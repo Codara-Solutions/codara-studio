@@ -137,7 +137,9 @@ async function pipeline(lib) {
     /not visible/,
   );
 
-  const fullTarget = fakeTarget();
+  // A Codara tab captures a full page through its surface (covered on a real
+  // page by test-browser-capture-chromium); other tabs render beyond the viewport.
+  const fullTarget = { ...fakeTarget(), kind: "chrome" };
   const full = await lib.captureScreenshot(fullTarget, normalize({ fullPage: true, scale: 0.25, save: false }), { codec: fakeCodec });
   assert.deepEqual(full.imageSize, { width: 200, height: 1250 });
   assert.equal(full.fullPage, true);

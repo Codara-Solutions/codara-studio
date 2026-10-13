@@ -1,7 +1,7 @@
 // The screenshot pipeline every capture feature shares (the screenshot tool,
 // element shots, before/after diffs, side-by-side sizes, comments on a
 // screenshot, recordings): capture from any BrowserTarget, crop to a clip
-// rect or an element, scale, encode PNG or JPEG, save the file in the
+// rect or an element, scale, encode PNG, JPEG or WebP, save the file in the
 // workspace's data folder, and report the scale that maps image pixels
 // back to CSS pixels.
 //
@@ -12,6 +12,10 @@
 
 import type { ElementDescription } from "../../shared/preview-locator";
 import { writeBrowserArtifact } from "./artifacts";
+import { blit, createBitmap, cropBitmap, scaleBitmap } from "./capture/bitmap";
+import { encodeWebp, FILE_EXTENSIONS, MIME_TYPES, nativeBitmapCodec, type BitmapCodec } from "./capture/codec";
+import { withGuestPaint } from "./capture/paint";
+import { captureThroughSurface, surfaceBound, surfaceMetrics, viewInCapture } from "./capture/surface";
 import { locateElement } from "./locator";
 import type { BrowserTarget, BrowserViewport } from "./targets";
 
@@ -27,11 +31,11 @@ export interface Size {
   height: number;
 }
 
-export type ScreenshotFormat = "png" | "jpeg";
+export type ScreenshotFormat = "png" | "jpeg" | "webp";
 
 export interface ScreenshotRequest {
   format: ScreenshotFormat;
-  /** JPEG quality, 1 to 100. */
+  /** JPEG and WebP quality, 1 to 100. */
   quality: number;
   /** Output pixels per CSS pixel; 1 is the page's CSS size, whatever the display density. */
   scale: number;
@@ -72,7 +76,9 @@ export function normalizeScreenshotRequest(
 ): ScreenshotRequest {
   const base = { ...SCREENSHOT_DEFAULTS, ...defaults };
   const format = raw.format === undefined ? base.format : raw.format;
-  if (format !== "png" && format !== "jpeg") throw new ScreenshotOptionError('format must be "png" or "jpeg".');
+  if (format !== "png" && format !== "jpeg" && format !== "webp") {
+    throw new ScreenshotOptionError('format must be "png", "jpeg" or "webp".');
+  }
   const quality = finite(raw.quality) ?? base.quality;
   const scale = finite(raw.scale) ?? base.scale;
   if (scale < 0.1 || scale > 4) throw new ScreenshotOptionError("scale must be between 0.1 and 4.");
@@ -135,7 +141,7 @@ export interface ImageCodec {
   size(png: Buffer): Size;
   crop(png: Buffer, rect: Rect): Buffer;
   resize(png: Buffer, size: Size): Buffer;
-  encode(png: Buffer, format: ScreenshotFormat, quality: number): Buffer;
+  encode(png: Buffer, format: ScreenshotFormat, quality: number): Buffer | Promise<Buffer>;
 }
 
 export function nativeImageCodec(): ImageCodec {
@@ -146,7 +152,10 @@ export function nativeImageCodec(): ImageCodec {
     size: (png) => load(png).getSize(),
     crop: (png, rect) => load(png).crop(rect).toPNG(),
     resize: (png, size) => load(png).resize({ ...size, quality: "good" }).toPNG(),
-    encode: (png, format, quality) => (format === "jpeg" ? load(png).toJPEG(quality) : png),
+    encode: (png, format, quality) => {
+      if (format === "jpeg") return load(png).toJPEG(quality);
+      return format === "webp" ? encodeWebp(png, quality) : png;
+    },
   };
 }
 
@@ -154,7 +163,7 @@ export interface ScreenshotResult {
   tabId: string;
   url: string;
   title: string;
-  mimeType: "image/png" | "image/jpeg";
+  mimeType: "image/png" | "image/jpeg" | "image/webp";
   /** Base64 image data. */
   data: string;
   /** The saved file, or null with save: false. */
@@ -171,21 +180,98 @@ export interface ScreenshotResult {
   element?: ElementDescription;
 }
 
-async function captureFullPage(target: BrowserTarget): Promise<{ png: Buffer; css: Size }> {
+async function contentSize(target: BrowserTarget): Promise<Size> {
   const metrics = await target.session.send<{ cssContentSize?: Size; contentSize?: Size }>("Page.getLayoutMetrics");
   const content = metrics.cssContentSize ?? metrics.contentSize;
   if (!content) throw new Error("The page did not report its size.");
-  const css = { width: Math.ceil(content.width), height: Math.min(FULL_PAGE_MAX_HEIGHT, Math.ceil(content.height)) };
-  const shot = await withTimeout(
-    target.session.send<{ data: string }>("Page.captureScreenshot", {
-      format: "png",
-      captureBeyondViewport: true,
-      clip: { x: 0, y: 0, width: css.width, height: css.height, scale: 1 },
-    }),
-    20_000,
-    "The full-page capture timed out.",
+  return { width: Math.ceil(content.width), height: Math.min(FULL_PAGE_MAX_HEIGHT, Math.ceil(content.height)) };
+}
+
+async function captureFullPage(target: BrowserTarget): Promise<{ png: Buffer; css: Size }> {
+  const css = await contentSize(target);
+  const shot = await withGuestPaint(target.session, () =>
+    withTimeout(
+      target.session.send<{ data: string }>("Page.captureScreenshot", {
+        format: "png",
+        captureBeyondViewport: true,
+        clip: { x: 0, y: 0, width: css.width, height: css.height, scale: 1 },
+      }),
+      20_000,
+      "The full-page capture timed out.",
+    ),
   );
   return { png: Buffer.from(shot.data, "base64"), css };
+}
+
+/**
+ * A full page through the tab's surface: laid out at the surface's width and
+ * the page's height (as a full-page capture in Chrome is, so viewport-high
+ * sections and fixed elements sit where they would on a tall screen), then
+ * captured one surface-high tile at a time and stitched at the output size.
+ * Content wider than the surface is cut at its edge.
+ */
+async function captureFullPageThroughSurface(
+  target: BrowserTarget,
+  request: ScreenshotRequest,
+  bitmapCodec: BitmapCodec,
+): Promise<{ png: Buffer; css: Size }> {
+  const surface = await surfaceMetrics(target);
+  return withGuestPaint(target.session, async () => {
+    try {
+      const width = surface.width;
+      // Laying the page out taller grows viewport-high sections, so the
+      // height is measured again once, under the tall layout.
+      let height = Math.max(surface.height, (await contentSize(target)).height);
+      await target.session.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 0, mobile: false });
+      height = Math.max(surface.height, (await contentSize(target)).height);
+      const css = { width, height };
+      const size = outputSize(css, request.scale, request.maxWidth);
+      const k = size.width / width;
+      const out = createBitmap(size.width, size.height);
+      for (let y = 0; y < height; y += surface.height) {
+        const tileHeight = Math.min(surface.height, height - y);
+        const png = await withTimeout(
+          captureThroughSurface(target, { width, height }, { x: 0, y, width, height: tileHeight }, 1),
+          20_000,
+          "The full-page capture timed out.",
+        );
+        const tile = bitmapCodec.decode(png);
+        const view = cropBitmap(tile, viewInCapture({ width, height: tileHeight }, 1, surface.devicePixelRatio, tile));
+        const top = Math.round(y * k);
+        const bottom = Math.min(size.height, Math.round((y + tileHeight) * k));
+        if (bottom > top) blit(out, scaleBitmap(view, { width: size.width, height: bottom - top }), 0, top);
+      }
+      return { png: await bitmapCodec.encode(out, "png", 100), css };
+    } finally {
+      await target.session.send("Emulation.clearDeviceMetricsOverride").catch(() => {});
+    }
+  });
+}
+
+/**
+ * A region rendered at the requested zoom through the tab's surface, sharper
+ * than enlarging a viewport capture. Null when the surface cannot show it
+ * any larger than a viewport capture already does.
+ */
+async function captureZoomedThroughSurface(
+  target: BrowserTarget,
+  clip: Rect,
+  request: ScreenshotRequest,
+  codec: ImageCodec,
+): Promise<{ png: Buffer; region: Rect } | null> {
+  const surface = await surfaceMetrics(target).catch(() => null);
+  if (!surface) return null;
+  const zoom = Math.min(request.scale / surface.devicePixelRatio, surface.width / clip.width, surface.height / clip.height);
+  if (zoom <= 1.01) return null;
+  return withGuestPaint(target.session, async () => {
+    try {
+      const view = { x: surface.scrollX + clip.x, y: surface.scrollY + clip.y, width: clip.width, height: clip.height };
+      const png = await captureThroughSurface(target, { width: surface.width, height: surface.height }, view, zoom);
+      return { png: codec.crop(png, viewInCapture(clip, zoom, surface.devicePixelRatio, codec.size(png))), region: { ...clip } };
+    } finally {
+      await target.session.send("Emulation.clearDeviceMetricsOverride").catch(() => {});
+    }
+  });
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
@@ -201,7 +287,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
 export async function captureScreenshot(
   target: BrowserTarget,
   request: ScreenshotRequest,
-  options: { codec?: ImageCodec; label?: string } = {},
+  options: { codec?: ImageCodec; bitmap?: BitmapCodec; label?: string } = {},
 ): Promise<ScreenshotResult> {
   const codec = options.codec ?? nativeImageCodec();
   const info = await target.info();
@@ -210,7 +296,9 @@ export async function captureScreenshot(
   let region: Rect;
   let element: ElementDescription | undefined;
   if (request.fullPage) {
-    ({ png, css } = await captureFullPage(target));
+    ({ png, css } = surfaceBound(target)
+      ? await captureFullPageThroughSurface(target, request, options.bitmap ?? nativeBitmapCodec())
+      : await captureFullPage(target));
     region = { x: 0, y: 0, ...css };
   } else {
     let clip = request.clip;
@@ -221,11 +309,13 @@ export async function captureScreenshot(
       }
       clip = { x: element.box.x, y: element.box.y, width: element.box.width, height: element.box.height };
     }
-    png = await target.captureViewport();
+    const sharper = clip !== null && surfaceBound(target) && request.scale > (info.devicePixelRatio || 1) * 1.01;
+    const zoomed = sharper && clip ? await captureZoomedThroughSurface(target, clip, request, codec) : null;
+    png = zoomed ? zoomed.png : await target.captureViewport();
     const image = codec.size(png);
     const viewport = info.viewport ?? image;
-    region = { x: 0, y: 0, width: viewport.width, height: viewport.height };
-    if (clip) {
+    region = zoomed ? zoomed.region : { x: 0, y: 0, width: viewport.width, height: viewport.height };
+    if (clip && !zoomed) {
       const crop = cssRectToImage(clip, viewport, image);
       if (!crop) throw new Error("The requested region is outside the viewport.");
       png = codec.crop(png, crop);
@@ -238,8 +328,8 @@ export async function captureScreenshot(
   const size = outputSize(css, request.scale, request.maxWidth);
   const current = codec.size(png);
   if (current.width !== size.width || current.height !== size.height) png = codec.resize(png, size);
-  const encoded = codec.encode(png, request.format, request.quality);
-  const ext = request.format === "jpeg" ? "jpg" : "png";
+  const encoded = await codec.encode(png, request.format, request.quality);
+  const ext = FILE_EXTENSIONS[request.format];
   const path = request.save
     ? await writeBrowserArtifact(target.workspaceId, "screenshots", { label: options.label ?? target.ref, ext, data: encoded })
     : null;
@@ -247,7 +337,7 @@ export async function captureScreenshot(
     tabId: target.ref,
     url: info.url,
     title: info.title,
-    mimeType: request.format === "jpeg" ? "image/jpeg" : "image/png",
+    mimeType: MIME_TYPES[request.format],
     data: encoded.toString("base64"),
     path,
     bytes: encoded.length,
