@@ -193,7 +193,8 @@ data, image alt, legible font sizes). Each failure names the offending items.
 | `memory` | JS heap use sampled over `ms` (up to 30000) with garbage collection at both ends, plus DOM node, listener and document counts. `snapshot: true` also saves a `.heapsnapshot` and summarizes it: largest classes, top retainers with their path from the window, and detached DOM nodes. |
 
 Trace files (`.json`) and heap snapshots open in Chrome DevTools (Performance
-and Memory panels). A background tab renders no frames, so while a load or
+and Memory panels). Each workspace keeps its newest ones, up to 2 GB together;
+older files are deleted as new ones arrive. A background tab renders no frames, so while a load or
 interaction is measured Codara lets it render without showing it; paint times
 can then run later than in a foreground tab, and the result says so. Chromium
 reports no event timing for a tab that is not on screen, so INP there is

@@ -38,6 +38,7 @@ async function loadModules() {
         export { evaluateInWorld } from "./audit/world";
         export * from "./perf/worker";
         export * from "./perf/vitals";
+        export { ARTIFACT_BYTES_KEPT, pruneArtifacts } from "./artifacts";
       `,
       resolveDir: path.join(ROOT, "src/main/browser"),
       loader: "ts",
@@ -224,6 +225,19 @@ function writeSyntheticTrace(file) {
 async function summaries(lib) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-insight-files-"));
   try {
+    // Trace and snapshot files keep to a byte budget, newest first; the
+    // newest stays even alone over it, since it may still be streaming in.
+    const kept = path.join(dir, "kept");
+    fs.mkdirSync(kept);
+    for (const [name, size] of [["1-a", 300], ["2-b", 300], ["3-c", 300], ["4-d", 500]]) fs.writeFileSync(path.join(kept, name), Buffer.alloc(size));
+    assert.ok(lib.ARTIFACT_BYTES_KEPT.traces >= 1 << 30);
+    await lib.pruneArtifacts(kept, 1_000);
+    assert.deepEqual(fs.readdirSync(kept).sort(), ["3-c", "4-d"]);
+    await lib.pruneArtifacts(kept, 100);
+    assert.deepEqual(fs.readdirSync(kept), ["4-d"]);
+    await lib.pruneArtifacts(kept);
+    assert.deepEqual(fs.readdirSync(kept), ["4-d"]);
+
     const snapshotFile = path.join(dir, "synthetic.heapsnapshot");
     writeSyntheticSnapshot(snapshotFile);
     const input = { path: snapshotFile, maxBytes: 1 << 30, maxNodesForRetained: 1_000_000 };
