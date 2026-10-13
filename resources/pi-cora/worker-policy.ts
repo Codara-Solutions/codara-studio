@@ -115,6 +115,15 @@ const FENCE_BRIDGE_MUTATING = [
   "codara_preview_chrome",
 ];
 
+// Navigation and resizing stay open to readonly workers on Codara's own tabs,
+// but on a tab of the user's browser (a chrome: tabId) they act inside the
+// user's signed-in session, where loading a URL can change account state.
+const FENCE_READONLY_USER_BROWSER = new Set(["navigate", "resize"]);
+
+function isUserBrowserTab(value: unknown): boolean {
+  return typeof value === "string" && value.trim().toLowerCase().startsWith("chrome:");
+}
+
 function fenceAccess(env: WorkerEnv): "edits" | "readonly" | undefined {
   const access = env.CODARA_PI_WORKER_ACCESS?.trim().toLowerCase();
   return access === "edits" || access === "readonly" ? access : undefined;
@@ -243,6 +252,16 @@ export function fenceDecision(
       if (index >= 0) {
         return { block: true, reason: `Preview batch step ${index + 1} uses a tool disabled by this worker's config. No batch steps were run. Use the remaining tools or report the limitation.` };
       }
+    }
+  }
+  // codara_preview_run is fenced by name for every preset, so only single calls reach this.
+  if (fenceAccess(env) === "readonly" && name.startsWith("codara_preview_") && input && typeof input === "object") {
+    const action = name.slice("codara_preview_".length);
+    if (FENCE_READONLY_USER_BROWSER.has(action) && isUserBrowserTab((input as { tabId?: unknown }).tabId)) {
+      return {
+        block: true,
+        reason: "This readonly worker may look at a tab of the user's own browser but not navigate or resize it. Use the remaining tools, or note the limitation in your final report.",
+      };
     }
   }
   // Containment applies only when a preset armed the fence; blockedTools-only

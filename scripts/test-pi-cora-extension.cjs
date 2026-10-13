@@ -411,6 +411,10 @@ const noInput = {};
   assert.equal(blocked("codara_preview_type")?.block, true, "readonly blocks preview type");
   assert.equal(blocked("codara_preview_screenshot"), undefined, "readonly keeps preview screenshot");
   assert.equal(blocked("codara_preview_navigate"), undefined, "readonly keeps preview navigate");
+  assert.equal(blocked("codara_preview_navigate", { tabId: "preview:3", url: "http://x" }), undefined, "readonly navigates Codara tabs");
+  assert.equal(blocked("codara_preview_navigate", { tabId: "chrome:12", url: "http://x" })?.block, true, "readonly may not navigate the user's browser");
+  assert.equal(blocked("codara_preview_resize", { tabId: "chrome:work-1a2b/12", width: 400, height: 800 })?.block, true, "readonly may not resize the user's browser");
+  assert.equal(blocked("codara_preview_snapshot", { tabId: "chrome:12" }), undefined, "readonly reads the user's shared tab");
   assert.equal(blocked("codara_ask_user"), undefined, "readonly keeps ask_user");
 }
 {
