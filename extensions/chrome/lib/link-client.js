@@ -79,10 +79,23 @@ export class LinkClient {
     this.setStatus({ state: "searching", code: null, error: null });
     const ports = (await this.deps.ports?.()) ?? DEFAULT_PORTS;
     let unknown = false;
-    for (const port of ports) {
-      const outcome = await this.tryPort(port, pairing, pair);
-      if (outcome === "unknown") unknown = true;
-      else if (outcome !== "next") return this.status;
+    let refusal = null;
+    // With a pairing, the Codara that can prove it is looked for on every
+    // port before any of them may start a new pairing: pressing Connect
+    // again must not hand the browser to whatever answers first.
+    const rounds = pairing && pair ? [false, true] : [pair];
+    for (const asking of rounds) {
+      for (const port of ports) {
+        const outcome = await this.tryPort(port, pairing, asking);
+        if (outcome === "unknown") unknown = true;
+        else if (outcome && typeof outcome === "object") refusal ??= outcome;
+        else if (outcome !== "next") return this.status;
+      }
+    }
+    if (refusal && !unknown) {
+      this.setStatus({ state: "error", error: refusal.message ?? "Codara refused the connection." });
+      this.scheduleReconnect();
+      return this.status;
     }
     if (unknown) {
       // Only an explicit revoke forgets the token: the Codara that issued it
@@ -154,6 +167,15 @@ export class LinkClient {
           if (message.type === "welcome" && !proven) {
             socket.close();
             finish("next");
+            return;
+          }
+          // A stored pairing is used only with a Codara that proved it: an
+          // unproven "pairing" would take over the browser (and replace the
+          // token) without the user asking, and an unproven refusal must not
+          // keep the real Codara on a later port from being tried.
+          if (pairing && !pair && !proven && message.type !== "unpaired") {
+            socket.close();
+            finish(message.type === "error" || message.type === "denied" ? { message: typeof message.message === "string" ? message.message : null } : "next");
             return;
           }
           // Only a Codara answers a hello with one of these; anything else on
@@ -228,6 +250,10 @@ export class LinkClient {
         break;
     }
     if (message.id !== undefined && REQUEST_TYPES.has(message.type)) {
+      if (this.status.state !== "connected") {
+        this.send({ id: message.id, error: { message: "This browser is not paired with you yet." } });
+        return;
+      }
       try {
         const result = await this.deps.onRequest(message);
         this.send({ id: message.id, result: result ?? {} });

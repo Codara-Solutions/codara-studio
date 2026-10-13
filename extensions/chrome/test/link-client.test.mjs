@@ -84,6 +84,17 @@ export async function run() {
   }));
   const eager = await impostor(() => ({ type: "welcome", protocol: 1, linkId: "chrome-ab12" }));
   const bluffer = await impostor(() => ({ type: "challenge", nonce: "d".repeat(32), proof: "0".repeat(64) }));
+  // One offers a new pairing, hands over a token of its own and asks for a
+  // tab; one refuses, which must not stop the search for the real Codara.
+  const hijacker = await listen((socket) => socket.on("message", (raw) => {
+    const message = JSON.parse(String(raw));
+    impostorHeard.push(message);
+    if (message.type !== "hello") return;
+    socket.send(JSON.stringify({ type: "pairing", code: "000 000" }));
+    socket.send(JSON.stringify({ type: "paired", token: "e".repeat(64), linkId: "evil-0001" }));
+    socket.send(JSON.stringify({ id: 99, type: "cdp", tabId: 5, method: "Runtime.evaluate", params: {} }));
+  }));
+  const refuser = await impostor(() => ({ type: "error", message: "Update the Codara extension." }));
   const unused = await freePort();
   let ports = [unused, stranger.address().port, codara.address().port];
   let token = null;
@@ -130,7 +141,16 @@ export async function run() {
 
   // Codara restarts: the client reconnects on its own with the token, past
   // the Codara that does not know it.
-  ports = [unused, stranger.address().port, eager.address().port, bluffer.address().port, other.address().port, codara.address().port];
+  ports = [
+    unused,
+    stranger.address().port,
+    eager.address().port,
+    bluffer.address().port,
+    hijacker.address().port,
+    refuser.address().port,
+    other.address().port,
+    codara.address().port,
+  ];
   codaraSocket.close();
   await until(() => client.status.state === "offline", "the loss");
   await until(() => client.status.state === "connected" && hellos.length === 2, "the reconnect", 8000);
@@ -141,8 +161,29 @@ export async function run() {
   assert.equal(client.status.app.version, "9.9.9");
   assert.equal(otherHellos.at(-1).linkId, "chrome-ab12", "the other Codara was asked first");
   assert.equal(token, "t".repeat(64), "and its unpaired answer did not cost the token");
-  assert.deepEqual(impostorHeard.map((message) => message.type), ["hello", "hello"], "the impostors got a hello and nothing more");
+  assert.deepEqual(impostorHeard.map((message) => message.type), ["hello", "hello", "hello", "hello"], "the impostors got a hello and nothing more");
+  assert.equal(requests.filter((request) => request.id === 99).length, 0, "an unproven pairing offer never reaches a tab");
   assert.ok(!JSON.stringify([...hellos, ...otherHellos, ...impostorHeard]).includes("t".repeat(64)), "the token never crosses the socket");
+
+  // Connect pressed again while paired: the Codara that proves the pairing
+  // wins over a program offering a new pairing on an earlier port.
+  ports = [hijacker.address().port, codara.address().port];
+  codaraSocket.close();
+  await until(() => client.status.state === "offline", "the second loss");
+  client.disconnect();
+  await client.connect({ pair: true });
+  await until(() => client.status.state === "connected", "the proven reconnect");
+  assert.equal(client.status.port, codara.address().port);
+  assert.equal(client.status.linkId, "chrome-ab12");
+  assert.equal(token, "t".repeat(64), "the hijacker's token was never stored");
+
+  // A refusal from a program on the only port is shown, and retried later.
+  ports = [refuser.address().port];
+  codaraSocket.close();
+  await until(() => client.status.state === "error", "the refusal");
+  assert.match(client.status.error, /Update the Codara extension/);
+  ports = [codara.address().port];
+  await until(() => client.status.state === "connected", "the retry after a refusal", 8000);
 
   // Only the other Codara is up: the popup says so and the token waits for its own Codara.
   ports = [other.address().port];
@@ -169,7 +210,9 @@ export async function run() {
   stranger.close();
   eager.close();
   bluffer.close();
+  hijacker.close();
+  refuser.close();
   other.close();
   codara.close();
-  return "link client: skips closed and foreign ports, pairs, answers requests, reconnects, tries past a Codara that does not know it, answers only a Codara that proves the pairing, honors revoke and deny";
+  return "link client: skips closed and foreign ports, pairs, answers requests, reconnects, tries past a Codara that does not know it, answers only a Codara that proves the pairing (never an unproven pairing offer), honors revoke and deny";
 }
