@@ -158,3 +158,18 @@ The `app.*` methods reachable through `cora rpc` (screenshots, in-page
 evaluation) are for development: they are available in unpackaged builds,
 and in packaged builds only when the app was started with
 `CODARA_DEV_TOOLS=1`.
+
+### Tools
+
+The codara-studio tools (see [MCP tools](mcp-tools.md)) for agents that do
+not speak MCP. Results are the same text an MCP client gets; images are saved
+to files and their paths printed. Every command takes `--json` for the raw
+result.
+
+| Command | What it does |
+|---|---|
+| `tool list` | Lists the tools available in this terminal. |
+| `tool help <name>` | Shows a tool's description and arguments. |
+| `tool <name> ['{"arg":1}'] [--arg value]` | Calls a tool. `<name>` may drop the `codara_` prefix. |
+| `inbox [--peek] [--limit N]` | What the user picked or commented on in a Codara browser tab and sent to the inbox, oldest first. Read items are removed unless `--peek`. Same as `tool preview_inbox`. |
+| `inspect <@ref\|selector> [--tabId ID]` | Describes an element to edit it: selector, box model, styles, CSS rules, source `file:line`, and a cropped image saved as a file. `--x N --y N` names a point instead. Same as `tool preview_inspect`. |

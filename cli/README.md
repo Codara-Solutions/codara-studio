@@ -44,7 +44,10 @@ without spending CPU repainting idle screens.
   pieces of the chat UI.
 - `commands/` — one file per command group (`chat.cjs` owns the TUI; the rest
   cover sessions, runs, agents/watch, board/whiteboard, automations, auth,
-  profiles, bench, and status).
+  profiles, bench, and status). `tool.cjs` calls any codara-studio tool for
+  agents without MCP; `point.cjs` adds `cora inbox` (what the user picked or
+  commented on in a browser tab) and `cora inspect` (describe an element to
+  edit it) as short names for two of those calls.
 - `bench/tasks.cjs` — the harness benchmark suite: tiered tasks with hidden
   contract checks and reference solutions; `bench/score.cjs` is the scorer;
   `bench/adopt.cjs` re-attaches to a live bench run whose bench process was
