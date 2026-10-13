@@ -26,6 +26,7 @@ import {
   SERVER_ID_RE,
   ServerInputError,
   serverSlug,
+  splitEnvPrefix,
   suggestServerId,
 } from "./detect";
 import type { PortOwner } from "./health";
@@ -307,10 +308,11 @@ export function createServerKeeper(deps: KeeperDeps) {
 
   async function launch(input: DevServerStartInput): Promise<Launched> {
     const workspaceId = input.workspaceId;
-    const command = input.command === undefined ? undefined : checkCommand(input.command);
+    const typed = input.command === undefined ? undefined : splitEnvPrefix(checkCommand(input.command));
+    const command = typed?.command;
     const port = checkPort(input.port);
     const url = checkUrl(input.url);
-    const env = checkEnv(input.env);
+    const env = { ...checkEnv(typed?.env), ...checkEnv(input.env) };
     const requestedId = typeof input.id === "string" && input.id.trim() ? serverSlug(input.id) : null;
     if (input.id !== undefined && !requestedId) throw new ServerInputError("id must contain a letter or digit");
 
@@ -492,7 +494,8 @@ export function createServerKeeper(deps: KeeperDeps) {
     const id = serverSlug(input.id ?? "");
     if (!id) throw new ServerInputError("id is required");
     const existing = await findSpec(input.workspaceId, id);
-    const command = input.command === undefined ? existing?.command : checkCommand(input.command);
+    const typed = input.command === undefined ? null : splitEnvPrefix(checkCommand(input.command));
+    const command = typed ? typed.command : existing?.command;
     if (!command) throw new ServerInputError(`No server "${id}" is saved for this workspace. Pass command to save one.`);
     const cwd = input.cwd === undefined && existing ? existing.cwd : await resolveCwd(input.workspaceId, input.cwd, existing?.cwd);
     const port = input.port === undefined ? existing?.port ?? null : checkPort(input.port);
@@ -503,7 +506,7 @@ export function createServerKeeper(deps: KeeperDeps) {
       cwd,
       port: port ?? portOfUrl(url),
       url,
-      envNames: existing?.envNames ?? [],
+      envNames: typed && Object.keys(typed.env).length ? Object.keys(checkEnv(typed.env)).sort() : existing?.envNames ?? [],
       autoStart: typeof input.autoStart === "boolean" ? input.autoStart : existing?.autoStart ?? false,
       source: existing?.source ?? "user",
       createdAt: existing?.createdAt ?? deps.now(),
@@ -516,6 +519,7 @@ export function createServerKeeper(deps: KeeperDeps) {
       if (index >= 0) specs[index] = next;
       else specs.push(next);
     });
+    if (typed && Object.keys(typed.env).length) envValues.set(key(input.workspaceId, id), typed.env);
     deps.changed(input.workspaceId);
     return statusOf(input.workspaceId, next);
   }
@@ -547,8 +551,11 @@ export function createServerKeeper(deps: KeeperDeps) {
 
   async function learnNow(input: LearnInput): Promise<string | null> {
     let command: string;
+    let env: Record<string, string>;
     try {
-      command = checkCommand(input.command);
+      const typed = splitEnvPrefix(checkCommand(input.command));
+      command = typed.command;
+      env = checkEnv(typed.env);
     } catch {
       return null;
     }
@@ -564,6 +571,7 @@ export function createServerKeeper(deps: KeeperDeps) {
       if (existing) {
         if (!existing.url) existing.url = input.url;
         if (!existing.port) existing.port = input.port;
+        existing.envNames = [...new Set([...existing.envNames, ...Object.keys(env)])].sort();
         existing.updatedAt = deps.now();
         return;
       }
@@ -573,13 +581,14 @@ export function createServerKeeper(deps: KeeperDeps) {
         cwd: input.cwd,
         port: input.port,
         url: input.url,
-        envNames: [],
+        envNames: Object.keys(env).sort(),
         autoStart: false,
         source: input.source,
         createdAt: deps.now(),
         updatedAt: deps.now(),
       });
     });
+    if (Object.keys(env).length) envValues.set(key(input.workspaceId, id), { ...envValues.get(key(input.workspaceId, id)), ...env });
     const previous = live.get(key(input.workspaceId, id));
     previous?.detach();
     live.set(key(input.workspaceId, id), {

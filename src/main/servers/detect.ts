@@ -179,6 +179,28 @@ export function checkEnv(env: unknown): Record<string, string> {
   return out;
 }
 
+// NAME=value at the start of a command: a single-quoted value, a
+// double-quoted one with nothing to expand, or a bare word with no shell
+// syntax. Anything else stays in the command for the shell to read.
+const ENV_PREFIX_RE = /^([A-Za-z_][A-Za-z0-9_]*)=(?:'([^']*)'|"([^"$`\\]*)"|([^\s'"$`\\;&|<>()~][^\s'"$`\\;&|<>()]*|))(?=\s)/;
+
+/**
+ * Splits the variable assignments off the front of a command line, so a
+ * typed `API_KEY=... pnpm dev` is remembered as `pnpm dev` with the name
+ * API_KEY and its value never reaches the saved command.
+ */
+export function splitEnvPrefix(command: string): { command: string; env: Record<string, string> } {
+  const env: Record<string, string> = {};
+  let rest = command.trim();
+  for (let match = ENV_PREFIX_RE.exec(rest); match; match = ENV_PREFIX_RE.exec(rest)) {
+    const after = rest.slice(match[0].length).trimStart();
+    if (!after) break;
+    env[match[1]] = match[2] ?? match[3] ?? match[4] ?? "";
+    rest = after;
+  }
+  return { command: rest, env };
+}
+
 export function checkEnvNames(names: unknown): string[] {
   if (!Array.isArray(names)) return [];
   return [...new Set(names.filter((name): name is string => typeof name === "string" && ENV_NAME_RE.test(name)))].sort();

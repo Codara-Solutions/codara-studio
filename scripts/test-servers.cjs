@@ -294,6 +294,14 @@ async function main() {
     assert.deepEqual(lib.shellReports("\x1b]7;file://host/Users/a%20b/app\x1b\\"), { commands: [], cwds: ["/Users/a b/app"] });
     assert.equal(lib.shellWord("it's"), `'it'\\''s'`);
     assert.equal(lib.shellWord("--port=3000"), "--port=3000");
+    assert.deepEqual(lib.splitEnvPrefix(`API_KEY=sk-1 B='x y' C="z" pnpm dev -- --port 3`), {
+      command: "pnpm dev -- --port 3",
+      env: { API_KEY: "sk-1", B: "x y", C: "z" },
+    });
+    assert.deepEqual(lib.splitEnvPrefix("PORT=$P pnpm dev"), { command: "PORT=$P pnpm dev", env: {} }, "a value the shell expands stays");
+    assert.deepEqual(lib.splitEnvPrefix("X=~/a node s"), { command: "X=~/a node s", env: {} });
+    assert.deepEqual(lib.splitEnvPrefix("ONLY=1"), { command: "ONLY=1", env: {} });
+    assert.deepEqual(lib.splitEnvPrefix("pnpm dev FOO=bar"), { command: "pnpm dev FOO=bar", env: {} });
   });
 
   await check("the command line and folder of a running process, to start it again", async () => {
@@ -340,6 +348,36 @@ async function main() {
       assert.ok(!text.includes("s3cret-value"), "an env value reached disk");
       assert.deepEqual(JSON.parse(text).servers[0].envNames, ["SECRET_TOKEN"]);
       assert.ok(!fs.existsSync(path.join(WS_DIR, ".codara")), "wrote into the repository");
+    });
+
+    await check("a value typed before the command is passed to it but never saved", async () => {
+      const inlinePort = await freePort();
+      const typed = await keeper.start({ workspaceId: "ws-1", command: `SECRET_TOKEN=inline-s3cret exec node ${JSON.stringify(FIXTURE)} ${inlinePort}` });
+      assert.equal(typed.ready, true);
+      assert.equal(typed.server.command, `exec node ${JSON.stringify(FIXTURE)} ${inlinePort}`);
+      assert.deepEqual(typed.server.envNames, ["SECRET_TOKEN"]);
+      assert.match((await keeper.logs("ws-1", typed.server.id)).text, /token=set/);
+      assert.ok(!fs.readFileSync(lib.serversFile("ws-1"), "utf8").includes("inline-s3cret"), "an inline env value reached disk");
+      const again = await keeper.start({ workspaceId: "ws-1", command: `exec node ${JSON.stringify(FIXTURE)} ${inlinePort}` });
+      assert.equal(again.alreadyRunning, true, "the same command without its prefix is the same server");
+      await keeper.forget("ws-1", typed.server.id);
+      sessions.sessions.delete(typed.server.paneId);
+      const learned = await keeper.learn({
+        workspaceId: "ws-1",
+        paneId: "pane-inline",
+        command: "API_KEY=sk-live-123 pnpm dev",
+        cwd: WS_DIR,
+        url: "http://localhost:1/",
+        port: 1,
+        source: "user",
+      });
+      const spec = (await keeper.list("ws-1", { probe: false })).find((server) => server.id === learned);
+      assert.equal(spec.command, "pnpm dev");
+      assert.deepEqual(spec.envNames, ["API_KEY"]);
+      assert.deepEqual(spec.missingEnv, [], "this app session still has the value");
+      assert.ok(!fs.readFileSync(lib.serversFile("ws-1"), "utf8").includes("sk-live-123"), "a learned env value reached disk");
+      await keeper.forget("ws-1", learned);
+      assert.deepEqual(stopped.splice(0), [["pane-inline", null]]);
     });
 
     await check("never two copies: the same id or the same command is already running", async () => {
