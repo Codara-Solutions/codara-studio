@@ -266,6 +266,10 @@ export interface PreviewTab extends BaseTab {
   // Retained as provenance and the default automation target. Browser tabs
   // belong to the workspace and survive their originating chat/run.
   runId?: string;
+  // A logged-out tab's in-memory Electron partition (codara-fresh-...). It is
+  // fixed when the webview is created; after a restart the same name is an
+  // empty partition again, so the tab comes back logged out.
+  partition?: string;
 }
 
 // Runs tabs are derived from the selected chat. `runId === null` is kept only

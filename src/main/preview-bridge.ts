@@ -48,7 +48,11 @@ export type PreviewOpName =
   // Show a page's alert/confirm/prompt in its tab; answers with the user's
   // choice (browser/preview-dialogs.ts). dialog_hide takes it down.
   | "dialog_show"
-  | "dialog_hide";
+  | "dialog_hide"
+  // A logged-out tab in its own temporary partition, and closing one
+  // (browser/fresh-tabs.ts wipes its data).
+  | "open_isolated"
+  | "close_isolated";
 
 export interface PreviewOpParams {
   tabId?: string | null;

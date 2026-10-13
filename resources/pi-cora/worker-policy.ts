@@ -112,6 +112,8 @@ const FENCE_BRIDGE_MUTATING = [
   "codara_preview_press_key",
   "codara_preview_type",
   "codara_preview_upload",
+  // devtools stream: cookies and site storage, and logged-out tabs.
+  "codara_preview_storage",
 ];
 
 function fenceAccess(env: WorkerEnv): "edits" | "readonly" | undefined {

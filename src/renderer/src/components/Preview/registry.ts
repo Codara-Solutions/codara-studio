@@ -8,6 +8,9 @@ interface RegistryEntry {
   runId: string | null;
   workspaceId: string | null;
   controlRunId?: string | null;
+  // A logged-out tab's own temporary partition. Such a tab is only ever
+  // driven by its id: an implicit pick never lands an agent in it.
+  partition?: string | null;
 }
 
 const entries = new Map<string, RegistryEntry>();
@@ -49,9 +52,16 @@ export function registerPreviewTab(input: {
   url: string;
   runId?: string | null;
   workspaceId?: string | null;
+  partition?: string | null;
 }): void {
   const previous = entries.get(input.id);
-  entries.set(input.id, { ...previous, ...input, runId: input.runId ?? null, workspaceId: input.workspaceId ?? null });
+  entries.set(input.id, {
+    ...previous,
+    ...input,
+    runId: input.runId ?? null,
+    workspaceId: input.workspaceId ?? null,
+    partition: input.partition ?? null,
+  });
 }
 
 export function updatePreviewTabUrl(id: string, url: string, runId?: string | null): void {
@@ -90,11 +100,12 @@ export function pickPreviewTab(
     const entry = entries.get(tabId);
     return entry && eligible(entry) ? entry : null;
   }
+  const implicit = (entry: RegistryEntry) => eligible(entry) && !entry.partition;
   if (paneId) {
     const own = reusablePaneTab(workspace, paneId);
     if (own) return own;
     const free = (entry: RegistryEntry | undefined): entry is RegistryEntry =>
-      Boolean(entry && eligible(entry) && !entry.runId && !agentPaneOwners.has(entry.id));
+      Boolean(entry && implicit(entry) && !entry.runId && !agentPaneOwners.has(entry.id));
     const active = activeId ? entries.get(activeId) : undefined;
     if (free(active)) return active;
     const viewed = entries.get(lastViewed.get(workspace) ?? "");
@@ -102,16 +113,16 @@ export function pickPreviewTab(
     return [...entries.values()].find(free) ?? null;
   }
   const active = activeId ? entries.get(activeId) : undefined;
-  if (active && eligible(active) && (!runId || active.runId === runId)) return active;
+  if (active && implicit(active) && (!runId || active.runId === runId)) return active;
   for (const entry of entries.values()) {
-    if (eligible(entry) && (!runId || entry.runId === runId)) return entry;
+    if (implicit(entry) && (!runId || entry.runId === runId)) return entry;
   }
   return null;
 }
 
 function reusablePaneTab(workspace: string | null, paneId: string): RegistryEntry | null {
   const own = (entry: RegistryEntry | undefined): entry is RegistryEntry =>
-    Boolean(entry && entry.workspaceId === workspace && !entry.runId && agentPaneOwners.get(entry.id) === paneId);
+    Boolean(entry && entry.workspaceId === workspace && !entry.runId && !entry.partition && agentPaneOwners.get(entry.id) === paneId);
   const active = activeId ? entries.get(activeId) : undefined;
   if (own(active)) return active;
   return [...entries.values()].reverse().find(own) ?? null;
@@ -139,6 +150,7 @@ export function listPreviewTabs(workspaceId?: string | null, callerPaneId?: stri
     workspaceId: entry.workspaceId,
     isLastViewed: lastViewed.get(workspace) === entry.id,
     isActive: entry.id === activeId && entry.workspaceId === activeWorkspaceId,
+    ...(entry.partition ? { isolated: true } : {}),
   }));
 }
 
@@ -155,25 +167,36 @@ export function clearPreviewControl(runId: string): void {
   }
 }
 
-type OpenPreviewTabFn = (url: string, runId?: string | null, workspaceId?: string | null) => Promise<string> | string;
+type OpenPreviewTabFn = (
+  url: string,
+  runId?: string | null,
+  workspaceId?: string | null,
+  options?: { partition?: string },
+) => Promise<string> | string;
 let openPreviewTabFn: OpenPreviewTabFn | null = null;
 
 export function setOpenPreviewTabFn(fn: OpenPreviewTabFn | null): void {
   openPreviewTabFn = fn;
 }
 
-export async function ensurePreviewTab(
-  url: string,
-  runId?: string | null,
-  workspaceId?: string | null,
-  callerPaneId?: string | null,
-): Promise<RegistryEntry> {
-  const { workspace, paneId } = previewScope(runId, workspaceId, callerPaneId);
-  const existing = findReusablePreviewTab(runId, workspace, paneId);
-  if (existing) return existing;
-  if (!openPreviewTabFn) throw new Error("Codara is not ready to open browser tabs yet. Retry in a moment.");
-  const id = await Promise.resolve(openPreviewTabFn(url, runId, workspace));
-  if (paneId) agentPaneOwners.set(id, paneId);
+type ClosePreviewTabFn = (id: string) => void;
+let closePreviewTabFn: ClosePreviewTabFn | null = null;
+
+export function setClosePreviewTabFn(fn: ClosePreviewTabFn | null): void {
+  closePreviewTabFn = fn;
+}
+
+/** Every tab running in one logged-out partition: the one an agent opened and the pages it opened in new tabs. */
+export function previewTabsInPartition(partition: string): string[] {
+  return [...entries.values()].filter((entry) => entry.partition === partition).map((entry) => entry.id);
+}
+
+export function closePreviewTab(id: string): void {
+  if (!closePreviewTabFn) throw new Error("Codara is not ready to close browser tabs yet. Retry in a moment.");
+  closePreviewTabFn(id);
+}
+
+async function waitForRegisteredTab(id: string, workspace: string | null): Promise<RegistryEntry> {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
     const entry = entries.get(id);
@@ -181,6 +204,36 @@ export async function ensurePreviewTab(
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(`Timed out waiting for the new browser tab ${id} to register.`);
+}
+
+/** Always a new tab, in its own partition, owned like any tab the caller opens. */
+export async function openIsolatedPreviewTab(
+  url: string,
+  partition: string,
+  runId?: string | null,
+  workspaceId?: string | null,
+  callerPaneId?: string | null,
+): Promise<RegistryEntry> {
+  const { workspace, paneId } = previewScope(runId, workspaceId, callerPaneId);
+  if (!openPreviewTabFn) throw new Error("Codara is not ready to open browser tabs yet. Retry in a moment.");
+  const id = await Promise.resolve(openPreviewTabFn(url, runId, workspace, { partition }));
+  if (paneId) agentPaneOwners.set(id, paneId);
+  return waitForRegisteredTab(id, workspace);
+}
+
+export async function ensurePreviewTab(
+  url: string,
+  runId?: string | null,
+  workspaceId?: string | null,
+  callerPaneId?: string | null,
+): Promise<{ tab: RegistryEntry; opened: boolean }> {
+  const { workspace, paneId } = previewScope(runId, workspaceId, callerPaneId);
+  const existing = findReusablePreviewTab(runId, workspace, paneId);
+  if (existing) return { tab: existing, opened: false };
+  if (!openPreviewTabFn) throw new Error("Codara is not ready to open browser tabs yet. Retry in a moment.");
+  const id = await Promise.resolve(openPreviewTabFn(url, runId, workspace));
+  if (paneId) agentPaneOwners.set(id, paneId);
+  return { tab: await waitForRegisteredTab(id, workspace), opened: true };
 }
 
 // The tab whose page is the guest with this webContents id, so a link the

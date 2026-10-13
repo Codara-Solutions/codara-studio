@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { isFreshPartition } from "@shared/browser-partition";
 import { withPreviewCapturePaint } from "./capturePaint";
 import PreviewCursor, { type PreviewControl } from "./PreviewCursor";
 import PageDialogOverlay from "./PageDialogOverlay";
@@ -109,6 +110,8 @@ interface Props {
   /** The browser tab this pane shows; its page dialogs open over it. */
   tabId?: string;
   url: string;
+  // A logged-out tab's own temporary partition; fixed for the webview's life.
+  partition?: string;
   visible: boolean;
   onUrlChange: (url: string) => void;
   // Fires once the guest is dom-ready and its webContents id is known, so the
@@ -117,7 +120,7 @@ interface Props {
 }
 
 const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
-  { tabId, url, visible, onUrlChange, onReady },
+  { tabId, url, partition, visible, onUrlChange, onReady },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -256,6 +259,9 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         "contextIsolation=yes,backgroundThrottling=no",
       );
       webview.setAttribute("allowpopups", "true");
+      // Must be set before the first navigation; Electron ignores a later
+      // change. Any other name could be a `persist:` one that writes to disk.
+      if (isFreshPartition(partition)) webview.setAttribute("partition", partition);
       // The inspector preload runs inside the embedded page's renderer to
       // capture element picks and report back via `ipcRenderer.sendToHost`.
       // It listens silently until the host sends `spark:inspector:toggle`,
@@ -687,6 +693,29 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         onToggleInspect={toggleInspect}
         onToggleDraw={toggleDraw}
       />
+      {isFreshPartition(partition) ? (
+        <div
+          data-preview-isolated
+          style={{
+            flex: "0 0 auto",
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "4px 12px",
+            background: "var(--panel)",
+            color: "var(--muted)",
+            fontSize: 11,
+            borderBottom: "1px solid var(--rule-soft)",
+          }}
+        >
+          <span className="spark-eyebrow" style={{ color: "var(--ink)", flex: "0 0 auto" }}>
+            Logged out
+          </span>
+          <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            Temporary session, separate from your other tabs. Nothing it stores is kept.
+          </span>
+        </div>
+      ) : null}
       {error ? (
         <div
           style={{

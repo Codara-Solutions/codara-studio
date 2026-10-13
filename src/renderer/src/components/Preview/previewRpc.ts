@@ -14,11 +14,11 @@ import { createPreviewDOM } from "@shared/preview-dom";
 import { createPreviewNames } from "@shared/preview-names";
 import { snapshotProbe } from "./domSnapshot";
 import { clickProbe, typeProbe, pressKeyProbe } from "./domActions";
+import { closeIsolatedTab, openIsolatedTab } from "./isolatedTabs";
 import { closePageDialog, showPageDialog, type PageDialogView } from "./pageDialogs";
 import {
   ensurePreviewTab,
   findPreviewTabByWebContentsId,
-  findReusablePreviewTab,
   listPreviewTabs,
   pickPreviewTab,
   showPreviewControl,
@@ -39,7 +39,9 @@ type PreviewOpName =
   | "resize"
   | "get_web_contents_id"
   | "dialog_show"
-  | "dialog_hide";
+  | "dialog_hide"
+  | "open_isolated"
+  | "close_isolated";
 
 interface BridgeRequest {
   reqId: string;
@@ -123,6 +125,10 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
     case "dialog_hide":
       closePageDialog(readString(req.params, "id") ?? "");
       return { ok: true };
+    case "open_isolated":
+      return openIsolatedTab(req.params);
+    case "close_isolated":
+      return closeIsolatedTab(req.params);
     default:
       throw new Error(`unknown preview op: ${(req.op as string) ?? "?"}`);
   }
@@ -201,15 +207,13 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
     const runId = readString(params, "runId");
     const workspaceId = readString(params, "workspaceId");
     const callerPaneId = readString(params, "callerPaneId");
-    const before = findReusablePreviewTab(runId, workspaceId, callerPaneId);
-    tab = await ensurePreviewTab(url, runId, workspaceId, callerPaneId);
-    opened = !before;
+    ({ tab, opened } = await ensurePreviewTab(url, runId, workspaceId, callerPaneId));
   }
-  // ensurePreviewTab created the tab with the target URL, so loadURL is a
-  // redundant nav in that case but cheap. For an existing tab it's the real
-  // navigation.
+  // A tab ensurePreviewTab just opened is already loading the URL. Loading
+  // it again would abort or repeat that first load, which runs the page's
+  // requests twice and records the first load's as never finished.
   showPreviewControl(tab, { action: "Navigating", runId: readString(params, "runId") });
-  tab.handle.loadURL(url);
+  if (!opened) tab.handle.loadURL(url);
   await waitDomReady(tab.handle, 15_000);
   return { url: tab.handle.getURL(), tabId: tab.id, opened };
 }

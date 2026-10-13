@@ -1,6 +1,8 @@
 // The BrowserTarget backend for Codara's own browser tabs.
 
+import { BrowserWindow, screen, type WebContents } from "electron";
 import { requestPreviewOp } from "../preview-bridge";
+import { captureEmulatedViewport, fitViewCaptureToEmulation } from "./emulation";
 import { previewCdpSession } from "./preview-cdp";
 import { resolvePreviewGuest } from "./preview-guest";
 import { formatTabRef, type BrowserTabRef } from "./tab-ref";
@@ -11,6 +13,14 @@ import {
   type BrowserTargetBackend,
   type BrowserTargetInfo,
 } from "./targets";
+
+/** Image pixels per CSS pixel in a capture of the guest's view. */
+function viewScale(wc: WebContents): number {
+  const host = wc.hostWebContents;
+  const window = host && !host.isDestroyed() ? BrowserWindow.fromWebContents(host) : null;
+  if (!host || !window) return 1;
+  return screen.getDisplayMatching(window.getBounds()).scaleFactor * host.getZoomFactor();
+}
 
 /** The renderer's routing fields, forwarded so it picks the same tab for every call. */
 function routing(params: Record<string, unknown>, tabId: string): Record<string, unknown> {
@@ -46,11 +56,13 @@ async function resolvePreviewTarget(ref: BrowserTabRef | null, params: Record<st
     async captureViewport() {
       // The renderer's capture paints a hidden tab (capturePaint.ts), which a
       // protocol screenshot of a background guest does not.
+      const emulated = await captureEmulatedViewport(session);
+      if (emulated) return emulated;
       const shot = await requestPreviewOp<{ dataUrl?: string }>("screenshot", routing(params, tabId));
       const dataUrl = typeof shot?.dataUrl === "string" ? shot.dataUrl : "";
       const comma = dataUrl.indexOf(",");
       if (!dataUrl.startsWith("data:image/png;base64,") || comma < 0) throw new Error("The browser tab returned no screenshot.");
-      return Buffer.from(dataUrl.slice(comma + 1), "base64");
+      return fitViewCaptureToEmulation(session, Buffer.from(dataUrl.slice(comma + 1), "base64"), viewScale(wc));
     },
     async showActivity(action, point) {
       await requestPreviewOp("activity", { ...routing(params, tabId), action, ...point }).catch(() => {});

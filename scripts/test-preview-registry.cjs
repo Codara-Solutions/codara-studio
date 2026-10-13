@@ -30,7 +30,7 @@ async function main() {
     r.registerPreviewTab({ id: "new-a", url, runId, workspaceId, handle });
     return "new-a";
   });
-  assert.equal((await r.ensurePreviewTab("https://new.test", "run-2", "a")).id, "new-a");
+  assert.deepEqual(await r.ensurePreviewTab("https://new.test", "run-2", "a").then(({ tab, opened }) => [tab.id, opened]), ["new-a", true]);
   assert.deepEqual(opened, { url: "https://new.test", runId: "run-2", workspaceId: "a" });
   r.showPreviewControl(r.pickPreviewTab("user-a", null, "a"), { runId: "run-2", action: "Clicking", x: 30, y: 40 });
   r.clearPreviewControl("run-1");
@@ -61,9 +61,9 @@ async function main() {
     r.registerPreviewTab({ id: "agent-pa", url, runId, workspaceId, handle: guestHandle(14) });
     return "agent-pa";
   });
-  assert.equal((await r.ensurePreviewTab("https://agent.test", null, null, "pane-a")).id, "agent-pa");
+  assert.deepEqual(await r.ensurePreviewTab("https://agent.test", null, null, "pane-a").then(({ tab, opened }) => [tab.id, opened]), ["agent-pa", true]);
   assert.deepEqual(paneOpened, { url: "https://agent.test", runId: null, workspaceId: "pa" });
-  assert.equal((await r.ensurePreviewTab("https://agent.test/2", null, null, "pane-a")).id, "agent-pa", "the agent reuses its own tab");
+  assert.deepEqual(await r.ensurePreviewTab("https://agent.test/2", null, null, "pane-a").then(({ tab, opened }) => [tab.id, opened]), ["agent-pa", false], "the agent reuses its own tab, which navigate then loads");
   assert.equal(r.pickPreviewTab(null, null, null, "pane-a").id, "agent-pa");
   assert.equal(r.pickPreviewTab(null, null, null, "pane-a2").id, "user-pa", "another agent never takes this agent's tab");
   assert.equal(r.findReusablePreviewTab(null, null, "pane-a2"), null);
