@@ -19,6 +19,7 @@ import type { WebContents } from "electron";
 
 import { onTrustedPreviewGuestAttached } from "../main-window-trust";
 import { CdpSession, type CdpTransport, type RingBuffer } from "./cdp-session";
+import { startPageActivity } from "./page-activity";
 import { startConsoleRecorder } from "./recorders/console";
 import { startNetworkRecorder } from "./recorders/network";
 
@@ -69,6 +70,7 @@ export function previewCdpSession(wc: WebContents): CdpSession {
   sessions.set(wcId, session);
   startConsoleRecorder(session);
   startNetworkRecorder(session);
+  startPageActivity(session);
   wc.once("destroyed", () => {
     const tabId = tabOfGuest.get(wcId);
     if (tabId && guestOfTab.get(tabId) === wcId) {
