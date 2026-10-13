@@ -18,6 +18,14 @@ export interface HmrRecord {
   at: number;
   kind: HmrKind;
   detail: string;
+  /**
+   * The first record of an update cycle: a rebuild line, or the first
+   * hot-update request after other signals. An error in a cycle stays its
+   * verdict even when the dev client logs "updated" after it, as Vite does.
+   */
+  opens?: boolean;
+  /** Recorded from a hot-update request rather than a console line. */
+  request?: boolean;
 }
 
 export interface InFlightRequest {
@@ -41,6 +49,8 @@ export interface PageActivity {
   lastNetworkAt: number;
   hmr: HmrRecord[];
   lastHmrAt: number;
+  /** The newest hot update record a finished hmr wait already reported (the next wait looks past it), and whether it reported a failure. */
+  hmrReported?: { at: number; failed: boolean };
 }
 
 const HISTORY_CAP = 30;
@@ -60,6 +70,7 @@ const HMR_CONSOLE: Array<[RegExp, HmrKind]> = [
   [/^\[HMR\] (?:Checking for updates|Waiting for update signal)/i, "start"],
   [/^\[HMR\] (?:Updated modules|App is up to date|Nothing hot updated)/i, "update"],
   [/^\[HMR\] (?:Cannot apply update|The following modules couldn't be hot updated|Reloading)/i, "reload"],
+  [/^\[webpack-dev-server\] App updated\. Recompiling/i, "start"],
   [/^\[webpack-dev-server\] (?:App updated|Nothing changed)/i, "update"],
   [/^\[webpack-dev-server\] (?:Errors while compiling|Warnings while compiling)/i, "error"],
   [/^\[parcel\] .*(?:Built|Updated)/i, "update"],
@@ -122,11 +133,20 @@ export function startPageActivity(session: CdpSession): void {
     if (parentId === undefined) return mainFrameId === null || frameId === mainFrameId;
     return !parentId;
   };
-  const hmr = (kind: HmrKind, detail: string) => {
+  const hmr = (kind: HmrKind, detail: string, request = false) => {
     const at = Date.now();
+    const previous = activity.hmr.at(-1);
+    const opens = kind === "start" || (request && !previous?.request && previous?.kind !== "start");
     activity.lastHmrAt = at;
-    pushCapped(activity.hmr, { at, kind, detail: detail.slice(0, 200) });
+    pushCapped(activity.hmr, { at, kind, detail: detail.slice(0, 200), ...(opens ? { opens } : {}), ...(request ? { request } : {}) });
   };
+  // Frame events can arrive before a main-frame navigation names the main
+  // frame (the session attaches after the first load); until then an
+  // iframe's loading or history change would pass for the page's own.
+  session.send<{ frameTree?: { frame?: { id?: string } } }>("Page.getFrameTree").then((result) => {
+    const id = result?.frameTree?.frame?.id;
+    if (mainFrameId === null && typeof id === "string") mainFrameId = id;
+  }, () => {});
 
   session.on("Page.frameNavigated", (params) => {
     const frame = (params.frame ?? {}) as { id?: string; parentId?: string; url?: string; urlFragment?: string; loaderId?: string };
@@ -159,7 +179,7 @@ export function startPageActivity(session: CdpSession): void {
     const request = (params.request ?? {}) as { url?: string };
     const url = typeof request.url === "string" ? request.url : "";
     activity.lastNetworkAt = Date.now();
-    if (isHmrRequest(url)) hmr("update", url);
+    if (isHmrRequest(url)) hmr("update", url, true);
     if (typeof params.type === "string" && LONG_LIVED_TYPES.has(params.type)) return;
     if (/^(?:data|blob|about):/.test(url)) return;
     activity.inFlight.set(requestId, { url, at: Date.now(), loaderId: typeof params.loaderId === "string" ? params.loaderId : "" });
@@ -186,9 +206,16 @@ export function startPageActivity(session: CdpSession): void {
     return true;
   };
   session.on("Runtime.consoleAPICalled", (params) => {
-    const args = Array.isArray(params.args) ? (params.args as Array<{ value?: unknown }>) : [];
+    const args = Array.isArray(params.args) ? (params.args as Array<{ value?: unknown; subtype?: string; description?: string }>) : [];
     const first = typeof args[0]?.value === "string" ? (args[0].value as string) : "";
     const rest = args.slice(1).map((arg) => (typeof arg.value === "string" ? arg.value : "")).join(" ");
+    // A dev client reports a failed update by logging the error object
+    // itself ("SyntaxError: ..."), then a line of its own.
+    if (params.type === "error" && args[0]?.subtype === "error" && Date.now() - activity.lastHmrAt <= 2_000) {
+      const description = (args[0].description ?? "").split("\n")[0];
+      if (description && firstSeen(params, description)) hmr("error", description);
+      return;
+    }
     const kind = classifyHmrConsole(first);
     if (!kind) return;
     const detail = `${first.replace(/%c/g, "")} ${rest}`.trim();

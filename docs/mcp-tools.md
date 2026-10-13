@@ -187,8 +187,11 @@ from a real user's.
   - `stableMs`: no DOM change for that long;
   - `hmr: true`: the dev server's hot update or reload finished and the page
     settled (Vite, webpack, Next.js Fast Refresh and Parcel client messages
-    and update requests). A build error the dev server reports ends the wait
-    at once with the error.
+    and update requests). A build error the dev server reports, or its error
+    overlay, ends the wait with the error, even when the dev client logs the
+    update as done afterwards (Vite does). Each `hmr` wait reports an update
+    no earlier wait reported, so save, wait, save, wait waits for the second
+    update; it also looks back 10 s for an update that landed before the call.
 
   The timeout is 5 s by default, 15 s with `navigation`, `load` or `hmr`, and
   at most 50 s. A timeout returns `ok: false` with what it saw, for example

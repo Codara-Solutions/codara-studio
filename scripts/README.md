@@ -268,7 +268,9 @@ All but the first drive a real Chromium through
 BrowserTarget with the tab recorders running. `test-studio-csp` checks the
 Content-Security-Policy of Codara's own window through Vite's dev transform
 and in Chromium; `tests/e2e/preview-agent-input.spec.ts` covers all of it in
-the built app over the socket, the stdio MCP server and `cora tool`.
+the built app over the socket, the stdio MCP server and `cora tool`, and
+`tests/e2e/preview-hot-reload.spec.ts` runs hot reload waits against a real
+Vite dev server.
 
 ### Security boundaries and packaging
 

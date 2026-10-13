@@ -8,8 +8,11 @@
 // - checkWait verdicts, pure;
 // - on a real Chromium page: url, navigation, load, networkidle (an
 //   EventSource does not count), fresh elements after an agent action, a
-//   stable DOM, hot updates, reloads and errors, and timeouts that say what
-//   was seen.
+//   stable DOM, hot updates, reloads and errors (Vite's failed update it
+//   still logs as "hot updated", its error overlay), each hmr wait waiting
+//   for an update no earlier wait reported, an iframe's navigation never
+//   passing for the page's, and timeouts that say what was seen.
+// tests/e2e/preview-hot-reload.spec.ts runs the same against a real Vite.
 //
 //   node scripts/test-preview-waits.cjs
 
@@ -70,7 +73,8 @@ function hmrSignals() {
   assert.equal(classifyHmrConsole("[Fast Refresh] performing full reload"), "reload");
   assert.equal(classifyHmrConsole("[HMR] Updated modules:"), "update");
   assert.equal(classifyHmrConsole("[HMR] Waiting for update signal from WDS..."), "start");
-  assert.equal(classifyHmrConsole("[webpack-dev-server] App updated. Recompiling..."), "update");
+  assert.equal(classifyHmrConsole("[webpack-dev-server] App updated. Recompiling..."), "start");
+  assert.equal(classifyHmrConsole("[webpack-dev-server] Nothing changed."), "update");
   assert.equal(classifyHmrConsole("[webpack-dev-server] Errors while compiling. Reload prevented."), "error");
   assert.equal(classifyHmrConsole("[parcel] ✨ Built in 20ms"), "update");
   assert.equal(classifyHmrConsole("hot updated"), null);
@@ -111,6 +115,24 @@ function verdicts() {
   assert.deepEqual(checkWait(hmr, activity({ hmr: [{ at: now - 1000, kind: "update", detail: "" }], lastHmrAt: now - 1000 }), probe({ quietMs: 10 }), now, now).waiting, ["the DOM is still changing"]);
   assert.equal(checkWait(hmr, activity({ hmr: [{ at: now - 1000, kind: "update", detail: "" }], lastHmrAt: now - 1000 }), probe(), now, now).ok, true);
   assert.equal(checkWait(hmr, activity({ hmr: [{ at: now - 20_000, kind: "update", detail: "" }], lastHmrAt: now - 20_000 }), probe(), now, now).ok, false, "an old update does not count");
+  // Vite logs "hot updated" even after the update failed: the cycle's error decides.
+  const failedCycle = [
+    { at: now - 1500, kind: "update", detail: "http://x/src/main.js?t=1791891550189", opens: true, request: true },
+    { at: now - 1450, kind: "error", detail: "SyntaxError: Unexpected token ';'" },
+    { at: now - 1440, kind: "error", detail: "[hmr] Failed to reload /src/main.js." },
+    { at: now - 1430, kind: "update", detail: "[vite] hot updated: /src/main.js" },
+  ];
+  assert.match(checkWait(hmr, activity({ hmr: failedCycle, lastHmrAt: now - 1430 }), probe(), now, now).failure, /reported an error after the update: SyntaxError: Unexpected token ';'/);
+  const fixedCycle = [
+    ...failedCycle,
+    { at: now - 800, kind: "update", detail: "http://x/src/main.js?t=1791891551000", opens: true, request: true },
+    { at: now - 780, kind: "update", detail: "[vite] hot updated: /src/main.js" },
+  ];
+  assert.equal(checkWait(hmr, activity({ hmr: fixedCycle, lastHmrAt: now - 780 }), probe(), now, now).ok, true, "a later update cycle replaces an earlier error");
+  const overlay = checkWait(hmr, activity({ hmr: fixedCycle, lastHmrAt: now - 780 }), probe({ overlay: "Transform failed: Unexpected }" }), now, now);
+  assert.equal(overlay.failure, "The dev server shows an error overlay: Transform failed: Unexpected }");
+  assert.deepEqual(checkWait(hmr, activity({ hmr: fixedCycle, lastHmrAt: now - 100 }), probe({ overlay: "old" }), now, now).waiting, ["the update is still being applied"],
+    "an overlay counts only once the update settled");
 
   const fresh = normalizeWaitRequest({ selector: "h1", fresh: true });
   const stale = checkWait(fresh, activity(), probe({ selector: { count: 2, visible: 2, fresh: 0, matched: false } }), now, now);
@@ -128,6 +150,10 @@ const PAGES = {
   "/next": `<!doctype html><title>Next</title><h1>Next page</h1>`,
   "/slow": `<!doctype html><title>Slow</title><h1>Slow</h1><img src="/delay?ms=900">`,
   "/stream": `<!doctype html><title>Stream</title><h1>Stream</h1><script>new EventSource('/sse');</script>`,
+  "/framed": `<!doctype html><title>Framed</title><h1>Framed</h1>
+    <iframe srcdoc="<p>child</p>"></iframe>`,
+  "/bad.js": (req, res) => res.writeHead(200, { "content-type": "text/javascript" }).end("export const label = 'x' + ;"),
+  "/good.js": (req, res) => res.writeHead(200, { "content-type": "text/javascript" }).end("export const label = 'ok';"),
   "/sse": (req, res) => {
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
     res.write("data: hello\n\n");
@@ -244,6 +270,58 @@ async function inChromium() {
     await lib.markAgentAction({});
     const quiet = await wait({ hmr: true, timeoutMs: 300 });
     assert.equal(quiet.error, "Timed out after 300 ms waiting for the hot update to finish. Seen: no hot update or reload seen yet.");
+
+    // Vite's client after a failed hot update: the import rejects, it logs
+    // the error and its own line, then "hot updated" all the same.
+    const viteUpdate = (file) => `(() => {
+      const path = ${JSON.stringify(file)};
+      setTimeout(() => import(path + "?t=" + Date.now()).catch((error) => {
+        console.error(error);
+        console.error("[hmr] Failed to reload " + path + ". This could be due to syntax errors or importing non-existent modules. (see errors above)");
+      }).finally(() => console.debug("[vite] hot updated: " + path)), 100);
+    })()`;
+    await navigate(target, server.url("/"));
+    await act(viteUpdate("/bad.js"));
+    const failed = await wait({ hmr: true, timeoutMs: 3000 });
+    assert.equal(failed.ok, false, JSON.stringify(failed));
+    assert.match(failed.error, /^The dev server reported an error after the update: SyntaxError: Unexpected token/);
+    // The next save fixes it; no browser action in between.
+    await sleep(50);
+    await target.evaluate(viteUpdate("/good.js"));
+    const recovered = await wait({ hmr: true, timeoutMs: 3000 });
+    assert.equal(recovered.ok, true, JSON.stringify(recovered));
+    assert.ok(recovered.waitedMs >= 50, `it waited for the new update rather than reporting the old error again (${recovered.waitedMs} ms)`);
+    // Save, wait, save, wait: the second wait is for the second update.
+    const next = await wait({ hmr: true, timeoutMs: 300 });
+    assert.equal(next.error, "Timed out after 300 ms waiting for the hot update to finish. Seen: no hot update or reload seen yet.");
+    // Vite's default error overlay is the only sign of a transform error.
+    await lib.markAgentAction({});
+    await target.evaluate(`setTimeout(() => {
+      console.debug("[vite] hot updated: /src/App.tsx");
+      const overlay = document.createElement("vite-error-overlay");
+      overlay.attachShadow({ mode: "open" }).innerHTML = '<div class="message"><span class="message-body">Transform failed with 1 error</span></div>';
+      document.body.append(overlay);
+    }, 100)`);
+    const overlaid = await wait({ hmr: true, timeoutMs: 3000 });
+    assert.equal(overlaid.error, "The dev server shows an error overlay: Transform failed with 1 error");
+
+    // A session that attaches after the page loaded knows the main frame
+    // anyway: an iframe's history change is not the page's navigation.
+    await navigate(target, server.url("/framed"));
+    const late = new lib.CdpSession("test:late", chromium.transportFor(page.targetId));
+    try {
+      lib.startPageActivity(late);
+      await late.send("Page.enable");
+      await sleep(100);
+      await target.evaluate("document.querySelector('iframe').contentWindow.location.hash = 'inner'; true");
+      await sleep(200);
+      assert.deepEqual(lib.pageActivity(late).navigations, [], "an iframe's navigation is not recorded as the page's");
+      await target.evaluate("history.pushState({}, '', '/framed#top'); true");
+      await sleep(200);
+      assert.deepEqual(lib.pageActivity(late).navigations.map((nav) => nav.url), [server.url("/framed#top")]);
+    } finally {
+      late.dispose({ detach: true });
+    }
   } finally {
     unregister();
     page.close();

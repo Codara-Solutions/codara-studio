@@ -33,6 +33,7 @@ const ACTION_SETTLE_MS = 250;
 /** A hot update counts if it came after the last action or this recently. */
 const HMR_LOOKBACK_MS = 10_000;
 const HMR_QUIET_MS = 300;
+const HMR_TAIL_MS = 2_000;
 
 export type LoadState = "domcontentloaded" | "load" | "networkidle";
 export type ElementState = "attached" | "visible" | "hidden";
@@ -126,6 +127,8 @@ export interface PageProbe {
   readyState: string;
   title: string;
   quietMs: number;
+  /** The text of a dev server's error overlay (Vite, webpack-dev-server) on the page, if one shows. */
+  overlay?: string;
   selector?: { count: number; visible: number; fresh: number; matched: boolean; ref?: string; tag?: string; text?: string };
 }
 
@@ -152,6 +155,15 @@ export function waitProbe(
     title: document.title,
     quietMs: Math.round(performance.now() - watch.last),
   };
+  // Vite reports a failed update only through this overlay by default.
+  const viteOverlay = document.querySelector("vite-error-overlay");
+  const webpackOverlay = document.getElementById("webpack-dev-server-client-overlay");
+  if (viteOverlay || webpackOverlay) {
+    const message = viteOverlay?.shadowRoot?.querySelector(".message-body")?.textContent
+      ?? (webpackOverlay as HTMLIFrameElement | null)?.contentDocument?.body?.innerText
+      ?? "";
+    probe.overlay = message.replace(/\s+/g, " ").trim().slice(0, 300) || "an error overlay is open";
+  }
   if (!args.selector) return probe;
   const dom = createDOM();
   let elements: Element[];
@@ -235,11 +247,32 @@ export function checkWait(
   }
   let failure: string | undefined;
   if (request.hmr) {
+    // An agent saves files with its own tools, so Codara cannot tell when an
+    // edit happened: a wait looks back a little, but never at an update an
+    // earlier wait already reported, or "save, wait, save, wait" would end the
+    // second wait on the first update (or its error).
     const from = Math.max(activity.lastActionAt, startedAt - HMR_LOOKBACK_MS);
-    const updates = activity.hmr.filter((record) => record.at >= from);
+    const reported = activity.hmrReported;
+    let updates = activity.hmr.filter((record) => record.at >= from && record.at > (reported?.at ?? 0));
+    if (reported?.failed) {
+      // A failure is reported at the first error, and what the failed cycle
+      // logs after it (Vite's "hot updated" line follows its error) is still
+      // that cycle, not a new update.
+      let tail = 0;
+      while (tail < updates.length && !updates[tail].opens && updates[tail].at - reported.at <= HMR_TAIL_MS) tail += 1;
+      updates = updates.slice(tail);
+    }
     const last = updates.at(-1);
+    let opened = 0;
+    for (let index = updates.length - 1; index > 0; index--) {
+      if (updates[index].opens) {
+        opened = index;
+        break;
+      }
+    }
+    const error = updates.slice(opened).find((record) => record.kind === "error");
     if (!last) waiting.push("no hot update or reload seen yet");
-    else if (last.kind === "error") failure = `The dev server reported an error after the update: ${last.detail}`;
+    else if (error) failure = `The dev server reported an error after the update: ${error.detail}`;
     else if (last.kind === "start") waiting.push("the dev server is rebuilding");
     else if (last.kind === "reload" && !activity.navigations.some((nav) => nav.at >= last.at && !nav.sameDocument)) {
       waiting.push("the page has not reloaded yet");
@@ -247,6 +280,9 @@ export function checkWait(
       waiting.push("the update is still being applied");
     } else if (probe && probe.readyState !== "complete") waiting.push("the reloaded page is still loading");
     else if (probe && probe.quietMs < HMR_QUIET_MS) waiting.push("the DOM is still changing");
+    // Read only once the update settled: a successful update removes the
+    // overlay an earlier error left.
+    else if (probe?.overlay) failure = `The dev server shows an error overlay: ${probe.overlay}`;
   }
   if (request.selector) {
     const sel = probe?.selector;
@@ -315,6 +351,7 @@ export async function waitForPage(target: BrowserTarget, request: WaitRequest): 
     }
     const now = Date.now();
     const verdict = checkWait(request, activity, probe, now, startedAt);
+    if ((verdict.failure || verdict.ok) && request.hmr) activity.hmrReported = { at: activity.hmr.at(-1)?.at ?? 0, failed: !!verdict.failure };
     if (verdict.failure) {
       return { ok: false, error: verdict.failure, waitedMs: now - startedAt, url: probe?.href ?? null };
     }
