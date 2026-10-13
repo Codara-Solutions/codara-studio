@@ -28,8 +28,9 @@ const lib = bundleBrowser(`
 
 function requests() {
   const { normalizeWaitRequest, WAIT_MAX_MS } = lib;
-  assert.throws(() => normalizeWaitRequest({}), /Give at least one condition: selector, url, navigation, load, stableMs or hmr/);
+  assert.throws(() => normalizeWaitRequest({}), /Give at least one condition: selector, text, url, navigation, load, stableMs or hmr/);
   assert.throws(() => normalizeWaitRequest({ fresh: true }), /Give at least one condition/);
+  assert.equal(normalizeWaitRequest({ text: "Pricing" }).selector, "body", "text alone watches the whole page");
   assert.throws(() => normalizeWaitRequest({ url: "/x", fresh: true }), /fresh needs a selector/);
   assert.throws(() => normalizeWaitRequest({ selector: "h1", state: "gone" }), /state must be/);
   assert.throws(() => normalizeWaitRequest({ load: "idle" }), /load must be domcontentloaded, load or networkidle/);
@@ -144,6 +145,7 @@ const PAGES = {
     <h1>Home</h1>
     <a id="next" href="/next">Next</a>
     <button id="push" onclick="setTimeout(() => history.pushState({}, '', '/done?x=1'), 300)">Push</button>
+    <button id="retitle" onclick="setTimeout(() => { document.querySelector('h1').textContent = 'Retitled'; }, 300)">Retitle</button>
     <button id="swap" onclick="setTimeout(() => { document.body.innerHTML = '<h1>Fresh</h1>'; }, 300)">Swap</button>
     <button id="fetch" onclick="setTimeout(() => fetch('/delay?ms=700'), 50)">Fetch</button>
     <button id="churn" onclick="let n = 0; const t = setInterval(() => { document.title = 'n' + n; document.body.dataset.n = ++n; if (n > 12) clearInterval(t); }, 50)">Churn</button>`,
@@ -231,6 +233,20 @@ async function inChromium() {
     assert.equal(fresh.ok, true, JSON.stringify(fresh));
     assert.equal(fresh.element.text, "Fresh");
     assert.match(fresh.element.ref, /^@/);
+    // A framework keeps the h1 and swaps its text: that is a new heading too.
+    await navigate(target, server.url("/"));
+    await act("document.getElementById('retitle').click()");
+    const retitled = await wait({ selector: "h1", fresh: true, timeoutMs: 3000 });
+    assert.equal(retitled.ok, true, JSON.stringify(retitled));
+    assert.equal(retitled.element.text, "Retitled");
+    const byText = await wait({ selector: "h1", text: "retitled", timeoutMs: 1000 });
+    assert.equal(byText.ok, true, JSON.stringify(byText));
+    assert.equal((await wait({ text: "/^Retit/", timeoutMs: 1000 })).ok, true, "text alone watches the page");
+    const wrongText = await wait({ selector: "h1", text: "Pricing", timeoutMs: 200 });
+    assert.equal(wrongText.error, "Timed out after 200 ms waiting for h1 visible with text Pricing. Seen: h1 is not visible with text Pricing: 1 match but none has the text.");
+    await navigate(target, server.url("/"));
+    await act("document.getElementById('swap').click()");
+    assert.equal((await wait({ selector: "h1", fresh: true, timeoutMs: 3000 })).element.text, "Fresh");
     await lib.markAgentAction({});
     const old = await wait({ selector: "h1", fresh: true, timeoutMs: 200 });
     assert.equal(old.error, "Timed out after 200 ms waiting for h1 visible (fresh). Seen: h1 is not visible (fresh): 1 element match but all existed before your last action.");

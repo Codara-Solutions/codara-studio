@@ -2,9 +2,11 @@
 // browser target. Conditions combine (all must hold):
 //
 //   selector + state   an element is attached, visible or hidden; with
-//                      fresh, only elements added since the agent's last
-//                      action count, so `h1` cannot match the page a click
-//                      is leaving
+//                      fresh, only elements added or whose text changed
+//                      since the agent's last action count, so `h1` cannot
+//                      match the page a click is leaving
+//   text               the matched element's text contains this (or matches
+//                      /regex/); alone it watches the whole page
 //   url                the address equals a URL or path, matches a glob
 //                      (*), or a /regular expression/
 //   navigation         a navigation committed since the last action
@@ -42,6 +44,7 @@ export interface WaitRequest {
   selector: string | null;
   state: ElementState;
   fresh: boolean;
+  text: string | null;
   url: string | null;
   navigation: boolean;
   load: LoadState | null;
@@ -54,7 +57,8 @@ export class WaitRequestError extends Error {}
 
 export function normalizeWaitRequest(params: Record<string, unknown>): WaitRequest {
   const text = (key: string) => (typeof params[key] === "string" && (params[key] as string).trim() ? (params[key] as string).trim() : null);
-  const selector = text("selector");
+  const wantedText = text("text");
+  const selector = text("selector") ?? (wantedText ? "body" : null);
   const state = params.state === undefined ? "visible" : params.state;
   if (state !== "attached" && state !== "visible" && state !== "hidden") throw new WaitRequestError("state must be attached, visible or hidden.");
   const load = params.load === undefined || params.load === null ? null : params.load;
@@ -68,6 +72,7 @@ export function normalizeWaitRequest(params: Record<string, unknown>): WaitReque
     selector,
     state,
     fresh: params.fresh === true,
+    text: wantedText,
     url: text("url"),
     navigation: params.navigation === true,
     load: load as LoadState | null,
@@ -76,7 +81,7 @@ export function normalizeWaitRequest(params: Record<string, unknown>): WaitReque
     timeoutMs: 0,
   };
   if (!request.selector && !request.url && !request.navigation && !request.load && !request.stableMs && !request.hmr) {
-    throw new WaitRequestError("Give at least one condition: selector, url, navigation, load, stableMs or hmr.");
+    throw new WaitRequestError("Give at least one condition: selector, text, url, navigation, load, stableMs or hmr.");
   }
   if (request.fresh && !request.selector) throw new WaitRequestError("fresh needs a selector.");
   const slow = request.navigation || request.load !== null || request.hmr;
@@ -129,12 +134,12 @@ export interface PageProbe {
   quietMs: number;
   /** The text of a dev server's error overlay (Vite, webpack-dev-server) on the page, if one shows. */
   overlay?: string;
-  selector?: { count: number; visible: number; fresh: number; matched: boolean; ref?: string; tag?: string; text?: string };
+  selector?: { count: number; visible: number; fresh: number; withText?: number; matched: boolean; ref?: string; tag?: string; text?: string };
 }
 
 // Stringified into the page; may use only its arguments and page globals.
 export function waitProbe(
-  args: { selector: string | null; state: string; fresh: boolean },
+  args: { selector: string | null; state: string; fresh: boolean; text: string | null },
   createDOM: typeof createPreviewDOM,
 ): PageProbe {
   type Watch = { last: number };
@@ -173,10 +178,18 @@ export function waitProbe(
   } else {
     elements = Array.from(document.querySelectorAll(args.selector));
   }
-  const baseline = host[Symbol.for("codara.preview.baseline")] as { seen: WeakSet<Element> } | undefined;
-  const isFresh = (el: Element) => !baseline || !baseline.seen.has(el);
+  const baseline = host[Symbol.for("codara.preview.baseline")] as { seen: WeakSet<Element>; texts?: WeakMap<Element, string> } | undefined;
+  // A framework that re-renders in place keeps the element and swaps its text.
+  const isFresh = (el: Element) => !baseline || !baseline.seen.has(el) || (baseline.texts?.has(el) === true && baseline.texts.get(el) !== el.textContent);
+  const regex = args.text && args.text.length > 2 && args.text.startsWith("/") && args.text.endsWith("/") ? new RegExp(args.text.slice(1, -1), "i") : null;
+  const wanted = args.text?.toLowerCase().replace(/\s+/g, " ") ?? null;
+  const hasText = (el: Element) => {
+    if (wanted === null) return true;
+    const own = ((el as HTMLElement).innerText ?? el.textContent ?? "").replace(/\s+/g, " ").trim();
+    return regex ? regex.test(own) : own.toLowerCase().includes(wanted);
+  };
   const visible = elements.filter((el) => dom.visible(el));
-  const candidates = args.fresh ? elements.filter(isFresh) : elements;
+  const candidates = (args.fresh ? elements.filter(isFresh) : elements).filter(hasText);
   let matched = false;
   let match: Element | undefined;
   if (args.state === "hidden") matched = candidates.every((el) => !dom.visible(el));
@@ -188,6 +201,7 @@ export function waitProbe(
     count: elements.length,
     visible: visible.length,
     fresh: elements.filter(isFresh).length,
+    withText: elements.filter(hasText).length,
     matched,
     ...(match
       ? {
@@ -202,7 +216,7 @@ export function waitProbe(
 
 /** Page expression that records which elements exist now, for fresh waits. */
 export const MARK_BASELINE_EXPRESSION =
-  "(() => { window[Symbol.for('codara.preview.baseline')] = { at: Date.now(), seen: new WeakSet(document.querySelectorAll('*')) }; return true; })()";
+  "(() => { const all = document.querySelectorAll('*'); const texts = new WeakMap(); if (all.length <= 4000) for (const el of all) { const t = el.textContent; if (t.length <= 300) texts.set(el, t); } window[Symbol.for('codara.preview.baseline')] = { at: Date.now(), seen: new WeakSet(all), texts }; return true; })()";
 
 export interface Verdict {
   ok: boolean;
@@ -291,10 +305,12 @@ export function checkWait(
       const old = sel.count - sel.fresh;
       const detail = sel.count === 0
         ? "no element matches"
-        : request.fresh && sel.fresh === 0
-          ? `${old} element${old === 1 ? "" : "s"} match but all existed before your last action`
-          : `${sel.count} match, ${sel.visible} visible`;
-      waiting.push(`${request.selector} is not ${request.state}${request.fresh ? " (fresh)" : ""}: ${detail}`);
+        : request.text && sel.withText === 0
+          ? `${sel.count} match but none has the text`
+          : request.fresh && sel.fresh === 0
+            ? `${old} element${old === 1 ? "" : "s"} match but all existed before your last action`
+            : `${sel.count} match, ${sel.visible} visible`;
+      waiting.push(`${request.selector} is not ${request.state}${request.fresh ? " (fresh)" : ""}${request.text ? ` with text ${request.text}` : ""}: ${detail}`);
     }
   }
   if (request.stableMs && (!probe || probe.quietMs < request.stableMs)) {
@@ -309,7 +325,7 @@ function describeConditions(request: WaitRequest): string {
   if (request.url) parts.push(`url ${request.url}`);
   if (request.load) parts.push(request.load);
   if (request.hmr) parts.push("the hot update to finish");
-  if (request.selector) parts.push(`${request.selector} ${request.state}${request.fresh ? " (fresh)" : ""}`);
+  if (request.selector) parts.push(`${request.selector} ${request.state}${request.fresh ? " (fresh)" : ""}${request.text ? ` with text ${request.text}` : ""}`);
   if (request.stableMs) parts.push(`${request.stableMs} ms without DOM changes`);
   return parts.join(" + ");
 }
@@ -334,7 +350,7 @@ export async function waitForPage(target: BrowserTarget, request: WaitRequest): 
   const activity = pageActivity(target.session);
   const startedAt = Date.now();
   const deadline = startedAt + request.timeoutMs;
-  const expression = `(${waitProbe.toString()})(${JSON.stringify({ selector: request.selector, state: request.state, fresh: request.fresh })}, ${createPreviewDOM.toString()})`;
+  const expression = `(${waitProbe.toString()})(${JSON.stringify({ selector: request.selector, state: request.state, fresh: request.fresh, text: request.text })}, ${createPreviewDOM.toString()})`;
   let probe: PageProbe | null = null;
   let probeError: string | null = null;
   for (;;) {

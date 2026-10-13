@@ -374,8 +374,12 @@ from a real user's.
   Codara's.
 - **Waits.** `codara_preview_wait_for` conditions combine, and all must hold:
   - `selector` with `state` (`visible` by default, `attached`, `hidden`), and
-    `fresh: true` to count only elements added since the agent's last action,
-    so `h1` cannot match the page a click is leaving;
+    `fresh: true` to count only elements added since the agent's last action
+    or whose text changed since then, so `h1` cannot match the page a click
+    is leaving, also when a framework re-renders the same `h1` in place;
+  - `text`: the matched element's text contains this, or matches `/regex/`
+    (alone it watches the whole page), for example `selector: "h1"` with
+    `text: "Pricing"`;
   - `url`: exact URL, a path on the same origin, a `*` glob, or `/regex/`;
   - `navigation: true`: a navigation committed since the last action;
   - `load`: `domcontentloaded`, `load`, or `networkidle` (loaded, then 500 ms

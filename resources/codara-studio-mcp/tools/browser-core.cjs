@@ -14,7 +14,7 @@ module.exports = {
       rpc: "preview.list",
       annotations: { readOnly: true },
       description:
-        "List your workspace's browser tabs, then ones the user shared from Chrome (kind \"chrome\"): id, title, URL, isActive, isLastViewed (seen last by the user). Match the user's references here and pass that tabId; ask if ambiguous.",
+        "List your workspace's browser tabs, then ones the user shared from Chrome (kind \"chrome\"): id, title, URL, isActive, isLastViewed. Match the user's references here and pass that tabId; ask if ambiguous.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
     },
     {
@@ -23,7 +23,7 @@ module.exports = {
       annotations: { openWorld: true },
       step: { order: 10 },
       description:
-        "Load an http, https or file URL in tabId, or in this session's tab (opened if needed). Waits briefly for dom-ready. Tabs stay open.",
+        "Load an http, https or file URL in tabId, or in this session's tab (opened if needed). Waits briefly for dom-ready.",
       inputSchema: {
         type: "object",
         required: ["url"],
@@ -40,7 +40,7 @@ module.exports = {
       annotations: { readOnly: true },
       step: { order: 70 },
       description:
-        "Read the page as a compact outline: @references, labels, values, states, link targets. Pass an @reference as another tool's selector. selector scopes it; since=<snapshotId> returns only the diff when smaller. Re-read after a stale reference; screenshot for visuals.",
+        "Read the page as a compact outline: @references, labels, values, states, link targets. Pass an @reference as another tool's selector. selector scopes it; since=<snapshotId> returns only the diff. Re-read after a stale reference.",
       inputSchema: {
         type: "object",
         properties: {
@@ -130,6 +130,7 @@ module.exports = {
         order: 60,
         properties: {
           fresh: { type: "boolean" },
+          text: { type: "string" },
           navigation: { type: "boolean" },
           load: { type: "string" },
           stableMs: { type: "number" },
@@ -137,7 +138,7 @@ module.exports = {
         },
       },
       description:
-        "Wait until every given condition holds; a timeout says what it saw. selector (+state); fresh: only elements added since your last action. url: exact, path, * glob, /regex/. navigation: committed since your last action. load. stableMs: DOM quiet that long. hmr: dev-server update settled.",
+        "Wait until all given conditions hold; a timeout says what it saw. selector (+state); fresh: only elements new or re-rendered with new text since your last action. text: contains it (or /regex/). url: exact, path, * glob, /regex/. navigation: committed since your last action. load. stableMs. hmr: dev-server update settled.",
       inputSchema: {
         type: "object",
         properties: {
@@ -145,6 +146,7 @@ module.exports = {
           selector: { type: "string" },
           state: { type: "string", enum: ["attached", "visible", "hidden"] },
           fresh: { type: "boolean" },
+          text: { type: "string" },
           url: { type: "string" },
           navigation: { type: "boolean" },
           load: { type: "string", enum: ["domcontentloaded", "load", "networkidle"] },
@@ -161,7 +163,7 @@ module.exports = {
       annotations: { readOnly: true },
       step: { order: 65, properties: { query: { type: "string" } } },
       description:
-        "Find elements by description (\"the search button\"): ranked @references with role, name and box, for click or type.",
+        "Find elements by description (\"the search button\"): ranked @references with role, name and box.",
       inputSchema: {
         type: "object",
         required: ["query"],
