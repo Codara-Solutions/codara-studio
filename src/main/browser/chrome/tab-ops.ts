@@ -7,6 +7,7 @@
 // nor a visible tab.
 
 import { createPreviewDOM } from "../../../shared/preview-dom";
+import { createPreviewNames } from "../../../shared/preview-names";
 import { snapshotProbe } from "../../../renderer/src/components/Preview/domSnapshot";
 import { clickProbe, typeProbe } from "../../../renderer/src/components/Preview/domActions";
 import { parseKeyChord, previewKeyEvents } from "../../preview-keyboard";
@@ -68,12 +69,14 @@ export async function url(target: BrowserTarget): Promise<unknown> {
 }
 
 export function snapshot(target: BrowserTarget, params: Params): Promise<unknown> {
-  return run(target, probe(snapshotProbe, {
+  const options = {
     mode: str(params, "mode") ?? "outline",
     maxBytes: num(params, "maxBytes") ?? 12_000,
     selector: str(params, "selector"),
     since: str(params, "since"),
-  }));
+  };
+  // The snapshot also takes the icon-name factory, as on Codara tabs (previewRpc.ts).
+  return run(target, `(${snapshotProbe.toString()})(${JSON.stringify(options)}, ${createPreviewDOM.toString()}, ${createPreviewNames.toString()})`);
 }
 
 /**
