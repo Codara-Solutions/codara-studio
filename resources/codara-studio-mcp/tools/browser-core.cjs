@@ -14,7 +14,7 @@ module.exports = {
       rpc: "preview.list",
       annotations: { readOnly: true },
       description:
-        "List the browser tabs in your workspace: id, title, URL, isActive, and isLastViewed (the tab the user looked at last). When the user refers to an existing tab, match it here and pass its tabId to the other browser tools; ask if the reference is ambiguous.",
+        "List the browser tabs in your workspace, then tabs the user shared from their own browser (kind \"chrome\"): id, title, URL, isActive, and isLastViewed (the tab the user looked at last). When the user refers to an existing tab, match it here and pass its tabId to the other browser tools; ask if the reference is ambiguous.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
     },
     {
