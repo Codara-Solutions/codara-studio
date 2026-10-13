@@ -28,11 +28,11 @@ const MAX_ARGS = 40;
 const RESERVED: Record<LaunchArgRuntime, readonly string[]> = {
   claude: ["--settings", "--mcp-config", "--strict-mcp-config", "--session-id", "--resume", "-r", "--continue", "-c", "--print", "-p", "--output-format", "--input-format"],
   codex: ["resume", "exec"],
-  grok: ["--session-id", "-s", "--resume", "-r"],
+  grok: ["--session-id", "-s", "--resume", "-r", "--continue", "-c", "--single", "-p", "--output-format"],
   pi: ["--session", "--resume", "-r", "--continue", "-c", "--print", "-p", "--mode"],
 };
 // Codex takes config overrides as -c key=value; Codara's own keys stay its own.
-const CODEX_RESERVED_KEYS = /^(?:mcp_servers\.codara-studio\b|notify\s*=|tui\.notifications\s*=)/;
+const CODEX_RESERVED_KEYS = /^\s*(?:mcp_servers\s*\.\s*(?:codara-studio\b|"codara-studio"|'codara-studio')|notify\s*=|tui\s*\.\s*notifications\s*=)/;
 
 export class LaunchArgsError extends Error {}
 

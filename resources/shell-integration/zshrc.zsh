@@ -113,7 +113,7 @@ _spark_agent_exec() {
     claude:auth|claude:mcp|claude:config|claude:doctor|claude:update|claude:upgrade|claude:install|claude:setup-token|claude:plugin|claude:plugins|claude:migrate-installer|\
     claude:agents|claude:attach|claude:logs|claude:rm|claude:stop|claude:kill|claude:respawn|claude:purge|claude:auto-mode|claude:import|claude:gateway|claude:ultrareview|\
     claude:-v|claude:--version|claude:-h|claude:--help|\
-    grok:agent|grok:clone|grok:completions|grok:cursor-worker|grok:dashboard|grok:doctor|grok:du|grok:disk-usage|grok:export|grok:help|grok:inspect|grok:leader|grok:login|grok:logout|grok:mcp|grok:memory|grok:models|grok:plugin|grok:sessions|grok:setup|grok:trace|grok:update|grok:usage|grok:version|grok:v|grok:worktree|grok:wrap|grok:-h|grok:--help|grok:-V|grok:--version|\
+    grok:agent|grok:clone|grok:completions|grok:cursor-worker|grok:dashboard|grok:doctor|grok:du|grok:disk-usage|grok:export|grok:help|grok:inspect|grok:leader|grok:login|grok:logout|grok:mcp|grok:memory|grok:models|grok:plugin|grok:sessions|grok:setup|grok:trace|grok:update|grok:usage|grok:version|grok:v|grok:worktree|grok:wrap|grok:-h|grok:--help|grok:-v|grok:-V|grok:--version|\
     pi:-h|pi:--help|pi:-v|pi:--version|pi:[^-]*|\
     codex:login|codex:logout|codex:mcp|codex:completion|codex:update|codex:doctor|codex:sandbox|codex:debug|codex:apply|codex:plugin|codex:app-server|codex:remote-control|codex:agents|codex:--version|codex:-V|codex:--help|codex:-h)
       command "$cli" "$@"

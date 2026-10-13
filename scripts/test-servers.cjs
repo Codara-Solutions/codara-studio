@@ -770,6 +770,8 @@ async function main() {
       ["codex", "-c mcp_servers.codara-studio.command=x", /set by Codara/],
       ["codex", "--config=notify=[]", /set by Codara/],
       ["grok", "--resume abc", /set by Codara/],
+      ["grok", "-c", /set by Codara/],
+      ["codex", `-c mcp_servers."codara-studio".command=x`, /set by Codara/],
       ["pi", "--mode rpc", /set by Codara/],
     ]) {
       const verdict = launch.checkLaunchArgs(runtime, text);

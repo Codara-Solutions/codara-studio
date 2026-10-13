@@ -54,7 +54,11 @@ function RuntimeFlagsField({
   return (
     <SettingRow
       title={title}
-      desc="Added after Codara's own flags each time this CLI starts in a terminal. Flags only, no shell syntax."
+      desc={
+        runtime === "claude" || runtime === "codex"
+          ? "Added after Codara's own flags each time this CLI starts in a terminal. Flags only, no shell syntax."
+          : "Added each time this CLI starts in a terminal. Flags only, no shell syntax."
+      }
       stacked
     >
       <input

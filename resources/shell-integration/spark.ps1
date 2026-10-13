@@ -43,7 +43,7 @@ function Global:__Spark-AgentExec {
     } elseif ($cli -eq 'grok') {
         @('agent', 'clone', 'completions', 'cursor-worker', 'dashboard', 'doctor', 'du', 'disk-usage', 'export', 'help', 'inspect', 'leader',
           'login', 'logout', 'mcp', 'memory', 'models', 'plugin', 'sessions', 'setup', 'trace', 'update', 'usage', 'version', 'v', 'worktree', 'wrap',
-          '-h', '--help', '-V', '--version')
+          '-h', '--help', '-v', '-V', '--version')
     } else {
         @('-h', '--help', '-v', '--version')
     }
