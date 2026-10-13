@@ -82,6 +82,18 @@ interface Live {
   detach: () => void;
 }
 
+/** A server seen running in a terminal pane. */
+export interface LearnInput {
+  workspaceId: string;
+  paneId: string;
+  command: string;
+  cwd: string;
+  url: string;
+  port: number;
+  pid?: number | null;
+  source: "agent" | "user";
+}
+
 export interface StartResult {
   server: DevServerStatus;
   alreadyRunning: boolean;
@@ -113,6 +125,26 @@ export function createServerKeeper(deps: KeeperDeps) {
   /** Env values of this app session, by server; never written anywhere. */
   const envValues = new Map<string, Record<string, string>>();
   const autoStarted = new Set<string>();
+  const queues = new Map<string, Promise<unknown>>();
+
+  /**
+   * Starts, stops and saves of one workspace run one at a time: two callers
+   * (an agent and the status view, or two agents) must never both pass the
+   * copy and port checks before either has spawned. The wait for ready runs
+   * outside, so a slow server does not hold the others up.
+   */
+  function serial<T>(workspaceId: string, task: () => Promise<T>): Promise<T> {
+    const run = (queues.get(workspaceId) ?? Promise.resolve()).catch(() => undefined).then(task);
+    const settled = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    queues.set(workspaceId, settled);
+    void settled.then(() => {
+      if (queues.get(workspaceId) === settled) queues.delete(workspaceId);
+    });
+    return run;
+  }
 
   async function resolveCwd(workspaceId: string, raw: unknown, fallback?: string): Promise<string> {
     const root = await deps.workspaceCwd(workspaceId);
@@ -256,7 +288,24 @@ export function createServerKeeper(deps: KeeperDeps) {
     return false;
   }
 
+  type Launched = { done: StartResult } | { entry: Live; spec: DevServerSpec };
+
   async function start(input: DevServerStartInput & { wait?: boolean }): Promise<StartResult> {
+    return settle(await serial(input.workspaceId, () => launch(input)), input.wait);
+  }
+
+  async function settle(launched: Launched, wait: boolean | undefined): Promise<StartResult> {
+    if ("done" in launched) return launched.done;
+    const { entry, spec: next } = launched;
+    const { workspaceId, id } = entry;
+    const ready = wait === false ? false : await waitReady(entry, null, () => findSpec(workspaceId, id));
+    const server = await statusOf(workspaceId, (await findSpec(workspaceId, id)) ?? next);
+    const result: StartResult = { server, alreadyRunning: false, ready };
+    if (entry.state === "exited") result.output = tail(plainTerminalText(entry.log), 1_500);
+    return result;
+  }
+
+  async function launch(input: DevServerStartInput): Promise<Launched> {
     const workspaceId = input.workspaceId;
     const command = input.command === undefined ? undefined : checkCommand(input.command);
     const port = checkPort(input.port);
@@ -287,7 +336,7 @@ export function createServerKeeper(deps: KeeperDeps) {
       live.delete(key(workspaceId, id));
     } else if (isRunning(current)) {
       const status = await statusOf(workspaceId, spec ?? (await findSpec(workspaceId, id))!);
-      return { server: status, alreadyRunning: true, ready: status.health !== "down" };
+      return { done: { server: status, alreadyRunning: true, ready: status.health !== "down" } };
     }
 
     const next: DevServerSpec = {
@@ -350,12 +399,7 @@ export function createServerKeeper(deps: KeeperDeps) {
       throw error;
     }
     deps.changed(workspaceId);
-
-    const ready = input.wait === false ? false : await waitReady(entry, null, () => findSpec(workspaceId, id));
-    const server = await statusOf(workspaceId, (await findSpec(workspaceId, id)) ?? next);
-    const result: StartResult = { server, alreadyRunning: false, ready };
-    if (entry.state === "exited") result.output = tail(plainTerminalText(entry.log), 1_500);
-    return result;
+    return { entry, spec: next };
   }
 
   function uniqueId(specs: readonly DevServerSpec[], base: string): string {
@@ -368,7 +412,11 @@ export function createServerKeeper(deps: KeeperDeps) {
     throw new ServerInputError("too many servers with this name");
   }
 
-  async function stop(workspaceId: string, rawId: string): Promise<{ server: DevServerStatus; alreadyStopped: boolean }> {
+  function stop(workspaceId: string, rawId: string): Promise<{ server: DevServerStatus; alreadyStopped: boolean }> {
+    return serial(workspaceId, () => stopNow(workspaceId, rawId));
+  }
+
+  async function stopNow(workspaceId: string, rawId: string): Promise<{ server: DevServerStatus; alreadyStopped: boolean }> {
     const id = serverSlug(rawId);
     const spec = await findSpec(workspaceId, id);
     if (!spec) throw new ServerInputError(`No server "${id}" is saved for this workspace.`);
@@ -394,15 +442,18 @@ export function createServerKeeper(deps: KeeperDeps) {
   }
 
   async function restart(workspaceId: string, id: string, options: { wait?: boolean; env?: Record<string, string> } = {}): Promise<StartResult> {
-    await stop(workspaceId, id);
-    const spec = await findSpec(workspaceId, serverSlug(id));
-    const port = spec ? spec.port ?? portOfUrl(spec.url) : null;
-    // A server needs a moment to let go of its port after it exits.
-    if (port) {
-      const deadline = deps.now() + STOP_WAIT_MS;
-      while (deps.now() < deadline && (await deps.portAnswers(port).catch(() => false))) await deps.sleep(150);
-    }
-    return start({ workspaceId, id, wait: options.wait, ...(options.env ? { env: options.env } : {}) });
+    const launched = await serial(workspaceId, async () => {
+      await stopNow(workspaceId, id);
+      const spec = await findSpec(workspaceId, serverSlug(id));
+      const port = spec ? spec.port ?? portOfUrl(spec.url) : null;
+      // A server needs a moment to let go of its port after it exits.
+      if (port) {
+        const deadline = deps.now() + STOP_WAIT_MS;
+        while (deps.now() < deadline && (await deps.portAnswers(port).catch(() => false))) await deps.sleep(150);
+      }
+      return launch({ workspaceId, id, ...(options.env ? { env: options.env } : {}) });
+    });
+    return settle(launched, options.wait);
   }
 
   async function logs(workspaceId: string, rawId: string, since?: number): Promise<DevServerLogs> {
@@ -433,7 +484,11 @@ export function createServerKeeper(deps: KeeperDeps) {
     };
   }
 
-  async function save(input: DevServerSaveInput): Promise<DevServerStatus> {
+  function save(input: DevServerSaveInput): Promise<DevServerStatus> {
+    return serial(input.workspaceId, () => saveNow(input));
+  }
+
+  async function saveNow(input: DevServerSaveInput): Promise<DevServerStatus> {
     const id = serverSlug(input.id ?? "");
     if (!id) throw new ServerInputError("id is required");
     const existing = await findSpec(input.workspaceId, id);
@@ -465,10 +520,14 @@ export function createServerKeeper(deps: KeeperDeps) {
     return statusOf(input.workspaceId, next);
   }
 
-  async function forget(workspaceId: string, rawId: string): Promise<{ id: string; forgotten: boolean }> {
+  function forget(workspaceId: string, rawId: string): Promise<{ id: string; forgotten: boolean }> {
+    return serial(workspaceId, () => forgetNow(workspaceId, rawId));
+  }
+
+  async function forgetNow(workspaceId: string, rawId: string): Promise<{ id: string; forgotten: boolean }> {
     const id = serverSlug(rawId);
     if (!(await findSpec(workspaceId, id))) return { id, forgotten: false };
-    await stop(workspaceId, id);
+    await stopNow(workspaceId, id);
     envValues.delete(key(workspaceId, id));
     await deps.store.update(workspaceId, (specs) => {
       const index = specs.findIndex((item) => item.id === id);
@@ -482,16 +541,11 @@ export function createServerKeeper(deps: KeeperDeps) {
    * A server an agent or the user started in a terminal pane printed a local
    * URL: remember how to start it and that it runs there now.
    */
-  async function learn(input: {
-    workspaceId: string;
-    paneId: string;
-    command: string;
-    cwd: string;
-    url: string;
-    port: number;
-    pid?: number | null;
-    source: "agent" | "user";
-  }): Promise<string | null> {
+  function learn(input: LearnInput): Promise<string | null> {
+    return serial(input.workspaceId, () => learnNow(input));
+  }
+
+  async function learnNow(input: LearnInput): Promise<string | null> {
     let command: string;
     try {
       command = checkCommand(input.command);

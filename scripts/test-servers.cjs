@@ -367,6 +367,23 @@ async function main() {
       await keeper.forget("ws-1", "api");
     });
 
+    await check("never two copies when two callers start the same server at once", async () => {
+      const racePort = await freePort();
+      const raceCommand = `exec node ${JSON.stringify(FIXTURE)} ${racePort}`;
+      const before = sessions.sessions.size;
+      const results = await Promise.all([
+        keeper.start({ workspaceId: "ws-1", command: raceCommand, port: racePort }),
+        keeper.start({ workspaceId: "ws-1", command: raceCommand, port: racePort }),
+        keeper.start({ workspaceId: "ws-1", command: raceCommand, port: racePort, wait: false }),
+      ]);
+      assert.equal(sessions.sessions.size - before, 1, "two callers spawned two processes");
+      assert.equal(results.filter((result) => !result.alreadyRunning).length, 1);
+      assert.equal(new Set(results.map((result) => result.server.id)).size, 1, "one server, one id");
+      const raced = (await keeper.list("ws-1")).filter((server) => server.command === raceCommand);
+      assert.equal(raced.length, 1);
+      await keeper.forget("ws-1", raced[0].id);
+    });
+
     await check("logs: plain text since a cursor", async () => {
       const all = await keeper.logs("ws-1", "web");
       assert.match(all.text, /token=set/);
