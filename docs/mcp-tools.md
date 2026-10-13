@@ -132,7 +132,9 @@ workspace on screen.
 | `codara_preview_evaluate` | Runs JavaScript in the page and returns the result. |
 | `codara_preview_wait_for` | Waits for page conditions: a selector (optionally only elements added since the last action), a URL, a committed navigation, load or network idle, a quiet DOM, or a finished dev-server hot update. A timeout says what it saw. |
 | `codara_preview_find` | Finds elements by description ("the search button") and returns ranked `@references` with role, name and box. |
-| `codara_preview_screenshot` | Captures the tab as a PNG, with the scale needed to turn image pixels into page coordinates. The image is also saved under Codara's workspace data folder and its `path` returned. |
+| `codara_preview_screenshot` | Captures the tab, the full page, one element or a zoomed region as a compact image (JPEG, quality 70, at most 1280 px wide unless asked otherwise), with the scale needed to turn image pixels into page coordinates. The image is also saved under Codara's workspace data folder and its `path` returned. |
+| `codara_preview_compare` | Before/after visual diffs (save a named baseline, then get the percent changed, the changed regions as boxes and a highlighted image) and several screen sizes side by side in one image, in light, dark or both. |
+| `codara_preview_record` | Records the tab to a GIF (or a WebM video when ffmpeg is installed) for a pull request: call once to start, drive the flow, call with `stop: true` for the file's path. |
 | `codara_preview_mouse` | Trusted mouse input (click, double-click, right-click, down, up) at a selector or coordinates. |
 | `codara_preview_scroll` | Scrolls with a trusted mouse-wheel event. |
 | `codara_preview_hover` | Moves the mouse over an element, triggering real hover styles and tooltips. |
@@ -333,6 +335,59 @@ Agents without MCP run the same tools from a Codara terminal with
 `cora tool preview_find '{"query":"the search button"}'`,
 `cora tool preview_wait_for --url /done --load networkidle` or
 `cora tool preview_dialog --accept true`.
+
+### Screenshots, visual diffs, sizes and recordings
+
+All four work on any tab, including one in the background, a hidden
+workspace's tab or a tab of a minimized window, and on a shared Chrome tab.
+Files go under `<codara home>/workspace-data/<workspace>/browser/`
+(`screenshots/`, `baselines/`, `diffs/`, `recordings/`), never into the
+repository.
+
+- **Screenshot options.** `format` is `jpeg` (default), `png` or `webp`, with
+  `quality` (1 to 100). `maxWidth` caps the image width (default 1280);
+  `scale` sets image pixels per CSS pixel, so `clip` plus `scale: 2` zooms
+  into a region; the region is rendered at that zoom, not enlarged
+  afterwards. `fullPage: true` captures the whole page (up to 16,384 CSS
+  pixels tall) with its own viewport, so a `100vh` section stays one screen
+  tall, `selector` (an `@ref` from a snapshot or a unique CSS selector) one
+  element, `clip` (`{x, y, width, height}` in CSS pixels) one region. The
+  result's `scale` maps image pixels back to CSS pixels for the mouse tools.
+  A Codara tab only renders the area its pane gives it, so a full page is
+  scrolled through one screen at a time at the pane's width and stitched;
+  fixed and sticky elements show once, and the scroll position is put back.
+- **Before/after diff.** `codara_preview_compare` with `mode: "baseline"`
+  saves a lossless capture, named by `name` or by default after the page
+  and viewport (`host/path@1280x800`). After the change, `mode: "diff"` (the
+  default) captures again and returns `summary`, `percent`, `changedPixels`,
+  up to 12 `regions` (CSS pixel boxes, largest first) and a highlighted
+  image: the new capture faded, changed pixels in magenta, each region
+  boxed. `threshold` (0 to 1, default 0.1) sets how different a color must
+  be to count. Baselines survive reloads and restarts (one taken by `@ref`
+  keeps the element's CSS selector); `mode: "list"` lists the newest 30.
+  `fullPage`, `selector` and `clip` choose what is compared.
+- **Sizes side by side.** `mode: "sizes"` lays the same tab out at each size
+  in turn (`sizes`: `phone` 390x844, `tablet` 820x1180, `desktop` 1440x900,
+  or `WIDTHxHEIGHT`; the three presets by default), optionally in
+  `colorScheme` `light`, `dark` or `both`, and returns one labeled image of
+  all of them with each tile's box. Only one renderer does the work, and the
+  tab's own size, scroll position and color scheme are put back afterwards.
+  A size larger than the tab's pane is shrunk to fit it, so its tile has the
+  pane's resolution.
+- **Recording.** `codara_preview_record` starts recording (`format` `gif` or
+  `webm`, `fps` up to 15, default 8; `maxWidth` default 800; `maxSeconds`
+  default 30, at most 120, after which it stops itself). Call it again with
+  `stop: true` to encode and get `path`, `bytes`, `frames`, `durationMs` and
+  `size`. Frames come from the page's own paint events, so a still page costs
+  nothing; a GIF stores only what changed between frames. WebM needs
+  `ffmpeg` on `PATH` (or `CODARA_FFMPEG`); without it, or when it cannot
+  encode, the recording is saved as a GIF and the result's `note` says so.
+
+The user has the same features in the browser pane's toolbar: the
+responsive view (phone, tablet and desktop side by side, sizes editable, one
+light/dark switch, scrolling and navigation kept in step) and the record
+button (click for a GIF, Shift-click for WebM). A recording an agent started
+shows on the same button.
 
 ## Terminals
 

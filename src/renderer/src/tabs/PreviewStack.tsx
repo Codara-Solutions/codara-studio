@@ -212,6 +212,7 @@ function PreviewStack({ tabs, activeId, dockIndex, onUrlChange, workspaceId, wor
               url={t.url}
               partition={t.partition}
               visible={visible}
+              workspaceId={workspaceId}
               onUrlChange={getUrlCallback(t.id)}
               onReady={(webContentsId) =>
                 window.spark.previewBridge.announce?.({ tabId: t.id, webContentsId })

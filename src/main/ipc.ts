@@ -477,6 +477,7 @@ import type {
 import { isPiSubscriptionProvider } from "../shared/agent-families";
 import type { AgentDeliveryRequest, AgentDeliveryResult } from "../shared/agent-delivery";
 import { agentDelivery } from "./agent-delivery";
+import { registerCaptureIpc } from "./browser/capture/ipc";
 import { registerChromeLinkIpc } from "./browser/chrome";
 import { registerServersIpc } from "./servers";
 
@@ -3999,6 +4000,7 @@ export function registerIpc(): void {
   // Areas that keep their channels next to their code.
   registerServersIpc(handle);
   registerChromeLinkIpc(handle);
+  registerCaptureIpc(handle);
 }
 
 const MEMORY_KINDS = new Set<MemoryItemKind>(["preference", "correction", "fact", "procedure", "lesson"]);

@@ -40,7 +40,15 @@ async function loadPreviewTools(stubs) {
   });
   const mod = { exports: {} };
   new Function("module", "exports", "require", out.outputFiles[0].text)(mod, mod.exports, (name) => {
-    if (name === "electron") return { ipcMain: { on() {} }, BrowserWindow: { getAllWindows: () => [] }, webContents: { fromId: () => null } };
+    if (name === "electron") {
+      const image = (buffer) => ({ getSize: () => ({ width: 1, height: 1 }), crop: () => image(buffer), resize: () => image(buffer), toPNG: () => buffer, toJPEG: () => buffer });
+      return {
+        ipcMain: { on() {} },
+        BrowserWindow: { getAllWindows: () => [] },
+        webContents: { fromId: () => null },
+        nativeImage: { createFromBuffer: image },
+      };
+    }
     return require(name);
   });
   return mod.exports;
@@ -118,11 +126,29 @@ async function loadPreviewTools(stubs) {
   assert.deepEqual(runListed.tabs, [], "a caller that may not use the user's browser does not see its tabs");
   unregister();
 
-  // A screenshot is also a file in the workspace's data folder, for agents
-  // that cannot read image content.
-  const shot = await tools.runPreviewTool("preview.screenshot", { callerPid: 7 }, host);
+  // A screenshot runs on the tab's browser target, in the caller's
+  // workspace, and is also a file in that workspace's data folder, for
+  // agents that cannot read image content.
+  const png = Buffer.from("iVBORw0KGgo=", "base64");
+  const unregisterPreview = tools.registerBrowserBackend({
+    kind: "preview",
+    async resolve(ref, params) {
+      return {
+        kind: "preview",
+        ref: "tab-1",
+        workspaceId: params.workspaceId,
+        session: { send: async () => ({}) },
+        info: async () => ({ ref: "tab-1", kind: "preview", url: "http://localhost/", title: "Fixture", viewport: { width: 1, height: 1 }, devicePixelRatio: 1 }),
+        evaluate: async () => null,
+        captureViewport: async () => png,
+        showActivity: async () => {},
+      };
+    },
+  });
+  const shot = await tools.runPreviewTool("preview.screenshot", { callerPid: 7, format: "png" }, host);
+  unregisterPreview();
   assert.ok(shot.path.startsWith(path.join(home, "workspace-data", "ws-caller", "browser", "screenshots")), shot.path);
-  assert.deepEqual(fs.readFileSync(shot.path), Buffer.from("iVBORw0KGgo=", "base64"));
+  assert.deepEqual(fs.readFileSync(shot.path), png);
   assert.equal(shot.dataUrl, "data:image/png;base64,iVBORw0KGgo=");
   fs.rmSync(home, { recursive: true, force: true });
 

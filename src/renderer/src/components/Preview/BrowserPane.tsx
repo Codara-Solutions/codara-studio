@@ -13,6 +13,8 @@ import PageDialogOverlay from "./PageDialogOverlay";
 import AddressBar, { type AddressBarHandle } from "./AddressBar";
 import InspectorOverlay, { type InspectorPick } from "./InspectorOverlay";
 import DrawOverlay from "./DrawOverlay";
+import CaptureActions from "./capture/CaptureActions";
+import ResponsiveView from "./capture/ResponsiveView";
 import { GlobeIcon } from "../icons";
 import type { SelectionPayload } from "../../routing/SelectionRoutingContext";
 import { pathToFileUrl } from "../../lib/pathToFileUrl";
@@ -110,7 +112,10 @@ export interface BrowserPaneHandle {
 }
 
 interface Props {
-  /** The browser tab this pane shows; its page dialogs open over it. */
+  /**
+   * The browser tab this pane shows. Its page dialogs open over it, and a
+   * recording started from the toolbar is named after it.
+   */
   tabId?: string;
   url: string;
   // A logged-out tab's own temporary partition; fixed for the webview's life.
@@ -120,10 +125,13 @@ interface Props {
   // Fires once the guest is dom-ready and its webContents id is known, so the
   // host can announce the tab to main (wiring console capture early).
   onReady?: (webContentsId: number) => void;
+  // So a recording started from the toolbar is saved in the workspace's data
+  // folder.
+  workspaceId?: string | null;
 }
 
 const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
-  { tabId, url, partition, visible, onUrlChange, onReady },
+  { tabId, url, partition, visible, onUrlChange, onReady, workspaceId },
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -138,6 +146,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   const [inspectorPick, setInspectorPick] = useState<InspectorPick | null>(null);
   const [drawing, setDrawing] = useState(false);
   const [drawingBusy, setDrawingBusy] = useState(false);
+  const [responsive, setResponsive] = useState(false);
   const [control, setControl] = useState<PreviewControl | null>(null);
   const cursorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const showAgentCursor = useCallback((next: PreviewControl | null) => {
@@ -701,6 +710,17 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         }}
         onToggleInspect={toggleInspect}
         onToggleDraw={toggleDraw}
+        captureTools={
+          <CaptureActions
+            url={currentUrl || url}
+            visible={visible}
+            tabId={tabId}
+            workspaceId={workspaceId}
+            responsive={responsive}
+            onToggleResponsive={() => setResponsive((on) => !on)}
+            getWebview={getLiveWebview}
+          />
+        }
       />
       {isFreshPartition(partition) ? (
         <div
@@ -831,6 +851,21 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         ) : null}
         <PreviewCursor control={control} />
         <PageDialogOverlay tabId={tabId} />
+        {responsive && visible && url ? (
+          <ResponsiveView
+            url={currentUrl || url}
+            onNavigate={(next) => {
+              const wv = getLiveWebview();
+              if (!wv?.loadURL) return;
+              try {
+                if (wv.getURL?.() !== next) wv.loadURL(next);
+              } catch {
+                /* webview not dom-ready */
+              }
+            }}
+            onClose={() => setResponsive(false)}
+          />
+        ) : null}
         <DrawOverlay
           active={drawing}
           busy={drawingBusy}

@@ -1,61 +1,69 @@
-// Screenshots. The image goes back as image content and is also saved under
-// the workspace's data folder, so an agent that cannot read image content
-// (or a shell user of `cora tool`) still has it as a file.
+// Screenshots, before/after comparisons, sizes side by side, and flow
+// recordings. Every handler works on any browser target (a Codara tab or a
+// shared Chrome tab) and in the background. Images go back as image
+// content and are also saved under the workspace's data folder, so an
+// agent that cannot read image content (or a shell user of `cora tool`)
+// still has them as files.
 
-import { nativeImage } from "electron";
-
-import { writeBrowserArtifact } from "../browser/artifacts";
-import { emulatedViewport } from "../browser/emulation";
+import { isCompareOptionError, runCompare } from "../browser/capture/compare";
+import { nativeBitmapCodec } from "../browser/capture/codec";
+import { SizesOptionError } from "../browser/capture/sizes";
+import { appRecordDeps, normalizeRecordOptions, RecordOptionError, startRecording, stopRecording } from "../browser/record/recorder";
+import { captureScreenshot, normalizeScreenshotRequest, ScreenshotOptionError, type ScreenshotResult } from "../browser/screenshot";
 import { resolveBrowserTarget } from "../browser/targets";
-import { requestPreviewOp } from "../preview-bridge";
-import type { PreviewToolTable } from "./types";
+import { PreviewToolParamsError, type PreviewToolTable } from "./types";
 
-/**
- * A tab emulating a device viewport. The renderer's capture is of the tab's
- * view, which shows that viewport cut or padded to the view's own size, so
- * its image would not match the viewport and scale it reports; the target's
- * capture renders exactly the emulated viewport.
- */
-async function emulatedScreenshot(params: Record<string, unknown>): Promise<Record<string, unknown> | null> {
-  if (typeof params.tabId === "string" && /^chrome:/i.test(params.tabId)) return null;
-  const target = await resolveBrowserTarget(params).catch(() => null);
-  if (!target || target.kind !== "preview" || !emulatedViewport(target.session)) return null;
-  const png = await target.captureViewport();
-  const info = await target.info();
-  const viewport = info.viewport ?? emulatedViewport(target.session);
-  const imageSize = nativeImage.createFromBuffer(png).getSize();
-  return {
-    dataUrl: `data:image/png;base64,${png.toString("base64")}`,
-    tabId: target.ref,
-    url: info.url,
-    title: info.title,
-    viewport,
-    imageSize,
-    scale: viewport && viewport.width > 0 && viewport.height > 0
-      ? { x: imageSize.width / viewport.width, y: imageSize.height / viewport.height }
-      : null,
-  };
-}
+/** Compact by default: any model reads a 1280 px JPEG for a fraction of a full-size PNG. */
+export const TOOL_SCREENSHOT_DEFAULTS = { format: "jpeg", quality: 70, maxWidth: 1280 } as const;
 
-async function screenshot(params: Record<string, unknown>): Promise<unknown> {
-  const result = (await emulatedScreenshot(params)) ?? (await requestPreviewOp("screenshot", { ...params }));
-  if (!result || typeof result !== "object") return result;
-  const shot = result as Record<string, unknown>;
-  const match = typeof shot.dataUrl === "string" ? /^data:image\/(png|jpeg);base64,(.+)$/.exec(shot.dataUrl) : null;
-  if (!match) return result;
+async function asParamsError<T>(run: () => Promise<T>): Promise<T> {
   try {
-    const path = await writeBrowserArtifact(
-      typeof params.workspaceId === "string" ? params.workspaceId : null,
-      "screenshots",
-      { label: typeof shot.tabId === "string" ? shot.tabId : "tab", ext: match[1] === "jpeg" ? "jpg" : "png", data: Buffer.from(match[2], "base64") },
-    );
-    return { ...shot, path };
-  } catch {
-    // The image itself still answers the call.
-    return result;
+    return await run();
+  } catch (error) {
+    if (
+      error instanceof ScreenshotOptionError ||
+      error instanceof SizesOptionError ||
+      error instanceof RecordOptionError ||
+      isCompareOptionError(error)
+    ) {
+      throw new PreviewToolParamsError((error as Error).message);
+    }
+    throw error;
   }
 }
 
+export function screenshotToolResult(shot: ScreenshotResult): Record<string, unknown> {
+  const { data, mimeType, ...rest } = shot;
+  return { ...rest, mimeType, dataUrl: `data:${mimeType};base64,${data}` };
+}
+
+async function screenshot(params: Record<string, unknown>): Promise<unknown> {
+  return asParamsError(async () => {
+    const request = normalizeScreenshotRequest(params, TOOL_SCREENSHOT_DEFAULTS);
+    const target = await resolveBrowserTarget(params);
+    return screenshotToolResult(await captureScreenshot(target, request));
+  });
+}
+
+async function compare(params: Record<string, unknown>): Promise<unknown> {
+  return asParamsError(async () => runCompare(await resolveBrowserTarget(params), params, { bitmap: nativeBitmapCodec() }));
+}
+
+async function record(params: Record<string, unknown>): Promise<unknown> {
+  return asParamsError(async () => {
+    const options = params.stop === true ? null : normalizeRecordOptions(params);
+    const target = await resolveBrowserTarget(params);
+    if (!options) return stopRecording(target);
+    const started = await startRecording(target, options, appRecordDeps(nativeBitmapCodec()));
+    return {
+      ...started,
+      next: `Drive the flow, then call codara_preview_record with stop: true${params.tabId ? ` and tabId ${JSON.stringify(target.ref)}` : ""}. It stops itself after ${options.maxSeconds} s.`,
+    };
+  });
+}
+
 export const capturePreviewTools: PreviewToolTable = {
-  "preview.screenshot": screenshot,
+  "preview.screenshot": { run: screenshot, targets: "any" },
+  "preview.compare": { run: compare, targets: "any" },
+  "preview.record": { run: record, targets: "any" },
 };
