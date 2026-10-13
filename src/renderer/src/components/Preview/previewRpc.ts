@@ -16,7 +16,6 @@ import { clickProbe, typeProbe, pressKeyProbe, waitForProbe } from "./domActions
 import { closeIsolatedTab, openIsolatedTab } from "./isolatedTabs";
 import {
   ensurePreviewTab,
-  findReusablePreviewTab,
   listPreviewTabs,
   pickPreviewTab,
   showPreviewControl,
@@ -196,15 +195,13 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
     const runId = readString(params, "runId");
     const workspaceId = readString(params, "workspaceId");
     const callerPaneId = readString(params, "callerPaneId");
-    const before = findReusablePreviewTab(runId, workspaceId, callerPaneId);
-    tab = await ensurePreviewTab(url, runId, workspaceId, callerPaneId);
-    opened = !before;
+    ({ tab, opened } = await ensurePreviewTab(url, runId, workspaceId, callerPaneId));
   }
-  // ensurePreviewTab created the tab with the target URL, so loadURL is a
-  // redundant nav in that case but cheap. For an existing tab it's the real
-  // navigation.
+  // A tab ensurePreviewTab just opened is already loading the URL. Loading
+  // it again would abort or repeat that first load, which runs the page's
+  // requests twice and records the first load's as never finished.
   showPreviewControl(tab, { action: "Navigating", runId: readString(params, "runId") });
-  tab.handle.loadURL(url);
+  if (!opened) tab.handle.loadURL(url);
   await waitDomReady(tab.handle, 15_000);
   return { url: tab.handle.getURL(), tabId: tab.id, opened };
 }

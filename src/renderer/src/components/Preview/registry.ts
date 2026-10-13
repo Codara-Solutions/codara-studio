@@ -226,14 +226,14 @@ export async function ensurePreviewTab(
   runId?: string | null,
   workspaceId?: string | null,
   callerPaneId?: string | null,
-): Promise<RegistryEntry> {
+): Promise<{ tab: RegistryEntry; opened: boolean }> {
   const { workspace, paneId } = previewScope(runId, workspaceId, callerPaneId);
   const existing = findReusablePreviewTab(runId, workspace, paneId);
-  if (existing) return existing;
+  if (existing) return { tab: existing, opened: false };
   if (!openPreviewTabFn) throw new Error("Codara is not ready to open browser tabs yet. Retry in a moment.");
   const id = await Promise.resolve(openPreviewTabFn(url, runId, workspace));
   if (paneId) agentPaneOwners.set(id, paneId);
-  return waitForRegisteredTab(id, workspace);
+  return { tab: await waitForRegisteredTab(id, workspace), opened: true };
 }
 
 // The tab whose page is the guest with this webContents id, so a link the
