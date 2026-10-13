@@ -242,8 +242,9 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     const network = await request("preview.network", { tabId });
     expect(JSON.stringify(network)).toContain("/api/save");
     expect(JSON.stringify(network)).not.toContain(SESSION);
+    // Screenshots default to a compact JPEG (docs/mcp-tools.md).
     const shot = await request("preview.screenshot", { tabId });
-    expect(shot.dataUrl).toMatch(/^data:image\/png;base64,/);
+    expect(shot.dataUrl).toMatch(/^data:image\/jpeg;base64,/);
     expect(await worker.evaluate((id) => chrome.action.getBadgeText({ tabId: id }), accountTab)).toBe("AI");
 
     // The same tools from a shell agent, through cora tool.
@@ -252,7 +253,7 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
       timeout: 30_000,
     });
     const saved = JSON.parse(stdout.trim().split("\n")[0]);
-    expect(saved).toMatchObject({ tabId, url: `${origin}/account`, mimeType: "image/png" });
+    expect(saved).toMatchObject({ tabId, url: `${origin}/account`, mimeType: "image/jpeg" });
     expect(existsSync(saved.path), stdout).toBe(true);
 
     // The same tools through the MCP server over stdio, on the tab while it
