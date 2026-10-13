@@ -179,12 +179,13 @@ repository.
   `scale` sets image pixels per CSS pixel, so `clip` plus `scale: 2` zooms
   into a region; the region is rendered at that zoom, not enlarged
   afterwards. `fullPage: true` captures the whole page (up to 16,384 CSS
-  pixels tall) laid out as on a screen that tall, `selector` (an `@ref` from
-  a snapshot or a unique CSS selector) one element, `clip` (`{x, y, width,
-  height}` in CSS pixels) one region. The result's `scale` maps image pixels
-  back to CSS pixels for the mouse tools. A Codara tab only renders the area
-  its pane gives it, so a full page is captured in pane-high slices at the
-  pane's width.
+  pixels tall) with its own viewport, so a `100vh` section stays one screen
+  tall, `selector` (an `@ref` from a snapshot or a unique CSS selector) one
+  element, `clip` (`{x, y, width, height}` in CSS pixels) one region. The
+  result's `scale` maps image pixels back to CSS pixels for the mouse tools.
+  A Codara tab only renders the area its pane gives it, so a full page is
+  scrolled through one screen at a time at the pane's width and stitched;
+  fixed and sticky elements show once, and the scroll position is put back.
 - **Before/after diff.** `codara_preview_compare` with `mode: "baseline"`
   saves a lossless capture, named by `name` or by default after the page
   and viewport (`host/path@1280x800`). After the change, `mode: "diff"` (the

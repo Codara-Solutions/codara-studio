@@ -205,6 +205,28 @@ test("capture tools: screenshot options, before/after diff, sizes and recording,
     expect(near(fullAt(300, full.viewport.height + 40), HEADER)).toBe(false);
     expect([LIGHT_BG, DARK_BG].some((bg) => near(fullAt(300, full.viewport.height + 40), bg))).toBe(true);
     expect(near(fullAt(300, 2230), FOOTER)).toBe(true);
+    // A screen-high section stays one screen tall instead of covering the
+    // page below it, and a fixed element shows once, at the top.
+    await asRun("preview.evaluate", { tabId, code: `(() => {
+      const screen = document.createElement("div");
+      screen.id = "screen-high";
+      screen.style.cssText = "position:absolute;left:340px;top:0;width:30px;height:100vh;background:rgb(224,36,94)";
+      const pin = document.createElement("div");
+      pin.id = "pinned";
+      pin.style.cssText = "position:fixed;left:390px;top:0;width:30px;height:30px;background:rgb(122,63,209)";
+      document.body.append(screen, pin);
+    })()` });
+    const pinnedFull = await asRun("preview.screenshot", { tabId, fullPage: true, format: "png", maxWidth: 400 });
+    expect(pinnedFull.region.height).toBe(full.region.height);
+    const pinnedImage = decodePng(Buffer.from(pinnedFull.dataUrl.split(",")[1], "base64"));
+    const pinnedScale = pinnedFull.imageSize.width / pinnedFull.region.width;
+    const pinnedAt = (x: number, y: number) => pixel(pinnedImage, Math.round(x * pinnedScale), Math.round(y * pinnedScale));
+    expect(near(pinnedAt(355, pinnedFull.viewport.height - 30), NARROW)).toBe(true);
+    expect(near(pinnedAt(355, pinnedFull.viewport.height + 60), NARROW)).toBe(false);
+    expect(near(pinnedAt(405, 15), FOOTER)).toBe(true);
+    expect(near(pinnedAt(405, pinnedFull.viewport.height + 15), FOOTER)).toBe(false);
+    expect((await asRun("preview.evaluate", { tabId, code: '[scrollY, document.getElementById("pinned").style.visibility]' })).value).toEqual([0, ""]);
+    await asRun("preview.evaluate", { tabId, code: 'document.getElementById("screen-high").remove(); document.getElementById("pinned").remove()' });
     const element = await asRun("preview.screenshot", { tabId, selector: "#box", format: "png" });
     expect(element.region).toMatchObject({ width: 120, height: 120 });
     expect(element.imageSize).toEqual({ width: 120, height: 120 });

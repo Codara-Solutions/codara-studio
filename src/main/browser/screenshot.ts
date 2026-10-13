@@ -15,7 +15,7 @@ import { writeBrowserArtifact } from "./artifacts";
 import { blit, createBitmap, cropBitmap, scaleBitmap } from "./capture/bitmap";
 import { encodeWebp, FILE_EXTENSIONS, MIME_TYPES, nativeBitmapCodec, type BitmapCodec } from "./capture/codec";
 import { withGuestPaint } from "./capture/paint";
-import { captureThroughSurface, surfaceBound, surfaceMetrics, viewInCapture } from "./capture/surface";
+import { captureThroughSurface, surfaceBound, surfaceMetrics, viewInCapture, waitForPaint } from "./capture/surface";
 import { locateElement } from "./locator";
 import type { BrowserTarget, BrowserViewport } from "./targets";
 
@@ -203,12 +203,39 @@ async function captureFullPage(target: BrowserTarget): Promise<{ png: Buffer; cs
   return { png: Buffer.from(shot.data, "base64"), css };
 }
 
+const REPEATING_KEY = "__codaraFullPageHidden";
+
+// Fixed and sticky elements on screen once the page has scrolled would
+// repeat in every tile; they are hidden until the capture ends.
+const HIDE_REPEATING = `(() => {
+  const hidden = [];
+  for (const el of document.querySelectorAll("body *")) {
+    const position = getComputedStyle(el).position;
+    if (position !== "fixed" && position !== "sticky") continue;
+    const box = el.getBoundingClientRect();
+    if (!box.width || !box.height || box.bottom <= 0 || box.top >= innerHeight) continue;
+    hidden.push([el, el.style.getPropertyValue("visibility"), el.style.getPropertyPriority("visibility")]);
+    el.style.setProperty("visibility", "hidden", "important");
+  }
+  window.${REPEATING_KEY} = hidden;
+})()`;
+
+const RESTORE_REPEATING = `(() => {
+  for (const [el, value, priority] of window.${REPEATING_KEY} || []) {
+    if (value) el.style.setProperty("visibility", value, priority);
+    else el.style.removeProperty("visibility");
+  }
+  delete window.${REPEATING_KEY};
+})()`;
+
 /**
- * A full page through the tab's surface: laid out at the surface's width and
- * the page's height (as a full-page capture in Chrome is, so viewport-high
- * sections and fixed elements sit where they would on a tall screen), then
- * captured one surface-high tile at a time and stitched at the output size.
- * Content wider than the surface is cut at its edge.
+ * A full page of a Codara tab: scrolled one screen at a time, each screen
+ * captured and stitched at the output size. A guest paints only its
+ * on-screen surface, and laying the page out taller instead would stretch
+ * every viewport-high section (a 100vh hero) over the content below it, so
+ * the page keeps its own viewport, as in Chrome's full-page capture. The
+ * scroll position and any hidden fixed elements are put back afterwards.
+ * Content wider than the viewport is cut at its edge; scrollbars are left out.
  */
 async function captureFullPageThroughSurface(
   target: BrowserTarget,
@@ -217,33 +244,43 @@ async function captureFullPageThroughSurface(
 ): Promise<{ png: Buffer; css: Size }> {
   const surface = await surfaceMetrics(target);
   return withGuestPaint(target.session, async () => {
+    let hiding = false;
     try {
-      const width = surface.width;
-      // Laying the page out taller grows viewport-high sections, so the
-      // height is measured again once, under the tall layout.
-      let height = Math.max(surface.height, (await contentSize(target)).height);
-      await target.session.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 0, mobile: false });
-      height = Math.max(surface.height, (await contentSize(target)).height);
+      const view = await target.evaluate<Size>(
+        "({ width: Math.floor(visualViewport ? visualViewport.width : innerWidth), height: Math.floor(visualViewport ? visualViewport.height : innerHeight) })",
+      );
+      const width = Math.max(1, Math.min(surface.width, view?.width || surface.width));
+      const step = Math.max(1, Math.min(surface.height, view?.height || surface.height));
+      const height = Math.max(step, (await contentSize(target)).height);
       const css = { width, height };
       const size = outputSize(css, request.scale, request.maxWidth);
       const k = size.width / width;
       const out = createBitmap(size.width, size.height);
-      for (let y = 0; y < height; y += surface.height) {
-        const tileHeight = Math.min(surface.height, height - y);
-        const png = await withTimeout(
-          captureThroughSurface(target, { width, height }, { x: 0, y, width, height: tileHeight }, 1),
-          20_000,
-          "The full-page capture timed out.",
-        );
-        const tile = bitmapCodec.decode(png);
-        const view = cropBitmap(tile, viewInCapture({ width, height: tileHeight }, 1, surface.devicePixelRatio, tile));
-        const top = Math.round(y * k);
-        const bottom = Math.min(size.height, Math.round((y + tileHeight) * k));
-        if (bottom > top) blit(out, scaleBitmap(view, { width: size.width, height: bottom - top }), 0, top);
+      for (let y = 0; y < height; y += step) {
+        const top = Number(await target.evaluate<number>(`(scrollTo({ left: 0, top: ${y}, behavior: "instant" }), scrollY)`)) || 0;
+        if (y > 0 && !hiding) {
+          hiding = true;
+          await target.evaluate(HIDE_REPEATING);
+        }
+        await waitForPaint(target);
+        const tile = bitmapCodec.decode(await withTimeout(target.captureViewport(), 20_000, "The full-page capture timed out."));
+        // Near the end the page cannot scroll a full screen further, so the
+        // rows wanted start partway down the screen.
+        const offset = Math.max(0, y - top);
+        const rows = Math.min(step - offset, height - y);
+        if (rows <= 0) break;
+        const px = tile.width / surface.width;
+        const part = cropBitmap(tile, { x: 0, y: offset * px, width: width * px, height: rows * px });
+        const from = Math.round(y * k);
+        const to = Math.min(size.height, Math.round((y + rows) * k));
+        if (to > from) blit(out, scaleBitmap(part, { width: size.width, height: to - from }), 0, from);
       }
       return { png: await bitmapCodec.encode(out, "png", 100), css };
     } finally {
-      await target.session.send("Emulation.clearDeviceMetricsOverride").catch(() => {});
+      if (hiding) await target.evaluate(RESTORE_REPEATING).catch(() => {});
+      await target
+        .evaluate(`scrollTo({ left: ${Number(surface.scrollX) || 0}, top: ${Number(surface.scrollY) || 0}, behavior: "instant" })`)
+        .catch(() => {});
     }
   });
 }

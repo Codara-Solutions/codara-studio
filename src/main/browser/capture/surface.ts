@@ -3,9 +3,9 @@
 // protocol capture beyond that (captureBeyondViewport, or an emulated
 // viewport larger than the pane) comes back as the surface repeated. The
 // protocol's viewport override instead moves and scales what the surface
-// shows over the laid-out page, so a full page is captured as tiles of the
-// surface, a larger emulated size scaled down to fit it, and a zoomed region
-// rendered at its zoom rather than enlarged afterwards.
+// shows over the laid-out page, so a larger emulated size is scaled down to
+// fit it and a zoomed region is rendered at its zoom rather than enlarged
+// afterwards. A full page is scrolled through instead (screenshot.ts).
 
 import { isRecording } from "../record/recorder";
 import type { Rect, Size } from "../screenshot";
@@ -106,11 +106,15 @@ export async function captureThroughSurface(
   // A page laid out for one mobile size keeps its page zoom when moved to
   // another, which would show the previous size's layout magnified.
   await target.session.send("Emulation.resetPageScaleFactor").catch(() => {});
-  if (!(await settle(target))) {
-    await pumpFrame(target).catch(() => {});
-    await settle(target);
-  }
+  await waitForPaint(target);
   return target.captureViewport();
+}
+
+/** Wait until the page has painted its last change, making it paint when it does not on its own. */
+export async function waitForPaint(target: Pick<BrowserTarget, "session" | "evaluate">): Promise<void> {
+  if (await settle(target)) return;
+  await pumpFrame(target).catch(() => {});
+  await settle(target);
 }
 
 /** The image-pixel rect a view occupies in a surface capture, clamped to the image. */

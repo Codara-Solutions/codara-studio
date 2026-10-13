@@ -157,6 +157,15 @@ async function throughSurface(lib, target, codecs) {
     deep.id = "deep";
     deep.style.cssText = "position:absolute;left:0;top:1500px;width:200px;height:100px;background:rgb(128,0,128)";
     document.body.appendChild(deep);
+    const screenHigh = document.createElement("div");
+    screenHigh.id = "screen-high";
+    screenHigh.style.cssText = "position:absolute;left:300px;top:0;width:60px;height:100vh;background:rgb(255,200,0)";
+    document.body.appendChild(screenHigh);
+    const pinned = document.createElement("div");
+    pinned.id = "pinned";
+    pinned.style.cssText = "position:fixed;left:500px;top:0;width:60px;height:60px;background:rgb(0,200,200)";
+    document.body.appendChild(pinned);
+    scrollTo(0, 30);
   })()`);
   const full = await lib.captureScreenshot(surfaceTarget, lib.normalizeScreenshotRequest({ fullPage: true, scale: 0.25, save: false }), { codec: codecs.image, bitmap: codecs.bitmap });
   assert.equal(full.imageSize.height, 600, "the stitched page covers the whole document");
@@ -165,6 +174,18 @@ async function throughSurface(lib, target, codecs) {
   assert.ok(near(pixel(page, Math.round(35 * 0.25), Math.round(225 * 0.25)), [0, 0, 0]), "the first tile");
   const seam = Math.round((viewport.h + 10) * 0.25);
   assert.ok(near(pixel(page, 100, seam), [250, 240, 230]), `the second tile starts below the first, not over it: ${pixel(page, 100, seam)}`);
+  // A 100vh element stays one screen tall, as in Chrome's own full-page
+  // capture, and a fixed element shows once, not in every screen.
+  assert.ok(near(pixel(page, Math.round(330 * 0.25), Math.round((viewport.h - 20) * 0.25)), [255, 200, 0]), "the screen-high element fills the first screen");
+  assert.ok(near(pixel(page, Math.round(330 * 0.25), Math.round((viewport.h + 60) * 0.25)), [250, 240, 230]), `and ends there: ${pixel(page, Math.round(330 * 0.25), Math.round((viewport.h + 60) * 0.25))}`);
+  assert.ok(near(pixel(page, Math.round(530 * 0.25), Math.round(30 * 0.25)), [0, 200, 200]), "the fixed element is at the top");
+  assert.ok(near(pixel(page, Math.round(530 * 0.25), Math.round((viewport.h + 30) * 0.25)), [250, 240, 230]), "and not repeated below");
+  assert.deepEqual(
+    await target.evaluate("[scrollY, document.getElementById('pinned').style.visibility]"),
+    [30, ""],
+    "the scroll position and the fixed element are put back",
+  );
+  await target.evaluate("document.getElementById('screen-high').remove(); document.getElementById('pinned').remove()");
 
   await target.evaluate("scrollTo(0, 50)");
   const zoomed = await lib.captureScreenshot(surfaceTarget, lib.normalizeScreenshotRequest({ clip: { x: 90, y: 40, width: 40, height: 20 }, scale: 3, save: false }), { codec: codecs.image, bitmap: codecs.bitmap });
