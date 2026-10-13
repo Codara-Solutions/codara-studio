@@ -84,6 +84,7 @@ import {
 import CustomSelect from "./settings/CustomSelect";
 import SettingsNav from "./settings/SettingsNav";
 import ThemePicker from "./settings/ThemePicker";
+import { LaunchArgsSection } from "./settings/launch-args/LaunchArgsSection";
 import {
   Disclosure,
   EmptyState,
@@ -2691,6 +2692,8 @@ function AgentsSettings({ onClose }: { onClose: () => void }) {
   return (
     <>
       <AccountsSettings />
+
+      <LaunchArgsSection />
 
       <SettingsSection title="Tools">
         <SettingRow

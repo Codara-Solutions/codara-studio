@@ -262,3 +262,22 @@ export function inheritPreviewTabOwner(tabId: string, sourceTabId: string): void
   const paneId = agentPaneOwners.get(sourceTabId);
   if (paneId) agentPaneOwners.set(tabId, paneId);
 }
+
+/** The workspace's browser tabs with who drives them: a run, a terminal agent's pane, or nobody. */
+export function previewTabOwners(workspaceId: string | null): Array<{
+  id: string;
+  title: string;
+  url: string;
+  runId: string | null;
+  ownerPaneId: string | null;
+}> {
+  return [...entries.values()]
+    .filter((entry) => entry.workspaceId === workspaceId)
+    .map((entry) => ({
+      id: entry.id,
+      title: entry.handle.getTitle() || entry.url,
+      url: entry.handle.getURL() || entry.url,
+      runId: entry.runId,
+      ownerPaneId: agentPaneOwners.get(entry.id) ?? null,
+    }));
+}

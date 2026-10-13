@@ -267,6 +267,7 @@ function stubPlugin() {
       export function agentArgsDir() { return "/codara/integrations"; }
       export function claudeLaunchArgs() { return []; }
       export function codexLaunchArgs() { return []; }
+      export function plainAgentLaunchArgs() { return []; }
     `,
     "./orchestration/claude-cli-profile-environment": `
       export function buildClaudeCliProfileEnvironment(baseEnv, configDir) {

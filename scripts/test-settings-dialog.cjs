@@ -86,7 +86,8 @@ check("every search result points at something the page renders", () => {
   assert.ok(entries.length >= 30, "the index must cover the settings");
   const behavior = read(...components, "capabilities", "BehaviorSection.tsx");
   const chromeLink = read(...components, "chrome", "ChromeLinkSection.tsx");
-  const rendered = [dialog, remote, behavior, chromeLink].join("\n");
+  const launchArgs = read(...components, "settings", "launch-args", "LaunchArgsSection.tsx");
+  const rendered = [dialog, remote, behavior, chromeLink, launchArgs].join("\n");
   const cards = read(...components, "AccountCards.tsx");
   const families = read("src", "shared", "agent-families.ts");
   for (const [, tab, title] of entries) {
@@ -99,8 +100,10 @@ check("every search result points at something the page renders", () => {
       new RegExp(`vendorLabel: "${title}"`).test(families);
     // Capability Center pages are named by its tab labels.
     const isCapabilityPage = tab === "capabilities" && new RegExp(`: "${title}",`).test(index);
+    // Startup flag rows are drawn from RUNTIME_ROWS.
+    const isLaunchRow = tab === "agents" && new RegExp(`runtime: "[a-z]+", title: "${title}"`).test(launchArgs);
     assert.ok(
-      asTitle.test(rendered) || isTabTitle || isProvider || isCapabilityPage,
+      asTitle.test(rendered) || isTabTitle || isProvider || isCapabilityPage || isLaunchRow,
       `${tab} › ${title} is not rendered`,
     );
   }

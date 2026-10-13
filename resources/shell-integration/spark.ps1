@@ -38,9 +38,17 @@ function Global:__Spark-AgentExec {
         @('auth', 'mcp', 'config', 'doctor', 'update', 'upgrade', 'install', 'setup-token', 'plugin', 'plugins', 'migrate-installer',
           'agents', 'attach', 'logs', 'rm', 'stop', 'kill', 'respawn', 'purge', 'auto-mode', 'import', 'gateway', 'ultrareview',
           '-v', '--version', '-h', '--help')
-    } else {
+    } elseif ($cli -eq 'codex') {
         @('login', 'logout', 'mcp', 'completion', 'update', 'doctor', 'sandbox', 'debug', 'apply', 'plugin', 'app-server', 'remote-control', 'agents', '--version', '-V', '--help', '-h')
+    } elseif ($cli -eq 'grok') {
+        @('agent', 'clone', 'completions', 'cursor-worker', 'dashboard', 'doctor', 'du', 'disk-usage', 'export', 'help', 'inspect', 'leader',
+          'login', 'logout', 'mcp', 'memory', 'models', 'plugin', 'sessions', 'setup', 'trace', 'update', 'usage', 'version', 'v', 'worktree', 'wrap',
+          '-h', '--help', '-v', '-V', '--version')
+    } else {
+        @('-h', '--help', '-v', '--version')
     }
+    # Pi's subcommands are not listed, so any first word that is not a flag runs it untouched.
+    if ($cli -eq 'pi' -and $first -ne '' -and -not $first.StartsWith('-')) { $passThrough = @($first) }
     $extra = @()
     $file = if ($env:SPARK_AGENT_ARGS_DIR) { Join-Path (Join-Path $env:SPARK_AGENT_ARGS_DIR $cli) 'args.txt' } else { $null }
     if ($file -and ($passThrough -cnotcontains $first) -and [System.IO.File]::Exists($file)) {
@@ -74,6 +82,13 @@ if ($env:SPARK_AGENT_ARGS_DIR) {
     }
     if (-not (Get-Command -Name codex -CommandType Function, Alias -ErrorAction SilentlyContinue)) {
         function Global:codex { __Spark-AgentExec 'codex' $args }
+    }
+    # grok and pi get only the flags set in Settings > Accounts > Startup flags.
+    if (-not (Get-Command -Name grok -CommandType Function, Alias -ErrorAction SilentlyContinue)) {
+        function Global:grok { __Spark-AgentExec 'grok' $args }
+    }
+    if (-not (Get-Command -Name pi -CommandType Function, Alias -ErrorAction SilentlyContinue)) {
+        function Global:pi { __Spark-AgentExec 'pi' $args }
     }
 }
 

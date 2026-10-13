@@ -37,6 +37,7 @@ import {
   quarantineLateAgentTerminal,
   registerAgentTerminal,
 } from "./agent-terminal-lifecycle";
+import { serversService } from "./servers/service";
 import { loadPreferences, setPreference } from "./preferences-store";
 import { loadSettings, loadState, saveState, updateState } from "./storage";
 import { setAllowedRoots } from "./fs-sandbox";
@@ -1432,6 +1433,20 @@ async function handleTerminalCreate(
 // Deliver text to a terminal pane's PTY. paneId is the pty session id, so this
 // writes straight to node-pty in main (no renderer round-trip) via the same
 // bracketed-paste inject path user input, drag-drop, and slash commands use.
+/**
+ * A dev server Codara runs for a workspace (src/main/servers/keeper.ts)
+ * belongs to no run, and any agent may already stop or restart it through
+ * terminal.servers, so any of them may also answer its prompts. Imported
+ * pull-request runs never reach terminal.write at all.
+ */
+function isKeptServerSession(paneId: string): boolean {
+  try {
+    return serversService().keeper().serverOfPane(paneId)?.owned === true;
+  } catch {
+    return false;
+  }
+}
+
 async function handleTerminalWrite(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -1448,7 +1463,7 @@ async function handleTerminalWrite(
   // panes, so their paneIds are discoverable. The bridge stamps SPARK_RUN_ID
   // onto writes; require the same run that created this terminal so one Cora
   // run cannot type into another run's agent-owned shell.
-  if (!agentTerminals.isActiveOwnedBy(paneId, runId)) {
+  if (!agentTerminals.isActiveOwnedBy(paneId, runId) && !isKeptServerSession(paneId)) {
     return errorResponse(
       id,
       ERR_INVALID_PARAMS,

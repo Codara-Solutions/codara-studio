@@ -1730,7 +1730,12 @@ function buildInstructions() {
   }
   if (listed.has("codara_terminal_run")) {
     parts.push(
-      "Terminals: codara_terminal_run runs a command and returns its exit code and output. Start servers and watchers with codara_terminal_create, then poll codara_terminal_read with since=<cursor> to get only new output, or mode=\"screen\" for full-screen programs. codara_terminal_list shows the workspace's panes; you can read any of them but only write to terminals you created.",
+      "Terminals: codara_terminal_run runs a command and returns its exit code and output. Start watchers with codara_terminal_create, then poll codara_terminal_read with since=<cursor> to get only new output, or mode=\"screen\" for full-screen programs. codara_terminal_list shows the workspace's panes; you can read any of them but only write to terminals you created.",
+    );
+  }
+  if (listed.has("codara_terminal_servers")) {
+    parts.push(
+      "Dev servers: list the workspace's saved ones with codara_terminal_servers and start them by id, or start a new one there with its command. Codara keeps them running when you exit or restart, and never starts a second copy. A server started in your own shell ends with your session.",
     );
   }
   if (listed.has("codara_whiteboard_get") || listed.has("codara_board_get")) {
@@ -1807,7 +1812,7 @@ function isTransportTimeout(err) {
 }
 
 // Browser and terminal routing belongs to the launching process, not tool JSON.
-const CALLER_LOCATED_RPCS = new Set(["terminal.create", "terminal.run", "terminal.list", "agent.notify"]);
+const CALLER_LOCATED_RPCS = new Set(["terminal.create", "terminal.run", "terminal.list", "terminal.servers", "agent.notify"]);
 function injectRunIdForStudioOwnership(rpc, args) {
   if (
     !rpc.startsWith("preview.") &&
@@ -2228,6 +2233,20 @@ async function handleLine(line) {
   }
 }
 
+// Tells Codara this pane's agent has its tools, for the status view, once
+// the client is ready. Nothing waits on it and a closed Codara is no error.
+let ANNOUNCED = false;
+function announceSession() {
+  if (ANNOUNCED || IS_UNTRUSTED_PULL_REQUEST) return;
+  ANNOUNCED = true;
+  const params = { client: CLIENT_NAME || "agent", callerPid: process.pid };
+  const envPaneId = (process.env.SPARK_AGENT_PANE_ID || process.env.SPARK_PANE_ID || "").trim();
+  if (envPaneId) params.callerPaneId = envPaneId;
+  const envRunId = (process.env.SPARK_RUN_ID || "").trim();
+  if (envRunId) params.runId = envRunId;
+  postJsonRpc("status.hello", params, 5_000).catch(() => undefined);
+}
+
 // Newest first. The 2025-06-18 and 2025-03-26 revisions add tool annotations
 // and progress messages; 2024-11-05 clients ignore both.
 const SUPPORTED_PROTOCOL_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -2249,6 +2268,7 @@ async function dispatch(method, params, ctx) {
     }
     case "notifications/initialized":
     case "initialized":
+      announceSession();
       return null;
     case "tools/list":
       return { tools: TOOLS };

@@ -188,7 +188,11 @@ async function loadPreviewTools(stubs) {
 
   // A handler that runs commands marks itself trustedRunsOnly, and the
   // socket's imported pull-request gate refuses it without an edit there.
-  assert.equal(tools.previewToolMethods().some((method) => tools.previewToolRefusesUntrustedRuns(method)), false);
+  assert.deepEqual(
+    tools.previewToolMethods().filter((method) => tools.previewToolRefusesUntrustedRuns(method)),
+    ["terminal.servers"],
+    "only the dev-server tool starts commands",
+  );
   const flagged = await loadPreviewTools({
     servers: `module.exports = { serverTools: { "servers.start": { run: async () => ({}), scope: "none", trustedRunsOnly: true } } };`,
   });

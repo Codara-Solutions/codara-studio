@@ -8,6 +8,7 @@ import { browserBackend, resolveBrowserTarget, type BrowserTarget } from "../bro
 import { normalizeWaitRequest, waitForPage, WaitRequestError } from "../browser/wait";
 import { requestPreviewOp, type PreviewOpName } from "../preview-bridge";
 import { waitForLoopbackPreviewServer } from "../preview-navigation";
+import { savedServerHint } from "../servers/navigate-hint";
 import { PreviewToolParamsError, type PreviewToolHandler, type PreviewToolHost, type PreviewToolTable } from "./types";
 
 export function rendererOp(op: PreviewOpName): PreviewToolHandler {
@@ -33,7 +34,8 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
     if (!reachable) {
       throw new Error(
         `Preview server is not accepting connections at ${params.url}. ` +
-        "Start the server (or keep it running) before navigating the Electron preview.",
+        "Start the server (or keep it running) before navigating the Electron preview." +
+        (await savedServerHint(params.workspaceId, params.url)),
       );
     }
   }

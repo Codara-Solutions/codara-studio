@@ -15,7 +15,9 @@
 //     `--mcp-config=`,
 //   - a function the user defined in their rc file is never replaced, and an
 //     alias that runs the CLI itself still goes through the wrapper,
-//   - without SPARK_AGENT_ARGS_DIR, or with no args file, the CLI runs as is.
+//   - without SPARK_AGENT_ARGS_DIR, or with no args file, the CLI runs as is,
+//   - `grok` and `pi` get the Startup flags from their own args file, and
+//     their subcommands, help and version pass through.
 //
 //   node scripts/test-shell-integration-agent-wrappers.cjs
 
@@ -40,16 +42,24 @@ const CODEX_MCP = 'mcp_servers.codara-studio={command="/opt/a b/node",args=["/x/
 const CODEX_NOTIFY = 'notify=["python3","-c","print(1)","/s/notify.py","--"]';
 const SEP = "\u001f";
 
-for (const dir of [HOME, USER_HOME, BIN, EMPTY_ARGS_DIR, path.join(ARGS_DIR, "claude"), path.join(ARGS_DIR, "codex")]) {
+for (const dir of [
+  HOME,
+  USER_HOME,
+  BIN,
+  EMPTY_ARGS_DIR,
+  ...["claude", "codex", "grok", "pi"].map((cli) => path.join(ARGS_DIR, cli)),
+]) {
   fs.mkdirSync(dir, { recursive: true });
 }
 const MCP_ARG = `--mcp-config=${MCP}`;
 fs.writeFileSync(path.join(ARGS_DIR, "claude", "args.txt"), ["--settings", SETTINGS, MCP_ARG, ""].join("\n"));
 fs.writeFileSync(path.join(ARGS_DIR, "codex", "args.txt"), ["-c", CODEX_MCP, "-c", CODEX_NOTIFY, ""].join("\n"));
+fs.writeFileSync(path.join(ARGS_DIR, "grok", "args.txt"), ["--disable-web-search", ""].join("\n"));
+fs.writeFileSync(path.join(ARGS_DIR, "pi", "args.txt"), ["--thinking", "high", ""].join("\n"));
 
 // The fakes print @@<name><US>arg<US>arg...@@ on one line; the unit separator
 // never appears in a test argument or in an echoed command line.
-for (const name of ["claude", "codex"]) {
+for (const name of ["claude", "codex", "grok", "pi"]) {
   const file = path.join(BIN, name);
   fs.writeFileSync(
     file,
@@ -91,7 +101,7 @@ function pass(name) {
 
 function parseCalls(output) {
   const calls = [];
-  for (const match of output.matchAll(/@@(claude|codex|userfn)((?:\u001f[^@\n]*)*)@@/g)) {
+  for (const match of output.matchAll(/@@(claude|codex|grok|pi|userfn)((?:\u001f[^@\n]*)*)@@/g)) {
     calls.push([match[1], ...(match[2] ? match[2].split(SEP).slice(1) : [])]);
   }
   return calls;
@@ -162,6 +172,19 @@ const PLAIN = [
   ["claude", "agents"],
   ["claude", "fix the failing test"],
 ];
+
+const PLAIN_COMMANDS = ["grok 'fix the bug'", "grok login", "grok --help", "pi --model m", "pi install pkg", "pi"];
+
+const PLAIN_EXPECTED = [
+  ["grok", "--disable-web-search", "fix the bug"],
+  ["grok", "login"],
+  ["grok", "--help"],
+  ["pi", "--thinking", "high", "--model", "m"],
+  ["pi", "install", "pkg"],
+  ["pi", "--thinking", "high"],
+];
+
+const PLAIN_AS_IS = [["grok", "fix the bug"], ["grok", "login"], ["grok", "--help"], ["pi", "--model", "m"], ["pi", "install", "pkg"], ["pi"]];
 
 const SHELLS = [];
 if (fs.existsSync("/bin/bash")) {
@@ -243,6 +266,12 @@ async function shellScenarios(shell) {
     `${shell.label}: alias of claude\n${output}`,
   );
   pass(`${shell.label}: an alias that runs claude itself still gets Codara's flags`);
+
+  output = await runShell(shell.exe, shell.args, baseEnv({ ...shell.env, SPARK_AGENT_ARGS_DIR: ARGS_DIR }), PLAIN_COMMANDS.join("\n"));
+  assert.deepEqual(parseCalls(output), PLAIN_EXPECTED, `${shell.label}: grok and pi\n${output}`);
+  output = await runShell(shell.exe, shell.args, baseEnv({ ...shell.env }), PLAIN_COMMANDS.join("\n"));
+  assert.deepEqual(parseCalls(output), PLAIN_AS_IS, `${shell.label}: grok and pi without args dir\n${output}`);
+  pass(`${shell.label}: grok and pi get their Startup flags, subcommands pass through`);
 }
 
 function pwshScenarios() {
@@ -285,6 +314,21 @@ function pwshScenarios() {
   output = run({ SPARK_AGENT_ARGS_DIR: ARGS_DIR }, "function Global:claude { Write-Output '@@userfn@@' }; ");
   assert.deepEqual(parseCalls(output)[0], ["userfn"], `pwsh: user function\n${output}`);
   pass("pwsh: a user's own claude function is never replaced");
+
+  const plain = (env) => {
+    const result = spawnSync("pwsh", ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", `. ${quoted}; ${PLAIN_COMMANDS.join("; ")}`], {
+      cwd: HOME,
+      env: baseEnv(env),
+      encoding: "utf8",
+      timeout: 60_000,
+    });
+    return `${result.stdout}${result.stderr}`;
+  };
+  output = plain({ SPARK_AGENT_ARGS_DIR: ARGS_DIR });
+  assert.deepEqual(parseCalls(output), PLAIN_EXPECTED, `pwsh: grok and pi\n${output}`);
+  output = plain({});
+  assert.deepEqual(parseCalls(output), PLAIN_AS_IS, `pwsh: grok and pi without args dir\n${output}`);
+  pass("pwsh: grok and pi get their Startup flags, subcommands pass through");
 }
 
 function sourcePins() {

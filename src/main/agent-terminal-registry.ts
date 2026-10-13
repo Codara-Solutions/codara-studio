@@ -55,6 +55,14 @@ interface ActiveAgentTerminal {
   tabId: string;
   runId: string | null;
   retention: AgentTerminalRetention;
+  /**
+   * A dev server was found running here (src/main/servers/), so no run's
+   * cleanup closes the pane any more. It stays writable by the run that made
+   * it and becomes writable by agents without a run (a restarted terminal
+   * agent included), never by another run.
+   */
+  workspaceOwned?: boolean;
+  adoptedFromRunId?: string | null;
   closePromise?: Promise<AgentTerminalCloseResult>;
 }
 
@@ -88,7 +96,25 @@ export class AgentTerminalRegistry {
   }
 
   isActiveOwnedBy(paneId: string, runId: string | null): boolean {
-    return this.active.get(paneId)?.runId === runId;
+    const terminal = this.active.get(paneId);
+    if (!terminal) return false;
+    return terminal.runId === runId || (terminal.workspaceOwned === true && terminal.adoptedFromRunId === runId);
+  }
+
+  /** True while the pane is registered as created through terminal.create. */
+  has(paneId: string): boolean {
+    return this.active.has(paneId) || this.exited.has(paneId);
+  }
+
+  /** Hands a pane from its run to its workspace (see workspaceOwned). */
+  transferToWorkspace(paneId: string): boolean {
+    const terminal = this.active.get(paneId) ?? this.exited.get(paneId);
+    if (!terminal) return false;
+    if (!terminal.workspaceOwned) terminal.adoptedFromRunId = terminal.runId;
+    terminal.runId = null;
+    terminal.retention = "service";
+    terminal.workspaceOwned = true;
+    return true;
   }
 
   /**
@@ -160,7 +186,9 @@ export class AgentTerminalRegistry {
       return { paneId: input.paneId, alreadyClosed: true };
     }
 
-    this.assertSameOwner(registration.runId, input.runId);
+    if (!registration.workspaceOwned || registration.adoptedFromRunId !== input.runId) {
+      this.assertSameOwner(registration.runId, input.runId);
+    }
     if (registration.closePromise) return registration.closePromise;
 
     const closePromise = (async (): Promise<AgentTerminalCloseResult> => {

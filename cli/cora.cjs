@@ -83,6 +83,9 @@ ${c.bold("TOOLS")}  the codara-studio tools, for agents without MCP
   inbox [--peek --limit N]     what the user picked or commented on for you
   inspect <@ref|selector>      describe an element to edit it: box model, styles,
           [--x N --y N --tabId ID]  CSS rules, source file:line, image
+  server list|start|stop|restart|logs|save|forget [id] [--command C --port N]
+                               this workspace's dev servers, kept running by
+                               Codara apart from any agent (\`cora server help\`)
 
 ${c.bold("FLAGS")}  --json (raw output)   --home DIR (Codara home, default ~/.codarastudio)
 
@@ -201,6 +204,10 @@ async function main() {
     case "tools":
       // Tool arguments are the tool's own flags, so they skip parseArgs.
       return require("./commands/tool.cjs").tool(rest);
+
+    case "server":
+    case "servers":
+      return require("./commands/servers.cjs").servers(rest);
 
     case "rpc": {
       const { rpcRaw } = require("./lib/rpc.cjs");

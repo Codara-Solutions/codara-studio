@@ -222,6 +222,8 @@ its first send (`run-store.ts`).
 | `test-terminal-redraw`, `test-terminal-scrollback`, `test-terminal-viewport`, `test-terminal-wake-recovery`, `test-terminal-workspace-memory` | Terminal rendering in the renderer: redraw, scrollback, viewport, recovery after sleep, memory limits. |
 | `test-session-registry`, `test-session-restore`, `test-resume-matrix`, `test-resume-policy`, `test-codex-session-tracker`, `test-pi-session-tracker`, `test-grok-sessions`, `test-manual-agent-startup`, `test-pane-format` | Finding agent sessions and resuming them after a restart. |
 | `test-clipboard-files` | Pasting files into a terminal on macOS. |
+| `test-servers` | Dev servers, the status view and launch arguments (`src/main/servers/`): the keeper with real processes and fixture servers on free ports (never two copies, port conflicts named, env names without values, logs by cursor and to a file, stop, restart, exit codes, auto-start after a restart), the saved server named when a preview navigates to its down port, learning servers from pane output, adopted agent terminals, tool hellos, the per-runtime startup flags and `--chrome`, and `cora server`. |
+| `test-shell-integration-agent-wrappers` | The `claude`, `codex`, `grok` and `pi` functions bash, zsh and PowerShell define in a pane, which add Codara's per-launch flags and the Startup flags from Settings. |
 
 ### Claude hooks, the MCP server and the agent socket
 
