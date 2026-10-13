@@ -160,6 +160,16 @@ test("codara_preview_inspect describes an element through the socket, MCP and co
     const atPoint = await request("preview.inspect", { tabId, x: inspected.element.box.x + 4, y: inspected.element.box.y + 4 });
     expect(atPoint.element.selector).toBe("#cta");
 
+    // Background and hidden: another tab on screen, then the window hidden,
+    // for the socket, the stdio MCP server and cora alike.
+    await fixture.page.getByRole("tab", { name: /terminals/i }).first().dispatchEvent("click");
+    await fixture.app.evaluate(({ BrowserWindow }) => { for (const window of BrowserWindow.getAllWindows()) window.hide(); });
+    const hidden = await request("preview.inspect", { tabId, ref: "#title" });
+    expect(hidden.tabId).toBe(tabId);
+    expect(hidden.element.tag).toBe("h1");
+    expect(hidden.dataUrl).toMatch(/^data:image\/jpeg;base64,/);
+    expect(await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some((window) => window.isVisible()))).toBe(false);
+
     // The stdio MCP server an agent CLI runs: image content plus the text,
     // which names the tab and the file.
     const mcp = spawn(process.execPath, [MCP_SERVER], { env: childEnv(home), stdio: ["pipe", "pipe", "pipe"] });
@@ -197,6 +207,7 @@ test("codara_preview_inspect describes an element through the socket, MCP and co
       expect(text).toContain(`"tabId":"${tabId}"`);
       expect(text).toContain("src/Hero.tsx");
       expect(text).toContain(".jpg");
+      expect(await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some((window) => window.isVisible()))).toBe(false);
     } finally {
       mcp.kill();
     }
@@ -205,14 +216,6 @@ test("codara_preview_inspect describes an element through the socket, MCP and co
     const cliResult = JSON.parse(cli.stdout);
     expect(cliResult.content.some((block: { type: string; text?: string }) => block.type === "text" && block.text!.includes("src/Hero.tsx"))).toBe(true);
 
-    // Background and hidden: another tab on screen, then the window hidden.
-    await fixture.page.getByRole("tab", { name: /terminals/i }).first().dispatchEvent("click");
-    await fixture.app.evaluate(({ BrowserWindow }) => { for (const window of BrowserWindow.getAllWindows()) window.hide(); });
-    const hidden = await request("preview.inspect", { tabId, ref: "#title" });
-    expect(hidden.tabId).toBe(tabId);
-    expect(hidden.element.tag).toBe("h1");
-    expect(hidden.dataUrl).toMatch(/^data:image\/jpeg;base64,/);
-    expect(await fixture.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows().some((window) => window.isVisible()))).toBe(false);
   } finally {
     await fixture.close();
   }
@@ -248,6 +251,15 @@ test("a pick from the browser tab is queued in the inbox and pasted into a termi
     await expect(page.getByTestId("point-notice")).toContainText("Queued in Agent inbox");
     await expect(composer).toHaveCount(0);
 
+    // An agent without MCP sees the same item from a shell in a pane, and a
+    // peek leaves it.
+    const { panes } = await request("terminal.list", {});
+    const pane = panes.find((entry: { title?: string }) => /terminals/i.test(entry.title ?? "")) ?? panes[0];
+    const peeked = await promisify(execFile)(process.execPath, [CORA, "inbox", "--peek", "--json", "--home", fixture.home], {
+      env: { ...childEnv(fixture.home), SPARK_PANE_ID: pane.paneId },
+    });
+    expect(peeked.stdout).toContain("Make the button blue");
+
     const { items } = await request("preview.inbox", { workspaceId: "ws-point" });
     expect(items).toHaveLength(1);
     const [item] = items;
@@ -282,8 +294,6 @@ test("a pick from the browser tab is queued in the inbox and pasted into a termi
     await chooseDestination(page, /Terminal · terminals/);
     await composer.getByRole("button", { name: "Paste", exact: true }).click();
     await expect(page.getByTestId("point-notice")).toContainText("Pasted into Terminal · terminals");
-    const { panes } = await request("terminal.list", {});
-    const pane = panes.find((entry: { title?: string }) => /terminals/i.test(entry.title ?? "")) ?? panes[0];
     // The line editor redraws a multi-line paste, so read the rendered screen.
     const screen = async () => {
       const read = await request("terminal.read", { paneId: pane.paneId, mode: "screen" });
