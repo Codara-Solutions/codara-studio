@@ -13,7 +13,7 @@ import type {
   ShellInfo,
 } from "@shared/types";
 import { isRemotePath, parseRemotePath } from "@shared/remote";
-import { bracketedPaste } from "@shared/terminal-text";
+import { bracketedPaste } from "../shared/terminal-text";
 import {
   restoreUserZdotdir,
   sanitizeAppImageChildEnv,
