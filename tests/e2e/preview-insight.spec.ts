@@ -162,6 +162,20 @@ test("audits and performance tools work on a background tab with the window hidd
     expect(leased.held).toBeGreaterThan(0);
     expect(leased.hits).toEqual([]);
     expect(leased.focusable).toEqual([]);
+    // The guest's own frame, in the webview's shadow root, is out of the
+    // Tab order too: Tab goes round the visible controls and never into it.
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    const tabbed: string[] = [];
+    for (let i = 0; i < 40; i += 1) {
+      await page.keyboard.press("Tab");
+      tabbed.push(await page.evaluate(() => {
+        const element = document.activeElement as HTMLElement | null;
+        if (!element || element === document.body) return "body";
+        return `${element.closest("[data-preview-capture-paint]") ? "leased " : ""}${element.tagName}.${element.className}`;
+      }));
+    }
+    expect(tabbed.filter((where) => where.startsWith("leased"))).toEqual([]);
+    expect(new Set(tabbed).size, tabbed.join(",")).toBeGreaterThan(5);
     await request("preview.mouse", { tabId, selector: "#slow" });
     const stopped = await request("preview.performance", { tabId, action: "stop" }, 60_000);
     expect(stopped.trace.longTasks.count).toBeGreaterThanOrEqual(1);

@@ -1,6 +1,30 @@
 import "./capturePaint.css";
 
 const leases = new WeakMap<HTMLElement, number>();
+// Tab order the frames inside a leased guest had before the lease.
+const untabbed = new WeakMap<HTMLElement, Array<[Element, string | null]>>();
+
+/**
+ * The webview's own frame sits in its shadow root, out of reach of the CSS
+ * that hides the rest, and stays in the Tab order: a revealed but invisible
+ * guest would take the user's focus and typing. A negative tabindex on the
+ * frame skips the guest's content; agents' input goes to the guest directly
+ * and is unaffected.
+ */
+function keepOutOfTabOrder(element: HTMLElement): void {
+  const frames = Array.from(element.shadowRoot?.querySelectorAll("iframe") ?? []);
+  if (!frames.length) return;
+  untabbed.set(element, frames.map((frame) => [frame, frame.getAttribute("tabindex")]));
+  for (const frame of frames) frame.setAttribute("tabindex", "-1");
+}
+
+function restoreTabOrder(element: HTMLElement): void {
+  for (const [frame, tabindex] of untabbed.get(element) ?? []) {
+    if (tabindex === null) frame.removeAttribute("tabindex");
+    else frame.setAttribute("tabindex", tabindex);
+  }
+  untabbed.delete(element);
+}
 
 /**
  * Let a background guest render until the returned release runs. Chromium
@@ -17,6 +41,7 @@ export function holdPreviewCapturePaint(element: HTMLElement): { changed: boolea
       changed.push(node);
     }
   }
+  if (changed[0] === element && leases.get(element) === 1) keepOutOfTabOrder(element);
   let released = false;
   return {
     changed: changed.length > 0,
@@ -29,6 +54,7 @@ export function holdPreviewCapturePaint(element: HTMLElement): { changed: boolea
         else {
           leases.delete(node);
           node.removeAttribute("data-preview-capture-paint");
+          if (node === element) restoreTabOrder(element);
         }
       }
     },

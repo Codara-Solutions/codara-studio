@@ -56,5 +56,26 @@ const node = (parentElement = null) => ({
   const shown = node(Object.assign(node(), { visibility: "visible" }));
   shown.visibility = "visible";
   assert.equal(exportsObject.holdPreviewCapturePaint(shown).changed, false, "a tab on screen needs no lease");
-  console.log("preview capture leases preserve state across overlap and failure");
+
+  // A leased webview's own frame leaves the Tab order until the last lease
+  // ends, and gets back the tabindex it had.
+  const frame = { attrs: new Map([["tabindex", "0"]]), getAttribute(key) { return this.attrs.has(key) ? this.attrs.get(key) : null; }, setAttribute(key, value) { this.attrs.set(key, value); }, removeAttribute(key) { this.attrs.delete(key); } };
+  const webview = Object.assign(node(node()), { shadowRoot: { querySelectorAll: (selector) => (selector === "iframe" ? [frame] : []) } });
+  const trace = exportsObject.holdPreviewCapturePaint(webview);
+  assert.equal(frame.getAttribute("tabindex"), "-1", "Tab cannot reach an invisible guest");
+  let finishShot;
+  const shot = exportsObject.withPreviewCapturePaint(webview, () => new Promise((resolve) => { finishShot = resolve; }));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  trace.release();
+  assert.equal(frame.getAttribute("tabindex"), "-1", "still out while a capture holds it");
+  finishShot("image");
+  await shot;
+  assert.equal(frame.getAttribute("tabindex"), "0");
+  frame.removeAttribute("tabindex");
+  exportsObject.holdPreviewCapturePaint(webview).release();
+  assert.equal(frame.getAttribute("tabindex"), null, "a frame with no tabindex gets none back");
+  const onScreen = Object.assign(node(), { visibility: "visible", shadowRoot: webview.shadowRoot });
+  exportsObject.holdPreviewCapturePaint(onScreen);
+  assert.equal(frame.getAttribute("tabindex"), null, "a guest on screen keeps its Tab order");
+  console.log("preview capture leases preserve state across overlap and failure, and keep a hidden guest out of the Tab order");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
