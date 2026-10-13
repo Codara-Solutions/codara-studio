@@ -596,6 +596,9 @@ async function main() {
     pane1("GET / 200 http://localhost:5173/x\r\n");
     await sleep(10);
     assert.equal(learned.length, 1, "learned the same server twice");
+    for (let frame = 0; frame < 50; frame += 1) pane1(`\x1b[2K\r  building ${frame}\r\n`);
+    await sleep(10);
+    assert.equal(learned.length, 1);
 
     const pane2 = taps.get("pane-2");
     holders.set(3000, { pid: 90, paneId: "pane-claude" });
@@ -658,6 +661,38 @@ async function main() {
     assert.equal(learned.length, 5, "an agent CLI's command line was taken for a server's");
     learner.dispose();
     assert.equal(learner.watchedCount(), 0);
+  });
+
+  await check("pane learner: two servers in one burst of output are both learned", async () => {
+    const taps = new Map();
+    const learned = [];
+    const learner = lib.createPaneLearner({
+      listPanes: async () => [{ paneId: "pane-t", workspaceId: "ws-1", profile: "shell" }],
+      tap(paneId, listener) {
+        taps.set(paneId, listener);
+        return () => taps.delete(paneId);
+      },
+      sessionCwd: () => "/repo",
+      recentOutput: () => "",
+      isKeeperSession: () => false,
+      portAnswers: async () => true,
+      portHolder: async (port) => ({ pid: port, paneId: "pane-t" }),
+      processCommand: async (pid) => ({ command: `node app-${pid}.cjs`, cwd: "/repo" }),
+      learn: async (input) => {
+        learned.push(input.port);
+        return "x";
+      },
+      adoptAgentPane: () => false,
+      sleep: () => Promise.resolve(),
+    });
+    await learner.sync();
+    const pane = taps.get("pane-t");
+    pane("web: http://localhost:3001/\r\napi: http://localhost:3002/\r\n");
+    await sleep(10);
+    pane("api: GET /health 200\r\n");
+    await sleep(10);
+    assert.deepEqual(learned, [3001, 3002]);
+    learner.dispose();
   });
 
   await check("an adopted agent terminal survives its run and stays with its run and runless agents", async () => {

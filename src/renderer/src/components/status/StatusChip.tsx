@@ -526,13 +526,20 @@ export default function StatusChip({ workspace }: { workspace: Workspace | null 
 
   useEffect(() => {
     refresh();
-    const timer = window.setInterval(refresh, open ? OPEN_POLL_MS : CLOSED_POLL_MS);
+    // A hidden or minimized window polls no ports; a change event or being
+    // shown again brings it up to date.
+    const tick = () => {
+      if (!document.hidden) refresh();
+    };
+    const timer = window.setInterval(tick, open ? OPEN_POLL_MS : CLOSED_POLL_MS);
     const off = window.spark.servers.onChanged((payload) => {
       if (payload.workspaceId === workspaceId) refresh();
     });
+    document.addEventListener("visibilitychange", tick);
     return () => {
       window.clearInterval(timer);
       off();
+      document.removeEventListener("visibilitychange", tick);
     };
   }, [refresh, open, workspaceId]);
 

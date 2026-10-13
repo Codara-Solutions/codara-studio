@@ -80,6 +80,11 @@ interface Watched {
   /** Ports already learned or found to be another process's, since the last command. */
   seen: Set<number>;
   pending: boolean;
+  /**
+   * A "://" arrived that no scan has covered yet. Agent CLIs redraw their
+   * screens many times a second; only output that can hold a URL is scanned.
+   */
+  urlPending: boolean;
   carry: string;
   scan: string;
   off: () => void;
@@ -125,6 +130,7 @@ export function createPaneLearner(deps: PaneLearnerDeps) {
     }
     // Never answered: a later mention may come once it does.
     pane.seen.delete(port);
+    pane.urlPending = true;
   }
 
   function onChunk(paneId: string, pane: Watched, chunk: string): void {
@@ -137,6 +143,7 @@ export function createPaneLearner(deps: PaneLearnerDeps) {
     } else {
       pane.carry = "";
     }
+    if ((pane.scan.slice(-2) + text).includes("://")) pane.urlPending = true;
     const reports = shellReports(text);
     if (reports.cwds.length) pane.cwd = reports.cwds[reports.cwds.length - 1];
     const started = text.lastIndexOf("\x1b]633;E;");
@@ -156,8 +163,13 @@ export function createPaneLearner(deps: PaneLearnerDeps) {
     } else {
       pane.scan = (pane.scan + text).slice(-SCAN_KEEP);
     }
-    if (pane.pending) return;
-    const next = findLocalUrls(completeLines(pane.scan)).find((found) => !pane.seen.has(found.port));
+    if (pane.pending || !pane.urlPending) return;
+    const complete = completeLines(pane.scan);
+    const unseen = findLocalUrls(complete).filter((found) => !pane.seen.has(found.port));
+    // Scanned again with the next output while a URL waits behind the one
+    // confirmed now or on a line that has not ended.
+    pane.urlPending = unseen.length > 1 || pane.scan.slice(complete.length).includes("://");
+    const next = unseen[0];
     if (!next) return;
     if (pane.seen.size >= MAX_SEEN_PORTS) pane.seen.clear();
     pane.seen.add(next.port);
@@ -185,6 +197,7 @@ export function createPaneLearner(deps: PaneLearnerDeps) {
         agentCommand: false,
         seen: new Set(),
         pending: false,
+        urlPending: false,
         carry: "",
         scan: "",
         off: () => undefined,
