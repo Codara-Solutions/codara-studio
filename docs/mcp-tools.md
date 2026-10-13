@@ -196,7 +196,8 @@ everything in force:
 Emulation lasts until reset or the tab closes, survives navigation, and is
 put back when the tab's view is resized or shown again. The emulated viewport
 is the page's layout viewport; on screen the page is drawn at the top left of
-the tab and may be cut off when the tab is smaller.
+the tab and may be cut off when the tab is smaller. A screenshot of the tab
+shows exactly the emulated viewport, whether or not it fits on screen.
 
 `codara_preview_storage` works on the tab's current origin. `action: "get"`
 reads one `area` or all of them (`cookies`, `local`, `session`, `indexeddb`,

@@ -140,6 +140,11 @@ test("network detail, emulation and storage work on a background tab through the
     expect(metrics.dark).toBe(true);
     const shot = await request("preview.screenshot", { tabId, runId });
     expect(shot.viewport.width).toBe(390);
+    // The image is the emulated phone viewport, not the tab's own view, so
+    // its scale maps image pixels back to the page the same way on both axes.
+    expect(shot.imageSize.width / shot.imageSize.height).toBeCloseTo(390 / 844, 2);
+    expect(shot.scale.x).toBeCloseTo(shot.scale.y, 2);
+    expect(shot.path.startsWith(join(userDataDir, "workspace-data"))).toBe(true);
     // Electron drops a guest's device metrics when its view is resized; they come back.
     await request("preview.resize", { tabId, runId, width: 700, height: 620 });
     await expect.poll(() => evaluate("[screen.width, devicePixelRatio, innerWidth].join()")).toBe("390,3,390");
