@@ -233,6 +233,10 @@ second time while it answers.
 A server marked `autoStart` starts the first time its workspace opens in an
 app session.
 
+When `codara_preview_navigate` is pointed at a local port that does not
+answer, its error names the saved server for that port and the call that
+starts it (or, when none is saved, how to start one that outlives the agent).
+
 The status view in the status bar (the **STATUS** chip) shows the same servers
 with their health, which agents in the workspace's panes reached Codara's
 tools (each codara-studio server reports itself once its client has

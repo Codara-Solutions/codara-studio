@@ -12,6 +12,8 @@
 //     workspace, or a pid)
 //   - logs come back plain since a cursor, long output goes to a file in
 //     Codara's workspace data folder
+//   - a navigation to a local port that does not answer names the saved
+//     server for it and how to start it
 //   - stop, restart and exit codes; a new keeper (an app restart) knows the
 //     server, names the env it misses, and auto-starts it once
 //   - a server learned from a pane is not started twice, and stopping it
@@ -251,6 +253,8 @@ async function main() {
       export { createPaneLearner } from "./servers/pane-learner";
       export { createStatusRegistry } from "./servers/status";
       export { AgentTerminalRegistry } from "./agent-terminal-registry";
+      export { savedServerHint } from "./servers/navigate-hint";
+      export { provideServersService } from "./servers/service";
     `,
     "servers",
   );
@@ -413,6 +417,17 @@ async function main() {
       assert.equal(result.server.state, "stopped");
       assert.equal(await lib.portAnswers(port, 300), false);
       assert.equal((await keeper.stop("ws-1", "web")).alreadyStopped, true);
+    });
+
+    await check("a browser navigation to a down port names the saved server and how to start it", async () => {
+      lib.provideServersService({ keeper: () => keeper, status: () => null, activeWorkspaceId: async () => "ws-1" });
+      const hint = await lib.savedServerHint("ws-1", `http://localhost:${port}/app`);
+      assert.match(hint, /Server "web" of this workspace serves this port/);
+      assert.match(hint, /action "start", id "web"/);
+      assert.match(hint, /cora server start web/);
+      assert.equal(await lib.savedServerHint(undefined, `http://127.0.0.1:${port}/`), hint, "the workspace on screen when the caller has none");
+      assert.match(await lib.savedServerHint("ws-1", "http://localhost:1/"), /start it with codara_terminal_servers/);
+      assert.equal(await lib.savedServerHint("ws-1", "https://example.com/"), "");
     });
 
     await check("restart keeps this session's env values; a crash shows its exit code", async () => {
