@@ -1,7 +1,8 @@
 // Guards the promise that an e2e run never reaches the person at the machine
-// (src/main/e2e-background.ts): on Linux the test app must run on Chromium's
-// headless Ozone backend. The app selects it itself, and a switch passed on
-// the command line would win over that, so no spec may pass one.
+// (src/main/e2e-background.ts): on Linux every runner that boots Electron puts
+// it on a private Xvfb display (scripts/virtual-display.cjs), and an Ozone
+// switch passed on the command line would move the window back onto the
+// desktop, so no spec may pass one.
 //
 //   node scripts/test-e2e-desktop-isolation.cjs
 //
@@ -55,13 +56,44 @@ check("no e2e file turns background mode off", () => {
   assert.deepEqual(offenders, []);
 });
 
-check("isolateE2eFromDesktop selects headless and mutes audio", () => {
+check("isolateE2eFromDesktop mutes audio", () => {
   const source = fs.readFileSync(path.join(ROOT, "src", "main", "e2e-background.ts"), "utf8");
   const start = source.indexOf("export function isolateE2eFromDesktop");
   assert.ok(start >= 0, "isolateE2eFromDesktop is missing");
   const body = source.slice(start, source.indexOf("\n}", start));
-  assert.match(body, /appendSwitch\("ozone-platform", "headless"\)/);
   assert.match(body, /appendSwitch\("mute-audio"\)/);
+  // This Electron segfaults creating a window on the headless backend.
+  assert.doesNotMatch(body, /"headless"/);
+});
+
+check("the Playwright and unit runners both use the private display", () => {
+  const config = fs.readFileSync(path.join(ROOT, "playwright.config.ts"), "utf8");
+  assert.match(config, /require\("\.\/scripts\/virtual-display\.cjs"\)/);
+  assert.match(config, /\nuseVirtualDisplay\(\);/);
+  const runner = fs.readFileSync(path.join(ROOT, "scripts", "run-all-tests.cjs"), "utf8");
+  assert.match(runner, /require\("\.\/virtual-display\.cjs"\)\.useVirtualDisplay\(\);/);
+});
+
+check("useVirtualDisplay points a child environment at the display and leaves opt-outs alone", () => {
+  const { useVirtualDisplay } = require("./virtual-display.cjs");
+  assert.equal(useVirtualDisplay({ SPARK_E2E_BACKGROUND: "0", PATH: "" }), null);
+  if (process.platform !== "linux") return;
+  const env = { PATH: "", CODARA_XVFB: "/nonexistent/Xvfb", WAYLAND_DISPLAY: "wayland-1" };
+  const warn = console.warn;
+  console.warn = () => {};
+  try {
+    assert.equal(useVirtualDisplay(env), null);
+  } finally {
+    console.warn = warn;
+  }
+  assert.equal(env.WAYLAND_DISPLAY, "wayland-1", "without Xvfb the desktop environment is untouched");
+  const display = useVirtualDisplay({ ...process.env });
+  if (!display) return;
+  const child = { CODARA_E2E_DISPLAY: display, WAYLAND_DISPLAY: "wayland-1", DISPLAY: ":1", PATH: "" };
+  assert.equal(useVirtualDisplay(child), display, "a child reuses its parent's display");
+  assert.equal(child.DISPLAY, display);
+  assert.equal(child.XDG_SESSION_TYPE, "x11");
+  assert.equal(child.WAYLAND_DISPLAY, undefined);
 });
 
 check("playwright.config.ts defaults the suite to background mode", () => {
