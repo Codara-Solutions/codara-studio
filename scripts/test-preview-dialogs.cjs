@@ -250,9 +250,12 @@ async function inChromium() {
       assert.equal(await chromeDialogs.answer(chromeDialogs.pending()[0].id, { accept: true }, "agent"), true);
       for (let i = 0; i < 40 && (await bareTarget.evaluate("document.body.dataset.confirm ?? null")) !== "true"; i++) await sleep(25);
       assert.equal(await bareTarget.evaluate("document.body.dataset.confirm ?? null"), "true");
+      // The new page's own first load can still commit after the recorders
+      // start, so only the last navigation is ours.
       await bare.send("Page.navigate", { url: server.url("/?chrome") });
-      for (let i = 0; i < 40 && !lib.pageActivity(bare).navigations.length; i++) await sleep(25);
-      assert.deepEqual(lib.pageActivity(bare).navigations.map((nav) => nav.url), [server.url("/?chrome")], "its navigations are recorded for waits");
+      const lastNavigation = () => lib.pageActivity(bare).navigations.at(-1)?.url;
+      for (let i = 0; i < 80 && lastNavigation() !== server.url("/?chrome"); i++) await sleep(25);
+      assert.equal(lastNavigation(), server.url("/?chrome"), "its navigations are recorded for waits");
     } finally {
       unregisterChrome();
       bare.dispose({ detach: true });
