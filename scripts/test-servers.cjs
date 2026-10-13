@@ -207,6 +207,7 @@ function keeperWith(lib, store, sessions, extra = {}) {
   const changes = [];
   const stopped = [];
   const logWrites = [];
+  const owners = [];
   const keeper = lib.createServerKeeper({
     store,
     spawn: (input) => sessions.spawn(input),
@@ -215,7 +216,10 @@ function keeperWith(lib, store, sessions, extra = {}) {
     onOutput: (paneId, listener) => sessions.onOutput(paneId, listener),
     onExit: (paneId, listener) => sessions.onExit(paneId, listener),
     portAnswers: (port) => lib.portAnswers(port, 300),
-    portOwner: (port) => lib.portOwner(port),
+    portOwner: (port) => {
+      owners.push(port);
+      return lib.portOwner(port);
+    },
     async paneOfPid(pid) {
       for (const [paneId, session] of sessions.sessions) if (session.child.pid === pid && session.alive) return paneId;
       return null;
@@ -242,7 +246,7 @@ function keeperWith(lib, store, sessions, extra = {}) {
     env: {},
     ...extra,
   });
-  return { keeper, changes, stopped, logWrites };
+  return { keeper, changes, stopped, logWrites, owners };
 }
 
 async function main() {
@@ -304,6 +308,18 @@ async function main() {
     assert.deepEqual(lib.splitEnvPrefix("X=~/a node s"), { command: "X=~/a node s", env: {} });
     assert.deepEqual(lib.splitEnvPrefix("ONLY=1"), { command: "ONLY=1", env: {} });
     assert.deepEqual(lib.splitEnvPrefix("pnpm dev FOO=bar"), { command: "pnpm dev FOO=bar", env: {} });
+    // The other ways a shell sets a value for one command.
+    assert.deepEqual(lib.splitEnvPrefix("env STRIPE_SECRET_KEY=sk_live_abc pnpm dev"), { command: "pnpm dev", env: { STRIPE_SECRET_KEY: "sk_live_abc" } });
+    assert.deepEqual(lib.splitEnvPrefix("export K=sk && pnpm dev"), { command: "pnpm dev", env: { K: "sk" } });
+    assert.deepEqual(lib.splitEnvPrefix("export A=1 B='2 3'; pnpm dev"), { command: "pnpm dev", env: { A: "1", B: "2 3" } });
+    assert.deepEqual(lib.splitEnvPrefix("$env:KEY='x'; pnpm dev"), { command: "pnpm dev", env: { KEY: "x" } });
+    assert.deepEqual(lib.splitEnvPrefix("env pnpm dev"), { command: "env pnpm dev", env: {} });
+    // A value that cannot be split off is refused rather than saved; a reference is not a value.
+    assert.throws(() => lib.checkServerCommand("KEY=ab$cd pnpm dev"), /KEY's value would be saved/);
+    assert.throws(() => lib.checkServerCommand("pnpm build && SECRET=x pnpm start"), /SECRET's value/);
+    assert.throws(() => lib.checkServerCommand(`$env:KEY="a$b"; pnpm dev`), /KEY's value/);
+    assert.deepEqual(lib.checkServerCommand("PORT=$PORT pnpm dev"), { command: "PORT=$PORT pnpm dev", env: {} });
+    assert.deepEqual(lib.checkServerCommand("pnpm dev FOO=bar"), { command: "pnpm dev FOO=bar", env: {} });
   });
 
   await check("the command line and folder of a running process, to start it again", async () => {
@@ -324,7 +340,7 @@ async function main() {
   const external = http.createServer((_req, res) => res.end("held"));
   try {
     const store = lib.createServerStore();
-    const { keeper, stopped, logWrites } = keeperWith(lib, store, sessions);
+    const { keeper, stopped, logWrites, owners } = keeperWith(lib, store, sessions);
     const port = await freePort();
     const command = `exec node ${JSON.stringify(FIXTURE)} ${port}`;
     let first;
@@ -378,6 +394,29 @@ async function main() {
       assert.deepEqual(spec.envNames, ["API_KEY"]);
       assert.deepEqual(spec.missingEnv, [], "this app session still has the value");
       assert.ok(!fs.readFileSync(lib.serversFile("ws-1"), "utf8").includes("sk-live-123"), "a learned env value reached disk");
+      const viaEnv = await keeper.learn({
+        workspaceId: "ws-1",
+        paneId: "pane-env",
+        command: "env STRIPE_SECRET_KEY=sk_live_abc pnpm run web",
+        cwd: WS_DIR,
+        url: "http://localhost:2/",
+        port: 2,
+        source: "user",
+      });
+      assert.equal((await keeper.list("ws-1", { probe: false })).find((server) => server.id === viaEnv).command, "pnpm run web");
+      assert.equal(await keeper.learn({
+        workspaceId: "ws-1",
+        paneId: "pane-dollar",
+        command: "KEY=ab$cd pnpm run api",
+        cwd: WS_DIR,
+        url: "http://localhost:3/",
+        port: 3,
+        source: "user",
+      }), null, "a command still holding a value is not learned");
+      const stored = fs.readFileSync(lib.serversFile("ws-1"), "utf8");
+      assert.ok(!stored.includes("sk_live_abc") && !stored.includes("ab$cd"), "a learned env value reached disk");
+      await keeper.forget("ws-1", viaEnv);
+      stopped.splice(0);
       await keeper.forget("ws-1", learned);
       assert.deepEqual(stopped.splice(0), [["pane-inline", null]]);
     });
@@ -408,6 +447,13 @@ async function main() {
       const saved = (await keeper.list("ws-1")).find((server) => server.id === "api");
       assert.equal(saved.state, "stopped");
       assert.match(saved.conflict ?? "", /already in use/, "the status names the conflict before a start");
+      // The closed status chip polls without detail: the port is probed but
+      // nothing runs lsof or walks a process chain to name its holder.
+      owners.splice(0);
+      const light = (await keeper.list("ws-1", { detail: false })).find((server) => server.id === "api");
+      assert.equal(light.health, "up");
+      assert.equal(light.conflict, null);
+      assert.deepEqual(owners, [], "a status without detail looked up the port's owner");
       await keeper.forget("ws-1", "api");
     });
 
@@ -782,12 +828,23 @@ async function main() {
       ["grok", "-c", /set by Codara/],
       ["codex", `-c mcp_servers."codara-studio".command=x`, /set by Codara/],
       ["pi", "--mode rpc", /set by Codara/],
+      ["claude", "--add-dir ../shared", /--add-dir=\.\.\/shared/],
+      ["claude", `--verbose --allowedTools "Bash(git:*)"`, /one value per flag/],
+      ["claude", "--disallowed-tools Bash --model opus", /one value per flag/],
+      ["claude", "--tools Read", /one value per flag/],
+      ["claude", "--betas x", /one value per flag/],
+      ["claude", "--file a.txt", /one value per flag/],
+      ["codex", "-i shot.png", /--image=shot\.png/],
+      ["codex", "--image shot.png", /one value per flag/],
     ]) {
       const verdict = launch.checkLaunchArgs(runtime, text);
       assert.equal(verdict.ok, false, `${runtime} ${JSON.stringify(text)}`);
       assert.match(verdict.error, pattern, `${runtime} ${JSON.stringify(text)}`);
     }
     assert.equal(launch.checkLaunchArgs("claude", `--x ${"y".repeat(1_001)}`).ok, false);
+    // The = form ends a variadic option at one value, so a typed prompt stays the prompt.
+    assert.deepEqual(launch.checkLaunchArgs("claude", `--add-dir=../shared --add-dir=../b --allowedTools="Bash(git:*)"`).argv, ["--add-dir=../shared", "--add-dir=../b", "--allowedTools=Bash(git:*)"]);
+    assert.deepEqual(launch.checkLaunchArgs("codex", "--image=shot.png").argv, ["--image=shot.png"]);
   });
 
   await check("launch arguments reach each launch and the typed-command files, nothing else", async () => {
@@ -879,6 +936,30 @@ async function main() {
         { action: calls[1].params.action, id: calls[1].params.id, port: calls[1].params.port },
         { action: "start", id: "web", port: 3000 },
       );
+      // Another workspace named in the tool JSON never reaches main: the
+      // caller's pane decides, over MCP and through cora alike.
+      const elsewhere = await run(["list", "--workspaceId", "ws-other", "--json"]);
+      assert.equal(elsewhere.code, 0, elsewhere.stderr);
+      assert.equal(calls[2].method, "terminal.servers");
+      assert.equal(calls[2].params.workspaceId, undefined);
+      assert.equal(calls[2].params.callerPaneId, "pane-4");
+      const viaMcp = require(path.join(ROOT, "resources", "codara-studio-mcp", "server.js"));
+      const before = calls.length;
+      const previousHome = process.env.CODARA_HOME_DIR;
+      const previousPane = process.env.SPARK_PANE_ID;
+      process.env.CODARA_HOME_DIR = home;
+      process.env.SPARK_PANE_ID = "pane-4";
+      try {
+        await viaMcp.callToolByName("codara_terminal_servers", { action: "stop", id: "web", workspaceId: "ws-other" });
+      } finally {
+        if (previousHome === undefined) delete process.env.CODARA_HOME_DIR;
+        else process.env.CODARA_HOME_DIR = previousHome;
+        if (previousPane === undefined) delete process.env.SPARK_PANE_ID;
+        else process.env.SPARK_PANE_ID = previousPane;
+      }
+      assert.equal(calls.length, before + 1);
+      assert.equal(calls[before].params.workspaceId, undefined);
+      assert.equal(calls[before].params.action, "stop");
       const bad = await run(["teleport"]);
       assert.equal(bad.code, 2);
       assert.match(bad.stderr, /unknown action/);

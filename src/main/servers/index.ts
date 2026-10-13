@@ -54,8 +54,10 @@ function idOf(input: unknown): string {
 
 /** Register this area's channels with the trusted-sender `handle`. */
 export function registerServersIpc(handle: IpcHandle): void {
-  handle("servers:status", (_event, workspaceId: unknown) =>
-    statusSnapshot(typeof workspaceId === "string" && workspaceId ? workspaceId : null),
+  handle("servers:status", (_event, workspaceId: unknown, options: unknown) =>
+    statusSnapshot(typeof workspaceId === "string" && workspaceId ? workspaceId : null, {
+      detail: !(options && typeof options === "object" && (options as { detail?: unknown }).detail === false),
+    }),
   );
   handle("servers:workspaceOpened", (_event, workspaceId: unknown) => serverKeeper().autoStart(workspaceIdOf(workspaceId)));
   handle("servers:start", (_event, input: DevServerStartInput) =>

@@ -31,6 +31,18 @@ const RESERVED: Record<LaunchArgRuntime, readonly string[]> = {
   grok: ["--session-id", "-s", "--resume", "-r", "--continue", "-c", "--single", "-p", "--output-format"],
   pi: ["--session", "--resume", "-r", "--continue", "-c", "--print", "-p", "--mode"],
 };
+/**
+ * Options that take every following word as another value. The Settings
+ * flags sit right before what the user types after the command, so the
+ * spaced form would swallow a typed prompt; the --opt=value form ends the
+ * option at its one value in both Commander (claude) and clap (codex).
+ */
+const VARIADIC: Record<LaunchArgRuntime, readonly string[]> = {
+  claude: ["--add-dir", "--allowedTools", "--allowed-tools", "--disallowedTools", "--disallowed-tools", "--tools", "--betas", "--file"],
+  codex: ["-i", "--image"],
+  grok: [],
+  pi: [],
+};
 // Codex takes config overrides as -c key=value; Codara's own keys stay its own.
 const CODEX_RESERVED_KEYS = /^\s*(?:mcp_servers\s*\.\s*(?:codara-studio\b|"codara-studio"|'codara-studio')|notify\s*=|tui\s*\.\s*notifications\s*=)/;
 
@@ -90,6 +102,10 @@ export function checkLaunchArgs(runtime: LaunchArgRuntime, text: string): Launch
       const flag = arg.includes("=") && arg.startsWith("--") ? arg.slice(0, arg.indexOf("=")) : arg;
       if (RESERVED[runtime].includes(flag)) {
         throw new LaunchArgsError(`${flag} is set by Codara for each launch and cannot be added here.`);
+      }
+      if (VARIADIC[runtime].includes(arg)) {
+        const example = `${arg.startsWith("--") ? arg : "--image"}=${argv[index + 1] ?? "value"}`;
+        throw new LaunchArgsError(`Write ${arg} as ${example}, one value per flag. With a space it would also take the prompt typed after the command as a value.`);
       }
       if (runtime === "codex" && (arg === "-c" || arg === "--config")) {
         const value = argv[index + 1] ?? "";

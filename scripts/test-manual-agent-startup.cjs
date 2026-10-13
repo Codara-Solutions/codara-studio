@@ -38,6 +38,24 @@ async function main() {
       formatManualAgentStartup(injected, "codex.cmd", "cmd"),
     );
 
+    // A Settings flag reaches cmd's own parse: an odd " would leave & outside
+    // quotes and run a second command, and %NAME% expands even inside quotes.
+    const withSettings = (value) => ({ ...parsed, childArgv: [parsed.childArgv[0], "--append-system-prompt", value, ...parsed.childArgv.slice(1)] });
+    for (const [value, char] of [
+      ['Keep lines under 80" wide & short', /contains &/],
+      ["use %USERPROFILE%", /contains %/],
+      ["shout!", /contains !/],
+      ["a\nb", /new line/],
+    ]) {
+      assert.throws(() => formatManualAgentStartup(withSettings(value), "claude.exe", "cmd"), char, value);
+    }
+    assert.ok(formatManualAgentStartup(withSettings('say "hi" & leave'), "claude.exe", "cmd").includes('"say \\"hi\\" & leave"'), "an even number of quotes keeps & quoted");
+    // PowerShell also ends a single-quoted string at a curly quote.
+    assert.equal(
+      formatManualAgentStartup({ runtime: "claude", childArgv: ["claude", "Don\u2019t; calc; \u2018x\u201A\u201B'"] }, "claude.exe", "pwsh"),
+      "& 'claude.exe' 'Don\u2019\u2019t; calc; \u2018\u2018x\u201A\u201A\u201B\u201B'''",
+    );
+
     if (process.platform !== "win32") {
       const binary = path.join(dir, "agent's tools $(false)", "codex");
       fs.mkdirSync(path.dirname(binary));

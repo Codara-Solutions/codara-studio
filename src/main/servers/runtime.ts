@@ -142,9 +142,12 @@ export function toolsByRuntime(): Record<string, boolean> {
   };
 }
 
-export async function statusSnapshot(workspaceId: string | null): Promise<StatusSnapshot> {
+export async function statusSnapshot(
+  workspaceId: string | null,
+  options: { detail?: boolean } = {},
+): Promise<StatusSnapshot> {
   const tools = toolsByRuntime();
-  const servers = workspaceId ? await serverKeeper().list(workspaceId) : [];
+  const servers = workspaceId ? await serverKeeper().list(workspaceId, { detail: options.detail }) : [];
   const watched = terminalAgentStateSnapshot().map((entry) => ({
     paneId: entry.paneId,
     workspaceId: entry.workspaceId,

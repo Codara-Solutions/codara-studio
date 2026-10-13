@@ -1549,14 +1549,14 @@ async function handleTerminalClose(
 // An agent with no run (Claude Code in a plain Studio terminal) drives browser
 // tabs in the workspace of the pane it runs in, not whichever workspace is on
 // screen, and never another agent's or a run's tab. Main stamps the pane's
-// workspace and passes the pane on only when it resolves to a live session; a
-// caller outside any pane keeps the on-screen workspace. A run keeps resolving
-// through scopePreviewWorkspace.
+// workspace and passes the pane on only when it resolves to a live session,
+// over any workspace the call names; a caller outside any pane keeps the
+// on-screen workspace. A run keeps resolving through scopePreviewWorkspace.
 async function scopePreviewToCaller(params: Record<string, unknown>): Promise<void> {
   let callerPaneId: string | null = null;
   if (!stringParam(params, "runId")) {
     const placement = await resolveCallerPlacement(params);
-    if (placement && !stringParam(params, "workspaceId")) params.workspaceId = placement.workspaceId;
+    if (placement) params.workspaceId = placement.workspaceId;
     callerPaneId = placement?.paneId ?? (await resolveCallerPaneId(params));
   }
   delete params.callerPid;

@@ -17,7 +17,8 @@ import type {
 } from "@shared/servers";
 
 export const serversApi = {
-  status: (workspaceId: string | null): Promise<StatusSnapshot> => ipcRenderer.invoke("servers:status", workspaceId),
+  status: (workspaceId: string | null, options?: { detail?: boolean }): Promise<StatusSnapshot> =>
+    ipcRenderer.invoke("servers:status", workspaceId, options),
   /** Starts the workspace's auto-start servers the first time it opens in this app session. */
   workspaceOpened: (workspaceId: string): Promise<string[]> => ipcRenderer.invoke("servers:workspaceOpened", workspaceId),
   start: (input: DevServerStartInput): Promise<DevServerStartReply> => ipcRenderer.invoke("servers:start", input),

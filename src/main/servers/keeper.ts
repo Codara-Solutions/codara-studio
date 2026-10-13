@@ -15,9 +15,9 @@ import type {
   DevServerStatus,
 } from "@shared/servers";
 import {
-  checkCommand,
   checkEnv,
   checkPort,
+  checkServerCommand,
   checkUrl,
   completeLines,
   findLocalUrls,
@@ -26,7 +26,6 @@ import {
   SERVER_ID_RE,
   ServerInputError,
   serverSlug,
-  splitEnvPrefix,
   suggestServerId,
 } from "./detect";
 import type { PortOwner } from "./health";
@@ -182,7 +181,7 @@ export function createServerKeeper(deps: KeeperDeps) {
     return port ? deps.portAnswers(port).catch(() => false) : true;
   }
 
-  async function statusOf(workspaceId: string, spec: DevServerSpec, probe = true): Promise<DevServerStatus> {
+  async function statusOf(workspaceId: string, spec: DevServerSpec, probe = true, detail = true): Promise<DevServerStatus> {
     const entry = liveOf(workspaceId, spec.id);
     const port = spec.port ?? portOfUrl(spec.url);
     const answers = probe && port ? await deps.portAnswers(port).catch(() => false) : null;
@@ -191,9 +190,11 @@ export function createServerKeeper(deps: KeeperDeps) {
     if (state === "pane" && entry && (!deps.exists(entry.paneId) || answers === false)) state = "stopped";
     const values = envValues.get(key(workspaceId, spec.id)) ?? {};
     // Something else answering on a stopped server's port is the conflict a
-    // start would refuse with, so it is reported before anyone tries.
+    // start would refuse with, so it is reported before anyone tries. Naming
+    // the holder runs lsof and walks a process chain, so a caller that never
+    // shows it (the closed status chip, every 15 s) asks without detail.
     const conflict =
-      answers === true && port && state !== "running" && state !== "pane"
+      detail && answers === true && port && state !== "running" && state !== "pane"
         ? await describePortHolder(workspaceId, port, spec.id)
         : null;
     return {
@@ -209,9 +210,9 @@ export function createServerKeeper(deps: KeeperDeps) {
     };
   }
 
-  async function list(workspaceId: string, options: { probe?: boolean } = {}): Promise<DevServerStatus[]> {
+  async function list(workspaceId: string, options: { probe?: boolean; detail?: boolean } = {}): Promise<DevServerStatus[]> {
     const specs = await deps.store.list(workspaceId);
-    return Promise.all(specs.map((spec) => statusOf(workspaceId, spec, options.probe !== false)));
+    return Promise.all(specs.map((spec) => statusOf(workspaceId, spec, options.probe !== false, options.detail !== false)));
   }
 
   async function findSpec(workspaceId: string, id: string): Promise<DevServerSpec | null> {
@@ -316,7 +317,7 @@ export function createServerKeeper(deps: KeeperDeps) {
 
   async function launch(input: DevServerStartInput): Promise<Launched> {
     const workspaceId = input.workspaceId;
-    const typed = input.command === undefined ? undefined : splitEnvPrefix(checkCommand(input.command));
+    const typed = input.command === undefined ? undefined : checkServerCommand(input.command);
     const command = typed?.command;
     const port = checkPort(input.port);
     const url = checkUrl(input.url);
@@ -510,7 +511,7 @@ export function createServerKeeper(deps: KeeperDeps) {
     const id = serverSlug(input.id ?? "");
     if (!id) throw new ServerInputError("id is required");
     const existing = await findSpec(input.workspaceId, id);
-    const typed = input.command === undefined ? null : splitEnvPrefix(checkCommand(input.command));
+    const typed = input.command === undefined ? null : checkServerCommand(input.command);
     const command = typed ? typed.command : existing?.command;
     if (!command) throw new ServerInputError(`No server "${id}" is saved for this workspace. Pass command to save one.`);
     const cwd = input.cwd === undefined && existing ? existing.cwd : await resolveCwd(input.workspaceId, input.cwd, existing?.cwd);
@@ -569,7 +570,7 @@ export function createServerKeeper(deps: KeeperDeps) {
     let command: string;
     let env: Record<string, string>;
     try {
-      const typed = splitEnvPrefix(checkCommand(input.command));
+      const typed = checkServerCommand(input.command);
       command = typed.command;
       env = checkEnv(typed.env);
     } catch {

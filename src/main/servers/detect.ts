@@ -182,23 +182,87 @@ export function checkEnv(env: unknown): Record<string, string> {
 // NAME=value at the start of a command: a single-quoted value, a
 // double-quoted one with nothing to expand, or a bare word with no shell
 // syntax. Anything else stays in the command for the shell to read.
-const ENV_PREFIX_RE = /^([A-Za-z_][A-Za-z0-9_]*)=(?:'([^']*)'|"([^"$`\\]*)"|([^\s'"$`\\;&|<>()~][^\s'"$`\\;&|<>()]*|))(?=\s)/;
+const ASSIGNMENT_RE = /([A-Za-z_][A-Za-z0-9_]*)=(?:'([^']*)'|"([^"$`\\]*)"|([^\s'"$`\\;&|<>()~][^\s'"$`\\;&|<>()]*|))/;
+const ENV_PREFIX_RE = new RegExp(`^${ASSIGNMENT_RE.source}(?=\\s)`);
+const NEXT_ASSIGNMENT_RE = new RegExp(`^${ASSIGNMENT_RE.source}\\s*`);
+// `export A=1 B=2 && cmd` or `export A=1; cmd`: the same values, set by a statement of their own.
+const EXPORT_PREFIX_RE = /^export\s+((?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"$`\\]*"|[^\s'"$`\\;&|<>()~][^\s'"$`\\;&|<>()]*|)\s*)+)(?:&&|;)\s*/;
+// PowerShell's `$env:A='1'; cmd`.
+const PWSH_ENV_PREFIX_RE = /^\$env:([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:'([^']*)'|"([^"$`]*)")\s*;\s*/i;
+
+function stripEnvPrefixOnce(rest: string, env: Record<string, string>): string | null {
+  const plain = ENV_PREFIX_RE.exec(rest);
+  if (plain) {
+    const after = rest.slice(plain[0].length).trimStart();
+    if (!after) return null;
+    env[plain[1]] = plain[2] ?? plain[3] ?? plain[4] ?? "";
+    return after;
+  }
+  if (/^env\s/.test(rest)) {
+    const after = rest.slice(3).trimStart();
+    return ENV_PREFIX_RE.test(after) ? after : null;
+  }
+  const exported = EXPORT_PREFIX_RE.exec(rest);
+  if (exported) {
+    const after = rest.slice(exported[0].length);
+    if (!after) return null;
+    let list = exported[1];
+    for (let match = NEXT_ASSIGNMENT_RE.exec(list); match; match = NEXT_ASSIGNMENT_RE.exec(list)) {
+      env[match[1]] = match[2] ?? match[3] ?? match[4] ?? "";
+      list = list.slice(match[0].length);
+      if (!list) break;
+    }
+    return after;
+  }
+  const pwsh = PWSH_ENV_PREFIX_RE.exec(rest);
+  if (pwsh) {
+    const after = rest.slice(pwsh[0].length);
+    if (!after) return null;
+    env[pwsh[1]] = pwsh[2] ?? pwsh[3] ?? "";
+    return after;
+  }
+  return null;
+}
 
 /**
  * Splits the variable assignments off the front of a command line, so a
- * typed `API_KEY=... pnpm dev` is remembered as `pnpm dev` with the name
- * API_KEY and its value never reaches the saved command.
+ * typed `API_KEY=... pnpm dev` (or `env API_KEY=... pnpm dev`, `export
+ * API_KEY=... && pnpm dev`, `$env:API_KEY='...'; pnpm dev`) is remembered as
+ * `pnpm dev` with the name API_KEY and its value never reaches the saved
+ * command.
  */
 export function splitEnvPrefix(command: string): { command: string; env: Record<string, string> } {
   const env: Record<string, string> = {};
   let rest = command.trim();
-  for (let match = ENV_PREFIX_RE.exec(rest); match; match = ENV_PREFIX_RE.exec(rest)) {
-    const after = rest.slice(match[0].length).trimStart();
-    if (!after) break;
-    env[match[1]] = match[2] ?? match[3] ?? match[4] ?? "";
-    rest = after;
-  }
+  for (let next = stripEnvPrefixOnce(rest, env); next !== null; next = stripEnvPrefixOnce(rest, env)) rest = next;
   return { command: rest, env };
+}
+
+/**
+ * A variable assignment still in a command after splitEnvPrefix whose value
+ * is written out (not only a reference such as $PORT): the name, or null.
+ * Saving such a command would store the value, so it is refused instead.
+ */
+export function assignedValueInCommand(command: string): string | null {
+  const re = /(?:^|[;&|]\s*|\b(?:env|export)\s+(?:-\S+\s+)*|\$env:)([A-Za-z_][A-Za-z0-9_]*)\s*=\s*("[^"]*"|'[^']*'|[^\s;&|]*)/gi;
+  for (let match = re.exec(command); match; match = re.exec(command)) {
+    const value = match[2];
+    if (/^(?:"?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?"?|~[\w./-]*|)$/.test(value)) continue;
+    return match[1];
+  }
+  return null;
+}
+
+/** checkCommand, then the values typed before it split off; a value that cannot be split off is refused. */
+export function checkServerCommand(command: unknown): { command: string; env: Record<string, string> } {
+  const typed = splitEnvPrefix(checkCommand(command));
+  const name = assignedValueInCommand(typed.command);
+  if (name) {
+    throw new ServerInputError(
+      `${name}'s value would be saved with the command. Pass it in env instead, which keeps only the name.`,
+    );
+  }
+  return typed;
 }
 
 export function checkEnvNames(names: unknown): string[] {

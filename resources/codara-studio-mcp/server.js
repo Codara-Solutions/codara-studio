@@ -1822,7 +1822,9 @@ function injectRunIdForStudioOwnership(rpc, args) {
   const envRunId = (process.env.SPARK_RUN_ID || "").trim();
   if (envRunId) args.runId = envRunId;
   else delete args.runId;
-  if (rpc.startsWith("preview.")) delete args.workspaceId;
+  // The workspace is the caller's (its run, or the pane it runs in), never
+  // one the tool JSON names.
+  if (rpc.startsWith("preview.") || CALLER_LOCATED_RPCS.has(rpc)) delete args.workspaceId;
   delete args.callerPaneId;
   delete args.callerPid;
   // Codara places a new terminal beside, and scopes the browser, the terminal

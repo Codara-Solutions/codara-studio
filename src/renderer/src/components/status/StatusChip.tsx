@@ -511,13 +511,14 @@ export default function StatusChip({ workspace }: { workspace: Workspace | null 
       return;
     }
     setTabs(previewTabOwners(workspaceId));
+    // Only the open popover shows what holds a taken port.
     void window.spark.servers
-      .status(workspaceId)
+      .status(workspaceId, { detail: open })
       .then((next) => {
         if (next.workspaceId === workspaceId) setSnapshot(next);
       })
       .catch(() => undefined);
-  }, [workspaceId]);
+  }, [workspaceId, open]);
 
   useEffect(() => {
     if (!workspaceId || remote) return;
