@@ -317,6 +317,24 @@ test("agents and users drive pages through keys, waits, dialogs, find and the ou
     expect(afterUser.value).toBe("false");
     expect(afterUser.dialogsAnswered).toEqual([expect.objectContaining({ type: "confirm", accepted: false, by: "user" })]);
 
+    // The card never takes focus from where the user is typing outside the
+    // tab: an Enter meant for a terminal or the chat must not answer it.
+    await page.evaluate(() => {
+      const field = document.createElement("textarea");
+      field.id = "outside-field";
+      document.body.append(field);
+      field.focus();
+    });
+    await mcp.call("codara_preview_click", { selector: "#del" });
+    await expect(card).toBeVisible();
+    expect(await page.evaluate(() => document.activeElement?.id)).toBe("outside-field");
+    await page.keyboard.press("Enter");
+    await page.waitForTimeout(300);
+    await expect(card).toBeVisible();
+    expect(await mcp.call("codara_preview_dialog", { accept: false })).toMatchObject({ ok: true, answered: { type: "confirm", accepted: false } });
+    await expect(card).toHaveCount(0);
+    await page.evaluate(() => document.getElementById("outside-field")?.remove());
+
     // A page that keeps opening dialogs leaves no listeners behind on its guest.
     const guestListeners = () => app.evaluate(({ webContents }, prefix) => {
       const guest = webContents.getAllWebContents().find((wc) => wc.getType() === "webview" && wc.getURL().startsWith(prefix));

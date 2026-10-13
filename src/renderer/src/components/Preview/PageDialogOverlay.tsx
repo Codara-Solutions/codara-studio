@@ -36,11 +36,18 @@ function PageDialogCard({ dialog }: { dialog: PageDialogView }) {
   const [text, setText] = useState(dialog.defaultPrompt);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const okRef = useRef<HTMLButtonElement | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
   const secondsLeft = useSecondsLeft(dialog.autoAt);
   const cancellable = dialog.type !== "alert";
   const leave = dialog.type === "beforeunload";
 
   useEffect(() => {
+    // Take focus only from this tab. An agent's click opens dialogs while the
+    // user types somewhere else (a terminal, the chat), where an Enter meant
+    // for that field must not answer "Delete project?".
+    const active = document.activeElement;
+    const pane = rootRef.current?.parentElement;
+    if (active && active !== document.body && !pane?.contains(active)) return;
     if (dialog.type === "prompt") inputRef.current?.select();
     else okRef.current?.focus();
   }, [dialog.type]);
@@ -50,6 +57,7 @@ function PageDialogCard({ dialog }: { dialog: PageDialogView }) {
 
   return (
     <div
+      ref={rootRef}
       className="spark-fade-in"
       data-testid="page-dialog"
       style={{
