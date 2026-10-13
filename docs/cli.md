@@ -145,6 +145,36 @@ their workspace.
 | `bench list` | Shows the suite's tasks. |
 | `bench history` | Shows the score history. |
 
+### Agent tools
+
+`cora tool` calls the Codara Studio MCP tools from a terminal, for agents
+without an MCP client and for scripts. It runs in a Codara terminal, acts on
+that terminal's workspace, and answers like an MCP call; images and long
+bodies are saved under Codara's workspace data folder and their paths printed.
+The `codara_` prefix of a tool name is optional. Flag values are read as JSON
+when they parse, otherwise as text, and a flag with no value is true.
+[mcp-tools.md](mcp-tools.md) describes every tool.
+
+| Command | What it does |
+|---|---|
+| `tool list` | Lists the tools. |
+| `tool help <name>` | One tool's description and arguments. |
+| `tool <name> ['{"arg":1}'] [--arg value ...]` | Calls a tool. |
+
+```sh
+cora tool preview_network --failed                       # failed requests of your tab
+cora tool preview_network --status 4xx --type fetch,xhr
+cora tool preview_network --id 1234.5                    # one request with its response body
+cora tool preview_network --har                          # HAR 1.2 file, secrets redacted
+cora tool preview_emulate --device phone --colorScheme dark
+cora tool preview_emulate --network slow3g --cpu 4
+cora tool preview_emulate --reset
+cora tool preview_storage --action get --area local
+cora tool preview_storage --action clear --area cookies
+cora tool preview_storage --action fresh --url http://localhost:3000   # logged-out tab
+cora tool preview_storage --action discard --tabId <id>
+```
+
 ### App
 
 | Command | What it does |

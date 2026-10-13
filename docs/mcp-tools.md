@@ -138,8 +138,10 @@ workspace on screen.
 | `codara_preview_drag` | Trusted drag from one point or element to another. |
 | `codara_preview_key` | Trusted keyboard input with optional modifiers. |
 | `codara_preview_upload` | Sets the files of an `<input type=file>`. |
-| `codara_preview_console` | Reads the tab's console messages, recorded since the tab opened. |
-| `codara_preview_network` | Reads the tab's network requests, recorded since the tab opened. |
+| `codara_preview_console` | Reads the tab's console messages, recorded since the tab opened, filtered by level. |
+| `codara_preview_network` | Lists the tab's network requests, recorded since the tab opened, with filters; shows one request in full (headers, timings, initiator, body); exports HAR 1.2. |
+| `codara_preview_emulate` | Emulates color scheme, reduced motion, network speed, CPU slowdown and a device (viewport, pixel ratio, mobile, touch, user agent) for one tab, until reset. |
+| `codara_preview_storage` | Reads, sets and clears the tab's cookies, localStorage, sessionStorage, IndexedDB and Cache Storage; opens and discards a logged-out tab. |
 | `codara_preview_resize` | Resizes the viewport, for example to test a mobile layout. |
 | `codara_preview_inbox` | Reads what the user queued for this agent from Codara (picked elements, page comments, screenshots): text, source tab and URL, and attached file paths. |
 | `codara_preview_run` | Runs a batch of the steps above in one call. |
@@ -153,6 +155,59 @@ imported pull request's run may not use Chrome tabs at all.
 Large results stay out of the agent's context: images and long bodies are
 written under `<codara home>/workspace-data/<workspace>/`, never into the
 repository, and the result gives the path.
+
+### Network, emulation and storage
+
+These work on background and hidden tabs and with the window unfocused or
+minimized, like every browser tool.
+
+`codara_preview_network` keeps the last 500 requests of a tab, from the
+moment the tab opened. A list row is compact (`id`, method, status, type, URL,
+time, size). Filters combine: `filter` (URL substring), `type` (comma list
+such as `xhr,fetch`), `status` (`404`, `4xx`, `400-499`, `>=400`) and
+`failed` (network errors and status 400 and up). `id` returns one request in
+full: request and response headers, timings (`blocked`, `dns`, `connect`,
+`ssl`, `send`, `wait`, `receive` in ms, -1 for a phase that did not happen),
+the initiator, the request body and the response body (`body: false` leaves
+the response body out). Text
+and JSON bodies are decoded and cut to a few thousand characters, with the
+full text saved to a file; a binary body is saved to a file and summarized.
+Each hop of a redirect is its own request. `har: true` writes a HAR 1.2 file
+of the filtered requests (bodies included up to 1 MB each) and returns its
+path. Cookie, Set-Cookie, Authorization and Proxy-Authorization headers are
+replaced with `[redacted]` in details and HAR files unless `redact: false` is
+passed. `clear: true` empties the recording.
+
+`codara_preview_emulate` changes only what a call names and returns
+everything in force:
+
+- `colorScheme`: `light`, `dark` or `none`; `reducedMotion`: true or false.
+- `network`: `offline`, `slow3g`, `fast3g`, `4g`, `none`, or a custom
+  `"latency/download/upload"` in ms and kbit/s (`"300/1600/750"`).
+- `cpu`: a slowdown factor from 1 to 20.
+- `device`: `phone`, `tablet`, `desktop`, `laptop`, `iphone-se`, `iphone-15`,
+  `iphone-15-pro-max`, `pixel-8`, `galaxy-s23`, `ipad-mini`, `ipad-pro` or
+  `none`. A device sets viewport, pixel ratio, mobile, touch and user agent;
+  `deviceScaleFactor`, `mobile` and `touch` refine it in the same call.
+- `reset: true` removes every override.
+
+Emulation lasts until reset or the tab closes, survives navigation, and is
+put back when the tab's view is resized or shown again. The emulated viewport
+is the page's layout viewport; on screen the page is drawn at the top left of
+the tab and may be cut off when the tab is smaller.
+
+`codara_preview_storage` works on the tab's current origin. `action: "get"`
+reads one `area` or all of them (`cookies`, `local`, `session`, `indexeddb`,
+`cache`); values that look like secrets (keys such as token, auth, session,
+or JWT-shaped values, and every cookie value) are masked unless
+`redact: false`. `set` writes a cookie or a local or session item (`name`,
+`value`). `clear` removes one item by `name` or empties an area, or every
+area without one. `fresh` opens `url` in a new logged-out tab: an in-memory
+browser session shared with no other tab, which agent calls never pick unless
+given its `tabId`. Pages it opens in new tabs share its session. `discard`
+closes those tabs and wipes the session. On a
+Chrome tab, cookies are read-only and only local and session storage can be
+cleared.
 
 `codara_preview_url` is no longer listed (`codara_preview_list` returns every
 tab's URL and title) but stays callable for agents that still use it. Outside
