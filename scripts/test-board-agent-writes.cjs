@@ -30,6 +30,7 @@ const electronStub = {
         "export const clipboard = { writeText: () => {} };",
         "export const dialog = {};",
         "export const webContents = { getAllWebContents: () => [] };",
+        "export const screen = { getDisplayMatching: () => ({ scaleFactor: 1 }) };",
       ].join("\n"),
       loader: "js",
     }));

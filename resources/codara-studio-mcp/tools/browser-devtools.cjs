@@ -1,6 +1,6 @@
 "use strict";
 
-// Browser DevTools: console, network and viewport size.
+// Browser DevTools: console, network, emulation and viewport size.
 // Entries follow the contract in ./index.cjs.
 
 module.exports = {
@@ -44,6 +44,29 @@ module.exports = {
           har: { type: "boolean" },
           redact: { type: "boolean" },
           clear: { type: "boolean" },
+        },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "codara_preview_emulate",
+      rpc: "preview.emulate",
+      annotations: { idempotent: true },
+      description:
+        "Emulate conditions on the tab until reset; only passed fields change. device: phone, tablet, desktop, iphone-se, iphone-15, pixel-8, ipad-pro, none (size, pixel ratio, touch, mobile UA). network: offline, slow3g, fast3g, 4g, none, or ms/kbps/kbps for latency/down/up. cpu: slowdown factor. reset=true clears all first.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tabId: { type: "string" },
+          colorScheme: { type: "string", enum: ["light", "dark", "none"] },
+          reducedMotion: { type: "boolean" },
+          network: { type: "string" },
+          cpu: { type: "number" },
+          device: { type: "string" },
+          deviceScaleFactor: { type: "number" },
+          mobile: { type: "boolean" },
+          touch: { type: "boolean" },
+          reset: { type: "boolean" },
         },
         additionalProperties: false,
       },

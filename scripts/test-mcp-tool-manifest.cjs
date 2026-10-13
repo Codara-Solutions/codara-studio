@@ -169,6 +169,8 @@ const FENCE_EXEMPT = new Set([
   "codara_preview_hover",
   "codara_preview_resize",
   "codara_preview_inbox",
+  // Emulation changes how the page renders, like resize, not what it holds.
+  "codara_preview_emulate",
 ]);
 const policyBundle = require("esbuild").buildSync({
   entryPoints: [path.join(ROOT, "resources", "pi-cora", "worker-policy.ts")],
