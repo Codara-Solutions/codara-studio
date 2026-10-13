@@ -48,6 +48,13 @@ function route(req, res) {
     });
     return;
   }
+  if (url.pathname === "/api/late") {
+    // The status is known at once; the body follows later.
+    res.writeHead(500, { "content-type": "application/json" });
+    res.flushHeaders();
+    setTimeout(() => res.end('{"error":"late boom"}'), 400);
+    return;
+  }
   if (url.pathname === "/pixel.png") {
     res.writeHead(200, { "content-type": "image/png" });
     res.end(PIXEL);

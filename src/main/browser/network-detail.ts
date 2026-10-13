@@ -24,6 +24,17 @@ function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promi
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
+/**
+ * The list shows a request once its status arrives, but Chrome holds the body
+ * back until loading finishes and answers a read before that with "No data
+ * found"; an agent that reads a detail right after the click would see no
+ * body. Waits for the end of the request, bounded for a stream that never ends.
+ */
+async function untilFinished(entry: NetworkEntry, ms: number): Promise<void> {
+  const end = Date.now() + ms;
+  while (!entry.finished && !entry.failed && Date.now() < end) await new Promise((done) => setTimeout(done, 25));
+}
+
 export interface NetworkFilter {
   url: string | null;
   types: Set<string> | null;
@@ -180,6 +191,7 @@ async function requestDetail(target: BrowserTarget, entry: NetworkEntry, params:
   try {
     // A body still streaming (a page that never reads it, a long poll) may
     // never finish; the protocol waits for it, so the read is bounded.
+    if (!entry.finished) await untilFinished(entry, UNFINISHED_BODY_WAIT_MS);
     const body = entry.finished
       ? await readResponseBody(target.session, entry)
       : await withTimeout(readResponseBody(target.session, entry), UNFINISHED_BODY_WAIT_MS, "the response has not finished");
@@ -198,7 +210,7 @@ async function requestDetail(target: BrowserTarget, entry: NetworkEntry, params:
     // The page dropped the body (evicted from its buffers, or a navigation cleared them).
     const message = error instanceof Error ? error.message : String(error);
     detail.body = {
-      unavailable: /no resource with given identifier/i.test(message)
+      unavailable: /no (?:resource|data found for resource) with given identifier/i.test(message)
         ? "the page no longer holds this body: it navigated or reloaded since, or its buffer dropped it"
         : message,
     };

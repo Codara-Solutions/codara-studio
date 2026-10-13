@@ -517,6 +517,11 @@ async function againstChromium(lib) {
     assert.equal(echo.request.requestBody, "{\"hello\":\"world\"}");
     assert.equal(echo.request.requestHeaders.authorization, `Bearer ${BEARER}`, "redact=false shows credentials");
     assert.deepEqual(JSON.parse(echo.request.body), { received: "{\"hello\":\"world\"}" });
+    // A detail read while the response is still arriving waits for its body.
+    await target.evaluate(`void fetch("${origin}/api/late")`);
+    const late = await until(() => lib.networkRing(session).toArray().find((row) => row.url.endsWith("/api/late") && row.status !== null && !row.finished), "the late response's status");
+    const lateDetail = await lib.networkTool(target, { id: late.id });
+    assert.equal(lateDetail.request.body, "{\"error\":\"late boom\"}");
     const pixel = await lib.networkTool(target, { id: byPath("/pixel.png").id });
     assert.equal(pixel.request.body.binary, "image/png");
     assert.equal(pixel.request.body.bytes, PIXEL_BYTES);
@@ -533,7 +538,7 @@ async function againstChromium(lib) {
     assert.ok(harResult.har.endsWith(".har") && fs.existsSync(harResult.har));
     const har = JSON.parse(fs.readFileSync(harResult.har, "utf8"));
     assert.equal(har.log.version, "1.2");
-    assert.equal(har.log.entries.length, list.matching);
+    assert.equal(har.log.entries.length, (await lib.networkTool(target, {})).matching);
     assert.ok(harResult.bodies >= 3, "text bodies are included");
     const harText = fs.readFileSync(harResult.har, "utf8");
     for (const secret of [SESSION_COOKIE, BEARER]) { const at = harText.indexOf(secret); assert.equal(at, -1, `the HAR carries no cookie or token by default: ${harText.slice(Math.max(0, at - 300), at + 50)}`); }
