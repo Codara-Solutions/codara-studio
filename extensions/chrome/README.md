@@ -27,7 +27,10 @@ tools it uses for its own browser tabs.
 - Codara accepts only loopback connections whose `Origin` is a
   `chrome-extension://` id, and only after the user allowed the pairing code.
   It then issues a token bound to that extension id and stores only its hash
-  (`<Codara home>/chrome-link/links.json`).
+  (`<Codara home>/chrome-link/links.json`). The token is never sent again:
+  on every later connect Codara proves first that it holds the pairing
+  (an HMAC over fresh nonces from both sides), then the extension proves the
+  same, so a program that took Codara's port gets nothing it could use.
 - The socket pings every 20 seconds, which keeps the MV3 service worker
   alive while connected. An alarm every 30 seconds reconnects after the
   worker was suspended or Codara restarted. A Codara that does not know the

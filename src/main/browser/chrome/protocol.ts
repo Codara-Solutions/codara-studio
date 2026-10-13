@@ -2,16 +2,26 @@
 // (extensions/chrome/). One WebSocket per browser profile at
 // ws://127.0.0.1:<port>/codara-chrome; every frame is one JSON object.
 //
-//   ext -> {type:"hello", protocol, browser, extension, token?, pair}
-//   codara -> {type:"welcome", protocol, linkId, app}          known token
-//   codara -> {type:"pairing", code}                           pair asked, no token
+//   ext -> {type:"hello", protocol, browser, extension, linkId?, nonce?, pair}
+//   codara -> {type:"challenge", nonce, proof}                 known linkId
+//   ext -> {type:"auth", proof}
+//   codara -> {type:"welcome", protocol, linkId, app}          the proof matched
+//   codara -> {type:"pairing", code}                           pair asked, not paired
 //   codara -> {type:"paired", token, linkId, app}              the user allowed it
 //   codara -> {type:"denied", message} | {type:"unpaired"}     then close
+//
+// The token never crosses the socket after pairing. Each side proves it
+// holds the pairing secret with an HMAC over both nonces (linkProof), and
+// the extension checks Codara's proof before it answers, so a program that
+// took Codara's port first (another OS user's, say) learns nothing it could
+// replay and never gets to drive a tab.
 //
 // After that the extension reports the tabs the user shared ("tabs"),
 // relays chrome.debugger events ("cdp_event", "detached") and answers
 // Codara's requests ({id, type, ...} -> {id, result} | {id, error}). Codara
 // tells it which agent used a tab ("usage") and can revoke the pairing.
+
+import { createHmac, timingSafeEqual } from "node:crypto";
 
 export const CHROME_LINK_PROTOCOL = 1;
 export const CHROME_LINK_PORTS: readonly number[] = [47615, 47616, 47617, 47618, 47619];
@@ -46,8 +56,26 @@ export interface ExtensionHello {
   protocol: number;
   browser: ChromeBrowserInfo;
   extension: { id: string; version: string };
-  token?: string;
+  linkId?: string;
+  nonce?: string;
   pair?: boolean;
+}
+
+export const LINK_NONCE = /^[0-9a-f]{32,128}$/;
+
+/**
+ * HMAC-SHA256 keyed by the pairing secret (the hex SHA-256 of the token,
+ * which is what Codara stores). `role` keeps Codara's proofs from ever
+ * serving as the extension's. extensions/chrome/lib/policy.js computes the
+ * same.
+ */
+export function linkProof(secretHex: string, role: "codara" | "browser", first: string, second: string): string {
+  return createHmac("sha256", secretHex).update(`${role}|${first}|${second}`).digest("hex");
+}
+
+export function proofMatches(expected: string, actual: unknown): boolean {
+  if (typeof actual !== "string" || actual.length !== expected.length) return false;
+  return timingSafeEqual(Buffer.from(expected), Buffer.from(actual));
 }
 
 /** "483 921": six digits, grouped so both screens read the same at a glance. */

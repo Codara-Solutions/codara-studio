@@ -19,9 +19,12 @@ import {
   CHROME_LINK_PORTS,
   CHROME_LINK_PROTOCOL,
   EXTENSION_ORIGIN,
+  LINK_NONCE,
   LOOPBACK_HOST,
   linkIdFor,
+  linkProof,
   pairingCode,
+  proofMatches,
   sanitizeBrowserInfo,
   type ChromeBrowserInfo,
 } from "./protocol";
@@ -216,9 +219,11 @@ export class ChromeLinkServer {
   private accept(ws: WebSocket, extensionId: string): void {
     let link: ChromeLink | null = null;
     let greeted = false;
+    let onAuth: ((answer: Record<string, unknown>) => void) | null = null;
     this.alive.set(ws, true);
     ws.on("pong", () => this.alive.set(ws, true));
-    const helloTimer = setTimeout(() => ws.close(4000, "no hello"), this.options.helloTimeoutMs ?? 10_000);
+    const helloTimeoutMs = this.options.helloTimeoutMs ?? 10_000;
+    let helloTimer = setTimeout(() => ws.close(4000, "no hello"), helloTimeoutMs);
     helloTimer.unref?.();
     ws.on("message", (data, isBinary) => {
       if (isBinary) return;
@@ -240,6 +245,13 @@ export class ChromeLinkServer {
         ws.send(JSON.stringify({ type: "pong" }));
         return;
       }
+      if (onAuth) {
+        const handler = onAuth;
+        onAuth = null;
+        clearTimeout(helloTimer);
+        handler(message);
+        return;
+      }
       if (greeted) return;
       if (message.type !== "hello") {
         ws.close(4001, "expected hello");
@@ -247,9 +259,19 @@ export class ChromeLinkServer {
       }
       greeted = true;
       clearTimeout(helloTimer);
-      this.hello(ws, extensionId, message, (adopted) => {
-        link = adopted;
-      });
+      this.hello(
+        ws,
+        extensionId,
+        message,
+        (adopted) => {
+          link = adopted;
+        },
+        (handler) => {
+          onAuth = handler;
+          helloTimer = setTimeout(() => ws.close(4000, "no auth"), helloTimeoutMs);
+          helloTimer.unref?.();
+        },
+      );
     });
     ws.on("close", () => {
       clearTimeout(helloTimer);
@@ -264,7 +286,13 @@ export class ChromeLinkServer {
     ws.on("error", () => {});
   }
 
-  private hello(ws: WebSocket, extensionId: string, message: Record<string, unknown>, adopt: (link: ChromeLink) => void): void {
+  private hello(
+    ws: WebSocket,
+    extensionId: string,
+    message: Record<string, unknown>,
+    adopt: (link: ChromeLink) => void,
+    expectAuth: (handler: (answer: Record<string, unknown>) => void) => void,
+  ): void {
     if (message.protocol !== CHROME_LINK_PROTOCOL) {
       this.refuse(ws, {
         type: "error",
@@ -275,12 +303,21 @@ export class ChromeLinkServer {
     const browser = sanitizeBrowserInfo(message.browser);
     const extension = message.extension && typeof message.extension === "object" ? (message.extension as Record<string, unknown>) : {};
     const version = typeof extension.version === "string" ? extension.version.slice(0, 24) : "";
-    const token = typeof message.token === "string" ? message.token : "";
-    const paired = token ? this.options.store.find(token, extensionId) : null;
+    const linkId = typeof message.linkId === "string" ? message.linkId : "";
+    const clientNonce = typeof message.nonce === "string" && LINK_NONCE.test(message.nonce) ? message.nonce : "";
+    const paired = linkId && clientNonce ? this.options.store.find(linkId, extensionId) : null;
     if (paired) {
-      this.options.store.add({ ...paired, browser, lastSeenAt: new Date().toISOString() });
-      ws.send(JSON.stringify({ type: "welcome", protocol: CHROME_LINK_PROTOCOL, linkId: paired.linkId, app: this.options.app }));
-      adopt(this.open(ws, paired.linkId, browser, extensionId, version));
+      const serverNonce = randomBytes(16).toString("hex");
+      expectAuth((answer) => {
+        if (answer.type !== "auth" || !proofMatches(linkProof(paired.tokenSha256, "browser", serverNonce, clientNonce), answer.proof)) {
+          this.refuse(ws, { type: "unpaired" });
+          return;
+        }
+        this.options.store.add({ ...paired, browser, lastSeenAt: new Date().toISOString() });
+        ws.send(JSON.stringify({ type: "welcome", protocol: CHROME_LINK_PROTOCOL, linkId: paired.linkId, app: this.options.app }));
+        adopt(this.open(ws, paired.linkId, browser, extensionId, version));
+      });
+      ws.send(JSON.stringify({ type: "challenge", nonce: serverNonce, proof: linkProof(paired.tokenSha256, "codara", clientNonce, serverNonce) }));
       return;
     }
     if (message.pair !== true) {

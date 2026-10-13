@@ -1,6 +1,6 @@
 // The extension's end of the Codara link: finds Codara on its loopback
-// ports, introduces itself with the paired token (or asks to pair when the
-// user pressed Connect), answers Codara's requests and keeps the socket busy
+// ports, proves it holds the pairing secret (or asks to pair when the user
+// pressed Connect), answers Codara's requests and keeps the socket busy
 // enough that the MV3 service worker is not suspended while connected.
 // Everything browser-specific is passed in, so the tests drive it in Node.
 
@@ -19,9 +19,9 @@ export class LinkClient {
    * @param {typeof WebSocket} deps.WebSocket
    * @param {() => Promise<number[]>} [deps.ports]
    * @param {() => Promise<object>} deps.hello  browser and extension identity
-   * @param {() => Promise<string | null>} deps.loadToken
-   * @param {(token: string, linkId: string) => Promise<void>} deps.saveToken
-   * @param {() => Promise<void>} deps.clearToken
+   * @param {() => Promise<{ token: string, linkId: string } | null>} deps.loadPairing
+   * @param {(token: string, linkId: string) => Promise<void>} deps.savePairing
+   * @param {() => Promise<void>} deps.clearPairing
    * @param {(request: object) => Promise<unknown>} deps.onRequest
    * @param {(message: object) => void} [deps.onMessage]
    * @param {(status: object) => void} [deps.onStatus]
@@ -71,8 +71,8 @@ export class LinkClient {
 
   async run(pair) {
     this.clearReconnect();
-    const token = await this.deps.loadToken();
-    if (!token && !pair) {
+    const pairing = await this.deps.loadPairing();
+    if (!pairing && !pair) {
       this.setStatus({ state: "idle", code: null, error: null });
       return this.status;
     }
@@ -80,7 +80,7 @@ export class LinkClient {
     const ports = (await this.deps.ports?.()) ?? DEFAULT_PORTS;
     let unknown = false;
     for (const port of ports) {
-      const outcome = await this.tryPort(port, token, pair);
+      const outcome = await this.tryPort(port, pairing, pair);
       if (outcome === "unknown") unknown = true;
       else if (outcome !== "next") return this.status;
     }
@@ -97,10 +97,12 @@ export class LinkClient {
     return this.status;
   }
 
-  tryPort(port, token, pair) {
+  tryPort(port, pairing, pair) {
     return new Promise((resolve) => {
       let settled = false;
       let socket;
+      let proven = false;
+      const nonce = pairing ? randomNonce() : null;
       const finish = (outcome) => {
         if (settled) return;
         settled = true;
@@ -123,17 +125,37 @@ export class LinkClient {
       }
       socket.onopen = async () => {
         const hello = await this.deps.hello();
-        socket.send(JSON.stringify({ type: "hello", protocol: PROTOCOL, ...hello, ...(token ? { token } : {}), pair: pair === true }));
+        socket.send(JSON.stringify({ type: "hello", protocol: PROTOCOL, ...hello, ...(pairing ? { linkId: pairing.linkId, nonce } : {}), pair: pair === true }));
       };
       socket.onerror = () => finish("next");
       socket.onclose = () => {
         if (!settled) finish("next");
         else if (this.socket === socket) this.lost();
       };
-      socket.onmessage = (event) => {
+      socket.onmessage = async (event) => {
         const message = parse(event.data);
         if (!message) return;
+        if (!settled && message.type === "challenge" && pairing && !proven) {
+          // Answer only a Codara that proved it holds this pairing's secret:
+          // whatever else sits on the port gets nothing it could replay.
+          const secret = await sha256Hex(pairing.token);
+          const expected = await linkProof(secret, "codara", nonce, String(message.nonce ?? ""));
+          if (settled) return;
+          if (message.proof !== expected) {
+            socket.close();
+            finish("unknown");
+            return;
+          }
+          proven = true;
+          socket.send(JSON.stringify({ type: "auth", proof: await linkProof(secret, "browser", String(message.nonce), nonce) }));
+          return;
+        }
         if (!settled) {
+          if (message.type === "welcome" && !proven) {
+            socket.close();
+            finish("next");
+            return;
+          }
           // Only a Codara answers a hello with one of these; anything else on
           // the port is some other program, so try the next one.
           if (!["welcome", "pairing", "denied", "unpaired", "error"].includes(message.type)) {
@@ -179,7 +201,7 @@ export class LinkClient {
         this.setStatus({ state: "pairing", code: message.code ?? null, error: null });
         return;
       case "paired":
-        await this.deps.saveToken(message.token, message.linkId);
+        await this.deps.savePairing(message.token, message.linkId);
         this.attempt = 0;
         this.setStatus({ state: "connected", code: null, linkId: message.linkId ?? null, app: message.app ?? null, error: null });
         this.deps.onConnected?.();
@@ -190,7 +212,7 @@ export class LinkClient {
         return;
       case "unpaired":
       case "revoked":
-        await this.deps.clearToken();
+        await this.deps.clearPairing();
         this.disconnect("unpaired");
         this.setStatus({ error: message.type === "revoked" ? "Codara disconnected this browser." : "Codara no longer knows this browser. Connect again." });
         this.deps.onMessage?.(message);
@@ -242,7 +264,7 @@ export class LinkClient {
 
   async scheduleReconnect() {
     this.clearReconnect();
-    if (!(await this.deps.loadToken())) return;
+    if (!(await this.deps.loadPairing())) return;
     const delay = RECONNECT_DELAYS_MS[Math.min(this.attempt, RECONNECT_DELAYS_MS.length - 1)];
     this.attempt += 1;
     this.reconnectTimer = setTimeout(() => {
@@ -260,6 +282,26 @@ export class LinkClient {
     this.status = { ...this.status, ...patch };
     this.deps.onStatus?.(this.status);
   }
+}
+
+const encoder = new TextEncoder();
+
+function hex(bytes) {
+  return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function randomNonce() {
+  return hex(crypto.getRandomValues(new Uint8Array(16)));
+}
+
+export async function sha256Hex(text) {
+  return hex(await crypto.subtle.digest("SHA-256", encoder.encode(text)));
+}
+
+/** The HMAC that Codara's protocol.ts linkProof computes, keyed by the hex SHA-256 of the token. */
+export async function linkProof(secretHex, role, first, second) {
+  const key = await crypto.subtle.importKey("raw", encoder.encode(secretHex), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return hex(await crypto.subtle.sign("HMAC", key, encoder.encode(`${role}|${first}|${second}`)));
 }
 
 function parse(data) {

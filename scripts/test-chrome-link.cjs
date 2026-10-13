@@ -1,6 +1,7 @@
 "use strict";
 // The Chrome extension link in main (src/main/browser/chrome/): who may
-// connect, pairing with a code and Allow, tokens bound to one extension,
+// connect, pairing with a code and Allow, tokens bound to one extension and
+// proven both ways without crossing the socket,
 // shared and blocked tabs, the DevTools protocol relayed to a shared tab, the
 // activity log with the agent's name, codara_preview_chrome, and unpairing.
 // A fake extension speaks the wire protocol; the real one, in a real
@@ -14,11 +15,14 @@ const net = require("node:net");
 const os = require("node:os");
 const path = require("node:path");
 const esbuild = require("esbuild");
+const { pathToFileURL } = require("node:url");
 const { WebSocket } = require("ws");
 
 const ROOT = path.resolve(__dirname, "..");
 const EXT_A = "a".repeat(32);
 const EXT_B = "b".repeat(32);
+
+const extensionCrypto = import(pathToFileURL(path.join(ROOT, "extensions/chrome/lib/link-client.js")).href);
 
 async function load() {
   const out = await esbuild.build({
@@ -102,6 +106,16 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   ext.send = (message) => socket.send(JSON.stringify(message));
   ext.hello = (extra = {}) => ext.send({ type: "hello", protocol: 1, browser: { name: "Google Chrome", version: "141.0" }, extension: { id, version: "1.0.0" }, ...extra });
   ext.next = (type) => until(() => ext.received.find((message) => message.type === type), type);
+  // The extension's side of the handshake, with the extension's own proof code.
+  ext.login = async ({ token, linkId }, { lie = false } = {}) => {
+    const { linkProof, sha256Hex } = await extensionCrypto;
+    const nonce = "e".repeat(32);
+    ext.hello({ linkId, nonce });
+    const challenge = await ext.next("challenge");
+    const secret = await sha256Hex(token);
+    assert.equal(challenge.proof, await linkProof(secret, "codara", nonce, challenge.nonce), "Codara proves it holds the pairing");
+    ext.send({ type: "auth", proof: lie ? "0".repeat(64) : await linkProof(secret, "browser", challenge.nonce, nonce) });
+  };
   return ext;
 }
 
@@ -193,11 +207,20 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   assert.ok(saved.includes(lib.hashToken(paired.token)));
   assert.equal((fs.statSync(storeFile).mode & 0o777).toString(8), "600");
 
-  // The token works only for the extension it was issued to.
+  // The pairing works only for the extension it was issued to, and only with its secret.
   const thief = extension(port, { id: EXT_B });
   await thief.opened;
-  thief.hello({ token: paired.token });
+  thief.hello({ linkId: paired.linkId, nonce: "f".repeat(32) });
   await thief.next("unpaired");
+  assert.ok(!thief.received.some((message) => message.type === "challenge"), "another extension gets no challenge");
+  const guesser = extension(port);
+  await guesser.opened;
+  await assert.rejects(guesser.login({ token: "0".repeat(64), linkId: paired.linkId }), /proves it holds the pairing/, "a wrong secret cannot check Codara's proof");
+  const liar = extension(port);
+  await liar.opened;
+  await liar.login(paired, { lie: true });
+  await liar.next("unpaired");
+  assert.ok(!liar.received.some((message) => message.type === "welcome"), "a wrong proof is refused");
 
   // Shared tabs and the backend.
   const backend = new lib.ChromeTargetBackend(server);
@@ -270,7 +293,7 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   // The extension refuses: the error reaches the agent as is.
   const refusing = extension(port, { answer: async () => { throw new Error("Cookies and site storage of chrome:5 need the user's permission"); } });
   await refusing.opened;
-  refusing.hello({ token: paired.token });
+  await refusing.login(paired);
   await refusing.next("welcome");
   await until(() => downs.length === 1, "the replaced link going down");
   refusing.send({ type: "tabs", tabs: [{ tabId: 5, windowId: 1, url: "https://shop.example/", title: "Shop", active: true }] });
@@ -307,7 +330,7 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   assert.ok(!fs.readFileSync(storeFile, "utf8").includes(edgePaired.linkId));
   const again = extension(port, { id: EXT_B });
   await again.opened;
-  again.hello({ token: edgePaired.token });
+  again.hello({ linkId: edgePaired.linkId, nonce: "f".repeat(32) });
   await again.next("unpaired");
   assert.deepEqual((await backend.list()).map((tab) => tab.id), ["chrome:7"], "one browser left: bare ids again");
 

@@ -1,9 +1,10 @@
 // The browsers the user paired, kept in Codara's own data folder
 // (<codara home>/chrome-link/links.json), never in the browser's profile.
-// Only a hash of each token is stored: the extension holds the token, and
-// the hash is enough to recognise it.
+// Only a hash of each token is stored. Both sides prove they hold that hash
+// on every connect (protocol.ts linkProof), so the file stays private to
+// the user.
 
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
@@ -46,14 +47,10 @@ export class ChromeLinkStore {
     return this.links.map((link) => ({ ...link }));
   }
 
-  /** The pairing this token belongs to, only from the extension it was issued to. */
-  find(token: string, extensionId: string): PairedBrowser | null {
-    const hash = Buffer.from(hashToken(token), "hex");
-    for (const link of this.links) {
-      const stored = Buffer.from(link.tokenSha256, "hex");
-      if (stored.length === hash.length && timingSafeEqual(stored, hash) && link.extensionId === extensionId) return { ...link };
-    }
-    return null;
+  /** The pairing with this id, only for the extension it was issued to. */
+  find(linkId: string, extensionId: string): PairedBrowser | null {
+    const link = this.links.find((entry) => entry.linkId === linkId && entry.extensionId === extensionId);
+    return link ? { ...link } : null;
   }
 
   add(link: PairedBrowser): void {

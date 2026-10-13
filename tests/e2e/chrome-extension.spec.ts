@@ -156,6 +156,15 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     await expect(prompt).toHaveCount(0);
     await expect(popup.locator("#status")).toHaveText(/Connected to Codara/);
 
+    // The service worker loses its socket (suspended, or Codara restarted):
+    // it reconnects on its own, both sides proving the pairing.
+    expect(await worker.evaluate(() => {
+      const { link } = (self as unknown as { codara: any }).codara;
+      link.lost();
+      return link.status.state;
+    })).toBe("offline");
+    await expect.poll(() => worker.evaluate(() => (self as unknown as { codara: any }).codara.link.status.state), { timeout: 15_000 }).toBe("connected");
+
     // Nothing is shared yet.
     await expect(request("preview.snapshot", { tabId: `chrome:${accountTab}` })).rejects.toThrow(/is not shared with agents/);
 

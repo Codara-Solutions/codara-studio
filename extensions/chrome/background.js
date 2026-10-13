@@ -98,12 +98,12 @@ const link = new LinkClient({
     browser: browserIdentity(),
     extension: { id: chrome.runtime.id, version: chrome.runtime.getManifest().version },
   }),
-  loadToken: async () => {
+  loadPairing: async () => {
     await ready;
-    return state.token;
+    return state.token && state.linkId ? { token: state.token, linkId: state.linkId } : null;
   },
-  saveToken: (token, linkId) => save({ token, linkId }),
-  clearToken: () => save({ token: null, linkId: null }),
+  savePairing: (token, linkId) => save({ token, linkId }),
+  clearPairing: () => save({ token: null, linkId: null }),
   onRequest: handleRequest,
   onMessage: handleMessage,
   onConnected: () => void reportTabs(),
