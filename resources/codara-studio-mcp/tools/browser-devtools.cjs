@@ -1,6 +1,6 @@
 "use strict";
 
-// Browser DevTools: console, network and viewport emulation.
+// Browser DevTools: console, network and viewport size.
 // Entries follow the contract in ./index.cjs.
 
 module.exports = {
@@ -12,7 +12,7 @@ module.exports = {
       rpc: "preview.console",
       annotations: { readOnly: true },
       description:
-        "Read the tab's console messages and uncaught errors, newest last (up to 500), recorded since the tab opened. Filter by level, trim with limit, or clear=true to reset.",
+        "Read the tab's console messages and uncaught errors since it opened (up to 500). Filter by level; clear=true resets.",
       inputSchema: {
         type: "object",
         properties: {
@@ -29,13 +29,20 @@ module.exports = {
       rpc: "preview.network",
       annotations: { readOnly: true },
       description:
-        "Read the tab's requests (url, method, status, mimeType, failure; up to 500), recorded since the tab opened. filter matches a URL substring; clear=true resets.",
+        "Read the tab's requests since it opened (up to 500). Filter: filter (URL part), type (xhr,fetch), status (404, 4xx, >=400), failed=true (errors, 4xx, 5xx). id=<row id>: headers, timings, initiator, body (body=false skips). har=true saves a HAR 1.2 file. Cookie and authorization values are redacted unless redact=false.",
       inputSchema: {
         type: "object",
         properties: {
           tabId: { type: "string" },
-          limit: { type: "number", description: "Default 100, max 500." },
+          limit: { type: "number" },
           filter: { type: "string" },
+          type: { type: "string" },
+          status: { type: "string" },
+          failed: { type: "boolean" },
+          id: { type: "string" },
+          body: { type: "boolean" },
+          har: { type: "boolean" },
+          redact: { type: "boolean" },
           clear: { type: "boolean" },
         },
         additionalProperties: false,
@@ -47,7 +54,7 @@ module.exports = {
       annotations: { idempotent: true },
       step: { order: 120 },
       description:
-        "Resize the viewport to CSS-pixel dimensions, for example 375x667 for a phone layout. Returns the applied size.",
+        "Resize the viewport to CSS pixels, such as 375x667 for a phone layout.",
       inputSchema: {
         type: "object",
         required: ["width", "height"],
