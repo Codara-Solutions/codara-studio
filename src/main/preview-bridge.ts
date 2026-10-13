@@ -37,7 +37,6 @@ export type PreviewOpName =
   | "click"
   | "type"
   | "press_key"
-  | "wait_for"
   | "screenshot"
   | "url"
   // Renderer-side webview-element resize (changes the guest viewport).

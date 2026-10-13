@@ -1,13 +1,29 @@
 // Page reading and DOM actions, run by the renderer against the picked tab
-// (components/Preview/previewRpc.ts) through the preview bridge.
+// (components/Preview/previewRpc.ts) through the preview bridge. Waits run
+// in main against any browser target.
 
-import { browserBackend } from "../browser/targets";
+import { callTarget, markAgentAction } from "../browser/agent-action";
+import { browserBackend, resolveBrowserTarget, type BrowserTarget } from "../browser/targets";
+import { normalizeWaitRequest, waitForPage, WaitRequestError } from "../browser/wait";
 import { requestPreviewOp, type PreviewOpName } from "../preview-bridge";
 import { waitForLoopbackPreviewServer } from "../preview-navigation";
-import type { PreviewToolHandler, PreviewToolHost, PreviewToolTable } from "./types";
+import { PreviewToolParamsError, type PreviewToolHandler, type PreviewToolHost, type PreviewToolTable } from "./types";
 
 export function rendererOp(op: PreviewOpName): PreviewToolHandler {
   return (params) => requestPreviewOp(op, { ...params });
+}
+
+/** An agent action: stamped on the tab first, so waits know what "after your last action" means. */
+export function acting(handler: PreviewToolHandler): PreviewToolHandler {
+  return async (params, method, host) => {
+    await markAgentAction(params);
+    return handler(params, method, host);
+  };
+}
+
+/** The call's tab, or the error saying why there is none. */
+export async function requireTarget(params: Record<string, unknown>): Promise<BrowserTarget> {
+  return (await callTarget(params)) ?? resolveBrowserTarget(params);
 }
 
 async function navigate(params: Record<string, unknown>): Promise<unknown> {
@@ -34,13 +50,30 @@ async function list(params: Record<string, unknown>, _method: string, host: Prev
   return { ...(result as Record<string, unknown>), tabs: [...(result as { tabs: unknown[] }).tabs, ...extra] };
 }
 
+async function waitFor(params: Record<string, unknown>): Promise<unknown> {
+  let request;
+  try {
+    request = normalizeWaitRequest(params);
+  } catch (error) {
+    if (error instanceof WaitRequestError) throw new PreviewToolParamsError(error.message);
+    throw error;
+  }
+  const target = await requireTarget(params);
+  try {
+    return await waitForPage(target, request);
+  } catch (error) {
+    if (error instanceof WaitRequestError) return { ok: false, error: error.message };
+    throw error;
+  }
+}
+
 export const corePreviewTools: PreviewToolTable = {
   "preview.list": list,
-  "preview.navigate": navigate,
+  "preview.navigate": acting(navigate),
   "preview.url": rendererOp("url"),
   "preview.snapshot": rendererOp("snapshot"),
-  "preview.evaluate": rendererOp("evaluate"),
-  "preview.click": rendererOp("click"),
-  "preview.type": rendererOp("type"),
-  "preview.wait_for": rendererOp("wait_for"),
+  "preview.evaluate": acting(rendererOp("evaluate")),
+  "preview.click": acting(rendererOp("click")),
+  "preview.type": acting(rendererOp("type")),
+  "preview.wait_for": { run: waitFor, targets: "any" },
 };

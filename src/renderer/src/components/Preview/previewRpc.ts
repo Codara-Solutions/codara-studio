@@ -12,7 +12,7 @@
 import type { CoraWhiteboard } from "@shared/types";
 import { createPreviewDOM } from "@shared/preview-dom";
 import { snapshotProbe } from "./domSnapshot";
-import { clickProbe, typeProbe, pressKeyProbe, waitForProbe } from "./domActions";
+import { clickProbe, typeProbe, pressKeyProbe } from "./domActions";
 import {
   ensurePreviewTab,
   findReusablePreviewTab,
@@ -31,7 +31,6 @@ type PreviewOpName =
   | "click"
   | "type"
   | "press_key"
-  | "wait_for"
   | "screenshot"
   | "url"
   | "resize"
@@ -103,8 +102,6 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
       return typeText(req.params);
     case "press_key":
       return pressKey(req.params);
-    case "wait_for":
-      return waitFor(req.params);
     case "screenshot":
       return screenshot(req.params);
     case "resize":
@@ -295,16 +292,6 @@ async function pressKey(params: Record<string, unknown>): Promise<unknown> {
   const selector = readString(params, "selector");
   const tab = requireTab(params);
   const code = `(${pressKeyProbe.toString()})(${JSON.stringify({ key, selector })}, ${createPreviewDOM.toString()})`;
-  return runGuestScript(tab.handle, code);
-}
-
-async function waitFor(params: Record<string, unknown>): Promise<unknown> {
-  const selector = readString(params, "selector");
-  if (!selector) throw new Error("wait_for requires 'selector'");
-  const state = (readString(params, "state") as "attached" | "visible" | "hidden" | null) ?? "visible";
-  const timeoutMs = readNumber(params, "timeoutMs") ?? 5_000;
-  const tab = requireTab(params);
-  const code = `(${waitForProbe.toString()})(${JSON.stringify({ selector, state, timeoutMs })}, ${createPreviewDOM.toString()})`;
   return runGuestScript(tab.handle, code);
 }
 

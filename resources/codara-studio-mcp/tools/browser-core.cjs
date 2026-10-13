@@ -14,7 +14,7 @@ module.exports = {
       rpc: "preview.list",
       annotations: { readOnly: true },
       description:
-        "List the browser tabs in your workspace: id, title, URL, isActive, and isLastViewed (the tab the user looked at last). When the user refers to an existing tab, match it here and pass its tabId to the other browser tools; ask if the reference is ambiguous.",
+        "List your workspace's browser tabs: id, title, URL, isActive, isLastViewed (the one the user saw last). Match the user's references here and pass that tabId; ask if ambiguous.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
     },
     {
@@ -23,7 +23,7 @@ module.exports = {
       annotations: { openWorld: true },
       step: { order: 10 },
       description:
-        "Load an http, https, or file URL in a browser tab. With tabId, reuse that tab; without it, reuse or open this session's tab. Waits briefly for dom-ready. Tabs stay open afterwards.",
+        "Load an http, https or file URL in tabId, or in this session's tab (opened if needed). Waits briefly for dom-ready. Tabs stay open.",
       inputSchema: {
         type: "object",
         required: ["url"],
@@ -58,7 +58,7 @@ module.exports = {
       rpc: "preview.click",
       step: { order: 20 },
       description:
-        "Click one element by @reference or unique CSS selector with DOM events, after waiting briefly for it to be visible and enabled. Ambiguous, stale, disabled, or covered targets fail. Use codara_preview_mouse when the page needs trusted native input.",
+        "Click one element (@reference or unique CSS selector) with DOM events once visible and enabled; ambiguous, stale, disabled or covered targets fail. codara_preview_mouse sends trusted native clicks.",
       inputSchema: {
         type: "object",
         required: ["selector"],
@@ -74,7 +74,7 @@ module.exports = {
       rpc: "preview.type",
       step: { order: 30 },
       description:
-        "Type text into an input, textarea, or contentEditable (by @reference or unique CSS selector), or pick a native dropdown option by its exact value. clearFirst empties a text field first.",
+        "Type text into an input, textarea or contentEditable (@reference or unique selector), or pick a native dropdown option by exact value. clearFirst empties the field.",
       inputSchema: {
         type: "object",
         required: ["selector", "text"],
@@ -92,7 +92,7 @@ module.exports = {
       rpc: "preview.press_key",
       step: { order: 40 },
       description:
-        "Send one key (Enter, Escape, Tab, ArrowUp, Backspace, or a single character) to the focused element or to selector. Uses trusted input when available; codara_preview_key adds modifiers.",
+        "Send one key (Enter, Escape, Tab, ArrowUp, Backspace or a character) to the focused element or selector, as trusted input when possible. codara_preview_key does chords.",
       inputSchema: {
         type: "object",
         required: ["key"],
@@ -126,17 +126,31 @@ module.exports = {
       name: "codara_preview_wait_for",
       rpc: "preview.wait_for",
       annotations: { readOnly: true },
-      step: { order: 60 },
+      step: {
+        order: 60,
+        properties: {
+          fresh: { type: "boolean" },
+          navigation: { type: "boolean" },
+          load: { type: "string" },
+          stableMs: { type: "number" },
+          hmr: { type: "boolean" },
+        },
+      },
       description:
-        "Wait until a selector is attached, visible (default), or hidden, or until timeoutMs passes.",
+        "Wait until every given condition holds; a timeout says what it saw. selector (+state); fresh: only elements added since your last action. url: exact, path, * glob, /regex/. navigation: committed since your last action. load. stableMs: DOM quiet that long. hmr: dev-server update settled.",
       inputSchema: {
         type: "object",
-        required: ["selector"],
         properties: {
           tabId: { type: "string" },
           selector: { type: "string" },
           state: { type: "string", enum: ["attached", "visible", "hidden"] },
-          timeoutMs: { type: "number", maximum: PREVIEW_WAIT_MAX_MS, description: `Default 5000, max ${PREVIEW_WAIT_MAX_MS}.` },
+          fresh: { type: "boolean" },
+          url: { type: "string" },
+          navigation: { type: "boolean" },
+          load: { type: "string", enum: ["domcontentloaded", "load", "networkidle"] },
+          stableMs: { type: "number" },
+          hmr: { type: "boolean" },
+          timeoutMs: { type: "number", maximum: PREVIEW_WAIT_MAX_MS, description: "Default 5000, or 15000 with navigation/load/hmr." },
         },
         additionalProperties: false,
       },

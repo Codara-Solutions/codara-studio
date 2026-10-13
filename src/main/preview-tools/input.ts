@@ -3,6 +3,7 @@
 // falls back to the renderer's synthetic event when it cannot.
 
 import { handlePreviewInputOp, type PreviewInputOp } from "../preview-input";
+import { acting } from "./core";
 import type { PreviewToolHandler, PreviewToolTable } from "./types";
 
 export function inputOp(op: PreviewInputOp): PreviewToolHandler {
@@ -10,11 +11,11 @@ export function inputOp(op: PreviewInputOp): PreviewToolHandler {
 }
 
 export const inputPreviewTools: PreviewToolTable = {
-  "preview.scroll": inputOp("scroll"),
-  "preview.hover": inputOp("hover"),
-  "preview.mouse": inputOp("mouse"),
-  "preview.drag": inputOp("drag"),
-  "preview.upload": inputOp("upload"),
-  "preview.key": inputOp("key"),
-  "preview.press_key": inputOp("press_key"),
+  "preview.scroll": acting(inputOp("scroll")),
+  "preview.hover": acting(inputOp("hover")),
+  "preview.mouse": acting(inputOp("mouse")),
+  "preview.drag": acting(inputOp("drag")),
+  "preview.upload": acting(inputOp("upload")),
+  "preview.key": acting(inputOp("key")),
+  "preview.press_key": acting(inputOp("press_key")),
 };

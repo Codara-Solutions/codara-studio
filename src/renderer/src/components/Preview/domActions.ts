@@ -73,24 +73,3 @@ export async function pressKeyProbe(opts: { key: string; selector: string | null
   dispatchOn.dispatchEvent(new KeyboardEvent("keyup", init));
   return { ok: true, target: dispatchOn?.tagName?.toLowerCase?.() ?? null };
 }
-
-export function waitForProbe(opts: { selector: string; state: string; timeoutMs: number }, createDOM: typeof createPreviewDOM) {
-  const dom = createDOM();
-  return new Promise((resolve, reject) => {
-    const deadline = Date.now() + opts.timeoutMs;
-    const check = () => {
-      let el: HTMLElement | null;
-      try { el = dom.find(opts.selector, opts.state === "hidden"); } catch (error) { reject(error); return; }
-      let match = false;
-      if (opts.state === "attached") match = el !== null;
-      else {
-        const visible = !!el && dom.visible(el);
-        match = opts.state === "hidden" ? !visible : visible;
-      }
-      if (match) return resolve({ ok: true, foundAt: new Date().toISOString() });
-      if (Date.now() >= deadline) return resolve({ ok: false, error: `timed out waiting for '${opts.selector}' to be ${opts.state}` });
-      setTimeout(check, 75);
-    };
-    check();
-  });
-}
