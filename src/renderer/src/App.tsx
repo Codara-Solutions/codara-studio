@@ -87,6 +87,7 @@ import DiffStack from "./tabs/DiffStack";
 import { useSharedGitStatus } from "./git/useSharedGitStatus";
 import { useWorkspaceBranches } from "./git/useWorkspaceBranches";
 import RemoteAuthPrompt from "./components/remote/RemoteAuthPrompt";
+import ChromePairingPrompt from "./components/chrome/ChromePairingPrompt";
 import SshManagerDialog from "./components/remote/SshManagerDialog";
 import { makeRemotePath, type RemoteHostConfig } from "@shared/remote";
 import { useTabs, isDraftChatTabId, persistedTerminalPaneIds, restoredChatRunIds, sameWorkerMeta } from "./tabs/useTabs";
@@ -6257,6 +6258,7 @@ export default function App() {
           />
         )}
         <RemoteAuthPrompt />
+        <ChromePairingPrompt />
 
         {onboardingOpen && (
           <Suspense fallback={null}>

@@ -8,10 +8,11 @@
 
 import { guardPageDialogs } from "../browser/dialog-guard";
 import { recordActedTab, withActedTab } from "../browser/acted-tab";
+import { noteChromeToolCall } from "../browser/chrome/activity";
 import { BrowserTabRefError, parseTabRef } from "../browser/tab-ref";
 import { scopePreviewWorkspace } from "../preview-workspace";
 import { capturePreviewTools } from "./capture";
-import { chromeTargetTools } from "./chrome";
+import { chromeLinkTools, chromeTargetTools } from "./chrome";
 import { corePreviewTools } from "./core";
 import { devtoolsPreviewTools } from "./devtools";
 import { inboxPreviewTools } from "./inbox";
@@ -32,6 +33,7 @@ const TABLES: readonly PreviewToolTable[] = [
   insightPreviewTools,
   pointPreviewTools,
   serverTools,
+  chromeLinkTools,
 ];
 
 function mergeTables(tables: readonly PreviewToolTable[]): Map<string, PreviewToolEntry> {
@@ -98,6 +100,8 @@ async function dispatchPreviewTool(
   if (!(await host.mayUseUserBrowser(params))) {
     throw new PreviewToolParamsError("This session may not use tabs of your own browser.");
   }
+  // Every call that reaches the user's own browser is logged with its agent.
+  noteChromeToolCall(method, params);
   if (entry.targets === "any") return guardPageDialogs(method, params, () => entry.run(params, method, host));
   const chrome = CHROME_HANDLERS.get(method);
   if (chrome) return guardPageDialogs(method, params, () => chrome.run(params, method, host));

@@ -190,6 +190,16 @@ cora tool preview_storage --action fresh --url http://localhost:3000   # logged-
 cora tool preview_storage --action discard --tabId <id>
 ```
 
+The browser tools reach the tabs of the user's own browser through the
+Codara extension (see [mcp-tools.md](mcp-tools.md#the-users-own-browser)):
+
+```sh
+cora tool preview_chrome --action status       # paired browsers and shared chrome: tabs
+cora tool preview_snapshot --tabId chrome:1234567
+cora tool preview_click --tabId chrome:1234567 --selector @e12
+cora tool preview_screenshot --tabId chrome:1234567
+```
+
 ### App
 
 | Command | What it does |

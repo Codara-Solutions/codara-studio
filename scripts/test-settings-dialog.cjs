@@ -85,7 +85,8 @@ check("every search result points at something the page renders", () => {
   const entries = [...index.matchAll(/\{ tab: "([a-z-]+)", title: "([^"]+)"/g)];
   assert.ok(entries.length >= 30, "the index must cover the settings");
   const behavior = read(...components, "capabilities", "BehaviorSection.tsx");
-  const rendered = [dialog, remote, behavior].join("\n");
+  const chromeLink = read(...components, "chrome", "ChromeLinkSection.tsx");
+  const rendered = [dialog, remote, behavior, chromeLink].join("\n");
   const cards = read(...components, "AccountCards.tsx");
   const families = read("src", "shared", "agent-families.ts");
   for (const [, tab, title] of entries) {

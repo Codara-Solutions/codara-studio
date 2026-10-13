@@ -131,7 +131,11 @@ navigations and renderer swaps, bounded event buffers that record console
 and network from the moment a tab opens). Codara tabs use
 `webContents.debugger`, which coexists with the user's own DevTools window.
 A Chrome tab is never used unless an agent names it, and never for an
-imported pull request. Large results (screenshots, bodies, traces) go to
+imported pull request. The extension (`extensions/chrome/`) reaches Codara
+over a loopback WebSocket that accepts only `chrome-extension://` origins
+and a token the user allowed with a pairing code, and it enforces the user's
+choices itself: only shared tabs, never a blocked site, cookies and storage
+only with a per-tab permission, and no command that reaches other tabs. Large results (screenshots, bodies, traces) go to
 `<codaraHome>/workspace-data/<workspace>/` and the tool returns the path.
 
 What the user sends from the UI (a picked element, a comment, a screenshot)

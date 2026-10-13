@@ -306,6 +306,20 @@
       {
         "from": "cli",
         "to": "cora-cli"
+      },
+      {
+        "from": "extensions/chrome",
+        "to": "chrome-extension",
+        "filter": [
+          "**/*",
+          "!build/**",
+          "!test/**",
+          "!dist/**",
+          "!package.json",
+          "!.gitignore",
+          "!README.md",
+          "!STORE.md"
+        ]
       }
     ],
     "directories": {

@@ -314,6 +314,15 @@ startup pass) and `startStudioClaudeLoginKeeper` are called from `index.ts`.
     JPEG, element and full-page shots), `browser/locator.ts` with
     `shared/preview-locator.ts` (refs, unique selectors, boxes, names), and
     `browser/artifacts.ts` (files under `workspace-data/<workspace>/`).
+  - The user's own browser: the extension is `extensions/chrome/` (MV3,
+    its own tests and store packing). Codara's end is
+    `src/main/browser/chrome/`: `link-server.ts` (loopback WebSocket,
+    origin check, pairing), `link-store.ts` (hashed tokens),
+    `relay-transport.ts` and `chrome-target.ts` (the `chrome` target
+    backend over `chrome.debugger`), `tab-ops.ts` (the renderer-side tools
+    written against `BrowserTarget`), `activity.ts` (who did what), and
+    `index.ts` (boot, IPC, the folder Settings reveals). The UI is
+    `components/chrome/` (the pairing prompt and the Settings section).
 - **Sending to an agent.** `src/main/agent-delivery.ts` pastes into a pane's
   agent of any runtime (unsubmitted unless the user pressed Send), adds to a
   Cora chat, or queues for `codara_preview_inbox`; attachments become files

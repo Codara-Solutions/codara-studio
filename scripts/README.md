@@ -248,9 +248,10 @@ build).
 
 `test-preview-*` (auto-open, capture-paint, input-references, keyboard,
 navigation, registry, workspace, tools-routing: every tool's socket method has
-one handler, `chrome:` ids are gated and results name the tab they acted on;
-point: the element probe, source maps, source files and the workspace search,
-crops, regions under comments and the text agents receive), `test-browser-pane-webview-liveness`,
+one handler, `chrome:` ids are gated, every tab tool has a Chrome handler and
+results name the tab they acted on; point: the element probe, source maps,
+source files and the workspace search, crops, regions under comments and the
+text agents receive), `test-browser-pane-webview-liveness`,
 `test-browser-storage-boundary`, `test-guest-popups`, `test-browser-targets`
 (tab ids and target backends), `test-browser-cdp-session` (the shared
 DevTools protocol session and its console and network recorders),
@@ -288,6 +289,17 @@ and in Chromium; `tests/e2e/preview-agent-input.spec.ts` covers all of it in
 the built app over the socket, the stdio MCP server and `cora tool`, and
 `tests/e2e/preview-hot-reload.spec.ts` runs hot reload waits against a real
 Vite dev server.
+
+The Chrome extension link: `test-chrome-extension` (the extension's own
+tests in `extensions/chrome/test/`: sharing and blocked-site rules, which
+DevTools protocol commands need the cookie permission or are always refused,
+cookie redaction, the link client against a fake Codara, the store zip, and
+that the packaged app and Settings ship the same files) and
+`test-chrome-link` (Codara's side in `src/main/browser/chrome/`: origin and
+host checks, pairing with the code and Allow, tokens bound to one extension,
+shared and blocked tabs, the relayed protocol, the activity log and
+`codara_preview_chrome`, unpairing). The real extension in Playwright's
+Chromium is `tests/e2e/chrome-extension.spec.ts`.
 
 ### Security boundaries and packaging
 
