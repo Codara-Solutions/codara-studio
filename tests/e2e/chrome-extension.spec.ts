@@ -333,6 +333,23 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     await expect(request("preview.navigate", { tabId, url: `http://localhost:${sitePort}/bank` })).rejects.toThrow(/blocked/);
     await expect(account.getByText("Signed in as Ada")).toBeVisible();
 
+    // A navigation answers once the page loaded, not after a timeout.
+    const navigateStarted = Date.now();
+    expect(await request("preview.navigate", { tabId, url: `${origin}/account?again` })).toMatchObject({ url: `${origin}/account?again`, title: "Account" });
+    expect(Date.now() - navigateStarted).toBeLessThan(8_000);
+
+    // A page that sends the shared tab to a blocked site loses the agent
+    // there, and gets it back once the tab is on an allowed site again.
+    await request("preview.evaluate", { tabId, code: `setTimeout(() => { location.href = "http://localhost:${sitePort}/bank"; }, 50); true` });
+    await expect.poll(() => request("preview.snapshot", { tabId }).then(() => "allowed", (error) => String(error))).toMatch(/blocked/);
+    // Playwright's own client stays attached to every page, so the extension's
+    // record says whether the agent's debugger let go.
+    const agentAttached = () => worker.evaluate((id) => (self as unknown as { codara: any }).codara.state().attached.includes(id), accountTab);
+    await expect.poll(agentAttached).toBe(false);
+    await account.goto(`${origin}/account`);
+    await expect.poll(async () => JSON.stringify(await request("preview.snapshot", { tabId }).catch((error) => String(error))), { timeout: 15_000 }).toContain("Signed in as Ada");
+    expect(await agentAttached()).toBe(true);
+
     // Chrome stops an idle MV3 service worker. The extension comes back on
     // its own (the alarm or the next event), pairs again with its stored
     // token and the shared tab works without the user doing anything.

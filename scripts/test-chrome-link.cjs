@@ -37,6 +37,7 @@ async function load() {
         `export { chromeLinkTool } from "./link-tool";`,
         `export { registerBrowserBackend, resolveBrowserTarget } from "../targets";`,
         `export { consoleRing } from "../recorders/console";`,
+        `export { navigate } from "./tab-ops";`,
       ].join("\n"),
       resolveDir: path.join(ROOT, "src/main/browser/chrome"),
       loader: "ts",
@@ -356,6 +357,31 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   unregister();
   await server.stop();
   fs.rmSync(home, { recursive: true, force: true });
+
+  // A navigation on a Chrome tab answers when the page loaded. The load
+  // event comes only with the Page domain on, so navigate turns it on
+  // itself instead of waiting out its 15 second timeout.
+  const pageDomains = new Set();
+  const pageListeners = new Map();
+  const pageSession = {
+    async enable(domain) {
+      pageDomains.add(domain);
+      return async () => {};
+    },
+    on(method, listener) {
+      pageListeners.set(method, listener);
+      return () => pageListeners.delete(method);
+    },
+    async send(method) {
+      assert.equal(method, "Page.navigate");
+      setTimeout(() => pageDomains.has("Page") && pageListeners.get("Page.loadEventFired")?.({}), 20);
+      return { frameId: "F", loaderId: "L" };
+    },
+  };
+  const navigateStarted = Date.now();
+  const navigated = await lib.navigate({ ref: "chrome:12", session: pageSession, info: async () => ({ url: "https://a.example/next", title: "Next" }) }, { url: "https://a.example/next" });
+  assert.deepEqual(navigated, { url: "https://a.example/next", title: "Next", tabId: "chrome:12", opened: false });
+  assert.ok(Date.now() - navigateStarted < 2_000, "navigate waited for the load event, not its timeout");
   console.log("chrome link: origin and host checks, pairing with code and Allow, bound tokens, shared and blocked tabs, relayed protocol, activity, codara_preview_chrome, unpair");
   setTimeout(() => process.exit(process.exitCode ?? 0), 50).unref();
 })().catch((error) => {

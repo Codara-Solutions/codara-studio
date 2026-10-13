@@ -44,21 +44,28 @@ export async function navigate(target: BrowserTarget, params: Params): Promise<u
   const url = str(params, "url");
   if (!url) throw new Error("navigate requires 'url'");
   const session = target.session;
-  const loaded = new Promise<void>((resolve) => {
-    const offLoad = session.on("Page.loadEventFired", () => done());
-    const offDom = session.on("Page.domContentEventFired", () => done());
-    const timer = setTimeout(() => done(), NAVIGATE_TIMEOUT_MS);
-    function done() {
-      clearTimeout(timer);
-      offLoad();
-      offDom();
-      resolve();
-    }
-  });
-  const result = await session.send<{ errorText?: string; loaderId?: string }>("Page.navigate", { url });
-  if (result.errorText) throw new Error(`The browser could not load ${url}: ${result.errorText}`);
-  // A same-document navigation (a #hash change) fires no load event.
-  if (result.loaderId) await loaded;
+  // The load events below arrive only with the Page domain on; without it
+  // every navigation would wait out the whole timeout.
+  const releasePage = await session.enable("Page");
+  try {
+    const loaded = new Promise<void>((resolve) => {
+      const offLoad = session.on("Page.loadEventFired", () => done());
+      const offDom = session.on("Page.domContentEventFired", () => done());
+      const timer = setTimeout(() => done(), NAVIGATE_TIMEOUT_MS);
+      function done() {
+        clearTimeout(timer);
+        offLoad();
+        offDom();
+        resolve();
+      }
+    });
+    const result = await session.send<{ errorText?: string; loaderId?: string }>("Page.navigate", { url });
+    if (result.errorText) throw new Error(`The browser could not load ${url}: ${result.errorText}`);
+    // A same-document navigation (a #hash change) fires no load event.
+    if (result.loaderId) await loaded;
+  } finally {
+    void releasePage().catch(() => {});
+  }
   const info = await target.info();
   return { url: info.url, title: info.title, tabId: target.ref, opened: false };
 }
