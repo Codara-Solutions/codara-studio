@@ -44,7 +44,12 @@ export function createPreviewNames() {
     return "";
   }
 
-  /** Where a link goes, short: a same-origin path, else the full URL. */
+  // A data: or long signed URL in an href would otherwise fill an agent's
+  // context with one attribute.
+  const TARGET_MAX = 200;
+  const bounded = (target: string) => (target.length > TARGET_MAX ? `${target.slice(0, TARGET_MAX)}...` : target);
+
+  /** Where a link goes, short: a same-origin path, else the full URL, capped. */
   function linkTarget(el: Element): string | null {
     const anchor = el.closest("a[href]");
     const raw = anchor?.getAttribute("href");
@@ -52,11 +57,11 @@ export function createPreviewNames() {
     try {
       const url = new URL(raw, location.href);
       if (url.origin === location.origin && /^https?:$/.test(url.protocol)) {
-        return `${url.pathname}${url.search}${url.hash}` || "/";
+        return bounded(`${url.pathname}${url.search}${url.hash}` || "/");
       }
-      return url.href;
+      return bounded(url.href);
     } catch {
-      return raw;
+      return bounded(raw);
     }
   }
 

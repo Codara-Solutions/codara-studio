@@ -67,6 +67,7 @@ const PAGE = `<!doctype html><title>Shop</title>
     <button onclick="document.body.dataset.closed = 'yes'">×</button>
     <button>Add to cart</button>
     <a href="/search/advanced">Advanced search</a>
+    <a id="export" href="data:text/csv,${"x".repeat(20000)}">Export orders</a>
   </main>`;
 
 async function inChromium() {
@@ -119,6 +120,11 @@ async function inChromium() {
     assert.equal((await find("close")).candidates[0].name, "×", "synonyms: close ~ ×");
     assert.equal((await find("shopping cart icon", 1)).count, 1, "limit is honored");
     assert.equal((await find("help")).candidates[0].target, "/help");
+    const exported = await find("export orders");
+    assert.equal(exported.candidates[0].selector, "#export");
+    assert.ok(JSON.stringify(exported).length < 2000, `a data: link stays short in results (${JSON.stringify(exported).length} chars)`);
+    assert.match(exported.candidates[0].target, /^data:text\/csv,x+\.\.\.$/);
+    assert.ok(line(/"Export orders"/).length < 300, "and in the outline");
     const nothing = await find("rocket launcher");
     assert.equal(nothing.count, 0);
     assert.deepEqual(nothing.candidates, []);
