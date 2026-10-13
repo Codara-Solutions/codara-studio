@@ -25,11 +25,12 @@ import { ipcMain, webContents, type WebContents } from "electron";
 
 import { createPreviewDOM } from "../shared/preview-dom";
 import type { CdpSession } from "./browser/cdp-session";
+import { registerGuestChordReports, withAgentKeys } from "./browser/guest-chords";
 import { bindPreviewTabGuest, previewCdpSession } from "./browser/preview-cdp";
 import { resolvePreviewGuest, type PreviewGuestInfo } from "./browser/preview-guest";
 import { consoleRing } from "./browser/recorders/console";
 import { clearNetwork, networkRing } from "./browser/recorders/network";
-import { previewKeyEvents } from "./preview-keyboard";
+import { normalizeKeyModifiers, parseKeyChord, previewKeyEvents } from "./preview-keyboard";
 import { requestPreviewOp } from "./preview-bridge";
 import { isTrustedOnSender, isTrustedPreviewGuest } from "./main-window-trust";
 
@@ -49,16 +50,6 @@ export type PreviewInputOp =
   | "press_key";
 
 const RING_CAP = 500;
-const MODIFIER_SET = new Set([
-  "shift",
-  "control",
-  "ctrl",
-  "alt",
-  "meta",
-  "cmd",
-  "command",
-  "capsLock",
-]);
 
 // ---------------------------------------------------------------------------
 // Registration: a tab announces its guest at dom-ready, which binds the guest
@@ -69,6 +60,7 @@ let registered = false;
 export function registerPreviewInput(): void {
   if (registered) return;
   registered = true;
+  registerGuestChordReports();
   ipcMain.on(
     "preview-bridge:announce",
     (event, payload: { tabId?: string; webContentsId?: number }) => {
@@ -132,19 +124,10 @@ async function centerProbe(opts: { selector: string; scrollIntoView: boolean }, 
   return { ok: true, ...dom.point(el) };
 }
 
+// Electron's sendInputEvent modifiers use 'control'/'meta'; aliases (ctrl,
+// cmd, option, Mod) fold to them.
 function normalizeModifiers(raw: unknown): string[] {
-  if (!Array.isArray(raw)) return [];
-  const out: string[] = [];
-  for (const m of raw) {
-    if (typeof m !== "string") continue;
-    const key = m.toLowerCase();
-    if (!MODIFIER_SET.has(key)) continue;
-    // Electron's sendInputEvent modifiers use 'control'/'meta'; fold aliases.
-    if (key === "ctrl") out.push("control");
-    else if (key === "cmd" || key === "command") out.push("meta");
-    else out.push(key);
-  }
-  return out;
+  return normalizeKeyModifiers(raw);
 }
 
 // ---------------------------------------------------------------------------
@@ -340,11 +323,12 @@ async function opNetwork(params: Record<string, unknown>): Promise<unknown> {
 }
 
 async function opKey(params: Record<string, unknown>): Promise<unknown> {
-  const key = typeof params.key === "string" ? params.key : null;
-  if (!key) throw new Error("key requires 'key'");
+  const raw = typeof params.key === "string" ? params.key : null;
+  if (!raw) throw new Error("key requires 'key'");
+  // "Control+K" and key "k" with modifiers ["control"] are the same chord.
+  const { key, modifiers } = parseKeyChord(raw, params.modifiers);
   const { wc } = await resolveGuest(params, true);
   const text = typeof params.text === "string" ? params.text : null;
-  const modifiers = normalizeModifiers(params.modifiers);
   await dispatchKey(wc, key, modifiers, text);
   return { ok: true, key, modifiers };
 }
@@ -393,7 +377,11 @@ async function dispatchKey(
   const events = previewKeyEvents(key, modifiers, text);
   const session: CdpSession = previewCdpSession(wc);
   await session.send("Emulation.setFocusEmulationEnabled", { enabled: true });
-  for (const event of events) await session.send("Input.dispatchKeyEvent", event);
+  // The page gets every key an agent sends, chords included; none of them
+  // may reach Codara's own shortcuts (browser/guest-chords.ts).
+  await withAgentKeys(wc, async () => {
+    for (const event of events) await session.send("Input.dispatchKeyEvent", event);
+  });
 }
 
 // ---------------------------------------------------------------------------

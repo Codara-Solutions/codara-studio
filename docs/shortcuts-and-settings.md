@@ -13,6 +13,11 @@ has no default chord; bind one there to use it from the keyboard. The defaults
 come from `src/renderer/src/shortcuts/commands.ts`, and the command id is what
 the Keybindings tab and that file call it.
 
+Inside a browser tab the page gets a chord first, as in a browser. Codara
+runs its own command only when the page did not handle the chord, so a site
+whose Mod+K opens its own search keeps it. Mod+W and Ctrl+Tab always stay
+Codara's. Keys an agent sends to a page never trigger Codara's shortcuts.
+
 ### General
 
 | Action | Default | Command id |

@@ -92,7 +92,7 @@ module.exports = {
       rpc: "preview.key",
       step: { order: 110 },
       description:
-        "Trusted keyboard input to the focused element: a named key or single character, with optional modifiers. To type a whole string into a field use codara_preview_type.",
+        "Trusted key to the focused element: a named key, a character, or a chord like Control+K or Mod+Shift+P (Mod: Meta on macOS). Only the page gets it. Strings: codara_preview_type.",
       inputSchema: {
         type: "object",
         required: ["key"],

@@ -1,6 +1,12 @@
 /// <reference lib="dom" />
 import { ipcRenderer } from "electron";
 
+import { installChordReporter } from "./guest/chord-report";
+
+// Must run before any page script: the chord listener has to be the first
+// one registered.
+installChordReporter();
+
 // Inspector preload — runs inside the embedded <webview> next to the loaded
 // page. The host (BrowserPane) toggles inspect mode via `webview.send`; we
 // listen for that message, attach mouseover/click listeners to the document,
