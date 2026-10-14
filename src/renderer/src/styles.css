@@ -212,10 +212,13 @@
        --glass-bg-menu / --glass-blur-menu: menus that list rows. Enough
          frost that the text behind a row turns into color, not words.
        --glass-bg-read / --glass-blur-read / --glass-saturate-read: the
-         legibility tier. Dialogs, palettes, toasts, the notification center
-         and the Settings nav hold dense text over live content (a scrolling
-         terminal, a streaming chat), so they keep the rim and frost but a
-         deeper tint.
+         legibility tier. Dialogs, palettes, toasts and the Settings nav
+         hold dense text over live content (a scrolling terminal, a
+         streaming chat), so they keep the rim and frost but a deeper tint.
+         The notification center keeps this frost under a thinner fill
+         over a dimmed backdrop, so it reads as glass across its height.
+       --glass-muted: the muted text tier on such a thinner fill, drawn
+         toward ink-dim so secondary text holds up over the frost.
        --glass-specular: the top-lit highlight, a background-image layer over
          the fill. Brighter than --glass-sheen and gone by mid-height.
        --modal-scrim: the one dim behind every modal dialog, per theme, with
@@ -229,6 +232,7 @@
   --modal-scrim: rgb(0 0 0 / 0.45);
   --palette-scrim: rgb(0 0 0 / 0.24);
   --glass-specular: linear-gradient(180deg, oklch(1 0 0 / 0.075), oklch(1 0 0 / 0.018) 40%, transparent 64%);
+  --glass-muted: color-mix(in oklab, var(--muted) 62%, var(--ink-dim));
 }
 
 /* Light glass: higher fill opacity (thin white glass goes milky, not smoky),
@@ -9501,23 +9505,41 @@ button.st-list__row:hover,
   animation: spark-fade-in var(--motion-fast) var(--ease-out) both;
 }
 @media not (prefers-reduced-transparency: reduce) {
-  /* The reading tier: a deep tint and a heavy frost, so the workbench
-     comes through as color and never as words behind a list of small text. */
+  /* See-through glass with the read tier's frost: the workbench shows
+     through as color and never as words behind a list of small text. The
+     backdrop is dimmed (lifted in light) before the fill tints it, so bright
+     content behind the panel cannot wash the fill toward the text, and the
+     muted tier leans toward ink-dim. No lens: the rows repaint under the
+     pointer, and the SVG lens would rerun over the whole tall panel. */
   html:not([data-glass="off"]) .nc-panel {
-    background-color: color-mix(in oklab, var(--panel-2) min(calc(86% * var(--glass-veil-scale, 1)), 98%), transparent);
+    --muted: var(--glass-muted);
+    background-color: color-mix(in oklab, var(--panel-2) min(calc(62% * var(--glass-veil-scale, 1)), 98%), transparent);
     background-image: var(--glass-specular);
-    -webkit-backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read));
-    backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read));
+    -webkit-backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read)) brightness(0.72);
+    backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read)) brightness(0.72);
     border-color: var(--glass-border);
     box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), var(--glass-bloom), var(--glass-shadow);
   }
-  /* Section labels are the panel's scroll edge: a band of the panel's own
-     tint that the rows pass under. It stays opaque, since any translucency
-     ghosts the rows' text through the label, and it does not frost them:
-     the panel is already the one glass layer here. */
+  /* A section label rests on the glass. Once it sticks, rows scroll under
+     it, so it shows a band of the panel's own color: opaque, since any
+     translucency ghosts the rows' text through the label, and not frosted,
+     since the panel is already the one glass layer here. */
   html:not([data-glass="off"]) .nc-section-head {
+    container-type: scroll-state;
+    background: none;
+  }
+  html:not([data-glass="off"]) .nc-section-head::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
     background: var(--panel-2);
     box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.09), inset 0 -1px 0 color-mix(in oklab, var(--ink) 7%, transparent);
+  }
+  @container not scroll-state(stuck: top) {
+    html:not([data-glass="off"]) .nc-section-head::before {
+      visibility: hidden;
+    }
   }
   html:not([data-glass="off"]) .nc-foot {
     border-top-color: color-mix(in oklab, var(--ink) 7%, transparent);
@@ -9525,9 +9547,11 @@ button.st-list__row:hover,
     box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.09);
   }
   :root[data-theme-mode="light"]:not([data-glass="off"]) .nc-panel {
-    background-color: var(--glass-bg-read);
+    background-color: color-mix(in oklab, var(--panel) min(calc(68% * var(--glass-veil-scale, 1)), 98%), transparent);
+    -webkit-backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read)) brightness(1.08);
+    backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read)) brightness(1.08);
   }
-  :root[data-theme-mode="light"]:not([data-glass="off"]) .nc-section-head {
+  :root[data-theme-mode="light"]:not([data-glass="off"]) .nc-section-head::before {
     background: var(--panel);
   }
 }
