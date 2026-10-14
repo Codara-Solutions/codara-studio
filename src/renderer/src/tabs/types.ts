@@ -15,9 +15,33 @@ import type {
 
 export type TabId = string;
 
+// The colors Chrome offers for its tab groups, so a group an agent mirrors
+// into the user's Chrome keeps its color there.
+export type TabGroupColor =
+  | "grey"
+  | "blue"
+  | "red"
+  | "yellow"
+  | "green"
+  | "pink"
+  | "purple"
+  | "cyan"
+  | "orange";
+
+// A named, colored run of adjacent tabs in one workspace's strip. Every member
+// carries the same record (see tabGroups.ts), so the group persists and moves
+// with the tab list alone.
+export interface TabGroup {
+  id: string;
+  name: string;
+  color: TabGroupColor;
+  collapsed?: boolean;
+}
+
 export interface BaseTab {
   id: TabId;
   title: string;
+  group?: TabGroup;
 }
 
 export interface ChatTab extends BaseTab {

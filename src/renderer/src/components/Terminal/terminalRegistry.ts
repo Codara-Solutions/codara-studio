@@ -35,6 +35,8 @@ export interface CreateAgentTerminalInput {
   // `codara-pane tab` helper): the user's own tab, so it takes focus and
   // carries no agent tint.
   requestedFromPane?: boolean;
+  // Tab group to put the new tab in, joined by name within its workspace.
+  group?: string;
 }
 
 export interface CreateAgentTerminalResult {
@@ -42,6 +44,8 @@ export interface CreateAgentTerminalResult {
   paneId: string;
   // The cwd actually used (input.cwd or the resolved active-workspace default).
   cwd: string;
+  // The group the tab joined, under its existing name when it already existed.
+  group?: string;
 }
 
 export interface ShareableStudioTerminal {
@@ -51,6 +55,8 @@ export interface ShareableStudioTerminal {
   title?: string;
   cwd?: string;
   profile: "shell" | "claude" | "codex" | "grok";
+  // The name of the tab group the pane's tab is in.
+  group?: string;
 }
 
 type ListShareableStudioTerminalsFn = () => ShareableStudioTerminal[];

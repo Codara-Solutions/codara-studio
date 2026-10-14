@@ -368,8 +368,9 @@ These suites bundle renderer modules without React where they can:
 `test-chat-*`, `test-composer-fast-mode`, `test-model-effort-shortcuts`,
 `test-agent-destinations` (where a pick, a comment or a tab reference from a
 browser tab can be sent, and the default),
-`test-dock-layout`, `test-split-drop`, `test-tab-reorder`,
-`test-workspace-reorder`, `test-workbench-routing`, `test-editor-tabs`,
+`test-dock-layout`, `test-split-drop`, `test-tab-reorder`, `test-tab-groups`
+(group membership, naming, colors, collapse, drops into and out of a group,
+saved groups), `test-workspace-reorder`, `test-workbench-routing`, `test-editor-tabs`,
 `test-workspace-colors`, `test-explorer-clipboard`, `test-file-tree-marquee`,
 `test-file-preview-capabilities`, `test-csv-preview`, `test-csv-preview-ui`,
 `test-run-graph-layout`, `test-overlay-performance`,

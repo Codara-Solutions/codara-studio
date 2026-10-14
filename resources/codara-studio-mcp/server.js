@@ -128,6 +128,7 @@ const TERMINAL_TOOLS = [
         command: { type: "string", description: "One line; join steps with && or ;." },
         paneId: { type: "string", description: "A terminal you created. Omit to open a new one." },
         cwd: { type: "string", description: "Directory for a new terminal. Defaults to the workspace root." },
+        group: { type: "string", description: "Tab group for a new terminal, or to move paneId's tab into." },
         timeoutMs: { type: "number", description: "Default 30000, max 600000." },
         lines: { type: "number", description: "Trailing output lines to return (default 200)." },
       },
@@ -137,17 +138,18 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_create",
     description:
-      "Open a new agent-owned terminal tab, tinted so the user can see an agent drives it, next to your own pane. Temporary terminals are closed automatically when their Cora run finishes; use retention='service' only for a dev server or watcher the user explicitly needs afterwards (it is still closed when the run is deleted). Optionally pass a shell command to start immediately and a title. Pass an absolute cwd that exists; when omitted it defaults to the workspace root, and a missing directory makes the terminal fail to start. Returns { tabId, paneId, cwd }.",
+      "Open a new agent-owned terminal tab, tinted so the user can see an agent drives it, next to your own pane. Temporary terminals are closed automatically when their Cora run finishes; use retention='service' only for a dev server or watcher the user explicitly needs afterwards (it is still closed when the run is deleted). Returns { tabId, paneId, cwd }.",
     inputSchema: {
       type: "object",
       properties: {
         cwd: { type: "string", description: "Absolute directory that exists. Defaults to the workspace root." },
         command: { type: "string", description: "Shell command to run right after the terminal opens." },
         title: { type: "string" },
+        group: { type: "string", description: "Tab group to open it in, named after your task." },
         retention: {
           type: "string",
           enum: ["temporary", "service"],
-          description: "temporary (default) closes when the run settles. service survives completion only when the user needs it, and still closes with the run.",
+          description: "temporary (default) or service.",
         },
       },
       additionalProperties: false,
@@ -187,7 +189,7 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_list",
     description:
-      "List the terminal panes in your workspace: paneId, title, cwd, which agent runs there and its state, whether the shell is running a command or idle, isCaller for your own pane, and writable for panes you may write to. Use it to find the pane the user means, then codara_terminal_read it.",
+      "List the terminal panes in your workspace: paneId, title, group, cwd, which agent runs there and its state, whether the shell is running a command or idle, isCaller for your own pane, and writable for panes you may write to. Use it to find the pane the user means, then codara_terminal_read it.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -1731,6 +1733,11 @@ function buildInstructions() {
   if (listed.has("codara_terminal_run")) {
     parts.push(
       "Terminals: codara_terminal_run runs a command and returns its exit code and output. Start watchers with codara_terminal_create, then poll codara_terminal_read with since=<cursor> to get only new output, or mode=\"screen\" for full-screen programs. codara_terminal_list shows the workspace's panes; you can read any of them but only write to terminals you created.",
+    );
+  }
+  if (listed.has("codara_preview_navigate") || listed.has("codara_terminal_create")) {
+    parts.push(
+      "Tab groups: when one task opens several tabs or terminals, pass the same group, a short name for the task, to the tools that open them. They sit together in a named group the user can collapse; a name already in use in your workspace joins that group.",
     );
   }
   if (listed.has("codara_terminal_servers")) {

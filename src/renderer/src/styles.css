@@ -96,6 +96,22 @@
      placeholder and a real tab are the same object. */
   --tab-h: 28px;
 
+  /* Tab group colors, Chrome's nine. Each is a dot, an underline and a tint
+     on the strip, so dark themes take the light tones (at least 4.5:1 on
+     every dark panel); the light palettes swap in deep ones below.
+     --tab-group-on is the text on a solid group color (the collapsed chip's
+     count), at least 7:1 here. */
+  --tab-group-grey: #dadce0;
+  --tab-group-blue: #8ab4f8;
+  --tab-group-red: #f28b82;
+  --tab-group-yellow: #fdd663;
+  --tab-group-green: #81c995;
+  --tab-group-pink: #ff8bcb;
+  --tab-group-purple: #c58af9;
+  --tab-group-cyan: #78d9ec;
+  --tab-group-orange: #fcad70;
+  --tab-group-on: #17181a;
+
   /* Motion */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);          /* expo-ish out  */
   --ease-out-fast: cubic-bezier(0.32, 0.72, 0, 1);     /* swift settle  */
@@ -248,6 +264,21 @@
   --modal-scrim: rgb(30 28 24 / 0.18);
   --palette-scrim: rgb(30 28 24 / 0.07);
   --glass-specular: linear-gradient(180deg, oklch(1 0 0 / 0.55), oklch(1 0 0 / 0.14) 40%, transparent 64%);
+}
+
+/* Deep group tones for bright paper: each keeps at least 3.5:1 against the
+   light panels and 5:1 under white text. */
+:root[data-theme-mode="light"] {
+  --tab-group-grey: #5f6368;
+  --tab-group-blue: #1a62d0;
+  --tab-group-red: #c5221f;
+  --tab-group-yellow: #9a5b00;
+  --tab-group-green: #137333;
+  --tab-group-pink: #b8136f;
+  --tab-group-purple: #8430ce;
+  --tab-group-cyan: #00707a;
+  --tab-group-orange: #b3530a;
+  --tab-group-on: #ffffff;
 }
 
 :root[data-theme="codara-classic"] {
@@ -730,6 +761,199 @@ a { color: inherit; }
   outline-offset: 1px;
 }
 
+/* Tab groups. Members carry a line in the group's color in the strip's
+   bottom slack, running on under the gap to the next member and stopping at
+   the last one, so a group reads as one run from its chip onwards. The
+   strip stays solid: the group's only floating layer is its editor. */
+.spark-tab[data-tab-group]::after {
+  content: "";
+  position: absolute;
+  left: -1px;
+  right: -5px;
+  bottom: -3px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--tab-group-color);
+  pointer-events: none;
+}
+
+.spark-tab[data-tab-group][data-group-last="true"]::after {
+  right: 8px;
+}
+
+.spark-tab-group-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  height: 22px;
+  max-width: 168px;
+  min-width: 0;
+  padding: 0 9px 0 8px;
+  border: 1px solid color-mix(in oklab, var(--tab-group-color) 55%, transparent);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--tab-group-color) 16%, var(--panel));
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: default;
+  -webkit-user-drag: none;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
+}
+
+/* The chip's share of the line: from its middle to the first member. */
+.spark-tab-group-chip[data-collapsed="false"]::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  right: -5px;
+  bottom: -6px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--tab-group-color);
+  pointer-events: none;
+}
+
+.spark-tab-group-chip:hover {
+  background: color-mix(in oklab, var(--tab-group-color) 26%, var(--panel));
+}
+
+.spark-tab-group-chip:active {
+  background: color-mix(in oklab, var(--tab-group-color) 34%, var(--panel));
+}
+
+.spark-tab-group-chip:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.spark-tab-group-chip[data-unnamed="true"] {
+  padding: 0 7px;
+}
+
+.spark-tab-group-chip__dot {
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--tab-group-color);
+}
+
+.spark-tab-group-chip__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spark-tab-group-chip__count {
+  flex: 0 0 auto;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--tab-group-color);
+  color: var(--tab-group-on);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A tab landing in a group shows the group's color in its slot. */
+.spark-tab-reorder-ghost[data-group-color] {
+  border-color: var(--tab-group-color);
+  background: color-mix(in oklab, var(--tab-group-color) 18%, transparent);
+}
+
+.spark-tab-group-dot {
+  flex: 0 0 9px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--tab-group-color);
+}
+
+.spark-tab-group-menu {
+  padding: 10px 0 4px;
+}
+
+.spark-tab-group-menu__field {
+  padding: 0 10px 10px;
+}
+
+.spark-tab-group-menu__field input {
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control, 7px);
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 500;
+  outline: none;
+}
+
+.spark-tab-group-menu__field input::placeholder {
+  color: var(--muted);
+}
+
+.spark-tab-group-menu__field input:focus {
+  border-color: var(--accent-edge);
+  box-shadow: var(--focus-ring);
+}
+
+/* All nine colors on one row. */
+.spark-tab-group-menu__colors {
+  display: grid;
+  grid-template-columns: repeat(9, 18px);
+  justify-content: space-between;
+  padding: 0 12px 10px;
+}
+
+.spark-tab-group-swatch {
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--tab-group-color);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--ink) 16%, transparent);
+  cursor: default;
+}
+
+.spark-tab-group-swatch[aria-checked="true"] {
+  box-shadow: 0 0 0 2px var(--panel-2), 0 0 0 4px var(--tab-group-color);
+}
+
+.spark-tab-group-swatch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
+
+.spark-tab-group-menu__rule {
+  height: 1px;
+  margin: 0 0 4px;
+  background: var(--rule-soft);
+}
+
+.spark-tab-group-menu__warning {
+  padding: 0 12px 8px;
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .spark-tab__label {
   /* Size the box to the title's OWN intrinsic width (width: max-content,
      flex-shrink: 0). Letting the label be a flex-shrinkable auto-width item
@@ -824,6 +1048,7 @@ a { color: inherit; }
    snapping into a new layout at drop time. The modifier is dropped in the same
    commit that applies the new order, so the settle is instant — the committed
    layout never animates backwards out of the preview offsets. */
+.spark-tabbar-scroll--reordering .spark-tab-group-chip,
 .spark-tabbar-scroll--reordering .spark-tab {
   transition:
     background var(--motion-fast) var(--ease-out),
@@ -834,6 +1059,7 @@ a { color: inherit; }
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .spark-tabbar-scroll--reordering .spark-tab-group-chip,
   .spark-tabbar-scroll--reordering .spark-tab {
     transition:
       background var(--motion-fast) var(--ease-out),

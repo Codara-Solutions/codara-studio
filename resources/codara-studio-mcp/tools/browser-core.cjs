@@ -7,29 +7,29 @@ const { PREVIEW_WAIT_MAX_MS } = require("./lib/limits.cjs");
 
 module.exports = {
   order: 10,
-  budget: 4400,
+  budget: 4540,
   tools: [
     {
       name: "codara_preview_list",
       rpc: "preview.list",
       annotations: { readOnly: true },
       description:
-        "List your workspace's browser tabs, then ones the user shared from Chrome (kind \"chrome\"): id, title, URL, isActive, isLastViewed. Match the user's references here and pass that tabId; ask if ambiguous.",
+        "List your workspace's browser tabs, then ones the user shared from Chrome (kind \"chrome\"): id, title, URL, group, isActive, isLastViewed. Match the user's references here and pass that tabId; ask if ambiguous.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
     },
     {
       name: "codara_preview_navigate",
       rpc: "preview.navigate",
       annotations: { openWorld: true },
-      step: { order: 10 },
+      step: { order: 10, properties: { group: { type: "string" } } },
       description:
         "Load an http, https or file URL in tabId, or in this session's tab (opened if needed). Waits briefly for dom-ready.",
       inputSchema: {
         type: "object",
-        required: ["url"],
         properties: {
           tabId: { type: "string" },
           url: { type: "string", description: "Absolute URL to load." },
+          group: { type: "string", description: "Tab group for the tab this opens, or for tabId (url then optional). Name it after your task." },
         },
         additionalProperties: false,
       },

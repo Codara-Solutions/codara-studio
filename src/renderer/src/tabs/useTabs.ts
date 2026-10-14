@@ -30,6 +30,8 @@ import type {
   PreviewTab,
   RunsTab,
   Tab,
+  TabGroup,
+  TabGroupColor,
   TabId,
   TerminalAgentSession,
   TerminalLeaf,
@@ -44,6 +46,24 @@ import { isRunOwnedTab } from "./types";
 import { createManualAgentLaunchWorker } from "./terminalAgentState";
 import { openEditor, type OpenEditorOptions } from "./openEditor";
 import { moveTabInList } from "./tabReorder";
+import {
+  applyStripDrop,
+  findTabGroupByName,
+  insertTabInNamedGroup,
+  moveTabToGroup,
+  newTabGroup,
+  normalizeTabGroupName,
+  normalizeTabGroups,
+  placeTabInNamedGroup,
+  recolorTabGroup,
+  renameTabGroup,
+  sanitizeTabGroup,
+  setTabGroupCollapsed,
+  tabGroupById,
+  tabGroupsIn,
+  ungroupTabGroup,
+  type StripDrop,
+} from "./tabGroups";
 import { insertTabAfter } from "./agentTerminalPlacement";
 import { applySplitDrop, type SplitDropSource, type SplitDropPlacement } from "./splitDrop";
 import { resolveBootActiveTabId } from "./bootSelection";
@@ -344,6 +364,85 @@ export function restoredChatRunIds(workspaceId: string | null): ReadonlySet<stri
 }
 const EMPTY_RUN_ID_SET: ReadonlySet<string> = new Set();
 
+// The group each saved chat tab was in, by run id. Chat tabs are stripped on
+// load and re-derived from the run store, so without this a relaunch would
+// drop every chat from its group. An entry is forgotten once its chat tab is
+// back in the strip (see the group effect in useTabs), not in the state
+// updater that adds it, which React may run twice.
+const restoredChatGroupsByWorkspace = new Map<string, Map<string, TabGroup>>();
+
+function restoredChatGroup(workspaceId: string | null, runId: string): TabGroup | null {
+  if (!workspaceId) return null;
+  return restoredChatGroupsByWorkspace.get(workspaceId)?.get(runId) ?? null;
+}
+
+// A chat tab added for a run that was in a group before the relaunch rejoins
+// it, after the group's other members, or brings the group back on its own.
+function withRestoredChatGroup(tabs: Tab[], chatTab: ChatTab, workspaceId: string | null): Tab[] {
+  const appended = [...tabs, chatTab];
+  const group = restoredChatGroup(workspaceId, chatTab.id);
+  if (!group) return appended;
+  return moveTabToGroup(appended, chatTab.id, tabGroupById(tabs, group.id) ?? group);
+}
+
+// Join a group resolved against an earlier snapshot of the same layout. Two
+// calls naming one new group in the same tick each predicted their own id;
+// matching the name again here lands both in whichever was created first.
+function joinPredictedGroup(tabs: Tab[], tabId: TabId, predicted: TabGroup): Tab[] {
+  const group =
+    tabGroupById(tabs, predicted.id) ??
+    findTabGroupByName(tabGroupsIn(tabs), predicted.name) ??
+    predicted;
+  return moveTabToGroup(tabs, tabId, group);
+}
+
+// The name a tab joining `name` in this layout ends up under: the existing
+// group's own spelling, else the cleaned-up name of the group it starts.
+function predictedGroupName(tabs: readonly Tab[], name: string): string | null {
+  return findTabGroupByName(tabGroupsIn(tabs), name)?.name ?? (normalizeTabGroupName(name) || null);
+}
+
+// The strip tab to select when a group folds over the selected one: the
+// nearest after the group, else before it.
+function nearestTabOutsideGroup(tabs: Tab[], groupId: string): TabId | null {
+  const docked = buildDockIndex(tabs);
+  const eligible = (tab: Tab | undefined) =>
+    Boolean(tab && tab.group?.id !== groupId && !isRunOwnedTab(tab) && !docked.has(tab.id));
+  const first = tabs.findIndex((tab) => tab.group?.id === groupId);
+  if (first < 0) return null;
+  let last = first;
+  while (tabs[last + 1]?.group?.id === groupId) last += 1;
+  for (let index = last + 1; index < tabs.length; index += 1) {
+    if (eligible(tabs[index])) return tabs[index].id;
+  }
+  for (let index = first - 1; index >= 0; index -= 1) {
+    if (eligible(tabs[index])) return tabs[index].id;
+  }
+  return null;
+}
+
+// Groups in a workspace's saved layout, read without hydrating it. Lets a
+// tab an agent opens in a workspace this window has not loaded yet join the
+// saved group of the same name instead of starting a second one.
+function persistedTabGroups(workspaceId: string): TabGroup[] {
+  const key = storageKey(workspaceId);
+  if (!key) return [];
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as { tabs?: unknown };
+    if (!Array.isArray(parsed.tabs)) return [];
+    const groups = new Map<string, TabGroup>();
+    for (const tab of parsed.tabs) {
+      const group = sanitizeTabGroup((tab as { group?: unknown } | null)?.group);
+      if (group && !groups.has(group.id)) groups.set(group.id, group);
+    }
+    return [...groups.values()];
+  } catch {
+    return [];
+  }
+}
+
 // Version chain rather than an equality check: bumping TAB_VERSION without one
 // silently discards every user's saved layout on first launch. Each step is
 // responsible for making the previous shape valid at the next version.
@@ -428,6 +527,13 @@ function loadPersisted(workspaceId: string | null, scrollbackLineLimit: number):
         for (const id of chatRunIds) set.add(id);
         restoredChatRunIdsByWorkspace.set(workspaceId, set);
       }
+      const chatGroups = restoredChatGroupsByWorkspace.get(workspaceId) ?? new Map<string, TabGroup>();
+      for (const tab of parsed.tabs) {
+        if (tab.kind !== "chat" || isDraftChatTabId(tab.id)) continue;
+        const group = sanitizeTabGroup(tab.group);
+        if (group) chatGroups.set(tab.id, group);
+      }
+      if (chatGroups.size > 0) restoredChatGroupsByWorkspace.set(workspaceId, chatGroups);
     }
     // Terminal processes are session-local. Preserve tabs, splits, and cwd, but
     // never replay output or resume an agent after a full app relaunch.
@@ -475,7 +581,7 @@ function loadPersisted(workspaceId: string | null, scrollbackLineLimit: number):
             !(tab.kind === "terminal" && tab.scope?.kind === "workers"),
         ),
     );
-    parsed.tabs = validateDockLeaves(parsed.tabs);
+    parsed.tabs = normalizeTabGroups(validateDockLeaves(parsed.tabs));
     for (const tab of parsed.tabs) {
       if (tab.kind === "terminal") cleanupTransientTerminalState(tab.root);
       if (tab.kind === "runs" && (tab.title === "Runs" || tab.title === "Ops")) tab.title = "Runs";
@@ -533,7 +639,10 @@ function persist(
     const payload: PersistedShape = {
       v: TAB_VERSION,
       tabs: trimTabsScrollback(
-        stripTransientTerminalState(normalizeTerminalTitles(tabs), persistAgentState),
+        stripTransientTerminalState(
+          normalizeTerminalTitles(normalizeTabGroups(tabs)),
+          persistAgentState,
+        ),
         scrollbackLineLimit,
       ),
       activeId,
@@ -973,6 +1082,9 @@ export interface AgentTerminalTabOptions {
   // (`codara-pane tab`): no agent tint, and selected like a tab the user
   // opened. A background workspace keeps its frozen selection.
   requestedFromPane?: boolean;
+  // Tab group the caller named: the tab joins the layout's group of that name
+  // (after its last member) or starts one there.
+  group?: string;
 }
 
 // Pure helpers shared by the hook and the session-layout regression harness.
@@ -984,10 +1096,13 @@ export interface AgentTerminalTabOptions {
 export function appendAgentTerminalToWorkspaceLayout(
   layout: WorkspaceTerminalLayout,
   options?: AgentTerminalTabOptions,
+  // Groups of the layout's saved tabs when only bridge tabs are loaded.
+  knownGroups: readonly TabGroup[] = [],
 ): {
   layout: WorkspaceTerminalLayout;
   tabId: TabId;
   paneId: string;
+  group: TabGroup | null;
 } {
   const tabId = makeId("term");
   const paneId = makeId("pane");
@@ -1009,17 +1124,20 @@ export function appendAgentTerminalToWorkspaceLayout(
       ? {}
       : { color: options?.color ?? "var(--agent-tab-accent)" }),
   };
+  const placed = insertTabAfter(layout.tabs, tab, options?.placeAfter?.(layout.tabs));
+  const grouped = options?.group
+    ? placeTabInNamedGroup(placed, tabId, options.group, knownGroups)
+    : null;
   return {
     layout: {
       ...layout,
       // Keep the frozen activeId untouched: bridge-created terminals never
       // steal focus, including when their workspace is hidden.
-      tabs: normalizeTerminalTitles(
-        insertTabAfter(layout.tabs, tab, options?.placeAfter?.(layout.tabs)),
-      ),
+      tabs: normalizeTerminalTitles(normalizeTabGroups(grouped?.tabs ?? placed)),
     },
     tabId,
     paneId,
+    group: grouped?.group ?? null,
   };
 }
 
@@ -1029,10 +1147,12 @@ export function mergeDeferredWorkspaceTerminalLayout(
 ): WorkspaceTerminalLayout {
   return {
     workspaceId: cold.workspaceId,
-    tabs: normalizeTerminalTitles([
+    // A bridge tab that joined a saved group shares its id, so normalizing
+    // brings it back beside the saved members.
+    tabs: normalizeTerminalTitles(normalizeTabGroups([
       ...cold.tabs.filter((tab) => !deferred.tabs.some((live) => live.id === tab.id)),
       ...deferred.tabs,
-    ]),
+    ])),
     activeId: cold.activeId,
   };
 }
@@ -1105,6 +1225,20 @@ export interface UseTabsApi {
   // lands BEFORE or AFTER the target. No-op when source and target are the
   // same tab or the move resolves to the existing position.
   reorderTab: (fromId: TabId, toId: TabId, position: "before" | "after") => void;
+  // Tab groups of the strip on screen (rules in tabGroups.ts). A drop from
+  // the strip moves a tab and sets its group in one step.
+  moveTabInStrip: (tabId: TabId, drop: StripDrop) => void;
+  // A new, unnamed group holding this tab; returns its id.
+  createTabGroup: (tabId: TabId) => string;
+  addTabToGroup: (tabId: TabId, groupId: string) => void;
+  removeTabFromGroup: (tabId: TabId) => void;
+  renameTabGroup: (groupId: string, name: string) => void;
+  recolorTabGroup: (groupId: string, color: TabGroupColor) => void;
+  toggleTabGroupCollapsed: (groupId: string) => void;
+  ungroupTabGroup: (groupId: string) => void;
+  // An agent's `group`: move a tab of any loaded workspace into the group of
+  // that name there, starting it if needed. Null when the tab is not found.
+  assignTabToNamedGroup: (workspaceId: string | null, tabId: TabId, name: string) => TabGroup | null;
   setDirty: (id: TabId, dirty: boolean) => void;
   setDetectedUrl: (tabId: TabId, paneId: string, url: string) => void;
   newTerminalTab: (
@@ -1129,7 +1263,7 @@ export interface UseTabsApi {
   // via terminal.write / terminal.read.
   newAgentTerminalTab: (
     options?: AgentTerminalTabOptions,
-  ) => { tabId: TabId; paneId: string };
+  ) => { tabId: TabId; paneId: string; group?: string };
   // Cross-workspace variant of newAgentTerminalTab: mint the agent tab into a
   // BACKGROUND workspace's frozen layout so a run's terminal.create never lands
   // in whichever workspace is on screen. The hidden mounted stack picks the new
@@ -1140,7 +1274,7 @@ export interface UseTabsApi {
   newAgentTerminalTabInWorkspace: (
     workspaceId: string,
     options?: AgentTerminalTabOptions,
-  ) => { tabId: TabId; paneId: string };
+  ) => { tabId: TabId; paneId: string; group?: string };
   // Open ONE terminal tab whose panes are split into a grid — used when Cora
   // spawns a batch of standing agent terminals, so the user sees them all at
   // once. One pane per spec, each autorunning its agent command.
@@ -1321,7 +1455,7 @@ export interface UseTabsApi {
   // openers (dev-server URL auto-detect, the MCP preview bridge) pass
   // focus:false so a preview never yanks the user off their chat — the tab
   // still appears in the workspace tab strip to click into.
-  newPreviewTab: (url: string, options?: { runId?: string | null; workspaceId?: string | null; focus?: boolean; partition?: string }) => TabId;
+  newPreviewTab: (url: string, options?: { runId?: string | null; workspaceId?: string | null; focus?: boolean; partition?: string; group?: string }) => TabId;
   // Open (or relabel) the runs tab bound to a chat. Each chat owns exactly
   // one runs tab. `focus` selects it too — true for explicit navigation,
   // false for the background "ensure the active chat has a tab" effect.
@@ -1851,8 +1985,12 @@ export function useTabs(
       if (!active || list.length === 0) return active;
       const idx = list.findIndex((t) => t.id === active);
       if (idx === -1) return active;
-      const nextIdx = (idx + delta + list.length) % list.length;
-      return list[nextIdx].id;
+      // Tabs folded into a collapsed group are skipped, as in Chrome.
+      for (let step = 1; step <= list.length; step += 1) {
+        const candidate = list[(idx + delta * step + list.length * step) % list.length];
+        if (!candidate.group?.collapsed || candidate.id === active) return candidate.id;
+      }
+      return active;
     });
   }, []);
 
@@ -1873,6 +2011,129 @@ export function useTabs(
     },
     [],
   );
+
+  // ── Tab groups (rules in tabGroups.ts) ──────────────────────────────────
+  const moveTabInStrip = useCallback((tabId: TabId, drop: StripDrop) => {
+    setTabs((curr) => {
+      const next = applyStripDrop(curr, tabId, drop);
+      return next === curr ? curr : normalizeTerminalTitles(next);
+    });
+  }, []);
+
+  const createTabGroup = useCallback((tabId: TabId): string => {
+    const group = newTabGroup("", tabGroupsIn(tabsRef.current));
+    setTabs((curr) => moveTabToGroup(curr, tabId, group));
+    return group.id;
+  }, []);
+
+  const addTabToGroup = useCallback((tabId: TabId, groupId: string) => {
+    setTabs((curr) => {
+      const group = tabGroupById(curr, groupId);
+      return group ? moveTabToGroup(curr, tabId, group) : curr;
+    });
+  }, []);
+
+  const removeTabFromGroup = useCallback((tabId: TabId) => {
+    setTabs((curr) => moveTabToGroup(curr, tabId, null));
+  }, []);
+
+  const renameGroup = useCallback((groupId: string, name: string) => {
+    setTabs((curr) => renameTabGroup(curr, groupId, name));
+  }, []);
+
+  const recolorGroup = useCallback((groupId: string, color: TabGroupColor) => {
+    setTabs((curr) => recolorTabGroup(curr, groupId, color));
+  }, []);
+
+  const ungroupGroup = useCallback((groupId: string) => {
+    setTabs((curr) => ungroupTabGroup(curr, groupId));
+  }, []);
+
+  // Collapsing the group that holds the selected tab selects the nearest tab
+  // outside it, as Chrome does. With nothing outside to select, the group
+  // stays open: the selected tab cannot hide behind its own chip.
+  const toggleTabGroupCollapsed = useCallback((groupId: string) => {
+    setTabs((curr) => {
+      const group = tabGroupById(curr, groupId);
+      if (!group) return curr;
+      if (group.collapsed) return setTabGroupCollapsed(curr, groupId, false);
+      const active = activeIdRef.current;
+      if (active && curr.find((tab) => tab.id === active)?.group?.id === groupId) {
+        const fallback = nearestTabOutsideGroup(curr, groupId);
+        if (!fallback) return curr;
+        setActiveId(fallback);
+      }
+      return setTabGroupCollapsed(curr, groupId, true);
+    });
+  }, []);
+
+  // A tab outside the active strip's layout is reached through the layout
+  // that holds it: the background workspace's frozen tabs, saved right away
+  // so the move survives a reload or relaunch.
+  const assignTabToNamedGroup = useCallback(
+    (targetWorkspaceId: string | null, tabId: TabId, name: string): TabGroup | null => {
+      if (!targetWorkspaceId || targetWorkspaceId === tabsWorkspaceIdRef.current) {
+        const placed = tabsRef.current.some((tab) => tab.id === tabId)
+          ? placeTabInNamedGroup(tabsRef.current, tabId, name)
+          : null;
+        if (!placed) return null;
+        setTabs((curr) => joinPredictedGroup(curr, tabId, placed.group));
+        return placed.group;
+      }
+      const live = liveWorkspaceTabsRef.current.get(targetWorkspaceId);
+      if (!live?.tabs.some((tab) => tab.id === tabId)) return null;
+      const deferred = deferredColdWorkspaceIdsRef.current.has(targetWorkspaceId);
+      const placed = placeTabInNamedGroup(
+        live.tabs,
+        tabId,
+        name,
+        deferred ? persistedTabGroups(targetWorkspaceId) : [],
+      );
+      if (!placed) return null;
+      const next = { tabs: placed.tabs, activeId: live.activeId };
+      liveWorkspaceTabsRef.current.set(targetWorkspaceId, next);
+      preloadedWorkspaceTabsRef.current.delete(targetWorkspaceId);
+      setInactiveWorkspaceLayouts((current) =>
+        upsertInactiveWorkspaceLayout(current, { workspaceId: targetWorkspaceId, ...next }),
+      );
+      // A layout holding only bridge tabs is incomplete; only its browser
+      // tabs are merged into the saved one (see persistBackgroundPreviews).
+      if (deferred) {
+        persistBackgroundPreviews(targetWorkspaceId, next.tabs);
+      } else {
+        const closed = closedChatRunIdsByWorkspaceRef.current.get(targetWorkspaceId);
+        persist(
+          targetWorkspaceId,
+          next.tabs,
+          next.activeId,
+          terminalScrollbackLineLimitRef.current,
+          persistAgentStateRef.current,
+          closed ? Array.from(closed) : undefined,
+        );
+      }
+      return placed.group;
+    },
+    [],
+  );
+
+  // Every change to the strip goes through here once: members stay adjacent
+  // whichever path inserted a tab, and selecting a tab inside a collapsed
+  // group (Ctrl+Tab, an editor reveal, a chat jump) opens the group.
+  useLayoutEffect(() => {
+    const restored = tabsWorkspaceIdRef.current
+      ? restoredChatGroupsByWorkspace.get(tabsWorkspaceIdRef.current)
+      : undefined;
+    if (restored?.size) {
+      for (const tab of tabs) if (tab.kind === "chat") restored.delete(tab.id);
+    }
+    const normalized = normalizeTabGroups(tabs);
+    const active = activeId ? normalized.find((tab) => tab.id === activeId) : undefined;
+    const next = active?.group?.collapsed
+      ? setTabGroupCollapsed(normalized, active.group.id, false)
+      : normalized;
+    // A newer list runs this effect again on its own.
+    if (next !== tabs) setTabs((curr) => (curr === tabs ? next : curr));
+  }, [tabs, activeId]);
 
   const selectByIndex = useCallback((idx: number) => {
     setTabs((curr) => {
@@ -1956,7 +2217,7 @@ export function useTabs(
   );
 
   const newAgentTerminalTab = useCallback(
-    (options?: AgentTerminalTabOptions): { tabId: TabId; paneId: string } => {
+    (options?: AgentTerminalTabOptions): { tabId: TabId; paneId: string; group?: string } => {
       const id = makeId("term");
       const paneId = makeId("pane");
       const root = {
@@ -1982,13 +2243,16 @@ export function useTabs(
           activePaneId: paneId,
           ...(color ? { color } : {}),
         };
-        return normalizeTerminalTitles(insertTabAfter(curr, tab, options?.placeAfter?.(curr)));
+        const placed = insertTabAfter(curr, tab, options?.placeAfter?.(curr));
+        const grouped = options?.group ? placeTabInNamedGroup(placed, id, options.group) : null;
+        return normalizeTerminalTitles(grouped?.tabs ?? placed);
       });
       // Deliberately NOT setActiveId for agents: an agent-spawned terminal
       // appears in the strip tinted but does not steal focus from the user's
       // current tab. A pane's own request is the user acting.
       if (options?.requestedFromPane) setActiveId(id);
-      return { tabId: id, paneId };
+      const group = options?.group ? predictedGroupName(tabsRef.current, options.group) : null;
+      return { tabId: id, paneId, ...(group ? { group } : {}) };
     },
     [],
   );
@@ -2001,7 +2265,7 @@ export function useTabs(
     (
       targetWorkspaceId: string,
       options?: AgentTerminalTabOptions,
-    ): { tabId: TabId; paneId: string } => {
+    ): { tabId: TabId; paneId: string; group?: string } => {
       if (tabsWorkspaceIdRef.current === targetWorkspaceId) {
         return newAgentTerminalTab(options);
       }
@@ -2016,6 +2280,9 @@ export function useTabs(
       const created = appendAgentTerminalToWorkspaceLayout(
         { workspaceId: targetWorkspaceId, tabs: live.tabs, activeId: live.activeId },
         options,
+        options?.group && deferredColdWorkspaceIdsRef.current.has(targetWorkspaceId)
+          ? persistedTabGroups(targetWorkspaceId)
+          : [],
       );
       liveWorkspaceTabsRef.current.set(targetWorkspaceId, {
         tabs: created.layout.tabs,
@@ -2024,7 +2291,11 @@ export function useTabs(
       setInactiveWorkspaceLayouts((current) =>
         upsertInactiveWorkspaceLayout(current, created.layout),
       );
-      return { tabId: created.tabId, paneId: created.paneId };
+      return {
+        tabId: created.tabId,
+        paneId: created.paneId,
+        ...(created.group ? { group: created.group.name } : {}),
+      };
     },
     [newAgentTerminalTab],
   );
@@ -3081,7 +3352,7 @@ export function useTabs(
         // title.
         const placeholder = createChatTabForRun(runId, "Cora");
         if (focus) setActiveId(placeholder.id);
-        return [...curr, placeholder];
+        return withRestoredChatGroup(curr, placeholder, tabsWorkspaceIdRef.current);
       });
       return runId;
     },
@@ -3149,7 +3420,10 @@ export function useTabs(
         // (or whose only runs are in the closed set) legitimately syncs to zero
         // chat tabs and stays that way. The empty-workspace state + the "New
         // chat" affordance in the top strip's "+" picker are the reopen path.
-        const next = additions.length ? [...renamed, ...additions] : renamed;
+        const next = additions.reduce(
+          (list, chatTab) => withRestoredChatGroup(list, chatTab, tabsWorkspaceIdRef.current),
+          renamed,
+        );
         return changed ? next : curr;
       });
     },
@@ -3289,7 +3563,7 @@ export function useTabs(
   }, []);
 
   const newPreviewTab = useCallback(
-    (url: string, options?: { runId?: string | null; workspaceId?: string | null; focus?: boolean; partition?: string }): TabId => {
+    (url: string, options?: { runId?: string | null; workspaceId?: string | null; focus?: boolean; partition?: string; group?: string }): TabId => {
       const id = makeId("preview");
       const tab: PreviewTab = {
         id,
@@ -3306,14 +3580,21 @@ export function useTabs(
           live = { tabs: [], activeId: null };
           deferredColdWorkspaceIdsRef.current.add(targetWorkspaceId);
         }
-        const next = { tabs: [...live.tabs, tab], activeId: live.activeId };
+        const known =
+          options?.group && deferredColdWorkspaceIdsRef.current.has(targetWorkspaceId)
+            ? persistedTabGroups(targetWorkspaceId)
+            : [];
+        const next = {
+          tabs: insertTabInNamedGroup(live.tabs, tab, options?.group, known).tabs,
+          activeId: live.activeId,
+        };
         liveWorkspaceTabsRef.current.set(targetWorkspaceId, next);
         persistBackgroundPreviews(targetWorkspaceId, next.tabs);
         preloadedWorkspaceTabsRef.current.delete(targetWorkspaceId);
         setInactiveWorkspaceLayouts((current) => upsertInactiveWorkspaceLayout(current, { workspaceId: targetWorkspaceId, ...next }));
         return id;
       }
-      setTabs((curr) => [...curr, tab]);
+      setTabs((curr) => insertTabInNamedGroup(curr, tab, options?.group).tabs);
       // Only steal the active tab for explicit user opens. Automated openers
       // (auto-detect, MCP bridge) pass focus:false so the preview appears in
       // the background instead of hiding the chat composer.
@@ -4013,6 +4294,15 @@ export function useTabs(
       cyclePrev,
       selectByIndex,
       reorderTab,
+      moveTabInStrip,
+      createTabGroup,
+      addTabToGroup,
+      removeTabFromGroup,
+      renameTabGroup: renameGroup,
+      recolorTabGroup: recolorGroup,
+      toggleTabGroupCollapsed,
+      ungroupTabGroup: ungroupGroup,
+      assignTabToNamedGroup,
       setDirty,
       setDetectedUrl,
       newTerminalTab,

@@ -11,6 +11,7 @@ import { recordActedTab, withActedTab } from "../browser/acted-tab";
 import { noteChromeToolCall } from "../browser/chrome/activity";
 import { BrowserTabRefError, parseTabRef } from "../browser/tab-ref";
 import { scopePreviewWorkspace } from "../preview-workspace";
+import { normalizeTabGroupName } from "../../shared/tab-group-name";
 import { capturePreviewTools } from "./capture";
 import { chromeLinkTools, chromeTargetTools } from "./chrome";
 import { corePreviewTools } from "./core";
@@ -75,6 +76,21 @@ export async function runPreviewTool(
   return withActedTab(value, tabId ?? (typeof params.tabId === "string" ? params.tabId : null));
 }
 
+// `group` names a tab group on the tools that open or move a tab. The CLI
+// sends a numeric name as a number, and an empty name means no group.
+function readGroupParam(params: Record<string, unknown>): void {
+  if (params.group === undefined || params.group === null) {
+    delete params.group;
+    return;
+  }
+  if (typeof params.group !== "string" && typeof params.group !== "number") {
+    throw new PreviewToolParamsError("group must be a tab group name.");
+  }
+  const group = normalizeTabGroupName(params.group);
+  if (group) params.group = group;
+  else delete params.group;
+}
+
 async function dispatchPreviewTool(
   method: string,
   params: Record<string, unknown>,
@@ -87,6 +103,7 @@ async function dispatchPreviewTool(
     await host.scopeToCaller(params);
     await scopePreviewWorkspace(params, host.getRun);
   }
+  readGroupParam(params);
   let ref;
   try {
     ref = parseTabRef(params.tabId);

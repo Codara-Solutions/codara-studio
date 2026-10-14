@@ -7,7 +7,7 @@
 
 module.exports = {
   order: 80,
-  budget: 600,
+  budget: 530,
   tools: [
     {
       name: "codara_preview_chrome",
@@ -21,6 +21,7 @@ module.exports = {
         properties: {
           action: { type: "string", enum: ["status", "open", "close", "activate"] },
           url: { type: "string" },
+          group: { type: "string", description: "Tab group for an opened tab." },
           tabId: { type: "string" },
         },
         additionalProperties: false,

@@ -5,7 +5,7 @@
 
 module.exports = {
   order: 40,
-  budget: 3000,
+  budget: 3070,
   tools: [
     {
       name: "codara_preview_console",
@@ -85,6 +85,7 @@ module.exports = {
           name: { type: "string" },
           value: { type: "string" },
           url: { type: "string" },
+          group: { type: "string", description: "Tab group for the fresh tab." },
           redact: { type: "boolean" },
         },
         additionalProperties: false,

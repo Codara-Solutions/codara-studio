@@ -101,6 +101,7 @@ import {
 } from "./orchestration/worker-session-reuse";
 import { normalizePiAccountProfileId } from "./orchestration/pi-account-execution";
 import { effectiveChatMode } from "@shared/chat-policy";
+import { normalizeTabGroupName } from "@shared/tab-group-name";
 import { DEFAULT_PREFERENCES } from "@shared/types";
 import { whiteboardIssues } from "@shared/whiteboard-quality";
 import type { WhiteboardIssue } from "@shared/whiteboard-quality";
@@ -983,6 +984,8 @@ async function handleTerminalRun(
   if (/[\r\n]/.test(command)) {
     return errorResponse(id, ERR_INVALID_PARAMS, "command must be a single line; join steps with && or ;");
   }
+  const group = tabGroupParam(params);
+  if (group === undefined) return errorResponse(id, ERR_INVALID_PARAMS, TAB_GROUP_PARAM_ERROR);
   const runId = stringParam(params, "runId");
   const requestedPaneId = stringParam(params, "paneId");
   if (requestedPaneId) {
@@ -1013,8 +1016,18 @@ async function handleTerminalRun(
   res.once("close", onClose);
   let paneId = requestedPaneId;
   try {
-    let created: { tabId: string; paneId: string; cwd: string } | null = null;
+    let created: { tabId: string; paneId: string; cwd: string; group?: string } | null = null;
+    let joinedGroup: string | null = null;
     if (paneId) {
+      // Grouping is cosmetic: a pane the renderer cannot place still runs.
+      if (group) {
+        joinedGroup =
+          (
+            await requestTerminalOp<{ group?: string }>("group", { paneId, group }, { timeoutMs: 5_000 }).catch(
+              () => null,
+            )
+          )?.group ?? null;
+      }
       // A line codara_terminal_write submitted just before this call may not
       // have started yet, and its markers would be read as this command's.
       // Wait briefly for the shell to report it finished.
@@ -1040,10 +1053,12 @@ async function handleTerminalRun(
       for (const key of ["cwd", "title", "runId", "callerPaneId", "callerPid"]) {
         if (params[key] !== undefined) createParams[key] = params[key];
       }
+      if (group) createParams.group = group;
       const createdResponse = await handleTerminalCreate(createParams, id);
       if (createdResponse.error) return createdResponse;
-      created = createdResponse.result as { tabId: string; paneId: string; cwd: string };
+      created = createdResponse.result as { tabId: string; paneId: string; cwd: string; group?: string };
       paneId = created.paneId;
+      joinedGroup = created.group ?? null;
       runningPanes.add(paneId);
       // A new shell prints its first prompt marker once it reads input; a
       // shell without integration never does, so the wait is bounded.
@@ -1077,6 +1092,7 @@ async function handleTerminalRun(
     return successResponse(id, {
       paneId,
       ...(created ? { tabId: created.tabId, cwd: created.cwd } : {}),
+      ...(joinedGroup ? { group: joinedGroup } : {}),
       ...result,
       cursor: paneCursors.current(paneId),
       ...(next ? { next } : {}),
@@ -1100,6 +1116,7 @@ interface StudioTerminalListing {
   title?: string;
   cwd?: string;
   profile?: string;
+  group?: string;
 }
 
 const CALLER_PLACEMENT_CACHE_MS = 5_000;
@@ -1163,6 +1180,7 @@ async function handleTerminalList(
         tabId: entry.tabId,
         ...(workspaceId ? {} : { workspaceId: entry.workspaceId }),
         ...(entry.title ? { title: entry.title } : {}),
+        ...(entry.group ? { group: entry.group } : {}),
         ...(entry.cwd ? { cwd: entry.cwd } : {}),
         agent: agent?.runtime ?? (entry.profile && entry.profile !== "shell" ? entry.profile : null),
         ...(agent ? { agentState: agent.state } : {}),
@@ -1272,6 +1290,8 @@ async function handleTerminalCreate(
   const cwd = stringParam(params, "cwd");
   const command = stringParam(params, "command");
   const title = stringParam(params, "title");
+  const group = tabGroupParam(params);
+  if (group === undefined) return errorResponse(id, ERR_INVALID_PARAMS, TAB_GROUP_PARAM_ERROR);
   const rawRetention = params.retention;
   if (
     rawRetention !== undefined &&
@@ -1335,7 +1355,7 @@ async function handleTerminalCreate(
   }
   const callerPaneId = await resolveCallerPaneId(params);
   try {
-    const result = await requestTerminalOp<{ tabId: string; paneId: string; cwd: string }>(
+    const result = await requestTerminalOp<{ tabId: string; paneId: string; cwd: string; group?: string }>(
       "create",
       {
         ...(cwd ? { cwd } : {}),
@@ -1344,6 +1364,7 @@ async function handleTerminalCreate(
         ...(workspaceId ? { workspaceId } : {}),
         ...(workspaceCwd ? { workspaceCwd } : {}),
         ...(callerPaneId ? { callerPaneId } : {}),
+        ...(group ? { group } : {}),
       },
     );
     // The renderer resolves as soon as the tab is added to state, but the PTY
@@ -7159,6 +7180,18 @@ function errorResponse(
   data?: unknown,
 ): JsonRpcResponse {
   return { jsonrpc: "2.0", id, error: { code, message, ...(data === undefined ? {} : { data }) } };
+}
+
+const TAB_GROUP_PARAM_ERROR = "group must be a tab group name";
+
+// The `group` argument of the terminal tools: a name, null when absent or
+// blank, undefined when it is not a name at all. The CLI sends a numeric name
+// as a number.
+function tabGroupParam(params: Record<string, unknown>): string | null | undefined {
+  const raw = params.group;
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "string" && typeof raw !== "number") return undefined;
+  return normalizeTabGroupName(raw) || null;
 }
 
 function stringParam(params: Record<string, unknown>, key: string): string | null {
