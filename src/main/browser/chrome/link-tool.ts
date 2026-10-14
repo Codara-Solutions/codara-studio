@@ -38,7 +38,12 @@ export async function chromeLinkTool(params: Record<string, unknown>, _method: s
       if (!link) {
         throw new Error('The user has not let agents open tabs. They can turn on "Let agents open new tabs" in the Codara extension popup, or share an existing tab.');
       }
-      const opened = await link.request<{ tabId: number; url?: string; title?: string; blocked?: boolean }>("open", { url }, 30_000);
+      const group = typeof params.group === "string" ? params.group : undefined;
+      const opened = await link.request<{ tabId: number; url?: string; title?: string; blocked?: boolean; group?: string }>(
+        "open",
+        { url, ...(group ? { group } : {}) },
+        30_000,
+      );
       const tabId = backend.refFor(link, opened.tabId);
       recordChromeActivity({
         at: new Date().toISOString(),
@@ -51,7 +56,13 @@ export async function chromeLinkTool(params: Record<string, unknown>, _method: s
       if (opened.blocked) {
         return { ok: true, tabId, url: "", title: "", blocked: true, note: "The page ended on a site the user blocked for agents, so this tab cannot be used." };
       }
-      return { ok: true, tabId, url: opened.url ?? url, title: opened.title ?? "" };
+      return {
+        ok: true,
+        tabId,
+        url: opened.url ?? url,
+        title: opened.title ?? "",
+        ...(typeof opened.group === "string" && opened.group ? { group: opened.group } : {}),
+      };
     }
     case "close":
     case "activate": {

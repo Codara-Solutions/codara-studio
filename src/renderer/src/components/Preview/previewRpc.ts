@@ -23,6 +23,7 @@ import {
   pickPreviewTab,
   showPreviewControl,
 } from "./registry";
+import { assignTabToGroup, tabGroupNameOf } from "../../tabs/tabGroupBridge";
 
 type PreviewOpName =
   | "whiteboard_inspect"
@@ -204,9 +205,13 @@ async function runGuestScript(
 
 async function navigate(params: Record<string, unknown>): Promise<unknown> {
   const url = readString(params, "url");
-  if (!url) throw new Error("navigate requires 'url'");
+  const group = readString(params, "group");
+  if (!url && !(params.tabId && group)) throw new Error("navigate requires 'url'");
   let tab;
   let opened = false;
+  // The store's own answer: the bridge reads committed state, which lags a
+  // move made in this same call.
+  let joined: string | null = null;
   if (params.tabId) {
     tab = pickPreviewTab(
       typeof params.tabId === "string" ? params.tabId : null,
@@ -215,7 +220,12 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
       readString(params, "callerPaneId"),
     );
     if (!tab) throw new Error(`preview tab not found: ${String(params.tabId)}`);
-  } else {
+    // A tab the call names joins the group; with no url that is all it does.
+    if (group) joined = assignTabToGroup(tab.id, tab.workspaceId, group);
+    if (!url) {
+      return { url: tab.handle.getURL(), tabId: tab.id, opened, group: joined ?? tabGroupNameOf(tab.id) };
+    }
+  } else if (url) {
     // runId is the calling run's identity, stamped by the MCP server; the
     // reused-or-opened tab must belong to that run (or, with no run, to the
     // calling agent's pane), not the selected one and never one the user
@@ -223,7 +233,9 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
     const runId = readString(params, "runId");
     const workspaceId = readString(params, "workspaceId");
     const callerPaneId = readString(params, "callerPaneId");
-    ({ tab, opened } = await ensurePreviewTab(url, runId, workspaceId, callerPaneId));
+    ({ tab, opened } = await ensurePreviewTab(url, runId, workspaceId, callerPaneId, group));
+  } else {
+    throw new Error("navigate requires 'url'");
   }
   // A tab ensurePreviewTab just opened is already loading the URL. Loading
   // it again would abort or repeat that first load, which runs the page's
@@ -231,7 +243,8 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
   showPreviewControl(tab, { action: "Navigating", runId: readString(params, "runId") });
   if (!opened) tab.handle.loadURL(url);
   await waitDomReady(tab.handle, 15_000);
-  return { url: tab.handle.getURL(), tabId: tab.id, opened };
+  joined ??= tabGroupNameOf(tab.id);
+  return { url: tab.handle.getURL(), tabId: tab.id, opened, ...(joined ? { group: joined } : {}) };
 }
 
 async function urlOf(params: Record<string, unknown>): Promise<unknown> {

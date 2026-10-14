@@ -14,6 +14,8 @@ import { LinkClient } from "./lib/link-client.js";
 import {
   DEFAULT_BLOCKED_SITES,
   DEFAULT_PORTS,
+  agentGroupFor,
+  agentGroupTitle,
   agentTabId,
   blockingRule,
   cdpPermission,
@@ -34,6 +36,7 @@ const SESSION_DEFAULTS = {
   stopped: [],
   storageTabs: [],
   agentTabs: [],
+  agentGroups: [],
   attached: [],
   usage: {},
 };
@@ -201,6 +204,7 @@ async function openTab(request) {
   if (rule) throw new Error(`${url} is on a site agents may not use ("${rule.raw}" in the extension's blocked sites).`);
   const tab = await chrome.tabs.create({ url, active: request.active === true });
   await save({ shareTabs: withValue(state.shareTabs, tab.id), agentTabs: withValue(state.agentTabs, tab.id) });
+  const group = await groupOpenedTab(tab, request.group);
   const deadline = Date.now() + OPEN_LOAD_TIMEOUT_MS;
   let current = tab;
   while (current && current.status !== "complete" && Date.now() < deadline) {
@@ -210,7 +214,29 @@ async function openTab(request) {
   // The tab list goes out before the answer, so Codara knows the tab is
   // shared by the time the agent uses its id.
   await refresh();
-  return openedTabAnswer(tab.id, current, url, rules);
+  return { ...openedTabAnswer(tab.id, current, url, rules), ...(group ? { group } : {}) };
+}
+
+// Puts a tab an agent just opened in the agent's named group in its window,
+// joining one the extension made with that title. Only that new tab moves, so
+// no tab the user shared is ever grouped. A failure leaves it ungrouped.
+async function groupOpenedTab(tab, requested) {
+  const title = agentGroupTitle(requested);
+  if (!title || !chrome.tabGroups) return null;
+  try {
+    const groups = await chrome.tabGroups.query({ windowId: tab.windowId });
+    const existing = agentGroupFor(groups, state.agentGroups, title);
+    if (existing) {
+      await chrome.tabs.group({ groupId: existing.id, tabIds: [tab.id] });
+      return existing.title;
+    }
+    const groupId = await chrome.tabs.group({ tabIds: [tab.id], createProperties: { windowId: tab.windowId } });
+    await chrome.tabGroups.update(groupId, { title });
+    await save({ agentGroups: withValue(state.agentGroups, groupId) });
+    return title;
+  } catch {
+    return null;
+  }
 }
 
 function handleMessage(message) {
@@ -356,6 +382,10 @@ chrome.tabs.onUpdated.addListener(async (tabId, change) => {
     }
   }
   if (change.url !== undefined || change.title !== undefined || change.status !== undefined) scheduleRefresh();
+});
+chrome.tabGroups?.onRemoved.addListener(async (group) => {
+  await ready;
+  if (state.agentGroups.includes(group.id)) await save({ agentGroups: without(state.agentGroups, group.id) });
 });
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   await ready;

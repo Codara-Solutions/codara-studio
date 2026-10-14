@@ -81,11 +81,18 @@ async function openFreshTab(params: Record<string, unknown>): Promise<unknown> {
   }
   const partition = newFreshPartition();
   trackFreshPartition(partition);
-  const opened = await requestPreviewOp<{ tabId?: string; url?: string }>("open_isolated", { ...routing(params), url, partition });
+  const group = typeof params.group === "string" ? params.group : undefined;
+  const opened = await requestPreviewOp<{ tabId?: string; url?: string; group?: string }>("open_isolated", {
+    ...routing(params),
+    url,
+    partition,
+    ...(group ? { group } : {}),
+  });
   return {
     ok: true,
     tabId: opened?.tabId ?? null,
     url: opened?.url ?? url,
+    ...(opened?.group ? { group: opened.group } : {}),
     isolated: true,
     note: "A new tab with its own temporary session: no cookies or storage, separate from the user's tabs. Pass this tabId to the other browser tools; storage action discard closes it and wipes its data.",
   };

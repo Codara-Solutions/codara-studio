@@ -1,5 +1,6 @@
 import type { BrowserPaneHandle } from "./BrowserPane";
 import type { PreviewControl } from "./PreviewCursor";
+import { tabGroupNameOf } from "../../tabs/tabGroupBridge";
 
 interface RegistryEntry {
   id: string;
@@ -143,15 +144,19 @@ export function findReusablePreviewTab(
 
 export function listPreviewTabs(workspaceId?: string | null, callerPaneId?: string | null) {
   const { workspace } = previewScope(null, workspaceId, callerPaneId);
-  return [...entries.values()].filter((entry) => entry.workspaceId === workspace).map((entry) => ({
-    id: entry.id,
-    title: entry.handle.getTitle() || entry.url,
-    url: entry.handle.getURL() || entry.url,
-    workspaceId: entry.workspaceId,
-    isLastViewed: lastViewed.get(workspace) === entry.id,
-    isActive: entry.id === activeId && entry.workspaceId === activeWorkspaceId,
-    ...(entry.partition ? { isolated: true } : {}),
-  }));
+  return [...entries.values()].filter((entry) => entry.workspaceId === workspace).map((entry) => {
+    const group = tabGroupNameOf(entry.id);
+    return {
+      id: entry.id,
+      title: entry.handle.getTitle() || entry.url,
+      url: entry.handle.getURL() || entry.url,
+      workspaceId: entry.workspaceId,
+      isLastViewed: lastViewed.get(workspace) === entry.id,
+      isActive: entry.id === activeId && entry.workspaceId === activeWorkspaceId,
+      ...(entry.partition ? { isolated: true } : {}),
+      ...(group ? { group } : {}),
+    };
+  });
 }
 
 export function showPreviewControl(tab: RegistryEntry, control: PreviewControl): void {
@@ -171,7 +176,7 @@ type OpenPreviewTabFn = (
   url: string,
   runId?: string | null,
   workspaceId?: string | null,
-  options?: { partition?: string },
+  options?: { partition?: string; group?: string },
 ) => Promise<string> | string;
 let openPreviewTabFn: OpenPreviewTabFn | null = null;
 
@@ -213,25 +218,33 @@ export async function openIsolatedPreviewTab(
   runId?: string | null,
   workspaceId?: string | null,
   callerPaneId?: string | null,
+  group?: string | null,
 ): Promise<RegistryEntry> {
   const { workspace, paneId } = previewScope(runId, workspaceId, callerPaneId);
   if (!openPreviewTabFn) throw new Error("Codara is not ready to open browser tabs yet. Retry in a moment.");
-  const id = await Promise.resolve(openPreviewTabFn(url, runId, workspace, { partition }));
+  const id = await Promise.resolve(
+    openPreviewTabFn(url, runId, workspace, { partition, ...(group ? { group } : {}) }),
+  );
   if (paneId) agentPaneOwners.set(id, paneId);
   return waitForRegisteredTab(id, workspace);
 }
 
+// `group` only applies when a tab is opened; a reused tab stays where the
+// user or an earlier call put it.
 export async function ensurePreviewTab(
   url: string,
   runId?: string | null,
   workspaceId?: string | null,
   callerPaneId?: string | null,
+  group?: string | null,
 ): Promise<{ tab: RegistryEntry; opened: boolean }> {
   const { workspace, paneId } = previewScope(runId, workspaceId, callerPaneId);
   const existing = findReusablePreviewTab(runId, workspace, paneId);
   if (existing) return { tab: existing, opened: false };
   if (!openPreviewTabFn) throw new Error("Codara is not ready to open browser tabs yet. Retry in a moment.");
-  const id = await Promise.resolve(openPreviewTabFn(url, runId, workspace));
+  const id = await Promise.resolve(
+    openPreviewTabFn(url, runId, workspace, group ? { group } : undefined),
+  );
   if (paneId) agentPaneOwners.set(id, paneId);
   return { tab: await waitForRegisteredTab(id, workspace), opened: true };
 }

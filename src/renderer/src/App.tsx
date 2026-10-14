@@ -51,7 +51,7 @@ import ToastHost from "./components/Toast";
 import WorkspaceSwitchHud from "./components/WorkspaceSwitchHud";
 import type { WorkerSessionPickerRequest } from "./components/WorkerSessionPicker";
 import { playNotificationSound } from "./components/notification-sounds";
-import TabBar, { type PickerHints } from "./tabs/TabBar";
+import TabBar, { TAB_GROUP_MENU_EVENT, type PickerHints, type TabGroupActions } from "./tabs/TabBar";
 import ChatStack from "./tabs/ChatStack";
 import { boardBackend } from "./components/board/board-backend";
 import { peekChatComposerChipConfig } from "./components/chat/ChatComposer";
@@ -75,6 +75,7 @@ import {
   setListDeliverablePanesFn,
   setListShareableStudioTerminalsFn,
   setWorkspaceAgentCounts,
+  type ShareableStudioTerminal,
 } from "./components/Terminal/terminalRegistry";
 import { setPaneOverlayHostLocator } from "./components/Terminal/paneOverlays";
 import { deliverablePanes } from "./routing/agent-destinations";
@@ -111,8 +112,10 @@ import { resolveAgentChordTarget } from "./tabs/agentChordTarget";
 import {
   agentTerminalAnchor,
   locateCallerPane,
+  locateTerminalPane,
   type WorkspaceTabs,
 } from "./tabs/agentTerminalPlacement";
+import { setTabGroupBridge } from "./tabs/tabGroupBridge";
 import type { ActiveNotificationView } from "./notifications/viewed";
 import type { TerminalPaneDragPayload } from "./tabs/terminalDrag";
 import type {
@@ -4955,9 +4958,49 @@ export default function App() {
     // Background opens preserve the user's current selection. The caller's
     // workspace and run identity must not follow whichever chat is selected.
     setOpenPreviewTabFn((url, runId, workspaceId, options) =>
-      newPreviewTab(url, { runId, workspaceId, focus: false, partition: options?.partition }),
+      newPreviewTab(url, {
+        runId,
+        workspaceId,
+        focus: false,
+        partition: options?.partition,
+        group: options?.group,
+      }),
     );
     setClosePreviewTabFn(closePreviewTab);
+    // An agent's `group` argument, for tabs it already has. Every loaded
+    // layout is searched, so a tab stays in its own workspace's group.
+    const loadedLayouts = (): WorkspaceTabs[] => {
+      const current = tabsRef.current;
+      const layouts: WorkspaceTabs[] = [];
+      if (current.tabsWorkspaceId) {
+        layouts.push({ workspaceId: current.tabsWorkspaceId, tabs: current.tabs });
+      }
+      for (const layout of current.inactiveWorkspaceLayouts) {
+        layouts.push({ workspaceId: layout.workspaceId, tabs: layout.tabs });
+      }
+      return layouts;
+    };
+    setTabGroupBridge({
+      groupOf: (tabId) => {
+        for (const layout of loadedLayouts()) {
+          const tab = layout.tabs.find((item) => item.id === tabId);
+          if (tab) return tab.group?.name ?? null;
+        }
+        return null;
+      },
+      assignTab: (tabId, workspaceId, name) => {
+        const layout = loadedLayouts().find((item) =>
+          item.tabs.some((tab) => tab.id === tabId),
+        );
+        if (!layout || (workspaceId && layout.workspaceId !== workspaceId)) return null;
+        return tabsRef.current.assignTabToNamedGroup(layout.workspaceId, tabId, name)?.name ?? null;
+      },
+      assignPane: (paneId, name) => {
+        const located = locateTerminalPane(loadedLayouts(), paneId);
+        if (!located) return null;
+        return tabsRef.current.assignTabToNamedGroup(located.workspaceId, located.tabId, name)?.name ?? null;
+      },
+    });
     // An agent with no run works in the workspace of the pane it runs in.
     setLocatePaneWorkspaceFn((paneId) => {
       const current = tabsRef.current;
@@ -4992,6 +5035,7 @@ export default function App() {
     return () => {
       setOpenPreviewTabFn(null);
       setClosePreviewTabFn(null);
+      setTabGroupBridge(null);
       setLocatePaneWorkspaceFn(null);
       setPaneOverlayHostLocator(null);
     };
@@ -5031,23 +5075,9 @@ export default function App() {
       }
       return layouts;
     };
-    const listShareableTerminals = (): Array<{
-      paneId: string;
-      tabId: string;
-      workspaceId: string;
-      title?: string;
-      cwd?: string;
-      profile: "shell" | "claude" | "codex" | "grok";
-    }> => {
+    const listShareableTerminals = (): ShareableStudioTerminal[] => {
       const layouts = workspaceLayouts();
-      const shared: Array<{
-        paneId: string;
-        tabId: string;
-        workspaceId: string;
-        title?: string;
-        cwd?: string;
-        profile: "shell" | "claude" | "codex" | "grok";
-      }> = [];
+      const shared: ShareableStudioTerminal[] = [];
       for (const layout of layouts) {
         for (const tab of layout.tabs) {
           if (tab.kind !== "terminal") continue;
@@ -5061,6 +5091,7 @@ export default function App() {
               workspaceId: layout.workspaceId,
               title: tab.title,
               ...(leaf.cwd ? { cwd: leaf.cwd } : {}),
+              ...(tab.group ? { group: tab.group.name } : {}),
               // The phone protocol has no Pi profile; a Pi pane is shared
               // as the shell it runs in.
               profile:
@@ -5138,6 +5169,7 @@ export default function App() {
         nativeClaudeProfileId: input.nativeClaudeProfileId,
         placeAfter,
         requestedFromPane: input.requestedFromPane,
+        group: input.group,
       };
       // A background run's terminal must not land in the ACTIVE workspace's
       // strip (same invariant as the spawn_terminals queue path). The hidden
@@ -5153,7 +5185,7 @@ export default function App() {
         });
         return { ...minted, cwd };
       }
-      const { tabId, paneId } = tabs.newAgentTerminalTab(options);
+      const { tabId, paneId, group } = tabs.newAgentTerminalTab(options);
       const placementWorkspaceId =
         targetWorkspaceId ?? tabs.tabsWorkspaceId ?? activeWorkspace?.id ?? null;
       agentTerminalPlacementsRef.current.set(tabId, {
@@ -5162,7 +5194,7 @@ export default function App() {
         paneId,
         ...(callerPaneId ? { callerPaneId } : {}),
       });
-      return { tabId, paneId, cwd };
+      return { tabId, paneId, cwd, ...(group ? { group } : {}) };
     });
     // Cleanup path for terminal.create: if the PTY never spawns (bad cwd), main
     // asks us to close the orphan tab so a failed create leaves nothing behind.
@@ -5425,19 +5457,33 @@ export default function App() {
         if (activeVisibleTabId) tabs.closeOthers(activeVisibleTabId);
       },
       "tab.cycleNext": () => {
-        if (!activeVisibleTabId || visibleWorkbenchTabs.length === 0) return;
-        const idx = visibleWorkbenchTabs.findIndex((tab) => tab.id === activeVisibleTabId);
-        const next = visibleWorkbenchTabs[(Math.max(0, idx) + 1) % visibleWorkbenchTabs.length];
+        // Tabs folded into a collapsed group are skipped, as in Chrome.
+        const cycle = visibleWorkbenchTabs.filter(
+          (tab) => !tab.group?.collapsed || tab.id === activeVisibleTabId,
+        );
+        if (!activeVisibleTabId || cycle.length === 0) return;
+        const idx = cycle.findIndex((tab) => tab.id === activeVisibleTabId);
+        const next = cycle[(Math.max(0, idx) + 1) % cycle.length];
         if (next) tabs.setActiveTab(next.id);
       },
       "tab.cyclePrev": () => {
-        if (!activeVisibleTabId || visibleWorkbenchTabs.length === 0) return;
-        const idx = visibleWorkbenchTabs.findIndex((tab) => tab.id === activeVisibleTabId);
-        const prev =
-          visibleWorkbenchTabs[
-            (Math.max(0, idx) - 1 + visibleWorkbenchTabs.length) % visibleWorkbenchTabs.length
-          ];
+        const cycle = visibleWorkbenchTabs.filter(
+          (tab) => !tab.group?.collapsed || tab.id === activeVisibleTabId,
+        );
+        if (!activeVisibleTabId || cycle.length === 0) return;
+        const idx = cycle.findIndex((tab) => tab.id === activeVisibleTabId);
+        const prev = cycle[(Math.max(0, idx) - 1 + cycle.length) % cycle.length];
         if (prev) tabs.setActiveTab(prev.id);
+      },
+      "tab.group": () => {
+        const active = visibleWorkbenchTabs.find((tab) => tab.id === activeVisibleTabId);
+        if (!active || isRunOwnedTab(active)) return;
+        const groupId = active.group?.id ?? tabs.createTabGroup(active.id);
+        window.dispatchEvent(new CustomEvent(TAB_GROUP_MENU_EVENT, { detail: { groupId } }));
+      },
+      "tab.ungroup": () => {
+        const active = visibleWorkbenchTabs.find((tab) => tab.id === activeVisibleTabId);
+        if (active?.group) tabs.removeTabFromGroup(active.id);
       },
       "terminal.splitRight": () => {
         // The active workbench tab dictates which split happens — we only
@@ -6247,7 +6293,6 @@ export default function App() {
               onRenameChat={handleRenameChatTab}
               onCloseChat={handleCloseChatTab}
               onTerminalPaneDrop={handleTerminalPaneDropToTab}
-              onReorderTab={tabs.reorderTab}
               onPinEditorTab={tabs.pinEditorTab}
               onPinDiffTab={tabs.pinDiffTab}
               pickerHints={pickerHints}
@@ -6819,7 +6864,6 @@ interface WorkspaceProps {
   onRenameChat: (id: TabId, title: string) => void;
   onCloseChat: (id: TabId) => void;
   onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId?: string) => void;
-  onReorderTab: (fromId: string, toId: string, position: "before" | "after") => void;
   onPinEditorTab: (id: TabId) => void;
   onPinDiffTab: (id: TabId) => void;
   // Resolved "+" picker keybind hints, memoized in App so this stays
@@ -6874,7 +6918,6 @@ const Workspace = React.memo(function Workspace({
   onRenameChat,
   onCloseChat,
   onTerminalPaneDrop,
-  onReorderTab,
   onPinEditorTab,
   onPinDiffTab,
   pickerHints,
@@ -6903,6 +6946,14 @@ const Workspace = React.memo(function Workspace({
     setLeafAgentSession,
     setLeafBootResumeConsumed,
     flushWorkspaceScrollbackNow,
+    moveTabInStrip,
+    createTabGroup,
+    addTabToGroup,
+    removeTabFromGroup,
+    renameTabGroup,
+    recolorTabGroup,
+    toggleTabGroupCollapsed,
+    ungroupTabGroup,
   } = tabs;
   // During a workspace switch, the tab snapshot and the run selection arrive
   // in separate commits. Do not "repair" the entering workspace's active tab
@@ -7002,6 +7053,42 @@ const Workspace = React.memo(function Workspace({
   const topStripTabs = useMemo(
     () => visibleTabs.filter((tab) => isTopStripTab(tab) && !dockIndex.has(tab.id)),
     [visibleTabs, dockIndex],
+  );
+  const topStripTabsRef = useRef(topStripTabs);
+  topStripTabsRef.current = topStripTabs;
+  // Stable for the strip's React.memo: every action is a stable useTabs
+  // callback, and closing reads the strip through a ref. Closing a group
+  // closes the tabs the user sees in it, each the way its own × would.
+  const tabGroupActions = useMemo<TabGroupActions>(
+    () => ({
+      moveTab: moveTabInStrip,
+      create: createTabGroup,
+      add: addTabToGroup,
+      remove: removeTabFromGroup,
+      rename: renameTabGroup,
+      recolor: recolorTabGroup,
+      toggleCollapsed: toggleTabGroupCollapsed,
+      ungroup: ungroupTabGroup,
+      close: (groupId) => {
+        for (const tab of topStripTabsRef.current) {
+          if (tab.group?.id !== groupId) continue;
+          if (tab.kind === "chat") onCloseChat(tab.id);
+          else closeTab(tab.id);
+        }
+      },
+    }),
+    [
+      moveTabInStrip,
+      createTabGroup,
+      addTabToGroup,
+      removeTabFromGroup,
+      renameTabGroup,
+      recolorTabGroup,
+      toggleTabGroupCollapsed,
+      ungroupTabGroup,
+      onCloseChat,
+      closeTab,
+    ],
   );
 
   // Lifted from ChatPanel so the hoisted inner tab strip can drive the chat /
@@ -7499,7 +7586,7 @@ const Workspace = React.memo(function Workspace({
         onRenameChat={onRenameChat}
         onCloseChat={onCloseChat}
         onTerminalPaneDrop={onTerminalPaneDrop}
-        onReorderTab={onReorderTab}
+        groupActions={tabGroupActions}
         onPinEditorTab={onPinEditorTab}
         onPinDiffTab={onPinDiffTab}
         onOpenInSplit={handleOpenInSplit}

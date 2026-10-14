@@ -35,7 +35,8 @@ import { getTrustedMainWindow, isTrustedOnSender } from "./main-window-trust";
 // caller can supply trusted phone-origin metadata or use the default tint.
 // "overlay" covers an existing pane with a temporary terminal (pane.open) and
 // "closeOverlay" drops one whose PTY never started. "panes" lists every
-// terminal pane with its workspace, the agents in them or not.
+// terminal pane with its workspace, the agents in them or not. "group" moves
+// the tab of an existing pane into a named tab group.
 export type TerminalOpName =
   | "create"
   | "destroy"
@@ -44,7 +45,8 @@ export type TerminalOpName =
   | "agentCounts"
   | "overlay"
   | "closeOverlay"
-  | "panes";
+  | "panes"
+  | "group";
 
 export interface TerminalOpParams {
   [key: string]: unknown;

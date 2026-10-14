@@ -160,6 +160,7 @@
     "test:worker-terminal-controls": "node scripts/test-worker-terminal-controls.cjs",
     "test:chat-surface-routing": "node scripts/test-chat-surface-routing.cjs",
     "test:tab-reorder": "node scripts/test-tab-reorder.cjs",
+    "test:tab-groups": "node scripts/test-tab-groups.cjs",
     "test:workspace-reorder": "node scripts/test-workspace-reorder.cjs",
     "test:pi-oauth-branding": "node scripts/test-pi-oauth-branding.cjs",
     "test:all": "node scripts/run-all-tests.cjs",

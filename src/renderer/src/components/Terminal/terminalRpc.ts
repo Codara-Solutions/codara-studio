@@ -17,6 +17,7 @@ import {
   setExternalTerminalSize,
 } from "./terminalRegistry";
 import { closePaneOverlay, openPaneOverlay } from "./paneOverlays";
+import { assignPaneToGroup } from "../../tabs/tabGroupBridge";
 import type { TerminalLeafOrigin } from "../../tabs/types";
 
 interface BridgeRequest {
@@ -76,6 +77,8 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
       return overlay(req.params);
     case "closeOverlay":
       return closeOverlay(req.params);
+    case "group":
+      return group(req.params);
     default:
       throw new Error(`unknown terminal op: ${req.op || "?"}`);
   }
@@ -96,6 +99,7 @@ async function create(params: Record<string, unknown>): Promise<unknown> {
   const nativeClaudeProfileId = readString(params, "nativeClaudeProfileId");
   const origin = readPhoneOrigin(params.origin);
   const requestedFromPane = params.requestedFromPane === true;
+  const groupName = readString(params, "group");
   return createAgentTerminal({
     cwd: cwd ?? undefined,
     command: command ?? undefined,
@@ -106,7 +110,18 @@ async function create(params: Record<string, unknown>): Promise<unknown> {
     nativeClaudeProfileId: nativeClaudeProfileId ?? undefined,
     origin: origin ?? undefined,
     ...(requestedFromPane ? { requestedFromPane } : {}),
+    ...(groupName ? { group: groupName } : {}),
   });
+}
+
+// Moves the tab holding an existing pane into a named group of its workspace.
+async function group(params: Record<string, unknown>): Promise<unknown> {
+  const paneId = readString(params, "paneId");
+  const name = readString(params, "group");
+  if (!paneId || !name) throw new Error("group requires paneId and group");
+  const joined = assignPaneToGroup(paneId, name);
+  if (!joined) throw new Error(`No terminal pane '${paneId}' is open in Codara.`);
+  return { paneId, group: joined };
 }
 
 async function overlay(params: Record<string, unknown>): Promise<unknown> {

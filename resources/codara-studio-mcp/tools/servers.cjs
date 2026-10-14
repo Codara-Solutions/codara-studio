@@ -9,7 +9,7 @@
 module.exports = {
   order: 900,
   family: "studio",
-  budget: 1100,
+  budget: 1040,
   tools: [
     {
       name: "codara_terminal_servers",

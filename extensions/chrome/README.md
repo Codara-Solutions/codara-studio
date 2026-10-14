@@ -74,7 +74,10 @@ tools it uses for its own browser tabs.
   `localStorage` and non-HttpOnly cookies, but never HttpOnly cookies; share
   only tabs whose page you would let an agent script.
 - Opening a new tab needs **Let agents open new tabs**; such a tab is shared
-  automatically and only those tabs can be closed by an agent.
+  automatically and only those tabs can be closed by an agent. An agent can
+  name a tab group for it (`group`): the tab joins a group the extension
+  made with that title in the same window, or starts one. Agents never move
+  a tab you shared and never add a tab to a group you made.
 - Codara logs every tool call with the agent that made it (Settings > General
   > Chrome extension, and `<Codara home>/chrome-link/activity.jsonl`). The
   popup shows which agent used each tab last.

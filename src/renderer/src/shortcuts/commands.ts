@@ -42,6 +42,8 @@ export type CommandId =
   | "tab.closeOthers"
   | "tab.cycleNext"
   | "tab.cyclePrev"
+  | "tab.group"
+  | "tab.ungroup"
   | "worker.newClaude"
   | "worker.newCodex"
   | "worker.newGrok"
@@ -342,6 +344,21 @@ export const COMMANDS: Command[] = [
     label: "Cycle to previous tab",
     group: "Tabs",
     defaultChords: [ctrl("Tab", { shift: true })],
+  },
+  // Tab groups from the keyboard. No default chord: the free ones collide
+  // with editor and terminal bindings. A group's chip is focusable too: Enter
+  // folds it, Shift+F10 opens the same editor.
+  {
+    id: "tab.group",
+    label: "Group active tab (or edit its group)",
+    group: "Tabs",
+    defaultChords: [],
+  },
+  {
+    id: "tab.ungroup",
+    label: "Remove active tab from its group",
+    group: "Tabs",
+    defaultChords: [],
   },
   // CLI worker spawners. No default chord — the chord-space we'd want
   // (Mod+Shift+C/Mod+Alt+C/…) all collide with built-in or browser

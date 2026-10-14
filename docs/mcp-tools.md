@@ -134,8 +134,8 @@ workspace on screen.
 
 | Tool | What it does |
 |---|---|
-| `codara_preview_list` | Lists the browser tabs in the workspace, with id, title, URL and which one is active. |
-| `codara_preview_navigate` | Loads a URL (http, https or file) in a tab, creating one for the run if needed. |
+| `codara_preview_list` | Lists the browser tabs in the workspace, with id, title, URL, tab group and which one is active. |
+| `codara_preview_navigate` | Loads a URL (http, https or file) in a tab, creating one for the run if needed. `group` puts a tab it opens in a tab group; with `tabId` it moves that tab into the group, and `url` may then be left out. |
 | `codara_preview_snapshot` | Reads the page as a compact outline with `@references` that other tools accept as selectors, link targets (`-> /path`) and names for icon-only links and buttons. Can return only what changed since a previous snapshot. |
 | `codara_preview_click` | Clicks one element by `@reference` or unique CSS selector. |
 | `codara_preview_type` | Types into a field, or picks an option in a native dropdown. |
@@ -163,7 +163,7 @@ workspace on screen.
 | `codara_preview_inspect` | Describes one element (an `@reference`, a unique selector, or `x`,`y` in viewport CSS pixels) for editing it: selector, role, name and text, box model, the computed styles that matter, the CSS rules that set them with their stylesheet, the DOM path, the component names and the source file and line, and a cropped image (also saved as a file, its `path` returned). |
 | `codara_preview_inbox` | Reads what the user queued for this agent from Codara (picked elements, page comments, screenshots): text, source tab and URL, and attached file paths. Read items are removed, except when a Cora run reads the workspace's items: those stay for the agent the user works with. |
 | `codara_preview_run` | Runs a batch of the steps above in one call. |
-| `codara_preview_chrome` | The user's own browser through the Codara extension: `status` (connected browsers and their shared `chrome:` tabs), `open` a URL in a new tab, `close` a tab an agent opened, `activate` a shared tab. |
+| `codara_preview_chrome` | The user's own browser through the Codara extension: `status` (connected browsers and their shared `chrome:` tabs), `open` a URL in a new tab (in a Chrome tab group with `group`), `close` a tab an agent opened, `activate` a shared tab. |
 
 Every browser tool takes a `tabId`: a Codara tab's id as `codara_preview_list`
 returns it (`preview:<id>` is accepted too), or `chrome:<tabId>` for a tab of
@@ -298,8 +298,8 @@ or JWT-shaped values, and every cookie value) are masked unless
 `value`). `clear` removes one item by `name` or empties an area, or every
 area without one. `fresh` opens `url` in a new logged-out tab: an in-memory
 browser session shared with no other tab, which agent calls never pick unless
-given its `tabId`. Pages it opens in new tabs share its session. `discard`
-closes those tabs and wipes the session. On a
+given its `tabId`, in the tab group `group` names. Pages it opens in new tabs
+share its session. `discard` closes those tabs and wipes the session. On a
 Chrome tab, cookies are read-only and only local and session storage can be
 cleared. The live sign-ins of the user's own browser are never handed out:
 on a Chrome tab, HttpOnly cookie values and the cookie and authorization
@@ -491,13 +491,33 @@ In every set, except `codara_spawn_terminals`, which is only in `execute`.
 
 | Tool | What it does |
 |---|---|
-| `codara_terminal_create` | Opens a new terminal tab owned by the agent, tinted so you can see an agent drives it. Temporary terminals close when the run finishes; `retention: "service"` keeps one (a dev server, say) until the run is deleted. |
-| `codara_terminal_run` | Runs one command in a terminal the agent created, or in a new one, and waits for it: returns the exit code, the output and a `cursor`. With Codara's shell integration the shell reports when the command ended; otherwise the call returns once output has been quiet. A command still running at `timeoutMs` (default 30 seconds, at most 10 minutes) keeps running. Refuses a pane that is busy, including one another `codara_terminal_run` call is still using. |
-| `codara_terminal_list` | Lists the terminal panes in the agent's workspace: title, cwd, which agent CLI runs there and its state, whether the shell is running a command, which pane is the caller's and which ones it may write to. |
+| `codara_terminal_create` | Opens a new terminal tab owned by the agent, tinted so you can see an agent drives it, in the tab group `group` names. Temporary terminals close when the run finishes; `retention: "service"` keeps one (a dev server, say) until the run is deleted. |
+| `codara_terminal_run` | Runs one command in a terminal the agent created, or in a new one, and waits for it: returns the exit code, the output and a `cursor`. With Codara's shell integration the shell reports when the command ended; otherwise the call returns once output has been quiet. A command still running at `timeoutMs` (default 30 seconds, at most 10 minutes) keeps running. Refuses a pane that is busy, including one another `codara_terminal_run` call is still using. `group` puts a new terminal in a tab group, or moves the tab of `paneId` into it. |
+| `codara_terminal_list` | Lists the terminal panes in the agent's workspace: title, tab group, cwd, which agent CLI runs there and its state, whether the shell is running a command, which pane is the caller's and which ones it may write to. |
 | `codara_terminal_write` | Types into a terminal the agent created, or into the session of a dev server Codara keeps (to answer its prompts), submitting with Enter by default. |
 | `codara_terminal_read` | Reads a terminal pane without escape codes. Returns a `cursor`; pass it back as `since` to get only output written after it. `mode: "screen"` renders what a full-screen program (an agent CLI, vim, top) shows instead of the raw stream. |
 | `codara_terminal_close` | Closes a terminal the agent created. It cannot close yours or another run's. |
 | `codara_spawn_terminals` | Opens one tab split into Claude Code, Codex, Grok or Pi panes for you to drive, launched the way the **+** menu launches them. An optional model and effort apply to each group; for Pi they become `--model` and `--thinking`. |
+
+### Tab groups
+
+The tools that open a tab take an optional `group`: `codara_preview_navigate`,
+`codara_preview_storage` (`fresh`), each `navigate` step of
+`codara_preview_run`, `codara_terminal_create` and `codara_terminal_run`. It
+names a tab group in the caller's workspace, as in Chrome: a named, colored
+run of adjacent tabs the user can collapse. A name already used there, in any
+case and ignoring extra spaces, joins that group; a new name starts one with
+the next free color. Names are cut to 48 characters, and a number (as
+`cora tool` sends `--group 2024`) is read as its digits. Without `group` a tab
+opens as before. The tab never takes focus and never lands in another
+workspace, and the result names the group it joined. An agent passes the same
+short name for the tabs and terminals of one task, so they stay together.
+Groups are the user's too: they can rename, recolor, ungroup or close them, and
+`codara_preview_list` and `codara_terminal_list` report each tab's group.
+`codara_spawn_terminals` takes no `group` yet. In the user's own browser,
+`codara_preview_chrome` `open` with `group` puts the new tab in a Chrome tab
+group the extension made with that title in the same window, or starts one;
+it never groups a tab the user shared or joins a group the user made.
 
 ### Dev servers
 

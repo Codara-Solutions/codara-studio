@@ -29,7 +29,11 @@ export async function requireTarget(params: Record<string, unknown>): Promise<Br
 }
 
 async function navigate(params: Record<string, unknown>): Promise<unknown> {
-  if (typeof params.url === "string") {
+  const hasUrl = typeof params.url === "string" && params.url.trim() !== "";
+  if (!hasUrl && (typeof params.tabId !== "string" || typeof params.group !== "string")) {
+    throw new PreviewToolParamsError("navigate needs a url, or a tabId and a group to move that tab into the group.");
+  }
+  if (hasUrl && typeof params.url === "string") {
     const reachable = await waitForLoopbackPreviewServer(params.url);
     if (!reachable) {
       throw new Error(
