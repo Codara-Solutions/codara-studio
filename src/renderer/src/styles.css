@@ -193,32 +193,34 @@
      Kill switch: html[data-glass="off"] (user pref) reverts every glass
      surface to the opaque panel look; prefers-reduced-transparency does the
      same at the media-query level. */
-  /* The look is Apple's Liquid Glass: a thin theme-bg veil over a saturated,
-     slightly dimmed backdrop, so the colors behind glow through while text
-     stays readable; a rim lit from the top left; menus bend the backdrop at
-     their edges (--glass-lens). Picked in October 2026 from five candidates
-     (the earlier milky look, liquid, clear, frosted and crystal) compared on
-     the real surfaces. */
+  /* The look is crystal glass: a thin theme-bg veil over a lightly frosted,
+     saturated and dimmed backdrop, so the shapes behind stay visible under
+     the text; a rim lit from the top left with a faint violet glint on the
+     bottom and right; a diagonal glare; menus bend the backdrop strongly at
+     their edges with a prism fringe (--glass-lens). Picked in October 2026
+     from five candidates (the earlier milky look, liquid, clear, frosted and
+     crystal) compared on the real surfaces. */
   /* --glass-veil-scale / --glass-blur-scale are user tuning knobs (Settings →
      Appearance), set on <html> by ThemeProvider as factors of 1; the lens
      bend/chroma knobs live on the SVG filter's scale attributes. */
-  --glass-bg-strong: color-mix(in oklab, var(--bg) min(calc(40% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg-strong: color-mix(in oklab, var(--bg) min(calc(32% * var(--glass-veil-scale, 1)), 98%), transparent);
   --glass-bg-faint: color-mix(in oklab, var(--bg) min(calc(25% * var(--glass-veil-scale, 1)), 98%), transparent);
   --glass-blur: calc(3px * var(--glass-blur-scale, 1));
-  --glass-blur-strong: calc(18px * var(--glass-blur-scale, 1));
+  --glass-blur-strong: calc(10px * var(--glass-blur-scale, 1));
   --glass-blur-faint: calc(3px * var(--glass-blur-scale, 1));
-  --glass-saturate: 2;
+  --glass-saturate: 1.7;
   /* Rim lit from the top left: a bright 1px line on the top and left edges,
-     a fainter one on the bottom and right, and a hairline all around —
-     painted as inset box-shadows (not a pseudo-element) so it stays pinned
-     on scrollable surfaces like tall menus. */
-  --glass-edge-hi: inset 1px 1px 0 oklch(1 0 0 / 0.38), inset -1px -1px 0 oklch(1 0 0 / 0.16);
-  --glass-edge-lo: inset 0 0 0 1px oklch(1 0 0 / 0.05);
-  --glass-bloom: inset 0 0 22px oklch(1 0 0 / 0.06);
-  /* Specular glare in the lit corner, and a faint echo in the opposite one. */
-  --glass-sheen: radial-gradient(120% 80% at 0% 0%, oklch(1 0 0 / 0.14), transparent 45%), radial-gradient(90% 60% at 100% 100%, oklch(1 0 0 / 0.05), transparent 50%);
-  --glass-border: oklch(1 0 0 / 0.16);
-  --glass-shadow: 0 18px 50px oklch(0 0 0 / 0.42), 0 1px 3px oklch(0 0 0 / 0.30);
+     a fainter violet one on the bottom and right, and a cool hairline all
+     around, painted as inset box-shadows (not a pseudo-element) so it stays
+     pinned on scrollable surfaces like tall menus. */
+  --glass-edge-hi: inset 1px 1px 0 oklch(1 0 0 / 0.45), inset -1px -1px 0 oklch(0.85 0.08 280 / 0.28);
+  --glass-edge-lo: inset 0 0 0 1px oklch(0.9 0.05 220 / 0.12);
+  --glass-bloom: inset 0 0 28px oklch(0.9 0.06 250 / 0.09);
+  /* A diagonal glare from the lit corner, and a faint violet glint in the
+     opposite one. */
+  --glass-sheen: linear-gradient(135deg, oklch(1 0 0 / 0.13), transparent 32%, transparent 68%, oklch(0.8 0.1 300 / 0.07));
+  --glass-border: oklch(1 0 0 / 0.20);
+  --glass-shadow: 0 18px 48px oklch(0 0 0 / 0.42), 0 0 0 0.5px oklch(1 0 0 / 0.06);
   /* Refraction lens (SVG feDisplacementMap chain in index.html): bends the
      backdrop at the rim only, with a chromatic fringe. Kept as a token so
      surfaces can opt out. */
@@ -237,29 +239,29 @@
          over a dimmed backdrop, so it reads as glass across its height.
        --glass-muted: the muted text tier on such a thinner fill, drawn
          toward ink-dim so secondary text holds up over the frost.
-       --glass-specular: the top-lit highlight, a background-image layer over
-         the fill. Brighter than --glass-sheen and gone by mid-height.
+       --glass-specular: the read tier's glare, a background-image layer over
+         the fill. A touch softer than --glass-sheen under dense text.
        --modal-scrim: the one dim behind every modal dialog, per theme, with
          glass on or off. --palette-scrim is the lighter dim behind palettes
          (Quick Open, the run switcher, search), which stay in context. */
-  --glass-bg-read: color-mix(in oklab, var(--bg) min(calc(56% * var(--glass-veil-scale, 1)), 98%), transparent);
-  --glass-blur-read: calc(28px * var(--glass-blur-scale, 1));
-  --glass-saturate-read: 2;
-  --glass-bg-menu: color-mix(in oklab, var(--bg) min(calc(28% * var(--glass-veil-scale, 1)), 98%), transparent);
-  --glass-blur-menu: calc(12px * var(--glass-blur-scale, 1));
+  --glass-bg-read: color-mix(in oklab, var(--bg) min(calc(46% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-blur-read: calc(14px * var(--glass-blur-scale, 1));
+  --glass-saturate-read: 1.7;
+  --glass-bg-menu: color-mix(in oklab, var(--bg) min(calc(20% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-blur-menu: calc(6px * var(--glass-blur-scale, 1));
   --modal-scrim: rgb(0 0 0 / 0.45);
   --palette-scrim: rgb(0 0 0 / 0.24);
-  --glass-specular: radial-gradient(120% 70% at 0% 0%, oklch(1 0 0 / 0.11), transparent 48%), radial-gradient(90% 60% at 100% 100%, oklch(1 0 0 / 0.04), transparent 50%);
+  --glass-specular: linear-gradient(135deg, oklch(1 0 0 / 0.10), transparent 35%, transparent 70%, oklch(0.8 0.1 300 / 0.06));
   --glass-muted: color-mix(in oklab, var(--muted) 62%, var(--ink-dim));
   /* --glass-tone-*: a brightness step at the end of each tier's backdrop
        filter, 1 being neutral. A thin fill needs the backdrop dimmed (lifted
        on paper) so bright content behind cannot wash the fill toward the
        text. --glass-bg-panel / --glass-tone-panel: the notification center,
        a thinner fill than the read tier over that dimmed backdrop. */
-  --glass-tone-menu: 0.8;
-  --glass-tone-read: 0.7;
+  --glass-tone-menu: 0.7;
+  --glass-tone-read: 0.62;
   --glass-tone-panel: 0.6;
-  --glass-bg-panel: color-mix(in oklab, var(--panel-2) min(calc(44% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg-panel: color-mix(in oklab, var(--panel-2) min(calc(42% * var(--glass-veil-scale, 1)), 98%), transparent);
 }
 
 /* Light glass: higher fill opacity (thin white glass goes milky, not smoky),
@@ -267,23 +269,23 @@
    much softer shadows — mirrors how --lift-hi / --shadow-1 are re-tinted per
    light palette. */
 :root[data-theme-mode="light"] {
-  --glass-bg-strong: color-mix(in oklab, var(--panel) min(calc(56% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg-strong: color-mix(in oklab, var(--panel) min(calc(42% * var(--glass-veil-scale, 1)), 98%), transparent);
   --glass-bg-faint: color-mix(in oklab, var(--panel) min(calc(28% * var(--glass-veil-scale, 1)), 98%), transparent);
-  --glass-edge-hi: inset 1px 1px 0 oklch(1 0 0 / 0.95), inset -1px -1px 0 oklch(1 0 0 / 0.45);
-  --glass-edge-lo: inset 0 0 0 1px oklch(1 0 0 / 0.35);
-  --glass-bloom: inset 0 0 18px oklch(1 0 0 / 0.25);
-  --glass-sheen: radial-gradient(140% 90% at 0% 0%, oklch(1 0 0 / 0.55), transparent 50%);
-  --glass-border: color-mix(in oklab, var(--ink) 10%, transparent);
-  --glass-shadow: 0 18px 50px oklch(0 0 0 / 0.14), 0 1px 3px oklch(0 0 0 / 0.10);
-  --glass-bg-read: color-mix(in oklab, var(--panel) min(calc(70% * var(--glass-veil-scale, 1)), 98%), transparent);
-  --glass-bg-menu: color-mix(in oklab, var(--panel) min(calc(46% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-edge-hi: inset 1px 1px 0 oklch(1 0 0 / 0.95), inset -1px -1px 0 oklch(0.85 0.08 280 / 0.35);
+  --glass-edge-lo: inset 0 0 0 1px oklch(1 0 0 / 0.4);
+  --glass-bloom: inset 0 0 28px oklch(0.95 0.04 250 / 0.3);
+  --glass-sheen: linear-gradient(135deg, oklch(1 0 0 / 0.6), transparent 35%, transparent 70%, oklch(0.9 0.06 300 / 0.25));
+  --glass-border: color-mix(in oklab, var(--ink) 12%, transparent);
+  --glass-shadow: 0 18px 48px oklch(0 0 0 / 0.14);
+  --glass-bg-read: color-mix(in oklab, var(--panel) min(calc(66% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg-menu: color-mix(in oklab, var(--panel) min(calc(36% * var(--glass-veil-scale, 1)), 98%), transparent);
   --modal-scrim: rgb(30 28 24 / 0.18);
   --palette-scrim: rgb(30 28 24 / 0.07);
-  --glass-specular: radial-gradient(140% 70% at 0% 0%, oklch(1 0 0 / 0.45), transparent 55%);
-  --glass-tone-menu: 1.08;
-  --glass-tone-read: 1.08;
-  --glass-tone-panel: 1.12;
-  --glass-bg-panel: color-mix(in oklab, var(--panel) min(calc(56% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-specular: linear-gradient(135deg, oklch(1 0 0 / 0.5), transparent 40%, transparent 72%, oklch(0.9 0.06 300 / 0.2));
+  --glass-tone-menu: 1.12;
+  --glass-tone-read: 1.12;
+  --glass-tone-panel: 1.15;
+  --glass-bg-panel: color-mix(in oklab, var(--panel) min(calc(50% * var(--glass-veil-scale, 1)), 98%), transparent);
 }
 
 /* Deep group tones for bright paper: each keeps at least 3.5:1 against the

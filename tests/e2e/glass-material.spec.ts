@@ -122,7 +122,7 @@ test("glass is only on the layers that open above the window, one level deep, an
     });
     expect(face.face, "the Settings face frosts the area its opaque panes cover").toBe("none");
     expect(face.nav, "the Settings nav frosts").not.toBe("none");
-    expect(face.navAlpha, "the Settings nav tint").toBeGreaterThanOrEqual(0.5);
+    expect(face.navAlpha, "the Settings nav tint").toBeGreaterThanOrEqual(0.4);
     const pane = await settings.locator(".st-content").first().evaluate((node) => getComputedStyle(node).backgroundColor);
     expect(pane, "the Settings reading pane is opaque").not.toMatch(/\/\s*0?\.\d+\)$|rgba\(/);
     await setGlass(page, false);
