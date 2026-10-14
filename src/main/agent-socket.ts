@@ -26,7 +26,7 @@ import {
   shellActivity,
   type PaneIo,
 } from "./agent-terminal-io";
-import { terminalAgentStateSnapshot, terminalAgentTurnsSignaled } from "./terminal-agent-notify";
+import { terminalAgentStateSnapshot, terminalAgentTurnsSignaled, terminalPanePlacement } from "./terminal-agent-notify";
 import {
   AgentTerminalOwnershipError,
   type AgentTerminalRegistration,
@@ -1122,7 +1122,7 @@ async function resolveCallerPlacement(params: Record<string, unknown>): Promise<
   let placement: CallerPlacement | null = null;
   const paneId = await resolveCallerPaneId(params);
   if (paneId) {
-    const watched = terminalAgentStateSnapshot().find((entry) => entry.paneId === paneId);
+    const watched = terminalPanePlacement(paneId);
     if (watched) {
       placement = { paneId, workspaceId: watched.workspaceId, tabId: watched.tabId };
     } else {
@@ -1818,7 +1818,7 @@ function worktreeDeps(): AgentWorktreeDeps {
     getRun: async (runId) => (await getRunStore()).getRun(runId),
     listRuns: async () => (await getRunStore()).listRuns(),
     paneWorkspaceId: async (paneId) => {
-      const watched = terminalAgentStateSnapshot().find((entry) => entry.paneId === paneId);
+      const watched = terminalPanePlacement(paneId);
       if (watched) return watched.workspaceId;
       const listed = (await listStudioTerminals().catch(() => [])).find((entry) => entry.paneId === paneId);
       return listed?.workspaceId ?? null;

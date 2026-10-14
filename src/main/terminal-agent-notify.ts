@@ -1923,6 +1923,16 @@ function emitPaneState(w: PaneWatcher, chipState: RuntimeState): void {
   });
 }
 
+// Where the renderer last placed a user pane, whether or not an agent in it
+// ever reported a state. Survives a window reload, after which the renderer no
+// longer holds the layouts of workspaces it has not reopened. Cora worker
+// panes stay unplaced: their run decides where their calls go.
+export function terminalPanePlacement(paneId: string): { workspaceId: string; tabId: string } | null {
+  const watcher = watchers.get(paneId);
+  if (!watcher || watcher.disposing || watcher.excluded) return null;
+  return { workspaceId: watcher.workspaceId, tabId: watcher.tabId };
+}
+
 // Level-triggered companion to the live terminal-agent:state event, for
 // renderer reloads and cold hydration.
 export function manualTerminalPaneIds(): Set<string> {

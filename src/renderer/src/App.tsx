@@ -109,7 +109,7 @@ import {
 import { resolveAgentChordTarget } from "./tabs/agentChordTarget";
 import {
   agentTerminalAnchor,
-  locateTerminalPane,
+  locateCallerPane,
   type WorkspaceTabs,
 } from "./tabs/agentTerminalPlacement";
 import type { ActiveNotificationView } from "./notifications/viewed";
@@ -4907,7 +4907,12 @@ export default function App() {
       for (const layout of current.inactiveWorkspaceLayouts) {
         layouts.push({ workspaceId: layout.workspaceId, tabs: layout.tabs });
       }
-      return locateTerminalPane(layouts, paneId)?.workspaceId ?? null;
+      return locateCallerPane(
+        layouts,
+        paneId,
+        workspacesRef.current.map((workspace) => workspace.id),
+        persistedTerminalPaneIds,
+      )?.workspaceId ?? null;
     });
     // `codara-pane overlay` covers a terminal leaf of any workspace's layout;
     // a docked cell is not a terminal and has nothing to cover.
@@ -5042,7 +5047,9 @@ export default function App() {
       for (const layout of tabs.inactiveWorkspaceLayouts) {
         layouts.push({ workspaceId: layout.workspaceId, tabs: layout.tabs });
       }
-      const located = callerPaneId ? locateTerminalPane(layouts, callerPaneId) : null;
+      const located = callerPaneId
+        ? locateCallerPane(layouts, callerPaneId, validWorkspaceIds, persistedTerminalPaneIds)
+        : null;
       const caller = located && validWorkspaceIds.has(located.workspaceId) ? located : null;
       const targetWorkspaceId = input.workspaceId ?? caller?.workspaceId;
       const targetWorkspaceCwd =
@@ -5051,10 +5058,11 @@ export default function App() {
           ? workspacesRef.current.find((w) => w.id === targetWorkspaceId)?.cwd
           : undefined);
       const cwd = input.cwd || targetWorkspaceCwd || activeWorkspace?.cwd || home;
+      const callerTabId = caller?.tabId;
       const placeAfter =
-        caller && caller.workspaceId === (targetWorkspaceId ?? tabs.tabsWorkspaceId)
+        caller && callerTabId && caller.workspaceId === (targetWorkspaceId ?? tabs.tabsWorkspaceId)
           ? (current: readonly Tab[]) =>
-              agentTerminalAnchor(current, caller.tabId, (tabId) =>
+              agentTerminalAnchor(current, callerTabId, (tabId) =>
                 [...agentTerminalPlacementsRef.current.values()].some(
                   (placement) =>
                     placement.tabId === tabId && placement.callerPaneId === callerPaneId,

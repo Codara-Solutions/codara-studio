@@ -172,6 +172,7 @@ async function main() {
   });
   await sleep(50);
   check("taps attached for all registered panes", T.taps.size === 9);
+  check("a Cora worker pane stays unplaced", mod.terminalPanePlacement("p3") === null);
   check(
     "cold restore replays pre-registration output into working state",
     initialSnapshot.some((state) => state.paneId === "p8" && state.runtime === "claude" && state.state === "working"),
@@ -751,6 +752,10 @@ async function main() {
   ] });
   check("a saved runtime hint does not count an agent before it starts",
     !mod.terminalAgentStateSnapshot("cold-start").some((entry) => entry.paneId === "not-started"));
+  check("a pane is placed in its workspace before its agent reports a state",
+    mod.terminalPanePlacement("not-started")?.workspaceId === "cold-start" &&
+      mod.terminalPanePlacement("not-started")?.tabId === "missing");
+  check("an unknown pane stays unplaced", mod.terminalPanePlacement("never-synced") === null);
   feed("restored-banner", "Claude Code v2.1.261\r\n");
   check("a restored idle banner publishes presence without a working turn",
     mod.terminalAgentStateSnapshot("cold-start").some((entry) => entry.paneId === "restored-banner" && entry.runtime === "claude"));
