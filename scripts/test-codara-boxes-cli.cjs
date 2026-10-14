@@ -65,6 +65,7 @@ if (args[0] === "boxes" && args[1] === "list") return out(${JSON.stringify(BOXES
 if (args[0] === "boxes" && args[1] === "ssh-config") {
   const rec = ${JSON.stringify(SSH_CONFIG)};
   if (mode === "bad-argv") rec.proxy_command = ["relative/codaracloud"];
+  if (mode === "key-added") rec.key_added = true;
   if (mode === "other-box") rec.box.id = ${JSON.stringify(OTHER)};
   return out(mode === "array" ? [rec] : rec);
 }
@@ -177,6 +178,14 @@ async function testConnectInfo(api) {
     codaraBoxId: ID,
   });
   assert.deepEqual(calls().pop(), ["boxes", "ssh-config", ID, "--print", "-o", "json"]);
+
+  process.env.MODE = "key-added";
+  assert.equal((await api.codaraBoxConnectInfo(ID, deps)).ok, true);
+  assert.equal(api.keyAddedFromSshConfigJson(JSON.stringify({ key_added: true })), true);
+  assert.equal(api.keyAddedFromSshConfigJson(JSON.stringify([{ key_added: true }])), true);
+  assert.equal(api.keyAddedFromSshConfigJson(JSON.stringify({ key_added: "true" })), false);
+  assert.equal(api.keyAddedFromSshConfigJson(JSON.stringify({ host: "x" })), false);
+  assert.equal(api.keyAddedFromSshConfigJson("nope"), false);
 
   process.env.MODE = "array";
   assert.equal((await api.codaraBoxConnectInfo(ID, deps)).ok, true);

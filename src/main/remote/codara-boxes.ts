@@ -9,6 +9,7 @@ import type {
 } from "@shared/remote";
 import { isValidHostId } from "@shared/remote";
 import { resolveBinary } from "../binary-resolver";
+import { markFreshBoxKey } from "./box-key-retry";
 
 // Codara Cloud boxes through the `codaracloud` CLI, the way github-cli.ts
 // reaches `gh`: the CLI owns sign-in, keys and the wake protocol; Studio only
@@ -202,6 +203,17 @@ export function hostFromSshConfigJson(boxId: string, stdout: string): RemoteHost
   };
 }
 
+/** `key_added` of an ssh-config record: the CLI registered the key just now. */
+export function keyAddedFromSshConfigJson(stdout: string): boolean {
+  try {
+    const parsed = JSON.parse(stdout);
+    const record = (Array.isArray(parsed) ? parsed[0] : parsed) as Record<string, unknown> | undefined;
+    return record?.key_added === true;
+  } catch {
+    return false;
+  }
+}
+
 export async function codaraBoxConnectInfo(
   boxId: string,
   deps: CodaraBoxesDeps = {},
@@ -214,7 +226,11 @@ export async function codaraBoxConnectInfo(
       ["boxes", "ssh-config", boxId, "--print", "-o", "json"],
       BOXES_SSH_CONFIG_TIMEOUT_MS,
     );
-    return { ok: true, host: hostFromSshConfigJson(boxId, stdout) };
+    const host = hostFromSshConfigJson(boxId, stdout);
+    // Main-only: a sleeping box reads keys when it wakes, a running one needs
+    // the retry window in box-key-retry.ts.
+    if (keyAddedFromSshConfigJson(stdout)) markFreshBoxKey(host.id);
+    return { ok: true, host };
   } catch (err) {
     return failure(err);
   }

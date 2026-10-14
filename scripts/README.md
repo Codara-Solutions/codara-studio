@@ -240,7 +240,7 @@ in nested and symlinked folders reach the explorer),
 | `test-terminal-leases`, `test-studio-terminal-share`, `test-phone-terminal-spawn`, `test-worker-terminal-controls`, `test-remote-access-terminal-launch` | Terminals used from the phone, and that they run the desktop's own launch commands. |
 | `test-remote-access-workspace-roots`, `test-remote-access-cora-send-rate` | What a phone may not do: add the home folder or a credentials folder as a workspace, or send Cora messages faster than its budget. |
 | `test-phone-notify`, `test-terminal-phone-notify` | Notifications sent to the phone. |
-| `test-remote-connection-lifecycle`, `test-ssh-keys` | SSH workspaces (`src/main/remote/`), not the phone. |
+| `test-remote-connection-lifecycle`, `test-box-key-retry`, `test-ssh-keys` | SSH workspaces (`src/main/remote/`), not the phone. |
 | `test-remote-proxycommand`, `test-ssh-config-include`, `test-codara-boxes-cli` | SSH over a ProxyCommand (`proxy-command.ts`), `~/.ssh/config` Include and ProxyCommand reading with the refusal of unsafe `%h`/`%r`/`%n`, and the Codara Cloud boxes picker that reads the `codaracloud` CLI (`codara-boxes.ts`). |
 
 ### Git and GitHub

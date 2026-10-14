@@ -14,6 +14,7 @@ import { codaraHome } from "../codara-home";
 import { getHost } from "./ssh-hosts";
 import { openProxySocket, resolveProxyInvocation, type ProxySocket } from "./proxy-command";
 import { wakeCodaraBox } from "./codara-boxes";
+import { abortableDelay, clearFreshBoxKey, nextFreshKeyDelayMs } from "./box-key-retry";
 import { deleteSecret, getSecret, setSecret } from "./secret-store";
 
 // One multiplexed SSH connection per host, shared by every consumer (SFTP
@@ -337,16 +338,32 @@ class RemoteConnection {
     }
 
     let lastErr: Error | null = null;
-    for (const attempt of attempts) {
-      try {
-        const client = await this.tryConnect(attempt.cfg, generation, signal);
-        this.adopt(client, generation, signal);
-        return client;
-      } catch (err) {
-        if (err instanceof ConnectionAttemptCancelledError) throw err;
-        lastErr = err as Error;
-        if (!isAuthFailure(lastErr)) break; // network/hostkey errors: stop the ladder
+    for (let retry = 0; ; retry++) {
+      lastErr = null;
+      for (const attempt of attempts) {
+        try {
+          const client = await this.tryConnect(attempt.cfg, generation, signal);
+          if (host.codaraBoxId) clearFreshBoxKey(host.id);
+          this.adopt(client, generation, signal);
+          return client;
+        } catch (err) {
+          if (err instanceof ConnectionAttemptCancelledError) throw err;
+          lastErr = err as Error;
+          if (!isAuthFailure(lastErr)) break; // network/hostkey errors: stop the ladder
+        }
       }
+      // A key the CLI added moments ago may not have reached the box yet:
+      // only then is an authentication failure worth another round.
+      if (!host.codaraBoxId || lastErr === null || !isAuthFailure(lastErr)) break;
+      const delay = nextFreshKeyDelayMs(host.id, retry);
+      if (delay === null) break;
+      this.setState(
+        "connecting",
+        undefined,
+        `Waiting for your new SSH key to reach the box (about 1 to 2 minutes), retrying in ${Math.ceil(delay / 1000)}s`,
+      );
+      await abortableDelay(delay, signal);
+      this.assertCurrent(generation, signal);
     }
 
     // Interactive password prompts (up to 3 tries), unless a non-auth error
