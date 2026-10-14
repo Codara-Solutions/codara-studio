@@ -32,10 +32,11 @@ async function load(entry) {
           build.onResolve({ filter: /^@shared\// }, (args) => ({
             path: path.join(SHARED_DIR, `${args.path.slice("@shared/".length)}.ts`),
           }));
-          // routing.ts imports useEffect for its focus listener only.
+          // routing.ts imports useEffect for its focus listener only; the
+          // stub runs the effect at once so the listener can be driven.
           build.onResolve({ filter: /^react$/ }, () => ({ path: "react", namespace: "stub" }));
           build.onLoad({ filter: /.*/, namespace: "stub" }, () => ({
-            contents: "export function useEffect() {}",
+            contents: "export function useEffect(effect) { effect(); }",
             loader: "js",
           }));
         },
@@ -349,7 +350,7 @@ function harness(statusFor) {
   const navigate = R.createNavigateTo({
     selectRun: (runId, ws) => calls.push(["run", runId, ws]),
     focusTerminal: (t) => calls.push(["terminal", t.paneId]),
-    openAutomations: () => calls.push(["automations"]),
+    openAutomation: (t) => calls.push(["automation", t.jobId, t.runId, t.workspaceId]),
     openWorkspace: (ws, panel) => calls.push(["workspace", ws, panel]),
     describeTarget: statusFor,
     explain: (title) => calls.push(["explain", title]),
@@ -385,6 +386,67 @@ test("a malformed target is gone without calling anything", () => {
   const { navigate, calls } = harness(() => ({ state: "live" }));
   assert.equal(navigate(null), "gone");
   assert.deepEqual(calls, []);
+});
+
+test("an automation opens in its own workspace, with or without a run", () => {
+  const { navigate, calls } = harness(() => ({ state: "live" }));
+  assert.equal(navigate({ type: "automation", jobId: "j1", workspaceId: "w2" }), "opened");
+  assert.equal(navigate({ type: "automation", jobId: "j1", runId: "r1", workspaceId: "w2" }), "opened");
+  assert.deepEqual(calls, [
+    ["automation", "j1", undefined, "w2"],
+    ["automation", "j1", "r1", "w2"],
+  ]);
+});
+
+test("every target type routes to its own handler", () => {
+  const { navigate, calls } = harness(() => ({ state: "live" }));
+  navigate({ type: "run", runId: "r1", workspaceId: "w1" });
+  navigate({ type: "terminal", workspaceId: "w1", tabId: "t", paneId: "p1" });
+  navigate({ type: "automation", jobId: "j1", workspaceId: "w1" });
+  navigate({ type: "workspace", workspaceId: "w1", panel: "git" });
+  navigate({ type: "workspace", workspaceId: "w1" });
+  assert.deepEqual(
+    calls.map((call) => call[0]),
+    ["run", "terminal", "automation", "workspace", "workspace"],
+  );
+});
+
+test("a native click opens through navigateTo and marks its row read unless nothing opened", () => {
+  const read = [];
+  let push = null;
+  globalThis.window = {
+    spark: {
+      notifications: {
+        onFocusTarget: (handler) => {
+          push = handler;
+          return () => {};
+        },
+        markRead: async (id) => {
+          read.push(id);
+        },
+      },
+    },
+  };
+  try {
+    let outcome = "opened";
+    const opened = [];
+    R.useNotifyFocusRouting((target) => {
+      opened.push(target.type);
+      return outcome;
+    });
+    assert.equal(typeof push, "function");
+    push({ type: "run", runId: "r1", workspaceId: "w1" }, "n-live");
+    outcome = "fallback";
+    push({ type: "terminal", workspaceId: "w1", tabId: "t", paneId: "p1" }, "n-fallback");
+    outcome = "gone";
+    push({ type: "workspace", workspaceId: "w9" }, "n-gone");
+    outcome = "opened";
+    push({ type: "workspace", workspaceId: "w1" });
+    assert.deepEqual(opened, ["run", "terminal", "workspace", "workspace"]);
+    assert.deepEqual(read, ["n-live", "n-fallback"]);
+  } finally {
+    delete globalThis.window;
+  }
 });
 
 (async () => {

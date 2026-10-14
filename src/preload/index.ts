@@ -651,10 +651,16 @@ const api = {
     },
     // Where a clicked notification should navigate. Main sends this after
     // focusing the window (native-notification clicks); the renderer's
-    // single routing listener dispatches on the target type.
-    onFocusTarget: (handler: (target: NavigationTarget) => void): (() => void) => {
-      const listener = (_e: Electron.IpcRendererEvent, target: NavigationTarget) =>
-        handler(target);
+    // single routing listener dispatches on the target type. entryId is the
+    // center row the notification belongs to.
+    onFocusTarget: (
+      handler: (target: NavigationTarget, entryId?: string) => void,
+    ): (() => void) => {
+      const listener = (
+        _e: Electron.IpcRendererEvent,
+        target: NavigationTarget,
+        entryId?: unknown,
+      ) => handler(target, typeof entryId === "string" ? entryId : undefined);
       ipcRenderer.on("notify:focus", listener);
       return () => ipcRenderer.off("notify:focus", listener);
     },

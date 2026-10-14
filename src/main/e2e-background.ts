@@ -68,10 +68,16 @@ export function hideWindowFromDesktop(target: BrowserWindow): void {
  * is ONE place that can be switched off, rather than a reveal hiding in a
  * notification handler or a tray callback that a future test happens to
  * trigger. Under an e2e run it does nothing at all.
+ *
+ * Hiding to the tray on Windows also drops the taskbar button, so a window
+ * brought back from there gets it back too, whichever path revealed it.
  */
 export function revealWindow(target: BrowserWindow): void {
   if (E2E_BACKGROUND || target.isDestroyed()) return;
   if (target.isMinimized()) target.restore();
-  if (!target.isVisible()) target.show();
+  if (!target.isVisible()) {
+    if (process.platform === "win32") target.setSkipTaskbar(false);
+    target.show();
+  }
   target.focus();
 }

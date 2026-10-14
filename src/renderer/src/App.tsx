@@ -42,7 +42,7 @@ import {
   pickWorkspaceColor,
 } from "@shared/workspace-colors";
 import WindowChrome from "./components/WindowChrome";
-import { requestWorkflowRunFocus } from "./components/automations/focus-request";
+import { requestAutomationFocus, requestWorkflowRunFocus } from "./components/automations/focus-request";
 import WorkspaceRail from "./components/WorkspaceRail";
 import StatusBar from "./components/StatusBar";
 import SearchPanel from "./components/Search/SearchPanel";
@@ -98,6 +98,7 @@ import { useChatSurfaces } from "./tabs/chatSurfaces";
 import {
   createNavigateTo,
   useNotifyFocusRouting,
+  type AutomationTarget,
   type NotifyTargetStatus,
 } from "./notifications/routing";
 import { targetWorkspaceId as notifyTargetWorkspaceId } from "@shared/notify-center";
@@ -3007,6 +3008,52 @@ export default function App() {
     [handleActivateWorkspace],
   );
 
+  // Automation notification click: the automation's own workspace, its
+  // Automations hub, and in it the workflow run the alert names or else the
+  // automation itself. The hub tab belongs to the workspace's layout, so a
+  // switch queues the landing until that layout is loaded.
+  const pendingAutomationTargetRef = useRef<AutomationTarget | null>(null);
+  const applyAutomationTarget = useCallback(
+    (target: AutomationTarget) => {
+      const runId = target.runId;
+      if (runId) {
+        setAwayDigest((current) => (current ? pruneAwayDigest(current, runId) : current));
+      }
+      const run = runId ? globalRuns.runsRef.current.find((r) => r.id === runId) : undefined;
+      const automationId = target.jobId || run?.automationId;
+      if (run?.workflow) requestWorkflowRunFocus(run.id);
+      else if (automationId) requestAutomationFocus(automationId);
+      tabsRef.current.openAutomationsTab();
+    },
+    [globalRuns.runsRef],
+  );
+  const openAutomationTarget = useCallback(
+    (target: AutomationTarget) => {
+      const workspaceId = target.workspaceId ?? activeIdRef.current;
+      if (!workspaceId || !workspacesRef.current.some((w) => w.id === workspaceId)) return;
+      if (activeIdRef.current !== workspaceId || tabsRef.current.tabsWorkspaceId !== workspaceId) {
+        pendingAutomationTargetRef.current = { ...target, workspaceId };
+        if (activeIdRef.current !== workspaceId) handleActivateWorkspace(workspaceId);
+        return;
+      }
+      pendingAutomationTargetRef.current = null;
+      applyAutomationTarget(target);
+    },
+    [applyAutomationTarget, handleActivateWorkspace],
+  );
+  useEffect(() => {
+    if (!booted) return;
+    const pending = pendingAutomationTargetRef.current;
+    if (!pending) return;
+    if (pending.workspaceId !== activeId) {
+      pendingAutomationTargetRef.current = null;
+      return;
+    }
+    if (pending.workspaceId !== tabs.tabsWorkspaceId) return;
+    pendingAutomationTargetRef.current = null;
+    applyAutomationTarget(pending);
+  }, [booted, activeId, tabs.tabsWorkspaceId, applyAutomationTarget]);
+
   // Whether a notification's target still exists, so the center can show a
   // closed pane or deleted run as gone and a click can land on its workspace
   // instead of doing nothing. The id sets are keyed on their contents, so the
@@ -3063,7 +3110,8 @@ export default function App() {
           ? { state: "live" }
           : { state: "gone", reason: "pane" };
       }
-      const runId = target.type === "run" || target.type === "automation" ? target.runId : undefined;
+      // An automation alert opens the automation, which outlives its runs.
+      const runId = target.type === "run" ? target.runId : undefined;
       if (runId && notifyRunIds && !notifyRunIds.has(runId)) return { state: "gone", reason: "run" };
       return { state: "live" };
     };
@@ -3074,14 +3122,27 @@ export default function App() {
   const navigateToNotifyTarget = useMemo(
     () =>
       createNavigateTo({
-        selectRun: handleSelectRunAnywhere,
+        // A run alert without a workspace (one fired from the cora CLI) still
+        // belongs to the run's own workspace, not the one on screen.
+        selectRun: (runId, workspaceId) =>
+          handleSelectRunAnywhere(
+            runId,
+            workspaceId ?? globalRuns.runsRef.current.find((run) => run.id === runId)?.workspaceId,
+          ),
         focusTerminal: focusTerminalTarget,
-        openAutomations: () => tabsRef.current.openAutomationsTab(),
+        openAutomation: openAutomationTarget,
         openWorkspace: openWorkspacePanel,
         describeTarget: describeNotifyTarget,
         explain: (title, body) => emitLocalToast(title, body, "warning"),
       }),
-    [handleSelectRunAnywhere, focusTerminalTarget, openWorkspacePanel, describeNotifyTarget],
+    [
+      handleSelectRunAnywhere,
+      globalRuns.runsRef,
+      focusTerminalTarget,
+      openAutomationTarget,
+      openWorkspacePanel,
+      describeNotifyTarget,
+    ],
   );
   const notifyWorkspaceMeta = useMemo(
     () => workspaces.map((w) => ({ id: w.id, name: w.name, color: w.color })),

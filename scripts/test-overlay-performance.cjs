@@ -196,12 +196,22 @@ async function main() {
   assert.match(toastRule[1], /background-color: var\(--glass-bg-read\);/);
   assert.match(styles, /--notify-surface: var\(--glass-bg-read\);/);
 
-  // Sticky notification section heads stay opaque under glass: rows scroll
-  // under them, and any translucency ghosts the rows' text through the label.
+  // A sticky notification section head under glass shows an opaque band
+  // whenever it is stuck: rows scroll under it then, and any translucency
+  // ghosts their text through the label. Only a head that is not stuck, with
+  // nothing under it, lets the panel's glass show.
+  const atRest =
+    /@container not scroll-state\(stuck: top\) \{\s*html:not\(\[data-glass="off"\]\) \.nc-section-head::before \{\s*visibility: hidden;\s*\}\s*\}/;
+  assert.match(styles, atRest, "a glass section head band hides only while the head is not stuck");
+  const bands = [...styles.replace(atRest, "").matchAll(/:not\(\[data-glass="off"\]\) \.nc-section-head::before \{([^}]*)\}/g)];
+  assert.ok(bands.some(([, body]) => /content: "";/.test(body)), "a glass section head must paint a band");
+  for (const [, body] of bands) {
+    const fill = /background:([^;]*);/.exec(body);
+    if (fill) assert.match(fill[1].trim(), /^var\(--panel(-2)?\)$/, "a glass section head band is translucent");
+    assert.doesNotMatch(body, /backdrop-filter|opacity|visibility/, "a glass section head band hides outside its at-rest rule");
+  }
   for (const match of styles.matchAll(/:not\(\[data-glass="off"\]\) \.nc-section-head \{([^}]*)\}/g)) {
-    const fill = /background:([^;]*);/.exec(match[1]);
-    assert.ok(fill, "a glass section head must set its fill");
-    assert.doesNotMatch(fill[1], /transparent/, "a glass section head is translucent");
+    assert.match(match[1], /container-type: scroll-state;/, "a glass section head must report when it is stuck");
   }
 
   const selectRows = await loadRunSelector();
