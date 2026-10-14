@@ -12,6 +12,8 @@ import type {
 import { writeFileAtomic } from "../fs-atomic";
 import { codaraHome } from "../codara-home";
 import { getHost } from "./ssh-hosts";
+import { openProxySocket, resolveProxyInvocation, type ProxySocket } from "./proxy-command";
+import { wakeCodaraBox } from "./codara-boxes";
 import { deleteSecret, getSecret, setSecret } from "./secret-store";
 
 // One multiplexed SSH connection per host, shared by every consumer (SFTP
@@ -54,6 +56,8 @@ function loadSsh2(): Promise<Ssh2Module> {
 }
 
 const READY_TIMEOUT_MS = 20_000;
+// Through a ProxyCommand the handshake also waits for the proxy to dial.
+const PROXY_READY_TIMEOUT_MS = 120_000;
 const KEEPALIVE_INTERVAL_MS = 15_000;
 const KEEPALIVE_COUNT_MAX = 3;
 const DEFAULT_EXEC_TIMEOUT_MS = 20_000;
@@ -189,10 +193,15 @@ class RemoteConnection {
 
   constructor(public readonly host: RemoteHostConfig) {}
 
-  private setState(state: RemoteConnectionStatus["state"], error?: string): void {
+  private setState(state: RemoteConnectionStatus["state"], error?: string, progress?: string): void {
     this.state = state;
     this.lastError = error ?? null;
-    statusSender?.({ hostId: this.host.id, state, ...(error ? { error } : {}) });
+    statusSender?.({
+      hostId: this.host.id,
+      state,
+      ...(error ? { error } : {}),
+      ...(progress ? { progress } : {}),
+    });
   }
 
   async ensure(): Promise<Client> {
@@ -226,6 +235,25 @@ class RemoteConnection {
     this.setState("connecting");
     const { utils: sshUtils } = await loadSsh2();
     this.assertCurrent(generation, signal);
+
+    // A Codara box may be asleep: the CLI wakes it first and reports phases,
+    // so the handshake below starts against a box that is already running.
+    if (host.codaraBoxId) {
+      try {
+        await wakeCodaraBox(host.codaraBoxId, {
+          signal,
+          onPhase: (line) => {
+            if (this.isCurrent(generation, signal)) this.setState("connecting", undefined, line);
+          },
+        });
+      } catch (err) {
+        this.assertCurrent(generation, signal);
+        const message = err instanceof Error ? err.message : "The box could not be woken.";
+        this.setState("error", message);
+        throw new Error(`SSH connection to ${host.id} failed: ${message}`);
+      }
+      this.assertCurrent(generation, signal);
+    }
 
     // Gather private keys up front (passphrase prompts must complete before
     // the TCP handshake starts consuming auth attempts).
@@ -375,6 +403,23 @@ class RemoteConnection {
     return new Promise((resolve, reject) => {
       const client = new Client();
       let settled = false;
+      let proxy: ProxySocket | null = null;
+      try {
+        const invocation = resolveProxyInvocation(host);
+        if (invocation) {
+          proxy = openProxySocket(invocation, {
+            onStderrLine: (line) => {
+              if (this.isCurrent(generation, signal)) this.setState("connecting", undefined, line);
+            },
+          });
+          // A proxy that dies destroys its socket; ssh2 then reports the close.
+          proxy.on("error", (err) => fail(err));
+          client.once("close", () => proxy?.destroy());
+        }
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
       const cleanup = () => {
         signal.removeEventListener("abort", onAbort);
         client.removeListener("ready", onReady);
@@ -387,6 +432,7 @@ class RemoteConnection {
         if (settled) return;
         settled = true;
         cleanup();
+        proxy?.destroy();
         reject(err);
       };
       const onReady = () => {
@@ -439,7 +485,8 @@ class RemoteConnection {
           host: host.host,
           port: host.port,
           username: host.username,
-          readyTimeout: READY_TIMEOUT_MS,
+          readyTimeout: proxy ? PROXY_READY_TIMEOUT_MS : READY_TIMEOUT_MS,
+          ...(proxy ? { sock: proxy } : {}),
           keepaliveInterval: KEEPALIVE_INTERVAL_MS,
           keepaliveCountMax: KEEPALIVE_COUNT_MAX,
           tryKeyboard: typeof auth.password === "string",
@@ -462,7 +509,7 @@ class RemoteConnection {
   ): Promise<boolean> {
     // Trust-on-first-use: remember the key's fingerprint per host:port and
     // refuse silently-changed keys (the workspace row shows the error).
-    const id = `${this.host.host}:${this.host.port}`;
+    const id = this.host.hostKeyAlias ?? `${this.host.host}:${this.host.port}`;
     const fingerprint = createHash("sha256").update(key).digest("base64");
     const known = await readKnownHosts();
     if (!this.isCurrent(generation, signal)) return false;

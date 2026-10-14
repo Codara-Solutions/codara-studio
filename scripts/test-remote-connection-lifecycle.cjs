@@ -16,6 +16,8 @@ function createHarness() {
     hostGates: [],
     deferredHosts: new Set(),
     statuses: [],
+    wakes: [],
+    hostOverrides: {},
     getHost(hostId) {
       const host = {
         id: hostId,
@@ -24,6 +26,7 @@ function createHarness() {
         port: 22,
         username: "codara",
         source: "manual",
+        ...this.hostOverrides[hostId],
       };
       if (!this.deferredHosts.has(hostId)) return Promise.resolve(host);
       return new Promise((resolve) => {
@@ -75,6 +78,13 @@ function stubPlugin() {
     "./ssh-hosts": `
       export function getHost(hostId) {
         return globalThis.__codaraSshLifecycleHarness.getHost(hostId);
+      }
+    `,
+    "./codara-boxes": `
+      export async function wakeCodaraBox(boxId, opts) {
+        const harness = globalThis.__codaraSshLifecycleHarness;
+        harness.wakes.push(boxId);
+        opts.onPhase("Waking dev: starting the box");
       }
     `,
     "./secret-store": `
@@ -257,6 +267,35 @@ async function testNoUnhandledRejectionOrListenerLeak(api, harness) {
   }
 }
 
+async function testProxyHost(api, harness) {
+  const hostId = "codara-proxy-host";
+  harness.hostOverrides[hostId] = {
+    source: "codara-cloud",
+    proxyCommand: [process.execPath, "-e", "setInterval(() => {}, 1000)"],
+    hostKeyAlias: "codara-box.test",
+    codaraBoxId: "6f1c2d3e-0000-4000-8000-00000000abcd",
+  };
+  const statusesBefore = harness.statuses.length;
+  const connection = await api.getConnection(hostId);
+  const resultPromise = observe(connection.ensure());
+  await waitForClientCount(harness, 5);
+  const client = harness.clients[4];
+  assert.deepEqual(harness.wakes, ["6f1c2d3e-0000-4000-8000-00000000abcd"], "the box is woken first");
+  assert(
+    harness.statuses.slice(statusesBefore).some((s) => s.progress === "Waking dev: starting the box"),
+    "wake phases are reported as progress",
+  );
+  const sock = client.connectConfig.sock;
+  assert(sock, "a proxy host connects over the proxy's stdio");
+  assert.equal(client.connectConfig.readyTimeout, 120000);
+  const pid = sock.child.pid;
+  client.emit("ready");
+  assert.equal((await resultPromise).ok, true);
+  client.emit("close");
+  await new Promise((resolve) => sock.child.once("close", resolve));
+  assert.throws(() => process.kill(pid, 0), "closing the client must kill the proxy child");
+}
+
 async function main() {
   const harness = createHarness();
   const api = await loadConnections(harness);
@@ -267,6 +306,7 @@ async function main() {
     await testNewerAttemptWins(api, harness);
     await testHostLookupCannotRecreateAfterDisconnect(api, harness);
     await testNoUnhandledRejectionOrListenerLeak(api, harness);
+    await testProxyHost(api, harness);
   } finally {
     api.disposeAllConnections();
     delete globalThis.__codaraSshLifecycleHarness;
