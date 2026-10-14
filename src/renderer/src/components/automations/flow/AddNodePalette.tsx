@@ -157,7 +157,7 @@ export default function AddNodePalette({
   return (
     <div
       ref={ref}
-      className="loom-palette spark-fade-in"
+      className="loom-palette spark-glass--strong spark-overlay-surface spark-fade-in"
       role="dialog"
       aria-label="Add node"
       onKeyDown={onKey}

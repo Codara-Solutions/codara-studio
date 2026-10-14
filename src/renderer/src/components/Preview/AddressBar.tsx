@@ -575,7 +575,7 @@ function TabIdButton({ tabId, onCopy }: { tabId: string; onCopy: (detail: "id" |
         <div
           ref={menuRef}
           role="menu"
-          className="spark-menu spark-glass--strong spark-overlay-surface"
+          className="spark-menu"
           style={{ position: "fixed", zIndex: 130, top: rect.bottom + 6, left: Math.max(8, Math.min(rect.right - 280, window.innerWidth - 288)), width: 280 }}
         >
           <button type="button" role="menuitem" className="spark-menu-item" onClick={() => { setOpen(false); onCopy("id"); }}>

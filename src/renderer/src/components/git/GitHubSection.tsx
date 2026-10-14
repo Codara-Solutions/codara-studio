@@ -800,22 +800,20 @@ function ShareForReviewDialog({
         display: "grid",
         placeItems: "center",
         padding: 24,
-        background: "rgba(4, 5, 10, 0.68)",
+        background: "var(--modal-scrim)",
       }}
     >
       <div
         role="dialog"
         aria-modal="true"
         aria-label="Share your work for review on GitHub"
+        className="spark-glass--strong spark-overlay-surface"
         style={{
           width: "min(600px, calc(100vw - 48px))",
           maxHeight: "calc(100vh - 48px)",
           overflowY: "auto",
           padding: 18,
           borderRadius: 12,
-          border: "1px solid var(--rule-strong)",
-          background: "var(--panel)",
-          boxShadow: "0 20px 70px rgba(0, 0, 0, 0.45)",
           display: "grid",
           gap: 13,
         }}
@@ -1117,22 +1115,20 @@ function MergePullRequestDialog({
         display: "grid",
         placeItems: "center",
         padding: 24,
-        background: "rgba(4, 5, 10, 0.68)",
+        background: "var(--modal-scrim)",
       }}
     >
       <div
         role="dialog"
         aria-modal="true"
         aria-label={`Merge pull request ${pullRequest.number}`}
+        className="spark-glass--strong spark-overlay-surface"
         style={{
           width: "min(520px, calc(100vw - 48px))",
           maxHeight: "calc(100vh - 48px)",
           overflowY: "auto",
           padding: 18,
           borderRadius: 12,
-          border: "1px solid var(--rule-strong)",
-          background: "var(--panel)",
-          boxShadow: "0 20px 70px rgba(0, 0, 0, 0.45)",
           display: "grid",
           gap: 13,
         }}

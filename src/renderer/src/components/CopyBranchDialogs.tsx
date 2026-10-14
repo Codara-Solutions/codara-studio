@@ -48,7 +48,7 @@ export function CopyBranchDeleteDialog({
       style={{
         position: "absolute",
         inset: 0,
-        background: "color-mix(in oklab, var(--bg) 70%, transparent)",
+        background: "var(--modal-scrim)",
         display: "grid",
         placeItems: "center",
         zIndex: 1200,
@@ -58,12 +58,10 @@ export function CopyBranchDeleteDialog({
       }}
     >
       <div
+        className="spark-glass--strong spark-overlay-surface"
         style={{
           width: "min(420px, calc(100vw - 48px))",
-          background: "var(--panel-2)",
-          border: "1px solid var(--rule)",
           borderRadius: 10,
-          boxShadow: "var(--shadow-2)",
           padding: 18,
           fontFamily: "var(--font-sans)",
           display: "grid",

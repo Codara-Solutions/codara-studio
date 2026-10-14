@@ -1655,7 +1655,9 @@ function LivePassCard({
     <div
       style={{
         borderRadius: "var(--radius-surface)",
-        background: "var(--notify-surface)",
+        // A card in the window, so solid: --notify-surface turns into toast
+        // glass when glass is on.
+        background: "var(--panel-2)",
         border: "1px solid var(--rule)",
         boxShadow: `inset 3px 0 0 ${edge}, var(--shadow-1)`,
         padding: "12px 14px",

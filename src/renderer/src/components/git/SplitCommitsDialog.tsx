@@ -143,16 +143,14 @@ export default function SplitCommitsDialog({ cwd, onClose, onDone }: Props): Rea
       }}
     >
       <div
+        className="spark-glass--strong spark-overlay-surface"
         style={{
           width: 680,
           maxWidth: "calc(100vw - 48px)",
           maxHeight: "calc(100vh - 72px)",
           display: "flex",
           flexDirection: "column",
-          background: "var(--panel)",
-          border: "1px solid var(--rule)",
           borderRadius: 14,
-          boxShadow: "0 24px 70px rgba(0, 0, 0, 0.5)",
           overflow: "hidden",
         }}
       >

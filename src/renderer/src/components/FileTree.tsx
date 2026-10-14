@@ -2034,7 +2034,7 @@ export default function FileTree({
             position: "fixed",
             inset: 0,
             zIndex: 120,
-            background: "color-mix(in oklab, black 30%, transparent)",
+            background: "var(--modal-scrim)",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",

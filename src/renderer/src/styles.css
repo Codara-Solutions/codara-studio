@@ -193,30 +193,32 @@
      Kill switch: html[data-glass="off"] (user pref) reverts every glass
      surface to the opaque panel look; prefers-reduced-transparency does the
      same at the media-query level. */
-  /* Values port the liquidglass-oss "dark"/"frosted" presets: the material is
-     SEE-THROUGH — a thin theme-bg veil + tiny blur keeps the backdrop legible
-     through the core; the glass reads from the rim (lens refraction via
-     --glass-lens + the fresnel ring below), not from fill opacity. */
+  /* The look is Apple's Liquid Glass: a thin theme-bg veil over a saturated,
+     slightly dimmed backdrop, so the colors behind glow through while text
+     stays readable; a rim lit from the top left; menus bend the backdrop at
+     their edges (--glass-lens). Picked in October 2026 from five candidates
+     (the earlier milky look, liquid, clear, frosted and crystal) compared on
+     the real surfaces. */
   /* --glass-veil-scale / --glass-blur-scale are user tuning knobs (Settings →
      Appearance), set on <html> by ThemeProvider as factors of 1; the lens
      bend/chroma knobs live on the SVG filter's scale attributes. */
-  --glass-bg-strong: color-mix(in oklab, var(--bg) min(calc(48% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg-strong: color-mix(in oklab, var(--bg) min(calc(40% * var(--glass-veil-scale, 1)), 98%), transparent);
   --glass-bg-faint: color-mix(in oklab, var(--bg) min(calc(25% * var(--glass-veil-scale, 1)), 98%), transparent);
   --glass-blur: calc(3px * var(--glass-blur-scale, 1));
-  --glass-blur-strong: calc(7px * var(--glass-blur-scale, 1));
+  --glass-blur-strong: calc(18px * var(--glass-blur-scale, 1));
   --glass-blur-faint: calc(3px * var(--glass-blur-scale, 1));
-  --glass-saturate: 1.12;
-  /* Fresnel rim: cool 1px ring all around + warm top-biased highlight —
+  --glass-saturate: 2;
+  /* Rim lit from the top left: a bright 1px line on the top and left edges,
+     a fainter one on the bottom and right, and a hairline all around —
      painted as inset box-shadows (not a pseudo-element) so it stays pinned
      on scrollable surfaces like tall menus. */
-  --glass-edge-hi: inset 0 1px 0 oklch(1 0.008 90 / 0.32), inset 0 0 0 1px oklch(0.92 0.02 250 / 0.10);
-  --glass-edge-lo: inset 0 -1px 0 oklch(0 0 0 / 0.22);
-  --glass-bloom: inset 0 0 20px oklch(1 0 0 / 0.03);
-  /* Whisper of top sheen (shader's topSheen ≈ 0.055) — must stay faint or the
-     core stops reading as clear glass. */
-  --glass-sheen: linear-gradient(180deg, oklch(1 0 0 / 0.05), transparent 30%);
-  --glass-border: color-mix(in oklab, var(--ink) 20%, transparent);
-  --glass-shadow: 0 24px 60px oklch(0 0 0 / 0.45), 0 2px 8px oklch(0 0 0 / 0.25);
+  --glass-edge-hi: inset 1px 1px 0 oklch(1 0 0 / 0.38), inset -1px -1px 0 oklch(1 0 0 / 0.16);
+  --glass-edge-lo: inset 0 0 0 1px oklch(1 0 0 / 0.05);
+  --glass-bloom: inset 0 0 22px oklch(1 0 0 / 0.06);
+  /* Specular glare in the lit corner, and a faint echo in the opposite one. */
+  --glass-sheen: radial-gradient(120% 80% at 0% 0%, oklch(1 0 0 / 0.14), transparent 45%), radial-gradient(90% 60% at 100% 100%, oklch(1 0 0 / 0.05), transparent 50%);
+  --glass-border: oklch(1 0 0 / 0.16);
+  --glass-shadow: 0 18px 50px oklch(0 0 0 / 0.42), 0 1px 3px oklch(0 0 0 / 0.30);
   /* Refraction lens (SVG feDisplacementMap chain in index.html): bends the
      backdrop at the rim only, with a chromatic fringe. Kept as a token so
      surfaces can opt out. */
@@ -240,34 +242,48 @@
        --modal-scrim: the one dim behind every modal dialog, per theme, with
          glass on or off. --palette-scrim is the lighter dim behind palettes
          (Quick Open, the run switcher, search), which stay in context. */
-  --glass-bg-read: color-mix(in oklab, var(--bg) min(calc(88% * var(--glass-veil-scale, 1)), 98%), transparent);
-  --glass-blur-read: calc(20px * var(--glass-blur-scale, 1));
-  --glass-saturate-read: 1.8;
-  --glass-bg-menu: color-mix(in oklab, var(--bg) min(calc(44% * var(--glass-veil-scale, 1)), 98%), transparent);
-  --glass-blur-menu: calc(20px * var(--glass-blur-scale, 1));
+  --glass-bg-read: color-mix(in oklab, var(--bg) min(calc(56% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-blur-read: calc(28px * var(--glass-blur-scale, 1));
+  --glass-saturate-read: 2;
+  --glass-bg-menu: color-mix(in oklab, var(--bg) min(calc(28% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-blur-menu: calc(12px * var(--glass-blur-scale, 1));
   --modal-scrim: rgb(0 0 0 / 0.45);
   --palette-scrim: rgb(0 0 0 / 0.24);
-  --glass-specular: linear-gradient(180deg, oklch(1 0 0 / 0.075), oklch(1 0 0 / 0.018) 40%, transparent 64%);
+  --glass-specular: radial-gradient(120% 70% at 0% 0%, oklch(1 0 0 / 0.11), transparent 48%), radial-gradient(90% 60% at 100% 100%, oklch(1 0 0 / 0.04), transparent 50%);
   --glass-muted: color-mix(in oklab, var(--muted) 62%, var(--ink-dim));
+  /* --glass-tone-*: a brightness step at the end of each tier's backdrop
+       filter, 1 being neutral. A thin fill needs the backdrop dimmed (lifted
+       on paper) so bright content behind cannot wash the fill toward the
+       text. --glass-bg-panel / --glass-tone-panel: the notification center,
+       a thinner fill than the read tier over that dimmed backdrop. */
+  --glass-tone-menu: 0.8;
+  --glass-tone-read: 0.7;
+  --glass-tone-panel: 0.6;
+  --glass-bg-panel: color-mix(in oklab, var(--panel-2) min(calc(44% * var(--glass-veil-scale, 1)), 98%), transparent);
 }
 
 /* Light glass: higher fill opacity (thin white glass goes milky, not smoky),
-   a bright specular top edge, hairline border, and much softer shadows —
-   mirrors how --lift-hi / --shadow-1 are re-tinted per light palette. */
+   a lifted rather than dimmed backdrop, a bright rim, hairline border, and
+   much softer shadows — mirrors how --lift-hi / --shadow-1 are re-tinted per
+   light palette. */
 :root[data-theme-mode="light"] {
-  --glass-bg-strong: color-mix(in oklab, var(--panel) min(calc(54% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg-strong: color-mix(in oklab, var(--panel) min(calc(56% * var(--glass-veil-scale, 1)), 98%), transparent);
   --glass-bg-faint: color-mix(in oklab, var(--panel) min(calc(28% * var(--glass-veil-scale, 1)), 98%), transparent);
-  --glass-edge-hi: inset 0 1px 0 oklch(1 0 0 / 0.85), inset 0 0 0 1px oklch(1 0 0 / 0.30);
-  --glass-edge-lo: inset 0 -1px 0 oklch(0 0 0 / 0.08);
-  --glass-bloom: inset 0 0 20px oklch(1 0 0 / 0.15);
-  --glass-sheen: linear-gradient(180deg, oklch(1 0 0 / 0.30), transparent 30%);
-  --glass-border: color-mix(in oklab, var(--ink) 12%, transparent);
-  --glass-shadow: 0 24px 60px oklch(0 0 0 / 0.16), 0 2px 8px oklch(0 0 0 / 0.08);
-  --glass-bg-read: color-mix(in oklab, var(--panel) min(calc(90% * var(--glass-veil-scale, 1)), 98%), transparent);
-  --glass-bg-menu: color-mix(in oklab, var(--panel) min(calc(48% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-edge-hi: inset 1px 1px 0 oklch(1 0 0 / 0.95), inset -1px -1px 0 oklch(1 0 0 / 0.45);
+  --glass-edge-lo: inset 0 0 0 1px oklch(1 0 0 / 0.35);
+  --glass-bloom: inset 0 0 18px oklch(1 0 0 / 0.25);
+  --glass-sheen: radial-gradient(140% 90% at 0% 0%, oklch(1 0 0 / 0.55), transparent 50%);
+  --glass-border: color-mix(in oklab, var(--ink) 10%, transparent);
+  --glass-shadow: 0 18px 50px oklch(0 0 0 / 0.14), 0 1px 3px oklch(0 0 0 / 0.10);
+  --glass-bg-read: color-mix(in oklab, var(--panel) min(calc(70% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg-menu: color-mix(in oklab, var(--panel) min(calc(46% * var(--glass-veil-scale, 1)), 98%), transparent);
   --modal-scrim: rgb(30 28 24 / 0.18);
   --palette-scrim: rgb(30 28 24 / 0.07);
-  --glass-specular: linear-gradient(180deg, oklch(1 0 0 / 0.55), oklch(1 0 0 / 0.14) 40%, transparent 64%);
+  --glass-specular: radial-gradient(140% 70% at 0% 0%, oklch(1 0 0 / 0.45), transparent 55%);
+  --glass-tone-menu: 1.08;
+  --glass-tone-read: 1.08;
+  --glass-tone-panel: 1.12;
+  --glass-bg-panel: color-mix(in oklab, var(--panel) min(calc(56% * var(--glass-veil-scale, 1)), 98%), transparent);
 }
 
 /* Deep group tones for bright paper: each keeps at least 3.5:1 against the
@@ -1248,9 +1264,9 @@ a { color: inherit; }
   z-index: 50;
   min-width: 200px;
   overflow: hidden;
-  /* One popover language with .spark-menu: 9px radius, --rule hairline, opaque
-     --panel-2 face, --shadow-2. (No blur — translucency is reserved for the
-     worker-chip / toolbar clusters that overlay live content.) */
+  /* One popover language with .spark-menu: radius, --rule hairline, opaque
+     --panel-2 face and --shadow-2 with glass off. Every picker carries
+     .spark-glass, so with glass on it is the same menu glass as the rest. */
   border-radius: var(--radius-popover, 9px);
   border: 1px solid var(--rule);
   background: var(--panel-2);
@@ -4251,16 +4267,16 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   html:not([data-glass="off"]) .spark-menu {
     background-color: var(--glass-bg-menu);
     background-image: var(--glass-sheen);
-    -webkit-backdrop-filter: var(--glass-lens) blur(var(--glass-blur-menu)) saturate(var(--glass-saturate));
-    backdrop-filter: var(--glass-lens) blur(var(--glass-blur-menu)) saturate(var(--glass-saturate));
+    -webkit-backdrop-filter: var(--glass-lens) blur(var(--glass-blur-menu)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-menu));
+    backdrop-filter: var(--glass-lens) blur(var(--glass-blur-menu)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-menu));
     border: 1px solid var(--glass-border);
     box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), var(--glass-bloom), var(--glass-shadow);
   }
   html:not([data-glass="off"]) .spark-glass--strong {
     background-color: var(--glass-bg-strong);
     background-image: var(--glass-sheen);
-    -webkit-backdrop-filter: var(--glass-lens) blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
-    backdrop-filter: var(--glass-lens) blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    -webkit-backdrop-filter: var(--glass-lens) blur(var(--glass-blur-strong)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-read));
+    backdrop-filter: var(--glass-lens) blur(var(--glass-blur-strong)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-read));
     border: 1px solid var(--glass-border);
     box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), var(--glass-bloom), var(--glass-shadow);
   }
@@ -4278,8 +4294,8 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   html:not([data-glass="off"]) .spark-toast {
     background-color: var(--glass-bg-read);
     background-image: var(--glass-sheen);
-    -webkit-backdrop-filter: var(--glass-lens) blur(var(--glass-blur-read)) saturate(var(--glass-saturate));
-    backdrop-filter: var(--glass-lens) blur(var(--glass-blur-read)) saturate(var(--glass-saturate));
+    -webkit-backdrop-filter: var(--glass-lens) blur(var(--glass-blur-read)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-read));
+    backdrop-filter: var(--glass-lens) blur(var(--glass-blur-read)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-read));
     border-color: var(--glass-border);
     box-shadow:
       var(--toast-status),
@@ -4309,8 +4325,8 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
      frost layer on the card, but never run the SVG refraction lens over a
      large scrolling dialog. */
   html:not([data-glass="off"]) .spark-glass--strong.spark-overlay-surface {
-    -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
-    backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-read));
+    backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-read));
     contain: paint;
   }
   /* Menus nested in either face match its opaque reading pane rather than
@@ -4373,15 +4389,13 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
    other part of the window stay solid with glass on: glass there read as a
    film over the whole app. Terminal panes and the editor are always opaque. */
 @media not (prefers-reduced-transparency: reduce) {
-  /* Palettes, dialogs and the new-tab menu hold a legibility floor: an 88-90%
-     tint, so the terminal behind reads as color under the rows even where
-     the backdrop filter cannot sample its WebGL canvas. */
-  html:not([data-glass="off"]) .spark-glass--strong.spark-overlay-surface,
-  html:not([data-glass="off"]) .spark-tabbar-picker.spark-glass {
+  /* Palettes and dialogs hold dense text over live content, so they take
+     the read tier: a deeper tint and frost than menus, no lens. */
+  html:not([data-glass="off"]) .spark-glass--strong.spark-overlay-surface {
     background-color: var(--glass-bg-read);
     background-image: var(--glass-specular);
-    -webkit-backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate));
-    backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate));
+    -webkit-backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-read));
+    backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-read));
     border-color: var(--glass-border);
     box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), var(--glass-bloom), var(--glass-shadow);
     contain: paint;
@@ -4406,8 +4420,8 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   html:not([data-glass="off"]) .settings-dialog-surface .st-nav,
   html:not([data-glass="off"]) .agent-capabilities-surface .st-nav {
     background-image: var(--glass-specular);
-    -webkit-backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read));
-    backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read));
+    -webkit-backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read)) brightness(var(--glass-tone-read));
+    backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read)) brightness(var(--glass-tone-read));
     border-right-color: color-mix(in oklab, var(--ink) 8%, transparent);
   }
   html:not([data-glass="off"]) .settings-dialog-surface .st-content,
@@ -4419,6 +4433,27 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   :root[data-theme-mode="light"]:not([data-glass="off"]) .settings-dialog-surface,
   :root[data-theme-mode="light"]:not([data-glass="off"]) .agent-capabilities-surface {
     box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), 0 28px 80px oklch(0 0 0 / 0.18), 0 2px 10px oklch(0 0 0 / 0.08);
+  }
+  /* Two small layers that animate in, so they frost without the lens (it
+     cannot composite during an opacity or transform animation): the
+     automation variable tooltip at the menu tier, and the workspace switch
+     badge at the read tier under its own accent tint. */
+  html:not([data-glass="off"]) .automation-variable-chip__tooltip {
+    background-color: var(--glass-bg-menu);
+    background-image: var(--glass-sheen);
+    -webkit-backdrop-filter: blur(var(--glass-blur-menu)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-menu));
+    backdrop-filter: blur(var(--glass-blur-menu)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-menu));
+    box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), var(--glass-bloom), var(--glass-shadow);
+  }
+  html:not([data-glass="off"]) .spark-workspace-switch-hud {
+    background-color: color-mix(in oklab, var(--hud-accent) 14%, var(--glass-bg-read));
+    background-image: var(--glass-specular);
+    -webkit-backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read)) brightness(var(--glass-tone-read));
+    backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read)) brightness(var(--glass-tone-read));
+    box-shadow:
+      var(--glass-edge-hi),
+      0 12px 30px -8px rgba(0, 0, 0, 0.55),
+      0 0 20px color-mix(in oklab, var(--hud-accent) 25%, transparent);
   }
 }
 
@@ -9739,10 +9774,10 @@ button.st-list__row:hover,
      pointer, and the SVG lens would rerun over the whole tall panel. */
   html:not([data-glass="off"]) .nc-panel {
     --muted: var(--glass-muted);
-    background-color: color-mix(in oklab, var(--panel-2) min(calc(62% * var(--glass-veil-scale, 1)), 98%), transparent);
+    background-color: var(--glass-bg-panel);
     background-image: var(--glass-specular);
-    -webkit-backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read)) brightness(0.72);
-    backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read)) brightness(0.72);
+    -webkit-backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read)) brightness(var(--glass-tone-panel));
+    backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read)) brightness(var(--glass-tone-panel));
     border-color: var(--glass-border);
     box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), var(--glass-bloom), var(--glass-shadow);
   }
@@ -9771,11 +9806,6 @@ button.st-list__row:hover,
     border-top-color: color-mix(in oklab, var(--ink) 7%, transparent);
     background: transparent;
     box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.09);
-  }
-  :root[data-theme-mode="light"]:not([data-glass="off"]) .nc-panel {
-    background-color: color-mix(in oklab, var(--panel) min(calc(68% * var(--glass-veil-scale, 1)), 98%), transparent);
-    -webkit-backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read)) brightness(1.08);
-    backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read)) brightness(1.08);
   }
   :root[data-theme-mode="light"]:not([data-glass="off"]) .nc-section-head::before {
     background: var(--panel);

@@ -64,7 +64,7 @@ function PageDialogCard({ dialog }: { dialog: PageDialogView }) {
         position: "absolute",
         inset: 0,
         zIndex: 70,
-        background: "color-mix(in oklab, var(--bg) 45%, transparent)",
+        background: "var(--modal-scrim)",
         display: "flex",
         alignItems: "flex-start",
         justifyContent: "center",
@@ -76,7 +76,7 @@ function PageDialogCard({ dialog }: { dialog: PageDialogView }) {
         aria-modal="true"
         aria-labelledby={`${dialog.id}-title`}
         aria-describedby={`${dialog.id}-message`}
-        className="spark-glass"
+        className="spark-glass--strong spark-overlay-surface"
         onKeyDown={(event) => {
           if (event.key === "Escape" && cancellable) {
             event.preventDefault();

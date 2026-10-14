@@ -108,6 +108,8 @@ async function main() {
     "settings-dialog-surface",
     "agent-capabilities-surface",
     "nc-panel",
+    "automation-variable-chip__tooltip",
+    "spark-workspace-switch-hud",
   ];
   const baseClasses = [
     "spark-shell",

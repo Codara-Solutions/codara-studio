@@ -102,8 +102,9 @@ test("glass is only on the layers that open above the window, one level deep, an
     expect(withSettings.length, "the Settings face frosts").toBeGreaterThan(0);
     expect(nested(withSettings), "glass inside glass in Settings").toEqual([]);
     expect(await frostedOutside(page, ".settings-dialog-surface"), "frost outside Settings").toEqual([]);
-    // Only the nav column frosts, and at the read tier, so its labels never
-    // depend on what is open behind Settings.
+    // Only the nav column frosts, and at the read tier: a deeper tint than
+    // menus over a dimmed, blurred backdrop, so its labels never depend on
+    // what is open behind Settings.
     const face = await settings.evaluate((node) => {
       const filter = (el: Element) => getComputedStyle(el).backdropFilter || "none";
       const nav = node.querySelector(".st-nav")!;
@@ -121,7 +122,7 @@ test("glass is only on the layers that open above the window, one level deep, an
     });
     expect(face.face, "the Settings face frosts the area its opaque panes cover").toBe("none");
     expect(face.nav, "the Settings nav frosts").not.toBe("none");
-    expect(face.navAlpha, "the Settings nav tint").toBeGreaterThanOrEqual(0.85);
+    expect(face.navAlpha, "the Settings nav tint").toBeGreaterThanOrEqual(0.5);
     const pane = await settings.locator(".st-content").first().evaluate((node) => getComputedStyle(node).backgroundColor);
     expect(pane, "the Settings reading pane is opaque").not.toMatch(/\/\s*0?\.\d+\)$|rgba\(/);
     await setGlass(page, false);

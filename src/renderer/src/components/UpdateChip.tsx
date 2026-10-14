@@ -238,7 +238,7 @@ export default function UpdateChip(): React.ReactElement | null {
     {open && (
       <div
         onMouseDown={(e) => e.stopPropagation()}
-        className="spark-fade-in"
+        className="spark-fade-in spark-glass"
         style={{
           position: "fixed",
           right: 8,
@@ -247,9 +247,6 @@ export default function UpdateChip(): React.ReactElement | null {
           width: 260,
           padding: "10px 12px",
           borderRadius: "var(--radius-surface)",
-          border: "1px solid var(--rule)",
-          background: "var(--panel)",
-          boxShadow: "var(--shadow-1)",
           display: "flex",
           flexDirection: "column",
           gap: 8,
