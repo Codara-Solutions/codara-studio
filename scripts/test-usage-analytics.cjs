@@ -24,7 +24,8 @@ const SHARED_DIR = path.join(ROOT, "src", "shared");
 const SHARED_TS = path.join(SHARED_DIR, "usage-analytics.ts");
 const PRICES_TS = path.join(ROOT, "src", "main", "model-prices.ts");
 
-const SCANNER_TS = path.join(ROOT, "src", "main", "usage-analytics.ts");
+const SCANNER_TS = path.join(ROOT, "src", "main", "usage-scan.ts");
+const WORKER_TS = path.join(ROOT, "src", "main", "usage-scan-worker.ts");
 
 const harnessPlugin = {
   name: "usage-analytics-test-harness",
@@ -641,11 +642,6 @@ async function main() {
 
   /* ── Scanner: cache codec, pruning, and the filesystem walk ────────────── */
 
-  // The scanner resolves its cache path through codaraHome(); point that at a
-  // throwaway directory so a test run can never touch the real ~/.codarastudio.
-  const scannerHome = path.join(tmp, "home");
-  fs.mkdirSync(scannerHome, { recursive: true });
-  process.env.CODARA_HOME_DIR = scannerHome;
   const scanner = await bundle(SCANNER_TS, path.join(tmp, "scanner.bundle.cjs"));
   const {
     decodeScanCache,
@@ -655,24 +651,32 @@ async function main() {
     readFileRecords,
     readTranscriptRecords,
     retentionCutoffMs,
+    scanUsage,
   } = scanner;
 
   {
     const now = 1_800_000_000_000;
     const day = 24 * 60 * 60 * 1000;
     const slack = 36 * 60 * 60 * 1000;
-    // On a short window the plain 90-day retention governs.
     eq(
-      "retention: a short window leaves the 90-day cutoff alone",
+      "retention: a short window leaves the one-year cutoff alone",
       retentionCutoffMs(now, now - 7 * day - slack),
-      now - 90 * day,
+      now - 368 * day,
     );
-    // On the longest window the 90-day cutoff would land inside the walked
-    // range, so the boundary files would be cached and pruned on the same pass
-    // and re-parsed on every scan. The clamp is what stops that.
-    const longWindowStart = now - 90 * day - slack;
+    // The page offers a one-year window. A retention shorter than that evicted
+    // everything past it on every 30-day scan, so the next one-year view
+    // re-parsed months of transcripts cold.
+    const yearWindowStart = now - 364 * day - slack;
+    check(
+      "retention: a 30-day scan keeps what the one-year window needs",
+      retentionCutoffMs(now, now - 29 * day - slack) < yearWindowStart,
+    );
+    // Were a window ever longer than the retention, the plain cutoff would land
+    // inside the walked range, so the boundary files would be cached and pruned
+    // on the same pass and re-parsed on every scan. The clamp is what stops that.
+    const longWindowStart = now - 400 * day - slack;
     eq(
-      "retention: the 90-day window clamps the cutoff back to its own start",
+      "retention: a window longer than the retention clamps the cutoff to its own start",
       retentionCutoffMs(now, longWindowStart),
       longWindowStart,
     );
@@ -894,6 +898,106 @@ async function main() {
     fs.writeFileSync(headless, `${piMessage()}\n`);
     const fallback = await readTranscriptRecords(headless, "cora");
     eq("scan: a pi session without a header falls back to the file name", fallback[0].sessionId, "run-fallback");
+  }
+
+  /* ── Scanner: a whole scan, inline and on the worker thread ────────────── */
+
+  const scanTree = path.join(tmp, "scan-tree");
+  const claudeRoot = path.join(scanTree, "claude", "projects");
+  const codexRoot = path.join(scanTree, "codex", "sessions");
+  const coraRoot = path.join(scanTree, "pi-agent", "sessions");
+  fs.mkdirSync(path.join(claudeRoot, "-p-app"), { recursive: true });
+  fs.mkdirSync(path.join(codexRoot, "2026", "06", "24"), { recursive: true });
+  fs.mkdirSync(coraRoot, { recursive: true });
+  // Two content blocks of one message: one record, not two.
+  fs.writeFileSync(path.join(claudeRoot, "-p-app", "s1.jsonl"), `${claudeLine({ cwd: "/p/app" })}\n${claudeLine({ cwd: "/p/app" })}\n`);
+  fs.writeFileSync(
+    path.join(codexRoot, "2026", "06", "24", "rollout-2026-06-24T22-03-02-019efba8-6f47-7fa2-b182-66ae4ed19230.jsonl"),
+    `${sessionMeta}\n${turnContext("gpt-5.5")}\n${tokenCount()}\n${tokenCount()}\n`,
+  );
+  fs.writeFileSync(path.join(coraRoot, "2026-08-06T13-44-00-040Z_run-abc.jsonl"), `${piHeader}\n${piMessage()}\n`);
+  const scanRequest = (cachePath) => ({
+    roots: [
+      { provider: "claude", dir: claudeRoot, error: null },
+      { provider: "codex", dir: codexRoot, error: null },
+      { provider: "cora", dir: coraRoot, error: null },
+    ],
+    cachePath,
+    input: { sinceDay: "2026-06-01", untilDay: "2026-08-31", timeZone: "UTC" },
+  });
+
+  let inlineSummary;
+  {
+    const cachePath = path.join(tmp, "scan-cache-inline.json");
+    // Overlapping requests, as a quick flip through windows sends them.
+    const [first, second] = await Promise.all([scanUsage(scanRequest(cachePath)), scanUsage(scanRequest(cachePath))]);
+    inlineSummary = first;
+    eq("scan: overlapping scans agree", JSON.stringify(second.buckets), JSON.stringify(first.buckets));
+    eq("scan: one cell per provider and model", first.buckets.length, 3);
+    const claudeCell = first.buckets.find((bucket) => bucket.provider === "claude");
+    eq("scan: repeated content blocks count once across the whole scan", claudeCell.recordCount, 1);
+    eq("scan: the claude cell carries every token kind", totalTokens(claudeCell.totals), 2 + 9757 + 9723 + 7);
+    eq("scan: the duplicate codex token_count counts once", first.buckets.find((bucket) => bucket.provider === "codex").recordCount, 1);
+    eq("scan: every root reports ok", first.sources.map((source) => source.status).join(","), "ok,ok,ok");
+    eq("scan: each source counts its session", first.sources.map((source) => source.distinctSessions).join(","), "1,1,1");
+    eq("scan: the project row carries the working directory", first.projects.find((row) => row.provider === "claude").project, "/p/app");
+    check("scan: the memo is persisted where the caller asked", fs.existsSync(cachePath));
+  }
+  {
+    const missing = await scanUsage({
+      roots: [
+        { provider: "claude", dir: path.join(tmp, "no-such-root"), error: null },
+        { provider: "codex", dir: "", error: "layout check failed" },
+      ],
+      cachePath: path.join(tmp, "scan-cache-missing.json"),
+      input: { sinceDay: "2026-06-01", untilDay: "2026-08-31", timeZone: "UTC" },
+    });
+    eq("scan: a root that does not exist reads as missing", missing.sources[0].status, "missing");
+    eq("scan: a root that could not be resolved reads as an error", missing.sources[1].status, "error");
+    eq("scan: the resolution error is shown on its row", missing.sources[1].message, "layout check failed");
+  }
+  {
+    let rejected = null;
+    try {
+      await scanUsage({ ...scanRequest(path.join(tmp, "scan-cache-bad.json")), input: { sinceDay: "2026-08-31", untilDay: "2026-06-01", timeZone: "UTC" } });
+    } catch (err) {
+      rejected = err;
+    }
+    check("scan: an inverted window is refused", rejected !== null && /after its end/.test(rejected.message));
+    const after = await scanUsage(scanRequest(path.join(tmp, "scan-cache-inline.json")));
+    eq("scan: a refused scan does not wedge the ones queued behind it", after.buckets.length, 3);
+  }
+  {
+    // The main process runs the scan on a thread started from this bundle's
+    // source text; it has to answer exactly what the inline scan answers.
+    const { Worker } = require("node:worker_threads");
+    const built = await esbuild.build({
+      entryPoints: [WORKER_TS],
+      bundle: true,
+      platform: "node",
+      format: "cjs",
+      write: false,
+      plugins: [harnessPlugin],
+      logLevel: "silent",
+    });
+    const thread = new Worker(built.outputFiles[0].text, { eval: true });
+    try {
+      const reply = await new Promise((resolve, reject) => {
+        thread.once("message", resolve);
+        thread.once("error", reject);
+        thread.postMessage({ id: 7, request: scanRequest(path.join(tmp, "scan-cache-worker.json")) });
+      });
+      eq("worker: the reply answers the job it was sent", reply.id, 7);
+      check("worker: the scan succeeds", reply.ok === true);
+      eq("worker: the thread scans exactly what the inline scan does", JSON.stringify(reply.summary.buckets), JSON.stringify(inlineSummary.buckets));
+      const failed = await new Promise((resolve) => {
+        thread.once("message", resolve);
+        thread.postMessage({ id: 8, request: { ...scanRequest(path.join(tmp, "scan-cache-worker.json")), input: { sinceDay: "nope", untilDay: "2026-06-01", timeZone: "UTC" } } });
+      });
+      check("worker: a refused scan comes back as an error, not a dead thread", failed.id === 8 && failed.ok === false && /YYYY-MM-DD/.test(failed.error));
+    } finally {
+      await thread.terminate();
+    }
   }
 
   console.log(`\nAll ${pass} usage-analytics checks passed.`);

@@ -22,31 +22,41 @@ function developmentVersion(): string {
   return `${packageJson.version}-dev`;
 }
 
-// The workflow sandbox thread starts from source text (`eval: true`), so its
-// file must be one self-contained CommonJS bundle with QuickJS inside: a
-// relative require or a rollup chunk would not resolve from an eval'd worker.
-// It is built beside the main bundle with esbuild instead of as a rollup input.
-function workflowSandboxWorkerPlugin(): Plugin {
+// The workflow sandbox and usage scan threads start from source text
+// (`eval: true`), so each file must be one self-contained CommonJS bundle (the
+// sandbox's with QuickJS inside): a relative require or a rollup chunk would
+// not resolve from an eval'd worker. They are built beside the main bundle
+// with esbuild instead of as rollup inputs.
+const THREAD_WORKERS: ReadonlyArray<{ entry: string; outfile: string }> = [
+  { entry: "src/main/orchestration/workflow-sandbox-worker.ts", outfile: "workflow-sandbox-worker.js" },
+  { entry: "src/main/usage-scan-worker.ts", outfile: "usage-scan-worker.js" },
+];
+
+function threadWorkersPlugin(): Plugin {
   let outDir = resolve(__dirname, "out/main");
   return {
-    name: "codara-workflow-sandbox-worker",
+    name: "codara-thread-workers",
     apply: "build",
     configResolved(config) {
       outDir = resolve(config.root, config.build.outDir);
     },
     async writeBundle() {
-      await esbuild({
-        entryPoints: [resolve(__dirname, "src/main/orchestration/workflow-sandbox-worker.ts")],
-        outfile: resolve(outDir, "workflow-sandbox-worker.js"),
-        bundle: true,
-        platform: "node",
-        format: "cjs",
-        target: "node22",
-        minify: true,
-        legalComments: "none",
-        logLevel: "warning",
-        alias: { "@shared": resolve(__dirname, "src/shared") },
-      });
+      await Promise.all(
+        THREAD_WORKERS.map((worker) =>
+          esbuild({
+            entryPoints: [resolve(__dirname, worker.entry)],
+            outfile: resolve(outDir, worker.outfile),
+            bundle: true,
+            platform: "node",
+            format: "cjs",
+            target: "node22",
+            minify: true,
+            legalComments: "none",
+            logLevel: "warning",
+            alias: { "@shared": resolve(__dirname, "src/shared") },
+          }),
+        ),
+      );
     },
   };
 }
@@ -68,7 +78,7 @@ export default defineConfig(({ command }) => ({
     // sax, ...), which broke every update check in the packaged app with
     // "Cannot find module 'debug'". Bundling it into the main chunk removes
     // the runtime dependency on asar node_modules resolution entirely.
-    plugins: [externalizeDepsPlugin({ exclude: ["electron-updater"] }), workflowSandboxWorkerPlugin()],
+    plugins: [externalizeDepsPlugin({ exclude: ["electron-updater"] }), threadWorkersPlugin()],
     resolve: {
       alias: {
         "@shared": resolve(__dirname, "src/shared"),
