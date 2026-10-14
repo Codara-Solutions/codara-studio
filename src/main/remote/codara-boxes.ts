@@ -67,7 +67,8 @@ function classifyFailure(stderr: string, fallback: string): CodaraBoxesError {
       "You are not signed in to Codara Cloud. Run codaracloud login in a terminal, then try again.",
     );
   }
-  const line = text.split(/\r?\n/).filter(Boolean).pop();
+  // The CLI prefixes its final failure with "Error: "; the picker adds its own framing.
+  const line = text.split(/\r?\n/).filter(Boolean).pop()?.replace(/^Error:\s*/, "");
   return new CodaraBoxesError("failed", line ? line.slice(0, 300) : fallback);
 }
 

@@ -58,8 +58,8 @@ const args = process.argv.slice(2);
 fs.appendFileSync(process.env.ARGS_LOG, JSON.stringify(args) + "\\n");
 const mode = process.env.MODE || "ok";
 const out = (v) => process.stdout.write(JSON.stringify(v));
-if (mode === "signedout") { console.error("Not signed in. Run codaracloud login."); process.exit(1); }
-if (mode === "disabled") { console.error("Error: boxes_disabled: Codara Boxes are not enabled yet."); process.exit(1); }
+if (mode === "signedout") { console.error("Error: no API token found — run codaracloud login"); process.exit(1); }
+if (mode === "disabled") { console.error("Error: Codara Boxes are not enabled yet."); process.exit(1); }
 if (mode === "garbage") { process.stdout.write("not json"); process.exit(0); }
 if (args[0] === "boxes" && args[1] === "list") return out(${JSON.stringify(BOXES)});
 if (args[0] === "boxes" && args[1] === "ssh-config") {
@@ -69,7 +69,7 @@ if (args[0] === "boxes" && args[1] === "ssh-config") {
   return out(mode === "array" ? [rec] : rec);
 }
 if (args[0] === "boxes" && args[1] === "wake") {
-  if (mode === "wake-fail") { console.error("Waking dev: starting the box"); console.error("The box did not start in time (last phase: starting)."); process.exit(255); }
+  if (mode === "wake-fail") { console.error("Waking dev: starting the box"); console.error("Error: The box did not start in time (last phase: starting). Run codaracloud boxes get " + args[2] + " to see why."); process.exit(1); }
   console.error("Waking dev: starting the box");
   console.error("Waking dev: waiting for a server (a new one can take several minutes)");
   process.exit(0);
@@ -209,7 +209,7 @@ async function testWake(api) {
   const seen = [];
   await assert.rejects(
     api.wakeCodaraBox(ID, { ...deps, onPhase: (l) => seen.push(l) }),
-    /The box did not start in time/,
+    (e) => /^The box did not start in time/.test(e.message),
   );
   assert.equal(seen[0], "Waking dev: starting the box");
 

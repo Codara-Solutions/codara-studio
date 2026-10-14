@@ -100,7 +100,7 @@ export interface CodaraBoxSummary {
   projectSlug: string | null;
   environmentSlug: string | null;
   region: string | null;
-  /** Pending, Running, Sleeping, Waking, Failed, Deleting, ... */
+  /** Pending, Starting, Running, Sleeping, Suspended, Blocked, Failed or Deleting. */
   phase: string;
   message: string | null;
   canConnect: boolean;
