@@ -66,6 +66,20 @@ Codara's. Keys an agent sends to a page never trigger Codara's shortcuts.
 | Close other tabs | Mod+Alt+T | `tab.closeOthers` |
 | Cycle to next tab | Ctrl+Tab | `tab.cycleNext` |
 | Cycle to previous tab | Ctrl+Shift+Tab | `tab.cyclePrev` |
+| Group active tab (or edit its group) | (unbound) | `tab.group` |
+| Remove active tab from its group | (unbound) | `tab.ungroup` |
+
+Tab groups work as in Chrome: a named, colored run of adjacent tabs. Right-click
+a tab to add it to a new or existing group or remove it from one, or drag it
+into or out of a group. The group's chip sits before its tabs: click it (or
+Enter) to collapse the group to the chip and a tab count, and right-click it
+(or Shift+F10) to rename it, change its color, ungroup it (the tabs stay) or
+close it with its tabs, which asks first when a terminal would close with
+them. Tab cycling skips the tabs of a collapsed group. Groups are saved with
+each workspace's tabs. Agents put the tabs and terminals they open into a
+group they name (`group` on the codara-studio tools, see
+[mcp-tools.md](mcp-tools.md#tab-groups)); those groups are the same and can be
+edited the same way.
 
 ### Terminal
 
