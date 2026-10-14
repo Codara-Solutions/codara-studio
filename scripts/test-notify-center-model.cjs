@@ -377,19 +377,36 @@ test("viewing marks exact targets read and keeps them", () => {
     workspaceId: "w1",
     visibleRunId: "r1",
     terminal: { workspaceId: "w1", tabId: "t1", paneId: "p1" },
+    automation: null,
   });
   assert.equal(changed, true);
   assert.equal(list.length, 6);
   assert.deepEqual(list.filter((e) => e.read).map((e) => e.id), ["pane", "run"]);
 });
 
+test("viewing an automation's page marks its own alerts read, not its Notify steps", () => {
+  const list = [
+    row({ id: "finished", kind: "automation.finished", target: { type: "automation", jobId: "j", runId: "pass", workspaceId: "w1" } }),
+    row({ id: "step", kind: "automation.step", target: { type: "automation", jobId: "j", workspaceId: "w1" } }),
+    row({ id: "other", kind: "automation.finished", target: { type: "automation", jobId: "k", workspaceId: "w1" } }),
+  ];
+  const changed = M.markViewed(list, {
+    workspaceId: "w1",
+    visibleRunId: null,
+    terminal: null,
+    automation: { workspaceId: "w1", jobId: "j" },
+  });
+  assert.equal(changed, true);
+  assert.deepEqual(list.filter((e) => e.read).map((e) => e.id), ["finished"]);
+});
+
 test("a run in another workspace is not acknowledged by a stale view", () => {
   assert.equal(
-    S.isTargetViewed({ type: "run", runId: "r1", workspaceId: "w2" }, { workspaceId: "w1", visibleRunId: "r1", terminal: null }),
+    S.isTargetViewed({ type: "run", runId: "r1", workspaceId: "w2" }, { workspaceId: "w1", visibleRunId: "r1", terminal: null, automation: null }),
     false,
   );
   assert.equal(
-    S.isTargetViewed({ type: "run", runId: "r1" }, { workspaceId: "w1", visibleRunId: "r1", terminal: null }),
+    S.isTargetViewed({ type: "run", runId: "r1" }, { workspaceId: "w1", visibleRunId: "r1", terminal: null, automation: null }),
     true,
   );
 });

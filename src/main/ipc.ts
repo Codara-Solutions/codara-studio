@@ -726,10 +726,13 @@ function notifyViewFromIpc(
   const workspaceId = str(terminal?.workspaceId);
   const tabId = str(terminal?.tabId);
   const paneId = str(terminal?.paneId);
+  const automationWorkspaceId = str(raw.automation?.workspaceId);
+  const jobId = str(raw.automation?.jobId);
   return {
     workspaceId: str(raw.workspaceId),
     visibleRunId: str(raw.visibleRunId),
     terminal: workspaceId && tabId && paneId ? { workspaceId, tabId, paneId } : null,
+    automation: automationWorkspaceId && jobId ? { workspaceId: automationWorkspaceId, jobId } : null,
   };
 }
 

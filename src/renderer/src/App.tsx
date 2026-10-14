@@ -117,6 +117,7 @@ import {
 } from "./tabs/agentTerminalPlacement";
 import { setTabGroupBridge } from "./tabs/tabGroupBridge";
 import type { ActiveNotificationView } from "./notifications/viewed";
+import { useViewedAutomation } from "./notifications/viewed-automation";
 import type { TerminalPaneDragPayload } from "./tabs/terminalDrag";
 import type {
   PaneNode,
@@ -839,6 +840,8 @@ export default function App() {
   const activeViewRunId = visibleRunIdForTab(activeViewTab);
   const activeViewTerminalTabId = activeViewTab?.kind === "terminal" ? activeViewTab.id : null;
   const activeViewPaneId = activeViewTab?.kind === "terminal" ? activeViewTab.activePaneId : null;
+  // Reported by the Automations hub while an automation's page is on screen.
+  const viewedAutomation = useViewedAutomation();
   const activeNotificationView = useMemo<ActiveNotificationView>(() => {
     const workspaceId = tabs.tabsWorkspaceId;
     return {
@@ -848,8 +851,9 @@ export default function App() {
         activeViewTerminalTabId && activeViewPaneId && workspaceId
           ? { workspaceId, tabId: activeViewTerminalTabId, paneId: activeViewPaneId }
           : null,
+      automation: viewedAutomation?.workspaceId === workspaceId ? viewedAutomation : null,
     };
-  }, [tabs.tabsWorkspaceId, activeViewRunId, activeViewTerminalTabId, activeViewPaneId]);
+  }, [tabs.tabsWorkspaceId, activeViewRunId, activeViewTerminalTabId, activeViewPaneId, viewedAutomation]);
 
   // The useTabs API's methods are stable for the hook instance's lifetime
   // (only its data fields re-key the memo). Destructure the ones the hoisted

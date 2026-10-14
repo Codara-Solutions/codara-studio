@@ -29,6 +29,7 @@ import {
   workerSummary,
 } from "./presentation";
 import { consumePendingAutomationFocus, consumePendingWorkflowRunFocus } from "./focus-request";
+import { reportViewedAutomation } from "../../notifications/viewed-automation";
 import WorkflowsView from "../workflows/WorkflowsView";
 import { LoomIcon, WORKER_TONE } from "./flow/FlowNodes";
 import { graphForJob } from "./flow/model";
@@ -261,6 +262,15 @@ export default function AutomationsPage({
   }, [focusRequest, loading, jobs, switchSubTab]);
 
   const selected = useMemo(() => jobs.find((j) => j.id === selectedId) ?? null, [jobs, selectedId]);
+
+  // While this automation's page is on screen, its own finished, failed and
+  // blocked alerts count as seen (isTargetViewed). The editor, the other
+  // sub-tabs and a hidden tab show no automation.
+  const viewedJobId = active && subTab === "looms" && mode.kind === "view" ? (selected?.id ?? null) : null;
+  useEffect(() => {
+    if (!viewedJobId) return;
+    return reportViewedAutomation(workspaceId, viewedJobId);
+  }, [workspaceId, viewedJobId]);
 
   // ── live board open/close ───────────────────────────────────────────────
   // Selection change always closes the board (a different automation's board

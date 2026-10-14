@@ -269,7 +269,8 @@ and muted sources do not light it.
 - Clicking a row opens its exact pane, run or automation and marks it read.
   If the pane was closed or the run is no longer available, the row says so
   and opening it lands on its workspace instead; rows of a removed workspace
-  open nothing. Opening the pane or run yourself also marks its alerts read.
+  open nothing. Opening the pane, run or automation yourself also marks its
+  alerts read, except the messages of an automation's Notify steps.
 - Hover a row for **Mark read** or **Mark unread**, **Mute** and
   **Dismiss**; they take the place of the time while the pointer is there.
   The mute menu picks how long first (**1 hour** or **Until morning**, the

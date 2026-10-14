@@ -1700,12 +1700,14 @@ export interface NotificationCenterSummary {
 }
 
 // What the user is looking at, as far as acknowledging center rows goes: the
-// visible run and the selected terminal pane. A row whose target is exactly
-// this surface is marked read; it stays in the history.
+// visible run, the selected terminal pane and the automation whose page is
+// open in the Automations hub. A row whose target is exactly this surface is
+// marked read; it stays in the history.
 export interface NotificationViewSnapshot {
   workspaceId: string | null;
   visibleRunId: string | null;
   terminal: { workspaceId: string; tabId: string; paneId: string } | null;
+  automation: { workspaceId: string; jobId: string } | null;
 }
 
 // The renderer's report of what the user is looking at, sent on every

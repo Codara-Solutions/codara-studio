@@ -206,7 +206,7 @@ export default function ToastHost({
       const matchingIds = new Set(matchingVisible.map((toast) => toast.id));
       setToasts((current) => current.filter((toast) => !matchingIds.has(toast.id)));
     }
-    if (!view.visibleRunId && !view.terminal) return;
+    if (!view.visibleRunId && !view.terminal && !view.automation) return;
     void window.spark.notifications.markViewed(view).catch(() => undefined);
   }, [activeViewKey]);
 

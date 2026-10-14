@@ -173,9 +173,10 @@ export function summarizeCenter(
   return { ...countCenter(list, mutes, now), mutes: activeMutes(mutes, now) };
 }
 
-// Whether a row's target is the exact surface on screen. Only a visible run
-// and the selected terminal pane count: being in a workspace, or on the
-// Automations hub, says nothing about whether a particular alert was seen.
+// Whether a row's target is the exact surface on screen. Only a visible run,
+// the selected terminal pane and the page of the automation itself count:
+// being in a workspace, or on the Automations hub showing another
+// automation, says nothing about whether a particular alert was seen.
 // A loom "Notify" step is the user's own message to themselves and a
 // teammate push has no single surface, so neither is ever acknowledged by
 // looking.
@@ -193,6 +194,17 @@ export function isTargetViewed(
       target.tabId === view.terminal.tabId &&
       target.paneId === view.terminal.paneId
     );
+  }
+  // A loom's own alerts (finished, failed, blocked) carry its pass's run,
+  // which has no chat tab, so its page is the surface they are seen on.
+  if (
+    target.type === "automation" &&
+    target.jobId &&
+    view.automation &&
+    target.jobId === view.automation.jobId &&
+    (!target.workspaceId || target.workspaceId === view.automation.workspaceId)
+  ) {
+    return true;
   }
   const runId = target.runId;
   if (!runId || runId !== view.visibleRunId) return false;

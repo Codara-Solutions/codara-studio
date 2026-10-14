@@ -1,8 +1,9 @@
 import type { NotificationViewSnapshot } from "@shared/types";
 
-// The surface on screen, as far as notifications care: the visible run and
-// the selected terminal pane. The matching rule lives in @shared/notify-center
-// so the main-process store applies the same one when it marks rows read.
+// The surface on screen, as far as notifications care: the visible run, the
+// selected terminal pane and the automation whose page is open. The matching
+// rule lives in @shared/notify-center so the main-process store applies the
+// same one when it marks rows read.
 export type ActiveNotificationView = NotificationViewSnapshot;
 
 export { isTargetViewed as isNotificationTargetViewed } from "@shared/notify-center";
@@ -11,5 +12,11 @@ export { isTargetViewed as isNotificationTargetViewed } from "@shared/notify-cen
 // instead of once per re-render that rebuilt an equal object.
 export function notificationViewKey(view: ActiveNotificationView): string {
   const t = view.terminal;
-  return [view.workspaceId ?? "", view.visibleRunId ?? "", t ? `${t.workspaceId}/${t.tabId}/${t.paneId}` : ""].join("|");
+  const a = view.automation;
+  return [
+    view.workspaceId ?? "",
+    view.visibleRunId ?? "",
+    t ? `${t.workspaceId}/${t.tabId}/${t.paneId}` : "",
+    a ? `${a.workspaceId}/${a.jobId}` : "",
+  ].join("|");
 }
