@@ -108,6 +108,7 @@ export interface CodaraBoxSummary {
 
 export type CodaraBoxesErrorCode =
   | "cli_missing"
+  | "cli_outdated"
   | "not_signed_in"
   | "boxes_disabled"
   | "failed";

@@ -59,6 +59,14 @@ async function requireCli(deps: CodaraBoxesDeps): Promise<string> {
 // The CLI prints API messages on stderr; map the ones the picker can act on.
 function classifyFailure(stderr: string, fallback: string): CodaraBoxesError {
   const text = stderr.trim();
+  // Released CLIs older than boxes have no boxes, ssh-proxy or ssh-config
+  // command, and cobra answers: unknown command "boxes" for "codaracloud".
+  if (/unknown command "(boxes|ssh-proxy|ssh-config)"/i.test(text)) {
+    return new CodaraBoxesError(
+      "cli_outdated",
+      "Your Codara Cloud CLI is too old for boxes. Run codaracloud update in a terminal, then try again.",
+    );
+  }
   if (/boxes_disabled|boxes are not enabled/i.test(text)) {
     return new CodaraBoxesError("boxes_disabled", "Codara Boxes are not enabled yet.");
   }

@@ -59,6 +59,7 @@ fs.appendFileSync(process.env.ARGS_LOG, JSON.stringify(args) + "\\n");
 const mode = process.env.MODE || "ok";
 const out = (v) => process.stdout.write(JSON.stringify(v));
 if (mode === "signedout") { console.error("Error: no API token found — run codaracloud login"); process.exit(1); }
+if (mode === "outdated") { console.error("Error: unknown command \\"boxes\\" for \\"codaracloud\\"\\nRun 'codaracloud --help' for usage."); process.exit(1); }
 if (mode === "disabled") { console.error("Error: Codara Boxes are not enabled yet."); process.exit(1); }
 if (mode === "garbage") { process.stdout.write("not json"); process.exit(0); }
 if (args[0] === "boxes" && args[1] === "list") return out(${JSON.stringify(BOXES)});
@@ -157,6 +158,11 @@ async function testListErrors(api) {
 
   process.env.MODE = "disabled";
   assert.equal((await api.listCodaraBoxes(deps)).code, "boxes_disabled");
+
+  process.env.MODE = "outdated";
+  const outdated = await api.listCodaraBoxes(deps);
+  assert.equal(outdated.code, "cli_outdated");
+  assert.match(outdated.message, /codaracloud update/);
 
   process.env.MODE = "garbage";
   assert.equal((await api.listCodaraBoxes(deps)).code, "failed");
