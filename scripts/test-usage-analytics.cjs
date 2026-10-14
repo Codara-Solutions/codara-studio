@@ -577,7 +577,31 @@ async function main() {
     aggregator.add(record({ provider: "cora", reportedCostUsd: 0.5 }));
     const reportedOnly = aggregator.finish().buckets[0];
     eq("aggregation: an all-reported cell says reported", reportedOnly.costSource, "reported");
-    near("aggregation: cache savings use the input/cacheRead spread", reportedOnly.cacheSavingsUsd, 4.5);
+    // 1M reads save 4.50 at Opus rates; 1M writes cost 1.25 over plain input.
+    near("aggregation: cache savings net the write premium off the read discount", reportedOnly.cacheSavingsUsd, 3.25);
+  }
+  {
+    const { cacheHitShare, cacheSavingsUsd } = usage;
+    const only = (over) => ({ uncachedInputTokens: 0, cachedInputTokens: 0, cacheCreationTokens: 0, outputTokens: 0, reasoningTokens: 0, ...over });
+    near(
+      "cache savings: writes that are never read back cost money",
+      cacheSavingsUsd(lookupUsagePrice, "claude", "claude-opus-5", only({ cacheCreationTokens: 1_000_000 })),
+      -1.25,
+    );
+    near(
+      "cache savings: a model without a write rate pays no premium",
+      cacheSavingsUsd(lookupUsagePrice, "codex", "gpt-5.6-sol", only({ cachedInputTokens: 1_000_000, cacheCreationTokens: 1_000_000 })),
+      4.5,
+    );
+    eq("cache savings: an unpriced model saves nothing", cacheSavingsUsd(lookupUsagePrice, "claude", "opus", only({ cachedInputTokens: 5 })), 0);
+    // A real-shaped Claude Code turn: almost nothing uncached, a sizeable write.
+    near(
+      "cache hits: writes count as prompt tokens that missed the cache",
+      cacheHitShare(only({ uncachedInputTokens: 2, cachedInputTokens: 9757, cacheCreationTokens: 9723 })),
+      9757 / (2 + 9757 + 9723),
+    );
+    eq("cache hits: nothing sent has no hit rate", cacheHitShare(only({ outputTokens: 10 })), null);
+    eq("cache hits: output never enters the share", cacheHitShare(only({ cachedInputTokens: 1, outputTokens: 99 })), 1);
   }
   {
     const aggregator = new UsageAggregator({
