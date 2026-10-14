@@ -61,6 +61,9 @@ const READY_TIMEOUT_MS = 20_000;
 const PROXY_READY_TIMEOUT_MS = 120_000;
 const KEEPALIVE_INTERVAL_MS = 15_000;
 const KEEPALIVE_COUNT_MAX = 3;
+// A ProxyCommand that ignores the end of its input would outlive a closed
+// connection, so dispose force-closes a client still open after this long.
+const DISPOSE_GRACE_MS = 2_000;
 const DEFAULT_EXEC_TIMEOUT_MS = 20_000;
 const DEFAULT_EXEC_MAX_BUFFER = 16 * 1024 * 1024;
 
@@ -705,7 +708,12 @@ class RemoteConnection {
     const client = this.client;
     this.client = null;
     this.sftpCached = null;
-    client?.end();
+    if (client) {
+      client.end();
+      const forceClose = setTimeout(() => disposeClient(client), DISPOSE_GRACE_MS);
+      forceClose.unref?.();
+      client.once("close", () => clearTimeout(forceClose));
+    }
     this.setState("disconnected");
   }
 }

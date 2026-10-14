@@ -65,10 +65,15 @@ function stubPlugin() {
         }
         end() {
           this.endCalls += 1;
+          // Like ssh2, ending the client ends its socket (a ProxyCommand's stdin).
+          this.connectConfig?.sock?.end?.();
           return this;
         }
         destroy() {
           this.destroyCalls += 1;
+          // Like ssh2, destroying the client destroys its socket, which for a
+          // ProxyCommand host kills the proxy process.
+          this.connectConfig?.sock?.destroy?.();
           return this;
         }
       }
@@ -355,7 +360,11 @@ async function testFreshKeyRetry(api, harness) {
     "the wait is reported as progress",
   );
   assert(harness.clearedFreshKeys.includes("codara-fresh-key"), "success clears the fresh-key state");
+  const freshClient = harness.clients[harness.clients.length - 1];
   api.disconnectHost("codara-fresh-key");
+  // This proxy ignores the end of its input; dispose still closes it.
+  await new Promise((resolve) => setTimeout(resolve, 2_200));
+  assert(freshClient.destroyCalls >= 1, "a disposed client that stays open is force-closed");
 
   // The window ends: the authentication failure is reported.
   const spent = await run("codara-fresh-budget", { budget: 1, acceptRound: 99 });
