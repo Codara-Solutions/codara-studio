@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 
 import {
   DEFAULT_BLOCKED_SITES,
+  agentGroupFor,
+  agentGroupTitle,
   blockingRule,
   cdpPermission,
   childSessionError,
@@ -103,5 +105,18 @@ export function run() {
   assert.equal(isTabShared({ ...none, all: true }, tab), true);
   assert.equal(isTabShared({ ...none, all: true, stopped: [7] }, tab), false, "a stopped tab stays off with every tab shared");
   assert.equal(isTabShared({ ...none, all: true }, { ...tab, url: "chrome://settings" }), false, "browser pages are never shared");
-  return "policy: blocked sites, browser pages, protocol permissions, cookie redaction and sharing";
+
+  assert.equal(agentGroupTitle("  Fix\n login   flow "), "Fix login flow");
+  assert.equal(agentGroupTitle(2024), "2024", "the CLI sends a numeric name as a number");
+  assert.equal(agentGroupTitle({ name: "x" }), "");
+  assert.equal(agentGroupTitle("x".repeat(80)).length, 48);
+  const groups = [
+    { id: 1, title: "Login" },
+    { id: 2, title: "login" },
+    { id: 3, title: "Docs" },
+  ];
+  assert.equal(agentGroupFor(groups, [2, 3], "LOGIN")?.id, 2, "joins the extension's group by title, ignoring case");
+  assert.equal(agentGroupFor(groups, [3], "Login"), null, "never the user's own group of that title");
+  assert.equal(agentGroupFor(groups, [1, 2, 3], ""), null);
+  return "policy: blocked sites, browser pages, protocol permissions, cookie redaction, sharing and agent tab groups";
 }

@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "description": "Let the agents you run in Codara use the browser tabs you share, with your signed-in sessions.",
   "minimum_chrome_version": "116",
-  "permissions": ["debugger", "tabs", "storage", "alarms"],
+  "permissions": ["debugger", "tabs", "tabGroups", "storage", "alarms"],
   "background": {
     "service_worker": "background.js",
     "type": "module"

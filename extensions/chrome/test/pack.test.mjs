@@ -31,7 +31,7 @@ function readZip(buffer) {
 export function run() {
   const { manifest, problems } = checkExtension();
   assert.deepEqual(problems, [], "the extension passes its own checks");
-  assert.deepEqual(manifest.permissions.sort(), ["alarms", "debugger", "storage", "tabs"], "no permission beyond what the link needs");
+  assert.deepEqual(manifest.permissions.sort(), ["alarms", "debugger", "storage", "tabGroups", "tabs"], "no permission beyond what the link needs");
   assert.equal(manifest.host_permissions, undefined);
 
   const files = extensionFiles();

@@ -47,6 +47,8 @@ Description:
 - `tabs`: list the user's tabs in the popup so they can choose which to
   share, follow a shared tab's URL to enforce the blocked-sites list, and
   open, focus or close tabs when the user allowed it.
+- `tabGroups`: put the tabs an agent opens into a tab group named after its
+  task, so they stay together and apart from the user's own tabs.
 - `storage`: remember the pairing token, the blocked-sites list and the
   user's sharing choices.
 - `alarms`: reconnect to Codara after the service worker was suspended or

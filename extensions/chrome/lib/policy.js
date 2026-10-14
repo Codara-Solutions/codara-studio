@@ -145,6 +145,37 @@ export function childSessionError(request) {
   return "Agents use the tab's own page only: its frames and workers are not reachable in your own browser.";
 }
 
+const AGENT_GROUP_TITLE_MAX = 48;
+
+/**
+ * The title of the tab group an agent asked to open a tab in, cleaned the way
+ * Codara cleans its own group names, or "" for none.
+ */
+export function agentGroupTitle(raw) {
+  const text = typeof raw === "string" ? raw : typeof raw === "number" && Number.isFinite(raw) ? String(raw) : "";
+  return text
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, AGENT_GROUP_TITLE_MAX)
+    .trim();
+}
+
+/**
+ * The group an agent's new tab joins: one of this window's groups the
+ * extension made, titled the same ignoring case. A group the user made is
+ * never joined, so an agent's tab never lands among the user's own.
+ */
+export function agentGroupFor(groups, agentGroupIds, title) {
+  const key = String(title ?? "").toLowerCase();
+  if (!key) return null;
+  return (
+    (groups ?? []).find(
+      (group) => agentGroupIds.includes(group.id) && String(group.title ?? "").toLowerCase() === key,
+    ) ?? null
+  );
+}
+
 /**
  * What the agent learns about a tab it opened. A page that redirected to a
  * blocked site tells it nothing: not where it ended, nor its title.
