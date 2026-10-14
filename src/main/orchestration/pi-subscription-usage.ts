@@ -677,6 +677,31 @@ function profileCacheTtlMs(provider: PiSubscriptionProvider): number {
   return provider === "anthropic" ? ANTHROPIC_CACHE_TTL_MS : DEFAULT_CACHE_TTL_MS;
 }
 
+/**
+ * Whether one of the read's windows has reset since it was taken. Such a read
+ * still describes the window before the reset, often full and limit-reached,
+ * which is the one number that is certainly wrong now, so the TTL alone must
+ * not keep serving it. Only a reset after the read counts: a vendor that has
+ * not rolled over yet reports a reset already past, and that must not turn
+ * every read into a live one.
+ */
+function windowResetSince(usage: PiUsageProfile, readAtMs: number, nowMs: number): boolean {
+  return usage.windows.some((window) => {
+    const resetMs = window.resetsAt ? Date.parse(window.resetsAt) : Number.NaN;
+    return Number.isFinite(resetMs) && resetMs > readAtMs && resetMs <= nowMs;
+  });
+}
+
+function cacheEntryFresh(
+  provider: PiSubscriptionProvider,
+  entry: { at: number; usage: PiUsageProfile },
+): boolean {
+  const now = Date.now();
+  return (
+    now - entry.at < profileCacheTtlMs(provider) && !windowResetSince(entry.usage, entry.at, now)
+  );
+}
+
 function refreshUsageProfileCountdowns(
   profile: PiUsageProfile,
 ): PiUsageProfile {
@@ -736,7 +761,7 @@ function cachedProfileUsage(
     return profileUsage(profile, authStatus, new Date().toISOString());
   }
   const existing = profileCache.get(profile.id);
-  if (!force && existing && Date.now() - existing.at < profileCacheTtlMs(profile.provider)) {
+  if (!force && existing && cacheEntryFresh(profile.provider, existing)) {
     return Promise.resolve(
       refreshUsageProfileCountdowns({
         ...existing.usage,
@@ -850,7 +875,7 @@ export function inspectCachedPiSubscriptionUsageProfiles(): PiUsageProfile[] {
   return cachedProfileProjection.profiles
     .filter((profile) => {
       const cached = profileCache.get(profile.profileId);
-      return cached && Date.now() - cached.at < profileCacheTtlMs(profile.provider);
+      return cached !== undefined && cacheEntryFresh(profile.provider, cached);
     })
     .map(refreshUsageProfileCountdowns);
 }

@@ -201,6 +201,7 @@ async function main() {
   let anthropicFetches = 0;
   let anthropicHeaders = null;
   let rateLimitAnthropic = false;
+  let anthropicFiveHour = { utilization: 12, resets_at: "2026-08-01T00:00:00.000Z" };
   const realDateNow = Date.now;
   let syntheticNow = realDateNow();
   Date.now = () => syntheticNow;
@@ -220,7 +221,7 @@ async function main() {
         status: 200,
         async text() {
           return JSON.stringify({
-            five_hour: { utilization: 12, resets_at: "2026-08-01T00:00:00.000Z" },
+            five_hour: anthropicFiveHour,
             seven_day: { utilization: 34, resets_at: "2026-08-07T00:00:00.000Z" },
           });
         },
@@ -369,6 +370,48 @@ async function main() {
   check(
     "invalidation clears the synchronous profile projection",
     usage.inspectCachedPiSubscriptionUsageProfiles().length === 0,
+  );
+
+  // A full window that resets inside the five-minute Claude TTL.
+  rateLimitAnthropic = false;
+  const claudeUsage = (overview) =>
+    overview.profiles.find((entry) => entry.profileId === profiles[3].id);
+  anthropicFiveHour = { utilization: 100, resets_at: new Date(syntheticNow + 60_000).toISOString() };
+  await usage.inspectPiSubscriptionUsage(true);
+  const fetchesBeforeReset = anthropicFetches;
+  syntheticNow += 30_000;
+  await usage.inspectPiSubscriptionUsage(false);
+  check(
+    "a read whose windows have not reset is served from cache",
+    anthropicFetches === fetchesBeforeReset,
+    `anthropicFetches=${anthropicFetches}`,
+  );
+  anthropicFiveHour = { utilization: 3, resets_at: new Date(syntheticNow + 5 * 3_600_000).toISOString() };
+  syntheticNow += 45_000;
+  check(
+    "the synchronous projection drops a read whose window has since reset",
+    !usage.inspectCachedPiSubscriptionUsageProfiles().some((entry) => entry.provider === "anthropic"),
+    JSON.stringify(usage.inspectCachedPiSubscriptionUsageProfiles().map((entry) => entry.provider)),
+  );
+  const afterReset = claudeUsage(await usage.inspectPiSubscriptionUsage(false));
+  check(
+    "a window that reset since the read is read again inside the TTL",
+    anthropicFetches === fetchesBeforeReset + 1 &&
+      afterReset.windows.some((window) => window.usedPercent === 3) &&
+      !afterReset.windows.some((window) => window.usedPercent === 100),
+    JSON.stringify({ anthropicFetches, windows: afterReset.windows }),
+  );
+  // A vendor that has not rolled over yet still reports the passed reset; that
+  // read is cached like any other instead of making every read live.
+  anthropicFiveHour = { utilization: 100, resets_at: new Date(syntheticNow - 1_000).toISOString() };
+  await usage.inspectPiSubscriptionUsage(true);
+  const fetchesAtLateRollover = anthropicFetches;
+  syntheticNow += 10_000;
+  await usage.inspectPiSubscriptionUsage(false);
+  check(
+    "a reset that was already past when read does not defeat the cache",
+    anthropicFetches === fetchesAtLateRollover,
+    `anthropicFetches=${anthropicFetches}`,
   );
   Date.now = realDateNow;
 
