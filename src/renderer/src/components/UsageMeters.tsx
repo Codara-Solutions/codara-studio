@@ -16,6 +16,7 @@ import type {
   PiUsageWindow,
 } from "@shared/types";
 import { ClaudeMark, CodexMark, GrokMark } from "./BrandMarks";
+import { msUntilUsageReset } from "./usage-reset-timer";
 
 type UsageEntry = PiUsageProvider | PiUsageProfile;
 
@@ -476,6 +477,16 @@ export default function UsageMeters({ onOpenUsage }: { onOpenUsage?: () => void 
     const timer = setInterval(() => load(false), POLL_INTERVAL_MS);
     return () => clearInterval(timer);
   }, [load]);
+
+  // A window that resets between two polls would keep its old, often full,
+  // bar for up to a whole poll. The main process treats a read whose window
+  // has since reset as stale, so this non-forced load reads live.
+  useEffect(() => {
+    const delay = msUntilUsageReset(overview, Date.now());
+    if (delay === null || delay >= POLL_INTERVAL_MS) return;
+    const timer = setTimeout(() => load(false), delay);
+    return () => clearTimeout(timer);
+  }, [overview, load]);
 
   // Re-read the moment the auth store changes (connect, disconnect, or a
   // login flow completing). The main process has already dropped its usage

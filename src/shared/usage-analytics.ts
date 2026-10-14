@@ -463,7 +463,12 @@ export function priceUsageRecord(
   return { costUsd, costSource: "priced" };
 }
 
-/** What the cache reads would have cost at full input rates, minus what they did. */
+/**
+ * What the cached tokens would have cost at the plain input rate, minus what
+ * they did. Writing to the cache costs more than plain input, so the write
+ * premium comes off the read discount. Negative when a call paid for cache
+ * writes it never read back.
+ */
 export function cacheSavingsUsd(
   lookup: UsagePriceLookup,
   provider: UsageProviderKind,
@@ -472,7 +477,22 @@ export function cacheSavingsUsd(
 ): number {
   const rate = lookup(model, provider);
   if (rate === null) return 0;
-  return (totals.cachedInputTokens * (rate.input - rate.cacheRead)) / 1_000_000;
+  return (
+    (totals.cachedInputTokens * (rate.input - rate.cacheRead) -
+      totals.cacheCreationTokens * (rate.cacheWrite - rate.input)) /
+    1_000_000
+  );
+}
+
+/**
+ * Share of the prompt tokens that were read from the cache. Cache writes are
+ * prompt tokens too (sent in full, then stored), so they count in the
+ * denominator. Null when nothing was sent.
+ */
+export function cacheHitShare(totals: UsageTokenTotals): number | null {
+  const prompt =
+    totals.uncachedInputTokens + totals.cachedInputTokens + totals.cacheCreationTokens;
+  return prompt === 0 ? null : totals.cachedInputTokens / prompt;
 }
 
 /* ── Aggregation ─────────────────────────────────────────────────────────── */

@@ -9,12 +9,8 @@ import {
   enumerateDays,
   makeUsageWindow,
   resolveLocalTimeZone,
-  totalTokens,
-  type UsageDayBucket,
-  type UsageProjectRow,
   type UsageProviderKind,
   type UsageSessionRow,
-  type UsageSource,
   type UsageSummary,
   type UsageSummaryInput,
 } from "@shared/usage-analytics";
@@ -22,11 +18,30 @@ import { ClaudeMark, CodexMark } from "../BrandMarks";
 import { SparkIcon } from "../icons";
 import {
   formatCount,
+  formatDayRange,
   formatDayShort,
   formatPercent,
+  formatShare,
   formatTokens,
   formatUsd,
+  spansYears,
 } from "./usage-format";
+import {
+  PROVIDER_ORDER,
+  PROVIDER_READING_ORDER,
+  buildDailyTotals,
+  buildModelRows,
+  buildProjectRows,
+  buildProviderCards,
+  busiestDay,
+  intensityColumns,
+  summarizeBuckets,
+  type DayTotals,
+  type ModelRow,
+  type ProjectRow,
+  type ProviderCardData,
+  type SummaryTotals,
+} from "./usage-derive";
 
 // The Usage page: what the three harnesses on this machine actually spent.
 // The scan lives in the main process; this file is display only.
@@ -45,6 +60,8 @@ const WINDOW_OPTIONS: ReadonlyArray<{ days: number; label: string }> = [
   { days: 365, label: "1y" },
 ];
 
+const LONGEST_WINDOW_DAYS = 365;
+
 // How many trailing days the intensity grid shows at most.
 const INTENSITY_DAYS = 42;
 const RECENT_SESSIONS_SHOWN = 12;
@@ -54,13 +71,6 @@ const PROVIDER_LABEL: Record<UsageProviderKind, string> = {
   codex: "Codex",
   cora: "Cora",
 };
-
-// Stacking order, bottom band first.
-const PROVIDER_ORDER: readonly UsageProviderKind[] = [
-  "cora",
-  "codex",
-  "claude",
-];
 
 /**
  * Provider identity colours.
@@ -88,6 +98,29 @@ function ProviderMark({
   if (provider === "claude") return <ClaudeMark size={size} />;
   if (provider === "codex") return <CodexMark size={size} />;
   return <SparkIcon size={size} />;
+}
+
+/**
+ * A provider's mark in its colour. The mark alone is the only thing telling
+ * two rows of the same model apart (Claude Code's and Cora's), so its name
+ * rides along for screen readers and as a tooltip.
+ */
+function ProviderBadge({
+  provider,
+  size = 12,
+}: {
+  provider: UsageProviderKind;
+  size?: number;
+}) {
+  return (
+    <span
+      title={PROVIDER_LABEL[provider]}
+      style={{ display: "flex", color: PROVIDER_COLOR[provider] }}
+    >
+      <ProviderMark provider={provider} size={size} />
+      <span className="spark-sr-only">{PROVIDER_LABEL[provider]}</span>
+    </span>
+  );
 }
 
 type UsageMetric = "cost" | "tokens";
@@ -138,12 +171,11 @@ const CARD_HINT: React.CSSProperties = {
   marginTop: 2,
 };
 
-interface DayTotals {
-  day: string;
-  costUsd: number;
-  tokens: number;
-  byProvider: Map<UsageProviderKind, { costUsd: number; tokens: number }>;
-}
+const NOTE: React.CSSProperties = {
+  margin: 0,
+  fontSize: 11,
+  color: "var(--muted)",
+};
 
 export default function UsagePage() {
   const [windowDays, setWindowDays] = useState<number>(30);
@@ -212,9 +244,20 @@ export default function UsagePage() {
     setRangeEpoch((epoch) => epoch + 1);
   }, []);
 
+  // Every number on screen comes from `summary`, so the dates, the axis and
+  // the day counts come from it too. While another window loads, the last
+  // answer stays up under the dates it covers, dimmed, instead of being
+  // spread across the new window's days.
+  const shownSince = summary?.sinceDay ?? range.sinceDay;
+  const shownUntil = summary?.untilDay ?? range.untilDay;
+  const switching =
+    loading &&
+    summary !== null &&
+    (summary.sinceDay !== range.sinceDay || summary.untilDay !== range.untilDay);
+
   const days = useMemo(
-    () => enumerateDays(range.sinceDay, range.untilDay),
-    [range],
+    () => enumerateDays(shownSince, shownUntil),
+    [shownSince, shownUntil],
   );
   const buckets = summary?.buckets ?? [];
 
@@ -226,10 +269,7 @@ export default function UsagePage() {
 
   const totals = useMemo(() => summarizeBuckets(buckets), [buckets]);
   const activeDays = daily.filter((day) => day.tokens > 0).length;
-  const dailyAverage = activeDays === 0 ? 0 : totals.tokens / activeDays;
-  const observedInput = totals.uncachedInputTokens + totals.cachedInputTokens;
-  const cachedShare =
-    observedInput === 0 ? 0 : totals.cachedInputTokens / observedInput;
+  const perActiveDay = activeDays === 0 ? 0 : totals.tokens / activeDays;
 
   // Each source counts its own distinct sessions, and the three transcript
   // roots are disjoint, so summing them is exact.
@@ -252,17 +292,11 @@ export default function UsagePage() {
     [buckets, summary, totals.tokens],
   );
   const intensityDays = useMemo(() => daily.slice(-INTENSITY_DAYS), [daily]);
-  const bestDay = useMemo(
-    () =>
-      daily.reduce<DayTotals | null>(
-        (best, entry) => (entry.tokens > (best?.tokens ?? 0) ? entry : best),
-        null,
-      ),
-    [daily],
-  );
+  const recentShown = summary?.recentSessions.slice(0, RECENT_SESSIONS_SHOWN) ?? [];
 
   return (
     <div
+      data-usage-page
       style={{
         position: "absolute",
         inset: 0,
@@ -293,10 +327,17 @@ export default function UsagePage() {
         >
           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
             <span style={LABEL}>Usage</span>
-            <span style={{ fontSize: 11, color: "var(--muted)" }}>
-              {formatDayShort(range.sinceDay)} –{" "}
-              {formatDayShort(range.untilDay)}
-              {summary ? ` · scanned ${formatUpdatedAt(summary.readAt)}` : ""}
+            <span
+              data-usage-range
+              aria-live="polite"
+              style={{ fontSize: 11, color: "var(--muted)" }}
+            >
+              {formatDayRange(shownSince, shownUntil)}
+              {loading
+                ? " · scanning…"
+                : summary
+                  ? ` · scanned ${formatUpdatedAt(summary.readAt)}`
+                  : ""}
               {totals.unpricedRecords > 0 ? " · some models are unpriced" : ""}
             </span>
           </div>
@@ -342,417 +383,320 @@ export default function UsagePage() {
             {error === null ? "Scanning transcripts…" : "Nothing to show."}
           </p>
         ) : (
-          <>
-            {/* The money and volume answers, first. */}
-            <section
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
-                gap: 10,
-              }}
-            >
-              <StatCard
-                label="Est. cost"
-                value={`${formatUsd(totals.costUsd)}${totals.pricedRecords > 0 ? "*" : ""}`}
-                icon={<CoinsGlyph />}
-                emphasis
+          <div
+            data-usage-body
+            aria-busy={switching}
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 18,
+              opacity: switching ? 0.55 : 1,
+              transition: "opacity var(--motion-fast) var(--ease-out)",
+            }}
+          >
+            {totals.records === 0 ? (
+              <EmptyWindow
+                summary={summary}
+                windowDays={windowDays}
+                onShowLongest={() => setWindowDays(LONGEST_WINDOW_DAYS)}
               />
-              <StatCard
-                label="Total tokens"
-                value={formatTokens(totals.tokens)}
-                icon={<SparkGlyph />}
-              />
-              <StatCard
-                label="Sessions"
-                value={formatCount(sessionCount)}
-                icon={<SessionsGlyph />}
-              />
-              <StatCard
-                label="Active days"
-                value={`${activeDays} / ${days.length}`}
-                icon={<CalendarGlyph />}
-              />
-              <StatCard
-                label="Daily average"
-                value={formatTokens(dailyAverage)}
-                icon={<GaugeGlyph />}
-              />
-              <StatCard
-                label="Cache hits"
-                value={formatPercent(cachedShare)}
-                icon={<CacheGlyph />}
-              />
-              <StatCard
-                label="Cache saved"
-                value={formatUsd(totals.cacheSavingsUsd)}
-                icon={<SavedGlyph />}
-              />
-              <StatCard
-                label="Output tokens"
-                value={formatTokens(totals.outputTokens)}
-                icon={<OutputGlyph />}
-              />
-            </section>
-
-            <section
-              style={{
-                display: "grid",
-                gridTemplateColumns: "minmax(0, 1.25fr) minmax(0, 0.9fr)",
-                gap: 12,
-              }}
-            >
-              <IntensityGrid days={intensityDays} bestDay={bestDay} />
-              <TokenMix totals={totals} />
-            </section>
-
-            <section
-              style={{
-                ...CARD,
-                display: "flex",
-                flexDirection: "column",
-                gap: 12,
-              }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  flexWrap: "wrap",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 12,
-                }}
-              >
-                <div>
-                  <div style={CARD_TITLE}>Daily usage</div>
-                  <div style={CARD_HINT}>
-                    Stacked by provider. Hover a day for the split.
+            ) : (
+              <>
+                {/* The money and volume answers, first. */}
+                <section
+                  style={{ display: "flex", flexDirection: "column", gap: 8 }}
+                >
+                  <div
+                    data-usage-stats
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns:
+                        "repeat(auto-fit, minmax(190px, 1fr))",
+                      gap: 10,
+                    }}
+                  >
+                    <StatCard
+                      label="Est. cost"
+                      value={`${formatUsd(totals.costUsd)}${totals.pricedRecords > 0 ? "*" : ""}`}
+                      hint="What this usage costs at API prices."
+                      icon={<CoinsGlyph />}
+                      emphasis
+                    />
+                    <StatCard
+                      label="Total tokens"
+                      value={formatTokens(totals.tokens)}
+                      hint="New input, cache reads, cache writes and output."
+                      icon={<SparkGlyph />}
+                    />
+                    <StatCard
+                      label="Sessions"
+                      value={formatCount(sessionCount)}
+                      hint="Sessions with at least one turn in this window."
+                      icon={<SessionsGlyph />}
+                    />
+                    <StatCard
+                      label="Active days"
+                      value={`${activeDays} / ${days.length}`}
+                      hint="Days in this window with any usage."
+                      icon={<CalendarGlyph />}
+                    />
+                    <StatCard
+                      label="Per active day"
+                      value={formatTokens(perActiveDay)}
+                      hint="Total tokens divided by the days with usage."
+                      icon={<GaugeGlyph />}
+                    />
+                    <StatCard
+                      label="Cache hits"
+                      value={
+                        totals.cacheHitShare === null
+                          ? "–"
+                          : formatPercent(totals.cacheHitShare)
+                      }
+                      hint="Share of prompt tokens read from the cache instead of sent again or written to it."
+                      icon={<CacheGlyph />}
+                    />
+                    <StatCard
+                      label="Cache saved"
+                      value={formatUsd(totals.cacheSavingsUsd)}
+                      hint="What cache reads saved over the input price, less the premium paid to write the cache."
+                      icon={<SavedGlyph />}
+                    />
+                    <StatCard
+                      label="Output tokens"
+                      value={formatTokens(totals.outputTokens)}
+                      hint="Tokens the models generated, reasoning included."
+                      icon={<OutputGlyph />}
+                    />
                   </div>
-                </div>
-                <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-                  <Legend />
-                  <Segmented
-                    label="Chart metric"
-                    options={[
-                      { value: "cost", label: "Cost" },
-                      { value: "tokens", label: "Tokens" },
-                    ]}
-                    value={metric}
-                    onChange={(value) => setMetric(value as UsageMetric)}
+                  {totals.pricedRecords > 0 && (
+                    <p style={NOTE}>
+                      * Estimated where the transcript reported no cost, from
+                      Codara&apos;s local rate table, which can drift from vendor
+                      list prices. Cora reports exact costs and is used as-is.
+                      Usage on a subscription is shown at what it would cost at
+                      API prices, not what the plan charged.
+                    </p>
+                  )}
+                </section>
+
+                <section
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "minmax(0, 1.25fr) minmax(0, 0.9fr)",
+                    gap: 12,
+                  }}
+                >
+                  <IntensityGrid
+                    days={intensityDays}
+                    truncated={daily.length > intensityDays.length}
                   />
-                </div>
-              </div>
-              <UsageChart days={days} byDay={byDay} metric={metric} />
-            </section>
+                  <TokenMix totals={totals} />
+                </section>
 
-            <section
-              style={{ display: "flex", flexDirection: "column", gap: 10 }}
-            >
-              <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
-                <span style={LABEL}>Providers</span>
-                <span style={{ fontSize: 11, color: "var(--muted)" }}>
-                  {providerCards.filter((card) => card.tokens > 0).length} with
-                  usage in this window
-                </span>
-              </div>
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))",
-                  gap: 10,
-                }}
-              >
-                {providerCards.map((card) => (
-                  <ProviderCard key={card.provider} card={card} />
-                ))}
-              </div>
-            </section>
-
-            <section
-              style={{
-                ...CARD,
-                display: "flex",
-                flexDirection: "column",
-                gap: 10,
-              }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 12,
-                }}
-              >
-                <div>
-                  <div style={CARD_TITLE}>Breakdown</div>
-                  <div style={CARD_HINT}>
-                    {breakdown === "model"
-                      ? "Every model that ran, costliest first."
-                      : breakdown === "project"
-                        ? "Every working directory the agents ran in, costliest first."
-                        : "Each day with activity, newest first."}
+                <section
+                  style={{
+                    ...CARD,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 12,
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      flexWrap: "wrap",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 12,
+                    }}
+                  >
+                    <div>
+                      <div style={CARD_TITLE}>Daily usage</div>
+                      <div style={CARD_HINT}>
+                        Stacked by provider. Hover a day for the split.
+                      </div>
+                    </div>
+                    <div
+                      style={{
+                        display: "flex",
+                        flexWrap: "wrap",
+                        alignItems: "center",
+                        gap: 14,
+                      }}
+                    >
+                      <Legend />
+                      <Segmented
+                        label="Chart metric"
+                        options={[
+                          { value: "cost", label: "Cost" },
+                          { value: "tokens", label: "Tokens" },
+                        ]}
+                        value={metric}
+                        onChange={(value) => setMetric(value as UsageMetric)}
+                      />
+                    </div>
                   </div>
-                </div>
-                <Segmented
-                  label="Breakdown grouping"
-                  options={[
-                    { value: "model", label: "Model" },
-                    { value: "project", label: "Project" },
-                    { value: "day", label: "Day" },
-                  ]}
-                  value={breakdown}
-                  onChange={(value) => setBreakdown(value as UsageBreakdown)}
-                />
-              </div>
-              {breakdown === "model" ? (
-                <ModelTable rows={modelRows} />
-              ) : breakdown === "project" ? (
-                <ProjectTable rows={projectRows} />
-              ) : (
-                <DayTable rows={dayRows} />
-              )}
-              {totals.pricedRecords > 0 && (
-                <p style={{ margin: 0, fontSize: 11, color: "var(--muted)" }}>
-                  * Estimated where the transcript reported no cost: those calls
-                  are priced from Codara's local rate table, which drifts from
-                  vendor list prices. Cora reports exact costs and is used
-                  as-is.
-                </p>
-              )}
-            </section>
+                  <UsageChart days={days} byDay={byDay} metric={metric} />
+                </section>
 
-            <section
-              style={{
-                ...CARD,
-                display: "flex",
-                flexDirection: "column",
-                gap: 10,
-              }}
-            >
-              <div>
-                <div style={CARD_TITLE}>Recent sessions</div>
-                <div style={CARD_HINT}>
-                  The last{" "}
-                  {Math.min(
-                    RECENT_SESSIONS_SHOWN,
-                    summary.recentSessions.length,
-                  )}{" "}
-                  sessions with activity in this window.
-                </div>
-              </div>
-              <SessionsTable
-                rows={summary.recentSessions.slice(0, RECENT_SESSIONS_SHOWN)}
-              />
-            </section>
+                <section
+                  style={{ display: "flex", flexDirection: "column", gap: 10 }}
+                >
+                  <div
+                    style={{ display: "flex", alignItems: "baseline", gap: 10 }}
+                  >
+                    <span style={LABEL}>Providers</span>
+                    <span style={{ fontSize: 11, color: "var(--muted)" }}>
+                      {providerCards.filter((card) => card.tokens > 0).length}{" "}
+                      with usage in this window
+                    </span>
+                  </div>
+                  <div
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns:
+                        "repeat(auto-fit, minmax(260px, 1fr))",
+                      gap: 10,
+                    }}
+                  >
+                    {providerCards.map((card) => (
+                      <ProviderCard key={card.provider} card={card} />
+                    ))}
+                  </div>
+                </section>
+
+                <section
+                  style={{
+                    ...CARD,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 10,
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      flexWrap: "wrap",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: 12,
+                    }}
+                  >
+                    <div>
+                      <div style={CARD_TITLE}>Breakdown</div>
+                      <div style={CARD_HINT}>
+                        {breakdown === "model"
+                          ? "Every model that ran, costliest first."
+                          : breakdown === "project"
+                            ? "Every working directory the agents ran in, costliest first."
+                            : "Each day with activity, newest first."}
+                      </div>
+                    </div>
+                    <Segmented
+                      label="Breakdown grouping"
+                      options={[
+                        { value: "model", label: "Model" },
+                        { value: "project", label: "Project" },
+                        { value: "day", label: "Day" },
+                      ]}
+                      value={breakdown}
+                      onChange={(value) =>
+                        setBreakdown(value as UsageBreakdown)
+                      }
+                    />
+                  </div>
+                  {breakdown === "model" ? (
+                    <ModelTable rows={modelRows} />
+                  ) : breakdown === "project" ? (
+                    <ProjectTable rows={projectRows} />
+                  ) : (
+                    <DayTable
+                      rows={dayRows}
+                      withYear={spansYears(shownSince, shownUntil)}
+                    />
+                  )}
+                </section>
+
+                <section
+                  style={{
+                    ...CARD,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 10,
+                  }}
+                >
+                  <div>
+                    <div style={CARD_TITLE}>Recent sessions</div>
+                    <div style={CARD_HINT}>
+                      {recentShown.length === 1
+                        ? "The one session with activity in this window."
+                        : `The last ${recentShown.length} sessions with activity in this window.`}
+                    </div>
+                  </div>
+                  <SessionsTable rows={recentShown} />
+                </section>
+              </>
+            )}
 
             <SourcesFooter summary={summary} />
-          </>
+          </div>
         )}
       </div>
     </div>
   );
 }
 
-/* ── Derivations ─────────────────────────────────────────────────────────── */
-
-function buildDailyTotals(
-  days: string[],
-  buckets: UsageDayBucket[],
-): DayTotals[] {
-  const rows = new Map<string, DayTotals>();
-  for (const day of days) {
-    rows.set(day, { day, costUsd: 0, tokens: 0, byProvider: new Map() });
-  }
-  for (const bucket of buckets) {
-    const row = rows.get(bucket.day);
-    // A bucket outside the enumerated days can only happen if the summary and
-    // the range drifted apart mid-fetch; drop it rather than draw off-axis.
-    if (row === undefined) continue;
-    const tokens = totalTokens(bucket.totals);
-    row.costUsd += bucket.costUsd;
-    row.tokens += tokens;
-    const provider = row.byProvider.get(bucket.provider) ?? {
-      costUsd: 0,
-      tokens: 0,
-    };
-    provider.costUsd += bucket.costUsd;
-    provider.tokens += tokens;
-    row.byProvider.set(bucket.provider, provider);
-  }
-  return [...rows.values()];
-}
-
-interface SummaryTotals {
-  costUsd: number;
-  cacheSavingsUsd: number;
-  tokens: number;
-  uncachedInputTokens: number;
-  cachedInputTokens: number;
-  cacheCreationTokens: number;
-  outputTokens: number;
-  reasoningTokens: number;
-  pricedRecords: number;
-  unpricedRecords: number;
-}
-
-function summarizeBuckets(buckets: UsageDayBucket[]): SummaryTotals {
-  const totals: SummaryTotals = {
-    costUsd: 0,
-    cacheSavingsUsd: 0,
-    tokens: 0,
-    uncachedInputTokens: 0,
-    cachedInputTokens: 0,
-    cacheCreationTokens: 0,
-    outputTokens: 0,
-    reasoningTokens: 0,
-    pricedRecords: 0,
-    unpricedRecords: 0,
-  };
-  for (const bucket of buckets) {
-    totals.costUsd += bucket.costUsd;
-    totals.cacheSavingsUsd += bucket.cacheSavingsUsd;
-    totals.tokens += totalTokens(bucket.totals);
-    totals.uncachedInputTokens += bucket.totals.uncachedInputTokens;
-    totals.cachedInputTokens += bucket.totals.cachedInputTokens;
-    totals.cacheCreationTokens += bucket.totals.cacheCreationTokens;
-    totals.outputTokens += bucket.totals.outputTokens;
-    totals.reasoningTokens += bucket.totals.reasoningTokens;
-    if (bucket.costSource === "priced")
-      totals.pricedRecords += bucket.recordCount;
-    if (bucket.costSource === "unpriced")
-      totals.unpricedRecords += bucket.recordCount;
-  }
-  return totals;
-}
-
-interface ModelRow {
-  provider: UsageProviderKind;
-  model: string;
-  uncachedInputTokens: number;
-  cachedInputTokens: number;
-  cacheCreationTokens: number;
-  outputTokens: number;
-  costUsd: number;
-  unpriced: boolean;
-}
-
-function buildModelRows(buckets: UsageDayBucket[]): ModelRow[] {
-  const rows = new Map<string, ModelRow>();
-  for (const bucket of buckets) {
-    const key = `${bucket.provider}:${bucket.model}`;
-    const row = rows.get(key) ?? {
-      provider: bucket.provider,
-      model: bucket.model,
-      uncachedInputTokens: 0,
-      cachedInputTokens: 0,
-      cacheCreationTokens: 0,
-      outputTokens: 0,
-      costUsd: 0,
-      unpriced: false,
-    };
-    row.uncachedInputTokens += bucket.totals.uncachedInputTokens;
-    row.cachedInputTokens += bucket.totals.cachedInputTokens;
-    row.cacheCreationTokens += bucket.totals.cacheCreationTokens;
-    row.outputTokens += bucket.totals.outputTokens;
-    row.costUsd += bucket.costUsd;
-    if (bucket.costSource === "unpriced") row.unpriced = true;
-    rows.set(key, row);
-  }
-  return [...rows.values()].sort(
-    (a, b) => b.costUsd - a.costUsd || b.outputTokens - a.outputTokens,
+/**
+ * A window with no usage. A page of zeros and empty charts said the same thing
+ * less clearly, and a 7-day window is often empty for someone who works in
+ * bursts, so the longest window is one click away.
+ */
+function EmptyWindow({
+  summary,
+  windowDays,
+  onShowLongest,
+}: {
+  summary: UsageSummary;
+  windowDays: number;
+  onShowLongest: () => void;
+}) {
+  const anyTranscripts = summary.sources.some(
+    (source) => source.status === "ok",
   );
-}
-
-interface ProjectRow {
-  key: string;
-  project: string;
-  providers: UsageProviderKind[];
-  tokens: number;
-  sessions: number;
-  records: number;
-  costUsd: number;
-}
-
-// The scan keeps one row per provider and directory; the table merges the
-// providers that shared a directory into one line so a project reads as one
-// project no matter which agents worked in it.
-function buildProjectRows(projects: UsageProjectRow[]): ProjectRow[] {
-  const rows = new Map<string, ProjectRow>();
-  for (const entry of projects) {
-    const row = rows.get(entry.project) ?? {
-      key: entry.project,
-      project: entry.project,
-      providers: [],
-      tokens: 0,
-      sessions: 0,
-      records: 0,
-      costUsd: 0,
-    };
-    if (!row.providers.includes(entry.provider))
-      row.providers.push(entry.provider);
-    row.tokens += totalTokens(entry.totals);
-    row.sessions += entry.sessions;
-    row.records += entry.records;
-    row.costUsd += entry.costUsd;
-    rows.set(entry.project, row);
-  }
-  return [...rows.values()].sort(
-    (a, b) => b.costUsd - a.costUsd || b.tokens - a.tokens,
+  return (
+    <section
+      data-usage-empty
+      style={{
+        ...CARD,
+        padding: "40px 24px",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        gap: 10,
+        textAlign: "center",
+      }}
+    >
+      <div style={CARD_TITLE}>
+        No usage between {formatDayRange(summary.sinceDay, summary.untilDay)}
+      </div>
+      <div style={{ ...CARD_HINT, maxWidth: 460, lineHeight: 1.5 }}>
+        {anyTranscripts
+          ? "Codara reads the Claude Code, Codex and Cora transcripts on this machine, and none of them has a turn in this window."
+          : "No Claude Code, Codex or Cora transcripts were found on this machine. Usage shows up here once an agent has run."}
+      </div>
+      {anyTranscripts && windowDays < LONGEST_WINDOW_DAYS && (
+        <button
+          type="button"
+          className="spark-btn"
+          onClick={onShowLongest}
+          style={{ marginTop: 4 }}
+        >
+          Show the last year
+        </button>
+      )}
+    </section>
   );
-}
-
-interface ProviderCardData {
-  provider: UsageProviderKind;
-  source: UsageSource | null;
-  tokens: number;
-  costUsd: number;
-  sessions: number;
-  records: number;
-  topModel: string | null;
-  share: number;
-}
-
-function buildProviderCards(
-  buckets: UsageDayBucket[],
-  sources: UsageSource[],
-  allTokens: number,
-): ProviderCardData[] {
-  return [...PROVIDER_ORDER].reverse().map((provider) => {
-    const modelTokens = new Map<string, number>();
-    let tokens = 0;
-    let costUsd = 0;
-    let records = 0;
-    for (const bucket of buckets) {
-      if (bucket.provider !== provider) continue;
-      const count = totalTokens(bucket.totals);
-      tokens += count;
-      costUsd += bucket.costUsd;
-      records += bucket.recordCount;
-      modelTokens.set(
-        bucket.model,
-        (modelTokens.get(bucket.model) ?? 0) + count,
-      );
-    }
-    let topModel: string | null = null;
-    let best = 0;
-    for (const [model, count] of modelTokens) {
-      if (count > best) {
-        best = count;
-        topModel = model;
-      }
-    }
-    const source = sources.find((entry) => entry.provider === provider) ?? null;
-    return {
-      provider,
-      source,
-      tokens,
-      costUsd,
-      sessions: source?.distinctSessions ?? 0,
-      records,
-      topModel,
-      share: allTokens === 0 ? 0 : tokens / allTokens,
-    };
-  });
 }
 
 function formatUpdatedAt(iso: string): string {
@@ -792,16 +736,21 @@ function projectLabel(project: string): string {
 function StatCard({
   label,
   value,
+  hint,
   icon,
   emphasis = false,
 }: {
   label: string;
   value: string;
+  /** What the number counts, for the tooltip and screen readers. */
+  hint: string;
   icon: React.ReactNode;
   emphasis?: boolean;
 }) {
   return (
     <div
+      data-usage-stat={label}
+      title={hint}
       style={{
         ...CARD,
         display: "flex",
@@ -851,6 +800,7 @@ function StatCard({
           {value}
         </span>
         <span style={LABEL}>{label}</span>
+        <span className="spark-sr-only">{hint}</span>
       </div>
     </div>
   );
@@ -954,15 +904,19 @@ const INTENSITY_FILL: Record<number, string> = {
 
 function IntensityGrid({
   days,
-  bestDay,
+  truncated,
 }: {
   days: DayTotals[];
-  bestDay: DayTotals | null;
+  /** The window is longer than the grid, which shows its last days only. */
+  truncated: boolean;
 }) {
-  const peak = days.reduce((max, day) => Math.max(max, day.tokens), 0);
-  const columns = days.length > 21 ? 21 : Math.max(7, days.length);
+  // The peak is taken over the cells drawn, so the chip always names a cell
+  // the reader can see.
+  const bestDay = busiestDay(days);
+  const peak = bestDay?.tokens ?? 0;
+  const columns = intensityColumns(days.length);
   return (
-    <section style={CARD}>
+    <section style={{ ...CARD, display: "flex", flexDirection: "column" }}>
       <div
         style={{
           display: "flex",
@@ -975,11 +929,15 @@ function IntensityGrid({
         <div>
           <div style={CARD_TITLE}>Daily intensity</div>
           <div style={CARD_HINT}>
-            Token activity per day across every provider.
+            {truncated
+              ? `Token activity across every provider, last ${days.length} days.`
+              : "Token activity per day across every provider."}
           </div>
         </div>
-        {bestDay && bestDay.tokens > 0 && (
+        {bestDay && (
           <span
+            data-usage-peak
+            title={`${formatTokens(bestDay.tokens)} tokens · ${formatUsd(bestDay.costUsd)}`}
             style={{
               ...LABEL,
               padding: "3px 8px",
@@ -994,7 +952,11 @@ function IntensityGrid({
       </div>
       <div
         role="img"
-        aria-label="Recent token activity"
+        aria-label={
+          bestDay
+            ? `Token activity by day, busiest ${formatDayShort(bestDay.day)} with ${formatTokens(bestDay.tokens)} tokens`
+            : "Token activity by day"
+        }
         style={{
           display: "grid",
           gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
@@ -1020,7 +982,8 @@ function IntensityGrid({
           alignItems: "center",
           justifyContent: "space-between",
           gap: 10,
-          marginTop: 10,
+          marginTop: "auto",
+          paddingTop: 10,
           ...MONO,
           fontSize: 9,
           color: "var(--muted)",
@@ -1112,7 +1075,13 @@ function TokenMix({ totals }: { totals: SummaryTotals }) {
         )}
       </div>
       <div
-        aria-label="Combined token mix"
+        role="img"
+        aria-label={`Token mix: ${segments
+          .map(
+            (segment) =>
+              `${segment.label} ${total > 0 ? formatShare(segment.value / total) : "0%"}`,
+          )
+          .join(", ")}`}
         style={{
           display: "flex",
           height: 10,
@@ -1138,7 +1107,7 @@ function TokenMix({ totals }: { totals: SummaryTotals }) {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "1fr 1fr",
+          gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))",
           gap: "8px 14px",
           marginTop: 12,
           fontSize: 11,
@@ -1152,6 +1121,7 @@ function TokenMix({ totals }: { totals: SummaryTotals }) {
               alignItems: "center",
               justifyContent: "space-between",
               gap: 8,
+              whiteSpace: "nowrap",
             }}
           >
             <span
@@ -1177,7 +1147,7 @@ function TokenMix({ totals }: { totals: SummaryTotals }) {
             <span style={{ ...MONO, color: "var(--ink-dim)" }}>
               {formatTokens(segment.value)}
               <span style={{ color: "var(--muted)", marginLeft: 6 }}>
-                {total > 0 ? formatPercent(segment.value / total, 0) : "0%"}
+                {total > 0 ? formatShare(segment.value / total) : "0%"}
               </span>
             </span>
           </div>
@@ -1280,7 +1250,9 @@ function ProviderCard({ card }: { card: ProviderCardData }) {
         <Mini label="Cost" value={formatUsd(card.costUsd)} />
       </div>
       <div
-        aria-label={`${PROVIDER_LABEL[card.provider]} share of tokens`}
+        role="img"
+        aria-label={`${PROVIDER_LABEL[card.provider]}: ${formatShare(card.share)} of tokens`}
+        title={`${formatShare(card.share)} of tokens`}
         style={{
           height: 5,
           borderRadius: 99,
@@ -1322,8 +1294,7 @@ const VIEW_HEIGHT = 220;
 const PLOT_HEIGHT = 208;
 const TICK_COUNT = 4;
 const BAR_CAP_RADIUS = 1.5;
-// Above this many columns the axis shows three anchors instead of every day;
-// below it, every column is labelled and weekends can be dimmed.
+// Above this many columns the axis shows three anchors instead of every day.
 const DENSE_AXIS_THRESHOLD = 10;
 
 /**
@@ -1369,13 +1340,6 @@ function topRoundedBar(
   ].join(" ");
 }
 
-function isWeekend(day: string): boolean {
-  const parsed = Date.parse(`${day}T00:00:00Z`);
-  if (Number.isNaN(parsed)) return false;
-  const weekday = new Date(parsed).getUTCDay();
-  return weekday === 0 || weekday === 6;
-}
-
 function UsageChart({
   days,
   byDay,
@@ -1387,6 +1351,8 @@ function UsageChart({
 }) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const plotRef = useRef<HTMLDivElement | null>(null);
+  const withYear =
+    days.length > 0 && spansYears(days[0], days[days.length - 1]);
 
   const columns = useMemo(
     () =>
@@ -1556,7 +1522,7 @@ function UsageChart({
               }}
             >
               <div style={{ ...LABEL, marginBottom: 1 }}>
-                {formatDayShort(hovered.day)}
+                {formatDayShort(hovered.day, withYear)}
               </div>
               {[...hovered.bands].reverse().map((band) => (
                 <div
@@ -1600,12 +1566,14 @@ function UsageChart({
       </div>
 
       <div
+        data-usage-axis
         style={{
           display: "flex",
           justifyContent: "space-between",
           paddingLeft: 56,
           ...MONO,
           fontSize: 9,
+          color: "var(--muted)",
         }}
       >
         {dense
@@ -1614,19 +1582,12 @@ function UsageChart({
               days[Math.floor(days.length / 2)],
               days[days.length - 1],
             ].map((day, index) => (
-              <span key={day ?? index} style={{ color: "var(--muted)" }}>
-                {day === undefined ? "" : formatDayShort(day)}
+              <span key={day ?? index}>
+                {day === undefined ? "" : formatDayShort(day, withYear)}
               </span>
             ))
           : days.map((day) => (
-              <span
-                key={day}
-                style={{
-                  flex: 1,
-                  textAlign: "center",
-                  color: isWeekend(day) ? "var(--muted-2)" : "var(--muted)",
-                }}
-              >
+              <span key={day} style={{ flex: 1, textAlign: "center" }}>
                 {formatDayShort(day)}
               </span>
             ))}
@@ -1637,10 +1598,13 @@ function UsageChart({
 
 /* ── Tables ──────────────────────────────────────────────────────────────── */
 
+// Cells never wrap: a model id or project name broken over two lines reads as
+// two values. A table wider than a narrow pane scrolls inside TableScroll.
 const CELL: React.CSSProperties = {
   padding: "6px 8px",
   borderBottom: "1px solid var(--rule-soft)",
   fontSize: 12,
+  whiteSpace: "nowrap",
 };
 const NUM_CELL: React.CSSProperties = {
   ...CELL,
@@ -1654,170 +1618,187 @@ const HEAD_CELL: React.CSSProperties = {
   borderBottom: "1px solid var(--rule)",
   fontWeight: 400,
   textAlign: "left",
+  whiteSpace: "nowrap",
 };
+
+const TABLE: React.CSSProperties = {
+  width: "100%",
+  borderCollapse: "collapse",
+};
+
+function TableScroll({ children }: { children: React.ReactNode }) {
+  return (
+    <div data-usage-table style={{ overflowX: "auto", minWidth: 0 }}>
+      {children}
+    </div>
+  );
+}
 
 function ModelTable({ rows }: { rows: ModelRow[] }) {
   if (rows.length === 0) return <EmptyRow />;
   return (
-    <table style={{ width: "100%", borderCollapse: "collapse" }}>
-      <thead>
-        <tr>
-          <th style={HEAD_CELL}>Model</th>
-          <th style={{ ...HEAD_CELL, textAlign: "right" }}>Input</th>
-          <th style={{ ...HEAD_CELL, textAlign: "right" }}>Cached</th>
-          <th style={{ ...HEAD_CELL, textAlign: "right" }}>Cache write</th>
-          <th style={{ ...HEAD_CELL, textAlign: "right" }}>Output</th>
-          <th style={{ ...HEAD_CELL, textAlign: "right" }}>Cost</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((row) => (
-          <tr key={`${row.provider}:${row.model}`} className="usage-row">
-            <td style={CELL}>
-              <span
-                style={{ display: "inline-flex", alignItems: "center", gap: 8 }}
-              >
+    <TableScroll>
+      <table style={TABLE}>
+        <thead>
+          <tr>
+            <th style={HEAD_CELL}>Model</th>
+            <th style={{ ...HEAD_CELL, textAlign: "right" }}>Input</th>
+            <th style={{ ...HEAD_CELL, textAlign: "right" }}>Cache read</th>
+            <th style={{ ...HEAD_CELL, textAlign: "right" }}>Cache write</th>
+            <th style={{ ...HEAD_CELL, textAlign: "right" }}>Output</th>
+            <th style={{ ...HEAD_CELL, textAlign: "right" }}>Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={`${row.provider}:${row.model}`} className="usage-row">
+              <td style={CELL}>
                 <span
-                  aria-hidden
                   style={{
-                    display: "flex",
-                    color: PROVIDER_COLOR[row.provider],
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 8,
                   }}
                 >
-                  <ProviderMark provider={row.provider} size={12} />
+                  <ProviderBadge provider={row.provider} />
+                  <span style={MONO}>{row.model}</span>
+                  {row.unpriced && <UnpricedBadge />}
                 </span>
-                <span style={MONO}>{row.model}</span>
-                {row.unpriced && <UnpricedBadge />}
-              </span>
-            </td>
-            <td style={NUM_CELL}>{formatTokens(row.uncachedInputTokens)}</td>
-            <td style={NUM_CELL}>{formatTokens(row.cachedInputTokens)}</td>
-            <td style={NUM_CELL}>{formatTokens(row.cacheCreationTokens)}</td>
-            <td style={NUM_CELL}>{formatTokens(row.outputTokens)}</td>
-            <td style={{ ...NUM_CELL, color: "var(--ink)" }}>
-              {formatUsd(row.costUsd)}
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+              </td>
+              <td style={NUM_CELL}>{formatTokens(row.uncachedInputTokens)}</td>
+              <td style={NUM_CELL}>{formatTokens(row.cachedInputTokens)}</td>
+              <td style={NUM_CELL}>{formatTokens(row.cacheCreationTokens)}</td>
+              <td style={NUM_CELL}>{formatTokens(row.outputTokens)}</td>
+              <td style={{ ...NUM_CELL, color: "var(--ink)" }}>
+                {formatUsd(row.costUsd)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </TableScroll>
   );
 }
 
 function ProjectTable({ rows }: { rows: ProjectRow[] }) {
   if (rows.length === 0) return <EmptyRow />;
   return (
-    <table style={{ width: "100%", borderCollapse: "collapse" }}>
-      <thead>
-        <tr>
-          <th style={HEAD_CELL}>Project</th>
-          <th style={{ ...HEAD_CELL, textAlign: "right" }}>Sessions</th>
-          <th style={{ ...HEAD_CELL, textAlign: "right" }}>Turns</th>
-          <th style={{ ...HEAD_CELL, textAlign: "right" }}>Tokens</th>
-          <th style={{ ...HEAD_CELL, textAlign: "right" }}>Cost</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((row) => (
-          <tr key={row.key} className="usage-row">
-            <td style={CELL} title={row.project || undefined}>
-              <span
-                style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 8,
-                  minWidth: 0,
-                }}
-              >
-                <span style={{ display: "inline-flex", gap: 3 }} aria-hidden>
-                  {row.providers.map((provider) => (
-                    <span
-                      key={provider}
-                      style={{
-                        display: "flex",
-                        color: PROVIDER_COLOR[provider],
-                      }}
-                    >
-                      <ProviderMark provider={provider} size={12} />
-                    </span>
-                  ))}
-                </span>
+    <TableScroll>
+      <table style={TABLE}>
+        <thead>
+          <tr>
+            <th style={HEAD_CELL}>Project</th>
+            <th style={{ ...HEAD_CELL, textAlign: "right" }}>Sessions</th>
+            <th style={{ ...HEAD_CELL, textAlign: "right" }}>Turns</th>
+            <th style={{ ...HEAD_CELL, textAlign: "right" }}>Tokens</th>
+            <th style={{ ...HEAD_CELL, textAlign: "right" }}>Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.key} className="usage-row">
+              <td style={CELL} title={row.project || undefined}>
                 <span
-                  style={{ color: row.project ? "var(--ink)" : "var(--muted)" }}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 8,
+                    minWidth: 0,
+                  }}
                 >
-                  {projectLabel(row.project)}
-                </span>
-                {row.project && (
+                  <span style={{ display: "inline-flex", gap: 3 }}>
+                    {row.providers.map((provider) => (
+                      <ProviderBadge key={provider} provider={provider} />
+                    ))}
+                  </span>
                   <span
                     style={{
-                      ...MONO,
-                      fontSize: 10,
-                      color: "var(--muted-2)",
-                      whiteSpace: "nowrap",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      maxWidth: 320,
+                      color: row.project ? "var(--ink)" : "var(--muted)",
                     }}
                   >
-                    {row.project}
+                    {projectLabel(row.project)}
                   </span>
-                )}
-              </span>
-            </td>
-            <td style={NUM_CELL}>{formatCount(row.sessions)}</td>
-            <td style={NUM_CELL}>{formatCount(row.records)}</td>
-            <td style={NUM_CELL}>{formatTokens(row.tokens)}</td>
-            <td style={{ ...NUM_CELL, color: "var(--ink)" }}>
-              {formatUsd(row.costUsd)}
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+                  {row.project && (
+                    <span
+                      style={{
+                        ...MONO,
+                        fontSize: 10,
+                        color: "var(--muted)",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        maxWidth: 320,
+                      }}
+                    >
+                      {row.project}
+                    </span>
+                  )}
+                </span>
+              </td>
+              <td style={NUM_CELL}>{formatCount(row.sessions)}</td>
+              <td style={NUM_CELL}>{formatCount(row.records)}</td>
+              <td style={NUM_CELL}>{formatTokens(row.tokens)}</td>
+              <td style={{ ...NUM_CELL, color: "var(--ink)" }}>
+                {formatUsd(row.costUsd)}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </TableScroll>
   );
 }
 
-function DayTable({ rows }: { rows: DayTotals[] }) {
+function DayTable({
+  rows,
+  withYear,
+}: {
+  rows: DayTotals[];
+  withYear: boolean;
+}) {
   if (rows.length === 0) return <EmptyRow />;
   return (
-    <table style={{ width: "100%", borderCollapse: "collapse" }}>
-      <thead>
-        <tr>
-          <th style={HEAD_CELL}>Day</th>
-          {PROVIDER_ORDER.map((provider) => (
-            <th key={provider} style={{ ...HEAD_CELL, textAlign: "right" }}>
-              {PROVIDER_LABEL[provider]}
-            </th>
-          ))}
-          <th style={{ ...HEAD_CELL, textAlign: "right" }}>Total</th>
-          <th style={{ ...HEAD_CELL, textAlign: "right" }}>Tokens</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((row) => (
-          <tr key={row.day} className="usage-row">
-            <td style={{ ...CELL, ...MONO }}>{formatDayShort(row.day)}</td>
-            {PROVIDER_ORDER.map((provider) => (
-              <td key={provider} style={NUM_CELL}>
-                {formatUsd(row.byProvider.get(provider)?.costUsd ?? 0)}
-              </td>
+    <TableScroll>
+      <table style={TABLE}>
+        <thead>
+          <tr>
+            <th style={HEAD_CELL}>Day</th>
+            {PROVIDER_READING_ORDER.map((provider) => (
+              <th key={provider} style={{ ...HEAD_CELL, textAlign: "right" }}>
+                {PROVIDER_LABEL[provider]}
+              </th>
             ))}
-            <td style={{ ...NUM_CELL, color: "var(--ink)" }}>
-              {formatUsd(row.costUsd)}
-            </td>
-            <td style={NUM_CELL}>{formatTokens(row.tokens)}</td>
+            <th style={{ ...HEAD_CELL, textAlign: "right" }}>Total</th>
+            <th style={{ ...HEAD_CELL, textAlign: "right" }}>Tokens</th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.day} className="usage-row">
+              <td style={{ ...CELL, ...MONO }}>
+                {formatDayShort(row.day, withYear)}
+              </td>
+              {PROVIDER_READING_ORDER.map((provider) => (
+                <td key={provider} style={NUM_CELL}>
+                  {formatUsd(row.byProvider.get(provider)?.costUsd ?? 0)}
+                </td>
+              ))}
+              <td style={{ ...NUM_CELL, color: "var(--ink)" }}>
+                {formatUsd(row.costUsd)}
+              </td>
+              <td style={NUM_CELL}>{formatTokens(row.tokens)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </TableScroll>
   );
 }
 
 function SessionsTable({ rows }: { rows: UsageSessionRow[] }) {
   if (rows.length === 0) return <EmptyRow />;
   return (
-    <div style={{ overflowX: "auto" }}>
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+    <TableScroll>
+      <table style={TABLE}>
         <thead>
           <tr>
             <th style={HEAD_CELL}>Last active</th>
@@ -1833,14 +1814,7 @@ function SessionsTable({ rows }: { rows: UsageSessionRow[] }) {
         <tbody>
           {rows.map((row) => (
             <tr key={`${row.provider}:${row.sessionId}`} className="usage-row">
-              <td
-                style={{
-                  ...CELL,
-                  ...MONO,
-                  color: "var(--muted)",
-                  whiteSpace: "nowrap",
-                }}
-              >
+              <td style={{ ...CELL, ...MONO, color: "var(--muted)" }}>
                 {formatSessionTime(row.lastMs)}
               </td>
               <td style={CELL} title={row.project || row.sessionId}>
@@ -1851,15 +1825,7 @@ function SessionsTable({ rows }: { rows: UsageSessionRow[] }) {
                     gap: 8,
                   }}
                 >
-                  <span
-                    aria-hidden
-                    style={{
-                      display: "flex",
-                      color: PROVIDER_COLOR[row.provider],
-                    }}
-                  >
-                    <ProviderMark provider={row.provider} size={12} />
-                  </span>
+                  <ProviderBadge provider={row.provider} />
                   <span
                     style={{
                       color: row.project ? "var(--ink)" : "var(--muted)",
@@ -1889,7 +1855,7 @@ function SessionsTable({ rows }: { rows: UsageSessionRow[] }) {
           ))}
         </tbody>
       </table>
-    </div>
+    </TableScroll>
   );
 }
 
@@ -1950,8 +1916,10 @@ function SourcesFooter({ summary }: { summary: UsageSummary }) {
           <span>{source.dir || "—"}</span>
           {source.status === "ok" ? (
             <span>
-              {formatCount(source.scannedFiles)} files ·{" "}
-              {formatCount(source.distinctSessions)} sessions
+              {formatCount(source.scannedFiles)}{" "}
+              {source.scannedFiles === 1 ? "file" : "files"} ·{" "}
+              {formatCount(source.distinctSessions)}{" "}
+              {source.distinctSessions === 1 ? "session" : "sessions"}
             </span>
           ) : (
             <span
@@ -1965,10 +1933,11 @@ function SourcesFooter({ summary }: { summary: UsageSummary }) {
           )}
         </div>
       ))}
-      <span style={{ ...MONO, fontSize: 10, color: "var(--muted-2)" }}>
+      <span style={{ ...MONO, fontSize: 10, color: "var(--muted)" }}>
         Scanned in {(summary.scanDurationMs / 1000).toFixed(1)}s · managed
         accounts link their transcripts into the personal home, so each session
-        is counted once
+        is counted once · Grok sessions are not counted: their transcripts
+        record no token usage
       </span>
     </section>
   );
@@ -2107,8 +2076,15 @@ function Swatch({ provider }: { provider: UsageProviderKind }) {
 
 function Legend() {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-      {[...PROVIDER_ORDER].reverse().map((provider) => (
+    <div
+      style={{
+        display: "flex",
+        flexWrap: "wrap",
+        alignItems: "center",
+        gap: "4px 14px",
+      }}
+    >
+      {PROVIDER_READING_ORDER.map((provider) => (
         <span
           key={provider}
           style={{
@@ -2117,6 +2093,7 @@ function Legend() {
             gap: 6,
             fontSize: 11,
             color: "var(--ink-dim)",
+            whiteSpace: "nowrap",
           }}
         >
           <span
