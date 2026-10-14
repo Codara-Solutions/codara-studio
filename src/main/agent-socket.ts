@@ -164,6 +164,7 @@ import type {
   ChatMode,
   CoraExecutionStrategy,
   InAppNotificationTone,
+  NavigationTarget,
   NotificationSoundKind,
   NotifyKind,
   PrefKey,
@@ -2930,6 +2931,7 @@ const NOTIFY_KINDS: ReadonlySet<string> = new Set<NotifyKind>([
   "automation.finished",
   "automation.failed",
   "automation.blocked",
+  "automation.step",
   "app.update-ready",
   "git.teammate-push",
   "git.pull-request",
@@ -2979,12 +2981,20 @@ async function handleAppNotify(
   const tabId = stringParam(params, "tabId");
   const paneId = stringParam(params, "paneId");
   const jobId = stringParam(params, "jobId");
-  const target =
+  const runId = stringParam(params, "runId");
+  // Any target a producer can raise: a pane, an automation (and its run), a
+  // run, or a workspace alone (a worktree, or with panel "git" a push or a
+  // pull request).
+  const target: NavigationTarget =
     workspaceId && tabId && paneId
-      ? ({ type: "terminal", workspaceId, tabId, paneId } as const)
+      ? { type: "terminal", workspaceId, tabId, paneId }
       : jobId
-        ? ({ type: "automation", jobId, workspaceId: workspaceId ?? undefined } as const)
-        : ({ type: "run", runId: stringParam(params, "runId") ?? "cli-test" } as const);
+        ? { type: "automation", jobId, ...(runId ? { runId } : {}), ...(workspaceId ? { workspaceId } : {}) }
+        : runId
+          ? { type: "run", runId, ...(workspaceId ? { workspaceId } : {}) }
+          : workspaceId
+            ? { type: "workspace", workspaceId, ...(stringParam(params, "panel") === "git" ? { panel: "git" as const } : {}) }
+            : { type: "run", runId: "cli-test" };
   publish({
     kind: kind as NotifyKind,
     sourceKey,

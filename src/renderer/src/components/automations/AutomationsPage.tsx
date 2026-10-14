@@ -964,6 +964,7 @@ const AutomationRow = React.memo(function AutomationRow({
     <button
       type="button"
       onClick={onSelect}
+      aria-current={selected ? "true" : undefined}
       className={`spark-fade-in automation-row${live ? " is-live" : ""}`}
       onMouseEnter={(e) => {
         setHover(true);

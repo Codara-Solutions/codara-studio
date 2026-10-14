@@ -8,6 +8,7 @@ import type {
 } from "@shared/types";
 import { E2E_BACKGROUND, revealWindow } from "../e2e-background";
 import { logMain } from "../file-log";
+import { createNotificationRetainer } from "./native-retain";
 
 // The four delivery transports for an alert the policy let through, gated by
 // the user's per-channel preferences. Each channel is best-effort: a thrown
@@ -15,7 +16,9 @@ import { logMain } from "../file-log";
 //
 //   - inApp   → renderer toast via "notification:in-app"
 //   - native  → Electron Notification; click focuses the window and routes
-//               the event's NavigationTarget through "notify:focus"
+//               the event's NavigationTarget through "notify:focus". Each
+//               one stays held (native-retain.ts) until the OS is done with
+//               it, or its click would never arrive
 //   - sound   → renderer chime via "notification:sound"
 //   - osCues  → Windows taskbar flash (cleared on focus). The macOS dock
 //               badge is owned by center-store (unread count), not here.
@@ -28,9 +31,25 @@ import { logMain } from "../file-log";
 // go unseen, so the native OS notification takes over. See isAppFocused().
 
 let getMainWindow: () => BrowserWindow | null = () => null;
+let toastActivationHandled = false;
 
 export function registerDeliveryWindow(win: BrowserWindow): void {
   getMainWindow = () => win;
+  // A toast clicked in the Action Center after its Notification was let go
+  // (past the retainer's cap, or raised by an earlier run) reaches only this
+  // callback, and a plain click carries no id to route by, so bringing the
+  // window forward is all it can do. A held toast also gets its own click.
+  if (process.platform === "win32" && !E2E_BACKGROUND && !toastActivationHandled) {
+    toastActivationHandled = true;
+    try {
+      Notification.handleActivation(() => {
+        const target = activeWindow();
+        if (target) revealWindow(target);
+      });
+    } catch (err) {
+      console.warn("[notify] toast activation handler failed:", err);
+    }
+  }
   win.on("focus", () => {
     if (process.platform === "win32") {
       try {
@@ -59,15 +78,68 @@ function isAppFocused(win: BrowserWindow | null): boolean {
   return !!win && !win.isMinimized() && win.isFocused();
 }
 
-export function focusTarget(target: NavigationTarget): void {
+// entryId is the center row the alert landed in. The renderer marks it read
+// once the target opened, as a click on the row itself does.
+export function focusTarget(target: NavigationTarget, entryId?: string): void {
   const win = activeWindow();
   if (!win) return;
   try {
     revealWindow(win);
-    win.webContents.send("notify:focus", target);
+    win.webContents.send("notify:focus", target, entryId);
   } catch (err) {
     console.warn("[notify] focus routing failed:", err);
   }
+}
+
+const retainedNotifications = createNotificationRetainer<Notification>();
+
+interface E2eNativeNotification {
+  id: string;
+  title: string;
+  body: string;
+  target: NavigationTarget;
+  notification: WeakRef<Notification>;
+}
+
+// The e2e seam: a test app builds and wires every notification exactly as a
+// real one but never shows it, and lists it here so a spec can fire its click
+// from main. The reference is weak so the list cannot keep alive a
+// notification the retainer let go.
+function recordForE2e(event: NotifyEvent, notification: Notification): void {
+  const host = globalThis as { __codaraNativeNotifications?: E2eNativeNotification[] };
+  (host.__codaraNativeNotifications ??= []).push({
+    id: event.id,
+    title: notification.title,
+    body: notification.body,
+    target: event.target,
+    notification: new WeakRef(notification),
+  });
+}
+
+function showNative(event: NotifyEvent): void {
+  if (!E2E_BACKGROUND && !Notification.isSupported()) return;
+  // macOS has a subtitle line for the workspace; elsewhere it rides on
+  // the title so the origin is never lost in a one-line banner.
+  const notification = new Notification(
+    process.platform === "darwin"
+      ? {
+          title: event.title,
+          body: event.body,
+          ...(event.workspaceName ? { subtitle: event.workspaceName } : {}),
+        }
+      : {
+          title: event.workspaceName ? `${event.title} · ${event.workspaceName}` : event.title,
+          body: event.body,
+        },
+  );
+  retainedNotifications.hold(notification, () => focusTarget(event.target, event.id));
+  // An e2e app is never focused, so every alert it raised would become a
+  // real OS notification on the desktop of whoever ran the suite.
+  if (E2E_BACKGROUND) {
+    recordForE2e(event, notification);
+    return;
+  }
+  notification.show();
 }
 
 // Persistent terminal attention is separate from intrusive delivery. The
@@ -129,30 +201,9 @@ export function deliver(event: NotifyEvent, channels: NotificationChannelsPref):
   // toast is NOT the alert — either the window isn't focused (minimized /
   // backgrounded), or the in-app channel is turned off — so enabling both
   // channels never produces the double notification.
-  // An e2e app is never focused, so every alert it raised became a real OS
-  // notification on the desktop of whoever ran the suite.
-  if (channels.native && !E2E_BACKGROUND && (!appFocused || !channels.inApp)) {
+  if (channels.native && (!appFocused || !channels.inApp)) {
     try {
-      if (Notification.isSupported()) {
-        // macOS has a subtitle line for the workspace; elsewhere it rides on
-        // the title so the origin is never lost in a one-line banner.
-        const n = new Notification(
-          process.platform === "darwin"
-            ? {
-                title: event.title,
-                body: event.body,
-                ...(event.workspaceName ? { subtitle: event.workspaceName } : {}),
-              }
-            : {
-                title: event.workspaceName
-                  ? `${event.title} · ${event.workspaceName}`
-                  : event.title,
-                body: event.body,
-              },
-        );
-        n.on("click", () => focusTarget(event.target));
-        n.show();
-      }
+      showNative(event);
     } catch (err) {
       console.warn("[notify] native fire failed:", err);
     }

@@ -26,7 +26,7 @@ assert.match(focus, /BrowserWindow\.fromWebContents\(owner\)/);
 assert.match(focus, /import \{ E2E_BACKGROUND, revealWindow \} from "\.\/e2e-background";/);
 assert.match(focus, /revealWindow\(target\);/);
 assert.match(background, /if \(target\.isMinimized\(\)\) target\.restore\(\);/);
-assert.match(background, /if \(!target\.isVisible\(\)\) target\.show\(\);/);
+assert.match(background, /if \(!target\.isVisible\(\)\) \{[^}]*target\.show\(\);\s*\}/);
 assert.match(background, /target\.focus\(\);/);
 assert.match(
   focus,

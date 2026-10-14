@@ -48,7 +48,9 @@ on Linux the Playwright runner and `npm test` start a private Xvfb display
 and every test window opens there (`scripts/virtual-display.cjs`; install it
 with `sudo apt install xvfb`, or point `CODARA_XVFB` at an Xvfb binary). On
 macOS and Windows the window is transparent and inactive. The app plays no
-sounds and raises no OS notifications. A throwaway script that launches
+sounds and raises no OS notifications: it builds each one without showing
+it and lists it in main as `globalThis.__codaraNativeNotifications`, where a
+spec can fire its click. A throwaway script that launches
 Electron itself should call `useVirtualDisplay()` from that module first.
 
 `playwright.config.ts` runs one spec at a time, and each spec boots a real
