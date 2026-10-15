@@ -237,7 +237,11 @@ config copies the entry without writing that config.
 arms triggers (cron, interval, folder, git and others),
 `automation-loop.ts` starts one iteration after another, and
 `loom-graph.ts`, `loom-resolve.ts` and `loom-steps.ts` walk a loom's graph.
-The UI is `components/automations/`.
+`automation-precheck.ts` runs a pass's optional shell check, and
+`automation-catchup.ts` works out which scheduled times were missed while the
+app was closed or the computer slept. The UI is `components/automations/`
+(the trigger panel's precheck and missed-run fields are
+`flow/TriggerGateFields.tsx`).
 
 **Workflows** run a script that fans work out to agents.
 `workflow-driver.ts` owns workflow runs and launches each agent as a worker;
