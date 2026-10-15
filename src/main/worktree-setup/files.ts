@@ -135,6 +135,7 @@ export async function writeWorktreeSetupFiles(draft: WorktreeSetupFileDraft): Pr
     include: Array.isArray(draft.include) ? draft.include.filter((line) => typeof line === "string") : [],
     link: Array.isArray(draft.link) ? draft.link.filter((line) => typeof line === "string") : [],
     setup: typeof draft.setup === "string" ? draft.setup : "",
+    setupWindows: typeof draft.setupWindows === "string" ? draft.setupWindows : "",
     waitForSetup: draft.waitForSetup === true,
     terminals: Array.isArray(draft.terminals)
       ? draft.terminals

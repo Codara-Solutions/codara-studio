@@ -141,6 +141,8 @@ export interface WorktreeSetupFileDraft {
   include: string[];
   link: string[];
   setup: string;
+  // Kept when the file already had one; the dialog edits it too.
+  setupWindows?: string;
   waitForSetup: boolean;
   terminals: WorktreeSetupTerminal[];
   overwrite?: boolean;
@@ -354,11 +356,12 @@ export function repoSetupCommandFor(config: WorktreeSetupFileConfig, platform: s
  * is only written when it has something to say.
  */
 export function serializeWorktreeSetupDraft(
-  draft: Pick<WorktreeSetupFileDraft, "include" | "link" | "setup" | "waitForSetup" | "terminals">,
+  draft: Pick<WorktreeSetupFileDraft, "include" | "link" | "setup" | "setupWindows" | "waitForSetup" | "terminals">,
 ): { worktreeInclude: string | null; setupFile: string | null } {
   const include = draft.include.map((line) => line.trim()).filter(Boolean);
   const link = draft.link.map((entry) => normalizeLinkPath(entry)).filter((entry): entry is string => Boolean(entry));
   const setup = draft.setup.replace(/\r\n/g, "\n").trim();
+  const setupWindows = (draft.setupWindows ?? "").replace(/\r\n/g, "\n").trim();
   const terminals = draft.terminals
     .map((terminal) => ({ name: terminal.name.trim(), command: terminal.command?.trim() ?? "" }))
     .filter((terminal) => terminal.name || terminal.command)
@@ -374,7 +377,8 @@ export function serializeWorktreeSetupDraft(
   const body: Record<string, unknown> = {};
   if (link.length) body.link = link;
   if (setup) body.setup = setup.includes("\n") ? setup.split("\n") : setup;
-  if (setup || draft.waitForSetup) body.waitForSetup = draft.waitForSetup;
+  if (setupWindows) body.setupWindows = setupWindows.includes("\n") ? setupWindows.split("\n") : setupWindows;
+  if (setup || setupWindows || draft.waitForSetup) body.waitForSetup = draft.waitForSetup;
   if (terminals.length) body.terminals = terminals;
   const setupFile = Object.keys(body).length ? `${JSON.stringify(body, null, 2)}\n` : null;
   return { worktreeInclude, setupFile };

@@ -11,6 +11,12 @@ import {
   shortenRelative,
 } from "./git/git-ui";
 import { InlineInput } from "./file-icons/InlineInput";
+import WorktreeSetupSummary from "./worktree-setup/WorktreeSetupSummary";
+
+export interface CreateCopySetupOptions {
+  // Run the repository's setup command, the user's own and its terminals.
+  runSetupCommands: boolean;
+}
 
 // Branch picker for the "Create copy" workspace action. Lists the source
 // repo's local + remote branches; a row click opens that exact branch as a new
@@ -33,14 +39,16 @@ export default function CreateCopyDialog({
   error: string | null;
   onDismissError: () => void;
   onClose: () => void;
-  onCreateNew: (name: string) => void;
-  onOpenBranch: (branch: GitBranch) => void;
+  onCreateNew: (name: string, setup: CreateCopySetupOptions) => void;
+  onOpenBranch: (branch: GitBranch, setup: CreateCopySetupOptions) => void;
 }): React.ReactElement {
   const [list, setList] = useState<GitBranchList | null>(null);
   const [refreshing, setRefreshing] = useState(true);
   const [filter, setFilter] = useState("");
   const [remotesOpen, setRemotesOpen] = useState(true);
   const [naming, setNaming] = useState(false);
+  const [runSetupCommands, setRunSetupCommands] = useState(true);
+  const openBranch = (branch: GitBranch): void => onOpenBranch(branch, { runSetupCommands });
 
   useEffect(() => {
     let cancelled = false;
@@ -69,7 +77,8 @@ export default function CreateCopyDialog({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === "Escape" && !busy) onClose();
+      // A dialog opened on top of this one handles its own Escape first.
+      if (e.key === "Escape" && !busy && !e.defaultPrevented) onClose();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -161,7 +170,7 @@ export default function CreateCopyDialog({
                 onCommit={(value) => {
                   setNaming(false);
                   const name = value.trim();
-                  if (name) onCreateNew(name);
+                  if (name) onCreateNew(name, { runSetupCommands });
                 }}
                 onCancel={() => setNaming(false)}
               />
@@ -298,7 +307,7 @@ export default function CreateCopyDialog({
                     key={`l:${branch.name}`}
                     branch={branch}
                     locked={busy}
-                    onOpen={onOpenBranch}
+                    onOpen={openBranch}
                   />
                 ))
               )}
@@ -352,13 +361,19 @@ export default function CreateCopyDialog({
                       key={`r:${branch.name}`}
                       branch={branch}
                       locked={busy}
-                      onOpen={onOpenBranch}
+                      onOpen={openBranch}
                     />
                   ))
                 ))}
             </>
           )}
         </div>
+        <WorktreeSetupSummary
+          sourceCwd={workspace.cwd}
+          runCommands={runSetupCommands}
+          onRunCommandsChange={setRunSetupCommands}
+          disabled={busy}
+        />
       </div>
     </div>
   );

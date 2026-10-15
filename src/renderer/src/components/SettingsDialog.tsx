@@ -110,6 +110,7 @@ import {
 } from "./settings/settings-index";
 import { bindToggle } from "./settings/setting-toggles";
 import ChromeLinkSection from "./chrome/ChromeLinkSection";
+import WorktreeSetupSettingsControl from "./worktree-setup/WorktreeSetupSettingsControl";
 
 export type { SettingsTab } from "./settings/settings-index";
 
@@ -1408,6 +1409,7 @@ function GeneralSettings({
               </>
             ) : null}
             <GithubWebhookSettings />
+            {workspaceCwd ? <WorktreeSetupFileField workspaceCwd={workspaceCwd} /> : null}
             {workspaceCwd ? <CopyBranchSetupField workspaceCwd={workspaceCwd} /> : null}
             {workspaceCwd ? <AgentWorktreeIgnoredField workspaceCwd={workspaceCwd} /> : null}
           </SettingsSection>
@@ -1532,6 +1534,18 @@ function TerminalAccountLeftoverNote() {
   );
 }
 
+// The repository's own worktree setup (.worktreeinclude and
+// .codara/worktree.json), shared by everyone who clones it.
+function WorktreeSetupFileField({ workspaceCwd }: { workspaceCwd: string }) {
+  return (
+    <SettingRow
+      title="Worktree setup file"
+      desc="What every new worktree of this repository gets: ignored files copied from this checkout, folders linked, a setup command and terminals. Kept in the repository, so commit it."
+      control={<WorktreeSetupSettingsControl workspaceCwd={workspaceCwd} />}
+    />
+  );
+}
+
 function CopyBranchSetupField({ workspaceCwd }: { workspaceCwd: string }) {
   const { preferences, hydrated, setPreference } = usePreferences();
   const stored = preferences.copyBranchSetupCommandByRepo?.[workspaceCwd];
@@ -1561,7 +1575,7 @@ function CopyBranchSetupField({ workspaceCwd }: { workspaceCwd: string }) {
   return (
     <SettingRow
       title="Copy-branch setup command"
-      desc="Runs in a new copy-branch worktree to restore what git does not track. Leave blank for none. Saved for this repository."
+      desc="Your own command for new worktrees of this repository, run after the worktree setup file's. Saved on this computer only. Leave blank for none."
       stacked
     >
       <input
