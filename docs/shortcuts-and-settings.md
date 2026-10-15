@@ -175,7 +175,7 @@ The pages:
 | Remote access | Turn phone access on, pair a device, and revoke paired devices (see [remote-access.md](./remote-access.md)). |
 | Keybindings | Rebind or unbind every command above. |
 | Runs | Every Cora run: browse, keep, delete. |
-| About | Version and links. A development build shows the nearest release tag plus the commits since it. |
+| About | Version and links (a development build shows the nearest release tag plus the commits since it), and Diagnostics: the freezes and crashes recorded on this computer, and **Export diagnostics**. |
 
 **Open links in** decides where a link you click opens: **Default browser**
 (the default) hands it to your machine's browser, **Codara browser** opens it
@@ -200,6 +200,29 @@ links keep a fixed destination whatever the setting says:
 The run terminal lifecycle works like this. Temporary worker panes close when
 a run settles. Service panes remain until the run is deleted.
 Failed closes retry automatically.
+
+### Diagnostics
+
+Codara keeps a record of its own freezes and crashes on this computer, and
+uploads nothing. A watchdog thread notices when the main process stops
+answering for 5 seconds, notes the stack of the JavaScript that blocks it, and
+records the freeze once it ends (or at the next start, if it never did).
+Crashes of the app or its processes leave a crash report in
+`~/.codarastudio/crash-dumps/`. Settings, About shows the count under
+**Freezes and crashes**.
+
+**Export diagnostics** saves a zip for a bug report: the main log, the freeze
+record, the recent events, the event loop delay over the last hour, the list
+of crash reports (names and sizes only, never their contents), versions, and
+your settings with secrets taken out. Tokens, keys, email addresses and home
+folder paths are removed from every file before it is written.
+[on-your-machine.md](./on-your-machine.md) lists the files.
+
+Environment variables turn parts of it off: `CODARA_HANG_WATCHDOG=0` (freeze
+detection), `CODARA_HANG_WATCHDOG_STACKS=0` (no stacks; they are also skipped
+while a debugger is attached, unless set to `1`), `CODARA_CRASH_REPORTER=0`
+(crash reports) and `CODARA_EVENT_LOOP_PROBE=0` (the event loop delay).
+`CODARA_HANG_WATCHDOG_THRESHOLD_MS` changes the 5 second threshold.
 
 ### Terminal agent notifications
 

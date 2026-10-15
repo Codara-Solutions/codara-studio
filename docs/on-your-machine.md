@@ -35,6 +35,8 @@ a `spark-` prefix keep the product's old name for compatibility.
 | `remote/` | Remote access: the desktop's identity (private key mode 0600), paired devices and the mutation ledger. |
 | `logs/main.log` | The main-process log, capped at 1 MB with one rotation. |
 | `logs/worktree-audit.jsonl` | One line for every worktree an agent created, removed or was refused (mode 0600): ids, paths, branches, commits and the reason, never tokens. Rotated once at 5 MB. |
+| `diagnostics/` | The freeze and crash record shown in Settings, About (files mode 0600). `hangs.jsonl` has one line for each time the main process stopped answering for 5 s or more: how long, whether it recovered, CPU and memory, the recent events, and the stack of the blocked JavaScript when it could be read; it is rotated once at 512 KB. `hang-pending.json` marks a freeze still under way, so one that ended in a quit or a crash is recorded at the next start. `breadcrumbs.json` and `breadcrumbs.previous.json` keep the last 200 notable log lines of this session and the one before. |
+| `crash-dumps/` | Crash reports (minidumps) that Electron's Crashpad writes when the app or one of its processes crashes. They hold process memory and never leave the computer: uploading is off. At most 20 reports and 64 MB are kept; the oldest go first. |
 
 ## How Codara sessions get its tools
 
@@ -140,4 +142,7 @@ exactly as in any other terminal.
 
 The app talks to `https://studio.codarasolutions.com` for update checks and a
 stream that announces new releases, to the sign-in providers you use, and, if
-you turn on remote access, to the Codara relay. There is no telemetry.
+you turn on remote access, to the Codara relay. There is no telemetry: freezes
+and crashes are recorded only on your computer, and **Export diagnostics** in
+Settings, About writes them to a zip you choose where to save, with tokens,
+keys, email addresses and home folder paths removed.

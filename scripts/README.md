@@ -327,6 +327,19 @@ in nested and symlinked folders reach the explorer),
 `test-system-metrics` (the memory figure in the title-bar meters,
 `src/main/system-metrics.ts`).
 
+### Crash and freeze black box
+
+`test-diagnostics-hang-watchdog` (the freeze detector and its settings, then
+the real watchdog thread against a busy loop, a block in native code, a
+healthy stretch and an exit in the middle of a freeze,
+`src/main/diagnostics/hang-watchdog*.ts`), `test-diagnostics-records`
+(breadcrumbs and their file, listing and pruning crash dumps, stopping the
+AppImage crash handler, event loop windows), `test-diagnostics-export`
+(redaction, the zip writer, checked with `unzip -t` and Python's zipfile when
+they are installed, and the exported bundle of a fake home). The built app is
+covered end to end by `tests/e2e/crash-diagnostics.spec.ts`: a real freeze,
+a real renderer crash, Settings, About and the export.
+
 ### Remote access (phone) and SSH workspaces
 
 | Suites | Covers |
