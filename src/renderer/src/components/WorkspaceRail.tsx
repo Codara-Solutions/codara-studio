@@ -20,6 +20,9 @@ import FileTree from "./FileTree";
 import GitPanel from "./git/GitPanel";
 import AnchoredMenu from "./chat/composer/AnchoredMenu";
 import WorkspaceIconPicker from "./WorkspaceIconPicker";
+import { WorkspaceStatusLine } from "./workspace-status/WorkspaceStatusChip";
+import WorkspaceStatusPicker from "./workspace-status/WorkspaceStatusPicker";
+import { setWorkspaceStatus, useWorkspaceStatus } from "./workspace-status/workspaceStatusStore";
 import { WorkspaceIconGlyph } from "./workspace-icons";
 import { resolveWorkspaceAccent } from "../lib/workspace-accent";
 import { useTheme } from "../theme/theme-context";
@@ -2047,6 +2050,8 @@ function WorkspaceRow({
   const [moreFocus, setMoreFocus] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [iconPickerOpen, setIconPickerOpen] = useState(false);
+  const [statusPickerOpen, setStatusPickerOpen] = useState(false);
+  const statusEntry = useWorkspaceStatus(ws.id);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
   // In-flight color while the OS color dialog is open. The native
   // <input type="color"> streams `input` events 30-60×/sec (sometimes faster)
@@ -2172,6 +2177,13 @@ function WorkspaceRow({
       onDragStart={onRowDragStart}
       onDragEnd={onRowDragEnd}
       onClick={editing ? undefined : onActivate}
+      onContextMenu={(event) => {
+        if (editing) return;
+        // A right-click opens the row's "…" actions, where status lives too.
+        event.preventDefault();
+        event.stopPropagation();
+        setMenuOpen(true);
+      }}
       onMouseEnter={() => setRowHover(true)}
       onMouseLeave={() => {
         setRowHover(false);
@@ -2417,6 +2429,7 @@ function WorkspaceRow({
                 {branch}
               </span>
             )}
+            <WorkspaceStatusLine workspaceId={ws.id} active={active} />
           </div>
         )}
 
@@ -2519,6 +2532,22 @@ function WorkspaceRow({
                   onEdit();
                 }}
               />
+              <RowMenuItem
+                label="Set status…"
+                onClick={() => {
+                  setMenuOpen(false);
+                  setStatusPickerOpen(true);
+                }}
+              />
+              {statusEntry && (
+                <RowMenuItem
+                  label="Clear status"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    void setWorkspaceStatus(ws.id, { clear: true }).catch(() => undefined);
+                  }}
+                />
+              )}
               {!ws.remote && (
                 <RowMenuItem
                   label="Create isolated worktree…"
@@ -2560,6 +2589,27 @@ function WorkspaceRow({
                 setIconPickerOpen(false);
               }}
               onPickColor={(color) => onChange({ color })}
+            />
+          </AnchoredMenu>
+          <AnchoredMenu
+            anchorRef={menuBtnRef}
+            open={statusPickerOpen && !editing}
+            onClose={() => setStatusPickerOpen(false)}
+            className="spark-menu"
+            role="dialog"
+            ariaLabel={`Status of ${ws.name}`}
+            placement="below"
+            align="end"
+          >
+            <WorkspaceStatusPicker
+              workspaceId={ws.id}
+              onClose={(options) => {
+                setStatusPickerOpen(false);
+                // From the keyboard, focus goes back to the row's "…" button.
+                if (options?.restoreFocus) {
+                  window.requestAnimationFrame(() => menuBtnRef.current?.focus({ preventScroll: true }));
+                }
+              }}
             />
           </AnchoredMenu>
         </div>

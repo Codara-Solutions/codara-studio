@@ -76,17 +76,24 @@ const WORKFLOW_TOOLS = [
   "codara_workflow_save",
 ];
 // A Cora chat (SPARK_RUN_ID set) also gets its whiteboard and board; a user's
-// own terminal agent gets the explicit notification and the worktree tools
-// instead.
+// own terminal agent gets the explicit notification, the workspace status and
+// the worktree tools instead.
 const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, ...WHITEBOARD_TOOLS, ...BOARD_TOOLS];
-const TERMINAL_STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, "codara_notify_user", ...WORKTREE_TOOLS];
+const TERMINAL_STUDIO_TOOLS = [
+  ...PREVIEW_TOOLS,
+  ...TERMINAL_TOOLS,
+  "codara_notify_user",
+  "codara_workspace_status",
+  ...WORKTREE_TOOLS,
+];
 const RUN = { SPARK_RUN_ID: "run-roster" };
 // tools/list budgets in JSON characters. The studio list is what every Claude
 // Code, Codex and Grok session pays for on every request. Each roster carries
 // every tool module, so these move with TOOL_MODULES_BUDGET in
 // test-mcp-tool-manifest.cjs (raised by 9,000 for the browser tools of the
-// round that added the Chrome extension, audits and captures).
-const LIST_BUDGET = { studio: 29_000, run: 39_000, worker: 35_000, execute: 94_000, automation: 69_000 };
+// round that added the Chrome extension, audits and captures, and the studio
+// one by 300 for codara_workspace_status, whose guidance rides on initialize).
+const LIST_BUDGET = { studio: 29_300, run: 39_000, worker: 35_000, execute: 94_000, automation: 69_000 };
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",
@@ -253,6 +260,11 @@ function sortedEqual(actual, expected, label) {
     assert.match(studio.init.instructions, /codara_terminal_run/, "initialize carries shared tool guidance");
     assert.match(studio.init.instructions, /codara_notify_user/);
     assert.match(studio.init.instructions, /codara_worktree_remove/, "a terminal agent learns the worktree lifecycle");
+    assert.match(
+      studio.init.instructions,
+      /codara_workspace_status.*note at each milestone.*in_review or done when you finish.*blocked/,
+      "a terminal agent learns to post milestones and its final status",
+    );
     assert.match(studio.init.instructions, /Dev servers: .*codara_terminal_servers.*keeps them running when you exit or restart/, "dev servers go to the keeper, not the agent's own shell");
     assert.doesNotMatch(studio.init.instructions, /baseRevision/, "chat-only guidance stays out of a terminal session");
     assert.notStrictEqual(studio.init.serverInfo.version, "0.1.0", "serverInfo reports Codara's version");
@@ -270,6 +282,7 @@ function sortedEqual(actual, expected, label) {
     sortedEqual(runStudio.tools, STUDIO_TOOLS, "studio roster inside a Cora chat mismatch");
     assert.match(runStudio.init.instructions, /baseRevision/);
     assert.doesNotMatch(runStudio.init.instructions, /codara_worktree/, "chat workers get no worktree guidance");
+    assert.doesNotMatch(runStudio.init.instructions, /codara_workspace_status/, "chat workers leave the workspace status to their chat");
 
     // Execute mode. Carries the automation-management tools too (Cora creates
     // and manages looms from an ordinary auto/execute chat), minus
@@ -900,6 +913,22 @@ function sortedEqual(actual, expected, label) {
     assert.strictEqual(received.at(-1).method, "agent.notify");
     assert.strictEqual(received.at(-1).params.callerPaneId, "pane-caller");
     assert.strictEqual(received.at(-1).params.kind, "done");
+    // The workspace status follows the caller's pane as well: a workspace or
+    // client the call names is never the one used.
+    await terminalAgentBridge.callToolByName("codara_workspace_status", {
+      status: "in_review",
+      note: "PR open",
+      workspaceId: "ws-other",
+      callerClient: "spoofed",
+      callerPaneId: "pane-spoofed",
+    });
+    assert.strictEqual(received.at(-1).method, "workspace.status");
+    assert.strictEqual(received.at(-1).params.callerPaneId, "pane-caller");
+    assert.strictEqual(received.at(-1).params.callerPid, process.pid);
+    assert.strictEqual(received.at(-1).params.callerClient, "cora");
+    assert.strictEqual(received.at(-1).params.status, "in_review");
+    assert.ok(!("workspaceId" in received.at(-1).params), "the tool never names a workspace");
+    assert.ok(!("runId" in received.at(-1).params), "a terminal agent's status call names no run");
     // Worktree calls carry who is asking from the launch environment only:
     // spoofed caller fields are replaced, and a refusal reaches the model as
     // an error result that keeps its code, blockers and hint.
@@ -1099,6 +1128,9 @@ function sortedEqual(actual, expected, label) {
     const offlineNotify = await terminalAgentBridge.callToolByName("codara_notify_user", { kind: "done" });
     assert.notStrictEqual(offlineNotify.isError, true, "an offline notification is not a tool error");
     assert.deepStrictEqual(JSON.parse(offlineNotify.content[0].text), { published: false, reason: "codara_offline" });
+    const offlineStatus = await terminalAgentBridge.callToolByName("codara_workspace_status", { note: "Tests pass" });
+    assert.notStrictEqual(offlineStatus.isError, true, "a status Codara cannot show is not a tool error");
+    assert.deepStrictEqual(JSON.parse(offlineStatus.content[0].text), { updated: false, reason: "codara_offline" });
     fs.writeFileSync(handshakePath, JSON.stringify({ url: "http://127.0.0.1:1", token: "f".repeat(64) }));
     const refused = await directBridge.callToolByName("codara_terminal_read", { paneId: "pane-owned" });
     assert.match(refused.content[0].text, /appears to be offline: nothing is listening/);

@@ -484,6 +484,7 @@ import { registerCaptureIpc } from "./browser/capture/ipc";
 import { registerChromeLinkIpc } from "./browser/chrome";
 import { registerPointIpc } from "./browser/point";
 import { registerServersIpc } from "./servers";
+import { registerWorkspaceStatusIpc } from "./workspace-status";
 
 function nativeCliAccountRuntimeFromIpc(value: unknown): NativeCliAccountRuntime {
   if (value === "claude" || value === "codex" || value === "grok") return value;
@@ -4055,6 +4056,7 @@ export function registerIpc(): void {
   registerChromeLinkIpc(handle);
   registerCaptureIpc(handle);
   registerPointIpc(handle);
+  registerWorkspaceStatusIpc(handle);
 }
 
 const MEMORY_KINDS = new Set<MemoryItemKind>(["preference", "correction", "fact", "procedure", "lesson"]);

@@ -41,6 +41,7 @@ import { captureApi } from "./areas/capture";
 import { chromeLinkApi } from "./areas/chrome-link";
 import { pointApi } from "./areas/point";
 import { serversApi } from "./areas/servers";
+import { workspaceStatusApi } from "./areas/workspace-status";
 import type {
   CoraMemoryItem,
   MemoryItemKind,
@@ -1773,6 +1774,7 @@ const api = {
   chromeLink: chromeLinkApi,
   capture: captureApi,
   point: pointApi,
+  workspaceStatus: workspaceStatusApi,
 };
 
 function isBrowserUrl(url: string): boolean {
