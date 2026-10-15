@@ -128,7 +128,7 @@ export function useSelectionRoutingApi(inputs: SelectionRoutingInputs): Selectio
         text: payload.text,
         attachments: payload.attachments,
         submit: options.submit === true,
-        source: payload.source === "inspect" ? "picker" : payload.source === "draw" ? "comment" : "tab",
+        source: payload.source === "inspect" ? "picker" : payload.source === "draw" ? "comment" : payload.source === "git" ? "git" : "tab",
         ...(payload.tabId ? { tabId: payload.tabId } : {}),
         ...(payload.url ? { url: payload.url } : {}),
       });

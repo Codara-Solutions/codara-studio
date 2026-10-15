@@ -166,7 +166,7 @@ The pages:
 
 | Tab | What lives there |
 |---|---|
-| General | Getting started (reopens the first-run guide), Appearance (theme, liquid glass surfaces), Window (keep running in the background when the window is closed, auto-open the browser for local dev servers, open links in the default browser or the Codara browser, the workspace switch badge), Agent worktrees (whether agents may create and remove worktrees, and remove ones you created), Tabs (middle-click to close), Notifications (in-app toast, native OS notification, sound, OS-specific cues), Git (background fetch, notify on teammate pushes and new pull requests), Instant git triggers, Copy-branch workspaces (a setup command for new worktrees, and extra ignored files an agent may delete with a merged worktree). |
+| General | Getting started (reopens the first-run guide), Appearance (theme, liquid glass surfaces), Window (keep running in the background when the window is closed, auto-open the browser for local dev servers, open links in the default browser or the Codara browser, the workspace switch badge), Agent worktrees (whether agents may create and remove worktrees, and remove ones you created), Tabs (middle-click to close), Notifications (in-app toast, native OS notification, sound, OS-specific cues), Git (background fetch, notify on teammate pushes and new pull requests, notify when CI fails on your pull request), Instant git triggers, Copy-branch workspaces (a setup command for new worktrees, and extra ignored files an agent may delete with a merged worktree). |
 | Editor | Code editor (Vim mode, autosave) and inline AI autocomplete. |
 | Default terminal | The shell for new panes, a resource overview, output history and scrollback lines, and the run terminal lifecycle for worker panes. |
 | API and model | An OpenRouter key, and how Git commit messages are generated. |
@@ -200,6 +200,42 @@ links keep a fixed destination whatever the setting says:
 The run terminal lifecycle works like this. Temporary worker panes close when
 a run settles. Service panes remain until the run is deleted.
 Failed closes retry automatically.
+
+### Fix with agent
+
+Source Control can hand a problem to an agent with what it needs to fix it:
+
+- **Fix checks with agent** on a pull request with failing checks: the
+  failing checks, and the end of each failed GitHub Actions job's log (the
+  last lines plus earlier error lines, up to three jobs).
+- **Fix with agent** under a commit a git hook rejected (`pre-commit`,
+  `prepare-commit-msg` or `commit-msg`, `core.hooksPath` included): the
+  hook's output, the staged files and the message you tried.
+- **Resolve with agent** while a merge, rebase, cherry-pick or revert has
+  conflicts: the conflicted files with their conflict markers.
+- **Address review comments** on an open pull request: its unresolved review
+  threads.
+
+A dialog shows what the agent receives (open **Show the full prompt** to read
+it all), takes an optional note, and asks where to send it: an agent already
+running in a terminal of the workspace, the open Cora chat, a new Cora chat,
+a new Claude Code, Codex, Grok or Pi in its own terminal tab (the prompt goes
+in once the agent is ready), or the agent inbox. Nothing is sent until you
+press **Send** (`Mod+Enter`); **Copy prompt** copies it instead. The next
+fix starts on the kind of target you used last.
+
+GitHub is read with your own `gh`. Logs, hook output, file excerpts and
+comments are capped, secrets in them are replaced by `[redacted]`, and the
+prompt tells the agent to treat them as data, not instructions. The prompts
+ask the agent not to push, commit or bypass hooks. Local workspaces only for
+now.
+
+**Notify me when CI fails on my pull request** (Settings, General, Git) sends
+one alert when a check fails on the pull request of a workspace's branch,
+once per failing commit; a pull request that was already failing when Codara
+first saw it stays quiet until a later run fails. Clicking the alert opens
+Source Control. It asks GitHub only when the branch or its upstream moved,
+every 90 seconds while checks run, and every 15 minutes otherwise.
 
 ### Terminal agent notifications
 

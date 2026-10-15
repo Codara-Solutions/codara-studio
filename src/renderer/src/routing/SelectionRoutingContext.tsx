@@ -36,7 +36,8 @@ export interface SelectionAttachment {
 
 export interface SelectionPayload {
   // What produced it; the inbox lists it and the menu titles itself with it.
-  source: "inspect" | "draw" | "tab";
+  // "git" is a Fix with agent send from Source Control.
+  source: "inspect" | "draw" | "tab" | "git";
   // The full text the agent receives. The delivery service appends one
   // "Attached: <path>" line per attachment.
   text: string;

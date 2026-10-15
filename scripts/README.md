@@ -340,10 +340,14 @@ in nested and symlinked folders reach the explorer),
 
 ### Git and GitHub
 
-`test-git-*`, `test-github-*` (26 files: the `gh` wrapper, publishing,
+`test-git-*`, `test-github-*` (30 files: the `gh` wrapper, publishing,
 merging, reviews, pull request import, issues, push alerts, the work queue,
 stashing while another process holds the index lock, GIT_OPTIONAL_LOCKS=0 on
-every git Codara spawns),
+every git Codara spawns; `test-git-fix-prompts`, `test-git-fix-context` and
+`test-git-fix-targets` cover Fix with agent: redaction, log and conflict
+slicing, prompt budgets, hooks and conflicts in throwaway repositories, a
+scripted `gh`, and the dialog's targets; `test-github-ci-watch` covers the
+CI failure alerts),
 `test-worktrees`, `test-worktree-delete-dialog`, `test-untrusted-pr-policy`
 (the checkout of an imported pull request stays untrusted, whatever path
 tricks it tries), `test-agent-worktrees` (worktrees agents create and remove
