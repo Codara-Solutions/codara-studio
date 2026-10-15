@@ -35,10 +35,6 @@ export function agentBrandLabel(runtime: AgentBrandRuntime): string {
   return AGENT_FAMILIES[runtime].displayName;
 }
 
-export function agentBrandCliLabel(runtime: AgentBrandRuntime): string {
-  return AGENT_FAMILIES[runtime].cliLabel;
-}
-
 export function agentBrandRuntime(value: string | null | undefined): AgentBrandRuntime | null {
   return isAgentRuntimeKind(value) ? value : null;
 }

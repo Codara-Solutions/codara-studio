@@ -32,6 +32,7 @@ function developmentVersion(): string {
 const THREAD_WORKERS: ReadonlyArray<{ entry: string; outfile: string }> = [
   { entry: "src/main/orchestration/workflow-sandbox-worker.ts", outfile: "workflow-sandbox-worker.js" },
   { entry: "src/main/usage-scan-worker.ts", outfile: "usage-scan-worker.js" },
+  { entry: "src/main/session-search/session-index-worker.ts", outfile: "session-index-worker.js" },
   { entry: "src/main/claude-follow/uninstall-entry.ts", outfile: "claude-follow-uninstall.js" },
 ];
 

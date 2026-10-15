@@ -103,7 +103,6 @@ async function main() {
     "spark-toast",
     "spark-backdrop-glass",
     "spark-overlay-surface",
-    "worker-session-surface",
     "spark-tabbar-picker",
     "settings-dialog-surface",
     "agent-capabilities-surface",
@@ -179,7 +178,7 @@ async function main() {
   // Dense dialogs and floating previews over live content take the read
   // tier, which has no lens, instead of the thin strong or menu recipe.
   for (const [parts, pattern] of [
-    [["components", "WorkerSessionPicker.tsx"], /className="spark-glass--strong spark-overlay-surface worker-session-surface"/],
+    [["components", "session-search", "SessionTranscriptDialog.tsx"], /className="ss-dialog ss-dialog--transcript spark-glass--strong spark-overlay-surface"/],
     [["components", "FileTree.tsx"], /aria-label="Confirm folder move"\s+className="spark-glass--strong spark-overlay-surface"/],
     [["components", "remote", "SshManagerDialog.tsx"], /className="spark-glass--strong spark-overlay-surface"/],
     [["components", "remote", "RemoteAuthPrompt.tsx"], /className="spark-glass--strong spark-overlay-surface"/],

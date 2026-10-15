@@ -186,13 +186,14 @@ async function loadPreviewTools(stubs) {
   assert.equal(shot.dataUrl, "data:image/png;base64,iVBORw0KGgo=");
   fs.rmSync(home, { recursive: true, force: true });
 
-  // A handler that runs commands, or writes what the user reads outside the
-  // tab (the workspace status in the rail), marks itself trustedRunsOnly, and
-  // the socket's imported pull-request gate refuses it without an edit there.
+  // A handler that runs commands, writes what the user reads outside the
+  // tab (the workspace status in the rail) or reads the person's past agent
+  // sessions marks itself trustedRunsOnly, and the socket's imported
+  // pull-request gate refuses it without an edit there.
   assert.deepEqual(
     tools.previewToolMethods().filter((method) => tools.previewToolRefusesUntrustedRuns(method)),
-    ["terminal.servers", "workspace.status"],
-    "only the dev-server tool starts commands, and only the workspace status writes the rail",
+    ["terminal.servers", "workspace.status", "session.search"],
+    "only the dev-server tool starts commands, only the workspace status writes the rail, only session search reads past sessions",
   );
   const flagged = await loadPreviewTools({
     servers: `module.exports = { serverTools: { "servers.start": { run: async () => ({}), scope: "none", trustedRunsOnly: true } } };`,

@@ -70,9 +70,8 @@ interface Props {
   onClose: (id: TabId) => void;
   onNewTerminal: () => void;
   onNewPreview: () => void;
-  // Open the worker session picker for a runtime: the picker lists this
-  // workspace's Claude / Codex history so a "+" row either starts a fresh
-  // worker or resumes (or deletes) an earlier session.
+  // Each starts a new session of that agent in its own terminal tab.
+  // Earlier sessions are resumed from the Sessions view of the rail.
   onNewClaudeWorker: () => void;
   onNewCodexWorker: () => void;
   onNewGrokWorker: () => void;
@@ -1062,9 +1061,6 @@ function TabBar({
                 onNewPreview();
               }}
             />
-            {/* Workers open the session picker rather than a bare terminal:
-                the same surface that starts a fresh agent also lists this
-                workspace's history so it can be resumed or deleted. */}
             <PickerSectionLabel label="Workers" />
             <PickerItem
               label="Claude worker"

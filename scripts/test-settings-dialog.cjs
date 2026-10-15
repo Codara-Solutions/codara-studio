@@ -91,7 +91,9 @@ check("every search result points at something the page renders", () => {
   const keepAwake = read(...components, "keep-awake", "KeepAwakeSettings.tsx");
   const quickCommands = read("src", "renderer", "src", "quick-commands", "QuickCommandsSettings.tsx");
   const keybindings = read("src", "renderer", "src", "shortcuts", "KeybindingsSection.tsx");
-  const rendered = [dialog, remote, behavior, chromeLink, keepInChrome, launchArgs, keepAwake, quickCommands, keybindings].join("\n");
+  const sessionSearch = read(...components, "session-search", "SessionSearchSettings.tsx");
+  const rendered = [dialog, remote, behavior, chromeLink, keepInChrome, launchArgs, keepAwake, quickCommands, keybindings, sessionSearch].join("
+");
   const cards = read(...components, "AccountCards.tsx");
   const families = read("src", "shared", "agent-families.ts");
   for (const [, tab, title] of entries) {

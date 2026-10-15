@@ -1421,6 +1421,14 @@ app.whenReady().then(async () => {
       logMain("git-auto-fetch", `failed to start: ${String(err)}`);
     });
 
+  // Agent session search: the local index of agent transcripts. Its first
+  // pass waits out the launch and runs on its own low-priority thread.
+  void import("./session-search/service")
+    .then((m) => m.startSessionSearch())
+    .catch((err) => {
+      logMain("session-search", `failed to start: ${String(err)}`);
+    });
+
   // "A teammate pushed" alerts, sourced from GitHub's Events API so the
   // pusher's identity is read rather than guessed from commit emails. Separate
   // from the fetcher above: that one keeps local git state fresh, this one
@@ -1744,6 +1752,9 @@ app.on("before-quit", (event) => {
       // session transcripts before any force-kill — fits comfortably inside
       // the 5s hard-exit fallback above. See disposeAllGraceful.
       await pty.disposeAllGraceful();
+      await import("./session-search/service")
+        .then((m) => m.stopSessionSearch())
+        .catch(() => undefined);
       fsWatcher.disposeAll();
       disposeAllConnections();
       // Close the hook RPC alongside ptys so any in-flight worker post (which

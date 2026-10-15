@@ -19,7 +19,6 @@ const card = read("src/renderer/src/components/AccountCard.tsx");
 const app = read("src/renderer/src/App.tsx");
 const tabs = read("src/renderer/src/tabs/useTabs.ts");
 const tabBar = read("src/renderer/src/tabs/TabBar.tsx");
-const picker = read("src/renderer/src/components/WorkerSessionPicker.tsx");
 const shortcutCommands = read("src/renderer/src/shortcuts/commands.ts");
 const terminalStack = read("src/renderer/src/tabs/TerminalStack.tsx");
 const session = read(
@@ -146,20 +145,16 @@ assert.doesNotMatch(
 );
 assert.match(tabBar, /workerRuntimes\.length > 1/);
 assert.match(tabBar, /<SplitAgentsMark runtimes=\{workerRuntimes\}/);
-assert.match(picker, /const \[selectedIndex, setSelectedIndex\] = useState\(-1\)/);
-assert.match(picker, /historyKeyboardArmedRef\.current = true/);
-assert.match(
-  picker,
-  /if \(!historyKeyboardArmedRef\.current \|\| !session\) \{\s*void launchNew\(\)/,
-);
 for (const [id, label, handler] of [
   ["worker.newGrok", "New Grok worker pane", "handleNewWorkerPane(GROK_LAUNCH_COMMAND)"],
-  ["worker.grokSessions", "Open Grok worker sessions…", 'openShortcutWorkerSessions("grok")'],
 ]) {
   assert.match(shortcutCommands, new RegExp(`\\| "${id}"`));
   assert.match(shortcutCommands, new RegExp(`id: "${id}"[\\s\\S]*?label: "${label}"`));
   assert.ok(app.includes(`"${id}": () => ${handler}`), `${id} must have an App handler`);
 }
+// No picker stands between a worker row or shortcut and a new session.
+assert.ok(!fs.existsSync(path.join(ROOT, "src/renderer/src/components/WorkerSessionPicker.tsx")));
+assert.doesNotMatch(shortcutCommands, /worker\.(claude|codex|grok)Sessions/);
 assert.match(
   app,
   /const launchWorkerInNewTerminalTab = useCallback\([\s\S]*?tabs\.newTerminalTab\(cwd, launchCommand/,
@@ -167,19 +162,24 @@ assert.match(
 );
 assert.match(
   app,
-  /const openTabBarWorkerSessions = useCallback\([\s\S]*?launchWorkerInNewTerminalTab\(command, \{ cwd, session \}\)/,
-  "tab-strip session resumes must use the new-tab launcher too",
+  /const launchNewWorkerTab = useCallback\([\s\S]*?launchWorkerInNewTerminalTab\(command, cwd \? \{ cwd \} : undefined\)/,
+  "the tab-strip worker rows start a new session in a new tab",
 );
-for (const runtime of ["claude", "codex", "grok"]) {
+for (const [runtime, command] of [
+  ["Claude", "CLAUDE_LAUNCH_COMMAND"],
+  ["Codex", "CODEX_LAUNCH_COMMAND"],
+  ["Grok", "GROK_LAUNCH_COMMAND"],
+  ["Pi", "PI_LAUNCH_COMMAND"],
+]) {
   assert.ok(
-    app.includes(`() => openTabBarWorkerSessions("${runtime}")`),
-    `the tab-strip ${runtime} row must use tab scope`,
+    app.includes(`() => launchNewWorkerTab(${command})`) && app.includes(`onNew${runtime}Worker={open${runtime}Worker}`),
+    `the tab-strip ${runtime} row must start a new session in its own tab`,
   );
 }
 assert.match(
   terminalStack,
-  /onOpenWorkerSessions: \(runtime\)[\s\S]*?splitRef\.current\(\s*tabId,\s*target\.paneId,\s*target\.direction,\s*command,\s*session/,
-  "the terminal-toolbar worker launcher must split inside its own tab",
+  /onPick=\{\(command\) => \{[\s\S]*?onSmartAdd\(command\)/,
+  "the terminal-toolbar worker launcher must add a pane inside its own tab",
 );
 
 // ---------------------------------------------------------------------------

@@ -21,6 +21,7 @@ import { inputPreviewTools } from "./input";
 import { insightPreviewTools } from "./insight";
 import { pointPreviewTools } from "./point";
 import { serverTools } from "./servers";
+import { sessionSearchTools } from "./session-search";
 import { workspaceStatusTools } from "./workspace-status";
 import { PreviewToolParamsError, type PreviewToolEntry, type PreviewToolHost, type PreviewToolTable } from "./types";
 
@@ -36,6 +37,7 @@ const TABLES: readonly PreviewToolTable[] = [
   pointPreviewTools,
   serverTools,
   workspaceStatusTools,
+  sessionSearchTools,
   chromeLinkTools,
 ];
 

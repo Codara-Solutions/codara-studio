@@ -4,7 +4,7 @@ import { digitFromEvent } from "../../shortcuts/bindings";
 import { IS_MAC } from "../../shortcuts/platform";
 import { RuntimeMark, type BrandRuntime } from "../BrandMarks";
 import FileNodeIcon from "../file-icons/LazyFileNodeIcon";
-import { GlobeIcon, PlusIcon } from "../icons";
+import { GlobeIcon, HistoryIcon, PlusIcon } from "../icons";
 import { WorkspaceIconGlyph } from "../workspace-icons";
 import {
   buildJumpEntries,
@@ -23,7 +23,8 @@ import {
 // that need you lead, then the most recently used. The first six rows answer
 // Mod+1 to Mod+6; Enter jumps to the selected one; a name nothing is called
 // offers a new worktree through the same path as the rail's "Create isolated
-// worktree". Same glass card and palette scrim as Quick Open.
+// worktree", and any typed text can be searched for in past agent sessions
+// (the rail's Sessions view). Same glass card and palette scrim as Quick Open.
 
 interface Props {
   sources: JumpSources;
@@ -34,11 +35,14 @@ interface Props {
   onClose: () => void;
   onJump: (target: JumpTarget) => void;
   onCreateWorktree: (name: string) => void;
+  /** Opens the rail's Sessions view on this query; absent hides the row. */
+  onSearchSessions?: (query: string) => void;
 }
 
 type Row =
   | { type: "entry"; id: string; ranked: RankedJumpEntry }
-  | { type: "create"; id: string; name: string };
+  | { type: "create"; id: string; name: string }
+  | { type: "sessions"; id: string; query: string };
 
 const DIGIT_ROWS = 6;
 const LIST_ID = "jump-palette-list";
@@ -73,6 +77,7 @@ export default function JumpPalette({
   onClose,
   onJump,
   onCreateWorktree,
+  onSearchSessions,
 }: Props) {
   // Rows are built once per opening: statuses and order stay put while the
   // user is choosing, so nothing moves under the pointer or the digit keys.
@@ -98,8 +103,11 @@ export default function JumpPalette({
     if (worktreeSource && name && shouldOfferWorktree(name, workspacesAtOpen)) {
       out.push({ type: "create", id: "create-worktree", name });
     }
+    const text = query.trim();
+    if (onSearchSessions && text) out.push({ type: "sessions", id: "search-sessions", query: text });
     return out;
-  }, [entries, query, workspacesAtOpen, worktreeSource]);
+  }, [entries, query, workspacesAtOpen, worktreeSource, onSearchSessions]);
+  const matched = rows.some((row) => row.type !== "sessions");
 
   useEffect(() => {
     const id = window.requestAnimationFrame(() => inputRef.current?.focus());
@@ -141,6 +149,12 @@ export default function JumpPalette({
     if (!row) return;
     if (row.type === "create") {
       onCreateWorktree(row.name);
+      return;
+    }
+    if (row.type === "sessions") {
+      // The Sessions view takes the keyboard.
+      chosenRef.current = true;
+      onSearchSessions?.(row.query);
       return;
     }
     chosenRef.current = true;
@@ -294,25 +308,24 @@ export default function JumpPalette({
           className="spark-quick-open__results"
           style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto", padding: 6 }}
         >
-          {rows.length === 0 ? (
+          {!matched ? (
             <div
               style={{ padding: "28px 16px", textAlign: "center", color: "var(--muted)", fontSize: 12 }}
             >
               {query.trim() ? `Nothing matches “${query.trim()}”` : "No workspaces yet"}
             </div>
-          ) : (
-            rows.map((row, index) => (
-              <JumpRow
-                key={row.id}
-                row={row}
-                index={index}
-                selected={index === selectedIndex}
-                worktreeSource={worktreeSource}
-                onHover={() => setSelectedIndex(index)}
-                onChoose={() => choose(row)}
-              />
-            ))
-          )}
+          ) : null}
+          {rows.map((row, index) => (
+            <JumpRow
+              key={row.id}
+              row={row}
+              index={index}
+              selected={index === selectedIndex}
+              worktreeSource={worktreeSource}
+              onHover={() => setSelectedIndex(index)}
+              onChoose={() => choose(row)}
+            />
+          ))}
         </div>
 
         <footer
@@ -359,7 +372,7 @@ function JumpRow({
       role="option"
       aria-selected={selected}
       data-jump-id={row.id}
-      data-jump-kind={entry ? entry.kind : "create"}
+      data-jump-kind={entry ? entry.kind : row.type}
       onMouseMove={selected ? undefined : onHover}
       onClick={onChoose}
       style={{
@@ -385,7 +398,15 @@ function JumpRow({
           justifyContent: "center",
         }}
       >
-        {entry ? <EntryIcon entry={entry} /> : <PlusIcon size={13} />}
+        {entry ? (
+          <EntryIcon entry={entry} />
+        ) : row.type === "sessions" ? (
+          <span style={{ display: "inline-flex", color: "var(--muted)" }}>
+            <HistoryIcon size={14} />
+          </span>
+        ) : (
+          <PlusIcon size={13} />
+        )}
       </span>
       <span style={{ flex: 1, minWidth: 0 }}>
         <span
@@ -405,6 +426,10 @@ function JumpRow({
             <>
               Create worktree <strong style={{ color: "var(--ink)" }}>{row.name}</strong>
             </>
+          ) : row.type === "sessions" ? (
+            <>
+              Search agent sessions for <strong style={{ color: "var(--ink)" }}>“{row.query}”</strong>
+            </>
           ) : null}
         </span>
         <span
@@ -420,7 +445,9 @@ function JumpRow({
         >
           {entry
             ? entry.detail
-            : `A new branch and workspace next to ${worktreeSource?.name ?? "this repository"}`}
+            : row.type === "sessions"
+              ? "What you and your agents said in past sessions"
+              : `A new branch and workspace next to ${worktreeSource?.name ?? "this repository"}`}
         </span>
       </span>
       {entry?.status ? (

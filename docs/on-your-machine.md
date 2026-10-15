@@ -41,6 +41,7 @@ a `spark-` prefix keep the product's old name for compatibility.
 | `logs/worktree-audit.jsonl` | One line for every worktree an agent created, removed or was refused, and every removal from the worktree cleanup screen (mode 0600): ids, paths, branches, commits and the reason, never tokens. Rotated once at 5 MB. |
 | `diagnostics/` | The freeze and crash record shown in Settings, About (files mode 0600). `hangs.jsonl` has one line for each time the main process stopped answering for 5 s or more: how long, whether it recovered, CPU and memory, the recent events, and the stack of the blocked JavaScript when it could be read; it is rotated once at 512 KB. `hang-pending.json` marks a freeze still under way, so one that ended in a quit or a crash is recorded at the next start. `breadcrumbs.json` and `breadcrumbs.previous.json` keep the last 200 notable log lines of this session and the one before. |
 | `crash-dumps/` | Crash reports (minidumps) that Electron's Crashpad writes when the app or one of its processes crashes. They hold process memory and never leave the computer: uploading is off. At most 20 reports and 64 MB are kept; the oldest go first. |
+| `session-index/sessions.sqlite` | The agent session search index (mode 0600, in a 0700 folder, with its `-wal` and `-shm` files): the text of your messages and the agents' replies in past Claude Code, Codex, Grok, Pi and Cora sessions, with each session's title, folder, model and times, and how far each transcript was read. No tool output. It is a cache: **Delete index** (Settings, Sessions) removes it and turns the search off. See [agent-session-search.md](./agent-session-search.md). |
 | `worktree-sizes.json` | The last measured size on disk of each worktree the cleanup screen listed (at most 2000), so it opens with sizes. Delete it to measure everything again. |
 
 ## How Codara sessions get its tools
@@ -111,6 +112,12 @@ session files of that folder in `~/.pi/agent/sessions/` (names and
 modification times, never their contents), so the pane can come back in the
 same Pi session when Codara reopens. It records the session id in
 `agent-session-starts.json`. Cora itself never reads `~/.pi`.
+
+With agent session search on (the default), Codara also reads the
+transcripts in `~/.claude/projects/`, `~/.codex/sessions/`,
+`~/.codex/archived_sessions/`, `~/.grok/sessions/` and `~/.pi/agent/sessions/`
+to build its search index, without changing them (see
+[agent-session-search.md](./agent-session-search.md)).
 
 For Codex panes, Codara also reads the session file Codex is writing
 (`~/.codex/sessions/.../rollout-*.jsonl`) from its end, looking only for the

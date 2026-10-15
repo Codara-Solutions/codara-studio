@@ -590,8 +590,8 @@ export interface TerminalSessionApi {
 // must not pull focus out of one: mounting a dialog over a pane can make that
 // pane "visible" again in React's terms, and grabbing focus back would send
 // the user's next arrow/Enter/Escape to the terminal underneath instead of to
-// the dialog they are looking at. Observed with the worker session picker,
-// which focuses itself on mount and then lost focus to the pane behind it.
+// the dialog they are looking at: a dialog that focuses itself on mount
+// would lose focus to the pane behind it.
 //
 // Every dialog in the app marks itself aria-modal, so this needs no registry
 // and no plumbing — and it self-clears, because the attribute goes away with

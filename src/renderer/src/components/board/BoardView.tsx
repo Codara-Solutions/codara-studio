@@ -2303,8 +2303,7 @@ function PencilIcon() {
   );
 }
 
-// Same trash glyph as WorkerSessionPicker's delete affordance, so "delete a
-// row/card" reads identically across the desktop surfaces.
+// The trash glyph for deleting a card.
 function TrashIcon() {
   return (
     <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>

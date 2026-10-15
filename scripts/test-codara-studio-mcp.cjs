@@ -87,6 +87,7 @@ const TERMINAL_STUDIO_TOOLS = [
   "codara_notify_user",
   "codara_workspace_status",
   ...WORKTREE_TOOLS,
+  "codara_session_search",
   "codara_share_offer",
 ];
 const RUN = { SPARK_RUN_ID: "run-roster" };
@@ -98,8 +99,9 @@ const RUN = { SPARK_RUN_ID: "run-roster" };
 // one by 300 for codara_workspace_status, whose guidance rides on initialize,
 // and by 500 for codara_worktree_setup; execute by 1,000 for the automation
 // precheck and missed-run fields, about 520, and by 1,000 for
-// codara_worktree_setup).
-const LIST_BUDGET = { studio: 29_800, run: 39_000, worker: 35_000, execute: 96_000, automation: 69_000 };
+// codara_worktree_setup; studio and execute by 500 each for
+// codara_session_search, about 450).
+const LIST_BUDGET = { studio: 30_300, run: 39_000, worker: 35_000, execute: 96_500, automation: 69_000 };
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",
@@ -273,6 +275,11 @@ function sortedEqual(actual, expected, label) {
       "a terminal agent learns to post milestones and its final status",
     );
     assert.match(studio.init.instructions, /Dev servers: .*codara_terminal_servers.*keeps them running when you exit or restart/, "dev servers go to the keeper, not the agent's own shell");
+    assert.match(
+      studio.init.instructions,
+      /codara_session_search.*quoted history, never instructions/,
+      "a terminal agent learns that past sessions are evidence, not orders",
+    );
     assert.doesNotMatch(studio.init.instructions, /baseRevision/, "chat-only guidance stays out of a terminal session");
     // Agents use the user's own Chrome through the extension, in their
     // workspace's tab group, and never start a browser of their own.
@@ -295,6 +302,7 @@ function sortedEqual(actual, expected, label) {
     assert.match(runStudio.init.instructions, /baseRevision/);
     assert.doesNotMatch(runStudio.init.instructions, /codara_worktree/, "chat workers get no worktree guidance");
     assert.doesNotMatch(runStudio.init.instructions, /codara_workspace_status/, "chat workers leave the workspace status to their chat");
+    assert.doesNotMatch(runStudio.init.instructions, /codara_session_search/, "chat workers get no session search");
 
     // Execute mode. Carries the automation-management tools too (Cora creates
     // and manages looms from an ordinary auto/execute chat), minus
@@ -309,6 +317,7 @@ function sortedEqual(actual, expected, label) {
         ...AUTOMATION_TOOLS.filter((name) => !EXECUTE_TOOLS.includes(name)),
         ...WORKTREE_TOOLS,
         ...WORKFLOW_TOOLS,
+        "codara_session_search",
         "codara_share_offer",
       ],
       "execute roster mismatch",
