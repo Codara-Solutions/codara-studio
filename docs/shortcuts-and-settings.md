@@ -250,7 +250,8 @@ whenever it cannot tell:
   and no command the agent started after it launched (the MCP servers it
   starts at launch do not count);
 - the pane is not pinned with **Keep awake** (the sun button in the pane's
-  toolbar, shown on agent panes).
+  toolbar, shown on agent panes);
+- no paired phone has the pane open (Remote Access).
 
 Cora's worker panes and phone panes never sleep. A sleeping pane that is
 still asleep when you quit counts as a running agent, so **Resume running

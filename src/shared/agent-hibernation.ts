@@ -51,6 +51,7 @@ export type AgentHibernationRefusal =
   | "in-flight"
   | "no-session"
   | "remote"
+  | "watched-on-phone"
   | "hidden-too-short"
   | "not-idle-long-enough"
   | "not-watched"

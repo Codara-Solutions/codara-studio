@@ -36,7 +36,7 @@ const harnessPlugin = (stubNotifier) => ({
     build.onResolve(
       {
         filter:
-          /^(electron|\.\/e2e-background|\.\/pty-manager|\.\/preferences-store|\.\/notify|\.\/agent-session-registry|\.\/orchestration\/usage-activity-refresh|\.\/owned-process-tree-stub)$/,
+          /^(electron|\.\/e2e-background|\.\/pty-manager|\.\/preferences-store|\.\/notify|\.\/agent-session-registry|\.\/orchestration\/usage-activity-refresh|\.\/owned-process-tree-stub|\.\/remote-access\/studio-terminal-share)$/,
       },
       (args) => ({ path: args.path, namespace: "stub" }),
     );
@@ -52,6 +52,11 @@ const harnessPlugin = (stubNotifier) => ({
         case "./preferences-store":
           return {
             contents: init + "export async function loadPreferences(){ return globalThis.__AH.prefs; }\n",
+            loader: "js",
+          };
+        case "./remote-access/studio-terminal-share":
+          return {
+            contents: "export function studioPaneWatchedFromPhone(){ return false; }\n",
             loader: "js",
           };
         case "./agent-session-registry":
@@ -268,6 +273,17 @@ async function main() {
   check("input that arrives while listing keeps it awake", r.result.reason === "not-idle-long-enough" && r.calls.stop.length === 0);
   r = await run((t) => { t.state.stopResult = false; });
   check("a stop that did not happen is reported", r.result.reason === "stop-failed");
+  r = await run((t) => { t.deps.watchedOnPhone = (paneId) => paneId === "pane-1"; });
+  check(
+    "a pane a paired phone has open stays awake without listing processes",
+    r.result.reason === "watched-on-phone" && r.calls.list === 0 && r.calls.stop.length === 0,
+    r.result,
+  );
+  r = await run((t) => {
+    let calls = 0;
+    t.deps.watchedOnPhone = () => (calls += 1) > 1;
+  });
+  check("a phone that opens the pane while processes are listed keeps it awake", r.result.reason === "watched-on-phone" && r.calls.stop.length === 0);
 
   {
     ah.resetAgentHibernationForTests();

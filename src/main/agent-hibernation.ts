@@ -6,7 +6,8 @@
 // knows which workspace is on screen, which panes are pinned awake and which
 // session each pane can resume. Main decides. It re-checks everything it can
 // see itself and stops the pane only when all of these hold:
-//   - the setting is on and the pane is a local PTY that still exists;
+//   - the setting is on and the pane is a local PTY that still exists, and
+//     no paired phone has it open (Remote Access);
 //   - the terminal agent notifier says the agent's turn ended, nothing is
 //     pending, it is not waiting on the user and no typed text is unsent;
 //   - nothing happened in the pane (input or output) for the idle period;
@@ -20,6 +21,7 @@ import type { IpcHandle } from "./ipc";
 import * as pty from "./pty-manager";
 import { loadPreferences } from "./preferences-store";
 import { terminalAgentHibernationEvidence, terminalPanePlacement } from "./terminal-agent-notify";
+import { studioPaneWatchedFromPhone } from "./remote-access/studio-terminal-share";
 import {
   classifyPaneProcessTree,
   listCensusProcesses,
@@ -61,6 +63,8 @@ export interface AgentHibernationDeps {
   terminalPids: (pane: { pid: number; ttyPath: string | null }) => Promise<number[] | null>;
   stop: (paneId: string, generationId: string) => Promise<boolean>;
   log: (line: string) => void;
+  // A paired phone has the pane open (Remote Access): it is on a screen.
+  watchedOnPhone?: (paneId: string) => boolean;
 }
 
 // e2e only: the suite cannot wait half an hour. Honored only when the app
@@ -92,6 +96,7 @@ const defaultDeps: AgentHibernationDeps = {
   terminalPids: (pane) => listPaneTerminalPids(pane),
   stop: (paneId, generationId) => pty.hibernate(paneId, generationId, STOP_GRACE_MS),
   log: (line) => console.log(`[agent-hibernation] ${line}`),
+  watchedOnPhone: (paneId) => studioPaneWatchedFromPhone(paneId),
 };
 
 const inFlight = new Set<string>();
@@ -142,6 +147,9 @@ function judgeNow(request: AgentHibernationRequest, deps: AgentHibernationDeps, 
   const session = deps.session(request.paneId);
   if (!session) return { ok: false, result: { ok: false, reason: "no-session" } };
   if (session.remote || !(session.pid > 0)) return { ok: false, result: { ok: false, reason: "remote" } };
+  if (deps.watchedOnPhone?.(request.paneId)) {
+    return { ok: false, result: { ok: false, reason: "watched-on-phone" } };
+  }
   const evidence = deps.evidence(request.paneId);
   const stateRefusal = judgeAgentEvidence(evidence, request.runtime);
   if (stateRefusal) return { ok: false, result: { ok: false, reason: stateRefusal } };
