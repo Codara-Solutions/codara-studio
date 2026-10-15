@@ -175,6 +175,33 @@ async function main() {
       { ok: true, text: "cd \"C:\\Users\\Me\\My Repo-1.2_x\"" },
       "an ordinary Windows folder with spaces is fine",
     );
+
+    // Outside double quotes the shell splits and expands: `rm -rf {cwd}/build`
+    // in "/work/My app" would remove /work/My, and "/{etc,home}" is two words.
+    const unquoted = { ok: false, variable: "cwd", reason: "unquoted" };
+    for (const value of ["/work/My app", "/work/a\u00a0b", "/w/*", "/w/a?", "/w/[ab]", "/{etc,home}", "/w/^x", "/w/x#", "/w/a~b", "C:\\a,C:\\b"]) {
+      assert.deepEqual(qc.expandQuickCommandText("rm -rf {cwd}/build", { cwd: value }, "shell"), unquoted, value);
+      assert.equal(qc.expandQuickCommandText("rm -rf \"{cwd}/build\"", { cwd: value }, "shell").ok, true, `${value} in double quotes`);
+    }
+    assert.equal(qc.expandQuickCommandText("cd \"$HOME\" && ls \"x/{cwd}\"", { cwd: "/w/My app" }, "shell").ok, true, "inside a longer quoted word");
+    assert.deepEqual(qc.expandQuickCommandText("echo \"a\" {cwd} \"b\"", { cwd: "/w/My app" }, "shell"), unquoted, "between two quoted words");
+    assert.deepEqual(qc.expandQuickCommandText("echo \"a\"{cwd}\"b\"", { cwd: "/w/My app" }, "shell"), unquoted, "between a closing and an opening quote");
+    assert.deepEqual(qc.expandQuickCommandText("echo '{cwd}'", { cwd: "/w/My app" }, "shell"), unquoted, "cmd.exe does not quote with single quotes");
+    assert.deepEqual(qc.expandQuickCommandText("echo '\"' {cwd}", { cwd: "/w/My app" }, "shell"), unquoted, "a double quote inside single quotes opens nothing");
+    assert.deepEqual(qc.expandQuickCommandText("echo \"a\\\" {cwd}", { cwd: "/w/My app" }, "shell"), unquoted, "a quote only a POSIX shell reads as escaped");
+    assert.deepEqual(qc.expandQuickCommandText("echo ^\"{cwd}\"", { cwd: "/w/My app" }, "shell"), unquoted, "a quote cmd.exe reads as escaped");
+    assert.equal(qc.expandQuickCommandText("echo \"a^\" \"{cwd}\"", { cwd: "/w/My app" }, "shell").ok, true, "a caret inside cmd.exe quotes is plain text");
+    assert.deepEqual(qc.expandQuickCommandText("echo \"{cwd}\" {cwd}", { cwd: "/w/My app" }, "shell"), unquoted, "every placeholder is checked");
+    assert.deepEqual(
+      qc.expandQuickCommandText("git push origin {branch} && cd {cwd}", { branch: "feat/x-1.2_y@z", cwd: "/work/app" }, "shell"),
+      { ok: true, text: "git push origin feat/x-1.2_y@z && cd /work/app" },
+      "a plain value needs no quotes",
+    );
+    assert.deepEqual(
+      qc.expandQuickCommandText("Review {cwd}", { cwd: "/work/My app" }, "prompt"),
+      { ok: true, text: "Review /work/My app" },
+      "a prompt takes spaces anywhere",
+    );
   });
 
   await check("terminal right-click: quick edit by default, Shift opens the menu", () => {

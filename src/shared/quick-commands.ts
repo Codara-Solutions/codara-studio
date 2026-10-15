@@ -193,9 +193,11 @@ export function moveQuickCommand(commands: readonly QuickCommand[], id: string, 
 //
 // {branch} and {cwd} fill in the git branch and the folder the command runs
 // in. "${branch}" is a shell variable and stays as written. In a shell
-// command a value is typed into the shell unquoted, so a value holding a
+// command a value is typed in as is, never escaped, so a value holding a
 // character that a shell (POSIX, PowerShell or cmd) would read as code is
-// refused instead of run; prompts are plain text and take any value.
+// refused instead of run, and so is one that would split into several words
+// where the command leaves the placeholder outside double quotes; prompts are
+// plain text and take any value.
 // Parentheses count: git allows them in branch names, PowerShell runs
 // `git push origin (calc)` as a subexpression, and zsh runs the code in a
 // glob qualifier such as `README.md(e+calc+)`. So does every control
@@ -209,6 +211,42 @@ export const QUICK_COMMAND_VARIABLES: readonly QuickCommandVariable[] = ["branch
 
 const VARIABLE_PATTERN = /(?<!\$)\{(branch|cwd)\}/g;
 const SHELL_UNSAFE = /[`$"';&|<>!%()\u0000-\u001f\u007f-\u009f]/;
+// Outside double quotes a shell also splits words and expands patterns, so a
+// value stays one plain argument only without whitespace, wildcards (`*?[]`,
+// and zsh's extended `^ # ~`), braces (`{etc,home}` is two words) or a comma
+// (an array in PowerShell). `rm -rf {cwd}/build` in "/work/My app" would
+// otherwise remove /work/My. Inside double quotes none of them matter.
+const UNQUOTED_UNSAFE = /[\s*?[\]{}^#~,]/;
+
+// The quoting rules of the shells a terminal may run: POSIX shells and fish
+// (backslash escapes, single quotes), PowerShell (backtick escapes, single
+// quotes) and cmd.exe (double quotes only, and a caret escapes outside
+// them). A placeholder counts as quoted only when every one of them reads it
+// inside double quotes.
+const QUOTING_RULES: ReadonlyArray<{ escape: string; escapeInDouble: boolean; single: boolean }> = [
+  { escape: "\\", escapeInDouble: true, single: true },
+  { escape: "`", escapeInDouble: true, single: true },
+  { escape: "^", escapeInDouble: false, single: false },
+];
+
+function insideDoubleQuotes(text: string, index: number): boolean {
+  return QUOTING_RULES.every(({ escape, escapeInDouble, single }) => {
+    let state: "none" | "single" | "double" = "none";
+    for (let i = 0; i < index; i += 1) {
+      const ch = text[i];
+      if (state === "single") {
+        if (ch === "'") state = "none";
+      } else if (ch === escape && (state === "none" || escapeInDouble)) {
+        i += 1;
+      } else if (ch === '"') {
+        state = state === "double" ? "none" : "double";
+      } else if (single && ch === "'" && state === "none") {
+        state = "single";
+      }
+    }
+    return state === "double";
+  });
+}
 
 export function quickCommandVariablesIn(text: string): Set<QuickCommandVariable> {
   const out = new Set<QuickCommandVariable>();
@@ -218,7 +256,8 @@ export function quickCommandVariablesIn(text: string): Set<QuickCommandVariable>
 
 export type QuickCommandExpansion =
   | { ok: true; text: string }
-  | { ok: false; variable: QuickCommandVariable; reason: "missing" | "unsafe" };
+  /** unquoted: fine inside double quotes, but outside them the shell would split or expand it. */
+  | { ok: false; variable: QuickCommandVariable; reason: "missing" | "unsafe" | "unquoted" };
 
 export function expandQuickCommandText(
   text: string,
@@ -229,6 +268,15 @@ export function expandQuickCommandText(
     const value = values[variable];
     if (!value) return { ok: false, variable, reason: "missing" };
     if (mode === "shell" && SHELL_UNSAFE.test(value)) return { ok: false, variable, reason: "unsafe" };
+  }
+  if (mode === "shell") {
+    for (const match of text.matchAll(VARIABLE_PATTERN)) {
+      const variable = match[1] as QuickCommandVariable;
+      const value = values[variable] ?? "";
+      if (UNQUOTED_UNSAFE.test(value) && !insideDoubleQuotes(text, match.index ?? 0)) {
+        return { ok: false, variable, reason: "unquoted" };
+      }
+    }
   }
   return {
     ok: true,

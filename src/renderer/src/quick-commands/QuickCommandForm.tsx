@@ -323,7 +323,7 @@ export default function QuickCommandForm({ initial, mode, repoOptions, onSave, o
 
       <p style={{ ...fieldHint, margin: 0 }}>
         {draft.kind === "shell"
-          ? "{branch} and {cwd} fill in the git branch and the folder it runs in. Put {cwd} in double quotes when the folder may contain spaces."
+          ? "{branch} and {cwd} fill in the git branch and the folder it runs in. Write \"{cwd}\" in double quotes: outside quotes, a folder with spaces stops the command."
           : "{branch} and {cwd} fill in the git branch and the folder of the terminal or workspace it goes to."}
       </p>
 

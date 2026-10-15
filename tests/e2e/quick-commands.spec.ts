@@ -8,8 +8,9 @@ import { delimiter, join } from "node:path";
 // Quick commands as the owner uses them: a saved shell command runs in the
 // focused terminal from the tab bar with {branch} filled in, the palette
 // (Mod+Shift+P) runs one in a new terminal, a prompt for the focused agent is
-// refused over a plain shell, a prompt for a new Claude Code reaches it once
-// it is ready, a command with Press Enter off never runs over an agent,
+// refused over a plain shell, {cwd} with a space is refused outside double
+// quotes, a prompt for a new Claude Code reaches it once it is ready, a
+// command with Press Enter off never runs over an agent,
 // Shift+right-click opens the terminal menu, Settings adds, reorders, edits,
 // deletes and restores commands and swaps the right-click, and the edit
 // dialog hands focus back and asks before it deletes.
@@ -44,7 +45,7 @@ test("quick commands run from the tab bar, the palette and the terminal menu", a
     await page.getByRole("button", { name: "Quick commands", exact: true }).click();
     const menu = page.getByRole("menu", { name: "Quick commands" });
     await expect(menu).toBeVisible();
-    await expect(menu.getByText("This repository · workspace", { exact: true })).toBeVisible();
+    await expect(menu.getByText("This repository · my repo", { exact: true })).toBeVisible();
     await expect(menu.getByText("All workspaces", { exact: true })).toBeVisible();
     await expect(menu.locator('[data-quick-command="qc-repo"]')).toBeVisible();
     await expect(menu.locator('[data-quick-command="qc-elsewhere"]')).toHaveCount(0);
@@ -79,13 +80,20 @@ test("quick commands run from the tab bar, the palette and the terminal menu", a
     await expect(palette.getByRole("option").first()).toHaveAttribute("data-quick-command", "qc-new");
     await page.keyboard.press("Enter");
     await expect(palette).toHaveCount(0);
-    await expect.poll(() => readText(join(fixture.workspaceDir, "qc-new.txt")), { timeout: 20_000 }).toMatch(/\/workspace\n$/);
+    await expect.poll(() => readText(join(fixture.workspaceDir, "qc-new.txt")), { timeout: 20_000 }).toMatch(/\/my repo\n$/);
 
     // A prompt for the focused agent is never typed into a plain shell.
     await openPalette();
     await page.keyboard.type("ask focused");
     await page.keyboard.press("Enter");
     await expect(page.locator(".spark-toast", { hasText: "No agent in the focused terminal" })).toBeVisible({ timeout: 10_000 });
+
+    // {cwd} outside double quotes, in a folder with a space: the shell would
+    // split it into two words, so the command stops with a notice.
+    await openPalette();
+    await page.keyboard.type("unquoted folder");
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".spark-toast", { hasText: 'Write "{cwd}" in double quotes' })).toBeVisible({ timeout: 10_000 });
 
     // A prompt for a new Claude Code waits for it to be ready, then sends.
     await openPalette();
@@ -101,6 +109,7 @@ test("quick commands run from the tab bar, the palette and the terminal menu", a
     await expect(page.locator(".spark-toast", { hasText: '"Draft marker" was not typed' })).toBeVisible({ timeout: 10_000 });
     await page.waitForTimeout(2_500);
     expect(await readText(join(fixture.workspaceDir, "qc-draft.txt"))).toBe("");
+    expect(await readText(join(fixture.workspaceDir, "qc-unquoted.txt"))).toBe("");
     expect(await readText(fixture.capture)).not.toContain("qc-draft");
 
     // Add from the tab bar menu: the dialog saves with Mod+Enter.
@@ -227,7 +236,8 @@ async function prepareFixture(): Promise<Fixture> {
     root,
     userHome: join(root, "home"),
     codaraHome: join(root, "codara-home"),
-    workspaceDir: join(root, "workspace"),
+    // A space in the folder, as on many macOS and Windows machines.
+    workspaceDir: join(root, "my repo"),
     binDir: join(root, "bin"),
     capture: join(root, "claude-input.txt"),
   };
@@ -292,6 +302,7 @@ async function prepareFixture(): Promise<Fixture> {
           shell("qc-focused", "Write marker", 'echo "{branch}" > qc-focused.txt'),
           shell("qc-draft", "Draft marker", "echo draft > qc-draft.txt", { submit: false }),
           shell("qc-new", "New terminal marker", "pwd > qc-new.txt", { target: "new" }),
+          shell("qc-unquoted", "Unquoted folder", "echo {cwd} > qc-unquoted.txt"),
           prompt("qc-ask-focused", "Ask focused agent", "Explain {branch}"),
           prompt("qc-ask-claude", "Ask Claude", "Summarize {branch}", { target: "new" }),
           shell("qc-repo", "Repo only", "true", { scope: { type: "repo", repo: fixture.workspaceDir } }),

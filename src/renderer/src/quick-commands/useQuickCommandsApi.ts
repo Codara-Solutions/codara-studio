@@ -85,13 +85,25 @@ function warn(title: string, body = ""): void {
   emitLocalToast(title, body, "warning");
 }
 
-function variableProblem(command: QuickCommand, variable: QuickCommandVariable, reason: "missing" | "unsafe", folder: string | null): void {
+function variableProblem(
+  command: QuickCommand,
+  variable: QuickCommandVariable,
+  reason: "missing" | "unsafe" | "unquoted",
+  folder: string | null,
+): void {
   if (reason === "missing") {
     warn(
       variable === "branch" ? "No git branch here" : "No folder for {cwd}",
       variable === "branch"
         ? `"${command.label}" uses {branch}, and ${folder ?? "this folder"} is not on a git branch.`
         : `"${command.label}" uses {cwd}, and this terminal has no known folder.`,
+    );
+    return;
+  }
+  if (reason === "unquoted") {
+    warn(
+      `"${command.label}" did not run`,
+      `The {${variable}} value has spaces or wildcard characters. Write "{${variable}}" in double quotes in the command.`,
     );
     return;
   }
