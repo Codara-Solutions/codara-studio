@@ -143,8 +143,12 @@ export default function JumpPalette({
       onCreateWorktree(row.name);
       return;
     }
-    chosenRef.current = true;
-    onJump(row.ranked.entry.target);
+    const { target, current } = row.ranked.entry;
+    // The jump places the keyboard in a tab or pane, and a switch hands it to
+    // the workspace shown next. The row of the workspace already on screen
+    // does neither, so the keyboard goes back to where it was.
+    chosenRef.current = Boolean(target.tabId) || !current;
+    onJump(target);
   };
 
   const move = (delta: number) => {
@@ -153,7 +157,18 @@ export default function JumpPalette({
     setSelectedIndex((index) => (index + delta + rows.length) % rows.length);
   };
 
+  // Page Up and Page Down stop at the first and last rows instead of wrapping.
+  const moveTo = (index: number) => {
+    if (rows.length === 0) return;
+    keyboardMoveRef.current = true;
+    setSelectedIndex(Math.max(0, Math.min(rows.length - 1, index)));
+  };
+
   const onKeyDown = (event: React.KeyboardEvent) => {
+    // An input method composing text (Japanese, Chinese, Korean) uses Enter,
+    // Escape and the arrows itself: Enter there confirms the characters and
+    // must not open a row or create a worktree from half a name.
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     const primary = IS_MAC ? event.metaKey : event.ctrlKey;
     const otherPrimary = IS_MAC ? event.ctrlKey : event.metaKey;
     if (primary && !otherPrimary && !event.altKey && !event.shiftKey) {
@@ -180,11 +195,11 @@ export default function JumpPalette({
         return;
       case "PageDown":
         event.preventDefault();
-        move(Math.min(8, Math.max(1, rows.length - 1 - selectedIndex)));
+        moveTo(selectedIndex + 8);
         return;
       case "PageUp":
         event.preventDefault();
-        move(-Math.min(8, selectedIndex));
+        moveTo(selectedIndex - 8);
         return;
       case "Enter":
         event.preventDefault();

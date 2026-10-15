@@ -488,6 +488,12 @@ function checkWiring() {
   assert.match(read("src/renderer/src/components/Terminal/TerminalPane.tsx"), /data-pane-id=\{sessionId\}/);
   assert.match(read("src/renderer/src/tabs/EditorStack.tsx"), /data-tab-content=\{t\.id\}/);
   assert.match(read("src/renderer/src/tabs/PreviewStack.tsx"), /data-tab-content=\{t\.id\}/);
+  // Enter that confirms an input method's characters opens nothing.
+  assert.match(
+    read("src/renderer/src/components/jump/JumpPalette.tsx"),
+    /if \(event\.nativeEvent\.isComposing \|\| event\.keyCode === 229\) return;/,
+    "the palette must leave keys to an input method that is composing",
+  );
   // UI copy: no em or en dashes in the new surfaces.
   for (const file of [
     "src/renderer/src/components/jump/JumpPalette.tsx",

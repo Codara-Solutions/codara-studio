@@ -135,10 +135,17 @@ export function useWorkspaceJump(options: UseWorkspaceJumpOptions): WorkspaceJum
   const pendingTabRef = useRef<JumpTarget | null>(null);
   useEffect(() => {
     const pending = pendingTabRef.current;
-    if (!pending?.tabId || pending.workspaceId !== options.tabsWorkspaceId) return;
+    if (!pending?.tabId) return;
+    // Another workspace came on screen before this one's layout loaded: that
+    // jump is over, and a later visit must not select its tab out of the blue.
+    if (pending.workspaceId !== options.activeWorkspaceId) {
+      pendingTabRef.current = null;
+      return;
+    }
+    if (pending.workspaceId !== options.tabsWorkspaceId) return;
     pendingTabRef.current = null;
     selectTab({ ...pending, tabId: pending.tabId });
-  }, [options.tabsWorkspaceId, selectTab]);
+  }, [options.activeWorkspaceId, options.tabsWorkspaceId, selectTab]);
 
   const jumpTo = useCallback((target: JumpTarget) => {
     const current = latest.current;
