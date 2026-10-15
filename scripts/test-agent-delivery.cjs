@@ -115,6 +115,25 @@ const PNG = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
     );
     assert.equal(fs.readdirSync(inboxRoot).length, before, "no folder was created for a refused send");
 
+    // A pane whose agent sleeps (agent hibernation) has no process to read a
+    // paste: the send is refused before any file is written, not reported as
+    // pasted. The inbox, which the agent pulls from once awake, still takes it.
+    {
+      const asleep = fakeDeps();
+      asleep.deps.paneAsleep = (paneId) => paneId === "pane-b";
+      const sleepy = lib.createAgentDelivery(asleep.deps);
+      await assert.rejects(
+        sleepy.deliver({ workspaceId: "ws-1", target: { kind: "pane", paneId: "pane-b" }, text: "x", attachments: [{ name: "a.txt", data: "eA==" }], source: "picker" }),
+        (error) => error instanceof lib.AgentDeliveryError && /asleep/.test(error.message),
+      );
+      assert.equal(asleep.log.length, 0, "nothing was pasted into the sleeping pane");
+      assert.equal(fs.readdirSync(inboxRoot).length, before, "no folder was created for the refused send");
+      const queued = await sleepy.deliver({ workspaceId: "ws-1", target: { kind: "inbox", paneId: "pane-b" }, text: "for later", source: "picker" });
+      assert.equal(queued.outcome, "queued", "the inbox still takes a send for a sleeping pane");
+      const awake = await sleepy.deliver({ workspaceId: "ws-1", target: { kind: "pane", paneId: "pane-a" }, text: "y", source: "picker" });
+      assert.equal(awake.outcome, "pasted", "an awake pane still gets the paste");
+    }
+
     // A chat: the bare message, files as attachments of the right kind.
     const source = path.join(HOME, "notes.txt");
     fs.writeFileSync(source, "hello");

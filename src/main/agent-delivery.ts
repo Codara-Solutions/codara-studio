@@ -32,6 +32,11 @@ export class AgentDeliveryError extends Error {}
 export interface AgentDeliveryDeps {
   /** The workspace a live pane belongs to, or null when no such pane is open. */
   paneWorkspace(paneId: string): Promise<string | null>;
+  /**
+   * The pane's agent is asleep (agent hibernation): no process would read a
+   * paste, so it is refused rather than reported as pasted.
+   */
+  paneAsleep?(paneId: string): boolean;
   pasteIntoPane(paneId: string, text: string, submit: boolean): Promise<void>;
   runWorkspace(runId: string): Promise<string | null>;
   addChatMessage(runId: string, text: string, attachments: { sourcePath: string; name: string; kind: "image" | "file" }[]): Promise<void>;
@@ -170,6 +175,9 @@ export function createAgentDelivery(deps: AgentDeliveryDeps): AgentDelivery {
       if (target?.kind === "pane") {
         if (await deps.paneWorkspace(target.paneId) !== workspaceId) {
           throw new AgentDeliveryError("That terminal is closed or belongs to another workspace.");
+        }
+        if (deps.paneAsleep?.(target.paneId)) {
+          throw new AgentDeliveryError("That agent is asleep. Open its pane to wake it, then send again.");
         }
       } else if (target?.kind === "chat") {
         if (await deps.runWorkspace(target.runId) !== workspaceId) {

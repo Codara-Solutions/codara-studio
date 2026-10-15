@@ -482,7 +482,7 @@ import { registerCaptureIpc } from "./browser/capture/ipc";
 import { registerChromeLinkIpc } from "./browser/chrome";
 import { registerPointIpc } from "./browser/point";
 import { registerServersIpc } from "./servers";
-import { registerAgentHibernationIpc } from "./agent-hibernation";
+import { agentPaneAsleep, registerAgentHibernationIpc } from "./agent-hibernation";
 
 function nativeCliAccountRuntimeFromIpc(value: unknown): NativeCliAccountRuntime {
   if (value === "claude" || value === "codex" || value === "grok") return value;
@@ -3047,7 +3047,11 @@ export function registerIpc(): void {
   // or queued for an agent to pull. Each send carries its own workspace; the
   // service refuses a pane or chat that belongs to another one.
   handle("agent:deliver", async (_e, request: AgentDeliveryRequest): Promise<AgentDeliveryResult> => {
-    if (request?.target?.kind === "pane") await awaitPendingSpawn(request.target.paneId);
+    // A sleeping agent's pane spawns only when the user opens it: no point
+    // waiting for it, the service refuses the send right away.
+    if (request?.target?.kind === "pane" && !agentPaneAsleep(request.target.paneId)) {
+      await awaitPendingSpawn(request.target.paneId);
+    }
     return agentDelivery().deliver(request);
   });
   handle("agent:inboxPending", async (_e, args: { workspaceId: string; paneId?: string | null }): Promise<number> =>

@@ -9,6 +9,7 @@ import { realpath } from "node:fs/promises";
 import { isAbsolute, relative } from "node:path";
 
 import { installAgentDelivery, resolvePaneWorkspace, type PaneWorkspaceEntry } from "./agent-delivery";
+import { agentPaneAsleep } from "./agent-hibernation";
 import { assertAllowedReadPathResolved } from "./fs-sandbox";
 import * as pty from "./pty-manager";
 import { noteTerminalUserInput, terminalAgentStateSnapshot } from "./terminal-agent-notify";
@@ -29,6 +30,7 @@ export function registerAgentDelivery(): void {
         () => requestTerminalOp<PaneWorkspaceEntry[]>("panes", {}, { timeoutMs: 5_000 }),
       );
     },
+    paneAsleep: (paneId) => agentPaneAsleep(paneId),
     async pasteIntoPane(paneId, text, submit) {
       pty.inject(paneId, text, { submit });
       // An unsubmitted paste is only text in the prompt; a submitted one starts a turn.
