@@ -13,6 +13,9 @@
 //      pane wraps, and the Codex screen mirror lays rows out the same way.
 //   3. The renderer switches tables before anything is written into a pane,
 //      and keeps WebGL glyph rescaling on.
+//   4. Ctrl or Cmd+click file links underline the cells a path is drawn in,
+//      also after an emoji or CJK character, where a string position and a
+//      cell column part ways.
 //
 //   node scripts/test-terminal-unicode-width.cjs
 
@@ -118,6 +121,53 @@ async function main() {
   const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8"));
   assert.ok(pkg.dependencies["@xterm/addon-unicode11"], "the add-on ships with the app, main uses it at runtime");
   console.log("ok 3 panes switch tables before their first write");
+
+  // 4. File links underline the cells the path is drawn in. The matcher finds
+  //    paths by string position; after an emoji or CJK character that is no
+  //    longer the cell column (a check mark is one code unit and two cells,
+  //    a rocket two and two, a CJK character one and two).
+  const { createFileLinkProvider, cellColumnsOfRow } = await bundle(
+    dir,
+    "src/renderer/src/components/Terminal/file-link-provider.ts",
+    "file-links",
+  );
+  const linkRanges = async (text) => {
+    const term = new Terminal({ cols: 60, rows: 4, allowProposedApi: true });
+    applyUnicode11Widths(term);
+    await new Promise((resolve) => term.write(text, resolve));
+    const provider = createFileLinkProvider(term, {
+      getCwd: () => "/work",
+      resolveExisting: async (target) => `/work/${target}`,
+      onActivate: () => undefined,
+    });
+    const links = await new Promise((resolve) => provider.provideLinks(1, resolve));
+    term.dispose();
+    return (links ?? []).map((link) => [link.text, link.range.start.x, link.range.end.x]);
+  };
+  // "src/a.ts:3" is ten characters; 1-based inclusive cell columns.
+  assert.deepEqual(await linkRanges("src/a.ts:3 done"), [["src/a.ts:3", 1, 10]], "plain ASCII");
+  assert.deepEqual(await linkRanges("✅ src/a.ts:3"), [["src/a.ts:3", 4, 13]], "after a check mark");
+  assert.deepEqual(await linkRanges("\u{1F680} src/a.ts:3"), [["src/a.ts:3", 4, 13]], "after a rocket");
+  assert.deepEqual(await linkRanges("世界 src/a.ts:3"), [["src/a.ts:3", 6, 15]], "after two CJK characters");
+  assert.deepEqual(
+    await linkRanges("❌ ./b.ts ✅ src/a.ts"),
+    [["./b.ts", 4, 9], ["src/a.ts", 14, 21]],
+    "every match on the row shifts by the wide characters before it",
+  );
+  // A wide character inside the path is underlined across both its cells.
+  assert.deepEqual(await linkRanges("/w/世.ts x"), [["/w/世.ts", 1, 8]], "a CJK file name");
+  {
+    // The column map is built the way xterm builds the row's text.
+    const term = new Terminal({ cols: 12, rows: 2, allowProposedApi: true });
+    applyUnicode11Widths(term);
+    await new Promise((resolve) => term.write("a✅b\u{1F680}c", resolve));
+    const line = term.buffer.active.getLine(0);
+    const columns = cellColumnsOfRow(line);
+    assert.equal(columns.length, line.translateToString(false).length + 1);
+    assert.deepEqual(columns.slice(0, 7), [0, 1, 3, 4, 4, 6, 7], "a, check, b, rocket (two units), c, then a blank cell");
+    term.dispose();
+  }
+  console.log("ok 4 file links land on the cells after wide characters");
 }
 
 main().catch((error) => {
