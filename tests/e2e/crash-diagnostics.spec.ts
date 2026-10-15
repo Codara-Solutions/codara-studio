@@ -11,8 +11,10 @@ import { inflateRawSync } from "node:zlib";
 // freeze with the blocking function's stack; a throwaway hidden renderer is
 // crashed and Crashpad writes its minidump into the Codara home, uploads
 // off; Settings > About then shows both, and Export diagnostics writes a
-// zip whose log has the planted secrets removed. Runs in a temp HOME and
-// Codara home; the save dialog is answered in the main process.
+// zip whose log has the planted secrets removed. Last, the GPU process,
+// which Chromium launches before `ready`, is crashed and leaves a minidump
+// too. Runs in a temp HOME and Codara home; the save dialog is answered in
+// the main process.
 
 const PLANTED_EMAIL = "ann.tester@example.com";
 const PLANTED_TOKEN = "sk-ant-api03-PlantedTokenForTheSpec_0123456789";
@@ -107,7 +109,12 @@ test("a freeze and a crash are recorded, shown in About and exported without sec
     expect(dumps[0].path).toMatch(/\.dmp$/);
     const system = JSON.parse(files.get("system.json")!);
     expect(system.versions.electron).toBeTruthy();
-    expect(system.blackBox).toMatchObject({ freezeWatchdog: true, crashReporter: true, eventLoopProbe: true });
+    expect(system.blackBox).toMatchObject({
+      freezeWatchdog: true,
+      crashReporter: true,
+      crashReporterBeforeReady: true,
+      eventLoopProbe: true,
+    });
 
     // Settings search finds the export.
     await page.keyboard.press(process.platform === "darwin" ? "Meta+F" : "Control+F");
@@ -115,6 +122,16 @@ test("a freeze and a crash are recorded, shown in About and exported without sec
     await expect(
       settings.getByRole("listbox", { name: "Matching settings" }).locator('[data-search-result="Export diagnostics"]'),
     ).toBeVisible();
+
+    // The GPU process was launched before `ready`; Crashpad watches it only
+    // because it started before then. The app reloads its window afterwards.
+    const dumpsBefore = listDumps(dumpsDir).length;
+    await app.evaluate(({ BrowserWindow }) => {
+      const probe = new BrowserWindow({ show: false });
+      void probe.loadURL("chrome://gpucrash").catch(() => undefined);
+      setTimeout(() => probe.destroy(), 3_000);
+    });
+    await expect.poll(() => listDumps(dumpsDir).length, { timeout: 20_000 }).toBeGreaterThan(dumpsBefore);
   } finally {
     await app?.close().catch(() => undefined);
     await rm(root, { recursive: true, force: true }).catch(() => undefined);

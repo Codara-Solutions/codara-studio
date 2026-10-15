@@ -6,7 +6,8 @@
 //   answering and records its stack, CPU and breadcrumbs;
 // - event-loop-probe.ts: event-loop delay in main.log;
 // - Electron's crashReporter, uploads off, dumps in <codaraHome>/crash-dumps
-//   under a size cap (crash-dumps.ts);
+//   under a size cap (crash-dumps.ts), started before `ready` when it can be
+//   (startCrashReporterEarly);
 // - "Export diagnostics" in Settings > About: a redacted zip saved where the
 //   user picks (export-bundle.ts, redact.ts, zip.ts).
 //
@@ -14,7 +15,7 @@
 // starting: every step is best effort and logs its own failure.
 
 import { app, BrowserWindow, crashReporter, dialog, shell, type WebContents } from "electron";
-import { mkdirSync, promises as fs, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, promises as fs, realpathSync } from "node:fs";
 import * as inspector from "node:inspector";
 import * as os from "node:os";
 import { basename, join } from "node:path";
@@ -41,7 +42,9 @@ export function crashDumpsDir(home: string = codaraHome()): string {
 }
 
 let started = false;
+let crashReporterTried = false;
 let crashReporterOn = false;
+let crashReporterBeforeReady = false;
 let pruneTimer: NodeJS.Timeout | null = null;
 let lastExportPath: string | null = null;
 
@@ -50,7 +53,10 @@ const describe = (value: unknown): string => {
   return typeof value === "string" ? value : JSON.stringify(value) ?? String(value);
 };
 
+// Crashpad cannot be started twice, and a failed start is not retried.
 function startCrashReporter(home: string): boolean {
+  if (crashReporterTried) return crashReporterOn;
+  crashReporterTried = true;
   if (process.env.CODARA_CRASH_REPORTER?.trim() === "0") return false;
   const dir = crashDumpsDir(home);
   try {
@@ -71,6 +77,25 @@ function startCrashReporter(home: string): boolean {
   stopCrashpadHandlerOnAppImageExit();
   scheduleCrashDumpPrune(0);
   return true;
+}
+
+/**
+ * Crashpad only watches the processes launched after it starts, and Chromium
+ * launches its GPU and network processes before `ready`. index.ts calls this
+ * at load, once it holds the single-instance lock. On a first run the Codara
+ * home does not exist yet, and creating it this early would stop
+ * codara-home.ts from moving a legacy home into place; startDiagnostics then
+ * starts the reporter instead, after ensureCodaraHomeSync.
+ */
+export function startCrashReporterEarly(): void {
+  try {
+    const home = codaraHome();
+    if (!existsSync(home)) return;
+    crashReporterOn = startCrashReporter(home);
+    crashReporterBeforeReady = crashReporterOn;
+  } catch (error) {
+    logMain("crash", `crash reports could not start early: ${describe(error)}`);
+  }
 }
 
 function scheduleCrashDumpPrune(delayMs = 5_000): void {
@@ -107,7 +132,8 @@ function watchProcessDeaths(): void {
 
 /**
  * Call once the Codara home exists (after ensureCodaraHomeSync) and before
- * the first window opens, so Crashpad watches every renderer.
+ * the first window opens, so Crashpad watches every renderer even when
+ * startCrashReporterEarly could not start it.
  */
 export function startDiagnostics(): void {
   if (started) return;
@@ -195,6 +221,7 @@ function systemInfo(): Record<string, unknown> {
     blackBox: {
       freezeWatchdog: hangWatchdogRunning(),
       crashReporter: crashReporterOn,
+      crashReporterBeforeReady,
       eventLoopProbe: eventLoopProbeRunning(),
       crashDumpsFolder: crashDumpsDir(),
     },

@@ -338,7 +338,8 @@ AppImage crash handler, event loop windows), `test-diagnostics-export`
 (redaction, the zip writer, checked with `unzip -t` and Python's zipfile when
 they are installed, and the exported bundle of a fake home). The built app is
 covered end to end by `tests/e2e/crash-diagnostics.spec.ts`: a real freeze,
-a real renderer crash, Settings, About and the export.
+a real renderer crash, a real GPU process crash (launched before `ready`, so
+it proves Crashpad starts early), Settings, About and the export.
 
 ### Remote access (phone) and SSH workspaces
 
