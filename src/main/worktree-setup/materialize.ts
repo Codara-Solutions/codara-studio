@@ -1,0 +1,424 @@
+// Puts the main checkout's ignored files into a new worktree: links first,
+// then copies. Every write stays inside the worktree, nothing is overwritten,
+// no symbolic link is followed out of the repository, and the copy stops at a
+// size and file-count budget.
+//
+// Copies ask for a copy-on-write clone (fs.copyFile with COPYFILE_FICLONE):
+// a reflink on Linux file systems that have them (Btrfs, XFS), a clonefile on
+// APFS through libuv's copyfile(3), and a plain copy anywhere else.
+
+import { constants as fsConstants, promises as fsp } from "node:fs";
+import { dirname, join, relative as relativePath, resolve, sep } from "node:path";
+import type { WorktreeSetupSkip } from "@shared/worktree-setup";
+import { assertCodaraOwnedWrite } from "../outside-write-guard";
+import type { SetupManifest, SetupManifestCopy, SetupManifestLink } from "./links";
+import { gitWithInput, ignoredSubset, type CopyCandidate } from "./plan";
+
+export interface CopyBudget {
+  bytes: number;
+  entries: number;
+}
+
+export const DEFAULT_COPY_BUDGET: CopyBudget = { bytes: 1024 * 1024 * 1024, entries: 20_000 };
+
+export interface MaterializeInput {
+  sourceRoot: string;
+  worktreeRoot: string;
+  copies: readonly CopyCandidate[];
+  links: readonly string[];
+  budget?: CopyBudget;
+  platform?: NodeJS.Platform;
+  log(line: string): void;
+  stopped?(): boolean;
+}
+
+export interface MaterializeResult {
+  copied: string[];
+  copiedFiles: SetupManifestCopy[];
+  copiedBytes: number;
+  // Relative links inside copied folders, recreated as they were.
+  copiedLinks: SetupManifestLink[];
+  linked: SetupManifestLink[];
+  skipped: WorktreeSetupSkip[];
+  warnings: string[];
+}
+
+const EXCLUDE_MARKER = "# Folders Codara Studio links into worktrees (see .codara/worktree.json)";
+
+function isAtOrUnder(candidate: string, dir: string): boolean {
+  return candidate === dir || candidate.startsWith(dir.endsWith(sep) ? dir : `${dir}${sep}`);
+}
+
+function under(path: string, folder: string): boolean {
+  return path === folder || path.startsWith(`${folder}/`);
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
+}
+
+/**
+ * Makes sure every folder above `relative` exists in the worktree as a real
+ * folder, creating missing ones. Refuses when one of them is a link or a
+ * file, so nothing can be written through a link into another place.
+ */
+async function ensureParentFolders(root: string, relative: string): Promise<boolean> {
+  const parts = relative.split("/");
+  let current = root;
+  for (let i = 0; i < parts.length - 1; i += 1) {
+    current = join(current, parts[i]);
+    const stat = await fsp.lstat(current).catch(() => null);
+    if (stat) {
+      if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+      continue;
+    }
+    try {
+      assertCodaraOwnedWrite(current);
+      await fsp.mkdir(current);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") return false;
+      const again = await fsp.lstat(current).catch(() => null);
+      if (!again?.isDirectory() || again.isSymbolicLink()) return false;
+    }
+  }
+  return true;
+}
+
+/** The real path of `absolute` when it is inside the repository and not in its .git; else null. */
+async function realInside(root: string, absolute: string): Promise<string | null> {
+  const real = await fsp.realpath(absolute).catch(() => null);
+  if (!real || !isAtOrUnder(real, root)) return null;
+  const rel = relativePath(root, real).split(sep);
+  if (rel.includes(".git")) return null;
+  return real;
+}
+
+interface Measure {
+  bytes: number;
+  entries: number;
+  over: boolean;
+}
+
+/** Size and entry count of a copy source, stopping once past `limit`. */
+async function measure(path: string, limit: CopyBudget, skip: (abs: string) => boolean): Promise<Measure> {
+  const total: Measure = { bytes: 0, entries: 0, over: false };
+  const visit = async (absolute: string): Promise<void> => {
+    if (total.over) return;
+    const stat = await fsp.lstat(absolute).catch(() => null);
+    if (!stat) return;
+    total.entries += 1;
+    if (stat.isFile()) total.bytes += stat.size;
+    if (total.entries > limit.entries || total.bytes > limit.bytes) {
+      total.over = true;
+      return;
+    }
+    if (!stat.isDirectory()) return;
+    const children = await fsp.readdir(absolute).catch(() => [] as string[]);
+    for (const child of children) {
+      if (child === ".git") continue;
+      const next = join(absolute, child);
+      if (skip(next)) continue;
+      await visit(next);
+      if (total.over) return;
+    }
+  };
+  await visit(path);
+  return total;
+}
+
+export async function materializeSetup(input: MaterializeInput): Promise<MaterializeResult> {
+  const sourceRoot = input.sourceRoot;
+  const worktreeRoot = input.worktreeRoot;
+  const platform = input.platform ?? process.platform;
+  const budget = input.budget ?? DEFAULT_COPY_BUDGET;
+  const result: MaterializeResult = {
+    copied: [],
+    copiedFiles: [],
+    copiedBytes: 0,
+    copiedLinks: [],
+    linked: [],
+    skipped: [],
+    warnings: [],
+  };
+  const stopped = () => input.stopped?.() === true;
+  if (sourceRoot === worktreeRoot) return result;
+
+  // ── Links ────────────────────────────────────────────────────────────────
+  for (const link of input.links) {
+    if (stopped()) break;
+    const source = join(sourceRoot, ...link.split("/"));
+    const target = await realInside(sourceRoot, source);
+    if (!target || target === sourceRoot) {
+      result.skipped.push({ path: link, reason: "points outside the repository" });
+      continue;
+    }
+    const destination = join(worktreeRoot, ...link.split("/"));
+    if (await fsp.lstat(destination).catch(() => null)) {
+      result.skipped.push({ path: link, reason: "already in the worktree" });
+      continue;
+    }
+    if (!(await ensureParentFolders(worktreeRoot, link))) {
+      result.skipped.push({ path: link, reason: "a folder above it in the worktree is a link or a file" });
+      continue;
+    }
+    try {
+      assertCodaraOwnedWrite(destination);
+      if (platform === "win32") {
+        // A junction needs no Developer Mode or admin rights.
+        await fsp.symlink(target, destination, "junction").catch(() => fsp.symlink(target, destination, "dir"));
+      } else {
+        await fsp.symlink(target, destination, "dir");
+      }
+      result.linked.push({ path: link, target });
+      input.log(`Linked ${link} -> ${target}`);
+    } catch (err) {
+      result.skipped.push({ path: link, reason: `could not link: ${(err as Error).message}` });
+    }
+  }
+  if (result.linked.length) {
+    const warning = await keepLinksIgnored(worktreeRoot, result.linked.map((link) => link.path)).catch(
+      (err: Error) => `Could not mark the linked folders as ignored: ${err.message}`,
+    );
+    if (warning) result.warnings.push(warning);
+  }
+  const linkedPaths = result.linked.map((link) => link.path);
+
+  // ── Copies ───────────────────────────────────────────────────────────────
+  const plan: Array<{ candidate: CopyCandidate; absolute: string; real: string; isDir: boolean }> = [];
+  let plannedBytes = 0;
+  let plannedEntries = 0;
+  let overBudget = 0;
+  for (const candidate of input.copies) {
+    if (stopped()) break;
+    // What a link already brings needs no copy.
+    if (linkedPaths.some((link) => under(candidate.path, link))) continue;
+    const absolute = join(sourceRoot, ...candidate.path.split("/"));
+    const stat = await fsp.lstat(absolute).catch(() => null);
+    if (!stat) continue;
+    let real = absolute;
+    if (stat.isSymbolicLink()) {
+      const inside = await realInside(sourceRoot, absolute);
+      if (!inside) {
+        result.skipped.push({ path: candidate.path, reason: "a link to a place outside the repository" });
+        continue;
+      }
+      real = inside;
+    } else if (!stat.isFile() && !stat.isDirectory()) {
+      continue;
+    }
+    const realStat = await fsp.stat(real).catch(() => null);
+    if (!realStat || (!realStat.isFile() && !realStat.isDirectory())) continue;
+    const remaining: CopyBudget = {
+      bytes: budget.bytes - plannedBytes,
+      entries: budget.entries - plannedEntries,
+    };
+    const linkedAbsolute = linkedPaths.map((link) => join(sourceRoot, ...link.split("/")));
+    const size = await measure(real, remaining, (abs) => linkedAbsolute.some((linked) => isAtOrUnder(abs, linked)));
+    if (size.over) {
+      overBudget += 1;
+      result.skipped.push({
+        path: candidate.path,
+        reason: `over the copy limit of ${formatBytes(budget.bytes)} or ${budget.entries.toLocaleString("en-US")} files`,
+      });
+      continue;
+    }
+    plannedBytes += size.bytes;
+    plannedEntries += size.entries;
+    plan.push({ candidate, absolute, real, isDir: realStat.isDirectory() });
+  }
+  if (overBudget) {
+    result.warnings.push(
+      `${overBudget} ${overBudget === 1 ? "entry was" : "entries were"} not copied because the copy would pass ${formatBytes(budget.bytes)} or ${budget.entries.toLocaleString("en-US")} files. Link big folders instead, or narrow the patterns.`,
+    );
+  }
+
+  const linkedSourceAbsolute = linkedPaths.map((link) => join(sourceRoot, ...link.split("/")));
+  for (const item of plan) {
+    if (stopped()) break;
+    const path = item.candidate.path;
+    if (!(await ensureParentFolders(worktreeRoot, path))) {
+      result.skipped.push({ path, reason: "a folder above it in the worktree is a link or a file" });
+      continue;
+    }
+    const destination = join(worktreeRoot, ...path.split("/"));
+    const before = result.copiedFiles.length;
+    if (item.isDir) {
+      await copyFolder(item.real, destination, path, {
+        sourceRoot,
+        worktreeRoot,
+        result,
+        stopped,
+        skipAbsolute: linkedSourceAbsolute,
+      });
+    } else {
+      await copyOneFile(item.real, destination, path, result);
+    }
+    if (result.copiedFiles.length > before || item.isDir) result.copied.push(path);
+  }
+  if (result.copiedFiles.length) {
+    input.log(
+      `Copied ${result.copiedFiles.length.toLocaleString("en-US")} ${result.copiedFiles.length === 1 ? "file" : "files"} (${formatBytes(result.copiedBytes)}) from the main checkout`,
+    );
+  }
+  for (const skip of result.skipped) input.log(`Skipped ${skip.path}: ${skip.reason}`);
+  return result;
+}
+
+async function copyOneFile(source: string, destination: string, relative: string, result: MaterializeResult): Promise<void> {
+  if (await fsp.lstat(destination).catch(() => null)) {
+    result.skipped.push({ path: relative, reason: "already in the worktree" });
+    return;
+  }
+  try {
+    assertCodaraOwnedWrite(destination);
+    await fsp.copyFile(source, destination, fsConstants.COPYFILE_EXCL | fsConstants.COPYFILE_FICLONE);
+    const stat = await fsp.lstat(destination);
+    result.copiedFiles.push({ path: relative, size: stat.size, mtimeMs: stat.mtimeMs });
+    result.copiedBytes += stat.size;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    result.skipped.push({
+      path: relative,
+      reason: code === "EEXIST" ? "already in the worktree" : `could not copy: ${(err as Error).message}`,
+    });
+  }
+}
+
+interface FolderContext {
+  sourceRoot: string;
+  worktreeRoot: string;
+  result: MaterializeResult;
+  stopped(): boolean;
+  skipAbsolute: string[];
+}
+
+async function copyFolder(source: string, destination: string, relative: string, ctx: FolderContext): Promise<void> {
+  if (ctx.stopped()) return;
+  const existing = await fsp.lstat(destination).catch(() => null);
+  if (existing && (!existing.isDirectory() || existing.isSymbolicLink())) {
+    ctx.result.skipped.push({ path: relative, reason: "already in the worktree" });
+    return;
+  }
+  if (!existing) {
+    try {
+      assertCodaraOwnedWrite(destination);
+      await fsp.mkdir(destination);
+    } catch (err) {
+      ctx.result.skipped.push({ path: relative, reason: `could not create the folder: ${(err as Error).message}` });
+      return;
+    }
+  }
+  const children = await fsp.readdir(source, { withFileTypes: true }).catch(() => null);
+  if (!children) {
+    ctx.result.skipped.push({ path: relative, reason: "could not read the folder" });
+    return;
+  }
+  for (const child of children) {
+    if (ctx.stopped()) return;
+    if (child.name === ".git") {
+      ctx.result.skipped.push({ path: `${relative}/.git`, reason: "a nested repository is never copied" });
+      continue;
+    }
+    const childSource = join(source, child.name);
+    if (ctx.skipAbsolute.some((linked) => isAtOrUnder(childSource, linked))) continue;
+    const childDestination = join(destination, child.name);
+    const childRelative = `${relative}/${child.name}`;
+    if (child.isDirectory()) {
+      await copyFolder(childSource, childDestination, childRelative, ctx);
+    } else if (child.isFile()) {
+      await copyOneFile(childSource, childDestination, childRelative, ctx.result);
+    } else if (child.isSymbolicLink()) {
+      await copyInnerLink(childSource, childDestination, childRelative, ctx);
+    }
+  }
+}
+
+/**
+ * A link inside a copied folder is recreated as is only when it is relative
+ * and lands inside the repository, so in the worktree it points at the
+ * worktree's own copy. Any other link is left out.
+ */
+async function copyInnerLink(source: string, destination: string, relative: string, ctx: FolderContext): Promise<void> {
+  const target = await fsp.readlink(source).catch(() => null);
+  if (target === null) return;
+  if (target.startsWith("/") || /^[a-zA-Z]:/.test(target) || target.startsWith("\\")) {
+    ctx.result.skipped.push({ path: relative, reason: "a link with an absolute target" });
+    return;
+  }
+  const lexical = resolve(dirname(source), target);
+  const real = await realInside(ctx.sourceRoot, source);
+  if (!isAtOrUnder(lexical, ctx.sourceRoot) || !real) {
+    ctx.result.skipped.push({ path: relative, reason: "a link to a place outside the repository" });
+    return;
+  }
+  if (await fsp.lstat(destination).catch(() => null)) {
+    ctx.result.skipped.push({ path: relative, reason: "already in the worktree" });
+    return;
+  }
+  try {
+    assertCodaraOwnedWrite(destination);
+    const stat = await fsp.stat(source).catch(() => null);
+    await fsp.symlink(target, destination, stat?.isDirectory() ? "dir" : "file");
+    ctx.result.copiedLinks.push({ path: relative, target });
+  } catch (err) {
+    ctx.result.skipped.push({ path: relative, reason: `could not recreate the link: ${(err as Error).message}` });
+  }
+}
+
+/**
+ * A link named like an ignored folder ("node_modules/") is not ignored by
+ * that rule, because git sees a link, not a folder. Without this the link
+ * would show as a new file, and `git add -A` in a worktree would commit it.
+ * The paths go into the repository's shared info/exclude, anchored, and only
+ * when git does not already ignore them.
+ */
+export async function keepLinksIgnored(worktreeRoot: string, links: readonly string[]): Promise<string | null> {
+  const ignored = await ignoredSubset(worktreeRoot, links);
+  const missing = links.filter((link) => !ignored.has(link));
+  if (!missing.length) return null;
+  const commonDir = (await gitWithInput(worktreeRoot, ["rev-parse", "--git-common-dir"], "")).trim();
+  if (!commonDir) return "Could not find the repository's git folder to mark linked folders as ignored.";
+  const infoDir = join(resolve(worktreeRoot, commonDir), "info");
+  const excludeFile = join(infoDir, "exclude");
+  const infoStat = await fsp.lstat(infoDir).catch(() => null);
+  if (infoStat && (!infoStat.isDirectory() || infoStat.isSymbolicLink())) {
+    return "The repository's .git/info is not a plain folder; linked folders were not marked as ignored.";
+  }
+  if (!infoStat) await fsp.mkdir(infoDir);
+  const fileStat = await fsp.lstat(excludeFile).catch(() => null);
+  if (fileStat && (!fileStat.isFile() || fileStat.isSymbolicLink())) {
+    return "The repository's .git/info/exclude is not a plain file; linked folders were not marked as ignored.";
+  }
+  const current = fileStat ? await fsp.readFile(excludeFile, "utf8") : "";
+  const lines = current.split(/\r?\n/);
+  const additions = missing.map((link) => `/${link}`).filter((line) => !lines.includes(line));
+  if (!additions.length) return null;
+  const prefix = current && !current.endsWith("\n") ? "\n" : "";
+  const header = lines.includes(EXCLUDE_MARKER) ? [] : [EXCLUDE_MARKER];
+  assertCodaraOwnedWrite(excludeFile);
+  await fsp.appendFile(excludeFile, `${prefix}${[...header, ...additions].join("\n")}\n`);
+  return null;
+}
+
+export function manifestFrom(
+  sourceRoot: string,
+  previous: SetupManifest | null,
+  result: Pick<MaterializeResult, "copiedFiles" | "copiedLinks" | "linked">,
+): SetupManifest {
+  const copies = new Map((previous?.copies ?? []).map((copy) => [copy.path, copy]));
+  for (const copy of result.copiedFiles) copies.set(copy.path, copy);
+  const copiedLinks = new Map((previous?.copiedLinks ?? []).map((link) => [link.path, link]));
+  for (const link of result.copiedLinks) copiedLinks.set(link.path, link);
+  const links = new Map((previous?.links ?? []).map((link) => [link.path, link]));
+  for (const link of result.linked) links.set(link.path, link);
+  return {
+    version: 1,
+    sourceRoot,
+    copies: [...copies.values()],
+    copiedLinks: [...copiedLinks.values()],
+    links: [...links.values()],
+  };
+}

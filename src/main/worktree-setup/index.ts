@@ -1,0 +1,219 @@
+// Electron side of worktree setup: the one service instance, the renderer's
+// channels (window.spark.worktreeSetup, src/preload/areas/worktree-setup.ts)
+// and the helpers the other creation paths (agents, issues, Cora workers,
+// workflows) call. ipc.ts registers the channels with one line.
+
+import { app, webContents } from "electron";
+import { promises as fsp } from "node:fs";
+import { isRemotePath } from "@shared/remote";
+import type { WorktreeSetupFileDraft, WorktreeSetupStatus } from "@shared/worktree-setup";
+import {
+  sanitizeAppImageChildEnv,
+  sanitizeElectronViteDevEnv,
+  sanitizeHostTerminalEnv,
+  sanitizeNestedAgentEnv,
+  sanitizeNpmRunScriptEnv,
+} from "../env-sanitize";
+import type { IpcHandle } from "../ipc";
+import { injectEnrichedPath } from "../path-reconstruction";
+import { loadPreferences } from "../preferences-store";
+import { defaultShell, listShells } from "../shells";
+import { loadSettings } from "../storage";
+import { previewWorktreeSetup, suggestWorktreeSetup, writeWorktreeSetupFiles } from "./files";
+import { repositoryRoot } from "./plan";
+import {
+  agentSetupSummary,
+  WorktreeSetupService,
+  type StartSetupRequest,
+  type UserShell,
+} from "./service";
+
+export { agentSetupSummary } from "./service";
+export type { StartSetupRequest } from "./service";
+
+let service: WorktreeSetupService | null = null;
+
+function broadcast(status: WorktreeSetupStatus): void {
+  for (const contents of webContents.getAllWebContents()) {
+    if (contents.isDestroyed()) continue;
+    try {
+      contents.send("worktreeSetup:changed", status);
+    } catch {
+      /* a window may close between enumeration and send */
+    }
+  }
+}
+
+// Keys of Codara's own plumbing that a setup command must not inherit.
+function isCodaraPrivateKey(key: string): boolean {
+  const upper = key.toUpperCase();
+  return (
+    upper.startsWith("SPARK_AGENT_") ||
+    upper.startsWith("CODARA_PI_") ||
+    upper === "SPARK_MCP_MODE" ||
+    upper === "SPARK_RUN_ID" ||
+    upper === "SPARK_AUTOMATION_ID" ||
+    upper === "SPARK_NODE_ID" ||
+    upper === "ELECTRON_RUN_AS_NODE" ||
+    upper === "ELECTRON_NO_ATTACH_CONSOLE"
+  );
+}
+
+async function commandBaseEnv(): Promise<Record<string, string>> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === "string" && !isCodaraPrivateKey(key)) env[key] = value;
+  }
+  sanitizeNestedAgentEnv(env);
+  sanitizeElectronViteDevEnv(env);
+  sanitizeNpmRunScriptEnv(env);
+  sanitizeHostTerminalEnv(env);
+  injectEnrichedPath(env);
+  sanitizeAppImageChildEnv(env);
+  for (const key of Object.keys(env)) if (env[key] === undefined) delete env[key];
+  return env;
+}
+
+async function userShell(): Promise<UserShell | null> {
+  const settings = await loadSettings().catch(() => null);
+  const shells = await listShells().catch(() => []);
+  const chosen =
+    (settings?.defaultShellId ? shells.find((shell) => shell.id === settings.defaultShellId) : undefined) ??
+    (await defaultShell().catch(() => null));
+  if (!chosen) return null;
+  switch (chosen.family) {
+    case "pwsh":
+    case "powershell":
+      return { path: chosen.exe, kind: "pwsh" };
+    case "cmd":
+      return { path: chosen.exe, kind: "cmd" };
+    case "bash":
+    case "zsh":
+    case "fish":
+    case "sh":
+      return { path: chosen.exe, kind: "posix" };
+    default:
+      return null;
+  }
+}
+
+export function worktreeSetupService(): WorktreeSetupService {
+  if (service) return service;
+  service = new WorktreeSetupService({
+    baseEnv: commandBaseEnv,
+    userShell,
+    onChange: broadcast,
+  });
+  const current = service;
+  app.once("will-quit", () => current.dispose());
+  return service;
+}
+
+/**
+ * The user's own setup command for a repository (Settings, "Setup command
+ * for new worktrees"). Keyed by the workspace folder the user set it on,
+ * which may be a different spelling of the repository root.
+ */
+export async function personalSetupCommand(sourceCwd: string): Promise<string | null> {
+  const prefs = await loadPreferences().catch(() => null);
+  const byRepo = prefs?.copyBranchSetupCommandByRepo ?? {};
+  const direct = byRepo[sourceCwd]?.trim();
+  if (direct) return direct;
+  const root = await repositoryRoot(sourceCwd);
+  if (!root) return null;
+  for (const [key, command] of Object.entries(byRepo)) {
+    if (!command?.trim() || isRemotePath(key)) continue;
+    const real = await fsp.realpath(key).catch(() => null);
+    if (real === root) return command.trim();
+  }
+  return null;
+}
+
+/**
+ * Starts setup for a worktree Codara just made. Never throws: a worktree
+ * that cannot be set up still works, so the caller only logs the reason.
+ */
+export async function startWorktreeSetup(
+  request: Omit<StartSetupRequest, "userCommand"> & { userCommand?: string | null },
+): Promise<WorktreeSetupStatus | { error: string }> {
+  try {
+    const userCommand =
+      request.userCommand === undefined ? await personalSetupCommand(request.sourceCwd) : request.userCommand;
+    return await worktreeSetupService().start({ ...request, userCommand });
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** The adapter agent-worktrees.ts takes as its `worktreeSetup` dependency. */
+export function agentWorktreeSetupRunner() {
+  return {
+    start: async (request: Omit<StartSetupRequest, "userCommand">) => {
+      const started = await startWorktreeSetup(request);
+      return "error" in started ? null : started;
+    },
+    whenPrepared: (id: string) => worktreeSetupService().whenPrepared(id),
+    waitFor: (id: string, timeoutMs: number) => worktreeSetupService().waitFor(id, timeoutMs),
+    get: (idOrPath: string) => worktreeSetupService().get(idOrPath),
+    tail: (id: string, lines: number) => worktreeSetupService().tail(id, lines),
+    summary: agentSetupSummary,
+  };
+}
+
+// ── Renderer channels ──────────────────────────────────────────────────────
+
+function stringField(input: unknown, key: string, required = true): string {
+  const value = input && typeof input === "object" ? (input as Record<string, unknown>)[key] : undefined;
+  if (typeof value === "string" && value) return value;
+  if (required) throw new Error(`${key} is required`);
+  return "";
+}
+
+function localPath(value: string, key: string): string {
+  if (isRemotePath(value)) throw new Error(`${key} must be a local folder`);
+  return value;
+}
+
+export function registerWorktreeSetupIpc(handle: IpcHandle): void {
+  handle("worktreeSetup:preview", async (_event, input: unknown) => {
+    const sourceCwd = localPath(stringField(input, "sourceCwd"), "sourceCwd");
+    return previewWorktreeSetup(sourceCwd, await personalSetupCommand(sourceCwd));
+  });
+  handle("worktreeSetup:suggest", (_event, input: unknown) =>
+    suggestWorktreeSetup(localPath(stringField(input, "sourceCwd"), "sourceCwd")),
+  );
+  handle("worktreeSetup:writeFiles", (_event, input: WorktreeSetupFileDraft) => writeWorktreeSetupFiles(input));
+  handle("worktreeSetup:start", async (_event, input: unknown) => {
+    const record = (input && typeof input === "object" ? input : {}) as Record<string, unknown>;
+    const started = await startWorktreeSetup({
+      sourceCwd: localPath(stringField(input, "sourceCwd"), "sourceCwd"),
+      worktreePath: localPath(stringField(input, "worktreePath"), "worktreePath"),
+      trigger: "ui",
+      ...(stringField(input, "workspaceId", false) ? { workspaceId: stringField(input, "workspaceId") } : {}),
+      ...(stringField(input, "workspaceName", false) ? { workspaceName: stringField(input, "workspaceName") } : {}),
+      ...(stringField(input, "branch", false) ? { branch: stringField(input, "branch") } : {}),
+      runCommands: record.runCommands !== false,
+    });
+    return started;
+  });
+  handle("worktreeSetup:get", (_event, input: unknown) => worktreeSetupService().get(stringField(input, "id")));
+  handle("worktreeSetup:list", () => worktreeSetupService().list());
+  handle("worktreeSetup:stop", (_event, input: unknown) => worktreeSetupService().stop(stringField(input, "id")));
+  handle("worktreeSetup:rerun", async (_event, input: unknown) => {
+    try {
+      const id = stringField(input, "id");
+      const status = await worktreeSetupService().get(id);
+      if (!status) return { error: "No setup is known for that worktree" };
+      // Settings may have changed since; never reuse a stored command.
+      const userCommand = await personalSetupCommand(status.sourcePath);
+      return await worktreeSetupService().rerun(id, { userCommand });
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  handle("worktreeSetup:readLog", (_event, input: unknown) => {
+    const from = input && typeof input === "object" ? (input as { from?: unknown }).from : undefined;
+    return worktreeSetupService().readLog(stringField(input, "id"), typeof from === "number" && from >= 0 ? from : 0);
+  });
+  handle("worktreeSetup:dismiss", (_event, input: unknown) => worktreeSetupService().dismiss(stringField(input, "id")));
+}
