@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { findBinding, type BindingTable } from "./bindings";
 import type { CommandId } from "./commands";
+import { noteCommandRan } from "../components/feature-tips/feature-usage";
 
 // Global, capture-phase keyboard dispatcher. Registers on `window` with
 // `capture: true` and calls `stopImmediatePropagation` once a binding
@@ -37,6 +38,7 @@ export function useGlobalShortcuts(
       e.preventDefault();
       e.stopImmediatePropagation();
       h(e);
+      noteCommandRan(id);
     };
     window.addEventListener("keydown", onKey, { capture: true });
     return () =>

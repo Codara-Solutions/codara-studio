@@ -19,6 +19,7 @@ import {
 } from "@shared/onboarding";
 import "./onboarding.css";
 import { CodaraMark } from "../BrandMarks";
+import { OnboardingCoach } from "./OnboardingCoach";
 
 const Accounts = lazy(() =>
   import("../SettingsDialog").then((module) => ({
@@ -249,30 +250,28 @@ export default function OnboardingDialog({
 
   if (exploring)
     return (
-      <aside
-        className="onboarding-coach"
-        aria-label="Studio tour guide"
-        aria-live="polite"
+      <OnboardingCoach
+        label="Studio tour guide"
+        eyebrow={`YOUR STUDIO · ${feature + 1} / ${STUDIO_TOUR.length}`}
+        title={currentFeature.title}
+        actions={
+          <>
+            <button className="spark-btn" onClick={() => setExploring(false)}>
+              Back to guide
+            </button>
+            <button
+              className="spark-btn onboarding-primary"
+              disabled={busy}
+              onClick={nextFeature}
+            >
+              Next stop
+            </button>
+          </>
+        }
+        footer={error && <p role="alert">{error}</p>}
       >
-        <span className="onboarding-eyebrow">
-          YOUR STUDIO · {feature + 1} / {STUDIO_TOUR.length}
-        </span>
-        <h2>{currentFeature.title}</h2>
         <p>{currentFeature.task}</p>
-        <div className="onboarding-actions">
-          <button className="spark-btn" onClick={() => setExploring(false)}>
-            Back to guide
-          </button>
-          <button
-            className="spark-btn onboarding-primary"
-            disabled={busy}
-            onClick={nextFeature}
-          >
-            Next stop
-          </button>
-        </div>
-        {error && <p role="alert">{error}</p>}
-      </aside>
+      </OnboardingCoach>
     );
 
   return (

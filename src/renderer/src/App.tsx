@@ -215,6 +215,7 @@ const loadSettingsDialog = () => import("./components/SettingsDialog");
 const loadAgentCapabilitiesDialog = () => import("./components/AgentCapabilitiesDialog");
 const SettingsDialog = lazy(loadSettingsDialog);
 const OnboardingDialog = lazy(() => import("./components/onboarding/OnboardingDialog"));
+const FeatureTipsHost = lazy(() => import("./components/feature-tips/FeatureTipsHost"));
 const SessionInspector = lazy(() => import("./components/SessionInspector"));
 const AgentCapabilitiesDialog = lazy(loadAgentCapabilitiesDialog);
 const WorkerSessionPicker = lazy(() => import("./components/WorkerSessionPicker"));
@@ -6605,6 +6606,12 @@ export default function App() {
         )}
         <RemoteAuthPrompt />
         <ChromePairingPrompt />
+
+        {booted && (
+          <Suspense fallback={null}>
+            <FeatureTipsHost onboardingOpen={onboardingOpen} hasWorkspaces={workspaces.length > 0} />
+          </Suspense>
+        )}
 
         {onboardingOpen && (
           <Suspense fallback={null}>

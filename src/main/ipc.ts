@@ -489,6 +489,7 @@ import { registerPointIpc } from "./browser/point";
 import { registerReviewIpc } from "./review";
 import { registerGitFixIpc } from "./git-fix-ipc";
 import { registerDiagnosticsIpc } from "./diagnostics";
+import { registerFeatureTipsIpc } from "./feature-tips";
 import { registerServersIpc } from "./servers";
 import { registerWorkspaceStatusIpc } from "./workspace-status";
 import { afterSkillAssetDeleted, afterSkillAssetInstalled, registerSkillUpdatesIpc, skillOriginsDir } from "./skill-updates-ipc";
@@ -4131,6 +4132,7 @@ export function registerIpc(): void {
   registerTerminalScrollbackIpc(handle);
   registerAgentHibernationIpc(handle);
   registerWorktreeCleanupIpc(handle);
+  registerFeatureTipsIpc(handle);
 }
 
 const MEMORY_KINDS = new Set<MemoryItemKind>(["preference", "correction", "fact", "procedure", "lesson"]);

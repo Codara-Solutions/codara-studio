@@ -152,6 +152,8 @@ export interface SettingsSearchEntry {
 
 export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "general", title: "Setup and guided tour", desc: "Set up local tools, connect an account and take the tour.", section: "Getting started", keywords: "onboarding tour welcome install guide help" },
+  { tab: "general", title: "Feature tips", desc: "Now and then, a short tip about a feature you have not tried.", section: "Getting started", keywords: "tips hints tour discover learn help dont show tips disable turn off" },
+  { tab: "general", title: "Tips you have seen", desc: "Let tips you already saw come back.", section: "Getting started", keywords: "tips reset again show hints" },
   { tab: "general", title: "Theme", desc: "The colors of the whole app, dark or light.", section: "Appearance", keywords: "dark light mode colors palette appearance dracula catppuccin github rose pine one dark daylight" },
   { tab: "general", title: "Liquid glass", desc: "Translucent glass for menus, popovers, toasts and dialogs.", section: "Appearance", keywords: "transparency translucent frosted blur opaque glass solid", toggle: "glassEffects" },
   { tab: "general", title: "Fine-tune glass", desc: "Tint, blur, refraction and fringe of the glass material.", section: "Appearance", keywords: "tint blur refraction chromatic fringe tuning strength sliders adjust" },

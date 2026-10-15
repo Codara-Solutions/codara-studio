@@ -235,7 +235,7 @@ The pages:
 
 | Tab | What lives there |
 |---|---|
-| General | Getting started (reopens the first-run guide), Appearance (theme, liquid glass surfaces), Window (keep running in the background when the window is closed, auto-open the browser for local dev servers, open links in the default browser or the Codara browser, ask where terminal links open, the workspace switch badge), Sleep (keep the computer awake while agents work, always or never, and on a Linux laptop with the lid closed; see [Keep the computer awake](#keep-the-computer-awake)), Agent worktrees (whether agents may create and remove worktrees, and remove ones you created), Tabs (middle-click to close), Notifications (in-app toast, native OS notification, sound, OS-specific cues), Git (background fetch, notify on teammate pushes and new pull requests, notify when CI fails on your pull request), Instant git triggers, Copy-branch workspaces (the repository's worktree setup file, your own setup command for new worktrees, and extra ignored files an agent may delete with a merged worktree). |
+| General | Getting started (reopens the first-run guide, turns feature tips on or off, and lets tips you have seen come back), Appearance (theme, liquid glass surfaces), Window (keep running in the background when the window is closed, auto-open the browser for local dev servers, open links in the default browser or the Codara browser, ask where terminal links open, the workspace switch badge), Sleep (keep the computer awake while agents work, always or never, and on a Linux laptop with the lid closed; see [Keep the computer awake](#keep-the-computer-awake)), Agent worktrees (whether agents may create and remove worktrees, and remove ones you created), Tabs (middle-click to close), Notifications (in-app toast, native OS notification, sound, OS-specific cues), Git (background fetch, notify on teammate pushes and new pull requests, notify when CI fails on your pull request), Instant git triggers, Copy-branch workspaces (the repository's worktree setup file, your own setup command for new worktrees, and extra ignored files an agent may delete with a merged worktree). |
 | Editor | Code editor (Vim mode, autosave) and inline AI autocomplete. |
 | Default terminal | The shell for new panes, output history and scrollback lines, whether programs may copy to the clipboard (OSC 52), a resource overview, and the run terminal lifecycle for worker panes. |
 | Quick commands | Saved shell commands and agent prompts: add, edit, reorder, delete, and where each is offered. Also what a right-click in a terminal does. See [Quick commands](#quick-commands). |
@@ -494,6 +494,31 @@ while a debugger is attached, unless set to `1`), `CODARA_CRASH_REPORTER=0`
   Codara's own folder (see [on-your-machine.md](./on-your-machine.md)).
   Closing a pane deletes its saved output, and turning the setting off
   deletes all of it.
+
+### Feature tips
+
+Now and then Codara shows one short tip about a feature you have not tried
+yet, such as splitting a terminal, pointing at a page element for an agent,
+or the notification center. A tip appears at most once a day and once per
+session, a few minutes after Codara opens, and only at a calm moment: not
+while you type, click, scroll or move the pointer, not while a page in the
+Codara browser has the keyboard, not while a dialog, menu or the first-run
+guide is open, and only when the feature's control is on screen. It never
+covers the chat composer or a dialog, and steps aside while one is open.
+
+- **Show me** starts a short tour: the guide card from the first-run tour
+  points at the real control with a ring around it. Click the control, or
+  **Done**, to finish; Escape ends the tour.
+- **Got it** or Escape closes the tip. That tip does not come back.
+- **Don't show tips** turns tips off. Turn them back on with **Feature tips**
+  in Settings, General, Getting started. **Tips you have seen** with
+  **Show them again** lets shown tips come back (greyed out until a tip has
+  been shown).
+
+To choose what is worth a tip, Codara notes which features you have used, the
+first time you use each one, in `feature-tips.json` in the Codara home
+(`~/.codarastudio`). It stays on this computer and is never uploaded. A
+feature you already use never gets a tip.
 
 ### Terminal agent notifications
 

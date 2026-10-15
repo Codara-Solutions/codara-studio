@@ -44,6 +44,7 @@ import { gitFixApi } from "./areas/git-fix";
 import { diagnosticsApi } from "./areas/diagnostics";
 import { pointApi } from "./areas/point";
 import { reviewApi } from "./areas/review";
+import { featureTipsApi } from "./areas/feature-tips";
 import { serversApi } from "./areas/servers";
 import { workspaceStatusApi } from "./areas/workspace-status";
 import { skillOriginsApi } from "./areas/skill-origins";
@@ -1804,6 +1805,7 @@ const api = {
   review: reviewApi,
   terminalScrollback: terminalScrollbackApi,
   worktreeCleanup: worktreeCleanupApi,
+  featureTips: featureTipsApi,
 };
 
 function isBrowserUrl(url: string): boolean {

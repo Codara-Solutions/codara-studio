@@ -1,0 +1,144 @@
+/* Feature tips and their tours: the onboarding coach card (onboarding.css),
+   smaller and placed by FeatureTipCard / FeatureTour. The card is a floating
+   layer, so it wears the read-tier glass classes; nothing here frosts on its
+   own. It sits under menus (50+) and dialogs (100+), so whatever opens later
+   covers the tip rather than the other way round. */
+
+.onboarding-coach.feature-tip,
+.onboarding-coach.feature-tour {
+  right: auto;
+  bottom: auto;
+  z-index: 45;
+  width: min(340px, calc(100vw - 32px));
+  padding: 16px 18px 14px;
+  border-radius: 12px;
+  animation: feature-tip-in var(--motion) var(--ease-out) both;
+}
+
+.onboarding-coach.feature-tip h2,
+.onboarding-coach.feature-tour h2 {
+  font-size: 15px;
+  line-height: 1.35;
+  margin: 8px 28px 6px 0;
+}
+
+.onboarding-coach.feature-tip p,
+.onboarding-coach.feature-tour p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink-dim);
+}
+
+.onboarding-coach.feature-tip .onboarding-actions,
+.onboarding-coach.feature-tour .onboarding-actions {
+  margin: 12px 0 0;
+  gap: 8px;
+}
+
+.onboarding-coach.feature-tip .spark-btn,
+.onboarding-coach.feature-tour .spark-btn {
+  padding: 6px 11px;
+  font-size: 12px;
+}
+
+.feature-tip__close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.feature-tip__close:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.feature-tip__off {
+  margin-left: auto;
+  padding: 4px 2px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  cursor: pointer;
+}
+.feature-tip__off:hover {
+  color: var(--ink);
+  text-decoration: underline;
+}
+
+.feature-tip__close:focus-visible,
+.feature-tip__off:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.feature-tour__missing {
+  margin-top: 8px !important;
+  color: var(--muted) !important;
+  font-style: italic;
+}
+
+.feature-tour__ring {
+  position: fixed;
+  z-index: 44;
+  border: 2px solid var(--accent);
+  border-radius: 9px;
+  box-shadow: 0 0 0 4px var(--accent-soft);
+  pointer-events: none;
+}
+/* A few soft pulses on transform and opacity only, then it holds still. */
+.feature-tour__ring::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border: 2px solid var(--accent);
+  border-radius: inherit;
+  opacity: 0;
+  animation: feature-tour-ring 1.4s var(--ease-out) 3;
+}
+
+/* The pane toolbar shows on hover only; the tour keeps it in view. */
+.spark-terminal-pane .spark-pane-toolbar:has([data-feature-tour-target]) {
+  opacity: 1;
+}
+
+@keyframes feature-tip-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes feature-tour-ring {
+  from {
+    opacity: 0.8;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(1.25);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .onboarding-coach.feature-tip,
+  .onboarding-coach.feature-tour,
+  .feature-tour__ring::after {
+    animation: none;
+  }
+}
