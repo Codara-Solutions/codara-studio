@@ -134,6 +134,8 @@ function EditorStack({ tabs, activeId, dockIndex, onActivatePane, onDirtyChange,
             ref={getDockRef(t.id)}
             // Marks the element the grid positions (see PreviewStack).
             data-dock-content-id={docked ? t.id : undefined}
+            // Lets the jump palette focus the editor of this tab.
+            data-tab-content={t.id}
             aria-hidden={!visible}
             onPointerDownCapture={activate}
             onFocusCapture={activate}
