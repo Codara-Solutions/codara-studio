@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type {
+  CodaraBoxesListResult,
+  CodaraBoxSummary,
   RemoteBrowseResult,
   RemoteConnectionStatus,
   RemoteHostConfig,
@@ -211,6 +213,19 @@ function ServersTab({ onPick }: { onPick: (host: RemoteHostConfig, remotePath: s
                       ssh config
                     </span>
                   )}
+                  {host.source === "codara-cloud" && (
+                    <span
+                      style={{
+                        fontSize: 10,
+                        padding: "1px 6px",
+                        borderRadius: 999,
+                        border: "1px solid var(--rule)",
+                        color: "var(--muted)",
+                      }}
+                    >
+                      Codara Cloud
+                    </span>
+                  )}
                 </div>
                 <div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)" }}>
                   {host.username}@{host.host}:{host.port}
@@ -243,7 +258,7 @@ function ServersTab({ onPick }: { onPick: (host: RemoteHostConfig, remotePath: s
                   Edit
                 </button>
               )}
-              {host.source === "manual" && (
+              {host.source !== "ssh-config" && (
                 <button
                   type="button"
                   className="spark-btn"
@@ -265,6 +280,7 @@ function ServersTab({ onPick }: { onPick: (host: RemoteHostConfig, remotePath: s
           );
         })}
       </div>
+      <CodaraBoxesSection onConnect={(host) => void connectAndBrowse(host, null)} />
       {form ? (
         <HostForm
           // Keyed by edit target: field state lives in mount-time useState
@@ -289,6 +305,99 @@ function ServersTab({ onPick }: { onPick: (host: RemoteHostConfig, remotePath: s
           + Add host
         </button>
       )}
+    </div>
+  );
+}
+
+function CodaraBoxesSection({ onConnect }: { onConnect: (host: RemoteHostConfig) => void }) {
+  const [result, setResult] = useState<CodaraBoxesListResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [preparing, setPreparing] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const refresh = useCallback(() => {
+    setLoading(true);
+    void window.spark.remote.codaraBoxes
+      .list()
+      .then(setResult)
+      .finally(() => setLoading(false));
+  }, []);
+  useEffect(refresh, [refresh]);
+
+  const connect = async (box: CodaraBoxSummary) => {
+    setPreparing(box.id);
+    setError(null);
+    const info = await window.spark.remote.codaraBoxes.connectInfo(box.id);
+    setPreparing(null);
+    if (!info.ok) {
+      setError(info.message);
+      return;
+    }
+    onConnect(info.host);
+  };
+
+  const boxes = result?.ok ? result.boxes : [];
+  return (
+    <div style={{ display: "grid", gap: 6 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span className="spark-eyebrow">Codara Cloud boxes</span>
+        <span style={{ flex: 1 }} />
+        <button type="button" className="spark-btn" style={{ fontSize: 11, padding: "2px 8px" }} onClick={refresh} disabled={loading}>
+          {loading ? "Loading…" : "Refresh"}
+        </button>
+      </div>
+      {result && !result.ok && (
+        <div style={{ fontSize: 11, color: "var(--muted)" }}>
+          {result.message}
+          {result.installUrl ? ` ${result.installUrl}` : ""}
+        </div>
+      )}
+      {result?.ok && boxes.length === 0 && (
+        <div style={{ fontSize: 11, color: "var(--muted)" }}>No boxes yet.</div>
+      )}
+      {error && <div style={{ fontSize: 11, color: "var(--danger)" }}>{error}</div>}
+      {boxes.map((box) => (
+        <div
+          key={box.id}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            padding: "8px 12px",
+            borderRadius: 8,
+            border: "1px solid var(--rule)",
+            background: "var(--panel)",
+          }}
+        >
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>{box.name}</div>
+            <div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "var(--font-mono)" }}>
+              {[box.clientSlug, box.projectSlug, box.environmentSlug].filter(Boolean).join(" / ")}
+            </div>
+          </div>
+          <span
+            style={{
+              fontSize: 10,
+              padding: "1px 6px",
+              borderRadius: 999,
+              border: "1px solid var(--rule)",
+              color: "var(--muted)",
+            }}
+          >
+            {box.phase}
+          </span>
+          <button
+            type="button"
+            className="spark-btn is-primary"
+            style={{ fontSize: 11, padding: "3px 10px" }}
+            disabled={!box.canConnect || preparing !== null}
+            title={box.message ?? undefined}
+            onClick={() => void connect(box)}
+          >
+            {preparing === box.id ? "Preparing…" : "Connect"}
+          </button>
+        </div>
+      ))}
     </div>
   );
 }
