@@ -470,6 +470,27 @@ async function integrationChecks({ sched, loop }, workspace) {
   await sched.setEnabled(cadence.id, false);
   pass("a cadence loop re-schedules after a skipped pass and counts no iteration");
 
+  // A cadence tick that lands on a trigger's check waits for its verdict; a
+  // skip re-arms the cadence instead of leaving the loop waiting forever.
+  const overlap = await sched.createJob({
+    name: "overlap",
+    trigger: { kind: "manual" },
+    input,
+    loop: { kind: "cadence", everyMs: 60_000, stop: {} },
+    precheck: { command: "sleep 0.4; exit 4" },
+  });
+  await sched.patchJob(overlap.id, (j) => ({ ...j, state: { status: "idle", iteration: 1 } }));
+  const triggerFire = loop.startIteration(overlap.id, { source: "trigger" });
+  await sleep(100);
+  await loop.startIteration(overlap.id, { source: "cadence" });
+  await triggerFire;
+  job = await get(overlap.id);
+  assert.strictEqual(job.skips.length, 1, "one check ran, one skip");
+  assert.ok(job.state.nextFireAt, "the cadence tick that waited on the check is re-armed");
+  assert.strictEqual(launchesFor(overlap.id), 0);
+  await sched.setEnabled(overlap.id, false);
+  pass("a cadence tick during a trigger's failing check is re-armed, not lost");
+
   // The start check's catch-up pass goes through the precheck too.
   const both = await sched.createJob({
     name: "both",

@@ -88,6 +88,9 @@ interface LoopRunner {
   firing: boolean;
   // A precheck is running for the next pass: further fires hold meanwhile.
   prechecking?: boolean;
+  // A cadence tick landed on that check: if the check skips, the cadence is
+  // re-armed, or the loop would wait for its trigger forever.
+  cadenceWaiting?: boolean;
   // The chain of automation ids that led here (onFinishOf cycle guard).
   chain: string[];
 }
@@ -227,7 +230,10 @@ async function passesPrecheck(id: string, job: ScheduledJob, opts: StartIteratio
   if (!precheck) return true;
   const runner = runnerFor(id);
   // Another start (or check) is in flight; this fire would be dropped anyway.
-  if (runner.firing || runner.prechecking) return false;
+  if (runner.firing || runner.prechecking) {
+    if (runner.prechecking && opts.source === "cadence") runner.cadenceWaiting = true;
+    return false;
+  }
   // A live pass holds the fire below; do not spend a check on it.
   if (job.state.currentRunId) {
     const live = await safeGetRun(job.state.currentRunId);
@@ -243,13 +249,16 @@ async function passesPrecheck(id: string, job: ScheduledJob, opts: StartIteratio
   } finally {
     runner.prechecking = false;
   }
+  // A passing check starts a pass, and the cadence continues after it.
+  const cadenceWaiting = runner.cadenceWaiting === true;
+  runner.cadenceWaiting = false;
   if (result.passed) return true;
   await appendSkip(id, {
     reason: "precheck",
     detail: precheckSkipDetail(result, precheck.timeoutSeconds),
     precheck: { command: precheck.command, ...result },
   });
-  if (opts.source === "cadence") {
+  if (opts.source === "cadence" || cadenceWaiting) {
     const fresh = await getJob(id);
     if (fresh?.enabled && fresh.loop.kind === "cadence" && fresh.state.status !== "paused" && fresh.state.status !== "stopped") {
       const everyMs = Math.max(1000, Math.floor(fresh.loop.everyMs ?? 60_000));
