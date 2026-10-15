@@ -629,6 +629,45 @@ async function main() {
       });
     }
 
+    await check("a terminal opened in a waiting worktree mid-batch keeps it", async () => {
+      const first = add("batch-first", "feature/batch-first");
+      const second = add("batch-second", "feature/batch-second");
+      const [checkA, checkB] = await removeMod.checkCleanupTargets(deps, [
+        { repoRoot: repo, path: first },
+        { repoRoot: repo, path: second },
+      ]);
+      assert.equal(checkA.blockers.length + checkB.blockers.length, 0);
+      // While the first worktree is being removed, the user opens a terminal
+      // in the second one.
+      const lateDeps = {
+        ...deps,
+        audit: async (entry) => {
+          if (entry.path === first && entry.outcome === "removed") h.sessionsUnder[second] = ["pane-late"];
+          return deps.audit(entry);
+        },
+      };
+      const result = await removeMod.removeCleanupWorktrees(
+        lateDeps,
+        {
+          items: [first, second].map((dir, index) => ({
+            repoRoot: repo,
+            path: dir,
+            fingerprint: [checkA, checkB][index].fingerprint,
+            confirmDirty: false,
+            confirmUnmerged: false,
+          })),
+          deleteMergedBranches: true,
+        },
+        { usageFreshMs: -1 },
+      );
+      delete h.sessionsUnder[second];
+      assert.equal(result.outcomes[0].status, "removed", JSON.stringify(result.outcomes[0]));
+      assert.equal(result.outcomes[1].code, "IN_USE", JSON.stringify(result.outcomes[1]));
+      assert.ok(fs.existsSync(second));
+      git(repo, ["worktree", "remove", second]);
+      git(repo, ["branch", "-D", "feature/batch-second"]);
+    });
+
     await check("an edited file too large to copy skips the snapshot, not the removal", async () => {
       const big = add("big", "feature/big");
       // Sparse: 60 MB by size, almost nothing on disk.
@@ -674,6 +713,22 @@ async function main() {
       h.terminals = [{ paneId: "pane-r", workspaceId: "ws-other", cwd: path.join(fresh, "src") }];
       assert.deepEqual(await usesOf(), ["terminal"], "a renderer pane whose folder is inside counts");
       h.terminals = [];
+      // A pane's own shell is that open terminal, not a second use. A shell
+      // whose pane opened elsewhere and moved in with cd is seen only by the
+      // process scan, and must still keep the worktree.
+      const pids = { "pane-shell": 5151, "pane-elsewhere": 6161 };
+      const shellDeps = { ...deps, sessionPid: (pane) => pids[pane] ?? null };
+      const shellUses = async () =>
+        (await scanMod.scanWorktreeCleanup(shellDeps)).scan.rows.find((entry) => entry.id === fresh).inUse.map((use) => use.kind);
+      h.sessionsUnder[fresh] = ["pane-shell"];
+      h.processes.set(fresh, [{ pid: 5151, command: "/bin/zsh" }]);
+      assert.deepEqual(await shellUses(), ["terminal"], "the pane's shell is not counted twice");
+      delete h.sessionsUnder[fresh];
+      h.processes.set(fresh, [{ pid: 6161, command: "/bin/zsh" }]);
+      assert.deepEqual(await shellUses(), ["process"], "a shell that moved in keeps the worktree");
+      const moved = await removeMod.checkCleanupTargets(shellDeps, [{ repoRoot: repo, path: fresh }]);
+      assert.equal(moved[0].blockers[0].code, "IN_USE");
+      h.processes.clear();
       const appDeps = { ...deps, appPaths: () => [path.join(fresh, "out")] };
       assert.deepEqual(
         (await scanMod.scanWorktreeCleanup(appDeps)).scan.rows.find((entry) => entry.id === fresh).inUse.map((use) => use.kind),

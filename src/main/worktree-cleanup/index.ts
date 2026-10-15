@@ -104,6 +104,7 @@ function deps(invalidateGitCache: (cwd: string) => void): WorktreeCleanupDeps {
     listRuns: async () => (await import("../orchestration/run-store")).listRuns(),
     sessionCwd: (paneId) => pty.sessionCwd(paneId),
     sessionsUnderCwd: (dir) => pty.sessionsUnderCwd(dir),
+    sessionPid: (paneId) => pty.sessionPid(paneId),
     listRendererTerminals: async () => {
       try {
         const listed = await requestTerminalOp<RendererTerminal[]>("list", {}, { timeoutMs: 5_000 });
@@ -112,17 +113,11 @@ function deps(invalidateGitCache: (cwd: string) => void): WorktreeCleanupDeps {
         return null;
       }
     },
-    processesUnderCwds: async (dirs) => {
-      const sessions = pty.sessionPids();
-      const found = await scanProcessesUnderCwds(dirs, { appPid: process.pid, sessionPids: sessions, timeoutMs: 5_000 });
-      // A terminal's own shell already counts as the open terminal; what it
-      // started (a dev server, a build) still counts as a process.
-      if (found) {
-        const shells = new Set(sessions);
-        for (const [dir, list] of found) found.set(dir, list.filter((entry) => !shells.has(entry.pid)));
-      }
-      return found;
-    },
+    // Shells stay in the list: one whose pane opened elsewhere and moved
+    // into the worktree with cd is only seen here. usageOf drops the shells
+    // of panes it already counts as open terminals.
+    processesUnderCwds: (dirs) =>
+      scanProcessesUnderCwds(dirs, { appPid: process.pid, sessionPids: pty.sessionPids(), timeoutMs: 5_000 }),
     runningServers: (workspaceId) => serversService().keeper().runningCount(workspaceId),
     pullRequests,
     regenerableIgnored: async (paths) => {
