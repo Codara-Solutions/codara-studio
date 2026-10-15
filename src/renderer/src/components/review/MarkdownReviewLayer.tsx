@@ -27,6 +27,9 @@ interface TextPick {
   rect: { left: number; top: number; bottom: number; right: number };
 }
 
+/** Where a noted block keeps a title of its own while the notes' title shows. */
+const OWN_TITLE = "data-review-own-title";
+
 const BLOCK_TAGS = new Set(["P", "LI", "H1", "H2", "H3", "H4", "H5", "H6", "PRE", "BLOCKQUOTE", "TR", "TD", "TH", "HR", "DIV", "DETAILS", "SUMMARY", "DT", "DD", "TABLE"]);
 
 function norm(path: string): string {
@@ -139,7 +142,11 @@ export default function MarkdownReviewLayer({ containerRef, basePath, text }: Pr
     const marked = container.querySelectorAll("[data-review-noted]");
     for (const element of marked) {
       element.removeAttribute("data-review-noted");
-      element.removeAttribute("title");
+      // A title the document gave the block comes back.
+      const own = element.getAttribute(OWN_TITLE);
+      if (own !== null) element.setAttribute("title", own);
+      else element.removeAttribute("title");
+      element.removeAttribute(OWN_TITLE);
     }
     if (!mine.length) return;
     const blocks = [...container.querySelectorAll<HTMLElement>("[data-line]")].filter((element) => BLOCK_TAGS.has(element.tagName));
@@ -157,6 +164,8 @@ export default function MarkdownReviewLayer({ containerRef, basePath, text }: Pr
       }
     }
     for (const [element, list] of hits) {
+      const own = element.getAttribute("title");
+      if (own !== null) element.setAttribute(OWN_TITLE, own);
       element.setAttribute("data-review-noted", "");
       element.setAttribute("title", list.map((note) => `Review note: ${note.body}`).join("\n\n"));
     }

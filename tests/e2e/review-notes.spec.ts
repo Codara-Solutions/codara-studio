@@ -271,6 +271,8 @@ test("notes on a Markdown plan join the review, paste into a terminal; the branc
     const paragraph = page.locator(".spark-markdown p", { hasText: "First we split the parser." });
     await expect(paragraph).toBeVisible({ timeout: 20_000 });
     await expect(paragraph).toHaveAttribute("data-line", "3");
+    // A title of the block's own, as raw HTML in the file can give it.
+    await paragraph.evaluate((element) => element.setAttribute("title", "Kept title"));
 
     // Select the paragraph's text: an Add note button appears beside it.
     await paragraph.evaluate((element) => {
@@ -302,6 +304,7 @@ test("notes on a Markdown plan join the review, paste into a terminal; the branc
     await expect(popover).toHaveCount(0);
     await expect(page.getByTestId("markdown-review-bar")).toContainText("1 review note on this file");
     await expect(paragraph).toHaveAttribute("data-review-noted", "");
+    await expect(paragraph).toHaveAttribute("title", "Review note: Say which parser.");
     await expect.poll(async () => (await storedNotes(home)).map((note) => [note.source, note.filePath, note.startLine])).toEqual([
       ["markdown", planPath, 3],
     ]);
@@ -356,6 +359,8 @@ test("notes on a Markdown plan join the review, paste into a terminal; the branc
     await expect.poll(screen, { timeout: 20_000 }).toContain("docs/plan.md:3 (Markdown)");
     expect(await screen()).not.toContain("command not found");
     await expect(page.getByTestId("markdown-review-bar")).toHaveCount(0);
+    await expect(paragraph).not.toHaveAttribute("data-review-noted", "");
+    await expect(paragraph).toHaveAttribute("title", "Kept title");
   } finally {
     await fixture.close();
   }
