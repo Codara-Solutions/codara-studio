@@ -10,6 +10,7 @@ import { logMain } from "../file-log";
 import type { IpcHandle } from "../ipc";
 import { getPreferenceCached, loadPreferences, onPreferenceChange } from "../preferences-store";
 import * as pty from "../pty-manager";
+import { subscribeAgentBoardChanged } from "../agent-board-signal";
 import { terminalAgentStateSnapshot } from "../terminal-agent-notify";
 import { combineKeepAwakeActivity, countWorkingTerminalAgents } from "./activity";
 import { KeepAwakeController, type LidHold, type SleepBlocker } from "./controller";
@@ -222,6 +223,9 @@ export function startKeepAwake(): void {
       if (key === "keepAwakeMode" || key === "keepAwakeLidClosed") controller?.refresh(`setting ${key}`);
     }),
   );
+  // A terminal agent starting or ending a turn, or its pane closing, pings
+  // the Agents view; the hold follows the same ping instead of a fast poll.
+  teardown.push(subscribeAgentBoardChanged(scheduleRefresh("terminal agents")));
   // The OS may drop a hold across a sleep it was forced into (a closed lid,
   // a critical battery); take it again on the way back.
   const onResume = () => controller?.refresh("resume");

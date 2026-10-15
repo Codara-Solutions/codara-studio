@@ -27,7 +27,13 @@ import { assertCodaraOwnedWrite } from "../outside-write-guard";
 import { stopCrashpadHandlerOnAppImageExit } from "./appimage-crashpad";
 import { flushBreadcrumbsSync, recentBreadcrumbs, recordBreadcrumb, startBreadcrumbPersistence } from "./breadcrumbs";
 import { listCrashDumps, pruneCrashDumps } from "./crash-dumps";
-import { eventLoopProbeRunning, recentEventLoopWindows, startEventLoopProbe, stopEventLoopProbe } from "./event-loop-probe";
+import {
+  eventLoopProbeRunning,
+  recentEventLoopWindows,
+  setEventLoopProbeSampling,
+  startEventLoopProbe,
+  stopEventLoopProbe,
+} from "./event-loop-probe";
 import { buildDiagnosticsEntries, diagnosticsFileName, readHangRecords, summarizeDiagnostics } from "./export-bundle";
 import {
   hangWatchdogRunning,
@@ -152,7 +158,7 @@ export function startDiagnostics(): void {
     crashReporterOn = startCrashReporter(home);
     startHangWatchdog(dir, hangWatchdogSettings(process.env, inspector.url() !== undefined));
     syncDialogsHeld = holdDuringSyncDialogs(dialog);
-    startEventLoopProbe((line) => logMain("event-loop", line));
+    if (startEventLoopProbe((line) => logMain("event-loop", line))) sampleEventLoopWhileFocused();
     watchProcessDeaths();
   } catch (error) {
     logMain("diagnostics", `black box start failed: ${describe(error)}`);
@@ -162,6 +168,15 @@ export function startDiagnostics(): void {
     stopEventLoopProbe();
     flushBreadcrumbsSync();
   });
+}
+
+// The probe samples from startup on, then only while a Codara window has
+// focus. Blur fires before the next window gains focus, so the check waits
+// a turn.
+function sampleEventLoopWhileFocused(): void {
+  const update = (): void => setEventLoopProbeSampling(BrowserWindow.getFocusedWindow() !== null);
+  app.on("browser-window-focus", update);
+  app.on("browser-window-blur", () => setImmediate(update));
 }
 
 function redactionContext(): RedactionContext {

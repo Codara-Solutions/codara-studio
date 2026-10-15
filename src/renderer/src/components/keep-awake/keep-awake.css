@@ -57,7 +57,9 @@
   outline-offset: 1px;
 }
 
-.keep-awake-popover {
+/* Two classes: this sheet loads before styles.css, whose .spark-menu
+   padding would otherwise win the tie. */
+.spark-menu.keep-awake-popover {
   display: grid;
   gap: 8px;
   padding: 10px;

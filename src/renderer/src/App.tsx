@@ -472,6 +472,23 @@ function hasLiveAgentTerminal(tabs: Tab[]): boolean {
   return false;
 }
 
+/** The dialog on screen that holds the keyboard, if any (hidden ones don't count). */
+function visibleModalDialog(): Element | null {
+  for (const el of document.querySelectorAll('[aria-modal="true"]')) {
+    if (el.getClientRects().length > 0) return el;
+  }
+  return null;
+}
+
+/** Whether the focused terminal pane runs an agent CLI (detected, or a live worker chip). */
+function focusedPaneRunsAgent(tabs: Tab[], activeTabId: string | null): boolean {
+  if (resolveAgentChordTarget(tabs, activeTabId).kind !== "none") return true;
+  const active = tabs.find((tab) => tab.id === activeTabId);
+  if (active?.kind !== "terminal") return false;
+  const worker = findLeafByPaneId(active.root, active.activePaneId)?.worker;
+  return !!worker && worker.agentRunning !== false && worker.state !== "done";
+}
+
 function hasAlternateScreenTerminal(tabs: Tab[]): boolean {
   for (const tab of tabs) {
     if (tab.kind !== "terminal") continue;
@@ -5472,7 +5489,14 @@ export default function App() {
     () => ({
       "shortcuts.open": () => setShortcutsOpen((open) => !open),
       "runSwitcher.open": () => setRunSwitcherOpen((open) => !open),
-      "jump.open": () => setJumpPaletteOpen((open) => !open),
+      "jump.open": () => {
+        // Not over another dialog (Settings, Fix with agent, quick commands):
+        // the palette would open under it while the dialog keeps the keyboard.
+        // The palette itself is a modal, so the chord still closes it.
+        const modal = visibleModalDialog();
+        if (modal && !modal.matches('[data-testid="jump-palette"]')) return;
+        setJumpPaletteOpen((open) => !open);
+      },
       "workspace.selectByIndex": handleSelectWorkspaceByIndex,
       "workspace.back": () => {
         workspaceJump.back();
@@ -5778,16 +5802,28 @@ export default function App() {
     isDisabled: (id, event) => {
       if (isRecording()) return true;
       if (onboardingOpen && document.querySelector(".onboarding-dialog")) return true;
-      // The open jump palette answers Mod+1..6 itself, and switching
-      // workspaces behind it would leave its rows describing the old one.
-      if (
-        jumpPaletteOpen &&
-        (id === "view.selectByIndex" ||
-          id === "workspace.selectByIndex" ||
-          id === "workspace.back" ||
-          id === "workspace.forward")
-      ) {
-        return true;
+      // The open jump palette answers Mod+1..6 itself.
+      if (jumpPaletteOpen && id === "view.selectByIndex") return true;
+      if (id === "workspace.selectByIndex" || id === "workspace.back" || id === "workspace.forward") {
+        // Switching workspaces behind a dialog (the jump palette, Settings,
+        // Fix with agent) happens out of sight and leaves the dialog
+        // describing the old workspace.
+        if (visibleModalDialog()) return true;
+        // Windows and Linux bind these to Alt+1..9 and Alt+[ ]. Full-screen
+        // terminal programs (irssi, weechat, nano, mc) use those keys, so
+        // they keep them while one has the keyboard. A shell prompt or an
+        // agent CLI still gives them to Codara.
+        if (!IS_MAC && event.target instanceof Element) {
+          const session = event.target.closest(".codara-terminal-session");
+          const paneId = session?.getAttribute("data-pane-id");
+          if (
+            paneId &&
+            isTerminalPaneInAlternateScreen(paneId) &&
+            !focusedPaneRunsAgent(visibleWorkbenchTabs, activeVisibleTabId)
+          ) {
+            return true;
+          }
+        }
       }
       // The terminal split chords only act on terminal tabs; swallowing them
       // at capture phase elsewhere would kill surface-local bindings that

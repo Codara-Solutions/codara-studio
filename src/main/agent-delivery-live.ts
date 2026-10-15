@@ -29,6 +29,7 @@ export function registerAgentDelivery(): void {
         () => requestTerminalOp<PaneWorkspaceEntry[]>("panes", {}, { timeoutMs: 5_000 }),
       );
     },
+    paneRunning: (paneId) => pty.hasSession(paneId),
     async pasteIntoPane(paneId, text, submit) {
       pty.inject(paneId, text, { submit });
       // An unsubmitted paste is only text in the prompt; a submitted one starts a turn.
