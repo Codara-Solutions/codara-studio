@@ -99,9 +99,10 @@ const RUN = { SPARK_RUN_ID: "run-roster" };
 // one by 300 for codara_workspace_status, whose guidance rides on initialize,
 // and by 500 for codara_worktree_setup; execute by 1,000 for the automation
 // precheck and missed-run fields, about 520, and by 1,000 for
-// codara_worktree_setup; studio and execute by 500 each for
-// codara_session_search, about 450).
-const LIST_BUDGET = { studio: 30_300, run: 39_000, worker: 35_000, execute: 96_500, automation: 69_000 };
+// codara_worktree_setup; studio by 200 for codara_session_search, about
+// 450, with the rest of it and all of codara_share_offer paid for by shorter
+// terminal and worktree descriptions, which also kept execute in place).
+const LIST_BUDGET = { studio: 30_000, run: 39_000, worker: 35_000, execute: 96_000, automation: 69_000 };
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",

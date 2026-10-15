@@ -142,14 +142,14 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_create",
     description:
-      "Open a new agent-owned terminal tab, tinted so the user can see an agent drives it, next to your own pane. Temporary terminals are closed automatically when their Cora run finishes; use retention='service' only for a dev server or watcher the user explicitly needs afterwards (it is still closed when the run is deleted). Returns { tabId, paneId, cwd }.",
+      "Open a new agent-owned terminal tab next to your own pane. Temporary terminals are closed automatically when their Cora run finishes; use retention='service' only for a dev server or watcher the user explicitly needs afterwards (it is still closed when the run is deleted). Returns { tabId, paneId, cwd }.",
     inputSchema: {
       type: "object",
       properties: {
-        cwd: { type: "string", description: "Absolute directory that exists. Defaults to the workspace root." },
-        command: { type: "string", description: "Shell command to run right after the terminal opens." },
+        cwd: { type: "string", description: "Absolute; default the workspace root." },
+        command: { type: "string", description: "Run right after it opens." },
         title: { type: "string" },
-        group: { type: "string", description: "Tab group to open it in, named after your task." },
+        group: { type: "string", description: "Tab group, named after your task." },
         retention: {
           type: "string",
           enum: ["temporary", "service"],
@@ -162,7 +162,7 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_write",
     description:
-      "Type text into a terminal you created with codara_terminal_create or codara_terminal_run, pressing Enter unless submit=false (use submit=false for raw keys such as \"\\u0003\" for Ctrl+C). Writing to any other pane is rejected. To run a command and get its result, prefer codara_terminal_run.",
+      "Type text into a terminal you created with codara_terminal_create or codara_terminal_run, pressing Enter unless submit=false (use submit=false for raw keys such as \"\\u0003\" for Ctrl+C). Writing to any other pane is rejected.",
     inputSchema: {
       type: "object",
       required: ["paneId", "text"],
@@ -177,7 +177,7 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_read",
     description:
-      "Read a terminal pane's recent output as plain text. Any pane from codara_terminal_list can be read. Every result carries a cursor: pass it back as since to get only the output printed after that read. mode \"screen\" renders what is on screen instead, which is the readable form for full-screen programs such as Claude Code, Codex, vim, or top.",
+      "Read a terminal pane's recent output as plain text. Every result carries a cursor: pass it back as since to get only the output printed after that read. mode \"screen\" renders the screen instead, for full-screen programs such as agent CLIs, vim or top.",
     inputSchema: {
       type: "object",
       required: ["paneId"],
@@ -193,7 +193,7 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_list",
     description:
-      "List the terminal panes in your workspace: paneId, title, group, cwd, which agent runs there and its state, whether the shell is running a command or idle, isCaller for your own pane, and writable for panes you may write to. Use it to find the pane the user means, then codara_terminal_read it.",
+      "List the terminal panes in your workspace: paneId, title, group, cwd, which agent runs there and its state, whether the shell is running a command or idle, isCaller for your own pane, and writable for panes you may write to.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
@@ -266,7 +266,7 @@ const WORKSPACE_STATUS_TOOL = {
 const SESSION_SEARCH_TOOL = {
   name: "codara_session_search",
   description:
-    "Search what was said in past Claude, Codex, Grok, Pi and Cora sessions on this computer (this project's, unless the user allowed all). Returns titles, short excerpts and session ids.",
+    "Search what was said in past agent sessions on this computer (this project's unless the user allowed all). Returns titles, excerpts and session ids.",
   inputSchema: {
     type: "object",
     properties: {
