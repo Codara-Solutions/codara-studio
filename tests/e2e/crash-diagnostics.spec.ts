@@ -16,6 +16,12 @@ import { inflateRawSync } from "node:zlib";
 // launches before `ready`, is crashed and leaves a minidump too. Runs in a
 // temp HOME and Codara home; the save dialog is answered in the main process.
 
+// Right after boot a main-process evaluate can fail ("Resulting promise was
+// garbage collected") although its body ran. Every evaluate below is
+// therefore idempotent, guarded by a flag on globalThis, and repeated until
+// it answers.
+type SpecFlags = typeof globalThis & Record<string, boolean | undefined>;
+
 const PLANTED_EMAIL = "ann.tester@example.com";
 const PLANTED_TOKEN = "sk-ant-api03-PlantedTokenForTheSpec_0123456789";
 
@@ -34,15 +40,20 @@ test("a freeze and a crash are recorded, shown in About and exported without sec
     // 1.5 s, reads the stack, and records the freeze once heartbeats resume.
     // The block runs from a main-process timer: Playwright loses the result
     // of an evaluate that itself blocks this long, watchdog or not.
-    await app.evaluate(() => {
-      function blockedOnPurposeByTheSpec(ms: number): number {
-        const end = Date.now() + ms;
-        let spins = 0;
-        while (Date.now() < end) spins += 1;
-        return spins;
-      }
-      setTimeout(() => blockedOnPurposeByTheSpec(4_000), 50);
-    });
+    await expect(async () => {
+      await app!.evaluate(() => {
+        const flags = globalThis as SpecFlags;
+        if (flags.__crashSpecFreeze) return;
+        flags.__crashSpecFreeze = true;
+        function blockedOnPurposeByTheSpec(ms: number): number {
+          const end = Date.now() + ms;
+          let spins = 0;
+          while (Date.now() < end) spins += 1;
+          return spins;
+        }
+        setTimeout(() => blockedOnPurposeByTheSpec(4_000), 50);
+      });
+    }).toPass({ timeout: 15_000 });
     const hangsFile = join(fixture.codaraHome, "diagnostics", "hangs.jsonl");
     await expect.poll(() => existsSync(hangsFile), { timeout: 15_000 }).toBe(true);
     const hang = JSON.parse((await readFile(hangsFile, "utf8")).trim().split("\n")[0]);
@@ -54,14 +65,19 @@ test("a freeze and a crash are recorded, shown in About and exported without sec
       .toMatch(/\[hang\] main process did not respond for \d+\.\d s and recovered; cpu \d+%.*stack: blockedOnPurposeByTheSpec/);
 
     // A crash: a hidden, sandboxed throwaway renderer is crashed for real.
-    await app.evaluate(async ({ BrowserWindow }) => {
-      const probe = new BrowserWindow({ show: false, webPreferences: { sandbox: true } });
-      await probe.loadURL("about:blank");
-      probe.webContents.debugger.attach("1.3");
-      // Never settles: the renderer that would answer is gone.
-      void probe.webContents.debugger.sendCommand("Page.crash").catch(() => undefined);
-      setTimeout(() => probe.destroy(), 3_000);
-    });
+    await expect(async () => {
+      await app!.evaluate(async ({ BrowserWindow }) => {
+        const flags = globalThis as SpecFlags;
+        if (flags.__crashSpecRenderer) return;
+        flags.__crashSpecRenderer = true;
+        const probe = new BrowserWindow({ show: false, webPreferences: { sandbox: true } });
+        await probe.loadURL("about:blank");
+        probe.webContents.debugger.attach("1.3");
+        // Never settles: the renderer that would answer is gone.
+        void probe.webContents.debugger.sendCommand("Page.crash").catch(() => undefined);
+        setTimeout(() => probe.destroy(), 3_000);
+      });
+    }).toPass({ timeout: 15_000 });
     const dumpsDir = join(fixture.codaraHome, "crash-dumps");
     await expect.poll(() => listDumps(dumpsDir).length, { timeout: 20_000 }).toBeGreaterThan(0);
 
@@ -77,9 +93,11 @@ test("a freeze and a crash are recorded, shown in About and exported without sec
     // Export: the dialog is answered with a name without .zip, which the app adds.
     const exportsDir = join(root, "exports");
     await mkdir(exportsDir);
-    await app.evaluate(({ dialog }, target) => {
-      dialog.showSaveDialog = (async () => ({ canceled: false, filePath: target })) as unknown as typeof dialog.showSaveDialog;
-    }, join(exportsDir, "bundle"));
+    await expect(async () => {
+      await app!.evaluate(({ dialog }, target) => {
+        dialog.showSaveDialog = (async () => ({ canceled: false, filePath: target })) as unknown as typeof dialog.showSaveDialog;
+      }, join(exportsDir, "bundle"));
+    }).toPass({ timeout: 15_000 });
     const exportRow = settings.locator('[data-setting-anchor="Export diagnostics"]');
     const button = exportRow.getByRole("button", { name: "Export diagnostics" });
     await button.focus();
@@ -138,11 +156,16 @@ test("a freeze and a crash are recorded, shown in About and exported without sec
     // The GPU process was launched before `ready`; Crashpad watches it only
     // because it started before then. The app reloads its window afterwards.
     const dumpsBefore = listDumps(dumpsDir).length;
-    await app.evaluate(({ BrowserWindow }) => {
-      const probe = new BrowserWindow({ show: false });
-      void probe.loadURL("chrome://gpucrash").catch(() => undefined);
-      setTimeout(() => probe.destroy(), 3_000);
-    });
+    await expect(async () => {
+      await app!.evaluate(({ BrowserWindow }) => {
+        const flags = globalThis as SpecFlags;
+        if (flags.__crashSpecGpu) return;
+        flags.__crashSpecGpu = true;
+        const probe = new BrowserWindow({ show: false });
+        void probe.loadURL("chrome://gpucrash").catch(() => undefined);
+        setTimeout(() => probe.destroy(), 3_000);
+      });
+    }).toPass({ timeout: 15_000 });
     await expect.poll(() => listDumps(dumpsDir).length, { timeout: 20_000 }).toBeGreaterThan(dumpsBefore);
   } finally {
     await app?.close().catch(() => undefined);
