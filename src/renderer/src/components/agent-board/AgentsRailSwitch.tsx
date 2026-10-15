@@ -5,17 +5,26 @@ import { RAIL_VIEW_PANEL_ID, type RailView } from "./railView";
 import "./rail-view-switch.css";
 
 // The top of the rail's Workspaces section: a switch between the workspace
-// list in the user's own order and the Agents view, which sorts every agent
-// terminal and Cora chat of every workspace into Needs you, Working and Done.
+// list in the user's own order, the Agents view, which sorts every agent
+// terminal and Cora chat of every workspace into Needs you, Working and Done,
+// and the Sessions view, which searches every past agent session.
 // The rail renders its own list under this when the switch says Workspaces.
 
 const VIEWS: { id: RailView; label: string }[] = [
   { id: "workspaces", label: "Workspaces" },
   { id: "agents", label: "Agents" },
+  { id: "sessions", label: "Sessions" },
 ];
 
 const loadAgentBoardList = () => import("./AgentBoardList");
 const AgentBoardList = lazy(loadAgentBoardList);
+const loadSessionSearchList = () => import("../session-search/SessionSearchList");
+const SessionSearchList = lazy(loadSessionSearchList);
+
+const PRELOAD: Partial<Record<RailView, () => Promise<unknown>>> = {
+  agents: loadAgentBoardList,
+  sessions: loadSessionSearchList,
+};
 
 export default function AgentsRailSwitch({
   view,
@@ -61,7 +70,7 @@ export default function AgentsRailSwitch({
                 role="tab"
                 id={`rail-view-tab-${entry.id}`}
                 aria-selected={selected}
-                aria-controls={entry.id === "agents" ? RAIL_VIEW_PANEL_ID : undefined}
+                aria-controls={entry.id !== "workspaces" && selected ? RAIL_VIEW_PANEL_ID : undefined}
                 data-feature-tip={entry.id === "agents" ? "agent-board" : undefined}
                 aria-label={badge ? `${entry.label}, ${badge} need${badge === 1 ? "s" : ""} you` : entry.label}
                 tabIndex={selected ? 0 : -1}
@@ -69,8 +78,8 @@ export default function AgentsRailSwitch({
                 onClick={() => onChange(entry.id)}
                 onKeyDown={onTabKey}
                 // Fetch the view while the pointer or focus is on its way.
-                onPointerEnter={entry.id === "agents" ? () => void loadAgentBoardList() : undefined}
-                onFocus={entry.id === "agents" ? () => void loadAgentBoardList() : undefined}
+                onPointerEnter={PRELOAD[entry.id] ? () => void PRELOAD[entry.id]?.() : undefined}
+                onFocus={PRELOAD[entry.id] ? () => void PRELOAD[entry.id]?.() : undefined}
               >
                 {entry.label}
                 {badge > 0 && (
@@ -86,6 +95,11 @@ export default function AgentsRailSwitch({
       {live && (
         <Suspense fallback={<div className="rail-view-switch__pending" />}>
           <AgentBoardList {...board} />
+        </Suspense>
+      )}
+      {view === "sessions" && (
+        <Suspense fallback={<div className="rail-view-switch__pending" />}>
+          <SessionSearchList />
         </Suspense>
       )}
     </>

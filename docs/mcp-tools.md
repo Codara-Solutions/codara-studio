@@ -93,9 +93,9 @@ environment variable that Codara sets for the agent:
 
 | Set | Who sees it | What it adds |
 |---|---|---|
-| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, `codara_notify_user`, `codara_workspace_status` and the worktree tools; whiteboard and board only inside a Cora chat |
+| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, `codara_notify_user`, `codara_workspace_status`, `codara_session_search` and the worktree tools; whiteboard and board only inside a Cora chat |
 | `worker` | Workers in automation passes | `studio` with the whiteboard and board read-only, plus `codara_ask_user` and `codara_request_next_iteration` |
-| `execute` | A Cora chat that orchestrates work | `studio`, plus orchestration, automation management and the worktree tools |
+| `execute` | A Cora chat that orchestrates work | `studio`, plus orchestration, automation management, `codara_session_search` and the worktree tools |
 | `automation` | The chat that designs automations | `studio`, plus automation management, `codara_ask_user` and `codara_name_chat` |
 
 A Cora chat that answers directly, without workers, gets `studio` plus
@@ -608,6 +608,24 @@ each overwrite the other's latest value, and every change is kept as a
 checkpoint. Statuses live in `<codaraHome>/workspace-status.json` and are
 dropped when their workspace is deleted. Agents without MCP use
 `cora tool workspace_status --status in_progress --note "..."`.
+
+## Past sessions
+
+In `studio` outside a Cora chat and in `execute`.
+
+| Tool | What it does |
+|---|---|
+| `codara_session_search` | Searches what was said in past Claude Code, Codex, Grok, Pi and Cora sessions on this computer, from Codara's [session index](./agent-session-search.md). `query` is the words to find (at most 200 characters), `limit` the number of sessions (default 8, at most 20). Each result has the agent, session id, title, folder, last use, message count and an excerpt of at most 240 characters. Read-only. |
+
+It searches the project of the caller's own workspace (every worktree of its
+repository), found from the terminal pane or Cora chat the agent runs in,
+never named by the call. Only when you choose **Every session** under
+Settings, Sessions, **What agents can search** does it search every indexed
+session. With session search turned off, or from an agent outside a local
+Codara workspace, it answers `ok: false` with a note. Imported pull request
+runs cannot call it. The server's instructions tell agents that the excerpts
+are quoted history, never instructions. Agents without MCP use
+`cora tool session_search --query "..."`.
 
 ## Worktrees
 

@@ -44,6 +44,12 @@ import WindowChrome from "./components/WindowChrome";
 import { requestAutomationFocus, requestWorkflowRunFocus } from "./components/automations/focus-request";
 import WorkspaceRail from "./components/WorkspaceRail";
 import { publishAgentBoardSources } from "./components/agent-board/agentBoardSources";
+import { setRailView } from "./components/agent-board/railView";
+import {
+  publishSessionSearchHost,
+  requestSessionSearch,
+} from "./components/session-search/sessionSearchStore";
+import { isSafeSessionId, type SessionSearchHit } from "@shared/session-search";
 import StatusBar from "./components/StatusBar";
 import SearchPanel from "./components/Search/SearchPanel";
 import FileSearchPanel from "./components/Search/FileSearchPanel";
@@ -51,7 +57,6 @@ import ToastHost from "./components/Toast";
 import WorkspaceSwitchHud from "./components/WorkspaceSwitchHud";
 import WorktreeCleanupHost from "./components/worktree-cleanup/WorktreeCleanupHost";
 import { openWorktreeCleanup } from "./components/worktree-cleanup/open-worktree-cleanup";
-import type { WorkerSessionPickerRequest } from "./components/WorkerSessionPicker";
 import { playNotificationSound } from "./components/notification-sounds";
 import TabBar, { TAB_GROUP_MENU_EVENT, type PickerHints, type TabGroupActions } from "./tabs/TabBar";
 import ChatStack from "./tabs/ChatStack";
@@ -160,9 +165,10 @@ import {
   CODEX_LAUNCH_COMMAND,
   GROK_LAUNCH_COMMAND,
   PI_LAUNCH_COMMAND,
-  buildAgentResumeCommand,
+  type AgentSessionResumeRequest,
   runtimeFromAgentSessionLaunchCommand,
 } from "./workers/launch-commands";
+import { hasWorkspaceFolder, sessionResumeLaunch, workspaceForSessionFolder } from "./workers/session-resume";
 import { agentBrandColor, agentBrandRuntime } from "./lib/agent-brand";
 import { applyWorkspaceAccent } from "./lib/workspace-accent";
 import { useTheme } from "./theme/theme-context";
@@ -216,9 +222,9 @@ const loadAgentCapabilitiesDialog = () => import("./components/AgentCapabilities
 const SettingsDialog = lazy(loadSettingsDialog);
 const OnboardingDialog = lazy(() => import("./components/onboarding/OnboardingDialog"));
 const FeatureTipsHost = lazy(() => import("./components/feature-tips/FeatureTipsHost"));
+const SessionSearchIntroHost = lazy(() => import("./components/session-search/SessionSearchIntroHost"));
 const SessionInspector = lazy(() => import("./components/SessionInspector"));
 const AgentCapabilitiesDialog = lazy(loadAgentCapabilitiesDialog);
-const WorkerSessionPicker = lazy(() => import("./components/WorkerSessionPicker"));
 const RunSwitcher = lazy(() => import("./components/RunSwitcher"));
 const JumpPalette = lazy(() => import("./components/jump/JumpPalette"));
 const CreateCopyDialog = lazy(() => import("./components/CreateCopyDialog"));
@@ -564,8 +570,6 @@ export default function App() {
   >("mcp");
   const [capabilitiesProfileId, setCapabilitiesProfileId] = useState<string | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
-  const [workerSessionPicker, setWorkerSessionPicker] =
-    useState<WorkerSessionPickerRequest | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
   // Pure renderer overlay — reads the active run, displays cost / events /
@@ -4673,8 +4677,8 @@ export default function App() {
 
   // The top tab-strip "+" has a different scope from the "+" inside a
   // terminal. Its worker rows always mint a separate terminal tab, even when
-  // the active terminal has an unused pane. The terminal-local menu supplies
-  // its own split callback through openPaneWorkerSessions below.
+  // the active terminal has an unused pane. The terminal-local menu splits
+  // its own tab instead (TerminalStack's AddPaneMenu).
   const launchWorkerInNewTerminalTab = useCallback(
     (
       autorun: string,
@@ -4745,137 +4749,57 @@ export default function App() {
     return activeWorkspace?.cwd ?? null;
   }, [activeWorkspace?.cwd]);
 
-  const openShortcutWorkerSessions = useCallback(
-    (runtime: WorkerSessionRuntime) => {
+  // The tab-strip "+" worker rows: a new session of that agent in its own
+  // terminal tab, in the folder the active terminal is in. Earlier sessions
+  // are resumed from the Sessions view instead.
+  const launchNewWorkerTab = useCallback(
+    (command: string) => {
       const cwd = resolveWorkerLaunchCwd();
-      const freshCommand =
-        runtime === "claude"
-          ? CLAUDE_LAUNCH_COMMAND
-          : runtime === "grok"
-            ? GROK_LAUNCH_COMMAND
-            : CODEX_LAUNCH_COMMAND;
-      if (!cwd) {
-        handleNewWorkerPane(freshCommand);
-        return;
-      }
-      setWorkerSessionPicker({
-        runtime,
-        cwd,
-        launch: (command, session) => handleNewWorkerPane(command, { cwd, session }),
-      });
-    },
-    [handleNewWorkerPane, resolveWorkerLaunchCwd],
-  );
-
-  const openTabBarWorkerSessions = useCallback(
-    (runtime: WorkerSessionRuntime) => {
-      const cwd = resolveWorkerLaunchCwd();
-      const freshCommand =
-        runtime === "claude"
-          ? CLAUDE_LAUNCH_COMMAND
-          : runtime === "grok"
-            ? GROK_LAUNCH_COMMAND
-            : CODEX_LAUNCH_COMMAND;
-      if (!cwd) {
-        launchWorkerInNewTerminalTab(freshCommand);
-        return;
-      }
-      setWorkerSessionPicker({
-        runtime,
-        cwd,
-        launch: (command, session) =>
-          launchWorkerInNewTerminalTab(command, { cwd, session }),
-      });
+      launchWorkerInNewTerminalTab(command, cwd ? { cwd } : undefined);
     },
     [launchWorkerInNewTerminalTab, resolveWorkerLaunchCwd],
   );
-
-  // Bound per runtime so the memoized TabBar gets stable callbacks. These
-  // deliberately use the tab-scoped launcher, while keyboard commands keep
-  // their pane-scoped behavior below.
-  const openClaudeWorkerSessions = useCallback(
-    () => openTabBarWorkerSessions("claude"),
-    [openTabBarWorkerSessions],
+  // Bound per runtime so the memoized TabBar gets stable callbacks.
+  const openClaudeWorker = useCallback(
+    () => launchNewWorkerTab(CLAUDE_LAUNCH_COMMAND),
+    [launchNewWorkerTab],
   );
-  const openCodexWorkerSessions = useCallback(
-    () => openTabBarWorkerSessions("codex"),
-    [openTabBarWorkerSessions],
+  const openCodexWorker = useCallback(
+    () => launchNewWorkerTab(CODEX_LAUNCH_COMMAND),
+    [launchNewWorkerTab],
   );
-  const openGrokWorkerSessions = useCallback(
-    () => openTabBarWorkerSessions("grok"),
-    [openTabBarWorkerSessions],
+  const openGrokWorker = useCallback(
+    () => launchNewWorkerTab(GROK_LAUNCH_COMMAND),
+    [launchNewWorkerTab],
   );
-  const openPiWorker = useCallback(() => {
-    const cwd = resolveWorkerLaunchCwd();
-    launchWorkerInNewTerminalTab(PI_LAUNCH_COMMAND, cwd ? { cwd } : undefined);
-  }, [launchWorkerInNewTerminalTab, resolveWorkerLaunchCwd]);
-  const openPaneWorkerSessions = useCallback(
-    (
-      runtime: WorkerSessionRuntime,
-      cwd: string | undefined,
-      launch: WorkerSessionPickerRequest["launch"],
-    ) => {
-      if (!cwd) {
-        launch(
-          runtime === "claude"
-            ? CLAUDE_LAUNCH_COMMAND
-            : runtime === "grok"
-              ? GROK_LAUNCH_COMMAND
-              : CODEX_LAUNCH_COMMAND,
-          null,
-        );
-        return;
-      }
-      setWorkerSessionPicker({ runtime, cwd, launch });
-    },
-    [],
+  const openPiWorker = useCallback(
+    () => launchNewWorkerTab(PI_LAUNCH_COMMAND),
+    [launchNewWorkerTab],
   );
 
-  const pendingSettingsSessionLaunchRef = useRef<{
-    workspaceId: string;
-    runtime: WorkerSessionRuntime;
-    cwd: string;
-    session: WorkerSessionSummary;
-  } | null>(null);
+  // Resuming a past session: Settings' session list and the rail's Sessions
+  // view. The session opens in a new terminal tab of the workspace that holds
+  // its folder (added first when none does), through the same resume command
+  // a restored pane uses.
+  const pendingSessionResumeRef = useRef<(AgentSessionResumeRequest & { workspaceId: string }) | null>(null);
 
-  const launchSettingsSession = useCallback(
-    async (request: {
-      runtime: WorkerSessionRuntime;
-      cwd: string;
-      session: WorkerSessionSummary;
-    }) => {
-      const pointer: TerminalAgentSession = {
-        runtime: request.runtime,
-        nativeCodexProfileId: request.session.nativeCodexProfileId,
-        nativeGrokProfileId: request.session.nativeGrokProfileId,
-        sessionId: request.session.sessionId,
-        cwd: request.cwd,
-        transcriptPath: request.session.transcriptPath,
-        capturedAt: new Date().toISOString(),
-        active: false,
-      };
-      const command = buildAgentResumeCommand(pointer);
-      tabsRef.current.newTerminalTab(request.cwd, command, {
-        agentSession: pointer,
-        manualAgentRuntime: request.runtime,
-        color: workerTabBrandColor(request.runtime),
-      });
-    },
-    [],
-  );
+  const launchSessionResume = useCallback((request: AgentSessionResumeRequest) => {
+    const launch = sessionResumeLaunch(request, new Date().toISOString());
+    if (!launch) return;
+    tabsRef.current.newTerminalTab(request.cwd, launch.command, {
+      agentSession: launch.pointer,
+      manualAgentRuntime: request.runtime,
+      color: workerTabBrandColor(request.runtime),
+    });
+  }, []);
 
-  const handleSettingsOpenWorkerSession = useCallback(
-    async (
-      runtime: WorkerSessionRuntime,
-      cwd: string,
-      session: WorkerSessionSummary,
-    ) => {
-      const normalized = (value: string) => {
-        const path = value.replace(/\\/g, "/").replace(/\/+$/, "");
-        return platform === "win32" ? path.toLowerCase() : path;
-      };
+  const resumeAgentSession = useCallback(
+    async (request: AgentSessionResumeRequest) => {
+      // The id is typed into a shell; only the shapes the CLIs mint pass.
+      if (!isSafeSessionId(request.sessionId)) return;
+      const { cwd } = request;
       const currentWorkspaces = workspacesRef.current;
-      let workspace = currentWorkspaces.find((item) => normalized(item.cwd) === normalized(cwd));
+      let workspace = workspaceForSessionFolder(currentWorkspaces, cwd, platform);
 
       if (!workspace) {
         const color = pickWorkspaceColor(
@@ -4893,34 +4817,71 @@ export default function App() {
           ?.setAllowedRoots([...currentWorkspaces.map((item) => item.cwd), cwd])
           .catch(() => undefined);
         const created = workspace;
-        setWorkspaces((items) =>
-          items.some((item) => normalized(item.cwd) === normalized(cwd))
-            ? items
-            : [...items, created],
-        );
+        setWorkspaces((items) => (hasWorkspaceFolder(items, cwd, platform) ? items : [...items, created]));
         activeRunIdsByWorkspaceRef.current[workspace.id] = null;
       }
 
-      const request = { runtime, cwd, session };
-      setSettingsOpen(false);
       if (tabsRef.current.tabsWorkspaceId === workspace.id) {
-        window.setTimeout(() => void launchSettingsSession(request), 0);
+        window.setTimeout(() => launchSessionResume(request), 0);
         return;
       }
-      pendingSettingsSessionLaunchRef.current = { workspaceId: workspace.id, ...request };
+      pendingSessionResumeRef.current = { workspaceId: workspace.id, ...request };
       setActiveId(workspace.id);
     },
-    [launchSettingsSession, platform],
+    [launchSessionResume, platform],
   );
 
   useEffect(() => {
-    const pending = pendingSettingsSessionLaunchRef.current;
+    const pending = pendingSessionResumeRef.current;
     if (!pending || pending.workspaceId !== tabs.tabsWorkspaceId) return;
-    pendingSettingsSessionLaunchRef.current = null;
-    window.setTimeout(() => {
-      void launchSettingsSession(pending);
-    }, 0);
-  }, [launchSettingsSession, tabs.tabsWorkspaceId]);
+    pendingSessionResumeRef.current = null;
+    window.setTimeout(() => launchSessionResume(pending), 0);
+  }, [launchSessionResume, tabs.tabsWorkspaceId]);
+
+  const handleSettingsOpenWorkerSession = useCallback(
+    (runtime: WorkerSessionRuntime, cwd: string, session: WorkerSessionSummary) => {
+      setSettingsOpen(false);
+      void resumeAgentSession({
+        runtime,
+        cwd,
+        sessionId: session.sessionId,
+        transcriptPath: session.transcriptPath,
+        nativeCodexProfileId: session.nativeCodexProfileId,
+        nativeGrokProfileId: session.nativeGrokProfileId,
+      });
+    },
+    [resumeAgentSession],
+  );
+
+  // The rail's Sessions view opens what it found through here.
+  const openSearchedSession = useCallback(
+    (hit: SessionSearchHit) => {
+      if (hit.agent === "cora") {
+        handleSelectRunAnywhere(hit.sessionId, hit.workspaceId ?? undefined);
+        return;
+      }
+      if (!hit.cwd) return;
+      void resumeAgentSession({ runtime: hit.agent, cwd: hit.cwd, sessionId: hit.sessionId });
+    },
+    [handleSelectRunAnywhere, resumeAgentSession],
+  );
+  const sessionSearchCwd = activeWorkspace && !activeWorkspace.remote ? activeWorkspace.cwd : null;
+  useEffect(() => {
+    publishSessionSearchHost({ workspaceCwd: sessionSearchCwd, openSession: openSearchedSession });
+  }, [sessionSearchCwd, openSearchedSession]);
+  useEffect(() => () => publishSessionSearchHost(null), []);
+
+  // The jump palette's "Search agent sessions": the rail's Sessions view,
+  // made visible, with the query in its box.
+  const openSessionSearch = useCallback((query: string) => {
+    const side: PanelSide = panelsRef.current.sections.left.includes("workspaces") ? "left" : "right";
+    if (compactWorkbenchRef.current) setCompactPanel(side);
+    else if (side === "left") setShowLeft(true);
+    else setShowRight(true);
+    panelsRef.current.revealSection("workspaces");
+    setRailView("sessions");
+    requestSessionSearch(query, "all");
+  }, []);
 
   const handleNewEditorTab = useCallback(() => {
     setSearchOpen(false);
@@ -5596,16 +5557,10 @@ export default function App() {
       "tab.newEditor": handleNewEditorTab,
       "tab.newPreview": handleNewPreviewTab,
       "tab.newWhiteboard": handleNewWhiteboard,
-      // Fresh-launch commands bypass the session picker entirely — rebinding
-      // them to the picker broke existing muscle memory (Ctrl+Shift+ñ etc.).
-      // The picker lives on its own `worker.*Sessions` commands.
       "worker.newClaude": () => handleNewWorkerPane(CLAUDE_LAUNCH_COMMAND),
       "worker.newCodex": () => handleNewWorkerPane(CODEX_LAUNCH_COMMAND),
       "worker.newGrok": () => handleNewWorkerPane(GROK_LAUNCH_COMMAND),
       "worker.newPi": () => handleNewWorkerPane(PI_LAUNCH_COMMAND),
-      "worker.claudeSessions": () => openShortcutWorkerSessions("claude"),
-      "worker.codexSessions": () => openShortcutWorkerSessions("codex"),
-      "worker.grokSessions": () => openShortcutWorkerSessions("grok"),
       "tab.close": () => {
         if (!activeVisibleTabId) return;
         const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
@@ -5799,7 +5754,6 @@ export default function App() {
       handleNewTerminalTab,
       handleNewWhiteboard,
       handleNewWorkerPane,
-      openShortcutWorkerSessions,
       handleCloseChatTab,
       handleToggleLeft,
       handleToggleRight,
@@ -6495,12 +6449,11 @@ export default function App() {
               onPaneScrollback={handlePaneScrollback}
               onTerminalPaneAgentState={onTerminalPaneAgentState}
               onTerminalPaneRuntimeState={onTerminalPaneRuntimeState}
-              onOpenWorkerSessionPicker={openPaneWorkerSessions}
               onNewTerminalTab={handleNewTerminalTab}
               onNewPreviewTab={handleNewPreviewTab}
-              onNewClaudeWorker={openClaudeWorkerSessions}
-              onNewCodexWorker={openCodexWorkerSessions}
-              onNewGrokWorker={openGrokWorkerSessions}
+              onNewClaudeWorker={openClaudeWorker}
+              onNewCodexWorker={openCodexWorker}
+              onNewGrokWorker={openGrokWorker}
               onNewPiWorker={openPiWorker}
               onNewChat={handleNewChat}
               onOpenBoardCardRun={handleOpenBoardCardRun}
@@ -6612,6 +6565,11 @@ export default function App() {
             <FeatureTipsHost onboardingOpen={onboardingOpen} hasWorkspaces={workspaces.length > 0} />
           </Suspense>
         )}
+        {booted && (
+          <Suspense fallback={null}>
+            <SessionSearchIntroHost onboardingOpen={onboardingOpen} hasWorkspaces={workspaces.length > 0} />
+          </Suspense>
+        )}
 
         {onboardingOpen && (
           <Suspense fallback={null}>
@@ -6674,15 +6632,6 @@ export default function App() {
           </Suspense>
         ) : null}
 
-        {workerSessionPicker ? (
-          <Suspense fallback={null}>
-            <WorkerSessionPicker
-              request={workerSessionPicker}
-              onClose={() => setWorkerSessionPicker(null)}
-            />
-          </Suspense>
-        ) : null}
-
         {jumpPaletteOpen ? (
           <Suspense fallback={null}>
             <JumpPalette
@@ -6717,6 +6666,10 @@ export default function App() {
                 workspaceJump.jumpTo(target);
               }}
               onCreateWorktree={handleJumpCreateWorktree}
+              onSearchSessions={(query) => {
+                setJumpPaletteOpen(false);
+                openSessionSearch(query);
+              }}
             />
           </Suspense>
         ) : null}
@@ -7108,20 +7061,12 @@ interface WorkspaceProps {
     state: TerminalAgentForegroundState,
   ) => void;
   onTerminalPaneRuntimeState: (tabId: string, paneId: string, state: RuntimeState) => void;
-  onOpenWorkerSessionPicker: (
-    runtime: WorkerSessionRuntime,
-    cwd: string | undefined,
-    launch: WorkerSessionPickerRequest["launch"],
-  ) => void;
   onNewTerminalTab: () => void;
   onNewPreviewTab: () => void;
-  // Tab-strip "+" worker rows. They open the worker session picker for the
-  // resolved workspace cwd, so the same row starts a new agent or resumes /
-  // deletes one from this workspace's history.
+  // Tab-strip "+" worker rows: each starts a new session of that agent.
   onNewClaudeWorker: () => void;
   onNewCodexWorker: () => void;
   onNewGrokWorker: () => void;
-  // Pi keeps its own sessions, so its row opens a fresh `pi` directly.
   onNewPiWorker: () => void;
   onNewChat: () => void;
   // "Open chat" on a Cora Board card with a live run — App's run-selection
@@ -7172,7 +7117,6 @@ const Workspace = React.memo(function Workspace({
   onPaneScrollback,
   onTerminalPaneAgentState,
   onTerminalPaneRuntimeState,
-  onOpenWorkerSessionPicker,
   onNewTerminalTab,
   onNewPreviewTab,
   onNewClaudeWorker,
@@ -8026,9 +7970,6 @@ const Workspace = React.memo(function Workspace({
                 }
                 onPaneAgentState={isActive ? onTerminalPaneAgentState : noopTerminalCb}
                 onPaneRuntimeState={isActive ? onTerminalPaneRuntimeState : noopTerminalCb}
-                onOpenWorkerSessionPicker={
-                  isActive ? onOpenWorkerSessionPicker : noopTerminalCb
-                }
                 onPaneResumeUnavailable={isActive ? handleLeafResumeUnavailable : noopTerminalCb}
                 onPaneResumeFallback={isActive ? handleLeafResumeFallback : noopTerminalCb}
                 onPaneBootResumeConsumed={isActive ? handleLeafBootResumeConsumed : noopTerminalCb}

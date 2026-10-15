@@ -183,6 +183,9 @@ async function main() {
     for (const row of renderedRows(read(path.join(COMPONENTS, "keep-awake", "KeepAwakeSettings.tsx")))) {
       if (!findable("general", row.name)) missing.push(`general › ${row.name} (KeepAwakeSettings.tsx)`);
     }
+    for (const row of renderedRows(read(path.join(COMPONENTS, "session-search", "SessionSearchSettings.tsx")))) {
+      if (!findable("sessions", row.name)) missing.push(`sessions › ${row.name} (SessionSearchSettings.tsx)`);
+    }
     for (const row of launchArgsRows()) {
       if (!findable("agents", row.name)) missing.push(`agents › ${row.name} (LaunchArgsSection.tsx)`);
     }
@@ -210,6 +213,7 @@ async function main() {
     }
     for (const row of renderedRows(read(path.join(COMPONENTS, "chrome", "ChromeLinkSection.tsx")))) rendered.general.add(row.name);
     for (const row of renderedRows(read(path.join(COMPONENTS, "keep-awake", "KeepAwakeSettings.tsx")))) rendered.general.add(row.name);
+    for (const row of renderedRows(read(path.join(COMPONENTS, "session-search", "SessionSearchSettings.tsx")))) rendered.sessions.add(row.name);
     rendered["remote-access"] = new Set(
       renderedRows(read(path.join(COMPONENTS, "RemoteAccessSettings.tsx"))).map((row) => row.name),
     );

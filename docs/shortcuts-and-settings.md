@@ -165,9 +165,11 @@ one, Shift+Enter edits it.
 
 ### Workers
 
-"New ... worker pane" starts a fresh session right away. "Open ... worker
-sessions" shows the workspace's recent sessions so you can resume one. None of
-these has a default chord.
+"New ... worker pane" starts a fresh session right away. To resume an earlier
+session, search for it in the rail's Sessions view, or type in the jump
+palette and pick "Search agent sessions" (see
+[Agent session search](agent-session-search.md)). None of these has a default
+chord.
 
 | Action | Default | Command id |
 |---|---|---|
@@ -175,9 +177,6 @@ these has a default chord.
 | New Codex worker pane | (unbound) | `worker.newCodex` |
 | New Grok worker pane | (unbound) | `worker.newGrok` |
 | New Pi worker pane | (unbound) | `worker.newPi` |
-| Open Claude worker sessions... | (unbound) | `worker.claudeSessions` |
-| Open Codex worker sessions... | (unbound) | `worker.codexSessions` |
-| Open Grok worker sessions... | (unbound) | `worker.grokSessions` |
 
 ### Agent
 
@@ -241,7 +240,7 @@ The pages:
 | Quick commands | Saved shell commands and agent prompts: add, edit, reorder, delete, and where each is offered. Also what a right-click in a terminal does. See [Quick commands](#quick-commands). |
 | API and model | An OpenRouter key, and how Git commit messages are generated. |
 | Agents | Your accounts (see [accounts.md](./accounts.md)), **Install Pi** when Pi is not installed yet, and **Open Capability Center** and **Worker models** buttons, which close Settings and open the Capability Center on MCP servers or on worker models. |
-| Sessions | Browse and resume Claude and Codex sessions from any local project, choose whether running agent sessions (Claude Code, Codex, Grok and Pi panes) resume when Codara reopens, whether terminal panes keep their output across restarts (**Keep terminal output across restarts**, on by default), and how long an idle agent in a background workspace may wait before it sleeps (**Let idle agents sleep**, see below). |
+| Sessions | Turn agent session search on or off and choose what it indexes (see [agent-session-search.md](./agent-session-search.md)), browse and resume Claude and Codex sessions from any local project, choose whether running agent sessions (Claude Code, Codex, Grok and Pi panes) resume when Codara reopens, whether terminal panes keep their output across restarts (**Keep terminal output across restarts**, on by default), and how long an idle agent in a background workspace may wait before it sleeps (**Let idle agents sleep**, see below). |
 | Remote access | Turn phone access on, pair a device, and revoke paired devices (see [remote-access.md](./remote-access.md)). |
 | Keybindings | Rebind or unbind every command above. |
 | Runs | Every Cora run: browse, keep, delete. |
@@ -647,8 +646,10 @@ once read. It is saved in `notifications.json` and the mutes in
 
 The switch at the top of the rail's Workspaces section picks what the
 section lists: **Workspaces**, your workspaces in your own order (the
-default), or **Agents**, every agent of every workspace sorted by what it
-needs from you. Codara remembers the choice when it restarts. While the
+default), **Agents**, every agent of every workspace sorted by what it
+needs from you, or **Sessions**, which searches your past agent sessions
+(see [agent-session-search.md](./agent-session-search.md)). Codara remembers
+the choice when it restarts. While the
 Workspaces list shows, the **Agents** side of the switch counts the agents
 waiting on you.
 
@@ -685,7 +686,8 @@ could pick the highlighted answer, often Yes, without you choosing it.
 Clicking a card, or Enter on it, switches to its workspace and opens its pane
 or chat.
 
-Keys: Left and Right move between **Workspaces** and **Agents**; in the
+Keys: Left and Right move between **Workspaces**, **Agents** and
+**Sessions**; in the
 list, Up and Down (or Home and End) move between cards, Tab reaches a card's
 reply box or its **Answer in terminal** button, and Escape goes back to the
 card.

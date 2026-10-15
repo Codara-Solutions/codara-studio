@@ -63,18 +63,21 @@ async function openSession(
     await page.keyboard.press("Enter");
     return;
   }
-  await page.getByRole("button", { name: "New tab", exact: true }).dispatchEvent("click");
-  const picker = page.locator(".spark-tabbar-picker");
-  const workerLabel = runtime === "claude" ? "Claude worker" : "Codex worker";
-  await picker.getByRole("button", { name: workerLabel }).dispatchEvent("click");
-  const dialogName = runtime === "claude" ? "Claude sessions" : "Codex sessions";
-  const dialog = page.getByRole("dialog", { name: dialogName });
-  await expect(dialog).toBeVisible();
   if (launchKind === "fresh") {
-    await dialog.getByRole("button", { name: "New session" }).dispatchEvent("click");
-  } else {
-    await dialog.getByTitle("Resume readiness fixture").dispatchEvent("click");
+    // The tab strip's worker row starts a new session in a new tab at once.
+    await page.getByRole("button", { name: "New tab", exact: true }).dispatchEvent("click");
+    const picker = page.locator(".spark-tabbar-picker");
+    const workerLabel = runtime === "claude" ? "Claude worker" : "Codex worker";
+    await picker.getByRole("button", { name: workerLabel }).dispatchEvent("click");
+    return;
   }
+  // An earlier session is resumed from the rail's Sessions view.
+  await page.getByRole("tablist", { name: "Rail view" }).getByRole("tab", { name: /^Sessions/ }).click();
+  const sessions = page.getByTestId("session-search");
+  await sessions.getByRole("searchbox", { name: "Search agent sessions" }).fill("readiness fixture");
+  const row = sessions.locator(`[data-session-row][data-session-agent="${runtime}"]`);
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  await row.click();
 }
 
 async function prepareFixture(): Promise<{
@@ -174,6 +177,11 @@ async function writeSessionFixtures(homeDir: string, workspaceDir: string) {
           source: "cli",
           timestamp: new Date().toISOString(),
         },
+      }),
+      JSON.stringify({
+        type: "response_item",
+        timestamp: new Date().toISOString(),
+        payload: { type: "message", role: "user", content: [{ type: "input_text", text: "readiness fixture" }] },
       }),
       JSON.stringify({
         type: "event_msg",

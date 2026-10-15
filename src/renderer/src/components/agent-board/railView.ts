@@ -2,20 +2,22 @@ import { useSyncExternalStore } from "react";
 import { recordFeatureUse } from "../feature-tips/feature-usage";
 
 // Which list the Workspaces section of the rail shows: the workspaces in
-// the user's own order (the default), or the Agents view. Remembered across
+// the user's own order (the default), the Agents view, or the Sessions view
+// (agent session search). Remembered across
 // restarts like the rest of the panel layout, in localStorage. One store for
 // the whole window, so a section moved to the other rail keeps its view.
 
-export type RailView = "workspaces" | "agents";
+export type RailView = "workspaces" | "agents" | "sessions";
 
 export const RAIL_VIEW_STORAGE_KEY = "codara.rail.view";
 
-/** The Agents view's element id, which the switch's tab controls. */
+/** The Agents or Sessions view's element id, which the switch's tab controls. */
 export const RAIL_VIEW_PANEL_ID = "rail-view-panel";
 
 function readRailView(): RailView {
   try {
-    return window.localStorage.getItem(RAIL_VIEW_STORAGE_KEY) === "agents" ? "agents" : "workspaces";
+    const stored = window.localStorage.getItem(RAIL_VIEW_STORAGE_KEY);
+    return stored === "agents" || stored === "sessions" ? stored : "workspaces";
   } catch {
     return "workspaces";
   }

@@ -385,6 +385,9 @@ async function main() {
       "src/main/orchestration/native-cli-shell-defaults.ts",
       "src/main/orchestration/unified-account-migration.ts",
       "src/main/pty-manager.ts",
+      // Agent session search reads the personal and Codara Claude projects
+      // roots to index transcripts; it never launches anything.
+      "src/main/session-search/service.ts",
       // Read-only transcript discovery needs the personal Claude projects
       // root; it is analytics, not an execution or launch surface.
       "src/main/usage-analytics.ts",

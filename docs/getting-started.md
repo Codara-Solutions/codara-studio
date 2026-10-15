@@ -92,8 +92,9 @@ Once the guide is done, try these in your workspace:
    `claude`, `codex`, `grok` or `pi` as you normally would.
 2. **An agent pane.** Open the **+** menu in the tab bar and pick
    **Claude worker**, **Codex worker**, **Grok worker** or **Pi worker**.
-   The first three show the workspace's recent sessions so you can resume
-   one or start fresh; Pi starts right away.
+   A new session starts right away in its own tab. To pick up an earlier
+   one, open **Sessions** at the top of the rail, search for it and click
+   it (see [Agent session search](agent-session-search.md)).
 3. **Cora.** Click **Cora** in the tab bar and describe a small change.
    Cora plans it, runs workers in their own panes, and shows progress on the
    chat's board.

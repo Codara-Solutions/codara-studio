@@ -45,6 +45,7 @@ import { diagnosticsApi } from "./areas/diagnostics";
 import { pointApi } from "./areas/point";
 import { reviewApi } from "./areas/review";
 import { featureTipsApi } from "./areas/feature-tips";
+import { sessionSearchApi } from "./areas/session-search";
 import { serversApi } from "./areas/servers";
 import { workspaceStatusApi } from "./areas/workspace-status";
 import { skillOriginsApi } from "./areas/skill-origins";
@@ -161,7 +162,6 @@ import type {
   ExportCoraWhiteboardFileInput,
   ExportFileDialogInput,
   ImportedCoraWhiteboardFile,
-  WorkerSessionRuntime,
   WorkerSessionSummary,
   PiSubscriptionAddAccountInput,
   PiRuntimeInstallEvent,
@@ -1305,16 +1305,6 @@ const api = {
   // session's id, probe whether it still exists before resuming, and pre-seed
   // Codex directory trust. See src/main/ipc.ts "agentSession:*" handlers.
   agentSession: {
-    // List resumable sessions whose recorded cwd matches the worker launch
-    // directory. The main process reads CLI-owned JSONL metadata; transcript
-    // contents remain on disk.
-    list: (args: {
-      runtime: WorkerSessionRuntime;
-      cwd: string;
-      nativeCodexProfileId?: string;
-      nativeClaudeProfileId?: string;
-      nativeGrokProfileId?: string;
-    }): Promise<WorkerSessionSummary[]> => ipcRenderer.invoke("agentSession:list", args),
     listAll: (): Promise<WorkerSessionSummary[]> => ipcRenderer.invoke("agentSession:listAll"),
     delete: (input: DeleteWorkerSessionInput): Promise<DeleteWorkerSessionResult> =>
       ipcRenderer.invoke("agentSession:delete", input),
@@ -1806,6 +1796,7 @@ const api = {
   terminalScrollback: terminalScrollbackApi,
   worktreeCleanup: worktreeCleanupApi,
   featureTips: featureTipsApi,
+  sessionSearch: sessionSearchApi,
 };
 
 function isBrowserUrl(url: string): boolean {

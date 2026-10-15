@@ -140,7 +140,6 @@ import type {
 import {
   deleteWorkerSession,
   listAllWorkerSessions,
-  listWorkerSessions,
 } from "./worker-sessions";
 import {
   centerSummary,
@@ -477,7 +476,6 @@ import type {
   UpdateScheduledJobInput,
   DeleteWorkerSessionInput,
   DeleteWorkerSessionResult,
-  WorkerSessionRuntime,
   WorkerSessionSummary,
 } from "@shared/types";
 import { isPiSubscriptionProvider } from "../shared/agent-families";
@@ -490,6 +488,7 @@ import { registerReviewIpc } from "./review";
 import { registerGitFixIpc } from "./git-fix-ipc";
 import { registerDiagnosticsIpc } from "./diagnostics";
 import { registerFeatureTipsIpc } from "./feature-tips";
+import { registerSessionSearchIpc } from "./session-search/service";
 import { registerServersIpc } from "./servers";
 import { registerWorkspaceStatusIpc } from "./workspace-status";
 import { afterSkillAssetDeleted, afterSkillAssetInstalled, registerSkillUpdatesIpc, skillOriginsDir } from "./skill-updates-ipc";
@@ -3097,8 +3096,8 @@ export function registerIpc(): void {
   // spawns, and focuses in one tick, but main can hold the spawn for seconds
   // (native-account resolution shells out to the claude/codex CLIs before a
   // plain shell starts). pty.write/inject silently no-op on an unknown id, so
-  // bytes sent in that window — early keystrokes, or the session picker's
-  // injected launch command landing in a still-booting pane — used to vanish.
+  // bytes sent in that window (early keystrokes, or an injected launch
+  // command landing in a still-booting pane) used to vanish.
   // Ride out the in-flight spawn instead; a session that never comes up still
   // drops the bytes after the bound. IPC arrival order is preserved across the
   // wait: spawnWaiters resolve in registration order, so queued writes land in
@@ -3213,71 +3212,6 @@ export function registerIpc(): void {
   });
 
   // ── Agent session restore (manual Claude/Codex terminal panes) ──────────
-  handle(
-    "agentSession:list",
-    async (
-      _e,
-      args: {
-        runtime: WorkerSessionRuntime;
-        cwd: string;
-        nativeCodexProfileId?: string;
-        nativeClaudeProfileId?: string;
-        nativeGrokProfileId?: string;
-      },
-    ): Promise<WorkerSessionSummary[]> => {
-      if (
-        !args ||
-        (args.runtime !== "claude" && args.runtime !== "codex" && args.runtime !== "grok")
-      ) {
-        return [];
-      }
-      if (typeof args.cwd !== "string" || !args.cwd.trim()) return [];
-      assertLocalWorkspace(args.cwd, "Worker session history");
-      if (args.runtime === "claude") {
-        const execution =
-          args.nativeClaudeProfileId === undefined
-            ? await resolveNewNativeClaudeProfile()
-            : await resolveFrozenNativeClaudeProfile(
-                args.nativeClaudeProfileId,
-              );
-        const items = await listWorkerSessions(args.runtime, args.cwd, {
-          claudeStateDir:
-            execution.env.CLAUDE_CONFIG_DIR ?? null,
-        });
-        return items.map((item) => ({
-          ...item,
-          nativeClaudeProfileId: execution.profileId,
-        }));
-      }
-      if (args.runtime === "grok") {
-        const execution =
-          args.nativeGrokProfileId === undefined
-            ? await resolveNewNativeGrokProfile()
-            : await resolveFrozenNativeGrokProfile(args.nativeGrokProfileId);
-        const items = await listWorkerSessions(args.runtime, args.cwd, {
-          grokHome: execution.env.GROK_HOME,
-        });
-        return items.map((item) => ({
-          ...item,
-          nativeGrokProfileId: execution.profileId,
-        }));
-      }
-      const execution =
-        args.nativeCodexProfileId === undefined
-          ? await resolveNewNativeCodexProfile()
-          : await resolveFrozenNativeCodexProfile(
-              args.nativeCodexProfileId,
-            );
-      const items = await listWorkerSessions(args.runtime, args.cwd, {
-        codexHome: execution.stateHome,
-      });
-      return items.map((item) => ({
-        ...item,
-        nativeCodexProfileId: execution.profileId,
-      }));
-    },
-  );
-
   handle(
     "agentSession:listAll",
     async (): Promise<WorkerSessionSummary[]> => {
@@ -4133,6 +4067,7 @@ export function registerIpc(): void {
   registerAgentHibernationIpc(handle);
   registerWorktreeCleanupIpc(handle);
   registerFeatureTipsIpc(handle);
+  registerSessionSearchIpc(handle);
 }
 
 const MEMORY_KINDS = new Set<MemoryItemKind>(["preference", "correction", "fact", "procedure", "lesson"]);

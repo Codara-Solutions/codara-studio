@@ -7,6 +7,7 @@ import type {
 } from "./agent-families";
 import type { WorkflowCallMarker, WorkflowRunInfo } from "./workflow";
 import type { QuickCommand, TerminalRightClickPref } from "./quick-commands";
+import type { SessionSearchPreferences } from "./session-search";
 
 export type ShellId = string;
 
@@ -1404,6 +1405,11 @@ export interface AppPreferences {
   // stays on screen after activating another workspace, in ms. 0 = never
   // show it. Capped at 10s.
   workspaceSwitchHudMs?: number;
+  // Agent session search: whether the local index of agent transcripts is
+  // kept, which agents it reads, and what the agent tool may search
+  // (src/main/session-search/). Unset reads as the defaults in
+  // shared/session-search.ts; this module imports types only.
+  sessionSearch?: SessionSearchPreferences;
 }
 
 export const DEFAULT_TOAST_DURATION_MS = 6_000;
@@ -1840,7 +1846,7 @@ export type TerminalAgentRuntime = AgentFamilyRuntime | "pi";
 export type WorkerSessionRuntime = WorkerSessionFamily;
 
 // Lightweight metadata read from the CLI-owned transcript stores for the
-// manual-worker session picker. The transcript itself never crosses IPC.
+// session lists (Settings, the phone). The transcript itself never crosses IPC.
 export interface WorkerSessionSummary {
   runtime: WorkerSessionRuntime;
   /** Frozen native Claude configuration. Undefined is legacy personal/unset. */
@@ -1851,10 +1857,6 @@ export interface WorkerSessionSummary {
   nativeGrokProfileId?: string;
   sessionId: string;
   title: string;
-  // First real user question, set when `title` is Claude Code's generated
-  // ai-title (the picker shows it as a dim second line). Null when the title
-  // already IS the first question, or none was found.
-  preview: string | null;
   cwd: string;
   cwdExists: boolean;
   updatedAt: string;

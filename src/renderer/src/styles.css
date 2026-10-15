@@ -1453,7 +1453,7 @@ a { color: inherit; }
    root, so the glass card inside it frosted only the empty wrapper and the
    terminal behind showed through sharp. These wrappers let the animation go
    once it ends, so the card samples the real workbench. */
-.spark-fade-in:has(> .spark-overlay-surface, > .worker-session-surface, > .spark-toast) {
+.spark-fade-in:has(> .spark-overlay-surface, > .spark-toast) {
   animation-fill-mode: backwards;
 }
 
@@ -4203,7 +4203,6 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
    re-rasterizes the terminal-sized workbench on every change behind it
    (fast-overlays.spec.ts holds that line). */
 .spark-scrim,
-.worker-session-scrim,
 .settings-dialog-scrim,
 .agent-capabilities-scrim,
 .create-copy-scrim {
@@ -4319,10 +4318,6 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
     -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
   }
-  /* The worker session picker is a spark-overlay-surface: its rows repaint
-     under the pointer, so it takes the read tier below (one composited blur,
-     no lens, `contain: paint`) rather than running the SVG lens over a tall
-     list. */
   /* Fast modal glass: keep the translucent fill, sheen, rim and one local
      frost layer on the card, but never run the SVG refraction lens over a
      large scrolling dialog. */
@@ -4475,19 +4470,6 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   content-visibility: auto;
   contain-intrinsic-size: auto 76px;
   contain: layout paint style;
-}
-
-/* Same treatment for the worker session picker's history list. A workspace
-   with hundreds of transcripts would otherwise lay out and paint every row
-   inside a backdrop-filtered dialog; off-screen rows skip both until they
-   approach view, so the list costs the same at 8 sessions and at 800. */
-.worker-session-list {
-  contain: layout paint style;
-  overscroll-behavior: contain;
-}
-.worker-session-row {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 52px;
 }
 
 /* ── Capability Center ──────────────────────────────────────────────────────

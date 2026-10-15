@@ -50,6 +50,7 @@ import {
 import { runStatusColor } from "../lib/run-status";
 import { useTheme } from "../theme/theme-context";
 import { usePreferences } from "../preferences/usePreferences";
+import SessionSearchSettings from "./session-search/SessionSearchSettings";
 import { useFeatureTipsSetting } from "./feature-tips/useFeatureTipsSetting";
 import KeybindingsSection, { ChordChips } from "../shortcuts/KeybindingsSection";
 import { buildBindingTable } from "../shortcuts/bindings";
@@ -3193,6 +3194,8 @@ function SessionsSettings({
           />
         ) : null}
       </SettingsSection>
+
+      <SessionSearchSettings />
 
       <SettingsSection
         title="Agent sessions"

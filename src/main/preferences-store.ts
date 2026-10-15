@@ -23,6 +23,7 @@ import {
 import { normalizeKeepAwakeMode } from "@shared/keep-awake";
 import { normalizeQuickCommands, normalizeTerminalRightClick } from "@shared/quick-commands";
 import { normalizeAgentHibernationMinutes } from "@shared/agent-hibernation";
+import { normalizeSessionSearchPreferences } from "@shared/session-search";
 import { writeFileAtomic } from "./fs-atomic";
 import { codaraHome } from "./codara-home";
 
@@ -354,6 +355,7 @@ function normalize(
         : DEFAULT_PREFERENCES.notifyCiFailures,
     toastDurationMs: normalizeToastDuration(src.toastDurationMs),
     workspaceSwitchHudMs: normalizeWorkspaceSwitchHud(src.workspaceSwitchHudMs),
+    sessionSearch: normalizeSessionSearchPreferences(src.sessionSearch),
   };
 }
 

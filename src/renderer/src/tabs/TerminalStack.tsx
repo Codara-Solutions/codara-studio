@@ -12,7 +12,6 @@ import type {
   RuntimeState,
   ShellInfo,
   TerminalAgentForegroundState,
-  WorkerSessionRuntime,
 } from "@shared/types";
 import type { SparkOpenInput } from "../components/Terminal/useTerminalSession";
 import { copyTerminalContext } from "../components/Terminal/terminalActions";
@@ -136,11 +135,6 @@ interface Props {
     autorun?: string,
     agentSession?: TerminalAgentSession | null,
   ) => void;
-  onOpenWorkerSessionPicker: (
-    runtime: WorkerSessionRuntime,
-    cwd: string | undefined,
-    launch: (command: string, session: TerminalAgentSession | null) => void,
-  ) => void;
   onMovePane: (
     payload: TerminalPaneDragPayload,
     targetTabId: TabId,
@@ -217,7 +211,6 @@ type Bundle = {
   onSplitRight: () => void;
   onSplitDown: () => void;
   onSmartAdd: (autorun?: string, agentSession?: TerminalAgentSession | null) => void;
-  onOpenWorkerSessions: (runtime: WorkerSessionRuntime) => void;
   onClose: () => void;
   onToggleZoom: () => void;
   onCwd: (cwd: string) => void;
@@ -248,7 +241,6 @@ function TerminalStack({
   onActivatePane,
   onSplitRatioChange,
   onSplitPane,
-  onOpenWorkerSessionPicker,
   onMovePane,
   onClosePane,
   onDockTabDrop,
@@ -286,7 +278,6 @@ function TerminalStack({
   const activateRef = useRef(onActivatePane);
   const ratioRef = useRef(onSplitRatioChange);
   const splitRef = useRef(onSplitPane);
-  const openWorkerSessionPickerRef = useRef(onOpenWorkerSessionPicker);
   const moveRef = useRef(onMovePane);
   const closeRef = useRef(onClosePane);
   const dockDropRef = useRef(onDockTabDrop);
@@ -315,7 +306,6 @@ function TerminalStack({
     activateRef.current = onActivatePane;
     ratioRef.current = onSplitRatioChange;
     splitRef.current = onSplitPane;
-    openWorkerSessionPickerRef.current = onOpenWorkerSessionPicker;
     moveRef.current = onMovePane;
     closeRef.current = onClosePane;
     dockDropRef.current = onDockTabDrop;
@@ -333,7 +323,7 @@ function TerminalStack({
     resumeUnavailableRef.current = onPaneResumeUnavailable;
     resumeFallbackRef.current = onPaneResumeFallback;
     bootResumeConsumedRef.current = onPaneBootResumeConsumed;
-  }, [workspaceVisible, onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onOpenWorkerSessionPicker, onMovePane, onClosePane, onDockTabDrop, onUndockTab, onCloseDockedTab, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState, onPaneRuntimeState, onPaneResumeUnavailable, onPaneResumeFallback, onPaneBootResumeConsumed]);
+  }, [workspaceVisible, onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onMovePane, onClosePane, onDockTabDrop, onUndockTab, onCloseDockedTab, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState, onPaneRuntimeState, onPaneResumeUnavailable, onPaneResumeFallback, onPaneBootResumeConsumed]);
 
   // Stable identities for the dock chrome: TerminalTabPane is memoized, and a
   // fresh callback identity here would re-render every tab (and with it every
@@ -430,25 +420,6 @@ function TerminalStack({
           onSplitRight: () => splitRef.current(tabId, paneId, "horizontal"),
           onSplitDown: () => splitRef.current(tabId, paneId, "vertical"),
           onSmartAdd: (autorun, agentSession) => smartAddInTab(tabId, autorun, agentSession),
-          onOpenWorkerSessions: (runtime) => {
-            const target = smartAddTargetInTab(tabId);
-            if (!target) return;
-            const tab = tabsRef.current.find((item) => item.id === tabId);
-            const targetLeaf = tab ? findLeaf(tab.root, target.paneId) : null;
-            openWorkerSessionPickerRef.current(
-              runtime,
-              targetLeaf?.cwd,
-              (command, session) => {
-                splitRef.current(
-                  tabId,
-                  target.paneId,
-                  target.direction,
-                  command,
-                  session,
-                );
-              },
-            );
-          },
           onClose: () => closeRef.current(tabId, paneId),
           onToggleZoom: () => zoomToggleRef.current(tabId, paneId),
           onCwd: (cwd: string) => cwdRef.current(tabId, paneId, cwd),
@@ -1365,7 +1336,6 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               <PaneToolbar
                 dragPayload={{ tabId: tab.id, paneId: leaf.paneId }}
                 onSmartAdd={bundle.onSmartAdd}
-                onOpenWorkerSessions={bundle.onOpenWorkerSessions}
                 onSplitRight={bundle.onSplitRight}
                 onSplitDown={bundle.onSplitDown}
                 onCopyContext={() => void copyTerminalContext(leaf.paneId)}
@@ -2384,7 +2354,6 @@ function ResizeIntersectionGrip({
 interface PaneToolbarProps {
   dragPayload: TerminalPaneDragPayload;
   onSmartAdd: (autorun?: string, agentSession?: TerminalAgentSession | null) => void;
-  onOpenWorkerSessions: (runtime: WorkerSessionRuntime) => void;
   onSplitRight: () => void;
   onSplitDown: () => void;
   onCopyContext: () => void;
@@ -2399,7 +2368,6 @@ interface PaneToolbarProps {
 function PaneToolbar({
   dragPayload,
   onSmartAdd,
-  onOpenWorkerSessions,
   onSplitRight,
   onSplitDown,
   onCopyContext,
@@ -2556,12 +2524,9 @@ function PaneToolbar({
         <AddPaneMenu
           ref={menuRef}
           position={menuPosition}
-          onPick={(kind) => {
+          onPick={(command) => {
             setMenuOpen(false);
-            if (kind === "shell") onSmartAdd();
-            // Pi keeps its own sessions (`pi --resume` inside the pane).
-            else if (kind === "pi") onSmartAdd(PI_LAUNCH_COMMAND);
-            else onOpenWorkerSessions(kind);
+            onSmartAdd(command);
           }}
         />,
         document.body,
@@ -2636,12 +2601,12 @@ export function PaneDragHandle({ payload }: { payload: TerminalPaneDragPayload }
 type AddPaneKind = "shell" | "claude" | "codex" | "grok" | "pi";
 
 // Polished popover anchored to the toolbar's + button. The shell entry is the
-// default smart-add behavior (split the most spacious leaf); the two worker
+// default smart-add behavior (split the most spacious leaf); the worker
 // entries do the same split but seed the new leaf with an `autorun` so the
-// shell auto-launches claude/codex once its prompt is ready.
+// shell starts a new session of that agent once its prompt is ready.
 const AddPaneMenu = React.forwardRef<
   HTMLDivElement,
-  { onPick: (kind: AddPaneKind) => void; position: { top: number; left: number } }
+  { onPick: (command: string | undefined) => void; position: { top: number; left: number } }
 >(function AddPaneMenu({ onPick, position }, ref) {
   const items: Array<{
     kind: AddPaneKind;
@@ -2718,7 +2683,7 @@ const AddPaneMenu = React.forwardRef<
             command={item.command}
             accent={item.accent}
             glyph={item.glyph}
-            onClick={() => onPick(item.kind)}
+            onClick={() => onPick(item.command)}
           />
         ))}
       </div>
