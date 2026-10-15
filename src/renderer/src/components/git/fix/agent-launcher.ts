@@ -62,10 +62,23 @@ export type AgentReadyResult =
   | { kind: "timeout"; paneId: string | null }
   | { kind: "exited"; paneId: string };
 
+// States that show the CLI itself is up (its banner, a turn, a dialog). The
+// pane chip starts at "launching" before the CLI runs, so for the chip only a
+// state the CLI produced counts.
+const MAIN_ALIVE_STATES: ReadonlySet<RuntimeState> = new Set(["launching", "working", "blocked", "stalled"]);
+const CHIP_ALIVE_STATES: ReadonlySet<RuntimeState> = new Set(["working", "blocked", "stalled"]);
+
 /**
  * Resolves with the pane id once the agent in the given tab is idle at its
  * prompt, or when it exits, or after timeoutMs. Subscribe before the tab is
  * created (pass a getter for the tab id) so no state is missed.
+ *
+ * An exit counts only after the CLI was seen running. Main's watcher knows
+ * the new pane's CLI from its launch, so a shell prompt drawn before the
+ * command runs (pwsh with shell integration types it in after its first
+ * prompt) reads as that CLI exiting, and the chip can keep that "done" until
+ * the CLI reports again. An exit seen before the CLI ever ran is kept for the
+ * timeout, which then reports the pane as exited.
  */
 export function waitForAgentReady(
   source: AgentReadySource,
@@ -78,6 +91,9 @@ export function waitForAgentReady(
     let lastPaneId: string | null = null;
     let unsubscribe: (() => void) | null = null;
     let poller: unknown = null;
+    let mainAlive = false;
+    let chipAlive = false;
+    let exitedBeforeStart: string | null = null;
     const finish = (result: AgentReadyResult) => {
       if (settled) return;
       settled = true;
@@ -86,15 +102,23 @@ export function waitForAgentReady(
       unsubscribe?.();
       resolve(result);
     };
+    const exited = (paneId: string, alive: boolean) => {
+      if (alive) finish({ kind: "exited", paneId });
+      else exitedBeforeStart = paneId;
+    };
     const consider = (payload: TerminalAgentStatePayload) => {
       const wanted = tabId();
       if (!wanted || payload?.tabId !== wanted || !payload.paneId) return;
       lastPaneId = payload.paneId;
       // A plain shell reports runtime null; only a running CLI is ready.
       if (payload.state === "idle" && payload.runtime) finish({ kind: "ready", paneId: payload.paneId });
-      else if (payload.state === "done" || payload.state === "error") finish({ kind: "exited", paneId: payload.paneId });
+      else if (payload.state === "done" || payload.state === "error") exited(payload.paneId, mainAlive);
+      else if (payload.runtime && MAIN_ALIVE_STATES.has(payload.state)) mainAlive = true;
     };
-    const timer = timers.setTimeout(() => finish({ kind: "timeout", paneId: lastPaneId }), timeoutMs);
+    const timer = timers.setTimeout(() => {
+      if (!mainAlive && !chipAlive && exitedBeforeStart) finish({ kind: "exited", paneId: exitedBeforeStart });
+      else finish({ kind: "timeout", paneId: lastPaneId });
+    }, timeoutMs);
     const poll = () => {
       poller = null;
       const wanted = tabId();
@@ -102,7 +126,8 @@ export function waitForAgentReady(
       if (pane) {
         lastPaneId = pane.paneId;
         if (pane.state === "idle") return finish({ kind: "ready", paneId: pane.paneId });
-        if (pane.state === "done" || pane.state === "error") return finish({ kind: "exited", paneId: pane.paneId });
+        if (pane.state === "done" || pane.state === "error") exited(pane.paneId, chipAlive);
+        else if (pane.state && CHIP_ALIVE_STATES.has(pane.state)) chipAlive = true;
       }
       if (!settled) poller = timers.setTimeout(poll, FIX_AGENT_POLL_MS);
     };
@@ -149,17 +174,6 @@ export async function deliverToNewAgent(
   const ready = waitForAgentReady(deps.ready, () => tabId, deps.timeoutMs);
   tabId = deps.launch(input.runtime, input.cwd);
   const result = await ready;
-  if (result.kind === "ready") {
-    await deps.sleep(FIX_AGENT_SETTLE_MS);
-    await deps.deliver({
-      workspaceId: input.workspaceId,
-      target: { kind: "pane", paneId: result.paneId },
-      text: input.text,
-      submit: true,
-      source: "git",
-    });
-    return { kind: "sent", paneId: result.paneId };
-  }
   const queue = (paneId: string | null) =>
     deps.deliver({
       workspaceId: input.workspaceId,
@@ -168,6 +182,23 @@ export async function deliverToNewAgent(
       submit: false,
       source: "git",
     });
+  if (result.kind === "ready") {
+    await deps.sleep(FIX_AGENT_SETTLE_MS);
+    try {
+      await deps.deliver({
+        workspaceId: input.workspaceId,
+        target: { kind: "pane", paneId: result.paneId },
+        text: input.text,
+        submit: true,
+        source: "git",
+      });
+      return { kind: "sent", paneId: result.paneId };
+    } catch {
+      // Closed in the moment before the paste: the fix must not be lost.
+      await queue(null);
+      return { kind: "queued", paneId: null, reason: "exited" };
+    }
+  }
   // Still starting: keep it for that pane. Closed meanwhile, or exited: any
   // agent in the workspace may take it.
   const paneId = result.kind === "timeout" ? result.paneId : null;

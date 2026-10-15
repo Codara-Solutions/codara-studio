@@ -154,8 +154,24 @@ test("waitForAgentReady reads the snapshot, and reports exits and timeouts", asy
 
   const exits = readySource();
   const exited = mod.waitForAgentReady(exits, () => "term-3", 90_000, fakeTimers());
+  exits.emit({ workspaceId: "ws", tabId: "term-3", paneId: "p-3", runtime: "claude", state: "launching" });
   exits.emit({ workspaceId: "ws", tabId: "term-3", paneId: "p-3", runtime: "claude", state: "error" });
   assert.deepEqual(await exited, { kind: "exited", paneId: "p-3" });
+
+  // An exit before the CLI was ever seen running waits for the timeout,
+  // which then reports the pane as exited rather than slow.
+  const neverStarted = readySource();
+  const neverTimers = fakeTimers();
+  const crashed = mod.waitForAgentReady(neverStarted, () => "term-8", 90_000, neverTimers);
+  neverStarted.emit({ workspaceId: "ws", tabId: "term-8", paneId: "p-8", runtime: "claude", state: "done" });
+  let crashSettled = false;
+  crashed.then(() => {
+    crashSettled = true;
+  });
+  await tick();
+  assert.equal(crashSettled, false, "an exit before the start is not final");
+  neverTimers.list[0].fn();
+  assert.deepEqual(await crashed, { kind: "exited", paneId: "p-8" });
 
   const slow = readySource();
   const timers = fakeTimers();
@@ -232,11 +248,47 @@ test("waitForAgentReady also follows the pane's chip in the tab strip", async ({
   assert.deepEqual(timers.list, [], "the timeout and the poll are cleared");
 
   const gone = readySource();
-  gone.paneState = () => ({ paneId: "p-6", state: "error" });
+  const goneChip = { paneId: "p-6", state: "working" };
+  gone.paneState = () => ({ ...goneChip });
   const goneTimers = fakeTimers();
   const exited = mod.waitForAgentReady(gone, () => "term-6", 90_000, goneTimers);
   fire(goneTimers, 1);
+  goneChip.state = "error";
+  fire(goneTimers, 1);
   assert.deepEqual(await exited, { kind: "exited", paneId: "p-6" });
+});
+
+test("waitForAgentReady is not fooled by a shell prompt drawn before the CLI starts", async ({ mod }) => {
+  // pwsh with shell integration draws its prompt before Codara types the
+  // command in. Main's watcher already knows the pane's CLI from the launch,
+  // so it reports that prompt as the CLI being done, and the pane's chip keeps
+  // "done" until the CLI reports again.
+  const source = readySource();
+  const chip = { paneId: "p-10", state: "launching" };
+  source.paneState = (tabId) => (tabId === "term-10" ? { ...chip } : null);
+  const timers = fakeTimers();
+  const ready = mod.waitForAgentReady(source, () => "term-10", 90_000, timers);
+  source.emit({ workspaceId: "ws", tabId: "term-10", paneId: "p-10", runtime: "claude", state: "done" });
+  chip.state = "done";
+  fire(timers, 1);
+  source.emit({ workspaceId: "ws", tabId: "term-10", paneId: "p-10", runtime: "claude", state: "launching" });
+  fire(timers, 1);
+  let settled = false;
+  ready.then(() => {
+    settled = true;
+  });
+  await tick();
+  assert.equal(settled, false, "still waiting for the CLI");
+  source.emit({ workspaceId: "ws", tabId: "term-10", paneId: "p-10", runtime: "claude", state: "idle" });
+  assert.deepEqual(await ready, { kind: "ready", paneId: "p-10" });
+});
+
+test("deliverToNewAgent queues the fix when the pane closes just before the paste", async ({ mod }) => {
+  const deps = deliveryDeps(readySource(), (source) => source.emit({ workspaceId: "ws", tabId: "term-9", paneId: "p-9", runtime: "claude", state: "idle" }));
+  deps.refuse = (request) => request.target.kind === "pane";
+  const outcome = await mod.deliverToNewAgent(deps, { runtime: "claude", cwd: "/repo", workspaceId: "ws", text: "Fix it" });
+  assert.deepEqual(outcome, { kind: "queued", paneId: null, reason: "exited" });
+  assert.deepEqual(deps.delivered.map((r) => [r.target, r.submit]), [[{ kind: "inbox", paneId: null }, false]]);
 });
 
 test("waitForAgentReady calls the window's timers bare, as a browser requires", async ({ mod }) => {
