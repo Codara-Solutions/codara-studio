@@ -1,4 +1,5 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { promises as fsp } from "node:fs";
 import type {
   AutomationPrecheck,
   AutomationPrecheckResult,
@@ -31,7 +32,8 @@ export interface PrecheckInvocation {
  *    from .zprofile/.bash_profile (brew, nvm) are there even when the app was
  *    started from the Dock; fish and unknown shells use /bin/sh.
  *  - default, Windows: cmd.exe /d /s /c "<command>", quoted the way Node's own
- *    shell:true does it, so quotes inside the command reach cmd unchanged.
+ *    shell:true does it, so quotes inside the command reach cmd unchanged;
+ *    several lines are joined with " & ".
  *  - powershell: powershell.exe on Windows, pwsh elsewhere, with the command
  *    as -EncodedCommand (UTF-16LE base64), which sidesteps every quoting rule. */
 export function precheckInvocation(
@@ -49,7 +51,15 @@ export function precheckInvocation(
   }
   if (platform === "win32") {
     const comspec = env.ComSpec || env.COMSPEC || "cmd.exe";
-    return { file: comspec, args: ["/d", "/s", "/c", `"${command}"`], windowsVerbatimArguments: true };
+    // cmd.exe stops reading a /c command line at its first line break, so a
+    // check typed on two lines would only run the first. Joined with "&" the
+    // lines run in order and the last one's exit code decides, as in sh -c.
+    const oneLine = command
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .join(" & ");
+    return { file: comspec, args: ["/d", "/s", "/c", `"${oneLine}"`], windowsVerbatimArguments: true };
   }
   const userShell = env.SHELL ?? "";
   const file = /\/(zsh|bash|sh)$/.test(userShell) ? userShell : "/bin/sh";
@@ -141,6 +151,20 @@ function finalTail(raw: string): string {
   return raw.replace(ANSI_RE, "").replace(/\r\n?/g, "\n").slice(-PRECHECK_OUTPUT_TAIL_CHARS).trimEnd();
 }
 
+/** Node reports a missing working folder as the SHELL missing ("spawn
+ *  /bin/zsh ENOENT"); a moved workspace must read as what it is. Only runs on
+ *  the error path. */
+export async function describeSpawnError(err: unknown, cwd: string): Promise<string> {
+  const message = err instanceof Error ? err.message : String(err);
+  if ((err as NodeJS.ErrnoException | undefined)?.code !== "ENOENT") return message;
+  try {
+    if ((await fsp.stat(cwd)).isDirectory()) return message;
+  } catch {
+    /* missing: said below */
+  }
+  return `the folder ${cwd} does not exist`;
+}
+
 export interface RunPrecheckOptions {
   cwd: string;
   env?: Record<string, string>;
@@ -199,7 +223,7 @@ export function runAutomationPrecheck(
         detached: platform !== "win32",
       });
     } catch (err) {
-      settle(null, err instanceof Error ? err.message : String(err));
+      void describeSpawnError(err, opts.cwd).then((message) => settle(null, message));
       return;
     }
     child.stdout?.setEncoding("utf8");
@@ -210,8 +234,17 @@ export function runAutomationPrecheck(
     child.stderr?.on("data", (chunk: string) => {
       tail = appendTail(tail, chunk);
     });
-    child.on("error", (err) => settle(null, err.message));
-    child.on("close", (code) => settle(typeof code === "number" ? code : null));
+    // A failed spawn emits "error" and then "close" (code -2): the error,
+    // described once the folder has been looked at, is the verdict.
+    let failing = false;
+    child.on("error", (err) => {
+      if (failing) return;
+      failing = true;
+      void describeSpawnError(err, opts.cwd).then((message) => settle(null, message));
+    });
+    child.on("close", (code) => {
+      if (!failing) settle(typeof code === "number" ? code : null);
+    });
     timer = setTimeout(() => {
       timedOut = true;
       killPrecheckTree(child, platform, opts.killDeps);

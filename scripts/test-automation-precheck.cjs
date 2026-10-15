@@ -118,6 +118,16 @@ async function main() {
     assert.deepStrictEqual(inv.args, ["/d", "/s", "/c", '"if exist "a b.txt" (exit 0) else (exit 1)"']);
     assert.strictEqual(inv.windowsVerbatimArguments, true);
     assert.strictEqual(runner.precheckInvocation("x", "default", "win32", {}).file, "cmd.exe");
+    assert.deepStrictEqual(
+      runner.precheckInvocation("cd sub\r\n\r\n  if exist TODO.md (exit 0) else (exit 1)\n", "default", "win32", {}).args,
+      ["/d", "/s", "/c", '"cd sub & if exist TODO.md (exit 0) else (exit 1)"'],
+      "cmd.exe would run only the first line: lines are joined with &",
+    );
+    assert.deepStrictEqual(
+      runner.precheckInvocation("cd sub\ntest -f TODO.md", "default", "linux", { SHELL: "/bin/sh" }).args,
+      ["-lc", "cd sub\ntest -f TODO.md"],
+      "POSIX shells take the lines as they are",
+    );
     pass("Windows runs cmd.exe /d /s /c with the command passed through verbatim");
   }
   {
@@ -225,6 +235,7 @@ async function main() {
     const missing = await runner.runAutomationPrecheck({ command: "true" }, { cwd: path.join(cwd, "gone") });
     assert.strictEqual(missing.passed, false);
     assert.ok(missing.error, "a missing folder is reported as an error");
+    assert.match(missing.error, /^the folder .*gone does not exist$/, `a missing folder reads as one, not as a missing shell (${missing.error})`);
     pass("a missing folder fails with an error instead of throwing");
 
     const long = await runner.runAutomationPrecheck(

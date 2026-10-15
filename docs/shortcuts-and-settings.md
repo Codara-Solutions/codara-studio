@@ -316,7 +316,9 @@ passes of a loop that already started. **Test check** runs the command once,
 right away, and says whether the pass would run. The command gets
 `SPARK_AUTOMATION_ID` and `CODARA_AUTOMATION_PRECHECK=1`. It runs in your login
 shell on macOS and Linux, and in Command Prompt on Windows, where a
-**PowerShell** choice is also offered.
+**PowerShell** choice is also offered. A check on several lines runs them in
+order and the last line's exit code decides (Command Prompt gets them joined
+with `&`).
 
 **If a run was missed** decides what happens to a scheduled time that passed
 while Codara was closed or the computer was asleep. Codara checks when it
