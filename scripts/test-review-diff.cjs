@@ -4,8 +4,10 @@
 // deleted, renamed, untracked, binary, paths with spaces and non-ASCII),
 // a repository with no commit yet, the branch view from where the branch left
 // its base, the line budget that defers sections, loading deferred files by
-// path, a merge conflict, a diff too large for one read, and a one-hunk patch
-// from the review model that git applies to the index.
+// path, untracked links (shown by target, never followed), a nested
+// repository and the capped read of a huge untracked file, a merge conflict,
+// a diff too large for one read, and a one-hunk patch from the review model
+// that git applies to the index.
 //
 //   node scripts/test-review-diff.cjs
 
