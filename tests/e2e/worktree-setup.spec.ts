@@ -30,13 +30,21 @@ test("worktree setup prepares new worktrees from the repository's files", async 
   const gitEnv = { ...process.env, GIT_CONFIG_GLOBAL: gitConfig, GIT_CONFIG_NOSYSTEM: "1" };
   execFileSync("git", ["init", "-q", "-b", "main", repo], { env: gitEnv });
   await writeFile(join(repo, "README.md"), "# repo\n");
-  await writeFile(join(repo, ".gitignore"), ".env\nnode_modules/\nsetup.txt\n");
+  await writeFile(join(repo, ".gitignore"), ".env\nnode_modules/\nsetup.txt\nterminal.txt\n");
   await writeFile(join(repo, ".worktreeinclude"), ".env\n");
   await mkdir(join(repo, ".codara"));
   const setupFile = join(repo, ".codara", "worktree.json");
   await writeFile(
     setupFile,
-    JSON.stringify({ link: ["node_modules"], setup: 'echo "root=$CODARA_ROOT_PATH" > setup.txt' }, null, 2),
+    JSON.stringify(
+      {
+        link: ["node_modules"],
+        setup: 'echo "root=$CODARA_ROOT_PATH" > setup.txt',
+        terminals: [{ name: "setup-shell", command: "echo opened > terminal.txt" }],
+      },
+      null,
+      2,
+    ),
   );
   git(repo, ["add", "-A"], gitEnv);
   git(repo, ["commit", "-q", "-m", "init"], gitEnv);
@@ -102,7 +110,8 @@ test("worktree setup prepares new worktrees from the repository's files", async 
     await expect(summary).toContainText("Copies 1 ignored file or folder from this checkout", { timeout: 15_000 });
     await expect(summary).toContainText("Links node_modules");
     await expect(summary).toContainText('echo "root=$CODARA_ROOT_PATH" > setup.txt');
-    await expect(summary.getByRole("checkbox", { name: /Run setup commands/ })).toBeChecked();
+    await expect(summary).toContainText("Opens 1 terminal: setup-shell");
+    await expect(summary.getByRole("checkbox", { name: /Run setup commands and open its terminals/ })).toBeChecked();
 
     // The setup file dialog opens over it, and Escape closes only that one.
     await summary.getByRole("button", { name: "Edit setup…" }).click();
@@ -110,6 +119,10 @@ test("worktree setup prepares new worktrees from the repository's files", async 
     await expect(fileDialog).toBeVisible();
     await expect(fileDialog.getByLabel("Files to copy from this checkout")).toHaveValue(".env", { timeout: 15_000 });
     await expect(fileDialog.getByRole("button", { name: "node_modules", pressed: true })).toBeVisible();
+    // Installing into the linked node_modules is called out while editing.
+    await expect(fileDialog.getByTestId("worktree-setup-install-conflict")).toHaveCount(0);
+    await fileDialog.getByLabel("Setup command", { exact: true }).fill("npm ci");
+    await expect(fileDialog.getByTestId("worktree-setup-install-conflict")).toContainText("installs into node_modules");
     await page.keyboard.press("Escape");
     await expect(fileDialog).toHaveCount(0);
     await expect(page.getByText(/Create isolated worktree for/)).toBeVisible();
@@ -125,6 +138,19 @@ test("worktree setup prepares new worktrees from the repository's files", async 
     expect(readFileSync(join(worktree, "setup.txt"), "utf8").trim()).toBe(`root=${repo}`);
     // The link never shows up as a change in the new worktree.
     expect(git(worktree, ["status", "--porcelain"], gitEnv)).toBe("");
+    // The file's terminal opened in the new worktree and ran its command.
+    await expect
+      .poll(
+        () =>
+          page.evaluate(() =>
+            Array.from(document.querySelectorAll<HTMLElement>("[data-tab-id]")).some((el) =>
+              (el.textContent ?? "").includes("setup-shell"),
+            ),
+          ),
+        { timeout: 15_000 },
+      )
+      .toBe(true);
+    await expect.poll(() => existsSync(join(worktree, "terminal.txt")), { timeout: 30_000 }).toBe(true);
 
     // ── A failing command stays in the tray, with its log ──────────────────
     await writeFile(setupFile, JSON.stringify({ setup: ["echo checking the toolchain", "exit 7"] }, null, 2));
