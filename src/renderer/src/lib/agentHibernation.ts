@@ -46,6 +46,14 @@ const BUSY_CHIP_STATES = new Set(["working", "blocked", "stalled", "error"]);
  * Panes in a background workspace that are worth asking main about: a
  * user-run agent (not a Cora worker, not a phone pane) whose session Codara
  * can resume, not pinned awake and not already sleeping.
+ *
+ * A restored pane's one-shot `bootResume` marker does not exclude it: a pane
+ * restored into a hidden workspace keeps that marker until the workspace is
+ * shown, so excluding it kept every agent restored behind the active
+ * workspace awake for the whole run. Main refuses a pane whose restore has
+ * not spawned yet (no pty), and once it has, the resume guards
+ * (autorunFiredSessions, the attach gate) stop the marker from resuming it a
+ * second time.
  */
 export function hibernationCandidates(
   workspaceId: string,
@@ -58,7 +66,7 @@ export function hibernationCandidates(
       const session = leaf.agentSession;
       if (!session?.sessionId || session.active !== true) continue;
       if (!isAgentHibernationRuntime(session.runtime)) continue;
-      if (leaf.keepAwake === true || leaf.hibernation || leaf.bootResume === true) continue;
+      if (leaf.keepAwake === true || leaf.hibernation) continue;
       if (leaf.origin?.kind === "phone") continue;
       if (leaf.worker?.source === "spark") continue;
       if (leaf.worker?.runtimeState && BUSY_CHIP_STATES.has(leaf.worker.runtimeState)) continue;

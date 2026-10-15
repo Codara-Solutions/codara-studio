@@ -117,6 +117,34 @@ test("a pane still asleep when Codara quits resumes its session on the next laun
   }
 });
 
+test("an agent restored into a background workspace at launch can sleep too", async () => {
+  test.setTimeout(90_000);
+  // Codara reopens on workspace B; A's agent is restored behind it, so A's
+  // pane mounts hidden and its one-shot restore marker is never consumed.
+  const fixture = await prepareFixture("plain", { activeWorkspaceId: "ws-b" });
+  const { app, page, logs } = await launch(fixture);
+  try {
+    const [first] = await waitForLaunches(fixture, 1);
+    expect(first.args).toEqual(expect.arrayContaining(["--resume", SESSION_ID]));
+    const sleepingChip = page.locator(`[data-terminal-pane-id="${PANE_ID}"] [data-testid="pane-sleeping-chip"]`);
+    await expect(sleepingChip, logs.join("\n")).toHaveAttribute("aria-label", "CLAUDE sleeping", {
+      timeout: 25_000,
+    });
+    await expect.poll(() => isAlive(first.pid), { timeout: 10_000 }).toBe(false);
+
+    await page.locator('[data-workspace-id="ws-a"]').evaluate((row) => (row as HTMLElement).click());
+    const launches = await waitForLaunches(fixture, 2);
+    expect(launches[1].args).toEqual(expect.arrayContaining(["--resume", SESSION_ID]));
+    await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 20_000 });
+    // Woken once, never resumed a second time by the restore marker.
+    await page.waitForTimeout(TICK_MS * 2);
+    expect((await readLaunches(fixture)).length).toBe(2);
+  } finally {
+    await app.close();
+    await cleanup(fixture);
+  }
+});
+
 test("Keep awake stops a pane from sleeping", async () => {
   test.setTimeout(90_000);
   const fixture = await prepareFixture("plain");
@@ -285,7 +313,10 @@ async function cleanup(fixture: Fixture): Promise<void> {
   await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);
 }
 
-async function prepareFixture(mode: Mode): Promise<Fixture> {
+async function prepareFixture(
+  mode: Mode,
+  { activeWorkspaceId = "ws-a" }: { activeWorkspaceId?: string } = {},
+): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), "codara-agent-hibernation-e2e-"));
   const userDataDir = join(root, "user-data");
   const binDir = join(root, "bin");
@@ -352,7 +383,7 @@ setInterval(() => {}, 1 << 30);
           { id: "ws-a", name: "workspace-a", cwd: workspaceA, color: "#34D3C3", workers: [] },
           { id: "ws-b", name: "workspace-b", cwd: workspaceB, color: "#78A8FF", workers: [] },
         ],
-        activeWorkspaceId: "ws-a",
+        activeWorkspaceId,
       },
       null,
       2,

@@ -170,6 +170,8 @@ async function main() {
             split(
               leaf("p-working", { agentSession: session({ sessionId: "s7" }), worker: { source: "manual", state: "running", runId: "", workerTaskId: "", attemptId: "", runtimeState: "working" } }),
               split(
+                // Restored into a hidden workspace: its restore marker stays
+                // until the workspace is shown, and must not keep it awake.
                 leaf("p-boot", { agentSession: session({ sessionId: "s8" }), bootResume: true }),
                 // A stale "launching" (the restored-pane case) is left to main.
                 leaf("p-codex", { agentSession: session({ runtime: "codex", sessionId: "s9" }), worker: { source: "manual", state: "running", runId: "", workerTaskId: "", attemptId: "", runtimeState: "launching" } }),
@@ -185,7 +187,7 @@ async function main() {
   const candidates = lib.hibernationCandidates("ws-b", layout).map((c) => c.paneId);
   check(
     "only unpinned, awake, user-run agents with a running session are candidates",
-    JSON.stringify(candidates) === JSON.stringify(["p-ok", "p-codex"]),
+    JSON.stringify(candidates) === JSON.stringify(["p-ok", "p-boot", "p-codex"]),
     candidates,
   );
   check("a candidate carries its workspace and tab", lib.hibernationCandidates("ws-b", layout)[0].workspaceId === "ws-b" && lib.hibernationCandidates("ws-b", layout)[0].tabId === "t1");
