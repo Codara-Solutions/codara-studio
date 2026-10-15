@@ -11,7 +11,8 @@
 // - a TUI that repaints its footer forever cannot push real history out;
 // - files are 0600 in a 0700 folder, written debounced, bounded per pane and
 //   in total, deleted with the pane, when stale, and when the setting is off;
-// - a restore happens once per pane per session, never over a live PTY, and
+// - a restore happens until the pane's process starts (a remount before that
+//   gets it again), never over a live PTY or one that ran this session, and
 //   what it replayed is still there after the next restart.
 //
 //   node scripts/test-terminal-scrollback-store.cjs
@@ -315,14 +316,28 @@ async function main() {
     check("the replay ends with the marker line", replay.text.endsWith(storeMod.RESTORED_OUTPUT_MARKER));
     check("the replay is inert", unsafeSequence(replay.text.slice(0, -storeMod.RESTORED_OUTPUT_MARKER.length)) === null);
     check("the last frame is in the replay", replay.text.includes("esc to interrupt"));
-    check("a pane replays once per session", (await restarted.restoreReplay("pane-a")) === null);
+    // A pane that unmounts between asking and spawning (a workspace switch
+    // while the app opens) lost the xterm the replay went to: the next mount
+    // gets the same text again.
+    check(
+      "a pane remounted before its process starts gets the replay again",
+      (await restarted.restoreReplay("pane-a", { maxLines: 2000 }))?.text === replay.text,
+    );
     check("force replays again (hibernation)", (await restarted.restoreReplay("pane-a", { force: true }))?.text === replay.text);
 
     // The new session's output lands below the replay, and both survive the
     // next restart in order.
     restarted.track(["pane-a"]);
     next.state.sessions.add("pane-a");
+    check("once its process runs, a pane gets no replay", (await restarted.restoreReplay("pane-a")) === null);
     next.state.feed("pane-a", "$ echo second session\r\nsecond session\r\n$ ");
+    next.state.sessions.delete("pane-a");
+    check(
+      "nor after that process ended (only force replays it then)",
+      (await restarted.restoreReplay("pane-a")) === null &&
+        (await restarted.restoreReplay("pane-a", { force: true })) !== null,
+    );
+    next.state.sessions.add("pane-a");
     await restarted.flush();
     restarted.dispose();
     const third = fakeDeps();

@@ -180,7 +180,6 @@ export class TerminalScrollbackStore {
   private readonly now: () => number;
   private readonly panes = new Map<string, PaneState>();
   private readonly index = new Map<string, IndexEntry>();
-  private readonly replayed = new Set<string>();
   // Every pane the renderer reported, also while the setting is off, so
   // turning it back on records them at once instead of at the next layout
   // change.
@@ -243,7 +242,6 @@ export class TerminalScrollbackStore {
       this.panes.delete(paneId);
       await state.writing.catch(() => undefined);
     }
-    this.replayed.delete(paneId);
     this.known.delete(paneId);
     await this.removeFile(scrollbackFileName(paneId));
   }
@@ -270,8 +268,13 @@ export class TerminalScrollbackStore {
 
   /**
    * What a pane restored after a restart shows before its new shell or its
-   * resumed agent draws. Only once per pane per app session, and only while
-   * the pane has no live PTY, unless `force` is set.
+   * resumed agent draws. Only until the pane's process starts in this app
+   * session, unless `force` is set.
+   *
+   * Not "once per pane": a pane can unmount between asking and spawning (a
+   * workspace switch or a layout swap while the app opens), and the xterm the
+   * replay went to is then gone. The next mount asks again and gets the same
+   * text, since the record cannot change before the pane prints anything.
    */
   async restoreReplay(
     paneId: string,
@@ -280,7 +283,6 @@ export class TerminalScrollbackStore {
     await this.init();
     if (!this.deps.enabled()) return null;
     if (!options.force) {
-      if (this.replayed.has(paneId)) return null;
       if (this.deps.hasSession(paneId) || this.panes.get(paneId)?.live) return null;
     }
     const record = await this.read(paneId);
@@ -300,7 +302,6 @@ export class TerminalScrollbackStore {
       return null;
     }
     if (body.trim().length === 0) return null;
-    this.replayed.add(paneId);
     const text = body + RESTORED_OUTPUT_MARKER;
     // The renderer writes exactly this before the new session's bytes, so it
     // becomes the start of the pane's next record: a second restart still
@@ -638,7 +639,6 @@ export class TerminalScrollbackStore {
       writes.push(state.writing.catch(() => undefined));
     }
     this.panes.clear();
-    this.replayed.clear();
     // A write already past its checks would otherwise land after the files
     // below were listed and outlive the setting being turned off.
     await Promise.all(writes);
