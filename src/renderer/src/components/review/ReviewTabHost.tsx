@@ -251,24 +251,7 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
     setDirty((value) => value + 1);
   }, [requestKey]);
 
-  // Anything that may have changed the diff marks it dirty; it reloads once
-  // the tab is on screen and no note is being written, so a refresh never
-  // moves lines under the user's pointer mid-sentence.
-  const composing = draft !== null || editingId !== null;
   const loadedFor = useRef(0);
-  useEffect(() => {
-    if (!visible || composing || dirty === loadedFor.current) return;
-    // Marks that arrive together (a git action bumps the status and the
-    // version) make one read.
-    const timer = setTimeout(
-      () => {
-        loadedFor.current = dirty;
-        void load();
-      },
-      loadedFor.current === 0 ? 0 : 150,
-    );
-    return () => clearTimeout(timer);
-  }, [composing, dirty, load, visible]);
 
   // A refresh the user asks for runs even with a note open.
   const refresh = useCallback(() => {
@@ -389,6 +372,31 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
 
   const files = useMemo(() => (diff?.files ?? []).map((file) => overrides.get(file.path) ?? file), [diff, overrides]);
   const fileByPath = useMemo(() => new Map(files.map((file) => [file.path, file])), [files]);
+
+  // Anything that may have changed the diff marks it dirty; it reloads once
+  // the tab is on screen and no note is being written, so a refresh never
+  // moves lines under the user's pointer mid-sentence. A note open in a
+  // collapsed file, or in one the diff no longer has, is not on screen and
+  // holds nothing back; its words are kept for when it shows again.
+  const composing = useMemo(() => {
+    const shown = (path: string) => fileByPath.has(path) && !collapsed.has(path);
+    if (draft && shown(draft.path)) return true;
+    const edited = editingId ? notes.find((note) => note.id === editingId) : undefined;
+    return Boolean(edited && edited.source === "diff" && shown(edited.filePath));
+  }, [collapsed, draft, editingId, fileByPath, notes]);
+  useEffect(() => {
+    if (!visible || composing || dirty === loadedFor.current) return;
+    // Marks that arrive together (a git action bumps the status and the
+    // version) make one read.
+    const timer = setTimeout(
+      () => {
+        loadedFor.current = dirty;
+        void load();
+      },
+      loadedFor.current === 0 ? 0 : 150,
+    );
+    return () => clearTimeout(timer);
+  }, [composing, dirty, load, visible]);
 
   const notesRef = useRef(new Map<string, ReviewNote[]>());
   const byPath = useMemo(() => {
