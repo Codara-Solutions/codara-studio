@@ -166,7 +166,7 @@ The pages:
 
 | Tab | What lives there |
 |---|---|
-| General | Getting started (reopens the first-run guide), Appearance (theme, liquid glass surfaces), Window (keep running in the background when the window is closed, auto-open the browser for local dev servers, open links in the default browser or the Codara browser, the workspace switch badge), Agent worktrees (whether agents may create and remove worktrees, and remove ones you created), Tabs (middle-click to close), Notifications (in-app toast, native OS notification, sound, OS-specific cues), Git (background fetch, notify on teammate pushes and new pull requests), Instant git triggers, Copy-branch workspaces (a setup command for new worktrees, and extra ignored files an agent may delete with a merged worktree). |
+| General | Getting started (reopens the first-run guide), Appearance (theme, liquid glass surfaces), Window (keep running in the background when the window is closed, auto-open the browser for local dev servers, open links in the default browser or the Codara browser, the workspace switch badge), Sleep (keep the computer awake while agents work, always or never, and on a Linux laptop with the lid closed; see [Keep the computer awake](#keep-the-computer-awake)), Agent worktrees (whether agents may create and remove worktrees, and remove ones you created), Tabs (middle-click to close), Notifications (in-app toast, native OS notification, sound, OS-specific cues), Git (background fetch, notify on teammate pushes and new pull requests), Instant git triggers, Copy-branch workspaces (a setup command for new worktrees, and extra ignored files an agent may delete with a merged worktree). |
 | Editor | Code editor (Vim mode, autosave) and inline AI autocomplete. |
 | Default terminal | The shell for new panes, a resource overview, output history and scrollback lines, and the run terminal lifecycle for worker panes. |
 | API and model | An OpenRouter key, and how Git commit messages are generated. |
@@ -200,6 +200,50 @@ links keep a fixed destination whatever the setting says:
 The run terminal lifecycle works like this. Temporary worker panes close when
 a run settles. Service panes remain until the run is deleted.
 Failed closes retry automatically.
+
+### Keep the computer awake
+
+Long agent runs stop when the computer goes to sleep. The cup beside the
+system meters in the title bar shows what Codara does about it, and a click
+on it picks the mode. The same choice is in Settings, General, **Sleep**
+(search "keep awake" or "sleep").
+
+- **While agents work** (the default) keeps the computer awake while
+  something works: a Claude Code, Codex, Grok or Pi pane in the middle of a
+  turn, a Cora chat with a turn or a worker running, an automation or
+  workflow, or a worker. A terminal agent that has printed nothing for 30
+  minutes stops counting. Once the last one finishes, the computer can sleep
+  again.
+- **Always** keeps it awake whenever Codara is open.
+- **Off** leaves sleep to your system settings.
+
+The cup is lit, with steam, while Codara holds the computer awake, plain
+while it waits for work, and crossed out when the mode is Off. Its tooltip
+and the popover say what is working right now. The cup and the popover work
+from the keyboard: Tab to the cup, Enter to open, the arrow keys to choose a
+mode, Escape to close.
+
+Only idle sleep is held off. The screen can still turn off and lock, and you
+can still put the computer to sleep yourself. Codara asks the system through
+Electron's `powerSaveBlocker` (`prevent-app-suspension`): an idle sleep
+assertion on macOS, `SetThreadExecutionState` on Windows, a sleep inhibitor
+on Linux. The hold belongs to the Codara process, so it ends when Codara
+quits or crashes; Codara also drops it as it quits. After the computer wakes
+from a sleep it could not prevent (a closed lid, a critical battery), Codara
+takes the hold again.
+
+**Keep awake with the lid closed** (off by default) appears only on a Linux
+laptop running systemd, the one place a closed lid can be held without admin
+rights or a change to a system setting. While Codara holds the computer
+awake, it also runs `systemd-inhibit --what=sleep:handle-lid-switch
+--mode=block cat`, so closing the lid does not suspend the laptop
+(`systemd-inhibit --list` shows it as Codara Studio). The helper waits on a
+pipe from Codara and exits the moment Codara goes away, even if Codara is
+killed. If the system refuses the lock, Codara says so in the
+popover and Settings and tries again later, waiting longer each time. A
+closed laptop on battery keeps draining. On macOS and Windows a closed
+laptop sleeps unless an administrator changes a power setting, so the option
+is hidden there.
 
 ### Terminal agent notifications
 

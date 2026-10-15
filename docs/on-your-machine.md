@@ -141,6 +141,16 @@ from Codara and run in your own `~/.claude`, `~/.codex` and `~/.grok` (or
 your own `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or `GROK_HOME`, if you set one),
 exactly as in any other terminal.
 
+## Sleep
+
+**Keep awake** (Settings, General, Sleep) changes no power setting. It asks
+the system for a hold that belongs to the Codara process and ends with it.
+With **Keep awake with the lid closed** on, a Linux laptop also gets a child
+process, `systemd-inhibit --what=sleep:handle-lid-switch --mode=block cat`,
+while Codara holds the computer awake. It is listed by `systemd-inhibit
+--list` as Codara Studio and exits with Codara. See
+[shortcuts-and-settings.md](./shortcuts-and-settings.md#keep-the-computer-awake).
+
 ## Network
 
 The app talks to `https://studio.codarasolutions.com` for update checks and a
