@@ -332,6 +332,12 @@ export class TerminalScrollbackStore {
       state.rawBytes = 0;
       state.cols = record.cols;
       state.rows = rows;
+    } else if (handOver && !this.deps.hasSession(paneId)) {
+      // Forced, for a pane whose process was stopped on purpose and is about
+      // to start again (agent hibernation): the record goes on from the old
+      // session, and the new ConPTY session starts on a fresh screen there
+      // too, after what the old one left on it.
+      this.onChunk(state, Buffer.from(handOverScreen(state.rows), "utf8"));
     }
     return { text: handOver ? history + handOverScreen(rows) : history, savedAt: record.savedAt };
   }

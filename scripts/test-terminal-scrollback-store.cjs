@@ -426,6 +426,34 @@ async function main() {
     );
     next.dispose();
     await next.forget("win");
+
+    // Hibernation on Windows: the pane's process is stopped on purpose and
+    // started again with a forced replay. The record goes on from the old
+    // session, so the new ConPTY session's first paint must not wipe it.
+    const h = fakeDeps({ newSessionOwnsScreen: true, dimensions: () => ({ cols: 80, rows: 10 }) });
+    const sleeper = new storeMod.TerminalScrollbackStore(h.deps);
+    await sleeper.init();
+    sleeper.track(["nap"]);
+    h.state.sessions.add("nap");
+    h.state.feed("nap", Array.from({ length: 4 }, (_, i) => `asleep line ${i}\r\n`).join("") + "PS C:\\work> ");
+    await sleeper.flush("nap");
+    h.state.sessions.delete("nap");
+    const woke = await sleeper.restoreReplay("nap", { force: true, rows: 10 });
+    check("a forced replay on Windows hands the screen over too", !!woke && woke.text.endsWith(storeMod.handOverScreen(10)));
+    h.state.sessions.add("nap");
+    h.state.feed("nap", conptyFirstPaint + "\x1b[1;13Hclaude --resume\r\n");
+    await sleeper.flush("nap");
+    sleeper.dispose();
+    const after = new storeMod.TerminalScrollbackStore(fakeDeps({ newSessionOwnsScreen: true }).deps);
+    const napLines = ((await after.restoreReplay("nap"))?.text ?? "").replace(/\x1b\[[0-9;]*m/g, "").split("\r\n");
+    check(
+      "and the record keeps the stopped session's screen above the new one",
+      napLines.filter((line) => /^asleep line \d$/.test(line)).length === 4 &&
+        napLines.indexOf("asleep line 3") < napLines.indexOf("PS C:\\work> claude --resume"),
+      JSON.stringify(napLines),
+    );
+    after.dispose();
+    await after.forget("nap");
   }
 
   // ── seeding a pane tracked after its session started ─────────────────
