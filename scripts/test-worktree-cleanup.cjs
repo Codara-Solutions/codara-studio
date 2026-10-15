@@ -304,6 +304,22 @@ async function main() {
       assert.equal(bySize[0].id, squash);
       const byName = shared.sortWorktreeRows(rows, "name");
       assert.equal(byName[0].id, repo, "the main checkout heads its repository");
+      // Two repositories with the same folder name stay apart, each under its main checkout.
+      const twin = (repoRoot, branch, isMain) => ({ ...row(merged), id: `${repoRoot}/${branch}`, repoRoot, repoName: "app", branch, isMain });
+      const twins = [
+        twin("/b/app", "zeta", false),
+        twin("/a/app", "beta", false),
+        twin("/b/app", "main", true),
+        twin("/a/app", "main", true),
+        twin("/b/app", "alpha", false),
+        twin("/a/app", "omega", false),
+      ];
+      for (const order of [twins, [...twins].reverse()]) {
+        assert.deepEqual(
+          shared.sortWorktreeRows(order, "name").map((entry) => entry.id),
+          ["/a/app/main", "/a/app/beta", "/a/app/omega", "/b/app/main", "/b/app/alpha", "/b/app/zeta"],
+        );
+      }
       assert.equal(shared.removalOutlook(row(repo)).blocked, "The main checkout is never removed.");
       assert.match(shared.removalOutlook(row(busy)).blocked, /In use: 1 open terminal/);
       assert.match(shared.removalOutlook(row(locked)).blocked, /Locked/);
@@ -508,6 +524,92 @@ async function main() {
       assert.ok(refExists(repo, "refs/heads/feature/missing"));
     });
 
+    const confirmedItems = (list) =>
+      list.map((entry) => ({
+        repoRoot: repo,
+        path: entry.path,
+        fingerprint: entry.fingerprint,
+        confirmDirty: true,
+        confirmUnmerged: true,
+      }));
+
+    await check("a locked worktree whose folder is away stays registered", async () => {
+      const away = add("away", "feature/away");
+      git(repo, ["worktree", "lock", "--reason", "on a drive that is not mounted", away]);
+      fs.rmSync(away, { recursive: true, force: true });
+      const [awayCheck] = await removeMod.checkCleanupTargets(deps, [{ repoRoot: repo, path: away }]);
+      assert.equal(awayCheck.blockers[0]?.code, "LOCKED", JSON.stringify(awayCheck));
+      const result = await removeMod.removeCleanupWorktrees(deps, { items: confirmedItems([awayCheck]), deleteMergedBranches: true });
+      assert.equal(result.outcomes[0].code, "LOCKED");
+      assert.ok(git(repo, ["worktree", "list", "--porcelain"]).includes(away), "the registration stays");
+      git(repo, ["worktree", "unlock", away]);
+      git(repo, ["worktree", "prune"]);
+    });
+
+    await check("a gone detached worktree keeps its commit under a recovery ref", async () => {
+      const goneDetached = add("gone-detached", null, ["--detach"]);
+      const lonely = commitFile(goneDetached, "lonely.txt", "lonely\n", "lonely work");
+      fs.rmSync(goneDetached, { recursive: true, force: true });
+      const [goneCheck] = await removeMod.checkCleanupTargets(deps, [{ repoRoot: repo, path: goneDetached }]);
+      assert.equal(goneCheck.alreadyRemoved, true);
+      assert.equal(goneCheck.unmerged.orphaned, true);
+      const result = await removeMod.removeCleanupWorktrees(deps, { items: confirmedItems([goneCheck]), deleteMergedBranches: true });
+      const [outcome] = result.outcomes;
+      assert.equal(outcome.status, "already-removed", JSON.stringify(outcome));
+      assert.ok(!git(repo, ["worktree", "list", "--porcelain"]).includes(goneDetached));
+      assert.ok(outcome.recoveryRef, "the registration was all that held the commit");
+      assert.equal(git(repo, ["rev-parse", outcome.recoveryRef]), lonely);
+    });
+
+    if (process.platform !== "win32" && process.getuid?.() !== 0) {
+      await check("a removal git gives up on partway keeps its recovery refs", async () => {
+        // git deletes what it can, then drops the registration even though a
+        // folder it could not delete is left: the refs are all that remain.
+        const stuck = add("stuck", null, ["--detach"]);
+        const stuckTip = commitFile(stuck, "stuck.txt", "stuck\n", "stuck work");
+        fs.writeFileSync(path.join(stuck, "draft.txt"), "draft\n");
+        fs.mkdirSync(path.join(stuck, "readonly"));
+        fs.writeFileSync(path.join(stuck, "readonly", "pinned.txt"), "pinned\n");
+        fs.chmodSync(path.join(stuck, "readonly"), 0o555);
+        try {
+          const [stuckCheck] = await removeMod.checkCleanupTargets(deps, [{ repoRoot: repo, path: stuck }]);
+          assert.deepEqual(stuckCheck.blockers, []);
+          const result = await removeMod.removeCleanupWorktrees(deps, {
+            items: confirmedItems([stuckCheck]),
+            deleteMergedBranches: true,
+          });
+          const [outcome] = result.outcomes;
+          assert.equal(outcome.status, "failed", JSON.stringify(outcome));
+          // Which files go before git stops depends on the directory order;
+          // the registration is gone either way.
+          assert.ok(fs.existsSync(stuck));
+          assert.ok(!git(repo, ["worktree", "list", "--porcelain"]).includes(stuck), "git dropped its registration");
+          assert.match(outcome.message, /part of the folder/);
+          assert.equal(git(repo, ["rev-parse", outcome.recoveryRef]), stuckTip, "the last commit is still saved");
+          assert.equal(git(repo, ["show", `${outcome.changesRef}:draft.txt`]), "draft", "the uncommitted work too");
+          const audit = fs.readFileSync(auditFile, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+          assert.equal(audit.at(-1).recoveryRef, outcome.recoveryRef);
+        } finally {
+          fs.chmodSync(path.join(stuck, "readonly"), 0o755);
+          git(repo, ["worktree", "prune"]);
+        }
+      });
+    }
+
+    await check("an edited file too large to copy skips the snapshot, not the removal", async () => {
+      const big = add("big", "feature/big");
+      // Sparse: 60 MB by size, almost nothing on disk.
+      fs.truncateSync(path.join(big, "README.md"), 60 * 1024 * 1024);
+      const [bigCheck] = await removeMod.checkCleanupTargets(deps, [{ repoRoot: repo, path: big }]);
+      assert.equal(bigCheck.localWork.tracked, 1);
+      const result = await removeMod.removeCleanupWorktrees(deps, { items: confirmedItems([bigCheck]), deleteMergedBranches: true });
+      const [outcome] = result.outcomes;
+      assert.equal(outcome.status, "removed", JSON.stringify(outcome));
+      assert.equal(outcome.changesRef, undefined);
+      assert.match(outcome.message, /not saved: the changed files are too large/);
+      assert.ok(outcome.recoveryRef);
+    });
+
     await check("in use covers runs, dev servers, the creating agent and processes", async () => {
       const fresh = add("fresh", "feature/fresh");
       h.state.workspaces.push({
@@ -560,6 +662,13 @@ async function main() {
       const protectedDeps = { ...deps, isProtectedPath: () => true };
       const checked = await removeMod.checkCleanupTargets(protectedDeps, [{ repoRoot: repo, path: path.join(trees, "fresh") }]);
       assert.equal(checked[0].blockers[0].code, "PROTECTED_PATH");
+      // A worktree that holds another tool's home (or the user's) stays too.
+      const holdingDeps = { ...deps, protectedRoots: () => [path.join(trees, "fresh", "dot-claude")] };
+      const holding = await removeMod.checkCleanupTargets(holdingDeps, [{ repoRoot: repo, path: path.join(trees, "fresh") }]);
+      assert.equal(holding[0].blockers[0].code, "PROTECTED_PATH");
+      const elsewhereDeps = { ...deps, protectedRoots: () => [path.join(scratch, "home", ".claude")] };
+      const elsewhere = await removeMod.checkCleanupTargets(elsewhereDeps, [{ repoRoot: repo, path: path.join(trees, "fresh") }]);
+      assert.ok(!elsewhere[0].blockers.some((entry) => entry.code === "PROTECTED_PATH"), "a home outside it is no reason");
     });
 
     // ── Sizes ──────────────────────────────────────────────────────────────
@@ -638,6 +747,31 @@ async function main() {
       assert.equal(queue.enqueue([{ id: "/fresh", path: "/fresh" }], { force: true }), 1, "force measures again");
       queue.cancel();
       assert.equal(queue.pending(), 0);
+
+      // A cancelled measurement that fails late leaves the next one of the
+      // same worktree alone.
+      const gates = [];
+      const restart = space.createSizeMeasurer({
+        store: space.createSizeStore(path.join(home, "sizes-restart.json")),
+        measure: () =>
+          new Promise((resolve, reject) => {
+            gates.push({ resolve, reject });
+          }),
+        onEvent: () => undefined,
+      });
+      restart.enqueue([{ id: "/z", path: "/z" }]);
+      restart.cancel();
+      restart.enqueue([{ id: "/z", path: "/z" }]);
+      assert.equal(gates.length, 2);
+      gates[0].reject(new Error("aborted"));
+      await new Promise((done) => setTimeout(done, 10));
+      assert.equal(restart.pending(), 1, "the second measurement still counts");
+      restart.enqueue([{ id: "/w", path: "/w" }]);
+      assert.equal(gates.length, 2, "one at a time: /w waits for /z");
+      gates[1].resolve({ bytes: 1, complete: true, measuredAt: 1 });
+      await new Promise((done) => setTimeout(done, 10));
+      assert.equal(gates.length, 3, "/w starts once /z is done");
+      restart.cancel();
     });
 
     if (process.platform !== "win32") {

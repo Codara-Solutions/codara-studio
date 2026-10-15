@@ -77,6 +77,9 @@ export interface WorktreeCleanupDeps {
   appPaths(): string[];
   // Another tool's home (~/.claude and the like), never written to.
   isProtectedPath(path: string): boolean;
+  // Folders a removal must never hold: the user's home and the other tools'
+  // homes. A worktree with one of them inside it stays.
+  protectedRoots?(): string[];
   audit(entry: AgentWorktreeAuditEntry): Promise<void>;
   now(): Date;
   nestedScanMaxDirs?: number;
@@ -108,6 +111,24 @@ export function isAtOrUnder(candidate: string, dir: string): boolean {
   const a = pathKey(candidate);
   const b = pathKey(dir);
   return a === b || a.startsWith(b.endsWith("/") ? b : `${b}/`);
+}
+
+// Rows and checks run a handful of git processes each; this many at a time
+// keeps a long list from starting hundreds at once.
+export const ROW_CONCURRENCY = 4;
+
+export async function mapLimited<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      out[index] = await fn(items[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
 }
 
 export async function withBudget<T>(promise: Promise<T>, ms: number, fallback: () => T): Promise<T> {
@@ -583,7 +604,8 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
     block(check, "MAIN_CHECKOUT", "The main checkout is never removed.");
     return finish();
   }
-  if (deps.isProtectedPath(real) || (mainReal && isAtOrUnder(mainReal, real))) {
+  const holdsProtected = (deps.protectedRoots?.() ?? []).some((root) => root && isAtOrUnder(root, real));
+  if (deps.isProtectedPath(real) || holdsProtected || (mainReal && isAtOrUnder(mainReal, real))) {
     block(check, "PROTECTED_PATH", "This folder holds the repository or another tool's home.");
     return finish();
   }
@@ -591,8 +613,10 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
     block(check, "GIT_FAILED", `The folder cannot be read: ${cleanText(stat.message, 200)}`);
     return finish();
   }
+  // A lock keeps the registration of a worktree whose folder is away (on a
+  // drive that is not mounted), so a locked one stays even when it looks gone.
+  if (registration.locked) block(check, "LOCKED", "Locked with git worktree lock. Unlock it first.");
   if (stat === null) check.alreadyRemoved = true;
-  else if (registration.locked) block(check, "LOCKED", "Locked with git worktree lock. Unlock it first.");
   const uses = await usageOf(ctx.usage, registration.path, real, workspaces);
   if (uses.length) block(check, "IN_USE", `In use: ${uses.map((use) => use.label).join(", ")}.`);
 

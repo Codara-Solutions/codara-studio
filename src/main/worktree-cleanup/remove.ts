@@ -22,7 +22,7 @@ import {
 } from "../agent-worktrees";
 import { deleteBranchIfAt } from "../git-branches";
 import { errorText, readGitText, runGit } from "../git-exec";
-import { dropMissingWorktreeRegistration, removeCopyWorktree } from "../git-worktrees";
+import { dropMissingWorktreeRegistration, isRegisteredWorktree, removeCopyWorktree } from "../git-worktrees";
 import { removeWorkspaceFromAppState } from "../workspace-state-edits";
 import {
   canonicalPath,
@@ -30,7 +30,9 @@ import {
   discoverRepos,
   linkWorkspaces,
   listWorktrees,
+  mapLimited,
   pathKey,
+  ROW_CONCURRENCY,
   usageContext,
   type CheckContext,
   type RepoContext,
@@ -52,6 +54,11 @@ const MAX_ITEMS = 200;
 const SNAPSHOT_MAX_FILES = 5_000;
 const SNAPSHOT_MAX_BYTES = 50 * 1024 * 1024;
 const SNAPSHOT_TIMEOUT_MS = 60_000;
+// Deleting a large worktree (node_modules, build output) can take minutes,
+// longer on Windows with an antivirus scanning each file. A git killed
+// partway leaves the folder half deleted, so it gets far more than the
+// usual 20 s.
+export const REMOVE_TIMEOUT_MS = 10 * 60_000;
 
 export interface RemoveOptions {
   sizeOf?: (id: string) => WorktreeSize | null;
@@ -113,22 +120,22 @@ export async function checkCleanupTargets(
     withPullRequests: (root) => deps.pullRequests(root).catch(() => null),
   });
   const contexts = new Map<RepoContext, Promise<CheckContext>>();
-  return Promise.all(
-    valid.map(async (target) => {
-      const repo = sameRepo(repos, target.repoRoot);
-      if (!repo) return missingRepoCheck(target);
-      let ctx = contexts.get(repo);
-      if (!ctx) {
-        ctx = contextFor(
-          deps,
-          repo,
-          valid.filter((item) => pathKey(item.repoRoot) === pathKey(repo.root)).map((item) => item.path),
-        );
-        contexts.set(repo, ctx);
-      }
-      return checkRemoval(await ctx, target.path);
-    }),
-  );
+  // A few at a time: each check runs several git processes and may walk
+  // ignored folders, and a review can hold up to MAX_ITEMS worktrees.
+  return mapLimited(valid, ROW_CONCURRENCY, async (target) => {
+    const repo = sameRepo(repos, target.repoRoot);
+    if (!repo) return missingRepoCheck(target);
+    let ctx = contexts.get(repo);
+    if (!ctx) {
+      ctx = contextFor(
+        deps,
+        repo,
+        valid.filter((item) => pathKey(item.repoRoot) === pathKey(repo.root)).map((item) => item.path),
+      );
+      contexts.set(repo, ctx);
+    }
+    return checkRemoval(await ctx, target.path);
+  });
 }
 
 function refSafe(text: string): string {
@@ -174,10 +181,15 @@ async function saveChanges(
     .split("\0")
     .filter(Boolean);
   if (listed.length > SNAPSHOT_MAX_FILES) return { skipped: "too many untracked files" };
+  // Edited tracked files are copied into the object store too, so a huge
+  // edited file counts against the same cap.
+  const edited = (await runGit(worktree, ["diff", "--name-only", "-z", "--no-renames", head])).stdout
+    .split("\0")
+    .filter(Boolean);
   let bytes = 0;
-  for (const entry of listed) {
+  for (const entry of [...listed, ...edited]) {
     bytes += (await fsp.lstat(join(worktree, entry)).catch(() => null))?.size ?? 0;
-    if (bytes > SNAPSHOT_MAX_BYTES) return { skipped: "untracked files too large" };
+    if (bytes > SNAPSHOT_MAX_BYTES) return { skipped: "the changed files are too large" };
   }
   const scratch = await fsp.mkdtemp(join(tmpdir(), "codara-worktree-changes-"));
   try {
@@ -266,12 +278,16 @@ async function removeOne(
   const refBase = `${RECOVERY_REF_PREFIX}/${dateStamp(deps.now())}/${id}`;
   let recoveryRef: string | null = null;
   let changesRef: string | null = null;
+  // Saved for a folder that is already gone too: the registration's HEAD may
+  // be all that still holds a detached commit.
+  if (check.head) {
+    recoveryRef = await saveRecoveryRef(repo.root, refBase, check.head);
+    if (!recoveryRef) {
+      return refuse("GIT_FAILED", "The recovery ref for its last commit could not be saved, so nothing was removed.");
+    }
+  }
   if (!check.alreadyRemoved) {
     if (check.head) {
-      recoveryRef = await saveRecoveryRef(repo.root, refBase, check.head);
-      if (!recoveryRef) {
-        return refuse("GIT_FAILED", "The recovery ref for its last commit could not be saved, so nothing was removed.");
-      }
       if (check.localWork) {
         const saved = await saveChanges(repo.root, check.path, check.head, `${refBase}-changes`).catch(
           (err: unknown) => ({ skipped: cleanText(errorText(err), 200) }),
@@ -279,6 +295,8 @@ async function removeOne(
         if ("ref" in saved) changesRef = saved.ref;
         else outcome.message = `Uncommitted changes were not saved: ${saved.skipped}.`;
       }
+    } else if (check.localWork) {
+      outcome.message = "Uncommitted changes were not saved: the worktree has no commit to save them on.";
     }
     const removed = await removeCopyWorktree({
       repoCwd: repo.root,
@@ -288,14 +306,31 @@ async function removeOne(
       force: check.localWork !== null,
       deleteBranch: false,
       removeOrphanDir: false,
+      timeoutMs: REMOVE_TIMEOUT_MS,
     });
     if (!removed.ok) {
-      for (const ref of [recoveryRef, changesRef]) {
-        if (ref) await runGit(repo.root, ["update-ref", "-d", ref]).catch(() => undefined);
-      }
-      await audit("refused", { code: "GIT_FAILED" });
+      // The recovery refs stay. git deletes files before it gives up on
+      // one it cannot delete, and it drops the worktree's registration even
+      // then, so after a failure the refs may be the only copy of the last
+      // commit and of the uncommitted work. They expire like the others.
+      await audit("refused", { code: "GIT_FAILED", recoveryRef });
+      const left = (await fsp.lstat(check.path).catch(() => null)) !== null;
+      const partly = left && !(await isRegisteredWorktree(repo.root, check.path));
       return {
-        outcome: { ...outcome, status: "failed", code: "GIT_FAILED", message: cleanText(removed.error, 400) },
+        outcome: {
+          ...outcome,
+          status: "failed",
+          code: "GIT_FAILED",
+          message: [
+            cleanText(removed.error, 400),
+            partly ? "git removed part of the folder; delete the rest by hand." : null,
+            outcome.message ?? null,
+          ]
+            .filter(Boolean)
+            .join(" "),
+          ...(recoveryRef ? { recoveryRef } : {}),
+          ...(changesRef ? { changesRef } : {}),
+        },
         dropWorkspaces: [],
       };
     }
@@ -303,8 +338,15 @@ async function removeOne(
   } else {
     const dropped = await dropMissingWorktreeRegistration(repo.root, check.path);
     if (!dropped.ok) {
+      await audit("refused", { code: "GIT_FAILED", recoveryRef });
       return {
-        outcome: { ...outcome, status: "failed", code: "GIT_FAILED", message: cleanText(dropped.error ?? "", 400) },
+        outcome: {
+          ...outcome,
+          status: "failed",
+          code: "GIT_FAILED",
+          message: cleanText(dropped.error ?? "", 400),
+          ...(recoveryRef ? { recoveryRef } : {}),
+        },
         dropWorkspaces: [],
       };
     }

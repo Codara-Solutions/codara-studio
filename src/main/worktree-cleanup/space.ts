@@ -269,16 +269,21 @@ export function createSizeMeasurer(deps: {
       const item = queue.shift()!;
       const controller = new AbortController();
       running.set(item.id, controller);
+      // After a cancel the same id may be measured again under a new
+      // controller; a late answer from the old one must not touch it.
+      const settle = (): void => {
+        if (running.get(item.id) === controller) running.delete(item.id);
+      };
       void deps
         .measure(item.path, controller.signal)
         .then((size) => {
           if (controller.signal.aborted) return;
           deps.store.set(item.id, size);
-          running.delete(item.id);
+          settle();
           deps.onEvent({ measured: { id: item.id, size }, pending: pending() });
         })
         .catch(() => {
-          running.delete(item.id);
+          settle();
           if (!controller.signal.aborted) deps.onEvent({ pending: pending() });
         })
         .finally(() => {

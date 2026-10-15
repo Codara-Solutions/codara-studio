@@ -162,10 +162,12 @@ export function filterWorktreeRows(
 }
 
 export function sortWorktreeRows(rows: readonly WorktreeCleanupRow[], key: WorktreeSortKey): WorktreeCleanupRow[] {
-  const name = (row: WorktreeCleanupRow): string => `${row.repoName}\u0000${row.branch ?? row.path}`;
+  // The root keeps two repositories that share a folder name apart, so each
+  // one's rows stay together under its main checkout.
+  const name = (row: WorktreeCleanupRow): string => `${row.repoName}\u0000${row.repoRoot}\u0000${row.branch ?? row.path}`;
   const sorted = [...rows];
   sorted.sort((a, b) => {
-    // The main checkout heads its repository's rows in every order.
+    // By name, the main checkout heads its repository's rows.
     if (a.repoRoot === b.repoRoot && a.isMain !== b.isMain && key === "name") return a.isMain ? -1 : 1;
     if (key === "size") {
       const delta = (b.size?.bytes ?? -1) - (a.size?.bytes ?? -1);

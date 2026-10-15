@@ -13,11 +13,13 @@ import { inProgressOperation } from "../git-worktrees";
 import type { WorktreeRegistration } from "../git-worktree-porcelain";
 import {
   ROW_BUDGET_MS,
+  ROW_CONCURRENCY,
   canonicalPath,
   discoverRepos,
   lastActivity,
   linkWorkspaces,
   linkedWorkspaceOf,
+  mapLimited,
   mergeFacts,
   pathKey,
   readStatus,
@@ -36,8 +38,6 @@ import {
 // (no fetch). Sizes are not measured here; space.ts measures them in the
 // background and the cached ones ride along.
 
-const ROW_CONCURRENCY = 4;
-
 export interface ScanOptions {
   sizeOf?: (id: string) => WorktreeSize | null;
 }
@@ -47,20 +47,6 @@ export interface ScannedWorktree {
   path: string;
   isMain: boolean;
   missing: boolean;
-}
-
-async function mapLimited<T, R>(items: readonly T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const out = new Array<R>(items.length);
-  let cursor = 0;
-  const worker = async (): Promise<void> => {
-    while (cursor < items.length) {
-      const index = cursor;
-      cursor += 1;
-      out[index] = await fn(items[index]);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return out;
 }
 
 function pullRequestFor(

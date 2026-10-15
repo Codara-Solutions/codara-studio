@@ -405,9 +405,10 @@ Removal goes through two steps. **Review removal** checks each picked
 worktree again and shows what would be lost. These always stay, whatever you
 confirm: the main checkout, a worktree in use (an open terminal, an active
 Cora run, a running dev server, the agent that made it still open, a running
-program, or Codara itself), a locked worktree, and one with another checkout
-inside it. A worktree with uncommitted work, or with commits that are not
-merged, needs its own confirmation. **Delete branches that are merged** (on by
+program, or Codara itself), a locked worktree (even when its folder is away),
+one with another checkout inside it, and one that holds your home folder or
+another tool's (such as `~/.claude`). A worktree with uncommitted work, or
+with commits that are not merged, needs its own confirmation. **Delete branches that are merged** (on by
 default) deletes a branch only when it is merged and not a long-lived one
 like `main` or `develop`; a branch with commits that are not merged is never
 deleted, and the last step lists it under **Branches kept for review**.

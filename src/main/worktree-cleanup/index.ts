@@ -5,6 +5,7 @@
 // window.spark.worktreeCleanup (src/preload/areas/worktree-cleanup.ts).
 
 import { app, BrowserWindow } from "electron";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
   WorktreeCleanupRemoveRequest,
@@ -14,7 +15,7 @@ import type {
 import { createWorktreeAuditLog, scanProcessesUnderCwds, type RendererTerminal } from "../agent-worktrees";
 import { codaraHome } from "../codara-home";
 import type { IpcHandle } from "../ipc";
-import { isProtectedCliPath } from "../outside-write-guard";
+import { isProtectedCliPath, protectedCliPaths } from "../outside-write-guard";
 import { loadPreferences } from "../preferences-store";
 import * as pty from "../pty-manager";
 import { serversService } from "../servers/service";
@@ -130,6 +131,7 @@ function deps(invalidateGitCache: (cwd: string) => void): WorktreeCleanupDeps {
     },
     appPaths: () => [process.cwd(), app.getAppPath(), codaraHome()],
     isProtectedPath: (path) => isProtectedCliPath(path),
+    protectedRoots: () => [homedir(), ...protectedCliPaths()],
     audit: (entry) => audit!(entry),
     now: () => new Date(),
   };
@@ -192,7 +194,12 @@ export function registerWorktreeCleanupIpc(handle: IpcHandle): void {
   });
 
   handle("worktreeCleanup:remove", async (_event, request: WorktreeCleanupRemoveRequest) => {
-    const { store: cache } = await sizes();
+    const { store: cache, measurer: queue } = await sizes();
+    // A du or a walk still reading a worktree would race git deleting it
+    // (on Windows an open directory fails the delete), and a measurement
+    // landing after the removal would cache a size for a folder that is gone.
+    // The screen measures again once it lists what is left.
+    queue.cancel();
     const { removeCleanupWorktrees } = await import("./remove");
     const result = await removeCleanupWorktrees(deps(await gitCacheInvalidator()), request, {
       sizeOf: (id) => cache.get(id),
