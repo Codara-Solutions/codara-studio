@@ -32,6 +32,11 @@ const electronStub = {
         "export const webContents = { getAllWebContents: () => [] };",
         "export const session = { fromPartition: () => ({}) };",
         "export const screen = { getDisplayMatching: () => ({ scaleFactor: 1 }) };",
+        // agent-socket.ts reaches ipc.ts, which registers keep-awake and
+        // diagnostics; their module scope names these.
+        "export const powerMonitor = { on: () => {}, removeListener: () => {} };",
+        "export const powerSaveBlocker = { start: () => 0, stop: () => {}, isStarted: () => false };",
+        "export const crashReporter = { start: () => {} };",
       ].join("\n"),
       loader: "js",
     }));
