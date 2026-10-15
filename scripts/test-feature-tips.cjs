@@ -639,6 +639,34 @@ async function main() {
     assert.match(tour, /placeBeside\(\{[\s\S]*?topInset: insets\.top,\s*bottomInset: insets\.bottom,/, "the tour passes the bands");
   });
 
+  check("a popover without a dialog or menu role holds tips back", () => {
+    const saved = ["document", "window"].map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]);
+    const popover = { closest: () => null, getBoundingClientRect: () => ({ left: 0, top: 0, width: 200, height: 120 }) };
+    try {
+      globalThis.window = { innerWidth: 1000, innerHeight: 800 };
+      globalThis.document = {
+        querySelectorAll: (selector) => (selector.split(/,\s*/).includes(".spark-overlay-surface") ? [popover] : []),
+      };
+      assert.equal(dom.blockingSurfaceOpen(), true, "the comment dock and other glass layers count as open");
+      globalThis.document = { querySelectorAll: () => [] };
+      assert.equal(dom.blockingSurfaceOpen(), false);
+    } finally {
+      for (const [name, descriptor] of saved) {
+        if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+        else delete globalThis[name];
+      }
+    }
+  });
+
+  check("a tip waits for the window to be in front, and coming back to it counts as busy", () => {
+    const host = read(path.join(RENDERER, "components", "feature-tips", "FeatureTipsHost.tsx"));
+    const focus = host.indexOf("!document.hasFocus()");
+    assert.ok(focus >= 0, "an unfocused window gets no tip");
+    assert.ok(focus < host.indexOf("blockingSurfaceOpen()"), "checked before any DOM read");
+    assert.match(host, /window\.addEventListener\("focus", onKey\);/);
+    assert.match(host, /window\.removeEventListener\("focus", onKey\);/);
+  });
+
   await serial("the store keeps every write in order and survives a corrupt file", async () => {
     const file = path.join(home, "store", "feature-tips.json");
     const store = mainModule.createFeatureTipsStore(() => file);

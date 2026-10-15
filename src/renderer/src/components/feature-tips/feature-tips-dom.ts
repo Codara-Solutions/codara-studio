@@ -12,13 +12,17 @@ export const TIPS_LAYER_ATTRIBUTE = "data-feature-tips-layer";
 export const TOUR_TARGET_ATTRIBUTE = "data-feature-tour-target";
 
 // Open surfaces that mean the person is in the middle of something: tips
-// wait, and a tip already up gets out of the way.
+// wait, and a tip already up gets out of the way. Every floating layer wears
+// spark-overlay-surface (the glass policy in styles.css), so a popover or
+// palette without a dialog or menu role, such as the comment dock in the
+// browser or one a later feature adds, holds tips back too.
 const BLOCKING = [
   '[role="dialog"]',
   '[role="alertdialog"]',
   '[aria-modal="true"]',
   '[role="menu"]',
   ".spark-menu",
+  ".spark-overlay-surface",
   ".spark-scrim",
   ".onboarding-dialog",
   ".onboarding-coach",

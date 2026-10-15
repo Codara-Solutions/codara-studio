@@ -143,10 +143,14 @@ export default function FeatureTipsHost({ onboardingOpen, hasWorkspaces }: Props
     window.addEventListener("keydown", onKey, { capture: true, passive: true });
     // The shortcut dispatcher stops a chord before this listener sees it.
     window.addEventListener(COMMAND_RAN_EVENT, onKey);
+    // Coming back to the window (Alt+Tab, Cmd+Tab) is about to be typing:
+    // the key that switched windows never reaches this one.
+    window.addEventListener("focus", onKey);
     for (const name of pointerEvents) window.addEventListener(name, onPointer, { capture: true, passive: true });
     return () => {
       window.removeEventListener("keydown", onKey, { capture: true });
       window.removeEventListener(COMMAND_RAN_EVENT, onKey);
+      window.removeEventListener("focus", onKey);
       for (const name of pointerEvents) window.removeEventListener(name, onPointer, { capture: true });
     };
   }, [scheduling]);
@@ -158,7 +162,9 @@ export default function FeatureTipsHost({ onboardingOpen, hasWorkspaces }: Props
       const current = stateRef.current;
       const now = Date.now();
       if (!current || !tipDue(current, now, timing, shownThisSession.current)) return;
-      if (document.visibilityState !== "visible") return;
+      // A window behind another app is not being looked at: a tip there
+      // would only be found later, already counted as shown.
+      if (document.visibilityState !== "visible" || !document.hasFocus()) return;
       if (!isCalmMoment({ now, startedAt: startedAt.current, lastKeyAt: lastKeyAt.current, lastPointerAt: lastPointerAt.current, timing })) return;
       // The window is read once per calm period. What a tip waits for (its
       // control on screen, a dialog closed, focus out of a page) changes when
