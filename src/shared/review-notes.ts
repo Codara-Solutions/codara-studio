@@ -75,7 +75,11 @@ export interface ReviewDiffRequest {
   mode: ReviewDiffMode;
   /** Base branch for mode "base"; the workspace's own base or the default branch when absent. */
   base?: string | null;
-  /** Load only these files (repository-relative), with no budget. */
+  /**
+   * Load only these files (repository-relative), with no budget. Name a
+   * renamed file's old path too: git pairs the two only when both are asked
+   * for, and shows the new one as an added file otherwise.
+   */
   paths?: string[];
   /** With paths: load them in full, even a file too large to show unasked. */
   force?: boolean;
@@ -97,6 +101,14 @@ export interface ReviewDiff {
   bases?: string[];
   error?: string;
 }
+
+/** Paths one diff request loads at most; the rest of a longer list are ignored. */
+export const MAX_REVIEW_REQUEST_PATHS = 200;
+/**
+ * Characters of the paths one diff request names at most. Each becomes an
+ * argument of git's command line, which Windows caps at 32,767 characters.
+ */
+export const MAX_REVIEW_REQUEST_CHARS = 12_000;
 
 export const MAX_REVIEW_NOTES = 500;
 export const MAX_NOTE_BODY_CHARS = 8_000;

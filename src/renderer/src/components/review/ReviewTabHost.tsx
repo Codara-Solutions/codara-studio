@@ -22,6 +22,7 @@ import {
   fileRows,
   fileStructure,
   hunkPatch,
+  pathRequests,
   quoteFor,
   reviewRepoFolder,
   shortLocation,
@@ -212,16 +213,21 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
     // full, are read again with the rest and swapped in together, so a
     // refresh never flashes them back to placeholders.
     const shown = overridesRef.current;
+    const listed = new Map(result.files.map((file) => [file.path, file]));
     const deferred = result.files.filter((file) => file.deferred).map((file) => file.path);
     const asked = deferred.filter((path) => forced.current.has(path)).slice(0, MAX_RELOAD_PATHS);
     const seen = deferred.filter((path) => !forced.current.has(path) && shown.has(path)).slice(0, MAX_RELOAD_PATHS);
-    const read = (paths: string[], force: boolean) =>
-      paths.length
-        ? window.spark.review
-            .diff({ cwd, mode, base: result.base, paths, force })
-            .then((extra) => extra.files.filter((file) => paths.includes(file.path)))
-            .catch(() => [] as ReviewDiffFile[])
-        : Promise.resolve([] as ReviewDiffFile[]);
+    const read = async (paths: string[], force: boolean): Promise<ReviewDiffFile[]> => {
+      const loaded = await Promise.all(
+        pathRequests(paths, (path) => listed.get(path)).map((request) =>
+          window.spark.review
+            .diff({ cwd, mode, base: result.base, paths: request.paths, force })
+            .then((extra) => extra.files.filter((file) => request.files.includes(file.path)))
+            .catch(() => [] as ReviewDiffFile[]),
+        ),
+      );
+      return loaded.flat();
+    };
     const again = (await Promise.all([read(asked, true), read(seen, false)])).flat();
     if (gen !== generation.current) return;
     setDiff(result);
@@ -323,28 +329,31 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
     (current: ReviewDiff, paths: string[], force: boolean) => {
       const gen = generation.current;
       setLoadingPaths((prev) => new Set([...prev, ...paths]));
-      const settle = (loaded: ReadonlyMap<string, ReviewDiffFile>, error: string | null) => {
-        if (gen !== generation.current) return;
-        setOverrides((prev) => {
-          const next = new Map(prev);
-          for (const path of paths) {
-            const file = loaded.get(path);
-            const original = current.files.find((candidate) => candidate.path === path);
-            if (file) next.set(path, file);
-            else if (original) next.set(path, { ...original, deferred: undefined, lines: [], ...(error ? { error } : {}) });
-          }
-          return next;
-        });
-        setLoadingPaths((prev) => {
-          const next = new Set(prev);
-          for (const path of paths) next.delete(path);
-          return next;
-        });
-      };
-      void window.spark.review
-        .diff({ cwd, mode: current.mode, base: current.base, paths, force })
-        .then((result) => settle(new Map(result.files.map((file) => [file.path, file])), result.error ?? null))
-        .catch((err: Error) => settle(new Map(), err.message));
+      const listed = new Map(current.files.map((file) => [file.path, file]));
+      for (const request of pathRequests(paths, (path) => listed.get(path))) {
+        const settle = (loaded: ReadonlyMap<string, ReviewDiffFile>, error: string | null) => {
+          if (gen !== generation.current) return;
+          setOverrides((prev) => {
+            const next = new Map(prev);
+            for (const path of request.files) {
+              const file = loaded.get(path);
+              const original = listed.get(path);
+              if (file) next.set(path, file);
+              else if (original) next.set(path, { ...original, deferred: undefined, lines: [], ...(error ? { error } : {}) });
+            }
+            return next;
+          });
+          setLoadingPaths((prev) => {
+            const next = new Set(prev);
+            for (const path of request.files) next.delete(path);
+            return next;
+          });
+        };
+        void window.spark.review
+          .diff({ cwd, mode: current.mode, base: current.base, paths: request.paths, force })
+          .then((result) => settle(new Map(result.files.map((file) => [file.path, file])), result.error ?? null))
+          .catch((err: Error) => settle(new Map(), err.message));
+      }
     },
     [cwd],
   );
