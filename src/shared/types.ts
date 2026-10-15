@@ -1355,6 +1355,10 @@ export interface AppPreferences {
   // raises one notification per PR. Default on; requires auto-fetch and a
   // signed-in gh.
   notifyPullRequests?: boolean;
+  // When on, a check failing on the pull request of a local workspace's
+  // branch raises one notification per failing head commit
+  // (src/main/github-ci-watch.ts). Default on; requires a signed-in gh.
+  notifyCiFailures?: boolean;
   // How long an in-app toast stays on screen before auto-dismissing, in ms.
   // 0 = stay until clicked or closed. Missed toasts always remain in the
   // notification center regardless.
@@ -1506,6 +1510,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   gitAutoFetchIntervalMinutes: DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES,
   notifyTeammatePushes: true,
   notifyPullRequests: true,
+  notifyCiFailures: true,
   toastDurationMs: DEFAULT_TOAST_DURATION_MS,
   workspaceSwitchHudMs: DEFAULT_WORKSPACE_SWITCH_HUD_MS,
 };
@@ -1649,7 +1654,10 @@ export type NotifyKind =
   | "git.teammate-push"
   // Someone opened (or reopened, or marked ready) a pull request on a watched
   // GitHub repository (src/main/github-push-watch.ts). One alert per PR.
-  | "git.pull-request";
+  | "git.pull-request"
+  // A check failed on the pull request of a workspace's branch
+  // (src/main/github-ci-watch.ts). One alert per failing head commit.
+  | "git.ci-failed";
 
 // Where clicking a notification (toast card, native notification, center
 // entry) navigates. Terminal targets reuse the TerminalAgentTarget shape.

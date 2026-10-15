@@ -2956,6 +2956,7 @@ const NOTIFY_KINDS: ReadonlySet<string> = new Set<NotifyKind>([
   "app.update-ready",
   "git.teammate-push",
   "git.pull-request",
+  "git.ci-failed",
 ]);
 const NOTIFY_TONES: ReadonlySet<string> = new Set<InAppNotificationTone>([
   "success",

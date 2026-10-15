@@ -1407,6 +1407,11 @@ function GeneralSettings({
                 />
               </>
             ) : null}
+            <ToggleRow
+              title="Notify me when CI fails on my pull request"
+              desc="One alert per failing commit on the pull request of each workspace's branch, read with your signed-in gh. Fix with agent in Source Control then hands the failure to an agent."
+              {...bindToggle("notifyCiFailures", preferences, setPreference)}
+            />
             <GithubWebhookSettings />
             {workspaceCwd ? <CopyBranchSetupField workspaceCwd={workspaceCwd} /> : null}
             {workspaceCwd ? <AgentWorktreeIgnoredField workspaceCwd={workspaceCwd} /> : null}

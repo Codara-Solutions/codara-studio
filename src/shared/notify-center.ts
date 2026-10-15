@@ -23,6 +23,7 @@ const FAILED_KINDS: ReadonlySet<NotifyKind> = new Set([
   "run.failed",
   "terminal.agent.failed",
   "automation.failed",
+  "git.ci-failed",
 ]);
 
 const DONE_KINDS: ReadonlySet<NotifyKind> = new Set([

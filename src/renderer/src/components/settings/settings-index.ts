@@ -173,6 +173,7 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "general", title: "Fetch interval", desc: "How often remotes are fetched.", section: "Git", keywords: "minutes cadence auto-fetch" },
   { tab: "general", title: "Notify me when teammates push", desc: "One quiet alert per repository when others push.", section: "Git", keywords: "github push alert gh notification", toggle: "notifyTeammatePushes" },
   { tab: "general", title: "Notify me when a pull request is opened", desc: "A notification for new pull requests.", section: "Git", keywords: "github pr review notification", toggle: "notifyPullRequests" },
+  { tab: "general", title: "Notify me when CI fails on my pull request", desc: "An alert when a check fails on your branch's pull request.", section: "Git", keywords: "github ci checks actions failed failing build notification fix with agent", toggle: "notifyCiFailures" },
   { tab: "general", title: "Instant git triggers", desc: "Pushes reach automations in seconds through the GitHub App.", section: "Git", keywords: "github app webhook install push automations" },
   { tab: "general", title: "Copy-branch setup command", desc: "What runs in a new copy of a branch.", section: "Git", keywords: "worktree pnpm npm install setup" },
   { tab: "general", title: "Agent worktrees: also regenerable", desc: "Ignored files an agent may delete with a merged worktree.", section: "Git", keywords: "worktree ignored gitignore cache build regenerable" },

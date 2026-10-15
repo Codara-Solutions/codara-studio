@@ -50,6 +50,7 @@ export const PREFERENCE_TOGGLES = {
   gitAutoFetchEnabled: defaultOn("gitAutoFetchEnabled"),
   notifyTeammatePushes: defaultOn("notifyTeammatePushes"),
   notifyPullRequests: defaultOn("notifyPullRequests"),
+  notifyCiFailures: defaultOn("notifyCiFailures"),
   vimMode: defaultOff("vimMode"),
   autosaveEnabled: defaultOff("autosaveEnabled"),
   inlineAutocompleteEnabled: defaultOff("inlineAutocompleteEnabled"),
