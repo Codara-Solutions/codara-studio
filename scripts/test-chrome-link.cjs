@@ -389,8 +389,30 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   chrome.send({ type: "tabs", allowOpen: true, tabs: [...link.tabs.values()] });
   await until(() => link.allowOpen, "allowOpen");
   assert.deepEqual(await lib.chromeLinkTool({ action: "open", url: "https://a.example/" }, "preview.chrome", host), { ok: true, tabId: "chrome:99", url: "https://a.example/", title: "Opened" });
-  assert.deepEqual(answers.at(-1), { id: answers.at(-1).id, type: "open", url: "https://a.example/" });
+  assert.deepEqual(answers.at(-1), { id: answers.at(-1).id, type: "open", url: "https://a.example/", group: "Codara" }, "an opened tab never lands loose");
   assert.equal(lib.recentChromeActivity()[0].detail, "opened https://a.example/");
+  // Without a group the tab joins its workspace's, named like the workspace
+  // and cleaned like every group name; an agent's own group wins.
+  const asked = [];
+  const named = {
+    ...host,
+    workspaceName: async (workspaceId) => {
+      asked.push(workspaceId);
+      return workspaceId === "ws-1" ? "  My\tApp \n  " : null;
+    },
+  };
+  await lib.chromeLinkTool({ action: "open", url: "https://a.example/", workspaceId: "ws-1" }, "preview.chrome", named);
+  assert.equal(answers.at(-1).group, "My App");
+  await lib.chromeLinkTool({ action: "open", url: "https://a.example/" }, "preview.chrome", named);
+  assert.deepEqual(asked, ["ws-1", null], "a caller outside a workspace asks for the one on screen");
+  assert.equal(answers.at(-1).group, "Codara", "no workspace name");
+  await lib.chromeLinkTool({ action: "open", url: "https://a.example/", workspaceId: "ws-1", group: " Login  flow " }, "preview.chrome", named);
+  assert.equal(answers.at(-1).group, "Login flow");
+  await lib.chromeLinkTool({ action: "open", url: "https://a.example/", workspaceId: "ws-1", group: "   " }, "preview.chrome", named);
+  assert.equal(answers.at(-1).group, "My App", "a blank group is no group");
+  const failing = { ...host, workspaceName: async () => { throw new Error("state unreadable"); } };
+  await lib.chromeLinkTool({ action: "open", url: "https://a.example/", workspaceId: "ws-1" }, "preview.chrome", failing);
+  assert.equal(answers.at(-1).group, "Codara");
   const toBank = await lib.chromeLinkTool({ action: "open", url: "https://a.example/redirects-to-bank" }, "preview.chrome", host);
   assert.deepEqual({ ...toBank, note: undefined }, { ok: true, tabId: "chrome:98", url: "", title: "", blocked: true, note: undefined }, "a tab that ended on a blocked site is not described");
   assert.match(toBank.note, /blocked for agents/);
