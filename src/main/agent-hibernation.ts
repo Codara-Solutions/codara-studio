@@ -57,7 +57,7 @@ export interface AgentHibernationDeps {
   session: (paneId: string) => pty.HibernationSessionInfo | null;
   evidence: (paneId: string) => AgentHibernationEvidence | null;
   listProcesses: () => Promise<CensusProcess[] | null>;
-  terminalPids: (ttyPath: string) => Promise<number[] | null>;
+  terminalPids: (ttyPath: string | null) => Promise<number[] | null>;
   stop: (paneId: string, generationId: string) => Promise<boolean>;
   log: (line: string) => void;
 }
@@ -192,7 +192,9 @@ export async function hibernateAgentPane(
 
     const processes = await deps.listProcesses();
     if (!processes) return holdCensus({ ok: false, reason: "process-list-unavailable" });
-    const terminalPids = first.session.ttyPath ? await deps.terminalPids(first.session.ttyPath) : [];
+    // An unknown terminal on POSIX answers null: without it, a process
+    // holding the pane's terminal from outside its tree could not be seen.
+    const terminalPids = await deps.terminalPids(first.session.ttyPath);
     if (!terminalPids) return holdCensus({ ok: false, reason: "process-list-unavailable" });
     const census = classifyPaneProcessTree(processes, first.session.pid, request.runtime, {
       terminalPids,

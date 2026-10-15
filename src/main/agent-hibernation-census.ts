@@ -292,10 +292,16 @@ async function listWindowsCensus(): Promise<CensusProcess[] | null> {
 
 /**
  * POSIX: the pids whose controlling terminal is exactly `ttyPath`. Null when
- * that cannot be read; the caller then refuses to stop the pane.
+ * that cannot be read, including a pane whose terminal is unknown; the caller
+ * then refuses to stop the pane. Windows has no controlling terminal to ask
+ * about, so it answers with none.
  */
-export async function listTerminalPids(ttyPath: string): Promise<number[] | null> {
-  if (process.platform === "win32") return [];
+export async function listTerminalPids(
+  ttyPath: string | null,
+  platform: NodeJS.Platform = process.platform,
+): Promise<number[] | null> {
+  if (platform === "win32") return [];
+  if (!ttyPath) return null;
   try {
     const { stdout } = await execFileAsync("ps", ["-t", ttyPath, "-o", "pid="], {
       encoding: "utf8",

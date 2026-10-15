@@ -117,7 +117,7 @@ const MIN = 60_000;
 const NOW = 1_000 * MIN;
 
 function makeDeps(overrides = {}) {
-  const calls = { stop: [], list: 0 };
+  const calls = { stop: [], list: 0, ttyPaths: [] };
   const state = {
     session: {
       generationId: "gen-1",
@@ -162,7 +162,10 @@ function makeDeps(overrides = {}) {
       if (state.duringList) state.duringList(state);
       return state.processes;
     },
-    terminalPids: async () => state.terminalPids,
+    terminalPids: async (ttyPath) => {
+      calls.ttyPaths.push(ttyPath);
+      return state.terminalPids;
+    },
     stop: async (paneId, generationId) => {
       calls.stop.push({ paneId, generationId });
       return state.stopResult ?? true;
@@ -234,6 +237,18 @@ async function main() {
   check("no process listing: stays awake", r.result.reason === "process-list-unavailable" && r.calls.stop.length === 0);
   r = await run((t) => { t.state.terminalPids = null; });
   check("unreadable terminal holders: stays awake", r.result.reason === "process-list-unavailable");
+  r = await run((t) => {
+    t.state.session.ttyPath = null;
+    // What listTerminalPids answers on POSIX for an unknown terminal.
+    t.deps.terminalPids = async (ttyPath) => (ttyPath === null ? null : t.state.terminalPids);
+  });
+  check(
+    "a pane whose terminal is unknown is asked about, and stays awake on POSIX",
+    r.result.reason === "process-list-unavailable" && r.calls.stop.length === 0,
+    r.result,
+  );
+  r = await run();
+  check("the pane's terminal is what the holder check reads", JSON.stringify(r.calls.ttyPaths) === JSON.stringify(["/dev/pts/7"]), r.calls.ttyPaths);
   r = await run((t) => {
     t.state.processes = [...t.state.processes, { pid: 103, parentPid: 100, startMs: NOW - 300 * MIN, command: "node vite" }];
   });

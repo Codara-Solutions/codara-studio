@@ -54,6 +54,7 @@ async function main() {
     normalizeCommandForMatch,
     parseWindowsCensusList,
     parseWindowsCreationDate,
+    listTerminalPids,
   } = require(outfile);
 
   let failures = 0;
@@ -190,6 +191,12 @@ async function main() {
   );
   check("a single row object parses too", parseWindowsCensusList(JSON.stringify({ ProcessId: 5, ParentProcessId: 4 }))?.length === 1);
   check("garbage is unknown, not empty", parseWindowsCensusList("not json") === null);
+
+  // ── Terminal holders ──
+  check("an unknown terminal on POSIX is unknown, not empty", (await listTerminalPids(null, "linux")) === null);
+  check("an unknown terminal on macOS is unknown too", (await listTerminalPids(null, "darwin")) === null);
+  const windowsHolders = await listTerminalPids(null, "win32");
+  check("Windows has no terminal holders to ask about", Array.isArray(windowsHolders) && windowsHolders.length === 0);
 
   if (failures > 0) {
     console.error(`\n${failures} check(s) failed`);
