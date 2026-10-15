@@ -848,6 +848,13 @@ export interface BesideInput {
   preferred?: FeatureTipPlacement;
   gap: number;
   margin: number;
+  /**
+   * Bands at the top and bottom the card never enters (title and status
+   * bars). The title bar is a window drag region and holds the window
+   * controls on Windows, so a card over it would swallow clicks there.
+   */
+  topInset?: number;
+  bottomInset?: number;
 }
 
 const FALLBACKS: Record<FeatureTipPlacement, FeatureTipPlacement[]> = {
@@ -880,16 +887,19 @@ export function placeBeside(input: BesideInput): { left: number; top: number; pl
   const anchor = input.avoid.find((box) => containsBox(box, target)) ?? target;
   const centerX = target.left + target.width / 2;
   const centerY = target.top + target.height / 2;
+  const minTop = Math.max(margin, input.topInset ?? 0);
+  const maxBottom = viewport.height - Math.max(margin, input.bottomInset ?? 0);
   for (const placement of FALLBACKS[input.preferred ?? "bottom"]) {
     let left: number;
     let top: number;
     if (placement === "bottom" || placement === "top") {
       top = placement === "bottom" ? anchor.top + anchor.height + gap : anchor.top - gap - size.height;
       left = clamp(centerX - size.width / 2, margin, viewport.width - margin - size.width);
-      if (top < margin || top + size.height > viewport.height - margin) continue;
+      if (top < minTop || top + size.height > maxBottom) continue;
     } else {
       left = placement === "right" ? anchor.left + anchor.width + gap : anchor.left - gap - size.width;
-      top = clamp(centerY - size.height / 2, margin, viewport.height - margin - size.height);
+      top = clamp(centerY - size.height / 2, minTop, maxBottom - size.height);
+      if (top < minTop || top + size.height > maxBottom) continue;
       if (left < margin || left + size.width > viewport.width - margin) continue;
     }
     const box = { left, top, ...size };
