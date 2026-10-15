@@ -22,6 +22,7 @@ import {
   fileStructure,
   hunkPatch,
   quoteFor,
+  reviewRepoFolder,
   shortLocation,
   type DraftAnchor,
   type FileGroup,
@@ -280,7 +281,7 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
     setDirty((value) => value + 1);
   }, [gitVersion, signature]);
 
-  const root = diff?.root ?? cwd;
+  const root = reviewRepoFolder(diff?.root, cwd);
   useEffect(() => {
     const top = norm(root);
     const under = (path: string) => {
@@ -640,16 +641,16 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
       const patch = hunkPatch(file, hunk);
       const options =
         action === "stage" ? { cached: true, reverse: false } : action === "unstage" ? { cached: true, reverse: true } : { cached: false, reverse: true };
-      void run(`hunk:${id}:${action}`, () => window.spark.git.applyPatch(cwd, patch, options));
+      void run(`hunk:${id}:${action}`, () => window.spark.git.applyPatch(root, patch, options));
     },
-    [confirmDiscard, cwd, fileByPath, run],
+    [confirmDiscard, fileByPath, root, run],
   );
 
   const onResolve = useCallback(
     (path: string, side: "ours" | "theirs") => {
-      void run(`conflict:${path}:${side}`, () => window.spark.git.resolveConflict(cwd, path, side));
+      void run(`conflict:${path}:${side}`, () => window.spark.git.resolveConflict(root, path, side));
     },
-    [cwd, run],
+    [root, run],
   );
 
   const changeOf = useCallback(

@@ -336,3 +336,22 @@ export function shortLocation(note: Pick<ReviewNote, "startLine" | "endLine" | "
   const range = plural ? `${note.startLine}-${note.endLine}` : `${note.startLine}`;
   return `${note.side === "old" ? "Old line" : "Line"}${plural ? "s" : ""} ${range}`;
 }
+
+/**
+ * The folder git actions on the review's paths run in, and files open from:
+ * the repository's top folder, since every path in the review is relative to
+ * it. A workspace that is a subfolder of its repository would otherwise apply
+ * a hunk of a file outside it as a silent no-op (git apply skips paths
+ * outside the folder it runs in). Spelled like the workspace folder when it
+ * is that folder, and with backslashes when the workspace uses them (git
+ * prints C:/x on Windows), so open tabs and caches keyed by path match.
+ */
+export function reviewRepoFolder(root: string | null | undefined, cwd: string): string {
+  if (!root) return cwd;
+  const norm = (value: string) => value.replace(/\\/g, "/").replace(/\/+$/, "");
+  const caseless = /^[A-Za-z]:\//.test(norm(cwd)) || /^[A-Za-z]:\//.test(norm(root));
+  const a = norm(root);
+  const b = norm(cwd);
+  if (caseless ? a.toLowerCase() === b.toLowerCase() : a === b) return cwd;
+  return cwd.includes("\\") && !cwd.includes("/") ? root.replace(/\//g, "\\") : root;
+}

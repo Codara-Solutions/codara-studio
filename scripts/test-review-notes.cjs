@@ -233,6 +233,16 @@ function diffFile(pathName, text, over = {}) {
     assert.equal(lib.shortLocation(note({ side: "old" })), "Old line 12");
     assert.equal(lib.shortLocation(note({ startLine: 0, endLine: 0 })), "Whole file");
 
+    // Git actions and opens run in the repository's top folder, spelled like the workspace.
+    assert.equal(lib.reviewRepoFolder("/home/u/repo", "/home/u/repo"), "/home/u/repo");
+    assert.equal(lib.reviewRepoFolder("/home/u/repo", "/home/u/repo/"), "/home/u/repo/", "the same folder keeps the workspace's spelling");
+    assert.equal(lib.reviewRepoFolder("/home/u/repo", "/home/u/repo/packages/web"), "/home/u/repo", "a subfolder workspace acts in the repository");
+    assert.equal(lib.reviewRepoFolder("C:/Users/Ann/repo", "C:\\Users\\Ann\\repo"), "C:\\Users\\Ann\\repo");
+    assert.equal(lib.reviewRepoFolder("c:/users/ann/repo", "C:\\Users\\Ann\\repo"), "C:\\Users\\Ann\\repo", "drive paths match without case");
+    assert.equal(lib.reviewRepoFolder("C:/Users/Ann/repo", "C:\\Users\\Ann\\repo\\web"), "C:\\Users\\Ann\\repo", "backslashes like the workspace");
+    assert.equal(lib.reviewRepoFolder(undefined, "/w"), "/w");
+    assert.equal(lib.reviewRepoFolder("/Home/u/repo", "/home/u/repo"), "/Home/u/repo", "POSIX paths keep their case");
+
     // ── Where a batch can go ────────────────────────────────────────────
     const routing = [
       { id: "pane:p1", kind: "pane", paneId: "p1", agent: true, label: "Claude Code · Terminal", sublabel: "focused", group: "agents" },
