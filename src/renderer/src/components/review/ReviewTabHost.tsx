@@ -271,6 +271,15 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
     void load();
   }, [dirty, load]);
 
+  // Coming back to the tab reads the diff again: an agent may have changed
+  // files that were already changed, which moves neither the status nor the
+  // git version, and the file watcher only runs while the file tree is open.
+  const wasVisible = useRef(visible);
+  useEffect(() => {
+    if (visible && !wasVisible.current) setDirty((value) => value + 1);
+    wasVisible.current = visible;
+  }, [visible]);
+
   const signature = statusSignature(status);
   const firstSignal = useRef(true);
   useEffect(() => {
