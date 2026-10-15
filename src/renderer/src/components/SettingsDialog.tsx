@@ -449,11 +449,15 @@ export default function SettingsDialog({
                   shells={shells}
                   selectedShellId={selectedShell?.id ?? null}
                   scrollbackLineLimit={draft.terminalScrollbackLineLimit}
+                  osc52Clipboard={draft.terminalOsc52Clipboard !== false}
                   onSelect={(defaultShellId) =>
                     setDraft((current) => ({ ...current, defaultShellId }))
                   }
                   onScrollbackLineLimitChange={(terminalScrollbackLineLimit) =>
                     setDraft((current) => ({ ...current, terminalScrollbackLineLimit }))
+                  }
+                  onOsc52ClipboardChange={(terminalOsc52Clipboard) =>
+                    setDraft((current) => ({ ...current, terminalOsc52Clipboard }))
                   }
                 />
               )}
@@ -755,14 +759,18 @@ function TerminalSettings({
   shells,
   selectedShellId,
   scrollbackLineLimit,
+  osc52Clipboard,
   onSelect,
   onScrollbackLineLimitChange,
+  onOsc52ClipboardChange,
 }: {
   shells: ShellInfo[];
   selectedShellId: string | null;
   scrollbackLineLimit: number;
+  osc52Clipboard: boolean;
   onSelect: (shellId: string) => void;
   onScrollbackLineLimitChange: (lineLimit: number) => void;
+  onOsc52ClipboardChange: (enabled: boolean) => void;
 }) {
   const [resourceSnapshot, setResourceSnapshot] =
     useState<PtyResourceSnapshot | null>(null);
@@ -825,6 +833,15 @@ function TerminalSettings({
           max={TERMINAL_SCROLLBACK_LINE_LIMIT_MAX}
           value={scrollbackLineLimit}
           onChange={onScrollbackLineLimitChange}
+        />
+      </SettingsSection>
+
+      <SettingsSection title="Clipboard">
+        <ToggleRow
+          title="Let programs copy to the clipboard"
+          desc="tmux, Neovim and programs on a machine you reach over SSH can put text on this computer's clipboard (OSC 52), up to 768 KB at a time. They can never read it. Only a pane you can see and type into can copy."
+          checked={osc52Clipboard}
+          onChange={onOsc52ClipboardChange}
         />
       </SettingsSection>
 
@@ -1285,6 +1302,11 @@ function GeneralSettings({
                   />
                 </div>
               }
+            />
+            <ToggleRow
+              title="Ask where terminal links open"
+              desc={`Clicking a link in a terminal shows a menu: Codara browser, default browser or copy. ${IS_MAC ? "Cmd" : "Ctrl"}+click skips it and follows Open links in. Off opens links on a plain click.`}
+              {...bindToggle("terminalLinkMenu", preferences, setPreference)}
             />
             <SettingRow
               title="Workspace switch badge"

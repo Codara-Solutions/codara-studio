@@ -40,6 +40,7 @@ export const PREFERENCE_TOGGLES = {
   glassEffects: defaultOn("glassEffects"),
   keepRunningInBackground: defaultOn("keepRunningInBackground"),
   autoOpenPreview: defaultOff("autoOpenPreview"),
+  terminalLinkMenu: defaultOn("terminalLinkMenu"),
   agentWorktreesEnabled: defaultOn("agentWorktreesEnabled"),
   agentsMayRemoveUserWorktrees: defaultOff("agentsMayRemoveUserWorktrees"),
   closeTabsOnMiddleClick: defaultOff("closeTabsOnMiddleClick"),

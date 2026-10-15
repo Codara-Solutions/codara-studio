@@ -1,5 +1,6 @@
 import { Terminal } from "@xterm/headless";
 import { classifyCodexScreen } from "@shared/agent-patterns";
+import { applyUnicode11Widths } from "@shared/terminal-unicode";
 
 // Retain terminal cells, not a concatenation of repaint bytes. A shimmer may
 // update one letter or timer digit while the rest of the busy footer stays put.
@@ -14,6 +15,7 @@ export class CodexTerminalScreen {
 
   constructor(cols: number, rows: number, private readonly onIdleFrame?: () => void) {
     this.terminal = new Terminal({ cols, rows, scrollback: 0, allowProposedApi: true });
+    applyUnicode11Widths(this.terminal);
   }
 
   write(data: string | Uint8Array): void {

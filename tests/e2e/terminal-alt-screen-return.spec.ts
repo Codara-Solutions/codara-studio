@@ -142,7 +142,7 @@ test("a pane revealed at a new size still follows the next layout change", async
     // the layout again must still reach the program.
     const tabCount = await page.locator(".spark-tabbar-scroll [data-tab-id]").count();
     await page.getByRole("button", { name: "New tab", exact: true }).dispatchEvent("click");
-    await page.getByRole("button", { name: "Terminal" }).click();
+    await page.getByRole("button", { name: /^Terminal\b/ }).click();
     await expect(page.locator(".spark-tabbar-scroll [data-tab-id]")).toHaveCount(tabCount + 1);
     await expect(page.locator(`[data-terminal-pane-id="${paneId}"] .xterm-host`)).toBeHidden();
     await page.waitForTimeout(500);

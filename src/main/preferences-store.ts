@@ -283,6 +283,10 @@ function normalize(
     linkOpenTarget: (LINK_OPEN_TARGETS as readonly unknown[]).includes(src.linkOpenTarget)
       ? (src.linkOpenTarget as LinkOpenTarget)
       : DEFAULT_PREFERENCES.linkOpenTarget,
+    terminalLinkMenu:
+      typeof src.terminalLinkMenu === "boolean"
+        ? src.terminalLinkMenu
+        : DEFAULT_PREFERENCES.terminalLinkMenu,
     copyBranchSetupCommandByRepo: normalizeStringMap(
       src.copyBranchSetupCommandByRepo,
     ),

@@ -1,5 +1,6 @@
 import { Terminal } from "@xterm/headless";
 import { stripVTControlCharacters } from "node:util";
+import { applyUnicode11Widths } from "@shared/terminal-unicode";
 
 // Terminal reads and runs for the codara-studio MCP tools (terminal.read,
 // terminal.run, terminal.list in agent-socket.ts). Kept free of Electron and
@@ -116,6 +117,7 @@ export async function renderTerminalScreen(
     scrollback: Math.max(0, lines),
     allowProposedApi: true,
   });
+  applyUnicode11Widths(terminal);
   try {
     await new Promise<void>((resolve) => terminal.write(bytes, resolve));
     const buffer = terminal.buffer.active;

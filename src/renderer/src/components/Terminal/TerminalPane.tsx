@@ -1,5 +1,5 @@
 import type { SearchAddon } from "@xterm/addon-search";
-import { forwardRef, useImperativeHandle, useRef } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type {
   PtyExitInfo,
   RuntimeState,
@@ -11,6 +11,7 @@ import {
   type SparkOpenInput,
 } from "./useTerminalSession";
 import type { TerminalAgentSession } from "../../tabs/types";
+import { TerminalLinkMenu, type TerminalLinkMenuRequest } from "./TerminalLinkMenu";
 
 // TerminalPane wraps a single xterm pane in a forwardRef component so the
 // parent strip can imperatively `write`, `focus`, copy the visible buffer,
@@ -141,6 +142,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
     ref,
   ) {
     const containerRef = useRef<HTMLDivElement>(null);
+    const [linkMenu, setLinkMenu] = useState<TerminalLinkMenuRequest | null>(null);
 
     const session = useTerminalSession({
       container: containerRef,
@@ -164,6 +166,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onCwd,
       onDetectedLocalUrl,
       onSparkOpen,
+      onLinkMenu: setLinkMenu,
       onActivity,
       onUserInput,
       onAgentState,
@@ -177,6 +180,19 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onResumeFallback,
       onBootResumeConsumed,
     });
+
+    // A pane that leaves the screen takes its link menu with it.
+    useEffect(() => {
+      if (!visible) setLinkMenu(null);
+    }, [visible]);
+    const focusTerminal = session.focus;
+    const closeLinkMenu = useCallback(
+      (refocusTerminal: boolean) => {
+        setLinkMenu(null);
+        if (refocusTerminal) focusTerminal();
+      },
+      [focusTerminal],
+    );
 
     useImperativeHandle(
       ref,
@@ -233,6 +249,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
             queueMicrotask(() => session.focus());
           }}
         />
+        {linkMenu ? <TerminalLinkMenu request={linkMenu} onClose={closeLinkMenu} /> : null}
       </div>
     );
   },

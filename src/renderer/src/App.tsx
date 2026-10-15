@@ -87,6 +87,7 @@ import {
   subscribeAlternateScreenPanes,
 } from "./components/Terminal/terminalScreenModes";
 import { mergeSessionStart } from "./components/Terminal/resume-policy";
+import { copyTerminalContext } from "./components/Terminal/terminalActions";
 import DiffStack from "./tabs/DiffStack";
 import { useSharedGitStatus } from "./git/useSharedGitStatus";
 import { useWorkspaceBranches } from "./git/useWorkspaceBranches";
@@ -5606,6 +5607,14 @@ export default function App() {
         const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
         if (!active || active.kind !== "terminal") return;
         tabs.toggleTerminalPaneZoom(active.id, active.activePaneId);
+      },
+      "terminal.copyContext": () => {
+        const active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
+        if (!active || active.kind !== "terminal") {
+          emitLocalToast("Nothing to copy", "Select a terminal tab first.", "warning");
+          return;
+        }
+        void copyTerminalContext(active.activePaneId);
       },
       // Model / effort chords. A chat routes to the composer's own pill
       // handlers (identical to clicking them); a live CLI pane gets `/model`

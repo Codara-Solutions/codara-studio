@@ -14,6 +14,8 @@ import type {
   WorkerSessionRuntime,
 } from "@shared/types";
 import type { SparkOpenInput } from "../components/Terminal/useTerminalSession";
+import { copyTerminalContext } from "../components/Terminal/terminalActions";
+import { TerminalContextGlyph } from "../components/Terminal/TerminalGlyphs";
 import DockedPaneChrome from "./DockedPaneChrome";
 import { dockLeaf, isDockLeaf } from "./dock";
 import {
@@ -1347,6 +1349,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
                 onOpenWorkerSessions={bundle.onOpenWorkerSessions}
                 onSplitRight={bundle.onSplitRight}
                 onSplitDown={bundle.onSplitDown}
+                onCopyContext={() => void copyTerminalContext(leaf.paneId)}
                 onClose={bundle.onClose}
                 onToggleZoom={bundle.onToggleZoom}
                 isZoomed={isZoomed}
@@ -2360,6 +2363,7 @@ interface PaneToolbarProps {
   onOpenWorkerSessions: (runtime: WorkerSessionRuntime) => void;
   onSplitRight: () => void;
   onSplitDown: () => void;
+  onCopyContext: () => void;
   onClose: () => void;
   onToggleZoom: () => void;
   isZoomed: boolean;
@@ -2372,6 +2376,7 @@ function PaneToolbar({
   onOpenWorkerSessions,
   onSplitRight,
   onSplitDown,
+  onCopyContext,
   onClose,
   onToggleZoom,
   isZoomed,
@@ -2500,6 +2505,9 @@ function PaneToolbar({
           background: "color-mix(in oklab, var(--rule-soft) 70%, transparent)",
         }}
       />
+      <ToolbarButton title="Copy terminal context" onClick={onCopyContext}>
+        <TerminalContextGlyph size={12} />
+      </ToolbarButton>
       <ToolbarButton title="Split right (Ctrl+\\)" onClick={onSplitRight}>
         <SplitRightIcon size={12} />
       </ToolbarButton>

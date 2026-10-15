@@ -33,6 +33,7 @@ import {
 } from "@shared/agent-patterns";
 import { formatPaneExitLine } from "@shared/pane-format";
 import { pasteBody } from "@shared/terminal-text";
+import { applyUnicode11Widths } from "@shared/terminal-unicode";
 import { detectMonoFontFamily } from "../../lib/fonts";
 import { subscribeAppTokens } from "../../lib/theme-tokens";
 import { createFileLinkProvider } from "./file-link-provider";
@@ -66,6 +67,12 @@ import { subscribeExternalTerminalSize } from "./terminalRegistry";
 import { createTerminalViewportRecovery, preserveTerminalViewport } from "./terminalViewport";
 import { createTerminalWakeRecovery, type TerminalRecoveryReason } from "./terminalWakeRecovery";
 import { asciiBytes, indexOfBytes } from "./terminalByteScan";
+import { isParsingReplay, writeAsReplay } from "./osc52";
+import { registerOsc52Clipboard } from "./terminalClipboard";
+import { readRecentOutput, registerTerminalContextSource } from "./terminalContext";
+import { resolveTerminalLinkClick } from "./terminalLinks";
+import type { TerminalLinkMenuRequest } from "./TerminalLinkMenu";
+import { preloadTerminalPrefs, terminalLinkMenuEnabled } from "./terminalPrefs";
 import {
   captureTerminalScreenModes,
   setTerminalPaneAlternateScreen,
@@ -496,6 +503,9 @@ interface Options {
   // URL (auto-opening a preview tab) must not confuse.
   onDetectedLocalUrl?: (url: string, meta?: { replayed?: boolean }) => void;
   onSparkOpen?: (input: SparkOpenInput) => void;
+  // A plain click on a link asks for the link menu (terminalLinks.ts decides
+  // when). Without it every link click opens the link straight away.
+  onLinkMenu?: (request: TerminalLinkMenuRequest) => void;
   // Fires on every PTY data chunk (input or output activity). Used by the
   // orchestration claim logic to decide whether a pane is "doing nothing"
   // and therefore safe to take over for a worker. Throttled implicitly by
@@ -600,6 +610,7 @@ export function useTerminalSession({
   onCwd,
   onDetectedLocalUrl,
   onSparkOpen,
+  onLinkMenu,
   onActivity,
   onClear,
   onUserInput,
@@ -678,6 +689,8 @@ export function useTerminalSession({
   const onExitRef = useRef(onExit);
   const onSearchReadyRef = useRef(onSearchReady);
   const onSparkOpenRef = useRef(onSparkOpen);
+  const onLinkMenuRef = useRef(onLinkMenu);
+  onLinkMenuRef.current = onLinkMenu;
   const onActivityRef = useRef(onActivity);
   const onClearRef = useRef(onClear);
   const onUserInputRef = useRef(onUserInput);
@@ -906,6 +919,23 @@ export function useTerminalSession({
       const openTerminalUri = (uri: string) => {
         void window.spark.openExternal?.(uri);
       };
+      // A plain click opens the link menu, Ctrl or Cmd+click opens the link
+      // (resolveTerminalLinkClick). Hosts without a menu keep the direct open.
+      const activateTerminalLink = (event: MouseEvent | undefined, uri: string) => {
+        const showMenu = onLinkMenuRef.current;
+        const click = resolveTerminalLinkClick({
+          button: event?.button,
+          ctrlKey: event?.ctrlKey,
+          metaKey: event?.metaKey,
+          menuEnabled: showMenu !== undefined && terminalLinkMenuEnabled(),
+          hasSelection: termRef.current?.hasSelection() ?? false,
+        });
+        if (click === "open") openTerminalUri(uri);
+        else if (click === "menu" && event && showMenu) {
+          showMenu({ url: uri, x: event.clientX, y: event.clientY });
+        }
+      };
+      preloadTerminalPrefs();
 
       const term = new Terminal({
         fontFamily: detectMonoFontFamily(),
@@ -920,6 +950,10 @@ export function useTerminalSession({
         scrollback: scrollbackLineLimitRef.current,
         allowProposedApi: true,
         allowTransparency: true,
+        // A glyph a font draws wider than its cell (box drawing and symbols
+        // from a fallback font, roman numerals) is squeezed into the cell
+        // instead of overlapping its neighbor. WebGL only; never emoji.
+        rescaleOverlappingGlyphs: true,
         convertEol: false,
         // OSC 8 hyperlinks (CLIs like Claude Code emit their localhost URLs
         // this way) are activated by xterm's core, not WebLinksAddon. With no
@@ -928,10 +962,12 @@ export function useTerminalSession({
         // shows a scary dialog and opens nothing. Handle it ourselves so these
         // links open like plain-text URLs do.
         linkHandler: {
-          activate: (_event, uri) => openTerminalUri(uri),
+          activate: (event, uri) => activateTerminalLink(event, uri),
         },
       });
       termRef.current = term;
+      // Before anything is written: widths are fixed as bytes are parsed.
+      applyUnicode11Widths(term);
 
       // Observe the erase sequence xterm actually parses rather than guessing
       // from keyboard input or shell command names. Returning false keeps xterm's
@@ -960,7 +996,7 @@ export function useTerminalSession({
       const search = new SearchAddon();
       term.loadAddon(search);
 
-      term.loadAddon(new WebLinksAddon((_e, uri) => openTerminalUri(uri)));
+      term.loadAddon(new WebLinksAddon((event, uri) => activateTerminalLink(event, uri)));
 
       // ── Ctrl/Cmd+click on file paths → open in editor ─────────────────────
       // Sister to the WebLinksAddon above. Detects path-shaped tokens in
@@ -1689,24 +1725,40 @@ export function useTerminalSession({
           forgetXtermBufferSnapshot(sessionId);
           viewportRecovery.restoreSnapshot(liveSnapshot.viewportFromBottom);
         };
-        if (replay) {
-          term.write(`${normalizeForTerminalReplay(replay)}\r\n`);
-        }
-        restoreScreenModes();
-        // Write the hidden-era bytes verbatim after the text replay and the
-        // modes, then clear the pending flag in the final callback so the
-        // ordering (text, modes, hidden bytes) holds even under chunked parsing.
-        if (pendingBytes && pendingBytes.length > 0) {
-          term.write(pendingBytes, finishReplay);
-        } else {
-          term.write("", finishReplay);
-        }
+        writeAsReplay(term, () => {
+          if (replay) {
+            term.write(`${normalizeForTerminalReplay(replay)}\r\n`);
+          }
+          restoreScreenModes();
+          // Write the hidden-era bytes verbatim after the text replay and the
+          // modes, then clear the pending flag in the final callback so the
+          // ordering (text, modes, hidden bytes) holds even under chunked parsing.
+          if (pendingBytes && pendingBytes.length > 0) {
+            term.write(pendingBytes, finishReplay);
+          } else {
+            term.write("", finishReplay);
+          }
+        });
       } else {
         restoreScreenModes();
       }
 
       const prompt = registerPromptTracker(term);
       cleanups.push(
+        registerOsc52Clipboard(term, {
+          // Only live output of a pane the user can see and type into may
+          // write the clipboard: a mirror would copy twice, and a hidden or
+          // watch-only pane is a program acting on its own.
+          paneBlock: () => {
+            if (readOnlyRef.current || inputBlockedRef.current) return "mirror";
+            // History written back into the pane (a snapshot, main's
+            // announced replay, output that arrived while hidden) is not
+            // a copy anyone asked for today. See writeAsReplay.
+            if (isParsingReplay(term)) return "replay";
+            if (!visibleRef.current) return "background";
+            return null;
+          },
+        }),
         registerCwdHandler(term, (cwd) => {
           // Mirror to the link-provider closure first so the very next
           // hover-driven match resolves relatives against the freshest
@@ -1718,6 +1770,21 @@ export function useTerminalSession({
         registerSparkOpenHandler(term, (input) => onSparkOpenRef.current?.(input)),
         prompt.dispose,
       );
+      // "Copy terminal context" reads the pane that owns the session, never a
+      // read-only mirror of it.
+      if (!readOnlyRef.current) {
+        cleanups.push(
+          registerTerminalContextSource(sessionId, () => {
+            const selection = term.getSelection();
+            return {
+              cwd: latestCwd,
+              shell: shell.label || null,
+              output: selection.trim() ? selection : readRecentOutput(term.buffer.active),
+              fromSelection: selection.trim().length > 0,
+            };
+          }),
+        );
+      }
       onSearchReadyRef.current?.(search);
 
       // Keep the xterm theme in sync with Codara design tokens so theme switches
@@ -2815,6 +2882,10 @@ export function useTerminalSession({
         // which must still consume the bytes or the replay would leak its
         // "history" marking onto the live output that follows.
         const isReplayedChunk = replayTracker.consume(bytes.length);
+        const writeChunk = (write: () => void) => {
+          if (isReplayedChunk) writeAsReplay(term, write);
+          else write();
+        };
 
         // Keep the agent lifecycle sniffer running even while the pane is
         // hidden. Some hosts defer hidden xterm writes, so byte-level detection
@@ -2836,7 +2907,7 @@ export function useTerminalSession({
           // INVARIANT: hiddenBufferRef stays empty, so reveal is a repaint of the
           // same xterm instance rather than a replay step.
           if (writeWhileHiddenRef.current) {
-            term.write(bytes, () => ack(bytes.length));
+            writeChunk(() => term.write(bytes, () => ack(bytes.length)));
             onActivityRef.current?.();
             return;
           }
@@ -2858,12 +2929,14 @@ export function useTerminalSession({
           const token = {};
           clearNotificationSuppressionRef.current = token;
           try {
-            term.write(bytes, () => {
-              ack(bytes.length);
-              if (clearNotificationSuppressionRef.current === token) {
-                clearNotificationSuppressionRef.current = null;
-              }
-            });
+            writeChunk(() =>
+              term.write(bytes, () => {
+                ack(bytes.length);
+                if (clearNotificationSuppressionRef.current === token) {
+                  clearNotificationSuppressionRef.current = null;
+                }
+              }),
+            );
           } catch (error) {
             ack(bytes.length);
             if (clearNotificationSuppressionRef.current === token) {
@@ -2872,7 +2945,7 @@ export function useTerminalSession({
             throw error;
           }
         } else {
-          term.write(bytes, () => ack(bytes.length));
+          writeChunk(() => term.write(bytes, () => ack(bytes.length)));
         }
         onActivityRef.current?.();
 
@@ -3864,11 +3937,15 @@ export function useTerminalSession({
         const token = {};
         clearNotificationSuppressionRef.current = token;
         try {
-          term.write(merged, () => {
-            if (clearNotificationSuppressionRef.current === token) {
-              clearNotificationSuppressionRef.current = null;
-            }
-          });
+          // Output that arrived while the pane was hidden: an OSC 52 copy in
+          // it was not asked for by anyone looking at this pane.
+          writeAsReplay(term, () =>
+            term.write(merged, () => {
+              if (clearNotificationSuppressionRef.current === token) {
+                clearNotificationSuppressionRef.current = null;
+              }
+            }),
+          );
         } catch {
           if (clearNotificationSuppressionRef.current === token) {
             clearNotificationSuppressionRef.current = null;

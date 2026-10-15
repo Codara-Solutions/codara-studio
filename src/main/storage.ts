@@ -46,6 +46,7 @@ const EMPTY: AppState = {
 const EMPTY_SETTINGS: AppSettings = {
   defaultShellId: null,
   terminalScrollbackLineLimit: TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
+  terminalOsc52Clipboard: true,
   openRouterApiKey: "",
   openRouterModel: DEFAULT_OPENROUTER_MODEL,
   openRouterCoraModels: [],
@@ -352,6 +353,7 @@ export function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
         ? settings.defaultShellId
         : null,
     terminalScrollbackLineLimit: normalizeTerminalScrollbackLineLimit(settings.terminalScrollbackLineLimit),
+    terminalOsc52Clipboard: settings.terminalOsc52Clipboard !== false,
     openRouterApiKey:
       typeof settings.openRouterApiKey === "string" ? settings.openRouterApiKey.trim() : "",
     openRouterModel:

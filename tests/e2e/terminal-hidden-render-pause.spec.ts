@@ -75,7 +75,7 @@ test("hidden terminal panes stop drawing until they are shown again", async () =
     test.skip(!renderer, "Electron started this run without a WebGL terminal renderer");
 
     await page.getByRole("button", { name: "New tab", exact: true }).dispatchEvent("click");
-    await page.getByRole("button", { name: "Terminal" }).click();
+    await page.getByRole("button", { name: /^Terminal\b/ }).click();
     await expect
       .poll(() => visiblePaneId(page), { timeout: 15_000 })
       .not.toBe(first);
