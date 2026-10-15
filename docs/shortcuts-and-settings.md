@@ -442,6 +442,53 @@ list, Up and Down (or Home and End) move between cards, Tab reaches a card's
 reply box or its **Answer in terminal** button, and Escape goes back to the
 card.
 
+### Automation precheck and missed runs
+
+These two settings belong to each automation, not to the Settings dialog: open
+the automation in the editor and select its trigger. The cron and interval
+triggers show both; the folder, git, "After automation" and "Automation
+activity" triggers show only the precheck. Manual and continuous triggers show
+the precheck only with a cadence loop, whose later passes it checks.
+
+**Before each run** takes an optional shell command. It runs in the
+workspace folder before every pass that the trigger starts (and before every
+pass of a cadence loop). Exit code 0 runs the pass. Any other exit code, a
+timeout (1 to 600 seconds, 60 by default) or a command that cannot start skips
+the pass: no agent starts and no tokens are spent, and the automation's
+history shows a **skipped** row with the reason and the last lines the
+command printed. The same skip again, with no pass in between, updates that
+row and counts it ("skipped 12 times") instead of adding one, so a check that
+often says "nothing to do" does not bury the real passes. **Run now** never
+runs the check, and neither do the later passes of a loop that already started
+(a cadence loop aside). **Test check** runs the command once,
+right away, and says whether the pass would run. The command gets
+`SPARK_AUTOMATION_ID` and `CODARA_AUTOMATION_PRECHECK=1`. It runs in your login
+shell on macOS and Linux, and in Command Prompt on Windows, where a
+**PowerShell** choice is also offered. A check on several lines runs them in
+order and the last line's exit code decides (Command Prompt gets them joined
+with `&`).
+
+**If a run was missed** decides what happens to a scheduled time that passed
+while Codara was closed or the computer was asleep. Codara checks when it
+starts and when the computer wakes up, and never starts more than one pass to
+catch up, however many times were missed.
+
+- **Skip it** (the default) starts nothing and adds one **skipped** row that
+  says how many times were missed.
+- **Run once when back** starts one pass, marked **caught up** in the history,
+  if the latest missed time is recent enough (12 hours by default, up to 7
+  days). An older one is skipped and recorded the same way.
+
+A scheduled time that passed less than 2 minutes before the computer woke up
+is not missed: it runs as usual, and the earlier times of the same sleep are
+not reported.
+
+A paused or turned-off automation has no missed runs: turning one back on, or
+changing its schedule, starts counting from that moment. Before this setting
+existed, a cron trigger fired once, late, after the computer woke up; it now
+follows the policy above, so an automation that should run after a sleep
+needs **Run once when back**.
+
 ## The Capability Center
 
 The Capability Center is where you decide what Cora, its workers and your

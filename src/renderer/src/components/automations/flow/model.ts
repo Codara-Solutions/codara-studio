@@ -22,6 +22,7 @@ import type {
 import type { Edge, Node } from "@xyflow/react";
 import { DEFAULT_WORKER_EFFORT, DEFAULT_WORKER_MODEL } from "../worker-models";
 import { defaultStepAction, stepTitle, validateStepAction, type StepType } from "./step-meta";
+import { emptyGateDraft, gateDraftFromJob, type GateDraft } from "./gate-model";
 
 // The node-flow editor's data model. The TRIGGER + LOOP live OFF the graph
 // (job.trigger / job.loop); the graph holds the worker/guard/merge pipeline.
@@ -98,6 +99,8 @@ export interface LoomDraft {
   trigger: TriggerDraft;
   loop: LoopDraft;
   worker: WorkerDraft;
+  /** Precheck and missed-run policy (edited in the trigger panel). */
+  gate: GateDraft;
 }
 
 export function emptyDraft(): LoomDraft {
@@ -133,6 +136,7 @@ export function emptyDraft(): LoomDraft {
       template: "",
     },
     worker: { model: w.model, effort: w.effort, timeoutMin: "" },
+    gate: emptyGateDraft(),
   };
 }
 
@@ -192,6 +196,7 @@ export function draftFromJob(job: ScheduledJob): LoomDraft {
   d.worker.effort = jw.effort;
   d.worker.timeoutMin =
     job.worker?.timeoutMinutes !== undefined ? String(job.worker.timeoutMinutes) : "";
+  d.gate = gateDraftFromJob(job);
   return d;
 }
 

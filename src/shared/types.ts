@@ -5509,6 +5509,75 @@ export interface AutomationRunRecord {
   measuredCostUsd?: number; // measured-only portion of costUsd (totalCostUsd + measuredWorkerCostUsd delta)
   stopReason?: AutomationStopReason; // set only on the final record when stopping
   continuationSource?: AutomationContinuationSource;
+  /** Set when this pass ran to catch up a scheduled time Codara missed
+   *  (closed or asleep) under the "run once when back" policy. */
+  catchUp?: AutomationCatchUp;
+}
+
+// ── Precheck and missed-run catch-up ────────────────────────────────────────
+// A precheck is a shell command run in the automation's folder before a pass a
+// trigger (or a cadence loop) starts on its own: exit 0 runs the pass, any
+// other outcome skips it without starting a worker. "Run now" never checks.
+// Shapes and defaults live in src/shared/automation-catchup.ts.
+
+/** Which shell runs the precheck. "default" is the login shell on macOS and
+ *  Linux and cmd.exe on Windows; "powershell" is powershell.exe on Windows and
+ *  pwsh elsewhere. */
+export type AutomationPrecheckShell = "default" | "powershell";
+
+export interface AutomationPrecheck {
+  command: string;
+  /** Seconds before the check is stopped and the pass skipped (1..600, default 60). */
+  timeoutSeconds?: number;
+  shell?: AutomationPrecheckShell;
+}
+
+export interface AutomationPrecheckResult {
+  /** True only for a clean exit 0 within the timeout. */
+  passed: boolean;
+  exitCode: number | null;
+  timedOut: boolean;
+  durationMs: number;
+  /** The last characters of stdout and stderr, in the order they arrived. */
+  outputTail: string;
+  /** Why the command could not run at all (missing shell or folder). */
+  error?: string;
+}
+
+/** What happens to a scheduled time Codara missed. "skip" (the default) records
+ *  it; "runOnce" starts a single pass when Codara is back, if the latest missed
+ *  time is within graceMinutes. Never more than one pass, however many were missed. */
+export type AutomationMissedRunPolicy = "skip" | "runOnce";
+
+export interface AutomationMissedRuns {
+  policy: AutomationMissedRunPolicy;
+  /** runOnce only: older missed times are skipped (default 720 = 12 hours). */
+  graceMinutes?: number;
+}
+
+export interface AutomationCatchUp {
+  /** ISO time of the latest scheduled run that was missed. */
+  scheduledFor: string;
+  /** How many scheduled times were missed (capped by the scan). */
+  missedCount: number;
+}
+
+/** A pass that did not start: its precheck said no, or its scheduled time was
+ *  missed and not caught up. Kept apart from `history` (which only ever holds
+ *  real passes with a run) and capped to AUTOMATION_SKIP_CAP. */
+export interface AutomationSkipRecord {
+  id: string;
+  at: string; // ISO time the skip was recorded
+  reason: "precheck" | "missed";
+  /** One plain-words line for the history row. */
+  detail: string;
+  precheck?: AutomationPrecheckResult & { command: string };
+  missed?: AutomationCatchUp & { noticedOn: "start" | "wake" };
+  /** How many skips in a row this row stands for (absent means 1): a skip
+   *  that repeats the newest one updates it instead of adding a row. */
+  repeats?: number;
+  /** ISO time of the first of those repeated skips (absent means `at`). */
+  firstAt?: string;
 }
 
 // Persisted live state of an automation's loop.
@@ -5565,6 +5634,17 @@ export interface ScheduledJob {
    *  of being silently swallowed into an in-memory baseline. */
   lastGitRemoteSha?: string;
   lastGitLocalSha?: string;
+  /** Optional shell gate run before each automatically started pass. */
+  precheck?: AutomationPrecheck;
+  /** cron and interval triggers: what to do about a missed scheduled time.
+   *  Absent means skip. */
+  missedRuns?: AutomationMissedRuns;
+  /** ISO time up to which scheduled times are settled (fired, held, caught
+   *  up or recorded as missed). PERSISTED so a restart can tell which times
+   *  passed while Codara was closed. */
+  scheduleCheckedAt?: string;
+  /** Passes that did not start, newest last. */
+  skips?: AutomationSkipRecord[];
   createdAt: string; // ISO timestamp
   /** The chat run that authored this loom: the Hub's assist ("Create with
    *  Cora") chat, or an ordinary auto/execute chat that created it with
@@ -5586,6 +5666,8 @@ export interface CreateScheduledJobInput {
   graph?: LoomGraph; // backfilled by normalizeJob when omitted (single w0 node)
   enabled?: boolean;
   createdByRunId?: string; // the chat run that authored this loom (assist or ordinary chat, never a loom run)
+  precheck?: AutomationPrecheck;
+  missedRuns?: AutomationMissedRuns;
 }
 
 // Edit payload (scheduler:update). Partial; id required. enabled/state/history
@@ -5599,6 +5681,16 @@ export interface UpdateScheduledJobInput {
   prompt?: AutomationPrompt;
   worker?: LoomWorkerConfig;
   graph?: LoomGraph;
+  /** null removes the precheck. */
+  precheck?: AutomationPrecheck | null;
+  /** null restores the default (skip). */
+  missedRuns?: AutomationMissedRuns | null;
+}
+
+/** automations:testPrecheck: run a precheck once from the editor. */
+export interface TestPrecheckInput {
+  cwd: string;
+  precheck: AutomationPrecheck;
 }
 
 // scheduler:getDetail response: the automation + its resolved live run.

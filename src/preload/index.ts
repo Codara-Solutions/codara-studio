@@ -93,6 +93,8 @@ import type {
   AutomationWorkerInfo,
   LoomStepResult,
   TestStepInput,
+  AutomationPrecheckResult,
+  TestPrecheckInput,
   RunBoard,
   RunBoardChangedPayload,
   RunBoardUpdateInput,
@@ -1144,6 +1146,8 @@ const api = {
       ipcRenderer.invoke("automations:listActiveWorkers"),
     testStep: (input: TestStepInput): Promise<LoomStepResult> =>
       ipcRenderer.invoke("automations:testStep", input),
+    testPrecheck: (input: TestPrecheckInput): Promise<AutomationPrecheckResult> =>
+      ipcRenderer.invoke("automations:testPrecheck", input),
   },
   // Workflows: saved scripts and their runs (src/main/orchestration/workflow-driver.ts).
   workflows: {

@@ -833,6 +833,19 @@ const GRAPH_SCHEMA = {
   additionalProperties: false,
 };
 
+// Optional gates. Described rather than spelled out property by property:
+// every session pays for this list, and the socket normalizes both.
+const PRECHECK_SCHEMA = {
+  type: "object",
+  description:
+    "{command, timeoutSeconds?: 1-600, shell?: default|powershell}. Runs before each trigger or cadence pass (not Run now); non-zero exit skips it.",
+};
+const MISSED_RUNS_SCHEMA = {
+  type: "object",
+  description:
+    "cron/interval: {policy: skip|runOnce, graceMinutes?}. Times missed while closed or asleep: skip (default), or run ONCE on return.",
+};
+
 // codara_update_automation always ships next to codara_create_automation, so
 // its fields point at the create schema instead of repeating 16k characters
 // of it; the socket validates both against the same rules.
@@ -878,6 +891,8 @@ const AUTOMATION_TOOLS = [
         },
         worker: WORKER_SCHEMA,
         graph: GRAPH_SCHEMA,
+        precheck: PRECHECK_SCHEMA,
+        missed_runs: MISSED_RUNS_SCHEMA,
       },
       additionalProperties: false,
     },
@@ -899,6 +914,8 @@ const AUTOMATION_TOOLS = [
         prompt_template: { type: "string", description: "Replacement prompt for a single-worker loom. Supports the same tokens as codara_create_automation, including {{lastOutput}}." },
         worker: sameShapeAsCreate("worker"),
         graph: sameShapeAsCreate("graph"),
+        precheck: { type: "object", description: "As in create; an empty command removes it." },
+        missed_runs: { type: "object", description: "As in create." },
       },
       additionalProperties: false,
     },

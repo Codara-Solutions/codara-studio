@@ -208,6 +208,7 @@ its first send (`run-store.ts`).
 | Suites | Covers |
 |---|---|
 | `test-automations`, `test-automation-loop` | `scheduler.ts` (triggers) and `automation-loop.ts` (runs one iteration after another). |
+| `test-automation-precheck`, `test-automation-catchup` | The precheck command (exit codes, output tail, timeout kills the process tree, the Windows and PowerShell invocations), and missed-run catch-up: which cron and interval times were missed, one catch-up pass or one skip at start and wake, the precheck gating trigger and cadence passes but never Run now, and concurrent job writes. |
 | `test-loom-graph`, `test-loom-predicates`, `test-loom-steps`, `test-step-live-stream`, `test-loom-model` | Loom graphs, guard nodes, fixed step nodes, and the flow editor's model. |
 | `test-board-store`, `test-board-agent-writes`, `test-board-nudge` | The board of each chat (`board-store.ts`, `board-nudge.ts`). |
 | `test-workflow-sandbox`, `test-workflow-runtime`, `test-workflow-prelude`, `test-workflow-meta`, `test-workflow-schema` | The workflow script sandbox (no escape), the script API, journal replay and resume caching, and schema checks. |

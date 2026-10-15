@@ -23,7 +23,9 @@ import {
   SPARK_LOOP_CONTINUE,
   SPARK_LOOP_DONE,
 } from "@shared/types";
-import { appendHistory, getJob, injectTriggerNote, listJobs, patchJob } from "./scheduler";
+import { appendHistory, appendSkip, getJob, injectTriggerNote, listJobs, patchJob } from "./scheduler";
+import { normalizeAutomationPrecheck, precheckSkipDetail } from "@shared/automation-catchup";
+import { runAutomationPrecheck } from "./automation-precheck";
 import { automationSourceKey, publish, rearm, settleAutomationQuestions } from "../notify";
 import { appendEvent, subscribeToEvents } from "./event-log";
 import { nextReadyWave, planLoomLayers, renderNodePrompt, sinkNodeIds, upstreamOf } from "./loom-graph";
@@ -84,6 +86,11 @@ interface LoopRunner {
   // today's behaviour.
   watchdogTimers: Map<string, ReturnType<typeof setTimeout>>;
   firing: boolean;
+  // A precheck is running for the next pass: further fires hold meanwhile.
+  prechecking?: boolean;
+  // A cadence tick landed on that check: if the check skips, the cadence is
+  // re-armed, or the loop would wait for its trigger forever.
+  cadenceWaiting?: boolean;
   // The chain of automation ids that led here (onFinishOf cycle guard).
   chain: string[];
 }
@@ -204,6 +211,63 @@ export interface StartIterationOpts {
   source: AutomationContinuationSource;
   firedPath?: string;
   chain?: string[];
+  /** This pass catches up a scheduled time Codara missed (scheduler.ts). */
+  catchUp?: import("@shared/types").AutomationCatchUp;
+}
+
+// Passes a trigger or a cadence loop starts on its own are gated by the
+// precheck. Run now is the user asking, and count/until/agent/continuous
+// continuations belong to a loop whose cycle already passed its gate.
+function precheckApplies(job: ScheduledJob, source: AutomationContinuationSource): boolean {
+  return (source === "trigger" || source === "cadence") && normalizeAutomationPrecheck(job.precheck) !== undefined;
+}
+
+// Run the precheck for the pass about to start. True means go ahead. A "no"
+// is recorded as a skip (no run, no worker, no tokens), and a cadence loop
+// keeps its rhythm: the next pass is scheduled as if this one had run.
+async function passesPrecheck(id: string, job: ScheduledJob, opts: StartIterationOpts): Promise<boolean> {
+  const precheck = normalizeAutomationPrecheck(job.precheck);
+  if (!precheck) return true;
+  const runner = runnerFor(id);
+  // Another start (or check) is in flight; this fire would be dropped anyway.
+  if (runner.firing || runner.prechecking) {
+    if (runner.prechecking && opts.source === "cadence") runner.cadenceWaiting = true;
+    return false;
+  }
+  // A live pass holds the fire below; do not spend a check on it.
+  if (job.state.currentRunId) {
+    const live = await safeGetRun(job.state.currentRunId);
+    if (live && !TERMINAL.has(live.status)) return false;
+  }
+  runner.prechecking = true;
+  let result: import("@shared/types").AutomationPrecheckResult;
+  try {
+    result = await runAutomationPrecheck(precheck, {
+      cwd: job.input.cwd,
+      env: { SPARK_AUTOMATION_ID: id, CODARA_AUTOMATION_PRECHECK: "1" },
+    });
+  } finally {
+    runner.prechecking = false;
+  }
+  // A passing check starts a pass, and the cadence continues after it.
+  const cadenceWaiting = runner.cadenceWaiting === true;
+  runner.cadenceWaiting = false;
+  if (result.passed) return true;
+  await appendSkip(id, {
+    reason: "precheck",
+    detail: precheckSkipDetail(result, precheck.timeoutSeconds),
+    precheck: { command: precheck.command, ...result },
+  });
+  if (opts.source === "cadence" || cadenceWaiting) {
+    const fresh = await getJob(id);
+    if (fresh?.enabled && fresh.loop.kind === "cadence" && fresh.state.status !== "paused" && fresh.state.status !== "stopped") {
+      const everyMs = Math.max(1000, Math.floor(fresh.loop.everyMs ?? 60_000));
+      const nextFireAt = new Date(Date.now() + everyMs).toISOString();
+      await patchJob(id, (j) => ({ ...j, state: { ...j.state, nextFireAt } }));
+      scheduleCadence(id, everyMs);
+    }
+  }
+  return false;
 }
 
 // Start the next iteration of an automation's loop. Idempotent against an
@@ -212,6 +276,13 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
   let job = await getJob(id);
   if (!job || !job.enabled) return;
   if (job.state.status === "paused") return; // explicit user hold; resumeLoop re-drives
+  // Before the stopped-loop reset below: a skipped fire leaves the last
+  // cycle's state exactly as it was.
+  if (precheckApplies(job, opts.source)) {
+    if (!(await passesPrecheck(id, job, opts))) return;
+    job = await getJob(id);
+    if (!job || !job.enabled || job.state.status === "paused") return;
+  }
   if (job.state.status === "stopped") {
     // A finalized loop is NOT dead to its trigger: a cron/interval/folder fire
     // (or an onFinishOf chain / manual kick) starts a FRESH cycle, exactly like
@@ -687,6 +758,7 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
           startedAt,
           status: "running",
           continuationSource: opts.source,
+          ...(opts.catchUp ? { catchUp: opts.catchUp } : {}),
         },
       ]),
     }));

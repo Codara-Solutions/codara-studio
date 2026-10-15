@@ -748,6 +748,16 @@ automation are shown to you for approval in the chat first.
 | `codara_stop_automation` | Stops the current loop; the automation stays. |
 | `codara_delete_automation` | Deletes an automation (asks you first). |
 
+`codara_create_automation` and `codara_update_automation` also take
+`precheck` (`{command, timeoutSeconds, shell}`: a shell command that must exit
+0 for a trigger or cadence pass to run) and `missed_runs` (`{policy: "skip" |
+"runOnce", graceMinutes}`: what happens to a cron or interval time missed while
+Codara was closed or the computer slept). In an update, an empty command or
+`null` removes the precheck, and `null` restores the default policy, skip. The
+approval shows the full precheck command, since it runs on your machine.
+`codara_list_automations` and `codara_get_automation` report both, with the
+latest skipped passes.
+
 ## Workflows
 
 Only in `execute`, and never for an imported pull request. A workflow is a

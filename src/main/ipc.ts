@@ -384,6 +384,8 @@ import type {
   AutomationWorkerInfo,
   LoomStepResult,
   TestStepInput,
+  AutomationPrecheckResult,
+  TestPrecheckInput,
   CreateScheduledJobInput,
   CreateStepInput,
   CreateRunInput,
@@ -2925,6 +2927,21 @@ export function registerIpc(): void {
       env: { SPARK_NODE_ID: input.node.id, SPARK_STEP_TEST: "1" },
     });
   });
+
+  // The editor's "Test check": run an automation's precheck once, exactly as
+  // the loop driver would before a pass. Never rejects.
+  handle(
+    "automations:testPrecheck",
+    async (_e, input: TestPrecheckInput): Promise<AutomationPrecheckResult> => {
+      const { normalizeAutomationPrecheck } = await import("@shared/automation-catchup");
+      const precheck = normalizeAutomationPrecheck(input?.precheck);
+      if (!precheck || typeof input.cwd !== "string" || !input.cwd) {
+        return { passed: false, exitCode: null, timedOut: false, durationMs: 0, outputTail: "", error: "no command" };
+      }
+      const { runAutomationPrecheck } = await import("./orchestration/automation-precheck");
+      return runAutomationPrecheck(precheck, { cwd: input.cwd, env: { CODARA_AUTOMATION_PRECHECK: "1" } });
+    },
+  );
 
   // Looms v2: live direct-worker inventory for the Hub's Workers sub-tab.
   handle("automations:listActiveWorkers", async (): Promise<AutomationWorkerInfo[]> => {

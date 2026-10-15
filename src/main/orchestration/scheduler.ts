@@ -3,8 +3,10 @@ import { basename, join } from "node:path";
 import { Cron } from "croner";
 import type {
   AgentEffortLevel,
+  AutomationCatchUp,
   AutomationDetail,
   AutomationRunRecord,
+  AutomationSkipRecord,
   AutomationState,
   AutomationTrigger,
   CreateScheduledJobInput,
@@ -15,6 +17,21 @@ import type {
   UpdateScheduledJobInput,
 } from "@shared/types";
 import { AUTOMATION_HISTORY_CAP } from "@shared/types";
+import {
+  AUTOMATION_SKIP_CAP,
+  missedSkipDetail,
+  normalizeAutomationPrecheck,
+  normalizeMissedRuns,
+  triggerHasSchedule,
+} from "@shared/automation-catchup";
+import {
+  LATE_FIRE_TOLERANCE_MS,
+  classifyTick,
+  decideMissed,
+  missedBaselineMs,
+  scheduledSlotsBetween,
+  type ScheduledSlots,
+} from "./automation-catchup";
 import {
   DEFAULT_LOOM_CODEX_WORKER_MODEL,
   DEFAULT_LOOM_WORKER_MODEL,
@@ -170,7 +187,30 @@ function normalizeJob(job: ScheduledJob): ScheduledJob {
       },
     };
   }
-  return next;
+  return normalizeGate(next);
+}
+
+// Precheck, missed-run policy and skip records arrive from the editor, the
+// agent socket and hand-edited files: keep only well-formed values, so the
+// loop driver never runs an empty command or reads a malformed skip list.
+function normalizeGate(job: ScheduledJob): ScheduledJob {
+  const precheck = normalizeAutomationPrecheck(job.precheck);
+  const missedRuns = normalizeMissedRuns(job.missedRuns);
+  const skipsOk = job.skips === undefined || Array.isArray(job.skips);
+  if (
+    skipsOk &&
+    JSON.stringify(precheck) === JSON.stringify(job.precheck) &&
+    JSON.stringify(missedRuns) === JSON.stringify(job.missedRuns)
+  ) {
+    return job;
+  }
+  const { precheck: _p, missedRuns: _m, skips, ...rest } = job;
+  return {
+    ...rest,
+    ...(precheck ? { precheck } : {}),
+    ...(missedRuns ? { missedRuns } : {}),
+    ...(Array.isArray(skips) ? { skips } : {}),
+  };
 }
 
 // Looms-on-Pi migration. Every worker config funnels through here on read:
@@ -374,6 +414,8 @@ export async function createJob(input: CreateScheduledJobInput): Promise<Schedul
     // manual-editor looms; JSON.stringify drops it so the persisted shape is
     // unchanged for those.
     createdByRunId: input.createdByRunId,
+    precheck: input.precheck,
+    missedRuns: input.missedRuns,
   };
   // Re-normalize so a freshly created job lands in the cache with the same
   // backfilled shape it would have after a disk round-trip (graph in
@@ -403,6 +445,10 @@ export async function updateJob(input: UpdateScheduledJobInput): Promise<Schedul
     ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
     ...(input.worker !== undefined ? { worker: input.worker } : {}),
     ...(input.graph !== undefined ? { graph: input.graph } : {}),
+    ...(input.precheck !== undefined ? { precheck: input.precheck ?? undefined } : {}),
+    ...(input.missedRuns !== undefined ? { missedRuns: input.missedRuns ?? undefined } : {}),
+    // Times the OLD schedule would have fired are not missed runs of the new one.
+    ...(input.trigger !== undefined ? { scheduleCheckedAt: settleScheduleNow(input.id) } : {}),
   });
   await persist(jobs.map((job) => (job.id === input.id ? updated : job)));
   // Re-arm so a changed trigger schedule takes effect now.
@@ -425,7 +471,12 @@ export async function patchJob(
   id: string,
   fn: (job: ScheduledJob) => ScheduledJob,
 ): Promise<ScheduledJob | undefined> {
-  const jobs = await loadJobs();
+  // Read-modify-write: the warm cache is taken without awaiting, so nothing
+  // can run between this read and persist(), which swaps the cache before its
+  // first await. Awaiting loadJobs() here would yield, and two patches of
+  // different jobs could read the same list, the second write dropping the
+  // first one's change.
+  const jobs = cache ?? (await loadJobs());
   const target = jobs.find((job) => job.id === id);
   if (!target) return undefined;
   const next = fn(target);
@@ -445,11 +496,60 @@ export async function deleteHistoryEntry(
 ): Promise<ScheduledJob | undefined> {
   return patchJob(jobId, (job) => {
     if (job.state.status === "running" && job.state.currentRunId === runId) return job;
+    // A skip row is removed through the same call, keyed by its id alone:
+    // skip ids are unique, and a repeated skip moves its time forward.
+    const skips = job.skips?.filter((s) => s.id !== runId);
     return {
       ...job,
       history: job.history.filter((r) => !(r.runId === runId && r.startedAt === startedAt)),
+      ...(skips ? { skips } : {}),
     };
   });
+}
+
+// Record a pass that did not start (precheck said no, or a missed scheduled
+// time that was not caught up). Capped, oldest dropped first. A skip that
+// repeats the newest one (same reason and line, same command, no pass in
+// between) updates that row and counts it instead: a precheck that says "no
+// work yet" every five minutes must not bury the real passes.
+export async function appendSkip(
+  id: string,
+  skip: Omit<AutomationSkipRecord, "id" | "at" | "repeats" | "firstAt">,
+  atMs: number = Date.now(),
+): Promise<void> {
+  await patchJob(id, (job) => {
+    const at = new Date(atMs).toISOString();
+    const prior = job.skips ?? [];
+    const last = prior[prior.length - 1];
+    if (last && repeatsSkip(job, last, skip)) {
+      const merged: AutomationSkipRecord = {
+        ...last,
+        ...skip,
+        id: last.id,
+        at,
+        firstAt: last.firstAt ?? last.at,
+        repeats: (last.repeats ?? 1) + 1,
+      };
+      return { ...job, skips: [...prior.slice(0, -1), merged] };
+    }
+    const skips = [...prior, { id: makeId("skip"), at, ...skip }];
+    return {
+      ...job,
+      skips: skips.length > AUTOMATION_SKIP_CAP ? skips.slice(-AUTOMATION_SKIP_CAP) : skips,
+    };
+  });
+}
+
+function repeatsSkip(
+  job: ScheduledJob,
+  last: AutomationSkipRecord,
+  skip: Omit<AutomationSkipRecord, "id" | "at" | "repeats" | "firstAt">,
+): boolean {
+  if (last.reason !== skip.reason || last.detail !== skip.detail) return false;
+  if (last.precheck?.command !== skip.precheck?.command) return false;
+  // A pass that started after the row splits the run of skips.
+  const lastAt = Date.parse(last.at);
+  return !job.history.some((r) => Date.parse(r.startedAt) >= lastAt);
 }
 
 // Loop-driver support: append/replace a history record (matched by runId +
@@ -523,6 +623,7 @@ export async function deleteJob(id: string): Promise<void> {
   const jobs = await loadJobs();
   if (!jobs.some((job) => job.id === id)) return; // idempotent
   disarmJob(id);
+  scheduleCheckpoint.delete(id);
   // Stop the live worker BEFORE removing the job: stopLoop resolves the run
   // through getJob (it must run while the registry still holds the record),
   // and deleting first would orphan a headless CLI worker that keeps editing
@@ -546,7 +647,11 @@ export async function setEnabled(id: string, enabled: boolean): Promise<Schedule
   if (!target) {
     throw new Error(`Scheduled job not found: ${id}`);
   }
-  const updated: ScheduledJob = { ...target, enabled };
+  // Scheduled times that passed while it was off were not missed: it was off.
+  const updated: ScheduledJob =
+    enabled && !target.enabled
+      ? { ...target, enabled, scheduleCheckedAt: settleScheduleNow(id) }
+      : { ...target, enabled };
   await persist(jobs.map((job) => (job.id === id ? updated : job)));
   if (enabled) armJob(updated);
   else disarmJob(id);
@@ -572,7 +677,7 @@ export async function fireJob(id: string, firedPath?: string): Promise<void> {
 
 async function startIterationViaDriver(
   id: string,
-  opts: { source: "trigger" | "continuous" | "manual"; firedPath?: string },
+  opts: { source: "trigger" | "continuous" | "manual"; firedPath?: string; catchUp?: AutomationCatchUp },
 ): Promise<void> {
   try {
     const { startIteration } = await import("./automation-loop");
@@ -580,6 +685,171 @@ async function startIterationViaDriver(
   } catch (err) {
     console.error(`[scheduler] failed to start loop iteration for ${id}:`, err);
   }
+}
+
+// ── Scheduled times: punctual fires, late fires and catch-up ────────────────
+// cron and interval fires go through onScheduledFire instead of straight to
+// the driver, so a fire that stands for a time Codara missed (croner fires
+// the slot it was waiting for when the machine wakes) follows the job's
+// missed-run policy, and a time a start or wake check already settled never
+// runs twice. Every settle of one job runs on that job's own promise chain.
+
+// Persisting the checkpoint on every fire of a per-second cron would rewrite
+// scheduler.json every second; a restart only needs it to this precision
+// (punctual fires use the in-memory value).
+const CHECKPOINT_PERSIST_EVERY_MS = 30_000;
+// jobId -> last time its schedule was settled in this session.
+const scheduleCheckpoint = new Map<string, number>();
+// jobId -> when its trigger timer was last armed (interval timers restart there).
+const armedAt = new Map<string, number>();
+const settleChains = new Map<string, Promise<void>>();
+
+function settleSerially(id: string, fn: () => Promise<void>): Promise<void> {
+  const next = (settleChains.get(id) ?? Promise.resolve()).then(fn).catch((err) => {
+    console.warn(`[scheduler] schedule settle for ${id} failed:`, err);
+  });
+  settleChains.set(id, next);
+  void next.then(() => {
+    if (settleChains.get(id) === next) settleChains.delete(id);
+  });
+  return next;
+}
+
+/** Mark the job's schedule settled up to now (in memory) and return the ISO
+ *  stamp for the caller to persist with its own write. */
+function settleScheduleNow(id: string): string {
+  const now = Date.now();
+  scheduleCheckpoint.set(id, now);
+  return new Date(now).toISOString();
+}
+
+function parseMs(iso: string | undefined): number | undefined {
+  if (!iso) return undefined;
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? t : undefined;
+}
+
+async function noteScheduleChecked(id: string, atMs: number, force = false): Promise<void> {
+  scheduleCheckpoint.set(id, Math.max(atMs, scheduleCheckpoint.get(id) ?? 0));
+  const jobs = cache ?? (await loadJobs());
+  const target = jobs.find((job) => job.id === id);
+  if (!target) return;
+  const persisted = parseMs(target.scheduleCheckedAt);
+  if (!force && persisted !== undefined && persisted <= atMs && atMs - persisted < CHECKPOINT_PERSIST_EVERY_MS) {
+    return;
+  }
+  const iso = new Date(atMs).toISOString();
+  // No automation.updated broadcast: the checkpoint is invisible in the UI,
+  // and a per-minute cron would otherwise refresh the hub every minute.
+  await persist(jobs.map((job) => (job.id === id ? { ...job, scheduleCheckedAt: iso } : job))).catch(() => undefined);
+}
+
+function onScheduledFire(id: string): void {
+  const firedAt = Date.now();
+  void settleSerially(id, async () => {
+    const job = await getJob(id);
+    if (!job || !job.enabled || !triggerHasSchedule(job.trigger)) return;
+    const known = [scheduleCheckpoint.get(id), parseMs(job.scheduleCheckedAt), armedAt.get(id)].filter(
+      (v): v is number => v !== undefined,
+    );
+    const verdict = classifyTick(
+      job.trigger,
+      firedAt,
+      known.length > 0 ? Math.max(...known) : undefined,
+      missedBaselineMs(job, scheduleCheckpoint.get(id), firedAt),
+    );
+    if (verdict.kind === "settled") return;
+    await noteScheduleChecked(id, firedAt);
+    if (verdict.kind === "fire") {
+      void startIterationViaDriver(id, { source: "trigger" });
+      return;
+    }
+    await settleMissed(job, verdict.slots, firedAt, "wake");
+  });
+}
+
+async function settleMissed(
+  job: ScheduledJob,
+  slots: ScheduledSlots,
+  nowMs: number,
+  noticedOn: "start" | "wake",
+): Promise<void> {
+  // A paused loop holds its trigger's fires; a missed time is no different.
+  if (job.state.status === "paused") return;
+  const verdict = decideMissed(job, slots, nowMs);
+  if (verdict.kind === "run") {
+    void startIterationViaDriver(job.id, { source: "trigger", catchUp: verdict.catchUp });
+    return;
+  }
+  await appendSkip(
+    job.id,
+    {
+      reason: "missed",
+      detail: missedSkipDetail({
+        count: verdict.catchUp.missedCount,
+        capped: verdict.capped,
+        policy: verdict.policy,
+        graceMinutes: verdict.graceMinutes,
+        noticedOn,
+      }),
+      missed: { ...verdict.catchUp, noticedOn },
+    },
+    nowMs,
+  );
+}
+
+/** Settle the scheduled times every enabled cron and interval automation
+ *  missed: at app start (Codara was closed) and when the computer wakes. Each
+ *  job starts at most one catch-up pass, or records one skip. */
+export async function catchUpScheduledJobs(reason: "start" | "wake", nowMs: number = Date.now()): Promise<void> {
+  let jobs: ScheduledJob[];
+  try {
+    jobs = await loadJobs();
+  } catch {
+    return;
+  }
+  const settled: string[] = [];
+  await Promise.all(
+    jobs
+      .filter((j) => j.enabled && triggerHasSchedule(j.trigger))
+      .map((j) =>
+        settleSerially(j.id, async () => {
+          const job = await getJob(j.id);
+          if (!job || !job.enabled || !triggerHasSchedule(job.trigger)) return;
+          // Only a trigger the scheduler armed has a schedule to settle: a wake
+          // that lands before startScheduler, or after stopScheduler during
+          // quit, must neither start a pass nor arm a timer.
+          if (!armed.has(job.id)) return;
+          // An interval timer that counted the sleep would fire the moment the
+          // machine wakes; restart it from now so its next fire is a full
+          // interval after this check.
+          if (reason === "wake" && job.trigger.kind === "interval") armJob(job);
+          const since = missedBaselineMs(job, scheduleCheckpoint.get(job.id), nowMs);
+          const slots = scheduledSlotsBetween(job.trigger, since, nowMs);
+          scheduleCheckpoint.set(job.id, Math.max(nowMs, scheduleCheckpoint.get(job.id) ?? 0));
+          settled.push(job.id);
+          if (!slots) return;
+          // A time that passed moments before the wake is on time, exactly as
+          // when croner's own late fire notices it first (classifyTick). The
+          // verdict must not depend on which of the two runs first.
+          if (reason === "wake" && nowMs - slots.latestMs <= LATE_FIRE_TOLERANCE_MS) {
+            void startIterationViaDriver(job.id, { source: "trigger" });
+            return;
+          }
+          await settleMissed(job, slots, nowMs, reason);
+        }),
+      ),
+  );
+  if (settled.length === 0) return;
+  // One write for every checked job.
+  const iso = new Date(nowMs).toISOString();
+  const ids = new Set(settled);
+  const current = cache ?? (await loadJobs());
+  await persist(
+    current.map((job) =>
+      ids.has(job.id) && !((parseMs(job.scheduleCheckedAt) ?? 0) >= nowMs) ? { ...job, scheduleCheckedAt: iso } : job,
+    ),
+  ).catch(() => undefined);
 }
 
 // Merge a folder trigger's changed path into the run note so the agent knows
@@ -603,16 +873,18 @@ function armJob(job: ScheduledJob): void {
     switch (trigger.kind) {
       case "cron": {
         const cron = new Cron(trigger.expr, trigger.tz ? { timezone: trigger.tz } : {}, () => {
-          void startIterationViaDriver(job.id, { source: "trigger" });
+          onScheduledFire(job.id);
         });
+        armedAt.set(job.id, Date.now());
         armed.set(job.id, () => cron.stop());
         break;
       }
       case "interval": {
         const everyMs = Math.max(1000, Math.floor(trigger.everyMs));
         const handle = setInterval(() => {
-          void startIterationViaDriver(job.id, { source: "trigger" });
+          onScheduledFire(job.id);
         }, everyMs);
+        armedAt.set(job.id, Date.now());
         armed.set(job.id, () => clearInterval(handle));
         break;
       }
@@ -665,6 +937,7 @@ function armJob(job: ScheduledJob): void {
 }
 
 function disarmJob(id: string): void {
+  armedAt.delete(id);
   const disarm = armed.get(id);
   if (disarm) {
     try {
@@ -686,6 +959,9 @@ export async function startScheduler(): Promise<void> {
   } catch (err) {
     console.error("[scheduler] resumeLoops failed:", err);
   }
+  // After the re-attach: a catch-up pass must see a loop that is still live
+  // and hold, not start a second worker beside it.
+  await catchUpScheduledJobs("start");
 }
 
 export function stopScheduler(): void {

@@ -388,6 +388,18 @@ folder, git, manual, and others). `automation-loop.ts` starts iterations.
 workers, guards, merges and fixed steps (shell, script, HTTP, file,
 notification).
 
+Before a pass that a trigger or a cadence loop starts, `automation-loop.ts`
+runs the automation's optional precheck (`automation-precheck.ts`: one shell
+command with a timeout, its process tree killed on timeout). A non-zero exit
+records a skip in the job's `skips` list instead of starting a run. Cron and
+interval fires go through `scheduler.ts`'s `onScheduledFire`, which uses
+`automation-catchup.ts` to tell a punctual fire from a late one (croner fires
+the time it was waiting for when the computer wakes up). At start and on the
+`powerMonitor` resume event, `catchUpScheduledJobs` counts the scheduled times
+since each job's last check (`scheduleCheckedAt`, persisted in
+`scheduler.json`) and applies the job's missed-run policy: one catch-up pass
+or one skip record, never a burst.
+
 **Workflows.** A workflow is a JavaScript file that fans work out to many
 agents: `agent(prompt, {schema, label, isolation, model})`, `parallel`,
 `pipeline`, `phase`, `log` and `args`, with a literal `meta` header.

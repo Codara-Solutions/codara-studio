@@ -91,9 +91,10 @@ const RUN = { SPARK_RUN_ID: "run-roster" };
 // Code, Codex and Grok session pays for on every request. Each roster carries
 // every tool module, so these move with TOOL_MODULES_BUDGET in
 // test-mcp-tool-manifest.cjs (raised by 9,000 for the browser tools of the
-// round that added the Chrome extension, audits and captures, and the studio
-// one by 300 for codara_workspace_status, whose guidance rides on initialize).
-const LIST_BUDGET = { studio: 29_300, run: 39_000, worker: 35_000, execute: 94_000, automation: 69_000 };
+// round that added the Chrome extension, audits and captures; the studio
+// one by 300 for codara_workspace_status, whose guidance rides on initialize;
+// execute by 1,000 for the automation precheck and missed-run fields, about 520).
+const LIST_BUDGET = { studio: 29_300, run: 39_000, worker: 35_000, execute: 95_000, automation: 69_000 };
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",
