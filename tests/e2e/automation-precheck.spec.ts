@@ -134,15 +134,18 @@ test("a cron fire whose precheck fails is skipped until the check passes", async
       return job.id;
     }, workspaceDir);
 
-    // Fires are skipped: skip records, no pass.
+    // Fires are skipped: skip records, no pass. The same skip again counts on
+    // one row instead of adding a row per fire.
     await expect.poll(() => jobState(page, id).then((j) => j?.skips ?? 0), { timeout: 20_000 }).toBeGreaterThanOrEqual(2);
     expect((await jobState(page, id))?.history).toBe(0);
+    expect((await jobState(page, id))?.skipRows).toBe(1);
 
-    // The hub shows them as skipped rows with the check's output.
+    // The hub shows them as a skipped row with the check's output.
     await clickAttached(page.getByRole("button", { name: /Wait for go/ }).first());
     const skipRow = page.locator('[data-testid="history-skip-row"][data-skip-reason="precheck"]').first();
     await expect(skipRow).toBeVisible();
     await expect(skipRow).toContainText("Skipped: the precheck exited with code 1.");
+    await expect(skipRow.getByTestId("history-skip-badge")).toHaveText(/^skipped \d+ times$/);
     await clickAttached(skipRow.getByRole("button").first());
     await expect(skipRow.getByTestId("history-skip-output")).toContainText("waiting for go.txt");
 
@@ -240,10 +243,19 @@ test("at start, a missed hourly run is caught up once or recorded as skipped", a
 async function jobState(
   page: Page,
   id: string,
-): Promise<{ history: number; skips: number; lastStatus?: string; catchUps: number; missedCount?: number; firstSkip?: string } | null> {
+): Promise<{
+  history: number;
+  /** Skipped passes, a repeated row counted as many times as it repeated. */
+  skips: number;
+  skipRows: number;
+  lastStatus?: string;
+  catchUps: number;
+  missedCount?: number;
+  firstSkip?: string;
+} | null> {
   return page.evaluate(async (jobId) => {
     type Rec = { status: string; catchUp?: { missedCount: number } };
-    type Job = { id: string; history: Rec[]; skips?: Array<{ detail: string }> };
+    type Job = { id: string; history: Rec[]; skips?: Array<{ detail: string; repeats?: number }> };
     const spark = (window as unknown as { spark: { scheduler: { list: () => Promise<Job[]> } } }).spark;
     const job = (await spark.scheduler.list()).find((j) => j.id === jobId);
     if (!job) return null;
@@ -251,7 +263,8 @@ async function jobState(
     const caught = job.history.filter((r) => r.catchUp);
     return {
       history: job.history.length,
-      skips: job.skips?.length ?? 0,
+      skips: (job.skips ?? []).reduce((n, skip) => n + (skip.repeats ?? 1), 0),
+      skipRows: job.skips?.length ?? 0,
       lastStatus: last?.status,
       catchUps: caught.length,
       missedCount: caught[0]?.catchUp?.missedCount,

@@ -368,6 +368,30 @@ async function integrationChecks({ sched, loop }, workspace) {
   assert.strictEqual(job.skips[0].detail, "n5", "the oldest skips are dropped first");
   pass("a skip row can be removed and the list is capped at 30");
 
+  // The same skip again updates the newest row; a pass in between splits it.
+  const repeat = await sched.createJob({ name: "repeat", trigger: yearly, input });
+  const t0 = Date.now();
+  const same = { reason: "precheck", detail: "Skipped: the precheck exited with code 1.", precheck: { command: "false", passed: false, exitCode: 1, timedOut: false, durationMs: 1, outputTail: "first" } };
+  await sched.appendSkip(repeat.id, same, t0);
+  await sched.appendSkip(repeat.id, { ...same, precheck: { ...same.precheck, outputTail: "second" } }, t0 + 1000);
+  await sched.appendSkip(repeat.id, { ...same, precheck: { ...same.precheck, outputTail: "third" } }, t0 + 2000);
+  job = await get(repeat.id);
+  assert.strictEqual(job.skips.length, 1, "repeated skips share one row");
+  assert.strictEqual(job.skips[0].repeats, 3);
+  assert.strictEqual(job.skips[0].firstAt, iso(t0));
+  assert.strictEqual(job.skips[0].at, iso(t0 + 2000));
+  assert.strictEqual(job.skips[0].precheck.outputTail, "third", "the row keeps the latest output");
+  const rowId = job.skips[0].id;
+  await sched.appendSkip(repeat.id, { ...same, detail: "Skipped: the precheck exited with code 2." }, t0 + 3000);
+  await sched.appendHistory(repeat.id, { runId: "r-between", iteration: 0, startedAt: iso(t0 + 4000), status: "done" }, {});
+  await sched.appendSkip(repeat.id, { ...same, detail: "Skipped: the precheck exited with code 2." }, t0 + 5000);
+  job = await get(repeat.id);
+  assert.deepStrictEqual(job.skips.map((x) => x.repeats ?? 1), [3, 1, 1], "a different line or a pass in between starts a new row");
+  await sched.deleteHistoryEntry(repeat.id, rowId, "an older time of the row");
+  assert.strictEqual((await get(repeat.id)).skips.length, 2, "a skip row is removed by its id, whatever time the view had");
+  await sched.deleteJob(repeat.id);
+  pass("a repeated skip updates and counts its row instead of adding one");
+
   // Patches of different jobs at the same moment must all land (the catch-up
   // settles jobs in parallel, and loop drivers patch on their own).
   const a = await sched.createJob({ name: "a", trigger: yearly, input });
@@ -423,6 +447,10 @@ async function integrationChecks({ sched, loop }, workspace) {
   assert.strictEqual(job.skips[0].precheck.outputTail, "nothing to do");
   assert.strictEqual(job.skips[0].precheck.command, "echo nothing to do; exit 1");
   assert.strictEqual(job.history.length, 0, "history keeps only real passes");
+  await loop.startIteration(gated.id, { source: "trigger" });
+  job = await get(gated.id);
+  assert.strictEqual(job.skips.length, 1, "the same skip again counts on the same row");
+  assert.strictEqual(job.skips[0].repeats, 2);
   pass("a trigger pass whose precheck fails is skipped and recorded with the output tail");
 
   await sched.runJobNow(gated.id);
@@ -464,7 +492,7 @@ async function integrationChecks({ sched, loop }, workspace) {
   assert.ok(job.state.nextFireAt, "the next cadence pass is scheduled");
   await sleep(1500);
   job = await get(cadence.id);
-  assert.ok(job.skips.length >= 2, `the cadence re-checked on time (${job.skips.length} skips)`);
+  assert.ok((job.skips[0].repeats ?? 1) >= 2, `the cadence re-checked on time (${job.skips[0].repeats ?? 1} skips)`);
   assert.strictEqual(job.state.iteration, 1, "skipped passes do not count as iterations");
   assert.strictEqual(launchesFor(cadence.id), 0);
   await sched.setEnabled(cadence.id, false);

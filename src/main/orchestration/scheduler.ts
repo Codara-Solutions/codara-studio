@@ -496,8 +496,9 @@ export async function deleteHistoryEntry(
 ): Promise<ScheduledJob | undefined> {
   return patchJob(jobId, (job) => {
     if (job.state.status === "running" && job.state.currentRunId === runId) return job;
-    // A skip row is removed through the same call, keyed by its id + time.
-    const skips = job.skips?.filter((s) => !(s.id === runId && s.at === startedAt));
+    // A skip row is removed through the same call, keyed by its id alone:
+    // skip ids are unique, and a repeated skip moves its time forward.
+    const skips = job.skips?.filter((s) => s.id !== runId);
     return {
       ...job,
       history: job.history.filter((r) => !(r.runId === runId && r.startedAt === startedAt)),
@@ -507,19 +508,48 @@ export async function deleteHistoryEntry(
 }
 
 // Record a pass that did not start (precheck said no, or a missed scheduled
-// time that was not caught up). Capped, oldest dropped first.
+// time that was not caught up). Capped, oldest dropped first. A skip that
+// repeats the newest one (same reason and line, same command, no pass in
+// between) updates that row and counts it instead: a precheck that says "no
+// work yet" every five minutes must not bury the real passes.
 export async function appendSkip(
   id: string,
-  skip: Omit<AutomationSkipRecord, "id" | "at">,
+  skip: Omit<AutomationSkipRecord, "id" | "at" | "repeats" | "firstAt">,
   atMs: number = Date.now(),
 ): Promise<void> {
   await patchJob(id, (job) => {
-    const skips = [...(job.skips ?? []), { id: makeId("skip"), at: new Date(atMs).toISOString(), ...skip }];
+    const at = new Date(atMs).toISOString();
+    const prior = job.skips ?? [];
+    const last = prior[prior.length - 1];
+    if (last && repeatsSkip(job, last, skip)) {
+      const merged: AutomationSkipRecord = {
+        ...last,
+        ...skip,
+        id: last.id,
+        at,
+        firstAt: last.firstAt ?? last.at,
+        repeats: (last.repeats ?? 1) + 1,
+      };
+      return { ...job, skips: [...prior.slice(0, -1), merged] };
+    }
+    const skips = [...prior, { id: makeId("skip"), at, ...skip }];
     return {
       ...job,
       skips: skips.length > AUTOMATION_SKIP_CAP ? skips.slice(-AUTOMATION_SKIP_CAP) : skips,
     };
   });
+}
+
+function repeatsSkip(
+  job: ScheduledJob,
+  last: AutomationSkipRecord,
+  skip: Omit<AutomationSkipRecord, "id" | "at" | "repeats" | "firstAt">,
+): boolean {
+  if (last.reason !== skip.reason || last.detail !== skip.detail) return false;
+  if (last.precheck?.command !== skip.precheck?.command) return false;
+  // A pass that started after the row splits the run of skips.
+  const lastAt = Date.parse(last.at);
+  return !job.history.some((r) => Date.parse(r.startedAt) >= lastAt);
 }
 
 // Loop-driver support: append/replace a history record (matched by runId +

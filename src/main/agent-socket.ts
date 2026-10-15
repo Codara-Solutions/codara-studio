@@ -5719,7 +5719,11 @@ function summarizeJob(job: ScheduledJob): Record<string, unknown> {
     ...(precheckSummary(job.precheck) ? { precheck: precheckSummary(job.precheck) } : {}),
     ...(missedRunsSummary(job) ? { missedRuns: missedRunsSummary(job) } : {}),
     ...(job.skips?.length
-      ? { skipped: job.skips.slice(-3).map((s) => ({ at: s.at, reason: s.reason, detail: s.detail })) }
+      ? {
+          skipped: job.skips
+            .slice(-3)
+            .map((s) => ({ at: s.at, reason: s.reason, detail: s.detail, ...(s.repeats ? { times: s.repeats } : {}) })),
+        }
       : {}),
   };
 }

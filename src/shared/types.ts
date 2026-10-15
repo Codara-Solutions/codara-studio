@@ -5560,6 +5560,11 @@ export interface AutomationSkipRecord {
   detail: string;
   precheck?: AutomationPrecheckResult & { command: string };
   missed?: AutomationCatchUp & { noticedOn: "start" | "wake" };
+  /** How many skips in a row this row stands for (absent means 1): a skip
+   *  that repeats the newest one updates it instead of adding a row. */
+  repeats?: number;
+  /** ISO time of the first of those repeated skips (absent means `at`). */
+  firstAt?: string;
 }
 
 // Persisted live state of an automation's loop.

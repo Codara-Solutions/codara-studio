@@ -311,8 +311,11 @@ pass of a cadence loop). Exit code 0 runs the pass. Any other exit code, a
 timeout (1 to 600 seconds, 60 by default) or a command that cannot start skips
 the pass: no agent starts and no tokens are spent, and the automation's
 history shows a **skipped** row with the reason and the last lines the
-command printed. **Run now** never runs the check, and neither do the later
-passes of a loop that already started. **Test check** runs the command once,
+command printed. The same skip again, with no pass in between, updates that
+row and counts it ("skipped 12 times") instead of adding one, so a check that
+often says "nothing to do" does not bury the real passes. **Run now** never
+runs the check, and neither do the later passes of a loop that already started
+(a cadence loop aside). **Test check** runs the command once,
 right away, and says whether the pass would run. The command gets
 `SPARK_AUTOMATION_ID` and `CODARA_AUTOMATION_PRECHECK=1`. It runs in your login
 shell on macOS and Linux, and in Command Prompt on Windows, where a

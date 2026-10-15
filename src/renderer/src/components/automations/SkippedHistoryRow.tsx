@@ -34,6 +34,7 @@ export default function SkippedHistoryRow({
   const [expanded, setExpanded] = useState(false);
   const label = skip.reason === "precheck" ? "precheck said no" : "missed";
   const output = skip.precheck?.outputTail ?? "";
+  const repeats = skip.repeats && skip.repeats > 1 ? skip.repeats : 0;
   return (
     <div data-testid="history-skip-row" data-skip-reason={skip.reason}>
       <div
@@ -75,8 +76,8 @@ export default function SkippedHistoryRow({
               boxSizing: "border-box",
             }}
           />
-          <span className="spark-badge" style={{ flex: "0 0 auto" }}>
-            skipped
+          <span className="spark-badge" style={{ flex: "0 0 auto" }} data-testid="history-skip-badge">
+            {repeats ? `skipped ${repeats} times` : "skipped"}
           </span>
           <span
             style={{
@@ -112,6 +113,12 @@ export default function SkippedHistoryRow({
           }}
         >
           <div style={{ fontSize: 11, color: "var(--ink-dim)", lineHeight: 1.5 }}>{skip.detail}</div>
+          {repeats ? (
+            <div style={{ fontSize: 10.5, color: "var(--muted)" }}>
+              The same skip {repeats} times in a row, from {fmtTime(skip.firstAt ?? skip.at)} to{" "}
+              {fmtTime(skip.at)}.{output ? " The output below is from the latest one." : ""}
+            </div>
+          ) : null}
           {skip.precheck && (
             <div className="spark-mono" style={{ fontSize: 10.5, color: "var(--muted)" }}>
               $ {skip.precheck.command}
