@@ -111,6 +111,7 @@ import {
 } from "./settings/settings-index";
 import { bindToggle } from "./settings/setting-toggles";
 import ChromeLinkSection from "./chrome/ChromeLinkSection";
+import KeepAwakeSettings from "./keep-awake/KeepAwakeSettings";
 
 export type { SettingsTab } from "./settings/settings-index";
 
@@ -1306,6 +1307,8 @@ function GeneralSettings({
               }
             />
           </SettingsSection>
+
+          <KeepAwakeSettings />
 
           <SettingsSection
             title="Agent worktrees"

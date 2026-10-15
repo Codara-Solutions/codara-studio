@@ -2,6 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { NavigationTarget, ResolvedRunQuestion } from "@shared/types";
 import NotificationCenter from "../notifications/NotificationCenter";
 import SystemMeters from "./SystemMeters";
+import KeepAwakeControl from "./keep-awake/KeepAwakeControl";
 import { CodaraMark } from "./BrandMarks";
 import UsageMeters from "./UsageMeters";
 import type { NavigateTo, NotifyTargetStatus } from "../notifications/routing";
@@ -375,6 +376,7 @@ function WindowChrome({
         }}
       >
         <SystemMeters />
+        <KeepAwakeControl />
         <UsageMeters onOpenUsage={onOpenUsage} />
         <PanelToggle on={rightOn} side="right" onClick={onToggleRight} title="Toggle right sidebar" edge="right" />
         <NotificationCenter
