@@ -580,6 +580,35 @@ async function main() {
     assert.equal(spawn.spawned.length, 3);
   });
 
+  await check("a retry that takes the lock stops showing the old error", () => {
+    const { inhibitor, spawn, changes, advance } = lidHarness();
+    inhibitor.start();
+    spawn.spawned[0].child.exit(1);
+    assert.equal(inhibitor.error, lidMod.LID_REFUSED);
+    advance(lidMod.LID_RETRY_BASE_MS);
+    inhibitor.start();
+    assert.equal(spawn.spawned.length, 2);
+    const before = changes.length;
+    advance(lidMod.LID_EARLY_EXIT_MS - 1);
+    assert.equal(inhibitor.error, lidMod.LID_REFUSED, "a refusal can still end it");
+    advance(1);
+    assert.equal(inhibitor.active, true);
+    assert.equal(inhibitor.error, null, "the lock holds, so nothing is wrong any more");
+    assert.equal(changes.length, before + 1, "the controller hears it and republishes");
+    // A helper that started fine says nothing when it settles.
+    inhibitor.stop();
+    inhibitor.start();
+    advance(lidMod.LID_EARLY_EXIT_MS);
+    assert.equal(changes.length, before + 1);
+    // A refusal after a good hold backs off from the base delay again.
+    inhibitor.stop();
+    inhibitor.start();
+    spawn.spawned[spawn.spawned.length - 1].child.exit(1);
+    advance(lidMod.LID_RETRY_BASE_MS);
+    inhibitor.start();
+    assert.equal(spawn.spawned.length, 5);
+  });
+
   await check("a missing systemd-inhibit is given up on for good", () => {
     const { inhibitor, spawn, changes, advance } = lidHarness();
     inhibitor.start();
