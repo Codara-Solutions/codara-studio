@@ -156,17 +156,36 @@ export async function releaseWorktreeLinks(worktreePath: string): Promise<SetupM
   return released;
 }
 
-let beforeRemoval: ((worktreePath: string) => Promise<void>) | null = null;
+/** True when no setup writes in the worktree any more. */
+let beforeRemoval: ((worktreePath: string) => Promise<boolean>) | null = null;
 
 /** Lets the setup service stop a setup still running in a worktree about to go. */
-export function setBeforeWorktreeRemoval(hook: ((worktreePath: string) => Promise<void>) | null): void {
+export function setBeforeWorktreeRemoval(hook: ((worktreePath: string) => Promise<boolean>) | null): void {
   beforeRemoval = hook;
 }
 
-/** Stops the worktree's setup, then releases its links. For every removal path. */
+/**
+ * Stops the worktree's setup, then releases its links. For every removal
+ * path. Throws, with the links put back, when the setup would not stop or a
+ * link it made is still there: git for Windows can follow a junction while
+ * deleting the worktree and empty the main checkout's folder.
+ */
 export async function prepareWorktreeRemoval(worktreePath: string): Promise<SetupManifestLink[]> {
-  if (beforeRemoval) await beforeRemoval(worktreePath).catch(() => undefined);
-  return releaseWorktreeLinks(worktreePath);
+  if (beforeRemoval && !(await beforeRemoval(worktreePath).catch(() => false))) {
+    throw new Error("The worktree's setup did not stop in time. Stop it from the setup tray, then remove the worktree again.");
+  }
+  const released = await releaseWorktreeLinks(worktreePath);
+  const manifest = await readSetupManifest(worktreePath).catch(() => null);
+  for (const link of manifest?.links ?? []) {
+    if (!safeRelative(link.path)) continue;
+    if (await linkStillOurs(join(worktreePath, ...link.path.split("/")), link.target)) {
+      await restoreWorktreeLinks(worktreePath, released);
+      throw new Error(
+        `Could not take out the linked folder ${link.path} before removing the worktree. Close what uses it, then try again.`,
+      );
+    }
+  }
+  return released;
 }
 
 /** Puts back links released for a removal that then failed. */

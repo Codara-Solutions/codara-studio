@@ -127,7 +127,7 @@ export function quitPromptText(live: LiveWork, options: QuitPromptOptions): Quit
     } else {
       parts.push(
         (options.keepsTerminalOutput ? "Their terminal output is kept. " : "") +
-          "To have terminal agents resume by themselves, turn on Resume running agent sessions in Settings, Sessions.",
+          "To have terminal agents resume by themselves, turn on \"Resume running agent sessions when Codara reopens\" in Settings, Sessions.",
       );
     }
   }

@@ -368,7 +368,9 @@ export function listConsolePids(shellPid: number): Promise<number[] | null> {
     const agentPid = child.pid;
     child.on("message", (message) => finish(consolePidsFromAgentMessage(message, agentPid)));
     child.on("error", () => finish(null));
-    child.on("exit", () => finish(null));
+    // The helper sends its answer and exits at once; "exit" can come before
+    // that message is read, so it waits a moment before giving up on it.
+    child.on("exit", () => setTimeout(() => finish(null), 250));
   });
 }
 

@@ -538,6 +538,39 @@ async function runSuite(m, scratch) {
     assert.ok(Date.now() - t0 < 5_000);
   });
 
+  await check("a step ends with its own process even when a leftover holds its output", async () => {
+    const wt = addWorktree("wt-leftover");
+    // The background sleep keeps the step's stdout open after the shell exits.
+    write(path.join(repo, ".codara", "worktree.json"), JSON.stringify({ setup: ["sleep 8 &", "echo started"] }));
+    const svc = makeService();
+    const t0 = Date.now();
+    const started = await svc.start({ sourceCwd: repo, worktreePath: wt, trigger: "ui", userCommand: null });
+    const done = await svc.waitFor(started.id, 20_000);
+    assert.equal(done.state, "succeeded");
+    assert.ok(Date.now() - t0 < 6_000, `took ${Date.now() - t0} ms`);
+    assert.match((await svc.readLog(started.id)).text, /^started$/m);
+  });
+
+  await check("a link planted in the setup folder is replaced, never written through", async () => {
+    const wt = addWorktree("wt-planted");
+    write(path.join(repo, ".codara", "worktree.json"), JSON.stringify({ setup: "echo planted-check" }));
+    const setupDir = await links.setupDirFor(wt);
+    fs.mkdirSync(setupDir, { recursive: true });
+    const victim = path.join(scratch, "victim.txt");
+    write(victim, "keep me\n");
+    for (const name of ["setup.log", "status.json", "repo-setup.sh"]) fs.symlinkSync(victim, path.join(setupDir, name));
+    const svc = makeService();
+    const started = await svc.start({ sourceCwd: repo, worktreePath: wt, trigger: "ui", userCommand: null });
+    const done = await svc.waitFor(started.id, 20_000);
+    assert.equal(done.state, "succeeded");
+    assert.equal(fs.readFileSync(victim, "utf8"), "keep me\n");
+    for (const name of ["setup.log", "status.json", "repo-setup.sh"]) {
+      assert.equal(fs.lstatSync(path.join(setupDir, name)).isSymbolicLink(), false, name);
+    }
+    assert.equal(fs.statSync(path.join(setupDir, "setup.log")).mode & 0o777, 0o600);
+    assert.match((await svc.readLog(started.id)).text, /^planted-check$/m);
+  });
+
   await check("a setup still running when Codara closed reads as stopped", async () => {
     const wt = addWorktree("wt-interrupted");
     write(path.join(repo, ".codara", "worktree.json"), JSON.stringify({ setup: "sleep 30" }));
@@ -664,6 +697,80 @@ async function runSuite(m, scratch) {
         fs.rmSync(info, { force: true });
         fs.renameSync(path.join(saved, "info"), info);
       }
+    });
+
+    await check("a copy git would see in the worktree is taken out again", async () => {
+      const wt = loneWorktree("lone-copy-seen");
+      // The worktree's own rules no longer ignore .env (an older .gitignore,
+      // or one the main checkout has not committed).
+      write(path.join(wt, ".gitignore"), "cache/\n");
+      const logLines = [];
+      const result = await materialize.materializeSetup({
+        sourceRoot: lone,
+        worktreeRoot: wt,
+        copies: [{ path: ".env", kind: "file" }, { path: "cache", kind: "dir" }],
+        links: [],
+        log: (line) => logLines.push(line),
+      });
+      assert.equal(fs.existsSync(path.join(wt, ".env")), false);
+      assert.equal(fs.readFileSync(path.join(wt, "cache", "blob.bin"), "utf8"), "cached\n");
+      assert.deepEqual(result.copied, ["cache"]);
+      assert.deepEqual(result.copiedFiles.map((copy) => copy.path), ["cache/blob.bin"]);
+      assert.ok(result.skipped.some((s) => s.path === ".env" && /does not ignore/.test(s.reason)), JSON.stringify(result));
+      assert.ok(logLines.some((line) => /^Took out 1 copy/.test(line)));
+      assert.equal(git(wt, ["status", "--porcelain", "--untracked-files=all"]), "M .gitignore");
+      // The main checkout keeps its file.
+      assert.equal(fs.readFileSync(path.join(lone, ".env"), "utf8"), "LONE=1\n");
+    });
+
+    await check("a link that cannot be recorded is taken out", async () => {
+      const wt = loneWorktree("lone-unrecorded");
+      const result = await materialize.materializeSetup({
+        sourceRoot: lone,
+        worktreeRoot: wt,
+        copies: [],
+        links: ["cache"],
+        log: () => undefined,
+        onLinked: async () => {
+          throw new Error("disk full");
+        },
+      });
+      assert.deepEqual(result.linked, []);
+      assert.equal(fs.existsSync(path.join(wt, "cache")), false);
+      assert.ok(result.warnings.some((w) => /could not record/i.test(w) && /disk full/.test(w)));
+      assert.equal(fs.readFileSync(path.join(lone, "cache", "blob.bin"), "utf8"), "cached\n");
+    });
+
+    await check("removal stops when setup keeps running or a link stays", async () => {
+      const wt = loneWorktree("lone-stuck");
+      const setupDir = await links.setupDirFor(wt);
+      fs.mkdirSync(setupDir, { recursive: true });
+      fs.symlinkSync(path.join(lone, "cache"), path.join(wt, "cache"), "dir");
+      fs.writeFileSync(
+        path.join(setupDir, links.SETUP_MANIFEST_FILE),
+        JSON.stringify({ version: 1, sourceRoot: lone, copies: [], links: [{ path: "cache", target: path.join(lone, "cache") }] }),
+      );
+      links.setBeforeWorktreeRemoval(async () => false);
+      try {
+        await assert.rejects(links.prepareWorktreeRemoval(wt), /did not stop/);
+        assert.equal(fs.lstatSync(path.join(wt, "cache")).isSymbolicLink(), true);
+      } finally {
+        links.setBeforeWorktreeRemoval(null);
+      }
+      if (process.getuid?.() !== 0) {
+        // The link cannot be unlinked: its folder is read-only.
+        fs.chmodSync(wt, 0o555);
+        try {
+          await assert.rejects(links.prepareWorktreeRemoval(wt), /Could not take out the linked folder cache/);
+        } finally {
+          fs.chmodSync(wt, 0o755);
+        }
+        assert.equal(fs.lstatSync(path.join(wt, "cache")).isSymbolicLink(), true);
+      }
+      const released = await links.prepareWorktreeRemoval(wt);
+      assert.deepEqual(released.map((link) => link.path), ["cache"]);
+      assert.equal(fs.existsSync(path.join(wt, "cache")), false);
+      assert.equal(fs.readFileSync(path.join(lone, "cache", "blob.bin"), "utf8"), "cached\n");
     });
 
     await check("removal stops setup and waits until it no longer writes", async () => {

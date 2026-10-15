@@ -2285,6 +2285,13 @@ async function processCwds(pids: number[]): Promise<Map<number, string> | null> 
       ["-a", "-d", "cwd", "-Fpn"],
       { timeout: 2_500, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
       (error, stdout) => {
+        // Killed at the timeout, lsof leaves a partial list: unknown, not
+        // "nothing runs there". (It exits 1 on processes it may not read;
+        // that list is still whole.)
+        if (error && (error.killed || error.signal)) {
+          done(null);
+          return;
+        }
         if (!stdout) {
           done(error ? null : new Map());
           return;

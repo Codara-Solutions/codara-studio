@@ -573,7 +573,12 @@ export async function removeCopyWorktree(
   const backoffMs = [0, 150, 300, 600, 1000, 1500];
   // Folders setup linked in from the main checkout go first, so removal can
   // never reach through them; they come back if the worktree stays.
-  const releasedLinks = await prepareWorktreeRemoval(input.worktreePath).catch(() => []);
+  let releasedLinks: Awaited<ReturnType<typeof prepareWorktreeRemoval>>;
+  try {
+    releasedLinks = await prepareWorktreeRemoval(input.worktreePath);
+  } catch (err) {
+    return { ok: false, error: errorText(err) };
+  }
   let lastError = "worktree removal not attempted";
   let removed = false;
   let askedToRelease = false;

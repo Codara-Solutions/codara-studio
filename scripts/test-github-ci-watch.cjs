@@ -365,6 +365,47 @@ test("timers: first pass after 45 seconds, then every minute; nudge and stop", a
   assert.deepEqual(h.timers, [], "a stopped watcher ignores nudges");
 });
 
+test("timers: every five minutes while nobody uses the computer", async ({ mod }) => {
+  const h = harness(mod);
+  let idle = 0;
+  const watch = mod.createGitHubCiWatch({
+    loadState: async () => h.state,
+    enabled: () => true,
+    pathExists: async () => true,
+    localRefs: async () => "h1 u1",
+    readPullRequest: async () => null,
+    publish: () => undefined,
+    rearm: () => undefined,
+    now: () => h.now,
+    setTimeout: (fn, ms) => {
+      const timer = { fn, ms };
+      h.timers.push(timer);
+      return timer;
+    },
+    clearTimeout: (timer) => {
+      h.timers = h.timers.filter((t) => t !== timer);
+    },
+    log: () => undefined,
+    idleMs: () => idle,
+  });
+  const tick = async () => {
+    const next = h.timers[0];
+    h.timers = [];
+    next.fn();
+    for (let i = 0; i < 4; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  };
+  watch.start();
+  await tick();
+  assert.deepEqual(h.timers.map((t) => t.ms), [60_000]);
+  idle = 11 * 60_000;
+  await tick();
+  assert.deepEqual(h.timers.map((t) => t.ms), [5 * 60_000]);
+  idle = 0;
+  await tick();
+  assert.deepEqual(h.timers.map((t) => t.ms), [60_000]);
+  watch.stop();
+});
+
 // ── Runner ──────────────────────────────────────────────────────────────────
 
 (async () => {

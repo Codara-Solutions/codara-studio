@@ -214,9 +214,26 @@ export async function materializeSetup(input: MaterializeInput): Promise<Materia
     result.linked = kept;
   }
   if (result.linked.length && input.onLinked) {
-    await input.onLinked(result.linked).catch((err: Error) => {
-      result.warnings.push(`Could not record the linked folders: ${err.message}`);
-    });
+    const recordError = await input.onLinked(result.linked).then(
+      () => null,
+      (err: Error) => err,
+    );
+    if (recordError) {
+      // Removal finds links through that record and takes them out before
+      // git deletes the worktree. A link it cannot find could let the delete
+      // reach into the main checkout (a junction on Windows), so an
+      // unrecorded link does not stay.
+      result.warnings.push(`Could not record the linked folders, so they were taken out: ${recordError.message}`);
+      const kept: SetupManifestLink[] = [];
+      for (const link of result.linked) {
+        if (await removeLinkEntry(join(worktreeRoot, ...link.path.split("/")))) {
+          result.skipped.push({ path: link.path, reason: "could not be recorded, so it was taken out" });
+        } else {
+          kept.push(link);
+        }
+      }
+      result.linked = kept;
+    }
   }
   const linkedPaths = result.linked.map((link) => link.path);
 
@@ -292,6 +309,7 @@ export async function materializeSetup(input: MaterializeInput): Promise<Materia
     }
     if (result.copiedFiles.length > before || item.isDir) result.copied.push(path);
   }
+  await takeOutCopiesGitWouldSee(worktreeRoot, result, input.log);
   if (result.copiedFiles.length) {
     input.log(
       `Copied ${result.copiedFiles.length.toLocaleString("en-US")} ${result.copiedFiles.length === 1 ? "file" : "files"} (${formatBytes(result.copiedBytes)}) from the main checkout`,
@@ -314,6 +332,67 @@ export async function materializeSetup(input: MaterializeInput): Promise<Materia
     input.log(`Skipped ${(result.skipped.length - SKIP_LOG_LINES).toLocaleString("en-US")} more`);
   }
   return result;
+}
+
+/**
+ * Copies are picked by the main checkout's ignore rules, but the worktree can
+ * sit on a commit that does not ignore them: an older .gitignore, or a rule
+ * the main checkout has not committed yet. There git lists the copy (a .env
+ * among them) as a new file that `git add -A` would commit and push, so any
+ * copy git would see is taken out again. When git cannot say, all of them go.
+ */
+async function takeOutCopiesGitWouldSee(
+  worktreeRoot: string,
+  result: MaterializeResult,
+  log: (line: string) => void,
+): Promise<void> {
+  const entries = [...result.copiedFiles.map((copy) => copy.path), ...result.copiedLinks.map((link) => link.path)];
+  if (!entries.length) return;
+  let ignored: Set<string>;
+  try {
+    ignored = await ignoredSubset(worktreeRoot, entries);
+  } catch (err) {
+    result.warnings.push(`Could not check the copies against the worktree's ignore rules, so they were taken out: ${(err as Error).message}`);
+    ignored = new Set();
+  }
+  const seen = (path: string) => !ignored.has(path);
+  if (!entries.some(seen)) return;
+  const takenOut: string[] = [];
+  const keptFiles: SetupManifestCopy[] = [];
+  for (const copy of result.copiedFiles) {
+    if (!seen(copy.path)) {
+      keptFiles.push(copy);
+      continue;
+    }
+    try {
+      assertCodaraOwnedWrite(join(worktreeRoot, ...copy.path.split("/")));
+      await fsp.unlink(join(worktreeRoot, ...copy.path.split("/")));
+      result.copiedBytes -= copy.size;
+      takenOut.push(copy.path);
+    } catch {
+      keptFiles.push(copy);
+    }
+  }
+  const keptLinks: SetupManifestLink[] = [];
+  for (const link of result.copiedLinks) {
+    if (seen(link.path) && (await removeLinkEntry(join(worktreeRoot, ...link.path.split("/"))))) {
+      takenOut.push(link.path);
+    } else {
+      keptLinks.push(link);
+    }
+  }
+  result.copiedFiles = keptFiles;
+  result.copiedLinks = keptLinks;
+  const remaining = [...keptFiles.map((copy) => copy.path), ...keptLinks.map((link) => link.path)];
+  result.copied = result.copied.filter((top) => remaining.some((path) => under(path, top)));
+  for (const path of takenOut) {
+    result.skipped.push({ path, reason: "git does not ignore it in this worktree, so the copy was taken out" });
+  }
+  if (takenOut.length) {
+    log(
+      `Took out ${takenOut.length.toLocaleString("en-US")} ${takenOut.length === 1 ? "copy" : "copies"} git does not ignore in the worktree`,
+    );
+  }
 }
 
 async function copyOneFile(source: string, destination: string, relative: string, result: MaterializeResult): Promise<void> {

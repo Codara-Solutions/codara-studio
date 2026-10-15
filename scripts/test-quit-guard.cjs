@@ -162,7 +162,7 @@ async function main() {
     );
     const update = qg.quitPromptText(live, { restartingForUpdate: true, resumesTerminalAgents: false, keepsTerminalOutput: false });
     check("update restart labels", update.confirmLabel === "Restart anyway" && /^Restarting to update stops them now\./.test(update.detail));
-    check("without resume it points at the setting", /turn on Resume running agent sessions in Settings, Sessions/.test(update.detail) && !/output is kept/.test(update.detail));
+    check("without resume it points at the setting", /turn on "Resume running agent sessions when Codara reopens" in Settings, Sessions/.test(update.detail) && !/output is kept/.test(update.detail));
     const one = qg.quitPromptText(qg.collectLiveWork(null, [agent("codex", "web")]), {
       restartingForUpdate: false,
       resumesTerminalAgents: false,

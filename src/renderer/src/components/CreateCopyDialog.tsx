@@ -180,7 +180,7 @@ export default function CreateCopyDialog({
               type="button"
               disabled={busy}
               onClick={() => setNaming(true)}
-              title="Create a new branch from the repo's default branch — you pick the name"
+              title="Create a new branch from the repo's default branch. You pick the name."
               style={{
                 appearance: "none",
                 display: "flex",
