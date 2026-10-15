@@ -1309,6 +1309,15 @@ export interface AppPreferences {
   // uses the Claude account active in Codara (src/main/claude-follow). Only
   // an installed app sets it up; turning it off takes it out again.
   claudeFollowsActiveAccount?: boolean;
+  // Keep the computer out of idle sleep (src/main/keep-awake/): "agents"
+  // (default) only while a terminal agent, Cora run, automation or worker is
+  // working, "always" while Codara is open, "off" never. The display may
+  // still sleep in every mode. src/shared/keep-awake.ts owns the policy.
+  keepAwakeMode?: "off" | "agents" | "always";
+  // Opt-in, Linux laptops only: while Codara holds the computer awake, a
+  // closed lid does not suspend it either (a systemd-inhibit lock, no power
+  // settings change). Ignored where it cannot work; the UI hides it there.
+  keepAwakeLidClosed?: boolean;
   // When true, a localhost dev URL sniffed from any terminal pane's stdout
   // auto-opens a preview tab. Default false: the detected-URL chip still shows
   // so the user can click to open, but Codara never yanks a tab open on its own
@@ -1499,6 +1508,8 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   glassChroma: 100,
   keepRunningInBackground: true,
   claudeFollowsActiveAccount: true,
+  keepAwakeMode: "agents",
+  keepAwakeLidClosed: false,
   autoOpenPreview: false,
   linkOpenTarget: "system",
   copyBranchSetupCommandByRepo: {},

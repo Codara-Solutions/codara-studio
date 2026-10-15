@@ -61,6 +61,7 @@ import { loadPreferences, setPreference } from "./preferences-store";
 import { openInSystemBrowser, openLinkFromApp } from "./open-link";
 import * as pty from "./pty-manager";
 import { systemResourceSnapshot } from "./system-metrics";
+import { registerKeepAwakeIpc } from "./keep-awake";
 import {
   configuredOpenRouterCoraModels,
   validateOpenRouterConfiguration,
@@ -3123,6 +3124,8 @@ export function registerIpc(): void {
   handle("system:resourceSnapshot", async () => {
     return systemResourceSnapshot();
   });
+  // Keep awake, the control beside the system meters.
+  registerKeepAwakeIpc(handle);
 
   // Pause / resume the live byte stream while the renderer-side TerminalPane
   // is unmounted (workspace switch). Paused sessions buffer pty output into a

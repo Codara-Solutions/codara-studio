@@ -38,6 +38,7 @@ import type { ClaudeFollowStatus } from "@shared/claude-follow";
 import type { AgentDeliveryRequest, AgentDeliveryResult } from "@shared/agent-delivery";
 import { captureApi } from "./areas/capture";
 import { chromeLinkApi } from "./areas/chrome-link";
+import { keepAwakeApi } from "./areas/keep-awake";
 import { pointApi } from "./areas/point";
 import { serversApi } from "./areas/servers";
 import type {
@@ -1769,6 +1770,7 @@ const api = {
   },
   servers: serversApi,
   chromeLink: chromeLinkApi,
+  keepAwake: keepAwakeApi,
   capture: captureApi,
   point: pointApi,
 };
