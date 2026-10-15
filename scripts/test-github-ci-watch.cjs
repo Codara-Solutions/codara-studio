@@ -156,8 +156,11 @@ test("parseCiPullRequest judges each check by its newest run", ({ mod }) => {
 });
 
 test("local refs: one git call a minute, the default branch looked up once per interval", async ({ mod }) => {
-  const env = { PATH: process.env.PATH, HOME: os.tmpdir(), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: os.devNull, GIT_TERMINAL_PROMPT: "0", LANG: "C", LC_ALL: "C" };
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), "codara-gh-ci-refs-"));
+  const home = path.join(temp, "home");
+  fs.mkdirSync(home);
+  fs.writeFileSync(path.join(home, ".gitconfig"), "[user]\n\tname = CI\n\temail = ci@example.invalid\n[init]\n\tdefaultBranch = main\n");
+  const env = { PATH: process.env.PATH, HOME: home, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: path.join(home, ".gitconfig"), GIT_TERMINAL_PROMPT: "0", LANG: "C", LC_ALL: "C" };
   const run = (cwd, args) => execFileSync("git", args, { cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
   try {
     try {
@@ -169,7 +172,6 @@ test("local refs: one git call a minute, the default branch looked up once per i
     const repo = path.join(temp, "repo");
     run(temp, ["init", "-q", "--bare", "-b", "main", remote]);
     run(temp, ["clone", "-q", remote, repo]);
-    for (const [key, value] of [["user.email", "ci@example.invalid"], ["user.name", "CI"]]) run(repo, ["config", key, value]);
     fs.writeFileSync(path.join(repo, "a.txt"), "a\n");
     run(repo, ["add", "-A"]);
     run(repo, ["commit", "-q", "-m", "a"]);
