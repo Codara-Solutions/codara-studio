@@ -52,6 +52,8 @@ export interface WorktreeSetupServiceDeps {
   maxConcurrentCommands?: number;
   budget?: CopyBudget;
   logCapBytes?: number;
+  // How long output may still arrive after a command exits (tests lower it).
+  exitDrainMs?: number;
 }
 
 export interface StartSetupRequest {
@@ -75,6 +77,7 @@ const TAIL_BYTES = 64 * 1024;
 const DEFAULT_LOG_CAP = 4 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 45 * 60 * 1000;
 const KILL_GRACE_MS = 3_000;
+const EXIT_DRAIN_MS = 2_000;
 const INTERRUPTED = "Codara closed while setup was running";
 
 interface Step {
@@ -163,6 +166,10 @@ export class WorktreeSetupService {
     const id = setupIdFor(worktreeReal);
     const existing = this.runs.get(id);
     if (existing && !isWorktreeSetupFinished(existing.status.state)) return { ...existing.status };
+    // A Stop marks a setup finished at once, while a copy of it may still be
+    // landing. A new run (Run again) waits for that one to stop writing, so
+    // the two never copy into the worktree or write its record together.
+    if (existing) await this.settled(existing);
     const setupDir = await setupDirFor(worktreeReal);
     if (!setupDir) throw new WorktreeSetupError("The folder is not a linked git worktree");
     const sources = await readSetupSources(request.sourceCwd);
@@ -295,6 +302,11 @@ export class WorktreeSetupService {
     }
     if (!run) return true;
     if (!isWorktreeSetupFinished(run.status.state)) await this.stop(run.status.id);
+    return this.settled(run, timeoutMs);
+  }
+
+  /** True once the run's pipeline has returned; false after `timeoutMs`. */
+  private async settled(run: Run, timeoutMs = 30_000): Promise<boolean> {
     let timer: NodeJS.Timeout | null = null;
     const timeout = new Promise<false>((resolvePromise) => {
       timer = setTimeout(() => resolvePromise(false), Math.max(0, timeoutMs));
@@ -404,7 +416,10 @@ export class WorktreeSetupService {
         userCommand: status.commands.find((command) => command.kind === "user")?.command ?? null,
       };
     }
-    if (run) this.runs.delete(run.status.id);
+    if (run) {
+      await this.settled(run);
+      this.runs.delete(run.status.id);
+    }
     return this.start({ ...request, runCommands: true, ...overrides });
   }
 
@@ -644,9 +659,11 @@ export class WorktreeSetupService {
     const shell = await this.deps.userShell().catch(() => null);
     if (shell?.kind === "pwsh") {
       const script = join(run.setupDir, "user-setup.ps1");
+      // The byte order mark makes Windows PowerShell 5.1 read the script as
+      // UTF-8 rather than the ANSI code page, so non-ASCII paths survive.
       await fsp.writeFile(
         script,
-        `Set-Location -LiteralPath ${pwshQuote(run.worktreeReal)}\r\n${command.command.replace(/\n/g, "\r\n")}\r\nif ($LASTEXITCODE) { exit $LASTEXITCODE }\r\n`,
+        `\uFEFFSet-Location -LiteralPath ${pwshQuote(run.worktreeReal)}\r\n${command.command.replace(/\n/g, "\r\n")}\r\nif ($LASTEXITCODE) { exit $LASTEXITCODE }\r\n`,
         { mode: 0o600 },
       );
       return [
@@ -741,18 +758,36 @@ export class WorktreeSetupService {
       pipe(child.stdout);
       pipe(child.stderr);
       let settled = false;
+      let drainTimer: NodeJS.Timeout | null = null;
       const settle = (code: number | null) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        if (drainTimer) clearTimeout(drainTimer);
         run.child = null;
         resolvePromise({ code, timedOut });
       };
+      const exitCode = (code: number | null, signal: NodeJS.Signals | null): number | null =>
+        code ?? (signal ? 128 + (signalNumber(signal) ?? 15) : null);
       child.on("error", (err) => {
         this.writeLog(run, `Could not start: ${err.message}\n`);
         settle(127);
       });
-      child.on("close", (code, signal) => settle(code ?? (signal ? 128 + (signalNumber(signal) ?? 15) : null)));
+      // "close" waits for the output pipes, which a process the command left
+      // running in the background (a daemon, a watcher, `cmd &`) keeps open.
+      // The command itself has ended at "exit": its last output gets a moment
+      // to arrive, then the step ends without waiting on the background one.
+      child.on("exit", (code, signal) => {
+        if (settled) return;
+        drainTimer = setTimeout(() => {
+          if (settled) return;
+          this.writeLog(run, "A process the command started is still running; its output is no longer logged\n");
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          settle(exitCode(code, signal));
+        }, this.deps.exitDrainMs ?? EXIT_DRAIN_MS);
+      });
+      child.on("close", (code, signal) => settle(exitCode(code, signal)));
     });
   }
 

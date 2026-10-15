@@ -281,7 +281,7 @@ export function parseWorktreeSetupFile(text: string): WorktreeSetupParseResult {
   }
   let root: unknown;
   try {
-    root = JSON.parse(text.replace(/^﻿/, ""));
+    root = JSON.parse(text.replace(/^\uFEFF/, ""));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return { config: null, errors: [`${WORKTREE_SETUP_FILE} is not valid JSON: ${message}`], warnings };
@@ -332,7 +332,7 @@ export function parseWorktreeIncludeFile(text: string): { patterns: string[]; er
     return { patterns: [], errors: [`${WORKTREE_INCLUDE_FILE} is larger than 256 KB`] };
   }
   const patterns: string[] = [];
-  for (const raw of text.replace(/^﻿/, "").split("\n")) {
+  for (const raw of text.replace(/^\uFEFF/, "").split("\n")) {
     const line = raw.replace(/\r$/, "");
     if (!line.trim() || line.startsWith("#")) continue;
     if (line.length > WORKTREE_SETUP_LIMITS.patternChars) continue;

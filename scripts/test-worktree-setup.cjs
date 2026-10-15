@@ -538,6 +538,22 @@ async function runSuite(m, scratch) {
     assert.ok(Date.now() - t0 < 5_000);
   });
 
+  await check("a command that leaves a process in the background still ends", async () => {
+    // The background sleep keeps the output pipes open: waiting for them
+    // would hold the step (and the agents waiting on it) until it exits.
+    const wt = addWorktree("wt-background");
+    write(path.join(repo, ".codara", "worktree.json"), JSON.stringify({ setup: ["sleep 4 &", "echo started"] }));
+    const svc = makeService({ exitDrainMs: 100 });
+    const t0 = Date.now();
+    const started = await svc.start({ sourceCwd: repo, worktreePath: wt, trigger: "ui", userCommand: null });
+    const done = await svc.waitFor(started.id, 20_000);
+    assert.equal(done.state, "succeeded", done.error);
+    assert.ok(Date.now() - t0 < 3_000, `took ${Date.now() - t0} ms`);
+    const log = (await svc.readLog(started.id)).text;
+    assert.match(log, /^started$/m);
+    assert.match(log, /still running/);
+  });
+
   await check("a setup still running when Codara closed reads as stopped", async () => {
     const wt = addWorktree("wt-interrupted");
     write(path.join(repo, ".codara", "worktree.json"), JSON.stringify({ setup: "sleep 30" }));
