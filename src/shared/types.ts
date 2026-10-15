@@ -630,6 +630,9 @@ export const DEFAULT_COMMIT_MESSAGE_MODEL: CommitMessageModel = "auto";
 export interface AppSettings {
   defaultShellId: string | null;
   terminalScrollbackLineLimit: number;
+  // Programs in a terminal (tmux, nvim, anything over SSH) may put text on
+  // the system clipboard with OSC 52. Write only, size capped; absent = on.
+  terminalOsc52Clipboard?: boolean;
   // OpenRouter API access. `openRouterModel` is the inexpensive utility model
   // shared by editor inline AI and git commit drafts when OpenRouter is picked
   // below. Cora models are kept separately so changing the editor model never
@@ -1315,6 +1318,10 @@ export interface AppPreferences {
   // follow it; explicit "open in Codara browser" actions, agent browser tools
   // and sign-in flows keep their fixed destination (src/main/link-routing.ts).
   linkOpenTarget?: LinkOpenTarget;
+  // A plain click on a terminal link opens a small menu (Codara browser,
+  // default browser, copy); Ctrl or Cmd+click opens it per linkOpenTarget.
+  // Off: a plain click opens it straight away. Default on.
+  terminalLinkMenu?: boolean;
   // "Create copy branch" setup command, keyed by absolute repo cwd. Run live
   // in a terminal in the new worktree after creation. Repos with no entry use
   // DEFAULT_COPY_BRANCH_SETUP_COMMAND.
@@ -1496,6 +1503,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   keepRunningInBackground: true,
   autoOpenPreview: false,
   linkOpenTarget: "system",
+  terminalLinkMenu: true,
   copyBranchSetupCommandByRepo: {},
   agentWorktreesEnabled: true,
   agentsMayRemoveUserWorktrees: false,

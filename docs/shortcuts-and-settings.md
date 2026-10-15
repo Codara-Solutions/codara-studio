@@ -90,9 +90,16 @@ edited the same way.
 | Split terminal pane down | Mod+Shift+D | `terminal.splitDown` |
 | Close active terminal pane | (unbound) | `terminal.closePane` |
 | Toggle terminal pane zoom | Mod+Shift+Enter | `terminal.toggleZoom` |
+| Copy terminal context | (unbound) | `terminal.copyContext` |
 
 Mod+W already closes just the selected pane when a terminal tab has more than
 one, so `terminal.closePane` only matters if you want a separate chord.
+
+`terminal.copyContext` does what the pane toolbar's **Copy terminal context**
+button does (see [Terminal clipboard, links and context](#terminal-clipboard-links-and-context)).
+It has no default chord because the free Ctrl+Alt letters type characters
+through AltGr on many keyboard layouts, and a terminal must keep receiving
+them.
 
 ### Workers
 
@@ -166,9 +173,9 @@ The pages:
 
 | Tab | What lives there |
 |---|---|
-| General | Getting started (reopens the first-run guide), Appearance (theme, liquid glass surfaces), Window (keep running in the background when the window is closed, auto-open the browser for local dev servers, open links in the default browser or the Codara browser, the workspace switch badge), Agent worktrees (whether agents may create and remove worktrees, and remove ones you created), Tabs (middle-click to close), Notifications (in-app toast, native OS notification, sound, OS-specific cues), Git (background fetch, notify on teammate pushes and new pull requests), Instant git triggers, Copy-branch workspaces (a setup command for new worktrees, and extra ignored files an agent may delete with a merged worktree). |
+| General | Getting started (reopens the first-run guide), Appearance (theme, liquid glass surfaces), Window (keep running in the background when the window is closed, auto-open the browser for local dev servers, open links in the default browser or the Codara browser, ask where terminal links open, the workspace switch badge), Agent worktrees (whether agents may create and remove worktrees, and remove ones you created), Tabs (middle-click to close), Notifications (in-app toast, native OS notification, sound, OS-specific cues), Git (background fetch, notify on teammate pushes and new pull requests), Instant git triggers, Copy-branch workspaces (a setup command for new worktrees, and extra ignored files an agent may delete with a merged worktree). |
 | Editor | Code editor (Vim mode, autosave) and inline AI autocomplete. |
-| Default terminal | The shell for new panes, a resource overview, output history and scrollback lines, and the run terminal lifecycle for worker panes. |
+| Default terminal | The shell for new panes, output history and scrollback lines, whether programs may copy to the clipboard (OSC 52), a resource overview, and the run terminal lifecycle for worker panes. |
 | API and model | An OpenRouter key, and how Git commit messages are generated. |
 | Agents | Your accounts (see [accounts.md](./accounts.md)), **Install Pi** when Pi is not installed yet, and **Open Capability Center** and **Worker models** buttons, which close Settings and open the Capability Center on MCP servers or on worker models. |
 | Sessions | Browse and resume Claude and Codex sessions from any local project, and choose whether running agent sessions (Claude Code, Codex, Grok and Pi panes) resume when Codara reopens. |
@@ -180,7 +187,8 @@ The pages:
 **Open links in** decides where a link you click opens: **Default browser**
 (the default) hands it to your machine's browser, **Codara browser** opens it
 in a browser tab of the current workspace. It covers links in terminals
-(plain URLs and OSC 8 hyperlinks), Cora chat and markdown previews, the GitHub
+(plain URLs and OSC 8 hyperlinks, on Ctrl or Cmd+click or when **Ask where
+terminal links open** is off), Cora chat and markdown previews, the GitHub
 panels, onboarding and Settings, and links the app window itself opens. Some
 links keep a fixed destination whatever the setting says:
 
@@ -200,6 +208,44 @@ links keep a fixed destination whatever the setting says:
 The run terminal lifecycle works like this. Temporary worker panes close when
 a run settles. Service panes remain until the run is deleted.
 Failed closes retry automatically.
+
+### Terminal clipboard, links and context
+
+**Links.** A plain click on a link in a terminal (a plain URL or an OSC 8
+hyperlink) opens a small menu: **Open in Codara browser**, **Open in default
+browser** and **Copy link**. A `file:` link offers **Open in Codara** and
+**Copy link**, a `mailto:` link **Open in mail app** and **Copy link**, and
+any other scheme only **Copy link**. Ctrl+click (Cmd+click on macOS; either
+works everywhere) skips the menu and opens the link where **Open links in**
+says. Dragging across a link selects text and opens nothing. The menu works
+from the keyboard (arrows, Home, End, Enter, Escape) and gives focus back to
+the terminal when it closes. Turn off **Ask where terminal links open** in
+General, Window, to open links on a plain click as before.
+
+**Copies from programs (OSC 52).** tmux, Neovim and programs on a machine you
+reach over SSH can put text on this computer's clipboard with the OSC 52
+escape sequence. **Let programs copy to the clipboard** on the Default
+terminal page (on by default, applied when you save) allows it, up to about
+768 KB per copy. Programs can never read the clipboard this way: a request to
+read it is ignored. A copy is also ignored when it comes from output written
+back into a pane (a restored or reattached terminal), from a pane that is not
+on screen, or from a pane you cannot type into. With the setting off, the
+first refused copy shows a "Terminal copy blocked" notice. For tmux, set
+`set -g set-clipboard on`; Neovim 0.10 and later uses OSC 52 on its own
+over SSH.
+
+**Copy terminal context.** The button in the pane toolbar, or the
+`terminal.copyContext` command, copies up to the pane's last 200 lines of output (or
+the selection, when there is one) with its working directory and shell, as a
+block ready to paste into an agent. The working directory is the one the
+shell last reported, or the folder the pane opened in when the shell does not
+report it.
+
+**Character widths.** Terminals measure characters with the Unicode 11
+tables, so an emoji or a CJK character takes two cells, as Claude Code,
+Codex, tmux and Neovim expect, and boxes drawn around them line up. Emoji
+joined into one picture (a family, or an emoji with a skin tone) can still
+take more cells than they show.
 
 ### Terminal agent notifications
 

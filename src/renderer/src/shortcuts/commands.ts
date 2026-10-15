@@ -30,6 +30,7 @@ export type CommandId =
   | "terminal.splitDown"
   | "terminal.closePane"
   | "terminal.toggleZoom"
+  | "terminal.copyContext"
   | "view.selectByIndex"
   | "view.zoomIn"
   | "view.zoomOut"
@@ -242,6 +243,16 @@ export const COMMANDS: Command[] = [
     // Mod+Shift+Enter — iTerm2's "Toggle Maximize Pane". Frees Mod+Shift+Z,
     // which is the universal Redo chord an editor must not consume.
     defaultChords: [mod("Enter", { shift: true })],
+  },
+  {
+    id: "terminal.copyContext",
+    label: "Copy terminal context",
+    group: "Terminal",
+    // The active pane's recent output (or its selection) and working
+    // directory, ready to paste into an agent. No default chord: the free
+    // Ctrl+Alt letters are AltGr characters on many keyboard layouts, which a
+    // terminal must keep receiving. The pane toolbar has a button for it.
+    defaultChords: [],
   },
   {
     id: "view.selectByIndex",

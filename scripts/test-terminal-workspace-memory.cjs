@@ -300,7 +300,7 @@ async function main() {
   );
   check(
     "modes are restored after the normal-screen snapshot, before hidden-era bytes",
-    /term\.write\(`\$\{normalizeForTerminalReplay\(replay\)\}\\r\\n`\);\n\s*\}\n\s*restoreScreenModes\(\);\n[\s\S]{0,300}term\.write\(pendingBytes, finishReplay\)/.test(
+    /term\.write\(`\$\{normalizeForTerminalReplay\(replay\)\}\\r\\n`\);\n\s*\}\n\s*restoreScreenModes\(\);\n[\s\S]{0,400}term\.write\(pendingBytes, finishReplay\)/.test(
       source,
     ),
   );
