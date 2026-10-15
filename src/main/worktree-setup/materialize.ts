@@ -436,7 +436,10 @@ export async function keepLinksIgnored(worktreeRoot: string, links: readonly str
   if (infoStat && (!infoStat.isDirectory() || infoStat.isSymbolicLink())) {
     return "The repository's .git/info is not a plain folder; linked folders were not marked as ignored.";
   }
-  if (!infoStat) await fsp.mkdir(infoDir);
+  if (!infoStat) {
+    assertCodaraOwnedWrite(infoDir);
+    await fsp.mkdir(infoDir);
+  }
   const fileStat = await fsp.lstat(excludeFile).catch(() => null);
   if (fileStat && (!fileStat.isFile() || fileStat.isSymbolicLink())) {
     return "The repository's .git/info/exclude is not a plain file; linked folders were not marked as ignored.";

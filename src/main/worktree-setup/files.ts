@@ -184,7 +184,10 @@ export async function writeWorktreeSetupFiles(draft: WorktreeSetupFileDraft): Pr
           : "{}\n"
         : null);
     if (text === null) continue;
-    if (target.path === filePath && !folderStat) await fsp.mkdir(folder);
+    if (target.path === filePath && !folderStat) {
+      assertCodaraOwnedWrite(folder);
+      await fsp.mkdir(folder);
+    }
     assertCodaraOwnedWrite(target.path);
     await fsp.writeFile(target.path, text, { flag: exists.includes(target.relative) ? "w" : "wx" });
     written.push(target.relative);
