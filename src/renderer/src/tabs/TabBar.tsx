@@ -4,6 +4,7 @@ import { buildDockIndex, canDockTab, isDockLeaf } from "./dock";
 import { CloseIcon, FileIcon, GlobeIcon, PhoneIcon, PlusIcon } from "../components/icons";
 import { AutomationsGlyph } from "../components/automations/AutomationsGlyph";
 import AutomationsStripButton from "../components/automations/AutomationsStripButton";
+import QuickCommandsButton from "../quick-commands/QuickCommandsButton";
 import { CodaraMark, RuntimeMark, type BrandRuntime } from "../components/BrandMarks";
 import { agentBrandTone } from "../lib/agent-brand";
 import { liveTerminalRuntime } from "./terminalAgentState";
@@ -1021,6 +1022,8 @@ function TabBar({
           than a sub-tab affordance. Quiet loop glyph when idle; live cue
           (spinner / needs-you dot + name) while an automation runs. */}
       {workspaceId && <AutomationsStripButton workspaceId={workspaceId} />}
+      {/* Saved shell commands and agent prompts, one click away. */}
+      {workspaceId && <QuickCommandsButton />}
       <div ref={pickerRef} style={{ position: "relative" }}>
         <button
           type="button"

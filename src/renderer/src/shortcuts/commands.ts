@@ -30,6 +30,7 @@ export type CommandId =
   | "terminal.splitDown"
   | "terminal.closePane"
   | "terminal.toggleZoom"
+  | "quickCommands.open"
   | "view.selectByIndex"
   | "view.zoomIn"
   | "view.zoomOut"
@@ -242,6 +243,15 @@ export const COMMANDS: Command[] = [
     // Mod+Shift+Enter — iTerm2's "Toggle Maximize Pane". Frees Mod+Shift+Z,
     // which is the universal Redo chord an editor must not consume.
     defaultChords: [mod("Enter", { shift: true })],
+  },
+  {
+    id: "quickCommands.open",
+    label: "Run a quick command",
+    group: "Terminal",
+    // Mod+Shift+P, the command palette chord of VS Code and Sublime, opens
+    // the palette of saved shell commands and agent prompts. Mod+P stays
+    // Quick Open.
+    defaultChords: [mod("p", { shift: true })],
   },
   {
     id: "view.selectByIndex",

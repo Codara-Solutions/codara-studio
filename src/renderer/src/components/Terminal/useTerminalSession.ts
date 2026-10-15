@@ -37,6 +37,7 @@ import { detectMonoFontFamily } from "../../lib/fonts";
 import { subscribeAppTokens } from "../../lib/theme-tokens";
 import { createFileLinkProvider } from "./file-link-provider";
 import { createReplayTracker } from "./replayTracker";
+import { openTerminalContextMenu } from "../../quick-commands/terminal-context-menu";
 import {
   registerCwdHandler,
   registerPromptTracker,
@@ -1428,9 +1429,29 @@ export function useTerminalSession({
           const term2 = termRef.current;
           if (!term2) return;
           const selection = term2.getSelection();
-          if (selection) {
+          const copySelection = () => {
+            if (!selection) return;
             void window.spark.clipboard.writeText(selection);
             term2.clearSelection();
+          };
+          // Shift+right-click (or a plain one, by preference) opens the quick
+          // command menu instead; see quick-commands/terminal-context-menu.ts.
+          if (
+            openTerminalContextMenu({
+              paneId: sessionId,
+              x: event.clientX,
+              y: event.clientY,
+              shiftKey: event.shiftKey,
+              selection,
+              readOnly: readOnlyRef.current || inputBlockedRef.current,
+              copy: copySelection,
+              paste: writePasteFromClipboard,
+            })
+          ) {
+            return;
+          }
+          if (selection) {
+            copySelection();
             return;
           }
           writePasteFromClipboard();
