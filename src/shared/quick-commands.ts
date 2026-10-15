@@ -198,14 +198,17 @@ export function moveQuickCommand(commands: readonly QuickCommand[], id: string, 
 // refused instead of run; prompts are plain text and take any value.
 // Parentheses count: git allows them in branch names, PowerShell runs
 // `git push origin (calc)` as a subexpression, and zsh runs the code in a
-// glob qualifier such as `README.md(e+calc+)`.
+// glob qualifier such as `README.md(e+calc+)`. So does every control
+// character: {cwd} comes from the folder a terminal reports (OSC 7), which any
+// program's output can set, and a shell without bracketed paste (cmd.exe, sh)
+// reads Ctrl+U, Tab or an escape sequence as keys, not text.
 
 export type QuickCommandVariable = "branch" | "cwd";
 
 export const QUICK_COMMAND_VARIABLES: readonly QuickCommandVariable[] = ["branch", "cwd"];
 
 const VARIABLE_PATTERN = /(?<!\$)\{(branch|cwd)\}/g;
-const SHELL_UNSAFE = /[`$"';&|<>!%()\r\n\0]/;
+const SHELL_UNSAFE = /[`$"';&|<>!%()\u0000-\u001f\u007f-\u009f]/;
 
 export function quickCommandVariablesIn(text: string): Set<QuickCommandVariable> {
   const out = new Set<QuickCommandVariable>();

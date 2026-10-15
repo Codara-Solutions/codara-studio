@@ -159,7 +159,9 @@ async function main() {
     assert.deepEqual(ok, { ok: true, text: "git push origin feat/x; echo ${branch} in \"/work/my app\"" });
     assert.deepEqual(qc.expandQuickCommandText("git push {branch}", { branch: null }, "shell"), { ok: false, variable: "branch", reason: "missing" });
     // "(calc)" runs calc in PowerShell and "README.md(e+calc+)" in zsh; git allows both as branch names.
-    for (const bad of ["x;rm -rf ~", "a$(id)", "a`id`", "a|b", "a&b", "a>b", "it's", "a\"b", "a\nb", "%PATH%", "!x", "(calc)", "README.md(e+calc+)"]) {
+    // Control characters too: {cwd} is whatever OSC 7 a program printed, and a
+    // shell without bracketed paste reads Ctrl+U, Tab or ESC as keys.
+    for (const bad of ["x;rm -rf ~", "a$(id)", "a`id`", "a|b", "a&b", "a>b", "it's", "a\"b", "a\nb", "a\rb", "a\0b", "%PATH%", "!x", "(calc)", "README.md(e+calc+)", "/w/a\u0015b", "/w/a\tb", "/w/\u001b[201~x", "/w/a\u007fb", "/w/a\u009bb"]) {
       assert.deepEqual(qc.expandQuickCommandText("echo {branch}", { branch: bad }, "shell"), { ok: false, variable: "branch", reason: "unsafe" }, bad);
     }
     assert.deepEqual(
@@ -168,6 +170,11 @@ async function main() {
       "a prompt is plain text",
     );
     assert.deepEqual(qc.expandQuickCommandText("npm test", {}, "shell"), { ok: true, text: "npm test" });
+    assert.deepEqual(
+      qc.expandQuickCommandText("cd \"{cwd}\"", { cwd: "C:\\Users\\Me\\My Repo-1.2_x" }, "shell"),
+      { ok: true, text: "cd \"C:\\Users\\Me\\My Repo-1.2_x\"" },
+      "an ordinary Windows folder with spaces is fine",
+    );
   });
 
   await check("terminal right-click: quick edit by default, Shift opens the menu", () => {
