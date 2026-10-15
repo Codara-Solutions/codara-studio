@@ -43,6 +43,7 @@ function getStore(): TerminalScrollbackStore {
     dimensions: pty.sessionDimensions,
     readTail: pty.readTail,
     enabled,
+    newSessionOwnsScreen: process.platform === "win32",
     log: (line) => logMain("scrollback", line),
   });
   return store;
@@ -89,12 +90,13 @@ export function registerTerminalScrollbackIpc(handle: IpcHandle): void {
     "terminalScrollback:restore",
     async (
       _event,
-      args: { paneId?: unknown; maxLines?: unknown; force?: unknown },
+      args: { paneId?: unknown; maxLines?: unknown; rows?: unknown; force?: unknown },
     ): Promise<TerminalScrollbackReplay | null> => {
       const paneId = typeof args?.paneId === "string" ? args.paneId : "";
       if (!paneId || paneId.length > 256) return null;
       const maxLines = typeof args.maxLines === "number" && Number.isFinite(args.maxLines) ? args.maxLines : undefined;
-      return readTerminalScrollbackReplay(paneId, { maxLines, force: args.force === true });
+      const rows = typeof args.rows === "number" && Number.isFinite(args.rows) ? args.rows : undefined;
+      return readTerminalScrollbackReplay(paneId, { maxLines, rows, force: args.force === true });
     },
   );
 }

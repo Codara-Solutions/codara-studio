@@ -218,9 +218,12 @@ Failed closes retry automatically.
 - **Keep terminal output across restarts** (Sessions, Restore; on by
   default): a terminal pane reopened after a quit, an update or a crash shows
   the output it had, then a dim `[Restored from before Codara restarted]`
-  line, then its new shell or its resumed agent. Colors are kept; cursor
-  movement, links and terminal queries are not replayed, and a full-screen
-  program such as Codex keeps only its last screen. The output is saved in
+  line, then its new shell or its resumed agent. On Windows the new session
+  starts on a fresh screen with that output in the scrollback just above it,
+  because the Windows console redraws the screen of a session it starts.
+  Colors are kept; cursor movement, links and terminal queries are not
+  replayed, and a full-screen program such as Codex keeps only its last
+  screen. The output is saved in
   Codara's own folder (see [on-your-machine.md](./on-your-machine.md)).
   Closing a pane deletes its saved output, and turning the setting off
   deletes all of it.

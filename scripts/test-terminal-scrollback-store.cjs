@@ -24,6 +24,7 @@ const assert = require("node:assert/strict");
 const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
+const RESTORED_OUTPUT_MARKER_TEXT = "[Restored from before Codara restarted]";
 
 let pass = 0;
 function check(name, cond, detail) {
@@ -352,6 +353,79 @@ async function main() {
     check("forgetting a pane deletes its file", !fs.existsSync(fileFor("pane-a")));
     check("a forgotten pane has nothing to replay", (await again.restoreReplay("pane-a", { force: true })) === null);
     again.dispose();
+  }
+
+  // ── Windows: the new ConPTY session owns the screen ───────────────────
+  // ConPTY clears the screen on its first paint and places PSReadLine's
+  // absolute cursor moves as if the session began at the top left. The replay
+  // must be in the scrollback by then, in the pane and in main's record.
+  {
+    const first = fakeDeps();
+    const recorder = new storeMod.TerminalScrollbackStore(first.deps);
+    await recorder.init();
+    recorder.track(["win"]);
+    first.state.sessions.add("win");
+    first.state.feed("win", "PS C:\\work> dir\r\n" + Array.from({ length: 6 }, (_, i) => `file ${i}.txt\r\n`).join("") + "PS C:\\work> ");
+    await recorder.flush();
+    recorder.dispose();
+
+    const rows = 10;
+    const conptyFirstPaint = "\x1b[?25l\x1b[2J\x1b[m\x1b[HPS C:\\work> \x1b[?25h";
+    const psReadLineRedraw = "\x1b[1;13Hgit status";
+    let size = { cols: 80, rows };
+    const win = fakeDeps({ newSessionOwnsScreen: true, dimensions: () => size });
+    const store = new storeMod.TerminalScrollbackStore(win.deps);
+    await store.init();
+    const replay = await store.restoreReplay("win", { rows });
+    check(
+      "on Windows the replay ends by handing the screen over",
+      !!replay && replay.text.endsWith(storeMod.RESTORED_OUTPUT_MARKER + storeMod.handOverScreen(rows)),
+      JSON.stringify(replay?.text.slice(-80)),
+    );
+
+    // The pane: replay, then the new session's first paint and a redraw.
+    const pane = await parse([replay.text], 80, rows);
+    const buffer = pane.buffer.active;
+    let blank = true;
+    for (let row = buffer.baseY; row < buffer.baseY + rows; row += 1) {
+      if ((buffer.getLine(row)?.translateToString(true) ?? "").trim()) blank = false;
+    }
+    check("the replay sits above a blank screen, cursor top left", blank && buffer.cursorX === 0 && buffer.cursorY === 0);
+    await new Promise((resolve) => pane.write(conptyFirstPaint + psReadLineRedraw, resolve));
+    const shown = historyOf(pane);
+    const markerAt = shown.indexOf(RESTORED_OUTPUT_MARKER_TEXT);
+    check(
+      "the new session's first paint leaves every replayed line in place",
+      markerAt > 0 &&
+        shown.slice(0, markerAt).filter((line) => /^file \d\.txt$/.test(line)).length === 6 &&
+        shown[markerAt + 1] === "PS C:\\work> git status",
+      JSON.stringify(shown),
+    );
+    pane.dispose();
+
+    // Main's record sees the same bytes; the pane is fitted taller before
+    // the save (a hidden workspace shown later), and the next restart still
+    // reads replay, marker, new session, in order.
+    store.track(["win"]);
+    win.state.sessions.add("win");
+    win.state.feed("win", conptyFirstPaint);
+    size = { cols: 80, rows: 30 };
+    win.state.feed("win", psReadLineRedraw + "\r\n");
+    await store.flush();
+    store.dispose();
+    const next = new storeMod.TerminalScrollbackStore(fakeDeps({ newSessionOwnsScreen: true }).deps);
+    const again = await next.restoreReplay("win", { rows: 30 });
+    const lines = (again?.text ?? "").replace(/\x1b\[[0-9;]*m/g, "").split("\r\n");
+    const firstMarker = lines.indexOf(RESTORED_OUTPUT_MARKER_TEXT);
+    check(
+      "the record keeps the replay whole below a Windows session, also after a resize",
+      firstMarker > 0 &&
+        lines.slice(0, firstMarker).filter((line) => /^file \d\.txt$/.test(line)).length === 6 &&
+        lines[firstMarker + 1] === "PS C:\\work> git status",
+      JSON.stringify(lines),
+    );
+    next.dispose();
+    await next.forget("win");
   }
 
   // ── seeding a pane tracked after its session started ─────────────────
