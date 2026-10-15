@@ -10,7 +10,7 @@
 // Pure git through runGit plus local file reads; no Electron import, so
 // scripts/test-review-diff.cjs runs it against throwaway repositories.
 
-import { readFile, stat } from "node:fs/promises";
+import { lstat, open, readlink } from "node:fs/promises";
 import { join } from "node:path";
 
 import type {
@@ -36,6 +36,8 @@ export const MAX_EAGER_FILES = 400;
 export const MAX_FILE_LINES = 20_000;
 /** Untracked files larger than this load only when asked. */
 const LARGE_UNTRACKED_BYTES = 1024 * 1024;
+/** Bytes read of an untracked file asked for in full; the lines past it are not shown. */
+export const MAX_UNTRACKED_READ_BYTES = 8 * 1024 * 1024;
 const MAX_UNTRACKED_FILES = 2_000;
 /** Above this many deferred files the patch is read per path instead of with exclusions. */
 const MAX_EXCLUDES = 200;
@@ -292,11 +294,40 @@ function toLines(raw: readonly string[], cap: number): { lines: ReviewDiffLine[]
 interface UntrackedInfo {
   path: string;
   size: number;
+  /**
+   * What lstat saw. A link is shown by its target, as git would add it, and
+   * never followed: one to a huge file, a pipe or a device would stall or
+   * flood the read. "other" is a folder (a repository of its own) or a
+   * special file.
+   */
+  kind?: "file" | "symlink" | "other";
 }
 
 async function untrackedInfo(top: string, path: string): Promise<UntrackedInfo> {
   if (isRemotePath(top)) return { path, size: 0 };
-  return { path, size: (await stat(join(top, path)).catch(() => null))?.size ?? 0 };
+  const info = await lstat(join(top, path)).catch(() => null);
+  if (!info) return { path, size: 0 };
+  if (info.isSymbolicLink()) return { path, size: 0, kind: "symlink" };
+  if (!info.isFile()) return { path, size: 0, kind: "other" };
+  return { path, size: info.size, kind: "file" };
+}
+
+/** At most `limit` bytes from the start of a regular file, and whether it holds more. */
+async function readHead(file: string, limit: number): Promise<{ buffer: Buffer; partial: boolean }> {
+  const handle = await open(file, "r");
+  try {
+    const size = (await handle.stat()).size;
+    const buffer = Buffer.alloc(Math.min(size, limit));
+    let filled = 0;
+    while (filled < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, filled, buffer.length - filled, filled);
+      if (bytesRead === 0) break;
+      filled += bytesRead;
+    }
+    return { buffer: buffer.subarray(0, filled), partial: size > limit };
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
 }
 
 async function untrackedPaths(cwd: string, pathspecs: string[] = []): Promise<string[]> {
@@ -326,11 +357,34 @@ export async function untrackedFile(top: string, info: UntrackedInfo, maxLines: 
   const base: ReviewDiffFile = { path: info.path, status: "untracked", additions: 0, deletions: 0, binary: false };
   if (!force && info.size > LARGE_UNTRACKED_BYTES) return { ...base, deferred: "large" };
   if (isRemotePath(top)) return { ...base, lines: [], error: "New files on a remote workspace are listed without their contents." };
+  const full = join(top, info.path);
   try {
-    const buffer = await readFile(join(top, info.path));
+    if (info.kind === "symlink") {
+      const target = await readlink(full);
+      const raw = [
+        `diff --git a/${info.path} b/${info.path}`,
+        "new file mode 120000",
+        "--- /dev/null",
+        `+++ b/${info.path}`,
+        "@@ -0,0 +1 @@",
+        `+${target}`,
+        "\\ No newline at end of file",
+      ];
+      return { ...base, additions: 1, lines: toLines(raw, maxLines).lines };
+    }
+    if (info.kind === "other") {
+      return {
+        ...base,
+        lines: [],
+        error: info.path.endsWith("/") ? "This folder is a git repository of its own." : "This is not a regular file, so it has no lines to show.",
+      };
+    }
+    const { buffer, partial } = await readHead(full, force ? MAX_UNTRACKED_READ_BYTES : LARGE_UNTRACKED_BYTES);
+    if (partial && !force) return { ...base, deferred: "large" };
     if (buffer.includes(0)) return { ...base, binary: true, lines: [] };
     const text = buffer.toString("utf8").split(/\r?\n/);
-    if (text.length && text[text.length - 1] === "") text.pop();
+    // A cut file ends mid-line; that line is not shown.
+    if (partial || (text.length && text[text.length - 1] === "")) text.pop();
     if (!force && text.length > LARGE_FILE_LINES) return { ...base, additions: text.length, deferred: "large" };
     const raw = [
       `diff --git a/${info.path} b/${info.path}`,
@@ -341,7 +395,8 @@ export async function untrackedFile(top: string, info: UntrackedInfo, maxLines: 
       ...text.map((line) => `+${line}`),
     ];
     const { lines, truncated } = toLines(raw, maxLines);
-    return { ...base, additions: text.length, lines, ...(truncated ? { truncated } : {}) };
+    if (partial && !truncated) lines.push({ kind: "meta", text: `… only the first ${MAX_UNTRACKED_READ_BYTES / (1024 * 1024)} MB of this file are shown` });
+    return { ...base, additions: text.length, lines, ...(truncated || partial ? { truncated: true } : {}) };
   } catch (err) {
     return { ...base, lines: [], error: errorText(err) };
   }

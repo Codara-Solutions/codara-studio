@@ -291,6 +291,61 @@ const numbered = (count, prefix = "line") => Array.from({ length: count }, (_, i
     assert.deepEqual(loaded.files.map((file) => file.path).sort(), ["huge.txt", "wild.txt"]);
     assert.ok(loaded.files.every((file) => !file.deferred && file.lines.length > lib.LARGE_FILE_LINES), "asked for, large files load");
 
+    // ── Untracked entries that are not plain small files ─────────────────
+    // A link shows its target, as git would add it, and is never followed;
+    // a repository inside the repository says so; a file asked for in full
+    // is read only up to a cap.
+    const odd = repo("odd");
+    write(odd, "kept.txt", "k\n");
+    git(odd, "add", ".");
+    git(odd, "commit", "-qm", "base");
+    const outside = path.join(scratch, "outside-secret.txt");
+    fs.writeFileSync(outside, "outside content\n");
+    const nested = path.join(odd, "nested");
+    fs.mkdirSync(nested);
+    git(nested, "init", "-q");
+    write(odd, "nested/inner.txt", "inner\n");
+    git(nested, "add", ".");
+    git(nested, "commit", "-qm", "inner");
+    write(odd, "capped.txt", numbered(Math.ceil(lib.MAX_UNTRACKED_READ_BYTES / 9) + 50_000, "c"));
+    let fifoMade = false;
+    if (process.platform !== "win32") {
+      fs.symlinkSync(outside, path.join(odd, "link-out"));
+      try {
+        execFileSync("mkfifo", [path.join(scratch, "a-pipe")], { stdio: "ignore" });
+        fs.symlinkSync(path.join(scratch, "a-pipe"), path.join(odd, "link-pipe"));
+        fifoMade = true;
+      } catch {
+        // No mkfifo here; the link to a file still covers following.
+      }
+    }
+    let hang;
+    const oddDiff = await Promise.race([
+      lib.getReviewDiff({ cwd: odd, mode: "uncommitted" }),
+      new Promise((_, reject) => {
+        hang = setTimeout(() => reject(new Error("the review read hung on an untracked link")), 15_000);
+      }),
+    ]).finally(() => clearTimeout(hang));
+    const oddFiles = new Map(oddDiff.files.map((file) => [file.path, file]));
+    if (process.platform !== "win32") {
+      const link = oddFiles.get("link-out");
+      assert.ok(link && link.lines, "the link is listed and shown");
+      assert.deepEqual(link.lines.filter((line) => line.kind === "add").map((line) => line.text), [`+${outside}`]);
+      assert.ok(!link.lines.some((line) => line.text.includes("outside content")), "the link is not followed");
+      if (fifoMade) {
+        const pipe = oddFiles.get("link-pipe");
+        assert.ok(pipe && pipe.lines.some((line) => line.text === `+${path.join(scratch, "a-pipe")}`), "a link to a pipe shows its target");
+      }
+    }
+    const nestedFile = oddFiles.get("nested/");
+    assert.ok(nestedFile, "the nested repository is listed");
+    assert.match(nestedFile.error, /repository of its own/);
+    assert.equal(oddFiles.get("capped.txt").deferred, "large");
+    const capped = (await lib.getReviewDiff({ cwd: odd, mode: "uncommitted", paths: ["capped.txt"], force: true })).files[0];
+    assert.equal(capped.truncated, true, "a file past the read cap is cut");
+    assert.ok(capped.lines.length <= lib.MAX_FILE_LINES + 2, `capped lines: ${capped.lines.length}`);
+    assert.ok(capped.additions > 0 && capped.additions < Math.ceil(lib.MAX_UNTRACKED_READ_BYTES / 9) + 50_000);
+
     // ── A merge conflict ────────────────────────────────────────────────
     const conflict = repo("conflict");
     write(conflict, "f.txt", "a\nb\nc\n");
