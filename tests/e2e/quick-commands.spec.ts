@@ -9,8 +9,10 @@ import { delimiter, join } from "node:path";
 // focused terminal from the tab bar with {branch} filled in, the palette
 // (Mod+Shift+P) runs one in a new terminal, a prompt for the focused agent is
 // refused over a plain shell, a prompt for a new Claude Code reaches it once
-// it is ready, Shift+right-click opens the terminal menu, and Settings adds,
-// reorders, edits, deletes and restores commands and swaps the right-click.
+// it is ready, a command with Press Enter off never runs over an agent,
+// Shift+right-click opens the terminal menu, Settings adds, reorders, edits,
+// deletes and restores commands and swaps the right-click, and the edit
+// dialog hands focus back and asks before it deletes.
 // Runs the real renderer in a temp HOME and Codara home, with a fake claude.
 
 const BRANCH = "feat/quick";
@@ -91,6 +93,16 @@ test("quick commands run from the tab bar, the palette and the terminal menu", a
     await page.keyboard.press("Enter");
     await expect.poll(() => readText(fixture.capture), { timeout: 45_000 }).toContain(`Summarize ${BRANCH}`);
 
+    // Press Enter off, and the focused terminal (that new Claude Code) runs
+    // an agent: nothing is typed, and no new terminal runs it either.
+    await openPalette();
+    await page.keyboard.type("draft marker");
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".spark-toast", { hasText: '"Draft marker" was not typed' })).toBeVisible({ timeout: 10_000 });
+    await page.waitForTimeout(2_500);
+    expect(await readText(join(fixture.workspaceDir, "qc-draft.txt"))).toBe("");
+    expect(await readText(fixture.capture)).not.toContain("qc-draft");
+
     // Add from the tab bar menu: the dialog saves with Mod+Enter.
     await page.getByRole("button", { name: "Quick commands", exact: true }).click();
     await menu.getByRole("menuitem", { name: "Add quick command" }).click();
@@ -142,6 +154,31 @@ test("quick commands run from the tab bar, the palette and the terminal menu", a
     await expect(terminalMenu.locator('[data-quick-command="qc-repo"]')).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(terminalMenu).toHaveCount(0);
+
+    // The edit dialog opened from the palette gives the keyboard back to
+    // the terminal the palette was opened from.
+    const backPane = await focusTerminal(page);
+    await openPalette();
+    await page.keyboard.type("write marker");
+    await page.keyboard.press("Shift+Enter");
+    const editDialog = page.getByRole("dialog", { name: "Edit quick command" });
+    await expect(editDialog).toBeVisible();
+    await expect(editDialog.getByLabel("Name", { exact: true })).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(editDialog).toHaveCount(0);
+    await expect(backPane.locator(".xterm-helper-textarea")).toBeFocused();
+
+    // The dialog has no Undo, so Delete asks for a second press.
+    await openPalette();
+    await page.keyboard.type("dialog added");
+    await page.keyboard.press("Shift+Enter");
+    await expect(editDialog).toBeVisible();
+    await editDialog.getByRole("button", { name: "Delete", exact: true }).click();
+    await expect(editDialog.getByRole("button", { name: "Delete for good" })).toBeVisible();
+    expect((await savedCommands(fixture)).map((c) => c.label)).toContain("Dialog added");
+    await editDialog.getByRole("button", { name: "Delete for good" }).click();
+    await expect(editDialog).toHaveCount(0);
+    await expect.poll(async () => (await savedCommands(fixture)).map((c) => c.label)).not.toContain("Dialog added");
   } finally {
     await app?.close().catch(() => undefined);
     await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);
@@ -238,6 +275,7 @@ async function prepareFixture(): Promise<Fixture> {
       JSON.stringify({
         quickCommands: [
           shell("qc-focused", "Write marker", 'echo "{branch}" > qc-focused.txt'),
+          shell("qc-draft", "Draft marker", "echo draft > qc-draft.txt", { submit: false }),
           shell("qc-new", "New terminal marker", "pwd > qc-new.txt", { target: "new" }),
           prompt("qc-ask-focused", "Ask focused agent", "Explain {branch}"),
           prompt("qc-ask-claude", "Ask Claude", "Summarize {branch}", { target: "new" }),
