@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 
 import type { ChromeLinkBrowserState } from "@shared/chrome-link";
-import { SettingRow, SettingsSection } from "../settings/SettingsPrimitives";
+import { Disclosure, SettingRow, SettingsSection } from "../settings/SettingsPrimitives";
 import { formatWhen, useChromeLink } from "./useChromeLink";
 import "./chrome-link.css";
 
@@ -10,7 +10,7 @@ function sharedCount(browser: ChromeLinkBrowserState): number {
 }
 
 /**
- * Settings > General > Chrome extension: how to install the extension in
+ * Settings > Browser > Chrome extension: how to install the extension in
  * Chrome, Edge, Brave or another Chromium browser, the browsers paired with
  * Codara and the tabs they share, and what agents did there.
  */
@@ -19,7 +19,10 @@ export default function ChromeLinkSection(): React.ReactElement | null {
   const [folder, setFolder] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [stepsOpen, setStepsOpen] = useState(false);
   if (!state) return null;
+  // The steps stay open until a browser is paired; after that they fold.
+  const showSteps = stepsOpen || state.browsers.length === 0;
 
   const shownFolder = folder ?? state.extensionFolder;
   const run = async (action: () => Promise<unknown>) => {
@@ -44,45 +47,8 @@ export default function ChromeLinkSection(): React.ReactElement | null {
   return (
     <SettingsSection
       title="Chrome extension"
-      description="Let any agent you run in Codara use tabs of your own Chrome, Edge, Brave or other Chromium browser, with your signed-in sessions. Agents see only the tabs you share from the extension's popup, never sites on its blocked list, and every action is logged below."
+      description="Let agents use tabs of your own Chrome, Edge, Brave or other Chromium browser, with your sign-ins. They see only the tabs you share from the extension's popup, never blocked sites, and every action is logged."
     >
-      <SettingRow
-        title="Connect a browser"
-        stacked
-        desc={
-          <ol className="chrome-steps">
-            <li>
-              <strong>Reveal the extension folder</strong> (or copy its path).
-            </li>
-            <li>
-              In your browser open <span className="spark-mono">chrome://extensions</span> (Edge:{" "}
-              <span className="spark-mono">edge://extensions</span>), turn on <strong>Developer mode</strong>, choose{" "}
-              <strong>Load unpacked</strong> and pick that folder.
-            </li>
-            <li>
-              Click the Codara icon in the toolbar and choose <strong>Connect to Codara</strong>.
-            </li>
-            <li>
-              Codara shows a code: <strong>Allow</strong> it when it matches the popup&apos;s. Then turn on{" "}
-              <strong>Let agents use this tab</strong> in the popup for each tab agents may use.
-            </li>
-          </ol>
-        }
-      >
-        <div className="chrome-folder">
-          <span className="chrome-folder__path spark-mono" title={shownFolder}>
-            {shownFolder}
-          </span>
-          <button type="button" className="spark-btn" onClick={() => void copyFolder()}>
-            {copied ? "Copied" : "Copy path"}
-          </button>
-          <button type="button" className="spark-btn is-primary" onClick={() => void reveal()}>
-            Reveal folder
-          </button>
-        </div>
-        {error ? <div className="chrome-folder__path" role="alert">{error}</div> : null}
-      </SettingRow>
-
       <SettingRow
         title="Link status"
         desc={
@@ -101,7 +67,7 @@ export default function ChromeLinkSection(): React.ReactElement | null {
           title={`${pairing.browser.name} wants to connect`}
           desc={`Allow it only if the extension shows the code ${pairing.code}.`}
           control={
-            <span style={{ display: "flex", gap: 8 }}>
+            <span className="st-button-pair">
               <button type="button" className="spark-btn" onClick={() => void run(() => window.spark.chromeLink.deny(pairing.id))}>
                 Deny
               </button>
@@ -114,9 +80,52 @@ export default function ChromeLinkSection(): React.ReactElement | null {
       ))}
 
       <SettingRow
+        title="Connect a browser"
+        stacked
+        desc="Load the extension folder in your browser, then pair it with Codara."
+      >
+        <div className="chrome-folder">
+          <span className="chrome-folder__path spark-mono" title={shownFolder}>
+            {shownFolder}
+          </span>
+          <button type="button" className="spark-btn" onClick={() => void copyFolder()}>
+            {copied ? "Copied" : "Copy path"}
+          </button>
+          <button type="button" className="spark-btn is-primary" onClick={() => void reveal()}>
+            Reveal folder
+          </button>
+        </div>
+        {error ? <div className="chrome-folder__path" role="alert">{error}</div> : null}
+        {state.browsers.length > 0 ? (
+          <Disclosure open={stepsOpen} onToggle={() => setStepsOpen((open) => !open)}>
+            How to connect
+          </Disclosure>
+        ) : null}
+        {showSteps ? (
+          <ol className="chrome-steps">
+            <li>
+              <strong>Reveal the extension folder</strong> (or copy its path).
+            </li>
+            <li>
+              In your browser open <span className="spark-mono">chrome://extensions</span> (Edge:{" "}
+              <span className="spark-mono">edge://extensions</span>), turn on <strong>Developer mode</strong>, choose{" "}
+              <strong>Load unpacked</strong> and pick that folder.
+            </li>
+            <li>
+              Click the Codara icon in the toolbar and choose <strong>Connect to Codara</strong>.
+            </li>
+            <li>
+              Codara shows a code: <strong>Allow</strong> it when it matches the popup&apos;s. Then turn on{" "}
+              <strong>Let agents use this tab</strong> in the popup for each tab agents may use.
+            </li>
+          </ol>
+        ) : null}
+      </SettingRow>
+
+      <SettingRow
         title="Paired browsers"
         stacked
-        desc={state.browsers.length === 0 ? "None yet. Follow the steps above to connect one." : "Disconnect forgets a browser: its extension has to connect again, with a new code."}
+        desc={state.browsers.length === 0 ? "None yet. Follow the steps above to connect one." : "Disconnect forgets a browser. Its extension must connect again, with a new code."}
       >
         {state.browsers.length > 0 ? (
           <div className="st-list">

@@ -6,9 +6,13 @@ import type { SettingsTab } from "../components/SettingsDialog";
 // tab added to SettingsTab fails the typecheck here until it is listed.
 const SETTINGS_SECTIONS: Record<SettingsTab, true> = {
   general: true,
+  appearance: true,
+  notifications: true,
   editor: true,
   terminal: true,
   "quick-commands": true,
+  git: true,
+  browser: true,
   api: true,
   agents: true,
   sessions: true,

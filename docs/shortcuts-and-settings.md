@@ -224,8 +224,8 @@ On macOS, Electron's default menu also binds Cmd+M to Minimize; rebind
 
 ## Settings
 
-Open Settings with `Mod+,`. The sidebar groups the pages under Workspace,
-Agents and models, and System, and its search box finds any setting by name
+Open Settings with `Mod+,`. The sidebar groups the pages under App,
+Workspace, Agents and models, and System, and its search box finds any setting by name
 or keyword and scrolls to it. Settings closes with Escape, the close button,
 Done, or Cancel and Save on pages with unsaved changes; a click outside the
 dialog does nothing, so a stray click never drops what you were doing. The
@@ -235,10 +235,14 @@ The pages:
 
 | Tab | What lives there |
 |---|---|
-| General | Getting started (reopens the first-run guide, turns feature tips on or off, and lets tips you have seen come back), Appearance (theme, liquid glass surfaces), Window (keep running in the background when the window is closed, auto-open the browser for local dev servers, open links in the default browser or the Codara browser, ask where terminal links open, the workspace switch badge), Sleep (keep the computer awake while agents work, always or never, and on a Linux laptop with the lid closed; see [Keep the computer awake](#keep-the-computer-awake)), Agent worktrees (whether agents may create and remove worktrees, and remove ones you created), Tabs (middle-click to close), Notifications (in-app toast, native OS notification, sound, OS-specific cues), Git (background fetch, notify on teammate pushes and new pull requests, notify when CI fails on your pull request), Instant git triggers, Copy-branch workspaces (the repository's worktree setup file, your own setup command for new worktrees, and extra ignored files an agent may delete with a merged worktree). |
+| General | Getting started (reopens the first-run guide, turns feature tips on or off, and lets tips you have seen come back), Window (keep running in the background when the window is closed, middle-click to close tabs, the workspace switch badge), Sleep (keep the computer awake while agents work, always or never, and on a Linux laptop with the lid closed; see [Keep the computer awake](#keep-the-computer-awake)). |
+| Appearance | Theme, and Glass (liquid glass for menus, popovers, toasts and dialogs, with tint, blur, refraction and fringe under **Fine-tune glass**). |
+| Notifications | In the app (toast and how long it stays), On your computer (native OS notification, sound, dock badge and taskbar flash). |
 | Editor | Code editor (Vim mode, autosave) and inline AI autocomplete. |
-| Default terminal | The shell for new panes, output history and scrollback lines, whether programs may copy to the clipboard (OSC 52), a resource overview, and the run terminal lifecycle for worker panes. |
+| Terminal | The shell for new panes, output history and scrollback lines, whether programs may copy to the clipboard (OSC 52), a resource overview, and the run terminal lifecycle for worker panes. |
 | Quick commands | Saved shell commands and agent prompts: add, edit, reorder, delete, and where each is offered. Also what a right-click in a terminal does. See [Quick commands](#quick-commands). |
+| Git | Remotes (background fetch, Instant git triggers, and a custom webhook receiver under Advanced), Alerts (notify on teammate pushes, new pull requests, and CI failing on your pull request), Worktrees (whether agents may create and remove worktrees, and remove ones you created, the repository's worktree setup file, and under Advanced your own setup command for new worktrees and extra ignored files an agent may delete with a merged worktree). |
+| Browser | Links (auto-open the browser for local dev servers, open links in the default browser or the Codara browser, ask where terminal links open), and the Chrome extension (link status, pairing, paired browsers, agent activity). |
 | API and model | An OpenRouter key, and how Git commit messages are generated. |
 | Agents | Your accounts (see [accounts.md](./accounts.md)), **Install Pi** when Pi is not installed yet, and **Open Capability Center** and **Worker models** buttons, which close Settings and open the Capability Center on MCP servers or on worker models. |
 | Sessions | Browse and resume Claude and Codex sessions from any local project, choose whether running agent sessions (Claude Code, Codex, Grok and Pi panes) resume when Codara reopens, whether terminal panes keep their output across restarts (**Keep terminal output across restarts**, on by default), and how long an idle agent in a background workspace may wait before it sleeps (**Let idle agents sleep**, see below). |
@@ -283,12 +287,12 @@ works everywhere) skips the menu and opens the link where **Open links in**
 says. Dragging across a link selects text and opens nothing. The menu works
 from the keyboard (arrows, Home, End, Enter, Escape) and gives focus back to
 the terminal when it closes. Turn off **Ask where terminal links open** in
-General, Window, to open links on a plain click as before.
+Browser, Links, to open links on a plain click as before.
 
 **Copies from programs (OSC 52).** tmux, Neovim and programs on a machine you
 reach over SSH can put text on this computer's clipboard with the OSC 52
-escape sequence. **Let programs copy to the clipboard** on the Default
-terminal page (on by default, applied when you save) allows it, up to about
+escape sequence. **Let programs copy to the clipboard** on the Terminal
+page (on by default, applied when you save) allows it, up to about
 768 KB per copy. Programs can never read the clipboard this way: a request to
 read it is ignored. A copy is also ignored when it comes from output written
 back into a pane (a restored or reattached terminal), from a pane that is not
@@ -385,7 +389,7 @@ prompt tells the agent to treat them as data, not instructions. The prompts
 ask the agent not to push, commit or bypass hooks. Local workspaces only for
 now.
 
-**Notify me when CI fails on my pull request** (Settings, General, Git) sends
+**Notify me when CI fails on my pull request** (Settings, Git, Alerts) sends
 one alert when a check fails on the pull request of a workspace's branch,
 once per failing commit; a pull request that was already failing when Codara
 first saw it stays quiet until a later run fails. Clicking the alert opens
@@ -523,8 +527,8 @@ feature you already use never gets a tip.
 ### Terminal agent notifications
 
 When Claude Code, Codex, Grok or Pi runs in a terminal pane, Codara tells you
-when a turn ends or the agent needs you. The Notifications switches in
-General choose where these alerts appear (toast, system notification, sound).
+when a turn ends or the agent needs you. The switches on the
+Notifications page of Settings choose where these alerts appear (toast, system notification, sound).
 
 - **Finished**: once per prompt you submit, when the agent's turn really
   ends (a subagent or background agent finishing does not count). The title names the agent and the tab (`Claude Code finished · api`), and

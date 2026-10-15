@@ -666,7 +666,7 @@ async function main() {
     );
     assert.match(
       settingsSource,
-      /<Label text="Commit message model">\s*<CustomSelect/,
+      /<SelectRow\s+title="Commit message model"/,
     );
     assert.doesNotMatch(settingsSource, /aria-label="Git commit message model"/);
     assert.match(settingsSource, /Automatic \(fast model, OpenAI first\)/);

@@ -1,7 +1,5 @@
 import React, {
-  createContext,
   useCallback,
-  useContext,
   useDeferredValue,
   useEffect,
   useMemo,
@@ -89,15 +87,18 @@ import SettingsNav from "./settings/SettingsNav";
 import ThemePicker from "./settings/ThemePicker";
 import { LaunchArgsSection } from "./settings/launch-args/LaunchArgsSection";
 import {
+  Advanced,
   Disclosure,
   EmptyState,
   InlineMessage,
   Kbd,
-  Label,
   RangeControl,
   Segmented,
+  SelectRow,
   SettingRow,
+  SettingsCard,
   SettingsPage,
+  SettingsRevealContext,
   SettingsSection,
   Switch,
   ToggleRow,
@@ -448,7 +449,9 @@ export default function SettingsDialog({
           ) : (
             <SettingsRevealContext.Provider value={pendingTarget?.reveal ?? null}>
             <SettingsPage>
-              {renderedTab === "general" && <GeneralSettings workspaceCwd={workspaceCwd} />}
+              {renderedTab === "general" && <GeneralSettings />}
+              {renderedTab === "appearance" && <AppearanceSettings />}
+              {renderedTab === "notifications" && <NotificationSettings />}
               {renderedTab === "editor" && <EditorSettings />}
               {renderedTab === "terminal" && (
                 <TerminalSettings
@@ -468,6 +471,8 @@ export default function SettingsDialog({
                 />
               )}
               {renderedTab === "quick-commands" && <QuickCommandsSettings />}
+              {renderedTab === "git" && <GitSettings workspaceCwd={workspaceCwd} />}
+              {renderedTab === "browser" && <BrowserSettings />}
               {renderedTab === "api" && <ApiSettings draft={draft} onChange={setDraft} />}
               {renderedTab === "agents" && <AgentsSettings onClose={onClose} />}
               {renderedTab === "sessions" && (
@@ -560,19 +565,6 @@ interface SearchTarget {
   fallbacks: string[];
   // Opened from the keyboard: focus moves into the row's control.
   focus: boolean;
-}
-
-// The disclosure a picked search result sits behind, while the dialog is
-// scrolling to it. A page that folds rows away opens the fold on a match.
-const SettingsRevealContext = createContext<string | null>(null);
-
-function useRevealOnSearch(disclosure: string, open: () => void): void {
-  const reveal = useContext(SettingsRevealContext);
-  const openRef = useRef(open);
-  openRef.current = open;
-  useEffect(() => {
-    if (reveal === disclosure) openRef.current();
-  }, [reveal, disclosure]);
 }
 
 const NON_TEXT_INPUTS = new Set([
@@ -805,48 +797,37 @@ function TerminalSettings({
 
   return (
     <>
-      <SettingsSection title="Shell">
+      <SettingsSection title="Shell and output">
         {shells.length === 0 ? (
           <EmptyState
             title="No terminals detected"
             body="Codara could not find a shell on this computer. Install one, then reopen Settings."
           />
         ) : (
-          <SettingRow
+          <SelectRow
             title="Default shell"
-            desc="New manual terminals and worker panes open with this shell."
-            control={
-              <CustomSelect
-                ariaLabel="Default shell"
-                width={250}
-                value={selectedShellId ?? ""}
-                options={distinctShells(shells, selectedShellId).map((shell) => ({
-                  value: shell.id,
-                  label: shell.label,
-                  detail: shell.exe,
-                }))}
-                onChange={onSelect}
-              />
-            }
+            desc="New terminals and worker panes open with this shell."
+            width={250}
+            value={selectedShellId ?? ""}
+            options={distinctShells(shells, selectedShellId).map((shell) => ({
+              value: shell.id,
+              label: shell.label,
+              detail: shell.exe,
+            }))}
+            onChange={onSelect}
           />
         )}
-      </SettingsSection>
-
-      <SettingsSection title="Output history">
         <NumberRow
           title="Scrollback lines"
-          desc={`Lines of output each terminal, worker pane and chat terminal view keeps in memory (${TERMINAL_SCROLLBACK_LINE_LIMIT_MIN.toLocaleString()} to ${TERMINAL_SCROLLBACK_LINE_LIMIT_MAX.toLocaleString()}).`}
+          desc={`Lines of output each terminal and worker pane keeps in memory, ${TERMINAL_SCROLLBACK_LINE_LIMIT_MIN.toLocaleString()} to ${TERMINAL_SCROLLBACK_LINE_LIMIT_MAX.toLocaleString()}.`}
           min={TERMINAL_SCROLLBACK_LINE_LIMIT_MIN}
           max={TERMINAL_SCROLLBACK_LINE_LIMIT_MAX}
           value={scrollbackLineLimit}
           onChange={onScrollbackLineLimitChange}
         />
-      </SettingsSection>
-
-      <SettingsSection title="Clipboard">
         <ToggleRow
           title="Let programs copy to the clipboard"
-          desc="tmux, Neovim and programs on a machine you reach over SSH can put text on this computer's clipboard (OSC 52), up to 768 KB at a time. They can never read it. Only a pane you can see and type into can copy."
+          desc="tmux, Neovim and programs over SSH can put up to 768 KB of text on this computer's clipboard (OSC 52). They can never read it, and only a pane you can see and type into can copy."
           checked={osc52Clipboard}
           onChange={onOsc52ClipboardChange}
         />
@@ -854,7 +835,7 @@ function TerminalSettings({
 
       <SettingsSection
         title="Resource overview"
-        description="Observation only. A quiet terminal can still have a running child process, and Codara never stops terminal work for being quiet."
+        description="Observation only. A quiet terminal can still run a child process, and Codara never stops one for being quiet."
         live
       >
           <ValueRow title="Live terminals" value={resourceSnapshot?.totals.live ?? "None yet"} />
@@ -883,7 +864,7 @@ function TerminalSettings({
               so the page has no heading without a row under it. */}
           <ValueRow
             title="Run panes"
-            desc="Temporary worker panes close when their run settles; service panes stay until the run is deleted. A failed close is retried."
+            desc="Temporary worker panes close when their run settles. Service panes stay until the run is deleted. A failed close is retried."
             value="Closed automatically"
           />
       </SettingsSection>
@@ -999,35 +980,27 @@ function ApiSettings({
       <SettingsSection
         title="OpenRouter"
         description="One key for inline edits, optional commit drafts and your favorite Cora models."
-        plain
       >
-        <div className="st-fields">
-          <Label
-            text="OpenRouter API key"
-            hint={
-              checkMessage ? (
-                <span
-                  role={checkMessage.tone === "error" ? "alert" : "status"}
-                  className={checkMessage.tone === "error" ? "st-text-danger" : "st-text-ok"}
-                >
-                  {checkMessage.text}
-                </span>
-              ) : (
-                "Stored on this computer. Check it to verify the key and your Cora models."
-              )
-            }
-            hintAction={
-              <button
-                type="button"
-                className="spark-btn"
-                disabled={checking || !draft.openRouterApiKey.trim()}
-                onClick={() => void checkOpenRouter()}
+        <SettingRow
+          title="OpenRouter API key"
+          htmlFor="settings-openrouter-key"
+          desc={
+            checkMessage ? (
+              <span
+                role={checkMessage.tone === "error" ? "alert" : "status"}
+                className={checkMessage.tone === "error" ? "st-text-danger" : "st-text-ok"}
               >
-                {checking ? "Checking…" : "Check key and models"}
-              </button>
-            }
-          >
+                {checkMessage.text}
+              </span>
+            ) : (
+              "Stored on this computer. Check it to verify the key and your Cora models."
+            )
+          }
+          stacked
+        >
+          <span className="st-input-group">
             <input
+              id="settings-openrouter-key"
               className="spark-input"
               type="password"
               value={draft.openRouterApiKey}
@@ -1041,97 +1014,104 @@ function ApiSettings({
               }}
               placeholder="sk-or-..."
             />
-          </Label>
-          <Label
-            text="Inline edit and commit model"
-            hint="Used for ghost-text completions, inline edits and OpenRouter commit drafts."
-          >
-            <input
-              className="spark-input spark-mono"
-              type="text"
-              value={draft.openRouterModel}
-              onChange={(event) => onChange({ ...draft, openRouterModel: event.currentTarget.value })}
-              placeholder="google/gemini-flash-latest"
-            />
-          </Label>
-          <div className="st-field" data-setting-anchor="Models for Cora">
-            <div className="st-field__label">Models for Cora</div>
-            {coraModels.length > 0 ? (
-              <div className="st-model-list">
-                {coraModels.map((modelId, index) => (
-                  <span key={`${index}:${coraModels.length}`} className="st-input-group">
-                    <input
-                      className="spark-input spark-mono"
-                      aria-label={`OpenRouter Cora model ${index + 1}`}
-                      type="text"
-                      value={modelId}
-                      onChange={(event) => replaceCoraModel(index, event.currentTarget.value)}
-                      placeholder="anthropic/claude-sonnet-4.5"
-                    />
-                    <button
-                      type="button"
-                      className="spark-icon-btn st-icon-btn"
-                      aria-label={`Remove OpenRouter Cora model ${index + 1}`}
-                      title="Remove"
-                      onClick={() => removeCoraModel(index)}
-                    >
-                      <svg aria-hidden width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                        <path d="M6 6l12 12M18 6L6 18" />
-                      </svg>
-                    </button>
-                  </span>
-                ))}
-              </div>
-            ) : null}
-            <div className="st-field__hint st-field__hint--row">
-              <span>
-                {coraModels.length > 0
-                  ? "Verified entries appear under OpenRouter in Cora's model selector."
-                  : "None yet. Added models appear under OpenRouter in Cora's model selector once the key is checked."}
-              </span>
-              <button
-                type="button"
-                className="spark-btn"
-                onClick={() => onChange({
-                  ...draft,
-                  openRouterCoraModels: [...draft.openRouterCoraModels, ""],
-                  openRouterVerifiedKeyHash: "",
-                })}
-              >
-                Add model
-              </button>
+            <button
+              type="button"
+              className="spark-btn"
+              disabled={checking || !draft.openRouterApiKey.trim()}
+              onClick={() => void checkOpenRouter()}
+            >
+              {checking ? "Checking…" : "Check key and models"}
+            </button>
+          </span>
+        </SettingRow>
+        <SettingRow
+          title="Inline edit and commit model"
+          htmlFor="settings-openrouter-model"
+          desc="Used for ghost-text completions, inline edits and OpenRouter commit drafts."
+          stacked
+        >
+          <input
+            id="settings-openrouter-model"
+            className="spark-input spark-mono"
+            type="text"
+            value={draft.openRouterModel}
+            onChange={(event) => onChange({ ...draft, openRouterModel: event.currentTarget.value })}
+            placeholder="google/gemini-flash-latest"
+          />
+        </SettingRow>
+        <SettingRow
+          title="Models for Cora"
+          desc={
+            coraModels.length > 0
+              ? "Verified entries appear under OpenRouter in Cora's model selector."
+              : "None yet. Added models appear under OpenRouter in Cora's model selector once the key is checked."
+          }
+          control={
+            <button
+              type="button"
+              className="spark-btn"
+              onClick={() => onChange({
+                ...draft,
+                openRouterCoraModels: [...draft.openRouterCoraModels, ""],
+                openRouterVerifiedKeyHash: "",
+              })}
+            >
+              Add model
+            </button>
+          }
+        >
+          {coraModels.length > 0 ? (
+            <div className="st-model-list">
+              {coraModels.map((modelId, index) => (
+                <span key={`${index}:${coraModels.length}`} className="st-input-group">
+                  <input
+                    className="spark-input spark-mono"
+                    aria-label={`OpenRouter Cora model ${index + 1}`}
+                    type="text"
+                    value={modelId}
+                    onChange={(event) => replaceCoraModel(index, event.currentTarget.value)}
+                    placeholder="anthropic/claude-sonnet-4.5"
+                  />
+                  <button
+                    type="button"
+                    className="spark-icon-btn st-icon-btn"
+                    aria-label={`Remove OpenRouter Cora model ${index + 1}`}
+                    title="Remove"
+                    onClick={() => removeCoraModel(index)}
+                  >
+                    <svg aria-hidden width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                      <path d="M6 6l12 12M18 6L6 18" />
+                    </svg>
+                  </button>
+                </span>
+              ))}
             </div>
-          </div>
-        </div>
+          ) : null}
+        </SettingRow>
       </SettingsSection>
 
-      <SettingsSection
-        title="Git commit messages"
-        description="Automatic picks a fast model on your first usable subscription. Native models run on their own subscription; OpenRouter uses the model above."
-        plain
-      >
-        <div className="st-fields">
-          <Label text="Commit message model">
-            <CustomSelect
-              value={draft.commitMessageModel}
-              options={[
-                { value: "auto", label: "Automatic (fast model, OpenAI first)" },
-                { value: "openrouter", label: `OpenRouter, ${draft.openRouterModel || "model above"}` },
-                ...COMMIT_MESSAGE_NATIVE_MODELS.map((model) => ({
-                  value: model.id,
-                  label: model.label,
-                  group: model.group,
-                })),
-              ]}
-              onChange={(value) =>
-                onChange({
-                  ...draft,
-                  commitMessageModel: value as AppSettings["commitMessageModel"],
-                })
-              }
-            />
-          </Label>
-        </div>
+      <SettingsSection title="Git commit messages">
+        <SelectRow
+          title="Commit message model"
+          desc="Automatic picks a fast model on your first usable subscription. Native models use their own subscription; OpenRouter uses the model above."
+          width={260}
+          value={draft.commitMessageModel}
+          options={[
+            { value: "auto", label: "Automatic (fast model, OpenAI first)" },
+            { value: "openrouter", label: `OpenRouter, ${draft.openRouterModel || "model above"}` },
+            ...COMMIT_MESSAGE_NATIVE_MODELS.map((model) => ({
+              value: model.id,
+              label: model.label,
+              group: model.group,
+            })),
+          ]}
+          onChange={(value) =>
+            onChange({
+              ...draft,
+              commitMessageModel: value as AppSettings["commitMessageModel"],
+            })
+          }
+        />
       </SettingsSection>
     </>
   );
@@ -1167,26 +1147,16 @@ function presetHint<T extends { value: number; hint: string }>(
   return presets.find((preset) => preset.value === value)?.hint;
 }
 
-function GeneralSettings({
-  workspaceCwd,
-}: {
-  workspaceCwd?: string | null;
-}) {
-  const { theme, setTheme } = useTheme();
+function GeneralSettings() {
   const { preferences, hydrated, setPreference } = usePreferences();
   const hudMs = preferences.workspaceSwitchHudMs ?? DEFAULT_WORKSPACE_SWITCH_HUD_MS;
-  const toastMs = preferences.toastDurationMs ?? DEFAULT_TOAST_DURATION_MS;
-  const fetchMinutes =
-    preferences.gitAutoFetchIntervalMinutes ?? DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES;
-  const [glassTuningOpen, setGlassTuningOpen] = useState(false);
-  useRevealOnSearch("Fine-tune glass", () => setGlassTuningOpen(true));
   const featureTips = useFeatureTipsSetting();
   return (
     <>
       <SettingsSection title="Getting started">
         <SettingRow
           title="Setup and guided tour"
-          desc="Set up local tools, connect an agent account and take a tour of the studio."
+          desc="Set up local tools, connect an agent account and tour the studio."
           control={
             <button
               type="button"
@@ -1201,7 +1171,7 @@ function GeneralSettings({
         {featureTips.hydrated ? (
           <ToggleRow
             title="Feature tips"
-            desc="Now and then, one short tip about a feature you have not tried yet. Off means don't show tips. What you use is noted on this computer only."
+            desc="Now and then, a short tip about a feature you have not tried. What you use is noted on this computer only."
             checked={featureTips.enabled}
             onChange={featureTips.setEnabled}
           />
@@ -1225,258 +1195,290 @@ function GeneralSettings({
         ) : null}
       </SettingsSection>
 
-      <SettingsSection title="Appearance">
-        <SettingRow title="Theme" stacked>
-          <ThemePicker value={theme} onChange={setTheme} />
-        </SettingRow>
-        {hydrated ? (
+      {hydrated ? (
+        <SettingsSection title="Window">
           <ToggleRow
-            title="Liquid glass"
-            desc="Translucent menus, popovers, toasts and dialogs that open above the window. The window itself stays solid. Off makes them opaque too. Always off when the system reduces transparency."
-            {...bindToggle("glassEffects", preferences, setPreference)}
+            title="Keep running in the background"
+            desc="Closing the window hides Codara Studio to the tray, so automations keep running. Quit from the tray menu."
+            {...bindToggle("keepRunningInBackground", preferences, setPreference)}
           />
-        ) : null}
-        {hydrated && preferences.glassEffects !== false ? (
+          <ToggleRow
+            title="Middle-click to close tabs"
+            desc="Close a workspace tab with the mouse wheel button."
+            {...bindToggle("closeTabsOnMiddleClick", preferences, setPreference)}
+          />
           <SettingRow
-            title="Fine-tune glass"
-            desc="How strong each part of the material is, as a share of the default."
+            title="Workspace switch badge"
+            desc="After a switch, shows the workspace and branch your next message goes to."
             control={
-              // The chevron carries open or closed, so the button itself
-              // never has to look pressed to say so.
-              <button
-                type="button"
-                className="spark-btn st-expand-btn"
-                aria-expanded={glassTuningOpen}
-                onClick={() => setGlassTuningOpen((open) => !open)}
-              >
-                {glassTuningOpen ? "Hide" : "Adjust"}
-                <svg aria-hidden width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M6 9l6 6 6-6" />
-                </svg>
-              </button>
+              <RangeControl
+                ariaLabel="Workspace switch badge duration"
+                min={0}
+                max={MAX_WORKSPACE_SWITCH_HUD_MS}
+                step={250}
+                value={hudMs}
+                display={
+                  hudMs === 0
+                    ? "Off"
+                    : `${(hudMs / 1000).toFixed(hudMs % 1000 === 0 ? 0 : 2).replace(/\.?0+$/, "")} s`
+                }
+                onChange={(next) => void setPreference("workspaceSwitchHudMs", next)}
+              />
             }
-          >
-            {glassTuningOpen ? (
-              <div className="st-subrows">
-                <GlassSliderRow
-                  label="Tint"
-                  hint="Lower is clearer"
-                  // Floor at 10%: veil 0 + blur 0 leaves menus as border-only
-                  // outlines over live content, which reads as a rendering bug.
-                  floor={10}
-                  value={preferences.glassVeil ?? 100}
-                  onChange={(v) => void setPreference("glassVeil", v)}
-                />
-                <GlassSliderRow
-                  label="Blur"
-                  hint="Frost behind floating surfaces"
-                  value={preferences.glassBlur ?? 100}
-                  onChange={(v) => void setPreference("glassBlur", v)}
-                />
-                <GlassSliderRow
-                  label="Refraction"
-                  hint="How much menu edges bend light"
-                  value={preferences.glassRefraction ?? 100}
-                  onChange={(v) => void setPreference("glassRefraction", v)}
-                />
-                <GlassSliderRow
-                  label="Fringe"
-                  hint="Color split along the edge"
-                  value={preferences.glassChroma ?? 100}
-                  onChange={(v) => void setPreference("glassChroma", v)}
-                />
-                <div className="st-subrows__foot">
-                  <button
-                    type="button"
-                    className="spark-btn"
-                    onClick={() => {
-                      void setPreference("glassVeil", 100);
-                      void setPreference("glassBlur", 100);
-                      void setPreference("glassRefraction", 100);
-                      void setPreference("glassChroma", 100);
-                    }}
-                  >
-                    Reset to defaults
-                  </button>
-                </div>
-              </div>
-            ) : null}
-          </SettingRow>
-        ) : null}
+          />
+        </SettingsSection>
+      ) : null}
+
+      <KeepAwakeSettings />
+    </>
+  );
+}
+
+function AppearanceSettings() {
+  const { theme, setTheme } = useTheme();
+  const { preferences, hydrated, setPreference } = usePreferences();
+  return (
+    <>
+      <SettingsSection title="Theme">
+        <div className="st-card__pad">
+          <ThemePicker value={theme} onChange={setTheme} />
+        </div>
       </SettingsSection>
 
       {hydrated ? (
-        <>
-          <SettingsSection title="Window">
-            <ToggleRow
-              title="Keep running in the background"
-              desc="Closing the window hides Codara Studio to the tray so automations keep running. Quit from the tray menu."
-              {...bindToggle("keepRunningInBackground", preferences, setPreference)}
-            />
-            <ToggleRow
-              title="Open local dev servers automatically"
-              desc="Open a localhost URL an agent or terminal prints in a browser tab. When off, a link chip appears instead."
-              {...bindToggle("autoOpenPreview", preferences, setPreference)}
-            />
-            <SettingRow
-              title="Open links in"
-              desc="Where links you click in terminals, Cora, markdown and GitHub open. Local files and Open in Codara browser actions always stay in Codara."
-              control={
-                <div data-setting="link-open-target">
-                  <CustomSelect
-                    ariaLabel="Open links in"
-                    width={190}
-                    value={preferences.linkOpenTarget ?? "system"}
-                    options={[
-                      { value: "system", label: "Default browser" },
-                      { value: "studio", label: "Codara browser" },
-                    ]}
-                    onChange={(v) => void setPreference("linkOpenTarget", v as LinkOpenTarget)}
-                  />
-                </div>
-              }
-            />
-            <ToggleRow
-              title="Ask where terminal links open"
-              desc={`Clicking a link in a terminal shows a menu: Codara browser, default browser or copy. ${IS_MAC ? "Cmd" : "Ctrl"}+click skips it and follows Open links in. Off opens links on a plain click.`}
-              {...bindToggle("terminalLinkMenu", preferences, setPreference)}
-            />
-            <SettingRow
-              title="Workspace switch badge"
-              desc="After a switch, shows the workspace and branch your next message goes to."
-              control={
-                <RangeControl
-                  ariaLabel="Workspace switch badge duration"
-                  min={0}
-                  max={MAX_WORKSPACE_SWITCH_HUD_MS}
-                  step={250}
-                  value={hudMs}
-                  display={
-                    hudMs === 0
-                      ? "Off"
-                      : `${(hudMs / 1000).toFixed(hudMs % 1000 === 0 ? 0 : 2).replace(/\.?0+$/, "")} s`
-                  }
-                  onChange={(next) => void setPreference("workspaceSwitchHudMs", next)}
-                />
-              }
-            />
-          </SettingsSection>
-
-          <KeepAwakeSettings />
-
-          <SettingsSection
-            title="Agent worktrees"
-            description="Claude Code, Codex and Cora can create git worktrees of their own repository through the Codara Studio tools and remove them once merged. Every change is logged in ~/.codarastudio/logs/worktree-audit.jsonl."
-          >
-            <ToggleRow
-              title="Let agents create and remove worktrees"
-              desc="Removal needs proof the branch is merged, no local changes and nothing running in the worktree. It never forces, and the last commit stays recoverable for 30 days. When off, agents can still list worktrees."
-              {...bindToggle("agentWorktreesEnabled", preferences, setPreference)}
-            />
-            <ToggleRow
-              title="Let agents remove worktrees I created"
-              desc="When off, agents only remove worktrees an agent created. The same merge and safety checks apply either way."
-              {...bindToggle("agentsMayRemoveUserWorktrees", preferences, setPreference)}
-            />
-          </SettingsSection>
-
-          <SettingsSection title="Tabs">
-            <ToggleRow
-              title="Middle-click to close tabs"
-              desc="Close a workspace tab with the mouse wheel button."
-              {...bindToggle("closeTabsOnMiddleClick", preferences, setPreference)}
-            />
-          </SettingsSection>
-
-          <ChromeLinkSection />
-
-          <SettingsSection
-            title="Notifications"
-            description="When a run, or a Claude or Codex CLI in a terminal, is blocked or finishes while you are away. Nothing fires for the chat or terminal you are already watching."
-          >
-            <ToggleRow
-              title="In-app toast"
-              desc="A card in the top right while Codara Studio is focused. Click it to jump to the chat or terminal."
-              {...bindToggle("notifyInApp", preferences, setPreference)}
-            />
-            {preferences.notificationChannels.inApp ? (
-              <SettingRow
-                title="Toast duration"
-                desc={`${presetHint(TOAST_DURATION_PRESETS, toastMs) ?? ""} A toast that times out stays unread in the bell.`}
-                control={
-                  <Segmented
-                    ariaLabel="Toast duration"
-                    options={TOAST_DURATION_PRESETS}
-                    value={toastMs}
-                    onChange={(next) => void setPreference("toastDurationMs", next)}
-                  />
-                }
+        <SettingsSection
+          title="Glass"
+          description="Menus, popovers, toasts and dialogs that open above the window. The window itself stays solid."
+        >
+          <ToggleRow
+            title="Liquid glass"
+            desc="Makes those layers translucent. Off makes them opaque. Always off when the system reduces transparency."
+            {...bindToggle("glassEffects", preferences, setPreference)}
+          />
+          {preferences.glassEffects !== false ? (
+            <Advanced
+              name="Fine-tune glass"
+              label="Fine-tune glass"
+              hint="Tint, blur, refraction and fringe"
+            >
+              <GlassSliderRow
+                label="Tint"
+                hint="Lower is clearer"
+                // Floor at 10%: veil 0 + blur 0 leaves menus as border-only
+                // outlines over live content, which reads as a rendering bug.
+                floor={10}
+                value={preferences.glassVeil ?? 100}
+                onChange={(v) => void setPreference("glassVeil", v)}
               />
-            ) : null}
-            <ToggleRow
-              title="Native OS notification"
-              desc="A system alert, only while Codara Studio is minimized or in the background, so it never doubles up with the toast."
-              {...bindToggle("notifyNative", preferences, setPreference)}
-            />
-            <ToggleRow
-              title="Sound"
-              desc="A short chime: one for needs you, one for done."
-              {...bindToggle("notifySound", preferences, setPreference)}
-            />
-            <ToggleRow
-              title="Dock badge and taskbar flash"
-              desc="The macOS dock badge or Windows taskbar flash. Clears when you focus Codara Studio."
-              {...bindToggle("notifyOsCues", preferences, setPreference)}
-            />
-          </SettingsSection>
-
-          <SettingsSection
-            title="Git"
-            description="Background fetch keeps ahead and behind counts and the history graph current: one fetch per repository, at most two at a time, never while offline."
-          >
-            <ToggleRow
-              title="Fetch remotes in the background"
-              desc="When off, the Fetch button is the only network activity."
-              {...bindToggle("gitAutoFetchEnabled", preferences, setPreference)}
-            />
-            {preferences.gitAutoFetchEnabled !== false ? (
-              <>
-                <SettingRow
-                  title="Fetch interval"
-                  desc={presetHint(GIT_AUTO_FETCH_INTERVAL_PRESETS, fetchMinutes)}
-                  control={
-                    <Segmented
-                      ariaLabel="Auto-fetch interval"
-                      options={GIT_AUTO_FETCH_INTERVAL_PRESETS}
-                      value={fetchMinutes}
-                      onChange={(next) => void setPreference("gitAutoFetchIntervalMinutes", next)}
-                    />
-                  }
-                />
-                <ToggleRow
-                  title="Notify me when teammates push"
-                  desc="One quiet alert per repository, checked with your signed-in gh account so your own merges never count. GitHub remotes only."
-                  {...bindToggle("notifyTeammatePushes", preferences, setPreference)}
-                />
-                <ToggleRow
-                  title="Notify me when a pull request is opened"
-                  desc="One alert with a chime when someone opens, reopens or readies a pull request. Drafts stay quiet."
-                  {...bindToggle("notifyPullRequests", preferences, setPreference)}
-                />
-              </>
-            ) : null}
-            <ToggleRow
-              title="Notify me when CI fails on my pull request"
-              desc="One alert per failing commit on the pull request of each workspace's branch, read with your signed-in gh. Fix with agent in Source Control then hands the failure to an agent."
-              {...bindToggle("notifyCiFailures", preferences, setPreference)}
-            />
-            <GithubWebhookSettings />
-            {workspaceCwd ? <WorktreeSetupFileField workspaceCwd={workspaceCwd} /> : null}
-            {workspaceCwd ? <CopyBranchSetupField workspaceCwd={workspaceCwd} /> : null}
-            {workspaceCwd ? <AgentWorktreeIgnoredField workspaceCwd={workspaceCwd} /> : null}
-          </SettingsSection>
-        </>
+              <GlassSliderRow
+                label="Blur"
+                hint="Frost behind floating surfaces"
+                value={preferences.glassBlur ?? 100}
+                onChange={(v) => void setPreference("glassBlur", v)}
+              />
+              <GlassSliderRow
+                label="Refraction"
+                hint="How much menu edges bend light"
+                value={preferences.glassRefraction ?? 100}
+                onChange={(v) => void setPreference("glassRefraction", v)}
+              />
+              <GlassSliderRow
+                label="Fringe"
+                hint="Color split along the edge"
+                value={preferences.glassChroma ?? 100}
+                onChange={(v) => void setPreference("glassChroma", v)}
+              />
+              <div className="st-row st-row--foot">
+                <button
+                  type="button"
+                  className="spark-btn"
+                  onClick={() => {
+                    void setPreference("glassVeil", 100);
+                    void setPreference("glassBlur", 100);
+                    void setPreference("glassRefraction", 100);
+                    void setPreference("glassChroma", 100);
+                  }}
+                >
+                  Reset to defaults
+                </button>
+              </div>
+            </Advanced>
+          ) : null}
+        </SettingsSection>
       ) : null}
+    </>
+  );
+}
+
+function NotificationSettings() {
+  const { preferences, hydrated, setPreference } = usePreferences();
+  if (!hydrated) return null;
+  const toastMs = preferences.toastDurationMs ?? DEFAULT_TOAST_DURATION_MS;
+  return (
+    <>
+      <SettingsSection
+        title="In the app"
+        description="When a run, or a Claude or Codex CLI in a terminal, is blocked or finishes while you are away. Never for the chat or terminal you are watching."
+      >
+        <ToggleRow
+          title="In-app toast"
+          desc="A card in the top right while Codara Studio is focused. Click it to jump to the chat or terminal."
+          {...bindToggle("notifyInApp", preferences, setPreference)}
+        />
+        {preferences.notificationChannels.inApp ? (
+          <SettingRow
+            title="Toast duration"
+            desc={`${presetHint(TOAST_DURATION_PRESETS, toastMs) ?? ""} A toast that times out stays unread in the bell.`}
+            control={
+              <Segmented
+                ariaLabel="Toast duration"
+                options={TOAST_DURATION_PRESETS}
+                value={toastMs}
+                onChange={(next) => void setPreference("toastDurationMs", next)}
+              />
+            }
+          />
+        ) : null}
+      </SettingsSection>
+
+      <SettingsSection title="On your computer">
+        <ToggleRow
+          title="Native OS notification"
+          desc="A system alert, only while Codara Studio is minimized or in the background, so it never doubles the toast."
+          {...bindToggle("notifyNative", preferences, setPreference)}
+        />
+        <ToggleRow
+          title="Sound"
+          desc="A short chime: one for needs you, one for done."
+          {...bindToggle("notifySound", preferences, setPreference)}
+        />
+        <ToggleRow
+          title="Dock badge and taskbar flash"
+          desc="The macOS dock badge or Windows taskbar flash. Clears when you focus Codara Studio."
+          {...bindToggle("notifyOsCues", preferences, setPreference)}
+        />
+      </SettingsSection>
+    </>
+  );
+}
+
+function GitSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
+  const { preferences, hydrated, setPreference } = usePreferences();
+  if (!hydrated) return null;
+  const fetchMinutes =
+    preferences.gitAutoFetchIntervalMinutes ?? DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES;
+  const fetching = preferences.gitAutoFetchEnabled !== false;
+  return (
+    <>
+      <SettingsSection
+        title="Remotes"
+        description="One fetch per repository, at most two at a time, never while offline."
+      >
+        <ToggleRow
+          title="Fetch remotes in the background"
+          desc="Keeps ahead and behind counts and the history graph current. Off leaves the Fetch button as the only network activity."
+          {...bindToggle("gitAutoFetchEnabled", preferences, setPreference)}
+        />
+        {fetching ? (
+          <SettingRow
+            title="Fetch interval"
+            desc={presetHint(GIT_AUTO_FETCH_INTERVAL_PRESETS, fetchMinutes)}
+            control={
+              <Segmented
+                ariaLabel="Auto-fetch interval"
+                options={GIT_AUTO_FETCH_INTERVAL_PRESETS}
+                value={fetchMinutes}
+                onChange={(next) => void setPreference("gitAutoFetchIntervalMinutes", next)}
+              />
+            }
+          />
+        ) : null}
+        <GithubWebhookSettings />
+      </SettingsSection>
+
+      <SettingsSection
+        title="Alerts"
+        description="Read with your signed-in gh account, for GitHub remotes."
+      >
+        {fetching ? (
+          <>
+            <ToggleRow
+              title="Notify me when teammates push"
+              desc="One quiet alert per repository. Your own merges never count."
+              {...bindToggle("notifyTeammatePushes", preferences, setPreference)}
+            />
+            <ToggleRow
+              title="Notify me when a pull request is opened"
+              desc="One alert with a chime when someone opens, reopens or readies a pull request. Drafts stay quiet."
+              {...bindToggle("notifyPullRequests", preferences, setPreference)}
+            />
+          </>
+        ) : null}
+        <ToggleRow
+          title="Notify me when CI fails on my pull request"
+          desc="One alert per failing commit on the pull request of each workspace's branch. Fix with agent in Source Control hands it to an agent."
+          {...bindToggle("notifyCiFailures", preferences, setPreference)}
+        />
+      </SettingsSection>
+
+      <SettingsSection
+        title="Worktrees"
+        description="Claude Code, Codex and Cora can create and remove worktrees of their own repository with the Codara Studio tools. Each change is logged in ~/.codarastudio/logs/worktree-audit.jsonl."
+      >
+        <ToggleRow
+          title="Let agents create and remove worktrees"
+          desc="Removal needs a merged branch, no local changes and nothing running. It never forces, and the last commit stays recoverable for 30 days. Off still lets agents list worktrees."
+          {...bindToggle("agentWorktreesEnabled", preferences, setPreference)}
+        />
+        <ToggleRow
+          title="Let agents remove worktrees I created"
+          desc="Off limits agents to worktrees an agent created. The same checks apply either way."
+          {...bindToggle("agentsMayRemoveUserWorktrees", preferences, setPreference)}
+        />
+        {workspaceCwd ? <WorktreeSetupFileField workspaceCwd={workspaceCwd} /> : null}
+        {workspaceCwd ? (
+          <Advanced name="Worktrees advanced" hint="Your setup command, files agents may delete">
+            <CopyBranchSetupField workspaceCwd={workspaceCwd} />
+            <AgentWorktreeIgnoredField workspaceCwd={workspaceCwd} />
+          </Advanced>
+        ) : null}
+      </SettingsSection>
+    </>
+  );
+}
+
+function BrowserSettings() {
+  const { preferences, hydrated, setPreference } = usePreferences();
+  return (
+    <>
+      {hydrated ? (
+        <SettingsSection title="Links">
+          <SelectRow
+            title="Open links in"
+            desc="Where links in terminals, Cora, markdown and GitHub open. Local files and Open in Codara browser actions stay in Codara."
+            setting="link-open-target"
+            width={190}
+            value={preferences.linkOpenTarget ?? "system"}
+            options={[
+              { value: "system", label: "Default browser" },
+              { value: "studio", label: "Codara browser" },
+            ]}
+            onChange={(v) => void setPreference("linkOpenTarget", v as LinkOpenTarget)}
+          />
+          <ToggleRow
+            title="Ask where terminal links open"
+            desc={`A click on a terminal link offers Codara browser, default browser or copy. ${IS_MAC ? "Cmd" : "Ctrl"}+click skips the menu. Off opens links on a plain click.`}
+            {...bindToggle("terminalLinkMenu", preferences, setPreference)}
+          />
+          <ToggleRow
+            title="Open local dev servers automatically"
+            desc="Opens a localhost URL an agent or terminal prints in a browser tab. Off shows a link chip instead."
+            {...bindToggle("autoOpenPreview", preferences, setPreference)}
+          />
+        </SettingsSection>
+      ) : null}
+
+      <ChromeLinkSection />
     </>
   );
 }
@@ -1493,7 +1495,6 @@ function GithubWebhookSettings() {
     }
   });
   const [copied, setCopied] = useState(false);
-  const [advanced, setAdvanced] = useState(() => url.trim().length > 0);
   const save = (value: string): void => {
     setUrl(value);
     try {
@@ -1512,52 +1513,51 @@ function GithubWebhookSettings() {
       .catch(() => {});
   };
   return (
-    <SettingRow
-      title="Instant git triggers"
-      desc="With the Codara Studio GitHub App installed, pushes reach git-triggered automations in seconds. Only a content-free push signal passes through it. Without it, the background fetch picks pushes up within minutes."
-      control={
-        <button
-          type="button"
-          className="spark-btn"
-          onClick={() => {
-            void window.spark.openExternal(
-              "https://github.com/apps/codara-studio/installations/new",
-            );
-          }}
-        >
-          Install GitHub App
-        </button>
-      }
-    >
-      <button
-        type="button"
-        className="st-disclosure"
-        aria-expanded={advanced}
-        onClick={() => setAdvanced((open) => !open)}
-      >
-        <svg aria-hidden width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M9 6l6 6-6 6" />
-        </svg>
-        Use a custom webhook receiver
-      </button>
-      {advanced ? (
-        <span className="st-input-group st-indent">
-          <input
-            className="spark-input spark-mono"
-            aria-label="Custom webhook receiver URL"
-            value={url}
-            onChange={(e) => save(e.target.value)}
-            placeholder="https://studio.codarasolutions.com/hooks/github/…"
-          />
-          <button type="button" className="spark-btn" onClick={copy} disabled={!url.trim()}>
-            {copied ? "Copied" : "Copy URL"}
+    <>
+      <SettingRow
+        title="Instant git triggers"
+        desc="With the Codara Studio GitHub App installed, pushes reach git-triggered automations in seconds. Only a content-free push signal passes through it."
+        control={
+          <button
+            type="button"
+            className="spark-btn"
+            onClick={() => {
+              void window.spark.openExternal(
+                "https://github.com/apps/codara-studio/installations/new",
+              );
+            }}
+          >
+            Install GitHub App
           </button>
-        </span>
-      ) : null}
-    </SettingRow>
+        }
+      />
+      <Advanced
+        name="Remotes advanced"
+        hint="Custom webhook receiver"
+        defaultOpen={url.trim().length > 0}
+      >
+        <SettingRow
+          title="Custom webhook receiver"
+          desc="Your own receiver for GitHub push webhooks, in place of the GitHub App."
+          stacked
+        >
+          <span className="st-input-group">
+            <input
+              className="spark-input spark-mono"
+              aria-label="Custom webhook receiver URL"
+              value={url}
+              onChange={(e) => save(e.target.value)}
+              placeholder="https://studio.codarasolutions.com/hooks/github/…"
+            />
+            <button type="button" className="spark-btn" onClick={copy} disabled={!url.trim()}>
+              {copied ? "Copied" : "Copy URL"}
+            </button>
+          </span>
+        </SettingRow>
+      </Advanced>
+    </>
   );
 }
-
 
 // A plain `claude` typed in another terminal app uses the Active Claude
 // account (src/main/claude-follow). On by default; turning it off takes
@@ -1607,10 +1607,9 @@ function ClaudeFollowSetting() {
         onChange={change}
         desc={
           <>
-            Typing <code className="spark-mono">claude</code> in any other terminal app uses the Active
-            Claude account, like a Codara terminal does. Your own Claude login is never changed: turn
-            this off, or remove Codara Studio, and <code className="spark-mono">claude</code> uses your
-            own login again.
+            Typing <code className="spark-mono">claude</code> in another terminal app uses the Active
+            Claude account, as in a Codara terminal. Your own Claude login never changes: turn this
+            off, or remove Codara Studio, and <code className="spark-mono">claude</code> uses it again.
             {status.windows ? " Command Prompt always uses your own login." : ""}
             {status.enabled && !status.available
               ? " This copy of Codara can't set it up; the installed app does."
@@ -1798,47 +1797,43 @@ function EditorSettings() {
           desc="Modal editing with the :w, :q, :wq and :x commands."
           {...bindToggle("vimMode", preferences, setPreference)}
         />
-        <SettingRow
+        <SelectRow
           title="Editor theme"
           desc="Syntax colors in the file editor."
-          control={
-            <CustomSelect
-              ariaLabel="Editor theme"
-              width={220}
-              value={preferences.editorTheme}
-              options={EDITOR_THEME_IDS.map((id) => ({
-                value: id,
-                label: EDITOR_THEME_LABEL[id],
-              }))}
-              onChange={(v) => void setPreference("editorTheme", v as EditorThemeId)}
-            />
-          }
+          value={preferences.editorTheme}
+          options={EDITOR_THEME_IDS.map((id) => ({
+            value: id,
+            label: EDITOR_THEME_LABEL[id],
+          }))}
+          onChange={(v) => void setPreference("editorTheme", v as EditorThemeId)}
         />
       </SettingsSection>
 
       <SettingsSection title="Saving">
         <ToggleRow
           title="Autosave"
-          desc="Saves the active file after you stop typing. If an agent changed it on disk, autosave pauses and asks. Ctrl or Cmd+S always saves."
+          desc="Saves the active file after you stop typing, and asks first if an agent changed it on disk. Ctrl or Cmd+S always saves."
           {...bindToggle("autosaveEnabled", preferences, setPreference)}
         />
         {preferences.autosaveEnabled ? (
-          <>
-            <SettingRow
-              title="Autosave delay"
-              desc={presetHint(AUTOSAVE_DELAY_PRESETS, currentAutosaveDelayMs) ?? "A custom delay."}
-              control={
-                <Segmented
-                  ariaLabel="Autosave delay"
-                  options={AUTOSAVE_DELAY_PRESETS}
-                  value={currentAutosaveDelayMs}
-                  onChange={(next) => void setPreference("autosaveDelayMs", next)}
-                />
-              }
-            />
+          <SettingRow
+            title="Autosave delay"
+            desc={presetHint(AUTOSAVE_DELAY_PRESETS, currentAutosaveDelayMs) ?? "A custom delay."}
+            control={
+              <Segmented
+                ariaLabel="Autosave delay"
+                options={AUTOSAVE_DELAY_PRESETS}
+                value={currentAutosaveDelayMs}
+                onChange={(next) => void setPreference("autosaveDelayMs", next)}
+              />
+            }
+          />
+        ) : null}
+        {preferences.autosaveEnabled ? (
+          <Advanced name="Autosave advanced" hint="Custom delay">
             <SettingRow
               title="Custom delay"
-              desc="Fine-tune the wait between a quarter second and ten seconds."
+              desc="Any wait between a quarter second and ten seconds."
               control={
                 <RangeControl
                   ariaLabel="Autosave wait time"
@@ -1851,7 +1846,7 @@ function EditorSettings() {
                 />
               }
             />
-          </>
+          </Advanced>
         ) : null}
       </SettingsSection>
 
@@ -1881,21 +1876,23 @@ function EditorSettings() {
             />
           }
         />
-        <SettingRow
-          title="Custom wait"
-          desc="How long a pause in typing must last before a suggestion is requested."
-          control={
-            <RangeControl
-              ariaLabel="Inline AI wait time"
-              min={0}
-              max={2000}
-              step={50}
-              value={currentInlineDelayMs}
-              display={`${currentInlineDelayMs.toLocaleString()} ms`}
-              onChange={(next) => void setPreference("inlineAutocompleteDelayMs", next)}
-            />
-          }
-        />
+        <Advanced name="Inline AI advanced" hint="Custom wait">
+          <SettingRow
+            title="Custom wait"
+            desc="How long a pause in typing lasts before a suggestion is requested."
+            control={
+              <RangeControl
+                ariaLabel="Inline AI wait time"
+                min={0}
+                max={2000}
+                step={50}
+                value={currentInlineDelayMs}
+                display={`${currentInlineDelayMs.toLocaleString()} ms`}
+                onChange={(next) => void setPreference("inlineAutocompleteDelayMs", next)}
+              />
+            }
+          />
+        </Advanced>
       </SettingsSection>
     </>
   );
@@ -3167,7 +3164,7 @@ function SessionsSettings({
         {hydrated ? (
           <ToggleRow
             title="Keep terminal output across restarts"
-            desc="Saves what each terminal pane printed and shows it again when the pane reopens after a quit, an update or a crash, above the new shell or the resumed agent. Stays on this computer in Codara's folder and is deleted when you close the pane. Turning this off deletes it all."
+            desc="Shows each pane's earlier output again after a quit, an update or a crash, above the new shell or resumed agent. Kept in Codara's folder on this computer until you close the pane. Turning this off deletes it all."
             {...bindToggle("restoreTerminalOutput", preferences, setPreference)}
           />
         ) : null}
@@ -3180,7 +3177,7 @@ function SessionsSettings({
             desc={
               hibernationMinutes === 0
                 ? "Agents in background workspaces keep running however long they wait."
-                : `${presetHint(AGENT_HIBERNATION_PRESETS, hibernationMinutes) ?? ""} An agent that finished its turn in a background workspace stops after this long to give its memory back, and resumes its session when you open its pane. Agents waiting for you, pinned with Keep awake, or sharing the pane with another program stay awake.`
+                : `${presetHint(AGENT_HIBERNATION_PRESETS, hibernationMinutes) ?? ""} A finished agent in a background workspace stops after this long to free its memory, and resumes when you open its pane. Agents waiting for you, pinned with Keep awake, or sharing a pane with another program stay awake.`
             }
             control={
               <Segmented
@@ -3956,17 +3953,20 @@ function AboutSettings() {
 
   return (
     <>
-      <div className="st-about">
-        <span className="st-about__mark" aria-hidden>
-          <CodaraMark size={26} />
-        </span>
-        <span className="st-about__text">
-          <span className="st-about__name">Codara Studio</span>
-          <span className="st-about__tag">
-            A terminal multiplexer with agent orchestration, driven by Cora.
+      <SettingsCard>
+        <div className="st-about">
+          <span className="st-about__mark" aria-hidden>
+            <CodaraMark size={26} />
           </span>
-        </span>
-      </div>
+          <span className="st-about__text">
+            <span className="st-about__name">Codara Studio</span>
+            <span className="st-about__tag">
+              A terminal multiplexer with agent orchestration, driven by Cora.
+            </span>
+          </span>
+          <span className="st-about__version spark-mono">v{version}</span>
+        </div>
+      </SettingsCard>
       <SettingsSection title="Details">
         <ValueRow title="Version" value={`v${version}`} mono />
         <ValueRow title="Platform" value={platform || "Detecting…"} mono />
@@ -3996,7 +3996,7 @@ function AboutSettings() {
         <SettingRow title="Freezes and crashes" desc={diagnostics.history} />
         <SettingRow
           title="Export diagnostics"
-          desc="Saves a zip of logs, freeze and crash records, app and system details and your settings, to attach to a bug report. Tokens, keys, email addresses and home folder paths are removed first."
+          desc="Saves a zip of logs, freeze and crash records, system details and your settings for a bug report. Tokens, keys, email addresses and home folder paths are removed first."
           control={diagnostics.exportButton}
         >
           {diagnostics.exportMessage}
@@ -4049,24 +4049,25 @@ function GlassSliderRow({
   };
 
   return (
-    <div className="st-subrow" data-setting-anchor={label}>
-      <span className="st-subrow__text">
-        <span className="st-subrow__label">{label}</span>
-        <span className="st-subrow__hint">{hint}</span>
-      </span>
-      <RangeControl
-        ariaLabel={`${label}: ${hint}`}
-        min={0}
-        max={200}
-        step={5}
-        value={draftValue}
-        display={`${draftValue}%`}
-        onPointerDown={() => {
-          dragging.current = true;
-        }}
-        onChange={(next) => setDraftValue(Math.max(floor, next))}
-        onCommit={commit}
-      />
-    </div>
+    <SettingRow
+      title={label}
+      desc={hint}
+      anchor={label}
+      control={
+        <RangeControl
+          ariaLabel={`${label}: ${hint}`}
+          min={0}
+          max={200}
+          step={5}
+          value={draftValue}
+          display={`${draftValue}%`}
+          onPointerDown={() => {
+            dragging.current = true;
+          }}
+          onChange={(next) => setDraftValue(Math.max(floor, next))}
+          onCommit={commit}
+        />
+      }
+    />
   );
 }

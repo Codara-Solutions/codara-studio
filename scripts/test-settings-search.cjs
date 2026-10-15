@@ -22,6 +22,8 @@ const COMPONENTS = path.join(ROOT, "src", "renderer", "src", "components");
 const read = (file) => fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n");
 // The Quick commands page lives with the rest of the feature.
 const QUICK_COMMANDS_PAGE = path.join(ROOT, "src", "renderer", "src", "quick-commands", "QuickCommandsSettings.tsx");
+// The Keybindings page body, with its reset row, lives with the shortcuts.
+const KEYBINDINGS_PAGE = path.join(ROOT, "src", "renderer", "src", "shortcuts", "KeybindingsSection.tsx");
 
 async function loadIndex() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-settings-search-"));
@@ -51,10 +53,14 @@ function launchArgsRows() {
 // renders setting rows must be listed, or the coverage check fails.
 const DIALOG_FUNCTION_TABS = {
   GeneralSettings: "general",
-  GithubWebhookSettings: "general",
-  CopyBranchSetupField: "general",
-  WorktreeSetupFileField: "general",
-  AgentWorktreeIgnoredField: "general",
+  AppearanceSettings: "appearance",
+  NotificationSettings: "notifications",
+  GitSettings: "git",
+  BrowserSettings: "browser",
+  GithubWebhookSettings: "git",
+  CopyBranchSetupField: "git",
+  WorktreeSetupFileField: "git",
+  AgentWorktreeIgnoredField: "git",
   EditorSettings: "editor",
   TerminalSettings: "terminal",
   ApiSettings: "api",
@@ -77,6 +83,8 @@ const ROW_PROPS = {
   SettingsSection: ["title", "anchor"],
   SettingRow: ["title", "anchor"],
   ToggleRow: ["title", "anchor"],
+  SelectRow: ["title", "anchor"],
+  DangerRow: ["title", "anchor"],
   ValueRow: ["title", "anchor"],
   NumberRow: ["title"],
   Label: ["text", "anchor"],
@@ -103,6 +111,11 @@ function renderedRows(source) {
     if ((ROW_PROPS[tag] ?? []).includes(found[1])) rows.push({ name: found[2], line });
   }
   return rows;
+}
+
+/** The folds a source draws: every literal `<Advanced name="...">`. */
+function advancedNames(source) {
+  return [...source.matchAll(/<Advanced\b[^>]*?\bname="([^"]+)"/g)].map((match) => match[1]);
 }
 
 /** Splits a module into its top-level functions: { name: body }. */
@@ -178,7 +191,10 @@ async function main() {
       if (!findable("capabilities", row.name)) missing.push(`capabilities › ${row.name}`);
     }
     for (const row of renderedRows(read(path.join(COMPONENTS, "chrome", "ChromeLinkSection.tsx")))) {
-      if (!findable("general", row.name)) missing.push(`general › ${row.name} (ChromeLinkSection.tsx)`);
+      if (!findable("browser", row.name)) missing.push(`browser › ${row.name} (ChromeLinkSection.tsx)`);
+    }
+    for (const row of renderedRows(read(KEYBINDINGS_PAGE))) {
+      if (!findable("keybindings", row.name)) missing.push(`keybindings › ${row.name} (KeybindingsSection.tsx)`);
     }
     for (const row of renderedRows(read(path.join(COMPONENTS, "keep-awake", "KeepAwakeSettings.tsx")))) {
       if (!findable("general", row.name)) missing.push(`general › ${row.name} (KeepAwakeSettings.tsx)`);
@@ -208,7 +224,12 @@ async function main() {
       rendered[tab] = (rendered[tab] ?? new Set());
       for (const row of renderedRows(body)) rendered[tab].add(row.name);
     }
-    for (const row of renderedRows(read(path.join(COMPONENTS, "chrome", "ChromeLinkSection.tsx")))) rendered.general.add(row.name);
+    for (const [name, body] of Object.entries(functions)) {
+      const tab = DIALOG_FUNCTION_TABS[name];
+      if (tab) for (const fold of advancedNames(body)) rendered[tab].add(fold);
+    }
+    for (const row of renderedRows(read(path.join(COMPONENTS, "chrome", "ChromeLinkSection.tsx")))) rendered.browser.add(row.name);
+    rendered.keybindings = new Set(renderedRows(read(KEYBINDINGS_PAGE)).map((row) => row.name));
     for (const row of renderedRows(read(path.join(COMPONENTS, "keep-awake", "KeepAwakeSettings.tsx")))) rendered.general.add(row.name);
     rendered["remote-access"] = new Set(
       renderedRows(read(path.join(COMPONENTS, "RemoteAccessSettings.tsx"))).map((row) => row.name),
@@ -233,6 +254,38 @@ async function main() {
       if (!provider) stale.push(`${entry.tab} › ${entry.title}`);
     }
     assert.deepEqual(stale, [], `entries nothing renders:\n  ${stale.join("\n  ")}`);
+  });
+
+  check("every row a search opens a fold for sits in that fold", () => {
+    const dialog = read(path.join(COMPONENTS, "SettingsDialog.tsx"));
+    const functions = topLevelFunctions(dialog);
+    const folds = {};
+    for (const [name, body] of Object.entries(functions)) {
+      const tab = DIALOG_FUNCTION_TABS[name];
+      if (!tab) continue;
+      folds[tab] = folds[tab] ?? new Set();
+      for (const fold of advancedNames(body)) folds[tab].add(fold);
+    }
+    const wrong = [];
+    for (const entry of SETTINGS_SEARCH_INDEX.filter((item) => item.reveal)) {
+      if (!folds[entry.tab]?.has(entry.reveal)) wrong.push(`${entry.tab} › ${entry.title} › ${entry.reveal}`);
+      // The fold must hold the row: its title appears after the fold opens
+      // and before the next top-level function.
+      const owner = Object.entries(functions).find(
+        ([name, body]) => DIALOG_FUNCTION_TABS[name] === entry.tab && body.includes(`name="${entry.reveal}"`),
+      );
+      if (!owner) continue;
+      const [, body] = owner;
+      const fold = body.slice(body.indexOf(`name="${entry.reveal}"`));
+      const inside = fold.slice(0, fold.indexOf("</Advanced>"));
+      const holder = Object.entries(functions).some(
+        ([name, other]) =>
+          (inside.includes(`<${name} `) || inside.includes(`<${name}\n`)) &&
+          (other.includes(`title="${entry.title}"`) || other.includes(`label="${entry.title}"`)),
+      );
+      if (!inside.includes(`"${entry.title}"`) && !holder) wrong.push(`${entry.title} is not inside ${entry.reveal}`);
+    }
+    assert.deepEqual(wrong, [], `entries whose fold is missing:\n  ${wrong.join("\n  ")}`);
   });
 
   check("every command on the Keybindings page is searchable", () => {
@@ -274,7 +327,7 @@ async function main() {
 
   check("each result names its page and section", () => {
     const glass = entries.find((entry) => entry.title === "Liquid glass");
-    assert.deepEqual(entryLocation(glass), ["General", "Appearance"]);
+    assert.deepEqual(entryLocation(glass), ["Appearance", "Glass"]);
     const compact = entries.find((entry) => entry.title === "Auto-compact context at");
     assert.deepEqual(entryLocation(compact), ["Capability Center", "Behavior"]);
     const mcp = entries.find((entry) => entry.title === "MCP servers");
