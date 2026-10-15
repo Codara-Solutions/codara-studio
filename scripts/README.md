@@ -377,6 +377,8 @@ saved groups), `test-workspace-reorder`, `test-workbench-routing`, `test-editor-
 `test-file-preview-capabilities`, `test-csv-preview`, `test-csv-preview-ui`,
 `test-run-graph-layout`, `test-overlay-performance`,
 `test-renderer-boot-ready`, `test-onboarding`, `test-usage-analytics`,
+`test-usage-roster` (the title bar's Usage panel: row order, chips, every
+account with its email, what a switch does, reset and credit copy),
 `test-settings-dialog` (Settings closes only through Escape, X, Done or
 Cancel; every search result is rendered; the face is opaque; a menu closes on
 a scroll only when its anchor moved), `test-settings-search` (every rendered

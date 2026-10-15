@@ -10618,3 +10618,392 @@ button.st-list__row:hover,
 .nc-switch[aria-checked="true"] { background: var(--accent); border-color: transparent; }
 .nc-switch[aria-checked="true"]::after { transform: translateX(12px); background: color-mix(in oklab, var(--bg) 92%, var(--accent)); }
 .nc-switch:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+/* ── Usage panel ─────────────────────────────────────────────────────────────
+   The title bar's Usage roster (UsageRoster.tsx) and the flyout beside it.
+   Both are .spark-menu, so they take the menu glass tier; they sit side by
+   side and never overlap, so there is one glass level. Nothing inside them
+   carries a fill of its own beyond the hover tint and the meters. */
+.usage-roster,
+.usage-flyout {
+  position: fixed;
+  z-index: 1300;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+  overflow: hidden auto;
+  font-family: var(--font-sans);
+  color: var(--ink);
+}
+@media not (prefers-reduced-transparency: reduce) {
+  /* Small grey text on a thin fill leans toward ink-dim to stay readable. */
+  html:not([data-glass="off"]) .usage-roster,
+  html:not([data-glass="off"]) .usage-flyout {
+    --muted: var(--glass-muted);
+  }
+}
+.usage-roster__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 2px 6px 8px;
+  border-bottom: 1px solid color-mix(in oklab, var(--ink) 8%, transparent);
+}
+.usage-roster__title {
+  font-size: 12.5px;
+  font-weight: 650;
+}
+.usage-roster__sub {
+  flex: 1 1 auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+.usage-roster__density .spark-segmented-item {
+  height: 20px;
+  padding: 0 8px;
+  font-size: 10.5px;
+}
+.usage-roster__refresh {
+  --spark-icon-btn-size: 22px;
+}
+.usage-roster__refresh[aria-busy="true"] {
+  opacity: 1;
+}
+.usage-roster__spin {
+  display: inline-flex;
+  animation: spark-spin 900ms linear infinite;
+}
+.usage-roster__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 0;
+}
+.usage-roster__empty {
+  margin: 0;
+  padding: 10px 8px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.usage-roster-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 6px 7px 8px;
+  border: none;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: default;
+  transition: background var(--motion-fast) var(--ease-out);
+}
+.usage-roster-row:hover,
+.usage-roster-row.is-open {
+  background: var(--hover);
+}
+.usage-roster-row__mark {
+  display: flex;
+  align-items: center;
+  height: 16px;
+  color: var(--ink);
+}
+.usage-roster-row__body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.usage-roster-row__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 16px;
+}
+.usage-roster-row__name {
+  font-size: 12px;
+  font-weight: 600;
+}
+.usage-roster-row__plan {
+  padding: 1px 5px;
+  border: 1px solid color-mix(in oklab, var(--ink) 14%, transparent);
+  border-radius: 99px;
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 550;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+.usage-roster-row__reset {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usage-roster-row__chips,
+.usage-account__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+.usage-roster-row__status,
+.usage-roster-row__account {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usage-roster-row__chev {
+  display: flex;
+  align-items: center;
+  height: 16px;
+  color: var(--muted);
+}
+.usage-roster-row.is-open .usage-roster-row__chev {
+  color: var(--ink);
+}
+.usage-roster__foot {
+  display: flex;
+  flex-direction: column;
+  padding-top: 4px;
+  border-top: 1px solid color-mix(in oklab, var(--ink) 8%, transparent);
+}
+.usage-roster__foot .spark-menu-item,
+.usage-flyout__foot .spark-menu-item {
+  font-size: 11.5px;
+}
+
+/* One window as "5h ▬ 26%": the label, a 28px bar, the figure in its tone. */
+.usage-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.usage-chip__label {
+  color: var(--muted);
+}
+.usage-chip__pct {
+  font-weight: 650;
+}
+.usage-chip__bar,
+.usage-window__bar {
+  display: block;
+  overflow: hidden;
+  border-radius: 99px;
+  background: color-mix(in oklab, var(--ink) 13%, transparent);
+}
+.usage-chip__bar {
+  width: 28px;
+  height: 4px;
+}
+.usage-chip__bar > span,
+.usage-window__bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 99px;
+  transition: width 240ms ease;
+}
+
+.usage-flyout {
+  gap: 10px;
+  padding: 10px;
+}
+.usage-flyout__head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.usage-flyout__mark {
+  display: flex;
+  color: var(--ink);
+}
+.usage-flyout__name {
+  font-size: 12.5px;
+  font-weight: 650;
+}
+.usage-flyout__updated {
+  flex: 1 1 auto;
+  color: var(--muted);
+  font-size: 10.5px;
+  text-align: right;
+  white-space: nowrap;
+}
+.usage-flyout__active {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+}
+.usage-flyout__active-label {
+  color: var(--accent-text);
+  font-weight: 650;
+}
+.usage-flyout__active-name {
+  overflow: hidden;
+  color: var(--ink-dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usage-flyout__windows {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.usage-window {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.usage-window__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11.5px;
+}
+.usage-window__pct {
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+.usage-window__bar {
+  height: 5px;
+}
+.usage-window__reset,
+.usage-flyout__muted {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+.usage-flyout__detail,
+.usage-flyout__alert {
+  margin: 0;
+  color: var(--ink-dim);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.usage-flyout__alert {
+  color: var(--danger);
+  font-weight: 600;
+}
+.usage-flyout__section {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-top: 9px;
+  border-top: 1px solid color-mix(in oklab, var(--ink) 8%, transparent);
+}
+.usage-flyout__section-title {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.usage-flyout__line {
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.usage-flyout__line.is-danger {
+  color: var(--danger);
+}
+.usage-flyout__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.usage-flyout__actions .spark-btn,
+.usage-account__switch {
+  height: 22px;
+  padding: 0 9px;
+  font-size: 11px;
+}
+.usage-flyout__confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.usage-flyout__accounts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+/* The Active account carries an accent rule and tag; the others stay plain. */
+.usage-account {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px 8px;
+  border-radius: var(--radius-control, 7px);
+  box-shadow: inset 2px 0 0 transparent;
+}
+.usage-account.is-active {
+  background: color-mix(in oklch, var(--accent) 9%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.usage-account__line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.usage-account__text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.usage-account__label {
+  overflow: hidden;
+  font-size: 11.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usage-account__email {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usage-account__tag {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border-radius: 99px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 10px;
+  font-weight: 650;
+}
+.usage-account__note {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+.usage-flyout__foot {
+  display: flex;
+  flex-direction: column;
+  margin: 0 -4px -4px;
+  padding-top: 4px;
+  border-top: 1px solid color-mix(in oklab, var(--ink) 8%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .usage-roster__spin { animation: none; }
+  .usage-chip__bar > span,
+  .usage-window__bar > span { transition: none; }
+}
