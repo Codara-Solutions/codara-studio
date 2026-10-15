@@ -8,7 +8,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createWriteStream, existsSync, promises as fsp, renameSync, writeFileSync, type WriteStream } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import {
   isWorktreeSetupFinished,
@@ -110,10 +110,12 @@ function stamp(date: Date): string {
   return date.toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
 }
 
+// Plain --git-common-dir, resolved here: --path-format=absolute needs git
+// 2.31, and an older git prints the unknown flag back as a line of output.
 async function commonGitDir(cwd: string): Promise<string | null> {
   try {
-    const out = (await gitWithInput(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"], "")).trim();
-    return out ? await fsp.realpath(out) : null;
+    const out = (await gitWithInput(cwd, ["rev-parse", "--git-common-dir"], "")).trim();
+    return out ? await fsp.realpath(resolve(cwd, out)) : null;
   } catch {
     return null;
   }
@@ -581,12 +583,21 @@ export class WorktreeSetupService {
         },
       ];
     }
-    if (this.platform === "win32") {
+    if (this.platform === "win32" && shell?.kind !== "posix") {
       return lines.map((line) => (shell?.kind === "cmd" ? { ...cmdLine(line), file: shell.path } : cmdLine(line)));
     }
+    // A POSIX shell, Git Bash included when it is the default on Windows:
+    // the command was written for the terminal it used to be typed into.
     const script = join(run.setupDir, "user-setup.sh");
-    await fsp.writeFile(script, `${command.command}\n`, { mode: 0o600 });
-    return [{ file: shell?.kind === "posix" ? shell.path : posixRunner(), args: [script], shown: command.command }];
+    await fsp.writeFile(script, `${command.command.replace(/\r\n/g, "\n")}\n`, { mode: 0o600 });
+    return [
+      {
+        file: shell?.kind === "posix" ? shell.path : posixRunner(),
+        // Git Bash reads C:/x/y.sh; a backslash path depends on its version.
+        args: [this.platform === "win32" ? script.replace(/\\/g, "/") : script],
+        shown: command.command,
+      },
+    ];
   }
 
   private async runCommand(

@@ -20,7 +20,7 @@ import {
   sanitizeNpmRunScriptEnv,
 } from "../env-sanitize";
 import type { IpcHandle } from "../ipc";
-import { injectEnrichedPath } from "../path-reconstruction";
+import { getEnrichedPath, injectEnrichedPath } from "../path-reconstruction";
 import { loadPreferences } from "../preferences-store";
 import { defaultShell, listShells } from "../shells";
 import { loadSettings } from "../storage";
@@ -77,6 +77,9 @@ async function commandBaseEnv(): Promise<Record<string, string>> {
   sanitizeElectronViteDevEnv(env);
   sanitizeNpmRunScriptEnv(env);
   sanitizeHostTerminalEnv(env);
+  // The PATH a login shell would have (nvm, Homebrew, ...); a setup may start
+  // before the boot-time computation has finished.
+  await getEnrichedPath().catch(() => null);
   injectEnrichedPath(env);
   sanitizeAppImageChildEnv(env);
   for (const key of Object.keys(env)) if (env[key] === undefined) delete env[key];

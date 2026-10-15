@@ -89,10 +89,12 @@ The commands see these variables:
 
 On macOS and Linux the setup command runs as a `bash` script (`sh` when
 there is no bash) with `set -e`. On Windows each line runs through
-`cmd /d /s /c` as written. Your own command runs as a script in your default
-shell (Settings > Terminal > **Default shell**), not in a terminal, so
-interactive startup files such as `.zshrc` are not read; PowerShell runs it
-with `-NoProfile`.
+`cmd /d /s /c` as written, in its own `cmd`, so a `cd` or a `set` does not
+carry over to the next line. Your own command runs as a script in your
+default shell (Settings > Terminal > **Default shell**; Git Bash on Windows
+when it is the default), not in a terminal, so interactive startup files
+such as `.zshrc` are not read; the `PATH` is the one a login shell gets.
+PowerShell runs it with `-NoProfile`.
 
 The status and the log live in the worktree's own git folder
 (`.git/worktrees/<name>/codara-setup/`), so they go when the worktree goes.
