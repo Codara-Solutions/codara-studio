@@ -309,12 +309,15 @@ export function parseWorktreeSetupFile(text: string): WorktreeSetupParseResult {
     if (typeof record.waitForSetup === "boolean") waitForSetup = record.waitForSetup;
     else errors.push(`"waitForSetup" must be true or false`);
   }
+  const setup = commandText(record.setup, "setup", errors);
+  const setupWindows = commandText(record.setupWindows, "setupWindows", errors);
+  warnings.push(...linkedInstallWarnings(link, [setup, setupWindows]));
   return {
     config: {
       copy,
       link,
-      setup: commandText(record.setup, "setup", errors),
-      setupWindows: commandText(record.setupWindows, "setupWindows", errors),
+      setup,
+      setupWindows,
       waitForSetup,
       terminals: terminalList(record.terminals, errors),
     },
@@ -342,6 +345,42 @@ export function parseWorktreeIncludeFile(text: string): { patterns: string[]; er
     }
   }
   return { patterns, errors: [] };
+}
+
+// Installers that write into a folder the file may also link. Through a link
+// the install lands in the main checkout's folder (npm ci even empties it
+// first), and two worktrees setting up at once would write it together.
+const INSTALLS_INTO: ReadonlyArray<{ folders: readonly string[]; command: RegExp }> = [
+  {
+    folders: ["node_modules"],
+    command: /(?:^|[\s;&|(])(?:npm|pnpm|yarn|bun)\s+(?:ci|install|i|add)\b|(?:^|[;&|(]\s*)yarn\s*(?:$|[;&|)])/m,
+  },
+  {
+    folders: [".venv", "venv"],
+    command: /(?:^|[\s;&|(])(?:uv\s+sync|poetry\s+install|pipenv\s+install|pip3?\s+install)\b/m,
+  },
+];
+
+/**
+ * Warnings for a linked folder that a setup command installs into, such as
+ * "node_modules" linked while setup runs "npm ci".
+ */
+export function linkedInstallWarnings(
+  links: readonly string[],
+  commands: ReadonlyArray<string | null | undefined>,
+): string[] {
+  const text = commands.filter((command): command is string => Boolean(command)).join("\n");
+  if (!text || !links.length) return [];
+  const warnings: string[] = [];
+  for (const link of links) {
+    const name = link.slice(link.lastIndexOf("/") + 1);
+    const installer = INSTALLS_INTO.find((entry) => entry.folders.includes(name));
+    if (!installer || !installer.command.test(text)) continue;
+    warnings.push(
+      `The setup command installs into ${link}, which is linked to the main checkout's folder, so it changes that folder too. Link ${link} or install it, not both.`,
+    );
+  }
+  return warnings;
 }
 
 /** The setup command for a platform: setupWindows wins on Windows. */

@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
+  linkedInstallWarnings,
+  normalizeLinkPath,
   parseWorktreeIncludeFile,
   parseWorktreeSetupFile,
   serializeWorktreeSetupDraft,
@@ -130,6 +132,16 @@ export default function WorktreeSetupFileDialog({
     [includeLines, links, linkExtra, setup, setupWindows, waitForSetup, terminals],
   );
   const preview = useMemo(() => serializeWorktreeSetupDraft(draft), [draft]);
+  // Linking node_modules while setup runs "npm ci" installs into the main
+  // checkout's folder: say so while the choice is being made.
+  const installConflicts = useMemo(
+    () =>
+      linkedInstallWarnings(
+        draft.link.map((entry) => normalizeLinkPath(entry)).filter((entry): entry is string => Boolean(entry)),
+        [setup, setupWindows],
+      ),
+    [draft.link, setup, setupWindows],
+  );
 
   const existing = suggestion
     ? suggestion.existing.worktreeInclude !== null || suggestion.existing.setupFile !== null
@@ -301,6 +313,11 @@ export default function WorktreeSetupFileDialog({
                 style={{ marginTop: 6 }}
               />
             </details>
+            {installConflicts.map((warning) => (
+              <div key={warning} className="wts-warning" data-testid="worktree-setup-install-conflict">
+                {warning}
+              </div>
+            ))}
             <label className="wts-check">
               <input
                 type="checkbox"

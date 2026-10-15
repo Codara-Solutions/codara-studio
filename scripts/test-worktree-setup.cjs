@@ -123,7 +123,11 @@ async function runSuite(m, scratch) {
       }),
     );
     assert.deepEqual(parsed.errors, []);
-    assert.deepEqual(parsed.warnings, ['"extra" is not a setting Codara knows; it is ignored']);
+    assert.deepEqual(parsed.warnings, [
+      '"extra" is not a setting Codara knows; it is ignored',
+      "The setup command installs into node_modules, which is linked to the main checkout's folder, so it changes that folder too. Link node_modules or install it, not both.",
+      "The setup command installs into packages/web/node_modules, which is linked to the main checkout's folder, so it changes that folder too. Link packages/web/node_modules or install it, not both.",
+    ]);
     assert.deepEqual(parsed.config.copy, ["config/*.local.json"]);
     assert.deepEqual(parsed.config.link, ["node_modules", "packages/web/node_modules"]);
     assert.equal(parsed.config.setup, "npm ci\nnpm run build");
@@ -134,6 +138,21 @@ async function runSuite(m, scratch) {
       { name: "Dev", command: "npm run dev" },
       { name: "npm", command: "npm test -- --watch" },
     ]);
+  });
+
+  await check("warns when setup installs into a linked folder", () => {
+    const warn = (links, ...commands) => shared.linkedInstallWarnings(links, commands).length;
+    assert.equal(warn(["node_modules"], "npm ci"), 1);
+    assert.equal(warn(["node_modules"], "corepack enable\npnpm install --frozen-lockfile"), 1);
+    assert.equal(warn(["node_modules"], "yarn"), 1);
+    assert.equal(warn(["node_modules"], "cd web && bun i"), 1);
+    assert.equal(warn(["apps/web/node_modules"], null, "npm install"), 1, "setupWindows counts too");
+    assert.equal(warn([".venv"], "uv sync"), 1);
+    assert.equal(warn(["node_modules"], "npm run build"), 0);
+    assert.equal(warn(["node_modules"], "uv sync"), 0);
+    assert.equal(warn([".venv"], "npm ci"), 0);
+    assert.equal(warn([], "npm ci"), 0);
+    assert.equal(warn(["node_modules"], null), 0);
   });
 
   await check("rejects links that leave the repository or are patterns", () => {
