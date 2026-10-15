@@ -55,6 +55,9 @@ async function main() {
     parseWindowsCensusList,
     parseWindowsCreationDate,
     listTerminalPids,
+    listPaneTerminalPids,
+    listConsolePids,
+    consolePidsFromAgentMessage,
   } = require(outfile);
 
   let failures = 0;
@@ -167,6 +170,16 @@ async function main() {
   check("windows npm claude with quoted paths may sleep", verdict.ok === true && verdict.agentPid === 502, verdict);
   verdict = classifyPaneProcessTree([...windows, proc(503, 502, 9 * 60_000, "C:\\Windows\\system32\\cmd.exe /d /s /c npm run dev")], 500, "claude");
   check("windows: a later child keeps the pane awake", !verdict.ok && verdict.reason === "other-processes", verdict);
+  // `npm run dev &` from a Git Bash tool call: bash exits, the server keeps
+  // the pane's console but its parent is gone, so the tree cannot see it.
+  // node-pty's kill takes every console process down, so it must count.
+  const orphan = proc(504, 9_999, 5 * 60_000, "\"C:\\Program Files\\nodejs\\node.exe\" node_modules\\vite\\bin\\vite.js");
+  verdict = classifyPaneProcessTree([...windows, orphan], 500, "claude", { terminalPids: [500, 502, 504] });
+  check("windows: a server whose parent exited but still holds the console keeps the pane awake", !verdict.ok && verdict.reason === "other-processes" && /504/.test(verdict.detail ?? ""), verdict);
+  verdict = classifyPaneProcessTree(windows, 500, "claude", { terminalPids: [500, 502] });
+  check("windows: a console holding only the shell and the agent may sleep", verdict.ok === true, verdict);
+  verdict = classifyPaneProcessTree(windows, 500, "claude", { terminalPids: [502] });
+  check("a holder list without the pane's shell is not an answer", !verdict.ok && verdict.reason === "process-list-unavailable", verdict);
 
   check("quoted tokens collapse to one", normalizeCommandForMatch("\"C:\\Program Files\\x.exe\" 'a b' c") === "C:\\Program_Files\\x.exe a_b c");
   check("the root shell that names the agent is not the agent", commandRunsAgent("/usr/bin/zsh -f -ic claude; exec zsh -i", "claude") === false);
@@ -194,9 +207,15 @@ async function main() {
 
   // ── Terminal holders ──
   check("an unknown terminal on POSIX is unknown, not empty", (await listTerminalPids(null, "linux")) === null);
-  check("an unknown terminal on macOS is unknown too", (await listTerminalPids(null, "darwin")) === null);
-  const windowsHolders = await listTerminalPids(null, "win32");
-  check("Windows has no terminal holders to ask about", Array.isArray(windowsHolders) && windowsHolders.length === 0);
+  check("an unknown terminal on macOS is unknown too", (await listPaneTerminalPids({ pid: 100, ttyPath: null }, "darwin")) === null);
+  check(
+    "the console list drops node-pty's own agent",
+    JSON.stringify(consolePidsFromAgentMessage({ consoleProcessList: [500, 502, 9001] }, 9001)) === JSON.stringify([500, 502]),
+  );
+  check("an empty console list is unknown", consolePidsFromAgentMessage({ consoleProcessList: [] }, 1) === null);
+  check("a malformed console list is unknown", consolePidsFromAgentMessage({ consoleProcessList: [500, "x"] }, 1) === null);
+  check("no console list at all is unknown", consolePidsFromAgentMessage(null, 1) === null);
+  check("a console that cannot be read is unknown", (await listConsolePids(process.pid)) === null);
 
   if (failures > 0) {
     console.error(`\n${failures} check(s) failed`);

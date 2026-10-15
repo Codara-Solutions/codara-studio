@@ -23,7 +23,7 @@ import { terminalAgentHibernationEvidence, terminalPanePlacement } from "./termi
 import {
   classifyPaneProcessTree,
   listCensusProcesses,
-  listTerminalPids,
+  listPaneTerminalPids,
   type CensusProcess,
 } from "./agent-hibernation-census";
 import {
@@ -57,7 +57,8 @@ export interface AgentHibernationDeps {
   session: (paneId: string) => pty.HibernationSessionInfo | null;
   evidence: (paneId: string) => AgentHibernationEvidence | null;
   listProcesses: () => Promise<CensusProcess[] | null>;
-  terminalPids: (ttyPath: string | null) => Promise<number[] | null>;
+  // Every process holding the pane's terminal (POSIX tty, Windows console).
+  terminalPids: (pane: { pid: number; ttyPath: string | null }) => Promise<number[] | null>;
   stop: (paneId: string, generationId: string) => Promise<boolean>;
   log: (line: string) => void;
 }
@@ -88,7 +89,7 @@ const defaultDeps: AgentHibernationDeps = {
   session: (paneId) => pty.hibernationSessionInfo(paneId),
   evidence: (paneId) => terminalAgentHibernationEvidence(paneId),
   listProcesses: () => listCensusProcesses(),
-  terminalPids: (ttyPath) => listTerminalPids(ttyPath),
+  terminalPids: (pane) => listPaneTerminalPids(pane),
   stop: (paneId, generationId) => pty.hibernate(paneId, generationId, STOP_GRACE_MS),
   log: (line) => console.log(`[agent-hibernation] ${line}`),
 };
@@ -192,9 +193,9 @@ export async function hibernateAgentPane(
 
     const processes = await deps.listProcesses();
     if (!processes) return holdCensus({ ok: false, reason: "process-list-unavailable" });
-    // An unknown terminal on POSIX answers null: without it, a process
-    // holding the pane's terminal from outside its tree could not be seen.
-    const terminalPids = await deps.terminalPids(first.session.ttyPath);
+    // An unknown terminal answers null: without it, a process holding the
+    // pane's terminal from outside its tree could not be seen.
+    const terminalPids = await deps.terminalPids({ pid: first.session.pid, ttyPath: first.session.ttyPath });
     if (!terminalPids) return holdCensus({ ok: false, reason: "process-list-unavailable" });
     const census = classifyPaneProcessTree(processes, first.session.pid, request.runtime, {
       terminalPids,

@@ -11,7 +11,9 @@
 // The classifier is pure and unit-tested (scripts/test-agent-hibernation-
 // census.cjs); the listing below is the only OS-specific part.
 
-import { execFile } from "node:child_process";
+import { execFile, fork } from "node:child_process";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { runtimeFromProcessCommand } from "@shared/agent-patterns";
 import type { AgentHibernationRuntime } from "@shared/agent-hibernation";
@@ -112,9 +114,11 @@ export function classifyPaneProcessTree(
   runtime: AgentHibernationRuntime,
   options: {
     bootWindowMs?: number;
-    // POSIX: every process holding the pane's terminal. One that is not in
-    // the tree under the pane's shell (a job the shell let go of) still uses
-    // the pane, so the pane stays awake.
+    // Every process holding the pane's terminal: its POSIX tty, or on
+    // Windows its console. One that is not in the tree under the pane's
+    // shell (a job whose parent exited) still uses the pane and dies with
+    // it, so the pane stays awake. A list without the pane's shell in it is
+    // not a real answer.
     terminalPids?: readonly number[] | null;
   } = {},
 ): CensusVerdict {
@@ -149,6 +153,9 @@ export function classifyPaneProcessTree(
     }
   }
   if (!agent) return { ok: false, reason: "no-agent-process" };
+  if (options.terminalPids && !options.terminalPids.includes(rootPid)) {
+    return { ok: false, reason: "process-list-unavailable", detail: "terminal holders without the pane shell" };
+  }
   for (const pid of options.terminalPids ?? []) {
     if (pid !== rootPid && !depth.has(pid)) {
       return { ok: false, reason: "other-processes", detail: `terminal holder ${pid}` };
@@ -291,16 +298,90 @@ async function listWindowsCensus(): Promise<CensusProcess[] | null> {
 }
 
 /**
+ * Every process holding the pane's terminal, for the census. POSIX: the
+ * processes whose controlling terminal is the pane's tty. Windows: the
+ * processes attached to the pane's console, which is what node-pty's kill
+ * stops (it kills the whole console process list, or closes the console
+ * under them). Null when that cannot be read; the caller then refuses.
+ */
+export function listPaneTerminalPids(
+  pane: { pid: number; ttyPath: string | null },
+  platform: NodeJS.Platform = process.platform,
+): Promise<number[] | null> {
+  return platform === "win32" ? listConsolePids(pane.pid) : listTerminalPids(pane.ttyPath, platform);
+}
+
+/**
+ * The answer of node-pty's console-list agent: the pids attached to the
+ * console, minus the agent itself (it attaches to the console to ask).
+ * Null for anything that is not a list of pids.
+ */
+export function consolePidsFromAgentMessage(message: unknown, agentPid: number | undefined): number[] | null {
+  const list = (message as { consoleProcessList?: unknown } | null)?.consoleProcessList;
+  if (!Array.isArray(list) || list.length === 0) return null;
+  const pids: number[] = [];
+  for (const value of list) {
+    if (!Number.isSafeInteger(value) || (value as number) <= 0) return null;
+    if (value !== agentPid) pids.push(value as number);
+  }
+  return pids;
+}
+
+const CONSOLE_LIST_TIMEOUT_MS = 8_000;
+
+/**
+ * Windows: the pids attached to the console of the pane whose shell is
+ * `shellPid`, read by node-pty's own console-list agent (the helper its kill
+ * uses), forked here so a failure or timeout answers null instead of the
+ * shell alone.
+ */
+export function listConsolePids(shellPid: number): Promise<number[] | null> {
+  if (!Number.isSafeInteger(shellPid) || shellPid <= 0) return Promise.resolve(null);
+  let script: string;
+  try {
+    const ptyRoot = dirname(createRequire(__filename).resolve("node-pty/package.json"));
+    script = join(ptyRoot, "lib", "conpty_console_list_agent.js");
+  } catch {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    let child: ReturnType<typeof fork> | null = null;
+    const finish = (value: number[] | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        child?.kill();
+      } catch {
+        /* already gone */
+      }
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(null), CONSOLE_LIST_TIMEOUT_MS);
+    try {
+      child = fork(script, [String(shellPid)], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+    } catch {
+      finish(null);
+      return;
+    }
+    const agentPid = child.pid;
+    child.on("message", (message) => finish(consolePidsFromAgentMessage(message, agentPid)));
+    child.on("error", () => finish(null));
+    child.on("exit", () => finish(null));
+  });
+}
+
+/**
  * POSIX: the pids whose controlling terminal is exactly `ttyPath`. Null when
  * that cannot be read, including a pane whose terminal is unknown; the caller
- * then refuses to stop the pane. Windows has no controlling terminal to ask
- * about, so it answers with none.
+ * then refuses to stop the pane.
  */
 export async function listTerminalPids(
   ttyPath: string | null,
   platform: NodeJS.Platform = process.platform,
 ): Promise<number[] | null> {
-  if (platform === "win32") return [];
+  if (platform === "win32") return null;
   if (!ttyPath) return null;
   try {
     const { stdout } = await execFileAsync("ps", ["-t", ttyPath, "-o", "pid="], {
