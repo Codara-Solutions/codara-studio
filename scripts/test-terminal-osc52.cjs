@@ -44,7 +44,7 @@ async function main() {
     format: "cjs",
     logLevel: "silent",
   });
-  const { parseOsc52, createOsc52Handler, writeAsReplay, OSC52_MAX_BASE64_CHARS } = require(outfile);
+  const { parseOsc52, createOsc52Handler, writeAsReplay, isParsingReplay, OSC52_MAX_BASE64_CHARS } = require(outfile);
 
   // 1. Parsing.
   assert.deepEqual(parseOsc52(`c;${b64("hello")}`), { kind: "write", text: "hello" });
@@ -148,17 +148,16 @@ async function main() {
   {
     const { Terminal } = require("@xterm/headless");
     const term = new Terminal({ cols: 40, rows: 5, allowProposedApi: true });
-    const depth = { current: 0 };
     const writes = [];
     term.parser.registerOscHandler(52, createOsc52Handler({
-      blockedBy: () => (depth.current > 0 ? "replay" : null),
+      blockedBy: () => (isParsingReplay(term) ? "replay" : null),
       writeText: (text) => writes.push(text),
     }));
     const osc = (text, end = "\x07") => `\x1b]52;c;${b64(text)}${end}`;
     term.write(osc("live before"));
     await new Promise((resolve) => term.write("", resolve));
     await flushMicrotasks();
-    writeAsReplay(term, depth, () => {
+    writeAsReplay(term, () => {
       term.write(`history ${osc("from history")} more`);
       term.write(Buffer.from(osc("history bytes", "\x1b\\")));
     });
@@ -166,22 +165,63 @@ async function main() {
     await new Promise((resolve) => term.write("", resolve));
     await flushMicrotasks();
     assert.deepEqual(writes, ["live before", "live after"]);
-    assert.equal(depth.current, 0, "the depth returns to zero");
+    assert.equal(isParsingReplay(term), false, "the depth returns to zero");
     assert.doesNotMatch(term.buffer.active.getLine(0).translateToString(true), /52|bGl2/, "the sequence is never drawn");
     term.dispose();
   }
-  console.log("ok 5 writeAsReplay drops exactly the history");
+  {
+    // A terminal whose closing callback never runs (disposed halfway through
+    // a replay) keeps its own depth; the pane's next terminal starts at zero.
+    const callbacks = [];
+    const stalled = { write: (_data, callback) => callbacks.push(callback) };
+    writeAsReplay(stalled, () => stalled.write("history"));
+    callbacks[0]();
+    assert.equal(isParsingReplay(stalled), true);
+    const next = { write: (_data, callback) => callback?.() };
+    assert.equal(isParsingReplay(next), false, "a new terminal never inherits another's replay");
+    writeAsReplay(next, () => next.write("history"));
+    assert.equal(isParsingReplay(next), false);
+  }
+  {
+    // xterm throws on a write once its queue is over the discard mark. When
+    // the closing write is refused, the opening one must not leave the depth
+    // up for good, whether it already ran or runs later.
+    for (const openRunsFirst of [true, false]) {
+      const queued = [];
+      let refuse = false;
+      const term = {
+        write: (_data, callback) => {
+          if (refuse) throw new Error("write data discarded");
+          if (openRunsFirst) callback?.();
+          else queued.push(callback);
+        },
+      };
+      assert.throws(
+        () =>
+          writeAsReplay(term, () => {
+            refuse = true;
+            term.write("history");
+          }),
+        /discarded/,
+        "the caller still sees the failure",
+      );
+      for (const callback of queued) callback?.();
+      assert.equal(isParsingReplay(term), false, `refused close, open ${openRunsFirst ? "before" : "after"}`);
+    }
+  }
+  console.log("ok 5 writeAsReplay drops exactly the history, per terminal");
 
   // 6. Wiring.
   const session = fs.readFileSync(path.join(TERMINAL, "useTerminalSession.ts"), "utf8");
   const guard = session.slice(session.indexOf("registerOsc52Clipboard(term, {"));
   const guardBody = guard.slice(0, guard.indexOf("}),"));
   assert.match(guardBody, /readOnlyRef\.current \|\| inputBlockedRef\.current\) return "mirror"/);
-  assert.match(guardBody, /replayParseDepthRef\.current > 0\) return "replay"/);
+  assert.match(guardBody, /if \(isParsingReplay\(term\)\) return "replay"/);
   assert.match(guardBody, /!visibleRef\.current\) return "background"/);
-  assert.match(session, /writeAsReplay\(term, replayParseDepthRef, \(\) => \{\s*if \(replay\)/, "the snapshot replay is history");
-  assert.match(session, /if \(isReplayedChunk\) writeAsReplay\(term, replayParseDepthRef, write\);/, "main's announced replay is history");
-  assert.match(session, /writeAsReplay\(term, replayParseDepthRef, \(\) =>\s*term\.write\(merged,/, "output buffered while hidden is history");
+  assert.match(session, /writeAsReplay\(term, \(\) => \{\s*if \(replay\)/, "the snapshot replay is history");
+  assert.match(session, /if \(isReplayedChunk\) writeAsReplay\(term, write\);/, "main's announced replay is history");
+  assert.match(session, /writeAsReplay\(term, \(\) =>\s*term\.write\(merged,/, "output buffered while hidden is history");
+  assert.doesNotMatch(session, /replayParseDepthRef/, "the replay depth belongs to each terminal, not to the pane");
   const directWrites = session.match(/(?<!writeChunk\(\(\) =>\s*)term\.write\(bytes,/g) ?? [];
   assert.equal(directWrites.length, 0, "every PTY chunk write goes through writeChunk");
   assert.match(wiring, /registerOscHandler\(52, handler\)/);

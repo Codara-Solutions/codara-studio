@@ -130,25 +130,59 @@ export function createOsc52Handler(deps: Osc52HandlerDeps): (data: string) => bo
   };
 }
 
+export interface ReplayWritable {
+  write(data: string | Uint8Array, callback?: () => void): void;
+}
+
+// One depth per terminal, never per pane: a pane can build a new terminal
+// while its old one is still parsing a replay, and the old one's closing
+// callback may never run once it is disposed. A shared count would then stay
+// up and silently refuse every later copy in that pane.
+const replayDepths = new WeakMap<ReplayWritable, { current: number }>();
+
+/** True while `term` parses bytes written through writeAsReplay. */
+export function isParsingReplay(term: ReplayWritable): boolean {
+  return (replayDepths.get(term)?.current ?? 0) > 0;
+}
+
 /**
  * Brackets writes of replayed history so OSC 52 requests inside them are
  * dropped. xterm parses writes in order and runs each write's callback right
  * after its bytes, so empty writes queued around the history raise and lower
  * the depth exactly while those bytes are parsed, whatever else is queued.
  */
-export function writeAsReplay(
-  term: { write(data: string | Uint8Array, callback?: () => void): void },
-  depth: { current: number },
-  write: () => void,
-): void {
+export function writeAsReplay(term: ReplayWritable, write: () => void): void {
+  let depth = replayDepths.get(term);
+  if (!depth) {
+    depth = { current: 0 };
+    replayDepths.set(term, depth);
+  }
+  const counter = depth;
+  // "abandoned": xterm refused the closing write (its queue is over the
+  // discard mark), so nothing would ever lower the depth again. The opening
+  // write then stands down instead of raising it.
+  let state: "queued" | "open" | "done" | "abandoned" = "queued";
   term.write("", () => {
-    depth.current += 1;
+    if (state !== "queued") return;
+    state = "open";
+    counter.current += 1;
   });
+  const close = () => {
+    if (state === "open") counter.current = Math.max(0, counter.current - 1);
+    state = "done";
+  };
+  let failure: { error: unknown } | null = null;
   try {
     write();
-  } finally {
-    term.write("", () => {
-      depth.current = Math.max(0, depth.current - 1);
-    });
+  } catch (error) {
+    failure = { error };
   }
+  try {
+    term.write("", close);
+  } catch (error) {
+    close();
+    state = "abandoned";
+    failure ??= { error };
+  }
+  if (failure) throw failure.error;
 }

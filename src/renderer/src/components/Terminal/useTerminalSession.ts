@@ -67,7 +67,7 @@ import { subscribeExternalTerminalSize } from "./terminalRegistry";
 import { createTerminalViewportRecovery, preserveTerminalViewport } from "./terminalViewport";
 import { createTerminalWakeRecovery, type TerminalRecoveryReason } from "./terminalWakeRecovery";
 import { asciiBytes, indexOfBytes } from "./terminalByteScan";
-import { writeAsReplay } from "./osc52";
+import { isParsingReplay, writeAsReplay } from "./osc52";
 import { registerOsc52Clipboard } from "./terminalClipboard";
 import { readRecentOutput, registerTerminalContextSource } from "./terminalContext";
 import { resolveTerminalLinkClick } from "./terminalLinks";
@@ -884,11 +884,6 @@ export function useTerminalSession({
   // Tokens prevent a late callback from an old write/session clearing a newer
   // suppression window.
   const clearNotificationSuppressionRef = useRef<object | null>(null);
-  // Above zero while xterm parses history written back into the pane (a
-  // snapshot, main's announced replay, output that arrived while hidden), so
-  // an OSC 52 copy inside it does not overwrite today's clipboard. See
-  // writeAsReplay.
-  const replayParseDepthRef = useRef(0);
 
   useEffect(() => {
     let disposed = false;
@@ -1730,7 +1725,7 @@ export function useTerminalSession({
           forgetXtermBufferSnapshot(sessionId);
           viewportRecovery.restoreSnapshot(liveSnapshot.viewportFromBottom);
         };
-        writeAsReplay(term, replayParseDepthRef, () => {
+        writeAsReplay(term, () => {
           if (replay) {
             term.write(`${normalizeForTerminalReplay(replay)}\r\n`);
           }
@@ -1756,7 +1751,10 @@ export function useTerminalSession({
           // watch-only pane is a program acting on its own.
           paneBlock: () => {
             if (readOnlyRef.current || inputBlockedRef.current) return "mirror";
-            if (replayParseDepthRef.current > 0) return "replay";
+            // History written back into the pane (a snapshot, main's
+            // announced replay, output that arrived while hidden) is not
+            // a copy anyone asked for today. See writeAsReplay.
+            if (isParsingReplay(term)) return "replay";
             if (!visibleRef.current) return "background";
             return null;
           },
@@ -2885,7 +2883,7 @@ export function useTerminalSession({
         // "history" marking onto the live output that follows.
         const isReplayedChunk = replayTracker.consume(bytes.length);
         const writeChunk = (write: () => void) => {
-          if (isReplayedChunk) writeAsReplay(term, replayParseDepthRef, write);
+          if (isReplayedChunk) writeAsReplay(term, write);
           else write();
         };
 
@@ -3941,7 +3939,7 @@ export function useTerminalSession({
         try {
           // Output that arrived while the pane was hidden: an OSC 52 copy in
           // it was not asked for by anyone looking at this pane.
-          writeAsReplay(term, replayParseDepthRef, () =>
+          writeAsReplay(term, () =>
             term.write(merged, () => {
               if (clearNotificationSuppressionRef.current === token) {
                 clearNotificationSuppressionRef.current = null;
