@@ -408,6 +408,22 @@ async function integrationChecks({ sched, loop }, workspace) {
   assert.deepStrictEqual((await get(a.id)).skips.map((x) => x.detail), ["a1", "a2"]);
   assert.deepStrictEqual((await get(b.id)).skips.map((x) => x.detail), ["b1"]);
   assert.strictEqual((await get(b.id)).history.length, 1);
+  // An edit, a toggle and a new automation landing beside a background write
+  // (a skip, a checkpoint, a loop record) must not drop it either.
+  const folder = path.join(workspace, "watched-later");
+  const [, , , created] = await Promise.all([
+    sched.updateJob({ id: a.id, name: "a renamed" }),
+    sched.appendSkip(b.id, { reason: "precheck", detail: "b2" }),
+    sched.setEnabled(b.id, false),
+    sched.createJob({ name: "c", trigger: { kind: "folder", path: folder, events: ["add"] }, input, enabled: false }),
+    sched.appendSkip(a.id, { reason: "precheck", detail: "a3" }),
+  ]);
+  assert.strictEqual((await get(a.id)).name, "a renamed");
+  assert.deepStrictEqual((await get(a.id)).skips.map((x) => x.detail), ["a1", "a2", "a3"], "a skip beside an edit of the same automation lands");
+  assert.deepStrictEqual((await get(b.id)).skips.map((x) => x.detail), ["b1", "b2"], "a skip beside an edit of another automation lands");
+  assert.strictEqual((await get(b.id)).enabled, false);
+  assert.ok(await get(created.id), "the new automation lands");
+  await sched.deleteJob(created.id);
   await sched.deleteJob(a.id);
   await sched.deleteJob(b.id);
   pass("concurrent patches of different automations do not drop each other's writes");

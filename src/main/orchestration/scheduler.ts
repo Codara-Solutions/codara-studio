@@ -380,7 +380,6 @@ export async function listJobs(): Promise<ScheduledJob[]> {
 }
 
 export async function createJob(input: CreateScheduledJobInput): Promise<ScheduledJob> {
-  const jobs = await loadJobs();
   // A folder-triggered automation cannot arm against a path that does not yet
   // exist. Creating the explicitly configured watch directory is a reversible
   // part of creating the automation and avoids persisting a loom that silently
@@ -421,7 +420,11 @@ export async function createJob(input: CreateScheduledJobInput): Promise<Schedul
   // backfilled shape it would have after a disk round-trip (graph in
   // particular). Idempotent for the already-set fields above.
   job = normalizeJob(job);
-  await persist([...jobs, job]);
+  // Read the list only now, with nothing awaited before persist() swaps the
+  // cache: a skip, checkpoint or loop write landing during the folder mkdir
+  // (or the loadJobs await) would otherwise be dropped. Same in updateJob,
+  // deleteJob and setEnabled, as in patchJob.
+  await persist([...(cache ?? (await loadJobs())), job]);
   armJob(job);
   void emitUpdated();
   return job;
@@ -431,7 +434,7 @@ export async function createJob(input: CreateScheduledJobInput): Promise<Schedul
 // state + history are NOT touched here. Re-arms when the trigger or enabled flag
 // is affected so a changed schedule takes effect immediately.
 export async function updateJob(input: UpdateScheduledJobInput): Promise<ScheduledJob> {
-  const jobs = await loadJobs();
+  const jobs = cache ?? (await loadJobs());
   const target = jobs.find((job) => job.id === input.id);
   if (!target) throw new Error(`Scheduled job not found: ${input.id}`);
   // normalizeJob re-runs on the merged result so a caller-supplied partial
@@ -637,12 +640,12 @@ export async function deleteJob(id: string): Promise<void> {
   }
   // Re-read: stopLoop's finalize re-persists the registry; filtering the
   // pre-stop snapshot would clobber that write (and any concurrent patch).
-  await persist((await loadJobs()).filter((job) => job.id !== id));
+  await persist((cache ?? (await loadJobs())).filter((job) => job.id !== id));
   void emitUpdated();
 }
 
 export async function setEnabled(id: string, enabled: boolean): Promise<ScheduledJob> {
-  const jobs = await loadJobs();
+  const jobs = cache ?? (await loadJobs());
   const target = jobs.find((job) => job.id === id);
   if (!target) {
     throw new Error(`Scheduled job not found: ${id}`);
