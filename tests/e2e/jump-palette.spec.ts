@@ -176,6 +176,18 @@ test("jump palette and workspace shortcuts move between workspaces, tabs and pan
       )
       .toBe(true);
 
+    // A tab closed while the palette is open is not selected: its row was
+    // read at opening, and picking it says so instead of blanking the stage.
+    palette = await openPalette(page);
+    await expect(palette.locator('[data-jump-kind="editor"]', { hasText: "meeting-notes.md" })).toHaveCount(1);
+    await page.keyboard.press(`${MOD}+w`);
+    await expect(page.locator('[data-tab-content] .cm-content:visible')).toHaveCount(0);
+    await palette.getByRole("combobox").fill("mtgnotes");
+    await palette.getByRole("combobox").press("Enter");
+    await expect(palette).toHaveCount(0);
+    await expect(page.getByText("That tab was closed").first()).toBeVisible();
+    await expectActive(page, "ws-b");
+
     // Initials of a hyphenated name, picked with Mod+1.
     palette = await openPalette(page);
     await palette.getByRole("combobox").fill("gs");
@@ -221,6 +233,18 @@ test("jump palette and workspace shortcuts move between workspaces, tabs and pan
     await expect(palette).toBeVisible();
     expect(await activeWorkspace(page)).toBe("ws-a");
     await page.keyboard.press("Escape");
+    await expect(palette).toHaveCount(0);
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => document.activeElement?.closest(".codara-terminal-session")?.getAttribute("data-pane-id") ?? null,
+        ),
+      )
+      .toBe(terminalPaneId);
+
+    // Its own chord closes it the same way.
+    palette = await openPalette(page);
+    await page.keyboard.press(JUMP);
     await expect(palette).toHaveCount(0);
     await expect
       .poll(() =>

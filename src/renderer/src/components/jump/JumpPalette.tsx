@@ -76,7 +76,10 @@ export default function JumpPalette({
 }: Props) {
   // Rows are built once per opening: statuses and order stay put while the
   // user is choosing, so nothing moves under the pointer or the digit keys.
+  // The workspace list is kept from the same moment: App hands a fresh array
+  // on every render, which would re-rank the rows each time it repaints.
   const [entries] = useState(() => buildJumpEntries(sources));
+  const [workspacesAtOpen] = useState(() => sources.workspaces);
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -85,21 +88,40 @@ export default function JumpPalette({
   const restoreFocusRef = useRef<Element | null>(
     typeof document !== "undefined" ? document.activeElement : null,
   );
+  // Set once a row is chosen: the jump places the keyboard itself.
+  const chosenRef = useRef(false);
 
   const rows = useMemo<Row[]>(() => {
     const ranked = rankJumpEntries(entries, query);
     const out: Row[] = ranked.map((item) => ({ type: "entry", id: item.entry.id, ranked: item }));
     const name = worktreeNameFromQuery(query);
-    if (worktreeSource && name && shouldOfferWorktree(name, sources.workspaces)) {
+    if (worktreeSource && name && shouldOfferWorktree(name, workspacesAtOpen)) {
       out.push({ type: "create", id: "create-worktree", name });
     }
     return out;
-  }, [entries, query, sources.workspaces, worktreeSource]);
+  }, [entries, query, workspacesAtOpen, worktreeSource]);
 
   useEffect(() => {
     const id = window.requestAnimationFrame(() => inputRef.current?.focus());
     return () => window.cancelAnimationFrame(id);
   }, []);
+
+  // However the palette closes without a jump (Escape, a click outside, its
+  // own chord again), the keyboard goes back to whatever had it, such as the
+  // terminal the palette was opened over.
+  useEffect(
+    () => () => {
+      if (chosenRef.current) return;
+      const previous = restoreFocusRef.current;
+      if (!(previous instanceof HTMLElement) || previous === document.body) return;
+      window.requestAnimationFrame(() => {
+        const active = document.activeElement;
+        const lost = !active || active === document.body;
+        if (lost && previous.isConnected) previous.focus({ preventScroll: true });
+      });
+    },
+    [],
+  );
 
   useEffect(() => {
     setSelectedIndex(0);
@@ -113,17 +135,7 @@ export default function JumpPalette({
       ?.scrollIntoView({ block: "nearest" });
   }, [selectedIndex]);
 
-  const cancel = () => {
-    const previous = restoreFocusRef.current;
-    onClose();
-    // Escape hands the keyboard back to whatever had it, such as the
-    // terminal the palette was opened over.
-    if (previous instanceof HTMLElement && previous !== document.body) {
-      window.requestAnimationFrame(() => {
-        if (previous.isConnected) previous.focus({ preventScroll: true });
-      });
-    }
-  };
+  const cancel = () => onClose();
 
   const choose = (row: Row | undefined) => {
     if (!row) return;
@@ -131,6 +143,7 @@ export default function JumpPalette({
       onCreateWorktree(row.name);
       return;
     }
+    chosenRef.current = true;
     onJump(row.ranked.entry.target);
   };
 

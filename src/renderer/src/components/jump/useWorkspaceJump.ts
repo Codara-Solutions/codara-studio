@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import type { TerminalAgentTarget, Workspace } from "@shared/types";
+import { emitLocalToast } from "../../notifications/local-toast";
+import type { Tab } from "../../tabs/types";
 import type { JumpTarget } from "./jump-model";
 import { focusJumpTargetWhenReady } from "./focus-target";
 import {
@@ -18,6 +20,8 @@ export interface UseWorkspaceJumpOptions {
   workspaces: readonly Workspace[];
   /** The workspace the loaded tab layout belongs to; lags a switch by a render. */
   tabsWorkspaceId: string | null;
+  /** The loaded layout's tabs (those of `tabsWorkspaceId`). */
+  layoutTabs: readonly Tab[];
   activeTabId: string | null;
   /** The active terminal tab's selected pane, if the active tab is a terminal. */
   activePaneId: string | null;
@@ -116,14 +120,25 @@ export function useWorkspaceJump(options: UseWorkspaceJumpOptions): WorkspaceJum
     record,
   ]);
 
+  // The palette's rows are read when it opens, so a tab can close before
+  // its row is chosen; selecting a missing id would leave the stage empty.
+  const selectTab = useCallback((target: JumpTarget & { tabId: string }) => {
+    const current = latest.current;
+    if (!current.layoutTabs.some((tab) => tab.id === target.tabId)) {
+      emitLocalToast("That tab was closed", "", "warning");
+      return;
+    }
+    current.setActiveTab(target.tabId);
+    focusJumpTargetWhenReady(target);
+  }, []);
+
   const pendingTabRef = useRef<JumpTarget | null>(null);
   useEffect(() => {
     const pending = pendingTabRef.current;
     if (!pending?.tabId || pending.workspaceId !== options.tabsWorkspaceId) return;
     pendingTabRef.current = null;
-    latest.current.setActiveTab(pending.tabId);
-    focusJumpTargetWhenReady(pending);
-  }, [options.tabsWorkspaceId]);
+    selectTab({ ...pending, tabId: pending.tabId });
+  }, [options.tabsWorkspaceId, selectTab]);
 
   const jumpTo = useCallback((target: JumpTarget) => {
     const current = latest.current;
@@ -145,12 +160,11 @@ export function useWorkspaceJump(options: UseWorkspaceJumpOptions): WorkspaceJum
     }
     if (!target.tabId) return;
     if (!switching && current.tabsWorkspaceId === target.workspaceId) {
-      current.setActiveTab(target.tabId);
-      focusJumpTargetWhenReady(target);
+      selectTab({ ...target, tabId: target.tabId });
       return;
     }
     pendingTabRef.current = target;
-  }, []);
+  }, [selectTab]);
 
   const step = useCallback((direction: -1 | 1): boolean => {
     const current = latest.current;

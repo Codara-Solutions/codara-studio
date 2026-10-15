@@ -54,6 +54,7 @@ export interface JumpLayout {
 export interface JumpSources {
   /** In rail order (see workspaceRailSequence). */
   workspaces: readonly Workspace[];
+  /** Loaded tab layouts; a later one for the same workspace wins. */
   layouts: readonly JumpLayout[];
   activeWorkspaceId: string | null;
   branchByWorkspaceId?: Readonly<Record<string, string | null | undefined>>;

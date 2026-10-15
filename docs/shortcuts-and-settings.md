@@ -58,14 +58,17 @@ also matches initials and skipped letters, so `fa` finds `fix-auth`.
   tab and, for a terminal pane, a file or a browser tab, puts the keyboard in
   it.
 - Mod+1 to Mod+6 open the first six rows directly.
-- Arrow keys, Page Up and Page Down move the selection; Esc closes and gives
-  the keyboard back to where it was.
+- Arrow keys, Page Up and Page Down move the selection. Esc, a click outside
+  or the palette's own chord closes it and gives the keyboard back to where it
+  was.
 - A name nothing goes by yet offers **Create worktree** with that name as the
   branch. It runs the same creation as the rail's "Create isolated worktree"
   next to the repository of the workspace on screen, and opens that dialog
-  with git's message if it fails. SSH workspaces do not offer it.
+  with git's message if it fails. One worktree is created at a time. SSH
+  workspaces do not offer it.
 
-The rows are read when the palette opens and stay put while it is open.
+The rows are read when the palette opens and stay put while it is open. A
+tab closed in the meantime is not selected; a toast says so.
 Tabs of a workspace you have not opened since Codara started are not listed
 yet; its workspace row is.
 

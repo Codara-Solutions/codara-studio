@@ -326,6 +326,16 @@ function checkEntries(lib) {
     activeWorkspaceId: null,
   });
   assert.equal(homeShell.find((e) => e.id === "tab:t-h").detail, "home");
+  // A stale copy of a workspace's layout gives way to the live one after it.
+  const relisted = buildJumpEntries({
+    workspaces: [ws("h", "home")],
+    layouts: [
+      { workspaceId: "h", activeTabId: null, tabs: [terminalTab("t-old", "Old", leaf("p-old"), "p-old")] },
+      { workspaceId: "h", activeTabId: null, tabs: [terminalTab("t-new", "New", leaf("p-new"), "p-new")] },
+    ],
+    activeWorkspaceId: "h",
+  });
+  assert.deepEqual(relisted.map((e) => e.id), ["ws:h", "tab:t-new"]);
   assert.equal(get("pane:p-codex").status, "working");
   assert.equal(get("tab:t-edit").detail, "codara-studio · src");
   assert.equal(get("tab:t-web").label, "localhost:5173");

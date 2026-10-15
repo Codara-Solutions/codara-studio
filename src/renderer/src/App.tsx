@@ -4083,6 +4083,7 @@ export default function App() {
     activeWorkspaceId: activeId,
     workspaces,
     tabsWorkspaceId: tabs.tabsWorkspaceId,
+    layoutTabs: tabs.tabs,
     activeTabId: tabs.activeId,
     activePaneId: tabs.activeTab?.kind === "terminal" ? tabs.activeTab.activePaneId : null,
     activateWorkspace: handleActivateWorkspace,
@@ -4107,16 +4108,29 @@ export default function App() {
 
   // "Create worktree <name>" runs the same creation as the rail's dialog; a
   // failure opens that dialog, which shows git's message and lets the user
-  // pick another name or branch.
+  // pick another name or branch. One creation at a time, as in the dialog:
+  // two in flight would each save the workspace list without the other's.
+  const createCopyBusyRef = useRef(createCopyBusy);
+  createCopyBusyRef.current = createCopyBusy;
+  const jumpWorktreeBusyRef = useRef(false);
   const handleJumpCreateWorktree = useCallback(
     (name: string) => {
       setJumpPaletteOpen(false);
       const source = worktreeSourceWorkspace(workspacesRef.current, activeIdRef.current);
       if (!source) return;
+      if (jumpWorktreeBusyRef.current || createCopyBusyRef.current) {
+        emitLocalToast("A worktree is already being created", "Try again once it is ready.", "warning");
+        return;
+      }
+      jumpWorktreeBusyRef.current = true;
       emitLocalToast(`Creating worktree ${name}`, "Codara switches to it as soon as it is ready.");
-      void createCopyBranchWs(source, { newBranch: name }).catch(() => {
-        setCreateCopyDialogWs(source);
-      });
+      void createCopyBranchWs(source, { newBranch: name })
+        .catch(() => {
+          setCreateCopyDialogWs(source);
+        })
+        .finally(() => {
+          jumpWorktreeBusyRef.current = false;
+        });
     },
     [createCopyBranchWs],
   );
@@ -6543,15 +6557,17 @@ export default function App() {
                 workspaces: workspaceRailSequence(workspaces, workspaceGroups, workspaceRailOrder, {
                   includeCollapsed: true,
                 }),
+                // The loaded layout last: it is the live one if a stale copy
+                // of the same workspace is still among the inactive ones.
                 layouts: [
-                  ...(tabs.tabsWorkspaceId
-                    ? [{ workspaceId: tabs.tabsWorkspaceId, tabs: tabs.tabs, activeTabId: tabs.activeId }]
-                    : []),
                   ...tabs.inactiveWorkspaceLayouts.map((layout) => ({
                     workspaceId: layout.workspaceId,
                     tabs: layout.tabs,
                     activeTabId: layout.activeId,
                   })),
+                  ...(tabs.tabsWorkspaceId
+                    ? [{ workspaceId: tabs.tabsWorkspaceId, tabs: tabs.tabs, activeTabId: tabs.activeId }]
+                    : []),
                 ],
                 activeWorkspaceId: activeId,
                 branchByWorkspaceId,
