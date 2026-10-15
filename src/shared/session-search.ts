@@ -192,6 +192,21 @@ export function splitSnippetMarks(snippet: string): SnippetPart[] {
   return parts;
 }
 
+/**
+ * Cuts the text before the first marked word to its last `maxLead`
+ * characters, from a word start, so an excerpt clamped to a few lines keeps
+ * the match in view.
+ */
+export function trimSnippetLead(parts: SnippetPart[], maxLead: number): SnippetPart[] {
+  const [first, ...rest] = parts;
+  if (!first || first.mark || rest.length === 0 || first.text.length <= maxLead) return parts;
+  const start = first.text.length - maxLead;
+  const tail = first.text.slice(start);
+  const space = /\s/.test(first.text[start - 1]) ? -1 : tail.search(/\s/);
+  const lead = space >= 0 && space < tail.length - 1 ? tail.slice(space + 1) : tail;
+  return [{ text: `\u2026${lead}`, mark: false }, ...rest];
+}
+
 // ── Query ─────────────────────────────────────────────────────────────────
 
 const MAX_QUERY_TERMS = 12;

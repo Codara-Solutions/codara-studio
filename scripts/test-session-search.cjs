@@ -276,6 +276,18 @@ async function helperTests(m) {
       { text: "zebra", mark: true },
       { text: " parser", mark: false },
     ]);
+    const long = m.splitSnippetMarks(
+      `Write a helper that verifies HMAC signatures on incoming ${m.SNIPPET_MARK_START}webhooks${m.SNIPPET_MARK_END} today`,
+    );
+    assert.deepEqual(m.trimSnippetLead(long, 28), [
+      { text: "\u2026HMAC signatures on incoming ", mark: false },
+      { text: "webhooks", mark: true },
+      { text: " today", mark: false },
+    ]);
+    assert.equal(m.trimSnippetLead(long, 24)[0].text, "\u2026signatures on incoming ", "the cut starts at a word");
+    assert.deepEqual(m.trimSnippetLead(parts, 28), parts, "a short lead is kept");
+    const unmarked = [{ text: "x".repeat(80), mark: false }];
+    assert.deepEqual(m.trimSnippetLead(unmarked, 28), unmarked, "an excerpt without a match is kept");
   });
 
   await check("Progress line, counts, ages and preferences", () => {

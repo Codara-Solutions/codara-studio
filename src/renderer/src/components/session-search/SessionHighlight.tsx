@@ -1,11 +1,14 @@
 import React from "react";
-import { splitSnippetMarks } from "@shared/session-search";
+import { splitSnippetMarks, trimSnippetLead } from "@shared/session-search";
 
-/** A snippet from the index, its matched words marked. */
+// A rail row clamps its excerpt to two lines, which hold about 60 characters.
+const SNIPPET_LEAD_CHARS = 28;
+
+/** A snippet from the index, its matched words marked and kept in view. */
 export function SnippetText({ snippet }: { snippet: string }) {
   return (
     <>
-      {splitSnippetMarks(snippet).map((part, index) =>
+      {trimSnippetLead(splitSnippetMarks(snippet), SNIPPET_LEAD_CHARS).map((part, index) =>
         part.mark ? (
           <mark key={index} className="ss-hl">
             {part.text}
