@@ -32,6 +32,7 @@ import {
   populatedSubmodules,
   resolveDefaultBranch,
 } from "../git-worktrees";
+import { setupProvidedEntries } from "../worktree-setup/links";
 
 // Facts about every worktree of the repositories behind the user's
 // workspaces, and the full check a removal from the cleanup screen runs. No
@@ -681,7 +682,12 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
   workFound ||= work.inProgress !== null;
   let ignored: string[] | null = null;
   try {
-    ignored = await ignoredEntries(registration.path);
+    const all = await ignoredEntries(registration.path);
+    // What worktree setup linked in or copied unchanged from the main
+    // checkout loses nothing on removal (the originals stay), so it is not
+    // local work; removeCopyWorktree releases the links before git runs.
+    const provided = await setupProvidedEntries(registration.path, all).catch(() => new Set<string>());
+    ignored = all.filter((entry) => !provided.has(entry));
     work.ignored = ignored.filter((entry) => !isRegenerableIgnored(entry, ctx.regenerable)).slice(0, MAX_LISTED);
     workFound ||= work.ignored.length > 0;
   } catch (err) {

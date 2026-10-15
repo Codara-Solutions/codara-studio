@@ -775,6 +775,45 @@ async function main() {
     });
 
     if (process.platform !== "win32") {
+      await check("what worktree setup put in a worktree is not local work, and its links survive removal", async () => {
+        // Worktree setup (src/main/worktree-setup/) copied .env.local and
+        // linked a folder from the main checkout into this worktree, and
+        // recorded both in the worktree's setup manifest.
+        const setupTree = add("with-setup", "feature/with-setup");
+        fs.writeFileSync(path.join(repo, ".git", "info", "exclude"), "linked-cache\n");
+        const shared = path.join(repo, "linked-cache");
+        fs.mkdirSync(shared, { recursive: true });
+        fs.writeFileSync(path.join(shared, "keep.txt"), "the main checkout's own\n");
+        fs.symlinkSync(shared, path.join(setupTree, "linked-cache"), "dir");
+        fs.writeFileSync(path.join(setupTree, ".env.local"), "COPIED=1\n");
+        const copied = fs.statSync(path.join(setupTree, ".env.local"));
+        const adminDir = path.join(repo, ".git", "worktrees", "with-setup", "codara-setup");
+        fs.mkdirSync(adminDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(adminDir, "manifest.json"),
+          JSON.stringify({
+            version: 1,
+            sourceRoot: repo,
+            copies: [{ path: ".env.local", size: copied.size, mtimeMs: copied.mtimeMs }],
+            links: [{ path: "linked-cache", target: shared }],
+          }),
+        );
+        const [setupCheck] = await removeMod.checkCleanupTargets(deps, [{ repoRoot: repo, path: setupTree }]);
+        assert.deepEqual(setupCheck.blockers, [], JSON.stringify(setupCheck.blockers));
+        assert.equal(setupCheck.localWork, null, "a copied, unchanged file and a linked folder lose nothing");
+        const result = await removeMod.removeCleanupWorktrees(deps, {
+          items: [{ repoRoot: repo, path: setupTree, fingerprint: setupCheck.fingerprint, confirmDirty: false, confirmUnmerged: false }],
+          deleteMergedBranches: true,
+        });
+        assert.equal(result.outcomes[0].status, "removed", JSON.stringify(result.outcomes[0]));
+        assert.ok(!fs.existsSync(setupTree));
+        assert.equal(
+          fs.readFileSync(path.join(shared, "keep.txt"), "utf8"),
+          "the main checkout's own\n",
+          "removal released the link instead of reaching through it",
+        );
+      });
+
       await check("the batch process scan finds a process inside one worktree only", async () => {
         const inside = path.join(trees, "fresh");
         const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { cwd: inside, stdio: "ignore" });
