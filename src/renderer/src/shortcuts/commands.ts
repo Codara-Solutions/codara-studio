@@ -17,6 +17,7 @@ export type CommandId =
   | "capabilities.open"
   | "automations.open"
   | "usage.open"
+  | "worktrees.cleanup"
   | "board.open"
   | "session.openInspector"
   | "composer.focus"
@@ -141,6 +142,15 @@ export const COMMANDS: Command[] = [
     // Mod+Shift+U — free chord, and the only U binding in the table. Opens the
     // token/cost analytics scanned from the provider CLIs' transcripts.
     defaultChords: [mod("u", { shift: true })],
+  },
+  {
+    id: "worktrees.cleanup",
+    label: "Clean up worktrees",
+    group: "General",
+    // No default chord: an occasional screen. It lists every worktree of the
+    // workspaces' repositories with size, activity and merge state, and
+    // removes the ones picked under the guarded removal.
+    defaultChords: [],
   },
   {
     id: "board.open",

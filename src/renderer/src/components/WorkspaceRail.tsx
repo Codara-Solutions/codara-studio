@@ -38,6 +38,7 @@ import {
   railAutoScrollDelta,
   type VerticalReorderSlot,
 } from "./workspaceReorder";
+import { openWorktreeCleanup } from "./worktree-cleanup/open-worktree-cleanup";
 
 const PANEL_SECTION_MIME = "application/x-codara-panel-section";
 const WORKSPACE_ROW_MIME = "application/x-codara-workspace-row";
@@ -2519,6 +2520,15 @@ function WorkspaceRow({
                   onClick={() => {
                     setMenuOpen(false);
                     onCreateCopyBranch();
+                  }}
+                />
+              )}
+              {!ws.remote && (
+                <RowMenuItem
+                  label="Clean up worktrees…"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    openWorktreeCleanup(ws.id);
                   }}
                 />
               )}
