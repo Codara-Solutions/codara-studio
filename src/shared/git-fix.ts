@@ -156,6 +156,8 @@ export interface GitFixReviewContext {
   pullRequest: GitFixPullRequestRef;
   threads: GitFixReviewThread[];
   omittedThreads: number;
+  /** GitHub has review threads beyond the pages Codara read. */
+  moreOnGitHub?: boolean;
 }
 
 // ── Check runs ──────────────────────────────────────────────────────────────
@@ -562,6 +564,7 @@ export function buildReviewPrompt(context: GitFixReviewContext): string {
     blocks.push(lines);
   }
   if (dropped) blocks.push([`(${plural(dropped, "more unresolved thread")} not listed: read them on the pull request.)`]);
+  if (context.moreOnGitHub) blocks.push(["(The pull request has more review threads than Codara read: check it for unresolved ones not listed here.)"]);
   return assemble(head, blocks, [
     UNTRUSTED_RULE,
     "Work only on these threads. For each, read the current code first; when a thread is outdated, apply the reviewer's intent only if it still fits the code.",
@@ -636,7 +639,7 @@ export function reviewRequest(context: GitFixReviewContext): GitFixRequest {
     kind: "review",
     title: `Address review comments on #${context.pullRequest.number}`,
     summary: [
-      `${plural(total, "unresolved thread")}${outdated ? `, ${outdated} outdated` : ""}`,
+      `${plural(total, "unresolved thread")}${outdated ? `, ${outdated} outdated` : ""}${context.moreOnGitHub ? ", maybe more on GitHub" : ""}`,
       `Files: ${[...new Set(context.threads.map((thread) => oneLine(thread.path, 60)))].slice(0, 3).join(", ")}${context.threads.length > 3 ? ", ..." : ""}`,
       `Pull request #${context.pullRequest.number} ${oneLine(context.pullRequest.title, 80)}`,
     ],

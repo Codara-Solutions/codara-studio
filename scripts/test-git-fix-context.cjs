@@ -455,8 +455,12 @@ test("review threads: unresolved only, two pages, outdated lines, redacted bodie
   assert.equal(deleted.comments[0].url, undefined, "only https links are kept");
   assert.ok(!deleted.comments[0].body.includes(GH_TOKEN));
   assert.equal(deleted.moreComments, 8);
+  assert.equal(context.moreOnGitHub, true, "threads past the second page are not claimed to be none");
+  cursors.length = 0;
   const result = await mod.prepareGitFix({ cwd: "/repo", kind: "review" }, deps(mod, { runGh: d.runGh }));
   assert.equal(result.ok, true);
+  assert.match(result.request.prompt, /more review threads than Codara read/);
+  assert.match(result.request.summary[0], /maybe more on GitHub/);
 });
 
 test("review threads: none open, closed pull request, GitHub errors", async (mod) => {
@@ -464,6 +468,13 @@ test("review threads: none open, closed pull request, GitHub errors", async (mod
     runGh: async () => ({ stdout: JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [thread(1, { isResolved: true })], pageInfo: { hasNextPage: false } } } } } }), stderr: "" }),
   });
   assert.deepEqual(await mod.prepareGitFix({ cwd: "/repo", kind: "review" }, empty), { ok: false, error: "No unresolved review threads on #42." });
+  const resolvedPages = deps(mod, {
+    runGh: async () => ({ stdout: JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { nodes: [thread(1, { isResolved: true })], pageInfo: { hasNextPage: true, endCursor: "c" } } } } } }), stderr: "" }),
+  });
+  assert.deepEqual(await mod.prepareGitFix({ cwd: "/repo", kind: "review" }, resolvedPages), {
+    ok: false,
+    error: "No unresolved review threads among the first 100 on #42. Open the pull request to see the rest.",
+  });
   const closed = deps(mod, { github: { getCurrentPullRequest: async () => ({ number: 7, title: "x", url: "u", state: "CLOSED", isDraft: false, baseBranch: "main", headBranch: "x", checks: {} }) } });
   assert.deepEqual(await mod.prepareGitFix({ cwd: "/repo", kind: "review" }, closed), { ok: false, error: "Pull request #7 is no longer open." });
   const none = deps(mod, { github: { getCurrentPullRequest: async () => null } });

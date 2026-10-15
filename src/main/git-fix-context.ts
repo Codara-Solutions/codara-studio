@@ -549,6 +549,7 @@ export async function readReviewContext(cwd: string, deps: GitFixContextDeps): P
     headCommitOid: summary.headCommitOid,
   };
   const threads: GitFixReviewThread[] = [];
+  let moreOnGitHub = false;
   try {
     const session = await reviewSession(
       cwd,
@@ -573,17 +574,25 @@ export async function readReviewContext(cwd: string, deps: GitFixContextDeps): P
         }
       }
       const info = record(connection.pageInfo);
-      if (info?.hasNextPage !== true || typeof info.endCursor !== "string") break;
-      cursor = info.endCursor;
+      moreOnGitHub = info?.hasNextPage === true && typeof info.endCursor === "string";
+      if (!moreOnGitHub) break;
+      cursor = info!.endCursor as string;
     }
   } catch (cause) {
     throw githubFailure(cause);
   }
-  if (!threads.length) throw new GitFixError(`No unresolved review threads on #${summary.number}.`);
+  if (!threads.length) {
+    throw new GitFixError(
+      moreOnGitHub
+        ? `No unresolved review threads among the first ${REVIEW_PAGES * 50} on #${summary.number}. Open the pull request to see the rest.`
+        : `No unresolved review threads on #${summary.number}.`,
+    );
+  }
   return {
     pullRequest,
     threads: threads.slice(0, GIT_FIX_LIMITS.reviewThreads),
     omittedThreads: Math.max(0, threads.length - GIT_FIX_LIMITS.reviewThreads),
+    ...(moreOnGitHub ? { moreOnGitHub: true } : {}),
   };
 }
 
