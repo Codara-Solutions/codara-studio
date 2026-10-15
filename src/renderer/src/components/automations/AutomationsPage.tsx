@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AutomationRunRecord,
+  AutomationSkipRecord,
   AutomationWorkerInfo,
   CreateScheduledJobInput,
   GuardPredicate,
@@ -42,6 +43,8 @@ import MiniFlow from "./MiniFlow";
 import LiveBoard from "./LiveBoard";
 import LiveRunHero from "./LiveRunHero";
 import NodeFlowEditor from "./flow/NodeFlowEditor";
+import SkippedHistoryRow, { mergeTimeline } from "./SkippedHistoryRow";
+import { missedRunsSummary, precheckSummary } from "@shared/automation-catchup";
 
 // AutomationsPage — the operations console for this workspace's automations.
 // An automation is a TRIGGER (when to start) + a LOOP (how it repeats) +
@@ -1301,8 +1304,8 @@ function AutomationDetail({
       )}
 
       {/* History */}
-      <Section label="History" count={job.history.length}>
-        <HistoryTimeline jobId={job.id} history={job.history} liveRunId={job.state.currentRunId} onOpenLiveBoard={onOpenLiveBoard} />
+      <Section label="History" count={job.history.length + (job.skips?.length ?? 0)}>
+        <HistoryTimeline jobId={job.id} history={job.history} skips={job.skips} liveRunId={job.state.currentRunId} onOpenLiveBoard={onOpenLiveBoard} />
       </Section>
 
       {/* Read-only configuration; the actions for it (Edit / Delete) live in
@@ -1772,11 +1775,13 @@ function LivePassCard({
 function HistoryTimeline({
   jobId,
   history,
+  skips,
   liveRunId,
   onOpenLiveBoard,
 }: {
   jobId: string;
   history: AutomationRunRecord[];
+  skips?: AutomationSkipRecord[];
   liveRunId?: string;
   onOpenLiveBoard: () => void;
 }): React.ReactElement {
@@ -1786,13 +1791,14 @@ function HistoryTimeline({
   const [expanded, setExpanded] = useState<string | null>(null);
   const [peekRunId, setPeekRunId] = useState<string | null>(null);
 
-  if (history.length === 0) {
+  if (history.length === 0 && !skips?.length) {
     return <div style={{ fontSize: 11, color: "var(--muted-2)" }}>No iterations yet.</div>;
   }
-  const rows = [...history].reverse();
+  const rows = mergeTimeline(history, skips);
   return (
     <div style={{ display: "flex", flexDirection: "column" }}>
       {rows.map((rec) => {
+        if ("skip" in rec) return <SkippedHistoryRow key={`skip-${rec.skip.id}`} jobId={jobId} skip={rec.skip} />;
         const recKey = `${rec.iteration}-${rec.runId}`;
         const dot = rec.status === "running" ? "var(--accent)" : runStatusColor(rec.status);
         const isExpanded = expanded === recKey;
@@ -1869,6 +1875,15 @@ function HistoryTimeline({
                 <span className="spark-mono" style={{ flex: "0 0 auto", fontSize: 9.5, color: "var(--muted-2)" }}>
                   {fmtTime(rec.finishedAt ?? rec.startedAt)}
                 </span>
+                {rec.catchUp && (
+                  <span
+                    className="spark-badge"
+                    style={{ flex: "0 0 auto" }}
+                    title={`Ran to catch up the scheduled time ${fmtTime(rec.catchUp.scheduledFor)}, which was missed`}
+                  >
+                    caught up
+                  </span>
+                )}
                 {rec.stopReason && (
                   <span
                     className={`spark-badge${
@@ -2123,6 +2138,8 @@ function ConfigSummary({ job }: { job: ScheduledJob }): React.ReactElement {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <KeyVal k="Trigger" v={triggerSummary(job.trigger)} />
+      {precheckSummary(job.precheck) && <KeyVal k="Precheck" v={precheckSummary(job.precheck) as string} />}
+      {missedRunsSummary(job) && <KeyVal k="If missed" v={missedRunsSummary(job) as string} />}
       <KeyVal k="Loop" v={loopSummary(job.loop)} />
       <div style={{ display: "flex", gap: 8 }}>
         <ConfigKey label="Stops" />

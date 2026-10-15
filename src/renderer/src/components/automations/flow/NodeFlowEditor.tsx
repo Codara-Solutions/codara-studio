@@ -25,6 +25,7 @@ import LoopInspector from "./LoopInspector";
 import AddNodePalette, { type PaletteState } from "./AddNodePalette";
 import { edgeTypes, nodeTypes } from "./FlowNodes";
 import { PRESETS, type LoomPreset } from "./presets";
+import { buildGate } from "./gate-model";
 import {
   TRIGGER_ID,
   buildLoop,
@@ -418,6 +419,7 @@ function Editor({
       chatMode: "execute" as const,
     };
 
+    const gate = buildGate(draft.gate, trigger);
     if (editing && initial && onSave) {
       onSave({
         id: initial.id,
@@ -428,6 +430,8 @@ function Editor({
         prompt: { template },
         worker,
         graph,
+        precheck: gate.precheck ?? null,
+        missedRuns: gate.missedRuns ?? null,
       });
     } else if (onCreate) {
       onCreate({
@@ -439,6 +443,7 @@ function Editor({
         worker,
         graph,
         enabled: true,
+        ...gate,
       });
     }
   }, [canSubmit, draft, nodes, edges, editing, initial, onCreate, onSave, workspaceId, workspaceName, cwd]);
@@ -813,6 +818,12 @@ function Editor({
                     setDraft((d) => ({ ...d, trigger }));
                     markDirty();
                   }}
+                  gate={draft.gate}
+                  onGateChange={(gate) => {
+                    setDraft((d) => ({ ...d, gate }));
+                    markDirty();
+                  }}
+                  builtTrigger={triggerBuilt}
                   cwd={cwd}
                   chainableJobs={jobs.filter((j) => j.id !== initial?.id)}
                   lastOutputs={lastOutputs}
