@@ -44,6 +44,7 @@ import {
 import WindowChrome from "./components/WindowChrome";
 import { requestAutomationFocus, requestWorkflowRunFocus } from "./components/automations/focus-request";
 import WorkspaceRail from "./components/WorkspaceRail";
+import { publishAgentBoardSources } from "./components/agent-board/agentBoardSources";
 import StatusBar from "./components/StatusBar";
 import SearchPanel from "./components/Search/SearchPanel";
 import FileSearchPanel from "./components/Search/FileSearchPanel";
@@ -3156,6 +3157,31 @@ export default function App() {
     [workspaces],
   );
   useNotifyFocusRouting(navigateToNotifyTarget, booted);
+  // The rail's Agents view reads these from its own store, so an agent
+  // changing state re-renders that view and not the memoized rail.
+  useEffect(() => {
+    publishAgentBoardSources({
+      workspaces,
+      runs: globalRuns.runs,
+      layouts: tabs.tabsWorkspaceId
+        ? [{ workspaceId: tabs.tabsWorkspaceId, tabs: tabs.tabs }, ...tabs.inactiveWorkspaceLayouts]
+        : tabs.inactiveWorkspaceLayouts,
+      attention: terminalAttention,
+      activeWorkspaceId: tabs.tabsWorkspaceId,
+      activePaneId: activeViewPaneId,
+      navigate: navigateToNotifyTarget,
+    });
+  }, [
+    workspaces,
+    globalRuns.runs,
+    tabs.tabs,
+    tabs.tabsWorkspaceId,
+    tabs.inactiveWorkspaceLayouts,
+    terminalAttention,
+    activeViewPaneId,
+    navigateToNotifyTarget,
+  ]);
+  useEffect(() => () => publishAgentBoardSources(null), []);
 
   // Shared by the toast cards and the notification center: resolve the exact
   // linked open question for inline answers. Main owns blocker clearing and the

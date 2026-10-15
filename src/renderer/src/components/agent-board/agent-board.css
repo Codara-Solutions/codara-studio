@@ -1,0 +1,372 @@
+/* The Agents view. It sits on the solid rail: no glass here, only the theme
+   tokens, so light and dark follow the rest of the window. */
+
+.agent-board {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 4px 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.agent-board__empty {
+  margin: 10px 4px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.agent-board__group {
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-board__heading {
+  margin: 0;
+  font: inherit;
+}
+
+.agent-board__heading-btn {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 24px;
+  margin-top: 4px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: default;
+}
+
+.agent-board__heading-btn:hover {
+  color: var(--ink);
+  background: var(--hover);
+}
+
+.agent-board__heading-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.agent-board__chevron {
+  flex: 0 0 auto;
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+
+.agent-board__heading-btn[aria-expanded="true"] .agent-board__chevron {
+  transform: rotate(90deg);
+}
+
+.agent-board__count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-board__group.is-needs-you .agent-board__count {
+  color: var(--warn);
+}
+
+.agent-board__none {
+  margin: 2px 4px 4px 18px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.agent-board__cards {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.agent-card {
+  --agent-card-tone: var(--muted);
+  position: relative;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius-control, 7px);
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.agent-card.is-warn { --agent-card-tone: var(--warn); }
+.agent-card.is-accent { --agent-card-tone: var(--accent); }
+.agent-card.is-ok { --agent-card-tone: var(--ok); }
+.agent-card.is-danger { --agent-card-tone: var(--danger); }
+
+/* The tone edge says the state at a glance, before the words are read. */
+.agent-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: var(--agent-card-tone);
+  opacity: 0.85;
+}
+
+.agent-card.is-active {
+  border-color: color-mix(in oklab, var(--accent) 45%, var(--rule-soft));
+  background: color-mix(in oklab, var(--accent) 7%, var(--panel));
+}
+
+.agent-card__open {
+  appearance: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  width: 100%;
+  min-width: 0;
+  padding: 7px 8px 7px 10px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+
+.agent-card__open:hover {
+  background: var(--hover);
+}
+
+/* Inset, since the card clips what falls outside its rounded edge. */
+.agent-card__open:focus-visible {
+  outline: none;
+  box-shadow:
+    inset 0 0 0 1px color-mix(in oklch, var(--accent) 70%, transparent),
+    inset 0 0 0 3px color-mix(in oklch, var(--accent) 22%, transparent);
+}
+
+.agent-card__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.agent-card__mark {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.agent-card__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.agent-card.is-unseen .agent-card__title {
+  font-weight: 650;
+}
+
+.agent-card.is-unseen .agent-card__head::after {
+  content: "";
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--agent-card-tone);
+  order: 3;
+}
+
+.agent-card__elapsed {
+  flex: 0 0 auto;
+  order: 4;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-card__meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.agent-card__status {
+  flex: 0 0 auto;
+  color: var(--agent-card-tone);
+  font-weight: 600;
+}
+
+.agent-card.is-muted .agent-card__status {
+  color: var(--ink-dim);
+}
+
+.agent-card__ws {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.agent-card__ws-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 2px;
+  background: var(--agent-card-ws);
+}
+
+.agent-card__ws-name,
+.agent-card__who {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-card__who {
+  flex: 1 1 auto;
+}
+
+.agent-card__tool {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+
+.agent-card__message {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  color: var(--ink-dim);
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.agent-card__reply {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 0 8px 8px 10px;
+}
+
+.agent-card__options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.agent-card__option,
+.agent-card__send,
+.agent-card__answer {
+  appearance: none;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius-control, 7px);
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.agent-card__option {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-card__option.is-recommended {
+  border-color: color-mix(in oklab, var(--accent) 50%, var(--rule-soft));
+}
+
+.agent-card__option:hover:not(:disabled),
+.agent-card__send:hover:not(:disabled),
+.agent-card__answer:hover {
+  background: var(--hover);
+}
+
+.agent-card__option:focus-visible,
+.agent-card__send:focus-visible,
+.agent-card__answer:focus-visible,
+.agent-card__input:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.agent-card__option:disabled,
+.agent-card__send:disabled {
+  opacity: 0.5;
+}
+
+.agent-card__form {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+}
+
+.agent-card__input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 24px;
+  padding: 0 7px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius-control, 7px);
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+}
+
+.agent-card__input::placeholder {
+  color: var(--muted);
+}
+
+.agent-card__send {
+  height: 24px;
+}
+
+.agent-card__answer {
+  align-self: flex-start;
+  height: 24px;
+}
+
+.agent-card__reply-status {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.agent-card__reply-status:empty {
+  margin-top: -5px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-board__chevron {
+    transition: none;
+  }
+}

@@ -32,6 +32,8 @@ import {
 } from "../panels/usePanelLayout";
 import ResizeHandle from "../panels/ResizeHandle";
 import SectionHeader from "../panels/SectionHeader";
+import AgentsRailSwitch from "./agent-board/AgentsRailSwitch";
+import { useRailView } from "./agent-board/railView";
 import {
   beforeItemForVerticalPlan,
   planVerticalReorder,
@@ -293,6 +295,7 @@ function WorkspaceRail(props: RailProps) {
   // their flip boundary so a menu near the section's end opens upward instead
   // of overhanging the section stacked below (Source Control / Explorer).
   const wsScrollRef = useRef<HTMLDivElement | null>(null);
+  const [railView, setRailView] = useRailView();
   // ── Rail reorder ─────────────────────────────────────────────────────────
   // The gesture is owned by the LIST, not by the individual rows — the same
   // shape the tab strip uses. One hit-test against one cached geometry, so
@@ -845,6 +848,8 @@ function WorkspaceRail(props: RailProps) {
                         label="New folder"
                         onClick={() => {
                           setCreateMenuOpen(false);
+                          // The new folder is named in the list, so show it.
+                          setRailView("workspaces");
                           setEditingGroupId(props.onCreateWorkspaceGroup());
                         }}
                       />
@@ -860,7 +865,8 @@ function WorkspaceRail(props: RailProps) {
                 </>
               }
             />
-            {!collapsed.workspaces && (
+            {!collapsed.workspaces && <AgentsRailSwitch view={railView} onChange={setRailView} />}
+            {!collapsed.workspaces && railView === "workspaces" && (
               <div
                 ref={wsScrollRef}
                 className={railListClassName}

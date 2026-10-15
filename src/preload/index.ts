@@ -36,6 +36,7 @@ import type {
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
 import type { ClaudeFollowStatus } from "@shared/claude-follow";
 import type { AgentDeliveryRequest, AgentDeliveryResult } from "@shared/agent-delivery";
+import { agentBoardApi } from "./areas/agent-board";
 import { captureApi } from "./areas/capture";
 import { chromeLinkApi } from "./areas/chrome-link";
 import { pointApi } from "./areas/point";
@@ -1429,6 +1430,7 @@ const api = {
       return () => ipcRenderer.off("terminal-agent:state", listener);
     },
   },
+  agentBoard: agentBoardApi,
   windowControls: {
     minimize: (): Promise<void> => ipcRenderer.invoke("window:minimize"),
     toggleMaximize: (): Promise<boolean> => ipcRenderer.invoke("window:toggleMaximize"),
