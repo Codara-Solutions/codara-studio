@@ -1,6 +1,13 @@
 import { app, BrowserWindow } from "electron";
 import { subscribeToEvents } from "./sse-client";
 import { autoUpdater, type ProgressInfo, type UpdateInfo } from "electron-updater";
+import { E2E_BACKGROUND } from "./e2e-background";
+import {
+  createUpdateRestartGate,
+  NO_LIVE_WORK,
+  type LiveWork,
+  type UpdateRestartReason,
+} from "./quit-guard";
 
 // Bridges electron-updater lifecycle into the renderer over a single
 // IPC channel (`updater:event`). The renderer subscribes via
@@ -16,7 +23,12 @@ export type UpdaterEventKind =
   | "update-not-available"
   | "download-progress"
   | "update-downloaded"
-  | "error";
+  | "error"
+  // The update restart is waiting for agents to finish (payload.items names
+  // them), was cancelled, or is starting now.
+  | "restart-waiting"
+  | "restart-cancelled"
+  | "restart-starting";
 
 export interface UpdaterEvent {
   kind: UpdaterEventKind;
@@ -40,6 +52,9 @@ const PERIODIC_CHECK_MS = 30 * 60 * 1000;
 const RELEASE_EVENTS_URL = "https://studio.codarasolutions.com/api/events";
 
 let registered = false;
+// Where lifecycle events go. Set even in dev builds, where no check runs, so
+// the restart gate can still report to the chip.
+let eventWindow: BrowserWindow | null = null;
 
 // True once a check has actually FOUND an update (update-available fired).
 // Errors before that point are check-phase failures — the update feed being
@@ -62,6 +77,7 @@ function send(window: BrowserWindow, event: UpdaterEvent): void {
 export function registerAutoUpdater(mainWindow: BrowserWindow): void {
   if (registered) return;
   registered = true;
+  eventWindow = mainWindow;
   if (!app.isPackaged) return;
 
   autoUpdater.autoDownload = true;
@@ -211,19 +227,64 @@ export async function checkForUpdatesNow(): Promise<ManualCheckResult> {
 // Instead the click REQUESTS the install and starts a normal quit; index.ts
 // finishes its cleanup and then asks (isInstallRequested/performQuitAndInstall)
 // whether to hand the process to Squirrel instead of plainly quitting.
+//
+// The click itself never cuts off an agent: while Cora or a terminal agent is
+// in the middle of a turn the restart waits (the chip says for what) and
+// starts by itself once they are done, unless the user picks Restart now.
 let installRequested = false;
+let installForced = false;
+let liveWorkProbe: (() => LiveWork) | null = null;
 
-export function quitAndInstall(): void {
+function emit(event: UpdaterEvent): void {
+  if (eventWindow) send(eventWindow, event);
+}
+
+const restartGate = createUpdateRestartGate({
+  liveWork: () => liveWorkProbe?.() ?? NO_LIVE_WORK,
+  install: (reason) => beginInstallQuit(reason),
+  emit,
+});
+
+// index.ts owns the run store and the terminal notifier, so it supplies what
+// counts as live work.
+export function setUpdateRestartLiveWork(probe: () => LiveWork): void {
+  liveWorkProbe = probe;
+}
+
+function beginInstallQuit(reason: UpdateRestartReason): void {
   if (!app.isPackaged) {
-    console.log("[auto-updater] quitAndInstall ignored in dev");
+    // The e2e suite drives the gate in a dev build and reads the outcome here.
+    if (E2E_BACKGROUND) {
+      const log = ((globalThis as { __codaraUpdateRestarts?: string[] }).__codaraUpdateRestarts ??= []);
+      log.push(reason);
+    }
+    console.log(`[auto-updater] quitAndInstall (${reason}) ignored in dev`);
     return;
   }
+  installForced = reason === "forced";
   installRequested = true;
   app.quit();
 }
 
+export function quitAndInstall(): void {
+  restartGate.request();
+}
+
+export function restartForUpdateNow(): void {
+  restartGate.restartNow();
+}
+
+export function cancelUpdateRestart(): void {
+  restartGate.cancel();
+}
+
 export function isInstallRequested(): boolean {
   return installRequested;
+}
+
+// Restart now already answered the quit guard's question.
+export function isInstallForced(): boolean {
+  return installRequested && installForced;
 }
 
 // The user kept working instead of restarting for the update. A request left
@@ -231,6 +292,8 @@ export function isInstallRequested(): boolean {
 // autoInstallOnAppQuit already applies the update on that quit without one.
 export function cancelInstallRequest(): void {
   installRequested = false;
+  installForced = false;
+  emit({ kind: "restart-cancelled" });
 }
 
 // Called by index.ts at the END of quit cleanup (cleanQuit already true, so

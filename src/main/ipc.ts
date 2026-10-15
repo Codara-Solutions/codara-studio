@@ -4033,6 +4033,16 @@ export function registerIpc(): void {
     const { quitAndInstall } = await import("./auto-updater");
     quitAndInstall();
   });
+  // While that restart waits for agents to finish: Restart now, or stop
+  // waiting. The update stays downloaded either way.
+  handle("updater:restartNow", async (): Promise<void> => {
+    const { restartForUpdateNow } = await import("./auto-updater");
+    restartForUpdateNow();
+  });
+  handle("updater:cancelRestart", async (): Promise<void> => {
+    const { cancelUpdateRestart } = await import("./auto-updater");
+    cancelUpdateRestart();
+  });
 
   // Manual "Check for updates" button in Settings › About. Returns a summary
   // the panel renders inline; lifecycle events still stream to the banner.

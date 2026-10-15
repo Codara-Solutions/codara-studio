@@ -223,7 +223,10 @@ export type UpdaterEventKind =
   | "update-not-available"
   | "download-progress"
   | "update-downloaded"
-  | "error";
+  | "error"
+  | "restart-waiting"
+  | "restart-cancelled"
+  | "restart-starting";
 
 export interface UpdaterEvent {
   kind: UpdaterEventKind;
@@ -1664,9 +1667,13 @@ const api = {
       return () => ipcRenderer.off("updater:event", listener);
     },
     // Triggered by the "Restart and install" button after the
-    // update-downloaded event. Main side calls autoUpdater.quitAndInstall()
-    // which quits the app and runs the installer.
+    // update-downloaded event. Main quits and runs the installer, or first
+    // waits while an agent is in the middle of a turn.
     quitAndInstall: (): Promise<void> => ipcRenderer.invoke("updater:quitAndInstall"),
+    // While that restart waits for agents to finish (a "restart-waiting"
+    // event): restart right away, or stop waiting.
+    restartNow: (): Promise<void> => ipcRenderer.invoke("updater:restartNow"),
+    cancelRestart: (): Promise<void> => ipcRenderer.invoke("updater:cancelRestart"),
     // Manual check from Settings › About. Resolves with a summary object
     // ({ status, updateAvailable?, version?, message? }) so the panel can
     // show "up to date" — an outcome the passive banner never surfaces.
