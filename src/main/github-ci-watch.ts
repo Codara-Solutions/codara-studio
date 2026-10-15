@@ -16,6 +16,7 @@
 // so it stays quiet; every later failure of a new head commit, or of a re-run
 // that went back to running first, alerts once.
 
+import { latestCheckContexts } from "@shared/git-fix";
 import { isRemotePath } from "@shared/remote";
 import type { AppState, Workspace } from "@shared/types";
 
@@ -240,9 +241,8 @@ export function parseCiPullRequest(stdout: string): CiPullRequestSnapshot | null
   if (!Number.isSafeInteger(number) || !match || !/^[a-f0-9]{40,64}$/i.test(headOid)) return null;
   const failed: string[] = [];
   let pending = 0;
-  for (const raw of Array.isArray(value.statusCheckRollup) ? value.statusCheckRollup : []) {
-    if (!raw || typeof raw !== "object") continue;
-    const check = raw as Record<string, unknown>;
+  // The newest run of each check: a passing re-run replaces its failed attempt.
+  for (const check of latestCheckContexts(value.statusCheckRollup)) {
     const signal = [check.conclusion, check.state, check.status].find((part) => typeof part === "string" && part) as string | undefined;
     const name = String(check.name ?? check.context ?? "check").replace(/\s+/g, " ").slice(0, 80);
     if (signal && FAILED_STATES.has(signal.toUpperCase())) failed.push(name);

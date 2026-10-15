@@ -228,6 +228,22 @@ test("failing checks come with the end of each Actions job log, redacted", async
   assert.ok(!result.request.prompt.includes(GH_TOKEN));
 });
 
+test("checks: a re-run replaces its failed attempt, and outside CI links lose their tokens", async (mod) => {
+  const failed = { __typename: "CheckRun", name: "build", workflowName: "CI", status: "COMPLETED", conclusion: "FAILURE", startedAt: "2026-10-01T10:00:00Z", completedAt: "2026-10-01T10:05:00Z", detailsUrl: "https://github.com/acme/widgets/actions/runs/111/job/222" };
+  const passed = { ...failed, conclusion: "SUCCESS", startedAt: "2026-10-01T11:00:00Z", completedAt: "2026-10-01T11:04:00Z", detailsUrl: "https://github.com/acme/widgets/actions/runs/111/job/333" };
+  const external = { __typename: "StatusContext", context: "ci/external", state: "FAILURE", targetUrl: `https://ci.example/build/9?token=${GH_TOKEN}` };
+  const green = await mod.prepareGitFix({ cwd: "/repo", kind: "checks" }, deps(mod, {
+    runGh: async () => ({ stdout: prView([failed, passed]), stderr: "" }),
+  }));
+  assert.equal(green.ok, false, "a passing re-run leaves nothing to fix");
+  assert.match(green.error, /No checks are failing on #42/);
+  const context = await mod.readChecksContext("/repo", deps(mod, {
+    runGh: async () => ({ stdout: prView([passed, failed, external]), stderr: "" }),
+  }));
+  assert.deepEqual(context.checks.map((c) => c.name), ["ci/external"]);
+  assert.equal(context.checks[0].url, "https://ci.example/build/9?token=[redacted]");
+});
+
 test("checks: clear messages when gh is missing, signed out, or there is nothing to fix", async (mod) => {
   const missing = await mod.prepareGitFix({ cwd: "/repo", kind: "checks" }, deps(mod, { resolveBinary: async () => null }));
   assert.deepEqual(missing, { ok: false, error: "Install GitHub CLI (gh) and run gh auth login, then try again." });

@@ -131,6 +131,28 @@ test("parseCiPullRequest reads failing and running checks", ({ mod }) => {
   assert.equal(mod.parseCiPullRequest("null"), null);
 });
 
+test("parseCiPullRequest judges each check by its newest run", ({ mod }) => {
+  // After "Re-run failed jobs" GitHub can list the failed attempt next to the
+  // new one. A passing re-run must clear the failure, a running one is pending.
+  const view = (rollup) => mod.parseCiPullRequest(JSON.stringify({
+    number: 42,
+    title: "Add widgets",
+    url: "https://github.com/acme/widgets/pull/42",
+    state: "OPEN",
+    headRefOid: HEAD_A,
+    statusCheckRollup: rollup,
+  }));
+  const failedRun = { __typename: "CheckRun", name: "build", workflowName: "CI", status: "COMPLETED", conclusion: "FAILURE", startedAt: "2026-10-01T10:00:00Z", completedAt: "2026-10-01T10:05:00Z" };
+  const passedRerun = { ...failedRun, conclusion: "SUCCESS", startedAt: "2026-10-01T11:00:00Z", completedAt: "2026-10-01T11:05:00Z" };
+  const runningRerun = { ...failedRun, status: "IN_PROGRESS", conclusion: "", startedAt: "2026-10-01T11:00:00Z", completedAt: "0001-01-01T00:00:00Z" };
+  assert.deepEqual([view([failedRun, passedRerun]).failed, view([passedRerun, failedRun]).failed], [[], []]);
+  const running = view([failedRun, runningRerun]);
+  assert.deepEqual([running.failed, running.pending], [[], 1]);
+  // Same name in another workflow is another check.
+  const other = view([failedRun, { ...passedRerun, workflowName: "Nightly" }]);
+  assert.deepEqual([other.failed, other.pending], [["build"], 0]);
+});
+
 test("formatCiFailure names up to three checks and the pull request", ({ mod }) => {
   assert.deepEqual(mod.formatCiFailure(pr(HEAD_A, { failed: ["build"] })), { title: "CI failed on pull request #42", body: "build · Add widgets" });
   const many = mod.formatCiFailure(pr(HEAD_A, { failed: ["a", "b", "c", "d", "e"], title: "t".repeat(100) }));

@@ -158,6 +158,36 @@ export interface GitFixReviewContext {
   omittedThreads: number;
 }
 
+// ── Check runs ──────────────────────────────────────────────────────────────
+
+function checkTime(value: unknown): number {
+  const at = typeof value === "string" ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(at) && at > 0 ? at : 0;
+}
+
+/**
+ * The newest run of each check in a pull request's statusCheckRollup, in
+ * GitHub's order. After a re-run GitHub can list the earlier attempt next to
+ * the new one; only the newest says whether the check fails now (gh pr
+ * checks keeps the newest the same way).
+ */
+export function latestCheckContexts(rollup: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(rollup)) return [];
+  const byKey = new Map<string, { item: Record<string, unknown>; at: number; index: number }>();
+  rollup.forEach((raw, index) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
+    const item = raw as Record<string, unknown>;
+    const name = typeof item.name === "string" && item.name ? item.name : typeof item.context === "string" ? item.context : "";
+    const kind = typeof item.__typename === "string" ? item.__typename : "";
+    const workflow = typeof item.workflowName === "string" ? item.workflowName : "";
+    const key = name ? `${kind}\u0000${workflow}\u0000${name}` : `\u0001${index}`;
+    const at = Math.max(checkTime(item.startedAt), checkTime(item.completedAt));
+    const current = byKey.get(key);
+    if (!current || at > current.at) byKey.set(key, { item, at, index });
+  });
+  return [...byKey.values()].sort((a, b) => a.index - b.index).map((entry) => entry.item);
+}
+
 // ── Text hygiene ────────────────────────────────────────────────────────────
 
 const SECRET_PATTERNS: ReadonlyArray<[RegExp, string]> = [

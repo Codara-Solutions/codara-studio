@@ -25,6 +25,7 @@ import {
   conflictExcerpt,
   conflictsRequest,
   hookRequest,
+  latestCheckContexts,
   oneLine,
   plainLogText,
   redactSecrets,
@@ -262,7 +263,7 @@ export async function readChecksContext(cwd: string, deps: GitFixContextDeps): P
   if (!raw) throw new GitFixError("GitHub returned an invalid pull request.");
   const pullRequest = pullRequestRef(raw);
   if (raw.state !== "OPEN") throw new GitFixError(`Pull request #${pullRequest.number} is no longer open.`);
-  const rollup = Array.isArray(raw.statusCheckRollup) ? raw.statusCheckRollup : [];
+  const rollup = latestCheckContexts(raw.statusCheckRollup);
   const failing: Array<GitFixFailingCheck & { jobId: string | null }> = [];
   for (const item of rollup) {
     const check = record(item);
@@ -274,7 +275,8 @@ export async function readChecksContext(cwd: string, deps: GitFixContextDeps): P
       name: oneLine(text(check.name) ?? text(check.context) ?? "Unnamed check", 160),
       ...(text(check.workflowName) ? { workflow: oneLine(text(check.workflowName)!, 160) } : {}),
       conclusion: signal.toUpperCase(),
-      ...(url ? { url: oneLine(url, 500) } : {}),
+      // An outside CI's link can carry a token in its query.
+      ...(url ? { url: oneLine(redactSecrets(url), 500) } : {}),
       jobId: actionsJobId(url, repository),
     });
   }
