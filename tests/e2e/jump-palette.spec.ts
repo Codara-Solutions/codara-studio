@@ -2,7 +2,7 @@ import { expect, test, type ElectronApplication, type Locator, type Page } from 
 import { _electron as electron } from "playwright";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -291,6 +291,7 @@ test("jump palette and workspace shortcuts move between workspaces, tabs and pan
     await expect(rangeRow).toContainText("1…9");
     await page.keyboard.press("Escape");
   } finally {
-    await app?.close();
+    await app?.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
   }
 });
