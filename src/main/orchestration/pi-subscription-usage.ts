@@ -28,19 +28,33 @@
 //                 rate limits, and are deliberately not shown as windows.
 //   OpenAI     GET https://chatgpt.com/backend-api/wham/usage
 //              -> { plan_type, limit_reached, rate_limit: { primary_window, secondary_window },
-//                   code_review_rate_limit: { primary_window } }
+//                   code_review_rate_limit: { primary_window },
+//                   credits: { has_credits, unlimited, balance },
+//                   rate_limit_reset_credits: { available_count } }
 //                 each window { used_percent, limit_window_seconds, reset_after_seconds }
+//              GET .../wham/rate-limit-reset-credits
+//              -> { available_count, credits: [{ status, granted_at, expires_at }] }
+//                 read only when the summary reports a reset to spend, for its expiry.
 // Both are read defensively: every field is optional and a missing window is
 // simply omitted rather than rendered as a confident zero.
+//
+// The credit and reset fields follow the shapes the Codex CLI's own backend
+// client decodes and Orca (github.com/stablyai/orca, MIT) reads. Claude's
+// extra_usage amounts are minor units of its currency, as Claude Code's own
+// schema for this endpoint documents; the newer `spend` object follows Orca.
 
+import { randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { logMain } from "../file-log";
 import { familyForSubscription, PI_SUBSCRIPTION_PROVIDERS } from "../../shared/agent-families";
 import type {
+  PiCodexResetOutcome,
   PiSubscriptionProvider,
+  PiUsageCredits,
   PiUsageOverview,
   PiUsageProfile,
   PiUsageProvider,
+  PiUsageResetCredits,
   PiUsageWindow,
 } from "@shared/types";
 
@@ -52,6 +66,11 @@ import {
 import type { PiAccountProfile } from "./pi-account-profiles";
 
 const REQUEST_TIMEOUT_MS = 15_000;
+/** Spending a reset waits longer than a read: the provider resets every
+ * window before it answers. */
+const RESET_REQUEST_TIMEOUT_MS = 30_000;
+const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const CODEX_RESET_CREDITS_URL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 const DEFAULT_CACHE_TTL_MS = 60_000;
 /** Anthropic's informational OAuth endpoint has a much tighter request budget
  * than an actual Claude session, so timer-driven reads stay at five minutes.
@@ -391,6 +410,165 @@ function codexWindow(
   };
 }
 
+function finiteNumber(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string" && value.trim().length > 0) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+/** Epoch milliseconds from an ISO string, epoch seconds or epoch milliseconds. */
+function epochMs(value: unknown): number | null {
+  const numeric = finiteNumber(value);
+  if (numeric !== null) return numeric < 10_000_000_000 ? numeric * 1000 : numeric;
+  const raw = stringValue(value);
+  if (!raw) return null;
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * Codex credits: a unitless balance the plan spends into once its windows are
+ * used up. An account that never bought any reports `has_credits: false`, and
+ * a "0 credits" line for it would only be noise.
+ */
+export function codexCreditsValue(value: unknown): PiUsageCredits | undefined {
+  const record = recordValue(value);
+  if (!record) return undefined;
+  const unlimited = record.unlimited === true;
+  if (record.has_credits !== true && !unlimited) return undefined;
+  const balance = finiteNumber(record.balance);
+  if (balance === null && !unlimited) return undefined;
+  return { kind: "balance", balance: Math.max(0, balance ?? 0), unlimited };
+}
+
+/** The reset count `wham/usage` carries, without expiries. */
+export function codexResetCreditsValue(value: unknown): PiUsageResetCredits | undefined {
+  const count = finiteNumber(recordValue(value)?.available_count);
+  return count === null ? undefined : { available: Math.max(0, Math.floor(count)) };
+}
+
+/**
+ * The reset list from `wham/rate-limit-reset-credits`: the count and when the
+ * soonest unspent reset expires. Spent and expired entries never set the
+ * expiry; when entries carry no status at all, only future expiries count.
+ */
+export function codexResetCreditDetails(
+  value: unknown,
+  nowMs = Date.now(),
+): PiUsageResetCredits | undefined {
+  const record = recordValue(value);
+  if (!record) return undefined;
+  const entries = (Array.isArray(record.credits) ? record.credits : [])
+    .map(recordValue)
+    .filter((entry): entry is Record<string, unknown> => entry !== null);
+  const reportsStatus = entries.some((entry) => typeof entry.status === "string");
+  const unspent = reportsStatus
+    ? entries.filter((entry) => String(entry.status).toLowerCase() === "available")
+    : entries;
+  const count =
+    finiteNumber(record.available_count) ?? (reportsStatus ? unspent.length : null);
+  if (count === null) return undefined;
+  const available = Math.max(0, Math.floor(count));
+  const soonest = unspent
+    .map((entry) => epochMs(entry.expires_at))
+    .filter((ms): ms is number => ms !== null && ms > nowMs)
+    .sort((left, right) => left - right)[0];
+  return {
+    available,
+    ...(available > 0 && soonest !== undefined
+      ? { nextExpiresAt: new Date(soonest).toISOString() }
+      : {}),
+  };
+}
+
+function currencyCode(value: unknown): string | null {
+  const raw = stringValue(value)?.trim().toUpperCase();
+  return raw && /^[A-Z]{3}$/.test(raw) ? raw : null;
+}
+
+/** Minor units and an exponent (200000 at 2 is 2000.00), or a plain amount. */
+function moneyValue(value: unknown): { amount: number; currency: string | null } | null {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? { amount: value, currency: null } : null;
+  }
+  const record = recordValue(value);
+  const minor = finiteNumber(record?.amount_minor);
+  if (!record || minor === null) return null;
+  const exponent = record.exponent === undefined ? 2 : finiteNumber(record.exponent);
+  if (exponent === null || !Number.isInteger(exponent) || exponent < 0 || exponent > 6) {
+    return null;
+  }
+  return { amount: minor / 10 ** exponent, currency: currencyCode(record.currency) };
+}
+
+function clampPercent(value: number): number {
+  return Math.min(100, Math.max(0, value));
+}
+
+/**
+ * Claude extra usage: what the account spent past its plan this period
+ * against the cap the user set. `extra_usage` is the shape Claude Code's own
+ * schema for this endpoint documents, so it wins; the `spend` object Orca
+ * also reads is used only when it is absent. Shown only while extra usage is
+ * on, since a cap on a feature that is off spends nothing.
+ */
+export function claudeExtraUsageValue(data: Record<string, unknown>): PiUsageCredits | undefined {
+  const legacy = recordValue(data.extra_usage);
+  if (legacy) return claudeExtraUsageRecord(legacy);
+  const spend = recordValue(data.spend);
+  if (!spend || spend.enabled !== true) return undefined;
+  const used = moneyValue(spend.used);
+  const limit = moneyValue(spend.limit) ?? moneyValue(recordValue(spend.cap)?.money);
+  if (!used && !limit) return undefined;
+  const percent = finiteNumber(spend.percent);
+  return {
+    kind: "spend",
+    currency: used?.currency ?? limit?.currency ?? "USD",
+    spent: used?.amount ?? null,
+    limit: limit?.amount ?? null,
+    usedPercent: !limit
+      ? null
+      : percent !== null
+        ? clampPercent(percent)
+        : used && limit.amount > 0
+          ? clampPercent((used.amount / limit.amount) * 100)
+          : null,
+  };
+}
+
+function claudeExtraUsageRecord(legacy: Record<string, unknown>): PiUsageCredits | undefined {
+  if (legacy.is_enabled !== true) return undefined;
+  const decimals = legacy.decimal_places === undefined ? 2 : finiteNumber(legacy.decimal_places);
+  if (decimals === null || !Number.isInteger(decimals) || decimals < 0 || decimals > 6) {
+    return undefined;
+  }
+  // Minor units of the currency (cents for USD); a null monthly_limit is a
+  // plan without a cap, so there is nothing to draw a bar against.
+  const limitMinor = finiteNumber(legacy.monthly_limit);
+  const spentMinor = finiteNumber(legacy.used_credits);
+  if (limitMinor === null && spentMinor === null) return undefined;
+  const limit = limitMinor === null ? null : limitMinor / 10 ** decimals;
+  const spent = spentMinor === null ? null : spentMinor / 10 ** decimals;
+  const utilization = finiteNumber(legacy.utilization);
+  return {
+    kind: "spend",
+    currency: currencyCode(legacy.currency) ?? "USD",
+    spent,
+    limit,
+    usedPercent:
+      limit === null
+        ? null
+        : utilization !== null
+          ? clampPercent(utilization)
+          : spent !== null && limit > 0
+            ? clampPercent((spent / limit) * 100)
+            : null,
+  };
+}
+
 function notConnectedProfile(
   profile: PiAccountProfile,
   checkedAt: string,
@@ -527,11 +705,13 @@ async function anthropicUsage(
         ]
       : []),
     ...modelWindows,
-    // Deliberately NOT mapped: `cinder_cove` is a one-off credit grant and
-    // `extra_usage` is a credit balance. Both carry a `utilization` and would
-    // pass a naive "looks like a window" test, but neither is a rate limit and
-    // showing them as one would misreport how much headroom is left.
+    // Deliberately NOT mapped as windows: `cinder_cove` is a one-off credit
+    // grant and `extra_usage` is a credit balance. Both carry a `utilization`
+    // and would pass a naive "looks like a window" test, but neither is a rate
+    // limit and showing them as one would misreport how much headroom is left.
+    // Extra usage is reported beside the windows as `credits` instead.
   ].filter((window): window is PiUsageWindow => window !== null);
+  const credits = claudeExtraUsageValue(result.data);
   return {
     profileId: profile.id,
     provider: "anthropic",
@@ -544,7 +724,35 @@ async function anthropicUsage(
       (window) => window.usedPercent >= 100,
     ),
     limitReached: windows.some((window) => window.usedPercent >= 100),
+    ...(credits ? { credits } : {}),
   };
+}
+
+function codexHeaders(access: string, accountId: string): Record<string, string> {
+  return {
+    authorization: `Bearer ${access}`,
+    "chatgpt-account-id": accountId,
+    "content-type": "application/json",
+    "user-agent": "codex-cli",
+  };
+}
+
+/**
+ * The expiry of the soonest unspent reset. Best effort: the count from
+ * `wham/usage` stands on its own, so any failure here keeps it without one.
+ */
+async function codexResetCreditsWithExpiry(
+  summary: PiUsageResetCredits,
+  headers: Record<string, string>,
+): Promise<PiUsageResetCredits> {
+  try {
+    const result = await fetchJsonRecord(CODEX_RESET_CREDITS_URL, headers);
+    if (!result.ok) return summary;
+    const details = codexResetCreditDetails(result.data);
+    return details ?? summary;
+  } catch {
+    return summary;
+  }
 }
 
 async function codexUsage(
@@ -565,12 +773,8 @@ async function codexUsage(
       "ChatGPT usage needs an account id that this session did not provide. Reconnect.",
     );
   }
-  const result = await fetchJsonRecord("https://chatgpt.com/backend-api/wham/usage", {
-    authorization: `Bearer ${resolved.access}`,
-    "chatgpt-account-id": accountId,
-    "content-type": "application/json",
-    "user-agent": "codex-cli",
-  });
+  const headers = codexHeaders(resolved.access, accountId);
+  const result = await fetchJsonRecord(CODEX_USAGE_URL, headers);
   if (!result.ok) {
     if (result.status === 401 || result.status === 403) {
       return profileProblem(profile, checkedAt, "expired", "ChatGPT rejected the stored session. Reconnect.");
@@ -596,6 +800,12 @@ async function codexUsage(
   const generalLimitReached =
     rateLimit?.limit_reached === true ||
     generalWindows.some((window) => window.usedPercent >= 100);
+  const credits = codexCreditsValue(result.data.credits);
+  const resetSummary = codexResetCreditsValue(result.data.rate_limit_reset_credits);
+  const resetCredits =
+    resetSummary && resetSummary.available > 0
+      ? await codexResetCreditsWithExpiry(resetSummary, headers)
+      : resetSummary;
   return {
     profileId: profile.id,
     provider: "openai-codex",
@@ -611,6 +821,8 @@ async function codexUsage(
       generalLimitReached ||
       reviewLimit?.limit_reached === true ||
       windows.some((window) => window.usedPercent >= 100),
+    ...(credits ? { credits } : {}),
+    ...(resetCredits ? { resetCredits } : {}),
   };
 }
 
@@ -714,6 +926,8 @@ function refreshUsageProfileCountdowns(
         ? { resetsIn: formatResetTime(window.resetsAt) ?? "now" }
         : {}),
     })),
+    ...(profile.credits ? { credits: { ...profile.credits } } : {}),
+    ...(profile.resetCredits ? { resetCredits: { ...profile.resetCredits } } : {}),
   };
 }
 
@@ -748,6 +962,8 @@ function compatibilityProvider(
       : {}),
     ...(selected.limitReached !== undefined ? { limitReached: selected.limitReached } : {}),
     ...(selected.message ? { message: selected.message } : {}),
+    ...(selected.credits ? { credits: selected.credits } : {}),
+    ...(selected.resetCredits ? { resetCredits: selected.resetCredits } : {}),
   };
 }
 
@@ -856,6 +1072,79 @@ export function inspectPiSubscriptionUsage(force = false): Promise<PiUsageOvervi
       return { checkedAt, providers, profiles: [] };
     }
   })();
+}
+
+const CODEX_RESET_OUTCOMES: Readonly<Record<string, PiCodexResetOutcome>> = {
+  reset: "reset",
+  nothing_to_reset: "nothing_to_reset",
+  no_credit: "no_credit",
+  already_redeemed: "already_redeemed",
+};
+
+/** A failure whose message is fixed copy, safe to show and to cross IPC. */
+class CodexResetError extends Error {}
+
+/**
+ * Spend one of a Codex account's rate-limit resets. The usage panel asks the
+ * user to confirm first: a reset is something the account earned, and using
+ * it cannot be undone. One request id per call, so a request the transport
+ * retries still spends at most one reset. The account's cached reading is
+ * dropped whatever happens, so the next read shows what ChatGPT reports now.
+ */
+export async function redeemCodexRateLimitReset(profileId: string): Promise<PiCodexResetOutcome> {
+  const inspection = await inspectPiAccountProfileAuthStore();
+  const profile = inspection.snapshot.profiles.find((entry) => entry.id === profileId);
+  if (!profile || profile.provider !== "openai-codex") {
+    throw new CodexResetError("This Codex account is no longer in Codara.");
+  }
+  try {
+    const resolved = await usableAccessToken(profile.id, "openai-codex");
+    if (!resolved?.access) {
+      throw new CodexResetError("This Codex account needs to sign in again. Reconnect it in Accounts.");
+    }
+    const accountId = resolved.credential.accountId ?? accountIdFromAccessToken(resolved.access);
+    if (!accountId) {
+      throw new CodexResetError("This Codex sign-in has no account id. Reconnect it in Accounts.");
+    }
+    const response = await fetch(`${CODEX_RESET_CREDITS_URL}/consume`, {
+      method: "POST",
+      headers: codexHeaders(resolved.access, accountId),
+      body: JSON.stringify({ redeem_request_id: randomUUID() }),
+      signal: AbortSignal.timeout(RESET_REQUEST_TIMEOUT_MS),
+    });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new CodexResetError(`ChatGPT did not reset the limits (HTTP ${response.status}).`);
+    }
+    let code: unknown;
+    try {
+      code = recordValue(JSON.parse(await response.text()))?.code;
+    } catch {
+      code = undefined;
+    }
+    const outcome = typeof code === "string" ? CODEX_RESET_OUTCOMES[code] : undefined;
+    if (!outcome) {
+      throw new CodexResetError(
+        "ChatGPT answered in a way Codara does not recognize. Check the limits before trying again.",
+      );
+    }
+    return outcome;
+  } catch (error) {
+    if (error instanceof CodexResetError) throw error;
+    // Same rule as profileUsage: fs and fetch errors can carry a credential
+    // path or vendor detail, so only fixed copy crosses IPC.
+    const name = error instanceof Error ? error.name : "Error";
+    const detail = error instanceof Error ? error.message : String(error);
+    logMain("usage", `openai-codex ${profile.id.slice(0, 8)} reset failed: ${name}: ${detail.slice(0, 300)}`);
+    throw new Error(
+      name === "TimeoutError" || name === "AbortError"
+        ? "ChatGPT did not answer in time. Check the limits before trying again."
+        : "The reset could not be sent. Check your connection and try again.",
+    );
+  } finally {
+    profileCache.delete(profile.id);
+    profileInflight.delete(profile.id);
+  }
 }
 
 /** Drop the cache so the next read is live; used after a connect/disconnect. */

@@ -34,6 +34,7 @@ const channels = [
   "pi-subscriptions:cancel",
   "pi-subscriptions:resume-login",
   "pi-subscriptions:usage",
+  "pi-subscriptions:codex-reset",
 ];
 for (const channel of channels) {
   assert.ok(

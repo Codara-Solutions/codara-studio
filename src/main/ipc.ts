@@ -434,6 +434,7 @@ import type {
   OpenRouterValidationInput,
   OpenRouterValidationResult,
   NativeCliAccountRuntime,
+  PiCodexResetResult,
   PiSubscriptionAddAccountInput,
   PiSubscriptionDeleteAccountInput,
   PiSubscriptionMakeDefaultInput,
@@ -1026,6 +1027,24 @@ export function registerIpc(): void {
     const { inspectPiSubscriptionUsage } = await import("./orchestration/pi-subscription-usage");
     return inspectPiSubscriptionUsage(input?.force === true);
   });
+  // Spends one Codex rate-limit reset of one account, after the user
+  // confirmed it in the usage panel. Every window then re-reads that
+  // account, whose cached reading the call dropped.
+  handle(
+    "pi-subscriptions:codex-reset",
+    async (_event, input?: { profileId?: unknown }): Promise<PiCodexResetResult> => {
+      await unifiedAccountsReady();
+      const profileId = piAccountProfileIdFromIpc(input?.profileId);
+      const { redeemCodexRateLimitReset } = await import("./orchestration/pi-subscription-usage");
+      try {
+        return { outcome: await redeemCodexRateLimitReset(profileId) };
+      } finally {
+        for (const contents of webContents.getAllWebContents()) {
+          if (!contents.isDestroyed()) contents.send("pi-subscriptions:event", { type: "usage" });
+        }
+      }
+    },
+  );
   // Lazily imported like the pi-subscription handlers: the scanner pulls in the
   // transcript readers and the persisted memo, none of which is worth loading
   // for a session that never opens the Usage tab.

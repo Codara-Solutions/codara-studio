@@ -1001,6 +1001,33 @@ export interface PiUsageWindow {
   resetsAt?: string;
 }
 
+/**
+ * What an account can spend once its windows are used up, read in the same
+ * request as the windows. Never a quota window: it does not refill on a
+ * schedule and routing never reads it.
+ *
+ * - `balance`: Codex credits, a unitless count the plan spends into.
+ * - `spend`: Claude extra usage, money spent against a monthly cap.
+ */
+export type PiUsageCredits =
+  | { kind: "balance"; balance: number; unlimited: boolean }
+  | {
+      kind: "spend";
+      /** ISO 4217 code, e.g. "USD". */
+      currency: string;
+      /** Major units (dollars, euros). Null when the provider did not say. */
+      spent: number | null;
+      limit: number | null;
+      usedPercent: number | null;
+    };
+
+/** Codex rate-limit resets the account has earned and not spent yet. */
+export interface PiUsageResetCredits {
+  available: number;
+  /** When the soonest unspent reset expires, if the provider said. */
+  nextExpiresAt?: string;
+}
+
 export interface PiUsageProvider {
   provider: PiSubscriptionProvider;
   label: string;
@@ -1015,6 +1042,8 @@ export interface PiUsageProvider {
   generalLimitReached?: boolean;
   limitReached?: boolean;
   message?: string;
+  credits?: PiUsageCredits;
+  resetCredits?: PiUsageResetCredits;
 }
 
 /** Sanitized quota snapshot for one locally named subscription account.
@@ -1034,6 +1063,15 @@ export interface PiUsageProfile {
   generalLimitReached?: boolean;
   limitReached?: boolean;
   message?: string;
+  credits?: PiUsageCredits;
+  resetCredits?: PiUsageResetCredits;
+}
+
+/** What spending one Codex rate-limit reset did, as the provider answered. */
+export type PiCodexResetOutcome = "reset" | "nothing_to_reset" | "no_credit" | "already_redeemed";
+
+export interface PiCodexResetResult {
+  outcome: PiCodexResetOutcome;
 }
 
 export interface PiUsageOverview {
