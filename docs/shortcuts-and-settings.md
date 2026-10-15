@@ -232,9 +232,10 @@ now.
 
 **Notify me when CI fails on my pull request** (Settings, General, Git) sends
 one alert when a check fails on the pull request of a workspace's branch,
-once per failing commit; a pull request that was already failing when Codara
-first saw it stays quiet until a later run fails. Clicking the alert opens
-Source Control. It asks GitHub only when the branch or its upstream moved,
+once per failing commit, including a pull request opened after the push
+whose checks failed before Codara first read it. Checks that failed while
+Codara was closed, or while the setting was off, stay quiet until a later
+run fails. Clicking the alert opens Source Control. It asks GitHub only when the branch or its upstream moved,
 every 90 seconds while checks run, and every 15 minutes otherwise.
 
 ### Terminal agent notifications

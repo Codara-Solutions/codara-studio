@@ -12,9 +12,13 @@
 // still running, and otherwise every 15 minutes, so a quiet repository costs
 // a handful of calls an hour.
 //
-// A pull request already failing when the watcher first sees it is not news,
-// so it stays quiet; every later failure of a new head commit, or of a re-run
-// that went back to running first, alerts once.
+// A pull request whose checks had already failed before the watcher started
+// (Codara was closed, or the setting off) is not news, so it stays quiet;
+// every later failure of a new head commit, or of a re-run that went back to
+// running first, alerts once. That includes a pull request the watcher first
+// sees already failing, when GitHub says the check failed after the watcher
+// started: one opened in the browser after the push the watcher saw is first
+// read up to 15 minutes later, and its checks have usually finished by then.
 
 import { latestCheckContexts } from "@shared/git-fix";
 import { isRemotePath } from "@shared/remote";
@@ -37,6 +41,8 @@ export interface CiPullRequestSnapshot {
   headOid: string;
   /** Names of the failing checks. */
   failed: string[];
+  /** When the last of the failing checks finished, by GitHub's clock; 0 when unknown. */
+  failedAt?: number;
   /** Checks still queued or running. */
   pending: number;
 }
@@ -108,12 +114,17 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
   let started = false;
   let timer: unknown = null;
   let running: Promise<void> | null = null;
+  // Since when failures are news: the start, or turning the setting back on.
+  let since = 0;
 
   function observe(workspace: Workspace, pr: CiPullRequestSnapshot): void {
     const key = `${pr.repository.toLowerCase()}#${pr.number}`;
     let track = pullRequests.get(key);
     if (!track) {
-      track = { firstHead: pr.headOid, firstFailed: pr.failed.length > 0, notified: [] };
+      // Failed before the watcher could have told you: quiet. Without a time
+      // from GitHub the failure counts as old.
+      const failedEarlier = pr.failed.length > 0 && !(pr.failedAt && pr.failedAt >= since);
+      track = { firstHead: pr.headOid, firstFailed: failedEarlier, notified: [] };
       pullRequests.set(key, track);
     }
     if (!pr.failed.length) {
@@ -145,8 +156,10 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
     if (!deps.enabled()) {
       workspaces.clear();
       pullRequests.clear();
+      since = 0;
       return;
     }
+    if (!since) since = deps.now();
     const state = await deps.loadState();
     const seen = new Set<string>();
     const local = state.workspaces.filter((workspace) => !isRemotePath(workspace.cwd)).slice(0, CI_WATCH_MAX_WORKSPACES);
@@ -212,6 +225,7 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
     start() {
       if (started) return;
       started = true;
+      if (!since) since = deps.now();
       schedule(CI_WATCH_FIRST_DELAY_MS);
     },
     stop() {
@@ -228,6 +242,12 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
 // ── Production wiring ───────────────────────────────────────────────────────
 
 const SUCCESS_STATES = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
+
+// GitHub writes 0001-01-01T00:00:00Z for a time it does not have.
+function githubTime(value: unknown): number {
+  const at = typeof value === "string" ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(at) && at > 0 ? at : 0;
+}
 const FAILED_STATES = new Set(["FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"]);
 
 /** The CI part of `gh pr view --json number,title,url,state,headRefOid,statusCheckRollup`. */
@@ -240,13 +260,16 @@ export function parseCiPullRequest(stdout: string): CiPullRequestSnapshot | null
   const headOid = typeof value.headRefOid === "string" ? value.headRefOid : "";
   if (!Number.isSafeInteger(number) || !match || !/^[a-f0-9]{40,64}$/i.test(headOid)) return null;
   const failed: string[] = [];
+  let failedAt = 0;
   let pending = 0;
   // The newest run of each check: a passing re-run replaces its failed attempt.
   for (const check of latestCheckContexts(value.statusCheckRollup)) {
     const signal = [check.conclusion, check.state, check.status].find((part) => typeof part === "string" && part) as string | undefined;
     const name = String(check.name ?? check.context ?? "check").replace(/\s+/g, " ").slice(0, 80);
-    if (signal && FAILED_STATES.has(signal.toUpperCase())) failed.push(name);
-    else if (!signal || !SUCCESS_STATES.has(signal.toUpperCase())) pending += 1;
+    if (signal && FAILED_STATES.has(signal.toUpperCase())) {
+      failed.push(name);
+      failedAt = Math.max(failedAt, githubTime(check.completedAt) || githubTime(check.startedAt));
+    } else if (!signal || !SUCCESS_STATES.has(signal.toUpperCase())) pending += 1;
   }
   return {
     repository: match[1],
@@ -255,6 +278,7 @@ export function parseCiPullRequest(stdout: string): CiPullRequestSnapshot | null
     state: typeof value.state === "string" ? value.state : "",
     headOid,
     failed,
+    failedAt,
     pending,
   };
 }
