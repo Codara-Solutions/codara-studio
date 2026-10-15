@@ -75,7 +75,7 @@ export default function SessionSearchIntro({ onClosed }: { onClosed: () => void 
             {status.phase === "error" && status.error ? status.error : sessionSearchProgressLine(status)}
           </div>
         </div>
-        <p className="ss-intro__hint">Change or turn it off anytime in Settings → Agent session search.</p>
+        <p className="ss-intro__hint">Change or turn it off anytime in Settings → Sessions.</p>
         <div className="ss-intro__actions">
           <button ref={buttonRef} type="button" className="spark-btn is-primary" onClick={close}>
             {working ? "Continue in background" : "Done"}

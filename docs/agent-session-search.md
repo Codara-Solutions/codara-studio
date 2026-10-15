@@ -108,7 +108,8 @@ Settings, Sessions, **Agent session search**:
 - **What agents can search**: what the `codara_session_search` tool may read
   (below).
 - **Session index** shows how many sessions and messages it holds and its
-  size on disk. **Rebuild index** reads everything again; **Delete index**
+  size on disk. **Rebuild index** reads everything again.
+- **Delete session index**, the last row: **Delete index**, clicked twice,
   removes the file and turns search off, so it is not rebuilt.
 
 ## For agents

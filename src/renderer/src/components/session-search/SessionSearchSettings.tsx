@@ -11,14 +11,14 @@ import {
   type SessionSearchPreferences,
 } from "@shared/session-search";
 import { usePreferences } from "../../preferences/usePreferences";
-import { InlineMessage, Segmented, SettingRow, SettingsSection, ToggleRow } from "../settings/SettingsPrimitives";
+import { DangerRow, InlineMessage, Segmented, SettingRow, SettingsSection, ToggleRow } from "../settings/SettingsPrimitives";
 import SessionAgentMark from "./SessionAgentMark";
 import { publishSessionSearchStatus, useSessionSearchStatus } from "./useSessionSearchStatus";
 import "./session-search.css";
 
 // The Agent session search section of Settings, Sessions: whether the local
 // index is kept, which agents it reads, what the agent tool may search, and
-// the index itself (its size, Rebuild, Delete). Self-contained, so the page
+// the index itself (its size and Rebuild, then Delete as the card's last row). Self-contained, so the page
 // around it can change without touching it.
 
 const TOOL_SCOPE_OPTIONS = [
@@ -29,7 +29,6 @@ const TOOL_SCOPE_OPTIONS = [
 export default function SessionSearchSettings() {
   const { preferences, setPreference, hydrated } = usePreferences();
   const { status } = useSessionSearchStatus();
-  const [confirmDelete, setConfirmDelete] = useState(false);
   const [busy, setBusy] = useState(false);
   const prefs = normalizeSessionSearchPreferences(preferences.sessionSearch);
 
@@ -117,47 +116,14 @@ export default function SessionSearchSettings() {
         title="Session index"
         desc={indexed}
         control={
-          <div className="ss-index-actions">
-            <button
-              type="button"
-              className="spark-btn"
-              disabled={!prefs.enabled || busy || working}
-              onClick={() =>
-                void act(async () => publishSessionSearchStatus(await window.spark.sessionSearch.rebuild()))
-              }
-            >
-              Rebuild index
-            </button>
-            {confirmDelete ? (
-              <>
-                <button
-                  type="button"
-                  className="spark-btn is-danger"
-                  disabled={busy}
-                  onClick={() =>
-                    void act(async () => {
-                      publishSessionSearchStatus(await window.spark.sessionSearch.deleteIndex());
-                      setConfirmDelete(false);
-                    })
-                  }
-                >
-                  Delete and turn off
-                </button>
-                <button type="button" className="spark-btn" onClick={() => setConfirmDelete(false)}>
-                  Cancel
-                </button>
-              </>
-            ) : (
-              <button
-                type="button"
-                className="spark-btn"
-                disabled={busy || (status.indexBytes === 0 && !prefs.enabled)}
-                onClick={() => setConfirmDelete(true)}
-              >
-                Delete index
-              </button>
-            )}
-          </div>
+          <button
+            type="button"
+            className="spark-btn"
+            disabled={!prefs.enabled || busy || working}
+            onClick={() => void act(async () => publishSessionSearchStatus(await window.spark.sessionSearch.rebuild()))}
+          >
+            Rebuild index
+          </button>
         }
       >
         {working || status.phase === "error" || status.lastSyncAt ? (
@@ -173,13 +139,15 @@ export default function SessionSearchSettings() {
             </InlineMessage>
           </div>
         ) : null}
-        {confirmDelete ? (
-          <InlineMessage tone="warn" role="alert">
-            Deletes the index from this computer and turns agent session search off, so it is not rebuilt. Your agents'
-            own transcripts are not touched.
-          </InlineMessage>
-        ) : null}
       </SettingRow>
+      <DangerRow
+        title="Delete session index"
+        desc="Deletes the index from this computer and turns agent session search off, so it is not rebuilt. Your agents' own transcripts are not touched."
+        action="Delete index"
+        confirmLabel="Delete and turn off"
+        disabled={busy || (status.indexBytes === 0 && !prefs.enabled)}
+        onConfirm={() => void act(async () => publishSessionSearchStatus(await window.spark.sessionSearch.deleteIndex()))}
+      />
     </SettingsSection>
   );
 }

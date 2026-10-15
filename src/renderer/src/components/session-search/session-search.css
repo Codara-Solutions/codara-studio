@@ -553,10 +553,3 @@
 .ss-agent-pick:disabled {
   opacity: 0.5;
 }
-
-.ss-index-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 6px;
-}

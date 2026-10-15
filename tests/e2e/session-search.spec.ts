@@ -283,7 +283,7 @@ test("the first-run dialog shows the build once and continues it in the backgrou
     const intro = page.getByTestId("session-search-intro");
     await expect(intro).toBeVisible({ timeout: 20_000 });
     await expect(intro.getByRole("heading", { name: "Indexing your agent sessions" })).toBeVisible();
-    await expect(intro).toContainText("Change or turn it off anytime in Settings → Agent session search.");
+    await expect(intro).toContainText("Change or turn it off anytime in Settings → Sessions.");
     await expect(intro.getByRole("status")).toHaveText(/4 sessions · 10 messages searchable/, { timeout: 20_000 });
     await intro.getByRole("button", { name: /Continue in background|Done/ }).click();
     await expect(intro).toHaveCount(0);
