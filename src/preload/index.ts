@@ -39,6 +39,7 @@ import { captureApi } from "./areas/capture";
 import { chromeLinkApi } from "./areas/chrome-link";
 import { pointApi } from "./areas/point";
 import { serversApi } from "./areas/servers";
+import { skillOriginsApi } from "./areas/skill-origins";
 import type {
   CoraMemoryItem,
   MemoryItemKind,
@@ -1761,6 +1762,7 @@ const api = {
     },
   },
   servers: serversApi,
+  skillOrigins: skillOriginsApi,
   chromeLink: chromeLinkApi,
   capture: captureApi,
   point: pointApi,

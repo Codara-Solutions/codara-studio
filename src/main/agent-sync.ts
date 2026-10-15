@@ -48,8 +48,12 @@ import {
 } from "./orchestration/pi-mcp-config";
 import { outsideWriteCapability } from "./outside-write-guard";
 
-/** Explicit exception to the outside-write guard: an MCP server or agent setting the user edited in Settings. */
-const AGENT_CONFIG_EDIT = outsideWriteCapability("an MCP server or agent setting the user edited in Settings");
+/**
+ * Explicit exception to the outside-write guard: an MCP server or agent setting
+ * the user edited in Settings, or a skill the user copied, updated or rolled
+ * back in the Capability Center (skill-updates-ipc.ts).
+ */
+export const AGENT_CONFIG_EDIT = outsideWriteCapability("an MCP server or agent setting the user edited in Settings");
 
 export type { McpServerConfig } from "./mcp-toml";
 
@@ -946,7 +950,7 @@ async function installSkillAssetToRuntime(
   }
   await fs.mkdir(destRoot, { recursive: true });
   await copyDir(sourceDir, dest);
-  return { ok: true, installed: [asset.name] };
+  return { ok: true, installed: [asset.name], path: dest };
 }
 
 function firstMcpMessage(result: AgentSyncResult, fallback: string): string {

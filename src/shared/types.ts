@@ -2138,6 +2138,8 @@ export interface AgentAssetInstallResult {
   ok: boolean;
   installed: string[];
   error?: string;
+  // Skills only: the folder the copy landed in.
+  path?: string;
 }
 
 // ---------------------------------------------------------------------------
