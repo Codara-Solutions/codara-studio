@@ -12,7 +12,8 @@
 //
 //   node scripts/test-terminal-agent-notify-pi.cjs
 //
-// Takes ~25 s: each finished turn rides out the 3 s quiet window.
+// Each finished turn rides out the 3 s quiet window on a fake clock
+// (scripts/fake-clock.cjs), so the suite runs in well under a second.
 
 const path = require("node:path");
 const os = require("node:os");
@@ -24,7 +25,10 @@ const ROOT = path.resolve(__dirname, "..");
 const SHARED_DIR = path.join(ROOT, "src", "shared");
 const ENTRY = path.join(ROOT, "src", "main", "terminal-agent-notify.ts");
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const { installFakeClock } = require("./fake-clock.cjs");
+
+let clock = null;
+const sleep = (ms) => clock.advance(ms);
 
 const harnessPlugin = {
   name: "terminal-agent-notify-pi-harness",
@@ -130,6 +134,7 @@ async function main() {
     plugins: [harnessPlugin],
     logLevel: "silent",
   });
+  clock = installFakeClock();
   const mod = require(outfile);
   const T = globalThis.__TAN;
   const feed = (paneId, s) => {
