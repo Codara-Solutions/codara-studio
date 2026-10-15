@@ -164,35 +164,8 @@
   white-space: normal;
 }
 
-.keep-awake-switch {
-  flex: 0 0 auto;
-  position: relative;
-  width: 24px;
-  height: 14px;
+.keep-awake-lid__track {
   margin-top: 1px;
-  border-radius: 999px;
-  background: color-mix(in oklab, var(--ink) 18%, transparent);
-  transition: background var(--motion-fast) var(--ease-out);
-}
-
-.keep-awake-switch.is-on {
-  background: var(--accent);
-}
-
-.keep-awake-switch__knob {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--ink);
-  transition: transform var(--motion-fast) var(--ease-out);
-}
-
-.keep-awake-switch.is-on .keep-awake-switch__knob {
-  background: var(--on-accent);
-  transform: translateX(10px);
 }
 
 .keep-awake-popover__foot {
@@ -223,11 +196,4 @@
 
 .keep-awake-popover__link:hover {
   background: var(--hover);
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .keep-awake-switch,
-  .keep-awake-switch__knob {
-    transition: none;
-  }
 }

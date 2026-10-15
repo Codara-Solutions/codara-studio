@@ -838,7 +838,12 @@ async function main() {
     assert.match(read("src", "renderer", "src", "components", "WindowChrome.tsx"), /<SystemMeters \/>\n\s*<KeepAwakeControl \/>/);
     const css = read("src", "renderer", "src", "components", "keep-awake", "keep-awake.css");
     assert.doesNotMatch(css.replace(/\/\*[\s\S]*?\*\//g, ""), /backdrop-filter/);
-    assert.match(read("src", "renderer", "src", "components", "keep-awake", "KeepAwakeControl.tsx"), /className="spark-menu spark-fade-in keep-awake-popover"/);
+    const control = read("src", "renderer", "src", "components", "keep-awake", "KeepAwakeControl.tsx");
+    assert.match(control, /className="spark-menu spark-fade-in keep-awake-popover"/);
+    // An off switch is a grey track with a white knob everywhere; an ink
+    // knob reads as on in the light themes.
+    assert.match(control, /`st-switch keep-awake-lid__track\$\{lid\.enabled \? " is-on" : ""\}`/);
+    assert.match(control, /className="st-switch__knob"/);
   });
 
   if (failures > 0) {

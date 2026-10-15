@@ -176,8 +176,10 @@ function KeepAwakePopover({
           data-keep-awake-lid
           onClick={() => onLid(!lid.enabled)}
         >
-          <span className={`keep-awake-switch${lid.enabled ? " is-on" : ""}`} aria-hidden>
-            <span className="keep-awake-switch__knob" />
+          {/* The Settings switch track (.st-switch in styles.css), so an off
+              switch reads the same everywhere: grey with a white knob. */}
+          <span className={`st-switch keep-awake-lid__track${lid.enabled ? " is-on" : ""}`} aria-hidden>
+            <span className="st-switch__knob" />
           </span>
           <span className="keep-awake-option__text">
             <span className="keep-awake-option__label">Also with the lid closed</span>
