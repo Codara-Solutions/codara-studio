@@ -62,6 +62,21 @@ async function load(dir) {
   return require(outfile);
 }
 
+/** The DOM reads of feature tips, bundled alone; tests stub the few globals they touch. */
+async function loadDom(dir) {
+  const outfile = path.join(dir, "feature-tips-dom.cjs");
+  await esbuild.build({
+    entryPoints: [path.join(RENDERER, "components", "feature-tips", "feature-tips-dom.ts")],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile,
+    alias: { "@shared": path.join(ROOT, "src", "shared") },
+    logLevel: "silent",
+  });
+  return require(outfile);
+}
+
 function rendererSources() {
   const out = [];
   const walk = (dir) => {
@@ -110,6 +125,7 @@ async function main() {
   fs.mkdirSync(home);
   process.env.CODARA_HOME_DIR = home;
   const tips = await load(dir);
+  const dom = await loadDom(dir);
   const {
     FEATURE_CATALOG,
     FEATURE_TIPS_TIMING,
@@ -128,6 +144,7 @@ async function main() {
     featureTipsMode,
     isCalmMoment,
     tipDue,
+    tipCheckDelay,
     pendingTips,
     pickNextTip,
     placeInCorner,
@@ -388,6 +405,83 @@ async function main() {
     const recent = { ...state, lastTipAt: 1_000 };
     assert.equal(tipDue(recent, 1_000 + timing.gapMs - 1, timing, false), false);
     assert.equal(tipDue(recent, 1_000 + timing.gapMs, timing, false), true);
+  });
+
+  check("the calm-moment poll sleeps until a tip can be due", () => {
+    const timing = { ...FEATURE_TIPS_TIMING };
+    const fresh = emptyFeatureTipsState();
+    assert.equal(tipCheckDelay(fresh, 0, 0, timing), timing.settleMs, "waits for the app to settle");
+    assert.equal(tipCheckDelay(fresh, timing.settleMs + 5, 0, timing), 0, "settled, never shown: look now");
+    const hour = 60 * 60_000;
+    const recent = { ...fresh, lastTipAt: 10 * hour };
+    assert.equal(tipCheckDelay(recent, 11 * hour, 0, timing), 10 * hour + timing.gapMs - 11 * hour, "waits out the gap");
+    assert.equal(tipCheckDelay(recent, 10 * hour + timing.gapMs, 0, timing), 0);
+    const future = { ...fresh, lastTipAt: 400 * 24 * hour };
+    assert.equal(tipCheckDelay(future, hour, 0, timing), timing.settleMs + timing.gapMs, "a clock set back stays in a timer's range");
+    assert.ok(timing.settleMs + timing.gapMs < 2 ** 31 - 1, "fits setTimeout");
+    // The host follows it: no fixed interval from the first second of a session.
+    const host = read(path.join(RENDERER, "components", "feature-tips", "FeatureTipsHost.tsx"));
+    assert.match(host, /window\.setTimeout\([\s\S]*?window\.setInterval\(tryOffer, timing\.pollMs\)[\s\S]*?tipCheckDelay\(/);
+    assert.match(host, /\["pointerdown", "pointermove", "wheel"\]/, "pointer moves and scrolls count as busy");
+    assert.match(host, /addEventListener\(COMMAND_RAN_EVENT, onKey\)/, "a shortcut the dispatcher swallowed is still a key press");
+  });
+
+  check("focus in a browser page or a frame counts as typing: those keys never reach the window", () => {
+    const saved = ["document", "HTMLTextAreaElement", "HTMLInputElement", "HTMLIFrameElement"].map((name) => [
+      name,
+      Object.getOwnPropertyDescriptor(globalThis, name),
+    ]);
+    class FakeElement {
+      constructor(tagName) {
+        this.tagName = tagName;
+      }
+      closest() {
+        return null;
+      }
+    }
+    class FakeTextArea extends FakeElement {
+      constructor(value, classes = []) {
+        super("TEXTAREA");
+        this.value = value;
+        this.classList = { contains: (name) => classes.includes(name) };
+      }
+    }
+    class FakeInput extends FakeElement {
+      constructor(type, value) {
+        super("INPUT");
+        this.type = type;
+        this.value = value;
+      }
+    }
+    class FakeIFrame extends FakeElement {
+      constructor() {
+        super("IFRAME");
+      }
+    }
+    Object.assign(globalThis, { HTMLTextAreaElement: FakeTextArea, HTMLInputElement: FakeInput, HTMLIFrameElement: FakeIFrame });
+    const focused = (element) => {
+      globalThis.document = { activeElement: element };
+      return dom.mayBeTyping();
+    };
+    try {
+      assert.equal(focused(null), false);
+      assert.equal(focused(new FakeElement("BODY")), false);
+      assert.equal(focused(new FakeElement("WEBVIEW")), true, "a page in the Codara browser has the keyboard");
+      assert.equal(focused(new FakeIFrame()), true);
+      assert.equal(focused(new FakeTextArea("half a sentence")), true, "an unfinished draft");
+      assert.equal(focused(new FakeTextArea("   ")), false);
+      assert.equal(focused(new FakeTextArea("ls -la", ["xterm-helper-textarea"])), false, "a terminal counts by key idle time only");
+      assert.equal(focused(new FakeInput("search", "needle")), true);
+      assert.equal(focused(new FakeInput("checkbox", "on")), false);
+      const inTip = new FakeElement("WEBVIEW");
+      inTip.closest = () => ({});
+      assert.equal(focused(inTip), false, "the tip layer itself never holds a tip back");
+    } finally {
+      for (const [name, descriptor] of saved) {
+        if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+        else delete globalThis[name];
+      }
+    }
   });
 
   check("pending tips skip used and shown features, fresh ones first", () => {

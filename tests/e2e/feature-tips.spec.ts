@@ -10,9 +10,9 @@ import { FEATURE_CATALOG } from "../../src/shared/feature-tips";
 // shortens the waits (a second to settle, 1.2 s without a key press).
 //
 // - without the opt-in, usage is still tracked and no tip ever appears
-// - a tip waits while you type and until its control is on screen, steps
-//   aside for a dialog, and its tour points at the real control, which then
-//   works as usual and ends the tour
+// - a tip waits while you type or move the pointer and until its control is
+//   on screen, steps aside for a dialog, and its tour points at the real
+//   control, which then works as usual and ends the tour
 // - a tip never covers the composer; Escape closes it; Settings brings shown
 //   tips back and turns tips on again after "Don't show tips"
 
@@ -102,6 +102,13 @@ test("a tip waits for a calm moment and its tour points at the real control", as
     await expect(pane.locator(".xterm-helper-textarea")).toBeFocused();
     for (let i = 0; i < 24; i += 1) {
       await page.keyboard.type("x");
+      await page.waitForTimeout(110);
+    }
+    await expect(tip).toHaveCount(0);
+    // A pointer on the move holds it back as well, long after the last key.
+    const paneBox = (await pane.boundingBox())!;
+    for (let i = 0; i < 24; i += 1) {
+      await page.mouse.move(paneBox.x + 40 + (i % 2) * 30, paneBox.y + paneBox.height / 2);
       await page.waitForTimeout(110);
     }
     await expect(tip).toHaveCount(0);

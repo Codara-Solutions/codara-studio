@@ -207,9 +207,10 @@ Now and then Codara shows one short tip about a feature you have not tried
 yet, such as splitting a terminal, pointing at a page element for an agent,
 or the notification center. A tip appears at most once a day and once per
 session, a few minutes after Codara opens, and only at a calm moment: not
-while you type or click, not while a dialog, menu or the first-run guide is
-open, and only when the feature's control is on screen. It never covers the
-chat composer or a dialog, and steps aside while one is open.
+while you type, click, scroll or move the pointer, not while a page in the
+Codara browser has the keyboard, not while a dialog, menu or the first-run
+guide is open, and only when the feature's control is on screen. It never
+covers the chat composer or a dialog, and steps aside while one is open.
 
 - **Show me** starts a short tour: the guide card from the first-run tour
   points at the real control with a ring around it. Click the control, or

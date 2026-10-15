@@ -102,13 +102,17 @@ export function avoidedBoxes(): Box[] {
 }
 
 /**
- * The person has an unfinished line in a text field. Terminals and the code
+ * The person may be typing where the key idle time cannot tell, or has an
+ * unfinished line in a text field. Keys typed into a page in the Codara
+ * browser (a <webview>) or into a frame stay in that page and never reach
+ * this window, so focus there counts as typing. Terminals and the code
  * editor keep focus for hours, so for them only typing itself counts (the
  * key idle time).
  */
-export function draftInProgress(): boolean {
+export function mayBeTyping(): boolean {
   const active = document.activeElement;
   if (!active || inLayer(active)) return false;
+  if (active.tagName === "WEBVIEW" || active instanceof HTMLIFrameElement) return true;
   if (active instanceof HTMLTextAreaElement) {
     return !active.classList.contains("xterm-helper-textarea") && active.value.trim().length > 0;
   }

@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  COMMAND_RAN_EVENT,
   isCalmMoment,
   pendingTips,
   pickNextTip,
   renderTipText,
+  tipCheckDelay,
   tipConditions,
   tipDue,
   type FeatureCatalogEntry,
@@ -15,7 +17,7 @@ import { usePreferences } from "../../preferences/usePreferences";
 import { buildBindingTable } from "../../shortcuts/bindings";
 import { chordToHint } from "../../shortcuts/chord";
 import { emitLocalToast } from "../../notifications/local-toast";
-import { blockingSurfaceOpen, conditionMet, draftInProgress } from "./feature-tips-dom";
+import { blockingSurfaceOpen, conditionMet, mayBeTyping } from "./feature-tips-dom";
 import { useFeatureUsage } from "./useFeatureUsage";
 import { FeatureTipCard, type TipText } from "./FeatureTipCard";
 import { FeatureTour, type TourStepText } from "./FeatureTour";
@@ -77,21 +79,6 @@ export default function FeatureTipsHost({ onboardingOpen, hasWorkspaces }: Props
     };
   }, []);
 
-  useEffect(() => {
-    const onKey = () => {
-      lastKeyAt.current = Date.now();
-    };
-    const onPointer = () => {
-      lastPointerAt.current = Date.now();
-    };
-    window.addEventListener("keydown", onKey, { capture: true, passive: true });
-    window.addEventListener("pointerdown", onPointer, { capture: true, passive: true });
-    return () => {
-      window.removeEventListener("keydown", onKey, { capture: true });
-      window.removeEventListener("pointerdown", onPointer, { capture: true });
-    };
-  }, []);
-
   const bindings = useMemo(
     () => buildBindingTable(preferences.keybindings),
     [preferences.keybindings],
@@ -136,6 +123,32 @@ export default function FeatureTipsHost({ onboardingOpen, hasWorkspaces }: Props
     !tour &&
     !shownThisSession.current;
 
+  // What the person is doing: keys, clicks, pointer moves and scrolls. Only
+  // followed while a tip may still come this session; it starts out busy, so
+  // a tip never lands on input that came before the listening began.
+  useEffect(() => {
+    if (!scheduling) return;
+    const start = Date.now();
+    lastKeyAt.current = start;
+    lastPointerAt.current = start;
+    const onKey = () => {
+      lastKeyAt.current = Date.now();
+    };
+    const onPointer = () => {
+      lastPointerAt.current = Date.now();
+    };
+    const pointerEvents = ["pointerdown", "pointermove", "wheel"] as const;
+    window.addEventListener("keydown", onKey, { capture: true, passive: true });
+    // The shortcut dispatcher stops a chord before this listener sees it.
+    window.addEventListener(COMMAND_RAN_EVENT, onKey);
+    for (const name of pointerEvents) window.addEventListener(name, onPointer, { capture: true, passive: true });
+    return () => {
+      window.removeEventListener("keydown", onKey, { capture: true });
+      window.removeEventListener(COMMAND_RAN_EVENT, onKey);
+      for (const name of pointerEvents) window.removeEventListener(name, onPointer, { capture: true });
+    };
+  }, [scheduling]);
+
   useEffect(() => {
     if (!scheduling || !boot) return;
     const timing = boot.timing;
@@ -145,7 +158,7 @@ export default function FeatureTipsHost({ onboardingOpen, hasWorkspaces }: Props
       if (!current || !tipDue(current, now, timing, shownThisSession.current)) return;
       if (document.visibilityState !== "visible") return;
       if (!isCalmMoment({ now, startedAt: startedAt.current, lastKeyAt: lastKeyAt.current, lastPointerAt: lastPointerAt.current, timing })) return;
-      if (blockingSurfaceOpen() || draftInProgress()) return;
+      if (blockingSurfaceOpen() || mayBeTyping()) return;
       const inUse = usage.inUseNow();
       const found: { tip: RenderedTip | null } = { tip: null };
       const entry = pickNextTip(current, (candidate) => {
@@ -159,8 +172,19 @@ export default function FeatureTipsHost({ onboardingOpen, hasWorkspaces }: Props
       setTip(found.tip);
       void window.spark.featureTips.tipShown(entry.id).catch(() => undefined);
     };
-    const timer = window.setInterval(tryOffer, timing.pollMs);
-    return () => window.clearInterval(timer);
+    // No tip can be due before the app settles and the gap since the last one
+    // passes, so the calm-moment poll sleeps until then.
+    let poll = 0;
+    const wait = window.setTimeout(
+      () => {
+        poll = window.setInterval(tryOffer, timing.pollMs);
+      },
+      tipCheckDelay(boot.state, Date.now(), startedAt.current, timing),
+    );
+    return () => {
+      window.clearTimeout(wait);
+      window.clearInterval(poll);
+    };
   }, [scheduling, boot, render, usage]);
 
   // Tips turned off elsewhere (Settings) take the one on screen with them.

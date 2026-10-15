@@ -683,7 +683,7 @@ export interface FeatureTipsTiming {
   settleMs: number;
   /** No key pressed for this long: not typing. */
   idleKeyMs: number;
-  /** No click or drag for this long. */
+  /** No pointer move, click or scroll for this long. */
   idlePointerMs: number;
   /** At least this long between two tips. */
   gapMs: number;
@@ -703,7 +703,7 @@ export const FEATURE_TIPS_TIMING: FeatureTipsTiming = {
 export const FEATURE_TIPS_TEST_TIMING: FeatureTipsTiming = {
   settleMs: 1_000,
   idleKeyMs: 1_200,
-  idlePointerMs: 300,
+  idlePointerMs: 800,
   gapMs: 0,
   pollMs: 200,
 };
@@ -748,6 +748,19 @@ export function isCalmMoment(input: CalmInput): boolean {
 export function tipDue(state: FeatureTipsState, now: number, timing: FeatureTipsTiming, shownThisSession: boolean): boolean {
   if (!state.enabled || shownThisSession) return false;
   return state.lastTipAt === null || now - state.lastTipAt >= timing.gapMs;
+}
+
+/**
+ * How long until a tip can be due: the app has settled and the gap since the
+ * last tip has passed. The host looks for a calm moment only after that, so a
+ * session does not wake every few seconds through a whole day for nothing.
+ * Never longer than one full wait, so a clock set back (a last tip in the
+ * future) cannot push it out of a timer's range.
+ */
+export function tipCheckDelay(state: FeatureTipsState, now: number, startedAt: number, timing: FeatureTipsTiming): number {
+  const settled = startedAt + timing.settleMs;
+  const gapEnds = state.lastTipAt === null ? 0 : state.lastTipAt + timing.gapMs;
+  return Math.min(Math.max(0, Math.max(settled, gapEnds) - now), timing.settleMs + timing.gapMs);
 }
 
 /** Tips not yet shown about features not yet used, in offer order. */
