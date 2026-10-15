@@ -263,6 +263,29 @@ async function main() {
     assert.equal(probe.startEventLoopProbe(() => undefined, { CODARA_EVENT_LOOP_PROBE: "0" }), false, "can be switched off");
   });
 
+  await check("a paused probe records no window and sees no stall", async () => {
+    const lines = [];
+    const before = probe.recentEventLoopWindows().length;
+    assert.equal(probe.startEventLoopProbe((line) => lines.push(line), { CODARA_EVENT_LOOP_WINDOW_MS: "200" }), true);
+    probe.setEventLoopProbeSampling(false);
+    await sleep(250);
+    const end = Date.now() + 400;
+    while (Date.now() < end) {
+      // Unfocused: nobody feels this one.
+    }
+    await sleep(500);
+    const paused = probe.recentEventLoopWindows().length;
+    // The window that was open when sampling paused still counts once.
+    assert.ok(paused - before <= 1, `windows while paused: ${paused - before}`);
+    assert.deepEqual(lines, []);
+    probe.setEventLoopProbeSampling(true);
+    await sleep(450);
+    probe.stopEventLoopProbe();
+    assert.ok(probe.recentEventLoopWindows().length > paused, "sampling again records windows again");
+    probe.setEventLoopProbeSampling(false);
+    assert.equal(probe.eventLoopProbeRunning(), false, "a pause after stop is a no-op");
+  });
+
   if (failures > 0) {
     console.error(`\n${failures} check(s) failed`);
     process.exit(1);

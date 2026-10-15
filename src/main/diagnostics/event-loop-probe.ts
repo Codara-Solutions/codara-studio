@@ -8,10 +8,13 @@
 // and one summary an hour. The last hour of windows is kept in memory for
 // the diagnostics export.
 //
-// The histogram samples on a timer of its own that runs for the whole
-// session, so its interval is a wake-up rate of the main thread: 50 ms keeps
-// it to 20 a second, and a delay is still known to within 50 ms, plenty for
-// stalls of 250 ms and more.
+// The histogram samples on a timer of its own, so its interval is a wake-up
+// rate of the main thread: 50 ms keeps it to 20 a second, and a delay is
+// still known to within 50 ms, plenty for stalls of 250 ms and more. A
+// sticky app is only felt by someone using it, so sampling pauses while no
+// Codara window has focus (setEventLoopProbeSampling) and an idle app in the
+// background is not woken 20 times a second; the freeze watchdog keeps
+// watching either way.
 //
 //   CODARA_EVENT_LOOP_WINDOW_MS=60000   window length (tests use less)
 //   CODARA_EVENT_LOOP_PROBE=0           no probe
@@ -98,6 +101,7 @@ export function eventLoopLogLines(
 const windows: EventLoopWindow[] = [];
 let timer: NodeJS.Timeout | null = null;
 let stopHistogram: (() => void) | null = null;
+let setSampling: ((active: boolean) => void) | null = null;
 
 export function recentEventLoopWindows(): EventLoopWindow[] {
   return windows.slice();
@@ -123,10 +127,28 @@ export function startEventLoopProbe(
     return false;
   }
   stopHistogram = () => histogram.disable();
+  let sampling = true;
+  // Whether the histogram sampled at all in the current window.
+  let sampledInWindow = true;
+  setSampling = (active) => {
+    if (active === sampling) return;
+    sampling = active;
+    if (active) {
+      sampledInWindow = true;
+      histogram.enable();
+    } else {
+      histogram.disable();
+    }
+  };
   const state = createEventLoopLogState();
   timer = setInterval(() => {
+    const sampled = sampledInWindow;
+    sampledInWindow = sampling;
     const window = summarizeEventLoopWindow(histogram, windowMs, Date.now());
     histogram.reset();
+    // A window spent wholly paused measured nothing; an all-zero entry would
+    // read as a perfectly smooth minute.
+    if (!sampled) return;
     windows.push(window);
     if (windows.length > KEPT_WINDOWS) windows.splice(0, windows.length - KEPT_WINDOWS);
     for (const line of eventLoopLogLines(window, state, summaryEvery)) log(line);
@@ -135,9 +157,18 @@ export function startEventLoopProbe(
   return true;
 }
 
+/**
+ * Pause or resume sampling (the window timer keeps running). diagnostics
+ * index.ts samples only while a Codara window has focus.
+ */
+export function setEventLoopProbeSampling(active: boolean): void {
+  setSampling?.(active);
+}
+
 export function stopEventLoopProbe(): void {
   if (timer) clearInterval(timer);
   timer = null;
   stopHistogram?.();
   stopHistogram = null;
+  setSampling = null;
 }
