@@ -664,6 +664,12 @@
   position: fixed;
   z-index: 130;
 }
+/* The button is both .spark-menu and .rv-textbtn, and this sheet can load
+   after the menu rules (review.css is its own chunk), so .rv-textbtn's
+   transparent face would win. Keep the menu face; glass tiers still outrank. */
+.rv-md-add.spark-menu {
+  background: var(--panel-2);
+}
 .rv-md-popover {
   position: fixed;
   z-index: 131;
