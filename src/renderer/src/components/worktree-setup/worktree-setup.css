@@ -17,6 +17,17 @@
   font-family: var(--font-sans);
   animation: spark-fade-in var(--motion-fast) var(--ease-out) both;
 }
+/* A running setup spins its mark every frame for as long as the setup
+   runs. Under the menu tier's SVG lens that re-renders the refraction each
+   frame, so the tray keeps the menu frost without the lens and paints in
+   its own layer, like the worker session picker. */
+@media not (prefers-reduced-transparency: reduce) {
+  html:not([data-glass="off"]) .spark-glass.wts-tray {
+    -webkit-backdrop-filter: blur(var(--glass-blur-menu)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-menu));
+    backdrop-filter: blur(var(--glass-blur-menu)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-menu));
+    contain: paint;
+  }
+}
 .wts-tray__row {
   display: grid;
   grid-template-columns: 16px minmax(0, 1fr) auto;

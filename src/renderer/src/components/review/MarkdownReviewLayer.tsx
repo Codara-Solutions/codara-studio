@@ -231,7 +231,7 @@ export default function MarkdownReviewLayer({ containerRef, basePath, text }: Pr
             <button
               ref={buttonRef}
               type="button"
-              className="spark-menu spark-glass rv-md-add rv-textbtn"
+              className="spark-menu spark-glass rv-md-add"
               data-testid="markdown-add-note"
               style={{ ...place(pickVisible.rect, 92, 28, "end"), minWidth: 0, padding: "4px 10px" }}
               // Keeps the selection: a click would otherwise collapse it first.

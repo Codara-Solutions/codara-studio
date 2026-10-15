@@ -664,11 +664,22 @@
   position: fixed;
   z-index: 130;
 }
-/* The button is both .spark-menu and .rv-textbtn, and this sheet can load
-   after the menu rules (review.css is its own chunk), so .rv-textbtn's
-   transparent face would win. Keep the menu face; glass tiers still outrank. */
+/* A floating menu face, not an inline .rv-textbtn: that class's transparent
+   face and hover would win over the menu's whenever this sheet loads after
+   the menu rules (review.css is its own chunk), leaving see-through text
+   over the page. Two classes keep the face in any load order; the glass
+   tiers still outrank it. */
 .rv-md-add.spark-menu {
   background: var(--panel-2);
+  border-radius: var(--radius-control, 7px);
+  color: var(--ink-dim);
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: default;
+}
+.rv-md-add.spark-menu:hover {
+  color: var(--ink);
 }
 .rv-md-popover {
   position: fixed;

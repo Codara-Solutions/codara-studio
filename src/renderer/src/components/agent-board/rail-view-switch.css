@@ -6,7 +6,9 @@
   padding: 6px 8px 0;
 }
 
-.rail-view-switch__track .spark-segmented-item {
+/* Outweighs .spark-segmented.is-wrap's sizing (and styles.css loads after
+   this sheet), so both views get the same width whatever their labels. */
+.spark-segmented.is-wrap.rail-view-switch__track .spark-segmented-item {
   flex: 1 1 0;
   min-width: 0;
 }
