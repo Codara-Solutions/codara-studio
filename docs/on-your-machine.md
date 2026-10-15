@@ -18,6 +18,7 @@ a `spark-` prefix keep the product's old name for compatibility.
 | `runs/<id>/run.json`, `runs/<id>/events.jsonl` | Every Cora run: transcript, workers, board, whiteboard, and an event journal. |
 | `memory/` | Cora's memory, global and per workspace, as plain markdown you can edit. Lines Cora saves with `codara_remember` (tagged `[cora ...]`) stay until you or Cora remove them; lessons it records on its own (tagged `[auto ...]`) expire after 30 days. |
 | `scheduler.json` | Armed automation triggers. They fire only while the app is open. |
+| `workspace-status.json` | Each workspace's status and one-line progress note, set by you or by an agent, with its five latest checkpoints. A workspace's entry is dropped when you delete the workspace. |
 | `notifications.json`, `notification-mutes.json` | The notification center's history (at most 200 rows; read rows are dropped after 7 days, any row after 30) and the sources you muted. A history file that cannot be read is kept beside it as `notifications.json.corrupt-<time>`. |
 | `onboarding.json` | Where you are in the first-run guide. |
 | `agent-socket.json` | The loopback address and token of the running app (mode 0600), rewritten on every start. |

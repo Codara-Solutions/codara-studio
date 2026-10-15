@@ -388,6 +388,7 @@ owns each file:
 | `memory/` (Cora's memory) | `cora-memory.ts`, `cora-profiles.ts` |
 | `memory/learned/items.json`, `memory/profiles/<id>/learned/items.json` (what Cora learned by itself), `memory/learning.json` (its switches) | `memory-items.ts`, `memory-learning.ts` |
 | `scheduler.json` (armed automation triggers) | `scheduler.ts` |
+| `workspace-status.json` (each workspace's status, note and checkpoints) | `workspace-status/` |
 | `claude-cli/` (the live slot `live/home`, saved logins, `live-login.json`) | `claude-cli-live-login.ts`, `claude-cli-account-profiles.ts`, `cli-account-homes.ts` |
 | `codex-cli/` (one managed `CODEX_HOME` per account) | `codex-cli-account-profiles.ts`, `cli-account-homes.ts` |
 | `grok-cli/` (one managed `GROK_HOME` per account) | `grok-cli-account-profiles.ts`, `cli-account-homes.ts` |

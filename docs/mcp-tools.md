@@ -93,7 +93,7 @@ environment variable that Codara sets for the agent:
 
 | Set | Who sees it | What it adds |
 |---|---|---|
-| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, `codara_notify_user` and the worktree tools; whiteboard and board only inside a Cora chat |
+| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, `codara_notify_user`, `codara_workspace_status` and the worktree tools; whiteboard and board only inside a Cora chat |
 | `worker` | Workers in automation passes | `studio` with the whiteboard and board read-only, plus `codara_ask_user` and `codara_request_next_iteration` |
 | `execute` | A Cora chat that orchestrates work | `studio`, plus orchestration, automation management and the worktree tools |
 | `automation` | The chat that designs automations | `studio`, plus automation management, `codara_ask_user` and `codara_name_chat` |
@@ -584,6 +584,30 @@ Only in `studio` outside a Cora chat (a Cora run announces its own outcome).
 | Tool | What it does |
 |---|---|
 | `codara_notify_user` | Sends a Codara notification from the agent's own pane: `done` when it finished a long task, `needs_input` when it is blocked on you. Clicking it opens the pane, and nothing shows while you are already looking at that pane. When Codara already reads the agent's own turn signals in that pane (Claude Code hooks or status reports, the Codex notify program or its session file), the call returns `published: false` with `reason: "announced_by_codara"`, because an alert sent mid-turn would arrive before the real end and displace the exact one. Otherwise it shares the pane's notification key with Codara's own end-of-turn alert, so the two arrive as one. At most one per kind every 5 seconds. An agent outside a Codara terminal, or with Codara closed, gets `published: false` back rather than an error. |
+
+## Workspace status
+
+Only in `studio` outside a Cora chat (a Cora chat already shows its own state
+on the workspace's row).
+
+| Tool | What it does |
+|---|---|
+| `codara_workspace_status` | Reads (no arguments) or sets the status and one-line progress note of the agent's own workspace, which the rail shows under the workspace's name. `status` is one of `todo`, `in_progress`, `in_review`, `done` and `blocked`; `note` is one plain line of at most 140 characters (longer text is cut and the result says `noteTruncated`, an empty note clears it); `clear: true` removes both. The result carries the current state, who set it and the five latest checkpoints, newest first, so an agent picking up another session's work can read where it stands. |
+
+The workspace is always the caller's own, found from the terminal pane the
+agent runs in, never named by the call. An agent outside a Codara terminal
+gets `updated: false` with `reason: "not_in_codara_workspace"`, one whose
+workspace was removed gets `reason: "workspace_gone"`, and with Codara closed
+the call returns `reason: "codara_offline"` rather than an error. Imported
+pull request runs cannot call it. The server's instructions ask agents to set
+`in_progress` with a short note when they start, a new note at each
+milestone, `in_review` or `done` when they finish, and `blocked` with the
+reason when they need you. You set, change or clear a status yourself from the
+row's menu (**Set status…**, or right-click the row); an agent and you can
+each overwrite the other's latest value, and every change is kept as a
+checkpoint. Statuses live in `<codaraHome>/workspace-status.json` and are
+dropped when their workspace is deleted. Agents without MCP use
+`cora tool workspace_status --status in_progress --note "..."`.
 
 ## Worktrees
 

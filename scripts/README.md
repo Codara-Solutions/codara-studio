@@ -246,7 +246,10 @@ credential and `pane.open`: overlays over the calling pane, tabs beside it),
 `codara-pane` and `cora` wrappers written at boot), `test-mcp-tool-manifest`
 (the tool module contract, module size budgets, the manifest against every
 roster, worker fences for new tools), `test-agent-delivery` (sending to a
-pane, a chat or the inbox, and `preview.inbox`), `test-agent-socket` (needs a
+pane, a chat or the inbox, and `preview.inbox`), `test-workspace-status`
+(workspace statuses and notes: the rules in `src/shared/workspace-status.ts`,
+the store in `src/main/workspace-status/` and the `workspace.status` socket
+method that routes an agent to its own workspace), `test-agent-socket` (needs a
 build).
 
 ### Preview browser
