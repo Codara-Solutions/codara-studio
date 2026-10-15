@@ -52,6 +52,7 @@ import { terminalScrollbackApi } from "./areas/terminal-scrollback";
 import { agentHibernationApi } from "./areas/agent-hibernation";
 import { worktreeCleanupApi } from "./areas/worktree-cleanup";
 import { worktreeSetupApi } from "./areas/worktree-setup";
+import { portsApi } from "./areas/ports";
 import type {
   CoraMemoryItem,
   MemoryItemKind,
@@ -1806,6 +1807,7 @@ const api = {
   terminalScrollback: terminalScrollbackApi,
   worktreeCleanup: worktreeCleanupApi,
   featureTips: featureTipsApi,
+  ports: portsApi,
 };
 
 function isBrowserUrl(url: string): boolean {

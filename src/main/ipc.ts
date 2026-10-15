@@ -502,6 +502,7 @@ import {
 import { registerAgentHibernationIpc } from "./agent-hibernation";
 import { registerWorktreeCleanupIpc } from "./worktree-cleanup";
 import { registerWorktreeSetupIpc } from "./worktree-setup";
+import { registerPortForwardIpc } from "./remote/port-forward-runtime";
 
 function nativeCliAccountRuntimeFromIpc(value: unknown): NativeCliAccountRuntime {
   if (value === "claude" || value === "codex" || value === "grok") return value;
@@ -4145,6 +4146,7 @@ export function registerIpc(): void {
   registerAgentHibernationIpc(handle);
   registerWorktreeCleanupIpc(handle);
   registerFeatureTipsIpc(handle);
+  registerPortForwardIpc(handle);
 }
 
 const MEMORY_KINDS = new Set<MemoryItemKind>(["preference", "correction", "fact", "procedure", "lesson"]);

@@ -1,0 +1,94 @@
+/* The Ports chip and popover reuse status.css; these are the parts only they
+   have. The notice stack is a floating layer, so it takes the glass material
+   (spark-glass--strong on each card) like the popover. */
+
+.ports-pop__flush {
+  margin-left: 0;
+}
+
+.ports-pop__available .status-pop__meta {
+  margin-right: 4px;
+}
+
+.ports-pop__form {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.ports-pop__input {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--rule-soft);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.ports-pop__input::placeholder {
+  color: var(--muted);
+  font-family: var(--font-sans);
+}
+
+.ports-pop__input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.ports-notices {
+  position: fixed;
+  right: 16px;
+  bottom: 34px;
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(380px, calc(100vw - 32px));
+}
+
+.ports-notice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 8px 9px 12px;
+  border-radius: var(--radius-surface, 7px);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 12px;
+}
+
+.ports-notice__text {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  line-height: 1.4;
+}
+
+.ports-notice__close {
+  appearance: none;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ports-notice__close:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+.ports-notice__close:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
