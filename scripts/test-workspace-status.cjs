@@ -337,6 +337,14 @@ async function toolActsOnTheCallersWorkspace() {
     await assert.rejects(call({ ...params, callerPaneId: "pane-claude" }), (error) => error instanceof ws.PreviewToolParamsError);
   }
   assert.equal((await store.get("ws-pane")).note, "42");
+
+  // Outside a chat, client "cora" is the in-process bridge `cora tool` and a
+  // pane's Pi use: a shell or aider is never credited as Cora. The pane's own
+  // agent still names itself when Codara knows it.
+  const fromShell = await call({ note: "From a shell", callerPaneId: "pane-unknown", callerClient: "cora" });
+  assert.equal(fromShell.by, "Agent");
+  const fromPaneAgent = await call({ note: "From Claude", callerPaneId: "pane-claude", callerClient: "cora" });
+  assert.equal(fromPaneAgent.by, "Claude Code");
 }
 
 (async () => {
