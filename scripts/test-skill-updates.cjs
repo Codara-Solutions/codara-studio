@@ -2,8 +2,8 @@
 "use strict";
 
 // Capability Center skill origins and updates (src/main/skill-origin-store.ts,
-// skill-updates.ts, the import's record in skill-import.ts) against a fake
-// HOME and a local repository. The real git
+// skill-updates.ts, claude-plugin-skills.ts, the import's record in
+// skill-import.ts) against a fake HOME and a local repository. The real git
 // runs: an https address is rewritten to the fixture with url.insteadOf in
 // GIT_CONFIG_*, so the tests touch no network and no real CLI folder.
 //
@@ -57,6 +57,7 @@ async function buildHarness() {
       `export * as store from ${JSON.stringify(main("skill-origin-store.ts"))};`,
       `export * as updates from ${JSON.stringify(main("skill-updates.ts"))};`,
       `export * as importer from ${JSON.stringify(main("skill-import.ts"))};`,
+      `export * as plugins from ${JSON.stringify(main("claude-plugin-skills.ts"))};`,
       `export * as guard from ${JSON.stringify(main("outside-write-guard.ts"))};`,
     ].join("\n"),
   );
@@ -127,7 +128,7 @@ async function check(name, fn) {
 
 async function main() {
   const H = await buildHarness();
-  const { store, updates, importer, guard } = H;
+  const { store, updates, importer, plugins, guard } = H;
   const real = importer.makeGitRunner();
   const calls = [];
   const runGit = (args, options) => {
@@ -432,6 +433,86 @@ async function main() {
     assert.notEqual(store.skillOriginKey("/Skills/A", "linux"), store.skillOriginKey("/skills/a", "linux"));
     assert.equal(store.parseSkillOriginReceipt("{"), null);
     assert.equal(store.parseSkillOriginReceipt(JSON.stringify({ schemaVersion: 2 })), null);
+  });
+
+  // ── Claude Code plugin skills ─────────────────────────────────────────────
+  const claudeDir = path.join(HOME, ".claude");
+  const cache = path.join(claudeDir, "plugins", "cache");
+  const project = path.join(TMP, "project");
+  fs.mkdirSync(project, { recursive: true });
+  const writePlugin = (dir, skills, manifest) => {
+    for (const [rel, name] of skills) {
+      fs.mkdirSync(path.join(dir, rel), { recursive: true });
+      fs.writeFileSync(path.join(dir, rel, "SKILL.md"), skillMd(name, "Plugin."));
+    }
+    if (manifest) {
+      fs.mkdirSync(path.join(dir, ".claude-plugin"), { recursive: true });
+      fs.writeFileSync(path.join(dir, ".claude-plugin", "plugin.json"), JSON.stringify(manifest));
+    }
+  };
+  writePlugin(path.join(cache, "review", "1.0.0"), [["skills/old-review", "old-review"]]);
+  writePlugin(path.join(cache, "review", "2.0.0"), [["skills/code-review", "code-review"], ["extra/lint-rules", "lint-rules"]], {
+    name: "review",
+    skills: ["./extra", "./../../escape"],
+  });
+  writePlugin(path.join(cache, "docs", "0.1.0"), [["skills/doc-writer", "doc-writer"]]);
+  writePlugin(path.join(cache, "off", "1.0.0"), [["skills/never", "never"]]);
+  writePlugin(path.join(TMP, "escape"), [["", "escaped"]]);
+  fs.mkdirSync(path.join(claudeDir, "plugins"), { recursive: true });
+  fs.writeFileSync(
+    path.join(claudeDir, "plugins", "installed_plugins.json"),
+    JSON.stringify({
+      version: 2,
+      plugins: {
+        "review@team-market": [
+          { scope: "user", installPath: path.join(cache, "review", "1.0.0"), version: "1.0.0" },
+          { scope: "project", projectPath: project, installPath: path.join(cache, "review", "2.0.0"), version: "2.0.0" },
+        ],
+        "docs@official": [{ scope: "user", installPath: path.join(cache, "docs", "0.1.0"), version: "0.1.0" }],
+        "off@official": [{ scope: "user", installPath: path.join(cache, "off", "1.0.0") }],
+        "relative@x": [{ scope: "user", installPath: "relative/path" }],
+      },
+    }),
+  );
+  fs.writeFileSync(
+    path.join(claudeDir, "settings.json"),
+    JSON.stringify({ enabledPlugins: { "review@team-market": true, "docs@official": true, "off@official": true, "relative@x": true } }),
+  );
+  fs.mkdirSync(path.join(project, ".claude"), { recursive: true });
+  fs.writeFileSync(path.join(project, ".claude", "settings.local.json"), JSON.stringify({ enabledPlugins: { "off@official": false } }));
+
+  await check("plugin skills come from the enabled plugins' applicable installs, inside the plugin only", async () => {
+    const inProject = await plugins.listClaudePluginSkills({ claudeDir, cwd: project });
+    assert.deepEqual(
+      inProject.skills.map((skill) => `${skill.pluginId}:${skill.name}:${skill.scope}`),
+      ["docs@official:doc-writer:user", "review@team-market:code-review:project", "review@team-market:lint-rules:project"],
+    );
+    const review = inProject.skills.find((skill) => skill.name === "code-review");
+    assert.equal(review.plugin, "review");
+    assert.equal(review.marketplace, "team-market");
+    assert.equal(review.version, "2.0.0");
+    assert.match(review.description, /Use when writing code-review/);
+    const elsewhere = await plugins.listClaudePluginSkills({ claudeDir, cwd: null });
+    assert.deepEqual(
+      elsewhere.skills.map((skill) => skill.name),
+      ["doc-writer", "never", "old-review"],
+      "outside the project the user install applies and the project's off switch does not",
+    );
+    assert.equal(elsewhere.skills.some((skill) => skill.name === "escaped"), false);
+  });
+
+  await check("version 1 records and missing files read as plugins or nothing, never a throw", async () => {
+    const v1 = plugins.resolveEnabledPluginInstalls(
+      {
+        installedPlugins: JSON.stringify({ version: 1, plugins: { "a@m": { installPath: path.join(cache, "docs", "0.1.0"), version: "9" } } }),
+        settings: [JSON.stringify({ enabledPlugins: { "a@m": true } })],
+      },
+      null,
+    );
+    assert.equal(v1.length, 1);
+    assert.equal(v1[0].install.scope, "user");
+    assert.deepEqual(plugins.resolveEnabledPluginInstalls({ installedPlugins: "{oops", settings: [] }, null), []);
+    assert.deepEqual(await plugins.listClaudePluginSkills({ claudeDir: path.join(TMP, "nothing"), cwd: null }), { skills: [] });
   });
 
   console.log(`PASS skill updates (${passed} checks)`);

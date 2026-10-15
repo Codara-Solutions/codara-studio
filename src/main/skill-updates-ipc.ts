@@ -1,10 +1,12 @@
 // The Capability Center's skill origin channels: where each skill came from,
-// whether its source moved, update and rollback. The work modules load on
-// first use, so none of this costs anything at startup.
+// whether its source moved, update and rollback, and the skills Claude Code
+// plugins bring. The work modules load on first use, so none of this costs
+// anything at startup.
 
 import { join } from "node:path";
 import type { AgentAssetDeleteResult, AgentAssetInstallResult } from "@shared/types";
 import type { IpcHandle } from "./ipc";
+import { claudeConfigDir } from "./orchestration/claude-paths";
 import { codaraHomeDir } from "./orchestration/codara-managed-cli-roots";
 import type { SkillUpdateOptions } from "./skill-updates";
 
@@ -48,6 +50,11 @@ export function registerSkillUpdatesIpc(handle: IpcHandle): void {
   handle("skills:rollback", async (_event, input: unknown) => {
     const { rollbackSkills } = await import("./skill-updates");
     return rollbackSkills({ dirs: dirsFrom(input) }, await updateOptions());
+  });
+  handle("skills:pluginSkills", async (_event, input: unknown) => {
+    const { listClaudePluginSkills } = await import("./claude-plugin-skills");
+    const cwd = input && typeof input === "object" ? (input as { cwd?: unknown }).cwd : undefined;
+    return listClaudePluginSkills({ claudeDir: claudeConfigDir(), cwd: typeof cwd === "string" ? cwd : null });
   });
 }
 

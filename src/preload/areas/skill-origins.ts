@@ -1,10 +1,11 @@
 // window.spark.skillOrigins: the renderer side of src/main/skill-updates-ipc.ts
-// (where each skill came from, update checks, update and rollback). An older
-// main process without these channels answers as if nothing were recorded,
-// until Codara restarts.
+// (where each skill came from, update checks, update and rollback, and the
+// skills Claude Code plugins bring). An older main process without these
+// channels answers as if nothing were recorded, until Codara restarts.
 
 import { ipcRenderer } from "electron";
 import type {
+  ClaudePluginSkillList,
   SkillOriginStatus,
   SkillRollbackResult,
   SkillUpdateResult,
@@ -33,4 +34,6 @@ export const skillOriginsApi = {
     invokeOr("skills:update", { dirs }, { ok: false, updated: [], unchanged: [], errors: [RESTART], origins: [] }),
   rollback: (dirs: string[]): Promise<SkillRollbackResult> =>
     invokeOr("skills:rollback", { dirs }, { ok: false, restored: [], errors: [RESTART], origins: [] }),
+  /** Skills from the Claude Code plugins switched on for `cwd` (and for every folder). */
+  pluginSkills: (cwd: string | null): Promise<ClaudePluginSkillList> => invokeOr("skills:pluginSkills", { cwd }, { skills: [] }),
 };

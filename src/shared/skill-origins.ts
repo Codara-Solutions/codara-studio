@@ -55,3 +55,24 @@ export interface SkillRollbackResult {
   errors: string[];
   origins: SkillOriginStatus[];
 }
+
+// A skill that ships inside a Claude Code plugin. Claude Code installs,
+// updates and removes these; Codara only lists them.
+export interface ClaudePluginSkill {
+  name: string;
+  description?: string;
+  dir: string;
+  // "name@marketplace" as Claude Code keys it, and its two halves.
+  pluginId: string;
+  plugin: string;
+  marketplace?: string;
+  version?: string;
+  // Which of Claude Code's install scopes the plugin copy belongs to.
+  scope: "user" | "project" | "local";
+}
+
+export interface ClaudePluginSkillList {
+  skills: ClaudePluginSkill[];
+  // A plugin held more skills than Codara lists.
+  truncated?: boolean;
+}
