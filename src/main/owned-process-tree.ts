@@ -20,6 +20,11 @@ const PS_TIMEOUT_MS = 1_000;
 // every process's argv), so it is only ever read asynchronously and only by
 // callers that need to know WHAT a process is, never on a teardown path.
 const PS_WITH_COMMANDS_TIMEOUT_MS = 6_000;
+// Full-width command lines (`ww`) are long on a machine running browsers and
+// Electron apps. Past this the listing counts as unavailable rather than
+// parsed in part: a cut listing silently misses processes, and agent
+// hibernation decides from it whether a pane holds anything but its agent.
+const MAX_PS_WITH_COMMANDS_BYTES = 16 * 1024 * 1024;
 // `lstart` is a fixed ctime-style stamp ("Tue Sep  1 23:48:34 2026"); the
 // command line follows it and runs to the end of the line.
 const PS_LINE_RE_WITH_ARGS =
@@ -29,6 +34,23 @@ const PS_LINE_RE_WITH_ARGS =
 const PS_LINE_RE_BARE = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/;
 
 type ListedProcess = Omit<OwnedProcessIdentity, "depth">;
+
+/**
+ * The environment for a `ps` whose `lstart` is parsed. procps 4 and BSD ps
+ * print that column in the locale's time format ("mié oct 14", "jeu. oct.
+ * 15"), which neither PS_LINE_RE_WITH_ARGS nor processStartMs reads, so the
+ * row would be dropped or its time misread. LC_TIME=C keeps the ctime
+ * stamp. LC_ALL would override it, so its value moves to LC_CTYPE, which
+ * keeps command lines decoded as before.
+ */
+export function psTimeEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const next: NodeJS.ProcessEnv = { ...env, LC_TIME: "C" };
+  if (next.LC_ALL) {
+    next.LC_CTYPE = next.LC_ALL;
+    delete next.LC_ALL;
+  }
+  return next;
+}
 
 // The command-line listing is shared between polling callers (the terminal
 // notifier's sweep, once per pane) instead of forked per pane per tick.
@@ -100,6 +122,7 @@ export function listProcessesWithCommands(
   inflightWithCommands = new Promise<readonly ListedProcess[] | null>(
     (resolve) => {
       let stdout = "";
+      let overflowed = false;
       let settled = false;
       const finish = (value: readonly ListedProcess[] | null): void => {
         if (settled) return;
@@ -116,6 +139,7 @@ export function listProcessesWithCommands(
         child = spawn("ps", ["-axww", "-o", "pid=,ppid=,lstart=,args="], {
           stdio: ["ignore", "pipe", "ignore"],
           windowsHide: true,
+          env: psTimeEnvironment(),
         });
       } catch {
         finish(null);
@@ -132,11 +156,17 @@ export function listProcessesWithCommands(
       timer.unref();
       child.stdout?.setEncoding("utf8");
       child.stdout?.on("data", (chunk: string) => {
-        if (stdout.length < MAX_PS_OUTPUT_BYTES) stdout += chunk;
+        if (overflowed) return;
+        if (stdout.length + chunk.length > MAX_PS_WITH_COMMANDS_BYTES) {
+          overflowed = true;
+          stdout = "";
+          return;
+        }
+        stdout += chunk;
       });
       child.on("error", () => finish(null));
       child.on("close", (code) => {
-        if (code !== 0) {
+        if (code !== 0 || overflowed) {
           finish(null);
           return;
         }
