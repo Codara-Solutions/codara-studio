@@ -6,8 +6,9 @@ import { delimiter, join } from "node:path";
 
 // Agent hibernation end to end: a finished Claude pane in a background
 // workspace is stopped after the idle time and resumed with `--resume` when
-// the user opens its workspace again. A pane pinned "Keep awake" and a pane
-// whose agent runs a command (a dev server) are never stopped.
+// the user opens its workspace again, or on the next launch when Codara quit
+// while it slept. A pane pinned "Keep awake" and a pane whose agent runs a
+// command (a dev server) are never stopped.
 //
 // The fake `claude` is a Node script so the process census sees it the way
 // it sees the real CLI ("node …/claude --resume <id>"). It records every
@@ -88,6 +89,34 @@ test("an idle Claude pane in a background workspace sleeps and resumes when open
   }
 });
 
+test("a pane still asleep when Codara quits resumes its session on the next launch", async () => {
+  test.setTimeout(120_000);
+  const fixture = await prepareFixture("plain");
+  let { app, page, logs } = await launch(fixture);
+  try {
+    await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 20_000 });
+    const [first] = await waitForLaunches(fixture, 1);
+    await page.locator('[data-workspace-id="ws-b"]').evaluate((row) => (row as HTMLElement).click());
+    const sleepingChip = page.locator(`[data-terminal-pane-id="${PANE_ID}"] [data-testid="pane-sleeping-chip"]`);
+    await expect(sleepingChip, logs.join("\n")).toHaveAttribute("aria-label", "CLAUDE sleeping", {
+      timeout: 25_000,
+    });
+    await expect.poll(() => isAlive(first.pid), { timeout: 10_000 }).toBe(false);
+
+    // Quit with the agent asleep: no agent process runs in the pane, yet it
+    // must count as a running session for the relaunch restore.
+    await app.close();
+    ({ app, page, logs } = await launch(fixture, { seed: false }));
+    await page.locator('[data-workspace-id="ws-a"]').evaluate((row) => (row as HTMLElement).click());
+    const launches = await waitForLaunches(fixture, 2);
+    expect(launches[1].args).toEqual(expect.arrayContaining(["--resume", SESSION_ID]));
+    await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 20_000 });
+  } finally {
+    await app.close();
+    await cleanup(fixture);
+  }
+});
+
 test("Keep awake stops a pane from sleeping", async () => {
   test.setTimeout(90_000);
   const fixture = await prepareFixture("plain");
@@ -141,7 +170,10 @@ test("a pane whose agent runs a dev server stays awake", async () => {
   }
 });
 
-async function launch(fixture: Fixture): Promise<{ app: ElectronApplication; page: Page; logs: string[] }> {
+async function launch(
+  fixture: Fixture,
+  { seed = true }: { seed?: boolean } = {},
+): Promise<{ app: ElectronApplication; page: Page; logs: string[] }> {
   const fixtureShell = join(fixture.binDir, "bash");
   await writeFile(fixtureShell, '#!/bin/sh\nexec /bin/bash --noprofile --norc "$@"\n');
   await chmod(fixtureShell, 0o755);
@@ -171,6 +203,8 @@ async function launch(fixture: Fixture): Promise<{ app: ElectronApplication; pag
   });
   const page = await app.firstWindow();
   await page.waitForLoadState("domcontentloaded");
+  // A relaunch keeps whatever the previous run persisted at quit.
+  if (!seed) return { app, page, logs };
   // A restored Claude pane, the shape a relaunch with session restore on
   // gives: bootResume runs `claude --resume <id>` in it. Installed on the new
   // document before Codara hydrates (see terminal-hidden-workspace-state).
