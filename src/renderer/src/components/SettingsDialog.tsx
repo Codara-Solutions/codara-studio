@@ -110,6 +110,7 @@ import {
 } from "./settings/settings-index";
 import { bindToggle } from "./settings/setting-toggles";
 import ChromeLinkSection from "./chrome/ChromeLinkSection";
+import { useDiagnostics } from "./settings/DiagnosticsControls";
 
 export type { SettingsTab } from "./settings/settings-index";
 
@@ -3741,6 +3742,7 @@ function AboutSettings() {
   const [checking, setChecking] = useState(false);
   const [checkResult, setCheckResult] = useState<string | null>(null);
   const [cleanupNotice, setCleanupNotice] = useState<string | null>(null);
+  const diagnostics = useDiagnostics();
   useEffect(() => {
     let alive = true;
     void window.spark.app.platform().then((p) => {
@@ -3814,6 +3816,19 @@ function AboutSettings() {
         {cleanupNotice ? (
           <SettingRow title="Earlier versions" desc={cleanupNotice} />
         ) : null}
+      </SettingsSection>
+      <SettingsSection
+        title="Diagnostics"
+        description="Codara keeps a record of its own freezes and crashes on this computer. Nothing is uploaded."
+      >
+        <SettingRow title="Freezes and crashes" desc={diagnostics.history} />
+        <SettingRow
+          title="Export diagnostics"
+          desc="Saves a zip of logs, freeze and crash records, app and system details and your settings, to attach to a bug report. Tokens, keys, email addresses and home folder paths are removed first."
+          control={diagnostics.exportButton}
+        >
+          {diagnostics.exportMessage}
+        </SettingRow>
       </SettingsSection>
     </>
   );

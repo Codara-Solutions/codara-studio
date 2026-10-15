@@ -91,7 +91,7 @@ export const SETTINGS_TABS: ReadonlyArray<SettingsTabMeta> = [
     id: "about",
     label: "About",
     title: "About",
-    description: "Version, platform and updates.",
+    description: "Version, platform, updates and diagnostics.",
   },
 ];
 
@@ -234,6 +234,8 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "about", title: "App ID", desc: "The application identifier.", section: "Details", keywords: "bundle identifier" },
   { tab: "about", title: "Software update", desc: "Check for a newer version.", section: "Details", keywords: "check for updates upgrade new version" },
   { tab: "about", title: "Earlier versions", desc: "Space freed from versions an update replaced.", section: "Details", keywords: "cleanup old versions disk" },
+  { tab: "about", title: "Freezes and crashes", desc: "How often Codara froze or crashed lately.", section: "Diagnostics", keywords: "hang hung unresponsive not responding crash dump minidump watchdog black box" },
+  { tab: "about", title: "Export diagnostics", desc: "Save a redacted zip of logs and crash records for a bug report.", section: "Diagnostics", keywords: "logs bug report support zip export crash freeze debug" },
 ];
 
 // Every command on the Keybindings page, derived from the command registry
