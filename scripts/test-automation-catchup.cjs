@@ -538,6 +538,45 @@ async function integrationChecks({ sched, loop }, workspace) {
   await sched.setEnabled(overlap.id, false);
   pass("a cadence tick during a trigger's failing check is re-armed, not lost");
 
+  // A finalized loop: a stray cadence tick neither checks nor records (it
+  // could not revive the loop anyway), while a trigger fire still may.
+  const finished = await sched.createJob({
+    name: "finished",
+    trigger: yearly,
+    input,
+    loop: { kind: "cadence", everyMs: 60_000, stop: {} },
+    precheck: { command: "exit 5" },
+  });
+  await sched.patchJob(finished.id, (j) => ({ ...j, state: { status: "stopped", iteration: 3, lastStopReason: "user" } }));
+  await loop.startIteration(finished.id, { source: "cadence" });
+  job = await get(finished.id);
+  assert.strictEqual(job.skips, undefined, "a cadence tick on a stopped loop spends no check");
+  assert.strictEqual(job.state.status, "stopped");
+  await loop.startIteration(finished.id, { source: "trigger" });
+  job = await get(finished.id);
+  assert.strictEqual(job.skips.length, 1, "a trigger fire on a stopped loop is checked");
+  assert.strictEqual(job.state.status, "stopped", "and a skipped fire leaves the stopped cycle as it was");
+  assert.strictEqual(job.state.iteration, 3);
+  await sched.setEnabled(finished.id, false);
+  pass("a stopped loop: a cadence tick is ignored, a trigger fire is checked and leaves it stopped");
+
+  // Stop pressed while a fire's check runs: the fire must not start a fresh
+  // cycle once the check passes.
+  const stopMid = await sched.createJob({
+    name: "stop mid check",
+    trigger: yearly,
+    input,
+    precheck: { command: "sleep 0.4; exit 0" },
+  });
+  const midFire = loop.startIteration(stopMid.id, { source: "trigger" });
+  await sleep(100);
+  await sched.patchJob(stopMid.id, (j) => ({ ...j, state: { ...j.state, status: "stopped", lastStopReason: "user" } }));
+  await midFire;
+  assert.strictEqual(launchesFor(stopMid.id), 0, "the stopped loop stays stopped");
+  assert.strictEqual((await get(stopMid.id)).state.status, "stopped");
+  await sched.setEnabled(stopMid.id, false);
+  pass("a Stop during the check wins over the fire that started it");
+
   // The start check's catch-up pass goes through the precheck too.
   const both = await sched.createJob({
     name: "both",

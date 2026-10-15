@@ -222,6 +222,12 @@ function precheckApplies(job: ScheduledJob, source: AutomationContinuationSource
   return (source === "trigger" || source === "cadence") && normalizeAutomationPrecheck(job.precheck) !== undefined;
 }
 
+// The sources that start a fresh cycle of a finalized loop (the stopped-loop
+// branch of startIteration lists the same three).
+function revivesStoppedLoop(source: AutomationContinuationSource): boolean {
+  return source === "trigger" || source === "continuous" || source === "manual";
+}
+
 // Run the precheck for the pass about to start. True means go ahead. A "no"
 // is recorded as a skip (no run, no worker, no tokens), and a cadence loop
 // keeps its rhythm: the next pass is scheduled as if this one had run.
@@ -281,9 +287,16 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
   // Before the stopped-loop reset below: a skipped fire leaves the last
   // cycle's state exactly as it was.
   if (precheckApplies(job, opts.source)) {
+    // A loop-internal tick never revives a finalized loop (below), so it must
+    // not spend a check or record a skip either.
+    if (job.state.status === "stopped" && !revivesStoppedLoop(opts.source)) return;
+    const stoppedBefore = job.state.status === "stopped";
     if (!(await passesPrecheck(id, job, opts))) return;
     job = await getJob(id);
     if (!job || !job.enabled || job.state.status === "paused") return;
+    // Stopped while its check ran: the user's Stop came after this fire, so
+    // the fire must not start a fresh cycle the moment the check passes.
+    if (!stoppedBefore && job.state.status === "stopped") return;
   }
   if (job.state.status === "stopped") {
     // A finalized loop is NOT dead to its trigger: a cron/interval/folder fire
