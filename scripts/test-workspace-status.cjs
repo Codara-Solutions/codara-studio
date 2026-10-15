@@ -202,6 +202,11 @@ async function storeKeepsStatusesOnDisk() {
   const reread = ws.createWorkspaceStatusStore({ file, now: () => clock });
   assert.equal((await reread.get("ws-b")).note, "Waiting on review");
 
+  // An empty workspace list (what an unreadable state file loads as) never
+  // wipes every status.
+  assert.deepEqual(await store.prune(new Set()), []);
+  assert.deepEqual(Object.keys(await store.list()).sort(), ["ws-a", "ws-b"]);
+
   // Workspaces that are gone lose their status, once.
   assert.deepEqual(await store.prune(new Set(["ws-a"])), ["ws-b"]);
   assert.deepEqual(await store.prune(new Set(["ws-a"])), []);
@@ -213,6 +218,21 @@ async function storeKeepsStatusesOnDisk() {
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).workspaces, {});
   await assert.rejects(store.update("", { status: "done" }, USER), /workspaceId is invalid/);
   await assert.rejects(store.update("__proto__", { status: "done" }, USER), /workspaceId is invalid/);
+
+  // A file that exists but cannot be read (here a folder in its place, as
+  // a file another process holds would be on Windows) is never replaced:
+  // reads answer empty, writes fail, and the store reads again next time.
+  const lockedFile = path.join(TMP, "home-locked", "workspace-status.json");
+  fs.mkdirSync(lockedFile, { recursive: true });
+  const locked = ws.createWorkspaceStatusStore({ file: lockedFile });
+  assert.deepEqual(await locked.list(), {});
+  await assert.rejects(locked.update("ws-l", { status: "todo" }, USER), (error) => error.code === "EISDIR");
+  assert.ok(fs.statSync(lockedFile).isDirectory(), "nothing was written over it");
+  fs.rmdirSync(lockedFile);
+  fs.writeFileSync(lockedFile, JSON.stringify({ version: 1, workspaces: { "ws-l": { status: "done", note: "kept" } } }));
+  assert.equal((await locked.get("ws-l")).note, "kept", "the next read sees the file once it is readable");
+  await locked.update("ws-m", { status: "todo" }, USER);
+  assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(lockedFile, "utf8")).workspaces).sort(), ["ws-l", "ws-m"]);
 
   // A corrupt file reads as empty and the next write replaces it.
   const corruptFile = path.join(TMP, "home-2", "workspace-status.json");

@@ -31,7 +31,12 @@ export interface WorkspaceStatusStore {
   list(): Promise<WorkspaceStatusMap>;
   get(workspaceId: string): Promise<WorkspaceStatusEntry | null>;
   update(workspaceId: string, patch: WorkspaceStatusPatch, by: WorkspaceStatusAuthor): Promise<WorkspaceStatusUpdate>;
-  /** Drops the entries of workspaces that no longer exist; returns the ids dropped. */
+  /**
+   * Drops the entries of workspaces that no longer exist; returns the ids
+   * dropped. An empty set drops nothing: it is also what an unreadable
+   * spark-state.json loads as, and that must not wipe every status. The
+   * next save that lists a workspace prunes as usual.
+   */
   prune(liveWorkspaceIds: ReadonlySet<string>): Promise<string[]>;
   onChange(listener: (workspaceId: string, entry: WorkspaceStatusEntry | null) => void): () => void;
 }
@@ -56,17 +61,32 @@ export function createWorkspaceStatusStore(options: WorkspaceStatusStoreOptions)
   // One writer at a time: each change reads the state the previous one left.
   let queue: Promise<unknown> = Promise.resolve();
 
+  // Missing: empty. Not JSON: empty too, and the next write replaces it
+  // rather than every status call failing. Any other read error (a file
+  // another process holds on Windows, too many open files) throws and is
+  // not cached, so a write never replaces statuses it could not read and
+  // the next call reads again.
   async function read(): Promise<WorkspaceStatusMap> {
     if (cache) return cache;
+    let raw: string;
     try {
-      const parsed = JSON.parse(await fs.readFile(options.file, "utf8")) as { workspaces?: unknown };
-      cache = normalizeWorkspaceStatusMap(parsed?.workspaces);
+      raw = await fs.readFile(options.file, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException | null)?.code !== "ENOENT") throw error;
+      cache = {};
+      return cache;
+    }
+    try {
+      cache = normalizeWorkspaceStatusMap((JSON.parse(raw) as { workspaces?: unknown } | null)?.workspaces);
     } catch {
-      // Missing or unreadable: start empty. A corrupt file is replaced by the
-      // next write rather than blocking every status call.
       cache = {};
     }
     return cache;
+  }
+
+  // Reads answer with nothing while the file cannot be read; writes fail.
+  async function readOrEmpty(): Promise<WorkspaceStatusMap> {
+    return read().catch((): WorkspaceStatusMap => ({}));
   }
 
   async function write(map: WorkspaceStatusMap): Promise<void> {
@@ -93,12 +113,12 @@ export function createWorkspaceStatusStore(options: WorkspaceStatusStoreOptions)
   return {
     async list() {
       await queue.catch(() => undefined);
-      const map = await read();
+      const map = await readOrEmpty();
       return Object.fromEntries(Object.entries(map).map(([id, entry]) => [id, cloneEntry(entry)]));
     },
     async get(workspaceId) {
       await queue.catch(() => undefined);
-      const entry = (await read())[workspaceId];
+      const entry = (await readOrEmpty())[workspaceId];
       return entry ? cloneEntry(entry) : null;
     },
     update(workspaceId, patch, by) {
@@ -119,6 +139,7 @@ export function createWorkspaceStatusStore(options: WorkspaceStatusStoreOptions)
       });
     },
     prune(liveWorkspaceIds) {
+      if (liveWorkspaceIds.size === 0) return Promise.resolve([]);
       return enqueue(async () => {
         const map = await read();
         const gone = Object.keys(map).filter((id) => !liveWorkspaceIds.has(id));
