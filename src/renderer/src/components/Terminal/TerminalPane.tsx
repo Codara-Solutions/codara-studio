@@ -96,6 +96,10 @@ interface Props {
   // Fires once the boot restore was attempted (any outcome) so the owner can
   // clear the leaf's `bootResume` marker.
   onBootResumeConsumed?: () => void;
+  // Agent hibernation: the leaf says this pane's agent sleeps; the pane
+  // resumes it once on screen and then reports onWoke.
+  hibernated?: boolean;
+  onWoke?: () => void;
 }
 
 // Far enough past any display edge that no part of the pane intersects the
@@ -137,6 +141,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onResumeUnavailable,
       onResumeFallback,
       onBootResumeConsumed,
+      hibernated,
+      onWoke,
     },
     ref,
   ) {
@@ -176,6 +182,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onResumeUnavailable,
       onResumeFallback,
       onBootResumeConsumed,
+      hibernated,
+      onWoke,
     });
 
     useImperativeHandle(

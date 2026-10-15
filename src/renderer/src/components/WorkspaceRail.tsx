@@ -147,7 +147,7 @@ interface RailProps {
   // manual terminal agent, idle or not) and how many are mid-turn. Renders
   // the quiet count at the row's right edge; zero hides it. Memoized by App
   // like the maps above.
-  agentsByWorkspaceId?: Record<string, { total: number; working: number }>;
+  agentsByWorkspaceId?: Record<string, { total: number; working: number; sleeping?: number }>;
   // Current git branch per workspace for the row subtitle; null/absent hides it.
   branchByWorkspaceId?: Record<string, string | null>;
   // The first section's share when exactly two sections are stacked here.
@@ -778,6 +778,7 @@ function WorkspaceRail(props: RailProps) {
         working={props.workingByWorkspaceId?.[w.id] ?? false}
         agentTotal={props.agentsByWorkspaceId?.[w.id]?.total ?? 0}
         agentWorking={props.agentsByWorkspaceId?.[w.id]?.working ?? 0}
+        agentSleeping={props.agentsByWorkspaceId?.[w.id]?.sleeping ?? 0}
         branch={props.branchByWorkspaceId?.[w.id] ?? null}
         missing={missingWorkspaceIds.has(w.id)}
         folderColorManaged={groupId !== null}
@@ -1971,6 +1972,8 @@ interface RowProps {
   agentTotal?: number;
   /** How many of those are mid-turn; brightens the count. */
   agentWorking?: number;
+  /** How many of those Codara stopped to save memory (agent hibernation). */
+  agentSleeping?: number;
   /** Current git branch (or short hash when detached); null hides the subtitle. */
   branch?: string | null;
   /** The workspace's folder is not on disk right now (moved/renamed/unmounted). */
@@ -2017,6 +2020,7 @@ function WorkspaceRow({
   working = false,
   agentTotal = 0,
   agentWorking = 0,
+  agentSleeping = 0,
   branch = null,
   missing = false,
   folderColorManaged = false,
@@ -2415,7 +2419,7 @@ function WorkspaceRow({
         )}
 
         {agentTotal > 0 && !editing && (
-          <AgentCount total={agentTotal} working={agentWorking} accent={accent} />
+          <AgentCount total={agentTotal} working={agentWorking} sleeping={agentSleeping} accent={accent} />
         )}
 
         <div style={{ flex: "0 0 18px" }}>
@@ -2713,12 +2717,13 @@ function RowMenuItem({
 // accent the moment one of them is mid-turn. Same 10px tabular type as the
 // folder header's member count; the slash and the row placement keep the two
 // apart, and no glyph or chip is drawn so the rail stays quiet.
-function AgentCount(props: { total: number; working: number; accent: string }) {
-  const { total, working, accent } = props;
-  const label =
+function AgentCount(props: { total: number; working: number; sleeping?: number; accent: string }) {
+  const { total, working, sleeping = 0, accent } = props;
+  const base =
     working > 0
       ? `${working} of ${total} agent${total === 1 ? "" : "s"} working`
       : `${total} agent${total === 1 ? "" : "s"} idle`;
+  const label = sleeping > 0 ? `${base}, ${sleeping} sleeping` : base;
   return (
     <span
       role="status"
@@ -2726,6 +2731,7 @@ function AgentCount(props: { total: number; working: number; accent: string }) {
       aria-label={label}
       data-testid="workspace-agent-count"
       data-working={working > 0 ? "true" : "false"}
+      data-sleeping={sleeping > 0 ? String(sleeping) : undefined}
       style={{
         flex: "0 0 auto",
         marginRight: 2,

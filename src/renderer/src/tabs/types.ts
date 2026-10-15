@@ -64,6 +64,12 @@ export interface EditorTab extends BaseTab {
   preview?: boolean;
 }
 
+// A sleeping agent pane (see TerminalLeaf.hibernation).
+export interface TerminalLeafHibernation {
+  runtime: "claude" | "codex" | "grok" | "pi";
+  sleptAt: number;
+}
+
 // Durable pointer to a Claude/Codex CLI session detected in a terminal leaf,
 // whether it came from Codara's launcher or a command typed by the user.
 // Persisted with the tab layout so a reopen can relaunch the same conversation
@@ -184,6 +190,13 @@ export interface TerminalLeaf {
   // Runtime-only, one-shot cold-restore marker. It is derived from a validated
   // active agentSession during hydration and is never written to localStorage.
   bootResume?: boolean;
+  // Runtime-only: Codara stopped this pane's idle agent to save memory (agent
+  // hibernation, lib/agentHibernation.ts) and resumes it when the pane is
+  // opened again. Never written to localStorage; at quit a sleeping pane
+  // counts as a running agent, so the opt-in relaunch restore resumes it.
+  hibernation?: TerminalLeafHibernation | null;
+  // The user pinned this pane awake: agent hibernation never stops it.
+  keepAwake?: boolean;
   // Runtime-only frozen account for a phone-created Claude pane before its
   // durable session pointer has been discovered.
   nativeClaudeProfileId?: string;

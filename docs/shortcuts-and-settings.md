@@ -171,7 +171,7 @@ The pages:
 | Default terminal | The shell for new panes, a resource overview, output history and scrollback lines, and the run terminal lifecycle for worker panes. |
 | API and model | An OpenRouter key, and how Git commit messages are generated. |
 | Agents | Your accounts (see [accounts.md](./accounts.md)), **Install Pi** when Pi is not installed yet, and **Open Capability Center** and **Worker models** buttons, which close Settings and open the Capability Center on MCP servers or on worker models. |
-| Sessions | Browse and resume Claude and Codex sessions from any local project, and choose whether running agent sessions (Claude Code, Codex, Grok and Pi panes) resume when Codara reopens. |
+| Sessions | Browse and resume Claude and Codex sessions from any local project, choose whether running agent sessions (Claude Code, Codex, Grok and Pi panes) resume when Codara reopens, and how long an idle agent in a background workspace may wait before it sleeps (**Let idle agents sleep**, see below). |
 | Remote access | Turn phone access on, pair a device, and revoke paired devices (see [remote-access.md](./remote-access.md)). |
 | Keybindings | Rebind or unbind every command above. |
 | Runs | Every Cora run: browse, keep, delete. |
@@ -228,6 +228,33 @@ The signals come from the agents themselves: Claude Code's hooks and status
 reports, and Codex's notify program and session file (see
 [on-your-machine.md](./on-your-machine.md) for what Codara adds to your
 config). Agents without those fall back to reading the screen.
+
+### Idle agents sleep
+
+An agent terminal (Claude Code, Codex, Grok or Pi) that finished its turn and
+sits untouched in a workspace you are not looking at is stopped after the
+time set in Settings, Sessions, **Let idle agents sleep**
+(`agentHibernationMinutes`: Off, 15, 30, 60 or 120 minutes; 30 by default).
+Its output stays in the pane, a **Sleeping** chip marks it, and the rail's
+agent count says how many agents are asleep. Open the pane again and the
+agent resumes its exact session in place.
+
+Codara only lets an agent sleep when all of these hold, and keeps it running
+whenever it cannot tell:
+
+- the agent's turn ended, it is not waiting for an answer, and there is no
+  text you typed but did not send;
+- nothing was typed into or printed by the pane for the whole idle time;
+- its session can be resumed exactly as it is;
+- nothing else runs in the pane: no dev server or other program you started,
+  and no command the agent started after it launched (the MCP servers it
+  starts at launch do not count);
+- the pane is not pinned with **Keep awake** (the sun button in the pane's
+  toolbar, shown on agent panes).
+
+Cora's worker panes and phone panes never sleep. A sleeping pane that is
+still asleep when you quit counts as a running agent, so **Resume running
+agent sessions when Codara reopens** brings it back too.
 
 ### The notification center
 

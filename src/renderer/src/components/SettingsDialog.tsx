@@ -55,6 +55,7 @@ import { IS_MAC } from "../shortcuts/platform";
 import { isRecording } from "../shortcuts/recording";
 import { useOpenAiFastMode } from "../lib/useOpenAiFastMode";
 import { FAST_MODE_COST_NOTE } from "@shared/fast-mode";
+import { AGENT_HIBERNATION_PRESETS, normalizeAgentHibernationMinutes } from "@shared/agent-hibernation";
 import {
   UsageEntryBody,
   useSubscriptionUsage,
@@ -2815,6 +2816,7 @@ function SessionsSettings({
   ) => void;
 }) {
   const { preferences, setPreference, hydrated } = usePreferences();
+  const hibernationMinutes = normalizeAgentHibernationMinutes(preferences.agentHibernationMinutes);
   const [sessions, setSessions] = useState<WorkerSessionSummary[] | null>(null);
   const [filter, setFilter] = useState("");
   const [runtimeFilter, setRuntimeFilter] = useState<"all" | WorkerSessionRuntime>("all");
@@ -3017,6 +3019,27 @@ function SessionsSettings({
             title="Resume running agent sessions when Codara reopens"
             desc="Reopens terminal tabs that still had Claude Code, Codex, Grok or Pi running and resumes their exact session. A pane whose shell dies under a live agent resumes in place."
             {...bindToggle("restoreAgentSessions", preferences, setPreference)}
+          />
+        ) : null}
+      </SettingsSection>
+
+      <SettingsSection title="Idle agents">
+        {hydrated ? (
+          <SettingRow
+            title="Let idle agents sleep"
+            desc={
+              hibernationMinutes === 0
+                ? "Agents in background workspaces keep running however long they wait."
+                : `${presetHint(AGENT_HIBERNATION_PRESETS, hibernationMinutes) ?? ""} An agent that finished its turn in a background workspace stops after this long to give its memory back, and resumes its session when you open its pane. Agents waiting for you, pinned with Keep awake, or sharing the pane with another program stay awake.`
+            }
+            control={
+              <Segmented
+                ariaLabel="Let idle agents sleep after"
+                options={AGENT_HIBERNATION_PRESETS}
+                value={hibernationMinutes}
+                onChange={(next) => void setPreference("agentHibernationMinutes", next)}
+              />
+            }
           />
         ) : null}
       </SettingsSection>

@@ -95,6 +95,8 @@ import SshManagerDialog from "./components/remote/SshManagerDialog";
 import { makeRemotePath, type RemoteHostConfig } from "@shared/remote";
 import { useTabs, isDraftChatTabId, persistedTerminalPaneIds, restoredChatRunIds, sameWorkerMeta } from "./tabs/useTabs";
 import { selectTerminalWorkspaceLayers } from "./tabs/terminalWorkspaceLayers";
+import { useAgentHibernation } from "./lib/useAgentHibernation";
+import { sleepingPaneIds } from "./lib/agentHibernation";
 import { useChatSurfaces } from "./tabs/chatSurfaces";
 import {
   createNavigateTo,
@@ -752,6 +754,15 @@ export default function App() {
     preferences.restoreAgentSessions === true,
   );
 
+  // Agent hibernation: stop finished, untouched agent terminals in background
+  // workspaces after the idle time set in Settings (lib/useAgentHibernation.ts).
+  useAgentHibernation({
+    activeWorkspaceId: tabs.tabsWorkspaceId,
+    inactiveLayouts: tabs.inactiveWorkspaceLayouts,
+    minutes: preferences.agentHibernationMinutes,
+    setPaneHibernation: tabs.setPaneHibernation,
+  });
+
   // One shared git status/log poll per active workspace — feeds the Source
   // Control panel, the explorer's changed-file decorations, and the diff
   // tabs from a single source of truth (was GitPanel's private poll).
@@ -1293,7 +1304,7 @@ export default function App() {
   // agent CLI counts one, idle or not), and `working` is how many of those
   // are mid-turn. The rail shows the total and brightens it while any work.
   const agentsByWorkspaceId = useMemo(() => {
-    const m: Record<string, { total: number; working: number }> = {};
+    const m: Record<string, { total: number; working: number; sleeping: number }> = {};
     for (const w of workspaces) {
       let total = 0;
       let working = 0;
@@ -1314,7 +1325,10 @@ export default function App() {
       const terminals = terminalAgentCensus(layoutTabs, terminalAgents[w.id], terminalWorking[w.id]);
       total += terminals.total;
       working += terminals.working;
-      m[w.id] = { total, working };
+      // Sleeping agents (agent hibernation) still count as the workspace's
+      // agents; the rail says how many of them are asleep.
+      const sleeping = sleepingPaneIds(layoutTabs).length;
+      m[w.id] = { total: Math.max(total, sleeping), working, sleeping };
     }
     return m;
   }, [workspaces, globalRuns.runs, terminalWorking, terminalAgents, tabs.tabs, tabs.tabsWorkspaceId, tabs.inactiveWorkspaceLayouts]);
@@ -5709,6 +5723,10 @@ export default function App() {
       if (!tab || tab.kind !== "terminal") return;
       const leaf = findLeafByPaneId(tab.root, paneId);
       if (!leaf) return;
+      // Agent hibernation stopped this agent on the user's behalf: its session
+      // stays the pane's running one and its chip stays as it was. The pane
+      // resumes it when shown (useTerminalSession wakeFromSleep).
+      if (info?.hibernated) return;
       // The shell died, taking any foreground agent with it — a pointer left
       // `active` here would wrongly restore on the next boot. The poller's
       // running:false usually lands first; this covers a pty that dies without
@@ -6949,6 +6967,8 @@ const Workspace = React.memo(function Workspace({
     registerDispose,
     setLeafAgentSession,
     setLeafBootResumeConsumed,
+    setPaneHibernation,
+    setLeafKeepAwake,
     flushWorkspaceScrollbackNow,
     moveTabInStrip,
     createTabGroup,
@@ -7560,6 +7580,16 @@ const Workspace = React.memo(function Workspace({
     },
     [setLeafBootResumeConsumed],
   );
+  // Agent hibernation. A pane wakes only while on screen, but the clear is
+  // workspace-agnostic so a wake that finishes after a switch still lands.
+  const handlePaneWoke = useCallback(
+    (_tabId: string, paneId: string) => setPaneHibernation(paneId, null),
+    [setPaneHibernation],
+  );
+  const handlePaneKeepAwake = useCallback(
+    (tabId: string, paneId: string, keepAwake: boolean) => setLeafKeepAwake(tabId, paneId, keepAwake),
+    [setLeafKeepAwake],
+  );
   const handleWhiteboardSavedAs = useCallback(
     (id: TabId, path: string) => tabs.saveWhiteboardTabAs(id, entryFromPath(path)),
     [tabs.saveWhiteboardTabAs],
@@ -7734,6 +7764,8 @@ const Workspace = React.memo(function Workspace({
                 onPaneResumeUnavailable={isActive ? handleLeafResumeUnavailable : noopTerminalCb}
                 onPaneResumeFallback={isActive ? handleLeafResumeFallback : noopTerminalCb}
                 onPaneBootResumeConsumed={isActive ? handleLeafBootResumeConsumed : noopTerminalCb}
+                onPaneWoke={handlePaneWoke}
+                onPaneKeepAwake={isActive ? handlePaneKeepAwake : noopTerminalCb}
                 onBackToRuns={isActive ? handleBackToRuns : noopTerminalCb}
               />
             </div>

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { TerminalPane, type TerminalPaneHandle } from "../components/Terminal/TerminalPane";
+import { KeepAwakeButton, SleepingPaneChip } from "../components/Terminal/AgentSleepControls";
 import {
   overlayStartupCommand,
   paneOverlaysSnapshot,
@@ -193,6 +194,10 @@ interface Props {
   // A restored pane's first mount made its boot-restore attempt — clear the
   // leaf's one-shot `bootResume` hydration marker.
   onPaneBootResumeConsumed: (tabId: TabId, paneId: string) => void;
+  // Agent hibernation (lib/agentHibernation.ts): a sleeping pane came back,
+  // and the user flipped a pane's "Keep awake" pin.
+  onPaneWoke?: (tabId: TabId, paneId: string) => void;
+  onPaneKeepAwake?: (tabId: TabId, paneId: string, keepAwake: boolean) => void;
   // Run-owned worker terminals are an observation surface by default. This
   // returns to the owning run canvas without tearing down the xterm or its PTY.
   onBackToRuns: () => void;
@@ -221,6 +226,8 @@ type Bundle = {
   onResumeUnavailable: () => void;
   onResumeFallback: (session: TerminalAgentSession) => void;
   onBootResumeConsumed: () => void;
+  onWoke: () => void;
+  onKeepAwake: (keepAwake: boolean) => void;
 };
 
 // React.memo: with the useTabs API object now memoized, TerminalStack's
@@ -256,6 +263,8 @@ function TerminalStack({
   onPaneResumeUnavailable,
   onPaneResumeFallback,
   onPaneBootResumeConsumed,
+  onPaneWoke,
+  onPaneKeepAwake,
   onBackToRuns,
 }: Props) {
   // Memoize the filtered list so it keeps a stable identity when an
@@ -293,6 +302,10 @@ function TerminalStack({
   const resumeUnavailableRef = useRef(onPaneResumeUnavailable);
   const resumeFallbackRef = useRef(onPaneResumeFallback);
   const bootResumeConsumedRef = useRef(onPaneBootResumeConsumed);
+  const wokeRef = useRef(onPaneWoke);
+  wokeRef.current = onPaneWoke;
+  const keepAwakeRef = useRef(onPaneKeepAwake);
+  keepAwakeRef.current = onPaneKeepAwake;
   useEffect(() => {
     detectedRef.current = onDetectedUrl;
     sparkOpenRef.current = onSparkOpen;
@@ -452,6 +465,8 @@ function TerminalStack({
           onResumeUnavailable: () => resumeUnavailableRef.current(tabId, paneId),
           onResumeFallback: (session) => resumeFallbackRef.current(tabId, paneId, session),
           onBootResumeConsumed: () => bootResumeConsumedRef.current(tabId, paneId),
+          onWoke: () => wokeRef.current?.(tabId, paneId),
+          onKeepAwake: (keepAwake) => keepAwakeRef.current?.(tabId, paneId, keepAwake),
         };
         bundles.current.set(key, b);
       }
@@ -1281,6 +1296,8 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
                 leaf.worker?.nativeGrokProfileId
               }
               bootResume={leaf.bootResume === true}
+              hibernated={Boolean(leaf.hibernation)}
+              onWoke={bundle.onWoke}
               // Hidden under an overlay: it keeps its size and buffer but can
               // neither take the keyboard nor refit, and revealing it again
               // when the overlay's command exits hands the focus back, but
@@ -1337,7 +1354,9 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
                 />
               </div>
             ) : null}
-            {!placeOffScreen && !workerTerminal && workerChip ? (
+            {!placeOffScreen && !workerTerminal && leaf.hibernation ? (
+              <SleepingPaneChip hibernation={leaf.hibernation} waking={visible} />
+            ) : !placeOffScreen && !workerTerminal && workerChip ? (
               <WorkerChip worker={workerChip} />
             ) : null}
             {!placeOffScreen && !workerTerminal ? (
@@ -1351,6 +1370,11 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
                 onToggleZoom={bundle.onToggleZoom}
                 isZoomed={isZoomed}
                 visible={visible && !placeOffScreen}
+                keepAwake={
+                  leaf.agentSession?.sessionId || workerChip
+                    ? { pinned: leaf.keepAwake === true, onToggle: () => bundle.onKeepAwake(leaf.keepAwake !== true) }
+                    : null
+                }
               />
             ) : null}
           </div>
@@ -2364,6 +2388,8 @@ interface PaneToolbarProps {
   onToggleZoom: () => void;
   isZoomed: boolean;
   visible: boolean;
+  // Agent panes only: the "Keep awake" pin (agent hibernation).
+  keepAwake?: { pinned: boolean; onToggle: () => void } | null;
 }
 
 function PaneToolbar({
@@ -2376,6 +2402,7 @@ function PaneToolbar({
   onToggleZoom,
   isZoomed,
   visible,
+  keepAwake = null,
 }: PaneToolbarProps) {
   const stop = (e: React.MouseEvent | React.PointerEvent) => e.stopPropagation();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -2513,6 +2540,7 @@ function PaneToolbar({
       >
         <ZoomPaneIcon size={12} zoomed={isZoomed} />
       </ToolbarButton>
+      {keepAwake ? <KeepAwakeButton pinned={keepAwake.pinned} onToggle={keepAwake.onToggle} /> : null}
       <ToolbarButton title="Close pane" onClick={onClose} danger>
         <CloseIcon size={12} />
       </ToolbarButton>

@@ -175,6 +175,9 @@ const autoResumeAttempts = new Map<string, number[]>();
 // Panes that already printed the "previous session available" hint this app
 // run — the hint fires once per pane, not on every workspace-switch remount.
 const resumeHintShown = new Set<string>();
+// A sleeping pane (agent hibernation) wakes this long after it comes on
+// screen, so a workspace the user only flicks past stays asleep.
+const WAKE_DELAY_MS = 450;
 
 // Screen modes per live session (alternate screen, bracketed paste, mouse
 // reporting, ...). A TUI enables them ONCE at startup, but a pane's xterm is
@@ -555,6 +558,13 @@ interface Options {
   // (resume typed, fresh fallback, pointer cleared, prefs-disabled, probe
   // failure) — so the owner clears the leaf's one-shot `bootResume` marker.
   onBootResumeConsumed?: () => void;
+  // Agent hibernation (lib/agentHibernation.ts): Codara stopped this pane's
+  // idle agent to save memory. A pane that mounts sleeping does not spawn a
+  // shell; once it is on screen it resumes the agent's session in place.
+  hibernated?: boolean;
+  // The sleeping pane is running again (resumed, or a plain shell when the
+  // session could not be resumed), so the owner clears the leaf's mark.
+  onWoke?: () => void;
 }
 
 export interface TerminalSessionApi {
@@ -613,6 +623,8 @@ export function useTerminalSession({
   onResumeUnavailable,
   onResumeFallback,
   onBootResumeConsumed,
+  hibernated = false,
+  onWoke,
 }: Options): TerminalSessionApi {
   // Latest-value ref so the input/resize closures (captured once per
   // sessionId) see the freshest readOnly flag without re-running the
@@ -669,6 +681,15 @@ export function useTerminalSession({
   // cleanly leave the TUI first?" — the crash-vs-clean discriminator that gates
   // the in-place auto-resume.
   const agentRunningRef = useRef(false);
+  // Agent hibernation. `sleepingRef` is this pane's own truth: set by a
+  // hibernated pty exit or a sleeping mount, cleared once the wake spawn ran.
+  // The `hibernated` prop is the leaf's mirror of it, for the UI.
+  const hibernatedRef = useRef(hibernated);
+  hibernatedRef.current = hibernated;
+  const sleepingRef = useRef(false);
+  const wakeRef = useRef<(() => void) | null>(null);
+  const onWokeRef = useRef(onWoke);
+  onWokeRef.current = onWoke;
 
   const detectedRef = useRef<string | null>(null);
   // Latest-callback refs so the effect can run exactly once per `sessionId`
@@ -3041,7 +3062,115 @@ export function useTerminalSession({
         }
       };
 
+      // Agent hibernation: bring a sleeping pane back once it is on screen.
+      // Same delivery as the death re-arm above (a same-id spawn whose shell
+      // runs the resume as its first action), but never gated on the restore
+      // preference: Codara stopped this agent itself and owes the user its
+      // session back. When the session cannot be resumed the pane still
+      // comes back as a working shell with a one-line notice.
+      let waking = false;
+      const wakeFromSleep = async () => {
+        if (disposed || waking || !sleepingRef.current || !visibleRef.current) return;
+        if (readOnlyRef.current || inputBlockedRef.current) return;
+        waking = true;
+        try {
+          let session = agentSessionRef.current?.sessionId ? agentSessionRef.current : null;
+          if (session) {
+            const healed = await fetchSessionStartHeal(sessionId, session);
+            if (disposed) return;
+            if (healed) {
+              logRestore(
+                `pane=${sessionId} pointer healed from SessionStart hook before wake (${session.sessionId} -> ${healed.sessionId})`,
+              );
+              session = healed;
+              agentSessionRef.current = healed;
+              onResumeFallbackRef.current?.(healed);
+            }
+          }
+          const plan = session ? await computeResumePlan(session) : null;
+          if (disposed) return;
+          const command = plan?.resumeCommand ?? null;
+          logRestore(`pane=${sessionId} waking from sleep (${session?.runtime ?? "no session"}) cmd=${command ?? "none"}`);
+          if (session && command && !plan?.resumeIsFreshFallback) {
+            term.write(`\x1b[2m[waking up: resuming the ${session.runtime} session]\x1b[0m\r\n`);
+          }
+          const spawnResult = await window.spark.pty.spawn({
+            id: sessionId,
+            shell,
+            cwd: session?.cwd ?? (initialCwd && initialCwd.trim().length > 0 ? initialCwd : ""),
+            cols: Math.max(1, term.cols),
+            rows: Math.max(1, term.rows),
+            env: command ? { ...(extraEnv ?? {}), SPARK_NO_SHELL_INTEGRATION: "1" } : extraEnv,
+            startupCommand: command ?? undefined,
+            nativeCodexProfileId: session?.nativeCodexProfileId ?? nativeCodexProfileId,
+            nativeClaudeProfileId: session?.nativeClaudeProfileId ?? nativeClaudeProfileId,
+            nativeGrokProfileId: session?.nativeGrokProfileId ?? nativeGrokProfileId,
+          });
+          if (disposed) return;
+          sleepingRef.current = false;
+          spawned = true;
+          // Input opens only once a shell is there to take it; a failed spawn
+          // leaves the pane asleep and the next reveal tries again.
+          term.options.disableStdin = false;
+          if (session && plan && command && spawnResult.startupCommandHandled) {
+            autorunFiredSessions.add(sessionId);
+            const adopted = adoptLiveSessionAccount(plan.fallbackSession ?? session, spawnResult);
+            if (adopted) {
+              if (plan.fallbackSession) plan.fallbackSession = adopted;
+              else {
+                agentSessionRef.current = adopted;
+                onResumeFallbackRef.current?.(adopted);
+              }
+            }
+            if (plan.fallbackSession) {
+              if (plan.fallbackNotice) term.write(`\x1b[2m[${plan.fallbackNotice}]\x1b[0m\r\n`);
+              onResumeFallbackRef.current?.(plan.fallbackSession);
+            } else if (session.runtime === "claude" && !plan.resumeIsFreshFallback) {
+              armClaudeRefusalWatch(session.cwd);
+            }
+            // The pane's agent phase outlived the stop. Restart its poller so
+            // the chip settles from the new process instead of keeping
+            // whatever it last confirmed for the stopped one.
+            const wokeRuntime = coercePublicRuntime((plan.fallbackSession ?? session).runtime);
+            if (agentPhase === "agent" && wokeRuntime) promoteAgentRuntime(wokeRuntime);
+            else setAgentRunning((plan.fallbackSession ?? session).runtime);
+          } else if (command && !spawnResult.attached) {
+            term.write(`\x1b[2m[couldn't resume automatically: run ${command}]\x1b[0m\r\n`);
+          } else if (!command && plan?.fallbackNotice) {
+            term.write(`\x1b[2m[${plan.fallbackNotice}]\x1b[0m\r\n`);
+            onResumeUnavailableRef.current?.();
+          }
+          onWokeRef.current?.();
+          refitAndResizeRef.current?.();
+        } catch (err) {
+          term.write(`\r\n\x1b[31mcouldn't wake this pane: ${(err as Error).message}\x1b[0m\r\n`);
+        } finally {
+          waking = false;
+        }
+      };
+      const wake = () => void wakeFromSleep();
+      wakeRef.current = wake;
+      cleanups.push(() => {
+        if (wakeRef.current === wake) wakeRef.current = null;
+      });
+      const scheduleWake = () => {
+        const timer = window.setTimeout(() => {
+          if (!disposed && visibleRef.current) void wakeFromSleep();
+        }, WAKE_DELAY_MS);
+        cleanups.push(() => window.clearTimeout(timer));
+      };
+
       const offExit = window.spark.pty.onExit(sessionId, (info) => {
+        if (info.hibernated) {
+          // Codara stopped the idle agent (agent hibernation). Not an exit the
+          // user should read as one: keep the output, say how it comes back.
+          sleepingRef.current = true;
+          term.options.disableStdin = true;
+          term.write(`\r\n\x1b[2m[sleeping to save memory: opening this pane resumes it]\x1b[0m\r\n`);
+          onExitRef.current?.(info);
+          if (visibleRef.current) scheduleWake();
+          return;
+        }
         // `info.sanctioned` is set by pty-manager for teardowns Codara asked
         // for (a finished worker's host shell, the app-quit sweep), and the
         // status chip already renders those calm-grey "done" vs red "crashed".
@@ -3133,7 +3262,16 @@ export function useTerminalSession({
       };
       let bootSession = agentSession;
       let registryBootResume = false;
-      if (!cmd && !readOnlyRef.current && !inputBlockedRef.current && !autorunFiredSessions.has(sessionId)) {
+      // A pane that mounts while its agent sleeps (agent hibernation) has no
+      // pty to spawn or attach to: it shows its saved output and waits for
+      // wakeFromSleep, which resumes the session once the pane is on screen.
+      const sleepingAtMount =
+        hibernatedRef.current && !readOnlyRef.current && !inputBlockedRef.current;
+      if (sleepingAtMount) sleepingRef.current = true;
+      const spawnOrSleep: typeof window.spark.pty.spawn = sleepingAtMount
+        ? async (args) => ({ id: args.id, pid: 0, attached: true, startupCommandHandled: false })
+        : window.spark.pty.spawn;
+      if (!sleepingAtMount && !cmd && !readOnlyRef.current && !inputBlockedRef.current && !autorunFiredSessions.has(sessionId)) {
         const start = await window.spark.agentSession.latestStart?.(sessionId).catch(() => null);
         if (start?.restoreOnBoot && start.active) {
           const healed = mergeSessionStart(bootSession, start);
@@ -3146,6 +3284,7 @@ export function useTerminalSession({
         }
       }
       if (
+        !sleepingAtMount &&
         (bootResume === true || registryBootResume) &&
         bootSession?.sessionId &&
         !cmd &&
@@ -3222,7 +3361,7 @@ export function useTerminalSession({
         ? { ...(extraEnv ?? {}), SPARK_NO_SHELL_INTEGRATION: "1" }
         : extraEnv;
       try {
-        const spawnResult = await window.spark.pty.spawn({
+        const spawnResult = await spawnOrSleep({
           id: sessionId,
           shell,
           cwd,
@@ -3316,6 +3455,7 @@ export function useTerminalSession({
       //     resume by hand; the pointer stays intact.
       // The codex clear-pointer case (resumeCommand null, notice only) is
       // unaffected: it never had anything to deliver.
+      if (sleepingAtMount) term.options.disableStdin = true;
       const resumeUndelivered = resumeCommand !== null && !startupCommandHandled;
       if (bootResumeEntered || resumeCommand !== null) {
         logRestore(
@@ -3409,7 +3549,7 @@ export function useTerminalSession({
       // Read-only mirrors also skip it: they never pause on unmount, and a
       // resume issued here would drain a backlog the CANONICAL pane paused for,
       // stealing its bytes onto the shared channel at the wrong moment.
-      if (!rawTailReattachRef.current && !readOnlyRef.current) {
+      if (!rawTailReattachRef.current && !readOnlyRef.current && !sleepingAtMount) {
         void window.spark.pty.resume(sessionId, attachedExistingSession && !externalSizeOwnerRef.current);
       }
 
@@ -3658,6 +3798,7 @@ export function useTerminalSession({
       // the resume here would land it inside the live TUI's input box.
       const typedCommand = cmd;
       if (
+        !sleepingAtMount &&
         typedCommand &&
         typedCommand.length > 0 &&
         !startupCommandHandled &&
@@ -3693,6 +3834,8 @@ export function useTerminalSession({
       ) {
         armClaudeRefusalWatch(agentSession.cwd);
       }
+
+      if (sleepingRef.current && visibleRef.current) scheduleWake();
     };
 
     return () => {
@@ -3830,6 +3973,17 @@ export function useTerminalSession({
       hiddenReplayPendingRef.current = true;
     }
   }, [visible]);
+
+  // Agent hibernation: a sleeping pane resumes once it is on screen. The pty
+  // exit and the sleeping mount schedule the same wake for a pane that is
+  // already visible; this covers a pane revealed later.
+  useEffect(() => {
+    if (!visible || !(hibernated || sleepingRef.current)) return;
+    const timer = window.setTimeout(() => {
+      if (visibleRef.current) wakeRef.current?.();
+    }, WAKE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [visible, hibernated]);
 
   // Let the newly selected workspace paint once, then coalesce and enqueue its
   // hidden output. requestAnimationFrame + a zero-delay task is intentional:
