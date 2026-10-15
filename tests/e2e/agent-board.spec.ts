@@ -116,6 +116,8 @@ async function prepare(opts: { blockedRun?: boolean } = {}): Promise<Fixture> {
     env: {
       ...env,
       HOME: userHome,
+      // Windows reads the home folder from here, not HOME.
+      USERPROFILE: userHome,
       SHELL: shell,
       CLAUDE_CONFIG_DIR: join(userHome, ".claude"),
       CODEX_HOME: join(userHome, ".codex"),
@@ -200,7 +202,9 @@ test("a terminal agent in another workspace is answered from the Agents view", a
       await page.getByRole("tab", { name: /terminals/i }).evaluate((tab) => (tab as HTMLElement).click());
       const input = page.locator(".xterm-helper-textarea:visible").first();
       await input.focus();
-      await input.pressSequentially(`"${process.execPath}" "${fixture.fakeClaude}"`, { delay: 2 });
+      // PowerShell, Codara's shell on Windows, runs a quoted path only with &.
+      const call = process.platform === "win32" ? "& " : "";
+      await input.pressSequentially(`${call}"${process.execPath}" "${fixture.fakeClaude}"`, { delay: 2 });
       await input.press("Enter");
       // Main has identified the agent once the workspace counts it.
       await expect(page.locator('[data-workspace-id="ws-a"]').getByTestId("workspace-agent-count")).toHaveText("1", {
@@ -290,15 +294,20 @@ test("a Cora question is answered from its card, by keyboard, and the view is re
   const fixture = await prepare({ blockedRun: true });
   const { app, page } = await launch(fixture);
   try {
-    await app.evaluate(({ ipcMain }) => {
-      const calls: unknown[] = [];
-      (globalThis as { __answerCalls?: unknown[] }).__answerCalls = calls;
-      ipcMain.removeHandler("orchestration:answerRunQuestion");
-      ipcMain.handle("orchestration:answerRunQuestion", async (_e, input: unknown) => {
-        calls.push(input);
-        return {};
+    // Right after boot the main-process evaluate can fail ("Resulting promise
+    // was garbage collected"), so it repeats until it lands. Installing the
+    // stand-in twice is harmless: nothing has answered yet.
+    await expect(async () => {
+      await app.evaluate(({ ipcMain }) => {
+        const calls: unknown[] = [];
+        (globalThis as { __answerCalls?: unknown[] }).__answerCalls = calls;
+        ipcMain.removeHandler("orchestration:answerRunQuestion");
+        ipcMain.handle("orchestration:answerRunQuestion", async (_e, input: unknown) => {
+          calls.push(input);
+          return {};
+        });
       });
-    });
+    }).toPass({ timeout: 20_000 });
     const chat = card(page, `run:${RUN_ID}`);
 
     await test.step("the switch works from the keyboard", async () => {
