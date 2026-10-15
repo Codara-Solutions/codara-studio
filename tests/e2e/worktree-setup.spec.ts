@@ -110,7 +110,8 @@ test("worktree setup prepares new worktrees from the repository's files", async 
     await expect(summary).toContainText("Copies 1 ignored file or folder from this checkout", { timeout: 15_000 });
     await expect(summary).toContainText("Links node_modules");
     await expect(summary).toContainText('echo "root=$CODARA_ROOT_PATH" > setup.txt');
-    await expect(summary).toContainText("Opens 1 terminal: setup-shell");
+    // The terminal's command shows too: creating the worktree runs it.
+    await expect(summary).toContainText("Opens 1 terminal: setup-shell (echo opened > terminal.txt)");
     await expect(summary.getByRole("checkbox", { name: /Run setup commands and open its terminals/ })).toBeChecked();
 
     // The setup file dialog opens over it, and Escape closes only that one.

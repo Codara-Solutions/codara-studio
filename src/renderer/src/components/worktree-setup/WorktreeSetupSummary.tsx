@@ -112,7 +112,22 @@ export default function WorktreeSetupSummary({
             </li>
           ))}
           {preview.terminals.length ? (
-            <li>Opens {plural(preview.terminals.length, "terminal", "terminals")}: {preview.terminals.map((terminal) => terminal.name).join(", ")}</li>
+            <li>
+              {/* The commands too: creating the worktree runs them. */}
+              Opens {plural(preview.terminals.length, "terminal", "terminals")}:{" "}
+              {preview.terminals.map((terminal, index) => (
+                <React.Fragment key={`t${index}`}>
+                  {index ? ", " : ""}
+                  {terminal.name}
+                  {terminal.command ? (
+                    <>
+                      {" "}
+                      (<code>{terminal.command.split("\n").join(" && ")}</code>)
+                    </>
+                  ) : null}
+                </React.Fragment>
+              ))}
+            </li>
           ) : null}
           {preview.waitForSetup ? <li>Agents wait for setup before they start</li> : null}
         </ul>
