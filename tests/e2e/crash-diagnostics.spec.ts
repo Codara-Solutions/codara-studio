@@ -113,6 +113,8 @@ test("a freeze and a crash are recorded, shown in About and exported without sec
       freezeWatchdog: true,
       crashReporter: true,
       crashReporterBeforeReady: true,
+      // A synchronous dialog stands the freeze watchdog down while it is open.
+      syncDialogsHeld: ["showMessageBoxSync", "showOpenDialogSync", "showSaveDialogSync", "showErrorBox"],
       eventLoopProbe: true,
     });
 

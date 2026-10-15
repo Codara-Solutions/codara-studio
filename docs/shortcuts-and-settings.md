@@ -206,7 +206,9 @@ Failed closes retry automatically.
 Codara keeps a record of its own freezes and crashes on this computer, and
 uploads nothing. A watchdog thread notices when the main process stops
 answering for 5 seconds, notes the stack of the JavaScript that blocks it, and
-records the freeze once it ends (or at the next start, if it never did).
+records the freeze once it ends (or at the next start, if it never did). Time
+the app spends waiting for your answer in one of its own dialogs, such as the
+question before quitting while Cora works, is not a freeze.
 Crashes of the app or its processes leave a crash report in
 `~/.codarastudio/crash-dumps/`. Settings, About shows the count under
 **Freezes and crashes**.

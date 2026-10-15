@@ -29,7 +29,13 @@ import { flushBreadcrumbsSync, recentBreadcrumbs, recordBreadcrumb, startBreadcr
 import { listCrashDumps, pruneCrashDumps } from "./crash-dumps";
 import { eventLoopProbeRunning, recentEventLoopWindows, startEventLoopProbe, stopEventLoopProbe } from "./event-loop-probe";
 import { buildDiagnosticsEntries, diagnosticsFileName, readHangRecords, summarizeDiagnostics } from "./export-bundle";
-import { hangWatchdogRunning, hangWatchdogSettings, startHangWatchdog, stopHangWatchdog } from "./hang-watchdog";
+import {
+  hangWatchdogRunning,
+  hangWatchdogSettings,
+  holdDuringSyncDialogs,
+  startHangWatchdog,
+  stopHangWatchdog,
+} from "./hang-watchdog";
 import type { RedactionContext } from "./redact";
 import { createZip } from "./zip";
 
@@ -45,6 +51,7 @@ let started = false;
 let crashReporterTried = false;
 let crashReporterOn = false;
 let crashReporterBeforeReady = false;
+let syncDialogsHeld: string[] = [];
 let pruneTimer: NodeJS.Timeout | null = null;
 let lastExportPath: string | null = null;
 
@@ -144,6 +151,7 @@ export function startDiagnostics(): void {
     startBreadcrumbPersistence(dir);
     crashReporterOn = startCrashReporter(home);
     startHangWatchdog(dir, hangWatchdogSettings(process.env, inspector.url() !== undefined));
+    syncDialogsHeld = holdDuringSyncDialogs(dialog);
     startEventLoopProbe((line) => logMain("event-loop", line));
     watchProcessDeaths();
   } catch (error) {
@@ -222,6 +230,7 @@ function systemInfo(): Record<string, unknown> {
       freezeWatchdog: hangWatchdogRunning(),
       crashReporter: crashReporterOn,
       crashReporterBeforeReady,
+      syncDialogsHeld,
       eventLoopProbe: eventLoopProbeRunning(),
       crashDumpsFolder: crashDumpsDir(),
     },

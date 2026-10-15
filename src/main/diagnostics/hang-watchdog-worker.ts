@@ -38,6 +38,10 @@ export interface HangWatchdogWorkerData {
 
 export type MainToWatchdogMessage =
   | { type: "heartbeat" }
+  // The main thread is about to wait on the user in a synchronous dialog, and
+  // has stopped waiting. Holds nest; silence while one is held is no freeze.
+  | { type: "hold" }
+  | { type: "release" }
   | { type: "breadcrumb"; crumb: Breadcrumb }
   | { type: "breadcrumbs"; crumbs: Breadcrumb[] }
   | { type: "shutdown" };
@@ -207,6 +211,7 @@ export function runHangWatchdogWorker(deps: WatchdogDeps): void {
   let current: { record: HangRecord; capture: Promise<void> } | null = null;
   let markerWrittenAt = 0;
   let sequence = 0;
+  let holds = 0;
 
   const writeMarker = (record: HangRecord): void => {
     markerWrittenAt = deps.now();
@@ -275,6 +280,9 @@ export function runHangWatchdogWorker(deps: WatchdogDeps): void {
   };
 
   const timer = setInterval(() => {
+    // Skipped ticks leave a gap the detector reads as a suspended process,
+    // so counting starts afresh once the last hold is released.
+    if (holds > 0) return;
     const event = detector.tick();
     if (!event) return;
     if (event.kind === "detected") {
@@ -289,11 +297,14 @@ export function runHangWatchdogWorker(deps: WatchdogDeps): void {
 
   port.on("message", (message) => {
     if (!message || typeof message !== "object") return;
-    if (message.type === "heartbeat") {
+    if (message.type === "heartbeat" || message.type === "hold" || message.type === "release") {
+      // Only a running main thread can post, so each of these is a heartbeat.
       const event = detector.heartbeat();
       cpuMark = attempt(() => deps.cpuUsage()) ?? cpuMark;
       cpuMarkAt = deps.now();
       if (event?.kind === "recovered") onRecovered(event.durationMs);
+      if (message.type === "hold") holds += 1;
+      else if (message.type === "release") holds = Math.max(0, holds - 1);
     } else if (message.type === "breadcrumb") {
       crumbs.push(message.crumb);
       if (crumbs.length > config.breadcrumbLimit) crumbs.splice(0, crumbs.length - config.breadcrumbLimit);

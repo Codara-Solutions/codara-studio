@@ -149,6 +149,7 @@ interface ActiveWatchdog {
   heartbeat: NodeJS.Timeout;
   unsubscribe: () => void;
   settings: HangWatchdogSettings;
+  post: (message: MainToWatchdogMessage) => void;
 }
 
 let active: ActiveWatchdog | null = null;
@@ -227,8 +228,52 @@ export function startHangWatchdog(dir: string, settings: HangWatchdogSettings): 
   });
   worker.once("exit", retire);
   worker.unref();
-  active = { worker, heartbeat, unsubscribe, settings };
+  active = { worker, heartbeat, unsubscribe, settings, post };
   return true;
+}
+
+/**
+ * Stands the watchdog down while the main thread waits on the user in a
+ * synchronous dialog: a person reading a question is not a freeze. Holds
+ * nest; call the returned release once the dialog has closed.
+ */
+export function holdHangWatchdog(): () => void {
+  const current = active;
+  if (!current) return () => undefined;
+  current.post({ type: "hold" });
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    if (active === current) current.post({ type: "release" });
+  };
+}
+
+/** The synchronous members of Electron's dialog module. */
+export const SYNC_DIALOG_METHODS = ["showMessageBoxSync", "showOpenDialogSync", "showSaveDialogSync", "showErrorBox"] as const;
+
+/**
+ * Wraps the synchronous dialogs of `dialogModule` so each one holds the
+ * watchdog while it is open, whichever module opens it (index.ts asks before
+ * quitting with live Cora work this way). Returns the names it wrapped.
+ */
+export function holdDuringSyncDialogs(dialogModule: object, hold: () => () => void = holdHangWatchdog): string[] {
+  const target = dialogModule as Record<string, unknown>;
+  const wrapped: string[] = [];
+  for (const name of SYNC_DIALOG_METHODS) {
+    const original = target[name];
+    if (typeof original !== "function") continue;
+    target[name] = function holdWhileOpen(this: unknown, ...args: unknown[]): unknown {
+      const release = hold();
+      try {
+        return (original as (...params: unknown[]) => unknown).apply(this, args);
+      } finally {
+        release();
+      }
+    };
+    wrapped.push(name);
+  }
+  return wrapped;
 }
 
 export function stopHangWatchdog(): void {

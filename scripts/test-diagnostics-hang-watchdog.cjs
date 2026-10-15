@@ -15,11 +15,13 @@
 //       the stack, high CPU and the mirrored breadcrumbs, after it recovers
 //     a block in native code (a synchronous child process): no stack, a note
 //       that says why, low CPU, and the main thread is not left paused
-//     a healthy stretch: nothing recorded
+//     a block while a synchronous dialog holds the watchdog, and a healthy
+//       stretch: nothing recorded
 //     a process that exits mid-freeze: the marker survives, and the next
 //       start moves it into hangs.jsonl as not recovered and logs it
 // - the main-process side: heartbeats and breadcrumbs reach the worker and a
-//   freeze lands in main.log with its stack
+//   freeze lands in main.log with its stack; a wrapped synchronous dialog
+//   holds the watchdog while it is open, whatever it returns or throws
 //
 //   node scripts/test-diagnostics-hang-watchdog.cjs
 
@@ -272,6 +274,10 @@ function blockThenDie(ms) {
   const timerLatencyMs = Date.now() - tick;
   const nativeRecorded = await waitFor(() => records.length >= 2, 5000);
 
+  // What a synchronous dialog does: the main thread waits on the user.
+  worker.postMessage({ type: "hold" });
+  deliberatelyBlockTheMainLoop(1500);
+  worker.postMessage({ type: "release" });
   await sleep(1500);
   const afterHealthy = records.length;
   clearInterval(beat);
@@ -334,7 +340,7 @@ check("a block in native code is recorded without a stack, says why, and leaves 
   assert.ok(outcome.timerLatencyMs < 250, `timers run right after the block (${outcome.timerLatencyMs} ms)`);
 });
 
-check("a healthy stretch records nothing, and hangs.jsonl holds one line per freeze", () => {
+check("a held wait and a healthy stretch record nothing, and hangs.jsonl holds one line per freeze", () => {
   assert.equal(outcome && outcome.afterHealthy, 2);
   const lines = fs.readFileSync(path.join(live.dir, "hangs.jsonl"), "utf8").trim().split("\n");
   assert.equal(lines.length, 2);
@@ -387,17 +393,22 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     false,
   );
   const started = watchdog.startHangWatchdog(dir, settings);
-  let recorded = null;
-  watchdog.onHangRecorded((record) => { recorded = record; });
+  const records = [];
+  watchdog.onHangRecorded((record) => { records.push(record); });
   await sleep(400);
   logMain("test", "about to block the main loop");
   await sleep(200);
   blockedByATestOnPurpose(1500);
   const end = Date.now() + 5000;
-  while (!recorded && Date.now() < end) await sleep(20);
+  while (records.length === 0 && Date.now() < end) await sleep(20);
   await sleep(200);
+  // A dialog the user takes 1.5 s to answer, opened through the wrapper.
+  const dialog = { showMessageBoxSync(ms) { blockedByATestOnPurpose(ms); return 1; } };
+  const wrapped = watchdog.holdDuringSyncDialogs(dialog);
+  const answer = dialog.showMessageBoxSync(1500);
+  await sleep(1500);
   watchdog.stopHangWatchdog();
-  console.log(JSON.stringify({ started, running: watchdog.hangWatchdogRunning(), recorded }));
+  console.log(JSON.stringify({ started, running: watchdog.hangWatchdogRunning(), recorded: records[0] ?? null, records: records.length, wrapped, answer }));
 })();
 `,
 );
@@ -425,6 +436,38 @@ check("the app-side watchdog relays breadcrumbs, logs the freeze to main.log, an
   );
   const log = fs.readFileSync(path.join(HOME, "logs", "main.log"), "utf8");
   assert.match(log, /\[hang\] main process did not respond for \d+\.\d s and recovered; cpu \d+%.*stack: blockedByATestOnPurpose \(main-scenario\.cjs:\d+:\d+\)/);
+  assert.deepEqual(out.wrapped, ["showMessageBoxSync"]);
+  assert.equal(out.answer, 1, "the dialog's answer comes through");
+  assert.equal(out.records, 1, "the wait on a synchronous dialog is not a freeze");
+});
+
+check("a wrapped synchronous dialog holds while open and releases whatever happens", () => {
+  const events = [];
+  const hold = () => {
+    events.push("hold");
+    return () => events.push("release");
+  };
+  const dialog = {
+    title: "owner",
+    showMessageBoxSync(value) {
+      events.push(`open ${this.title}`);
+      return value * 2;
+    },
+    showErrorBox() {
+      events.push("error box");
+      throw new Error("no display");
+    },
+    showOpenDialog: async () => "not wrapped",
+  };
+  const asyncOriginal = dialog.showOpenDialog;
+  assert.deepEqual(main.holdDuringSyncDialogs(dialog, hold), ["showMessageBoxSync", "showErrorBox"]);
+  assert.equal(dialog.showMessageBoxSync(21), 42);
+  assert.throws(() => dialog.showErrorBox("t", "c"), /no display/);
+  assert.deepEqual(events, ["hold", "open owner", "release", "hold", "error box", "release"]);
+  assert.equal(dialog.showOpenDialog, asyncOriginal, "asynchronous dialogs leave the main thread free");
+  const release = main.holdHangWatchdog();
+  release();
+  release();
 });
 
 if (failures > 0) {
