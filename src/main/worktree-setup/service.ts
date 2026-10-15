@@ -392,7 +392,7 @@ export class WorktreeSetupService {
     // A queued run gives its place up, so its pipeline ends now rather than
     // when another setup frees a slot (removal waits for that end).
     run.leaveQueue?.();
-    if (run.child) this.killTree(run.child);
+    if (run.child) await this.killTree(run.child);
     else if (run.status.state === "queued" || run.status.state === "preparing") {
       this.finish(run, "stopped", "Stopped");
     }
@@ -488,7 +488,7 @@ export class WorktreeSetupService {
       if (isWorktreeSetupFinished(run.status.state)) continue;
       run.stopRequested = true;
       run.leaveQueue?.();
-      if (run.child) this.killTree(run.child, true);
+      if (run.child) void this.killTree(run.child, true);
       this.applyFinish(run, "stopped", INTERRUPTED);
       this.persistSync(run);
       run.log?.end();
@@ -744,7 +744,7 @@ export class WorktreeSetupService {
       let timedOut = false;
       const timer = setTimeout(() => {
         timedOut = true;
-        this.killTree(child);
+        void this.killTree(child);
       }, timeoutMs);
       const pipe = (stream: NodeJS.ReadableStream | null) => {
         if (!stream) return;
@@ -791,16 +791,27 @@ export class WorktreeSetupService {
     });
   }
 
-  private killTree(child: ChildProcess, immediate = false): void {
+  /**
+   * Ends a command and everything it started. Resolves once they are gone
+   * (or the grace period passed and SIGKILL went out), so a removal that
+   * waits on a stop never races a child still writing in the worktree.
+   */
+  private killTree(child: ChildProcess, immediate = false): Promise<void> {
     const pid = child.pid;
-    if (!pid) return;
+    if (!pid) return Promise.resolve();
     if (this.platform === "win32") {
-      try {
-        spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" }).on("error", () => undefined);
-      } catch {
-        child.kill();
-      }
-      return;
+      return new Promise((resolvePromise) => {
+        const done = () => resolvePromise();
+        try {
+          const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+          killer.on("error", done);
+          killer.on("close", done);
+          setTimeout(done, KILL_GRACE_MS).unref();
+        } catch {
+          child.kill();
+          done();
+        }
+      });
     }
     const signalGroup = (signal: NodeJS.Signals) => {
       try {
@@ -815,12 +826,19 @@ export class WorktreeSetupService {
     };
     if (immediate) {
       signalGroup("SIGKILL");
-      return;
+      return Promise.resolve();
     }
     signalGroup("SIGTERM");
-    setTimeout(() => {
-      if (child.exitCode === null && child.signalCode === null) signalGroup("SIGKILL");
-    }, KILL_GRACE_MS).unref();
+    // The whole group, even when the script itself already ended: a child
+    // that ignores SIGTERM (an install, a build) would otherwise keep
+    // writing into a worktree that is being removed.
+    return (async () => {
+      const deadline = Date.now() + KILL_GRACE_MS;
+      while (Date.now() < deadline && groupAlive(pid)) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+      }
+      if (groupAlive(pid)) signalGroup("SIGKILL");
+    })();
   }
 
   // ── Status and log ───────────────────────────────────────────────────────
@@ -956,6 +974,16 @@ function posixRunner(): string {
     if (existsSync(candidate)) return candidate;
   }
   return "/bin/sh";
+}
+
+/** Whether any process of the group led by `pid` still exists (POSIX). */
+function groupAlive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === "EPERM";
+  }
 }
 
 function signalNumber(signal: NodeJS.Signals): number | null {

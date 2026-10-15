@@ -568,6 +568,32 @@ async function runSuite(m, scratch) {
     assert.ok(Date.now() - t0 < 5_000);
   });
 
+  await check("stop also ends a child that ignores SIGTERM before it returns", async () => {
+    const wt = addWorktree("wt-stop-stubborn");
+    write(
+      path.join(repo, ".codara", "worktree.json"),
+      JSON.stringify({ setup: [`sh -c 'trap "" TERM; echo $$ > stubborn.pid; while :; do sleep 0.1; done' &`, "wait"] }),
+    );
+    const svc = makeService();
+    const started = await svc.start({ sourceCwd: repo, worktreePath: wt, trigger: "ui", userCommand: null });
+    const pidFile = path.join(wt, "stubborn.pid");
+    for (let i = 0; i < 100 && !fs.existsSync(pidFile); i += 1) await new Promise((r) => setTimeout(r, 50));
+    const pid = Number(fs.readFileSync(pidFile, "utf8").trim());
+    assert.ok(pid > 0);
+    const stopped = await svc.stop(started.id);
+    assert.equal(stopped.state, "stopped");
+    let alive = true;
+    for (let i = 0; i < 20 && alive; i += 1) {
+      try {
+        process.kill(pid, 0);
+        await new Promise((r) => setTimeout(r, 50));
+      } catch {
+        alive = false;
+      }
+    }
+    assert.equal(alive, false, "the child that ignored SIGTERM is gone once stop returned");
+  });
+
   await check("a command that leaves a process in the background still ends", async () => {
     // The background sleep keeps the output pipes open: waiting for them
     // would hold the step (and the agents waiting on it) until it exits.
