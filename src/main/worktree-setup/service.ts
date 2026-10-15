@@ -54,6 +54,8 @@ export interface WorktreeSetupServiceDeps {
   logCapBytes?: number;
   // How long output may still arrive after a command exits (tests lower it).
   exitDrainMs?: number;
+  // How many finished setups stay in memory (tests lower it).
+  keptFinishedRuns?: number;
 }
 
 export interface StartSetupRequest {
@@ -73,6 +75,10 @@ export interface StartSetupRequest {
 export class WorktreeSetupError extends Error {}
 
 const LIST_LIMIT = 200;
+// Finished setups kept in memory (with their log tail); older ones are read
+// back from their worktree's status file when asked for by path. Without a
+// cap, a session of automations with sandboxed workers grows without end.
+const KEPT_FINISHED_RUNS = 100;
 const TAIL_BYTES = 64 * 1024;
 const DEFAULT_LOG_CAP = 4 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 45 * 60 * 1000;
@@ -105,6 +111,7 @@ interface Run {
   // finished at once, while a copy may still be landing; removal waits on
   // this so nothing is written into a worktree being deleted.
   pipelineDone: Promise<void>;
+  pipelineSettled: boolean;
   markPrepared(): void;
   markFinished(): void;
   releaseSlot: (() => void) | null;
@@ -252,6 +259,7 @@ export class WorktreeSetupService {
       prepared: Promise.resolve(status),
       finished: Promise.resolve(status),
       pipelineDone: Promise.resolve(),
+      pipelineSettled: false,
       markPrepared: () => markPrepared(),
       markFinished: () => markFinished(),
       releaseSlot: null,
@@ -285,7 +293,11 @@ export class WorktreeSetupService {
         this.finish(run, "failed", `Setup could not run: ${(err as Error)?.message ?? String(err)}`);
       })
       // The last status write is part of the pipeline: removal waits for it.
-      .then(() => this.writeJson(this.statusFile(run), run.status).catch(() => undefined));
+      .then(() => this.writeJson(this.statusFile(run), run.status).catch(() => undefined))
+      .then(() => {
+        run.pipelineSettled = true;
+        this.prune();
+      });
     return { ...status };
   }
 
@@ -397,6 +409,25 @@ export class WorktreeSetupService {
       this.finish(run, "stopped", "Stopped");
     }
     return this.waitFor(id, KILL_GRACE_MS * 2 + 1_000);
+  }
+
+  /**
+   * Forgets the oldest finished setups past KEPT_FINISHED_RUNS, dismissed
+   * and successful ones first. Their record stays in the worktree.
+   */
+  private prune(): void {
+    const finished = [...this.runs.values()].filter(
+      (run) => run.pipelineSettled && isWorktreeSetupFinished(run.status.state),
+    );
+    const excess = finished.length - (this.deps.keptFinishedRuns ?? KEPT_FINISHED_RUNS);
+    if (excess <= 0) return;
+    const rank = (run: Run) => (run.dismissed || run.status.state === "succeeded" ? 0 : 1);
+    finished.sort(
+      (a, b) =>
+        rank(a) - rank(b) ||
+        ((a.status.finishedAt ?? a.status.startedAt) < (b.status.finishedAt ?? b.status.startedAt) ? -1 : 1),
+    );
+    for (const run of finished.slice(0, excess)) this.runs.delete(run.status.id);
   }
 
   /** Runs setup again for a worktree whose setup ended. */

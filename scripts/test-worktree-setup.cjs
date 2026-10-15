@@ -638,6 +638,21 @@ async function runSuite(m, scratch) {
     assert.equal((await svc.waitFor(b.id, 10_000)).state, "succeeded");
   });
 
+  await check("only the latest finished setups stay in memory", async () => {
+    write(path.join(repo, ".codara", "worktree.json"), JSON.stringify({ setup: "true" }));
+    const svc = makeService({ keptFinishedRuns: 1 });
+    const wtA = addWorktree("wt-keep-a");
+    const a = await svc.start({ sourceCwd: repo, worktreePath: wtA, trigger: "worker", userCommand: null });
+    assert.equal((await svc.waitFor(a.id, 10_000)).state, "succeeded");
+    assert.equal(await svc.quiesce(a.id), true);
+    const b = await svc.start({ sourceCwd: repo, worktreePath: addWorktree("wt-keep-b"), trigger: "worker", userCommand: null });
+    assert.equal((await svc.waitFor(b.id, 10_000)).state, "succeeded");
+    assert.equal(await svc.quiesce(b.id), true);
+    assert.deepEqual(svc.list().map((status) => status.id), [b.id]);
+    assert.equal(await svc.get(a.id), null, "forgotten by id");
+    assert.equal((await svc.get(wtA)).state, "succeeded", "still read back from the worktree");
+  });
+
   await check("an unreadable setup file fails after the copies", async () => {
     const wt = addWorktree("wt-badfile");
     write(path.join(repo, ".codara", "worktree.json"), "{ not json");
