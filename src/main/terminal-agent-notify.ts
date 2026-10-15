@@ -21,6 +21,8 @@ import { latestSessionStart } from "./agent-session-registry";
 import { descendantProcessesWithCommands } from "./owned-process-tree";
 import { emitTerminalAgentState, paneSourceKey, publish, rearm } from "./notify";
 import { nudgeUsageRefresh } from "./orchestration/usage-activity-refresh";
+import { signalAgentBoardChanged } from "./agent-board-signal";
+import type { TerminalAgentActivity } from "@shared/agent-board";
 import type { RuntimeState, TerminalAgentStatePayload } from "@shared/types";
 
 // Terminal-agent notifier: tells the user when a Claude Code, Codex, Grok
@@ -212,6 +214,8 @@ interface PaneWatcher {
   // pending, which is what filters screen text that merely looks like one.
   pendingToolCalls: number;
   lastToolDetail: string | null;
+  // What the rail's Agents view shows for this pane.
+  activity: PaneActivity;
   // The UserPromptSubmit that started the current Claude activity was a
   // background task reporting back, not the user.
   hookFollowUp: boolean;
@@ -356,6 +360,7 @@ export function syncTerminalNotifyPanes(input: {
       lastHookEventAt: 0,
       pendingToolCalls: 0,
       lastToolDetail: null,
+      activity: emptyActivity(),
       hookFollowUp: false,
       backgroundRunningAtLastStop: 0,
       lastProgramState: null,
@@ -507,6 +512,7 @@ function resetAgentSession(w: PaneWatcher): void {
   w.screenIdleSince = null;
   w.pendingToolCalls = 0;
   w.lastToolDetail = null;
+  noteActivity(w, emptyActivity());
   w.hookFollowUp = false;
   w.backgroundRunningAtLastStop = 0;
   w.lastProgramState = null;
@@ -701,6 +707,7 @@ function requestDone(
   },
 ): void {
   if (w.replayingTail || w.excluded) return;
+  if (req.body && req.body.trim()) noteActivity(w, { message: req.body.slice(0, ACTIVITY_TEXT_MAX) });
   if (!req.followUp && !turnActive(w)) {
     tanLog(`pane=${w.paneId} done (${req.origin}) ignored: no unannounced turn`);
     return;
@@ -764,6 +771,7 @@ function cancelPendingDone(w: PaneWatcher, reason: string, onlyBelow?: DoneOrigi
 // The agent stopped for the user. Only inside a turn: launch-time trust and
 // login screens are answered by someone who is looking at the pane.
 function needsYou(w: PaneWatcher, now: number, body: string | null, why: string): void {
+  noteActivity(w, { question: body });
   if (!turnActive(w) && w.state !== "working") {
     if (w.state !== "blocked") tanLog(`pane=${w.paneId} prompt outside a turn (${why}), no alert`);
     w.state = "blocked";
@@ -977,6 +985,7 @@ export function noteTerminalHookEvent(
         return;
       }
       w.hookFollowUp = false;
+      noteActivity(w, { prompt: oneLine(prompt, SUMMARY_MAX_CHARS) || null, question: null, tool: null });
       if (turnActive(w) && w.turn?.source === "input" && now - w.turn.startedAt < 10_000) {
         w.turn.source = "prompt";
         w.turn.sessionId = sessionId;
@@ -991,6 +1000,7 @@ export function noteTerminalHookEvent(
       const input = payload?.tool_input ?? payload?.toolInput;
       w.pendingToolCalls += 1;
       w.lastToolDetail = describeToolCall(tool, input);
+      noteActivity(w, { tool: w.lastToolDetail });
       if (!agentId) cancelPendingDone(w, `lead tool call ${tool}`);
       if (tool === "AskUserQuestion") {
         if (!w.signals.programStatus) needsYou(w, now, questionText(input) ?? "Has a question for you.", "AskUserQuestion");
@@ -1433,6 +1443,7 @@ function handleProgramStatus(w: PaneWatcher, report: ProgramStatusReport, now: n
     }
     case "error":
       w.state = "failed";
+      if (report.msg) noteActivity(w, { message: report.msg.slice(0, ACTIVITY_TEXT_MAX) });
       emitPaneState(w, "error");
       if (!turnActive(w)) return;
       closeTurnSilently(w, now, "program status error");
@@ -1913,6 +1924,7 @@ function emitPaneState(w: PaneWatcher, chipState: RuntimeState): void {
   if (w.excluded) return;
   if (w.lastEmittedState === chipState) return;
   w.lastEmittedState = chipState;
+  noteActivity(w, { stateSince: Date.now() });
   tanLog(`pane=${w.paneId} chip-state -> ${chipState} (runtime=${w.runtime})`);
   emitTerminalAgentState({
     workspaceId: w.workspaceId,
@@ -2022,6 +2034,57 @@ function deliver(
   });
   // A finished turn is when the subscription quota actually moved.
   nudgeUsageRefresh();
+}
+
+// What a pane keeps of an agent message for the board; it shows one line.
+const ACTIVITY_TEXT_MAX = 4_000;
+
+interface PaneActivity {
+  stateSince: number;
+  sessionSince: number;
+  prompt: string | null;
+  message: string | null;
+  question: string | null;
+  tool: string | null;
+}
+
+function emptyActivity(): PaneActivity {
+  const now = Date.now();
+  return { stateSince: now, sessionSince: now, prompt: null, message: null, question: null, tool: null };
+}
+
+function noteActivity(w: PaneWatcher, patch: Partial<PaneActivity>): void {
+  w.activity = { ...w.activity, ...patch };
+  if (!w.excluded) signalAgentBoardChanged();
+}
+
+// Every user pane hosting an agent, for the rail's Agents view. Cora worker
+// panes are left out: their runs stand for them. Accounts are filled in by
+// agent-board.ts, which owns the pty lookups.
+export function terminalAgentActivitySnapshot(): TerminalAgentActivity[] {
+  const out: TerminalAgentActivity[] = [];
+  for (const w of watchers.values()) {
+    if (w.excluded || w.disposing || !w.runtime) continue;
+    const state = w.lastEmittedState ?? "launching";
+    const active = state === "working" || state === "blocked" || state === "stalled";
+    out.push({
+      paneId: w.paneId,
+      workspaceId: w.workspaceId,
+      tabId: w.tabId,
+      tabTitle: w.tabTitle,
+      runtime: w.runtime,
+      state,
+      stateSince: w.activity.stateSince,
+      sessionSince: w.activity.sessionSince,
+      turnStartedAt: w.turn && !w.turn.announced ? w.turn.startedAt : null,
+      tool: active ? w.activity.tool : null,
+      prompt: w.activity.prompt,
+      message: summarizeAgentMessage(w.activity.message),
+      question: state === "blocked" ? w.activity.question : null,
+      accountProfileId: null,
+    });
+  }
+  return out;
 }
 
 // Test/maintenance escape hatch: drop every watcher. Safe to call repeatedly.
