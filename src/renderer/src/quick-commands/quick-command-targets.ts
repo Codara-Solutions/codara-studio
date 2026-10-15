@@ -97,17 +97,25 @@ export function paneFolder(leaf: TerminalLeaf, runtime: PaneRuntimeView | undefi
 export type ShellPlan =
   | { kind: "pane"; pane: FocusedPane }
   /** busy: the focused terminal runs an agent or a full-screen program, so typing there would not reach a shell. */
-  | { kind: "new-terminal"; fallback?: "busy" | "none" };
+  | { kind: "new-terminal"; fallback?: "busy" | "none" }
+  /** Press Enter is off and no shell can take the text: nothing is typed or run. */
+  | { kind: "refuse"; reason: "busy" | "none" };
 
+/**
+ * A command with Press Enter off is typed for the user to finish, so it is
+ * never run anywhere else: a new terminal would run it at once, which is
+ * exactly what the user turned off (think `git reset --hard` kept as a draft).
+ */
 export function planShellCommand(
   command: Extract<QuickCommand, { kind: "shell" }>,
   focused: FocusedPane | null,
   activity: PaneActivity | null,
 ): ShellPlan {
   if (command.target === "new") return { kind: "new-terminal" };
-  if (!focused) return { kind: "new-terminal", fallback: "none" };
-  if (activity !== "shell") return { kind: "new-terminal", fallback: "busy" };
-  return { kind: "pane", pane: focused };
+  if (focused && activity === "shell") return { kind: "pane", pane: focused };
+  const reason = focused ? "busy" : "none";
+  if (!command.submit) return { kind: "refuse", reason };
+  return { kind: "new-terminal", fallback: reason };
 }
 
 export type PromptPlan =

@@ -227,7 +227,9 @@ export default function QuickCommandForm({ initial, mode, repoOptions, onSave, o
             <span style={fieldHint}>
               {draft.shellTarget === "new"
                 ? "Opens a terminal tab in the workspace folder and runs it there."
-                : "Types it into the terminal you were last in. If an agent or another full-screen program runs there, it opens a new terminal instead."}
+                : draft.shellSubmit
+                  ? "Types it into the terminal you were last in. If an agent or another full-screen program runs there, it runs in a new terminal instead."
+                  : "Types it into the terminal you were last in for you to finish. If an agent or another full-screen program runs there, nothing is typed."}
             </span>
           </div>
           {draft.shellTarget === "focused" ? (

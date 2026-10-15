@@ -191,6 +191,15 @@ export function useQuickCommandsApi(inputs: QuickCommandsInputs): QuickCommandsA
       const focused = resolveFocusedPane(current.tabs, current.activeId, lastPaneId.current, options?.paneId);
       const activity = focused ? paneActivity(focused.leaf, state.paneRuntime.current.get(focused.leaf.paneId), state.detectedAgents) : null;
       const plan = planShellCommand(command, focused, activity);
+      if (plan.kind === "refuse") {
+        warn(
+          `"${command.label}" was not typed`,
+          plan.reason === "busy"
+            ? "It waits for you to press Enter, and the focused terminal is running an agent or a full-screen program. Click into a shell, then run it again."
+            : "It waits for you to press Enter, and no terminal is focused. Click into a terminal, then run it again.",
+        );
+        return;
+      }
       if (plan.kind === "pane") {
         const folder = paneFolder(plan.pane.leaf, state.paneRuntime.current.get(plan.pane.leaf.paneId), workspace.cwd);
         const text = await expand(command, folder, "shell");

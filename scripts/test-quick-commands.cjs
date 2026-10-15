@@ -212,6 +212,13 @@ async function main() {
     assert.deepEqual(targets.planShellCommand(sh, shellPane, "program"), { kind: "new-terminal", fallback: "busy" }, "nor into vim or less");
     assert.deepEqual(targets.planShellCommand(sh, null, null), { kind: "new-terminal", fallback: "none" });
     assert.deepEqual(targets.planShellCommand(shell("n", { target: "new" }), shellPane, "shell"), { kind: "new-terminal" });
+    // Press Enter off: typed for the user to finish, so never run elsewhere.
+    const draft = shell("d", { submit: false });
+    assert.deepEqual(targets.planShellCommand(draft, shellPane, "shell"), { kind: "pane", pane: shellPane });
+    assert.deepEqual(targets.planShellCommand(draft, agentPane, "agent"), { kind: "refuse", reason: "busy" }, "not run in a new terminal behind the user's back");
+    assert.deepEqual(targets.planShellCommand(draft, shellPane, "program"), { kind: "refuse", reason: "busy" });
+    assert.deepEqual(targets.planShellCommand(draft, null, null), { kind: "refuse", reason: "none" });
+    assert.deepEqual(targets.planShellCommand(shell("dn", { submit: false, target: "new" }), null, null), { kind: "new-terminal" }, "a New terminal command always runs");
 
     const pr = prompt("p");
     assert.deepEqual(targets.planPrompt(pr, agentPane, "agent", null), { kind: "pane", pane: agentPane });

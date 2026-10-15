@@ -227,8 +227,10 @@ A **shell command** runs in the **Focused terminal** (the terminal pane you
 were last in) or in a **New terminal** tab in the workspace folder. Typed
 into the focused terminal, **Press Enter** decides whether it runs or waits
 for you to edit it. When an agent or another full-screen program (vim, less)
-runs in the focused terminal, the command opens a new terminal instead, so it
-never lands in the agent's input.
+runs in the focused terminal, the command runs in a new terminal instead, so
+it never lands in the agent's input. With **Press Enter** off it is not typed
+anywhere else: a notice asks you to click into a shell, so a command you keep
+as a draft never runs on its own.
 
 An **agent prompt** goes to:
 
