@@ -296,11 +296,19 @@ async function main() {
       handler.slice(0, 400),
     );
     // The kept-output flush at quit start cannot eat the budget the agent
-    // drain needs to let agents save their sessions.
+    // drain needs to let agents save their sessions: it starts before the
+    // drain, runs alongside it, and the final store flush waits for it.
     const cleanup = index.slice(start, index.indexOf("await pty.disposeAllGraceful()", start));
+    const flushAt = cleanup.indexOf("void flushTerminalScrollback().catch(() => undefined);");
     check(
-      "the quit-start output flush is bounded",
-      /await Promise\.race\(\[\s*flushTerminalScrollback\(\)[^\]]*setTimeout\(resolve, 1_500\)/.test(cleanup),
+      "the quit-start output flush runs alongside the agent drain",
+      flushAt >= 0 &&
+        flushAt < cleanup.indexOf("shutdownRunRuntimeResources") &&
+        !/\bawait\s+(?:Promise\.\w+\(\[\s*)?flushTerminalScrollback/.test(cleanup),
+    );
+    check(
+      "and the final store flush waits for it",
+      /async function flushAllStores\(\)[\s\S]*?flushTerminalScrollback\(\)\.catch\(\(\) => undefined\),[\s\S]*?\n\}/.test(index),
     );
     const updater = fs.readFileSync(path.join(ROOT, "src", "main", "auto-updater.ts"), "utf8");
     check(
