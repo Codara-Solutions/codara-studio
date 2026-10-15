@@ -1791,6 +1791,12 @@ function buildInstructions() {
       "Browser: open or reuse this session's tab with codara_preview_navigate, read it with codara_preview_snapshot, and act on its @references. Batch multi-step flows into one codara_preview_run. Use the trusted input tools (mouse, key, scroll, hover, drag) when a page ignores synthetic events.",
     );
     parts.push(...TOOL_REGISTRY.instructions);
+    parts.push(
+      (listed.has("codara_preview_chrome")
+        ? "The user's Chrome: for signed-in sites, or when the user asks for Chrome, use codara_preview_chrome open; the tab lands in this workspace's tab group. For local dev servers the in-app browser (codara_preview_navigate) stays the default. If Chrome is not connected, use the in-app browser or tell the user to connect the Codara extension (Settings, Chrome extension). "
+        : "") +
+        "Never launch a separate browser or Chrome window: no chrome-devtools-mcp, Playwright or puppeteer windows, no google-chrome or xdg-open from the shell.",
+    );
   }
   if (listed.has("codara_terminal_run")) {
     parts.push(

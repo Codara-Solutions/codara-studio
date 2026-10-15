@@ -74,10 +74,18 @@ tools it uses for its own browser tabs.
   `localStorage` and non-HttpOnly cookies, but never HttpOnly cookies; share
   only tabs whose page you would let an agent script.
 - Opening a new tab needs **Let agents open new tabs**; such a tab is shared
-  automatically and only those tabs can be closed by an agent. An agent can
-  name a tab group for it (`group`): the tab joins a group the extension
+  automatically and only those tabs can be closed by an agent. Every such
+  tab goes in a tab group: the one the agent names (`group`), or else one
+  named after the agent's Codara workspace. It joins a group the extension
   made with that title in the same window, or starts one. Agents never move
   a tab you shared and never add a tab to a group you made.
+- **Keep agents in your Chrome** (Settings > General > Chrome extension, on
+  by default) turns off, for the Claude Code and Codex sessions Codara
+  starts, the browser tools that open a separate Chrome window with its own
+  profile: the chrome-devtools-mcp and Playwright plugins, and MCP servers in
+  your configs that run chrome-devtools-mcp, `@playwright/mcp` or a
+  puppeteer server. Settings lists each one it found. Your own configs are
+  never changed, so the same CLIs outside Codara keep those tools.
 - Codara logs every tool call with the agent that made it (Settings > General
   > Chrome extension, and `<Codara home>/chrome-link/activity.jsonl`). The
   popup shows which agent used each tab last.

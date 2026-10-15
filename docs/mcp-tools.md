@@ -236,7 +236,25 @@ own. With two browsers paired, ids carry the browser:
   scripts see.
 - Readonly Pi workers may look at a shared tab but not navigate or resize it.
 - `codara_preview_chrome` `open` needs the popup's "Let agents open new
-  tabs", and `close` only closes tabs an agent opened.
+  tabs", and `close` only closes tabs an agent opened. Without `group` the
+  tab goes in a group named after the caller's workspace, so it never lands
+  loose among the user's own tabs.
+- **Keep agents in your Chrome** (Settings > General > Chrome extension, on
+  by default) keeps agents off browser tools that start a Chrome of their
+  own, with a separate profile and the "controlled by automated test
+  software" bar. For the Claude Code sessions Codara starts, its `--settings`
+  file sets `enabledPlugins` to false for the chrome-devtools-mcp and
+  Playwright plugins (and any other enabled plugin whose server runs one of
+  these) and lists matching plain servers in `deniedMcpServers`, so none of
+  them starts. Codex sessions get `-c mcp_servers.<name>={command=...,
+  enabled=false}` for each matching server. A server matches on its command
+  and arguments: chrome-devtools-mcp, `@playwright/mcp` or a puppeteer MCP
+  server, unless told to attach to a running browser. The user's configs are
+  only read, Settings names every tool it turned off, and the Capability
+  Center marks such servers "Off in Codara". The browser-use plugin, which
+  drives the user's running Chrome, stays on. The studio server's
+  instructions tell agents to use `codara_preview_chrome` for the user's
+  Chrome and never to start a separate browser.
 - Every call is logged with the agent that made it, in Settings and in
   `<codara home>/chrome-link/activity.jsonl`; the popup shows which agent
   used each tab last.
@@ -517,7 +535,8 @@ Groups are the user's too: they can rename, recolor, ungroup or close them, and
 `codara_spawn_terminals` takes no `group` yet. In the user's own browser,
 `codara_preview_chrome` `open` with `group` puts the new tab in a Chrome tab
 group the extension made with that title in the same window, or starts one;
-it never groups a tab the user shared or joins a group the user made.
+it never groups a tab the user shared or joins a group the user made. Without
+`group` it uses the workspace's name, cleaned the same way.
 
 ### Dev servers
 

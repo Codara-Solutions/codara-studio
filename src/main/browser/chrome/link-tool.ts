@@ -1,12 +1,21 @@
 // codara_preview_chrome: the state of the browser link, and opening, closing
 // or bringing forward a tab of the user's browser. The extension decides
 // again: it opens tabs only when the user turned that on, closes only tabs
-// an agent opened, and brings forward only shared tabs.
+// an agent opened, and brings forward only shared tabs. An opened tab always
+// goes in a tab group: the one the agent names, or its workspace's.
 
+import { normalizeTabGroupName } from "../../../shared/tab-group-name";
 import { PreviewToolParamsError, type PreviewToolHost } from "../../preview-tools/types";
 import { parseTabRef } from "../tab-ref";
 import { chromeAgentLabel, recordChromeActivity } from "./activity";
 import { chromeLinkRuntime } from "./runtime";
+
+/** The group of a tab opened without one: named like the caller's workspace, so each workspace gets its own. */
+async function workspaceGroup(params: Record<string, unknown>, host: PreviewToolHost): Promise<string> {
+  const workspaceId = typeof params.workspaceId === "string" && params.workspaceId ? params.workspaceId : null;
+  const name = host.workspaceName ? await host.workspaceName(workspaceId).catch(() => null) : null;
+  return normalizeTabGroupName(name) || "Codara";
+}
 
 export async function chromeLinkTool(params: Record<string, unknown>, _method: string, host: PreviewToolHost): Promise<unknown> {
   if (!(await host.mayUseUserBrowser(params))) throw new PreviewToolParamsError("This session may not use tabs of your own browser.");
@@ -38,10 +47,10 @@ export async function chromeLinkTool(params: Record<string, unknown>, _method: s
       if (!link) {
         throw new Error('The user has not let agents open tabs. They can turn on "Let agents open new tabs" in the Codara extension popup, or share an existing tab.');
       }
-      const group = typeof params.group === "string" ? params.group : undefined;
+      const group = normalizeTabGroupName(params.group) || (await workspaceGroup(params, host));
       const opened = await link.request<{ tabId: number; url?: string; title?: string; blocked?: boolean; group?: string }>(
         "open",
-        { url, ...(group ? { group } : {}) },
+        { url, group },
         30_000,
       );
       const tabId = backend.refFor(link, opened.tabId);

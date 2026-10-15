@@ -376,6 +376,33 @@ async function main() {
     assert.ok(after.mcpServers.top);
   });
 
+  await check("a server that opens a separate Chrome is marked Off in Codara while the switch is on", async () => {
+    const savedClaude = fs.readFileSync(CLAUDE_JSON, "utf8");
+    writeJson(CLAUDE_JSON, {
+      mcpServers: {
+        devtools: { command: "npx", args: ["-y", "chrome-devtools-mcp@latest"] },
+        attached: { command: "npx", args: ["chrome-devtools-mcp@latest", "--autoConnect"] },
+        plain: { command: "node", args: ["server.js"] },
+      },
+    });
+    const marked = (off) =>
+      Object.fromEntries(
+        sync
+          .listAgentAssets({ cwd: FAKE_CWD, settings: settings(), separateBrowserToolsOff: off })
+          .mcp.filter((item) => item.runtime === "claude" && ["devtools", "attached", "plain"].includes(item.name))
+          .map((item) => [item.name, Boolean(item.offInCodara)]),
+      );
+    assert.deepEqual(marked(true), { attached: false, devtools: true, plain: false });
+    assert.deepEqual(marked(false), { attached: false, devtools: false, plain: false });
+    const reason = sync
+      .listAgentAssets({ cwd: FAKE_CWD, settings: settings(), separateBrowserToolsOff: true })
+      .mcp.find((item) => item.name === "devtools").offInCodara;
+    assert.match(reason, /separate Chrome window/);
+    assert.match(reason, /Keep agents in your Chrome/);
+    assert.doesNotMatch(reason, /[\u2013\u2014]/);
+    fs.writeFileSync(CLAUDE_JSON, savedClaude);
+  });
+
   await check("sync keeps scope and placeholders project secrets", async () => {
     writeJson(CLAUDE_JSON, { mcpServers: {} });
     // The managed block is what older syncs copied out of some project's

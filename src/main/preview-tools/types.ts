@@ -12,6 +12,8 @@ export interface PreviewToolHost {
    * logged-in sessions. False for an imported pull-request run.
    */
   mayUseUserBrowser(params: Record<string, unknown>): Promise<boolean>;
+  /** A workspace's name, or the one on screen for null; null when there is none. */
+  workspaceName?(workspaceId: string | null): Promise<string | null>;
 }
 
 export type PreviewToolHandler = (params: Record<string, unknown>, method: string, host: PreviewToolHost) => Promise<unknown>;

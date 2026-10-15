@@ -1071,8 +1071,16 @@ app.whenReady().then(async () => {
         console.warn("[main] global config cleanup failed:", err);
       }
       try {
-        const summary = await writeIntegrationFiles({ codexNotify: process.env.SPARK_CODEX_NOTIFY !== "0" });
+        const keep = await import("./browser/chrome/keep-agents-in-chrome");
+        const summary = await writeIntegrationFiles({
+          codexNotify: process.env.SPARK_CODEX_NOTIFY !== "0",
+          separateBrowserTools: await keep.separateBrowserToolsGuardForLaunch().catch(() => null),
+        });
         noteCodexNotifyInstalled(summary.codexNotify);
+        // A browser server added in the Capability Center is off for the
+        // next session too.
+        const { onAgentAssetsChanged } = await import("./agent-sync");
+        onAgentAssetsChanged(() => void keep.applyKeepAgentsInChrome().catch(() => undefined));
       } catch (err) {
         console.warn("[main] agent integration files failed:", err);
       }

@@ -284,6 +284,10 @@ function normalize(
       typeof src.keepAwakeLidClosed === "boolean"
         ? src.keepAwakeLidClosed
         : DEFAULT_PREFERENCES.keepAwakeLidClosed,
+    keepAgentsInYourChrome:
+      typeof src.keepAgentsInYourChrome === "boolean"
+        ? src.keepAgentsInYourChrome
+        : DEFAULT_PREFERENCES.keepAgentsInYourChrome,
     autoOpenPreview:
       typeof src.autoOpenPreview === "boolean"
         ? src.autoOpenPreview

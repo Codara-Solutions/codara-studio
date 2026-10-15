@@ -2,6 +2,7 @@ import React, { useState } from "react";
 
 import type { ChromeLinkBrowserState } from "@shared/chrome-link";
 import { Disclosure, SettingRow, SettingsSection } from "../settings/SettingsPrimitives";
+import KeepAgentsInChromeRow from "./KeepAgentsInChromeRow";
 import { formatWhen, useChromeLink } from "./useChromeLink";
 import "./chrome-link.css";
 
@@ -49,6 +50,8 @@ export default function ChromeLinkSection(): React.ReactElement | null {
       title="Chrome extension"
       description="Let agents use tabs of your own Chrome, Edge, Brave or other Chromium browser, with your sign-ins. They see only the tabs you share from the extension's popup, never blocked sites, and every action is logged."
     >
+      <KeepAgentsInChromeRow />
+
       <SettingRow
         title="Link status"
         desc={

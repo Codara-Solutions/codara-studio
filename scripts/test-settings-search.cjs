@@ -77,6 +77,10 @@ const DIALOG_FUNCTION_TABS = {
   AboutSettings: "about",
 };
 
+// The Chrome extension section of the Browser page and the rows it draws
+// from their own files.
+const CHROME_SECTION_FILES = ["ChromeLinkSection.tsx", "KeepAgentsInChromeRow.tsx"];
+
 // Components whose literal title, text, label or anchor prop names a row or
 // section that search scrolls to.
 const ROW_PROPS = {
@@ -190,8 +194,10 @@ async function main() {
     for (const row of renderedRows(behavior)) {
       if (!findable("capabilities", row.name)) missing.push(`capabilities › ${row.name}`);
     }
-    for (const row of renderedRows(read(path.join(COMPONENTS, "chrome", "ChromeLinkSection.tsx")))) {
-      if (!findable("browser", row.name)) missing.push(`browser › ${row.name} (ChromeLinkSection.tsx)`);
+    for (const file of CHROME_SECTION_FILES) {
+      for (const row of renderedRows(read(path.join(COMPONENTS, "chrome", file)))) {
+        if (!findable("browser", row.name)) missing.push(`browser › ${row.name} (${file})`);
+      }
     }
     for (const row of renderedRows(read(KEYBINDINGS_PAGE))) {
       if (!findable("keybindings", row.name)) missing.push(`keybindings › ${row.name} (KeybindingsSection.tsx)`);
@@ -228,7 +234,9 @@ async function main() {
       const tab = DIALOG_FUNCTION_TABS[name];
       if (tab) for (const fold of advancedNames(body)) rendered[tab].add(fold);
     }
-    for (const row of renderedRows(read(path.join(COMPONENTS, "chrome", "ChromeLinkSection.tsx")))) rendered.browser.add(row.name);
+    for (const file of CHROME_SECTION_FILES) {
+      for (const row of renderedRows(read(path.join(COMPONENTS, "chrome", file)))) rendered.browser.add(row.name);
+    }
     rendered.keybindings = new Set(renderedRows(read(KEYBINDINGS_PAGE)).map((row) => row.name));
     for (const row of renderedRows(read(path.join(COMPONENTS, "keep-awake", "KeepAwakeSettings.tsx")))) rendered.general.add(row.name);
     rendered["remote-access"] = new Set(

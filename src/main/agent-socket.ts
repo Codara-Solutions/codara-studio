@@ -1609,6 +1609,11 @@ const PREVIEW_TOOL_HOST: PreviewToolHost = {
     const run = await (await getRunStore()).getRun(runId);
     return !run || runProjectPolicyMode(run) !== "untrusted-pull-request";
   },
+  workspaceName: async (workspaceId) => {
+    const state = await loadState();
+    const id = workspaceId ?? state.activeWorkspaceId;
+    return state.workspaces.find((workspace) => workspace.id === id)?.name ?? null;
+  },
 };
 
 async function handlePreviewToolRpc(

@@ -772,11 +772,18 @@ export function CliCell({
 }
 
 // The standing warnings about an entry: one only one runtime understands, one
-// Codara is not allowed to delete, and copies that disagree with each other.
+// Codara is not allowed to delete, copies that disagree with each other, and
+// one "Keep agents in your Chrome" turns off for the sessions Codara starts.
 export function EntryFlags({ group }: { group: NameGroup }) {
   const isProtected = groupItems(group).some((item) => !item.canDelete);
+  const offInCodara = groupItems(group).find((item) => item.offInCodara)?.offInCodara;
   return (
     <>
+      {offInCodara ? (
+        <span className="spark-badge" style={badgeStyle} title={offInCodara}>
+          Off in Codara
+        </span>
+      ) : null}
       {!group.any.syncable ? (
         <span className="spark-badge is-warn" style={badgeStyle} title={group.any.compatibilityReason}>
           native

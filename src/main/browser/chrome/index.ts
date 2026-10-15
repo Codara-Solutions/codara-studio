@@ -12,7 +12,7 @@ import { app, BrowserWindow, shell } from "electron";
 import { cpSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import type { ChromeLinkState } from "../../../shared/chrome-link";
+import type { ChromeLinkState, SeparateBrowserTool } from "../../../shared/chrome-link";
 import { latestSessionStart } from "../../agent-session-registry";
 import { codaraHome } from "../../codara-home";
 import type { IpcHandle } from "../../ipc";
@@ -27,6 +27,7 @@ import {
 } from "./activity";
 import { ChromeTargetBackend } from "./chrome-target";
 import { ChromeLinkServer } from "./link-server";
+import { applyKeepAgentsInChrome } from "./keep-agents-in-chrome";
 import { ChromeLinkStore } from "./link-store";
 import { CHROME_LINK_PORTS } from "./protocol";
 import { setChromeLinkRuntime } from "./runtime";
@@ -227,6 +228,9 @@ export function registerChromeLinkIpc(handle: IpcHandle): void {
   handle("chromeLink:disconnect", async (_event, linkId: unknown): Promise<boolean> =>
     typeof linkId === "string" ? server?.unpair(linkId) ?? false : false,
   );
+  // Reading the list also re-applies it, so a tool the user added since boot
+  // is off for the next session once Settings shows it.
+  handle("chromeLink:separateBrowserTools", async (): Promise<SeparateBrowserTool[]> => applyKeepAgentsInChrome());
   handle("chromeLink:prepareExtension", async (): Promise<string> => prepareExtensionFolder(true));
   handle("chromeLink:revealExtension", async (): Promise<string> => {
     const folder = prepareExtensionFolder(true);

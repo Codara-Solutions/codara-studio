@@ -338,6 +338,13 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     await expect.poll(async () => (await request("preview.chrome", { action: "status" })).browsers[0].mayOpenTabs).toBe(true);
     const opened = await request("preview.chrome", { action: "open", url: `${origin}/opened` });
     expect(opened).toMatchObject({ ok: true, url: `${origin}/opened`, title: "Public /opened" });
+    // Without a group the tab still lands in one, named like the workspace.
+    const groupTitle = await worker.evaluate(async (id) => {
+      const tab = await chrome.tabs.get(id);
+      return tab.groupId >= 0 ? (await chrome.tabGroups.get(tab.groupId)).title : null;
+    }, Number(String(opened.tabId).replace(/^chrome:/, "")));
+    expect(groupTitle).toBe("Chrome link");
+    expect(opened.group).toBe("Chrome link");
     expect(JSON.stringify(await request("preview.snapshot", { tabId: opened.tabId }))).toContain("Public page");
     await request("preview.chrome", { action: "activate", tabId });
     expect(await worker.evaluate((id) => chrome.tabs.get(id).then((tab: { active: boolean }) => tab.active), accountTab)).toBe(true);
