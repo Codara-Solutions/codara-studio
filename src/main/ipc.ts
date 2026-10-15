@@ -488,6 +488,7 @@ import { registerChromeLinkIpc } from "./browser/chrome";
 import { registerPointIpc } from "./browser/point";
 import { registerServersIpc } from "./servers";
 import { registerWorkspaceStatusIpc } from "./workspace-status";
+import { afterSkillAssetDeleted, afterSkillAssetInstalled, registerSkillUpdatesIpc, skillOriginsDir } from "./skill-updates-ipc";
 
 function nativeCliAccountRuntimeFromIpc(value: unknown): NativeCliAccountRuntime {
   if (value === "claude" || value === "codex" || value === "grok") return value;
@@ -1131,14 +1132,18 @@ export function registerIpc(): void {
     "agents:deleteAsset",
     async (_e, input: { id: string }) => {
       const { deleteAgentAsset } = await getAgentSync();
-      return deleteAgentAsset({ id: input.id });
+      const result = await deleteAgentAsset({ id: input.id });
+      await afterSkillAssetDeleted(result);
+      return result;
     },
   );
   handle(
     "agents:installAsset",
     async (_e, input: { id: string; target: "claude" | "codex" | "grok" }) => {
       const { installAgentAssetToRuntime } = await getAgentSync();
-      return installAgentAssetToRuntime({ id: input.id, target: input.target });
+      const result = await installAgentAssetToRuntime({ id: input.id, target: input.target });
+      await afterSkillAssetInstalled(input.id, result);
+      return result;
     },
   );
   handle(
@@ -1243,7 +1248,7 @@ export function registerIpc(): void {
         description: typeof input?.description === "string" ? input.description : "",
         instructions: typeof input?.instructions === "string" ? input.instructions : "",
       },
-      { skillsDir: codaraSkillsDir() },
+      { skillsDir: codaraSkillsDir(), originsDir: skillOriginsDir() },
     );
   });
   handle("agents:importSkill", async (_e, input: AgentSkillImportSource) => {
@@ -1258,7 +1263,11 @@ export function registerIpc(): void {
             ? { kind: "git", url: input.url, subdir }
             : null;
     if (!source) return { ok: false, error: "Choose a folder, a zip file or a git address to import." };
-    return importCodaraSkill(source, { skillsDir: codaraSkillsDir(), stagingDir: join(codaraHome(), "tmp") });
+    return importCodaraSkill(source, {
+      skillsDir: codaraSkillsDir(),
+      stagingDir: join(codaraHome(), "tmp"),
+      originsDir: skillOriginsDir(),
+    });
   });
   handle("dialog:openSkillArchive", async (e): Promise<string | null> => {
     const win = BrowserWindow.fromWebContents(e.sender);
@@ -4073,6 +4082,7 @@ export function registerIpc(): void {
 
   // Areas that keep their channels next to their code.
   registerServersIpc(handle);
+  registerSkillUpdatesIpc(handle);
   registerChromeLinkIpc(handle);
   registerCaptureIpc(handle);
   registerPointIpc(handle);

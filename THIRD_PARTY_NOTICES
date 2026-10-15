@@ -13,6 +13,11 @@ Adapted in Codara's own idiom, not copied file for file:
   holding a block lock on sleep and the lid switch, running `cat` on a pipe
   from the app so the lock ends with the app, and the backoff after a refused
   lock (src/main/keep-awake/linux-lid-inhibitor.ts).
+- Choosing the Claude Code plugin install that applies to a folder
+  (installed_plugins.json, enabledPlugins in the user, project and
+  project-local settings, the local, project, user order), adapted from Orca's
+  src/main/skills/claude-plugin-skill-sources.ts
+  (src/main/claude-plugin-skills.ts).
 
 MIT License
 

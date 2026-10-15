@@ -546,7 +546,7 @@ by default; bind it in Keybindings). It has six sections:
 | Section | What lives there |
 |---|---|
 | Tools (MCP servers) | Your MCP servers, one row per name. **Cora** and **Workers** switch a server on for Cora and for Pi workers; the **Claude CLI**, **Codex CLI** and **Grok Build** columns show whether that CLI loads it, with **Add** to copy it there. Each row says what Cora and workers actually get, has **Test** (starts the server once and lists its tools), **Edit** and **Remove**. The built-in Codara Studio server sits on top with an on/off switch per CLI; switching it off removes Codara's entry from that CLI's config, and it stays off across restarts. |
-| Skills | The skills agents can load, with a switch for Cora and workers and the same CLI columns. |
+| Skills | The skills agents can load, with a switch for Cora and workers and the same CLI columns. A skill imported from git says where it came from, shows **Update available** when its folder changed upstream, and has **Update** and **Roll back**. Skills from Claude Code plugins are listed below, read only. |
 | Profiles | Separate Coras with their own instructions and memory: create one, edit its instructions (`PROFILE.md`), make it the default for new chats, or delete it. A new chat (including a board chat with no messages yet) picks its profile from the composer's profile menu; a started chat shows its profile as a chip that opens it here, and keeps it. |
 | Memory | What Cora remembers for the profile you pick, globally and for this workspace. Global memory is the master switch: while it is off, workspace memory is off too and says so. **Open in editor** creates the file if nothing was remembered yet. |
 | Worker models | Which models Cora may pick for its workers. Cora only uses a model whose provider has a signed-in account; the others are marked **Not signed in**. The last usable model cannot be switched off; an OpenRouter model only counts once its key is verified. |
@@ -610,6 +610,33 @@ session starts, up to 16 per session. An open Cora chat picks up servers you
 add, change or remove on your next message, without a restart. A server that
 signs in through Claude's OAuth login cannot be used from Cora; give it an
 `Authorization` header instead.
+
+### Skill origins and updates
+
+**Add skill** can import a skill from a folder, a zip file or a git
+repository. Codara remembers where each one came from (the address, branch or
+tag, commit and folder in the repository) in its own folder, never inside the
+skill, and the skill's row shows it. Copying a skill to the Claude or Codex
+CLI with **Add** carries that record to the copy.
+
+For skills from git, Codara asks the repository whether it moved when the
+Capability Center opens, at most every six hours (30 minutes after a failed
+check), and when you click **Check for updates**. A check runs `git
+ls-remote` and, only when the branch moved, reads that commit's folder
+listing without downloading files, so a repository of many skills flags only
+the skills whose folder changed. It uses no model and no tokens, and never
+opens a sign-in window.
+
+**Update** replaces the skill with the repository's version and keeps the
+one it replaced; **Roll back** restores that version in one click. The skill
+keeps its name, so its switch and the agents that know it are unaffected,
+and new Cora chats and workers load the new version. A copy inside a CLI's
+skill folder is changed only when you click one of these.
+
+Skills that come with Claude Code plugins are listed under **From Claude
+Code plugins**: the enabled plugins' skills for this workspace, with the
+plugin, marketplace and version. Claude Code installs, updates and removes
+them with `/plugin`; only the Claude CLI loads them.
 
 Skills reach Cora too. Cora loads the skills kept in `.pi/skills`,
 `.agents/skills`, the workspace's `.claude/skills` and `.codex/skills`, and

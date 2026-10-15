@@ -52,6 +52,7 @@ import McpSection, { type ImportState, type ProbeState, type RemoveScope, type S
 import McpServerForm from "./capabilities/McpServerForm";
 import SkillsSection from "./capabilities/SkillsSection";
 import SkillForm, { blankSkillEditor, validateSkillEditor, type SkillEditorState } from "./capabilities/SkillForm";
+import { useSkillOrigins } from "./capabilities/useSkillOrigins";
 import ProfilesSection, { type ProfileDocumentDraft, type ProfileDraft } from "./capabilities/ProfilesSection";
 import MemorySection from "./capabilities/MemorySection";
 import WorkerModelsSection from "./capabilities/WorkerModelsSection";
@@ -249,6 +250,10 @@ export default function AgentCapabilitiesDialog({
       .then(setAssets)
       .catch((err) => setAssetsError(errorText(err)));
   }, [workspaceCwd]);
+
+  // Where each skill came from, the background update check, and the skills
+  // Claude Code plugins bring.
+  const skillOrigins = useSkillOrigins({ cwd: workspaceCwd, inventory: assets, onStatus: setStatus, onChanged: refreshAssets });
 
   const refreshBuiltins = useCallback(() => {
     setBuiltinsError(null);
@@ -1408,6 +1413,8 @@ export default function AgentCapabilitiesDialog({
                   onRemove={removeGroup}
                   onInstall={installToRuntime}
                   onAdd={openAddSkill}
+                  origins={skillOrigins.view}
+                  pluginSkills={skillOrigins.plugins}
                 />
               ) : null}
 

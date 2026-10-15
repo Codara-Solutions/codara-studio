@@ -1,7 +1,9 @@
 // Skills the user adds in the Capability Center: written there, or imported
 // from a folder, a zip archive or a git repository. Everything lands in
 // Codara's own skill folder (codaraSkillsDir in agent-sync.ts), which Cora and
-// her workers load per launch; no CLI's skill folder is ever written.
+// her workers load per launch; no CLI's skill folder is ever written. Where an
+// import came from is recorded beside it (skill-origin-store.ts), so a skill
+// from git can be checked and updated later (skill-updates.ts).
 //
 // Imported content is untrusted. An archive entry or a repository file may
 // try to escape the destination (`../`, an absolute path, a symlink), so
@@ -15,7 +17,9 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { inflateRawSync } from "node:zlib";
 import type { AgentSkillCreateInput, AgentSkillImportSource, AgentSkillWriteResult } from "@shared/types";
+import type { SkillOrigin } from "@shared/skill-origins";
 import { gitChildEnv } from "./git-env";
+import { forgetSkillOrigin, recordSkillOrigin } from "./skill-origin-store";
 
 // The Agent Skills naming rule, which Pi enforces when it loads a skill.
 export const SKILL_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
@@ -30,7 +34,8 @@ const MAX_CANDIDATES = 50;
 const GIT_TIMEOUT_MS = 90_000;
 const SKIPPED_NAMES = new Set([".git", "node_modules", "__MACOSX", ".DS_Store"]);
 
-export type GitRunner = (args: string[], options: { cwd: string; timeoutMs: number }) => Promise<void>;
+/** Runs git and resolves to its stdout; a fake may resolve to nothing. */
+export type GitRunner = (args: string[], options: { cwd: string; timeoutMs: number }) => Promise<string | void>;
 
 export interface SkillImportOptions {
   skillsDir: string;
@@ -38,6 +43,8 @@ export interface SkillImportOptions {
   runGit?: GitRunner;
   /** Where clones and extracted archives are staged; defaults to the OS temp dir. */
   stagingDir?: string;
+  /** Codara's record of where skills came from; nothing is recorded without it. */
+  originsDir?: string;
 }
 
 class SkillImportError extends Error {
@@ -89,7 +96,7 @@ export function renderSkillDocument(input: AgentSkillCreateInput): string {
 
 export async function createCodaraSkill(
   input: AgentSkillCreateInput,
-  options: { skillsDir: string },
+  options: { skillsDir: string; originsDir?: string },
 ): Promise<AgentSkillWriteResult> {
   const name = (input.name ?? "").trim();
   const problem = validateSkillName(name);
@@ -122,6 +129,9 @@ export async function createCodaraSkill(
     await fs.rm(dest, { recursive: true, force: true }).catch(() => undefined);
     return failure(err);
   }
+  // A skill written here has no source to update from, whatever a record
+  // left by an earlier skill of the same name says.
+  if (options.originsDir) await forgetSkillOrigin(options.originsDir, dest).catch(() => undefined);
   return { ok: true, name, path: dest };
 }
 
@@ -137,31 +147,93 @@ export async function importCodaraSkill(
     // What to call a skill whose SKILL.md sits at the top of the source and
     // names no valid skill: the folder, archive or repository name.
     let rootName: string;
+    let origin: (skillDir: string) => Promise<SkillOrigin>;
+    const installedAt = new Date().toISOString();
     if (source.kind === "folder") {
       root = await requireDirectory(source.path, "folder");
       rootName = basename(root);
+      origin = async (skillDir) => ({ kind: "folder", sourcePath: skillDir, installedAt });
     } else if (source.kind === "zip") {
       const archive = await requireFile(source.path);
       await fs.mkdir(staging, { recursive: true, mode: 0o700 });
       await extractZipSafely(await fs.readFile(archive), staging);
       root = staging;
       rootName = basename(archive).replace(/\.zip$/i, "");
+      origin = async () => ({ kind: "zip", sourcePath: archive, installedAt });
     } else {
       const parsed = parseGitSkillUrl(source.url);
       if ("error" in parsed) throw new SkillImportError(parsed.error);
       await fs.mkdir(staging, { recursive: true, mode: 0o700 });
       const clone = join(staging, "repo");
-      await cloneRepository(parsed, clone, options.runGit ?? runGit);
+      const run = options.runGit ?? runGit;
+      await cloneRepository(parsed, clone, run);
       root = parsed.subdir ? await confinedDir(clone, join(clone, ...parsed.subdir.split("/"))) : clone;
       rootName = (parsed.subdir ?? parsed.cloneUrl).split("/").pop()!.replace(/\.git$/i, "");
+      origin = async (skillDir) => ({
+        kind: "git",
+        url: parsed.cloneUrl,
+        ...(parsed.ref ? { ref: parsed.ref } : {}),
+        ...(await describeClone(clone, skillDir, run, parsed.ref === undefined)),
+        installedAt,
+      });
     }
     const skillDir = await chooseSkillDir(root, source.subdir);
-    return await installSkillFolder(skillDir, options.skillsDir, resolve(skillDir) === resolve(root) ? rootName : basename(skillDir));
+    const result = await installSkillFolder(skillDir, options.skillsDir, resolve(skillDir) === resolve(root) ? rootName : basename(skillDir));
+    if (result.ok && result.path && result.name && options.originsDir) {
+      // The skill is in place either way; a record that cannot be written
+      // only means Codara cannot offer updates for it.
+      await recordSkillOrigin(options.originsDir, { skillDir: result.path, name: result.name, origin: await origin(skillDir) }).catch(
+        () => undefined,
+      );
+    }
+    return result;
   } catch (err) {
     return failure(err);
   } finally {
     await fs.rm(staging, { recursive: true, force: true }).catch(() => undefined);
   }
+}
+
+const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
+
+function firstLine(output: string | void): string {
+  return typeof output === "string" ? output.trim().split(/\r?\n/)[0]?.trim() ?? "" : "";
+}
+
+/** The skill's folder inside a clone, as git names it ("" for the root). */
+export async function repoSubpath(clone: string, skillDir: string): Promise<string | null> {
+  const [realClone, realSkill] = await Promise.all([fs.realpath(clone), fs.realpath(skillDir)]);
+  if (!insideRoot(realClone, realSkill)) return null;
+  return relative(realClone, realSkill).split(sep).join("/");
+}
+
+/**
+ * The commit a clone holds, the skill folder's path and git tree in it, and
+ * the default branch a clone without --branch landed on. Each part is left
+ * out when git cannot say: the skill is installed either way.
+ */
+export async function describeClone(
+  clone: string,
+  skillDir: string,
+  run: GitRunner,
+  wantBranch: boolean,
+): Promise<Pick<SkillOrigin, "commit" | "subpath" | "tree" | "branch">> {
+  const out: Pick<SkillOrigin, "commit" | "subpath" | "tree" | "branch"> = {};
+  const subpath = await repoSubpath(clone, skillDir).catch(() => null);
+  if (subpath !== null) out.subpath = subpath;
+  const git = (args: string[]) =>
+    run(["-C", clone, ...args], { cwd: clone, timeoutMs: 15_000 }).then(firstLine, () => "");
+  const commit = await git(["rev-parse", "--verify", "HEAD^{commit}"]);
+  if (OBJECT_ID.test(commit)) out.commit = commit;
+  if (subpath !== null) {
+    const tree = await git(["rev-parse", "--verify", subpath ? `HEAD:${subpath}` : "HEAD^{tree}"]);
+    if (OBJECT_ID.test(tree)) out.tree = tree;
+  }
+  if (wantBranch) {
+    const branch = await git(["rev-parse", "--abbrev-ref", "HEAD"]);
+    if (branch && branch !== "HEAD" && REF_PATTERN.test(branch)) out.branch = branch;
+  }
+  return out;
 }
 
 async function requireDirectory(path: string, noun: string): Promise<string> {
@@ -196,14 +268,14 @@ export function safeRelativePath(raw: string): string | null {
   return segments.join("/");
 }
 
-function insideRoot(root: string, candidate: string): boolean {
+export function insideRoot(root: string, candidate: string): boolean {
   const rel = relative(resolve(root), resolve(candidate));
   return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
 }
 
 // The lexical check above cannot see a symlinked folder on the way to `dir`,
 // which would point the copy at any folder on the machine.
-async function confinedDir(root: string, dir: string): Promise<string> {
+export async function confinedDir(root: string, dir: string): Promise<string> {
   const [realRoot, realDir] = await Promise.all([fs.realpath(root), fs.realpath(dir).catch(() => null)]);
   if (realDir === null) return dir;
   if (!insideRoot(realRoot, realDir)) throw new SkillImportError("That folder is outside the import source.");
@@ -233,7 +305,7 @@ async function chooseSkillDir(root: string, subdir: string | undefined): Promise
   );
 }
 
-async function hasSkillFile(dir: string): Promise<boolean> {
+export async function hasSkillFile(dir: string): Promise<boolean> {
   const stat = await fs.lstat(join(dir, "SKILL.md")).catch(() => null);
   return Boolean(stat?.isFile());
 }
@@ -342,7 +414,7 @@ async function installSkillFolder(
 
 // Regular files and folders only. A symlink is skipped rather than copied:
 // recreated, it could point the installed skill at any file on the machine.
-async function copyTreeSafely(
+export async function copyTreeSafely(
   source: string,
   dest: string,
   budget: { files: number; bytes: number },
@@ -543,7 +615,7 @@ export function parseGitSkillUrl(raw: string): ParsedGitSkillUrl | { error: stri
   };
 }
 
-async function cloneRepository(parsed: ParsedGitSkillUrl, dest: string, run: GitRunner): Promise<void> {
+export async function cloneRepository(parsed: ParsedGitSkillUrl, dest: string, run: GitRunner): Promise<void> {
   const args = [
     // https only, whatever the repository's own config or submodules ask for.
     "-c", "protocol.allow=never",
@@ -567,21 +639,26 @@ async function cloneRepository(parsed: ParsedGitSkillUrl, dest: string, run: Git
   }
 }
 
-const runGit: GitRunner = (args, options) =>
-  new Promise((resolvePromise, reject) => {
-    execFile(
-      "git",
-      args,
-      {
-        cwd: options.cwd,
-        timeout: options.timeoutMs,
-        windowsHide: true,
-        maxBuffer: 4 * 1024 * 1024,
-        env: { ...gitChildEnv(), GIT_LFS_SKIP_SMUDGE: "1", GIT_ASKPASS: "", SSH_ASKPASS: "" },
-      },
-      (error, _stdout, stderr) => {
-        if (error) reject(new Error(String(stderr || error.message).trim()));
-        else resolvePromise();
-      },
-    );
-  });
+/** The real git. `extraEnv` adds to the environment every run gets. */
+export function makeGitRunner(extraEnv: NodeJS.ProcessEnv = {}): GitRunner {
+  return (args, options) =>
+    new Promise((resolvePromise, reject) => {
+      execFile(
+        "git",
+        args,
+        {
+          cwd: options.cwd,
+          timeout: options.timeoutMs,
+          windowsHide: true,
+          maxBuffer: 4 * 1024 * 1024,
+          env: { ...gitChildEnv(), GIT_LFS_SKIP_SMUDGE: "1", GIT_ASKPASS: "", SSH_ASKPASS: "", ...extraEnv },
+        },
+        (error, stdout, stderr) => {
+          if (error) reject(new Error(String(stderr || error.message).trim()));
+          else resolvePromise(String(stdout));
+        },
+      );
+    });
+}
+
+const runGit: GitRunner = makeGitRunner();

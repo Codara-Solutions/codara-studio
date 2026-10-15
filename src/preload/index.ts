@@ -43,6 +43,7 @@ import { keepAwakeApi } from "./areas/keep-awake";
 import { pointApi } from "./areas/point";
 import { serversApi } from "./areas/servers";
 import { workspaceStatusApi } from "./areas/workspace-status";
+import { skillOriginsApi } from "./areas/skill-origins";
 import type {
   CoraMemoryItem,
   MemoryItemKind,
@@ -1776,6 +1777,7 @@ const api = {
     },
   },
   servers: serversApi,
+  skillOrigins: skillOriginsApi,
   chromeLink: chromeLinkApi,
   keepAwake: keepAwakeApi,
   capture: captureApi,
