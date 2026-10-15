@@ -22,6 +22,7 @@ import * as fsWatcher from "./fs-watcher";
 import { disposeAllConnections } from "./remote/connections";
 import { closeAllPaneOverlays, startAgentSocket, stopAgentSocket } from "./agent-socket";
 import { ensureCodaraHomeSync, codaraHome } from "./codara-home";
+import { startDiagnostics } from "./diagnostics";
 import { flush, loadSettings, loadState } from "./storage";
 import {
   flushPreferences,
@@ -1025,6 +1026,9 @@ app.whenReady().then(async () => {
   }
 
   ensureCodaraHomeSync();
+  // The crash and freeze black box: before anything slow runs, so a freeze
+  // during startup is caught, and before the window, so Crashpad watches it.
+  startDiagnostics();
   logMain(
     "boot",
     `app start pid=${process.pid} packaged=${app.isPackaged} relaunched=${process.argv.includes(RELAUNCHED_FLAG)}`,
