@@ -107,7 +107,7 @@ export default function WorktreeSetupSummary({
           ) : null}
           {preview.commands.map((command, index) => (
             <li key={`c${index}`}>
-              {command.kind === "repo" ? "Runs" : "Then runs your command"}{" "}
+              {command.kind === "repo" ? "Runs" : index > 0 ? "Then runs your command" : "Runs your command"}{" "}
               <code>{command.command.split("\n").join(" && ")}</code>
             </li>
           ))}

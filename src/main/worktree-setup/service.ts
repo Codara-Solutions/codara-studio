@@ -1031,7 +1031,7 @@ export function agentSetupSummary(status: WorktreeSetupStatus, logTail: string):
         ? "Setup was stopped before it finished; the worktree may be missing dependencies."
         : status.state === "succeeded"
           ? "Setup finished."
-          : "Setup is still running. Call codara_worktree_setup({wait: true}) before you build or test.";
+          : "Setup is still running. Call codara_worktree_setup({workspaceId, wait: true}) before you build or test.";
   return {
     state: status.state,
     waitForSetup: status.waitForSetup,
