@@ -30,7 +30,11 @@ export interface LidSupportProbe {
   pathDirs: string[];
 }
 
-const FALLBACK_DIRS = ["/usr/bin", "/bin", "/usr/local/bin"];
+// Where systemd installs it, looked at before PATH: Codara's PATH can start
+// with folders it did not choose (an AppImage mount, npm's node_modules/.bin
+// under `npm run dev`). PATH still finds it where systemd lives elsewhere
+// (NixOS).
+const SYSTEM_DIRS = ["/usr/bin", "/bin", "/usr/local/bin"];
 
 export function detectLidSupport(probe: LidSupportProbe): LidSupport {
   if (probe.platform !== "linux") {
@@ -45,7 +49,7 @@ export function detectLidSupport(probe: LidSupportProbe): LidSupport {
     return { supported: false, command: null, reason: "not booted with systemd" };
   }
   const command =
-    [...probe.pathDirs, ...FALLBACK_DIRS]
+    [...SYSTEM_DIRS, ...probe.pathDirs]
       .filter((dir) => dir.startsWith("/"))
       .map((dir) => join(dir, "systemd-inhibit"))
       .find((candidate) => probe.exists(candidate)) ?? null;

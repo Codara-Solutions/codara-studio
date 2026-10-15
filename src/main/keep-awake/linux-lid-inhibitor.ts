@@ -1,4 +1,5 @@
 import { spawn as nodeSpawn } from "node:child_process";
+import { sanitizeAppImageChildEnv } from "../env-sanitize";
 import type { LidHold } from "./controller";
 
 // Keeps a Linux laptop running with its lid closed, without admin rights and
@@ -49,7 +50,12 @@ export interface LidHelperProcess {
 export type LidHelperSpawn = (
   command: string,
   args: string[],
-  options: { stdio: ["pipe", "ignore", "pipe"]; windowsHide: true; detached: false },
+  options: {
+    stdio: ["pipe", "ignore", "pipe"];
+    windowsHide: true;
+    detached: false;
+    env: NodeJS.ProcessEnv;
+  },
 ) => LidHelperProcess;
 
 export interface LinuxLidInhibitorOptions {
@@ -62,6 +68,18 @@ export interface LinuxLidInhibitorOptions {
   setTimeout?: (fn: () => void, ms: number) => unknown;
   clearTimeout?: (handle: unknown) => void;
   log?: (message: string) => void;
+}
+
+/**
+ * The helper's environment: Codara's own, minus an AppImage launch. AppRun
+ * puts the mount's bundled libraries on LD_LIBRARY_PATH and its folders on
+ * PATH; the system's systemd-inhibit and cat must load the system's
+ * libraries, as from a terminal (env-sanitize.ts).
+ */
+export function linuxLidHelperEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env = { ...source };
+  sanitizeAppImageChildEnv(env);
+  return env;
 }
 
 export function linuxLidInhibitArgs(): string[] {
@@ -116,6 +134,7 @@ export class LinuxLidInhibitor implements LidHold {
         stdio: ["pipe", "ignore", "pipe"],
         windowsHide: true,
         detached: false,
+        env: linuxLidHelperEnv(),
       });
     } catch (err) {
       this.onFailure(null, err as NodeJS.ErrnoException, "");
@@ -147,7 +166,9 @@ export class LinuxLidInhibitor implements LidHold {
     this.clearRetry();
     this.retryAt = null;
     this.failures = 0;
-    this.lastError = null;
+    // A missing or unrunnable systemd-inhibit stays missing: keep saying so,
+    // or an enabled lid option would look fine while it never holds.
+    this.lastError = this.unavailable ? LID_UNAVAILABLE : null;
     this.releaseChild();
   }
 

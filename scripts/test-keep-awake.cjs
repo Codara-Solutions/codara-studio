@@ -519,6 +519,8 @@ async function main() {
     assert.equal(args[args.length - 1], "cat", "cat on our pipe is what ties the lock to Codara");
     assert.deepEqual(options.stdio, ["pipe", "ignore", "pipe"]);
     assert.equal(options.detached, false);
+    assert.equal(typeof options.env, "object", "the helper gets its own environment");
+    assert.equal(options.env.APPDIR, undefined);
     assert.equal(inhibitor.active, true);
 
     inhibitor.stop();
@@ -588,6 +590,30 @@ async function main() {
     advance(lidMod.LID_RETRY_MAX_MS * 2);
     inhibitor.start();
     assert.equal(spawn.spawned.length, 1);
+    // The controller stops the hold whenever Codara stops holding; the
+    // reason must outlive that, or the enabled option looks fine forever.
+    inhibitor.stop();
+    inhibitor.start();
+    assert.equal(spawn.spawned.length, 1);
+    assert.equal(inhibitor.error, lidMod.LID_UNAVAILABLE, "still says why after a stop");
+  });
+
+  await check("the lid helper runs with the system's libraries, not an AppImage's", () => {
+    const mount = "/tmp/.mount_CodaraXYZ";
+    const env = lidMod.linuxLidHelperEnv({
+      APPDIR: mount,
+      APPIMAGE: "/home/u/Codara.AppImage",
+      PATH: `${mount}:${mount}/usr/sbin:/usr/local/bin:/usr/bin`,
+      LD_LIBRARY_PATH: `${mount}/usr/lib`,
+      HOME: "/home/u",
+    });
+    assert.equal(env.PATH, "/usr/local/bin:/usr/bin");
+    assert.equal(env.LD_LIBRARY_PATH, undefined);
+    assert.equal(env.APPDIR, undefined);
+    assert.equal(env.APPIMAGE, undefined);
+    assert.equal(env.HOME, "/home/u");
+    const plain = lidMod.linuxLidHelperEnv({ PATH: "/usr/bin:/bin", LANG: "C" });
+    assert.deepEqual(plain, { PATH: "/usr/bin:/bin", LANG: "C" });
   });
 
   await check("dispose stops the helper and cancels a pending retry", () => {
@@ -699,6 +725,22 @@ async function main() {
       probe({ files: ["/run/systemd/system", "/bin/systemd-inhibit"], pathDirs: ["relative"], dirs: { "/proc/acpi/button/lid": ["LID"] } }),
     );
     assert.equal(bin.command, "/bin/systemd-inhibit");
+    const shadowed = supportMod.detectLidSupport(
+      probe({
+        files: ["/run/systemd/system", "/usr/bin/systemd-inhibit", "/repo/node_modules/.bin/systemd-inhibit"],
+        pathDirs: ["/repo/node_modules/.bin", "/usr/bin"],
+        dirs: { "/proc/acpi/button/lid": ["LID0"] },
+      }),
+    );
+    assert.equal(shadowed.command, "/usr/bin/systemd-inhibit", "the system's copy comes before PATH");
+    const nix = supportMod.detectLidSupport(
+      probe({
+        files: ["/run/systemd/system", "/run/current-system/sw/bin/systemd-inhibit"],
+        pathDirs: ["/run/current-system/sw/bin"],
+        dirs: { "/proc/acpi/button/lid": ["LID0"] },
+      }),
+    );
+    assert.equal(nix.command, "/run/current-system/sw/bin/systemd-inhibit", "PATH still finds it elsewhere");
   });
 
   // ── 6. What counts as work ─────────────────────────────────────────────
@@ -779,7 +821,11 @@ async function main() {
     assert.match(wiring, /process\.on\("exit", stopKeepAwake\)/);
     // A test run must never hold the machine it runs on.
     assert.match(wiring, /if \(E2E_BACKGROUND\) \{\s*const probe = e2eProbe/);
-    assert.match(read("src", "main", "index.ts"), /startChromeLink\(\);\n\s*startKeepAwake\(\);/);
+    const boot = read("src", "main", "index.ts");
+    const ready = boot.indexOf("app.whenReady()");
+    const started = boot.indexOf("\n  startKeepAwake();");
+    assert.ok(ready >= 0 && started > ready, "started once the app is ready");
+    assert.ok(started > boot.indexOf("createWindow();", ready), "after the window exists");
   });
 
   await check("the status channel is registered through the trusted-sender gate", () => {
