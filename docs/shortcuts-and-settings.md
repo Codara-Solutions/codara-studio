@@ -32,11 +32,60 @@ Codara's. Keys an agent sends to a page never trigger Codara's shortcuts.
 | Action | Default | Command id |
 |---|---|---|
 | Switch Cora run | Mod+K | `runSwitcher.open` |
+| Jump to a workspace, tab or agent | Cmd+J on macOS, Ctrl+Shift+J on Windows and Linux | `jump.open` |
+| Switch to workspace 1 to 9 | Ctrl+1 ... Ctrl+9 on macOS, Alt+1 ... Alt+9 on Windows and Linux | `workspace.selectByIndex` |
+| Back to the previous workspace | Cmd+Option+Left on macOS, Alt+[ on Windows and Linux | `workspace.back` |
+| Forward to the next workspace | Cmd+Option+Right on macOS, Alt+] on Windows and Linux | `workspace.forward` |
 | Open Automations | Mod+Shift+A | `automations.open` |
 | Open Usage | Mod+Shift+U | `usage.open` |
 | Open Cora Board | Mod+Shift+B | `board.open` |
 | Focus chat composer | Mod+L | `composer.focus` |
 | Search in files | Mod+Shift+F | `search.open` |
+
+#### The jump palette
+
+`jump.open` opens one search over every workspace, every open terminal,
+editor, diff and browser tab, and every agent pane, in all workspaces at
+once. With nothing typed, the rows that need you come first (an agent waiting
+on an answer, or a workspace whose Cora run is blocked), then agents that
+finished while you were elsewhere, then everything by when you last used it.
+Typing filters by name first, then by path, URL, branch and workspace, and
+also matches initials and skipped letters, so `fa` finds `fix-auth`.
+
+- Enter opens the selected row: it switches workspace if needed, selects the
+  tab and, for a terminal pane, a file or a browser tab, puts the keyboard in
+  it.
+- Mod+1 to Mod+6 open the first six rows directly.
+- Arrow keys, Page Up and Page Down move the selection; Esc closes and gives
+  the keyboard back to where it was.
+- A name nothing goes by yet offers **Create worktree** with that name as the
+  branch. It runs the same creation as the rail's "Create isolated worktree"
+  next to the repository of the workspace on screen, and opens that dialog
+  with git's message if it fails. SSH workspaces do not offer it.
+
+The rows are read when the palette opens and stay put while it is open.
+Tabs of a workspace you have not opened since Codara started are not listed
+yet; its workspace row is.
+
+#### Workspace 1 to 9, back and forward
+
+`workspace.selectByIndex` counts the workspaces as the rail shows them, top
+to bottom, with each folder's workspaces in place and the workspaces of a
+collapsed folder skipped. It is a range: in Keybindings you record the
+modifiers with any digit, and they then apply to 1 to 9. The range needs Ctrl,
+Alt or Cmd so the digits keep typing numbers. The digit is read from the key's
+position too, so it works on layouts like AZERTY where the digit row types
+symbols.
+
+Back and forward walk the workspaces you have been in, like a browser's
+history. A workspace deleted since is skipped.
+
+Why these defaults: Ctrl+J is a new line in a terminal (Claude Code and Pi
+use it), so Windows and Linux open the palette with Ctrl+Shift+J. Ctrl+Alt is
+AltGr on Windows, which types characters like @ and #, so the workspace range
+there is Alt+digit. Ctrl+Alt+Left and Right switch desktops on GNOME,
+Cinnamon and Xfce and Alt+Left and Right move by word, hence Alt+[ and Alt+].
+On a layout without [ and ] keys, rebind back and forward in Keybindings.
 
 ### View
 
@@ -56,7 +105,7 @@ Codara's. Keys an agent sends to a page never trigger Codara's shortcuts.
 
 | Action | Default | Command id |
 |---|---|---|
-| Switch to tab 1 to 9 | Mod+1 ... Mod+9 (fixed) | `view.selectByIndex` |
+| Switch to tab 1 to 9 | Mod+1 ... Mod+9 (fixed; on macOS Cmd only, since Ctrl+1 ... Ctrl+9 switch workspaces) | `view.selectByIndex` |
 | New chat | Mod+Alt+N | `chat.new` |
 | New terminal tab | Mod+T | `tab.newTerminal` |
 | Quick Open file | Mod+P | `tab.newEditor` |
