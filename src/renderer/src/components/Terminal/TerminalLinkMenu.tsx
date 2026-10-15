@@ -116,6 +116,9 @@ export function TerminalLinkMenu({
       aria-label="Link actions"
       className="spark-menu"
       data-terminal-link-menu
+      // Focusable, so a click on the link text or the hint keeps the keys
+      // (arrows, Escape) with the menu instead of dropping focus to the page.
+      tabIndex={-1}
       onKeyDown={onKeyDown}
       // Rendered in a portal but still inside the pane's React tree: the pane
       // and its stack must not take these presses as clicks on the terminal.
