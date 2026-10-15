@@ -11,10 +11,10 @@ import { inflateRawSync } from "node:zlib";
 // freeze with the blocking function's stack; a throwaway hidden renderer is
 // crashed and Crashpad writes its minidump into the Codara home, uploads
 // off; Settings > About then shows both, and Export diagnostics writes a
-// zip whose log has the planted secrets removed. Last, the GPU process,
-// which Chromium launches before `ready`, is crashed and leaves a minidump
-// too. Runs in a temp HOME and Codara home; the save dialog is answered in
-// the main process.
+// zip whose log has the planted secrets removed, without replacing a file
+// the save dialog never asked about. Last, the GPU process, which Chromium
+// launches before `ready`, is crashed and leaves a minidump too. Runs in a
+// temp HOME and Codara home; the save dialog is answered in the main process.
 
 const PLANTED_EMAIL = "ann.tester@example.com";
 const PLANTED_TOKEN = "sk-ant-api03-PlantedTokenForTheSpec_0123456789";
@@ -115,6 +115,16 @@ test("a freeze and a crash are recorded, shown in About and exported without sec
       crashReporterBeforeReady: true,
       eventLoopProbe: true,
     });
+
+    // The same name again: the dialog confirmed replacing "bundle", never
+    // "bundle.zip", so the first export stays as it was.
+    const firstExport = await readFile(join(exportsDir, "bundle.zip"));
+    await button.focus();
+    await page.keyboard.press("Enter");
+    await expect(exportRow.getByRole("alert")).toContainText(
+      "Could not export: bundle.zip already exists there. Export again and pick another name.",
+    );
+    expect((await readFile(join(exportsDir, "bundle.zip"))).equals(firstExport)).toBe(true);
 
     // Settings search finds the export.
     await page.keyboard.press(process.platform === "darwin" ? "Meta+F" : "Control+F");

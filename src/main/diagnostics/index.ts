@@ -255,8 +255,13 @@ export async function exportDiagnostics(owner: BrowserWindow | null): Promise<Di
   };
   const choice = owner ? await dialog.showSaveDialog(owner, options) : await dialog.showSaveDialog(options);
   if (choice.canceled || !choice.filePath) return { status: "canceled" };
-  const destination = choice.filePath.toLowerCase().endsWith(".zip") ? choice.filePath : `${choice.filePath}.zip`;
+  // The dialog confirmed replacing the name the user typed. When .zip is added
+  // here, a file already at the new name was never shown to them.
+  const named = choice.filePath.toLowerCase().endsWith(".zip");
+  const destination = named ? choice.filePath : `${choice.filePath}.zip`;
   assertCodaraOwnedWrite(destination);
+  const taken = (): Error => new Error(`${basename(destination)} already exists there. Export again and pick another name.`);
+  if (!named && existsSync(destination)) throw taken();
   const home = codaraHome();
   const entries = await buildDiagnosticsEntries({
     sources: { home, diagnosticsDir: diagnosticsDir(home), crashDumpsDir: crashDumpsDir(home) },
@@ -267,7 +272,11 @@ export async function exportDiagnostics(owner: BrowserWindow | null): Promise<Di
     now,
   });
   const zip = createZip(entries);
-  await fs.writeFile(destination, zip, { mode: 0o600 });
+  try {
+    await fs.writeFile(destination, zip, { mode: 0o600, flag: named ? "w" : "wx" });
+  } catch (error) {
+    throw (error as NodeJS.ErrnoException).code === "EEXIST" ? taken() : error;
+  }
   lastExportPath = destination;
   logMain("diagnostics", `exported ${entries.length} files (${zip.length} bytes)`);
   return { status: "saved", path: destination, fileName: basename(destination), files: entries.length, bytes: zip.length };
