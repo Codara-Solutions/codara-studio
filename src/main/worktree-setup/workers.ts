@@ -2,7 +2,7 @@
 // run-store.ts starts it when it makes a worker's worktree and waits for it
 // before launching the worker when the setup file asks agents to wait.
 
-import { isWorktreeSetupFinished, type WorktreeSetupStatus } from "@shared/worktree-setup";
+import { isWorktreeSetupFinished, isWorktreeSetupStartError, type WorktreeSetupStatus } from "@shared/worktree-setup";
 import { startWorktreeSetup, worktreeSetupService } from "./index";
 
 // A worker waits at most this long; after that it starts on what is there.
@@ -37,7 +37,7 @@ export async function prepareWorkerWorktree(input: {
 }): Promise<WorkerSetupEvent | null> {
   const started = await startWorktreeSetup({ ...input, trigger: "worker" });
   if (!started) return null;
-  if ("error" in started) {
+  if (isWorktreeSetupStartError(started)) {
     return { failed: true, message: `Worktree setup could not start: ${started.error}`, payload: { error: started.error } };
   }
   const prepared = (await worktreeSetupService().whenPrepared(started.id).catch(() => null)) ?? started;

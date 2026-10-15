@@ -6,7 +6,12 @@
 import { app, webContents } from "electron";
 import { promises as fsp } from "node:fs";
 import { isRemotePath } from "@shared/remote";
-import type { WorktreeSetupFileDraft, WorktreeSetupStatus } from "@shared/worktree-setup";
+import {
+  isWorktreeSetupStartError,
+  type WorktreeSetupFileDraft,
+  type WorktreeSetupStartError,
+  type WorktreeSetupStatus,
+} from "@shared/worktree-setup";
 import {
   sanitizeAppImageChildEnv,
   sanitizeElectronViteDevEnv,
@@ -143,7 +148,7 @@ export async function personalSetupCommand(sourceCwd: string): Promise<string | 
  */
 export async function startWorktreeSetup(
   request: Omit<StartSetupRequest, "userCommand"> & { userCommand?: string | null },
-): Promise<WorktreeSetupStatus | null | { error: string }> {
+): Promise<WorktreeSetupStatus | null | WorktreeSetupStartError> {
   try {
     const userCommand =
       request.userCommand === undefined ? await personalSetupCommand(request.sourceCwd) : request.userCommand;
@@ -158,7 +163,7 @@ export function agentWorktreeSetupRunner() {
   return {
     start: async (request: Omit<StartSetupRequest, "userCommand">) => {
       const started = await startWorktreeSetup(request);
-      return started && !("error" in started) ? started : null;
+      return started && !isWorktreeSetupStartError(started) ? started : null;
     },
     whenPrepared: (id: string) => worktreeSetupService().whenPrepared(id),
     waitFor: (id: string, timeoutMs: number) => worktreeSetupService().waitFor(id, timeoutMs),

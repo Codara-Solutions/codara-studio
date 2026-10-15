@@ -32,7 +32,17 @@ function commitAll(cwd, message) {
 }
 
 let passed = 0;
+let skipped = 0;
+// From the links on, the checks make symlinks and run POSIX shell commands
+// (echo, test, sleep). The Windows paths (junctions, cmd, taskkill) are not
+// exercised here, so Windows runs only the parsing and matching checks.
+let posixOnly = false;
 async function check(name, fn) {
+  if (posixOnly && process.platform === "win32") {
+    skipped += 1;
+    console.log(`SKIP - ${name} (POSIX only)`);
+    return;
+  }
   try {
     await fn();
     passed += 1;
@@ -92,7 +102,7 @@ async function main() {
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
   }
-  console.log(`\n${passed} checks passed`);
+  console.log(`\n${passed} checks passed${skipped ? `, ${skipped} skipped` : ""}`);
 }
 
 async function runSuite(m, scratch) {
@@ -159,6 +169,11 @@ async function runSuite(m, scratch) {
   });
 
   // ── Gitignore matcher against git ────────────────────────────────────────
+  await check("a failed status is not mistaken for a start error", () => {
+    assert.equal(shared.isWorktreeSetupStartError({ error: "The worktree folder does not exist" }), true);
+    assert.equal(shared.isWorktreeSetupStartError({ id: "abc", state: "failed", error: "exit 3" }), false);
+  });
+
   await check("matches the way git does", () => {
     const repo = path.join(scratch, "matcher");
     execFileSync("git", ["init", "-q", "-b", "main", repo]);
@@ -289,6 +304,7 @@ async function runSuite(m, scratch) {
     return fs.realpathSync(wt);
   }
 
+  posixOnly = true;
   await check("links and copies stay inside the repository and never overwrite", async () => {
     const wt = addWorktree("wt-materialize");
     write(path.join(wt, ".env.local"), "MINE=1\n");

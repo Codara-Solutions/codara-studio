@@ -8,6 +8,7 @@ import type {
   WorktreeSetupFileDraft,
   WorktreeSetupLogChunk,
   WorktreeSetupPreview,
+  WorktreeSetupStartError,
   WorktreeSetupStatus,
   WorktreeSetupSuggestion,
   WorktreeSetupWriteResult,
@@ -23,7 +24,7 @@ export interface WorktreeSetupStartInput {
 }
 
 // Null when the repository configures nothing and the user has no command.
-export type WorktreeSetupStartReply = WorktreeSetupStatus | null | { error: string };
+export type WorktreeSetupStartReply = WorktreeSetupStatus | null | WorktreeSetupStartError;
 
 export const worktreeSetupApi = {
   preview: (sourceCwd: string): Promise<WorktreeSetupPreview> => ipcRenderer.invoke("worktreeSetup:preview", { sourceCwd }),

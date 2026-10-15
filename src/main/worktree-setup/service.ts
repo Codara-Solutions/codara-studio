@@ -28,6 +28,7 @@ import {
   SETUP_MANIFEST_FILE,
   SETUP_STATUS_FILE,
 } from "./links";
+import { assertCodaraOwnedWrite } from "../outside-write-guard";
 import { DEFAULT_COPY_BUDGET, manifestFrom, materializeSetup, type CopyBudget } from "./materialize";
 import { copyPatterns, gitWithInput, readSetupSources, resolveCopyCandidates, resolveLinkSources } from "./plan";
 
@@ -211,6 +212,13 @@ export class WorktreeSetupService {
       logPath: join(setupDir, SETUP_LOG_FILE),
     };
 
+    assertCodaraOwnedWrite(setupDir);
+    await fsp.mkdir(setupDir, { recursive: true });
+    // Another start for this worktree may have registered while this one
+    // read the repository; the first one wins.
+    const raced = this.runs.get(id);
+    if (raced && !isWorktreeSetupFinished(raced.status.state)) return { ...raced.status };
+
     let markPrepared = () => undefined as void;
     let markFinished = () => undefined as void;
     const run: Run = {
@@ -239,7 +247,6 @@ export class WorktreeSetupService {
     });
     this.runs.set(id, run);
 
-    await fsp.mkdir(setupDir, { recursive: true });
     run.log = createWriteStream(run.logFile, { flags: "w" });
     run.log.on("error", () => {
       run.log = null;

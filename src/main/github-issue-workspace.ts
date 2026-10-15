@@ -8,6 +8,7 @@ import {
   type StartGitHubIssueResult,
 } from "@shared/github";
 import { isRemotePath } from "@shared/remote";
+import { isWorktreeSetupStartError } from "@shared/worktree-setup";
 import {
   DEFAULT_COPY_BRANCH_SETUP_COMMAND,
   normalizeGitHubIssueOrigin,
@@ -107,7 +108,7 @@ function productionDependencies(): GitHubIssueWorkspaceDependencies {
     publishState,
     startWorktreeSetup: async (input) => {
       const started = await startWorktreeSetup({ ...input, trigger: "issue" });
-      return Boolean(started && !("error" in started));
+      return Boolean(started && !isWorktreeSetupStartError(started));
     },
   };
 }
@@ -542,7 +543,7 @@ function issuePrompt(origin: GitHubIssueOrigin, setupCommand: string, setupStart
     "",
     ...(setupStarted
       ? [
-          "FIRST STEP — Codara is preparing this worktree from the repository's setup files and the configured setup command. Before inspecting or changing issue code, call codara_worktree_setup with wait:true and wait until its state is succeeded.",
+          "FIRST STEP: Codara is preparing this worktree from the repository's setup files and the configured setup command. Before inspecting or changing issue code, call codara_worktree_setup with wait:true and wait until its state is succeeded.",
           "If setup failed or stopped, stop and report that failure with its log tail; do not continue into issue work with a partially prepared workspace.",
           "",
         ]

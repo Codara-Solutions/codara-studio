@@ -96,6 +96,18 @@ export function isWorktreeSetupFinished(state: WorktreeSetupState): boolean {
   return state === "succeeded" || state === "failed" || state === "stopped";
 }
 
+// Why setup could not start at all. A status can carry an `error` too (why
+// it failed or stopped), so tell the two apart by the status's id.
+export interface WorktreeSetupStartError {
+  error: string;
+}
+
+export function isWorktreeSetupStartError(
+  reply: WorktreeSetupStatus | WorktreeSetupStartError,
+): reply is WorktreeSetupStartError {
+  return typeof (reply as Partial<WorktreeSetupStatus>).id !== "string";
+}
+
 // What the create dialog shows before anything exists on disk.
 export interface WorktreeSetupPreview {
   isRepo: boolean;
