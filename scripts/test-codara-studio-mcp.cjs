@@ -264,7 +264,7 @@ function sortedEqual(actual, expected, label) {
     assert.match(studio.init.instructions, /codara_notify_user/);
     assert.match(studio.init.instructions, /codara_worktree_remove/, "a terminal agent learns the worktree lifecycle");
     assert.match(studio.init.instructions, /Linked folders are shared with the main checkout/);
-    assert.match(studio.init.instructions, /awaiting-approval waits for the user to approve its command; never run that command yourself/);
+    assert.match(studio.init.instructions, /awaiting-approval waits for the user to approve its commands; never run them, or the setup file's terminal commands, yourself/);
     assert.match(
       studio.init.instructions,
       /codara_workspace_status.*note at each milestone.*in_review or done when you finish.*blocked/,

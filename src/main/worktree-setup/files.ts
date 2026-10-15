@@ -68,7 +68,11 @@ export async function previewWorktreeSetup(
   const patterns = copyPatterns(sources);
   const repoCommand = config ? repoSetupCommandFor(config, platform) : null;
   // What setup will not link because a command installs into it (service.ts).
-  const refused = linksInstalledInto(config?.link ?? [], [repoCommand, userCommand]);
+  const refused = linksInstalledInto(config?.link ?? [], [
+    repoCommand,
+    userCommand,
+    ...(config?.terminals ?? []).map((terminal) => terminal.command),
+  ]);
   const wantedLinks = (config?.link ?? []).filter((link) => !refused.includes(link));
   const [copies, links, envFiles] = await Promise.all([
     scan && patterns.length ? resolveCopyCandidates(root, patterns).catch(() => null) : Promise.resolve(null),
@@ -80,7 +84,7 @@ export async function previewWorktreeSetup(
   );
   const covered = (path: string) =>
     copied.some((candidate) => candidate.path === path || path.startsWith(`${candidate.path}/`));
-  const fingerprint = repoCommand ? setupCommandFingerprint(repoCommand, platform) : null;
+  const fingerprint = setupCommandFingerprint(repoCommand, platform, config?.terminals ?? []);
   let approved = false;
   if (fingerprint && approvals) {
     const common = await commonGitDir(root);

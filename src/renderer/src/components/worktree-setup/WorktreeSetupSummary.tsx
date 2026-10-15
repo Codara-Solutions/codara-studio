@@ -1,5 +1,5 @@
 import React, { Suspense, lazy, useEffect, useState } from "react";
-import type { WorktreeSetupPreview } from "@shared/worktree-setup";
+import { terminalsWithCommands, type WorktreeSetupPreview } from "@shared/worktree-setup";
 import { plural } from "./labels";
 import "./worktree-setup.css";
 
@@ -122,12 +122,18 @@ export default function WorktreeSetupSummary({
           {preview.terminals.length ? (
             <li>Opens {plural(preview.terminals.length, "terminal", "terminals")}: {preview.terminals.map((terminal) => terminal.name).join(", ")}</li>
           ) : null}
+          {terminalsWithCommands(preview.terminals).map((terminal, index) => (
+            <li key={`t${index}`}>
+              Terminal {terminal.name} runs <code>{(terminal.command ?? "").split("\n").join(" && ")}</code>
+            </li>
+          ))}
           {preview.waitForSetup ? <li>Agents wait for setup before they start</li> : null}
         </ul>
       ) : null}
       {preview.repoCommandFingerprint && !preview.repoCommandApproved && runCommands ? (
         <div className="wts-hint" data-testid="worktree-setup-approves">
-          Creating it allows this setup command for the repository, so worktrees agents and Cora make run it too.
+          Creating it approves these commands for the repository, so worktrees made without this dialog, by agents,
+          Cora or the jump palette, run them too.
         </div>
       ) : null}
       {preview.uncoveredEnvFiles.length ? (

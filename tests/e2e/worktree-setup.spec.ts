@@ -14,7 +14,9 @@ const { rpcRaw } = require("../../cli/lib/rpc.cjs");
 // the setup command run (the dialog showed it, so creating there approves
 // it); a failing command shows in the setup tray with its log; and an
 // agent's worktree never runs a command nobody approved: it waits in the
-// tray until the user allows it, then reports it.
+// tray until the user allows it, then reports it; and a worktree made from
+// the jump palette, which shows no commands, asks first and opens the file's
+// terminals as plain shells.
 
 function git(cwd: string, args: string[], env: NodeJS.ProcessEnv): string {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", env }).trim();
@@ -113,6 +115,8 @@ test("worktree setup prepares new worktrees from the repository's files", async 
     await expect(summary).toContainText("Links node_modules");
     await expect(summary).toContainText('echo "root=$CODARA_ROOT_PATH" > setup.txt');
     await expect(summary).toContainText("Opens 1 terminal: setup-shell");
+    // Creating approves the terminal's command too, so the dialog shows it.
+    await expect(summary).toContainText("Terminal setup-shell runs echo opened > terminal.txt");
     await expect(summary.getByRole("checkbox", { name: /Run setup commands and open its terminals/ })).toBeChecked();
     await expect(summary.getByTestId("worktree-setup-approves")).toBeVisible();
 
@@ -144,12 +148,12 @@ test("worktree setup prepares new worktrees from the repository's files", async 
     expect(readFileSync(join(worktree, "setup.txt"), "utf8").trim()).toBe(`root=${repo}`);
     // The link never shows up as a change in the new worktree.
     expect(git(worktree, ["status", "--porcelain"], gitEnv)).toBe("");
-    // Creating from the dialog approved the command it showed, in Codara's
-    // home and never in the repository.
+    // Creating from the dialog approved the commands it showed, the
+    // terminal's too, in Codara's home and never in the repository.
     const approvals = JSON.parse(readFileSync(join(home, "worktree-setup-approvals.json"), "utf8"));
     expect(approvals.repositories[join(repo, ".git")]).toMatchObject({
       name: "repo",
-      commands: [{ command: 'echo "root=$CODARA_ROOT_PATH" > setup.txt' }],
+      commands: [{ command: 'echo "root=$CODARA_ROOT_PATH" > setup.txt\nterminal setup-shell: echo opened > terminal.txt' }],
     });
     expect(git(repo, ["status", "--porcelain"], gitEnv)).toBe("");
     // The file's terminal opened in the new worktree and ran its command.
@@ -198,8 +202,8 @@ test("worktree setup prepares new worktrees from the repository's files", async 
     expect(created.ok, JSON.stringify(created)).toBe(true);
     expect(created.setup?.state, JSON.stringify(created.setup)).toBe("awaiting-approval");
     expect(created.setupCommand).toBeNull();
-    expect(created.next).toContain("do not run it yourself");
-    expect(created.setup.hint).toContain("Do not run that command yourself");
+    expect(created.next).toContain("do not run it, or the setup file's terminal commands, yourself");
+    expect(created.setup.hint).toContain("Do not run that command");
     // Copies and links are done; the command is not.
     expect(existsSync(join(created.path, ".env"))).toBe(true);
     expect(lstatSync(join(created.path, "node_modules")).isSymbolicLink()).toBe(true);
@@ -235,6 +239,51 @@ test("worktree setup prepares new worktrees from the repository's files", async 
     expect(again.created).toBe(true);
     expect(again.setup?.state, JSON.stringify(again.setup)).toBe("succeeded");
     expect(readFileSync(join(again.path, "setup.txt"), "utf8").trim()).toBe("agent");
+
+    // ── The jump palette shows no commands, so it asks first ───────────────
+    await writeFile(
+      setupFile,
+      JSON.stringify(
+        {
+          setup: "echo palette > palette-setup.txt",
+          terminals: [{ name: "palette-shell", command: "echo palette > palette-terminal.txt" }],
+        },
+        null,
+        2,
+      ),
+    );
+    await page.locator('[data-workspace-id="ws-repo"]').click();
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+j" : "Control+Shift+J");
+    const palette = page.getByTestId("jump-palette");
+    await expect(palette).toBeVisible();
+    await palette.getByRole("combobox").fill("palette check");
+    const createRow = palette.locator('[data-jump-kind="create"]');
+    await expect(createRow).toContainText("Create worktree palette-check");
+    await createRow.click();
+    const paletteApproval = tray.getByTestId("worktree-setup-approval");
+    await expect(paletteApproval).toBeVisible({ timeout: 30_000 });
+    // The prompt lists the terminal's command with the setup command.
+    await expect(paletteApproval.getByLabel("Setup command")).toHaveText("echo palette > palette-setup.txt");
+    await expect(paletteApproval.getByLabel("Command of terminal palette-shell")).toHaveText(
+      "echo palette > palette-terminal.txt",
+    );
+    await expect(paletteApproval).toContainText("Its terminals then open as plain shells, without their commands.");
+    const paletteWorktree = managedWorktree("palette-check");
+    const paletteTabOpen = () =>
+      page.evaluate(() =>
+        Array.from(document.querySelectorAll<HTMLElement>("[data-tab-id]")).some((el) =>
+          (el.textContent ?? "").includes("palette-shell"),
+        ),
+      );
+    expect(await paletteTabOpen(), "no terminal before the user decides").toBe(false);
+    expect(existsSync(join(paletteWorktree, "palette-setup.txt"))).toBe(false);
+    await paletteApproval.getByRole("button", { name: "Run setup", exact: true }).click();
+    await expect.poll(() => existsSync(join(paletteWorktree, "palette-setup.txt")), { timeout: 30_000 }).toBe(true);
+    await expect.poll(paletteTabOpen, { timeout: 15_000 }).toBe(true);
+    // A plain shell: its command never ran, though the first worktree's
+    // terminal ran its own within moments.
+    await page.waitForTimeout(5_000);
+    expect(existsSync(join(paletteWorktree, "palette-terminal.txt"))).toBe(false);
   } finally {
     await app?.close();
   }

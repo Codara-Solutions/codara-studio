@@ -1,9 +1,10 @@
 // Which repository setup commands the user approved, per repository, kept in
 // Codara's own home and never in the repository. Anything that can write the
 // repository (an agent, a pulled branch, a fresh clone) can change
-// .codara/worktree.json, so a worktree nobody made by hand runs its command
-// only when this record holds that exact command. The create dialog, which
-// shows the command, approves it; so does "Always allow" in the setup tray.
+// .codara/worktree.json, so a worktree nobody made by hand runs its commands
+// only when this record holds those exact commands: the setup command and
+// the commands of the file's terminals. The create dialog, which shows them,
+// approves them; so does "Always allow" in the setup tray.
 //
 // Electron-free: index.ts hands the service a store on a file in the home,
 // the unit suite one on a temp file.
@@ -11,6 +12,7 @@
 import { createHash } from "node:crypto";
 import { promises as fsp } from "node:fs";
 import { basename, dirname } from "node:path";
+import { terminalsWithCommands, type WorktreeSetupTerminal } from "@shared/worktree-setup";
 import { writeFileAtomic } from "../fs-atomic";
 
 export const SETUP_APPROVALS_FILE = "worktree-setup-approvals.json";
@@ -37,14 +39,35 @@ const MAX_COMMANDS_PER_REPO = 50;
 const COMMAND_PREVIEW_CHARS = 500;
 
 /**
- * The fingerprint of a repository setup command: the exact text and the
- * shell that runs it (a bash script on macOS and Linux, one cmd per line on
- * Windows), so an approval never carries over to a different command or to
- * the same text run another way.
+ * The fingerprint of a repository's setup commands: the setup command's
+ * exact text, the shell that runs it (a bash script on macOS and Linux, one
+ * cmd per line on Windows), and each terminal that runs a command, by name
+ * and command. An approval never carries over to a different command, a
+ * changed or added terminal, or the same text run another way. Null when the
+ * file runs nothing.
  */
-export function setupCommandFingerprint(command: string, platform: NodeJS.Platform | string): string {
+export function setupCommandFingerprint(
+  command: string | null,
+  platform: NodeJS.Platform | string,
+  terminals: readonly WorktreeSetupTerminal[] = [],
+): string | null {
+  const running = terminalsWithCommands(terminals).map((terminal) => ({
+    name: terminal.name,
+    command: terminal.command ?? "",
+  }));
+  if (!command && !running.length) return null;
   const runner = platform === "win32" ? "win32-cmd-per-line" : "posix-bash-set-e";
-  return createHash("sha256").update(JSON.stringify({ version: 1, runner, command }), "utf8").digest("hex");
+  return createHash("sha256")
+    .update(JSON.stringify({ version: 1, runner, command: command ?? null, terminals: running }), "utf8")
+    .digest("hex");
+}
+
+/** What an approval covers, as the record and the prompts show it. */
+export function approvedCommandsText(command: string | null, terminals: readonly WorktreeSetupTerminal[] = []): string {
+  return [
+    ...(command ? [command] : []),
+    ...terminalsWithCommands(terminals).map((terminal) => `terminal ${terminal.name}: ${terminal.command}`),
+  ].join("\n");
 }
 
 /**

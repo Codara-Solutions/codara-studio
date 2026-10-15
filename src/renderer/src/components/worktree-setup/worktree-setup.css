@@ -102,6 +102,23 @@
   overflow-wrap: anywhere;
   color: var(--ink);
 }
+.wts-approval__terminals {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+  max-height: 160px;
+  overflow: auto;
+}
+.wts-approval__terminals li {
+  display: grid;
+  gap: 2px;
+}
+.wts-approval__terminal-name {
+  font-size: 11px;
+  color: var(--ink-dim);
+}
 .wts-approval__actions {
   display: flex;
   flex-wrap: wrap;

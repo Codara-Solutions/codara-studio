@@ -821,7 +821,7 @@ function createdResult(
       ? `Run setup with codara_terminal_create({cwd: path, command: setupCommand}).`
       : "",
     setupState === "awaiting-approval"
-      ? "Setup is waiting for the user to approve the repository's setup command in Codara and has not run it: do not run it yourself. Tell the user, then call codara_worktree_setup({workspaceId, wait: true})."
+      ? "Setup is waiting for the user to approve the repository's setup command in Codara and has not run it: do not run it, or the setup file's terminal commands, yourself. Tell the user, then call codara_worktree_setup({workspaceId, wait: true})."
       : setupState === "failed" || setupState === "stopped"
         ? "Setup did not finish: read setup.logTail and fix the cause before you build or test."
         : setupState && setupState !== "succeeded"

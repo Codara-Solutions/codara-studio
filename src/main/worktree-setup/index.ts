@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { isRemotePath } from "@shared/remote";
 import {
   isWorktreeSetupStartError,
+  terminalsWithCommands,
   type WorktreeSetupFileDraft,
   type WorktreeSetupStartError,
   type WorktreeSetupStatus,
@@ -81,7 +82,10 @@ function noticeApproval(status: WorktreeSetupStatus): void {
   approvalNotices.add(key);
   const workspaceId = status.workspaceId;
   if (!workspaceId) return;
-  const command = (status.commands.find((entry) => entry.kind === "repo")?.command ?? "").split("\n").join(" && ");
+  const command = [
+    ...(status.commands.find((entry) => entry.kind === "repo")?.command ?? "").split("\n").filter(Boolean),
+    ...terminalsWithCommands(status.terminals).map((terminal) => terminal.command ?? ""),
+  ].join(" && ");
   const shown = command.length > 160 ? `${command.slice(0, 160)}...` : command;
   const name = status.branch || status.worktreePath.split(/[\\/]+/).filter(Boolean).pop() || status.worktreePath;
   void import("../notify")

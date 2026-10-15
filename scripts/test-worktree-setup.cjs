@@ -164,6 +164,28 @@ async function runSuite(m, scratch) {
     assert.deepEqual(shared.linksInstalledInto(["node_modules", ".venv", "cache"], ["pnpm i", null]), ["node_modules"]);
   });
 
+  await check("bundle install fills vendor/bundle, or the path it is given", () => {
+    const into = (links, ...commands) => shared.linksInstalledInto(links, commands);
+    assert.deepEqual(into(["vendor/bundle", "cache"], "bundle install"), ["vendor/bundle"]);
+    assert.deepEqual(into(["vendor/bundle"], "gem install bundler && bundle"), ["vendor/bundle"], "bundle alone installs");
+    assert.deepEqual(into(["vendor"], "bundle install --jobs 4"), ["vendor"], "a link holding it");
+    assert.deepEqual(into(["gems"], "bundle install --path gems"), ["gems"]);
+    assert.deepEqual(into(["gems"], "bundle install --path=./gems/"), ["gems"]);
+    assert.deepEqual(into(["gems/ruby"], "bundle install --path gems"), ["gems/ruby"], "a link inside it");
+    assert.deepEqual(into(["deps"], "BUNDLE_PATH=deps bundle install"), ["deps"]);
+    assert.deepEqual(into(["deps"], 'export BUNDLE_PATH="deps"\nbundle install'), ["deps"]);
+    assert.deepEqual(into(["deps"], "bundle config set --local path deps && bundle install"), ["deps"]);
+    assert.deepEqual(into(["vendor/bundle"], "bundle exec rake db:setup"), [], "bundle exec installs nothing");
+    assert.deepEqual(into(["vendor/bundle"], "npm ci"), []);
+    assert.deepEqual(into(["deps"], "BUNDLE_PATH=deps bundle exec rspec"), [], "a path without an install");
+    assert.deepEqual(into(["node_modules"], null, null), []);
+    // A terminal's command counts as much as the setup command.
+    const parsed = shared.parseWorktreeSetupFile(
+      JSON.stringify({ link: ["node_modules"], terminals: [{ name: "dev", command: "npm install && npm run dev" }] }),
+    );
+    assert.ok(parsed.warnings.some((warning) => /node_modules is not linked/.test(warning)), JSON.stringify(parsed.warnings));
+  });
+
   await check("rejects links that leave the repository or are patterns", () => {
     for (const bad of ["../x", "/abs", "C:/x", "a/../../b", "*.d", ".git/hooks", "a//b", "."]) {
       assert.equal(shared.normalizeLinkPath(bad), null, bad);
@@ -695,11 +717,11 @@ async function runSuite(m, scratch) {
       assert.equal(fs.existsSync(path.join(wt, "ran.txt")), false);
       assert.equal(fs.existsSync(path.join(wt, "user.txt")), false, "your command waits with it");
       const log = (await svc.readLog(started.id)).text;
-      assert.match(log, /is new or changed for gate, so it has not run/);
+      assert.match(log, /are new or changed for gate, so nothing has run/);
       assert.match(log, /^\$ echo gate > ran\.txt$/m);
       const summary = service.agentSetupSummary(prepared, "");
       assert.equal(summary.state, "awaiting-approval");
-      assert.match(summary.hint, /Do not run that command yourself/);
+      assert.match(summary.hint, /Do not run that command or the setup file's terminal commands yourself/);
       // "Don't run" ends it without running anything.
       const declined = await svc.stop(started.id);
       assert.equal(declined.state, "stopped");
@@ -844,7 +866,7 @@ async function runSuite(m, scratch) {
       assert.ok(Date.now() - t0 < 10_000, "the create does not wait for the user");
       assert.equal(created.setup.state, "awaiting-approval", JSON.stringify(created.setup));
       assert.equal(created.setupCommand, null);
-      assert.match(created.setup.hint, /Do not run that command yourself/);
+      assert.match(created.setup.hint, /Do not run that command/);
       assert.match(created.next, /waiting for the user to approve/);
       assert.equal(fs.existsSync(path.join(created.path, "ran.txt")), false);
       assert.equal(fs.readFileSync(path.join(created.path, ".env"), "utf8"), "GATE=1\n");
@@ -854,6 +876,60 @@ async function runSuite(m, scratch) {
       const waited = await agent.getAgentWorktreeSetup(caller, { workspaceId: created.workspaceId, wait: true, timeoutSeconds: 20 }, deps);
       assert.equal(waited.setup.state, "succeeded", JSON.stringify(waited.setup));
       assert.equal(fs.readFileSync(path.join(created.path, "ran.txt"), "utf8"), "agent\n");
+    });
+
+    await check("the file's terminal commands are approved with the setup command", async () => {
+      const command = "echo gate > ran.txt";
+      const terminals = [{ name: "dev", command: "echo dev > dev.txt" }];
+      assert.equal(await store.isApproved(repoKey, fingerprintOf(command)), true, "allowed above, without terminals");
+      setFile({ setup: command, terminals });
+      const withTerminals = approvals.setupCommandFingerprint(command, process.platform, terminals);
+      assert.notEqual(withTerminals, fingerprintOf(command));
+      const svc = gated();
+      const started = await svc.start({ sourceCwd: gate, worktreePath: gateWorktree(), trigger: "agent", userCommand: null });
+      assert.deepEqual(started.approval, { fingerprint: withTerminals, repoName: "gate" }, "an added terminal asks again");
+      assert.equal((await svc.whenPrepared(started.id)).state, "awaiting-approval");
+      assert.equal(fs.existsSync(path.join(started.worktreePath, "ran.txt")), false);
+      assert.match((await svc.readLog(started.id)).text, /^terminal dev: echo dev > dev\.txt$/m);
+      const preview = await files.previewWorktreeSetup(gate, null, process.platform, false, store);
+      assert.equal(preview.repoCommandFingerprint, withTerminals, "the dialog approves the same thing");
+      await svc.approve(started.id, { fingerprint: withTerminals, always: true });
+      assert.equal((await svc.waitFor(started.id, 20_000)).state, "succeeded");
+      const record = JSON.parse(fs.readFileSync(recordFile, "utf8"));
+      assert.ok(
+        record.repositories[repoKey].commands.some((entry) => entry.command === `${command}\nterminal dev: echo dev > dev.txt`),
+        "the record says what it covers",
+      );
+      // Renaming a terminal or changing its command asks again.
+      for (const changed of [[{ name: "server", command: "echo dev > dev.txt" }], [{ name: "dev", command: "echo pwned" }]]) {
+        assert.notEqual(approvals.setupCommandFingerprint(command, process.platform, changed), withTerminals);
+        setFile({ setup: command, terminals: changed });
+        const again = await svc.start({ sourceCwd: gate, worktreePath: gateWorktree(), trigger: "ui", userCommand: null });
+        assert.ok(again.approval, JSON.stringify(changed));
+        await svc.stop(again.id);
+      }
+      // A terminal without a command is a plain shell and changes nothing.
+      assert.equal(
+        approvals.setupCommandFingerprint(command, process.platform, [...terminals, { name: "shell" }]),
+        withTerminals,
+      );
+      // Terminal commands alone wait for the user too, and nothing else runs.
+      setFile({ terminals: [{ name: "watch", command: "npm run watch" }] });
+      const alone = await svc.start({ sourceCwd: gate, worktreePath: gateWorktree(), trigger: "ui", userCommand: null });
+      assert.ok(alone.approval);
+      assert.deepEqual(alone.commands, []);
+      assert.equal((await svc.whenPrepared(alone.id)).state, "awaiting-approval");
+      const declined = await svc.stop(alone.id);
+      assert.equal(declined.state, "stopped");
+      const once = await svc.start({ sourceCwd: gate, worktreePath: gateWorktree(), trigger: "ui", userCommand: null });
+      assert.equal((await svc.whenPrepared(once.id)).state, "awaiting-approval");
+      await svc.approve(once.id, { fingerprint: once.approval.fingerprint });
+      assert.equal((await svc.waitFor(once.id, 10_000)).state, "succeeded");
+      // Plain shells need nobody's approval.
+      setFile({ terminals: [{ name: "shell" }] });
+      const plain = await svc.start({ sourceCwd: gate, worktreePath: gateWorktree(), trigger: "agent", userCommand: null });
+      assert.equal(plain.approval, undefined);
+      assert.equal((await svc.waitFor(plain.id, 10_000)).state, "succeeded");
     });
 
     await check("a folder the setup command installs into is not linked, and gets no copy", async () => {

@@ -1,5 +1,10 @@
 import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
-import { isWorktreeSetupFinished, isWorktreeSetupStartError, type WorktreeSetupStatus } from "@shared/worktree-setup";
+import {
+  isWorktreeSetupFinished,
+  isWorktreeSetupStartError,
+  terminalsWithCommands,
+  type WorktreeSetupStatus,
+} from "@shared/worktree-setup";
 import { emitLocalToast } from "../../notifications/local-toast";
 import { setupName, setupStateLabel } from "./labels";
 import "./worktree-setup.css";
@@ -211,22 +216,42 @@ function ApprovalBanner({
   onDecline: () => void;
 }): React.ReactElement {
   const command = status.commands.find((entry) => entry.kind === "repo")?.command ?? "";
+  const terminals = terminalsWithCommands(status.terminals);
   const repoName = status.approval?.repoName ?? "this repository";
+  const several = terminals.length > 0;
+  const what = command && several ? "setup and terminal commands" : command ? "setup command" : "terminal commands";
   return (
-    <div className="wts-approval" role="group" aria-label={`Approve the setup command of ${setupName(status)}`} data-testid="worktree-setup-approval">
+    <div className="wts-approval" role="group" aria-label={`Approve the setup commands of ${setupName(status)}`} data-testid="worktree-setup-approval">
       <div className="wts-approval__text">
-        The setup command from <code>.codara/worktree.json</code> is new or changed for {repoName}, so it has not run.
-        Run it only if you trust it.
+        The {what} from <code>.codara/worktree.json</code> {several ? "are" : "is"} new or changed for {repoName}, so
+        nothing has run. Run {several ? "them" : "it"} only if you trust {several ? "them" : "it"}.
       </div>
-      <pre className="wts-approval__command" tabIndex={0} aria-label="Setup command">
-        {command}
-      </pre>
+      {command ? (
+        <pre className="wts-approval__command" tabIndex={0} aria-label="Setup command">
+          {command}
+        </pre>
+      ) : null}
+      {terminals.length ? (
+        <ul className="wts-approval__terminals" aria-label="Terminal commands" data-testid="worktree-setup-approval-terminals">
+          {terminals.map((terminal, index) => (
+            <li key={`${index}:${terminal.name}`}>
+              <span className="wts-approval__terminal-name">Terminal {terminal.name}</span>
+              <pre className="wts-approval__command" tabIndex={0} aria-label={`Command of terminal ${terminal.name}`}>
+                {terminal.command}
+              </pre>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {several && status.trigger === "ui" ? (
+        <div className="wts-approval__text">Its terminals then open as plain shells, without their commands.</div>
+      ) : null}
       <div className="wts-approval__actions">
         <button type="button" className="spark-btn is-primary" disabled={busy} onClick={() => onRun(false)}>
           Run setup
         </button>
         <button type="button" className="spark-btn" disabled={busy} onClick={() => onRun(true)}>
-          Always allow this command for {repoName}
+          Always allow {several ? "these commands" : "this command"} for {repoName}
         </button>
         <button type="button" className="spark-btn" disabled={busy} onClick={onDecline}>
           Don&apos;t run

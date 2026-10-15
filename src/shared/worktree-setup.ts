@@ -142,8 +142,9 @@ export interface WorktreeSetupPreview {
   copyCount: number;
   link: string[];
   commands: Array<{ kind: "repo" | "user"; label: string; command: string }>;
-  // The repository command's fingerprint. Creating a worktree from the
-  // dialog that showed it approves it for every worktree of the repository.
+  // The fingerprint of the repository's setup command and terminal
+  // commands. Creating a worktree from the dialog that showed them approves
+  // them for every worktree of the repository.
   repoCommandFingerprint: string | null;
   // Already approved for this repository, so agents run it too.
   repoCommandApproved: boolean;
@@ -338,7 +339,10 @@ export function parseWorktreeSetupFile(text: string): WorktreeSetupParseResult {
   }
   const setup = commandText(record.setup, "setup", errors);
   const setupWindows = commandText(record.setupWindows, "setupWindows", errors);
-  warnings.push(...linkedInstallWarnings(link, [setup, setupWindows]));
+  const terminals = terminalList(record.terminals, errors);
+  warnings.push(
+    ...linkedInstallWarnings(link, [setup, setupWindows, ...terminals.map((terminal) => terminal.command)]),
+  );
   return {
     config: {
       copy,
@@ -346,7 +350,7 @@ export function parseWorktreeSetupFile(text: string): WorktreeSetupParseResult {
       setup,
       setupWindows,
       waitForSetup,
-      terminals: terminalList(record.terminals, errors),
+      terminals,
     },
     errors,
     warnings,
@@ -374,6 +378,9 @@ export function parseWorktreeIncludeFile(text: string): { patterns: string[]; er
   return { patterns, errors: [] };
 }
 
+// `bundle install`, or `bundle` alone, which installs too.
+const BUNDLE_INSTALL = /(?:^|[\s;&|(])bundle(?:\s+install\b|\s*(?:$|[;&|)]))/m;
+
 // Installers that write into a folder the file may also link. Through a link
 // the install lands in the main checkout's folder (npm ci even empties it
 // first), and two worktrees setting up at once would write it together, so
@@ -393,7 +400,39 @@ const INSTALLS_INTO: ReadonlyArray<{ folders: readonly string[]; command: RegExp
     folders: ["vendor"],
     command: /(?:^|[\s;&|(])(?:composer\s+(?:install|update|require)|go\s+mod\s+vendor)\b/m,
   },
+  {
+    // Bundler's usual project folder (BUNDLE_PATH=vendor/bundle, often set
+    // in .bundle/config); a path the command names is read by bundlePaths.
+    folders: ["vendor/bundle", "vendor"],
+    command: BUNDLE_INSTALL,
+  },
 ];
+
+function plainPath(value: string): string {
+  return value
+    .replace(/^["']|["']$/g, "")
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "")
+    .replace(/\/+$/, "");
+}
+
+/** The folders Bundler is told to install into: --path, BUNDLE_PATH or bundle config path. */
+function bundlePaths(text: string): string[] {
+  if (!BUNDLE_INSTALL.test(text)) return [];
+  const paths: string[] = [];
+  const patterns = [
+    /bundle\s+install\b[^\n;&|]*?\s--path(?:=|\s+)("[^"]+"|'[^']+'|[^\s;&|]+)/g,
+    /\bBUNDLE_PATH=("[^"]+"|'[^']+'|[^\s;&|]+)/g,
+    /bundle\s+config\s+(?:set\s+)?(?:--(?:local|global)\s+)?path\s+("[^"]+"|'[^']+'|[^\s;&|]+)/g,
+  ];
+  for (const pattern of patterns) {
+    for (const match of text.matchAll(pattern)) {
+      const path = plainPath(match[1] ?? "");
+      if (path && !path.startsWith("/") && !path.startsWith("$")) paths.push(path);
+    }
+  }
+  return paths;
+}
 
 /**
  * The linked folders a setup command installs into, such as "node_modules"
@@ -405,10 +444,18 @@ export function linksInstalledInto(
 ): string[] {
   const text = commands.filter((command): command is string => Boolean(command)).join("\n");
   if (!text || !links.length) return [];
+  const bundled = bundlePaths(text);
   return links.filter((link) => {
-    const name = link.slice(link.lastIndexOf("/") + 1);
-    const installer = INSTALLS_INTO.find((entry) => entry.folders.includes(name));
-    return Boolean(installer?.command.test(text));
+    const path = plainPath(link);
+    const name = path.slice(path.lastIndexOf("/") + 1);
+    const named = INSTALLS_INTO.some(
+      (entry) => (entry.folders.includes(path) || entry.folders.includes(name)) && entry.command.test(text),
+    );
+    // A link that is, holds or sits inside the folder Bundler fills.
+    return (
+      named ||
+      bundled.some((target) => target === path || target.startsWith(`${path}/`) || path.startsWith(`${target}/`))
+    );
   });
 }
 
@@ -423,6 +470,15 @@ export function linkedInstallWarnings(
   commands: ReadonlyArray<string | null | undefined>,
 ): string[] {
   return linksInstalledInto(links, commands).map(linkedInstallNote);
+}
+
+/**
+ * The setup file's terminals that run a command. They run the repository's
+ * commands as much as the setup command does, so the same approval covers
+ * them; a terminal without a command is a plain shell.
+ */
+export function terminalsWithCommands(terminals: readonly WorktreeSetupTerminal[]): WorktreeSetupTerminal[] {
+  return terminals.filter((terminal) => Boolean(terminal.command?.trim()));
 }
 
 /** The setup command for a platform: setupWindows wins on Windows. */

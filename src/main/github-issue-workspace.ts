@@ -544,7 +544,7 @@ function issuePrompt(origin: GitHubIssueOrigin, setupCommand: string, setupStart
     ...(setupStarted
       ? [
           "FIRST STEP: Codara is preparing this worktree from the repository's setup files and the configured setup command. Before inspecting or changing issue code, call codara_worktree_setup with wait:true and wait until its state is succeeded.",
-          "If its state is awaiting-approval, the repository's setup command waits for my approval in Codara: never run that command yourself; tell me and call codara_worktree_setup with wait:true again.",
+          "If its state is awaiting-approval, the repository's setup command waits for my approval in Codara: never run it, or the setup file's terminal commands, yourself; tell me and call codara_worktree_setup with wait:true again.",
           "If setup failed or stopped, stop and report that failure with its log tail; do not continue into issue work with a partially prepared workspace.",
           "",
         ]

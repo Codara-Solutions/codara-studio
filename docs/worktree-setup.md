@@ -76,9 +76,9 @@ Saving rewrites both files; comments in them are not kept.
    so it never shows up as a change; when that fails, the link is taken out
    again rather than left for `git add -A` to commit. Links are recorded
    before the copies start.
-3. When the setup command is new or changed for this repository and you did
-   not create the worktree from the dialog that showed it, setup stops here
-   and asks you first (see [Approving the setup command](#approving-the-setup-command)).
+3. When the setup command or a terminal command is new or changed for this
+   repository and you did not create the worktree from the dialog that
+   showed them, setup stops here and asks you first (see [Approving the setup command](#approving-the-setup-command)).
 4. It runs the setup command in the worktree, then your own command (see
    below). Each runs without a terminal and without input, in its own
    process group (on Windows, Stop ends its whole process tree), and is
@@ -117,24 +117,29 @@ repository's setup command, or alone when the repository has no setup files.
 ## Approving the setup command
 
 Anything that can write the repository (an agent, a branch you pulled, a
-fresh clone) can change `.codara/worktree.json`, so its setup command runs
-only once you approved that exact command for that repository. Codara keeps
-the approvals in its own home (`worktree-setup-approvals.json`), never in
-the repository, keyed by the repository's shared git folder so every
-worktree of it counts. An approval covers the exact text and the way it runs
-(a bash script on macOS and Linux, one `cmd` per line on Windows); any
-change to the command asks again.
+fresh clone) can change `.codara/worktree.json`, so its commands run only
+once you approved them for that repository: the setup command and the
+command of each terminal the file opens. Codara keeps the approvals in its
+own home (`worktree-setup-approvals.json`), never in the repository, keyed
+by the repository's shared git folder so every worktree of it counts. An
+approval covers the exact setup command, the way it runs (a bash script on
+macOS and Linux, one `cmd` per line on Windows) and each terminal's name and
+command; any change to them, or a terminal added, asks again. A terminal
+without a command is a plain shell and needs no approval.
 
-- Creating a worktree from the dialog approves the command it showed, as
-  long as **Run setup commands** is on. The dialog says so under the
-  summary.
-- A worktree made any other way (by an agent through
-  `codara_worktree_create`, for a GitHub issue, or for a Cora worker) with a
-  command not yet approved gets its files copied and folders linked, and
-  the command waits. The setup list at the bottom right shows the exact
-  command with **Run setup** (this once), **Always allow this command for
-  <repository>** and **Don't run**, and a notification asks for you. Its
-  terminals open only once the command ran.
+- Creating a worktree from the dialog approves the commands it showed, as
+  long as **Run setup commands** is on. The dialog lists each terminal's
+  command and says so under the summary.
+- A worktree made any other way (from the jump palette, by an agent through
+  `codara_worktree_create`, for a GitHub issue, or for a Cora worker) with
+  commands not yet approved gets its files copied and folders linked, and
+  nothing runs. The setup list at the bottom right shows the exact setup
+  command and terminal commands with **Run setup** (this once), **Always
+  allow** them for the repository and **Don't run**, and a notification
+  asks for you. No terminal opens before you decide; once you ran setup, a
+  worktree from the jump palette gets its terminals as plain shells, without
+  their commands. Agents, issues and workers never open the file's
+  terminals.
 - Your own command is yours and needs no approval.
 
 ## Watching and stopping it
@@ -189,12 +194,15 @@ A linked folder is the main checkout's own folder: an install, a build or a
 delete in the worktree changes it for the main checkout and every other
 worktree. So Codara does not link:
 
-- a folder the setup command installs into: `node_modules` for `npm ci`,
-  `npm install`, `pnpm install`, `yarn`, `bun install` and `deno install`;
-  `.venv` or `venv` for `uv sync`, `pip install`, `poetry install`, `pipenv
-  install`, `pdm install`, `rye sync` and `python -m venv`; `vendor` for
-  `composer install` and `go mod vendor`. It copies nothing there either:
-  the install fills it. The create dialog and the editor say so.
+- a folder the setup command, your own command or a terminal's command
+  installs into: `node_modules` for `npm ci`, `npm install`, `pnpm
+  install`, `yarn`, `bun install` and `deno install`; `.venv` or `venv` for
+  `uv sync`, `pip install`, `poetry install`, `pipenv install`, `pdm
+  install`, `rye sync` and `python -m venv`; `vendor` for `composer install`
+  and `go mod vendor`; `vendor/bundle` (or `vendor`) for `bundle install`,
+  or the folder it is given with `--path`, `BUNDLE_PATH` or `bundle config
+  set path`. It copies nothing there either: the install fills it. The
+  create dialog and the editor say so.
 - anything in a Cora worker's sandbox worktree, which is meant to share
   nothing with the main checkout.
 
