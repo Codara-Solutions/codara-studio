@@ -148,5 +148,8 @@ The app talks to `https://studio.codarasolutions.com` for update checks and a
 stream that announces new releases, to the sign-in providers you use, if you
 turn on remote access, to the Codara relay, and, when you share a page as a
 link, to the Codara share service: only the page you chose, after you click
-Share, and the list, expiry and delete calls of Settings, Shared pages. There
-is no telemetry.
+Share, and the list, expiry and delete calls of Settings, Shared pages. While
+the Share prompt prepares a page, it downloads the libraries, stylesheets and
+fonts that page itself loads from cdnjs, jsDelivr, unpkg or Google Fonts, to
+embed them; nothing of yours is sent with those requests. There is no
+telemetry.

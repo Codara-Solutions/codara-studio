@@ -10,7 +10,8 @@ Open the file and click the share icon in the editor toolbar, next to
 Preview and Edit. The prompt shows the file name, the size of the page, what
 it includes, and **Anyone with the link can open this page.** Pick when the
 link expires (7, 30 or 90 days; 30 by default) and click **Share**. Nothing
-leaves the computer before that click.
+of yours leaves the computer before that click; preparing the page only
+downloads the public CDN files it uses (below).
 
 The link is copied to the clipboard and shown in the prompt with a Copy
 button. Settings, **Shared pages** lists every link this computer shared:
@@ -30,12 +31,26 @@ from the file as it is in the editor (unsaved edits included):
 - **Local files** the page uses (pictures, fonts, stylesheets, scripts, audio
   and video) are embedded, as long as they are in the page's folder or the
   workspace it belongs to, are not hidden (no segment starting with a dot),
-  and have the extension of what they are used as. The prompt lists what it
+  and have the extension of what they are used as. A symbolic link is
+  followed to the file it points to, and that file must pass the same
+  rules: a link out of the workspace is left out. Whatever its extension,
+  nothing under `.git`, no `.env*`, `*.pem` or `*.key` file and no `id_*`
+  file other than a picture is ever embedded. The prompt lists what it
   embedded and what it left out, and why.
+- **Libraries, stylesheets and fonts from public CDNs** are downloaded when
+  the prompt opens and embedded: scripts and stylesheets from
+  `cdnjs.cloudflare.com`, `cdn.jsdelivr.net/npm` and `unpkg.com`, Google
+  Fonts stylesheets from `fonts.googleapis.com` with their fonts from
+  `fonts.gstatic.com`, and the fonts and pictures those stylesheets use.
+  Only over HTTPS, following a redirect only to another of these addresses,
+  with an `integrity` attribute checked when the page has one, and within
+  the page's 5 MB. From a Google Fonts stylesheet, only the parts for the
+  scripts (latin, cyrillic...) the page's text uses are kept. The prompt
+  lists them under **Embedded from the web**.
 - **Links to other files on this computer**, frames, embeds, `<base>` and
   redirects are removed, because they cannot work for someone else.
-- **Files from other sites** stay as references but do not load: the page is
-  served sealed (below). The prompt says how many there are.
+- **Other files from other sites** stay as references but do not load: the
+  page is served sealed (below). The prompt lists them.
 
 A page is at most 5 MB after embedding.
 

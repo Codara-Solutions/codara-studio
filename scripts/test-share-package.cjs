@@ -1,14 +1,18 @@
 // Harness for the Share packager (src/renderer/src/components/share/): how a
 // page on disk becomes the one self-contained document a share link serves.
 // Local pictures, fonts, styles and scripts are embedded; files outside the
-// page's folder and workspace, hidden files and files of the wrong type are
-// left out and reported; frames, local links and redirects are removed; a
-// Markdown file renders through the preview's own sanitizing pipeline.
+// page's folder and workspace (links resolved), hidden files, key and secret
+// files and files of the wrong type are left out and reported; libraries,
+// stylesheets and fonts from the allowed CDNs are downloaded and embedded;
+// frames, local links and redirects are removed; a Markdown file renders
+// through the preview's own sanitizing pipeline.
 //
 //   node scripts/test-share-package.cjs
 //
-// Runs in Node against a throwaway folder; the packager's file reader is a
-// plain fs reader standing in for the app's sandboxed one.
+// Runs in Node against a throwaway folder. The packager reads through main's
+// own reader (src/main/share/assets.ts) and downloads through main's own
+// downloader (src/main/share/remote.ts) over a fake CDN: nothing goes over
+// the network.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -32,6 +36,8 @@ async function load() {
         `export * as paths from ${JSON.stringify(path.join(SHARE, "paths.ts"))};`,
         `export * as offers from ${JSON.stringify(path.join(SHARE, "offer-store.ts"))};`,
         `export { shareErrorText } from ${JSON.stringify(path.join(SHARE, "errors.ts"))};`,
+        `export { readShareAsset } from ${JSON.stringify(path.join(ROOT, "src", "main", "share", "assets.ts"))};`,
+        `export { fetchShareRemote } from ${JSON.stringify(path.join(ROOT, "src", "main", "share", "remote.ts"))};`,
       ].join("\n"),
       resolveDir: SHARE,
       loader: "ts",
@@ -69,14 +75,25 @@ const PNG = Buffer.from(
   "hex",
 );
 
-const fsReader = {
-  size: async (p) => {
-    const st = fs.statSync(p);
-    if (!st.isFile()) throw new Error("not a file");
-    return st.size;
-  },
-  read: async (p) => new Uint8Array(fs.readFileSync(p)),
-};
+let fsReader = null;
+
+// A CDN in memory: url -> { body, type } | { redirect } | { status }.
+function fakeCdn(routes) {
+  const calls = [];
+  const fetch = async (url, init) => {
+    calls.push(url);
+    assert.equal(init.redirect, "manual", "every redirect is checked by Studio");
+    const route = routes[url];
+    if (!route) return new Response("not found", { status: 404, headers: { "content-type": "text/plain" } });
+    if (route.redirect) return new Response(null, { status: 302, headers: { location: route.redirect } });
+    return new Response(route.body, { status: route.status ?? 200, headers: { "content-type": route.type } });
+  };
+  return { fetch, calls };
+}
+
+function sri(alg, body) {
+  return `${alg}-${require("node:crypto").createHash(alg).update(body).digest("base64")}`;
+}
 
 function write(file, content) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -85,6 +102,7 @@ function write(file, content) {
 
 async function main() {
   const mod = await load();
+  fsReader = { read: (request) => mod.readShareAsset(request) };
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "codara-share-package-"));
   const workspace = path.join(tmp, "project");
   const reportDir = path.join(workspace, "reports");
@@ -164,7 +182,18 @@ async function main() {
         page.leftOut.map((entry) => `${entry.ref}:${entry.reason}`).sort(),
         ["../../outside.png:outside", ".secret.png:hidden", "missing.png:missing", "notes.txt:type"],
       );
-      assert.equal(page.remote, 5, "remote stylesheet, script, picture, css url and frame are counted");
+      assert.deepEqual(
+        [...page.remote].sort(),
+        [
+          "https://cdn.test/lib.js",
+          "https://cdn.test/remote.css",
+          "https://cdn.test/remote.png",
+          "https://cdn.test/x.png",
+          "https://video.test/embed",
+        ],
+        "remote stylesheet, script, picture, css url and frame are listed",
+      );
+      assert.deepEqual(page.embedded, [], "nothing is downloaded without a downloader");
       assert.equal(page.removed, 7, "base, refresh, preload, local link, two frames and the object");
       assert.deepEqual(
         page.included.sort(),
@@ -183,6 +212,231 @@ async function main() {
       });
       assert.equal(page.included.length, 1);
       assert.deepEqual(page.leftOut.map((entry) => entry.reason), ["too_large", "too_large"]);
+    });
+
+    await check("links are followed to where they really are: out of the workspace or to a secret is refused", async () => {
+      if (process.platform === "win32") return;
+      const home = path.join(tmp, "home");
+      write(path.join(home, ".ssh", "id_ed25519"), "PRIVATE KEY");
+      write(path.join(home, "Pictures", "holiday.png"), PNG);
+      write(path.join(workspace, ".env"), "TOKEN=1");
+      write(path.join(workspace, "certs", "server.pem"), "CERT");
+      write(path.join(workspace, ".git", "objects", "blob.png"), PNG);
+      write(path.join(workspace, "keys", "id_rsa"), "PRIVATE KEY");
+      write(path.join(workspace, "notes.txt"), "text");
+      write(path.join(reportDir, "id_card.png"), PNG);
+      write(path.join(reportDir, "deploy.pem"), "CERT");
+      write(path.join(reportDir, "server.key"), "KEY");
+      write(path.join(tmp, "outside-dir", "a.png"), PNG);
+      const links = path.join(reportDir, "links");
+      fs.mkdirSync(links, { recursive: true });
+      const link = (name, target) => fs.symlinkSync(target, path.join(links, name));
+      link("key.png", path.join(home, ".ssh", "id_ed25519"));
+      link("holiday.png", path.join(home, "Pictures", "holiday.png"));
+      link("logo.png", path.join(workspace, "assets", "logo.png"));
+      link("relative.png", "../../assets/logo.png");
+      link("dangling.png", path.join(workspace, "gone.png"));
+      link("env.png", path.join(workspace, ".env"));
+      link("cert.png", path.join(workspace, "certs", "server.pem"));
+      link("git.png", path.join(workspace, ".git", "objects", "blob.png"));
+      link("id.png", path.join(workspace, "keys", "id_rsa"));
+      link("text.png", path.join(workspace, "notes.txt"));
+      link("dir", path.join(tmp, "outside-dir"));
+      link("loop.png", path.join(links, "loop.png"));
+      const source = [
+        "links/key.png",
+        "links/holiday.png",
+        "links/logo.png",
+        "links/relative.png",
+        "links/dangling.png",
+        "links/env.png",
+        "links/cert.png",
+        "links/git.png",
+        "links/id.png",
+        "links/text.png",
+        "links/dir/a.png",
+        "links/loop.png",
+        "id_card.png",
+        "deploy.pem",
+        "../.git/objects/blob.png",
+      ]
+        .map((src) => `<img src="${src}">`)
+        .join("\n") + '\n<script src="server.key"></script><link rel="stylesheet" href="../.env.css">';
+      const page = await mod.packageHtmlPage(source, {
+        sourcePath: reportPath,
+        allowedRoots: mod.allowedRootsFor(reportPath, [workspace]),
+        reader: fsReader,
+      });
+      assert.deepEqual(
+        page.leftOut.map((entry) => `${entry.ref}:${entry.reason}`),
+        [
+          "links/key.png:outside",
+          "links/holiday.png:outside",
+          "links/dangling.png:missing",
+          "links/env.png:private",
+          "links/cert.png:private",
+          "links/git.png:private",
+          "links/id.png:private",
+          "links/text.png:type",
+          "links/dir/a.png:outside",
+          "links/loop.png:missing",
+          "deploy.pem:private",
+          "../.git/objects/blob.png:private",
+          "server.key:private",
+          "../.env.css:private",
+        ],
+      );
+      assert.deepEqual(page.included.sort(), ["id_card.png", "links/logo.png", "links/relative.png"], "links inside the workspace and an id_ picture are embedded");
+      assert.ok(!page.html.includes(Buffer.from("PRIVATE KEY").toString("base64")), "no key reaches the page");
+    });
+
+    await check("main refuses what the renderer was told to skip, judged on the real path", async () => {
+      const roots = [reportDir];
+      const read = (p, extra = {}) => mod.readShareAsset({ path: p, roots, kinds: ["image"], maxBytes: 1 << 20, ...extra });
+      assert.equal((await read(path.join(reportDir, "chart.png"))).ok, true);
+      assert.equal((await read(path.join(reportDir, "chart.png"), { roots: [] })).reason, "outside");
+      assert.equal((await read(path.join(reportDir, "chart.png"), { kinds: ["script"] })).reason, "type");
+      assert.equal((await read(path.join(reportDir, "chart.png"), { maxBytes: 10 })).reason, "too_large");
+      assert.equal((await read("relative/chart.png")).reason, "missing", "only absolute paths");
+      assert.equal((await read(path.join(reportDir, "img"))).reason, "type", "a folder is not a picture");
+      if (process.platform !== "win32") {
+        assert.equal((await read(path.join(reportDir, "links", "key.png"))).reason, "outside");
+        assert.equal((await read(path.join(reportDir, "links", "logo.png"), { roots: [reportDir, workspace] })).ok, true);
+        const fifo = path.join(reportDir, "pipe.png");
+        require("node:child_process").execFileSync("mkfifo", [fifo]);
+        assert.equal((await read(fifo)).reason, "missing", "a FIFO is not opened");
+        // A workspace opened through a link still embeds its own files.
+        const viaLink = path.join(tmp, "workspace-link");
+        fs.symlinkSync(workspace, viaLink);
+        const linkedPage = path.join(viaLink, "reports", "report.html");
+        const page = await mod.packageHtmlPage('<img src="chart.png"><img src="../assets/logo.png">', {
+          sourcePath: linkedPage,
+          allowedRoots: mod.allowedRootsFor(linkedPage, [viaLink]),
+          reader: fsReader,
+        });
+        assert.deepEqual(page.leftOut, []);
+        assert.deepEqual(page.included.sort(), ["../assets/logo.png", "chart.png"]);
+      }
+      const seen = [];
+      const gated = await mod.readShareAsset(
+        { path: path.join(reportDir, "chart.png"), roots, kinds: ["image"], maxBytes: 1 << 20 },
+        { assertReadable: (p) => { seen.push(p); throw new Error("Path not allowed"); } },
+      );
+      assert.equal(gated.reason, "outside", "the fs sandbox has the last word");
+      assert.deepEqual(seen, [path.join(reportDir, "chart.png")]);
+    });
+
+    await check("libraries, stylesheets and fonts from the allowed CDNs are embedded; the rest is listed", async () => {
+      const lib = 'window.lib = "</script>";';
+      const fontLatin = Buffer.from("wOF2latin");
+      const fontCyrillic = Buffer.from("wOF2cyrillic");
+      const fa = Buffer.from("wOF2awesome");
+      const googleCss = [
+        "/* cyrillic */",
+        "@font-face { font-family: 'Inter'; src: url(https://fonts.gstatic.com/s/inter/v1/cyr.woff2) format('woff2'); unicode-range: U+0301, U+0400-045F, U+0490-0491; }",
+        "/* latin */",
+        "@font-face { font-family: 'Inter'; src: url(https://fonts.gstatic.com/s/inter/v1/latin.woff2) format('woff2'); unicode-range: U+0000-00FF, U+0131, U+20??; }",
+      ].join("\n");
+      const cdn = fakeCdn({
+        "https://cdnjs.cloudflare.com/ajax/libs/lib/1.0/lib.min.js": { body: lib, type: "application/javascript; charset=utf-8" },
+        "https://unpkg.com/bad@1/x.js": { body: "tampered()", type: "application/javascript" },
+        "https://unpkg.com/react": { redirect: "/react@18.3.1/umd/react.production.min.js" },
+        "https://unpkg.com/react@18.3.1/umd/react.production.min.js": { body: "window.React = {};", type: "text/javascript" },
+        "https://unpkg.com/away": { redirect: "https://evil.test/x.js" },
+        "https://unpkg.com/html@1/x.js": { body: "<html>not found</html>", type: "text/html" },
+        "https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap": { body: googleCss, type: "text/css" },
+        "https://fonts.gstatic.com/s/inter/v1/latin.woff2": { body: fontLatin, type: "font/woff2" },
+        "https://fonts.gstatic.com/s/inter/v1/cyr.woff2": { body: fontCyrillic, type: "font/woff2" },
+        "https://cdn.jsdelivr.net/npm/icons@6/css/all.min.css": {
+          body: '@font-face { font-family: Icons; src: url("../webfonts/icons.woff2") format("woff2"); }\n.i::before { content: "\\\\f00c"; }',
+          type: "text/css",
+        },
+        "https://cdn.jsdelivr.net/npm/icons@6/webfonts/icons.woff2": { body: fa, type: "font/woff2" },
+      });
+      const source = `<!doctype html><html><head>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/icons@6/css/all.min.css" integrity="${sri("sha512", "wrong")}">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/lib/1.0/lib.min.js" integrity="${sri("sha256", "x")} ${sri("sha384", lib)}" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/bad@1/x.js" integrity="${sri("sha384", "original()")}"></script>
+<script src="https://unpkg.com/react"></script>
+<script src="https://unpkg.com/away"></script>
+<script src="https://unpkg.com/html@1/x.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/someone/repo/x.js"></script>
+<script src="http://cdnjs.cloudflare.com/ajax/libs/lib/1.0/lib.min.js"></script>
+<script src="https://cdnjs.cloudflare.com:8443/x.js"></script>
+</head><body><p>Plain latin text.</p>
+<img src="https://cdnjs.cloudflare.com/ajax/libs/pic/1/pic.png">
+</body></html>`;
+      const page = await mod.packageHtmlPage(source, {
+        sourcePath: reportPath,
+        allowedRoots: [reportDir],
+        reader: fsReader,
+        remote: { fetch: (request) => mod.fetchShareRemote(request, { fetch: cdn.fetch }) },
+      });
+      const html = page.html;
+      assert.ok(html.includes('window.lib = "<\\/script>";'), "the library is inline and cannot close its element");
+      assert.ok(html.includes("window.React = {};"), "a redirect within the CDN is followed");
+      assert.ok(html.includes(`data:font/woff2;base64,${fontLatin.toString("base64")}`), "the Google font is inline");
+      assert.ok(!html.includes(fontCyrillic.toString("base64")) && !html.includes("unicode-range: U+0301"), "a script the page does not use is dropped");
+      assert.ok(!cdn.calls.includes("https://fonts.gstatic.com/s/inter/v1/cyr.woff2"), "and never downloaded");
+      assert.ok(html.includes('href="https://cdn.jsdelivr.net/npm/icons@6/css/all.min.css"'), "a stylesheet that failed keeps its link");
+      assert.ok(!html.includes(fa.toString("base64")), "a stylesheet failing its integrity hash is not embedded");
+      assert.ok(!html.includes("tampered()"), "a script failing its integrity hash is not embedded");
+      assert.ok(html.includes('src="https://unpkg.com/bad@1/x.js"'), "and keeps its reference");
+      assert.ok(!cdn.calls.some((url) => url.startsWith("https://evil.test")), "a redirect off the list is not followed");
+      assert.ok(!cdn.calls.some((url) => url.includes("/gh/") || url.startsWith("http:") || url.includes(":8443")), "addresses off the list are not fetched");
+      assert.ok(!cdn.calls.some((url) => url.endsWith("pic.png")), "pictures in the page are not downloaded");
+      assert.ok(!html.includes("preconnect"), "connection hints are dropped");
+      assert.ok(!html.includes('src="https://cdnjs.cloudflare.com/ajax/libs/lib/1.0/lib.min.js"'), "the inlined script lost its src");
+      assert.deepEqual(page.embedded.sort(), [
+        "cdnjs.cloudflare.com/ajax/libs/lib/1.0/lib.min.js",
+        "fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap",
+        "fonts.gstatic.com/s/inter/v1/latin.woff2",
+        "unpkg.com/react",
+      ]);
+      assert.deepEqual(
+        page.leftOut.map((entry) => `${entry.ref}:${entry.reason}`),
+        [
+          "https://cdn.jsdelivr.net/npm/icons@6/css/all.min.css:integrity",
+          "https://unpkg.com/bad@1/x.js:integrity",
+          "https://unpkg.com/away:unavailable",
+          "https://unpkg.com/html@1/x.js:unavailable",
+        ],
+      );
+      assert.deepEqual(page.remote.sort(), [
+        "http://cdnjs.cloudflare.com/ajax/libs/lib/1.0/lib.min.js",
+        "https://cdn.jsdelivr.net/gh/someone/repo/x.js",
+        "https://cdnjs.cloudflare.com/ajax/libs/pic/1/pic.png",
+        "https://cdnjs.cloudflare.com:8443/x.js",
+      ]);
+      assert.equal(page.bytes, Buffer.byteLength(html, "utf8"));
+    });
+
+    await check("a stylesheet from a CDN brings its fonts; downloads count toward the page cap", async () => {
+      const css = '@font-face { font-family: Icons; src: url("../webfonts/icons.woff2") format("woff2"), url(../webfonts/icons.ttf) format("truetype"); }';
+      const font = Buffer.alloc(3000, 7);
+      const cdn = fakeCdn({
+        "https://cdn.jsdelivr.net/npm/icons@6/css/all.min.css": { body: css, type: "text/css" },
+        "https://cdn.jsdelivr.net/npm/icons@6/webfonts/icons.woff2": { body: font, type: "application/octet-stream" },
+        "https://cdn.jsdelivr.net/npm/icons@6/webfonts/icons.ttf": { body: font, type: "font/ttf" },
+      });
+      const source = `<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/icons@6/css/all.min.css" integrity="${sri("sha512", css)}">`;
+      const remote = { fetch: (request) => mod.fetchShareRemote(request, { fetch: cdn.fetch }) };
+      const page = await mod.packageHtmlPage(source, { sourcePath: reportPath, allowedRoots: [reportDir], reader: fsReader, remote });
+      assert.ok(page.html.includes(`url("data:font/woff2;base64,${font.toString("base64")}")`), "a font served as bytes is typed by its name");
+      assert.ok(page.html.includes(`url("data:font/ttf;base64,`));
+      assert.ok(!page.html.includes("<link"), "the stylesheet link became a style element");
+      const small = await mod.packageHtmlPage(source, {
+        sourcePath: reportPath,
+        allowedRoots: [reportDir],
+        reader: fsReader,
+        remote,
+        maxBytes: source.length + css.length + 4500,
+      });
+      assert.deepEqual(small.leftOut.map((entry) => entry.reason), ["too_large"], "the second font does not fit");
+      assert.equal(small.embedded.length, 2);
     });
 
     await check("a page outside every workspace embeds only from its own folder", () => {

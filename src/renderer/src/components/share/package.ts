@@ -1,9 +1,11 @@
 // Builds the page a share link serves, from the file as it is in the editor.
-// Runs entirely on this computer; nothing is sent until the user chooses
-// Share in the prompt.
+// It is built on this computer and nothing of the user's is sent until they
+// choose Share in the prompt. Before that, the only network use is
+// downloading the public CDN files the page itself loads, so the prompt can
+// show them as embedded.
 
 import { shareableKind } from "@shared/share";
-import { packageHtmlPage, type AssetReader, type PackagedPage } from "./inline";
+import { packageHtmlPage, type AssetReader, type PackagedPage, type RemoteFetcher } from "./inline";
 import { renderMarkdownDocument, type MermaidRenderer } from "./markdown";
 import { basenameOf, dirnameOf, isAbsoluteFsPath, isInsideDir } from "./paths";
 
@@ -20,6 +22,8 @@ export interface PackagedShare extends PackagedPage {
 
 export interface PackageDeps {
   reader: AssetReader;
+  /** Downloads CDN files; without it they are only reported. */
+  remote?: RemoteFetcher;
   renderMermaid?: MermaidRenderer;
 }
 
@@ -43,6 +47,7 @@ export async function packageForShare(source: ShareSource, deps: PackageDeps): P
     sourcePath: source.path,
     allowedRoots: allowedRootsFor(source.path, source.workspaceRoots),
     reader: deps.reader,
+    remote: deps.remote,
   };
   const html =
     kind === "markdown" ? await renderMarkdownDocument(source.text, title, deps.renderMermaid) : source.text;
@@ -51,13 +56,13 @@ export async function packageForShare(source: ShareSource, deps: PackageDeps): P
 
 let diagramCounter = 0;
 
-/** The app's reader and Mermaid, for the real prompt. Tests pass their own. */
+/** The app's reader, downloader and Mermaid, for the real prompt. Tests pass their own. */
 export function appPackageDeps(): PackageDeps {
   return {
-    reader: {
-      size: async (path) => (await window.spark.fs.statFile(path)).size,
-      read: (path) => window.spark.fs.readFileBytes(path),
-    },
+    // Main reads and downloads, and checks each file again where it really
+    // is (src/main/share/assets.ts, remote.ts).
+    reader: { read: (request) => window.spark.share.readAsset(request) },
+    remote: { fetch: (request) => window.spark.share.fetchRemote(request) },
     renderMermaid: async (code) => {
       const { loadMermaid } = await import("../markdown-preview/mermaid");
       const mermaid = await loadMermaid();

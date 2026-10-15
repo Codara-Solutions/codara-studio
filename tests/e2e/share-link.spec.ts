@@ -2,7 +2,7 @@ import { test, expect, type ElectronApplication } from "@playwright/test";
 import { _electron as electron } from "playwright";
 import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -11,7 +11,8 @@ import { join, resolve } from "node:path";
 // shared from the editor toolbar, the served page is fetched and checked, the
 // link lands on the clipboard, Settings lists, extends and deletes it, and an
 // agent's codara_share_offer only opens the prompt (nothing is uploaded when
-// the user cancels).
+// the user cancels), and a picture that is a link out of the workspace is
+// left out, not embedded.
 //
 // The service is the codara-share repository built next to this one
 // (npm run build there), or the one CODARA_SHARE_REPO names.
@@ -115,9 +116,13 @@ test("a page is shared from the editor, served sealed, managed in Settings, and 
   );
   await writeFile(
     join(workspaceDir, "page.html"),
-    '<!doctype html><html><head><link rel="stylesheet" href="style.css"></head><body><h1>Agent page</h1><img src="img/chart.png"></body></html>',
+    '<!doctype html><html><head><link rel="stylesheet" href="style.css"></head><body><h1>Agent page</h1><img src="img/chart.png"><img src="img/escape.png"></body></html>',
     "utf8",
   );
+  // A picture name that is a link to a file outside the workspace. Windows
+  // needs extra rights to make links; there the reference is simply missing.
+  await writeFile(join(root, "outside-secret.png"), "PRIVATE KEY", "utf8");
+  if (process.platform !== "win32") await symlink(join(root, "outside-secret.png"), join(workspaceDir, "img", "escape.png"));
   await writeFile(join(workspaceDir, "style.css"), "h1 { color: rgb(1, 2, 3); }", "utf8");
   await writeFile(
     join(home, "spark-state.json"),
@@ -235,6 +240,8 @@ test("a page is shared from the editor, served sealed, managed in Settings, and 
     const offerPrompt = page.getByRole("dialog", { name: "Share as link" });
     await expect(offerPrompt.getByText("Anyone with the link can open this page.")).toBeVisible({ timeout: 20_000 });
     await expect(offerPrompt.getByText("Includes 2 files from this computer.")).toBeVisible();
+    await offerPrompt.getByText("Left out 1 file.").click();
+    await expect(offerPrompt.getByText(process.platform === "win32" ? "img/escape.png (could not be read)" : "img/escape.png (outside this folder)")).toBeVisible();
     await offerPrompt.getByRole("button", { name: "Cancel" }).click();
     await expect(offerPrompt).toHaveCount(0);
     expect(await storedPages(storageDir), "an offer the user cancels uploads nothing").toEqual([]);

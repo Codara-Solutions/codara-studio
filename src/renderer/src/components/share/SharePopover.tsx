@@ -27,10 +27,13 @@ type Stage =
 
 const LEFT_OUT_REASON: Record<string, string> = {
   outside: "outside this folder",
+  private: "may hold a key or secret",
   hidden: "hidden file",
   type: "not a picture, font, style or script",
   missing: "could not be read",
   too_large: "page would pass 5 MB",
+  unavailable: "could not be downloaded",
+  integrity: "did not match its integrity hash",
 };
 
 interface Props {
@@ -212,6 +215,18 @@ function ReadyBody({
           </ul>
         </details>
       )}
+      {page.embedded.length > 0 && (
+        <details className="share-pop__details">
+          <summary>
+            Embedded from the web: {page.embedded.length} {page.embedded.length === 1 ? "file" : "files"}.
+          </summary>
+          <ul>
+            {page.embedded.map((address) => (
+              <li key={address}>{address}</li>
+            ))}
+          </ul>
+        </details>
+      )}
       {page.leftOut.length > 0 && (
         <details className="share-pop__details">
           <summary>
@@ -226,10 +241,18 @@ function ReadyBody({
           </ul>
         </details>
       )}
-      {page.remote > 0 && (
-        <p className="share-pop__note">
-          {page.remote} {page.remote === 1 ? "file" : "files"} from other sites will not load on the shared page.
-        </p>
+      {page.remote.length > 0 && (
+        <details className="share-pop__details">
+          <summary>
+            {page.remote.length} {page.remote.length === 1 ? "file" : "files"} from other sites will not load on the
+            shared page.
+          </summary>
+          <ul>
+            {page.remote.map((address) => (
+              <li key={address}>{address}</li>
+            ))}
+          </ul>
+        </details>
       )}
       {page.removed > 0 && (
         <p className="share-pop__note">

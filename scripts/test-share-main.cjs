@@ -1,9 +1,10 @@
 // Harness for src/main/share/ (Share as link, main-process side): the share
 // key on disk (modes, reuse, symlink and corrupt-file handling), the local
 // list of shared pages, request signing and building, the base URL override,
-// response parsing, the ShareService over a fake fetch, and the agent offer
-// gate. Everything runs in a throwaway directory; nothing touches the real
-// ~/.codarastudio and nothing goes over the network.
+// response parsing, the ShareService over a fake fetch, the agent offer
+// gate, and the CDN downloader (allowlist, redirects, caps, integrity) over a
+// fake fetch. Everything runs in a throwaway directory; nothing touches the
+// real ~/.codarastudio and nothing goes over the network.
 //
 //   node scripts/test-share-main.cjs
 //
@@ -113,6 +114,10 @@ async function main() {
   const protocol = await bundle(path.join(ROOT, "src", "main", "share", "protocol.ts"), "share-protocol.cjs");
   const serviceMod = await bundle(path.join(ROOT, "src", "main", "share", "service.ts"), "share-service.cjs");
   const offerMod = await bundle(path.join(ROOT, "src", "main", "share", "offer.ts"), "share-offer.cjs");
+  const remoteMod = {
+    ...(await bundle(path.join(ROOT, "src", "main", "share", "remote.ts"), "share-remote.cjs")),
+    ...(await bundle(path.join(ROOT, "src", "shared", "share-assets.ts"), "share-assets.cjs")),
+  };
 
   try {
     await check("the share key is created once, owner-only, and reused", () => {
@@ -409,6 +414,156 @@ async function main() {
         fs.symlinkSync(outside, path.join(dir, "inside-link.md"));
         assert.equal((await gate.check(path.join(dir, "inside-link.md"), "pane:6")).reason, "not_allowed", "a link out of the folder is refused");
       }
+    });
+    await check("files from the web come only from the allowed CDNs, over HTTPS", () => {
+      const allowed = remoteMod.shareRemoteAllowed;
+      for (const [url, kind] of [
+        ["https://cdnjs.cloudflare.com/ajax/libs/a/1/a.js", "script"],
+        ["https://cdn.jsdelivr.net/npm/a@1/a.css", "css"],
+        ["https://unpkg.com/a@1/font.woff2", "font"],
+        ["https://fonts.googleapis.com/css2?family=Inter", "css"],
+        ["https://fonts.gstatic.com/s/inter/v1/a.woff2", "font"],
+        ["https://cdnjs.cloudflare.com:443/x.js", "script"],
+      ]) {
+        assert.equal(allowed(url, kind), true, url);
+      }
+      for (const [url, kind] of [
+        ["http://cdnjs.cloudflare.com/x.js", "script"],
+        ["https://cdnjs.cloudflare.com:8443/x.js", "script"],
+        ["https://user:pw@unpkg.com/x.js", "script"],
+        ["https://cdn.jsdelivr.net/gh/a/b/x.js", "script"],
+        ["https://cdn.jsdelivr.net/npm-x/a.js", "script"],
+        ["https://fonts.googleapis.com/x.js", "script"],
+        ["https://fonts.gstatic.com/a.css", "css"],
+        ["https://unpkg.com.evil.test/x.js", "script"],
+        ["https://evil.test/unpkg.com/x.js", "script"],
+        ["https://unpkg.com./x.js", "script"],
+        ["not a url", "script"],
+      ]) {
+        assert.equal(allowed(url, kind), false, url);
+      }
+    });
+
+    await check("a download follows redirects only within the list, with a time and size cap", async () => {
+      const fetchRemote = remoteMod.fetchShareRemote;
+      const calls = [];
+      const serve = (handler) => async (url, init) => {
+        calls.push({ url, init });
+        return handler(url, init);
+      };
+      const ok = (body, type = "application/javascript") =>
+        new Response(body, { status: 200, headers: { "content-type": type } });
+      const redirect = (location) => new Response(null, { status: 301, headers: { location } });
+      const request = (url, extra = {}) => ({ url, kind: "script", maxBytes: 1 << 20, ...extra });
+
+      const hops = await fetchRemote(request("https://unpkg.com/a"), {
+        fetch: serve((url) => (url.endsWith("/c") ? ok("c()") : redirect(url.endsWith("/a") ? "/b" : "https://cdnjs.cloudflare.com/c"))),
+      });
+      assert.equal(hops.ok, true);
+      assert.equal(hops.url, "https://cdnjs.cloudflare.com/c", "the final address is reported");
+      assert.equal(new TextDecoder().decode(hops.bytes), "c()");
+      for (const call of calls) {
+        assert.equal(call.init.redirect, "manual");
+        assert.equal(call.init.credentials, "omit");
+        assert.match(call.init.headers["user-agent"], /^Mozilla\/5\.0 .* Chrome\//, "a plain browser identity");
+        assert.equal(call.init.headers.cookie, undefined);
+      }
+
+      calls.length = 0;
+      const endless = await fetchRemote(request("https://unpkg.com/0"), {
+        fetch: serve((url) => redirect(`/${Number(url.split("/").pop()) + 1}`)),
+      });
+      assert.equal(endless.reason, "unavailable");
+      assert.equal(calls.length, remoteMod.SHARE_REMOTE_MAX_REDIRECTS + 1, "redirects stop after the limit");
+
+      calls.length = 0;
+      const away = await fetchRemote(request("https://unpkg.com/a"), { fetch: serve(() => redirect("http://unpkg.com/a")) });
+      assert.equal(away.reason, "unavailable", "a redirect to plain HTTP is not followed");
+      assert.equal(calls.length, 1);
+
+      calls.length = 0;
+      const offList = await fetchRemote(request("https://evil.test/x.js"), { fetch: serve(() => ok("x")) });
+      assert.equal(offList.reason, "unavailable");
+      assert.equal(calls.length, 0, "an address off the list is never fetched");
+
+      const started = Date.now();
+      const slow = await fetchRemote(request("https://unpkg.com/slow"), {
+        timeoutMs: 100,
+        fetch: (_url, init) =>
+          new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(new Error("aborted")))),
+      });
+      assert.equal(slow.reason, "unavailable");
+      assert.ok(Date.now() - started < 5_000, "a slow CDN is given up on");
+      const shorter = await fetchRemote(request("https://unpkg.com/slow", { timeoutMs: 999_999 }), {
+        timeoutMs: 100,
+        fetch: (_url, init) =>
+          new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(new Error("aborted")))),
+      });
+      assert.equal(shorter.reason, "unavailable", "the page cannot raise main's time cap");
+
+      const stream = () =>
+        new Response(
+          new ReadableStream({
+            pull(controller) {
+              controller.enqueue(new Uint8Array(64 * 1024));
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/javascript" } },
+        );
+      assert.equal((await fetchRemote(request("https://unpkg.com/big", { maxBytes: 100_000 }), { fetch: stream })).reason, "too_large", "an endless body stops at the cap");
+      assert.equal(
+        (await fetchRemote(request("https://unpkg.com/big", { maxBytes: 50 * 1024 * 1024 }), { fetch: stream })).reason,
+        "too_large",
+        "main's own cap holds whatever the page asks",
+      );
+      const declared = await fetchRemote(request("https://unpkg.com/big", { maxBytes: 10 }), {
+        fetch: async () => new Response("0123456789abc", { status: 200, headers: { "content-type": "text/javascript", "content-length": "13" } }),
+      });
+      assert.equal(declared.reason, "too_large");
+      assert.equal((await fetchRemote(request("https://unpkg.com/a", { maxBytes: 0 }), { fetch: serve(() => ok("x")) })).reason, "too_large");
+
+      assert.equal((await fetchRemote(request("https://unpkg.com/a"), { fetch: async () => ok("<html>", "text/html") })).reason, "unavailable", "a page is not a script");
+      assert.equal((await fetchRemote(request("https://unpkg.com/a"), { fetch: async () => new Response("gone", { status: 404 }) })).reason, "unavailable");
+      assert.equal((await fetchRemote(request("https://unpkg.com/a"), { fetch: async () => { throw new Error("offline"); } })).reason, "unavailable");
+      assert.equal((await fetchRemote({ url: "https://unpkg.com/a", kind: "html", maxBytes: 10 }, { fetch: serve(() => ok("x")) })).reason, "unavailable");
+      assert.equal((await fetchRemote(null)).reason, "unavailable");
+
+      const font = await fetchRemote(
+        { url: "https://fonts.gstatic.com/s/x/a.woff2", kind: "font", maxBytes: 1000 },
+        { fetch: async () => ok("wOF2", "application/octet-stream") },
+      );
+      assert.equal(font.mime, "font/woff2", "a font served as bytes is typed by its name");
+      const css = await fetchRemote(
+        { url: "https://fonts.googleapis.com/css2?family=A", kind: "css", maxBytes: 1000 },
+        { fetch: async () => ok("@font-face{}", "text/css; charset=utf-8") },
+      );
+      assert.equal(css.mime, "text/css");
+      const fakeFont = await fetchRemote(
+        { url: "https://fonts.gstatic.com/s/x/a.woff2", kind: "font", maxBytes: 1000 },
+        { fetch: async () => ok("<html>", "text/html") },
+      );
+      assert.equal(fakeFont.reason, "unavailable");
+    });
+
+    await check("integrity attributes are checked by their strongest hash, as browsers do", async () => {
+      const body = Buffer.from("library()");
+      const digest = (alg, data = body) => crypto.createHash(alg).update(data).digest("base64");
+      const matches = remoteMod.integrityMatches;
+      assert.equal(matches(body, `sha256-${digest("sha256")}`), true);
+      assert.equal(matches(body, `sha384-${digest("sha384")}`), true);
+      assert.equal(matches(body, `sha512-${digest("sha512")}`), true);
+      assert.equal(matches(body, `sha384-${digest("sha384", "other")}`), false);
+      assert.equal(matches(body, `sha256-${digest("sha256")} sha512-${digest("sha512", "other")}`), false, "the strongest hash decides");
+      assert.equal(matches(body, `sha512-${digest("sha512", "x")} sha512-${digest("sha512")}`), true, "any value of that hash may match");
+      assert.equal(matches(body, `sha384-${digest("sha384").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}`), true, "base64url without padding");
+      assert.equal(matches(body, `sha384-${digest("sha384")}?ct=application/javascript`), true, "options after ? are ignored");
+      assert.equal(matches(body, "md5-abc sha1-def"), null, "unknown hashes are not checked");
+      assert.equal(matches(body, ""), null);
+      const fetched = await remoteMod.fetchShareRemote(
+        { url: "https://unpkg.com/a.js", kind: "script", maxBytes: 1000, integrity: `sha384-${digest("sha384", "other")}` },
+        { fetch: async () => new Response(body, { status: 200, headers: { "content-type": "text/javascript" } }) },
+      );
+      assert.equal(fetched.reason, "integrity");
     });
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
