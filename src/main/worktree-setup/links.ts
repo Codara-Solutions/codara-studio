@@ -121,7 +121,8 @@ async function linkStillOurs(absolute: string, target: string): Promise<boolean>
   return normalize(pointsAt) === normalize(target);
 }
 
-async function removeLinkEntry(absolute: string): Promise<boolean> {
+/** Removes a link or junction itself, never what it points at. */
+export async function removeLinkEntry(absolute: string): Promise<boolean> {
   try {
     await fsp.unlink(absolute);
     return true;

@@ -27,6 +27,7 @@ import {
   SETUP_LOG_FILE,
   SETUP_MANIFEST_FILE,
   SETUP_STATUS_FILE,
+  type SetupManifest,
 } from "./links";
 import { assertCodaraOwnedWrite } from "../outside-write-guard";
 import { DEFAULT_COPY_BUDGET, manifestFrom, materializeSetup, type CopyBudget } from "./materialize";
@@ -97,9 +98,15 @@ interface Run {
   dismissed: boolean;
   prepared: Promise<WorktreeSetupStatus>;
   finished: Promise<WorktreeSetupStatus>;
+  // Settles when the pipeline itself has returned. A stop marks the status
+  // finished at once, while a copy may still be landing; removal waits on
+  // this so nothing is written into a worktree being deleted.
+  pipelineDone: Promise<void>;
   markPrepared(): void;
   markFinished(): void;
   releaseSlot: (() => void) | null;
+  // Set while queued for a command slot: takes the run out of the queue.
+  leaveQueue: (() => void) | null;
 }
 
 export function setupIdFor(realWorktreePath: string): string {
@@ -237,9 +244,11 @@ export class WorktreeSetupService {
       dismissed: false,
       prepared: Promise.resolve(status),
       finished: Promise.resolve(status),
+      pipelineDone: Promise.resolve(),
       markPrepared: () => markPrepared(),
       markFinished: () => markFinished(),
       releaseSlot: null,
+      leaveQueue: null,
     };
     run.prepared = new Promise((resolvePromise) => {
       markPrepared = () => resolvePromise({ ...run.status });
@@ -264,10 +273,37 @@ export class WorktreeSetupService {
     for (const warning of warnings) this.writeLog(run, `Warning: ${warning}\n`);
     this.persist(run);
 
-    void this.pipeline(run, sources).catch((err: unknown) => {
-      this.finish(run, "failed", `Setup could not run: ${(err as Error)?.message ?? String(err)}`);
-    });
+    run.pipelineDone = this.pipeline(run, sources)
+      .catch((err: unknown) => {
+        this.finish(run, "failed", `Setup could not run: ${(err as Error)?.message ?? String(err)}`);
+      })
+      // The last status write is part of the pipeline: removal waits for it.
+      .then(() => this.writeJson(this.statusFile(run), run.status).catch(() => undefined));
     return { ...status };
+  }
+
+  /**
+   * For removal: stops a setup still going in the worktree and waits (at
+   * most `timeoutMs`) until it has stopped writing there. True when nothing
+   * of it runs any more.
+   */
+  async quiesce(idOrPath: string, timeoutMs = 30_000): Promise<boolean> {
+    let run = this.runs.get(idOrPath);
+    if (!run && /[\\/]/.test(idOrPath)) {
+      const real = await fsp.realpath(idOrPath).catch(() => null);
+      run = real ? this.runs.get(setupIdFor(real)) : undefined;
+    }
+    if (!run) return true;
+    if (!isWorktreeSetupFinished(run.status.state)) await this.stop(run.status.id);
+    let timer: NodeJS.Timeout | null = null;
+    const timeout = new Promise<false>((resolvePromise) => {
+      timer = setTimeout(() => resolvePromise(false), Math.max(0, timeoutMs));
+    });
+    try {
+      return await Promise.race([run.pipelineDone.then(() => true as const), timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /** Resolves once copies and links are done (or setup ended first). */
@@ -277,20 +313,35 @@ export class WorktreeSetupService {
     return run.prepared;
   }
 
-  /** Resolves when setup ends, or with the current status after `timeoutMs`. */
-  async waitFor(id: string, timeoutMs: number): Promise<WorktreeSetupStatus | null> {
+  /**
+   * Resolves when setup ends, or with the current status after `timeoutMs`.
+   * With `aborted`, it also gives up (with the current status) within
+   * `sliceMs` of that turning true: a stopped Cora worker stops waiting.
+   */
+  async waitFor(
+    id: string,
+    timeoutMs: number,
+    options: { aborted?: () => boolean; sliceMs?: number } = {},
+  ): Promise<WorktreeSetupStatus | null> {
     const run = this.runs.get(id);
     if (!run) return this.get(id);
-    if (isWorktreeSetupFinished(run.status.state)) return { ...run.status };
-    let timer: NodeJS.Timeout | null = null;
-    const timeout = new Promise<WorktreeSetupStatus>((resolvePromise) => {
-      timer = setTimeout(() => resolvePromise({ ...run.status }), Math.max(0, timeoutMs));
-    });
-    try {
-      return await Promise.race([run.finished, timeout]);
-    } finally {
-      if (timer) clearTimeout(timer);
+    const deadline = Date.now() + Math.max(0, timeoutMs);
+    const slice = options.aborted ? Math.max(10, options.sliceMs ?? 1_000) : Number.POSITIVE_INFINITY;
+    while (!isWorktreeSetupFinished(run.status.state)) {
+      if (options.aborted?.()) break;
+      const left = deadline - Date.now();
+      if (left <= 0) break;
+      let timer: NodeJS.Timeout | null = null;
+      const timeout = new Promise<void>((resolvePromise) => {
+        timer = setTimeout(resolvePromise, Math.min(left, slice));
+      });
+      try {
+        await Promise.race([run.finished, timeout]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     }
+    return { ...run.status };
   }
 
   /** A status by id (this session) or by worktree path (also earlier sessions). */
@@ -326,6 +377,9 @@ export class WorktreeSetupService {
     if (isWorktreeSetupFinished(run.status.state)) return { ...run.status };
     run.stopRequested = true;
     this.writeLog(run, "\nStopped by the user\n");
+    // A queued run gives its place up, so its pipeline ends now rather than
+    // when another setup frees a slot (removal waits for that end).
+    run.leaveQueue?.();
     if (run.child) this.killTree(run.child);
     else if (run.status.state === "queued" || run.status.state === "preparing") {
       this.finish(run, "stopped", "Stopped");
@@ -418,6 +472,7 @@ export class WorktreeSetupService {
     for (const run of this.runs.values()) {
       if (isWorktreeSetupFinished(run.status.state)) continue;
       run.stopRequested = true;
+      run.leaveQueue?.();
       if (run.child) this.killTree(run.child, true);
       this.applyFinish(run, "stopped", INTERRUPTED);
       this.persistSync(run);
@@ -443,6 +498,9 @@ export class WorktreeSetupService {
       run.status.warnings.push(notice);
       this.writeLog(run, `Warning: ${notice}\n`);
     }
+    // What an earlier setup of this worktree already put there (Run again).
+    const previous = await readSetupManifest(run.worktreeReal).catch(() => null);
+    const manifestFile = join(run.setupDir, SETUP_MANIFEST_FILE);
     const outcome = await materializeSetup({
       sourceRoot: root,
       worktreeRoot: run.worktreeReal,
@@ -452,10 +510,14 @@ export class WorktreeSetupService {
       platform: this.platform,
       log: (line) => this.writeLog(run, `${line}\n`),
       stopped: () => run.stopRequested,
+      alreadyProvided: providedPaths(previous),
+      // The links are on record before any copy starts, so a removal or a
+      // crash during a long copy still finds them and takes them out first.
+      onLinked: (linked) =>
+        this.writeJson(manifestFile, manifestFrom(root, previous, { copiedFiles: [], copiedLinks: [], linked })),
     });
-    const previous = await readSetupManifest(run.worktreeReal).catch(() => null);
     const manifest = manifestFrom(root, previous, outcome);
-    await this.writeJson(join(run.setupDir, SETUP_MANIFEST_FILE), manifest);
+    await this.writeJson(manifestFile, manifest);
 
     const skipped = [...linkSources.skipped, ...outcome.skipped];
     for (const skip of linkSources.skipped) this.writeLog(run, `Skipped ${skip.path}: ${skip.reason}\n`);
@@ -483,8 +545,8 @@ export class WorktreeSetupService {
     }
     this.change(run, "queued");
     run.markPrepared();
-    await this.acquireSlot(run);
-    if (run.stopRequested || isWorktreeSetupFinished(run.status.state)) {
+    const acquired = await this.acquireSlot(run);
+    if (!acquired || run.stopRequested || isWorktreeSetupFinished(run.status.state)) {
       run.releaseSlot?.();
       if (!isWorktreeSetupFinished(run.status.state)) this.finish(run, "stopped", "Stopped");
       return;
@@ -536,11 +598,22 @@ export class WorktreeSetupService {
     return env;
   }
 
-  private async acquireSlot(run: Run): Promise<void> {
+  /** False when the run left the queue (stopped) before a slot freed. */
+  private async acquireSlot(run: Run): Promise<boolean> {
     const max = Math.max(1, this.deps.maxConcurrentCommands ?? 2);
     if (this.active >= max) {
       this.writeLog(run, "Waiting for other worktree setups to finish\n");
-      await new Promise<void>((resolvePromise) => this.waiting.push(resolvePromise));
+      const granted = await new Promise<boolean>((resolvePromise) => {
+        const grant = () => resolvePromise(true);
+        this.waiting.push(grant);
+        run.leaveQueue = () => {
+          const index = this.waiting.indexOf(grant);
+          if (index >= 0) this.waiting.splice(index, 1);
+          resolvePromise(false);
+        };
+      });
+      run.leaveQueue = null;
+      if (!granted) return false;
     }
     this.active += 1;
     let released = false;
@@ -550,6 +623,7 @@ export class WorktreeSetupService {
       this.active -= 1;
       this.waiting.shift()?.();
     };
+    return true;
   }
 
   private async stepsFor(run: Run, command: WorktreeSetupCommand): Promise<Step[]> {
@@ -832,6 +906,14 @@ export class WorktreeSetupService {
     }
     return status;
   }
+}
+
+function providedPaths(manifest: SetupManifest | null): Set<string> {
+  return new Set([
+    ...(manifest?.copies ?? []).map((copy) => copy.path),
+    ...(manifest?.copiedLinks ?? []).map((link) => link.path),
+    ...(manifest?.links ?? []).map((link) => link.path),
+  ]);
 }
 
 function posixRunner(): string {

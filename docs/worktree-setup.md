@@ -71,7 +71,9 @@ Saving rewrites both files; comments in them are not kept.
    skipped, with a hint to link big folders instead. Symlinks inside a copied folder are recreated
    only when they point inside the repository. A link that git does not
    ignore is added to the repository's `info/exclude` under a Codara comment,
-   so it never shows up as a change.
+   so it never shows up as a change; when that fails, the link is taken out
+   again rather than left for `git add -A` to commit. Links are recorded
+   before the copies start.
 3. It runs the setup command in the worktree, then your own command (see
    below). Each runs without a terminal and without input, in its own
    process group (on Windows, Stop ends its whole process tree), and is
@@ -151,10 +153,16 @@ worker starts, and waits for it when the file says so.
 
 - A linked folder is shared: an install in the worktree changes the main
   checkout's folder too. Link only what is safe to share, or copy and install
-  instead.
+  instead. A setup file that links `node_modules` (or `.venv`) and also runs
+  an install into it gets a warning, in the create dialog and in the editor.
 - `info/exclude` is shared by every worktree of the repository, so an entry
   Codara adds for a link hides that path in all of them. Entries sit under a
   `# Folders Codara Studio links into worktrees` comment and can be deleted
   by hand.
-- Removing a worktree first stops its setup and takes its links out, so
-  nothing in the main checkout is deleted through them.
+- Removing a worktree first stops its setup, waits until it no longer
+  writes there, and takes its links out, so nothing in the main checkout is
+  deleted through them. Remove a worktree with linked folders from Codara
+  (or take the links out first): a tool that follows a Windows junction
+  while deleting would reach the main checkout's folder.
+- A Cora worker that waits for setup stops waiting as soon as it is
+  stopped.

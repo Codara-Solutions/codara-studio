@@ -510,7 +510,17 @@ async function runSuite(m, scratch) {
     const again = await svc.rerun(started.id, { userCommand: null });
     const second = await svc.waitFor(again.id, 20_000);
     assert.equal(second.state, "succeeded");
-    assert.match((await svc.readLog(again.id)).text, /fixed/);
+    const secondLog = (await svc.readLog(again.id)).text;
+    assert.match(secondLog, /fixed/);
+    // What the first run put there is expected, not listed as skipped.
+    assert.ok(done.copiedCount > 0);
+    assert.deepEqual(
+      second.skipped.filter((skip) => /already/.test(skip.reason)),
+      [],
+      JSON.stringify(second.skipped),
+    );
+    assert.match(secondLog, /from an earlier setup already in place/);
+    assert.doesNotMatch(secondLog, /Skipped \.env: already/);
   });
 
   await check("stop ends a running command and its children", async () => {
@@ -590,6 +600,147 @@ async function runSuite(m, scratch) {
     const sources = await plan.readSetupSources(linkedRepo);
     assert.equal(sources.file.present, false);
   });
+
+  // ── Links git would see, removal, abortable waits ────────────────────────
+  {
+    // A repository of its own: the main one's info/exclude already lists
+    // /node_modules from the checks above.
+    const lone = path.join(scratch, "lone");
+    execFileSync("git", ["init", "-q", "-b", "main", lone]);
+    write(path.join(lone, ".gitignore"), "cache/\n.env\n");
+    write(path.join(lone, "README.md"), "x\n");
+    commitAll(lone, "init");
+    write(path.join(lone, ".env"), "LONE=1\n");
+    write(path.join(lone, "cache", "blob.bin"), "cached\n");
+    const loneWorktree = (name) => {
+      const wt = path.join(scratch, "lone-worktrees", name);
+      fs.mkdirSync(path.dirname(wt), { recursive: true });
+      git(lone, ["worktree", "add", "-q", "-b", name, wt]);
+      return fs.realpathSync(wt);
+    };
+
+    await check("links are on record before the copies start", async () => {
+      const wt = loneWorktree("lone-record");
+      const seen = [];
+      const result = await materialize.materializeSetup({
+        sourceRoot: lone,
+        worktreeRoot: wt,
+        copies: [{ path: ".env", kind: "file" }],
+        links: ["cache"],
+        log: () => undefined,
+        onLinked: async (linked) => {
+          seen.push({ linked: linked.map((link) => link.path), envCopied: fs.existsSync(path.join(wt, ".env")) });
+        },
+      });
+      assert.deepEqual(seen, [{ linked: ["cache"], envCopied: false }]);
+      assert.deepEqual(result.linked.map((link) => link.path), ["cache"]);
+      assert.equal(fs.readFileSync(path.join(wt, ".env"), "utf8"), "LONE=1\n");
+      assert.equal(git(wt, ["status", "--porcelain"]), "");
+    });
+
+    await check("a link git would still see is taken out again", async () => {
+      const wt = loneWorktree("lone-unignored");
+      // An info/exclude Codara cannot write: .git/info is a file.
+      const info = path.join(lone, ".git", "info");
+      const saved = fs.mkdtempSync(path.join(scratch, "info-"));
+      fs.renameSync(info, path.join(saved, "info"));
+      write(info, "not a folder\n");
+      try {
+        const result = await materialize.materializeSetup({
+          sourceRoot: lone,
+          worktreeRoot: wt,
+          copies: [],
+          links: ["cache"],
+          log: () => undefined,
+          onLinked: async () => assert.fail("nothing is linked"),
+        });
+        assert.deepEqual(result.linked, []);
+        assert.equal(fs.existsSync(path.join(wt, "cache")), false);
+        assert.ok(result.skipped.some((s) => s.path === "cache" && /taken out/.test(s.reason)), JSON.stringify(result));
+        assert.ok(result.warnings.some((w) => /info is not a plain folder/.test(w)));
+        assert.equal(fs.readFileSync(path.join(lone, "cache", "blob.bin"), "utf8"), "cached\n");
+        assert.equal(git(wt, ["status", "--porcelain"]), "");
+      } finally {
+        fs.rmSync(info, { force: true });
+        fs.renameSync(path.join(saved, "info"), info);
+      }
+    });
+
+    await check("removal stops setup and waits until it no longer writes", async () => {
+      const wt = loneWorktree("lone-quiesce");
+      write(path.join(lone, ".codara", "worktree.json"), JSON.stringify({ link: ["cache"], setup: "sleep 30 & wait" }));
+      const svc = makeService();
+      const started = await svc.start({ sourceCwd: lone, worktreePath: wt, trigger: "agent", userCommand: null });
+      for (let i = 0; i < 100; i += 1) {
+        if ((await svc.get(started.id)).state === "running") break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      const t0 = Date.now();
+      assert.equal(await svc.quiesce(wt, 10_000), true);
+      assert.ok(Date.now() - t0 < 8_000);
+      const stored = JSON.parse(fs.readFileSync(path.join(path.dirname(started.logPath), "status.json"), "utf8"));
+      assert.equal(stored.state, "stopped");
+      // The link is on record, so removal takes it out first.
+      const released = await links.releaseWorktreeLinks(wt);
+      assert.deepEqual(released.map((link) => link.path), ["cache"]);
+      assert.equal(fs.readFileSync(path.join(lone, "cache", "blob.bin"), "utf8"), "cached\n");
+      // Nothing running: quiesce answers at once.
+      assert.equal(await svc.quiesce(path.join(scratch, "nowhere")), true);
+      fs.rmSync(path.join(lone, ".codara"), { recursive: true, force: true });
+    });
+
+    await check("a queued setup leaves the queue when it is stopped", async () => {
+      write(path.join(lone, ".codara", "worktree.json"), JSON.stringify({ setup: "sleep 30 & wait" }));
+      const svc = makeService({ maxConcurrentCommands: 1 });
+      const a = await svc.start({ sourceCwd: lone, worktreePath: loneWorktree("lone-slot-a"), trigger: "ui", userCommand: null });
+      await svc.whenPrepared(a.id);
+      const b = await svc.start({ sourceCwd: lone, worktreePath: loneWorktree("lone-slot-b"), trigger: "ui", userCommand: null });
+      await svc.whenPrepared(b.id);
+      assert.equal((await svc.get(b.id)).state, "queued");
+      const t0 = Date.now();
+      assert.equal(await svc.quiesce(b.id, 10_000), true);
+      assert.ok(Date.now() - t0 < 3_000, `took ${Date.now() - t0} ms`);
+      assert.equal((await svc.get(b.id)).state, "stopped");
+      assert.equal((await svc.get(a.id)).state, "running", "the other setup is untouched");
+      assert.equal((await svc.stop(a.id)).state, "stopped");
+      // The slot is free again for the next one.
+      write(path.join(lone, ".codara", "worktree.json"), JSON.stringify({ setup: "true" }));
+      const c = await svc.start({ sourceCwd: lone, worktreePath: loneWorktree("lone-slot-c"), trigger: "ui", userCommand: null });
+      assert.equal((await svc.waitFor(c.id, 10_000)).state, "succeeded");
+      fs.rmSync(path.join(lone, ".codara"), { recursive: true, force: true });
+    });
+
+    await check("a wait gives up as soon as its caller is stopped", async () => {
+      const wt = loneWorktree("lone-abort");
+      write(path.join(lone, ".codara", "worktree.json"), JSON.stringify({ setup: "sleep 30 & wait", waitForSetup: true }));
+      const svc = makeService();
+      const started = await svc.start({ sourceCwd: lone, worktreePath: wt, trigger: "worker", userCommand: null });
+      const t0 = Date.now();
+      const waited = await svc.waitFor(started.id, 60_000, { aborted: () => Date.now() - t0 > 300, sliceMs: 50 });
+      assert.ok(Date.now() - t0 < 3_000, `waited ${Date.now() - t0} ms`);
+      assert.ok(!["succeeded", "failed", "stopped"].includes(waited.state), waited.state);
+      assert.equal((await svc.stop(started.id)).state, "stopped");
+      fs.rmSync(path.join(lone, ".codara"), { recursive: true, force: true });
+    });
+
+    await check("on Windows a Git Bash default shell runs your command", async () => {
+      // The seam only: platform win32 with a POSIX default shell takes the
+      // script route, not cmd (which does not exist here).
+      const wt = loneWorktree("lone-gitbash");
+      const svc = makeService({ platform: "win32", userShell: async () => ({ path: "/bin/sh", kind: "posix" }) });
+      const started = await svc.start({ sourceCwd: lone, worktreePath: wt, trigger: "ui", userCommand: "echo bash > from-user.txt" });
+      const done = await svc.waitFor(started.id, 20_000);
+      assert.equal(done.state, "succeeded", done.error);
+      assert.equal(fs.readFileSync(path.join(wt, "from-user.txt"), "utf8"), "bash\n");
+      const viaCmd = makeService({ platform: "win32", userShell: async () => ({ path: "/nonexistent/cmd.exe", kind: "cmd" }) });
+      const wtCmd = loneWorktree("lone-cmd");
+      const failed = await viaCmd.waitFor(
+        (await viaCmd.start({ sourceCwd: lone, worktreePath: wtCmd, trigger: "ui", userCommand: "echo x" })).id,
+        20_000,
+      );
+      assert.equal(failed.state, "failed", "cmd is used when it is the default");
+    });
+  }
 
   // ── Files dialog ─────────────────────────────────────────────────────────
   await check("previews, suggests and writes the setup files", async () => {

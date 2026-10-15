@@ -119,11 +119,11 @@ export function worktreeSetupService(): WorktreeSetupService {
   const current = service;
   // Optional: unit suites load this module against an Electron stub.
   app?.once?.("will-quit", () => current.dispose());
+  // Every removal path stops the worktree's setup first and waits until it
+  // no longer writes there, so its links are on record and nothing lands in
+  // a folder being deleted.
   setBeforeWorktreeRemoval(async (worktreePath) => {
-    const status = await current.get(worktreePath);
-    if (status && (status.state === "preparing" || status.state === "queued" || status.state === "running")) {
-      await current.stop(status.id);
-    }
+    await current.quiesce(worktreePath);
   });
   return service;
 }

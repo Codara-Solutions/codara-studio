@@ -52,20 +52,27 @@ export async function prepareWorkerWorktree(input: {
  * Waits for a worker worktree's setup commands when its setup file asks
  * agents to wait. Null when there is nothing to wait for or report.
  */
-export async function waitForWorkerWorktreeSetup(worktreePath: string): Promise<WorkerSetupEvent | null> {
+export async function waitForWorkerWorktreeSetup(
+  worktreePath: string,
+  options: { aborted?: () => boolean } = {},
+): Promise<WorkerSetupEvent | null> {
   const service = worktreeSetupService();
   const status = await service.get(worktreePath).catch(() => null);
   if (!status || !status.waitForSetup) return null;
+  // A Stop of the worker (or its run) ends the wait at once instead of
+  // holding the launch for the whole setup.
   const done = isWorktreeSetupFinished(status.state)
     ? status
-    : ((await service.waitFor(status.id, WORKER_SETUP_WAIT_MS).catch(() => null)) ?? status);
+    : ((await service.waitFor(status.id, WORKER_SETUP_WAIT_MS, { aborted: options.aborted }).catch(() => null)) ??
+      status);
+  if (options.aborted?.()) return null;
   if (done.state === "succeeded") {
     return { failed: false, message: "Worktree setup finished", payload: payloadOf(done) };
   }
   if (!isWorktreeSetupFinished(done.state)) {
     return {
       failed: false,
-      message: "Worktree setup is still running after 30 minutes; the worker starts anyway",
+      message: "Worktree setup is still running; the worker starts anyway",
       payload: payloadOf(done),
     };
   }

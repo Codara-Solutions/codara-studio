@@ -11,7 +11,7 @@ import { constants as fsConstants, promises as fsp } from "node:fs";
 import { dirname, join, relative as relativePath, resolve, sep } from "node:path";
 import type { WorktreeSetupSkip } from "@shared/worktree-setup";
 import { assertCodaraOwnedWrite } from "../outside-write-guard";
-import type { SetupManifest, SetupManifestCopy, SetupManifestLink } from "./links";
+import { removeLinkEntry, type SetupManifest, type SetupManifestCopy, type SetupManifestLink } from "./links";
 import { gitWithInput, ignoredSubset, type CopyCandidate } from "./plan";
 
 export interface CopyBudget {
@@ -30,7 +30,15 @@ export interface MaterializeInput {
   platform?: NodeJS.Platform;
   log(line: string): void;
   stopped?(): boolean;
+  // Paths an earlier setup of this worktree put there. Finding them again
+  // (Run again) is expected, not a skip worth listing.
+  alreadyProvided?: ReadonlySet<string>;
+  // Called once the links are made and kept ignored, before any copy.
+  onLinked?(linked: SetupManifestLink[]): Promise<void>;
 }
+
+const ALREADY_THERE = "already in the worktree";
+const SKIP_LOG_LINES = 200;
 
 export interface MaterializeResult {
   copied: string[];
@@ -157,7 +165,7 @@ export async function materializeSetup(input: MaterializeInput): Promise<Materia
     }
     const destination = join(worktreeRoot, ...link.split("/"));
     if (await fsp.lstat(destination).catch(() => null)) {
-      result.skipped.push({ path: link, reason: "already in the worktree" });
+      result.skipped.push({ path: link, reason: ALREADY_THERE });
       continue;
     }
     if (!(await ensureParentFolders(worktreeRoot, link))) {
@@ -183,6 +191,32 @@ export async function materializeSetup(input: MaterializeInput): Promise<Materia
       (err: Error) => `Could not mark the linked folders as ignored: ${err.message}`,
     );
     if (warning) result.warnings.push(warning);
+    // A link git still sees would be staged by `git add -A` (and merged back
+    // from a Cora worker's sandbox) as a link to this computer's main
+    // checkout. Such a link is taken out again.
+    const ignored = await ignoredSubset(worktreeRoot, result.linked.map((link) => link.path)).catch(
+      () => new Set<string>(),
+    );
+    const kept: SetupManifestLink[] = [];
+    for (const link of result.linked) {
+      if (ignored.has(link.path)) {
+        kept.push(link);
+        continue;
+      }
+      const removed = await removeLinkEntry(join(worktreeRoot, ...link.path.split("/")));
+      if (!removed) {
+        kept.push(link);
+        continue;
+      }
+      result.skipped.push({ path: link.path, reason: "git would see the link as a new file, so it was taken out" });
+      input.log(`Took out the link ${link.path}: git does not ignore it in the worktree`);
+    }
+    result.linked = kept;
+  }
+  if (result.linked.length && input.onLinked) {
+    await input.onLinked(result.linked).catch((err: Error) => {
+      result.warnings.push(`Could not record the linked folders: ${err.message}`);
+    });
   }
   const linkedPaths = result.linked.map((link) => link.path);
 
@@ -263,13 +297,28 @@ export async function materializeSetup(input: MaterializeInput): Promise<Materia
       `Copied ${result.copiedFiles.length.toLocaleString("en-US")} ${result.copiedFiles.length === 1 ? "file" : "files"} (${formatBytes(result.copiedBytes)}) from the main checkout`,
     );
   }
-  for (const skip of result.skipped) input.log(`Skipped ${skip.path}: ${skip.reason}`);
+  const known = input.alreadyProvided;
+  if (known?.size) {
+    let again = 0;
+    result.skipped = result.skipped.filter((skip) => {
+      if (skip.reason !== ALREADY_THERE || !known.has(skip.path)) return true;
+      again += 1;
+      return false;
+    });
+    if (again) {
+      input.log(`${again.toLocaleString("en-US")} ${again === 1 ? "entry" : "entries"} from an earlier setup already in place`);
+    }
+  }
+  for (const skip of result.skipped.slice(0, SKIP_LOG_LINES)) input.log(`Skipped ${skip.path}: ${skip.reason}`);
+  if (result.skipped.length > SKIP_LOG_LINES) {
+    input.log(`Skipped ${(result.skipped.length - SKIP_LOG_LINES).toLocaleString("en-US")} more`);
+  }
   return result;
 }
 
 async function copyOneFile(source: string, destination: string, relative: string, result: MaterializeResult): Promise<void> {
   if (await fsp.lstat(destination).catch(() => null)) {
-    result.skipped.push({ path: relative, reason: "already in the worktree" });
+    result.skipped.push({ path: relative, reason: ALREADY_THERE });
     return;
   }
   try {
@@ -282,7 +331,7 @@ async function copyOneFile(source: string, destination: string, relative: string
     const code = (err as NodeJS.ErrnoException)?.code;
     result.skipped.push({
       path: relative,
-      reason: code === "EEXIST" ? "already in the worktree" : `could not copy: ${(err as Error).message}`,
+      reason: code === "EEXIST" ? ALREADY_THERE : `could not copy: ${(err as Error).message}`,
     });
   }
 }
@@ -299,7 +348,7 @@ async function copyFolder(source: string, destination: string, relative: string,
   if (ctx.stopped()) return;
   const existing = await fsp.lstat(destination).catch(() => null);
   if (existing && (!existing.isDirectory() || existing.isSymbolicLink())) {
-    ctx.result.skipped.push({ path: relative, reason: "already in the worktree" });
+    ctx.result.skipped.push({ path: relative, reason: ALREADY_THERE });
     return;
   }
   if (!existing) {
@@ -355,7 +404,7 @@ async function copyInnerLink(source: string, destination: string, relative: stri
     return;
   }
   if (await fsp.lstat(destination).catch(() => null)) {
-    ctx.result.skipped.push({ path: relative, reason: "already in the worktree" });
+    ctx.result.skipped.push({ path: relative, reason: ALREADY_THERE });
     return;
   }
   try {

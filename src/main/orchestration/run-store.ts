@@ -14803,7 +14803,9 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   });
   try {
     if (attempt.sandboxWorktreePath) {
-      const setup = await waitForWorkerWorktreeSetup(attempt.sandboxWorktreePath);
+      const setup = await waitForWorkerWorktreeSetup(attempt.sandboxWorktreePath, {
+        aborted: () => workerLaunchAborted(attempt.id),
+      });
       if (setup) {
         await appendEvent({
           timestamp: new Date().toISOString(),
