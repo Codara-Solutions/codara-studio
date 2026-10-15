@@ -463,6 +463,7 @@ Debugging:
 | Tabs, splits, docking | `src/renderer/src/tabs/useTabs.ts` | `paneTree.ts`, `dock.ts`, `TerminalStack.tsx` |
 | Detecting an agent's state in a pane | `src/shared/agent-patterns.ts` | `src/main/terminal-agent-notify.ts`; `test-agent-patterns`, `test-terminal-agent-notify` |
 | Notifications | `src/main/notify/policy.ts` (whether to deliver) | `deliver.ts`; `src/renderer/src/notifications/` |
+| The rail's Agents view | `src/shared/agent-board.ts` (which group a card lands in) | `components/agent-board/`; `src/main/agent-board.ts` and `terminalAgentActivitySnapshot` in `terminal-agent-notify.ts`; `test-agent-board`, `tests/e2e/agent-board.spec.ts` |
 | The preview browser | `components/Preview/previewRpc.ts` (DOM actions) or `src/main/preview-input.ts` (trusted input) | The socket handlers in `src/main/preview-tools/` (one table per area, merged in `index.ts`); `test-preview-tools-routing` |
 | The chat UI | `components/chat/` | `lib/useRunExecutionRecord.ts`, `chat/timeline.ts` |
 | Automations and looms | `scheduler.ts`, `automation-loop.ts`, `loom-*.ts` | `components/automations/` |

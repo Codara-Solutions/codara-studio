@@ -297,6 +297,45 @@ row after 30 days; a question still waiting on you keeps the 30 days even
 once read. It is saved in `notifications.json` and the mutes in
 `notification-mutes.json` (see [on-your-machine.md](./on-your-machine.md)).
 
+### The Agents view
+
+The switch at the top of the rail's Workspaces section picks what the
+section lists: **Workspaces**, your workspaces in your own order (the
+default), or **Agents**, every agent of every workspace sorted by what it
+needs from you. Codara remembers the choice when it restarts. While the
+Workspaces list shows, the **Agents** side of the switch counts the agents
+waiting on you.
+
+The Agents view has three groups, each with its count. Click a group's name
+to fold it; the folding is remembered.
+
+- **Needs you**: a terminal agent waiting at a permission prompt or a
+  question, one that stopped with an error, and Cora chats that asked you
+  something or are paused. The one waiting longest comes first.
+- **Working**: terminal agents in a turn and Cora chats that are planning,
+  working or reviewing, including automation runs and board cards while they
+  work. The latest start comes first.
+- **Done**: terminal agents back at their prompt, and Cora chats that
+  finished, failed or were cancelled in the last 12 hours (a finished chat
+  you have not opened stays until you do). Unseen ones come first, marked
+  with a dot.
+
+Each card shows the agent (Claude Code, Codex, Grok, Pi or Cora), its
+workspace, the account it runs on when Codara knows it, what it is doing or
+asked, the tool it is running when the agent reports one, and how long it
+has been in that state. A terminal agent's card is titled by your last prompt
+when the agent's hooks report it, otherwise by its tab.
+
+A **Needs you** card has a reply box. For a terminal agent the text is pasted
+into its pane and submitted, as if you had typed it there; a permission
+prompt that wants a key is answered in the pane itself. For a Cora question
+the answer options show as buttons above the box. Clicking a card, or Enter
+on it, switches to its workspace and opens its pane or chat.
+
+Keys: Left and Right move between **Workspaces** and **Agents**; in the
+list, Up and Down (or Home and End) move between cards, Tab reaches a card's
+reply box, and Escape leaves the box.
+
 ## The Capability Center
 
 The Capability Center is where you decide what Cora, its workers and your
