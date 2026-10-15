@@ -34,6 +34,9 @@ export async function previewWorktreeSetup(
   sourceCwd: string,
   userCommand: string | null,
   platform: NodeJS.Platform = process.platform,
+  // False reads the two files only: no walk of the checkout for the files
+  // to copy, the folders to link or the .env files (Settings needs no more).
+  scan = true,
 ): Promise<WorktreeSetupPreview> {
   const sources = await readSetupSources(sourceCwd);
   if (!sources) {
@@ -57,9 +60,9 @@ export async function previewWorktreeSetup(
   const config = sources.file.config;
   const patterns = copyPatterns(sources);
   const [copies, links, envFiles] = await Promise.all([
-    patterns.length ? resolveCopyCandidates(root, patterns).catch(() => null) : Promise.resolve(null),
-    config?.link.length ? resolveLinkSources(root, config.link).catch(() => null) : Promise.resolve(null),
-    findIgnoredEnvFiles(root).catch(() => [] as string[]),
+    scan && patterns.length ? resolveCopyCandidates(root, patterns).catch(() => null) : Promise.resolve(null),
+    scan && config?.link.length ? resolveLinkSources(root, config.link).catch(() => null) : Promise.resolve(null),
+    scan ? findIgnoredEnvFiles(root).catch(() => [] as string[]) : Promise.resolve([] as string[]),
   ]);
   const copied = copies?.candidates ?? [];
   const covered = (path: string) =>

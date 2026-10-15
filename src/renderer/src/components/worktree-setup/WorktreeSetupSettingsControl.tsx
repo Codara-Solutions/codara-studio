@@ -15,7 +15,7 @@ export default function WorktreeSetupSettingsControl({ workspaceCwd }: { workspa
   useEffect(() => {
     let cancelled = false;
     void window.spark.worktreeSetup
-      .preview(workspaceCwd)
+      .preview(workspaceCwd, { light: true })
       .then((next) => {
         if (!cancelled) setPreview(next);
       })

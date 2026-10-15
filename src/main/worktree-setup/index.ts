@@ -3,7 +3,7 @@
 // and the helpers the other creation paths (agents, issues, Cora workers,
 // workflows) call. ipc.ts registers the channels with one line.
 
-import { app, webContents } from "electron";
+import { app, BrowserWindow } from "electron";
 import { promises as fsp } from "node:fs";
 import { isRemotePath } from "@shared/remote";
 import {
@@ -39,8 +39,11 @@ export type { StartSetupRequest } from "./service";
 
 let service: WorktreeSetupService | null = null;
 
+// Codara's own windows only: a status carries paths and the setup commands,
+// which a page open in the built-in browser has no business receiving.
 function broadcast(status: WorktreeSetupStatus): void {
-  for (const contents of webContents?.getAllWebContents?.() ?? []) {
+  for (const window of BrowserWindow?.getAllWindows?.() ?? []) {
+    const contents = window.webContents;
     if (contents.isDestroyed()) continue;
     try {
       contents.send("worktreeSetup:changed", status);
@@ -190,7 +193,8 @@ function localPath(value: string, key: string): string {
 export function registerWorktreeSetupIpc(handle: IpcHandle): void {
   handle("worktreeSetup:preview", async (_event, input: unknown) => {
     const sourceCwd = localPath(stringField(input, "sourceCwd"), "sourceCwd");
-    return previewWorktreeSetup(sourceCwd, await personalSetupCommand(sourceCwd));
+    const light = Boolean(input && typeof input === "object" && (input as { light?: unknown }).light === true);
+    return previewWorktreeSetup(sourceCwd, await personalSetupCommand(sourceCwd), process.platform, !light);
   });
   handle("worktreeSetup:suggest", (_event, input: unknown) =>
     suggestWorktreeSetup(localPath(stringField(input, "sourceCwd"), "sourceCwd")),

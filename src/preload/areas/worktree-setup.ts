@@ -27,7 +27,9 @@ export interface WorktreeSetupStartInput {
 export type WorktreeSetupStartReply = WorktreeSetupStatus | null | WorktreeSetupStartError;
 
 export const worktreeSetupApi = {
-  preview: (sourceCwd: string): Promise<WorktreeSetupPreview> => ipcRenderer.invoke("worktreeSetup:preview", { sourceCwd }),
+  /** `light` reads the two files only, without looking through the checkout. */
+  preview: (sourceCwd: string, options: { light?: boolean } = {}): Promise<WorktreeSetupPreview> =>
+    ipcRenderer.invoke("worktreeSetup:preview", { sourceCwd, ...(options.light ? { light: true } : {}) }),
   suggest: (sourceCwd: string): Promise<WorktreeSetupSuggestion> => ipcRenderer.invoke("worktreeSetup:suggest", { sourceCwd }),
   writeFiles: (draft: WorktreeSetupFileDraft): Promise<WorktreeSetupWriteResult> =>
     ipcRenderer.invoke("worktreeSetup:writeFiles", draft),
