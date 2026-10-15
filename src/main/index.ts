@@ -1399,6 +1399,12 @@ app.whenReady().then(async () => {
     .catch((err) => {
       logMain("github-push-watch", `failed to start: ${String(err)}`);
     });
+  // "CI failed on your pull request" alerts (Settings, Git).
+  void import("./github-ci-watch")
+    .then((m) => m.startGitHubCiWatch())
+    .catch((err) => {
+      logMain("github-ci-watch", `failed to start: ${String(err)}`);
+    });
 
   // Re-reads the providers' model lists every few hours so a model released
   // while Codara runs appears in the worker list, switched off. Its first pass

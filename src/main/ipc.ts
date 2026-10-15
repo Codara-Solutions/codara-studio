@@ -487,6 +487,7 @@ import { registerCaptureIpc } from "./browser/capture/ipc";
 import { registerChromeLinkIpc } from "./browser/chrome";
 import { registerPointIpc } from "./browser/point";
 import { registerReviewIpc } from "./review";
+import { registerGitFixIpc } from "./git-fix-ipc";
 import { registerServersIpc } from "./servers";
 import { registerWorkspaceStatusIpc } from "./workspace-status";
 import { afterSkillAssetDeleted, afterSkillAssetInstalled, registerSkillUpdatesIpc, skillOriginsDir } from "./skill-updates-ipc";
@@ -4084,6 +4085,7 @@ export function registerIpc(): void {
   // Areas that keep their channels next to their code.
   registerServersIpc(handle);
   registerSkillUpdatesIpc(handle);
+  registerGitFixIpc(handle);
   registerChromeLinkIpc(handle);
   registerCaptureIpc(handle);
   registerPointIpc(handle);

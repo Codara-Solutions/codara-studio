@@ -15,6 +15,7 @@ import {
 import type { GitStatus } from "@shared/types";
 import { ChevronIcon } from "../icons";
 import GitHubWorkQueue from "./GitHubWorkQueue";
+import FixWithAgentButton from "./fix/FixWithAgentButton";
 import { RefreshIcon, SparkleIcon, Spinner } from "./git-ui";
 
 interface Props {
@@ -517,6 +518,7 @@ export default function GitHubSection({
             />
             {status.pullRequest ? (
               <PullRequestView
+                cwd={cwd}
                 status={status}
                 markingReady={markingReady}
                 markReadyResult={markReadyResult}
@@ -1320,12 +1322,14 @@ function Guidance({
 }
 
 function PullRequestView({
+  cwd,
   status,
   markingReady,
   markReadyResult,
   onMarkReady,
   onMerge,
 }: {
+  cwd: string;
   status: Extract<GitHubWorkspaceStatus, { kind: "ready" }>;
   markingReady: boolean;
   markReadyResult: GitHubMarkReadyResult | null;
@@ -1433,6 +1437,24 @@ function PullRequestView({
             label="Review merge"
             title={`Review safeguards before merging pull request #${pullRequest.number}`}
             onClick={onMerge}
+          />
+        ) : null}
+        {pullRequest.state === "OPEN" ? (
+          <FixWithAgentButton
+            cwd={cwd}
+            kind="checks"
+            label="Fix checks with agent"
+            title={`Send the failing checks on #${pullRequest.number} and their logs to an agent`}
+            tone="danger"
+            hidden={pullRequest.checks.failed === 0}
+          />
+        ) : null}
+        {pullRequest.state === "OPEN" ? (
+          <FixWithAgentButton
+            cwd={cwd}
+            kind="review"
+            label="Address review comments"
+            title={`Send the unresolved review threads on #${pullRequest.number} to an agent`}
           />
         ) : null}
       </div>

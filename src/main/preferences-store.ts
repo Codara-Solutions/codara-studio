@@ -337,6 +337,10 @@ function normalize(
       typeof src.notifyPullRequests === "boolean"
         ? src.notifyPullRequests
         : DEFAULT_PREFERENCES.notifyPullRequests,
+    notifyCiFailures:
+      typeof src.notifyCiFailures === "boolean"
+        ? src.notifyCiFailures
+        : DEFAULT_PREFERENCES.notifyCiFailures,
     toastDurationMs: normalizeToastDuration(src.toastDurationMs),
     workspaceSwitchHudMs: normalizeWorkspaceSwitchHud(src.workspaceSwitchHudMs),
   };

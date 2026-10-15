@@ -25,6 +25,7 @@ import SplitCommitsDialog from "./SplitCommitsDialog";
 import CommitHistory from "./CommitHistory";
 import GitHubSection from "./GitHubSection";
 import StashSection from "./StashSection";
+import { CommitHookFix, ConflictFixBanner } from "./fix/GitPanelFixes";
 import type { SharedGitStatus } from "../../git/useSharedGitStatus";
 import {
   CommitIcon,
@@ -80,6 +81,8 @@ export default function GitPanel({
   // same snapshot this panel does. Everything below is panel-local UI state.
   const { status, log, loading, gitVersion, refresh, notifyChanged, readError } = git;
   const [opError, setOpError] = useState<string | null>(null);
+  // The last failed commit, so a hook's rejection can go to an agent.
+  const [commitFailure, setCommitFailure] = useState<{ output: string; message: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState("");
   const [sections, setSections] = useState({ staged: false, changes: false, history: false });
@@ -110,6 +113,7 @@ export default function GitPanel({
   // Reset panel-local state whenever the workspace changes.
   useEffect(() => {
     setOpError(null);
+    setCommitFailure(null);
     setDetailHash(null);
     setReturnHighlightHash(null);
     savedScrollRef.current = null;
@@ -277,6 +281,7 @@ export default function GitPanel({
       const nothingStaged = (statusRef.current?.staged.length ?? 0) === 0;
       setBusy("commit");
       setOpError(null);
+      setCommitFailure(null);
       try {
         if (!amend && nothingStaged) {
           const staged = await window.spark.git.stageAll(cwd);
@@ -287,7 +292,10 @@ export default function GitPanel({
         }
         const result = await window.spark.git.commit(cwd, text, amend);
         if (result.ok) setMessage("");
-        else setOpError(result.error);
+        else {
+          setOpError(result.error);
+          setCommitFailure({ output: result.error, message: text });
+        }
       } catch (err) {
         setOpError((err as Error).message);
       } finally {
@@ -540,9 +548,23 @@ export default function GitPanel({
                       }}
                       composer={
                         <>
+                          <ConflictFixBanner cwd={cwd} status={status} />
                           {displayError && (
-                            <ErrorStrip text={displayError} onDismiss={() => setOpError(null)} />
+                            <ErrorStrip
+                              text={displayError}
+                              onDismiss={() => {
+                                setOpError(null);
+                                setCommitFailure(null);
+                              }}
+                            />
                           )}
+                          {commitFailure && opError === commitFailure.output ? (
+                            <CommitHookFix
+                              cwd={cwd}
+                              output={commitFailure.output}
+                              commitMessage={commitFailure.message}
+                            />
+                          ) : null}
                           <CommitComposer
                             message={message}
                             onMessageChange={setMessage}

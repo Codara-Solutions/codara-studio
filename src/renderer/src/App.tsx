@@ -166,6 +166,7 @@ import { usePanelLayout, type PanelSectionKey, type PanelSide } from "./panels/u
 import ResizeHandle from "./panels/ResizeHandle";
 import { SelectionRoutingProvider } from "./routing/SelectionRoutingContext";
 import { useSelectionRoutingApi } from "./routing/useSelectionRoutingApi";
+import { setFixAgentHost } from "./components/git/fix/agent-launcher";
 import { useGlobalRuns } from "./lib/useGlobalRuns";
 import { onSettingsChanged, publishSettings } from "./lib/useOpenAiFastMode";
 import { isRunningStatus } from "./lib/run-status";
@@ -4663,6 +4664,36 @@ export default function App() {
     },
     [activeWorkspace?.cwd, prepareWorkerLaunch, tabs],
   );
+
+  // "Fix with agent" in Source Control starts a new agent CLI in its own
+  // terminal tab of the active workspace and hands it the prompt once its
+  // chip says it is ready.
+  useEffect(() => {
+    setFixAgentHost({
+      launch(runtime, cwd) {
+        const command =
+          runtime === "claude"
+            ? CLAUDE_LAUNCH_COMMAND
+            : runtime === "codex"
+              ? CODEX_LAUNCH_COMMAND
+              : runtime === "grok"
+                ? GROK_LAUNCH_COMMAND
+                : PI_LAUNCH_COMMAND;
+        const launchRuntime = runtimeFromAgentSessionLaunchCommand(command);
+        return tabsRef.current.newTerminalTab(cwd, command, {
+          manualAgentRuntime: launchRuntime ?? undefined,
+          color: workerTabBrandColor(launchRuntime, command),
+        });
+      },
+      paneState(tabId) {
+        const tab = tabsRef.current.tabs.find((item) => item.id === tabId);
+        if (tab?.kind !== "terminal") return null;
+        const leaf = findLeafByPaneId(tab.root, tab.activePaneId);
+        return leaf ? { paneId: leaf.paneId, state: leaf.worker?.runtimeState ?? null } : null;
+      },
+    });
+    return () => setFixAgentHost(null);
+  }, []);
 
   const resolveWorkerLaunchCwd = useCallback((): string | null => {
     const current = tabsRef.current;

@@ -40,6 +40,7 @@ import { agentBoardApi } from "./areas/agent-board";
 import { captureApi } from "./areas/capture";
 import { chromeLinkApi } from "./areas/chrome-link";
 import { keepAwakeApi } from "./areas/keep-awake";
+import { gitFixApi } from "./areas/git-fix";
 import { pointApi } from "./areas/point";
 import { reviewApi } from "./areas/review";
 import { serversApi } from "./areas/servers";
@@ -1779,6 +1780,7 @@ const api = {
   },
   servers: serversApi,
   skillOrigins: skillOriginsApi,
+  gitFix: gitFixApi,
   chromeLink: chromeLinkApi,
   keepAwake: keepAwakeApi,
   capture: captureApi,
