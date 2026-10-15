@@ -259,6 +259,36 @@ export function parseCiPullRequest(stdout: string): CiPullRequestSnapshot | null
   };
 }
 
+/**
+ * GitHubCiWatchDeps.localRefs on plain git: one `git rev-parse` a minute per
+ * workspace for HEAD, its upstream and the upstream's name. Which branch the
+ * remote calls its default rarely changes, so that answer is kept for the
+ * settled requery interval.
+ */
+export function createCiLocalRefsReader(
+  read: (cwd: string, args: string[]) => Promise<string>,
+  now: () => number,
+): (cwd: string) => Promise<string | null> {
+  const defaults = new Map<string, { branch: string; at: number }>();
+  return async (cwd) => {
+    const lines = (await read(cwd, ["rev-parse", "HEAD", "@{upstream}", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]))
+      .split(/\r?\n/)
+      .map((line) => line.trim());
+    if (lines.length !== 3) return null;
+    const [head, upstreamOid, upstream] = lines;
+    if (!head || !upstreamOid || !upstream.includes("/")) return null;
+    const remote = upstream.slice(0, upstream.indexOf("/"));
+    const key = `${cwd}\u0000${remote}`;
+    let known = defaults.get(key);
+    if (!known || now() - known.at >= CI_WATCH_SETTLED_REQUERY_MS) {
+      known = { branch: await read(cwd, ["symbolic-ref", "--quiet", "--short", `refs/remotes/${remote}/HEAD`]), at: now() };
+      defaults.set(key, known);
+    }
+    if (known.branch && known.branch === upstream) return null;
+    return `${head} ${upstreamOid}`;
+  };
+}
+
 let live: GitHubCiWatch | null = null;
 
 async function productionDeps(): Promise<GitHubCiWatchDeps> {
@@ -289,15 +319,7 @@ async function productionDeps(): Promise<GitHubCiWatchDeps> {
         return false;
       }
     },
-    async localRefs(cwd) {
-      const upstream = await read(cwd, ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]);
-      if (!upstream || !upstream.includes("/")) return null;
-      const remote = upstream.slice(0, upstream.indexOf("/"));
-      const defaultBranch = await read(cwd, ["symbolic-ref", "--quiet", "--short", `refs/remotes/${remote}/HEAD`]);
-      if (defaultBranch && defaultBranch === upstream) return null;
-      const commits = await read(cwd, ["rev-parse", "HEAD", "@{upstream}"]);
-      return commits ? commits.replace(/\s+/g, " ") : null;
-    },
+    localRefs: createCiLocalRefsReader(read, Date.now),
     async readPullRequest(cwd) {
       // Without gh there is nothing to watch; asked again in 15 minutes.
       const executablePath = await resolveBinary("gh");

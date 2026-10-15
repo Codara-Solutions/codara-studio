@@ -4,9 +4,11 @@
 // Unit tests for src/main/github-ci-watch.ts: "Notify me when CI fails on my
 // pull request". The watcher is driven through its injected dependencies:
 // scripted local refs and pull request reads, a fake clock and timers, and a
-// recorded publish. No git, gh, network or Electron.
+// recorded publish; the local refs reader runs real git on a throwaway
+// clone. No gh, network or Electron.
 
 const assert = require("node:assert/strict");
+const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -151,6 +153,60 @@ test("parseCiPullRequest judges each check by its newest run", ({ mod }) => {
   // Same name in another workflow is another check.
   const other = view([failedRun, { ...passedRerun, workflowName: "Nightly" }]);
   assert.deepEqual([other.failed, other.pending], [["build"], 0]);
+});
+
+test("local refs: one git call a minute, the default branch looked up once per interval", async ({ mod }) => {
+  const env = { PATH: process.env.PATH, HOME: os.tmpdir(), GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: os.devNull, GIT_TERMINAL_PROMPT: "0", LANG: "C", LC_ALL: "C" };
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "codara-gh-ci-refs-"));
+  const run = (cwd, args) => execFileSync("git", args, { cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  try {
+    try {
+      run(temp, ["--version"]);
+    } catch {
+      return; // no git here: the scripted tests above still cover the watcher
+    }
+    const remote = path.join(temp, "remote.git");
+    const repo = path.join(temp, "repo");
+    run(temp, ["init", "-q", "--bare", "-b", "main", remote]);
+    run(temp, ["clone", "-q", remote, repo]);
+    for (const [key, value] of [["user.email", "ci@example.invalid"], ["user.name", "CI"]]) run(repo, ["config", key, value]);
+    fs.writeFileSync(path.join(repo, "a.txt"), "a\n");
+    run(repo, ["add", "-A"]);
+    run(repo, ["commit", "-q", "-m", "a"]);
+    run(repo, ["push", "-q", "-u", "origin", "main"]);
+    run(repo, ["remote", "set-head", "origin", "main"]);
+    const calls = [];
+    let now = 1_000;
+    const read = async (cwd, args) => {
+      calls.push(args.join(" "));
+      try {
+        return run(cwd, args).trim();
+      } catch {
+        return "";
+      }
+    };
+    const localRefs = mod.createCiLocalRefsReader(read, () => now);
+    assert.equal(await localRefs(repo), null, "the default branch has no pull request");
+    run(repo, ["checkout", "-q", "-b", "feat/x"]);
+    assert.equal(await localRefs(repo), null, "no upstream yet");
+    fs.writeFileSync(path.join(repo, "b.txt"), "b\n");
+    run(repo, ["add", "-A"]);
+    run(repo, ["commit", "-q", "-m", "b"]);
+    run(repo, ["push", "-q", "-u", "origin", "feat/x"]);
+    const head = run(repo, ["rev-parse", "HEAD"]).trim();
+    calls.length = 0;
+    assert.equal(await localRefs(repo), `${head} ${head}`);
+    assert.equal(await localRefs(repo), `${head} ${head}`);
+    assert.equal(calls.filter((call) => call.startsWith("symbolic-ref")).length, 0, "the default branch answer is reused");
+    assert.equal(calls.length, 2, "one git call per look");
+    now += 15 * 60_000;
+    await localRefs(repo);
+    assert.equal(calls.filter((call) => call.startsWith("symbolic-ref")).length, 1, "and looked up again after the interval");
+    run(repo, ["checkout", "-q", "--detach"]);
+    assert.equal(await localRefs(repo), null, "a detached HEAD has no pull request");
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
 });
 
 test("formatCiFailure names up to three checks and the pull request", ({ mod }) => {
