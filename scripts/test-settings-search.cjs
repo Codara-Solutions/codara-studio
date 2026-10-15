@@ -68,6 +68,10 @@ const DIALOG_FUNCTION_TABS = {
   AboutSettings: "about",
 };
 
+// The Chrome extension section of the General page and the rows it draws
+// from their own files.
+const CHROME_SECTION_FILES = ["ChromeLinkSection.tsx", "KeepAgentsInChromeRow.tsx"];
+
 // Components whose literal title, text, label or anchor prop names a row or
 // section that search scrolls to.
 const ROW_PROPS = {
@@ -174,8 +178,10 @@ async function main() {
     for (const row of renderedRows(behavior)) {
       if (!findable("capabilities", row.name)) missing.push(`capabilities › ${row.name}`);
     }
-    for (const row of renderedRows(read(path.join(COMPONENTS, "chrome", "ChromeLinkSection.tsx")))) {
-      if (!findable("general", row.name)) missing.push(`general › ${row.name} (ChromeLinkSection.tsx)`);
+    for (const file of CHROME_SECTION_FILES) {
+      for (const row of renderedRows(read(path.join(COMPONENTS, "chrome", file)))) {
+        if (!findable("general", row.name)) missing.push(`general › ${row.name} (${file})`);
+      }
     }
     for (const row of launchArgsRows()) {
       if (!findable("agents", row.name)) missing.push(`agents › ${row.name} (LaunchArgsSection.tsx)`);
@@ -199,7 +205,9 @@ async function main() {
       rendered[tab] = (rendered[tab] ?? new Set());
       for (const row of renderedRows(body)) rendered[tab].add(row.name);
     }
-    for (const row of renderedRows(read(path.join(COMPONENTS, "chrome", "ChromeLinkSection.tsx")))) rendered.general.add(row.name);
+    for (const file of CHROME_SECTION_FILES) {
+      for (const row of renderedRows(read(path.join(COMPONENTS, "chrome", file)))) rendered.general.add(row.name);
+    }
     rendered["remote-access"] = new Set(
       renderedRows(read(path.join(COMPONENTS, "RemoteAccessSettings.tsx"))).map((row) => row.name),
     );

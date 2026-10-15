@@ -239,6 +239,22 @@ own. With two browsers paired, ids carry the browser:
   tabs", and `close` only closes tabs an agent opened. Without `group` the
   tab goes in a group named after the caller's workspace, so it never lands
   loose among the user's own tabs.
+- **Keep agents in your Chrome** (Settings > General > Chrome extension, on
+  by default) keeps agents off browser tools that start a Chrome of their
+  own, with a separate profile and the "controlled by automated test
+  software" bar. For the Claude Code sessions Codara starts, its `--settings`
+  file sets `enabledPlugins` to false for the chrome-devtools-mcp and
+  Playwright plugins (and any other enabled plugin whose server runs one of
+  these) and lists matching plain servers in `deniedMcpServers`, so none of
+  them starts. Codex sessions get `-c mcp_servers.<name>={command=...,
+  enabled=false}` for each matching server. A server matches on its command
+  and arguments: chrome-devtools-mcp, `@playwright/mcp` or a puppeteer MCP
+  server, unless told to attach to a running browser. The user's configs are
+  only read, Settings names every tool it turned off, and the Capability
+  Center marks such servers "Off in Codara". The browser-use plugin, which
+  drives the user's running Chrome, stays on. The studio server's
+  instructions tell agents to use `codara_preview_chrome` for the user's
+  Chrome and never to start a separate browser.
 - Every call is logged with the agent that made it, in Settings and in
   `<codara home>/chrome-link/activity.jsonl`; the popup shows which agent
   used each tab last.

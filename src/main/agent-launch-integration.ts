@@ -21,6 +21,7 @@ import {
 } from "./mcp-installer";
 import { parseTomlText } from "./mcp-toml";
 import { resolveCodexHomePaths } from "./orchestration/codex-home";
+import type { SeparateBrowserToolsGuard } from "./separate-browser-tools";
 import { extraLaunchArgs } from "./servers/launch-args";
 
 /**
@@ -32,6 +33,11 @@ import { extraLaunchArgs } from "./servers/launch-args";
  * (the pane-scoped shell functions in resources/shell-integration read the
  * args files written here). Nothing goes into the user's own CLI config, so
  * a session started anywhere else behaves as if Codara were not installed.
+ *
+ * While "Keep agents in your Chrome" is on, the same flags also turn off the
+ * user's browser tools that open a Chrome of their own
+ * (separate-browser-tools.ts): in the `--settings` file for Claude, as `-c`
+ * values for Codex.
  *
  * Files under <codaraHome>/integrations are regenerated at every boot from
  * the running binary, so a moved app, an AppImage mount or a worktree build
@@ -104,6 +110,11 @@ export interface AgentLaunchPlan {
 
 interface IntegrationState {
   dir: string;
+  /** Null when there is no hook script to point Claude at (no Python). */
+  claudeHooks: Record<string, unknown> | null;
+  separateBrowserTools: SeparateBrowserToolsGuard | null;
+  claudeSettingsFile: string;
+  /** The `--settings` file, or null while it has nothing to say. */
   claudeSettingsPath: string | null;
   claudeMcpConfigPaths: Partial<Record<AgentMcpMode, string>>;
   codexNotifyArgv: string[] | null;
@@ -229,6 +240,8 @@ export interface IntegrationFilesOptions {
   codexConfigText?: string;
   /** False leaves Codex's notify program out of every launch. */
   codexNotify?: boolean;
+  /** What "Keep agents in your Chrome" turns off; null or absent while it is off. */
+  separateBrowserTools?: SeparateBrowserToolsGuard | null;
 }
 
 export interface IntegrationFilesSummary {
@@ -263,11 +276,9 @@ export async function writeIntegrationFiles(
     : null;
 
   const claudeSettingsPath = join(dir, "claude", "settings.json");
-  if (hookScript) {
-    await writeIfChanged(claudeSettingsPath, `${JSON.stringify(claudeHookSettings(python, hookScript), null, 2)}\n`);
-  } else {
-    await fs.rm(claudeSettingsPath, { force: true });
-  }
+  const claudeHooks = hookScript ? { ...claudeHookSettings(python, hookScript) } : null;
+  const separateBrowserTools = options.separateBrowserTools ?? null;
+  const claudeSettingsWritten = await writeClaudeSettings(claudeSettingsPath, claudeHooks, separateBrowserTools);
   const claudeMcpConfigPaths: Partial<Record<AgentMcpMode, string>> = {};
   for (const mode of MCP_MODES) {
     const path = join(dir, "claude", `mcp-${mode}.json`);
@@ -283,13 +294,53 @@ export async function writeIntegrationFiles(
 
   state = {
     dir,
-    claudeSettingsPath: hookScript ? claudeSettingsPath : null,
+    claudeHooks,
+    separateBrowserTools,
+    claudeSettingsFile: claudeSettingsPath,
+    claudeSettingsPath: claudeSettingsWritten ? claudeSettingsPath : null,
     claudeMcpConfigPaths,
     codexNotifyArgv,
     codexTuiNotificationsUnset: tuiNotificationsUnset(codexText),
   };
   await writeShellArgsFiles();
   return { dir, claudeHooks: hookScript !== null, codexNotify: codexNotifyArgv !== null };
+}
+
+/**
+ * The `--settings` file: Codara's hooks, and what "Keep agents in your
+ * Chrome" turns off. Removed when it would be empty, so no launch points at
+ * a stale one.
+ */
+async function writeClaudeSettings(
+  path: string,
+  hooks: Record<string, unknown> | null,
+  guard: SeparateBrowserToolsGuard | null,
+): Promise<boolean> {
+  const content = { ...(hooks ?? {}), ...(guard?.claudeSettings ?? {}) };
+  if (Object.keys(content).length === 0) {
+    await fs.rm(path, { force: true });
+    return false;
+  }
+  await writeIfChanged(path, `${JSON.stringify(content, null, 2)}\n`);
+  return true;
+}
+
+/**
+ * "Keep agents in your Chrome" was switched, or the user's tools changed:
+ * rewrite the `--settings` file and the args files. New sessions follow it;
+ * running ones keep what they started with.
+ */
+export async function setSeparateBrowserToolsGuard(guard: SeparateBrowserToolsGuard | null): Promise<void> {
+  if (!state) return;
+  state.separateBrowserTools = guard;
+  const written = await writeClaudeSettings(state.claudeSettingsFile, state.claudeHooks, guard);
+  state.claudeSettingsPath = written ? state.claudeSettingsFile : null;
+  await writeShellArgsFiles();
+}
+
+/** The `-c` value that starts one of the user's Codex servers disabled. */
+export function codexDisabledServerOverride(server: { name: string; command: string }): string {
+  return `mcp_servers.${server.name}={command=${tomlString(server.command)},enabled=false}`;
 }
 
 function userNotifyFromText(text: string): string[] {
@@ -383,6 +434,13 @@ export function codexLaunchArgs(input: {
   const out: string[] = [];
   if (!readSparkBuiltinOptOuts().has("codex")) {
     out.push("-c", codexStudioServerOverride(input.mode ?? "studio"));
+  }
+  for (const server of state.separateBrowserTools?.codexServers ?? []) {
+    try {
+      out.push("-c", codexDisabledServerOverride(server));
+    } catch {
+      // A command with a control character cannot be passed; the server stays on.
+    }
   }
   if (state.codexNotifyArgv) out.push("-c", `notify=${tomlStringArray(state.codexNotifyArgv)}`);
   // Only when the user left it unset: a filter list of their own stays theirs.

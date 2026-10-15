@@ -86,8 +86,9 @@ check("every search result points at something the page renders", () => {
   assert.ok(entries.length >= 30, "the index must cover the settings");
   const behavior = read(...components, "capabilities", "BehaviorSection.tsx");
   const chromeLink = read(...components, "chrome", "ChromeLinkSection.tsx");
+  const keepInChrome = read(...components, "chrome", "KeepAgentsInChromeRow.tsx");
   const launchArgs = read(...components, "settings", "launch-args", "LaunchArgsSection.tsx");
-  const rendered = [dialog, remote, behavior, chromeLink, launchArgs].join("\n");
+  const rendered = [dialog, remote, behavior, chromeLink, keepInChrome, launchArgs].join("\n");
   const cards = read(...components, "AccountCards.tsx");
   const families = read("src", "shared", "agent-families.ts");
   for (const [, tab, title] of entries) {

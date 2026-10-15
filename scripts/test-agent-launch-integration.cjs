@@ -276,6 +276,73 @@ async function main() {
     );
   });
 
+  // What "Keep agents in your Chrome" hands the launch (separate-browser-tools.ts).
+  const guard = {
+    tools: [],
+    claudeSettings: {
+      enabledPlugins: {
+        "chrome-devtools-mcp@claude-plugins-official": false,
+        "playwright@claude-plugins-official": false,
+      },
+      deniedMcpServers: [{ serverName: "my-chrome" }],
+    },
+    codexServers: [
+      { name: "playwright", command: "npx" },
+      { name: "pw2", command: "C:\\tools\\npx.cmd" },
+    ],
+  };
+  const codexDisabled = () =>
+    launch
+      .codexLaunchArgs({ userArgs: [] })
+      .filter((arg) => arg.startsWith("mcp_servers.") && !arg.startsWith("mcp_servers.codara-studio="));
+
+  await check("Keep agents in your Chrome on: Claude's settings file turns the browser tools off next to the hooks", async () => {
+    launch.resetAgentLaunchIntegrationForTests();
+    await launch.writeIntegrationFiles({ ...options, separateBrowserTools: guard });
+    const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+    assert.deepEqual(Object.keys(settings), ["hooks", "enabledPlugins", "deniedMcpServers"]);
+    assert.deepEqual(settings.enabledPlugins, guard.claudeSettings.enabledPlugins);
+    assert.deepEqual(settings.deniedMcpServers, [{ serverName: "my-chrome" }]);
+    assert.match(settings.hooks.Stop[0].hooks[0].command, /codara-hook\.py" Stop$/);
+    assert.deepEqual(launch.claudeLaunchArgs({ userArgs: [] }), ["--settings", settingsPath, `--mcp-config=${studioMcp}`]);
+    assert.deepEqual(tree(HOME), userHomeBefore, "the switch wrote into the user's home");
+  });
+
+  await check("Keep agents in your Chrome on: Codex starts each browser server disabled, as a valid server", async () => {
+    const disabled = codexDisabled();
+    assert.deepEqual(disabled, [
+      "mcp_servers.playwright={command='npx',enabled=false}",
+      "mcp_servers.pw2={command='C:\\tools\\npx.cmd',enabled=false}",
+    ]);
+    assert.deepEqual(
+      disabled.map((arg) => JSON.parse(JSON.stringify(parseToml(arg).mcp_servers))),
+      [{ playwright: { command: "npx", enabled: false } }, { pw2: { command: "C:\\tools\\npx.cmd", enabled: false } }],
+    );
+    const typed = fs.readFileSync(path.join(dir, "codex", "args.txt"), "utf8").split("\n");
+    assert.ok(typed.includes("mcp_servers.playwright={command='npx',enabled=false}"), "a typed codex keeps the server on");
+    assert.deepEqual(launch.codexLaunchArgs({ userArgs: ["login"] }), [], "management commands stay untouched");
+  });
+
+  await check("switching it off takes the browser entries out of new launches; the hooks stay", async () => {
+    await launch.setSeparateBrowserToolsGuard(null);
+    assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(settingsPath, "utf8"))), ["hooks"]);
+    assert.deepEqual(codexDisabled(), []);
+    assert.ok(!fs.readFileSync(path.join(dir, "codex", "args.txt"), "utf8").includes("enabled=false"));
+    await launch.setSeparateBrowserToolsGuard(guard);
+    assert.ok(fs.readFileSync(path.join(dir, "codex", "args.txt"), "utf8").includes("enabled=false"), "switching back on");
+  });
+
+  await check("without Python the switch alone still gets a settings file, and off removes it", async () => {
+    launch.resetAgentLaunchIntegrationForTests();
+    await launch.writeIntegrationFiles({ ...options, pythonAvailable: false, separateBrowserTools: guard });
+    assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(settingsPath, "utf8"))), ["enabledPlugins", "deniedMcpServers"]);
+    assert.deepEqual(launch.claudeLaunchArgs({ userArgs: [] }), ["--settings", settingsPath, `--mcp-config=${studioMcp}`]);
+    await launch.setSeparateBrowserToolsGuard(null);
+    assert.equal(fs.existsSync(settingsPath), false, "an empty settings file was left for --settings");
+    assert.deepEqual(launch.claudeLaunchArgs({ userArgs: [] }), [`--mcp-config=${studioMcp}`]);
+    assert.deepEqual(fs.readFileSync(path.join(dir, "claude", "args.txt"), "utf8").split("\n"), [`--mcp-config=${studioMcp}`, ""]);
+  });
+
   await check("a pane never waits on boot for more than the bound", async () => {
     // The bound's timer is unref'd so it never holds the app open; keep this
     // process alive while it runs.

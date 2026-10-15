@@ -276,6 +276,10 @@ function normalize(
       typeof src.claudeFollowsActiveAccount === "boolean"
         ? src.claudeFollowsActiveAccount
         : DEFAULT_PREFERENCES.claudeFollowsActiveAccount,
+    keepAgentsInYourChrome:
+      typeof src.keepAgentsInYourChrome === "boolean"
+        ? src.keepAgentsInYourChrome
+        : DEFAULT_PREFERENCES.keepAgentsInYourChrome,
     autoOpenPreview:
       typeof src.autoOpenPreview === "boolean"
         ? src.autoOpenPreview

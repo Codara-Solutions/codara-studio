@@ -47,6 +47,7 @@ import {
   normalizePiMcpServersDetailed,
 } from "./orchestration/pi-mcp-config";
 import { outsideWriteCapability } from "./outside-write-guard";
+import { separateBrowserLauncher } from "./separate-browser-tools";
 
 /** Explicit exception to the outside-write guard: an MCP server or agent setting the user edited in Settings. */
 const AGENT_CONFIG_EDIT = outsideWriteCapability("an MCP server or agent setting the user edited in Settings");
@@ -199,6 +200,8 @@ export function listAgentAssets(input: {
     AppSettings,
     "agentDisabledMcpIds" | "agentDisabledSkillIds" | "agentMcpCoraManagerIds" | "agentMcpPiWorkerIds"
   >;
+  /** "Keep agents in your Chrome" is on: mark the servers it turns off. */
+  separateBrowserToolsOff?: boolean;
 }): AgentAssetInventory {
   const cwd = input.cwd ?? "";
   const piScopes = {
@@ -208,10 +211,11 @@ export function listAgentAssets(input: {
   const skillSources = discoverSkillSources(cwd || homedir());
   const visibleSkillSources = cwd ? skillSources : skillSources.filter((source) => source.scope === "user");
   const truncated = visibleSkillSources.some((source) => source.truncated);
+  const offInCodara = input.separateBrowserToolsOff === true;
   return {
     mcp: cwd
-      ? sourcesToInventory(discoverMcpSources(cwd), input.settings.agentDisabledMcpIds, piScopes)
-      : sourcesToInventory(discoverMcpSources(homedir()), input.settings.agentDisabledMcpIds, piScopes)
+      ? sourcesToInventory(discoverMcpSources(cwd), input.settings.agentDisabledMcpIds, piScopes, offInCodara)
+      : sourcesToInventory(discoverMcpSources(homedir()), input.settings.agentDisabledMcpIds, piScopes, offInCodara)
         .filter((item) => item.scope === "user"),
     skills: sourcesToInventory(visibleSkillSources, input.settings.agentDisabledSkillIds),
     ...(truncated ? { skillsTruncated: true } : {}),
@@ -1212,10 +1216,23 @@ function mcpSourceReaders(source: Pick<SyncSource, "runtime" | "scope" | "path" 
   };
 }
 
+const OFF_IN_CODARA =
+  'Opens a separate Chrome window, so Claude Code and Codex sessions in Codara do not load it. Agents use your own Chrome through the Codara extension instead. Turn off "Keep agents in your Chrome" in Settings, Chrome extension, to allow it.';
+
+// The entries "Keep agents in your Chrome" turns off for the CLIs Codara
+// starts (separate-browser-tools.ts). Codara's own list only reaches Cora and
+// Pi workers, which the switch does not cover.
+function offInCodaraReason(source: SyncSource, config: McpServerConfig | null): string | null {
+  if (!config || config.enabled === false || source.runtime === "codara") return null;
+  if (source.runtime === "codex" && !/^[A-Za-z0-9_-]+$/.test(config.name)) return null;
+  return separateBrowserLauncher(config.command, config.args) ? OFF_IN_CODARA : null;
+}
+
 function sourcesToInventory(
   sources: SyncSource[],
   disabledSessionKeys: string[],
   piScopes?: { cora: string[]; worker: string[] },
+  markOffInCodara = false,
 ): AgentAssetInventoryItem[] {
   const disabled = new Set(disabledSessionKeys);
   const coraAssigned = new Set(piScopes?.cora ?? []);
@@ -1234,6 +1251,7 @@ function sourcesToInventory(
       if (piDefinition) piDefined.add(key);
       const compatibility = describeAssetCompatibility(source, skillDir, config);
       const skillDescription = source.skillDescriptions?.get(name);
+      const offInCodara = markOffInCodara ? offInCodaraReason(source, config) : null;
       const systemSkill = Boolean(skillDir && normalizePathForMatch(skillDir).includes(CODEX_SYSTEM_SKILL_ROOT));
       items.push({
         id: assetId({
@@ -1263,6 +1281,7 @@ function sourcesToInventory(
         mcpSummary: config ? describeMcpServer(config) : undefined,
         ...(readers ? { readBy: readers.readBy, ...(readers.note ? { readByNote: readers.note } : {}) } : {}),
         ...(source.project !== undefined ? { claudeLocalScope: true } : {}),
+        ...(offInCodara ? { offInCodara } : {}),
         ...(piDefinition ? { piDefinition: true } : {}),
         ...(skillDir ? { skillDir } : {}),
         ...(skillDescription ? { skillDescription } : {}),

@@ -1119,7 +1119,12 @@ export function registerIpc(): void {
     "agents:assets",
     async (_e, input?: { cwd?: string | null }) => {
       const { listAgentAssets } = await getAgentSync();
-      return listAgentAssets({ cwd: input?.cwd ?? null, settings: await loadSettings() });
+      const { keepAgentsInChromeEnabled } = await import("./browser/chrome/keep-agents-in-chrome");
+      return listAgentAssets({
+        cwd: input?.cwd ?? null,
+        settings: await loadSettings(),
+        separateBrowserToolsOff: keepAgentsInChromeEnabled(),
+      });
     },
   );
   handle(
@@ -1312,6 +1317,13 @@ export function registerIpc(): void {
       if (args.key === "claudeFollowsActiveAccount") {
         void import("./claude-follow/claude-follow-service")
           .then(({ applyClaudeFollowSetting }) => applyClaudeFollowSetting())
+          .catch(() => undefined);
+      }
+      // New sessions follow "Keep agents in your Chrome": the launch flags
+      // are rewritten with or without the browser tools it turns off.
+      if (args.key === "keepAgentsInYourChrome") {
+        void import("./browser/chrome/keep-agents-in-chrome")
+          .then(({ applyKeepAgentsInChrome }) => applyKeepAgentsInChrome())
           .catch(() => undefined);
       }
       if (args.key === "keepRunningInBackground" && _trayHook) {

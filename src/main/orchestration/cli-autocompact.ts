@@ -52,8 +52,9 @@ export async function ensureClaudeAutoCompactSettingsFile(
   return file;
 }
 
-// The hooks file writeIntegrationFiles keeps under <home>/integrations; absent
-// when hooks are off (no Python), in which case only the limit is sent.
+// The `--settings` file writeIntegrationFiles keeps under <home>/integrations
+// (hooks, and what "Keep agents in your Chrome" turns off); absent when it
+// has neither, in which case only the limit is sent.
 async function codaraClaudeHookSettings(home: string): Promise<Record<string, unknown> | null> {
   try {
     const parsed: unknown = JSON.parse(await readFile(join(home, "integrations", "claude", "settings.json"), "utf8"));

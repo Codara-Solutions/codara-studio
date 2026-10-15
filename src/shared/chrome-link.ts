@@ -54,3 +54,19 @@ export interface ChromeLinkState {
   pending: ChromeLinkPairing[];
   activity: ChromeLinkActivity[];
 }
+
+/**
+ * A browser tool in the user's own Claude Code or Codex config that starts a
+ * Chrome of its own (separate profile, "controlled by automated test
+ * software") instead of using theirs. While "Keep agents in your Chrome" is
+ * on, the sessions Codara starts get it turned off on their command line.
+ */
+export interface SeparateBrowserTool {
+  /** A Claude Code plugin, or an MCP server in a Claude Code or Codex config. */
+  kind: "claude-plugin" | "claude-mcp" | "codex-mcp";
+  /** The plugin id (name@marketplace) or the server name. */
+  name: string;
+  launcher: "chrome-devtools-mcp" | "playwright" | "puppeteer";
+  /** The config file it was found in. */
+  source: string;
+}

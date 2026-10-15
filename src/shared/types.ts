@@ -1309,6 +1309,11 @@ export interface AppPreferences {
   // uses the Claude account active in Codara (src/main/claude-follow). Only
   // an installed app sets it up; turning it off takes it out again.
   claudeFollowsActiveAccount?: boolean;
+  // When true (default), the Claude Code and Codex sessions Codara starts
+  // get the browser tools that open a separate Chrome turned off, so agents
+  // use the user's own Chrome through the Codara extension
+  // (src/main/separate-browser-tools.ts). Applies to new sessions.
+  keepAgentsInYourChrome?: boolean;
   // When true, a localhost dev URL sniffed from any terminal pane's stdout
   // auto-opens a preview tab. Default false: the detected-URL chip still shows
   // so the user can click to open, but Codara never yanks a tab open on its own
@@ -1499,6 +1504,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   glassChroma: 100,
   keepRunningInBackground: true,
   claudeFollowsActiveAccount: true,
+  keepAgentsInYourChrome: true,
   autoOpenPreview: false,
   linkOpenTarget: "system",
   copyBranchSetupCommandByRepo: {},
@@ -1962,6 +1968,10 @@ export interface AgentAssetInventoryItem {
   // MCP only: the entry lives in Claude's private per-project map in
   // ~/.claude.json (Claude's "local" scope) for the active workspace.
   claudeLocalScope?: boolean;
+  // MCP only: why the Claude Code and Codex sessions Codara starts do not
+  // load it ("Keep agents in your Chrome" turns off servers that open a
+  // separate Chrome). Absent when Codara leaves it on.
+  offInCodara?: string;
   // MCP only: this copy is the definition Cora and Pi workers connect with
   // when the name is defined in several files (the first readable, enabled
   // one in discovery order).

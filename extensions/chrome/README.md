@@ -79,6 +79,13 @@ tools it uses for its own browser tabs.
   named after the agent's Codara workspace. It joins a group the extension
   made with that title in the same window, or starts one. Agents never move
   a tab you shared and never add a tab to a group you made.
+- **Keep agents in your Chrome** (Settings > General > Chrome extension, on
+  by default) turns off, for the Claude Code and Codex sessions Codara
+  starts, the browser tools that open a separate Chrome window with its own
+  profile: the chrome-devtools-mcp and Playwright plugins, and MCP servers in
+  your configs that run chrome-devtools-mcp, `@playwright/mcp` or a
+  puppeteer server. Settings lists each one it found. Your own configs are
+  never changed, so the same CLIs outside Codara keep those tools.
 - Codara logs every tool call with the agent that made it (Settings > General
   > Chrome extension, and `<Codara home>/chrome-link/activity.jsonl`). The
   popup shows which agent used each tab last.

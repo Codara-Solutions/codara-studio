@@ -2,6 +2,7 @@ import React, { useState } from "react";
 
 import type { ChromeLinkBrowserState } from "@shared/chrome-link";
 import { SettingRow, SettingsSection } from "../settings/SettingsPrimitives";
+import KeepAgentsInChromeRow from "./KeepAgentsInChromeRow";
 import { formatWhen, useChromeLink } from "./useChromeLink";
 import "./chrome-link.css";
 
@@ -46,6 +47,8 @@ export default function ChromeLinkSection(): React.ReactElement | null {
       title="Chrome extension"
       description="Let any agent you run in Codara use tabs of your own Chrome, Edge, Brave or other Chromium browser, with your signed-in sessions. Agents see only the tabs you share from the extension's popup, never sites on its blocked list, and every action is logged below."
     >
+      <KeepAgentsInChromeRow />
+
       <SettingRow
         title="Connect a browser"
         stacked

@@ -126,3 +126,14 @@
   white-space: nowrap;
   color: var(--ink);
 }
+
+.chrome-off-tools {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-dim);
+  overflow-wrap: anywhere;
+}
+
+.chrome-off-tools .spark-mono {
+  color: var(--ink);
+}

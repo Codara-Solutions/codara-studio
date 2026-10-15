@@ -4,7 +4,7 @@
 
 import { ipcRenderer } from "electron";
 
-import type { ChromeLinkState } from "@shared/chrome-link";
+import type { ChromeLinkState, SeparateBrowserTool } from "@shared/chrome-link";
 
 export const chromeLinkApi = {
   state: (): Promise<ChromeLinkState> => ipcRenderer.invoke("chromeLink:state"),
@@ -12,6 +12,11 @@ export const chromeLinkApi = {
   deny: (id: string): Promise<boolean> => ipcRenderer.invoke("chromeLink:deny", id),
   /** Forget a paired browser; its token stops working. */
   disconnect: (linkId: string): Promise<boolean> => ipcRenderer.invoke("chromeLink:disconnect", linkId),
+  /**
+   * The browser tools in the user's Claude Code and Codex configs that open a
+   * separate Chrome; "Keep agents in your Chrome" turns them off in Codara.
+   */
+  separateBrowserTools: (): Promise<SeparateBrowserTool[]> => ipcRenderer.invoke("chromeLink:separateBrowserTools"),
   /** Copy the extension into Codara's home and return the folder for Load unpacked. */
   prepareExtension: (): Promise<string> => ipcRenderer.invoke("chromeLink:prepareExtension"),
   /** The same, and open the folder in the file manager. */
