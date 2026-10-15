@@ -182,6 +182,8 @@ function PreviewStack({ tabs, activeId, dockIndex, onUrlChange, workspaceId, wor
             // addressable without reaching through to the <webview> (which
             // sits below the address bar and is a smaller box).
             data-dock-content-id={docked ? t.id : undefined}
+            // Lets the jump palette focus this tab's page.
+            data-tab-content={t.id}
             aria-hidden={!visible}
             style={
               docked

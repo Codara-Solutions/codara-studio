@@ -1,4 +1,11 @@
 import { ctrl, mod, type Chord } from "./chord";
+import { IS_MAC } from "./platform";
+import {
+  jumpPaletteDefaultChord,
+  workspaceBackDefaultChord,
+  workspaceForwardDefaultChord,
+  workspaceIndexDefaultChord,
+} from "./workspace-jump-chords";
 
 // The command registry. Every keyboard-triggerable action is an entry here:
 // an `id` for handler dispatch, a human label for the cheat sheet / settings
@@ -13,6 +20,10 @@ import { ctrl, mod, type Chord } from "./chord";
 export type CommandId =
   | "shortcuts.open"
   | "runSwitcher.open"
+  | "jump.open"
+  | "workspace.selectByIndex"
+  | "workspace.back"
+  | "workspace.forward"
   | "settings.open"
   | "capabilities.open"
   | "automations.open"
@@ -83,6 +94,10 @@ export type Command = {
   // `fixed` commands where the chord shape can't be expressed as a fixed
   // key (e.g. variable digit). The dispatcher calls this directly.
   customMatch?: (e: KeyboardEvent) => boolean;
+  // The chord stands for a range: its modifiers with any digit 1 to 9 (the
+  // stored key is a representative "1"). Unlike `fixed`, the modifiers can be
+  // rebound; see digitRangeMatches in ./bindings.ts.
+  digitRange?: boolean;
 };
 
 export const COMMAND_GROUPS: CommandGroup[] = [
@@ -110,6 +125,34 @@ export const COMMANDS: Command[] = [
     group: "Navigation",
     // Mod+K — quick access to recent Cora work in registered workspaces.
     defaultChords: [mod("k")],
+  },
+  // The jump palette and workspace navigation. Per-platform defaults and why:
+  // ./workspace-jump-chords.ts. On macOS Ctrl+1..9 is the workspace range, so
+  // view.selectByIndex answers only Cmd+digit there.
+  {
+    id: "jump.open",
+    label: "Jump to a workspace, tab or agent",
+    group: "Navigation",
+    defaultChords: [jumpPaletteDefaultChord(IS_MAC)],
+  },
+  {
+    id: "workspace.selectByIndex",
+    label: "Switch to workspace 1 to 9",
+    group: "Navigation",
+    defaultChords: [workspaceIndexDefaultChord(IS_MAC)],
+    digitRange: true,
+  },
+  {
+    id: "workspace.back",
+    label: "Back to the previous workspace",
+    group: "Navigation",
+    defaultChords: [workspaceBackDefaultChord(IS_MAC)],
+  },
+  {
+    id: "workspace.forward",
+    label: "Forward to the next workspace",
+    group: "Navigation",
+    defaultChords: [workspaceForwardDefaultChord(IS_MAC)],
   },
   {
     id: "settings.open",
@@ -251,7 +294,7 @@ export const COMMANDS: Command[] = [
     defaultChords: [mod("1")],
     fixed: true,
     customMatch: (e) =>
-      (e.ctrlKey || e.metaKey) &&
+      (IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey || e.metaKey) &&
       !e.shiftKey &&
       !e.altKey &&
       /^[1-9]$/.test(e.key),

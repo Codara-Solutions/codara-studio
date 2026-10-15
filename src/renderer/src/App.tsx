@@ -144,7 +144,7 @@ import {
 import type { CoraView } from "./components/chat/cora-view";
 import { basename } from "./path-utils";
 import { useGlobalShortcuts, type ShortcutHandlers } from "./shortcuts/useGlobalShortcuts";
-import { buildBindingTable, type BindingTable } from "./shortcuts/bindings";
+import { buildBindingTable, digitFromEvent, type BindingTable } from "./shortcuts/bindings";
 import { chordToHint } from "./shortcuts/chord";
 import type { CommandId } from "./shortcuts/commands";
 import { isRecording } from "./shortcuts/recording";
@@ -173,6 +173,8 @@ import { isLiveOnlyEvent } from "@shared/live-events";
 import type { SettingsTab } from "./components/SettingsDialog";
 import { isAppTearingDown, markAppTearingDown } from "./lib/app-lifecycle";
 import { requestEditorReveal } from "./components/editor-cm/reveal";
+import { workspaceRailSequence, worktreeSourceWorkspace } from "./components/jump/jump-model";
+import { useWorkspaceJump } from "./components/jump/useWorkspaceJump";
 import {
   buildAwayDigest,
   captureAwayDigestBaseline,
@@ -207,6 +209,7 @@ const SessionInspector = lazy(() => import("./components/SessionInspector"));
 const AgentCapabilitiesDialog = lazy(loadAgentCapabilitiesDialog);
 const WorkerSessionPicker = lazy(() => import("./components/WorkerSessionPicker"));
 const RunSwitcher = lazy(() => import("./components/RunSwitcher"));
+const JumpPalette = lazy(() => import("./components/jump/JumpPalette"));
 const CreateCopyDialog = lazy(() => import("./components/CreateCopyDialog"));
 const CopyBranchDeleteDialog = lazy(() =>
   import("./components/CopyBranchDialogs").then((module) => ({
@@ -561,6 +564,8 @@ export default function App() {
   // picker has zero rendering cost; RunSwitcher drops orphaned workspace
   // history and caps its rows.
   const [runSwitcherOpen, setRunSwitcherOpen] = useState(false);
+  // Jump palette (jump.open): mounted only while open, like the run switcher.
+  const [jumpPaletteOpen, setJumpPaletteOpen] = useState(false);
   // Single "While you were away" digest surfaced on window focus-after-away.
   // Holds the snapshot computed at focus time; null when nothing landed or the
   // user dismissed it.
@@ -4099,6 +4104,63 @@ export default function App() {
     [workspaces],
   );
 
+  // ── Jump palette and workspace navigation ───────────────────────────────
+  const workspaceJump = useWorkspaceJump({
+    activeWorkspaceId: activeId,
+    workspaces,
+    tabsWorkspaceId: tabs.tabsWorkspaceId,
+    layoutTabs: tabs.tabs,
+    activeTabId: tabs.activeId,
+    activePaneId: tabs.activeTab?.kind === "terminal" ? tabs.activeTab.activePaneId : null,
+    activateWorkspace: handleActivateWorkspace,
+    setActiveTab: tabs.setActiveTab,
+    focusTerminalTarget,
+  });
+
+  // Workspace N is the Nth row the rail shows, folders flattened in place.
+  const handleSelectWorkspaceByIndex = useCallback(
+    (event: KeyboardEvent) => {
+      const digit = digitFromEvent(event);
+      if (digit === null) return;
+      const target = workspaceRailSequence(
+        workspacesRef.current,
+        workspaceGroupsRef.current,
+        workspaceRailOrderRef.current,
+      )[digit - 1];
+      if (target && target.id !== activeIdRef.current) handleActivateWorkspace(target.id);
+    },
+    [handleActivateWorkspace],
+  );
+
+  // "Create worktree <name>" runs the same creation as the rail's dialog; a
+  // failure opens that dialog, which shows git's message and lets the user
+  // pick another name or branch. One creation at a time, as in the dialog:
+  // two in flight would each save the workspace list without the other's.
+  const createCopyBusyRef = useRef(createCopyBusy);
+  createCopyBusyRef.current = createCopyBusy;
+  const jumpWorktreeBusyRef = useRef(false);
+  const handleJumpCreateWorktree = useCallback(
+    (name: string) => {
+      setJumpPaletteOpen(false);
+      const source = worktreeSourceWorkspace(workspacesRef.current, activeIdRef.current);
+      if (!source) return;
+      if (jumpWorktreeBusyRef.current || createCopyBusyRef.current) {
+        emitLocalToast("A worktree is already being created", "Try again once it is ready.", "warning");
+        return;
+      }
+      jumpWorktreeBusyRef.current = true;
+      emitLocalToast(`Creating worktree ${name}`, "Codara switches to it as soon as it is ready.");
+      void createCopyBranchWs(source, { newBranch: name })
+        .catch(() => {
+          setCreateCopyDialogWs(source);
+        })
+        .finally(() => {
+          jumpWorktreeBusyRef.current = false;
+        });
+    },
+    [createCopyBranchWs],
+  );
+
   // Stable identity: an inline arrow here would defeat WorkspaceRail's
   // React.memo on both rails.
   const handleCreateRemote = useCallback((groupId?: string) => {
@@ -5380,6 +5442,14 @@ export default function App() {
     () => ({
       "shortcuts.open": () => setShortcutsOpen((open) => !open),
       "runSwitcher.open": () => setRunSwitcherOpen((open) => !open),
+      "jump.open": () => setJumpPaletteOpen((open) => !open),
+      "workspace.selectByIndex": handleSelectWorkspaceByIndex,
+      "workspace.back": () => {
+        workspaceJump.back();
+      },
+      "workspace.forward": () => {
+        workspaceJump.forward();
+      },
       "settings.open": () => {
         setSettingsOpen(true);
         window.dispatchEvent(new CustomEvent("spark:open-settings"));
@@ -5655,8 +5725,10 @@ export default function App() {
       handleToggleRight,
       activeVisibleTabId,
       dispatchBrowserPoint,
+      handleSelectWorkspaceByIndex,
       tabs,
       visibleWorkbenchTabs,
+      workspaceJump,
     ],
   );
 
@@ -5672,6 +5744,17 @@ export default function App() {
     isDisabled: (id, event) => {
       if (isRecording()) return true;
       if (onboardingOpen && document.querySelector(".onboarding-dialog")) return true;
+      // The open jump palette answers Mod+1..6 itself, and switching
+      // workspaces behind it would leave its rows describing the old one.
+      if (
+        jumpPaletteOpen &&
+        (id === "view.selectByIndex" ||
+          id === "workspace.selectByIndex" ||
+          id === "workspace.back" ||
+          id === "workspace.forward")
+      ) {
+        return true;
+      }
       // The terminal split chords only act on terminal tabs; swallowing them
       // at capture phase elsewhere would kill surface-local bindings that
       // share the chord (the whiteboard's Ctrl+D duplicate).
@@ -6489,6 +6572,44 @@ export default function App() {
             <WorkerSessionPicker
               request={workerSessionPicker}
               onClose={() => setWorkerSessionPicker(null)}
+            />
+          </Suspense>
+        ) : null}
+
+        {jumpPaletteOpen ? (
+          <Suspense fallback={null}>
+            <JumpPalette
+              sources={{
+                workspaces: workspaceRailSequence(workspaces, workspaceGroups, workspaceRailOrder, {
+                  includeCollapsed: true,
+                }),
+                // The loaded layout last: it is the live one if a stale copy
+                // of the same workspace is still among the inactive ones.
+                layouts: [
+                  ...tabs.inactiveWorkspaceLayouts.map((layout) => ({
+                    workspaceId: layout.workspaceId,
+                    tabs: layout.tabs,
+                    activeTabId: layout.activeId,
+                  })),
+                  ...(tabs.tabsWorkspaceId
+                    ? [{ workspaceId: tabs.tabsWorkspaceId, tabs: tabs.tabs, activeTabId: tabs.activeId }]
+                    : []),
+                ],
+                activeWorkspaceId: activeId,
+                branchByWorkspaceId,
+                toneByWorkspaceId,
+                attention: terminalAttention,
+                detectedAgents: terminalAgents,
+                recency: workspaceJump.recency(),
+              }}
+              worktreeSource={worktreeSourceWorkspace(workspaces, activeId, branchByWorkspaceId)}
+              chordHint={hintForCommand(bindingTable, "jump.open")}
+              onClose={() => setJumpPaletteOpen(false)}
+              onJump={(target) => {
+                setJumpPaletteOpen(false);
+                workspaceJump.jumpTo(target);
+              }}
+              onCreateWorktree={handleJumpCreateWorktree}
             />
           </Suspense>
         ) : null}

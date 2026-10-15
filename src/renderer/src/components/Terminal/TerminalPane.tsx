@@ -192,6 +192,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
     return (
       <div
         className="codara-terminal-session"
+        // Lets the jump palette put the keyboard in this exact pane.
+        data-pane-id={sessionId}
         style={{
           display: "flex",
           flex: 1,

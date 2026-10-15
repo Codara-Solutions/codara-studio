@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo } from "react";
 import { COMMAND_GROUPS } from "./commands";
-import { buildBindingTable, type BindingTable } from "./bindings";
+import { bindingChips, buildBindingTable, type BindingTable } from "./bindings";
 import { chordToDisplay } from "./chord";
 import { usePreferences } from "../preferences/usePreferences";
 
@@ -165,10 +165,7 @@ export default function ShortcutsDialog({ onClose }: ShortcutsDialogProps) {
                     // shift-equivalent chords — showing both would be
                     // redundant). "Switch tab 1–9" gets a special label
                     // because the chord shape is a range.
-                    const chips =
-                      b.command.id === "view.selectByIndex"
-                        ? [...chordToDisplay(b.chords[0]).slice(0, -1), "1…9"]
-                        : chordToDisplay(b.chords[0]);
+                    const chips = bindingChips(b, chordToDisplay);
                     return (
                       <li
                         key={b.command.id}
