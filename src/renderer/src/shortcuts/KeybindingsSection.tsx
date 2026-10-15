@@ -14,6 +14,7 @@ import { chordFromEvent, chordToDisplay, type Chord } from "./chord";
 import { COMMAND_GROUPS, type CommandId } from "./commands";
 import { IS_MAC } from "./platform";
 import { setRecording } from "./recording";
+import { DangerRow, SettingsSection } from "../components/settings/SettingsPrimitives";
 
 type SetPreferenceFn = <K extends PrefKey>(
   key: K,
@@ -104,11 +105,6 @@ export default function KeybindingsSection({
             onChange={(event) => setFilter(event.currentTarget.value)}
           />
         </span>
-        <ResetAllButton
-          disabled={customizedCount === 0}
-          count={customizedCount}
-          onClick={resetAll}
-        />
       </div>
 
       {visibleGroups.length === 0 ? (
@@ -123,13 +119,13 @@ export default function KeybindingsSection({
       ) : null}
 
       {visibleGroups.map(({ group, items }) => (
-        <section key={group} className="st-section">
+        <section key={group} className="st-section" aria-label={group}>
           <div className="st-section__head">
             <div className="st-section__titles">
               <h3 className="st-section__title">{group}</h3>
             </div>
           </div>
-          <ul className="st-rows st-kb-list">
+          <ul className="st-card st-kb-list">
             {items.map((binding) => (
               <Row
                 key={binding.command.id}
@@ -155,6 +151,24 @@ export default function KeybindingsSection({
           </ul>
         </section>
       ))}
+
+      {query ? null : (
+        <SettingsSection title="Reset">
+          <DangerRow
+            title="Reset all shortcuts"
+            desc={
+              customizedCount === 0
+                ? "Every shortcut is at its default."
+                : `${customizedCount} changed shortcut${customizedCount === 1 ? "" : "s"} go back to the default keys.`
+            }
+            action="Reset all"
+            confirmLabel="Confirm reset"
+            disabled={customizedCount === 0}
+            buttonTitle={customizedCount === 0 ? "No custom bindings" : undefined}
+            onConfirm={() => void resetAll()}
+          />
+        </SettingsSection>
+      )}
     </>
   );
 }
@@ -345,41 +359,6 @@ function Recorder({
         </button>
       ) : null}
     </div>
-  );
-}
-
-function ResetAllButton({
-  count,
-  disabled,
-  onClick,
-}: {
-  count: number;
-  disabled: boolean;
-  onClick: () => void;
-}) {
-  // Two-step reset: first click arms, second click confirms. Disarms on
-  // mouse leave / blur, so a stray click never wipes the custom bindings.
-  const [armed, setArmed] = useState(false);
-  return (
-    <button
-      type="button"
-      onClick={() => {
-        if (disabled) return;
-        if (!armed) {
-          setArmed(true);
-          return;
-        }
-        setArmed(false);
-        onClick();
-      }}
-      onMouseLeave={() => setArmed(false)}
-      onBlur={() => setArmed(false)}
-      disabled={disabled}
-      title={disabled ? "No custom bindings" : `Reset ${count} custom binding${count === 1 ? "" : "s"}`}
-      className={`spark-btn${armed ? " is-danger" : " st-btn-quiet"}`}
-    >
-      {armed ? "Confirm reset" : `Reset all${count > 0 ? ` (${count})` : ""}`}
-    </button>
   );
 }
 

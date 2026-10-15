@@ -29,11 +29,13 @@ function baseName(path: string): string {
 
 type Editing = { id: string; isNew: boolean } | null;
 
+// The list is a settings card (.st-card draws the hairlines between rows),
+// so rows carry only their own padding.
 const styles = {
-  list: { display: "flex", flexDirection: "column", margin: 0, padding: 0, listStyle: "none" },
-  row: { display: "flex", alignItems: "center", gap: 12, padding: "11px 0", borderTop: "1px solid var(--st-line)", minWidth: 0 },
-  editor: { padding: "14px 0", borderTop: "1px solid var(--st-line)" },
-  newEditor: { padding: "4px 0 14px" },
+  list: { margin: 0, padding: 0, listStyle: "none" },
+  row: { display: "flex", alignItems: "center", gap: 12, padding: "11px 16px", minWidth: 0 },
+  editor: { padding: "14px 16px" },
+  newEditor: { padding: "14px 16px" },
   glyph: { display: "inline-flex", flex: "none", color: "var(--muted)" },
   text: { display: "flex", flexDirection: "column", gap: 2, flex: 1, minWidth: 0 },
   title: { color: "var(--ink)", fontSize: 13, fontWeight: 500 },
@@ -128,7 +130,7 @@ export default function QuickCommandsSettings() {
         ) : null}
 
         {editing?.isNew && draftNew ? (
-          <div style={styles.newEditor}>
+          <div className="st-card" style={styles.newEditor}>
             <QuickCommandForm
               key={draftNew.id}
               initial={draftNew}
@@ -148,20 +150,22 @@ export default function QuickCommandsSettings() {
         ) : null}
 
         {commands.length === 0 && !editing?.isNew ? (
-          <div className="st-empty">
-            <span className="st-empty__title">No quick commands yet</span>
-            <span className="st-empty__body">
-              Save a shell command such as npm test, or a prompt for an agent such as a review request. {"{branch}"} and {"{cwd}"} fill in the git branch and the folder.
-            </span>
+          <div className="st-card">
+            <div className="st-empty">
+              <span className="st-empty__title">No quick commands yet</span>
+              <span className="st-empty__body">
+                Save a shell command such as npm test, or a prompt for an agent such as a review request. {"{branch}"} and {"{cwd}"} fill in the git branch and the folder.
+              </span>
+            </div>
           </div>
         ) : null}
 
         {commands.length > 0 ? (
-          <ul aria-label="Saved quick commands" style={styles.list}>
+          <ul aria-label="Saved quick commands" className="st-card" style={styles.list}>
             {commands.map((command, index) => {
               if (editing?.id === command.id && !editing.isNew) {
                 return (
-                  <li key={command.id} style={index === 0 ? { ...styles.editor, borderTop: "none" } : styles.editor}>
+                  <li key={command.id} style={styles.editor}>
                     <QuickCommandForm
                       initial={command}
                       mode="edit"
@@ -182,7 +186,7 @@ export default function QuickCommandsSettings() {
               }
               const body = command.kind === "shell" ? command.command : command.prompt;
               return (
-                <li key={command.id} style={index === 0 ? { ...styles.row, borderTop: "none" } : styles.row} data-quick-command={command.id}>
+                <li key={command.id} style={styles.row} data-quick-command={command.id}>
                   <span aria-hidden style={styles.glyph}>
                     <KindGlyph command={command} size={13} />
                   </span>

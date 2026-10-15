@@ -9,6 +9,7 @@ import {
   EmptyState,
   InlineMessage,
   SettingRow,
+  SettingsCard,
   SettingsSection,
   SwitchTrack,
 } from "./settings/SettingsPrimitives";
@@ -120,7 +121,7 @@ export default function RemoteAccessSettings() {
       <SettingsSection
         title="Connection"
         anchor="Allow remote access"
-        description="Let the Codara phone app reach this computer, on your wifi or from anywhere. Devices pair by QR code and can be revoked at any time."
+        description="Let the Codara phone app reach this computer, on your wifi or from anywhere. Devices pair by QR code, and you can revoke them at any time."
       >
         <SettingRow
           title="Allow remote access"
@@ -169,24 +170,26 @@ export default function RemoteAccessSettings() {
 
       <SettingsSection
         title="Paired devices"
-        description="Every paired device can open terminals on this computer. Revoke one and its live sessions end immediately."
+        description="A paired device can open terminals on this computer. Revoking one ends its live sessions at once."
         plain
       >
         {devices.length === 0 ? (
-          <EmptyState
-            icon={
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="7" y="3" width="10" height="18" rx="2.5" />
-                <line x1="10.5" y1="17.5" x2="13.5" y2="17.5" />
-              </svg>
-            }
-            title="No paired devices yet."
-            body={
-              enabled
-                ? "Choose Pair a device above, then scan the code with the Codara app."
-                : "Turn on remote access above, then pair your phone by scanning a QR code."
-            }
-          />
+          <SettingsCard>
+            <EmptyState
+              icon={
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="7" y="3" width="10" height="18" rx="2.5" />
+                  <line x1="10.5" y1="17.5" x2="13.5" y2="17.5" />
+                </svg>
+              }
+              title="No paired devices yet."
+              body={
+                enabled
+                  ? "Choose Pair a device above, then scan the code with the Codara app."
+                  : "Turn on remote access above, then pair your phone by scanning a QR code."
+              }
+            />
+          </SettingsCard>
         ) : (
           <div className="st-list">
             {devices.map((device) => (
