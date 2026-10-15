@@ -12,6 +12,7 @@ import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Breadcrumb } from "@shared/diagnostics";
 import { writeFileAtomic } from "../fs-atomic";
+import { redactText, type RedactionContext } from "./redact";
 
 export const BREADCRUMB_CAPACITY = 200;
 const MAX_CATEGORY_CHARS = 40;
@@ -60,6 +61,9 @@ export function makeBreadcrumb(category: string, message: string, now: number): 
 let ring = createBreadcrumbRing(BREADCRUMB_CAPACITY);
 const listeners = new Set<(crumb: Breadcrumb) => void>();
 let persistDir: string | null = null;
+let persistRedaction: RedactionContext = { homeDirs: [] };
+// The ring is saved every few seconds; each line is redacted once.
+const redactedCrumbs = new WeakMap<Breadcrumb, Breadcrumb>();
 let persistTimer: NodeJS.Timeout | null = null;
 let writing: Promise<void> = Promise.resolve();
 const sessionStartedAt = Date.now();
@@ -100,12 +104,27 @@ export function previousBreadcrumbsFile(dir: string): string {
   return join(dir, "breadcrumbs.previous.json");
 }
 
+// The file stays on disk after the session and users attach it to reports, so
+// it gets the same redaction as the export. The in-memory ring is left as is.
+function redactedCrumb(crumb: Breadcrumb): Breadcrumb {
+  let safe = redactedCrumbs.get(crumb);
+  if (!safe) {
+    safe = {
+      ...crumb,
+      category: redactText(crumb.category, persistRedaction),
+      message: redactText(crumb.message, persistRedaction),
+    };
+    redactedCrumbs.set(crumb, safe);
+  }
+  return safe;
+}
+
 function sessionBody(): string {
   return JSON.stringify({
     pid: process.pid,
     startedAt: sessionStartedAt,
     savedAt: Date.now(),
-    breadcrumbs: ring.list(),
+    breadcrumbs: ring.list().map(redactedCrumb),
   });
 }
 
@@ -115,8 +134,9 @@ function sessionBody(): string {
  * after the Codara home exists (creating it earlier would defeat the legacy
  * home rename in codara-home.ts).
  */
-export function startBreadcrumbPersistence(dir: string): void {
+export function startBreadcrumbPersistence(dir: string, redaction?: RedactionContext): void {
   persistDir = dir;
+  if (redaction) persistRedaction = redaction;
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
   } catch {
@@ -167,6 +187,7 @@ export function flushBreadcrumbsSync(): void {
 export function _resetBreadcrumbsForTest(): void {
   ring = createBreadcrumbRing(BREADCRUMB_CAPACITY);
   persistDir = null;
+  persistRedaction = { homeDirs: [] };
   if (persistTimer) clearTimeout(persistTimer);
   persistTimer = null;
   listeners.clear();

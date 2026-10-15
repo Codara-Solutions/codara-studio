@@ -154,7 +154,7 @@ export function startDiagnostics(): void {
   const home = codaraHome();
   const dir = diagnosticsDir(home);
   try {
-    startBreadcrumbPersistence(dir);
+    startBreadcrumbPersistence(dir, redactionContext());
     crashReporterOn = startCrashReporter(home);
     startHangWatchdog(dir, hangWatchdogSettings(process.env, inspector.url() !== undefined));
     syncDialogsHeld = holdDuringSyncDialogs(dialog);

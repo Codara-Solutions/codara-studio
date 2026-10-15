@@ -124,6 +124,29 @@ async function main() {
     crumbs._resetBreadcrumbsForTest();
   });
 
+  await check("the saved file is redacted like the export; the in-memory ring is not", async () => {
+    crumbs._resetBreadcrumbsForTest();
+    const dir = path.join(TMP, "crumbs-redacted");
+    const home = process.platform === "win32" ? "C:\\Users\\ann" : "/home/ann";
+    crumbs.startBreadcrumbPersistence(dir, { homeDirs: [home] });
+    const token = "sk-ant-api03-abcdefghijklmnop1234";
+    crumbs.recordBreadcrumb("auth", `login failed for ann@example.com with ${token}`);
+    crumbs.recordBreadcrumb("fs", `opened ${home}/project/file.txt password=hunter2hunter2`);
+    await crumbs.persistBreadcrumbsNow();
+    const text = fs.readFileSync(crumbs.breadcrumbsFile(dir), "utf8");
+    for (const secret of [token, "ann@example.com", "hunter2hunter2", home]) {
+      assert.ok(!text.includes(secret), `${secret} must not be in the saved file`);
+    }
+    const saved = JSON.parse(text);
+    assert.match(saved.breadcrumbs[0].message, /\[email\]/);
+    assert.match(saved.breadcrumbs[0].message, /\[redacted\]/);
+    assert.match(saved.breadcrumbs[1].message, /\[redacted\]/);
+    crumbs.flushBreadcrumbsSync();
+    assert.ok(!fs.readFileSync(crumbs.breadcrumbsFile(dir), "utf8").includes(token), "the quit-time write is redacted too");
+    assert.ok(crumbs.recentBreadcrumbs()[0].message.includes(token), "the ring keeps the original for the export");
+    crumbs._resetBreadcrumbsForTest();
+  });
+
   // ── Crash dumps ────────────────────────────────────────────────────────────
   const dumpRoot = path.join(TMP, "crash-dumps");
   const MB = 1024 * 1024;
