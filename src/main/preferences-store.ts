@@ -22,6 +22,7 @@ import {
 } from "@shared/types";
 import { normalizeKeepAwakeMode } from "@shared/keep-awake";
 import { normalizeQuickCommands, normalizeTerminalRightClick } from "@shared/quick-commands";
+import { normalizeAgentHibernationMinutes } from "@shared/agent-hibernation";
 import { writeFileAtomic } from "./fs-atomic";
 import { codaraHome } from "./codara-home";
 
@@ -321,6 +322,9 @@ function normalize(
       typeof src.restoreTerminalOutput === "boolean"
         ? src.restoreTerminalOutput
         : DEFAULT_PREFERENCES.restoreTerminalOutput,
+    // Agent hibernation: one of the Settings presets (0 = off); anything else
+    // falls back to the default.
+    agentHibernationMinutes: normalizeAgentHibernationMinutes(src.agentHibernationMinutes),
     // Opt-in: the phone Remote Access listener. Off for absent/invalid
     // values, so an existing preference file never turns a network listener
     // on by surprise.

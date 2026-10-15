@@ -190,6 +190,10 @@ interface Session {
   // SIGHUP, which surfaces as exitCode 0 + signal 1, so exit status alone can
   // never make that distinction.
   sanctioned: boolean;
+  // Set by hibernate() before an idle agent pane is stopped to save memory.
+  // Carried out as PtyExitInfo.hibernated so the renderer paints a sleeping
+  // pane that resumes on return instead of an exit line.
+  hibernated?: boolean;
   nativeCodexProfileId?: string;
   releaseNativeCodexProfileLease?: () => void;
   nativeClaudeProfileId?: string;
@@ -1092,7 +1096,7 @@ async function doSpawnRemote(
       s.exited = true;
       flushDataNow(s);
       if (s.webContents && !s.webContents.isDestroyed()) {
-        s.webContents.send(s.exitChannel, { exitCode, signal, sanctioned: s.sanctioned });
+        s.webContents.send(s.exitChannel, exitPayload(s, exitCode, signal));
       }
       if (!strandedBindings.has(opts.id)) {
         stashWebContents(opts.id, s);
@@ -1109,7 +1113,7 @@ async function doSpawnRemote(
     exitWaiters.delete(opts.id);
     for (const w of waiters) {
       try {
-        w({ exitCode, signal, sanctioned: s.sanctioned });
+        w(exitPayload(s, exitCode, signal));
       } catch {
         /* ignore */
       }
@@ -1596,7 +1600,7 @@ function doSpawn(
       s.exited = true;
       flushDataNow(s);
       if (s.webContents && !s.webContents.isDestroyed()) {
-        s.webContents.send(s.exitChannel, { exitCode, signal, sanctioned: s.sanctioned });
+        s.webContents.send(s.exitChannel, exitPayload(s, exitCode, signal));
       }
       // Stash for a potential same-id respawn (mode-flip flow). If the kill
       // path already stashed, that wins — overwriting with stale tail would
@@ -1619,7 +1623,7 @@ function doSpawn(
     exitWaiters.delete(opts.id);
     for (const w of waiters) {
       try {
-        w({ exitCode, signal, sanctioned: s.sanctioned });
+        w(exitPayload(s, exitCode, signal));
       } catch {
         /* ignore */
       }
@@ -2428,6 +2432,12 @@ function markSanctioned(id: string): void {
   if (s) s.sanctioned = true;
 }
 
+function exitPayload(s: Session, exitCode: number, signal: number | undefined): PtyExitInfo {
+  return s.hibernated
+    ? { exitCode, signal, sanctioned: s.sanctioned, hibernated: true }
+    : { exitCode, signal, sanctioned: s.sanctioned };
+}
+
 // `sanctioned` marks a Codara-initiated teardown (see PtyExitInfo). Renderer
 // pane closes leave it unset: closing a worker's pane kills a worker Cora did
 // not stop, which is exactly the unsanctioned death the chip must name.
@@ -2806,6 +2816,59 @@ export async function disposeNativeCliRuntimeGraceful(
   }
   await disposeSessionsGraceful(ids, maxWaitMs);
   return { closedSessionCount: ids.length };
+}
+
+/** What agent hibernation (src/main/agent-hibernation.ts) reads about a pane. */
+export interface HibernationSessionInfo {
+  generationId: string;
+  pid: number;
+  remote: boolean;
+  createdAt: number;
+  lastInputAt: number;
+  lastOutputAt: number;
+  // The pane's POSIX terminal (/dev/pts/N), null on Windows or when unknown.
+  ttyPath: string | null;
+}
+
+export function hibernationSessionInfo(id: string): HibernationSessionInfo | null {
+  const s = sessions.get(id);
+  if (!s || s.disposed || s.exitEmitted || pendingKills.has(id)) return null;
+  const ttyPath = (s.pty as { _pty?: unknown })._pty;
+  return {
+    generationId: s.generationId,
+    pid: s.pty.pid,
+    remote: s.pty.pid === 0 || isRemotePath(s.cwd),
+    createdAt: s.createdAt,
+    lastInputAt: s.lastInputAt,
+    lastOutputAt: s.lastOutputAt,
+    ttyPath: typeof ttyPath === "string" && /^\/dev\/(?:pts\/\d+|tty[\w.-]+)$/.test(ttyPath) ? ttyPath : null,
+  };
+}
+
+/**
+ * Stop one idle agent pane on Codara's behalf. Same graceful teardown as an
+ * account switch, so the CLI gets time to flush its transcript, but the exit
+ * carries `hibernated` and the renderer keeps the pane as a sleeping one.
+ * The generation fence refuses a pane that was respawned since it was judged.
+ */
+export async function hibernate(
+  id: string,
+  expectedGenerationId: string,
+  maxWaitMs = 3000,
+): Promise<boolean> {
+  const s = sessions.get(id);
+  if (
+    !s ||
+    s.generationId !== expectedGenerationId ||
+    s.disposed ||
+    s.exitEmitted ||
+    pendingKills.has(id)
+  ) {
+    return false;
+  }
+  s.hibernated = true;
+  await disposeSessionsGraceful([id], maxWaitMs);
+  return true;
 }
 
 export async function disposeAllGraceful(maxWaitMs = 1500): Promise<void> {

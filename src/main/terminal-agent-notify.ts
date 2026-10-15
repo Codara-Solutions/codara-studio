@@ -24,6 +24,7 @@ import { nudgeUsageRefresh } from "./orchestration/usage-activity-refresh";
 import { signalAgentBoardChanged } from "./agent-board-signal";
 import type { TerminalAgentActivity } from "@shared/agent-board";
 import type { RuntimeState, TerminalAgentStatePayload } from "@shared/types";
+import type { AgentHibernationEvidence } from "@shared/agent-hibernation";
 
 // Terminal-agent notifier: tells the user when a Claude Code, Codex, Grok
 // or Pi CLI they ran in a NORMAL terminal pane finished a turn, or stopped to
@@ -207,6 +208,9 @@ interface PaneWatcher {
   // since; null otherwise.
   screenIdleSince: number | null;
   lastUserInputAt: number;
+  // The last of those inputs that was a submit (Enter). A key after it means
+  // text may sit unsent in the agent's input box (agent hibernation).
+  lastSubmitAt: number;
   lastInterruptKeyAt: number;
   lastHookEventAt: number;
   // Claude tool calls announced by PreToolUse and not yet answered by
@@ -356,6 +360,7 @@ export function syncTerminalNotifyPanes(input: {
       completedTurnPending: false,
       screenIdleSince: null,
       lastUserInputAt: 0,
+      lastSubmitAt: 0,
       lastInterruptKeyAt: 0,
       lastHookEventAt: 0,
       pendingToolCalls: 0,
@@ -418,18 +423,26 @@ function attach(w: PaneWatcher): void {
     }
   });
   w.offExit = pty.onExit(w.paneId, (info) => {
+    // Codara stopped this idle agent to save memory (agent hibernation). It
+    // did not stop on its own and nothing finished: no alert, no chip state.
+    // The watcher re-attaches below so the resumed agent is tracked again.
+    const hibernated = info.hibernated === true;
     // Only a real non-zero exit STATUS is a crash worth alerting on. A missing
     // code (pty killed on teardown, host suspend, signal death) tells the user
     // nothing; the renderer's own pty:exit handler paints the red chip.
     const exitCode = typeof info.exitCode === "number" ? info.exitCode : null;
-    if (!w.excluded && !w.disposing && w.runtime && exitCode !== null && exitCode !== 0) {
+    if (!hibernated && !w.excluded && !w.disposing && w.runtime && exitCode !== null && exitCode !== 0) {
       deliver(w, "failed", { body: `The terminal exited with code ${exitCode}.` });
     }
     if (w.disposing) {
       removeWatcher(w.paneId);
       return;
     }
-    emitPaneState(w, info.exitCode === 0 ? "done" : "error");
+    if (hibernated) {
+      tanLog(`pane=${w.paneId} hibernated`);
+    } else {
+      emitPaneState(w, info.exitCode === 0 ? "done" : "error");
+    }
 
     // Keep the watcher registration alive across a same-id respawn
     // (useTerminalSession can auto-resume a live agent after a PTY death).
@@ -847,6 +860,7 @@ export function noteTerminalUserInput(paneId: string, data?: string): void {
   // Any key while a prompt is up is the user answering it.
   if (w.state === "blocked") rearm(paneSourceKey(paneId));
   if (data !== undefined && !isSubmit(data)) return;
+  w.lastSubmitAt = now;
   // Enter while a turn runs queues a message or answers a dialog; the turn
   // already exists. A submit that started no work (an empty prompt, a local
   // slash command, a turn the user stopped) leaves an idle turn behind, and
@@ -1216,6 +1230,31 @@ export function noteTerminalWillDispose(paneId: string): void {
   if (!w) return;
   w.disposing = true;
   if (w.runtime && !w.excluded) signalAgentBoardChanged();
+}
+
+// What agent hibernation (src/main/agent-hibernation.ts) needs to know about
+// a pane's agent: whether its turn ended, whether it waits on the user, and
+// whether text may sit unsent in its input box. Null for an unknown pane.
+export function terminalAgentHibernationEvidence(paneId: string): AgentHibernationEvidence | null {
+  const w = watchers.get(paneId);
+  if (!w) return null;
+  return {
+    excluded: w.excluded,
+    disposing: w.disposing,
+    attached: w.attached,
+    runtime: w.runtime,
+    state: w.state,
+    chipState: w.lastEmittedState,
+    turnActive: turnActive(w),
+    pendingDone: w.pendingDone !== null,
+    pendingToolCalls: w.pendingToolCalls,
+    backgroundRunning: w.backgroundRunningAtLastStop,
+    teammatesActive: w.teammatesActive,
+    codexAwaitingIdle: w.codexAwaitingIdle,
+    lastUserInputAt: w.lastUserInputAt,
+    lastSubmitAt: w.lastSubmitAt,
+    lastOutputAt: w.lastOutputAt,
+  };
 }
 
 // Snapshot foreground agent panes before app-level PTY teardown begins.

@@ -37,6 +37,7 @@ import type {
   TerminalLeaf,
   TerminalLeafOrigin,
   TerminalLeafWorker,
+  TerminalLeafHibernation,
   TerminalSplit,
   TerminalTab,
   UsageTab,
@@ -601,6 +602,9 @@ export function cleanupTransientTerminalState(node: PaneNode): void {
     delete node.autorun;
     delete node.origin;
     delete node.nativeClaudeProfileId;
+    // A sleeping pane is process state of the run that put it to sleep.
+    delete node.hibernation;
+    if (node.keepAwake !== true) delete node.keepAwake;
     // Scrollback is durable here: when the restore preference is off,
     // persist() already stripped it, so whatever survived to hydration is
     // meant to replay.
@@ -730,6 +734,7 @@ export function stripTransientPaneState(node: PaneNode, keepAgentState = false):
       !("origin" in node) &&
       !("nativeClaudeProfileId" in node) &&
       !("bootResume" in node) &&
+      !("hibernation" in node) &&
       !dropProcessState
     ) {
       return node;
@@ -740,6 +745,7 @@ export function stripTransientPaneState(node: PaneNode, keepAgentState = false):
       origin: _origin,
       nativeClaudeProfileId: _nativeClaudeProfileId,
       bootResume: _bootResume,
+      hibernation: _hibernation,
       ...rest
     } = node;
     if (!keepAgentState) {
@@ -844,7 +850,9 @@ export function markTerminalAgentSessionsActive(
   if (!paneIds) return node;
   if (node.kind === "leaf") {
     const session = validatedTerminalAgentSession(node.agentSession);
-    const active = paneIds.has(node.paneId);
+    // A sleeping pane's agent was stopped by Codara, not by the user: it is
+    // still the running session the relaunch restore should bring back.
+    const active = paneIds.has(node.paneId) || Boolean(node.hibernation);
     if (!session || session.active === active) return node;
     return { ...node, agentSession: { ...session, active } };
   }
@@ -1405,6 +1413,11 @@ export interface UseTabsApi {
   // `bootResume` flag once the pane's first mount has made its restore attempt
   // (whatever the outcome), so no later remount can auto-resume again.
   setLeafBootResumeConsumed: (tabId: TabId, paneId: string) => void;
+  // Agent hibernation: mark a pane sleeping (or awake again, with null),
+  // wherever it lives: the visible workspace or a background one.
+  setPaneHibernation: (paneId: string, hibernation: TerminalLeafHibernation | null) => void;
+  // The pane's "Keep awake" pin: agent hibernation never stops a pinned pane.
+  setLeafKeepAwake: (tabId: TabId, paneId: string, keepAwake: boolean) => void;
   // Rename a leaf's paneId. The caller must dispose the old PTY when it is
   // intentionally replacing a live shell. The new TerminalPane mounts at the
   // new id and spawns/attaches there. Used by orchestration to take over an
@@ -3235,6 +3248,62 @@ export function useTabs(
     [],
   );
 
+  const setPaneHibernation = useCallback(
+    (paneId: string, hibernation: TerminalLeafHibernation | null) => {
+      const updateTabs = (currentTabs: Tab[]): Tab[] => {
+        let changed = false;
+        const nextTabs = currentTabs.map((tab) => {
+          if (tab.kind !== "terminal") return tab;
+          const leaf = findLeaf(tab.root, paneId);
+          if (!leaf || (leaf.hibernation ?? null) === hibernation) return tab;
+          const root = setLeafField(tab.root, paneId, "hibernation", hibernation);
+          if (root === tab.root) return tab;
+          changed = true;
+          return { ...tab, root };
+        });
+        return changed ? nextTabs : currentTabs;
+      };
+      setTabs(updateTabs);
+      // Same write pattern as updateLeafWorkerInWorkspace: ref first, then
+      // the render-driving mirror of background layouts.
+      for (const [workspace, live] of liveWorkspaceTabsRef.current) {
+        if (workspace === tabsWorkspaceIdRef.current) continue;
+        const nextTabs = updateTabs(live.tabs);
+        if (nextTabs === live.tabs) continue;
+        liveWorkspaceTabsRef.current.set(workspace, { ...live, tabs: nextTabs });
+        setInactiveWorkspaceLayouts((current) => {
+          const latest = liveWorkspaceTabsRef.current.get(workspace);
+          if (!latest) return current;
+          let changed = false;
+          const next = current.map((layout) => {
+            if (layout.workspaceId !== workspace || layout.tabs === latest.tabs) return layout;
+            changed = true;
+            return { ...layout, tabs: latest.tabs };
+          });
+          return changed ? next : current;
+        });
+      }
+    },
+    [],
+  );
+
+  const setLeafKeepAwake = useCallback(
+    (tabId: TabId, paneId: string, keepAwake: boolean) => {
+      setTabs((curr) => {
+        let changed = false;
+        const next = curr.map((t) => {
+          if (t.id !== tabId || t.kind !== "terminal") return t;
+          const root = setLeafField(t.root, paneId, "keepAwake", keepAwake ? true : undefined);
+          if (root === t.root) return t;
+          changed = true;
+          return { ...t, root };
+        });
+        return changed ? next : curr;
+      });
+    },
+    [],
+  );
+
   // Rename a leaf's paneId. Walks the tree, swaps the id, and bumps the
   // tab's activePaneId to point at the new id if it used to point at the
   // old one. Returns true if the leaf was found, false otherwise.
@@ -4354,6 +4423,8 @@ export function useTabs(
       updateLeafWorkerInWorkspace,
       setLeafAgentSession,
       setLeafBootResumeConsumed,
+      setPaneHibernation,
+      setLeafKeepAwake,
       renameLeaf,
       addPaneInTab,
       openChatTab,
