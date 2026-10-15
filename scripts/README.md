@@ -333,7 +333,11 @@ file watcher behind the explorer, `src/main/fs-watcher.ts`),
 `test-fs-watcher-events` (runs that watcher on a temporary workspace: changes
 in nested and symlinked folders reach the explorer),
 `test-system-metrics` (the memory figure in the title-bar meters,
-`src/main/system-metrics.ts`).
+`src/main/system-metrics.ts`), `test-keep-awake` (keeping the computer awake
+while agents work, `src/main/keep-awake/`: the modes, one OS hold kept in step,
+the Linux lid helper and its backoff, that the helper dies with a killed
+parent, where the lid option is offered, what counts as work, the
+preferences and the quit release).
 
 ### Remote access (phone) and SSH workspaces
 

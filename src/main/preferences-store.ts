@@ -20,6 +20,7 @@ import {
   type PrefKey,
   type ThemePref,
 } from "@shared/types";
+import { normalizeKeepAwakeMode } from "@shared/keep-awake";
 import { writeFileAtomic } from "./fs-atomic";
 import { codaraHome } from "./codara-home";
 
@@ -276,6 +277,11 @@ function normalize(
       typeof src.claudeFollowsActiveAccount === "boolean"
         ? src.claudeFollowsActiveAccount
         : DEFAULT_PREFERENCES.claudeFollowsActiveAccount,
+    keepAwakeMode: normalizeKeepAwakeMode(src.keepAwakeMode),
+    keepAwakeLidClosed:
+      typeof src.keepAwakeLidClosed === "boolean"
+        ? src.keepAwakeLidClosed
+        : DEFAULT_PREFERENCES.keepAwakeLidClosed,
     autoOpenPreview:
       typeof src.autoOpenPreview === "boolean"
         ? src.autoOpenPreview
@@ -378,6 +384,19 @@ export async function loadPreferences(): Promise<AppPreferences> {
   return cache;
 }
 
+type PreferenceListener = (key: PrefKey, prefs: AppPreferences) => void;
+const preferenceListeners = new Set<PreferenceListener>();
+
+// Main-process reactions to a change, whichever path wrote it (the
+// preferences:set IPC, the agent socket's app.prefs.set). Called once the
+// cache holds the new value, before the disk write settles.
+export function onPreferenceChange(listener: PreferenceListener): () => void {
+  preferenceListeners.add(listener);
+  return () => {
+    preferenceListeners.delete(listener);
+  };
+}
+
 export async function setPreference<K extends PrefKey>(
   key: K,
   value: AppPreferences[K],
@@ -385,6 +404,13 @@ export async function setPreference<K extends PrefKey>(
   const current = await loadPreferences();
   const next = normalize({ ...current, [key]: value });
   cache = next;
+  for (const listener of preferenceListeners) {
+    try {
+      listener(key, next);
+    } catch (err) {
+      console.error("[preferences] change listener failed:", err);
+    }
+  }
   // Dual-handle: the awaited `write` rejects to the IPC caller on disk
   // failure so the renderer knows the toggle never persisted, while `writing`
   // swallows the rejection so the queue chain survives for later saves.

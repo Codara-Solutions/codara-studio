@@ -39,6 +39,7 @@ import type { AgentDeliveryRequest, AgentDeliveryResult } from "@shared/agent-de
 import { agentBoardApi } from "./areas/agent-board";
 import { captureApi } from "./areas/capture";
 import { chromeLinkApi } from "./areas/chrome-link";
+import { keepAwakeApi } from "./areas/keep-awake";
 import { pointApi } from "./areas/point";
 import { serversApi } from "./areas/servers";
 import { workspaceStatusApi } from "./areas/workspace-status";
@@ -1776,6 +1777,7 @@ const api = {
   },
   servers: serversApi,
   chromeLink: chromeLinkApi,
+  keepAwake: keepAwakeApi,
   capture: captureApi,
   point: pointApi,
   workspaceStatus: workspaceStatusApi,

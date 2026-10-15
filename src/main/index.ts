@@ -51,6 +51,7 @@ import { registerPreviewTargets } from "./browser/preview-target";
 import { forwardGuestChords } from "./browser/guest-chords";
 import { registerAgentDelivery } from "./agent-delivery-live";
 import { startChromeLink } from "./browser/chrome";
+import { startKeepAwake } from "./keep-awake";
 import { startServers } from "./servers";
 import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
 import { initAgentSessionRegistry, flushAgentSessionRegistry, snapshotAgentSessionsForQuit } from "./agent-session-registry";
@@ -1255,6 +1256,7 @@ app.whenReady().then(async () => {
   createWindow();
   startServers();
   startChromeLink();
+  startKeepAwake();
 
   // System sleep/wake handling. On suspend, checkpoint renderer state (its tab
   // tree + scrollback), flush main's stores, and pause PTY delivery into a
