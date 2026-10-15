@@ -500,6 +500,7 @@ import {
 } from "./terminal-scrollback";
 import { registerAgentHibernationIpc } from "./agent-hibernation";
 import { registerWorktreeCleanupIpc } from "./worktree-cleanup";
+import { registerWorktreeSetupIpc } from "./worktree-setup";
 
 function nativeCliAccountRuntimeFromIpc(value: unknown): NativeCliAccountRuntime {
   if (value === "claude" || value === "codex" || value === "grok") return value;
@@ -4121,6 +4122,7 @@ export function registerIpc(): void {
   registerServersIpc(handle);
   registerSkillUpdatesIpc(handle);
   registerGitFixIpc(handle);
+  registerWorktreeSetupIpc(handle);
   registerChromeLinkIpc(handle);
   registerCaptureIpc(handle);
   registerPointIpc(handle);

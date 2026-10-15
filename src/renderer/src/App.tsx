@@ -25,7 +25,6 @@ import type {
   WorkspaceGroup,
 } from "@shared/types";
 import {
-  DEFAULT_COPY_BRANCH_SETUP_COMMAND,
   DEFAULT_TOAST_DURATION_MS,
   DEFAULT_WORKSPACE_SWITCH_HUD_MS,
   TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
@@ -110,6 +109,7 @@ import {
 } from "./notifications/routing";
 import { targetWorkspaceId as notifyTargetWorkspaceId } from "@shared/notify-center";
 import { emitLocalToast } from "./notifications/local-toast";
+import { startNewWorktreeSetup } from "./components/worktree-setup/start";
 import {
   AGENT_WORKTREE_TOAST_GAP_MS,
   agentWorktreeToast,
@@ -221,6 +221,7 @@ const WorkerSessionPicker = lazy(() => import("./components/WorkerSessionPicker"
 const RunSwitcher = lazy(() => import("./components/RunSwitcher"));
 const JumpPalette = lazy(() => import("./components/jump/JumpPalette"));
 const CreateCopyDialog = lazy(() => import("./components/CreateCopyDialog"));
+const WorktreeSetupTray = lazy(() => import("./components/worktree-setup/WorktreeSetupTray"));
 const CopyBranchDeleteDialog = lazy(() =>
   import("./components/CopyBranchDialogs").then((module) => ({
     default: module.CopyBranchDeleteDialog,
@@ -888,7 +889,7 @@ export default function App() {
   // tabs.activeId, ...) must still list that data as a dep.
   const {
     setActiveTab: setActiveTabStable,
-    newTerminalTab,
+    newAgentTerminalTabInWorkspace,
     newPreviewTab,
     closePreviewTab,
     addDraftChatTab,
@@ -3711,6 +3712,8 @@ export default function App() {
         activate?: boolean;
         /** Issue provisioning gives setup to Cora as an awaited first step. */
         launchSetupTerminal?: boolean;
+        /** The create dialog's "Run setup commands" box. */
+        runSetupCommands?: boolean;
       },
     ): Promise<Workspace> => {
       setCreateCopyBusy(true);
@@ -3938,15 +3941,22 @@ export default function App() {
         }
 
         setCreateCopyDialogWs(null);
-        // Run the per-repo setup command live in a terminal in the new worktree.
-        // Default is empty (opt-in) — nothing runs unless this repo has one set.
+        // The repository's worktree setup (.worktreeinclude,
+        // .codara/worktree.json) and the user's own command, in main with a
+        // log the setup tray opens; the file's terminals open here.
         if (launchSetupTerminal) {
-          void window.spark.preferences.load().then((prefs) => {
-            const cmd = (
-              prefs.copyBranchSetupCommandByRepo?.[sourceWs.cwd] ??
-              DEFAULT_COPY_BRANCH_SETUP_COMMAND
-            ).trim();
-            if (cmd) newTerminalTab(res.path, cmd);
+          void startNewWorktreeSetup({
+            sourceCwd: sourceWs.cwd,
+            workspace: persistedWorkspace,
+            runCommands: opts?.runSetupCommands !== false,
+            openTerminal: (terminal) => {
+              newAgentTerminalTabInWorkspace(ws.id, {
+                cwd: res.path,
+                ...(terminal.command ? { autorun: terminal.command } : {}),
+                title: terminal.name,
+                requestedFromPane: true,
+              });
+            },
           }).catch(() => undefined);
         }
         return persistedWorkspace;
@@ -3959,7 +3969,7 @@ export default function App() {
         setCreateCopyBusy(false);
       }
     },
-    [newTerminalTab],
+    [newAgentTerminalTabInWorkspace],
   );
 
   const handleStartGitHubIssue = useCallback(
@@ -6743,6 +6753,9 @@ export default function App() {
           activeView={activeNotificationView}
           dismissMs={preferences.toastDurationMs ?? DEFAULT_TOAST_DURATION_MS}
         />
+        <Suspense fallback={null}>
+          <WorktreeSetupTray />
+        </Suspense>
         {awayDigest && (
           <AwayDigestCard
             digest={awayDigest}
@@ -6767,15 +6780,17 @@ export default function App() {
                   setCreateCopyError(null);
                 }
               }}
-              onCreateNew={(name) =>
-                void createCopyBranchWs(createCopyDialogWs, { newBranch: name }).catch(
-                  () => undefined,
-                )
+              onCreateNew={(name, setup) =>
+                void createCopyBranchWs(createCopyDialogWs, {
+                  newBranch: name,
+                  runSetupCommands: setup.runSetupCommands,
+                }).catch(() => undefined)
               }
-              onOpenBranch={(b) =>
+              onOpenBranch={(b, setup) =>
                 void createCopyBranchWs(createCopyDialogWs, {
                   checkoutBranch: b.name,
                   checkoutIsRemote: b.isRemote,
+                  runSetupCommands: setup.runSetupCommands,
                 }).catch(() => undefined)
               }
             />

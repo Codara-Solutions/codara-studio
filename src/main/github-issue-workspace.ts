@@ -8,6 +8,7 @@ import {
   type StartGitHubIssueResult,
 } from "@shared/github";
 import { isRemotePath } from "@shared/remote";
+import { isWorktreeSetupStartError } from "@shared/worktree-setup";
 import {
   DEFAULT_COPY_BRANCH_SETUP_COMMAND,
   normalizeGitHubIssueOrigin,
@@ -38,6 +39,7 @@ import {
 } from "./orchestration/run-store";
 import { loadPreferences } from "./preferences-store";
 import { codaraHome } from "./codara-home";
+import { startWorktreeSetup } from "./worktree-setup";
 import { loadState, updateState } from "./storage";
 
 export interface GitHubIssueWorkspaceDependencies {
@@ -72,6 +74,16 @@ export interface GitHubIssueWorkspaceDependencies {
   startAutopilot(input: StartAutopilotInput): Promise<RunState>;
   worktreesRoot(repoCwd: string): string;
   publishState(state: AppState): void;
+  // Worktree setup kept in the repository (src/main/worktree-setup). True
+  // when a setup started; false when the repository configures nothing and
+  // the user has no command. Without it Cora runs the user's command itself.
+  startWorktreeSetup?(input: {
+    sourceCwd: string;
+    worktreePath: string;
+    workspaceId: string;
+    workspaceName: string;
+    branch: string;
+  }): Promise<boolean>;
 }
 
 const issueMutations = new Map<string, Promise<StartGitHubIssueResult>>();
@@ -94,6 +106,10 @@ function productionDependencies(): GitHubIssueWorkspaceDependencies {
     startAutopilot,
     worktreesRoot: (repoCwd) => managedWorktreesRoot(codaraHome(), repoCwd),
     publishState,
+    startWorktreeSetup: async (input) => {
+      const started = await startWorktreeSetup({ ...input, trigger: "issue" });
+      return Boolean(started && !isWorktreeSetupStartError(started));
+    },
   };
 }
 
@@ -315,7 +331,18 @@ async function createOrResumeIssueWorkspace(
   }
   dependencies.publishState(persistedState);
 
-  return startAndActivateIssueWorkspace(workspace, origin, "created", dependencies);
+  const setupStarted = dependencies.startWorktreeSetup
+    ? await dependencies
+        .startWorktreeSetup({
+          sourceCwd: source.cwd,
+          worktreePath: created.path,
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
+          branch: created.branch,
+        })
+        .catch(() => false)
+    : false;
+  return startAndActivateIssueWorkspace(workspace, origin, "created", dependencies, setupStarted);
 }
 
 async function resumeIssueWorkspace(
@@ -340,6 +367,7 @@ async function startAndActivateIssueWorkspace(
   origin: GitHubIssueOrigin,
   outcome: "created" | "resumed",
   dependencies: GitHubIssueWorkspaceDependencies,
+  setupStarted = false,
 ): Promise<StartGitHubIssueResult> {
   const clientMessageId = issueClientMessageId(origin);
   let run = (await dependencies.listRuns(workspace.id)).find(
@@ -385,7 +413,7 @@ async function startAndActivateIssueWorkspace(
         ...(run ? { runId: run.id } : {}),
         origin,
         planTitle: `GitHub issue #${origin.number}`,
-        initialUserNote: issuePrompt(origin, setupCommand),
+        initialUserNote: issuePrompt(origin, setupStarted ? "" : setupCommand, setupStarted),
         initialUserNoteClientMessageId: clientMessageId,
       });
     } catch (cause) {
@@ -509,10 +537,17 @@ function issueClientMessageId(origin: GitHubIssueOrigin): string {
     .slice(0, 32)}`;
 }
 
-function issuePrompt(origin: GitHubIssueOrigin, setupCommand: string): string {
+function issuePrompt(origin: GitHubIssueOrigin, setupCommand: string, setupStarted = false): string {
   return [
     `Work on GitHub issue ${origin.repository}#${origin.number}.`,
     "",
+    ...(setupStarted
+      ? [
+          "FIRST STEP: Codara is preparing this worktree from the repository's setup files and the configured setup command. Before inspecting or changing issue code, call codara_worktree_setup with wait:true and wait until its state is succeeded.",
+          "If setup failed or stopped, stop and report that failure with its log tail; do not continue into issue work with a partially prepared workspace.",
+          "",
+        ]
+      : []),
     ...(setupCommand
       ? [
           "FIRST STEP — before inspecting or changing issue code, run the configured workspace setup command below from this worktree and wait for it to exit successfully.",

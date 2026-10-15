@@ -312,6 +312,7 @@ import {
 } from "../git-worktrees";
 import { readGitText } from "../git-exec";
 import { codaraHome } from "../codara-home";
+import { prepareWorkerWorktree, waitForWorkerWorktreeSetup } from "../worktree-setup/workers";
 import { defaultShell } from "../shells";
 import {
   isOpenRouterModelId,
@@ -14604,6 +14605,28 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
             startPoint: startPoint ?? null,
           },
         });
+        // The repository's worktree setup: files and links before the
+        // worker sees the checkout, the commands before it starts when the
+        // setup file asks agents to wait (launchWorkerAttempt).
+        const setup = await prepareWorkerWorktree({
+          sourceCwd: input.cwd,
+          worktreePath: created.path,
+          workspaceId: run.workspaceId,
+          branch: created.branch,
+        });
+        if (setup) {
+          await appendEvent({
+            timestamp: new Date().toISOString(),
+            workspaceId: run.workspaceId,
+            runId: run.id,
+            stepId: task.stepId,
+            workerTaskId: task.id,
+            attemptId: attempt.id,
+            type: "worker_attempt.worktree_setup",
+            message: setup.message,
+            payload: setup.payload,
+          });
+        }
       } else {
         await appendEvent({
           timestamp,
@@ -14779,6 +14802,23 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     aborted: false,
   });
   try {
+    if (attempt.sandboxWorktreePath) {
+      const setup = await waitForWorkerWorktreeSetup(attempt.sandboxWorktreePath, {
+        aborted: () => workerLaunchAborted(attempt.id),
+      });
+      if (setup) {
+        await appendEvent({
+          timestamp: new Date().toISOString(),
+          workspaceId: run.workspaceId,
+          runId: run.id,
+          workerTaskId: attempt.workerTaskId,
+          attemptId: attempt.id,
+          type: setup.failed ? "worker_attempt.worktree_setup_failed" : "worker_attempt.worktree_setup",
+          message: setup.message,
+          payload: setup.payload,
+        });
+      }
+    }
     return await launchWorkerAttemptInner(input);
   } finally {
     launchingWorkerAttempts.delete(attempt.id);

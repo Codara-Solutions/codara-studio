@@ -36,6 +36,8 @@ import {
 } from "./git-worktrees";
 import { deleteBranch, deleteBranchIfAt } from "./git-branches";
 import { listProcessesWithCommands, processChainIn } from "./owned-process-tree";
+import { setupProvidedEntries } from "./worktree-setup/links";
+import type { WorktreeSetupStatus } from "@shared/worktree-setup";
 import {
   insertCopyWorkspace,
   removeWorkspaceFromAppState,
@@ -181,7 +183,36 @@ export interface AgentWorktreeDeps {
   // How many ignored directories the nested-checkout scan may visit. Tests
   // lower it to reach the limit without building a huge tree.
   nestedScanMaxDirs?: number;
+  // Worktree setup kept in the repository (.worktreeinclude and
+  // .codara/worktree.json, src/main/worktree-setup). Without it a created
+  // worktree only reports the user's setup command for the agent to run.
+  worktreeSetup?: AgentWorktreeSetupRunner;
 }
+
+export interface AgentWorktreeSetupRunner {
+  // Null when the repository configures nothing and the user has no command.
+  start(request: {
+    sourceCwd: string;
+    worktreePath: string;
+    trigger: "agent";
+    workspaceId?: string;
+    workspaceName?: string;
+    branch?: string;
+  }): Promise<WorktreeSetupStatus | null>;
+  whenPrepared(id: string): Promise<WorktreeSetupStatus | null>;
+  waitFor(id: string, timeoutMs: number): Promise<WorktreeSetupStatus | null>;
+  get(idOrPath: string): Promise<WorktreeSetupStatus | null>;
+  tail(id: string, lines: number): Promise<string>;
+  summary(status: WorktreeSetupStatus, logTail: string): Record<string, unknown>;
+}
+
+// codara_worktree_create waits at most this long for a setup that asks
+// agents to wait; codara_worktree_setup can wait longer. Both stay under the
+// 11 minutes Codex gives one MCP tool call.
+const SETUP_WAIT_ON_CREATE_MS = 5 * 60_000;
+export const SETUP_WAIT_MAX_SECONDS = 540;
+const SETUP_LOG_LINES_DEFAULT = 40;
+const SETUP_LOG_LINES_MAX = 200;
 
 const AGENT_WORKTREE_LIMIT = 20;
 const FETCH_TIMEOUT_MS = 30_000;
@@ -706,6 +737,9 @@ export interface CreateWorktreeInput {
   purpose?: string;
   title?: string;
   fetch?: boolean;
+  // Wait for the repository's setup before returning. Default: what
+  // .codara/worktree.json says ("waitForSetup"), else false.
+  waitForSetup?: boolean;
 }
 
 async function validateBranchName(
@@ -775,14 +809,21 @@ function createdResult(
     baseCommit?: string | null;
     setupCommand: string | null;
     warnings: string[];
+    setup?: Record<string, unknown> | null;
   },
 ): Record<string, unknown> {
   const copy = workspace.copyBranch!;
+  const setupState = typeof extra.setup?.state === "string" ? extra.setup.state : null;
   const next = [
     "Work under `path` with absolute paths or `git -C <path>`; your own cwd does not change.",
     extra.setupCommand
       ? `Run setup with codara_terminal_create({cwd: path, command: setupCommand}).`
       : "",
+    setupState === "failed" || setupState === "stopped"
+      ? "Setup did not finish: read setup.logTail and fix the cause before you build or test."
+      : setupState && setupState !== "succeeded"
+        ? "Codara is still setting it up: call codara_worktree_setup({workspaceId, wait: true}) before you build or test."
+        : "",
     "After the branch is merged, call codara_worktree_remove({workspaceId}).",
   ]
     .filter(Boolean)
@@ -801,9 +842,51 @@ function createdResult(
     sourceWorkspaceId: scope.parentWorkspace.id,
     ...(typeof copy.fileCount === "number" ? { fileCount: copy.fileCount } : {}),
     setupCommand: extra.setupCommand,
+    ...(extra.setup !== undefined ? { setup: extra.setup } : {}),
     ...(extra.warnings.length ? { warnings: extra.warnings } : {}),
     next,
   };
+}
+
+async function setupSummaryFor(
+  runner: AgentWorktreeSetupRunner,
+  worktreePath: string,
+  logLines = SETUP_LOG_LINES_DEFAULT,
+): Promise<Record<string, unknown> | null> {
+  const status = await runner.get(worktreePath).catch(() => null);
+  if (!status) return null;
+  return runner.summary(status, await runner.tail(status.id, logLines).catch(() => ""));
+}
+
+// Starts the repository's setup in a worktree an agent just made: copies and
+// links before this returns, the commands after it unless the setup file
+// (or the caller) asks to wait. Null when nothing is configured.
+async function runCreatedSetup(
+  runner: AgentWorktreeSetupRunner,
+  scope: WorktreeScope,
+  workspace: Workspace,
+  input: CreateWorktreeInput,
+): Promise<Record<string, unknown> | null> {
+  try {
+    const started = await runner.start({
+      sourceCwd: scope.repoCwd,
+      worktreePath: workspace.cwd,
+      trigger: "agent",
+      workspaceId: workspace.id,
+      workspaceName: workspace.name,
+      ...(workspace.copyBranch?.branch ? { branch: workspace.copyBranch.branch } : {}),
+    });
+    if (!started) return null;
+    let status = (await runner.whenPrepared(started.id)) ?? started;
+    const wait = typeof input.waitForSetup === "boolean" ? input.waitForSetup : status.waitForSetup;
+    if (wait && !["succeeded", "failed", "stopped"].includes(status.state)) {
+      status = (await runner.waitFor(started.id, SETUP_WAIT_ON_CREATE_MS)) ?? status;
+    }
+    const tail = status.state === "succeeded" ? "" : await runner.tail(status.id, SETUP_LOG_LINES_DEFAULT).catch(() => "");
+    return runner.summary(status, tail);
+  } catch (err) {
+    return { state: "failed", error: `setup could not start: ${cleanText(errorText(err), 300)}` };
+  }
 }
 
 export async function createAgentWorktree(
@@ -886,8 +969,9 @@ async function createAgentWorktreeInner(
         if (!registered.has(await realpathOrResolve(workspace.cwd))) continue;
         return createdResult(workspace, current, {
           created: false,
-          setupCommand: await setupCommandFor(current, deps),
+          setupCommand: deps.worktreeSetup ? null : await setupCommandFor(current, deps),
           warnings: [],
+          ...(deps.worktreeSetup ? { setup: await setupSummaryFor(deps.worktreeSetup, workspace.cwd) } : {}),
         });
       }
       const usedAt = await branchWorktreePath(repoCwd, branch);
@@ -994,7 +1078,9 @@ async function createAgentWorktreeInner(
         created: true,
         base: baseName,
         baseCommit,
-        setupCommand: await setupCommandFor(current, deps),
+        // With worktree setup the user's command runs there, with the
+        // repository's own; the agent must not run it a second time.
+        setupCommand: deps.worktreeSetup ? null : await setupCommandFor(current, deps),
         warnings,
       });
     });
@@ -1003,6 +1089,17 @@ async function createAgentWorktreeInner(
     throw err;
   }
   const made = createdWorkspace as Workspace | null;
+  if (made && deps.worktreeSetup && !isRefusal(outcome)) {
+    const setup = await runCreatedSetup(deps.worktreeSetup, scope, made, input);
+    outcome = createdResult(made, scope, {
+      created: true,
+      base: baseName,
+      baseCommit,
+      setupCommand: null,
+      warnings,
+      setup,
+    });
+  }
   if (made) {
     deps.sendAgentEvent({
       kind: "created",
@@ -1341,7 +1438,12 @@ export async function verifyRemovable(
   ];
   let ignored: string[] | null = null;
   try {
-    ignored = await ignoredEntries(path);
+    // What worktree setup linked in or copied unchanged from the main
+    // checkout loses nothing on removal; a linked folder is the main
+    // checkout's own and is never scanned here.
+    const all = await ignoredEntries(path);
+    const provided = await setupProvidedEntries(realPath, all).catch(() => new Set<string>());
+    ignored = all.filter((entry) => !provided.has(entry));
     const blocking = ignored.filter((entry) => !isRegenerableIgnored(entry, extra));
     if (blocking.length) {
       verdict.dirty.ignoredBlocking = blocking.slice(0, MAX_LISTED_PATHS);
@@ -1609,6 +1711,74 @@ function newContext(
     rendererTerminals: deps.listRendererTerminals().catch(() => null),
     fetchedTargets: new Map(),
   };
+}
+
+// ── Setup status ───────────────────────────────────────────────────────────
+
+export interface WorktreeSetupQueryInput {
+  workspaceId?: string;
+  path?: string;
+  wait?: boolean;
+  timeoutSeconds?: number;
+  logLines?: number;
+}
+
+/**
+ * The setup status and log tail of a worktree of the caller's repository:
+ * the one named, or the caller's own. Read-only; `wait` blocks until setup
+ * ends or the timeout passes.
+ */
+export async function getAgentWorktreeSetup(
+  caller: WorktreeCaller,
+  input: WorktreeSetupQueryInput,
+  deps: AgentWorktreeDeps,
+): Promise<Record<string, unknown> | WorktreeRefusal> {
+  const gate = await gateCaller(caller, deps, { mutation: false });
+  if (isRefusal(gate)) return gate;
+  const scope = await resolveWorktreeScope(caller, deps, gate.run);
+  if (isRefusal(scope)) return scope;
+  const managed = await managedWorkspaces(scope);
+  let workspace: Workspace | undefined;
+  if (input.workspaceId) {
+    workspace = managed.find((candidate) => candidate.id === input.workspaceId);
+  } else if (input.path) {
+    const wanted = await realpathOrResolve(input.path);
+    for (const candidate of managed) {
+      if ((await realpathOrResolve(candidate.cwd)) === wanted) {
+        workspace = candidate;
+        break;
+      }
+    }
+  } else if (managed.some((candidate) => candidate.id === scope.callerWorkspace.id)) {
+    workspace = scope.callerWorkspace;
+  }
+  if (!workspace) {
+    return refusal(
+      "WORKTREE_NOT_FOUND",
+      input.workspaceId || input.path ? undefined : "you are not in a Codara-managed worktree; pass workspaceId or path",
+    );
+  }
+  const base = {
+    ok: true,
+    workspaceId: workspace.id,
+    path: workspace.cwd,
+    ...(workspace.copyBranch?.branch ? { branch: workspace.copyBranch.branch } : {}),
+  };
+  const runner = deps.worktreeSetup;
+  let status = runner ? await runner.get(workspace.cwd).catch(() => null) : null;
+  if (!runner || !status) {
+    return {
+      ...base,
+      setup: null,
+      hint: "No setup ran for this worktree: the repository has no .worktreeinclude or .codara/worktree.json, and the user set no setup command.",
+    };
+  }
+  if (input.wait && !["succeeded", "failed", "stopped"].includes(status.state)) {
+    const seconds = Math.min(Math.max(1, Math.floor(input.timeoutSeconds ?? 300)), SETUP_WAIT_MAX_SECONDS);
+    status = (await runner.waitFor(status.id, seconds * 1000)) ?? status;
+  }
+  const lines = Math.min(Math.max(1, Math.floor(input.logLines ?? SETUP_LOG_LINES_DEFAULT)), SETUP_LOG_LINES_MAX);
+  return { ...base, setup: runner.summary(status, await runner.tail(status.id, lines).catch(() => "")) };
 }
 
 // ── List ───────────────────────────────────────────────────────────────────

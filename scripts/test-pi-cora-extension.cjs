@@ -296,7 +296,7 @@ for (const automation of [false, true]) {
   assert.equal(policy.isWorkerSafeBridgeTool("codara_remember", automation, { CODARA_PI_DIRECT_TASK: "1" }), !automation);
 }
 assert.equal(policy.isWorkerSafeBridgeTool("codara_remember", false, { CODARA_PI_DIRECT_TASK: "1", CODARA_PI_PROJECT_POLICY: "untrusted-pull-request" }), false);
-for (const tool of ["codara_worktree_create", "codara_worktree_list", "codara_worktree_remove"]) {
+for (const tool of ["codara_worktree_create", "codara_worktree_list", "codara_worktree_remove", "codara_worktree_setup"]) {
   assert.equal(policy.isWorkerSafeBridgeTool(tool, false, {}), false, `${tool} stays out of chat workers`);
   assert.equal(policy.isWorkerSafeBridgeTool(tool, true, { CODARA_PI_DIRECT_TASK: "1" }), false, `${tool} stays out of loom workers`);
   assert.equal(policy.isWorkerSafeBridgeTool(tool, false, { CODARA_PI_DIRECT_TASK: "1" }), true, `${tool} reaches a direct task`);

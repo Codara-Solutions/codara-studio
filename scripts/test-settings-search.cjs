@@ -53,6 +53,7 @@ const DIALOG_FUNCTION_TABS = {
   GeneralSettings: "general",
   GithubWebhookSettings: "general",
   CopyBranchSetupField: "general",
+  WorktreeSetupFileField: "general",
   AgentWorktreeIgnoredField: "general",
   EditorSettings: "editor",
   TerminalSettings: "terminal",

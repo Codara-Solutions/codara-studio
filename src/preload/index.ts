@@ -50,6 +50,7 @@ import { skillOriginsApi } from "./areas/skill-origins";
 import { terminalScrollbackApi } from "./areas/terminal-scrollback";
 import { agentHibernationApi } from "./areas/agent-hibernation";
 import { worktreeCleanupApi } from "./areas/worktree-cleanup";
+import { worktreeSetupApi } from "./areas/worktree-setup";
 import type {
   CoraMemoryItem,
   MemoryItemKind,
@@ -1794,6 +1795,7 @@ const api = {
   gitFix: gitFixApi,
   diagnostics: diagnosticsApi,
   agentHibernation: agentHibernationApi,
+  worktreeSetup: worktreeSetupApi,
   chromeLink: chromeLinkApi,
   keepAwake: keepAwakeApi,
   capture: captureApi,

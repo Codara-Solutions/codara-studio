@@ -620,7 +620,8 @@ are not supported yet.
 
 | Tool | What it does |
 |---|---|
-| `codara_worktree_create` | Creates a worktree on a new branch (default `agent/<purpose>-<id>`, from the default branch after a fetch) or, with `checkout: true`, on an existing branch. The agent's own cwd does not change; it works under the returned `path`. The repository's copy-branch setup command comes back as `setupCommand` to run in a terminal there. Asking again for the same branch returns the existing worktree. At most 20 agent worktrees per repository. |
+| `codara_worktree_create` | Creates a worktree on a new branch (default `agent/<purpose>-<id>`, from the default branch after a fetch) or, with `checkout: true`, on an existing branch. The agent's own cwd does not change; it works under the returned `path`. Codara starts the repository's [worktree setup](./worktree-setup.md) there (files from `.worktreeinclude`, links, the setup command from `.codara/worktree.json` and your own copy-branch command) and returns its state as `setup`; `setupCommand` is now always null. With `waitForSetup: true`, or when the setup file asks for it, the call waits up to 5 minutes for setup to end. Asking again for the same branch returns the existing worktree. At most 20 agent worktrees per repository. |
+| `codara_worktree_setup` | The setup state of a worktree: what was copied and linked, each command with its exit code, the error and the end of the log (`logLines`, at most 200). Without `workspaceId` or `path`, the worktree the agent works in. `wait: true` waits for setup to end, up to `timeoutSeconds` (default 300, at most 540). Read-only. |
 | `codara_worktree_list` | Lists the repository's Codara-managed worktrees: who created each, uncommitted and ignored files, terminals, runs and processes using it, merge status, and `removable` with the `blockers` that `codara_worktree_remove` would report. `checkMerge: true` fetches and asks GitHub, so it is slower. Worktrees Codara does not manage are listed under `unmanaged` and are never touched. |
 | `codara_worktree_remove` | Removes a worktree and, by default, the branch it created. `dryRun: true` only checks. |
 
@@ -640,7 +641,8 @@ the `blockers` and a `hint`:
   `assume-unchanged` or `skip-worktree` count), no merge or rebase in
   progress, and no ignored files beyond build output and caches
   (`node_modules/`, `dist/`, `.venv/` and similar, plus the patterns you add
-  for the repository in Settings); `discardIgnoredFiles: true` deletes the
+  for the repository in Settings, and the files worktree setup copied or
+  linked while they are unchanged); `discardIgnoredFiles: true` deletes the
   rest;
 - no submodule or nested repository is checked out in it, and no other
   checkout or worktree sits inside it, ignored folders included. The search
