@@ -329,6 +329,10 @@ catch up, however many times were missed.
   if the latest missed time is recent enough (12 hours by default, up to 7
   days). An older one is skipped and recorded the same way.
 
+A scheduled time that passed less than 2 minutes before the computer woke up
+is not missed: it runs as usual, and the earlier times of the same sleep are
+not reported.
+
 A paused or turned-off automation has no missed runs: turning one back on, or
 changing its schedule, starts counting from that moment. Before this setting
 existed, a cron trigger fired once, late, after the computer woke up; it now

@@ -343,6 +343,19 @@ async function integrationChecks({ sched, loop }, workspace) {
   assert.match(job.skips[0].detail, /while the computer was asleep/);
   pass("wake: a missed time is reported as missed during the sleep");
 
+  // A time that passed moments before the wake runs as usual, whichever of
+  // the wake check and croner's late fire sees it first.
+  const justNow = await sched.createJob({ name: "just now", trigger: { kind: "cron", expr: "* * * * *" }, input });
+  await backdate(justNow.id, 2 * HOUR);
+  await sched.catchUpScheduledJobs("wake");
+  await sleep(150);
+  assert.strictEqual(launchesFor(justNow.id), 1, "the slot of the last minute runs once");
+  const jn = await get(justNow.id);
+  assert.strictEqual(jn.skips, undefined, "and the earlier slots of the sleep are not reported");
+  assert.strictEqual(jn.history[jn.history.length - 1].catchUp, undefined, "it is an ordinary pass, not a catch-up");
+  await sched.setEnabled(justNow.id, false);
+  pass("wake: a time that passed less than 2 minutes ago is on time, not missed");
+
   // ── skip records: removal, cap, normalization ────────────────────────────
   const skipId = job.skips[0].id;
   await sched.deleteHistoryEntry(sleeper.id, skipId, job.skips[0].at);
@@ -491,7 +504,26 @@ async function main() {
   pureChecks(mod.cu, mod.shared);
   await integrationChecks(mod, workspace);
 
+  // Once the scheduler is stopped (quit), a late wake starts and records nothing.
+  const late = await mod.sched.createJob({
+    name: "after stop",
+    trigger: { kind: "cron", expr: "0 * * * *" },
+    input: { workspaceId: "ws", workspaceName: "test", cwd: workspace, initialUserNote: "x" },
+    missedRuns: { policy: "runOnce" },
+  });
+  await mod.sched.patchJob(late.id, (j) => ({
+    ...j,
+    createdAt: iso(Date.now() - 10 * HOUR),
+    scheduleCheckedAt: iso(Date.now() - 3 * HOUR),
+  }));
+  const launchesBefore = globalThis.__CU.launches.length;
   mod.sched.stopScheduler();
+  await mod.sched.catchUpScheduledJobs("wake");
+  await sleep(100);
+  assert.strictEqual(globalThis.__CU.launches.length, launchesBefore, "no pass after the scheduler stopped");
+  assert.strictEqual((await mod.sched.listJobs()).find((j) => j.id === late.id).skips, undefined);
+  pass("a wake after the scheduler stopped starts and records nothing");
+
   fs.rmSync(tmp, { recursive: true, force: true });
   console.log(`\nAll ${passed} automation catch-up checks PASSED.`);
 }

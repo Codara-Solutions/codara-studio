@@ -25,6 +25,7 @@ import {
   triggerHasSchedule,
 } from "@shared/automation-catchup";
 import {
+  LATE_FIRE_TOLERANCE_MS,
   classifyTick,
   decideMissed,
   missedBaselineMs,
@@ -785,6 +786,10 @@ export async function catchUpScheduledJobs(reason: "start" | "wake", nowMs: numb
         settleSerially(j.id, async () => {
           const job = await getJob(j.id);
           if (!job || !job.enabled || !triggerHasSchedule(job.trigger)) return;
+          // Only a trigger the scheduler armed has a schedule to settle: a wake
+          // that lands before startScheduler, or after stopScheduler during
+          // quit, must neither start a pass nor arm a timer.
+          if (!armed.has(job.id)) return;
           // An interval timer that counted the sleep would fire the moment the
           // machine wakes; restart it from now so its next fire is a full
           // interval after this check.
@@ -793,7 +798,15 @@ export async function catchUpScheduledJobs(reason: "start" | "wake", nowMs: numb
           const slots = scheduledSlotsBetween(job.trigger, since, nowMs);
           scheduleCheckpoint.set(job.id, Math.max(nowMs, scheduleCheckpoint.get(job.id) ?? 0));
           settled.push(job.id);
-          if (slots) await settleMissed(job, slots, nowMs, reason);
+          if (!slots) return;
+          // A time that passed moments before the wake is on time, exactly as
+          // when croner's own late fire notices it first (classifyTick). The
+          // verdict must not depend on which of the two runs first.
+          if (reason === "wake" && nowMs - slots.latestMs <= LATE_FIRE_TOLERANCE_MS) {
+            void startIterationViaDriver(job.id, { source: "trigger" });
+            return;
+          }
+          await settleMissed(job, slots, nowMs, reason);
         }),
       ),
   );
