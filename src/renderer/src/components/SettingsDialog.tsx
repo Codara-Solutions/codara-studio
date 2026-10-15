@@ -16,6 +16,7 @@ import {
 } from "@shared/agent-families";
 import { ALLOWED_WORKER_MODELS } from "@shared/worker-model-roster";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
+import type { ClaudeFollowStatus } from "@shared/claude-follow";
 import type {
   AppSettings,
   EditorThemeId,
@@ -1495,12 +1496,78 @@ function GithubWebhookSettings() {
 }
 
 
+// A plain `claude` typed in another terminal app uses the Active Claude
+// account (src/main/claude-follow). On by default; turning it off takes
+// Codara's line back out of the user's startup files. Only an installed app
+// sets it up, so a development build says so instead.
+function ClaudeFollowSetting() {
+  const [status, setStatus] = useState<ClaudeFollowStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let mounted = true;
+    void window.spark.claudeFollow
+      .status()
+      .then((next) => {
+        if (mounted) setStatus(next);
+      })
+      .catch(() => {
+        // No status, no row: the setting keeps its stored value.
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  if (!status) return null;
+  const change = (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    setStatus({ ...status, enabled });
+    void window.spark.claudeFollow
+      .set(enabled)
+      .then(setStatus)
+      .catch((reason: unknown) => {
+        setStatus(status);
+        setError(reason instanceof Error ? reason.message : String(reason));
+      })
+      .finally(() => setBusy(false));
+  };
+  return (
+    <SettingsSection title="Other terminals">
+      <ToggleRow
+        title="Use the Active Claude account in other terminals"
+        anchor="Use the Active Claude account in other terminals"
+        checked={status.enabled}
+        disabled={busy}
+        onChange={change}
+        desc={
+          <>
+            Typing <code className="spark-mono">claude</code> in any other terminal app uses the Active
+            Claude account, like a Codara terminal does. Your own Claude login is never changed: turn
+            this off, or remove Codara Studio, and <code className="spark-mono">claude</code> uses your
+            own login again.
+            {status.windows ? " Command Prompt always uses your own login." : ""}
+            {status.enabled && !status.available
+              ? " This copy of Codara can't set it up; the installed app does."
+              : ""}
+          </>
+        }
+      />
+      {error ? <InlineMessage tone="danger" role="alert">{error}</InlineMessage> : null}
+    </SettingsSection>
+  );
+}
+
 // The "Use the Active account in your terminal" feature was removed: plain
 // `claude` keeps its chats, settings, agents, and commands inside the config
 // directory that setting redirected, so switching accounts made the terminal
 // lose all of that state. This note only appears while the block the old
 // feature added is still in the user's shell startup file, and tells them how
-// to delete it themselves. Codara no longer edits shell startup files at all.
+// to delete it themselves. That block is never edited; the one line Codara
+// keeps in startup files now is ClaudeFollowSetting's, which shares the
+// user's Claude state instead of hiding it.
 function TerminalAccountLeftoverNote() {
   const [leftover, setLeftover] = useState<NativeCliShellProfileLeftover | null>(null);
 
@@ -2387,10 +2454,10 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
               Every account is one sign-in for Cora and its terminal tool. The Active account is used by new Codara terminals and new Cora chats.
             </p>
             <p>
-              Sign-ins for Cora and for the Claude Code, Codex and Grok terminals that Codara opens. They stay inside Codara. Your own logins and settings, and every terminal outside Codara, are never changed.
+              Sign-ins for Cora and for the Claude Code, Codex and Grok terminals that Codara opens. They stay inside Codara. Your own logins and settings are never changed.
             </p>
             <p>
-              Only Codara uses an account you add here. A row marked as your own login is the login on this computer: Codara uses it as it is and never changes it.
+              An account you add here is used by Codara, and by <code className="spark-mono">claude</code> in other terminals while "Use the Active Claude account in other terminals" is on. A row marked as your own login is the login on this computer: Codara uses it as it is and never changes it.
             </p>
             <dl>
               {providerViews.map((view) => (
@@ -2431,6 +2498,8 @@ export function AccountsSettings({ guided = false, onBusyChange }: {
 
         {cliError ? <InlineMessage tone="danger" role="alert">{cliError}</InlineMessage> : null}
       </SettingsSection>
+
+      <ClaudeFollowSetting />
 
       <SettingsSection title="Limits and runtime">
         <FastModeRow />

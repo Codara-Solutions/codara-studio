@@ -203,9 +203,18 @@ assert.ok(
 // says what the page is, so the detail lives in the switching explainer.
 assert.ok(
   settings.includes(
-    "Sign-ins for Cora and for the Claude Code, Codex and Grok terminals that Codara opens. They stay inside Codara. Your own logins and settings, and every terminal outside Codara, are never changed.",
+    "Sign-ins for Cora and for the Claude Code, Codex and Grok terminals that Codara opens. They stay inside Codara. Your own logins and settings are never changed.",
   ),
 );
+// A plain `claude` in other terminals follows the Active Claude account
+// while its setting is on (src/main/claude-follow); the explainer says so
+// rather than promising those terminals are untouched.
+assert.ok(
+  settings.includes(
+    'An account you add here is used by Codara, and by <code className="spark-mono">claude</code> in other terminals while "Use the Active Claude account in other terminals" is on.',
+  ),
+);
+assert.doesNotMatch(settings, /every terminal outside Codara, are never changed/);
 assert.doesNotMatch(settings, /closes that tool's running sessions first/);
 
 // One Use, one Reconnect, one Share, one Rename, one Delete, all through

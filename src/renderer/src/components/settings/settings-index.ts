@@ -201,6 +201,8 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "agents", title: "Anthropic", label: "Anthropic accounts", desc: "Claude accounts for Cora and Claude Code.", keywords: "claude code claude login account email limits switch system own login" },
   { tab: "agents", title: "OpenAI", label: "OpenAI accounts", desc: "ChatGPT accounts for Cora and Codex.", keywords: "codex chatgpt codex login account email limits switch system own login" },
   { tab: "agents", title: "xAI", label: "xAI accounts", desc: "SuperGrok accounts for Cora and Grok.", keywords: "grok supergrok grok login account email switch system own login" },
+  { tab: "agents", title: "Other terminals", desc: "How claude in other terminal apps picks its account.", keywords: "claude terminal outside other apps iterm windows terminal shell" },
+  { tab: "agents", title: "Use the Active Claude account in other terminals", desc: "Typing claude in any other terminal app uses the Active Claude account.", section: "Other terminals", keywords: "claude code terminal iterm shell zsh bash fish powershell outside follow active account login startup file" },
   { tab: "agents", title: "Usage limits", desc: "Re-read every account's limits now.", section: "Limits and runtime", keywords: "quota rate limit refresh" },
   { tab: "agents", title: "Fast mode", desc: "Cora and her workers answer faster on models that support it, at a higher price.", section: "Limits and runtime", keywords: "speed faster priority service tier premium lightning flash", toggle: "fastMode" },
   { tab: "agents", title: "Pi runtime", desc: "The coding agent Cora runs on.", section: "Limits and runtime", keywords: "pi install version" },

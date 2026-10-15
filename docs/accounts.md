@@ -12,9 +12,12 @@ design behind it, with file references, is in
   sign-in serves both Cora and the matching terminal tool (Claude Code, Codex
   or Grok) in the terminals Codara opens.
 - Accounts stay inside Codara, in `~/.codarastudio`. Your own Claude Code,
-  Codex and Grok logins and settings (`~/.claude`, `~/.claude.json`,
-  `~/.codex`, `~/.grok`), and every terminal outside Codara, are never
-  changed.
+  Codex and Grok logins (`~/.claude`, `~/.claude.json`, `~/.codex`,
+  `~/.grok`) are never changed.
+- A plain `claude` typed in any other terminal app uses the Active Claude
+  account too, while **Use the Active Claude account in other terminals**
+  (Settings, Accounts; on by default) is on. See
+  [Claude in other terminals](#claude-in-other-terminals).
 - For each provider, one account is the **Active** one. New Codara terminals
   and new Cora chats use it.
 - Your own login on this computer (the **System login**) can be used as an
@@ -187,3 +190,40 @@ terminals no longer carry `APPIMAGE`, `APPDIR`, `OWD` or `ARGV0`.
 
 Every file an account leaves on disk is listed in
 [on-your-machine.md](./on-your-machine.md).
+
+## Claude in other terminals
+
+With **Use the Active Claude account in other terminals** on, typing
+`claude` in Terminal, iTerm, Windows Terminal, VS Code's terminal or any
+other terminal app runs Claude Code with the Active Claude account, the same
+way a Codara terminal does, and a switch in Codara reaches those sessions on
+their next request. Your own Claude login is never changed: with your own
+login active in Codara, with the setting off, or once Codara Studio is
+removed, `claude` uses your own login again.
+
+How it works: Codara adds one guarded line to the startup file of each shell
+you use (`~/.zshrc`, `~/.bashrc`, `~/.bash_profile` on macOS, a fish
+`conf.d` file, your PowerShell profile on Windows, Git Bash's `~/.bashrc`).
+The line loads a small script from `~/.codarastudio/shell/` only while that
+script exists, and the script only acts while the app is still installed.
+Each file is backed up to `~/.codarastudio/backups/claude-follow/` before the
+first edit; a file kept in a git repository, a signed PowerShell profile and
+a PowerShell profile your execution policy would refuse are left alone.
+Turning the setting off takes the lines out again, and so does the Windows
+uninstaller; on macOS and Linux the line simply does nothing once the app is
+gone.
+
+It stays out of the way: it does nothing when you set `CLAUDE_CONFIG_DIR` or
+another Claude login variable yourself, when you have your own `claude` alias
+or function, inside Codara's own terminals, or in scripts. Command Prompt
+(`cmd.exe`) always uses your own login.
+
+While it is on, Codara keeps your MCP servers and the folders you trusted in
+step between `~/.claude.json` and the active account, copies your MCP
+sign-ins once (a server that rotates its tokens may ask you to sign in to it
+once more), and a `/login` typed in one of those terminals becomes an account
+in Codara and the Active one.
+
+Only the installed app sets this up. A development build does so only when
+started with `CODARA_CLAUDE_FOLLOW_DEV=1`.
+

@@ -594,6 +594,11 @@ export default function OnboardingDialog({
                   provider plan. Installing a CLI and signing in are separate
                   steps. If the Cora runtime is missing, install it below first.
                 </p>
+                <p className="onboarding-note">
+                  Typing <code>claude</code> in your other terminals also uses
+                  the Active Claude account. You can turn this off in Settings,
+                  Accounts.
+                </p>
                 <Suspense
                   fallback={<p role="status">Loading secure sign-in…</p>}
                 >

@@ -132,6 +132,22 @@ test("accounts switch in one click, offer the System login, and remove for good"
     await expect(dialog.getByText(/New Codex sessions use the new account\. Running ones keep theirs\./)).toBeVisible();
     await expect(row("main@example.com").getByText("Signed in", { exact: true })).toBeVisible();
     await expect(dialog.getByText("MCP servers that need a sign-in must be connected once in each Codara account.")).toBeVisible();
+    await expect(dialog.getByText(/by claude in other terminals while "Use the Active Claude account in other terminals" is on/)).toBeVisible();
+
+    // A plain `claude` in other terminals follows the Active account: on by
+    // default. Only an installed app sets it up, so this test build says so
+    // and writes nothing outside its own folder when the switch moves.
+    const follow = dialog.getByRole("switch", { name: "Use the Active Claude account in other terminals" });
+    await expect(follow).toHaveAttribute("aria-checked", "true");
+    await expect(dialog.getByText(/This copy of Codara can't set it up; the installed app does\./)).toBeVisible();
+    await follow.click();
+    await expect(follow).toHaveAttribute("aria-checked", "false");
+    await expect(dialog.getByText(/This copy of Codara can't set it up/)).toHaveCount(0);
+    expect(await page.evaluate(() => (window as unknown as { spark: { claudeFollow: { status(): Promise<{ enabled: boolean; available: boolean; files: string[] }> } } }).spark.claudeFollow.status())).toEqual(
+      expect.objectContaining({ enabled: false, available: false, files: [] }),
+    );
+    await follow.click();
+    await expect(follow).toHaveAttribute("aria-checked", "true");
 
     // One click switches; nothing asks to close sessions.
     await row("next@example.com").getByRole("button", { name: "Switch to this account", exact: true }).click();

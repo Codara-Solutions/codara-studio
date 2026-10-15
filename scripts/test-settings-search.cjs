@@ -59,6 +59,7 @@ const DIALOG_FUNCTION_TABS = {
   AgentsSettings: "agents",
   FastModeRow: "agents",
   TerminalAccountLeftoverNote: "agents",
+  ClaudeFollowSetting: "agents",
   PiRuntimeInstallRow: "agents",
   PiLoginPanel: "agents",
   SessionsSettings: "sessions",
