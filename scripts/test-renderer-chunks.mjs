@@ -107,7 +107,11 @@ const genericVendor = chunks.find(
 assert(!genericVendor, `generic vendor chunk returned as ${genericVendor?.fileName}`);
 
 const normalizeId = (id) => id.replaceAll("\\", "/");
-const reactModulePattern = /\/node_modules\/(?:react|react-dom)\//;
+// The React runtime. react-dom/server is a separate renderer with no state
+// of its own, used only by the Share packager; it gets its own lazy chunk
+// (react-dom-server-vendor) and is checked below as feature-only.
+const reactServerPattern = /\/node_modules\/react-dom\/(?:server|cjs\/react-dom-server)/;
+const reactModulePattern = { test: (id) => /\/node_modules\/(?:react|react-dom)\//.test(id) && !reactServerPattern.test(id) };
 const reactOwners = chunks.filter((chunk) =>
   Object.keys(chunk.modules).some((id) => reactModulePattern.test(normalizeId(id))),
 );
@@ -139,6 +143,10 @@ const featureOnlyPackages = [
   {
     label: "Mermaid",
     pattern: /\/node_modules\/(?:mermaid|@mermaid-js)\//,
+  },
+  {
+    label: "React server rendering (Share packager)",
+    pattern: reactServerPattern,
   },
   {
     label: "QR code",

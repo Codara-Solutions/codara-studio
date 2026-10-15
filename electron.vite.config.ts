@@ -143,6 +143,10 @@ export default defineConfig(({ command }) => ({
         output: {
           manualChunks(id: string) {
             if (!id.includes("node_modules")) return undefined;
+            // react-dom/server is only used by the Share packager, which renders
+            // Markdown to a page off screen. Without its own chunk it would ride
+            // in the eager react-vendor chunk below and load with every window.
+            if (/[\\/]node_modules[\\/]react-dom[\\/](server|cjs[\\/]react-dom-server)/.test(id)) return "react-dom-server-vendor";
             // react-vendor must stay a leaf chunk (no imports back into "vendor",
             // which would make the chunk graph circular), so react-dom's runtime
             // helpers ride along with it.
