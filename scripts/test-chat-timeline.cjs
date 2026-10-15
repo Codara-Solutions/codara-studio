@@ -771,7 +771,7 @@ async function main() {
     const bubble = timeline.find((item) => item.kind === "message" && item.id === "msg-resume");
     assert.ok(bubble, "the resume note must render as a chat message");
     assert.equal(bubble.author, "user");
-    assert.equal(bubble.text, "Resume — hand 2 interrupted attempts back to Cora");
+    assert.equal(bubble.text, "Resume: hand 2 interrupted attempts back to Cora");
     assert.equal(bubble.at, at(30));
     assert.equal(
       timeline.some((item) => item.id === "resume-note:msg-resume"),
@@ -794,7 +794,7 @@ async function main() {
     ].join("\n");
     const timeline = T.buildChatTimeline(syntheticNoteRun("msg-capped", "resumeNote", capped));
     const bubble = timeline.find((item) => item.kind === "message" && item.id === "msg-capped");
-    assert.equal(bubble.text, "Resume — hand 5 interrupted attempts back to Cora");
+    assert.equal(bubble.text, "Resume: hand 5 interrupted attempts back to Cora");
   });
 
   test("a plain resume note (no interrupted attempts) renders as a bare Resume bubble", () => {
