@@ -3,6 +3,7 @@ import {
   NO_KEEP_AWAKE_ACTIVITY,
   normalizeKeepAwakeMode,
   type KeepAwakeActivity,
+  type KeepAwakeBattery,
   type KeepAwakeStatus,
 } from "@shared/keep-awake";
 import { E2E_BACKGROUND } from "../e2e-background";
@@ -13,6 +14,7 @@ import * as pty from "../pty-manager";
 import { subscribeAgentBoardChanged } from "../agent-board-signal";
 import { terminalAgentStateSnapshot } from "../terminal-agent-notify";
 import { combineKeepAwakeActivity, countWorkingTerminalAgents } from "./activity";
+import { batteryFrom, readLinuxPower, systemPowerSupplyProbe } from "./battery";
 import { KeepAwakeController, type LidHold, type SleepBlocker } from "./controller";
 import { detectLidSupport, systemLidSupportProbe } from "./lid-support";
 import { LinuxLidInhibitor } from "./linux-lid-inhibitor";
@@ -40,6 +42,7 @@ const teardown: Array<() => void> = [];
 let runStore: typeof import("../orchestration/run-store") | null = null;
 let workflowDriver: typeof import("../orchestration/workflow-driver") | null = null;
 let simulated: KeepAwakeActivity = { ...NO_KEEP_AWAKE_ACTIVITY };
+let simulatedBattery: KeepAwakeBattery | null = null;
 
 function log(message: string): void {
   logMain("keep-awake", message);
@@ -77,6 +80,14 @@ function readActivity(): KeepAwakeActivity {
   };
 }
 
+// Only read while the user wants the lid held (controller.ts), and only on
+// Linux, the one platform with a lid hold. Under the e2e suite the battery
+// is whatever the spec simulates: the runner's own battery must not decide.
+function readBattery(): KeepAwakeBattery | null {
+  if (E2E_BACKGROUND) return simulatedBattery ? { ...simulatedBattery } : null;
+  return batteryFrom(readLinuxPower(systemPowerSupplyProbe()), powerMonitor.isOnBatteryPower());
+}
+
 interface E2eHoldRecord {
   active: boolean;
   starts: number;
@@ -87,6 +98,8 @@ interface E2eKeepAwakeProbe {
   blocker: E2eHoldRecord;
   lid: E2eHoldRecord | null;
   simulate(activity: Partial<KeepAwakeActivity>): KeepAwakeStatus | null;
+  /** null takes the battery away, as on a desktop. */
+  simulateBattery(battery: KeepAwakeBattery | null): KeepAwakeStatus | null;
   status(): KeepAwakeStatus | null;
 }
 
@@ -97,6 +110,10 @@ function e2eProbe(lidSupported: boolean): E2eKeepAwakeProbe {
     simulate: (activity) => {
       simulated = { ...NO_KEEP_AWAKE_ACTIVITY, ...activity };
       return controller?.refresh("e2e") ?? null;
+    },
+    simulateBattery: (battery) => {
+      simulatedBattery = battery ? { ...battery } : null;
+      return controller?.refresh("e2e battery") ?? null;
     },
     status: () => controller?.status() ?? null,
   };
@@ -214,6 +231,7 @@ export function startKeepAwake(): void {
     readMode: () => normalizeKeepAwakeMode(getPreferenceCached("keepAwakeMode")),
     readLidEnabled: () => getPreferenceCached("keepAwakeLidClosed") === true,
     readActivity,
+    readBattery: lid ? readBattery : undefined,
     onStatus: broadcast,
     log,
   });
@@ -231,6 +249,16 @@ export function startKeepAwake(): void {
   const onResume = () => controller?.refresh("resume");
   powerMonitor.on("resume", onResume);
   teardown.push(() => powerMonitor.off("resume", onResume));
+  // Unplugging can find the battery already low, and plugging in brings the
+  // lid hold back at once; the poll covers the charge draining in between.
+  const onBattery = () => controller?.refresh("on battery");
+  const onAc = () => controller?.refresh("on mains");
+  powerMonitor.on("on-battery", onBattery);
+  powerMonitor.on("on-ac", onAc);
+  teardown.push(() => {
+    powerMonitor.off("on-battery", onBattery);
+    powerMonitor.off("on-ac", onAc);
+  });
   attachOrchestration();
 
   // The preferences cache is warm by now; load() is a no-op then and covers

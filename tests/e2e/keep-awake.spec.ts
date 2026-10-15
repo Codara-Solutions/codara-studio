@@ -6,8 +6,8 @@ import { join } from "node:path";
 
 // Keep the computer awake, end to end: the title-bar cup follows what main
 // holds, the popover's modes work from the keyboard and persist, the lid
-// option shows where main offers it, Settings has the same controls, and
-// quitting releases every hold for good.
+// option shows where main offers it and lets go on a low battery, Settings
+// has the same controls, and quitting releases every hold for good.
 //
 // Under the e2e flag main swaps the OS holds for records on
 // globalThis.__codaraKeepAwake (src/main/keep-awake/index.ts), so this run
@@ -43,6 +43,15 @@ async function simulate(app: ElectronApplication, activity: Activity): Promise<v
   await app.evaluate((_electron, next) => {
     (globalThis as Record<string, any>).__codaraKeepAwake.simulate(next);
   }, activity);
+}
+
+async function simulateBattery(
+  app: ElectronApplication,
+  battery: { onBattery: boolean; level: number | null } | null,
+): Promise<void> {
+  await app.evaluate((_electron, next) => {
+    (globalThis as Record<string, any>).__codaraKeepAwake.simulateBattery(next);
+  }, battery);
 }
 
 async function savedPreferences(codaraHome: string): Promise<Record<string, unknown>> {
@@ -127,6 +136,25 @@ test("keep awake follows agent work, from the title bar and Settings, and ends w
     expect((await probe(app)).lid?.active, "no lid hold while Off").toBe(false);
     await modeRadio("Always").click();
     await expect.poll(async () => (await probe(app!)).lid?.active).toBe(true);
+
+    // On a low battery the lid lock lets go, since it also blocks the
+    // hibernate a critical battery triggers. The switch stays on, its line
+    // says why, and the charger brings the lock back.
+    await simulateBattery(app, { onBattery: true, level: 8 });
+    await expect.poll(async () => (await probe(app!)).lid?.active).toBe(false);
+    expect((await probe(app)).blocker.active, "idle sleep stays blocked").toBe(true);
+    const pausedHint = lidSwitch.locator('[data-keep-awake-lid-paused="battery"]');
+    await expect(pausedHint).toHaveText(
+      "Off for now: the battery is at 8%, so a closed lid or a critical battery can still suspend this laptop. It comes back when it charges or reaches 15%.",
+    );
+    await expect(lidSwitch).toHaveAttribute("aria-checked", "true");
+    await simulateBattery(app, { onBattery: true, level: 12 });
+    await expect(pausedHint).toContainText("at 12%");
+    expect((await probe(app)).lid?.active, "12% is not enough to take it again").toBe(false);
+    await simulateBattery(app, { onBattery: false, level: 12 });
+    await expect.poll(async () => (await probe(app!)).lid?.active).toBe(true);
+    await expect(pausedHint).toHaveCount(0);
+    await simulateBattery(app, null);
 
     // Escape closes and gives focus back to the cup.
     await modeRadio("Always").focus();

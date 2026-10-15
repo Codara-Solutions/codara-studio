@@ -13,7 +13,10 @@
 //      the OS dropped it, survives a throwing OS, polls only in "agents" mode,
 //      and after dispose() never holds again.
 //   3. The lid hold is only taken while the blocker is held and the user
-//      opted in.
+//      opted in, and lets go on battery at 10% or less (the lock also blocks
+//      the hibernate a critical battery triggers), taking it again once
+//      charging or back at 15%. The battery is read from the kernel's power
+//      supplies, a mouse's or headset's battery left out.
 //   4. The Linux lid helper is spawned as systemd-inhibit with a block lock on
 //      sleep and the lid switch, released on stop, backs off when refused,
 //      gives up for good when the binary is missing, and dies with its parent
@@ -167,6 +170,8 @@ function harness(KeepAwakeController, overrides = {}) {
     lidEnabled: false,
     activity: { terminalAgents: 0, chats: 0, automations: 0, workers: 0 },
     activityReads: 0,
+    battery: null,
+    batteryReads: 0,
     statuses: [],
     logs: [],
   };
@@ -183,6 +188,13 @@ function harness(KeepAwakeController, overrides = {}) {
       if (state.activityThrows) throw new Error(state.activityThrows);
       return state.activity;
     },
+    readBattery: overrides.battery
+      ? () => {
+          state.batteryReads += 1;
+          if (state.batteryThrows) throw new Error(state.batteryThrows);
+          return state.battery;
+        }
+      : undefined,
     onStatus: (status) => state.statuses.push(status),
     log: (line) => state.logs.push(line),
     setInterval: timers.setInterval,
@@ -200,6 +212,7 @@ async function main() {
   const { mod: lidMod, outfile: lidBundle } = await load("src/main/keep-awake/linux-lid-inhibitor.ts", "lid");
   const { mod: supportMod } = await load("src/main/keep-awake/lid-support.ts", "support");
   const { mod: activityMod } = await load("src/main/keep-awake/activity.ts", "activity");
+  const { mod: batteryMod } = await load("src/main/keep-awake/battery.ts", "battery");
   const { KeepAwakeController } = controllerMod;
 
   // ── 1. Policy and words ────────────────────────────────────────────────
@@ -230,7 +243,7 @@ async function main() {
       mode: "agents",
       holding: true,
       activity: ZERO,
-      lid: { supported: false, enabled: false, active: false, error: null },
+      lid: { supported: false, enabled: false, active: false, error: null, pausedForBattery: false, batteryLevel: null },
       error: null,
       ...over,
     });
@@ -250,12 +263,51 @@ async function main() {
     assert.match(shared.keepAwakeIndicatorLabel(status({ holding: false })), /^Keep awake: while agents work\./);
   });
 
+  await check("the lid hold lets go on battery at 10% and comes back at 15% or on the charger", () => {
+    const low = (wasLow, onBattery, level) => shared.lidBatteryLow(wasLow, { onBattery, level });
+    assert.equal(shared.LID_BATTERY_RELEASE_AT, 10);
+    assert.equal(shared.LID_BATTERY_RESUME_AT, 15);
+    assert.equal(shared.lidBatteryLow(false, null), false, "no battery, nothing to protect");
+    assert.equal(low(false, true, 11), false);
+    assert.equal(low(false, true, 10), true);
+    assert.equal(low(false, true, 3), true);
+    assert.equal(low(true, true, 12), true, "between the two levels it stays off");
+    assert.equal(low(false, true, 12), false, "and stays on");
+    assert.equal(low(true, true, 15), false);
+    assert.equal(low(true, false, 4), false, "charging brings it back at once");
+    assert.equal(low(true, true, null), true, "an unreadable charge keeps the last answer");
+    assert.equal(low(false, true, null), false);
+  });
+
+  await check("the lid row says why it is off on a low battery", () => {
+    const lid = (over) => ({
+      supported: true,
+      enabled: true,
+      active: false,
+      error: null,
+      pausedForBattery: false,
+      batteryLevel: null,
+      ...over,
+    });
+    assert.equal(
+      shared.keepAwakeLidBatteryNote(8),
+      "Off for now: the battery is at 8%, so a closed lid or a critical battery can still suspend this laptop. It comes back when it charges or reaches 15%.",
+    );
+    assert.match(shared.keepAwakeLidBatteryNote(null), /^Off for now: the battery is low,/);
+    assert.equal(shared.keepAwakeLidHint(lid({ pausedForBattery: true, batteryLevel: 7 })), shared.keepAwakeLidBatteryNote(7));
+    assert.equal(shared.keepAwakeLidHint(lid({ error: "Refused." })), "Refused.");
+    assert.equal(shared.keepAwakeLidHint(lid({ enabled: false, pausedForBattery: true })), shared.KEEP_AWAKE_LID_HINT);
+    assert.match(shared.KEEP_AWAKE_LID_HINT, /until 10% is left\.$/);
+  });
+
   await check("no dashes in the keep-awake UI copy", () => {
     for (const file of [
       ["src", "shared", "keep-awake.ts"],
       ["src", "renderer", "src", "components", "keep-awake", "KeepAwakeControl.tsx"],
       ["src", "renderer", "src", "components", "keep-awake", "KeepAwakeSettings.tsx"],
       ["src", "main", "keep-awake", "linux-lid-inhibitor.ts"],
+      ["src", "main", "keep-awake", "controller.ts"],
+      ["src", "main", "keep-awake", "battery.ts"],
     ]) {
       assert.doesNotMatch(read(...file), /[–—]/, file.join("/"));
     }
@@ -379,7 +431,14 @@ async function main() {
     state.lidEnabled = true;
     let status = controller.refresh("setting");
     assert.equal(lid.active, true);
-    assert.deepEqual(status.lid, { supported: true, enabled: true, active: true, error: null });
+    assert.deepEqual(status.lid, {
+      supported: true,
+      enabled: true,
+      active: true,
+      error: null,
+      pausedForBattery: false,
+      batteryLevel: null,
+    });
 
     state.mode = "agents";
     status = controller.refresh("setting");
@@ -399,7 +458,14 @@ async function main() {
     state.mode = "always";
     state.lidEnabled = true;
     const status = controller.start();
-    assert.deepEqual(status.lid, { supported: false, enabled: true, active: false, error: null });
+    assert.deepEqual(status.lid, {
+      supported: false,
+      enabled: true,
+      active: false,
+      error: null,
+      pausedForBattery: false,
+      batteryLevel: null,
+    });
   });
 
   await check("a blocker the OS refuses takes no lid hold either", () => {
@@ -410,6 +476,79 @@ async function main() {
     state.lidEnabled = true;
     controller.start();
     assert.equal(lid.active, false);
+  });
+
+  await check("the lid hold lets go on a low battery and comes back on the charger", () => {
+    const { controller, blocker, lid, timers, state } = harness(KeepAwakeController, { battery: true });
+    state.mode = "always";
+    state.lidEnabled = true;
+    state.battery = { onBattery: true, level: 40 };
+    let status = controller.start();
+    assert.equal(lid.active, true);
+    assert.equal(status.lid.pausedForBattery, false);
+    assert.equal(timers.intervals.size, 1, "a lid hold polls the battery even in Always");
+
+    state.battery = { onBattery: true, level: 9 };
+    timers.tick();
+    status = controller.status();
+    assert.equal(lid.active, false, "the lock goes so a critical battery can hibernate");
+    assert.equal(status.holding, true, "idle sleep stays blocked");
+    assert.equal(blocker.held.size, 1);
+    assert.equal(status.lid.enabled, true, "the user's choice is kept");
+    assert.equal(status.lid.pausedForBattery, true);
+    assert.equal(status.lid.batteryLevel, 9);
+    assert.ok(state.logs.some((line) => line.includes("letting go of the lid hold")));
+
+    state.battery = { onBattery: true, level: 13 };
+    timers.tick();
+    assert.equal(lid.active, false, "13% is not enough to take it again");
+    assert.equal(controller.status().lid.batteryLevel, 13);
+
+    state.battery = { onBattery: false, level: 13 };
+    controller.refresh("on mains");
+    status = controller.status();
+    assert.equal(lid.active, true, "plugged in, the hold is back");
+    assert.equal(status.lid.pausedForBattery, false);
+    assert.equal(status.lid.batteryLevel, null);
+
+    state.battery = { onBattery: true, level: 13 };
+    timers.tick();
+    assert.equal(lid.active, true, "unplugged at 13%, it stays on until 10%");
+    state.battery = { onBattery: true, level: 10 };
+    timers.tick();
+    assert.equal(lid.active, false);
+    state.battery = { onBattery: true, level: 15 };
+    timers.tick();
+    assert.equal(lid.active, true, "back at 15%");
+    assert.equal(lid.starts, 3);
+  });
+
+  await check("the battery is read only while the lid hold is wanted", () => {
+    const { controller, timers, state } = harness(KeepAwakeController, { battery: true });
+    state.mode = "always";
+    state.battery = { onBattery: true, level: 5 };
+    controller.start();
+    assert.equal(state.batteryReads, 0, "lid option off");
+    assert.equal(timers.intervals.size, 0, "and no poll for it");
+    state.lidEnabled = true;
+    const status = controller.refresh("setting");
+    assert.equal(state.batteryReads, 1);
+    assert.equal(status.lid.pausedForBattery, true);
+    state.lidEnabled = false;
+    const off = controller.refresh("setting");
+    assert.equal(off.lid.pausedForBattery, false, "nothing to explain once the option is off");
+    assert.equal(timers.intervals.size, 0);
+  });
+
+  await check("a battery reader that throws keeps the lid hold and logs", () => {
+    const { controller, lid, state } = harness(KeepAwakeController, { battery: true });
+    state.mode = "always";
+    state.lidEnabled = true;
+    state.batteryThrows = "no sysfs";
+    const status = controller.start();
+    assert.equal(lid.active, true);
+    assert.equal(status.lid.pausedForBattery, false);
+    assert.ok(state.logs.some((line) => line.includes("no sysfs")));
   });
 
   await check("dispose releases everything and nothing holds again", () => {
@@ -689,6 +828,69 @@ async function main() {
     });
   }
 
+  // ── 4b. Reading the battery on Linux ───────────────────────────────────
+
+  function powerSupplies(supplies) {
+    const dir = batteryMod.POWER_SUPPLY_DIR;
+    return {
+      readDir: (p) => (p === dir ? Object.keys(supplies) : []),
+      readFile: (p) => {
+        const rest = p.slice(dir.length + 1).split("/");
+        const value = supplies[rest[0]]?.[rest[1]];
+        return value === undefined ? "" : `${value}\n`;
+      },
+    };
+  }
+  const reading = (supplies, electronOnBattery = false) =>
+    batteryMod.batteryFrom(batteryMod.readLinuxPower(powerSupplies(supplies)), electronOnBattery);
+
+  await check("the laptop's battery counts, a mouse's does not", () => {
+    assert.deepEqual(
+      reading({
+        AC: { type: "Mains", online: 0 },
+        BAT0: { type: "Battery", scope: "System", present: 1, status: "Discharging", capacity: 9 },
+        hidpp_battery_0: { type: "Battery", scope: "Device", status: "Discharging", capacity: 80 },
+      }),
+      { onBattery: true, level: 9 },
+    );
+    assert.equal(reading({ hidpp_battery_0: { type: "Battery", scope: "Device", capacity: 3 } }), null, "a desktop with a mouse");
+    assert.equal(reading({ AC: { type: "Mains", online: 1 } }), null);
+    assert.equal(reading({ BAT0: { type: "Battery", present: 0, capacity: 5 } }), null, "a removed battery");
+  });
+
+  await check("two batteries add up what they hold", () => {
+    assert.deepEqual(
+      reading({
+        BAT0: { type: "Battery", status: "Discharging", capacity: 10, energy_now: 5_000_000, energy_full: 50_000_000 },
+        BAT1: { type: "Battery", status: "Unknown", capacity: 100, energy_now: 25_000_000, energy_full: 25_000_000 },
+      }),
+      { onBattery: true, level: 40 },
+    );
+    assert.deepEqual(
+      reading({
+        BAT0: { type: "Battery", status: "Discharging", capacity: 10, charge_now: 1000, charge_full: 4000 },
+        BAT1: { type: "Battery", status: "Discharging", capacity: 30 },
+      }),
+      { onBattery: true, level: 20 },
+      "without every energy figure, the mean of the percentages",
+    );
+  });
+
+  await check("charging, a plugged in adapter and a drain decide on battery power", () => {
+    const bat = (status) => ({ type: "Battery", status, capacity: 8 });
+    assert.equal(reading({ BAT0: bat("Charging"), AC: { type: "Mains", online: 1 } }).onBattery, false);
+    assert.equal(reading({ BAT0: bat("Not charging"), AC: { type: "Mains", online: 1 } }).onBattery, false);
+    assert.equal(reading({ BAT0: bat("Full"), AC: { type: "Mains", online: 0 } }).onBattery, true);
+    assert.equal(
+      reading({ BAT0: bat("Discharging"), AC: { type: "Mains", online: 1 } }).onBattery,
+      true,
+      "a charger too weak for the load still drains it",
+    );
+    assert.equal(reading({ BAT0: bat("Unknown") }, true).onBattery, true, "unclear: the system's answer");
+    assert.equal(reading({ BAT0: bat("Unknown") }, false).onBattery, false);
+    assert.deepEqual(reading({ BAT0: { type: "Battery", status: "Discharging" } }), { onBattery: true, level: null });
+  });
+
   // ── 5. Where the lid option is offered ─────────────────────────────────
 
   function probe(over = {}) {
@@ -821,6 +1023,12 @@ async function main() {
     assert.match(wiring, /process\.on\("exit", stopKeepAwake\)/);
     // A test run must never hold the machine it runs on.
     assert.match(wiring, /if \(E2E_BACKGROUND\) \{\s*const probe = e2eProbe/);
+    // Plugging in or out refreshes at once; the battery is only read where
+    // there is a lid hold, and never the test runner's own under e2e.
+    assert.match(wiring, /powerMonitor\.on\("on-battery", onBattery\)/);
+    assert.match(wiring, /powerMonitor\.on\("on-ac", onAc\)/);
+    assert.match(wiring, /readBattery: lid \? readBattery : undefined/);
+    assert.match(wiring, /if \(E2E_BACKGROUND\) return simulatedBattery/);
     const boot = read("src", "main", "index.ts");
     const ready = boot.indexOf("app.whenReady()");
     const started = boot.indexOf("\n  startKeepAwake();");

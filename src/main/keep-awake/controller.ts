@@ -1,7 +1,9 @@
 import {
+  lidBatteryLow,
   NO_KEEP_AWAKE_ACTIVITY,
   shouldHoldAwake,
   type KeepAwakeActivity,
+  type KeepAwakeBattery,
   type KeepAwakeMode,
   type KeepAwakeStatus,
 } from "@shared/keep-awake";
@@ -16,7 +18,8 @@ import {
 //     when the OS throws;
 //   - after dispose() nothing is ever acquired again, whatever calls refresh;
 //   - the lid hold is only taken while the blocker decision is "hold" and the
-//     user opted in.
+//     user opted in, and never on a low battery: the lock blocks the
+//     hibernate a critical battery triggers too.
 
 /** Electron's powerSaveBlocker, narrowed to the one blocker type Codara takes. */
 export interface SleepBlocker {
@@ -44,6 +47,8 @@ export interface KeepAwakeControllerDeps {
   readMode(): KeepAwakeMode;
   readLidEnabled(): boolean;
   readActivity(): KeepAwakeActivity;
+  /** The battery, where there is one; null on mains-only machines. */
+  readBattery?(): KeepAwakeBattery | null;
   /** Called with every status that differs from the last one published. */
   onStatus(status: KeepAwakeStatus): void;
   log?: (message: string) => void;
@@ -71,6 +76,8 @@ export class KeepAwakeController {
   private last: KeepAwakeStatus | null = null;
   private lastKey = "";
   private lastActivityError = "";
+  private lidLowBattery = false;
+  private batteryLevel: number | null = null;
 
   constructor(private readonly deps: KeepAwakeControllerDeps) {}
 
@@ -96,8 +103,8 @@ export class KeepAwakeController {
     const hold = shouldHoldAwake(mode, activity);
     if (hold) this.acquire(reason);
     else this.release(reason);
-    this.syncLid(hold && this.blockerId !== null);
-    this.syncPoll(mode);
+    const lidWanted = this.syncLid(hold && this.blockerId !== null);
+    this.syncPoll(mode, lidWanted);
     return this.publish(mode, activity);
   }
 
@@ -174,19 +181,50 @@ export class KeepAwakeController {
     }
   }
 
-  private syncLid(holding: boolean): void {
+  /** True while the user wants the lid held, whether or not the battery lets it. */
+  private syncLid(holding: boolean): boolean {
     const lid = this.deps.lid;
-    if (!lid) return;
+    if (!lid) return false;
+    const wanted = holding && this.deps.readLidEnabled();
+    this.syncBattery(wanted);
     try {
-      if (holding && this.deps.readLidEnabled()) lid.start();
+      if (wanted && !this.lidLowBattery) lid.start();
       else lid.stop();
     } catch (err) {
       this.log(`lid hold failed: ${String(err)}`);
     }
+    return wanted;
   }
 
-  private syncPoll(mode: KeepAwakeMode): void {
-    if (mode !== "agents") {
+  private syncBattery(lidWanted: boolean): void {
+    if (!lidWanted || !this.deps.readBattery) {
+      this.lidLowBattery = false;
+      this.batteryLevel = null;
+      return;
+    }
+    let battery: KeepAwakeBattery | null = null;
+    try {
+      battery = this.deps.readBattery();
+    } catch (err) {
+      this.log(`battery read failed: ${String(err)}`);
+    }
+    const low = lidBatteryLow(this.lidLowBattery, battery);
+    if (low !== this.lidLowBattery) {
+      const level = battery?.level === null || battery?.level === undefined ? "unknown" : `${battery.level}%`;
+      this.log(
+        low
+          ? `battery low on battery power (${level}): letting go of the lid hold so the system can hibernate`
+          : `battery ${battery?.onBattery ? `back to ${level}` : "charging"}: taking the lid hold again`,
+      );
+    }
+    this.lidLowBattery = low;
+    this.batteryLevel = low ? (battery?.level ?? null) : null;
+  }
+
+  private syncPoll(mode: KeepAwakeMode, lidWanted: boolean): void {
+    // "Always" needs no activity poll, but a lid hold still follows the
+    // battery, which has no event for its level.
+    if (mode !== "agents" && !(lidWanted && this.deps.readBattery)) {
       this.stopPoll();
       return;
     }
@@ -215,6 +253,8 @@ export class KeepAwakeController {
         enabled: this.deps.readLidEnabled(),
         active: lid?.active ?? false,
         error: lid?.error ?? null,
+        pausedForBattery: this.lidLowBattery,
+        batteryLevel: this.batteryLevel,
       },
       error: this.blockerError,
     };
