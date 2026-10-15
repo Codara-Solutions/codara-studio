@@ -185,6 +185,7 @@ import { isAppTearingDown, markAppTearingDown } from "./lib/app-lifecycle";
 import { requestEditorReveal } from "./components/editor-cm/reveal";
 import { workspaceRailSequence, worktreeSourceWorkspace } from "./components/jump/rail-order";
 import { useWorkspaceJump } from "./components/jump/useWorkspaceJump";
+import { requestShareOffer, setShareWorkspaceRoots } from "./components/share/offer-store";
 import {
   buildAwayDigest,
   captureAwayDigestBaseline,
@@ -1658,6 +1659,8 @@ export default function App() {
   useEffect(() => {
     if (!booted) return;
     const cwds = workspaceCwdsKey ? workspaceCwdsKey.split("\0").filter((c) => c.length > 0) : [];
+    // The same folders bound what a shared page may embed (components/share/).
+    setShareWorkspaceRoots(cwds);
     void window.spark.ui?.setAllowedRoots(cwds).catch(() => {
       /* sandbox push is best-effort; failures only restrict reachable reads */
     });
@@ -4387,6 +4390,15 @@ export default function App() {
       window.removeEventListener("spark:open-review", openReview);
     };
   }, [handleOpenDiffForPath, openFileByPath]);
+
+  // An agent offered to share a page it wrote (codara_share_offer): open the
+  // file and its Share prompt. Nothing is uploaded until the user clicks Share.
+  useEffect(() => {
+    return window.spark.share?.onOffer(({ path }) => {
+      requestShareOffer(path);
+      openFileByPath(path);
+    });
+  }, [openFileByPath]);
 
   // Which diff tab is focused — highlights its ChangeRow in the git panel.
   // Commit-scoped diff tabs have no working-tree row to highlight.

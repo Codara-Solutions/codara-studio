@@ -190,6 +190,9 @@ async function main() {
     for (const row of renderedRows(remote.replace(pairing, ""))) {
       if (!findable("remote-access", row.name)) missing.push(`remote-access › ${row.name}`);
     }
+    for (const row of renderedRows(read(path.join(COMPONENTS, "share", "SharedPagesSettings.tsx")))) {
+      if (!findable("shared-pages", row.name)) missing.push(`shared-pages › ${row.name}`);
+    }
     const behavior = read(path.join(COMPONENTS, "capabilities", "BehaviorSection.tsx"));
     for (const row of renderedRows(behavior)) {
       if (!findable("capabilities", row.name)) missing.push(`capabilities › ${row.name}`);
@@ -241,6 +244,9 @@ async function main() {
     for (const row of renderedRows(read(path.join(COMPONENTS, "keep-awake", "KeepAwakeSettings.tsx")))) rendered.general.add(row.name);
     rendered["remote-access"] = new Set(
       renderedRows(read(path.join(COMPONENTS, "RemoteAccessSettings.tsx"))).map((row) => row.name),
+    );
+    rendered["shared-pages"] = new Set(
+      renderedRows(read(path.join(COMPONENTS, "share", "SharedPagesSettings.tsx"))).map((row) => row.name),
     );
     for (const row of launchArgsRows()) rendered.agents.add(row.name);
     rendered["quick-commands"] = new Set(renderedRows(read(QUICK_COMMANDS_PAGE)).map((row) => row.name));

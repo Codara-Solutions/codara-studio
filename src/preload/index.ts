@@ -53,6 +53,7 @@ import { agentHibernationApi } from "./areas/agent-hibernation";
 import { worktreeCleanupApi } from "./areas/worktree-cleanup";
 import { worktreeSetupApi } from "./areas/worktree-setup";
 import { portsApi } from "./areas/ports";
+import { shareApi } from "./areas/share";
 import type {
   CoraMemoryItem,
   MemoryItemKind,
@@ -1798,6 +1799,7 @@ const api = {
   diagnostics: diagnosticsApi,
   agentHibernation: agentHibernationApi,
   worktreeSetup: worktreeSetupApi,
+  share: shareApi,
   chromeLink: chromeLinkApi,
   keepAwake: keepAwakeApi,
   capture: captureApi,

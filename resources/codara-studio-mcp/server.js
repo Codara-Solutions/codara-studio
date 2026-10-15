@@ -258,6 +258,23 @@ const WORKSPACE_STATUS_TOOL = {
   },
 };
 
+// An agent that wrote a page meant for someone else can offer to share it.
+// The call only shows the user Codara's Share prompt for the file; nothing is
+// uploaded unless the user clicks Share there.
+const SHARE_TOOL = {
+  name: "codara_share_offer",
+  description:
+    "Show the user Codara's Share prompt for an HTML or Markdown page you wrote for someone else. Nothing is uploaded unless they choose Share. path: absolute or relative to your cwd.",
+  inputSchema: {
+    type: "object",
+    required: ["path"],
+    properties: {
+      path: { type: "string" },
+    },
+    additionalProperties: false,
+  },
+};
+
 // Agent worktrees. The repository is always the caller's own (its run or
 // terminal pane), so no tool takes a repo; the policy is in
 // src/main/agent-worktrees.ts and a refusal comes back as {ok:false, code,
@@ -1655,24 +1672,26 @@ if (IS_AUTOMATION_MODE) {
 } else if (IS_EXECUTE_MODE) {
   // EXECUTE_TOOLS already contains codara_ask_user and codara_name_chat, so the
   // execute map is spread LAST and keeps orchestrator.name_chat.
-  TOOLS = [...STUDIO_TOOLS, ...EXECUTE_TOOLS, ...MANAGER_AUTOMATION_TOOLS, ...WORKTREE_TOOLS, ...WORKFLOW_TOOLS];
+  TOOLS = [...STUDIO_TOOLS, ...EXECUTE_TOOLS, ...MANAGER_AUTOMATION_TOOLS, ...WORKTREE_TOOLS, ...WORKFLOW_TOOLS, SHARE_TOOL];
   TOOL_TO_RPC = {
     ...STUDIO_TOOL_TO_RPC,
     ...MANAGER_AUTOMATION_TOOL_TO_RPC,
     ...EXECUTE_TOOL_TO_RPC,
     ...WORKTREE_TOOL_TO_RPC,
     ...WORKFLOW_TOOL_TO_RPC,
+    codara_share_offer: "share.offer",
   };
 } else if (IS_WORKER_MODE) {
   TOOLS = WORKER_TOOLS;
   TOOL_TO_RPC = WORKER_TOOL_TO_RPC;
 } else if (process.env.CODARA_PI_DIRECT_TASK === "1") {
-  TOOLS = [...STUDIO_TOOLS, DIRECT_MEMORY_TOOL, RECALL_TOOL, ...WORKTREE_TOOLS];
+  TOOLS = [...STUDIO_TOOLS, DIRECT_MEMORY_TOOL, RECALL_TOOL, ...WORKTREE_TOOLS, SHARE_TOOL];
   TOOL_TO_RPC = {
     ...STUDIO_TOOL_TO_RPC,
     codara_remember: "orchestrator.remember",
     codara_recall: "orchestrator.recall",
     ...WORKTREE_TOOL_TO_RPC,
+    codara_share_offer: "share.offer",
   };
 } else if (STARTUP_RUN_ID) {
   // A chat worker or talk chat: Codara refuses worktree changes from either,
@@ -1682,12 +1701,13 @@ if (IS_AUTOMATION_MODE) {
 } else {
   // A user's own terminal agent. A Cora run already announces its outcome, so
   // only this roster carries the explicit notification.
-  TOOLS = [...STUDIO_TOOLS, NOTIFY_TOOL, WORKSPACE_STATUS_TOOL, ...WORKTREE_TOOLS];
+  TOOLS = [...STUDIO_TOOLS, NOTIFY_TOOL, WORKSPACE_STATUS_TOOL, ...WORKTREE_TOOLS, SHARE_TOOL];
   TOOL_TO_RPC = {
     ...STUDIO_TOOL_TO_RPC,
     codara_notify_user: "agent.notify",
     codara_workspace_status: "workspace.status",
     ...WORKTREE_TOOL_TO_RPC,
+    codara_share_offer: "share.offer",
   };
 }
 if (IS_UNTRUSTED_PULL_REQUEST) {
@@ -1823,6 +1843,11 @@ function buildInstructions() {
       "Worktrees: codara_worktree_create gives you an isolated checkout of your repository on its own branch, shown in the user's rail. Work there with absolute paths or git -C; your cwd stays put. Codara prepares it from the repository's .worktreeinclude and .codara/worktree.json (copied files, linked folders, setup command); when the result's setup is not finished, call codara_worktree_setup with wait:true before building, and read its logTail if it failed. Once the branch is merged, call codara_worktree_remove. It refuses anything unmerged, dirty or in use and never forces, so act on its code and hint instead of retrying.",
     );
   }
+  if (listed.has("codara_share_offer")) {
+    parts.push(
+      "When you write an HTML or Markdown report meant for someone else, call codara_share_offer once with its path so the user can share it as a link. It only shows the user a Share prompt.",
+    );
+  }
   if (listed.has("codara_notify_user")) {
     parts.push(
       "When you finish a task that took more than a minute, or you are blocked waiting for the user, call codara_notify_user once with a one-line summary.",
@@ -1895,7 +1920,7 @@ function isTransportTimeout(err) {
 }
 
 // Browser and terminal routing belongs to the launching process, not tool JSON.
-const CALLER_LOCATED_RPCS = new Set(["terminal.create", "terminal.run", "terminal.list", "terminal.servers", "agent.notify", "workspace.status"]);
+const CALLER_LOCATED_RPCS = new Set(["terminal.create", "terminal.run", "terminal.list", "terminal.servers", "agent.notify", "workspace.status", "share.offer"]);
 function injectRunIdForStudioOwnership(rpc, args) {
   if (
     !rpc.startsWith("preview.") &&
@@ -2412,6 +2437,7 @@ async function callTool(params, ctx = {}) {
   stampWorktreeCaller(rpc, args, ctx);
   stampWorkspaceStatusCaller(rpc, args, ctx);
   clampPreviewWait(rpc, args);
+  resolveShareOfferPath(rpc, args);
 
   const timeoutMs = rpcTimeoutMs(rpc);
   let heartbeat = null;
@@ -2457,10 +2483,20 @@ async function callTool(params, ctx = {}) {
     if (rpc === "workspace.status" && err && err.code === "SPARK_OFFLINE") {
       return toToolResult({ updated: false, reason: "codara_offline" });
     }
+    if (rpc === "share.offer" && err && err.code === "SPARK_OFFLINE") {
+      return toToolResult({ offered: false, reason: "codara_offline", note: "Codara is not open, so nothing was offered." });
+    }
     return toolError(errorText(err));
   } finally {
     if (heartbeat) clearInterval(heartbeat);
   }
+}
+
+// Codara resolves nothing against its own working directory: a relative path
+// is the agent's, so it is made absolute here, where the agent's cwd is known.
+function resolveShareOfferPath(rpc, args) {
+  if (rpc !== "share.offer" || typeof args.path !== "string" || args.path.length === 0) return;
+  if (!path.isAbsolute(args.path)) args.path = path.resolve(process.cwd(), args.path);
 }
 
 // wait_for must answer before the client gives up on the call, or the agent
@@ -2598,6 +2634,7 @@ function toolManifest() {
     terminal: names(TERMINAL_TOOLS),
     notify: names([NOTIFY_TOOL]),
     status: names([WORKSPACE_STATUS_TOOL]),
+    share: names([SHARE_TOOL]),
     worktree: names(WORKTREE_TOOLS),
     whiteboard: names(WHITEBOARD_TOOLS),
     board: names(BOARD_TOOLS),

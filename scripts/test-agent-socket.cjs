@@ -787,6 +787,7 @@ async function main() {
       ["terminal.run", { runId: "run-untrusted-pr", command: "id" }],
       ["terminal.list", { runId: "run-untrusted-pr" }],
       ["agent.notify", { runId: "run-untrusted-pr", kind: "done" }],
+      ["share.offer", { runId: "run-untrusted-pr", path: "/tmp/page.html" }],
       ["orchestrator.spawn_terminals", { runId: "run-untrusted-pr", terminals: [] }],
       ["orchestrator.remember", {
         runId: "run-untrusted-pr",
@@ -850,6 +851,23 @@ async function main() {
         placeless.result?.reason === "not_in_codara_terminal",
       JSON.stringify(placeless).slice(0, 180),
     );
+    // A share offer only ever names a page in a folder the app may read, and
+    // a refusal is an answer for the agent, not an error.
+    const shareDir = fs.mkdtempSync(path.join(os.tmpdir(), "cora-share-offer-"));
+    fs.writeFileSync(path.join(shareDir, "notes.txt"), "plain");
+    for (const [label, offerPath, reason] of [
+      ["a relative path", "page.html", "invalid"],
+      ["a file that is not a page", path.join(shareDir, "notes.txt"), "not_shareable"],
+      ["a missing file", path.join(shareDir, "gone.md"), "missing"],
+    ]) {
+      const refused = await rpc(handshake, "share.offer", { path: offerPath, callerPid: 1 });
+      check(
+        `share.offer refuses ${label}`,
+        !refused.error && refused.result?.offered === false && refused.result?.reason === reason,
+        JSON.stringify(refused).slice(0, 180),
+      );
+    }
+    fs.rmSync(shareDir, { recursive: true, force: true });
     // The remember budget stops write loops within one turn; it does not cap
     // a chat's whole life.
     fabricateRun("run-remember-budget", {

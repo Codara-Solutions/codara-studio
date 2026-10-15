@@ -1,38 +1,12 @@
 import { memo, useMemo, useRef } from "react";
 import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeRaw from "rehype-raw";
-import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
-import rehypeHighlight from "rehype-highlight";
 import MermaidBlock from "./MermaidBlock";
 import MarkdownReviewLayer from "../review/MarkdownReviewLayer";
+import { markdownRehypePipeline, markdownRemarkPlugins } from "./pipeline";
 import "./markdown.css";
 
-// Sanitizer schema for the raw HTML that rehype-raw expands. This file renders
-// fully untrusted markdown (model-generated plans, arbitrary repo READMEs) in
-// the privileged renderer that exposes the window.spark IPC surface, so the
-// raw HTML MUST be scrubbed before it reaches React. We extend the GitHub-style
-// defaultSchema (which already strips script/style/iframe, event-handler
-// attributes, and javascript: URLs) with two minimal additions:
-//   - `data` protocol on img[src] so inline `![](data:image/png;base64,...)`
-//     images keep working (defaultSchema only allows http/https for src).
-//   - details/summary are already in defaultSchema's tagNames, so no change
-//     needed there.
-// Code-fence highlighting is unaffected: sanitize runs BEFORE rehypeHighlight,
-// defaultSchema already allows the remark-added `language-*` className on
-// <code>, and the `hljs*` classes rehypeHighlight injects afterward are never
-// seen by the sanitizer. Mermaid is likewise unaffected — it is intercepted at
-// the `code` component via the `language-mermaid` class (preserved by the
-// `language-*` allowance) and rendered from the code's text content, not from
-// raw HTML. Relative/anchor/root-relative img+link refs pass through cleanly,
-// so the custom `a`/`img` components below still resolve them to file:// URLs.
-const sanitizeSchema = {
-  ...defaultSchema,
-  protocols: {
-    ...defaultSchema.protocols,
-    src: [...(defaultSchema.protocols?.src ?? []), "data"],
-  },
-};
+// Plugins and the sanitizer schema live in ./pipeline, shared with the Share
+// packager (components/share/) so a shared page renders like this preview.
 
 interface HastNode {
   type: string;
@@ -56,6 +30,8 @@ function rehypeSourceLines() {
     walk(tree);
   };
 }
+
+const previewRehypePlugins = markdownRehypePipeline([rehypeSourceLines]);
 
 // VS Code-parity markdown preview for the editor pane. Wired through
 // react-markdown so we get tables, task lists, strikethrough, autolinks
@@ -166,8 +142,8 @@ function MarkdownPreview({ text, basePath }: Props) {
     >
       <MarkdownReviewLayer containerRef={rootRef} basePath={basePath} text={text} />
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema], rehypeSourceLines, rehypeHighlight]}
+        remarkPlugins={markdownRemarkPlugins}
+        rehypePlugins={previewRehypePlugins}
         components={components}
       >
         {text}

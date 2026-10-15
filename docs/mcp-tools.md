@@ -93,13 +93,13 @@ environment variable that Codara sets for the agent:
 
 | Set | Who sees it | What it adds |
 |---|---|---|
-| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, `codara_notify_user`, `codara_workspace_status` and the worktree tools; whiteboard and board only inside a Cora chat |
+| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, `codara_notify_user`, `codara_workspace_status`, `codara_share_offer` and the worktree tools; whiteboard and board only inside a Cora chat |
 | `worker` | Workers in automation passes | `studio` with the whiteboard and board read-only, plus `codara_ask_user` and `codara_request_next_iteration` |
-| `execute` | A Cora chat that orchestrates work | `studio`, plus orchestration, automation management and the worktree tools |
+| `execute` | A Cora chat that orchestrates work | `studio`, plus orchestration, automation management, the worktree tools and `codara_share_offer` |
 | `automation` | The chat that designs automations | `studio`, plus automation management, `codara_ask_user` and `codara_name_chat` |
 
 A Cora chat that answers directly, without workers, gets `studio` plus
-`codara_remember` and the worktree tools, with the whiteboard and board
+`codara_remember`, `codara_share_offer` and the worktree tools, with the whiteboard and board
 read-only. Cora's chat workers and Talk chats do not get the worktree tools. Requests to draw
 on the whiteboard, change the board or schedule work therefore go to the
 orchestrating chat, and a direct chat hands over to it when a follow-up needs
@@ -634,6 +634,15 @@ each overwrite the other's latest value, and every change is kept as a
 checkpoint. Statuses live in `<codaraHome>/workspace-status.json` and are
 dropped when their workspace is deleted. Agents without MCP use
 `cora tool workspace_status --status in_progress --note "..."`.
+
+## Share offer
+
+In `studio` outside a Cora chat, in `execute`, and in a Cora chat that answers
+directly. Never for workers or an imported pull request.
+
+| Tool | What it does |
+|---|---|
+| `codara_share_offer` | Takes `path`, an HTML or Markdown file (absolute, or relative to the agent's working directory) in a folder open in Codara, at most 5 MB. Codara opens the file and shows its Share prompt; nothing is uploaded unless you click Share there, and the agent never gets the link. Returns `offered: true`, or `offered: false` with a `reason` (`invalid`, `not_shareable`, `missing`, `too_large`, `not_allowed`, `rate_limited`, `no_window`, `codara_offline`). One prompt per agent every 10 seconds. See [share-links.md](./share-links.md). |
 
 ## Worktrees
 

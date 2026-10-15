@@ -36,6 +36,7 @@ a `spark-` prefix keep the product's old name for compatibility.
 | `shell/active-cli-env` | Which account home running Studio shells should follow. |
 | `spark-remote-hosts.json`, `spark-known-hosts.json`, `spark-remote-secrets.json` | SSH workspaces: saved hosts, pinned host keys, and passwords or passphrases encrypted by the operating system (if encryption is unavailable, they are not saved). |
 | `remote/` | Remote access: the desktop's identity (private key mode 0600), paired devices and the mutation ledger. |
+| `share/` | Share as link (mode 0700): `identity.json`, the key that signs your uploads (mode 0600, created the first time you share), and `pages.json`, the links you shared from this computer with the file name each came from. See [share-links.md](./share-links.md). |
 | `logs/main.log` | The main-process log, capped at 1 MB with one rotation. |
 | `logs/worktree-audit.jsonl` | One line for every worktree an agent created, removed or was refused, and every removal from the worktree cleanup screen (mode 0600): ids, paths, branches, commits and the reason, never tokens. Rotated once at 5 MB. |
 | `diagnostics/` | The freeze and crash record shown in Settings, About (files mode 0600). `hangs.jsonl` has one line for each time the main process stopped answering for 5 s or more: how long, whether it recovered, CPU and memory, the recent events, and the stack of the blocked JavaScript when it could be read; it is rotated once at 512 KB. `hang-pending.json` marks a freeze still under way, so one that ended in a quit or a crash is recorded at the next start. `breadcrumbs.json` and `breadcrumbs.previous.json` keep the last 200 notable log lines of this session and the one before. |
@@ -166,8 +167,14 @@ you start yourself is held off too. See
 ## Network
 
 The app talks to `https://studio.codarasolutions.com` for update checks and a
-stream that announces new releases, to the sign-in providers you use, and, if
-you turn on remote access, to the Codara relay. There is no telemetry: freezes
-and crashes are recorded only on your computer, and **Export diagnostics** in
-Settings, About writes them to a zip you choose where to save, with tokens,
-keys, email addresses and home folder paths removed.
+stream that announces new releases, to the sign-in providers you use, if you
+turn on remote access, to the Codara relay, and, when you share a page as a
+link, to the Codara share service: only the page you chose, after you click
+Share, and the list, expiry and delete calls of Settings, Shared pages. While
+the Share prompt prepares a page, it downloads the libraries, stylesheets and
+fonts that page itself loads from cdnjs, jsDelivr, unpkg or Google Fonts, to
+embed them; nothing of yours is sent with those requests. There is no
+telemetry: freezes and crashes are recorded only on your computer, and
+**Export diagnostics** in Settings, About writes them to a zip you choose
+where to save, with tokens, keys, email addresses and home folder paths
+removed.

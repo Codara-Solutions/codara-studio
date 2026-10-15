@@ -89,8 +89,9 @@ function staticAllowed(): string[] {
     // scoped to the memory subdirectory only: the Codara home also holds
     // auth tokens (pi-agent/auth.json) AND the Remote Access key material
     // in remote/ (identity.json is the computer's private key; see
-    // src/main/remote-access/). Neither the home root nor remote/ may EVER
-    // be allowlisted here.
+    // src/main/remote-access/) and the share key in share/ (see
+    // src/main/share/identity.ts). Neither the home root, remote/ nor share/
+    // may EVER be allowlisted here.
     path.join(codaraHome(), "memory"),
     // Run artifacts (worker stdout/raw logs, prompts, final reports under
     // runs/<runId>/...) are rendered by the automations live feed, the Runs
