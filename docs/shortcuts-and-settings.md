@@ -171,7 +171,7 @@ The pages:
 | Default terminal | The shell for new panes, a resource overview, output history and scrollback lines, and the run terminal lifecycle for worker panes. |
 | API and model | An OpenRouter key, and how Git commit messages are generated. |
 | Agents | Your accounts (see [accounts.md](./accounts.md)), **Install Pi** when Pi is not installed yet, and **Open Capability Center** and **Worker models** buttons, which close Settings and open the Capability Center on MCP servers or on worker models. |
-| Sessions | Browse and resume Claude and Codex sessions from any local project, and choose whether running agent sessions (Claude Code, Codex, Grok and Pi panes) resume when Codara reopens. |
+| Sessions | Browse and resume Claude and Codex sessions from any local project, choose whether running agent sessions (Claude Code, Codex, Grok and Pi panes) resume when Codara reopens, and whether terminal panes keep their output across restarts (**Keep terminal output across restarts**, on by default). |
 | Remote access | Turn phone access on, pair a device, and revoke paired devices (see [remote-access.md](./remote-access.md)). |
 | Keybindings | Rebind or unbind every command above. |
 | Runs | Every Cora run: browse, keep, delete. |
@@ -200,6 +200,30 @@ links keep a fixed destination whatever the setting says:
 The run terminal lifecycle works like this. Temporary worker panes close when
 a run settles. Service panes remain until the run is deleted.
 Failed closes retry automatically.
+
+### Quitting, restarting and updating while agents work
+
+- Quitting while Cora or a terminal agent is in the middle of a turn asks
+  first. The prompt names what is still working ("Claude Code in api",
+  "2 Codex agents in web", "Cora in 1 chat") and says whether terminal agents
+  resume when Codara reopens. An agent stopped on a question inside a turn
+  counts too, marked "waiting for you". Plain shells, idle agents and Cora's
+  own worker panes do not (Cora's runs are counted as runs). **Keep working**
+  cancels the quit.
+- **Restart and install** on the update chip never cuts work off. While
+  something is working, the chip lists it and restarts by itself once nothing
+  has been working for 5 seconds. **Restart now** restarts at once and stops
+  that work; **Don't restart yet** stops waiting, and the downloaded update
+  still installs the next time Codara quits.
+- **Keep terminal output across restarts** (Sessions, Restore; on by
+  default): a terminal pane reopened after a quit, an update or a crash shows
+  the output it had, then a dim `[Restored from before Codara restarted]`
+  line, then its new shell or its resumed agent. Colors are kept; cursor
+  movement, links and terminal queries are not replayed, and a full-screen
+  program such as Codex keeps only its last screen. The output is saved in
+  Codara's own folder (see [on-your-machine.md](./on-your-machine.md)).
+  Closing a pane deletes its saved output, and turning the setting off
+  deletes all of it.
 
 ### Terminal agent notifications
 
