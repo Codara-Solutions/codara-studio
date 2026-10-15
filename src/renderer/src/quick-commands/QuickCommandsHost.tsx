@@ -1,5 +1,6 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
-import { terminalRightClickAction, type QuickCommand } from "@shared/quick-commands";
+import { MAX_QUICK_COMMANDS, terminalRightClickAction, type QuickCommand } from "@shared/quick-commands";
+import { emitLocalToast } from "../notifications/local-toast";
 import { QUICK_COMMANDS_EVENT, type QuickCommandsRequest } from "./events";
 import type { QuickCommandsApi } from "./QuickCommandsContext";
 import { setTerminalContextMenuHandler, type TerminalContextMenuRequest } from "./terminal-context-menu";
@@ -13,7 +14,7 @@ import TerminalQuickMenu from "./TerminalQuickMenu";
 const QuickCommandsPalette = lazy(() => import("./QuickCommandsPalette"));
 const QuickCommandDialog = lazy(() => import("./QuickCommandDialog"));
 
-type DialogState = { command: QuickCommand | null } | null;
+type DialogState = { command: QuickCommand | null; returnFocus: HTMLElement | null } | null;
 
 export default function QuickCommandsHost({ api }: { api: QuickCommandsApi }) {
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -22,6 +23,19 @@ export default function QuickCommandsHost({ api }: { api: QuickCommandsApi }) {
 
   const apiRef = useRef(api);
   apiRef.current = api;
+
+  const openAddDialog = useCallback((returnFocus: HTMLElement | null) => {
+    // The saved list keeps MAX_QUICK_COMMANDS; one more would be dropped on save.
+    if (apiRef.current.commands.length >= MAX_QUICK_COMMANDS) {
+      emitLocalToast(
+        `You have ${MAX_QUICK_COMMANDS} quick commands`,
+        "That is the most Codara keeps. Delete one in Settings to add another.",
+        "warning",
+      );
+      return;
+    }
+    setDialog({ command: null, returnFocus });
+  }, []);
 
   useEffect(() => {
     const onRequest = (event: Event) => {
@@ -36,16 +50,17 @@ export default function QuickCommandsHost({ api }: { api: QuickCommandsApi }) {
         return;
       }
       setPaletteOpen(false);
+      const returnFocus = detail.returnFocus ?? null;
       if (detail.action === "add") {
-        setDialog({ command: null });
+        openAddDialog(returnFocus);
         return;
       }
       const command = apiRef.current.commands.find((entry) => entry.id === detail.id);
-      if (command) setDialog({ command });
+      if (command) setDialog({ command, returnFocus });
     };
     window.addEventListener(QUICK_COMMANDS_EVENT, onRequest);
     return () => window.removeEventListener(QUICK_COMMANDS_EVENT, onRequest);
-  }, []);
+  }, [openAddDialog]);
 
   useEffect(
     () =>
@@ -76,11 +91,19 @@ export default function QuickCommandsHost({ api }: { api: QuickCommandsApi }) {
             <QuickCommandsPalette
               api={api}
               onClose={closePalette}
-              onAdd={() => setDialog({ command: null })}
-              onEdit={(command) => setDialog({ command })}
+              onAdd={openAddDialog}
+              onEdit={(command, returnFocus) => setDialog({ command, returnFocus })}
             />
           ) : null}
-          {dialog ? <QuickCommandDialog key={dialog.command?.id ?? "new"} api={api} command={dialog.command} onClose={closeDialog} /> : null}
+          {dialog ? (
+            <QuickCommandDialog
+              key={dialog.command?.id ?? "new"}
+              api={api}
+              command={dialog.command}
+              returnFocus={dialog.returnFocus}
+              onClose={closeDialog}
+            />
+          ) : null}
         </Suspense>
       ) : null}
     </>

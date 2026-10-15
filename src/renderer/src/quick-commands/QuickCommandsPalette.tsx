@@ -23,8 +23,9 @@ export function paletteRows(commands: readonly QuickCommand[], repoKey: string |
 export interface QuickCommandsPaletteProps {
   api: QuickCommandsApi;
   onClose: () => void;
-  onAdd: () => void;
-  onEdit: (command: QuickCommand) => void;
+  /** returnFocus: what had the keyboard before the palette, for the dialog to give it back. */
+  onAdd: (returnFocus: HTMLElement | null) => void;
+  onEdit: (command: QuickCommand, returnFocus: HTMLElement | null) => void;
 }
 
 export default function QuickCommandsPalette({ api, onClose, onAdd, onEdit }: QuickCommandsPaletteProps) {
@@ -33,15 +34,18 @@ export default function QuickCommandsPalette({ api, onClose, onAdd, onEdit }: Qu
   const inputRef = useRef<HTMLInputElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const keyboardMoveRef = useRef(false);
+  const previousRef = useRef<HTMLElement | null>(null);
 
   const rows = useMemo(() => paletteRows(api.commands, api.repoKey, filter), [api.commands, api.repoKey, filter]);
   const hasCommands = rows.length > 1;
 
   // Focus moves before the next keystroke can land: a chord pressed in a
   // terminal is often followed at once by the filter text. On close it goes
-  // back where it was unless what ran took it (a new terminal, a chat).
+  // back where it was unless what ran took it (a new terminal, a chat), and
+  // the add or edit dialog opened from here gives it back when it closes.
   useLayoutEffect(() => {
     const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    previousRef.current = previous;
     inputRef.current?.focus();
     return () => {
       window.requestAnimationFrame(() => {
@@ -64,8 +68,8 @@ export default function QuickCommandsPalette({ api, onClose, onAdd, onEdit }: Qu
   const choose = (row: Row | undefined, edit = false) => {
     if (!row) return;
     onClose();
-    if (row.kind === "add") onAdd();
-    else if (edit) onEdit(row.command);
+    if (row.kind === "add") onAdd(previousRef.current);
+    else if (edit) onEdit(row.command, previousRef.current);
     else void api.run(row.command);
   };
 

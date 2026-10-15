@@ -119,11 +119,11 @@ export default function TerminalQuickMenu({ api, request, onClose }: TerminalQui
         onRun={run}
         onEdit={(command) => {
           onClose();
-          requestQuickCommands({ action: "edit", id: command.id });
+          requestQuickCommands({ action: "edit", id: command.id, returnFocus: previous.current });
         }}
         onAdd={() => {
           onClose();
-          requestQuickCommands({ action: "add" });
+          requestQuickCommands({ action: "add", returnFocus: previous.current });
         }}
         onManage={() => {
           onClose();

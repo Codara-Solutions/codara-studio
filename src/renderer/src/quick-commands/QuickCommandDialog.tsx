@@ -11,21 +11,28 @@ export interface QuickCommandDialogProps {
   api: QuickCommandsApi;
   /** The command to edit; null adds a new one. */
   command: QuickCommand | null;
+  /** What takes the keyboard back on close, when the opener knows better than the focus at mount. */
+  returnFocus?: HTMLElement | null;
   onClose: () => void;
 }
 
-export default function QuickCommandDialog({ api, command, onClose }: QuickCommandDialogProps) {
+export default function QuickCommandDialog({ api, command, returnFocus, onClose }: QuickCommandDialogProps) {
   const sectionRef = useRef<HTMLElement | null>(null);
   const [initial] = useState(() => command ?? newQuickCommandDraft());
   const mode = command ? "edit" : "add";
 
   // Focus goes back where it was (a terminal, usually) when the dialog closes.
-  useEffect(() => {
-    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    return () => {
+  // Read during the first render: by the time an effect runs, the form has
+  // already moved focus into its Name field.
+  const [previous] = useState<HTMLElement | null>(() =>
+    returnFocus ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null),
+  );
+  useEffect(
+    () => () => {
       if (previous?.isConnected) window.requestAnimationFrame(() => previous.focus());
-    };
-  }, []);
+    },
+    [previous],
+  );
 
   // Tab stays inside the dialog while it is open.
   const onKeyDown = (event: React.KeyboardEvent) => {
@@ -105,6 +112,8 @@ export default function QuickCommandDialog({ api, command, onClose }: QuickComma
           onSave={save}
           onCancel={onClose}
           onDelete={mode === "edit" ? remove : undefined}
+          // Settings offers Undo after a delete; this dialog cannot, so it asks first.
+          confirmDelete
         />
       </section>
     </div>

@@ -119,10 +119,13 @@ export interface QuickCommandFormProps {
   onSave: (command: QuickCommand) => void;
   onCancel: () => void;
   onDelete?: () => void;
+  /** Delete takes a second press, for a place with no Undo. */
+  confirmDelete?: boolean;
 }
 
-export default function QuickCommandForm({ initial, mode, repoOptions, onSave, onCancel, onDelete }: QuickCommandFormProps) {
+export default function QuickCommandForm({ initial, mode, repoOptions, onSave, onCancel, onDelete, confirmDelete }: QuickCommandFormProps) {
   const [draft, setDraft] = useState<Draft>(() => toDraft(initial));
+  const [deleteArmed, setDeleteArmed] = useState(false);
   const nameRef = useRef<HTMLInputElement | null>(null);
   const ids = useId();
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((current) => ({ ...current, [key]: value }));
@@ -326,8 +329,16 @@ export default function QuickCommandForm({ initial, mode, repoOptions, onSave, o
 
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         {onDelete ? (
-          <button type="button" className="spark-btn is-danger" onClick={onDelete}>
-            Delete
+          <button
+            type="button"
+            className="spark-btn is-danger"
+            onClick={() => {
+              if (confirmDelete && !deleteArmed) setDeleteArmed(true);
+              else onDelete();
+            }}
+            onBlur={() => setDeleteArmed(false)}
+          >
+            {deleteArmed ? "Delete for good" : "Delete"}
           </button>
         ) : null}
         <span style={{ flex: 1 }} />

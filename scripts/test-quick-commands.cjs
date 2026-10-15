@@ -281,6 +281,16 @@ async function main() {
     const host = read("src", "renderer", "src", "quick-commands", "QuickCommandsHost.tsx");
     assert.match(host, /lazy\(\(\) => import\("\.\/QuickCommandsPalette"\)\)/);
     assert.match(host, /lazy\(\(\) => import\("\.\/QuickCommandDialog"\)\)/);
+    // Normalization keeps MAX_QUICK_COMMANDS, so adding past it must say so
+    // rather than save a command that is then dropped.
+    assert.match(host, /commands\.length >= MAX_QUICK_COMMANDS/, "the add dialog does not open past the cap");
+    assert.match(host, /onAdd=\{openAddDialog\}/, "the palette's Add goes through the same check");
+    assert.match(read("src", "renderer", "src", "quick-commands", "QuickCommandsSettings.tsx"), /disabled=\{editing\?\.isNew === true \|\| commands\.length >= MAX_QUICK_COMMANDS\}/);
+    // The dialog reads what had focus during its first render: by its first
+    // effect the form has already focused the Name field.
+    const dialog = read("src", "renderer", "src", "quick-commands", "QuickCommandDialog.tsx");
+    assert.match(dialog, /const \[previous\] = useState<HTMLElement \| null>\(\(\) =>\s+returnFocus \?\?/);
+    assert.match(dialog, /confirmDelete/, "a delete with no Undo asks first");
 
     const dir = path.join(ROOT, "src", "renderer", "src", "quick-commands");
     for (const file of ["QuickCommandsPalette.tsx", "QuickCommandDialog.tsx"]) {

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
+  MAX_QUICK_COMMANDS,
   moveQuickCommand,
   normalizeQuickCommands,
   normalizeTerminalRightClick,
@@ -90,7 +91,14 @@ export default function QuickCommandsSettings() {
           </>
         }
         actions={
-          <button type="button" className="spark-btn" onClick={startAdd} disabled={editing?.isNew === true}>
+          <button
+            type="button"
+            className="spark-btn"
+            onClick={startAdd}
+            // The saved list keeps MAX_QUICK_COMMANDS; one more would be dropped on save.
+            disabled={editing?.isNew === true || commands.length >= MAX_QUICK_COMMANDS}
+            title={commands.length >= MAX_QUICK_COMMANDS ? `${MAX_QUICK_COMMANDS} is the most Codara keeps. Delete one to add another.` : undefined}
+          >
             Add quick command
           </button>
         }

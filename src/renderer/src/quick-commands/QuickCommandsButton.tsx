@@ -87,11 +87,11 @@ export default function QuickCommandsButton() {
             }}
             onEdit={(command) => {
               close(false);
-              requestQuickCommands({ action: "edit", id: command.id });
+              requestQuickCommands({ action: "edit", id: command.id, returnFocus: buttonRef.current });
             }}
             onAdd={() => {
               close(false);
-              requestQuickCommands({ action: "add" });
+              requestQuickCommands({ action: "add", returnFocus: buttonRef.current });
             }}
             onManage={() => {
               close(false);
