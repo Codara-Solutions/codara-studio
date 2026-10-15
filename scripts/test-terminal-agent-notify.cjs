@@ -13,9 +13,9 @@
 //
 //   node scripts/test-terminal-agent-notify.cjs
 //
-// Takes ~40s (the done-detection quiet window is 3s of real time, swept at
-// 1s cadence, and the stall/rearm regression scenarios each ride out several
-// quiet windows). Exits non-zero on any failed assertion.
+// The quiet windows, sweeps and confirmation delays run on a fake clock
+// (scripts/fake-clock.cjs), so the scenarios ride out minutes of simulated
+// time in about a second. Exits non-zero on any failed assertion.
 
 const path = require("node:path");
 const os = require("node:os");
@@ -27,7 +27,10 @@ const ROOT = path.resolve(__dirname, "..");
 const SHARED_DIR = path.join(ROOT, "src", "shared");
 const ENTRY = path.join(ROOT, "src", "main", "terminal-agent-notify.ts");
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const { installFakeClock } = require("./fake-clock.cjs");
+
+let clock = null;
+const sleep = (ms) => clock.advance(ms);
 
 const harnessPlugin = {
   name: "terminal-agent-notify-harness",
@@ -127,6 +130,7 @@ async function main() {
     plugins: [harnessPlugin],
     logLevel: "silent",
   });
+  clock = installFakeClock();
   const mod = require(outfile);
   const T = globalThis.__TAN;
   const feed = (paneId, s) => {
