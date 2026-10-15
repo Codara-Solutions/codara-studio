@@ -143,7 +143,7 @@ test("agents and the user set a workspace's status and progress note in the rail
       callsFile,
       JSON.stringify([
         ["codara_workspace_status", { status: "in_progress", note: "Wiring the store\nand the rail" }],
-        ["codara_workspace_status", { note: `\u001b[32mTests pass\u001b[0m‮ ${"and more ".repeat(30)}` }],
+        ["codara_workspace_status", { note: `\u001b[32mTests pass\u001b[0m\u202e ${"and more ".repeat(30)}` }],
         ["codara_workspace_status", {}],
         ["codara_workspace_status", { status: "shipped" }],
       ]),
@@ -172,7 +172,7 @@ test("agents and the user set a workspace's status and progress note in the rail
     expect(cut.noteTruncated).toBe(true);
     expect(cut.note.startsWith("Tests pass and more")).toBe(true);
     expect(Array.from(cut.note as string)).toHaveLength(140);
-    expect(cut.note).not.toMatch(/[\u001b‮]/);
+    expect(cut.note).not.toMatch(/[\u001b\u202e]/);
     expect(body(read).checkpoints.map((checkpoint: { status: string }) => checkpoint.status)).toEqual(["in_progress", "in_progress"]);
     expect(refused.isError).toBe(true);
     expect(refused.content[0]?.text).toMatch(/status must be one of todo, in_progress, in_review, done, blocked/);

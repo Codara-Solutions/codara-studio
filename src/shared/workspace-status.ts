@@ -113,8 +113,17 @@ export function parseWorkspaceStatusId(raw: unknown): WorkspaceStatusId | null {
 const ANSI_SEQUENCES = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?|\u001b[@-Z\\-_]/g;
 const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 // Invisible characters that reorder or hide text: a note must read the same
-// in the rail as in the tool call that wrote it.
-const INVISIBLE_CHARS = /[؜​-‏‪-‮⁠-⁤⁦-⁩﻿]/g;
+// in the rail as in the tool call that wrote it, and the next agent that
+// reads it back must not get text the user never saw. Bidi marks and
+// overrides, zero-width characters, word joiners and invisible operators,
+// the byte order mark, and the tag characters and supplementary variation
+// selectors that can carry hidden text. Written as escapes so the source
+// itself holds no invisible characters.
+const INVISIBLE_CHARS =
+  /[\u{061c}\u{200b}-\u{200f}\u{202a}-\u{202e}\u{2060}-\u{2064}\u{2066}-\u{2069}\u{feff}\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]/gu;
+// A note is one short line; nothing past this many code units is ever shown,
+// so a huge payload is cut before the expressions above walk it.
+const NOTE_INPUT_MAX = 8_192;
 
 function cutToCodePoints(text: string, max: number): { text: string; cut: boolean } {
   const points = Array.from(text);
@@ -129,14 +138,15 @@ function cutToCodePoints(text: string, max: number): { text: string; cut: boolea
  */
 export function sanitizeWorkspaceStatusNote(raw: unknown): { note: string; truncated: boolean } {
   if (typeof raw !== "string") return { note: "", truncated: false };
-  const flat = raw
+  const oversized = raw.length > NOTE_INPUT_MAX;
+  const flat = (oversized ? raw.slice(0, NOTE_INPUT_MAX) : raw)
     .replace(ANSI_SEQUENCES, "")
     .replace(CONTROL_CHARS, " ")
     .replace(INVISIBLE_CHARS, "")
     .replace(/\s+/g, " ")
     .trim();
   const { text, cut } = cutToCodePoints(flat, WORKSPACE_STATUS_NOTE_MAX);
-  return { note: text, truncated: cut };
+  return { note: text, truncated: cut || oversized };
 }
 
 export function sanitizeWorkspaceStatusAuthor(raw: unknown): WorkspaceStatusAuthor {
