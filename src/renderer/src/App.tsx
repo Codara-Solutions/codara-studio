@@ -6320,6 +6320,7 @@ export default function App() {
     activeTab: activeViewTab,
     activePaneId: activeViewPaneId,
     detectedAgents: terminalAgents[tabs.tabsWorkspaceId ?? ""] ?? NO_DETECTED_AGENTS,
+    shell: defaultShell,
     paneRuntime: paneRuntimeRef,
     routing: routingApi,
     launchAgent: (command, cwd) => launchWorkerInNewTerminalTab(command, cwd ? { cwd } : undefined),

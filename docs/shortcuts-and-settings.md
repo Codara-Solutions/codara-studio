@@ -431,11 +431,15 @@ An **agent prompt** goes to:
 
 Two variables fill in when a command runs: `{branch}` (the git branch of the
 folder it runs in) and `{cwd}` (that folder). `${branch}` is left alone for
-the shell. In a shell command the value is typed unquoted, so put `"{cwd}"` in
-double quotes when a folder may contain spaces, and a value holding a
+the shell. In a shell command `{cwd}` is quoted for the terminal's shell, so a
+folder with spaces or quotes stays one word: single quotes in bash, zsh,
+fish and PowerShell, double quotes in cmd, and forward slashes in Git Bash
+(which drops backslashes). If you already wrap `{cwd}` in quotes yourself it
+is left as you wrote it. `{branch}` is typed unquoted, so a branch holding a
 character a shell would read as code (`;`, `$`, a quote, a backtick, a
 parenthesis and the like) stops the command with a notice instead of running
-it.
+it, and so does a folder with a line break (or, in cmd, a double quote or
+percent sign).
 
 **Right-click in a terminal** chooses what a plain right-click does: **Copy
 or paste** (the default: copy the selection, or paste when nothing is
