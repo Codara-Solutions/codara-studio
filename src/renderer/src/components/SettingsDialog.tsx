@@ -49,6 +49,7 @@ import {
 import { runStatusColor } from "../lib/run-status";
 import { useTheme } from "../theme/theme-context";
 import { usePreferences } from "../preferences/usePreferences";
+import { useFeatureTipsSetting } from "./feature-tips/useFeatureTipsSetting";
 import KeybindingsSection, { ChordChips } from "../shortcuts/KeybindingsSection";
 import { buildBindingTable } from "../shortcuts/bindings";
 import { IS_MAC } from "../shortcuts/platform";
@@ -1155,6 +1156,7 @@ function GeneralSettings({
     preferences.gitAutoFetchIntervalMinutes ?? DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES;
   const [glassTuningOpen, setGlassTuningOpen] = useState(false);
   useRevealOnSearch("Fine-tune glass", () => setGlassTuningOpen(true));
+  const featureTips = useFeatureTipsSetting();
   return (
     <>
       <SettingsSection title="Getting started">
@@ -1172,6 +1174,25 @@ function GeneralSettings({
             </button>
           }
         />
+        {featureTips.hydrated ? (
+          <ToggleRow
+            title="Feature tips"
+            desc="Now and then, one short tip about a feature you have not tried yet. Off means don't show tips. What you use is noted on this computer only."
+            checked={featureTips.enabled}
+            onChange={featureTips.setEnabled}
+          />
+        ) : null}
+        {featureTips.hydrated && featureTips.seen > 0 ? (
+          <SettingRow
+            title="Tips you have seen"
+            desc="Let the tips you already saw come back, one at a time."
+            control={
+              <button type="button" className="spark-btn" onClick={featureTips.reset}>
+                Show them again
+              </button>
+            }
+          />
+        ) : null}
       </SettingsSection>
 
       <SettingsSection title="Appearance">

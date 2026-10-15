@@ -166,7 +166,7 @@ The pages:
 
 | Tab | What lives there |
 |---|---|
-| General | Getting started (reopens the first-run guide), Appearance (theme, liquid glass surfaces), Window (keep running in the background when the window is closed, auto-open the browser for local dev servers, open links in the default browser or the Codara browser, the workspace switch badge), Agent worktrees (whether agents may create and remove worktrees, and remove ones you created), Tabs (middle-click to close), Notifications (in-app toast, native OS notification, sound, OS-specific cues), Git (background fetch, notify on teammate pushes and new pull requests), Instant git triggers, Copy-branch workspaces (a setup command for new worktrees, and extra ignored files an agent may delete with a merged worktree). |
+| General | Getting started (reopens the first-run guide, turns feature tips on or off, and lets tips you have seen come back), Appearance (theme, liquid glass surfaces), Window (keep running in the background when the window is closed, auto-open the browser for local dev servers, open links in the default browser or the Codara browser, the workspace switch badge), Agent worktrees (whether agents may create and remove worktrees, and remove ones you created), Tabs (middle-click to close), Notifications (in-app toast, native OS notification, sound, OS-specific cues), Git (background fetch, notify on teammate pushes and new pull requests), Instant git triggers, Copy-branch workspaces (a setup command for new worktrees, and extra ignored files an agent may delete with a merged worktree). |
 | Editor | Code editor (Vim mode, autosave) and inline AI autocomplete. |
 | Default terminal | The shell for new panes, a resource overview, output history and scrollback lines, and the run terminal lifecycle for worker panes. |
 | API and model | An OpenRouter key, and how Git commit messages are generated. |
@@ -200,6 +200,29 @@ links keep a fixed destination whatever the setting says:
 The run terminal lifecycle works like this. Temporary worker panes close when
 a run settles. Service panes remain until the run is deleted.
 Failed closes retry automatically.
+
+### Feature tips
+
+Now and then Codara shows one short tip about a feature you have not tried
+yet, such as splitting a terminal, pointing at a page element for an agent,
+or the notification center. A tip appears at most once a day and once per
+session, a few minutes after Codara opens, and only at a calm moment: not
+while you type or click, not while a dialog, menu or the first-run guide is
+open, and only when the feature's control is on screen. It never covers the
+chat composer or a dialog, and steps aside while one is open.
+
+- **Show me** starts a short tour: the guide card from the first-run tour
+  points at the real control with a ring around it. Click the control, or
+  **Done**, to finish; Escape ends the tour.
+- **Got it** or Escape closes the tip. That tip does not come back.
+- **Don't show tips** turns tips off. Turn them back on with **Feature tips**
+  in Settings, General, Getting started. **Tips you have seen** with
+  **Show them again** lets shown tips come back.
+
+To choose what is worth a tip, Codara notes which features you have used, the
+first time you use each one, in `feature-tips.json` in the Codara home
+(`~/.codarastudio`). It stays on this computer and is never uploaded. A
+feature you already use never gets a tip.
 
 ### Terminal agent notifications
 
