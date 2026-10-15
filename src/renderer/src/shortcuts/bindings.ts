@@ -123,6 +123,29 @@ export function findConflicts(
   return out;
 }
 
+export interface HiddenDefault {
+  /** The command's own default chord that no longer reaches it. */
+  chord: Chord;
+  /** The command the user bound to that chord. */
+  by: EffectiveBinding;
+}
+
+// Default chords of `id` that a user binding on another command now takes
+// (findBinding lets a chord the user bound beat one a command ships with). A
+// command the user rebound or unbound has no default in effect, so it has
+// none to lose. Lets Keybindings say so, for example after an update gives a
+// command a default that someone already bound to something else.
+export function hiddenDefaults(table: BindingTable, id: CommandId): HiddenDefault[] {
+  const binding = table.find((b) => b.command.id === id);
+  if (!binding || binding.customized || binding.command.fixed) return [];
+  const out: HiddenDefault[] = [];
+  for (const chord of binding.chords) {
+    const by = findConflicts(table, chord, id).find((other) => other.customized);
+    if (by) out.push({ chord, by });
+  }
+  return out;
+}
+
 // ── Digit ranges ────────────────────────────────────────────────────────────
 // A `digitRange` command binds its chord's modifiers to every digit 1 to 9.
 // The digit comes from `code` when `key` is not one (AZERTY digits need Shift,

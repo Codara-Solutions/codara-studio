@@ -4,13 +4,14 @@ import {
   bindingChips,
   buildBindingTable,
   findConflicts,
+  hiddenDefaults,
   isUsableDigitRangeChord,
   overrideForChord,
   unboundOverride,
   type BindingTable,
   type EffectiveBinding,
 } from "./bindings";
-import { chordFromEvent, chordToDisplay, type Chord } from "./chord";
+import { chordFromEvent, chordToDisplay, chordToHint, type Chord } from "./chord";
 import { COMMAND_GROUPS, type CommandId } from "./commands";
 import { IS_MAC } from "./platform";
 import { setRecording } from "./recording";
@@ -180,6 +181,7 @@ function Row({
 }) {
   const { command, chords, customized } = binding;
   const fixed = command.fixed === true;
+  const hidden = useMemo(() => hiddenDefaults(table, command.id), [table, command.id]);
 
   return (
     <li
@@ -192,6 +194,12 @@ function Row({
           {customized ? <span className="st-kb-row__tag">Changed</span> : null}
         </span>
         {fixed ? <span className="st-kb-row__desc">Built-in, cannot be changed</span> : null}
+        {hidden.map(({ chord, by }) => (
+          <span key={chordToHint(chord)} className="st-kb-row__desc" data-testid="kb-hidden-default">
+            {chordToHint(chord)} is taken by your shortcut for {by.command.label}, so it does not
+            work here. Record a new shortcut for this command.
+          </span>
+        ))}
       </div>
 
       {isRecording ? (
