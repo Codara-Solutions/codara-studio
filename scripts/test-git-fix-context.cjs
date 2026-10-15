@@ -370,6 +370,31 @@ test("conflicts: a path that leads out of the working tree is never read", async
   assert.ok(!JSON.stringify(context).includes("TOP SECRET"));
 });
 
+test("conflicts: a workspace opened on a subfolder still quotes files named from the top", async (mod) => {
+  // git names conflicted files from the top of the working tree, so a
+  // workspace on packages/web must not look for packages/web/<path>.
+  const repo = makeRepo({ "packages/web/app.ts": "base\n", "..notes.md": "base\n" });
+  git(repo, ["checkout", "-q", "-b", "feature"]);
+  fs.writeFileSync(path.join(repo, "packages", "web", "app.ts"), "feature\n");
+  fs.writeFileSync(path.join(repo, "..notes.md"), "feature\n");
+  git(repo, ["commit", "-q", "-am", "Feature change"]);
+  git(repo, ["checkout", "-q", "main"]);
+  fs.writeFileSync(path.join(repo, "packages", "web", "app.ts"), "main\n");
+  fs.writeFileSync(path.join(repo, "..notes.md"), "main\n");
+  git(repo, ["commit", "-q", "-am", "Main change"]);
+  gitFails(repo, ["merge", "feature"]);
+  const context = await mod.readConflictContext(path.join(repo, "packages", "web"), deps(mod));
+  assert.deepEqual(context.files.map((f) => f.path).sort(), ["..notes.md", "packages/web/app.ts"]);
+  for (const file of context.files) {
+    assert.equal(file.conflicts, 1, `${file.path} is quoted, not described as deleted`);
+    assert.match(file.excerpt, /<<<<<<< HEAD\nmain\n=======\nfeature\n>>>>>>> feature/);
+  }
+  assert.equal(mod.staysInside(".."), false);
+  assert.equal(mod.staysInside(path.join("..", "x")), false);
+  assert.equal(mod.staysInside("..x"), true);
+  assert.equal(mod.staysInside(""), false);
+});
+
 test("conflicts: nothing to resolve is a plain message", async (mod) => {
   const result = await mod.prepareGitFix({ cwd: makeRepo(), kind: "conflicts" }, deps(mod));
   assert.deepEqual(result, { ok: false, error: "There are no conflicted files right now." });

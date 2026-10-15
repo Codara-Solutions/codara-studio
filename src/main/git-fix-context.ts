@@ -12,7 +12,7 @@
 
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { isRemotePath } from "@shared/remote";
 import {
@@ -387,16 +387,21 @@ async function describeCommit(deps: GitFixContextDeps, cwd: string, ref: string)
   return line ? oneLine(line, 160) : undefined;
 }
 
+// A path relative to a root that stays below it. "..env" is a file name, not
+// a step up, so only a whole ".." segment counts as leaving.
+export function staysInside(rel: string): boolean {
+  return Boolean(rel) && rel !== ".." && !rel.startsWith(`..${sep}`) && !rel.startsWith("../") && !isAbsolute(rel);
+}
+
 function insideRoot(root: string, path: string): string | null {
   if (!path || isAbsolute(path) || /^[A-Za-z]:/.test(path)) return null;
   const full = resolve(root, path);
-  const rel = relative(root, full);
-  return rel && !rel.startsWith("..") && !isAbsolute(rel) ? full : null;
+  return staysInside(relative(root, full)) ? full : null;
 }
 
-async function conflictFile(deps: GitFixContextDeps, cwd: string, realRoot: string | null, path: string): Promise<GitFixConflictFile> {
+async function conflictFile(deps: GitFixContextDeps, root: string, realRoot: string | null, path: string): Promise<GitFixConflictFile> {
   const displayPath = oneLine(path, 300);
-  const full = insideRoot(cwd, path);
+  const full = insideRoot(root, path);
   const info = full ? await deps.stat(full) : null;
   if (!full || !info?.isFile) {
     return { path: displayPath, conflicts: 0, excerpt: "", truncated: false, note: "Deleted on one side and changed on the other: decide whether it stays (git status shows which side)." };
@@ -405,7 +410,7 @@ async function conflictFile(deps: GitFixContextDeps, cwd: string, realRoot: stri
   // points elsewhere is described, never read.
   const real = await deps.realpath(full);
   const rel = real && realRoot ? relative(realRoot, real) : "";
-  if (!real || !rel || rel.startsWith("..") || isAbsolute(rel)) {
+  if (!real || !staysInside(rel)) {
     return { path: displayPath, conflicts: 0, excerpt: "", truncated: false, note: "A link to somewhere else: open it in the repository to resolve it." };
   }
   if (info.size > MAX_CONFLICT_FILE_BYTES) {
@@ -461,8 +466,12 @@ export async function readConflictContext(cwd: string, deps: GitFixContextDeps):
     stoppedAt = await describeCommit(deps, cwd, "REVERT_HEAD");
   }
   const listed = unique.slice(0, GIT_FIX_LIMITS.conflictFiles);
-  const realRoot = await deps.realpath(cwd);
-  const files = await Promise.all(listed.map((path) => conflictFile(deps, cwd, realRoot, path)));
+  // git names conflicted files from the top of the working tree, whichever
+  // folder of it the workspace opened.
+  const top = await gitOrEmpty(deps, cwd, ["rev-parse", "--show-toplevel"]);
+  const root = top ? resolve(cwd, top) : cwd;
+  const realRoot = await deps.realpath(root);
+  const files = await Promise.all(listed.map((path) => conflictFile(deps, root, realRoot, path)));
   return {
     operation,
     ...(branch ? { branch: oneLine(branch, 160) } : {}),
