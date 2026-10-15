@@ -52,7 +52,10 @@ export function layoutAgentPanes(layouts: readonly AgentBoardLayout[]): AgentBoa
       if (tab.kind !== "terminal" || tab.scope?.kind === "workers") continue;
       for (const leaf of collectLeaves(tab.root)) {
         if (isDockLeaf(leaf) || leaf.worker?.source === "spark") continue;
-        const runtime = liveTerminalRuntime(leaf.worker);
+        // A sleeping agent (agent hibernation) has no live chip while its CLI
+        // is stopped; the leaf still says which agent it was.
+        const sleeping = leaf.hibernation ?? null;
+        const runtime = liveTerminalRuntime(leaf.worker) ?? sleeping?.runtime ?? null;
         if (!runtime) continue;
         out.push({
           paneId: leaf.paneId,
@@ -62,6 +65,7 @@ export function layoutAgentPanes(layouts: readonly AgentBoardLayout[]): AgentBoa
           runtime,
           ...(leaf.worker?.runtimeState ? { state: leaf.worker.runtimeState } : {}),
           ...(leafAccountId(leaf, runtime) ? { accountProfileId: leafAccountId(leaf, runtime) } : {}),
+          ...(sleeping ? { sleepingSince: sleeping.sleptAt } : {}),
         });
       }
     }
@@ -314,6 +318,7 @@ const SCALAR_FIELDS = [
   "detail",
   "since",
   "unseen",
+  "sleeping",
 ] as const satisfies readonly (keyof AgentBoardCard)[];
 
 function sameCard(a: AgentBoardCard, b: AgentBoardCard): boolean {

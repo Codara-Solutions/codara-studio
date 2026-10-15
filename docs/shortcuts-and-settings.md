@@ -664,10 +664,13 @@ to fold it; the folding is remembered.
 - **Done**: terminal agents back at their prompt, and Cora chats that
   finished, failed or were cancelled in the last 12 hours (a finished chat
   you have not opened stays until you do). Unseen ones come first, marked
-  with a dot.
+  with a dot. A terminal agent Codara stopped to save memory (see
+  [Idle agents sleep](#idle-agents-sleep)) shows here as **Sleeping**;
+  opening its card resumes it.
 
 Each card shows the agent (Claude Code, Codex, Grok, Pi or Cora), its
-workspace, the account it runs on when Codara knows it, what it is doing or
+workspace with the workspace's status when one is set (from the workspace
+row's menu or by an agent), the account it runs on when Codara knows it, what it is doing or
 asked, the tool it is running when the agent reports one, and how long it
 has been in that state. A terminal agent's card is titled by your last prompt
 when the agent's hooks report it, otherwise by its tab.

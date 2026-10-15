@@ -51,6 +51,11 @@ export interface AgentBoardLayoutPane {
   runtime: TerminalAgentRuntime;
   state?: RuntimeState;
   accountProfileId?: string;
+  /**
+   * When Codara stopped this pane's idle agent to save memory (agent
+   * hibernation); absent while it runs. Opening the pane resumes it.
+   */
+  sleepingSince?: number;
 }
 
 export interface AgentBoardWorkspace {
@@ -101,6 +106,8 @@ export interface AgentBoardCard {
   since: number;
   /** Finished or waiting since the user last looked at it. */
   unseen: boolean;
+  /** A terminal agent Codara stopped to save memory; opening it resumes it. */
+  sleeping: boolean;
   target: NavigationTarget;
   reply: AgentBoardReply | null;
 }
@@ -324,6 +331,7 @@ function coraCard(
     detail: detailParts.length > 0 ? detailParts.join(" · ") : null,
     since,
     unseen: placement.bucket === "done" && run.status === "complete" && run.seen !== true,
+    sleeping: false,
     target,
     reply,
   };
@@ -338,6 +346,7 @@ interface MergedPane {
   state: RuntimeState | undefined;
   activity: TerminalAgentActivity | null;
   accountProfileId: string | null;
+  sleepingSince: number | null;
 }
 
 function mergePanes(input: AgentBoardInput): MergedPane[] {
@@ -352,6 +361,7 @@ function mergePanes(input: AgentBoardInput): MergedPane[] {
       state: pane.state,
       activity: null,
       accountProfileId: pane.accountProfileId ?? null,
+      sleepingSince: pane.sleepingSince ?? null,
     });
   }
   for (const activity of input.activity ?? []) {
@@ -367,16 +377,25 @@ function mergePanes(input: AgentBoardInput): MergedPane[] {
       state: activity.state,
       activity,
       accountProfileId: activity.accountProfileId ?? layout?.accountProfileId ?? null,
+      // Only the renderer's layout knows a pane sleeps: main's notifier keeps
+      // the last state it saw before Codara stopped the agent.
+      sleepingSince: layout?.sleepingSince ?? null,
     });
   }
   return [...merged.values()];
 }
+
+// A sleeping agent (agent hibernation) finished its turn before Codara
+// stopped it, so it sits with the other finished agents, in a quiet tone.
+const SLEEPING_PLACEMENT: Placement = { bucket: "done", status: "Sleeping", tone: "muted" };
+const SLEEPING_MESSAGE = "Stopped to save memory. Opening it resumes the conversation.";
 
 function terminalCard(
   pane: MergedPane,
   workspace: AgentBoardWorkspace,
   input: AgentBoardInput,
 ): AgentBoardCard {
+  if (pane.sleepingSince !== null) return sleepingCard(pane, workspace, input);
   const placement = terminalAgentPlacement(pane.state);
   const activity = pane.activity;
   let message: string | null = null;
@@ -408,8 +427,34 @@ function terminalCard(
     detail: null,
     since,
     unseen: placement.bucket === "done" && unseenKind === "complete",
+    sleeping: false,
     target: { type: "terminal", workspaceId: pane.workspaceId, tabId: pane.tabId, paneId: pane.paneId },
     reply: terminalReply(pane),
+  };
+}
+
+function sleepingCard(pane: MergedPane, workspace: AgentBoardWorkspace, input: AgentBoardInput): AgentBoardCard {
+  return {
+    key: `pane:${pane.paneId}`,
+    source: "terminal",
+    bucket: SLEEPING_PLACEMENT.bucket,
+    status: SLEEPING_PLACEMENT.status,
+    tone: SLEEPING_PLACEMENT.tone,
+    workspaceId: workspace.id,
+    workspaceName: workspace.name,
+    workspaceColor: workspace.color ?? null,
+    runtime: pane.runtime,
+    agentLabel: agentBoardRuntimeLabel(pane.runtime),
+    account: (pane.accountProfileId && input.accountLabels?.[pane.accountProfileId]) || null,
+    title: pane.activity?.prompt ?? (agentBoardLine(pane.tabTitle, 120) || agentBoardRuntimeLabel(pane.runtime)),
+    message: SLEEPING_MESSAGE,
+    tool: null,
+    detail: null,
+    since: pane.sleepingSince ?? 0,
+    unseen: input.unseenPanes?.[pane.paneId] === "complete",
+    sleeping: true,
+    target: { type: "terminal", workspaceId: pane.workspaceId, tabId: pane.tabId, paneId: pane.paneId },
+    reply: null,
   };
 }
 

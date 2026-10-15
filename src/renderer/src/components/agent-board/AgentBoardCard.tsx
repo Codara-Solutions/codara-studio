@@ -3,6 +3,9 @@ import type { CSSProperties, KeyboardEvent } from "react";
 import { formatAgentElapsed, type AgentBoardCard as Card } from "@shared/agent-board";
 import { CodaraMark, RuntimeMark } from "../BrandMarks";
 import { agentBrandColor } from "../../lib/agent-brand";
+import { WORKSPACE_STATUS_LABELS } from "@shared/workspace-status";
+import { WorkspaceStatusChip } from "../workspace-status/WorkspaceStatusChip";
+import { useWorkspaceStatus } from "../workspace-status/workspaceStatusStore";
 import AgentReplyBox from "./AgentReplyBox";
 
 // One agent on the Agents view. The summary is a button that opens the agent
@@ -22,6 +25,9 @@ interface Props {
 }
 
 function AgentBoardCardView({ card, elapsed, active, focusable, onOpen, onFocusCard }: Props) {
+  // The workspace's status (set by an agent or by hand in the rail), so the
+  // card says where the work stands as well as what the agent does.
+  const workspaceStatus = useWorkspaceStatus(card.workspaceId)?.status ?? null;
   const mark =
     card.runtime === "cora" ? (
       <span className="agent-card__mark" style={{ color: "var(--accent)" }}>
@@ -37,6 +43,7 @@ function AgentBoardCardView({ card, elapsed, active, focusable, onOpen, onFocusC
     card.title,
     card.status,
     `${card.agentLabel} in ${card.workspaceName}`,
+    workspaceStatus ? `workspace ${WORKSPACE_STATUS_LABELS[workspaceStatus]}` : null,
     card.account ? `account ${card.account}` : null,
     elapsed && elapsed !== "now" ? `for ${elapsed}` : null,
     card.tool ? `running ${card.tool}` : null,
@@ -50,6 +57,7 @@ function AgentBoardCardView({ card, elapsed, active, focusable, onOpen, onFocusC
       data-agent-card={card.key}
       data-agent-bucket={card.bucket}
       data-agent-workspace={card.workspaceId}
+      data-agent-sleeping={card.sleeping ? "true" : undefined}
       style={{ "--agent-card-ws": card.workspaceColor ?? "var(--muted)" } as CSSProperties}
       // Focus anywhere in the card (its reply box too) makes it the card
       // focus returns to if it moves to another group.
@@ -75,6 +83,7 @@ function AgentBoardCardView({ card, elapsed, active, focusable, onOpen, onFocusC
           <span className="agent-card__ws">
             <span className="agent-card__ws-dot" aria-hidden />
             <span className="agent-card__ws-name">{card.workspaceName}</span>
+            {workspaceStatus && <WorkspaceStatusChip status={workspaceStatus} />}
           </span>
           {meta && <span className="agent-card__who">{meta}</span>}
         </span>

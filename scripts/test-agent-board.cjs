@@ -407,6 +407,47 @@ async function testRendererHelpers(board) {
   check("a pane keeps its tab, state and account", panes[0].tabId === "t1" && panes[0].state === "blocked" && panes[0].accountProfileId === "claude-work");
   check("a pane in another workspace keeps its workspace", panes[1].workspaceId === "ws-b" && panes[1].runtime === "grok");
 
+  // Agent hibernation: a sleeping pane has no live chip, but still counts,
+  // under Done, as the agent its leaf names.
+  const sleptAt = NOW - 40 * MIN;
+  const sleepingLayouts = [
+    {
+      workspaceId: "ws-b",
+      tabs: [
+        {
+          id: "t7",
+          kind: "terminal",
+          title: "Codex",
+          activePaneId: "s1",
+          root: leaf("s1", null, { hibernation: { runtime: "codex", sleptAt } }),
+        },
+      ],
+    },
+  ];
+  const sleepingPanes = helpers.layoutAgentPanes(sleepingLayouts);
+  check(
+    "a sleeping pane counts as its agent without a live chip",
+    sleepingPanes.length === 1 && sleepingPanes[0].runtime === "codex" && sleepingPanes[0].sleepingSince === sleptAt,
+    sleepingPanes,
+  );
+  const sleepingBoard = board.buildAgentBoard({
+    now: NOW,
+    workspaces: WORKSPACES,
+    layoutPanes: sleepingPanes,
+    // Main still reports the state it saw before Codara stopped the agent.
+    activity: [activity({ paneId: "s1", workspaceId: "ws-b", tabId: "t7", runtime: "codex", state: "working" })],
+    runs: [],
+  });
+  const sleepingCard = sleepingBoard.done.find((card) => card.key === "pane:s1");
+  check("a sleeping agent sits under Done, whatever main last saw", Boolean(sleepingCard) && sleepingBoard.working.length === 0);
+  check(
+    "a sleeping card says so, quietly, with no reply",
+    sleepingCard?.sleeping === true && sleepingCard.status === "Sleeping" && sleepingCard.tone === "muted" && sleepingCard.reply === null,
+    sleepingCard,
+  );
+  check("a sleeping card counts from when it fell asleep", sleepingCard?.since === sleptAt);
+  check("opening a sleeping card goes to its pane", sleepingCard?.target.type === "terminal" && sleepingCard.target.paneId === "s1");
+
   check("a Cora tool reads name and target", helpers.describeCoraTool("Bash", { command: "npm test" }) === "Bash: npm test");
   check("an MCP tool loses its server prefix", helpers.describeCoraTool("mcp__codara-studio__codara_terminal_run", {}) === "terminal_run");
   check("a file tool shows its path", helpers.describeCoraTool("Read", { file_path: "/x/y.ts" }) === "Read: /x/y.ts");
