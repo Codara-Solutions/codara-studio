@@ -13,6 +13,7 @@ import {
   type WorktreeSetupStatus,
 } from "@shared/worktree-setup";
 import {
+  restoreUserZdotdir,
   sanitizeAppImageChildEnv,
   sanitizeElectronViteDevEnv,
   sanitizeHostTerminalEnv,
@@ -76,6 +77,9 @@ async function commandBaseEnv(): Promise<Record<string, string>> {
   sanitizeNestedAgentEnv(env);
   sanitizeElectronViteDevEnv(env);
   sanitizeNpmRunScriptEnv(env);
+  // A zsh command reads the user's own .zshenv, not the one of Codara's
+  // terminal integration (set when Codara was started from its own pane).
+  restoreUserZdotdir(env);
   sanitizeHostTerminalEnv(env);
   // The PATH a login shell would have (nvm, Homebrew, ...); a setup may start
   // before the boot-time computation has finished.
