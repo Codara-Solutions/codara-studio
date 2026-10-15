@@ -33,6 +33,7 @@ import {
 } from "@shared/agent-patterns";
 import { formatPaneExitLine } from "@shared/pane-format";
 import { pasteBody } from "@shared/terminal-text";
+import { applyUnicode11Widths } from "@shared/terminal-unicode";
 import { detectMonoFontFamily } from "../../lib/fonts";
 import { subscribeAppTokens } from "../../lib/theme-tokens";
 import { createFileLinkProvider } from "./file-link-provider";
@@ -920,6 +921,10 @@ export function useTerminalSession({
         scrollback: scrollbackLineLimitRef.current,
         allowProposedApi: true,
         allowTransparency: true,
+        // A glyph a font draws wider than its cell (box drawing and symbols
+        // from a fallback font, roman numerals) is squeezed into the cell
+        // instead of overlapping its neighbor. WebGL only; never emoji.
+        rescaleOverlappingGlyphs: true,
         convertEol: false,
         // OSC 8 hyperlinks (CLIs like Claude Code emit their localhost URLs
         // this way) are activated by xterm's core, not WebLinksAddon. With no
@@ -932,6 +937,8 @@ export function useTerminalSession({
         },
       });
       termRef.current = term;
+      // Before anything is written: widths are fixed as bytes are parsed.
+      applyUnicode11Widths(term);
 
       // Observe the erase sequence xterm actually parses rather than guessing
       // from keyboard input or shell command names. Returning false keeps xterm's
