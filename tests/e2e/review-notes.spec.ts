@@ -142,6 +142,14 @@ test("review notes on lines, ranges and files are edited, kept and sent to the i
     const draft = review.getByTestId("review-draft");
     await expect(draft).toContainText("Line 3");
     await draft.getByRole("textbox").fill("Use a clearer name here.");
+    // The words outlive the draft's row: opening the long file above pushes
+    // it far out of view, where the list unmounts it.
+    const bigToggle = fileHeader(review, "big.txt").getByRole("button", { name: /big\.txt/ });
+    await bigToggle.click();
+    await expect(review.locator(".rv-text", { hasText: /^big 1$/ })).toBeVisible();
+    await expect(draft).toHaveCount(0);
+    await bigToggle.click();
+    await expect(draft.getByRole("textbox")).toHaveValue("Use a clearer name here.");
     await draft.getByRole("textbox").press("Control+Enter");
     await expect(review.getByTestId("review-note")).toHaveCount(1);
     await expect(review.getByTestId("review-note").first()).toContainText("Use a clearer name here.");

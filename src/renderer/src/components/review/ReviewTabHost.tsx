@@ -758,11 +758,13 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
   // ── Render ─────────────────────────────────────────────────────────────
 
   const draftWhere = draft ? shortLocation(draft) : null;
+  const draftKey = draft ? `diff:${workspaceId ?? ""}:${draft.path}:${draft.side}:${draft.startLine}-${draft.endLine}` : null;
   const context = useMemo(
     (): ReviewListContext => ({
       selection,
       notedRanges,
       draftWhere,
+      draftKey,
       editingId,
       flashId,
       busy,
@@ -791,6 +793,7 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
       closeDraft,
       confirmDiscard,
       conflicted,
+      draftKey,
       draftWhere,
       editingId,
       flashId,

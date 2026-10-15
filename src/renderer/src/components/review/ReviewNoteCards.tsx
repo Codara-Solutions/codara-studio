@@ -7,6 +7,24 @@ import { shortLocation } from "./review-model";
 
 const MOD_LABEL = typeof navigator !== "undefined" && /Mac/i.test(navigator.platform) ? "Cmd" : "Ctrl";
 
+// The words of composers not saved yet, by place. The diff is virtualized:
+// a note being written unmounts when it scrolls far out of view, and its
+// words must still be there when it scrolls back. Dropped on save and on
+// cancel; a composer closed another way keeps them for when the same place
+// is opened again.
+const unsent = new Map<string, string>();
+const MAX_UNSENT = 50;
+
+function rememberUnsent(key: string, text: string): void {
+  unsent.delete(key);
+  if (text.trim()) unsent.set(key, text);
+  while (unsent.size > MAX_UNSENT) {
+    const oldest = unsent.keys().next().value;
+    if (oldest === undefined) break;
+    unsent.delete(oldest);
+  }
+}
+
 function useAutoFocus(ref: React.RefObject<HTMLTextAreaElement>, when: boolean): void {
   useEffect(() => {
     if (!when) return;
@@ -24,6 +42,7 @@ export function NoteComposer({
   onSave,
   onCancel,
   testId,
+  draftKey,
 }: {
   label: string;
   initial?: string;
@@ -31,19 +50,29 @@ export function NoteComposer({
   onSave: (text: string) => Promise<void> | void;
   onCancel: () => void;
   testId?: string;
+  /** Where the note is; its unsaved words outlive the composer under this key. */
+  draftKey?: string;
 }): React.ReactElement {
-  const [text, setText] = useState(initial);
+  const [restored] = useState(() => (draftKey ? unsent.get(draftKey) : undefined));
+  const [text, setText] = useState(restored ?? initial);
   const [busy, setBusy] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
-  useAutoFocus(ref, true);
+  // A composer that scrolled back into view with words in it does not take
+  // the focus from wherever the user went meanwhile.
+  useAutoFocus(ref, restored === undefined);
   const save = async () => {
     if (!text.trim() || busy) return;
     setBusy(true);
     try {
       await onSave(text);
+      if (draftKey) unsent.delete(draftKey);
     } finally {
       setBusy(false);
     }
+  };
+  const cancel = () => {
+    if (draftKey) unsent.delete(draftKey);
+    onCancel();
   };
   return (
     <div data-testid={testId}>
@@ -53,7 +82,10 @@ export function NoteComposer({
         aria-label={label}
         placeholder="What should the agent change here?"
         value={text}
-        onChange={(event) => setText(event.target.value)}
+        onChange={(event) => {
+          setText(event.target.value);
+          if (draftKey) rememberUnsent(draftKey, event.target.value);
+        }}
         onKeyDown={(event) => {
           if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
             event.preventDefault();
@@ -61,13 +93,13 @@ export function NoteComposer({
           } else if (event.key === "Escape") {
             event.preventDefault();
             event.stopPropagation();
-            onCancel();
+            cancel();
           }
         }}
       />
       <div className="rv-draft__foot">
         <span className="rv-hint">{MOD_LABEL}+Enter to save, Esc to cancel</span>
-        <button type="button" className="rv-textbtn" onClick={onCancel}>
+        <button type="button" className="rv-textbtn" onClick={cancel}>
           Cancel
         </button>
         <button type="button" className="rv-textbtn is-primary" disabled={!text.trim() || busy} onClick={() => void save()}>
@@ -80,10 +112,12 @@ export function NoteComposer({
 
 export function DraftCard({
   where,
+  draftKey,
   onSave,
   onCancel,
 }: {
   where: string;
+  draftKey?: string;
   onSave: (text: string) => Promise<void> | void;
   onCancel: () => void;
 }): React.ReactElement {
@@ -93,7 +127,7 @@ export function DraftCard({
         <span className="rv-note__where">New note</span>
         <span>{where}</span>
       </div>
-      <NoteComposer label={`Note on ${where}`} saveLabel="Add note" onSave={onSave} onCancel={onCancel} />
+      <NoteComposer label={`Note on ${where}`} saveLabel="Add note" onSave={onSave} onCancel={onCancel} draftKey={draftKey} />
     </div>
   );
 }
@@ -144,6 +178,7 @@ export const NoteCard = React.memo(function NoteCard({
           saveLabel="Save"
           onSave={(text) => onSaveEdit(note.id, text)}
           onCancel={onCancelEdit}
+          draftKey={`edit:${note.id}`}
         />
       ) : (
         <div className="rv-note__body">{note.body}</div>

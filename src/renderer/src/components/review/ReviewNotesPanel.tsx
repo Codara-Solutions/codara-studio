@@ -71,6 +71,7 @@ export default function ReviewNotesPanel({ notes, cwd, sending, onJump, onUpdate
                         setEditingId(null);
                       }}
                       onCancel={() => setEditingId(null)}
+                      draftKey={`edit:${note.id}`}
                     />
                   </div>
                 ) : (

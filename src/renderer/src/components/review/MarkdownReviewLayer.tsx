@@ -257,7 +257,13 @@ export default function MarkdownReviewLayer({ containerRef, basePath, text }: Pr
                 <span className="rv-note__where">Note on {where(composing)}</span>
               </div>
               <div className="rv-md-popover__quote">{composing.quote}</div>
-              <NoteComposer label={`Note on ${where(composing)}`} saveLabel="Add note" onSave={save} onCancel={close} />
+              <NoteComposer
+                label={`Note on ${where(composing)}`}
+                saveLabel="Add note"
+                onSave={save}
+                onCancel={close}
+                draftKey={`md:${workspaceId}:${basePath}:${composing.startLine}-${composing.endLine}`}
+              />
               {error ? <div className="rv-status" data-tone="error" style={{ padding: "6px 0 0" }}>{error}</div> : null}
             </div>,
             document.body,

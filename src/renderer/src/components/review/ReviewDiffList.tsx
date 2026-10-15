@@ -17,6 +17,8 @@ export interface ReviewListContext {
   selection: LineSelection | null;
   notedRanges: ReadonlyMap<string, ReadonlyArray<readonly [number, number]>>;
   draftWhere: string | null;
+  /** The open draft's place, under which its unsaved words are kept. */
+  draftKey: string | null;
   editingId: string | null;
   flashId: string | null;
   busy: string | null;
@@ -211,7 +213,7 @@ function RowView({ row, file, ctx }: { row: ReviewRow; file: ReviewDiffFile; ctx
     case "draft":
       return (
         <div className="rv-card-wrap">
-          <DraftCard where={ctx.draftWhere ?? ""} onSave={ctx.onSaveDraft} onCancel={ctx.onCancelDraft} />
+          <DraftCard where={ctx.draftWhere ?? ""} draftKey={ctx.draftKey ?? undefined} onSave={ctx.onSaveDraft} onCancel={ctx.onCancelDraft} />
         </div>
       );
     case "placeholder":
