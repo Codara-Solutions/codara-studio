@@ -279,6 +279,29 @@ async function main() {
     check("a probe failing on the first ask restarts as with nothing live", fresh.gate.request() === "started");
   }
 
+  // ── a quit that proceeds ends the wait ──────────────────────────────
+  {
+    // Quitting while the update restart waits: cleanup stops the agents, and
+    // a gate still polling would see them gone and turn the user's plain
+    // quit into an install that reopens the app. index.ts cancels it as soon
+    // as the quit is past the prompt.
+    const index = fs.readFileSync(path.join(ROOT, "src", "main", "index.ts"), "utf8");
+    const start = index.indexOf('app.on("before-quit"');
+    const handler = index.slice(start, index.indexOf("void (async () => {", start));
+    const claimed = handler.indexOf("cleanupRan = true;");
+    const cancelled = handler.indexOf("updaterModCached?.cancelUpdateRestart();");
+    check(
+      "a quit past the prompt cancels a waiting update restart",
+      start >= 0 && claimed >= 0 && cancelled > claimed,
+      handler.slice(0, 400),
+    );
+    const updater = fs.readFileSync(path.join(ROOT, "src", "main", "auto-updater.ts"), "utf8");
+    check(
+      "the updater exposes that cancel",
+      /export function cancelUpdateRestart\(\): void \{\s*restartGate\.cancel\(\);/.test(updater),
+    );
+  }
+
   // ── terminal agents mid-turn, from the real notifier ─────────────────
   const notify = await bundle(path.join(ROOT, "src", "main", "terminal-agent-notify.ts"), "notify", tmp, [notifyHarness]);
   const Q = globalThis.__QG;

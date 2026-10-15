@@ -1636,6 +1636,11 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   if (cleanupRan) return; // cleanup already in flight from an earlier quit attempt
   cleanupRan = true;
+  // An update restart still waiting for agents ends with this quit. Its
+  // timer would otherwise see the agents stop during cleanup and turn this
+  // plain quit into an install that reopens the app. (A restart the gate
+  // started itself is no longer waiting, so this leaves it alone.)
+  updaterModCached?.cancelUpdateRestart();
 
   // Hard-exit fallback: if cleanup hangs (e.g. a wedged fs handle), force the
   // process to die rather than block quit forever. Mirrors the headless
