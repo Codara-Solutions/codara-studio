@@ -188,6 +188,7 @@ async function main() {
     console.log(`${cond ? "PASS" : "FAIL"} ${name}${!cond && detail !== undefined ? `: ${JSON.stringify(detail)}` : ""}`);
   };
   const run = async (mutate, req = request()) => {
+    ah.resetAgentHibernationForTests();
     const t = makeDeps();
     mutate?.(t);
     const result = await ah.hibernateAgentPane(req, t.deps);
@@ -249,6 +250,7 @@ async function main() {
   check("a stop that did not happen is reported", r.result.reason === "stop-failed");
 
   {
+    ah.resetAgentHibernationForTests();
     const t = makeDeps();
     let release;
     t.deps.listProcesses = () => new Promise((resolve) => { release = () => resolve(t.state.processes); });
@@ -258,6 +260,90 @@ async function main() {
     release();
     const firstResult = await first;
     check("one decision per pane at a time", second.reason === "in-flight" && firstResult.ok === true && t.calls.stop.length === 1);
+  }
+
+  // ── Census backoff ──
+  const devServer = { pid: 103, parentPid: 100, startMs: NOW - 300 * MIN, command: "node vite" };
+  {
+    ah.resetAgentHibernationForTests();
+    const t = makeDeps();
+    const lone = t.state.processes;
+    t.state.processes = [...lone, devServer];
+    const first = await ah.hibernateAgentPane(request(), t.deps);
+    const second = await ah.hibernateAgentPane(request(), t.deps);
+    check(
+      "a census refusal is reused on the next ticks without listing every process again",
+      first.reason === "other-processes" && second.reason === "other-processes" && t.calls.list === 1,
+      { first, second, list: t.calls.list },
+    );
+    t.state.evidence.state = "working";
+    t.state.evidence.chipState = "working";
+    const busy = await ah.hibernateAgentPane(request(), t.deps);
+    check("the pane's own state still answers first while the census is held", busy.reason === "agent-busy", busy);
+    t.state.evidence.state = "idle";
+    t.state.evidence.chipState = "idle";
+    t.state.processes = lone;
+    t.state.session = { ...t.state.session, generationId: "gen-2" };
+    const respawned = await ah.hibernateAgentPane(request(), t.deps);
+    check(
+      "a new process generation is listed afresh",
+      respawned.ok === true && t.calls.list === 2 && t.calls.stop.length === 1,
+      { respawned, list: t.calls.list },
+    );
+  }
+  {
+    ah.resetAgentHibernationForTests();
+    const t = makeDeps();
+    let clock = NOW;
+    t.deps.now = () => clock;
+    const lone = t.state.processes;
+    t.state.processes = [...lone, devServer];
+    await ah.hibernateAgentPane(request(), t.deps);
+    t.state.processes = lone;
+    clock += 4 * MIN;
+    const held = await ah.hibernateAgentPane(request(), t.deps);
+    clock += 2 * MIN;
+    const fresh = await ah.hibernateAgentPane(request(), t.deps);
+    check(
+      "the held verdict expires after five ticks and the stopped dev server lets the pane sleep",
+      held.reason === "other-processes" && fresh.ok === true && t.calls.list === 2,
+      { held, fresh, list: t.calls.list },
+    );
+  }
+  {
+    ah.resetAgentHibernationForTests();
+    const t = makeDeps();
+    t.state.processes = null;
+    await ah.hibernateAgentPane(request(), t.deps);
+    await ah.hibernateAgentPane(request(), t.deps);
+    check("an unreadable listing is not retried on every tick", t.calls.list === 1, t.calls.list);
+  }
+
+  // ── Quit during the stop ──
+  {
+    ah.resetAgentHibernationForTests();
+    const t = makeDeps();
+    let duringStop = null;
+    t.deps.stop = async () => {
+      // pty-manager drops the session from its table as the stop begins.
+      H.live = new Set();
+      H.placed = new Set(["pane-1"]);
+      duringStop = ah.sleepingAgentPanes().get("pane-1") ?? null;
+      return true;
+    };
+    const result = await ah.hibernateAgentPane(request(), t.deps);
+    check(
+      "a quit while the stop runs already counts the pane as a sleeping agent",
+      result.ok === true && duringStop === "claude",
+      { result, duringStop },
+    );
+    ah.resetAgentHibernationForTests();
+    const failed = makeDeps();
+    failed.state.stopResult = false;
+    await ah.hibernateAgentPane(request(), failed.deps);
+    check("a stop that did not happen leaves no sleeping mark", !ah.sleepingAgentPanes().has("pane-1"));
+    H.live = undefined;
+    H.placed = undefined;
   }
 
   // ── Policy ──

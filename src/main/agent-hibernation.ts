@@ -44,6 +44,12 @@ const DEFAULT_TICK_MS = 60_000;
 // The CLI gets this long after SIGHUP to write its transcript before the
 // tree is force-killed, the same grace an account switch gives.
 const STOP_GRACE_MS = 3_000;
+// A pane the census kept awake (a dev server, a late child, a listing that
+// could not be read) usually stays that way for a while. Listing every
+// process on the machine again on each tick costs a `ps` per such pane per
+// minute, and on Windows a PowerShell CIM query, so the census verdict is
+// reused for this many ticks, for the same process generation only.
+const CENSUS_BACKOFF_TICKS = 5;
 
 export interface AgentHibernationDeps {
   now: () => number;
@@ -91,6 +97,16 @@ const inFlight = new Set<string>();
 // Panes this run put to sleep, with the agent each held. A pane that spawned
 // again (woke) or was closed drops out lazily in sleepingAgentPanes().
 const sleeping = new Map<string, AgentHibernationRequest["runtime"]>();
+// Census refusals per pane, reused until `until` while the pane keeps the
+// same process generation (see CENSUS_BACKOFF_TICKS).
+const censusBackoff = new Map<string, { generationId: string; until: number; result: AgentHibernationResult }>();
+
+/** Tests only: forget every pane's in-memory hibernation state. */
+export function resetAgentHibernationForTests(): void {
+  inFlight.clear();
+  sleeping.clear();
+  censusBackoff.clear();
+}
 
 /**
  * The panes still asleep, for the quit census (src/main/index.ts): their
@@ -150,7 +166,7 @@ export async function hibernateAgentPane(
 ): Promise<AgentHibernationResult> {
   const request = validRequest(input);
   if (!request) return { ok: false, reason: "bad-request" };
-  const { idleMs } = await deps.policy();
+  const { idleMs, tickMs } = await deps.policy();
   if (!(idleMs > 0)) return { ok: false, reason: "off" };
   if (inFlight.has(request.paneId)) return { ok: false, reason: "in-flight" };
   inFlight.add(request.paneId);
@@ -158,16 +174,32 @@ export async function hibernateAgentPane(
     const first = judgeNow(request, deps, idleMs);
     if (!first.ok) return first.result;
 
+    const now = deps.now();
+    for (const [paneId, held] of censusBackoff) {
+      if (held.until <= now) censusBackoff.delete(paneId);
+    }
+    const held = censusBackoff.get(request.paneId);
+    if (held && held.generationId === first.session.generationId) return held.result;
+    censusBackoff.delete(request.paneId);
+    const holdCensus = (result: AgentHibernationResult): AgentHibernationResult => {
+      censusBackoff.set(request.paneId, {
+        generationId: first.session.generationId,
+        until: now + Math.max(1_000, tickMs) * CENSUS_BACKOFF_TICKS,
+        result,
+      });
+      return result;
+    };
+
     const processes = await deps.listProcesses();
-    if (!processes) return { ok: false, reason: "process-list-unavailable" };
+    if (!processes) return holdCensus({ ok: false, reason: "process-list-unavailable" });
     const terminalPids = first.session.ttyPath ? await deps.terminalPids(first.session.ttyPath) : [];
-    if (!terminalPids) return { ok: false, reason: "process-list-unavailable" };
+    if (!terminalPids) return holdCensus({ ok: false, reason: "process-list-unavailable" });
     const census = classifyPaneProcessTree(processes, first.session.pid, request.runtime, {
       terminalPids,
     });
     if (!census.ok) {
       deps.log(`pane=${request.paneId} stays awake: ${census.reason}${census.detail ? ` (${census.detail})` : ""}`);
-      return { ok: false, reason: census.reason, ...(census.detail ? { detail: census.detail } : {}) };
+      return holdCensus({ ok: false, reason: census.reason, ...(census.detail ? { detail: census.detail } : {}) });
     }
 
     // The listing took time. Judge again from fresh state, and fence the stop
@@ -177,9 +209,16 @@ export async function hibernateAgentPane(
     if (second.session.generationId !== first.session.generationId) {
       return { ok: false, reason: "no-session" };
     }
-    const stopped = await deps.stop(request.paneId, first.session.generationId);
-    if (!stopped) return { ok: false, reason: "stop-failed" };
+    // Recorded before the stop: the pty leaves pty-manager's table as the
+    // stop begins, so an app quit during the stop's grace period must already
+    // find this pane among the sleeping ones, or the relaunch restore would
+    // drop its session.
     sleeping.set(request.paneId, request.runtime);
+    const stopped = await deps.stop(request.paneId, first.session.generationId);
+    if (!stopped) {
+      sleeping.delete(request.paneId);
+      return { ok: false, reason: "stop-failed" };
+    }
     const sleptAt = deps.now();
     deps.log(`pane=${request.paneId} ${request.runtime} is sleeping`);
     return { ok: true, sleptAt };
