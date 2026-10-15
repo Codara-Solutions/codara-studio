@@ -111,11 +111,13 @@ export function FeatureTour({ name, steps, onClose }: Props) {
       ? placeBeside({ target: targetBox, size, viewport, avoid, preferred: step.placement, gap: GAP, margin: MARGIN })
       : null;
     const insets = chromeInsets();
+    // A window too small for a clear spot: the top right, under the title
+    // bar, is the corner farthest from the composer at the bottom.
     const next =
       beside ??
       placeInCorner({ viewport, size, avoid, margin: MARGIN, topInset: insets.top, bottomInset: insets.bottom }) ?? {
         left: Math.max(MARGIN, viewport.width - MARGIN - size.width),
-        top: Math.max(MARGIN, viewport.height - MARGIN - size.height - insets.bottom),
+        top: insets.top + MARGIN,
       };
     setSpot((current) => (current && current.left === next.left && current.top === next.top ? current : next));
   }, [targetBox, step.placement]);
