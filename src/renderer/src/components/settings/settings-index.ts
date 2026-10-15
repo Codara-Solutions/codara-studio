@@ -7,7 +7,7 @@
 // no page renders, so the two cannot drift apart.
 
 import type { CapabilityTab } from "../capabilities/model";
-import { COMMANDS } from "../../shortcuts/commands";
+import { COMMANDS, type CommandId } from "../../shortcuts/commands";
 import type { PreferenceToggleId } from "./setting-toggles";
 
 export type SettingsTab =
@@ -259,6 +259,20 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "about", title: "Export diagnostics", desc: "Save a redacted zip of logs and crash records for a bug report.", section: "Diagnostics", keywords: "logs bug report support zip export crash freeze debug" },
 ];
 
+// Words people search a command by that neither its label nor its id
+// contains ("palette" for the jump palette). Kept here, not in the command
+// registry, so the registry's shape stays the keyboard dispatcher's own.
+const SHORTCUT_KEYWORDS: Partial<Record<CommandId, string>> = {
+  "jump.open": "palette switcher go to navigate find search",
+  "workspace.selectByIndex": "number digit switch",
+  "workspace.back": "previous history navigate",
+  "workspace.forward": "next history navigate",
+  "quickCommands.open": "palette snippet saved script prompt run",
+  "review.open": "review notes diff comments agent",
+  "worktrees.cleanup": "prune remove delete disk space merged stale",
+  "terminal.copyContext": "copy output agent context",
+};
+
 // Every command on the Keybindings page, derived from the command registry
 // so a new command is searchable without an entry here.
 const SHORTCUT_ENTRIES: ReadonlyArray<SettingsSearchEntry> = COMMANDS.map((command) => ({
@@ -266,7 +280,11 @@ const SHORTCUT_ENTRIES: ReadonlyArray<SettingsSearchEntry> = COMMANDS.map((comma
   title: command.label,
   desc: command.fixed ? "A built-in keyboard shortcut." : "Keyboard shortcut. Record a new key combination.",
   section: command.group,
-  keywords: `shortcut keyboard hotkey key ${command.id.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/\./g, " ")}`,
+  keywords: [
+    "shortcut keyboard hotkey key",
+    command.id.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/\./g, " "),
+    SHORTCUT_KEYWORDS[command.id] ?? "",
+  ].join(" ").trim(),
   shortcut: true,
 }));
 

@@ -303,6 +303,17 @@ async function main() {
     assert.ok(searchSettings("keybindings").some((entry) => entry.tab === "keybindings"));
   });
 
+  check("this round's commands are found by the words people use for them", () => {
+    assert.equal(top("jump palette"), "Jump to a workspace, tab or agent");
+    assert.ok(rankOf("palette", "Jump to a workspace, tab or agent") >= 0, "the jump palette under palette");
+    assert.ok(rankOf("palette", "Run a quick command") >= 0, "the quick commands palette under palette");
+    assert.equal(top("quick commands"), "Saved commands");
+    assert.ok(rankOf("quick commands", "Run a quick command") >= 0);
+    assert.equal(top("clean up worktrees"), "Clean up worktrees");
+    assert.ok(rankOf("prune worktrees", "Clean up worktrees") === 0, "prune finds the cleanup screen");
+    assert.equal(top("review notes"), "Review changes");
+  });
+
   check("word order does not matter", () => {
     assert.equal(top("glass liquid"), "Liquid glass");
     assert.equal(top("tabs close middle"), "Middle-click to close tabs");
