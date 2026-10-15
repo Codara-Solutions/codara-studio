@@ -379,6 +379,36 @@ async function runSuite(m, scratch) {
     assert.ok(result.skipped.some((s) => /link or a file/.test(s.reason)));
   });
 
+  await check("a link inside a folder copied at another depth never points out", async () => {
+    // "shortcut" links to deep/a/b, whose inner link climbs three folders:
+    // fine in the main checkout, but one level down in the worktree the
+    // same text would point above the worktree.
+    const depth = path.join(scratch, "depth");
+    execFileSync("git", ["init", "-q", "-b", "main", depth]);
+    write(path.join(depth, ".gitignore"), "deep/\nshortcut\nkey.pem\n");
+    write(path.join(depth, "README.md"), "x\n");
+    commitAll(depth, "init");
+    write(path.join(depth, "key.pem"), "pem\n");
+    write(path.join(depth, "deep/a/b/file.txt"), "inside\n");
+    fs.symlinkSync("../../../key.pem", path.join(depth, "deep/a/b/up.pem"));
+    fs.symlinkSync("file.txt", path.join(depth, "deep/a/b/near.txt"));
+    fs.symlinkSync("deep/a/b", path.join(depth, "shortcut"));
+    const wt = path.join(scratch, "worktrees", "depth-wt");
+    git(depth, ["worktree", "add", "-q", "-b", "depth-wt", wt]);
+    const result = await materialize.materializeSetup({
+      sourceRoot: fs.realpathSync(depth),
+      worktreeRoot: fs.realpathSync(wt),
+      copies: [{ path: "shortcut", kind: "file" }],
+      links: [],
+      log: () => undefined,
+    });
+    assert.equal(fs.readFileSync(path.join(wt, "shortcut/file.txt"), "utf8"), "inside\n");
+    assert.equal(fs.readlinkSync(path.join(wt, "shortcut/near.txt")), "file.txt");
+    assert.equal(fs.existsSync(path.join(wt, "shortcut/up.pem")), false);
+    assert.equal(fs.lstatSync(path.join(wt, "shortcut/up.pem"), { throwIfNoEntry: false }), undefined);
+    assert.ok(result.skipped.some((s) => s.path === "shortcut/up.pem" && /outside/.test(s.reason)), JSON.stringify(result.skipped));
+  });
+
   await check("stops at the copy budget and says so", async () => {
     const wt = addWorktree("wt-budget");
     const result = await materialize.materializeSetup({

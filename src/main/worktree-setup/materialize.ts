@@ -398,8 +398,11 @@ async function copyInnerLink(source: string, destination: string, relative: stri
     return;
   }
   const lexical = resolve(dirname(source), target);
+  // The copy may sit at another depth than its source (a folder reached
+  // through a link), so the same text must also land inside the worktree.
+  const landsAt = resolve(dirname(destination), target);
   const real = await realInside(ctx.sourceRoot, source);
-  if (!isAtOrUnder(lexical, ctx.sourceRoot) || !real) {
+  if (!isAtOrUnder(lexical, ctx.sourceRoot) || !isAtOrUnder(landsAt, ctx.worktreeRoot) || !real) {
     ctx.result.skipped.push({ path: relative, reason: "a link to a place outside the repository" });
     return;
   }
