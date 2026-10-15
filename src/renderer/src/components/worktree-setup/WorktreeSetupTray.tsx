@@ -10,7 +10,10 @@ const WorktreeSetupLogDialog = lazy(() => import("./WorktreeSetupLogDialog"));
 // still running, and the ones that failed or were stopped until dismissed.
 // A finished one shows "Ready" for a moment and leaves. Every setup Codara
 // starts lands here, whoever made the worktree (you, an agent, an issue or a
-// Cora worker), and a failure also raises a toast.
+// Cora worker), and a failure also raises a toast. A repository command that
+// is new or changed for its repository waits here, with the exact command,
+// until the user runs it, allows it for good or declines it; main raises
+// the notification for that.
 
 const READY_LINGER_MS = 4_000;
 
@@ -124,7 +127,7 @@ export default function WorktreeSetupTray(): React.ReactElement | null {
                   <button type="button" className="spark-btn" onClick={() => setLogId(status.id)}>
                     Log
                   </button>
-                  {!finished ? (
+                  {!finished && status.state !== "awaiting-approval" ? (
                     <button
                       type="button"
                       className="spark-btn"
@@ -163,6 +166,25 @@ export default function WorktreeSetupTray(): React.ReactElement | null {
                     </>
                   ) : null}
                 </div>
+                {status.state === "awaiting-approval" && status.approval ? (
+                  <ApprovalBanner
+                    status={status}
+                    busy={busy}
+                    onRun={(always) =>
+                      void act(status.id, async () => {
+                        const reply = await window.spark.worktreeSetup.approve(
+                          status.id,
+                          status.approval?.fingerprint ?? "",
+                          always,
+                        );
+                        if (isWorktreeSetupStartError(reply)) {
+                          emitLocalToast("Setup did not run", reply.error, "danger");
+                        }
+                      })
+                    }
+                    onDecline={() => void act(status.id, () => window.spark.worktreeSetup.stop(status.id))}
+                  />
+                ) : null}
               </div>
             );
           })}
@@ -174,5 +196,42 @@ export default function WorktreeSetupTray(): React.ReactElement | null {
         </Suspense>
       ) : null}
     </>
+  );
+}
+
+function ApprovalBanner({
+  status,
+  busy,
+  onRun,
+  onDecline,
+}: {
+  status: WorktreeSetupStatus;
+  busy: boolean;
+  onRun: (always: boolean) => void;
+  onDecline: () => void;
+}): React.ReactElement {
+  const command = status.commands.find((entry) => entry.kind === "repo")?.command ?? "";
+  const repoName = status.approval?.repoName ?? "this repository";
+  return (
+    <div className="wts-approval" role="group" aria-label={`Approve the setup command of ${setupName(status)}`} data-testid="worktree-setup-approval">
+      <div className="wts-approval__text">
+        The setup command from <code>.codara/worktree.json</code> is new or changed for {repoName}, so it has not run.
+        Run it only if you trust it.
+      </div>
+      <pre className="wts-approval__command" tabIndex={0} aria-label="Setup command">
+        {command}
+      </pre>
+      <div className="wts-approval__actions">
+        <button type="button" className="spark-btn is-primary" disabled={busy} onClick={() => onRun(false)}>
+          Run setup
+        </button>
+        <button type="button" className="spark-btn" disabled={busy} onClick={() => onRun(true)}>
+          Always allow this command for {repoName}
+        </button>
+        <button type="button" className="spark-btn" disabled={busy} onClick={onDecline}>
+          Don&apos;t run
+        </button>
+      </div>
+    </div>
   );
 }

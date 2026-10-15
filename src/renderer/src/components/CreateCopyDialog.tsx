@@ -16,6 +16,9 @@ import WorktreeSetupSummary from "./worktree-setup/WorktreeSetupSummary";
 export interface CreateCopySetupOptions {
   // Run the repository's setup command, the user's own and its terminals.
   runSetupCommands: boolean;
+  // The repository command shown at the foot of the dialog. Creating with
+  // it on screen approves it for the repository.
+  approveFingerprint: string | null;
 }
 
 // Branch picker for the "Create copy" workspace action. Lists the source
@@ -48,7 +51,9 @@ export default function CreateCopyDialog({
   const [remotesOpen, setRemotesOpen] = useState(true);
   const [naming, setNaming] = useState(false);
   const [runSetupCommands, setRunSetupCommands] = useState(true);
-  const openBranch = (branch: GitBranch): void => onOpenBranch(branch, { runSetupCommands });
+  const [shownFingerprint, setShownFingerprint] = useState<string | null>(null);
+  const setupOptions: CreateCopySetupOptions = { runSetupCommands, approveFingerprint: shownFingerprint };
+  const openBranch = (branch: GitBranch): void => onOpenBranch(branch, setupOptions);
 
   useEffect(() => {
     let cancelled = false;
@@ -170,7 +175,7 @@ export default function CreateCopyDialog({
                 onCommit={(value) => {
                   setNaming(false);
                   const name = value.trim();
-                  if (name) onCreateNew(name, { runSetupCommands });
+                  if (name) onCreateNew(name, setupOptions);
                 }}
                 onCancel={() => setNaming(false)}
               />
@@ -372,6 +377,7 @@ export default function CreateCopyDialog({
           sourceCwd={workspace.cwd}
           runCommands={runSetupCommands}
           onRunCommandsChange={setRunSetupCommands}
+          onShownCommandChange={setShownFingerprint}
           disabled={busy}
         />
       </div>

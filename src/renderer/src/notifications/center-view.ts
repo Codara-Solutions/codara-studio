@@ -174,6 +174,7 @@ export function sourceLabel(entry: NotificationCenterEntry): string {
     return match ? `CI on pull request #${match[1]}` : "CI on this pull request";
   }
   if (entry.kind.startsWith("run.")) return "This Cora run";
+  if (entry.kind === "worktree.setup-approval") return "Setup of this worktree";
   return title;
 }
 

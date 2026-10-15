@@ -1738,6 +1738,8 @@ const DESTRUCTIVE_TOOL_NAMES = new Set([
   "codara_board_update",
   "codara_delete_automation",
   "codara_remember",
+  // Runs the repository's setup command (once the user approved it).
+  "codara_worktree_create",
   "codara_worktree_remove",
 ]);
 const IDEMPOTENT_TOOL_NAMES = new Set([
@@ -1754,6 +1756,8 @@ const OPEN_WORLD_TOOL_NAMES = new Set([
   "codara_terminal_run",
   "codara_terminal_create",
   "codara_terminal_write",
+  // Fetches the base and runs the repository's setup command.
+  "codara_worktree_create",
 ]);
 
 function toolTitle(name) {
@@ -1814,7 +1818,7 @@ function buildInstructions() {
   }
   if (listed.has("codara_worktree_create")) {
     parts.push(
-      "Worktrees: codara_worktree_create gives you an isolated checkout of your repository on its own branch, shown in the user's rail. Work there with absolute paths or git -C; your cwd stays put. Codara prepares it from the repository's .worktreeinclude and .codara/worktree.json (copied files, linked folders, setup command); when the result's setup is not finished, call codara_worktree_setup with wait:true before building, and read its logTail if it failed. Once the branch is merged, call codara_worktree_remove. It refuses anything unmerged, dirty or in use and never forces, so act on its code and hint instead of retrying.",
+      "Worktrees: codara_worktree_create gives you an isolated checkout of your repository on its own branch, shown in the user's rail. Work there with absolute paths or git -C; your cwd stays put. Codara prepares it from the repository's .worktreeinclude and .codara/worktree.json (copied files, linked folders, setup command); when the result's setup is not finished, call codara_worktree_setup with wait:true before building, and read its logTail if it failed. Linked folders are shared with the main checkout: never install into or delete them from the worktree. A setup in state awaiting-approval waits for the user to approve its command; never run that command yourself. Once the branch is merged, call codara_worktree_remove. It refuses anything unmerged, dirty or in use and never forces, so act on its code and hint instead of retrying.",
     );
   }
   if (listed.has("codara_notify_user")) {

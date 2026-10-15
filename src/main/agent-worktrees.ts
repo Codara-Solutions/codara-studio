@@ -200,7 +200,8 @@ export interface AgentWorktreeSetupRunner {
     branch?: string;
   }): Promise<WorktreeSetupStatus | null>;
   whenPrepared(id: string): Promise<WorktreeSetupStatus | null>;
-  waitFor(id: string, timeoutMs: number): Promise<WorktreeSetupStatus | null>;
+  // Without throughApproval a command waiting for the user ends the wait.
+  waitFor(id: string, timeoutMs: number, options?: { throughApproval?: boolean }): Promise<WorktreeSetupStatus | null>;
   get(idOrPath: string): Promise<WorktreeSetupStatus | null>;
   tail(id: string, lines: number): Promise<string>;
   summary(status: WorktreeSetupStatus, logTail: string): Record<string, unknown>;
@@ -819,11 +820,13 @@ function createdResult(
     extra.setupCommand
       ? `Run setup with codara_terminal_create({cwd: path, command: setupCommand}).`
       : "",
-    setupState === "failed" || setupState === "stopped"
-      ? "Setup did not finish: read setup.logTail and fix the cause before you build or test."
-      : setupState && setupState !== "succeeded"
-        ? "Codara is still setting it up: call codara_worktree_setup({workspaceId, wait: true}) before you build or test."
-        : "",
+    setupState === "awaiting-approval"
+      ? "Setup is waiting for the user to approve the repository's setup command in Codara and has not run it: do not run it yourself. Tell the user, then call codara_worktree_setup({workspaceId, wait: true})."
+      : setupState === "failed" || setupState === "stopped"
+        ? "Setup did not finish: read setup.logTail and fix the cause before you build or test."
+        : setupState && setupState !== "succeeded"
+          ? "Codara is still setting it up: call codara_worktree_setup({workspaceId, wait: true}) before you build or test."
+          : "",
     "After the branch is merged, call codara_worktree_remove({workspaceId}).",
   ]
     .filter(Boolean)
@@ -1775,7 +1778,9 @@ export async function getAgentWorktreeSetup(
   }
   if (input.wait && !["succeeded", "failed", "stopped"].includes(status.state)) {
     const seconds = Math.min(Math.max(1, Math.floor(input.timeoutSeconds ?? 300)), SETUP_WAIT_MAX_SECONDS);
-    status = (await runner.waitFor(status.id, seconds * 1000)) ?? status;
+    // An agent that asked to wait also waits while the user decides on a
+    // command that needs their approval.
+    status = (await runner.waitFor(status.id, seconds * 1000, { throughApproval: true })) ?? status;
   }
   const lines = Math.min(Math.max(1, Math.floor(input.logLines ?? SETUP_LOG_LINES_DEFAULT)), SETUP_LOG_LINES_MAX);
   return { ...base, setup: runner.summary(status, await runner.tail(status.id, lines).catch(() => "")) };

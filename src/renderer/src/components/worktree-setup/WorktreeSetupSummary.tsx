@@ -16,11 +16,14 @@ export default function WorktreeSetupSummary({
   sourceCwd,
   runCommands,
   onRunCommandsChange,
+  onShownCommandChange,
   disabled,
 }: {
   sourceCwd: string;
   runCommands: boolean;
   onRunCommandsChange: (value: boolean) => void;
+  // The fingerprint of the repository command on screen, or null.
+  onShownCommandChange?: (fingerprint: string | null) => void;
   disabled?: boolean;
 }): React.ReactElement | null {
   const [preview, setPreview] = useState<WorktreeSetupPreview | null>(null);
@@ -29,8 +32,13 @@ export default function WorktreeSetupSummary({
   const [revision, setRevision] = useState(0);
 
   useEffect(() => {
+    onShownCommandChange?.(preview?.isRepo ? preview.repoCommandFingerprint : null);
+  }, [preview, onShownCommandChange]);
+
+  useEffect(() => {
     let cancelled = false;
     setFailed(false);
+    setPreview(null);
     void window.spark.worktreeSetup
       .preview(sourceCwd)
       .then((next) => {
@@ -116,6 +124,11 @@ export default function WorktreeSetupSummary({
           ) : null}
           {preview.waitForSetup ? <li>Agents wait for setup before they start</li> : null}
         </ul>
+      ) : null}
+      {preview.repoCommandFingerprint && !preview.repoCommandApproved && runCommands ? (
+        <div className="wts-hint" data-testid="worktree-setup-approves">
+          Creating it allows this setup command for the repository, so worktrees agents and Cora make run it too.
+        </div>
       ) : null}
       {preview.uncoveredEnvFiles.length ? (
         <div className="wts-hint">

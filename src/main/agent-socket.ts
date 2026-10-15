@@ -3001,6 +3001,7 @@ const NOTIFY_KINDS: ReadonlySet<string> = new Set<NotifyKind>([
   "git.teammate-push",
   "git.pull-request",
   "git.ci-failed",
+  "worktree.setup-approval",
 ]);
 const NOTIFY_TONES: ReadonlySet<string> = new Set<InAppNotificationTone>([
   "success",

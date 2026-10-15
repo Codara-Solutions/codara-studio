@@ -47,7 +47,17 @@ export interface WorktreeSetupParseResult {
   warnings: string[];
 }
 
-export type WorktreeSetupState = "preparing" | "queued" | "running" | "succeeded" | "failed" | "stopped";
+// "awaiting-approval": the copies and links are done, and the repository's
+// setup command is new or changed for this repository, so it waits for the
+// user to run it from the setup tray. Nothing runs until they do.
+export type WorktreeSetupState =
+  | "preparing"
+  | "awaiting-approval"
+  | "queued"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "stopped";
 export type WorktreeSetupTrigger = "ui" | "agent" | "issue" | "worker" | "workflow";
 export type WorktreeSetupCommandState = "pending" | "running" | "succeeded" | "failed" | "skipped" | "stopped";
 
@@ -62,6 +72,15 @@ export interface WorktreeSetupCommand {
 export interface WorktreeSetupSkip {
   path: string;
   reason: string;
+}
+
+// Set on a status whose repository command needed the user's approval.
+export interface WorktreeSetupApproval {
+  // sha256 of the exact command and the shell that runs it; what the tray
+  // sends back, so a click can only run the command it showed.
+  fingerprint: string;
+  // The repository "Always allow this command for <repo>" names.
+  repoName: string;
 }
 
 export interface WorktreeSetupStatus {
@@ -84,6 +103,9 @@ export interface WorktreeSetupStatus {
   warnings: string[];
   commands: WorktreeSetupCommand[];
   commandsSkipped?: boolean;
+  // Set while the repository command waits for the user's approval, and
+  // kept when they declined it; cleared once they run it.
+  approval?: WorktreeSetupApproval;
   exitCode?: number | null;
   // One line saying why setup failed or stopped.
   error?: string;
@@ -120,6 +142,11 @@ export interface WorktreeSetupPreview {
   copyCount: number;
   link: string[];
   commands: Array<{ kind: "repo" | "user"; label: string; command: string }>;
+  // The repository command's fingerprint. Creating a worktree from the
+  // dialog that showed it approves it for every worktree of the repository.
+  repoCommandFingerprint: string | null;
+  // Already approved for this repository, so agents run it too.
+  repoCommandApproved: boolean;
   waitForSetup: boolean;
   terminals: WorktreeSetupTerminal[];
   // Ignored .env-like files in the main checkout that no rule copies yet.
@@ -349,38 +376,53 @@ export function parseWorktreeIncludeFile(text: string): { patterns: string[]; er
 
 // Installers that write into a folder the file may also link. Through a link
 // the install lands in the main checkout's folder (npm ci even empties it
-// first), and two worktrees setting up at once would write it together.
+// first), and two worktrees setting up at once would write it together, so
+// setup refuses such a link.
 const INSTALLS_INTO: ReadonlyArray<{ folders: readonly string[]; command: RegExp }> = [
   {
     folders: ["node_modules"],
-    command: /(?:^|[\s;&|(])(?:npm|pnpm|yarn|bun)\s+(?:ci|install|i|add)\b|(?:^|[;&|(]\s*)yarn\s*(?:$|[;&|)])/m,
+    command:
+      /(?:^|[\s;&|(])(?:npm|pnpm|yarn|bun|deno)\s+(?:ci|install|i|add|clean-install|install-clean|it)\b|(?:^|[;&|(]\s*)yarn\s*(?:$|[;&|)])/m,
   },
   {
     folders: [".venv", "venv"],
-    command: /(?:^|[\s;&|(])(?:uv\s+sync|poetry\s+install|pipenv\s+install|pip3?\s+install)\b/m,
+    command:
+      /(?:^|[\s;&|(])(?:uv\s+(?:sync|venv|pip\s+(?:install|sync))|poetry\s+(?:install|sync)|pipenv\s+(?:install|sync)|pdm\s+(?:install|sync)|rye\s+sync|pip3?\s+install|pip-sync|virtualenv|python3?\s+-m\s+(?:venv|virtualenv|pip\s+install))\b/m,
+  },
+  {
+    folders: ["vendor"],
+    command: /(?:^|[\s;&|(])(?:composer\s+(?:install|update|require)|go\s+mod\s+vendor)\b/m,
   },
 ];
 
 /**
- * Warnings for a linked folder that a setup command installs into, such as
- * "node_modules" linked while setup runs "npm ci".
+ * The linked folders a setup command installs into, such as "node_modules"
+ * linked while setup runs "npm ci". Setup does not link them.
  */
-export function linkedInstallWarnings(
+export function linksInstalledInto(
   links: readonly string[],
   commands: ReadonlyArray<string | null | undefined>,
 ): string[] {
   const text = commands.filter((command): command is string => Boolean(command)).join("\n");
   if (!text || !links.length) return [];
-  const warnings: string[] = [];
-  for (const link of links) {
+  return links.filter((link) => {
     const name = link.slice(link.lastIndexOf("/") + 1);
     const installer = INSTALLS_INTO.find((entry) => entry.folders.includes(name));
-    if (!installer || !installer.command.test(text)) continue;
-    warnings.push(
-      `The setup command installs into ${link}, which is linked to the main checkout's folder, so it changes that folder too. Link ${link} or install it, not both.`,
-    );
-  }
-  return warnings;
+    return Boolean(installer?.command.test(text));
+  });
+}
+
+/** Why a folder the setup command installs into is not linked. */
+export function linkedInstallNote(link: string): string {
+  return `${link} is not linked because the setup command installs into it, and through a link the install would change the main checkout's folder. Nothing is copied there either; the install fills it.`;
+}
+
+/** Warnings for the editor and the create dialog, one per refused link. */
+export function linkedInstallWarnings(
+  links: readonly string[],
+  commands: ReadonlyArray<string | null | undefined>,
+): string[] {
+  return linksInstalledInto(links, commands).map(linkedInstallNote);
 }
 
 /** The setup command for a platform: setupWindows wins on Windows. */

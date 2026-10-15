@@ -10,7 +10,7 @@
 // and their tests bundle them without the rest of the setup code.
 
 import { promises as fsp } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 export const SETUP_DIR_NAME = "codara-setup";
 export const SETUP_MANIFEST_FILE = "manifest.json";
@@ -110,15 +110,23 @@ function safeRelative(path: string): boolean {
   return !path.split("/").some((segment) => segment === "" || segment === "." || segment === "..");
 }
 
+function withoutLongPathPrefix(value: string): string {
+  return value.replace(/^\\\\\?\\/, "");
+}
+
 async function linkStillOurs(absolute: string, target: string): Promise<boolean> {
-  const stat = await fsp.lstat(absolute).catch(() => null);
-  if (!stat) return false;
-  // A junction reads as a symbolic link to lstat on Windows.
-  if (!stat.isSymbolicLink()) return false;
-  const pointsAt = await fsp.readlink(absolute).catch(() => null);
+  const pointsAt = await linkTarget(absolute);
   if (pointsAt === null) return false;
-  const normalize = (value: string) => resolve(value.replace(/^\\\\\?\\/, "")).replace(/[\\/]+$/, "").toLowerCase();
+  const normalize = (value: string) => resolve(withoutLongPathPrefix(value)).replace(/[\\/]+$/, "").toLowerCase();
   return normalize(pointsAt) === normalize(target);
+}
+
+/** What the link or junction at `absolute` points at; null when it is not one. */
+async function linkTarget(absolute: string): Promise<string | null> {
+  const stat = await fsp.lstat(absolute).catch(() => null);
+  // A junction reads as a symbolic link to lstat on Windows.
+  if (!stat?.isSymbolicLink()) return null;
+  return fsp.readlink(absolute).catch(() => null);
 }
 
 /** Removes a link or junction itself, never what it points at. */
@@ -140,8 +148,11 @@ export async function removeLinkEntry(absolute: string): Promise<boolean> {
 
 /**
  * Takes out the folder links setup made, so removing the worktree can never
- * reach into the main checkout through them. Only a link still pointing where
- * Codara pointed it is removed; anything else is left for git.
+ * reach into the main checkout through them. A link or junction at a path
+ * setup linked goes even when something repointed it since: git for Windows
+ * follows any junction while deleting, whatever it points at. Removing a
+ * link never touches what it points at; each comes back with the target it
+ * had when the removal fails.
  */
 export async function releaseWorktreeLinks(worktreePath: string): Promise<SetupManifestLink[]> {
   const manifest = await readSetupManifest(worktreePath).catch(() => null);
@@ -150,8 +161,12 @@ export async function releaseWorktreeLinks(worktreePath: string): Promise<SetupM
   for (const link of manifest.links) {
     if (!safeRelative(link.path)) continue;
     const absolute = join(worktreePath, ...link.path.split("/"));
-    if (!(await linkStillOurs(absolute, link.target))) continue;
-    if (await removeLinkEntry(absolute)) released.push(link);
+    const pointsAt = await linkTarget(absolute);
+    if (pointsAt === null) continue;
+    const target = (await linkStillOurs(absolute, link.target))
+      ? link.target
+      : resolve(dirname(absolute), withoutLongPathPrefix(pointsAt));
+    if (await removeLinkEntry(absolute)) released.push({ path: link.path, target });
   }
   return released;
 }
@@ -178,7 +193,7 @@ export async function prepareWorktreeRemoval(worktreePath: string): Promise<Setu
   const manifest = await readSetupManifest(worktreePath).catch(() => null);
   for (const link of manifest?.links ?? []) {
     if (!safeRelative(link.path)) continue;
-    if (await linkStillOurs(join(worktreePath, ...link.path.split("/")), link.target)) {
+    if ((await linkTarget(join(worktreePath, ...link.path.split("/")))) !== null) {
       await restoreWorktreeLinks(worktreePath, released);
       throw new Error(
         `Could not take out the linked folder ${link.path} before removing the worktree. Close what uses it, then try again.`,

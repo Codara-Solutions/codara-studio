@@ -15,6 +15,8 @@ export async function startNewWorktreeSetup(input: {
   sourceCwd: string;
   workspace: Workspace;
   runCommands: boolean;
+  // The repository command the create dialog showed, approved by creating.
+  approveFingerprint?: string | null;
   openTerminal: (terminal: WorktreeSetupTerminal) => void;
 }): Promise<WorktreeSetupStatus | null> {
   const { workspace } = input;
@@ -26,6 +28,7 @@ export async function startNewWorktreeSetup(input: {
       workspaceId: workspace.id,
       workspaceName: workspace.name,
       ...(workspace.copyBranch?.branch ? { branch: workspace.copyBranch.branch } : {}),
+      ...(input.approveFingerprint ? { approveFingerprint: input.approveFingerprint } : {}),
       runCommands: input.runCommands,
     });
   } catch (cause) {
@@ -48,7 +51,9 @@ export async function startNewWorktreeSetup(input: {
     opened = true;
     for (const terminal of terminals) input.openTerminal(terminal);
   };
-  if (!started.waitForSetup) {
+  // A command waiting for the user's approval holds the terminals too: they
+  // come from the same file, and open once the user ran its setup.
+  if (!started.waitForSetup && !started.approval) {
     open(started.terminals);
     return started;
   }
