@@ -589,6 +589,31 @@ async function main() {
     store.dispose();
   }
 
+  // ── off, on, off in quick succession ─────────────────────────────────
+  // The first off is still waiting for a write when the on arrives. What the
+  // pane records after the on must still go at the second off.
+  {
+    const { deps, state } = fakeDeps();
+    const store = new storeMod.TerminalScrollbackStore(deps);
+    await store.init();
+    state.sessions.add("flip");
+    store.track(["flip"]);
+    state.feed("flip", "before the flips\r\n");
+    await store.flush();
+    state.enabled = false;
+    const off = store.setEnabled(false);
+    state.enabled = true;
+    const on = store.setEnabled(true);
+    await Promise.all([off, on]);
+    state.feed("flip", "recorded after turning it back on\r\n");
+    await store.flush();
+    check("recording resumes after a quick off and on", fs.existsSync(fileFor("flip")));
+    state.enabled = false;
+    await store.setEnabled(false);
+    check("and the next off still deletes what it wrote", !fs.existsSync(fileFor("flip")));
+    store.dispose();
+  }
+
   // ── where replayed history ends, in the renderer ─────────────────────
   {
     const floor = await bundle(

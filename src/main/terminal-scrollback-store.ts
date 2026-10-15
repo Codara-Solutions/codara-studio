@@ -203,6 +203,7 @@ export class TerminalScrollbackStore {
   private folds = 0;
   private ready: Promise<void> | null = null;
   private wipedWhileDisabled = false;
+  private settingChange: Promise<void> = Promise.resolve();
 
   constructor(deps: TerminalScrollbackStoreDeps) {
     this.deps = deps;
@@ -336,15 +337,23 @@ export class TerminalScrollbackStore {
   }
 
   /** The setting changed. Off stops recording and deletes every file. */
-  async setEnabled(enabled: boolean): Promise<void> {
-    await this.init();
-    if (enabled) {
-      // Panes already open start recording now, seeded with what their
-      // session still holds, so a quit right after this keeps their output.
-      this.track([...this.known]);
-      return;
-    }
-    await this.wipe();
+  setEnabled(enabled: boolean): Promise<void> {
+    // One change at a time. Off waits for writes in flight before it deletes
+    // and marks the folder wiped; an on that ran in that wait would start
+    // recording first, and the files it then wrote would survive the next
+    // off, which skips a folder already marked wiped.
+    const change = this.settingChange.then(async () => {
+      await this.init();
+      if (enabled) {
+        // Panes already open start recording now, seeded with what their
+        // session still holds, so a quit right after this keeps their output.
+        this.track([...this.known]);
+        return;
+      }
+      await this.wipe();
+    });
+    this.settingChange = change.catch(() => undefined);
+    return change;
   }
 
   /** Test hook: wait for folds and writes in flight. */
