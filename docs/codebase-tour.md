@@ -357,6 +357,47 @@ the real services. Supporting pieces: `terminal-leases.ts` and
 apply once), `phone-notify.ts` (push notifications). Boot starts it only when
 the `remoteAccessEnabled` preference is on.
 
+#### SSH port forwarding
+
+When a dev server starts on the host of an SSH workspace, Codara forwards its
+port to this computer over the workspace's existing SSH connection, like
+`ssh -L`, and shows a small notice: "Port 5173 is forwarded." with **Open in
+browser**, which opens a Codara browser tab on `http://localhost:5173`. The
+local port is the same number when it is free here, otherwise a nearby one
+(and 8000 above a port below 1024, so 80 opens on 8080). Local ports listen on
+127.0.0.1 only, never on other interfaces.
+
+- **How a server is found.** A localhost URL with a port printed in any of
+  the host's terminals, including terminals an agent opened with
+  `codara_terminal_create` or `codara_terminal_run`, is forwarded once the host
+  answers on that port. Every 4 seconds Codara also lists the host's
+  listening TCP ports (`ss`, then `netstat`, then `/proc/net/tcp` on Linux;
+  `lsof`, then `netstat` on macOS) and forwards a port that started listening
+  after it connected, from 1024 to 32767, leaving out the SSH port and agent
+  CLIs' sign-in callbacks. Ports already listening when the host connected are
+  offered in the Ports list instead. A host with none of those tools gets
+  forwarding from terminal output only.
+- **The Ports list.** The **PORTS** chip in the status bar of a remote
+  workspace lists the forwarded ports with their local address and process,
+  with Open, Copy URL and Stop forwarding, the host's other listening ports
+  with Forward, and a field to forward any port by hand. Forwards belong to
+  the host, so two workspaces on one machine share them. A stopped port is
+  not forwarded again until it stops listening.
+- **Lifecycle.** Forwards close when the last workspace on the host is
+  removed. When the connection drops they close and wait, and a reconnect
+  binds them again on the same local ports. Forwarding never connects or
+  reconnects a host by itself.
+- **Agents.** In a remote workspace, `codara_preview_navigate` to
+  `http://localhost:<port>` opens that port on the host, forwarding it first.
+
+Code: `src/main/remote/port-forwarding.ts` (the forwards and their
+lifecycle), `port-detect.ts` (URL and port-listing parsers, local port
+choice), `port-forward-runtime.ts` (wiring and IPC), `forwardOut` and
+`onConnectionLifecycle` in `connections.ts`, and
+`components/remote/PortsChip.tsx`. A Codara Cloud box connection is an
+ordinary `RemoteConnection` whose transport is a ProxyCommand, so it forwards
+the same way.
+
 ### 3.6 Claude Code hooks
 
 `hook-installer.ts` builds the `hooks` block that `agent-launch-integration.ts`

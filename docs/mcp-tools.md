@@ -571,6 +571,13 @@ When `codara_preview_navigate` is pointed at a local port that does not
 answer, its error names the saved server for that port and the call that
 starts it (or, when none is saved, how to start one that outlives the agent).
 
+In an SSH workspace, `localhost:<port>` means that port on the host: the
+navigation forwards it over the workspace's SSH connection (when the host
+answers on it) and opens the local port the forward got, which is the same
+number unless that one is taken on this computer. When nothing listens there,
+the error says so. See
+[SSH port forwarding](./codebase-tour.md#ssh-port-forwarding).
+
 The status view in the status bar (the **STATUS** chip) shows the same servers
 with their health, which agents in the workspace's panes reached Codara's
 tools (each codara-studio server reports itself once its client has
