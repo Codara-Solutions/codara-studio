@@ -196,7 +196,10 @@ function normalizeJob(job: ScheduledJob): ScheduledJob {
 function normalizeGate(job: ScheduledJob): ScheduledJob {
   const precheck = normalizeAutomationPrecheck(job.precheck);
   const missedRuns = normalizeMissedRuns(job.missedRuns);
-  const skipsOk = job.skips === undefined || Array.isArray(job.skips);
+  // The history view and the repeat merge read id, at, reason and detail of
+  // every row: an entry without them is dropped, not rendered.
+  const skips = Array.isArray(job.skips) ? job.skips.filter(isSkipRecord) : undefined;
+  const skipsOk = job.skips === undefined || (skips !== undefined && skips.length === job.skips.length);
   if (
     skipsOk &&
     JSON.stringify(precheck) === JSON.stringify(job.precheck) &&
@@ -204,13 +207,24 @@ function normalizeGate(job: ScheduledJob): ScheduledJob {
   ) {
     return job;
   }
-  const { precheck: _p, missedRuns: _m, skips, ...rest } = job;
+  const { precheck: _p, missedRuns: _m, skips: _s, ...rest } = job;
   return {
     ...rest,
     ...(precheck ? { precheck } : {}),
     ...(missedRuns ? { missedRuns } : {}),
-    ...(Array.isArray(skips) ? { skips } : {}),
+    ...(skips ? { skips } : {}),
   };
+}
+
+function isSkipRecord(value: unknown): value is AutomationSkipRecord {
+  if (!value || typeof value !== "object") return false;
+  const s = value as Record<string, unknown>;
+  return (
+    typeof s.id === "string" &&
+    typeof s.at === "string" &&
+    typeof s.detail === "string" &&
+    (s.reason === "precheck" || s.reason === "missed")
+  );
 }
 
 // Looms-on-Pi migration. Every worker config funnels through here on read:

@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import type { AutomationRunRecord, AutomationSkipRecord } from "@shared/types";
-import { fmtClock, fmtTime } from "./presentation";
+import { fmtTime } from "./presentation";
 
 // A history-timeline row for a pass that did not start: its precheck said no,
 // or its scheduled time was missed and not caught up. No run exists, so the
@@ -144,7 +144,7 @@ export default function SkippedHistoryRow({
           )}
           {skip.missed && (
             <div className="spark-mono" style={{ fontSize: 10, color: "var(--muted)" }}>
-              latest missed time {fmtClock(skip.missed.scheduledFor)}
+              latest missed time {fmtTime(skip.missed.scheduledFor)}
             </div>
           )}
           <div style={{ display: "flex", alignItems: "center" }}>

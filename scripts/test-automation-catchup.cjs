@@ -145,6 +145,12 @@ function pureChecks(cu, shared) {
   assert.strictEqual(slots.capped, true);
   assert.strictEqual(slots.count, cu.MISSED_SLOT_SCAN_CAP);
   assert.strictEqual(slots.latestMs, t("2026-10-15T12:34:56Z"), "the latest slot is still exact when the scan is capped");
+  // A month of a five-minute schedule in a timezone: the walk stops at the cap.
+  const nyWork = { kind: "cron", expr: "*/5 9-17 * * 1-5", tz: "America/New_York" };
+  slots = cu.scheduledSlotsBetween(nyWork, t("2026-09-15T00:00:00Z"), t("2026-10-15T12:00:00Z"));
+  assert.strictEqual(slots.capped, true);
+  assert.strictEqual(slots.count, cu.MISSED_SLOT_SCAN_CAP);
+  assert.strictEqual(slots.latestMs, t("2026-10-14T21:55:00Z"), "17:55 New York on the 14th is the latest");
   pass("a dense schedule is capped at the scan limit with the exact latest time");
 
   const ny = { kind: "cron", expr: "0 9 * * *", tz: "America/New_York" };
@@ -218,12 +224,12 @@ function pureChecks(cu, shared) {
   const lines = [
     shared.missedSkipDetail({ count: 3, policy: "skip", graceMinutes: 720, noticedOn: "start" }),
     shared.missedSkipDetail({ count: 1, policy: "runOnce", graceMinutes: 60, noticedOn: "wake" }),
-    shared.missedSkipDetail({ count: 1000, capped: true, policy: "skip", graceMinutes: 720, noticedOn: "wake" }),
+    shared.missedSkipDetail({ count: 100, capped: true, policy: "skip", graceMinutes: 720, noticedOn: "wake" }),
   ];
   assert.deepStrictEqual(lines, [
     "3 scheduled runs were missed while Codara was closed and skipped.",
     "1 scheduled run was missed while the computer was asleep; the latest was more than 1 hour ago, so none ran.",
-    "1000 or more scheduled runs were missed while the computer was asleep and skipped.",
+    "100 or more scheduled runs were missed while the computer was asleep and skipped.",
   ]);
   for (const line of lines) assert.ok(!/[\u2013\u2014]/.test(line), "no en or em dashes in UI copy");
   assert.strictEqual(shared.missedRunsSummary({ trigger: { kind: "manual" } }), null);
@@ -445,6 +451,23 @@ async function integrationChecks({ sched, loop }, workspace) {
   assert.strictEqual(job.precheck, undefined, "null removes the precheck");
   assert.strictEqual(job.missedRuns, undefined, "null restores the default policy");
   pass("precheck and policy normalize on write; null removes them");
+
+  // A hand-edited or older skip list: rows the history view cannot render
+  // are dropped the next time the automation is normalized.
+  await sched.patchJob(sleeper.id, (j) => ({
+    ...j,
+    skips: [
+      { id: "skip-ok", at: iso(Date.now()), reason: "precheck", detail: "kept" },
+      { id: "skip-no-detail", at: iso(Date.now()), reason: "precheck" },
+      { at: iso(Date.now()), reason: "missed", detail: "no id" },
+      { id: "skip-bad-reason", at: iso(Date.now()), reason: "because", detail: "x" },
+      null,
+      "text",
+    ],
+  }));
+  await sched.updateJob({ id: sleeper.id, name: "sleeper renamed" });
+  assert.deepStrictEqual((await get(sleeper.id)).skips.map((x) => x.id), ["skip-ok"]);
+  pass("malformed skip rows are dropped when the automation is normalized");
 
   // ── the precheck gate ─────────────────────────────────────────────────────
   if (process.platform === "win32") {
