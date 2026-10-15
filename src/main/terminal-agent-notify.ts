@@ -477,6 +477,8 @@ function removeWatcher(paneId: string): void {
   if (!w) return;
   tanLog(`pane=${paneId} watcher removed`);
   watchers.delete(paneId);
+  // A closed agent pane leaves the Agents view (and its Needs you count) now.
+  if (w.runtime && !w.excluded) signalAgentBoardChanged();
   clearCodexScreen(w);
   cancelPendingDone(w, "watcher removed");
   rearm(paneSourceKey(paneId));
@@ -1018,6 +1020,8 @@ export function noteTerminalHookEvent(
     case "PostToolUse":
     case "PostToolUseFailure":
       w.pendingToolCalls = Math.max(0, w.pendingToolCalls - 1);
+      // The board shows the tool running now, not the last one that ran.
+      if (w.pendingToolCalls === 0 && w.activity.tool !== null) noteActivity(w, { tool: null });
       if (w.signals.programStatus) return;
       if (w.state === "blocked") promptResolved(w, now);
       return;
@@ -1209,7 +1213,9 @@ function handleCodexRolloutEvent(w: PaneWatcher, event: CodexRolloutEvent): void
 
 export function noteTerminalWillDispose(paneId: string): void {
   const w = watchers.get(paneId);
-  if (w) w.disposing = true;
+  if (!w) return;
+  w.disposing = true;
+  if (w.runtime && !w.excluded) signalAgentBoardChanged();
 }
 
 // Snapshot foreground agent panes before app-level PTY teardown begins.

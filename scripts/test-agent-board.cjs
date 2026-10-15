@@ -578,6 +578,14 @@ async function testNotifierActivity() {
   check("a blocked pane keeps the tool it asks to run", entry?.tool === "Bash: ./deploy.sh --prod");
   mod.noteTerminalUserInput("h1", "1");
   mod.noteTerminalHookEvent("h1", "PostToolUse", { ...session, tool_name: "Bash" });
+  entry = pane("h1");
+  check("a tool that finished is no longer the current tool", entry?.tool === null, entry);
+  mod.noteTerminalHookEvent("h1", "PreToolUse", { ...session, tool_name: "Read", tool_input: { file_path: "a.ts" } });
+  mod.noteTerminalHookEvent("h1", "PreToolUse", { ...session, tool_name: "Read", tool_input: { file_path: "b.ts" } });
+  mod.noteTerminalHookEvent("h1", "PostToolUse", { ...session, tool_name: "Read" });
+  check("a tool still running stays the current tool", pane("h1")?.tool === "Read: b.ts", pane("h1")?.tool);
+  mod.noteTerminalHookEvent("h1", "PostToolUse", { ...session, tool_name: "Read" });
+  check("the last tool call done, no current tool", pane("h1")?.tool === null, pane("h1")?.tool);
   mod.noteTerminalHookEvent("h1", "Stop", { ...session, last_assistant_message: "**Deployed** to eu-west.", background_tasks: [] });
   await sleep(1300);
   entry = pane("h1");
@@ -611,7 +619,33 @@ async function testNotifierActivity() {
   check("main leaves the account to agent-board.ts", pane("h1")?.accountProfileId === null);
   check("every entry names its workspace and tab", pane("h1")?.workspaceId === "ws-a" && pane("h1")?.tabId === "t1");
 
-  T.exits.get("s1")?.({ exitCode: 0 });
+  // A closed agent pane must leave the board (and the switch's Needs you
+  // count) at once, not on the next safety refresh.
+  let signalsBeforeClose = T.signals;
+  mod.noteTerminalWillDispose("s1");
+  check("an agent pane about to close leaves the board", pane("s1") === undefined);
+  check("an agent pane about to close pings the board", T.signals > signalsBeforeClose);
+  signalsBeforeClose = T.signals;
+  mod.syncTerminalNotifyPanes({
+    workspaceId: "ws-a",
+    workspaceName: "Alpha",
+    panes: [
+      { paneId: "h1", tabId: "t1", tabTitle: "Claude hooks", excluded: false },
+      { paneId: "w1", tabId: "t3", tabTitle: "workers", excluded: true },
+      { paneId: "sh", tabId: "t4", tabTitle: "shell", excluded: false },
+    ],
+  });
+  check("a closed agent pane pings the board", T.signals > signalsBeforeClose);
+  signalsBeforeClose = T.signals;
+  mod.syncTerminalNotifyPanes({
+    workspaceId: "ws-a",
+    workspaceName: "Alpha",
+    panes: [
+      { paneId: "h1", tabId: "t1", tabTitle: "Claude hooks", excluded: false },
+      { paneId: "w1", tabId: "t3", tabTitle: "workers", excluded: true },
+    ],
+  });
+  check("a closed plain shell does not ping the board", T.signals === signalsBeforeClose);
   mod.disposeAllTerminalAgentWatchers();
   check("disposed panes leave the board", mod.terminalAgentActivitySnapshot().length === 0);
 }
