@@ -572,6 +572,25 @@ async function main() {
   pureChecks(mod.cu, mod.shared);
   await integrationChecks(mod, workspace);
 
+  // Quitting while a check runs: the stopped check is not a skip.
+  if (process.platform !== "win32") {
+    const quitting = await mod.sched.createJob({
+      name: "quitting",
+      trigger: { kind: "cron", expr: "0 0 1 1 *", tz: "UTC" },
+      input: { workspaceId: "ws", workspaceName: "test", cwd: workspace, initialUserNote: "x" },
+      loop: { kind: "cadence", everyMs: 60_000, stop: {} },
+      precheck: { command: "sleep 30; exit 0" },
+    });
+    const fire = mod.loop.startIteration(quitting.id, { source: "cadence" });
+    await sleep(300);
+    mod.loop.teardownAllLoops();
+    await fire;
+    const q = (await mod.sched.listJobs()).find((j) => j.id === quitting.id);
+    assert.strictEqual(q.skips, undefined, "a check stopped by quitting records no skip");
+    assert.ok(!globalThis.__CU.launches.some((l) => l.automationId === quitting.id));
+    pass("quitting stops a running check without recording a skip or launching a pass");
+  }
+
   // Once the scheduler is stopped (quit), a late wake starts and records nothing.
   const late = await mod.sched.createJob({
     name: "after stop",

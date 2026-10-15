@@ -25,7 +25,7 @@ import {
 } from "@shared/types";
 import { appendHistory, appendSkip, getJob, injectTriggerNote, listJobs, patchJob } from "./scheduler";
 import { normalizeAutomationPrecheck, precheckSkipDetail } from "@shared/automation-catchup";
-import { runAutomationPrecheck } from "./automation-precheck";
+import { PRECHECK_STOPPED_ERROR, runAutomationPrecheck, stopRunningPrechecks } from "./automation-precheck";
 import { automationSourceKey, publish, rearm, settleAutomationQuestions } from "../notify";
 import { appendEvent, subscribeToEvents } from "./event-log";
 import { nextReadyWave, planLoomLayers, renderNodePrompt, sinkNodeIds, upstreamOf } from "./loom-graph";
@@ -253,6 +253,8 @@ async function passesPrecheck(id: string, job: ScheduledJob, opts: StartIteratio
   const cadenceWaiting = runner.cadenceWaiting === true;
   runner.cadenceWaiting = false;
   if (result.passed) return true;
+  // Codara is quitting: that is not the check's answer, so nothing to record.
+  if (result.error === PRECHECK_STOPPED_ERROR) return false;
   await appendSkip(id, {
     reason: "precheck",
     detail: precheckSkipDetail(result, precheck.timeoutSeconds),
@@ -985,6 +987,8 @@ export function teardownAllLoops(): void {
   }
   loops.clear();
   watchedRuns.clear();
+  // A check in its own process group would outlive the app.
+  stopRunningPrechecks();
 }
 
 // onFinishOf chain registry (called from scheduler.armJob).

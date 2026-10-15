@@ -2906,11 +2906,13 @@ export function registerIpc(): void {
     async (_e, input: TestPrecheckInput): Promise<AutomationPrecheckResult> => {
       const { normalizeAutomationPrecheck } = await import("@shared/automation-catchup");
       const precheck = normalizeAutomationPrecheck(input?.precheck);
-      if (!precheck || typeof input.cwd !== "string" || !input.cwd) {
+      if (!precheck) {
         return { passed: false, exitCode: null, timedOut: false, durationMs: 0, outputTail: "", error: "no command" };
       }
+      // A missing or relative folder is the runner's to report, in its words.
+      const cwd = typeof input.cwd === "string" ? input.cwd : "";
       const { runAutomationPrecheck } = await import("./orchestration/automation-precheck");
-      return runAutomationPrecheck(precheck, { cwd: input.cwd, env: { CODARA_AUTOMATION_PRECHECK: "1" } });
+      return runAutomationPrecheck(precheck, { cwd, env: { CODARA_AUTOMATION_PRECHECK: "1" } });
     },
   );
 

@@ -320,8 +320,12 @@ right away, and says whether the pass would run. The command gets
 `SPARK_AUTOMATION_ID` and `CODARA_AUTOMATION_PRECHECK=1`. It runs in your login
 shell on macOS and Linux, and in Command Prompt on Windows, where a
 **PowerShell** choice is also offered. A check on several lines runs them in
-order and the last line's exit code decides (Command Prompt gets them joined
-with `&`).
+order and the last line's exit code decides. Command Prompt reads only one
+line, so Codara joins the lines the way a batch file reads them: with `&`
+between statements, a ( ) block and a `^` continuation kept whole, and `rem`
+or `::` comment lines left out. A command is at most 4000 characters. Quitting
+Codara stops a check that is still running, and that is not recorded as a
+skip.
 
 **If a run was missed** decides what happens to a scheduled time that passed
 while Codara was closed or the computer was asleep. Codara checks when it

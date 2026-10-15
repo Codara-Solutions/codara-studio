@@ -1,5 +1,6 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promises as fsp } from "node:fs";
+import { isAbsolute } from "node:path";
 import type {
   AutomationPrecheck,
   AutomationPrecheckResult,
@@ -33,9 +34,11 @@ export interface PrecheckInvocation {
  *    started from the Dock; fish and unknown shells use /bin/sh.
  *  - default, Windows: cmd.exe /d /s /c "<command>", quoted the way Node's own
  *    shell:true does it, so quotes inside the command reach cmd unchanged;
- *    several lines are joined with " & ".
+ *    several lines are joined into one (joinCmdLines).
  *  - powershell: powershell.exe on Windows, pwsh elsewhere, with the command
- *    as -EncodedCommand (UTF-16LE base64), which sidesteps every quoting rule. */
+ *    as -EncodedCommand (UTF-16LE base64), which sidesteps every quoting rule.
+ *    Progress records are turned off first: with its output redirected,
+ *    PowerShell writes them to stderr as CLIXML, which would fill the tail. */
 export function precheckInvocation(
   command: string,
   shell: AutomationPrecheckShell | undefined,
@@ -43,7 +46,8 @@ export function precheckInvocation(
   env: Record<string, string | undefined> = process.env,
 ): PrecheckInvocation {
   if (shell === "powershell") {
-    const encoded = Buffer.from(command, "utf16le").toString("base64");
+    const script = `$ProgressPreference = 'SilentlyContinue'\n${command}`;
+    const encoded = Buffer.from(script, "utf16le").toString("base64");
     const common = ["-NoLogo", "-NoProfile", "-NonInteractive"];
     return platform === "win32"
       ? { file: "powershell.exe", args: [...common, "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded] }
@@ -51,19 +55,40 @@ export function precheckInvocation(
   }
   if (platform === "win32") {
     const comspec = env.ComSpec || env.COMSPEC || "cmd.exe";
-    // cmd.exe stops reading a /c command line at its first line break, so a
-    // check typed on two lines would only run the first. Joined with "&" the
-    // lines run in order and the last one's exit code decides, as in sh -c.
-    const oneLine = command
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .join(" & ");
-    return { file: comspec, args: ["/d", "/s", "/c", `"${oneLine}"`], windowsVerbatimArguments: true };
+    return {
+      file: comspec,
+      args: ["/d", "/s", "/c", `"${joinCmdLines(command)}"`],
+      windowsVerbatimArguments: true,
+    };
   }
   const userShell = env.SHELL ?? "";
   const file = /\/(zsh|bash|sh)$/.test(userShell) ? userShell : "/bin/sh";
   return { file, args: ["-lc", command] };
+}
+
+/** cmd.exe stops reading a /c command line at its first line break, so a
+ *  check typed on several lines would only run the first. The lines are
+ *  joined the way cmd reads them from a batch file: "&" between statements
+ *  (they run in order and the last one's exit code decides, as in sh -c), a
+ *  plain space at the edges of a ( ) block and after an operator that already
+ *  joins (&, &&, ||, |), and nothing for a trailing ^ continuation. A REM or
+ *  :: comment line is dropped: on one line it would swallow every line after
+ *  it. */
+export function joinCmdLines(command: string): string {
+  let out = "";
+  for (const raw of command.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || /^(rem(\s|$)|::)/i.test(line)) continue;
+    if (!out) {
+      out = line;
+      continue;
+    }
+    const carets = /\^+$/.exec(out)?.[0].length ?? 0;
+    if (carets % 2 === 1) out = `${out.slice(0, -1)}${line}`;
+    else if (/[(&|]$/.test(out) || line.startsWith(")")) out = `${out} ${line}`;
+    else out = `${out} & ${line}`;
+  }
+  return out;
 }
 
 export interface KillDeps {
@@ -99,6 +124,8 @@ export function killPrecheckTree(
   child: Pick<ChildProcess, "pid" | "kill">,
   platform: NodeJS.Platform = process.platform,
   deps: KillDeps = realKillDeps,
+  /** Quitting: SIGKILL the group at once, there is no later to wait for. */
+  now = false,
 ): void {
   const pid = child.pid;
   if (!pid) {
@@ -120,15 +147,17 @@ export function killPrecheckTree(
     });
     return;
   }
+  const first: NodeJS.Signals = now ? "SIGKILL" : "SIGTERM";
   try {
-    deps.processKill(-pid, "SIGTERM");
+    deps.processKill(-pid, first);
   } catch {
     try {
-      child.kill("SIGTERM");
+      child.kill(first);
     } catch {
       /* already gone */
     }
   }
+  if (now) return;
   deps.setTimer(() => {
     try {
       deps.processKill(-pid, "SIGKILL");
@@ -147,8 +176,29 @@ function appendTail(tail: string, chunk: string): string {
   return next.length > PRECHECK_OUTPUT_TAIL_CHARS * 2 ? next.slice(-PRECHECK_OUTPUT_TAIL_CHARS * 2) : next;
 }
 
+// Windows PowerShell can write its error stream as CLIXML when its output is
+// redirected ("#< CLIXML" then an <Objs> document). Keep the error text only,
+// with its _xHHHH_ escapes (CR, LF) and XML entities decoded.
+const CLIXML_RE = /#< CLIXML\s*(<Objs\b[\s\S]*?<\/Objs>)/g;
+const XML_ENTITIES: Record<string, string> = { lt: "<", gt: ">", quot: '"', apos: "'", amp: "&" };
+
+export function decodeClixml(text: string): string {
+  if (!text.includes("#< CLIXML")) return text;
+  return text.replace(CLIXML_RE, (_m, objs: string) =>
+    [...objs.matchAll(/<S S="Error">([\s\S]*?)<\/S>/g)]
+      .map((m) => m[1])
+      .join("")
+      .replace(/_x([0-9A-Fa-f]{4})_/g, (_x, hex: string) => String.fromCharCode(parseInt(hex, 16)))
+      .replace(/&(lt|gt|quot|apos|amp);/g, (_e, name: string) => XML_ENTITIES[name]),
+  );
+}
+
 function finalTail(raw: string): string {
-  return raw.replace(ANSI_RE, "").replace(/\r\n?/g, "\n").slice(-PRECHECK_OUTPUT_TAIL_CHARS).trimEnd();
+  return decodeClixml(raw)
+    .replace(ANSI_RE, "")
+    .replace(/\r\n?/g, "\n")
+    .slice(-PRECHECK_OUTPUT_TAIL_CHARS)
+    .trimEnd();
 }
 
 /** Node reports a missing working folder as the SHELL missing ("spawn
@@ -174,6 +224,34 @@ export interface RunPrecheckOptions {
   killDeps?: KillDeps;
 }
 
+/** After the shell exits, how long its output may take to drain before the
+ *  verdict is given anyway. A background job the check started (`cmd &`)
+ *  keeps the pipes open after the shell is gone; the shell's exit code is
+ *  the answer, not that job's lifetime. */
+export const PRECHECK_DRAIN_MS = 1000;
+
+// Checks running right now, so quitting Codara stops them (a POSIX check runs
+// in its own process group and would otherwise outlive the app, with no
+// timeout left to stop it).
+const runningPrechecks = new Set<() => void>();
+
+/** The error a check stopped by stopRunningPrechecks settles with. It is not
+ *  the check's answer, so the loop driver records no skip for it. */
+export const PRECHECK_STOPPED_ERROR = "Codara quit before the check finished";
+
+/** Stop every running precheck (app quit). Their promises still settle, with
+ *  PRECHECK_STOPPED_ERROR. */
+export function stopRunningPrechecks(): void {
+  for (const stop of [...runningPrechecks]) {
+    try {
+      stop();
+    } catch {
+      /* best effort during teardown */
+    }
+  }
+  runningPrechecks.clear();
+}
+
 /** Run the precheck once. Resolves with the outcome; never rejects. */
 export function runAutomationPrecheck(
   precheck: AutomationPrecheck,
@@ -188,6 +266,9 @@ export function runAutomationPrecheck(
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let hardStop: ReturnType<typeof setTimeout> | undefined;
+    let drain: ReturnType<typeof setTimeout> | undefined;
+    let stopTree: (() => void) | undefined;
+    let stopped = false;
     let child: ChildProcess;
 
     const settle = (exitCode: number | null, error?: string): void => {
@@ -195,20 +276,29 @@ export function runAutomationPrecheck(
       settled = true;
       if (timer) clearTimeout(timer);
       if (hardStop) clearTimeout(hardStop);
-      const passed = !timedOut && !error && exitCode === 0;
+      if (drain) clearTimeout(drain);
+      if (stopTree) runningPrechecks.delete(stopTree);
+      const why = stopped ? PRECHECK_STOPPED_ERROR : error;
+      const passed = !timedOut && !why && exitCode === 0;
       resolve({
         passed,
         exitCode: timedOut ? null : exitCode,
         timedOut,
         durationMs: Math.max(0, Date.now() - startedAt),
         outputTail: finalTail(tail),
-        ...(error ? { error } : {}),
+        ...(why ? { error: why } : {}),
       });
     };
 
     const command = precheck.command.trim();
     if (!command) {
       settle(null, "no command");
+      return;
+    }
+    // Without a folder, spawn would run the command wherever Codara itself
+    // runs ("/" for an app started from the Dock).
+    if (!opts.cwd || !isAbsolute(opts.cwd)) {
+      settle(null, "the automation has no workspace folder");
       return;
     }
     const inv = precheckInvocation(command, precheck.shell, platform, process.env);
@@ -245,6 +335,24 @@ export function runAutomationPrecheck(
     child.on("close", (code) => {
       if (!failing) settle(typeof code === "number" ? code : null);
     });
+    // "close" waits for the pipes as well as the shell. Normally both end
+    // together; when a leftover background job holds the pipes, the shell's
+    // exit code decides once the output had a moment to drain.
+    child.on("exit", (code) => {
+      if (failing || settled || drain) return;
+      drain = setTimeout(() => {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        settle(typeof code === "number" ? code : null);
+      }, PRECHECK_DRAIN_MS);
+    });
+    stopTree = () => {
+      stopped = true;
+      killPrecheckTree(child, platform, opts.killDeps, true);
+      // Settle even if a grandchild outside the group holds the pipes.
+      drain ??= setTimeout(() => settle(null), PRECHECK_DRAIN_MS);
+    };
+    runningPrechecks.add(stopTree);
     timer = setTimeout(() => {
       timedOut = true;
       killPrecheckTree(child, platform, opts.killDeps);

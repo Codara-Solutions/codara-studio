@@ -1085,6 +1085,16 @@ async function main() {
       Boolean(precheckRejected.error) && /precheck must be/i.test(precheckRejected.error?.message ?? ""),
       JSON.stringify(precheckRejected.error ?? precheckRejected.result).slice(0, 200),
     );
+    const longRejected = await rpc(handshake, "automation.create", {
+      ...createBase,
+      worker: okWorker,
+      precheck: { command: `test -f ${"x".repeat(4100)}` },
+    });
+    check(
+      "automation.create refuses an over-long precheck command instead of cutting it",
+      Boolean(longRejected.error) && /longer than 4000 characters/i.test(longRejected.error?.message ?? ""),
+      JSON.stringify(longRejected.error ?? longRejected.result).slice(0, 200),
+    );
     const missedRejected = await rpc(handshake, "automation.create", {
       ...createBase,
       worker: okWorker,

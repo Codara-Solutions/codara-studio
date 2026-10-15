@@ -77,6 +77,12 @@ async function main() {
   );
   assert.strictEqual(shared.normalizeAutomationPrecheck({ command: "x", timeoutSeconds: 0 }).timeoutSeconds, 1);
   assert.strictEqual(shared.normalizeAutomationPrecheck({ command: "x", shell: "bash" }).shell, undefined);
+  const longCommand = `test -f ${"x".repeat(shared.MAX_PRECHECK_COMMAND_CHARS + 100)}`;
+  assert.strictEqual(
+    shared.normalizeAutomationPrecheck({ command: longCommand }).command,
+    longCommand,
+    "a long command is kept whole (refused at the input, never cut into a different command)",
+  );
   pass("precheck normalizer trims, clamps the timeout and drops unknown shells");
 
   assert.strictEqual(
@@ -123,6 +129,22 @@ async function main() {
       ["/d", "/s", "/c", '"cd sub & if exist TODO.md (exit 0) else (exit 1)"'],
       "cmd.exe would run only the first line: lines are joined with &",
     );
+    // A block typed over several lines, the way a batch file is written.
+    assert.strictEqual(
+      runner.joinCmdLines("if exist TODO.md (\n  echo found\n  exit 0\n) else (\n  exit 1\n)"),
+      "if exist TODO.md ( echo found & exit 0 ) else ( exit 1 )",
+      "no & right inside a ( ) block's edges",
+    );
+    assert.strictEqual(runner.joinCmdLines("git fetch &&\ngit status"), "git fetch && git status", "an operator at the end already joins");
+    assert.strictEqual(runner.joinCmdLines("dir |\nfind \"x\""), 'dir | find "x"');
+    assert.strictEqual(runner.joinCmdLines("echo a ^\nb\nexit 1"), "echo a b & exit 1", "a trailing ^ continues the line");
+    assert.strictEqual(runner.joinCmdLines("echo a^^\nexit 1"), "echo a^^ & exit 1", "an escaped ^^ is not a continuation");
+    assert.strictEqual(
+      runner.joinCmdLines("rem look for work\n:: still a comment\nREM\nif exist TODO.md (exit 0) else (exit 1)"),
+      "if exist TODO.md (exit 0) else (exit 1)",
+      "comment lines are dropped, not allowed to swallow the lines after them",
+    );
+    assert.strictEqual(runner.joinCmdLines("remove.bat"), "remove.bat", "only a REM word is a comment");
     assert.deepStrictEqual(
       runner.precheckInvocation("cd sub\ntest -f TODO.md", "default", "linux", { SHELL: "/bin/sh" }).args,
       ["-lc", "cd sub\ntest -f TODO.md"],
@@ -137,12 +159,25 @@ async function main() {
     assert.ok(win.args.includes("-NonInteractive") && win.args.includes("-NoProfile"));
     assert.deepStrictEqual(win.args.slice(-4, -2), ["-ExecutionPolicy", "Bypass"]);
     assert.strictEqual(win.args[win.args.length - 2], "-EncodedCommand");
-    assert.strictEqual(Buffer.from(win.args[win.args.length - 1], "base64").toString("utf16le"), cmd);
+    const decoded = Buffer.from(win.args[win.args.length - 1], "base64").toString("utf16le");
+    assert.strictEqual(decoded, `$ProgressPreference = 'SilentlyContinue'\n${cmd}`, "progress records are off, then the command as typed");
     const mac = runner.precheckInvocation(cmd, "powershell", "darwin", {});
     assert.strictEqual(mac.file, "pwsh");
     assert.ok(!mac.args.includes("-ExecutionPolicy"));
-    assert.strictEqual(Buffer.from(mac.args[mac.args.length - 1], "base64").toString("utf16le"), cmd);
+    assert.ok(Buffer.from(mac.args[mac.args.length - 1], "base64").toString("utf16le").endsWith(`\n${cmd}`));
     pass("PowerShell gets the command as -EncodedCommand (powershell.exe on Windows, pwsh elsewhere)");
+
+    const clixml =
+      'before\r\n#< CLIXML\r\n<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">' +
+      '<Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.PSCustomObject</T></TN><MS><I64 N="SourceId">1</I64></MS></Obj>' +
+      '<S S="Error">No TODO.md &amp; nothing to do_x000D__x000A_</S><S S="Error">At line:1 &lt;here&gt;_x000D__x000A_</S></Objs>';
+    assert.strictEqual(
+      runner.decodeClixml(clixml),
+      "before\r\nNo TODO.md & nothing to do\r\nAt line:1 <here>\r\n",
+      "the error text is kept, progress records and markup are dropped",
+    );
+    assert.strictEqual(runner.decodeClixml("plain output"), "plain output");
+    pass("Windows PowerShell CLIXML on stderr reads as its error text");
   }
 
   // ── platform seam: how a timed-out command tree is stopped ───────────────
@@ -161,6 +196,17 @@ async function main() {
     timers[0][0]();
     assert.deepStrictEqual(calls[1], ["kill", -4321, "SIGKILL"]);
     pass("POSIX: SIGTERM to the process group, SIGKILL two seconds later");
+
+    const quitCalls = [];
+    const quitTimers = [];
+    runner.killPrecheckTree({ pid: 99, kill: () => quitCalls.push(["child.kill"]) }, "darwin", {
+      processKill: (pid, sig) => quitCalls.push(["kill", pid, sig]),
+      runTaskkill: () => quitCalls.push(["taskkill"]),
+      setTimer: (fn, ms) => quitTimers.push(ms),
+    }, true);
+    assert.deepStrictEqual(quitCalls, [["kill", -99, "SIGKILL"]]);
+    assert.strictEqual(quitTimers.length, 0, "quitting has no later to wait for");
+    pass("quitting: SIGKILL to the process group at once");
   }
   {
     const calls = [];
@@ -231,6 +277,45 @@ async function main() {
     assert.strictEqual(slow.exitCode, null);
     assert.ok(took < 8000, `a timed-out check settles promptly (took ${took} ms)`);
     pass("a timeout stops the whole tree (background child included) and fails the check");
+
+    // A background job that keeps the pipes open: the shell's exit decides.
+    let bgPid;
+    const spawnImpl = (...args) => {
+      const child = require("node:child_process").spawn(...args);
+      bgPid = child.pid;
+      return child;
+    };
+    const bgStarted = Date.now();
+    const bg = await runner.runAutomationPrecheck({ command: "sleep 20 & echo started; exit 0", timeoutSeconds: 15 }, { cwd, spawnImpl });
+    const bgTook = Date.now() - bgStarted;
+    try {
+      process.kill(-bgPid, "SIGKILL");
+    } catch {
+      /* already gone */
+    }
+    assert.strictEqual(bg.passed, true, "exit 0 passes although a background job still holds the output");
+    assert.strictEqual(bg.timedOut, false);
+    assert.strictEqual(bg.outputTail, "started");
+    assert.ok(bgTook < runner.PRECHECK_DRAIN_MS + 2500, `the verdict does not wait for the background job (took ${bgTook} ms)`);
+    pass("a check that leaves a background job running is decided by the shell's exit code");
+
+    // Quitting Codara stops a running check, and says so.
+    const quitStarted = Date.now();
+    const quitting = runner.runAutomationPrecheck({ command: "trap '' TERM; sleep 30; exit 0", timeoutSeconds: 60 }, { cwd });
+    await new Promise((r) => setTimeout(r, 300));
+    runner.stopRunningPrechecks();
+    const quit = await quitting;
+    assert.strictEqual(quit.passed, false);
+    assert.strictEqual(quit.error, runner.PRECHECK_STOPPED_ERROR);
+    assert.ok(Date.now() - quitStarted < 5000, "a stopped check settles at once, even one that ignores SIGTERM");
+    pass("quitting stops a running check (SIGKILL to its group) and marks it stopped, not failed");
+
+    for (const where of ["", "relative/folder"]) {
+      const none = await runner.runAutomationPrecheck({ command: "true" }, { cwd: where });
+      assert.strictEqual(none.passed, false);
+      assert.strictEqual(none.error, "the automation has no workspace folder", `cwd ${JSON.stringify(where)}`);
+    }
+    pass("no folder (or a relative one) fails instead of running wherever Codara runs");
 
     const missing = await runner.runAutomationPrecheck({ command: "true" }, { cwd: path.join(cwd, "gone") });
     assert.strictEqual(missing.passed, false);

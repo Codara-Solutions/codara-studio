@@ -105,6 +105,7 @@ import { normalizeTabGroupName } from "@shared/tab-group-name";
 import { DEFAULT_PREFERENCES } from "@shared/types";
 import { whiteboardIssues } from "@shared/whiteboard-quality";
 import {
+  MAX_PRECHECK_COMMAND_CHARS,
   missedRunsSummary,
   normalizeAutomationPrecheck,
   normalizeMissedRuns,
@@ -6108,6 +6109,9 @@ function paramGate(params: Record<string, unknown>):
     } else {
       const p = normalizeAutomationPrecheck(rawPrecheck);
       if (!p) return { error: "precheck must be an object with a 'command' string" };
+      if (p.command.length > MAX_PRECHECK_COMMAND_CHARS) {
+        return { error: `precheck.command is longer than ${MAX_PRECHECK_COMMAND_CHARS} characters` };
+      }
       out.precheck = p;
     }
   }
