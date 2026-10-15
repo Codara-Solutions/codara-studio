@@ -43,6 +43,7 @@ export type CommandId =
   | "terminal.closePane"
   | "terminal.toggleZoom"
   | "terminal.copyContext"
+  | "quickCommands.open"
   | "view.selectByIndex"
   | "view.zoomIn"
   | "view.zoomOut"
@@ -305,6 +306,15 @@ export const COMMANDS: Command[] = [
     // Ctrl+Alt letters are AltGr characters on many keyboard layouts, which a
     // terminal must keep receiving. The pane toolbar has a button for it.
     defaultChords: [],
+  },
+  {
+    id: "quickCommands.open",
+    label: "Run a quick command",
+    group: "Terminal",
+    // Mod+Shift+P, the command palette chord of VS Code and Sublime, opens
+    // the palette of saved shell commands and agent prompts. Mod+P stays
+    // Quick Open.
+    defaultChords: [mod("p", { shift: true })],
   },
   {
     id: "view.selectByIndex",

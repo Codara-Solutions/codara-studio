@@ -20,6 +20,8 @@ const esbuild = require("esbuild");
 const ROOT = path.resolve(__dirname, "..");
 const COMPONENTS = path.join(ROOT, "src", "renderer", "src", "components");
 const read = (file) => fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n");
+// The Quick commands page lives with the rest of the feature.
+const QUICK_COMMANDS_PAGE = path.join(ROOT, "src", "renderer", "src", "quick-commands", "QuickCommandsSettings.tsx");
 
 async function loadIndex() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-settings-search-"));
@@ -183,6 +185,9 @@ async function main() {
     for (const row of launchArgsRows()) {
       if (!findable("agents", row.name)) missing.push(`agents › ${row.name} (LaunchArgsSection.tsx)`);
     }
+    for (const row of renderedRows(read(QUICK_COMMANDS_PAGE))) {
+      if (!findable("quick-commands", row.name)) missing.push(`quick-commands › ${row.name} (QuickCommandsSettings.tsx)`);
+    }
     assert.deepEqual(missing, [], `rows without a search entry:\n  ${missing.join("\n  ")}`);
   });
 
@@ -208,6 +213,7 @@ async function main() {
       renderedRows(read(path.join(COMPONENTS, "RemoteAccessSettings.tsx"))).map((row) => row.name),
     );
     for (const row of launchArgsRows()) rendered.agents.add(row.name);
+    rendered["quick-commands"] = new Set(renderedRows(read(QUICK_COMMANDS_PAGE)).map((row) => row.name));
     rendered.capabilities = new Set([
       ...renderedRows(read(path.join(COMPONENTS, "capabilities", "BehaviorSection.tsx"))).map((row) => row.name),
       "Auto-compact context at",

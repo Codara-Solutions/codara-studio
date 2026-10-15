@@ -112,6 +112,7 @@ import {
 import { bindToggle } from "./settings/setting-toggles";
 import ChromeLinkSection from "./chrome/ChromeLinkSection";
 import KeepAwakeSettings from "./keep-awake/KeepAwakeSettings";
+import QuickCommandsSettings from "../quick-commands/QuickCommandsSettings";
 
 export type { SettingsTab } from "./settings/settings-index";
 
@@ -462,6 +463,7 @@ export default function SettingsDialog({
                   }
                 />
               )}
+              {renderedTab === "quick-commands" && <QuickCommandsSettings />}
               {renderedTab === "api" && <ApiSettings draft={draft} onChange={setDraft} />}
               {renderedTab === "agents" && <AgentsSettings onClose={onClose} />}
               {renderedTab === "sessions" && (

@@ -8,6 +8,7 @@ const SETTINGS_SECTIONS: Record<SettingsTab, true> = {
   general: true,
   editor: true,
   terminal: true,
+  "quick-commands": true,
   api: true,
   agents: true,
   sessions: true,

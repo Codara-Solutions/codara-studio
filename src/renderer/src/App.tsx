@@ -167,6 +167,10 @@ import ResizeHandle from "./panels/ResizeHandle";
 import { SelectionRoutingProvider } from "./routing/SelectionRoutingContext";
 import { useSelectionRoutingApi } from "./routing/useSelectionRoutingApi";
 import { setFixAgentHost } from "./components/git/fix/agent-launcher";
+import { useQuickCommandsApi } from "./quick-commands/useQuickCommandsApi";
+import { QuickCommandsProvider } from "./quick-commands/QuickCommandsContext";
+import QuickCommandsHost from "./quick-commands/QuickCommandsHost";
+import { requestQuickCommands } from "./quick-commands/events";
 import { useGlobalRuns } from "./lib/useGlobalRuns";
 import { onSettingsChanged, publishSettings } from "./lib/useOpenAiFastMode";
 import { isRunningStatus } from "./lib/run-status";
@@ -4656,7 +4660,7 @@ export default function App() {
       const launchRuntime =
         options?.session?.runtime ?? runtimeFromAgentSessionLaunchCommand(launchCommand);
       const cwd = options?.cwd ?? activeWorkspace?.cwd ?? undefined;
-      tabs.newTerminalTab(cwd, launchCommand, {
+      return tabs.newTerminalTab(cwd, launchCommand, {
         agentSession: makeSession(cwd),
         manualAgentRuntime: launchRuntime ?? undefined,
         color: workerTabBrandColor(launchRuntime, launchCommand),
@@ -5654,6 +5658,7 @@ export default function App() {
         }
         void copyTerminalContext(active.activePaneId);
       },
+      "quickCommands.open": () => requestQuickCommands({ action: "palette" }),
       // Model / effort chords. A chat routes to the composer's own pill
       // handlers (identical to clicking them); a live CLI pane gets `/model`
       // typed at its REPL, which opens Claude Code's / Codex's own picker.
@@ -6236,6 +6241,22 @@ export default function App() {
     refreshRuns: refreshRunsFor,
   });
 
+  // Saved shell commands and agent prompts (quick-commands/). A new agent
+  // starts the way the tab strip's worker rows start one.
+  const quickCommandsApi = useQuickCommandsApi({
+    activeWorkspace,
+    workspaces,
+    runs,
+    activeRunId,
+    tabsRef,
+    activeTab: activeViewTab,
+    activePaneId: activeViewPaneId,
+    detectedAgents: terminalAgents[tabs.tabsWorkspaceId ?? ""] ?? NO_DETECTED_AGENTS,
+    paneRuntime: paneRuntimeRef,
+    routing: routingApi,
+    launchAgent: (command, cwd) => launchWorkerInNewTerminalTab(command, cwd ? { cwd } : undefined),
+  });
+
   if (bootError) {
     return (
       <div
@@ -6295,6 +6316,7 @@ export default function App() {
 
   return (
     <SelectionRoutingProvider value={routingApi}>
+    <QuickCommandsProvider value={quickCommandsApi}>
     <div
       style={{
         height: "100%",
@@ -6767,7 +6789,9 @@ export default function App() {
         platform={platform}
         workerCount={workerCount}
       />
+      <QuickCommandsHost api={quickCommandsApi} />
     </div>
+    </QuickCommandsProvider>
     </SelectionRoutingProvider>
   );
 }

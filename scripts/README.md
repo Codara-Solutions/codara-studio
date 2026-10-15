@@ -414,7 +414,10 @@ Cancel; every search result is rendered; the face is opaque; a menu closes on
 a scroll only when its anchor moved), `test-settings-search` (every rendered
 Settings row has a search entry; ranking, typos, synonyms and highlights),
 `test-account-card-keys` (an account
-card keeps its key while it gains or loses a half).
+card keeps its key while it gains or loses a half), `test-quick-commands`
+(saved shell commands and agent prompts: the stored list, repository scope,
+`{branch}` and `{cwd}`, the terminal right-click choice and where a command
+goes).
 
 ### The `cora` CLI and its benchmark
 

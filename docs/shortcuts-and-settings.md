@@ -147,6 +147,7 @@ edited the same way.
 | Close active terminal pane | (unbound) | `terminal.closePane` |
 | Toggle terminal pane zoom | Mod+Shift+Enter | `terminal.toggleZoom` |
 | Copy terminal context | (unbound) | `terminal.copyContext` |
+| Run a quick command | Mod+Shift+P | `quickCommands.open` |
 
 Mod+W already closes just the selected pane when a terminal tab has more than
 one, so `terminal.closePane` only matters if you want a separate chord.
@@ -156,6 +157,10 @@ button does (see [Terminal clipboard, links and context](#terminal-clipboard-lin
 It has no default chord because the free Ctrl+Alt letters type characters
 through AltGr on many keyboard layouts, and a terminal must keep receiving
 them.
+
+Run a quick command opens the palette of your saved commands (see
+[Quick commands](#quick-commands)): type to filter, Enter runs the selected
+one, Shift+Enter edits it.
 
 ### Workers
 
@@ -232,6 +237,7 @@ The pages:
 | General | Getting started (reopens the first-run guide), Appearance (theme, liquid glass surfaces), Window (keep running in the background when the window is closed, auto-open the browser for local dev servers, open links in the default browser or the Codara browser, ask where terminal links open, the workspace switch badge), Sleep (keep the computer awake while agents work, always or never, and on a Linux laptop with the lid closed; see [Keep the computer awake](#keep-the-computer-awake)), Agent worktrees (whether agents may create and remove worktrees, and remove ones you created), Tabs (middle-click to close), Notifications (in-app toast, native OS notification, sound, OS-specific cues), Git (background fetch, notify on teammate pushes and new pull requests, notify when CI fails on your pull request), Instant git triggers, Copy-branch workspaces (a setup command for new worktrees, and extra ignored files an agent may delete with a merged worktree). |
 | Editor | Code editor (Vim mode, autosave) and inline AI autocomplete. |
 | Default terminal | The shell for new panes, output history and scrollback lines, whether programs may copy to the clipboard (OSC 52), a resource overview, and the run terminal lifecycle for worker panes. |
+| Quick commands | Saved shell commands and agent prompts: add, edit, reorder, delete, and where each is offered. Also what a right-click in a terminal does. See [Quick commands](#quick-commands). |
 | API and model | An OpenRouter key, and how Git commit messages are generated. |
 | Agents | Your accounts (see [accounts.md](./accounts.md)), **Install Pi** when Pi is not installed yet, and **Open Capability Center** and **Worker models** buttons, which close Settings and open the Capability Center on MCP servers or on worker models. |
 | Sessions | Browse and resume Claude and Codex sessions from any local project, and choose whether running agent sessions (Claude Code, Codex, Grok and Pi panes) resume when Codara reopens. |
@@ -384,6 +390,60 @@ once per failing commit; a pull request that was already failing when Codara
 first saw it stays quiet until a later run fails. Clicking the alert opens
 Source Control. It asks GitHub only when the branch or its upstream moved,
 every 90 seconds while checks run, and every 15 minutes otherwise.
+
+### Quick commands
+
+A quick command is a shell command or an agent prompt you save once and run
+in one click. Run one from:
+
+- the play button in the tab bar, next to Automations,
+- Shift+right-click in a terminal, which opens a menu with Copy, Paste and
+  your commands (they run in the terminal you clicked),
+- Run a quick command (Mod+Shift+P), a palette you filter by typing.
+
+Each command is offered everywhere (**All workspaces**) or only in the
+workspaces of one repository; a copy-branch workspace counts as its source
+repository. A repository's commands come first in the menus. Add, edit,
+reorder and delete them in **Settings, Quick commands**, or with Add and the
+pencil button in any of the menus.
+
+A **shell command** runs in the **Focused terminal** (the terminal pane you
+were last in) or in a **New terminal** tab in the workspace folder. Typed
+into the focused terminal, **Press Enter** decides whether it runs or waits
+for you to edit it. When an agent or another full-screen program (vim, less)
+runs in the focused terminal, the command runs in a new terminal instead, so
+it never lands in the agent's input. With **Press Enter** off it is not typed
+anywhere else: a notice asks you to click into a shell, so a command you keep
+as a draft never runs on its own.
+
+An **agent prompt** goes to:
+
+- **Focused agent**: the Claude Code, Codex, Grok or Pi session in the focused
+  terminal. Over a plain shell it is not sent, so a prompt never runs as a
+  shell command.
+- **Cora**: the Cora chat open in this workspace, or a new chat.
+- **New agent**: a new terminal tab with the agent you pick. The prompt is
+  sent once the agent is ready for input; if it is not ready within a minute,
+  the prompt is copied to the clipboard instead.
+
+**Send right away** off leaves the prompt in the agent's input to edit.
+
+Two variables fill in when a command runs: `{branch}` (the git branch of the
+folder it runs in) and `{cwd}` (that folder). `${branch}` is left alone for
+the shell. In a shell command the value is typed unquoted, so put `"{cwd}"` in
+double quotes when a folder may contain spaces, and a value holding a
+character a shell would read as code (`;`, `$`, a quote, a backtick, a
+parenthesis and the like) stops the command with a notice instead of running
+it.
+
+**Right-click in a terminal** chooses what a plain right-click does: **Copy
+or paste** (the default: copy the selection, or paste when nothing is
+selected) or **Open menu**. Shift+right-click always does the other one. A
+read-only mirror pane keeps copy and paste.
+
+Quick commands are stored with your other preferences in
+`spark-preferences.json` and stay on this computer; the phone app does not
+show them yet.
 
 ### Terminal agent notifications
 

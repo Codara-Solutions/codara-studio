@@ -6,6 +6,7 @@ import type {
   WorkerSessionRuntime as WorkerSessionFamily,
 } from "./agent-families";
 import type { WorkflowCallMarker, WorkflowRunInfo } from "./workflow";
+import type { QuickCommand, TerminalRightClickPref } from "./quick-commands";
 
 export type ShellId = string;
 
@@ -1339,6 +1340,14 @@ export interface AppPreferences {
   // in a terminal in the new worktree after creation. Repos with no entry use
   // DEFAULT_COPY_BRANCH_SETUP_COMMAND.
   copyBranchSetupCommandByRepo: Record<string, string>;
+  // Saved shell commands and agent prompts, in the order the user arranged
+  // them (src/shared/quick-commands.ts). Global or scoped to one repository
+  // by the same key as copyBranchSetupCommandByRepo.
+  quickCommands?: QuickCommand[];
+  // What a plain right-click in a terminal does: "paste" keeps quick edit
+  // (copy the selection, otherwise paste) and Shift+right-click opens the
+  // quick command menu; "menu" swaps the two. Default "paste".
+  terminalRightClick?: TerminalRightClickPref;
   // Agent worktrees (codara_worktree_* MCP tools, src/main/agent-worktrees.ts).
   // Off turns create and remove away; list keeps working. Default on.
   agentWorktreesEnabled?: boolean;
@@ -1525,6 +1534,8 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   linkOpenTarget: "system",
   terminalLinkMenu: true,
   copyBranchSetupCommandByRepo: {},
+  quickCommands: [],
+  terminalRightClick: "paste",
   agentWorktreesEnabled: true,
   agentsMayRemoveUserWorktrees: false,
   agentWorktreeRegenerableIgnoredByRepo: {},
