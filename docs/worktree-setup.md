@@ -91,8 +91,12 @@ The commands see these variables:
 
 On macOS and Linux the setup command runs as a `bash` script (`sh` when
 there is no bash) with `set -e`. On Windows each line runs through
-`cmd /d /s /c` as written, in its own `cmd`, so a `cd` or a `set` does not
-carry over to the next line. Your own command runs as a script in your
+all lines of a step run in one `cmd` script (a `.cmd` file with `@echo off`),
+so a `cd` or a `set` carries over to the next line, and the first line that
+fails stops the step. Lines that start with a program such as `npm` are
+called with `call`; a line that chains one after a builtin
+(`cd app && npm ci`) should be split into two lines. In that script `%%` is
+`%` and a `for` variable is written `%%i`. Your own command runs as a script in your
 default shell (Settings > Terminal > **Default shell**; Git Bash on Windows
 when it is the default), not in a terminal, so interactive startup files
 such as `.zshrc` are not read; the `PATH` is the one a login shell gets.

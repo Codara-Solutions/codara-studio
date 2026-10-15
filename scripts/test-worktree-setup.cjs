@@ -66,6 +66,7 @@ async function main() {
         'export * as plan from "./src/main/worktree-setup/plan";',
         'export * as materialize from "./src/main/worktree-setup/materialize";',
         'export * as links from "./src/main/worktree-setup/links";',
+        'export * as cmdScript from "./src/main/worktree-setup/cmd-script";',
         'export * as service from "./src/main/worktree-setup/service";',
         'export * as files from "./src/main/worktree-setup/files";',
         'export * as agent from "./src/main/agent-worktrees";',
@@ -106,9 +107,28 @@ async function main() {
 }
 
 async function runSuite(m, scratch) {
-  const { shared, gitignore, plan, materialize, links, service, files, agent } = m;
+  const { shared, gitignore, plan, materialize, links, service, files, agent, cmdScript } = m;
 
   // ── Parser ───────────────────────────────────────────────────────────────
+  await check("the Windows setup script runs every line in one cmd, stopping at the first failure", () => {
+    const lines = cmdScript.setupLines("# install\n  cd app  \n\nnpm ci\r\nset FOO=1\nif exist x (echo y)\n");
+    assert.deepEqual(lines, ["cd app", "npm ci", "set FOO=1", "if exist x (echo y)"]);
+    const script = cmdScript.buildCmdScript(lines);
+    const check = 'if not "%errorlevel%"=="0" exit /b %errorlevel%';
+    assert.equal(
+      script,
+      ["@echo off", "chcp 65001 >nul", "cd app", check, "call npm ci", check, "set FOO=1", check, "if exist x (echo y)", check, "exit /b 0", ""].join("\r\n"),
+    );
+    assert.ok(script.startsWith("@echo off\r\n"), "no BOM before @echo off");
+    assert.ok(!/[^\r]\n/.test(script), "CRLF line endings only");
+    assert.equal((script.match(/exit \/b %errorlevel%/g) ?? []).length, lines.length, "a check after each line");
+    assert.ok(script.indexOf("cd app") < script.indexOf("call npm ci"), "the cd comes before the line that depends on it");
+    assert.equal(cmdScript.buildCmdScript([]), "@echo off\r\nchcp 65001 >nul\r\nexit /b 0\r\n");
+    assert.match(cmdScript.buildCmdScript(["CD.."]), /\r\nCD\.\.\r\n/, "cd.. is a builtin");
+    assert.match(cmdScript.buildCmdScript([".\\gradlew build"]), /\r\ncall \.\\gradlew build\r\n/);
+    assert.match(cmdScript.buildCmdScript(["@echo hi"]), /\r\n@echo hi\r\n/);
+  });
+
   await check("parses a full setup file", () => {
     const parsed = shared.parseWorktreeSetupFile(
       JSON.stringify({
