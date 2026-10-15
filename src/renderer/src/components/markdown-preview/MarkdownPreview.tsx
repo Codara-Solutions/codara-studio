@@ -1,10 +1,11 @@
-import { memo, useMemo } from "react";
+import { memo, useMemo, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import rehypeHighlight from "rehype-highlight";
 import MermaidBlock from "./MermaidBlock";
+import MarkdownReviewLayer from "../review/MarkdownReviewLayer";
 import "./markdown.css";
 
 // Sanitizer schema for the raw HTML that rehype-raw expands. This file renders
@@ -32,6 +33,29 @@ const sanitizeSchema = {
     src: [...(defaultSchema.protocols?.src ?? []), "data"],
   },
 };
+
+interface HastNode {
+  type: string;
+  properties?: Record<string, unknown>;
+  position?: { start: { line: number }; end: { line: number } };
+  children?: HastNode[];
+}
+
+// Marks each rendered element with the source lines it came from, so a review
+// note on selected text can say which lines of the file it is about. Runs
+// after the sanitizer, which keeps positions but would drop data attributes
+// it does not know.
+function rehypeSourceLines() {
+  return (tree: HastNode) => {
+    const walk = (node: HastNode) => {
+      if (node.type === "element" && node.position) {
+        node.properties = { ...node.properties, dataLine: node.position.start.line, dataLineEnd: node.position.end.line };
+      }
+      node.children?.forEach(walk);
+    };
+    walk(tree);
+  };
+}
 
 // VS Code-parity markdown preview for the editor pane. Wired through
 // react-markdown so we get tables, task lists, strikethrough, autolinks
@@ -72,6 +96,7 @@ function resolveResource(href: string, baseDir: string): string {
 
 function MarkdownPreview({ text, basePath }: Props) {
   const baseDir = useMemo(() => dirnameOf(basePath), [basePath]);
+  const rootRef = useRef<HTMLDivElement>(null);
 
   const components = useMemo(
     () => ({
@@ -130,6 +155,7 @@ function MarkdownPreview({ text, basePath }: Props) {
 
   return (
     <div
+      ref={rootRef}
       className="spark-markdown"
       style={{
         flex: 1,
@@ -138,9 +164,10 @@ function MarkdownPreview({ text, basePath }: Props) {
         background: "var(--bg)",
       }}
     >
+      <MarkdownReviewLayer containerRef={rootRef} basePath={basePath} text={text} />
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema], rehypeHighlight]}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema], rehypeSourceLines, rehypeHighlight]}
         components={components}
       >
         {text}

@@ -28,6 +28,7 @@ export type CommandId =
   | "capabilities.open"
   | "automations.open"
   | "usage.open"
+  | "review.open"
   | "board.open"
   | "session.openInspector"
   | "composer.focus"
@@ -185,6 +186,14 @@ export const COMMANDS: Command[] = [
     // Mod+Shift+U — free chord, and the only U binding in the table. Opens the
     // token/cost analytics scanned from the provider CLIs' transcripts.
     defaultChords: [mod("u", { shift: true })],
+  },
+  {
+    id: "review.open",
+    label: "Review changes",
+    group: "Navigation",
+    // No default chord: Mod+Shift+G is the editor's find-previous. The Source
+    // Control header has a button for it too.
+    defaultChords: [],
   },
   {
     id: "board.open",

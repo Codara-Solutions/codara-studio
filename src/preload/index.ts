@@ -41,6 +41,7 @@ import { captureApi } from "./areas/capture";
 import { chromeLinkApi } from "./areas/chrome-link";
 import { keepAwakeApi } from "./areas/keep-awake";
 import { pointApi } from "./areas/point";
+import { reviewApi } from "./areas/review";
 import { serversApi } from "./areas/servers";
 import { workspaceStatusApi } from "./areas/workspace-status";
 import { skillOriginsApi } from "./areas/skill-origins";
@@ -1783,6 +1784,7 @@ const api = {
   capture: captureApi,
   point: pointApi,
   workspaceStatus: workspaceStatusApi,
+  review: reviewApi,
 };
 
 function isBrowserUrl(url: string): boolean {

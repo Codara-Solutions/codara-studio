@@ -2019,6 +2019,7 @@ function labelFor(t: Tab): string {
   if (t.kind === "automations") return t.title || "Automations";
   if (t.kind === "usage") return t.title || "Usage";
   if (t.kind === "diff") {
+    if (t.review) return t.title;
     // Commit tabs already carry "name @ hash" in the title; don't re-suffix.
     return t.commitHash ? t.title : `${t.title} ${t.staged ? "(Staged)" : "(Working Tree)"}`;
   }
@@ -2038,6 +2039,7 @@ function titleFor(t: Tab): string {
   if (t.kind === "automations") return t.title;
   if (t.kind === "usage") return t.title;
   if (t.kind === "diff") {
+    if (t.review) return "Review every change of the workspace and leave notes for an agent";
     return t.commitHash
       ? `${t.path} @ ${t.commitHash.slice(0, 7)} (Commit)`
       : `${t.path} ${t.staged ? "(Staged)" : "(Working Tree)"}`;

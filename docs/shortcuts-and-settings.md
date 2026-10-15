@@ -40,6 +40,7 @@ Codara's. Keys an agent sends to a page never trigger Codara's shortcuts.
 | Forward to the next workspace | Cmd+Option+Right on macOS, Alt+] on Windows and Linux | `workspace.forward` |
 | Open Automations | Mod+Shift+A | `automations.open` |
 | Open Usage | Mod+Shift+U | `usage.open` |
+| Review changes | (unbound) | `review.open` |
 | Open Cora Board | Mod+Shift+B | `board.open` |
 | Focus chat composer | Mod+L | `composer.focus` |
 | Search in files | Mod+Shift+F | `search.open` |

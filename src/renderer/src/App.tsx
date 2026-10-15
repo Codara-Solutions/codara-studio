@@ -4325,11 +4325,17 @@ export default function App() {
       const path = (event as CustomEvent<{ path?: string }>).detail?.path;
       if (path) handleOpenDiffForPath(path);
     };
+    // The Source Control header and the Markdown preview's notes bar open the review tab.
+    const openReview = () => {
+      tabsRef.current.openReviewTab();
+    };
     window.addEventListener("spark:open-file", openFile);
     window.addEventListener("spark:open-diff", openDiff);
+    window.addEventListener("spark:open-review", openReview);
     return () => {
       window.removeEventListener("spark:open-file", openFile);
       window.removeEventListener("spark:open-diff", openDiff);
+      window.removeEventListener("spark:open-review", openReview);
     };
   }, [handleOpenDiffForPath, openFileByPath]);
 
@@ -5459,6 +5465,7 @@ export default function App() {
       "session.openInspector": () => setInspectorOpen((open) => !open),
       "automations.open": () => tabs.openAutomationsTab(),
       "usage.open": () => tabs.openUsageTab(),
+      "review.open": () => tabs.openReviewTab(),
       // The Cora Board is a chat sub-view now (no top-level tab). The chord
       // focuses the active chat's Board view; the chatView state lives inside
       // the Workspace component, so this is broadcast like the other
@@ -7153,6 +7160,28 @@ const Workspace = React.memo(function Workspace({
   // per-workspace write-backs — deliberately out of scope here.
   const noopTerminalCb = useCallback(() => {}, []);
 
+  // The review tab opens a file's own diff (to stage single hunks there) and
+  // starts a new agent CLI on its notes in a terminal tab of its own.
+  const openDiffTabFromReview = tabs.openDiffTab;
+  const newTerminalTabFromReview = tabs.newTerminalTab;
+  const openReviewFileDiff = useCallback(
+    (path: string, staged: boolean) => {
+      openDiffTabFromReview(path, staged, { pin: true });
+    },
+    [openDiffTabFromReview],
+  );
+  const launchReviewAgent = useCallback(
+    (command: string, cwd: string) => {
+      const runtime = runtimeFromAgentSessionLaunchCommand(command);
+      newTerminalTabFromReview(cwd, command, {
+        agentSession: null,
+        manualAgentRuntime: runtime ?? undefined,
+        color: workerTabBrandColor(runtime, command),
+      });
+    },
+    [newTerminalTabFromReview],
+  );
+
   // Keep the current workspace and one recently-used workspace mounted. Each
   // TerminalStack owns xterm buffers plus a DOM/WebGL renderer, so keeping every
   // visited workspace hidden made renderer RAM grow for the whole app session.
@@ -7834,6 +7863,8 @@ const Workspace = React.memo(function Workspace({
           onOpenFile={onSparkOpenFile}
           onChanged={onGitChanged}
           onCloseTab={handleTabClose}
+          onOpenFileDiff={openReviewFileDiff}
+          onLaunchAgent={launchReviewAgent}
         />
         {/* A bounded set of mounted TerminalStacks. The active workspace is
             visible; one recent workspace stays warm for instant switching and

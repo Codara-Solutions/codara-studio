@@ -67,7 +67,7 @@ Most suites need only `npm install`. These are the exceptions:
 | A build in `out/` | `test-agent-socket.cjs` | Launches `out/main/index.js` under Electron with a temporary home. Run `npm run build` (which is `electron-vite build`) first. Without a build the app never writes its handshake file and the suite fails. |
 | The Electron binary | `test-agent-socket.cjs`, `test-trusted-sender.cjs` | Both boot a headless Electron from `node_modules`. |
 | Playwright's Chromium | `test-chat-surface-routing.cjs`, `test-csv-preview-ui.cjs`, `test-browser-cdp-session.cjs`, `test-browser-screenshot-locator.cjs`, `test-browser-devtools.cjs`, `test-browser-insight.cjs`, `test-browser-capture-chromium.cjs`, `test-preview-waits.cjs`, `test-preview-dialogs.cjs`, `test-preview-find-outline.cjs`, `test-preview-console-filter.cjs`, `test-studio-csp.cjs` | Install it with `npx playwright install chromium`. Without it they print SKIP for the real-page checks. |
-| Real `git` | `test-worktrees.cjs`, `test-agent-worktrees.cjs`, `test-git-auto-fetch-git.cjs`, `test-git-split-commits.cjs`, `test-git-optional-locks.cjs`, `test-git-stash.cjs`, `test-github-pull-request-git.cjs`, `test-result-manifest.cjs`, `test-worker-diff.cjs`, `test-browser-storage-boundary.cjs` | Most create throwaway repositories in a temp dir. `test-browser-storage-boundary.cjs` runs `git ls-files` on this checkout, so it needs a git clone. |
+| Real `git` | `test-worktrees.cjs`, `test-agent-worktrees.cjs`, `test-git-auto-fetch-git.cjs`, `test-git-split-commits.cjs`, `test-git-optional-locks.cjs`, `test-git-stash.cjs`, `test-github-pull-request-git.cjs`, `test-review-diff.cjs`, `test-result-manifest.cjs`, `test-worker-diff.cjs`, `test-browser-storage-boundary.cjs` | Most create throwaway repositories in a temp dir. `test-browser-storage-boundary.cjs` runs `git ls-files` on this checkout, so it needs a git clone. |
 | POSIX tools | `test-owned-process-tree-descendants.cjs` (needs `ps`), `test-pty-inherited-env.cjs` (skips its zsh probes without `/bin/zsh`), `test-ssh-keys.cjs` (skips key generation without `ssh-keygen`) | On Windows they run a reduced set of checks. |
 | A `codara-mobile` checkout next to this repo | `test-cora-history-interop.cjs`, `test-cora-run-interop.cjs`, and some checks in `test-remote-access.cjs` | They print `SKIP` when the sibling repo is missing, as on CI. |
 
@@ -366,7 +366,13 @@ tricks it tries), `test-agent-worktrees` (worktrees agents create and remove
 through the MCP tools: merge proofs, every refusal, recovery refs, the audit
 log, the repository lock and the process scan, against throwaway
 repositories with a fake git config), `test-agent-worktrees-docs` (every
-removal refusal code is documented in `docs/mcp-tools.md`).
+removal refusal code is documented in `docs/mcp-tools.md`),
+`test-review-diff` (the review tab's combined diff against throwaway
+repositories: every kind of change, no commit yet, the branch view from the
+merge base, the line budget and deferred files, untracked links shown by
+their target and never followed, a nested repository, the capped read of a
+huge untracked file, a conflict, a diff too large for one read, and a
+one-hunk patch git applies).
 
 ### Notifications
 
@@ -386,6 +392,10 @@ These suites bundle renderer modules without React where they can:
 `test-chat-*`, `test-composer-fast-mode`, `test-model-effort-shortcuts`,
 `test-agent-destinations` (where a pick, a comment or a tab reference from a
 browser tab can be sent, and the default),
+`test-review-notes` (review notes: the batch text an agent gets, the review
+tab's rows, anchors and quotes, the folder git actions run in, where a batch
+can go, the command a new agent starts with, and main's per-workspace store
+in Codara's own folder, which a failed read never lets a save wipe),
 `test-dock-layout`, `test-split-drop`, `test-tab-reorder`, `test-tab-groups`
 (group membership, naming, colors, collapse, drops into and out of a group,
 saved groups), `test-workspace-reorder`, `test-workbench-routing`, `test-editor-tabs`,

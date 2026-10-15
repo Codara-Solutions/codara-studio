@@ -486,6 +486,7 @@ import { agentDelivery } from "./agent-delivery";
 import { registerCaptureIpc } from "./browser/capture/ipc";
 import { registerChromeLinkIpc } from "./browser/chrome";
 import { registerPointIpc } from "./browser/point";
+import { registerReviewIpc } from "./review";
 import { registerServersIpc } from "./servers";
 import { registerWorkspaceStatusIpc } from "./workspace-status";
 import { afterSkillAssetDeleted, afterSkillAssetInstalled, registerSkillUpdatesIpc, skillOriginsDir } from "./skill-updates-ipc";
@@ -4087,6 +4088,7 @@ export function registerIpc(): void {
   registerCaptureIpc(handle);
   registerPointIpc(handle);
   registerWorkspaceStatusIpc(handle);
+  registerReviewIpc(handle);
 }
 
 const MEMORY_KINDS = new Set<MemoryItemKind>(["preference", "correction", "fact", "procedure", "lesson"]);

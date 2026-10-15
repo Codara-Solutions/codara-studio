@@ -340,6 +340,15 @@ startup pass) and `startStudioClaudeLoginKeeper` are called from `index.ts`.
   named by path. The renderer calls it through `window.spark.agentDelivery`.
   Agents without MCP use the same tools with `cora tool`
   (`cli/commands/tool.cjs`), which Codara's panes have on PATH.
+- **Review notes.** The review tab (`components/review/`, opened from the
+  Source Control header or the `review.open` command) shows every change of
+  the workspace in one virtualized diff, uncommitted or against the base
+  branch, read by `src/main/review/review-diff.ts`. Notes on lines, ranges,
+  files and selected text of a rendered Markdown file are kept per workspace
+  under `<codaraHome>/workspace-data/<workspace>/review/` and go to an agent
+  as one batch (`src/shared/review-notes.ts` formats it) through
+  `agent-delivery.ts`, a new Cora chat, or a hand-off file a new agent CLI
+  is started on.
 - **Safety.** `index.ts` hardens every `<webview>` (`will-attach-webview`).
   `browser/guest-chords.ts` forwards chord keys from a page to the app's
   shortcuts.

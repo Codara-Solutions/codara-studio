@@ -15,6 +15,7 @@ import type {
 } from "@shared/types";
 import type { GitHubWorkQueueItem } from "@shared/github";
 import SectionHeader, { type SectionHeaderDragProps } from "../../panels/SectionHeader";
+import { ReviewNotesIcon } from "../review/ReviewNoteCards";
 import ChangeTree from "./ChangeTree";
 import ChangeSection from "./ChangeSection";
 import BranchMenu from "./BranchMenu";
@@ -454,14 +455,25 @@ export default function GitPanel({
           ) : undefined
         }
         actions={
-          <IconButton
-            title="Refresh"
-            onClick={handleRefresh}
-            disabled={disabled}
-            size={22}
-          >
-            <RefreshIcon />
-          </IconButton>
+          <>
+            {status?.isRepo ? (
+              <IconButton
+                title="Review all changes and leave notes for an agent"
+                onClick={() => window.dispatchEvent(new CustomEvent("spark:open-review"))}
+                size={22}
+              >
+                <ReviewNotesIcon />
+              </IconButton>
+            ) : null}
+            <IconButton
+              title="Refresh"
+              onClick={handleRefresh}
+              disabled={disabled}
+              size={22}
+            >
+              <RefreshIcon />
+            </IconButton>
+          </>
         }
       />
 
