@@ -266,6 +266,9 @@ function diffFile(pathName, text, over = {}) {
     );
     assert.equal(destinations[1].sublabel, "no agent, pasted without Enter", "a plain shell never runs the notes as commands");
     assert.ok(lib.reviewDestinations([], false).every((d) => d.disabled), "nothing to start without a workspace");
+    const remote = lib.reviewDestinations(routing, true, { remote: true });
+    assert.ok(remote.filter((d) => d.kind === "agent-new").every((d) => d.disabled && /remote workspace/.test(d.disabledReason)), "a new agent CLI on a remote host cannot read the local notes file");
+    assert.ok(remote.some((d) => d.kind === "pane" && !d.disabled), "terminals of a remote workspace still take a paste");
     assert.deepEqual(lib.reviewDeliveryTarget({ id: "pane:p1", kind: "pane" }), { kind: "pane", paneId: "p1" });
     assert.deepEqual(lib.reviewDeliveryTarget({ id: "chat:r1", kind: "chat" }), { kind: "chat", runId: "r1" });
     assert.deepEqual(lib.reviewDeliveryTarget({ id: "inbox", kind: "inbox" }), { kind: "inbox", paneId: null });

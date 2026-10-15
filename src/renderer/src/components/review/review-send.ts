@@ -40,8 +40,14 @@ const NEW_AGENTS: Array<{ runtime: NewAgentRuntime; label: string }> = [
 /**
  * The send menu: every terminal pane of the workspace, its Cora chats, new
  * agents (a Cora chat or an agent CLI in a new terminal tab), and the inbox.
+ * A new agent CLI reads its notes from a file on this computer, so it is
+ * not offered in a remote workspace, whose terminals run on the other host.
  */
-export function reviewDestinations(routing: readonly RoutingDestination[], hasWorkspace: boolean): ReviewDestination[] {
+export function reviewDestinations(
+  routing: readonly RoutingDestination[],
+  hasWorkspace: boolean,
+  options: { remote?: boolean } = {},
+): ReviewDestination[] {
   const out: ReviewDestination[] = [];
   for (const destination of routing) {
     if (destination.kind === "pane" || destination.kind === "chat" || destination.kind === "inbox") {
@@ -77,7 +83,11 @@ export function reviewDestinations(routing: readonly RoutingDestination[], hasWo
       sublabel: "new terminal tab",
       group: "new",
       runtime: agent.runtime,
-      ...(hasWorkspace ? {} : { disabled: true, disabledReason: "Open a workspace first." }),
+      ...(!hasWorkspace
+        ? { disabled: true, disabledReason: "Open a workspace first." }
+        : options.remote
+          ? { disabled: true, disabledReason: "Not in a remote workspace: the agent there cannot read the notes file on this computer." }
+          : {}),
     });
   }
   const order: ReviewDestination["group"][] = ["agents", "chat", "new", "inbox"];

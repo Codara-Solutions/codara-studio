@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GroupedVirtuosoHandle } from "react-virtuoso";
 import type { GitStatus } from "@shared/types";
+import { isRemotePath } from "@shared/remote";
 import {
   formatReviewNotes,
   sortReviewNotes,
@@ -695,9 +696,9 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
   const destinations = useMemo((): { list: ReviewDestination[]; defaultId: string | null } => {
     if (!menu || menu.kind !== "send") return { list: [], defaultId: null };
     const routed = routing ? routing.destinationsFor(null) : { destinations: [], defaultId: "" };
-    const list = reviewDestinations(routed.destinations, Boolean(workspaceId));
+    const list = reviewDestinations(routed.destinations, Boolean(workspaceId), { remote: isRemotePath(cwd) });
     return { list, defaultId: defaultReviewDestination(list, routed.defaultId) };
-  }, [menu, routing, workspaceId]);
+  }, [cwd, menu, routing, workspaceId]);
 
   const scope = useMemo(() => {
     if (notes.some((note) => note.source !== "diff")) return null;
