@@ -11,9 +11,9 @@
 // capability the caller passes (see outside-write-guard.ts).
 
 import { randomUUID } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { promises as fs, type Stats } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { SkillOrigin, SkillOriginStatus, SkillRollbackResult, SkillUpdateResult } from "@shared/skill-origins";
 import { assertCodaraOwnedWrite, type OutsideWriteCapability } from "./outside-write-guard";
 import {
@@ -88,7 +88,10 @@ function messageOf(err: unknown): string {
   const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   return (lines.find((line) => /^fatal:/i.test(line)) ?? lines[lines.length - 1] ?? "unknown error")
     .replace(/^fatal:\s*/i, "")
-    .slice(0, 300);
+    // A url.insteadOf rule can put a token into the address git prints.
+    .replace(/(https?:\/\/)[^\s/@]+@/gi, "$1")
+    // Room for git's line and a path Codara adds to it.
+    .slice(0, 600);
 }
 
 // One mutation at a time: an update, a rollback or a record never interleave,
@@ -246,7 +249,10 @@ export function checkSkillUpdates(options: SkillUpdateOptions & { force?: boolea
   const force = options.force === true;
   const running = inflightChecks.get(key);
   if (running && (running.force || !force)) return running.promise;
-  if (running) return running.promise.then(() => checkSkillUpdates(options));
+  if (running) {
+    const again = () => checkSkillUpdates(options);
+    return running.promise.then(again, again);
+  }
   const promise = runCheck(options).finally(() => inflightChecks.delete(key));
   inflightChecks.set(key, { promise, force });
   return promise;
@@ -348,8 +354,18 @@ export async function moveDir(from: string, to: string, options: Pick<SkillUpdat
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "EXDEV") {
-        await fs.cp(from, to, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
-        await fs.rm(from, { recursive: true, force: true });
+        // Never merge into a folder that is already there, and never leave a
+        // half copy behind: the caller puts things back from `from`.
+        if (await fs.lstat(to).then(() => true, () => false)) throw err;
+        try {
+          await fs.cp(from, to, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
+        } catch (copyErr) {
+          await fs.rm(to, { recursive: true, force: true }).catch(() => undefined);
+          throw copyErr;
+        }
+        // The copy is whole. A file left at the source (held open on
+        // Windows) does not undo the move; the caller's next step sees it.
+        await fs.rm(from, { recursive: true, force: true }).catch(() => undefined);
         return;
       }
       if (platform === "win32" && (code === "EPERM" || code === "EBUSY" || code === "EACCES") && attempt < 4) {
@@ -359,6 +375,32 @@ export async function moveDir(from: string, to: string, options: Pick<SkillUpdat
       throw err;
     }
   }
+}
+
+/**
+ * Every record Codara writes names a folder directly inside a `skills`
+ * folder: its own, a CLI's, or a project's. An update or rollback may write
+ * in a CLI's home with the capability the caller passes, so a record that
+ * names anything else (corrupted, or edited by hand) is refused before
+ * anything moves.
+ */
+export function isSkillFolderPath(dir: string, platform: NodeJS.Platform = process.platform): boolean {
+  const parent = basename(dirname(resolve(dir)));
+  return (platform === "win32" || platform === "darwin" ? parent.toLowerCase() : parent) === "skills";
+}
+
+/** The folder an update or rollback may replace: a real skill folder, not a link. */
+async function assertReplaceableSkillDir(
+  dir: string,
+  options: SkillUpdateOptions,
+  stat: Stats | null,
+): Promise<void> {
+  if (!isSkillFolderPath(dir, options.platform)) {
+    throw new Error("The record names a folder outside a skills folder, so Codara leaves it alone.");
+  }
+  if (!stat) return;
+  if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("The skill's folder is a link; change it where it points.");
+  if (!(await hasSkillFile(dir))) throw new Error("The skill's folder has no SKILL.md any more, so Codara leaves it alone.");
 }
 
 async function readSkillName(dir: string): Promise<string | undefined> {
@@ -426,7 +468,7 @@ async function updateOne(
   const dir = receipt.skillDir;
   const stat = await fs.lstat(dir).catch(() => null);
   if (!stat) throw new Error("The skill's folder is gone.");
-  if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("The skill's folder is a link; update it where it points.");
+  await assertReplaceableSkillDir(dir, options, stat);
   const subpath = receipt.origin.subpath ?? "";
   const rel = subpath === "" ? "" : safeRelativePath(subpath);
   if (rel === null) throw new Error("The recorded folder is outside the repository.");
@@ -445,7 +487,12 @@ async function updateOne(
     return "unchanged";
   }
 
-  const staged = join(staging, "next", basename(dir));
+  // Refused before anything is staged, so a CLI copy the caller may not
+  // write leaves nothing behind for the next skill of the same group.
+  assertCodaraOwnedWrite(dir, options.outsideWrite);
+  // Each skill stages apart: two copies of one skill share a folder name,
+  // and what a failed one left must not merge into the next.
+  const staged = join(staging, `next-${randomUUID()}`, basename(dir));
   await fs.mkdir(staged, { recursive: true });
   await copyTreeSafely(source, staged, { files: 0, bytes: 0 }, 0);
   const document = await fs.readFile(join(staged, "SKILL.md"), "utf8");
@@ -458,17 +505,27 @@ async function updateOne(
   const name = (await readSkillName(dir)) ?? receipt.name;
   if (frontmatter.name !== name) await fs.writeFile(join(staged, "SKILL.md"), withSkillName(document, name));
 
-  assertCodaraOwnedWrite(dir, options.outsideWrite);
   const backupRoot = skillOriginBackupDir(options.stateDir, dir);
   await fs.rm(backupRoot, { recursive: true, force: true });
+  // The version an earlier update kept is gone now; a record still pointing
+  // at it would offer a Roll back with nothing behind it.
+  const { rollback: _previous, ...withoutRollback } = receipt;
+  if (receipt.rollback) await writeSkillOrigin(options.stateDir, withoutRollback);
   await fs.mkdir(backupRoot, { recursive: true, mode: 0o700 });
   const backup = join(backupRoot, "skill");
   await moveDir(dir, backup, options);
+  const kept = { savedAt: at, name: receipt.name, origin: receipt.origin };
   try {
     await moveDir(staged, dir, options);
   } catch (err) {
-    await moveDir(backup, dir, options).catch(() => undefined);
-    throw err;
+    const putBack = await moveDir(backup, dir, options).then(
+      () => true,
+      () => false,
+    );
+    if (putBack) throw err;
+    // The previous version stays in Codara's folder: Roll back restores it.
+    await writeSkillOrigin(options.stateDir, { ...withoutRollback, rollback: kept }).catch(() => undefined);
+    throw new Error(`${messageOf(err).slice(0, 300).replace(/\.$/, "")}. The previous version is kept in ${backup}; Roll back restores it.`);
   }
   try {
     await writeSkillOrigin(options.stateDir, {
@@ -482,12 +539,12 @@ async function updateOne(
         updatedAt: at,
       },
       check: { state: "current", checkedAt: at, ...(info.commit ? { remoteCommit: info.commit } : {}) },
-      rollback: { savedAt: at, name: receipt.name, origin: receipt.origin },
+      rollback: kept,
     });
   } catch (err) {
     // Without its record the update could not be rolled back: put the
     // previous version back instead of leaving one that cannot be undone.
-    const discard = join(staging, "discard");
+    const discard = join(staging, `discard-${randomUUID()}`);
     await moveDir(dir, discard, options).catch(() => undefined);
     await moveDir(backup, dir, options).catch(() => undefined);
     throw err;
@@ -518,9 +575,12 @@ export function rollbackSkills(input: { dirs: string[] }, options: SkillUpdateOp
         continue;
       }
       const discard = join(root, `codara-skill-rollback-${randomUUID()}`);
+      // Set when the version being replaced could not be put back after a
+      // failed restore: it is then left where it is rather than deleted.
+      let keepDiscard = false;
       try {
         const stat = await fs.lstat(receipt.skillDir).catch(() => null);
-        if (stat && (stat.isSymbolicLink() || !stat.isDirectory())) throw new Error("The skill's folder is a link; restore it where it points.");
+        await assertReplaceableSkillDir(receipt.skillDir, options, stat);
         assertCodaraOwnedWrite(receipt.skillDir, options.outsideWrite);
         await fs.mkdir(discard, { recursive: true, mode: 0o700 });
         const current = join(discard, "skill");
@@ -528,7 +588,10 @@ export function rollbackSkills(input: { dirs: string[] }, options: SkillUpdateOp
         try {
           await moveDir(backup, receipt.skillDir, options);
         } catch (err) {
-          if (stat) await moveDir(current, receipt.skillDir, options).catch(() => undefined);
+          if (stat && !(await moveDir(current, receipt.skillDir, options).then(() => true, () => false))) {
+            keepDiscard = true;
+            throw new Error(`${messageOf(err).slice(0, 300).replace(/\.$/, "")}. The version you had is kept in ${current}.`);
+          }
           throw err;
         }
         const at = nowIso(options);
@@ -542,14 +605,16 @@ export function rollbackSkills(input: { dirs: string[] }, options: SkillUpdateOp
           origin: receipt.rollback.origin,
           ...(behind
             ? { check: { state: "update-available" as const, checkedAt: at, remoteCommit: receipt.check?.remoteCommit ?? receipt.origin.commit } }
-            : {}),
+            : receipt.check
+              ? { check: receipt.check }
+              : {}),
         });
         await fs.rm(backupRoot, { recursive: true, force: true }).catch(() => undefined);
         restored.push(receipt.skillDir);
       } catch (err) {
         errors.push(`${receipt.name}: ${messageOf(err)}`);
       } finally {
-        await fs.rm(discard, { recursive: true, force: true }).catch(() => undefined);
+        if (!keepDiscard) await fs.rm(discard, { recursive: true, force: true }).catch(() => undefined);
       }
     }
     return { ok: errors.length === 0, restored, errors, origins: await listSkillOrigins(options) };

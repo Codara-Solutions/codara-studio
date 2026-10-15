@@ -379,6 +379,121 @@ async function main() {
     assert.ok(calls.some((args) => args.includes("ls-remote")), "the forced check ran after the cached one");
   });
 
+  const cliCopy = path.join(HOME, ".claude", "skills", "release-notes");
+  const capability = guard.outsideWriteCapability("test: the user clicked Update");
+  const ioError = () => Object.assign(new Error("EIO: i/o error, rename"), { code: "EIO" });
+  // Fails the listed rename calls (1-based) and runs the others for real.
+  const failingRename = (...failing) => {
+    let call = 0;
+    return async (from, to) => {
+      call += 1;
+      if (failing.includes(call)) throw ioError();
+      fs.renameSync(from, to);
+    };
+  };
+
+  await check("a copy whose swap fails is put back, and the next copy of the same skill still updates", async () => {
+    const back = await updates.rollbackSkills({ dirs: [skillDir] }, options());
+    assert.equal(back.ok, true, back.errors.join(" "));
+    assert.match(fs.readFileSync(path.join(skillDir, "SKILL.md"), "utf8"), /Version one\./);
+    assert.match(fs.readFileSync(path.join(cliCopy, "SKILL.md"), "utf8"), /Version one\./);
+    // Both copies are named release-notes; the first one's swap fails.
+    const result = await updates.updateSkills(
+      { dirs: [cliCopy, skillDir] },
+      options({ outsideWrite: capability, rename: failingRename(2) }),
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.errors.length, 1, result.errors.join(" "));
+    assert.match(result.errors[0], /EIO/);
+    assert.deepEqual(result.updated, [skillDir], "what the failed copy staged does not leak into the next one");
+    assert.match(fs.readFileSync(path.join(cliCopy, "SKILL.md"), "utf8"), /Version one\./, "the failed copy was put back");
+    assert.match(fs.readFileSync(path.join(skillDir, "SKILL.md"), "utf8"), /Version two\./);
+    assert.equal(fs.existsSync(path.join(skillDir, "scripts", "run.sh")), true);
+    assert.deepEqual(fs.readdirSync(STAGING), [], "staging is cleaned up");
+  });
+
+  await check("when putting a copy back fails too, its previous version is kept and Roll back restores it", async () => {
+    const result = await updates.updateSkills({ dirs: [cliCopy] }, options({ outsideWrite: capability, rename: failingRename(2, 3) }));
+    assert.equal(result.ok, false);
+    const backup = path.join(store.skillOriginBackupDir(STATE, cliCopy), "skill");
+    assert.ok(result.errors[0].includes(backup), result.errors[0]);
+    assert.match(result.errors[0], /Roll back restores it/);
+    assert.equal(fs.existsSync(cliCopy), false);
+    assert.match(fs.readFileSync(path.join(backup, "SKILL.md"), "utf8"), /Version one\./);
+    assert.ok((await store.readSkillOrigin(STATE, cliCopy)).rollback, "the record offers the roll back");
+    const restored = await updates.rollbackSkills({ dirs: [cliCopy] }, options({ outsideWrite: capability }));
+    assert.equal(restored.ok, true, restored.errors.join(" "));
+    assert.match(fs.readFileSync(path.join(cliCopy, "SKILL.md"), "utf8"), /Version one\./);
+  });
+
+  await check("a rollback that cannot finish keeps the version it was replacing", async () => {
+    const updated = await updates.updateSkills({ dirs: [cliCopy] }, options({ outsideWrite: capability }));
+    assert.equal(updated.ok, true, updated.errors.join(" "));
+    fs.writeFileSync(path.join(cliCopy, "local-notes.md"), "edited after the update\n");
+    // Call 1 moves the current folder aside, 2 (the restore) and 3 (putting it back) fail.
+    const result = await updates.rollbackSkills({ dirs: [cliCopy] }, options({ outsideWrite: capability, rename: failingRename(2, 3) }));
+    assert.equal(result.ok, false);
+    const kept = /kept in (.+)\.$/.exec(result.errors[0]);
+    assert.ok(kept, result.errors[0]);
+    assert.equal(fs.readFileSync(path.join(kept[1], "local-notes.md"), "utf8"), "edited after the update\n");
+    fs.renameSync(kept[1], cliCopy);
+    fs.rmSync(path.dirname(kept[1]), { recursive: true, force: true });
+    const again = await updates.rollbackSkills({ dirs: [cliCopy] }, options({ outsideWrite: capability }));
+    assert.equal(again.ok, true, again.errors.join(" "));
+    assert.match(fs.readFileSync(path.join(cliCopy, "SKILL.md"), "utf8"), /Version one\./);
+  });
+
+  await check("a record naming a folder outside a skills folder, or one without SKILL.md, never moves it", async () => {
+    const source = await store.readSkillOrigin(STATE, skillDir);
+    const outside = path.join(TMP, "projects", "important");
+    const emptied = path.join(SKILLS, "emptied");
+    fs.mkdirSync(outside, { recursive: true });
+    fs.writeFileSync(path.join(outside, "SKILL.md"), skillMd("important", "Mine."));
+    fs.writeFileSync(path.join(outside, "notes.txt"), "keep\n");
+    fs.mkdirSync(emptied, { recursive: true });
+    fs.writeFileSync(path.join(emptied, "notes.txt"), "keep\n");
+    for (const dir of [outside, emptied]) {
+      await store.writeSkillOrigin(STATE, {
+        schemaVersion: 1,
+        skillDir: dir,
+        name: path.basename(dir),
+        origin: { ...source.origin, commit: firstCommit },
+        rollback: { savedAt: new Date().toISOString(), name: path.basename(dir), origin: source.origin },
+      });
+      const backup = path.join(store.skillOriginBackupDir(STATE, dir), "skill");
+      fs.mkdirSync(backup, { recursive: true });
+      fs.writeFileSync(path.join(backup, "SKILL.md"), skillMd("planted", "Planted."));
+    }
+    const update = await updates.updateSkills({ dirs: [outside, emptied] }, options({ outsideWrite: capability }));
+    assert.equal(update.ok, false);
+    assert.match(update.errors.join("\n"), /outside a skills folder/);
+    assert.match(update.errors.join("\n"), /no SKILL\.md/);
+    const rollback = await updates.rollbackSkills({ dirs: [outside, emptied] }, options({ outsideWrite: capability }));
+    assert.equal(rollback.ok, false);
+    assert.deepEqual(rollback.restored, []);
+    assert.match(fs.readFileSync(path.join(outside, "SKILL.md"), "utf8"), /Mine\./);
+    assert.equal(fs.readFileSync(path.join(outside, "notes.txt"), "utf8"), "keep\n");
+    assert.deepEqual(fs.readdirSync(emptied), ["notes.txt"]);
+    assert.equal(updates.isSkillFolderPath("/Users/sam/.claude/Skills/x", "darwin"), true);
+    assert.equal(updates.isSkillFolderPath("/home/sam/.claude/Skills/x", "linux"), false);
+    assert.equal(updates.isSkillFolderPath("/home/sam/.claude", "linux"), false);
+    await updates.forgetSkillOrigins({ dirs: [outside, emptied] }, options());
+    fs.rmSync(emptied, { recursive: true });
+  });
+
+  await check("a check's error never carries credentials from the address git printed", async () => {
+    const failing = async () => {
+      throw new Error("fatal: unable to access 'https://sam:ghp_secret123@skills.example.test/team/skills/': 403");
+    };
+    const statuses = await updates.checkSkillUpdates(options({ force: true, runGit: failing }));
+    const status = statuses.find((entry) => entry.skillDir === skillDir);
+    assert.equal(status.state, "error");
+    assert.doesNotMatch(status.error, /ghp_secret123|sam:/);
+    assert.match(status.error, /https:\/\/skills\.example\.test\/team\/skills\//);
+    const receiptText = fs.readFileSync(store.skillOriginReceiptPath(STATE, skillDir), "utf8");
+    assert.doesNotMatch(receiptText, /ghp_secret123/);
+  });
+
   await check("removing a skill forgets its record and kept version", async () => {
     await updates.updateSkills({ dirs: [skillDir] }, options());
     const backupRoot = store.skillOriginBackupDir(STATE, skillDir);
@@ -427,6 +542,24 @@ async function main() {
       updates.moveDir(path.join(TMP, "move-back"), path.join(TMP, "never"), { platform: "linux", rename: async () => { throw busy; } }),
       /busy/,
     );
+    // Across volumes, a folder already at the destination is never merged
+    // into, and a copy that fails half way leaves nothing there.
+    const occupied = path.join(TMP, "occupied");
+    fs.mkdirSync(occupied);
+    fs.writeFileSync(path.join(occupied, "mine.txt"), "mine");
+    await assert.rejects(updates.moveDir(path.join(TMP, "move-back"), occupied, { rename: async () => { throw exdev; } }), /cross-device/);
+    assert.deepEqual(fs.readdirSync(occupied), ["mine.txt"]);
+    assert.equal(fs.existsSync(path.join(TMP, "move-back", "inner", "f.txt")), true, "the source is untouched");
+    if (process.platform !== "win32" && process.getuid?.() !== 0) {
+      const locked = path.join(TMP, "move-back", "locked.txt");
+      fs.writeFileSync(locked, "secret");
+      fs.chmodSync(locked, 0o000);
+      const half = path.join(TMP, "half");
+      await assert.rejects(updates.moveDir(path.join(TMP, "move-back"), half, { rename: async () => { throw exdev; } }));
+      assert.equal(fs.existsSync(half), false, "no half copy is left");
+      assert.equal(fs.existsSync(path.join(TMP, "move-back", "inner", "f.txt")), true);
+      fs.chmodSync(locked, 0o600);
+    }
   });
 
   await check("record keys fold case on macOS and Windows only", async () => {
