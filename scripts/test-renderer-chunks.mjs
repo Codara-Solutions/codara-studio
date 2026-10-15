@@ -160,6 +160,9 @@ const closedSurfaceModules = [
   "components/CopyBranchDialogs.tsx",
   "shortcuts/ShortcutsDialog.tsx",
   "components/file-preview/SpreadsheetPreview.tsx",
+  "components/review/ReviewTabHost.tsx",
+  "components/review/ReviewNoteCards.tsx",
+  "components/jump/jump-model.ts",
 ];
 const allModuleIds = chunks.flatMap((chunk) => Object.keys(chunk.modules));
 const staticModuleIds = staticChunks.flatMap((chunk) => Object.keys(chunk.modules));

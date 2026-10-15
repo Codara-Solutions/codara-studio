@@ -2,7 +2,8 @@ import React, { useEffect } from "react";
 import { GroupedVirtuoso, type GroupedVirtuosoHandle } from "react-virtuoso";
 import type { ReviewDiffFile, ReviewDiffLine } from "@shared/review-notes";
 import { IconButton, MinusGlyph, OpenFileIcon, PlusGlyph, Spinner, UndoIcon, splitPath } from "../git/git-ui";
-import { DraftCard, NoteCard, ReviewNotesIcon } from "./ReviewNoteCards";
+import { DraftCard, NoteCard } from "./ReviewNoteCards";
+import { ReviewNotesIcon } from "./ReviewNotesIcon";
 import { statusWord, type FileGroup, type LineSelection, type ReviewRow } from "./review-model";
 
 // The combined diff, virtualized: one sticky header per file and only the

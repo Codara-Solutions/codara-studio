@@ -15,7 +15,7 @@ import type {
 } from "@shared/types";
 import type { GitHubWorkQueueItem } from "@shared/github";
 import SectionHeader, { type SectionHeaderDragProps } from "../../panels/SectionHeader";
-import { ReviewNotesIcon } from "../review/ReviewNoteCards";
+import { ReviewNotesIcon } from "../review/ReviewNotesIcon";
 import ChangeTree from "./ChangeTree";
 import ChangeSection from "./ChangeSection";
 import BranchMenu from "./BranchMenu";

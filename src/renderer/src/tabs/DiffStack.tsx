@@ -1,7 +1,6 @@
-import React, { useMemo } from "react";
+import React, { Suspense, lazy, useMemo } from "react";
 import type { GitStatus } from "@shared/types";
 import DiffTabHost from "../components/git/DiffTabHost";
-import ReviewTabHost from "../components/review/ReviewTabHost";
 import DockedSurface from "./DockedSurface";
 import type { DockRef } from "./dock";
 import type { DiffTab, Tab, TabId } from "./types";
@@ -10,6 +9,10 @@ import type { DiffTab, Tab, TabId } from "./types";
 // mounted in an absolutely-positioned wrapper and visibility toggles on the
 // active id, so scroll position and pending discard-confirm state survive
 // tab switches.
+
+// The review screen loads the first time a review tab opens: most sessions
+// never open one, and it keeps its own diff list, notes and send controls.
+const ReviewTabHost = lazy(() => import("../components/review/ReviewTabHost"));
 
 interface Props {
   tabs: Tab[];
@@ -58,16 +61,18 @@ function DiffStack({
         >
           {(visible) =>
             t.review ? (
-              <ReviewTabHost
-                cwd={cwd}
-                status={status}
-                gitVersion={gitVersion}
-                visible={visible}
-                onOpenFile={onOpenFile}
-                onOpenFileDiff={onOpenFileDiff}
-                onChanged={onChanged}
-                onLaunchAgent={onLaunchAgent}
-              />
+              <Suspense fallback={null}>
+                <ReviewTabHost
+                  cwd={cwd}
+                  status={status}
+                  gitVersion={gitVersion}
+                  visible={visible}
+                  onOpenFile={onOpenFile}
+                  onOpenFileDiff={onOpenFileDiff}
+                  onChanged={onChanged}
+                  onLaunchAgent={onLaunchAgent}
+                />
+              </Suspense>
             ) : (
               <DiffTabHost
                 cwd={cwd}

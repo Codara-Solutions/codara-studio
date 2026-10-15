@@ -183,7 +183,7 @@ import { isLiveOnlyEvent } from "@shared/live-events";
 import type { SettingsTab } from "./components/SettingsDialog";
 import { isAppTearingDown, markAppTearingDown } from "./lib/app-lifecycle";
 import { requestEditorReveal } from "./components/editor-cm/reveal";
-import { workspaceRailSequence, worktreeSourceWorkspace } from "./components/jump/jump-model";
+import { workspaceRailSequence, worktreeSourceWorkspace } from "./components/jump/rail-order";
 import { useWorkspaceJump } from "./components/jump/useWorkspaceJump";
 import {
   buildAwayDigest,
