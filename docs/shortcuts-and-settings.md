@@ -27,6 +27,7 @@ Codara's. Keys an agent sends to a page never trigger Codara's shortcuts.
 | Show keyboard shortcuts | Mod+Shift+/ | `shortcuts.open` |
 | Open settings | Mod+, | `settings.open` |
 | Open Capability Center (tools, skills, memory) | (unbound) | `capabilities.open` |
+| Clean up worktrees | (unbound) | `worktrees.cleanup` |
 | Show run details | Mod+Shift+I | `session.openInspector` |
 
 ### Navigation
@@ -816,3 +817,42 @@ Skills reach Cora too. Cora loads the skills kept in `.pi/skills`,
 your user skill folders for Pi, Claude and Codex. A skill switched off here
 is not loaded by new Cora sessions. Removing a skill moves its folder to the
 trash.
+
+## The worktree cleanup screen
+
+The cleanup screen lists every worktree of the repositories behind your
+workspaces, so you can find the ones that only take up space and remove
+several at once. Open it from the menu on a workspace's row in the rail (**Clean up
+worktrees…**, which starts filtered to that workspace's repository) or
+with the `worktrees.cleanup` command (unbound by default; bind it in
+Keybindings). SSH workspaces are not listed.
+
+Each row shows the branch, the folder, its size on disk, the last activity
+(the newest of its last commit, checkout or index change), uncommitted
+changes, how far it is ahead of or behind its upstream, whether it is merged
+into the base branch (by a merge, a squash or rebase, or a merged pull
+request), and its pull request when the GitHub CLI is signed in. Sizes are
+measured in the background, one worktree at a time and for at most four
+minutes per opening, and kept in `worktree-sizes.json` so the next opening
+starts with them; **Measure sizes again** measures the rows shown again. The
+search box matches branch, folder, repository, workspace and pull request;
+**Merged**, **Stale for** (7 to 90 days without activity) and **Larger than**
+narrow the list, and the column headers sort it.
+
+Removal goes through two steps. **Review removal** checks each picked
+worktree again and shows what would be lost. These always stay, whatever you
+confirm: the main checkout, a worktree in use (an open terminal, an active
+Cora run, a running dev server, the agent that made it still open, a running
+program, or Codara itself), a locked worktree (even when its folder is away),
+one with another checkout inside it, and one that holds your home folder or
+another tool's (such as `~/.claude`). A worktree with uncommitted work, or
+with commits that are not merged, needs its own confirmation. **Delete branches that are merged** (on by
+default) deletes a branch only when it is merged and not a long-lived one
+like `main` or `develop`; a branch with commits that are not merged is never
+deleted, and the last step lists it under **Branches kept for review**.
+Before removing a worktree Codara saves its last commit, and its uncommitted
+changes when they are small enough (ignored files never), under
+`refs/codara/removed-worktrees/` for 30 days. Each removal checks again under
+the repository lock and stops if anything changed since the review. A
+workspace row for a removed worktree leaves the rail, and every removal is
+logged to `logs/worktree-audit.jsonl`.

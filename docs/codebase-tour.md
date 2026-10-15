@@ -418,6 +418,7 @@ owns each file:
 | `remote/` (identity, paired devices, ledger) | `remote-access/` |
 | `logs/main.log` | `file-log.ts` (`logMain`) |
 | `logs/worktree-audit.jsonl` (agent worktree changes) | `agent-worktrees.ts` (`createWorktreeAuditLog`) |
+| `worktree-sizes.json` (worktree sizes for the cleanup screen) | `worktree-cleanup/space.ts` (`createSizeStore`) |
 
 The renderer also keeps each workspace's tab layout in `localStorage`
 (`tabs/useTabs.ts`). The `spark-` prefixes and `SPARK_*` variables come from
@@ -491,6 +492,7 @@ Debugging:
 | Workflows | `workflow-driver.ts` (runs), `workflow-runtime.ts` (script API, journal) | `components/workflows/`; `test-workflow-*`, `tests/e2e/workflow-run.spec.ts` |
 | Git or GitHub features | `src/main/git-*.ts`, `src/main/github-*.ts` | `components/git/` |
 | Worktrees agents create and remove | `src/main/agent-worktrees.ts` (the policy, no Electron) | The `worktree.*` handlers in `agent-socket.ts`; `workspace-state-edits.ts`; `test-agent-worktrees`, `tests/e2e/agent-worktree.spec.ts` |
+| The worktree cleanup screen | `src/main/worktree-cleanup/` (`inspect.ts` the facts and the full check, `scan.ts` the list, `remove.ts` the guarded removal, `space.ts` sizes; only `index.ts` touches Electron) | `src/shared/worktree-cleanup.ts` (filters, the removal outlook); `components/worktree-cleanup/`; `test-worktree-cleanup`, `tests/e2e/worktree-cleanup.spec.ts` |
 | The phone protocol | `remote-access/rpc.ts` | `production.ts`; the interop suites in [scripts/README.md](../scripts/README.md#remote-access-phone-and-ssh-workspaces) |
 | The Claude Code hook | `src/main/hook-installer.ts` | `resources/claude-hooks/codara-hook.py`, `hook-watcher.ts` |
 | Shell integration | `resources/shell-integration/` | `src/main/shell-init.ts` |

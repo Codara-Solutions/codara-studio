@@ -189,7 +189,7 @@ const PANE_LOOKUP_TIMEOUT_MS = 2_000;
 const LIST_ITEM_BUDGET_MS = 10_000;
 const LIST_CONCURRENCY = 4;
 const REPO_LOCK_WAIT_MS = 60_000;
-const RECOVERY_REF_PREFIX = "refs/codara/removed-worktrees";
+export const RECOVERY_REF_PREFIX = "refs/codara/removed-worktrees";
 const RECOVERY_REF_RETENTION_DAYS = 30;
 const MAX_LISTED_PATHS = 20;
 const MAX_TITLE = 80;
@@ -508,7 +508,7 @@ interface NestedScan {
 // first so a large node_modules/ cannot use up the budget before a hand-made
 // ignored folder is checked. A walk cut short by the budget or an unreadable
 // directory proves nothing, so the caller must treat it as a block.
-async function checkoutsInIgnored(
+export async function checkoutsInIgnored(
   root: string,
   entries: readonly string[],
   extra: readonly string[],
@@ -1705,7 +1705,7 @@ async function findRecoveryRef(repoCwd: string, workspaceId: string): Promise<{ 
   return null;
 }
 
-async function pruneRecoveryRefs(repoCwd: string, now: Date): Promise<void> {
+export async function pruneRecoveryRefs(repoCwd: string, now: Date): Promise<void> {
   const out = await readGitText(repoCwd, [
     "for-each-ref",
     "--format=%(refname) %(objectname)",
@@ -2066,24 +2066,35 @@ export async function scanProcessesUnderCwd(
   dir: string,
   options: { appPid: number; sessionPids: readonly number[]; timeoutMs?: number },
 ): Promise<ProcessUse[] | null> {
+  const found = await scanProcessesUnderCwds([dir], options);
+  return found ? found.get(dir) ?? [] : null;
+}
+
+// The same scan for many directories from one process listing, so the
+// worktree cleanup screen does not list every process once per worktree.
+export async function scanProcessesUnderCwds(
+  dirs: readonly string[],
+  options: { appPid: number; sessionPids: readonly number[]; timeoutMs?: number },
+): Promise<Map<string, ProcessUse[]> | null> {
   if (process.platform === "win32") return null;
-  const scan = (async (): Promise<ProcessUse[] | null> => {
+  const scan = (async (): Promise<Map<string, ProcessUse[]> | null> => {
     const listed = await listProcessesWithCommands(0);
     if (!listed) return null;
     const cwds = await processCwds(listed.map((entry) => entry.pid));
     if (!cwds) return null;
     const sessions = new Set(options.sessionPids);
     const appAncestors = new Set(processChainIn(listed, options.appPid) ?? [options.appPid]);
-    const out: ProcessUse[] = [];
+    const out = new Map<string, ProcessUse[]>(dirs.map((dir) => [dir, []]));
     for (const entry of listed) {
       const cwd = cwds.get(entry.pid);
-      if (!cwd || !isAtOrUnder(cwd, dir)) continue;
-      if (appAncestors.has(entry.pid)) continue;
+      if (!cwd) continue;
+      const inside = dirs.filter((dir) => isAtOrUnder(cwd, dir));
+      if (!inside.length || appAncestors.has(entry.pid)) continue;
       const chain = processChainIn(listed, entry.pid) ?? [entry.pid];
       const sessionIndex = chain.findIndex((pid) => sessions.has(pid));
       const appIndex = chain.indexOf(options.appPid);
       if (appIndex >= 0 && (sessionIndex < 0 || sessionIndex > appIndex)) continue;
-      out.push({ pid: entry.pid, command: cleanText(entry.command, 200) });
+      for (const dir of inside) out.get(dir)!.push({ pid: entry.pid, command: cleanText(entry.command, 200) });
     }
     return out;
   })();

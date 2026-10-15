@@ -499,6 +499,7 @@ import {
   trackTerminalScrollbackPanes,
 } from "./terminal-scrollback";
 import { registerAgentHibernationIpc } from "./agent-hibernation";
+import { registerWorktreeCleanupIpc } from "./worktree-cleanup";
 
 function nativeCliAccountRuntimeFromIpc(value: unknown): NativeCliAccountRuntime {
   if (value === "claude" || value === "codex" || value === "grok") return value;
@@ -4127,6 +4128,7 @@ export function registerIpc(): void {
   registerReviewIpc(handle);
   registerTerminalScrollbackIpc(handle);
   registerAgentHibernationIpc(handle);
+  registerWorktreeCleanupIpc(handle);
 }
 
 const MEMORY_KINDS = new Set<MemoryItemKind>(["preference", "correction", "fact", "procedure", "lesson"]);

@@ -49,6 +49,7 @@ import { workspaceStatusApi } from "./areas/workspace-status";
 import { skillOriginsApi } from "./areas/skill-origins";
 import { terminalScrollbackApi } from "./areas/terminal-scrollback";
 import { agentHibernationApi } from "./areas/agent-hibernation";
+import { worktreeCleanupApi } from "./areas/worktree-cleanup";
 import type {
   CoraMemoryItem,
   MemoryItemKind,
@@ -1800,6 +1801,7 @@ const api = {
   workspaceStatus: workspaceStatusApi,
   review: reviewApi,
   terminalScrollback: terminalScrollbackApi,
+  worktreeCleanup: worktreeCleanupApi,
 };
 
 function isBrowserUrl(url: string): boolean {

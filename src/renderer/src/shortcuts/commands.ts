@@ -29,6 +29,7 @@ export type CommandId =
   | "automations.open"
   | "usage.open"
   | "review.open"
+  | "worktrees.cleanup"
   | "board.open"
   | "session.openInspector"
   | "composer.focus"
@@ -194,6 +195,15 @@ export const COMMANDS: Command[] = [
     group: "Navigation",
     // No default chord: Mod+Shift+G is the editor's find-previous. The Source
     // Control header has a button for it too.
+    defaultChords: [],
+  },
+  {
+    id: "worktrees.cleanup",
+    label: "Clean up worktrees",
+    group: "General",
+    // No default chord: an occasional screen. It lists every worktree of the
+    // workspaces' repositories with size, activity and merge state, and
+    // removes the ones picked under the guarded removal.
     defaultChords: [],
   },
   {

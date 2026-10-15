@@ -51,6 +51,10 @@ export interface RemoveCopyWorktreeInput {
   // reached through a symlink reads as orphaned and would be deleted
   // recursively right after git refused to remove it.
   removeOrphanDir?: boolean;
+  // How long `git worktree remove` may run. A large worktree (node_modules,
+  // build output) can take minutes to delete, and a git killed by the
+  // default timeout leaves it half deleted.
+  timeoutMs?: number;
 }
 
 const MANAGED_REPO_HASH_HEX_LENGTH = 12;
@@ -525,12 +529,11 @@ async function tryRemoveWorktreeOnce(
         };
       }
     }
-    await runGit(input.repoCwd, [
-      "worktree",
-      "remove",
-      ...(input.force ? ["--force"] : []),
-      input.worktreePath,
-    ]);
+    await runGit(
+      input.repoCwd,
+      ["worktree", "remove", ...(input.force ? ["--force"] : []), input.worktreePath],
+      input.timeoutMs ? { timeout: input.timeoutMs } : {},
+    );
     return { ok: true };
   } catch (err) {
     const msg = errorText(err);

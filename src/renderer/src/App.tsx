@@ -50,6 +50,8 @@ import SearchPanel from "./components/Search/SearchPanel";
 import FileSearchPanel from "./components/Search/FileSearchPanel";
 import ToastHost from "./components/Toast";
 import WorkspaceSwitchHud from "./components/WorkspaceSwitchHud";
+import WorktreeCleanupHost from "./components/worktree-cleanup/WorktreeCleanupHost";
+import { openWorktreeCleanup } from "./components/worktree-cleanup/open-worktree-cleanup";
 import type { WorkerSessionPickerRequest } from "./components/WorkerSessionPicker";
 import { playNotificationSound } from "./components/notification-sounds";
 import TabBar, { TAB_GROUP_MENU_EVENT, type PickerHints, type TabGroupActions } from "./tabs/TabBar";
@@ -5515,6 +5517,7 @@ export default function App() {
       "automations.open": () => tabs.openAutomationsTab(),
       "usage.open": () => tabs.openUsageTab(),
       "review.open": () => tabs.openReviewTab(),
+      "worktrees.cleanup": () => openWorktreeCleanup(activeIdRef.current),
       // The Cora Board is a chat sub-view now (no top-level tab). The chord
       // focuses the active chat's Board view; the chatView state lives inside
       // the Workspace component, so this is broadcast like the other
@@ -6750,6 +6753,7 @@ export default function App() {
             onDismiss={() => setAwayDigest(null)}
           />
         )}
+        <WorktreeCleanupHost />
         {createCopyDialogWs && (
           <Suspense fallback={null}>
             <CreateCopyDialog
