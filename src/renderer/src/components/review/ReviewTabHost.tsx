@@ -727,7 +727,7 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
     async (destination: ReviewDestination) => {
       if (!workspaceId || !notes.length || sending) return;
       const batch = sortReviewNotes(notes);
-      const text = formatReviewNotes(batch, { scope, workspaceCwd: cwd });
+      const text = formatReviewNotes(batch, { scope, workspaceCwd: cwd, repoRoot: diff?.root });
       setSending(true);
       setMessage(null);
       try {
@@ -753,17 +753,17 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
         setSending(false);
       }
     },
-    [cwd, notes, onLaunchAgent, routing, scope, sending, workspaceId],
+    [cwd, diff?.root, notes, onLaunchAgent, routing, scope, sending, workspaceId],
   );
 
   const copyAll = useCallback(() => {
     if (!notes.length) return;
-    const text = formatReviewNotes(sortReviewNotes(notes), { scope, workspaceCwd: cwd });
+    const text = formatReviewNotes(sortReviewNotes(notes), { scope, workspaceCwd: cwd, repoRoot: diff?.root });
     void window.spark.clipboard
       .writeText(text)
       .then(() => setMessage({ text: `Copied ${notes.length === 1 ? "1 note" : `${notes.length} notes`}.` }))
       .catch((err: Error) => setMessage({ text: err.message, tone: "error" }));
-  }, [cwd, notes, scope]);
+  }, [cwd, diff?.root, notes, scope]);
 
   const clearAll = useCallback(() => {
     if (!workspaceId) return;

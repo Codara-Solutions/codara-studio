@@ -147,6 +147,18 @@ function diffFile(pathName, text, over = {}) {
       ].join("\n"),
     );
     assert.match(lib.formatReviewNotes([note()]), /^\[Codara\] 1 review note\. Address each one/);
+    // A workspace inside its repository: the agent is told where diff paths start.
+    assert.equal(
+      lib.formatReviewNotes([note()], { workspaceCwd: "/repo/packages/web", repoRoot: "/repo" }).split("\n\n")[0],
+      "[Codara] 1 review note. Address each one, then say what you changed.\nFile paths are relative to the repository at /repo.",
+    );
+    assert.doesNotMatch(lib.formatReviewNotes([note()], { workspaceCwd: "/repo/", repoRoot: "/repo" }), /relative to the repository/);
+    assert.doesNotMatch(lib.formatReviewNotes([note()], { workspaceCwd: "C:\\Repo", repoRoot: "c:/repo" }), /relative to the repository/);
+    assert.doesNotMatch(
+      lib.formatReviewNotes([note({ source: "markdown", filePath: "/repo/web/plan.md" })], { workspaceCwd: "/repo/web", repoRoot: "/repo" }),
+      /relative to the repository/,
+      "Markdown notes carry their own path",
+    );
 
     // Sent notes leave the list; one edited while sending stays.
     const sent = [note({ id: "a" }), note({ id: "b" })];

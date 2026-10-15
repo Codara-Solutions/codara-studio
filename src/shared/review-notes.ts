@@ -230,6 +230,19 @@ export interface ReviewNotesFormatOptions {
   /** What the diff showed: "uncommitted changes" or "changes against origin/main". */
   scope?: string | null;
   workspaceCwd?: string | null;
+  /**
+   * The repository's top folder. Diff notes name files relative to it, so
+   * the message says so when the workspace is a folder inside it, where the
+   * agent works.
+   */
+  repoRoot?: string | null;
+}
+
+function samePlace(a: string, b: string): boolean {
+  const norm = (value: string) => value.replace(/\\/g, "/").replace(/\/+$/, "");
+  const x = norm(a);
+  const y = norm(b);
+  return /^[A-Za-z]:\//.test(x) || /^[A-Za-z]:\//.test(y) ? x.toLowerCase() === y.toLowerCase() : x === y;
 }
 
 /**
@@ -242,7 +255,12 @@ export function formatReviewNotes(notes: readonly ReviewNote[], options: ReviewN
   const sorted = sortReviewNotes(notes);
   const count = sorted.length;
   const scope = options.scope?.trim();
-  const head = `[Codara] ${count === 1 ? "1 review note" : `${count} review notes`}${scope ? ` on the ${scope}` : ""}. Address each one, then say what you changed.`;
+  const root = options.repoRoot?.trim();
+  const elsewhere =
+    root && options.workspaceCwd && sorted.some((note) => note.source === "diff") && !samePlace(root, options.workspaceCwd)
+      ? `\nFile paths are relative to the repository at ${root}.`
+      : "";
+  const head = `[Codara] ${count === 1 ? "1 review note" : `${count} review notes`}${scope ? ` on the ${scope}` : ""}. Address each one, then say what you changed.${elsewhere}`;
   const blocks = sorted.map((note, index) => {
     const path = displayNotePath(note, options.workspaceCwd);
     const lines = [`${index + 1}. ${reviewNoteLocation(note, path)}${note.source === "markdown" ? " (Markdown)" : ""}`];
