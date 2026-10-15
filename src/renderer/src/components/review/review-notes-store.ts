@@ -1,5 +1,6 @@
 import { useCallback, useSyncExternalStore } from "react";
 import { makeId } from "@shared/ids";
+import { unwrapIpcError } from "../../lib/ipc-error";
 import {
   cleanReviewNote,
   MAX_REVIEW_NOTES,
@@ -12,6 +13,8 @@ import {
 // (src/main/review/notes-store.ts); this module loads a workspace's list
 // once, applies each change in memory at once, and saves the whole list
 // after it in order, so a quick edit after a delete never lands first.
+// Nothing is saved until the list on disk has been read: a save replaces the
+// whole file, so saving after a failed read would drop the notes in it.
 
 type Listener = () => void;
 
@@ -52,11 +55,14 @@ function ensureLoaded(workspaceId: string): Promise<void> {
         entry.notes = [...entry.notes, ...notes.filter((note) => !known.has(note.id))];
         entry.error = null;
       })
+      .then(() => {
+        entry.loaded = true;
+      })
       .catch((error: unknown) => {
-        entry.error = error instanceof Error ? error.message : String(error);
+        // Stays unloaded, so the next change or view reads it again.
+        entry.error = unwrapIpcError(error);
       })
       .finally(() => {
-        entry.loaded = true;
         entry.loading = null;
         notify(entry);
       });
@@ -79,6 +85,11 @@ export function getReviewNotes(workspaceId: string | null): ReviewNote[] {
   return entries.get(workspaceId)?.notes ?? EMPTY;
 }
 
+/** Why the notes could not be read or saved, until the next read or save works. */
+export function reviewNotesError(workspaceId: string | null): string | null {
+  return workspaceId ? entries.get(workspaceId)?.error ?? null : null;
+}
+
 export function useReviewNotes(workspaceId: string | null): { notes: ReviewNote[]; loaded: boolean; error: string | null } {
   const sub = useCallback(
     (listener: Listener) => (workspaceId ? subscribe(workspaceId, listener) : () => undefined),
@@ -97,6 +108,7 @@ export async function changeReviewNotes(
 ): Promise<void> {
   await ensureLoaded(workspaceId);
   const entry = entryFor(workspaceId);
+  if (!entry.loaded) return;
   const next = change(entry.notes);
   if (next === entry.notes) return;
   entry.notes = next;
@@ -112,7 +124,7 @@ export async function changeReviewNotes(
       }
     })
     .catch((error: unknown) => {
-      entry.error = error instanceof Error ? error.message : String(error);
+      entry.error = `The notes were not saved: ${unwrapIpcError(error)}`;
       notify(entry);
     });
   await entry.saving;

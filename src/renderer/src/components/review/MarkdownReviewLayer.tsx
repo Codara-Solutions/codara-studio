@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { clampQuote, type ReviewNote } from "@shared/review-notes";
 import { useOptionalSelectionRouting } from "../../routing/SelectionRoutingContext";
 import { NoteComposer } from "./ReviewNoteCards";
-import { addReviewNote, useReviewNotes } from "./review-notes-store";
+import { addReviewNote, reviewNotesError, useReviewNotes } from "./review-notes-store";
 import "./review.css";
 
 // Review notes on a rendered Markdown file, such as a plan: select text, press
@@ -190,7 +190,8 @@ export default function MarkdownReviewLayer({ containerRef, basePath, text }: Pr
         body,
       });
       if (!note) {
-        setError("The note was not saved. There may be too many notes already.");
+        const why = reviewNotesError(workspaceId);
+        setError(why ? `The note was not saved. ${why}` : "The note was not saved. There may be too many notes already.");
         return;
       }
       window.getSelection()?.removeAllRanges();

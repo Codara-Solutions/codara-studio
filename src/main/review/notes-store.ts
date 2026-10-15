@@ -47,11 +47,22 @@ export function createReviewNotesStore(options: { now?: () => number } = {}): Re
     return next;
   }
 
+  // No file means no notes. A file that cannot be read now (locked by a
+  // scanner on Windows, out of file handles) is an error, not an empty list:
+  // the renderer saves the whole list after its next change, and an empty
+  // read would have that save wipe the notes on disk.
   async function read(workspaceId: string): Promise<ReviewNote[]> {
+    let raw: string;
     try {
-      const parsed = JSON.parse(await fs.readFile(reviewNotesFile(workspaceId), "utf8")) as { notes?: unknown };
-      return cleanReviewNotes(parsed?.notes);
+      raw = await fs.readFile(reviewNotesFile(workspaceId), "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return [];
+      throw new Error("The review notes could not be read. Try again in a moment.");
+    }
+    try {
+      return cleanReviewNotes((JSON.parse(raw) as { notes?: unknown })?.notes);
     } catch {
+      // Not JSON: an atomic write never leaves this, so there is nothing to keep.
       return [];
     }
   }

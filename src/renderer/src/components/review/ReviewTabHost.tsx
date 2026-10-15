@@ -35,6 +35,7 @@ import {
   clearReviewNotes,
   deleteReviewNote,
   removeDeliveredNotes,
+  reviewNotesError,
   updateReviewNote,
   useReviewNotes,
 } from "./review-notes-store";
@@ -154,7 +155,7 @@ function statusSignature(status: GitStatus | null): string {
 export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpenFile, onOpenFileDiff, onChanged, onLaunchAgent }: Props): React.ReactElement {
   const routing = useOptionalSelectionRouting();
   const workspaceId = routing?.workspaceId ?? null;
-  const { notes } = useReviewNotes(workspaceId);
+  const { notes, error: notesError } = useReviewNotes(workspaceId);
 
   const [prefs, setPrefs] = useState<ViewPrefs>(() => readPrefs(workspaceId));
   useEffect(() => setPrefs(readPrefs(workspaceId)), [workspaceId]);
@@ -503,7 +504,8 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
         body: text,
       });
       if (!saved) {
-        setMessage({ text: "The note was not saved. There may be too many notes already.", tone: "error" });
+        const why = reviewNotesError(workspaceId);
+        setMessage({ text: why ? `The note was not saved. ${why}` : "The note was not saved. There may be too many notes already.", tone: "error" });
         return;
       }
       closeDraft();
@@ -961,6 +963,11 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
       {diff?.error && files.length > 0 ? (
         <div className="rv-banner" data-tone="error">
           {diff.error}
+        </div>
+      ) : null}
+      {notesError ? (
+        <div className="rv-banner" data-tone="error" role="alert" data-testid="review-notes-error">
+          {notesError}
         </div>
       ) : null}
       <div className="rv-body">

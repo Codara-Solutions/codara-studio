@@ -93,9 +93,11 @@ export function reviewDeliveryTarget(destination: Pick<ReviewDestination, "id" |
 }
 
 // What a path inside double quotes may hold so that bash, zsh, fish, cmd and
-// PowerShell all pass it through unchanged: no $, backtick, ", %, !, ^ or
+// PowerShell all pass it through unchanged: letters and digits of any script
+// (a home folder named José or 田中) and a few plain marks, but no $,
+// backtick, ", %, !, ^, curly quotes (PowerShell reads them as quotes) or
 // control characters.
-const SHELL_SAFE_PATH = /^[A-Za-z0-9 _.,:+@~/\\()[\]{}=-]+$/;
+const SHELL_SAFE_PATH = /^[\p{L}\p{M}\p{N} _.,:+@~/\\()[\]{}=-]+$/u;
 
 /**
  * The command that starts an agent CLI on the notes saved at `path`. The

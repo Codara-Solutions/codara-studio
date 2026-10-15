@@ -25,6 +25,7 @@ async function load() {
         export * from "./renderer/src/components/review/review-model";
         export * from "./renderer/src/components/review/review-send";
         export { createReviewNotesStore, reviewNotesFile } from "./main/review/notes-store";
+        export * as notesCache from "./renderer/src/components/review/review-notes-store";
       `,
       resolveDir: path.join(ROOT, "src"),
       loader: "ts",
@@ -273,7 +274,14 @@ function diffFile(pathName, text, over = {}) {
       lib.newAgentCommand("codex", "C:\\Users\\Ann Lee\\.codarastudio\\notes.md"),
       'codex --yolo "Read the review notes in C:\\Users\\Ann Lee\\.codarastudio\\notes.md and address each one."',
     );
-    for (const unsafe of ["/home/$USER/n.md", "/tmp/a\"b.md", "C:\\%TEMP%\\n.md", "/tmp/`x`.md", "/tmp/a!b.md", "/tmp/a^b.md", ""]) {
+    // A home folder named in another alphabet still works; letters are never special to a shell.
+    assert.equal(
+      lib.newAgentCommand("claude", "C:\\Users\\José Müller\\.codarastudio\\n.md"),
+      'claude --dangerously-skip-permissions "Read the review notes in C:\\Users\\José Müller\\.codarastudio\\n.md and address each one."',
+    );
+    assert.ok(lib.newAgentCommand("codex", "/home/zoë/.codarastudio/n.md"));
+    assert.ok(lib.newAgentCommand("codex", "/Users/田中/.codarastudio/n.md"));
+    for (const unsafe of ["/home/$USER/n.md", "/tmp/a\"b.md", "C:\\%TEMP%\\n.md", "/tmp/`x`.md", "/tmp/a!b.md", "/tmp/a^b.md", "/tmp/a\u201cb.md", "/tmp/a\u2019b.md", "/tmp/a\nb.md", ""]) {
       assert.equal(lib.newAgentCommand("claude", unsafe), null, `refused: ${unsafe}`);
     }
 
@@ -297,6 +305,49 @@ function diffFile(pathName, text, over = {}) {
     // A workspace id never leaves the data folder.
     const escaped = lib.reviewNotesFile("../../etc");
     assert.ok(escaped.startsWith(path.join(HOME, "workspace-data") + path.sep), escaped);
+
+    // A file that cannot be read now is an error, never an empty list that
+    // the next save would write over it; a file that is not JSON is empty.
+    const file9 = lib.reviewNotesFile("ws-9");
+    fs.mkdirSync(file9, { recursive: true });
+    await assert.rejects(() => store.list("ws-9"), /could not be read/);
+    fs.rmSync(file9, { recursive: true, force: true });
+    fs.writeFileSync(file9, "{not json");
+    assert.deepEqual(await store.list("ws-9"), []);
+    fs.rmSync(file9, { force: true });
+
+    // The renderer's cache saves nothing until the list on disk was read.
+    const calls = { list: 0, saves: [] };
+    let failList = true;
+    let onDisk = [note({ id: "disk-1", body: "On disk." })];
+    global.window = {
+      spark: {
+        review: {
+          listNotes: async () => {
+            calls.list++;
+            if (failList) throw new Error("Error invoking remote method 'review:notes:list': Error: The review notes could not be read. Try again in a moment.");
+            return onDisk;
+          },
+          saveNotes: async (_id, notes) => {
+            calls.saves.push(notes.map((n) => n.id));
+            onDisk = notes;
+            return notes;
+          },
+        },
+      },
+    };
+    const cache = lib.notesCache;
+    const refused = await cache.addReviewNote("ws-cache", { source: "diff", filePath: "a.ts", side: "new", startLine: 1, endLine: 1, quote: "", body: "New." });
+    assert.equal(refused, null, "no note is added on top of a list that could not be read");
+    assert.deepEqual(calls.saves, [], "nothing was saved over the notes on disk");
+    assert.equal(cache.reviewNotesError("ws-cache"), "The review notes could not be read. Try again in a moment.");
+    failList = false;
+    const added = await cache.addReviewNote("ws-cache", { source: "diff", filePath: "a.ts", side: "new", startLine: 1, endLine: 1, quote: "", body: "New." });
+    assert.ok(added, "the next change reads the list again and adds the note");
+    assert.equal(calls.list, 2);
+    assert.deepEqual(calls.saves, [["disk-1", added.id]], "the saved list keeps the notes on disk");
+    assert.equal(cache.reviewNotesError("ws-cache"), null);
+    delete global.window;
 
     const handoff = await store.handoff("ws-1", "[Codara] 1 review note.");
     assert.ok(handoff.startsWith(path.join(HOME, "workspace-data", "ws-1", "review", "sent")));
