@@ -469,6 +469,7 @@ Debugging:
 | Workflows | `workflow-driver.ts` (runs), `workflow-runtime.ts` (script API, journal) | `components/workflows/`; `test-workflow-*`, `tests/e2e/workflow-run.spec.ts` |
 | Git or GitHub features | `src/main/git-*.ts`, `src/main/github-*.ts` | `components/git/` |
 | Worktrees agents create and remove | `src/main/agent-worktrees.ts` (the policy, no Electron) | The `worktree.*` handlers in `agent-socket.ts`; `workspace-state-edits.ts`; `test-agent-worktrees`, `tests/e2e/agent-worktree.spec.ts` |
+| What a new worktree gets (copied files, links, setup commands) | `src/main/worktree-setup/` (`service.ts` runs it, `plan.ts` and `materialize.ts` decide and copy), `src/shared/worktree-setup.ts` (the file format) | `components/worktree-setup/` (the tray, the log, the setup file dialog); `test-worktree-setup`, `tests/e2e/worktree-setup.spec.ts`; [worktree-setup.md](./worktree-setup.md) |
 | The phone protocol | `remote-access/rpc.ts` | `production.ts`; the interop suites in [scripts/README.md](../scripts/README.md#remote-access-phone-and-ssh-workspaces) |
 | The Claude Code hook | `src/main/hook-installer.ts` | `resources/claude-hooks/codara-hook.py`, `hook-watcher.ts` |
 | Shell integration | `resources/shell-integration/` | `src/main/shell-init.ts` |

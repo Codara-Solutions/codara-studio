@@ -101,6 +101,7 @@ Manage accounts in Settings, Agents, or with `cora auth`. The full story is in
 | [Shortcuts and settings](./docs/shortcuts-and-settings.md) | Look up a key binding or find which Settings tab holds an option. |
 | [The `cora` CLI](./docs/cli.md) | Drive Cora and inspect runs from a terminal. |
 | [MCP tools](./docs/mcp-tools.md) | See which Codara tools an agent gets and what each one does. |
+| [Worktree setup](./docs/worktree-setup.md) | Make every new worktree start with its .env files, dependencies and terminals. |
 | [Whiteboards and review](./docs/whiteboard-review.md) | Understand Cora's project maps and what "Cora reviewed" means. |
 | [Remote access](./docs/remote-access.md) | Pair a phone and understand what a paired device can do. |
 | [What Codara writes on your machine](./docs/on-your-machine.md) | Audit or undo every file and setting Codara touches. |

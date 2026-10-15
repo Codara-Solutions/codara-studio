@@ -198,6 +198,32 @@ hidden worktree. The renderer hears about the new state through
 `state:changed`, disposes what it held for a vanished workspace, and shows a
 toast from `workspace:agentEvent`.
 
+### Worktree setup
+
+Every worktree Codara makes (the create dialog, `codara_worktree_create`, a
+GitHub issue, a Cora worker's sandbox) goes through one service,
+`worktree-setup/service.ts`, which prepares it from the repository's
+`.worktreeinclude` and `.codara/worktree.json` and the user's own setup
+command ([worktree-setup.md](./worktree-setup.md)). The parts that touch the
+disk import no Electron: `plan.ts` reads the files from the main checkout
+(plain files only, never from the new worktree, so a branch cannot change
+what runs), asks git which entries are ignored (`ls-files`, `check-ignore`)
+and matches the patterns with `gitignore.ts`, which follows gitignore(5) and
+is tested against git itself; `materialize.ts` links and copies
+without overwriting and without following a link out of the repository;
+`links.ts` takes the links out before any removal. `index.ts` wires the
+singleton to the app: the environment (Codara's own variables stripped), the
+default shell, the IPC handlers, and a `worktreeSetup:changed` broadcast the
+renderer's setup tray listens to.
+
+Commands run detached, without a terminal and without input, at most two at a
+time, each in its own process group (a tree kill on Windows) so Stop ends
+everything a command started. The status, manifest and log sit in the
+worktree's own git folder, so they survive a restart (a run that was still
+going reads as stopped) and leave with the worktree. The manifest lets the
+removal check in `agent-worktrees.ts` accept unchanged copies and links as
+regenerable while anything edited still blocks.
+
 ## Per-launch integration
 
 Codara never puts its hooks, MCP server or notify program into the user's
