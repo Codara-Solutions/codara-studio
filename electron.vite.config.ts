@@ -26,10 +26,13 @@ function developmentVersion(): string {
 // (`eval: true`), so each file must be one self-contained CommonJS bundle (the
 // sandbox's with QuickJS inside): a relative require or a rollup chunk would
 // not resolve from an eval'd worker. They are built beside the main bundle
-// with esbuild instead of as rollup inputs.
+// with esbuild instead of as rollup inputs. The Windows uninstaller runs the
+// claude-follow cleanup the same way, a self-contained script started by the
+// app's executable as plain Node (package.json unpacks it from the asar).
 const THREAD_WORKERS: ReadonlyArray<{ entry: string; outfile: string }> = [
   { entry: "src/main/orchestration/workflow-sandbox-worker.ts", outfile: "workflow-sandbox-worker.js" },
   { entry: "src/main/usage-scan-worker.ts", outfile: "usage-scan-worker.js" },
+  { entry: "src/main/claude-follow/uninstall-entry.ts", outfile: "claude-follow-uninstall.js" },
 ];
 
 function threadWorkersPlugin(): Plugin {

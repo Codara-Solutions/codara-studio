@@ -269,6 +269,7 @@
       "!**/node_modules/node-pty/prebuilds/win32-ia32/**"
     ],
     "asarUnpack": [
+      "out/main/claude-follow-uninstall.js",
       "node_modules/@earendil-works/pi-coding-agent/node_modules/**/*.node",
       "node_modules/pi-web-search/**",
       "node_modules/@vscode/ripgrep/**",
@@ -325,6 +326,9 @@
     ],
     "directories": {
       "buildResources": "build"
+    },
+    "nsis": {
+      "include": "build/installer.nsh"
     },
     "win": {
       "icon": "build/icon.ico",
