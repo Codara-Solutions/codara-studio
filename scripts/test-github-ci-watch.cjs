@@ -153,6 +153,18 @@ test("parseCiPullRequest judges each check by its newest run", ({ mod }) => {
   // Same name in another workflow is another check.
   const other = view([failedRun, { ...passedRerun, workflowName: "Nightly" }]);
   assert.deepEqual([other.failed, other.pending], [["build"], 0]);
+  // A push run cancelled (cancel-in-progress) just after the pull request's
+  // run of the same job started finishes later than that run started; the
+  // run that started last is the one that counts, not the cancelled one.
+  const cancelledPush = { ...failedRun, conclusion: "CANCELLED", startedAt: "2026-10-01T12:00:00Z", completedAt: "2026-10-01T12:00:09Z" };
+  const prRun = { ...runningRerun, startedAt: "2026-10-01T12:00:05Z" };
+  for (const rollup of [[cancelledPush, prRun], [prRun, cancelledPush]]) {
+    const parsed = view(rollup);
+    assert.deepEqual([parsed.failed, parsed.pending], [[], 1]);
+  }
+  // A check with no start time is placed by its finish time.
+  const noStart = { ...passedRerun, startedAt: undefined, completedAt: "2026-10-01T13:00:00Z" };
+  assert.deepEqual(view([failedRun, noStart]).failed, []);
 });
 
 test("local refs: one git call a minute, the default branch looked up once per interval", async ({ mod }) => {

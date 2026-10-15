@@ -170,8 +170,10 @@ function checkTime(value: unknown): number {
 /**
  * The newest run of each check in a pull request's statusCheckRollup, in
  * GitHub's order. After a re-run GitHub can list the earlier attempt next to
- * the new one; only the newest says whether the check fails now (gh pr
- * checks keeps the newest the same way).
+ * the new one; only the newest says whether the check fails now. Newest means
+ * started last, as gh pr checks keeps it: a run cancelled because a newer
+ * one started (concurrency cancel-in-progress) finishes after that newer one
+ * started, so its finish time must not make it the newest.
  */
 export function latestCheckContexts(rollup: unknown): Record<string, unknown>[] {
   if (!Array.isArray(rollup)) return [];
@@ -183,7 +185,7 @@ export function latestCheckContexts(rollup: unknown): Record<string, unknown>[] 
     const kind = typeof item.__typename === "string" ? item.__typename : "";
     const workflow = typeof item.workflowName === "string" ? item.workflowName : "";
     const key = name ? `${kind}\u0000${workflow}\u0000${name}` : `\u0001${index}`;
-    const at = Math.max(checkTime(item.startedAt), checkTime(item.completedAt));
+    const at = checkTime(item.startedAt) || checkTime(item.completedAt);
     const current = byKey.get(key);
     if (!current || at > current.at) byKey.set(key, { item, at, index });
   });
