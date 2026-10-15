@@ -1303,6 +1303,11 @@ app.whenReady().then(async () => {
       void import("./github-push-watch")
         .then((m) => m.nudgeGitHubPushWatch())
         .catch(() => undefined);
+      // Scheduled automations whose time passed during the sleep follow
+      // their missed-run policy: one catch-up pass or one skip record.
+      void import("./orchestration/scheduler")
+        .then((m) => m.catchUpScheduledJobs("wake"))
+        .catch(() => undefined);
     }, 1500);
     resumeTimer.unref();
   });
