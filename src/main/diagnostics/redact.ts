@@ -74,7 +74,7 @@ const TOKEN_SHAPES: RegExp[] = [
 // redaction quadratic, and the export runs on the main thread (400 KB of
 // "a.a.a." took a minute).
 const SENSITIVE_NAME =
-  "[A-Za-z0-9_.-]{0,64}?(?:token|secret|password|passwd|passphrase|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|auth|authorization|cookie|session[_-]?id|credentials?|signature)";
+  "[A-Za-z0-9_.-]{0,64}?(?:token|secret|password|passwd|passphrase|pass|pwd|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|auth|authorization|cookie|session[_-]?id|credentials?|signature)";
 
 const RULES: Array<[RegExp, string]> = [
   // https://user:password@host
@@ -128,6 +128,8 @@ const SENSITIVE_WORDS = new Set([
   "passwords",
   "passwd",
   "passphrase",
+  "pass",
+  "pwd",
   "key",
   "keys",
   "apikey",
@@ -180,9 +182,15 @@ export function redactJson(value: unknown, ctx: RedactionContext, key?: string):
   }
   if (typeof value === "object") {
     if (sensitive) return REDACTED;
+    const record = value as Record<string, unknown>;
+    // An entry like { "name": "API_TOKEN", "value": "..." } (an environment
+    // variable, a header) names its secret in a sibling, not in its own key.
+    const label = typeof record.name === "string" ? record.name : record.key;
+    const valueIsSecret = typeof label === "string" && isSensitiveKey(label);
     const out: Record<string, unknown> = {};
-    for (const [childKey, child] of Object.entries(value as Record<string, unknown>)) {
-      out[redactText(childKey, ctx)] = redactJson(child, ctx, childKey);
+    for (const [childKey, child] of Object.entries(record)) {
+      const asKey = valueIsSecret && childKey.toLowerCase() === "value" ? label : childKey;
+      out[redactText(childKey, ctx)] = redactJson(child, ctx, asKey);
     }
     return out;
   }
