@@ -500,6 +500,41 @@ async function main() {
     store.dispose();
   }
 
+  // ── where replayed history ends, in the renderer ─────────────────────
+  {
+    const floor = await bundle(
+      path.join(ROOT, "src", "renderer", "src", "components", "Terminal", "persistedScrollback.ts"),
+      "persisted-scrollback",
+      tmp,
+    );
+    const replayed =
+      "old output\r\n\x1b[38;2;215;119;87m✻ Working… (3s · esc to interrupt)\x1b[0m\r\n" + storeMod.RESTORED_OUTPUT_MARKER;
+    const term = await parse([replayed, "$ echo new\r\nnew\r\n$ "], 80, 10);
+    const row = floor.rowAfterMarkerLine(term.buffer.active, 0);
+    check(
+      "the marker line says where replayed history ends",
+      term.buffer.active.getLine(row)?.translateToString(true) === "$ echo new",
+      String(row),
+    );
+    check(
+      "without the xterm marker (a remount) the floor is still found",
+      floor.replayFloorRow(term, Math.max(0, term.buffer.active.length - 40)) === row,
+    );
+    check("only rows from the reader's window down are searched", floor.rowAfterMarkerLine(term.buffer.active, row) === 0);
+    term.dispose();
+    const narrow = await parse([replayed, "$ "], 16, 8);
+    const narrowRow = floor.rowAfterMarkerLine(narrow.buffer.active, 0);
+    check(
+      "a marker wrapped in a narrow pane still counts",
+      narrowRow > 0 && narrow.buffer.active.getLine(narrowRow)?.translateToString(true).trimEnd() === "$",
+      String(narrowRow),
+    );
+    narrow.dispose();
+    const plain = await parse(["$ echo [Restored from before\r\n$ "], 80, 10);
+    check("ordinary output has no floor", floor.rowAfterMarkerLine(plain.buffer.active, 0) === 0);
+    plain.dispose();
+  }
+
   // ── fold cost stays small ─────────────────────────────────────────────
   {
     const big = Array.from({ length: 3000 }, (_, i) => `\x1b[3${i % 8}mline ${i} ${"word ".repeat(18)}\x1b[0m\r\n`).join("");

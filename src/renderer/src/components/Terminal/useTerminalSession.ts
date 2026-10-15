@@ -4188,7 +4188,8 @@ function readTerminalTail(term: Terminal, maxRows: number): string {
   const buf = term.buffer.active;
   const total = buf.length;
   // Output replayed from before a restart is history, never a live agent.
-  const start = Math.max(0, total - maxRows, replayFloorRow(term));
+  const windowStart = Math.max(0, total - maxRows);
+  const start = Math.max(windowStart, replayFloorRow(term, windowStart));
   const parts: string[] = [];
   for (let i = start; i < total; i++) {
     const line = buf.getLine(i);

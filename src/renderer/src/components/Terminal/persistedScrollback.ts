@@ -1,4 +1,5 @@
 import type { IMarker, Terminal } from "@xterm/xterm";
+import { RESTORED_OUTPUT_MARKER_TEXT } from "@shared/terminal-scrollback";
 
 // Output a pane had before Codara restarted (src/main/terminal-scrollback.ts),
 // written into its fresh xterm before the PTY spawns, so it sits above
@@ -9,7 +10,10 @@ import type { IMarker, Terminal } from "@xterm/xterm";
 // bottom rows for agent chrome must not mistake it for an agent running now.
 // A marker on the first row after the replay is that floor; readers stop
 // there. xterm moves the marker as rows scroll and disposes it once the row
-// leaves the scrollback, along with the history it guarded.
+// leaves the scrollback, along with the history it guarded. A remount (a
+// workspace switch, a drag) rebuilds the buffer from a text snapshot in a new
+// xterm, and the marker does not come along; the dim marker line main wrote
+// after the replay does, so the floor is also found by that line.
 
 const replayFloors = new WeakMap<Terminal, IMarker>();
 
@@ -43,10 +47,43 @@ export async function replayPersistedScrollback(
   return true;
 }
 
-/** First buffer row that is not replayed history, or 0 when there is none. */
-export function replayFloorRow(term: Terminal): number {
-  if (term.buffer.active.type !== "normal") return 0;
+type BufferReader = Pick<Terminal["buffer"]["active"], "type" | "length" | "getLine">;
+
+/**
+ * First buffer row that is not replayed history, or 0 when there is none.
+ * Only rows from `searchFrom` down are searched for the marker line, so a
+ * caller reading the last N rows pays for those N rows only.
+ */
+export function replayFloorRow(term: Terminal, searchFrom = 0): number {
+  const buffer = term.buffer.active;
+  if (buffer.type !== "normal") return 0;
   const marker = replayFloors.get(term);
-  if (!marker || marker.isDisposed || marker.line < 0) return 0;
-  return marker.line;
+  const floor = marker && !marker.isDisposed && marker.line >= 0 ? marker.line : 0;
+  return Math.max(floor, rowAfterMarkerLine(buffer, Math.max(floor, searchFrom)));
+}
+
+/**
+ * The row after the last restored-output marker line at or below `from`, or
+ * 0. A narrow pane wraps the marker over several rows; the logical line is
+ * what is compared.
+ */
+export function rowAfterMarkerLine(buffer: BufferReader, from: number): number {
+  if (buffer.type !== "normal") return 0;
+  let text = "";
+  let lineEnd = -1;
+  for (let row = buffer.length - 1; row >= Math.max(0, from); row -= 1) {
+    const line = buffer.getLine(row);
+    if (!line) {
+      text = "";
+      lineEnd = -1;
+      continue;
+    }
+    if (lineEnd < 0) lineEnd = row;
+    text = line.translateToString(true) + text;
+    if (line.isWrapped) continue;
+    if (text.trimEnd() === RESTORED_OUTPUT_MARKER_TEXT) return lineEnd + 1;
+    text = "";
+    lineEnd = -1;
+  }
+  return 0;
 }
