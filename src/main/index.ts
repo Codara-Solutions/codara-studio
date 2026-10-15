@@ -79,7 +79,9 @@ import {
 import {
   startStudioClaudeLoginKeeper,
   startUnifiedAccountMigration,
+  unifiedAccountsReady,
 } from "./orchestration/unified-account-migration";
+import { startClaudeFollow } from "./claude-follow/claude-follow-service";
 import { credentialMirror } from "./orchestration/credential-mirror";
 
 // run-store is heavy (loads the manager protocol and agent-sync transitively).
@@ -1131,6 +1133,9 @@ app.whenReady().then(async () => {
   // The live Claude login gets one refresher ahead of Claude Code and Cora,
   // so the two never race for its single-use refresh token.
   startStudioClaudeLoginKeeper();
+  // A plain `claude` in other terminals follows the active account, set up
+  // only by an installed app (claude-follow/claude-follow.ts).
+  startClaudeFollow(unifiedAccountsReady());
   // Earlier builds installed a copy of Pi of their own under the Codara
   // home. Cora now runs the user's Pi (or the bundled one) and nothing
   // reads that copy any more.

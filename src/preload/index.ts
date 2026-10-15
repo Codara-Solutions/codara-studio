@@ -34,6 +34,7 @@ import type {
   GitSplitPlanResult,
 } from "@shared/git-split";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
+import type { ClaudeFollowStatus } from "@shared/claude-follow";
 import type { AgentDeliveryRequest, AgentDeliveryResult } from "@shared/agent-delivery";
 import { captureApi } from "./areas/capture";
 import { chromeLinkApi } from "./areas/chrome-link";
@@ -318,6 +319,12 @@ const api = {
   nativeCliShellLeftover: {
     status: (): Promise<NativeCliShellProfileLeftover | null> =>
       ipcRenderer.invoke("native-cli-shell-leftover:status"),
+  },
+  // A plain `claude` in other terminals uses the active Claude account.
+  claudeFollow: {
+    status: (): Promise<ClaudeFollowStatus> => ipcRenderer.invoke("claude-follow:status"),
+    set: (enabled: boolean): Promise<ClaudeFollowStatus> =>
+      ipcRenderer.invoke("claude-follow:set", { enabled }),
   },
   nativeCliAccounts: {
     inspect: (): Promise<NativeCliAccountsInspection> =>

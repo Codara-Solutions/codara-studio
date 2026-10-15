@@ -364,6 +364,13 @@ async function main() {
       // Read-only sign-in probe: it derives the personal keychain service
       // name from CLAUDE_CONFIG_DIR and never launches anything.
       "src/main/agent-runtimes.ts",
+      // claude-follow: the service asks whether the Active Claude account is
+      // a managed one (to keep its flag), and the hook text names the
+      // variables that pick a Claude login of the user's own, to step aside
+      // when one is set. Neither launches anything; the hook hands Claude
+      // Code the same live slot path the runtime does.
+      "src/main/claude-follow/claude-follow-service.ts",
+      "src/main/claude-follow/hook-scripts.ts",
       // The unified account service, its Claude adapter, the startup pass
       // and the credential mirror own the two halves of an account; they
       // read the store's directories and never launch anything.

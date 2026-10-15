@@ -123,6 +123,7 @@ import {
 import { anthropicAccounts } from "./orchestration/unified-account-registry";
 import { detectNativeCliShellProfileLeftover } from "./orchestration/native-cli-terminal-cleanup";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
+import type { ClaudeFollowStatus } from "@shared/claude-follow";
 import * as mcpInstaller from "./mcp-installer";
 import { setSparkBuiltinInstalled } from "./builtin-mcp-actions";
 import * as coraMemory from "./orchestration/cora-memory";
@@ -852,8 +853,26 @@ export function registerIpc(): void {
 
   // READ-ONLY: reports whether a shell startup file still carries the block
   // the retired "Active account in your terminal" feature appended, so the
-  // Accounts panel can tell the user how to delete it themselves. Codara no
-  // longer writes to shell startup files anywhere.
+  // Accounts panel can tell the user how to delete it themselves. That
+  // feature's block is never edited; the one line Codara does keep in
+  // startup files now is claude-follow's, handled below.
+  handle(
+    "claude-follow:status",
+    async (): Promise<ClaudeFollowStatus> => {
+      const { claudeFollowStatus } = await import("./claude-follow/claude-follow-service");
+      return claudeFollowStatus();
+    },
+  );
+  handle(
+    "claude-follow:set",
+    async (_event, input?: { enabled?: unknown }): Promise<ClaudeFollowStatus> => {
+      if (typeof input?.enabled !== "boolean") throw new TypeError("enabled must be true or false");
+      const { setClaudeFollowEnabled } = await import("./claude-follow/claude-follow-service");
+      const status = await setClaudeFollowEnabled(input.enabled);
+      broadcastPreferencesChanged({ key: "claudeFollowsActiveAccount", value: status.enabled });
+      return status;
+    },
+  );
   handle(
     "native-cli-shell-leftover:status",
     async (): Promise<NativeCliShellProfileLeftover | null> => {
@@ -1287,6 +1306,14 @@ export function registerIpc(): void {
       // user doesn't have to restart the app to see the menu-bar icon appear or
       // disappear. The hook is registered by index.ts after ensureTray /
       // destroyTray are defined; it's null if somehow called before that.
+      // The claude-follow setting adds or takes out the line in the user's
+      // startup files; Settings uses claude-follow:set, this keeps any
+      // other writer of the preference in step.
+      if (args.key === "claudeFollowsActiveAccount") {
+        void import("./claude-follow/claude-follow-service")
+          .then(({ applyClaudeFollowSetting }) => applyClaudeFollowSetting())
+          .catch(() => undefined);
+      }
       if (args.key === "keepRunningInBackground" && _trayHook) {
         if (args.value) {
           _trayHook.ensure();

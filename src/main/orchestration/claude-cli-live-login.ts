@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { lock } from "proper-lockfile";
-import { assertCodaraOwnedWrite } from "../outside-write-guard";
+import { assertCodaraOwnedWrite, type OutsideWriteCapability } from "../outside-write-guard";
 import { withAccountSelectionLock } from "./account-selection-lock";
 import {
   CLAUDE_CLI_ACCOUNTS_DIRECTORY,
@@ -363,14 +363,17 @@ export async function readClaudeOauthAccount(
  * Change `.claude.json` under the lock Claude Code 2.1.281 takes for its own
  * config writes (`<file>.lock`), re-reading inside it so a concurrent save of
  * project state is never lost. The file keeps its mode; an unparsable file is
- * left alone rather than replaced.
+ * left alone rather than replaced. Only claude-follow's sync passes a
+ * capability, to write the user's own `.claude.json`.
  */
 export async function updateClaudeGlobalConfig(
   home: ClaudeLiveHome,
   transform: (config: Record<string, unknown>) => Record<string, unknown> | null,
+  capability?: OutsideWriteCapability,
 ): Promise<boolean> {
   const file = await claudeGlobalConfigFile(home);
-  assertCodaraOwnedWrite(file);
+  assertCodaraOwnedWrite(file, capability);
+  assertCodaraOwnedWrite(`${file}.lock`, capability);
   await fs.mkdir(dirname(file), { recursive: true });
   const release = await lock(file, {
     realpath: false,
@@ -507,6 +510,78 @@ export async function claudeLiveSlotHoldsProfile(
     return false;
   }
   return true;
+}
+
+export interface ClaudeForeignLiveLogin {
+  /** The managed profile the marker names. */
+  profileId: ClaudeCliProfileId;
+  /** The account the live slot records now, lowercase. */
+  accountUuid: string;
+  email?: string;
+}
+
+/**
+ * The account a terminal `/login` put in the live slot, when it is not the
+ * account of the profile the marker names (see claudeLiveSlotHoldsProfile);
+ * null when the slot holds its profile's own login, holds none, or a switch
+ * is in flight.
+ */
+export async function readClaudeForeignLiveLogin(
+  store: ClaudeLoginSlotStore,
+): Promise<ClaudeForeignLiveLogin | null> {
+  const selection = await readClaudeLiveSelection(store.rootDir).catch(() => null);
+  if (!selection || selection.switchingFrom || !isClaudeCliManagedProfileId(selection.profileId)) return null;
+  const oauthAccount = await readClaudeOauthAccount(claudeLiveHome(store)).catch(() => null);
+  const accountUuid = accountUuidOf(oauthAccount);
+  if (!accountUuid) return null;
+  if (await claudeLiveSlotHoldsProfile(store, selection.profileId)) return null;
+  const email = normalizeAccountEmail(oauthAccount?.emailAddress);
+  return { profileId: selection.profileId, accountUuid, ...(email ? { email } : {}) };
+}
+
+/**
+ * Make the login a terminal `/login` put in the live slot the login of
+ * `profileId`, which then becomes the profile the marker names. The slot is
+ * not touched: running sessions keep the login they just signed in with.
+ * The profile the marker named before keeps its vault as it is, since the
+ * login in the slot is not its own. Holds the selection lock and Claude
+ * Code's refresh locks, and does nothing unless the slot still records
+ * `accountUuid` with a usable login and no switch is in flight.
+ */
+export async function adoptClaudeLiveLogin(
+  store: ClaudeLoginSlotStore,
+  rawProfileId: string,
+  accountUuid: string,
+  options: ClaudeCredentialStoreOptions & { refreshLockRetries?: number } = {},
+): Promise<boolean> {
+  const profileId = normalizeClaudeCliProfileId(rawProfileId);
+  if (!isClaudeCliManagedProfileId(profileId)) {
+    throw new TypeError("Only a managed Claude account can take a terminal sign-in");
+  }
+  const expected = accountUuid.trim().toLowerCase();
+  const home = claudeLiveHome(store);
+  return withClaudeSelectionLock(store.rootDir, () =>
+    withClaudeCodeRefreshLock(
+      home.configDir,
+      async () => {
+        const selection = await readClaudeLiveSelection(store.rootDir);
+        if (!selection || selection.switchingFrom) return false;
+        const oauthAccount = await readClaudeOauthAccount(home);
+        if (!oauthAccount || accountUuidOf(oauthAccount) !== expected) return false;
+        const live = liveScopedKeys(
+          await readClaudeCredentialStores(home.configDir, home.configDirEnv, options),
+        );
+        if (!hasUsableLogin(live)) return false;
+        await writeVaultedLogin(claudeCliVaultFile(store.rootDir, profileId), {
+          store: live,
+          oauthAccount,
+        });
+        await writeLiveSelection(store.rootDir, { profileId, accountUuid: expected });
+        return true;
+      },
+      options.refreshLockRetries === undefined ? {} : { retries: options.refreshLockRetries },
+    ),
+  );
 }
 
 /**

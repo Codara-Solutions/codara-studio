@@ -30,8 +30,18 @@ delete process.env.GROK_HOME;
 // the user edits or deletes, and the one-time removal of entries older
 // builds wrote. Hooks, notify and trust are per launch and write nothing
 // there. Adding one is a reviewable decision, not a drive-by.
+//
+// claude-follow (a plain `claude` in other terminals uses the active
+// account, a setting on by default) mints three, each for one narrow write:
+// startup-files.ts the guarded line in the user's shell startup files,
+// config-sync.ts the MCP servers and folder trust synced back into
+// ~/.claude.json, and shared-state.ts a shared file saved back into
+// ~/.claude when a Windows hard link broke.
 const CAPABILITY_CALL_SITES = [
   "src/main/agent-sync.ts",
+  "src/main/claude-follow/config-sync.ts",
+  "src/main/claude-follow/shared-state.ts",
+  "src/main/claude-follow/startup-files.ts",
   "src/main/fs-tree.ts",
   "src/main/global-config-cleanup.ts",
   "src/main/mcp-installer.ts",

@@ -479,6 +479,15 @@ export class UnifiedAccountService<Loc = unknown, Raw = unknown> {
     return { accounts, terminalOnly };
   }
 
+  /**
+   * The row whose recorded account matches a fingerprint, if any: how a
+   * terminal sign-in claude-follow adopts finds the account it belongs to.
+   */
+  async rowForIdentity(identityFingerprint: string): Promise<PiAccountProfile | null> {
+    const rows = await this.piStore.registry.listProfiles(this.provider);
+    return rows.find((profile) => profile.identityFingerprint === identityFingerprint) ?? null;
+  }
+
   private watchProfile(profile: PiAccountProfile): void {
     const pair = this.pairFromProfile(profile);
     if (pair) this.mirror.watch(pair);

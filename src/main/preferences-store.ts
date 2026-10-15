@@ -272,6 +272,10 @@ function normalize(
       typeof src.keepRunningInBackground === "boolean"
         ? src.keepRunningInBackground
         : DEFAULT_PREFERENCES.keepRunningInBackground,
+    claudeFollowsActiveAccount:
+      typeof src.claudeFollowsActiveAccount === "boolean"
+        ? src.claudeFollowsActiveAccount
+        : DEFAULT_PREFERENCES.claudeFollowsActiveAccount,
     autoOpenPreview:
       typeof src.autoOpenPreview === "boolean"
         ? src.autoOpenPreview

@@ -1305,6 +1305,10 @@ export interface AppPreferences {
   // and keeps the process alive so main-process timers (automations / loops)
   // keep firing instead of quitting. Quit explicitly from the tray menu.
   keepRunningInBackground?: boolean;
+  // When true (default), a plain `claude` typed in a terminal outside Codara
+  // uses the Claude account active in Codara (src/main/claude-follow). Only
+  // an installed app sets it up; turning it off takes it out again.
+  claudeFollowsActiveAccount?: boolean;
   // When true, a localhost dev URL sniffed from any terminal pane's stdout
   // auto-opens a preview tab. Default false: the detected-URL chip still shows
   // so the user can click to open, but Codara never yanks a tab open on its own
@@ -1494,6 +1498,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   glassRefraction: 100,
   glassChroma: 100,
   keepRunningInBackground: true,
+  claudeFollowsActiveAccount: true,
   autoOpenPreview: false,
   linkOpenTarget: "system",
   copyBranchSetupCommandByRepo: {},

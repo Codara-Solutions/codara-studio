@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { promises as fs, type Stats } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import {
@@ -13,7 +13,7 @@ import {
   CLAUDE_ACCOUNT_SCOPED_CONFIG_KEYS,
   updateClaudeGlobalConfig,
 } from "./claude-cli-live-login";
-import { atomicWritePrivateFile } from "./native-cli-atomic-file";
+import { atomicWritePrivateFile, readPrivateJsonFile } from "./native-cli-atomic-file";
 
 /**
  * The homes Codara runs Claude Code, Codex and Grok in for a managed
@@ -28,8 +28,13 @@ import { atomicWritePrivateFile } from "./native-cli-atomic-file";
  * CLI version invents stays private until someone classifies it: a new
  * credential-bearing file can never be shared by accident.
  *
- * Windows is a deliberate no-op for links (creating one needs privileges
- * most users lack): a managed home there is simply private.
+ * Windows has no symlinks without privileges most users lack, so a Claude
+ * home there links its shared folders with directory junctions (no
+ * privilege needed) and its shared files with a symlink when Developer Mode
+ * allows one, a hard link otherwise. A hard link breaks when Claude Code
+ * rewrites the file by renaming a new one over it; while plain `claude`
+ * follows Codara, claude-follow/shared-state.ts mends that. Codex and Grok
+ * homes stay private on Windows.
  */
 
 const MAX_CONFIG_BYTES = 32 * 1024 * 1024;
@@ -51,6 +56,14 @@ export const CLAUDE_SHARED_STATE_NAMES: readonly string[] = [
   "plugins",
   "output-styles",
   "file-history",
+  "CLAUDE.md",
+  "settings.json",
+  "keybindings.json",
+  "history.jsonl",
+];
+
+/** The shared names that are files; every other shared name is a folder. */
+export const CLAUDE_SHARED_FILE_NAMES: readonly string[] = [
   "CLAUDE.md",
   "settings.json",
   "keybindings.json",
@@ -127,17 +140,140 @@ async function ensurePrivateDirectory(path: string): Promise<void> {
   }
 }
 
+export type SharedLinkKind = "symlink" | "junction" | "hardlink";
+
+/**
+ * Test seam: whether a Windows file link may try a symlink first. Tests on
+ * Linux, where a symlink always succeeds, turn it off to reach the hard
+ * link a Windows computer without Developer Mode gets.
+ */
+export const sharedLinkSeams = { windowsFileSymlinks: true };
+
+/**
+ * Create the link itself at `path`. Windows folders get a junction; Windows
+ * files a symlink when Developer Mode permits one, else a hard link (same
+ * volume, which a home under the profile folder always is).
+ */
+async function createLink(
+  target: string,
+  path: string,
+  directory: boolean,
+  platform: NodeJS.Platform,
+): Promise<SharedLinkKind> {
+  if (platform !== "win32") {
+    await fs.symlink(target, path, directory ? "dir" : "file");
+    return "symlink";
+  }
+  if (directory) {
+    await fs.symlink(target, path, "junction");
+    return "junction";
+  }
+  if (sharedLinkSeams.windowsFileSymlinks) {
+    try {
+      await fs.symlink(target, path, "file");
+      return "symlink";
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EPERM" && code !== "EACCES" && code !== "ENOTSUP") throw error;
+    }
+  }
+  await fs.link(target, path);
+  return "hardlink";
+}
+
 /** Point `entry` at `target` by a temporary link renamed over it, never a gap. */
-async function placeLink(entry: string, target: string, directory: boolean): Promise<void> {
+export async function placeLink(
+  entry: string,
+  target: string,
+  directory: boolean,
+  platform: NodeJS.Platform = process.platform,
+): Promise<SharedLinkKind> {
   assertCodaraOwnedEntry(entry);
   const temporary = join(dirname(entry), `.${basename(entry)}.codara-link-${randomBytes(4).toString("hex")}`);
-  await fs.symlink(target, temporary, directory ? "dir" : "file");
+  const kind = await createLink(target, temporary, directory, platform);
   try {
     await fs.rename(temporary, entry);
   } catch (error) {
-    await fs.unlink(temporary).catch(() => undefined);
+    await (directory && platform === "win32" ? fs.rmdir(temporary) : fs.unlink(temporary)).catch(() => undefined);
     throw error;
   }
+  return kind;
+}
+
+/** Two paths name one file: a hard link, or the same file reached twice. */
+export async function sameFileIdentity(a: string, b: string): Promise<boolean> {
+  const [first, second] = await Promise.all([
+    fs.stat(a, { bigint: true }).catch(() => null),
+    fs.stat(b, { bigint: true }).catch(() => null),
+  ]);
+  return !!first && !!second && first.ino !== 0n && first.ino === second.ino && first.dev === second.dev;
+}
+
+// ---------------------------------------------------------------------------
+// The record of Windows hard links, so a broken one can be mended.
+
+export interface SharedFileLinkRecord {
+  /** The user's file the entry was linked to. */
+  target: string;
+  /** sha256 of the content both names last shared. */
+  sha256: string;
+}
+
+/** Where Codara notes the hard links it placed, inside its own claude-cli folder. */
+export function sharedFileLinkRecordFile(root: string): string {
+  return join(root, "shared-file-links.json");
+}
+
+export async function sha256OfFile(path: string): Promise<string | null> {
+  try {
+    return createHash("sha256").update(await fs.readFile(path)).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+export async function readSharedFileLinks(recordFile: string): Promise<Record<string, SharedFileLinkRecord>> {
+  const read = await readPrivateJsonFile(recordFile);
+  if (read.kind !== "value" || !isRecord(read.value) || !isRecord(read.value.links)) return {};
+  const links: Record<string, SharedFileLinkRecord> = {};
+  for (const [entry, value] of Object.entries(read.value.links)) {
+    if (isRecord(value) && typeof value.target === "string" && typeof value.sha256 === "string") {
+      links[entry] = { target: value.target, sha256: value.sha256 };
+    }
+  }
+  return links;
+}
+
+let recordQueue: Promise<unknown> = Promise.resolve();
+
+/** Change the record under an in-process queue; `change` edits the map in place. */
+export function updateSharedFileLinks(
+  recordFile: string,
+  change: (links: Record<string, SharedFileLinkRecord>) => void,
+): Promise<void> {
+  const run = recordQueue.then(async () => {
+    const links = await readSharedFileLinks(recordFile);
+    const before = JSON.stringify(links);
+    change(links);
+    if (JSON.stringify(links) === before) return;
+    await atomicWritePrivateFile(recordFile, `${JSON.stringify({ version: 1, links }, null, 2)}\n`);
+  });
+  recordQueue = run.catch(() => undefined);
+  return run;
+}
+
+function samePath(a: string, b: string, platform: NodeJS.Platform): boolean {
+  const fold = (value: string) => {
+    const trimmed = resolve(value).replace(/[\\/]+$/, "");
+    return platform === "win32" || platform === "darwin" ? trimmed.toLowerCase() : trimmed;
+  };
+  return fold(a) === fold(b);
+}
+
+/** Whether a link entry already points at `target` (a junction may read back with a trailing separator). */
+export async function linkPointsAt(entry: string, target: string, platform: NodeJS.Platform): Promise<boolean> {
+  const current = await fs.readlink(entry).catch(() => null);
+  return current !== null && (current === target || samePath(current, target, platform));
 }
 
 export type SharedLinkOutcome = "linked" | "kept" | "missing-target" | "replaced-by-cli" | "error";
@@ -153,6 +289,8 @@ async function ensureSharedLink(
   source: string,
   name: string,
   log?: ManagedHomeLog,
+  platform: NodeJS.Platform = process.platform,
+  recordFile?: string,
 ): Promise<SharedLinkOutcome> {
   const target = join(source, name);
   const entry = join(home, name);
@@ -161,6 +299,21 @@ async function ensureSharedLink(
     const entryStats = await lstatOrNull(entry);
     if (!targetStats) return "missing-target";
     if (entryStats && !entryStats.isSymbolicLink()) {
+      // A Windows hard link is a file of its own to lstat, yet the same file.
+      if (entryStats.isFile() && (await sameFileIdentity(entry, target))) return "kept";
+      // A Windows home made before links existed there: an empty folder of
+      // its own holds nothing to lose, so it becomes the junction.
+      if (
+        platform === "win32" &&
+        entryStats.isDirectory() &&
+        targetStats.isDirectory() &&
+        (await fs.readdir(entry)).length === 0
+      ) {
+        assertCodaraOwnedEntry(entry);
+        await fs.rmdir(entry);
+        await placeLink(entry, target, true, platform);
+        return "linked";
+      }
       const key = `${home}\0${name}`;
       if (!warnedReplacedLinks.has(key)) {
         warnedReplacedLinks.add(key);
@@ -168,8 +321,15 @@ async function ensureSharedLink(
       }
       return "replaced-by-cli";
     }
-    if (entryStats && (await fs.readlink(entry)) === target) return "kept";
-    await placeLink(entry, target, targetStats.isDirectory());
+    if (entryStats && (await linkPointsAt(entry, target, platform))) return "kept";
+    const kind = await placeLink(entry, target, targetStats.isDirectory(), platform);
+    if (recordFile) {
+      const sha256 = kind === "hardlink" ? await sha256OfFile(target) : null;
+      await updateSharedFileLinks(recordFile, (links) => {
+        if (sha256) links[entry] = { target, sha256 };
+        else delete links[entry];
+      });
+    }
     return "linked";
   } catch (error) {
     log?.(
@@ -254,6 +414,19 @@ export interface ClaudeManagedHomeInput {
   /** A user-set CLAUDE_CONFIG_DIR, or null when the System login uses ~/.claude. */
   systemConfigDirEnv: string | null;
   log?: ManagedHomeLog;
+  /** Test seam: the platform whose link kinds are used. */
+  platform?: NodeJS.Platform;
+}
+
+let claudeServersSyncedTwoWay = false;
+
+/**
+ * While plain `claude` follows Codara, claude-follow/config-sync.ts keeps
+ * the user-scope MCP servers in step both ways; the one-way copy below would
+ * bring back a server a following terminal just removed, so it stands down.
+ */
+export function setClaudeServersSyncedTwoWay(enabled: boolean): void {
+  claudeServersSyncedTwoWay = enabled;
 }
 
 /**
@@ -266,10 +439,16 @@ export interface ClaudeManagedHomeInput {
 export async function ensureClaudeManagedHome(input: ClaudeManagedHomeInput): Promise<void> {
   assertManagedHome(input.home, input.root);
   await ensurePrivateDirectory(input.home);
-  if (process.platform !== "win32") {
-    for (const name of CLAUDE_SHARED_STATE_NAMES) {
-      await ensureSharedLink(input.home, input.systemHome, name, input.log);
-    }
+  const platform = input.platform ?? process.platform;
+  for (const name of CLAUDE_SHARED_STATE_NAMES) {
+    await ensureSharedLink(
+      input.home,
+      input.systemHome,
+      name,
+      input.log,
+      platform,
+      platform === "win32" ? sharedFileLinkRecordFile(input.root) : undefined,
+    );
   }
   const system = await readJsonObject(
     systemClaudeConfigFile(input.systemHome, input.systemConfigDirEnv),
@@ -284,6 +463,7 @@ export async function ensureClaudeManagedHome(input: ClaudeManagedHomeInput): Pr
     return;
   }
   if (existing.isSymbolicLink() || !existing.isFile()) return;
+  if (claudeServersSyncedTwoWay) return;
   const servers = userMcpServers(system);
   if (Object.keys(servers).length === 0) return;
   const home = { configDir: input.home, configDirEnv: input.home, homeDir: dirname(input.home) };

@@ -400,6 +400,21 @@ async function main() {
     assert.equal(await mod.refreshLiveClaudeLoginIfDue(keeper.deps), "foreign");
     assert.deepEqual(keeper.calls, [], "the stranger's login is not refreshed");
 
+    // While a plain `claude` follows Codara, claude-follow takes a foreign
+    // login on through the handler; without one, the pass leaves it alone.
+    let handled = 0;
+    mod.startClaudeLoginKeeper(keeper.deps);
+    assert.equal(await mod.nudgeClaudeLoginKeeper(), "foreign");
+    assert.equal(handled, 0);
+    mod.setClaudeForeignLoginHandler(async () => {
+      handled += 1;
+    });
+    assert.equal(await mod.nudgeClaudeLoginKeeper(), "foreign");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(handled, 1, "the handler runs once per foreign pass");
+    mod.setClaudeForeignLoginHandler(null);
+    mod.stopClaudeLoginKeeper();
+
     const cora = deps(f);
     const renewal = await mod.renewClaudeLoginForCora(cora.deps, id, "refresh-own");
     assert.equal(renewal.outcome, "refreshed");
