@@ -606,7 +606,7 @@ export default function WorktreeCleanupDialog({
             ) : rows.length === 0 ? (
               <div className="wtc-empty">No worktrees found. Open a Git repository as a workspace to see its worktrees here.</div>
             ) : (
-              <div role="grid" aria-label="Worktrees" aria-rowcount={visible.length} className="wtc-grid">
+              <div role="grid" aria-label="Worktrees" aria-rowcount={visible.length + 1} className="wtc-grid">
                 <div role="row" className="wtc-row wtc-row--head">
                   <span role="columnheader" className="wtc-cell-check">
                     <input

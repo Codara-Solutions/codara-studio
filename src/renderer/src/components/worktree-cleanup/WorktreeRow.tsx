@@ -69,16 +69,18 @@ function badgesFor(row: WorktreeCleanupRow, onOpenPullRequest: (url: string) => 
     );
   }
   const target = row.merge.target ?? row.base?.name ?? "the base branch";
+  // How far the base moved on since the branch left it.
+  const behind = row.base && row.base.behind > 0 ? ` ${plural(row.base.behind, "commit")} behind ${row.base.name}.` : "";
   if (row.merge.state === "merged") {
     out.push(
-      <Badge key="merge" tone="ok" title={row.merge.proof ? PROOF_TEXT[row.merge.proof](target) : undefined}>
+      <Badge key="merge" tone="ok" title={row.merge.proof ? `${PROOF_TEXT[row.merge.proof](target)}${behind}` : undefined}>
         Merged
       </Badge>,
     );
   } else if (row.merge.state === "unmerged" && !row.isMain) {
     const ahead = row.base?.ahead ?? 0;
     out.push(
-      <Badge key="merge" tone="warn" title={`Commits that ${target} does not have.`}>
+      <Badge key="merge" tone="warn" title={`Commits that ${target} does not have.${behind}`}>
         {ahead > 0 ? `${plural(ahead, "commit")} not merged` : "Not merged"}
       </Badge>,
     );
