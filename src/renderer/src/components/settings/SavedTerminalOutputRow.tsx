@@ -87,7 +87,7 @@ export default function SavedTerminalOutputRow() {
               disabled={busy || empty}
               onClick={() => setArmed(true)}
             >
-              Clear saved output
+              Clear now
             </button>
           )}
         </span>
