@@ -41,6 +41,7 @@ import { captureApi } from "./areas/capture";
 import { chromeLinkApi } from "./areas/chrome-link";
 import { keepAwakeApi } from "./areas/keep-awake";
 import { gitFixApi } from "./areas/git-fix";
+import { diagnosticsApi } from "./areas/diagnostics";
 import { pointApi } from "./areas/point";
 import { reviewApi } from "./areas/review";
 import { serversApi } from "./areas/servers";
@@ -1781,6 +1782,7 @@ const api = {
   servers: serversApi,
   skillOrigins: skillOriginsApi,
   gitFix: gitFixApi,
+  diagnostics: diagnosticsApi,
   chromeLink: chromeLinkApi,
   keepAwake: keepAwakeApi,
   capture: captureApi,

@@ -18,6 +18,17 @@ Adapted in Codara's own idiom, not copied file for file:
   project-local settings, the local, project, user order), adapted from Orca's
   src/main/skills/claude-plugin-skill-sources.ts
   (src/main/claude-plugin-skills.ts).
+- The main-thread freeze watchdog: a worker thread fed heartbeats by the main
+  process, with a tick-gap check that tells system sleep from a frozen main
+  thread (src/main/diagnostics/hang-detection.ts,
+  src/main/diagnostics/hang-watchdog-worker.ts,
+  src/main/diagnostics/hang-watchdog.ts).
+- The event-loop delay probe built on perf_hooks' histogram
+  (src/main/diagnostics/event-loop-probe.ts).
+- Crash dump pruning by size and count, and stopping Crashpad's handler when
+  an AppImage exits so it does not fault after the mount goes away
+  (src/main/diagnostics/crash-dumps.ts,
+  src/main/diagnostics/appimage-crashpad.ts).
 
 MIT License
 

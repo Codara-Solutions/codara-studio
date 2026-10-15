@@ -22,6 +22,7 @@ import * as fsWatcher from "./fs-watcher";
 import { disposeAllConnections } from "./remote/connections";
 import { closeAllPaneOverlays, startAgentSocket, stopAgentSocket } from "./agent-socket";
 import { ensureCodaraHomeSync, codaraHome } from "./codara-home";
+import { startCrashReporterEarly, startDiagnostics } from "./diagnostics";
 import { flush, loadSettings, loadState } from "./storage";
 import {
   flushPreferences,
@@ -222,6 +223,9 @@ if (!ownsSingleInstanceLock) {
     showMainWindow();
   });
 }
+// Before `ready`: Chromium launches its GPU and network processes by then,
+// and Crashpad records only the processes launched after it starts.
+if (ownsSingleInstanceLock) startCrashReporterEarly();
 
 const isDev = !app.isPackaged;
 // On win32 use the .ico; on macOS/Linux use .png — icon.ico fails to load on
@@ -1028,6 +1032,10 @@ app.whenReady().then(async () => {
   }
 
   ensureCodaraHomeSync();
+  // The crash and freeze black box: before anything slow runs, so a freeze
+  // during startup is caught, and before the window, so Crashpad watches it
+  // on a first run too.
+  startDiagnostics();
   logMain(
     "boot",
     `app start pid=${process.pid} packaged=${app.isPackaged} relaunched=${process.argv.includes(RELAUNCHED_FLAG)}`,
