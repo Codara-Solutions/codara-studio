@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import type { AutomationPrecheckResult, AutomationTrigger } from "@shared/types";
+import type { AutomationLoopKind, AutomationPrecheckResult, AutomationTrigger } from "@shared/types";
 import {
   MAX_PRECHECK_TIMEOUT_SECONDS,
   MISSED_GRACE_CHOICES,
@@ -26,12 +26,15 @@ export default function TriggerGateFields({
   gate,
   onChange,
   trigger,
+  loopKind,
   cwd,
 }: {
   gate: GateDraft;
   onChange: (next: GateDraft) => void;
   /** The trigger as it would be saved (null while it is incomplete). */
   trigger: AutomationTrigger | null;
+  /** A cadence loop's later passes are checked too, whatever the trigger. */
+  loopKind?: AutomationLoopKind;
   cwd: string;
 }): React.ReactElement | null {
   const set = (patch: Partial<GateDraft>): void => onChange({ ...gate, ...patch });
@@ -47,7 +50,14 @@ export default function TriggerGateFields({
   // A result describes the command it ran; editing the command clears it.
   useEffect(() => setResult(null), [gate.precheckCommand, gate.precheckShell]);
 
-  const showPrecheck = trigger ? triggerUsesPrecheck(trigger) : false;
+  const showPrecheck = trigger ? triggerUsesPrecheck(trigger, loopKind) : false;
+  const startsOnItsOwn = trigger ? triggerUsesPrecheck(trigger) : false;
+  const checkedPasses =
+    loopKind !== "cadence"
+      ? "this trigger starts"
+      : startsOnItsOwn
+        ? "this trigger or the cadence loop starts"
+        : "the cadence loop starts";
   const showMissed = trigger ? triggerHasSchedule(trigger) : false;
   if (!showPrecheck && !showMissed) return null;
 
@@ -86,9 +96,9 @@ export default function TriggerGateFields({
         <section style={sectionStyle} data-testid="precheck-section">
           <span className="spark-eyebrow">Before each run</span>
           <span style={hintStyle}>
-            Optional. A shell command that runs in the workspace folder before each pass this trigger
-            starts. Exit code 0 runs the pass. Anything else skips it: no agent starts and no tokens are
-            spent. Run now always runs.
+            {`Optional. A shell command that runs in the workspace folder before each pass ${checkedPasses}. `}
+            Exit code 0 runs the pass. Anything else skips it: no agent starts and no tokens are spent.
+            Run now always runs.
           </span>
           <Field label="Precheck command">
             <textarea

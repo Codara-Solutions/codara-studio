@@ -54,6 +54,19 @@ test("trigger panel: precheck and missed-run settings, Test check, and save", as
     await expect(page.getByTestId("precheck-section")).toHaveCount(0);
     await expect(page.getByTestId("missed-section")).toHaveCount(0);
 
+    // A cadence loop's later passes are checked, so a manual trigger with one
+    // shows the precheck (but no missed-run choice: nothing is scheduled).
+    await clickAttached(page.getByTitle("Loop & stops: how the whole graph repeats"));
+    await clickAttached(page.getByRole("button", { name: "Cadence", exact: true }));
+    await clickAttached(page.locator(".react-flow__node-trigger"));
+    await expect(page.getByTestId("precheck-section")).toBeVisible();
+    await expect(page.getByTestId("precheck-section")).toContainText("before each pass the cadence loop starts");
+    await expect(page.getByTestId("missed-section")).toHaveCount(0);
+    await clickAttached(page.getByTitle("Loop & stops: how the whole graph repeats"));
+    await clickAttached(page.getByRole("button", { name: "Once", exact: true }));
+    await clickAttached(page.locator(".react-flow__node-trigger"));
+    await expect(page.getByTestId("precheck-section")).toHaveCount(0);
+
     // A cron trigger has both.
     await clickAttached(page.getByRole("button", { name: "Cron", exact: true }));
     await page.getByPlaceholder("0 2 * * *").fill("0 3 * * *");

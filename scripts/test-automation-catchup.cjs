@@ -230,6 +230,9 @@ function pureChecks(cu, shared) {
   assert.strictEqual(shared.missedRunsSummary({ trigger: hourly }), "skip");
   assert.strictEqual(shared.triggerUsesPrecheck({ kind: "manual" }), false);
   assert.strictEqual(shared.triggerUsesPrecheck({ kind: "git", events: ["remoteUpdated"] }), true);
+  assert.strictEqual(shared.triggerUsesPrecheck({ kind: "manual" }, "cadence"), true, "a cadence loop's passes are checked");
+  assert.strictEqual(shared.triggerUsesPrecheck({ kind: "continuous" }, "cadence"), true);
+  assert.strictEqual(shared.triggerUsesPrecheck({ kind: "continuous" }, "continuous"), false);
   pass("missed-run policy normalizes and its history lines read plainly");
 }
 

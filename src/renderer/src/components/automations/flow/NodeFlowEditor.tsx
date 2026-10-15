@@ -419,7 +419,7 @@ function Editor({
       chatMode: "execute" as const,
     };
 
-    const gate = buildGate(draft.gate, trigger);
+    const gate = buildGate(draft.gate, trigger, loop.kind);
     if (editing && initial && onSave) {
       onSave({
         id: initial.id,
@@ -824,6 +824,7 @@ function Editor({
                     markDirty();
                   }}
                   builtTrigger={triggerBuilt}
+                  loopKind={draft.loop.kind}
                   cwd={cwd}
                   chainableJobs={jobs.filter((j) => j.id !== initial?.id)}
                   lastOutputs={lastOutputs}

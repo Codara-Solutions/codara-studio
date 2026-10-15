@@ -1,4 +1,5 @@
 import type {
+  AutomationLoopKind,
   AutomationMissedRuns,
   AutomationPrecheck,
   AutomationPrecheckShell,
@@ -59,15 +60,16 @@ export function buildPrecheck(d: GateDraft): AutomationPrecheck | undefined {
   });
 }
 
-/** What the editor saves. Fields that do not apply to the trigger are
- *  dropped, so switching a cron automation to manual does not keep a
- *  precheck nobody can see. */
+/** What the editor saves. Fields that do not apply to the trigger and loop
+ *  are dropped, so switching a cron automation to manual does not keep a
+ *  precheck nobody can see (a cadence loop keeps it: its passes are checked). */
 export function buildGate(
   d: GateDraft,
   trigger: AutomationTrigger | null,
+  loopKind?: AutomationLoopKind,
 ): { precheck?: AutomationPrecheck; missedRuns?: AutomationMissedRuns } {
   const out: { precheck?: AutomationPrecheck; missedRuns?: AutomationMissedRuns } = {};
-  if (trigger && triggerUsesPrecheck(trigger)) {
+  if (trigger && triggerUsesPrecheck(trigger, loopKind)) {
     const p = buildPrecheck(d);
     if (p) out.precheck = p;
   }

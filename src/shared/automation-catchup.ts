@@ -1,4 +1,5 @@
 import type {
+  AutomationLoopKind,
   AutomationMissedRuns,
   AutomationPrecheck,
   AutomationPrecheckResult,
@@ -81,11 +82,17 @@ export function triggerHasSchedule(trigger: AutomationTrigger | undefined): bool
   return trigger?.kind === "cron" || trigger?.kind === "interval";
 }
 
-/** Whether a precheck means anything for this trigger. Manual automations
- *  only run from Run now (never checked) and a continuous trigger starts its
- *  loop at arm time, so the editor hides the field for both. */
-export function triggerUsesPrecheck(trigger: AutomationTrigger | undefined): boolean {
-  return Boolean(trigger) && trigger?.kind !== "manual" && trigger?.kind !== "continuous";
+/** Whether a precheck means anything for this trigger and loop. Manual
+ *  automations only run from Run now (never checked) and a continuous trigger
+ *  starts its loop at arm time, so neither trigger is checked; a cadence
+ *  loop's later passes are, whatever started the loop. */
+export function triggerUsesPrecheck(
+  trigger: AutomationTrigger | undefined,
+  loopKind?: AutomationLoopKind,
+): boolean {
+  if (!trigger) return false;
+  if (loopKind === "cadence") return true;
+  return trigger.kind !== "manual" && trigger.kind !== "continuous";
 }
 
 export function formatGraceMinutes(minutes: number): string {

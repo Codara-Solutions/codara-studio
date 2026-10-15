@@ -303,7 +303,7 @@ These two settings belong to each automation, not to the Settings dialog: open
 the automation in the editor and select its trigger. The cron and interval
 triggers show both; the folder, git, "After automation" and "Automation
 activity" triggers show only the precheck. Manual and continuous triggers show
-neither.
+the precheck only with a cadence loop, whose later passes it checks.
 
 **Before each run** takes an optional shell command. It runs in the
 workspace folder before every pass that the trigger starts (and before every

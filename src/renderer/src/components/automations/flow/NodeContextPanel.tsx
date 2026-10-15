@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentEffortLevel,
+  AutomationLoopKind,
   AutomationTrigger,
   FolderTriggerEvent,
   GuardPredicate,
@@ -102,6 +103,8 @@ export interface NodeContextPanelProps {
   onGateChange?: (next: GateDraft) => void;
   /** The trigger as it would be saved (null while incomplete). */
   builtTrigger?: AutomationTrigger | null;
+  /** The loop kind: a cadence loop's passes take the precheck too. */
+  loopKind?: AutomationLoopKind;
   cwd: string;
   chainableJobs: ScheduledJob[];
   /** Looms v3: the most recent pass's per-node outputs (what each node
@@ -181,6 +184,7 @@ export default function NodeContextPanel(props: NodeContextPanelProps): React.Re
                 gate={props.gate}
                 onChange={props.onGateChange}
                 trigger={props.builtTrigger ?? null}
+                loopKind={props.loopKind}
                 cwd={props.cwd}
               />
             )}
