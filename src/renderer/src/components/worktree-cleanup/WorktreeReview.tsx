@@ -1,6 +1,7 @@
 import React from "react";
 import {
   formatBytes,
+  keptBranchLogCommand,
   plural,
   type WorktreeCleanupOutcome,
   type WorktreeCleanupRemoveResult,
@@ -271,7 +272,7 @@ export function ResultsView({
           </p>
           <ul>
             {result.keptBranches.map((kept) => {
-              const command = `git -C "${kept.repoRoot}" log --oneline ${kept.target ? `${kept.target}..` : ""}${kept.branch}`;
+              const command = keptBranchLogCommand(kept);
               return (
                 <li key={`${kept.repoRoot}\u0000${kept.branch}`}>
                   <span className="wtc-row-name">{kept.branch}</span>

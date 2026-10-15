@@ -333,6 +333,39 @@ async function main() {
       assert.equal(shared.formatAge(now - 3 * 86_400_000, now), "3 days ago");
     });
 
+    await check("rows keep their place while sizes land, until the user sorts again", async () => {
+      const a = { id: "/a", size: { bytes: 10 } };
+      const b = { id: "/b", size: { bytes: 20 } };
+      const c = { id: "/c", size: null };
+      const positions = shared.rowPositions([b, a, c]);
+      // /c measures largest: a fresh sort would move it to the top.
+      const bigC = { ...c, size: { bytes: 99 } };
+      const live = [bigC, b, a];
+      const kept = shared.keepRowOrder(live, positions);
+      assert.deepEqual(kept.map((entry) => entry.id), ["/b", "/a", "/c"], "the row under the pointer stays put");
+      assert.equal(kept[2], bigC, "the kept order carries the new size");
+      assert.equal(shared.orderDrifted(kept, live), true, "the header offers to sort again");
+      assert.equal(shared.orderDrifted(live, live), false);
+      const withNew = shared.keepRowOrder([{ id: "/d" }, ...live], positions);
+      assert.deepEqual(withNew.map((entry) => entry.id), ["/b", "/a", "/c", "/d"], "a row the order does not know goes last");
+    });
+
+    await check("the kept-branch log command pastes safely into a shell", async () => {
+      assert.equal(
+        shared.keptBranchLogCommand({ repoRoot: "/r", branch: "feature/x", target: "origin/main" }),
+        'git -C "/r" log --oneline origin/main..feature/x --',
+      );
+      assert.equal(shared.keptBranchLogCommand({ repoRoot: "/r", branch: "wip", target: null }), 'git -C "/r" log --oneline wip --');
+      // Git allows $, ;, & and backticks in branch names; none may run.
+      assert.equal(
+        shared.keptBranchLogCommand({ repoRoot: "/r", branch: "x;$(touch pwned)`id`&", target: "main" }),
+        "git -C \"/r\" log --oneline 'main..x;$(touch pwned)`id`&' --",
+      );
+      assert.equal(shared.shellArg("it's"), "'it'\\''s'");
+      const out = execFileSync("sh", ["-c", `printf %s ${shared.shellArg("a'b $(echo no) `echo no`")}`], { encoding: "utf8" });
+      assert.equal(out, "a'b $(echo no) `echo no`");
+    });
+
     // ── The full check ─────────────────────────────────────────────────────
     const checks = await removeMod.checkCleanupTargets(
       deps,
