@@ -21,6 +21,9 @@ export interface WorktreeSetupStartInput {
   workspaceName?: string;
   branch?: string;
   runCommands?: boolean;
+  // The repository command fingerprint the create dialog showed; creating
+  // with it approves that command for the repository.
+  approveFingerprint?: string;
 }
 
 // Null when the repository configures nothing and the user has no command.
@@ -39,6 +42,13 @@ export const worktreeSetupApi = {
   list: (): Promise<WorktreeSetupStatus[]> => ipcRenderer.invoke("worktreeSetup:list"),
   stop: (id: string): Promise<WorktreeSetupStatus | null> => ipcRenderer.invoke("worktreeSetup:stop", { id }),
   rerun: (id: string): Promise<WorktreeSetupStartReply> => ipcRenderer.invoke("worktreeSetup:rerun", { id }),
+  /** Runs a command waiting for approval; `always` also allows it for the repository from now on. */
+  approve: (
+    id: string,
+    fingerprint: string,
+    always = false,
+  ): Promise<WorktreeSetupStatus | WorktreeSetupStartError> =>
+    ipcRenderer.invoke("worktreeSetup:approve", { id, fingerprint, always }),
   readLog: (id: string, from = 0): Promise<WorktreeSetupLogChunk | null> =>
     ipcRenderer.invoke("worktreeSetup:readLog", { id, from }),
   dismiss: (id: string): Promise<boolean> => ipcRenderer.invoke("worktreeSetup:dismiss", { id }),

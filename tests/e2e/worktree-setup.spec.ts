@@ -11,8 +11,12 @@ const { rpcRaw } = require("../../cli/lib/rpc.cjs");
 // A repository that keeps its worktree setup in .worktreeinclude and
 // .codara/worktree.json: the create dialog says what a new worktree gets, a
 // worktree made there arrives with its .env copied, node_modules linked and
-// the setup command run; a failing command shows in the setup tray with its
-// log; and an agent's worktree waits for setup and reports it.
+// the setup command run (the dialog showed it, so creating there approves
+// it); a failing command shows in the setup tray with its log; and an
+// agent's worktree never runs a command nobody approved: it waits in the
+// tray until the user allows it, then reports it; and a worktree made from
+// the jump palette, which shows no commands, asks first and opens the file's
+// terminals as plain shells.
 
 function git(cwd: string, args: string[], env: NodeJS.ProcessEnv): string {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", env }).trim();
@@ -111,7 +115,10 @@ test("worktree setup prepares new worktrees from the repository's files", async 
     await expect(summary).toContainText("Links node_modules");
     await expect(summary).toContainText('echo "root=$CODARA_ROOT_PATH" > setup.txt');
     await expect(summary).toContainText("Opens 1 terminal: setup-shell");
+    // Creating approves the terminal's command too, so the dialog shows it.
+    await expect(summary).toContainText("Terminal setup-shell runs echo opened > terminal.txt");
     await expect(summary.getByRole("checkbox", { name: /Run setup commands and open its terminals/ })).toBeChecked();
+    await expect(summary.getByTestId("worktree-setup-approves")).toBeVisible();
 
     // The setup file dialog opens over it, and Escape closes only that one.
     await summary.getByRole("button", { name: "Edit setup…" }).click();
@@ -119,10 +126,13 @@ test("worktree setup prepares new worktrees from the repository's files", async 
     await expect(fileDialog).toBeVisible();
     await expect(fileDialog.getByLabel("Files to copy from this checkout")).toHaveValue(".env", { timeout: 15_000 });
     await expect(fileDialog.getByRole("button", { name: "node_modules", pressed: true })).toBeVisible();
-    // Installing into the linked node_modules is called out while editing.
+    // A link the setup command installs into is refused, and the editor
+    // says so: through it the install would change the main checkout.
     await expect(fileDialog.getByTestId("worktree-setup-install-conflict")).toHaveCount(0);
     await fileDialog.getByLabel("Setup command", { exact: true }).fill("npm ci");
-    await expect(fileDialog.getByTestId("worktree-setup-install-conflict")).toContainText("installs into node_modules");
+    await expect(fileDialog.getByTestId("worktree-setup-install-conflict")).toContainText(
+      "node_modules is not linked because the setup command installs into it",
+    );
     await page.keyboard.press("Escape");
     await expect(fileDialog).toHaveCount(0);
     await expect(page.getByText(/Create isolated worktree for/)).toBeVisible();
@@ -138,6 +148,14 @@ test("worktree setup prepares new worktrees from the repository's files", async 
     expect(readFileSync(join(worktree, "setup.txt"), "utf8").trim()).toBe(`root=${repo}`);
     // The link never shows up as a change in the new worktree.
     expect(git(worktree, ["status", "--porcelain"], gitEnv)).toBe("");
+    // Creating from the dialog approved the commands it showed, the
+    // terminal's too, in Codara's home and never in the repository.
+    const approvals = JSON.parse(readFileSync(join(home, "worktree-setup-approvals.json"), "utf8"));
+    expect(approvals.repositories[join(repo, ".git")]).toMatchObject({
+      name: "repo",
+      commands: [{ command: 'echo "root=$CODARA_ROOT_PATH" > setup.txt\nterminal setup-shell: echo opened > terminal.txt' }],
+    });
+    expect(git(repo, ["status", "--porcelain"], gitEnv)).toBe("");
     // The file's terminal opened in the new worktree and ran its command.
     await expect
       .poll(
@@ -173,7 +191,7 @@ test("worktree setup prepares new worktrees from the repository's files", async 
     await failedRow.getByRole("button", { name: /^Dismiss setup of setup-broken/ }).click();
     await expect(failedRow).toHaveCount(0);
 
-    // ── An agent's worktree waits for setup and reports it ─────────────────
+    // ── An agent's worktree never runs a command nobody approved ──────────
     await writeFile(
       setupFile,
       JSON.stringify({ link: ["node_modules"], setup: "sleep 1 && echo agent > setup.txt", waitForSetup: true }, null, 2),
@@ -182,16 +200,90 @@ test("worktree setup prepares new worktrees from the repository's files", async 
     const caller = { callerRole: "studio", callerClient: "claude-code", callerPaneId: pane.paneId };
     const created = await request("worktree.create", { ...caller, purpose: "Check setup" });
     expect(created.ok, JSON.stringify(created)).toBe(true);
-    expect(created.setup?.state, JSON.stringify(created.setup)).toBe("succeeded");
+    expect(created.setup?.state, JSON.stringify(created.setup)).toBe("awaiting-approval");
     expect(created.setupCommand).toBeNull();
-    expect(readFileSync(join(created.path, "setup.txt"), "utf8").trim()).toBe("agent");
+    expect(created.next).toContain("do not run it, or the setup file's terminal commands, yourself");
+    expect(created.setup.hint).toContain("Do not run that command");
+    // Copies and links are done; the command is not.
     expect(existsSync(join(created.path, ".env"))).toBe(true);
+    expect(lstatSync(join(created.path, "node_modules")).isSymbolicLink()).toBe(true);
+    expect(existsSync(join(created.path, "setup.txt"))).toBe(false);
 
-    const status = await request("worktree.setup", { ...caller, workspaceId: created.workspaceId });
+    // The tray shows the exact command and asks; the agent waits meanwhile.
+    const approval = tray.getByTestId("worktree-setup-approval");
+    await expect(approval).toBeVisible({ timeout: 15_000 });
+    await expect(approval.getByLabel("Setup command")).toHaveText("sleep 1 && echo agent > setup.txt");
+    const waited = request("worktree.setup", { ...caller, workspaceId: created.workspaceId, wait: true, timeoutSeconds: 60 });
+    await page.waitForTimeout(500);
+    expect(existsSync(join(created.path, "setup.txt")), "nothing runs until the user says so").toBe(false);
+    await approval.getByRole("button", { name: "Always allow this command for repo" }).click();
+    await expect(approval).toHaveCount(0, { timeout: 15_000 });
+
+    const status = await waited;
     expect(status.ok, JSON.stringify(status)).toBe(true);
     expect(status.setup.state).toBe("succeeded");
     expect(status.setup.commands[0]).toMatchObject({ kind: "repo", state: "succeeded", exitCode: 0 });
     expect(status.setup.linked).toEqual(["node_modules"]);
+    expect(status.setup.linkedNote).toContain("main checkout");
+    expect(readFileSync(join(created.path, "setup.txt"), "utf8").trim()).toBe("agent");
+
+    // Allowed for the repository, the next agent worktree runs it at once.
+    const otherPane = await request("terminal.create", { cwd: repo, title: "agent 2" });
+    const again = await request("worktree.create", {
+      callerRole: "studio",
+      callerClient: "claude-code",
+      callerPaneId: otherPane.paneId,
+      purpose: "Check setup again",
+    });
+    expect(again.ok, JSON.stringify(again)).toBe(true);
+    expect(again.created).toBe(true);
+    expect(again.setup?.state, JSON.stringify(again.setup)).toBe("succeeded");
+    expect(readFileSync(join(again.path, "setup.txt"), "utf8").trim()).toBe("agent");
+
+    // ── The jump palette shows no commands, so it asks first ───────────────
+    await writeFile(
+      setupFile,
+      JSON.stringify(
+        {
+          setup: "echo palette > palette-setup.txt",
+          terminals: [{ name: "palette-shell", command: "echo palette > palette-terminal.txt" }],
+        },
+        null,
+        2,
+      ),
+    );
+    await page.locator('[data-workspace-id="ws-repo"]').click();
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+j" : "Control+Shift+J");
+    const palette = page.getByTestId("jump-palette");
+    await expect(palette).toBeVisible();
+    await palette.getByRole("combobox").fill("palette check");
+    const createRow = palette.locator('[data-jump-kind="create"]');
+    await expect(createRow).toContainText("Create worktree palette-check");
+    await createRow.click();
+    const paletteApproval = tray.getByTestId("worktree-setup-approval");
+    await expect(paletteApproval).toBeVisible({ timeout: 30_000 });
+    // The prompt lists the terminal's command with the setup command.
+    await expect(paletteApproval.getByLabel("Setup command")).toHaveText("echo palette > palette-setup.txt");
+    await expect(paletteApproval.getByLabel("Command of terminal palette-shell")).toHaveText(
+      "echo palette > palette-terminal.txt",
+    );
+    await expect(paletteApproval).toContainText("Its terminals then open as plain shells, without their commands.");
+    const paletteWorktree = managedWorktree("palette-check");
+    const paletteTabOpen = () =>
+      page.evaluate(() =>
+        Array.from(document.querySelectorAll<HTMLElement>("[data-tab-id]")).some((el) =>
+          (el.textContent ?? "").includes("palette-shell"),
+        ),
+      );
+    expect(await paletteTabOpen(), "no terminal before the user decides").toBe(false);
+    expect(existsSync(join(paletteWorktree, "palette-setup.txt"))).toBe(false);
+    await paletteApproval.getByRole("button", { name: "Run setup", exact: true }).click();
+    await expect.poll(() => existsSync(join(paletteWorktree, "palette-setup.txt")), { timeout: 30_000 }).toBe(true);
+    await expect.poll(paletteTabOpen, { timeout: 15_000 }).toBe(true);
+    // A plain shell: its command never ran, though the first worktree's
+    // terminal ran its own within moments.
+    await page.waitForTimeout(5_000);
+    expect(existsSync(join(paletteWorktree, "palette-terminal.txt"))).toBe(false);
   } finally {
     await app?.close();
   }

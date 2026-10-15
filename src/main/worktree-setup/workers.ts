@@ -69,6 +69,15 @@ export async function waitForWorkerWorktreeSetup(
   if (done.state === "succeeded") {
     return { failed: false, message: "Worktree setup finished", payload: payloadOf(done) };
   }
+  // Waiting on the user could hold the worker for good; it starts on what
+  // the copies gave it, and the command runs if the user approves it.
+  if (done.state === "awaiting-approval") {
+    return {
+      failed: false,
+      message: "Worktree setup is waiting for your approval of its setup command; the worker starts without it",
+      payload: payloadOf(done),
+    };
+  }
   if (!isWorktreeSetupFinished(done.state)) {
     return {
       failed: false,

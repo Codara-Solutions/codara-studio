@@ -1,6 +1,9 @@
 // Starts the repository's worktree setup for a worktree the user just made
-// in the create dialog, and opens the terminals the setup file lists: right
-// away, or once setup succeeded when the file asks to wait for it.
+// in the create dialog or the jump palette, and opens the terminals the
+// setup file lists: right away, or once setup succeeded when the file asks
+// to wait for it. Terminals whose commands nobody approved yet (the palette
+// shows none of them) open only once the user approved the setup, and then
+// as plain shells: their commands never run on their own.
 
 import type { Workspace } from "@shared/types";
 import {
@@ -15,6 +18,8 @@ export async function startNewWorktreeSetup(input: {
   sourceCwd: string;
   workspace: Workspace;
   runCommands: boolean;
+  // The repository command the create dialog showed, approved by creating.
+  approveFingerprint?: string | null;
   openTerminal: (terminal: WorktreeSetupTerminal) => void;
 }): Promise<WorktreeSetupStatus | null> {
   const { workspace } = input;
@@ -26,6 +31,7 @@ export async function startNewWorktreeSetup(input: {
       workspaceId: workspace.id,
       workspaceName: workspace.name,
       ...(workspace.copyBranch?.branch ? { branch: workspace.copyBranch.branch } : {}),
+      ...(input.approveFingerprint ? { approveFingerprint: input.approveFingerprint } : {}),
       runCommands: input.runCommands,
     });
   } catch (cause) {
@@ -48,13 +54,18 @@ export async function startNewWorktreeSetup(input: {
     opened = true;
     for (const terminal of terminals) input.openTerminal(terminal);
   };
-  if (!started.waitForSetup) {
+  // Commands waiting for the user's approval hold the terminals: they come
+  // from the same file, and open as plain shells once the user ran setup.
+  const unapproved = Boolean(started.approval);
+  if (!started.waitForSetup && !unapproved) {
     open(started.terminals);
     return started;
   }
   const settle = (status: WorktreeSetupStatus): boolean => {
     if (!isWorktreeSetupFinished(status.state)) return false;
-    if (status.state === "succeeded") open(status.terminals);
+    if (status.state === "succeeded") {
+      open(unapproved ? status.terminals.map((terminal) => ({ name: terminal.name })) : status.terminals);
+    }
     return true;
   };
   const off = window.spark.worktreeSetup.onChanged((status) => {

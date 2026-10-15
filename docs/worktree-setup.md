@@ -64,7 +64,9 @@ Saving rewrites both files; comments in them are not kept.
 1. Codara reads the two files from the main checkout, never from the new
    worktree, so a branch cannot change what runs. Both must be plain files:
    a symlinked file is ignored.
-2. It links the `link` folders, then copies what the patterns match. A copy
+2. It links the `link` folders, then copies what the patterns match. A
+   folder the setup command installs into is not linked, nor copied (see
+   [Linked folders](#linked-folders)). A copy
    never overwrites a file the worktree already has, and on file systems that
    support it (APFS on macOS, Btrfs and XFS on Linux) the copy is a cheap
    clone. Copies stop at 1 GB or 20,000 files; the rest is listed as
@@ -74,7 +76,10 @@ Saving rewrites both files; comments in them are not kept.
    so it never shows up as a change; when that fails, the link is taken out
    again rather than left for `git add -A` to commit. Links are recorded
    before the copies start.
-3. It runs the setup command in the worktree, then your own command (see
+3. When the setup command or a terminal command is new or changed for this
+   repository and you did not create the worktree from the dialog that
+   showed them, setup stops here and asks you first (see [Approving the setup command](#approving-the-setup-command)).
+4. It runs the setup command in the worktree, then your own command (see
    below). Each runs without a terminal and without input, in its own
    process group (on Windows, Stop ends its whole process tree), and is
    stopped after 45 minutes. At most two setups run commands at
@@ -109,6 +114,34 @@ Settings > Git > Worktrees > Advanced > **Copy-branch setup command** is a comma
 for one repository, saved on this computer only. It runs after the
 repository's setup command, or alone when the repository has no setup files.
 
+## Approving the setup command
+
+Anything that can write the repository (an agent, a branch you pulled, a
+fresh clone) can change `.codara/worktree.json`, so its commands run only
+once you approved them for that repository: the setup command and the
+command of each terminal the file opens. Codara keeps the approvals in its
+own home (`worktree-setup-approvals.json`), never in the repository, keyed
+by the repository's shared git folder so every worktree of it counts. An
+approval covers the exact setup command, the way it runs (a bash script on
+macOS and Linux, one `cmd` per line on Windows) and each terminal's name and
+command; any change to them, or a terminal added, asks again. A terminal
+without a command is a plain shell and needs no approval.
+
+- Creating a worktree from the dialog approves the commands it showed, as
+  long as **Run setup commands** is on. The dialog lists each terminal's
+  command and says so under the summary.
+- A worktree made any other way (from the jump palette, by an agent through
+  `codara_worktree_create`, for a GitHub issue, or for a Cora worker) with
+  commands not yet approved gets its files copied and folders linked, and
+  nothing runs. The setup list at the bottom right shows the exact setup
+  command and terminal commands with **Run setup** (this once), **Always
+  allow** them for the repository and **Don't run**, and a notification
+  asks for you. No terminal opens before you decide; once you ran setup, a
+  worktree from the jump palette gets its terminals as plain shells, without
+  their commands. Agents, issues and workers never open the file's
+  terminals.
+- Your own command is yours and needs no approval.
+
 ## Watching and stopping it
 
 Every setup Codara starts shows in a small list at the bottom right: running,
@@ -122,13 +155,18 @@ In the create dialog, **Run setup commands** (on by default) turns off the
 commands and the terminals for that one worktree. Files are still copied and
 folders linked.
 
+A setup waiting for your approval stays in the list with its command until
+you run it, allow it or decline it; closing Codara ends it as stopped.
+
 ## Agents
 
 `codara_worktree_create` starts setup and returns a `setup` summary next to
 the worktree. When `.codara/worktree.json` sets `waitForSetup`, or the agent
 passes `waitForSetup: true`, it waits up to five minutes for setup to end.
 Otherwise the agent calls `codara_worktree_setup` with `wait: true` before it
-builds or tests. `codara_worktree_setup` returns the state, each command with
+builds or tests. A setup in the state `awaiting-approval` has not run its
+command: the agent is told to tell you and never to run the command itself,
+and `codara_worktree_setup` with `wait: true` keeps waiting while you decide. `codara_worktree_setup` returns the state, each command with
 its exit code, the error and the end of the log; it waits up to nine minutes.
 Without arguments it reports on the worktree the agent works in. See
 [MCP tools](./mcp-tools.md).
@@ -140,7 +178,8 @@ ignored file.
 
 A GitHub issue workspace runs setup too, and Cora is told to wait for it
 before touching the code. A Cora worker's sandbox worktree runs it before the
-worker starts, and waits for it when the file says so.
+worker starts, and waits for it when the file says so; a command that waits
+for your approval does not hold the worker, which starts without it.
 
 ## What it does not cover
 
@@ -149,12 +188,28 @@ worker starts, and waits for it when the file says so.
 - The worktrees a workflow gives an agent with `isolation: "worktree"`.
 - SSH workspaces.
 
-## Things to know
+## Linked folders
 
-- A linked folder is shared: an install in the worktree changes the main
-  checkout's folder too. Link only what is safe to share, or copy and install
-  instead. A setup file that links `node_modules` (or `.venv`) and also runs
-  an install into it gets a warning, in the create dialog and in the editor.
+A linked folder is the main checkout's own folder: an install, a build or a
+delete in the worktree changes it for the main checkout and every other
+worktree. So Codara does not link:
+
+- a folder the setup command, your own command or a terminal's command
+  installs into: `node_modules` for `npm ci`, `npm install`, `pnpm
+  install`, `yarn`, `bun install` and `deno install`; `.venv` or `venv` for
+  `uv sync`, `pip install`, `poetry install`, `pipenv install`, `pdm
+  install`, `rye sync` and `python -m venv`; `vendor` for `composer install`
+  and `go mod vendor`; `vendor/bundle` (or `vendor`) for `bundle install`,
+  or the folder it is given with `--path`, `BUNDLE_PATH` or `bundle config
+  set path`. It copies nothing there either: the install fills it. The
+  create dialog and the editor say so.
+- anything in a Cora worker's sandbox worktree, which is meant to share
+  nothing with the main checkout.
+
+Agents are told that linked folders are shared and never to install into or
+delete them from a worktree.
+
+## Things to know
 - `info/exclude` is shared by every worktree of the repository, so an entry
   Codara adds for a link hides that path in all of them. Entries sit under a
   `# Folders Codara Studio links into worktrees` comment and can be deleted

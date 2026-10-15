@@ -189,7 +189,7 @@ export default function WorktreeSetupLogDialog({
                     <span>{command.kind === "repo" ? "Repository setup command" : "Your setup command"}</span>
                     <code title={command.command}>{command.command.split("\n").join(" && ")}</code>
                   </span>
-                  <span className="wts-steps__state">{commandStateLabel(command)}</span>
+                  <span className="wts-steps__state">{commandStateLabel(command, status)}</span>
                 </li>
               ))}
             </ul>
@@ -241,7 +241,7 @@ export default function WorktreeSetupLogDialog({
           </span>
           {status && !finished ? (
             <button type="button" className="spark-btn is-danger" disabled={busy} onClick={() => void stop()}>
-              Stop
+              {status.state === "awaiting-approval" ? "Don't run" : "Stop"}
             </button>
           ) : null}
           {status && finished ? (

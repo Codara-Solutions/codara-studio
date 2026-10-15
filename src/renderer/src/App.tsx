@@ -3739,6 +3739,8 @@ export default function App() {
         launchSetupTerminal?: boolean;
         /** The create dialog's "Run setup commands" box. */
         runSetupCommands?: boolean;
+        /** The repository setup command the create dialog showed. */
+        approveSetupFingerprint?: string | null;
       },
     ): Promise<Workspace> => {
       setCreateCopyBusy(true);
@@ -3974,6 +3976,7 @@ export default function App() {
             sourceCwd: sourceWs.cwd,
             workspace: persistedWorkspace,
             runCommands: opts?.runSetupCommands !== false,
+            approveFingerprint: opts?.approveSetupFingerprint ?? null,
             openTerminal: (terminal) => {
               newAgentTerminalTabInWorkspace(ws.id, {
                 cwd: res.path,
@@ -6792,6 +6795,7 @@ export default function App() {
                 void createCopyBranchWs(createCopyDialogWs, {
                   newBranch: name,
                   runSetupCommands: setup.runSetupCommands,
+                  approveSetupFingerprint: setup.approveFingerprint,
                 }).catch(() => undefined)
               }
               onOpenBranch={(b, setup) =>
@@ -6799,6 +6803,7 @@ export default function App() {
                   checkoutBranch: b.name,
                   checkoutIsRemote: b.isRemote,
                   runSetupCommands: setup.runSetupCommands,
+                  approveSetupFingerprint: setup.approveFingerprint,
                 }).catch(() => undefined)
               }
             />

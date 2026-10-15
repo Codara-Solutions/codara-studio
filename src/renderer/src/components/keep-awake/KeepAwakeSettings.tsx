@@ -4,6 +4,7 @@ import {
   KEEP_AWAKE_LID_HINT,
   KEEP_AWAKE_LID_SUSPEND_NOTE,
   KEEP_AWAKE_MODE_OPTIONS,
+  keepAwakeLidBatteryNote,
   keepAwakeSummary,
   type KeepAwakeMode,
 } from "@shared/keep-awake";
@@ -53,9 +54,11 @@ export default function KeepAwakeSettings() {
         <ToggleRow
           title="Keep awake with the lid closed"
           desc={
-            status.lid.enabled && status.lid.error
-              ? `${status.lid.error} ${KEEP_AWAKE_LID_HINT}`
-              : `${KEEP_AWAKE_LID_HINT} ${KEEP_AWAKE_LID_SUSPEND_NOTE} No system setting changes.`
+            status.lid.enabled && status.lid.pausedForBattery
+              ? keepAwakeLidBatteryNote(status.lid.batteryLevel)
+              : status.lid.enabled && status.lid.error
+                ? `${status.lid.error} ${KEEP_AWAKE_LID_HINT}`
+                : `${KEEP_AWAKE_LID_HINT} ${KEEP_AWAKE_LID_SUSPEND_NOTE} No system setting changes.`
           }
           checked={status.lid.enabled}
           onChange={setLidClosed}

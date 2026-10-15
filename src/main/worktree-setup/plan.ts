@@ -130,6 +130,17 @@ export async function repositoryRoot(cwd: string): Promise<string | null> {
   }
 }
 
+// Plain --git-common-dir, resolved here: --path-format=absolute needs git
+// 2.31, and an older git prints the unknown flag back as a line of output.
+export async function commonGitDir(cwd: string): Promise<string | null> {
+  try {
+    const out = (await gitWithInput(cwd, ["rev-parse", "--git-common-dir"], "")).trim();
+    return out ? await fsp.realpath(resolve(cwd, out)) : null;
+  } catch {
+    return null;
+  }
+}
+
 // A setup file is read only when it is a plain file inside the repository:
 // a symlink could make Codara read, and then act on, a file from elsewhere.
 async function readPlainFile(root: string, relative: string): Promise<string | null> {

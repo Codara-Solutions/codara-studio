@@ -356,7 +356,14 @@ killed. While that lock is held it also holds off a suspend you start
 yourself: the system may refuse it or ask for an administrator password, so
 turn the option off or quit Codara first. If the system refuses the lock,
 Codara says so in the popover and Settings and tries again later, waiting
-longer each time. A closed laptop on battery keeps draining. On macOS and Windows a closed
+longer each time. A closed laptop on battery keeps draining, so on battery
+at 10% or less Codara lets go of the lid lock: the lock would also block the
+hibernate a critical battery triggers. The switch stays on, the
+popover and Settings say why it is off, and the lock comes back once the
+laptop charges or reaches 15%. Codara reads the battery from
+`/sys/class/power_supply` (a mouse's or headset's battery does not count)
+when it is plugged in or out and every 30 seconds while the lock is wanted.
+On macOS and Windows a closed
 laptop sleeps unless an administrator changes a power setting, so the option
 is hidden there.
 

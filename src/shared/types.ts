@@ -1718,7 +1718,10 @@ export type NotifyKind =
   | "git.pull-request"
   // A check failed on the pull request of a workspace's branch
   // (src/main/github-ci-watch.ts). One alert per failing head commit.
-  | "git.ci-failed";
+  | "git.ci-failed"
+  // A worktree's repository setup command is new or changed, so it waits for
+  // the user to run it (src/main/worktree-setup). One alert per setup.
+  | "worktree.setup-approval";
 
 // Where clicking a notification (toast card, native notification, center
 // entry) navigates. Terminal targets reuse the TerminalAgentTarget shape.

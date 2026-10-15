@@ -132,15 +132,15 @@ export default function WorktreeSetupFileDialog({
     [includeLines, links, linkExtra, setup, setupWindows, waitForSetup, terminals],
   );
   const preview = useMemo(() => serializeWorktreeSetupDraft(draft), [draft]);
-  // Linking node_modules while setup runs "npm ci" installs into the main
-  // checkout's folder: say so while the choice is being made.
+  // Linking node_modules while setup or a terminal runs "npm ci" installs
+  // into the main checkout's folder: say so while the choice is being made.
   const installConflicts = useMemo(
     () =>
       linkedInstallWarnings(
         draft.link.map((entry) => normalizeLinkPath(entry)).filter((entry): entry is string => Boolean(entry)),
-        [setup, setupWindows],
+        [setup, setupWindows, ...draft.terminals.map((terminal) => terminal.command)],
       ),
-    [draft.link, setup, setupWindows],
+    [draft.link, draft.terminals, setup, setupWindows],
   );
 
   const existing = suggestion

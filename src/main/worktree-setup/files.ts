@@ -7,6 +7,8 @@ import { promises as fsp } from "node:fs";
 import { join } from "node:path";
 import { isRemotePath } from "@shared/remote";
 import {
+  linkedInstallNote,
+  linksInstalledInto,
   repoSetupCommandFor,
   serializeWorktreeSetupDraft,
   WORKTREE_INCLUDE_FILE,
@@ -17,7 +19,9 @@ import {
   type WorktreeSetupWriteResult,
 } from "@shared/worktree-setup";
 import { assertCodaraOwnedWrite } from "../outside-write-guard";
+import { approvalRepository, setupCommandFingerprint, type SetupApprovalStore } from "./approvals";
 import {
+  commonGitDir,
   copyPatterns,
   findIgnoredEnvFiles,
   findLinkableFolders,
@@ -37,6 +41,7 @@ export async function previewWorktreeSetup(
   // False reads the two files only: no walk of the checkout for the files
   // to copy, the folders to link or the .env files (Settings needs no more).
   scan = true,
+  approvals: SetupApprovalStore | null = null,
 ): Promise<WorktreeSetupPreview> {
   const sources = await readSetupSources(sourceCwd);
   if (!sources) {
@@ -51,6 +56,8 @@ export async function previewWorktreeSetup(
       copyCount: 0,
       link: [],
       commands: [],
+      repoCommandFingerprint: null,
+      repoCommandApproved: false,
       waitForSetup: false,
       terminals: [],
       uncoveredEnvFiles: [],
@@ -59,15 +66,32 @@ export async function previewWorktreeSetup(
   const root = sources.sourceRoot;
   const config = sources.file.config;
   const patterns = copyPatterns(sources);
+  const repoCommand = config ? repoSetupCommandFor(config, platform) : null;
+  // What setup will not link because a command installs into it (service.ts).
+  const refused = linksInstalledInto(config?.link ?? [], [
+    repoCommand,
+    userCommand,
+    ...(config?.terminals ?? []).map((terminal) => terminal.command),
+  ]);
+  const wantedLinks = (config?.link ?? []).filter((link) => !refused.includes(link));
   const [copies, links, envFiles] = await Promise.all([
     scan && patterns.length ? resolveCopyCandidates(root, patterns).catch(() => null) : Promise.resolve(null),
-    scan && config?.link.length ? resolveLinkSources(root, config.link).catch(() => null) : Promise.resolve(null),
+    scan && wantedLinks.length ? resolveLinkSources(root, wantedLinks).catch(() => null) : Promise.resolve(null),
     scan ? findIgnoredEnvFiles(root).catch(() => [] as string[]) : Promise.resolve([] as string[]),
   ]);
-  const copied = copies?.candidates ?? [];
+  const copied = (copies?.candidates ?? []).filter(
+    (candidate) => !refused.some((link) => candidate.path === link || candidate.path.startsWith(`${link}/`)),
+  );
   const covered = (path: string) =>
     copied.some((candidate) => candidate.path === path || path.startsWith(`${candidate.path}/`));
-  const repoCommand = config ? repoSetupCommandFor(config, platform) : null;
+  const fingerprint = setupCommandFingerprint(repoCommand, platform, config?.terminals ?? []);
+  let approved = false;
+  if (fingerprint && approvals) {
+    const common = await commonGitDir(root);
+    if (common) {
+      approved = await approvals.isApproved(approvalRepository(common, root).key, fingerprint).catch(() => false);
+    }
+  }
   const commands: WorktreeSetupPreview["commands"] = [];
   if (repoCommand) commands.push({ kind: "repo", label: `From ${WORKTREE_SETUP_FILE}`, command: repoCommand });
   if (userCommand) commands.push({ kind: "user", label: "Your setup command", command: userCommand });
@@ -77,11 +101,20 @@ export async function previewWorktreeSetup(
     configured: sources.include.present || sources.file.present,
     files: { worktreeInclude: sources.include.present, setupFile: sources.file.present },
     errors: [...sources.include.errors, ...sources.file.errors],
-    warnings: [...sources.file.warnings, ...(copies?.notices ?? []), ...(links?.skipped ?? []).map((skip) => `${skip.path}: ${skip.reason}`)],
+    warnings: [
+      ...new Set([
+        ...sources.file.warnings,
+        ...refused.map(linkedInstallNote),
+        ...(copies?.notices ?? []),
+        ...(links?.skipped ?? []).map((skip) => `${skip.path}: ${skip.reason}`),
+      ]),
+    ],
     copy: copied.slice(0, PREVIEW_LIST).map((candidate) => (candidate.kind === "dir" ? `${candidate.path}/` : candidate.path)),
     copyCount: copied.length,
     link: links?.links ?? [],
     commands,
+    repoCommandFingerprint: fingerprint,
+    repoCommandApproved: approved,
     waitForSetup: config?.waitForSetup ?? false,
     terminals: config?.terminals ?? [],
     uncoveredEnvFiles: envFiles.filter((file) => !covered(file)).slice(0, PREVIEW_LIST),

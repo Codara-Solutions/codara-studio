@@ -53,6 +53,43 @@ export interface KeepAwakeLidStatus {
   active: boolean;
   /** Why the last attempt failed, while it keeps failing. */
   error: string | null;
+  /**
+   * The hold is let go because the laptop runs on a low battery: the lock
+   * also blocks the hibernate a critical battery triggers.
+   */
+  pausedForBattery: boolean;
+  /** The battery's charge in percent while that is so, when it can be read. */
+  batteryLevel: number | null;
+}
+
+/** What the lid hold needs to know about the battery. */
+export interface KeepAwakeBattery {
+  onBattery: boolean;
+  /** Percent, or null when it cannot be read. */
+  level: number | null;
+}
+
+/** On battery at or below this percentage the lid hold lets go. */
+export const LID_BATTERY_RELEASE_AT = 10;
+/** It is taken again once charging, or at or above this percentage. */
+export const LID_BATTERY_RESUME_AT = 15;
+
+/**
+ * Whether the lid hold stays off for the battery. Between the two levels it
+ * keeps its last answer, so a charge hovering at 10% does not flap the hold.
+ */
+export function lidBatteryLow(wasLow: boolean, battery: KeepAwakeBattery | null): boolean {
+  if (!battery || !battery.onBattery) return false;
+  if (battery.level === null) return wasLow;
+  if (battery.level <= LID_BATTERY_RELEASE_AT) return true;
+  if (battery.level >= LID_BATTERY_RESUME_AT) return false;
+  return wasLow;
+}
+
+/** The popover's and Settings' line while the lid hold is off for the battery. */
+export function keepAwakeLidBatteryNote(level: number | null): string {
+  const charge = level === null ? "low" : `at ${Math.round(level)}%`;
+  return `Off for now: the battery is ${charge}, so a closed lid or a critical battery can still suspend this laptop. It comes back when it charges or reaches ${LID_BATTERY_RESUME_AT}%.`;
 }
 
 export interface KeepAwakeStatus {
@@ -138,8 +175,14 @@ export function keepAwakeIndicatorLabel(status: KeepAwakeStatus | null): string 
 
 export const KEEP_AWAKE_DISPLAY_NOTE = "The screen can still turn off and lock.";
 
-export const KEEP_AWAKE_LID_HINT =
-  "Closing the lid does not suspend this laptop while Codara keeps it awake. On battery it keeps draining.";
+export const KEEP_AWAKE_LID_HINT = `Closing the lid does not suspend this laptop while Codara keeps it awake. On battery it keeps draining, until ${LID_BATTERY_RELEASE_AT}% is left.`;
+
+/** The lid row's hint for this status: the battery or the failure first, when there is one. */
+export function keepAwakeLidHint(lid: KeepAwakeLidStatus): string {
+  if (lid.enabled && lid.pausedForBattery) return keepAwakeLidBatteryNote(lid.batteryLevel);
+  if (lid.enabled && lid.error) return lid.error;
+  return KEEP_AWAKE_LID_HINT;
+}
 
 /** The lid lock blocks every suspend, so one started from the system menu too. */
 export const KEEP_AWAKE_LID_SUSPEND_NOTE = "Suspending it yourself may be blocked too.";

@@ -13,6 +13,8 @@ export function setupStateLabel(status: WorktreeSetupStatus): string {
   switch (status.state) {
     case "preparing":
       return "Copying files from the main checkout";
+    case "awaiting-approval":
+      return "Waiting for your approval to run its setup command";
     case "queued":
       return "Waiting for another setup to finish";
     case "running": {
@@ -29,10 +31,13 @@ export function setupStateLabel(status: WorktreeSetupStatus): string {
   }
 }
 
-export function commandStateLabel(command: WorktreeSetupCommand): string {
+export function commandStateLabel(
+  command: WorktreeSetupCommand,
+  status?: Pick<WorktreeSetupStatus, "state">,
+): string {
   switch (command.state) {
     case "pending":
-      return "Waiting";
+      return status?.state === "awaiting-approval" ? "Waiting for your approval" : "Waiting";
     case "running":
       return "Running";
     case "succeeded":

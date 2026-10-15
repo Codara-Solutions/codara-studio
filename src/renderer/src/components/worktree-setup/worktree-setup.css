@@ -9,8 +9,8 @@
   right: 16px;
   bottom: 40px;
   z-index: 1100;
-  width: min(360px, calc(100vw - 32px));
-  max-height: min(320px, 50vh);
+  width: min(380px, calc(100vw - 32px));
+  max-height: min(420px, 60vh);
   overflow-y: auto;
   border-radius: var(--radius-popover, 12px);
   padding: 4px;
@@ -71,6 +71,66 @@
   height: 22px;
   padding: 0 8px;
   font-size: 11px;
+}
+
+/* A command waiting for the user: the exact text and the three choices,
+   under its row. */
+.wts-approval {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in oklab, var(--warn) 45%, transparent);
+  background: color-mix(in oklab, var(--warn) 8%, transparent);
+}
+.wts-approval__text {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--ink);
+}
+.wts-approval__command {
+  margin: 0;
+  max-height: 96px;
+  overflow: auto;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--bg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+}
+.wts-approval__terminals {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+  max-height: 160px;
+  overflow: auto;
+}
+.wts-approval__terminals li {
+  display: grid;
+  gap: 2px;
+}
+.wts-approval__terminal-name {
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+.wts-approval__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.wts-approval__actions .spark-btn {
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+.wts-mark[data-state="awaiting-approval"] {
+  background: var(--warn);
 }
 
 /* State marks shared by the tray and the log dialog. */

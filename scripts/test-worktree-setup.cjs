@@ -2,7 +2,8 @@
 // (src/main/worktree-setup/*, src/shared/worktree-setup.ts): the file parser,
 // the gitignore matcher (checked against git itself), finding the ignored
 // files to copy, links and copies with their safety rules and budget, the
-// command runner with its log and status, and removal's link release. The
+// command runner with its log and status, the approval a repository command
+// needs before it runs, and removal's link release. The
 // modules are Electron-free, bundled with esbuild and run against throwaway
 // repositories under a fake HOME and git config.
 const assert = require("node:assert/strict");
@@ -68,6 +69,7 @@ async function main() {
         'export * as links from "./src/main/worktree-setup/links";',
         'export * as service from "./src/main/worktree-setup/service";',
         'export * as files from "./src/main/worktree-setup/files";',
+        'export * as approvals from "./src/main/worktree-setup/approvals";',
         'export * as agent from "./src/main/agent-worktrees";',
       ].join("\n"),
       resolveDir: ROOT,
@@ -106,7 +108,7 @@ async function main() {
 }
 
 async function runSuite(m, scratch) {
-  const { shared, gitignore, plan, materialize, links, service, files, agent } = m;
+  const { shared, gitignore, plan, materialize, links, service, files, agent, approvals } = m;
 
   // ── Parser ───────────────────────────────────────────────────────────────
   await check("parses a full setup file", () => {
@@ -125,8 +127,8 @@ async function runSuite(m, scratch) {
     assert.deepEqual(parsed.errors, []);
     assert.deepEqual(parsed.warnings, [
       '"extra" is not a setting Codara knows; it is ignored',
-      "The setup command installs into node_modules, which is linked to the main checkout's folder, so it changes that folder too. Link node_modules or install it, not both.",
-      "The setup command installs into packages/web/node_modules, which is linked to the main checkout's folder, so it changes that folder too. Link packages/web/node_modules or install it, not both.",
+      "node_modules is not linked because the setup command installs into it, and through a link the install would change the main checkout's folder. Nothing is copied there either; the install fills it.",
+      "packages/web/node_modules is not linked because the setup command installs into it, and through a link the install would change the main checkout's folder. Nothing is copied there either; the install fills it.",
     ]);
     assert.deepEqual(parsed.config.copy, ["config/*.local.json"]);
     assert.deepEqual(parsed.config.link, ["node_modules", "packages/web/node_modules"]);
@@ -153,6 +155,35 @@ async function runSuite(m, scratch) {
     assert.equal(warn([".venv"], "npm ci"), 0);
     assert.equal(warn([], "npm ci"), 0);
     assert.equal(warn(["node_modules"], null), 0);
+    for (const command of ["pip install -r requirements.txt", "python3 -m venv .venv", "python -m pip install -e .", "poetry sync", "uv pip install x"]) {
+      assert.equal(warn([".venv"], command), 1, command);
+    }
+    assert.equal(warn(["vendor"], "composer install"), 1);
+    assert.equal(warn(["vendor"], "go mod vendor"), 1);
+    assert.equal(warn(["vendor"], "go build ./..."), 0);
+    assert.deepEqual(shared.linksInstalledInto(["node_modules", ".venv", "cache"], ["pnpm i", null]), ["node_modules"]);
+  });
+
+  await check("bundle install fills vendor/bundle, or the path it is given", () => {
+    const into = (links, ...commands) => shared.linksInstalledInto(links, commands);
+    assert.deepEqual(into(["vendor/bundle", "cache"], "bundle install"), ["vendor/bundle"]);
+    assert.deepEqual(into(["vendor/bundle"], "gem install bundler && bundle"), ["vendor/bundle"], "bundle alone installs");
+    assert.deepEqual(into(["vendor"], "bundle install --jobs 4"), ["vendor"], "a link holding it");
+    assert.deepEqual(into(["gems"], "bundle install --path gems"), ["gems"]);
+    assert.deepEqual(into(["gems"], "bundle install --path=./gems/"), ["gems"]);
+    assert.deepEqual(into(["gems/ruby"], "bundle install --path gems"), ["gems/ruby"], "a link inside it");
+    assert.deepEqual(into(["deps"], "BUNDLE_PATH=deps bundle install"), ["deps"]);
+    assert.deepEqual(into(["deps"], 'export BUNDLE_PATH="deps"\nbundle install'), ["deps"]);
+    assert.deepEqual(into(["deps"], "bundle config set --local path deps && bundle install"), ["deps"]);
+    assert.deepEqual(into(["vendor/bundle"], "bundle exec rake db:setup"), [], "bundle exec installs nothing");
+    assert.deepEqual(into(["vendor/bundle"], "npm ci"), []);
+    assert.deepEqual(into(["deps"], "BUNDLE_PATH=deps bundle exec rspec"), [], "a path without an install");
+    assert.deepEqual(into(["node_modules"], null, null), []);
+    // A terminal's command counts as much as the setup command.
+    const parsed = shared.parseWorktreeSetupFile(
+      JSON.stringify({ link: ["node_modules"], terminals: [{ name: "dev", command: "npm install && npm run dev" }] }),
+    );
+    assert.ok(parsed.warnings.some((warning) => /node_modules is not linked/.test(warning)), JSON.stringify(parsed.warnings));
   });
 
   await check("rejects links that leave the repository or are patterns", () => {
@@ -400,6 +431,9 @@ async function runSuite(m, scratch) {
 
   // ── Service ──────────────────────────────────────────────────────────────
   const changes = [];
+  // Most checks here are about what setup does once its command may run;
+  // the approval checks below hand in a store on a real file instead.
+  const allApproved = { isApproved: async () => true, approve: async () => undefined };
   function makeService(extra = {}) {
     return new service.WorktreeSetupService({
       baseEnv: async () => {
@@ -408,6 +442,7 @@ async function runSuite(m, scratch) {
         return env;
       },
       userShell: async () => ({ path: "/bin/sh", kind: "posix" }),
+      approvals: allApproved,
       onChange: (status) => changes.push(status.state),
       ...extra,
     });
@@ -633,6 +668,330 @@ async function runSuite(m, scratch) {
     const sources = await plan.readSetupSources(linkedRepo);
     assert.equal(sources.file.present, false);
   });
+
+  // ── Approval of the repository command ───────────────────────────────────
+  {
+    // A repository of its own, so the record and the files start empty.
+    const gate = path.join(scratch, "gate");
+    execFileSync("git", ["init", "-q", "-b", "main", gate]);
+    write(path.join(gate, ".gitignore"), ".env\nnode_modules/\nran.txt\nuser.txt\n");
+    write(path.join(gate, "README.md"), "x\n");
+    commitAll(gate, "init");
+    write(path.join(gate, ".env"), "GATE=1\n");
+    write(path.join(gate, "node_modules/dep/index.js"), "module.exports = 1;\n");
+    write(path.join(gate, ".worktreeinclude"), ".env\nnode_modules/dep/\n");
+    const setFile = (body) => write(path.join(gate, ".codara", "worktree.json"), JSON.stringify(body));
+    let n = 0;
+    const gateWorktree = () => {
+      n += 1;
+      const wt = path.join(scratch, "gate-worktrees", `g${n}`);
+      fs.mkdirSync(path.dirname(wt), { recursive: true });
+      git(gate, ["worktree", "add", "-q", "-b", `g${n}`, wt]);
+      return fs.realpathSync(wt);
+    };
+    const recordFile = path.join(scratch, "approvals", "worktree-setup-approvals.json");
+    const store = approvals.fileApprovalStore(recordFile);
+    const gated = (extra = {}) => makeService({ approvals: store, ...extra });
+    const fingerprintOf = (command) => approvals.setupCommandFingerprint(command, process.platform);
+    const repoKey = fs.realpathSync(path.join(gate, ".git"));
+
+    await check("an unapproved command waits for the user, after the copies, and runs nothing", async () => {
+      setFile({ link: ["node_modules"], setup: "echo gate > ran.txt", waitForSetup: true });
+      const wt = gateWorktree();
+      const notified = [];
+      const svc = gated({ onChange: (status) => notified.push(status.state) });
+      const started = await svc.start({ sourceCwd: gate, worktreePath: wt, trigger: "agent", userCommand: "echo me > user.txt" });
+      // Known at once, so the renderer holds the terminals and agents are told.
+      assert.deepEqual(started.approval, { fingerprint: fingerprintOf("echo gate > ran.txt"), repoName: "gate" });
+      const prepared = await svc.whenPrepared(started.id);
+      assert.equal(prepared.state, "awaiting-approval");
+      assert.ok(notified.includes("awaiting-approval"));
+      assert.equal(fs.readFileSync(path.join(wt, ".env"), "utf8"), "GATE=1\n", "copies are done");
+      assert.equal(fs.lstatSync(path.join(wt, "node_modules")).isSymbolicLink(), true, "links are done");
+      assert.deepEqual(prepared.commands.map((c) => c.state), ["pending", "pending"]);
+      // A plain wait returns at once; nothing runs while it waits.
+      const t0 = Date.now();
+      assert.equal((await svc.waitFor(started.id, 10_000)).state, "awaiting-approval");
+      assert.ok(Date.now() - t0 < 1_000);
+      await new Promise((r) => setTimeout(r, 200));
+      assert.equal(fs.existsSync(path.join(wt, "ran.txt")), false);
+      assert.equal(fs.existsSync(path.join(wt, "user.txt")), false, "your command waits with it");
+      const log = (await svc.readLog(started.id)).text;
+      assert.match(log, /are new or changed for gate, so nothing has run/);
+      assert.match(log, /^\$ echo gate > ran\.txt$/m);
+      const summary = service.agentSetupSummary(prepared, "");
+      assert.equal(summary.state, "awaiting-approval");
+      assert.match(summary.hint, /Do not run that command or the setup file's terminal commands yourself/);
+      // "Don't run" ends it without running anything.
+      const declined = await svc.stop(started.id);
+      assert.equal(declined.state, "stopped");
+      assert.match(declined.error, /before its setup command was approved/);
+      assert.deepEqual(declined.commands.map((c) => c.state), ["skipped", "skipped"]);
+      assert.equal(fs.existsSync(path.join(wt, "ran.txt")), false);
+      assert.match(service.agentSetupSummary(declined, "").hint, /Do not run it yourself/);
+      assert.equal(await store.isApproved(repoKey, fingerprintOf("echo gate > ran.txt")), false);
+    });
+
+    await check("Run setup runs it once; Always allow records it for the repository", async () => {
+      setFile({ setup: "echo gate > ran.txt" });
+      const svc = gated();
+      const first = await svc.start({ sourceCwd: gate, worktreePath: gateWorktree(), trigger: "issue", userCommand: null });
+      assert.equal((await svc.whenPrepared(first.id)).state, "awaiting-approval");
+      // A wait for the decision follows it to the end.
+      const waiting = svc.waitFor(first.id, 20_000, { throughApproval: true });
+      const stale = await svc.approve(first.id, { fingerprint: fingerprintOf("echo other") });
+      assert.match(stale.error, /changed/);
+      const once = await svc.approve(first.id, { fingerprint: first.approval.fingerprint });
+      assert.equal(once.id, first.id);
+      const done = await waiting;
+      assert.equal(done.state, "succeeded", done.error);
+      assert.equal(done.approval, undefined, "answered, so no longer asked");
+      assert.equal(fs.readFileSync(path.join(done.worktreePath, "ran.txt"), "utf8"), "gate\n");
+      assert.equal(await store.isApproved(repoKey, first.approval.fingerprint), false, "once is not remembered");
+      assert.match((await svc.approve(first.id, { fingerprint: first.approval.fingerprint })).error, /not waiting/);
+
+      const second = await svc.start({ sourceCwd: gate, worktreePath: gateWorktree(), trigger: "worker", userCommand: null });
+      assert.equal((await svc.whenPrepared(second.id)).state, "awaiting-approval", "asks again");
+      await svc.approve(second.id, { fingerprint: second.approval.fingerprint, always: true });
+      assert.equal((await svc.waitFor(second.id, 20_000)).state, "succeeded");
+      assert.equal(await store.isApproved(repoKey, second.approval.fingerprint), true);
+      const record = JSON.parse(fs.readFileSync(recordFile, "utf8"));
+      assert.equal(record.repositories[repoKey].name, "gate");
+      assert.equal(record.repositories[repoKey].commands[0].command, "echo gate > ran.txt");
+      assert.equal(fs.statSync(recordFile).mode & 0o777, 0o600);
+      assert.ok(!fs.readdirSync(gate).includes("worktree-setup-approvals.json"), "never in the repository");
+
+      // Approved: an agent's worktree runs it without asking.
+      const third = await svc.start({ sourceCwd: gate, worktreePath: gateWorktree(), trigger: "agent", userCommand: null });
+      assert.equal(third.approval, undefined);
+      const ran = await svc.waitFor(third.id, 20_000);
+      assert.equal(ran.state, "succeeded", ran.error);
+      assert.equal(ran.approval, undefined);
+    });
+
+    await check("a command changed after its approval asks again", async () => {
+      setFile({ setup: ["echo gate > ran.txt", "echo sneaky >> ran.txt"] });
+      const svc = gated();
+      const started = await svc.start({ sourceCwd: gate, worktreePath: gateWorktree(), trigger: "agent", userCommand: null });
+      assert.ok(started.approval, "the approved command was one line; this one is not");
+      assert.equal((await svc.whenPrepared(started.id)).state, "awaiting-approval");
+      assert.equal(fs.existsSync(path.join(started.worktreePath, "ran.txt")), false);
+      await svc.stop(started.id);
+      // The same text on another platform's runner is another fingerprint.
+      assert.notEqual(approvals.setupCommandFingerprint("npm ci", "win32"), approvals.setupCommandFingerprint("npm ci", "linux"));
+    });
+
+    await check("creating from the dialog approves the command it showed", async () => {
+      setFile({ setup: "echo dialog > ran.txt" });
+      const preview = await files.previewWorktreeSetup(gate, null, process.platform, false, store);
+      assert.equal(preview.repoCommandFingerprint, fingerprintOf("echo dialog > ran.txt"));
+      assert.equal(preview.repoCommandApproved, false);
+      const svc = gated();
+      // A fingerprint the dialog did not show approves nothing.
+      const stale = await svc.start({
+        sourceCwd: gate,
+        worktreePath: gateWorktree(),
+        trigger: "ui",
+        userCommand: null,
+        approveFingerprint: fingerprintOf("echo older > ran.txt"),
+      });
+      assert.equal((await svc.whenPrepared(stale.id)).state, "awaiting-approval");
+      await svc.stop(stale.id);
+      // Only a create from the dialog honors it, not an agent.
+      const agentTry = await svc.start({
+        sourceCwd: gate,
+        worktreePath: gateWorktree(),
+        trigger: "agent",
+        userCommand: null,
+        approveFingerprint: preview.repoCommandFingerprint,
+      });
+      assert.equal((await svc.whenPrepared(agentTry.id)).state, "awaiting-approval");
+      await svc.stop(agentTry.id);
+      // With the box unticked nothing runs and nothing is approved.
+      const unticked = await svc.start({
+        sourceCwd: gate,
+        worktreePath: gateWorktree(),
+        trigger: "ui",
+        userCommand: null,
+        runCommands: false,
+        approveFingerprint: preview.repoCommandFingerprint,
+      });
+      assert.equal((await svc.waitFor(unticked.id, 10_000)).state, "succeeded");
+      assert.equal(await store.isApproved(repoKey, preview.repoCommandFingerprint), false);
+
+      const shown = await svc.start({
+        sourceCwd: gate,
+        worktreePath: gateWorktree(),
+        trigger: "ui",
+        userCommand: null,
+        approveFingerprint: preview.repoCommandFingerprint,
+      });
+      assert.equal(shown.approval, undefined);
+      const done = await svc.waitFor(shown.id, 20_000);
+      assert.equal(done.state, "succeeded", done.error);
+      assert.equal(fs.readFileSync(path.join(done.worktreePath, "ran.txt"), "utf8"), "dialog\n");
+      assert.equal(await store.isApproved(repoKey, preview.repoCommandFingerprint), true);
+      assert.equal((await files.previewWorktreeSetup(gate, null, process.platform, false, store)).repoCommandApproved, true);
+      // Run again checks the record, never the dialog's old fingerprint.
+      setFile({ setup: "echo changed > ran.txt" });
+      const again = await svc.rerun(shown.id);
+      assert.ok(again.approval);
+      assert.equal((await svc.whenPrepared(again.id)).state, "awaiting-approval");
+      await svc.stop(again.id);
+    });
+
+    await check("an agent's worktree never runs an unapproved command", async () => {
+      setFile({ setup: "echo agent > ran.txt", waitForSetup: true });
+      const svc = gated();
+      const agentRepo = path.join(scratch, "gate-agent-root");
+      const state = {
+        workspaces: [{ id: "ws-gate", name: "gate", cwd: gate, color: "#123456", workers: [] }],
+        workspaceRailOrder: ["ws-gate"],
+        activeWorkspaceId: "ws-gate",
+      };
+      let current = structuredClone(state);
+      const deps = agentDeps({
+        getState: () => current,
+        setState: (next) => {
+          current = next;
+        },
+        root: agentRepo,
+        runner: runnerFor(svc, service),
+        workspaceId: "ws-gate",
+      });
+      const caller = { role: "studio", client: "claude-code", paneId: "pane-gate" };
+      const t0 = Date.now();
+      const created = await agent.createAgentWorktree(caller, { branch: "agent/gate" }, deps);
+      assert.equal(created.ok, true, JSON.stringify(created));
+      assert.ok(Date.now() - t0 < 10_000, "the create does not wait for the user");
+      assert.equal(created.setup.state, "awaiting-approval", JSON.stringify(created.setup));
+      assert.equal(created.setupCommand, null);
+      assert.match(created.setup.hint, /Do not run that command/);
+      assert.match(created.next, /waiting for the user to approve/);
+      assert.equal(fs.existsSync(path.join(created.path, "ran.txt")), false);
+      assert.equal(fs.readFileSync(path.join(created.path, ".env"), "utf8"), "GATE=1\n");
+      // codara_worktree_setup with wait:true waits while the user decides.
+      const status = await svc.get(created.path);
+      setTimeout(() => void svc.approve(status.id, { fingerprint: status.approval.fingerprint, always: true }), 300);
+      const waited = await agent.getAgentWorktreeSetup(caller, { workspaceId: created.workspaceId, wait: true, timeoutSeconds: 20 }, deps);
+      assert.equal(waited.setup.state, "succeeded", JSON.stringify(waited.setup));
+      assert.equal(fs.readFileSync(path.join(created.path, "ran.txt"), "utf8"), "agent\n");
+    });
+
+    await check("the file's terminal commands are approved with the setup command", async () => {
+      const command = "echo gate > ran.txt";
+      const terminals = [{ name: "dev", command: "echo dev > dev.txt" }];
+      assert.equal(await store.isApproved(repoKey, fingerprintOf(command)), true, "allowed above, without terminals");
+      setFile({ setup: command, terminals });
+      const withTerminals = approvals.setupCommandFingerprint(command, process.platform, terminals);
+      assert.notEqual(withTerminals, fingerprintOf(command));
+      const svc = gated();
+      const started = await svc.start({ sourceCwd: gate, worktreePath: gateWorktree(), trigger: "agent", userCommand: null });
+      assert.deepEqual(started.approval, { fingerprint: withTerminals, repoName: "gate" }, "an added terminal asks again");
+      assert.equal((await svc.whenPrepared(started.id)).state, "awaiting-approval");
+      assert.equal(fs.existsSync(path.join(started.worktreePath, "ran.txt")), false);
+      assert.match((await svc.readLog(started.id)).text, /^terminal dev: echo dev > dev\.txt$/m);
+      const preview = await files.previewWorktreeSetup(gate, null, process.platform, false, store);
+      assert.equal(preview.repoCommandFingerprint, withTerminals, "the dialog approves the same thing");
+      await svc.approve(started.id, { fingerprint: withTerminals, always: true });
+      assert.equal((await svc.waitFor(started.id, 20_000)).state, "succeeded");
+      const record = JSON.parse(fs.readFileSync(recordFile, "utf8"));
+      assert.ok(
+        record.repositories[repoKey].commands.some((entry) => entry.command === `${command}\nterminal dev: echo dev > dev.txt`),
+        "the record says what it covers",
+      );
+      // Renaming a terminal or changing its command asks again.
+      for (const changed of [[{ name: "server", command: "echo dev > dev.txt" }], [{ name: "dev", command: "echo pwned" }]]) {
+        assert.notEqual(approvals.setupCommandFingerprint(command, process.platform, changed), withTerminals);
+        setFile({ setup: command, terminals: changed });
+        const again = await svc.start({ sourceCwd: gate, worktreePath: gateWorktree(), trigger: "ui", userCommand: null });
+        assert.ok(again.approval, JSON.stringify(changed));
+        await svc.stop(again.id);
+      }
+      // A terminal without a command is a plain shell and changes nothing.
+      assert.equal(
+        approvals.setupCommandFingerprint(command, process.platform, [...terminals, { name: "shell" }]),
+        withTerminals,
+      );
+      // Terminal commands alone wait for the user too, and nothing else runs.
+      setFile({ terminals: [{ name: "watch", command: "npm run watch" }] });
+      const alone = await svc.start({ sourceCwd: gate, worktreePath: gateWorktree(), trigger: "ui", userCommand: null });
+      assert.ok(alone.approval);
+      assert.deepEqual(alone.commands, []);
+      assert.equal((await svc.whenPrepared(alone.id)).state, "awaiting-approval");
+      const declined = await svc.stop(alone.id);
+      assert.equal(declined.state, "stopped");
+      const once = await svc.start({ sourceCwd: gate, worktreePath: gateWorktree(), trigger: "ui", userCommand: null });
+      assert.equal((await svc.whenPrepared(once.id)).state, "awaiting-approval");
+      await svc.approve(once.id, { fingerprint: once.approval.fingerprint });
+      assert.equal((await svc.waitFor(once.id, 10_000)).state, "succeeded");
+      // Plain shells need nobody's approval.
+      setFile({ terminals: [{ name: "shell" }] });
+      const plain = await svc.start({ sourceCwd: gate, worktreePath: gateWorktree(), trigger: "agent", userCommand: null });
+      assert.equal(plain.approval, undefined);
+      assert.equal((await svc.waitFor(plain.id, 10_000)).state, "succeeded");
+    });
+
+    await check("a folder the setup command installs into is not linked, and gets no copy", async () => {
+      setFile({ link: ["node_modules"], setup: "npm ci" });
+      const wt = gateWorktree();
+      const svc = gated();
+      const started = await svc.start({ sourceCwd: gate, worktreePath: wt, trigger: "ui", userCommand: null, runCommands: false });
+      const done = await svc.waitFor(started.id, 10_000);
+      assert.equal(done.state, "succeeded");
+      assert.deepEqual(done.linked, []);
+      assert.equal(fs.existsSync(path.join(wt, "node_modules")), false, ".worktreeinclude's node_modules/dep/ is not copied either");
+      assert.ok(done.skipped.some((skip) => skip.path === "node_modules" && /installs into it/.test(skip.reason)), JSON.stringify(done.skipped));
+      assert.ok(done.warnings.some((warning) => /node_modules is not linked/.test(warning)));
+      assert.equal(fs.readFileSync(path.join(gate, "node_modules/dep/index.js"), "utf8"), "module.exports = 1;\n");
+      // Your own command counts too.
+      setFile({ link: ["node_modules"] });
+      const mine = await svc.start({ sourceCwd: gate, worktreePath: gateWorktree(), trigger: "ui", userCommand: "pnpm install", runCommands: false });
+      assert.deepEqual((await svc.waitFor(mine.id, 10_000)).linked, []);
+      // The dialog says the same before anything exists.
+      setFile({ link: ["node_modules"], setup: "npm ci" });
+      const preview = await files.previewWorktreeSetup(gate, null, "linux", true, store);
+      assert.deepEqual(preview.link, []);
+      assert.ok(preview.warnings.some((warning) => /node_modules is not linked/.test(warning)));
+      assert.ok(!preview.copy.some((entry) => entry.startsWith("node_modules")), JSON.stringify(preview.copy));
+    });
+
+    await check("a sandbox worktree gets no linked folders", async () => {
+      setFile({ link: ["node_modules"] });
+      const wt = gateWorktree();
+      const svc = gated();
+      const started = await svc.start({ sourceCwd: gate, worktreePath: wt, trigger: "worker", userCommand: null });
+      const done = await svc.waitFor(started.id, 10_000);
+      assert.equal(done.state, "succeeded");
+      assert.deepEqual(done.linked, []);
+      assert.equal(fs.existsSync(path.join(wt, "node_modules")), false);
+      assert.ok(done.skipped.some((skip) => skip.path === "node_modules" && /sandbox/.test(skip.reason)));
+      // The same file links it in a worktree the user made.
+      const own = await svc.start({ sourceCwd: gate, worktreePath: gateWorktree(), trigger: "ui", userCommand: null });
+      assert.deepEqual((await svc.waitFor(own.id, 10_000)).linked, ["node_modules"]);
+      assert.match(service.agentSetupSummary(await svc.get(own.id), "").linkedNote, /main checkout's own folders/);
+    });
+
+    await check("removal takes out a link at a linked path even when it was repointed", async () => {
+      setFile({ link: ["node_modules"] });
+      const wt = gateWorktree();
+      const svc = gated();
+      const started = await svc.start({ sourceCwd: gate, worktreePath: wt, trigger: "ui", userCommand: null });
+      assert.deepEqual((await svc.waitFor(started.id, 10_000)).linked, ["node_modules"]);
+      // Something repoints it at another folder of the main checkout.
+      const elsewhere = path.join(gate, "node_modules", "dep");
+      fs.unlinkSync(path.join(wt, "node_modules"));
+      fs.symlinkSync(elsewhere, path.join(wt, "node_modules"), "dir");
+      const released = await links.prepareWorktreeRemoval(wt);
+      assert.deepEqual(released, [{ path: "node_modules", target: elsewhere }]);
+      assert.equal(fs.existsSync(path.join(wt, "node_modules")), false);
+      assert.equal(fs.readFileSync(path.join(elsewhere, "index.js"), "utf8"), "module.exports = 1;\n");
+      // A failed removal puts it back as it was.
+      await links.restoreWorktreeLinks(wt, released);
+      assert.equal(fs.readlinkSync(path.join(wt, "node_modules")), elsewhere);
+    });
+    fs.rmSync(path.join(gate, ".codara"), { recursive: true, force: true });
+  }
 
   // ── Links git would see, removal, abortable waits ────────────────────────
   {
@@ -885,7 +1244,10 @@ async function runSuite(m, scratch) {
     assert.deepEqual(shared.parseWorktreeIncludeFile(fs.readFileSync(path.join(fresh, ".worktreeinclude"), "utf8")).patterns, []);
     const after = await files.previewWorktreeSetup(fresh, null, "linux");
     assert.equal(after.configured, true);
-    assert.deepEqual(after.link, ["node_modules"]);
+    // pnpm install fills node_modules, so it is not linked.
+    assert.deepEqual(after.link, []);
+    assert.ok(after.warnings.some((warning) => /^node_modules is not linked/.test(warning)), JSON.stringify(after.warnings));
+    assert.equal(after.repoCommandApproved, false, "no store: nothing reads as approved");
     assert.equal(after.waitForSetup, true);
     // A .codara that is a link is refused.
     const linked = path.join(scratch, "linked-codara");
@@ -898,8 +1260,49 @@ async function runSuite(m, scratch) {
   });
 }
 
+// The setup runner agent-worktrees.ts takes, on a service of the test's own.
+function runnerFor(svc, service) {
+  return {
+    start: (request) => svc.start({ ...request, userCommand: null }),
+    whenPrepared: (id) => svc.whenPrepared(id),
+    waitFor: (id, ms, options) => svc.waitFor(id, ms, options),
+    get: (idOrPath) => svc.get(idOrPath),
+    tail: (id, lines) => svc.tail(id, lines),
+    summary: service.agentSetupSummary,
+  };
+}
+
+// What createAgentWorktree needs, over an in-memory state with one workspace.
+function agentDeps({ getState, setState, root, runner, workspaceId }) {
+  let ids = 0;
+  return {
+    loadState: async () => structuredClone(getState()),
+    updateState: async (mutator) => {
+      setState(await mutator(structuredClone(getState())));
+      return getState();
+    },
+    loadPreferences: async () => ({ agentWorktreesEnabled: true, agentWorktreeRegenerableIgnoredByRepo: {} }),
+    publishState: () => {},
+    invalidateGitCache: () => {},
+    getRun: async () => null,
+    listRuns: async () => [],
+    paneWorkspaceId: async () => workspaceId,
+    sessionCwd: () => null,
+    sessionsUnderCwd: () => [],
+    listRendererTerminals: async () => [],
+    processesUnderCwd: async () => [],
+    github: { listPullRequestsForHead: async () => [], listMergedPullRequests: async () => [] },
+    sendAgentEvent: () => {},
+    audit: async () => {},
+    worktreesRoot: () => root,
+    now: () => new Date("2026-10-15T10:00:00Z"),
+    randomId: () => (++ids).toString(16).padStart(8, "b"),
+    worktreeSetup: runner,
+  };
+}
+
 async function agentSuite(m, scratch) {
-  const { service, agent } = m;
+  const { service, agent, approvals } = m;
   const repo = path.join(scratch, "agent-repo");
   execFileSync("git", ["init", "-q", "-b", "main", repo]);
   write(path.join(repo, ".gitignore"), ".env\nnode_modules/\ndist/\n");
@@ -913,51 +1316,33 @@ async function agentSuite(m, scratch) {
   write(path.join(repo, ".env"), "TOKEN=1\n");
   write(path.join(repo, "node_modules/dep/index.js"), "module.exports = 1;\n");
 
+  // The user approved the repository's command (from the create dialog or
+  // the tray); the approval checks themselves are in runSuite.
+  const store = approvals.fileApprovalStore(path.join(scratch, "agent-approvals.json"));
+  await store.approve(fs.realpathSync(path.join(repo, ".git")), {
+    fingerprint: approvals.setupCommandFingerprint("sleep 0.3 && mkdir -p dist && echo made > dist/made.txt", process.platform),
+    repoName: "agent-repo",
+    command: "sleep 0.3 && mkdir -p dist && echo made > dist/made.txt",
+  });
   const svc = new service.WorktreeSetupService({
     baseEnv: async () => ({ ...process.env }),
     userShell: async () => null,
+    approvals: store,
   });
-  const runner = {
-    start: (request) => svc.start({ ...request, userCommand: null }),
-    whenPrepared: (id) => svc.whenPrepared(id),
-    waitFor: (id, ms) => svc.waitFor(id, ms),
-    get: (idOrPath) => svc.get(idOrPath),
-    tail: (id, lines) => svc.tail(id, lines),
-    summary: service.agentSetupSummary,
+  let state = {
+    workspaces: [{ id: "ws-repo", name: "repo", cwd: repo, color: "#123456", workers: [] }],
+    workspaceRailOrder: ["ws-repo"],
+    activeWorkspaceId: "ws-repo",
   };
-  let ids = 0;
-  const h = {
-    state: {
-      workspaces: [{ id: "ws-repo", name: "repo", cwd: repo, color: "#123456", workers: [] }],
-      workspaceRailOrder: ["ws-repo"],
-      activeWorkspaceId: "ws-repo",
+  const deps = agentDeps({
+    getState: () => state,
+    setState: (next) => {
+      state = next;
     },
-    prefs: { agentWorktreesEnabled: true, agentWorktreeRegenerableIgnoredByRepo: {} },
-  };
-  const deps = {
-    loadState: async () => structuredClone(h.state),
-    updateState: async (mutator) => {
-      h.state = await mutator(structuredClone(h.state));
-      return h.state;
-    },
-    loadPreferences: async () => h.prefs,
-    publishState: () => {},
-    invalidateGitCache: () => {},
-    getRun: async () => null,
-    listRuns: async () => [],
-    paneWorkspaceId: async () => "ws-repo",
-    sessionCwd: () => null,
-    sessionsUnderCwd: () => [],
-    listRendererTerminals: async () => [],
-    processesUnderCwd: async () => [],
-    github: { listPullRequestsForHead: async () => [], listMergedPullRequests: async () => [] },
-    sendAgentEvent: () => {},
-    audit: async () => {},
-    worktreesRoot: () => path.join(scratch, "agent-worktrees"),
-    now: () => new Date("2026-10-15T10:00:00Z"),
-    randomId: () => (++ids).toString(16).padStart(8, "b"),
-    worktreeSetup: runner,
-  };
+    root: path.join(scratch, "agent-worktrees"),
+    runner: runnerFor(svc, service),
+    workspaceId: "ws-repo",
+  });
   const caller = { role: "studio", client: "claude-code", paneId: "pane-1" };
 
   await check("an agent worktree waits for setup when the file asks", async () => {

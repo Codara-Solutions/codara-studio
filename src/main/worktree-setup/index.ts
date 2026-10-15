@@ -5,9 +5,11 @@
 
 import { app, BrowserWindow } from "electron";
 import { promises as fsp } from "node:fs";
+import { join } from "node:path";
 import { isRemotePath } from "@shared/remote";
 import {
   isWorktreeSetupStartError,
+  terminalsWithCommands,
   type WorktreeSetupFileDraft,
   type WorktreeSetupStartError,
   type WorktreeSetupStatus,
@@ -19,11 +21,13 @@ import {
   sanitizeNestedAgentEnv,
   sanitizeNpmRunScriptEnv,
 } from "../env-sanitize";
+import { codaraHome } from "../codara-home";
 import type { IpcHandle } from "../ipc";
 import { getEnrichedPath, injectEnrichedPath } from "../path-reconstruction";
 import { loadPreferences } from "../preferences-store";
 import { defaultShell, listShells } from "../shells";
 import { loadSettings } from "../storage";
+import { fileApprovalStore, SETUP_APPROVALS_FILE, type SetupApprovalStore } from "./approvals";
 import { previewWorktreeSetup, suggestWorktreeSetup, writeWorktreeSetupFiles } from "./files";
 import { setBeforeWorktreeRemoval } from "./links";
 import { repositoryRoot } from "./plan";
@@ -38,6 +42,12 @@ export { agentSetupSummary } from "./service";
 export type { StartSetupRequest } from "./service";
 
 let service: WorktreeSetupService | null = null;
+let approvals: SetupApprovalStore | null = null;
+
+function approvalStore(): SetupApprovalStore {
+  approvals ??= fileApprovalStore(join(codaraHome(), SETUP_APPROVALS_FILE));
+  return approvals;
+}
 
 // Codara's own windows only: a status carries paths and the setup commands,
 // which a page open in the built-in browser has no business receiving.
@@ -51,6 +61,47 @@ function broadcast(status: WorktreeSetupStatus): void {
       /* a window may close between enumeration and send */
     }
   }
+}
+
+// A command waiting for the user's approval raises a needs-you notification
+// (native, toast and the notification center) on top of the tray's banner:
+// an agent or Cora made the worktree, so the user may be looking elsewhere.
+const approvalNotices = new Set<string>();
+
+function noticeApproval(status: WorktreeSetupStatus): void {
+  const key = `${status.id}:${status.startedAt}`;
+  const sourceKey = `worktree-setup:${status.id}`;
+  if (status.state !== "awaiting-approval") {
+    // Run, allowed or stopped: the question is answered.
+    if (approvalNotices.delete(key)) {
+      void import("../notify").then(({ rearm }) => rearm(sourceKey)).catch(() => undefined);
+    }
+    return;
+  }
+  if (approvalNotices.has(key)) return;
+  approvalNotices.add(key);
+  const workspaceId = status.workspaceId;
+  if (!workspaceId) return;
+  const command = [
+    ...(status.commands.find((entry) => entry.kind === "repo")?.command ?? "").split("\n").filter(Boolean),
+    ...terminalsWithCommands(status.terminals).map((terminal) => terminal.command ?? ""),
+  ].join(" && ");
+  const shown = command.length > 160 ? `${command.slice(0, 160)}...` : command;
+  const name = status.branch || status.worktreePath.split(/[\\/]+/).filter(Boolean).pop() || status.worktreePath;
+  void import("../notify")
+    .then(({ publish, rearm }) => {
+      rearm(sourceKey);
+      publish({
+        kind: "worktree.setup-approval",
+        sourceKey,
+        title: "Worktree setup needs your approval",
+        body: `${name}: run ${shown}? It has not run. Decide in the setup tray.`,
+        tone: "warning",
+        soundKind: "needs-you",
+        target: { type: "workspace", workspaceId },
+      });
+    })
+    .catch(() => undefined);
 }
 
 // Keys of Codara's own plumbing that a setup command must not inherit.
@@ -114,7 +165,11 @@ export function worktreeSetupService(): WorktreeSetupService {
   service = new WorktreeSetupService({
     baseEnv: commandBaseEnv,
     userShell,
-    onChange: broadcast,
+    approvals: approvalStore(),
+    onChange: (status) => {
+      broadcast(status);
+      noticeApproval(status);
+    },
   });
   const current = service;
   // Optional: unit suites load this module against an Electron stub.
@@ -174,7 +229,8 @@ export function agentWorktreeSetupRunner() {
       return started && !isWorktreeSetupStartError(started) ? started : null;
     },
     whenPrepared: (id: string) => worktreeSetupService().whenPrepared(id),
-    waitFor: (id: string, timeoutMs: number) => worktreeSetupService().waitFor(id, timeoutMs),
+    waitFor: (id: string, timeoutMs: number, options?: { throughApproval?: boolean }) =>
+      worktreeSetupService().waitFor(id, timeoutMs, options),
     get: (idOrPath: string) => worktreeSetupService().get(idOrPath),
     tail: (id: string, lines: number) => worktreeSetupService().tail(id, lines),
     summary: agentSetupSummary,
@@ -199,7 +255,13 @@ export function registerWorktreeSetupIpc(handle: IpcHandle): void {
   handle("worktreeSetup:preview", async (_event, input: unknown) => {
     const sourceCwd = localPath(stringField(input, "sourceCwd"), "sourceCwd");
     const light = Boolean(input && typeof input === "object" && (input as { light?: unknown }).light === true);
-    return previewWorktreeSetup(sourceCwd, await personalSetupCommand(sourceCwd), process.platform, !light);
+    return previewWorktreeSetup(
+      sourceCwd,
+      await personalSetupCommand(sourceCwd),
+      process.platform,
+      !light,
+      approvalStore(),
+    );
   });
   handle("worktreeSetup:suggest", (_event, input: unknown) =>
     suggestWorktreeSetup(localPath(stringField(input, "sourceCwd"), "sourceCwd")),
@@ -214,9 +276,19 @@ export function registerWorktreeSetupIpc(handle: IpcHandle): void {
       ...(stringField(input, "workspaceId", false) ? { workspaceId: stringField(input, "workspaceId") } : {}),
       ...(stringField(input, "workspaceName", false) ? { workspaceName: stringField(input, "workspaceName") } : {}),
       ...(stringField(input, "branch", false) ? { branch: stringField(input, "branch") } : {}),
+      ...(stringField(input, "approveFingerprint", false)
+        ? { approveFingerprint: stringField(input, "approveFingerprint") }
+        : {}),
       runCommands: record.runCommands !== false,
     });
     return started;
+  });
+  handle("worktreeSetup:approve", (_event, input: unknown) => {
+    const always = Boolean(input && typeof input === "object" && (input as { always?: unknown }).always === true);
+    return worktreeSetupService().approve(stringField(input, "id"), {
+      fingerprint: stringField(input, "fingerprint"),
+      always,
+    });
   });
   handle("worktreeSetup:get", (_event, input: unknown) => worktreeSetupService().get(stringField(input, "id")));
   handle("worktreeSetup:list", () => worktreeSetupService().list());

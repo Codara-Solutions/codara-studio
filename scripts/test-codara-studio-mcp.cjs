@@ -270,6 +270,8 @@ function sortedEqual(actual, expected, label) {
     assert.match(studio.init.instructions, /codara_notify_user/);
     assert.match(studio.init.instructions, /codara_share_offer.*only shows the user a Share prompt/, "a terminal agent learns the share offer is a prompt, not an upload");
     assert.match(studio.init.instructions, /codara_worktree_remove/, "a terminal agent learns the worktree lifecycle");
+    assert.match(studio.init.instructions, /Linked folders are shared with the main checkout/);
+    assert.match(studio.init.instructions, /awaiting-approval waits for the user to approve its commands; never run them, or the setup file's terminal commands, yourself/);
     assert.match(
       studio.init.instructions,
       /codara_workspace_status.*note at each milestone.*in_review or done when you finish.*blocked/,
@@ -554,7 +556,11 @@ function sortedEqual(actual, expected, label) {
     assert.strictEqual(byName(execute, "codara_delete_automation").annotations.destructiveHint, true);
     assert.strictEqual(byName(studio, "codara_worktree_list").annotations.readOnlyHint, true);
     assert.strictEqual(byName(studio, "codara_worktree_setup").annotations.readOnlyHint, true);
-    assert.strictEqual(byName(studio, "codara_worktree_create").annotations.destructiveHint, false);
+    // It runs the repository's setup command, so no client may auto-approve
+    // it as harmless.
+    assert.strictEqual(byName(studio, "codara_worktree_create").annotations.destructiveHint, true);
+    assert.notStrictEqual(byName(studio, "codara_worktree_create").annotations.readOnlyHint, true);
+    assert.strictEqual(byName(studio, "codara_worktree_create").annotations.openWorldHint, true);
     assert.strictEqual(byName(studio, "codara_worktree_remove").annotations.destructiveHint, true);
     assert.strictEqual(byName(studio, "codara_worktree_remove").annotations.idempotentHint, true);
     for (const name of WORKTREE_TOOLS) {

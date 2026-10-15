@@ -8,19 +8,24 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createWriteStream, existsSync, promises as fsp, renameSync, rmSync, writeFileSync, type WriteStream } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import {
   isWorktreeSetupFinished,
+  linksInstalledInto,
   repoSetupCommandFor,
+  terminalsWithCommands,
   WORKTREE_INCLUDE_FILE,
   WORKTREE_SETUP_FILE,
   type WorktreeSetupCommand,
   type WorktreeSetupLogChunk,
+  type WorktreeSetupSkip,
+  type WorktreeSetupStartError,
   type WorktreeSetupState,
   type WorktreeSetupStatus,
   type WorktreeSetupTrigger,
 } from "@shared/worktree-setup";
+import { approvalRepository, approvedCommandsText, setupCommandFingerprint, type SetupApprovalStore } from "./approvals";
 import {
   readSetupManifest,
   setupDirFor,
@@ -31,7 +36,7 @@ import {
 } from "./links";
 import { assertCodaraOwnedWrite } from "../outside-write-guard";
 import { DEFAULT_COPY_BUDGET, manifestFrom, materializeSetup, type CopyBudget } from "./materialize";
-import { copyPatterns, gitWithInput, readSetupSources, resolveCopyCandidates, resolveLinkSources } from "./plan";
+import { commonGitDir, copyPatterns, readSetupSources, resolveCopyCandidates, resolveLinkSources } from "./plan";
 
 export type UserShellKind = "posix" | "pwsh" | "cmd";
 
@@ -46,6 +51,8 @@ export interface WorktreeSetupServiceDeps {
   baseEnv(): Promise<Record<string, string>>;
   // The user's default shell, for their personal setup command.
   userShell(): Promise<UserShell | null>;
+  // The repository setup commands the user approved (approvals.ts).
+  approvals: SetupApprovalStore;
   onChange?(status: WorktreeSetupStatus): void;
   now?(): Date;
   commandTimeoutMs?: number;
@@ -66,6 +73,10 @@ export interface StartSetupRequest {
   runCommands?: boolean;
   // The per-user command (Settings, "Setup command for new worktrees").
   userCommand?: string | null;
+  // The fingerprint of the repository command the create dialog showed.
+  // Only a "ui" start honors it: creating from that dialog approves the
+  // command for the repository.
+  approveFingerprint?: string;
 }
 
 export class WorktreeSetupError extends Error {}
@@ -78,6 +89,11 @@ const DEFAULT_TIMEOUT_MS = 45 * 60 * 1000;
 const STEP_EXIT_GRACE_MS = 2_000;
 const KILL_GRACE_MS = 3_000;
 const INTERRUPTED = "Codara closed while setup was running";
+const CLOSED_BEFORE_APPROVAL = "Codara closed before the setup command was approved";
+const NOT_APPROVED = "Stopped before its setup command was approved";
+// Triggers whose worktree is a sandbox: a link there would let what runs in
+// it write the main checkout's folder.
+const SANDBOX_TRIGGERS: ReadonlySet<WorktreeSetupTrigger> = new Set(["worker", "workflow"]);
 
 interface Step {
   file: string;
@@ -109,6 +125,16 @@ interface Run {
   releaseSlot: (() => void) | null;
   // Set while queued for a command slot: takes the run out of the queue.
   leaveQueue: (() => void) | null;
+  // Where the approval of the repository command is looked up and saved.
+  repoKey: string;
+  repoName: string;
+  fingerprint: string | null;
+  // The create dialog showed this command and the user created anyway.
+  approvedHere: boolean;
+  // Set while the command waits for the user: true runs it, false ends setup.
+  decide: ((approved: boolean) => void) | null;
+  // Woken on every status change, for waitFor.
+  listeners: Set<() => void>;
 }
 
 export function setupIdFor(realWorktreePath: string): string {
@@ -117,17 +143,6 @@ export function setupIdFor(realWorktreePath: string): string {
 
 function stamp(date: Date): string {
   return date.toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC");
-}
-
-// Plain --git-common-dir, resolved here: --path-format=absolute needs git
-// 2.31, and an older git prints the unknown flag back as a line of output.
-async function commonGitDir(cwd: string): Promise<string | null> {
-  try {
-    const out = (await gitWithInput(cwd, ["rev-parse", "--git-common-dir"], "")).trim();
-    return out ? await fsp.realpath(resolve(cwd, out)) : null;
-  } catch {
-    return null;
-  }
 }
 
 function pwshQuote(value: string): string {
@@ -183,6 +198,13 @@ export class WorktreeSetupService {
     if (!sources.include.present && !sources.file.present && !userCommand) return null;
     const repoCommand = config ? repoSetupCommandFor(config, this.platform) : null;
     const runCommands = request.runCommands !== false;
+    const terminals = config?.terminals ?? [];
+    const repository = approvalRepository(sourceCommon, sources.sourceRoot);
+    // The setup command and the file's terminal commands, approved together.
+    const fingerprint = setupCommandFingerprint(repoCommand, this.platform, terminals);
+    const approvedHere = Boolean(
+      fingerprint && runCommands && request.trigger === "ui" && request.approveFingerprint === fingerprint,
+    );
     const commands: WorktreeSetupCommand[] = [];
     if (repoCommand) {
       commands.push({ kind: "repo", label: `Setup command from ${WORKTREE_SETUP_FILE}`, command: repoCommand, state: "pending" });
@@ -197,6 +219,28 @@ export class WorktreeSetupService {
       ...sources.file.warnings,
       ...(config ? sources.file.errors : []),
     ];
+    if (approvedHere && fingerprint) {
+      // This run goes ahead either way: the user saw the commands and created.
+      const saved = await this.deps.approvals
+        .approve(repository.key, {
+          fingerprint,
+          repoName: repository.name,
+          command: approvedCommandsText(repoCommand, terminals),
+        })
+        .then(
+          () => null,
+          (err: unknown) => `Could not save the approval of the setup command: ${(err as Error)?.message ?? String(err)}`,
+        );
+      if (saved) warnings.push(saved);
+    }
+    // Known before anything runs, so the renderer holds the file's terminals
+    // and agents learn at once that the command waits for the user.
+    const needsApproval = Boolean(
+      fingerprint &&
+        runCommands &&
+        !approvedHere &&
+        !(await this.deps.approvals.isApproved(repository.key, fingerprint).catch(() => false)),
+    );
     const status: WorktreeSetupStatus = {
       id,
       worktreePath: worktreeReal,
@@ -218,8 +262,9 @@ export class WorktreeSetupService {
       warnings,
       commands,
       ...(!runCommands && commands.length ? { commandsSkipped: true } : {}),
+      ...(needsApproval && fingerprint ? { approval: { fingerprint, repoName: repository.name } } : {}),
       waitForSetup: config?.waitForSetup ?? false,
-      terminals: config?.terminals ?? [],
+      terminals,
       logPath: join(setupDir, SETUP_LOG_FILE),
     };
 
@@ -251,6 +296,12 @@ export class WorktreeSetupService {
       markFinished: () => markFinished(),
       releaseSlot: null,
       leaveQueue: null,
+      repoKey: repository.key,
+      repoName: repository.name,
+      fingerprint,
+      approvedHere,
+      decide: null,
+      listeners: new Set(),
     };
     run.prepared = new Promise((resolvePromise) => {
       markPrepared = () => resolvePromise({ ...run.status });
@@ -333,13 +384,16 @@ export class WorktreeSetupService {
   async waitFor(
     id: string,
     timeoutMs: number,
-    options: { aborted?: () => boolean; sliceMs?: number } = {},
+    options: { aborted?: () => boolean; sliceMs?: number; throughApproval?: boolean } = {},
   ): Promise<WorktreeSetupStatus | null> {
     const run = this.runs.get(id);
     if (!run) return this.get(id);
     const deadline = Date.now() + Math.max(0, timeoutMs);
     const slice = options.aborted ? Math.max(10, options.sliceMs ?? 1_000) : Number.POSITIVE_INFINITY;
     while (!isWorktreeSetupFinished(run.status.state)) {
+      // A command waiting for the user ends the wait unless the caller asked
+      // to wait for their decision too: nothing happens until they decide.
+      if (run.status.state === "awaiting-approval" && !options.throughApproval) break;
       if (options.aborted?.()) break;
       const left = deadline - Date.now();
       if (left <= 0) break;
@@ -347,10 +401,16 @@ export class WorktreeSetupService {
       const timeout = new Promise<void>((resolvePromise) => {
         timer = setTimeout(resolvePromise, Math.min(left, slice));
       });
+      let wake: (() => void) | null = null;
+      const changed = new Promise<void>((resolvePromise) => {
+        wake = resolvePromise;
+        run.listeners.add(resolvePromise);
+      });
       try {
-        await Promise.race([run.finished, timeout]);
+        await Promise.race([run.finished, changed, timeout]);
       } finally {
         if (timer) clearTimeout(timer);
+        if (wake) run.listeners.delete(wake);
       }
     }
     return { ...run.status };
@@ -393,10 +453,54 @@ export class WorktreeSetupService {
     // when another setup frees a slot (removal waits for that end).
     run.leaveQueue?.();
     if (run.child) this.killTree(run.child);
-    else if (run.status.state === "queued" || run.status.state === "preparing") {
+    else if (run.status.state === "awaiting-approval") {
+      this.finish(run, "stopped", NOT_APPROVED);
+      run.decide?.(false);
+    } else if (run.status.state === "queued" || run.status.state === "preparing") {
       this.finish(run, "stopped", "Stopped");
     }
     return this.waitFor(id, KILL_GRACE_MS * 2 + 1_000);
+  }
+
+  /**
+   * Runs a repository command that waits for the user's approval. `always`
+   * first saves the approval, so the next worktree of the repository runs
+   * the same command without asking. The fingerprint must be the one the
+   * tray showed: a click never runs a command the user did not see.
+   */
+  async approve(
+    id: string,
+    input: { fingerprint: string; always?: boolean },
+  ): Promise<WorktreeSetupStatus | WorktreeSetupStartError> {
+    const run = this.runs.get(id);
+    const waiting = () => run?.status.state === "awaiting-approval" && run.decide !== null;
+    if (!run || !waiting()) return { error: "This setup is not waiting for approval any more." };
+    const approval = run.status.approval;
+    const repoCommand = run.status.commands.find((entry) => entry.kind === "repo")?.command ?? null;
+    if (!approval || approval.fingerprint !== input.fingerprint) {
+      return { error: "The setup command changed. Look at it again before you run it." };
+    }
+    if (input.always) {
+      try {
+        await this.deps.approvals.approve(run.repoKey, {
+          fingerprint: approval.fingerprint,
+          repoName: run.repoName,
+          command: approvedCommandsText(repoCommand, run.status.terminals),
+        });
+      } catch (err) {
+        return { error: `Could not save the approval: ${(err as Error)?.message ?? String(err)}` };
+      }
+      if (!waiting()) return { error: "This setup is not waiting for approval any more." };
+    }
+    this.writeLog(run, input.always ? `Always allowed for ${run.repoName}, so it runs now\n` : "Run this once, so it runs now\n");
+    // The question is answered: a later stop is the user stopping a command
+    // they ran, not declining it.
+    delete run.status.approval;
+    // Out of the waiting state before this returns, so a wait that starts
+    // now follows the commands instead of ending at once.
+    this.change(run, "queued");
+    run.decide?.(true);
+    return { ...run.status };
   }
 
   /** Runs setup again for a worktree whose setup ended. */
@@ -417,7 +521,9 @@ export class WorktreeSetupService {
       };
     }
     if (run) this.runs.delete(run.status.id);
-    return this.start({ ...request, runCommands: true, ...overrides });
+    // Only a create from the dialog approves; a later run checks the record.
+    const { approveFingerprint: _shown, ...again } = request;
+    return this.start({ ...again, runCommands: true, ...overrides });
   }
 
   async readLog(id: string, from = 0, maxBytes = 256 * 1024): Promise<WorktreeSetupLogChunk | null> {
@@ -483,10 +589,12 @@ export class WorktreeSetupService {
     this.disposed = true;
     for (const run of this.runs.values()) {
       if (isWorktreeSetupFinished(run.status.state)) continue;
+      const waitedForApproval = run.status.state === "awaiting-approval";
       run.stopRequested = true;
       run.leaveQueue?.();
       if (run.child) this.killTree(run.child, true);
-      this.applyFinish(run, "stopped", INTERRUPTED);
+      this.applyFinish(run, "stopped", waitedForApproval ? CLOSED_BEFORE_APPROVAL : INTERRUPTED);
+      run.decide?.(false);
       this.persistSync(run);
       run.log?.end();
       run.markPrepared();
@@ -500,12 +608,22 @@ export class WorktreeSetupService {
     const root = sources.sourceRoot;
     const config = sources.file.config;
     const patterns = copyPatterns(sources);
-    const resolved = patterns.length
+    const { links: wantedLinks, skipped: refusedLinks } = this.linksFor(run, config?.link ?? []);
+    const refused = refusedLinks.map((skip) => skip.path);
+    const found = patterns.length
       ? await resolveCopyCandidates(root, patterns)
       : { candidates: [], notices: [] as string[] };
-    const linkSources = config?.link.length
-      ? await resolveLinkSources(root, config.link)
-      : { links: [] as string[], skipped: [] };
+    // A refused link gets no copy in its place either: the install fills it.
+    const resolved = {
+      ...found,
+      candidates: found.candidates.filter(
+        (candidate) => !refused.some((link) => candidate.path === link || candidate.path.startsWith(`${link}/`)),
+      ),
+    };
+    const linkSources = wantedLinks.length
+      ? await resolveLinkSources(root, wantedLinks)
+      : { links: [] as string[], skipped: [] as WorktreeSetupSkip[] };
+    linkSources.skipped.unshift(...refusedLinks);
     for (const notice of resolved.notices) {
       run.status.warnings.push(notice);
       this.writeLog(run, `Warning: ${notice}\n`);
@@ -551,6 +669,23 @@ export class WorktreeSetupService {
       return;
     }
     const pending = run.status.commands.filter((command) => command.state === "pending");
+    // Terminal commands alone still wait for the user: the renderer opens
+    // the terminals once setup succeeded.
+    if (!pending.length && !run.status.approval) {
+      this.finish(run, "succeeded");
+      return;
+    }
+    if (run.status.approval && (await this.repoCommandApproved(run))) {
+      // Approved for the repository meanwhile, from another worktree's tray.
+      delete run.status.approval;
+    }
+    if (run.status.approval) {
+      const approved = await this.awaitApproval(run);
+      if (!approved || run.stopRequested || isWorktreeSetupFinished(run.status.state)) {
+        if (!isWorktreeSetupFinished(run.status.state)) this.finish(run, "stopped", NOT_APPROVED);
+        return;
+      }
+    }
     if (!pending.length) {
       this.finish(run, "succeeded");
       return;
@@ -599,6 +734,65 @@ export class WorktreeSetupService {
       run.releaseSlot?.();
       run.releaseSlot = null;
     }
+  }
+
+  /**
+   * The folders to link, and the ones refused: every one in a sandbox
+   * worktree (a Cora worker's), and any the commands install into, since
+   * through a link an install would change the main checkout's folder.
+   */
+  private linksFor(run: Run, links: readonly string[]): { links: string[]; skipped: WorktreeSetupSkip[] } {
+    if (!links.length) return { links: [], skipped: [] };
+    if (SANDBOX_TRIGGERS.has(run.request.trigger)) {
+      return {
+        links: [],
+        skipped: links.map((path) => ({
+          path,
+          reason: "not linked: a sandbox worktree gets no linked folders, so nothing run there reaches the main checkout",
+        })),
+      };
+    }
+    // A terminal the file opens can install as much as a setup command.
+    const installed = new Set(
+      linksInstalledInto(links, [
+        ...run.status.commands.map((command) => command.command),
+        ...run.status.terminals.map((terminal) => terminal.command),
+      ]),
+    );
+    return {
+      links: links.filter((link) => !installed.has(link)),
+      skipped: [...installed].map((path) => ({
+        path,
+        reason: "not linked: the setup command installs into it, and through a link it would change the main checkout's folder",
+      })),
+    };
+  }
+
+  private async repoCommandApproved(run: Run): Promise<boolean> {
+    if (!run.fingerprint || run.approvedHere) return true;
+    return this.deps.approvals.isApproved(run.repoKey, run.fingerprint).catch(() => false);
+  }
+
+  /** Holds the commands until the user runs them from the tray (true) or stops setup (false). */
+  private async awaitApproval(run: Run): Promise<boolean> {
+    const command = run.status.commands.find((entry) => entry.kind === "repo")?.command ?? "";
+    const shown = [
+      ...(command ? command.split("\n").map((line) => `$ ${line}`) : []),
+      ...terminalsWithCommands(run.status.terminals).map((terminal) => `terminal ${terminal.name}: ${terminal.command}`),
+    ];
+    this.writeLog(
+      run,
+      `\nThe commands in ${WORKTREE_SETUP_FILE} are new or changed for ${run.repoName}, so nothing has run and ` +
+        `no terminal opened. They wait for your approval in Codara's setup tray:\n${shown.join("\n")}\n`,
+    );
+    const decision = new Promise<boolean>((resolvePromise) => {
+      run.decide = resolvePromise;
+    });
+    this.change(run, "awaiting-approval");
+    run.markPrepared();
+    const approved = await decision;
+    run.decide = null;
+    return approved;
   }
 
   private async commandEnv(run: Run): Promise<Record<string, string>> {
@@ -849,6 +1043,8 @@ export class WorktreeSetupService {
   }
 
   private emit(run: Run): void {
+    for (const wake of run.listeners) wake();
+    run.listeners.clear();
     try {
       this.deps.onChange?.({ ...run.status });
     } catch {
@@ -926,8 +1122,8 @@ export class WorktreeSetupService {
     status.worktreePath = worktreeReal;
     status.logPath = join(setupDir, SETUP_LOG_FILE);
     if (!isWorktreeSetupFinished(status.state)) {
+      status.error = status.state === "awaiting-approval" ? CLOSED_BEFORE_APPROVAL : INTERRUPTED;
       status.state = "stopped";
-      status.error = INTERRUPTED;
       status.finishedAt ??= status.startedAt;
       for (const command of status.commands ?? []) {
         if (command.state === "running") command.state = "stopped";
@@ -972,18 +1168,28 @@ async function writePrivateFile(path: string, body: string): Promise<void> {
 /** The short summary agents get for a setup. */
 export function agentSetupSummary(status: WorktreeSetupStatus, logTail: string): Record<string, unknown> {
   const hint =
-    status.state === "failed"
-      ? "Setup failed. Read logTail, fix the cause, and run it again from Codara or by hand in the worktree."
-      : status.state === "stopped"
-        ? "Setup was stopped before it finished; the worktree may be missing dependencies."
-        : status.state === "succeeded"
-          ? "Setup finished."
-          : "Setup is still running. Call codara_worktree_setup({wait: true}) before you build or test.";
+    status.state === "awaiting-approval"
+      ? "Setup is waiting for the user to approve the repository's setup command in Codara; it has not run. Do not run that command or the setup file's terminal commands yourself. Tell the user, then call codara_worktree_setup({wait: true}), which waits while they decide."
+      : status.state === "failed"
+        ? "Setup failed. Read logTail, fix the cause, and run it again from Codara or by hand in the worktree."
+        : status.state === "stopped"
+          ? status.approval
+            ? "The user did not run the repository's setup command, so the worktree may be missing dependencies. Do not run it yourself; ask the user."
+            : "Setup was stopped before it finished; the worktree may be missing dependencies."
+          : status.state === "succeeded"
+            ? "Setup finished."
+            : "Setup is still running. Call codara_worktree_setup({wait: true}) before you build or test.";
   return {
     state: status.state,
     waitForSetup: status.waitForSetup,
     copied: status.copiedCount,
     linked: status.linked,
+    ...(status.linked.length
+      ? {
+          linkedNote:
+            "Linked folders are the main checkout's own folders: installing, deleting or building in them from this worktree changes the main checkout.",
+        }
+      : {}),
     ...(status.skipped.length ? { skipped: status.skipped.slice(0, 20) } : {}),
     ...(status.warnings.length ? { warnings: status.warnings.slice(0, 20) } : {}),
     commands: status.commands.map((command) => ({

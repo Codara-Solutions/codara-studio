@@ -200,11 +200,13 @@ not change: hand workers the returned path (they work there with absolute
 paths or git -C) and run setupCommand there when it is set. Codara prepares
 the checkout from the repository's .worktreeinclude and .codara/worktree.json;
 when the result's setup has not finished, call codara_worktree_setup with
-wait:true before work starts there, and on failure read its logTail. Once the
-branch is merged, call codara_worktree_remove. It refuses anything unmerged,
-dirty or in use and never forces; act on its code and hint, and ask the user
-rather than deleting work yourself. codara_worktree_list shows what is
-removable.`,
+wait:true before work starts there, and on failure read its logTail. Linked
+folders are shared with the main checkout: never install into or delete them.
+A setup awaiting-approval waits for the user to approve its commands; never
+run them, or the setup file's terminal commands, yourself. Once the branch is
+merged, call codara_worktree_remove. It refuses anything unmerged, dirty or in
+use and never forces; act on its code and hint, and ask the user rather than
+deleting work yourself. codara_worktree_list shows what is removable.`,
   workflows: `Workflows: a script that runs many agents. Shape:
   export const meta = { name: "kebab-name", description: "...", phases: [{ title: "Find" }], args: {JSON Schema} };
   phase("Find");

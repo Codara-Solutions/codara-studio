@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   KEEP_AWAKE_DISPLAY_NOTE,
-  KEEP_AWAKE_LID_HINT,
   KEEP_AWAKE_MODE_OPTIONS,
   keepAwakeIndicatorLabel,
+  keepAwakeLidHint,
   keepAwakeSummary,
   type KeepAwakeMode,
   type KeepAwakeStatus,
@@ -183,8 +183,11 @@ function KeepAwakePopover({
           </span>
           <span className="keep-awake-option__text">
             <span className="keep-awake-option__label">Also with the lid closed</span>
-            <span className="keep-awake-option__hint">
-              {lid.enabled && lid.error ? lid.error : KEEP_AWAKE_LID_HINT}
+            <span
+              className="keep-awake-option__hint"
+              data-keep-awake-lid-paused={lid.enabled && lid.pausedForBattery ? "battery" : undefined}
+            >
+              {keepAwakeLidHint(lid)}
             </span>
           </span>
         </button>
