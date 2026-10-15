@@ -127,20 +127,35 @@ test("quick commands run from the tab bar, the palette and the terminal menu", a
     await form.getByLabel("Command", { exact: true }).fill("npm run lint");
     await form.getByRole("button", { name: "Add", exact: true }).click();
     await expect.poll(async () => (await savedCommands(fixture)).at(-1)?.label).toBe("Lint");
+    // Every action that removes or moves the focused control hands the
+    // keyboard to the row it acted on (or Undo), never to the page body.
+    await expect(settings.getByRole("button", { name: "Edit Lint" })).toBeFocused();
 
+    const lastTwo = async () => (await savedCommands(fixture)).map((c) => c.label).slice(-2);
     await settings.getByRole("button", { name: "Move Lint up" }).click();
-    await expect.poll(async () => (await savedCommands(fixture)).map((c) => c.label).slice(-2)).toEqual(["Lint", "Dialog added"]);
+    await expect.poll(lastTwo).toEqual(["Lint", "Dialog added"]);
+    await expect(settings.getByRole("button", { name: "Move Lint up" })).toBeFocused();
+    // Moving down re-inserts the row, and at the end Move down turns disabled.
+    await settings.getByRole("button", { name: "Move Lint down" }).focus();
+    await page.keyboard.press("Enter");
+    await expect.poll(lastTwo).toEqual(["Dialog added", "Lint"]);
+    await expect(settings.getByRole("button", { name: "Move Lint up" })).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect.poll(lastTwo).toEqual(["Lint", "Dialog added"]);
 
     await settings.getByRole("button", { name: "Edit Lint" }).click();
     const edit = settings.getByRole("form", { name: "Edit Lint" });
     await edit.getByLabel("Name", { exact: true }).fill("Lint all");
     await edit.getByRole("button", { name: "Save", exact: true }).click();
     await expect.poll(async () => (await savedCommands(fixture)).map((c) => c.label)).toContain("Lint all");
+    await expect(settings.getByRole("button", { name: "Edit Lint all" })).toBeFocused();
 
     await settings.getByRole("button", { name: "Delete Lint all" }).click();
     await expect.poll(async () => (await savedCommands(fixture)).map((c) => c.label)).not.toContain("Lint all");
-    await settings.getByRole("button", { name: "Undo" }).click();
-    await expect.poll(async () => (await savedCommands(fixture)).map((c) => c.label).slice(-2)).toEqual(["Lint all", "Dialog added"]);
+    await expect(settings.getByRole("button", { name: "Undo" })).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect.poll(lastTwo).toEqual(["Lint all", "Dialog added"]);
+    await expect(settings.getByRole("button", { name: "Edit Lint all" })).toBeFocused();
 
     await settings.getByRole("group", { name: "Right-click in a terminal" }).getByRole("button", { name: "Open menu" }).click();
     await expect.poll(async () => (await preferences(fixture)).terminalRightClick).toBe("menu");
