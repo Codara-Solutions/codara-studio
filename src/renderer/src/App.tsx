@@ -3891,6 +3891,24 @@ export default function App() {
     tabsRef.current.openEditorTab(entryFromPath(path));
   }, []);
 
+  // Files opened from Finder or Explorer. Each gets its own pinned tab: with
+  // the shared preview tab, a multi-file selection would keep only the last.
+  // Nothing drains before a workspace is active: useTabs swaps in that
+  // workspace's tab list once it resolves at boot, which would drop a tab
+  // opened earlier. Main keeps the files queued meanwhile.
+  const openPathsWorkspaceId = activeWorkspace?.id ?? null;
+  useEffect(() => {
+    if (!openPathsWorkspaceId) return;
+    const drain = () => {
+      void window.spark.app.takeOpenPaths().then((paths) => {
+        for (const path of paths) tabsRef.current.openEditorTab(entryFromPath(path), { preview: false });
+      });
+    };
+    const off = window.spark.app.onOpenPaths(drain);
+    drain();
+    return off;
+  }, [openPathsWorkspaceId]);
+
   // Open a changed file's diff as a workbench tab (Source Control row click).
   // Single click = shared preview tab; double click passes pin=true.
   const handleOpenDiffTab = useCallback(

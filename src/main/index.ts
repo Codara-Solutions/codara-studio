@@ -65,6 +65,15 @@ import {
   startUnifiedAccountMigration,
 } from "./orchestration/unified-account-migration";
 import { credentialMirror } from "./orchestration/credential-mirror";
+import { OPEN_WITH_FLAG } from "@shared/open-with";
+import {
+  installOpenWithIntegration,
+  openPathsFromArgv,
+  openPathsFromLockData,
+  queueOpenPaths,
+  setOpenPathsListener,
+  type OpenWithLockData,
+} from "./open-with";
 
 // run-store is heavy (loads the manager protocol and agent-sync transitively).
 // ipc.ts dynamically imports it for the same reason — keep startup snappy by
@@ -191,14 +200,37 @@ if (process.platform === "win32") {
 // alongside a dev instance. `ownsSingleInstanceLock` gates the whenReady body
 // below so a lost lock exits cleanly even if 'ready' still fires before
 // app.quit() lands.
+// A launch from Finder's Quick Action or Explorer's "Open in Codara Studio"
+// carries files; the losing process hands them over as lock data, resolved
+// against its own cwd, and the owner opens them.
+const launchOpenPaths = openPathsFromArgv(process.argv, process.cwd());
 const ownsSingleInstanceLock =
   process.env.SPARK_ALLOW_MULTI === "1" ||
-  app.requestSingleInstanceLock();
+  app.requestSingleInstanceLock({ openPaths: launchOpenPaths } satisfies OpenWithLockData);
 if (!ownsSingleInstanceLock) {
   app.quit();
-} else if (process.env.SPARK_ALLOW_MULTI !== "1") {
-  app.on("second-instance", () => {
+} else {
+  queueOpenPaths(launchOpenPaths);
+  if (process.env.SPARK_ALLOW_MULTI !== "1") {
+    app.on("second-instance", (_event, argv, workingDirectory, additionalData) => {
+      queueOpenPaths(openPathsFromLockData(additionalData) ?? openPathsFromArgv(argv, workingDirectory));
+      showMainWindow();
+    });
+  }
+  // macOS delivers Finder "Open With", Dock drops and `open -a` here, and can
+  // do so before `ready` on a cold launch, so this must be registered now.
+  app.on("open-file", (event, file) => {
+    event.preventDefault();
+    queueOpenPaths([file]);
+  });
+  setOpenPathsListener(() => {
+    // Until boot creates the window, the renderer drains the queue on mount;
+    // creating it from here would race ahead of IPC registration.
+    if (!bootCreatedWindow) return;
     showMainWindow();
+    if (mainWindow && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send("app:open-paths");
+    }
   });
 }
 
@@ -217,6 +249,7 @@ const trayIconPath = app.isPackaged
   : join(__dirname, "../../build/tray.png");
 
 let mainWindow: BrowserWindow | null = null;
+let bootCreatedWindow = false;
 // Tray + background-running state (Feature: "close to tray"). `isQuitting`
 // flips true only on an explicit Quit (tray menu / before-quit) so the window
 // `close` handler knows to actually close instead of hiding to the tray.
@@ -973,6 +1006,18 @@ app.whenReady().then(async () => {
   // was already called; bail before doing any startup work or opening a window.
   if (!ownsSingleInstanceLock) return;
 
+  // A dev build launched only to forward files found no Studio to forward
+  // them to. Booting here would load a renderer with no Vite server behind it.
+  if (!app.isPackaged && process.argv.includes(OPEN_WITH_FLAG)) {
+    await dialog.showMessageBox({
+      type: "info",
+      message: "Codara Studio isn't running",
+      detail: "Start it with `npm run dev`, then open the file again.",
+    });
+    app.quit();
+    return;
+  }
+
   // macOS bounces an app into the Dock and activates it on launch even when it
   // opens no visible window. "accessory" keeps the process out of the Dock and
   // out of the activation queue entirely, so a test run leaves no trace on the
@@ -1194,6 +1239,13 @@ app.whenReady().then(async () => {
   await loadPreferences().catch(() => undefined);
 
   createWindow();
+  bootCreatedWindow = true;
+
+  // Keep Finder's Quick Action and Explorer's verb pointing at this build.
+  // Isolated instances (tests, private user-data dirs) must not repoint them.
+  if (!E2E_BACKGROUND && !process.env.SPARK_USER_DATA_DIR) {
+    void installOpenWithIntegration();
+  }
 
   // System sleep/wake handling. On suspend, checkpoint renderer state (its tab
   // tree + scrollback), flush main's stores, and pause PTY delivery into a
