@@ -60,27 +60,29 @@ export function buildBindingTable(overrides: KeybindingOverrides): BindingTable 
   });
 }
 
-// Find which command should fire for a given event. Returns the first
-// match in registration order (matching the legacy SHORTCUTS loop).
+function bindingMatches(binding: EffectiveBinding, e: KeyboardEvent): boolean {
+  const cmd = binding.command;
+  if (cmd.customMatch) return cmd.customMatch(e);
+  if (cmd.digitRange) return binding.chords.some((chord) => digitRangeMatches(chord, e) !== null);
+  return binding.chords.some((chord) => chordMatches(chord, e));
+}
+
+// Find which command should fire for a given event: the first match in
+// registration order (matching the legacy SHORTCUTS loop), except that a
+// chord the user bound beats one a command ships with. Keybindings says
+// "Replaces ..." when a recorded chord is taken, and a default added in an
+// update must not silently take over a chord someone already bound.
 export function findBinding(
   table: BindingTable,
   e: KeyboardEvent,
 ): EffectiveBinding | undefined {
+  let firstMatch: EffectiveBinding | undefined;
   for (const binding of table) {
-    const cmd = binding.command;
-    if (cmd.customMatch) {
-      if (cmd.customMatch(e)) return binding;
-      continue;
-    }
-    if (cmd.digitRange) {
-      if (binding.chords.some((chord) => digitRangeMatches(chord, e) !== null)) return binding;
-      continue;
-    }
-    for (const chord of binding.chords) {
-      if (chordMatches(chord, e)) return binding;
-    }
+    if (!bindingMatches(binding, e)) continue;
+    if (binding.customized) return binding;
+    firstMatch ??= binding;
   }
-  return undefined;
+  return firstMatch;
 }
 
 // Look up bindings that share the same chord (used by the settings UI to
@@ -96,10 +98,13 @@ export function findConflicts(
   const recordingRange = table.find((b) => b.command.id === exclude)?.command.digitRange === true;
   for (const binding of table) {
     if (binding.command.id === exclude) continue;
-    if (recordingRange && binding.command.customMatch) {
-      // A digit range recorded over a fixed digit command (Switch tab 1 to 9)
-      // would take its keys, so name it even though it cannot be rebound.
-      if (binding.command.customMatch(syntheticDigitEvent(chord))) out.push(binding);
+    if (binding.command.customMatch) {
+      // A chord or digit range recorded over a fixed command (Switch tab 1
+      // to 9) takes those keys from it, so name it even though it cannot be
+      // rebound.
+      if (binding.command.customMatch(syntheticEvent(chord, recordingRange ? "1" : chord.key))) {
+        out.push(binding);
+      }
       continue;
     }
     if (binding.command.fixed) continue;
@@ -152,6 +157,9 @@ export function digitRangeMatches(chord: Chord, e: KeyboardEvent): number | null
   }
   // AltGr reports Ctrl+Alt on Windows; a character typed with it is text.
   if (typeof e.getModifierState === "function" && e.getModifierState("AltGraph")) return null;
+  // Alt plus numpad digits types a character by its code on Windows
+  // (Alt+0233 is é), so only the digit row counts while Alt is held.
+  if (e.altKey && /^Numpad/.test(e.code ?? "")) return null;
   return digitFromEvent(e);
 }
 
@@ -160,10 +168,10 @@ export function isUsableDigitRangeChord(chord: Chord): boolean {
   return chord.ctrl || chord.meta || chord.alt;
 }
 
-function syntheticDigitEvent(chord: Chord): KeyboardEvent {
+function syntheticEvent(chord: Chord, key: string): KeyboardEvent {
   return {
-    key: "1",
-    code: "Digit1",
+    key,
+    code: isRangeDigit(key) ? `Digit${key}` : "",
     ctrlKey: chord.ctrl,
     metaKey: chord.meta,
     altKey: chord.alt,

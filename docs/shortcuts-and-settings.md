@@ -11,7 +11,9 @@ shortcut list as a cheat sheet.
 rebound or unbound in Settings, **Keybindings**. A command marked "(unbound)"
 has no default chord; bind one there to use it from the keyboard. The defaults
 come from `src/renderer/src/shortcuts/commands.ts`, and the command id is what
-the Keybindings tab and that file call it.
+the Keybindings tab and that file call it. A chord you bind yourself wins over
+a default on the same keys, so a default added in an update never takes over
+a chord you already use.
 
 Inside a browser tab the page gets a chord first, as in a browser. Codara
 runs its own command only when the page did not handle the chord, so a site
@@ -75,7 +77,8 @@ collapsed folder skipped. It is a range: in Keybindings you record the
 modifiers with any digit, and they then apply to 1 to 9. The range needs Ctrl,
 Alt or Cmd so the digits keep typing numbers. The digit is read from the key's
 position too, so it works on layouts like AZERTY where the digit row types
-symbols.
+symbols. With Alt held only the digit row counts: Alt plus numpad digits types
+a character by its code on Windows (Alt+0233 is é).
 
 Back and forward walk the workspaces you have been in, like a browser's
 history. A workspace deleted since is skipped.

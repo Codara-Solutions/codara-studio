@@ -154,6 +154,11 @@ function checkDigitRanges(lib) {
   assert.equal(digitRangeMatches(altRange, key("4", { alt: true, ctrl: true }, "Digit4")), null);
   assert.equal(digitRangeMatches({ ...altRange, alt: false }, key("4", {}, "Digit4")), null);
   assert.equal(digitFromEvent({ key: "7", code: "Numpad7" }), 7);
+  // Alt plus numpad digits types a character by its code on Windows
+  // (Alt+0233 is é): never a jump. Without Alt the numpad still counts.
+  assert.equal(digitRangeMatches(altRange, key("2", { alt: true }, "Numpad2")), null);
+  const ctrlRange = { ...altRange, alt: false, ctrl: true };
+  assert.equal(digitRangeMatches(ctrlRange, key("2", { ctrl: true }, "Numpad2")), 2);
   assert.equal(digitFromEvent({ key: "a", code: "KeyA" }), null);
   assert.equal(isUsableDigitRangeChord({ ...altRange, alt: false, shift: true }), false);
   assert.equal(isUsableDigitRangeChord({ ...altRange, alt: false, ctrl: true }), true);
@@ -182,6 +187,30 @@ function checkDigitRanges(lib) {
     "jump.open",
   ).map((b) => b.command.id);
   assert.deepEqual(single, lib.IS_MAC ? [] : ["workspace.selectByIndex"]);
+  // A single chord over the fixed tab range is named too.
+  assert.deepEqual(
+    findConflicts(buildBindingTable({}), { ...tabModifier, key: "3" }, "worker.newClaude").map((b) => b.command.id),
+    ["view.selectByIndex"],
+  );
+
+  // A chord someone bound before an update keeps working when a new default
+  // lands on the same keys: the user's binding wins, the rest of the range
+  // and the default's other uses stay.
+  const rangeModifier = lib.IS_MAC ? { ctrl: true } : { alt: true };
+  const rangeStorage = lib.IS_MAC ? "ctrl+1" : "alt+1";
+  const userBound = buildBindingTable({ "worker.newClaude": rangeStorage });
+  assert.equal(findBinding(userBound, key("1", rangeModifier, "Digit1"))?.command.id, "worker.newClaude");
+  assert.equal(findBinding(userBound, key("2", rangeModifier, "Digit2"))?.command.id, "workspace.selectByIndex");
+  const jumpStorage = lib.IS_MAC ? "meta+j" : "ctrl+shift+j";
+  const jumpEvent = lib.IS_MAC ? key("j", { meta: true }) : key("J", { ctrl: true, shift: true });
+  const userJump = buildBindingTable({ "worker.newCodex": jumpStorage });
+  assert.equal(findBinding(userJump, jumpEvent)?.command.id, "worker.newCodex");
+  assert.equal(findBinding(buildBindingTable({}), jumpEvent)?.command.id, "jump.open");
+  // An unbound command never wins anything.
+  assert.equal(
+    findBinding(buildBindingTable({ "worker.newCodex": null }), jumpEvent)?.command.id,
+    "jump.open",
+  );
 }
 
 function checkRailSequence(lib) {
