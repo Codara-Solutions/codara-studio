@@ -8,6 +8,11 @@
 // and one summary an hour. The last hour of windows is kept in memory for
 // the diagnostics export.
 //
+// The histogram samples on a timer of its own that runs for the whole
+// session, so its interval is a wake-up rate of the main thread: 50 ms keeps
+// it to 20 a second, and a delay is still known to within 50 ms, plenty for
+// stalls of 250 ms and more.
+//
 //   CODARA_EVENT_LOOP_WINDOW_MS=60000   window length (tests use less)
 //   CODARA_EVENT_LOOP_PROBE=0           no probe
 
@@ -15,7 +20,7 @@ import { monitorEventLoopDelay } from "node:perf_hooks";
 import type { EventLoopWindow } from "@shared/diagnostics";
 import { formatDuration } from "@shared/diagnostics";
 
-const RESOLUTION_MS = 10;
+const RESOLUTION_MS = 50;
 const STALL_MS = 1_000;
 const NOTABLE_MS = 250;
 const NOTABLE_QUIET_MS = 10 * 60 * 1000;

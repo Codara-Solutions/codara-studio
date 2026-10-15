@@ -210,8 +210,8 @@ async function main() {
   // ── Event-loop probe ──────────────────────────────────────────────────────
   await check("a window reports delay beyond the sampling interval", () => {
     const histogram = {
-      percentile: (p) => (p === 50 ? 10.4e6 : 22e6),
-      max: 1_250e6,
+      percentile: (p) => (p === 50 ? 50.4e6 : 62e6),
+      max: 1_290e6,
     };
     assert.deepEqual(probe.summarizeEventLoopWindow(histogram, 60_000, 5), {
       t: 5,
