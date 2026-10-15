@@ -8,8 +8,9 @@
 // - redaction: provider keys and tokens, bearer and basic credentials, URL
 //   passwords and query secrets, key=value secrets, private keys, opaque
 //   blobs, email addresses, the user's home folder in every spelling (POSIX,
-//   Windows, JSON-escaped, file: URL) and other users' homes; commit hashes,
-//   UUIDs and ordinary log text survive
+//   Windows, JSON-escaped, file: URL, query value) and other users' homes;
+//   commit hashes, UUIDs and ordinary log text survive; long pathological
+//   runs take linear time
 // - settings: values under secret-looking keys are replaced, the rest is
 //   kept so the settings still help
 // - the bundle built from a fake Codara home holds the expected files, lists
@@ -134,7 +135,31 @@ async function main() {
     assert.equal(r("/home/anne/x"), "/home/<user>/x", "a longer name is someone else, not ~e");
     assert.equal(r("/Users/bob/Library and /home/carol"), "/Users/<user>/Library and /home/<user>");
     assert.equal(r("C:\\Users\\bob\\x"), "C:\\Users\\<user>\\x");
-    assert.equal(r("/home/ann."), "/home/<user>", "no spelling leaves the name behind");
+    assert.equal(r("/home/ann."), "~.", "no spelling leaves the name behind");
+    assert.equal(r("/home/ann-old/x"), "/home/<user>/x", "a name that goes on is someone else");
+    assert.equal(r("open?cwd=/home/ann&x=1"), "open?cwd=~&x=1");
+    assert.equal(r("open?cwd=%2Fhome%2Fann%2Fcode"), "open?cwd=~%2Fcode");
+    assert.equal(r("open?cwd=C%3A%2FUsers%2FAnn%2Fcode"), "open?cwd=~%2Fcode");
+    const silverblue = { homeDirs: ["/var/home/ann"] };
+    assert.equal(redact.redactText("cd /var/home/ann. then /var/home/ann|x", silverblue), "cd ~. then ~|x");
+  });
+
+  await check("redaction stays linear on long dotted, dashed and other pathological runs", () => {
+    const runs = {
+      dotted: "a.".repeat(200_000),
+      dashed: "ab-".repeat(130_000),
+      tokenish: "x.token-".repeat(50_000),
+      schemes: "ab+".repeat(130_000),
+      addresses: "a.b@c.".repeat(70_000),
+      homes: "/home/".repeat(70_000),
+    };
+    for (const [name, text] of Object.entries(runs)) {
+      const started = Date.now();
+      r(text);
+      // Linear: tens of milliseconds. The quadratic rules this guards
+      // against took 20 to 60 seconds on these inputs.
+      assert.ok(Date.now() - started < 2_000, `${name} took ${Date.now() - started} ms`);
+    }
   });
 
   await check("commit hashes, UUIDs and ordinary log text survive", () => {

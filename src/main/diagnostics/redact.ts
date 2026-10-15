@@ -16,24 +16,41 @@ export const REDACTED_EMAIL = "[email]";
 
 const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-/** Every spelling a home folder takes in logs: as is, with / or \, JSON-escaped, URL-encoded. */
+/**
+ * Every spelling a home folder takes in logs: as is, with / or \, JSON-escaped,
+ * URL-encoded as a path and as a query value.
+ */
 function homeSpellings(home: string): string[] {
   const trimmed = home.replace(/[\\/]+$/, "");
   if (trimmed.length < 2) return [];
   const forward = trimmed.replace(/\\/g, "/");
   const back = trimmed.replace(/\//g, "\\");
-  const spellings = new Set([trimmed, forward, back, back.replace(/\\/g, "\\\\"), encodeURI(forward)]);
+  const spellings = new Set([
+    trimmed,
+    forward,
+    back,
+    back.replace(/\\/g, "\\\\"),
+    encodeURI(forward),
+    encodeURIComponent(forward),
+  ]);
   return [...spellings].filter((value) => value.length >= 2).sort((a, b) => b.length - a.length);
 }
 
+// Compiled once per context: redactJson calls redactText for every string.
+const compiledHomePatterns = new WeakMap<RedactionContext, RegExp[]>();
+
 function homePatterns(ctx: RedactionContext): RegExp[] {
+  const cached = compiledHomePatterns.get(ctx);
+  if (cached) return cached;
   const spellings = new Set<string>();
   for (const home of ctx.homeDirs) for (const spelling of homeSpellings(home)) spellings.add(spelling);
-  return [...spellings]
+  const patterns = [...spellings]
     .sort((a, b) => b.length - a.length)
-    // A home path ends at a separator, a quote, whitespace or the end, never
-    // mid-name: /home/ann must not eat the start of /home/anne.
-    .map((spelling) => new RegExp(`${escapeRegExp(spelling)}(?=[\\\\/"'\`\\s:;,)\\]}>]|$)`, "gi"));
+    // A home path ends anywhere but mid-name: /home/ann must not eat the
+    // start of /home/anne, and /home/ann. or /home/ann&x=1 still lose it.
+    .map((spelling) => new RegExp(`${escapeRegExp(spelling)}(?![A-Za-z0-9_-])`, "gi"));
+  compiledHomePatterns.set(ctx, patterns);
+  return patterns;
 }
 
 // Shapes of credentials that are recognizable on their own.
@@ -52,12 +69,16 @@ const TOKEN_SHAPES: RegExp[] = [
   /\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}/g,
 ];
 
+// The name prefix and the URL scheme below are bounded: an unbounded run,
+// tried again at every word boundary of a long dotted or dashed string, makes
+// redaction quadratic, and the export runs on the main thread (400 KB of
+// "a.a.a." took a minute).
 const SENSITIVE_NAME =
-  "[A-Za-z0-9_.-]*?(?:token|secret|password|passwd|passphrase|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|auth|authorization|cookie|session[_-]?id|credentials?|signature)";
+  "[A-Za-z0-9_.-]{0,64}?(?:token|secret|password|passwd|passphrase|api[_-]?key|apikey|access[_-]?key|private[_-]?key|client[_-]?secret|auth|authorization|cookie|session[_-]?id|credentials?|signature)";
 
 const RULES: Array<[RegExp, string]> = [
   // https://user:password@host
-  [/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@:"'<>]+(?::[^\s/@"'<>]*)?@/gi, `$1${REDACTED}@`],
+  [/\b([a-z][a-z0-9+.-]{0,31}:\/\/)[^\s/@:"'<>]+(?::[^\s/@"'<>]*)?@/gi, `$1${REDACTED}@`],
   // Authorization: Bearer abc, token abc
   [/\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+/=-]{6,}/gi, `$1 ${REDACTED}`],
   // ?access_token=abc&key=abc
