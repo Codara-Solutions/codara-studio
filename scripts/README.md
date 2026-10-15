@@ -374,6 +374,9 @@ These suites bundle renderer modules without React where they can:
 `test-chat-*`, `test-composer-fast-mode`, `test-model-effort-shortcuts`,
 `test-agent-destinations` (where a pick, a comment or a tab reference from a
 browser tab can be sent, and the default),
+`test-review-notes` (review notes: the batch text an agent gets, the review
+tab's rows, anchors and quotes, where a batch can go, the command a new agent
+starts with, and main's per-workspace store in Codara's own folder),
 `test-dock-layout`, `test-split-drop`, `test-tab-reorder`, `test-tab-groups`
 (group membership, naming, colors, collapse, drops into and out of a group,
 saved groups), `test-workspace-reorder`, `test-workbench-routing`, `test-editor-tabs`,

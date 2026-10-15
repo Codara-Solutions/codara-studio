@@ -328,6 +328,10 @@ export interface DiffTab extends BaseTab {
   // row or the tab pill. One shared preview slot across both diff flavors.
   // Mirrors EditorTab.preview.
   preview?: boolean;
+  // The review tab: every change of the workspace in one diff, with notes for
+  // an agent (components/review). One per workspace; path is "" and staged,
+  // commitHash and preview are unused.
+  review?: boolean;
 }
 
 // Automations tabs host the workspace's scheduler + overnight-queue panel.

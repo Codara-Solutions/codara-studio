@@ -1487,6 +1487,8 @@ export interface UseTabsApi {
   // Opens as a VS Code-style preview (next commit file replaces it) unless
   // options.pin, which also promotes an existing preview to persistent.
   openCommitDiffTab: (path: string, commitHash: string, options?: { pin?: boolean }) => TabId;
+  // Focus the workspace's review tab, or open it.
+  openReviewTab: () => TabId;
   // Close the runs tab bound to a chat (used when the chat is deleted).
   closeRunsTabFor: (runId: string) => void;
   closeWorkerTerminalTabFor: (runId: string) => void;
@@ -3824,6 +3826,24 @@ export function useTabs(
     [],
   );
 
+  // The review tab is a singleton per workspace, like Automations: the
+  // existence check runs inside the updater so a double click opens one.
+  const openReviewTab = useCallback((): TabId => {
+    const existingId = tabsRef.current.find((t): t is DiffTab => t.kind === "diff" && t.review === true)?.id;
+    const resultId = existingId ?? makeId("review");
+    setTabs((curr) => {
+      const existing = curr.find((t): t is DiffTab => t.kind === "diff" && t.review === true);
+      if (existing) {
+        setActiveId(existing.id);
+        return curr;
+      }
+      const tab: DiffTab = { id: resultId, kind: "diff", title: "Review changes", path: "", staged: false, review: true };
+      setActiveId(resultId);
+      return [...curr, tab];
+    });
+    return resultId;
+  }, []);
+
   const setLeafScrollback = useCallback(
     (tabId: TabId, paneId: string, scrollback: string) => {
       const trimmed = trimPersistedTerminalScrollback(
@@ -4351,6 +4371,7 @@ export function useTabs(
       saveWhiteboardTabAs,
       openDiffTab,
       openCommitDiffTab,
+      openReviewTab,
       closeRunsTabFor,
       closeWorkerTerminalTabFor,
       pruneDeletedRunTabsFromInactiveWorkspaces,

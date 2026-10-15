@@ -1,6 +1,7 @@
 import React, { useMemo } from "react";
 import type { GitStatus } from "@shared/types";
 import DiffTabHost from "../components/git/DiffTabHost";
+import ReviewTabHost from "../components/review/ReviewTabHost";
 import DockedSurface from "./DockedSurface";
 import type { DockRef } from "./dock";
 import type { DiffTab, Tab, TabId } from "./types";
@@ -23,6 +24,9 @@ interface Props {
   onOpenFile: (absolutePath: string) => void;
   onChanged: () => void;
   onCloseTab: (id: TabId) => void;
+  // The review tab opens a file's own diff and can start an agent on its notes.
+  onOpenFileDiff?: (path: string, staged: boolean) => void;
+  onLaunchAgent?: (command: string, cwd: string) => void;
 }
 
 function DiffStack({
@@ -35,6 +39,8 @@ function DiffStack({
   onOpenFile,
   onChanged,
   onCloseTab,
+  onOpenFileDiff,
+  onLaunchAgent,
 }: Props) {
   const diffTabs = useMemo(
     () => tabs.filter((t): t is DiffTab => t.kind === "diff"),
@@ -50,19 +56,32 @@ function DiffStack({
           docked={dockIndex.has(t.id)}
           active={t.id === activeId}
         >
-          {() => (
-            <DiffTabHost
-              cwd={cwd}
-              path={t.path}
-              staged={t.staged}
-              commitHash={t.commitHash}
-              status={status}
-              gitVersion={gitVersion}
-              onOpenFile={onOpenFile}
-              onChanged={onChanged}
-              onClose={() => onCloseTab(t.id)}
-            />
-          )}
+          {(visible) =>
+            t.review ? (
+              <ReviewTabHost
+                cwd={cwd}
+                status={status}
+                gitVersion={gitVersion}
+                visible={visible}
+                onOpenFile={onOpenFile}
+                onOpenFileDiff={onOpenFileDiff}
+                onChanged={onChanged}
+                onLaunchAgent={onLaunchAgent}
+              />
+            ) : (
+              <DiffTabHost
+                cwd={cwd}
+                path={t.path}
+                staged={t.staged}
+                commitHash={t.commitHash}
+                status={status}
+                gitVersion={gitVersion}
+                onOpenFile={onOpenFile}
+                onChanged={onChanged}
+                onClose={() => onCloseTab(t.id)}
+              />
+            )
+          }
         </DockedSurface>
       ))}
     </div>

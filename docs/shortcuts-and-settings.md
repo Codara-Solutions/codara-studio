@@ -34,6 +34,7 @@ Codara's. Keys an agent sends to a page never trigger Codara's shortcuts.
 | Switch Cora run | Mod+K | `runSwitcher.open` |
 | Open Automations | Mod+Shift+A | `automations.open` |
 | Open Usage | Mod+Shift+U | `usage.open` |
+| Review changes | (unbound) | `review.open` |
 | Open Cora Board | Mod+Shift+B | `board.open` |
 | Focus chat composer | Mod+L | `composer.focus` |
 | Search in files | Mod+Shift+F | `search.open` |
