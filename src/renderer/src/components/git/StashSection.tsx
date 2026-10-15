@@ -206,7 +206,7 @@ export default function StashSection({
           </span>
           <InlineInput
             initial=""
-            placeholder="Stash message (optional) — Enter to stash"
+            placeholder="Stash message (optional), Enter to stash"
             onCommit={saveStash}
             onCancel={() => setSaving(false)}
           />

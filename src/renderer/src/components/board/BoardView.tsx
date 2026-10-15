@@ -691,7 +691,7 @@ export default function BoardView({
       // Two ways to land here, and the notice must not pick the wrong one:
       // the worker has not launched yet (no pane is created until it does),
       // or its pane was closed.
-      showNotice("No terminal for that worker — it hasn't launched yet, or its pane was closed");
+      showNotice("No terminal for that worker. It hasn't launched yet, or its pane was closed");
     }
   };
 
@@ -1143,7 +1143,7 @@ function BoardColumn({
         )}
         {dropActive && (
           <div className="spark-board-lane__drophint">
-            {column.key === "queued" ? "Drop to queue — Cora picks it up" : `Move to ${column.label}`}
+            {column.key === "queued" ? "Drop to queue, Cora picks it up" : `Move to ${column.label}`}
           </div>
         )}
         {column.composer && ready && (
@@ -1179,7 +1179,7 @@ function LaneRail({
       data-board-lane={column.key}
       className={dropActive ? "spark-board-rail spark-board-rail--drop" : "spark-board-rail"}
       style={{ "--lane-tint": LANE_TINT[column.key] } as React.CSSProperties}
-      title={count === 0 ? `${column.label} — empty. Drop a card here to move it.` : undefined}
+      title={count === 0 ? `${column.label}: empty. Drop a card here to move it.` : undefined}
       onDragOver={(event) => {
         if (!Array.from(event.dataTransfer.types).includes(BOARD_CARD_DRAG_MIME)) return;
         event.preventDefault();

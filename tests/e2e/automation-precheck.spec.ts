@@ -157,7 +157,7 @@ test("a cron fire whose precheck fails is skipped until the check passes", async
     await clickAttached(page.getByRole("button", { name: /Wait for go/ }).first());
     const skipRow = page.locator('[data-testid="history-skip-row"][data-skip-reason="precheck"]').first();
     await expect(skipRow).toBeVisible();
-    await expect(skipRow).toContainText("Skipped: the precheck exited with code 1.");
+    await expect(skipRow).toContainText("Skipped: the check exited with code 1.");
     await expect(skipRow.getByTestId("history-skip-badge")).toHaveText(/^skipped \d+ times$/);
     await clickAttached(skipRow.getByRole("button").first());
     await expect(skipRow.getByTestId("history-skip-output")).toContainText("waiting for go.txt");

@@ -439,7 +439,7 @@ export default function WorktreeCleanupDialog({
         <header className="wtc-header">
           <div className="wtc-title-line">
             <h2 id="wtc-title">
-              {view === "list" ? "Worktrees" : view === "review" ? "Review removal" : "Removal done"}
+              {view === "list" ? "Clean up worktrees" : view === "review" ? "Review removal" : "Removal done"}
             </h2>
             {loading && view === "list" ? <Spinner size={12} /> : null}
             <span className="wtc-summary" role="status">

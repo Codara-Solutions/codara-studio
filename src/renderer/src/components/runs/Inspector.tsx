@@ -855,7 +855,7 @@ function RunSummary({
           <MetricCell
             label="Workers"
             value={String(logicalWorkers(run).length)}
-            title="Logical workers — a retried or replaced task still counts once"
+            title="Logical workers: a retried or replaced task still counts once"
           />
           <MetricCell
             label="All attempts"
@@ -1817,7 +1817,7 @@ function ReportView({ report, compact }: { report: WorkerReport; compact?: boole
           {report.filesChanged.slice(0, fileCap).map((file, i) => (
             <div key={i} style={{ fontFamily: "var(--font-mono)", fontSize: 10.5, lineHeight: 1.5, wordBreak: "break-word" }}>
               <span style={{ color: "var(--accent-text)" }}>{file.path}</span>
-              {file.reason && <span style={{ color: "var(--muted)" }}> — {file.reason}</span>}
+              {file.reason && <span style={{ color: "var(--muted)" }}>: {file.reason}</span>}
             </div>
           ))}
           {report.filesChanged.length > fileCap && (

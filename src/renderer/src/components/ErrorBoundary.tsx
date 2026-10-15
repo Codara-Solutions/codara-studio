@@ -216,7 +216,7 @@ export default class ErrorBoundary extends React.Component<Props, State> {
               color: "var(--muted, #9ca3af)",
             }}
           >
-            Your work is on disk — this is the interface, not your files. Reloading
+            Your work is on disk. This is the interface, not your files. Reloading
             usually brings it back. If it keeps happening, copy the report and hand it
             to an agent.
           </p>

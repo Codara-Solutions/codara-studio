@@ -97,10 +97,10 @@ export function spansYears(sinceDay: string, untilDay: string): boolean {
 }
 
 /**
- * `Sep 15 – Oct 14`, with both years once the range crosses one: a one-year
- * window otherwise reads `Oct 15 – Oct 14`.
+ * `Sep 15 to Oct 14`, with both years once the range crosses one: a one-year
+ * window otherwise reads `Oct 15 to Oct 14`.
  */
 export function formatDayRange(sinceDay: string, untilDay: string): string {
   const withYear = spansYears(sinceDay, untilDay);
-  return `${formatDayShort(sinceDay, withYear)} – ${formatDayShort(untilDay, withYear)}`;
+  return `${formatDayShort(sinceDay, withYear)} to ${formatDayShort(untilDay, withYear)}`;
 }

@@ -7,7 +7,7 @@ import { delimiter, join } from "node:path";
 // Agent hibernation end to end: a finished Claude pane in a background
 // workspace is stopped after the idle time and resumed with `--resume` when
 // the user opens its workspace again, or on the next launch when Codara quit
-// while it slept. A pane pinned "Keep awake" and a pane whose agent runs a
+// while it slept. A pane pinned "Keep running" and a pane whose agent runs a
 // command (a dev server) are never stopped.
 //
 // The fake `claude` is a Node script so the process census sees it the way
@@ -145,14 +145,14 @@ test("an agent restored into a background workspace at launch can sleep too", as
   }
 });
 
-test("Keep awake stops a pane from sleeping", async () => {
+test("Keep running stops a pane from sleeping", async () => {
   test.setTimeout(90_000);
   const fixture = await prepareFixture("plain");
   const { app, page, logs } = await launch(fixture);
   try {
     await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 20_000 });
     const [first] = await waitForLaunches(fixture, 1);
-    const pin = page.locator(`[data-terminal-pane-id="${PANE_ID}"]`).getByRole("button", { name: "Keep awake" });
+    const pin = page.locator(`[data-terminal-pane-id="${PANE_ID}"]`).getByRole("button", { name: "Keep running" });
     await expect(pin).toHaveAttribute("aria-pressed", "false");
     await pin.evaluate((button) => (button as HTMLElement).click());
     await expect(pin).toHaveAttribute("aria-pressed", "true");

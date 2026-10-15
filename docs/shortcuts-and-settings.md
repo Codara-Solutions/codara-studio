@@ -237,7 +237,7 @@ The pages:
 |---|---|
 | General | Getting started (reopens the first-run guide, turns feature tips on or off, and lets tips you have seen come back), Appearance (theme, liquid glass surfaces), Window (keep running in the background when the window is closed, auto-open the browser for local dev servers, open links in the default browser or the Codara browser, ask where terminal links open, the workspace switch badge), Sleep (keep the computer awake while agents work, always or never, and on a Linux laptop with the lid closed; see [Keep the computer awake](#keep-the-computer-awake)), Agent worktrees (whether agents may create and remove worktrees, and remove ones you created), Tabs (middle-click to close), Notifications (in-app toast, native OS notification, sound, OS-specific cues), Git (background fetch, notify on teammate pushes and new pull requests, notify when CI fails on your pull request), Instant git triggers, Copy-branch workspaces (the repository's worktree setup file, your own setup command for new worktrees, and extra ignored files an agent may delete with a merged worktree). |
 | Editor | Code editor (Vim mode, autosave) and inline AI autocomplete. |
-| Default terminal | The shell for new panes, output history and scrollback lines, whether programs may copy to the clipboard (OSC 52), a resource overview, and the run terminal lifecycle for worker panes. |
+| Default terminal | The shell for new panes, output history and scrollback lines, whether programs may copy to the clipboard, a resource overview, and the run terminal lifecycle for worker panes. |
 | Quick commands | Saved shell commands and agent prompts: add, edit, reorder, delete, and where each is offered. Also what a right-click in a terminal does. See [Quick commands](#quick-commands). |
 | API and model | An OpenRouter key, and how Git commit messages are generated. |
 | Agents | Your accounts (see [accounts.md](./accounts.md)), **Install Pi** when Pi is not installed yet, and **Open Capability Center** and **Worker models** buttons, which close Settings and open the Capability Center on MCP servers or on worker models. |
@@ -572,7 +572,7 @@ whenever it cannot tell:
 - nothing else runs in the pane: no dev server or other program you started,
   and no command the agent started after it launched (the MCP servers it
   starts at launch do not count);
-- the pane is not pinned with **Keep awake** (the sun button in the pane's
+- the pane is not pinned with **Keep running** (the sun button in the pane's
   toolbar, shown on agent panes).
 
 Cora's worker panes and phone panes never sleep. A sleeping pane that is
@@ -694,15 +694,15 @@ list, Up and Down (or Home and End) move between cards, Tab reaches a card's
 reply box or its **Answer in terminal** button, and Escape goes back to the
 card.
 
-### Automation precheck and missed runs
+### Check first and missed runs
 
 These two settings belong to each automation, not to the Settings dialog: open
 the automation in the editor and select its trigger. The cron and interval
 triggers show both; the folder, git, "After automation" and "Automation
-activity" triggers show only the precheck. Manual and continuous triggers show
-the precheck only with a cadence loop, whose later passes it checks.
+activity" triggers show only Check first. Manual and continuous triggers show
+Check first only with a cadence loop, whose later passes it checks.
 
-**Before each run** takes an optional shell command. It runs in the
+**Before each run** (the **Check first command**) takes an optional shell command. It runs in the
 workspace folder before every pass that the trigger starts (and before every
 pass of a cadence loop). Exit code 0 runs the pass. Any other exit code, a
 timeout (1 to 600 seconds, 60 by default) or a command that cannot start skips
@@ -850,9 +850,9 @@ your user skill folders for Pi, Claude and Codex. A skill switched off here
 is not loaded by new Cora sessions. Removing a skill moves its folder to the
 trash.
 
-## The worktree cleanup screen
+## Clean up worktrees
 
-The cleanup screen lists every worktree of the repositories behind your
+Clean up worktrees lists every worktree of the repositories behind your
 workspaces, so you can find the ones that only take up space and remove
 several at once. Open it from the menu on a workspace's row in the rail (**Clean up
 worktrees…**, which starts filtered to that workspace's repository) or

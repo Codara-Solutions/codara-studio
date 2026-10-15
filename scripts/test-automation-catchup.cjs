@@ -396,7 +396,7 @@ async function integrationChecks({ sched, loop }, workspace) {
   // The same skip again updates the newest row; a pass in between splits it.
   const repeat = await sched.createJob({ name: "repeat", trigger: yearly, input });
   const t0 = Date.now();
-  const same = { reason: "precheck", detail: "Skipped: the precheck exited with code 1.", precheck: { command: "false", passed: false, exitCode: 1, timedOut: false, durationMs: 1, outputTail: "first" } };
+  const same = { reason: "precheck", detail: "Skipped: the check exited with code 1.", precheck: { command: "false", passed: false, exitCode: 1, timedOut: false, durationMs: 1, outputTail: "first" } };
   await sched.appendSkip(repeat.id, same, t0);
   await sched.appendSkip(repeat.id, { ...same, precheck: { ...same.precheck, outputTail: "second" } }, t0 + 1000);
   await sched.appendSkip(repeat.id, { ...same, precheck: { ...same.precheck, outputTail: "third" } }, t0 + 2000);
@@ -407,9 +407,9 @@ async function integrationChecks({ sched, loop }, workspace) {
   assert.strictEqual(job.skips[0].at, iso(t0 + 2000));
   assert.strictEqual(job.skips[0].precheck.outputTail, "third", "the row keeps the latest output");
   const rowId = job.skips[0].id;
-  await sched.appendSkip(repeat.id, { ...same, detail: "Skipped: the precheck exited with code 2." }, t0 + 3000);
+  await sched.appendSkip(repeat.id, { ...same, detail: "Skipped: the check exited with code 2." }, t0 + 3000);
   await sched.appendHistory(repeat.id, { runId: "r-between", iteration: 0, startedAt: iso(t0 + 4000), status: "done" }, {});
-  await sched.appendSkip(repeat.id, { ...same, detail: "Skipped: the precheck exited with code 2." }, t0 + 5000);
+  await sched.appendSkip(repeat.id, { ...same, detail: "Skipped: the check exited with code 2." }, t0 + 5000);
   job = await get(repeat.id);
   assert.deepStrictEqual(job.skips.map((x) => x.repeats ?? 1), [3, 1, 1], "a different line or a pass in between starts a new row");
   await sched.deleteHistoryEntry(repeat.id, rowId, "an older time of the row");
@@ -468,7 +468,7 @@ async function integrationChecks({ sched, loop }, workspace) {
   assert.strictEqual(launchesFor(gated.id), 0, "a failed precheck starts no worker");
   assert.strictEqual(job.skips.length, 1);
   assert.strictEqual(job.skips[0].reason, "precheck");
-  assert.strictEqual(job.skips[0].detail, "Skipped: the precheck exited with code 1.");
+  assert.strictEqual(job.skips[0].detail, "Skipped: the check exited with code 1.");
   assert.strictEqual(job.skips[0].precheck.outputTail, "nothing to do");
   assert.strictEqual(job.skips[0].precheck.command, "echo nothing to do; exit 1");
   assert.strictEqual(job.history.length, 0, "history keeps only real passes");

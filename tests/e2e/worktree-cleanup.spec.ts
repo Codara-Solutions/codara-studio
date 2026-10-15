@@ -122,7 +122,7 @@ test("the cleanup screen removes only what it may, and what was confirmed", asyn
 
     await repoRow.getByTitle("Workspace actions").click();
     await page.getByRole("menuitem", { name: /^Clean up worktrees/ }).click();
-    const dialog = page.getByRole("dialog", { name: "Worktrees" });
+    const dialog = page.getByRole("dialog", { name: "Clean up worktrees" });
     await expect(dialog).toBeVisible();
     await expect(dialog.getByRole("searchbox", { name: "Search worktrees" })).toBeFocused();
 

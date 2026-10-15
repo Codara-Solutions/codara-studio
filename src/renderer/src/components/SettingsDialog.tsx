@@ -848,7 +848,7 @@ function TerminalSettings({
       <SettingsSection title="Clipboard">
         <ToggleRow
           title="Let programs copy to the clipboard"
-          desc="tmux, Neovim and programs on a machine you reach over SSH can put text on this computer's clipboard (OSC 52), up to 768 KB at a time. They can never read it. Only a pane you can see and type into can copy."
+          desc="tmux, Neovim and programs on a machine you reach over SSH can put text on this computer's clipboard, up to 768 KB at a time. They can never read it. Only a pane you can see and type into can copy."
           checked={osc52Clipboard}
           onChange={onOsc52ClipboardChange}
         />
@@ -3182,7 +3182,7 @@ function SessionsSettings({
             desc={
               hibernationMinutes === 0
                 ? "Agents in background workspaces keep running however long they wait."
-                : `${presetHint(AGENT_HIBERNATION_PRESETS, hibernationMinutes) ?? ""} An agent that finished its turn in a background workspace stops after this long to give its memory back, and resumes its session when you open its pane. Agents waiting for you, pinned with Keep awake, or sharing the pane with another program stay awake.`
+                : `${presetHint(AGENT_HIBERNATION_PRESETS, hibernationMinutes) ?? ""} An agent that finished its turn in a background workspace stops after this long to give its memory back, and resumes its session when you open its pane. Agents waiting for you, pinned with Keep running, or sharing the pane with another program stay awake.`
             }
             control={
               <Segmented

@@ -2035,8 +2035,8 @@ function titleFor(t: Tab): string {
   if (t.kind === "preview") return t.url;
   if (t.kind === "terminal") {
     const devices = phoneDeviceNames(t);
-    if (devices.length === 1) return `${t.title} — opened from phone (${devices[0]})`;
-    if (devices.length > 1) return `${t.title} — opened from phones (${devices.join(", ")})`;
+    if (devices.length === 1) return `${t.title}, opened from phone (${devices[0]})`;
+    if (devices.length > 1) return `${t.title}, opened from phones (${devices.join(", ")})`;
     return t.title;
   }
   if (t.kind === "automations") return t.title;

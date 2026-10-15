@@ -69,7 +69,7 @@ test("the usage page explains an empty window and reports a year's figures", asy
     );
     await expect(page.locator("[data-usage-stats]")).toBeVisible({ timeout: 30_000 });
     await expect(page.locator("[data-usage-range]")).toHaveText(
-      /^[A-Z][a-z]{2} \d{1,2}, \d{4} – [A-Z][a-z]{2} \d{1,2}, \d{4} · scanned /,
+      /^[A-Z][a-z]{2} \d{1,2}, \d{4} to [A-Z][a-z]{2} \d{1,2}, \d{4} · scanned /,
     );
 
     // 3. The figures the transcript implies.

@@ -100,7 +100,7 @@ export default function TriggerGateFields({
             Exit code 0 runs the pass. Anything else skips it: no agent starts and no tokens are spent.
             Run now always runs.
           </span>
-          <Field label="Precheck command">
+          <Field label="Check first command">
             <textarea
               className="spark-input spark-mono"
               data-testid="precheck-command"

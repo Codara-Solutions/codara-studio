@@ -78,7 +78,7 @@ test("source control discards one file in a single click and all changes from th
     // panel settles — allow for it.
     await expect(changesHeader).toBeVisible({ timeout: 30_000 });
 
-    const scratchRow = page.getByTitle("Untracked — scratch.txt");
+    const scratchRow = page.getByTitle("Untracked: scratch.txt");
     await expect(scratchRow).toBeVisible({ timeout: 15_000 });
 
     // Hover reveals the row actions. React derives onMouseEnter from delegated
@@ -99,7 +99,7 @@ test("source control discards one file in a single click and all changes from th
     await expect(discardAll).toBeVisible();
     await discardAll.dispatchEvent("click");
 
-    await expect(page.getByText("No changes — working tree clean.")).toBeVisible({
+    await expect(page.getByText("No changes, working tree clean.")).toBeVisible({
       timeout: 15_000,
     });
     expect(await isDirty()).toBe("");

@@ -90,7 +90,7 @@ export type Command = {
   group: CommandGroup;
   defaultChords: Chord[];
   // When true, the chord can't be rebound from the Keybindings UI — used
-  // for commands whose key portion varies at runtime (e.g. "Switch tab 1–9").
+  // for commands whose key portion varies at runtime (e.g. "Switch tab 1 to 9").
   // The cheat sheet still shows the default chord; the settings UI marks
   // the row as fixed.
   fixed?: boolean;
@@ -328,7 +328,7 @@ export const COMMANDS: Command[] = [
   },
   {
     id: "view.selectByIndex",
-    label: "Switch tab 1–9",
+    label: "Switch tab 1 to 9",
     group: "Tabs",
     // Variable-key chord — the digit is the tab index. Not rebindable.
     defaultChords: [mod("1")],

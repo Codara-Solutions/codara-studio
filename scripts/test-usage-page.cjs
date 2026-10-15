@@ -116,9 +116,9 @@ check("day labels carry the year only when asked", () => {
 check("a range crossing a year names both years", () => {
   assert.equal(spansYears("2026-09-15", "2026-10-14"), false);
   assert.equal(spansYears("2025-10-15", "2026-10-14"), true);
-  assert.equal(formatDayRange("2026-09-15", "2026-10-14"), "Sep 15 – Oct 14");
+  assert.equal(formatDayRange("2026-09-15", "2026-10-14"), "Sep 15 to Oct 14");
   // The one-year window used to read "Oct 15 – Oct 14".
-  assert.equal(formatDayRange("2025-10-15", "2026-10-14"), "Oct 15, 2025 – Oct 14, 2026");
+  assert.equal(formatDayRange("2025-10-15", "2026-10-14"), "Oct 15, 2025 to Oct 14, 2026");
 });
 
 check("the intensity grid fills its rows evenly", () => {
