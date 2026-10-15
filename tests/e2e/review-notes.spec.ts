@@ -264,6 +264,17 @@ test("notes on a Markdown plan join the review, paste into a terminal; the branc
     });
     const add = page.getByTestId("markdown-add-note");
     await expect(add).toBeVisible();
+    // A floating button: an opaque face with glass off, never see-through text.
+    const glass = await page.evaluate(() => {
+      const previous = document.documentElement.getAttribute("data-glass");
+      document.documentElement.setAttribute("data-glass", "off");
+      return previous;
+    });
+    expect(await add.evaluate((element) => getComputedStyle(element).backgroundColor)).not.toBe("rgba(0, 0, 0, 0)");
+    await page.evaluate((previous) => {
+      if (previous === null) document.documentElement.removeAttribute("data-glass");
+      else document.documentElement.setAttribute("data-glass", previous);
+    }, glass);
     await add.click();
     const popover = page.getByTestId("markdown-note-popover");
     await expect(popover).toContainText("Note on line 3");

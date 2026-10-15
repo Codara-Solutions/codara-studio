@@ -25,11 +25,18 @@ function rememberUnsent(key: string, text: string): void {
   }
 }
 
+/** Whether the user is typing in another field, which a composer mounting must not take over. */
+function typingElsewhere(el: HTMLElement): boolean {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement) || active === el) return false;
+  return active.isContentEditable || active.tagName === "TEXTAREA" || active.tagName === "INPUT" || active.tagName === "SELECT";
+}
+
 function useAutoFocus(ref: React.RefObject<HTMLTextAreaElement>, when: boolean): void {
   useEffect(() => {
     if (!when) return;
     const el = ref.current;
-    if (!el) return;
+    if (!el || typingElsewhere(el)) return;
     el.focus({ preventScroll: true });
     el.setSelectionRange(el.value.length, el.value.length);
   }, [ref, when]);
@@ -53,13 +60,12 @@ export function NoteComposer({
   /** Where the note is; its unsaved words outlive the composer under this key. */
   draftKey?: string;
 }): React.ReactElement {
-  const [restored] = useState(() => (draftKey ? unsent.get(draftKey) : undefined));
-  const [text, setText] = useState(restored ?? initial);
+  const [text, setText] = useState(() => (draftKey ? unsent.get(draftKey) : undefined) ?? initial);
   const [busy, setBusy] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
-  // A composer that scrolled back into view with words in it does not take
-  // the focus from wherever the user went meanwhile.
-  useAutoFocus(ref, restored === undefined);
+  // Focus on opening, and when it scrolls back into view, unless the user is
+  // typing in another field meanwhile.
+  useAutoFocus(ref, true);
   const save = async () => {
     if (!text.trim() || busy) return;
     setBusy(true);
