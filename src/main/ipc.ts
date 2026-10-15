@@ -481,6 +481,7 @@ import { agentDelivery } from "./agent-delivery";
 import { registerCaptureIpc } from "./browser/capture/ipc";
 import { registerChromeLinkIpc } from "./browser/chrome";
 import { registerPointIpc } from "./browser/point";
+import { registerGitFixIpc } from "./git-fix-ipc";
 import { registerServersIpc } from "./servers";
 
 function nativeCliAccountRuntimeFromIpc(value: unknown): NativeCliAccountRuntime {
@@ -4022,6 +4023,7 @@ export function registerIpc(): void {
 
   // Areas that keep their channels next to their code.
   registerServersIpc(handle);
+  registerGitFixIpc(handle);
   registerChromeLinkIpc(handle);
   registerCaptureIpc(handle);
   registerPointIpc(handle);
