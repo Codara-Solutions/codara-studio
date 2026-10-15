@@ -545,6 +545,14 @@ async function main() {
     }
   });
 
+  check("the host reads the window once per calm period, not on every poll", () => {
+    const host = read(path.join(RENDERER, "components", "feature-tips", "FeatureTipsHost.tsx"));
+    const look = /const activity = Math\.max\(lastKeyAt\.current, lastPointerAt\.current\);\s*if \(lookedAfter\.current === activity\) return;\s*lookedAfter\.current = activity;\s*if \(blockingSurfaceOpen\(\)/;
+    assert.match(host, look, "the look is skipped until new input, before any DOM read");
+    const calm = host.indexOf("isCalmMoment({");
+    assert.ok(calm >= 0 && calm < host.search(look), "the cheap checks come first");
+  });
+
   check("pending tips skip used and shown features, fresh ones first", () => {
     let state = emptyFeatureTipsState();
     const all = pendingTips(state);

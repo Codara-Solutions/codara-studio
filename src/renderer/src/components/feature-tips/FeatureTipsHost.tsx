@@ -54,6 +54,8 @@ export default function FeatureTipsHost({ onboardingOpen, hasWorkspaces }: Props
   const startedAt = useRef(Date.now());
   const lastKeyAt = useRef(0);
   const lastPointerAt = useRef(0);
+  // The input a calm period follows, once the window was read in it.
+  const lookedAfter = useRef<number | null>(null);
 
   if (onboardingOpen) onboardingSeen.current = true;
 
@@ -158,6 +160,15 @@ export default function FeatureTipsHost({ onboardingOpen, hasWorkspaces }: Props
       if (!current || !tipDue(current, now, timing, shownThisSession.current)) return;
       if (document.visibilityState !== "visible") return;
       if (!isCalmMoment({ now, startedAt: startedAt.current, lastKeyAt: lastKeyAt.current, lastPointerAt: lastPointerAt.current, timing })) return;
+      // The window is read once per calm period. What a tip waits for (its
+      // control on screen, a dialog closed, focus out of a page) changes when
+      // the person acts, so after a look that found nothing the next one
+      // waits for new input. A tip whose control is never on screen stays
+      // pending for good, so without this a session would query the DOM
+      // every few seconds for as long as it sits idle.
+      const activity = Math.max(lastKeyAt.current, lastPointerAt.current);
+      if (lookedAfter.current === activity) return;
+      lookedAfter.current = activity;
       if (blockingSurfaceOpen() || mayBeTyping()) return;
       const inUse = usage.inUseNow();
       const found: { tip: RenderedTip | null } = { tip: null };
