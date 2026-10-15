@@ -195,6 +195,7 @@ export function registerWorktreeCleanupIpc(handle: IpcHandle): void {
     // landing after the removal would cache a size for a folder that is gone.
     // The screen measures again once it lists what is left.
     queue.cancel();
+    await queue.settled(5_000);
     const { removeCleanupWorktrees } = await import("./remove");
     const result = await removeCleanupWorktrees(deps(await gitCacheInvalidator()), request, {
       sizeOf: (id) => cache.get(id),

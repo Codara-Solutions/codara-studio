@@ -862,6 +862,37 @@ async function main() {
       restart.cancel();
     });
 
+    await check("sizes: a removal waits for a cancelled measurement to end", async () => {
+      let finish;
+      const slow = space.createSizeMeasurer({
+        store: space.createSizeStore(path.join(home, "sizes-settle.json")),
+        measure: () =>
+          new Promise((resolve) => {
+            finish = () => resolve({ bytes: 1, complete: true, measuredAt: 1 });
+          }),
+        onEvent: () => undefined,
+      });
+      await slow.settled(10);
+      slow.enqueue([{ id: "/s", path: "/s" }]);
+      slow.cancel();
+      assert.equal(slow.pending(), 0);
+      let ended = false;
+      const waiting = slow.settled(5_000).then(() => {
+        ended = true;
+      });
+      await new Promise((done) => setTimeout(done, 20));
+      assert.equal(ended, false, "the cancelled du or walk may still read the folder");
+      finish();
+      await waiting;
+      assert.equal(ended, true);
+      slow.enqueue([{ id: "/t", path: "/t" }]);
+      const started = Date.now();
+      await slow.settled(30);
+      assert.ok(Date.now() - started < 2_000, "the wait is bounded");
+      slow.cancel();
+      finish();
+    });
+
     if (process.platform !== "win32") {
       await check("the batch process scan finds a process inside one worktree only", async () => {
         const inside = path.join(trees, "fresh");
