@@ -53,11 +53,13 @@ export interface KeepAwakeControllerDeps {
 }
 
 /**
- * How often "While agents work" re-reads activity. Terminal agents report no
- * event of their own here, and a few seconds of lag is far below any OS idle
- * timeout.
+ * How often "While agents work" re-reads activity on its own. Terminal agent
+ * state changes and Cora's events refresh it as they happen (index.ts); the
+ * poll catches what has no event, such as a pane that went silent past
+ * TERMINAL_AGENT_SILENT_STALE_MS, and half a minute of lag is far below any
+ * OS idle timeout.
  */
-export const KEEP_AWAKE_POLL_MS = 3_000;
+export const KEEP_AWAKE_POLL_MS = 30_000;
 
 const BLOCKER_REFUSED = "The system refused the request to stay awake.";
 

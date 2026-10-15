@@ -526,6 +526,18 @@ async function testSignal() {
   signal.signalAgentBoardChanged();
   await sleep(signal.AGENT_BOARD_SIGNAL_WINDOW_MS + 100);
   check("no listener, no ping", calls === 2);
+  let heard = 0;
+  const off = signal.subscribeAgentBoardChanged(() => {
+    heard += 1;
+  });
+  signal.signalAgentBoardChanged();
+  signal.signalAgentBoardChanged();
+  await sleep(signal.AGENT_BOARD_SIGNAL_WINDOW_MS + 100);
+  check("a subscriber hears one ping without the view's listener", heard === 1 && calls === 2);
+  off();
+  signal.signalAgentBoardChanged();
+  await sleep(signal.AGENT_BOARD_SIGNAL_WINDOW_MS + 100);
+  check("an unsubscribed reader hears nothing", heard === 1);
 }
 
 const notifierStubs = {
