@@ -239,7 +239,7 @@ own. With two browsers paired, ids carry the browser:
   tabs", and `close` only closes tabs an agent opened. Without `group` the
   tab goes in a group named after the caller's workspace, so it never lands
   loose among the user's own tabs.
-- **Keep agents in your Chrome** (Settings > General > Chrome extension, on
+- **Keep agents in your Chrome** (Settings > Browser > Chrome extension, on
   by default) keeps agents off browser tools that start a Chrome of their
   own, with a separate profile and the "controlled by automated test
   software" bar. For the Claude Code sessions Codara starts, its `--settings`

@@ -15,7 +15,7 @@ module.exports = {
       name: "codara_terminal_servers",
       rpc: "terminal.servers",
       description:
-        "Dev servers of this workspace, run by Codara apart from any agent so they survive agent restarts. list: id, state, health (port check), url. start: id of a saved one, or command (+cwd, port, env) to save; refuses a second copy or a busy port; waits up to 15 s for ready. stop, restart, logs (since=cursor), save, forget. Env values are never stored.",
+        "Dev servers of this workspace, kept by Codara across agent restarts. list: id, state, health (port check), url. start: id of a saved one, or command (+cwd, port, env) to save; refuses a second copy or a busy port; waits up to 15 s for ready. stop, restart, logs (since=cursor), save, forget. Env values are never stored.",
       inputSchema: {
         type: "object",
         properties: {
