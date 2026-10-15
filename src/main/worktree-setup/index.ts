@@ -167,9 +167,12 @@ export async function startWorktreeSetup(
 /** The adapter agent-worktrees.ts takes as its `worktreeSetup` dependency. */
 export function agentWorktreeSetupRunner() {
   return {
+    // Null only when nothing is configured. A setup that could not start
+    // throws, so the agent's result says why instead of "no setup ran".
     start: async (request: Omit<StartSetupRequest, "userCommand">) => {
       const started = await startWorktreeSetup(request);
-      return started && !isWorktreeSetupStartError(started) ? started : null;
+      if (started && isWorktreeSetupStartError(started)) throw new Error(started.error);
+      return started;
     },
     whenPrepared: (id: string) => worktreeSetupService().whenPrepared(id),
     waitFor: (id: string, timeoutMs: number) => worktreeSetupService().waitFor(id, timeoutMs),

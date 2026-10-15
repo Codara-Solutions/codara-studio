@@ -939,6 +939,19 @@ async function agentSuite(m, scratch) {
     assert.equal(fs.readFileSync(path.join(repo, ".env"), "utf8"), "TOKEN=1\n");
   });
 
+  await check("a setup that cannot start is reported, not taken for no setup", async () => {
+    const broken = {
+      ...deps,
+      worktreeSetup: { ...runner, start: async () => Promise.reject(new Error("The worktree folder does not exist")) },
+    };
+    const created = await agent.createAgentWorktree(caller, { branch: "agent/setup-broken" }, broken);
+    assert.equal(created.ok, true, JSON.stringify(created));
+    assert.equal(created.setup.state, "failed");
+    assert.match(created.setup.error, /could not start: The worktree folder does not exist/);
+    assert.match(created.setup.hint, /Copy the ignored files and run the setup yourself/);
+    assert.match(created.next, /setup\.error/);
+  });
+
   await check("an edited copy still blocks removal", async () => {
     const created = await agent.createAgentWorktree(caller, { branch: "agent/setup-edited" }, deps);
     write(path.join(created.path, ".env"), "TOKEN=changed\n");
