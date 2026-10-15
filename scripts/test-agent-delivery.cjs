@@ -57,6 +57,7 @@ function fakeDeps() {
     deps: {
       async paneWorkspace(paneId) { return { "pane-a": "ws-1", "pane-b": "ws-1", "pane-x": "ws-2" }[paneId] ?? null; },
       async pasteIntoPane(paneId, text, submit) { log.push({ paste: paneId, text, submit }); },
+      paneRunning(paneId) { return paneId !== "pane-b"; },
       async runWorkspace(runId) { return { "run-1": "ws-1" }[runId] ?? null; },
       async addChatMessage(runId, text, attachments) { log.push({ chat: runId, text, attachments }); },
       async sourceAllowed(file) { return path.dirname(file) === HOME; },
@@ -105,6 +106,14 @@ const PNG = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
       delivery.deliver({ workspaceId: "ws-1", target: { kind: "pane", paneId: "pane-x" }, text: "x", attachments: [{ name: "a.txt", data: "eA==" }], source: "picker" }),
       (error) => error instanceof lib.AgentDeliveryError && /another workspace/.test(error.message),
     );
+    // A pane whose agent sleeps (agent hibernation) has no process to take
+    // the paste; the pty layer would drop it without a word.
+    const pastes = log.length;
+    await assert.rejects(
+      delivery.deliver({ workspaceId: "ws-1", target: { kind: "pane", paneId: "pane-b" }, text: "x", attachments: [{ name: "a.txt", data: "eA==" }], source: "review" }),
+      (error) => error instanceof lib.AgentDeliveryError && /Nothing is running in that terminal/.test(error.message),
+    );
+    assert.equal(log.length, pastes, "nothing is pasted into a pane without a process");
     await assert.rejects(delivery.deliver({ workspaceId: "ws-1", target: { kind: "chat", runId: "run-9" }, text: "x", source: "picker" }), /no longer exists/);
     await assert.rejects(delivery.deliver({ workspaceId: "ws-1", target: { kind: "pane", paneId: "pane-a" }, text: "  ", source: "picker" }), /Nothing to send/);
     await assert.rejects(delivery.deliver({ workspaceId: "ws-1", target: { kind: "mail" }, text: "x", source: "picker" }), /Unknown delivery target/);

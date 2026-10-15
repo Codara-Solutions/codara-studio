@@ -206,6 +206,11 @@ async function main() {
     assert.equal(targets.paneActivity(shellPane.leaf, undefined, { "p-shell": true }), "agent", "an agent main detected");
     assert.equal(targets.paneActivity(agentPane.leaf, undefined, {}), "agent");
     assert.equal(targets.paneActivity(agentLeaf("p-quit", { agentRunning: false }), undefined, {}), "shell", "an agent that quit");
+    assert.equal(
+      targets.paneActivity({ kind: "leaf", paneId: "p-nap", hibernation: { runtime: "codex", sleptAt: 1 } }, undefined, {}),
+      "agent",
+      "a sleeping pane wakes into its agent, so a shell command never goes there",
+    );
 
     const sh = shell("s");
     assert.deepEqual(targets.planShellCommand(sh, shellPane, "shell"), { kind: "pane", pane: shellPane });

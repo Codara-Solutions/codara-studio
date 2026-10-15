@@ -83,6 +83,8 @@ export function paneActivity(
   runtime: PaneRuntimeView | undefined,
   detected: Readonly<Record<string, true>>,
 ): PaneActivity {
+  // A sleeping pane (agent hibernation) wakes into its agent, never a shell.
+  if (leaf.hibernation) return "agent";
   const worker = leaf.worker && leaf.worker.agentRunning !== false && leaf.worker.state !== "done" ? leaf.worker : null;
   if (worker || detected[leaf.paneId] || detected[leafInjectId(leaf)]) return "agent";
   if (runtime?.altScreenActive) return "program";

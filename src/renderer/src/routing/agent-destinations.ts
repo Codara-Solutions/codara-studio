@@ -93,10 +93,13 @@ export function paneDestinations(
     for (const [index, leaf] of cells.entries()) {
       terminalIndex++;
       const paneId = leafInjectId(leaf);
+      // Codara stopped this pane's idle agent (agent hibernation): nothing
+      // runs there to take a paste until the user opens the pane again.
+      const sleeping = leaf.hibernation ?? null;
       const worker = leaf.worker && leaf.worker.agentRunning !== false ? leaf.worker : null;
       const detected = Boolean(state.detected[leaf.paneId] || state.detected[paneId]);
-      const agent = Boolean(worker) || detected || state.altScreen.has(leaf.paneId);
-      const name = runtimeLabel(worker?.runtime) ?? (agent ? "Agent" : "Terminal");
+      const agent = Boolean(worker) || detected || state.altScreen.has(leaf.paneId) || Boolean(sleeping);
+      const name = runtimeLabel(worker?.runtime ?? sleeping?.runtime) ?? (agent ? "Agent" : "Terminal");
       const place = cells.length > 1 ? `${tab.title} (pane ${index + 1})` : tab.title || `Terminal ${terminalIndex}`;
       const runTitle = worker?.source === "spark" ? runs.find((run) => run.id === worker.runId)?.title : undefined;
       const focused = focusedPaneId !== null && (leaf.paneId === focusedPaneId || paneId === focusedPaneId);
@@ -107,8 +110,11 @@ export function paneDestinations(
         agent,
         focused,
         label: `${name} · ${runTitle ?? place}`,
-        sublabel: focused ? "focused" : agent ? undefined : "no agent detected",
+        sublabel: sleeping ? "asleep" : focused ? "focused" : agent ? undefined : "no agent detected",
         group: "agents",
+        ...(sleeping
+          ? { disabled: true, disabledReason: "This agent is asleep. Open its terminal to wake it, then send." }
+          : {}),
       });
     }
   }
@@ -162,7 +168,7 @@ export function defaultDestination(
   activeRunId: string | null,
 ): string {
   const has = (id: string) => destinations.some((d) => d.id === id && !d.disabled);
-  const panes = destinations.filter((d): d is PaneDestination => d.kind === "pane");
+  const panes = destinations.filter((d): d is PaneDestination => d.kind === "pane" && !d.disabled);
   const focused = panes.find((d) => d.agent && d.focused);
   if (focused) return focused.id;
   if (owner?.paneId && has(`pane:${owner.paneId}`)) return `pane:${owner.paneId}`;

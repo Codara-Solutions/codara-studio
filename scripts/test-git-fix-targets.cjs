@@ -58,6 +58,9 @@ test("targets: agent panes only, chats, installed CLIs, then the inbox", ({ mod 
   assert.deepEqual(mod.fixTargets(DESTINATIONS, null).filter((t) => t.kind === "agent-new"), [], "nothing new to start while the check runs");
   const noWorkspace = mod.fixTargets([{ ...DESTINATIONS[4], disabled: true }], null);
   assert.equal(noWorkspace.find((t) => t.id === "chat-new").disabled, true);
+  const asleep = mod.fixTargets([{ ...DESTINATIONS[0], sublabel: "asleep", disabled: true }, DESTINATIONS[2]], null);
+  assert.equal(asleep.find((t) => t.id === "pane:p-claude").disabled, true, "a sleeping agent is shown but cannot be picked");
+  assert.equal(mod.defaultFixTarget(asleep, "pane", "pane:p-claude"), "pane:p-codex", "nor is it the default");
 });
 
 test("default target: what was used last, else the focused agent, chat, new CLI, inbox", ({ mod }) => {

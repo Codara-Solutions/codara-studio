@@ -84,6 +84,21 @@ const ROOT = path.resolve(__dirname, "..");
   assert.equal(defaultDestination([...paneDestinations([tabs[1]], runs, { detected: {}, altScreen: new Set() }, null), INBOX_DESTINATION], null, null), "inbox", "no agent anywhere: the inbox");
   assert.equal(defaultDestination(all("p-shell"), { runId: null, paneId: "p-closed" }, null), "pane:p-codex", "an owner pane that closed is skipped");
 
+  // A sleeping agent (agent hibernation) is offered, named, and refused:
+  // nothing runs there to take a paste until the pane is opened.
+  const sleeping = { kind: "leaf", paneId: "p-sleep", hibernation: { runtime: "claude", sleptAt: 1 } };
+  const withSleeper = [{ kind: "terminal", id: "t9", title: "Nap", activePaneId: "p-sleep", root: sleeping }, tabs[1]];
+  const sleeperPanes = paneDestinations(withSleeper, runs, state, "p-sleep");
+  const sleeper = sleeperPanes.find((d) => d.paneId === "p-sleep");
+  assert.equal(sleeper.label, "Claude Code · Nap");
+  assert.equal(sleeper.disabled, true, "a sleeping pane cannot be sent to");
+  assert.equal(sleeper.sublabel, "asleep");
+  assert.equal(
+    defaultDestination([...sleeperPanes, INBOX_DESTINATION], null, null),
+    "pane:p-unknown",
+    "a focused sleeping agent is never the default",
+  );
+
   assert.equal(runtimeLabel("claude"), "Claude Code");
   assert.equal(runtimeLabel("opencode"), "Opencode");
   assert.equal(runtimeLabel(null), null);

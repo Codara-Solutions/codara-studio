@@ -271,6 +271,13 @@ export function useQuickCommandsApi(inputs: QuickCommandsInputs): QuickCommandsA
           warn("No agent in the focused terminal", "Click into a terminal running Claude Code, Codex, Grok or Pi, then run it again.");
           return;
         case "pane": {
+          // Nothing runs in a sleeping pane to take the prompt. Opening it
+          // wakes the agent; the prompt is not queued behind that.
+          if (plan.pane.leaf.hibernation) {
+            focusPane(plan.pane);
+            warn(`"${command.label}" was not sent`, "The agent in that terminal was asleep and is waking up now. Run the command again once it is back.");
+            return;
+          }
           const folder = paneFolder(plan.pane.leaf, state.paneRuntime.current.get(plan.pane.leaf.paneId), workspace.cwd);
           const text = await expand(command, folder, "prompt");
           if (text === null) return;

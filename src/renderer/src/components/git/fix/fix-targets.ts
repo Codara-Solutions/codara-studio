@@ -83,6 +83,8 @@ export function fixTargets(
         ...(destination.sublabel ? { sublabel: destination.sublabel } : {}),
         group: "agents",
         paneId: destination.paneId,
+        // A sleeping agent (agent hibernation) cannot take the prompt yet.
+        ...(destination.disabled ? { disabled: true } : {}),
       });
     } else if (destination.kind === "chat" && destination.runId) {
       out.push({
