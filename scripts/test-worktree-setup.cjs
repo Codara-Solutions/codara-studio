@@ -666,6 +666,80 @@ async function runSuite(m, scratch) {
       }
     });
 
+    await check("a copy git would see in the worktree is taken out again", async () => {
+      const wt = loneWorktree("lone-copy-seen");
+      // The worktree's own rules no longer ignore .env (an older .gitignore,
+      // or one the main checkout has not committed).
+      write(path.join(wt, ".gitignore"), "cache/\n");
+      const logLines = [];
+      const result = await materialize.materializeSetup({
+        sourceRoot: lone,
+        worktreeRoot: wt,
+        copies: [{ path: ".env", kind: "file" }, { path: "cache", kind: "dir" }],
+        links: [],
+        log: (line) => logLines.push(line),
+      });
+      assert.equal(fs.existsSync(path.join(wt, ".env")), false);
+      assert.equal(fs.readFileSync(path.join(wt, "cache", "blob.bin"), "utf8"), "cached\n");
+      assert.deepEqual(result.copied, ["cache"]);
+      assert.deepEqual(result.copiedFiles.map((copy) => copy.path), ["cache/blob.bin"]);
+      assert.ok(result.skipped.some((s) => s.path === ".env" && /does not ignore/.test(s.reason)), JSON.stringify(result));
+      assert.ok(logLines.some((line) => /^Took out 1 copy/.test(line)));
+      assert.equal(git(wt, ["status", "--porcelain", "--untracked-files=all"]), "M .gitignore");
+      // The main checkout keeps its file.
+      assert.equal(fs.readFileSync(path.join(lone, ".env"), "utf8"), "LONE=1\n");
+    });
+
+    await check("a link that cannot be recorded is taken out", async () => {
+      const wt = loneWorktree("lone-unrecorded");
+      const result = await materialize.materializeSetup({
+        sourceRoot: lone,
+        worktreeRoot: wt,
+        copies: [],
+        links: ["cache"],
+        log: () => undefined,
+        onLinked: async () => {
+          throw new Error("disk full");
+        },
+      });
+      assert.deepEqual(result.linked, []);
+      assert.equal(fs.existsSync(path.join(wt, "cache")), false);
+      assert.ok(result.warnings.some((w) => /could not record/i.test(w) && /disk full/.test(w)));
+      assert.equal(fs.readFileSync(path.join(lone, "cache", "blob.bin"), "utf8"), "cached\n");
+    });
+
+    await check("removal stops when setup keeps running or a link stays", async () => {
+      const wt = loneWorktree("lone-stuck");
+      const setupDir = await links.setupDirFor(wt);
+      fs.mkdirSync(setupDir, { recursive: true });
+      fs.symlinkSync(path.join(lone, "cache"), path.join(wt, "cache"), "dir");
+      fs.writeFileSync(
+        path.join(setupDir, links.SETUP_MANIFEST_FILE),
+        JSON.stringify({ version: 1, sourceRoot: lone, copies: [], links: [{ path: "cache", target: path.join(lone, "cache") }] }),
+      );
+      links.setBeforeWorktreeRemoval(async () => false);
+      try {
+        await assert.rejects(links.prepareWorktreeRemoval(wt), /did not stop/);
+        assert.equal(fs.lstatSync(path.join(wt, "cache")).isSymbolicLink(), true);
+      } finally {
+        links.setBeforeWorktreeRemoval(null);
+      }
+      if (process.getuid?.() !== 0) {
+        // The link cannot be unlinked: its folder is read-only.
+        fs.chmodSync(wt, 0o555);
+        try {
+          await assert.rejects(links.prepareWorktreeRemoval(wt), /Could not take out the linked folder cache/);
+        } finally {
+          fs.chmodSync(wt, 0o755);
+        }
+        assert.equal(fs.lstatSync(path.join(wt, "cache")).isSymbolicLink(), true);
+      }
+      const released = await links.prepareWorktreeRemoval(wt);
+      assert.deepEqual(released.map((link) => link.path), ["cache"]);
+      assert.equal(fs.existsSync(path.join(wt, "cache")), false);
+      assert.equal(fs.readFileSync(path.join(lone, "cache", "blob.bin"), "utf8"), "cached\n");
+    });
+
     await check("removal stops setup and waits until it no longer writes", async () => {
       const wt = loneWorktree("lone-quiesce");
       write(path.join(lone, ".codara", "worktree.json"), JSON.stringify({ link: ["cache"], setup: "sleep 30 & wait" }));

@@ -122,9 +122,7 @@ export function worktreeSetupService(): WorktreeSetupService {
   // Every removal path stops the worktree's setup first and waits until it
   // no longer writes there, so its links are on record and nothing lands in
   // a folder being deleted.
-  setBeforeWorktreeRemoval(async (worktreePath) => {
-    await current.quiesce(worktreePath);
-  });
+  setBeforeWorktreeRemoval((worktreePath) => current.quiesce(worktreePath));
   return service;
 }
 
