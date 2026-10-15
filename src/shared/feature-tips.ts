@@ -55,7 +55,7 @@ export interface FeatureTip {
    * tour of a control that is not there.
    */
   when?: string;
-  /** How many elements must match `when` (default 1). */
+  /** How many elements matching `when` must be on screen (default 1). */
   whenAtLeast?: number;
   /** "Show me": a short tour over the real controls. */
   tour?: readonly FeatureTourStep[];
@@ -333,7 +333,9 @@ export const FEATURE_CATALOG: readonly FeatureCatalogEntry[] = [
       when: '[title^="On branch "]',
       tour: [
         {
-          target: 'button[title="Workspace actions"]',
+          // The actions of a workspace on a git branch: a plain folder has no
+          // branch to copy.
+          target: '[data-workspace-id]:has([title^="On branch "]) button[title="Workspace actions"]',
           title: "Create an isolated worktree",
           body: "Open a workspace's actions and choose Create isolated worktree. It shows up under the workspace.",
           placement: "right",
@@ -405,6 +407,9 @@ export const FEATURE_CATALOG: readonly FeatureCatalogEntry[] = [
     tip: {
       title: "Give one pane the whole tab",
       body: "Zoom a pane to read it full size, then zoom back to see the others. Shortcut: {shortcut:terminal.toggleZoom}.",
+      // Zoom only means something with another pane beside it.
+      when: 'button[title^="Zoom pane"]',
+      whenAtLeast: 2,
       tour: [
         {
           target: 'button[title^="Zoom pane"]',

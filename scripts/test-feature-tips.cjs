@@ -484,6 +484,67 @@ async function main() {
     }
   });
 
+  check("a tip's control counts only where the person can see it", () => {
+    const saved = ["document", "window"].map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]);
+    const box = (left, top, width = 20, height = 20) => ({ left, top, width, height, right: left + width, bottom: top + height });
+    const cover = { contains: () => false, closest: () => null };
+    const element = (rect, covered = false) => {
+      const self = { covered, closest: () => null, getBoundingClientRect: () => rect, contains: (other) => other === self };
+      return self;
+    };
+    const withDom = (elements, fn) => {
+      globalThis.window = { innerWidth: 1000, innerHeight: 800 };
+      globalThis.document = {
+        querySelectorAll: () => elements,
+        elementsFromPoint: (x, y) => {
+          const hit = elements.find((candidate) => {
+            const rect = candidate.getBoundingClientRect();
+            return !candidate.covered && x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+          });
+          return [hit ?? cover];
+        },
+      };
+      return fn();
+    };
+    try {
+      const visible = () => element(box(100, 100));
+      const zoom = 'button[title^="Zoom pane"]';
+      assert.equal(withDom([visible(), element(box(400, 100))], () => dom.conditionMet(zoom, 2)), true, "two panes side by side");
+      // A pane in a background tab keeps its toolbar in the DOM with no box.
+      const hidden = element(box(0, 0, 0, 0));
+      assert.equal(withDom([visible(), hidden], () => dom.conditionMet(zoom, 2)), false, "one pane here, one in another tab");
+      assert.equal(withDom([visible(), hidden], () => dom.conditionMet(zoom, 1)), true);
+      assert.equal(withDom([visible(), element(box(400, 100), true)], () => dom.conditionMet(zoom, 2)), false, "covered");
+      assert.equal(withDom([visible(), element(box(2000, 100))], () => dom.conditionMet(zoom, 2)), false, "outside the window");
+      assert.equal(withDom([], () => dom.conditionMet(zoom, 1)), false);
+    } finally {
+      for (const [name, descriptor] of saved) {
+        if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+        else delete globalThis[name];
+      }
+    }
+  });
+
+  check("zoom is offered beside another pane, and the worktree tour points at a git workspace", () => {
+    const zoom = FEATURE_CATALOG.find((entry) => entry.id === "zoom-pane");
+    assert.deepEqual(tipConditions(zoom)[0], { selector: 'button[title^="Zoom pane"]', atLeast: 2 });
+    const worktree = FEATURE_CATALOG.find((entry) => entry.id === "isolated-worktree");
+    assert.match(worktree.tip.tour[0].target, /^\[data-workspace-id\]:has\(\[title\^="On branch "\]\) /);
+  });
+
+  check("an open button opens a Settings page that exists", () => {
+    const index = read(path.join(RENDERER, "components", "settings", "settings-index.ts"));
+    const union = /export type SettingsTab =([^;]+);/.exec(index)?.[1] ?? "";
+    const tabs = new Set([...union.matchAll(/"([\w-]+)"/g)].map((match) => match[1]));
+    assert.ok(tabs.size > 3, "Settings tabs were read");
+    const app = read(path.join(RENDERER, "App.tsx"));
+    for (const entry of FEATURE_CATALOG.filter((item) => item.tip?.open)) {
+      const { event, detail } = entry.tip.open;
+      assert.ok(app.includes(`addEventListener("${event}"`), `${entry.id}: nothing listens to ${event}`);
+      if (event === "spark:open-settings") assert.ok(tabs.has(detail?.section), `${entry.id}: no Settings page ${detail?.section}`);
+    }
+  });
+
   check("pending tips skip used and shown features, fresh ones first", () => {
     let state = emptyFeatureTipsState();
     const all = pendingTips(state);
