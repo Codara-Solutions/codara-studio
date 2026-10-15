@@ -182,7 +182,8 @@ export function normalizeLinkPath(raw: string): string | null {
   if (!normalized || normalized.startsWith("/") || /^[a-zA-Z]:/.test(normalized)) return null;
   if (/[*?[\]!]/.test(normalized) || /[\u0000-\u001f]/.test(normalized)) return null;
   const segments = normalized.split("/");
-  if (segments.some((segment) => segment === "" || segment === "." || segment === ".." || segment === ".git")) {
+  // ".GIT" is the same folder on the case-insensitive disks of macOS and Windows.
+  if (segments.some((segment) => segment === "" || segment === "." || segment === ".." || segment.toLowerCase() === ".git")) {
     return null;
   }
   return normalized;

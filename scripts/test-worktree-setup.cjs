@@ -156,7 +156,7 @@ async function runSuite(m, scratch) {
   });
 
   await check("rejects links that leave the repository or are patterns", () => {
-    for (const bad of ["../x", "/abs", "C:/x", "a/../../b", "*.d", ".git/hooks", "a//b", "."]) {
+    for (const bad of ["../x", "/abs", "C:/x", "a/../../b", "*.d", ".git/hooks", ".GIT/hooks", "sub/.Git", "a//b", "."]) {
       assert.equal(shared.normalizeLinkPath(bad), null, bad);
     }
     const parsed = shared.parseWorktreeSetupFile('{"link":["../up"],"waitForSetup":"yes","setup":5}');
@@ -377,6 +377,44 @@ async function runSuite(m, scratch) {
     });
     assert.equal(fs.existsSync(path.join(outside, "web")), false);
     assert.ok(result.skipped.some((s) => /link or a file/.test(s.reason)));
+  });
+
+  await check("never copies or links the new worktree into itself", async () => {
+    // A repository that holds its own worktrees folder (a dotfiles repository
+    // at the home folder holds Codara's): copying that folder would copy the
+    // new worktree into itself, deeper at every level.
+    const nest = path.join(scratch, "nest");
+    execFileSync("git", ["init", "-q", "-b", "main", nest]);
+    write(path.join(nest, ".gitignore"), "wts/\n.env\n");
+    write(path.join(nest, "README.md"), "x\n");
+    commitAll(nest, "init");
+    write(path.join(nest, ".env"), "NEST=1\n");
+    write(path.join(nest, "wts", "notes.txt"), "kept\n");
+    git(nest, ["worktree", "add", "-q", "-b", "inner", path.join(nest, "wts", "inner")]);
+    const wt = fs.realpathSync(path.join(nest, "wts", "inner"));
+    const linked = await materialize.materializeSetup({
+      sourceRoot: fs.realpathSync(nest),
+      worktreeRoot: wt,
+      copies: [],
+      links: ["wts"],
+      log: () => undefined,
+    });
+    assert.deepEqual(linked.linked, []);
+    assert.ok(linked.skipped.some((s) => s.path === "wts" && /new worktree itself/.test(s.reason)), JSON.stringify(linked.skipped));
+    const copied = await materialize.materializeSetup({
+      sourceRoot: fs.realpathSync(nest),
+      worktreeRoot: wt,
+      copies: [
+        { path: ".env", kind: "file" },
+        { path: "wts", kind: "dir" },
+      ],
+      links: [],
+      log: () => undefined,
+    });
+    assert.equal(fs.readFileSync(path.join(wt, ".env"), "utf8"), "NEST=1\n");
+    assert.equal(fs.readFileSync(path.join(wt, "wts", "notes.txt"), "utf8"), "kept\n");
+    assert.equal(fs.existsSync(path.join(wt, "wts", "inner")), false, "the worktree is not copied into itself");
+    assert.deepEqual(copied.copiedFiles.map((copy) => copy.path).sort(), [".env", "wts/notes.txt"]);
   });
 
   await check("a link inside a folder copied at another depth never points out", async () => {
