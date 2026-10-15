@@ -255,6 +255,11 @@ function sortedEqual(actual, expected, label) {
     assert.match(studio.init.instructions, /codara_worktree_remove/, "a terminal agent learns the worktree lifecycle");
     assert.match(studio.init.instructions, /Dev servers: .*codara_terminal_servers.*keeps them running when you exit or restart/, "dev servers go to the keeper, not the agent's own shell");
     assert.doesNotMatch(studio.init.instructions, /baseRevision/, "chat-only guidance stays out of a terminal session");
+    // Agents use the user's own Chrome through the extension, in their
+    // workspace's tab group, and never start a browser of their own.
+    assert.match(studio.init.instructions, /use codara_preview_chrome open; the tab lands in this workspace's tab group/);
+    assert.match(studio.init.instructions, /local dev servers the in-app browser \(codara_preview_navigate\) stays the default/);
+    assert.match(studio.init.instructions, /Never launch a separate browser or Chrome window: no chrome-devtools-mcp, Playwright or puppeteer windows, no google-chrome or xdg-open/);
     assert.notStrictEqual(studio.init.serverInfo.version, "0.1.0", "serverInfo reports Codara's version");
     const legacyClient = await listTools(undefined, {}, { protocolVersion: "2024-11-05" });
     assert.strictEqual(legacyClient.init.protocolVersion, "2024-11-05");
