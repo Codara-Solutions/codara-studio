@@ -7,7 +7,7 @@
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { createWriteStream, existsSync, promises as fsp, renameSync, writeFileSync, type WriteStream } from "node:fs";
+import { createWriteStream, existsSync, promises as fsp, renameSync, rmSync, writeFileSync, type WriteStream } from "node:fs";
 import { join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import {
@@ -74,6 +74,8 @@ const LIST_LIMIT = 200;
 const TAIL_BYTES = 64 * 1024;
 const DEFAULT_LOG_CAP = 4 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 45 * 60 * 1000;
+// How long a finished step's output may keep arriving before its pipes are let go.
+const STEP_EXIT_GRACE_MS = 2_000;
 const KILL_GRACE_MS = 3_000;
 const INTERRUPTED = "Codara closed while setup was running";
 
@@ -258,8 +260,18 @@ export class WorktreeSetupService {
     });
     this.runs.set(id, run);
 
-    run.log = createWriteStream(run.logFile, { flags: "w" });
-    run.log.on("error", () => {
+    // The setup folder sits in the repository's .git, which anything working
+    // in the repository can write. A file planted there as a link must not
+    // send Codara's writes elsewhere: each file is replaced, never opened
+    // through what was there, and kept private (the log echoes commands).
+    try {
+      rmSync(run.logFile, { force: true });
+      assertCodaraOwnedWrite(run.logFile);
+      run.log = createWriteStream(run.logFile, { flags: "wx", mode: 0o600 });
+    } catch {
+      run.log = null;
+    }
+    run.log?.on("error", () => {
       run.log = null;
     });
     this.writeLog(run, `Worktree setup, ${stamp(this.now())}\n`);
@@ -638,16 +650,15 @@ export class WorktreeSetupService {
     if (command.kind === "repo") {
       if (this.platform === "win32") return lines.map(cmdLine);
       const script = join(run.setupDir, "repo-setup.sh");
-      await fsp.writeFile(script, `set -e\n${command.command}\n`, { mode: 0o600 });
+      await writePrivateFile(script, `set -e\n${command.command}\n`);
       return [{ file: posixRunner(), args: [script], shown: command.command }];
     }
     const shell = await this.deps.userShell().catch(() => null);
     if (shell?.kind === "pwsh") {
       const script = join(run.setupDir, "user-setup.ps1");
-      await fsp.writeFile(
+      await writePrivateFile(
         script,
         `Set-Location -LiteralPath ${pwshQuote(run.worktreeReal)}\r\n${command.command.replace(/\n/g, "\r\n")}\r\nif ($LASTEXITCODE) { exit $LASTEXITCODE }\r\n`,
-        { mode: 0o600 },
       );
       return [
         {
@@ -663,7 +674,7 @@ export class WorktreeSetupService {
     // A POSIX shell, Git Bash included when it is the default on Windows:
     // the command was written for the terminal it used to be typed into.
     const script = join(run.setupDir, "user-setup.sh");
-    await fsp.writeFile(script, `${command.command.replace(/\r\n/g, "\n")}\n`, { mode: 0o600 });
+    await writePrivateFile(script, `${command.command.replace(/\r\n/g, "\n")}\n`);
     return [
       {
         file: shell?.kind === "posix" ? shell.path : posixRunner(),
@@ -752,7 +763,22 @@ export class WorktreeSetupService {
         this.writeLog(run, `Could not start: ${err.message}\n`);
         settle(127);
       });
-      child.on("close", (code, signal) => settle(code ?? (signal ? 128 + (signalNumber(signal) ?? 15) : null)));
+      const exitCode = (code: number | null, signal: NodeJS.Signals | null) =>
+        code ?? (signal ? 128 + (signalNumber(signal) ?? 15) : null);
+      child.on("close", (code, signal) => settle(exitCode(code, signal)));
+      // A process the step started and left behind (a daemon that called
+      // setsid, a Windows `start`) can hold the pipes open, so "close" never
+      // comes and the setup would hold its command slot for good. The step is
+      // over once its own process is: past a short grace for the last output,
+      // the pipes are let go.
+      child.on("exit", (code, signal) => {
+        setTimeout(() => {
+          if (settled) return;
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          settle(exitCode(code, signal));
+        }, STEP_EXIT_GRACE_MS).unref();
+      });
     });
   }
 
@@ -856,8 +882,11 @@ export class WorktreeSetupService {
   private persistSync(run: Run): void {
     try {
       const file = this.statusFile(run);
-      writeFileSync(`${file}.tmp`, JSON.stringify(run.status, null, 2));
-      renameSync(`${file}.tmp`, file);
+      const tmp = `${file}.tmp`;
+      rmSync(tmp, { force: true });
+      assertCodaraOwnedWrite(tmp);
+      writeFileSync(tmp, JSON.stringify(run.status, null, 2), { flag: "wx", mode: 0o600 });
+      renameSync(tmp, file);
     } catch {
       /* the worktree may be gone */
     }
@@ -870,7 +899,7 @@ export class WorktreeSetupService {
     const write = async () => {
       if (!existsSync(join(file, ".."))) return;
       const tmp = `${file}.${process.pid}.tmp`;
-      await fsp.writeFile(tmp, body);
+      await writePrivateFile(tmp, body);
       await fsp.rename(tmp, file);
     };
     this.writeChain = this.writeChain.then(write, write);
@@ -926,6 +955,16 @@ function posixRunner(): string {
 function signalNumber(signal: NodeJS.Signals): number | null {
   const table: Partial<Record<NodeJS.Signals, number>> = { SIGHUP: 1, SIGINT: 2, SIGKILL: 9, SIGTERM: 15 };
   return table[signal] ?? null;
+}
+
+/**
+ * Writes a new private file in the setup folder. Whatever was at the path,
+ * a planted link included, is removed first and never written through.
+ */
+async function writePrivateFile(path: string, body: string): Promise<void> {
+  await fsp.rm(path, { force: true });
+  assertCodaraOwnedWrite(path);
+  await fsp.writeFile(path, body, { flag: "wx", mode: 0o600 });
 }
 
 /** The short summary agents get for a setup. */

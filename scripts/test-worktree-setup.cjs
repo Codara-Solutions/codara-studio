@@ -538,6 +538,39 @@ async function runSuite(m, scratch) {
     assert.ok(Date.now() - t0 < 5_000);
   });
 
+  await check("a step ends with its own process even when a leftover holds its output", async () => {
+    const wt = addWorktree("wt-leftover");
+    // The background sleep keeps the step's stdout open after the shell exits.
+    write(path.join(repo, ".codara", "worktree.json"), JSON.stringify({ setup: ["sleep 8 &", "echo started"] }));
+    const svc = makeService();
+    const t0 = Date.now();
+    const started = await svc.start({ sourceCwd: repo, worktreePath: wt, trigger: "ui", userCommand: null });
+    const done = await svc.waitFor(started.id, 20_000);
+    assert.equal(done.state, "succeeded");
+    assert.ok(Date.now() - t0 < 6_000, `took ${Date.now() - t0} ms`);
+    assert.match((await svc.readLog(started.id)).text, /^started$/m);
+  });
+
+  await check("a link planted in the setup folder is replaced, never written through", async () => {
+    const wt = addWorktree("wt-planted");
+    write(path.join(repo, ".codara", "worktree.json"), JSON.stringify({ setup: "echo planted-check" }));
+    const setupDir = await links.setupDirFor(wt);
+    fs.mkdirSync(setupDir, { recursive: true });
+    const victim = path.join(scratch, "victim.txt");
+    write(victim, "keep me\n");
+    for (const name of ["setup.log", "status.json", "repo-setup.sh"]) fs.symlinkSync(victim, path.join(setupDir, name));
+    const svc = makeService();
+    const started = await svc.start({ sourceCwd: repo, worktreePath: wt, trigger: "ui", userCommand: null });
+    const done = await svc.waitFor(started.id, 20_000);
+    assert.equal(done.state, "succeeded");
+    assert.equal(fs.readFileSync(victim, "utf8"), "keep me\n");
+    for (const name of ["setup.log", "status.json", "repo-setup.sh"]) {
+      assert.equal(fs.lstatSync(path.join(setupDir, name)).isSymbolicLink(), false, name);
+    }
+    assert.equal(fs.statSync(path.join(setupDir, "setup.log")).mode & 0o777, 0o600);
+    assert.match((await svc.readLog(started.id)).text, /^planted-check$/m);
+  });
+
   await check("a setup still running when Codara closed reads as stopped", async () => {
     const wt = addWorktree("wt-interrupted");
     write(path.join(repo, ".codara", "worktree.json"), JSON.stringify({ setup: "sleep 30" }));

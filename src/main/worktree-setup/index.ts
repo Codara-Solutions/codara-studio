@@ -119,6 +119,10 @@ export function worktreeSetupService(): WorktreeSetupService {
   const current = service;
   // Optional: unit suites load this module against an Electron stub.
   app?.once?.("will-quit", () => current.dispose());
+  // Setup commands run in their own process group, so they outlive Codara
+  // unless stopped. The quit's 5 second hard exit and a crash skip
+  // will-quit; "exit" still runs (dispose is synchronous on POSIX).
+  process.once("exit", () => current.dispose());
   // Every removal path stops the worktree's setup first and waits until it
   // no longer writes there, so its links are on record and nothing lands in
   // a folder being deleted.
