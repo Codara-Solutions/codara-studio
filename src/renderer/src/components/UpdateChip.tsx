@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { UpdateRestartWait } from "./UpdateRestartWait";
 
 // Compact update control for the window chrome: invisible until an update
@@ -132,6 +132,9 @@ function fmtMB(bytes: number): string {
 
 export default function UpdateChip(): React.ReactElement | null {
   const [state, setState] = useState<ChipState>({ kind: "idle" });
+  // Read by the updater listener, which subscribes once.
+  const stateKindRef = useRef<ChipState["kind"]>(state.kind);
+  stateKindRef.current = state.kind;
   const [hover, setHover] = useState(false);
   // Details popover, toggled by clicking the chip while the download runs.
   const [open, setOpen] = useState(false);
@@ -152,8 +155,13 @@ export default function UpdateChip(): React.ReactElement | null {
   useEffect(() => {
     if (!window.spark?.updater) return undefined;
     const off = window.spark.updater.onEvent((event) => {
-      // A restart that starts waiting says so where the click happened.
-      if (event.kind === "restart-waiting") setOpen(true);
+      // A restart that starts waiting says so where the click happened. A
+      // later change to what it waits for (an agent finished) updates the
+      // list without reopening a popover the user closed.
+      if (event.kind === "restart-waiting" && stateKindRef.current !== "waiting") {
+        stateKindRef.current = "waiting";
+        setOpen(true);
+      }
       setState((current) => reduceEvent(current, event));
     });
     return off;
