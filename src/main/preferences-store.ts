@@ -20,6 +20,7 @@ import {
   type PrefKey,
   type ThemePref,
 } from "@shared/types";
+import { normalizeQuickCommands, normalizeTerminalRightClick } from "@shared/quick-commands";
 import { writeFileAtomic } from "./fs-atomic";
 import { codaraHome } from "./codara-home";
 
@@ -282,6 +283,8 @@ function normalize(
     copyBranchSetupCommandByRepo: normalizeStringMap(
       src.copyBranchSetupCommandByRepo,
     ),
+    quickCommands: normalizeQuickCommands(src.quickCommands),
+    terminalRightClick: normalizeTerminalRightClick(src.terminalRightClick),
     agentWorktreesEnabled:
       typeof src.agentWorktreesEnabled === "boolean"
         ? src.agentWorktreesEnabled
