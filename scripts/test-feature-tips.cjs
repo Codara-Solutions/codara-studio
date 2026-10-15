@@ -198,6 +198,20 @@ async function main() {
     }
   });
 
+  check("every shortcut a tip names has a default chord, or the tip could never show", () => {
+    const chordless = [];
+    for (const entry of FEATURE_CATALOG) {
+      for (const command of tipShortcutCommands(entry)) {
+        const start = commandsSource.indexOf(`id: "${command}",`);
+        assert.ok(start >= 0, `${entry.id} names unknown command ${command}`);
+        const block = commandsSource.slice(start, commandsSource.indexOf("\n  },", start));
+        const chords = /defaultChords: \[([^\]]*)\]/.exec(block)?.[1] ?? "";
+        if (!chords.trim()) chordless.push(`${entry.id}: ${command}`);
+      }
+    }
+    assert.deepEqual(chordless, [], "a tip text names a command that has no chord out of the box");
+  });
+
   check("a tip either tours a real control, opens its feature, or names a shortcut", () => {
     for (const entry of FEATURE_CATALOG.filter((item) => item.tip)) {
       const { tip } = entry;
