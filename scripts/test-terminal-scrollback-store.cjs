@@ -405,6 +405,101 @@ async function main() {
     fresh.dispose();
   }
 
+  // ── a flood takes a bounded share of the main thread ─────────────────
+  {
+    check(
+      "by default folding takes at most a tenth of the main thread",
+      storeMod.DEFAULT_TERMINAL_SCROLLBACK_LIMITS.foldMaxDuty > 0 && storeMod.DEFAULT_TERMINAL_SCROLLBACK_LIMITS.foldMaxDuty <= 0.1,
+    );
+    const { deps, state } = fakeDeps();
+    deps.limits = { ...deps.limits, foldMinGapMs: 400, foldMaxDuty: 1 };
+    const store = new storeMod.TerminalScrollbackStore(deps);
+    await store.init();
+    store.track(["flood", "flood-2"]);
+    state.sessions.add("flood");
+    state.sessions.add("flood-2");
+    const startedAt = Date.now();
+    let n = 0;
+    while (Date.now() - startedAt < 700) {
+      let chunk = "";
+      for (let i = 0; i < 100; i += 1) chunk += `flood line ${n++} ${"x".repeat(40)}\r\n`;
+      // Each feed is past rawCompactBytes, so without the pause every one
+      // would fold.
+      state.feed("flood", chunk);
+      state.feed("flood-2", chunk);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    const elapsed = Date.now() - startedAt;
+    const folds = store.foldCount();
+    check(
+      "a flood in two panes folds one at a time, a pause apart",
+      folds <= Math.ceil(elapsed / 400) + 1 && n > 2000,
+      `${folds} folds in ${elapsed} ms for ${n} lines`,
+    );
+    state.feed("flood", "LAST LINE OF THE FLOOD\r\n");
+    await store.idle();
+    await store.flush();
+    const record = await store.read("flood");
+    check(
+      "the newest output of a flood is kept",
+      !!record && `${record.history}${record.raw.toString("utf8")}`.includes("LAST LINE OF THE FLOOD"),
+    );
+    check("and its file stays bounded", fs.statSync(fileFor("flood")).size < 2 * 16 * 1024 + 256 * 1024 + 4096);
+    await store.forget("flood");
+    await store.forget("flood-2");
+    store.dispose();
+  }
+
+  // ── a failed save is not lost ─────────────────────────────────────────
+  {
+    const blocked = path.join(tmp, "blocked");
+    const badDir = path.join(blocked, "terminal-scrollback");
+    fs.writeFileSync(blocked, "a file where the folder goes");
+    const { deps, state } = fakeDeps({ dir: badDir, log: () => undefined });
+    const store = new storeMod.TerminalScrollbackStore(deps);
+    await store.init();
+    store.track(["retry"]);
+    state.feed("retry", "kept after a failed save\r\n");
+    await store.flush();
+    check("a save that cannot write leaves nothing behind", !fs.existsSync(badDir));
+    fs.rmSync(blocked);
+    fs.mkdirSync(badDir, { recursive: true });
+    await store.flush();
+    const record = await store.read("retry");
+    check("the next flush writes what the failed save held", !!record && record.raw.toString("utf8").includes("kept after a failed save"));
+    store.dispose();
+    fs.rmSync(blocked, { recursive: true, force: true });
+  }
+
+  // ── turning the setting back on ───────────────────────────────────────
+  {
+    const { deps, state } = fakeDeps({
+      readTail: (id) => (id === "reon" ? Buffer.from("printed while it was off\r\n") : null),
+    });
+    state.enabled = false;
+    const store = new storeMod.TerminalScrollbackStore(deps);
+    await store.init();
+    state.sessions.add("reon");
+    store.track(["reon"]);
+    check("while off a reported pane is not tapped", !state.taps.has("reon"));
+    state.enabled = true;
+    await store.setEnabled(true);
+    check("turning the setting on records the open panes at once", state.taps.has("reon"));
+    await store.flush();
+    const record = await store.read("reon");
+    check(
+      "seeded with what their session still holds",
+      !!record && record.raw.toString("utf8").includes("printed while it was off"),
+    );
+    await store.forget("reon");
+    state.enabled = false;
+    await store.setEnabled(false);
+    state.enabled = true;
+    await store.setEnabled(true);
+    check("a closed pane is not recorded again", !state.taps.has("reon"));
+    store.dispose();
+  }
+
   // ── fold cost stays small ─────────────────────────────────────────────
   {
     const big = Array.from({ length: 3000 }, (_, i) => `\x1b[3${i % 8}mline ${i} ${"word ".repeat(18)}\x1b[0m\r\n`).join("");

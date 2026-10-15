@@ -1,6 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
+import { performance } from "node:perf_hooks";
+import { RESTORED_OUTPUT_MARKER_TEXT } from "@shared/terminal-scrollback";
 import {
   compactScrollback,
   renderScrollbackForDisplay,
@@ -16,6 +18,13 @@ import {
 // terminal-scrollback-render.ts), so a TUI that repaints its footer ten times
 // a second cannot push the real history out. A save writes that folded text
 // plus the raw bytes since, debounced, to one 0600 file per pane.
+//
+// Folding runs on the main process, which also carries every pane's output to
+// the window. Folds therefore run one at a time across all panes and leave the
+// thread alone between them (foldMaxDuty), so a pane streaming a huge log
+// costs a bounded share of the main thread. Output that arrives faster than
+// that is cut from the front at rawHardCapBytes: only the newest part of such
+// a flood can survive the line budget anyway.
 //
 // Lifetime: a file goes away when the user closes its pane (forget), when the
 // setting is turned off, when it has not been written for maxAgeMs, or when
@@ -42,6 +51,11 @@ export interface TerminalScrollbackLimits {
   maxAgeMs: number;
   // Characters a restore hands the renderer.
   replayMaxChars: number;
+  // Share of the main thread folding may take while output floods in (each
+  // fold is followed by a pause of took * (1 / duty - 1)), and the shortest
+  // pause between two folds.
+  foldMaxDuty: number;
+  foldMinGapMs: number;
 }
 
 export const DEFAULT_TERMINAL_SCROLLBACK_LIMITS: TerminalScrollbackLimits = {
@@ -55,6 +69,8 @@ export const DEFAULT_TERMINAL_SCROLLBACK_LIMITS: TerminalScrollbackLimits = {
   saveMaxWaitMs: 15_000,
   maxAgeMs: 30 * 24 * 60 * 60 * 1000,
   replayMaxChars: 1024 * 1024,
+  foldMaxDuty: 0.1,
+  foldMinGapMs: 50,
 };
 
 export interface TerminalScrollbackStoreDeps {
@@ -100,7 +116,7 @@ const MAX_HEADER_BYTES = 4096;
 
 // Plain words, dim, on its own line. Written by main so the line is also part
 // of the record and survives the next restart in the right place.
-export const RESTORED_OUTPUT_MARKER = "\x1b[0m\x1b[2m[Restored from before Codara restarted]\x1b[0m\r\n";
+export const RESTORED_OUTPUT_MARKER = `\x1b[0m\x1b[2m${RESTORED_OUTPUT_MARKER_TEXT}\x1b[0m\r\n`;
 
 interface PaneState {
   paneId: string;
@@ -108,7 +124,7 @@ interface PaneState {
   history: string;
   raw: Buffer[];
   rawBytes: number;
-  folding: { history: string; raw: Buffer[] } | null;
+  folding: FoldJob | null;
   foldQueued: boolean;
   cols: number;
   rows: number;
@@ -121,6 +137,17 @@ interface PaneState {
   live: boolean;
   generation: number;
   writing: Promise<void>;
+}
+
+interface FoldJob {
+  history: string;
+  raw: Buffer[];
+}
+
+interface QueuedFold {
+  state: PaneState;
+  job: FoldJob;
+  generation: number;
 }
 
 interface IndexEntry {
@@ -154,6 +181,15 @@ export class TerminalScrollbackStore {
   private readonly panes = new Map<string, PaneState>();
   private readonly index = new Map<string, IndexEntry>();
   private readonly replayed = new Set<string>();
+  // Every pane the renderer reported, also while the setting is off, so
+  // turning it back on records them at once instead of at the next layout
+  // change.
+  private readonly known = new Set<string>();
+  private readonly foldQueue: QueuedFold[] = [];
+  private foldTimer: NodeJS.Timeout | null = null;
+  private foldRunning = false;
+  private foldNotBefore = 0;
+  private folds = 0;
   private ready: Promise<void> | null = null;
   private wipedWhileDisabled = false;
 
@@ -173,10 +209,11 @@ export class TerminalScrollbackStore {
 
   /** Start recording these panes. Unknown ids are added; nothing is removed. */
   track(paneIds: Iterable<string>): void {
+    const ids = [...paneIds].filter((paneId) => typeof paneId === "string" && paneId.length > 0);
+    for (const paneId of ids) this.known.add(paneId);
     if (!this.deps.enabled()) return;
     this.wipedWhileDisabled = false;
-    for (const paneId of paneIds) {
-      if (typeof paneId !== "string" || paneId.length === 0) continue;
+    for (const paneId of ids) {
       const state = this.ensureState(paneId);
       if (state.untap) continue;
       // Tap first, then read what the session already printed: nothing can
@@ -207,6 +244,7 @@ export class TerminalScrollbackStore {
       await state.writing.catch(() => undefined);
     }
     this.replayed.delete(paneId);
+    this.known.delete(paneId);
     await this.removeFile(scrollbackFileName(paneId));
   }
 
@@ -281,18 +319,32 @@ export class TerminalScrollbackStore {
   /** The setting changed. Off stops recording and deletes every file. */
   async setEnabled(enabled: boolean): Promise<void> {
     await this.init();
-    if (enabled) return;
+    if (enabled) {
+      // Panes already open start recording now, seeded with what their
+      // session still holds, so a quit right after this keeps their output.
+      this.track([...this.known]);
+      return;
+    }
     await this.wipe();
   }
 
   /** Test hook: wait for folds and writes in flight. */
-  async idle(): Promise<void> {
-    for (let i = 0; i < 20; i += 1) {
-      const busy = [...this.panes.values()].filter((s) => s.folding || s.foldQueued);
+  async idle(timeoutMs = 10_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const busy =
+        this.foldRunning ||
+        this.foldQueue.length > 0 ||
+        [...this.panes.values()].some((s) => s.folding || s.foldQueued);
       await Promise.all([...this.panes.values()].map((s) => s.writing.catch(() => undefined)));
-      if (busy.length === 0) return;
+      if (!busy || Date.now() > deadline) return;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
+  }
+
+  /** Test hook: folds run so far. */
+  foldCount(): number {
+    return this.folds;
   }
 
   totalBytes(): number {
@@ -307,6 +359,12 @@ export class TerminalScrollbackStore {
       state.timer = null;
       state.untap?.();
       state.untap = null;
+    }
+    if (this.foldTimer) clearTimeout(this.foldTimer);
+    this.foldTimer = null;
+    for (const queued of this.foldQueue.splice(0)) {
+      queued.state.foldQueued = false;
+      if (queued.state.folding === queued.job) queued.state.folding = null;
     }
   }
 
@@ -383,10 +441,12 @@ export class TerminalScrollbackStore {
       state.rows = size.rows;
     }
     if (state.rawBytes > this.limits.rawHardCapBytes) {
-      // A fold is still running and this much arrived meanwhile: keep the
-      // newest bytes in one buffer. What is lost is output that came after
-      // the fold took its bytes, never the history before it.
-      const kept = Buffer.from(trimRawFront(concat(state.raw), this.limits.rawHardCapBytes));
+      // A fold is still running or waiting its turn and this much arrived
+      // meanwhile: keep the newest bytes in one buffer. What is lost is output
+      // that came after the fold took its bytes, never the history before it.
+      // Cut to three quarters of the cap, so a flood copies once per quarter
+      // cap of output instead of on every chunk.
+      const kept = trimRawFront(concat(state.raw), Math.floor((this.limits.rawHardCapBytes * 3) / 4));
       state.raw = [kept];
       state.rawBytes = kept.length;
     }
@@ -427,26 +487,52 @@ export class TerminalScrollbackStore {
 
   private queueFold(state: PaneState): void {
     if (state.folding || state.raw.length === 0 || this.panes.get(state.paneId) !== state) return;
-    // Take the bytes now, not when the fold runs: a burst arriving in the
-    // same tick would otherwise push them past the hard cap before they are
+    // Take the bytes now, not when the fold runs: a burst arriving before it
+    // runs would otherwise push them past the hard cap before they are
     // folded, and the history they hold would be lost.
-    const job = { history: state.history, raw: state.raw };
+    const job: FoldJob = { history: state.history, raw: state.raw };
     state.folding = job;
     state.raw = [];
     state.rawBytes = 0;
-    const generation = state.generation;
     state.foldQueued = true;
-    setImmediate(() => {
-      state.foldQueued = false;
-      void this.fold(state, job, generation);
-    });
+    this.foldQueue.push({ state, job, generation: state.generation });
+    this.pumpFolds();
   }
 
-  private async fold(state: PaneState, job: { history: string; raw: Buffer[] }, generation: number): Promise<void> {
+  // One fold at a time, across every pane, each followed by a pause in
+  // proportion to how long it took (see foldMaxDuty).
+  private pumpFolds(): void {
+    if (this.foldRunning || this.foldTimer || this.foldQueue.length === 0) return;
+    const wait = Math.max(0, this.foldNotBefore - performance.now());
+    this.foldTimer = setTimeout(() => {
+      this.foldTimer = null;
+      const next = this.foldQueue.shift();
+      if (!next) return;
+      next.state.foldQueued = false;
+      this.foldRunning = true;
+      const started = performance.now();
+      void this.fold(next.state, next.job, next.generation)
+        .then((worked) => {
+          if (!worked) return;
+          const took = performance.now() - started;
+          const duty = Math.min(1, Math.max(0.01, this.limits.foldMaxDuty));
+          this.foldNotBefore = performance.now() + Math.max(this.limits.foldMinGapMs, took * (1 / duty - 1));
+        })
+        .finally(() => {
+          this.foldRunning = false;
+          this.pumpFolds();
+        });
+    }, wait);
+    this.foldTimer.unref?.();
+  }
+
+  // True when it folded, false when the pane was gone or reset meanwhile.
+  private async fold(state: PaneState, job: FoldJob, generation: number): Promise<boolean> {
     if (state.generation !== generation || this.panes.get(state.paneId) !== state) {
       if (state.folding === job) state.folding = null;
-      return;
+      return false;
     }
+    this.folds += 1;
     try {
       const next = await compactScrollback(job.history, job.raw, state.cols, state.rows, this.renderLimits());
       if (state.generation === generation) state.history = next;
@@ -461,6 +547,7 @@ export class TerminalScrollbackStore {
       if (state.folding === job) state.folding = null;
     }
     if (state.rawBytes >= this.limits.rawCompactBytes) this.queueFold(state);
+    return true;
   }
 
   private renderLimits(): ScrollbackRenderLimits {
@@ -475,7 +562,10 @@ export class TerminalScrollbackStore {
     const generation = state.generation;
     const history = state.folding ? state.folding.history : state.history;
     const rawParts = state.folding ? [...state.folding.raw, ...state.raw] : state.raw;
-    const raw = trimRawFront(concat(rawParts.length > 0 ? rawParts : [Buffer.alloc(0)]), this.limits.rawHardCapBytes);
+    // A fold waiting its turn holds up to a cap of bytes and the pane up to
+    // another: keep both, so a save (the one at quit included) never drops
+    // the bytes the fold took.
+    const raw = trimRawFront(concat(rawParts.length > 0 ? rawParts : [Buffer.alloc(0)]), 2 * this.limits.rawHardCapBytes);
     const header = {
       paneId: state.paneId,
       cols: state.cols,
@@ -498,6 +588,9 @@ export class TerminalScrollbackStore {
       })
       .catch((err) => {
         this.log(`save failed for ${state.paneId}: ${err instanceof Error ? err.message : String(err)}`);
+        // Try again at the next save or flush (the one at quit included)
+        // instead of losing what this one held.
+        if (state.generation === generation && this.panes.get(state.paneId) === state) state.dirty = true;
       });
     return state.writing;
   }
@@ -509,7 +602,7 @@ export class TerminalScrollbackStore {
       await fs.writeFile(tmp, data, { mode: 0o600 });
       // umask can loosen the mode open(2) applied.
       if (process.platform !== "win32") await fs.chmod(tmp, 0o600);
-      await fs.rename(tmp, file);
+      await renameWithRetry(tmp, file);
     } catch (err) {
       await fs.rm(tmp, { force: true }).catch(() => undefined);
       throw err;
@@ -537,13 +630,18 @@ export class TerminalScrollbackStore {
   }
 
   private async wipe(): Promise<void> {
+    const writes: Promise<void>[] = [];
     for (const state of this.panes.values()) {
       state.generation += 1;
       if (state.timer) clearTimeout(state.timer);
       state.untap?.();
+      writes.push(state.writing.catch(() => undefined));
     }
     this.panes.clear();
     this.replayed.clear();
+    // A write already past its checks would otherwise land after the files
+    // below were listed and outlive the setting being turned off.
+    await Promise.all(writes);
     if (this.wipedWhileDisabled) return;
     this.wipedWhileDisabled = true;
     this.index.clear();
@@ -558,6 +656,21 @@ export class TerminalScrollbackStore {
         .filter((name) => name.endsWith(FILE_EXT) || name.endsWith(".tmp"))
         .map((name) => fs.rm(join(this.deps.dir, name), { force: true }).catch(() => undefined)),
     );
+  }
+}
+
+// Windows: an antivirus or indexer scan can hold the target for a moment, and
+// rename then fails with EPERM, EACCES or EBUSY. Retry briefly before giving up.
+async function renameWithRetry(from: string, to: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await fs.rename(from, to);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (attempt >= 4 || (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY")) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 20 * (attempt + 1)));
+    }
   }
 }
 
