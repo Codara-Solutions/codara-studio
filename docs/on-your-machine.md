@@ -34,7 +34,8 @@ a `spark-` prefix keep the product's old name for compatibility.
 | `spark-remote-hosts.json`, `spark-known-hosts.json`, `spark-remote-secrets.json` | SSH workspaces: saved hosts, pinned host keys, and passwords or passphrases encrypted by the operating system (if encryption is unavailable, they are not saved). |
 | `remote/` | Remote access: the desktop's identity (private key mode 0600), paired devices and the mutation ledger. |
 | `logs/main.log` | The main-process log, capped at 1 MB with one rotation. |
-| `logs/worktree-audit.jsonl` | One line for every worktree an agent created, removed or was refused (mode 0600): ids, paths, branches, commits and the reason, never tokens. Rotated once at 5 MB. |
+| `logs/worktree-audit.jsonl` | One line for every worktree an agent created, removed or was refused, and every removal from the worktree cleanup screen (mode 0600): ids, paths, branches, commits and the reason, never tokens. Rotated once at 5 MB. |
+| `worktree-sizes.json` | The last measured size on disk of each worktree the cleanup screen listed (at most 2000), so it opens with sizes. Delete it to measure everything again. |
 
 ## How Codara sessions get its tools
 
@@ -81,6 +82,7 @@ servers, turns the server off for the sessions Codara starts.
 | Your repositories' refs under `refs/codara/removed-worktrees/` | When an agent removes a merged worktree, its last commit is saved there first, named by date and workspace, so the worktree can be restored. Refs older than 30 days are deleted at the next removal. | Turn off **Let agents create and remove worktrees** in Settings, General. |
 | `%APPDATA%\powershell\Community\Terminal-Icons\*.xml` (Windows only) | Deletes a cache that breaks the Terminal-Icons module inside Studio terminals. | Not configurable. |
 | Git refs in your workspace repository: `refs/spark/runs/<run>` and `refs/spark/undo/<run>` | Cora snapshots the workspace before each message so **Undo message and code** can restore it. That undo asks for a second click, puts back every file changed since the message (and removes files created since), and first saves the files as they were on `refs/spark/undo/<run>`, so an undo can be reversed with `git checkout refs/spark/undo/<run> -- <path>`. Neither ref moves a branch or HEAD. | Deleting the chat removes both refs. |
+| The same `refs/codara/removed-worktrees/` refs, from the worktree cleanup screen | When you remove a worktree there, its last commit is saved first, named by date and workspace (or `wt-<hash>` when no workspace shows it), and uncommitted changes you confirmed deleting are saved as a commit under the same name ending in `-changes` when they are small enough (ignored files never are). They are deleted after 30 days like the others. | Do not remove worktrees from the cleanup screen. |
 | `<tmpdir>/spark-terminal-notify.log` | A diagnostic trail of agent state changes in terminals (no terminal content). | Set `SPARK_TERMINAL_NOTIFY_LOG=0`. |
 
 Your logins are never written: not the `Claude Code-credentials` Keychain
