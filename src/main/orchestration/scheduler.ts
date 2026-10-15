@@ -425,7 +425,12 @@ export async function patchJob(
   id: string,
   fn: (job: ScheduledJob) => ScheduledJob,
 ): Promise<ScheduledJob | undefined> {
-  const jobs = await loadJobs();
+  // Read-modify-write: the warm cache is taken without awaiting, so nothing
+  // can run between this read and persist(), which swaps the cache before its
+  // first await. Awaiting loadJobs() here would yield, and two patches of
+  // different jobs could read the same list, the second write dropping the
+  // first one's change.
+  const jobs = cache ?? (await loadJobs());
   const target = jobs.find((job) => job.id === id);
   if (!target) return undefined;
   const next = fn(target);
