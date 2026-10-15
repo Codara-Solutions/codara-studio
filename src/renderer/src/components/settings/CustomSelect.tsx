@@ -48,6 +48,7 @@ export default function CustomSelect({
   options,
   onChange,
   ariaLabel,
+  describedBy,
   width,
   disabled,
 }: {
@@ -55,6 +56,8 @@ export default function CustomSelect({
   options: ReadonlyArray<CustomSelectOption>;
   onChange: (next: string) => void;
   ariaLabel?: string;
+  /** Id of the row description the trigger is described by. */
+  describedBy?: string;
   disabled?: boolean;
   /** Fixed trigger width when the select sits in a row's control slot. */
   width?: number;
@@ -103,6 +106,7 @@ export default function CustomSelect({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={ariaLabel}
+        aria-describedby={describedBy}
         disabled={disabled}
         className={`st-select-trigger${open ? " is-open" : ""}`}
         onClick={() => setOpen((o) => !o)}
