@@ -148,7 +148,8 @@ the system for a hold that belongs to the Codara process and ends with it.
 With **Keep awake with the lid closed** on, a Linux laptop also gets a child
 process, `systemd-inhibit --what=sleep:handle-lid-switch --mode=block cat`,
 while Codara holds the computer awake. It is listed by `systemd-inhibit
---list` as Codara Studio and exits with Codara. See
+--list` as Codara Studio and exits with Codara. While it runs, a suspend
+you start yourself is held off too. See
 [shortcuts-and-settings.md](./shortcuts-and-settings.md#keep-the-computer-awake).
 
 ## Network

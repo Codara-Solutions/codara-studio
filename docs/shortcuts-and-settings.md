@@ -226,8 +226,8 @@ mode, Escape to close.
 Only idle sleep is held off. The screen can still turn off and lock, and you
 can still put the computer to sleep yourself. Codara asks the system through
 Electron's `powerSaveBlocker` (`prevent-app-suspension`): an idle sleep
-assertion on macOS, `SetThreadExecutionState` on Windows, a sleep inhibitor
-on Linux. The hold belongs to the Codara process, so it ends when Codara
+assertion on macOS, a power request on Windows (`powercfg /requests` lists
+it), a sleep inhibitor on Linux. The hold belongs to the Codara process, so it ends when Codara
 quits or crashes; Codara also drops it as it quits. After the computer wakes
 from a sleep it could not prevent (a closed lid, a critical battery), Codara
 takes the hold again.
@@ -239,9 +239,11 @@ awake, it also runs `systemd-inhibit --what=sleep:handle-lid-switch
 --mode=block cat`, so closing the lid does not suspend the laptop
 (`systemd-inhibit --list` shows it as Codara Studio). The helper waits on a
 pipe from Codara and exits the moment Codara goes away, even if Codara is
-killed. If the system refuses the lock, Codara says so in the
-popover and Settings and tries again later, waiting longer each time. A
-closed laptop on battery keeps draining. On macOS and Windows a closed
+killed. While that lock is held it also holds off a suspend you start
+yourself: the system may refuse it or ask for an administrator password, so
+turn the option off or quit Codara first. If the system refuses the lock,
+Codara says so in the popover and Settings and tries again later, waiting
+longer each time. A closed laptop on battery keeps draining. On macOS and Windows a closed
 laptop sleeps unless an administrator changes a power setting, so the option
 is hidden there.
 

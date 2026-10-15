@@ -140,3 +140,6 @@ export const KEEP_AWAKE_DISPLAY_NOTE = "The screen can still turn off and lock."
 
 export const KEEP_AWAKE_LID_HINT =
   "Closing the lid does not suspend this laptop while Codara keeps it awake. On battery it keeps draining.";
+
+/** The lid lock blocks every suspend, so one started from the system menu too. */
+export const KEEP_AWAKE_LID_SUSPEND_NOTE = "Suspending it yourself may be blocked too.";

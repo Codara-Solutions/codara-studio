@@ -22,7 +22,7 @@ import { LinuxLidInhibitor } from "./linux-lid-inhibitor";
 //
 // The hold is powerSaveBlocker "prevent-app-suspension": idle sleep is
 // blocked, the display may still sleep. The OS ties it to this process
-// (an IOKit assertion on macOS, SetThreadExecutionState on Windows, a D-Bus
+// (an IOKit assertion on macOS, a power request on Windows, a D-Bus
 // inhibitor on Linux), so it cannot outlive Codara; the Linux lid helper dies
 // with Codara through its stdin pipe (linux-lid-inhibitor.ts).
 //

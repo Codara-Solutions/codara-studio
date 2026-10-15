@@ -2,6 +2,7 @@ import {
   DEFAULT_KEEP_AWAKE_MODE,
   KEEP_AWAKE_DISPLAY_NOTE,
   KEEP_AWAKE_LID_HINT,
+  KEEP_AWAKE_LID_SUSPEND_NOTE,
   KEEP_AWAKE_MODE_OPTIONS,
   keepAwakeSummary,
   type KeepAwakeMode,
@@ -54,7 +55,7 @@ export default function KeepAwakeSettings() {
           desc={
             status.lid.enabled && status.lid.error
               ? `${status.lid.error} ${KEEP_AWAKE_LID_HINT}`
-              : `${KEEP_AWAKE_LID_HINT} No system setting changes.`
+              : `${KEEP_AWAKE_LID_HINT} ${KEEP_AWAKE_LID_SUSPEND_NOTE} No system setting changes.`
           }
           checked={status.lid.enabled}
           onChange={setLidClosed}
