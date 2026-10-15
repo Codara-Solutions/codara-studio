@@ -8,11 +8,11 @@ import {
 } from "@shared/share";
 import AnchoredMenu from "../chat/composer/AnchoredMenu";
 import { SETTINGS_MENU_Z } from "../AccountCardPrimitives";
-import { EmptyState, InlineMessage, SettingsSection } from "../settings/SettingsPrimitives";
+import { ConfirmButton, EmptyState, InlineMessage, SettingsCard, SettingsSection } from "../settings/SettingsPrimitives";
 import { shareErrorText } from "./errors";
 
-// Settings, "Shared pages": every link this computer shared, with copy,
-// expiry and delete. The service's list is the truth; when it cannot be
+// Settings, Workspace, "Shared pages": every link this computer shared, with
+// copy, expiry and delete. The service's list is the truth; when it cannot be
 // reached the page shows this computer's copy and says so. The renderer only
 // ever sees links and metadata, never the share key.
 
@@ -26,7 +26,6 @@ export default function SharedPagesSettings() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [confirmId, setConfirmId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -71,7 +70,6 @@ export default function SharedPagesSettings() {
   const remove = (page: SharedPage) =>
     run(page.id, async () => {
       await window.spark.share.delete(page.id);
-      setConfirmId(null);
       setList((current) =>
         current ? { ...current, pages: current.pages.filter((entry) => entry.id !== page.id) } : current,
       );
@@ -94,11 +92,13 @@ export default function SharedPagesSettings() {
         </InlineMessage>
       ) : null}
       {list === null ? null : list.pages.length === 0 ? (
-        <EmptyState
-          icon={<LinkIcon size={20} />}
-          title="No shared pages."
-          body="Open an HTML or Markdown file and choose Share as link in its toolbar."
-        />
+        <SettingsCard>
+          <EmptyState
+            icon={<LinkIcon size={20} />}
+            title="No shared pages."
+            body="Open an HTML or Markdown file and choose Share as link in its toolbar."
+          />
+        </SettingsCard>
       ) : (
         <div className="st-list">
           {list.pages.map((page) => (
@@ -126,27 +126,13 @@ export default function SharedPagesSettings() {
               {!list.offline ? (
                 <ExpiryMenu disabled={busyId === page.id} onPick={(days) => void extend(page, days)} />
               ) : null}
-              {confirmId === page.id ? (
-                <button
-                  type="button"
-                  className="spark-btn is-danger"
-                  disabled={busyId === page.id}
-                  onClick={() => void remove(page)}
-                  onBlur={() => setConfirmId((current) => (current === page.id ? null : current))}
-                  autoFocus
-                >
-                  Delete link
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  className="spark-btn is-danger"
-                  disabled={busyId === page.id}
-                  onClick={() => setConfirmId(page.id)}
-                >
-                  Delete
-                </button>
-              )}
+              <ConfirmButton
+                confirmLabel="Delete link"
+                disabled={busyId === page.id}
+                onConfirm={() => void remove(page)}
+              >
+                Delete
+              </ConfirmButton>
             </div>
           ))}
         </div>

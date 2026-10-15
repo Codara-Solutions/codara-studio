@@ -255,7 +255,7 @@ export const REGENERABLE_IGNORED_PATTERNS: readonly string[] = [
 ];
 
 const MESSAGES: Record<WorktreeCode, string> = {
-  WORKTREE_DISABLED: "agent worktrees are turned off in Settings > General",
+  WORKTREE_DISABLED: "agent worktrees are turned off in Settings > Git",
   WORKTREE_FORBIDDEN:
     "worktree changes are unavailable to workers, automation and talk chats, and finished runs",
   WORKTREE_NO_WORKSPACE: "could not tell which Codara workspace you run in",

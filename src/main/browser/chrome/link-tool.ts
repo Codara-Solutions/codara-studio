@@ -36,7 +36,7 @@ export async function chromeLinkTool(params: Record<string, unknown>, _method: s
         })),
         tabs: backend.summaries(),
         ...(links.length === 0
-          ? { hint: "No browser is connected. The user installs the Codara extension (Settings, Chrome extension) and connects it from its popup." }
+          ? { hint: "No browser is connected. The user installs the Codara extension (Settings, Browser) and connects it from its popup." }
           : {}),
       };
     case "open": {

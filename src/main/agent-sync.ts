@@ -1221,7 +1221,7 @@ function mcpSourceReaders(source: Pick<SyncSource, "runtime" | "scope" | "path" 
 }
 
 const OFF_IN_CODARA =
-  'Opens a separate Chrome window, so Claude Code and Codex sessions in Codara do not load it. Agents use your own Chrome through the Codara extension instead. Turn off "Keep agents in your Chrome" in Settings, Chrome extension, to allow it.';
+  'Opens a separate Chrome window, so Claude Code and Codex sessions in Codara do not load it. Agents use your own Chrome through the Codara extension instead. Turn off "Keep agents in your Chrome" in Settings, Browser, to allow it.';
 
 // The entries "Keep agents in your Chrome" turns off for the CLIs Codara
 // starts (separate-browser-tools.ts). Codara's own list only reaches Cora and

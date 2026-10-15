@@ -19,11 +19,11 @@ export type SettingsTab =
   | "quick-commands"
   | "git"
   | "browser"
+  | "shared-pages"
   | "api"
   | "agents"
   | "sessions"
   | "remote-access"
-  | "shared-pages"
   | "keybindings"
   | "runs"
   | "about";
@@ -88,6 +88,12 @@ export const SETTINGS_TABS: ReadonlyArray<SettingsTabMeta> = [
     description: "Where links open, and agents in your own Chrome.",
   },
   {
+    id: "shared-pages",
+    label: "Shared pages",
+    title: "Shared pages",
+    description: "Pages you shared from the editor as links, and when they expire.",
+  },
+  {
     id: "api",
     label: "API and model",
     title: "API and model",
@@ -110,12 +116,6 @@ export const SETTINGS_TABS: ReadonlyArray<SettingsTabMeta> = [
     label: "Remote access",
     title: "Remote access",
     description: "Reach this computer from the Codara phone app.",
-  },
-  {
-    id: "shared-pages",
-    label: "Shared pages",
-    title: "Shared pages",
-    description: "Links to pages you shared from the editor, and when they expire.",
   },
   {
     id: "keybindings",
@@ -142,9 +142,9 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<{
   tabs: ReadonlyArray<SettingsTab>;
 }> = [
   { label: "App", tabs: ["general", "appearance", "notifications", "keybindings"] },
-  { label: "Workspace", tabs: ["editor", "terminal", "quick-commands", "git", "browser"] },
+  { label: "Workspace", tabs: ["editor", "terminal", "quick-commands", "git", "browser", "shared-pages"] },
   { label: "Agents and models", tabs: ["agents", "api", "sessions", "runs"] },
-  { label: "System", tabs: ["remote-access", "shared-pages", "about"] },
+  { label: "System", tabs: ["remote-access", "about"] },
 ];
 
 export function tabMeta(tab: SettingsTab): SettingsTabMeta {
@@ -208,7 +208,7 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "git", title: "Let agents remove worktrees I created", desc: "Agents may also remove merged worktrees you created.", section: "Worktrees", keywords: "worktree branch git agent delete merged", toggle: "agentsMayRemoveUserWorktrees" },
   { tab: "general", title: "Middle-click to close tabs", desc: "Close a tab with the middle mouse button.", section: "Window", keywords: "mouse wheel button middle click", toggle: "closeTabsOnMiddleClick" },
   { tab: "browser", title: "Chrome extension", desc: "Let agents use tabs you share from your own browser.", keywords: "chrome edge brave chromium browser extension logged in signed in session tab agent" },
-  { tab: "browser", title: "Keep agents in your Chrome", desc: "Agents use your own Chrome in a tab group. Tools that open a separate Chrome window are off in Codara.", section: "Chrome extension", keywords: "chrome devtools mcp playwright puppeteer automated test software separate window profile tab group browser agent plugin", toggle: "keepAgentsInYourChrome" },
+  { tab: "browser", title: "Keep agents in your Chrome", desc: "Agents use your own Chrome in a tab group. Tools that open a separate Chrome window are off in Codara.", section: "Chrome extension", keywords: "chrome devtools mcp playwright puppeteer automated test software separate window profile tab group browser agent plugin" },
   { tab: "browser", title: "Connect a browser", desc: "Install the extension with Load unpacked and pair it.", section: "Chrome extension", keywords: "chrome edge brave install load unpacked developer mode pair code extension folder" },
   { tab: "browser", title: "Link status", desc: "Where browsers connect, and pairing requests.", section: "Chrome extension", keywords: "chrome port loopback pairing allow deny code" },
   { tab: "browser", title: "Paired browsers", desc: "Browsers connected to Codara and the tabs they share.", section: "Chrome extension", keywords: "chrome edge brave disconnect revoke unpair shared tabs" },

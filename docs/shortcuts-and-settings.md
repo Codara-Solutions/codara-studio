@@ -242,12 +242,12 @@ The pages:
 | Terminal | The shell for new panes, output history and scrollback lines, whether programs may copy to the clipboard (OSC 52), a resource overview, and the run terminal lifecycle for worker panes. |
 | Quick commands | Saved shell commands and agent prompts: add, edit, reorder, delete, and where each is offered. Also what a right-click in a terminal does. See [Quick commands](#quick-commands). |
 | Git | Remotes (background fetch, Instant git triggers, and a custom webhook receiver under Advanced), Alerts (notify on teammate pushes, new pull requests, and CI failing on your pull request), Worktrees (whether agents may create and remove worktrees, and remove ones you created, the repository's worktree setup file, and under Advanced your own setup command for new worktrees and extra ignored files an agent may delete with a merged worktree). |
-| Browser | Links (auto-open the browser for local dev servers, open links in the default browser or the Codara browser, ask where terminal links open), and the Chrome extension (link status, pairing, paired browsers, agent activity). |
+| Browser | Links (auto-open the browser for local dev servers, open links in the default browser or the Codara browser, ask where terminal links open), and the Chrome extension (**Keep agents in your Chrome**, link status, pairing, paired browsers, agent activity). |
+| Shared pages | The links you shared from the editor: copy one, change when it expires, or delete it (see [share-links.md](./share-links.md)). |
 | API and model | An OpenRouter key, and how Git commit messages are generated. |
 | Agents | Your accounts (see [accounts.md](./accounts.md)), **Install Pi** when Pi is not installed yet, and **Open Capability Center** and **Worker models** buttons, which close Settings and open the Capability Center on MCP servers or on worker models. |
 | Sessions | Browse and resume Claude and Codex sessions from any local project, choose whether running agent sessions (Claude Code, Codex, Grok and Pi panes) resume when Codara reopens, whether terminal panes keep their output across restarts (**Keep terminal output across restarts**, on by default), and how long an idle agent in a background workspace may wait before it sleeps (**Let idle agents sleep**, see below). |
 | Remote access | Turn phone access on, pair a device, and revoke paired devices (see [remote-access.md](./remote-access.md)). |
-| Shared pages | The links you shared from the editor: copy one, change when it expires, or delete it (see [share-links.md](./share-links.md)). |
 | Keybindings | Rebind or unbind every command above. |
 | Runs | Every Cora run: browse, keep, delete. |
 | About | Version and links (a development build shows the nearest release tag plus the commits since it), and Diagnostics: the freezes and crashes recorded on this computer, and **Export diagnostics**. |

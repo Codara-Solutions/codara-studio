@@ -1,4 +1,4 @@
-// "Keep agents in your Chrome" (Settings > General > Chrome extension): the
+// "Keep agents in your Chrome" (Settings > Browser > Chrome extension): the
 // preference, where Codara looks for the browser tools it turns off, and
 // putting the result on the launch flags of new sessions. Detection lives in
 // separate-browser-tools.ts; the flags in agent-launch-integration.ts.

@@ -14,7 +14,7 @@ of yours leaves the computer before that click; preparing the page only
 downloads the public CDN files it uses (below).
 
 The link is copied to the clipboard and shown in the prompt with a Copy
-button. Settings, **Shared pages** lists every link this computer shared:
+button. Settings, Workspace, **Shared pages** lists every link this computer shared:
 copy it, change when it expires (counted from today), or delete it. A deleted
 or expired link stops working at once.
 
