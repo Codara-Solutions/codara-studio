@@ -482,6 +482,7 @@ import { registerCaptureIpc } from "./browser/capture/ipc";
 import { registerChromeLinkIpc } from "./browser/chrome";
 import { registerPointIpc } from "./browser/point";
 import { registerServersIpc } from "./servers";
+import { registerWorktreeSetupIpc } from "./worktree-setup";
 
 function nativeCliAccountRuntimeFromIpc(value: unknown): NativeCliAccountRuntime {
   if (value === "claude" || value === "codex" || value === "grok") return value;
@@ -4022,6 +4023,7 @@ export function registerIpc(): void {
 
   // Areas that keep their channels next to their code.
   registerServersIpc(handle);
+  registerWorktreeSetupIpc(handle);
   registerChromeLinkIpc(handle);
   registerCaptureIpc(handle);
   registerPointIpc(handle);
