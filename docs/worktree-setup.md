@@ -56,7 +56,7 @@ worktree** shows what a new worktree will get at the foot of the dialog, and
 **Set up worktrees** (or **Edit setup**) opens a dialog that starts from what
 it finds in the checkout: ignored `.env` files a worktree would miss, folders
 such as `node_modules` worth linking, and an install command for the
-lockfile. Settings > General > **Worktree setup file** opens the same dialog.
+lockfile. Settings > Git > **Worktree setup file** opens the same dialog.
 Saving rewrites both files; comments in them are not kept.
 
 ## What happens when a worktree is made
@@ -105,7 +105,7 @@ returns the latest lines.
 
 ### Your own command
 
-Settings > General > **Copy-branch setup command** is a command of your own
+Settings > Git > Worktrees > Advanced > **Copy-branch setup command** is a command of your own
 for one repository, saved on this computer only. It runs after the
 repository's setup command, or alone when the repository has no setup files.
 

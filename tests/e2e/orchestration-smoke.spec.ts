@@ -383,6 +383,8 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
 
     await clickAttached(page.getByRole("button", { name: "Editor" }));
     await expect(page.getByRole("textbox", { name: "Inline AI model" })).toHaveCount(0);
+    // The custom wait slider sits in the section's Advanced fold.
+    await clickAttached(page.locator('[data-setting-anchor="Inline AI advanced"]'));
     const inlineWaitInput = page.getByLabel("Inline AI wait time");
     await expect(inlineWaitInput).toHaveValue("0");
     await clickAttached(page.getByRole("button", { name: /After pause/ }));
@@ -459,8 +461,10 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
         width: surface.getBoundingClientRect().width,
         height: surface.getBoundingClientRect().height,
         borderRadius: getComputedStyle(surface).borderRadius,
-        expectedWidth: Math.min(920, window.innerWidth - 48),
-        expectedHeight: Math.min(780, window.innerHeight - 48),
+        expectedWidth: Math.min(1000, window.innerWidth - 48),
+        // The surface is sized to the overlay (the workbench row), 20px
+        // clear of the title bar and the status bar, not to the window.
+        expectedHeight: Math.min(800, surface.parentElement!.getBoundingClientRect().height - 40),
       };
     });
     expect(capabilityGlass).not.toBeNull();

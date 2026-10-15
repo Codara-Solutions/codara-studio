@@ -214,7 +214,7 @@ script's source map, inline or fetched from the dev server.
 ### The user's own browser
 
 With the Codara extension loaded in Chrome, Edge, Brave or another Chromium
-browser and paired (Settings > General > Chrome extension, see
+browser and paired (Settings > Browser > Chrome extension, see
 `extensions/chrome/README.md`), every tool above that takes a `tabId` also
 works on a tab the user shared from the extension's popup: the snapshot's
 `@references`, typing, trusted input, waits, screenshots, console, network
@@ -630,7 +630,7 @@ when all of these hold, and otherwise returns an error result with a `code`,
 the `blockers` and a `hint`:
 
 - an agent created it, unless you turned on **Let agents remove worktrees I
-  created** in Settings > General; GitHub issue and pull-request workspaces
+  created** in Settings > Git; GitHub issue and pull-request workspaces
   are removed from the rail only;
 - its exact last commit is merged into the target (its base, or `target`):
   the target contains it, a merged pull request from the same repository has

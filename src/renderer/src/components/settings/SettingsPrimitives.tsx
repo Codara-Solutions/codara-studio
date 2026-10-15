@@ -1,27 +1,66 @@
-import React from "react";
+import React, { createContext, useContext, useEffect, useId, useRef, useState } from "react";
+import CustomSelect, { type CustomSelectOption } from "./CustomSelect";
 
 /**
  * The building blocks every Settings page is drawn with. A page is a stack of
  * sections under the dialog's title bar, which carries the page title and its
- * one-line description so they stay put while the page scrolls. A section
- * is a heading over a stack of rows split by hairlines; a row is a label and
- * a short description on the left with its control on the right. Spacing and
- * dividers separate things, never boxes. The look lives in styles.css under
- * `.st-*`, scoped to the dialog surface, so these components carry structure
- * and no colours.
+ * one-line description so they stay put while the page scrolls.
+ *
+ *   <SettingsSection title="Window" description="One line, if any.">
+ *     <ToggleRow title="..." desc="..." checked={on} onChange={setOn} />
+ *     <SelectRow title="..." desc="..." value={v} options={...} onChange={setV} />
+ *     <SettingRow title="..." desc="..." control={<button className="spark-btn">Go</button>} />
+ *     <Advanced name="Window advanced">
+ *       <SettingRow ... />
+ *     </Advanced>
+ *   </SettingsSection>
+ *
+ * A section is a heading over one card; the card stacks its rows with
+ * hairlines between them. A row is a title and a one-line description on the
+ * left with its control on the right, or, `stacked`, with a wide control
+ * (text field, list) under the text. Rare options go in an `Advanced`
+ * disclosure at the foot of the card. A section that lays out its own
+ * content (a toolbar over a list) is `plain`, and puts its rows in a
+ * `SettingsCard` or its list in `.st-list`, which is drawn as a card too.
+ * The look lives in styles.css under `.st-*`, scoped to the dialog surface,
+ * so these components carry structure and no colours.
  *
  * `anchor` names a section or row for Settings search: a result scrolls to
- * the element carrying the same `data-setting-anchor`.
+ * the element carrying the same `data-setting-anchor`, and flashes it. A row
+ * whose title is a string is its own anchor. Every literal title must have
+ * an entry in settings-index.ts (scripts/test-settings-search.cjs checks).
  */
 
 export function SettingsPage({ children }: { children: React.ReactNode }) {
   return <div className="st-page">{children}</div>;
 }
 
+// The disclosure a picked search result sits behind, while the dialog is
+// scrolling to it. A page that folds rows away opens the fold on a match.
+export const SettingsRevealContext = createContext<string | null>(null);
+
+/** Opens a fold when Settings search is taking the user to a row inside it. */
+export function useRevealOnSearch(disclosure: string, open: () => void): void {
+  const reveal = useContext(SettingsRevealContext);
+  const openRef = useRef(open);
+  openRef.current = open;
+  useEffect(() => {
+    if (reveal === disclosure) openRef.current();
+  }, [reveal, disclosure]);
+}
+
+function ChevronGlyph() {
+  return (
+    <svg aria-hidden width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 6l6 6-6 6" />
+    </svg>
+  );
+}
+
 /**
- * A quiet "show more" toggle with a chevron that turns when open. Details
- * most people never need (tuning, how a mechanism works) sit behind one so
- * the page reads as a list of settings rather than a wall of text.
+ * A quiet inline "show more" toggle with a chevron that turns when open, for
+ * an explainer next to a toolbar. Rows that most people never need go in
+ * `Advanced` instead.
  */
 export function Disclosure({
   open,
@@ -42,11 +81,57 @@ export function Disclosure({
       data-setting-anchor={anchor}
       onClick={onToggle}
     >
-      <svg aria-hidden width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M9 6l6 6-6 6" />
-      </svg>
+      <ChevronGlyph />
       {children}
     </button>
+  );
+}
+
+/**
+ * The fold at the foot of a card for options most people never touch. Closed
+ * by default; `name` is its search key, so an index entry with
+ * `reveal: name` opens it before scrolling to the row inside. Names are
+ * unique within a page. `label` is what the toggle says ("Advanced" unless
+ * the fold has a better name), `hint` a short note shown while it is shut.
+ */
+export function Advanced({
+  name,
+  label = "Advanced",
+  hint,
+  defaultOpen = false,
+  children,
+}: {
+  name: string;
+  label?: string;
+  hint?: string;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  useRevealOnSearch(name, () => setOpen(true));
+  const bodyId = useId();
+  return (
+    <div className={`st-advanced${open ? " is-open" : ""}`}>
+      <button
+        type="button"
+        className="st-advanced__toggle"
+        aria-expanded={open}
+        aria-controls={open ? bodyId : undefined}
+        data-setting-anchor={name}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <span className="st-advanced__chevron">
+          <ChevronGlyph />
+        </span>
+        <span className="st-advanced__label">{label}</span>
+        {hint && !open ? <span className="st-advanced__hint">{hint}</span> : null}
+      </button>
+      {open ? (
+        <div id={bodyId} className="st-advanced__body">
+          {children}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -68,29 +153,63 @@ export function SettingsSection({
   description?: React.ReactNode;
   actions?: React.ReactNode;
   anchor?: string;
-  /** Children are laid out as they are, without the hairline row stack. */
+  /** Children are laid out as they are, outside a card (toolbars, lists). */
   plain?: boolean;
   /** The rows are live values that screen readers should announce. */
   live?: boolean;
   children?: React.ReactNode;
 }) {
+  const titleId = useId();
   return (
-    <section className="st-section" data-setting-anchor={anchor ?? title}>
+    <section
+      className="st-section"
+      data-setting-anchor={anchor ?? title}
+      aria-labelledby={title ? titleId : undefined}
+    >
       {title || actions ? (
         <div className="st-section__head">
           <div className="st-section__titles">
-            {title ? <h3 className="st-section__title">{title}</h3> : null}
+            {title ? (
+              <h3 id={titleId} className="st-section__title">
+                {title}
+              </h3>
+            ) : null}
             {description ? <p className="st-section__desc">{description}</p> : null}
           </div>
           {actions ? <div className="st-section__actions">{actions}</div> : null}
         </div>
       ) : null}
       {children ? (
-        <div className={plain ? "st-section__body" : "st-rows"} aria-live={live ? "polite" : undefined}>
-          {children}
-        </div>
+        plain ? (
+          <div className="st-section__body" aria-live={live ? "polite" : undefined}>
+            {children}
+          </div>
+        ) : (
+          <SettingsCard live={live}>{children}</SettingsCard>
+        )
       ) : null}
     </section>
+  );
+}
+
+/** A rounded card of rows split by hairlines. A section draws one itself. */
+export function SettingsCard({
+  live,
+  tone,
+  children,
+}: {
+  live?: boolean;
+  /** "danger" outlines the card for a group of destructive actions. */
+  tone?: "danger";
+  children: React.ReactNode;
+}) {
+  return (
+    <div
+      className={`st-card${tone === "danger" ? " st-card--danger" : ""}`}
+      aria-live={live ? "polite" : undefined}
+    >
+      {children}
+    </div>
   );
 }
 
@@ -100,32 +219,43 @@ export function SettingRow({
   control,
   disabled,
   htmlFor,
+  descId,
   anchor,
   stacked,
+  tone,
   children,
 }: {
   title: React.ReactNode;
   desc?: React.ReactNode;
   control?: React.ReactNode;
   disabled?: boolean;
+  /** The control the title labels; a click on the title then reaches it. */
   htmlFor?: string;
+  /** Id for the description, so a control can name it in aria-describedby. */
+  descId?: string;
   anchor?: string;
   /** The control takes the full width under the label (text fields, lists). */
   stacked?: boolean;
+  tone?: "danger";
   /** Extra content under the row (a sub-setting that belongs to this one). */
   children?: React.ReactNode;
 }) {
+  const TitleTag = htmlFor ? "label" : "span";
   return (
     <div
-      className={`st-row${stacked ? " st-row--stacked" : ""}${disabled ? " is-disabled" : ""}`}
+      className={`st-row${stacked ? " st-row--stacked" : ""}${disabled ? " is-disabled" : ""}${tone === "danger" ? " st-row--danger" : ""}`}
       data-setting-anchor={anchor ?? (typeof title === "string" ? title : undefined)}
     >
       <div className="st-row__main">
         <div className="st-row__text">
-          <label htmlFor={htmlFor} className="st-row__title">
+          <TitleTag htmlFor={htmlFor} className="st-row__title">
             {title}
-          </label>
-          {desc ? <div className="st-row__desc">{desc}</div> : null}
+          </TitleTag>
+          {desc ? (
+            <div id={descId} className="st-row__desc">
+              {desc}
+            </div>
+          ) : null}
         </div>
         {control !== undefined && control !== null ? (
           <div className="st-row__control">{control}</div>
@@ -153,18 +283,173 @@ export function ToggleRow({
   onChange: (next: boolean) => void;
   children?: React.ReactNode;
 }) {
+  const id = useId();
   return (
     <SettingRow
       title={title}
       desc={desc}
       anchor={anchor}
       disabled={disabled}
+      htmlFor={`${id}-switch`}
+      descId={desc ? `${id}-desc` : undefined}
       control={
-        <Switch checked={checked} disabled={disabled} onChange={onChange} ariaLabel={title} />
+        <Switch
+          id={`${id}-switch`}
+          checked={checked}
+          disabled={disabled}
+          onChange={onChange}
+          ariaLabel={title}
+          describedBy={desc ? `${id}-desc` : undefined}
+        />
       }
     >
       {children}
     </SettingRow>
+  );
+}
+
+/** A row whose control is a dropdown. The title names the dropdown. */
+export function SelectRow({
+  title,
+  desc,
+  value,
+  options,
+  onChange,
+  width = 220,
+  disabled,
+  anchor,
+  setting,
+  children,
+}: {
+  title: string;
+  desc?: React.ReactNode;
+  value: string;
+  options: ReadonlyArray<CustomSelectOption>;
+  onChange: (next: string) => void;
+  /** Trigger width in px. */
+  width?: number;
+  disabled?: boolean;
+  anchor?: string;
+  /** A data-setting hook on the control, for specs. */
+  setting?: string;
+  children?: React.ReactNode;
+}) {
+  const id = useId();
+  return (
+    <SettingRow
+      title={title}
+      desc={desc}
+      anchor={anchor}
+      disabled={disabled}
+      descId={desc ? `${id}-desc` : undefined}
+      control={
+        <div className="st-row__select" data-setting={setting}>
+          <CustomSelect
+            ariaLabel={title}
+            describedBy={desc ? `${id}-desc` : undefined}
+            width={width}
+            value={value}
+            options={options}
+            disabled={disabled}
+            onChange={onChange}
+          />
+        </div>
+      }
+    >
+      {children}
+    </SettingRow>
+  );
+}
+
+/**
+ * A button that asks twice: the first click arms it and it turns red with
+ * its confirm label, the second runs the action. It disarms when the pointer
+ * or focus leaves it, or after a few seconds, so a stray click never
+ * destroys anything.
+ */
+export function ConfirmButton({
+  children,
+  confirmLabel,
+  onConfirm,
+  disabled,
+  title,
+}: {
+  children: React.ReactNode;
+  confirmLabel: string;
+  onConfirm: () => void;
+  disabled?: boolean;
+  title?: string;
+}) {
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    if (!armed) return;
+    const timer = window.setTimeout(() => setArmed(false), 4000);
+    return () => window.clearTimeout(timer);
+  }, [armed]);
+  return (
+    <button
+      type="button"
+      className={`spark-btn st-confirm-btn${armed ? " is-danger is-armed" : ""}`}
+      disabled={disabled}
+      title={title}
+      onClick={() => {
+        if (!armed) {
+          setArmed(true);
+          return;
+        }
+        setArmed(false);
+        onConfirm();
+      }}
+      onMouseLeave={() => setArmed(false)}
+      onBlur={() => setArmed(false)}
+    >
+      {armed ? confirmLabel : children}
+    </button>
+  );
+}
+
+/**
+ * A destructive action: its title, what it removes, and a button that asks
+ * twice. Put these last on a page, in a `SettingsSection` titled for what
+ * they remove.
+ */
+export function DangerRow({
+  title,
+  desc,
+  action,
+  confirmLabel = "Click again to confirm",
+  onConfirm,
+  disabled,
+  anchor,
+  buttonTitle,
+}: {
+  title: string;
+  desc?: React.ReactNode;
+  /** The button's resting label. */
+  action: string;
+  confirmLabel?: string;
+  onConfirm: () => void;
+  disabled?: boolean;
+  anchor?: string;
+  buttonTitle?: string;
+}) {
+  return (
+    <SettingRow
+      title={title}
+      desc={desc}
+      anchor={anchor}
+      tone="danger"
+      control={
+        <ConfirmButton
+          confirmLabel={confirmLabel}
+          onConfirm={onConfirm}
+          disabled={disabled}
+          title={buttonTitle}
+        >
+          {action}
+        </ConfirmButton>
+      }
+    />
   );
 }
 
@@ -182,22 +467,28 @@ export function SwitchTrack({ checked }: { checked: boolean }) {
 }
 
 export function Switch({
+  id,
   checked,
   disabled,
   onChange,
   ariaLabel,
+  describedBy,
 }: {
+  id?: string;
   checked: boolean;
   disabled?: boolean;
   onChange: (next: boolean) => void;
   ariaLabel?: string;
+  describedBy?: string;
 }) {
   return (
     <button
+      id={id}
       type="button"
       role="switch"
       aria-checked={checked}
       aria-label={ariaLabel}
+      aria-describedby={describedBy}
       disabled={disabled}
       className="st-switch-btn"
       onClick={() => onChange(!checked)}
@@ -281,6 +572,7 @@ export function RangeControl({
     <span className="st-range">
       <input
         aria-label={ariaLabel}
+        aria-valuetext={display}
         type="range"
         min={min}
         max={max}
@@ -293,7 +585,9 @@ export function RangeControl({
         onBlur={commit}
         onKeyUp={commit}
       />
-      <span className="st-range__value">{display}</span>
+      <span className="st-range__value" aria-hidden>
+        {display}
+      </span>
     </span>
   );
 }
@@ -301,7 +595,8 @@ export function RangeControl({
 /**
  * A stacked form field: a sentence-case label over its control, with an
  * optional hint under it. Wrapping in a <label> keeps getByLabel working for
- * both inputs and button-shaped controls.
+ * both inputs and button-shaped controls. Inside a card, prefer a `stacked`
+ * SettingRow; this is for forms that are not rows.
  */
 export function Label({
   text,

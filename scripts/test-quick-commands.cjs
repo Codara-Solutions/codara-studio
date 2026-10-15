@@ -313,7 +313,7 @@ async function main() {
     assert.doesNotMatch(read("src", "shared", "quick-commands.ts"), /[\u2013\u2014]/);
 
     const settings = read("src", "renderer", "src", "components", "settings", "settings-index.ts");
-    assert.match(settings, /tabs: \["general", "editor", "terminal", "quick-commands", "keybindings"\]/);
+    assert.match(settings, /tabs: \["editor", "terminal", "quick-commands", "git", "browser"\]/);
     assert.match(read("src", "renderer", "src", "lib", "settings-sections.ts"), /"quick-commands": true,/);
     assert.match(read("src", "renderer", "src", "components", "SettingsDialog.tsx"), /renderedTab === "quick-commands" && <QuickCommandsSettings \/>/);
     const docs = read("docs", "shortcuts-and-settings.md");

@@ -30,6 +30,45 @@ function NavIcon({ tab }: { tab: SettingsTab }) {
           <circle cx="15" cy="17" r="2.2" fill="var(--st-nav-icon-fill, transparent)" />
         </svg>
       );
+    case "appearance":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="8.5" />
+          <path d="M12 3.5v17" />
+          <path d="M12 3.5a8.5 8.5 0 0 1 0 17z" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case "notifications":
+      return (
+        <svg {...common}>
+          <path d="M6.5 16.5V11a5.5 5.5 0 0 1 11 0v5.5l1.5 2H5z" />
+          <path d="M10 20.5a2 2 0 0 0 4 0" />
+        </svg>
+      );
+    case "quick-commands":
+      return (
+        <svg {...common}>
+          <path d="M13 3.5 5.5 13.5H12l-1 7 7.5-10H12z" />
+        </svg>
+      );
+    case "git":
+      return (
+        <svg {...common}>
+          <circle cx="7" cy="6" r="2.2" />
+          <circle cx="7" cy="18" r="2.2" />
+          <circle cx="17" cy="9" r="2.2" />
+          <path d="M7 8.2v7.6" />
+          <path d="M17 11.2c0 3.5-4 3.8-8.6 5.2" />
+        </svg>
+      );
+    case "browser":
+      return (
+        <svg {...common}>
+          <circle cx="12" cy="12" r="8.5" />
+          <path d="M3.5 12h17" />
+          <path d="M12 3.5c2.4 2.4 3.5 5.2 3.5 8.5s-1.1 6.1-3.5 8.5c-2.4-2.4-3.5-5.2-3.5-8.5s1.1-6.1 3.5-8.5z" />
+        </svg>
+      );
     case "editor":
       return (
         <svg {...common}>
@@ -211,7 +250,7 @@ export default function SettingsNav({
       </div>
       <div className="st-nav__groups">
         {SETTINGS_NAV_GROUPS.map((group) => (
-          <div key={group.label} className="st-nav__group">
+          <div key={group.label} className="st-nav__group" role="group" aria-label={group.label}>
             <div className="st-nav__group-label" aria-hidden>
               {group.label}
             </div>

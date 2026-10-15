@@ -139,7 +139,7 @@ check("the built-in server keeps its row, its controls and a placeholder while l
   );
   // Settings' footprint and grid, and the compact wrap the MCP rows switch to
   // when the pane itself, not the window, leaves the fixed columns too little.
-  assert.match(styles, /\.agent-capabilities-surface \{\s*\n\s*position: relative;\s*\n\s*width: min\(920px, calc\(100vw - 48px\)\);/);
+  assert.match(styles, /\.agent-capabilities-surface \{\s*\n\s*position: relative;\s*\n\s*width: min\(1000px, calc\(100vw - 48px\)\);/);
   assert.match(styles, /container: capabilities \/ inline-size;/);
   assert.match(styles, /@container capabilities \(max-width: 760px\) \{\s*\n\s*\.agent-capability-row--mcp \{\s*\n\s*display: flex !important;/);
 });

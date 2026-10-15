@@ -37,7 +37,7 @@ test("Settings search finds, opens and flips settings from the keyboard", async 
     const first = results.getByRole("option").first();
     await expect(first).toHaveAttribute("data-search-result", "Liquid glass");
     await expect(first).toHaveAttribute("aria-selected", "true");
-    await expect(first.locator(".st-result__crumb")).toHaveText("General › Appearance");
+    await expect(first.locator(".st-result__crumb")).toHaveText("Appearance › Glass");
     await expect(first.locator(".st-result__title mark")).toHaveText(["Liquid", "glas"]);
     await expect(search).toHaveAttribute("aria-activedescendant", (await first.getAttribute("id"))!);
 
@@ -56,7 +56,7 @@ test("Settings search finds, opens and flips settings from the keyboard", async 
     await search.fill("fringe");
     await expect(results.getByRole("option").first()).toHaveAttribute("data-search-result", "Fringe");
     await search.press("Enter");
-    await expect(settings.locator(".st-topbar__title")).toHaveText("General");
+    await expect(settings.locator(".st-topbar__title")).toHaveText("Appearance");
     const fringe = settings.locator('[data-setting-anchor="Fringe"]');
     await expect(fringe).toBeInViewport();
     await expect(fringe).toHaveClass(/is-flash/);

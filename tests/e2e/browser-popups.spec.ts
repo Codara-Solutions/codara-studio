@@ -188,6 +188,11 @@ test("clicked links open in the default browser unless the Codara browser is cho
     await page.getByTitle("Settings").click({ force: true });
     const dialog = page.getByRole("dialog", { name: "Settings" });
     await expect(dialog).toBeVisible();
+    // Link handling lives on the Browser page. Settings search opens it
+    // without a pointer click near the browser tab underneath the dialog.
+    await dialog.getByRole("combobox", { name: "Search settings" }).fill("open links in");
+    await page.keyboard.press("Enter");
+    await expect(dialog.locator(".st-topbar__title")).toHaveText("Browser");
     const control = dialog.locator('[data-setting="link-open-target"]');
     await control.scrollIntoViewIfNeeded();
     await expect(control.getByRole("button")).toHaveText(/Default browser/);
