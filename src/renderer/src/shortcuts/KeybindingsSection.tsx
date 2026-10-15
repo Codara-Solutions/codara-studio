@@ -1,8 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { AppPreferences, KeybindingOverridesPref, PrefKey } from "@shared/types";
 import {
+  bindingChips,
   buildBindingTable,
   findConflicts,
+  isUsableDigitRangeChord,
   overrideForChord,
   unboundOverride,
   type BindingTable,
@@ -10,6 +12,7 @@ import {
 } from "./bindings";
 import { chordFromEvent, chordToDisplay, type Chord } from "./chord";
 import { COMMAND_GROUPS, type CommandId } from "./commands";
+import { IS_MAC } from "./platform";
 import { setRecording } from "./recording";
 
 type SetPreferenceFn = <K extends PrefKey>(
@@ -194,6 +197,7 @@ function Row({
       {isRecording ? (
         <Recorder
           command={command.id}
+          digitRange={command.digitRange === true}
           table={table}
           onAssign={onAssign}
           onCancel={onCancelRecording}
@@ -226,14 +230,10 @@ function Row({
 }
 
 export function ChordChips({ binding }: { binding: EffectiveBinding }) {
-  if (binding.command.id === "view.selectByIndex") {
-    const chips = [...chordToDisplay(binding.chords[0]).slice(0, -1), "1…9"];
-    return <ChipRow chips={chips} />;
-  }
   if (binding.chords.length === 0) {
     return <span className="st-kb-unset">Set shortcut</span>;
   }
-  return <ChipRow chips={chordToDisplay(binding.chords[0])} />;
+  return <ChipRow chips={bindingChips(binding, chordToDisplay)} />;
 }
 
 function ChipRow({ chips }: { chips: string[] }) {
@@ -248,12 +248,17 @@ function ChipRow({ chips }: { chips: string[] }) {
 
 function Recorder({
   command,
+  digitRange,
   table,
   onAssign,
   onCancel,
   onUnbind,
 }: {
   command: CommandId;
+  // The command binds modifiers to the digits 1 to 9: only the modifiers of
+  // what is pressed count, and at least Ctrl, Alt or Cmd is required so the
+  // digits keep typing numbers.
+  digitRange: boolean;
   table: BindingTable;
   onAssign: (chord: Chord) => void | Promise<void>;
   onCancel: () => void;
@@ -261,6 +266,11 @@ function Recorder({
 }) {
   const [captured, setCaptured] = useState<Chord | null>(null);
   const inputRef = useRef<HTMLDivElement>(null);
+  const unusable = digitRange && captured !== null && !isUsableDigitRangeChord(captured);
+  const assign = (chord: Chord) => {
+    if (digitRange && !isUsableDigitRangeChord(chord)) return;
+    void onAssign(digitRange ? { ...chord, key: "1" } : chord);
+  };
 
   useEffect(() => {
     const el = inputRef.current;
@@ -278,7 +288,7 @@ function Recorder({
       return;
     }
     if (e.key === "Enter" && captured) {
-      void onAssign(captured);
+      assign(captured);
       return;
     }
     const chord = chordFromEvent(e.nativeEvent);
@@ -301,12 +311,19 @@ function Recorder({
         className="st-kb-recorder__field"
       >
         {captured ? (
-          chordToDisplay(captured).map((k, i) => <Kbd key={i}>{k}</Kbd>)
+          (digitRange
+            ? [...chordToDisplay(captured).slice(0, -1), "1…9"]
+            : chordToDisplay(captured)
+          ).map((k, i) => <Kbd key={i}>{k}</Kbd>)
         ) : (
           <span className="st-kb-recorder__prompt">Press keys…</span>
         )}
       </div>
-      {conflicts.length > 0 && captured ? (
+      {unusable ? (
+        <span className="st-kb-recorder__conflict">
+          {IS_MAC ? "Add Control, Option or Command" : "Add Ctrl or Alt"}
+        </span>
+      ) : conflicts.length > 0 && captured ? (
         <span className="st-kb-recorder__conflict">
           Replaces {conflicts.map((c) => c.command.label).join(", ")}
         </span>
@@ -314,8 +331,8 @@ function Recorder({
       <button
         type="button"
         className="spark-btn is-primary"
-        onClick={() => captured && void onAssign(captured)}
-        disabled={!captured}
+        onClick={() => captured && assign(captured)}
+        disabled={!captured || unusable}
       >
         Save
       </button>
