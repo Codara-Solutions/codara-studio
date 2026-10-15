@@ -362,6 +362,27 @@ test("a Cora question is answered from its card, by keyboard, and the view is re
       await expect(viewTab(page, "Workspaces")).toHaveAttribute("aria-selected", "true");
       await expect(page.getByLabel("Workspace folder name")).toBeFocused();
     });
+
+    await test.step("a new workspace from the Agents view shows the list to name it in", async () => {
+      const gamma = join(fixture.root, "projects", "gamma");
+      await mkdir(gamma, { recursive: true });
+      // The folder picker is a native dialog; it answers with the fixture folder.
+      await expect(async () => {
+        await app.evaluate(({ ipcMain }, folder) => {
+          ipcMain.removeHandler("dialog:openDirectory");
+          ipcMain.handle("dialog:openDirectory", async () => folder);
+        }, gamma);
+      }).toPass({ timeout: 20_000 });
+      await viewTab(page, "Agents").click();
+      await expect(viewTab(page, "Agents")).toHaveAttribute("aria-selected", "true");
+      await page.getByTitle("New…").click({ force: true });
+      await page.getByRole("menuitem", { name: "New workspace…", exact: true }).click({ force: true });
+      await expect(viewTab(page, "Workspaces")).toHaveAttribute("aria-selected", "true");
+      // The new row's name box is open and focused, not hidden behind the view.
+      const name = page.locator("[data-workspace-id]").getByRole("textbox");
+      await expect(name).toHaveValue("gamma");
+      await expect(name).toBeFocused();
+    });
   } finally {
     await app.close();
     await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);

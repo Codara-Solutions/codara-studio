@@ -104,8 +104,15 @@ function useTerminalActivity(open: boolean): TerminalAgentActivity[] | null {
     let again = false;
     let lastRead = 0;
     let trailing: number | null = null;
+    // Busy agents ping several times a second; a hidden window shows none of
+    // it, so it reads once when it is shown again.
+    let missed = false;
     const read = () => {
       if (!alive) return;
+      if (document.visibilityState === "hidden") {
+        missed = true;
+        return;
+      }
       if (inFlight) {
         again = true;
         return;
@@ -138,14 +145,19 @@ function useTerminalActivity(open: boolean): TerminalAgentActivity[] | null {
           }
         });
     };
+    const onVisibility = () => {
+      if (!missed || document.visibilityState !== "visible") return;
+      missed = false;
+      read();
+    };
     read();
     const off = api.onChanged(read);
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") read();
-    }, open ? SAFETY_REFRESH_MS : CLOSED_SAFETY_REFRESH_MS);
+    document.addEventListener("visibilitychange", onVisibility);
+    const timer = window.setInterval(read, open ? SAFETY_REFRESH_MS : CLOSED_SAFETY_REFRESH_MS);
     return () => {
       alive = false;
       off();
+      document.removeEventListener("visibilitychange", onVisibility);
       window.clearInterval(timer);
       if (trailing !== null) window.clearTimeout(trailing);
     };
