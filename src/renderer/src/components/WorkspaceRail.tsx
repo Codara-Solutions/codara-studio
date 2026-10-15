@@ -848,6 +848,8 @@ function WorkspaceRail(props: RailProps) {
                         label="New folder"
                         onClick={() => {
                           setCreateMenuOpen(false);
+                          // The new folder is named in the list, so show it.
+                          setRailView("workspaces");
                           setEditingGroupId(props.onCreateWorkspaceGroup());
                         }}
                       />

@@ -50,6 +50,11 @@ function snapshot(): AgentBoardSources {
   return sources;
 }
 
+/** What App published last, for event handlers that need the latest value. */
+export function getAgentBoardSources(): AgentBoardSources {
+  return sources;
+}
+
 export function publishAgentBoardSources(next: AgentBoardSources | null): void {
   sources = next ?? EMPTY;
   for (const listener of listeners) listener();

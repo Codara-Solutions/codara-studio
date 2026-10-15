@@ -354,6 +354,14 @@ test("a Cora question is answered from its card, by keyboard, and the view is re
       await expect(viewTab(page, "Workspaces")).toHaveAttribute("aria-selected", "true");
       await expect(page.locator('[data-workspace-id="ws-a"]')).toBeVisible();
     });
+
+    await test.step("a new folder from the Agents view shows the list to name it in", async () => {
+      await viewTab(page, "Agents").click();
+      await page.getByTitle("New…").click({ force: true });
+      await page.getByRole("menuitem", { name: "New folder", exact: true }).click({ force: true });
+      await expect(viewTab(page, "Workspaces")).toHaveAttribute("aria-selected", "true");
+      await expect(page.getByLabel("Workspace folder name")).toBeFocused();
+    });
   } finally {
     await app.close();
     await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);

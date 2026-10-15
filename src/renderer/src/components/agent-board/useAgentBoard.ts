@@ -252,26 +252,25 @@ function useCoraLive(enabled: boolean, runningIds: string): Record<string, Agent
   return live;
 }
 
-function useAccountLabels(enabled: boolean): Record<string, string> {
-  const [labels, setLabels] = useState<Record<string, string>>({});
+// Account labels by profile id. Inspecting the CLI accounts checks every
+// sign-in in main, so it runs only while a terminal card names a profile;
+// Cora's accounts come from the same cheap status read the composer uses.
+function useAccountLabels(enabled: boolean, wantCli: boolean, wantCora: boolean): Record<string, string> {
+  const [cli, setCli] = useState<Record<string, string>>({});
+  const [cora, setCora] = useState<Record<string, string>>({});
   useEffect(() => {
-    if (!enabled) return undefined;
+    if (!enabled || !wantCli) return undefined;
     let alive = true;
     const load = async () => {
+      const inspection = await window.spark.nativeCliAccounts?.inspect?.().catch(() => null);
+      if (!alive || !inspection) return;
       const next: Record<string, string> = {};
-      const [cli, cora] = await Promise.all([
-        window.spark.nativeCliAccounts?.inspect?.().catch(() => null),
-        window.spark.piSubscriptions?.status?.().catch(() => null),
-      ]);
-      for (const runtime of cli?.runtimes ?? []) {
+      for (const runtime of inspection.runtimes ?? []) {
         for (const profile of runtime.profiles ?? []) {
           if (profile.id && profile.label) next[profile.id] = profile.label;
         }
       }
-      for (const profile of cora?.profiles ?? []) {
-        if (profile.id && profile.label) next[profile.id] = profile.label;
-      }
-      if (alive) setLabels(next);
+      setCli(next);
     };
     void load();
     const off = window.spark.nativeCliAccounts?.onChanged?.(() => void load());
@@ -279,8 +278,24 @@ function useAccountLabels(enabled: boolean): Record<string, string> {
       alive = false;
       off?.();
     };
-  }, [enabled]);
-  return labels;
+  }, [enabled, wantCli]);
+  useEffect(() => {
+    if (!enabled || !wantCora) return undefined;
+    let alive = true;
+    void (async () => {
+      const overview = await window.spark.piSubscriptions?.status?.().catch(() => null);
+      if (!alive || !overview) return;
+      const next: Record<string, string> = {};
+      for (const profile of overview.profiles ?? []) {
+        if (profile.id && profile.label) next[profile.id] = profile.label;
+      }
+      setCora(next);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [enabled, wantCora]);
+  return useMemo(() => ({ ...cli, ...cora }), [cli, cora]);
 }
 
 const SCALAR_FIELDS = [
@@ -343,8 +358,11 @@ export function useAgentBoard(live: boolean): AgentBoardState {
     [sources.runs],
   );
   const runLive = useCoraLive(live, runningIds);
-  const accountLabels = useAccountLabels(live);
   const layoutPanes = useMemo(() => layoutAgentPanes(sources.layouts), [sources.layouts]);
+  const wantCliLabels =
+    layoutPanes.some((pane) => pane.accountProfileId) || Boolean(activity?.some((entry) => entry.accountProfileId));
+  const wantCoraLabels = useMemo(() => sources.runs.some((run) => run.chatAccountProfileId), [sources.runs]);
+  const accountLabels = useAccountLabels(live, wantCliLabels, wantCoraLabels);
   const unseen = useMemo(() => unseenPanes(sources), [sources]);
   const workspaces = useMemo(
     () => sources.workspaces.map((workspace) => ({ id: workspace.id, name: workspace.name, color: workspace.color })),

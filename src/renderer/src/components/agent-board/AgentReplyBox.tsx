@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { AgentBoardCard } from "@shared/agent-board";
 import { isQuestionInactiveError } from "@shared/run-questions";
 import { unwrapIpcError } from "../../lib/ipc-error";
+import { getAgentBoardSources } from "./agentBoardSources";
 
 // The reply box on a Needs you card. A terminal agent stopped by an error is
 // back at its prompt and gets the text pasted there and submitted, as if
@@ -44,8 +45,12 @@ async function sendReply(card: AgentBoardCard, text: string): Promise<void> {
       return;
     } catch (err) {
       // The question closed after the board last saw it (a Stop, a park):
-      // the reply is still the user's next message, as in the composer.
+      // the reply is still the user's next message, as in the composer. A
+      // chat that finished meanwhile is left alone, since a message there
+      // would start it again.
       if (!isQuestionInactiveError((err as Error)?.message)) throw err;
+      const status = getAgentBoardSources().runs.find((run) => run.id === reply.runId)?.status;
+      if (status === "complete" || status === "failed" || status === "cancelled") throw err;
     }
   }
   await window.spark.orchestration.addRunMessage({
