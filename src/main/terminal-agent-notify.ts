@@ -1229,6 +1229,40 @@ export function activeTerminalAgentPaneIds(): string[] {
   return active;
 }
 
+export interface TerminalAgentMidTurn {
+  paneId: string;
+  workspaceId: string;
+  workspaceName: string;
+  tabTitle: string;
+  runtime: PublicAgentRuntime;
+  // "waiting": stopped inside a turn on a prompt for the user. Quitting still
+  // ends the turn, so it counts, but nothing will finish it on its own.
+  state: "working" | "waiting";
+}
+
+// Terminal agents a quit or an update restart would cut off in the middle of
+// a turn. Synchronous and memory-only, like liveWorkForQuit in run-store.ts,
+// because the quit guard decides inside before-quit. Cora worker panes are
+// excluded: run-store already counts their runs.
+export function terminalAgentsMidTurn(): TerminalAgentMidTurn[] {
+  const out: TerminalAgentMidTurn[] = [];
+  for (const w of watchers.values()) {
+    if (w.excluded || w.disposing || !w.runtime || !pty.hasSession(w.paneId)) continue;
+    const state =
+      w.state === "working" ? "working" : w.state === "blocked" && turnActive(w) ? "waiting" : null;
+    if (!state) continue;
+    out.push({
+      paneId: w.paneId,
+      workspaceId: w.workspaceId,
+      workspaceName: w.workspaceName,
+      tabTitle: w.tabTitle,
+      runtime: w.runtime,
+      state,
+    });
+  }
+  return out;
+}
+
 // The agent in this pane already tells the notifier when its turns end and
 // when it waits on the user (hooks, status reports, Codex notify or its
 // session file). An agent-sent alert on top of that would arrive mid-turn,

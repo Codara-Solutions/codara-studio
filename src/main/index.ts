@@ -65,7 +65,10 @@ import {
   manualTerminalPaneIds,
   noteCodexNotifyInstalled,
   noteHostResume,
+  terminalAgentsMidTurn,
 } from "./terminal-agent-notify";
+import { collectLiveWork, hasLiveWork, quitPromptText, type LiveWork } from "./quit-guard";
+import { flushTerminalScrollback, initTerminalScrollback } from "./terminal-scrollback";
 import {
   isAllowedMainWindowUrl,
   isSameResolvedPath,
@@ -681,6 +684,7 @@ function registerUpdaterAfterFirstPaint(windowForEvents: BrowserWindow): void {
   void import("./auto-updater")
     .then((updater) => {
       updaterModCached = updater;
+      updater.setUpdateRestartLiveWork(currentLiveWork);
       return updater.registerAutoUpdater(windowForEvents);
     })
     .catch((err) => console.warn("[main] auto-updater failed to load:", err));
@@ -1243,6 +1247,11 @@ app.whenReady().then(async () => {
   }
   codexSessionTracker.start();
   piSessionTracker.start();
+  // Saved terminal output, replayed into panes the renderer restores. Loads
+  // its index in the background; the first restore request waits for it.
+  void initTerminalScrollback().catch((err) => {
+    console.warn("[main] terminal scrollback store failed to init:", err);
+  });
 
   // CLI hook ingestion watcher (big-bet "CLI hook ingestion — free
   // observability"). The installer (called earlier in app.whenReady) drops
@@ -1534,6 +1543,7 @@ async function flushAllStores(): Promise<void> {
     // land while it is still in flight. Only when run-store was already loaded:
     // quitting must not pull the heavy module in just to flush nothing.
     runStoreMod?.flushRunCompletionTails().catch(() => undefined) ?? Promise.resolve(),
+    flushTerminalScrollback().catch(() => undefined),
   ]);
 }
 
@@ -1591,34 +1601,37 @@ let cleanupRan = false;
 // pass (and a quit the OS forces at shutdown) never asks twice.
 let quitWithLiveWorkConfirmed = false;
 
-function describeLiveWork(live: { chats: number; automations: number }): string {
-  const parts: string[] = [];
-  if (live.chats > 0) parts.push(`${live.chats} chat${live.chats === 1 ? "" : "s"}`);
-  if (live.automations > 0) {
-    parts.push(`${live.automations} automation${live.automations === 1 ? "" : "s"}`);
-  }
-  return parts.join(" and ");
+// Cora runs with a turn or a worker in flight, and terminal agents in the
+// middle of a turn. Memory-only, so before-quit and the update restart gate
+// can ask synchronously; run-store is only consulted once it has loaded.
+function currentLiveWork(): LiveWork {
+  return collectLiveWork(runStoreMod?.liveWorkForQuit(), terminalAgentsMidTurn());
 }
 
-// Quitting stops every manager turn and worker in seconds, and the run comes
-// back paused with half-applied edits. Ask first. The check is synchronous and
-// memory-only, so it can decide inside before-quit.
+// Quitting stops every manager turn, worker and terminal agent in seconds:
+// runs come back paused with half-applied edits, and a terminal agent loses
+// the turn it was in. Ask first. The check is synchronous and memory-only, so
+// it can decide inside before-quit.
 function confirmQuitWithLiveWork(): boolean {
   if (quitWithLiveWorkConfirmed || E2E_BACKGROUND) return true;
-  const live = runStoreMod?.liveWorkForQuit();
-  if (!live || live.chats + live.automations === 0) return true;
+  // Restart now on a waiting update restart already answered this.
+  if (updaterModCached?.isInstallForced() === true) return true;
+  const live = currentLiveWork();
+  if (!hasLiveWork(live)) return true;
   const restartingForUpdate = updaterModCached?.isInstallRequested() === true;
+  const prompt = quitPromptText(live, {
+    restartingForUpdate,
+    resumesTerminalAgents: getPreferenceCached("restoreAgentSessions") === true,
+    keepsTerminalOutput: getPreferenceCached("restoreTerminalOutput") !== false,
+  });
   const options: Electron.MessageBoxSyncOptions = {
     type: "warning",
-    buttons: [restartingForUpdate ? "Restart anyway" : "Quit anyway", "Keep working"],
+    buttons: [prompt.confirmLabel, prompt.cancelLabel],
     defaultId: 1,
     cancelId: 1,
     noLink: true,
-    message: `Cora is still working in ${describeLiveWork(live)}.`,
-    detail:
-      (restartingForUpdate ? "Restarting to update" : "Quitting") +
-      " stops it now. The work pauses and can be resumed after the app reopens, " +
-      "but anything a worker was in the middle of is left half done.",
+    message: prompt.message,
+    detail: prompt.detail,
   };
   const parent = mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() ? mainWindow : null;
   const choice = parent ? dialog.showMessageBoxSync(parent, options) : dialog.showMessageBoxSync(options);
@@ -1649,6 +1662,11 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   if (cleanupRan) return; // cleanup already in flight from an earlier quit attempt
   cleanupRan = true;
+  // An update restart still waiting for agents ends with this quit. Its
+  // timer would otherwise see the agents stop during cleanup and turn this
+  // plain quit into an install that reopens the app. (A restart the gate
+  // started itself is no longer waiting, so this leaves it alone.)
+  updaterModCached?.cancelUpdateRestart();
 
   // Hard-exit fallback: if cleanup hangs (e.g. a wedged fs handle), force the
   // process to die rather than block quit forever. Mirrors the headless
@@ -1690,6 +1708,15 @@ app.on("before-quit", (event) => {
       snapshotAgentSessionsForQuit(live);
       if (live) signalRendererBeforeQuit([...live.keys()]);
       await flushAgentSessionRegistry();
+      // Each pane's output, while every shell still holds it: the PTY sweep
+      // below only adds exit noise. Bounded, because the agent drain and the
+      // graceful PTY teardown below need the rest of the 5s budget to let
+      // agents save their sessions; a write still running finishes in
+      // flushAllStores.
+      await Promise.race([
+        flushTerminalScrollback().catch(() => undefined),
+        new Promise<void>((resolve) => setTimeout(resolve, 1_500).unref()),
+      ]);
       // Drain orchestration-owned workers and all provider sessions before the
       // broad PTY sweep. This drain is single-flight and bounded (≤2s), leaving
       // room for graceful PTY teardown inside the 5s hard-exit fallback.

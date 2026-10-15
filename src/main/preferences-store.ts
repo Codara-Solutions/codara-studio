@@ -317,6 +317,10 @@ function normalize(
       typeof src.restoreAgentSessions === "boolean"
         ? src.restoreAgentSessions
         : DEFAULT_PREFERENCES.restoreAgentSessions,
+    restoreTerminalOutput:
+      typeof src.restoreTerminalOutput === "boolean"
+        ? src.restoreTerminalOutput
+        : DEFAULT_PREFERENCES.restoreTerminalOutput,
     // Opt-in: the phone Remote Access listener. Off for absent/invalid
     // values, so an existing preference file never turns a network listener
     // on by surprise.

@@ -3121,6 +3121,13 @@ function SessionsSettings({
             {...bindToggle("restoreAgentSessions", preferences, setPreference)}
           />
         ) : null}
+        {hydrated ? (
+          <ToggleRow
+            title="Keep terminal output across restarts"
+            desc="Saves what each terminal pane printed and shows it again when the pane reopens after a quit, an update or a crash, above the new shell or the resumed agent. Stays on this computer in Codara's folder and is deleted when you close the pane. Turning this off deletes it all."
+            {...bindToggle("restoreTerminalOutput", preferences, setPreference)}
+          />
+        ) : null}
       </SettingsSection>
 
       <SettingsSection

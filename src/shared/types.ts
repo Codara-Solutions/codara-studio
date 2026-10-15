@@ -1365,6 +1365,10 @@ export interface AppPreferences {
   // that had already exited still open as fresh shells. Off = fresh shells on
   // every relaunch.
   restoreAgentSessions?: boolean;
+  // Default on: keep each terminal pane's output on disk (Codara's own
+  // folder, bounded, deleted with the pane) and show it again when the pane
+  // is restored after a quit, an update or a crash. Off deletes it all.
+  restoreTerminalOutput?: boolean;
   // Opt-in (default off): the phone Remote Access listener
   // (docs/remote-access.md). While on, paired devices can reach this
   // computer over LAN or the blind relay; pairing and revocation live in Settings,
@@ -1540,6 +1544,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   agentsMayRemoveUserWorktrees: false,
   agentWorktreeRegenerableIgnoredByRepo: {},
   restoreAgentSessions: false,
+  restoreTerminalOutput: true,
   remoteAccessEnabled: false,
   gitAutoFetchEnabled: true,
   gitAutoFetchIntervalMinutes: DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES,

@@ -21,6 +21,7 @@ a `spark-` prefix keep the product's old name for compatibility.
 | `workspace-status.json` | Each workspace's status and one-line progress note, set by you or by an agent, with its five latest checkpoints. A workspace's entry is dropped when you delete the workspace. |
 | `notifications.json`, `notification-mutes.json` | The notification center's history (at most 200 rows; read rows are dropped after 7 days, any row after 30) and the sources you muted. A history file that cannot be read is kept beside it as `notifications.json.corrupt-<time>`. |
 | `onboarding.json` | Where you are in the first-run guide. |
+| `terminal-scrollback/` | Each terminal pane's recent output, one file per pane (mode 0600, in a 0700 folder), so a pane reopened after a quit, an update or a crash shows what it printed before. Up to 3,000 lines and a few MB per pane and 64 MB in all, oldest first out. A file is deleted when you close its pane, when it has not been written for 30 days, and all of them when you turn off **Keep terminal output across restarts** (Settings, Sessions). It holds whatever the pane printed, so treat it like your shell history. |
 | `agent-socket.json` | The loopback address and token of the running app (mode 0600), rewritten on every start. |
 | `hooks/`, `hooks/processed/` | Claude Code hook events and Codex turn-complete events, one JSON file each. Processed files are kept for a week. |
 | `claude-hooks/` | A durable copy of the hook script, so the hook survives app updates. |

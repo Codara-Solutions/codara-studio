@@ -240,7 +240,7 @@ The pages:
 | Quick commands | Saved shell commands and agent prompts: add, edit, reorder, delete, and where each is offered. Also what a right-click in a terminal does. See [Quick commands](#quick-commands). |
 | API and model | An OpenRouter key, and how Git commit messages are generated. |
 | Agents | Your accounts (see [accounts.md](./accounts.md)), **Install Pi** when Pi is not installed yet, and **Open Capability Center** and **Worker models** buttons, which close Settings and open the Capability Center on MCP servers or on worker models. |
-| Sessions | Browse and resume Claude and Codex sessions from any local project, and choose whether running agent sessions (Claude Code, Codex, Grok and Pi panes) resume when Codara reopens. |
+| Sessions | Browse and resume Claude and Codex sessions from any local project, choose whether running agent sessions (Claude Code, Codex, Grok and Pi panes) resume when Codara reopens, and whether terminal panes keep their output across restarts (**Keep terminal output across restarts**, on by default). |
 | Remote access | Turn phone access on, pair a device, and revoke paired devices (see [remote-access.md](./remote-access.md)). |
 | Keybindings | Rebind or unbind every command above. |
 | Runs | Every Cora run: browse, keep, delete. |
@@ -469,6 +469,30 @@ detection), `CODARA_HANG_WATCHDOG_STACKS=0` (no stacks; they are also skipped
 while a debugger is attached, unless set to `1`), `CODARA_CRASH_REPORTER=0`
 (crash reports) and `CODARA_EVENT_LOOP_PROBE=0` (the event loop delay).
 `CODARA_HANG_WATCHDOG_THRESHOLD_MS` changes the 5 second threshold.
+
+### Quitting, restarting and updating while agents work
+
+- Quitting while Cora or a terminal agent is in the middle of a turn asks
+  first. The prompt names what is still working ("Claude Code in api",
+  "2 Codex agents in web", "Cora in 1 chat") and says whether terminal agents
+  resume when Codara reopens. An agent stopped on a question inside a turn
+  counts too, marked "waiting for you". Plain shells, idle agents and Cora's
+  own worker panes do not (Cora's runs are counted as runs). **Keep working**
+  cancels the quit.
+- **Restart and install** on the update chip never cuts work off. While
+  something is working, the chip lists it and restarts by itself once nothing
+  has been working for 5 seconds. **Restart now** restarts at once and stops
+  that work; **Don't restart yet** stops waiting, and the downloaded update
+  still installs the next time Codara quits.
+- **Keep terminal output across restarts** (Sessions, Restore; on by
+  default): a terminal pane reopened after a quit, an update or a crash shows
+  the output it had, then a dim `[Restored from before Codara restarted]`
+  line, then its new shell or its resumed agent. Colors are kept; cursor
+  movement, links and terminal queries are not replayed, and a full-screen
+  program such as Codex keeps only its last screen. The output is saved in
+  Codara's own folder (see [on-your-machine.md](./on-your-machine.md)).
+  Closing a pane deletes its saved output, and turning the setting off
+  deletes all of it.
 
 ### Terminal agent notifications
 

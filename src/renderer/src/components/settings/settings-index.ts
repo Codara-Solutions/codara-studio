@@ -239,6 +239,7 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "capabilities", title: "Memory", desc: "What Cora remembers between chats.", capabilityTab: "memory", keywords: "remember memories notes" },
   { tab: "capabilities", title: "Worker models", desc: "The models Cora may hand work to.", capabilityTab: "workers", keywords: "models worker roster switch on" },
   { tab: "sessions", title: "Resume running agent sessions when Codara reopens", desc: "Bring back agent sessions after a restart.", section: "Restore", keywords: "restore relaunch restart resume reopen", toggle: "restoreAgentSessions" },
+  { tab: "sessions", title: "Keep terminal output across restarts", desc: "Show each pane's earlier output after Codara reopens.", section: "Restore", keywords: "scrollback history output restore restart relaunch update crash terminal", toggle: "restoreTerminalOutput" },
   { tab: "sessions", title: "Agent sessions", desc: "Find, resume and delete Claude and Codex sessions.", keywords: "history transcripts delete claude codex conversations" },
   { tab: "remote-access", title: "Allow remote access", desc: "Pair the Codara phone app with this computer.", section: "Connection", keywords: "phone mobile app pair qr" },
   { tab: "remote-access", title: "Pair a new device", desc: "Show a code to pair another phone.", section: "Connection", keywords: "phone mobile qr code pairing" },

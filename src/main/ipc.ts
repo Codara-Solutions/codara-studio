@@ -492,6 +492,12 @@ import { registerDiagnosticsIpc } from "./diagnostics";
 import { registerServersIpc } from "./servers";
 import { registerWorkspaceStatusIpc } from "./workspace-status";
 import { afterSkillAssetDeleted, afterSkillAssetInstalled, registerSkillUpdatesIpc, skillOriginsDir } from "./skill-updates-ipc";
+import {
+  forgetTerminalScrollback,
+  registerTerminalScrollbackIpc,
+  setTerminalScrollbackEnabled,
+  trackTerminalScrollbackPanes,
+} from "./terminal-scrollback";
 
 function nativeCliAccountRuntimeFromIpc(value: unknown): NativeCliAccountRuntime {
   if (value === "claude" || value === "codex" || value === "grok") return value;
@@ -1319,6 +1325,10 @@ export function registerIpc(): void {
     ): Promise<AppPreferences> => {
       const next = await setPreference(args.key, args.value);
       broadcastPreferencesChanged({ key: args.key, value: next[args.key] });
+      // Off deletes every saved terminal output at once, not at the next save.
+      if (args.key === "restoreTerminalOutput") {
+        void setTerminalScrollbackEnabled(next.restoreTerminalOutput !== false).catch(() => undefined);
+      }
       // Reflect keepRunningInBackground changes in the tray immediately so the
       // user doesn't have to restart the app to see the menu-bar icon appear or
       // disappear. The hook is registered by index.ts after ensureTray /
@@ -3140,6 +3150,9 @@ export function registerIpc(): void {
     }
     noteTerminalWillDispose(args.id);
     pty.dispose(args.id);
+    // Every renderer pane close funnels here, and nothing else does: the
+    // user is done with this pane, so its saved output goes too.
+    void forgetTerminalScrollback(args.id).catch(() => undefined);
   });
 
   // Probe for an existing session. Used by ChatPanel's backend-terminal tab
@@ -3648,7 +3661,15 @@ export function registerIpc(): void {
       _e,
       input: { workspaceId: string; workspaceName?: string; panes: TerminalNotifyPaneEntry[] },
     ) => {
-      return syncTerminalNotifyPanes(input);
+      const states = syncTerminalNotifyPanes(input);
+      if (Array.isArray(input?.panes)) {
+        trackTerminalScrollbackPanes(
+          input.panes
+            .filter((pane) => pane && !pane.excluded && typeof pane.paneId === "string")
+            .map((pane) => pane.paneId),
+        );
+      }
+      return states;
     },
   );
   handle("terminalNotify:snapshot", async () => terminalAgentStateSnapshot());
@@ -4075,6 +4096,16 @@ export function registerIpc(): void {
     const { quitAndInstall } = await import("./auto-updater");
     quitAndInstall();
   });
+  // While that restart waits for agents to finish: Restart now, or stop
+  // waiting. The update stays downloaded either way.
+  handle("updater:restartNow", async (): Promise<void> => {
+    const { restartForUpdateNow } = await import("./auto-updater");
+    restartForUpdateNow();
+  });
+  handle("updater:cancelRestart", async (): Promise<void> => {
+    const { cancelUpdateRestart } = await import("./auto-updater");
+    cancelUpdateRestart();
+  });
 
   // Manual "Check for updates" button in Settings › About. Returns a summary
   // the panel renders inline; lifecycle events still stream to the banner.
@@ -4093,6 +4124,7 @@ export function registerIpc(): void {
   registerPointIpc(handle);
   registerWorkspaceStatusIpc(handle);
   registerReviewIpc(handle);
+  registerTerminalScrollbackIpc(handle);
 }
 
 const MEMORY_KINDS = new Set<MemoryItemKind>(["preference", "correction", "fact", "procedure", "lesson"]);
