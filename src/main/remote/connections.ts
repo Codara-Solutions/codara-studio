@@ -175,6 +175,28 @@ export function setStatusSender(sender: StatusSender | null): void {
   statusSender = sender;
 }
 
+// ── Client lifecycle (port forwarding follows it) ────────────────────────────
+
+export type ConnectionLifecycleEvent = "connected" | "closed";
+type ConnectionLifecycleListener = (hostId: string, event: ConnectionLifecycleEvent) => void;
+const lifecycleListeners = new Set<ConnectionLifecycleListener>();
+
+/** "connected" once a client is adopted, "closed" when that client's transport closes. */
+export function onConnectionLifecycle(listener: ConnectionLifecycleListener): () => void {
+  lifecycleListeners.add(listener);
+  return () => lifecycleListeners.delete(listener);
+}
+
+function emitLifecycle(hostId: string, event: ConnectionLifecycleEvent): void {
+  for (const listener of lifecycleListeners) {
+    try {
+      listener(hostId, event);
+    } catch {
+      // A listener must never break the connection it observes.
+    }
+  }
+}
+
 // ── Connection ───────────────────────────────────────────────────────────────
 
 class RemoteConnection {
@@ -503,6 +525,9 @@ class RemoteConnection {
     // The owned lifecycle listeners above are now installed atomically from
     // the EventEmitter's point of view; the handoff guard is no longer needed.
     client.removeListener("error", swallowUnownedClientError);
+    // After drop(), so a "closed" listener already sees the host disconnected.
+    client.once("close", () => emitLifecycle(this.host.id, "closed"));
+    emitLifecycle(this.host.id, "connected");
   }
 
   async sftp(): Promise<SFTPWrapper> {
@@ -629,6 +654,26 @@ class RemoteConnection {
           else resolve(stream);
         },
       );
+    });
+  }
+
+  /**
+   * A direct-tcpip channel to host:port as the remote machine sees it (local
+   * port forwarding, see port-forwarding.ts). Only on the client that is open
+   * now: a forward must never reconnect a host the user disconnected.
+   */
+  forwardOut(
+    host: string,
+    port: number,
+    from: { address: string; port: number },
+  ): Promise<ClientChannel> {
+    const client = this.client;
+    if (!client) return Promise.reject(new Error(`SSH connection to ${this.host.id} is not open.`));
+    return new Promise((resolve, reject) => {
+      client.forwardOut(from.address, from.port, host, port, (err, channel) => {
+        if (err) reject(err);
+        else resolve(channel);
+      });
     });
   }
 

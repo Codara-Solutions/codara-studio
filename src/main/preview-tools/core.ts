@@ -8,6 +8,7 @@ import { browserBackend, resolveBrowserTarget, type BrowserTarget } from "../bro
 import { normalizeWaitRequest, waitForPage, WaitRequestError } from "../browser/wait";
 import { requestPreviewOp, type PreviewOpName } from "../preview-bridge";
 import { waitForLoopbackPreviewServer } from "../preview-navigation";
+import { resolveRemotePreviewUrl } from "../remote/port-forward-preview";
 import { savedServerHint } from "../servers/navigate-hint";
 import { PreviewToolParamsError, type PreviewToolHandler, type PreviewToolHost, type PreviewToolTable } from "./types";
 
@@ -34,12 +35,17 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
     throw new PreviewToolParamsError("navigate needs a url, or a tabId and a group to move that tab into the group.");
   }
   if (hasUrl && typeof params.url === "string") {
-    const reachable = await waitForLoopbackPreviewServer(params.url);
+    // In an SSH workspace localhost means the host: open its forwarded port.
+    const remote = await resolveRemotePreviewUrl(params.workspaceId, params.url);
+    if (remote && "error" in remote) throw new Error(remote.error);
+    const url = remote ? remote.url : params.url;
+    if (remote) params = { ...params, url };
+    const reachable = await waitForLoopbackPreviewServer(url);
     if (!reachable) {
       throw new Error(
-        `Preview server is not accepting connections at ${params.url}. ` +
+        `Preview server is not accepting connections at ${url}. ` +
         "Start the server (or keep it running) before navigating the Electron preview." +
-        (await savedServerHint(params.workspaceId, params.url)),
+        (await savedServerHint(params.workspaceId, url)),
       );
     }
   }

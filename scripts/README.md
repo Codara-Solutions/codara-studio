@@ -331,6 +331,7 @@ in nested and symlinked folders reach the explorer),
 
 | Suites | Covers |
 |---|---|
+| `test-remote-port-forward` | SSH port forwarding: terminal URL and port-listing parsers (ss, netstat, lsof, /proc), local port choice, and the forward lifecycle against an in-process ssh2 server. |
 | `test-remote-access`, `test-remote-access-hostile.mjs`, `test-remote-relay-client`, `test-mutation-ledger` | `src/main/remote-access/`: pairing, the protocol, the relay, idempotent writes, attacks before sign-in. |
 | `test-remote-cora-contract`, `test-cora-history-interop`, `test-cora-run-interop`, `test-cora-run-message-window` | The exact data the phone app receives for Cora chats. |
 | `test-terminal-leases`, `test-studio-terminal-share`, `test-phone-terminal-spawn`, `test-worker-terminal-controls`, `test-remote-access-terminal-launch` | Terminals used from the phone, and that they run the desktop's own launch commands. |

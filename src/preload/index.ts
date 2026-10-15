@@ -40,6 +40,7 @@ import { captureApi } from "./areas/capture";
 import { chromeLinkApi } from "./areas/chrome-link";
 import { pointApi } from "./areas/point";
 import { serversApi } from "./areas/servers";
+import { portsApi } from "./areas/ports";
 import type {
   CoraMemoryItem,
   MemoryItemKind,
@@ -1771,6 +1772,7 @@ const api = {
   chromeLink: chromeLinkApi,
   capture: captureApi,
   point: pointApi,
+  ports: portsApi,
 };
 
 function isBrowserUrl(url: string): boolean {
