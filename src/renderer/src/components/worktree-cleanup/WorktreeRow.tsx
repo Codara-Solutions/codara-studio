@@ -1,4 +1,4 @@
-import React, { memo } from "react";
+import React, { memo, useId } from "react";
 import {
   formatAge,
   formatBytes,
@@ -180,7 +180,8 @@ export const WorktreeRow = memo(function WorktreeRow({
   const size = sizeText(row, measuring);
   const title = rowTitle(row);
   const meta = metaFor(row, showRepo);
-  const checkboxId = `wtc-check-${row.id}`;
+  // A path may hold spaces, which an id must not.
+  const checkboxId = useId();
   return (
     <div
       role="row"
@@ -188,7 +189,9 @@ export const WorktreeRow = memo(function WorktreeRow({
       data-worktree-path={row.path}
       onClick={(event) => {
         if (blocked) return;
-        if ((event.target as HTMLElement).closest("input, button, a")) return;
+        // A label forwards its click to the checkbox, which toggles the row
+        // itself; toggling here as well would undo it.
+        if ((event.target as HTMLElement).closest("input, button, a, label")) return;
         onToggle(row.id);
       }}
     >

@@ -132,6 +132,7 @@ export default function WorktreeCleanupDialog({
   const bodyRef = useRef<HTMLDivElement>(null);
   const firstScan = useRef(true);
   const scanSeq = useRef(0);
+  const reviewSeq = useRef(0);
 
   const load = useCallback(async () => {
     const seq = ++scanSeq.current;
@@ -287,15 +288,17 @@ export default function WorktreeCleanupDialog({
   const review = async (): Promise<void> => {
     const targets = picked.map((row) => ({ repoRoot: row.repoRoot, path: row.path }));
     if (!targets.length) return;
+    // Back, then review again: only the latest check may fill the step.
+    const seq = ++reviewSeq.current;
     setView("review");
     setChecks(null);
     setConfirmations({});
     setError(null);
     try {
       const next = await window.spark.worktreeCleanup.check(targets);
-      if (mounted.current) setChecks(next);
+      if (mounted.current && seq === reviewSeq.current) setChecks(next);
     } catch (err) {
-      if (!mounted.current) return;
+      if (!mounted.current || seq !== reviewSeq.current) return;
       setError(errorMessage(err));
       setView("list");
     }
@@ -337,6 +340,7 @@ export default function WorktreeCleanupDialog({
   };
 
   const backToList = useCallback(() => {
+    reviewSeq.current += 1;
     setView("list");
     setChecks(null);
     setResult(null);

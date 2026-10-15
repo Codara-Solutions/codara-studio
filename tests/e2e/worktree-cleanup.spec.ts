@@ -163,8 +163,12 @@ test("the cleanup screen removes only what it may, and what was confirmed", asyn
     await dialog.getByRole("checkbox", { name: "Select feature/merged" }).focus();
     await page.keyboard.press("Space");
     await expect(dialog.getByRole("checkbox", { name: "Select feature/merged" })).toBeChecked();
-    await dialog.getByRole("checkbox", { name: "Select feature/dirty" }).check();
-    await dialog.getByRole("checkbox", { name: "Select feature/unmerged" }).check();
+    // A click on the branch name picks the row once, and so does a click
+    // anywhere else on it.
+    await row(dirty).locator("label", { hasText: "feature/dirty" }).click();
+    await expect(dialog.getByRole("checkbox", { name: "Select feature/dirty" })).toBeChecked();
+    await row(unmerged).locator(".wtc-row-path").click();
+    await expect(dialog.getByRole("checkbox", { name: "Select feature/unmerged" })).toBeChecked();
     await dialog.getByRole("button", { name: "Review removal of 3" }).click();
     const review = page.getByRole("dialog", { name: "Review removal" });
     await expect(review).toBeVisible();
