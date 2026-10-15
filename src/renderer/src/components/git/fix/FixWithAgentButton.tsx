@@ -18,6 +18,11 @@ export interface FixWithAgentButtonProps {
   commitMessage?: string;
   /** Danger tint for buttons that sit in an error strip. */
   tone?: "default" | "danger";
+  /**
+   * The problem is gone (a refresh shows the checks re-running): the button
+   * hides, but a dialog already open stays until the user closes it.
+   */
+  hidden?: boolean;
 }
 
 export default function FixWithAgentButton({
@@ -28,6 +33,7 @@ export default function FixWithAgentButton({
   output,
   commitMessage,
   tone = "default",
+  hidden = false,
 }: FixWithAgentButtonProps): React.ReactElement | null {
   const [open, setOpen] = useState(false);
   const [hover, setHover] = useState(false);
@@ -39,40 +45,42 @@ export default function FixWithAgentButton({
   }, []);
   const accent = tone === "danger" ? "var(--danger)" : "var(--accent-text)";
   // The context is read with local git and gh; remote workspaces come later.
-  if (isRemotePath(cwd)) return null;
+  if (isRemotePath(cwd) || (hidden && !open)) return null;
   return (
     <>
-      <button
-        ref={buttonRef}
-        type="button"
-        title={title}
-        aria-haspopup="dialog"
-        data-git-fix={kind}
-        onClick={() => setOpen(true)}
-        onMouseEnter={() => setHover(true)}
-        onMouseLeave={() => setHover(false)}
-        style={{
-          appearance: "none",
-          alignSelf: "flex-start",
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 5,
-          padding: "5px 8px",
-          borderRadius: 6,
-          border: hover
-            ? `1px solid color-mix(in oklch, ${accent} 55%, var(--rule-strong))`
-            : "1px solid var(--rule-strong)",
-          background: hover ? `color-mix(in oklch, ${accent} 12%, transparent)` : "transparent",
-          color: hover ? accent : "var(--ink-dim)",
-          fontFamily: "var(--font-sans)",
-          fontSize: 10.5,
-          fontWeight: 650,
-          cursor: "default",
-        }}
-      >
-        <SparkGlyph />
-        {label}
-      </button>
+      {hidden ? null : (
+        <button
+          ref={buttonRef}
+          type="button"
+          title={title}
+          aria-haspopup="dialog"
+          data-git-fix={kind}
+          onClick={() => setOpen(true)}
+          onMouseEnter={() => setHover(true)}
+          onMouseLeave={() => setHover(false)}
+          style={{
+            appearance: "none",
+            alignSelf: "flex-start",
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 5,
+            padding: "5px 8px",
+            borderRadius: 6,
+            border: hover
+              ? `1px solid color-mix(in oklch, ${accent} 55%, var(--rule-strong))`
+              : "1px solid var(--rule-strong)",
+            background: hover ? `color-mix(in oklch, ${accent} 12%, transparent)` : "transparent",
+            color: hover ? accent : "var(--ink-dim)",
+            fontFamily: "var(--font-sans)",
+            fontSize: 10.5,
+            fontWeight: 650,
+            cursor: "default",
+          }}
+        >
+          <SparkGlyph />
+          {label}
+        </button>
+      )}
       {open ? (
         <Suspense fallback={null}>
           <FixWithAgentDialog

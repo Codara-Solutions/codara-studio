@@ -1439,13 +1439,14 @@ function PullRequestView({
             onClick={onMerge}
           />
         ) : null}
-        {pullRequest.state === "OPEN" && pullRequest.checks.failed > 0 ? (
+        {pullRequest.state === "OPEN" ? (
           <FixWithAgentButton
             cwd={cwd}
             kind="checks"
             label="Fix checks with agent"
             title={`Send the failing checks on #${pullRequest.number} and their logs to an agent`}
             tone="danger"
+            hidden={pullRequest.checks.failed === 0}
           />
         ) : null}
         {pullRequest.state === "OPEN" ? (
