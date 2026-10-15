@@ -21,6 +21,28 @@ const ROOT = path.resolve(__dirname, "..");
 const SHARED_DIR = path.join(ROOT, "src", "shared");
 const ORCH_DIR = path.join(ROOT, "src", "main", "orchestration");
 
+// The scheduler reads the wall clock and the suite uses hourly and per-minute
+// crons, so a run that straddled a full hour or minute saw an extra slot (and
+// croner fired a real one). The clock starts at a fixed mid-hour time and
+// advances with real elapsed time, so timers and sleeps still mean what they say.
+function installFixedClock(startIso) {
+  const RealDate = Date;
+  const base = RealDate.parse(startIso);
+  const t0 = process.hrtime.bigint();
+  const now = () => base + Number((process.hrtime.bigint() - t0) / 1_000_000n);
+  class FakeDate extends RealDate {
+    constructor(...args) {
+      if (args.length === 0) super(now());
+      else super(...args);
+    }
+    static now() {
+      return now();
+    }
+  }
+  globalThis.Date = FakeDate;
+}
+installFixedClock("2026-10-15T12:30:20.000Z");
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const HOUR = 3_600_000;
 const iso = (ms) => new Date(ms).toISOString();
