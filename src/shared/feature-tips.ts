@@ -125,7 +125,7 @@ export const FEATURE_CATALOG: readonly FeatureCatalogEntry[] = [
   },
   {
     id: "quick-commands",
-    name: "Quick Commands",
+    name: "Quick commands",
     used: "A quick command was run, added or edited.",
     signals: {
       commands: ["quickCommands.open"],
@@ -137,7 +137,7 @@ export const FEATURE_CATALOG: readonly FeatureCatalogEntry[] = [
       tour: [
         {
           target: featureTipTargetSelector("quick-commands"),
-          title: "Quick Commands",
+          title: "Quick commands",
           body: "Pick a saved command to run it, or add a new one. Shortcut: {shortcut:quickCommands.open}.",
           placement: "bottom",
         },

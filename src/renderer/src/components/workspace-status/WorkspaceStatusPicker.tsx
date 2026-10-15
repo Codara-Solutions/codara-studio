@@ -172,10 +172,10 @@ export default function WorkspaceStatusPicker({
 
       {checkpoints.length > 0 && (
         <section
-          aria-label="Recent checkpoints"
+          aria-label="Recent updates"
           style={{ borderTop: "1px solid var(--rule-soft)", paddingTop: 7, display: "grid", gap: 5 }}
         >
-          <div style={sectionLabel}>Recent checkpoints</div>
+          <div style={sectionLabel}>Recent updates</div>
           <ol
             data-testid="workspace-status-checkpoints"
             style={{ listStyle: "none", margin: 0, padding: "0 6px 4px", display: "grid", gap: 6, maxHeight: 180, overflow: "auto" }}
