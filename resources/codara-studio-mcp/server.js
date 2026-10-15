@@ -233,6 +233,27 @@ const NOTIFY_TOOL = {
   },
 };
 
+// The workspace's status and one-line progress note, shown under its name in
+// the rail. Only the terminal agent roster carries it: a Cora chat already
+// shows its own state on the workspace's row. The workspace is always the
+// caller's own (the terminal pane it runs in), so the tool takes none; the
+// store is src/main/workspace-status/ and the socket method
+// src/main/preview-tools/workspace-status.ts.
+const WORKSPACE_STATUS_TOOL = {
+  name: "codara_workspace_status",
+  description:
+    "Read (no arguments) or set your workspace's status and one-line progress note, shown under its name in Codara's rail.",
+  inputSchema: {
+    type: "object",
+    properties: {
+      status: { type: "string", enum: ["todo", "in_progress", "in_review", "done", "blocked"] },
+      note: { type: "string", description: "One plain line, at most 140 characters; empty clears it." },
+      clear: { type: "boolean" },
+    },
+    additionalProperties: false,
+  },
+};
+
 // Agent worktrees. The repository is always the caller's own (its run or
 // terminal pane), so no tool takes a repo; the policy is in
 // src/main/agent-worktrees.ts and a refusal comes back as {ok:false, code,
@@ -1623,10 +1644,11 @@ if (IS_AUTOMATION_MODE) {
 } else {
   // A user's own terminal agent. A Cora run already announces its outcome, so
   // only this roster carries the explicit notification.
-  TOOLS = [...STUDIO_TOOLS, NOTIFY_TOOL, ...WORKTREE_TOOLS];
+  TOOLS = [...STUDIO_TOOLS, NOTIFY_TOOL, WORKSPACE_STATUS_TOOL, ...WORKTREE_TOOLS];
   TOOL_TO_RPC = {
     ...STUDIO_TOOL_TO_RPC,
     codara_notify_user: "agent.notify",
+    codara_workspace_status: "workspace.status",
     ...WORKTREE_TOOL_TO_RPC,
   };
 }
@@ -1681,6 +1703,7 @@ const DESTRUCTIVE_TOOL_NAMES = new Set([
 ]);
 const IDEMPOTENT_TOOL_NAMES = new Set([
   ...TOOL_REGISTRY.annotations.idempotent,
+  "codara_workspace_status",
   "codara_terminal_close",
   "codara_worktree_remove",
   "codara_set_automation_enabled",
@@ -1760,6 +1783,11 @@ function buildInstructions() {
       "When you finish a task that took more than a minute, or you are blocked waiting for the user, call codara_notify_user once with a one-line summary.",
     );
   }
+  if (listed.has("codara_workspace_status")) {
+    parts.push(
+      "Workspace status: codara_workspace_status shows the user where your work stands, under the workspace's name in the rail. Set in_progress with a short note when you start a task, post a new one-line note at each milestone, set in_review or done when you finish and blocked, with the reason as the note, when you need the user. Read it first when you pick up work another session started.",
+    );
+  }
   parts.push(
     "When Codara is closed every call fails at once with an offline error. Ask the user to open Codara, then retry; do not loop.",
   );
@@ -1819,12 +1847,12 @@ function isTransportTimeout(err) {
 }
 
 // Browser and terminal routing belongs to the launching process, not tool JSON.
-const CALLER_LOCATED_RPCS = new Set(["terminal.create", "terminal.run", "terminal.list", "terminal.servers", "agent.notify"]);
+const CALLER_LOCATED_RPCS = new Set(["terminal.create", "terminal.run", "terminal.list", "terminal.servers", "agent.notify", "workspace.status"]);
 function injectRunIdForStudioOwnership(rpc, args) {
   if (
     !rpc.startsWith("preview.") &&
     !rpc.startsWith("terminal.") &&
-    rpc !== "agent.notify"
+    !CALLER_LOCATED_RPCS.has(rpc)
   ) return;
   const envRunId = (process.env.SPARK_RUN_ID || "").trim();
   if (envRunId) args.runId = envRunId;
@@ -1870,6 +1898,12 @@ function stampWorktreeCaller(rpc, args, ctx) {
   if (envPaneId) args.callerPaneId = envPaneId;
   args.callerPid = process.pid;
   args.callerRole = worktreeCallerRole();
+  args.callerClient = (ctx && ctx.client) || CLIENT_NAME || "agent";
+}
+
+// Which agent wrote a workspace status, when Codara cannot tell from the pane.
+function stampWorkspaceStatusCaller(rpc, args, ctx) {
+  if (rpc !== "workspace.status") return;
   args.callerClient = (ctx && ctx.client) || CLIENT_NAME || "agent";
 }
 
@@ -2328,6 +2362,7 @@ async function callTool(params, ctx = {}) {
   }
   injectRunIdForStudioOwnership(rpc, args);
   stampWorktreeCaller(rpc, args, ctx);
+  stampWorkspaceStatusCaller(rpc, args, ctx);
   clampPreviewWait(rpc, args);
 
   const timeoutMs = rpcTimeoutMs(rpc);
@@ -2370,6 +2405,9 @@ async function callTool(params, ctx = {}) {
     // retry or report.
     if (rpc === "agent.notify" && err && err.code === "SPARK_OFFLINE") {
       return toToolResult({ published: false, reason: "codara_offline" });
+    }
+    if (rpc === "workspace.status" && err && err.code === "SPARK_OFFLINE") {
+      return toToolResult({ updated: false, reason: "codara_offline" });
     }
     return toolError(errorText(err));
   } finally {
@@ -2511,6 +2549,7 @@ function toolManifest() {
     ...Object.fromEntries(Object.entries(TOOL_REGISTRY.families).map(([family, list]) => [family, names(list.map((name) => ({ name })))])),
     terminal: names(TERMINAL_TOOLS),
     notify: names([NOTIFY_TOOL]),
+    status: names([WORKSPACE_STATUS_TOOL]),
     worktree: names(WORKTREE_TOOLS),
     whiteboard: names(WHITEBOARD_TOOLS),
     board: names(BOARD_TOOLS),
