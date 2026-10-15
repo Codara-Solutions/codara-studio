@@ -38,6 +38,7 @@ import type { AgentDeliveryRequest, AgentDeliveryResult } from "@shared/agent-de
 import { captureApi } from "./areas/capture";
 import { chromeLinkApi } from "./areas/chrome-link";
 import { pointApi } from "./areas/point";
+import { reviewApi } from "./areas/review";
 import { serversApi } from "./areas/servers";
 import type {
   CoraMemoryItem,
@@ -1764,6 +1765,7 @@ const api = {
   chromeLink: chromeLinkApi,
   capture: captureApi,
   point: pointApi,
+  review: reviewApi,
 };
 
 function isBrowserUrl(url: string): boolean {
