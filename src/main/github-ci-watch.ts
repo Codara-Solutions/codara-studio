@@ -10,7 +10,8 @@
 // default branch, has no pull request and is skipped. `gh pr view` runs when
 // those refs moved (a commit or a push), every 90 seconds while checks are
 // still running, and otherwise every 15 minutes, so a quiet repository costs
-// a handful of calls an hour.
+// a handful of calls an hour. While nobody has touched the computer for ten
+// minutes it looks every five minutes instead of every minute.
 //
 // A pull request already failing when the watcher first sees it is not news,
 // so it stays quiet; every later failure of a new head commit, or of a re-run
@@ -22,6 +23,10 @@ import type { AppState, Workspace } from "@shared/types";
 
 export const CI_WATCH_FIRST_DELAY_MS = 45_000;
 export const CI_WATCH_TICK_MS = 60_000;
+// Nobody at the computer: a failure can wait a few minutes, so the watcher
+// looks every five instead of every one (a git call per workspace each time).
+export const CI_WATCH_IDLE_TICK_MS = 5 * 60_000;
+export const CI_WATCH_IDLE_AFTER_MS = 10 * 60_000;
 export const CI_WATCH_PENDING_REQUERY_MS = 90_000;
 export const CI_WATCH_SETTLED_REQUERY_MS = 15 * 60_000;
 export const CI_WATCH_ERROR_BACKOFF_MS = 10 * 60_000;
@@ -68,6 +73,8 @@ export interface GitHubCiWatchDeps {
   setTimeout(fn: () => void, ms: number): unknown;
   clearTimeout(handle: unknown): void;
   log(message: string): void;
+  /** How long the user has not touched the computer; absent means always present. */
+  idleMs?(): number;
 }
 
 interface WorkspaceTrack {
@@ -193,7 +200,9 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
     if (!started) return;
     timer = deps.setTimeout(() => {
       timer = null;
-      void runPass().finally(() => schedule(CI_WATCH_TICK_MS));
+      void runPass().finally(() =>
+        schedule((deps.idleMs?.() ?? 0) >= CI_WATCH_IDLE_AFTER_MS ? CI_WATCH_IDLE_TICK_MS : CI_WATCH_TICK_MS),
+      );
     }, ms);
   }
 
@@ -292,7 +301,8 @@ export function createCiLocalRefsReader(
 let live: GitHubCiWatch | null = null;
 
 async function productionDeps(): Promise<GitHubCiWatchDeps> {
-  const [{ access }, { runGit }, { resolveBinary }, github, notify, prefs, storage] = await Promise.all([
+  const [{ powerMonitor }, { access }, { runGit }, { resolveBinary }, github, notify, prefs, storage] = await Promise.all([
+    import("electron"),
     import("node:fs/promises"),
     import("./git-exec"),
     import("./binary-resolver"),
@@ -349,6 +359,13 @@ async function productionDeps(): Promise<GitHubCiWatchDeps> {
     },
     clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout),
     log: (message) => console.warn(`[github-ci-watch] ${message}`),
+    idleMs: () => {
+      try {
+        return powerMonitor.getSystemIdleTime() * 1000;
+      } catch {
+        return 0;
+      }
+    },
   };
 }
 
