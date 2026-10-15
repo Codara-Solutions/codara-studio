@@ -379,7 +379,9 @@ signs in through Claude's OAuth login cannot be used from Cora; give it an
 repository. Codara remembers where each one came from (the address, branch or
 tag, commit and folder in the repository) in its own folder, never inside the
 skill, and the skill's row shows it. Copying a skill to the Claude or Codex
-CLI with **Add** carries that record to the copy.
+CLI with **Add** carries that record to the copy. A skill you remove outside
+Codara and replace with another in the same folder loses its record, so the
+new one is never updated from the old one's source.
 
 For skills from git, Codara asks the repository whether it moved when the
 Capability Center opens, at most every six hours (30 minutes after a failed

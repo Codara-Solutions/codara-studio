@@ -255,7 +255,9 @@ async function main() {
 
   await check("update replaces the skill, keeps its name, and keeps the old version for rollback", async () => {
     const before = fs.readFileSync(path.join(skillDir, "SKILL.md"), "utf8");
-    const result = await updates.updateSkills({ dirs: [skillDir] }, options());
+    // The same folder named twice is updated once, so the kept version is
+    // the one from before this update.
+    const result = await updates.updateSkills({ dirs: [skillDir, `${skillDir}${path.sep}`] }, options());
     assert.equal(result.ok, true, result.errors.join(" "));
     assert.deepEqual(result.updated, [skillDir]);
     const document = fs.readFileSync(path.join(skillDir, "SKILL.md"), "utf8");
@@ -412,12 +414,14 @@ async function main() {
     assert.deepEqual(fs.readdirSync(STAGING), [], "staging is cleaned up");
   });
 
-  await check("when putting a copy back fails too, its previous version is kept and Roll back restores it", async () => {
+  await check("when putting a copy back fails too, its previous version is kept and can be restored", async () => {
     const result = await updates.updateSkills({ dirs: [cliCopy] }, options({ outsideWrite: capability, rename: failingRename(2, 3) }));
     assert.equal(result.ok, false);
     const backup = path.join(store.skillOriginBackupDir(STATE, cliCopy), "skill");
     assert.ok(result.errors[0].includes(backup), result.errors[0]);
-    assert.match(result.errors[0], /Roll back restores it/);
+    // The folder is gone, so the skill has no row to click Roll back on: the
+    // message says where the previous version is and where it belongs.
+    assert.ok(result.errors[0].includes(`move that folder back to ${cliCopy}`), result.errors[0]);
     assert.equal(fs.existsSync(cliCopy), false);
     assert.match(fs.readFileSync(path.join(backup, "SKILL.md"), "utf8"), /Version one\./);
     assert.ok((await store.readSkillOrigin(STATE, cliCopy)).rollback, "the record offers the roll back");
@@ -504,6 +508,54 @@ async function main() {
     fs.rmSync(path.join(SKILLS, "other"), { recursive: true });
     const listed = await updates.listSkillOrigins(options());
     assert.equal(listed.some((status) => status.name === "other"), false);
+  });
+
+  await check("a record no longer describes a folder replaced outside Codara", async () => {
+    const imported = await importer.importCodaraSkill(
+      { kind: "git", url: `${URL_BASE}team/skills`, subdir: "skills/other" },
+      { skillsDir: SKILLS, stagingDir: STAGING, originsDir: STATE, runGit },
+    );
+    assert.equal(imported.ok, true, imported.error);
+    const otherDir = imported.path;
+    const recorded = await store.readSkillOrigin(STATE, otherDir);
+    assert.match(recorded.folderId ?? "", /^[1-9][0-9]*$/, "the record names the folder it describes");
+    assert.ok((await updates.listSkillOrigins(options())).some((status) => status.skillDir === otherDir));
+    // Removed by hand and another skill of the same name put there. It is
+    // made beside the old one first, so it cannot reuse the old folder's id.
+    const replacement = path.join(SKILLS, ".replacement");
+    fs.mkdirSync(replacement);
+    fs.writeFileSync(path.join(replacement, "SKILL.md"), skillMd("other", "Hand-made."));
+    fs.rmSync(otherDir, { recursive: true });
+    fs.renameSync(replacement, otherDir);
+    assert.equal((await updates.listSkillOrigins(options())).some((status) => status.skillDir === otherDir), false);
+    const checked = await updates.checkSkillUpdates(options({ force: true }));
+    assert.equal(checked.some((status) => status.skillDir === otherDir), false);
+    const update = await updates.updateSkills({ dirs: [otherDir] }, options());
+    assert.equal(update.ok, false);
+    assert.match(update.errors[0], /replaced since Codara installed it/);
+    // A kept version belongs to the skill that was there, not this one.
+    await store.writeSkillOrigin(STATE, {
+      ...recorded,
+      rollback: { savedAt: new Date().toISOString(), name: "other", origin: recorded.origin },
+    });
+    const backup = path.join(store.skillOriginBackupDir(STATE, otherDir), "skill");
+    fs.mkdirSync(backup, { recursive: true });
+    fs.writeFileSync(path.join(backup, "SKILL.md"), skillMd("other", "Kept."));
+    const rollback = await updates.rollbackSkills({ dirs: [otherDir] }, options());
+    assert.equal(rollback.ok, false);
+    assert.match(rollback.errors[0], /replaced since Codara installed it/);
+    assert.match(fs.readFileSync(path.join(otherDir, "SKILL.md"), "utf8"), /Hand-made\./);
+    // Add to a CLI of a skill with no record drops what a skill removed from
+    // that place outside Codara left behind.
+    const cliOther = path.join(HOME, ".claude", "skills", "other");
+    fs.mkdirSync(cliOther, { recursive: true });
+    fs.writeFileSync(path.join(cliOther, "SKILL.md"), skillMd("other", "Hand-made."));
+    await store.writeSkillOrigin(STATE, { ...recorded, skillDir: cliOther });
+    assert.equal(await updates.copySkillOrigin({ from: otherDir, to: cliOther }, options()), false);
+    assert.equal(await store.readSkillOrigin(STATE, cliOther), null);
+    await updates.forgetSkillOrigins({ dirs: [otherDir] }, options());
+    fs.rmSync(otherDir, { recursive: true });
+    fs.rmSync(cliOther, { recursive: true });
   });
 
   await check("ls-remote output resolves branches, peeled annotated tags, lightweight tags and HEAD", async () => {

@@ -36,6 +36,10 @@ export interface SkillOriginReceipt {
   origin: SkillOrigin;
   check?: SkillOriginCheck;
   rollback?: SkillOriginRollback;
+  // The folder's file id (inode) when Codara last wrote it. A skill removed
+  // outside Codara and another one put in the same place later has a new id,
+  // so this record no longer describes it (see skillFolderId).
+  folderId?: string;
 }
 
 // Folded the way outside-write-guard folds: macOS and Windows treat paths
@@ -59,6 +63,21 @@ export function skillOriginBackupDir(stateDir: string, skillDir: string): string
 }
 
 const COMMIT_PATTERN = /^[0-9a-f]{7,64}$/;
+const FOLDER_ID_PATTERN = /^[1-9][0-9]{0,39}$/;
+
+/**
+ * The folder's file id: the inode on macOS and Linux, the NTFS file index on
+ * Windows. A rename keeps it; a folder removed and made again gets a new one.
+ * Undefined when the folder is missing or the file system reports none.
+ */
+export async function skillFolderId(dir: string): Promise<string | undefined> {
+  try {
+    const stat = await fs.lstat(dir, { bigint: true });
+    return stat.isDirectory() && stat.ino > 0n ? stat.ino.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function optionalString(value: unknown): value is string | undefined {
   return value === undefined || typeof value === "string";
@@ -110,6 +129,9 @@ export function parseSkillOriginReceipt(text: string): SkillOriginReceipt | null
   if (typeof receipt.skillDir !== "string" || typeof receipt.name !== "string" || !isOrigin(receipt.origin)) return null;
   if (receipt.check !== undefined && !isCheck(receipt.check)) return null;
   if (receipt.rollback !== undefined && !isRollback(receipt.rollback)) return null;
+  if (receipt.folderId !== undefined && (typeof receipt.folderId !== "string" || !FOLDER_ID_PATTERN.test(receipt.folderId))) {
+    return null;
+  }
   return receipt as unknown as SkillOriginReceipt;
 }
 
@@ -145,11 +167,13 @@ export async function recordSkillOrigin(
   // A fresh install starts with no rollback: a backup kept for an earlier
   // skill in the same folder would restore something else.
   await fs.rm(skillOriginBackupDir(stateDir, input.skillDir), { recursive: true, force: true });
+  const folderId = await skillFolderId(input.skillDir);
   await writeSkillOrigin(stateDir, {
     schemaVersion: SCHEMA_VERSION,
     skillDir: resolve(input.skillDir),
     name: input.name,
     origin: input.origin,
+    ...(folderId ? { folderId } : {}),
   });
 }
 
