@@ -505,7 +505,7 @@ function reviewThread(value: unknown): (GitFixReviewThread & { resolved: boolean
   const comments = nodes.flatMap((raw) => {
     const comment = record(raw);
     if (!comment || typeof comment.body !== "string") return [];
-    const body = capText(redactSecrets(plainLogText(comment.body.slice(0, 64_000)).trim()), GIT_FIX_LIMITS.reviewCommentChars);
+    const body = capText(redactSecrets(plainLogText(comment.body.slice(0, 8_000)).trim()), GIT_FIX_LIMITS.reviewCommentChars);
     const author = record(comment.author);
     const url = text(comment.url, 500);
     return [{

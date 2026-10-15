@@ -85,6 +85,33 @@ test("redactSecrets keeps code that only names a secret", ({ mod }) => {
   assert.equal(mod.redactSecrets(code), code);
 });
 
+test("redaction stays fast on huge lines full of secret-like names", ({ mod }) => {
+  // These run in the main process on CI logs, hook output and conflicted
+  // (often minified) files. Unbounded, the assignment pattern backtracked
+  // quadratically on a long run like "token.token.token...": a 512 kB line
+  // froze the main process for about ten seconds.
+  const long = 512 * 1024;
+  for (const line of ["token.".repeat(long / 6), "a-secret-".repeat(long / 9), "token".repeat(long / 5)]) {
+    let started = Date.now();
+    mod.redactSecrets(line);
+    assert.ok(Date.now() - started < 3_000, `redactSecrets took ${Date.now() - started} ms`);
+    started = Date.now();
+    const tail = mod.sliceLogTail(`${line}\nlast line`);
+    mod.tailText(line, 200, 16_000);
+    mod.conflictExcerpt(`<<<<<<< HEAD\n${line}\n=======\nx\n>>>>>>> theirs\n`);
+    assert.ok(Date.now() - started < 1_500, `slicing took ${Date.now() - started} ms`);
+    assert.equal(tail.truncated, true);
+    assert.ok(tail.text.length <= 12_000);
+  }
+  // Long names still count (the value is assembled so scanners skip it).
+  const longName = "MY_GOOGLE_CLOUD_SERVICE_ACCOUNT_PRIVATE_KEY";
+  assert.equal(mod.redactSecrets(`${longName}=${"abc123"}${"def456ghi"}`), `${longName}=[redacted]`);
+  // A secret cut by the first slice never survives the final cap.
+  const token = "ghp_" + "Q1w2E3r4T5y6U7i8O9p0A1s2D3f4G5h6J7k8";
+  const tailed = mod.tailText(`${"x".repeat(9_000)}${token}${"y".repeat(16_000 + 4_096 - 20)}`, 200, 16_000);
+  assert.ok(!tailed.text.includes(token.slice(-20)), "no part of a split token is kept");
+});
+
 test("plainLogText strips terminal escapes and control characters", ({ mod }) => {
   assert.equal(mod.plainLogText("\x1b[31mred\x1b[0m\r\nnext\x07\x00"), "red\nnext");
 });

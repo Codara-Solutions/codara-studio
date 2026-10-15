@@ -210,8 +210,11 @@ const SECRET_PATTERNS: ReadonlyArray<[RegExp, string]> = [
 ];
 
 // KEY=value and "key": "value" assignments whose name says it holds a secret.
+// The name's parts around the keyword are bounded: unbounded, a long run like
+// "token.token.token..." in a minified line backtracks quadratically, and this
+// runs in the main process.
 const SECRET_ASSIGNMENT =
-  /\b([A-Za-z0-9_.-]*(?:token|secret|passw(?:or)?d|passwd|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credential)[A-Za-z0-9_.-]*)(["']?\s*[:=]\s*)(["']?)([^\s"'`,;]{8,})/gi;
+  /\b([A-Za-z0-9_.-]{0,64}(?:token|secret|passw(?:or)?d|passwd|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|credential)[A-Za-z0-9_.-]{0,64})(["']?\s*[:=]\s*)(["']?)([^\s"'`,;]{8,})/gi;
 
 // A value that reads like a credential rather than code: one token of
 // key-like characters mixing letters and digits. `process.env.API_KEY` and
@@ -219,6 +222,11 @@ const SECRET_ASSIGNMENT =
 function secretLike(value: string): boolean {
   return /^[A-Za-z0-9+/=_~.-]+$/.test(value) && /[A-Za-z]/.test(value) && /\d/.test(value) && !/^\d+(?:\.\d+)*$/.test(value);
 }
+
+// Text is cut to its cap plus this margin before it is redacted, so the
+// work stays small whatever a log line holds; a secret the first cut splits
+// lies in the margin, which the final cap drops.
+const REDACT_MARGIN = 4_096;
 
 /**
  * The text with credentials replaced by "[redacted]": provider tokens, bearer
@@ -285,8 +293,10 @@ export function sliceLogTail(
     }
   }
   const parts = earlier.length ? [...earlier, "... (earlier output omitted) ...", ...recent] : recent;
-  let text = redactSecrets(parts.join("\n"));
-  let truncated = recentStart > 0;
+  const joined = parts.join("\n");
+  const precut = joined.length > maxChars + REDACT_MARGIN;
+  let text = redactSecrets(precut ? joined.slice(-(maxChars + REDACT_MARGIN)) : joined);
+  let truncated = recentStart > 0 || precut;
   if (text.length > maxChars) {
     text = text.slice(text.length - maxChars);
     const firstBreak = text.indexOf("\n");
@@ -301,8 +311,10 @@ export function tailText(raw: string, maxLines: number, maxChars: number): { tex
   const lines = plainLogText(raw).split("\n").map((line) => line.replace(/\s+$/, ""));
   while (lines.length && !lines[lines.length - 1]) lines.pop();
   while (lines.length && !lines[0]) lines.shift();
-  let truncated = lines.length > maxLines;
-  let text = redactSecrets(lines.slice(-maxLines).join("\n"));
+  const joined = lines.slice(-maxLines).join("\n");
+  const precut = joined.length > maxChars + REDACT_MARGIN;
+  let truncated = lines.length > maxLines || precut;
+  let text = redactSecrets(precut ? joined.slice(-(maxChars + REDACT_MARGIN)) : joined);
   if (text.length > maxChars) {
     text = text.slice(text.length - maxChars);
     truncated = true;
@@ -346,7 +358,8 @@ export function conflictExcerpt(
     }
     parts.push(`lines ${from + 1}-${to + 1}:\n${body.join("\n")}`);
   }
-  const capped = capText(redactSecrets(parts.join("\n\n")), maxChars);
+  const joined = parts.join("\n\n");
+  const capped = capText(redactSecrets(joined.slice(0, maxChars + REDACT_MARGIN)), maxChars);
   return { excerpt: capped.text, conflicts: ranges.length, truncated: capped.truncated || ranges.length > maxBlocks };
 }
 
