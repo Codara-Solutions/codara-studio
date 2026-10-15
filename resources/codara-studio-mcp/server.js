@@ -98,6 +98,10 @@ const TERMINAL_RUN_TIMEOUT_MS = TERMINAL_RUN_MAX_WAIT_MS + 60_000;
 // A worktree call may fetch (30 s cap), wait its turn on the repository lock
 // (60 s cap) and then check out or delete a large tree.
 const WORKTREE_TIMEOUT_MS = 150_000;
+// Create may then wait up to 5 minutes for the repository's setup, and
+// codara_worktree_setup up to 9; both stay under Codex's 11-minute tool limit.
+const WORKTREE_CREATE_TIMEOUT_MS = WORKTREE_TIMEOUT_MS + 5 * 60_000 + 30_000;
+const WORKTREE_SETUP_TIMEOUT_MS = 9 * 60_000 + 30_000;
 
 // ===========================================================================
 // Browser tool set (drive the built-in browser tabs). The definitions live in
@@ -251,6 +255,22 @@ const WORKTREE_TOOLS = [
         purpose: { type: "string", description: "One line: what it is for." },
         title: { type: "string", description: "Rail label. Default the branch." },
         fetch: { type: "boolean", description: "Default true." },
+        waitForSetup: { type: "boolean", description: "Wait for its setup (5 min max)." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_worktree_setup",
+    description: "A worktree's setup status and log tail; default your own. wait:true waits for it to end.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        workspaceId: { type: "string" },
+        path: { type: "string" },
+        wait: { type: "boolean" },
+        timeoutSeconds: { type: "number", description: "Max 540." },
+        logLines: { type: "number" },
       },
       additionalProperties: false,
     },
@@ -288,6 +308,7 @@ const WORKTREE_TOOL_TO_RPC = {
   codara_worktree_create: "worktree.create",
   codara_worktree_list: "worktree.list",
   codara_worktree_remove: "worktree.remove",
+  codara_worktree_setup: "worktree.setup",
 };
 
 // Workflows: a JavaScript script that fans work out to many Cora agents. Only
@@ -1657,6 +1678,7 @@ const READ_ONLY_TOOL_NAMES = new Set([
   "codara_get_automation",
   "codara_wait_for_automation",
   "codara_worktree_list",
+  "codara_worktree_setup",
   "codara_recall",
   "codara_workflow_list",
   "codara_workflow_get",
@@ -1752,7 +1774,7 @@ function buildInstructions() {
   }
   if (listed.has("codara_worktree_create")) {
     parts.push(
-      "Worktrees: codara_worktree_create gives you an isolated checkout of your repository on its own branch, shown in the user's rail. Work there with absolute paths or git -C; your cwd stays put. Once the branch is merged, call codara_worktree_remove. It refuses anything unmerged, dirty or in use and never forces, so act on its code and hint instead of retrying.",
+      "Worktrees: codara_worktree_create gives you an isolated checkout of your repository on its own branch, shown in the user's rail. Work there with absolute paths or git -C; your cwd stays put. Codara prepares it from the repository's .worktreeinclude and .codara/worktree.json (copied files, linked folders, setup command); when the result's setup is not finished, call codara_worktree_setup with wait:true before building, and read its logTail if it failed. Once the branch is merged, call codara_worktree_remove. It refuses anything unmerged, dirty or in use and never forces, so act on its code and hint instead of retrying.",
     );
   }
   if (listed.has("codara_notify_user")) {
@@ -1801,12 +1823,15 @@ const PROGRESS_RPCS = new Set([
   "automation.set_enabled",
   "worktree.create",
   "worktree.remove",
+  "worktree.setup",
 ]);
 const PROGRESS_INTERVAL_MS = 10_000;
 
 function rpcTimeoutMs(rpc) {
   if (isOrchestrationRpc(rpc)) return ORCHESTRATION_TIMEOUT_MS;
   if (rpc === "terminal.run") return TERMINAL_RUN_TIMEOUT_MS;
+  if (rpc === "worktree.create") return WORKTREE_CREATE_TIMEOUT_MS;
+  if (rpc === "worktree.setup") return WORKTREE_SETUP_TIMEOUT_MS;
   if (rpc.startsWith("worktree.")) return WORKTREE_TIMEOUT_MS;
   return PREVIEW_TERMINAL_TIMEOUT_MS;
 }

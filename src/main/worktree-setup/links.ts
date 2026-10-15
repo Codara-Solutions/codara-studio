@@ -155,6 +155,19 @@ export async function releaseWorktreeLinks(worktreePath: string): Promise<SetupM
   return released;
 }
 
+let beforeRemoval: ((worktreePath: string) => Promise<void>) | null = null;
+
+/** Lets the setup service stop a setup still running in a worktree about to go. */
+export function setBeforeWorktreeRemoval(hook: ((worktreePath: string) => Promise<void>) | null): void {
+  beforeRemoval = hook;
+}
+
+/** Stops the worktree's setup, then releases its links. For every removal path. */
+export async function prepareWorktreeRemoval(worktreePath: string): Promise<SetupManifestLink[]> {
+  if (beforeRemoval) await beforeRemoval(worktreePath).catch(() => undefined);
+  return releaseWorktreeLinks(worktreePath);
+}
+
 /** Puts back links released for a removal that then failed. */
 export async function restoreWorktreeLinks(worktreePath: string, links: readonly SetupManifestLink[]): Promise<void> {
   for (const link of links) {

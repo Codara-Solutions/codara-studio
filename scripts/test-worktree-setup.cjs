@@ -58,6 +58,7 @@ async function main() {
         'export * as links from "./src/main/worktree-setup/links";',
         'export * as service from "./src/main/worktree-setup/service";',
         'export * as files from "./src/main/worktree-setup/files";',
+        'export * as agent from "./src/main/agent-worktrees";',
       ].join("\n"),
       resolveDir: ROOT,
       loader: "ts",
@@ -87,6 +88,7 @@ async function main() {
 
   try {
     await runSuite(m, scratch);
+    await agentSuite(m, scratch);
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
   }
@@ -94,7 +96,7 @@ async function main() {
 }
 
 async function runSuite(m, scratch) {
-  const { shared, gitignore, plan, materialize, links, service, files } = m;
+  const { shared, gitignore, plan, materialize, links, service, files, agent } = m;
 
   // ── Parser ───────────────────────────────────────────────────────────────
   await check("parses a full setup file", () => {
@@ -600,6 +602,116 @@ async function runSuite(m, scratch) {
     assert.equal(viaLink.ok, false);
     assert.equal(fs.existsSync(path.join(outside, "worktree.json.tmp")), false);
     assert.match(viaLink.error, /not a plain folder/);
+  });
+}
+
+async function agentSuite(m, scratch) {
+  const { service, agent } = m;
+  const repo = path.join(scratch, "agent-repo");
+  execFileSync("git", ["init", "-q", "-b", "main", repo]);
+  write(path.join(repo, ".gitignore"), ".env\nnode_modules/\ndist/\n");
+  write(path.join(repo, ".worktreeinclude"), ".env\n");
+  write(
+    path.join(repo, ".codara", "worktree.json"),
+    JSON.stringify({ link: ["node_modules"], setup: "sleep 0.3 && mkdir -p dist && echo made > dist/made.txt", waitForSetup: true }),
+  );
+  write(path.join(repo, "README.md"), "# agent\n");
+  commitAll(repo, "init");
+  write(path.join(repo, ".env"), "TOKEN=1\n");
+  write(path.join(repo, "node_modules/dep/index.js"), "module.exports = 1;\n");
+
+  const svc = new service.WorktreeSetupService({
+    baseEnv: async () => ({ ...process.env }),
+    userShell: async () => null,
+  });
+  const runner = {
+    start: (request) => svc.start({ ...request, userCommand: null }),
+    whenPrepared: (id) => svc.whenPrepared(id),
+    waitFor: (id, ms) => svc.waitFor(id, ms),
+    get: (idOrPath) => svc.get(idOrPath),
+    tail: (id, lines) => svc.tail(id, lines),
+    summary: service.agentSetupSummary,
+  };
+  let ids = 0;
+  const h = {
+    state: {
+      workspaces: [{ id: "ws-repo", name: "repo", cwd: repo, color: "#123456", workers: [] }],
+      workspaceRailOrder: ["ws-repo"],
+      activeWorkspaceId: "ws-repo",
+    },
+    prefs: { agentWorktreesEnabled: true, agentWorktreeRegenerableIgnoredByRepo: {} },
+  };
+  const deps = {
+    loadState: async () => structuredClone(h.state),
+    updateState: async (mutator) => {
+      h.state = await mutator(structuredClone(h.state));
+      return h.state;
+    },
+    loadPreferences: async () => h.prefs,
+    publishState: () => {},
+    invalidateGitCache: () => {},
+    getRun: async () => null,
+    listRuns: async () => [],
+    paneWorkspaceId: async () => "ws-repo",
+    sessionCwd: () => null,
+    sessionsUnderCwd: () => [],
+    listRendererTerminals: async () => [],
+    processesUnderCwd: async () => [],
+    github: { listPullRequestsForHead: async () => [], listMergedPullRequests: async () => [] },
+    sendAgentEvent: () => {},
+    audit: async () => {},
+    worktreesRoot: () => path.join(scratch, "agent-worktrees"),
+    now: () => new Date("2026-10-15T10:00:00Z"),
+    randomId: () => (++ids).toString(16).padStart(8, "b"),
+    worktreeSetup: runner,
+  };
+  const caller = { role: "studio", client: "claude-code", paneId: "pane-1" };
+
+  await check("an agent worktree waits for setup when the file asks", async () => {
+    const created = await agent.createAgentWorktree(caller, { branch: "agent/setup-wait" }, deps);
+    assert.equal(created.ok, true, JSON.stringify(created));
+    assert.equal(created.setupCommand, null);
+    assert.equal(created.setup.state, "succeeded", JSON.stringify(created.setup));
+    assert.equal(created.setup.copied, 1);
+    assert.deepEqual(created.setup.linked, ["node_modules"]);
+    assert.equal(fs.readFileSync(path.join(created.path, "dist/made.txt"), "utf8"), "made\n");
+    assert.doesNotMatch(created.next, /codara_worktree_setup/);
+  });
+
+  await check("waitForSetup:false returns at once and codara_worktree_setup waits", async () => {
+    const created = await agent.createAgentWorktree(caller, { branch: "agent/setup-nowait", waitForSetup: false }, deps);
+    assert.equal(created.ok, true, JSON.stringify(created));
+    assert.ok(["queued", "running"].includes(created.setup.state), created.setup.state);
+    assert.match(created.next, /codara_worktree_setup/);
+    const waited = await agent.getAgentWorktreeSetup(caller, { workspaceId: created.workspaceId, wait: true }, deps);
+    assert.equal(waited.ok, true);
+    assert.equal(waited.setup.state, "succeeded");
+    assert.match(waited.setup.logTail, /Setup finished/);
+    const byPath = await agent.getAgentWorktreeSetup(caller, { path: created.path }, deps);
+    assert.equal(byPath.workspaceId, created.workspaceId);
+    const own = await agent.getAgentWorktreeSetup(caller, {}, deps);
+    assert.equal(own.code, "WORKTREE_NOT_FOUND", "the caller's own workspace is the main checkout");
+    const worker = await agent.getAgentWorktreeSetup({ role: "worker", client: "cora" }, {}, deps);
+    assert.equal(worker.code, "WORKTREE_FORBIDDEN");
+  });
+
+  await check("removal accepts untouched copies and takes the link out first", async () => {
+    const created = await agent.createAgentWorktree(caller, { branch: "agent/setup-remove" }, deps);
+    assert.equal(created.setup.state, "succeeded");
+    const dry = await agent.removeAgentWorktree(caller, { workspaceId: created.workspaceId, dryRun: true }, deps);
+    assert.ok(!(dry.blockers ?? []).includes("WORKTREE_IGNORED_FILES"), JSON.stringify(dry));
+    const removed = await agent.removeAgentWorktree(caller, { workspaceId: created.workspaceId }, deps);
+    assert.equal(removed.ok, true, JSON.stringify(removed));
+    assert.equal(fs.existsSync(created.path), false);
+    assert.equal(fs.readFileSync(path.join(repo, "node_modules/dep/index.js"), "utf8"), "module.exports = 1;\n");
+    assert.equal(fs.readFileSync(path.join(repo, ".env"), "utf8"), "TOKEN=1\n");
+  });
+
+  await check("an edited copy still blocks removal", async () => {
+    const created = await agent.createAgentWorktree(caller, { branch: "agent/setup-edited" }, deps);
+    write(path.join(created.path, ".env"), "TOKEN=changed\n");
+    const dry = await agent.removeAgentWorktree(caller, { workspaceId: created.workspaceId, dryRun: true }, deps);
+    assert.ok((dry.blockers ?? []).includes("WORKTREE_IGNORED_FILES"), JSON.stringify(dry));
   });
 }
 

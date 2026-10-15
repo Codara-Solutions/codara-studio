@@ -7,6 +7,7 @@ import type { GitCopyWorktreeResult, GitOpResult } from "@shared/types";
 import { gitChildEnv } from "./git-env";
 import { errorText, readGitText, runGit } from "./git-exec";
 import { parseWorktreePorcelain, type WorktreeRegistration } from "./git-worktree-porcelain";
+import { prepareWorktreeRemoval, restoreWorktreeLinks } from "./worktree-setup/links";
 
 export type { WorktreeRegistration };
 
@@ -567,6 +568,9 @@ export async function removeCopyWorktree(
   // we ask the caller (via onBusy) to kill the worktree's PTYs, then keep
   // retrying while ConPTY + taskkill tear them down asynchronously (~1s).
   const backoffMs = [0, 150, 300, 600, 1000, 1500];
+  // Folders setup linked in from the main checkout go first, so removal can
+  // never reach through them; they come back if the worktree stays.
+  const releasedLinks = await prepareWorktreeRemoval(input.worktreePath).catch(() => []);
   let lastError = "worktree removal not attempted";
   let removed = false;
   let askedToRelease = false;
@@ -588,7 +592,10 @@ export async function removeCopyWorktree(
       }
     }
   }
-  if (!removed) return { ok: false, error: lastError };
+  if (!removed) {
+    await restoreWorktreeLinks(input.worktreePath, releasedLinks).catch(() => undefined);
+    return { ok: false, error: lastError };
+  }
 
   // Best-effort: only this worktree's own registration, if one was left.
   await dropMissingWorktreeRegistration(input.repoCwd, input.worktreePath);

@@ -44,6 +44,7 @@ import { setAllowedRoots } from "./fs-sandbox";
 import {
   createAgentWorktree,
   createWorktreeAuditLog,
+  getAgentWorktreeSetup,
   listAgentWorktrees,
   removeAgentWorktree,
   scanProcessesUnderCwd,
@@ -53,6 +54,7 @@ import {
   type WorktreeCallerRole,
 } from "./agent-worktrees";
 import { managedWorktreesRoot } from "./git-worktrees";
+import { agentWorktreeSetupRunner } from "./worktree-setup";
 import { invalidateGitCache } from "./git-ops";
 import { createGitHubCliAdapter } from "./github-cli";
 import { publishState } from "./workspace-state-publish";
@@ -606,6 +608,7 @@ const UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS = new Set<string>([
   "worktree.create",
   "worktree.list",
   "worktree.remove",
+  "worktree.setup",
 ]);
 
 function isUntrustedPullRequestBlockedMethod(method: string): boolean {
@@ -733,6 +736,7 @@ async function dispatch(
       case "worktree.create":
       case "worktree.list":
       case "worktree.remove":
+      case "worktree.setup":
         return await handleWorktree(method, params, id);
       case "accounts.list":
         return await handleAccountsList(id);
@@ -1881,6 +1885,7 @@ function worktreeDeps(): AgentWorktreeDeps {
     worktreesRoot: (repoCwd) => managedWorktreesRoot(codaraHome(), repoCwd),
     now: () => new Date(),
     randomId: () => randomBytes(8).toString("hex"),
+    worktreeSetup: agentWorktreeSetupRunner(),
   };
 }
 
@@ -1913,16 +1918,18 @@ function optionalTypedParam(
 }
 
 async function handleWorktree(
-  method: "worktree.create" | "worktree.list" | "worktree.remove",
+  method: "worktree.create" | "worktree.list" | "worktree.remove" | "worktree.setup",
   params: Record<string, unknown>,
   id: JsonRpcId,
 ): Promise<JsonRpcResponse> {
   const checks: Array<[string, "string" | "boolean"]> =
     method === "worktree.create"
-      ? [["branch", "string"], ["base", "string"], ["checkout", "boolean"], ["purpose", "string"], ["title", "string"], ["fetch", "boolean"]]
+      ? [["branch", "string"], ["base", "string"], ["checkout", "boolean"], ["purpose", "string"], ["title", "string"], ["fetch", "boolean"], ["waitForSetup", "boolean"]]
       : method === "worktree.list"
         ? [["checkMerge", "boolean"]]
-        : [
+        : method === "worktree.setup"
+          ? [["workspaceId", "string"], ["path", "string"], ["wait", "boolean"]]
+          : [
             ["workspaceId", "string"],
             ["path", "string"],
             ["target", "string"],
@@ -1943,6 +1950,34 @@ async function handleWorktree(
     if (method === "worktree.list") {
       return successResponse(id, await listAgentWorktrees(caller, { checkMerge: bool("checkMerge") }, deps));
     }
+    if (method === "worktree.setup") {
+      const num = (key: string): number | undefined =>
+        typeof params[key] === "number" && Number.isFinite(params[key]) ? (params[key] as number) : undefined;
+      for (const key of ["timeoutSeconds", "logLines"]) {
+        if (params[key] !== undefined && params[key] !== null && num(key) === undefined) {
+          return errorResponse(id, ERR_INVALID_PARAMS, `${key} must be a number`);
+        }
+      }
+      const setupPath = str("path");
+      if (str("workspaceId") && setupPath) {
+        return errorResponse(id, ERR_INVALID_PARAMS, "pass at most one of workspaceId or path");
+      }
+      if (setupPath && !isAbsolute(setupPath)) return errorResponse(id, ERR_INVALID_PARAMS, "path must be absolute");
+      return successResponse(
+        id,
+        await getAgentWorktreeSetup(
+          caller,
+          {
+            workspaceId: str("workspaceId"),
+            path: setupPath,
+            wait: bool("wait"),
+            timeoutSeconds: num("timeoutSeconds"),
+            logLines: num("logLines"),
+          },
+          deps,
+        ),
+      );
+    }
     if (method === "worktree.create") {
       return successResponse(
         id,
@@ -1955,6 +1990,7 @@ async function handleWorktree(
             purpose: str("purpose"),
             title: str("title"),
             fetch: bool("fetch"),
+            waitForSetup: bool("waitForSetup"),
           },
           deps,
         ),

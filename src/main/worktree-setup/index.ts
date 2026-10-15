@@ -20,6 +20,7 @@ import { loadPreferences } from "../preferences-store";
 import { defaultShell, listShells } from "../shells";
 import { loadSettings } from "../storage";
 import { previewWorktreeSetup, suggestWorktreeSetup, writeWorktreeSetupFiles } from "./files";
+import { setBeforeWorktreeRemoval } from "./links";
 import { repositoryRoot } from "./plan";
 import {
   agentSetupSummary,
@@ -34,7 +35,7 @@ export type { StartSetupRequest } from "./service";
 let service: WorktreeSetupService | null = null;
 
 function broadcast(status: WorktreeSetupStatus): void {
-  for (const contents of webContents.getAllWebContents()) {
+  for (const contents of webContents?.getAllWebContents?.() ?? []) {
     if (contents.isDestroyed()) continue;
     try {
       contents.send("worktreeSetup:changed", status);
@@ -105,7 +106,14 @@ export function worktreeSetupService(): WorktreeSetupService {
     onChange: broadcast,
   });
   const current = service;
-  app.once("will-quit", () => current.dispose());
+  // Optional: unit suites load this module against an Electron stub.
+  app?.once?.("will-quit", () => current.dispose());
+  setBeforeWorktreeRemoval(async (worktreePath) => {
+    const status = await current.get(worktreePath);
+    if (status && (status.state === "preparing" || status.state === "queued" || status.state === "running")) {
+      await current.stop(status.id);
+    }
+  });
   return service;
 }
 
@@ -135,7 +143,7 @@ export async function personalSetupCommand(sourceCwd: string): Promise<string | 
  */
 export async function startWorktreeSetup(
   request: Omit<StartSetupRequest, "userCommand"> & { userCommand?: string | null },
-): Promise<WorktreeSetupStatus | { error: string }> {
+): Promise<WorktreeSetupStatus | null | { error: string }> {
   try {
     const userCommand =
       request.userCommand === undefined ? await personalSetupCommand(request.sourceCwd) : request.userCommand;
@@ -150,7 +158,7 @@ export function agentWorktreeSetupRunner() {
   return {
     start: async (request: Omit<StartSetupRequest, "userCommand">) => {
       const started = await startWorktreeSetup(request);
-      return "error" in started ? null : started;
+      return started && !("error" in started) ? started : null;
     },
     whenPrepared: (id: string) => worktreeSetupService().whenPrepared(id),
     waitFor: (id: string, timeoutMs: number) => worktreeSetupService().waitFor(id, timeoutMs),

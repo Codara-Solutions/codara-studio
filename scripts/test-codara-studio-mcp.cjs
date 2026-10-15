@@ -63,7 +63,7 @@ const TERMINAL_TOOLS = [
 ];
 const WHITEBOARD_TOOLS = ["codara_whiteboard_get", "codara_whiteboard_update", "codara_whiteboard_arrange", "codara_whiteboard_inspect", "codara_whiteboard_review"];
 const BOARD_TOOLS = ["codara_board_get", "codara_board_update"];
-const WORKTREE_TOOLS = ["codara_worktree_create", "codara_worktree_list", "codara_worktree_remove"];
+const WORKTREE_TOOLS = ["codara_worktree_create", "codara_worktree_list", "codara_worktree_remove", "codara_worktree_setup"];
 const WORKFLOW_TOOLS = [
   "codara_workflow_list",
   "codara_workflow_get",
@@ -85,8 +85,9 @@ const RUN = { SPARK_RUN_ID: "run-roster" };
 // Code, Codex and Grok session pays for on every request. Each roster carries
 // every tool module, so these move with TOOL_MODULES_BUDGET in
 // test-mcp-tool-manifest.cjs (raised by 9,000 for the browser tools of the
-// round that added the Chrome extension, audits and captures).
-const LIST_BUDGET = { studio: 29_000, run: 39_000, worker: 35_000, execute: 94_000, automation: 69_000 };
+// round that added the Chrome extension, audits and captures; studio by 500
+// and execute by 1,000 for codara_worktree_setup).
+const LIST_BUDGET = { studio: 29_500, run: 39_000, worker: 35_000, execute: 95_000, automation: 69_000 };
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",
@@ -517,6 +518,7 @@ function sortedEqual(actual, expected, label) {
     assert.strictEqual(byName(studio, "codara_preview_navigate").annotations.openWorldHint, true);
     assert.strictEqual(byName(execute, "codara_delete_automation").annotations.destructiveHint, true);
     assert.strictEqual(byName(studio, "codara_worktree_list").annotations.readOnlyHint, true);
+    assert.strictEqual(byName(studio, "codara_worktree_setup").annotations.readOnlyHint, true);
     assert.strictEqual(byName(studio, "codara_worktree_create").annotations.destructiveHint, false);
     assert.strictEqual(byName(studio, "codara_worktree_remove").annotations.destructiveHint, true);
     assert.strictEqual(byName(studio, "codara_worktree_remove").annotations.idempotentHint, true);
@@ -532,6 +534,8 @@ function sortedEqual(actual, expected, label) {
     const worktreeTimeout = Number(/const WORKTREE_TIMEOUT_MS = ([\d_]+);/.exec(serverSource)[1].replace(/_/g, ""));
     assert.ok(worktreeTimeout >= 120_000, "worktree calls get a long client timeout");
     assert.match(serverSource, /rpc\.startsWith\("worktree\."\)\) return WORKTREE_TIMEOUT_MS/);
+    // Waiting for setup gets its own deadline, still under Codex's 660 s tool limit.
+    assert.match(serverSource, /rpc === "worktree\.setup"\) return WORKTREE_SETUP_TIMEOUT_MS/);
     // It marks the returned messages read, so a client must not treat it as a
     // side-effect-free call it may repeat or run in parallel.
     assert.notStrictEqual(byName(execute, "codara_check_messages").annotations.readOnlyHint, true);

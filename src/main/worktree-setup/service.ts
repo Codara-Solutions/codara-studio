@@ -143,8 +143,10 @@ export class WorktreeSetupService {
    * Starts setup for a worktree and returns its first status. Copies, links
    * and commands continue in the background; `whenPrepared` and `waitFor`
    * follow them. A setup already running for the worktree is returned as is.
+   * Null when there is nothing to do: no .worktreeinclude, no setup file and
+   * no command of the user's.
    */
-  async start(request: StartSetupRequest): Promise<WorktreeSetupStatus> {
+  async start(request: StartSetupRequest): Promise<WorktreeSetupStatus | null> {
     if (this.disposed) throw new WorktreeSetupError("Codara is closing");
     const worktreeReal = await fsp.realpath(request.worktreePath).catch(() => null);
     if (!worktreeReal) throw new WorktreeSetupError("The worktree folder does not exist");
@@ -166,6 +168,7 @@ export class WorktreeSetupService {
 
     const config = sources.file.config;
     const userCommand = request.userCommand?.trim() || null;
+    if (!sources.include.present && !sources.file.present && !userCommand) return null;
     const repoCommand = config ? repoSetupCommandFor(config, this.platform) : null;
     const runCommands = request.runCommands !== false;
     const commands: WorktreeSetupCommand[] = [];
@@ -322,7 +325,7 @@ export class WorktreeSetupService {
   }
 
   /** Runs setup again for a worktree whose setup ended. */
-  async rerun(idOrPath: string, overrides: Partial<StartSetupRequest> = {}): Promise<WorktreeSetupStatus> {
+  async rerun(idOrPath: string, overrides: Partial<StartSetupRequest> = {}): Promise<WorktreeSetupStatus | null> {
     const run = this.runs.get(idOrPath);
     let request: StartSetupRequest | null = run ? run.request : null;
     if (run && !isWorktreeSetupFinished(run.status.state)) return { ...run.status };
