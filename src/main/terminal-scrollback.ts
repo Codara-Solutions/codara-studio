@@ -18,9 +18,12 @@ import type { IpcHandle } from "./ipc";
 // Other main-process features use these exports rather than the files:
 // - agent hibernation stops a pane's process on purpose and starts it later.
 //   flushTerminalScrollback(paneId) before the stop keeps its output, and
-//   readTerminalScrollbackReplay(paneId, { force: true }) hands back the text
-//   to show before the new process draws (the renderer can ask the same
-//   through window.spark.terminalScrollback.restore with force).
+//   readTerminalScrollbackReplay(paneId, { force: true, rows }) hands back
+//   the text to show before the new process draws, with rows the xterm's
+//   height (on Windows the text ends by clearing a screen that tall, see
+//   handOverScreen). Ask after the stop and right before the start. The
+//   renderer can ask the same through window.spark.terminalScrollback.restore
+//   with force.
 //   Stopping the PTY from main (pty.dispose) keeps the file; only the
 //   renderer's pty:dispose, which means the user closed the pane, deletes it.
 // - readTerminalScrollbackRecord(paneId) returns the stored record itself.
