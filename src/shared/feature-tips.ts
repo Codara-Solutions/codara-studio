@@ -87,64 +87,123 @@ export function featureTipTargetSelector(id: string): string {
   return `[${FEATURE_TIP_ATTRIBUTE}="${id}"]`;
 }
 
-const awaitingControl = (
-  id: string,
-  name: string,
-  used: string,
-  tip: Omit<FeatureTip, "when" | "tour" | "fresh"> & { tourTitle: string; tourBody: string },
-): FeatureCatalogEntry => ({
-  id,
-  name,
-  used,
-  awaitsControl: true,
-  signals: {},
-  tip: {
-    title: tip.title,
-    body: tip.body,
-    fresh: true,
-    tour: [{ target: featureTipTargetSelector(id), title: tip.tourTitle, body: tip.tourBody }],
-  },
-});
-
 // Order is the offer order within each group (fresh first, then the rest).
 export const FEATURE_CATALOG: readonly FeatureCatalogEntry[] = [
-  // ── Built on parallel branches. Dormant until their control exists. ──
-  awaitingControl("keep-awake", "Keep awake", "The keep-awake control was turned on or changed.", {
-    title: "Keep the computer awake while agents work",
-    body: "A long run does not stop halfway because the computer went to sleep.",
-    tourTitle: "Keep awake",
-    tourBody: "Turn this on and the computer stays awake while agents are still working.",
-  }),
-  awaitingControl("jump-palette", "Jump palette", "The jump palette was opened.", {
-    title: "Jump anywhere from the keyboard",
-    body: "Switch workspaces, tabs and chats by typing a few letters of their name.",
-    tourTitle: "The jump palette",
-    tourBody: "Open it here or with its shortcut, then type where you want to go.",
-  }),
-  awaitingControl("quick-commands", "Quick Commands", "A quick command was run, added or edited.", {
-    title: "Keep your usual commands one click away",
-    body: "Save the commands you run often and start them in a terminal without typing them again.",
-    tourTitle: "Quick Commands",
-    tourBody: "Pick a saved command to run it here, or add the one you just typed.",
-  }),
-  awaitingControl("agent-board", "Agents tab", "The Agents tab in the workspace rail was opened.", {
-    title: "See every agent at a glance",
-    body: "The Agents tab lists the agents that are working, waiting for you or done, in every workspace.",
-    tourTitle: "The Agents tab",
-    tourBody: "Open it to see each agent's state and jump to the one that needs you.",
-  }),
-  awaitingControl("review-notes", "Review notes", "A review note was added to a diff or sent to an agent.", {
-    title: "Leave review notes on a diff",
-    body: "Add notes on the lines you want changed, then send them all to an agent to fix.",
-    tourTitle: "Review notes",
-    tourBody: "Add a note on a diff line here. Your notes go to the agent together.",
-  }),
-  awaitingControl("worktree-cleanup", "Worktree cleanup", "The worktree cleanup screen was opened or used.", {
-    title: "Clean up old worktrees",
-    body: "See every worktree, how much space it takes and whether it is merged, and remove the ones you are done with.",
-    tourTitle: "Worktree cleanup",
-    tourBody: "Open it to review your worktrees and free the space the merged ones take.",
-  }),
+  // ── New this round: offered before the older features. ──
+  {
+    id: "keep-awake",
+    name: "Keep awake",
+    used: "The keep-awake control in the title bar was opened or its mode changed.",
+    signals: {},
+    tip: {
+      title: "Keep the computer awake while agents work",
+      body: "A long run does not stop halfway because the computer went to sleep.",
+      fresh: true,
+      tour: [
+        {
+          target: featureTipTargetSelector("keep-awake"),
+          title: "Keep awake",
+          body: "Choose While agents work and the computer stays awake until the last agent finishes.",
+          placement: "bottom",
+        },
+      ],
+    },
+  },
+  {
+    id: "jump-palette",
+    name: "Jump palette",
+    used: "The jump palette was opened.",
+    signals: {
+      commands: ["jump.open"],
+      visible: ['[role="dialog"][aria-label="Jump to a workspace, tab or agent"]'],
+    },
+    tip: {
+      title: "Jump anywhere from the keyboard",
+      body: "Press {shortcut:jump.open} and type a few letters of a workspace, tab or agent to go straight there.",
+      fresh: true,
+    },
+  },
+  {
+    id: "quick-commands",
+    name: "Quick Commands",
+    used: "A quick command was run, added or edited.",
+    signals: {
+      commands: ["quickCommands.open"],
+    },
+    tip: {
+      title: "Keep your usual commands one click away",
+      body: "Save the commands and prompts you use often and run them in a terminal without typing them again.",
+      fresh: true,
+      tour: [
+        {
+          target: featureTipTargetSelector("quick-commands"),
+          title: "Quick Commands",
+          body: "Pick a saved command to run it, or add a new one. Shortcut: {shortcut:quickCommands.open}.",
+          placement: "bottom",
+        },
+      ],
+    },
+  },
+  {
+    id: "agent-board",
+    name: "Agents tab",
+    used: "The Agents tab in the workspace rail was opened.",
+    signals: {},
+    tip: {
+      title: "See every agent at a glance",
+      body: "The Agents tab lists the agents that are working, waiting for you or done, in every workspace.",
+      fresh: true,
+      tour: [
+        {
+          target: featureTipTargetSelector("agent-board"),
+          title: "The Agents tab",
+          body: "Open it to see each agent's state and jump to the one that needs you.",
+          placement: "right",
+        },
+      ],
+    },
+  },
+  {
+    id: "review-notes",
+    name: "Review notes",
+    used: "The review of all changes was opened, or a review note was added or sent to an agent.",
+    signals: {
+      clicks: ['button[title="Review all changes and leave notes for an agent"]'],
+      commands: ["review.open"],
+    },
+    tip: {
+      title: "Leave review notes on a diff",
+      body: "Add notes on the lines you want changed, then send them all to an agent to fix.",
+      fresh: true,
+      tour: [
+        {
+          target: 'button[title="Review all changes and leave notes for an agent"]',
+          title: "Review notes",
+          body: "Open the review here, add a note on any diff line, then send your notes to an agent together.",
+          placement: "bottom",
+        },
+      ],
+    },
+  },
+  {
+    id: "worktree-cleanup",
+    name: "Worktree cleanup",
+    used: "The worktree cleanup screen was opened or used.",
+    signals: {
+      commands: ["worktrees.cleanup"],
+      events: ["spark:open-worktree-cleanup"],
+      visible: [".wtc-dialog"],
+    },
+    tip: {
+      title: "Clean up old worktrees",
+      body: "See every worktree, how much space it takes and whether it is merged, and remove the ones you are done with.",
+      fresh: true,
+      // Only someone with a few worktrees in the rail has anything to clean.
+      when: "[data-copy-branch]",
+      whenAtLeast: 2,
+      open: { label: "Open worktree cleanup", event: "spark:open-worktree-cleanup" },
+    },
+  },
 
   // ── Features that ship today. ──
   {

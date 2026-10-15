@@ -279,15 +279,12 @@ async function main() {
   });
 
   check("features from other branches stay dormant until their control exists", () => {
+    // The six features built alongside this one (keep-awake, jump-palette,
+    // quick-commands, agent-board, review-notes, worktree-cleanup) have
+    // their controls now; a later feature built elsewhere joins this list
+    // until its control lands.
     const awaiting = FEATURE_CATALOG.filter((entry) => entry.awaitsControl).map((entry) => entry.id);
-    assert.deepEqual(awaiting.sort(), [
-      "agent-board",
-      "jump-palette",
-      "keep-awake",
-      "quick-commands",
-      "review-notes",
-      "worktree-cleanup",
-    ]);
+    assert.deepEqual(awaiting.sort(), []);
     for (const entry of FEATURE_CATALOG.filter((item) => item.awaitsControl)) {
       const target = featureTipTargetSelector(entry.id);
       assert.equal(entry.tip.tour[0].target, target, entry.id);

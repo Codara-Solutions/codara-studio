@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from "react";
+import { recordFeatureUse } from "../feature-tips/feature-usage";
 
 // Which list the Workspaces section of the rail shows: the workspaces in
 // the user's own order (the default), or the Agents view. Remembered across
@@ -35,6 +36,8 @@ export function getRailView(): RailView {
 export function setRailView(next: RailView): void {
   if (next === current) return;
   current = next;
+  // The arrow keys switch views too, which a click signal would miss.
+  if (next === "agents") recordFeatureUse("agent-board");
   try {
     window.localStorage.setItem(RAIL_VIEW_STORAGE_KEY, next);
   } catch {

@@ -1,6 +1,7 @@
 import { useCallback, useSyncExternalStore } from "react";
 import { makeId } from "@shared/ids";
 import { unwrapIpcError } from "../../lib/ipc-error";
+import { recordFeatureUse } from "../feature-tips/feature-usage";
 import {
   cleanReviewNote,
   MAX_REVIEW_NOTES,
@@ -133,6 +134,7 @@ export async function changeReviewNotes(
 export type NewReviewNote = Omit<ReviewNote, "id" | "createdAt" | "updatedAt">;
 
 export async function addReviewNote(workspaceId: string, input: NewReviewNote): Promise<ReviewNote | null> {
+  recordFeatureUse("review-notes");
   const note = cleanReviewNote({ ...input, id: makeId("note"), createdAt: Date.now() });
   if (!note) return null;
   await changeReviewNotes(workspaceId, (notes) => (notes.length >= MAX_REVIEW_NOTES ? notes : [...notes, note]));

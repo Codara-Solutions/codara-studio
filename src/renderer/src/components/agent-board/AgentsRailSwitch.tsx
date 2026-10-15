@@ -62,6 +62,7 @@ export default function AgentsRailSwitch({
                 id={`rail-view-tab-${entry.id}`}
                 aria-selected={selected}
                 aria-controls={entry.id === "agents" ? RAIL_VIEW_PANEL_ID : undefined}
+                data-feature-tip={entry.id === "agents" ? "agent-board" : undefined}
                 aria-label={badge ? `${entry.label}, ${badge} need${badge === 1 ? "s" : ""} you` : entry.label}
                 tabIndex={selected ? 0 : -1}
                 className={`spark-segmented-item${selected ? " is-selected" : ""}`}

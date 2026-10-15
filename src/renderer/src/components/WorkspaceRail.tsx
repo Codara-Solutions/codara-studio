@@ -2200,6 +2200,7 @@ function WorkspaceRow({
       onMouseUp={() => setRowPressed(false)}
       aria-busy={working}
       data-agent-working={working ? "true" : undefined}
+      data-copy-branch={ws.copyBranch ? "true" : undefined}
       style={{
         display: "flex",
         alignItems: "center",

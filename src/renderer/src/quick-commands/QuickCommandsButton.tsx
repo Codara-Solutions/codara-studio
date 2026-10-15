@@ -55,6 +55,7 @@ export default function QuickCommandsButton() {
         ref={buttonRef}
         type="button"
         className="spark-tabbar-new"
+        data-feature-tip="quick-commands"
         onClick={() => setOpen((value) => !value)}
         onKeyDown={(event) => {
           if (event.key === "ArrowDown" && !open) {

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { KeepAwakeMode, KeepAwakeStatus } from "@shared/keep-awake";
+import { recordFeatureUse } from "../feature-tips/feature-usage";
 
 // The live keep-awake status from main, plus the two writes the UI makes.
 // The writes go through preferences like every other setting; main reacts to
@@ -44,6 +45,7 @@ export function useKeepAwake(): UseKeepAwakeResult {
   }, []);
 
   const setMode = useCallback((mode: KeepAwakeMode) => {
+    recordFeatureUse("keep-awake");
     setStatus((current) => (current ? { ...current, mode } : current));
     void window.spark.preferences.set("keepAwakeMode", mode).catch(() => undefined);
   }, []);

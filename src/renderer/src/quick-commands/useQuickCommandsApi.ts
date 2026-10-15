@@ -16,6 +16,7 @@ import {
 import { isRemotePath } from "@shared/remote";
 import type { RunState, Workspace } from "@shared/types";
 import { emitLocalToast } from "../notifications/local-toast";
+import { recordFeatureUse } from "../components/feature-tips/feature-usage";
 import { usePreferences } from "../preferences/usePreferences";
 import { runtimeLabel } from "../routing/agent-destinations";
 import type { SelectionRoutingApi } from "../routing/SelectionRoutingContext";
@@ -310,6 +311,7 @@ export function useQuickCommandsApi(inputs: QuickCommandsInputs): QuickCommandsA
         warn("Open a workspace first", "Quick commands run in the workspace on screen.");
         return;
       }
+      recordFeatureUse("quick-commands");
       try {
         if (command.kind === "shell") await runShell(command, workspace, options);
         else await runPrompt(command, workspace, options);
@@ -321,7 +323,10 @@ export function useQuickCommandsApi(inputs: QuickCommandsInputs): QuickCommandsA
   );
 
   const save = useCallback(
-    (next: QuickCommand[]) => setPreference("quickCommands", normalizeQuickCommands(next)),
+    (next: QuickCommand[]) => {
+      recordFeatureUse("quick-commands");
+      return setPreference("quickCommands", normalizeQuickCommands(next));
+    },
     [setPreference],
   );
   const setTerminalRightClick = useCallback(

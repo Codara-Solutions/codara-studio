@@ -247,6 +247,7 @@ export default function KeepAwakeControl() {
         ref={buttonRef}
         type="button"
         data-window-control
+        data-feature-tip="keep-awake"
         data-keep-awake-state={state}
         data-keep-awake-mode={status?.mode ?? ""}
         className="keep-awake-button"
