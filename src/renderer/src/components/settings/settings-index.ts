@@ -18,6 +18,7 @@ export type SettingsTab =
   | "agents"
   | "sessions"
   | "remote-access"
+  | "shared-pages"
   | "keybindings"
   | "runs"
   | "about";
@@ -76,6 +77,12 @@ export const SETTINGS_TABS: ReadonlyArray<SettingsTabMeta> = [
     description: "Reach this computer from the Codara phone app.",
   },
   {
+    id: "shared-pages",
+    label: "Shared pages",
+    title: "Shared pages",
+    description: "Links to pages you shared from the editor, and when they expire.",
+  },
+  {
     id: "keybindings",
     label: "Keybindings",
     title: "Keybindings",
@@ -101,7 +108,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<{
 }> = [
   { label: "Workspace", tabs: ["general", "editor", "terminal", "keybindings"] },
   { label: "Agents and models", tabs: ["agents", "api", "sessions", "runs"] },
-  { label: "System", tabs: ["remote-access", "about"] },
+  { label: "System", tabs: ["remote-access", "shared-pages", "about"] },
 ];
 
 export function tabMeta(tab: SettingsTab): SettingsTabMeta {
@@ -229,6 +236,7 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "remote-access", title: "Allow remote access", desc: "Pair the Codara phone app with this computer.", section: "Connection", keywords: "phone mobile app pair qr" },
   { tab: "remote-access", title: "Pair a new device", desc: "Show a code to pair another phone.", section: "Connection", keywords: "phone mobile qr code pairing" },
   { tab: "remote-access", title: "Paired devices", desc: "Phones that can reach this computer.", keywords: "revoke phone device mobile" },
+  { tab: "shared-pages", title: "Shared pages", desc: "Copy, extend or delete the links you shared.", keywords: "share link url publish expire expiry delete html markdown report page" },
   { tab: "keybindings", title: "Keybindings", desc: "Record new shortcuts for any command.", keywords: "shortcuts keyboard hotkeys keys" },
   { tab: "runs", title: "All runs", desc: "Every Cora run on this computer.", keywords: "history delete open runs" },
   { tab: "about", title: "Version", desc: "The Codara Studio build you are running.", section: "Details", keywords: "about build release" },

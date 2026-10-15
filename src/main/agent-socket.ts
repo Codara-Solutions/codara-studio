@@ -40,7 +40,8 @@ import {
 import { serversService } from "./servers/service";
 import { loadPreferences, setPreference } from "./preferences-store";
 import { loadSettings, loadState, saveState, updateState } from "./storage";
-import { setAllowedRoots } from "./fs-sandbox";
+import { assertAllowedReadPathResolved, setAllowedRoots } from "./fs-sandbox";
+import { ShareOfferGate } from "./share/offer";
 import {
   createAgentWorktree,
   createWorktreeAuditLog,
@@ -600,6 +601,7 @@ const UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS = new Set<string>([
   "terminal.run",
   "terminal.list",
   "agent.notify",
+  "share.offer",
   "orchestrator.spawn_terminals",
   "orchestrator.remember",
   "orchestrator.recall",
@@ -698,6 +700,8 @@ async function dispatch(
         return await handlePaneOpen(params, id);
       case "agent.notify":
         return await handleAgentNotify(params, id);
+      case "share.offer":
+        return await handleShareOffer(params, id);
       case "chat.append":
         return await handleChatAppend(params, id);
       case "chat.create":
@@ -1260,6 +1264,36 @@ async function handleAgentNotify(
     },
   });
   return successResponse(id, { published: true });
+}
+
+const shareOfferGate = new ShareOfferGate({ assertReadable: assertAllowedReadPathResolved });
+
+// An agent asks Studio to offer sharing a page it wrote. This only shows the
+// user the Share prompt for that file; nothing is uploaded unless they click
+// Share there (docs/share-links.md). The page itself is never read here.
+async function handleShareOffer(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  const callerKey = runId
+    ? `run:${runId}`
+    : `pane:${(await resolveCallerPaneId(params)) ?? "none"}`;
+  const checked = await shareOfferGate.check(params.path, callerKey);
+  if (!checked.ok) {
+    return successResponse(id, { offered: false, reason: checked.reason, note: checked.message });
+  }
+  // The trusted app window only: a popup a page opened must never be handed
+  // a path to put in front of the user.
+  const win = getTrustedMainWindow();
+  if (!win || win.webContents.isDestroyed()) {
+    return successResponse(id, { offered: false, reason: "no_window", note: "Codara has no open window." });
+  }
+  win.webContents.send("share:offer", { path: checked.path });
+  return successResponse(id, {
+    offered: true,
+    note: "Codara opened the file and showed the user a Share prompt. Nothing is uploaded unless the user chooses Share; do not ask again.",
+  });
 }
 
 // The pane the calling agent runs in, so its new terminal opens beside it

@@ -33,6 +33,7 @@ a `spark-` prefix keep the product's old name for compatibility.
 | `shell/active-cli-env` | Which account home running Studio shells should follow. |
 | `spark-remote-hosts.json`, `spark-known-hosts.json`, `spark-remote-secrets.json` | SSH workspaces: saved hosts, pinned host keys, and passwords or passphrases encrypted by the operating system (if encryption is unavailable, they are not saved). |
 | `remote/` | Remote access: the desktop's identity (private key mode 0600), paired devices and the mutation ledger. |
+| `share/` | Share as link (mode 0700): `identity.json`, the key that signs your uploads (mode 0600, created the first time you share), and `pages.json`, the links you shared from this computer with the file name each came from. See [share-links.md](./share-links.md). |
 | `logs/main.log` | The main-process log, capped at 1 MB with one rotation. |
 | `logs/worktree-audit.jsonl` | One line for every worktree an agent created, removed or was refused (mode 0600): ids, paths, branches, commits and the reason, never tokens. Rotated once at 5 MB. |
 
@@ -144,5 +145,8 @@ exactly as in any other terminal.
 ## Network
 
 The app talks to `https://studio.codarasolutions.com` for update checks and a
-stream that announces new releases, to the sign-in providers you use, and, if
-you turn on remote access, to the Codara relay. There is no telemetry.
+stream that announces new releases, to the sign-in providers you use, if you
+turn on remote access, to the Codara relay, and, when you share a page as a
+link, to the Codara share service: only the page you chose, after you click
+Share, and the list, expiry and delete calls of Settings, Shared pages. There
+is no telemetry.

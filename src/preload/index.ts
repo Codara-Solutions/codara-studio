@@ -40,6 +40,7 @@ import { captureApi } from "./areas/capture";
 import { chromeLinkApi } from "./areas/chrome-link";
 import { pointApi } from "./areas/point";
 import { serversApi } from "./areas/servers";
+import { shareApi } from "./areas/share";
 import type {
   CoraMemoryItem,
   MemoryItemKind,
@@ -1768,6 +1769,7 @@ const api = {
     },
   },
   servers: serversApi,
+  share: shareApi,
   chromeLink: chromeLinkApi,
   capture: captureApi,
   point: pointApi,

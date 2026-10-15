@@ -93,13 +93,13 @@ environment variable that Codara sets for the agent:
 
 | Set | Who sees it | What it adds |
 |---|---|---|
-| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, `codara_notify_user` and the worktree tools; whiteboard and board only inside a Cora chat |
+| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, `codara_notify_user`, `codara_share_offer` and the worktree tools; whiteboard and board only inside a Cora chat |
 | `worker` | Workers in automation passes | `studio` with the whiteboard and board read-only, plus `codara_ask_user` and `codara_request_next_iteration` |
-| `execute` | A Cora chat that orchestrates work | `studio`, plus orchestration, automation management and the worktree tools |
+| `execute` | A Cora chat that orchestrates work | `studio`, plus orchestration, automation management, the worktree tools and `codara_share_offer` |
 | `automation` | The chat that designs automations | `studio`, plus automation management, `codara_ask_user` and `codara_name_chat` |
 
 A Cora chat that answers directly, without workers, gets `studio` plus
-`codara_remember` and the worktree tools, with the whiteboard and board
+`codara_remember`, `codara_share_offer` and the worktree tools, with the whiteboard and board
 read-only. Cora's chat workers and Talk chats do not get the worktree tools. Requests to draw
 on the whiteboard, change the board or schedule work therefore go to the
 orchestrating chat, and a direct chat hands over to it when a follow-up needs
@@ -584,6 +584,15 @@ Only in `studio` outside a Cora chat (a Cora run announces its own outcome).
 | Tool | What it does |
 |---|---|
 | `codara_notify_user` | Sends a Codara notification from the agent's own pane: `done` when it finished a long task, `needs_input` when it is blocked on you. Clicking it opens the pane, and nothing shows while you are already looking at that pane. When Codara already reads the agent's own turn signals in that pane (Claude Code hooks or status reports, the Codex notify program or its session file), the call returns `published: false` with `reason: "announced_by_codara"`, because an alert sent mid-turn would arrive before the real end and displace the exact one. Otherwise it shares the pane's notification key with Codara's own end-of-turn alert, so the two arrive as one. At most one per kind every 5 seconds. An agent outside a Codara terminal, or with Codara closed, gets `published: false` back rather than an error. |
+
+## Share offer
+
+In `studio` outside a Cora chat, in `execute`, and in a Cora chat that answers
+directly. Never for workers or an imported pull request.
+
+| Tool | What it does |
+|---|---|
+| `codara_share_offer` | Takes `path`, an HTML or Markdown file (absolute, or relative to the agent's working directory) in a folder open in Codara, at most 5 MB. Codara opens the file and shows its Share prompt; nothing is uploaded unless you click Share there, and the agent never gets the link. Returns `offered: true`, or `offered: false` with a `reason` (`invalid`, `not_shareable`, `missing`, `too_large`, `not_allowed`, `rate_limited`, `no_window`, `codara_offline`). One prompt per agent every 10 seconds. See [share-links.md](./share-links.md). |
 
 ## Worktrees
 

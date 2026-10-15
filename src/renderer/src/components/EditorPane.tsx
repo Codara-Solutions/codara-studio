@@ -48,6 +48,8 @@ import {
   PreviewFullscreenButton,
   usePreviewFullscreen,
 } from "./file-preview/PreviewFullscreenButton";
+import { shareableKind } from "@shared/share";
+import ShareButton from "./share/ShareButton";
 
 // Path-based detection used to decide whether to expose the "Preview" toggle
 // and listen for the markdown.togglePreview shortcut. Keeping this co-located
@@ -117,6 +119,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     setViewMode(toggleKind || isCsv ? "preview" : "edit");
   }, [path, toggleKind, isCsv]);
   const [copiedAt, setCopiedAt] = useState<number | null>(null);
+  const shareable = useMemo(() => shareableKind(path) !== null, [path]);
 
   const cmRef = useRef<ReactCodeMirrorRef>(null);
   const { preferences } = usePreferences();
@@ -357,6 +360,23 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       window.removeEventListener("spark:markdown.togglePreview", onToggle);
   }, [hasViewToggle, focused]);
 
+  // The Share prompt reads the buffer when it opens, so it shares what is on
+  // screen, unsaved edits included. useDocument resets `doc` in an effect, so
+  // for one render after the path changes it still holds the previous file:
+  // the path a doc object first appeared with is the file it holds, and Share
+  // shows only once that is this pane's file.
+  const docRef = useRef(doc);
+  const docPathRef = useRef(path);
+  if (docRef.current !== doc) {
+    docRef.current = doc;
+    docPathRef.current = path;
+  }
+  const shareReady = shareable && doc.status === "ready" && docPathRef.current === path;
+  const getShareText = useCallback(
+    () => (docRef.current.status === "ready" ? docRef.current.content : ""),
+    [],
+  );
+
   // Copy raw markdown source to the system clipboard. The 1200ms badge is
   // long enough to confirm but short enough not to linger if the user
   // immediately switches modes.
@@ -454,6 +474,11 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             onCopy={handleCopy}
             onSetMode={setViewMode}
             fullscreenAction={viewMode === "preview" ? fullscreenAction : null}
+            shareAction={
+              shareReady ? (
+                <ShareButton key={path} path={path} getText={getShareText} style={toolbarIconButton} />
+              ) : null
+            }
             forceLocalToolbar={fullscreen}
             table={isCsv}
           />
@@ -757,6 +782,7 @@ function MarkdownToolbar({
   onCopy,
   onSetMode,
   fullscreenAction,
+  shareAction,
   forceLocalToolbar,
   table = false,
 }: {
@@ -765,6 +791,7 @@ function MarkdownToolbar({
   onCopy: () => void;
   onSetMode: (next: ViewMode) => void;
   fullscreenAction?: React.ReactNode;
+  shareAction?: React.ReactNode;
   forceLocalToolbar?: boolean;
   table?: boolean;
 }) {
@@ -801,6 +828,7 @@ function MarkdownToolbar({
           {table ? "Source" : "Edit"}
         </SegmentedButton>
       </div>
+      {shareAction}
       {fullscreenAction}
     </DockablePaneBar>
   );

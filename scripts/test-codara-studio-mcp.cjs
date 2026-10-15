@@ -77,16 +77,18 @@ const WORKFLOW_TOOLS = [
 ];
 // A Cora chat (SPARK_RUN_ID set) also gets its whiteboard and board; a user's
 // own terminal agent gets the explicit notification and the worktree tools
-// instead.
+// instead. The share offer goes to the agents that write for the user (a
+// terminal agent, a manager chat, a direct Pi task), never to workers.
 const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, ...WHITEBOARD_TOOLS, ...BOARD_TOOLS];
-const TERMINAL_STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, "codara_notify_user", ...WORKTREE_TOOLS];
+const TERMINAL_STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, "codara_notify_user", ...WORKTREE_TOOLS, "codara_share_offer"];
 const RUN = { SPARK_RUN_ID: "run-roster" };
 // tools/list budgets in JSON characters. The studio list is what every Claude
 // Code, Codex and Grok session pays for on every request. Each roster carries
 // every tool module, so these move with TOOL_MODULES_BUDGET in
 // test-mcp-tool-manifest.cjs (raised by 9,000 for the browser tools of the
-// round that added the Chrome extension, audits and captures).
-const LIST_BUDGET = { studio: 29_000, run: 39_000, worker: 35_000, execute: 94_000, automation: 69_000 };
+// round that added the Chrome extension, audits and captures; studio and
+// execute by 500 for codara_share_offer).
+const LIST_BUDGET = { studio: 29_500, run: 39_000, worker: 35_000, execute: 94_500, automation: 69_000 };
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",
@@ -252,6 +254,7 @@ function sortedEqual(actual, expected, label) {
     assert.strictEqual(studio.init.protocolVersion, "2025-06-18", "initialize echoes a supported client version");
     assert.match(studio.init.instructions, /codara_terminal_run/, "initialize carries shared tool guidance");
     assert.match(studio.init.instructions, /codara_notify_user/);
+    assert.match(studio.init.instructions, /codara_share_offer.*only shows the user a Share prompt/, "a terminal agent learns the share offer is a prompt, not an upload");
     assert.match(studio.init.instructions, /codara_worktree_remove/, "a terminal agent learns the worktree lifecycle");
     assert.match(studio.init.instructions, /Dev servers: .*codara_terminal_servers.*keeps them running when you exit or restart/, "dev servers go to the keeper, not the agent's own shell");
     assert.doesNotMatch(studio.init.instructions, /baseRevision/, "chat-only guidance stays out of a terminal session");
@@ -284,6 +287,7 @@ function sortedEqual(actual, expected, label) {
         ...AUTOMATION_TOOLS.filter((name) => !EXECUTE_TOOLS.includes(name)),
         ...WORKTREE_TOOLS,
         ...WORKFLOW_TOOLS,
+        "codara_share_offer",
       ],
       "execute roster mismatch",
     );
@@ -412,7 +416,7 @@ function sortedEqual(actual, expected, label) {
     }
 
     const directMemory = await listTools("talk", { ...RUN, CODARA_PI_DIRECT_TASK: "1" });
-    sortedEqual(directMemory.tools, [...STUDIO_TOOLS, "codara_remember", "codara_recall", ...WORKTREE_TOOLS], "direct Cora roster mismatch");
+    sortedEqual(directMemory.tools, [...STUDIO_TOOLS, "codara_remember", "codara_recall", ...WORKTREE_TOOLS, "codara_share_offer"], "direct Cora roster mismatch");
     const directDefinition = directMemory.definitions.find((tool) => tool.name === "codara_remember");
     assert.ok(!("runId" in directDefinition.inputSchema.properties), "direct memory cannot choose a different run");
     assert.ok(JSON.stringify(directDefinition).length < 1500, "direct memory keeps a compact tool schema");
@@ -900,6 +904,14 @@ function sortedEqual(actual, expected, label) {
     assert.strictEqual(received.at(-1).method, "agent.notify");
     assert.strictEqual(received.at(-1).params.callerPaneId, "pane-caller");
     assert.strictEqual(received.at(-1).params.kind, "done");
+    // A share offer carries the caller's pane, and a relative path is the
+    // agent's, resolved against its own working directory.
+    await terminalAgentBridge.callToolByName("codara_share_offer", { path: "report.md" });
+    assert.strictEqual(received.at(-1).method, "share.offer");
+    assert.strictEqual(received.at(-1).params.path, path.resolve(process.cwd(), "report.md"));
+    assert.strictEqual(received.at(-1).params.callerPaneId, "pane-caller");
+    await terminalAgentBridge.callToolByName("codara_share_offer", { path: "/abs/page.html" });
+    assert.strictEqual(received.at(-1).params.path, "/abs/page.html");
     // Worktree calls carry who is asking from the launch environment only:
     // spoofed caller fields are replaced, and a refusal reaches the model as
     // an error result that keeps its code, blockers and hint.
@@ -1099,6 +1111,9 @@ function sortedEqual(actual, expected, label) {
     const offlineNotify = await terminalAgentBridge.callToolByName("codara_notify_user", { kind: "done" });
     assert.notStrictEqual(offlineNotify.isError, true, "an offline notification is not a tool error");
     assert.deepStrictEqual(JSON.parse(offlineNotify.content[0].text), { published: false, reason: "codara_offline" });
+    const offlineShare = await terminalAgentBridge.callToolByName("codara_share_offer", { path: "/abs/page.html" });
+    assert.notStrictEqual(offlineShare.isError, true, "an offer Codara cannot show is not a tool error");
+    assert.strictEqual(JSON.parse(offlineShare.content[0].text).offered, false);
     fs.writeFileSync(handshakePath, JSON.stringify({ url: "http://127.0.0.1:1", token: "f".repeat(64) }));
     const refused = await directBridge.callToolByName("codara_terminal_read", { paneId: "pane-owned" });
     assert.match(refused.content[0].text, /appears to be offline: nothing is listening/);

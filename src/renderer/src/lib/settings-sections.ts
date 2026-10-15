@@ -12,6 +12,7 @@ const SETTINGS_SECTIONS: Record<SettingsTab, true> = {
   agents: true,
   sessions: true,
   "remote-access": true,
+  "shared-pages": true,
   keybindings: true,
   runs: true,
   about: true,

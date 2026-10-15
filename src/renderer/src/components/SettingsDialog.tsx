@@ -74,6 +74,7 @@ import {
 } from "../lib/account-provider-descriptors";
 import { stableAccountCardKeys } from "../lib/account-card-keys";
 import RemoteAccessSettings from "./RemoteAccessSettings";
+import SharedPagesSettings from "./share/SharedPagesSettings";
 import { CardOverflowMenu } from "./AccountCardPrimitives";
 import { CodaraMark, RuntimeMark } from "./BrandMarks";
 import { EDITOR_THEME_LABEL } from "./editor-cm/themes";
@@ -463,6 +464,7 @@ export default function SettingsDialog({
                 <SessionsSettings onOpenWorkerSession={onOpenWorkerSession} />
               )}
               {renderedTab === "remote-access" && <RemoteAccessSettings />}
+              {renderedTab === "shared-pages" && <SharedPagesSettings />}
               {renderedTab === "keybindings" && <KeybindingsTab />}
               {renderedTab === "runs" && <RunsSettings onOpenRun={onOpenRun} />}
               {renderedTab === "about" && <AboutSettings />}
