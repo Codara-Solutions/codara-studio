@@ -171,7 +171,8 @@ export function quoteFor(file: ReviewDiffFile, selection: LineSelection): string
       continue;
     }
     if (line.kind === "meta") continue;
-    out.push(line.text);
+    // A CRLF file's lines keep their CR for hunk patches; quotes do not.
+    out.push(line.text.endsWith("\r") ? line.text.slice(0, -1) : line.text);
   }
   return clampQuote(out.join("\n"));
 }

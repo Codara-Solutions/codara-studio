@@ -25,7 +25,7 @@ async function load() {
     stdin: {
       contents: `
         export * from "./main/review/review-diff";
-        export { fileStructure, hunkPatch } from "./renderer/src/components/review/review-model";
+        export { fileStructure, hunkPatch, quoteFor } from "./renderer/src/components/review/review-model";
       `,
       resolveDir: path.join(ROOT, "src"),
       loader: "ts",
@@ -120,6 +120,9 @@ const numbered = (count, prefix = "line") => Array.from({ length: count }, (_, i
       ].join("\n"),
     );
     assert.deepEqual(blocks.map((block) => block.path), ["dir with space/x.txt", 'q"x.txt']);
+    // Content lines keep a CRLF file's CR; header lines never hold one.
+    const crBlocks = lib.splitPatch("diff --git a/w.txt b/w.txt\r\nindex 1..2 100644\r\n--- a/w.txt\r\n+++ b/w.txt\r\n@@ -1 +1 @@ ctx\r\n-a\r\n+b\r\n");
+    assert.deepEqual(crBlocks.map((block) => [block.path, block.lines]), [["w.txt", ["diff --git a/w.txt b/w.txt", "index 1..2 100644", "--- a/w.txt", "+++ b/w.txt", "@@ -1 +1 @@ ctx", "-a\r", "+b\r"]]]);
 
     // ── Every kind of uncommitted change ─────────────────────────────────
     const main = repo("main");
@@ -292,6 +295,26 @@ const numbered = (count, prefix = "line") => Array.from({ length: count }, (_, i
     const loaded = await lib.getReviewDiff({ cwd: big, mode: "uncommitted", paths: ["huge.txt", "wild.txt"], force: true });
     assert.deepEqual(loaded.files.map((file) => file.path).sort(), ["huge.txt", "wild.txt"]);
     assert.ok(loaded.files.every((file) => !file.deferred && file.lines.length > lib.LARGE_FILE_LINES), "asked for, large files load");
+
+    // ── A file with CRLF endings: a hunk still stages, quotes drop the CR ─
+    const crlf = repo("crlf");
+    const crlfLines = Array.from({ length: 30 }, (_, i) => `row ${i + 1}`);
+    write(crlf, "win.txt", `${crlfLines.join("\r\n")}\r\n`);
+    git(crlf, "add", ".");
+    git(crlf, "commit", "-qm", "base");
+    crlfLines[1] = "row 2 changed";
+    crlfLines[25] = "row 26 changed";
+    write(crlf, "win.txt", `${crlfLines.join("\r\n")}\r\n`);
+    const crlfFile = (await lib.getReviewDiff({ cwd: crlf, mode: "uncommitted" })).files.find((file) => file.path === "win.txt");
+    const crlfStructure = lib.fileStructure(crlfFile);
+    assert.equal(crlfStructure.hunks.length, 2);
+    const crlfPatch = path.join(scratch, "crlf.patch");
+    fs.writeFileSync(crlfPatch, lib.hunkPatch(crlfFile, crlfStructure.hunks[1]));
+    git(crlf, "apply", "--cached", "--recount", "--whitespace=nowarn", crlfPatch);
+    const crlfStaged = git(crlf, "diff", "--cached", "--", "win.txt");
+    assert.ok(crlfStaged.includes("+row 26 changed\r") && !crlfStaged.includes("+row 2 changed"), "one hunk of a CRLF file stages");
+    const changedAt = crlfFile.lines.findIndex((line) => line.text.startsWith("+row 26 changed"));
+    assert.equal(lib.quoteFor(crlfFile, { path: "win.txt", from: changedAt, to: changedAt }), "+row 26 changed", "the quote has no CR");
 
     // ── Untracked entries that are not plain small files ─────────────────
     // A link shows its target, as git would add it, and is never followed;

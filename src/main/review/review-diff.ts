@@ -214,24 +214,40 @@ export interface PatchBlock {
   lines: string[];
 }
 
-/** One block per file of a multi-file unified diff, with the file's path. */
+/**
+ * One block per file of a multi-file unified diff, with the file's path.
+ * Lines split on LF only: a file with CRLF endings keeps its CR on each
+ * content line, so a hunk patch built from them still matches the index
+ * (git apply refuses a patch whose lines lost their CR). The view and the
+ * quotes drop the CR.
+ */
 export function splitPatch(raw: string): PatchBlock[] {
   const blocks: PatchBlock[] = [];
   let current: string[] | null = null;
-  const all = raw.split(/\r?\n/);
+  const all = raw.split("\n");
   if (all.length && all[all.length - 1] === "") all.pop();
   const finish = () => {
     if (!current) return;
     const block = blockFrom(current);
     if (block) blocks.push(block);
   };
-  for (const line of all) {
-    if (line.startsWith("diff --git ")) {
+  // Header and @@ lines never carry a CR of their own; one there came from
+  // the transport, and would end up in the paths.
+  let inHunk = false;
+  for (const raw of all) {
+    const bare = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
+    if (bare.startsWith("diff --git ")) {
       finish();
-      current = [line];
+      current = [bare];
+      inHunk = false;
       continue;
     }
-    current?.push(line);
+    if (bare.startsWith("@@")) {
+      inHunk = true;
+      current?.push(bare);
+      continue;
+    }
+    current?.push(inHunk ? raw : bare);
   }
   finish();
   return blocks;

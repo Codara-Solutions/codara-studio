@@ -226,11 +226,13 @@ function sign(line: ReviewDiffLine): string {
 }
 
 function body(line: ReviewDiffLine): string {
+  // A CRLF file's lines keep their CR for hunk patches; it is not shown.
+  const text = line.text.endsWith("\r") ? line.text.slice(0, -1) : line.text;
   if (line.kind === "add" || line.kind === "del" || line.kind === "context") {
-    const text = line.text.slice(1);
-    return text === "" ? " " : text;
+    const content = text.slice(1);
+    return content === "" ? " " : content;
   }
-  return line.text || " ";
+  return text || " ";
 }
 
 const LineRow = React.memo(function LineRow({
