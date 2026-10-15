@@ -248,8 +248,9 @@ Two variables fill in when a command runs: `{branch}` (the git branch of the
 folder it runs in) and `{cwd}` (that folder). `${branch}` is left alone for
 the shell. In a shell command the value is typed unquoted, so put `"{cwd}"` in
 double quotes when a folder may contain spaces, and a value holding a
-character a shell would read as code (`;`, `$`, a quote, a backtick and the
-like) stops the command with a notice instead of running it.
+character a shell would read as code (`;`, `$`, a quote, a backtick, a
+parenthesis and the like) stops the command with a notice instead of running
+it.
 
 **Right-click in a terminal** chooses what a plain right-click does: **Copy
 or paste** (the default: copy the selection, or paste when nothing is

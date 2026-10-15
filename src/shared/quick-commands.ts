@@ -196,13 +196,16 @@ export function moveQuickCommand(commands: readonly QuickCommand[], id: string, 
 // command a value is typed into the shell unquoted, so a value holding a
 // character that a shell (POSIX, PowerShell or cmd) would read as code is
 // refused instead of run; prompts are plain text and take any value.
+// Parentheses count: git allows them in branch names, PowerShell runs
+// `git push origin (calc)` as a subexpression, and zsh runs the code in a
+// glob qualifier such as `README.md(e+calc+)`.
 
 export type QuickCommandVariable = "branch" | "cwd";
 
 export const QUICK_COMMAND_VARIABLES: readonly QuickCommandVariable[] = ["branch", "cwd"];
 
 const VARIABLE_PATTERN = /(?<!\$)\{(branch|cwd)\}/g;
-const SHELL_UNSAFE = /[`$"';&|<>!%\r\n\0]/;
+const SHELL_UNSAFE = /[`$"';&|<>!%()\r\n\0]/;
 
 export function quickCommandVariablesIn(text: string): Set<QuickCommandVariable> {
   const out = new Set<QuickCommandVariable>();

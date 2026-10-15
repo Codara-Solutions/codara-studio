@@ -158,7 +158,8 @@ async function main() {
     const ok = qc.expandQuickCommandText("git push origin {branch}; echo ${branch} in \"{cwd}\"", { branch: "feat/x", cwd: "/work/my app" }, "shell");
     assert.deepEqual(ok, { ok: true, text: "git push origin feat/x; echo ${branch} in \"/work/my app\"" });
     assert.deepEqual(qc.expandQuickCommandText("git push {branch}", { branch: null }, "shell"), { ok: false, variable: "branch", reason: "missing" });
-    for (const bad of ["x;rm -rf ~", "a$(id)", "a`id`", "a|b", "a&b", "a>b", "it's", "a\"b", "a\nb", "%PATH%", "!x"]) {
+    // "(calc)" runs calc in PowerShell and "README.md(e+calc+)" in zsh; git allows both as branch names.
+    for (const bad of ["x;rm -rf ~", "a$(id)", "a`id`", "a|b", "a&b", "a>b", "it's", "a\"b", "a\nb", "%PATH%", "!x", "(calc)", "README.md(e+calc+)"]) {
       assert.deepEqual(qc.expandQuickCommandText("echo {branch}", { branch: bad }, "shell"), { ok: false, variable: "branch", reason: "unsafe" }, bad);
     }
     assert.deepEqual(
