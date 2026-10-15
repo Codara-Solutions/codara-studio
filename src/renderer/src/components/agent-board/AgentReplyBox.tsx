@@ -3,9 +3,11 @@ import type { AgentBoardCard } from "@shared/agent-board";
 import { isQuestionInactiveError } from "@shared/run-questions";
 import { unwrapIpcError } from "../../lib/ipc-error";
 
-// The reply box on a Needs you card. A terminal agent gets the text pasted
-// into its pane and submitted, as if typed there; a Cora question gets an
-// answer (its options as buttons), and a paused or waiting chat a message.
+// The reply box on a Needs you card. A terminal agent stopped by an error is
+// back at its prompt and gets the text pasted there and submitted, as if
+// typed; a Cora question gets an answer (its options as buttons), and a
+// paused or waiting chat a message. A terminal agent waiting in a menu has no
+// box (AgentBoardCard opens its pane instead).
 
 type Phase = { kind: "idle" } | { kind: "sending" } | { kind: "sent" } | { kind: "error"; message: string };
 
@@ -17,7 +19,8 @@ function clientMessageId(): string {
 
 async function sendReply(card: AgentBoardCard, text: string): Promise<void> {
   const reply = card.reply;
-  if (!reply) return;
+  // A pane waiting in a menu is answered in the pane, never pasted into.
+  if (!reply || reply.kind === "pane-dialog") return;
   if (reply.kind === "pane") {
     const result = await window.spark.agentDelivery.deliver({
       workspaceId: card.workspaceId,

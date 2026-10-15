@@ -69,8 +69,14 @@ export type AgentBoardBucket = "needs-you" | "working" | "done";
 export type AgentBoardTone = "warn" | "accent" | "ok" | "muted" | "danger";
 export type AgentBoardRuntime = TerminalAgentRuntime | "cora";
 
+// "pane": the agent is back at its prompt (it stopped with an error), so a
+// reply is pasted there and submitted like a new prompt. "pane-dialog": the
+// agent waits in a menu (a permission prompt, a question, a plan to approve,
+// a trust screen) that takes keys, where pasted text and Enter could pick the
+// highlighted answer the user never chose; the card opens the pane instead.
 export type AgentBoardReply =
   | { kind: "pane"; paneId: string }
+  | { kind: "pane-dialog"; paneId: string }
   | { kind: "question"; runId: string; questionMessageId: string; options: RunQuestionOption[] }
   | { kind: "message"; runId: string };
 
@@ -403,8 +409,14 @@ function terminalCard(
     since,
     unseen: placement.bucket === "done" && unseenKind === "complete",
     target: { type: "terminal", workspaceId: pane.workspaceId, tabId: pane.tabId, paneId: pane.paneId },
-    reply: placement.bucket === "needs-you" ? { kind: "pane", paneId: pane.paneId } : null,
+    reply: terminalReply(pane),
   };
+}
+
+function terminalReply(pane: MergedPane): AgentBoardReply | null {
+  if (pane.state === "blocked") return { kind: "pane-dialog", paneId: pane.paneId };
+  if (pane.state === "error") return { kind: "pane", paneId: pane.paneId };
+  return null;
 }
 
 function compareCards(order: Map<string, number>, newestFirst: boolean) {

@@ -1,5 +1,5 @@
 import { memo } from "react";
-import type { CSSProperties } from "react";
+import type { CSSProperties, KeyboardEvent } from "react";
 import { formatAgentElapsed, type AgentBoardCard as Card } from "@shared/agent-board";
 import { CodaraMark, RuntimeMark } from "../BrandMarks";
 import { agentBrandColor } from "../../lib/agent-brand";
@@ -7,7 +7,9 @@ import AgentReplyBox from "./AgentReplyBox";
 
 // One agent on the Agents view. The summary is a button that opens the agent
 // (switches workspace, focuses its pane or chat); a Needs you card carries
-// its reply box below, outside the button.
+// its reply box below, outside the button. A terminal agent waiting in a
+// menu gets a button to its pane instead: text pasted into a menu could
+// pick an answer the user did not choose.
 
 interface Props {
   card: Card;
@@ -79,9 +81,33 @@ function AgentBoardCardView({ card, elapsed, active, focusable, onOpen, onFocusC
         {card.tool && <span className="agent-card__tool">{card.tool}</span>}
         {card.message && <span className="agent-card__message">{card.message}</span>}
       </button>
-      {card.reply && <AgentReplyBox key={replyKey(card)} card={card} />}
+      {card.reply?.kind === "pane-dialog" ? (
+        <div className="agent-card__reply">
+          <button
+            type="button"
+            className="agent-card__answer"
+            aria-label={`Answer ${card.agentLabel} in its terminal in ${card.workspaceName}`}
+            title="Its prompt is a menu that takes keys, so you answer it in the terminal"
+            onClick={() => onOpen(card)}
+            onKeyDown={backToCard}
+          >
+            Answer in terminal
+          </button>
+        </div>
+      ) : (
+        card.reply && <AgentReplyBox key={replyKey(card)} card={card} />
+      )}
     </li>
   );
+}
+
+// Escape leaves the card's controls for the card, where the arrows move on.
+function backToCard(event: KeyboardEvent<HTMLElement>): void {
+  if (event.key !== "Escape") return;
+  event.currentTarget
+    .closest("[data-agent-card]")
+    ?.querySelector<HTMLButtonElement>("[data-agent-card-open]")
+    ?.focus();
 }
 
 // A new question is a new box: a draft typed for the last one is dropped.

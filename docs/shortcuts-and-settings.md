@@ -326,15 +326,20 @@ asked, the tool it is running when the agent reports one, and how long it
 has been in that state. A terminal agent's card is titled by your last prompt
 when the agent's hooks report it, otherwise by its tab.
 
-A **Needs you** card has a reply box. For a terminal agent the text is pasted
-into its pane and submitted, as if you had typed it there; a permission
-prompt that wants a key is answered in the pane itself. For a Cora question
-the answer options show as buttons above the box. Clicking a card, or Enter
-on it, switches to its workspace and opens its pane or chat.
+A **Needs you** card has a reply box. For a Cora question the answer options
+show as buttons above the box. For a terminal agent that stopped with an
+error, the text is pasted into its pane and submitted, as if you had typed it
+at its prompt. A terminal agent waiting at a permission prompt, a question or
+a plan to approve shows **Answer in terminal** instead, which opens its pane:
+those prompts are menus that take keys, and pasted text followed by Enter
+could pick the highlighted answer, often Yes, without you choosing it.
+Clicking a card, or Enter on it, switches to its workspace and opens its pane
+or chat.
 
 Keys: Left and Right move between **Workspaces** and **Agents**; in the
 list, Up and Down (or Home and End) move between cards, Tab reaches a card's
-reply box, and Escape leaves the box.
+reply box or its **Answer in terminal** button, and Escape goes back to the
+card.
 
 ## The Capability Center
 

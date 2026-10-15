@@ -7,10 +7,12 @@ import { join } from "node:path";
 // The rail's Agents view against a throwaway Codara home and a fake user
 // home (no real ~/.claude, shell startup file or account is read or
 // written). A fake Claude Code drives its pane through OSC 7501 program
-// status: it lands under Needs you in another workspace, is answered from its
-// card, moves to Done with its last message, and opening the card brings
-// its pane back. A seeded blocked Cora chat is answered with one of its
-// options; the switch works from the keyboard and is remembered on reload.
+// status: it lands under Needs you in another workspace with a question,
+// which the card never pastes into (a real one is a menu) but opens the pane
+// for; then it stops with an error and is answered from its card's reply
+// box, moves to Done with its last message, and opening the card brings its
+// pane back. A seeded blocked Cora chat is answered with one of its options;
+// the switch works from the keyboard and is remembered on reload.
 
 const MINUTE = 60_000;
 const RUN_ID = "run-agents-view";
@@ -51,7 +53,8 @@ async function prepare(opts: { blockedRun?: boolean } = {}): Promise<Fixture> {
   if (opts.blockedRun) await seedBlockedRun(home, cwdB);
 
   // A Claude Code stand-in: waits for a prompt, works, asks a question
-  // through OSC 7501, and finishes once the answer arrives (typed or pasted).
+  // through OSC 7501, stops with an error once it is answered, and finishes
+  // on the next prompt (typed or pasted).
   const fakeClaude = join(binDir, "claude.js");
   await writeFile(
     fakeClaude,
@@ -78,6 +81,14 @@ async function prepare(opts: { blockedRun?: boolean } = {}): Promise<Fixture> {
           status("state=working");
           setTimeout(() => status("state=blocked:kind=question:msg=" + b64("Deploy to production?")), 1500);
         } else if (phase === "question") {
+          phase = "error";
+          out("\r\nanswer: " + line + "\r\n");
+          status("state=working");
+          setTimeout(() => {
+            out("Rate limited.\r\n> ");
+            status("state=error:msg=" + b64("Rate limited, try again."));
+          }, 1500);
+        } else if (phase === "error") {
           phase = "done";
           out("\r\ngot: " + line + "\r\n");
           status("state=working");
@@ -220,9 +231,27 @@ test("a terminal agent in another workspace is answered from the Agents view", a
       await expect(page.getByRole("button", { name: "Needs you, 1", exact: true })).toHaveAttribute("aria-expanded", "true");
     });
 
-    await test.step("a reply from the card reaches the pane", async () => {
+    await test.step("a question in a terminal is answered in its pane, never pasted into", async () => {
+      // No text box: pasted text and Enter would pick a real menu's
+      // highlighted answer without the user choosing it.
+      await expect(agent.getByRole("textbox")).toHaveCount(0);
+      const answer = agent.getByRole("button", { name: "Answer Claude Code in its terminal in alpha" });
+      await expect(answer).toHaveText("Answer in terminal");
+      await answer.click();
+      await expect(agent.locator("[data-agent-card-open]")).toHaveAttribute("aria-current", "true");
+      const input = page.locator(`[data-terminal-pane-id="${paneId}"]:visible .xterm-helper-textarea`).first();
+      await input.focus();
+      await input.pressSequentially("yes", { delay: 2 });
+      await input.press("Enter");
+      await expect(agent).not.toHaveAttribute("data-agent-bucket", "needs-you", { timeout: 15_000 });
+    });
+
+    await test.step("an agent stopped by an error takes a reply from its card", async () => {
+      await expect(agent).toHaveAttribute("data-agent-bucket", "needs-you", { timeout: 15_000 });
+      await expect(agent).toContainText("Stopped");
+      await expect(agent).toContainText("Rate limited, try again.");
       const reply = agent.getByRole("textbox", { name: "Reply to Claude Code in alpha" });
-      await reply.fill("yes, ship it");
+      await reply.fill("try again");
       await reply.press("Enter");
       // The agent picks it up and leaves Needs you.
       await expect(agent).not.toHaveAttribute("data-agent-bucket", "needs-you", { timeout: 15_000 });
@@ -232,12 +261,17 @@ test("a terminal agent in another workspace is answered from the Agents view", a
 
     await test.step("the finished agent moves to Done with its last message", async () => {
       await expect(agent).toHaveAttribute("data-agent-bucket", "done", { timeout: 15_000 });
-      await expect(agent).toContainText("Shipped after you said yes, ship it.");
+      await expect(agent).toContainText("Shipped after you said try again.");
       await expect(agent).toContainText("Finished");
       await expect(viewTab(page, "Agents")).toHaveAccessibleName("Agents");
     });
 
     await test.step("opening the card switches workspace and focuses the pane", async () => {
+      await viewTab(page, "Workspaces").click();
+      await page.locator('[data-workspace-id="ws-b"]').evaluate((row) => (row as HTMLElement).click());
+      await expect(page.locator('[data-workspace-id="ws-b"]')).toHaveAttribute("data-active", "true");
+      await viewTab(page, "Agents").click();
+      await expect(agent.locator("[data-agent-card-open]")).not.toHaveAttribute("aria-current", "true");
       await agent.locator("[data-agent-card-open]").click();
       await expect(agent.locator("[data-agent-card-open]")).toHaveAttribute("aria-current", "true");
       const pane = page.locator(`[data-terminal-pane-id="${paneId}"]:visible`);

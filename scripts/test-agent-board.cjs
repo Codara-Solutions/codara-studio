@@ -268,7 +268,26 @@ async function testBuilder() {
   check("a pane card names its account", blocked.account === "Work");
   check("a pane card names the agent", blocked.agentLabel === "Claude Code");
   check("a pane card carries the workspace", blocked.workspaceName === "Alpha" && blocked.workspaceColor === "#3366ff");
-  check("a blocked pane replies into its pane", blocked.reply && blocked.reply.kind === "pane" && blocked.reply.paneId === "p-blocked");
+  // Its prompt is a menu: pasted text and Enter would pick the highlighted
+  // answer (usually Yes), so the card opens the pane instead of pasting.
+  check(
+    "a blocked pane is answered in its pane, never pasted into",
+    blocked.reply && blocked.reply.kind === "pane-dialog" && blocked.reply.paneId === "p-blocked",
+    blocked.reply,
+  );
+  const stopped = board.buildAgentBoard({
+    now: NOW,
+    workspaces: WORKSPACES,
+    layoutPanes: [],
+    activity: [activity({ paneId: "p-error", state: "error", message: "Rate limited." })],
+    runs: [],
+  }).needsYou[0];
+  check(
+    "a pane stopped by an error is back at its prompt and takes a pasted reply",
+    stopped && stopped.status === "Stopped" && stopped.reply && stopped.reply.kind === "pane" && stopped.reply.paneId === "p-error",
+    stopped,
+  );
+  check("a stopped pane says why", stopped && stopped.message === "Rate limited.");
   check(
     "a pane card opens its terminal",
     blocked.target.type === "terminal" && blocked.target.paneId === "p-blocked" && blocked.target.tabId === "t1",

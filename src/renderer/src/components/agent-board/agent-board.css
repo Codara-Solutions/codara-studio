@@ -279,7 +279,8 @@
 }
 
 .agent-card__option,
-.agent-card__send {
+.agent-card__send,
+.agent-card__answer {
   appearance: none;
   height: 22px;
   padding: 0 8px;
@@ -305,12 +306,14 @@
 }
 
 .agent-card__option:hover:not(:disabled),
-.agent-card__send:hover:not(:disabled) {
+.agent-card__send:hover:not(:disabled),
+.agent-card__answer:hover {
   background: var(--hover);
 }
 
 .agent-card__option:focus-visible,
 .agent-card__send:focus-visible,
+.agent-card__answer:focus-visible,
 .agent-card__input:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);
@@ -345,6 +348,11 @@
 }
 
 .agent-card__send {
+  height: 24px;
+}
+
+.agent-card__answer {
+  align-self: flex-start;
   height: 24px;
 }
 
