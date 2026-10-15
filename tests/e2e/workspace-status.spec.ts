@@ -217,6 +217,8 @@ test("agents and the user set a workspace's status and progress note in the rail
     await page.keyboard.type(" for review");
     await page.keyboard.press("Enter");
     await expect(picker).toHaveCount(0);
+    // Focus goes back to the row's actions button, not to the page body.
+    await expect(row(page, "ws-beta").getByRole("button", { name: "Workspace actions" })).toBeFocused();
     const betaStatus = row(page, "ws-beta").getByTestId("workspace-status");
     await expect(betaStatus.getByTestId("workspace-status-chip")).toHaveText("In review");
     await expect(betaStatus.getByTestId("workspace-status-note")).toHaveText("PR open for review");
@@ -226,6 +228,7 @@ test("agents and the user set a workspace's status and progress note in the rail
     await picker.getByRole("option", { name: "Done" }).click();
     await page.keyboard.press("Escape");
     await expect(picker).toHaveCount(0);
+    await expect(row(page, "ws-gamma").getByRole("button", { name: "Workspace actions" })).toBeFocused();
     await expect(row(page, "ws-gamma").getByTestId("workspace-status")).toHaveCount(0);
     await openStatusPicker(page, "ws-gamma");
     await page.getByTestId("workspace-status-picker").getByRole("option", { name: "Done" }).click();
@@ -249,12 +252,25 @@ test("agents and the user set a workspace's status and progress note in the rail
     await expect(row(page, "ws-gamma").getByTestId("workspace-status")).toHaveCount(0);
     await expect.poll(async () => Object.keys(await stored()).sort()).toEqual(["ws-alpha", "ws-beta"]);
 
+    // An agent posting while the picker is open shows in it, and Save sends
+    // only what the user changed, so the agent's newer status stays.
+    picker = await openStatusPicker(page, "ws-alpha");
+    await expect(picker.getByRole("option", { name: "Blocked" })).toHaveAttribute("aria-selected", "true");
+    await request("workspace.status", { callerPaneId: pane.paneId, callerClient: "claude-code", status: "in_review" });
+    await expect(picker.getByRole("option", { name: "In review" })).toHaveAttribute("aria-selected", "true");
+    await expect(picker.getByTestId("workspace-status-checkpoints").locator("li").first()).toContainText("Claude Code");
+    await picker.getByRole("textbox", { name: "Progress note" }).fill("API key added");
+    await picker.getByRole("button", { name: "Save" }).click();
+    await expect(picker).toHaveCount(0);
+    await expect(alphaStatus.getByTestId("workspace-status-chip")).toHaveText("In review");
+    await expect(alphaStatus.getByTestId("workspace-status-note")).toHaveText("API key added");
+
     // A restart keeps them.
     await app.close();
     app = await launch();
     page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
-    await expect(row(page, "ws-alpha").getByTestId("workspace-status-chip")).toHaveText("Blocked");
+    await expect(row(page, "ws-alpha").getByTestId("workspace-status-chip")).toHaveText("In review");
     await expect(row(page, "ws-beta").getByTestId("workspace-status-note")).toHaveText("PR open for review");
 
     // Deleting a workspace drops its status.

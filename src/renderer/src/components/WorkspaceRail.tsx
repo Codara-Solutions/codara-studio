@@ -2595,7 +2595,16 @@ function WorkspaceRow({
             placement="below"
             align="end"
           >
-            <WorkspaceStatusPicker workspaceId={ws.id} onClose={() => setStatusPickerOpen(false)} />
+            <WorkspaceStatusPicker
+              workspaceId={ws.id}
+              onClose={(options) => {
+                setStatusPickerOpen(false);
+                // From the keyboard, focus goes back to the row's "…" button.
+                if (options?.restoreFocus) {
+                  window.requestAnimationFrame(() => menuBtnRef.current?.focus({ preventScroll: true }));
+                }
+              }}
+            />
           </AnchoredMenu>
         </div>
       </div>

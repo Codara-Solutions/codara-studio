@@ -24,32 +24,49 @@ const sectionLabel: CSSProperties = {
 // note, and the latest checkpoints agents or the user left. The parent
 // supplies the AnchoredMenu shell. The statuses are options, so the menu's
 // arrow keys walk them and opening the popover focuses the current one.
+// A close from the keyboard asks the parent to put focus back on the row
+// (restoreFocus), so it does not fall to the page body.
 export default function WorkspaceStatusPicker({
   workspaceId,
   onClose,
 }: {
   workspaceId: string;
-  onClose: () => void;
+  onClose: (options?: { restoreFocus?: boolean }) => void;
 }) {
   const entry = useWorkspaceStatus(workspaceId);
-  const [status, setStatus] = useState<WorkspaceStatusId | null>(entry?.status ?? null);
-  const [note, setNote] = useState(entry?.note ?? "");
+  // What the user picked or typed, null until they touch that field. Until
+  // then the picker shows the live value, and Save sends only what they
+  // changed: an agent's status or note posted while the picker is open is
+  // neither hidden nor overwritten with the value the picker opened on.
+  const [picked, setPicked] = useState<{ status: WorkspaceStatusId | null } | null>(null);
+  const [typed, setTyped] = useState<string | null>(null);
+  const status = picked ? picked.status : (entry?.status ?? null);
+  const note = typed ?? entry?.note ?? "";
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const apply = async (patch: WorkspaceStatusPatch) => {
+  const changes = (): WorkspaceStatusPatch => ({
+    ...(picked ? { status: picked.status } : {}),
+    ...(typed !== null ? { note: typed } : {}),
+  });
+  const apply = async (patch: WorkspaceStatusPatch, restoreFocus = false) => {
+    if (saving) return;
+    if (patch.status === undefined && patch.note === undefined && !patch.clear) {
+      onClose({ restoreFocus });
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
       await setWorkspaceStatus(workspaceId, patch);
-      onClose();
+      onClose({ restoreFocus });
     } catch (err) {
       setError(unwrapIpcError(err));
     } finally {
       setSaving(false);
     }
   };
-  const save = () => void apply({ status, note });
+  const save = (restoreFocus = false) => void apply(changes(), restoreFocus);
   const checkpoints = entry ? entry.checkpoints.slice().reverse() : [];
   const now = Date.now();
 
@@ -62,6 +79,14 @@ export default function WorkspaceStatusPicker({
       onClick={(event) => event.stopPropagation()}
       onMouseDown={(event) => event.stopPropagation()}
       onContextMenu={(event) => event.stopPropagation()}
+      onKeyDown={(event) => {
+        // Escape on a status or a button: handled here, before the menu's own
+        // document listener, so focus can go back to the row.
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        onClose({ restoreFocus: true });
+      }}
     >
       <div style={{ display: "grid", gap: 2 }}>
         <div id={`workspace-status-label-${workspaceId}`} style={{ ...sectionLabel, paddingTop: 4 }}>
@@ -81,8 +106,8 @@ export default function WorkspaceStatusPicker({
                 aria-selected={selected}
                 tabIndex={tabStop ? 0 : -1}
                 className={selected ? "spark-menu-item is-active" : "spark-menu-item"}
-                onClick={() => setStatus(selected ? null : id)}
-                onDoubleClick={() => void apply({ status: id, note })}
+                onClick={() => setPicked({ status: selected ? null : id })}
+                onDoubleClick={() => void apply({ ...changes(), status: id })}
               >
                 <span
                   aria-hidden="true"
@@ -107,17 +132,17 @@ export default function WorkspaceStatusPicker({
           value={note}
           maxLength={WORKSPACE_STATUS_NOTE_MAX}
           placeholder="What is done or happening now"
-          onChange={(event) => setNote(event.target.value)}
+          onChange={(event) => setTyped(event.target.value)}
           onKeyDown={(event) => {
             // Text editing keys stay in the field; the menu's own arrow and
             // Home/End handling would move focus to the status list.
             event.stopPropagation();
             if (event.key === "Enter") {
               event.preventDefault();
-              save();
+              save(true);
             } else if (event.key === "Escape") {
               event.preventDefault();
-              onClose();
+              onClose({ restoreFocus: true });
             }
           }}
           style={{ margin: "0 4px", width: "calc(100% - 8px)", boxSizing: "border-box" }}
@@ -135,11 +160,12 @@ export default function WorkspaceStatusPicker({
           type="button"
           className="spark-btn"
           disabled={saving || !entry}
-          onClick={() => void apply({ clear: true })}
+          // detail 0: pressed with Enter or Space, not clicked.
+          onClick={(event) => void apply({ clear: true }, event.detail === 0)}
         >
           Clear
         </button>
-        <button type="button" className="spark-btn is-primary" disabled={saving} onClick={save}>
+        <button type="button" className="spark-btn is-primary" disabled={saving} onClick={(event) => save(event.detail === 0)}>
           Save
         </button>
       </div>
