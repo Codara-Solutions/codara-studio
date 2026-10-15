@@ -67,6 +67,11 @@ test("tips never appear in a test run that did not ask, and usage is still track
     await page.waitForTimeout(3_000);
     await expect(page.locator(TIP)).toHaveCount(0);
     await expect(page.locator(TOUR)).toHaveCount(0);
+
+    // Before any tip, the row a Settings search lands on is there, greyed out.
+    const settings = await openSettings(page);
+    await expect(settings.getByRole("button", { name: "Show them again" })).toBeDisabled();
+    await expect(settings.getByRole("switch", { name: "Feature tips" })).toHaveAttribute("aria-checked", "true");
   } finally {
     await app?.close().catch(() => undefined);
     await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);

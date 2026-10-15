@@ -507,6 +507,9 @@ async function main() {
     const settings = read(path.join(RENDERER, "components", "SettingsDialog.tsx"));
     assert.match(settings, /<ToggleRow\s+title="Feature tips"/);
     assert.match(settings, /title="Tips you have seen"/);
+    // Always rendered once loaded, so its Settings search result has a row to land on.
+    assert.match(settings, /\{featureTips\.hydrated \? \(\s*<SettingRow\s+title="Tips you have seen"/);
+    assert.match(settings, /disabled=\{featureTips\.seen === 0\}/);
     const ipc = read(path.join(ROOT, "src", "main", "ipc.ts"));
     assert.match(ipc, /registerFeatureTipsIpc\(handle\);/, "registered through the gated handle");
     const preload = read(path.join(ROOT, "src", "preload", "index.ts"));

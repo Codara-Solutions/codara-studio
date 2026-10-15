@@ -1182,12 +1182,18 @@ function GeneralSettings({
             onChange={featureTips.setEnabled}
           />
         ) : null}
-        {featureTips.hydrated && featureTips.seen > 0 ? (
+        {featureTips.hydrated ? (
           <SettingRow
             title="Tips you have seen"
             desc="Let the tips you already saw come back, one at a time."
             control={
-              <button type="button" className="spark-btn" onClick={featureTips.reset}>
+              <button
+                type="button"
+                className="spark-btn"
+                onClick={featureTips.reset}
+                disabled={featureTips.seen === 0}
+                title={featureTips.seen === 0 ? "No tips shown yet" : undefined}
+              >
                 Show them again
               </button>
             }

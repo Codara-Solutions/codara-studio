@@ -217,7 +217,8 @@ chat composer or a dialog, and steps aside while one is open.
 - **Got it** or Escape closes the tip. That tip does not come back.
 - **Don't show tips** turns tips off. Turn them back on with **Feature tips**
   in Settings, General, Getting started. **Tips you have seen** with
-  **Show them again** lets shown tips come back.
+  **Show them again** lets shown tips come back (greyed out until a tip has
+  been shown).
 
 To choose what is worth a tip, Codara notes which features you have used, the
 first time you use each one, in `feature-tips.json` in the Codara home
