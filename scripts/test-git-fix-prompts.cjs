@@ -286,6 +286,10 @@ test("looksLikeHookFailure tells a hook's rejection from git's own errors", ({ m
     "fatal: Unable to create '/r/.git/index.lock': File exists.",
     "error: Committing is not possible because you have unmerged files.",
     "error: gpg failed to sign the data",
+    "fatal: You are in the middle of a merge -- cannot amend.",
+    "fatal: unable to write new index file",
+    "error: insufficient permission for adding an object to repository database .git/objects",
+    "fatal: failed to write commit object",
   ]) {
     assert.equal(mod.looksLikeHookFailure(text, ["pre-commit"]), false, text);
   }

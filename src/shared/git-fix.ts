@@ -579,7 +579,7 @@ export function buildReviewPrompt(context: GitFixReviewContext): string {
 
 // Commit failures that are git's own, not a hook's: nothing to fix with an agent.
 const NOT_A_HOOK =
-  /nothing to commit|nothing added to commit|no changes added to commit|please tell me who you are|unable to auto-detect email|empty ident name|committing is not possible because you have unmerged files|aborting commit due to empty commit message|commit message is empty|index\.lock|cannot lock ref|gpg failed to sign|unable to sign|not a git repository|could not lock config file/i;
+  /nothing to commit|nothing added to commit|no changes added to commit|please tell me who you are|unable to auto-detect email|empty ident name|committing is not possible because you have unmerged files|aborting commit due to empty commit message|commit message is empty|index\.lock|cannot lock ref|gpg failed to sign|unable to sign|not a git repository|could not lock config file|cannot amend|unable to write new[ _]index file|no space left on device|insufficient permission for adding an object|failed to write commit object/i;
 
 /** Whether a failed commit's output reads as a hook's rejection. */
 export function looksLikeHookFailure(output: string, hooks: readonly string[]): boolean {
