@@ -773,7 +773,7 @@ function cancelPendingDone(w: PaneWatcher, reason: string, onlyBelow?: DoneOrigi
 // The agent stopped for the user. Only inside a turn: launch-time trust and
 // login screens are answered by someone who is looking at the pane.
 function needsYou(w: PaneWatcher, now: number, body: string | null, why: string): void {
-  noteActivity(w, { question: body });
+  noteQuestion(w, body);
   if (!turnActive(w) && w.state !== "working") {
     if (w.state !== "blocked") tanLog(`pane=${w.paneId} prompt outside a turn (${why}), no alert`);
     w.state = "blocked";
@@ -979,6 +979,8 @@ export function noteTerminalHookEvent(
       if (agentId) return;
       const prompt = stringField(payload, "prompt") ?? "";
       w.pendingToolCalls = 0;
+      // No call is pending, so no tool is running (a follow-up too).
+      noteActivity(w, { tool: null });
       if (/^\s*<task-notification>/.test(prompt)) {
         // A background task reporting back. Claude works on it, but nobody
         // submitted anything.
@@ -1053,6 +1055,7 @@ export function noteTerminalHookEvent(
       closeTurnSilently(w, now, `session ${source || "start"}`);
       w.turn = null;
       w.pendingToolCalls = 0;
+      noteActivity(w, { tool: null });
       w.backgroundRunningAtLastStop = 0;
       w.hookFollowUp = false;
       return;
@@ -1087,10 +1090,13 @@ function handleClaudeStop(
   w.backgroundRunningAtLastStop = running;
   tanLog(`pane=${w.paneId} hook ${hookName} (background running=${running}, follow-up=${followUp})`);
   if (hookName === "StopFailure") {
-    if (!turnActive(w)) return;
     const error = stringField(payload, "error") ?? stringField(payload, "error_type");
+    const body = error ? `The turn ended with an error: ${oneLine(error, 100)}` : "The turn ended with an API error.";
+    // The Agents view's last line is the failure, not the turn before it.
+    noteActivity(w, { message: body });
+    if (!turnActive(w)) return;
     closeTurnSilently(w, now, "stop failure");
-    deliver(w, "failed", { body: error ? `The turn ended with an error: ${oneLine(error, 100)}` : "The turn ended with an API error." });
+    deliver(w, "failed", { body });
     return;
   }
   if (turnActive(w) && !followUp) {
@@ -1449,7 +1455,8 @@ function handleProgramStatus(w: PaneWatcher, report: ProgramStatusReport, now: n
     }
     case "error":
       w.state = "failed";
-      if (report.msg) noteActivity(w, { message: report.msg.slice(0, ACTIVITY_TEXT_MAX) });
+      // Why it stopped; without a reason, not the last good message either.
+      noteActivity(w, { message: report.msg ? report.msg.slice(0, ACTIVITY_TEXT_MAX) : null });
       emitPaneState(w, "error");
       if (!turnActive(w)) return;
       closeTurnSilently(w, now, "program status error");
@@ -1626,6 +1633,8 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
       }
       w.state = problem.kind;
       emitPaneState(w, problem.kind === "failed" ? "error" : "blocked");
+      if (problem.kind === "failed") noteActivity(w, { message: problem.body });
+      else noteQuestion(w, problem.body);
       if (shouldAlert && now - w.lastOscNotifyAt >= OSC_NOTIFY_MUTE_MS && !w.replayingTail) {
         // A positive new outcome, not the tail of a prior completion.
         rearm(paneSourceKey(w.paneId));
@@ -1888,6 +1897,7 @@ function handleExplicitNotify(w: PaneWatcher, message: string): void {
     w.teammatesActive = 0;
   }
   emitPaneState(w, kind === "blocked" ? "blocked" : "idle");
+  if (kind === "blocked") noteQuestion(w, message ? oneLine(message, SUMMARY_MAX_CHARS) : null);
   if (w.replayingTail) return;
   if (w.runtime === null && !/\b(?:claude|codex|grok)\b/i.test(message)) {
     // A plain program's notification is shown the way a terminal would.
@@ -1930,7 +1940,8 @@ function emitPaneState(w: PaneWatcher, chipState: RuntimeState): void {
   if (w.excluded) return;
   if (w.lastEmittedState === chipState) return;
   w.lastEmittedState = chipState;
-  noteActivity(w, { stateSince: Date.now() });
+  // A prompt answered or gone takes its question with it.
+  noteActivity(w, chipState === "blocked" ? { stateSince: Date.now() } : { stateSince: Date.now(), question: null });
   tanLog(`pane=${w.paneId} chip-state -> ${chipState} (runtime=${w.runtime})`);
   emitTerminalAgentState({
     workspaceId: w.workspaceId,
@@ -2059,9 +2070,28 @@ function emptyActivity(): PaneActivity {
   return { stateSince: now, sessionSince: now, prompt: null, message: null, question: null, tool: null };
 }
 
+// Screen readers report the same prompt on every repaint; only a real change
+// is recorded and pings the board.
 function noteActivity(w: PaneWatcher, patch: Partial<PaneActivity>): void {
+  let changed = false;
+  for (const key of Object.keys(patch) as (keyof PaneActivity)[]) {
+    if (w.activity[key] !== patch[key]) {
+      changed = true;
+      break;
+    }
+  }
+  if (!changed) return;
   w.activity = { ...w.activity, ...patch };
   if (!w.excluded) signalAgentBoardChanged();
+}
+
+// What a blocked pane waits on. The first account of a prompt is the most
+// specific (a hook's question text before the screen's "Permission for ..."
+// or a generic notification), so a repaint or a later report of the same
+// prompt keeps it; emitPaneState clears it once the pane leaves blocked.
+function noteQuestion(w: PaneWatcher, body: string | null): void {
+  if (w.lastEmittedState === "blocked" && w.activity.question) return;
+  noteActivity(w, { question: body });
 }
 
 // Every user pane hosting an agent, for the rail's Agents view. Cora worker
