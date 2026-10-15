@@ -207,7 +207,8 @@ const SECRET_PATTERNS: ReadonlyArray<[RegExp, string]> = [
   [/\bnpm_[A-Za-z0-9]{36}\b/g, "[redacted]"],
   [/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, "[redacted]"],
   [/\b(Bearer|Basic|token)\s+[A-Za-z0-9._~+/=-]{12,}/gi, "$1 [redacted]"],
-  [/(https?:\/\/)[^/\s:@]+:[^/\s@]+@/gi, "$1[redacted]@"],
+  // Credentials in any URL: https, but also postgres://, redis://, amqp://.
+  [/\b([a-z][a-z0-9+.-]{0,30}:\/\/)[^/\s:@]+:[^/\s@]+@/gi, "$1[redacted]@"],
   [/([?&](?:access_token|token|auth|key|api_key|apikey|signature|sig|password)=)[^&\s"'#]+/gi, "$1[redacted]"],
 ];
 
@@ -242,6 +243,18 @@ export function redactSecrets(text: string): string {
   return out.replace(SECRET_ASSIGNMENT, (match, name: string, sep: string, quote: string, value: string) =>
     secretLike(value) ? `${name}${sep}${quote}[redacted]` : match,
   );
+}
+
+// Files that exist to hold credentials. Their conflicts are named, never
+// quoted: redaction cannot know every secret a .env or a key file holds.
+// Committed templates (.env.example and the like) are quoted as usual.
+const SECRETS_FILE =
+  /^(?:\.env(?:\.(?!(?:example|sample|template|dist|defaults)$)[^/]*)?|[^/]*\.(?:pem|key|p12|pfx|jks|keystore|tfvars|tfstate)|id_(?:rsa|dsa|ecdsa|ed25519)|\.npmrc|\.pypirc|\.netrc|_netrc|\.git-credentials|\.htpasswd|(?:credentials|secrets?)(?:\.(?:json|ya?ml|toml|ini|env|txt|xml|properties))?)$/i;
+
+/** Whether a repository path names a file that holds credentials. */
+export function looksLikeSecretsFile(path: string): boolean {
+  const name = path.split(/[\\/]/).pop() ?? "";
+  return SECRETS_FILE.test(name);
 }
 
 const ANSI_PATTERN = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/g;

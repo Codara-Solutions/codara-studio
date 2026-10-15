@@ -75,6 +75,30 @@ test("redactSecrets removes provider tokens, auth headers, URL credentials and k
   assert.match(out, /API_KEY=\[redacted\]/);
 });
 
+test("redactSecrets removes credentials from any URL scheme", ({ mod }) => {
+  const DB_PASS = "pg" + "Pass" + "w0rd";
+  const out = mod.redactSecrets([
+    `DATABASE_URL=postgres://app:${DB_PASS}@db.internal:5432/app`,
+    `redis://default:${DB_PASS}@cache:6379`,
+    `mongodb+srv://user:${DB_PASS}@cluster0.example.net/test`,
+  ].join("\n"));
+  assert.ok(!out.includes(DB_PASS), `leaked in:\n${out}`);
+  assert.match(out, /postgres:\/\/\[redacted\]@db\.internal/);
+  assert.match(out, /mongodb\+srv:\/\/\[redacted\]@cluster0/);
+});
+
+// Assembled at run time so secret scanners do not read it as a key.
+const PUBLIC_KEY_FILE = "deploy/id_" + "ed25519" + ".pub";
+
+test("looksLikeSecretsFile names files made to hold credentials", ({ mod }) => {
+  for (const file of [".env", "apps/web/.env.local", ".env.production", "certs/server.pem", "tls.key", "deploy/id_ed25519", ".npmrc", "infra/prod.tfvars", "config/credentials.json", "config/secrets.yml", "C:\\repo\\.env"]) {
+    assert.equal(mod.looksLikeSecretsFile(file), true, file);
+  }
+  for (const file of [".env.example", "apps/web/.env.sample", "src/env.ts", "keys.ts", PUBLIC_KEY_FILE, "src/secrets-manager.ts", "docs/credentials.md.orig", "monkey.ts", "src/secrets.ts", "lib/credentials.py"]) {
+    assert.equal(mod.looksLikeSecretsFile(file), false, file);
+  }
+});
+
 test("redactSecrets keeps code that only names a secret", ({ mod }) => {
   const code = [
     "const key = process.env.API_KEY;",

@@ -411,6 +411,25 @@ test("conflicts: a workspace opened on a subfolder still quotes files named from
   assert.equal(mod.staysInside(""), false);
 });
 
+test("conflicts: a file made to hold secrets is named, never quoted", async (mod) => {
+  const SECRET = "hunter" + "2butLonger";
+  const repo = makeRepo({ ".env": "MODE=base\n" });
+  git(repo, ["checkout", "-q", "-b", "feature"]);
+  fs.writeFileSync(path.join(repo, ".env"), `MODE=feature\nDB_PASS_PHRASE=${SECRET}\n`);
+  git(repo, ["commit", "-q", "-am", "Feature change"]);
+  git(repo, ["checkout", "-q", "main"]);
+  fs.writeFileSync(path.join(repo, ".env"), "MODE=main\n");
+  git(repo, ["commit", "-q", "-am", "Main change"]);
+  gitFails(repo, ["merge", "feature"]);
+  const reads = [];
+  const d = deps(mod, { readFile: (file) => { reads.push(file); return fs.promises.readFile(file); } });
+  const result = await mod.prepareGitFix({ cwd: repo, kind: "conflicts" }, d);
+  assert.equal(result.ok, true);
+  assert.match(result.request.prompt, /"\.env"\n   A file that holds secrets/);
+  assert.ok(!result.request.prompt.includes(SECRET));
+  assert.ok(!reads.some((file) => file.endsWith(`${path.sep}.env`)), "the file is not even read");
+});
+
 test("conflicts: nothing to resolve is a plain message", async (mod) => {
   const result = await mod.prepareGitFix({ cwd: makeRepo(), kind: "conflicts" }, deps(mod));
   assert.deepEqual(result, { ok: false, error: "There are no conflicted files right now." });

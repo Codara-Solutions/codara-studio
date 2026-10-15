@@ -226,7 +226,9 @@ fix starts on the kind of target you used last.
 
 GitHub is read with your own `gh`. Logs, hook output, file excerpts and
 comments are capped, secrets in them are replaced by `[redacted]`, and the
-prompt tells the agent to treat them as data, not instructions. The prompts
+prompt tells the agent to treat them as data, not instructions. A conflicted
+file made to hold secrets (`.env`, key files, `.npmrc` and the like) is named
+but never quoted. The prompts
 ask the agent not to push, commit or bypass hooks. Local workspaces only for
 now.
 
