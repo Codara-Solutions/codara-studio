@@ -14,7 +14,8 @@ import { FEATURE_CATALOG } from "../../src/shared/feature-tips";
 //   on screen, steps aside for a dialog, and its tour points at the real
 //   control, which then works as usual and ends the tour
 // - a tip never covers the composer; Escape closes it; Settings brings shown
-//   tips back and turns tips on again after "Don't show tips"
+//   tips back and turns tips on again after "Don't show tips"; using the
+//   feature a tip is about closes the tip
 
 interface Fixture {
   root: string;
@@ -218,6 +219,19 @@ test("a tip stays clear of the composer, and Settings controls whether tips show
     await toggle.click();
     await expect(toggle).toHaveAttribute("aria-checked", "true");
     await expect.poll(async () => (await readState(fixture))?.enabled).toBe(true);
+
+    // Using the feature a tip is about takes the tip away.
+    await again.getByRole("button", { name: "Show them again" }).click();
+    await expect.poll(async () => Object.keys((await readState(fixture))?.tips ?? { x: 1 }).length).toBe(0);
+    await page.keyboard.press("Escape");
+    await expect(again).toHaveCount(0);
+    await page.reload();
+    await page.waitForLoadState("domcontentloaded");
+    await expect(page.locator(".spark-tabbar")).toBeVisible({ timeout: 30_000 });
+    await expect(tip).toBeVisible({ timeout: 8_000 });
+    await page.locator('button[aria-label="Usage analytics"]').click();
+    await expect.poll(async () => (await readState(fixture))?.used?.["usage-panel"]).toBeGreaterThan(0);
+    await expect(tip).toHaveCount(0);
   } finally {
     await app?.close().catch(() => undefined);
     await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);

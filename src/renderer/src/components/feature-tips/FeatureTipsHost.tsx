@@ -204,10 +204,13 @@ export default function FeatureTipsHost({ onboardingOpen, hasWorkspaces }: Props
     };
   }, [scheduling, boot, render, usage]);
 
-  // Tips turned off elsewhere (Settings) take the one on screen with them.
+  // Tips turned off elsewhere (Settings) take the one on screen with them,
+  // and so does using the feature the tip is about: it has done its job.
+  const tipId = tip?.entry.id;
   useEffect(() => {
-    if (state && !state.enabled) setTip(null);
-  }, [state]);
+    if (!state) return;
+    if (!state.enabled || (tipId !== undefined && state.used[tipId] !== undefined)) setTip(null);
+  }, [state, tipId]);
 
   const settle = useCallback((id: string, outcome: FeatureTipOutcome) => {
     setTip(null);
