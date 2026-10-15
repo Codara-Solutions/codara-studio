@@ -42,6 +42,8 @@ export default function TerminalQuickMenu({ api, request, onClose }: TerminalQui
     // terminal underneath. Capture phase, ahead of xterm, which consumes it.
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      // A dialog opened over the menu (the jump palette) closes first.
+      if (event.target instanceof Element && event.target.closest('[aria-modal="true"]')) return;
       event.preventDefault();
       event.stopPropagation();
       onClose();

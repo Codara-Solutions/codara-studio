@@ -95,6 +95,8 @@ export default function ReviewMenu({
     };
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      // A dialog opened over the menu (the jump palette) closes first.
+      if (event.target instanceof Element && event.target.closest('[aria-modal="true"]')) return;
       event.preventDefault();
       event.stopPropagation();
       onClose();
