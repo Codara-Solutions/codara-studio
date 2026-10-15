@@ -1072,6 +1072,41 @@ async function main() {
       JSON.stringify(mixedCaseAccepted.error ?? mixedCaseAccepted.result).slice(0, 200),
     );
 
+    // Precheck and missed-run policy: a malformed value is an error, never
+    // silently saved as "none"; well-formed ones pass to the workspace gate.
+    const okWorker = { model: "claude-opus-5", effort: "medium" };
+    const precheckRejected = await rpc(handshake, "automation.create", {
+      ...createBase,
+      worker: okWorker,
+      precheck: { command: 42 },
+    });
+    check(
+      "automation.create rejects a precheck without a command string",
+      Boolean(precheckRejected.error) && /precheck must be/i.test(precheckRejected.error?.message ?? ""),
+      JSON.stringify(precheckRejected.error ?? precheckRejected.result).slice(0, 200),
+    );
+    const missedRejected = await rpc(handshake, "automation.create", {
+      ...createBase,
+      worker: okWorker,
+      missed_runs: { policy: "always" },
+    });
+    check(
+      "automation.create rejects an unknown missed_runs policy",
+      Boolean(missedRejected.error) && /missed_runs\.policy/i.test(missedRejected.error?.message ?? ""),
+      JSON.stringify(missedRejected.error ?? missedRejected.result).slice(0, 200),
+    );
+    const gateAccepted = await rpc(handshake, "automation.create", {
+      ...createBase,
+      worker: okWorker,
+      precheck: { command: "test -f TODO.md", timeoutSeconds: 30 },
+      missed_runs: { policy: "runOnce", graceMinutes: 60 },
+    });
+    check(
+      "automation.create accepts a precheck and missed_runs (validation passes to the workspace gate)",
+      Boolean(gateAccepted.error) && /workspace directory/i.test(gateAccepted.error?.message ?? ""),
+      JSON.stringify(gateAccepted.error ?? gateAccepted.result).slice(0, 200),
+    );
+
     // The agent-loop handoff lowercases nextModel for the same reason; the
     // accepted echo proves what the loop driver will consume.
     const handoff = await rpc(handshake, "orchestrator.request_next_iteration", {

@@ -104,6 +104,12 @@ import { effectiveChatMode } from "@shared/chat-policy";
 import { normalizeTabGroupName } from "@shared/tab-group-name";
 import { DEFAULT_PREFERENCES } from "@shared/types";
 import { whiteboardIssues } from "@shared/whiteboard-quality";
+import {
+  missedRunsSummary,
+  normalizeAutomationPrecheck,
+  normalizeMissedRuns,
+  precheckSummary,
+} from "@shared/automation-catchup";
 import type { WhiteboardIssue } from "@shared/whiteboard-quality";
 import { rememberWhiteboardInspection, requireWhiteboardInspection, whiteboardSourceIssues } from "./whiteboard-review";
 import {
@@ -170,6 +176,8 @@ import type {
   NotifyKind,
   PrefKey,
   AutomationLoop,
+  AutomationMissedRuns,
+  AutomationPrecheck,
   AutomationTrigger,
   CreateScheduledJobInput,
   LoomGraph,
@@ -5706,7 +5714,13 @@ function summarizeJob(job: ScheduledJob): Record<string, unknown> {
       status: h.status,
       stopReason: h.stopReason ?? null,
       costUsd: h.costUsd ?? null,
+      ...(h.catchUp ? { caughtUpMissedRunAt: h.catchUp.scheduledFor } : {}),
     })),
+    ...(precheckSummary(job.precheck) ? { precheck: precheckSummary(job.precheck) } : {}),
+    ...(missedRunsSummary(job) ? { missedRuns: missedRunsSummary(job) } : {}),
+    ...(job.skips?.length
+      ? { skipped: job.skips.slice(-3).map((s) => ({ at: s.at, reason: s.reason, detail: s.detail })) }
+      : {}),
   };
 }
 
@@ -6074,6 +6088,33 @@ function paramGraph(params: Record<string, unknown>): LoomGraph | undefined {
   const g = params.graph;
   return g && typeof g === "object" ? (g as LoomGraph) : undefined;
 }
+/** precheck / missed_runs: undefined = not supplied, null = remove. An empty
+ *  precheck command also removes it. Any other value that does not normalize
+ *  is an error, so a typo is never saved as "no precheck". */
+function paramGate(params: Record<string, unknown>):
+  | { precheck?: AutomationPrecheck | null; missedRuns?: AutomationMissedRuns | null }
+  | { error: string } {
+  const out: { precheck?: AutomationPrecheck | null; missedRuns?: AutomationMissedRuns | null } = {};
+  const rawPrecheck = params.precheck;
+  if (rawPrecheck === null) out.precheck = null;
+  else if (rawPrecheck !== undefined) {
+    const command = typeof rawPrecheck === "object" ? (rawPrecheck as { command?: unknown }).command : undefined;
+    if (typeof rawPrecheck === "object" && (command === undefined || (typeof command === "string" && !command.trim()))) {
+      out.precheck = null;
+    } else {
+      const p = normalizeAutomationPrecheck(rawPrecheck);
+      if (!p) return { error: "precheck must be an object with a 'command' string" };
+      out.precheck = p;
+    }
+  }
+  if (params.missed_runs === null) out.missedRuns = null;
+  else if (params.missed_runs !== undefined) {
+    const m = normalizeMissedRuns(params.missed_runs);
+    if (!m) return { error: "missed_runs.policy must be 'skip' or 'runOnce' (or null for the default)" };
+    out.missedRuns = m;
+  }
+  return out;
+}
 
 async function handleAutomationList(
   params: Record<string, unknown>,
@@ -6113,6 +6154,7 @@ async function handleAutomationGet(
     return successResponse(id, {
       ...job,
       history: (Array.isArray(job.history) ? job.history : []).slice(-5),
+      ...(Array.isArray(job.skips) ? { skips: job.skips.slice(-5) } : {}),
     });
   } catch (err) {
     return errorResponse(id, ERR_INTERNAL, (err as Error).message);
@@ -6159,6 +6201,8 @@ async function handleAutomationCreate(
   if (!promptTemplate && !graph) {
     return errorResponse(id, ERR_INVALID_PARAMS, "prompt_template is required when no graph is given");
   }
+  const gate = paramGate(params);
+  if ("error" in gate) return errorResponse(id, ERR_INVALID_PARAMS, gate.error);
   // Resolve workspace binding server-side from the calling run. The architect
   // never supplies paths - the automation runs in the same workspace as the
   // chat that created it. Unlike the one-shot spawn_workers analog we do NOT
@@ -6193,6 +6237,8 @@ async function handleAutomationCreate(
     prompt: { template: promptTemplate },
     worker,
     graph,
+    ...(gate.precheck ? { precheck: gate.precheck } : {}),
+    ...(gate.missedRuns ? { missedRuns: gate.missedRuns } : {}),
     input: {
       workspaceId: run.workspaceId,
       workspaceName,
@@ -6254,6 +6300,16 @@ function describeUpdate(existing: ScheduledJob, update: UpdateScheduledJobInput)
       x ? [x.model, x.effort].filter(Boolean).join("/") : "(unset)";
     lines.push(`worker: ${fmt(ew)} → ${fmt(w)}`);
   }
+  if (update.precheck !== undefined) {
+    // The command runs on the user's machine before each pass: show it whole.
+    lines.push(
+      `precheck: ${precheckSummary(existing.precheck) ?? "(none)"} → ${precheckSummary(update.precheck ?? undefined) ?? "(none)"}`,
+    );
+  }
+  if (update.missedRuns !== undefined) {
+    const next = { trigger: update.trigger ?? existing.trigger, missedRuns: update.missedRuns ?? undefined };
+    lines.push(`if a run is missed: ${missedRunsSummary(existing) ?? "skip"} → ${missedRunsSummary(next) ?? "skip"}`);
+  }
   if (update.graph !== undefined) {
     const n = update.graph.nodes?.length ?? 0;
     const e = update.graph.edges?.length ?? 0;
@@ -6288,8 +6344,12 @@ async function handleAutomationUpdate(
   if (tlwErr) return errorResponse(id, ERR_INVALID_PARAMS, tlwErr);
   const name = stringParam(params, "name");
   const promptTemplate = stringParam(params, "prompt_template");
+  const gate = paramGate(params);
+  if ("error" in gate) return errorResponse(id, ERR_INVALID_PARAMS, gate.error);
   const update: UpdateScheduledJobInput = {
     id: automationId,
+    ...(gate.precheck !== undefined ? { precheck: gate.precheck } : {}),
+    ...(gate.missedRuns !== undefined ? { missedRuns: gate.missedRuns } : {}),
     ...(name ? { name } : {}),
     ...(paramTrigger(params) ? { trigger: paramTrigger(params) } : {}),
     ...(paramLoop(params) ? { loop: paramLoop(params) } : {}),
