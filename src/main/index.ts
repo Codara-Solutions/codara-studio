@@ -64,6 +64,7 @@ import {
   noteCodexNotifyInstalled,
   noteHostResume,
 } from "./terminal-agent-notify";
+import { flushTerminalScrollback, initTerminalScrollback } from "./terminal-scrollback";
 import {
   isAllowedMainWindowUrl,
   isSameResolvedPath,
@@ -1229,6 +1230,11 @@ app.whenReady().then(async () => {
   }
   codexSessionTracker.start();
   piSessionTracker.start();
+  // Saved terminal output, replayed into panes the renderer restores. Loads
+  // its index in the background; the first restore request waits for it.
+  void initTerminalScrollback().catch((err) => {
+    console.warn("[main] terminal scrollback store failed to init:", err);
+  });
 
   // CLI hook ingestion watcher (big-bet "CLI hook ingestion — free
   // observability"). The installer (called earlier in app.whenReady) drops
@@ -1508,6 +1514,7 @@ async function flushAllStores(): Promise<void> {
     // land while it is still in flight. Only when run-store was already loaded:
     // quitting must not pull the heavy module in just to flush nothing.
     runStoreMod?.flushRunCompletionTails().catch(() => undefined) ?? Promise.resolve(),
+    flushTerminalScrollback().catch(() => undefined),
   ]);
 }
 
@@ -1664,6 +1671,9 @@ app.on("before-quit", (event) => {
       snapshotAgentSessionsForQuit(live);
       if (live) signalRendererBeforeQuit([...live.keys()]);
       await flushAgentSessionRegistry();
+      // Each pane's output, while every shell still holds it: the PTY sweep
+      // below only adds exit noise.
+      await flushTerminalScrollback().catch(() => undefined);
       // Drain orchestration-owned workers and all provider sessions before the
       // broad PTY sweep. This drain is single-flight and bounded (≤2s), leaving
       // room for graceful PTY teardown inside the 5s hard-exit fallback.

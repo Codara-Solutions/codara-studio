@@ -39,6 +39,7 @@ import { captureApi } from "./areas/capture";
 import { chromeLinkApi } from "./areas/chrome-link";
 import { pointApi } from "./areas/point";
 import { serversApi } from "./areas/servers";
+import { terminalScrollbackApi } from "./areas/terminal-scrollback";
 import type {
   CoraMemoryItem,
   MemoryItemKind,
@@ -1764,6 +1765,7 @@ const api = {
   chromeLink: chromeLinkApi,
   capture: captureApi,
   point: pointApi,
+  terminalScrollback: terminalScrollbackApi,
 };
 
 function isBrowserUrl(url: string): boolean {

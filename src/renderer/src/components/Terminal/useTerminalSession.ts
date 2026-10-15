@@ -37,6 +37,7 @@ import { detectMonoFontFamily } from "../../lib/fonts";
 import { subscribeAppTokens } from "../../lib/theme-tokens";
 import { createFileLinkProvider } from "./file-link-provider";
 import { createReplayTracker } from "./replayTracker";
+import { replayFloorRow, replayPersistedScrollback } from "./persistedScrollback";
 import {
   registerCwdHandler,
   registerPromptTracker,
@@ -3197,6 +3198,22 @@ export function useTerminalSession({
       }
       if (disposed) return;
 
+      // A pane reopened after Codara restarted shows the output it had
+      // before, ahead of anything its new shell or resumed agent draws. Main
+      // answers only for a pane with no live PTY that has not run yet this
+      // session, so a remount (which replays its own snapshot above) or an
+      // in-place respawn never gets it twice. Mirrors and worker hosts do
+      // not own the pane's history.
+      if (
+        !liveSnapshot &&
+        !readOnlyRef.current &&
+        !rawTailReattachRef.current &&
+        !inputBlockedRef.current
+      ) {
+        await replayPersistedScrollback(term, sessionId, scrollbackLineLimitRef.current);
+        if (disposed) return;
+      }
+
       // Spawn the PTY. We pass the pre-fit cols/rows so the shell starts at
       // the real visible size — without this, ConPTY paints at 80×24 then
       // reflows once the renderer reports the actual size, which the user
@@ -4170,7 +4187,8 @@ function containsSchemeSeparator(bytes: Uint8Array): boolean {
 function readTerminalTail(term: Terminal, maxRows: number): string {
   const buf = term.buffer.active;
   const total = buf.length;
-  const start = Math.max(0, total - maxRows);
+  // Output replayed from before a restart is history, never a live agent.
+  const start = Math.max(0, total - maxRows, replayFloorRow(term));
   const parts: string[] = [];
   for (let i = start; i < total; i++) {
     const line = buf.getLine(i);
