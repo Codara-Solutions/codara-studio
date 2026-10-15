@@ -684,6 +684,38 @@ async function runSuite(m, scratch) {
       assert.equal(git(wt, ["status", "--porcelain"]), "");
     });
 
+    await check("a copy the worktree's branch does not ignore is taken out again", async () => {
+      // An older branch whose .gitignore does not list .env yet: a copied
+      // .env would be a new file there, one `git add -A` away from a commit.
+      git(lone, ["branch", "lone-old", "main"]);
+      const old = path.join(scratch, "lone-old-src");
+      git(lone, ["worktree", "add", "-q", old, "lone-old"]);
+      write(path.join(old, ".gitignore"), "cache/\n");
+      commitAll(old, "an older ignore file");
+      git(lone, ["worktree", "remove", "--force", old]);
+      const wt = path.join(scratch, "lone-worktrees", "lone-old-wt");
+      git(lone, ["worktree", "add", "-q", "-b", "lone-old-wt", wt, "lone-old"]);
+      const logLines = [];
+      const result = await materialize.materializeSetup({
+        sourceRoot: lone,
+        worktreeRoot: fs.realpathSync(wt),
+        copies: [
+          { path: ".env", kind: "file" },
+          { path: "cache", kind: "dir" },
+        ],
+        links: [],
+        log: (line) => logLines.push(line),
+      });
+      assert.equal(fs.existsSync(path.join(wt, ".env")), false);
+      assert.equal(fs.readFileSync(path.join(wt, "cache", "blob.bin"), "utf8"), "cached\n", "an ignored copy stays");
+      assert.deepEqual(result.copiedFiles.map((copy) => copy.path), ["cache/blob.bin"]);
+      assert.deepEqual(result.copied, ["cache"]);
+      assert.ok(result.skipped.some((s) => s.path === ".env" && /does not ignore/.test(s.reason)), JSON.stringify(result.skipped));
+      assert.ok(logLines.some((line) => /Took out 1 copy/.test(line)), logLines.join("\n"));
+      assert.equal(git(wt, ["status", "--porcelain", "--untracked-files=all"]), "");
+      assert.equal(fs.readFileSync(path.join(lone, ".env"), "utf8"), "LONE=1\n");
+    });
+
     await check("a link git would still see is taken out again", async () => {
       const wt = loneWorktree("lone-unignored");
       // An info/exclude Codara cannot write: .git/info is a file.

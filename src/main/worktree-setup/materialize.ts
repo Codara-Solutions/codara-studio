@@ -292,6 +292,7 @@ export async function materializeSetup(input: MaterializeInput): Promise<Materia
     }
     if (result.copiedFiles.length > before || item.isDir) result.copied.push(path);
   }
+  await takeOutUnignoredCopies(worktreeRoot, result, input.log);
   if (result.copiedFiles.length) {
     input.log(
       `Copied ${result.copiedFiles.length.toLocaleString("en-US")} ${result.copiedFiles.length === 1 ? "file" : "files"} (${formatBytes(result.copiedBytes)}) from the main checkout`,
@@ -314,6 +315,75 @@ export async function materializeSetup(input: MaterializeInput): Promise<Materia
     input.log(`Skipped ${(result.skipped.length - SKIP_LOG_LINES).toLocaleString("en-US")} more`);
   }
   return result;
+}
+
+/**
+ * Copies are chosen because git ignores them in the main checkout, but the
+ * worktree may be on a branch whose .gitignore does not (an older branch, a
+ * remote one). There a copied .env would show as a new file that `git add -A`
+ * commits and a push publishes. A copy git does not ignore in the worktree is
+ * taken out again, as long as it is still the file Codara just made.
+ */
+async function takeOutUnignoredCopies(
+  worktreeRoot: string,
+  result: MaterializeResult,
+  log: (line: string) => void,
+): Promise<void> {
+  const paths = [...result.copiedFiles.map((copy) => copy.path), ...result.copiedLinks.map((link) => link.path)];
+  if (!paths.length) return;
+  let ignored: Set<string>;
+  try {
+    ignored = await ignoredSubset(worktreeRoot, paths);
+  } catch (err) {
+    result.warnings.push(`Could not check that the copied files are ignored on this branch: ${(err as Error).message}`);
+    return;
+  }
+  const removed = new Set<string>();
+  const keptFiles: SetupManifestCopy[] = [];
+  for (const copy of result.copiedFiles) {
+    if (ignored.has(copy.path)) {
+      keptFiles.push(copy);
+      continue;
+    }
+    const absolute = join(worktreeRoot, ...copy.path.split("/"));
+    const stat = await fsp.lstat(absolute).catch(() => null);
+    const untouched = !!stat?.isFile() && stat.size === copy.size && Math.abs(stat.mtimeMs - copy.mtimeMs) < 1;
+    const gone = untouched && (await fsp.unlink(absolute).then(() => true, () => false));
+    if (!gone) {
+      keptFiles.push(copy);
+      continue;
+    }
+    removed.add(copy.path);
+    result.copiedBytes -= copy.size;
+  }
+  const keptLinks: SetupManifestLink[] = [];
+  for (const link of result.copiedLinks) {
+    if (ignored.has(link.path)) {
+      keptLinks.push(link);
+      continue;
+    }
+    const absolute = join(worktreeRoot, ...link.path.split("/"));
+    const pointsAt = await fsp.readlink(absolute).catch(() => null);
+    if (pointsAt !== link.target || !(await removeLinkEntry(absolute))) {
+      keptLinks.push(link);
+      continue;
+    }
+    removed.add(link.path);
+  }
+  if (!removed.size) return;
+  result.copiedFiles = keptFiles;
+  result.copiedLinks = keptLinks;
+  const remaining = [...keptFiles.map((copy) => copy.path), ...keptLinks.map((link) => link.path)];
+  const removedList = [...removed];
+  result.copied = result.copied.filter(
+    (entry) => remaining.some((path) => under(path, entry)) || !removedList.some((path) => under(path, entry)),
+  );
+  for (const path of removed) {
+    result.skipped.push({ path, reason: "git does not ignore it on this branch, so it would show as a new file" });
+  }
+  log(
+    `Took out ${removed.size.toLocaleString("en-US")} ${removed.size === 1 ? "copy" : "copies"} that git does not ignore on this branch`,
+  );
 }
 
 async function copyOneFile(source: string, destination: string, relative: string, result: MaterializeResult): Promise<void> {
