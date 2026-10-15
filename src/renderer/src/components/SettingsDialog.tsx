@@ -87,6 +87,7 @@ import {
 import CustomSelect from "./settings/CustomSelect";
 import SettingsNav from "./settings/SettingsNav";
 import ThemePicker from "./settings/ThemePicker";
+import SavedTerminalOutputRow from "./settings/SavedTerminalOutputRow";
 import { LaunchArgsSection } from "./settings/launch-args/LaunchArgsSection";
 import {
   Disclosure,
@@ -841,6 +842,7 @@ function TerminalSettings({
           value={scrollbackLineLimit}
           onChange={onScrollbackLineLimitChange}
         />
+        <SavedTerminalOutputRow />
       </SettingsSection>
 
       <SettingsSection title="Clipboard">

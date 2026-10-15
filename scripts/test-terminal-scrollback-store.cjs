@@ -372,6 +372,32 @@ async function main() {
     store.dispose();
   }
 
+  // ── clearing saved output on demand ───────────────────────────────────
+  {
+    const { deps, state } = fakeDeps();
+    const store = new storeMod.TerminalScrollbackStore(deps);
+    store.track(["clr-a", "clr-b"]);
+    state.feed("clr-a", "api key sk-secret\r\n");
+    state.feed("clr-b", "another line\r\n");
+    await store.flush();
+    const before = await store.usage();
+    check("usage counts the saved panes and bytes", before.files === 2 && before.bytes > 0, JSON.stringify(before));
+    const removed = await store.clear();
+    check("clear reports what it removed", removed.files === 2 && removed.bytes === before.bytes);
+    check("clear deletes every file", fs.readdirSync(dir).filter((n) => n.endsWith(".bin")).length === 0);
+    check("usage is empty afterwards", (await store.usage()).files === 0);
+    await store.flush();
+    check("unsaved output is dropped too, not written back", fs.readdirSync(dir).filter((n) => n.endsWith(".bin")).length === 0);
+    check("recording continues after a clear", state.taps.has("clr-a"));
+    state.feed("clr-a", "new output\r\n");
+    await store.flush();
+    const after = await store.read("clr-a");
+    check("only output after the clear is saved", !!after && after.raw.toString("utf8").includes("new output") && !after.raw.toString("utf8").includes("sk-secret"));
+    await store.forget("clr-a");
+    await store.forget("clr-b");
+    store.dispose();
+  }
+
   // ── total budget, age and strays ──────────────────────────────────────
   {
     const { deps, state } = fakeDeps();

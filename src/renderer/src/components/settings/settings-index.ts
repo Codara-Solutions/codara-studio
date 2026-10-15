@@ -200,6 +200,7 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "editor", title: "Custom wait", label: "Custom suggestion wait", desc: "How long a pause in typing lasts before a suggestion.", section: "Inline AI", keywords: "autocomplete delay slider" },
   { tab: "terminal", title: "Default shell", desc: "The shell new terminals open with.", section: "Shell", keywords: "zsh bash fish powershell pwsh cmd terminal" },
   { tab: "terminal", title: "Scrollback lines", desc: "Lines of output each terminal keeps.", section: "Output history", keywords: "buffer memory history scroll" },
+  { tab: "terminal", title: "Clear saved terminal output", desc: "Delete the terminal output Codara saved on this computer.", section: "Output history", keywords: "delete erase scrollback history secrets privacy restore saved" },
   { tab: "terminal", title: "Let programs copy to the clipboard", desc: "tmux, Neovim and SSH sessions can copy to this computer's clipboard.", section: "Clipboard", keywords: "osc 52 osc52 copy paste yank tmux neovim nvim vim ssh remote clipboard" },
   { tab: "terminal", title: "Resource overview", desc: "Live terminals and the output they buffer.", keywords: "memory streams parked live resources" },
   { tab: "terminal", title: "Live terminals", desc: "How many terminals are running.", section: "Resource overview", keywords: "count running pty" },

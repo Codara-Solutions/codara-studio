@@ -85,6 +85,8 @@ export function setTerminalScrollbackEnabled(next: boolean): Promise<void> {
 }
 
 export function registerTerminalScrollbackIpc(handle: IpcHandle): void {
+  handle("terminalScrollback:usage", () => getStore().usage());
+  handle("terminalScrollback:clear", () => getStore().clear());
   handle(
     "terminalScrollback:restore",
     async (

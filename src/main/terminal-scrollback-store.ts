@@ -328,6 +328,50 @@ export class TerminalScrollbackStore {
     await this.wipe();
   }
 
+  /** What is on disk now: how many panes' output, and how many bytes. */
+  async usage(): Promise<{ files: number; bytes: number }> {
+    await this.init();
+    return { files: this.index.size, bytes: this.totalBytes() };
+  }
+
+  /**
+   * Delete every saved file and forget what the open panes had collected, but
+   * keep recording: only output printed from now on is saved again.
+   */
+  async clear(): Promise<{ files: number; bytes: number }> {
+    await this.init();
+    const removed = { files: this.index.size, bytes: this.totalBytes() };
+    const writes: Promise<void>[] = [];
+    for (const state of this.panes.values()) {
+      // A write or fold already underway checks the generation and drops its result.
+      state.generation += 1;
+      if (state.timer) clearTimeout(state.timer);
+      state.timer = null;
+      state.history = "";
+      state.raw = [];
+      state.rawBytes = 0;
+      state.folding = null;
+      state.foldQueued = false;
+      state.dirty = false;
+      writes.push(state.writing.catch(() => undefined));
+    }
+    this.replayed.clear();
+    await Promise.all(writes);
+    this.index.clear();
+    let names: string[] = [];
+    try {
+      names = await fs.readdir(this.deps.dir);
+    } catch {
+      return removed;
+    }
+    await Promise.all(
+      names
+        .filter((name) => name.endsWith(FILE_EXT) || name.endsWith(".tmp"))
+        .map((name) => fs.rm(join(this.deps.dir, name), { force: true }).catch(() => undefined)),
+    );
+    return removed;
+  }
+
   /** Test hook: wait for folds and writes in flight. */
   async idle(timeoutMs = 10_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
