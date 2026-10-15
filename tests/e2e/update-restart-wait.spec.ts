@@ -142,6 +142,8 @@ async function prepare() {
       ...process.env,
       PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`,
       SHELL: shell,
+      // A fake home: nothing the app or the shell does reaches the real one.
+      HOME: root,
       SPARK_USER_DATA_DIR: userData,
       CODARA_HOME_DIR: userData,
       SPARK_HOME_DIR: userData,

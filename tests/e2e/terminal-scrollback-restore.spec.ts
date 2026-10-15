@@ -68,6 +68,55 @@ test("a terminal pane keeps its output across a restart, and closing it deletes 
   }
 });
 
+// The default: agent sessions do not resume, so the layout keeps no buffer
+// of its own and the replay is the only earlier output the pane gets. What
+// the pane showed is read back from main's record, which starts with the
+// replay the renderer asked for.
+test("with agent resume off a reopened pane still gets its output", async () => {
+  test.skip(process.platform === "win32", "Fixture uses a Unix shell wrapper.");
+  test.setTimeout(120_000);
+  const fixture = await prepare({ restoreAgentSessions: false });
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({ args: ["."], env: fixture.env });
+    let page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await openTerminals(page);
+    const input = page.locator(".xterm-helper-textarea:visible").first();
+    await input.focus();
+    await input.pressSequentially("printf 'FIRST-%s\\n' DEFAULT-RUN", { delay: 2 });
+    await input.press("Enter");
+    const paneId = await page.locator("[data-terminal-pane-id]:visible").first().getAttribute("data-terminal-pane-id");
+    expect(paneId).toBeTruthy();
+    const file = join(fixture.userData, "terminal-scrollback", `${createHash("sha256").update(paneId!).digest("hex").slice(0, 40)}.bin`);
+    await expect.poll(() => readFile(file, "latin1").catch(() => ""), { timeout: 20_000 }).toContain("FIRST-DEFAULT-RUN");
+
+    await app.close();
+    app = null;
+
+    app = await electron.launch({ args: ["."], env: fixture.env });
+    page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await openTerminals(page);
+    const pane = page.locator(`[data-terminal-pane-id="${paneId}"]`);
+    await expect(pane).toBeVisible({ timeout: 20_000 });
+    const restoredInput = pane.locator(".xterm-helper-textarea");
+    await restoredInput.focus();
+    await restoredInput.pressSequentially("printf 'SECOND-%s\\n' DEFAULT-RUN", { delay: 2 });
+    await restoredInput.press("Enter");
+    await expect.poll(() => readFile(file, "utf8").catch(() => ""), { timeout: 20_000 }).toContain("SECOND-DEFAULT-RUN");
+    const record = await readFile(file, "utf8");
+    const first = record.indexOf("FIRST-DEFAULT-RUN");
+    const marker = record.indexOf(RESTORED_LINE);
+    const second = record.indexOf("SECOND-DEFAULT-RUN");
+    expect(first, record).toBeGreaterThanOrEqual(0);
+    expect(marker, record).toBeGreaterThan(first);
+    expect(second, record).toBeGreaterThan(marker);
+  } finally {
+    await app?.close();
+  }
+});
+
 test("with the setting off nothing is kept", async () => {
   test.skip(process.platform === "win32", "Fixture uses a Unix shell wrapper.");
   test.setTimeout(60_000);
@@ -143,6 +192,8 @@ async function prepare(preferences: Record<string, unknown> = {}) {
       ...process.env,
       PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`,
       SHELL: shell,
+      // A fake home: nothing the app or the shell does reaches the real one.
+      HOME: root,
       SPARK_USER_DATA_DIR: userData,
       CODARA_HOME_DIR: userData,
       SPARK_HOME_DIR: userData,
