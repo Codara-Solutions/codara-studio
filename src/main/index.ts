@@ -54,6 +54,7 @@ import { startChromeLink } from "./browser/chrome";
 import { startServers } from "./servers";
 import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
 import { initAgentSessionRegistry, flushAgentSessionRegistry, snapshotAgentSessionsForQuit } from "./agent-session-registry";
+import { sleepingAgentPanes } from "./agent-hibernation";
 import { agentProcessForPane, createCodexSessionTracker } from "./codex-session-tracker";
 import { createPiSessionTracker } from "./pi-session-tracker";
 import { listProcessesWithCommands } from "./owned-process-tree";
@@ -1660,6 +1661,9 @@ app.on("before-quit", (event) => {
           const agent = agentProcessForPane(session.pid, processes);
           if (agent) live.set(session.id, agent.runtime);
         }
+        // Agents Codara put to sleep (agent hibernation) are running
+        // sessions too: the relaunch restore must bring them back.
+        for (const [paneId, runtime] of sleepingAgentPanes()) live.set(paneId, runtime);
       }
       snapshotAgentSessionsForQuit(live);
       if (live) signalRendererBeforeQuit([...live.keys()]);

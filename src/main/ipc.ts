@@ -482,6 +482,7 @@ import { registerCaptureIpc } from "./browser/capture/ipc";
 import { registerChromeLinkIpc } from "./browser/chrome";
 import { registerPointIpc } from "./browser/point";
 import { registerServersIpc } from "./servers";
+import { registerAgentHibernationIpc } from "./agent-hibernation";
 
 function nativeCliAccountRuntimeFromIpc(value: unknown): NativeCliAccountRuntime {
   if (value === "claude" || value === "codex" || value === "grok") return value;
@@ -4025,6 +4026,7 @@ export function registerIpc(): void {
   registerChromeLinkIpc(handle);
   registerCaptureIpc(handle);
   registerPointIpc(handle);
+  registerAgentHibernationIpc(handle);
 }
 
 const MEMORY_KINDS = new Set<MemoryItemKind>(["preference", "correction", "fact", "procedure", "lesson"]);

@@ -39,6 +39,7 @@ import { captureApi } from "./areas/capture";
 import { chromeLinkApi } from "./areas/chrome-link";
 import { pointApi } from "./areas/point";
 import { serversApi } from "./areas/servers";
+import { agentHibernationApi } from "./areas/agent-hibernation";
 import type {
   CoraMemoryItem,
   MemoryItemKind,
@@ -1761,6 +1762,7 @@ const api = {
     },
   },
   servers: serversApi,
+  agentHibernation: agentHibernationApi,
   chromeLink: chromeLinkApi,
   capture: captureApi,
   point: pointApi,

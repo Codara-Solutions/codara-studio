@@ -1336,6 +1336,10 @@ export interface AppPreferences {
   // that had already exited still open as fresh shells. Off = fresh shells on
   // every relaunch.
   restoreAgentSessions?: boolean;
+  // Agent hibernation (src/main/agent-hibernation.ts): minutes a finished,
+  // untouched agent terminal in a background workspace may sit before Codara
+  // stops it to save memory; opening the pane resumes it. 0 = off.
+  agentHibernationMinutes?: number;
   // Opt-in (default off): the phone Remote Access listener
   // (docs/remote-access.md). While on, paired devices can reach this
   // computer over LAN or the blind relay; pairing and revocation live in Settings,
@@ -1501,6 +1505,8 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   agentsMayRemoveUserWorktrees: false,
   agentWorktreeRegenerableIgnoredByRepo: {},
   restoreAgentSessions: false,
+  // DEFAULT_AGENT_HIBERNATION_MINUTES in shared/agent-hibernation.ts.
+  agentHibernationMinutes: 30,
   remoteAccessEnabled: false,
   gitAutoFetchEnabled: true,
   gitAutoFetchIntervalMinutes: DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES,
@@ -1573,6 +1579,9 @@ export interface PtyExitInfo {
   exitCode: number;
   signal?: number;
   sanctioned?: boolean;
+  // Codara stopped an idle agent pane to save memory (agent hibernation).
+  // The pane resumes the agent's session when the user opens it again.
+  hibernated?: boolean;
 }
 
 /** Main-owned, observation-only resource data for one live PTY session. */
