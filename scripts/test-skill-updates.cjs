@@ -51,6 +51,7 @@ process.env.GIT_CONFIG_VALUE_2 = "true";
 async function buildHarness() {
   const entry = path.join(TMP, "entry.ts");
   const main = (name) => path.join(ROOT, "src", "main", name);
+  const renderer = (name) => path.join(ROOT, "src", "renderer", "src", "components", "capabilities", name);
   fs.writeFileSync(
     entry,
     [
@@ -59,6 +60,7 @@ async function buildHarness() {
       `export * as importer from ${JSON.stringify(main("skill-import.ts"))};`,
       `export * as plugins from ${JSON.stringify(main("claude-plugin-skills.ts"))};`,
       `export * as guard from ${JSON.stringify(main("outside-write-guard.ts"))};`,
+      `export * as view from ${JSON.stringify(renderer("skill-origins.ts"))};`,
     ].join("\n"),
   );
   const out = path.join(TMP, "harness.cjs");
@@ -128,7 +130,7 @@ async function check(name, fn) {
 
 async function main() {
   const H = await buildHarness();
-  const { store, updates, importer, plugins, guard } = H;
+  const { store, updates, importer, plugins, guard, view } = H;
   const real = importer.makeGitRunner();
   const calls = [];
   const runGit = (args, options) => {
@@ -513,6 +515,43 @@ async function main() {
     assert.equal(v1[0].install.scope, "user");
     assert.deepEqual(plugins.resolveEnabledPluginInstalls({ installedPlugins: "{oops", settings: [] }, null), []);
     assert.deepEqual(await plugins.listClaudePluginSkills({ claudeDir: path.join(TMP, "nothing"), cwd: null }), { skills: [] });
+  });
+
+  // ── The renderer's pure helpers ───────────────────────────────────────────
+  await check("the row says where a skill came from in plain words", async () => {
+    const git = view.describeOrigin({
+      kind: "git",
+      url: "https://github.com/owner/skills",
+      ref: "main",
+      commit: "0123456789abcdef0123456789abcdef01234567",
+      subpath: "skills/release-notes",
+      installedAt: "2026-10-01T10:00:00.000Z",
+    });
+    assert.equal(git.text, "From github.com/owner/skills · skills/release-notes · main at 0123456");
+    assert.match(git.title, /Commit: 0123456789abcdef/);
+    const folder = view.describeOrigin({ kind: "folder", sourcePath: "/home/sam/skills/x", installedAt: "2026-10-01T10:00:00.000Z" });
+    assert.equal(folder.text, "Imported from the folder ~/skills/x");
+    for (const text of [git.text, git.title, folder.text, folder.title]) {
+      assert.doesNotMatch(text, /[\u2013\u2014]/, "no en or em dashes in UI copy");
+    }
+    const status = (state, extra = {}) => ({ skillDir: "/x", name: "x", origin: { kind: "git", url: "https://h/r", installedAt: "" }, state, ...extra });
+    assert.equal(view.groupOriginState([status("current"), status("update-available")]), "update-available");
+    assert.equal(view.groupOriginState([status("current"), status("error")]), "error");
+    assert.equal(view.groupOriginState([status("current")]), "current");
+    assert.equal(view.groupOriginState([]), "unchecked");
+    assert.equal(view.timeAgo(new Date(Date.now() - 5 * 60_000).toISOString()), "5 min ago");
+    assert.equal(view.checkSummary([status("update-available"), status("current")]).text, "1 skill has an update.");
+    assert.equal(view.checkSummary([status("current")]).text, "Every skill installed from git is up to date.");
+    const index = view.indexOrigins([{ ...status("current"), skillDir: "C:\\Users\\sam\\.codarastudio\\skills\\x\\" }]);
+    const group = {
+      kind: "skill",
+      name: "x",
+      sessionKey: "skill:x",
+      installs: { codara: [{ skillDir: "C:/Users/sam/.codarastudio/skills/x" }], claude: [], codex: [], grok: [], shared: [] },
+      any: {},
+      differs: false,
+    };
+    assert.equal(view.originsForGroup(group, index).length, 1);
   });
 
   console.log(`PASS skill updates (${passed} checks)`);

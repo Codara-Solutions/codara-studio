@@ -239,7 +239,11 @@ cursor, screen rendering and `terminal.run` completion in
 `test-builtin-mcp-ownership`, `test-grok-mcp-copy`, `test-agent-sync-toml`
 (Capability Center config reads and edits, sync scope, skills, the MCP
 probe), `test-mcp-snippet-parse` (the Add server paste box),
-`test-capability-center-ui`, `test-remote-capabilities`,
+`test-capability-center-ui`, `test-skill-import` (Add skill: writing,
+folder, zip and git imports), `test-skill-updates` (where skills came from,
+update checks against a local repository, update and rollback, CLI copies
+only with the capability, Claude Code plugin skills),
+`test-remote-capabilities`,
 `test-agent-socket-capabilities`, `test-agent-socket-pane-open` (a pane's own
 credential and `pane.open`: overlays over the calling pane, tabs beside it),
 `test-shell-integration-codara-pane` (the `codara-pane` helper and the

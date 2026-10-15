@@ -231,7 +231,14 @@ in the Capability Center write only to `<codara home>/skills` and
 `<codara home>/mcp-servers.json` (`skill-import.ts`, `agent-sync.ts`).
 Cora and Pi workers load them per launch through `listPiSkillPaths` and
 `listPiMcpServers`; no CLI reads them, and importing from a CLI's MCP
-config copies the entry without writing that config.
+config copies the entry without writing that config. Where an imported
+skill came from is recorded in `<codara home>/skill-origins`
+(`skill-origin-store.ts`, keyed by the skill's folder); `skill-updates.ts`
+checks git skills with `ls-remote` and a blob-less probe, updates them with a
+backup and rolls them back, and `claude-plugin-skills.ts` lists the skills of
+enabled Claude Code plugins. `skill-updates-ipc.ts` registers the `skills:*`
+channels; the UI is `capabilities/SkillOrigin.tsx`,
+`capabilities/PluginSkillsList.tsx` and `capabilities/useSkillOrigins.ts`.
 
 **Automations and looms** start runs without a chat message: `scheduler.ts`
 arms triggers (cron, interval, folder, git and others),

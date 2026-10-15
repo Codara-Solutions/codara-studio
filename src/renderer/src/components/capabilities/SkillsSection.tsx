@@ -1,4 +1,5 @@
 import React from "react";
+import type { ClaudePluginSkillList } from "@shared/skill-origins";
 import type { NameGroup, CliRuntime } from "./model";
 import { groupItems } from "./model";
 import {
@@ -21,6 +22,10 @@ import {
   sectionStyle,
 } from "./controls";
 import { Cell, CliCell, EntryFlags, RemoveControl, TableHeader, scopeLabel, shortPath, type RemoveScope } from "./McpSection";
+import PluginSkillsList from "./PluginSkillsList";
+import { CheckUpdatesButton, SkillOriginLine } from "./SkillOrigin";
+import { originsForGroup } from "./skill-origins";
+import type { SkillOriginsView } from "./useSkillOrigins";
 
 export const SKILL_GRID = "minmax(0, 1fr) 92px 64px 64px 124px";
 
@@ -42,6 +47,8 @@ export default function SkillsSection({
   onRemove,
   onInstall,
   onAdd,
+  origins,
+  pluginSkills = null,
 }: {
   loading: boolean;
   loadError: string | null;
@@ -60,6 +67,9 @@ export default function SkillsSection({
   onRemove: (group: NameGroup, scope: RemoveScope) => void;
   onInstall: (group: NameGroup, target: CliRuntime) => void;
   onAdd: () => void;
+  // Where each skill came from and its update actions; plugin skills.
+  origins?: SkillOriginsView;
+  pluginSkills?: ClaudePluginSkillList | null;
 }) {
   return (
     <section style={sectionStyle}>
@@ -72,6 +82,7 @@ export default function SkillsSection({
                 {activeCount} of {totalGroups} on for Cora and workers
               </span>
             )}
+            {origins ? <CheckUpdatesButton view={origins} /> : null}
             <button
               type="button"
               className="spark-btn"
@@ -112,6 +123,7 @@ export default function SkillsSection({
                 onToggle={onToggle}
                 onRemove={onRemove}
                 onInstall={onInstall}
+                origins={origins}
               />
             ))}
             {filteredTotal === 0 ? (
@@ -138,6 +150,7 @@ export default function SkillsSection({
           </>
         )}
       </div>
+      <PluginSkillsList list={pluginSkills} search={search} />
     </section>
   );
 }
@@ -149,6 +162,7 @@ function SkillRow({
   onToggle,
   onRemove,
   onInstall,
+  origins,
 }: {
   group: NameGroup;
   busy: ReadonlySet<string>;
@@ -158,6 +172,7 @@ function SkillRow({
   // Skills render the Claude and Codex columns only: Grok Build has no skill
   // folder.
   onInstall: (group: NameGroup, target: CliRuntime) => void;
+  origins?: SkillOriginsView;
 }) {
   const folder = group.any.skillDir ?? group.any.path;
   const systemSkill = groupItems(group).every((item) => item.piLoads === false) && enabled;
@@ -178,6 +193,7 @@ function SkillRow({
           </span>
           <EntryFlags group={group} />
         </div>
+        {origins ? <SkillOriginLine name={group.name} statuses={originsForGroup(group, origins.index)} view={origins} /> : null}
         {systemSkill ? (
           <div style={{ ...rowNoteStyle, marginTop: 3 }}>A bundled Codex system skill: Codex uses it, Cora does not load it.</div>
         ) : null}
