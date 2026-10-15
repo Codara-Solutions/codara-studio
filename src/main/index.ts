@@ -1683,8 +1683,14 @@ app.on("before-quit", (event) => {
       if (live) signalRendererBeforeQuit([...live.keys()]);
       await flushAgentSessionRegistry();
       // Each pane's output, while every shell still holds it: the PTY sweep
-      // below only adds exit noise.
-      await flushTerminalScrollback().catch(() => undefined);
+      // below only adds exit noise. Bounded, because the agent drain and the
+      // graceful PTY teardown below need the rest of the 5s budget to let
+      // agents save their sessions; a write still running finishes in
+      // flushAllStores.
+      await Promise.race([
+        flushTerminalScrollback().catch(() => undefined),
+        new Promise<void>((resolve) => setTimeout(resolve, 1_500).unref()),
+      ]);
       // Drain orchestration-owned workers and all provider sessions before the
       // broad PTY sweep. This drain is single-flight and bounded (≤2s), leaving
       // room for graceful PTY teardown inside the 5s hard-exit fallback.

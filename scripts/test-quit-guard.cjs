@@ -295,6 +295,13 @@ async function main() {
       start >= 0 && claimed >= 0 && cancelled > claimed,
       handler.slice(0, 400),
     );
+    // The kept-output flush at quit start cannot eat the budget the agent
+    // drain needs to let agents save their sessions.
+    const cleanup = index.slice(start, index.indexOf("await pty.disposeAllGraceful()", start));
+    check(
+      "the quit-start output flush is bounded",
+      /await Promise\.race\(\[\s*flushTerminalScrollback\(\)[^\]]*setTimeout\(resolve, 1_500\)/.test(cleanup),
+    );
     const updater = fs.readFileSync(path.join(ROOT, "src", "main", "auto-updater.ts"), "utf8");
     check(
       "the updater exposes that cancel",
