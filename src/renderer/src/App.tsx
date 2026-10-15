@@ -97,6 +97,7 @@ import { useTabs, isDraftChatTabId, persistedTerminalPaneIds, restoredChatRunIds
 import { selectTerminalWorkspaceLayers } from "./tabs/terminalWorkspaceLayers";
 import { useAgentHibernation } from "./lib/useAgentHibernation";
 import { sleepingPaneIds } from "./lib/agentHibernation";
+import type { TerminalLeafHibernation } from "./tabs/types";
 import { useChatSurfaces } from "./tabs/chatSurfaces";
 import {
   createNavigateTo,
@@ -7586,6 +7587,10 @@ const Workspace = React.memo(function Workspace({
     (_tabId: string, paneId: string) => setPaneHibernation(paneId, null),
     [setPaneHibernation],
   );
+  const handlePaneAsleep = useCallback(
+    (_tabId: string, paneId: string, hibernation: TerminalLeafHibernation) => setPaneHibernation(paneId, hibernation),
+    [setPaneHibernation],
+  );
   const handlePaneKeepAwake = useCallback(
     (tabId: string, paneId: string, keepAwake: boolean) => setLeafKeepAwake(tabId, paneId, keepAwake),
     [setLeafKeepAwake],
@@ -7765,6 +7770,7 @@ const Workspace = React.memo(function Workspace({
                 onPaneResumeFallback={isActive ? handleLeafResumeFallback : noopTerminalCb}
                 onPaneBootResumeConsumed={isActive ? handleLeafBootResumeConsumed : noopTerminalCb}
                 onPaneWoke={handlePaneWoke}
+                onPaneAsleep={handlePaneAsleep}
                 onPaneKeepAwake={isActive ? handlePaneKeepAwake : noopTerminalCb}
                 onBackToRuns={isActive ? handleBackToRuns : noopTerminalCb}
               />

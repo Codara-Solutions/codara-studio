@@ -37,6 +37,7 @@ import {
   type AgentHibernationPolicy,
   type AgentHibernationRequest,
   type AgentHibernationResult,
+  type AgentSleepingPane,
 } from "@shared/agent-hibernation";
 
 const MINUTE_MS = 60_000;
@@ -52,6 +53,10 @@ const STOP_GRACE_MS = 3_000;
 // minute, and on Windows a PowerShell CIM query, so the census verdict is
 // reused for this many ticks, for the same process generation only.
 const CENSUS_BACKOFF_TICKS = 5;
+// What the pane printed is kept for the sleeping pane to show when its view
+// mounts again with an empty xterm (the stop drops pty-manager's tail and
+// backlog). Bounded per pane; the newest output wins.
+const MAX_SLEEPING_OUTPUT_BYTES = 2 * 1024 * 1024;
 
 export interface AgentHibernationDeps {
   now: () => number;
@@ -65,6 +70,8 @@ export interface AgentHibernationDeps {
   log: (line: string) => void;
   // A paired phone has the pane open (Remote Access): it is on a screen.
   watchedOnPhone?: (paneId: string) => boolean;
+  // What the pane printed, kept for its sleeping view (see pty.sleepOutput).
+  sleepOutput?: (paneId: string) => { tail: Buffer | null; unsent: Buffer | null } | null;
 }
 
 // e2e only: the suite cannot wait half an hour. Honored only when the app
@@ -97,12 +104,48 @@ const defaultDeps: AgentHibernationDeps = {
   stop: (paneId, generationId) => pty.hibernate(paneId, generationId, STOP_GRACE_MS),
   log: (line) => console.log(`[agent-hibernation] ${line}`),
   watchedOnPhone: (paneId) => studioPaneWatchedFromPhone(paneId),
+  sleepOutput: (paneId) => pty.sleepOutput(paneId, MAX_SLEEPING_OUTPUT_BYTES),
 };
 
 const inFlight = new Set<string>();
-// Panes this run put to sleep, with the agent each held. A pane that spawned
-// again (woke) or was closed drops out lazily in sleepingAgentPanes().
-const sleeping = new Map<string, AgentHibernationRequest["runtime"]>();
+// Panes this run put to sleep: the agent each held, when, and what the pane
+// printed (its newest raw output, and what a paused view never received). A
+// pane leaves the list when it is seen running again or closed
+// (sleepingEntry), and at the first exit after it woke (forgetAtNextExit),
+// so a woken pane whose shell later ends is never taken for a sleeping one.
+interface SleepingEntry {
+  runtime: AgentHibernationRequest["runtime"];
+  sleptAt: number;
+  tail: Buffer | null;
+  unsent: Buffer | null;
+  offExit: (() => void) | null;
+}
+const sleeping = new Map<string, SleepingEntry>();
+
+function forget(paneId: string, entry: SleepingEntry): void {
+  if (sleeping.get(paneId) === entry) sleeping.delete(paneId);
+  try {
+    entry.offExit?.();
+  } catch {
+    /* already gone */
+  }
+  entry.offExit = null;
+}
+
+// pty-manager's exit listeners are one-shot per exit. The stop's own exit
+// (hibernated) re-arms for the next one, which can only be the end of the
+// session that woke the pane.
+function forgetAtNextExit(paneId: string, entry: SleepingEntry): void {
+  entry.offExit = pty.onExit(paneId, (info) => {
+    entry.offExit = null;
+    if (sleeping.get(paneId) !== entry) return;
+    if (info.hibernated === true) {
+      forgetAtNextExit(paneId, entry);
+      return;
+    }
+    forget(paneId, entry);
+  });
+}
 // Census refusals per pane, reused until `until` while the pane keeps the
 // same process generation (see CENSUS_BACKOFF_TICKS).
 const censusBackoff = new Map<string, { generationId: string; until: number; result: AgentHibernationResult }>();
@@ -110,7 +153,7 @@ const censusBackoff = new Map<string, { generationId: string; until: number; res
 /** Tests only: forget every pane's in-memory hibernation state. */
 export function resetAgentHibernationForTests(): void {
   inFlight.clear();
-  sleeping.clear();
+  for (const [paneId, entry] of [...sleeping]) forget(paneId, entry);
   censusBackoff.clear();
 }
 
@@ -120,10 +163,55 @@ export function resetAgentHibernationForTests(): void {
  * restore must treat them as running sessions.
  */
 export function sleepingAgentPanes(): Map<string, AgentHibernationRequest["runtime"]> {
+  const out = new Map<string, AgentHibernationRequest["runtime"]>();
   for (const paneId of [...sleeping.keys()]) {
-    if (pty.hasSession(paneId) || !terminalPanePlacement(paneId)) sleeping.delete(paneId);
+    const entry = sleepingEntry(paneId);
+    if (entry) out.set(paneId, entry.runtime);
   }
-  return new Map(sleeping);
+  return out;
+}
+
+function sleepingEntry(paneId: string): SleepingEntry | null {
+  const entry = sleeping.get(paneId);
+  if (!entry) return null;
+  if (pty.hasSession(paneId) || !terminalPanePlacement(paneId)) {
+    forget(paneId, entry);
+    return null;
+  }
+  return entry;
+}
+
+/**
+ * True while Codara has this pane's agent stopped and nothing runs in the
+ * pane. Text sent to it now would reach no process (agent delivery refuses
+ * it instead of reporting it pasted).
+ */
+export function agentPaneAsleep(paneId: string): boolean {
+  return sleepingEntry(paneId) !== null;
+}
+
+/**
+ * For a pane that mounts while its agent sleeps: whether it does, since
+ * when, and what to show. A view that kept its own copy of the output gets
+ * only what it never received (once); a fresh view, an empty xterm after a
+ * window reload, gets the pane's newest raw output, as a live pane's
+ * reattach does. The leaf's own sleeping mark is runtime-only, so after a
+ * reload this is the only record of it.
+ */
+export function takeSleepingPane(paneId: string, freshView = false): AgentSleepingPane | null {
+  const entry = sleepingEntry(paneId);
+  if (!entry) return null;
+  const output = freshView ? entry.tail : entry.unsent;
+  entry.unsent = null;
+  // The size only: the output itself is the user's terminal content.
+  console.log(`[agent-hibernation] pane=${paneId} mounts asleep (${output?.byteLength ?? 0} bytes of output kept)`);
+  return {
+    runtime: entry.runtime,
+    sleptAt: entry.sleptAt,
+    // A copy with its own exact-size buffer: a view could carry the rest of
+    // a pooled ArrayBuffer across IPC.
+    output: output ? new Uint8Array(output) : null,
+  };
 }
 
 function validRequest(input: unknown): AgentHibernationRequest | null {
@@ -224,13 +312,24 @@ export async function hibernateAgentPane(
     // stop begins, so an app quit during the stop's grace period must already
     // find this pane among the sleeping ones, or the relaunch restore would
     // drop its session.
-    sleeping.set(request.paneId, request.runtime);
+    const sleptAt = deps.now();
+    const previous = sleeping.get(request.paneId);
+    if (previous) forget(request.paneId, previous);
+    const kept = deps.sleepOutput?.(request.paneId) ?? null;
+    const entry: SleepingEntry = {
+      runtime: request.runtime,
+      sleptAt,
+      tail: kept?.tail ?? null,
+      unsent: kept?.unsent ?? null,
+      offExit: null,
+    };
+    sleeping.set(request.paneId, entry);
+    forgetAtNextExit(request.paneId, entry);
     const stopped = await deps.stop(request.paneId, first.session.generationId);
     if (!stopped) {
-      sleeping.delete(request.paneId);
+      forget(request.paneId, entry);
       return { ok: false, reason: "stop-failed" };
     }
-    const sleptAt = deps.now();
     deps.log(`pane=${request.paneId} ${request.runtime} is sleeping`);
     return { ok: true, sleptAt };
   } finally {
@@ -242,4 +341,9 @@ export async function hibernateAgentPane(
 export function registerAgentHibernationIpc(handle: IpcHandle): void {
   handle("agentHibernation:policy", () => currentHibernationPolicy());
   handle("agentHibernation:hibernate", (_event, input: unknown) => hibernateAgentPane(input));
+  handle("agentHibernation:sleepingPane", (_event, paneId: unknown, options: unknown) =>
+    typeof paneId === "string" && paneId.length > 0 && paneId.length <= 256
+      ? takeSleepingPane(paneId, (options as { freshView?: unknown } | null)?.freshView === true)
+      : null,
+  );
 }

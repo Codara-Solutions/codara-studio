@@ -10,7 +10,7 @@ import {
   useTerminalSession,
   type SparkOpenInput,
 } from "./useTerminalSession";
-import type { TerminalAgentSession } from "../../tabs/types";
+import type { TerminalAgentSession, TerminalLeafHibernation } from "../../tabs/types";
 
 // TerminalPane wraps a single xterm pane in a forwardRef component so the
 // parent strip can imperatively `write`, `focus`, copy the visible buffer,
@@ -100,6 +100,9 @@ interface Props {
   // resumes it once on screen and then reports onWoke.
   hibernated?: boolean;
   onWoke?: () => void;
+  // Main says the pane's agent sleeps though the leaf has no mark (a window
+  // reload while it slept): the owner marks the leaf.
+  onAsleep?: (hibernation: TerminalLeafHibernation) => void;
 }
 
 // Far enough past any display edge that no part of the pane intersects the
@@ -143,6 +146,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onBootResumeConsumed,
       hibernated,
       onWoke,
+      onAsleep,
     },
     ref,
   ) {
@@ -184,6 +188,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onBootResumeConsumed,
       hibernated,
       onWoke,
+      onAsleep,
     });
 
     useImperativeHandle(

@@ -255,7 +255,9 @@ whenever it cannot tell:
 
 Cora's worker panes and phone panes never sleep. A sleeping pane that is
 still asleep when you quit counts as a running agent, so **Resume running
-agent sessions when Codara reopens** brings it back too.
+agent sessions when Codara reopens** brings it back too. If the window
+reloads while an agent sleeps, its pane stays asleep, still shows what the
+agent last printed, and resumes when you open it.
 
 ### The notification center
 

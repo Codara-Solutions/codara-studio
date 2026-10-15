@@ -145,6 +145,42 @@ test("an agent restored into a background workspace at launch can sleep too", as
   }
 });
 
+test("a pane asleep when the window reloads stays asleep and resumes when opened", async () => {
+  test.setTimeout(120_000);
+  const fixture = await prepareFixture("plain");
+  const { app, page, logs } = await launch(fixture);
+  try {
+    await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 20_000 });
+    const [first] = await waitForLaunches(fixture, 1);
+    await page.locator('[data-workspace-id="ws-b"]').evaluate((row) => (row as HTMLElement).click());
+    const sleepingChip = page.locator(`[data-terminal-pane-id="${PANE_ID}"] [data-testid="pane-sleeping-chip"]`);
+    await expect(sleepingChip, logs.join("\n")).toHaveAttribute("aria-label", "CLAUDE sleeping", {
+      timeout: 25_000,
+    });
+    await expect.poll(() => isAlive(first.pid), { timeout: 10_000 }).toBe(false);
+
+    // With session restore off, nothing but main's sleeping record can bring
+    // the agent back after the reload; the pane's own mark and its xterm are
+    // gone with it, so main also hands the fresh view the pane's output.
+    await page.evaluate(() =>
+      (window as unknown as {
+        spark: { preferences: { set: (key: string, value: boolean) => Promise<unknown> } };
+      }).spark.preferences.set("restoreAgentSessions", false),
+    );
+    await page.reload();
+    await page.waitForLoadState("domcontentloaded");
+    await page.locator('[data-workspace-id="ws-a"]').evaluate((row) => (row as HTMLElement).click());
+    const launches = await waitForLaunches(fixture, 2);
+    expect(launches[1].args).toEqual(expect.arrayContaining(["--resume", SESSION_ID]));
+    await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 20_000 });
+    const mounted = logs.find((line) => line.includes(`pane=${PANE_ID} mounts asleep`)) ?? "";
+    expect(Number(/\((\d+) bytes of output kept\)/.exec(mounted)?.[1] ?? 0), logs.join("\n")).toBeGreaterThan(0);
+  } finally {
+    await app.close();
+    await cleanup(fixture);
+  }
+});
+
 test("Keep awake stops a pane from sleeping", async () => {
   test.setTimeout(90_000);
   const fixture = await prepareFixture("plain");
