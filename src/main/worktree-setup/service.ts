@@ -656,9 +656,11 @@ export class WorktreeSetupService {
     const shell = await this.deps.userShell().catch(() => null);
     if (shell?.kind === "pwsh") {
       const script = join(run.setupDir, "user-setup.ps1");
+      // The BOM makes Windows PowerShell 5.1 read the file as UTF-8, not
+      // the ANSI code page, so a path like C:\Users\Étienne survives.
       await writePrivateFile(
         script,
-        `Set-Location -LiteralPath ${pwshQuote(run.worktreeReal)}\r\n${command.command.replace(/\n/g, "\r\n")}\r\nif ($LASTEXITCODE) { exit $LASTEXITCODE }\r\n`,
+        `\uFEFFSet-Location -LiteralPath ${pwshQuote(run.worktreeReal)}\r\n${command.command.replace(/\n/g, "\r\n")}\r\nif ($LASTEXITCODE) { exit $LASTEXITCODE }\r\n`,
       );
       return [
         {
