@@ -14,6 +14,7 @@ export type SettingsTab =
   | "general"
   | "editor"
   | "terminal"
+  | "quick-commands"
   | "api"
   | "agents"
   | "sessions"
@@ -50,6 +51,12 @@ export const SETTINGS_TABS: ReadonlyArray<SettingsTabMeta> = [
     label: "Terminal",
     title: "Terminal",
     description: "The shell new terminals open with, and how much output they keep.",
+  },
+  {
+    id: "quick-commands",
+    label: "Quick commands",
+    title: "Quick commands",
+    description: "Shell commands and agent prompts you run in one click.",
   },
   {
     id: "api",
@@ -99,7 +106,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<{
   label: string;
   tabs: ReadonlyArray<SettingsTab>;
 }> = [
-  { label: "Workspace", tabs: ["general", "editor", "terminal", "keybindings"] },
+  { label: "Workspace", tabs: ["general", "editor", "terminal", "quick-commands", "keybindings"] },
   { label: "Agents and models", tabs: ["agents", "api", "sessions", "runs"] },
   { label: "System", tabs: ["remote-access", "about"] },
 ];
@@ -192,6 +199,8 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "terminal", title: "Parked or headless", desc: "Terminals running without a visible pane.", section: "Resource overview", keywords: "detached hidden background" },
   { tab: "terminal", title: "Buffered output", desc: "Output held in memory for all terminals.", section: "Resource overview", keywords: "memory bytes buffer" },
   { tab: "terminal", title: "Run panes", desc: "When worker panes close.", section: "Resource overview", keywords: "worker panes close lifecycle run terminal" },
+  { tab: "quick-commands", title: "Saved commands", label: "Quick commands", desc: "Shell commands and agent prompts you run in one click.", keywords: "quick command snippet saved script prompt macro favorite run button play add edit delete reorder branch cwd variables" },
+  { tab: "quick-commands", title: "Right-click in a terminal", desc: "Copy or paste, or open the menu with your quick commands.", section: "Terminal", keywords: "context menu mouse right click shift copy paste quick commands" },
   { tab: "api", title: "OpenRouter API key", desc: "The key behind inline edits and OpenRouter models.", section: "OpenRouter", keywords: "key token openrouter secret" },
   { tab: "api", title: "Inline edit and commit model", desc: "The OpenRouter model for inline edits.", section: "OpenRouter", keywords: "model gemini autocomplete" },
   { tab: "api", title: "Models for Cora", desc: "OpenRouter models offered in the Cora picker.", section: "OpenRouter", keywords: "model picker openrouter favorite" },
