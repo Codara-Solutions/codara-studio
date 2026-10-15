@@ -850,6 +850,24 @@ async function main() {
         placeless.result?.reason === "not_in_codara_terminal",
       JSON.stringify(placeless).slice(0, 180),
     );
+    // The workspace status passes the same gates in the real app: an
+    // imported pull request cannot write the rail, and a caller outside every
+    // pane gets an answer, never the workspace on screen.
+    const untrustedWorkspaceStatus = await rpc(handshake, "workspace.status", { runId: "run-untrusted-pr", status: "done" });
+    check(
+      "untrusted PR socket policy blocks workspace.status",
+      Boolean(untrustedWorkspaceStatus.error) && /unavailable|pull-request/i.test(untrustedWorkspaceStatus.error?.message ?? ""),
+      JSON.stringify(untrustedWorkspaceStatus).slice(0, 180),
+    );
+    const placelessStatus = await rpc(handshake, "workspace.status", { status: "done", callerPid: 1 });
+    check(
+      "workspace.status outside a Codara pane changes nothing and is not an error",
+      !placelessStatus.error &&
+        placelessStatus.result?.updated === false &&
+        placelessStatus.result?.reason === "not_in_codara_workspace" &&
+        !fs.existsSync(path.join(HOME, "workspace-status.json")),
+      JSON.stringify(placelessStatus).slice(0, 180),
+    );
     // The remember budget stops write loops within one turn; it does not cap
     // a chat's whole life.
     fabricateRun("run-remember-budget", {
