@@ -384,7 +384,10 @@ Cancel; every search result is rendered; the face is opaque; a menu closes on
 a scroll only when its anchor moved), `test-settings-search` (every rendered
 Settings row has a search entry; ranking, typos, synonyms and highlights),
 `test-account-card-keys` (an account
-card keeps its key while it gains or loses a half).
+card keeps its key while it gains or loses a half), `test-feature-tips` (the
+feature tips catalog, when a tip may appear and where it goes, the
+feature-tips.json store and its IPC; a catalog selector naming a control the
+renderer no longer has fails here).
 
 ### The `cora` CLI and its benchmark
 
