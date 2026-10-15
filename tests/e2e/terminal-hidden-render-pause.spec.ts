@@ -52,7 +52,7 @@ test("hidden terminal panes stop drawing until they are shown again", async () =
     });
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
-    await expect(page.locator('[role="tab"][aria-selected="true"]').first()).toBeVisible();
+    await expect(page.locator('[data-tab-id][role="tab"][aria-selected="true"]').first()).toBeVisible();
     await installDrawCounter(page);
 
     const chatTabId = await activeTabId(page);
@@ -149,7 +149,7 @@ async function drawsDuring(page: Page, paneIds: string[]): Promise<Record<string
 }
 
 async function activeTabId(page: Page): Promise<string> {
-  const id = await page.locator('[role="tab"][aria-selected="true"]').first().getAttribute("data-tab-id");
+  const id = await page.locator('[data-tab-id][role="tab"][aria-selected="true"]').first().getAttribute("data-tab-id");
   expect(id, "expected an active tab").toBeTruthy();
   return id!;
 }

@@ -99,7 +99,7 @@ async function openTerminalTab(page: Page): Promise<void> {
 async function dockBrowserPane(page: Page, url: string): Promise<void> {
   await page.getByRole("button", { name: "New tab", exact: true }).dispatchEvent("click");
   await page.getByText("Browser", { exact: true }).dispatchEvent("click");
-  const browserId = await page.locator('[role="tab"][aria-selected="true"]').getAttribute("data-tab-id");
+  const browserId = await page.locator('[data-tab-id][role="tab"][aria-selected="true"]').getAttribute("data-tab-id");
   const address = page.getByPlaceholder("http://localhost:3000").first();
   await expect(address).toBeVisible({ timeout: 10_000 });
   await address.fill(url);
