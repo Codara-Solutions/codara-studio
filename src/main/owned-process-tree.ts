@@ -110,7 +110,10 @@ export function listProcessesWithCommands(
       };
       let child: ReturnType<typeof spawn>;
       try {
-        child = spawn("ps", ["-axo", "pid=,ppid=,lstart=,args="], {
+        // `ww`: full command lines. Without it `ps` cuts each line to
+        // $COLUMNS when that is set (an app started from a terminal), and a
+        // cut command line no longer names the program it runs.
+        child = spawn("ps", ["-axww", "-o", "pid=,ppid=,lstart=,args="], {
           stdio: ["ignore", "pipe", "ignore"],
           windowsHide: true,
         });
