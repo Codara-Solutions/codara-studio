@@ -33,6 +33,7 @@
   },
   "scripts": {
     "test": "node scripts/run-all-tests.cjs",
+    "test:changed": "node scripts/run-changed-tests.cjs",
     "icon:dev": "node scripts/stamp-dev-electron-icon.cjs",
     "predev": "node scripts/stamp-dev-electron-icon.cjs",
     "dev": "electron-vite dev",
