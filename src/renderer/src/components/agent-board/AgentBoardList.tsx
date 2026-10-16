@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import type { AgentBoardBucket, AgentBoardCard as Card } from "@shared/agent-board";
-import AgentBoardCard, { cardElapsed } from "./AgentBoardCard";
+import AgentBoardCard, { cardTime } from "./AgentBoardCard";
 import type { AgentBoardState } from "./useAgentBoard";
 import { RAIL_VIEW_PANEL_ID } from "./railView";
 import "./agent-board.css";
@@ -171,18 +171,22 @@ export default function AgentBoardList({ model, activeKey, activeWorkspaceId, na
                   <p className="agent-board__none">{group.bucket === "needs-you" ? "Nothing waits on you." : "None"}</p>
                 ) : (
                   <ul className="agent-board__cards">
-                    {cards.map((card) => (
-                      <AgentBoardCard
-                        key={card.key}
-                        card={card}
-                        elapsed={cardElapsed(card, now)}
-                        active={card.key === activeKey}
-                        here={card.workspaceId === activeWorkspaceId}
-                        focusable={card.key === tabStop}
-                        onOpen={onOpen}
-                        onFocusCard={setFocusKey}
-                      />
-                    ))}
+                    {cards.map((card) => {
+                      const time = cardTime(card, now);
+                      return (
+                        <AgentBoardCard
+                          key={card.key}
+                          card={card}
+                          time={time?.text ?? null}
+                          timeTitle={time?.title ?? null}
+                          active={card.key === activeKey}
+                          here={card.workspaceId === activeWorkspaceId}
+                          focusable={card.key === tabStop}
+                          onOpen={onOpen}
+                          onFocusCard={setFocusKey}
+                        />
+                      );
+                    })}
                   </ul>
                 ))}
             </section>

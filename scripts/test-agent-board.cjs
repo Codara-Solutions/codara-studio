@@ -136,11 +136,35 @@ async function testBuilder() {
   check("idle terminal is done", board.terminalAgentPlacement("idle").bucket === "done");
   check("launching terminal shows as starting", board.terminalAgentPlacement("launching").status === "Starting");
 
-  check("elapsed under a minute reads now", board.formatAgentElapsed(30_000) === "now");
-  check("elapsed minutes", board.formatAgentElapsed(4 * MIN + 10_000) === "4m");
-  check("elapsed hours and minutes", board.formatAgentElapsed(2 * HOUR + 5 * MIN) === "2h 5m");
-  check("elapsed whole hours", board.formatAgentElapsed(3 * HOUR) === "3h");
-  check("elapsed days", board.formatAgentElapsed(50 * HOUR) === "2d");
+  check("a span under a minute reads <1m", board.formatAgentSpan(30_000) === "<1m");
+  check("span minutes", board.formatAgentSpan(4 * MIN + 10_000) === "4m");
+  check("span hours and minutes", board.formatAgentSpan(2 * HOUR + 5 * MIN) === "2h 5m");
+  check("span whole hours", board.formatAgentSpan(3 * HOUR) === "3h");
+  check("span days", board.formatAgentSpan(50 * HOUR) === "2d");
+  const timeOf = (bucket, status, tone, ago) =>
+    board.agentCardTime({ bucket, status, tone, since: NOW - ago }, NOW);
+  check("working says how long it has worked", timeOf("working", "Working", "info", 12 * MIN)?.text === "Working for 12m");
+  check("a fresh working stretch reads <1m", timeOf("working", "Working", "info", 20_000)?.text === "Working for <1m");
+  check("background says how long", timeOf("working", "In background", "info", 5 * MIN)?.text === "In background for 5m");
+  check("ready says how long ago it finished", timeOf("done", "Ready", "ok", 8 * MIN)?.text === "Done 8m ago");
+  check("finished reads Done too", timeOf("done", "Finished", "ok", 2 * HOUR + 3 * MIN)?.text === "Done 2h 3m ago");
+  check("done under a minute reads just now", timeOf("done", "Ready", "ok", 10_000)?.text === "Done just now");
+  check("a failed run keeps its word", timeOf("done", "Failed", "danger", 3 * MIN)?.text === "Failed 3m ago");
+  check("needs you says how long it waits", timeOf("needs-you", "Needs you", "warn", 3 * MIN)?.text === "Needs you \u00b7 3m");
+  check("a stopped pane says when it stopped", timeOf("needs-you", "Stopped", "danger", 3 * MIN)?.text === "Stopped 3m ago");
+  check("the tooltip gives the exact time", /^Started \d\d:\d\d$/.test(timeOf("working", "Working", "info", MIN).title), timeOf("working", "Working", "info", MIN));
+  check("the tooltip for a finished card says Finished", /^Finished /.test(timeOf("done", "Ready", "ok", MIN).title));
+  check("no known start, no time", board.agentCardTime({ bucket: "done", status: "Ready", tone: "ok", since: 0 }, NOW) === null);
+  check("labels never use dashes", !/[\u2013\u2014]/.test(timeOf("working", "Working", "info", MIN).text));
+  const stretch = board.nextWorkingSince;
+  check("ready to working starts a stretch", stretch("idle", "working", null, 100) === 100);
+  check("working to background keeps it", stretch("working", "background", 100, 200) === 100);
+  check("background to working keeps it", stretch("background", "working", 100, 300) === 100);
+  check("working to stalled to working keeps it", stretch("stalled", "working", 100, 400) === 100);
+  check("blocked to working restarts it", stretch("blocked", "working", null, 500) === 500);
+  check("working to ready clears it", stretch("working", "idle", 100, 600) === null);
+  check("launching to working starts it", stretch(null, "working", null, 700) === 700);
+  check("a missing start restarts it", stretch("working", "working", null, 800) === 800);
   check(
     "a message becomes one plain line",
     board.agentBoardLine("**Done.** Fixed `parse()`.\n\n```ts\nconst x = 1;\n```\n- [docs](https://x.y)") ===
@@ -343,6 +367,16 @@ async function testBuilder() {
 
   const working = find("pane:p-working");
   check("working measures from the turn start", working.since === NOW - 2 * MIN);
+  check("working prefers the working stretch to the turn start", (() => {
+    const card = board.buildAgentBoard({
+      now: NOW,
+      workspaces: WORKSPACES,
+      layoutPanes: [],
+      activity: [activity({ paneId: "p-ws", state: "background", turnStartedAt: NOW - 30 * MIN, workingSince: NOW - 40 * MIN })],
+      runs: [],
+    }).working[0];
+    return card.since === NOW - 40 * MIN;
+  })());
   check("working shows the current tool", working.tool === "Edit: src/a.ts");
   check("a working card has no reply box", working.reply === null);
   const moved = find("pane:p-moved");
@@ -755,13 +789,17 @@ async function testNotifierActivity() {
   feed("s1", "\x1b]7501;app=claude:state=working\x07");
   check("program status working", pane("s1")?.state === "working", pane("s1")?.state);
   const since = pane("s1")?.stateSince;
+  const stretchStart = pane("s1")?.workingSince;
+  check("a working pane has a stretch start", typeof stretchStart === "number" && stretchStart > 0, stretchStart);
   await sleep(20);
   feed("s1", `\x1b]7501;app=claude:state=blocked:kind=question:msg=${b64("Which region?")}\x07`);
   entry = pane("s1");
   check("program status blocked carries the question", entry?.state === "blocked" && entry.question === "Which region?", entry);
   check("a state change moves the state clock", entry?.stateSince > since);
+  check("a blocked pane is not in a working stretch", entry?.workingSince === undefined, entry?.workingSince);
   feed("s1", "\x1b]7501;app=claude:state=working\x07");
   check("answered, the question is gone", pane("s1")?.question === null);
+  check("answering starts a new working stretch", pane("s1")?.workingSince > stretchStart, pane("s1")?.workingSince);
   feed("s1", `\x1b]7501;app=claude:state=done:msg=${b64("Picked eu-west.")}\x07`);
   check("program status done keeps the message", pane("s1")?.message === "Picked eu-west.", pane("s1")?.message);
   feed("s1", `\x1b]7501;app=claude:state=error:msg=${b64("Rate limited.")}\x07`);

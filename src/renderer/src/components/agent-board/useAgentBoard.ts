@@ -86,10 +86,17 @@ function useNow(enabled: boolean): number {
   useEffect(() => {
     if (!enabled) return undefined;
     setNow(Date.now());
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") setNow(Date.now());
-    }, TICK_MS);
-    return () => window.clearInterval(timer);
+    // One timer for every card, landing on the wall clock's TICK_MS marks so
+    // the label turns over within a tick of the minute it crosses.
+    let timer = 0;
+    const schedule = (): void => {
+      timer = window.setTimeout(() => {
+        if (document.visibilityState === "visible") setNow(Date.now());
+        schedule();
+      }, TICK_MS - (Date.now() % TICK_MS) + 50);
+    };
+    schedule();
+    return () => window.clearTimeout(timer);
   }, [enabled]);
   return now;
 }
