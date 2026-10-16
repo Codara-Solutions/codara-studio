@@ -71,6 +71,11 @@ function sharedRules() {
   assert.equal(clean("ok \u2764\ufe0f").note, "ok \u2764\ufe0f", "an emoji keeps its own variation selector");
   const huge = clean(`Done${"\u200b".repeat(200_000)} and more`);
   assert.deepEqual(huge, { note: "Done", truncated: true }, "a huge payload is cut before it is cleaned, and says so");
+  // That cut can land inside an emoji, and the tool's JSON can carry a lone
+  // "\ud83d" escape: neither leaves half a pair behind.
+  const split = clean(`Ok ${"\u200b".repeat(8_188)}\u{1F680}`);
+  assert.deepEqual(split, { note: "Ok", truncated: true }, "the cut drops half an emoji");
+  assert.equal(clean("a\ud83db\ude80c \u{1F680}").note, "abc \u{1F680}", "lone surrogates are dropped, pairs kept");
   assert.deepEqual(clean(42), { note: "", truncated: false });
   const long = clean("x".repeat(500));
   assert.equal(long.truncated, true);
@@ -337,6 +342,14 @@ async function toolActsOnTheCallersWorkspace() {
     await assert.rejects(call({ ...params, callerPaneId: "pane-claude" }), (error) => error instanceof ws.PreviewToolParamsError);
   }
   assert.equal((await store.get("ws-pane")).note, "42");
+
+  // Outside a chat, client "cora" is the in-process bridge `cora tool` and a
+  // pane's Pi use: a shell or aider is never credited as Cora. The pane's own
+  // agent still names itself when Codara knows it.
+  const fromShell = await call({ note: "From a shell", callerPaneId: "pane-unknown", callerClient: "cora" });
+  assert.equal(fromShell.by, "Agent");
+  const fromPaneAgent = await call({ note: "From Claude", callerPaneId: "pane-claude", callerClient: "cora" });
+  assert.equal(fromPaneAgent.by, "Claude Code");
 }
 
 (async () => {

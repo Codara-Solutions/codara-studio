@@ -2183,7 +2183,10 @@ function WorkspaceRow({
       onDragEnd={onRowDragEnd}
       onClick={editing ? undefined : onActivate}
       onContextMenu={(event) => {
-        if (editing) return;
+        // The row's popovers are portalled out of it, but React still
+        // bubbles their events here: a right-click in the icon picker must
+        // not swap it for the actions menu.
+        if (editing || !(event.target instanceof Node) || !event.currentTarget.contains(event.target)) return;
         // A right-click opens the row's "…" actions, where status lives too.
         event.preventDefault();
         event.stopPropagation();

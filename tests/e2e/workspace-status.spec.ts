@@ -195,6 +195,7 @@ test("agents and the user set a workspace's status and progress note in the rail
     await expect(picker).toHaveCount(0);
     await expect(alphaStatus.getByTestId("workspace-status-chip")).toHaveText("Blocked");
     await expect(alphaStatus.getByTestId("workspace-status-note")).toHaveText("Waiting on the API key");
+    await expect(alphaStatus).toHaveAttribute("title", "Blocked. Waiting on the API key. Set by you just now.");
     await expect(row(page, "ws-beta")).toHaveAttribute("data-active", "true", { timeout: 1_000 });
     await expect.poll(async () => (await stored())["ws-alpha"]?.by?.label).toBe("You");
 
@@ -251,6 +252,18 @@ test("agents and the user set a workspace's status and progress note in the rail
     await page.getByRole("menuitem", { name: "Clear status", exact: true }).click();
     await expect(row(page, "ws-gamma").getByTestId("workspace-status")).toHaveCount(0);
     await expect.poll(async () => Object.keys(await stored()).sort()).toEqual(["ws-alpha", "ws-beta"]);
+
+    // A right-click inside one of the row's popovers stays there: the row's
+    // own right-click does not swap the icon picker for the actions menu.
+    await row(page, "ws-gamma").click({ button: "right" });
+    await page.getByRole("menuitem", { name: "Change icon…", exact: true }).click();
+    const iconPicker = page.getByRole("dialog", { name: "Change workspace icon" });
+    await expect(iconPicker).toBeVisible();
+    await iconPicker.click({ button: "right", position: { x: 12, y: 12 } });
+    await expect(iconPicker).toBeVisible();
+    await expect(page.getByRole("menu", { name: "Workspace actions" })).toHaveCount(0);
+    await page.keyboard.press("Escape");
+    await expect(iconPicker).toHaveCount(0);
 
     // An agent posting while the picker is open shows in it, and Save sends
     // only what the user changed, so the agent's newer status stays.

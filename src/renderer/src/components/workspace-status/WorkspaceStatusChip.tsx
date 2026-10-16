@@ -44,7 +44,10 @@ export function describeWorkspaceStatus(entry: WorkspaceStatusEntry, now = Date.
   const parts: string[] = [];
   if (entry.status) parts.push(`${WORKSPACE_STATUS_LABELS[entry.status]}.`);
   if (entry.note) parts.push(/[.!?…]$/.test(entry.note) ? entry.note : `${entry.note}.`);
-  if (entry.updatedAt > 0) parts.push(`Set by ${entry.by.label} ${workspaceStatusAge(entry.updatedAt, now)}.`);
+  if (entry.updatedAt > 0) {
+    const who = entry.by.kind === "user" ? "you" : entry.by.label;
+    parts.push(`Set by ${who} ${workspaceStatusAge(entry.updatedAt, now)}.`);
+  }
   return parts.join(" ");
 }
 
