@@ -1,10 +1,10 @@
-// Settings > Terminal > Output history: how much terminal output Codara has
-// saved on disk, and a two-click way to delete all of it. Saved output can
+// Settings > Terminal > Shell and output: how much terminal output Codara has
+// saved on disk, and a DangerRow that deletes all of it on a second click. Saved output can
 // hold anything a terminal printed, secrets included.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { formatBytes } from "@shared/worktree-cleanup";
-import { SettingRow } from "./SettingsPrimitives";
+import { DangerRow } from "./SettingsPrimitives";
 
 interface Usage {
   files: number;
@@ -19,7 +19,6 @@ export function describeSavedOutput(usage: Usage | null): string {
 
 export default function SavedTerminalOutputRow() {
   const [usage, setUsage] = useState<Usage | null>(null);
-  const [armed, setArmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const alive = useRef(true);
@@ -42,7 +41,6 @@ export default function SavedTerminalOutputRow() {
   }, [refresh]);
 
   const clear = async () => {
-    setArmed(false);
     setBusy(true);
     setFailed(false);
     try {
@@ -56,9 +54,8 @@ export default function SavedTerminalOutputRow() {
 
   const empty = usage !== null && usage.files === 0;
   return (
-    <SettingRow
+    <DangerRow
       title="Clear saved terminal output"
-      anchor="Clear saved terminal output"
       desc={
         <>
           Codara keeps what your terminals printed, secrets included, on this computer for up to 30 days and up to 64 MB,
@@ -68,30 +65,10 @@ export default function SavedTerminalOutputRow() {
           </span>
         </>
       }
-      control={
-        <span
-          className="st-row-actions"
-          onMouseLeave={() => setArmed(false)}
-          onBlur={(e) => {
-            if (!e.currentTarget.contains(e.relatedTarget as Node)) setArmed(false);
-          }}
-        >
-          {armed ? (
-            <button type="button" className="spark-btn is-danger" disabled={busy} onClick={() => void clear()}>
-              Confirm clear
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="spark-btn"
-              disabled={busy || empty}
-              onClick={() => setArmed(true)}
-            >
-              Clear now
-            </button>
-          )}
-        </span>
-      }
+      action="Clear now"
+      confirmLabel="Confirm clear"
+      disabled={busy || empty}
+      onConfirm={() => void clear()}
     />
   );
 }
