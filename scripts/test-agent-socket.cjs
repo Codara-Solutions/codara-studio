@@ -801,6 +801,7 @@ async function main() {
       ["worktree.create", { runId: "run-untrusted-pr", callerRole: "manager" }],
       ["worktree.list", { runId: "run-untrusted-pr", callerRole: "manager" }],
       ["worktree.remove", { runId: "run-untrusted-pr", callerRole: "manager", workspaceId: "ws-x" }],
+      ["worktree.setup", { runId: "run-untrusted-pr", callerRole: "manager" }],
     ]) {
       const denied = await rpc(handshake, method, params);
       check(

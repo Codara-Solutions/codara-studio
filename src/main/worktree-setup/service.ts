@@ -60,6 +60,10 @@ export interface WorktreeSetupServiceDeps {
   maxConcurrentCommands?: number;
   budget?: CopyBudget;
   logCapBytes?: number;
+  // How long output may still arrive after a command exits (tests lower it).
+  exitDrainMs?: number;
+  // How many finished setups stay in memory (tests lower it).
+  keptFinishedRuns?: number;
 }
 
 export interface StartSetupRequest {
@@ -83,6 +87,10 @@ export interface StartSetupRequest {
 export class WorktreeSetupError extends Error {}
 
 const LIST_LIMIT = 200;
+// Finished setups kept in memory (with their log tail); older ones are read
+// back from their worktree's status file when asked for by path. Without a
+// cap, a session of automations with sandboxed workers grows without end.
+const KEPT_FINISHED_RUNS = 100;
 const TAIL_BYTES = 64 * 1024;
 const DEFAULT_LOG_CAP = 4 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 45 * 60 * 1000;
@@ -121,6 +129,7 @@ interface Run {
   // finished at once, while a copy may still be landing; removal waits on
   // this so nothing is written into a worktree being deleted.
   pipelineDone: Promise<void>;
+  pipelineSettled: boolean;
   markPrepared(): void;
   markFinished(): void;
   releaseSlot: (() => void) | null;
@@ -181,6 +190,10 @@ export class WorktreeSetupService {
     const id = setupIdFor(worktreeReal);
     const existing = this.runs.get(id);
     if (existing && !isWorktreeSetupFinished(existing.status.state)) return { ...existing.status };
+    // A Stop marks a setup finished at once, while a copy of it may still be
+    // landing. A new run (Run again) waits for that one to stop writing, so
+    // the two never copy into the worktree or write its record together.
+    if (existing) await this.settled(existing);
     const setupDir = await setupDirFor(worktreeReal);
     if (!setupDir) throw new WorktreeSetupError("The folder is not a linked git worktree");
     const sources = await readSetupSources(request.sourceCwd);
@@ -293,6 +306,7 @@ export class WorktreeSetupService {
       prepared: Promise.resolve(status),
       finished: Promise.resolve(status),
       pipelineDone: Promise.resolve(),
+      pipelineSettled: false,
       markPrepared: () => markPrepared(),
       markFinished: () => markFinished(),
       releaseSlot: null,
@@ -342,7 +356,11 @@ export class WorktreeSetupService {
         this.finish(run, "failed", `Setup could not run: ${(err as Error)?.message ?? String(err)}`);
       })
       // The last status write is part of the pipeline: removal waits for it.
-      .then(() => this.writeJson(this.statusFile(run), run.status).catch(() => undefined));
+      .then(() => this.writeJson(this.statusFile(run), run.status).catch(() => undefined))
+      .then(() => {
+        run.pipelineSettled = true;
+        this.prune();
+      });
     return { ...status };
   }
 
@@ -359,6 +377,11 @@ export class WorktreeSetupService {
     }
     if (!run) return true;
     if (!isWorktreeSetupFinished(run.status.state)) await this.stop(run.status.id);
+    return this.settled(run, timeoutMs);
+  }
+
+  /** True once the run's pipeline has returned; false after `timeoutMs`. */
+  private async settled(run: Run, timeoutMs = 30_000): Promise<boolean> {
     let timer: NodeJS.Timeout | null = null;
     const timeout = new Promise<false>((resolvePromise) => {
       timer = setTimeout(() => resolvePromise(false), Math.max(0, timeoutMs));
@@ -453,7 +476,7 @@ export class WorktreeSetupService {
     // A queued run gives its place up, so its pipeline ends now rather than
     // when another setup frees a slot (removal waits for that end).
     run.leaveQueue?.();
-    if (run.child) this.killTree(run.child);
+    if (run.child) await this.killTree(run.child);
     else if (run.status.state === "awaiting-approval") {
       this.finish(run, "stopped", NOT_APPROVED);
       run.decide?.(false);
@@ -504,6 +527,25 @@ export class WorktreeSetupService {
     return { ...run.status };
   }
 
+  /**
+   * Forgets the oldest finished setups past KEPT_FINISHED_RUNS, dismissed
+   * and successful ones first. Their record stays in the worktree.
+   */
+  private prune(): void {
+    const finished = [...this.runs.values()].filter(
+      (run) => run.pipelineSettled && isWorktreeSetupFinished(run.status.state),
+    );
+    const excess = finished.length - (this.deps.keptFinishedRuns ?? KEPT_FINISHED_RUNS);
+    if (excess <= 0) return;
+    const rank = (run: Run) => (run.dismissed || run.status.state === "succeeded" ? 0 : 1);
+    finished.sort(
+      (a, b) =>
+        rank(a) - rank(b) ||
+        ((a.status.finishedAt ?? a.status.startedAt) < (b.status.finishedAt ?? b.status.startedAt) ? -1 : 1),
+    );
+    for (const run of finished.slice(0, excess)) this.runs.delete(run.status.id);
+  }
+
   /** Runs setup again for a worktree whose setup ended. */
   async rerun(idOrPath: string, overrides: Partial<StartSetupRequest> = {}): Promise<WorktreeSetupStatus | null> {
     const run = this.runs.get(idOrPath);
@@ -521,7 +563,10 @@ export class WorktreeSetupService {
         userCommand: status.commands.find((command) => command.kind === "user")?.command ?? null,
       };
     }
-    if (run) this.runs.delete(run.status.id);
+    if (run) {
+      await this.settled(run);
+      this.runs.delete(run.status.id);
+    }
     // Only a create from the dialog approves; a later run checks the record.
     const { approveFingerprint: _shown, ...again } = request;
     return this.start({ ...again, runCommands: true, ...overrides });
@@ -593,7 +638,7 @@ export class WorktreeSetupService {
       const waitedForApproval = run.status.state === "awaiting-approval";
       run.stopRequested = true;
       run.leaveQueue?.();
-      if (run.child) this.killTree(run.child, true);
+      if (run.child) void this.killTree(run.child, true);
       this.applyFinish(run, "stopped", waitedForApproval ? CLOSED_BEFORE_APPROVAL : INTERRUPTED);
       run.decide?.(false);
       this.persistSync(run);
@@ -934,7 +979,7 @@ export class WorktreeSetupService {
       let timedOut = false;
       const timer = setTimeout(() => {
         timedOut = true;
-        this.killTree(child);
+        void this.killTree(child);
       }, timeoutMs);
       const pipe = (stream: NodeJS.ReadableStream | null) => {
         if (!stream) return;
@@ -970,24 +1015,36 @@ export class WorktreeSetupService {
       child.on("exit", (code, signal) => {
         setTimeout(() => {
           if (settled) return;
+          this.writeLog(run, "A process the command started is still running; its output is no longer logged\n");
           child.stdout?.destroy();
           child.stderr?.destroy();
           settle(exitCode(code, signal));
-        }, STEP_EXIT_GRACE_MS).unref();
+        }, this.deps.exitDrainMs ?? STEP_EXIT_GRACE_MS).unref();
       });
     });
   }
 
-  private killTree(child: ChildProcess, immediate = false): void {
+  /**
+   * Ends a command and everything it started. Resolves once they are gone
+   * (or the grace period passed and SIGKILL went out), so a removal that
+   * waits on a stop never races a child still writing in the worktree.
+   */
+  private killTree(child: ChildProcess, immediate = false): Promise<void> {
     const pid = child.pid;
-    if (!pid) return;
+    if (!pid) return Promise.resolve();
     if (this.platform === "win32") {
-      try {
-        spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" }).on("error", () => undefined);
-      } catch {
-        child.kill();
-      }
-      return;
+      return new Promise((resolvePromise) => {
+        const done = () => resolvePromise();
+        try {
+          const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+          killer.on("error", done);
+          killer.on("close", done);
+          setTimeout(done, KILL_GRACE_MS).unref();
+        } catch {
+          child.kill();
+          done();
+        }
+      });
     }
     const signalGroup = (signal: NodeJS.Signals) => {
       try {
@@ -1002,12 +1059,19 @@ export class WorktreeSetupService {
     };
     if (immediate) {
       signalGroup("SIGKILL");
-      return;
+      return Promise.resolve();
     }
     signalGroup("SIGTERM");
-    setTimeout(() => {
-      if (child.exitCode === null && child.signalCode === null) signalGroup("SIGKILL");
-    }, KILL_GRACE_MS).unref();
+    // The whole group, even when the script itself already ended: a child
+    // that ignores SIGTERM (an install, a build) would otherwise keep
+    // writing into a worktree that is being removed.
+    return (async () => {
+      const deadline = Date.now() + KILL_GRACE_MS;
+      while (Date.now() < deadline && groupAlive(pid)) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+      }
+      if (groupAlive(pid)) signalGroup("SIGKILL");
+    })();
   }
 
   // ── Status and log ───────────────────────────────────────────────────────
@@ -1150,6 +1214,16 @@ function posixRunner(): string {
   return "/bin/sh";
 }
 
+/** Whether any process of the group led by `pid` still exists (POSIX). */
+function groupAlive(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === "EPERM";
+  }
+}
+
 function signalNumber(signal: NodeJS.Signals): number | null {
   const table: Partial<Record<NodeJS.Signals, number>> = { SIGHUP: 1, SIGINT: 2, SIGKILL: 9, SIGTERM: 15 };
   return table[signal] ?? null;
@@ -1169,7 +1243,7 @@ async function writePrivateFile(path: string, body: string): Promise<void> {
 export function agentSetupSummary(status: WorktreeSetupStatus, logTail: string): Record<string, unknown> {
   const hint =
     status.state === "awaiting-approval"
-      ? "Setup is waiting for the user to approve the repository's setup command in Codara; it has not run. Do not run that command or the setup file's terminal commands yourself. Tell the user, then call codara_worktree_setup({wait: true}), which waits while they decide."
+      ? "Setup is waiting for the user to approve the repository's setup command in Codara; it has not run. Do not run that command or the setup file's terminal commands yourself. Tell the user, then call codara_worktree_setup({workspaceId, wait: true}), which waits while they decide."
       : status.state === "failed"
         ? "Setup failed. Read logTail, fix the cause, and run it again from Codara or by hand in the worktree."
         : status.state === "stopped"
@@ -1178,7 +1252,7 @@ export function agentSetupSummary(status: WorktreeSetupStatus, logTail: string):
             : "Setup was stopped before it finished; the worktree may be missing dependencies."
           : status.state === "succeeded"
             ? "Setup finished."
-            : "Setup is still running. Call codara_worktree_setup({wait: true}) before you build or test.";
+            : "Setup is still running. Call codara_worktree_setup({workspaceId, wait: true}) before you build or test.";
   return {
     state: status.state,
     waitForSetup: status.waitForSetup,

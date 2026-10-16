@@ -15,6 +15,7 @@ import {
   type WorktreeSetupStatus,
 } from "@shared/worktree-setup";
 import {
+  restoreUserZdotdir,
   sanitizeAppImageChildEnv,
   sanitizeElectronViteDevEnv,
   sanitizeHostTerminalEnv,
@@ -127,6 +128,9 @@ async function commandBaseEnv(): Promise<Record<string, string>> {
   sanitizeNestedAgentEnv(env);
   sanitizeElectronViteDevEnv(env);
   sanitizeNpmRunScriptEnv(env);
+  // A zsh command reads the user's own .zshenv, not the one of Codara's
+  // terminal integration (set when Codara was started from its own pane).
+  restoreUserZdotdir(env);
   sanitizeHostTerminalEnv(env);
   // The PATH a login shell would have (nvm, Homebrew, ...); a setup may start
   // before the boot-time computation has finished.
@@ -224,9 +228,12 @@ export async function startWorktreeSetup(
 /** The adapter agent-worktrees.ts takes as its `worktreeSetup` dependency. */
 export function agentWorktreeSetupRunner() {
   return {
+    // Null only when nothing is configured. A setup that could not start
+    // throws, so the agent's result says why instead of "no setup ran".
     start: async (request: Omit<StartSetupRequest, "userCommand">) => {
       const started = await startWorktreeSetup(request);
-      return started && !isWorktreeSetupStartError(started) ? started : null;
+      if (started && isWorktreeSetupStartError(started)) throw new Error(started.error);
+      return started;
     },
     whenPrepared: (id: string) => worktreeSetupService().whenPrepared(id),
     waitFor: (id: string, timeoutMs: number, options?: { throughApproval?: boolean }) =>

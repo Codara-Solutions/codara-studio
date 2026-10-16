@@ -164,7 +164,7 @@ assert.match(
   "chat.resume must keep an explicit root-only dispatch gate even if a future scoped roster changes",
 );
 
-for (const method of ["worktree.create", "worktree.list", "worktree.remove"]) {
+for (const method of ["worktree.create", "worktree.list", "worktree.remove", "worktree.setup"]) {
   assert.match(
     socketSource,
     new RegExp(`UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS = new Set<string>\\(\\[[^\\]]*"${method.replace(".", "\\.")}"`),

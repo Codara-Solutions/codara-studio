@@ -207,7 +207,7 @@ async function runSuite(m, scratch) {
   });
 
   await check("rejects links that leave the repository or are patterns", () => {
-    for (const bad of ["../x", "/abs", "C:/x", "a/../../b", "*.d", ".git/hooks", "a//b", "."]) {
+    for (const bad of ["../x", "/abs", "C:/x", "a/../../b", "*.d", ".git/hooks", ".GIT/hooks", "sub/.Git", "a//b", "."]) {
       assert.equal(shared.normalizeLinkPath(bad), null, bad);
     }
     const parsed = shared.parseWorktreeSetupFile('{"link":["../up"],"waitForSetup":"yes","setup":5}');
@@ -430,6 +430,74 @@ async function runSuite(m, scratch) {
     assert.ok(result.skipped.some((s) => /link or a file/.test(s.reason)));
   });
 
+  await check("never copies or links the new worktree into itself", async () => {
+    // A repository that holds its own worktrees folder (a dotfiles repository
+    // at the home folder holds Codara's): copying that folder would copy the
+    // new worktree into itself, deeper at every level.
+    const nest = path.join(scratch, "nest");
+    execFileSync("git", ["init", "-q", "-b", "main", nest]);
+    write(path.join(nest, ".gitignore"), "wts/\n.env\n");
+    write(path.join(nest, "README.md"), "x\n");
+    commitAll(nest, "init");
+    write(path.join(nest, ".env"), "NEST=1\n");
+    write(path.join(nest, "wts", "notes.txt"), "kept\n");
+    git(nest, ["worktree", "add", "-q", "-b", "inner", path.join(nest, "wts", "inner")]);
+    const wt = fs.realpathSync(path.join(nest, "wts", "inner"));
+    const linked = await materialize.materializeSetup({
+      sourceRoot: fs.realpathSync(nest),
+      worktreeRoot: wt,
+      copies: [],
+      links: ["wts"],
+      log: () => undefined,
+    });
+    assert.deepEqual(linked.linked, []);
+    assert.ok(linked.skipped.some((s) => s.path === "wts" && /new worktree itself/.test(s.reason)), JSON.stringify(linked.skipped));
+    const copied = await materialize.materializeSetup({
+      sourceRoot: fs.realpathSync(nest),
+      worktreeRoot: wt,
+      copies: [
+        { path: ".env", kind: "file" },
+        { path: "wts", kind: "dir" },
+      ],
+      links: [],
+      log: () => undefined,
+    });
+    assert.equal(fs.readFileSync(path.join(wt, ".env"), "utf8"), "NEST=1\n");
+    assert.equal(fs.readFileSync(path.join(wt, "wts", "notes.txt"), "utf8"), "kept\n");
+    assert.equal(fs.existsSync(path.join(wt, "wts", "inner")), false, "the worktree is not copied into itself");
+    assert.deepEqual(copied.copiedFiles.map((copy) => copy.path).sort(), [".env", "wts/notes.txt"]);
+  });
+
+  await check("a link inside a folder copied at another depth never points out", async () => {
+    // "shortcut" links to deep/a/b, whose inner link climbs three folders:
+    // fine in the main checkout, but one level down in the worktree the
+    // same text would point above the worktree.
+    const depth = path.join(scratch, "depth");
+    execFileSync("git", ["init", "-q", "-b", "main", depth]);
+    write(path.join(depth, ".gitignore"), "deep/\nshortcut\nkey.pem\n");
+    write(path.join(depth, "README.md"), "x\n");
+    commitAll(depth, "init");
+    write(path.join(depth, "key.pem"), "pem\n");
+    write(path.join(depth, "deep/a/b/file.txt"), "inside\n");
+    fs.symlinkSync("../../../key.pem", path.join(depth, "deep/a/b/up.pem"));
+    fs.symlinkSync("file.txt", path.join(depth, "deep/a/b/near.txt"));
+    fs.symlinkSync("deep/a/b", path.join(depth, "shortcut"));
+    const wt = path.join(scratch, "worktrees", "depth-wt");
+    git(depth, ["worktree", "add", "-q", "-b", "depth-wt", wt]);
+    const result = await materialize.materializeSetup({
+      sourceRoot: fs.realpathSync(depth),
+      worktreeRoot: fs.realpathSync(wt),
+      copies: [{ path: "shortcut", kind: "file" }],
+      links: [],
+      log: () => undefined,
+    });
+    assert.equal(fs.readFileSync(path.join(wt, "shortcut/file.txt"), "utf8"), "inside\n");
+    assert.equal(fs.readlinkSync(path.join(wt, "shortcut/near.txt")), "file.txt");
+    assert.equal(fs.existsSync(path.join(wt, "shortcut/up.pem")), false);
+    assert.equal(fs.lstatSync(path.join(wt, "shortcut/up.pem"), { throwIfNoEntry: false }), undefined);
+    assert.ok(result.skipped.some((s) => s.path === "shortcut/up.pem" && /outside/.test(s.reason)), JSON.stringify(result.skipped));
+  });
+
   await check("stops at the copy budget and says so", async () => {
     const wt = addWorktree("wt-budget");
     const result = await materialize.materializeSetup({
@@ -626,6 +694,48 @@ async function runSuite(m, scratch) {
     assert.match((await svc.readLog(started.id)).text, /^planted-check$/m);
   });
 
+  await check("stop also ends a child that ignores SIGTERM before it returns", async () => {
+    const wt = addWorktree("wt-stop-stubborn");
+    write(
+      path.join(repo, ".codara", "worktree.json"),
+      JSON.stringify({ setup: [`sh -c 'trap "" TERM; echo $$ > stubborn.pid; while :; do sleep 0.1; done' &`, "wait"] }),
+    );
+    const svc = makeService();
+    const started = await svc.start({ sourceCwd: repo, worktreePath: wt, trigger: "ui", userCommand: null });
+    const pidFile = path.join(wt, "stubborn.pid");
+    for (let i = 0; i < 100 && !fs.existsSync(pidFile); i += 1) await new Promise((r) => setTimeout(r, 50));
+    const pid = Number(fs.readFileSync(pidFile, "utf8").trim());
+    assert.ok(pid > 0);
+    const stopped = await svc.stop(started.id);
+    assert.equal(stopped.state, "stopped");
+    let alive = true;
+    for (let i = 0; i < 20 && alive; i += 1) {
+      try {
+        process.kill(pid, 0);
+        await new Promise((r) => setTimeout(r, 50));
+      } catch {
+        alive = false;
+      }
+    }
+    assert.equal(alive, false, "the child that ignored SIGTERM is gone once stop returned");
+  });
+
+  await check("a command that leaves a process in the background still ends", async () => {
+    // The background sleep keeps the output pipes open: waiting for them
+    // would hold the step (and the agents waiting on it) until it exits.
+    const wt = addWorktree("wt-background");
+    write(path.join(repo, ".codara", "worktree.json"), JSON.stringify({ setup: ["sleep 4 &", "echo started"] }));
+    const svc = makeService({ exitDrainMs: 100 });
+    const t0 = Date.now();
+    const started = await svc.start({ sourceCwd: repo, worktreePath: wt, trigger: "ui", userCommand: null });
+    const done = await svc.waitFor(started.id, 20_000);
+    assert.equal(done.state, "succeeded", done.error);
+    assert.ok(Date.now() - t0 < 3_000, `took ${Date.now() - t0} ms`);
+    const log = (await svc.readLog(started.id)).text;
+    assert.match(log, /^started$/m);
+    assert.match(log, /still running/);
+  });
+
   await check("a setup still running when Codara closed reads as stopped", async () => {
     const wt = addWorktree("wt-interrupted");
     write(path.join(repo, ".codara", "worktree.json"), JSON.stringify({ setup: "sleep 30" }));
@@ -652,6 +762,21 @@ async function runSuite(m, scratch) {
     assert.deepEqual(states, ["queued", "running"]);
     assert.equal((await svc.waitFor(a.id, 10_000)).state, "succeeded");
     assert.equal((await svc.waitFor(b.id, 10_000)).state, "succeeded");
+  });
+
+  await check("only the latest finished setups stay in memory", async () => {
+    write(path.join(repo, ".codara", "worktree.json"), JSON.stringify({ setup: "true" }));
+    const svc = makeService({ keptFinishedRuns: 1 });
+    const wtA = addWorktree("wt-keep-a");
+    const a = await svc.start({ sourceCwd: repo, worktreePath: wtA, trigger: "worker", userCommand: null });
+    assert.equal((await svc.waitFor(a.id, 10_000)).state, "succeeded");
+    assert.equal(await svc.quiesce(a.id), true);
+    const b = await svc.start({ sourceCwd: repo, worktreePath: addWorktree("wt-keep-b"), trigger: "worker", userCommand: null });
+    assert.equal((await svc.waitFor(b.id, 10_000)).state, "succeeded");
+    assert.equal(await svc.quiesce(b.id), true);
+    assert.deepEqual(svc.list().map((status) => status.id), [b.id]);
+    assert.equal(await svc.get(a.id), null, "forgotten by id");
+    assert.equal((await svc.get(wtA)).state, "succeeded", "still read back from the worktree");
   });
 
   await check("an unreadable setup file fails after the copies", async () => {
@@ -1050,6 +1175,38 @@ async function runSuite(m, scratch) {
       assert.equal(git(wt, ["status", "--porcelain"]), "");
     });
 
+    await check("a copy the worktree's branch does not ignore is taken out again", async () => {
+      // An older branch whose .gitignore does not list .env yet: a copied
+      // .env would be a new file there, one `git add -A` away from a commit.
+      git(lone, ["branch", "lone-old", "main"]);
+      const old = path.join(scratch, "lone-old-src");
+      git(lone, ["worktree", "add", "-q", old, "lone-old"]);
+      write(path.join(old, ".gitignore"), "cache/\n");
+      commitAll(old, "an older ignore file");
+      git(lone, ["worktree", "remove", "--force", old]);
+      const wt = path.join(scratch, "lone-worktrees", "lone-old-wt");
+      git(lone, ["worktree", "add", "-q", "-b", "lone-old-wt", wt, "lone-old"]);
+      const logLines = [];
+      const result = await materialize.materializeSetup({
+        sourceRoot: lone,
+        worktreeRoot: fs.realpathSync(wt),
+        copies: [
+          { path: ".env", kind: "file" },
+          { path: "cache", kind: "dir" },
+        ],
+        links: [],
+        log: (line) => logLines.push(line),
+      });
+      assert.equal(fs.existsSync(path.join(wt, ".env")), false);
+      assert.equal(fs.readFileSync(path.join(wt, "cache", "blob.bin"), "utf8"), "cached\n", "an ignored copy stays");
+      assert.deepEqual(result.copiedFiles.map((copy) => copy.path), ["cache/blob.bin"]);
+      assert.deepEqual(result.copied, ["cache"]);
+      assert.ok(result.skipped.some((s) => s.path === ".env" && /does not ignore/.test(s.reason)), JSON.stringify(result.skipped));
+      assert.ok(logLines.some((line) => /Took out 1 copy/.test(line)), logLines.join("\n"));
+      assert.equal(git(wt, ["status", "--porcelain", "--untracked-files=all"]), "");
+      assert.equal(fs.readFileSync(path.join(lone, ".env"), "utf8"), "LONE=1\n");
+    });
+
     await check("a link git would still see is taken out again", async () => {
       const wt = loneWorktree("lone-unignored");
       // An info/exclude Codara cannot write: .git/info is a file.
@@ -1403,6 +1560,19 @@ async function agentSuite(m, scratch) {
     assert.equal(fs.existsSync(created.path), false);
     assert.equal(fs.readFileSync(path.join(repo, "node_modules/dep/index.js"), "utf8"), "module.exports = 1;\n");
     assert.equal(fs.readFileSync(path.join(repo, ".env"), "utf8"), "TOKEN=1\n");
+  });
+
+  await check("a setup that cannot start is reported, not taken for no setup", async () => {
+    const broken = {
+      ...deps,
+      worktreeSetup: { ...deps.worktreeSetup, start: async () => Promise.reject(new Error("The worktree folder does not exist")) },
+    };
+    const created = await agent.createAgentWorktree(caller, { branch: "agent/setup-broken" }, broken);
+    assert.equal(created.ok, true, JSON.stringify(created));
+    assert.equal(created.setup.state, "failed");
+    assert.match(created.setup.error, /could not start: The worktree folder does not exist/);
+    assert.match(created.setup.hint, /Copy the ignored files and run the setup yourself/);
+    assert.match(created.next, /setup\.error/);
   });
 
   await check("an edited copy still blocks removal", async () => {
