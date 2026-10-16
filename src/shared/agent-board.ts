@@ -41,6 +41,30 @@ export interface TerminalAgentActivity {
   question: string | null;
   /** The CLI account the pane was started on, when Codara chose one. */
   accountProfileId: string | null;
+  /**
+   * Work the agent started that still runs after its own turn ended
+   * (background subagents, shells, workflows), while the pane reads
+   * "background"; null otherwise. Absent from older mains.
+   */
+  background?: AgentBackgroundSummary | null;
+}
+
+/** Counts of an agent's live background work, by kind. */
+export interface AgentBackgroundSummary {
+  agents: number;
+  shells: number;
+  other: number;
+}
+
+/** "2 agents and 1 shell"; null when nothing runs. */
+export function describeAgentBackground(summary: AgentBackgroundSummary | null | undefined): string | null {
+  if (!summary) return null;
+  const parts: string[] = [];
+  if (summary.agents > 0) parts.push(`${summary.agents} agent${summary.agents === 1 ? "" : "s"}`);
+  if (summary.shells > 0) parts.push(`${summary.shells} shell${summary.shells === 1 ? "" : "s"}`);
+  if (summary.other > 0) parts.push(`${summary.other} task${summary.other === 1 ? "" : "s"}`);
+  if (parts.length === 0) return null;
+  return parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
 }
 
 /** A pane the renderer's layouts show with a live agent chip. */
@@ -214,6 +238,9 @@ export function terminalAgentPlacement(state: RuntimeState | undefined): Placeme
       return { bucket: "needs-you", status: "Stopped", tone: "danger" };
     case "working":
       return { bucket: "working", status: "Working", tone: "info" };
+    case "background":
+      // Its turn ended, but work it started still runs and will wake it.
+      return { bucket: "working", status: "In background", tone: "info" };
     case "stalled":
       return { bucket: "working", status: "No output", tone: "info" };
     case "idle":
@@ -447,13 +474,18 @@ function terminalCard(
       pane.state === "working" || pane.state === "blocked" || pane.state === "stalled"
         ? agentBoardLine(activity?.tool, 120)
         : null,
-    detail: null,
+    detail: pane.state === "background" ? backgroundDetail(activity) : null,
     since,
     unseen: placement.bucket === "done" && unseenKind === "complete",
     sleeping: false,
     target: { type: "terminal", workspaceId: pane.workspaceId, tabId: pane.tabId, paneId: pane.paneId },
     reply: terminalReply(pane),
   };
+}
+
+function backgroundDetail(activity: TerminalAgentActivity | null): string {
+  const running = describeAgentBackground(activity?.background);
+  return running ? `${running} running` : "Background work running";
 }
 
 function sleepingCard(pane: MergedPane, workspace: AgentBoardWorkspace, input: AgentBoardInput): AgentBoardCard {

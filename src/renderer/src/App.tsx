@@ -28,6 +28,7 @@ import {
   DEFAULT_TOAST_DURATION_MS,
   DEFAULT_WORKSPACE_SWITCH_HUD_MS,
   TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
+  runtimeStateIsBusy,
 } from "@shared/types";
 import type {
   GitHubIssueSummary,
@@ -1334,7 +1335,7 @@ export default function App() {
     for (const tab of tabs.tabs) {
       if (tab.kind !== "terminal" || activeLayerHasWorkingTerminal) continue;
       forEachTerminalLeaf(tab.root, (leaf) => {
-        if (leaf.worker?.runtimeState === "working") {
+        if (runtimeStateIsBusy(leaf.worker?.runtimeState)) {
           activeLayerHasWorkingTerminal = true;
         }
       });
@@ -2648,10 +2649,11 @@ export default function App() {
   // an existing one.
   const reconcileTerminalAgentState = useCallback((payload: TerminalAgentStatePayload) => {
     if (payload?.workspaceId && payload.paneId && payload.state) {
+      // Background work (subagents, shells after the turn) is work too.
       setTerminalPaneWorking(
         payload.workspaceId,
         payload.paneId,
-        payload.state === "working",
+        runtimeStateIsBusy(payload.state),
       );
       // An identified CLI in any state but "done" is an agent session the
       // workspace holds; a pane back at a plain shell reports runtime null.
@@ -6243,7 +6245,7 @@ export default function App() {
       // hidden, but the local poller is already the source that painted the
       // chip the user sees here, so mirror its confirmed state into the rail.
       if (t.tabsWorkspaceId) {
-        setTerminalPaneWorking(t.tabsWorkspaceId, paneId, state === "working");
+        setTerminalPaneWorking(t.tabsWorkspaceId, paneId, runtimeStateIsBusy(state));
       }
       if (state === "done") return;
       const tab = t.tabs.find((item) => item.id === tabId);

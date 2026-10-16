@@ -60,18 +60,18 @@ function plural(n: number, one: string, many = `${one}s`): string {
 /**
  * One short phrase per thing still working, for the quit prompt and the
  * update chip: "Claude Code in api", "2 Codex agents in web",
- * "Pi in docs (waiting for you)", "Cora in 1 chat", "1 automation".
+ * "Pi in docs (waiting for you)", "Claude Code in web (working in background)",
+ * "Cora in 1 chat", "1 automation".
  */
 export function liveWorkItems(live: LiveWork): string[] {
-  const groups = new Map<string, { runtime: string; where: string; waiting: boolean; count: number }>();
+  const groups = new Map<string, { runtime: string; where: string; state: TerminalAgentMidTurn["state"]; count: number }>();
   for (const agent of live.terminalAgents) {
     const runtime = RUNTIME_LABELS[agent.runtime] ?? "An agent";
     const where = agent.workspaceName.trim() || agent.tabTitle.trim();
-    const waiting = agent.state === "waiting";
-    const key = `${runtime}\u0000${where}\u0000${waiting ? 1 : 0}`;
+    const key = `${runtime}\u0000${where}\u0000${agent.state}`;
     const group = groups.get(key);
     if (group) group.count += 1;
-    else groups.set(key, { runtime, where, waiting, count: 1 });
+    else groups.set(key, { runtime, where, state: agent.state, count: 1 });
   }
   const terminalItems: string[] = [];
   let collapsed = 0;
@@ -82,7 +82,9 @@ export function liveWorkItems(live: LiveWork): string[] {
     }
     const who = group.count === 1 ? group.runtime : `${group.count} ${group.runtime} agents`;
     const where = group.where ? ` in ${group.where}` : "";
-    terminalItems.push(`${who}${where}${group.waiting ? " (waiting for you)" : ""}`);
+    const note =
+      group.state === "waiting" ? " (waiting for you)" : group.state === "background" ? " (working in background)" : "";
+    terminalItems.push(`${who}${where}${note}`);
   }
   if (collapsed > 0) terminalItems.push(`${plural(collapsed, "more terminal agent")}`);
   const items = terminalItems;

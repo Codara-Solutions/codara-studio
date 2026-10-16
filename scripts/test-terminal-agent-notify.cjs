@@ -405,7 +405,12 @@ async function main() {
   await sleep(1100);
   check("hooks: the turn still finishes after its prompts", alertCount() === beforePrompt + 3 && T.alerts.at(-1).kind === "complete");
 
-  // ── Hooks: background work is reported, never held for an hour ──
+  // ── Hooks: background work keeps the agent busy until it drains ──
+  // The owner's report: Claude's turn ended with background subagents and
+  // shells still running, and the pane read "ready". Claude wakes itself when
+  // they report back, so the pane works in the background and the turn's
+  // "finished" waits for the last follow-up.
+  const chipOf = (paneId) => mod.terminalAgentStateSnapshot().find((c) => c.paneId === paneId)?.state;
   const beforeBackground = alertCount();
   mod.noteTerminalUserInput("h1", "run the suite in the background\r");
   mod.noteTerminalHookEvent("h1", "UserPromptSubmit", { ...session, prompt: "run the suite in the background" });
@@ -414,24 +419,117 @@ async function main() {
   mod.noteTerminalHookEvent("h1", "Stop", {
     ...session,
     last_assistant_message: "The suite is running in the background.",
-    background_tasks: [{ id: "b1", type: "shell", status: "running" }],
+    background_tasks: [
+      { id: "b1", type: "shell", status: "running", command: "npm test", description: "Run the suite" },
+      { id: "a7", type: "local_agent", status: "running", description: "Review the parser", agent_type: "general-purpose" },
+    ],
   });
   await sleep(1100);
-  check("hooks: the turn with a background task finishes at its Stop", alertCount() === beforeBackground + 1);
-  check("hooks: the alert says what is still running", /1 background task still running/.test(T.alerts.at(-1).body));
-  // The task reports back: Claude runs a follow-up turn nobody submitted.
-  mod.noteTerminalHookEvent("h1", "UserPromptSubmit", { ...session, prompt: "<task-notification>\n<task-id>b1</task-id>" });
-  mod.noteTerminalHookEvent("h1", "Stop", { ...session, last_assistant_message: "All 42 tests passed.", background_tasks: [] });
-  await sleep(1100);
-  check("hooks: drained background work is announced once", alertCount() === beforeBackground + 2);
+  check("background: a turn whose work still runs is not announced at its Stop", alertCount() === beforeBackground);
+  check("background: the chip reads working in background, not ready", chipOf("h1") === "background");
+  const boardEntry = mod.terminalAgentActivitySnapshot().find((entry) => entry.paneId === "h1");
   check(
-    "hooks: the follow-up alert says the background work finished",
-    /finished background work/.test(T.alerts.at(-1).title) && /All 42 tests passed/.test(T.alerts.at(-1).body),
+    "background: the Agents view counts what still runs",
+    boardEntry?.state === "background" && boardEntry.background?.agents === 1 && boardEntry.background?.shells === 1,
   );
+  check(
+    "background: the quit guard counts the pane",
+    mod.terminalAgentsMidTurn().some((entry) => entry.paneId === "h1" && entry.state === "background"),
+  );
+  check("background: hibernation sees the work", mod.terminalAgentHibernationEvidence("h1")?.backgroundRunning === 2);
+  // A background agent stops and resumes while it waits on its own work, and
+  // its tool calls are not the lead working.
+  mod.noteTerminalHookEvent("h1", "SubagentStop", {
+    ...session,
+    agent_id: "a7",
+    background_tasks: [
+      { id: "b1", type: "shell", status: "running", command: "npm test" },
+      { id: "a7", type: "local_agent", status: "running" },
+    ],
+  });
+  mod.noteTerminalHookEvent("h1", "PreToolUse", { ...session, agent_id: "a7", tool_name: "Read", tool_input: { file_path: "/repo/src/parser.ts" } });
+  mod.noteTerminalHookEvent("h1", "PostToolUse", { ...session, agent_id: "a7", tool_name: "Read" });
+  await sleep(1100);
+  check("background: a subagent stopping and its tool calls change nothing", alertCount() === beforeBackground && chipOf("h1") === "background");
+  // The background agent asks for permission: that needs the user now.
+  mod.noteTerminalHookEvent("h1", "PreToolUse", { ...session, agent_id: "a7", tool_name: "Bash", tool_input: { command: "git push" } });
+  mod.noteTerminalHookEvent("h1", "Notification", { ...session, notification_type: "permission_prompt", message: "Claude needs your permission" });
+  check("background: a background agent's prompt alerts at once", alertCount() === beforeBackground + 1 && T.alerts.at(-1).kind === "blocked");
+  mod.noteTerminalHookEvent("h1", "PostToolUse", { ...session, agent_id: "a7", tool_name: "Bash" });
+  check("background: once answered, the pane is back in the background", chipOf("h1") === "background");
+  // The shell reports back: Claude runs a follow-up nobody submitted, and
+  // the agent still runs after it.
+  mod.noteTerminalHookEvent("h1", "UserPromptSubmit", { ...session, prompt: "<task-notification>\n<task-id>b1</task-id>" });
+  check("background: a follow-up works", chipOf("h1") === "working");
+  mod.noteTerminalHookEvent("h1", "Stop", {
+    ...session,
+    last_assistant_message: "Tests pass; waiting on the review.",
+    background_tasks: [{ id: "a7", type: "local_agent", status: "running" }],
+  });
+  await sleep(1100);
+  check("background: a follow-up with work left stays quiet", alertCount() === beforeBackground + 1 && chipOf("h1") === "background");
+  // The agent reports back too; its follow-up's end is the real finish.
+  mod.noteTerminalHookEvent("h1", "UserPromptSubmit", { ...session, prompt: "<task-notification>\n<task-id>a7</task-id>" });
+  mod.noteTerminalHookEvent("h1", "Stop", { ...session, last_assistant_message: "All 42 tests passed and the review is in.", background_tasks: [] });
+  await sleep(1100);
+  check("background: the turn is announced once its work drained", alertCount() === beforeBackground + 2);
+  check(
+    "background: the alert is the turn's finish with the last message",
+    T.alerts.at(-1).title === "Claude Code finished · Claude hooks" &&
+      /All 42 tests passed and the review is in\./.test(T.alerts.at(-1).body) &&
+      !/still running/.test(T.alerts.at(-1).body),
+  );
+  check("background: the chip is ready again", chipOf("h1") === "idle");
+  check("background: nothing is left for the quit guard", !mod.terminalAgentsMidTurn().some((entry) => entry.paneId === "h1"));
   mod.noteTerminalHookEvent("h1", "UserPromptSubmit", { ...session, prompt: "<task-notification>\n<task-id>b2</task-id>" });
   mod.noteTerminalHookEvent("h1", "Stop", { ...session, last_assistant_message: "Noted.", background_tasks: [] });
   await sleep(1100);
-  check("hooks: a later follow-up with nothing draining stays quiet", alertCount() === beforeBackground + 2);
+  check("background: a later follow-up with nothing draining stays quiet", alertCount() === beforeBackground + 2);
+
+  // A dev server never ends by itself: the turn is announced at its Stop.
+  mod.noteTerminalUserInput("h1", "start the dev server\r");
+  mod.noteTerminalHookEvent("h1", "UserPromptSubmit", { ...session, prompt: "start the dev server" });
+  mod.noteTerminalHookEvent("h1", "Stop", {
+    ...session,
+    last_assistant_message: "The dev server is up on port 5173.",
+    background_tasks: [{ id: "srv", type: "shell", status: "running", command: "cd web && npm run dev", description: "Start the dev server" }],
+  });
+  await sleep(1100);
+  check("background: a turn leaving only a dev server is announced at its Stop", alertCount() === beforeBackground + 3);
+  check("background: that alert says what still runs", /1 background task still running/.test(T.alerts.at(-1).body));
+  check("background: a dev server alone leaves the agent ready", chipOf("h1") === "idle");
+
+  // Work that shows no sign of life stops counting, and the held turn is
+  // announced then.
+  mod.noteTerminalUserInput("h1", "watch the deploy\r");
+  mod.noteTerminalHookEvent("h1", "UserPromptSubmit", { ...session, prompt: "watch the deploy" });
+  mod.noteTerminalHookEvent("h1", "Stop", {
+    ...session,
+    last_assistant_message: "Polling the deploy.",
+    background_tasks: [{ id: "poll", type: "shell", status: "running", command: "./wait-for-deploy.sh" }],
+  });
+  await sleep(1100);
+  check("background: a silent shell holds the turn at first", alertCount() === beforeBackground + 3 && chipOf("h1") === "background");
+  await sleep(31 * 60_000);
+  check("background: after the quiet window the held turn is announced", alertCount() === beforeBackground + 4);
+  check("background: and the chip reads ready", chipOf("h1") === "idle");
+  // The session ending takes its background work with it.
+  mod.noteTerminalUserInput("h1", "spin up a reviewer\r");
+  mod.noteTerminalHookEvent("h1", "UserPromptSubmit", { ...session, prompt: "spin up a reviewer" });
+  mod.noteTerminalHookEvent("h1", "Stop", {
+    ...session,
+    last_assistant_message: "A reviewer is on it.",
+    background_tasks: [{ id: "a8", type: "local_agent", status: "running" }],
+  });
+  await sleep(1100);
+  check("background: held again for a new background agent", chipOf("h1") === "background");
+  mod.noteTerminalHookEvent("h1", "SessionEnd", { session_id: "99999999-other", reason: "other" });
+  check("background: another session ending changes nothing", chipOf("h1") === "background");
+  mod.noteTerminalHookEvent("h1", "SessionEnd", { ...session, reason: "prompt_input_exit" });
+  await sleep(6000);
+  check("background: the session ending clears its background work", chipOf("h1") === "idle");
+  check("background: and nothing is announced for it", alertCount() === beforeBackground + 4);
+  mod.noteTerminalHookEvent("h1", "SessionStart", { ...session, source: "startup" });
 
   // ── Hooks: Esc stops the turn without a Stop hook ──
   const beforeEsc = alertCount();
@@ -488,13 +586,75 @@ async function main() {
   feed("s1", "\x1b]7501;state=idle:app=claude-code\x1b\\");
   await sleep(900);
   check("7501: a stopped turn (working -> idle) is not announced", alertCount() === before7501 + 2);
-  // Child records (background tasks) never decide the parent's turn.
-  mod.noteTerminalUserInput("s1", "start the watcher\r");
+  // Child records are background agents: the parent's done waits for them.
+  mod.noteTerminalUserInput("s1", "start the reviewers\r");
   feed("s1", "\x1b]7501;state=working:app=claude-code\x1b\\");
-  feed("s1", "\x1b]7501;state=working:app=claude-code:id=task1\x1b\\");
+  feed("s1", `\x1b]7501;state=working:app=claude-code:id=task1:title=${b64("Review the parser")}\x1b\\`);
   feed("s1", "\x1b]7501;state=done:app=claude-code\x1b\\");
   await sleep(900);
-  check("7501: a parent done stands while a child record still works", alertCount() === before7501 + 3);
+  check("7501: a parent done waits while a child record still works", alertCount() === before7501 + 2);
+  check(
+    "7501: the chip reads working in background",
+    mod.terminalAgentStateSnapshot().find((c) => c.paneId === "s1")?.state === "background",
+  );
+  // The child ends and Claude wakes to report on it.
+  feed("s1", "\x1b]7501;state=clear:id=task1\x1b\\");
+  feed("s1", "\x1b]7501;state=working:app=claude-code\x1b\\");
+  feed("s1", `\x1b]7501;state=done:app=claude-code:msg=${b64("The review found nothing.")}\x1b\\`);
+  await sleep(900);
+  check(
+    "7501: the turn is announced once the child is done",
+    alertCount() === before7501 + 3 && /The review found nothing\./.test(T.alerts.at(-1).body),
+  );
+  check("7501: and the chip is ready", mod.terminalAgentStateSnapshot().find((c) => c.paneId === "s1")?.state === "idle");
+  // A child that ends with no follow-up still lets the held turn finish.
+  mod.noteTerminalUserInput("s1", "one more reviewer\r");
+  feed("s1", "\x1b]7501;state=working:app=claude-code\x1b\\");
+  feed("s1", "\x1b]7501;state=working:app=claude-code:id=task2\x1b\\");
+  feed("s1", "\x1b]7501;state=done:app=claude-code\x1b\\");
+  await sleep(900);
+  check("7501: held for the second child", alertCount() === before7501 + 3);
+  feed("s1", "\x1b]7501;state=clear:id=task2\x1b\\");
+  await sleep(7000);
+  check("7501: a child ending without a follow-up announces the held turn", alertCount() === before7501 + 4);
+  // Claude as the owner runs it: status reports and hooks together. Only the
+  // Stop hook lists background shells, and its done replaces the status one.
+  mod.syncTerminalNotifyPanes({
+    workspaceId: "ws-7501",
+    panes: [
+      { paneId: "s1", tabId: "ts1", tabTitle: "Status", excluded: false },
+      { paneId: "s3", tabId: "ts3", tabTitle: "Both", excluded: false },
+    ],
+  });
+  const both = { session_id: "44444444-cccc" };
+  feed("s3", "\x1b]7501;state=idle:app=claude-code\x1b\\Claude Code v2.1.301\r\n");
+  mod.noteTerminalHookEvent("s3", "SessionStart", { ...both, source: "startup" });
+  const beforeBoth = alertCount();
+  mod.noteTerminalUserInput("s3", "build it and test it in the background\r");
+  mod.noteTerminalHookEvent("s3", "UserPromptSubmit", { ...both, prompt: "build it and test it in the background" });
+  feed("s3", "\x1b]7501;state=working:app=claude-code\x1b\\");
+  feed("s3", "\x1b]7501;state=done:app=claude-code\x1b\\");
+  mod.noteTerminalHookEvent("s3", "Stop", {
+    ...both,
+    last_assistant_message: "Four shells are running.",
+    background_tasks: [
+      { id: "sh1", type: "shell", status: "running", command: "npm run build" },
+      { id: "sh2", type: "shell", status: "running", command: "npm test" },
+    ],
+  });
+  await sleep(2000);
+  check("7501 + hooks: background shells hold the turn", alertCount() === beforeBoth);
+  check("7501 + hooks: the chip reads working in background", mod.terminalAgentStateSnapshot().find((c) => c.paneId === "s3")?.state === "background");
+  feed("s3", "\x1b]7501;state=working:app=claude-code\x1b\\");
+  mod.noteTerminalHookEvent("s3", "UserPromptSubmit", { ...both, prompt: "<task-notification>\n<task-id>sh2</task-id>" });
+  feed("s3", "\x1b]7501;state=done:app=claude-code\x1b\\");
+  mod.noteTerminalHookEvent("s3", "Stop", { ...both, last_assistant_message: "Built and tested.", background_tasks: [] });
+  await sleep(2000);
+  check(
+    "7501 + hooks: announced once, with the hook's message",
+    alertCount() === beforeBoth + 1 && /Built and tested\./.test(T.alerts.at(-1).body),
+  );
+  check("7501 + hooks: ready again", mod.terminalAgentStateSnapshot().find((c) => c.paneId === "s3")?.state === "idle");
   T.writes.length = 0;
   T.tails.set("s2", [Buffer.from("\x1b]7501;?\x1b\\", "utf8")]);
   mod.syncTerminalNotifyPanes({

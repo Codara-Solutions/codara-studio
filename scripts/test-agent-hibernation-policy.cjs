@@ -128,6 +128,10 @@ async function main() {
   check("no chip state yet: stays awake", judge(idleEvidence({ chipState: null }), "claude") === "unknown-state");
   check("a pending tool call keeps it awake", judge(idleEvidence({ pendingToolCalls: 1 }), "claude") === "agent-busy");
   check("background tasks keep it awake", judge(idleEvidence({ backgroundRunning: 2 }), "claude") === "agent-busy");
+  check(
+    "a chip working in the background keeps it awake",
+    judge(idleEvidence({ chipState: "background" }), "claude") === "agent-busy",
+  );
   check("live teammates keep it awake", judge(idleEvidence({ teammatesActive: 1 }), "claude") === "agent-busy");
   check("an unannounced turn keeps it awake", judge(idleEvidence({ turnActive: true }), "claude") === "agent-busy");
   check("a pending done keeps it awake", judge(idleEvidence({ pendingDone: true }), "claude") === "agent-busy");

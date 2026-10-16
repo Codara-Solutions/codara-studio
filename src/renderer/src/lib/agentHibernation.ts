@@ -40,7 +40,7 @@ export function sleepingPaneIds(tabs: readonly Tab[]): string[] {
 // from its own evidence anyway; this only saves it a pointless request.
 // "launching" is left out on purpose: a restored pane's leaf keeps it after
 // the agent settled while its workspace was hidden, so it proves nothing.
-const BUSY_CHIP_STATES = new Set(["working", "blocked", "stalled", "error"]);
+const BUSY_CHIP_STATES = new Set(["working", "background", "blocked", "stalled", "error"]);
 
 /**
  * Panes in a background workspace that are worth asking main about: a

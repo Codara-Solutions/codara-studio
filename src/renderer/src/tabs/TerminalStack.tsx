@@ -2949,6 +2949,20 @@ function deriveChipTone(worker: TerminalLeafWorker): ChipTone {
       frame: "accent",
     };
   }
+  if (runtime === "background") {
+    // The turn ended but work the agent started (subagents, shells) still
+    // runs and will wake it: busy, not ready. A hollow ring in the brand
+    // colour, the way the agent CLIs mark a background task, keeps it apart
+    // from the filled "working" dot.
+    const brand = workerBrandColor(worker);
+    return {
+      status: "working in background",
+      dot: "transparent",
+      dotGlow: `inset 0 0 0 1.5px ${brand}, 0 0 9px color-mix(in oklch, ${brand} 35%, transparent)`,
+      pulse: true,
+      frame: "accent",
+    };
+  }
   if (runtime === "blocked") {
     return {
       status: "needs you",

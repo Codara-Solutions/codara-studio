@@ -554,9 +554,17 @@ Notifications page of Settings choose where these alerts appear (toast, system n
 
 - **Finished**: once per prompt you submit, when the agent's turn really
   ends (a subagent or background agent finishing does not count). The title names the agent and the tab (`Claude Code finished · api`), and
-  the text quotes the agent's last message, how long the turn took, and how
-  many background tasks are still running. When those tasks finish, one
-  more alert says so.
+  the text quotes the agent's last message and how long the turn took.
+- **Working in background**: a Claude Code turn can end while work it
+  started still runs: background subagents, shells, workflows or monitors.
+  The agent reports back on its own once they finish, so it is not ready
+  yet. Its pane, its workspace in the rail, its card in the Agents view and
+  the jump palette say it works in the background, and keep-awake and the
+  quit prompt count it. "Finished" waits until that work is done and the
+  agent has reported on it. A shell running a dev server, a watcher or
+  `tail -f` never ends by itself and does not count; the alert names how
+  many such tasks still run. Work that shows no sign of life for 30 minutes
+  stops counting, and all of it ends when the agent exits.
 - **Needs you**: a permission prompt, a question or a plan to review, with
   the tool or question named. It is separate from "finished" and appears
   again for each new prompt in the same turn.

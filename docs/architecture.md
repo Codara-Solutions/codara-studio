@@ -59,7 +59,11 @@ prompt, or Claude's UserPromptSubmit hook) and is announced at most once.
 The end comes from the most trusted signal the pane has. For Claude Code that
 is the Stop hook of the lead session (subagent stops, tool calls and
 background-task follow-ups are not turn ends) and Claude's OSC 7501 program
-status, which Codara asks for by answering Claude's `?` query from main. For
+status, which Codara asks for by answering Claude's `?` query from main. A
+Claude turn that ends with background work still running (the Stop hook's
+`background_tasks`, OSC 7501 child records) is held: the pane reads
+`background`, and the turn is announced once that work has drained and
+Claude's follow-up turn on it has ended (`agent-background-work.ts`). For
 Codex it is the notify program (`codex-notify-installer.ts`,
 `resources/codex-hooks/`) and the `task_complete` record in Codex's session
 file (`codex-rollout-tail.ts`), deduplicated by turn id. Subagents and a

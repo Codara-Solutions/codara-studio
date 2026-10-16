@@ -25,6 +25,11 @@ interface Fixture {
   fakeClaude: string;
   /** A Claude Code stand-in that starts working on its first prompt and stays there. */
   busyClaude: string;
+  /**
+   * A Claude Code stand-in whose first turn ends with a background agent
+   * still running; the next prompt lets that agent finish.
+   */
+  backgroundClaude: string;
 }
 
 async function prepare(opts: { blockedRun?: boolean } = {}): Promise<Fixture> {
@@ -122,6 +127,47 @@ async function prepare(opts: { blockedRun?: boolean } = {}): Promise<Fixture> {
     `,
     "utf8",
   );
+  const backgroundClaude = join(binDir, "background-claude.js");
+  await writeFile(
+    backgroundClaude,
+    String.raw`
+      const out = (text) => process.stdout.write(text);
+      const status = (fields) => out("\x1b]7501;app=claude:" + fields + "\x07");
+      const b64 = (text) => Buffer.from(text, "utf8").toString("base64");
+      out("Claude Code v2.1.301\r\n> ");
+      status("state=idle");
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+      let buffer = "";
+      let phase = "prompt";
+      process.stdin.on("data", (data) => {
+        const text = data.toString("utf8");
+        if (text.includes("\x03")) process.exit(0);
+        buffer += text;
+        if (!buffer.includes("\r")) return;
+        buffer = "";
+        if (phase === "prompt") {
+          phase = "background";
+          status("state=working");
+          setTimeout(() => {
+            status("state=working:id=a1b2c3:title=" + b64("Review the parser"));
+            out("A reviewer is on it.\r\n> ");
+            status("state=done:msg=" + b64("A reviewer is on it."));
+          }, 1000);
+        } else if (phase === "background") {
+          phase = "over";
+          status("state=working");
+          setTimeout(() => {
+            status("state=clear:id=a1b2c3");
+            out("The review found nothing.\r\n> ");
+            status("state=done:msg=" + b64("The review found nothing."));
+          }, 1000);
+        }
+      });
+      setTimeout(() => process.exit(0), 120000);
+    `,
+    "utf8",
+  );
   // Keep the pane's shell away from any startup file.
   const shell = join(binDir, "bash");
   await writeFile(shell, '#!/bin/sh\nexec /bin/bash --noprofile --norc "$@"\n', "utf8");
@@ -134,6 +180,7 @@ async function prepare(opts: { blockedRun?: boolean } = {}): Promise<Fixture> {
     home,
     fakeClaude,
     busyClaude,
+    backgroundClaude,
     env: {
       ...env,
       HOME: userHome,
@@ -496,6 +543,55 @@ test("a switch from a card keeps every card's colours and says where you are", a
           expect(`${key} ${part} ${value}`).toBe(`${key} ${part} ${before[key]?.[part]}`);
         }
       }
+    });
+  } finally {
+    await app.close();
+    await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+test("an agent whose turn ended with background work still running is not ready", async () => {
+  test.setTimeout(90_000);
+  const fixture = await prepare();
+  const { app, page } = await launch(fixture);
+  try {
+    const count = page.locator('[data-workspace-id="ws-a"]').getByTestId("workspace-agent-count");
+    const input = page.locator(".xterm-helper-textarea:visible").first();
+    let paneId = "";
+    await test.step("its turn ends while a background agent it started still runs", async () => {
+      await page.getByRole("tab", { name: /terminals/i }).evaluate((tab) => (tab as HTMLElement).click());
+      await input.focus();
+      const call = process.platform === "win32" ? "& " : "";
+      await input.pressSequentially(`${call}"${process.execPath}" "${fixture.backgroundClaude}"`, { delay: 2 });
+      await input.press("Enter");
+      await expect(count).toHaveText("1", { timeout: 15_000 });
+      paneId = (await page.locator("[data-terminal-pane-id]:visible").first().getAttribute("data-terminal-pane-id")) ?? "";
+      expect(paneId).toBeTruthy();
+      await input.pressSequentially("review the parser in the background", { delay: 2 });
+      await input.press("Enter");
+    });
+
+    await test.step("the pane, the rail and the Agents view say it works in the background", async () => {
+      await expect(page.getByRole("status", { name: "CLAUDE working in background" })).toBeVisible({ timeout: 15_000 });
+      await expect(page.getByRole("status", { name: "CLAUDE ready" })).toHaveCount(0);
+      await expect(count).toHaveAttribute("data-working", "true");
+      await viewTab(page, "Agents").click();
+      const agent = card(page, `pane:${paneId}`);
+      await expect(agent).toHaveAttribute("data-agent-bucket", "working", { timeout: 15_000 });
+      await expect(agent).toContainText("In background");
+      await expect(agent).toContainText("1 agent running");
+      await viewTab(page, "Workspaces").click();
+    });
+
+    await test.step("once the background agent is done, the agent is ready", async () => {
+      await input.focus();
+      await input.pressSequentially("wrap it up", { delay: 2 });
+      await input.press("Enter");
+      await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 15_000 });
+      await expect(count).toHaveAttribute("data-working", "false");
+      await viewTab(page, "Agents").click();
+      await expect(card(page, `pane:${paneId}`)).toHaveAttribute("data-agent-bucket", "done", { timeout: 15_000 });
+      await expect(card(page, `pane:${paneId}`)).toContainText("The review found nothing.");
     });
   } finally {
     await app.close();

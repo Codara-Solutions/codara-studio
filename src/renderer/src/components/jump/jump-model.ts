@@ -15,7 +15,7 @@ export { workspaceRailSequence, worktreeSourceWorkspace } from "./rail-order";
 export type JumpEntryKind = "workspace" | "agent" | "terminal" | "editor" | "diff" | "browser";
 
 /** What an agent row shows about its agent. `needs-you` and `done` rank first. */
-export type JumpStatus = "needs-you" | "done" | "working" | "ready" | "starting" | "exited";
+export type JumpStatus = "needs-you" | "done" | "working" | "background" | "ready" | "starting" | "exited";
 
 export interface JumpTarget {
   workspaceId: string;
@@ -107,6 +107,8 @@ function statusOf(
   switch (state) {
     case "working":
       return { status: "working", tier: 2 };
+    case "background":
+      return { status: "background", tier: 2 };
     case "idle":
       return { status: "ready", tier: 2 };
     case "launching":

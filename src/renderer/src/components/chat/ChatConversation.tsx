@@ -3235,6 +3235,7 @@ function TerminalGlyph() {
 function runtimeStateColor(state: ChatWorker["runtimeState"]): string | null {
   switch (state) {
     case "working":
+    case "background":
       return "var(--accent)";
     case "blocked":
       return "var(--danger)";

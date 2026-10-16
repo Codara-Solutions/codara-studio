@@ -65,8 +65,8 @@ export type AgentReadyResult =
 // States that show the CLI itself is up (its banner, a turn, a dialog). The
 // pane chip starts at "launching" before the CLI runs, so for the chip only a
 // state the CLI produced counts.
-const MAIN_ALIVE_STATES: ReadonlySet<RuntimeState> = new Set(["launching", "working", "blocked", "stalled"]);
-const CHIP_ALIVE_STATES: ReadonlySet<RuntimeState> = new Set(["working", "blocked", "stalled"]);
+const MAIN_ALIVE_STATES: ReadonlySet<RuntimeState> = new Set(["launching", "working", "background", "blocked", "stalled"]);
+const CHIP_ALIVE_STATES: ReadonlySet<RuntimeState> = new Set(["working", "background", "blocked", "stalled"]);
 
 /**
  * Resolves with the pane id once the agent in the given tab is idle at its

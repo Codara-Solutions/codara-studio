@@ -992,6 +992,18 @@ async function main() {
     assert.equal(activityMod.countWorkingTerminalAgents(states, (id) => last[id] ?? null, now), 1);
   });
 
+  await check("an agent with background work counts while its pane lives, quiet screen or not", () => {
+    const now = 100 * 60_000;
+    // Its own turn ended, so its screen can sit still while a background
+    // build runs; the notifier already drops work that shows no life.
+    const last = { quiet: now - activityMod.TERMINAL_AGENT_SILENT_STALE_MS - 1 };
+    const states = [
+      { paneId: "quiet", state: "background" },
+      { paneId: "gone", state: "background" },
+    ];
+    assert.equal(activityMod.countWorkingTerminalAgents(states, (id) => last[id] ?? null, now), 1);
+  });
+
   await check("a workflow with a live agent is one automation, not two", () => {
     assert.deepEqual(
       activityMod.combineKeepAwakeActivity({ terminalAgents: 1, live: { chats: 2, automations: 1, workers: 3 }, activeWorkflows: 1 }),

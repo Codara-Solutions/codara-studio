@@ -22,6 +22,7 @@ import { descendantProcessesWithCommands } from "./owned-process-tree";
 import { emitTerminalAgentState, paneSourceKey, publish, rearm } from "./notify";
 import { nudgeUsageRefresh } from "./orchestration/usage-activity-refresh";
 import { signalAgentBoardChanged } from "./agent-board-signal";
+import { BackgroundWork, claudeBackgroundPaths, probeBackgroundFiles } from "./agent-background-work";
 import type { TerminalAgentActivity } from "@shared/agent-board";
 import type { RuntimeState, TerminalAgentStatePayload } from "@shared/types";
 import type { AgentHibernationEvidence } from "@shared/agent-hibernation";
@@ -65,6 +66,14 @@ import type { AgentHibernationEvidence } from "@shared/agent-hibernation";
 // Who is watching is the notify policy's call (src/main/notify): a finished
 // turn in a pane on screen is not announced; a prompt is announced unless its
 // pane is the selected one.
+//
+// Background work (agent-background-work.ts). A Claude turn can end while
+// work it started keeps running: background subagents, shells, workflows,
+// monitors. Claude wakes itself when they report back, so the pane is not
+// ready: its chip reads "background", and the turn's "finished" alert waits
+// until that work has drained and Claude's last follow-up turn has ended.
+// The work counts only while something shows it alive, and dies with the
+// agent's process or session.
 
 const RING_MAX = 8_192;
 // Banner-sniff window: while a pane has no detected runtime (every plain
@@ -100,6 +109,15 @@ const STRUCTURED_IDLE_SETTLE_MS = 1_000;
 // or prompt within this window and cancels the pending announcement.
 const HOOK_DONE_CONFIRM_MS = 800;
 const PROGRAM_DONE_CONFIRM_MS = 600;
+// With hooks active, a program-status done waits for the Stop hook too: only
+// the hook's input lists the background shells still running.
+const PROGRAM_DONE_HOOK_GRACE_MS = 1_500;
+// A turn held for its background work: once that work drains, Claude wakes
+// within moments to report on it, and that follow-up's end is the real
+// finish. Without a follow-up in this window the held turn is announced.
+const BACKGROUND_DRAIN_SETTLE_MS = 5_000;
+// How often a pane with background work reads the session's files.
+const BACKGROUND_PROBE_MS = 10_000;
 // When Codex has a structured completion source (the notify program or a
 // tracked session file), an idle screen waits this long for it so the alert
 // carries Codex's own message and an interrupted turn stays silent.
@@ -138,7 +156,9 @@ interface AgentTurn {
   announcedAt: number;
 }
 
-type DoneOrigin = "heuristic" | "explicit" | "program" | "hook" | "codex";
+// "held": a turn held for its background work, announced once that work is
+// gone without Claude waking to report on it.
+type DoneOrigin = "heuristic" | "explicit" | "program" | "hook" | "codex" | "held";
 
 const DONE_RANK: Record<DoneOrigin, number> = {
   heuristic: 0,
@@ -146,6 +166,7 @@ const DONE_RANK: Record<DoneOrigin, number> = {
   program: 2,
   hook: 3,
   codex: 3,
+  held: 3,
 };
 
 interface PendingDone {
@@ -153,7 +174,6 @@ interface PendingDone {
   origin: DoneOrigin;
   body: string | null;
   bodyRank: number;
-  backgroundRunning: number;
   // Claude's background work drained after the turn was already announced.
   followUp: boolean;
 }
@@ -223,7 +243,19 @@ interface PaneWatcher {
   // The UserPromptSubmit that started the current Claude activity was a
   // background task reporting back, not the user.
   hookFollowUp: boolean;
-  backgroundRunningAtLastStop: number;
+  // Work the agent started that runs on after its turn (see the header).
+  background: BackgroundWork;
+  // The Claude session whose hooks feed `background`. A nested `claude -p`
+  // in the pane fires hooks with its own session id.
+  backgroundSessionId: string | null;
+  // A turn whose end was held for background work, with the message to
+  // announce once that work drains.
+  heldDone: { body: string | null } | null;
+  backgroundWasActive: boolean;
+  backgroundDrainedAt: number;
+  backgroundSummaryKey: string;
+  backgroundProbeAt: number;
+  backgroundProbeInflight: boolean;
   lastProgramState: string | null;
   codexScreen: CodexTerminalScreen | null;
   codexIdleSince: number | null;
@@ -367,7 +399,14 @@ export function syncTerminalNotifyPanes(input: {
       lastToolDetail: null,
       activity: emptyActivity(),
       hookFollowUp: false,
-      backgroundRunningAtLastStop: 0,
+      background: new BackgroundWork(),
+      backgroundSessionId: null,
+      heldDone: null,
+      backgroundWasActive: false,
+      backgroundDrainedAt: 0,
+      backgroundSummaryKey: "",
+      backgroundProbeAt: 0,
+      backgroundProbeInflight: false,
       lastProgramState: null,
       codexScreen: null,
       codexIdleSince: null,
@@ -529,7 +568,8 @@ function resetAgentSession(w: PaneWatcher): void {
   w.lastToolDetail = null;
   noteActivity(w, emptyActivity());
   w.hookFollowUp = false;
-  w.backgroundRunningAtLastStop = 0;
+  clearBackground(w);
+  w.backgroundSessionId = null;
   w.lastProgramState = null;
   w.codexAnnouncedTurnIds = [];
   w.codexRollout = null;
@@ -551,6 +591,7 @@ function ensureSweep(): void {
         continue;
       }
       if (!w.runtime) continue;
+      sweepBackground(w, now);
       if (w.runtime === "codex") pollCodexRollout(w);
       if (w.runtime === "codex" && w.codexScreen) {
         sweepCodexScreen(w, now);
@@ -568,6 +609,8 @@ function ensureSweep(): void {
           // byte silence this long means the counter is stale.
           tanLog(`pane=${w.paneId} teammate counter stale (silence), cleared`);
           w.teammatesActive = 0;
+          // An agent already between turns was only waiting on them.
+          if (w.state !== "working" && w.lastEmittedState === "background") emitPaneState(w, "idle");
         } else {
           continue;
         }
@@ -591,6 +634,127 @@ function ensureSweep(): void {
     }
   }, SWEEP_MS);
   sweepTimer.unref();
+}
+
+// ── Background work ───────────────────────────────────────────────────────
+
+function clearBackground(w: PaneWatcher): void {
+  w.background.clear();
+  w.heldDone = null;
+  w.backgroundWasActive = false;
+  w.backgroundDrainedAt = 0;
+  w.backgroundProbeAt = 0;
+  if (w.backgroundSummaryKey) {
+    w.backgroundSummaryKey = "";
+    if (!w.excluded) signalAgentBoardChanged();
+  }
+}
+
+function backgroundActive(w: PaneWatcher, now: number): boolean {
+  return w.background.isActive(now);
+}
+
+// Background lists come only from the Claude session the pane follows: a
+// nested `claude -p` (a script, a tool call) fires hooks with its own id.
+function ownsBackgroundSession(w: PaneWatcher, sessionId: string | null): boolean {
+  if (!sessionId) return true;
+  if (!w.backgroundSessionId) w.backgroundSessionId = sessionId;
+  return w.backgroundSessionId === sessionId;
+}
+
+// The pane's conversation is now `sessionId` (the user prompted it, or it
+// was cleared or resumed). Work tracked for another one is not its work.
+function followBackgroundSession(w: PaneWatcher, sessionId: string | null, now: number): void {
+  if (!sessionId || w.backgroundSessionId === sessionId) return;
+  if (w.backgroundSessionId && w.background.size > 0) {
+    tanLog(`pane=${w.paneId} session ${sessionId.slice(0, 8)} replaces ${w.backgroundSessionId.slice(0, 8)}; background work cleared`);
+    clearBackground(w);
+  }
+  w.backgroundSessionId = sessionId;
+  syncBackground(w, now);
+}
+
+// Bring the chip and the Agents view in line with the pane's background work.
+function syncBackground(w: PaneWatcher, now: number): void {
+  const active = backgroundActive(w, now);
+  if (active !== w.backgroundWasActive) {
+    w.backgroundWasActive = active;
+    if (!active) w.backgroundDrainedAt = now;
+    tanLog(`pane=${w.paneId} background work ${active ? "running" : "over"} (${w.background.size} known)`);
+    // Only the chip of an agent between turns shows it.
+    if (w.state === "idle" && (w.lastEmittedState === "idle" || w.lastEmittedState === "background")) {
+      emitPaneState(w, "idle");
+    }
+  }
+  const summary = active ? w.background.summary(now) : null;
+  const key = summary ? `${summary.agents}/${summary.shells}/${summary.other}` : "";
+  if (key !== w.backgroundSummaryKey) {
+    w.backgroundSummaryKey = key;
+    if (!w.excluded && w.runtime) signalAgentBoardChanged();
+  }
+}
+
+function sweepBackground(w: PaneWatcher, now: number): void {
+  if (w.background.size === 0 && !w.heldDone && !w.backgroundWasActive) return;
+  if (
+    w.background.size > 0 &&
+    !w.backgroundProbeInflight &&
+    now - w.backgroundProbeAt >= BACKGROUND_PROBE_MS &&
+    (w.background.paths.subagentsDir || w.background.paths.tasksDir)
+  ) {
+    probeBackground(w, now);
+  }
+  syncBackground(w, now);
+  settleHeldDone(w, now);
+}
+
+// The session's files show which tasks still write: a shell's output, a
+// subagent's transcript.
+function probeBackground(w: PaneWatcher, now: number): void {
+  w.backgroundProbeAt = now;
+  w.backgroundProbeInflight = true;
+  const work = w.background;
+  void probeBackgroundFiles(work.paths, work.all())
+    .then((signs) => {
+      if (watchers.get(w.paneId) !== w) return;
+      const at = Date.now();
+      for (const sign of signs) {
+        if (sign.modifiedAt !== null) work.noteTaskSign(sign.id, Math.min(sign.modifiedAt, at));
+      }
+      syncBackground(w, at);
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      w.backgroundProbeInflight = false;
+    });
+}
+
+// A turn ended while work it started still runs. Its "finished" waits; the
+// chip says the agent works in the background.
+function holdDone(w: PaneWatcher, body: string | null, now: number): void {
+  w.heldDone = { body: body ?? w.heldDone?.body ?? null };
+  const summary = w.background.summary(now);
+  tanLog(
+    `pane=${w.paneId} turn end held for background work (agents=${summary.agents} shells=${summary.shells} other=${summary.other})`,
+  );
+  syncBackground(w, now);
+}
+
+// The work a held turn waited on is gone. Claude normally wakes to report on
+// it, and that follow-up's end finishes the turn; this covers work that ended
+// or went quiet with no follow-up.
+function settleHeldDone(w: PaneWatcher, now: number): void {
+  const held = w.heldDone;
+  if (!held) return;
+  if (!turnActive(w)) {
+    w.heldDone = null;
+    return;
+  }
+  if (backgroundActive(w, now) || w.state !== "idle" || w.hookFollowUp || w.pendingDone) return;
+  if (now - w.backgroundDrainedAt < BACKGROUND_DRAIN_SETTLE_MS) return;
+  w.heldDone = null;
+  tanLog(`pane=${w.paneId} background work over without a follow-up; announcing the held turn`);
+  requestDone(w, { origin: "held", body: held.body, delayMs: 0 });
 }
 
 function sweepTrustedClaude(w: PaneWatcher, now: number): void {
@@ -676,6 +840,12 @@ function turnActive(w: PaneWatcher): boolean {
   return w.turn !== null && !w.turn.announced;
 }
 
+// The agent itself works on the turn, rather than waiting on background work
+// it started (a held turn).
+function leadTurnRunning(w: PaneWatcher): boolean {
+  return turnActive(w) && w.heldDone === null;
+}
+
 function startTurn(w: PaneWatcher, now: number, source: AgentTurn["source"], sessionId: string | null): void {
   if (w.replayingTail) return;
   cancelPendingDone(w, "new turn");
@@ -684,6 +854,8 @@ function startTurn(w: PaneWatcher, now: number, source: AgentTurn["source"], ses
     w.lastWorkingAt = 0;
   }
   w.turn = { startedAt: now, source, sessionId, announced: false, announcedAt: 0 };
+  // A turn held for background work is superseded; this one is announced.
+  w.heldDone = null;
   w.screenIdleSince = null;
   w.lastOscNotifyAt = 0;
   tanLog(`pane=${w.paneId} turn start (${source}${sessionId ? ` session=${sessionId.slice(0, 8)}` : ""})`);
@@ -705,6 +877,7 @@ function interruptedThisTurn(w: PaneWatcher, now: number): boolean {
 // The turn is over without anything worth announcing (the user stopped it).
 function closeTurnSilently(w: PaneWatcher, now: number, reason: string): void {
   cancelPendingDone(w, reason);
+  w.heldDone = null;
   if (!w.turn || w.turn.announced) return;
   w.turn.announced = true;
   w.turn.announcedAt = now;
@@ -717,7 +890,6 @@ function requestDone(
     origin: DoneOrigin;
     delayMs: number;
     body?: string | null;
-    backgroundRunning?: number;
     followUp?: boolean;
   },
 ): void {
@@ -739,7 +911,6 @@ function requestDone(
     origin: req.origin,
     body: keepOld ? existing.body : newBody,
     bodyRank: keepOld ? existing.bodyRank : newBody ? rank : -1,
-    backgroundRunning: req.backgroundRunning ?? existing?.backgroundRunning ?? 0,
     followUp: req.followUp === true || existing?.followUp === true,
   };
   w.pendingDone = pending;
@@ -758,6 +929,12 @@ function fireDone(w: PaneWatcher, pending: PendingDone): void {
   if (pending.timer) clearTimeout(pending.timer);
   if (!pending.followUp && !turnActive(w)) return;
   const now = Date.now();
+  // The turn ended but work it started still runs and will wake the agent:
+  // the agent is not done, so neither is the turn.
+  if (!pending.followUp && backgroundActive(w, now)) {
+    holdDone(w, pending.body, now);
+    return;
+  }
   const startedAt = w.turn && !w.turn.announced ? w.turn.startedAt : null;
   if (w.turn) {
     w.turn.announced = true;
@@ -769,7 +946,9 @@ function fireDone(w: PaneWatcher, pending: PendingDone): void {
   deliver(w, "done", {
     body: pending.body,
     durationMs: startedAt !== null ? now - startedAt : null,
-    backgroundRunning: pending.backgroundRunning,
+    // What still runs once the turn is announced: services such as a dev
+    // server, or work that went quiet.
+    backgroundRunning: pending.followUp ? 0 : w.background.size,
     followUp: pending.followUp,
   });
 }
@@ -812,6 +991,12 @@ function needsYou(w: PaneWatcher, now: number, body: string | null, why: string)
 function promptResolved(w: PaneWatcher, now: number): void {
   if (w.state !== "blocked") return;
   rearm(paneSourceKey(w.paneId));
+  // A background agent's prompt, answered while the lead waits on it.
+  if (w.heldDone && !w.hookFollowUp) {
+    w.state = "idle";
+    emitPaneState(w, "idle");
+    return;
+  }
   enterWorking(w, now);
 }
 
@@ -827,6 +1012,9 @@ function enterWorking(w: PaneWatcher, now: number): void {
   if (w.state !== "working") {
     w.workingSince = now;
     tanLog(`pane=${w.paneId} state -> working (was ${w.state})`);
+    emitPaneState(w, "working");
+  } else if (w.lastEmittedState === "background") {
+    // The lead resumed while teammates still run (heuristic panes).
     emitPaneState(w, "working");
   }
   w.state = "working";
@@ -949,17 +1137,6 @@ function questionText(input: unknown): string | null {
   return typeof question === "string" && question.trim() ? oneLine(question, SUMMARY_MAX_CHARS) : null;
 }
 
-function runningBackgroundTasks(value: unknown): number {
-  if (!Array.isArray(value)) return 0;
-  let running = 0;
-  for (const task of value) {
-    if (!task || typeof task !== "object") continue;
-    const status = (task as { status?: unknown }).status;
-    if (typeof status !== "string" || /^(?:running|pending|in_progress|active)$/i.test(status)) running += 1;
-  }
-  return running;
-}
-
 // Claude Code hook events (and the Codex notify program's events) for a pane
 // the user opened themselves, routed here by hook-watcher.ts.
 export function noteTerminalHookEvent(
@@ -988,10 +1165,13 @@ export function noteTerminalHookEvent(
   // id. While the user's turn is open, only its own session counts.
   const nested = sessionId !== null && turnActive(w) && w.turn?.sessionId != null && sessionId !== w.turn.sessionId;
   if (nested) return;
+  // Every hook a background agent fires shows it still works.
+  if (agentId) w.background.noteTaskSign(agentId, now);
   switch (hookName) {
     case "UserPromptSubmit": {
       if (agentId) return;
       const prompt = stringField(payload, "prompt") ?? "";
+      followBackgroundSession(w, sessionId, now);
       w.pendingToolCalls = 0;
       // No call is pending, so no tool is running (a follow-up too).
       noteActivity(w, { tool: null });
@@ -1030,7 +1210,8 @@ export function noteTerminalHookEvent(
       }
       if (w.signals.programStatus) return;
       if (w.state === "blocked") promptResolved(w, now);
-      else if (turnActive(w) || w.hookFollowUp) enterWorking(w, now);
+      // A background agent's tool calls are not the lead working.
+      else if (leadTurnRunning(w) || w.hookFollowUp) enterWorking(w, now);
       return;
     }
     case "PostToolUse":
@@ -1062,6 +1243,15 @@ export function noteTerminalHookEvent(
       if (agentId) return;
       handleClaudeStop(w, now, hookName, payload);
       return;
+    case "SubagentStop":
+      // Never a lead-turn boundary, and not the end of a background agent
+      // either: one stops and resumes many times while it waits on its own
+      // work. Its list of the session's background tasks is still current.
+      if (ownsBackgroundSession(w, sessionId)) {
+        w.background.applyHookList(payload?.background_tasks, now, claudeBackgroundPaths(payload));
+        syncBackground(w, now);
+      }
+      return;
     case "SessionStart": {
       const source = stringField(payload, "source") ?? "";
       // compact fires inside a turn.
@@ -1070,16 +1260,21 @@ export function noteTerminalHookEvent(
       w.turn = null;
       w.pendingToolCalls = 0;
       noteActivity(w, { tool: null });
-      w.backgroundRunningAtLastStop = 0;
+      followBackgroundSession(w, sessionId, now);
       w.hookFollowUp = false;
       return;
     }
     case "SessionEnd":
       closeTurnSilently(w, now, "session end");
       w.pendingToolCalls = 0;
+      // The session's background work ends with it.
+      if (sessionId && sessionId === w.backgroundSessionId) {
+        clearBackground(w);
+        if (w.state === "idle" && w.lastEmittedState === "background") emitPaneState(w, "idle");
+      }
       return;
     default:
-      // SubagentStart / SubagentStop / PreCompact: never a lead-turn boundary.
+      // SubagentStart / PreCompact: never a lead-turn boundary.
       return;
   }
 }
@@ -1090,19 +1285,25 @@ function handleClaudeStop(
   hookName: string,
   payload: Record<string, unknown> | null,
 ): void {
-  const running = runningBackgroundTasks(payload?.background_tasks);
   const message = summarizeAgentMessage(payload?.last_assistant_message);
   const followUp = w.hookFollowUp;
   w.hookFollowUp = false;
   w.pendingToolCalls = 0;
   w.screenIdleSince = null;
+  const activeBefore = backgroundActive(w, now);
+  if (ownsBackgroundSession(w, stringField(payload, "session_id"))) {
+    w.background.applyHookList(payload?.background_tasks, now, claudeBackgroundPaths(payload));
+  }
+  const activeAfter = backgroundActive(w, now);
+  const drained = activeBefore && !activeAfter;
   if (!w.signals.programStatus) {
     w.state = "idle";
     emitPaneState(w, "idle");
   }
-  const drained = w.backgroundRunningAtLastStop > 0 && running === 0;
-  w.backgroundRunningAtLastStop = running;
-  tanLog(`pane=${w.paneId} hook ${hookName} (background running=${running}, follow-up=${followUp})`);
+  syncBackground(w, now);
+  tanLog(
+    `pane=${w.paneId} hook ${hookName} (background known=${w.background.size} active=${activeAfter}, follow-up=${followUp})`,
+  );
   if (hookName === "StopFailure") {
     const error = stringField(payload, "error") ?? stringField(payload, "error_type");
     const body = error ? `The turn ended with an error: ${oneLine(error, 100)}` : "The turn ended with an API error.";
@@ -1113,16 +1314,14 @@ function handleClaudeStop(
     deliver(w, "failed", { body });
     return;
   }
-  if (turnActive(w) && !followUp) {
-    requestDone(w, {
-      origin: "hook",
-      body: message,
-      backgroundRunning: running,
-      delayMs: HOOK_DONE_CONFIRM_MS,
-    });
+  // The turn, or a follow-up on the work a held turn waits for. fireDone
+  // holds it again while background work still runs.
+  if (turnActive(w)) {
+    requestDone(w, { origin: "hook", body: message, delayMs: HOOK_DONE_CONFIRM_MS });
     return;
   }
-  if (drained) {
+  // Background work started after the turn was announced (by a follow-up).
+  if (followUp && drained) {
     requestDone(w, { origin: "hook", body: message, followUp: true, delayMs: HOOK_DONE_CONFIRM_MS });
   }
 }
@@ -1254,7 +1453,7 @@ export function terminalAgentHibernationEvidence(paneId: string): AgentHibernati
     turnActive: turnActive(w),
     pendingDone: w.pendingDone !== null,
     pendingToolCalls: w.pendingToolCalls,
-    backgroundRunning: w.backgroundRunningAtLastStop,
+    backgroundRunning: w.background.size,
     teammatesActive: w.teammatesActive,
     codexAwaitingIdle: w.codexAwaitingIdle,
     lastUserInputAt: w.lastUserInputAt,
@@ -1282,7 +1481,9 @@ export interface TerminalAgentMidTurn {
   runtime: PublicAgentRuntime;
   // "waiting": stopped inside a turn on a prompt for the user. Quitting still
   // ends the turn, so it counts, but nothing will finish it on its own.
-  state: "working" | "waiting";
+  // "background": between turns, with background work (subagents, shells)
+  // that quitting would kill.
+  state: "working" | "waiting" | "background";
 }
 
 // Terminal agents a quit or an update restart would cut off in the middle of
@@ -1294,7 +1495,13 @@ export function terminalAgentsMidTurn(): TerminalAgentMidTurn[] {
   for (const w of watchers.values()) {
     if (w.excluded || w.disposing || !w.runtime || !pty.hasSession(w.paneId)) continue;
     const state =
-      w.state === "working" ? "working" : w.state === "blocked" && turnActive(w) ? "waiting" : null;
+      w.state === "working"
+        ? "working"
+        : w.state === "blocked" && turnActive(w)
+          ? "waiting"
+          : w.lastEmittedState === "background"
+            ? "background"
+            : null;
     if (!state) continue;
     out.push({
       paneId: w.paneId,
@@ -1431,6 +1638,8 @@ export interface ProgramStatusReport {
   id: string | null;
   kind: string | null;
   msg: string | null;
+  // A child record's display title.
+  title: string | null;
 }
 
 function decodeStatusText(value: string | undefined): string | null {
@@ -1463,6 +1672,7 @@ export function parseProgramStatus(body: string): ProgramStatusReport | null {
     id: fields.get("id") ?? null,
     kind: fields.get("kind") ?? null,
     msg: decodeStatusText(fields.get("msg")),
+    title: decodeStatusText(fields.get("title")),
   };
 }
 
@@ -1475,9 +1685,16 @@ function blockedBody(kind: string | null, msg: string | null): string {
 }
 
 function handleProgramStatus(w: PaneWatcher, report: ProgramStatusReport, now: number): void {
-  // Child records describe background tasks. The parent's own state decides
-  // whether the turn is done.
-  if (report.id) return;
+  // Child records describe background tasks (agents, teammates, workflows;
+  // not shells): they run on after the parent reports its turn done.
+  if (report.id) {
+    if (report.state === "clear") w.background.end(report.id, now);
+    else if (report.state === "working" || report.state === "blocked") {
+      w.background.applyStatusChild(report.id, report.title ?? report.msg, now);
+    }
+    syncBackground(w, now);
+    return;
+  }
   const app = report.app ?? "";
   const reported: PublicAgentRuntime | null = app === "codex" ? "codex" : app.startsWith("claude") ? "claude" : null;
   if (!w.runtime && reported) identifyRuntime(w, reported, "program status");
@@ -1507,7 +1724,13 @@ function handleProgramStatus(w: PaneWatcher, report: ProgramStatusReport, now: n
       w.state = "idle";
       emitPaneState(w, "idle");
       if (w.runtime === "codex") return;
-      requestDone(w, { origin: "program", body: report.msg, delayMs: PROGRAM_DONE_CONFIRM_MS });
+      // With hooks, the Stop hook's list of background work may still be on
+      // its way; the hook's own done replaces this one.
+      requestDone(w, {
+        origin: "program",
+        body: report.msg,
+        delayMs: w.signals.hooks ? PROGRAM_DONE_HOOK_GRACE_MS : PROGRAM_DONE_CONFIRM_MS,
+      });
       return;
     case "idle": {
       const wasActive = previous === "working" || previous === "blocked";
@@ -1526,6 +1749,11 @@ function handleProgramStatus(w: PaneWatcher, report: ProgramStatusReport, now: n
       closeTurnSilently(w, now, "program status idle (stopped)");
       return;
     }
+    case "clear":
+      // The program took its status down (it is exiting); so are its records.
+      w.background.clearStatusChildren();
+      syncBackground(w, now);
+      return;
     case "error":
       w.state = "failed";
       // Why it stopped; without a reason, not the last good message either.
@@ -1564,6 +1792,7 @@ function onChunk(w: PaneWatcher, chunk: Buffer): void {
   const decoded = w.decoder.decode(chunk, { stream: true });
   if (decoded.length === 0) return;
   w.lastOutputAt = Date.now();
+  if (w.background.size > 0 && !w.replayingTail) w.background.noteScreenSign(w.lastOutputAt);
   const carryLen = w.carry.length;
   const text = w.carry + decoded;
 
@@ -1814,7 +2043,7 @@ function heuristicIdle(w: PaneWatcher, now: number, why: string, confirmMs: numb
   if (w.teammatesActive > 0) {
     tanLog(`pane=${w.paneId} ${why} held: ${w.teammatesActive} teammate(s) running`);
     // A blocked chip stays blocked; a pending prompt is the actionable cue.
-    if (w.state !== "blocked") emitPaneState(w, "working");
+    if (w.state !== "blocked") emitPaneState(w, "background");
     return;
   }
   const finished = w.state === "working";
@@ -1956,7 +2185,7 @@ function handleExplicitNotify(w: PaneWatcher, message: string): void {
   }
   if (kind === "done" && w.teammatesActive > 0) {
     tanLog(`pane=${w.paneId} explicit done held: ${w.teammatesActive} teammate(s) running`);
-    if (w.state !== "blocked") emitPaneState(w, "working");
+    if (w.state !== "blocked") emitPaneState(w, "background");
     return;
   }
   if (kind === "blocked") {
@@ -2011,6 +2240,8 @@ function runtimeLabel(runtime: PublicAgentRuntime | null): string {
 // the renderer's own poller is frozen). Dedup on lastEmittedState.
 function emitPaneState(w: PaneWatcher, chipState: RuntimeState): void {
   if (w.excluded) return;
+  // An agent between turns with work of its own still running is not ready.
+  if (chipState === "idle" && backgroundActive(w, Date.now())) chipState = "background";
   if (w.lastEmittedState === chipState) return;
   w.lastEmittedState = chipState;
   // A prompt answered or gone takes its question with it.
@@ -2176,6 +2407,7 @@ export function terminalAgentActivitySnapshot(): TerminalAgentActivity[] {
     if (w.excluded || w.disposing || !w.runtime) continue;
     const state = w.lastEmittedState ?? "launching";
     const active = state === "working" || state === "blocked" || state === "stalled";
+    const background = state === "background" ? w.background.summary(Date.now()) : null;
     out.push({
       paneId: w.paneId,
       workspaceId: w.workspaceId,
@@ -2190,6 +2422,7 @@ export function terminalAgentActivitySnapshot(): TerminalAgentActivity[] {
       prompt: w.activity.prompt,
       message: summarizeAgentMessage(w.activity.message),
       question: state === "blocked" ? w.activity.question : null,
+      background,
       accountProfileId: null,
     });
   }

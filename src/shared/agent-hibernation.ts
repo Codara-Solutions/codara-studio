@@ -127,6 +127,9 @@ export function judgeAgentEvidence(
   if (evidence.runtime !== expected) return "runtime-mismatch";
   if (evidence.state === "blocked" || evidence.chipState === "blocked") return "waiting-on-user";
   if (evidence.state !== "idle") return "agent-busy";
+  // Its turn ended but work it started still runs and will wake it; stopping
+  // the agent would kill that work.
+  if (evidence.chipState === "background" || evidence.backgroundRunning > 0) return "agent-busy";
   // "launching" is the chip of an agent that started and never ran a turn
   // since: a resumed session the user has not typed into yet keeps it for
   // good, because only a turn's end moves the chip to idle. With the state

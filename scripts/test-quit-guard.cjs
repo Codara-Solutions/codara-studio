@@ -123,16 +123,18 @@ async function main() {
         agent("codex", "web"),
         agent("codex", "web"),
         agent("pi", "docs", "waiting"),
+        agent("claude", "web", "background"),
       ]),
     );
     assert.deepEqual(items, [
       "Claude Code in api",
       "2 Codex agents in web",
       "Pi in docs (waiting for you)",
+      "Claude Code in web (working in background)",
       "Cora in 2 chats",
       "1 automation",
     ]);
-    check("items group agents per runtime and project, waiting apart, Cora last", true);
+    check("items group agents per runtime and project, waiting and background apart, Cora last", true);
   }
   {
     const many = ["a", "b", "c", "d", "e", "f"].map((ws) => agent("claude", ws));
@@ -368,6 +370,23 @@ async function main() {
     midTurn().find((a) => a.paneId === "claude")?.state === "waiting",
     JSON.stringify(midTurn()),
   );
+
+  // Its turn ended, but a background agent it started still runs: quitting
+  // would kill that agent.
+  notify.noteTerminalHookEvent("claude", "UserPromptSubmit", { session_id: "s-1", prompt: "review it in the background" });
+  notify.noteTerminalHookEvent("claude", "Stop", {
+    session_id: "s-1",
+    last_assistant_message: "A reviewer is on it.",
+    background_tasks: [{ id: "a1", type: "local_agent", status: "running" }],
+  });
+  check(
+    "an agent between turns with background work counts",
+    midTurn().find((a) => a.paneId === "claude")?.state === "background",
+    JSON.stringify(midTurn()),
+  );
+  notify.noteTerminalHookEvent("claude", "UserPromptSubmit", { session_id: "s-1", prompt: "<task-notification>" });
+  notify.noteTerminalHookEvent("claude", "Stop", { session_id: "s-1", last_assistant_message: "Reviewed.", background_tasks: [] });
+  check("once its background work drained it is not listed", !midTurn().some((a) => a.paneId === "claude"), JSON.stringify(midTurn()));
 
   Q.dead.add("codex");
   check("a pane whose process is gone is not listed", !midTurn().some((a) => a.paneId === "codex"));

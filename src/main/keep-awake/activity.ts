@@ -1,5 +1,5 @@
 import type { KeepAwakeActivity } from "@shared/keep-awake";
-import type { RuntimeState } from "@shared/types";
+import { runtimeStateIsBusy, type RuntimeState } from "@shared/types";
 
 // What counts as "agents work" for keep-awake, from the snapshots the rest of
 // main already keeps: the terminal notifier's chip state per pane, the
@@ -26,11 +26,14 @@ export function countWorkingTerminalAgents(
 ): number {
   let count = 0;
   for (const entry of states) {
-    if (entry.state !== "working") continue;
+    if (!runtimeStateIsBusy(entry.state)) continue;
     const at = lastOutputAt(entry.paneId);
     // No live PTY behind the pane: whatever the chip says, nothing runs.
     if (at === null || !Number.isFinite(at)) continue;
-    if (now - at > staleMs) continue;
+    // Background work (a build in a background shell) can run with the
+    // agent's screen still; the notifier already drops work that shows no
+    // sign of life for as long as this window.
+    if (entry.state === "working" && now - at > staleMs) continue;
     count += 1;
   }
   return count;

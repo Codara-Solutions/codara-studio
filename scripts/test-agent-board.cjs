@@ -127,6 +127,11 @@ async function testBuilder() {
   check("blocked terminal needs you", board.terminalAgentPlacement("blocked").bucket === "needs-you");
   check("errored terminal needs you as Stopped", board.terminalAgentPlacement("error").status === "Stopped");
   check("working terminal is working", board.terminalAgentPlacement("working").bucket === "working");
+  check(
+    "a terminal working in the background is working, said so",
+    board.terminalAgentPlacement("background").bucket === "working" &&
+      board.terminalAgentPlacement("background").status === "In background",
+  );
   check("stalled terminal is still working", board.terminalAgentPlacement("stalled").bucket === "working");
   check("idle terminal is done", board.terminalAgentPlacement("idle").bucket === "done");
   check("launching terminal shows as starting", board.terminalAgentPlacement("launching").status === "Starting");
@@ -308,6 +313,28 @@ async function testBuilder() {
     stopped,
   );
   check("a stopped pane says why", stopped && stopped.message === "Rate limited.");
+  const background = board.buildAgentBoard({
+    now: NOW,
+    workspaces: WORKSPACES,
+    layoutPanes: [],
+    activity: [
+      activity({ paneId: "p-bg", state: "background", turnStartedAt: NOW - 20 * MIN, background: { agents: 2, shells: 1, other: 0 } }),
+      activity({ paneId: "p-bg-old", tabId: "t2", state: "background" }),
+    ],
+    runs: [],
+  });
+  const bgCard = background.working.find((card) => card.key === "pane:p-bg");
+  check(
+    "a pane working in the background sits with the working agents and says what runs",
+    bgCard && bgCard.status === "In background" && bgCard.detail === "2 agents and 1 shell running" && bgCard.since === NOW - 20 * MIN,
+    bgCard,
+  );
+  check(
+    "without counts (an older main) it still says background work runs",
+    background.working.find((card) => card.key === "pane:p-bg-old")?.detail === "Background work running",
+  );
+  check("describing background work", board.describeAgentBackground({ agents: 1, shells: 2, other: 1 }) === "1 agent, 2 shells and 1 task");
+  check("nothing running is described as nothing", board.describeAgentBackground({ agents: 0, shells: 0, other: 0 }) === null);
   check(
     "a pane card opens its terminal",
     blocked.target.type === "terminal" && blocked.target.paneId === "p-blocked" && blocked.target.tabId === "t1",

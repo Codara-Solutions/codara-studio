@@ -337,6 +337,10 @@ function checkEntries(lib) {
   });
   assert.deepEqual(relisted.map((e) => e.id), ["ws:h", "tab:t-new"]);
   assert.equal(get("pane:p-codex").status, "working");
+  // Background work after its turn is not ready.
+  const backgroundCodex = sources();
+  backgroundCodex.layouts[1].tabs[0].root.worker = { ...backgroundCodex.layouts[1].tabs[0].root.worker, runtimeState: "background" };
+  assert.equal(buildJumpEntries(backgroundCodex).find((e) => e.id === "pane:p-codex").status, "background");
   assert.equal(get("tab:t-edit").detail, "codara-studio · src");
   assert.equal(get("tab:t-web").label, "localhost:5173");
   assert.equal(get("ws:b").detail, "fix-auth");

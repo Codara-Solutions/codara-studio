@@ -2773,6 +2773,10 @@ export type WorkerAttemptStatus =
 //                  before the first working/idle classification resolves so a
 //                  freshly-launched agent reads as "starting", not busy.
 //   - "working" : the agent is actively thinking / streaming tokens.
+//   - "background": the agent's own turn ended but work it started still runs
+//                 (background subagents, shells, workflows, monitors) and
+//                 will report back and wake it. Busy, not ready; the user may
+//                 still type to it. Set only by the main-process notifier.
 //   - "blocked" : the agent is waiting for the user (permission prompt,
 //                 confirmation, "do you want to proceed?").
 //   - "idle"    : the WIRE name for "turn complete / waiting for your input /
@@ -2797,11 +2801,21 @@ export type WorkerAttemptStatus =
 export type RuntimeState =
   | "launching"
   | "working"
+  | "background"
   | "blocked"
   | "idle"
   | "done"
   | "error"
   | "stalled";
+
+/**
+ * The agent is doing work right now, in its turn or in the background:
+ * what keep-awake, the quit guard and the rail's activity count treat as
+ * "agents work".
+ */
+export function runtimeStateIsBusy(state: RuntimeState | null | undefined): boolean {
+  return state === "working" || state === "background";
+}
 
 // Binary foreground-agent lifecycle emitted by a terminal pane. A false state
 // can be heuristic (the visible UI disappeared briefly) or confirmed (the

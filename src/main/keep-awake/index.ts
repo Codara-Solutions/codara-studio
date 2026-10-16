@@ -13,6 +13,7 @@ import { getPreferenceCached, loadPreferences, onPreferenceChange } from "../pre
 import * as pty from "../pty-manager";
 import { subscribeAgentBoardChanged } from "../agent-board-signal";
 import { terminalAgentStateSnapshot } from "../terminal-agent-notify";
+import { runtimeStateIsBusy } from "@shared/types";
 import { combineKeepAwakeActivity, countWorkingTerminalAgents } from "./activity";
 import { batteryFrom, readLinuxPower, systemPowerSupplyProbe } from "./battery";
 import { KeepAwakeController, type LidHold, type SleepBlocker } from "./controller";
@@ -60,7 +61,7 @@ function broadcast(status: KeepAwakeStatus): void {
 }
 
 function readActivity(): KeepAwakeActivity {
-  const working = terminalAgentStateSnapshot().filter((entry) => entry.state === "working");
+  const working = terminalAgentStateSnapshot().filter((entry) => runtimeStateIsBusy(entry.state));
   let terminalAgents = 0;
   if (working.length > 0) {
     const lastOutput = new Map(pty.resourceSnapshot().sessions.map((session) => [session.id, session.lastOutputAt]));

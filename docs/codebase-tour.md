@@ -525,7 +525,7 @@ Debugging:
 | Accounts | `unified-accounts.ts` and the adapter in `account-adapters/` | `claude-cli-live-login.ts`, `claude-login-keeper.ts`, `cli-account-homes.ts`, `credential-mirror.ts`, `outside-write-guard.ts`; `components/AccountCards.tsx` |
 | Terminal rendering or input | `components/Terminal/useTerminalSession.ts` | `pty-manager.ts` on the main side |
 | Tabs, splits, docking | `src/renderer/src/tabs/useTabs.ts` | `paneTree.ts`, `dock.ts`, `TerminalStack.tsx` |
-| Detecting an agent's state in a pane | `src/shared/agent-patterns.ts` | `src/main/terminal-agent-notify.ts`; `test-agent-patterns`, `test-terminal-agent-notify` |
+| Detecting an agent's state in a pane | `src/shared/agent-patterns.ts` | `src/main/terminal-agent-notify.ts`, `src/main/agent-background-work.ts` (work still running after a turn); `test-agent-patterns`, `test-terminal-agent-notify`, `test-agent-background-work` |
 | Notifications | `src/main/notify/policy.ts` (whether to deliver) | `deliver.ts`; `src/renderer/src/notifications/` |
 | Agent session search (the rail's Sessions view) | `src/main/session-search/session-index.ts` (the index, no Electron) | `transcript-parsers.ts`, `session-index-worker.ts` (its thread), `service.ts` (pacing, IPC, the agent tool); `components/session-search/`; `test-session-search`, `tests/e2e/session-search.spec.ts`; [agent-session-search.md](./agent-session-search.md) |
 | The rail's Agents view | `src/shared/agent-board.ts` (which group a card lands in) | `components/agent-board/`; `src/main/agent-board.ts` and `terminalAgentActivitySnapshot` in `terminal-agent-notify.ts`; `test-agent-board`, `tests/e2e/agent-board.spec.ts` |
