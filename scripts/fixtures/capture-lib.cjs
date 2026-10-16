@@ -25,6 +25,7 @@ async function loadCaptureLib() {
         export * from "./record/gif-encoder";
         export * from "./record/gif-worker";
         export * from "./record/ffmpeg";
+        export * from "./record/video-mux";
         export * from "./record/recorder";
         export * from "./capture/paint";
         export * from "./locator";

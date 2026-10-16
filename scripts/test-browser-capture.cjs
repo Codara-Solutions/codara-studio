@@ -294,7 +294,9 @@ const deps = {
 
 async function recorder(lib, home) {
   assert.deepEqual(lib.normalizeRecordOptions({}), lib.RECORD_DEFAULTS);
-  for (const [raw, message] of [[{ format: "mp4" }, /format/], [{ fps: 60 }, /fps/], [{ maxSeconds: 600 }, /maxSeconds/], [{ maxWidth: 10 }, /maxWidth/]]) {
+  assert.deepEqual(lib.normalizeRecordOptions({ format: "mp4" }), { format: "mp4", fps: 30, maxSeconds: 30, maxWidth: 1920 }, "a video defaults to smooth and full size");
+  assert.deepEqual(lib.normalizeRecordOptions({ format: "gif", fps: 24.4, maxWidth: 640 }), { format: "gif", fps: 24, maxSeconds: 30, maxWidth: 640 });
+  for (const [raw, message] of [[{ format: "avi" }, /format/], [{ fps: 60 }, /fps/], [{ maxSeconds: 600 }, /maxSeconds/], [{ maxWidth: 10 }, /maxWidth/], [{ maxWidth: 4000 }, /maxWidth/]]) {
     assert.throws(() => lib.normalizeRecordOptions(raw), (error) => error instanceof lib.RecordOptionError && message.test(error.message));
   }
 
@@ -339,8 +341,11 @@ async function recorder(lib, home) {
   assert.ok(decoded.frames.at(-1).delay >= 100, "the last frame holds before the GIF loops");
   assert.equal(fs.existsSync(path.join(home, "workspace-data", "ws-rec", "browser", "recording-frames")) ? fs.readdirSync(path.join(home, "workspace-data", "ws-rec", "browser", "recording-frames")).length : 0, 0, "frame files are removed");
   await assert.rejects(lib.stopRecording(target), /not being recorded/);
-  assert.deepEqual(changes.map((change) => change.recording), [true, false]);
-  assert.equal(changes[1].result.path, result.path);
+  const progress = changes.filter((change) => change.progress !== undefined);
+  assert.deepEqual(changes.filter((change) => change.progress === undefined).map((change) => change.recording), [true, false]);
+  assert.ok(progress.length >= 1 && progress.at(-1).progress === 1 && progress.every((change) => !change.recording), "encoding reports its progress");
+  assert.equal(changes.at(-1).result.path, result.path);
+  assert.ok(result.encodeMs >= 0);
   off();
 
   // A tab that paints no screencast frames (hidden, minimized window) is
@@ -376,6 +381,49 @@ async function recorder(lib, home) {
   assert.ok(fs.existsSync(rescued.path));
   const recordings = path.join(home, "workspace-data", "ws-rec", "browser", "recordings");
   assert.deepEqual(fs.readdirSync(recordings).filter((name) => name.endsWith(".webm")), []);
+
+  // A video goes to the app's encoder (WebCodecs, faked here): it gets every
+  // frame file with its time, and the file it writes becomes the artifact.
+  const filmed = fakeSession("tab-v");
+  const filmedTarget = { ref: "tab-v", session: filmed, workspaceId: "ws-rec", captureViewport: async () => encodePng(solid(lib, 33, 25, [0, 0, 0])) };
+  let job = null;
+  const encodeVideo = async (request) => {
+    job = request;
+    for (const entry of request.frames) assert.ok(fs.existsSync(entry.file), "frame files are there while encoding");
+    request.onProgress?.(1);
+    const out = `${request.outBase}.mp4`;
+    fs.writeFileSync(out, Buffer.from("not really an mp4"));
+    return { path: out, format: "mp4", codec: "avc1.640028", bytes: fs.statSync(out).size };
+  };
+  await lib.startRecording(filmedTarget, lib.normalizeRecordOptions({ format: "mp4" }), { ...deps, encodeVideo });
+  const oddFrame = (rgb) => encodePng(solid(lib, 33, 25, rgb)).toString("base64");
+  filmed.emit("Page.screencastFrame", { data: oddFrame([10, 20, 30]), sessionId: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  filmed.emit("Page.screencastFrame", { data: oddFrame([40, 50, 60]), sessionId: 2 });
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  const film = await lib.stopRecording(filmedTarget);
+  assert.equal(job.format, "mp4");
+  assert.equal(job.fps, 30);
+  assert.deepEqual(job.size, { width: 33, height: 25 });
+  assert.equal(job.frames.length, 2);
+  assert.ok(job.frames[1].atMs - job.frames[0].atMs >= 80, `frames keep their times (${job.frames.map((entry) => entry.atMs)})`);
+  assert.equal(job.frames[0].durationMs, job.frames[1].atMs - job.frames[0].atMs, "a frame lasts until the next");
+  assert.deepEqual([film.format, film.mimeType, film.note], ["mp4", "video/mp4", undefined]);
+  assert.deepEqual(film.size, { width: 32, height: 24 }, "video sizes are even");
+  assert.ok(film.path.startsWith(recordings) && film.path.endsWith(".mp4"), film.path);
+  assert.equal(fs.readFileSync(film.path, "utf8"), "not really an mp4");
+  assert.equal(fs.existsSync(`${job.outBase}.mp4`), false, "the encoder's file was moved, not copied");
+
+  // An encoder that fails leaves the flow as a GIF, and says why.
+  const shaky = fakeSession("tab-w");
+  const shakyTarget = { ref: "tab-w", session: shaky, workspaceId: "ws-rec", captureViewport: async () => encodePng(solid(lib, 20, 20, [3, 3, 3])) };
+  await lib.startRecording(shakyTarget, lib.normalizeRecordOptions({ format: "mp4", fps: 5 }), { ...deps, encodeVideo: async () => { throw new Error("no GPU today"); } });
+  shaky.emit("Page.screencastFrame", { data: frame([90, 90, 90]), sessionId: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const saved = await lib.stopRecording(shakyTarget);
+  assert.equal(saved.format, "gif");
+  assert.match(saved.note, /Video encoding failed \(no GPU today\)\. Saved a GIF instead\./);
+  assert.equal(decodeGif(fs.readFileSync(saved.path)).frames.length >= 1, true);
 
   // The time limit stops a forgotten recording; the next stop returns it.
   const limited = fakeSession("tab-c");

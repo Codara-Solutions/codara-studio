@@ -1,12 +1,24 @@
 // The capture features' window channels: recording a browser tab from its
-// toolbar, and the responsive view's per-frame emulation. Both act on a
-// <webview> guest the renderer names by id, so each first proves it is a
-// real preview guest of the trusted window. The renderer side is
-// window.spark.capture (src/preload/areas/capture.ts).
+// toolbar (and saving or copying the file it made), and the responsive
+// view's per-frame emulation. Both act on a <webview> guest the renderer
+// names by id, so each first proves it is a real preview guest of the
+// trusted window. The renderer side is window.spark.capture
+// (src/preload/areas/capture.ts).
 
-import { webContents, type WebContents } from "electron";
+import { promises as fs } from "node:fs";
+import { basename, extname, join, relative, resolve, sep } from "node:path";
 
-import type { CaptureFrameEmulationRequest, CaptureRecordRequest, CaptureRecordResponse } from "../../../shared/capture";
+import { app, BrowserWindow, clipboard, dialog, webContents, type WebContents } from "electron";
+
+import type {
+  CaptureFrameEmulationRequest,
+  CaptureRecordingFileRequest,
+  CaptureRecordingFileResponse,
+  CaptureRecordRequest,
+  CaptureRecordResponse,
+} from "../../../shared/capture";
+import { writeClipboardFilePaths } from "../../clipboard-files";
+import { workspaceDataRoot } from "../../workspace-data";
 import type { IpcHandle } from "../../ipc";
 import { getTrustedMainWindow, isTrustedPreviewGuest } from "../../main-window-trust";
 import { previewCdpSession } from "../preview-cdp";
@@ -42,6 +54,18 @@ function guestTarget(wc: WebContents, tabId: unknown, workspaceId: unknown): Rec
   };
 }
 
+/** A recording this app made: a file in some workspace's browser/recordings folder. */
+async function recordingFile(path: unknown): Promise<string> {
+  if (typeof path !== "string" || !path) throw new Error("No recording was named.");
+  const full = resolve(path);
+  const parts = relative(workspaceDataRoot(), full).split(sep);
+  const inRecordings = parts.length === 4 && parts[0] !== ".." && parts[1] === "browser" && parts[2] === "recordings";
+  if (!inRecordings || !/\.(gif|mp4|webm)$/i.test(full)) throw new Error("That is not a recording.");
+  const stat = await fs.stat(full).catch(() => null);
+  if (!stat?.isFile()) throw new Error("That recording is not there any more.");
+  return full;
+}
+
 let forwarding = false;
 
 export function registerCaptureIpc(handle: IpcHandle): void {
@@ -51,8 +75,33 @@ export function registerCaptureIpc(handle: IpcHandle): void {
     const key = target.session.key;
     if (request.action === "status") return { key, status: recordingStatus(target) };
     if (request.action === "stop") return { key, result: await stopRecording(target) };
-    const options = normalizeRecordOptions({ format: request.format === "webm" ? "webm" : "gif" });
+    const format = request.format === "gif" || request.format === "webm" ? request.format : "mp4";
+    const options = normalizeRecordOptions({ format });
     return { key, status: await startRecording(target, options, appRecordDeps(nativeBitmapCodec())) };
+  });
+
+  handle("capture:recordingFile", async (event, request: CaptureRecordingFileRequest): Promise<CaptureRecordingFileResponse> => {
+    const path = await recordingFile(request?.path);
+    if (request.action === "copy") {
+      // The file itself where the system clipboard holds files (macOS,
+      // Windows), so it pastes into a chat or an issue; its path elsewhere.
+      if (await writeClipboardFilePaths([path])) return { copied: "file" };
+      clipboard.writeText(path);
+      return { copied: "path" };
+    }
+    if (request.action !== "save") throw new Error("Unknown recording action.");
+    const window = BrowserWindow.fromWebContents(event.sender);
+    const ext = extname(path).slice(1);
+    const options = {
+      title: "Save recording",
+      defaultPath: join(app.getPath("downloads"), basename(path)),
+      filters: [{ name: ext === "gif" ? "GIF image" : `${ext.toUpperCase()} video`, extensions: [ext] }],
+    };
+    const choice = window ? await dialog.showSaveDialog(window, options) : await dialog.showSaveDialog(options);
+    if (choice.canceled || !choice.filePath) return { savedTo: null };
+    const destination = choice.filePath.toLowerCase().endsWith(`.${ext}`) ? choice.filePath : `${choice.filePath}.${ext}`;
+    await fs.copyFile(path, destination);
+    return { savedTo: destination };
   });
 
   // The responsive view lays each frame out at its preset's size; this

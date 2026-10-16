@@ -59,14 +59,14 @@ module.exports = {
       annotations: { readOnly: true },
       step: { order: 85, properties: { stop: { type: "boolean" } } },
       description:
-        "Record the tab to a GIF or WebM file, for a pull request. Call to start, act, then call with stop:true to get the path.",
+        "Record the tab to a GIF (default), MP4 or WebM, for a pull request. Call to start, act, then call with stop:true to get the path.",
       inputSchema: {
         type: "object",
         properties: {
           tabId: tab,
           stop: { type: "boolean" },
-          format: { type: "string", enum: ["gif", "webm"] },
-          fps: { type: "number", description: "max 15" },
+          format: { type: "string", enum: ["gif", "mp4", "webm"] },
+          fps: { type: "number", description: "max 30" },
           maxSeconds: { type: "number", description: "default 30" },
           maxWidth: { type: "number" },
         },

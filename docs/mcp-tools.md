@@ -146,7 +146,7 @@ workspace on screen.
 | `codara_preview_find` | Finds elements by description ("the search button") and returns ranked `@references` with role, name and box. |
 | `codara_preview_screenshot` | Captures the tab, the full page, one element or a zoomed region as a compact image (JPEG, quality 70, at most 1280 px wide unless asked otherwise), with the scale needed to turn image pixels into page coordinates. The image is also saved under Codara's workspace data folder and its `path` returned. |
 | `codara_preview_compare` | Before/after visual diffs (save a named baseline, then get the percent changed, the changed regions as boxes and a highlighted image) and several screen sizes side by side in one image, in light, dark or both. |
-| `codara_preview_record` | Records the tab to a GIF (or a WebM video when ffmpeg is installed) for a pull request: call once to start, drive the flow, call with `stop: true` for the file's path. |
+| `codara_preview_record` | Records the tab to a GIF, or an MP4 or WebM video (nothing to install), for a pull request: call once to start, drive the flow, call with `stop: true` for the file's path. |
 | `codara_preview_mouse` | Trusted mouse input (click, double-click, right-click, down, up) at a selector or coordinates. |
 | `codara_preview_scroll` | Scrolls with a trusted mouse-wheel event. |
 | `codara_preview_hover` | Moves the mouse over an element, triggering real hover styles and tooltips. |
@@ -492,20 +492,30 @@ repository.
   tab's own size, scroll position and color scheme are put back afterwards.
   A size larger than the tab's pane is shrunk to fit it, so its tile has the
   pane's resolution.
-- **Recording.** `codara_preview_record` starts recording (`format` `gif` or
-  `webm`, `fps` up to 15, default 8; `maxWidth` default 800; `maxSeconds`
-  default 30, at most 120, after which it stops itself). Call it again with
-  `stop: true` to encode and get `path`, `bytes`, `frames`, `durationMs` and
-  `size`. Frames come from the page's own paint events, so a still page costs
-  nothing; a GIF stores only what changed between frames. WebM needs
-  `ffmpeg` on `PATH` (or `CODARA_FFMPEG`); without it, or when it cannot
-  encode, the recording is saved as a GIF and the result's `note` says so.
+- **Recording.** `codara_preview_record` starts recording (`format` `gif`,
+  the default, `mp4` or `webm`; `fps` up to 30, default 15 for a GIF and 30
+  for a video; `maxWidth` up to 2560, default 1280 for a GIF and 1920 for a
+  video; `maxSeconds` default 30, at most 120, after which it stops itself).
+  Call it again with `stop: true` to encode and get `path`, `mimeType`,
+  `bytes`, `frames`, `durationMs`, `size` and `encodeMs`. Frames come from
+  the page's own paint events, so a still page costs nothing. A GIF stores
+  only what changed between frames, with its own 256 colors per frame and
+  dithering only where the page is smooth, so gradients do not band and still
+  areas never shimmer. MP4 (H.264) and WebM (VP9) are encoded by the app's
+  own Chromium encoder, nothing to install: sharper and much smaller than a
+  GIF, and the better choice for anything longer than a few seconds. Where
+  the system cannot encode H.264, `mp4` saves a WebM; if no video can be
+  encoded, `ffmpeg` on `PATH` (or `CODARA_FFMPEG`) writes the WebM, and
+  without it the recording is saved as a GIF. The result's `note` says when
+  any of that happened.
 
 The user has the same features in the browser pane's toolbar: the
 responsive view (phone, tablet and desktop side by side, sizes editable, one
 light/dark switch, scrolling and navigation kept in step) and the record
-button (click for a GIF, Shift-click for WebM). A recording an agent started
-shows on the same button.
+button, which records an MP4 video by default; its menu switches to a GIF,
+and the choice is remembered. When a recording is saved, the button offers
+Save as, Copy and Show in folder. A recording an agent started shows on the
+same button.
 
 ## Terminals
 

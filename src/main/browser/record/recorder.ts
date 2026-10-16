@@ -1,27 +1,31 @@
-// Recording a browser flow to a GIF or WebM file. Frames come from the
-// DevTools protocol's screencast, which the page sends whenever it paints,
-// so recording costs nothing while the page is still. A tab that sends no
-// frames (hidden behind another tab, a minimized window) is captured with
-// the target's background-safe viewport capture instead.
+// Recording a browser flow to an MP4, WebM or GIF file. Frames come from the
+// DevTools protocol's screencast, which the page sends whenever it paints, at
+// the device's pixel density, so recording costs nothing while the page is
+// still and text stays sharp on a HiDPI screen. A tab that sends no frames
+// (hidden behind another tab, a minimized window) is captured with the
+// target's background-safe viewport capture instead.
 //
 // Frames are sampled at most `fps` times a second (the newest frame wins,
 // so the last state before a pause is never dropped) and written to disk
-// as they arrive; memory holds one frame. Stopping encodes them: GIF on a
-// worker thread, WebM with the user's ffmpeg when there is one.
+// as they arrive, lossless PNG for a GIF and JPEG for a video; memory holds
+// one frame. Stopping encodes them off the main thread: video with
+// Chromium's WebCodecs encoder in a hidden page (video-encoder.ts), with
+// the user's ffmpeg as a fallback for WebM, and GIF on a worker thread.
 
 import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { workspaceDataDir } from "../../workspace-data";
-import { browserArtifactDir, writeBrowserArtifact } from "../artifacts";
+import { browserArtifactDir, moveBrowserArtifact, writeBrowserArtifact } from "../artifacts";
 import { blit, createBitmap, fitSize, scaleBitmap, type Bitmap } from "../capture/bitmap";
 import type { BitmapCodec } from "../capture/codec";
 import { holdGuestPaint } from "../capture/paint";
 import type { CdpSession } from "../cdp-session";
 import { encodeWebm, findFfmpeg } from "./ffmpeg";
 import { startGifWorker } from "./gif-worker";
+import type { VideoEncodeJob, VideoEncodeResult } from "./video-encoder";
 
-export type RecordFormat = "gif" | "webm";
+export type RecordFormat = "gif" | "webm" | "mp4";
 
 export interface RecordOptions {
   format: RecordFormat;
@@ -29,20 +33,32 @@ export interface RecordOptions {
   fps: number;
   /** The recording stops itself after this long. */
   maxSeconds: number;
-  /** Frame width cap in pixels. */
+  /** Frame width cap in pixels (device pixels: a HiDPI tab records sharper). */
   maxWidth: number;
 }
 
-export const RECORD_DEFAULTS: RecordOptions = { format: "gif", fps: 8, maxSeconds: 30, maxWidth: 800 };
-export const RECORD_MAX = { fps: 15, maxSeconds: 120, maxWidth: 1920 };
+/** The defaults when nothing is asked for: a GIF, which pastes anywhere. */
+export const RECORD_DEFAULTS: RecordOptions = { format: "gif", fps: 15, maxSeconds: 30, maxWidth: 1280 };
+/** Per format: a video is smooth and full size for little; a GIF grows with every pixel and frame. */
+export const RECORD_FORMAT_DEFAULTS: Record<RecordFormat, Pick<RecordOptions, "fps" | "maxWidth">> = {
+  gif: { fps: 15, maxWidth: 1280 },
+  mp4: { fps: 30, maxWidth: 1920 },
+  webm: { fps: 30, maxWidth: 1920 },
+};
+export const RECORD_MAX = { fps: 30, maxSeconds: 120, maxWidth: 2560 };
 /** Frame files on disk per recording, a backstop under the time limit. */
-export const RECORD_MAX_BYTES = 256 * 1024 * 1024;
-/** How long a final frame stays up before a GIF loops. */
+export const RECORD_MAX_BYTES = 1024 * 1024 * 1024;
+/** How long a final frame stays up before a GIF loops (and at the end of a video). */
 const FINAL_FRAME_MS = 1_000;
 /** Frame folders older than this belong to no running recording. */
 const STALE_FRAMES_MS = 30 * 60 * 1000;
 /** Without a screencast frame by then, the tab is not painting: capture it instead. */
 const SCREENCAST_GRACE_MS = 700;
+/** Direct captures run on the main process: at most this often. */
+const POLL_EVERY_MS = 100;
+/** JPEG quality of a video's frames: near lossless (PNG would be eight times the disk), so the video encoder decides what is lost. */
+const VIDEO_FRAME_QUALITY = 95;
+const PROGRESS_EVERY_MS = 150;
 
 export class RecordOptionError extends Error {}
 
@@ -52,10 +68,10 @@ function finite(value: unknown): number | null {
 
 export function normalizeRecordOptions(raw: Record<string, unknown>): RecordOptions {
   const format = raw.format === undefined ? RECORD_DEFAULTS.format : raw.format;
-  if (format !== "gif" && format !== "webm") throw new RecordOptionError('format must be "gif" or "webm".');
-  const fps = finite(raw.fps) ?? RECORD_DEFAULTS.fps;
+  if (format !== "gif" && format !== "webm" && format !== "mp4") throw new RecordOptionError('format must be "mp4", "webm" or "gif".');
+  const fps = finite(raw.fps) ?? RECORD_FORMAT_DEFAULTS[format].fps;
   const maxSeconds = finite(raw.maxSeconds) ?? RECORD_DEFAULTS.maxSeconds;
-  const maxWidth = finite(raw.maxWidth) ?? RECORD_DEFAULTS.maxWidth;
+  const maxWidth = finite(raw.maxWidth) ?? RECORD_FORMAT_DEFAULTS[format].maxWidth;
   if (fps < 1 || fps > RECORD_MAX.fps) throw new RecordOptionError(`fps must be between 1 and ${RECORD_MAX.fps}.`);
   if (maxSeconds < 1 || maxSeconds > RECORD_MAX.maxSeconds) {
     throw new RecordOptionError(`maxSeconds must be between 1 and ${RECORD_MAX.maxSeconds}.`);
@@ -72,12 +88,17 @@ export interface RecordTarget {
   captureViewport(): Promise<Buffer>;
 }
 
+export type FrameFormat = "jpeg" | "png";
+
 export interface RecordDeps {
+  /** Decodes a frame the GIF worker cannot (a JPEG video frame, when a video falls back to a GIF). */
   codec: BitmapCodec;
-  /** The image format of screencast frames and frame files. */
-  frameFormat: "jpeg" | "png";
+  /** The frame files' format; by default PNG for a GIF, JPEG for a video. */
+  frameFormat?: FrameFormat;
   /** A viewport capture (PNG) as a frame file's bytes, no wider than maxWidth. */
-  frameFromPng(png: Buffer, maxWidth: number): Promise<Buffer>;
+  frameFromPng(png: Buffer, maxWidth: number, format: FrameFormat): Promise<Buffer>;
+  /** Encodes a video without ffmpeg (the app's WebCodecs encoder); absent in unit suites. */
+  encodeVideo?: (job: VideoEncodeJob) => Promise<VideoEncodeResult>;
   ffmpeg?: () => string | null;
   /** Keeps a background tab painting for the whole recording; returns its release. */
   holdPaint?: (session: CdpSession) => Promise<() => void>;
@@ -92,17 +113,21 @@ export interface RecordingStatus {
   maxSeconds: number;
 }
 
+export const RECORD_MIME_TYPES = { gif: "image/gif", mp4: "video/mp4", webm: "video/webm" } as const;
+
 export interface RecordingResult {
   recording: false;
   tabId: string;
   path: string;
   format: RecordFormat;
-  mimeType: "image/gif" | "video/webm";
+  mimeType: (typeof RECORD_MIME_TYPES)[RecordFormat];
   bytes: number;
   frames: number;
   durationMs: number;
   size: { width: number; height: number };
   fps: number;
+  /** How long encoding took after the recording stopped. */
+  encodeMs: number;
   /** Why it stopped on its own (time limit, tab closed), when it did. */
   stoppedBy?: string;
   note?: string;
@@ -112,6 +137,8 @@ export interface RecordingChange {
   key: string;
   tabId: string;
   recording: boolean;
+  /** While a stopped recording encodes: how far along, 0 to 1. */
+  progress?: number;
   result?: RecordingResult;
   error?: string;
 }
@@ -126,16 +153,18 @@ interface Recording {
   target: RecordTarget;
   options: RecordOptions;
   deps: RecordDeps;
+  frameFormat: FrameFormat;
   startedAt: number;
   dir: string;
   frames: Frame[];
   bytes: number;
-  latest: { data: Buffer; seq: number } | null;
+  latest: { data: Buffer; seq: number; at: number } | null;
   seq: number;
   written: number;
   lastWritten: Buffer | null;
   sawScreencast: boolean;
   polling: boolean;
+  lastPoll: number;
   writes: Promise<void>;
   timers: Array<ReturnType<typeof setInterval>>;
   cleanups: Array<() => void>;
@@ -189,22 +218,26 @@ export function isRecording(sessionKey: string): boolean {
   return Boolean(rec && !rec.stopping);
 }
 
-function commit(rec: Recording, data: Buffer, seq: number): void {
-  rec.written = seq;
-  if (rec.lastWritten && rec.lastWritten.equals(data)) return;
-  rec.lastWritten = data;
-  const file = join(rec.dir, `${String(rec.frames.length).padStart(6, "0")}.${rec.deps.frameFormat === "jpeg" ? "jpg" : "png"}`);
-  rec.frames.push({ file, at: Date.now() - rec.startedAt });
-  rec.bytes += data.length;
-  rec.writes = rec.writes.then(() => fs.writeFile(file, data));
+function commit(rec: Recording, latest: NonNullable<Recording["latest"]>): void {
+  rec.written = latest.seq;
+  if (rec.lastWritten && rec.lastWritten.equals(latest.data)) return;
+  rec.lastWritten = latest.data;
+  const file = join(rec.dir, `${String(rec.frames.length).padStart(6, "0")}.${rec.frameFormat === "jpeg" ? "jpg" : "png"}`);
+  // Frame times only move forward, even when a frame's paint time does not.
+  const previous = rec.frames[rec.frames.length - 1];
+  rec.frames.push({ file, at: Math.max(previous ? previous.at + 1 : 0, latest.at) });
+  rec.bytes += latest.data.length;
+  rec.writes = rec.writes.then(() => fs.writeFile(file, latest.data));
 }
 
 async function poll(rec: Recording): Promise<void> {
   rec.polling = true;
+  rec.lastPoll = Date.now();
   try {
     const png = await rec.target.captureViewport();
-    const frame = await rec.deps.frameFromPng(png, rec.options.maxWidth);
-    if (!rec.stopping) rec.latest = { data: frame, seq: ++rec.seq };
+    const at = Date.now() - rec.startedAt;
+    const frame = await rec.deps.frameFromPng(png, rec.options.maxWidth, rec.frameFormat);
+    if (!rec.stopping) rec.latest = { data: frame, seq: ++rec.seq, at };
   } catch {
     /* the next tick tries again */
   } finally {
@@ -214,15 +247,16 @@ async function poll(rec: Recording): Promise<void> {
 
 function tick(rec: Recording): void {
   if (rec.stopping) return;
-  if (rec.latest && rec.latest.seq !== rec.written) commit(rec, rec.latest.data, rec.latest.seq);
-  else if (!rec.sawScreencast && Date.now() - rec.startedAt >= SCREENCAST_GRACE_MS && !rec.polling) void poll(rec);
+  const now = Date.now();
+  if (rec.latest && rec.latest.seq !== rec.written) commit(rec, rec.latest);
+  else if (!rec.sawScreencast && now - rec.startedAt >= SCREENCAST_GRACE_MS && !rec.polling && now - rec.lastPoll >= POLL_EVERY_MS) void poll(rec);
   if (rec.bytes >= RECORD_MAX_BYTES) void finishOnItsOwn(rec, `it reached ${RECORD_MAX_BYTES / 1024 / 1024} MB of frames`);
 }
 
 function screencastParams(rec: Recording): Record<string, unknown> {
   return {
-    format: rec.deps.frameFormat,
-    quality: 80,
+    format: rec.frameFormat,
+    ...(rec.frameFormat === "jpeg" ? { quality: VIDEO_FRAME_QUALITY } : {}),
     maxWidth: rec.options.maxWidth,
     maxHeight: rec.options.maxWidth * 4,
     everyNthFrame: 1,
@@ -241,6 +275,7 @@ export async function startRecording(target: RecordTarget, options: RecordOption
     target,
     options,
     deps,
+    frameFormat: deps.frameFormat ?? (options.format === "gif" ? "png" : "jpeg"),
     startedAt: Date.now(),
     dir: workspaceDataDir(target.workspaceId, "browser", "recording-frames", id),
     frames: [],
@@ -251,6 +286,7 @@ export async function startRecording(target: RecordTarget, options: RecordOption
     lastWritten: null,
     sawScreencast: false,
     polling: false,
+    lastPoll: 0,
     writes: Promise.resolve(),
     timers: [],
     cleanups: [],
@@ -265,7 +301,13 @@ export async function startRecording(target: RecordTarget, options: RecordOption
       void target.session.send("Page.screencastFrameAck", { sessionId: params.sessionId }).catch(() => {});
       if (rec.stopping || typeof params.data !== "string") return;
       rec.sawScreencast = true;
-      rec.latest = { data: Buffer.from(params.data, "base64"), seq: ++rec.seq };
+      // The frame's own paint time (seconds) keeps motion evenly timed,
+      // whenever it arrives; one far from now is from another clock.
+      const now = Date.now() - rec.startedAt;
+      const painted = (params.metadata as { timestamp?: unknown } | undefined)?.timestamp;
+      const paintedAt = typeof painted === "number" && Number.isFinite(painted) ? Math.round(painted * 1000) - rec.startedAt : NaN;
+      const at = Math.abs(paintedAt - now) < 2_000 ? paintedAt : now;
+      rec.latest = { data: Buffer.from(params.data, "base64"), seq: ++rec.seq, at: Math.max(0, at) };
     }));
     // A tab that closed (or whose page was replaced) ends its session for
     // good without a detach event, and nothing more will come from it.
@@ -370,10 +412,10 @@ function finish(rec: Recording, stoppedBy?: string): Promise<RecordingResult> {
     await rec.target.session.send("Page.stopScreencast").catch(() => {});
     await rec.release?.().catch(() => {});
     const endAt = Date.now() - rec.startedAt;
-    if (rec.latest && rec.latest.seq !== rec.written) commit(rec, rec.latest.data, rec.latest.seq);
+    if (rec.latest && rec.latest.seq !== rec.written) commit(rec, rec.latest);
     if (!rec.frames.length) {
       await poll(rec);
-      if (rec.latest) commit(rec, rec.latest.data, rec.latest.seq);
+      if (rec.latest) commit(rec, rec.latest);
     }
     try {
       await rec.writes;
@@ -396,6 +438,36 @@ function durations(frames: Frame[], endAt: number): number[] {
   return frames.map((frame, i) => (i + 1 < frames.length ? frames[i + 1].at - frame.at : Math.max(FINAL_FRAME_MS, endAt - frame.at)));
 }
 
+/** GIF delays in hundredths of a second, rounded on the running total so they do not drift. */
+export function gifDelays(times: number[]): number[] {
+  let elapsed = 0;
+  return times.map((ms) => {
+    const from = Math.round(elapsed / 10);
+    elapsed += ms;
+    return Math.round(elapsed / 10) - from;
+  });
+}
+
+/** A PNG's or JPEG's pixel size, from its header. */
+export function imageSize(data: Uint8Array): { width: number; height: number } {
+  if (data[0] === 0x89 && data[1] === 0x50) {
+    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    return { width: view.getUint32(16), height: view.getUint32(20) };
+  }
+  if (data[0] === 0xff && data[1] === 0xd8) {
+    for (let i = 2; i + 9 < data.length; ) {
+      if (data[i] !== 0xff) break;
+      const marker = data[i + 1];
+      const length = (data[i + 2] << 8) | data[i + 3];
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+        return { width: (data[i + 7] << 8) | data[i + 8], height: (data[i + 5] << 8) | data[i + 6] };
+      }
+      i += 2 + length;
+    }
+  }
+  throw new Error("A frame is neither a PNG nor a JPEG.");
+}
+
 /** Fit a frame into the recording's size, centered on white, when the viewport changed mid-recording. */
 function fitFrame(bitmap: Bitmap, width: number, height: number): Bitmap {
   if (bitmap.width === width && bitmap.height === height) return bitmap;
@@ -405,70 +477,118 @@ function fitFrame(bitmap: Bitmap, width: number, height: number): Bitmap {
   return canvas;
 }
 
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 async function encode(rec: Recording, endAt: number, stoppedBy?: string): Promise<RecordingResult> {
-  const { codec } = rec.deps;
+  const encodeStart = Date.now();
   const times = durations(rec.frames, endAt);
-  const first = codec.decode(await fs.readFile(rec.frames[0].file));
-  const size = { width: first.width, height: first.height };
-  const base = {
+  const head = await fs.readFile(rec.frames[0].file);
+  const size = imageSize(head);
+  let lastProgress = 0;
+  const onProgress = (fraction: number) => {
+    const now = Date.now();
+    if (fraction < 1 && now - lastProgress < PROGRESS_EVERY_MS) return;
+    lastProgress = now;
+    emit({ key: rec.key, tabId: rec.target.ref, recording: false, progress: Math.max(0, Math.min(1, fraction)) });
+  };
+  const base = (format: RecordFormat, path: string, bytes: number, frameSize = size) => ({
     recording: false as const,
     tabId: rec.target.ref,
+    path,
+    format,
+    mimeType: RECORD_MIME_TYPES[format],
+    bytes,
     frames: rec.frames.length,
     durationMs: times.reduce((sum, ms) => sum + ms, 0),
-    size,
+    size: frameSize,
     fps: rec.options.fps,
+    encodeMs: Date.now() - encodeStart,
     ...(stoppedBy ? { stoppedBy } : {}),
-  };
-  let note: string | undefined;
-  if (rec.options.format === "webm") {
+  });
+  const label = rec.target.ref;
+  const notes: string[] = [];
+  if (rec.options.format !== "gif") {
+    if (rec.deps.encodeVideo) {
+      try {
+        const video = await rec.deps.encodeVideo({
+          frames: rec.frames.map((frame, i) => ({ file: frame.file, atMs: frame.at, durationMs: times[i] })),
+          size,
+          format: rec.options.format,
+          fps: rec.options.fps,
+          outBase: join(rec.dir, "recording"),
+          workDir: rec.dir,
+          onProgress,
+        });
+        const path = await moveBrowserArtifact(rec.target.workspaceId, "recordings", { label, ext: video.format, from: video.path });
+        const even = { width: size.width - (size.width % 2), height: size.height - (size.height % 2) };
+        return { ...base(video.format, path, video.bytes, even), ...(video.note ? { note: video.note } : {}) };
+      } catch (error) {
+        notes.push(`Video encoding failed (${errorText(error)}).`);
+      }
+    }
     const ffmpeg = (rec.deps.ffmpeg ?? findFfmpeg)();
     if (ffmpeg) {
       const dir = browserArtifactDir(rec.target.workspaceId, "recordings");
       await fs.mkdir(dir, { recursive: true });
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      const path = join(dir, `${stamp}-${rec.target.ref.replace(/[^A-Za-z0-9._-]+/g, "-")}.webm`);
+      const path = join(dir, `${stamp}-${label.replace(/[^A-Za-z0-9._-]+/g, "-")}.webm`);
       const frames = rec.frames.map((frame, i) => ({ file: frame.file, durationMs: times[i] }));
       // The frames are deleted once this returns, so an ffmpeg that cannot
       // encode them (no VP8 or VP9, a broken install) must not lose the flow.
       try {
         await encodeWebm(ffmpeg, frames, path, rec.dir, rec.options.fps, size);
         const bytes = (await fs.stat(path)).size;
-        return { ...base, path, format: "webm", mimeType: "video/webm", bytes };
+        if (rec.options.format === "mp4") notes.push("Saved a WebM with ffmpeg instead.");
+        return { ...base("webm", path, bytes), ...(notes.length ? { note: notes.join(" ") } : {}) };
       } catch (error) {
         await fs.rm(path, { force: true }).catch(() => {});
-        note = `WebM encoding failed (${error instanceof Error ? error.message : String(error)}); saved a GIF instead.`;
+        notes.push(`WebM encoding failed (${errorText(error)}).`);
       }
-    } else {
-      note = "WebM needs ffmpeg on PATH (or CODARA_FFMPEG); saved a GIF instead.";
+    } else if (!rec.deps.encodeVideo) {
+      notes.push("A video needs Codara's encoder or ffmpeg on PATH (or CODARA_FFMPEG).");
     }
+    notes.push("Saved a GIF instead.");
   }
   const worker = startGifWorker(size.width, size.height);
   try {
+    const delays = gifDelays(times);
     for (let i = 0; i < rec.frames.length; i += 1) {
-      const bitmap = i === 0 ? first : codec.decode(await fs.readFile(rec.frames[i].file));
-      await worker.addFrame(fitFrame(bitmap, size.width, size.height).data, Math.round(times[i] / 10));
+      const file = rec.frames[i].file;
+      if (file.endsWith(".png")) await worker.addFrameFile(file, delays[i]);
+      else {
+        // A video's JPEG frames: decoded here, which only this fallback needs.
+        const bitmap = rec.deps.codec.decode(await fs.readFile(file));
+        await worker.addFrame(fitFrame(bitmap, size.width, size.height).data, delays[i]);
+      }
+      onProgress((i + 1) / rec.frames.length);
     }
     const gif = await worker.finish();
-    const path = await writeBrowserArtifact(rec.target.workspaceId, "recordings", { label: rec.target.ref, ext: "gif", data: gif });
-    return { ...base, path, format: "gif", mimeType: "image/gif", bytes: gif.length, ...(note ? { note } : {}) };
+    const path = await writeBrowserArtifact(rec.target.workspaceId, "recordings", { label, ext: "gif", data: gif });
+    return { ...base("gif", path, gif.length), ...(notes.length ? { note: notes.join(" ") } : {}) };
   } finally {
     worker.terminate();
   }
 }
 
-/** The app's recording dependencies: Electron's image codec and JPEG frames. */
+/** The app's recording dependencies: Electron's image codec and the WebCodecs video encoder. */
 export function appRecordDeps(codec: BitmapCodec): RecordDeps {
   return {
     codec,
-    frameFormat: "jpeg",
     holdPaint: holdGuestPaint,
-    async frameFromPng(png, maxWidth) {
+    encodeVideo: async (job) => {
+      const { encodeVideo } = await import("./video-encoder");
+      return encodeVideo(job);
+    },
+    async frameFromPng(png, maxWidth, format) {
       const { nativeImage } = require("electron") as typeof import("electron");
       let image = nativeImage.createFromBuffer(png);
       if (image.isEmpty()) throw new Error("The capture was empty.");
       const size = image.getSize();
-      if (size.width > maxWidth) image = image.resize({ width: maxWidth, quality: "good" });
-      return image.toJPEG(80);
+      if (size.width <= maxWidth && format === "png") return png;
+      if (size.width > maxWidth) image = image.resize({ width: maxWidth, quality: "best" });
+      return format === "png" ? image.toPNG() : image.toJPEG(VIDEO_FRAME_QUALITY);
     },
   };
 }

@@ -251,8 +251,9 @@ test("capture tools: screenshot options, before/after diff, sizes and recording,
     const saved = page.getByTestId("preview-record-result");
     await expect(saved).toContainText("Recording saved", { timeout: 30_000 });
     const savedPath = await saved.getByTestId("preview-record-path").getAttribute("title");
-    expect(savedPath).toMatch(/\.gif$/);
-    expect(readFileSync(savedPath!).subarray(0, 6).toString("latin1")).toBe("GIF89a");
+    // The button records a video by default, encoded by the app itself.
+    expect(savedPath).toMatch(/\.mp4$/);
+    expect(readFileSync(savedPath!).subarray(4, 8).toString("latin1")).toBe("ftyp");
     await saved.getByRole("button", { name: "Dismiss" }).click();
 
     // Everything below runs on a run's tab the user never selected.

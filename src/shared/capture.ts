@@ -19,18 +19,20 @@ export const DEFAULT_CAPTURE_SIZES: readonly CaptureSizePreset[] = [
 
 export type CaptureColorScheme = "light" | "dark" | null;
 
+export type CaptureRecordFormat = "mp4" | "webm" | "gif";
+
 export interface CaptureRecordRequest {
   webContentsId: number;
   tabId?: string | null;
   workspaceId?: string | null;
   action: "start" | "stop" | "status";
-  format?: "gif" | "webm";
+  format?: CaptureRecordFormat;
 }
 
 export interface CaptureRecordingStatus {
   recording: true;
   tabId: string;
-  format: "gif" | "webm";
+  format: CaptureRecordFormat;
   elapsedMs: number;
   frames: number;
   maxSeconds: number;
@@ -40,13 +42,14 @@ export interface CaptureRecordingResult {
   recording: false;
   tabId: string;
   path: string;
-  format: "gif" | "webm";
+  format: CaptureRecordFormat;
   mimeType: string;
   bytes: number;
   frames: number;
   durationMs: number;
   size: { width: number; height: number };
   fps: number;
+  encodeMs?: number;
   stoppedBy?: string;
   note?: string;
 }
@@ -62,8 +65,23 @@ export interface CaptureRecordingChange {
   key: string;
   tabId: string;
   recording: boolean;
+  /** While a stopped recording encodes: how far along, 0 to 1. */
+  progress?: number;
   result?: CaptureRecordingResult;
   error?: string;
+}
+
+/** Save a finished recording elsewhere (a save dialog) or put it on the clipboard. */
+export interface CaptureRecordingFileRequest {
+  path: string;
+  action: "save" | "copy";
+}
+
+export interface CaptureRecordingFileResponse {
+  /** Where it was saved; null when the dialog was cancelled. */
+  savedTo?: string | null;
+  /** What the clipboard got: the file itself, or its path where the system cannot hold files. */
+  copied?: "file" | "path";
 }
 
 export interface CaptureFrameEmulationRequest {

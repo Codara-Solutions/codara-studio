@@ -28,18 +28,40 @@ function slug(label: string): string {
   return label.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60) || "item";
 }
 
+async function artifactPath(workspaceId: string | null, kind: BrowserArtifactKind, label: string, ext: string): Promise<{ dir: string; file: string }> {
+  const dir = browserArtifactDir(workspaceId, kind);
+  await fs.mkdir(dir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const random = Math.random().toString(36).slice(2, 6);
+  return { dir, file: join(dir, `${stamp}-${random}-${slug(label)}.${ext.replace(/^\./, "")}`) };
+}
+
 /** Writes the file and returns its absolute path. */
 export async function writeBrowserArtifact(
   workspaceId: string | null,
   kind: BrowserArtifactKind,
   input: { label: string; ext: string; data: Buffer | string },
 ): Promise<string> {
-  const dir = browserArtifactDir(workspaceId, kind);
-  await fs.mkdir(dir, { recursive: true });
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const random = Math.random().toString(36).slice(2, 6);
-  const file = join(dir, `${stamp}-${random}-${slug(input.label)}.${input.ext.replace(/^\./, "")}`);
+  const { dir, file } = await artifactPath(workspaceId, kind, input.label, input.ext);
   await fs.writeFile(file, input.data);
+  void pruneArtifacts(dir, ARTIFACT_BYTES_KEPT[kind]).catch(() => {});
+  return file;
+}
+
+/** Moves a finished file (written elsewhere, too large to hold in memory) in as an artifact; returns its new path. */
+export async function moveBrowserArtifact(
+  workspaceId: string | null,
+  kind: BrowserArtifactKind,
+  input: { label: string; ext: string; from: string },
+): Promise<string> {
+  const { dir, file } = await artifactPath(workspaceId, kind, input.label, input.ext);
+  try {
+    await fs.rename(input.from, file);
+  } catch {
+    // Another volume: copy, then drop the original.
+    await fs.copyFile(input.from, file);
+    await fs.rm(input.from, { force: true });
+  }
   void pruneArtifacts(dir, ARTIFACT_BYTES_KEPT[kind]).catch(() => {});
   return file;
 }

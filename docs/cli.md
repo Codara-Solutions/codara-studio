@@ -232,6 +232,7 @@ cora tool preview_compare --name home                         # after: percent, 
 cora tool preview_compare --mode sizes --colorScheme both     # phone, tablet, desktop in one image
 cora tool preview_record --format gif                         # start; drive the flow, then:
 cora tool preview_record --stop                               # the GIF's path
+cora tool preview_record --format mp4                         # a sharp, small video instead
 ```
 
 Add `--tabId <id>` (from `cora tool preview_list`) to act on a tab other

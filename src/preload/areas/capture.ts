@@ -10,12 +10,16 @@ import type {
   CaptureGuestPaintAck,
   CaptureGuestPaintRequest,
   CaptureRecordingChange,
+  CaptureRecordingFileRequest,
+  CaptureRecordingFileResponse,
   CaptureRecordRequest,
   CaptureRecordResponse,
 } from "@shared/capture";
 
 export const captureApi = {
   record: (request: CaptureRecordRequest): Promise<CaptureRecordResponse> => ipcRenderer.invoke("capture:record", request),
+  recordingFile: (request: CaptureRecordingFileRequest): Promise<CaptureRecordingFileResponse> =>
+    ipcRenderer.invoke("capture:recordingFile", request),
   frameEmulation: (request: CaptureFrameEmulationRequest): Promise<{ ok: true }> =>
     ipcRenderer.invoke("capture:frameEmulation", request),
   onRecordingChanged: (handler: (change: CaptureRecordingChange) => void): (() => void) => {

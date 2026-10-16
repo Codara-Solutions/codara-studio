@@ -113,6 +113,9 @@ export default defineConfig(({ command }) => ({
           // attribute on the tag; communicates with the host via
           // `ipcRenderer.sendToHost`.
           "inspector-preload": resolve(__dirname, "src/preload/inspector-preload.ts"),
+          // The hidden page that encodes browser recordings to video with
+          // WebCodecs (src/main/browser/record/video-encoder.ts).
+          "record-encoder": resolve(__dirname, "src/preload/record-encoder.ts"),
         },
       },
     },
