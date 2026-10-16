@@ -216,6 +216,27 @@ async function main() {
   check("a malformed console list is unknown", consolePidsFromAgentMessage({ consoleProcessList: [500, "x"] }, 1) === null);
   check("no console list at all is unknown", consolePidsFromAgentMessage(null, 1) === null);
   check("a console that cannot be read is unknown", (await listConsolePids(process.pid)) === null);
+  // node-pty's console-list agent answers and exits in the same tick, so its
+  // exit can be seen before its message: the answer must still count. A
+  // stand-in agent does the same here (forked like the real one).
+  {
+    const answering = path.join(dir, "console-agent-answers.js");
+    fs.writeFileSync(
+      answering,
+      "const shell = Number(process.argv[2]);\n" +
+        "process.send({ consoleProcessList: [shell, 4242, process.pid] });\n" +
+        "process.exit(0);\n",
+    );
+    const silent = path.join(dir, "console-agent-silent.js");
+    fs.writeFileSync(silent, "process.exit(0);\n");
+    let answered = true;
+    for (let i = 0; i < 5; i++) {
+      const pids = await listConsolePids(1234, answering);
+      if (JSON.stringify(pids) !== JSON.stringify([1234, 4242])) answered = false;
+    }
+    check("an agent that answers and exits at once is heard, minus its own pid", answered);
+    check("an agent that exits without answering is unknown", (await listConsolePids(1234, silent)) === null);
+  }
 
   if (failures > 0) {
     console.error(`\n${failures} check(s) failed`);

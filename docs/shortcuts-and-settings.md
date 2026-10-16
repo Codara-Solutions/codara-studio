@@ -584,11 +584,16 @@ whenever it cannot tell:
   and no command the agent started after it launched (the MCP servers it
   starts at launch do not count);
 - the pane is not pinned with **Keep running** (the sun button in the pane's
-  toolbar, shown on agent panes).
+  toolbar, shown on agent panes);
+- no paired phone has the pane open (Remote Access).
 
 Cora's worker panes and phone panes never sleep. A sleeping pane that is
 still asleep when you quit counts as a running agent, so **Resume running
-agent sessions when Codara reopens** brings it back too.
+agent sessions when Codara reopens** brings it back too. If the window
+reloads while an agent sleeps, its pane stays asleep, still shows what the
+agent last printed, and resumes when you open it. Sending a selection or a
+screenshot to a sleeping agent is refused with a note to open its pane
+first, so nothing is pasted into a pane with no agent to read it.
 
 ### The notification center
 

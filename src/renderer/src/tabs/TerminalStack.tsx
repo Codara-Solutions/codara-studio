@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { createPortal } from "react-dom";
 import { TerminalPane, type TerminalPaneHandle } from "../components/Terminal/TerminalPane";
 import { KeepAwakeButton, SleepingPaneChip } from "../components/Terminal/AgentSleepControls";
+import type { TerminalLeafHibernation } from "./types";
 import {
   overlayStartupCommand,
   paneOverlaysSnapshot,
@@ -193,6 +194,7 @@ interface Props {
   // Agent hibernation (lib/agentHibernation.ts): a sleeping pane came back,
   // and the user flipped a pane's "Keep running" pin.
   onPaneWoke?: (tabId: TabId, paneId: string) => void;
+  onPaneAsleep?: (tabId: TabId, paneId: string, hibernation: TerminalLeafHibernation) => void;
   onPaneKeepAwake?: (tabId: TabId, paneId: string, keepAwake: boolean) => void;
   // Run-owned worker terminals are an observation surface by default. This
   // returns to the owning run canvas without tearing down the xterm or its PTY.
@@ -222,6 +224,7 @@ type Bundle = {
   onResumeFallback: (session: TerminalAgentSession) => void;
   onBootResumeConsumed: () => void;
   onWoke: () => void;
+  onAsleep: (hibernation: TerminalLeafHibernation) => void;
   onKeepAwake: (keepAwake: boolean) => void;
 };
 
@@ -258,6 +261,7 @@ function TerminalStack({
   onPaneResumeFallback,
   onPaneBootResumeConsumed,
   onPaneWoke,
+  onPaneAsleep,
   onPaneKeepAwake,
   onBackToRuns,
 }: Props) {
@@ -297,6 +301,8 @@ function TerminalStack({
   const bootResumeConsumedRef = useRef(onPaneBootResumeConsumed);
   const wokeRef = useRef(onPaneWoke);
   wokeRef.current = onPaneWoke;
+  const asleepRef = useRef(onPaneAsleep);
+  asleepRef.current = onPaneAsleep;
   const keepAwakeRef = useRef(onPaneKeepAwake);
   keepAwakeRef.current = onPaneKeepAwake;
   useEffect(() => {
@@ -439,6 +445,7 @@ function TerminalStack({
           onResumeFallback: (session) => resumeFallbackRef.current(tabId, paneId, session),
           onBootResumeConsumed: () => bootResumeConsumedRef.current(tabId, paneId),
           onWoke: () => wokeRef.current?.(tabId, paneId),
+          onAsleep: (hibernation) => asleepRef.current?.(tabId, paneId, hibernation),
           onKeepAwake: (keepAwake) => keepAwakeRef.current?.(tabId, paneId, keepAwake),
         };
         bundles.current.set(key, b);
@@ -1271,6 +1278,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               bootResume={leaf.bootResume === true}
               hibernated={Boolean(leaf.hibernation)}
               onWoke={bundle.onWoke}
+              onAsleep={bundle.onAsleep}
               // Hidden under an overlay: it keeps its size and buffer but can
               // neither take the keyboard nor refit, and revealing it again
               // when the overlay's command exits hands the focus back, but

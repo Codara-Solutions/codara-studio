@@ -2846,6 +2846,39 @@ export function hibernationSessionInfo(id: string): HibernationSessionInfo | nul
 }
 
 /**
+ * What a pane printed, for agent hibernation to keep while the pane sleeps:
+ * the stop drops the session with its tail and backlog. `tail` is the newest
+ * raw output (at most `maxBytes`, whole chunks), for a view that comes back
+ * with an empty xterm (a reloaded window), the same bytes a live pane's
+ * reattach replays. `unsent` is what a paused view (its xterm unmounted, see
+ * pause()) has not received yet, for a view that kept its own copy of the
+ * rest. Null when the session is gone.
+ */
+export function sleepOutput(
+  id: string,
+  maxBytes: number,
+): { tail: Buffer | null; unsent: Buffer | null } | null {
+  const s = sessions.get(id);
+  if (!s) return null;
+  const newest = (chunks: ReadonlyArray<Buffer | null>): Buffer | null => {
+    const kept: Buffer[] = [];
+    let bytes = 0;
+    for (let index = chunks.length - 1; index >= 0; index -= 1) {
+      const chunk = chunks[index];
+      if (!chunk) continue;
+      if (kept.length > 0 && bytes + chunk.length > maxBytes) break;
+      kept.unshift(chunk);
+      bytes += chunk.length;
+    }
+    return bytes > 0 ? Buffer.concat(kept, bytes) : null;
+  };
+  return {
+    tail: newest(s.tail.slice(s.tailHead)),
+    unsent: s.attached ? null : newest(s.detachedBacklog),
+  };
+}
+
+/**
  * Stop one idle agent pane on Codara's behalf. Same graceful teardown as an
  * account switch, so the CLI gets time to flush its transcript, but the exit
  * carries `hibernated` and the renderer keeps the pane as a sleeping one.

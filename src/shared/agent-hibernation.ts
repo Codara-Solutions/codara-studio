@@ -51,6 +51,7 @@ export type AgentHibernationRefusal =
   | "in-flight"
   | "no-session"
   | "remote"
+  | "watched-on-phone"
   | "hidden-too-short"
   | "not-idle-long-enough"
   | "not-watched"
@@ -67,6 +68,19 @@ export type AgentHibernationRefusal =
 export type AgentHibernationResult =
   | { ok: true; sleptAt: number }
   | { ok: false; reason: AgentHibernationRefusal; detail?: string };
+
+/**
+ * A pane whose agent Codara has stopped, as main remembers it: what a pane
+ * mounting while asleep (a remount, a reloaded window) needs to show itself
+ * asleep. `output` is raw terminal output to write before anything else: the
+ * pane's newest output for a fresh (empty) view, or only what a view that
+ * kept its own copy never received.
+ */
+export interface AgentSleepingPane {
+  runtime: AgentHibernationRuntime;
+  sleptAt: number;
+  output: Uint8Array | null;
+}
 
 /** The policy main answers with, so the renderer can pace its nominations. */
 export interface AgentHibernationPolicy {

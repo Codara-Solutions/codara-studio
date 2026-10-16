@@ -57,6 +57,27 @@ export interface StudioTerminalShareOptions {
   log?: (line: string) => void;
 }
 
+// Every live store, so agent hibernation can ask whether a paired phone has a
+// Studio pane open (studioPaneWatchedFromPhone). Weak: a store the service
+// dropped is not kept alive by this list.
+const liveStores = new Set<WeakRef<StudioTerminalShareStore>>();
+
+/**
+ * True while a paired phone is attached to this Studio pane. Agent
+ * hibernation keeps such a pane awake: it is on a screen, just not this one.
+ */
+export function studioPaneWatchedFromPhone(paneId: string): boolean {
+  for (const ref of liveStores) {
+    const store = ref.deref();
+    if (!store) {
+      liveStores.delete(ref);
+      continue;
+    }
+    if (store.paneHasSubscribers(paneId)) return true;
+  }
+  return false;
+}
+
 /**
  * Read/write mirrors for terminals the user opened in Studio itself. The PTY
  * stays desktop-owned: detach and close only remove a phone subscriber, and a
@@ -65,7 +86,19 @@ export interface StudioTerminalShareOptions {
 export class StudioTerminalShareStore implements RemoteTerminalLeaseStore {
   private readonly records = new Map<string, SharedStudioTerminal>();
 
-  constructor(private readonly options: StudioTerminalShareOptions = {}) {}
+  constructor(private readonly options: StudioTerminalShareOptions = {}) {
+    liveStores.add(new WeakRef(this));
+  }
+
+  /** Whether any phone is attached to the shared terminal of this pane. */
+  paneHasSubscribers(paneId: string): boolean {
+    for (const record of this.records.values()) {
+      if (record.paneId === paneId && record.descriptor.phase !== "ended" && record.subscribers.size > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
 
   async createInteractive(
     _ownerKey: string,

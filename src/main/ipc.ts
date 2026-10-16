@@ -498,7 +498,7 @@ import {
   setTerminalScrollbackEnabled,
   trackTerminalScrollbackPanes,
 } from "./terminal-scrollback";
-import { registerAgentHibernationIpc } from "./agent-hibernation";
+import { agentPaneAsleep, registerAgentHibernationIpc } from "./agent-hibernation";
 import { registerWorktreeCleanupIpc } from "./worktree-cleanup";
 import { registerWorktreeSetupIpc } from "./worktree-setup";
 import { registerPortForwardIpc } from "./remote/port-forward-runtime";
@@ -3132,7 +3132,11 @@ export function registerIpc(): void {
   // or queued for an agent to pull. Each send carries its own workspace; the
   // service refuses a pane or chat that belongs to another one.
   handle("agent:deliver", async (_e, request: AgentDeliveryRequest): Promise<AgentDeliveryResult> => {
-    if (request?.target?.kind === "pane") await awaitPendingSpawn(request.target.paneId);
+    // A sleeping agent's pane spawns only when the user opens it: no point
+    // waiting for it, the service refuses the send right away.
+    if (request?.target?.kind === "pane" && !agentPaneAsleep(request.target.paneId)) {
+      await awaitPendingSpawn(request.target.paneId);
+    }
     return agentDelivery().deliver(request);
   });
   handle("agent:inboxPending", async (_e, args: { workspaceId: string; paneId?: string | null }): Promise<number> =>

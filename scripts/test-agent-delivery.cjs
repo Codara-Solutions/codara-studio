@@ -124,6 +124,17 @@ const PNG = Buffer.from("89504e470d0a1a0a", "hex").toString("base64");
     );
     assert.equal(fs.readdirSync(inboxRoot).length, before, "no folder was created for a refused send");
 
+    // The inbox, which a sleeping agent pulls from once awake, still takes a
+    // send for its pane, and an awake pane still gets the paste.
+    {
+      const asleep = fakeDeps();
+      const sleepy = lib.createAgentDelivery(asleep.deps);
+      const queued = await sleepy.deliver({ workspaceId: "ws-1", target: { kind: "inbox", paneId: "pane-b" }, text: "for later", source: "picker" });
+      assert.equal(queued.outcome, "queued", "the inbox still takes a send for a sleeping pane");
+      const awake = await sleepy.deliver({ workspaceId: "ws-1", target: { kind: "pane", paneId: "pane-a" }, text: "y", source: "picker" });
+      assert.equal(awake.outcome, "pasted", "an awake pane still gets the paste");
+    }
+
     // A chat: the bare message, files as attachments of the right kind.
     const source = path.join(HOME, "notes.txt");
     fs.writeFileSync(source, "hello");

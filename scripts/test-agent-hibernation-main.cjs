@@ -36,7 +36,7 @@ const harnessPlugin = (stubNotifier) => ({
     build.onResolve(
       {
         filter:
-          /^(electron|\.\/e2e-background|\.\/pty-manager|\.\/preferences-store|\.\/notify|\.\/agent-session-registry|\.\/orchestration\/usage-activity-refresh|\.\/owned-process-tree-stub)$/,
+          /^(electron|\.\/e2e-background|\.\/pty-manager|\.\/preferences-store|\.\/notify|\.\/agent-session-registry|\.\/orchestration\/usage-activity-refresh|\.\/owned-process-tree-stub|\.\/remote-access\/studio-terminal-share)$/,
       },
       (args) => ({ path: args.path, namespace: "stub" }),
     );
@@ -52,6 +52,11 @@ const harnessPlugin = (stubNotifier) => ({
         case "./preferences-store":
           return {
             contents: init + "export async function loadPreferences(){ return globalThis.__AH.prefs; }\n",
+            loader: "js",
+          };
+        case "./remote-access/studio-terminal-share":
+          return {
+            contents: "export function studioPaneWatchedFromPhone(){ return false; }\n",
             loader: "js",
           };
         case "./agent-session-registry":
@@ -83,6 +88,7 @@ const harnessPlugin = (stubNotifier) => ({
               init +
               "export function hibernationSessionInfo(){ return null; }\n" +
               "export async function hibernate(){ return false; }\n" +
+              "export function sleepOutput(){ return null; }\n" +
               "export function hasSession(id){ return globalThis.__AH.live ? globalThis.__AH.live.has(id) : true; }\n" +
               "export function sessionAgentFlagsReachCli(){ return true; }\n" +
               "export function tap(id, h){ globalThis.__AH.taps.set(id, h); return () => globalThis.__AH.taps.delete(id); }\n" +
@@ -268,6 +274,17 @@ async function main() {
   check("input that arrives while listing keeps it awake", r.result.reason === "not-idle-long-enough" && r.calls.stop.length === 0);
   r = await run((t) => { t.state.stopResult = false; });
   check("a stop that did not happen is reported", r.result.reason === "stop-failed");
+  r = await run((t) => { t.deps.watchedOnPhone = (paneId) => paneId === "pane-1"; });
+  check(
+    "a pane a paired phone has open stays awake without listing processes",
+    r.result.reason === "watched-on-phone" && r.calls.list === 0 && r.calls.stop.length === 0,
+    r.result,
+  );
+  r = await run((t) => {
+    let calls = 0;
+    t.deps.watchedOnPhone = () => (calls += 1) > 1;
+  });
+  check("a phone that opens the pane while processes are listed keeps it awake", r.result.reason === "watched-on-phone" && r.calls.stop.length === 0);
 
   {
     ah.resetAgentHibernationForTests();
@@ -364,6 +381,56 @@ async function main() {
     check("a stop that did not happen leaves no sleeping mark", !ah.sleepingAgentPanes().has("pane-1"));
     H.live = undefined;
     H.placed = undefined;
+  }
+
+  // ── The sleeping pane as main remembers it ──
+  {
+    ah.resetAgentHibernationForTests();
+    const t = makeDeps();
+    t.deps.sleepOutput = (paneId) =>
+      paneId === "pane-1"
+        ? { tail: Buffer.from("the whole screen\r\nthe end of the turn\r\n"), unsent: Buffer.from("the end of the turn\r\n") }
+        : null;
+    const result = await ah.hibernateAgentPane(request(), t.deps);
+    H.live = new Set();
+    H.placed = new Set(["pane-1"]);
+    check("a stopped pane is asleep for delivery", result.ok === true && ah.agentPaneAsleep("pane-1") === true);
+    const first = ah.takeSleepingPane("pane-1", false);
+    check(
+      "a view that kept its copy learns its runtime, when it slept and only the output it missed",
+      first && first.runtime === "claude" && first.sleptAt === NOW && Buffer.from(first.output).toString() === "the end of the turn\r\n",
+      first,
+    );
+    const second = ah.takeSleepingPane("pane-1", false);
+    check("that missed output is handed over once", second && second.output === null && second.runtime === "claude", second);
+    const fresh = ah.takeSleepingPane("pane-1", true);
+    check(
+      "an empty view (a reloaded window) gets the pane's newest output, as often as it comes back",
+      Buffer.from(fresh?.output ?? []).toString() === "the whole screen\r\nthe end of the turn\r\n" &&
+        Buffer.from(ah.takeSleepingPane("pane-1", true)?.output ?? []).toString().startsWith("the whole screen"),
+      fresh,
+    );
+    // The stop's own exit keeps the mark; the woken session's exit ends it.
+    H.exits.get("pane-1")?.({ exitCode: 0, signal: 1, sanctioned: true, hibernated: true });
+    check("the stop's own exit leaves the pane asleep", ah.agentPaneAsleep("pane-1") === true);
+    H.exits.get("pane-1")?.({ exitCode: 0 });
+    check(
+      "a woken pane whose shell later ends is not taken for a sleeping one",
+      ah.agentPaneAsleep("pane-1") === false && !ah.sleepingAgentPanes().has("pane-1") && ah.takeSleepingPane("pane-1") === null,
+    );
+    H.placed = new Set();
+    ah.resetAgentHibernationForTests();
+    await ah.hibernateAgentPane(request(), makeDeps().deps);
+    check("a closed sleeping pane is not asleep", ah.agentPaneAsleep("pane-1") === false && !H.exits.has("pane-1"));
+    H.placed = new Set(["pane-1"]);
+    H.live = new Set(["pane-1"]);
+    ah.resetAgentHibernationForTests();
+    await ah.hibernateAgentPane(request(), makeDeps().deps);
+    check("a pane that runs again is awake", ah.agentPaneAsleep("pane-1") === false);
+    check("an unknown pane is not asleep", ah.agentPaneAsleep("nope") === false && ah.takeSleepingPane("nope") === null);
+    H.live = undefined;
+    H.placed = undefined;
+    ah.resetAgentHibernationForTests();
   }
 
   // ── Policy ──
