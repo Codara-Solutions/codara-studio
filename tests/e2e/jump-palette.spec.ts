@@ -62,21 +62,31 @@ test("jump palette and workspace shortcuts move between workspaces, tabs and pan
   test.setTimeout(150_000);
   const root = await mkdtemp(join(tmpdir(), "codara-jump-palette-"));
   const userDataDir = join(root, "user-data");
+  // The terminals this flow opens start a shell, and the app reads agent
+  // homes at boot: none of that may touch the owner's real home.
+  const userHome = join(root, "home");
+  const claudeConfigDir = join(root, "claude-home");
+  const codexHomeDir = join(root, "codex-home");
+  const grokHomeDir = join(root, "grok-home");
   const repoDir = join(root, "alpha-repo");
   const notesDir = join(root, "beta-notes");
   const siteDir = join(root, "gamma-site");
+  await Promise.all(
+    [userDataDir, userHome, claudeConfigDir, codexHomeDir, grokHomeDir, repoDir, notesDir, siteDir].map((dir) =>
+      mkdir(dir, { recursive: true }),
+    ),
+  );
   await Promise.all([
-    mkdir(userDataDir, { recursive: true }),
-    mkdir(repoDir, { recursive: true }),
-    mkdir(notesDir, { recursive: true }),
-    mkdir(siteDir, { recursive: true }),
-  ]);
-  await Promise.all([
+    // A fake HOME with no rc files would drop zsh into its new-user wizard.
+    writeFile(join(userHome, ".zshrc"), "PS1='%~ %# '\n", "utf8"),
     writeFile(join(repoDir, "README.md"), "# Alpha\n", "utf8"),
     writeFile(join(notesDir, "meeting-notes.md"), "# Notes\n\nfirst line\n", "utf8"),
     writeFile(join(siteDir, "index.html"), "<h1>Gamma</h1>\n", "utf8"),
   ]);
-  const git = (args: string[]) => execFileAsync("git", args, { cwd: repoDir });
+  // The fixture's own git runs in the fake home too, away from the owner's
+  // global config (signing, hooks).
+  const gitEnv = { ...process.env, HOME: userHome, GIT_CONFIG_NOSYSTEM: "1" };
+  const git = (args: string[]) => execFileAsync("git", args, { cwd: repoDir, env: gitEnv });
   await git(["init", "-b", "main"]);
   await git(["config", "user.email", "e2e@example.invalid"]);
   await git(["config", "user.name", "Codara E2E"]);
@@ -102,6 +112,8 @@ test("jump palette and workspace shortcuts move between workspaces, tabs and pan
       args: ["."],
       env: {
         ...process.env,
+        HOME: userHome,
+        ZDOTDIR: userHome,
         // Pin every home override the app honors: a shell inside the dev app
         // exports SPARK_HOME_DIR, which outranks SPARK_USER_DATA_DIR and would
         // point this instance at the user's real ~/.codarastudio state.
@@ -110,6 +122,11 @@ test("jump palette and workspace shortcuts move between workspaces, tabs and pan
         SPARK_HOME_DIR: userDataDir,
         SPARK_SKIP_LEGACY_MIGRATION: "1",
         SPARK_NO_SHELL_INTEGRATION: "1",
+        SPARK_ALLOW_MULTI: "1",
+        CODARA_DISABLE_KEYCHAIN: "1",
+        CLAUDE_CONFIG_DIR: claudeConfigDir,
+        CODEX_HOME: codexHomeDir,
+        GROK_HOME: grokHomeDir,
       },
     });
     const page = await app.firstWindow();
@@ -158,8 +175,19 @@ test("jump palette and workspace shortcuts move between workspaces, tabs and pan
     // Tabs of the workspaces visited are listed too.
     await expect(palette.locator('[data-jump-kind="editor"]', { hasText: "meeting-notes.md" })).toHaveCount(1);
 
-    // Fuzzy search, then Enter puts the keyboard in that editor.
+    // Page Down and Page Up stop at the last and first rows, never wrap.
     const input = palette.getByRole("combobox");
+    const options = palette.getByRole("option");
+    const lastIndex = (await options.count()) - 1;
+    expect(lastIndex).toBeGreaterThan(0);
+    await input.press("PageDown");
+    await input.press("PageDown");
+    await expect(options.nth(lastIndex)).toHaveAttribute("aria-selected", "true");
+    await input.press("PageUp");
+    await input.press("PageUp");
+    await expect(options.first()).toHaveAttribute("aria-selected", "true");
+
+    // Fuzzy search, then Enter puts the keyboard in that editor.
     await input.fill("mtgnotes");
     const editorRow = palette.getByRole("option").first();
     await expect(editorRow).toHaveAttribute("data-jump-kind", "editor");
@@ -254,6 +282,21 @@ test("jump palette and workspace shortcuts move between workspaces, tabs and pan
       )
       .toBe(terminalPaneId);
 
+    // Enter on the workspace already on screen hands the keyboard back too.
+    palette = await openPalette(page);
+    await palette.getByRole("combobox").fill("alpha-repo");
+    await expect(palette.getByRole("option").first()).toHaveAttribute("data-jump-id", "ws:ws-a");
+    await palette.getByRole("combobox").press("Enter");
+    await expect(palette).toHaveCount(0);
+    await expectActive(page, "ws-a");
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () => document.activeElement?.closest(".codara-terminal-session")?.getAttribute("data-pane-id") ?? null,
+        ),
+      )
+      .toBe(terminalPaneId);
+
     // ── Create worktree from a typed name ─────────────────────────────────
     palette = await openPalette(page);
     // A name a workspace already goes by is not offered.
@@ -271,7 +314,9 @@ test("jump palette and workspace shortcuts move between workspaces, tabs and pan
     expect(repos).toHaveLength(1);
     const worktree = join(userDataDir, "worktrees", repos[0], "jump-e2e-branch");
     expect(existsSync(worktree)).toBe(true);
-    const { stdout: head } = await execFileAsync("git", ["-C", worktree, "rev-parse", "--abbrev-ref", "HEAD"]);
+    const { stdout: head } = await execFileAsync("git", ["-C", worktree, "rev-parse", "--abbrev-ref", "HEAD"], {
+      env: gitEnv,
+    });
     expect(head.trim()).toBe("jump-e2e-branch");
 
     // ── The commands are in the cheat sheet with their range chips ────────
