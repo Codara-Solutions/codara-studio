@@ -86,6 +86,27 @@ async function main() {
     assert.equal(readRecentOutput(term.buffer.active), "", "an empty pane has no output");
     term.dispose();
   }
+  {
+    // One logical line wrapped across 10,000 rows (minified JSON, a progress
+    // bar with no newline): reading stops once it holds enough characters,
+    // instead of joining the whole scrollback into one string first.
+    const rows = 10_000;
+    let reads = 0;
+    const buffer = {
+      length: rows,
+      getLine: (y) => {
+        reads += 1;
+        return {
+          isWrapped: y > 0,
+          translateToString: () => (y === rows - 1 ? "the end" : `r${String(y).padStart(5, "0")}`.padEnd(80, "x")),
+        };
+      },
+    };
+    const text = readRecentOutput(buffer, 200, 4000);
+    assert.ok(text.length <= 4000, "bounded by characters");
+    assert.ok(text.endsWith("the end"), "the newest text is kept");
+    assert.ok(reads < 200, `stopped early (${reads} row reads)`);
+  }
   console.log("ok 1 recent output reads back as logical lines");
 
   // 2. Formatting.
