@@ -534,10 +534,17 @@ async function main() {
     const union = /export type SettingsTab =([^;]+);/.exec(index)?.[1] ?? "";
     const tabs = new Set([...union.matchAll(/"([\w-]+)"/g)].map((match) => match[1]));
     assert.ok(tabs.size > 3, "Settings tabs were read");
-    const app = read(path.join(RENDERER, "App.tsx"));
+    // A listener names the event itself or a constant set to it (the
+    // worktree cleanup host listens through OPEN_WORKTREE_CLEANUP_EVENT).
+    const sources = rendererSources();
+    const listens = (event) => {
+      if (sources.includes(`addEventListener("${event}"`)) return true;
+      const names = [...sources.matchAll(/const (\w+) = "([^"]+)"/g)].filter((match) => match[2] === event).map((match) => match[1]);
+      return names.some((name) => sources.includes(`addEventListener(${name},`));
+    };
     for (const entry of FEATURE_CATALOG.filter((item) => item.tip?.open)) {
       const { event, detail } = entry.tip.open;
-      assert.ok(app.includes(`addEventListener("${event}"`), `${entry.id}: nothing listens to ${event}`);
+      assert.ok(listens(event), `${entry.id}: nothing listens to ${event}`);
       if (event === "spark:open-settings") assert.ok(tabs.has(detail?.section), `${entry.id}: no Settings page ${detail?.section}`);
     }
   });
