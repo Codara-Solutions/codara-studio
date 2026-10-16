@@ -23,7 +23,7 @@ import { emitTerminalAgentState, paneSourceKey, publish, rearm } from "./notify"
 import { nudgeUsageRefresh } from "./orchestration/usage-activity-refresh";
 import { signalAgentBoardChanged } from "./agent-board-signal";
 import { BackgroundWork, claudeBackgroundPaths, probeBackgroundFiles } from "./agent-background-work";
-import type { TerminalAgentActivity } from "@shared/agent-board";
+import { nextWorkingSince, type TerminalAgentActivity } from "@shared/agent-board";
 import type { RuntimeState, TerminalAgentStatePayload } from "@shared/types";
 import type { AgentHibernationEvidence } from "@shared/agent-hibernation";
 
@@ -2243,9 +2243,15 @@ function emitPaneState(w: PaneWatcher, chipState: RuntimeState): void {
   // An agent between turns with work of its own still running is not ready.
   if (chipState === "idle" && backgroundActive(w, Date.now())) chipState = "background";
   if (w.lastEmittedState === chipState) return;
+  const previousState = w.lastEmittedState;
   w.lastEmittedState = chipState;
+  const now = Date.now();
+  const workingSince = nextWorkingSince(previousState, chipState, w.activity.workingSince, now);
   // A prompt answered or gone takes its question with it.
-  noteActivity(w, chipState === "blocked" ? { stateSince: Date.now() } : { stateSince: Date.now(), question: null });
+  noteActivity(
+    w,
+    chipState === "blocked" ? { stateSince: now, workingSince } : { stateSince: now, workingSince, question: null },
+  );
   tanLog(`pane=${w.paneId} chip-state -> ${chipState} (runtime=${w.runtime})`);
   emitTerminalAgentState({
     workspaceId: w.workspaceId,
@@ -2362,6 +2368,8 @@ const ACTIVITY_TEXT_MAX = 4_000;
 
 interface PaneActivity {
   stateSince: number;
+  /** Start of the current working stretch; null while not working. */
+  workingSince: number | null;
   sessionSince: number;
   prompt: string | null;
   message: string | null;
@@ -2371,7 +2379,7 @@ interface PaneActivity {
 
 function emptyActivity(): PaneActivity {
   const now = Date.now();
-  return { stateSince: now, sessionSince: now, prompt: null, message: null, question: null, tool: null };
+  return { stateSince: now, workingSince: null, sessionSince: now, prompt: null, message: null, question: null, tool: null };
 }
 
 // Screen readers report the same prompt on every repaint; only a real change
@@ -2416,6 +2424,7 @@ export function terminalAgentActivitySnapshot(): TerminalAgentActivity[] {
       runtime: w.runtime,
       state,
       stateSince: w.activity.stateSince,
+      workingSince: w.activity.workingSince ?? undefined,
       sessionSince: w.activity.sessionSince,
       turnStartedAt: w.turn && !w.turn.announced ? w.turn.startedAt : null,
       tool: active ? w.activity.tool : null,

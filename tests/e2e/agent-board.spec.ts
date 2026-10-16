@@ -522,6 +522,19 @@ test("a switch from a card keeps every card's colours and says where you are", a
       await expect(card(page, `run:${RUN_ID}`)).not.toHaveClass(/is-here/);
     });
 
+    await test.step("each card says how long it has worked or waited", async () => {
+      // The seeded question was asked ten minutes ago.
+      await expect(card(page, `run:${RUN_ID}`).locator(".agent-card__elapsed")).toHaveText(/^Waiting 1\dm$/);
+      await expect(card(page, `run:${RUN_ID}`).locator(".agent-card__elapsed")).toHaveAttribute("title", /^Waiting since \d\d:\d\d$/);
+      const working = page.locator('[data-agent-bucket="working"] .agent-card__elapsed');
+      await expect(working).toHaveText(/^Working for (<1m|\d+m)$/);
+      await expect(working).toHaveAttribute("title", /^Started \d\d:\d\d$/);
+      const dark = await page.evaluate(() => document.documentElement.dataset.themeMode !== "light");
+      if (dark && process.env.AGENT_TIMES_SHOT) {
+        await page.locator(".agent-board").first().screenshot({ path: process.env.AGENT_TIMES_SHOT });
+      }
+    });
+
     const before = await cardColours(page);
     await test.step("opening the beta card switches workspace and names it", async () => {
       await card(page, `run:${RUN_ID}`).locator("[data-agent-card-open]").click();
@@ -579,6 +592,7 @@ test("an agent whose turn ended with background work still running is not ready"
       const agent = card(page, `pane:${paneId}`);
       await expect(agent).toHaveAttribute("data-agent-bucket", "working", { timeout: 15_000 });
       await expect(agent).toContainText("In background");
+      await expect(agent.locator(".agent-card__elapsed")).toHaveText(/^In background for (<1m|\d+m)$/);
       await expect(agent).toContainText("1 agent running");
       await viewTab(page, "Workspaces").click();
     });
@@ -592,6 +606,7 @@ test("an agent whose turn ended with background work still running is not ready"
       await viewTab(page, "Agents").click();
       await expect(card(page, `pane:${paneId}`)).toHaveAttribute("data-agent-bucket", "done", { timeout: 15_000 });
       await expect(card(page, `pane:${paneId}`)).toContainText("The review found nothing.");
+      await expect(card(page, `pane:${paneId}`).locator(".agent-card__elapsed")).toHaveText("Done just now");
     });
   } finally {
     await app.close();

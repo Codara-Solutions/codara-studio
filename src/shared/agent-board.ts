@@ -27,6 +27,13 @@ export interface TerminalAgentActivity {
   state: RuntimeState;
   /** When the pane entered `state` (ms since epoch). */
   stateSince: number;
+  /**
+   * When the agent's current working stretch began: the last time it went
+   * from not working (ready, waiting on the user, stopped, starting) to
+   * working. Moves between working, background and stalled leave it alone.
+   * Absent from older mains.
+   */
+  workingSince?: number;
   /** When the agent session now in the pane started. */
   sessionSince: number;
   /** Start of the turn in progress, or null between turns. */
@@ -213,14 +220,78 @@ export function agentBoardLine(text: unknown, max = AGENT_BOARD_LINE_MAX): strin
   return plain.length > max ? `${plain.slice(0, max - 1).trimEnd()}…` : plain;
 }
 
-/** Elapsed time in the rail's compact voice: "now", "4m", "2h 5m", "3d". */
-export function formatAgentElapsed(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 60_000) return "now";
+/** States in which an agent is busy: one working stretch spans all of them. */
+export function isWorkingStretchState(state: RuntimeState | null | undefined): boolean {
+  return state === "working" || state === "background" || state === "stalled";
+}
+
+/**
+ * The start of the working stretch after a pane moves from `previous` to
+ * `next` at `now`: kept through working, background and stalled, restarted
+ * when the agent comes back from anywhere else (ready, waiting, stopped).
+ */
+export function nextWorkingSince(
+  previous: RuntimeState | null | undefined,
+  next: RuntimeState,
+  current: number | null,
+  now: number,
+): number | null {
+  if (!isWorkingStretchState(next)) return null;
+  if (isWorkingStretchState(previous) && current !== null) return current;
+  return now;
+}
+
+/** A span in the card's compact voice: "<1m", "4m", "2h 5m", "3d". */
+export function formatAgentSpan(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 60_000) return "<1m";
   const minutes = Math.floor(ms / 60_000);
   if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return minutes % 60 === 0 ? `${hours}h` : `${hours}h ${minutes % 60}m`;
   return `${Math.floor(hours / 24)}d`;
+}
+
+/** Wall-clock time of day, with the date when it is not today. */
+function formatAgentClock(at: number, now: number): string {
+  const date = new Date(at);
+  const clock = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+  if (date.toDateString() === new Date(now).toDateString()) return clock;
+  return `${date.toLocaleDateString([], { month: "short", day: "numeric" })} ${clock}`;
+}
+
+export interface AgentCardTime {
+  /** On the card: "Working for 12m", "Done 8m ago", "Waiting 3m". */
+  text: string;
+  /** The exact moment, for the tooltip: "Started 14:02". */
+  title: string;
+}
+
+/**
+ * What the card says about time: how long it has been working, waiting on
+ * the user, or done. Null when the card has no known start.
+ */
+export function agentCardTime(
+  card: Pick<AgentBoardCard, "bucket" | "status" | "tone" | "since">,
+  now: number,
+): AgentCardTime | null {
+  if (!(card.since > 0)) return null;
+  const span = Math.max(0, now - card.since);
+  const long = span >= 60_000;
+  const at = formatAgentClock(card.since, now);
+  if (card.bucket === "working") {
+    return { text: `${card.status} for ${formatAgentSpan(span)}`, title: `Started ${at}` };
+  }
+  if (card.bucket === "needs-you") {
+    if (card.tone === "danger") {
+      return { text: `${card.status} ${long ? `${formatAgentSpan(span)} ago` : "just now"}`, title: `Stopped ${at}` };
+    }
+    return { text: `Waiting ${formatAgentSpan(span)}`, title: `Waiting since ${at}` };
+  }
+  const word = card.status === "Ready" || card.status === "Finished" ? "Done" : card.status;
+  return {
+    text: `${word} ${long ? `${formatAgentSpan(span)} ago` : "just now"}`,
+    title: `${card.status === "Sleeping" ? "Stopped" : "Finished"} ${at}`,
+  };
 }
 
 interface Placement {
@@ -454,7 +525,9 @@ function terminalCard(
   const unseenKind = input.unseenPanes?.[pane.paneId];
   const finishedTurn = placement.bucket === "done" && activity?.message != null;
   let since = activity?.stateSince ?? 0;
-  if (placement.bucket === "working") since = activity?.turnStartedAt ?? since;
+  // The working stretch, not the turn: a turn that waited on the user in the
+  // middle has been working only since the answer.
+  if (placement.bucket === "working") since = activity?.workingSince ?? activity?.turnStartedAt ?? since;
   return {
     key: `pane:${pane.paneId}`,
     source: "terminal",

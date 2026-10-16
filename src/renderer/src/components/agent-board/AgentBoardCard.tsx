@@ -1,6 +1,6 @@
 import { memo } from "react";
 import type { CSSProperties, KeyboardEvent } from "react";
-import { formatAgentElapsed, type AgentBoardCard as Card } from "@shared/agent-board";
+import { agentCardTime, type AgentBoardCard as Card, type AgentCardTime } from "@shared/agent-board";
 import { CodaraMark, RuntimeMark } from "../BrandMarks";
 import { agentBrandColor } from "../../lib/agent-brand";
 import { WORKSPACE_STATUS_LABELS } from "@shared/workspace-status";
@@ -18,8 +18,10 @@ import AgentReplyBox from "./AgentReplyBox";
 
 interface Props {
   card: Card;
-  /** Elapsed time, already formatted, so a tick re-renders only what changed. */
-  elapsed: string | null;
+  /** The card's time line, already formatted, so a tick re-renders only what changed. */
+  time: string | null;
+  /** The exact moment, for the tooltip. */
+  timeTitle: string | null;
   active: boolean;
   /** The card's workspace is the one the user is in. */
   here: boolean;
@@ -28,7 +30,7 @@ interface Props {
   onFocusCard: (key: string) => void;
 }
 
-function AgentBoardCardView({ card, elapsed, active, here, focusable, onOpen, onFocusCard }: Props) {
+function AgentBoardCardView({ card, time, timeTitle, active, here, focusable, onOpen, onFocusCard }: Props) {
   // The workspace's status (set by an agent or by hand in the rail), so the
   // card says where the work stands as well as what the agent does.
   const workspaceStatus = useWorkspaceStatus(card.workspaceId)?.status ?? null;
@@ -54,7 +56,7 @@ function AgentBoardCardView({ card, elapsed, active, here, focusable, onOpen, on
     `${card.agentLabel} in ${card.workspaceName}${here ? ", the workspace you are in" : ""}`,
     workspaceStatus ? `workspace ${WORKSPACE_STATUS_LABELS[workspaceStatus]}` : null,
     card.account ? `account ${card.account}` : null,
-    elapsed && elapsed !== "now" ? `for ${elapsed}` : null,
+    time,
     card.tool ? `running ${card.tool}` : null,
     card.message,
   ]
@@ -88,7 +90,11 @@ function AgentBoardCardView({ card, elapsed, active, here, focusable, onOpen, on
         <span className="agent-card__head">
           {mark}
           <span className="agent-card__title">{card.title}</span>
-          {elapsed && <span className="agent-card__elapsed">{elapsed}</span>}
+          {time && (
+            <span className="agent-card__elapsed" title={timeTitle ?? undefined}>
+              {time}
+            </span>
+          )}
         </span>
         <span className="agent-card__where">
           <span className="agent-card__ws-tile" aria-hidden title={here ? "You are in this workspace" : undefined}>
@@ -145,8 +151,8 @@ function replyKey(card: Card): string {
   return reply.kind === "question" ? `${card.key}:${reply.questionMessageId}` : card.key;
 }
 
-export function cardElapsed(card: Card, now: number): string | null {
-  return card.since > 0 ? formatAgentElapsed(Math.max(0, now - card.since)) : null;
+export function cardTime(card: Card, now: number): AgentCardTime | null {
+  return agentCardTime(card, now);
 }
 
 export default memo(AgentBoardCardView);
