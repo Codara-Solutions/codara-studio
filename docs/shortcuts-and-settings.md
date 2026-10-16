@@ -906,7 +906,9 @@ minutes per opening, and kept in `worktree-sizes.json` so the next opening
 starts with them; **Measure sizes again** measures the rows shown again. The
 search box matches branch, folder, repository, workspace and pull request;
 **Merged**, **Stale for** (7 to 90 days without activity) and **Larger than**
-narrow the list, and the column headers sort it.
+narrow the list, and the column headers sort it. Rows keep their place
+while sizes land, so nothing moves under the pointer; a dot on the sorted
+column means newer sizes would change the order, and a click sorts again.
 
 Removal goes through two steps. **Review removal** checks each picked
 worktree again and shows what would be lost. These always stay, whatever you

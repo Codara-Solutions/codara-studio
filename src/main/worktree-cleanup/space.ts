@@ -90,6 +90,12 @@ export async function walkSize(
           }
           budget -= entries.length;
           for (const entry of entries) {
+            // A cancel (the screen closed, a removal starting) stops at the
+            // next entry, not after a folder of thousands.
+            if (options.signal?.aborted) {
+              complete = false;
+              return;
+            }
             const path = join(folder, entry.name);
             const stat = await fsp.lstat(path).catch(() => null);
             if (!stat) {
@@ -237,6 +243,8 @@ export interface SizeMeasurer {
   enqueue(items: readonly SizeRequest[], options?: { force?: boolean }): number;
   cancel(): void;
   pending(): number;
+  /** Resolves once every measurement started so far has ended, cancelled ones included, or after `timeoutMs`. */
+  settled(timeoutMs: number): Promise<void>;
 }
 
 export function createSizeMeasurer(deps: {
@@ -251,6 +259,9 @@ export function createSizeMeasurer(deps: {
   const now = deps.now ?? Date.now;
   const queue: SizeRequest[] = [];
   const running = new Map<string, AbortController>();
+  // Every measurement still running, cancelled ones included: a cancelled
+  // du or walk may read the folder a moment longer.
+  const inflight = new Set<Promise<void>>();
   let startedAt: number | null = null;
 
   const pending = (): number => queue.length + running.size;
@@ -274,7 +285,7 @@ export function createSizeMeasurer(deps: {
       const settle = (): void => {
         if (running.get(item.id) === controller) running.delete(item.id);
       };
-      void deps
+      const run: Promise<void> = deps
         .measure(item.path, controller.signal)
         .then((size) => {
           if (controller.signal.aborted) return;
@@ -287,9 +298,11 @@ export function createSizeMeasurer(deps: {
           if (!controller.signal.aborted) deps.onEvent({ pending: pending() });
         })
         .finally(() => {
+          inflight.delete(run);
           if (pending() === 0) startedAt = null;
           pump();
         });
+      inflight.add(run);
     }
   };
 
@@ -324,5 +337,16 @@ export function createSizeMeasurer(deps: {
       startedAt = null;
     },
     pending,
+    async settled(timeoutMs) {
+      if (!inflight.size) return;
+      let timer: NodeJS.Timeout | null = null;
+      await Promise.race([
+        Promise.allSettled([...inflight]),
+        new Promise<void>((done) => {
+          timer = setTimeout(done, timeoutMs);
+        }),
+      ]);
+      if (timer) clearTimeout(timer);
+    },
   };
 }

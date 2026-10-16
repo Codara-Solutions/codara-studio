@@ -59,10 +59,14 @@ const SNAPSHOT_TIMEOUT_MS = 60_000;
 // partway leaves the folder half deleted, so it gets far more than the
 // usual 20 s.
 export const REMOVE_TIMEOUT_MS = 10 * 60_000;
+// How old the in-use facts (terminals, runs, processes) may get during a
+// batch before the next worktree's check reads them again.
+export const USAGE_FRESH_MS = 2_000;
 
 export interface RemoveOptions {
   sizeOf?: (id: string) => WorktreeSize | null;
   forgetSize?: (id: string) => void;
+  usageFreshMs?: number;
 }
 
 function sameRepo(repos: readonly RepoContext[], root: string): RepoContext | undefined {
@@ -456,7 +460,15 @@ export async function removeCleanupWorktrees(
           repo,
           repoItems.map((item) => item.path),
         );
-        for (const item of repoItems) {
+        let usageAt = Date.now();
+        for (const [index, item] of repoItems.entries()) {
+          // Deleting a large worktree takes minutes; a terminal, run or
+          // server started meanwhile in one still waiting must be seen.
+          if (Date.now() - usageAt > (options.usageFreshMs ?? USAGE_FRESH_MS)) {
+            const left = await Promise.all(repoItems.slice(index).map((entry) => canonicalPath(entry.path)));
+            ctx.usage = await usageContext(deps, left);
+            usageAt = Date.now();
+          }
           const work = await removeOne(ctx, item, normalized, options).catch(
             (err: unknown): RemovalWork => ({
               outcome: {

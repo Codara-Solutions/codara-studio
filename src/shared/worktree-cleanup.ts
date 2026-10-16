@@ -182,6 +182,30 @@ export function sortWorktreeRows(rows: readonly WorktreeCleanupRow[], key: Workt
   return sorted;
 }
 
+/** Each row's place in the list, taken when the user sorts or the list is read again. */
+export function rowPositions(rows: readonly { id: string }[]): Map<string, number> {
+  return new Map(rows.map((row, index) => [row.id, index]));
+}
+
+/**
+ * Rows keep the place `positions` gave them while sizes land in the
+ * background, so a row never moves under the pointer while the user picks;
+ * rows it does not know follow in their live order.
+ */
+export function keepRowOrder<T extends { id: string }>(sorted: readonly T[], positions: ReadonlyMap<string, number>): T[] {
+  const known: T[] = [];
+  const fresh: T[] = [];
+  for (const row of sorted) (positions.has(row.id) ? known : fresh).push(row);
+  known.sort((a, b) => positions.get(a.id)! - positions.get(b.id)!);
+  return [...known, ...fresh];
+}
+
+/** True when sorting again would put the rows in another order. */
+export function orderDrifted(kept: readonly { id: string }[], sorted: readonly { id: string }[]): boolean {
+  if (kept.length !== sorted.length) return true;
+  return kept.some((row, index) => row.id !== sorted[index].id);
+}
+
 // ── What a removal may do ──────────────────────────────────────────────────
 
 export interface WorktreeRemovalOutlook {
@@ -338,4 +362,21 @@ export function formatAge(at: number | null, now: number): string {
 
 export function plural(count: number, one: string, many = `${one}s`): string {
   return `${count} ${count === 1 ? one : many}`;
+}
+
+/**
+ * One argument of a command the user copies and pastes into a shell. A
+ * branch name may hold `$`, `;`, `&` or a backtick, so anything beyond plain
+ * ref characters is single-quoted: literal in sh, zsh, fish and PowerShell.
+ */
+export function shellArg(text: string): string {
+  if (/^[A-Za-z0-9._/@:+=,-]+$/.test(text)) return text;
+  return `'${text.replace(/'/g, `'\\''`)}'`;
+}
+
+/** The command that lists a kept branch's commits the base lacks. */
+export function keptBranchLogCommand(kept: { repoRoot: string; branch: string; target: string | null }): string {
+  const range = kept.target ? `${kept.target}..${kept.branch}` : kept.branch;
+  // The folder stays double-quoted: it reads the same in cmd, PowerShell and sh.
+  return `git -C "${kept.repoRoot}" log --oneline ${shellArg(range)} --`;
 }

@@ -69,6 +69,9 @@ test("the cleanup screen removes only what it may, and what was confirmed", asyn
   const busy = join(trees, "busy");
   git(repo, ["worktree", "add", "-q", "-b", "feature/busy", busy], gitEnv);
 
+  const moved = join(trees, "moved");
+  git(repo, ["worktree", "add", "-q", "-b", "feature/moved", moved], gitEnv);
+
   await writeFile(
     join(home, "spark-state.json"),
     JSON.stringify({
@@ -119,6 +122,17 @@ test("the cleanup screen removes only what it may, and what was confirmed", asyn
 
     // A terminal open in a worktree keeps it out of reach.
     await request("terminal.create", { cwd: busy, title: "busy" });
+    // So does one opened in the main checkout whose shell moved into a
+    // worktree without telling the pane (no OSC 7 from a plain sh): only
+    // the process's own folder shows it.
+    const elsewhere = await request("terminal.create", { cwd: repo, title: "elsewhere" });
+    await request("terminal.write", {
+      paneId: elsewhere.paneId,
+      text: `exec sh -c 'cd "${moved}" && echo moved-in-$((40 + 2)) && exec sleep 600'`,
+    });
+    await expect
+      .poll(async () => (await request("terminal.read", { paneId: elsewhere.paneId })).text, { timeout: 15_000 })
+      .toContain("moved-in-42");
 
     await repoRow.getByTitle("Workspace actions").click();
     await page.getByRole("menuitem", { name: /^Clean up worktrees/ }).click();
@@ -127,14 +141,18 @@ test("the cleanup screen removes only what it may, and what was confirmed", asyn
     await expect(dialog.getByRole("searchbox", { name: "Search worktrees" })).toBeFocused();
 
     const rows = dialog.locator("[data-worktree-path]");
-    await expect(rows).toHaveCount(5, { timeout: 30_000 });
+    await expect(rows).toHaveCount(6, { timeout: 30_000 });
     const row = (path: string) => dialog.locator(`[data-worktree-path="${path}"]`);
 
     await expect(row(repo).getByText("Main checkout")).toBeVisible();
     await expect(row(repo).getByRole("checkbox")).toBeDisabled();
     await expect(row(busy).getByText("In use", { exact: true })).toBeVisible();
     await expect(row(busy).getByRole("checkbox")).toBeDisabled();
-    await expect(row(busy).getByText(/In use: 1 open terminal/)).toBeVisible();
+    await expect(row(busy).getByText("In use: 1 open terminal.", { exact: true })).toBeVisible();
+    if (process.platform !== "win32") {
+      await expect(row(moved).getByRole("checkbox")).toBeDisabled();
+      await expect(row(moved).getByText("In use: 1 running process.", { exact: true })).toBeVisible();
+    }
     await expect(row(merged).getByText("Merged", { exact: true })).toBeVisible();
     await expect(row(merged).getByText("Workspace Merged copy")).toBeVisible();
     await expect(row(unmerged).getByText("1 commit not merged")).toBeVisible();
@@ -145,14 +163,14 @@ test("the cleanup screen removes only what it may, and what was confirmed", asyn
     // Filters and search.
     // A branch with no commits of its own is merged by definition.
     await dialog.getByRole("button", { name: "Merged", exact: true }).click();
-    await expect(rows).toHaveCount(3);
+    await expect(rows).toHaveCount(4);
     await expect(row(unmerged)).toHaveCount(0);
     await expect(row(repo)).toHaveCount(0);
     await dialog.getByRole("button", { name: "Merged", exact: true }).click();
     await dialog.getByRole("searchbox", { name: "Search worktrees" }).fill("unmerged");
     await expect(rows).toHaveCount(1);
     await dialog.getByRole("searchbox", { name: "Search worktrees" }).fill("");
-    await expect(rows).toHaveCount(5);
+    await expect(rows).toHaveCount(6);
 
     // Focus stays inside the screen.
     await page.keyboard.press("Shift+Tab");
@@ -202,6 +220,7 @@ test("the cleanup screen removes only what it may, and what was confirmed", asyn
 
     for (const path of [merged, dirty, unmerged]) expect(existsSync(path)).toBe(false);
     expect(existsSync(busy)).toBe(true);
+    expect(existsSync(moved)).toBe(true);
     expect(refExists(repo, "refs/heads/feature/merged", gitEnv)).toBe(false);
     expect(refExists(repo, "refs/heads/feature/dirty", gitEnv)).toBe(false);
     expect(refExists(repo, "refs/heads/feature/unmerged", gitEnv)).toBe(true);
@@ -215,7 +234,7 @@ test("the cleanup screen removes only what it may, and what was confirmed", asyn
 
     // Back on the list, only what is left shows; Escape closes the screen.
     await done.getByRole("button", { name: "Back to the list" }).click();
-    await expect(rows).toHaveCount(2, { timeout: 30_000 });
+    await expect(rows).toHaveCount(3, { timeout: 30_000 });
     await page.keyboard.press("Escape");
     await expect(dialog).toHaveCount(0);
   } finally {

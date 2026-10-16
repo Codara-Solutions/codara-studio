@@ -333,6 +333,39 @@ async function main() {
       assert.equal(shared.formatAge(now - 3 * 86_400_000, now), "3 days ago");
     });
 
+    await check("rows keep their place while sizes land, until the user sorts again", async () => {
+      const a = { id: "/a", size: { bytes: 10 } };
+      const b = { id: "/b", size: { bytes: 20 } };
+      const c = { id: "/c", size: null };
+      const positions = shared.rowPositions([b, a, c]);
+      // /c measures largest: a fresh sort would move it to the top.
+      const bigC = { ...c, size: { bytes: 99 } };
+      const live = [bigC, b, a];
+      const kept = shared.keepRowOrder(live, positions);
+      assert.deepEqual(kept.map((entry) => entry.id), ["/b", "/a", "/c"], "the row under the pointer stays put");
+      assert.equal(kept[2], bigC, "the kept order carries the new size");
+      assert.equal(shared.orderDrifted(kept, live), true, "the header offers to sort again");
+      assert.equal(shared.orderDrifted(live, live), false);
+      const withNew = shared.keepRowOrder([{ id: "/d" }, ...live], positions);
+      assert.deepEqual(withNew.map((entry) => entry.id), ["/b", "/a", "/c", "/d"], "a row the order does not know goes last");
+    });
+
+    await check("the kept-branch log command pastes safely into a shell", async () => {
+      assert.equal(
+        shared.keptBranchLogCommand({ repoRoot: "/r", branch: "feature/x", target: "origin/main" }),
+        'git -C "/r" log --oneline origin/main..feature/x --',
+      );
+      assert.equal(shared.keptBranchLogCommand({ repoRoot: "/r", branch: "wip", target: null }), 'git -C "/r" log --oneline wip --');
+      // Git allows $, ;, & and backticks in branch names; none may run.
+      assert.equal(
+        shared.keptBranchLogCommand({ repoRoot: "/r", branch: "x;$(touch pwned)`id`&", target: "main" }),
+        "git -C \"/r\" log --oneline 'main..x;$(touch pwned)`id`&' --",
+      );
+      assert.equal(shared.shellArg("it's"), "'it'\\''s'");
+      const out = execFileSync("sh", ["-c", `printf %s ${shared.shellArg("a'b $(echo no) `echo no`")}`], { encoding: "utf8" });
+      assert.equal(out, "a'b $(echo no) `echo no`");
+    });
+
     // ── The full check ─────────────────────────────────────────────────────
     const checks = await removeMod.checkCleanupTargets(
       deps,
@@ -596,6 +629,45 @@ async function main() {
       });
     }
 
+    await check("a terminal opened in a waiting worktree mid-batch keeps it", async () => {
+      const first = add("batch-first", "feature/batch-first");
+      const second = add("batch-second", "feature/batch-second");
+      const [checkA, checkB] = await removeMod.checkCleanupTargets(deps, [
+        { repoRoot: repo, path: first },
+        { repoRoot: repo, path: second },
+      ]);
+      assert.equal(checkA.blockers.length + checkB.blockers.length, 0);
+      // While the first worktree is being removed, the user opens a terminal
+      // in the second one.
+      const lateDeps = {
+        ...deps,
+        audit: async (entry) => {
+          if (entry.path === first && entry.outcome === "removed") h.sessionsUnder[second] = ["pane-late"];
+          return deps.audit(entry);
+        },
+      };
+      const result = await removeMod.removeCleanupWorktrees(
+        lateDeps,
+        {
+          items: [first, second].map((dir, index) => ({
+            repoRoot: repo,
+            path: dir,
+            fingerprint: [checkA, checkB][index].fingerprint,
+            confirmDirty: false,
+            confirmUnmerged: false,
+          })),
+          deleteMergedBranches: true,
+        },
+        { usageFreshMs: -1 },
+      );
+      delete h.sessionsUnder[second];
+      assert.equal(result.outcomes[0].status, "removed", JSON.stringify(result.outcomes[0]));
+      assert.equal(result.outcomes[1].code, "IN_USE", JSON.stringify(result.outcomes[1]));
+      assert.ok(fs.existsSync(second));
+      git(repo, ["worktree", "remove", second]);
+      git(repo, ["branch", "-D", "feature/batch-second"]);
+    });
+
     await check("an edited file too large to copy skips the snapshot, not the removal", async () => {
       const big = add("big", "feature/big");
       // Sparse: 60 MB by size, almost nothing on disk.
@@ -641,6 +713,22 @@ async function main() {
       h.terminals = [{ paneId: "pane-r", workspaceId: "ws-other", cwd: path.join(fresh, "src") }];
       assert.deepEqual(await usesOf(), ["terminal"], "a renderer pane whose folder is inside counts");
       h.terminals = [];
+      // A pane's own shell is that open terminal, not a second use. A shell
+      // whose pane opened elsewhere and moved in with cd is seen only by the
+      // process scan, and must still keep the worktree.
+      const pids = { "pane-shell": 5151, "pane-elsewhere": 6161 };
+      const shellDeps = { ...deps, sessionPid: (pane) => pids[pane] ?? null };
+      const shellUses = async () =>
+        (await scanMod.scanWorktreeCleanup(shellDeps)).scan.rows.find((entry) => entry.id === fresh).inUse.map((use) => use.kind);
+      h.sessionsUnder[fresh] = ["pane-shell"];
+      h.processes.set(fresh, [{ pid: 5151, command: "/bin/zsh" }]);
+      assert.deepEqual(await shellUses(), ["terminal"], "the pane's shell is not counted twice");
+      delete h.sessionsUnder[fresh];
+      h.processes.set(fresh, [{ pid: 6161, command: "/bin/zsh" }]);
+      assert.deepEqual(await shellUses(), ["process"], "a shell that moved in keeps the worktree");
+      const moved = await removeMod.checkCleanupTargets(shellDeps, [{ repoRoot: repo, path: fresh }]);
+      assert.equal(moved[0].blockers[0].code, "IN_USE");
+      h.processes.clear();
       const appDeps = { ...deps, appPaths: () => [path.join(fresh, "out")] };
       assert.deepEqual(
         (await scanMod.scanWorktreeCleanup(appDeps)).scan.rows.find((entry) => entry.id === fresh).inUse.map((use) => use.kind),
@@ -772,6 +860,37 @@ async function main() {
       await new Promise((done) => setTimeout(done, 10));
       assert.equal(gates.length, 3, "/w starts once /z is done");
       restart.cancel();
+    });
+
+    await check("sizes: a removal waits for a cancelled measurement to end", async () => {
+      let finish;
+      const slow = space.createSizeMeasurer({
+        store: space.createSizeStore(path.join(home, "sizes-settle.json")),
+        measure: () =>
+          new Promise((resolve) => {
+            finish = () => resolve({ bytes: 1, complete: true, measuredAt: 1 });
+          }),
+        onEvent: () => undefined,
+      });
+      await slow.settled(10);
+      slow.enqueue([{ id: "/s", path: "/s" }]);
+      slow.cancel();
+      assert.equal(slow.pending(), 0);
+      let ended = false;
+      const waiting = slow.settled(5_000).then(() => {
+        ended = true;
+      });
+      await new Promise((done) => setTimeout(done, 20));
+      assert.equal(ended, false, "the cancelled du or walk may still read the folder");
+      finish();
+      await waiting;
+      assert.equal(ended, true);
+      slow.enqueue([{ id: "/t", path: "/t" }]);
+      const started = Date.now();
+      await slow.settled(30);
+      assert.ok(Date.now() - started < 2_000, "the wait is bounded");
+      slow.cancel();
+      finish();
     });
 
     if (process.platform !== "win32") {
