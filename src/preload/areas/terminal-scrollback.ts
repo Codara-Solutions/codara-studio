@@ -7,12 +7,18 @@ export interface TerminalScrollbackRestoreRequest {
   paneId: string;
   /** The pane's scrollback line limit; main never returns more. */
   maxLines?: number;
+  /** Rows of the xterm the text goes into (Windows moves the replay above them). */
+  rows?: number;
   /** Replay even if the pane already ran this session (agent hibernation). */
   force?: boolean;
 }
 
 export interface TerminalScrollbackReplay {
-  /** Lines with colors and CRLF endings, ending in a dim marker line. */
+  /**
+   * Lines with colors and CRLF endings, ending in a dim marker line. On
+   * Windows it then moves them into the scrollback and the cursor to the top
+   * left, where the new ConPTY session starts drawing.
+   */
   text: string;
   savedAt: string;
 }

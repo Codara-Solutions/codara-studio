@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { RESTORED_OUTPUT_MARKER_TEXT } from "@shared/terminal-scrollback";
 import {
+  clampGeometry,
   compactScrollback,
   renderScrollbackForDisplay,
   type ScrollbackRenderLimits,
@@ -80,6 +81,9 @@ export interface TerminalScrollbackStoreDeps {
   dimensions(paneId: string): { cols: number; rows: number } | null;
   readTail(paneId: string, maxBytes: number): Buffer | null;
   enabled(): boolean;
+  // Windows: every pane runs under ConPTY, which owns the screen of the
+  // session it starts (see handOverScreen). False elsewhere.
+  newSessionOwnsScreen?: boolean;
   limits?: Partial<TerminalScrollbackLimits>;
   now?: () => number;
   log?: (line: string) => void;
@@ -97,13 +101,17 @@ export interface TerminalScrollbackRecord {
 
 export interface TerminalScrollbackReplay {
   // Lines with SGR colors and CRLF endings, then a dim marker line. Safe to
-  // write into any xterm: no cursor movement, modes, OSC or queries.
+  // write into any xterm: no modes, OSC or queries. On Windows it ends by
+  // moving those lines up into the scrollback and the cursor to the top left
+  // of a blank screen (handOverScreen); elsewhere it has no cursor movement.
   text: string;
   savedAt: string;
 }
 
 export interface TerminalScrollbackReplayOptions {
   maxLines?: number;
+  // Rows of the terminal the text is written into, for handOverScreen.
+  rows?: number;
   // Replay even though the pane already ran this app session. For a caller
   // that stopped the pane's process on purpose (agent hibernation) and is
   // about to start it again.
@@ -122,6 +130,9 @@ interface PaneState {
   paneId: string;
   untap: (() => void) | null;
   history: string;
+  // `history` is a replay a new ConPTY session starts below: it is parsed
+  // followed by handOverScreen at the rows of that parse (Windows only).
+  handOver: boolean;
   raw: Buffer[];
   rawBytes: number;
   folding: FoldJob | null;
@@ -141,6 +152,7 @@ interface PaneState {
 
 interface FoldJob {
   history: string;
+  handOver: boolean;
   raw: Buffer[];
 }
 
@@ -180,7 +192,6 @@ export class TerminalScrollbackStore {
   private readonly now: () => number;
   private readonly panes = new Map<string, PaneState>();
   private readonly index = new Map<string, IndexEntry>();
-  private readonly replayed = new Set<string>();
   // Every pane the renderer reported, also while the setting is off, so
   // turning it back on records them at once instead of at the next layout
   // change.
@@ -192,6 +203,7 @@ export class TerminalScrollbackStore {
   private folds = 0;
   private ready: Promise<void> | null = null;
   private wipedWhileDisabled = false;
+  private settingChange: Promise<void> = Promise.resolve();
 
   constructor(deps: TerminalScrollbackStoreDeps) {
     this.deps = deps;
@@ -243,7 +255,6 @@ export class TerminalScrollbackStore {
       this.panes.delete(paneId);
       await state.writing.catch(() => undefined);
     }
-    this.replayed.delete(paneId);
     this.known.delete(paneId);
     await this.removeFile(scrollbackFileName(paneId));
   }
@@ -270,8 +281,13 @@ export class TerminalScrollbackStore {
 
   /**
    * What a pane restored after a restart shows before its new shell or its
-   * resumed agent draws. Only once per pane per app session, and only while
-   * the pane has no live PTY, unless `force` is set.
+   * resumed agent draws. Only until the pane's process starts in this app
+   * session, unless `force` is set.
+   *
+   * Not "once per pane": a pane can unmount between asking and spawning (a
+   * workspace switch or a layout swap while the app opens), and the xterm the
+   * replay went to is then gone. The next mount asks again and gets the same
+   * text, since the record cannot change before the pane prints anything.
    */
   async restoreReplay(
     paneId: string,
@@ -280,7 +296,6 @@ export class TerminalScrollbackStore {
     await this.init();
     if (!this.deps.enabled()) return null;
     if (!options.force) {
-      if (this.replayed.has(paneId)) return null;
       if (this.deps.hasSession(paneId) || this.panes.get(paneId)?.live) return null;
     }
     const record = await this.read(paneId);
@@ -300,32 +315,51 @@ export class TerminalScrollbackStore {
       return null;
     }
     if (body.trim().length === 0) return null;
-    this.replayed.add(paneId);
-    const text = body + RESTORED_OUTPUT_MARKER;
+    const handOver = this.deps.newSessionOwnsScreen === true;
+    const rows = clampGeometry(record.cols, typeof options.rows === "number" ? options.rows : record.rows).rows;
+    const history = body + RESTORED_OUTPUT_MARKER;
     // The renderer writes exactly this before the new session's bytes, so it
     // becomes the start of the pane's next record: a second restart still
-    // shows the first one's output, in order.
+    // shows the first one's output, in order. The hand-over is added again
+    // at the rows each later parse uses, since the pane may be resized
+    // before then (a pane restored in a hidden workspace is fitted when
+    // shown) and rows - 1 line feeds only clear a screen of that height.
     const state = this.panes.get(paneId) ?? this.ensureState(paneId);
     if (!state.live) {
-      state.history = text;
+      state.history = history;
+      state.handOver = handOver;
       state.raw = [];
       state.rawBytes = 0;
       state.cols = record.cols;
-      state.rows = record.rows;
+      state.rows = rows;
+    } else if (handOver && !this.deps.hasSession(paneId)) {
+      // Forced, for a pane whose process was stopped on purpose and is about
+      // to start again (agent hibernation): the record goes on from the old
+      // session, and the new ConPTY session starts on a fresh screen there
+      // too, after what the old one left on it.
+      this.onChunk(state, Buffer.from(handOverScreen(state.rows), "utf8"));
     }
-    return { text, savedAt: record.savedAt };
+    return { text: handOver ? history + handOverScreen(rows) : history, savedAt: record.savedAt };
   }
 
   /** The setting changed. Off stops recording and deletes every file. */
-  async setEnabled(enabled: boolean): Promise<void> {
-    await this.init();
-    if (enabled) {
-      // Panes already open start recording now, seeded with what their
-      // session still holds, so a quit right after this keeps their output.
-      this.track([...this.known]);
-      return;
-    }
-    await this.wipe();
+  setEnabled(enabled: boolean): Promise<void> {
+    // One change at a time. Off waits for writes in flight before it deletes
+    // and marks the folder wiped; an on that ran in that wait would start
+    // recording first, and the files it then wrote would survive the next
+    // off, which skips a folder already marked wiped.
+    const change = this.settingChange.then(async () => {
+      await this.init();
+      if (enabled) {
+        // Panes already open start recording now, seeded with what their
+        // session still holds, so a quit right after this keeps their output.
+        this.track([...this.known]);
+        return;
+      }
+      await this.wipe();
+    });
+    this.settingChange = change.catch(() => undefined);
+    return change;
   }
 
   /** What is on disk now: how many panes' output, and how many bytes. */
@@ -348,6 +382,7 @@ export class TerminalScrollbackStore {
       if (state.timer) clearTimeout(state.timer);
       state.timer = null;
       state.history = "";
+      state.handOver = false;
       state.raw = [];
       state.rawBytes = 0;
       state.folding = null;
@@ -355,7 +390,6 @@ export class TerminalScrollbackStore {
       state.dirty = false;
       writes.push(state.writing.catch(() => undefined));
     }
-    this.replayed.clear();
     await Promise.all(writes);
     this.index.clear();
     let names: string[] = [];
@@ -455,6 +489,7 @@ export class TerminalScrollbackStore {
         paneId,
         untap: null,
         history: "",
+        handOver: false,
         raw: [],
         rawBytes: 0,
         folding: null,
@@ -534,7 +569,7 @@ export class TerminalScrollbackStore {
     // Take the bytes now, not when the fold runs: a burst arriving before it
     // runs would otherwise push them past the hard cap before they are
     // folded, and the history they hold would be lost.
-    const job: FoldJob = { history: state.history, raw: state.raw };
+    const job: FoldJob = { history: state.history, handOver: state.handOver, raw: state.raw };
     state.folding = job;
     state.raw = [];
     state.rawBytes = 0;
@@ -578,8 +613,12 @@ export class TerminalScrollbackStore {
     }
     this.folds += 1;
     try {
-      const next = await compactScrollback(job.history, job.raw, state.cols, state.rows, this.renderLimits());
-      if (state.generation === generation) state.history = next;
+      const prefix = job.handOver ? job.history + handOverScreen(state.rows) : job.history;
+      const next = await compactScrollback(prefix, job.raw, state.cols, state.rows, this.renderLimits());
+      if (state.generation === generation) {
+        state.history = next;
+        state.handOver = false;
+      }
     } catch (err) {
       this.log(`fold failed for ${state.paneId}: ${err instanceof Error ? err.message : String(err)}`);
       if (state.generation === generation) {
@@ -604,7 +643,10 @@ export class TerminalScrollbackStore {
     if (!state.dirty || !this.deps.enabled()) return state.writing;
     state.dirty = false;
     const generation = state.generation;
-    const history = state.folding ? state.folding.history : state.history;
+    const base = state.folding ?? state;
+    // The rows in the header are the ones this hand-over is made for, and the
+    // ones the next restart parses the record at.
+    const history = base.handOver ? base.history + handOverScreen(state.rows) : base.history;
     const rawParts = state.folding ? [...state.folding.raw, ...state.raw] : state.raw;
     // A fold waiting its turn holds up to a cap of bytes and the pane up to
     // another: keep both, so a save (the one at quit included) never drops
@@ -682,7 +724,6 @@ export class TerminalScrollbackStore {
       writes.push(state.writing.catch(() => undefined));
     }
     this.panes.clear();
-    this.replayed.clear();
     // A write already past its checks would otherwise land after the files
     // below were listed and outlive the setting being turned off.
     await Promise.all(writes);
@@ -701,6 +742,18 @@ export class TerminalScrollbackStore {
         .map((name) => fs.rm(join(this.deps.dir, name), { force: true }).catch(() => undefined)),
     );
   }
+}
+
+// What follows the replay on Windows. ConPTY owns the screen of the session
+// it starts: its first paint clears it, and it positions the shell's output
+// (PSReadLine redraws its input line with absolute cursor moves) as if the
+// session began at the top left. Replayed rows left on screen would be wiped
+// or written over, so they move up into the scrollback (rows - 1 line feeds
+// from anywhere on screen scroll every row above the cursor out) and the
+// cursor goes home, to the blank row right after the marker line, where
+// ConPTY believes it is.
+export function handOverScreen(rows: number): string {
+  return `${"\n".repeat(Math.max(0, Math.trunc(rows) - 1))}\x1b[H`;
 }
 
 // Windows: an antivirus or indexer scan can hold the target for a moment, and
