@@ -6,6 +6,8 @@ import { agentBrandColor } from "../../lib/agent-brand";
 import { WORKSPACE_STATUS_LABELS } from "@shared/workspace-status";
 import { WorkspaceStatusChip } from "../workspace-status/WorkspaceStatusChip";
 import { useWorkspaceStatus } from "../workspace-status/workspaceStatusStore";
+import { WorkspaceIconGlyph } from "../workspace-icons";
+import { normalizeWorkspaceColor, workspaceAccentInk } from "@shared/workspace-colors";
 import AgentReplyBox from "./AgentReplyBox";
 
 // One agent on the Agents view. The summary is a button that opens the agent
@@ -19,30 +21,37 @@ interface Props {
   /** Elapsed time, already formatted, so a tick re-renders only what changed. */
   elapsed: string | null;
   active: boolean;
+  /** The card's workspace is the one the user is in. */
+  here: boolean;
   focusable: boolean;
   onOpen: (card: Card) => void;
   onFocusCard: (key: string) => void;
 }
 
-function AgentBoardCardView({ card, elapsed, active, focusable, onOpen, onFocusCard }: Props) {
+function AgentBoardCardView({ card, elapsed, active, here, focusable, onOpen, onFocusCard }: Props) {
   // The workspace's status (set by an agent or by hand in the rail), so the
   // card says where the work stands as well as what the agent does.
   const workspaceStatus = useWorkspaceStatus(card.workspaceId)?.status ?? null;
-  const mark =
-    card.runtime === "cora" ? (
-      <span className="agent-card__mark" style={{ color: "var(--accent)" }}>
-        <CodaraMark size={13} />
-      </span>
-    ) : (
-      <span className="agent-card__mark" style={{ color: agentBrandColor(card.runtime) }}>
-        <RuntimeMark runtime={card.runtime} size={13} />
-      </span>
-    );
-  const meta = [card.agentLabel, card.account, card.detail].filter(Boolean).join(" · ");
+  // The harness is the mark alone; its name stays in the tooltip and in what
+  // a screen reader hears. Cora's mark is plain ink, not the accent, which
+  // follows the active workspace and would repaint it on every switch.
+  const mark = (
+    <span
+      className="agent-card__mark"
+      role="img"
+      aria-label={card.agentLabel}
+      title={card.agentLabel}
+      data-agent-runtime={card.runtime}
+      style={{ color: card.runtime === "cora" ? "var(--ink)" : agentBrandColor(card.runtime) }}
+    >
+      {card.runtime === "cora" ? <CodaraMark size={14} /> : <RuntimeMark runtime={card.runtime} size={14} />}
+    </span>
+  );
+  const meta = [card.account, card.detail].filter(Boolean).join(" · ");
   const spoken = [
     card.title,
     card.status,
-    `${card.agentLabel} in ${card.workspaceName}`,
+    `${card.agentLabel} in ${card.workspaceName}${here ? ", the workspace you are in" : ""}`,
     workspaceStatus ? `workspace ${WORKSPACE_STATUS_LABELS[workspaceStatus]}` : null,
     card.account ? `account ${card.account}` : null,
     elapsed && elapsed !== "now" ? `for ${elapsed}` : null,
@@ -53,12 +62,15 @@ function AgentBoardCardView({ card, elapsed, active, focusable, onOpen, onFocusC
     .join(", ");
   return (
     <li
-      className={`agent-card is-${card.tone}${active ? " is-active" : ""}${card.unseen ? " is-unseen" : ""}`}
+      className={`agent-card is-${card.tone}${active ? " is-active" : ""}${here ? " is-here" : ""}${card.unseen ? " is-unseen" : ""}`}
       data-agent-card={card.key}
       data-agent-bucket={card.bucket}
       data-agent-workspace={card.workspaceId}
       data-agent-sleeping={card.sleeping ? "true" : undefined}
-      style={{ "--agent-card-ws": card.workspaceColor ?? "var(--muted)" } as CSSProperties}
+      // The workspace's own colour, fixed per workspace (see
+      // agentBoardWorkspaceColor): the edge and the tile say where the agent
+      // is, the status label says how it is doing.
+      style={{ "--agent-card-ws": card.workspaceColor, "--agent-card-ws-ink": tileInk(card.workspaceColor) } as CSSProperties}
       // Focus anywhere in the card (its reply box too) makes it the card
       // focus returns to if it moves to another group.
       onFocus={() => onFocusCard(card.key)}
@@ -78,14 +90,14 @@ function AgentBoardCardView({ card, elapsed, active, focusable, onOpen, onFocusC
           <span className="agent-card__title">{card.title}</span>
           {elapsed && <span className="agent-card__elapsed">{elapsed}</span>}
         </span>
-        <span className="agent-card__meta">
-          <span className="agent-card__status">{card.status}</span>
-          <span className="agent-card__ws">
-            <span className="agent-card__ws-dot" aria-hidden />
-            <span className="agent-card__ws-name">{card.workspaceName}</span>
-            {workspaceStatus && <WorkspaceStatusChip status={workspaceStatus} />}
+        <span className="agent-card__where">
+          <span className="agent-card__ws-tile" aria-hidden title={here ? "You are in this workspace" : undefined}>
+            <WorkspaceIconGlyph icon={card.workspaceIcon ?? undefined} size={11} />
           </span>
+          <span className="agent-card__ws-name">{card.workspaceName}</span>
+          {workspaceStatus && <WorkspaceStatusChip status={workspaceStatus} />}
           {meta && <span className="agent-card__who">{meta}</span>}
+          <span className="agent-card__status">{card.status}</span>
         </span>
         {card.tool && <span className="agent-card__tool">{card.tool}</span>}
         {card.message && <span className="agent-card__message">{card.message}</span>}
@@ -108,6 +120,13 @@ function AgentBoardCardView({ card, elapsed, active, focusable, onOpen, onFocusC
       )}
     </li>
   );
+}
+
+// The glyph on the solid "you are here" tile, dark or light by the colour,
+// as the rail's active tile picks it.
+function tileInk(color: string): string {
+  const hex = normalizeWorkspaceColor(color);
+  return hex ? workspaceAccentInk(hex) : "#10100E";
 }
 
 // Escape leaves the card's controls for the card, where the arrows move on.

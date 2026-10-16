@@ -96,7 +96,7 @@ function question(id, text, at, options) {
 }
 
 const WORKSPACES = [
-  { id: "ws-a", name: "Alpha", color: "#3366ff" },
+  { id: "ws-a", name: "Alpha", color: "#3366ff", icon: "rocket" },
   { id: "ws-b", name: "Beta" },
 ];
 
@@ -225,7 +225,7 @@ async function testBuilder() {
     activity({ paneId: "p-elsewhere", workspaceId: "ws-removed", state: "blocked" }),
   ];
 
-  const model = board.buildAgentBoard({
+  const input = {
     now: NOW,
     workspaces: WORKSPACES,
     layoutPanes,
@@ -234,7 +234,8 @@ async function testBuilder() {
     runLive: { "r-running": { tool: "Bash: npm test", text: "Running the suite now." } },
     unseenPanes: { "p-idle": "complete" },
     accountLabels: { "claude-work": "Work", "pi-work": "Team plan" },
-  });
+  };
+  const model = board.buildAgentBoard(input);
   const keys = (cards) => cards.map((card) => card.key);
   const find = (key) => [...model.needsYou, ...model.working, ...model.done].find((card) => card.key === key);
 
@@ -268,6 +269,25 @@ async function testBuilder() {
   check("a pane card names its account", blocked.account === "Work");
   check("a pane card names the agent", blocked.agentLabel === "Claude Code");
   check("a pane card carries the workspace", blocked.workspaceName === "Alpha" && blocked.workspaceColor === "#3366ff");
+
+  // A workspace keeps one colour on every card: its own, or one picked from
+  // its id, never from which workspace is active or where the card sits.
+  check("working is the fixed info tone, not the workspace accent", board.terminalAgentPlacement("working").tone === "info");
+  check("a workspace without a colour gets one from its id", find("pane:p-moved")?.workspaceColor === board.agentBoardWorkspaceColor({ id: "ws-b" }));
+  check(
+    "the fallback colour is stable and from the palette",
+    board.agentBoardWorkspaceColor({ id: "ws-b" }) === board.agentBoardWorkspaceColor({ id: "ws-b", color: "  " }) &&
+      /^#[0-9A-F]{6}$/.test(board.agentBoardWorkspaceColor({ id: "ws-b" })),
+  );
+  {
+    const shuffled = board.buildAgentBoard({ ...input, workspaces: [...input.workspaces].reverse() });
+    const colours = (m) => Object.fromEntries([...m.needsYou, ...m.working, ...m.done].map((c) => [c.key, c.workspaceColor]));
+    check(
+      "card colours do not depend on the workspace order",
+      JSON.stringify(colours(shuffled)) === JSON.stringify(colours(model)),
+    );
+  }
+  check("a card carries its workspace's icon", blocked.workspaceIcon === "rocket" && find("pane:p-moved")?.workspaceIcon === null);
   // Its prompt is a menu: pasted text and Enter would pick the highlighted
   // answer (usually Yes), so the card opens the pane instead of pasting.
   check(

@@ -321,6 +321,7 @@ const SCALAR_FIELDS = [
   "workspaceId",
   "workspaceName",
   "workspaceColor",
+  "workspaceIcon",
   "runtime",
   "agentLabel",
   "account",
@@ -361,6 +362,8 @@ export interface AgentBoardState {
   model: AgentBoardModel;
   /** The card of the pane the user is looking at, if it is on the board. */
   activeKey: string | null;
+  /** The workspace the user is in, for the cards' "you are here" tile. */
+  activeWorkspaceId: string | null;
   navigate: AgentBoardSources["navigate"];
   /** The clock the elapsed times are measured against; ticks only while live. */
   now: number;
@@ -382,7 +385,15 @@ export function useAgentBoard(live: boolean): AgentBoardState {
   const accountLabels = useAccountLabels(live, wantCliLabels, wantCoraLabels);
   const unseen = useMemo(() => unseenPanes(sources), [sources]);
   const workspaces = useMemo(
-    () => sources.workspaces.map((workspace) => ({ id: workspace.id, name: workspace.name, color: workspace.color })),
+    () =>
+      sources.workspaces.map((workspace) => ({
+        id: workspace.id,
+        name: workspace.name,
+        color: workspace.color,
+        // The glyph the rail's tile draws: a worktree copy without its own
+        // icon shows the branch.
+        icon: workspace.icon ?? (workspace.copyBranch ? "branch" : undefined),
+      })),
     [sources.workspaces],
   );
   const model = useMemo(
@@ -404,5 +415,5 @@ export function useAgentBoard(live: boolean): AgentBoardState {
   const cardCache = useRef(new Map<string, AgentBoardCard>());
   const stable = useMemo(() => stabilizeAgentBoard(model, cardCache.current), [model]);
   const activeKey = sources.activePaneId ? `pane:${sources.activePaneId}` : null;
-  return { model: stable, activeKey, navigate: sources.navigate, now };
+  return { model: stable, activeKey, activeWorkspaceId: sources.activeWorkspaceId, navigate: sources.navigate, now };
 }

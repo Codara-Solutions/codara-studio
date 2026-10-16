@@ -818,8 +818,19 @@ export default function App() {
   );
 
   // Switch HUD: bumps once per real workspace change (never on first load),
-  // see WorkspaceSwitchHud for the hold/exit timing.
+  // see WorkspaceSwitchHud for the hold/exit timing. It watches activeId
+  // itself rather than one switch handler, because a workspace changes from
+  // many places (rail, palette, an agent card, a notification, a session
+  // resume, main's `cora start`) and every one of them should say where you
+  // landed. The first id (restore on boot) and a set to the same id never
+  // count.
   const [switchSignal, setSwitchSignal] = useState(0);
+  const switchHudPrevIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const previous = switchHudPrevIdRef.current;
+    switchHudPrevIdRef.current = activeId;
+    if (previous && activeId && previous !== activeId) setSwitchSignal((n) => n + 1);
+  }, [activeId]);
 
   // Evict frozen terminal layouts for deleted workspaces so they don't linger
   // in state. Render already prunes them (the validWorkspaceIds gate in
@@ -3040,9 +3051,6 @@ export default function App() {
     const currentWorkspaceId = activeIdRef.current;
     if (currentWorkspaceId) {
       activeRunIdsByWorkspaceRef.current[currentWorkspaceId] = activeRunIdRef.current;
-    }
-    if (currentWorkspaceId && currentWorkspaceId !== id) {
-      setSwitchSignal((n) => n + 1);
     }
     activeIdRef.current = id;
     setActiveId(id);
