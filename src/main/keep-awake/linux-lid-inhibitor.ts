@@ -98,6 +98,7 @@ export class LinuxLidInhibitor implements LidHold {
   private failures = 0;
   private retryAt: number | null = null;
   private retryTimer: unknown = null;
+  private settleTimer: unknown = null;
   private unavailable = false;
   private disposed = false;
   private lastError: string | null = null;
@@ -160,6 +161,7 @@ export class LinuxLidInhibitor implements LidHold {
       settle(() => this.onExit(child, code, signal, stderr)),
     );
     this.log(`lid hold taken (pid ${child.pid ?? "?"})`);
+    this.armSettle(child);
   }
 
   stop(): void {
@@ -179,6 +181,7 @@ export class LinuxLidInhibitor implements LidHold {
   }
 
   private releaseChild(): void {
+    this.clearSettle();
     const child = this.child;
     if (!child) return;
     this.child = null;
@@ -206,6 +209,7 @@ export class LinuxLidInhibitor implements LidHold {
     // A helper released by stop() exits too; only the current one matters.
     if (this.child !== child) return;
     this.child = null;
+    this.clearSettle();
     const early = this.now() - this.startedAt < LID_EARLY_EXIT_MS;
     const detail = firstLine(stderr);
     this.log(
@@ -221,6 +225,7 @@ export class LinuxLidInhibitor implements LidHold {
   private onFailure(child: LidHelperProcess | null, err: NodeJS.ErrnoException, stderr: string): void {
     if (child && this.child !== child) return;
     this.child = null;
+    this.clearSettle();
     const detail = firstLine(stderr);
     this.log(`lid hold failed: ${String(err?.message ?? err)}${detail ? ` (${detail})` : ""}`);
     if (err?.code === "ENOENT" || err?.code === "EACCES") {
@@ -234,28 +239,59 @@ export class LinuxLidInhibitor implements LidHold {
     this.options.onChange();
   }
 
+  /**
+   * A helper still running LID_EARLY_EXIT_MS after it started holds its
+   * lock: a refusal would have ended it by then. Whatever failed before is
+   * over, so stop showing that error while the lock works.
+   */
+  private armSettle(child: LidHelperProcess): void {
+    this.clearSettle();
+    this.settleTimer = this.schedule(() => {
+      this.settleTimer = null;
+      if (this.disposed || this.child !== child) return;
+      this.failures = 0;
+      if (this.lastError === null) return;
+      this.lastError = null;
+      this.options.onChange();
+    }, LID_EARLY_EXIT_MS);
+  }
+
+  private clearSettle(): void {
+    if (this.settleTimer === null) return;
+    this.cancel(this.settleTimer);
+    this.settleTimer = null;
+  }
+
   private scheduleRetry(): void {
     if (this.disposed) return;
     this.failures += 1;
     const delay = Math.min(LID_RETRY_BASE_MS * 2 ** (this.failures - 1), LID_RETRY_MAX_MS);
     this.retryAt = this.now() + delay;
     this.clearRetry();
-    const schedule = this.options.setTimeout ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));
-    const timer = schedule(() => {
+    this.retryTimer = this.schedule(() => {
       this.retryTimer = null;
       if (!this.disposed) this.options.onChange();
     }, delay);
-    if (timer && typeof (timer as { unref?: () => void }).unref === "function") {
-      (timer as { unref: () => void }).unref();
-    }
-    this.retryTimer = timer;
   }
 
   private clearRetry(): void {
     if (this.retryTimer === null) return;
-    const clear = this.options.clearTimeout ?? ((handle: unknown) => clearTimeout(handle as NodeJS.Timeout));
-    clear(this.retryTimer);
+    this.cancel(this.retryTimer);
     this.retryTimer = null;
+  }
+
+  private schedule(fn: () => void, ms: number): unknown {
+    const schedule = this.options.setTimeout ?? ((callback: () => void, delay: number) => setTimeout(callback, delay));
+    const timer = schedule(fn, ms);
+    if (timer && typeof (timer as { unref?: () => void }).unref === "function") {
+      (timer as { unref: () => void }).unref();
+    }
+    return timer;
+  }
+
+  private cancel(timer: unknown): void {
+    const clear = this.options.clearTimeout ?? ((handle: unknown) => clearTimeout(handle as NodeJS.Timeout));
+    clear(timer);
   }
 
   private log(message: string): void {
