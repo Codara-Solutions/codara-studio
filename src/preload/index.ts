@@ -186,6 +186,7 @@ import type {
   PtyExitInfo,
   PtyResourceSnapshot,
   SystemResourceSnapshot,
+  SystemResourceSnapshotOptions,
   RenameRunInput,
   ResumeRunInput,
   RenameFileInput,
@@ -1300,8 +1301,8 @@ const api = {
     },
   },
   system: {
-    resourceSnapshot: (): Promise<SystemResourceSnapshot> =>
-      ipcRenderer.invoke("system:resourceSnapshot"),
+    resourceSnapshot: (options?: SystemResourceSnapshotOptions): Promise<SystemResourceSnapshot> =>
+      ipcRenderer.invoke("system:resourceSnapshot", { detail: options?.detail === true, focus: options?.focus }),
   },
   // Manual Claude/Codex terminal-pane session restore. Capture a launched
   // session's id, probe whether it still exists before resuming, and pre-seed

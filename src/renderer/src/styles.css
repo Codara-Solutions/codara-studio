@@ -62,6 +62,16 @@
      you) read as their own group. Named dark themes inherit this base value;
      the light palettes re-tint it darker below (as they do the tone tokens). */
   --automation: oklch(0.72 0.18 300);
+  /* System activity: one fixed hue per metric (never the workspace accent,
+     so CPU is the same blue in every project). Chosen as a set: adjacent
+     pairs stay apart for every kind of colour blindness, none of them is a
+     status amber or red, and each clears 3:1 on the panels. Disk and
+     network are secondary and share a neutral line. */
+  --metric-cpu: #3987e5;
+  --metric-gpu: #199e70;
+  --metric-ram: #9085e9;
+  --metric-swap: #d55181;
+  --metric-io: color-mix(in oklab, var(--ink) 52%, transparent);
 
   /* Type — humanist sans for chrome, mono for data/code.
      Both use system fallbacks: Inter / Segoe UI Variable / SF Pro on
@@ -534,6 +544,14 @@
   --agent-codex: oklch(0.50 0.13 175);
   --agent-grok: oklch(0.48 0.16 128);
   --agent-pi: oklch(0.50 0.15 300);
+}
+
+/* The system-activity metric hues stepped darker for bright paper. */
+:root[data-theme-mode="light"] {
+  --metric-cpu: #2a78d6;
+  --metric-gpu: #0f9466;
+  --metric-ram: #6250d6;
+  --metric-swap: #d4497d;
 }
 
 * { box-sizing: border-box; }
@@ -6967,7 +6985,7 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
 }
 
 .system-meters-pill:hover,
-.system-meters-pill[aria-expanded="true"] {
+.system-meters-pill[data-open] {
   border-color: color-mix(in oklab, var(--accent) 42%, var(--rule));
   background:
     linear-gradient(110deg, color-mix(in oklab, var(--accent) 13%, transparent), transparent 52%),
@@ -6977,17 +6995,34 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
     0 0 12px color-mix(in oklab, var(--accent) 11%, transparent);
 }
 
-.system-meters-pill:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: 1px;
-}
-
+/* Each meter is its own button: pressing one opens what uses it. */
 .system-meter-mini {
+  appearance: none;
+  align-self: stretch;
   display: inline-flex;
   align-items: center;
   gap: 3px;
   min-width: 42px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: inherit;
+  font: inherit;
   white-space: nowrap;
+  cursor: default;
+}
+
+.system-meter-mini:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.system-meter-mini:hover .system-meter-mini-label,
+.system-meter-mini[aria-expanded="true"] .system-meter-mini-label,
+.system-meter-mini[aria-expanded="true"] .system-meter-mini-value {
+  color: var(--ink);
 }
 
 .system-meter-mini + .system-meter-mini {
@@ -7011,134 +7046,27 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   letter-spacing: 0.05em;
 }
 
-/* The meter tints are ring colors; as 9px figures on light paper they
-   need a darker cut of the same hue to stay readable. */
-:root[data-theme-mode="light"] .system-meter-mini-value {
-  color: color-mix(in oklch, var(--meter-tint) 52%, black);
-}
+/* Figures stay in ink and the rings carry each metric's hue: a light hue
+   as 9px text is unreadable on bright paper. RAM's figure takes the status
+   colour while memory runs low, beside a ring of the same colour. */
 .system-meter-mini-value {
-  color: var(--meter-tint);
+  color: var(--ink-dim);
   min-width: 17px;
   font-size: 9px;
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
   letter-spacing: -0.04em;
   text-align: right;
 }
-
-.system-meter-popover {
-  display: grid;
-  gap: 10px;
-  padding: 11px;
-  font-family: var(--font-sans);
+.system-meters-pill[data-memory-level="low"] [data-metric="ram"] .system-meter-mini-value {
+  color: var(--warn);
+}
+.system-meters-pill[data-memory-level="critical"] [data-metric="ram"] .system-meter-mini-value {
+  color: var(--danger);
 }
 
-.system-meter-popover-title {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--ink);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.system-meter-live-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--ok);
-  box-shadow: 0 0 8px color-mix(in oklab, var(--ok) 58%, transparent);
-  animation: system-meter-breathe 2.4s ease-in-out infinite;
-}
-
-.system-meter-live-label {
-  margin-left: auto;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 8px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-}
-
-.system-meter-popover-rows {
-  display: grid;
-  gap: 7px;
-}
-
-.system-meter-popover-row {
-  display: grid;
-  gap: 5px;
-  padding: 8px;
-  border: 1px solid var(--rule-soft);
-  border-radius: var(--radius-surface);
-  background: color-mix(in oklab, var(--ink) 3%, transparent);
-}
-
-.system-meter-popover-heading {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.system-meter-popover-mark {
-  display: flex;
-}
-
-.system-meter-popover-label {
-  color: var(--ink-dim);
-  font-size: 10px;
-  font-weight: 650;
-  letter-spacing: 0.04em;
-}
-
-.system-meter-popover-value {
-  margin-left: auto;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 750;
-}
-
-.system-meter-popover-graph {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-
-.system-meter-popover-track {
-  flex: 1;
-  height: 4px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: color-mix(in oklab, var(--ink) 11%, transparent);
-}
-
-.system-meter-popover-track > span {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  transition: width 420ms var(--ease-out);
-}
-
-.system-meter-sparkline {
-  width: 72px;
-  height: 22px;
-  opacity: 0.88;
-}
-
-.system-meter-popover-detail,
-.system-meter-popover-footnote {
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 8.5px;
-}
-
-.system-meter-popover-footnote {
-  text-align: center;
-}
-
-@keyframes system-meter-breathe {
-  0%, 100% { opacity: 0.62; transform: scale(0.9); }
-  50% { opacity: 1; transform: scale(1.08); }
-}
+/* The popover itself is lazy: its sheet is
+   components/system-activity/system-activity.css. */
 
 @media (max-width: 1320px) {
   .system-meter-mini {
@@ -7153,12 +7081,6 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
 @media (max-width: 960px) {
   .system-meters-root {
     display: none;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .system-meter-live-dot {
-    animation: none;
   }
 }
 

@@ -368,8 +368,16 @@ not leave half-saved workspaces in memory), `test-storage-openrouter-key`
 file watcher behind the explorer, `src/main/fs-watcher.ts`),
 `test-fs-watcher-events` (runs that watcher on a temporary workspace: changes
 in nested and symlinked folders reach the explorer),
-`test-system-metrics` (the memory figure in the title-bar meters,
-`src/main/system-metrics.ts`), `test-keep-awake` (keeping the computer awake
+`test-system-metrics` (the title-bar meters and System activity samplers,
+`src/main/system-metrics*.ts`: every platform's parsers on captured output,
+the Linux sampler on a fake `/proc` and `/sys`, Intel, AMD and NVIDIA GPUs
+with fake `nvidia-smi` loops for totals and video memory per process, and
+processes grouped by the pane that owns them with CPU, memory, video memory
+and swap per pane and other apps folded by program),
+`test-system-activity-model` (the popover's model: how each pane's row is
+named, where a click on it goes, each resource's rows and top processes,
+formatting and the minute of chart history),
+`test-keep-awake` (keeping the computer awake
 while agents work, `src/main/keep-awake/`: the modes, one OS hold kept in step,
 the Linux lid helper and its backoff, that the helper dies with a killed
 parent, where the lid option is offered, what counts as work, the

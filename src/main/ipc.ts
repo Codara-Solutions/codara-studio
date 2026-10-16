@@ -60,7 +60,8 @@ import { detectAgentRuntimes } from "./agent-runtimes";
 import { loadPreferences, setPreference } from "./preferences-store";
 import { openInSystemBrowser, openLinkFromApp } from "./open-link";
 import * as pty from "./pty-manager";
-import { systemResourceSnapshot } from "./system-metrics";
+import { systemResourceSnapshot, type PaneRoot } from "./system-metrics";
+import { serversService } from "./servers/service";
 import { registerKeepAwakeIpc } from "./keep-awake";
 import {
   configuredOpenRouterCoraModels,
@@ -162,7 +163,9 @@ import {
   noteTerminalWillDispose,
   noteTerminalUserInput,
   syncTerminalNotifyPanes,
+  terminalAgentActivitySnapshot,
   terminalAgentStateSnapshot,
+  terminalPanePlacement,
   type TerminalNotifyPaneEntry,
 } from "./terminal-agent-notify";
 import { registerAgentBoardIpc } from "./agent-board";
@@ -470,6 +473,7 @@ import type {
   SparkEvent,
   StartAutopilotInput,
   StartSearchResponse,
+  SystemResource,
   UiAttentionSnapshot,
   UndoToCheckpointInput,
   UndoToCheckpointResult,
@@ -700,6 +704,38 @@ export function broadcastGitRemoteUpdated(cwds: string[]): void {
 // none today: only one BrowserWindow exists and the webview inspector preload
 // exposes no ipcRenderer.invoke, so no non-main-window sender can reach these
 // channels at all).
+
+const SYSTEM_RESOURCES: readonly SystemResource[] = ["cpu", "memory", "gpu", "swap"];
+
+// The local panes the System activity popover groups processes under, with
+// main's own placement for panes the window has not loaded since a reload,
+// and the agent main sees in each (its runtime and latest prompt name the row).
+function systemPaneRoots(): PaneRoot[] {
+  let keeper: ReturnType<ReturnType<typeof serversService>["keeper"]> | null = null;
+  try {
+    keeper = serversService().keeper();
+  } catch {
+    keeper = null;
+  }
+  const agents = new Map(terminalAgentActivitySnapshot().map((entry) => [entry.paneId, entry]));
+  return pty
+    .resourceSnapshot()
+    .sessions.filter((session) => !session.remote && session.pid > 0)
+    .map((session) => {
+      const placement = terminalPanePlacement(session.id);
+      const server = keeper?.serverOfPane(session.id) ?? null;
+      const agent = agents.get(session.id);
+      return {
+        paneId: session.id,
+        pid: session.pid,
+        workspaceId: placement?.workspaceId ?? server?.workspaceId ?? null,
+        tabId: placement?.tabId ?? null,
+        serverId: server?.id ?? null,
+        runtime: agent?.runtime ?? null,
+        task: agent?.prompt ?? null,
+      };
+    });
+}
 
 // Mirror Electron's own ipcMain.handle listener signature exactly (its args are
 // `...args: any[]`), so every existing typed listener stays assignable through
@@ -3188,8 +3224,10 @@ export function registerIpc(): void {
   handle("pty:resourceSnapshot", async () => {
     return pty.resourceSnapshot();
   });
-  handle("system:resourceSnapshot", async () => {
-    return systemResourceSnapshot();
+  handle("system:resourceSnapshot", async (_e, args: unknown) => {
+    const options = typeof args === "object" && args !== null ? (args as { detail?: unknown; focus?: unknown }) : {};
+    const focus = SYSTEM_RESOURCES.find((resource) => resource === options.focus);
+    return systemResourceSnapshot({ detail: options.detail === true, focus }, systemPaneRoots);
   });
   // Keep awake, the control beside the system meters.
   registerKeepAwakeIpc(handle);

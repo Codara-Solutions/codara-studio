@@ -1677,18 +1677,145 @@ export interface PtyResourceSnapshot {
   };
 }
 
+export type SystemGpuVendor = "nvidia" | "amd" | "intel" | "apple" | "other";
+
+/** One graphics adapter in the system monitor. */
+export interface SystemGpuSnapshot {
+  /** Stable across samples: a PCI address, an NVIDIA bus id or a Windows LUID. */
+  id: string;
+  name: string;
+  vendor: SystemGpuVendor;
+  /** Null when the driver gives no figure; 0 while the GPU sleeps. */
+  utilizationPercent: number | null;
+  memoryUsedBytes: number | null;
+  memoryTotalBytes: number | null;
+  temperatureC: number | null;
+  /** Powered down by runtime power management, so it was not woken to ask. */
+  asleep: boolean;
+  /** Why a GPU that is present gives no figures, in a sentence for the UI. */
+  note: string | null;
+}
+
+/** ok, low: under 12% available or sustained stalls; critical: under 5% or heavy stalls. */
+export type SystemMemoryLevel = "ok" | "low" | "critical";
+
+/** What the System activity popover breaks down by owner. */
+export type SystemResource = "cpu" | "memory" | "gpu" | "swap";
+
+export interface SystemProcessSnapshot {
+  pid: number;
+  name: string;
+  /** The command line, cut to a few hundred characters; empty when unreadable. */
+  command: string;
+  /** Percent of one core, as top shows it: a process on two full cores reads 200. */
+  cpuPercent: number;
+  /** Private resident memory where the platform reports it, else resident. */
+  memoryBytes: number;
+  /** Video memory, where the driver reports it per process; null where it does not. */
+  gpuMemoryBytes: number | null;
+  /** Memory swapped out, read only while the swap breakdown is open; null otherwise. */
+  swapBytes: number | null;
+}
+
+/** Processes outside Codara added up by program name ("chrome", "slack"). */
+export interface SystemAppUsage {
+  name: string;
+  processCount: number;
+  cpuPercent: number;
+  memoryBytes: number;
+  gpuMemoryBytes: number | null;
+  swapBytes: number | null;
+}
+
+/**
+ * Processes grouped by who started them: a Codara terminal pane with every
+ * process under it (the pane id is the pty id), Codara itself, or anything
+ * else on the machine.
+ */
+export interface SystemProcessGroup {
+  owner: "pane" | "codara" | "outside";
+  paneId: string | null;
+  /** Main's last known placement of the pane, for panes the window has not loaded. */
+  workspaceId: string | null;
+  tabId: string | null;
+  /** Set when the pane runs one of the workspace's dev servers. */
+  serverId: string | null;
+  /** The agent CLI main sees in the pane ("claude", "codex"), if any. */
+  runtime: string | null;
+  /** The agent's latest prompt, one line, when its hooks report it. */
+  task: string | null;
+  cpuPercent: number;
+  memoryBytes: number;
+  gpuMemoryBytes: number | null;
+  swapBytes: number | null;
+  processCount: number;
+  /** The group's heaviest processes by each resource. */
+  processes: SystemProcessSnapshot[];
+  /** Outside Codara only: the heaviest programs by each resource. */
+  apps: SystemAppUsage[];
+}
+
+export interface SystemProcessesSnapshot {
+  groups: SystemProcessGroup[];
+  processCount: number;
+  /** False on the first reading after opening: CPU needs two samples. */
+  cpuMeasured: boolean;
+  /** Whether processes carry video memory; when not, why, in a sentence. */
+  gpuMeasured: boolean;
+  gpuUnavailableReason: string | null;
+  /** Whether processes carry swap; only while the swap breakdown is open. */
+  swapMeasured: boolean;
+  swapUnavailableReason: string | null;
+  /** Why no process list is available, when it is not. */
+  unavailableReason: string | null;
+}
+
 /** Whole-machine activity shown in the title-bar system monitor. */
 export interface SystemResourceSnapshot {
   sampledAt: number;
+  platform: string;
   cpuPercent: number;
   cpuLogicalCores: number;
+  /** Per logical core, in core order. */
+  cpuCorePercents: number[];
+  cpuModel: string | null;
+  /** 1, 5 and 15 minute load averages; null where the OS has none (Windows). */
+  loadAverage: [number, number, number] | null;
+  cpuTemperatureC: number | null;
+  /** The busiest GPU. */
   gpuPercent: number | null;
+  gpus: SystemGpuSnapshot[];
+  /** Why no GPU figures are shown, when none are. */
+  gpuUnavailableReason: string | null;
   ramPercent: number;
   ramUsedBytes: number;
   ramTotalBytes: number;
+  ramAvailableBytes: number;
+  /** Page cache the kernel can drop under pressure; null where unknown. */
+  ramCachedBytes: number | null;
+  /** Share of time some tasks stalled on memory over the last interval (Linux PSI). */
+  memoryPressurePercent: number | null;
+  memoryLevel: SystemMemoryLevel;
   swapPercent: number | null;
   swapUsedBytes: number | null;
   swapTotalBytes: number | null;
+  swapInBytesPerSecond: number | null;
+  swapOutBytesPerSecond: number | null;
+  diskReadBytesPerSecond: number | null;
+  diskWriteBytesPerSecond: number | null;
+  networkReceiveBytesPerSecond: number | null;
+  networkSendBytesPerSecond: number | null;
+  /** Only in a detailed snapshot (the popover is open). */
+  processes: SystemProcessesSnapshot | null;
+  /** The sampler's own CPU time as a share of one core, child processes included. */
+  samplerCpuPercent: number | null;
+}
+
+export interface SystemResourceSnapshotOptions {
+  /** Per-process figures, read only while the popover is open. */
+  detail?: boolean;
+  /** The breakdown on screen: per-process swap is only read for "swap". */
+  focus?: SystemResource;
 }
 
 export type NotificationSoundKind = "needs-you" | "done";

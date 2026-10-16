@@ -173,6 +173,8 @@ const closedSurfaceModules = [
   "components/review/ReviewTabHost.tsx",
   "components/review/ReviewNoteCards.tsx",
   "components/jump/jump-model.ts",
+  "components/system-activity/SystemActivityPopover.tsx",
+  "components/system-activity/model.ts",
 ];
 const allModuleIds = chunks.flatMap((chunk) => Object.keys(chunk.modules));
 const staticModuleIds = staticChunks.flatMap((chunk) => Object.keys(chunk.modules));
