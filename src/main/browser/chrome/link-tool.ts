@@ -1,7 +1,8 @@
 // codara_preview_chrome: the state of the browser link, and opening, closing
 // or bringing forward a tab of the user's browser. The extension decides
 // again: it opens tabs only when the user turned that on, closes only tabs
-// an agent opened, and brings forward only shared tabs. An opened tab always
+// an agent opened or the user shared (never one on a blocked site), and
+// brings forward only shared tabs. An opened tab always
 // goes in a tab group: the one the agent names, or its workspace's.
 
 import { normalizeTabGroupName } from "../../../shared/tab-group-name";
@@ -79,7 +80,7 @@ export async function chromeLinkTool(params: Record<string, unknown>, _method: s
       if (ref?.kind !== "chrome") throw new PreviewToolParamsError(`${action} needs the tabId of a Chrome tab, such as chrome:123.`);
       const { link, tab } = backend.locate(ref);
       await link.request(action, { tabId: tab.tabId });
-      return { ok: true, tabId: backend.refFor(link, tab.tabId), action };
+      return { ok: true, tabId: backend.refFor(link, tab.tabId), action, ...(action === "close" ? { closed: true } : {}) };
     }
     default:
       throw new PreviewToolParamsError(`Unknown action ${action}; use status, open, close or activate.`);

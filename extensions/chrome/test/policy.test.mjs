@@ -4,16 +4,22 @@ import {
   DEFAULT_BLOCKED_SITES,
   agentGroupFor,
   agentGroupTitle,
+  RELOAD_CARRY_MS,
+  RELOAD_RETRY_MS,
   blockingRule,
+  carriedSession,
   cdpPermission,
   childSessionError,
+  closeTabError,
   commandUrl,
+  compareVersions,
   isBlockedUrl,
   isRestrictedUrl,
   isTabShared,
   openedTabAnswer,
   parseBlockedSites,
   redactCdpEvent,
+  shouldReload,
   storageScopeError,
 } from "../lib/policy.js";
 
@@ -118,5 +124,36 @@ export function run() {
   assert.equal(agentGroupFor(groups, [2, 3], "LOGIN")?.id, 2, "joins the extension's group by title, ignoring case");
   assert.equal(agentGroupFor(groups, [3], "Login"), null, "never the user's own group of that title");
   assert.equal(agentGroupFor(groups, [1, 2, 3], ""), null);
-  return "policy: blocked sites, browser pages, protocol permissions, cookie redaction, sharing and agent tab groups";
+
+  // Closing: a tab an agent opened or the user shared, never a blocked one.
+  const share = { all: false, windows: [7], tabs: [21], stopped: [] };
+  const webTab = (id, extra = {}) => ({ id, windowId: 1, url: "https://example.com/", ...extra });
+  assert.equal(closeTabError(webTab(20), share, [20], defaults), null, "a tab an agent opened");
+  assert.equal(closeTabError(webTab(21), share, [], defaults), null, "a tab the user shared");
+  assert.equal(closeTabError(webTab(22, { windowId: 7 }), share, [], defaults), null, "a tab of a shared window");
+  assert.equal(closeTabError(webTab(23), { ...share, all: true }, [], defaults), null, "a tab while everything is shared");
+  assert.match(closeTabError(webTab(24), share, [], defaults), /chrome:24 was not opened by an agent and is not shared/);
+  assert.match(closeTabError(webTab(21), { ...share, stopped: [21] }, [], defaults), /not shared/, "a tab the user stopped");
+  assert.match(closeTabError(webTab(21, { url: "https://www.paypal.com/" }), share, [], defaults), /blocked sites/);
+  assert.match(closeTabError(webTab(20, { url: "https://www.paypal.com/" }), share, [20], defaults), /blocked sites/, "even one an agent opened");
+  assert.match(closeTabError(null, share, [], defaults), /already closed/);
+
+  // Updating: reload for a newer version only, and not again for a while.
+  assert.equal(compareVersions("1.0.0", "1.1.0"), -1);
+  assert.equal(compareVersions("1.10.0", "1.9.9"), 1);
+  assert.equal(compareVersions("1.1", "1.1.0"), 0);
+  const now = 1_000_000_000;
+  assert.equal(shouldReload("1.0.0", "1.1.0", null, now), true);
+  assert.equal(shouldReload("1.1.0", "1.1.0", null, now), false, "already current");
+  assert.equal(shouldReload("1.2.0", "1.1.0", null, now), false, "never a downgrade");
+  assert.equal(shouldReload("1.0.0", "", null, now), false);
+  assert.equal(shouldReload("1.0.0", "1.1.0", { version: "1.1.0", at: now - 1000 }, now), false, "a reload that did not help is not repeated");
+  assert.equal(shouldReload("1.0.0", "1.1.0", { version: "1.1.0", at: now - RELOAD_RETRY_MS }, now), true, "but tried again later");
+  assert.equal(shouldReload("1.0.0", "1.2.0", { version: "1.1.0", at: now - 1000 }, now), true, "a newer version is tried at once");
+  const session = { shareTabs: [3], agentTabs: [3] };
+  assert.deepEqual(carriedSession({ at: now - 5000, session }, now), session, "sharing survives the reload");
+  assert.equal(carriedSession({ at: now - RELOAD_CARRY_MS, session }, now), null, "a stale carry is dropped: tab ids are reused after a restart");
+  assert.equal(carriedSession({ at: now + 5000, session }, now), null);
+  assert.equal(carriedSession(null, now), null);
+  return "policy: blocked sites, browser pages, protocol permissions, cookie redaction, sharing, agent tab groups, closing tabs and self-updates";
 }

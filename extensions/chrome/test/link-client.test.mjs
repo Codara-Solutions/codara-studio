@@ -129,6 +129,7 @@ export async function run() {
   let token = null;
   const statuses = [];
   const requests = [];
+  const reloads = [];
   const client = new LinkClient({
     WebSocket,
     ports: async () => ports,
@@ -145,6 +146,7 @@ export async function run() {
       if (request.method === "Boom.fail") throw new Error("refused by the user's choice");
       return { echoed: request.method };
     },
+    onReload: (message) => reloads.push(message),
     onStatus: (status) => {
       statuses.push(status.state);
       if (status.code) shown.push(status.code);
@@ -176,6 +178,16 @@ export async function run() {
   assert.equal(client.send({ type: "tabs", tabs: [] }), true);
   const answerFrames = heard.slice(-2).map((raw) => JSON.parse(raw));
   assert.ok(answerFrames.every((frame) => typeof frame.sealed === "string" && Object.keys(frame).length === 1), "answers leave sealed");
+
+  // Codara asks for a reload over the sealed session; the same frame
+  // unsealed is dropped with the link and never reloads anything.
+  await toBrowser(codaraSocket, { type: "reload", version: "1.1.0" });
+  await until(() => reloads.length === 1, "the sealed reload");
+  assert.deepEqual(reloads[0], { type: "reload", version: "1.1.0" });
+  codaraSocket.send(JSON.stringify({ type: "reload", version: "9.9.9" }));
+  await until(() => client.status.state === "offline", "the drop on an unsealed reload");
+  assert.equal(reloads.length, 1, "an unsealed reload never reaches the extension");
+  await until(() => client.status.state === "connected", "the reconnect after the unsealed reload", 8000);
 
   // Something on the path injects a request of its own, then replays one of
   // Codara's frames: neither reaches a tab, and each ends the link.
@@ -267,5 +279,5 @@ export async function run() {
   refuser.close();
   other.close();
   codara.close();
-  return "link client: skips closed and foreign ports, pairs, answers requests, reconnects, tries past a Codara that does not know it, answers only a Codara that proves the pairing (never an unproven pairing offer), honors revoke and deny, pairs over ECDH without sending the token, and drops the link on an unsealed or replayed frame";
+  return "link client: skips closed and foreign ports, pairs, answers requests, reconnects, tries past a Codara that does not know it, answers only a Codara that proves the pairing (never an unproven pairing offer), honors revoke and deny, pairs over ECDH without sending the token, reloads only when the sealed session asks, and drops the link on an unsealed or replayed frame";
 }

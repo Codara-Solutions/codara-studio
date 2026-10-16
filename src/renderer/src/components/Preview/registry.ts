@@ -196,6 +196,11 @@ export function previewTabsInPartition(partition: string): string[] {
   return [...entries.values()].filter((entry) => entry.partition === partition).map((entry) => entry.id);
 }
 
+/** Whether any workspace has this browser tab open. */
+export function hasPreviewTab(id: string): boolean {
+  return entries.has(id);
+}
+
 export function closePreviewTab(id: string): void {
   if (!closePreviewTabFn) throw new Error("Codara is not ready to close browser tabs yet. Retry in a moment.");
   closePreviewTabFn(id);

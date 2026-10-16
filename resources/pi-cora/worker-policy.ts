@@ -123,9 +123,10 @@ const FENCE_BRIDGE_MUTATING = [
 // Navigation and resizing stay open to readonly workers on Codara's own tabs,
 // but on a tab of the user's browser (a chrome: tabId) they act inside the
 // user's signed-in session, where loading a URL can change account state.
+// Closing one ends a tab the user may be using.
 // Emulation (device size, offline network, CPU, user agent) stays on the
 // user's tab after the worker ends, the same lasting change resize makes.
-const FENCE_READONLY_USER_BROWSER = new Set(["navigate", "resize", "emulate"]);
+const FENCE_READONLY_USER_BROWSER = new Set(["navigate", "resize", "emulate", "close"]);
 
 function isUserBrowserTab(value: unknown): boolean {
   return typeof value === "string" && value.trim().toLowerCase().startsWith("chrome:");

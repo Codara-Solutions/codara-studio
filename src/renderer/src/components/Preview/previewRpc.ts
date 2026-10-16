@@ -17,8 +17,11 @@ import { clickProbe, typeProbe, pressKeyProbe } from "./domActions";
 import { closeIsolatedTab, openIsolatedTab } from "./isolatedTabs";
 import { closePageDialog, showPageDialog, type PageDialogView } from "./pageDialogs";
 import {
+  closePreviewTab,
   ensurePreviewTab,
   findPreviewTabByWebContentsId,
+  findReusablePreviewTab,
+  hasPreviewTab,
   listPreviewTabs,
   pickPreviewTab,
   showPreviewControl,
@@ -43,7 +46,8 @@ type PreviewOpName =
   | "dialog_show"
   | "dialog_hide"
   | "open_isolated"
-  | "close_isolated";
+  | "close_isolated"
+  | "close";
 
 interface BridgeRequest {
   reqId: string;
@@ -145,6 +149,8 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
       return openIsolatedTab(req.params);
     case "close_isolated":
       return closeIsolatedTab(req.params);
+    case "close":
+      return closeTab(req.params);
     default:
       throw new Error(`unknown preview op: ${(req.op as string) ?? "?"}`);
   }
@@ -176,6 +182,32 @@ function requireTab(params: Record<string, unknown>) {
   showPreviewControl(tab, { action: "Working", runId });
   actedTabs.set(params, tab.id);
   return tab;
+}
+
+// codara_preview_close. A named tab must be in the caller's workspace; with
+// no tabId only a tab this run or agent opened is closed, never the user's.
+// It closes like the user's close button, so groups, history and the layout
+// follow, and a logged-out tab's data is wiped once its last page is gone.
+function closeTab(params: Record<string, unknown>) {
+  const runId = readString(params, "runId");
+  const workspaceId = readString(params, "workspaceId");
+  const callerPaneId = readString(params, "callerPaneId");
+  const tabId = readString(params, "tabId");
+  if (tabId) {
+    const tab = pickPreviewTab(tabId, runId, workspaceId, callerPaneId);
+    if (!tab) {
+      if (!hasPreviewTab(tabId)) return { ok: true, tabId, alreadyClosed: true };
+      throw new Error(`Browser tab ${tabId} is not in your workspace, so you cannot close it.`);
+    }
+    closePreviewTab(tab.id);
+    return { ok: true, tabId: tab.id, closed: true };
+  }
+  const own = findReusablePreviewTab(runId, workspaceId, callerPaneId);
+  if (!own) {
+    throw new Error("This session has no browser tab of its own open. Pass the tabId from codara_preview_list to close another tab of your workspace.");
+  }
+  closePreviewTab(own.id);
+  return { ok: true, tabId: own.id, closed: true };
 }
 
 // Electron logs EVERY rejected webview.executeJavaScript to the dev terminal as

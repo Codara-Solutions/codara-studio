@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Codara",
   "short_name": "Codara",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Let the agents you run in Codara use the browser tabs you share, with your signed-in sessions.",
   "minimum_chrome_version": "116",
   "permissions": ["debugger", "tabs", "tabGroups", "storage", "alarms"],

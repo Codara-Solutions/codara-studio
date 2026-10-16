@@ -27,6 +27,7 @@ export class LinkClient {
    * @param {() => Promise<void>} deps.clearPairing
    * @param {(request: object) => Promise<unknown>} deps.onRequest
    * @param {(message: object) => void} [deps.onMessage]
+   * @param {(message: object) => void} [deps.onReload]  Codara ships a newer extension
    * @param {(status: object) => void} [deps.onStatus]
    * @param {() => void} [deps.onConnected]
    * @param {() => void} [deps.onDisconnected]
@@ -307,6 +308,11 @@ export class LinkClient {
         return;
       case "pong":
         this.lastPong = Date.now();
+        return;
+      case "reload":
+        // Only from the sealed session of a proven Codara: anything on the
+        // path before that could otherwise restart the extension at will.
+        if (this.status.state === "connected" && this.socket?.sealer) this.deps.onReload?.(message);
         return;
       default:
         break;

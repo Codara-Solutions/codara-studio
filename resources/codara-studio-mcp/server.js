@@ -1843,7 +1843,7 @@ function buildInstructions() {
   ];
   if (listed.has("codara_preview_navigate")) {
     parts.push(
-      "Browser: open or reuse this session's tab with codara_preview_navigate, read it with codara_preview_snapshot, and act on its @references. Batch multi-step flows into one codara_preview_run. Use the trusted input tools (mouse, key, scroll, hover, drag) when a page ignores synthetic events.",
+      "Browser: open or reuse this session's tab with codara_preview_navigate, read it with codara_preview_snapshot, and act on its @references. Batch multi-step flows into one codara_preview_run. Use the trusted input tools (mouse, key, scroll, hover, drag) when a page ignores synthetic events. Close the tabs you opened with codara_preview_close when you are done, unless the user needs them.",
     );
     parts.push(...TOOL_REGISTRY.instructions);
     parts.push(

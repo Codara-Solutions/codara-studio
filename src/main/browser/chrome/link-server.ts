@@ -32,6 +32,7 @@ import {
   pairingCode,
   proofMatches,
   sanitizeBrowserInfo,
+  sanitizeExtensionFeatures,
   type ChromeBrowserInfo,
 } from "./protocol";
 
@@ -58,6 +59,7 @@ interface PairingEntry {
   socket: WebSocket;
   timer: ReturnType<typeof setTimeout>;
   version: string;
+  features: string[];
   /** Derived on both sides from the ECDH exchange; never sent. */
   token: string;
   sessionKey: Buffer;
@@ -157,7 +159,7 @@ export class ChromeLinkServer {
       lastSeenAt: now,
     });
     entry.socket.send(JSON.stringify({ type: "paired", linkId, app: this.options.app }));
-    entry.adopt(this.open(entry.socket, linkId, entry.pending.browser, entry.pending.extensionId, entry.version, new LinkSealer(entry.sessionKey, "codara")));
+    entry.adopt(this.open(entry.socket, linkId, entry.pending.browser, entry.pending.extensionId, entry.version, new LinkSealer(entry.sessionKey, "codara"), entry.features));
     this.emitChange();
     return true;
   }
@@ -320,6 +322,7 @@ export class ChromeLinkServer {
     const browser = sanitizeBrowserInfo(message.browser);
     const extension = message.extension && typeof message.extension === "object" ? (message.extension as Record<string, unknown>) : {};
     const version = typeof extension.version === "string" ? extension.version.slice(0, 24) : "";
+    const features = sanitizeExtensionFeatures(extension.features);
     const linkId = typeof message.linkId === "string" ? message.linkId : "";
     const clientNonce = typeof message.nonce === "string" && LINK_NONCE.test(message.nonce) ? message.nonce : "";
     const paired = linkId && clientNonce ? this.options.store.find(linkId, extensionId) : null;
@@ -333,7 +336,7 @@ export class ChromeLinkServer {
         this.options.store.add({ ...paired, browser, lastSeenAt: new Date().toISOString() });
         ws.send(JSON.stringify({ type: "welcome", protocol: CHROME_LINK_PROTOCOL, linkId: paired.linkId, app: this.options.app }));
         const sealer = new LinkSealer(linkSessionKey(paired.tokenSha256, clientNonce, serverNonce), "codara");
-        adopt(this.open(ws, paired.linkId, browser, extensionId, version, sealer));
+        adopt(this.open(ws, paired.linkId, browser, extensionId, version, sealer, features));
       });
       ws.send(JSON.stringify({ type: "challenge", nonce: serverNonce, proof: linkProof(paired.tokenSha256, "codara", clientNonce, serverNonce) }));
       return;
@@ -377,6 +380,7 @@ export class ChromeLinkServer {
         browser,
         extensionId,
         version,
+        features,
         adopt,
         code: pairingCode(extensionKey, codaraKey),
         token,
@@ -388,9 +392,9 @@ export class ChromeLinkServer {
 
   private awaitApproval(
     ws: WebSocket,
-    request: Pick<PairingEntry, "version" | "token" | "sessionKey" | "adopt"> & { browser: ChromeBrowserInfo; extensionId: string; code: string },
+    request: Pick<PairingEntry, "version" | "features" | "token" | "sessionKey" | "adopt"> & { browser: ChromeBrowserInfo; extensionId: string; code: string },
   ): void {
-    const { browser, extensionId, version, adopt, code, token, sessionKey } = request;
+    const { browser, extensionId, version, features, adopt, code, token, sessionKey } = request;
     const timeoutMs = this.options.pairingTimeoutMs ?? 120_000;
     const now = Date.now();
     const pending: PendingPairing = {
@@ -403,17 +407,25 @@ export class ChromeLinkServer {
     };
     const timer = setTimeout(() => this.deny(pending.id, "Nobody allowed the connection in Codara in time."), timeoutMs);
     timer.unref?.();
-    this.pairings.set(pending.id, { pending, socket: ws, timer, version, token, sessionKey, adopt });
+    this.pairings.set(pending.id, { pending, socket: ws, timer, version, features, token, sessionKey, adopt });
     for (const listener of this.pairingListeners) listener({ ...pending });
     this.emitChange();
   }
 
-  private open(ws: WebSocket, linkId: string, browser: ChromeBrowserInfo, extensionId: string, version: string, sealer: LinkSealer): ChromeLink {
+  private open(
+    ws: WebSocket,
+    linkId: string,
+    browser: ChromeBrowserInfo,
+    extensionId: string,
+    version: string,
+    sealer: LinkSealer,
+    features: string[],
+  ): ChromeLink {
     const previous = this.live.get(linkId);
     // The same browser reconnected (its service worker restarted): the new
     // socket replaces the old one.
     if (previous) this.drop(previous, 4002, "replaced");
-    const link = new ChromeLink(linkId, browser, extensionId, version, ws, sealer);
+    const link = new ChromeLink(linkId, browser, extensionId, version, ws, sealer, features);
     this.live.set(linkId, link);
     link.onTabs(() => this.emitChange());
     for (const listener of this.upListeners) listener(link);

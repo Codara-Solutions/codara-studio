@@ -323,3 +323,53 @@ export function isTabShared(share, tab) {
 export function agentTabId(tabId) {
   return `chrome:${tabId}`;
 }
+
+/**
+ * Why agents may not close this tab, or null when they may: a tab an agent
+ * opened or one the user shared, never one on a blocked site.
+ */
+export function closeTabError(tab, share, agentTabs, rules) {
+  if (!tab || typeof tab.id !== "number") return "The tab is already closed.";
+  const id = agentTabId(tab.id);
+  if (!agentTabs.includes(tab.id) && !isTabShared(share, tab)) {
+    return `${id} was not opened by an agent and is not shared with agents, so agents cannot close it.`;
+  }
+  const rule = blockingRule(tab.url ?? tab.pendingUrl, rules);
+  if (rule) return `${id} is on a site agents may not use ("${rule.raw}" in the extension's blocked sites), so agents cannot close it.`;
+  return null;
+}
+
+/** -1, 0 or 1 for two dotted versions such as "1.0.0" and "1.1.0"; anything unreadable counts as 0. */
+export function compareVersions(a, b) {
+  const parts = (version) => String(version ?? "").split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const left = parts(a);
+  const right = parts(b);
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const diff = (left[index] ?? 0) - (right[index] ?? 0);
+    if (diff) return diff < 0 ? -1 : 1;
+  }
+  return 0;
+}
+
+// A reload that did not bring the new version (Chrome loads the extension
+// from another folder) must not turn into a loop on every reconnect.
+export const RELOAD_RETRY_MS = 30 * 60_000;
+
+/** Whether Codara's "reload" for `target` should reload this extension, running `current`. */
+export function shouldReload(current, target, lastReload, now) {
+  if (typeof target !== "string" || !target || compareVersions(current, target) >= 0) return false;
+  if (lastReload && lastReload.version === target && now - Number(lastReload.at) < RELOAD_RETRY_MS) return false;
+  return true;
+}
+
+// chrome.storage.session is cleared when the extension reloads, so what the
+// user shared rides over in local storage, for a moment only: tab ids are
+// reused after a browser restart.
+export const RELOAD_CARRY_MS = 60_000;
+
+/** The session state saved before a reload, if it is from just now. */
+export function carriedSession(carry, now) {
+  if (!carry || typeof carry !== "object" || !carry.session || typeof carry.session !== "object") return null;
+  const age = now - Number(carry.at);
+  return age >= 0 && age < RELOAD_CARRY_MS ? carry.session : null;
+}

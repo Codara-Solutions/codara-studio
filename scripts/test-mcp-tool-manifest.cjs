@@ -76,7 +76,7 @@ assert.deepEqual(
 // module that needs more takes it from another module's budget; raising the
 // cap raises every session's cost (the roster budgets in
 // test-codara-studio-mcp.cjs follow it).
-const TOOL_MODULES_BUDGET = 18_300;
+const TOOL_MODULES_BUDGET = 18_680;
 let budgeted = 0;
 for (const mod of registry.modules) {
   assert.equal(typeof mod.budget, "number", `${mod.file} declares its budget`);
@@ -165,6 +165,8 @@ assert.match(installer, /toolManifest/, "mcp-installer.ts reads the server's man
 // A new tool that does neither fails here until someone decides.
 const FENCE_EXEMPT = new Set([
   "codara_preview_navigate",
+  // Closes the run's own tab like navigate opens one; a chrome: tabId is fenced.
+  "codara_preview_close",
   "codara_preview_scroll",
   "codara_preview_hover",
   "codara_preview_resize",

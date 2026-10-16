@@ -92,6 +92,7 @@ async function find(params: Record<string, unknown>): Promise<unknown> {
 export const corePreviewTools: PreviewToolTable = {
   "preview.list": list,
   "preview.navigate": acting(navigate),
+  "preview.close": rendererOp("close"),
   "preview.url": rendererOp("url"),
   "preview.snapshot": rendererOp("snapshot"),
   "preview.evaluate": acting(rendererOp("evaluate")),

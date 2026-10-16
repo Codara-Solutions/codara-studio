@@ -136,6 +136,7 @@ workspace on screen.
 |---|---|
 | `codara_preview_list` | Lists the browser tabs in the workspace, with id, title, URL, tab group and which one is active. |
 | `codara_preview_navigate` | Loads a URL (http, https or file) in a tab, creating one for the run if needed. `group` puts a tab it opens in a tab group; with `tabId` it moves that tab into the group, and `url` may then be left out. |
+| `codara_preview_close` | Closes a browser tab: this session's own by default, or the `tabId` given. A `chrome:` tabId closes a Chrome tab an agent opened or the user shared. |
 | `codara_preview_snapshot` | Reads the page as a compact outline with `@references` that other tools accept as selectors, link targets (`-> /path`) and names for icon-only links and buttons. Can return only what changed since a previous snapshot. |
 | `codara_preview_click` | Clicks one element by `@reference` or unique CSS selector. |
 | `codara_preview_type` | Types into a field, or picks an option in a native dropdown. |
@@ -163,7 +164,7 @@ workspace on screen.
 | `codara_preview_inspect` | Describes one element (an `@reference`, a unique selector, or `x`,`y` in viewport CSS pixels) for editing it: selector, role, name and text, box model, the computed styles that matter, the CSS rules that set them with their stylesheet, the DOM path, the component names and the source file and line, and a cropped image (also saved as a file, its `path` returned). |
 | `codara_preview_inbox` | Reads what the user queued for this agent from Codara (picked elements, page comments, screenshots): text, source tab and URL, and attached file paths. Read items are removed, except when a Cora run reads the workspace's items: those stay for the agent the user works with. |
 | `codara_preview_run` | Runs a batch of the steps above in one call. |
-| `codara_preview_chrome` | The user's own browser through the Codara extension: `status` (connected browsers and their shared `chrome:` tabs), `open` a URL in a new tab (in a Chrome tab group with `group`), `close` a tab an agent opened, `activate` a shared tab. |
+| `codara_preview_chrome` | The user's own browser through the Codara extension: `status` (connected browsers and their shared `chrome:` tabs), `open` a URL in a new tab (in a Chrome tab group with `group`), `close` a tab an agent opened or the user shared, `activate` a shared tab. |
 
 Every browser tool takes a `tabId`: a Codara tab's id as `codara_preview_list`
 returns it (`preview:<id>` is accepted too), or `chrome:<tabId>` for a tab of
@@ -234,9 +235,12 @@ own. With two browsers paired, ids carry the browser:
   refused. Page
   script from `codara_preview_evaluate` sees only what the page's own
   scripts see.
-- Readonly Pi workers may look at a shared tab but not navigate or resize it.
+- Readonly Pi workers may look at a shared tab but not navigate, resize or
+  close it.
 - `codara_preview_chrome` `open` needs the popup's "Let agents open new
-  tabs", and `close` only closes tabs an agent opened. Without `group` the
+  tabs", and `close` (or `codara_preview_close` with a `chrome:` tabId)
+  closes only a tab an agent opened or the user shared, never one on a
+  blocked site. Without `group` the
   tab goes in a group named after the caller's workspace, so it never lands
   loose among the user's own tabs.
 - **Keep agents in your Chrome** (Settings > Browser > Chrome extension, on

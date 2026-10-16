@@ -443,3 +443,42 @@ test("the user groups, recolors, renames, folds, drags, ungroups and closes tab 
     await teardown(fixture, app);
   }
 });
+
+test("an agent closes its own browser tab or one of its workspace, never another workspace's", async () => {
+  test.setTimeout(120_000);
+  const fixture = await setup("codara-tab-close-", true);
+  let app: ElectronApplication | null = null;
+  try {
+    let page: Page;
+    ({ app, page } = await fixture.launch());
+    const { paneId: agentPane } = await fixture.request("terminal.create", { cwd: fixture.cwdA, title: "Agent A", command: "sleep 600" });
+    const agent = { callerPaneId: agentPane };
+
+    await page.locator('[data-workspace-id="ws-b"]').click();
+    const userB = await openUserTab(fixture, page, "/b-user");
+    const opened = await mcpCall(fixture.home, agentPane, "codara_preview_navigate", { url: `${fixture.origin}/close-me`, group: "Close me" });
+    const own = opened.tabId as string;
+    await expect.poll(() => savedGroups(page)).toEqual({ "ws-a": { [own]: "Close me" }, "ws-b": {} });
+
+    // Another workspace's tab is out of reach.
+    await expect(fixture.request("preview.close", { ...agent, tabId: userB })).rejects.toThrow(/not in your workspace/);
+
+    // No tabId: the agent's own tab, closed like the user's close button, so
+    // its group goes with it.
+    expect(await mcpCall(fixture.home, agentPane, "codara_preview_close", {})).toMatchObject({ ok: true, tabId: own, closed: true });
+    await expect.poll(async () => (await fixture.request("preview.list", agent)).tabs.map((item: { id: string }) => item.id)).toEqual([]);
+    await expect.poll(() => savedGroups(page)).toEqual({ "ws-a": {}, "ws-b": {} });
+
+    // A retry after a lost answer is not an error, and with nothing of its
+    // own open the agent is told so instead of closing the user's tab.
+    expect(await mcpCall(fixture.home, agentPane, "codara_preview_close", { tabId: own })).toMatchObject({ ok: true, tabId: own, alreadyClosed: true });
+    await expect(fixture.request("preview.close", agent)).rejects.toThrow(/no browser tab of its own/);
+    await expect(page.locator(tab(userB))).toBeVisible();
+
+    // The user's own tab, named, closes for an agent in its workspace.
+    expect(await fixture.request("preview.close", { tabId: userB })).toMatchObject({ ok: true, tabId: userB, closed: true });
+    await expect(page.locator(tab(userB))).toHaveCount(0);
+  } finally {
+    await teardown(fixture, app);
+  }
+});

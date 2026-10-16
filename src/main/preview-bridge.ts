@@ -54,7 +54,9 @@ export type PreviewOpName =
   // A logged-out tab in its own temporary partition, and closing one
   // (browser/fresh-tabs.ts wipes its data).
   | "open_isolated"
-  | "close_isolated";
+  | "close_isolated"
+  // codara_preview_close: closes a tab the way the user's close button does.
+  | "close";
 
 export interface PreviewOpParams {
   tabId?: string | null;

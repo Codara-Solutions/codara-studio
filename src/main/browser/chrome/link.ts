@@ -35,6 +35,8 @@ export class ChromeLink {
     readonly extensionVersion: string,
     private readonly socket: Pick<WebSocket, "send" | "close" | "readyState">,
     private readonly sealer: LinkSealer,
+    /** What the extension's hello said it can do, such as "reload". */
+    readonly extensionFeatures: readonly string[] = [],
   ) {}
 
   get isOpen(): boolean {

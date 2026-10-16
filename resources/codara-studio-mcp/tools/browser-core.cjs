@@ -7,7 +7,7 @@ const { PREVIEW_WAIT_MAX_MS } = require("./lib/limits.cjs");
 
 module.exports = {
   order: 10,
-  budget: 4540,
+  budget: 4900,
   tools: [
     {
       name: "codara_preview_list",
@@ -33,6 +33,14 @@ module.exports = {
         },
         additionalProperties: false,
       },
+    },
+    {
+      name: "codara_preview_close",
+      rpc: "preview.close",
+      annotations: { destructive: true, idempotent: true },
+      description:
+        "Close a browser tab you are done with: tabId, or this session's tab. A chrome: tabId closes a Chrome tab an agent opened or the user shared. Only tabs of your workspace; a retry returns alreadyClosed=true.",
+      inputSchema: { type: "object", properties: { tabId: { type: "string" } }, additionalProperties: false },
     },
     {
       name: "codara_preview_snapshot",

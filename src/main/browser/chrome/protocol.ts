@@ -2,7 +2,7 @@
 // (extensions/chrome/). One WebSocket per browser profile at
 // ws://127.0.0.1:<port>/codara-chrome; every frame is one JSON object.
 //
-//   ext -> {type:"hello", protocol, browser, extension, linkId?, nonce?, pair, pairCommit?}
+//   ext -> {type:"hello", protocol, browser, extension:{id, version, features?}, linkId?, nonce?, pair, pairCommit?}
 //   codara -> {type:"challenge", nonce, proof}                 known linkId
 //   ext -> {type:"auth", proof}
 //   codara -> {type:"welcome", protocol, linkId, app}          the proof matched
@@ -29,7 +29,9 @@
 // After that the extension reports the tabs the user shared ("tabs"),
 // relays chrome.debugger events ("cdp_event", "detached") and answers
 // Codara's requests ({id, type, ...} -> {id, result} | {id, error}). Codara
-// tells it which agent used a tab ("usage") and can revoke the pairing.
+// tells it which agent used a tab ("usage"), can revoke the pairing, and asks
+// an extension older than the one it ships to reload itself ({type:"reload",
+// version}) when its hello listed the "reload" feature.
 
 import { createCipheriv, createDecipheriv, createHash, createHmac, timingSafeEqual } from "node:crypto";
 
@@ -65,7 +67,7 @@ export interface ExtensionHello {
   type: "hello";
   protocol: number;
   browser: ChromeBrowserInfo;
-  extension: { id: string; version: string };
+  extension: { id: string; version: string; features?: string[] };
   linkId?: string;
   nonce?: string;
   pair?: boolean;
@@ -175,6 +177,12 @@ export function sanitizeBrowserInfo(value: unknown): ChromeBrowserInfo {
   const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
   const text = (input: unknown, max: number) => (typeof input === "string" ? input.replace(/[^\w .()-]/g, "").slice(0, max) : "");
   return { name: text(raw.name, 40) || "Chromium", version: text(raw.version, 24) };
+}
+
+/** The features an extension's hello lists, such as "reload". */
+export function sanitizeExtensionFeatures(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((item): item is string => typeof item === "string" && /^[a-z][a-z0-9-]{0,23}$/.test(item)))].slice(0, 16);
 }
 
 export function sanitizeTabs(value: unknown): ChromeTabInfo[] {

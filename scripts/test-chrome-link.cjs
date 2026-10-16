@@ -35,6 +35,7 @@ async function load() {
         `export * from "./activity";`,
         `export * from "./runtime";`,
         `export * from "./protocol";`,
+        `export * from "./extension-update";`,
         `export { chromeLinkTool } from "./link-tool";`,
         `export { registerBrowserBackend, resolveBrowserTarget } from "../targets";`,
         `export { consoleRing } from "../recorders/console";`,
@@ -164,10 +165,10 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
     return pairingCode(key, offer.key);
   };
   // The extension's side of the handshake, with the extension's own proof code.
-  ext.login = async ({ token, linkId }, { lie = false } = {}) => {
+  ext.login = async ({ token, linkId }, { lie = false, features } = {}) => {
     const { linkProof, sha256Hex } = await extensionCrypto;
     const nonce = "e".repeat(32);
-    ext.hello({ linkId, nonce });
+    ext.hello({ linkId, nonce, ...(features ? { extension: { id, version: "1.1.0", features } } : {}) });
     const challenge = await ext.next("challenge");
     const secret = await sha256Hex(token);
     assert.equal(challenge.proof, await linkProof(secret, "codara", nonce, challenge.nonce), "Codara proves it holds the pairing");
@@ -309,6 +310,7 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
     ],
   });
   const link = await until(() => server.links()[0]?.tabs.size === 2 && server.links()[0], "the tab list");
+  assert.deepEqual(link.extensionFeatures, [], "an extension that lists no features");
   assert.deepEqual(await backend.list(), [
     { id: "chrome:12", kind: "chrome", title: "Mail", url: "https://mail.example/", isActive: true, browser: "Google Chrome", attached: false, storage: false, openedByAgent: false },
   ], "a blocked tab is never listed");
@@ -419,15 +421,22 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   await lib.chromeLinkTool({ action: "activate", tabId: "chrome:12" }, "preview.chrome", host);
   assert.deepEqual(answers.at(-1), { id: answers.at(-1).id, type: "activate", tabId: 12 });
   await assert.rejects(lib.chromeLinkTool({ action: "close", tabId: "tab-3" }, "preview.chrome", host), /tabId of a Chrome tab/);
+  // codara_preview_close with a chrome: tabId is the link's close; the
+  // extension decides again whether agents may close that tab.
+  assert.deepEqual(await tools["preview.close"]({ tabId: "chrome:12" }, "preview.close", host), { ok: true, tabId: "chrome:12", action: "close", closed: true });
+  assert.deepEqual(answers.at(-1), { id: answers.at(-1).id, type: "close", tabId: 12 });
+  await assert.rejects(tools["preview.close"]({ tabId: "chrome:4040" }, "preview.close", host), /not shared with agents, or it is closed/);
 
   // The extension refuses: the error reaches the agent as is.
   const refusing = extension(port, { answer: async () => { throw new Error("Cookies and site storage of chrome:5 need the user's permission"); } });
   await refusing.opened;
-  await refusing.login({ token, linkId: paired.linkId });
+  await refusing.login({ token, linkId: paired.linkId }, { features: ["reload", "Not A Feature"] });
   await refusing.next("welcome");
   await until(() => downs.length === 1, "the replaced link going down");
   refusing.send({ type: "tabs", tabs: [{ tabId: 5, windowId: 1, url: "https://shop.example/", title: "Shop", active: true }] });
   const second = await until(() => server.links()[0]?.tabs.has(5) && server.links()[0], "the new socket's tabs");
+  assert.deepEqual(second.extensionFeatures, ["reload"], "the features its hello listed");
+  assert.equal(second.extensionVersion, "1.1.0");
   assert.notEqual(second, link, "the reconnected browser replaces its old socket");
   const reconnected = await lib.resolveBrowserTarget({ tabId: "chrome:5" });
   await assert.rejects(reconnected.session.send("Network.getCookies"), /need the user's permission/);
@@ -537,6 +546,42 @@ function extension(port, { id = EXT_A, origin, host, path: urlPath = "/codara-ch
   const navigated = await lib.navigate({ ref: "chrome:12", session: pageSession, info: async () => ({ url: "https://a.example/next", title: "Next" }) }, { url: "https://a.example/next" });
   assert.deepEqual(navigated, { url: "https://a.example/next", title: "Next", tabId: "chrome:12", opened: false });
   assert.ok(Date.now() - navigateStarted < 2_000, "navigate waited for the load event, not its timeout");
+  // Keeping the loaded extension current: the copy follows any changed
+  // file, and a connected extension older than it reloads or is shown.
+  const shipped = fs.mkdtempSync(path.join(os.tmpdir(), "codara-ext-src-"));
+  const copy = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "codara-ext-home-")), "chrome-extension");
+  fs.writeFileSync(path.join(shipped, "manifest.json"), JSON.stringify({ version: "1.1.0" }));
+  fs.mkdirSync(path.join(shipped, "lib"));
+  fs.writeFileSync(path.join(shipped, "lib", "policy.js"), "export const a = 1;");
+  fs.mkdirSync(path.join(shipped, "test"));
+  fs.writeFileSync(path.join(shipped, "test", "x.mjs"), "dev only");
+  fs.writeFileSync(path.join(shipped, "README.md"), "dev only");
+  assert.equal(lib.syncExtensionFolder(shipped, copy), true, "a missing copy is made");
+  assert.deepEqual(fs.readdirSync(copy).sort(), ["lib", "manifest.json"], "without the development files");
+  assert.equal(lib.syncExtensionFolder(shipped, copy), false, "an identical copy is left alone");
+  fs.writeFileSync(path.join(shipped, "README.md"), "changed, but not shipped");
+  assert.equal(lib.syncExtensionFolder(shipped, copy), false, "a development file does not count");
+  fs.writeFileSync(path.join(shipped, "lib", "policy.js"), "export const a = 2;");
+  assert.equal(lib.syncExtensionFolder(shipped, copy), true, "a changed file refreshes the copy at the same version");
+  assert.equal(fs.readFileSync(path.join(copy, "lib", "policy.js"), "utf8"), "export const a = 2;");
+  fs.writeFileSync(path.join(copy, "stray.js"), "left by hand");
+  assert.equal(lib.syncExtensionFolder(shipped, copy), true, "an extra file in the copy refreshes it");
+  assert.equal(fs.existsSync(path.join(copy, "stray.js")), false);
+  assert.equal(lib.syncExtensionFolder(shipped, copy, true), true, "forced");
+  assert.equal(lib.extensionManifestVersion(copy), "1.1.0");
+  assert.equal(lib.extensionContentHash(path.join(copy, "missing")), null);
+  assert.equal(lib.compareExtensionVersions("1.0.0", "1.1.0"), -1);
+  assert.equal(lib.compareExtensionVersions("1.10.0", "1.9.0"), 1);
+  assert.equal(lib.compareExtensionVersions("1.1", "1.1.0"), 0);
+  assert.equal(lib.extensionUpdateAction("1.1.0", ["reload"], "1.1.0", false), "none", "current");
+  assert.equal(lib.extensionUpdateAction("1.2.0", [], "1.1.0", false), "none", "newer than shipped");
+  assert.equal(lib.extensionUpdateAction("1.0.0", [], null, false), "none", "nothing shipped to compare");
+  assert.equal(lib.extensionUpdateAction("1.0.0", ["reload"], "1.1.0", false), "reload");
+  assert.equal(lib.extensionUpdateAction("1.0.0", ["reload"], "1.1.0", true), "manual", "a reload that did not help");
+  assert.equal(lib.extensionUpdateAction("1.0.0", [], "1.1.0", false), "manual", "too old to reload itself");
+  assert.deepEqual(lib.sanitizeExtensionFeatures(["reload", "reload", "Bad Feature", 3, "x".repeat(40)]), ["reload"]);
+  assert.deepEqual(lib.sanitizeExtensionFeatures("reload"), []);
+
   console.log("chrome link: origin and host checks, pairing over ECDH with code and Allow, a swapped key refused, bound tokens never sent, sealed frames with injected and replayed ones dropping the link, shared and blocked tabs, relayed protocol, activity, codara_preview_chrome, unpair");
   setTimeout(() => process.exit(process.exitCode ?? 0), 50).unref();
 })().catch((error) => {

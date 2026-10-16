@@ -74,7 +74,8 @@ tools it uses for its own browser tabs.
   `localStorage` and non-HttpOnly cookies, but never HttpOnly cookies; share
   only tabs whose page you would let an agent script.
 - Opening a new tab needs **Let agents open new tabs**; such a tab is shared
-  automatically and only those tabs can be closed by an agent. Every such
+  automatically. An agent can close a tab it opened or one you shared, never
+  any other tab and never one on a blocked site. Every such
   tab goes in a tab group: the one the agent names (`group`), or else one
   named after the agent's Codara workspace. It joins a group the extension
   made with that title in the same window, or starts one. Agents never move
@@ -89,6 +90,17 @@ tools it uses for its own browser tabs.
 - Codara logs every tool call with the agent that made it (Settings > Browser
   > Chrome extension, and `<Codara home>/chrome-link/activity.jsonl`). The
   popup shows which agent used each tab last.
+
+## Updates
+
+Codara keeps its copy of the extension (the folder you loaded) the same as
+the one it ships: it copies it again whenever a file differs. When this
+extension connects with an older version than that copy, Codara asks it,
+over the sealed session only, to reload itself (`chrome.runtime.reload()`).
+What you shared and the pairing are kept across the reload, and a reload
+that did not bring the new version is not tried again for 30 minutes.
+Versions before 1.1.0 cannot reload themselves: Settings > Browser then
+says to press the reload button on Codara in `chrome://extensions` once.
 
 ## Development
 

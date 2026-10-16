@@ -35,6 +35,9 @@ export const chromeTargetTools: PreviewToolTable = {
   "preview.network": onTarget(ops.networkEntries),
   "preview.resize": onTarget(ops.resize),
   "preview.screenshot": onTarget(ops.screenshot),
+  // codara_preview_close on a chrome: tab is the link tool's close, so one
+  // tool closes tabs in both browsers and the extension decides again.
+  "preview.close": (params, method, host) => chromeLinkTool({ ...params, action: "close" }, method, host),
 };
 
 /** Methods only the extension link has: its state, and opening, closing or bringing forward a tab. */

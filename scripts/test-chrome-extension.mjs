@@ -25,9 +25,9 @@ assert.equal(entry.to, "chrome-extension", "src/main/browser/chrome/index.ts rea
 for (const name of DEV_FILES) {
   assert.ok(entry.filter.includes(`!${name}`) || entry.filter.includes(`!${name}/**`), `the packaged copy leaves out ${name}`);
 }
-const main = readFileSync(join(root, "src", "main", "browser", "chrome", "index.ts"), "utf8");
+const main = readFileSync(join(root, "src", "main", "browser", "chrome", "extension-update.ts"), "utf8");
 const prepared = /EXTENSION_DEV_FILES = new Set\(\[([^\]]*)\]\)/.exec(main);
-assert.ok(prepared, "index.ts names the files Settings leaves out");
+assert.ok(prepared, "extension-update.ts names the files Settings leaves out");
 assert.deepEqual(JSON.parse(`[${prepared[1]}]`).sort(), [...DEV_FILES].sort(), "Settings prepares the same files Chrome loads");
 console.log("ok - the packaged app and Settings ship what the store zip ships");
 

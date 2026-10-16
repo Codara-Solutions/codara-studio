@@ -31,6 +31,7 @@ fs.writeFileSync(
 const CORE_PREVIEW_TOOLS = [
   "codara_preview_list",
   "codara_preview_navigate",
+  "codara_preview_close",
   "codara_preview_snapshot",
   "codara_preview_click",
   "codara_preview_type",
@@ -102,7 +103,7 @@ const RUN = { SPARK_RUN_ID: "run-roster" };
 // codara_worktree_setup; studio by 200 for codara_session_search, about
 // 450, with the rest of it and all of codara_share_offer paid for by shorter
 // terminal and worktree descriptions, which also kept execute in place).
-const LIST_BUDGET = { studio: 30_000, run: 39_000, worker: 35_000, execute: 96_000, automation: 69_000 };
+const LIST_BUDGET = { studio: 30_500, run: 39_000, worker: 35_000, execute: 96_000, automation: 69_000 };
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",
@@ -561,6 +562,9 @@ function sortedEqual(actual, expected, label) {
     assert.strictEqual(byName(studio, "codara_terminal_read").annotations.readOnlyHint, true);
     assert.strictEqual(byName(studio, "codara_terminal_close").annotations.destructiveHint, true);
     assert.strictEqual(byName(studio, "codara_preview_navigate").annotations.openWorldHint, true);
+    assert.strictEqual(byName(studio, "codara_preview_close").annotations.destructiveHint, true);
+    assert.strictEqual(byName(studio, "codara_preview_close").annotations.idempotentHint, true);
+    assert.match(studio.init.instructions, /codara_preview_close/);
     assert.strictEqual(byName(execute, "codara_delete_automation").annotations.destructiveHint, true);
     assert.strictEqual(byName(studio, "codara_worktree_list").annotations.readOnlyHint, true);
     assert.strictEqual(byName(studio, "codara_worktree_setup").annotations.readOnlyHint, true);

@@ -18,14 +18,17 @@ import {
   agentGroupTitle,
   agentTabId,
   blockingRule,
+  carriedSession,
   cdpPermission,
   childSessionError,
+  closeTabError,
   commandUrl,
   isRestrictedUrl,
   isTabShared,
   openedTabAnswer,
   parseBlockedSites,
   redactCdpEvent,
+  shouldReload,
   storageScopeError,
 } from "./lib/policy.js";
 
@@ -46,7 +49,9 @@ const LOCAL_DEFAULTS = {
   blockedSites: DEFAULT_BLOCKED_SITES,
   allowOpen: false,
   ports: null,
+  lastReload: null,
 };
+const RELOAD_CARRY = "reloadCarry";
 const ALARM = "codara-link";
 const OPEN_LOAD_TIMEOUT_MS = 15_000;
 
@@ -55,10 +60,21 @@ let rules = parseBlockedSites(DEFAULT_BLOCKED_SITES);
 const ready = load();
 
 async function load() {
-  const [session, local] = await Promise.all([
+  const [stored, local, carry] = await Promise.all([
     chrome.storage.session.get(SESSION_DEFAULTS),
     chrome.storage.local.get(LOCAL_DEFAULTS),
+    chrome.storage.local.get(RELOAD_CARRY),
   ]);
+  let session = stored;
+  // Back from a reload Codara asked for: what the user shared survives it.
+  if (carry[RELOAD_CARRY] !== undefined) {
+    const carried = carriedSession(carry[RELOAD_CARRY], Date.now());
+    await chrome.storage.local.remove(RELOAD_CARRY);
+    if (carried) {
+      session = { ...SESSION_DEFAULTS, ...pick(carried, Object.keys(SESSION_DEFAULTS)), attached: [] };
+      await chrome.storage.session.set(session);
+    }
+  }
   state = { ...SESSION_DEFAULTS, ...session, ...LOCAL_DEFAULTS, ...local };
   rules = parseBlockedSites(state.blockedSites);
 }
@@ -79,6 +95,7 @@ async function save(patch) {
   ]);
 }
 
+const pick = (object, keys) => Object.fromEntries(keys.filter((key) => key in object).map((key) => [key, object[key]]));
 const without = (list, value) => list.filter((item) => item !== value);
 const withValue = (list, value) => (list.includes(value) ? list : [...list, value]);
 
@@ -102,7 +119,8 @@ const link = new LinkClient({
   },
   hello: async () => ({
     browser: browserIdentity(),
-    extension: { id: chrome.runtime.id, version: chrome.runtime.getManifest().version },
+    // "reload": this version reloads itself when Codara ships a newer one.
+    extension: { id: chrome.runtime.id, version: chrome.runtime.getManifest().version, features: ["reload"] },
   }),
   loadPairing: async () => {
     await ready;
@@ -112,6 +130,7 @@ const link = new LinkClient({
   clearPairing: () => save({ token: null, linkId: null }),
   onRequest: handleRequest,
   onMessage: handleMessage,
+  onReload: (message) => void reloadForUpdate(message),
   onConnected: () => void reportTabs(),
   onDisconnected: () => void detachAll(),
 });
@@ -152,10 +171,12 @@ async function handleRequest(request) {
       return openTab(request);
     case "close": {
       const tabId = Number(request.tabId);
-      if (!state.agentTabs.includes(tabId)) {
-        throw new Error(`${agentTabId(tabId)} was not opened by an agent, so agents cannot close it.`);
-      }
-      await chrome.tabs.remove(tabId);
+      const tab = await chrome.tabs.get(tabId).catch(() => null);
+      if (!tab) throw new Error(`${agentTabId(tabId)} is closed.`);
+      const refused = closeTabError(tab, shareChoice(), state.agentTabs, rules);
+      if (refused) throw new Error(refused);
+      await detachTab(tab.id);
+      await chrome.tabs.remove(tab.id);
       return {};
     }
     case "activate": {
@@ -247,6 +268,23 @@ function handleMessage(message) {
   } else if (message.type === "revoked") {
     void detachAll();
   }
+}
+
+// Codara copied a newer version of this extension into the folder Chrome
+// loads it from: reload to run it. Codara asks only over the sealed session
+// (LinkClient passes nothing else on), and a reload that did not bring the
+// new version is not tried again for a while, so it can never loop.
+async function reloadForUpdate(message) {
+  await ready;
+  const target = typeof message.version === "string" ? message.version : "";
+  const now = Date.now();
+  if (!shouldReload(chrome.runtime.getManifest().version, target, state.lastReload, now)) return;
+  const session = pick(state, Object.keys(SESSION_DEFAULTS));
+  await save({ lastReload: { version: target, at: now } });
+  await chrome.storage.local.set({ [RELOAD_CARRY]: { at: now, session } });
+  link.disconnect("idle");
+  await detachAll();
+  chrome.runtime.reload();
 }
 
 // ── Debugger sessions ───────────────────────────────────────────────────────

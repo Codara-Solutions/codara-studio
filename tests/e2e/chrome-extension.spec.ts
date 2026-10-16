@@ -2,7 +2,7 @@ import { test, expect, type Page } from "@playwright/test";
 import { _electron as electron, chromium, type BrowserContext, type Worker } from "playwright";
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { cp, mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
@@ -331,7 +331,7 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     await expect(popup.locator("#tab-usage")).toContainText("codara_preview_screenshot");
 
     // Tabs in the user's browser: opening needs the popup's switch, and an
-    // agent closes only the tabs it opened.
+    // agent closes only tabs it opened or the user shared.
     expect(await request("preview.chrome", { action: "status" })).toMatchObject({ connected: true, browsers: [{ sharedTabs: 1, mayOpenTabs: false }] });
     await expect(request("preview.chrome", { action: "open", url: `${origin}/opened` })).rejects.toThrow(/open new tabs/);
     await popup.locator("#allow-open").check();
@@ -348,15 +348,24 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     expect(JSON.stringify(await request("preview.snapshot", { tabId: opened.tabId }))).toContain("Public page");
     await request("preview.chrome", { action: "activate", tabId });
     expect(await worker.evaluate((id) => chrome.tabs.get(id).then((tab: { active: boolean }) => tab.active), accountTab)).toBe(true);
-    await expect(request("preview.chrome", { action: "close", tabId })).rejects.toThrow(/not opened by an agent/);
-    await request("preview.chrome", { action: "close", tabId: opened.tabId });
+    await expect(request("preview.chrome", { action: "close", tabId: `chrome:${otherTab}` })).rejects.toThrow(/not shared with agents/);
+    // codara_preview_close takes a chrome: tabId too.
+    expect(await request("preview.close", { tabId: opened.tabId })).toMatchObject({ ok: true, tabId: opened.tabId, closed: true });
     await expect.poll(() => browser?.pages().some((page) => page.url().endsWith("/opened"))).toBe(false);
     await expect(account.getByText("Signed in as Ada")).toBeVisible();
+    const spare = await browser.newPage();
+    await spare.goto(`${origin}/spare`);
+    const spareTab = await tabIdOf(worker, "/spare");
+    await worker.evaluate((id) => (self as unknown as { codara: any }).codara.handlePopup({ type: "shareTab", tabId: id, on: true }), spareTab);
+    await expect.poll(async () => (await request("preview.list")).tabs.some((tab: { id: string }) => tab.id === `chrome:${spareTab}`)).toBe(true);
+    expect(await request("preview.chrome", { action: "close", tabId: `chrome:${spareTab}` })).toMatchObject({ ok: true, closed: true });
+    await expect.poll(() => spare.isClosed()).toBe(true);
 
     // An unshared tab, and a shared tab on a blocked site, are refused.
     await expect(request("preview.snapshot", { tabId: `chrome:${otherTab}` })).rejects.toThrow(/is not shared with agents/);
     await worker.evaluate((id) => (self as unknown as { codara: any }).codara.handlePopup({ type: "shareTab", tabId: id, on: true }), blockedTab);
     await expect(request("preview.snapshot", { tabId: `chrome:${blockedTab}` })).rejects.toThrow(/blocked/);
+    await expect(request("preview.close", { tabId: `chrome:${blockedTab}` })).rejects.toThrow(/blocked/);
     await expect(request("preview.navigate", { tabId, url: `http://localhost:${sitePort}/bank` })).rejects.toThrow(/blocked/);
     await expect(account.getByText("Signed in as Ada")).toBeVisible();
 
@@ -400,6 +409,115 @@ test("the Chrome extension pairs, shares one tab with agents, refuses the rest a
     const { tabs } = await request("preview.list");
     expect(tabs.some((tab: { kind?: string }) => tab.kind === "chrome")).toBe(false);
     await expect.poll(() => popup.evaluate((id) => chrome.action.getBadgeText({ tabId: id }), accountTab)).not.toBe("AI");
+  } finally {
+    await browser?.close().catch(() => undefined);
+    await app.close();
+    await new Promise((done) => site.close(done));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an extension older than the one Codara ships reloads itself once, keeps what the user shared, and Settings says what to do", async () => {
+  test.setTimeout(150_000);
+  const executablePath = fullChromium();
+  test.skip(!executablePath, "no Playwright Chromium installed");
+
+  const root = await mkdtemp(join(tmpdir(), "codara-chrome-update-"));
+  const userDataDir = join(root, "home");
+  const workspaceDir = join(root, "workspace");
+  const profile = join(root, "chromium");
+  // The user loaded an older copy from a folder Codara does not refresh, so
+  // the reload Codara asks for cannot bring the new version.
+  const older = join(root, "extension");
+  await mkdir(userDataDir);
+  await mkdir(workspaceDir);
+  await cp(EXTENSION, older, { recursive: true });
+  const manifest = JSON.parse(await readFile(join(EXTENSION, "manifest.json"), "utf8"));
+  await writeFile(join(older, "manifest.json"), JSON.stringify({ ...manifest, version: "1.0.0" }));
+  await writeFile(join(userDataDir, "spark-state.json"), JSON.stringify({
+    activeWorkspaceId: "ws-chrome",
+    workspaces: [{ id: "ws-chrome", name: "Chrome link", cwd: workspaceDir, color: "#42D6C7", workers: [] }],
+  }));
+  const site = createServer(accountSite);
+  await new Promise<void>((done) => site.listen(0, "127.0.0.1", done));
+  const origin = `http://127.0.0.1:${(site.address() as { port: number }).port}`;
+  const linkPort = await freePort();
+
+  const app = await electron.launch({ args: ["."], env: {
+    ...process.env,
+    CODARA_HOME_DIR: userDataDir, SPARK_HOME_DIR: userDataDir, SPARK_USER_DATA_DIR: userDataDir,
+    SPARK_SKIP_LEGACY_MIGRATION: "1", SPARK_NO_SHELL_INTEGRATION: "1", SPARK_ALLOW_MULTI: "1",
+    CODARA_CHROME_LINK: "1", CODARA_CHROME_LINK_PORTS: String(linkPort),
+  } });
+  let browser: BrowserContext | null = null;
+  const linkState = (codara: Page) => codara.evaluate(() => (window as unknown as { spark: any }).spark.chromeLink.state());
+  try {
+    const codara: Page = await app.firstWindow();
+    await codara.waitForLoadState("domcontentloaded");
+    await expect(codara.getByText("Chrome link", { exact: true }).first()).toBeVisible();
+
+    // Loaded the way the user's Load unpacked does: Chromium disables an
+    // extension from --load-extension when it reloads itself.
+    browser = await chromium.launchPersistentContext(profile, {
+      executablePath: executablePath ?? undefined,
+      headless: true,
+      ignoreDefaultArgs: ["--disable-extensions"],
+      args: ["--enable-unsafe-extension-debugging"],
+    });
+    const cdp = await browser.browser()!.newBrowserCDPSession();
+    const { id: extensionId } = (await cdp.send("Extensions.loadUnpacked" as any, { path: older })) as { id: string };
+    const ours = (candidate: Worker) => candidate.url().startsWith(`chrome-extension://${extensionId}/`);
+    const first = browser.serviceWorkers().find(ours) ?? (await browser.waitForEvent("serviceworker", { predicate: ours, timeout: 15_000 }));
+    await first.evaluate(async (port) => chrome.storage.local.set({ ports: [port] }), linkPort);
+
+    // The user shares a tab before connecting.
+    const page = await browser.newPage();
+    await page.goto(`${origin}/shared`);
+    const sharedTab = await tabIdOf(first, "/shared");
+    await first.evaluate((id) => (self as unknown as { codara: any }).codara.handlePopup({ type: "shareTab", tabId: id, on: true }), sharedTab);
+
+    // Pairing. Codara ships a newer extension, so the moment it connects it
+    // is asked to reload: the old service worker goes, a new one comes.
+    const replaced = browser.waitForEvent("serviceworker", { predicate: ours, timeout: 30_000 });
+    const popup = await browser.newPage();
+    await popup.goto(`chrome-extension://${extensionId}/popup.html?tab=${sharedTab}`);
+    await popup.locator("#connect-button").click();
+    await expect(popup.locator("#pairing-code")).toHaveText(/^\d{3} \d{3}$/, { timeout: 10_000 });
+    await codara.locator("[data-chrome-pairing]").getByRole("button", { name: "Allow" }).click();
+    const worker = await replaced;
+    expect(worker).not.toBe(first);
+
+    // It came back paired, with the tab still shared, and it remembers the
+    // reload so it does not ask for another one.
+    const extensionState = () => worker.evaluate(() => (self as unknown as { codara: any }).codara.state());
+    await expect.poll(() => worker.evaluate(() => (self as unknown as { codara: any }).codara.link.status.state), { timeout: 30_000 }).toBe("connected");
+    const after = await extensionState();
+    expect(after.token).toBeTruthy();
+    expect(after.shareTabs).toContain(sharedTab);
+    expect(after.lastReload).toMatchObject({ version: manifest.version });
+    expect(await worker.evaluate(() => chrome.storage.local.get("reloadCarry"))).toEqual({});
+    await expect.poll(async () => (await linkState(codara)).browsers[0]?.tabs.map((tab: { id: string }) => tab.id)).toEqual([`chrome:${sharedTab}`]);
+
+    // Still the old version: Settings tells the user how to update.
+    await expect.poll(async () => (await linkState(codara)).browsers[0]?.extensionUpdate, { timeout: 30_000 }).toBe("manual");
+    const state = await linkState(codara);
+    expect(state.shippedExtensionVersion).toBe(manifest.version);
+    expect(state.browsers[0]).toMatchObject({ connected: true, extensionVersion: "1.0.0" });
+    await codara.getByTitle("Settings").first().click({ force: true });
+    const settings = codara.getByRole("dialog", { name: "Settings" });
+    await settings.getByRole("combobox", { name: "Search settings" }).fill("paired browsers");
+    await expect(settings.locator("[data-search-result]").first()).toBeVisible();
+    await codara.keyboard.press("Enter");
+    await expect(settings.locator(".st-topbar__title")).toHaveText("Browser");
+    const notice = settings.locator('[data-chrome-extension-update="manual"]');
+    await expect(notice).toContainText("Update the extension: open chrome://extensions and press the reload button on Codara.");
+    await expect(notice).toContainText(`This browser runs extension 1.0.0, Codara ships ${manifest.version}.`);
+    expect(await notice.textContent()).not.toMatch(/[\u2013\u2014]/);
+
+    // No loop: the same worker stays connected.
+    await codara.waitForTimeout(3_000);
+    expect(browser.serviceWorkers().filter(ours)).toEqual([worker]);
+    expect(await worker.evaluate(() => (self as unknown as { codara: any }).codara.link.status.state)).toBe("connected");
   } finally {
     await browser?.close().catch(() => undefined);
     await app.close();

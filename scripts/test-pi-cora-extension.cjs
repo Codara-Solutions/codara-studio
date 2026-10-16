@@ -167,6 +167,7 @@ const executeToolNames = new Set(executeBridge.listTools().map((tool) => tool.na
 for (const browserTool of [
   "codara_preview_list",
   "codara_preview_navigate",
+  "codara_preview_close",
   "codara_preview_snapshot",
   "codara_preview_screenshot",
   "codara_preview_mouse",
@@ -413,6 +414,9 @@ const noInput = {};
   assert.equal(blocked("codara_preview_navigate"), undefined, "readonly keeps preview navigate");
   assert.equal(blocked("codara_preview_navigate", { tabId: "preview:3", url: "http://x" }), undefined, "readonly navigates Codara tabs");
   assert.equal(blocked("codara_preview_navigate", { tabId: "chrome:12", url: "http://x" })?.block, true, "readonly may not navigate the user's browser");
+  assert.equal(blocked("codara_preview_close"), undefined, "readonly may close its own preview tab");
+  assert.equal(blocked("codara_preview_close", { tabId: "preview:3" }), undefined, "readonly closes Codara tabs");
+  assert.equal(blocked("codara_preview_close", { tabId: "chrome:12" })?.block, true, "readonly may not close the user's browser tabs");
   assert.equal(blocked("codara_preview_resize", { tabId: "chrome:work-1a2b/12", width: 400, height: 800 })?.block, true, "readonly may not resize the user's browser");
   assert.equal(blocked("codara_preview_emulate", { tabId: "chrome:12", network: "offline" })?.block, true, "readonly may not emulate on the user's browser");
   assert.equal(blocked("codara_preview_emulate", { tabId: "chrome:12", device: "iPhone" })?.block, true, "readonly may not set a device on the user's browser");

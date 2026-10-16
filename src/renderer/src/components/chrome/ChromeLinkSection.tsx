@@ -142,6 +142,13 @@ export default function ChromeLinkSection(): React.ReactElement | null {
                   <div className="st-device__meta">
                     {`${sharedCount(browser)} shared tab${sharedCount(browser) === 1 ? "" : "s"}, paired ${formatWhen(browser.pairedAt)}, last seen ${browser.connected ? "now" : formatWhen(browser.lastSeenAt)}`}
                   </div>
+                  {browser.extensionUpdate ? (
+                    <div className="st-device__meta" role="status" data-chrome-extension-update={browser.extensionUpdate}>
+                      {browser.extensionUpdate === "updating"
+                        ? `Updating the extension to ${state.shippedExtensionVersion ?? "the latest version"}.`
+                        : `This browser runs extension ${browser.extensionVersion ?? "an older version"}, Codara ships ${state.shippedExtensionVersion ?? "a newer one"}. Update the extension: open chrome://extensions and press the reload button on Codara.`}
+                    </div>
+                  ) : null}
                   {browser.tabs.length > 0 ? (
                     <ul className="chrome-tabs">
                       {browser.tabs.map((tab) => (

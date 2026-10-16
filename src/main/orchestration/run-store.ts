@@ -20931,6 +20931,7 @@ function piWorkerToolLabel(value: unknown): string {
     ls: "List files",
     codara_preview_screenshot: "Inspect preview",
     codara_preview_navigate: "Open preview",
+    codara_preview_close: "Close browser tab",
     codara_whiteboard_update: "Update whiteboard",
   };
   return known[normalized] ?? normalized

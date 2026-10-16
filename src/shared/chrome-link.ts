@@ -21,6 +21,12 @@ export interface ChromeLinkBrowserState {
   lastSeenAt: string | null;
   connected: boolean;
   extensionVersion: string | null;
+  /**
+   * The connected extension is older than the one Codara ships: "updating"
+   * while it reloads itself, "manual" when the user has to reload it in the
+   * browser's extensions page. Null when it is current or not connected.
+   */
+  extensionUpdate: "updating" | "manual" | null;
   allowOpen: boolean;
   tabs: ChromeLinkTabState[];
 }
@@ -50,6 +56,8 @@ export interface ChromeLinkState {
   error: string | null;
   /** The folder to choose in the browser's "Load unpacked". */
   extensionFolder: string;
+  /** The version of the extension in that folder, as this Codara ships it. */
+  shippedExtensionVersion: string | null;
   browsers: ChromeLinkBrowserState[];
   pending: ChromeLinkPairing[];
   activity: ChromeLinkActivity[];
