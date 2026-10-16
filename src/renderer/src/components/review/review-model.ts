@@ -6,6 +6,8 @@
 
 import {
   clampQuote,
+  MAX_REVIEW_REQUEST_CHARS,
+  MAX_REVIEW_REQUEST_PATHS,
   type ReviewDiffFile,
   type ReviewDiffLine,
   type ReviewNote,
@@ -307,6 +309,46 @@ export function notesByPath(notes: readonly ReviewNote[]): Map<string, ReviewNot
     out.set(note.filePath, list);
   }
   for (const list of out.values()) list.sort((a, b) => a.endLine - b.endLine || a.startLine - b.startLine || a.createdAt - b.createdAt);
+  return out;
+}
+
+export interface PathRequest {
+  /** The files this request loads, as the review lists them. */
+  files: string[];
+  /** What main is asked for: those files, and each renamed one's old path. */
+  paths: string[];
+}
+
+/**
+ * The diff requests that load these files by path. A renamed file goes with
+ * its old path, or git shows it as a new file with every line added; and
+ * each request stays under main's cap, which would drop the rest unread, and
+ * under the length a command line may have on Windows.
+ */
+export function pathRequests(
+  paths: readonly string[],
+  lookup: (path: string) => Pick<ReviewDiffFile, "oldPath"> | undefined,
+): PathRequest[] {
+  const out: PathRequest[] = [];
+  let current: PathRequest | null = null;
+  let chars = 0;
+  for (const path of new Set(paths)) {
+    const oldPath = lookup(path)?.oldPath;
+    const asked = oldPath && oldPath !== path ? [path, oldPath] : [path];
+    const size = asked.reduce((sum, item) => sum + item.length, 0);
+    if (
+      !current ||
+      current.paths.length + asked.length > MAX_REVIEW_REQUEST_PATHS ||
+      (current.paths.length > 0 && chars + size > MAX_REVIEW_REQUEST_CHARS)
+    ) {
+      current = { files: [], paths: [] };
+      chars = 0;
+      out.push(current);
+    }
+    current.files.push(path);
+    current.paths.push(...asked);
+    chars += size;
+  }
   return out;
 }
 

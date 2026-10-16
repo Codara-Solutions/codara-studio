@@ -13,12 +13,13 @@
 import { lstat, open, readlink } from "node:fs/promises";
 import { join } from "node:path";
 
-import type {
-  ReviewDiff,
-  ReviewDiffFile,
-  ReviewDiffLine,
-  ReviewDiffRequest,
-  ReviewFileStatus,
+import {
+  MAX_REVIEW_REQUEST_PATHS,
+  type ReviewDiff,
+  type ReviewDiffFile,
+  type ReviewDiffLine,
+  type ReviewDiffRequest,
+  type ReviewFileStatus,
 } from "@shared/review-notes";
 import { isRemotePath } from "@shared/remote";
 import { errorText, isNotARepo, runGit } from "../git-exec";
@@ -42,7 +43,7 @@ const MAX_UNTRACKED_FILES = 2_000;
 /** Above this many deferred files the patch is read per path instead of with exclusions. */
 const MAX_EXCLUDES = 200;
 const PATH_BATCH = 50;
-const MAX_REQUEST_PATHS = 200;
+const MAX_REQUEST_PATHS = MAX_REVIEW_REQUEST_PATHS;
 
 export interface ReviewDiffDeps {
   /** The base branch the workspace records for this folder, if any. */
@@ -52,9 +53,10 @@ export interface ReviewDiffDeps {
 }
 
 // Fixed flags so a user's diff config (external tools, colors, prefixes,
-// quoted paths) never changes what we parse.
+// quoted paths) never changes what we parse. diff.relative would cut a
+// subfolder workspace's diff down to that folder, with paths relative to it.
 const DIFF_FLAGS = ["--no-color", "--no-ext-diff", "-M", "--src-prefix=a/", "--dst-prefix=b/"];
-const GIT_C = ["-c", "core.quotePath=false"];
+const GIT_C = ["-c", "core.quotePath=false", "-c", "diff.relative=false"];
 
 const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._/+@-]*$/;
 
@@ -346,8 +348,11 @@ async function readHead(file: string, limit: number): Promise<{ buffer: Buffer; 
   }
 }
 
+// Repository-wide like the diff: from a workspace that is a subfolder of its
+// repository, ls-files would otherwise list only the new files under it.
 async function untrackedPaths(cwd: string, pathspecs: string[] = []): Promise<string[]> {
-  const { stdout } = await runGit(cwd, [...GIT_C, "ls-files", "--others", "--exclude-standard", "--full-name", "-z", "--", ...pathspecs]);
+  const specs = pathspecs.length ? pathspecs : [":(top)"];
+  const { stdout } = await runGit(cwd, [...GIT_C, "ls-files", "--others", "--exclude-standard", "--full-name", "-z", "--", ...specs]);
   return stdout.split("\0").filter(Boolean);
 }
 
@@ -552,13 +557,16 @@ export async function getReviewDiff(request: ReviewDiffRequest, deps: ReviewDiff
   const only = Array.isArray(request.paths)
     ? request.paths.filter((path): path is string => typeof path === "string" && path.length > 0 && !path.includes("\0")).slice(0, MAX_REQUEST_PATHS)
     : null;
+  // Asked for no file: nothing to read. Without a pathspec git would read
+  // every file, with no budget.
+  if (only && only.length === 0) return result;
   const pathspecs = only ? only.map(literal) : [];
 
   try {
     const [numstat, nameStatus, untracked] = await Promise.all([
       runGit(cwd, [...GIT_C, "diff", "--numstat", "-z", "-M", "--no-ext-diff", target, "--", ...pathspecs]).then((r) => parseNumstatZ(r.stdout)),
       runGit(cwd, [...GIT_C, "diff", "--name-status", "-z", "-M", "--no-ext-diff", target, "--", ...pathspecs]).then((r) => parseNameStatusZ(r.stdout)),
-      only && only.length === 0 ? Promise.resolve([] as string[]) : untrackedPaths(cwd, pathspecs),
+      untrackedPaths(cwd, pathspecs),
     ]);
 
     // A requested old path of a rename comes back as part of its pair.

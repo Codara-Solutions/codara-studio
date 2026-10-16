@@ -200,6 +200,22 @@ const numbered = (count, prefix = "line") => Array.from({ length: count }, (_, i
     const some = await lib.getReviewDiff({ cwd: main, mode: "uncommitted", paths: ["a.txt", "dir with space/new ü.txt"] });
     assert.deepEqual(some.files.map((file) => file.path), ["a.txt", "dir with space/new ü.txt"]);
     assert.ok(some.files.every((file) => Array.isArray(file.lines) && !file.deferred));
+    // A renamed file asked for with its old path, as the review asks for
+    // one, stays a rename; git pairs the two only when both are named.
+    const renamedAsked = await lib.getReviewDiff({ cwd: main, mode: "uncommitted", paths: ["e.txt", "d.txt"] });
+    assert.deepEqual(renamedAsked.files.map((file) => [file.path, file.status, file.oldPath]), [["e.txt", "renamed", "d.txt"]]);
+    // Asked for no file: nothing is read, not the whole diff with no budget.
+    const noneAsked = await lib.getReviewDiff({ cwd: main, mode: "uncommitted", paths: [] });
+    assert.deepEqual(noneAsked.files, []);
+    // From a workspace in a subfolder of the repository: every change of the
+    // repository, new files outside the folder too, with repository paths,
+    // even when the user's config makes git diff relative to the folder.
+    git(main, "config", "diff.relative", "true");
+    const fromSub = await lib.getReviewDiff({ cwd: path.join(main, "dir with space"), mode: "uncommitted" });
+    git(main, "config", "--unset", "diff.relative");
+    assert.equal(fromSub.error, undefined);
+    assert.deepEqual(fromSub.files.map((file) => file.path), diff.files.map((file) => file.path), "a subfolder workspace sees the whole repository");
+    assert.deepEqual(fromSub.files.find((file) => file.path === "a.txt").lines, aFile.lines);
 
     // ── No commit yet ───────────────────────────────────────────────────
     const unborn = repo("unborn");

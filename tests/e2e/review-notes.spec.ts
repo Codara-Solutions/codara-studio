@@ -203,6 +203,24 @@ test("review notes on lines, ranges and files are edited, kept and sent to the i
     expect(stored.find((note) => note.body.startsWith("Use"))).toMatchObject({ filePath: "src/app.ts", startLine: 3, endLine: 3 });
     expect(stored.find((note) => note.body.startsWith("This block"))).toMatchObject({ startLine: 29, endLine: 31 });
 
+    // A note left open in a file the user collapsed holds no read back: the
+    // diff is read again on coming back to the tab, and the note is still
+    // open when the file is.
+    await addButton(review, "line 3 changed").click();
+    await expect(draft).toContainText("Line 3");
+    const appToggle = fileHeader(review, "src/app.ts").getByRole("button", { name: /app\.ts/ });
+    await appToggle.click();
+    await expect(draft).toHaveCount(0);
+    await writeFile(join(fixture.workspaceDir, "later.txt"), "written while the note was open\n");
+    await page.getByRole("tab", { name: /terminals/i }).first().click();
+    await expect(review).toBeHidden();
+    await page.getByRole("tab", { name: /Review changes/ }).click();
+    await expect(fileHeader(review, "later.txt")).toBeVisible({ timeout: 20_000 });
+    await appToggle.click();
+    await expect(draft).toContainText("Line 3");
+    await draft.getByRole("button", { name: "Cancel" }).click();
+    await expect(draft).toHaveCount(0);
+
     // The notes list jumps to a note that is off screen.
     await review.getByRole("button", { name: "Collapse all" }).click();
     await expect(fileHeader(review, "src/app.ts").getByRole("button", { name: /app\.ts/ })).toHaveAttribute("aria-expanded", "false");
@@ -253,6 +271,8 @@ test("notes on a Markdown plan join the review, paste into a terminal; the branc
     const paragraph = page.locator(".spark-markdown p", { hasText: "First we split the parser." });
     await expect(paragraph).toBeVisible({ timeout: 20_000 });
     await expect(paragraph).toHaveAttribute("data-line", "3");
+    // A title of the block's own, as raw HTML in the file can give it.
+    await paragraph.evaluate((element) => element.setAttribute("title", "Kept title"));
 
     // Select the paragraph's text: an Add note button appears beside it.
     await paragraph.evaluate((element) => {
@@ -284,6 +304,7 @@ test("notes on a Markdown plan join the review, paste into a terminal; the branc
     await expect(popover).toHaveCount(0);
     await expect(page.getByTestId("markdown-review-bar")).toContainText("1 review note on this file");
     await expect(paragraph).toHaveAttribute("data-review-noted", "");
+    await expect(paragraph).toHaveAttribute("title", "Review note: Say which parser.");
     await expect.poll(async () => (await storedNotes(home)).map((note) => [note.source, note.filePath, note.startLine])).toEqual([
       ["markdown", planPath, 3],
     ]);
@@ -338,6 +359,8 @@ test("notes on a Markdown plan join the review, paste into a terminal; the branc
     await expect.poll(screen, { timeout: 20_000 }).toContain("docs/plan.md:3 (Markdown)");
     expect(await screen()).not.toContain("command not found");
     await expect(page.getByTestId("markdown-review-bar")).toHaveCount(0);
+    await expect(paragraph).not.toHaveAttribute("data-review-noted", "");
+    await expect(paragraph).toHaveAttribute("title", "Kept title");
   } finally {
     await fixture.close();
   }
