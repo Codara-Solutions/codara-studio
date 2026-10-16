@@ -17,8 +17,10 @@ The code map for the rest of the repository is
 
 | Command | What it does |
 |---|---|
-| `npm test` | Runs every `scripts/test-*.cjs` and `test-*.mjs`, sorted by name. |
+| `npm test` | Runs every `scripts/test-*.cjs` and `test-*.mjs`, a few at a time (see below). About 2 minutes. |
 | `npm test -- <regex>` | Runs only the files whose name matches the regex, for example `npm test -- loom-steps` or `npm test -- "^test-(claude\|codex)-"`. |
+| `npm run test:changed` | Runs only the suites that can see a file changed since the merge base with `origin/main`, committed or not. `npm run test:changed -- <ref>` picks another base, and `-- --list` prints the selection without running it. Use it in the inner loop; `npm test` stays the gate before landing. |
+| `CODARA_TEST_JOBS=1 npm test` | The old behavior: one suite at a time, in name order, with the name printed before it runs. |
 | `node scripts/test-notify-policy.cjs` | Runs one suite directly. Suites find the repository from their own file location, so you do not need to `cd` first. |
 | `npm run test:<name>` | Shortcuts for some suites or groups of suites, defined in `package.json`. You never need one: the runner already picks up every file. |
 | `npm run typecheck` | The three TypeScript projects (node, web, e2e). Not part of `npm test`; run it too. |
@@ -29,11 +31,37 @@ How `scripts/run-all-tests.cjs` works:
   file runs as soon as it exists. You add no entry anywhere. A `.ts` file does
   not match: `test-cora-direct-mode.ts` only runs through
   `npm run test:cora-direct-mode`.
-- Each file runs as `node <file>` in its own process with a 180 second
-  timeout. It passes when it exits with code 0.
-- The runner prints `ok` or `FAIL` for each file, then a pass count, then the
-  last 6000 characters of each failure's output. It exits with code 1 if any
-  file failed.
+- Each file runs as `node <file>` in its own process (and process group)
+  with a 180 second timeout. It passes when it exits with code 0. A timeout
+  kills the whole group, Electron and Chromium children included.
+- Suites run in a pool of `CODARA_TEST_JOBS` processes, by default
+  `min(4, cores - 2)`. The machine is shared with other agents, so the pool
+  is sized for memory, not speed:
+  - A file with a `// test-runner: heavy (why)` line never runs next to
+    another heavy one. Tag a suite heavy when it launches Chromium or
+    Electron, or when its process peaks above about 200 MB.
+  - A file with a `// test-runner: serial (why)` line runs after the pool,
+    with nothing else running. Today that is `test-renderer-chunks.mjs` (a
+    production Vite build, about 2 GB) and `test-workflow-sandbox.cjs` (its
+    heap-limit case grows QuickJS's WebAssembly memory to 2 GB).
+  - No suite starts while `MemAvailable` is below `CODARA_TEST_MIN_FREE_MB`
+    (default 2048) and another suite is still running.
+  - Each suite gets its own empty `TMPDIR`, removed when it finishes, so
+    suites that write fixed names under `os.tmpdir()` cannot collide. Do not
+    write fixed paths anywhere else (the repository, `node_modules/.cache`)
+    without a name unique to the suite.
+  - Durations are kept in `node_modules/.cache/codara-tests/timings.json`,
+    and the next run starts the longest suites first.
+- The whole run peaks at about 2.5 GB, almost all of it from the two serial
+  suites. Keep a new suite well under that, or tag it.
+- The runner prints `ok` or `FAIL` for each file as it finishes, then a pass
+  count, then the last 6000 characters of each failure's output, in name
+  order. It exits with code 1 if any file failed.
+- Never wait on real time in a suite. Code that runs on timers (quiet
+  windows, sweeps, retries) can run on `scripts/fake-clock.cjs`: install it
+  before loading the bundle and call `await clock.advance(ms)` where the
+  suite would sleep. `test-terminal-agent-notify.cjs` is the example; it
+  went from 157 s to under a second.
 
 The Playwright specs are separate. They live in `tests/e2e/`:
 

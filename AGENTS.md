@@ -27,7 +27,12 @@ of suites by area). `CONTRIBUTING.md` covers setup and pull requests.
   `npm test -- <regex>` (the registry globs `scripts/test-*.{cjs,mjs}`), for
   example `npm test -- step-lifecycle` or `npm test -- loom-steps` for
   orchestration changes and `npm test -- terminal-agent-notify` for the
-  terminal notifier. `npm test` runs everything and takes a while. A few
+  terminal notifier. `npm run test:changed` picks the suites that can see
+  your changes since `origin/main` for you; use it while you iterate.
+  `npm test` runs everything, a few suites at a time, in about two minutes;
+  run it before you land. `CODARA_TEST_JOBS=1` makes it run one suite at a
+  time, and `scripts/README.md` explains the `heavy` and `serial` tags a
+  memory-hungry suite needs. A few
   suites need a build or extra tools first (`test-agent-socket` needs
   `npm run build`); `scripts/README.md` lists them.
 - Tests that need a real subscription or network are the `smoke:*` scripts
