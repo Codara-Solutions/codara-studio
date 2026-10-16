@@ -150,7 +150,7 @@ async function testBuilder() {
   check("finished reads Done too", timeOf("done", "Finished", "ok", 2 * HOUR + 3 * MIN)?.text === "Done 2h 3m ago");
   check("done under a minute reads just now", timeOf("done", "Ready", "ok", 10_000)?.text === "Done just now");
   check("a failed run keeps its word", timeOf("done", "Failed", "danger", 3 * MIN)?.text === "Failed 3m ago");
-  check("needs you says how long it waits", timeOf("needs-you", "Needs you", "warn", 3 * MIN)?.text === "Waiting 3m");
+  check("needs you says how long it waits", timeOf("needs-you", "Needs you", "warn", 3 * MIN)?.text === "Needs you \u00b7 3m");
   check("a stopped pane says when it stopped", timeOf("needs-you", "Stopped", "danger", 3 * MIN)?.text === "Stopped 3m ago");
   check("the tooltip gives the exact time", /^Started \d\d:\d\d$/.test(timeOf("working", "Working", "info", MIN).title), timeOf("working", "Working", "info", MIN));
   check("the tooltip for a finished card says Finished", /^Finished /.test(timeOf("done", "Ready", "ok", MIN).title));

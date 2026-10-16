@@ -18,7 +18,7 @@ import AgentReplyBox from "./AgentReplyBox";
 
 interface Props {
   card: Card;
-  /** The card's time line, already formatted, so a tick re-renders only what changed. */
+  /** The status phrase with its time, already formatted, so a tick re-renders only what changed. */
   time: string | null;
   /** The exact moment, for the tooltip. */
   timeTitle: string | null;
@@ -52,7 +52,7 @@ function AgentBoardCardView({ card, time, timeTitle, active, here, focusable, on
   const meta = [card.account, card.detail].filter(Boolean).join(" · ");
   const spoken = [
     card.title,
-    card.status,
+    time ?? card.status,
     `${card.agentLabel} in ${card.workspaceName}${here ? ", the workspace you are in" : ""}`,
     workspaceStatus ? `workspace ${WORKSPACE_STATUS_LABELS[workspaceStatus]}` : null,
     card.account ? `account ${card.account}` : null,
@@ -90,11 +90,6 @@ function AgentBoardCardView({ card, time, timeTitle, active, here, focusable, on
         <span className="agent-card__head">
           {mark}
           <span className="agent-card__title">{card.title}</span>
-          {time && (
-            <span className="agent-card__elapsed" title={timeTitle ?? undefined}>
-              {time}
-            </span>
-          )}
         </span>
         <span className="agent-card__where">
           <span className="agent-card__ws-tile" aria-hidden title={here ? "You are in this workspace" : undefined}>
@@ -103,7 +98,9 @@ function AgentBoardCardView({ card, time, timeTitle, active, here, focusable, on
           <span className="agent-card__ws-name">{card.workspaceName}</span>
           {workspaceStatus && <WorkspaceStatusChip status={workspaceStatus} />}
           {meta && <span className="agent-card__who">{meta}</span>}
-          <span className="agent-card__status">{card.status}</span>
+          <span className="agent-card__status" title={timeTitle ?? undefined}>
+            {time ?? card.status}
+          </span>
         </span>
         {card.tool && <span className="agent-card__tool">{card.tool}</span>}
         {card.message && <span className="agent-card__message">{card.message}</span>}

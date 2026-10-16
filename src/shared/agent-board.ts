@@ -260,14 +260,14 @@ function formatAgentClock(at: number, now: number): string {
 }
 
 export interface AgentCardTime {
-  /** On the card: "Working for 12m", "Done 8m ago", "Waiting 3m". */
+  /** The status phrase on the card: "Working for 12m", "Done 8m ago", "Needs you \u00b7 3m". */
   text: string;
   /** The exact moment, for the tooltip: "Started 14:02". */
   title: string;
 }
 
 /**
- * What the card says about time: how long it has been working, waiting on
+ * The card's status with its time: how long it has been working, waiting on
  * the user, or done. Null when the card has no known start.
  */
 export function agentCardTime(
@@ -285,7 +285,7 @@ export function agentCardTime(
     if (card.tone === "danger") {
       return { text: `${card.status} ${long ? `${formatAgentSpan(span)} ago` : "just now"}`, title: `Stopped ${at}` };
     }
-    return { text: `Waiting ${formatAgentSpan(span)}`, title: `Waiting since ${at}` };
+    return { text: `${card.status} \u00b7 ${formatAgentSpan(span)}`, title: `Waiting since ${at}` };
   }
   const word = card.status === "Ready" || card.status === "Finished" ? "Done" : card.status;
   return {
