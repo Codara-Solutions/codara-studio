@@ -72,7 +72,7 @@ function StatusBar({ workspace, gitStatus, defaultShell, platform, workerCount }
             mono: true,
             icon: <BranchGlyph />,
             title: gitStatus?.upstream
-              ? `${branch} — tracking ${gitStatus.upstream}`
+              ? `${branch}, tracking ${gitStatus.upstream}`
               : branch,
           },
         ]

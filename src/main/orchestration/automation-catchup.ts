@@ -18,8 +18,10 @@ import { missedRunsOf } from "@shared/automation-catchup";
 /** How late a fire may be and still count as on time. Wider than croner's
  *  30 s re-check and the checkpoint's persist throttle. */
 export const LATE_FIRE_TOLERANCE_MS = 2 * 60_000;
-/** Most scheduled times enumerated per check; more reads "N or more". */
-export const MISSED_SLOT_SCAN_CAP = 1000;
+/** Most scheduled times enumerated per check; more reads "N or more". The
+ *  count is only shown, and croner with a timezone costs about 0.15 ms a
+ *  step on the main process, so a dense schedule is not walked any further. */
+export const MISSED_SLOT_SCAN_CAP = 100;
 
 export interface ScheduledSlots {
   count: number;

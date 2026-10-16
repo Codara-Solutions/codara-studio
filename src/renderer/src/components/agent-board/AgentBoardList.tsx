@@ -140,8 +140,8 @@ export default function AgentBoardList({ model, activeKey, navigate, now }: Agen
     >
       {model.total === 0 ? (
         <p className="agent-board__empty">
-          No agents right now. Start Claude Code, Codex or Grok in a terminal, or chat with Cora, and they show up
-          here.
+          No agents right now. Start Claude Code, Codex, Grok or Pi in a terminal, or chat with Cora, and they show
+          up here.
         </p>
       ) : (
         GROUPS.map((group) => {

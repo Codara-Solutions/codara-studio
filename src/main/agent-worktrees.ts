@@ -823,7 +823,7 @@ function createdResult(
     setupState === "awaiting-approval"
       ? "Setup is waiting for the user to approve the repository's setup command in Codara and has not run it: do not run it, or the setup file's terminal commands, yourself. Tell the user, then call codara_worktree_setup({workspaceId, wait: true})."
       : setupState === "failed" || setupState === "stopped"
-        ? "Setup did not finish: read setup.logTail and fix the cause before you build or test."
+        ? "Setup did not finish: read setup.error and setup.logTail and fix the cause before you build or test."
         : setupState && setupState !== "succeeded"
           ? "Codara is still setting it up: call codara_worktree_setup({workspaceId, wait: true}) before you build or test."
           : "",
@@ -888,7 +888,11 @@ async function runCreatedSetup(
     const tail = status.state === "succeeded" ? "" : await runner.tail(status.id, SETUP_LOG_LINES_DEFAULT).catch(() => "");
     return runner.summary(status, tail);
   } catch (err) {
-    return { state: "failed", error: `setup could not start: ${cleanText(errorText(err), 300)}` };
+    return {
+      state: "failed",
+      error: `setup could not start: ${cleanText(errorText(err), 300)}`,
+      hint: "Codara could not prepare this worktree. Copy the ignored files and run the setup yourself, or ask the user.",
+    };
   }
 }
 
@@ -1092,17 +1096,8 @@ async function createAgentWorktreeInner(
     throw err;
   }
   const made = createdWorkspace as Workspace | null;
-  if (made && deps.worktreeSetup && !isRefusal(outcome)) {
-    const setup = await runCreatedSetup(deps.worktreeSetup, scope, made, input);
-    outcome = createdResult(made, scope, {
-      created: true,
-      base: baseName,
-      baseCommit,
-      setupCommand: null,
-      warnings,
-      setup,
-    });
-  }
+  // The rail toast and the audit entry come first: the worktree exists now,
+  // while its setup below may hold this call for minutes.
   if (made) {
     deps.sendAgentEvent({
       kind: "created",
@@ -1123,6 +1118,17 @@ async function createAgentWorktreeInner(
         tip: baseCommit,
       })
       .catch(() => undefined);
+  }
+  if (made && deps.worktreeSetup && !isRefusal(outcome)) {
+    const setup = await runCreatedSetup(deps.worktreeSetup, scope, made, input);
+    outcome = createdResult(made, scope, {
+      created: true,
+      base: baseName,
+      baseCommit,
+      setupCommand: null,
+      warnings,
+      setup,
+    });
   }
   return outcome;
 }

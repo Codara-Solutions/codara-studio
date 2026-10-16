@@ -44,7 +44,14 @@ export function readRecentOutput(
   // may have fallen right after a space between two words.
   let continues = false;
   let chars = 0;
-  for (let y = end; y >= 0 && lines.length < maxLines && chars < maxChars; y -= 1) {
+  // `current` counts too: one logical line can wrap across the whole
+  // scrollback (minified JSON, a progress bar without newlines), and reading
+  // all of it only to keep the last maxChars would build a string of megabytes.
+  for (
+    let y = end;
+    y >= 0 && lines.length < maxLines && chars + current.length < maxChars;
+    y -= 1
+  ) {
     const line = buffer.getLine(y);
     if (!line) continue;
     current = line.translateToString(!continues) + current;
@@ -86,7 +93,9 @@ function countLines(text: string): number {
 }
 
 export function formatTerminalContext(snapshot: TerminalContextSnapshot): string {
-  const output = snapshot.output.replace(/\r\n?/g, "\n").replace(/\s+$/, "");
+  // trimEnd, not /\s+$/: that regex retries from every space of every run and
+  // takes a noticeable pause on a large selection padded with spaces.
+  const output = snapshot.output.replace(/\r\n?/g, "\n").trimEnd();
   const header = ["Terminal context"];
   if (snapshot.cwd) header.push(`Working directory: ${snapshot.cwd}`);
   if (snapshot.shell) header.push(`Shell: ${snapshot.shell}`);

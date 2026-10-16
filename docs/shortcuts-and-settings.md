@@ -238,7 +238,7 @@ The pages:
 | Appearance | Theme, and Glass (liquid glass for menus, popovers, toasts and dialogs, with tint, blur, refraction and fringe under **Fine-tune glass**). |
 | Notifications | In the app (toast and how long it stays), On your computer (native OS notification, sound, dock badge and taskbar flash). |
 | Editor | Code editor (Vim mode, autosave) and inline AI autocomplete. |
-| Terminal | The shell for new panes, output history and scrollback lines, whether programs may copy to the clipboard (OSC 52), a resource overview, and the run terminal lifecycle for worker panes. |
+| Terminal | The shell for new panes, output history and scrollback lines, whether programs may copy to the clipboard, clearing the terminal output Codara saved (**Clear saved terminal output**), a resource overview, and the run terminal lifecycle for worker panes. |
 | Quick commands | Saved shell commands and agent prompts: add, edit, reorder, delete, and where each is offered. Also what a right-click in a terminal does. See [Quick commands](#quick-commands). |
 | Git | Remotes (background fetch, Instant git triggers, and a custom webhook receiver under Advanced), Alerts (notify on teammate pushes, new pull requests, and CI failing on your pull request), Worktrees (whether agents may create and remove worktrees, and remove ones you created, the repository's worktree setup file, and under Advanced your own setup command for new worktrees and extra ignored files an agent may delete with a merged worktree). |
 | Browser | Links (auto-open the browser for local dev servers, open links in the default browser or the Codara browser, ask where terminal links open), and the Chrome extension (**Keep agents in your Chrome**, link status, pairing, paired browsers, agent activity). |
@@ -392,16 +392,20 @@ fix starts on the kind of target you used last.
 
 GitHub is read with your own `gh`. Logs, hook output, file excerpts and
 comments are capped, secrets in them are replaced by `[redacted]`, and the
-prompt tells the agent to treat them as data, not instructions. The prompts
+prompt tells the agent to treat them as data, not instructions. A conflicted
+file made to hold secrets (`.env`, key files, `.npmrc` and the like) is named
+but never quoted. The prompts
 ask the agent not to push, commit or bypass hooks. Local workspaces only for
 now.
 
 **Notify me when CI fails on my pull request** (Settings, Git, Alerts) sends
 one alert when a check fails on the pull request of a workspace's branch,
-once per failing commit; a pull request that was already failing when Codara
-first saw it stays quiet until a later run fails. Clicking the alert opens
-Source Control. It asks GitHub only when the branch or its upstream moved,
-every 90 seconds while checks run, and every 15 minutes otherwise.
+once per failing commit, including a pull request opened after the push
+whose checks failed before Codara first read it. Checks that failed while
+Codara was closed, or while the setting was off, stay quiet until a later
+run fails. Clicking the alert opens Source Control. It asks GitHub only
+when the branch or its upstream moved, every 90 seconds while checks run,
+and every 15 minutes otherwise.
 
 ### Quick commands
 
@@ -442,11 +446,17 @@ An **agent prompt** goes to:
 
 Two variables fill in when a command runs: `{branch}` (the git branch of the
 folder it runs in) and `{cwd}` (that folder). `${branch}` is left alone for
-the shell. In a shell command the value is typed unquoted, so put `"{cwd}"` in
-double quotes when a folder may contain spaces, and a value holding a
-character a shell would read as code (`;`, `$`, a quote, a backtick, a
-parenthesis and the like) stops the command with a notice instead of running
-it.
+the shell. In a shell command `{cwd}` is quoted for the terminal's shell, so a
+folder with spaces or quotes stays one word: single quotes in bash, zsh,
+fish and PowerShell, double quotes in cmd, and forward slashes in Git Bash
+(which drops backslashes). If you already wrap `{cwd}` in quotes yourself it
+is left as you wrote it. `{branch}` is typed in as is, never escaped, so a
+branch holding a character a shell would read as code (`;`, `$`, a quote, a
+backtick, a parenthesis and the like) stops the command with a notice instead
+of running it. So does a `{branch}` outside double quotes whose name has
+braces, `#` or a comma, which a shell would split or expand, and a folder
+with a control character such as a line break (or, in cmd, a double quote or
+percent sign).
 
 **Right-click in a terminal** chooses what a plain right-click does: **Copy
 or paste** (the default: copy the selection, or paste when nothing is
@@ -499,9 +509,12 @@ while a debugger is attached, unless set to `1`), `CODARA_CRASH_REPORTER=0`
 - **Keep terminal output across restarts** (Sessions, Restore; on by
   default): a terminal pane reopened after a quit, an update or a crash shows
   the output it had, then a dim `[Restored from before Codara restarted]`
-  line, then its new shell or its resumed agent. Colors are kept; cursor
-  movement, links and terminal queries are not replayed, and a full-screen
-  program such as Codex keeps only its last screen. The output is saved in
+  line, then its new shell or its resumed agent. On Windows the new session
+  starts on a fresh screen with that output in the scrollback just above it,
+  because the Windows console redraws the screen of a session it starts.
+  Colors are kept; cursor movement, links and terminal queries are not
+  replayed, and a full-screen program such as Codex keeps only its last
+  screen. The output is saved in
   Codara's own folder (see [on-your-machine.md](./on-your-machine.md)).
   Closing a pane deletes its saved output, and turning the setting off
   deletes all of it.
@@ -511,16 +524,18 @@ while a debugger is attached, unless set to `1`), `CODARA_CRASH_REPORTER=0`
 Now and then Codara shows one short tip about a feature you have not tried
 yet, such as splitting a terminal, pointing at a page element for an agent,
 or the notification center. A tip appears at most once a day and once per
-session, a few minutes after Codara opens, and only at a calm moment: not
-while you type, click, scroll or move the pointer, not while a page in the
-Codara browser has the keyboard, not while a dialog, menu or the first-run
-guide is open, and only when the feature's control is on screen. It never
-covers the chat composer or a dialog, and steps aside while one is open.
+session, a few minutes after Codara opens, and only at a calm moment: while
+the Codara window is in front, not while you type, click, scroll or move the
+pointer, not while a page in the Codara browser has the keyboard, not while a
+dialog, menu, popover or the first-run guide is open, and only when the
+feature's control is on screen. It never covers the chat composer, a dialog
+or the title bar, and steps aside while one is open.
 
 - **Show me** starts a short tour: the guide card from the first-run tour
   points at the real control with a ring around it. Click the control, or
   **Done**, to finish; Escape ends the tour.
-- **Got it** or Escape closes the tip. That tip does not come back.
+- **Got it** or Escape closes the tip. That tip does not come back. Using
+  the feature also closes it.
 - **Don't show tips** turns tips off. Turn them back on with **Feature tips**
   in Settings, General, Getting started. **Tips you have seen** with
   **Show them again** lets shown tips come back (greyed out until a tip has
@@ -579,12 +594,17 @@ whenever it cannot tell:
 - nothing else runs in the pane: no dev server or other program you started,
   and no command the agent started after it launched (the MCP servers it
   starts at launch do not count);
-- the pane is not pinned with **Keep awake** (the sun button in the pane's
-  toolbar, shown on agent panes).
+- the pane is not pinned with **Keep running** (the sun button in the pane's
+  toolbar, shown on agent panes);
+- no paired phone has the pane open (Remote Access).
 
 Cora's worker panes and phone panes never sleep. A sleeping pane that is
 still asleep when you quit counts as a running agent, so **Resume running
-agent sessions when Codara reopens** brings it back too.
+agent sessions when Codara reopens** brings it back too. If the window
+reloads while an agent sleeps, its pane stays asleep, still shows what the
+agent last printed, and resumes when you open it. Sending a selection or a
+screenshot to a sleeping agent is refused with a note to open its pane
+first, so nothing is pasted into a pane with no agent to read it.
 
 ### The notification center
 
@@ -663,7 +683,8 @@ needs from you, or **Sessions**, which searches your past agent sessions
 (see [agent-session-search.md](./agent-session-search.md)). Codara remembers
 the choice when it restarts. While the
 Workspaces list shows, the **Agents** side of the switch counts the agents
-waiting on you.
+waiting on you. Creating or renaming a workspace or a folder switches back
+to **Workspaces**, where you type its name.
 
 The Agents view has three groups, each with its count. Click a group's name
 to fold it; the folding is remembered.
@@ -704,15 +725,15 @@ list, Up and Down (or Home and End) move between cards, Tab reaches a card's
 reply box or its **Answer in terminal** button, and Escape goes back to the
 card.
 
-### Automation precheck and missed runs
+### Check first and missed runs
 
 These two settings belong to each automation, not to the Settings dialog: open
 the automation in the editor and select its trigger. The cron and interval
 triggers show both; the folder, git, "After automation" and "Automation
-activity" triggers show only the precheck. Manual and continuous triggers show
-the precheck only with a cadence loop, whose later passes it checks.
+activity" triggers show only Check first. Manual and continuous triggers show
+Check first only with a cadence loop, whose later passes it checks.
 
-**Before each run** takes an optional shell command. It runs in the
+**Before each run** (the **Check first command**) takes an optional shell command. It runs in the
 workspace folder before every pass that the trigger starts (and before every
 pass of a cadence loop). Exit code 0 runs the pass. Any other exit code, a
 timeout (1 to 600 seconds, 60 by default) or a command that cannot start skips
@@ -727,8 +748,12 @@ right away, and says whether the pass would run. The command gets
 `SPARK_AUTOMATION_ID` and `CODARA_AUTOMATION_PRECHECK=1`. It runs in your login
 shell on macOS and Linux, and in Command Prompt on Windows, where a
 **PowerShell** choice is also offered. A check on several lines runs them in
-order and the last line's exit code decides (Command Prompt gets them joined
-with `&`).
+order and the last line's exit code decides. Command Prompt reads only one
+line, so Codara joins the lines the way a batch file reads them: with `&`
+between statements, a ( ) block and a `^` continuation kept whole, and `rem`
+or `::` comment lines left out. A command is at most 4000 characters. Quitting
+Codara stops a check that is still running, and that is not recorded as a
+skip.
 
 **If a run was missed** decides what happens to a scheduled time that passed
 while Codara was closed or the computer was asleep. Codara checks when it
@@ -833,7 +858,9 @@ signs in through Claude's OAuth login cannot be used from Cora; give it an
 repository. Codara remembers where each one came from (the address, branch or
 tag, commit and folder in the repository) in its own folder, never inside the
 skill, and the skill's row shows it. Copying a skill to the Claude or Codex
-CLI with **Add** carries that record to the copy.
+CLI with **Add** carries that record to the copy. A skill you remove outside
+Codara and replace with another in the same folder loses its record, so the
+new one is never updated from the old one's source.
 
 For skills from git, Codara asks the repository whether it moved when the
 Capability Center opens, at most every six hours (30 minutes after a failed
@@ -860,9 +887,9 @@ your user skill folders for Pi, Claude and Codex. A skill switched off here
 is not loaded by new Cora sessions. Removing a skill moves its folder to the
 trash.
 
-## The worktree cleanup screen
+## Clean up worktrees
 
-The cleanup screen lists every worktree of the repositories behind your
+Clean up worktrees lists every worktree of the repositories behind your
 workspaces, so you can find the ones that only take up space and remove
 several at once. Open it from the menu on a workspace's row in the rail (**Clean up
 worktrees…**, which starts filtered to that workspace's repository) or
@@ -879,7 +906,9 @@ minutes per opening, and kept in `worktree-sizes.json` so the next opening
 starts with them; **Measure sizes again** measures the rows shown again. The
 search box matches branch, folder, repository, workspace and pull request;
 **Merged**, **Stale for** (7 to 90 days without activity) and **Larger than**
-narrow the list, and the column headers sort it.
+narrow the list, and the column headers sort it. Rows keep their place
+while sizes land, so nothing moves under the pointer; a dot on the sorted
+column means newer sizes would change the order, and a click sorts again.
 
 Removal goes through two steps. **Review removal** checks each picked
 worktree again and shows what would be lost. These always stay, whatever you

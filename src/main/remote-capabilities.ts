@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { RemoteAssetUpdate, RemoteMcpEditor, RemoteMcpTarget } from "./remote-access/rpc";
 import { deleteAgentAsset, installAgentAssetToRuntime, listAgentAssets, listMcpWriteTargets, mcpServerRevision, readMcpServerDetail, saveMcpServer } from "./agent-sync";
+import { afterSkillAssetDeleted, afterSkillAssetInstalled } from "./skill-updates-ipc";
 
 type InventoryContext = Parameters<typeof listAgentAssets>[0];
 export const REMOTE_BUILTIN_MCP_NAMES = new Set([
@@ -67,6 +68,7 @@ export async function updateRemoteAgentAsset(context: InventoryContext, input: E
   if (input.action === "remove") {
     if (!asset.canDelete) throw new Error("This capability is managed by its plugin and cannot be removed here.");
     const result = await deleteAgentAsset({ id: asset.id });
+    await afterSkillAssetDeleted(result);
     if (!result.ok) throw new Error(result.error ?? "Could not remove this capability.");
     return `${asset.name} was removed from ${asset.runtime} (${asset.scope === "user" ? "every workspace" : "this workspace"}).`;
   }
@@ -74,6 +76,7 @@ export async function updateRemoteAgentAsset(context: InventoryContext, input: E
     throw new Error("This capability cannot be copied to that runtime.");
   }
   const result = await installAgentAssetToRuntime({ id: asset.id, target: input.runtime });
+  await afterSkillAssetInstalled(asset.id, result);
   if (!result.ok) throw new Error(result.error ?? "Could not install this capability.");
   return `${asset.name} was installed for ${input.runtime}. Changes apply to new sessions.`;
 }

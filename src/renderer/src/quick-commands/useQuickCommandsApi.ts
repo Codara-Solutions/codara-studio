@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import {
   expandQuickCommandText,
+  quickCommandShellKind,
   normalizeQuickCommands,
   normalizeTerminalRightClick,
   quickCommandBody,
@@ -14,7 +15,7 @@ import {
   type TerminalRightClickPref,
 } from "@shared/quick-commands";
 import { isRemotePath } from "@shared/remote";
-import type { RunState, Workspace } from "@shared/types";
+import type { RunState, ShellInfo, Workspace } from "@shared/types";
 import { emitLocalToast } from "../notifications/local-toast";
 import { recordFeatureUse } from "../components/feature-tips/feature-usage";
 import { usePreferences } from "../preferences/usePreferences";
@@ -62,6 +63,8 @@ export interface QuickCommandsInputs {
   activeTab: Tab | null;
   activePaneId: string | null;
   detectedAgents: Readonly<Record<string, true>>;
+  /** The shell terminals open with; decides how {cwd} is quoted. */
+  shell: ShellInfo | null;
   paneRuntime: { readonly current: ReadonlyMap<string, PaneRuntimeView> };
   routing: SelectionRoutingApi;
   /** Opens a new terminal tab running an agent launch command and returns its tab id. */
@@ -86,7 +89,12 @@ function warn(title: string, body = ""): void {
   emitLocalToast(title, body, "warning");
 }
 
-function variableProblem(command: QuickCommand, variable: QuickCommandVariable, reason: "missing" | "unsafe", folder: string | null): void {
+function variableProblem(
+  command: QuickCommand,
+  variable: QuickCommandVariable,
+  reason: "missing" | "unsafe" | "unquoted",
+  folder: string | null,
+): void {
   if (reason === "missing") {
     warn(
       variable === "branch" ? "No git branch here" : "No folder for {cwd}",
@@ -96,9 +104,18 @@ function variableProblem(command: QuickCommand, variable: QuickCommandVariable, 
     );
     return;
   }
+  if (reason === "unquoted") {
+    warn(
+      `"${command.label}" did not run`,
+      `The {${variable}} value has characters a shell would split or expand, such as braces or a comma. Write "{${variable}}" in double quotes in the command.`,
+    );
+    return;
+  }
   warn(
     `"${command.label}" did not run`,
-    `The {${variable}} value has characters a shell would read as code.`,
+    variable === "cwd"
+      ? "The folder name has a control character, such as a line break, or a character this shell cannot take inside quotes."
+      : `The {${variable}} value has characters a shell would read as code.`,
   );
 }
 
@@ -175,7 +192,7 @@ export function useQuickCommandsApi(inputs: QuickCommandsInputs): QuickCommandsA
         const where = workspace && isRemotePath(workspace.cwd) ? workspace.cwd : folder ?? workspace?.cwd ?? null;
         values.branch = where ? await window.spark.git.currentBranch(where).catch(() => null) : null;
       }
-      const result = expandQuickCommandText(body, values, mode);
+      const result = expandQuickCommandText(body, values, mode, quickCommandShellKind(live.current.shell));
       if (!result.ok) {
         variableProblem(command, result.variable, result.reason, folder);
         return null;

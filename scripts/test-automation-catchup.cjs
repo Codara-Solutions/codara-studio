@@ -21,6 +21,28 @@ const ROOT = path.resolve(__dirname, "..");
 const SHARED_DIR = path.join(ROOT, "src", "shared");
 const ORCH_DIR = path.join(ROOT, "src", "main", "orchestration");
 
+// The scheduler reads the wall clock and the suite uses hourly and per-minute
+// crons, so a run that straddled a full hour or minute saw an extra slot (and
+// croner fired a real one). The clock starts at a fixed mid-hour time and
+// advances with real elapsed time, so timers and sleeps still mean what they say.
+function installFixedClock(startIso) {
+  const RealDate = Date;
+  const base = RealDate.parse(startIso);
+  const t0 = process.hrtime.bigint();
+  const now = () => base + Number((process.hrtime.bigint() - t0) / 1_000_000n);
+  class FakeDate extends RealDate {
+    constructor(...args) {
+      if (args.length === 0) super(now());
+      else super(...args);
+    }
+    static now() {
+      return now();
+    }
+  }
+  globalThis.Date = FakeDate;
+}
+installFixedClock("2026-10-15T12:30:20.000Z");
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const HOUR = 3_600_000;
 const iso = (ms) => new Date(ms).toISOString();
@@ -145,6 +167,12 @@ function pureChecks(cu, shared) {
   assert.strictEqual(slots.capped, true);
   assert.strictEqual(slots.count, cu.MISSED_SLOT_SCAN_CAP);
   assert.strictEqual(slots.latestMs, t("2026-10-15T12:34:56Z"), "the latest slot is still exact when the scan is capped");
+  // A month of a five-minute schedule in a timezone: the walk stops at the cap.
+  const nyWork = { kind: "cron", expr: "*/5 9-17 * * 1-5", tz: "America/New_York" };
+  slots = cu.scheduledSlotsBetween(nyWork, t("2026-09-15T00:00:00Z"), t("2026-10-15T12:00:00Z"));
+  assert.strictEqual(slots.capped, true);
+  assert.strictEqual(slots.count, cu.MISSED_SLOT_SCAN_CAP);
+  assert.strictEqual(slots.latestMs, t("2026-10-14T21:55:00Z"), "17:55 New York on the 14th is the latest");
   pass("a dense schedule is capped at the scan limit with the exact latest time");
 
   const ny = { kind: "cron", expr: "0 9 * * *", tz: "America/New_York" };
@@ -218,12 +246,12 @@ function pureChecks(cu, shared) {
   const lines = [
     shared.missedSkipDetail({ count: 3, policy: "skip", graceMinutes: 720, noticedOn: "start" }),
     shared.missedSkipDetail({ count: 1, policy: "runOnce", graceMinutes: 60, noticedOn: "wake" }),
-    shared.missedSkipDetail({ count: 1000, capped: true, policy: "skip", graceMinutes: 720, noticedOn: "wake" }),
+    shared.missedSkipDetail({ count: 100, capped: true, policy: "skip", graceMinutes: 720, noticedOn: "wake" }),
   ];
   assert.deepStrictEqual(lines, [
     "3 scheduled runs were missed while Codara was closed and skipped.",
     "1 scheduled run was missed while the computer was asleep; the latest was more than 1 hour ago, so none ran.",
-    "1000 or more scheduled runs were missed while the computer was asleep and skipped.",
+    "100 or more scheduled runs were missed while the computer was asleep and skipped.",
   ]);
   for (const line of lines) assert.ok(!/[\u2013\u2014]/.test(line), "no en or em dashes in UI copy");
   assert.strictEqual(shared.missedRunsSummary({ trigger: { kind: "manual" } }), null);
@@ -374,7 +402,7 @@ async function integrationChecks({ sched, loop }, workspace) {
   // The same skip again updates the newest row; a pass in between splits it.
   const repeat = await sched.createJob({ name: "repeat", trigger: yearly, input });
   const t0 = Date.now();
-  const same = { reason: "precheck", detail: "Skipped: the precheck exited with code 1.", precheck: { command: "false", passed: false, exitCode: 1, timedOut: false, durationMs: 1, outputTail: "first" } };
+  const same = { reason: "precheck", detail: "Skipped: the check exited with code 1.", precheck: { command: "false", passed: false, exitCode: 1, timedOut: false, durationMs: 1, outputTail: "first" } };
   await sched.appendSkip(repeat.id, same, t0);
   await sched.appendSkip(repeat.id, { ...same, precheck: { ...same.precheck, outputTail: "second" } }, t0 + 1000);
   await sched.appendSkip(repeat.id, { ...same, precheck: { ...same.precheck, outputTail: "third" } }, t0 + 2000);
@@ -385,9 +413,9 @@ async function integrationChecks({ sched, loop }, workspace) {
   assert.strictEqual(job.skips[0].at, iso(t0 + 2000));
   assert.strictEqual(job.skips[0].precheck.outputTail, "third", "the row keeps the latest output");
   const rowId = job.skips[0].id;
-  await sched.appendSkip(repeat.id, { ...same, detail: "Skipped: the precheck exited with code 2." }, t0 + 3000);
+  await sched.appendSkip(repeat.id, { ...same, detail: "Skipped: the check exited with code 2." }, t0 + 3000);
   await sched.appendHistory(repeat.id, { runId: "r-between", iteration: 0, startedAt: iso(t0 + 4000), status: "done" }, {});
-  await sched.appendSkip(repeat.id, { ...same, detail: "Skipped: the precheck exited with code 2." }, t0 + 5000);
+  await sched.appendSkip(repeat.id, { ...same, detail: "Skipped: the check exited with code 2." }, t0 + 5000);
   job = await get(repeat.id);
   assert.deepStrictEqual(job.skips.map((x) => x.repeats ?? 1), [3, 1, 1], "a different line or a pass in between starts a new row");
   await sched.deleteHistoryEntry(repeat.id, rowId, "an older time of the row");
@@ -408,6 +436,22 @@ async function integrationChecks({ sched, loop }, workspace) {
   assert.deepStrictEqual((await get(a.id)).skips.map((x) => x.detail), ["a1", "a2"]);
   assert.deepStrictEqual((await get(b.id)).skips.map((x) => x.detail), ["b1"]);
   assert.strictEqual((await get(b.id)).history.length, 1);
+  // An edit, a toggle and a new automation landing beside a background write
+  // (a skip, a checkpoint, a loop record) must not drop it either.
+  const folder = path.join(workspace, "watched-later");
+  const [, , , created] = await Promise.all([
+    sched.updateJob({ id: a.id, name: "a renamed" }),
+    sched.appendSkip(b.id, { reason: "precheck", detail: "b2" }),
+    sched.setEnabled(b.id, false),
+    sched.createJob({ name: "c", trigger: { kind: "folder", path: folder, events: ["add"] }, input, enabled: false }),
+    sched.appendSkip(a.id, { reason: "precheck", detail: "a3" }),
+  ]);
+  assert.strictEqual((await get(a.id)).name, "a renamed");
+  assert.deepStrictEqual((await get(a.id)).skips.map((x) => x.detail), ["a1", "a2", "a3"], "a skip beside an edit of the same automation lands");
+  assert.deepStrictEqual((await get(b.id)).skips.map((x) => x.detail), ["b1", "b2"], "a skip beside an edit of another automation lands");
+  assert.strictEqual((await get(b.id)).enabled, false);
+  assert.ok(await get(created.id), "the new automation lands");
+  await sched.deleteJob(created.id);
   await sched.deleteJob(a.id);
   await sched.deleteJob(b.id);
   pass("concurrent patches of different automations do not drop each other's writes");
@@ -430,6 +474,23 @@ async function integrationChecks({ sched, loop }, workspace) {
   assert.strictEqual(job.missedRuns, undefined, "null restores the default policy");
   pass("precheck and policy normalize on write; null removes them");
 
+  // A hand-edited or older skip list: rows the history view cannot render
+  // are dropped the next time the automation is normalized.
+  await sched.patchJob(sleeper.id, (j) => ({
+    ...j,
+    skips: [
+      { id: "skip-ok", at: iso(Date.now()), reason: "precheck", detail: "kept" },
+      { id: "skip-no-detail", at: iso(Date.now()), reason: "precheck" },
+      { at: iso(Date.now()), reason: "missed", detail: "no id" },
+      { id: "skip-bad-reason", at: iso(Date.now()), reason: "because", detail: "x" },
+      null,
+      "text",
+    ],
+  }));
+  await sched.updateJob({ id: sleeper.id, name: "sleeper renamed" });
+  assert.deepStrictEqual((await get(sleeper.id)).skips.map((x) => x.id), ["skip-ok"]);
+  pass("malformed skip rows are dropped when the automation is normalized");
+
   // ── the precheck gate ─────────────────────────────────────────────────────
   if (process.platform === "win32") {
     console.log("  SKIP precheck gate cases (they run POSIX shell commands)");
@@ -446,7 +507,7 @@ async function integrationChecks({ sched, loop }, workspace) {
   assert.strictEqual(launchesFor(gated.id), 0, "a failed precheck starts no worker");
   assert.strictEqual(job.skips.length, 1);
   assert.strictEqual(job.skips[0].reason, "precheck");
-  assert.strictEqual(job.skips[0].detail, "Skipped: the precheck exited with code 1.");
+  assert.strictEqual(job.skips[0].detail, "Skipped: the check exited with code 1.");
   assert.strictEqual(job.skips[0].precheck.outputTail, "nothing to do");
   assert.strictEqual(job.skips[0].precheck.command, "echo nothing to do; exit 1");
   assert.strictEqual(job.history.length, 0, "history keeps only real passes");
@@ -522,6 +583,45 @@ async function integrationChecks({ sched, loop }, workspace) {
   await sched.setEnabled(overlap.id, false);
   pass("a cadence tick during a trigger's failing check is re-armed, not lost");
 
+  // A finalized loop: a stray cadence tick neither checks nor records (it
+  // could not revive the loop anyway), while a trigger fire still may.
+  const finished = await sched.createJob({
+    name: "finished",
+    trigger: yearly,
+    input,
+    loop: { kind: "cadence", everyMs: 60_000, stop: {} },
+    precheck: { command: "exit 5" },
+  });
+  await sched.patchJob(finished.id, (j) => ({ ...j, state: { status: "stopped", iteration: 3, lastStopReason: "user" } }));
+  await loop.startIteration(finished.id, { source: "cadence" });
+  job = await get(finished.id);
+  assert.strictEqual(job.skips, undefined, "a cadence tick on a stopped loop spends no check");
+  assert.strictEqual(job.state.status, "stopped");
+  await loop.startIteration(finished.id, { source: "trigger" });
+  job = await get(finished.id);
+  assert.strictEqual(job.skips.length, 1, "a trigger fire on a stopped loop is checked");
+  assert.strictEqual(job.state.status, "stopped", "and a skipped fire leaves the stopped cycle as it was");
+  assert.strictEqual(job.state.iteration, 3);
+  await sched.setEnabled(finished.id, false);
+  pass("a stopped loop: a cadence tick is ignored, a trigger fire is checked and leaves it stopped");
+
+  // Stop pressed while a fire's check runs: the fire must not start a fresh
+  // cycle once the check passes.
+  const stopMid = await sched.createJob({
+    name: "stop mid check",
+    trigger: yearly,
+    input,
+    precheck: { command: "sleep 0.4; exit 0" },
+  });
+  const midFire = loop.startIteration(stopMid.id, { source: "trigger" });
+  await sleep(100);
+  await sched.patchJob(stopMid.id, (j) => ({ ...j, state: { ...j.state, status: "stopped", lastStopReason: "user" } }));
+  await midFire;
+  assert.strictEqual(launchesFor(stopMid.id), 0, "the stopped loop stays stopped");
+  assert.strictEqual((await get(stopMid.id)).state.status, "stopped");
+  await sched.setEnabled(stopMid.id, false);
+  pass("a Stop during the check wins over the fire that started it");
+
   // The start check's catch-up pass goes through the precheck too.
   const both = await sched.createJob({
     name: "both",
@@ -555,6 +655,25 @@ async function main() {
   const mod = await bundle(tmp);
   pureChecks(mod.cu, mod.shared);
   await integrationChecks(mod, workspace);
+
+  // Quitting while a check runs: the stopped check is not a skip.
+  if (process.platform !== "win32") {
+    const quitting = await mod.sched.createJob({
+      name: "quitting",
+      trigger: { kind: "cron", expr: "0 0 1 1 *", tz: "UTC" },
+      input: { workspaceId: "ws", workspaceName: "test", cwd: workspace, initialUserNote: "x" },
+      loop: { kind: "cadence", everyMs: 60_000, stop: {} },
+      precheck: { command: "sleep 30; exit 0" },
+    });
+    const fire = mod.loop.startIteration(quitting.id, { source: "cadence" });
+    await sleep(300);
+    mod.loop.teardownAllLoops();
+    await fire;
+    const q = (await mod.sched.listJobs()).find((j) => j.id === quitting.id);
+    assert.strictEqual(q.skips, undefined, "a check stopped by quitting records no skip");
+    assert.ok(!globalThis.__CU.launches.some((l) => l.automationId === quitting.id));
+    pass("quitting stops a running check without recording a skip or launching a pass");
+  }
 
   // Once the scheduler is stopped (quit), a late wake starts and records nothing.
   const late = await mod.sched.createJob({

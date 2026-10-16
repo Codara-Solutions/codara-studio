@@ -498,7 +498,7 @@ import {
   setTerminalScrollbackEnabled,
   trackTerminalScrollbackPanes,
 } from "./terminal-scrollback";
-import { registerAgentHibernationIpc } from "./agent-hibernation";
+import { agentPaneAsleep, registerAgentHibernationIpc } from "./agent-hibernation";
 import { registerWorktreeCleanupIpc } from "./worktree-cleanup";
 import { registerWorktreeSetupIpc } from "./worktree-setup";
 import { registerPortForwardIpc } from "./remote/port-forward-runtime";
@@ -2975,11 +2975,13 @@ export function registerIpc(): void {
     async (_e, input: TestPrecheckInput): Promise<AutomationPrecheckResult> => {
       const { normalizeAutomationPrecheck } = await import("@shared/automation-catchup");
       const precheck = normalizeAutomationPrecheck(input?.precheck);
-      if (!precheck || typeof input.cwd !== "string" || !input.cwd) {
+      if (!precheck) {
         return { passed: false, exitCode: null, timedOut: false, durationMs: 0, outputTail: "", error: "no command" };
       }
+      // A missing or relative folder is the runner's to report, in its words.
+      const cwd = typeof input.cwd === "string" ? input.cwd : "";
       const { runAutomationPrecheck } = await import("./orchestration/automation-precheck");
-      return runAutomationPrecheck(precheck, { cwd: input.cwd, env: { CODARA_AUTOMATION_PRECHECK: "1" } });
+      return runAutomationPrecheck(precheck, { cwd, env: { CODARA_AUTOMATION_PRECHECK: "1" } });
     },
   );
 
@@ -3132,7 +3134,11 @@ export function registerIpc(): void {
   // or queued for an agent to pull. Each send carries its own workspace; the
   // service refuses a pane or chat that belongs to another one.
   handle("agent:deliver", async (_e, request: AgentDeliveryRequest): Promise<AgentDeliveryResult> => {
-    if (request?.target?.kind === "pane") await awaitPendingSpawn(request.target.paneId);
+    // A sleeping agent's pane spawns only when the user opens it: no point
+    // waiting for it, the service refuses the send right away.
+    if (request?.target?.kind === "pane" && !agentPaneAsleep(request.target.paneId)) {
+      await awaitPendingSpawn(request.target.paneId);
+    }
     return agentDelivery().deliver(request);
   });
   handle("agent:inboxPending", async (_e, args: { workspaceId: string; paneId?: string | null }): Promise<number> =>

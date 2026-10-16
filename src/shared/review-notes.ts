@@ -75,7 +75,11 @@ export interface ReviewDiffRequest {
   mode: ReviewDiffMode;
   /** Base branch for mode "base"; the workspace's own base or the default branch when absent. */
   base?: string | null;
-  /** Load only these files (repository-relative), with no budget. */
+  /**
+   * Load only these files (repository-relative), with no budget. Name a
+   * renamed file's old path too: git pairs the two only when both are asked
+   * for, and shows the new one as an added file otherwise.
+   */
   paths?: string[];
   /** With paths: load them in full, even a file too large to show unasked. */
   force?: boolean;
@@ -97,6 +101,14 @@ export interface ReviewDiff {
   bases?: string[];
   error?: string;
 }
+
+/** Paths one diff request loads at most; the rest of a longer list are ignored. */
+export const MAX_REVIEW_REQUEST_PATHS = 200;
+/**
+ * Characters of the paths one diff request names at most. Each becomes an
+ * argument of git's command line, which Windows caps at 32,767 characters.
+ */
+export const MAX_REVIEW_REQUEST_CHARS = 12_000;
 
 export const MAX_REVIEW_NOTES = 500;
 export const MAX_NOTE_BODY_CHARS = 8_000;
@@ -218,6 +230,19 @@ export interface ReviewNotesFormatOptions {
   /** What the diff showed: "uncommitted changes" or "changes against origin/main". */
   scope?: string | null;
   workspaceCwd?: string | null;
+  /**
+   * The repository's top folder. Diff notes name files relative to it, so
+   * the message says so when the workspace is a folder inside it, where the
+   * agent works.
+   */
+  repoRoot?: string | null;
+}
+
+function samePlace(a: string, b: string): boolean {
+  const norm = (value: string) => value.replace(/\\/g, "/").replace(/\/+$/, "");
+  const x = norm(a);
+  const y = norm(b);
+  return /^[A-Za-z]:\//.test(x) || /^[A-Za-z]:\//.test(y) ? x.toLowerCase() === y.toLowerCase() : x === y;
 }
 
 /**
@@ -230,7 +255,12 @@ export function formatReviewNotes(notes: readonly ReviewNote[], options: ReviewN
   const sorted = sortReviewNotes(notes);
   const count = sorted.length;
   const scope = options.scope?.trim();
-  const head = `[Codara] ${count === 1 ? "1 review note" : `${count} review notes`}${scope ? ` on the ${scope}` : ""}. Address each one, then say what you changed.`;
+  const root = options.repoRoot?.trim();
+  const elsewhere =
+    root && options.workspaceCwd && sorted.some((note) => note.source === "diff") && !samePlace(root, options.workspaceCwd)
+      ? `\nFile paths are relative to the repository at ${root}.`
+      : "";
+  const head = `[Codara] ${count === 1 ? "1 review note" : `${count} review notes`}${scope ? ` on the ${scope}` : ""}. Address each one, then say what you changed.${elsewhere}`;
   const blocks = sorted.map((note, index) => {
     const path = displayNotePath(note, options.workspaceCwd);
     const lines = [`${index + 1}. ${reviewNoteLocation(note, path)}${note.source === "markdown" ? " (Markdown)" : ""}`];

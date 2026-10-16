@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   MAX_QUICK_COMMANDS,
   moveQuickCommand,
@@ -43,8 +43,24 @@ const styles = {
   meta: { color: "var(--muted)", fontSize: 11.5 },
 } satisfies Record<string, React.CSSProperties>;
 
+// Where the keyboard goes once the page re-renders after an action that
+// removed or moved the focused control: the first selector that matches an
+// enabled element inside the page wins.
+function focusFirst(root: HTMLElement | null, selectors: readonly string[]): void {
+  if (!root) return;
+  for (const selector of selectors) {
+    const el = root.querySelector<HTMLElement>(selector);
+    if (el && !(el as HTMLButtonElement).disabled) {
+      el.focus();
+      return;
+    }
+  }
+}
+
+const rowSelector = (id: string) => `[data-quick-command="${CSS.escape(id)}"]`;
+
 export default function QuickCommandsSettings() {
-  const { preferences, setPreference } = usePreferences();
+  const { preferences, hydrated, setPreference } = usePreferences();
   const api = useOptionalQuickCommands();
   const commands = useMemo(() => normalizeQuickCommands(preferences.quickCommands), [preferences.quickCommands]);
   const rightClick = normalizeTerminalRightClick(preferences.terminalRightClick);
@@ -52,6 +68,17 @@ export default function QuickCommandsSettings() {
   const [editing, setEditing] = useState<Editing>(null);
   const [draftNew, setDraftNew] = useState<QuickCommand | null>(null);
   const [deleted, setDeleted] = useState<{ command: QuickCommand; index: number } | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  // A move re-inserts the row (a focused button leaves the DOM and loses the
+  // keyboard), a Move button at an end turns disabled, and Delete, Save and
+  // Cancel remove the control that had focus. Each names where focus goes.
+  const pendingFocus = useRef<readonly string[] | null>(null);
+  useEffect(() => {
+    const selectors = pendingFocus.current;
+    if (!selectors) return;
+    pendingFocus.current = null;
+    focusFirst(rootRef.current, selectors);
+  });
 
   useEffect(() => {
     if (!deleted) return;
@@ -60,6 +87,11 @@ export default function QuickCommandsSettings() {
   }, [deleted]);
 
   const save = (next: QuickCommand[]) => void setPreference("quickCommands", normalizeQuickCommands(next));
+
+  const moveFocus = (selectors: readonly string[]) => {
+    pendingFocus.current = selectors;
+  };
+  const backToRow = (id: string) => moveFocus([`${rowSelector(id)} [data-qc-action="edit"]`, "[data-qc-action=\"add\"]"]);
 
   const startAdd = () => {
     const draft = newQuickCommandDraft();
@@ -81,7 +113,7 @@ export default function QuickCommandsSettings() {
   }, [preferences.keybindings]);
 
   return (
-    <>
+    <div ref={rootRef} style={{ display: "contents" }}>
       <SettingsSection
         title="Saved commands"
         description={
@@ -96,6 +128,7 @@ export default function QuickCommandsSettings() {
           <button
             type="button"
             className="spark-btn"
+            data-qc-action="add"
             onClick={startAdd}
             // The saved list keeps MAX_QUICK_COMMANDS; one more would be dropped on save.
             disabled={editing?.isNew === true || commands.length >= MAX_QUICK_COMMANDS}
@@ -114,11 +147,13 @@ export default function QuickCommandsSettings() {
               <button
                 type="button"
                 className="spark-btn"
+                data-qc-action="undo"
                 onClick={() => {
                   const next = [...commands];
                   next.splice(Math.min(deleted.index, next.length), 0, deleted.command);
                   save(next);
                   setDeleted(null);
+                  backToRow(deleted.command.id);
                 }}
               >
                 Undo
@@ -140,16 +175,18 @@ export default function QuickCommandsSettings() {
                 save(upsertQuickCommand(commands, command));
                 setEditing(null);
                 setDraftNew(null);
+                backToRow(command.id);
               }}
               onCancel={() => {
                 setEditing(null);
                 setDraftNew(null);
+                moveFocus(["[data-qc-action=\"add\"]"]);
               }}
             />
           </div>
         ) : null}
 
-        {commands.length === 0 && !editing?.isNew ? (
+        {hydrated && commands.length === 0 && !editing?.isNew ? (
           <div className="st-card">
             <div className="st-empty">
               <span className="st-empty__title">No quick commands yet</span>
@@ -173,12 +210,17 @@ export default function QuickCommandsSettings() {
                       onSave={(next) => {
                         save(upsertQuickCommand(commands, next));
                         setEditing(null);
+                        backToRow(command.id);
                       }}
-                      onCancel={() => setEditing(null)}
+                      onCancel={() => {
+                        setEditing(null);
+                        backToRow(command.id);
+                      }}
                       onDelete={() => {
                         setDeleted({ command, index });
                         save(removeQuickCommand(commands, command.id));
                         setEditing(null);
+                        moveFocus(["[data-qc-action=\"undo\"]"]);
                       }}
                     />
                   </li>
@@ -203,8 +245,12 @@ export default function QuickCommandsSettings() {
                       className="spark-icon-btn st-icon-btn"
                       aria-label={`Move ${command.label} up`}
                       title="Move up"
+                      data-qc-action="up"
                       disabled={index === 0}
-                      onClick={() => save(moveQuickCommand(commands, command.id, -1))}
+                      onClick={() => {
+                        save(moveQuickCommand(commands, command.id, -1));
+                        moveFocus([`${rowSelector(command.id)} [data-qc-action="up"]`, `${rowSelector(command.id)} [data-qc-action="down"]`]);
+                      }}
                     >
                       <ArrowGlyph />
                     </button>
@@ -213,8 +259,12 @@ export default function QuickCommandsSettings() {
                       className="spark-icon-btn st-icon-btn"
                       aria-label={`Move ${command.label} down`}
                       title="Move down"
+                      data-qc-action="down"
                       disabled={index === commands.length - 1}
-                      onClick={() => save(moveQuickCommand(commands, command.id, 1))}
+                      onClick={() => {
+                        save(moveQuickCommand(commands, command.id, 1));
+                        moveFocus([`${rowSelector(command.id)} [data-qc-action="down"]`, `${rowSelector(command.id)} [data-qc-action="up"]`]);
+                      }}
                     >
                       <ArrowGlyph down />
                     </button>
@@ -223,6 +273,7 @@ export default function QuickCommandsSettings() {
                       className="spark-icon-btn st-icon-btn"
                       aria-label={`Edit ${command.label}`}
                       title="Edit"
+                      data-qc-action="edit"
                       onClick={() => {
                         setDraftNew(null);
                         setEditing({ id: command.id, isNew: false });
@@ -238,6 +289,7 @@ export default function QuickCommandsSettings() {
                       onClick={() => {
                         setDeleted({ command, index });
                         save(removeQuickCommand(commands, command.id));
+                        moveFocus(["[data-qc-action=\"undo\"]"]);
                       }}
                     >
                       <TrashGlyph />
@@ -271,6 +323,6 @@ export default function QuickCommandsSettings() {
           }
         />
       </SettingsSection>
-    </>
+    </div>
   );
 }

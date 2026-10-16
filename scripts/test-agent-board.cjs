@@ -651,6 +651,58 @@ async function testNotifierActivity() {
   mod.noteTerminalHookEvent("h1", "UserPromptSubmit", { ...session, prompt: "next" });
   check("a new prompt replaces the old one", pane("h1")?.prompt === "next");
 
+  // The first account of a prompt is the specific one: the hook's question
+  // text, not the screen's "Permission for AskUserQuestion" painted after it
+  // or the generic notification that follows.
+  const menu = "\r\nDo you want to proceed?\r\n❯ 1. Yes\r\n  2. No\r\n";
+  mod.noteTerminalHookEvent("h1", "PreToolUse", {
+    ...session,
+    tool_name: "AskUserQuestion",
+    tool_input: { questions: [{ question: "Which region goes first?" }] },
+  });
+  feed("h1", menu);
+  check("a painted prompt keeps the question it asks", pane("h1")?.question === "Which region goes first?", pane("h1")?.question);
+  mod.noteTerminalHookEvent("h1", "Notification", {
+    ...session,
+    notification_type: "permission_prompt",
+    message: "Claude needs your permission",
+  });
+  check("a later notification of the same prompt keeps the question", pane("h1")?.question === "Which region goes first?", pane("h1")?.question);
+  const signalsAtPrompt = T.signals;
+  feed("h1", menu);
+  feed("h1", menu);
+  check("a repainted prompt does not ping the board again", T.signals === signalsAtPrompt, T.signals - signalsAtPrompt);
+  mod.noteTerminalUserInput("h1", "1");
+  mod.noteTerminalHookEvent("h1", "PostToolUse", { ...session, tool_name: "AskUserQuestion" });
+  check("an answered prompt leaves no question", pane("h1")?.question === null, pane("h1"));
+  mod.noteTerminalHookEvent("h1", "PreToolUse", { ...session, tool_name: "Bash", tool_input: { command: "rm -rf build" } });
+  feed("h1", menu);
+  check("the next prompt brings its own question", /rm -rf build/.test(pane("h1")?.question ?? ""), pane("h1")?.question);
+  mod.noteTerminalUserInput("h1", "1");
+  mod.noteTerminalHookEvent("h1", "PostToolUse", { ...session, tool_name: "Bash" });
+  // A hard failure banner is what the card says, not the last good message.
+  feed("h1", "\r\n⚠ Credit balance is too low\r\n");
+  entry = pane("h1");
+  check("a failure banner stops the pane", entry?.state === "error", entry?.state);
+  check("a stopped pane says why, not its last good message", /Credit balance/.test(entry?.message ?? ""), entry?.message);
+  mod.noteTerminalUserInput("h1", "again\r");
+  mod.noteTerminalHookEvent("h1", "UserPromptSubmit", { ...session, prompt: "again" });
+  mod.noteTerminalHookEvent("h1", "StopFailure", { ...session, error: "overloaded_error" });
+  check("a turn that failed says so", /overloaded_error/.test(pane("h1")?.message ?? ""), pane("h1")?.message);
+  // A background task reporting back starts with no tool running, not the
+  // one the last turn was in when it ended.
+  mod.noteTerminalUserInput("h1", "run the tests\r");
+  mod.noteTerminalHookEvent("h1", "UserPromptSubmit", { ...session, prompt: "run the tests" });
+  mod.noteTerminalHookEvent("h1", "PreToolUse", { ...session, tool_name: "Bash", tool_input: { command: "npm test" } });
+  check("a tool call in flight is the current tool", pane("h1")?.tool === "Bash: npm test", pane("h1")?.tool);
+  mod.noteTerminalHookEvent("h1", "UserPromptSubmit", {
+    ...session,
+    prompt: "<task-notification>tests finished</task-notification>",
+  });
+  entry = pane("h1");
+  check("a follow-up works without the last turn's tool", entry?.state === "working" && entry?.tool === null, entry);
+  check("a follow-up keeps the user's prompt as the title", entry?.prompt === "run the tests", entry?.prompt);
+
   // OSC 7501 program status, no hooks.
   feed("s1", "\x1b]633;E;claude\x07");
   feed("s1", "\x1b]7501;app=claude:state=working\x07");
@@ -667,6 +719,9 @@ async function testNotifierActivity() {
   check("program status done keeps the message", pane("s1")?.message === "Picked eu-west.", pane("s1")?.message);
   feed("s1", `\x1b]7501;app=claude:state=error:msg=${b64("Rate limited.")}\x07`);
   check("program status error keeps why", pane("s1")?.state === "error" && pane("s1")?.message === "Rate limited.", pane("s1"));
+  feed("s1", `\x1b]7501;app=claude:state=done:msg=${b64("All green.")}\x07`);
+  feed("s1", "\x1b]7501;app=claude:state=error\x07");
+  check("an error without a reason drops the last good message", pane("s1")?.state === "error" && pane("s1")?.message === null, pane("s1"));
 
   check("Cora worker panes stay off the board", pane("w1") === undefined);
   check("main leaves the account to agent-board.ts", pane("h1")?.accountProfileId === null);

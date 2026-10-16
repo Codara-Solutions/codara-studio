@@ -309,7 +309,7 @@ function handleRunEvent(event: SparkEvent): void {
         kind: "automation.blocked",
         sourceKey,
         tone: "warning",
-        title: "Automation — needs you",
+        title: "Automation needs you",
         body: event.message?.trim() || "An automation is waiting on your answer.",
         soundKind: "needs-you",
         // workspaceId lets a cross-workspace click switch projects before
@@ -323,7 +323,7 @@ function handleRunEvent(event: SparkEvent): void {
       sourceKey,
       // A blocked run is the agent asking for you, not a failure — amber.
       tone: "warning",
-      title: "Codara Studio — needs you",
+      title: "Codara Studio needs you",
       body: event.message?.trim() || "A run is blocked and needs your attention.",
       soundKind: "needs-you",
       target: { type: "run", runId, workspaceId },
@@ -351,14 +351,14 @@ function handleRunEvent(event: SparkEvent): void {
     if (startedMs !== undefined) {
       const elapsed = Date.parse(event.timestamp) - startedMs;
       if (Number.isFinite(elapsed) && elapsed > 5 * 60_000) {
-        body += ` — ran ${formatDuration(elapsed)}`;
+        body += `, ran ${formatDuration(elapsed)}`;
       }
     }
     publish({
       kind: ok ? "run.complete" : "run.failed",
       sourceKey,
       tone: ok ? "success" : "danger",
-      title: ok ? "Codara Studio — done" : "Codara Studio — failed",
+      title: ok ? "Codara Studio is done" : "Codara Studio failed",
       body,
       soundKind: "done",
       target: { type: "run", runId, workspaceId },

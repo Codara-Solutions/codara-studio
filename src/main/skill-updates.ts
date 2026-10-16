@@ -20,7 +20,9 @@ import {
   listSkillOriginReceipts,
   readSkillOrigin,
   receiptToStatus,
+  skillFolderId,
   skillOriginBackupDir,
+  skillOriginKey,
   writeSkillOrigin,
   forgetSkillOrigin,
   type SkillOriginCheck,
@@ -110,10 +112,28 @@ async function stagingRoot(options: SkillUpdateOptions): Promise<string> {
   return root;
 }
 
-/** The skill records whose folder still holds a skill, as the renderer shows them. */
+/**
+ * False when the folder was replaced since Codara recorded it: removed outside
+ * Codara (by hand, another tool, a phone) and another skill put in its place.
+ * The record then describes a skill that is gone, so it is ignored. A missing
+ * folder still matches, so a version kept after a failed swap can come back.
+ */
+async function describesFolder(receipt: SkillOriginReceipt): Promise<boolean> {
+  if (!receipt.folderId) return true;
+  const id = await skillFolderId(receipt.skillDir);
+  return id === undefined || id === receipt.folderId;
+}
+
+async function liveReceipt(receipt: SkillOriginReceipt): Promise<boolean> {
+  return (await hasSkillFile(receipt.skillDir)) && (await describesFolder(receipt));
+}
+
+const REPLACED = "the folder was replaced since Codara installed it, so Codara no longer knows where it came from.";
+
+/** The skill records whose folder still holds that skill, as the renderer shows them. */
 export async function listSkillOrigins(options: SkillUpdateOptions): Promise<SkillOriginStatus[]> {
   const receipts = await listSkillOriginReceipts(options.stateDir);
-  const live = await Promise.all(receipts.map(async (receipt) => ((await hasSkillFile(receipt.skillDir)) ? receipt : null)));
+  const live = await Promise.all(receipts.map(async (receipt) => ((await liveReceipt(receipt)) ? receipt : null)));
   return live.filter((receipt): receipt is SkillOriginReceipt => receipt !== null).map(receiptToStatus);
 }
 
@@ -265,7 +285,7 @@ async function runCheck(options: SkillUpdateOptions & { force?: boolean }): Prom
   const receipts = (await listSkillOriginReceipts(options.stateDir)).filter((receipt) => receipt.origin.kind === "git");
   const due: SkillOriginReceipt[] = [];
   for (const receipt of receipts) {
-    if (!(await hasSkillFile(receipt.skillDir))) continue;
+    if (!(await liveReceipt(receipt))) continue;
     if (options.force || !checkIsFresh(receipt, now, ttlMs)) due.push(receipt);
   }
   const groups = new Map<string, { target: { cloneUrl: string; ref?: string } | null; receipts: SkillOriginReceipt[] }>();
@@ -421,11 +441,20 @@ export function updateSkills(input: { dirs: string[] }, options: SkillUpdateOpti
     const unchanged: string[] = [];
     const errors: string[] = [];
     const groups = new Map<string, { target: { cloneUrl: string; ref?: string }; receipts: SkillOriginReceipt[] }>();
+    // One folder named twice (another case on macOS or Windows) is updated
+    // once: a second pass would replace the version the first one kept.
+    const seen = new Set<string>();
     for (const dir of new Set(input.dirs.filter((value) => typeof value === "string" && value.trim()))) {
       const receipt = await readSkillOrigin(options.stateDir, dir);
       const target = receipt ? cloneTarget(receipt.origin) : null;
       if (!receipt || !target) {
         errors.push(`${basename(dir)}: Codara has no git source to update it from.`);
+        continue;
+      }
+      if (seen.has(skillOriginKey(receipt.skillDir))) continue;
+      seen.add(skillOriginKey(receipt.skillDir));
+      if (!(await describesFolder(receipt))) {
+        errors.push(`${receipt.name}: ${REPLACED}`);
         continue;
       }
       const key = `${target.cloneUrl}\n${target.ref ?? ""}`;
@@ -523,14 +552,20 @@ async function updateOne(
       () => false,
     );
     if (putBack) throw err;
-    // The previous version stays in Codara's folder: Roll back restores it.
+    // The previous version stays in Codara's folder and the record points at
+    // it. With the folder gone the skill has no row to roll back from, so the
+    // message says where it is.
     await writeSkillOrigin(options.stateDir, { ...withoutRollback, rollback: kept }).catch(() => undefined);
-    throw new Error(`${messageOf(err).slice(0, 300).replace(/\.$/, "")}. The previous version is kept in ${backup}; Roll back restores it.`);
+    throw new Error(
+      `${messageOf(err).slice(0, 300).replace(/\.$/, "")}. The previous version is kept in ${backup}; move that folder back to ${dir} to restore it.`,
+    );
   }
   try {
+    const folderId = await skillFolderId(dir);
     await writeSkillOrigin(options.stateDir, {
       schemaVersion: 1,
       skillDir: receipt.skillDir,
+      ...(folderId ? { folderId } : {}),
       name,
       origin: {
         ...receipt.origin,
@@ -581,6 +616,9 @@ export function rollbackSkills(input: { dirs: string[] }, options: SkillUpdateOp
       try {
         const stat = await fs.lstat(receipt.skillDir).catch(() => null);
         await assertReplaceableSkillDir(receipt.skillDir, options, stat);
+        // Another skill now in this place is not the one the kept version
+        // belongs to: restoring would throw it away.
+        if (stat && !(await describesFolder(receipt))) throw new Error(REPLACED);
         assertCodaraOwnedWrite(receipt.skillDir, options.outsideWrite);
         await fs.mkdir(discard, { recursive: true, mode: 0o700 });
         const current = join(discard, "skill");
@@ -598,9 +636,11 @@ export function rollbackSkills(input: { dirs: string[] }, options: SkillUpdateOp
         // The remote still has the version just rolled back from, so the
         // skill is behind it again until the user updates.
         const behind = receipt.origin.commit && receipt.origin.commit !== receipt.rollback.origin.commit;
+        const folderId = await skillFolderId(receipt.skillDir);
         await writeSkillOrigin(options.stateDir, {
           schemaVersion: 1,
           skillDir: receipt.skillDir,
+          ...(folderId ? { folderId } : {}),
           name: receipt.rollback.name,
           origin: receipt.rollback.origin,
           ...(behind
@@ -625,17 +665,26 @@ export function rollbackSkills(input: { dirs: string[] }, options: SkillUpdateOp
 
 /**
  * A skill copied to another folder (Add to Claude CLI) came from the same
- * place: the copy gets its own record, so it can be updated too.
+ * place: the copy gets its own record, so it can be updated too. A copy of a
+ * skill with no record drops whatever record a skill removed from that place
+ * outside Codara left behind.
  */
 export function copySkillOrigin(input: { from: string; to: string }, options: SkillUpdateOptions): Promise<boolean> {
   return withMutation(async () => {
-    const receipt = await readSkillOrigin(options.stateDir, input.from);
-    if (!receipt || !(await hasSkillFile(input.to))) return false;
+    const found = await readSkillOrigin(options.stateDir, input.from);
+    const receipt = found && (await describesFolder(found)) ? found : null;
+    if (!receipt) {
+      await forgetSkillOrigin(options.stateDir, input.to);
+      return false;
+    }
+    if (!(await hasSkillFile(input.to))) return false;
     await fs.rm(skillOriginBackupDir(options.stateDir, input.to), { recursive: true, force: true });
     const { updatedAt: _updatedAt, ...origin } = receipt.origin;
+    const folderId = await skillFolderId(input.to);
     await writeSkillOrigin(options.stateDir, {
       schemaVersion: 1,
       skillDir: resolve(input.to),
+      ...(folderId ? { folderId } : {}),
       name: (await readSkillName(input.to)) ?? receipt.name,
       origin: { ...origin, installedAt: nowIso(options) },
       ...(receipt.check ? { check: receipt.check } : {}),

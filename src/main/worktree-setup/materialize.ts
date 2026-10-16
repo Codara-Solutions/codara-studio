@@ -38,6 +38,7 @@ export interface MaterializeInput {
 }
 
 const ALREADY_THERE = "already in the worktree";
+const HOLDS_WORKTREE = "it is or holds the new worktree itself";
 const SKIP_LOG_LINES = 200;
 
 export interface MaterializeResult {
@@ -100,7 +101,7 @@ async function realInside(root: string, absolute: string): Promise<string | null
   const real = await fsp.realpath(absolute).catch(() => null);
   if (!real || !isAtOrUnder(real, root)) return null;
   const rel = relativePath(root, real).split(sep);
-  if (rel.includes(".git")) return null;
+  if (rel.some((segment) => segment.toLowerCase() === ".git")) return null;
   return real;
 }
 
@@ -161,6 +162,10 @@ export async function materializeSetup(input: MaterializeInput): Promise<Materia
     const target = await realInside(sourceRoot, source);
     if (!target || target === sourceRoot) {
       result.skipped.push({ path: link, reason: "points outside the repository" });
+      continue;
+    }
+    if (isAtOrUnder(worktreeRoot, target) || isAtOrUnder(target, worktreeRoot)) {
+      result.skipped.push({ path: link, reason: HOLDS_WORKTREE });
       continue;
     }
     const destination = join(worktreeRoot, ...link.split("/"));
@@ -236,6 +241,10 @@ export async function materializeSetup(input: MaterializeInput): Promise<Materia
     }
   }
   const linkedPaths = result.linked.map((link) => link.path);
+  // Never read from what a link already brings, nor from the new worktree
+  // itself when it sits inside the main checkout (a repository kept at the
+  // home folder holds Codara's own worktrees folder).
+  const skipAbsolute = [...linkedPaths.map((link) => join(sourceRoot, ...link.split("/"))), worktreeRoot];
 
   // ── Copies ───────────────────────────────────────────────────────────────
   const plan: Array<{ candidate: CopyCandidate; absolute: string; real: string; isDir: boolean }> = [];
@@ -262,12 +271,15 @@ export async function materializeSetup(input: MaterializeInput): Promise<Materia
     }
     const realStat = await fsp.stat(real).catch(() => null);
     if (!realStat || (!realStat.isFile() && !realStat.isDirectory())) continue;
+    if (isAtOrUnder(real, worktreeRoot)) {
+      result.skipped.push({ path: candidate.path, reason: HOLDS_WORKTREE });
+      continue;
+    }
     const remaining: CopyBudget = {
       bytes: budget.bytes - plannedBytes,
       entries: budget.entries - plannedEntries,
     };
-    const linkedAbsolute = linkedPaths.map((link) => join(sourceRoot, ...link.split("/")));
-    const size = await measure(real, remaining, (abs) => linkedAbsolute.some((linked) => isAtOrUnder(abs, linked)));
+    const size = await measure(real, remaining, (abs) => skipAbsolute.some((skip) => isAtOrUnder(abs, skip)));
     if (size.over) {
       overBudget += 1;
       result.skipped.push({
@@ -286,7 +298,6 @@ export async function materializeSetup(input: MaterializeInput): Promise<Materia
     );
   }
 
-  const linkedSourceAbsolute = linkedPaths.map((link) => join(sourceRoot, ...link.split("/")));
   for (const item of plan) {
     if (stopped()) break;
     const path = item.candidate.path;
@@ -302,7 +313,7 @@ export async function materializeSetup(input: MaterializeInput): Promise<Materia
         worktreeRoot,
         result,
         stopped,
-        skipAbsolute: linkedSourceAbsolute,
+        skipAbsolute,
       });
     } else {
       await copyOneFile(item.real, destination, path, result);
@@ -477,8 +488,11 @@ async function copyInnerLink(source: string, destination: string, relative: stri
     return;
   }
   const lexical = resolve(dirname(source), target);
+  // The copy may sit at another depth than its source (a folder reached
+  // through a link), so the same text must also land inside the worktree.
+  const landsAt = resolve(dirname(destination), target);
   const real = await realInside(ctx.sourceRoot, source);
-  if (!isAtOrUnder(lexical, ctx.sourceRoot) || !real) {
+  if (!isAtOrUnder(lexical, ctx.sourceRoot) || !isAtOrUnder(landsAt, ctx.worktreeRoot) || !real) {
     ctx.result.skipped.push({ path: relative, reason: "a link to a place outside the repository" });
     return;
   }

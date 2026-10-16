@@ -13,6 +13,8 @@
   padding: 16px 18px 14px;
   border-radius: 12px;
   animation: feature-tip-in var(--motion) var(--ease-out) both;
+  /* Clickable even where it meets the title bar's drag region (macOS, Windows). */
+  -webkit-app-region: no-drag;
 }
 
 .onboarding-coach.feature-tip h2,

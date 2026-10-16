@@ -335,12 +335,14 @@ const CONSOLE_LIST_TIMEOUT_MS = 8_000;
  * uses), forked here so a failure or timeout answers null instead of the
  * shell alone.
  */
-export function listConsolePids(shellPid: number): Promise<number[] | null> {
+export function listConsolePids(shellPid: number, agentScript?: string): Promise<number[] | null> {
   if (!Number.isSafeInteger(shellPid) || shellPid <= 0) return Promise.resolve(null);
   let script: string;
   try {
-    const ptyRoot = dirname(createRequire(__filename).resolve("node-pty/package.json"));
-    script = join(ptyRoot, "lib", "conpty_console_list_agent.js");
+    // `agentScript` is for tests: a stand-in agent that answers like node-pty's.
+    script =
+      agentScript ??
+      join(dirname(createRequire(__filename).resolve("node-pty/package.json")), "lib", "conpty_console_list_agent.js");
   } catch {
     return Promise.resolve(null);
   }

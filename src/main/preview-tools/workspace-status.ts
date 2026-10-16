@@ -54,7 +54,12 @@ async function callerWorkspace(params: Record<string, unknown>, host: PreviewToo
     };
   }
   const paneId = text(params, "callerPaneId");
-  const label = (paneId ? workspaceStatusService().agentLabelForPane(paneId) : null) ?? workspaceStatusAgentLabel(client);
+  // Outside a chat, client "cora" is the in-process bridge that `cora tool`
+  // (a shell, aider, a script) and a pane's Pi share, never Cora itself, so
+  // it names no agent; the pane's own agent, when Codara knows it, does.
+  const fromClient = workspaceStatusAgentLabel(client);
+  const label =
+    (paneId ? workspaceStatusService().agentLabelForPane(paneId) : null) ?? (fromClient === "Cora" ? "Agent" : fromClient);
   return { workspaceId, by: { kind: "agent", label } };
 }
 

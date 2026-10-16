@@ -389,7 +389,7 @@ function HostForm({
             style={{ flex: 1, minWidth: 0 }}
             value={identityFile}
             onChange={(e) => setIdentityFile(e.target.value)}
-            placeholder="~/.ssh/id_ed25519 — leave blank to use defaults or a password"
+            placeholder="~/.ssh/id_ed25519, leave blank to use defaults or a password"
           />
           <button type="button" className="spark-btn" onClick={openKeyPicker}>
             Choose…

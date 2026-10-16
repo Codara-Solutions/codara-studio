@@ -481,6 +481,82 @@ async function main() {
     }
   });
 
+  check("a tip's control counts only where the person can see it", () => {
+    const saved = ["document", "window"].map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]);
+    const box = (left, top, width = 20, height = 20) => ({ left, top, width, height, right: left + width, bottom: top + height });
+    const cover = { contains: () => false, closest: () => null };
+    const element = (rect, covered = false) => {
+      const self = { covered, closest: () => null, getBoundingClientRect: () => rect, contains: (other) => other === self };
+      return self;
+    };
+    const withDom = (elements, fn) => {
+      globalThis.window = { innerWidth: 1000, innerHeight: 800 };
+      globalThis.document = {
+        querySelectorAll: () => elements,
+        elementsFromPoint: (x, y) => {
+          const hit = elements.find((candidate) => {
+            const rect = candidate.getBoundingClientRect();
+            return !candidate.covered && x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
+          });
+          return [hit ?? cover];
+        },
+      };
+      return fn();
+    };
+    try {
+      const visible = () => element(box(100, 100));
+      const zoom = 'button[title^="Zoom pane"]';
+      assert.equal(withDom([visible(), element(box(400, 100))], () => dom.conditionMet(zoom, 2)), true, "two panes side by side");
+      // A pane in a background tab keeps its toolbar in the DOM with no box.
+      const hidden = element(box(0, 0, 0, 0));
+      assert.equal(withDom([visible(), hidden], () => dom.conditionMet(zoom, 2)), false, "one pane here, one in another tab");
+      assert.equal(withDom([visible(), hidden], () => dom.conditionMet(zoom, 1)), true);
+      assert.equal(withDom([visible(), element(box(400, 100), true)], () => dom.conditionMet(zoom, 2)), false, "covered");
+      assert.equal(withDom([visible(), element(box(2000, 100))], () => dom.conditionMet(zoom, 2)), false, "outside the window");
+      assert.equal(withDom([], () => dom.conditionMet(zoom, 1)), false);
+    } finally {
+      for (const [name, descriptor] of saved) {
+        if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+        else delete globalThis[name];
+      }
+    }
+  });
+
+  check("zoom is offered beside another pane, and the worktree tour points at a git workspace", () => {
+    const zoom = FEATURE_CATALOG.find((entry) => entry.id === "zoom-pane");
+    assert.deepEqual(tipConditions(zoom)[0], { selector: 'button[title^="Zoom pane"]', atLeast: 2 });
+    const worktree = FEATURE_CATALOG.find((entry) => entry.id === "isolated-worktree");
+    assert.match(worktree.tip.tour[0].target, /^\[data-workspace-id\]:has\(\[title\^="On branch "\]\) /);
+  });
+
+  check("an open button opens a Settings page that exists", () => {
+    const index = read(path.join(RENDERER, "components", "settings", "settings-index.ts"));
+    const union = /export type SettingsTab =([^;]+);/.exec(index)?.[1] ?? "";
+    const tabs = new Set([...union.matchAll(/"([\w-]+)"/g)].map((match) => match[1]));
+    assert.ok(tabs.size > 3, "Settings tabs were read");
+    // A listener names the event itself or a constant set to it (the
+    // worktree cleanup host listens through OPEN_WORKTREE_CLEANUP_EVENT).
+    const sources = rendererSources();
+    const listens = (event) => {
+      if (sources.includes(`addEventListener("${event}"`)) return true;
+      const names = [...sources.matchAll(/const (\w+) = "([^"]+)"/g)].filter((match) => match[2] === event).map((match) => match[1]);
+      return names.some((name) => sources.includes(`addEventListener(${name},`));
+    };
+    for (const entry of FEATURE_CATALOG.filter((item) => item.tip?.open)) {
+      const { event, detail } = entry.tip.open;
+      assert.ok(listens(event), `${entry.id}: nothing listens to ${event}`);
+      if (event === "spark:open-settings") assert.ok(tabs.has(detail?.section), `${entry.id}: no Settings page ${detail?.section}`);
+    }
+  });
+
+  check("the host reads the window once per calm period, not on every poll", () => {
+    const host = read(path.join(RENDERER, "components", "feature-tips", "FeatureTipsHost.tsx"));
+    const look = /const activity = Math\.max\(lastKeyAt\.current, lastPointerAt\.current\);\s*if \(lookedAfter\.current === activity\) return;\s*lookedAfter\.current = activity;\s*if \(blockingSurfaceOpen\(\)/;
+    assert.match(host, look, "the look is skipped until new input, before any DOM read");
+    const calm = host.indexOf("isCalmMoment({");
+    assert.ok(calm >= 0 && calm < host.search(look), "the cheap checks come first");
+  });
+
   check("pending tips skip used and shown features, fresh ones first", () => {
     let state = emptyFeatureTipsState();
     const all = pendingTips(state);
@@ -534,6 +610,65 @@ async function main() {
       placeBeside({ ...base, target: tools, avoid: [{ left: 0, top: 0, width: 1360, height: 860 }] }),
       null,
     );
+  });
+
+  check("the tour coach never enters the title bar or the status bar", () => {
+    const viewport = { width: 1360, height: 860 };
+    const size = { width: 340, height: 150 };
+    const base = { size, viewport, avoid: [], gap: 14, margin: 12, topInset: 30, bottomInset: 24 };
+    // A rail button near the top: beside it, the card is pushed below the
+    // title bar instead of clamping to 12 px over its drag region.
+    const railButton = { left: 10, top: 40, width: 20, height: 20 };
+    const right = placeBeside({ ...base, target: railButton, preferred: "right" });
+    assert.equal(right.placement, "right");
+    assert.equal(right.top, 30);
+    assert.equal(placeBeside({ ...base, topInset: 0, target: railButton, preferred: "right" }).top, 12, "no title bar: the margin");
+    // The bell sits in the title bar; below it is still fine.
+    const bell = { left: 1300, top: 4, width: 24, height: 22 };
+    const below = placeBeside({ ...base, target: bell, preferred: "bottom" });
+    assert.equal(below.placement, "bottom");
+    assert.ok(below.top >= 30);
+    // Above a control whose top edge is just under the title bar there is no room.
+    const tab = { left: 600, top: 120, width: 80, height: 24 };
+    assert.equal(placeBeside({ ...base, target: tab, preferred: "top" }).placement, "bottom");
+    // The status chip: above it, clear of the status bar.
+    const chip = { left: 1060, top: 838, width: 180, height: 20 };
+    const above = placeBeside({ ...base, target: chip, preferred: "bottom" });
+    assert.equal(above.placement, "top");
+    assert.ok(above.top + size.height <= 860 - 24);
+    // A side placement that cannot fit between the bands is skipped, not squeezed over one.
+    const short = { ...base, viewport: { width: 1360, height: 200 } };
+    assert.equal(placeBeside({ ...short, target: { left: 600, top: 90, width: 20, height: 20 }, preferred: "right" }), null);
+    const tour = read(path.join(RENDERER, "components", "feature-tips", "FeatureTour.tsx"));
+    assert.match(tour, /placeBeside\(\{[\s\S]*?topInset: insets\.top,\s*bottomInset: insets\.bottom,/, "the tour passes the bands");
+  });
+
+  check("a popover without a dialog or menu role holds tips back", () => {
+    const saved = ["document", "window"].map((name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)]);
+    const popover = { closest: () => null, getBoundingClientRect: () => ({ left: 0, top: 0, width: 200, height: 120 }) };
+    try {
+      globalThis.window = { innerWidth: 1000, innerHeight: 800 };
+      globalThis.document = {
+        querySelectorAll: (selector) => (selector.split(/,\s*/).includes(".spark-overlay-surface") ? [popover] : []),
+      };
+      assert.equal(dom.blockingSurfaceOpen(), true, "the comment dock and other glass layers count as open");
+      globalThis.document = { querySelectorAll: () => [] };
+      assert.equal(dom.blockingSurfaceOpen(), false);
+    } finally {
+      for (const [name, descriptor] of saved) {
+        if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+        else delete globalThis[name];
+      }
+    }
+  });
+
+  check("a tip waits for the window to be in front, and coming back to it counts as busy", () => {
+    const host = read(path.join(RENDERER, "components", "feature-tips", "FeatureTipsHost.tsx"));
+    const focus = host.indexOf("!document.hasFocus()");
+    assert.ok(focus >= 0, "an unfocused window gets no tip");
+    assert.ok(focus < host.indexOf("blockingSurfaceOpen()"), "checked before any DOM read");
+    assert.match(host, /window\.addEventListener\("focus", onKey\);/);
+    assert.match(host, /window\.removeEventListener\("focus", onKey\);/);
   });
 
   await serial("the store keeps every write in order and survives a corrupt file", async () => {
@@ -628,6 +763,7 @@ async function main() {
     assert.doesNotMatch(css, /backdrop-filter/);
     const zIndex = Number(/\.onboarding-coach\.feature-tour \{[^}]*?z-index: (\d+);/s.exec(css)?.[1]);
     assert.ok(zIndex > 0 && zIndex < 50, "below menus (50) and dialogs (100+)");
+    assert.match(css, /\.onboarding-coach\.feature-tour \{[^}]*-webkit-app-region: no-drag;/s, "never a window drag handle");
     for (const file of ["FeatureTipCard.tsx", "FeatureTour.tsx"]) {
       assert.match(
         read(path.join(RENDERER, "components", "feature-tips", file)),

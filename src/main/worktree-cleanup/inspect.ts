@@ -65,6 +65,9 @@ export interface WorktreeCleanupDeps {
   listRuns(): Promise<RunState[]>;
   sessionCwd(paneId: string): string | null;
   sessionsUnderCwd(dir: string): string[];
+  // The shell pid of a terminal pane, so a pane counted as an open terminal
+  // is not counted again as a process.
+  sessionPid?(paneId: string): number | null;
   // Null when the renderer did not answer.
   listRendererTerminals(): Promise<RendererTerminal[] | null>;
   // Null when the platform offers no process scan.
@@ -427,7 +430,17 @@ export async function usageOf(
     }
   }
 
-  const processes = ctx.processes?.get(real) ?? ctx.processes?.get(path) ?? [];
+  // The shell of a pane counted above is that open terminal. Any other
+  // shell found inside (a terminal opened elsewhere that moved here with
+  // cd) is seen only by the process scan, and counts as a process.
+  const counted = new Set<number>();
+  for (const pane of panes) {
+    const pid = deps.sessionPid?.(pane) ?? null;
+    if (pid !== null) counted.add(pid);
+  }
+  const processes = (ctx.processes?.get(real) ?? ctx.processes?.get(path) ?? []).filter(
+    (entry) => !counted.has(entry.pid),
+  );
   if (processes.length) uses.push({ kind: "process", label: count(processes.length, "running process", "running processes") });
 
   if (deps.appPaths().some((appPath) => appPath && isAtOrUnder(appPath, real))) {

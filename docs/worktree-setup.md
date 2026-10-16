@@ -71,7 +71,11 @@ Saving rewrites both files; comments in them are not kept.
    support it (APFS on macOS, Btrfs and XFS on Linux) the copy is a cheap
    clone. Copies stop at 1 GB or 20,000 files; the rest is listed as
    skipped, with a hint to link big folders instead. Symlinks inside a copied folder are recreated
-   only when they point inside the repository. A link that git does not
+   only when they point inside the repository and inside the worktree. The
+   worktree's own git is then asked about every copy: on a branch whose
+   `.gitignore` does not list a copied file (an older or a remote branch),
+   the copy is taken out again and listed as skipped, so a `.env` never
+   waits there for `git add -A`. A link that git does not
    ignore is added to the repository's `info/exclude` under a Codara comment,
    so it never shows up as a change; when that fails, the link is taken out
    again rather than left for `git add -A` to commit. Links are recorded
@@ -82,7 +86,9 @@ Saving rewrites both files; comments in them are not kept.
 4. It runs the setup command in the worktree, then your own command (see
    below). Each runs without a terminal and without input, in its own
    process group (on Windows, Stop ends its whole process tree), and is
-   stopped after 45 minutes. At most two setups run commands at
+   stopped after 45 minutes. A line that leaves a process running in the
+   background does not hold setup: the step ends when the command itself
+   exits, and the log says that something it started is still running. At most two setups run commands at
    the same time; the others wait their turn.
 
 The commands see these variables:
@@ -96,8 +102,12 @@ The commands see these variables:
 
 On macOS and Linux the setup command runs as a `bash` script (`sh` when
 there is no bash) with `set -e`. On Windows each line runs through
-`cmd /d /s /c` as written, in its own `cmd`, so a `cd` or a `set` does not
-carry over to the next line. Your own command runs as a script in your
+all lines of a step run in one `cmd` script (a `.cmd` file with `@echo off`),
+so a `cd` or a `set` carries over to the next line, and the first line that
+fails stops the step. Lines that start with a program such as `npm` are
+called with `call`; a line that chains one after a builtin
+(`cd app && npm ci`) should be split into two lines. In that script `%%` is
+`%` and a `for` variable is written `%%i`. Your own command runs as a script in your
 default shell (Settings > Terminal > **Default shell**; Git Bash on Windows
 when it is the default), not in a terminal, so interactive startup files
 such as `.zshrc` are not read; the `PATH` is the one a login shell gets.
@@ -148,7 +158,8 @@ Every setup Codara starts shows in a small list at the bottom right: running,
 failed or stopped. A setup that succeeds shows **Ready** for a moment and
 leaves; one that fails also raises a notification. **Log** opens the output
 as it arrives, with what was copied, linked and skipped and the state of
-each command. **Stop** ends the running command and everything it started;
+each command. **Stop** ends the running command and everything it started
+(what ignores the polite signal is killed after three seconds);
 **Run again** starts over with the current files and your current command.
 
 In the create dialog, **Run setup commands** (on by default) turns off the

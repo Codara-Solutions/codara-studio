@@ -25,7 +25,7 @@ import {
 } from "@shared/types";
 import { appendHistory, appendSkip, getJob, injectTriggerNote, listJobs, patchJob } from "./scheduler";
 import { normalizeAutomationPrecheck, precheckSkipDetail } from "@shared/automation-catchup";
-import { runAutomationPrecheck } from "./automation-precheck";
+import { PRECHECK_STOPPED_ERROR, runAutomationPrecheck, stopRunningPrechecks } from "./automation-precheck";
 import { automationSourceKey, publish, rearm, settleAutomationQuestions } from "../notify";
 import { appendEvent, subscribeToEvents } from "./event-log";
 import { nextReadyWave, planLoomLayers, renderNodePrompt, sinkNodeIds, upstreamOf } from "./loom-graph";
@@ -222,6 +222,12 @@ function precheckApplies(job: ScheduledJob, source: AutomationContinuationSource
   return (source === "trigger" || source === "cadence") && normalizeAutomationPrecheck(job.precheck) !== undefined;
 }
 
+// The sources that start a fresh cycle of a finalized loop (the stopped-loop
+// branch of startIteration lists the same three).
+function revivesStoppedLoop(source: AutomationContinuationSource): boolean {
+  return source === "trigger" || source === "continuous" || source === "manual";
+}
+
 // Run the precheck for the pass about to start. True means go ahead. A "no"
 // is recorded as a skip (no run, no worker, no tokens), and a cadence loop
 // keeps its rhythm: the next pass is scheduled as if this one had run.
@@ -253,6 +259,8 @@ async function passesPrecheck(id: string, job: ScheduledJob, opts: StartIteratio
   const cadenceWaiting = runner.cadenceWaiting === true;
   runner.cadenceWaiting = false;
   if (result.passed) return true;
+  // Codara is quitting: that is not the check's answer, so nothing to record.
+  if (result.error === PRECHECK_STOPPED_ERROR) return false;
   await appendSkip(id, {
     reason: "precheck",
     detail: precheckSkipDetail(result, precheck.timeoutSeconds),
@@ -279,9 +287,16 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
   // Before the stopped-loop reset below: a skipped fire leaves the last
   // cycle's state exactly as it was.
   if (precheckApplies(job, opts.source)) {
+    // A loop-internal tick never revives a finalized loop (below), so it must
+    // not spend a check or record a skip either.
+    if (job.state.status === "stopped" && !revivesStoppedLoop(opts.source)) return;
+    const stoppedBefore = job.state.status === "stopped";
     if (!(await passesPrecheck(id, job, opts))) return;
     job = await getJob(id);
     if (!job || !job.enabled || job.state.status === "paused") return;
+    // Stopped while its check ran: the user's Stop came after this fire, so
+    // the fire must not start a fresh cycle the moment the check passes.
+    if (!stoppedBefore && job.state.status === "stopped") return;
   }
   if (job.state.status === "stopped") {
     // A finalized loop is NOT dead to its trigger: a cron/interval/folder fire
@@ -985,6 +1000,8 @@ export function teardownAllLoops(): void {
   }
   loops.clear();
   watchedRuns.clear();
+  // A check in its own process group would outlive the app.
+  stopRunningPrechecks();
 }
 
 // onFinishOf chain registry (called from scheduler.armJob).
@@ -1732,7 +1749,7 @@ async function finalize(
       kind: failed ? "automation.failed" : "automation.finished",
       sourceKey: automationSourceKey(id),
       tone: failed ? "danger" : "success",
-      title: failed ? "Automation — failed" : "Automation — finished",
+      title: failed ? "Automation failed" : "Automation finished",
       body: failed
         ? `“${finalJob.name}” stopped after ${passes} (${reason}).`
         : `“${finalJob.name}” finished after ${passes} (${reason}).`,

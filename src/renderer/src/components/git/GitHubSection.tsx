@@ -466,7 +466,7 @@ export default function GitHubSection({
         >
           <RoomTab
             label="Save"
-            title="Save your work locally — sync, commit, split"
+            title="Save your work locally: sync, commit, split"
             active={activeRoom === "save"}
             count={dirtyCount}
             onClick={() => setRoom("save")}
@@ -553,7 +553,7 @@ export default function GitHubSection({
                     flex: "0 0 auto",
                   }}
                 />
-                All clear — no open pull requests or issues.
+                All clear. No open pull requests or issues.
               </div>
             ) : null}
             {queue ? (
@@ -667,7 +667,7 @@ function publishBlockReason(
     status.staged.length + status.unstaged.length === 0 &&
     status.ahead === 0
   ) {
-    return "No new work to share yet — everything is already on GitHub.";
+    return "No new work to share yet. Everything is already on GitHub.";
   }
   return null;
 }
@@ -1613,14 +1613,14 @@ function JourneyTimeline({
         title: dirty > 0 ? "New edits not shared yet" : "Work saved",
         detail:
           dirty > 0
-            ? `${dirty} file${dirty === 1 ? "" : "s"} changed since sharing — save and push to update the PR`
+            ? `${dirty} file${dirty === 1 ? "" : "s"} changed since sharing. Save and push to update the PR`
             : "everything is committed",
       },
       {
         key: "shared",
         state: "done",
         title: `Shared as PR #${pullRequest.number}`,
-        detail: pullRequest.isDraft ? "draft — mark it ready below" : "open for review",
+        detail: pullRequest.isDraft ? "draft, mark it ready below" : "open for review",
       },
       {
         key: "checks",
@@ -1640,7 +1640,7 @@ function JourneyTimeline({
         title: "Merge",
         detail:
           checksDone && !pullRequest.isDraft
-            ? "ready — review and merge below"
+            ? "ready, review and merge below"
             : "after checks pass",
       },
     ];
@@ -1652,7 +1652,7 @@ function JourneyTimeline({
         title: dirty > 0 ? "Save your work" : "Work saved",
         detail:
           dirty > 0
-            ? `${dirty} file${dirty === 1 ? "" : "s"} changed — commit in the Save room`
+            ? `${dirty} file${dirty === 1 ? "" : "s"} changed. Commit in the Save room`
             : `${ahead} commit${ahead === 1 ? "" : "s"} ready to share`,
       },
       {
@@ -1751,7 +1751,7 @@ function ShareButton({ onClick }: { onClick: () => void }): React.ReactElement {
   return (
     <button
       type="button"
-      title="Save your changes, send them to GitHub, and open a pull request for review — Codara drafts the summary for you"
+      title="Save your changes, send them to GitHub, and open a pull request for review. Codara drafts the summary for you"
       onClick={onClick}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => {

@@ -300,6 +300,10 @@ function WorkspaceRail(props: RailProps) {
   // of overhanging the section stacked below (Source Control / Explorer).
   const wsScrollRef = useRef<HTMLDivElement | null>(null);
   const [railView, setRailView] = useRailView();
+  // A workspace being named (a new one, a rename) is named in the list.
+  useEffect(() => {
+    if (props.editingId) setRailView("workspaces");
+  }, [props.editingId, setRailView]);
   // ── Rail reorder ─────────────────────────────────────────────────────────
   // The gesture is owned by the LIST, not by the individual rows — the same
   // shape the tab strip uses. One hit-test against one cached geometry, so
@@ -2183,7 +2187,10 @@ function WorkspaceRow({
       onDragEnd={onRowDragEnd}
       onClick={editing ? undefined : onActivate}
       onContextMenu={(event) => {
-        if (editing) return;
+        // The row's popovers are portalled out of it, but React still
+        // bubbles their events here: a right-click in the icon picker must
+        // not swap it for the actions menu.
+        if (editing || !(event.target instanceof Node) || !event.currentTarget.contains(event.target)) return;
         // A right-click opens the row's "…" actions, where status lives too.
         event.preventDefault();
         event.stopPropagation();
@@ -2257,7 +2264,7 @@ function WorkspaceRow({
                 ? "This workspace's shade follows its folder color and position"
                 : "Change color"
               : working
-                ? `${ws.name} — agent working`
+                ? `${ws.name}, agent working`
                 : undefined
           }
           style={{
@@ -2388,7 +2395,7 @@ function WorkspaceRow({
               // progress), and deleting it on the app's own initiative is not
               // undoable. The strike says "this path is gone" without deciding
               // anything on the user's behalf.
-              title={missing ? `${ws.name} — folder not found at ${ws.cwd}` : ws.name}
+              title={missing ? `${ws.name}: folder not found at ${ws.cwd}` : ws.name}
               style={{
                 fontSize: 12,
                 fontWeight: 600,

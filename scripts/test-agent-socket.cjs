@@ -802,6 +802,7 @@ async function main() {
       ["worktree.create", { runId: "run-untrusted-pr", callerRole: "manager" }],
       ["worktree.list", { runId: "run-untrusted-pr", callerRole: "manager" }],
       ["worktree.remove", { runId: "run-untrusted-pr", callerRole: "manager", workspaceId: "ws-x" }],
+      ["worktree.setup", { runId: "run-untrusted-pr", callerRole: "manager" }],
     ]) {
       const denied = await rpc(handshake, method, params);
       check(
@@ -869,6 +870,24 @@ async function main() {
       );
     }
     fs.rmSync(shareDir, { recursive: true, force: true });
+    // The workspace status passes the same gates in the real app: an
+    // imported pull request cannot write the rail, and a caller outside every
+    // pane gets an answer, never the workspace on screen.
+    const untrustedWorkspaceStatus = await rpc(handshake, "workspace.status", { runId: "run-untrusted-pr", status: "done" });
+    check(
+      "untrusted PR socket policy blocks workspace.status",
+      Boolean(untrustedWorkspaceStatus.error) && /unavailable|pull-request/i.test(untrustedWorkspaceStatus.error?.message ?? ""),
+      JSON.stringify(untrustedWorkspaceStatus).slice(0, 180),
+    );
+    const placelessStatus = await rpc(handshake, "workspace.status", { status: "done", callerPid: 1 });
+    check(
+      "workspace.status outside a Codara pane changes nothing and is not an error",
+      !placelessStatus.error &&
+        placelessStatus.result?.updated === false &&
+        placelessStatus.result?.reason === "not_in_codara_workspace" &&
+        !fs.existsSync(path.join(HOME, "workspace-status.json")),
+      JSON.stringify(placelessStatus).slice(0, 180),
+    );
     // The remember budget stops write loops within one turn; it does not cap
     // a chat's whole life.
     fabricateRun("run-remember-budget", {
@@ -1103,6 +1122,16 @@ async function main() {
       "automation.create rejects a precheck without a command string",
       Boolean(precheckRejected.error) && /precheck must be/i.test(precheckRejected.error?.message ?? ""),
       JSON.stringify(precheckRejected.error ?? precheckRejected.result).slice(0, 200),
+    );
+    const longRejected = await rpc(handshake, "automation.create", {
+      ...createBase,
+      worker: okWorker,
+      precheck: { command: `test -f ${"x".repeat(4100)}` },
+    });
+    check(
+      "automation.create refuses an over-long precheck command instead of cutting it",
+      Boolean(longRejected.error) && /longer than 4000 characters/i.test(longRejected.error?.message ?? ""),
+      JSON.stringify(longRejected.error ?? longRejected.result).slice(0, 200),
     );
     const missedRejected = await rpc(handshake, "automation.create", {
       ...createBase,

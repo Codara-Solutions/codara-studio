@@ -54,6 +54,8 @@ export default function FeatureTipsHost({ onboardingOpen, hasWorkspaces }: Props
   const startedAt = useRef(Date.now());
   const lastKeyAt = useRef(0);
   const lastPointerAt = useRef(0);
+  // The input a calm period follows, once the window was read in it.
+  const lookedAfter = useRef<number | null>(null);
 
   if (onboardingOpen) onboardingSeen.current = true;
 
@@ -141,10 +143,14 @@ export default function FeatureTipsHost({ onboardingOpen, hasWorkspaces }: Props
     window.addEventListener("keydown", onKey, { capture: true, passive: true });
     // The shortcut dispatcher stops a chord before this listener sees it.
     window.addEventListener(COMMAND_RAN_EVENT, onKey);
+    // Coming back to the window (Alt+Tab, Cmd+Tab) is about to be typing:
+    // the key that switched windows never reaches this one.
+    window.addEventListener("focus", onKey);
     for (const name of pointerEvents) window.addEventListener(name, onPointer, { capture: true, passive: true });
     return () => {
       window.removeEventListener("keydown", onKey, { capture: true });
       window.removeEventListener(COMMAND_RAN_EVENT, onKey);
+      window.removeEventListener("focus", onKey);
       for (const name of pointerEvents) window.removeEventListener(name, onPointer, { capture: true });
     };
   }, [scheduling]);
@@ -156,8 +162,19 @@ export default function FeatureTipsHost({ onboardingOpen, hasWorkspaces }: Props
       const current = stateRef.current;
       const now = Date.now();
       if (!current || !tipDue(current, now, timing, shownThisSession.current)) return;
-      if (document.visibilityState !== "visible") return;
+      // A window behind another app is not being looked at: a tip there
+      // would only be found later, already counted as shown.
+      if (document.visibilityState !== "visible" || !document.hasFocus()) return;
       if (!isCalmMoment({ now, startedAt: startedAt.current, lastKeyAt: lastKeyAt.current, lastPointerAt: lastPointerAt.current, timing })) return;
+      // The window is read once per calm period. What a tip waits for (its
+      // control on screen, a dialog closed, focus out of a page) changes when
+      // the person acts, so after a look that found nothing the next one
+      // waits for new input. A tip whose control is never on screen stays
+      // pending for good, so without this a session would query the DOM
+      // every few seconds for as long as it sits idle.
+      const activity = Math.max(lastKeyAt.current, lastPointerAt.current);
+      if (lookedAfter.current === activity) return;
+      lookedAfter.current = activity;
       if (blockingSurfaceOpen() || mayBeTyping()) return;
       const inUse = usage.inUseNow();
       const found: { tip: RenderedTip | null } = { tip: null };
@@ -187,10 +204,13 @@ export default function FeatureTipsHost({ onboardingOpen, hasWorkspaces }: Props
     };
   }, [scheduling, boot, render, usage]);
 
-  // Tips turned off elsewhere (Settings) take the one on screen with them.
+  // Tips turned off elsewhere (Settings) take the one on screen with them,
+  // and so does using the feature the tip is about: it has done its job.
+  const tipId = tip?.entry.id;
   useEffect(() => {
-    if (state && !state.enabled) setTip(null);
-  }, [state]);
+    if (!state) return;
+    if (!state.enabled || (tipId !== undefined && state.used[tipId] !== undefined)) setTip(null);
+  }, [state, tipId]);
 
   const settle = useCallback((id: string, outcome: FeatureTipOutcome) => {
     setTip(null);

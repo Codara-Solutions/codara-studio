@@ -293,6 +293,17 @@
   color: var(--ink);
   font-weight: 650;
 }
+/* Sizes landed since this sort; the rows keep their place until a click. */
+.wtc-sort.is-stale::after {
+  content: "";
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-left: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  vertical-align: middle;
+}
 
 .wtc-row-title {
   display: flex;

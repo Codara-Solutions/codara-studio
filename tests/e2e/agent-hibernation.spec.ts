@@ -7,7 +7,7 @@ import { delimiter, join } from "node:path";
 // Agent hibernation end to end: a finished Claude pane in a background
 // workspace is stopped after the idle time and resumed with `--resume` when
 // the user opens its workspace again, or on the next launch when Codara quit
-// while it slept. A pane pinned "Keep awake" and a pane whose agent runs a
+// while it slept. A pane pinned "Keep running" and a pane whose agent runs a
 // command (a dev server) are never stopped.
 //
 // The fake `claude` is a Node script so the process census sees it the way
@@ -145,14 +145,50 @@ test("an agent restored into a background workspace at launch can sleep too", as
   }
 });
 
-test("Keep awake stops a pane from sleeping", async () => {
+test("a pane asleep when the window reloads stays asleep and resumes when opened", async () => {
+  test.setTimeout(120_000);
+  const fixture = await prepareFixture("plain");
+  const { app, page, logs } = await launch(fixture);
+  try {
+    await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 20_000 });
+    const [first] = await waitForLaunches(fixture, 1);
+    await page.locator('[data-workspace-id="ws-b"]').evaluate((row) => (row as HTMLElement).click());
+    const sleepingChip = page.locator(`[data-terminal-pane-id="${PANE_ID}"] [data-testid="pane-sleeping-chip"]`);
+    await expect(sleepingChip, logs.join("\n")).toHaveAttribute("aria-label", "CLAUDE sleeping", {
+      timeout: 25_000,
+    });
+    await expect.poll(() => isAlive(first.pid), { timeout: 10_000 }).toBe(false);
+
+    // With session restore off, nothing but main's sleeping record can bring
+    // the agent back after the reload; the pane's own mark and its xterm are
+    // gone with it, so main also hands the fresh view the pane's output.
+    await page.evaluate(() =>
+      (window as unknown as {
+        spark: { preferences: { set: (key: string, value: boolean) => Promise<unknown> } };
+      }).spark.preferences.set("restoreAgentSessions", false),
+    );
+    await page.reload();
+    await page.waitForLoadState("domcontentloaded");
+    await page.locator('[data-workspace-id="ws-a"]').evaluate((row) => (row as HTMLElement).click());
+    const launches = await waitForLaunches(fixture, 2);
+    expect(launches[1].args).toEqual(expect.arrayContaining(["--resume", SESSION_ID]));
+    await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 20_000 });
+    const mounted = logs.find((line) => line.includes(`pane=${PANE_ID} mounts asleep`)) ?? "";
+    expect(Number(/\((\d+) bytes of output kept\)/.exec(mounted)?.[1] ?? 0), logs.join("\n")).toBeGreaterThan(0);
+  } finally {
+    await app.close();
+    await cleanup(fixture);
+  }
+});
+
+test("Keep running stops a pane from sleeping", async () => {
   test.setTimeout(90_000);
   const fixture = await prepareFixture("plain");
   const { app, page, logs } = await launch(fixture);
   try {
     await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 20_000 });
     const [first] = await waitForLaunches(fixture, 1);
-    const pin = page.locator(`[data-terminal-pane-id="${PANE_ID}"]`).getByRole("button", { name: "Keep awake" });
+    const pin = page.locator(`[data-terminal-pane-id="${PANE_ID}"]`).getByRole("button", { name: "Keep running" });
     await expect(pin).toHaveAttribute("aria-pressed", "false");
     await pin.evaluate((button) => (button as HTMLElement).click());
     await expect(pin).toHaveAttribute("aria-pressed", "true");

@@ -11,7 +11,8 @@
 // - a TUI that repaints its footer forever cannot push real history out;
 // - files are 0600 in a 0700 folder, written debounced, bounded per pane and
 //   in total, deleted with the pane, when stale, and when the setting is off;
-// - a restore happens once per pane per session, never over a live PTY, and
+// - a restore happens until the pane's process starts (a remount before that
+//   gets it again), never over a live PTY or one that ran this session, and
 //   what it replayed is still there after the next restart.
 //
 //   node scripts/test-terminal-scrollback-store.cjs
@@ -23,6 +24,7 @@ const assert = require("node:assert/strict");
 const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
+const RESTORED_OUTPUT_MARKER_TEXT = "[Restored from before Codara restarted]";
 
 let pass = 0;
 function check(name, cond, detail) {
@@ -315,14 +317,28 @@ async function main() {
     check("the replay ends with the marker line", replay.text.endsWith(storeMod.RESTORED_OUTPUT_MARKER));
     check("the replay is inert", unsafeSequence(replay.text.slice(0, -storeMod.RESTORED_OUTPUT_MARKER.length)) === null);
     check("the last frame is in the replay", replay.text.includes("esc to interrupt"));
-    check("a pane replays once per session", (await restarted.restoreReplay("pane-a")) === null);
+    // A pane that unmounts between asking and spawning (a workspace switch
+    // while the app opens) lost the xterm the replay went to: the next mount
+    // gets the same text again.
+    check(
+      "a pane remounted before its process starts gets the replay again",
+      (await restarted.restoreReplay("pane-a", { maxLines: 2000 }))?.text === replay.text,
+    );
     check("force replays again (hibernation)", (await restarted.restoreReplay("pane-a", { force: true }))?.text === replay.text);
 
     // The new session's output lands below the replay, and both survive the
     // next restart in order.
     restarted.track(["pane-a"]);
     next.state.sessions.add("pane-a");
+    check("once its process runs, a pane gets no replay", (await restarted.restoreReplay("pane-a")) === null);
     next.state.feed("pane-a", "$ echo second session\r\nsecond session\r\n$ ");
+    next.state.sessions.delete("pane-a");
+    check(
+      "nor after that process ended (only force replays it then)",
+      (await restarted.restoreReplay("pane-a")) === null &&
+        (await restarted.restoreReplay("pane-a", { force: true })) !== null,
+    );
+    next.state.sessions.add("pane-a");
     await restarted.flush();
     restarted.dispose();
     const third = fakeDeps();
@@ -337,6 +353,107 @@ async function main() {
     check("forgetting a pane deletes its file", !fs.existsSync(fileFor("pane-a")));
     check("a forgotten pane has nothing to replay", (await again.restoreReplay("pane-a", { force: true })) === null);
     again.dispose();
+  }
+
+  // ── Windows: the new ConPTY session owns the screen ───────────────────
+  // ConPTY clears the screen on its first paint and places PSReadLine's
+  // absolute cursor moves as if the session began at the top left. The replay
+  // must be in the scrollback by then, in the pane and in main's record.
+  {
+    const first = fakeDeps();
+    const recorder = new storeMod.TerminalScrollbackStore(first.deps);
+    await recorder.init();
+    recorder.track(["win"]);
+    first.state.sessions.add("win");
+    first.state.feed("win", "PS C:\\work> dir\r\n" + Array.from({ length: 6 }, (_, i) => `file ${i}.txt\r\n`).join("") + "PS C:\\work> ");
+    await recorder.flush();
+    recorder.dispose();
+
+    const rows = 10;
+    const conptyFirstPaint = "\x1b[?25l\x1b[2J\x1b[m\x1b[HPS C:\\work> \x1b[?25h";
+    const psReadLineRedraw = "\x1b[1;13Hgit status";
+    let size = { cols: 80, rows };
+    const win = fakeDeps({ newSessionOwnsScreen: true, dimensions: () => size });
+    const store = new storeMod.TerminalScrollbackStore(win.deps);
+    await store.init();
+    const replay = await store.restoreReplay("win", { rows });
+    check(
+      "on Windows the replay ends by handing the screen over",
+      !!replay && replay.text.endsWith(storeMod.RESTORED_OUTPUT_MARKER + storeMod.handOverScreen(rows)),
+      JSON.stringify(replay?.text.slice(-80)),
+    );
+
+    // The pane: replay, then the new session's first paint and a redraw.
+    const pane = await parse([replay.text], 80, rows);
+    const buffer = pane.buffer.active;
+    let blank = true;
+    for (let row = buffer.baseY; row < buffer.baseY + rows; row += 1) {
+      if ((buffer.getLine(row)?.translateToString(true) ?? "").trim()) blank = false;
+    }
+    check("the replay sits above a blank screen, cursor top left", blank && buffer.cursorX === 0 && buffer.cursorY === 0);
+    await new Promise((resolve) => pane.write(conptyFirstPaint + psReadLineRedraw, resolve));
+    const shown = historyOf(pane);
+    const markerAt = shown.indexOf(RESTORED_OUTPUT_MARKER_TEXT);
+    check(
+      "the new session's first paint leaves every replayed line in place",
+      markerAt > 0 &&
+        shown.slice(0, markerAt).filter((line) => /^file \d\.txt$/.test(line)).length === 6 &&
+        shown[markerAt + 1] === "PS C:\\work> git status",
+      JSON.stringify(shown),
+    );
+    pane.dispose();
+
+    // Main's record sees the same bytes; the pane is fitted taller before
+    // the save (a hidden workspace shown later), and the next restart still
+    // reads replay, marker, new session, in order.
+    store.track(["win"]);
+    win.state.sessions.add("win");
+    win.state.feed("win", conptyFirstPaint);
+    size = { cols: 80, rows: 30 };
+    win.state.feed("win", psReadLineRedraw + "\r\n");
+    await store.flush();
+    store.dispose();
+    const next = new storeMod.TerminalScrollbackStore(fakeDeps({ newSessionOwnsScreen: true }).deps);
+    const again = await next.restoreReplay("win", { rows: 30 });
+    const lines = (again?.text ?? "").replace(/\x1b\[[0-9;]*m/g, "").split("\r\n");
+    const firstMarker = lines.indexOf(RESTORED_OUTPUT_MARKER_TEXT);
+    check(
+      "the record keeps the replay whole below a Windows session, also after a resize",
+      firstMarker > 0 &&
+        lines.slice(0, firstMarker).filter((line) => /^file \d\.txt$/.test(line)).length === 6 &&
+        lines[firstMarker + 1] === "PS C:\\work> git status",
+      JSON.stringify(lines),
+    );
+    next.dispose();
+    await next.forget("win");
+
+    // Hibernation on Windows: the pane's process is stopped on purpose and
+    // started again with a forced replay. The record goes on from the old
+    // session, so the new ConPTY session's first paint must not wipe it.
+    const h = fakeDeps({ newSessionOwnsScreen: true, dimensions: () => ({ cols: 80, rows: 10 }) });
+    const sleeper = new storeMod.TerminalScrollbackStore(h.deps);
+    await sleeper.init();
+    sleeper.track(["nap"]);
+    h.state.sessions.add("nap");
+    h.state.feed("nap", Array.from({ length: 4 }, (_, i) => `asleep line ${i}\r\n`).join("") + "PS C:\\work> ");
+    await sleeper.flush("nap");
+    h.state.sessions.delete("nap");
+    const woke = await sleeper.restoreReplay("nap", { force: true, rows: 10 });
+    check("a forced replay on Windows hands the screen over too", !!woke && woke.text.endsWith(storeMod.handOverScreen(10)));
+    h.state.sessions.add("nap");
+    h.state.feed("nap", conptyFirstPaint + "\x1b[1;13Hclaude --resume\r\n");
+    await sleeper.flush("nap");
+    sleeper.dispose();
+    const after = new storeMod.TerminalScrollbackStore(fakeDeps({ newSessionOwnsScreen: true }).deps);
+    const napLines = ((await after.restoreReplay("nap"))?.text ?? "").replace(/\x1b\[[0-9;]*m/g, "").split("\r\n");
+    check(
+      "and the record keeps the stopped session's screen above the new one",
+      napLines.filter((line) => /^asleep line \d$/.test(line)).length === 4 &&
+        napLines.indexOf("asleep line 3") < napLines.indexOf("PS C:\\work> claude --resume"),
+      JSON.stringify(napLines),
+    );
+    after.dispose();
+    await after.forget("nap");
   }
 
   // ── seeding a pane tracked after its session started ─────────────────
@@ -369,6 +486,32 @@ async function main() {
     store.track(["off-pane"]);
     check("nothing is tracked while off", !state.taps.has("off-pane"));
     check("nothing is replayed while off", (await store.restoreReplay("off-pane", { force: true })) === null);
+    store.dispose();
+  }
+
+  // ── clearing saved output on demand ───────────────────────────────────
+  {
+    const { deps, state } = fakeDeps();
+    const store = new storeMod.TerminalScrollbackStore(deps);
+    store.track(["clr-a", "clr-b"]);
+    state.feed("clr-a", "api key sk-secret\r\n");
+    state.feed("clr-b", "another line\r\n");
+    await store.flush();
+    const before = await store.usage();
+    check("usage counts the saved panes and bytes", before.files === 2 && before.bytes > 0, JSON.stringify(before));
+    const removed = await store.clear();
+    check("clear reports what it removed", removed.files === 2 && removed.bytes === before.bytes);
+    check("clear deletes every file", fs.readdirSync(dir).filter((n) => n.endsWith(".bin")).length === 0);
+    check("usage is empty afterwards", (await store.usage()).files === 0);
+    await store.flush();
+    check("unsaved output is dropped too, not written back", fs.readdirSync(dir).filter((n) => n.endsWith(".bin")).length === 0);
+    check("recording continues after a clear", state.taps.has("clr-a"));
+    state.feed("clr-a", "new output\r\n");
+    await store.flush();
+    const after = await store.read("clr-a");
+    check("only output after the clear is saved", !!after && after.raw.toString("utf8").includes("new output") && !after.raw.toString("utf8").includes("sk-secret"));
+    await store.forget("clr-a");
+    await store.forget("clr-b");
     store.dispose();
   }
 
@@ -497,6 +640,31 @@ async function main() {
     state.enabled = true;
     await store.setEnabled(true);
     check("a closed pane is not recorded again", !state.taps.has("reon"));
+    store.dispose();
+  }
+
+  // ── off, on, off in quick succession ─────────────────────────────────
+  // The first off is still waiting for a write when the on arrives. What the
+  // pane records after the on must still go at the second off.
+  {
+    const { deps, state } = fakeDeps();
+    const store = new storeMod.TerminalScrollbackStore(deps);
+    await store.init();
+    state.sessions.add("flip");
+    store.track(["flip"]);
+    state.feed("flip", "before the flips\r\n");
+    await store.flush();
+    state.enabled = false;
+    const off = store.setEnabled(false);
+    state.enabled = true;
+    const on = store.setEnabled(true);
+    await Promise.all([off, on]);
+    state.feed("flip", "recorded after turning it back on\r\n");
+    await store.flush();
+    check("recording resumes after a quick off and on", fs.existsSync(fileFor("flip")));
+    state.enabled = false;
+    await store.setEnabled(false);
+    check("and the next off still deletes what it wrote", !fs.existsSync(fileFor("flip")));
     store.dispose();
   }
 

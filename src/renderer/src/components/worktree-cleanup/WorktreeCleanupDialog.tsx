@@ -4,8 +4,11 @@ import {
   DEFAULT_STALE_DAYS,
   filterWorktreeRows,
   formatBytes,
+  keepRowOrder,
+  orderDrifted,
   plural,
   removalOutlook,
+  rowPositions,
   sortWorktreeRows,
   type WorktreeCleanupRemoveResult,
   type WorktreeCleanupRow,
@@ -69,16 +72,20 @@ function SortHeader({
   label,
   sortKey,
   sort,
+  drifted,
   onSort,
   className,
 }: {
   label: string;
   sortKey: WorktreeSortKey;
   sort: WorktreeSortKey;
+  /** Values changed since the rows were sorted; a click sorts them again. */
+  drifted: boolean;
   onSort: (key: WorktreeSortKey) => void;
   className?: string;
 }): React.ReactElement {
   const active = sort === sortKey;
+  const stale = active && drifted;
   return (
     <span
       role="columnheader"
@@ -86,7 +93,13 @@ function SortHeader({
       // Size runs largest first; activity runs oldest first; names run A to Z.
       aria-sort={active ? (sortKey === "size" ? "descending" : "ascending") : "none"}
     >
-      <button type="button" className={`wtc-sort${active ? " is-active" : ""}`} onClick={() => onSort(sortKey)}>
+      <button
+        type="button"
+        className={`wtc-sort${active ? " is-active" : ""}${stale ? " is-stale" : ""}`}
+        title={stale ? "Sizes changed since this sort. Click to sort again." : undefined}
+        aria-label={stale ? `${label}, sort again` : undefined}
+        onClick={() => onSort(sortKey)}
+      >
         {label}
       </button>
     </span>
@@ -181,31 +194,51 @@ export default function WorktreeCleanupDialog({
     };
   }, [load]);
 
+  // A row keeps its object until its own size changes, so a size landing
+  // repaints that row only, not the whole list (WorktreeRow is memoized).
+  const sizedRows = useRef(new WeakMap<WorktreeCleanupRow, WorktreeCleanupRow>());
   const rows = useMemo<WorktreeCleanupRow[]>(
-    () => (scan?.rows ?? []).map((row) => ({ ...row, size: newerSize(row.size, sizes.get(row.id)) })),
+    () =>
+      (scan?.rows ?? []).map((row) => {
+        const size = newerSize(row.size, sizes.get(row.id));
+        if (size === row.size) return row;
+        const known = sizedRows.current.get(row);
+        if (known?.size === size) return known;
+        const next = { ...row, size };
+        sizedRows.current.set(row, next);
+        return next;
+      }),
     [scan, sizes],
   );
   const repos = scan?.repos ?? [];
   const repoNames = useMemo(() => new Map(repos.map((entry) => [entry.root, entry.name])), [repos]);
   const outlooks = useMemo(() => new Map(rows.map((row) => [row.id, removalOutlook(row)])), [rows]);
 
+  // The order is taken when the user sorts or the list is read again, and
+  // kept while sizes land, so rows never move under the pointer mid-pick.
+  // A click on the active column sorts again with the sizes measured since.
+  const [sortRound, setSortRound] = useState(0);
+  const sorted = useMemo(() => sortWorktreeRows(rows, sort), [rows, sort]);
+  const orderKey = `${sort}\u0000${scan?.scannedAt ?? 0}\u0000${sortRound}`;
+  const order = useRef<{ key: string; positions: Map<string, number> }>({ key: "", positions: new Map() });
+  if (order.current.key !== orderKey) order.current = { key: orderKey, positions: rowPositions(sorted) };
+  const ordered = useMemo(() => keepRowOrder(sorted, order.current.positions), [sorted, orderKey]);
+  const sortDrifted = useMemo(() => orderDrifted(ordered, sorted), [ordered, sorted]);
+
   const visible = useMemo(
     () =>
-      sortWorktreeRows(
-        filterWorktreeRows(
-          rows,
-          {
-            query,
-            repo,
-            merged: mergedOnly,
-            staleDays: staleOn ? staleDays : null,
-            largeBytes: largeOn ? largeBytes : null,
-          },
-          now,
-        ),
-        sort,
+      filterWorktreeRows(
+        ordered,
+        {
+          query,
+          repo,
+          merged: mergedOnly,
+          staleDays: staleOn ? staleDays : null,
+          largeBytes: largeOn ? largeBytes : null,
+        },
+        now,
       ),
-    [rows, query, repo, mergedOnly, staleOn, staleDays, largeOn, largeBytes, now, sort],
+    [ordered, query, repo, mergedOnly, staleOn, staleDays, largeOn, largeBytes, now],
   );
   const selectable = useMemo(() => visible.filter((row) => !outlooks.get(row.id)?.blocked), [visible, outlooks]);
   // What you see is what you remove: rows a filter hides drop out of the pick.
@@ -266,6 +299,7 @@ export default function WorktreeCleanupDialog({
 
   const changeSort = useCallback((key: WorktreeSortKey) => {
     setSort(key);
+    setSortRound((round) => round + 1);
     remembered.sort = key;
   }, []);
 
@@ -439,7 +473,7 @@ export default function WorktreeCleanupDialog({
         <header className="wtc-header">
           <div className="wtc-title-line">
             <h2 id="wtc-title">
-              {view === "list" ? "Worktrees" : view === "review" ? "Review removal" : "Removal done"}
+              {view === "list" ? "Clean up worktrees" : view === "review" ? "Review removal" : "Removal done"}
             </h2>
             {loading && view === "list" ? <Spinner size={12} /> : null}
             <span className="wtc-summary" role="status">
@@ -572,7 +606,7 @@ export default function WorktreeCleanupDialog({
             ) : rows.length === 0 ? (
               <div className="wtc-empty">No worktrees found. Open a Git repository as a workspace to see its worktrees here.</div>
             ) : (
-              <div role="grid" aria-label="Worktrees" aria-rowcount={visible.length} className="wtc-grid">
+              <div role="grid" aria-label="Worktrees" aria-rowcount={visible.length + 1} className="wtc-grid">
                 <div role="row" className="wtc-row wtc-row--head">
                   <span role="columnheader" className="wtc-cell-check">
                     <input
@@ -585,11 +619,12 @@ export default function WorktreeCleanupDialog({
                       onChange={toggleAll}
                     />
                   </span>
-                  <SortHeader label="Worktree" sortKey="name" sort={sort} onSort={changeSort} />
+                  <SortHeader label="Worktree" sortKey="name" sort={sort} drifted={sortDrifted} onSort={changeSort} />
                   <SortHeader
                     label="Last activity"
                     sortKey="activity"
                     sort={sort}
+                    drifted={sortDrifted}
                     onSort={changeSort}
                     className="wtc-cell-num"
                   />
@@ -597,6 +632,7 @@ export default function WorktreeCleanupDialog({
                     label="Size"
                     sortKey="size"
                     sort={sort}
+                    drifted={sortDrifted}
                     onSort={changeSort}
                     className="wtc-cell-num"
                   />

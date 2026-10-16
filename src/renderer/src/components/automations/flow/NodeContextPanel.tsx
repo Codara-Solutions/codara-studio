@@ -439,7 +439,7 @@ function TriggerForm({
               }
             />
           </div>
-          <Field label="Branch (optional — any branch when empty)">
+          <Field label="Branch (optional, any branch when empty)">
             <input
               className="spark-input spark-mono"
               value={t.gitBranch}
@@ -450,7 +450,7 @@ function TriggerForm({
           </Field>
           <Hint>
             Watches this workspace's repository. Local moves are noticed within ~20 seconds;
-            pushes are noticed by the background fetch within a few minutes — or in seconds
+            pushes are noticed by the background fetch within a few minutes, or in seconds
             with the{" "}
             <a
               href="https://github.com/apps/codara-studio/installations/new"

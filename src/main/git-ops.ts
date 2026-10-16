@@ -673,7 +673,7 @@ async function listUntrackedDirAsDiff(cwd: string, relPath: string): Promise<Git
     const lines: GitDiffLine[] = [
       {
         kind: "meta",
-        text: `Untracked directory — ${files.length} file${files.length === 1 ? "" : "s"}`,
+        text: `Untracked directory: ${files.length} file${files.length === 1 ? "" : "s"}`,
       },
       { kind: "hunk", text: `@@ -0,0 +1,${files.length} @@` },
     ];

@@ -124,6 +124,10 @@ const INVISIBLE_CHARS =
 // A note is one short line; nothing past this many code units is ever shown,
 // so a huge payload is cut before the expressions above walk it.
 const NOTE_INPUT_MAX = 8_192;
+// Half of a surrogate pair: what that cut leaves when it lands inside an
+// emoji, or what a malformed "\ud83d" escape in the tool's JSON decodes to.
+// It draws as a replacement box, so it goes.
+const LONE_SURROGATES = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
 
 function cutToCodePoints(text: string, max: number): { text: string; cut: boolean } {
   const points = Array.from(text);
@@ -143,6 +147,7 @@ export function sanitizeWorkspaceStatusNote(raw: unknown): { note: string; trunc
     .replace(ANSI_SEQUENCES, "")
     .replace(CONTROL_CHARS, " ")
     .replace(INVISIBLE_CHARS, "")
+    .replace(LONE_SURROGATES, "")
     .replace(/\s+/g, " ")
     .trim();
   const { text, cut } = cutToCodePoints(flat, WORKSPACE_STATUS_NOTE_MAX);

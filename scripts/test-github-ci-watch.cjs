@@ -58,8 +58,8 @@ function ws(id, cwd) {
   return { id, name: id, cwd, color: "#000", workers: [] };
 }
 
-function pr(head, { failed = [], pending = 0, state = "OPEN", number = 42, title = "Add widgets" } = {}) {
-  return { repository: "acme/widgets", number, title, state, headOid: head, failed, pending };
+function pr(head, { failed = [], pending = 0, state = "OPEN", number = 42, title = "Add widgets", failedAt = 0 } = {}) {
+  return { repository: "acme/widgets", number, title, state, headOid: head, failed, failedAt, pending };
 }
 
 function harness(mod, { workspaces = [ws("ws-1", "/repo")], refs = { "/repo": "h1 u1" }, prs = {}, enabled = true } = {}) {
@@ -127,7 +127,21 @@ test("parseCiPullRequest reads failing and running checks", ({ mod }) => {
       { context: "ci/queued", state: "PENDING" },
     ],
   }));
-  assert.deepEqual(parsed, { repository: "acme/widgets", number: 42, title: "Add widgets", state: "OPEN", headOid: HEAD_A, failed: ["build", "ci/external"], pending: 2 });
+  assert.deepEqual(parsed, { repository: "acme/widgets", number: 42, title: "Add widgets", state: "OPEN", headOid: HEAD_A, failed: ["build", "ci/external"], failedAt: 0, pending: 2 });
+  // When the failing checks finished: the last of them, by finish or else start time.
+  const timed = mod.parseCiPullRequest(JSON.stringify({
+    number: 42,
+    url: "https://github.com/acme/widgets/pull/42",
+    state: "OPEN",
+    headRefOid: HEAD_A,
+    statusCheckRollup: [
+      { name: "build", status: "COMPLETED", conclusion: "FAILURE", startedAt: "2026-10-01T10:00:00Z", completedAt: "2026-10-01T10:05:00Z" },
+      { name: "lint", status: "COMPLETED", conclusion: "SUCCESS", completedAt: "2026-10-01T11:00:00Z" },
+      { context: "ci/external", state: "ERROR", startedAt: "2026-10-01T10:07:00Z" },
+      { name: "e2e", status: "COMPLETED", conclusion: "TIMED_OUT", completedAt: "0001-01-01T00:00:00Z" },
+    ],
+  }));
+  assert.equal(timed.failedAt, Date.parse("2026-10-01T10:07:00Z"));
   assert.equal(mod.parseCiPullRequest(JSON.stringify({ number: 1, url: "https://github.com/a/b/pull/1", headRefOid: "nope" })), null);
   assert.equal(mod.parseCiPullRequest(JSON.stringify({ number: 1, url: "ftp://x/a/b/pull/1", headRefOid: HEAD_A })), null);
   assert.equal(mod.parseCiPullRequest("null"), null);
@@ -153,6 +167,18 @@ test("parseCiPullRequest judges each check by its newest run", ({ mod }) => {
   // Same name in another workflow is another check.
   const other = view([failedRun, { ...passedRerun, workflowName: "Nightly" }]);
   assert.deepEqual([other.failed, other.pending], [["build"], 0]);
+  // A push run cancelled (cancel-in-progress) just after the pull request's
+  // run of the same job started finishes later than that run started; the
+  // run that started last is the one that counts, not the cancelled one.
+  const cancelledPush = { ...failedRun, conclusion: "CANCELLED", startedAt: "2026-10-01T12:00:00Z", completedAt: "2026-10-01T12:00:09Z" };
+  const prRun = { ...runningRerun, startedAt: "2026-10-01T12:00:05Z" };
+  for (const rollup of [[cancelledPush, prRun], [prRun, cancelledPush]]) {
+    const parsed = view(rollup);
+    assert.deepEqual([parsed.failed, parsed.pending], [[], 1]);
+  }
+  // A check with no start time is placed by its finish time.
+  const noStart = { ...passedRerun, startedAt: undefined, completedAt: "2026-10-01T13:00:00Z" };
+  assert.deepEqual(view([failedRun, noStart]).failed, []);
 });
 
 test("local refs: one git call a minute, the default branch looked up once per interval", async ({ mod }) => {
@@ -222,6 +248,28 @@ test("a pull request already failing when first seen stays quiet", async ({ mod 
   await h.pass();
   assert.deepEqual(h.reads, ["/repo"]);
   assert.equal(h.published.length, 0);
+  // GitHub says it failed before the watcher started: still quiet.
+  const before = harness(mod, { prs: { "/repo": pr(HEAD_A, { failed: ["build"], failedAt: 1_000_000 - 60_000 }) } });
+  await before.pass();
+  assert.equal(before.published.length, 0);
+});
+
+test("a pull request first seen already failing alerts when it failed after the start", async ({ mod }) => {
+  // Pushed while Codara runs, then opened in the browser: the watcher asked
+  // at the push (no pull request yet) and next asks 15 minutes later, when
+  // the checks have finished.
+  const h = harness(mod);
+  await h.pass();
+  assert.equal(h.reads.length, 1);
+  h.advance(15 * 60_000);
+  h.prs["/repo"] = pr(HEAD_A, { failed: ["build"], failedAt: h.now - 5 * 60_000 });
+  await h.pass();
+  assert.equal(h.reads.length, 2);
+  assert.equal(h.published.length, 1);
+  assert.equal(h.published[0].title, "CI failed on pull request #42");
+  h.advance(15 * 60_000);
+  await h.pass();
+  assert.equal(h.published.length, 1, "once per failing commit");
 });
 
 test("a new head commit that fails alerts once, with the workspace as target", async ({ mod }) => {
@@ -339,11 +387,12 @@ test("turned off: no reads, and turning it back on starts fresh", async ({ mod }
   assert.equal(h.reads.length, 1);
   h.enabled = false;
   await h.pass();
+  h.advance(30 * 60_000);
   h.enabled = true;
-  h.prs["/repo"] = pr(HEAD_A, { failed: ["build"] });
+  h.prs["/repo"] = pr(HEAD_A, { failed: ["build"], failedAt: h.now - 10 * 60_000 });
   await h.pass();
   assert.equal(h.reads.length, 2, "forgotten state means a fresh read");
-  assert.equal(h.published.length, 0, "and a failure seen first is quiet again");
+  assert.equal(h.published.length, 0, "and a failure from while it was off is quiet");
 });
 
 test("timers: first pass after 45 seconds, then every minute; nudge and stop", async ({ mod }) => {

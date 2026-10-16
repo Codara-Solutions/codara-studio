@@ -26,6 +26,7 @@ import {
   conflictsRequest,
   hookRequest,
   latestCheckContexts,
+  looksLikeSecretsFile,
   oneLine,
   plainLogText,
   redactSecrets,
@@ -281,7 +282,7 @@ export async function readChecksContext(cwd: string, deps: GitFixContextDeps): P
     });
   }
   if (!failing.length) {
-    throw new GitFixError(`No checks are failing on #${pullRequest.number} right now. Refresh Source Control to see the latest.`);
+    throw new GitFixError(`No checks are failing on #${pullRequest.number} right now: the latest run of each check passed or is still running.`);
   }
   const listed = failing.slice(0, GIT_FIX_LIMITS.checks);
   let downloads = 0;
@@ -403,6 +404,9 @@ function insideRoot(root: string, path: string): string | null {
 
 async function conflictFile(deps: GitFixContextDeps, root: string, realRoot: string | null, path: string): Promise<GitFixConflictFile> {
   const displayPath = oneLine(path, 300);
+  if (looksLikeSecretsFile(path)) {
+    return { path: displayPath, conflicts: 0, excerpt: "", truncated: false, note: "A file that holds secrets, so its content is not quoted here: open it to resolve the conflict." };
+  }
   const full = insideRoot(root, path);
   const info = full ? await deps.stat(full) : null;
   if (!full || !info?.isFile) {

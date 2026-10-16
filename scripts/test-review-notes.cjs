@@ -147,6 +147,18 @@ function diffFile(pathName, text, over = {}) {
       ].join("\n"),
     );
     assert.match(lib.formatReviewNotes([note()]), /^\[Codara\] 1 review note\. Address each one/);
+    // A workspace inside its repository: the agent is told where diff paths start.
+    assert.equal(
+      lib.formatReviewNotes([note()], { workspaceCwd: "/repo/packages/web", repoRoot: "/repo" }).split("\n\n")[0],
+      "[Codara] 1 review note. Address each one, then say what you changed.\nFile paths are relative to the repository at /repo.",
+    );
+    assert.doesNotMatch(lib.formatReviewNotes([note()], { workspaceCwd: "/repo/", repoRoot: "/repo" }), /relative to the repository/);
+    assert.doesNotMatch(lib.formatReviewNotes([note()], { workspaceCwd: "C:\\Repo", repoRoot: "c:/repo" }), /relative to the repository/);
+    assert.doesNotMatch(
+      lib.formatReviewNotes([note({ source: "markdown", filePath: "/repo/web/plan.md" })], { workspaceCwd: "/repo/web", repoRoot: "/repo" }),
+      /relative to the repository/,
+      "Markdown notes carry their own path",
+    );
 
     // Sent notes leave the list; one edited while sending stays.
     const sent = [note({ id: "a" }), note({ id: "b" })];
@@ -242,6 +254,28 @@ function diffFile(pathName, text, over = {}) {
     assert.equal(lib.reviewRepoFolder("C:/Users/Ann/repo", "C:\\Users\\Ann\\repo\\web"), "C:\\Users\\Ann\\repo", "backslashes like the workspace");
     assert.equal(lib.reviewRepoFolder(undefined, "/w"), "/w");
     assert.equal(lib.reviewRepoFolder("/Home/u/repo", "/home/u/repo"), "/Home/u/repo", "POSIX paths keep their case");
+
+    // Deferred files load by path: a renamed one with its old path, in
+    // requests main reads whole and git's command line can hold.
+    const renames = new Map([["src/new.ts", { oldPath: "src/old.ts" }]]);
+    assert.deepEqual(lib.pathRequests(["a.ts", "src/new.ts", "a.ts"], (p) => renames.get(p)), [
+      { files: ["a.ts", "src/new.ts"], paths: ["a.ts", "src/new.ts", "src/old.ts"] },
+    ]);
+    assert.deepEqual(lib.pathRequests([], () => undefined), []);
+    const cap = lib.MAX_REVIEW_REQUEST_PATHS;
+    const many = Array.from({ length: cap + 5 }, (_, i) => `f${i}`);
+    const pairAt = `f${cap - 1}`;
+    const split = lib.pathRequests(many, (p) => (p === pairAt ? { oldPath: "was" } : undefined));
+    assert.deepEqual(split.flatMap((request) => request.files), many, "every file once, in order");
+    assert.ok(split.every((request) => request.paths.length <= cap), "no request past main's cap");
+    assert.ok(split.some((request) => request.files.includes(pairAt) && request.paths.includes("was")), "a rename's two paths go together");
+    const long = Array.from({ length: 60 }, (_, i) => `${"deep/".repeat(80)}${i}.ts`);
+    const byLength = lib.pathRequests(long, () => undefined);
+    assert.ok(byLength.length > 1, "long paths are split over several requests");
+    assert.ok(byLength.every((request) => request.paths.join("").length <= lib.MAX_REVIEW_REQUEST_CHARS));
+    assert.deepEqual(byLength.flatMap((request) => request.files), long);
+    const huge = `${"x/".repeat(lib.MAX_REVIEW_REQUEST_CHARS)}y.ts`;
+    assert.deepEqual(lib.pathRequests([huge], () => undefined), [{ files: [huge], paths: [huge] }], "one path longer than the budget still goes alone");
 
     // ── Where a batch can go ────────────────────────────────────────────
     const routing = [

@@ -54,7 +54,8 @@ import {
   isAgentSessionLaunchCommand,
   PI_LAUNCH_COMMAND,
 } from "../../workers/launch-commands";
-import type { TerminalAgentSession } from "../../tabs/types";
+import type { TerminalAgentSession, TerminalLeafHibernation } from "../../tabs/types";
+import { isAgentHibernationRuntime } from "@shared/agent-hibernation";
 import {
   adoptLiveSessionAccount,
   canAutoResume,
@@ -316,7 +317,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
       return {
         resumeCommand: fresh.command,
         resumeIsFreshFallback: true,
-        fallbackNotice: "previous Grok session couldn't be resumed — starting a fresh one",
+        fallbackNotice: "previous Grok session couldn't be resumed, starting a fresh one",
         fallbackSession: {
           runtime: "grok",
           sessionId: fresh.sessionId,
@@ -334,7 +335,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
     return {
       resumeCommand: fresh.command,
       resumeIsFreshFallback: true,
-      fallbackNotice: "previous Claude session couldn't be resumed — starting a fresh one",
+      fallbackNotice: "previous Claude session couldn't be resumed, starting a fresh one",
       fallbackSession: {
         runtime: "claude",
         sessionId: fresh.sessionId,
@@ -577,6 +578,9 @@ interface Options {
   // The sleeping pane is running again (resumed, or a plain shell when the
   // session could not be resumed), so the owner clears the leaf's mark.
   onWoke?: () => void;
+  // Main says this pane's agent sleeps although the leaf carries no mark (the
+  // window reloaded while it slept), so the owner marks the leaf.
+  onAsleep?: (hibernation: TerminalLeafHibernation) => void;
 }
 
 export interface TerminalSessionApi {
@@ -638,6 +642,7 @@ export function useTerminalSession({
   onBootResumeConsumed,
   hibernated = false,
   onWoke,
+  onAsleep,
 }: Options): TerminalSessionApi {
   // Latest-value ref so the input/resize closures (captured once per
   // sessionId) see the freshest readOnly flag without re-running the
@@ -703,6 +708,8 @@ export function useTerminalSession({
   const wakeRef = useRef<(() => void) | null>(null);
   const onWokeRef = useRef(onWoke);
   onWokeRef.current = onWoke;
+  const onAsleepRef = useRef(onAsleep);
+  onAsleepRef.current = onAsleep;
 
   const detectedRef = useRef<string | null>(null);
   // Latest-callback refs so the effect can run exactly once per `sessionId`
@@ -3043,7 +3050,7 @@ export function useTerminalSession({
           const fresh = buildClaudeLaunch();
           logRestore(`pane=${sessionId} claude REFUSED resume; self-healing to fresh id=${fresh.sessionId}`);
           term.write(
-            `\r\n\x1b[2m[couldn't resume the previous Claude session — starting a fresh one]\x1b[0m\r\n`,
+            `\r\n\x1b[2m[couldn't resume the previous Claude session, starting a fresh one]\x1b[0m\r\n`,
           );
           onResumeFallbackRef.current?.({
             runtime: "claude",
@@ -3141,7 +3148,7 @@ export function useTerminalSession({
             // if it somehow attached to a live session, mutate nothing, otherwise
             // the shell family couldn't run a startup command — print the manual line.
             if (!spawnResult.attached) {
-              term.write(`\x1b[2m[couldn't auto-resume — run: ${plan.resumeCommand}]\x1b[0m\r\n`);
+              term.write(`\x1b[2m[couldn't auto-resume. Run: ${plan.resumeCommand}]\x1b[0m\r\n`);
             }
             return;
           }
@@ -3291,7 +3298,7 @@ export function useTerminalSession({
         const prior = pruneAttempts(autoResumeAttempts.get(sessionId) ?? [], now);
         if (!canAutoResume(prior, now)) {
           term.write(
-            `\x1b[2m[auto-resume paused after repeated exits — run: ${buildAgentResumeCommand(session)}]\x1b[0m\r\n`,
+            `\x1b[2m[auto-resume paused after repeated exits. Run: ${buildAgentResumeCommand(session)}]\x1b[0m\r\n`,
           );
           return;
         }
@@ -3360,8 +3367,34 @@ export function useTerminalSession({
       // A pane that mounts while its agent sleeps (agent hibernation) has no
       // pty to spawn or attach to: it shows its saved output and waits for
       // wakeFromSleep, which resumes the session once the pane is on screen.
-      const sleepingAtMount =
+      let sleepingAtMount =
         hibernatedRef.current && !readOnlyRef.current && !inputBlockedRef.current;
+      // Main remembers which panes sleep and keeps what they printed (the
+      // stop dropped the pty with its tail and backlog): a view restored from
+      // its own snapshot above gets only what it never received, an empty one
+      // (after a window reload) the pane's newest output. Asked for every
+      // agent pane, not only marked ones: after a reload the leaf has lost
+      // its runtime-only mark, and a plain spawn here would bring the pane
+      // back as a shell without its agent.
+      const sleepCandidate = agentSessionRef.current ?? agentSession;
+      if (
+        !readOnlyRef.current &&
+        !inputBlockedRef.current &&
+        (sleepingAtMount || (sleepCandidate?.sessionId && isAgentHibernationRuntime(sleepCandidate.runtime)))
+      ) {
+        const asleep = await window.spark.agentHibernation
+          ?.sleepingPane?.(sessionId, { freshView: !liveSnapshot })
+          .catch(() => null);
+        if (disposed) return;
+        if (asleep) {
+          if (asleep.output && asleep.output.byteLength > 0) term.write(asleep.output);
+          if (!sleepingAtMount) {
+            sleepingAtMount = true;
+            logRestore(`pane=${sessionId} mounts asleep (${asleep.runtime}), marked from main`);
+            onAsleepRef.current?.({ runtime: asleep.runtime, sleptAt: asleep.sleptAt });
+          }
+        }
+      }
       if (sleepingAtMount) sleepingRef.current = true;
       const spawnOrSleep: typeof window.spark.pty.spawn = sleepingAtMount
         ? async (args) => ({ id: args.id, pid: 0, attached: true, startupCommandHandled: false })
@@ -3608,7 +3641,7 @@ export function useTerminalSession({
           if (!disposed) {
             logRestore(`pane=${sessionId} hint: inactive pointer (${hintSession.runtime} id=${hintSession.sessionId})`);
             term.write(
-              `\x1b[2m[previous ${hintSession.runtime} session available — resume: ${buildAgentResumeCommand(hintSession)}]\x1b[0m\r\n`,
+              `\x1b[2m[previous ${hintSession.runtime} session available. Resume: ${buildAgentResumeCommand(hintSession)}]\x1b[0m\r\n`,
             );
           }
         }
@@ -3628,7 +3661,7 @@ export function useTerminalSession({
         }
       } else if (!attachedExistingSession) {
         term.write(
-          `\x1b[2m[couldn't auto-resume the previous ${agentSession?.runtime ?? "agent"} session in this shell — run: ${resumeCommand}]\x1b[0m\r\n`,
+          `\x1b[2m[couldn't auto-resume the previous ${agentSession?.runtime ?? "agent"} session in this shell. Run: ${resumeCommand}]\x1b[0m\r\n`,
         );
       }
       // Boot restore attempted — every outcome lands here (resume riding the

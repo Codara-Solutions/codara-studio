@@ -168,7 +168,7 @@ function compactWorkerError(error: string | undefined): string | null {
 function workerAttemptFailureDisplay(attempt: WorkerAttempt | undefined): string | null {
   if (!attempt) return null;
   if (attempt.failureKind === "subscription") {
-    return "The Claude account has no Extra Usage for third-party harness use — enable it at claude.ai/settings/usage or switch accounts.";
+    return "The Claude account has no Extra Usage for third-party harness use. Enable it at claude.ai/settings/usage or switch accounts.";
   }
   return compactWorkerError(attempt.error);
 }
@@ -452,9 +452,9 @@ export function buildChatTimeline(run: RunState): ChatTimelineItem[] {
         messageKind: message.kind,
         text:
           attemptCount === 1
-            ? "Resume — hand 1 interrupted attempt back to Cora"
+            ? "Resume: hand 1 interrupted attempt back to Cora"
             : attemptCount > 1
-              ? `Resume — hand ${attemptCount} interrupted attempts back to Cora`
+              ? `Resume: hand ${attemptCount} interrupted attempts back to Cora`
               : "Resume",
         questionOptions: [],
         answersMessageId: message.answersMessageId,

@@ -29,7 +29,7 @@ export async function replayPersistedScrollback(
 ): Promise<boolean> {
   const restore = window.spark.terminalScrollback?.restore;
   if (!restore) return false;
-  const replay = await restore({ paneId, maxLines }).catch(() => null);
+  const replay = await restore({ paneId, maxLines, rows: term.rows }).catch(() => null);
   if (!replay?.text) return false;
   await new Promise<void>((resolve) => {
     try {

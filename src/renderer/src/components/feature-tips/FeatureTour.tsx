@@ -107,10 +107,20 @@ export function FeatureTour({ name, steps, onClose }: Props) {
     const size = { width: coach.offsetWidth, height: coach.offsetHeight };
     const viewport = { width: window.innerWidth, height: window.innerHeight };
     const avoid = avoidedBoxes();
-    const beside = targetBox
-      ? placeBeside({ target: targetBox, size, viewport, avoid, preferred: step.placement, gap: GAP, margin: MARGIN })
-      : null;
     const insets = chromeInsets();
+    const beside = targetBox
+      ? placeBeside({
+          target: targetBox,
+          size,
+          viewport,
+          avoid,
+          preferred: step.placement,
+          gap: GAP,
+          margin: MARGIN,
+          topInset: insets.top,
+          bottomInset: insets.bottom,
+        })
+      : null;
     // A window too small for a clear spot: the top right, under the title
     // bar, is the corner farthest from the composer at the bottom.
     const next =

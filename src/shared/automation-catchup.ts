@@ -16,6 +16,9 @@ export const DEFAULT_PRECHECK_TIMEOUT_SECONDS = 60;
 export const MAX_PRECHECK_TIMEOUT_SECONDS = 600;
 /** How much of the precheck's output a skip record keeps (both streams). */
 export const PRECHECK_OUTPUT_TAIL_CHARS = 2000;
+/** The longest command the editor and the agent tools accept (well inside
+ *  cmd.exe's 8191-character line). A longer one is refused, never cut: a cut
+ *  command is a different command. */
 export const MAX_PRECHECK_COMMAND_CHARS = 4000;
 
 export const DEFAULT_MISSED_GRACE_MINUTES = 720;
@@ -44,7 +47,7 @@ export function normalizeAutomationPrecheck(raw: unknown): AutomationPrecheck | 
   if (!command) return undefined;
   const shell = normalizePrecheckShell(r.shell);
   return {
-    command: command.slice(0, MAX_PRECHECK_COMMAND_CHARS),
+    command,
     timeoutSeconds: normalizePrecheckTimeoutSeconds(r.timeoutSeconds),
     ...(shell === "powershell" ? { shell } : {}),
   };
@@ -114,12 +117,12 @@ function formatSeconds(ms: number): string {
 
 /** The history line for a precheck that said no. */
 export function precheckSkipDetail(result: AutomationPrecheckResult, timeoutSeconds?: number): string {
-  if (result.error) return `Skipped: the precheck could not run (${result.error}).`;
+  if (result.error) return `Skipped: the check could not run (${result.error}).`;
   if (result.timedOut) {
     const limit = timeoutSeconds ? `${timeoutSeconds}s` : formatSeconds(result.durationMs);
-    return `Skipped: the precheck did not finish within ${limit}.`;
+    return `Skipped: the check did not finish within ${limit}.`;
   }
-  return `Skipped: the precheck exited with code ${result.exitCode ?? "unknown"}.`;
+  return `Skipped: the check exited with code ${result.exitCode ?? "unknown"}.`;
 }
 
 /** The one-line verdict the editor's "Test check" shows. */

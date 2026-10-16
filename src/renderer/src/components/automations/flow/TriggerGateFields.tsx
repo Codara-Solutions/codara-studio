@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { AutomationLoopKind, AutomationPrecheckResult, AutomationTrigger } from "@shared/types";
 import {
+  MAX_PRECHECK_COMMAND_CHARS,
   MAX_PRECHECK_TIMEOUT_SECONDS,
   MISSED_GRACE_CHOICES,
   formatGraceMinutes,
@@ -100,11 +101,12 @@ export default function TriggerGateFields({
             Exit code 0 runs the pass. Anything else skips it: no agent starts and no tokens are spent.
             Run now always runs.
           </span>
-          <Field label="Precheck command">
+          <Field label="Check first command">
             <textarea
               className="spark-input spark-mono"
               data-testid="precheck-command"
               rows={2}
+              maxLength={MAX_PRECHECK_COMMAND_CHARS}
               value={gate.precheckCommand}
               onChange={(e) => set({ precheckCommand: e.target.value })}
               placeholder={

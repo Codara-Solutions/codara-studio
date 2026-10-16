@@ -1401,7 +1401,7 @@ export default function ChatComposer({
   // send is a first message (see the isUnstartedChatRun branch in send()).
   const placeholder = !run_ || isUnstartedChatRun(run_)
     ? lockedMode === "automation"
-      ? "Describe the loom you want — trigger, loop, and worker."
+      ? "Describe the loom you want: trigger, loop, and worker."
       : "Tell Cora what to build, or describe a task."
     : failureCardOffersRetry
       ? "Send a follow-up. Cora picks the work back up."
@@ -1418,7 +1418,7 @@ export default function ChatComposer({
           // (run-store's scheduleResumeForUserMessage), so the placeholder
           // must not send the user hunting for the Resume button. Resume
           // still works on its own for an empty composer.
-          ? "Send to resume — your message goes with it."
+          ? "Send to resume. Your message goes with it."
           : isActive
             ? "Message Cora. It waits for her next turn, or press Send now on it to interrupt her."
             : "Reply, steer, or add context.";

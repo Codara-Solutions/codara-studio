@@ -162,7 +162,7 @@ function subscriber() {
 }
 
 async function main() {
-  const { StudioTerminalShareStore } = await loadStore();
+  const { StudioTerminalShareStore, studioPaneWatchedFromPhone } = await loadStore();
   let passed = 0;
   const test = async (name, fn) => {
     await fn();
@@ -315,6 +315,38 @@ async function main() {
       pty.emitExit("pane-1");
       assert.equal((await store.list("phone-a")).length, 0);
       assert.equal(changedPings.length, 1);
+      store.shutdown();
+    },
+  );
+
+  await test(
+    "agent hibernation sees a pane a phone has open, and only while it does",
+    async () => {
+      const pty = fakePtyManager();
+      globalThis.__studioSharePty = pty;
+      const inventory = [inventoryItem("pane-1"), inventoryItem("pane-2")];
+      globalThis.__studioShareBridge = {
+        requestTerminalOp: async () => inventory,
+      };
+      pty.open("pane-1", ["boot"]);
+      pty.open("pane-2", ["boot"]);
+      const store = new StudioTerminalShareStore();
+      await store.list("phone-a");
+      // Listed for the phone, but nobody has it open yet.
+      assert.equal(studioPaneWatchedFromPhone("pane-1"), false);
+      const sink = subscriber();
+      const attached = store.attach("phone-a", "studio-pane-1", 0, "phone-a-sub", sink.callbacks);
+      assert.equal(studioPaneWatchedFromPhone("pane-1"), true);
+      assert.equal(studioPaneWatchedFromPhone("pane-2"), false);
+      store.detach("phone-a", "studio-pane-1", "phone-a-sub", attached.attachmentId);
+      assert.equal(studioPaneWatchedFromPhone("pane-1"), false);
+      store.attach("phone-a", "studio-pane-2", 0, "phone-b-sub", subscriber().callbacks);
+      assert.equal(studioPaneWatchedFromPhone("pane-2"), true);
+      store.detachSubscriber("phone-b-sub");
+      assert.equal(studioPaneWatchedFromPhone("pane-2"), false);
+      store.attach("phone-a", "studio-pane-1", 0, "phone-c-sub", subscriber().callbacks);
+      pty.emitExit("pane-1");
+      assert.equal(studioPaneWatchedFromPhone("pane-1"), false, "an ended terminal is watched by nobody");
       store.shutdown();
     },
   );

@@ -105,6 +105,8 @@ async function main() {
       ["x-api-key: k-123456", "k-123456"],
       ["cora --token abc123secret --verbose", "abc123secret"],
       ["client_secret: 'zzz-secret'", "zzz-secret"],
+      ["DB_PASS=hunter2 db=main", "hunter2"],
+      ["MYSQL_PWD: s3cret", "s3cret"],
       ["-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAB3NzaC1yc2E\n-----END OPENSSH PRIVATE KEY-----", "AAAAB3NzaC1yc2E"],
     ];
     for (const [text, secret] of cases) {
@@ -207,7 +209,29 @@ async function main() {
       workspaceRoots: ["~/code/app"],
       keybindings: { "app.quit": "Mod+Q" },
     });
-    for (const key of ["apiKey", "OPENAI_API_KEY", "sessionKey", "cookies", "client_secret", "Authorization", "privateKey", "accessToken"]) {
+    assert.deepEqual(
+      redact.redactJson(
+        {
+          env: [
+            { name: "GITHUB_TOKEN", value: "plain-env-secret" },
+            { name: "NODE_ENV", value: "production" },
+            { key: "DB_PASS", value: "hunter2" },
+          ],
+          headers: [{ name: "Authorization", value: "Basic plain-header" }],
+        },
+        CTX,
+      ),
+      {
+        env: [
+          { name: "GITHUB_TOKEN", value: "[redacted]" },
+          { name: "NODE_ENV", value: "production" },
+          { key: "[redacted]", value: "[redacted]" },
+        ],
+        headers: [{ name: "Authorization", value: "[redacted]" }],
+      },
+      "a value whose sibling name is secret",
+    );
+    for (const key of ["apiKey", "OPENAI_API_KEY", "sessionKey", "cookies", "client_secret", "Authorization", "privateKey", "accessToken", "DB_PASS", "MYSQL_PWD"]) {
       assert.equal(redact.isSensitiveKey(key), true, key);
     }
     for (const key of ["keybindings", "keyboardLayout", "monkey", "author", "theme", "tokenizerModel"]) {

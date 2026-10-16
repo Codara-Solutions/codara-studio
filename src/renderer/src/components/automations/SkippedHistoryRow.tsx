@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import type { AutomationRunRecord, AutomationSkipRecord } from "@shared/types";
-import { fmtClock, fmtTime } from "./presentation";
+import { fmtTime } from "./presentation";
 
 // A history-timeline row for a pass that did not start: its precheck said no,
 // or its scheduled time was missed and not caught up. No run exists, so the
@@ -32,7 +32,7 @@ export default function SkippedHistoryRow({
   skip: AutomationSkipRecord;
 }): React.ReactElement {
   const [expanded, setExpanded] = useState(false);
-  const label = skip.reason === "precheck" ? "precheck said no" : "missed";
+  const label = skip.reason === "precheck" ? "check said no" : "missed";
   const output = skip.precheck?.outputTail ?? "";
   const repeats = skip.repeats && skip.repeats > 1 ? skip.repeats : 0;
   return (
@@ -144,7 +144,7 @@ export default function SkippedHistoryRow({
           )}
           {skip.missed && (
             <div className="spark-mono" style={{ fontSize: 10, color: "var(--muted)" }}>
-              latest missed time {fmtClock(skip.missed.scheduledFor)}
+              latest missed time {fmtTime(skip.missed.scheduledFor)}
             </div>
           )}
           <div style={{ display: "flex", alignItems: "center" }}>

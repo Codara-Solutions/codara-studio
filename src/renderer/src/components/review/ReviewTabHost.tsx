@@ -22,6 +22,7 @@ import {
   fileRows,
   fileStructure,
   hunkPatch,
+  pathRequests,
   quoteFor,
   reviewRepoFolder,
   shortLocation,
@@ -212,16 +213,21 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
     // full, are read again with the rest and swapped in together, so a
     // refresh never flashes them back to placeholders.
     const shown = overridesRef.current;
+    const listed = new Map(result.files.map((file) => [file.path, file]));
     const deferred = result.files.filter((file) => file.deferred).map((file) => file.path);
     const asked = deferred.filter((path) => forced.current.has(path)).slice(0, MAX_RELOAD_PATHS);
     const seen = deferred.filter((path) => !forced.current.has(path) && shown.has(path)).slice(0, MAX_RELOAD_PATHS);
-    const read = (paths: string[], force: boolean) =>
-      paths.length
-        ? window.spark.review
-            .diff({ cwd, mode, base: result.base, paths, force })
-            .then((extra) => extra.files.filter((file) => paths.includes(file.path)))
-            .catch(() => [] as ReviewDiffFile[])
-        : Promise.resolve([] as ReviewDiffFile[]);
+    const read = async (paths: string[], force: boolean): Promise<ReviewDiffFile[]> => {
+      const loaded = await Promise.all(
+        pathRequests(paths, (path) => listed.get(path)).map((request) =>
+          window.spark.review
+            .diff({ cwd, mode, base: result.base, paths: request.paths, force })
+            .then((extra) => extra.files.filter((file) => request.files.includes(file.path)))
+            .catch(() => [] as ReviewDiffFile[]),
+        ),
+      );
+      return loaded.flat();
+    };
     const again = (await Promise.all([read(asked, true), read(seen, false)])).flat();
     if (gen !== generation.current) return;
     setDiff(result);
@@ -245,24 +251,7 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
     setDirty((value) => value + 1);
   }, [requestKey]);
 
-  // Anything that may have changed the diff marks it dirty; it reloads once
-  // the tab is on screen and no note is being written, so a refresh never
-  // moves lines under the user's pointer mid-sentence.
-  const composing = draft !== null || editingId !== null;
   const loadedFor = useRef(0);
-  useEffect(() => {
-    if (!visible || composing || dirty === loadedFor.current) return;
-    // Marks that arrive together (a git action bumps the status and the
-    // version) make one read.
-    const timer = setTimeout(
-      () => {
-        loadedFor.current = dirty;
-        void load();
-      },
-      loadedFor.current === 0 ? 0 : 150,
-    );
-    return () => clearTimeout(timer);
-  }, [composing, dirty, load, visible]);
 
   // A refresh the user asks for runs even with a note open.
   const refresh = useCallback(() => {
@@ -323,28 +312,31 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
     (current: ReviewDiff, paths: string[], force: boolean) => {
       const gen = generation.current;
       setLoadingPaths((prev) => new Set([...prev, ...paths]));
-      const settle = (loaded: ReadonlyMap<string, ReviewDiffFile>, error: string | null) => {
-        if (gen !== generation.current) return;
-        setOverrides((prev) => {
-          const next = new Map(prev);
-          for (const path of paths) {
-            const file = loaded.get(path);
-            const original = current.files.find((candidate) => candidate.path === path);
-            if (file) next.set(path, file);
-            else if (original) next.set(path, { ...original, deferred: undefined, lines: [], ...(error ? { error } : {}) });
-          }
-          return next;
-        });
-        setLoadingPaths((prev) => {
-          const next = new Set(prev);
-          for (const path of paths) next.delete(path);
-          return next;
-        });
-      };
-      void window.spark.review
-        .diff({ cwd, mode: current.mode, base: current.base, paths, force })
-        .then((result) => settle(new Map(result.files.map((file) => [file.path, file])), result.error ?? null))
-        .catch((err: Error) => settle(new Map(), err.message));
+      const listed = new Map(current.files.map((file) => [file.path, file]));
+      for (const request of pathRequests(paths, (path) => listed.get(path))) {
+        const settle = (loaded: ReadonlyMap<string, ReviewDiffFile>, error: string | null) => {
+          if (gen !== generation.current) return;
+          setOverrides((prev) => {
+            const next = new Map(prev);
+            for (const path of request.files) {
+              const file = loaded.get(path);
+              const original = listed.get(path);
+              if (file) next.set(path, file);
+              else if (original) next.set(path, { ...original, deferred: undefined, lines: [], ...(error ? { error } : {}) });
+            }
+            return next;
+          });
+          setLoadingPaths((prev) => {
+            const next = new Set(prev);
+            for (const path of request.files) next.delete(path);
+            return next;
+          });
+        };
+        void window.spark.review
+          .diff({ cwd, mode: current.mode, base: current.base, paths: request.paths, force })
+          .then((result) => settle(new Map(result.files.map((file) => [file.path, file])), result.error ?? null))
+          .catch((err: Error) => settle(new Map(), err.message));
+      }
     },
     [cwd],
   );
@@ -380,6 +372,31 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
 
   const files = useMemo(() => (diff?.files ?? []).map((file) => overrides.get(file.path) ?? file), [diff, overrides]);
   const fileByPath = useMemo(() => new Map(files.map((file) => [file.path, file])), [files]);
+
+  // Anything that may have changed the diff marks it dirty; it reloads once
+  // the tab is on screen and no note is being written, so a refresh never
+  // moves lines under the user's pointer mid-sentence. A note open in a
+  // collapsed file, or in one the diff no longer has, is not on screen and
+  // holds nothing back; its words are kept for when it shows again.
+  const composing = useMemo(() => {
+    const shown = (path: string) => fileByPath.has(path) && !collapsed.has(path);
+    if (draft && shown(draft.path)) return true;
+    const edited = editingId ? notes.find((note) => note.id === editingId) : undefined;
+    return Boolean(edited && edited.source === "diff" && shown(edited.filePath));
+  }, [collapsed, draft, editingId, fileByPath, notes]);
+  useEffect(() => {
+    if (!visible || composing || dirty === loadedFor.current) return;
+    // Marks that arrive together (a git action bumps the status and the
+    // version) make one read.
+    const timer = setTimeout(
+      () => {
+        loadedFor.current = dirty;
+        void load();
+      },
+      loadedFor.current === 0 ? 0 : 150,
+    );
+    return () => clearTimeout(timer);
+  }, [composing, dirty, load, visible]);
 
   const notesRef = useRef(new Map<string, ReviewNote[]>());
   const byPath = useMemo(() => {
@@ -710,7 +727,7 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
     async (destination: ReviewDestination) => {
       if (!workspaceId || !notes.length || sending) return;
       const batch = sortReviewNotes(notes);
-      const text = formatReviewNotes(batch, { scope, workspaceCwd: cwd });
+      const text = formatReviewNotes(batch, { scope, workspaceCwd: cwd, repoRoot: diff?.root });
       setSending(true);
       setMessage(null);
       try {
@@ -736,17 +753,17 @@ export default function ReviewTabHost({ cwd, status, gitVersion, visible, onOpen
         setSending(false);
       }
     },
-    [cwd, notes, onLaunchAgent, routing, scope, sending, workspaceId],
+    [cwd, diff?.root, notes, onLaunchAgent, routing, scope, sending, workspaceId],
   );
 
   const copyAll = useCallback(() => {
     if (!notes.length) return;
-    const text = formatReviewNotes(sortReviewNotes(notes), { scope, workspaceCwd: cwd });
+    const text = formatReviewNotes(sortReviewNotes(notes), { scope, workspaceCwd: cwd, repoRoot: diff?.root });
     void window.spark.clipboard
       .writeText(text)
       .then(() => setMessage({ text: `Copied ${notes.length === 1 ? "1 note" : `${notes.length} notes`}.` }))
       .catch((err: Error) => setMessage({ text: err.message, tone: "error" }));
-  }, [cwd, notes, scope]);
+  }, [cwd, diff?.root, notes, scope]);
 
   const clearAll = useCallback(() => {
     if (!workspaceId) return;
