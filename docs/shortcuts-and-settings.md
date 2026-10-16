@@ -392,15 +392,18 @@ fix starts on the kind of target you used last.
 
 GitHub is read with your own `gh`. Logs, hook output, file excerpts and
 comments are capped, secrets in them are replaced by `[redacted]`, and the
-prompt tells the agent to treat them as data, not instructions. The prompts
+prompt tells the agent to treat them as data, not instructions. A conflicted
+file made to hold secrets (`.env`, key files, `.npmrc` and the like) is named
+but never quoted. The prompts
 ask the agent not to push, commit or bypass hooks. Local workspaces only for
 now.
 
 **Notify me when CI fails on my pull request** (Settings, Git, Alerts) sends
 one alert when a check fails on the pull request of a workspace's branch,
-once per failing commit; a pull request that was already failing when Codara
-first saw it stays quiet until a later run fails. Clicking the alert opens
-Source Control. It asks GitHub only when the branch or its upstream moved,
+once per failing commit, including a pull request opened after the push
+whose checks failed before Codara first read it. Checks that failed while
+Codara was closed, or while the setting was off, stay quiet until a later
+run fails. Clicking the alert opens Source Control. It asks GitHub only when the branch or its upstream moved,
 every 90 seconds while checks run, and every 15 minutes otherwise.
 
 ### Quick commands
