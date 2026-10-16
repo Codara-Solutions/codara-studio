@@ -571,6 +571,10 @@ async function testLifecycle() {
   const write = (text) => harness.taps.get("pane-agent")(Buffer.from(text));
   // Printed but nothing listening on the host (stale history): never forwarded.
   write(`old banner http://localhost:${deadRemote}/\r\n`);
+  // A probe of a dead port runs its whole retry ladder (about 3.75 s) before it gives up. The
+  // preview resolver probes on its own, so start it now: it overlaps the printed URL's ladder and
+  // its answer is checked below, instead of paying the same ladder twice in a row.
+  const notListeningPending = api.resolveRemotePreviewUrl("ws-remote", `http://localhost:${deadRemote}/`);
   // Left out of the listing, so the 4 s poll cannot find it first: only output names it.
   remote.hidden.add(webRemote);
   remote.ports.set(webRemote, web.port);
@@ -582,7 +586,10 @@ async function testLifecycle() {
   assert.equal(await get(webRemote, "/dashboard"), "web");
   assert.equal(notices().at(-1).url, `http://localhost:${webRemote}/dashboard`);
   remote.hidden.delete(webRemote);
-  await sleep(4_000);
+  // The preview probe started after the printed URL's, so it ends after it; the short sleep lets
+  // the printed URL's probe settle and be acted on.
+  const notListening = await notListeningPending;
+  await sleep(100);
   assert.equal(await forwardOf(deadRemote), undefined, "a URL the host does not answer on is not forwarded");
   ok("a URL printed in a remote terminal is forwarded once the host answers on it, with its path");
 
@@ -618,7 +625,6 @@ async function testLifecycle() {
   remote.hidden.delete(previewRemote);
   const viaMoved = await api.resolveRemotePreviewUrl(undefined, `http://127.0.0.1:${busyRemote}/`);
   assert.deepEqual(viaMoved, { url: `http://127.0.0.1:${moved.localPort}/` }, "the active workspace, and a moved port");
-  const notListening = await api.resolveRemotePreviewUrl("ws-remote", `http://localhost:${deadRemote}/`);
   assert.match(notListening.error, new RegExp(`Nothing is listening on port ${deadRemote} on box`));
   assert.equal(await api.resolveRemotePreviewUrl("ws-local", "http://localhost:5173/"), null, "local workspaces are untouched");
   assert.equal(await api.resolveRemotePreviewUrl("ws-remote", "https://example.com/"), null);
