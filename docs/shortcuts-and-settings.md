@@ -667,7 +667,8 @@ needs from you, or **Sessions**, which searches your past agent sessions
 (see [agent-session-search.md](./agent-session-search.md)). Codara remembers
 the choice when it restarts. While the
 Workspaces list shows, the **Agents** side of the switch counts the agents
-waiting on you.
+waiting on you. Creating or renaming a workspace or a folder switches back
+to **Workspaces**, where you type its name.
 
 The Agents view has three groups, each with its count. Click a group's name
 to fold it; the folding is remembered.

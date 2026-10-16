@@ -300,6 +300,10 @@ function WorkspaceRail(props: RailProps) {
   // of overhanging the section stacked below (Source Control / Explorer).
   const wsScrollRef = useRef<HTMLDivElement | null>(null);
   const [railView, setRailView] = useRailView();
+  // A workspace being named (a new one, a rename) is named in the list.
+  useEffect(() => {
+    if (props.editingId) setRailView("workspaces");
+  }, [props.editingId, setRailView]);
   // ── Rail reorder ─────────────────────────────────────────────────────────
   // The gesture is owned by the LIST, not by the individual rows — the same
   // shape the tab strip uses. One hit-test against one cached geometry, so
