@@ -346,13 +346,19 @@ async function main() {
 
     // A slow server must not hold the first prompt for its whole connect
     // timeout: session_start returns after a short wait, the server is offered
-    // as connecting, and the loader and its tool work once it is up.
+    // as connecting, and the loader and its tool work once it is up. The slow
+    // server connects when the test creates the file named by its first
+    // argument, so the test releases it on the event it is waiting for instead
+    // of racing a fixed delay.
     const slowFixturePath = path.join(directory, "slow-fixture-server.cjs");
+    const releaseFirst = path.join(directory, "release-slow-first");
+    const releaseSecond = path.join(directory, "release-slow-second");
     fs.writeFileSync(
       slowFixturePath,
       fixtureServerSource(sdkDir).replace(
         "server.connect(new StdioServerTransport());",
-        "setTimeout(() => server.connect(new StdioServerTransport()), 4000);",
+        `const release = () => (require("node:fs").existsSync(process.argv[2]) ? server.connect(new StdioServerTransport()) : setTimeout(release, 20));
+release();`,
       ),
       "utf8",
     );
@@ -361,7 +367,7 @@ async function main() {
       JSON.stringify(
         config.buildPiMcpBridgeConfig(
           config.normalizePiMcpServers(
-            [{ name: "slow", command: process.execPath, args: [slowFixturePath] }],
+            [{ name: "slow", command: process.execPath, args: [slowFixturePath, releaseFirst] }],
             { env: process.env },
           ),
           { audience: "cora", connectTimeoutMs: 15_000 },
@@ -385,10 +391,12 @@ async function main() {
     assert.equal(slowPi.tools.has("mcp__slow__echo_tool"), false, "the slow server is still connecting");
     assert.match(slowHandle.promptSuffix(), /Connected MCP servers: slow \(connecting\)/);
     assert.doesNotMatch(slowHandle.promptSuffix(), /Unavailable MCP servers/);
-    const slowDiscovery = await slowPi.tools.get(bridge.EXTERNAL_TOOL_LOADER_NAME).execute(
+    const slowDiscoveryCall = slowPi.tools.get(bridge.EXTERNAL_TOOL_LOADER_NAME).execute(
       "call-slow-discover",
       { query: "echo", limit: 1 },
     );
+    fs.writeFileSync(releaseFirst, "");
+    const slowDiscovery = await slowDiscoveryCall;
     assert.deepEqual(slowDiscovery.details.activated, ["mcp__slow__echo_tool"], "the loader waits for the connection");
     assert.equal(slowPi.activeTools.has("mcp__slow__fail"), false, "a late connection does not activate every tool");
     const slowEcho = await slowPi.tools.get("mcp__slow__echo_tool").execute("call-slow-echo", { text: "late" });
@@ -446,7 +454,7 @@ async function main() {
     // next prompt for its whole connect timeout either.
     writeRoster([
       { name: "second", command: process.execPath, args: [fixturePath] },
-      { name: "slow", command: process.execPath, args: [slowFixturePath] },
+      { name: "slow", command: process.execPath, args: [slowFixturePath, releaseSecond] },
     ]);
     const reloadStartedAt = Date.now();
     await reloadPi.handlers.get("input")({ type: "input", text: "with a slow server" });
@@ -456,10 +464,12 @@ async function main() {
       `the prompt waited ${reloadWait}ms for a slow server added mid-chat`,
     );
     assert.match(reloadHandle.promptSuffix(), /slow \(connecting\)/);
-    const lateDiscovery = await reloadPi.tools.get(bridge.EXTERNAL_TOOL_LOADER_NAME).execute(
+    const lateDiscoveryCall = reloadPi.tools.get(bridge.EXTERNAL_TOOL_LOADER_NAME).execute(
       "call-late",
       { activate: ["mcp__slow__echo_tool"] },
     );
+    fs.writeFileSync(releaseSecond, "");
+    const lateDiscovery = await lateDiscoveryCall;
     assert.deepEqual(lateDiscovery.details.activated, ["mcp__slow__echo_tool"], "the slow server finishes in the background");
 
     // An unchanged roster is not re-read into reconnects.
