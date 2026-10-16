@@ -81,11 +81,11 @@ async function main() {
 
   assert.strictEqual(
     shared.precheckSkipDetail({ passed: false, exitCode: 3, timedOut: false, durationMs: 5, outputTail: "" }),
-    "Skipped: the precheck exited with code 3.",
+    "Skipped: the check exited with code 3.",
   );
   assert.strictEqual(
     shared.precheckSkipDetail({ passed: false, exitCode: null, timedOut: true, durationMs: 60_400, outputTail: "" }, 60),
-    "Skipped: the precheck did not finish within 60s.",
+    "Skipped: the check did not finish within 60s.",
   );
   assert.match(
     shared.precheckSkipDetail({ passed: false, exitCode: null, timedOut: false, durationMs: 1, outputTail: "", error: "spawn /bin/zsh ENOENT" }),
@@ -97,7 +97,7 @@ async function main() {
   );
   assert.match(
     shared.precheckVerdict({ passed: false, exitCode: 1, timedOut: false, durationMs: 12, outputTail: "" }),
-    /^Would skip: the precheck exited with code 1\.$/,
+    /^Would skip: the check exited with code 1\.$/,
   );
   pass("skip and verdict lines are plain words");
 

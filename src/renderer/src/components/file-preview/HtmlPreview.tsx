@@ -104,7 +104,7 @@ export default function HtmlPreview({ path, mtimeMs }: Props) {
           <div className="spark-eyebrow" style={{ marginBottom: 6 }}>
             Remote file
           </div>
-          Rendered HTML preview needs a local file — remote pages can&apos;t load their linked
+          Rendered HTML preview needs a local file. Remote pages can&apos;t load their linked
           assets. Use the Edit view to read the source.
         </div>
       </div>

@@ -1,6 +1,6 @@
 // Pane chrome for agent hibernation (lib/agentHibernation.ts): the calm
 // "Sleeping" chip a pane shows while Codara has its idle agent stopped, and
-// the "Keep awake" pin in the pane toolbar. Both are part of the pane, not
+// the "Keep running" pin in the pane toolbar. Both are part of the pane, not
 // floating layers, so they stay solid (no glass).
 
 import type { TerminalLeafHibernation } from "../../tabs/types";
@@ -118,7 +118,7 @@ export function SleepingPaneChip({
 }
 
 /**
- * The pane toolbar's "Keep awake" pin. Pressed, the pane's agent is never
+ * The pane toolbar's "Keep running" pin. Pressed, the pane's agent is never
  * stopped by hibernation, however long it sits in a background workspace.
  */
 export function KeepAwakeButton({
@@ -128,13 +128,13 @@ export function KeepAwakeButton({
   pinned: boolean;
   onToggle: () => void;
 }) {
-  const title = pinned ? "Keep awake is on: this agent never sleeps" : "Keep awake";
+  const title = pinned ? "Keep running is on: this agent never sleeps" : "Keep running";
   return (
     <button
       type="button"
       className={`spark-icon-btn${pinned ? " is-active" : ""}`}
       title={title}
-      aria-label="Keep awake"
+      aria-label="Keep running"
       aria-pressed={pinned}
       data-testid="pane-keep-awake"
       onClick={(event) => {

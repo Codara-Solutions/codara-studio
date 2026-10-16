@@ -238,7 +238,7 @@ The pages:
 | Appearance | Theme, and Glass (liquid glass for menus, popovers, toasts and dialogs, with tint, blur, refraction and fringe under **Fine-tune glass**). |
 | Notifications | In the app (toast and how long it stays), On your computer (native OS notification, sound, dock badge and taskbar flash). |
 | Editor | Code editor (Vim mode, autosave) and inline AI autocomplete. |
-| Terminal | The shell for new panes, output history and scrollback lines, whether programs may copy to the clipboard (OSC 52), a resource overview, and the run terminal lifecycle for worker panes. |
+| Terminal | The shell for new panes, output history and scrollback lines, whether programs may copy to the clipboard, clearing the terminal output Codara saved (**Clear saved terminal output**), a resource overview, and the run terminal lifecycle for worker panes. |
 | Quick commands | Saved shell commands and agent prompts: add, edit, reorder, delete, and where each is offered. Also what a right-click in a terminal does. See [Quick commands](#quick-commands). |
 | Git | Remotes (background fetch, Instant git triggers, and a custom webhook receiver under Advanced), Alerts (notify on teammate pushes, new pull requests, and CI failing on your pull request), Worktrees (whether agents may create and remove worktrees, and remove ones you created, the repository's worktree setup file, and under Advanced your own setup command for new worktrees and extra ignored files an agent may delete with a merged worktree). |
 | Browser | Links (auto-open the browser for local dev servers, open links in the default browser or the Codara browser, ask where terminal links open), and the Chrome extension (**Keep agents in your Chrome**, link status, pairing, paired browsers, agent activity). |
@@ -442,11 +442,15 @@ An **agent prompt** goes to:
 
 Two variables fill in when a command runs: `{branch}` (the git branch of the
 folder it runs in) and `{cwd}` (that folder). `${branch}` is left alone for
-the shell. In a shell command the value is typed unquoted, so put `"{cwd}"` in
-double quotes when a folder may contain spaces, and a value holding a
+the shell. In a shell command `{cwd}` is quoted for the terminal's shell, so a
+folder with spaces or quotes stays one word: single quotes in bash, zsh,
+fish and PowerShell, double quotes in cmd, and forward slashes in Git Bash
+(which drops backslashes). If you already wrap `{cwd}` in quotes yourself it
+is left as you wrote it. `{branch}` is typed unquoted, so a branch holding a
 character a shell would read as code (`;`, `$`, a quote, a backtick, a
 parenthesis and the like) stops the command with a notice instead of running
-it.
+it, and so does a folder with a line break (or, in cmd, a double quote or
+percent sign).
 
 **Right-click in a terminal** chooses what a plain right-click does: **Copy
 or paste** (the default: copy the selection, or paste when nothing is
@@ -579,7 +583,7 @@ whenever it cannot tell:
 - nothing else runs in the pane: no dev server or other program you started,
   and no command the agent started after it launched (the MCP servers it
   starts at launch do not count);
-- the pane is not pinned with **Keep awake** (the sun button in the pane's
+- the pane is not pinned with **Keep running** (the sun button in the pane's
   toolbar, shown on agent panes).
 
 Cora's worker panes and phone panes never sleep. A sleeping pane that is
@@ -704,15 +708,15 @@ list, Up and Down (or Home and End) move between cards, Tab reaches a card's
 reply box or its **Answer in terminal** button, and Escape goes back to the
 card.
 
-### Automation precheck and missed runs
+### Check first and missed runs
 
 These two settings belong to each automation, not to the Settings dialog: open
 the automation in the editor and select its trigger. The cron and interval
 triggers show both; the folder, git, "After automation" and "Automation
-activity" triggers show only the precheck. Manual and continuous triggers show
-the precheck only with a cadence loop, whose later passes it checks.
+activity" triggers show only Check first. Manual and continuous triggers show
+Check first only with a cadence loop, whose later passes it checks.
 
-**Before each run** takes an optional shell command. It runs in the
+**Before each run** (the **Check first command**) takes an optional shell command. It runs in the
 workspace folder before every pass that the trigger starts (and before every
 pass of a cadence loop). Exit code 0 runs the pass. Any other exit code, a
 timeout (1 to 600 seconds, 60 by default) or a command that cannot start skips
@@ -860,9 +864,9 @@ your user skill folders for Pi, Claude and Codex. A skill switched off here
 is not loaded by new Cora sessions. Removing a skill moves its folder to the
 trash.
 
-## The worktree cleanup screen
+## Clean up worktrees
 
-The cleanup screen lists every worktree of the repositories behind your
+Clean up worktrees lists every worktree of the repositories behind your
 workspaces, so you can find the ones that only take up space and remove
 several at once. Open it from the menu on a workspace's row in the rail (**Clean up
 worktrees…**, which starts filtered to that workspace's repository) or

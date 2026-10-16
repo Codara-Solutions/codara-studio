@@ -457,7 +457,7 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
           <span style={{ flex: 1 }} />
           {truncated ? (
             <span style={{ color: "var(--warn)" }}>
-              File list capped — refine the query
+              File list capped. Refine the query
             </span>
           ) : null}
         </footer>

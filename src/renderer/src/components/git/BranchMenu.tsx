@@ -227,9 +227,9 @@ export default function BranchMenu({
         type="button"
         title={
           list.detached
-            ? "HEAD is detached — pick a branch to move it again"
+            ? "HEAD is detached. Pick a branch to move it again"
             : currentName
-              ? `On branch ${currentName} — click to switch or manage branches`
+              ? `On branch ${currentName}. Click to switch or manage branches`
               : "Manage branches"
         }
         disabled={disabled}

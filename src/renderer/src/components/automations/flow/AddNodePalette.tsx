@@ -52,7 +52,7 @@ function entries(): Entry[] {
       key: "guard",
       choice: { kind: "guard" },
       title: "Guard",
-      blurb: "Branch on a condition — pass or fail.",
+      blurb: "Branch on a condition: pass or fail.",
       group: "Flow",
       tone: "var(--ok)",
       keywords: ["if", "condition", "branch", "tests", "check", "route"],

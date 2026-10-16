@@ -2257,7 +2257,7 @@ function WorkspaceRow({
                 ? "This workspace's shade follows its folder color and position"
                 : "Change color"
               : working
-                ? `${ws.name} — agent working`
+                ? `${ws.name}, agent working`
                 : undefined
           }
           style={{
@@ -2388,7 +2388,7 @@ function WorkspaceRow({
               // progress), and deleting it on the app's own initiative is not
               // undoable. The strike says "this path is gone" without deciding
               // anything on the user's behalf.
-              title={missing ? `${ws.name} — folder not found at ${ws.cwd}` : ws.name}
+              title={missing ? `${ws.name}: folder not found at ${ws.cwd}` : ws.name}
               style={{
                 fontSize: 12,
                 fontWeight: 600,

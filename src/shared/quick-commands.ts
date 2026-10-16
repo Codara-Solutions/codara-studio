@@ -192,17 +192,28 @@ export function moveQuickCommand(commands: readonly QuickCommand[], id: string, 
 // ── Variables ───────────────────────────────────────────────────────────────
 //
 // {branch} and {cwd} fill in the git branch and the folder the command runs
-// in. "${branch}" is a shell variable and stays as written. In a shell
-// command a value is typed into the shell unquoted, so a value holding a
-// character that a shell (POSIX, PowerShell or cmd) would read as code is
-// refused instead of run; prompts are plain text and take any value.
-// Parentheses count: git allows them in branch names, PowerShell runs
-// `git push origin (calc)` as a subexpression, and zsh runs the code in a
-// glob qualifier such as `README.md(e+calc+)`.
+// in. "${branch}" is a shell variable and stays as written.
+//
+// {cwd} is quoted for the shell it is typed into, so a folder with spaces or
+// quote characters stays one argument: single quotes in POSIX shells (a
+// quote inside becomes '\''), single quotes in PowerShell (doubled), double
+// quotes in cmd, and forward slashes in Git Bash, which drops backslashes.
+// A {cwd} the command already wraps in quotes is left as the author wrote it
+// and checked like {branch}.
+//
+// {branch} is typed unquoted, so a value holding a character that a shell
+// (POSIX, PowerShell or cmd) would read as code is refused instead of run;
+// prompts are plain text and take any value. Parentheses count: git allows
+// them in branch names, PowerShell runs `git push origin (calc)` as a
+// subexpression, and zsh runs the code in a glob qualifier such as
+// `README.md(e+calc+)`.
 
 export type QuickCommandVariable = "branch" | "cwd";
 
 export const QUICK_COMMAND_VARIABLES: readonly QuickCommandVariable[] = ["branch", "cwd"];
+
+/** How a shell reads quotes: what {cwd} must look like to stay one word. */
+export type QuickCommandShellKind = "posix" | "powershell" | "cmd" | "gitbash";
 
 const VARIABLE_PATTERN = /(?<!\$)\{(branch|cwd)\}/g;
 const SHELL_UNSAFE = /[`$"';&|<>!%()\r\n\0]/;
@@ -213,6 +224,42 @@ export function quickCommandVariablesIn(text: string): Set<QuickCommandVariable>
   return out;
 }
 
+/** The quoting rules of a detected shell (ShellInfo's family and exe). */
+export function quickCommandShellKind(shell: { family: string; exe: string } | null | undefined): QuickCommandShellKind {
+  if (!shell) return "posix";
+  if (shell.family === "pwsh" || shell.family === "powershell") return "powershell";
+  if (shell.family === "cmd") return "cmd";
+  if (shell.family === "bash" && /^[a-z]:[\\/]/i.test(shell.exe)) return "gitbash";
+  return "posix";
+}
+
+const posixQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
+
+/**
+ * The folder as one word for `kind`, or null when no quoting can carry it
+ * (a line break or NUL, which would end the typed command; in cmd also a
+ * double quote or a percent sign, which cmd expands inside double quotes).
+ */
+export function quoteCwdForShell(value: string, kind: QuickCommandShellKind): string | null {
+  if (/[\r\n\0]/.test(value)) return null;
+  switch (kind) {
+    case "powershell":
+      // PowerShell also treats the typographic single quotes as quotes.
+      return `'${value.replace(/['\u2018\u2019\u201a\u201b]/g, (quote) => quote + quote)}'`;
+    case "cmd":
+      return /["%]/.test(value) ? null : `"${value}"`;
+    case "gitbash":
+      return posixQuote(value.replace(/\\/g, "/"));
+    default:
+      return posixQuote(value);
+  }
+}
+
+const insideQuotes = (text: string, start: number, end: number): boolean => {
+  const before = text[start - 1];
+  return (before === '"' || before === "'") && text[end] === before;
+};
+
 export type QuickCommandExpansion =
   | { ok: true; text: string }
   | { ok: false; variable: QuickCommandVariable; reason: "missing" | "unsafe" };
@@ -221,15 +268,28 @@ export function expandQuickCommandText(
   text: string,
   values: Partial<Record<QuickCommandVariable, string | null | undefined>>,
   mode: "shell" | "prompt",
+  shellKind: QuickCommandShellKind = "posix",
 ): QuickCommandExpansion {
-  for (const variable of quickCommandVariablesIn(text)) {
+  const replacements = new Map<number, string>();
+  for (const match of text.matchAll(VARIABLE_PATTERN)) {
+    const variable = match[1] as QuickCommandVariable;
     const value = values[variable];
     if (!value) return { ok: false, variable, reason: "missing" };
-    if (mode === "shell" && SHELL_UNSAFE.test(value)) return { ok: false, variable, reason: "unsafe" };
+    if (mode !== "shell") continue;
+    const index = match.index ?? 0;
+    if (variable === "cwd" && !insideQuotes(text, index, index + match[0].length)) {
+      const quoted = quoteCwdForShell(value, shellKind);
+      if (quoted === null) return { ok: false, variable, reason: "unsafe" };
+      replacements.set(index, quoted);
+    } else if (SHELL_UNSAFE.test(value)) {
+      return { ok: false, variable, reason: "unsafe" };
+    }
   }
   return {
     ok: true,
-    text: text.replace(VARIABLE_PATTERN, (_whole, name: QuickCommandVariable) => values[name] ?? ""),
+    text: text.replace(VARIABLE_PATTERN, (_whole, name: QuickCommandVariable, offset: number) =>
+      replacements.get(offset) ?? values[name] ?? "",
+    ),
   };
 }
 

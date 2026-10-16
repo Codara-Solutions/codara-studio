@@ -316,7 +316,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
       return {
         resumeCommand: fresh.command,
         resumeIsFreshFallback: true,
-        fallbackNotice: "previous Grok session couldn't be resumed — starting a fresh one",
+        fallbackNotice: "previous Grok session couldn't be resumed, starting a fresh one",
         fallbackSession: {
           runtime: "grok",
           sessionId: fresh.sessionId,
@@ -334,7 +334,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
     return {
       resumeCommand: fresh.command,
       resumeIsFreshFallback: true,
-      fallbackNotice: "previous Claude session couldn't be resumed — starting a fresh one",
+      fallbackNotice: "previous Claude session couldn't be resumed, starting a fresh one",
       fallbackSession: {
         runtime: "claude",
         sessionId: fresh.sessionId,
@@ -3043,7 +3043,7 @@ export function useTerminalSession({
           const fresh = buildClaudeLaunch();
           logRestore(`pane=${sessionId} claude REFUSED resume; self-healing to fresh id=${fresh.sessionId}`);
           term.write(
-            `\r\n\x1b[2m[couldn't resume the previous Claude session — starting a fresh one]\x1b[0m\r\n`,
+            `\r\n\x1b[2m[couldn't resume the previous Claude session, starting a fresh one]\x1b[0m\r\n`,
           );
           onResumeFallbackRef.current?.({
             runtime: "claude",
@@ -3141,7 +3141,7 @@ export function useTerminalSession({
             // if it somehow attached to a live session, mutate nothing, otherwise
             // the shell family couldn't run a startup command — print the manual line.
             if (!spawnResult.attached) {
-              term.write(`\x1b[2m[couldn't auto-resume — run: ${plan.resumeCommand}]\x1b[0m\r\n`);
+              term.write(`\x1b[2m[couldn't auto-resume. Run: ${plan.resumeCommand}]\x1b[0m\r\n`);
             }
             return;
           }
@@ -3291,7 +3291,7 @@ export function useTerminalSession({
         const prior = pruneAttempts(autoResumeAttempts.get(sessionId) ?? [], now);
         if (!canAutoResume(prior, now)) {
           term.write(
-            `\x1b[2m[auto-resume paused after repeated exits — run: ${buildAgentResumeCommand(session)}]\x1b[0m\r\n`,
+            `\x1b[2m[auto-resume paused after repeated exits. Run: ${buildAgentResumeCommand(session)}]\x1b[0m\r\n`,
           );
           return;
         }
@@ -3608,7 +3608,7 @@ export function useTerminalSession({
           if (!disposed) {
             logRestore(`pane=${sessionId} hint: inactive pointer (${hintSession.runtime} id=${hintSession.sessionId})`);
             term.write(
-              `\x1b[2m[previous ${hintSession.runtime} session available — resume: ${buildAgentResumeCommand(hintSession)}]\x1b[0m\r\n`,
+              `\x1b[2m[previous ${hintSession.runtime} session available. Resume: ${buildAgentResumeCommand(hintSession)}]\x1b[0m\r\n`,
             );
           }
         }
@@ -3628,7 +3628,7 @@ export function useTerminalSession({
         }
       } else if (!attachedExistingSession) {
         term.write(
-          `\x1b[2m[couldn't auto-resume the previous ${agentSession?.runtime ?? "agent"} session in this shell — run: ${resumeCommand}]\x1b[0m\r\n`,
+          `\x1b[2m[couldn't auto-resume the previous ${agentSession?.runtime ?? "agent"} session in this shell. Run: ${resumeCommand}]\x1b[0m\r\n`,
         );
       }
       // Boot restore attempted — every outcome lands here (resume riding the

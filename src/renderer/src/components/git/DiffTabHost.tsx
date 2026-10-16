@@ -112,8 +112,8 @@ export default function DiffTabHost({
             borderBottom: "1px solid var(--rule-soft)",
           }}
         >
-          This file was renamed to <span style={{ color: "var(--ink-dim)" }}>{renamedTo}</span> —
-          open its diff from Source Control.
+          This file was renamed to <span style={{ color: "var(--ink-dim)" }}>{renamedTo}</span>.
+          Open its diff from Source Control.
         </div>
       )}
       <DiffView

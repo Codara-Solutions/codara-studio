@@ -226,7 +226,7 @@ test("a failing step fails the pass unless it is soft-fail", async () => {
         kind: "automation.finished",
         sourceKey: "automation:e2e",
         tone: "success",
-        title: "Automation — finished",
+        title: "Automation finished",
         body: "control alert that should stay hidden",
         soundKind: "done",
         target: { type: "automation", jobId: hardId, workspaceId: "ws-automations-e2e" },

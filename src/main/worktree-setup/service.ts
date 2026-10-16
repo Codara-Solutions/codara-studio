@@ -36,6 +36,7 @@ import {
 } from "./links";
 import { assertCodaraOwnedWrite } from "../outside-write-guard";
 import { DEFAULT_COPY_BUDGET, manifestFrom, materializeSetup, type CopyBudget } from "./materialize";
+import { buildCmdScript, setupLines } from "./cmd-script";
 import { commonGitDir, copyPatterns, readSetupSources, resolveCopyCandidates, resolveLinkSources } from "./plan";
 
 export type UserShellKind = "posix" | "pwsh" | "cmd";
@@ -833,16 +834,15 @@ export class WorktreeSetupService {
   }
 
   private async stepsFor(run: Run, command: WorktreeSetupCommand): Promise<Step[]> {
-    const lines = command.command.split("\n").map((line) => line.trim()).filter((line) => line && !line.startsWith("#"));
     const comspec = process.env.ComSpec || "cmd.exe";
-    const cmdLine = (line: string): Step => ({
-      file: comspec,
-      args: ["/d", "/s", "/c", `"${line}"`],
-      verbatim: true,
-      shown: line,
-    });
+    // One cmd for all of a step's lines, so a `cd` or `set` carries over.
+    const cmdScript = async (file: string): Promise<Step> => {
+      const script = join(run.setupDir, `${command.kind}-setup.cmd`);
+      await writePrivateFile(script, buildCmdScript(setupLines(command.command)));
+      return { file, args: ["/d", "/s", "/c", `"${script}"`], verbatim: true, shown: command.command };
+    };
     if (command.kind === "repo") {
-      if (this.platform === "win32") return lines.map(cmdLine);
+      if (this.platform === "win32") return [await cmdScript(comspec)];
       const script = join(run.setupDir, "repo-setup.sh");
       await writePrivateFile(script, `set -e\n${command.command}\n`);
       return [{ file: posixRunner(), args: [script], shown: command.command }];
@@ -865,7 +865,7 @@ export class WorktreeSetupService {
       ];
     }
     if (this.platform === "win32" && shell?.kind !== "posix") {
-      return lines.map((line) => (shell?.kind === "cmd" ? { ...cmdLine(line), file: shell.path } : cmdLine(line)));
+      return [await cmdScript(shell?.kind === "cmd" ? shell.path : comspec)];
     }
     // A POSIX shell, Git Bash included when it is the default on Windows:
     // the command was written for the terminal it used to be typed into.

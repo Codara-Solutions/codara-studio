@@ -114,12 +114,12 @@ function formatSeconds(ms: number): string {
 
 /** The history line for a precheck that said no. */
 export function precheckSkipDetail(result: AutomationPrecheckResult, timeoutSeconds?: number): string {
-  if (result.error) return `Skipped: the precheck could not run (${result.error}).`;
+  if (result.error) return `Skipped: the check could not run (${result.error}).`;
   if (result.timedOut) {
     const limit = timeoutSeconds ? `${timeoutSeconds}s` : formatSeconds(result.durationMs);
-    return `Skipped: the precheck did not finish within ${limit}.`;
+    return `Skipped: the check did not finish within ${limit}.`;
   }
-  return `Skipped: the precheck exited with code ${result.exitCode ?? "unknown"}.`;
+  return `Skipped: the check exited with code ${result.exitCode ?? "unknown"}.`;
 }
 
 /** The one-line verdict the editor's "Test check" shows. */

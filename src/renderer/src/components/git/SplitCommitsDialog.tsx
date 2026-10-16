@@ -188,10 +188,10 @@ export default function SplitCommitsDialog({ cwd, onClose, onDone }: Props): Rea
                 ? "Reading your changes…"
                 : phase.kind === "done"
                   ? phase.result.ok
-                    ? "Done — your work is saved."
-                    : "Stopped early — see below."
+                    ? "Done. Your work is saved."
+                    : "Stopped early. See below."
                   : reviewGroups
-                    ? `${reviewGroups.length} commit${reviewGroups.length === 1 ? "" : "s"} · ${fileTotal} file${fileTotal === 1 ? "" : "s"} — nothing is saved until you create them`
+                    ? `${reviewGroups.length} commit${reviewGroups.length === 1 ? "" : "s"} · ${fileTotal} file${fileTotal === 1 ? "" : "s"}. Nothing is saved until you create them`
                     : ""}
             </div>
           </div>
@@ -259,7 +259,7 @@ export default function SplitCommitsDialog({ cwd, onClose, onDone }: Props): Rea
               <Spinner size={16} />
               <span>Reading your changes and grouping them into commits…</span>
               <span style={{ fontSize: 10.5, color: "var(--muted-2)" }}>
-                Cora groups by purpose — a feature and its tests travel together.
+                Cora groups by purpose: a feature and its tests travel together.
               </span>
             </div>
           ) : null}
@@ -496,7 +496,7 @@ function GroupCard({
                   fontStyle: "italic",
                 }}
               >
-                subject only — click to add details
+                subject only, click to add details
               </div>
             )}
           </div>
@@ -661,7 +661,7 @@ function DoneView({ result }: { result: GitSplitExecuteResult }): React.ReactEle
       {result.ok ? (
         <div style={{ fontSize: 12, color: "var(--ink-dim)", lineHeight: 1.5 }}>
           All {result.committed.length} commit{result.committed.length === 1 ? "" : "s"} created.
-          Your work is saved locally — share it for review whenever you're ready.
+          Your work is saved locally. Share it for review whenever you're ready.
         </div>
       ) : (
         <div style={{ fontSize: 12, color: "var(--warn)", lineHeight: 1.5 }}>{result.error}</div>

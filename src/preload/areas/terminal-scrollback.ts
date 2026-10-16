@@ -17,7 +17,17 @@ export interface TerminalScrollbackReplay {
   savedAt: string;
 }
 
+export interface TerminalScrollbackUsage {
+  files: number;
+  bytes: number;
+}
+
 export const terminalScrollbackApi = {
+  /** How much saved terminal output is on disk. */
+  usage: (): Promise<TerminalScrollbackUsage> => ipcRenderer.invoke("terminalScrollback:usage"),
+  /** Deletes all saved terminal output; returns what was removed. */
+  clear: (): Promise<TerminalScrollbackUsage> => ipcRenderer.invoke("terminalScrollback:clear"),
+
   /**
    * The output a pane had before Codara restarted, to write into its xterm
    * before the PTY spawns. Null when there is none, the setting is off, or the

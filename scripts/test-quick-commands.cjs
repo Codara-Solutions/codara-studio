@@ -170,6 +170,38 @@ async function main() {
     assert.deepEqual(qc.expandQuickCommandText("npm test", {}, "shell"), { ok: true, text: "npm test" });
   });
 
+  await check("{cwd} is quoted for the shell it is typed into", () => {
+    const run = (text, cwd, kind) => qc.expandQuickCommandText(text, { cwd }, "shell", kind);
+    assert.deepEqual(run("cd {cwd}", "/work/my app", "posix"), { ok: true, text: "cd '/work/my app'" });
+    assert.deepEqual(run("cd {cwd}", "/work/it's", "posix"), { ok: true, text: "cd '/work/it'\\''s'" });
+    assert.deepEqual(run("cd {cwd}", "/work/$HOME `x`", "posix"), { ok: true, text: "cd '/work/$HOME `x`'" }, "single quotes keep $ and backticks literal");
+    assert.deepEqual(run("cd {cwd}", "/work/app"), { ok: true, text: "cd '/work/app'" }, "POSIX is the default");
+    assert.deepEqual(run("cd {cwd}", "C:\\Users\\a b\\it's", "powershell"), { ok: true, text: "cd 'C:\\Users\\a b\\it''s'" });
+    assert.deepEqual(run("cd {cwd}", "C:\\a\u2019b", "powershell"), { ok: true, text: "cd 'C:\\a\u2019\u2019b'" }, "typographic quotes are doubled too");
+    assert.deepEqual(run("cd /d {cwd}", "C:\\Users\\a b", "cmd"), { ok: true, text: 'cd /d "C:\\Users\\a b"' });
+    assert.deepEqual(run("cd {cwd}", "C:\\Program Files\\x", "gitbash"), { ok: true, text: "cd 'C:/Program Files/x'" }, "Git Bash gets forward slashes");
+    assert.deepEqual(run("cd {cwd}", "C:\\it's", "gitbash"), { ok: true, text: "cd 'C:/it'\\''s'" });
+    for (const kind of ["posix", "powershell", "cmd", "gitbash"]) {
+      assert.deepEqual(run("cd {cwd}", "/a\nb", kind), { ok: false, variable: "cwd", reason: "unsafe" }, `${kind}: a line break`);
+    }
+    assert.deepEqual(run("cd {cwd}", "C:\\100%", "cmd"), { ok: false, variable: "cwd", reason: "unsafe" }, "cmd expands % inside quotes");
+    assert.deepEqual(run("echo {cwd} {cwd}", "/a b", "posix"), { ok: true, text: "echo '/a b' '/a b'" }, "every occurrence");
+    // A command written for the old behaviour keeps working.
+    assert.deepEqual(run('cd "{cwd}"', "/work/my app", "posix"), { ok: true, text: 'cd "/work/my app"' });
+    assert.deepEqual(run("cd '{cwd}'", "/work/my app", "posix"), { ok: true, text: "cd '/work/my app'" });
+    assert.deepEqual(run('cd "{cwd}"', "/work/$x", "posix"), { ok: false, variable: "cwd", reason: "unsafe" }, "a hand-quoted value is still checked");
+    assert.deepEqual(run('cd "{cwd}" && cd {cwd}', "/a b", "posix"), { ok: true, text: "cd \"/a b\" && cd '/a b'" }, "mixed");
+    assert.deepEqual(qc.expandQuickCommandText("Open {cwd}", { cwd: "/a b" }, "prompt", "powershell"), { ok: true, text: "Open /a b" }, "prompts stay plain");
+    const kind = qc.quickCommandShellKind;
+    assert.equal(kind({ family: "pwsh", exe: "C:\\pwsh.exe" }), "powershell");
+    assert.equal(kind({ family: "powershell", exe: "C:\\powershell.exe" }), "powershell");
+    assert.equal(kind({ family: "cmd", exe: "C:\\Windows\\System32\\cmd.exe" }), "cmd");
+    assert.equal(kind({ family: "bash", exe: "C:\\Program Files\\Git\\bin\\bash.exe" }), "gitbash");
+    assert.equal(kind({ family: "bash", exe: "/bin/bash" }), "posix");
+    assert.equal(kind({ family: "zsh", exe: "/bin/zsh" }), "posix");
+    assert.equal(kind(null), "posix");
+  });
+
   await check("terminal right-click: quick edit by default, Shift opens the menu", () => {
     const act = qc.terminalRightClickAction;
     assert.equal(act("paste", { shiftKey: false, hasSelection: true }), "copy");

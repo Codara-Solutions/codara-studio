@@ -732,7 +732,7 @@ function CleanState(): React.ReactElement {
       <span style={{ color: "var(--ok)", display: "inline-flex" }}>
         <CommitIcon />
       </span>
-      No changes — working tree clean.
+      No changes, working tree clean.
     </div>
   );
 }

@@ -87,6 +87,7 @@ import {
 import CustomSelect from "./settings/CustomSelect";
 import SettingsNav from "./settings/SettingsNav";
 import ThemePicker from "./settings/ThemePicker";
+import SavedTerminalOutputRow from "./settings/SavedTerminalOutputRow";
 import { LaunchArgsSection } from "./settings/launch-args/LaunchArgsSection";
 import {
   Advanced,
@@ -830,10 +831,11 @@ function TerminalSettings({
         />
         <ToggleRow
           title="Let programs copy to the clipboard"
-          desc="tmux, Neovim and programs over SSH can put up to 768 KB of text on this computer's clipboard (OSC 52). They can never read it, and only a pane you can see and type into can copy."
+          desc="tmux, Neovim and programs over SSH can put up to 768 KB of text on this computer's clipboard. They can never read it, and only a pane you can see and type into can copy."
           checked={osc52Clipboard}
           onChange={onOsc52ClipboardChange}
         />
+        <SavedTerminalOutputRow />
       </SettingsSection>
 
       <SettingsSection
@@ -3180,7 +3182,7 @@ function SessionsSettings({
             desc={
               hibernationMinutes === 0
                 ? "Agents in background workspaces keep running however long they wait."
-                : `${presetHint(AGENT_HIBERNATION_PRESETS, hibernationMinutes) ?? ""} A finished agent in a background workspace stops after this long to free its memory, and resumes when you open its pane. Agents waiting for you, pinned with Keep awake, or sharing a pane with another program stay awake.`
+                : `${presetHint(AGENT_HIBERNATION_PRESETS, hibernationMinutes) ?? ""} A finished agent in a background workspace stops after this long to free its memory, and resumes when you open its pane. Agents waiting for you, pinned with Keep running, or sharing a pane with another program stay awake.`
             }
             control={
               <Segmented

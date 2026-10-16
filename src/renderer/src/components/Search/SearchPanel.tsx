@@ -609,7 +609,7 @@ export default function SearchPanel({ open, cwd, onClose, onOpenFile }: Props) {
           <span style={{ flex: 1 }} />
           {hitCap && (
             <span style={{ color: "var(--warn)" }}>
-              {HIT_CAP}+ hits — refine the query
+              {HIT_CAP}+ hits. Refine the query
             </span>
           )}
         </footer>

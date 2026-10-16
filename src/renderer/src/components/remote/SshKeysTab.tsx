@@ -102,7 +102,7 @@ export default function SshKeysTab() {
               >
                 <div style={{ flex: 1, fontSize: 12, color: "var(--ink)" }}>
                   Delete <b>{key.name}</b> and its public key? Servers that trust this key will stop
-                  accepting logins with it — make sure you have another way in. This cannot be undone.
+                  accepting logins with it. Make sure you have another way in. This cannot be undone.
                 </div>
                 <button type="button" className="spark-btn" disabled={busy} onClick={() => setConfirmDelete(null)}>
                   Cancel
@@ -258,7 +258,7 @@ function SetupHelper({ keyInfo }: { keyInfo: SshKeyInfo }) {
       }}
     >
       <div style={{ color: "var(--ink)" }}>
-        Your <b>public</b> key is safe to share — paste it wherever the server or provider asks for an SSH key:
+        Your <b>public</b> key is safe to share. Paste it wherever the server or provider asks for an SSH key:
       </div>
       <ul style={{ margin: 0, paddingLeft: 18, color: "var(--muted)", display: "grid", gap: 4 }}>
         <li>
@@ -274,7 +274,7 @@ function SetupHelper({ keyInfo }: { keyInfo: SshKeyInfo }) {
       </ul>
       <CopyableCode text={`echo ${shQuote(keyInfo.publicKey ?? "")} >> ~/.ssh/authorized_keys`} />
       <div style={{ color: "var(--muted-2)", fontSize: 11 }}>
-        Never share the private half ({keyInfo.name}) — it stays on this machine.
+        Never share the private half ({keyInfo.name}). It stays on this machine.
       </div>
     </div>
   );
@@ -387,7 +387,7 @@ function GenerateForm({
             disabled={busy}
           />
           <span style={{ fontSize: 11, color: "var(--muted)" }}>
-            Optional — protects the key file; you'll be asked for it when connecting
+            Optional. Protects the key file; you'll be asked for it when connecting
           </span>
         </div>,
       )}

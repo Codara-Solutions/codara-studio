@@ -576,7 +576,7 @@ export async function svgToPngDataUrl(svg: string, scale = 2): Promise<string> {
   const largestSide = Math.max(image.naturalWidth, image.naturalHeight, 1);
   const effectiveScale = Math.min(scale, MAX_CANVAS_SIDE / largestSide);
   if (effectiveScale < 0.2) {
-    throw new Error("This board is too large to rasterize — export it as SVG instead.");
+    throw new Error("This board is too large to rasterize. Export it as SVG instead.");
   }
   const width = Math.max(1, Math.round(image.naturalWidth * effectiveScale));
   const height = Math.max(1, Math.round(image.naturalHeight * effectiveScale));

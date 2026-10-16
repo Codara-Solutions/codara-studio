@@ -32,7 +32,7 @@ export default function SkippedHistoryRow({
   skip: AutomationSkipRecord;
 }): React.ReactElement {
   const [expanded, setExpanded] = useState(false);
-  const label = skip.reason === "precheck" ? "precheck said no" : "missed";
+  const label = skip.reason === "precheck" ? "check said no" : "missed";
   const output = skip.precheck?.outputTail ?? "";
   const repeats = skip.repeats && skip.repeats > 1 ? skip.repeats : 0;
   return (

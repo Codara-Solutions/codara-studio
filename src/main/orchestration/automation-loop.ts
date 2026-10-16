@@ -1732,7 +1732,7 @@ async function finalize(
       kind: failed ? "automation.failed" : "automation.finished",
       sourceKey: automationSourceKey(id),
       tone: failed ? "danger" : "success",
-      title: failed ? "Automation — failed" : "Automation — finished",
+      title: failed ? "Automation failed" : "Automation finished",
       body: failed
         ? `“${finalJob.name}” stopped after ${passes} (${reason}).`
         : `“${finalJob.name}” finished after ${passes} (${reason}).`,

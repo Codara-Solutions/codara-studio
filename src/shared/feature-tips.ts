@@ -187,21 +187,21 @@ export const FEATURE_CATALOG: readonly FeatureCatalogEntry[] = [
   },
   {
     id: "worktree-cleanup",
-    name: "Worktree cleanup",
-    used: "The worktree cleanup screen was opened or used.",
+    name: "Clean up worktrees",
+    used: "Clean up worktrees was opened or used.",
     signals: {
       commands: ["worktrees.cleanup"],
       events: ["spark:open-worktree-cleanup"],
       visible: [".wtc-dialog"],
     },
     tip: {
-      title: "Clean up old worktrees",
+      title: "Clean up worktrees",
       body: "See every worktree, how much space it takes and whether it is merged, and remove the ones you are done with.",
       fresh: true,
       // Only someone with a few worktrees in the rail has anything to clean.
       when: "[data-copy-branch]",
       whenAtLeast: 2,
-      open: { label: "Open worktree cleanup", event: "spark:open-worktree-cleanup" },
+      open: { label: "Clean up worktrees", event: "spark:open-worktree-cleanup" },
     },
   },
 

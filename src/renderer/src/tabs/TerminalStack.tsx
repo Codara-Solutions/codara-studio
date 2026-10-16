@@ -191,7 +191,7 @@ interface Props {
   // leaf's one-shot `bootResume` hydration marker.
   onPaneBootResumeConsumed: (tabId: TabId, paneId: string) => void;
   // Agent hibernation (lib/agentHibernation.ts): a sleeping pane came back,
-  // and the user flipped a pane's "Keep awake" pin.
+  // and the user flipped a pane's "Keep running" pin.
   onPaneWoke?: (tabId: TabId, paneId: string) => void;
   onPaneKeepAwake?: (tabId: TabId, paneId: string, keepAwake: boolean) => void;
   // Run-owned worker terminals are an observation surface by default. This
@@ -2361,7 +2361,7 @@ interface PaneToolbarProps {
   onToggleZoom: () => void;
   isZoomed: boolean;
   visible: boolean;
-  // Agent panes only: the "Keep awake" pin (agent hibernation).
+  // Agent panes only: the "Keep running" pin (agent hibernation).
   keepAwake?: { pinned: boolean; onToggle: () => void } | null;
 }
 
@@ -3184,7 +3184,7 @@ function WorkerPaneHeader({
         role="status"
         aria-live="polite"
         aria-atomic="true"
-        aria-label={`${title} — Cora ${tone.status}`}
+        aria-label={`${title}, Cora ${tone.status}`}
         style={{ flex: "0 0 auto", color: statusColor }}
       >
         {tone.status}

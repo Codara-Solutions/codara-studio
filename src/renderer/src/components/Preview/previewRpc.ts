@@ -166,7 +166,7 @@ function requireTab(params: Record<string, unknown>) {
   if (!tab) {
     if (runId && !params.tabId) {
       throw new Error(
-        "No preview tab belongs to this run — call codara_preview_navigate first to open one (or pass an explicit tabId).",
+        "No preview tab belongs to this run. Call codara_preview_navigate first to open one (or pass an explicit tabId).",
       );
     }
     throw new Error(

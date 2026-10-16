@@ -2138,7 +2138,7 @@ function ConfigSummary({ job }: { job: ScheduledJob }): React.ReactElement {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <KeyVal k="Trigger" v={triggerSummary(job.trigger)} />
-      {precheckSummary(job.precheck) && <KeyVal k="Precheck" v={precheckSummary(job.precheck) as string} />}
+      {precheckSummary(job.precheck) && <KeyVal k="Check first" v={precheckSummary(job.precheck) as string} />}
       {missedRunsSummary(job) && <KeyVal k="If missed" v={missedRunsSummary(job) as string} />}
       <KeyVal k="Loop" v={loopSummary(job.loop)} />
       <div style={{ display: "flex", gap: 8 }}>
@@ -2147,9 +2147,9 @@ function ConfigSummary({ job }: { job: ScheduledJob }): React.ReactElement {
           {chips.length === 0 ? (
             <span
               style={{ fontSize: 11, color: "var(--muted-2)" }}
-              title="No stop conditions set — the loop runs its natural course. Add caps in the editor: Loop node → Safety caps."
+              title="No stop conditions set. The loop runs its natural course. Add caps in the editor: Loop node → Safety caps."
             >
-              no caps — engine defaults
+              no caps, engine defaults
             </span>
           ) : (
             chips.map((c) => (

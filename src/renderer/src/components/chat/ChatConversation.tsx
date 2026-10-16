@@ -2019,7 +2019,7 @@ function QuestionChoices({
       <div style={ASK_HEAD_STYLE}>
         <span style={ASK_EYEBROW_STYLE}>Choose an option</span>
         <span style={ASK_HINT_STYLE}>
-          press 1–{options.length} or click
+          press 1 to {options.length} or click
         </span>
       </div>
       <div style={ASK_OPTION_LIST_STYLE}>

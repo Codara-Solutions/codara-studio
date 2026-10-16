@@ -512,8 +512,8 @@ function ConversationRestState({ run }: { run: RunState }) {
           {live ? "Cora is answering in chat" : "Just a conversation so far"}
         </div>
         <div style={{ color: "var(--muted)", fontSize: 12.5, lineHeight: 1.5, maxWidth: 380 }}>
-          The moment Cora delegates real work — parallel workers, steps,
-          verification — the orchestration graph appears here.
+          The moment Cora delegates real work (parallel workers, steps,
+          verification), the orchestration graph appears here.
         </div>
       </div>
     </div>

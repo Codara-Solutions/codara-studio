@@ -1416,7 +1416,7 @@ export interface UseTabsApi {
   // Agent hibernation: mark a pane sleeping (or awake again, with null),
   // wherever it lives: the visible workspace or a background one.
   setPaneHibernation: (paneId: string, hibernation: TerminalLeafHibernation | null) => void;
-  // The pane's "Keep awake" pin: agent hibernation never stops a pinned pane.
+  // The pane's "Keep running" pin: agent hibernation never stops a pinned pane.
   setLeafKeepAwake: (tabId: TabId, paneId: string, keepAwake: boolean) => void;
   // Rename a leaf's paneId. The caller must dispose the old PTY when it is
   // intentionally replacing a live shell. The new TerminalPane mounts at the
