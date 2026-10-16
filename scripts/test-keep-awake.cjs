@@ -793,6 +793,9 @@ async function main() {
          setInterval(() => {}, 1000);`,
       );
       const parent = childProcess.spawn(process.execPath, [driver], { stdio: ["ignore", "pipe", "inherit"] });
+      // The give-up timer is cleared once the pid arrives: left pending it kept
+      // the whole process alive for ten idle seconds after the last check.
+      let giveUp;
       const helperPid = await new Promise((resolve, reject) => {
         let out = "";
         parent.stdout.on("data", (chunk) => {
@@ -801,8 +804,8 @@ async function main() {
           if (out.includes("\n")) resolve(Number(line));
         });
         parent.on("exit", () => reject(new Error("driver exited early")));
-        setTimeout(() => reject(new Error("driver never reported its helper")), 10_000);
-      });
+        giveUp = setTimeout(() => reject(new Error("driver never reported its helper")), 10_000);
+      }).finally(() => clearTimeout(giveUp));
       assert.ok(Number.isInteger(helperPid) && helperPid > 0, `helper pid ${helperPid}`);
       const alive = (pid) => {
         try {

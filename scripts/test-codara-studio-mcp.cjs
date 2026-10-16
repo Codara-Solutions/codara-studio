@@ -225,15 +225,23 @@ function stdioSession(extraEnv = {}) {
       const found = messages.find(match);
       if (found) return Promise.resolve(found);
       return new Promise((resolve, reject) => {
-        const waiter = { match, resolve };
-        waiters.push(waiter);
-        setTimeout(() => {
+        // The timer is cleared once the message arrives: left running, it
+        // would hold the process open for the full timeout after the last check.
+        const timer = setTimeout(() => {
           const index = waiters.indexOf(waiter);
           if (index >= 0) {
             waiters.splice(index, 1);
             reject(new Error("timed out waiting for a stdio message"));
           }
         }, timeoutMs);
+        const waiter = {
+          match,
+          resolve(msg) {
+            clearTimeout(timer);
+            resolve(msg);
+          },
+        };
+        waiters.push(waiter);
       });
     },
     close() {
@@ -1154,6 +1162,10 @@ function sortedEqual(actual, expected, label) {
       child.on("exit", () => resolve(child.pid));
     });
     fs.writeFileSync(handshakePath, JSON.stringify({ ...JSON.parse(liveHandshake), pid: deadPid }));
+    // The notification bridge is a separate module instance with its own
+    // handshake wait, so its call overlaps the one below instead of adding a
+    // second three-second wait; both see the same stale handshake.
+    const offlineNotifyCall = terminalAgentBridge.callToolByName("codara_notify_user", { kind: "done" });
     const staleStartedAt = Date.now();
     const stalePid = await directBridge.callToolByName("codara_terminal_read", { paneId: "pane-owned" });
     assert.strictEqual(stalePid.isError, true);
@@ -1165,7 +1177,7 @@ function sortedEqual(actual, expected, label) {
     assert.ok(Date.now() - fastStartedAt < 1_000, "a repeat call while Codara is closed fails at once");
     // The studio roster also loads in agents started outside Codara; a
     // notification Codara cannot show is not a failure of the agent's task.
-    const offlineNotify = await terminalAgentBridge.callToolByName("codara_notify_user", { kind: "done" });
+    const offlineNotify = await offlineNotifyCall;
     assert.notStrictEqual(offlineNotify.isError, true, "an offline notification is not a tool error");
     assert.deepStrictEqual(JSON.parse(offlineNotify.content[0].text), { published: false, reason: "codara_offline" });
     const offlineStatus = await terminalAgentBridge.callToolByName("codara_workspace_status", { note: "Tests pass" });
