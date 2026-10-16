@@ -804,8 +804,8 @@ automation are shown to you for approval in the chat first.
 | `codara_delete_automation` | Deletes an automation (asks you first). |
 
 `codara_create_automation` and `codara_update_automation` also take
-`precheck` (`{command, timeoutSeconds, shell}`: a shell command that must exit
-0 for a trigger or cadence pass to run) and `missed_runs` (`{policy: "skip" |
+`precheck` (`{command, timeoutSeconds, shell}`: a shell command of at most
+4000 characters that must exit 0 for a trigger or cadence pass to run) and `missed_runs` (`{policy: "skip" |
 "runOnce", graceMinutes}`: what happens to a cron or interval time missed while
 Codara was closed or the computer slept). In an update, an empty command or
 `null` removes the precheck, and `null` restores the default policy, skip. The

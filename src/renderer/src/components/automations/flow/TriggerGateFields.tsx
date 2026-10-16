@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import type { AutomationLoopKind, AutomationPrecheckResult, AutomationTrigger } from "@shared/types";
 import {
+  MAX_PRECHECK_COMMAND_CHARS,
   MAX_PRECHECK_TIMEOUT_SECONDS,
   MISSED_GRACE_CHOICES,
   formatGraceMinutes,
@@ -105,6 +106,7 @@ export default function TriggerGateFields({
               className="spark-input spark-mono"
               data-testid="precheck-command"
               rows={2}
+              maxLength={MAX_PRECHECK_COMMAND_CHARS}
               value={gate.precheckCommand}
               onChange={(e) => set({ precheckCommand: e.target.value })}
               placeholder={

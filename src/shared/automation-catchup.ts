@@ -16,6 +16,9 @@ export const DEFAULT_PRECHECK_TIMEOUT_SECONDS = 60;
 export const MAX_PRECHECK_TIMEOUT_SECONDS = 600;
 /** How much of the precheck's output a skip record keeps (both streams). */
 export const PRECHECK_OUTPUT_TAIL_CHARS = 2000;
+/** The longest command the editor and the agent tools accept (well inside
+ *  cmd.exe's 8191-character line). A longer one is refused, never cut: a cut
+ *  command is a different command. */
 export const MAX_PRECHECK_COMMAND_CHARS = 4000;
 
 export const DEFAULT_MISSED_GRACE_MINUTES = 720;
@@ -44,7 +47,7 @@ export function normalizeAutomationPrecheck(raw: unknown): AutomationPrecheck | 
   if (!command) return undefined;
   const shell = normalizePrecheckShell(r.shell);
   return {
-    command: command.slice(0, MAX_PRECHECK_COMMAND_CHARS),
+    command,
     timeoutSeconds: normalizePrecheckTimeoutSeconds(r.timeoutSeconds),
     ...(shell === "powershell" ? { shell } : {}),
   };
