@@ -35,7 +35,7 @@ function writeCollapsed(value: Set<AgentBoardBucket>): void {
   }
 }
 
-export default function AgentBoardList({ model, activeKey, navigate, now }: AgentBoardState) {
+export default function AgentBoardList({ model, activeKey, activeWorkspaceId, navigate, now }: AgentBoardState) {
   const [collapsed, setCollapsed] = useState(readCollapsed);
   const [focusKey, setFocusKey] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -177,6 +177,7 @@ export default function AgentBoardList({ model, activeKey, navigate, now }: Agen
                         card={card}
                         elapsed={cardElapsed(card, now)}
                         active={card.key === activeKey}
+                        here={card.workspaceId === activeWorkspaceId}
                         focusable={card.key === tabStop}
                         onOpen={onOpen}
                         onFocusCard={setFocusKey}

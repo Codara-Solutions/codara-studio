@@ -8,6 +8,7 @@
 // user has not seen yet, and renders what buildAgentBoard returns.
 
 import { isBackendFailurePark, resolveOpenRunQuestion } from "./run-questions";
+import { WORKSPACE_COLORS } from "./workspace-colors";
 import type {
   NavigationTarget,
   RunQuestionOption,
@@ -62,6 +63,22 @@ export interface AgentBoardWorkspace {
   id: string;
   name: string;
   color?: string;
+  /** Glyph id from the workspace icon library, as the rail's tile shows it. */
+  icon?: string;
+}
+
+/**
+ * The colour a workspace wears on its cards: its own, the one the Workspaces
+ * list shows, or, when it has none, one picked from its id. Never anything
+ * that depends on which workspace is active or where the card sits, so a
+ * card keeps its colour through every switch and re-sort.
+ */
+export function agentBoardWorkspaceColor(workspace: { id: string; color?: string | null }): string {
+  const own = workspace.color?.trim();
+  if (own) return own;
+  let hash = 0;
+  for (let i = 0; i < workspace.id.length; i += 1) hash = (hash * 31 + workspace.id.charCodeAt(i)) >>> 0;
+  return WORKSPACE_COLORS[hash % WORKSPACE_COLORS.length];
 }
 
 /** What a Cora run's live stream said last (tool calls, assistant text). */
@@ -71,7 +88,9 @@ export interface AgentBoardRunLive {
 }
 
 export type AgentBoardBucket = "needs-you" | "working" | "done";
-export type AgentBoardTone = "warn" | "accent" | "ok" | "muted" | "danger";
+// "info" (working) is a fixed status token, never the workspace accent: the
+// accent follows the active workspace and would repaint every card on a switch.
+export type AgentBoardTone = "warn" | "info" | "ok" | "muted" | "danger";
 export type AgentBoardRuntime = TerminalAgentRuntime | "cora";
 
 // "pane": the agent is back at its prompt (it stopped with an error), so a
@@ -94,7 +113,9 @@ export interface AgentBoardCard {
   tone: AgentBoardTone;
   workspaceId: string;
   workspaceName: string;
-  workspaceColor: string | null;
+  /** Always set: see agentBoardWorkspaceColor. */
+  workspaceColor: string;
+  workspaceIcon: string | null;
   runtime: AgentBoardRuntime;
   agentLabel: string;
   account: string | null;
@@ -192,9 +213,9 @@ export function terminalAgentPlacement(state: RuntimeState | undefined): Placeme
     case "error":
       return { bucket: "needs-you", status: "Stopped", tone: "danger" };
     case "working":
-      return { bucket: "working", status: "Working", tone: "accent" };
+      return { bucket: "working", status: "Working", tone: "info" };
     case "stalled":
-      return { bucket: "working", status: "No output", tone: "accent" };
+      return { bucket: "working", status: "No output", tone: "info" };
     case "idle":
     case "done":
       return { bucket: "done", status: "Ready", tone: "ok" };
@@ -223,11 +244,11 @@ export function coraRunPlacement(
 ): Placement | null {
   switch (run.status) {
     case "planning":
-      return { bucket: "working", status: "Planning", tone: "accent" };
+      return { bucket: "working", status: "Planning", tone: "info" };
     case "running":
-      return { bucket: "working", status: "Working", tone: "accent" };
+      return { bucket: "working", status: "Working", tone: "info" };
     case "reviewing":
-      return { bucket: "working", status: "Reviewing", tone: "accent" };
+      return { bucket: "working", status: "Reviewing", tone: "info" };
     case "blocked":
       if (isBackendFailurePark(run)) {
         if (hubOwned(run)) return null;
@@ -319,7 +340,8 @@ function coraCard(
     tone: placement.tone,
     workspaceId: workspace.id,
     workspaceName: workspace.name,
-    workspaceColor: workspace.color ?? null,
+    workspaceColor: agentBoardWorkspaceColor(workspace),
+    workspaceIcon: workspace.icon ?? null,
     runtime: "cora",
     agentLabel: agentBoardRuntimeLabel("cora"),
     account: (run.chatAccountProfileId && input.accountLabels?.[run.chatAccountProfileId]) || null,
@@ -414,7 +436,8 @@ function terminalCard(
     tone: placement.tone,
     workspaceId: workspace.id,
     workspaceName: workspace.name,
-    workspaceColor: workspace.color ?? null,
+    workspaceColor: agentBoardWorkspaceColor(workspace),
+    workspaceIcon: workspace.icon ?? null,
     runtime: pane.runtime,
     agentLabel: agentBoardRuntimeLabel(pane.runtime),
     account: (pane.accountProfileId && input.accountLabels?.[pane.accountProfileId]) || null,
@@ -442,7 +465,8 @@ function sleepingCard(pane: MergedPane, workspace: AgentBoardWorkspace, input: A
     tone: SLEEPING_PLACEMENT.tone,
     workspaceId: workspace.id,
     workspaceName: workspace.name,
-    workspaceColor: workspace.color ?? null,
+    workspaceColor: agentBoardWorkspaceColor(workspace),
+    workspaceIcon: workspace.icon ?? null,
     runtime: pane.runtime,
     agentLabel: agentBoardRuntimeLabel(pane.runtime),
     account: (pane.accountProfileId && input.accountLabels?.[pane.accountProfileId]) || null,

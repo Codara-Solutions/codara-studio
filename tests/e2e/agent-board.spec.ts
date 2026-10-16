@@ -23,6 +23,8 @@ interface Fixture {
   home: string;
   env: Record<string, string>;
   fakeClaude: string;
+  /** A Claude Code stand-in that starts working on its first prompt and stays there. */
+  busyClaude: string;
 }
 
 async function prepare(opts: { blockedRun?: boolean } = {}): Promise<Fixture> {
@@ -102,6 +104,24 @@ async function prepare(opts: { blockedRun?: boolean } = {}): Promise<Fixture> {
     `,
     "utf8",
   );
+  const busyClaude = join(binDir, "busy-claude.js");
+  await writeFile(
+    busyClaude,
+    String.raw`
+      const status = (fields) => process.stdout.write("\x1b]7501;app=claude:" + fields + "\x07");
+      process.stdout.write("Claude Code v2.1.300\r\n> ");
+      status("state=idle");
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+      process.stdin.on("data", (data) => {
+        const text = data.toString("utf8");
+        if (text.includes("\x03")) process.exit(0);
+        if (text.includes("\r")) status("state=working");
+      });
+      setTimeout(() => process.exit(0), 120000);
+    `,
+    "utf8",
+  );
   // Keep the pane's shell away from any startup file.
   const shell = join(binDir, "bash");
   await writeFile(shell, '#!/bin/sh\nexec /bin/bash --noprofile --norc "$@"\n', "utf8");
@@ -113,6 +133,7 @@ async function prepare(opts: { blockedRun?: boolean } = {}): Promise<Fixture> {
     root,
     home,
     fakeClaude,
+    busyClaude,
     env: {
       ...env,
       HOME: userHome,
@@ -231,7 +252,9 @@ test("a terminal agent in another workspace is answered from the Agents view", a
       await expect(agent).toHaveAttribute("data-agent-workspace", "ws-a");
       await expect(agent).toContainText("Deploy to production?");
       await expect(agent).toContainText("alpha");
-      await expect(agent).toContainText("Claude Code");
+      // The harness is its mark, named in the tooltip, not repeated as text.
+      await expect(agent.locator('[data-agent-runtime="claude"]')).toHaveAttribute("title", "Claude Code");
+      await expect(agent).not.toContainText("Claude Code");
       await expect(page.getByRole("button", { name: "Needs you, 1", exact: true })).toHaveAttribute("aria-expanded", "true");
     });
 
@@ -278,6 +301,8 @@ test("a terminal agent in another workspace is answered from the Agents view", a
       await expect(agent.locator("[data-agent-card-open]")).not.toHaveAttribute("aria-current", "true");
       await agent.locator("[data-agent-card-open]").click();
       await expect(agent.locator("[data-agent-card-open]")).toHaveAttribute("aria-current", "true");
+      // The switch says where you landed, as a switch from the rail does.
+      await expect(page.getByTestId("workspace-switch-hud")).toContainText("alpha");
       const pane = page.locator(`[data-terminal-pane-id="${paneId}"]:visible`);
       await expect(pane).toBeVisible();
       await viewTab(page, "Workspaces").click();
@@ -321,7 +346,7 @@ test("a Cora question is answered from its card, by keyboard, and the view is re
       await expect(chat).toHaveAttribute("data-agent-bucket", "needs-you", { timeout: 15_000 });
       await expect(chat).toContainText("Postgres or SQLite for the session store?");
       await expect(chat).toContainText("Pick a database");
-      await expect(chat).toContainText("Cora");
+      await expect(chat.locator('[data-agent-runtime="cora"]')).toHaveAttribute("aria-label", "Cora");
       await expect(chat).toContainText("beta");
       await expect(chat.getByRole("button", { name: "Postgres", exact: true })).toBeVisible();
       await expect(chat.getByRole("textbox", { name: "Reply to Cora in beta" })).toBeVisible();
@@ -391,6 +416,86 @@ test("a Cora question is answered from its card, by keyboard, and the view is re
       const name = page.locator("[data-workspace-id]").getByRole("textbox");
       await expect(name).toHaveValue("gamma");
       await expect(name).toBeFocused();
+    });
+  } finally {
+    await app.close();
+    await rm(fixture.root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
+// What each card is painted with: its workspace edge, the status word, the
+// harness mark and, unless it is the workspace you are in, its tile.
+async function cardColours(page: Page): Promise<Record<string, Record<string, string>>> {
+  return page.locator("[data-agent-card]").evaluateAll((cards) =>
+    Object.fromEntries(
+      cards.map((card) => {
+        const pick = (selector: string, prop: "color" | "backgroundColor") => {
+          const node = card.querySelector(selector);
+          return node ? getComputedStyle(node)[prop] : "";
+        };
+        const colours: Record<string, string> = {
+          edge: getComputedStyle(card, "::before").backgroundColor,
+          status: pick(".agent-card__status", "color"),
+          mark: pick(".agent-card__mark", "color"),
+        };
+        if (!card.classList.contains("is-here")) colours.tile = pick(".agent-card__ws-tile", "backgroundColor");
+        return [card.getAttribute("data-agent-card") ?? "", colours];
+      }),
+    ),
+  );
+}
+
+test("a switch from a card keeps every card's colours and says where you are", async () => {
+  test.setTimeout(90_000);
+  const fixture = await prepare({ blockedRun: true });
+  const { app, page } = await launch(fixture);
+  try {
+    // Restoring the last workspace on start is not a switch.
+    await expect(page.locator('[data-workspace-id="ws-a"]')).toHaveAttribute("data-active", "true");
+    await expect(page.getByTestId("workspace-switch-hud")).toHaveCount(0);
+
+    await test.step("an agent works in alpha while a Cora chat waits in beta", async () => {
+      await page.getByRole("tab", { name: /terminals/i }).evaluate((tab) => (tab as HTMLElement).click());
+      const input = page.locator(".xterm-helper-textarea:visible").first();
+      await input.focus();
+      const call = process.platform === "win32" ? "& " : "";
+      await input.pressSequentially(`${call}"${process.execPath}" "${fixture.busyClaude}"`, { delay: 2 });
+      await input.press("Enter");
+      await expect(page.locator('[data-workspace-id="ws-a"]').getByTestId("workspace-agent-count")).toHaveText("1", {
+        timeout: 15_000,
+      });
+      await input.pressSequentially("keep going", { delay: 2 });
+      await input.press("Enter");
+      await viewTab(page, "Agents").click();
+      await expect(page.locator('[data-agent-bucket="working"][data-agent-workspace="ws-a"]')).toHaveCount(1, {
+        timeout: 15_000,
+      });
+      await expect(card(page, `run:${RUN_ID}`)).toHaveAttribute("data-agent-bucket", "needs-you", { timeout: 15_000 });
+      await expect(page.locator('[data-agent-workspace="ws-a"]')).toHaveClass(/is-here/);
+      await expect(card(page, `run:${RUN_ID}`)).not.toHaveClass(/is-here/);
+    });
+
+    const before = await cardColours(page);
+    await test.step("opening the beta card switches workspace and names it", async () => {
+      await card(page, `run:${RUN_ID}`).locator("[data-agent-card-open]").click();
+      await expect(page.getByTestId("workspace-switch-hud")).toContainText("beta");
+      await expect(card(page, `run:${RUN_ID}`)).toHaveClass(/is-here/);
+      await expect(page.locator('[data-agent-workspace="ws-a"]')).not.toHaveClass(/is-here/);
+    });
+
+    await test.step("no card changed colour, only the you-are-here tile moved", async () => {
+      // Let any colour transition settle before reading.
+      await page.waitForTimeout(400);
+      const after = await cardColours(page);
+      const working = Object.keys(after).find((key) => key.startsWith("pane:")) ?? "";
+      expect(working).toBeTruthy();
+      expect(after[working].edge).not.toBe(after[`run:${RUN_ID}`].edge);
+      for (const [key, colours] of Object.entries(after)) {
+        for (const [part, value] of Object.entries(colours)) {
+          if (part === "tile" && before[key]?.tile === undefined) continue;
+          expect(`${key} ${part} ${value}`).toBe(`${key} ${part} ${before[key]?.[part]}`);
+        }
+      }
     });
   } finally {
     await app.close();
