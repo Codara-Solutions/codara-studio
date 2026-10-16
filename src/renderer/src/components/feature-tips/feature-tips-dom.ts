@@ -12,13 +12,17 @@ export const TIPS_LAYER_ATTRIBUTE = "data-feature-tips-layer";
 export const TOUR_TARGET_ATTRIBUTE = "data-feature-tour-target";
 
 // Open surfaces that mean the person is in the middle of something: tips
-// wait, and a tip already up gets out of the way.
+// wait, and a tip already up gets out of the way. Every floating layer wears
+// spark-overlay-surface (the glass policy in styles.css), so a popover or
+// palette without a dialog or menu role, such as the comment dock in the
+// browser or one a later feature adds, holds tips back too.
 const BLOCKING = [
   '[role="dialog"]',
   '[role="alertdialog"]',
   '[aria-modal="true"]',
   '[role="menu"]',
   ".spark-menu",
+  ".spark-overlay-surface",
   ".spark-scrim",
   ".onboarding-dialog",
   ".onboarding-coach",
@@ -77,11 +81,19 @@ export function firstOnScreen(selector: string): HTMLElement | null {
   return null;
 }
 
-/** At least `atLeast` elements match and one of them is on screen. */
+/**
+ * At least `atLeast` elements matching the selector are on screen. Elements
+ * in hidden tabs or other workspaces stay in the DOM, so they do not count:
+ * two panes in a background tab are not two panes the person can see.
+ */
 export function conditionMet(selector: string, atLeast: number): boolean {
   const matches = safeQueryAll(selector).filter((element) => !inLayer(element));
   if (matches.length < atLeast) return false;
-  return matches.some(isOnScreen);
+  let onScreen = 0;
+  for (const element of matches) {
+    if (isOnScreen(element) && ++onScreen >= atLeast) return true;
+  }
+  return false;
 }
 
 /** Any element matching the selector is laid out (a dialog, a page). */

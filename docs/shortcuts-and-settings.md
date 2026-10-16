@@ -518,16 +518,18 @@ while a debugger is attached, unless set to `1`), `CODARA_CRASH_REPORTER=0`
 Now and then Codara shows one short tip about a feature you have not tried
 yet, such as splitting a terminal, pointing at a page element for an agent,
 or the notification center. A tip appears at most once a day and once per
-session, a few minutes after Codara opens, and only at a calm moment: not
-while you type, click, scroll or move the pointer, not while a page in the
-Codara browser has the keyboard, not while a dialog, menu or the first-run
-guide is open, and only when the feature's control is on screen. It never
-covers the chat composer or a dialog, and steps aside while one is open.
+session, a few minutes after Codara opens, and only at a calm moment: while
+the Codara window is in front, not while you type, click, scroll or move the
+pointer, not while a page in the Codara browser has the keyboard, not while a
+dialog, menu, popover or the first-run guide is open, and only when the
+feature's control is on screen. It never covers the chat composer, a dialog
+or the title bar, and steps aside while one is open.
 
 - **Show me** starts a short tour: the guide card from the first-run tour
   points at the real control with a ring around it. Click the control, or
   **Done**, to finish; Escape ends the tour.
-- **Got it** or Escape closes the tip. That tip does not come back.
+- **Got it** or Escape closes the tip. That tip does not come back. Using
+  the feature also closes it.
 - **Don't show tips** turns tips off. Turn them back on with **Feature tips**
   in Settings, General, Getting started. **Tips you have seen** with
   **Show them again** lets shown tips come back (greyed out until a tip has
