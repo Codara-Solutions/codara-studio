@@ -450,10 +450,12 @@ the shell. In a shell command `{cwd}` is quoted for the terminal's shell, so a
 folder with spaces or quotes stays one word: single quotes in bash, zsh,
 fish and PowerShell, double quotes in cmd, and forward slashes in Git Bash
 (which drops backslashes). If you already wrap `{cwd}` in quotes yourself it
-is left as you wrote it. `{branch}` is typed unquoted, so a branch holding a
-character a shell would read as code (`;`, `$`, a quote, a backtick, a
-parenthesis and the like) stops the command with a notice instead of running
-it, and so does a folder with a line break (or, in cmd, a double quote or
+is left as you wrote it. `{branch}` is typed in as is, never escaped, so a
+branch holding a character a shell would read as code (`;`, `$`, a quote, a
+backtick, a parenthesis and the like) stops the command with a notice instead
+of running it. So does a `{branch}` outside double quotes whose name has
+braces, `#` or a comma, which a shell would split or expand, and a folder
+with a control character such as a line break (or, in cmd, a double quote or
 percent sign).
 
 **Right-click in a terminal** chooses what a plain right-click does: **Copy

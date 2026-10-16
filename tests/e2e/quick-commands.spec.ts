@@ -8,8 +8,9 @@ import { delimiter, join } from "node:path";
 // Quick commands as the owner uses them: a saved shell command runs in the
 // focused terminal from the tab bar with {branch} filled in, the palette
 // (Mod+Shift+P) runs one in a new terminal, a prompt for the focused agent is
-// refused over a plain shell, a prompt for a new Claude Code reaches it once
-// it is ready, a command with Press Enter off never runs over an agent,
+// refused over a plain shell, {cwd} with a space is quoted for the shell
+// and stays one word, a prompt for a new Claude Code reaches it once it is ready, a
+// command with Press Enter off never runs over an agent,
 // Shift+right-click opens the terminal menu, Settings adds, reorders, edits,
 // deletes and restores commands and swaps the right-click, and the edit
 // dialog hands focus back and asks before it deletes.
@@ -44,7 +45,7 @@ test("quick commands run from the tab bar, the palette and the terminal menu", a
     await page.getByRole("button", { name: "Quick commands", exact: true }).click();
     const menu = page.getByRole("menu", { name: "Quick commands" });
     await expect(menu).toBeVisible();
-    await expect(menu.getByText("This repository · workspace", { exact: true })).toBeVisible();
+    await expect(menu.getByText("This repository · my repo", { exact: true })).toBeVisible();
     await expect(menu.getByText("All workspaces", { exact: true })).toBeVisible();
     await expect(menu.locator('[data-quick-command="qc-repo"]')).toBeVisible();
     await expect(menu.locator('[data-quick-command="qc-elsewhere"]')).toHaveCount(0);
@@ -79,13 +80,20 @@ test("quick commands run from the tab bar, the palette and the terminal menu", a
     await expect(palette.getByRole("option").first()).toHaveAttribute("data-quick-command", "qc-new");
     await page.keyboard.press("Enter");
     await expect(palette).toHaveCount(0);
-    await expect.poll(() => readText(join(fixture.workspaceDir, "qc-new.txt")), { timeout: 20_000 }).toMatch(/\/workspace\n$/);
+    await expect.poll(() => readText(join(fixture.workspaceDir, "qc-new.txt")), { timeout: 20_000 }).toMatch(/\/my repo\n$/);
 
     // A prompt for the focused agent is never typed into a plain shell.
     await openPalette();
     await page.keyboard.type("ask focused");
     await page.keyboard.press("Enter");
     await expect(page.locator(".spark-toast", { hasText: "No agent in the focused terminal" })).toBeVisible({ timeout: 10_000 });
+
+    // {cwd} without quotes, in a folder with a space: Codara quotes it for
+    // the shell, so it reaches the command as one word.
+    await openPalette();
+    await page.keyboard.type("unquoted folder");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => readText(join(fixture.workspaceDir, "qc-unquoted.txt")), { timeout: 20_000 }).toMatch(/\/my repo\n$/);
 
     // A prompt for a new Claude Code waits for it to be ready, then sends.
     await openPalette();
@@ -127,20 +135,35 @@ test("quick commands run from the tab bar, the palette and the terminal menu", a
     await form.getByLabel("Command", { exact: true }).fill("npm run lint");
     await form.getByRole("button", { name: "Add", exact: true }).click();
     await expect.poll(async () => (await savedCommands(fixture)).at(-1)?.label).toBe("Lint");
+    // Every action that removes or moves the focused control hands the
+    // keyboard to the row it acted on (or Undo), never to the page body.
+    await expect(settings.getByRole("button", { name: "Edit Lint" })).toBeFocused();
 
+    const lastTwo = async () => (await savedCommands(fixture)).map((c) => c.label).slice(-2);
     await settings.getByRole("button", { name: "Move Lint up" }).click();
-    await expect.poll(async () => (await savedCommands(fixture)).map((c) => c.label).slice(-2)).toEqual(["Lint", "Dialog added"]);
+    await expect.poll(lastTwo).toEqual(["Lint", "Dialog added"]);
+    await expect(settings.getByRole("button", { name: "Move Lint up" })).toBeFocused();
+    // Moving down re-inserts the row, and at the end Move down turns disabled.
+    await settings.getByRole("button", { name: "Move Lint down" }).focus();
+    await page.keyboard.press("Enter");
+    await expect.poll(lastTwo).toEqual(["Dialog added", "Lint"]);
+    await expect(settings.getByRole("button", { name: "Move Lint up" })).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect.poll(lastTwo).toEqual(["Lint", "Dialog added"]);
 
     await settings.getByRole("button", { name: "Edit Lint" }).click();
     const edit = settings.getByRole("form", { name: "Edit Lint" });
     await edit.getByLabel("Name", { exact: true }).fill("Lint all");
     await edit.getByRole("button", { name: "Save", exact: true }).click();
     await expect.poll(async () => (await savedCommands(fixture)).map((c) => c.label)).toContain("Lint all");
+    await expect(settings.getByRole("button", { name: "Edit Lint all" })).toBeFocused();
 
     await settings.getByRole("button", { name: "Delete Lint all" }).click();
     await expect.poll(async () => (await savedCommands(fixture)).map((c) => c.label)).not.toContain("Lint all");
-    await settings.getByRole("button", { name: "Undo" }).click();
-    await expect.poll(async () => (await savedCommands(fixture)).map((c) => c.label).slice(-2)).toEqual(["Lint all", "Dialog added"]);
+    await expect(settings.getByRole("button", { name: "Undo" })).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect.poll(lastTwo).toEqual(["Lint all", "Dialog added"]);
+    await expect(settings.getByRole("button", { name: "Edit Lint all" })).toBeFocused();
 
     await settings.getByRole("group", { name: "Right-click in a terminal" }).getByRole("button", { name: "Open menu" }).click();
     await expect.poll(async () => (await preferences(fixture)).terminalRightClick).toBe("menu");
@@ -212,7 +235,8 @@ async function prepareFixture(): Promise<Fixture> {
     root,
     userHome: join(root, "home"),
     codaraHome: join(root, "codara-home"),
-    workspaceDir: join(root, "workspace"),
+    // A space in the folder, as on many macOS and Windows machines.
+    workspaceDir: join(root, "my repo"),
     binDir: join(root, "bin"),
     capture: join(root, "claude-input.txt"),
   };
@@ -277,6 +301,7 @@ async function prepareFixture(): Promise<Fixture> {
           shell("qc-focused", "Write marker", 'echo "{branch}" > qc-focused.txt'),
           shell("qc-draft", "Draft marker", "echo draft > qc-draft.txt", { submit: false }),
           shell("qc-new", "New terminal marker", "pwd > qc-new.txt", { target: "new" }),
+          shell("qc-unquoted", "Unquoted folder", "echo {cwd} > qc-unquoted.txt"),
           prompt("qc-ask-focused", "Ask focused agent", "Explain {branch}"),
           prompt("qc-ask-claude", "Ask Claude", "Summarize {branch}", { target: "new" }),
           shell("qc-repo", "Repo only", "true", { scope: { type: "repo", repo: fixture.workspaceDir } }),

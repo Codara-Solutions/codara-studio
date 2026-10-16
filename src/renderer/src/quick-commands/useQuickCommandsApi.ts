@@ -89,7 +89,12 @@ function warn(title: string, body = ""): void {
   emitLocalToast(title, body, "warning");
 }
 
-function variableProblem(command: QuickCommand, variable: QuickCommandVariable, reason: "missing" | "unsafe", folder: string | null): void {
+function variableProblem(
+  command: QuickCommand,
+  variable: QuickCommandVariable,
+  reason: "missing" | "unsafe" | "unquoted",
+  folder: string | null,
+): void {
   if (reason === "missing") {
     warn(
       variable === "branch" ? "No git branch here" : "No folder for {cwd}",
@@ -99,10 +104,17 @@ function variableProblem(command: QuickCommand, variable: QuickCommandVariable, 
     );
     return;
   }
+  if (reason === "unquoted") {
+    warn(
+      `"${command.label}" did not run`,
+      `The {${variable}} value has characters a shell would split or expand, such as braces or a comma. Write "{${variable}}" in double quotes in the command.`,
+    );
+    return;
+  }
   warn(
     `"${command.label}" did not run`,
     variable === "cwd"
-      ? "The folder name has a line break or a character this shell cannot take inside quotes."
+      ? "The folder name has a control character, such as a line break, or a character this shell cannot take inside quotes."
       : `The {${variable}} value has characters a shell would read as code.`,
   );
 }

@@ -159,7 +159,9 @@ async function main() {
     assert.deepEqual(ok, { ok: true, text: "git push origin feat/x; echo ${branch} in \"/work/my app\"" });
     assert.deepEqual(qc.expandQuickCommandText("git push {branch}", { branch: null }, "shell"), { ok: false, variable: "branch", reason: "missing" });
     // "(calc)" runs calc in PowerShell and "README.md(e+calc+)" in zsh; git allows both as branch names.
-    for (const bad of ["x;rm -rf ~", "a$(id)", "a`id`", "a|b", "a&b", "a>b", "it's", "a\"b", "a\nb", "%PATH%", "!x", "(calc)", "README.md(e+calc+)"]) {
+    // Control characters too: {cwd} is whatever OSC 7 a program printed, and a
+    // shell without bracketed paste reads Ctrl+U, Tab or ESC as keys.
+    for (const bad of ["x;rm -rf ~", "a$(id)", "a`id`", "a|b", "a&b", "a>b", "it's", "a\"b", "a\nb", "a\rb", "a\0b", "%PATH%", "!x", "(calc)", "README.md(e+calc+)", "/w/a\u0015b", "/w/a\tb", "/w/\u001b[201~x", "/w/a\u007fb", "/w/a\u009bb"]) {
       assert.deepEqual(qc.expandQuickCommandText("echo {branch}", { branch: bad }, "shell"), { ok: false, variable: "branch", reason: "unsafe" }, bad);
     }
     assert.deepEqual(
@@ -168,6 +170,49 @@ async function main() {
       "a prompt is plain text",
     );
     assert.deepEqual(qc.expandQuickCommandText("npm test", {}, "shell"), { ok: true, text: "npm test" });
+    assert.deepEqual(
+      qc.expandQuickCommandText("cd \"{cwd}\"", { cwd: "C:\\Users\\Me\\My Repo-1.2_x" }, "shell"),
+      { ok: true, text: "cd \"C:\\Users\\Me\\My Repo-1.2_x\"" },
+      "an ordinary Windows folder with spaces is fine",
+    );
+
+    // Outside double quotes the shell splits and expands: git allows braces,
+    // "#" and commas in a branch name, and "feat/{a,b}" is two words there.
+    // An unquoted {cwd} is quoted for the shell instead (see below).
+    const unquoted = { ok: false, variable: "branch", reason: "unquoted" };
+    const value = "feat/{a,b}";
+    for (const branch of [value, "fix#12", "a,b", "x}y"]) {
+      assert.deepEqual(qc.expandQuickCommandText("git push origin {branch}", { branch }, "shell"), unquoted, branch);
+      assert.equal(qc.expandQuickCommandText("git push origin \"{branch}\"", { branch }, "shell").ok, true, `${branch} in double quotes`);
+    }
+    assert.equal(qc.expandQuickCommandText("cd \"$HOME\" && git log \"origin/{branch}\"", { branch: value }, "shell").ok, true, "inside a longer quoted word");
+    assert.deepEqual(qc.expandQuickCommandText("echo \"a\" {branch} \"b\"", { branch: value }, "shell"), unquoted, "between two quoted words");
+    assert.deepEqual(qc.expandQuickCommandText("echo \"a\"{branch}\"b\"", { branch: value }, "shell"), unquoted, "between a closing and an opening quote");
+    assert.deepEqual(qc.expandQuickCommandText("echo '{branch}'", { branch: value }, "shell"), unquoted, "cmd.exe does not quote with single quotes");
+    assert.deepEqual(qc.expandQuickCommandText("echo '\"' {branch}", { branch: value }, "shell"), unquoted, "a double quote inside single quotes opens nothing");
+    assert.deepEqual(qc.expandQuickCommandText("echo \"a\\\" {branch}", { branch: value }, "shell"), unquoted, "a quote only a POSIX shell reads as escaped");
+    assert.deepEqual(qc.expandQuickCommandText("echo ^\"{branch}\"", { branch: value }, "shell"), unquoted, "a quote cmd.exe reads as escaped");
+    assert.equal(qc.expandQuickCommandText("echo \"a^\" \"{branch}\"", { branch: value }, "shell").ok, true, "a caret inside cmd.exe quotes is plain text");
+    assert.deepEqual(qc.expandQuickCommandText("echo \"{branch}\" {branch}", { branch: value }, "shell"), unquoted, "every placeholder is checked");
+    // An unquoted {cwd} is quoted, so spaces and wildcards are fine, but a
+    // control character still never reaches the shell, quoted or not.
+    assert.deepEqual(qc.expandQuickCommandText("rm -rf {cwd}/build", { cwd: "/work/My app" }, "shell"), { ok: true, text: "rm -rf '/work/My app'/build" });
+    for (const bad of ["/w/a\u0015b", "/w/a\tb", "/w/\u001b[201~x", "/w/a\u007fb", "/w/a\u009bb"]) {
+      for (const kind of ["posix", "powershell", "cmd", "gitbash"]) {
+        assert.deepEqual(qc.expandQuickCommandText("cd {cwd}", { cwd: bad }, "shell", kind), { ok: false, variable: "cwd", reason: "unsafe" }, `${kind}: ${JSON.stringify(bad)}`);
+      }
+      assert.deepEqual(qc.expandQuickCommandText("cd \"{cwd}\"", { cwd: bad }, "shell"), { ok: false, variable: "cwd", reason: "unsafe" }, `quoted: ${JSON.stringify(bad)}`);
+    }
+    assert.deepEqual(
+      qc.expandQuickCommandText("git push origin {branch} && cd {cwd}", { branch: "feat/x-1.2_y@z", cwd: "/work/app" }, "shell"),
+      { ok: true, text: "git push origin feat/x-1.2_y@z && cd '/work/app'" },
+      "a plain branch needs no quotes",
+    );
+    assert.deepEqual(
+      qc.expandQuickCommandText("Review {cwd}", { cwd: "/work/My app" }, "prompt"),
+      { ok: true, text: "Review /work/My app" },
+      "a prompt takes spaces anywhere",
+    );
   });
 
   await check("{cwd} is quoted for the shell it is typed into", () => {

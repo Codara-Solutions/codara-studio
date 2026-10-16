@@ -201,12 +201,17 @@ export function moveQuickCommand(commands: readonly QuickCommand[], id: string, 
 // A {cwd} the command already wraps in quotes is left as the author wrote it
 // and checked like {branch}.
 //
-// {branch} is typed unquoted, so a value holding a character that a shell
-// (POSIX, PowerShell or cmd) would read as code is refused instead of run;
-// prompts are plain text and take any value. Parentheses count: git allows
-// them in branch names, PowerShell runs `git push origin (calc)` as a
-// subexpression, and zsh runs the code in a glob qualifier such as
-// `README.md(e+calc+)`.
+// {branch} is typed in as is, never escaped, so a value holding a character
+// that a shell (POSIX, PowerShell or cmd) would read as code is refused
+// instead of run, and so is one that would split into several words where
+// the command leaves it outside double quotes; prompts are plain text and
+// take any value. Parentheses count: git allows them in branch names,
+// PowerShell runs `git push origin (calc)` as a subexpression, and zsh runs
+// the code in a glob qualifier such as `README.md(e+calc+)`. So does every
+// control character, in {branch} and in {cwd} quoted or not: {cwd} comes from
+// the folder a terminal reports (OSC 7), which any program's output can set,
+// and a shell without bracketed paste (cmd.exe, sh) reads Ctrl+U, Tab or an
+// escape sequence as keys, not text.
 
 export type QuickCommandVariable = "branch" | "cwd";
 
@@ -216,7 +221,43 @@ export const QUICK_COMMAND_VARIABLES: readonly QuickCommandVariable[] = ["branch
 export type QuickCommandShellKind = "posix" | "powershell" | "cmd" | "gitbash";
 
 const VARIABLE_PATTERN = /(?<!\$)\{(branch|cwd)\}/g;
-const SHELL_UNSAFE = /[`$"';&|<>!%()\r\n\0]/;
+const SHELL_UNSAFE = /[`$"';&|<>!%()\u0000-\u001f\u007f-\u009f]/;
+// Outside double quotes a shell also splits words and expands patterns, so a
+// {branch} typed there stays one plain argument only without whitespace,
+// wildcards (`*?[]`, and zsh's extended `^ # ~`), braces (`{a,b}` is two
+// words) or a comma (an array in PowerShell). Git allows braces, `#` and
+// commas in branch names. Inside double quotes none of them matter.
+const UNQUOTED_UNSAFE = /[\s*?[\]{}^#~,]/;
+
+// The quoting rules of the shells a terminal may run: POSIX shells and fish
+// (backslash escapes, single quotes), PowerShell (backtick escapes, single
+// quotes) and cmd.exe (double quotes only, and a caret escapes outside
+// them). A placeholder counts as quoted only when every one of them reads it
+// inside double quotes.
+const QUOTING_RULES: ReadonlyArray<{ escape: string; escapeInDouble: boolean; single: boolean }> = [
+  { escape: "\\", escapeInDouble: true, single: true },
+  { escape: "`", escapeInDouble: true, single: true },
+  { escape: "^", escapeInDouble: false, single: false },
+];
+
+function insideDoubleQuotes(text: string, index: number): boolean {
+  return QUOTING_RULES.every(({ escape, escapeInDouble, single }) => {
+    let state: "none" | "single" | "double" = "none";
+    for (let i = 0; i < index; i += 1) {
+      const ch = text[i];
+      if (state === "single") {
+        if (ch === "'") state = "none";
+      } else if (ch === escape && (state === "none" || escapeInDouble)) {
+        i += 1;
+      } else if (ch === '"') {
+        state = state === "double" ? "none" : "double";
+      } else if (single && ch === "'" && state === "none") {
+        state = "single";
+      }
+    }
+    return state === "double";
+  });
+}
 
 export function quickCommandVariablesIn(text: string): Set<QuickCommandVariable> {
   const out = new Set<QuickCommandVariable>();
@@ -235,13 +276,17 @@ export function quickCommandShellKind(shell: { family: string; exe: string } | n
 
 const posixQuote = (value: string): string => `'${value.replace(/'/g, "'\\''")}'`;
 
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
+
 /**
  * The folder as one word for `kind`, or null when no quoting can carry it
- * (a line break or NUL, which would end the typed command; in cmd also a
- * double quote or a percent sign, which cmd expands inside double quotes).
+ * (a control character: a line break ends the typed command, and a shell
+ * without bracketed paste reads Ctrl+U or an escape sequence as keys even
+ * inside quotes; in cmd also a double quote or a percent sign, which cmd
+ * expands inside double quotes).
  */
 export function quoteCwdForShell(value: string, kind: QuickCommandShellKind): string | null {
-  if (/[\r\n\0]/.test(value)) return null;
+  if (CONTROL_CHARS.test(value)) return null;
   switch (kind) {
     case "powershell":
       // PowerShell also treats the typographic single quotes as quotes.
@@ -262,7 +307,8 @@ const insideQuotes = (text: string, start: number, end: number): boolean => {
 
 export type QuickCommandExpansion =
   | { ok: true; text: string }
-  | { ok: false; variable: QuickCommandVariable; reason: "missing" | "unsafe" };
+  /** unquoted: fine inside double quotes, but outside them the shell would split or expand it. */
+  | { ok: false; variable: QuickCommandVariable; reason: "missing" | "unsafe" | "unquoted" };
 
 export function expandQuickCommandText(
   text: string,
@@ -283,6 +329,17 @@ export function expandQuickCommandText(
       replacements.set(index, quoted);
     } else if (SHELL_UNSAFE.test(value)) {
       return { ok: false, variable, reason: "unsafe" };
+    }
+  }
+  if (mode === "shell") {
+    for (const match of text.matchAll(VARIABLE_PATTERN)) {
+      const variable = match[1] as QuickCommandVariable;
+      // An unquoted {cwd} was quoted above; a hand-quoted one stays in its quotes.
+      if (variable !== "branch") continue;
+      const value = values[variable] ?? "";
+      if (UNQUOTED_UNSAFE.test(value) && !insideDoubleQuotes(text, match.index ?? 0)) {
+        return { ok: false, variable, reason: "unquoted" };
+      }
     }
   }
   return {
