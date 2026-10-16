@@ -1,3 +1,4 @@
+// test-runner: heavy (launches Chromium through Playwright)
 "use strict";
 // Page dialogs never freeze an agent (feedback round 5, item 11):
 // - DialogState (src/main/browser/recorders/dialogs.ts): the ask policy waits

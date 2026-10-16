@@ -1,3 +1,4 @@
+// test-runner: heavy (launches Chromium through Playwright)
 "use strict";
 // The agent's DevTools for a browser tab: emulation (src/main/browser/
 // emulation.ts), network detail and HAR export (recorders/network.ts,

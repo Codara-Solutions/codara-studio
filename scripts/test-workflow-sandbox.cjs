@@ -1,3 +1,4 @@
+// test-runner: serial (the heap-limit case grows the QuickJS WebAssembly memory to its 2 GB cap)
 // Guards the workflow sandbox (src/main/orchestration/workflow-sandbox*.ts):
 // a workflow script is untrusted code that Cora may have written, so it must
 // not reach require, process, the file system, the network or timers, must

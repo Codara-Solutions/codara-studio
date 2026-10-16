@@ -1,3 +1,4 @@
+// test-runner: heavy (launches Chromium through Playwright)
 "use strict";
 // The Content-Security-Policy of Codara's own window (src/main/studio-csp.ts,
 // applied by the renderer's Vite plugin in electron.vite.config.ts):

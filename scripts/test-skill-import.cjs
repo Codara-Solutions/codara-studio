@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// test-runner: heavy (peaks near 225 MB)
 "use strict";
 
 // The Capability Center's "Add skill" writes into Codara's own skill folder

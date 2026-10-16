@@ -1,3 +1,4 @@
+// test-runner: heavy (boots Electron)
 // Real-Electron regression test for the privileged-IPC sender gate
 // (src/main/main-window-trust.ts requireTrustedSender + registerTrustedMainWindow).
 //

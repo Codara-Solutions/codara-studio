@@ -1,3 +1,4 @@
+// test-runner: heavy (launches Chromium through Playwright)
 "use strict";
 // The shared screenshot pipeline (src/main/browser/screenshot.ts) and element
 // locator (src/shared/preview-locator.ts): option validation, crop and scale

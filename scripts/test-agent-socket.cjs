@@ -1,3 +1,4 @@
+// test-runner: heavy (boots Electron)
 // Integration test for the agent-socket RPC layer + MCP discovery contract.
 //
 // Unlike the esbuild-stub harnesses, this drives the REAL app: it launches the

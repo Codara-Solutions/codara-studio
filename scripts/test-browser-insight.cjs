@@ -1,3 +1,4 @@
+// test-runner: heavy (launches Chromium through Playwright)
 "use strict";
 // Audits and performance (src/main/browser/audit/, src/main/browser/perf/):
 // the axe-core accessibility audit and the page-quality checks, Core Web

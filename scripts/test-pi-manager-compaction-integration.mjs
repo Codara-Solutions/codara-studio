@@ -1,3 +1,4 @@
+// test-runner: heavy (peaks near 205 MB)
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";

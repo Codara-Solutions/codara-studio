@@ -1,3 +1,4 @@
+// test-runner: heavy (peaks near 275 MB)
 // Offline evaluation of Cora's context compaction over long agentic runs.
 //
 // Replays a synthetic 240-tool-call billing migration through a real pinned

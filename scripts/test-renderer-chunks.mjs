@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// test-runner: serial (a full production Vite build of the renderer, about 2 GB)
 
 import assert from "node:assert/strict";
 import path from "node:path";

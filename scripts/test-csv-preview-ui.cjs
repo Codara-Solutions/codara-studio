@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// test-runner: heavy (launches Chromium through Playwright)
 "use strict";
 
 const assert = require("node:assert/strict");

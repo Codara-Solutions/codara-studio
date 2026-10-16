@@ -1,3 +1,4 @@
+// test-runner: heavy (peaks near 210 MB)
 // Fast-mode fallback through a real, offline Pi agent session.
 //
 //   node scripts/test-pi-fast-mode-fallback-integration.mjs

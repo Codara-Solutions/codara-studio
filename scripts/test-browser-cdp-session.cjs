@@ -1,3 +1,4 @@
+// test-runner: heavy (launches Chromium through Playwright)
 "use strict";
 // The per-tab DevTools protocol session (src/main/browser/cdp-session.ts) and
 // the console and network recorders built on it: ref-counted domains shared

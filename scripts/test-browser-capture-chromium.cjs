@@ -1,3 +1,4 @@
+// test-runner: heavy (launches Chromium through Playwright)
 "use strict";
 // The capture features on a real Chromium page served over HTTP, through the
 // same DevTools protocol session interface a Chrome tab uses: element and

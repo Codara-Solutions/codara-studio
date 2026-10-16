@@ -1,3 +1,4 @@
+// test-runner: heavy (launches Chromium through Playwright)
 "use strict";
 // The page console an agent reads holds what the page logged (feedback round
 // 5, item 5): src/main/browser/recorders/console-filter.ts drops Electron's

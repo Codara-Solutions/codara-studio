@@ -1,3 +1,4 @@
+// test-runner: heavy (peaks near 300 MB)
 "use strict";
 // The review tab's combined diff (src/main/review/review-diff.ts) against
 // throwaway repositories: every kind of change in one list (modified, added,

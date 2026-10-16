@@ -1,3 +1,4 @@
+// test-runner: heavy (peaks near 215 MB)
 // Guards the workflow host runtime (src/main/orchestration/workflow-runtime.ts)
 // with the journal and the real sandbox: caps the script cannot raise, one
 // failing agent resolving null instead of failing the run, skip and stop,

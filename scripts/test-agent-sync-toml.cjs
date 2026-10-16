@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// test-runner: heavy (peaks near 230 MB)
 "use strict";
 
 // The Capability Center reads and edits the real config files of Claude,

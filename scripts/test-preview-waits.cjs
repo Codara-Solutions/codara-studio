@@ -1,3 +1,4 @@
+// test-runner: heavy (launches Chromium through Playwright)
 "use strict";
 // codara_preview_wait_for (feedback round 5, item 4): src/main/browser/wait.ts
 // and the activity it reads (page-activity.ts).

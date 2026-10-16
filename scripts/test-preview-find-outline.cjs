@@ -1,3 +1,4 @@
+// test-runner: heavy (launches Chromium through Playwright)
 "use strict";
 // Finding elements by description and naming them in the outline (feedback
 // round 5, items 18 and 19), on a real Chromium page:
