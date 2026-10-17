@@ -1474,6 +1474,12 @@ const api = {
     },
   },
   app: {
+    /**
+     * True only in the e2e suite, which sets CODARA_E2E_SEED_TERMINAL so the
+     * many specs written around a workspace that starts with a chat and a terminal keep
+     * them. A real workspace always starts empty.
+     */
+    e2eSeedTerminal: process.argv.includes("--codara-e2e-seed-terminal"),
     platform: (): Promise<NodeJS.Platform> => ipcRenderer.invoke("app:platform"),
     home: (): Promise<string> => ipcRenderer.invoke("app:home"),
     /** Where the one-time cleanup of older builds' global config put its backup; null if it never cleaned anything. */

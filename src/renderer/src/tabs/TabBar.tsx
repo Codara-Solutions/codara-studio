@@ -109,6 +109,7 @@ interface Props {
 }
 
 export interface PickerHints {
+  chat?: string;
   terminal?: string;
   preview?: string;
 }

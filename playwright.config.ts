@@ -12,6 +12,10 @@ import { restoreUserZdotdir, sanitizeElectronViteDevEnv } from "./src/main/env-s
 // Assigned rather than forced, so a debugging run can watch the window with
 // SPARK_E2E_BACKGROUND=0 npx playwright test.
 process.env.SPARK_E2E_BACKGROUND ??= "1";
+// A new workspace opens empty (no Cora, no terminal). Most specs predate that
+// and drive the chat and terminal a workspace used to start with, so the suite seeds them
+// for them; empty-new-workspace.spec.ts turns it off to cover the real default.
+process.env.CODARA_E2E_SEED_TERMINAL ??= "1";
 // A test app listening on the Chrome extension's ports would answer the
 // user's own browser in place of their Codara. The spec that covers the link
 // turns it back on, on a port of its own.

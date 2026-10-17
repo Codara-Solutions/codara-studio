@@ -5893,6 +5893,7 @@ export default function App() {
   // command that performs the SAME action as its onNew* handler.
   const pickerHints = useMemo<PickerHints>(
     () => ({
+      chat: hintForCommand(bindingTable, "chat.new"),
       terminal: hintForCommand(bindingTable, "tab.newTerminal"),
       preview: hintForCommand(bindingTable, "tab.newPreview"),
     }),
@@ -7927,7 +7928,12 @@ const Workspace = React.memo(function Workspace({
             remaining tab is run-owned with no owning chat open (nothing is
             eligible to activate), and the empty state beats a blank void. */}
         {(visibleTabs.length === 0 || !effectiveActiveId) && (
-          <EmptyWorkbench onNewChat={onNewChat} onNewTerminal={onNewTerminalTab} />
+          <EmptyWorkbench
+            onNewChat={onNewChat}
+            onNewTerminal={onNewTerminalTab}
+            onNewAgent={onNewClaudeWorker}
+            hints={pickerHints}
+          />
         )}
         <ChatStack
           tabs={visibleTabs}
@@ -8222,18 +8228,31 @@ const NoWorkspace = React.memo(function NoWorkspace({ onCreate }: { onCreate: ()
   );
 });
 
-// Centered empty state for a workspace whose tab strip has been emptied — e.g.
-// the user closed the Cora chat and every terminal. The close STICKS
-// (no tab is auto-respawned), so this is a legitimate resting state, not an
-// error; it gives the user the two obvious ways back in. The "+" picker in the
+// Centered empty state for a workspace whose tab strip is empty: a brand-new
+// workspace (nothing opens by default) or one whose user closed the Cora chat
+// and every terminal. The close STICKS (no tab is auto-respawned), so this is
+// a legitimate resting state, not an error; it gives the user the obvious ways
+// in, each with its live keyboard shortcut. The "+" picker in the
 // top strip offers the same actions plus Open file / Preview / Automations.
 const EmptyWorkbench = React.memo(function EmptyWorkbench({
   onNewChat,
   onNewTerminal,
+  onNewAgent,
+  hints,
 }: {
   onNewChat: () => void;
   onNewTerminal: () => void;
+  onNewAgent: () => void;
+  hints: PickerHints;
 }) {
+  const hintStyle: React.CSSProperties = {
+    marginLeft: 10,
+    fontFamily: "var(--font-mono)",
+    fontSize: 11,
+    fontWeight: 500,
+    letterSpacing: 0,
+    opacity: 0.7,
+  };
   const buttonStyle: React.CSSProperties = {
     appearance: "none",
     background: "transparent",
@@ -8305,8 +8324,8 @@ const EmptyWorkbench = React.memo(function EmptyWorkbench({
           marginBottom: 8,
         }}
       >
-        Start a new chat with Cora, or open a terminal. Past chats are still in
-        the history popover.
+        Start a chat with Cora, open a terminal or launch an agent. Past chats
+        are still in the history popover.
       </div>
       <div style={{ display: "inline-flex", gap: 10 }}>
         <button
@@ -8321,6 +8340,7 @@ const EmptyWorkbench = React.memo(function EmptyWorkbench({
           }}
         >
           + New chat
+          {hints.chat && <span style={hintStyle}>{hints.chat}</span>}
         </button>
         <button
           type="button"
@@ -8330,6 +8350,16 @@ const EmptyWorkbench = React.memo(function EmptyWorkbench({
           onMouseLeave={onLeave}
         >
           + New terminal
+          {hints.terminal && <span style={hintStyle}>{hints.terminal}</span>}
+        </button>
+        <button
+          type="button"
+          onClick={onNewAgent}
+          style={buttonStyle}
+          onMouseEnter={onEnter}
+          onMouseLeave={onLeave}
+        >
+          + New agent
         </button>
       </div>
     </div>

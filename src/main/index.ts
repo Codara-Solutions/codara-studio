@@ -781,6 +781,10 @@ function createWindow(): void {
     titleBarStyle: process.platform === "win32" ? "hidden" : undefined,
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
+      // The e2e suite alone opts its workspaces into a first terminal (see
+      // playwright.config.ts); a real workspace always starts empty.
+      additionalArguments:
+        process.env.CODARA_E2E_SEED_TERMINAL === "1" ? ["--codara-e2e-seed-terminal"] : [],
       // Renderer + preload run in a sandboxed OS process; the preload has no
       // Node deps (verified) so flipping this on costs nothing and gives us
       // Chromium's full process isolation. Keep contextIsolation + no

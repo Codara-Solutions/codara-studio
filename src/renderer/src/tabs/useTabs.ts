@@ -342,13 +342,17 @@ export function isDraftChatTabId(id: TabId): boolean {
   return id.startsWith(DRAFT_CHAT_PREFIX);
 }
 
-// First-run seed for a brand-new workspace (nothing persisted): one draft
-// Cora chat tab plus one terminal. Chat tabs are otherwise derived from
-// the run store, so this seed only ever applies on the very first launch of a
-// workspace — once any tab state is persisted, restores honor exactly what was
-// saved (including zero chat tabs after the user closes them).
+// First-run seed for a brand-new workspace (nothing persisted): no tabs at all.
+// The workspace opens on the empty-workbench state, where the user picks Cora,
+// a terminal or an agent. Chat tabs are otherwise derived from the run store;
+// once any tab state is persisted, restores honor exactly what was saved.
 function defaultTabs(cwd?: string): Tab[] {
-  return [createDraftChatTab(), createTerminalTab(cwd)];
+  // The e2e suite alone seeds the old first-run pair (draft chat plus
+  // terminal), so specs that predate the empty default keep surfaces to
+  // drive; see playwright.config.ts.
+  return window.spark?.app?.e2eSeedTerminal
+    ? [createDraftChatTab(), createTerminalTab(cwd)]
+    : [];
 }
 
 // Run ids of the chat tabs found in each workspace's persisted blob, captured
@@ -1040,7 +1044,7 @@ function initialTabsStateFromPersisted(loaded: PersistedShape): InitialTabsState
   // App-level sync effect re-derives chat tabs for runs not in
   // closedChatRunIds, and an intentionally empty workspace stays empty. Only a
   // genuine FIRST RUN — loadPersisted returned null (nothing persisted, or a
-  // stale-version blob) — gets the defaultTabs seed (draft chat + terminal).
+  // stale-version blob) — gets the defaultTabs seed (no tabs).
   // Honor the persisted selection when it survived hydration, never land on a
   // restored preview (dead dev server → blank page hiding the composer). See
   // resolveBootActiveTabId for why the chat tab can't be the fallback here.
@@ -1062,7 +1066,7 @@ function initialTabsState(
   const loaded = loadPersisted(workspaceId, scrollbackLineLimit);
   if (loaded) return initialTabsStateFromPersisted(loaded);
   const seed = defaultTabs(defaultCwd);
-  return { tabs: seed, activeId: seed[0].id, closedChatRunIds: [] };
+  return { tabs: seed, activeId: seed[0]?.id ?? null, closedChatRunIds: [] };
 }
 
 // One workspace's retained tab layout. The workbench mounts a small MRU subset
