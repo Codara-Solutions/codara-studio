@@ -206,7 +206,10 @@ A setup awaiting-approval waits for the user to approve its commands; never
 run them, or the setup file's terminal commands, yourself. Once the branch is
 merged, call codara_worktree_remove. It refuses anything unmerged, dirty or in
 use and never forces; act on its code and hint, and ask the user rather than
-deleting work yourself. codara_worktree_list shows what is removable.`,
+deleting work yourself. codara_worktree_list shows what is removable.
+To clean up worktrees across every repository, scan with
+codara_worktree_cleanup, explain its recommendations to the user in plain
+words, then call it with action "remove"; the user approves each one in Codara.`,
   workflows: `Workflows: a script that runs many agents. Shape:
   export const meta = { name: "kebab-name", description: "...", phases: [{ title: "Find" }], args: {JSON Schema} };
   phase("Find");

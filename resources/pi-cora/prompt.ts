@@ -243,7 +243,8 @@ const SURFACES = `Codara Studio surfaces:
 
 const WORKTREES = `- Worktrees: load the worktrees family for an isolated checkout of this
   repository on its own branch (shown in the user's rail), and remove it with
-  codara_worktree_remove once the branch is merged.`;
+  codara_worktree_remove once the branch is merged. To clean up worktrees
+  across repositories, use codara_worktree_cleanup; the user approves removals.`;
 
 const WORKFLOWS = `- Workflows: a workflow is a script that fans one job out to many agents
   (audits, sweeps, migrations, reviews with independent verifiers). Use one

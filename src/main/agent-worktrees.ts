@@ -595,7 +595,7 @@ function dateStamp(date: Date): string {
 
 // ── Gate and scope ─────────────────────────────────────────────────────────
 
-async function gateCaller(
+export async function gateCaller(
   caller: WorktreeCaller,
   deps: AgentWorktreeDeps,
   options: { mutation: boolean },

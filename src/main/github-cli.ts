@@ -230,6 +230,8 @@ export interface GitHubCliAdapter {
   listPullRequestsForHead?(cwd: string, branch: string): Promise<GitHubMergedPullRequest[]>;
   // The most recent merged pull requests, one call for a whole worktree list.
   listMergedPullRequests?(cwd: string, limit?: number): Promise<GitHubMergedPullRequest[]>;
+  // The most recent pull requests closed without merging.
+  listClosedPullRequests?(cwd: string, limit?: number): Promise<GitHubMergedPullRequest[]>;
   createPullRequest?(input: {
     cwd: string;
     title: string;
@@ -716,6 +718,36 @@ export function createGitHubCliAdapter(
         MERGED_PULL_REQUEST_JSON_FIELDS,
       ]);
       return parseMergedPullRequests(stdout);
+    },
+
+    async listClosedPullRequests(
+      cwd: string,
+      limit = GITHUB_MERGED_PULL_REQUEST_LIST_LIMIT,
+    ): Promise<GitHubMergedPullRequest[]> {
+      const bounded = Math.max(1, Math.min(GITHUB_MERGED_PULL_REQUEST_LIST_LIMIT, Math.trunc(limit)));
+      // gh counts merged pull requests as closed; mergedAt tells them apart.
+      const stdout = await runRead(cwd, [
+        "pr",
+        "list",
+        "--state",
+        "closed",
+        "--limit",
+        String(bounded),
+        "--json",
+        `${MERGED_PULL_REQUEST_JSON_FIELDS},mergedAt`,
+      ]);
+      const merged = new Set<number>();
+      try {
+        const raw: unknown = JSON.parse(stdout);
+        if (Array.isArray(raw)) {
+          for (const entry of raw) {
+            if (isRecord(entry) && typeof entry.number === "number" && entry.mergedAt) merged.add(entry.number);
+          }
+        }
+      } catch {
+        /* parseMergedPullRequests reports the invalid JSON. */
+      }
+      return parseMergedPullRequests(stdout).filter((pr) => !merged.has(pr.number));
     },
 
     async createPullRequest(input): Promise<void> {

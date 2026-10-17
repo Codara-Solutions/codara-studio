@@ -13,6 +13,11 @@ import type {
   WorktreeRemovalCheck,
   WorktreeSizeEvent,
 } from "@shared/worktree-cleanup";
+import type {
+  WorktreeCleanupAgentResult,
+  WorktreeCleanupApprovalAnswer,
+  WorktreeCleanupApprovalRequest,
+} from "@shared/worktree-cleanup-agent";
 
 export const worktreeCleanupApi = {
   scan: (): Promise<WorktreeCleanupScan> => ipcRenderer.invoke("worktreeCleanup:scan"),
@@ -29,4 +34,19 @@ export const worktreeCleanupApi = {
     ipcRenderer.on("worktreeCleanup:size", wrapped);
     return () => ipcRenderer.removeListener("worktreeCleanup:size", wrapped);
   },
+  /** An agent asks to remove worktrees (codara_worktree_cleanup); the user answers in the approval dialog. */
+  onApproval: (listener: (request: WorktreeCleanupApprovalRequest) => void): (() => void) => {
+    const wrapped = (_event: unknown, payload: WorktreeCleanupApprovalRequest): void => listener(payload);
+    ipcRenderer.on("worktreeCleanup:approval", wrapped);
+    return () => ipcRenderer.removeListener("worktreeCleanup:approval", wrapped);
+  },
+  /** The request is no longer waited for (it timed out). */
+  onApprovalClosed: (listener: (payload: { id: string }) => void): (() => void) => {
+    const wrapped = (_event: unknown, payload: { id: string }): void => listener(payload);
+    ipcRenderer.on("worktreeCleanup:approvalClosed", wrapped);
+    return () => ipcRenderer.removeListener("worktreeCleanup:approvalClosed", wrapped);
+  },
+  /** Resolves with what the removal did; null when the request expired. */
+  answerApproval: (answer: WorktreeCleanupApprovalAnswer): Promise<WorktreeCleanupAgentResult | null> =>
+    ipcRenderer.invoke("worktreeCleanup:approvalAnswer", answer),
 };

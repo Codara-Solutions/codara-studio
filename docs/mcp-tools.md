@@ -691,6 +691,7 @@ are not supported yet.
 | `codara_worktree_setup` | The setup state of a worktree: what was copied and linked, each command with its exit code, the error and the end of the log (`logLines`, at most 200). Without `workspaceId` or `path`, the worktree the agent works in. `wait: true` waits for setup to end, also while you decide on a command awaiting approval, up to `timeoutSeconds` (default 300, at most 540). Read-only. |
 | `codara_worktree_list` | Lists the repository's Codara-managed worktrees: who created each, uncommitted and ignored files, terminals, runs and processes using it, merge status, and `removable` with the `blockers` that `codara_worktree_remove` would report. `checkMerge: true` fetches and asks GitHub, so it is slower. Worktrees Codara does not manage are listed under `unmanaged` and are never touched. |
 | `codara_worktree_remove` | Removes a worktree and, by default, the branch it created. `dryRun: true` only checks. |
+| `codara_worktree_cleanup` | **Clean up worktrees** for an agent, across every repository behind your workspaces. See [Cleaning up worktrees](#cleaning-up-worktrees). |
 
 `codara_worktree_remove` never forces anything. It removes a worktree only
 when all of these hold, and otherwise returns an error result with a `code`,
@@ -759,6 +760,46 @@ branch is deleted only if it still points at the commit that was checked.
 Every create and removal, refused or not, is logged to
 `~/.codarastudio/logs/worktree-audit.jsonl`. **Let agents create and remove
 worktrees** in Settings turns creating and removing off; listing still works.
+
+### Cleaning up worktrees
+
+`codara_worktree_cleanup` gives an agent what the **Clean up worktrees** screen
+shows, so it can recommend what to remove and ask you.
+
+- `action: "scan"` (the default) only reads. For every worktree of every
+  repository behind your workspaces (not the main checkouts) it returns the
+  repository, branch, path, workspace, size on disk, last activity, uncommitted
+  files, ignored files a fresh checkout would not bring back, the full check's
+  blockers, what is running in it, the merge state, the pull request (open,
+  merged or closed) and whether the branch is on the remote, plus a
+  `recommendation` with a `reason`: **safe to remove** (merged, clean and
+  idle), **review** (merged but holding ignored files such as `.env.local`, or
+  not merged but pushed and idle for `staleDays`, default 14), or **keep**
+  (unsaved changes, in use, an open pull request, commits that are not
+  pushed). The list is sorted safe first, then by size, and `totals` says how
+  much the safe removals free. `checkMerge: true` asks GitHub and the remote
+  now (`git ls-remote`) instead of using the last fetch. SSH workspaces are
+  listed under `notCovered`: their worktrees live on the remote host.
+- `action: "remove"` with `paths` opens an approval dialog in Codara that says
+  which agent asks and lists each worktree with its repository, branch, size,
+  recommendation and reason. Only the safe ones start ticked. A worktree with
+  unsaved changes or something running in it cannot be ticked; you remove
+  those yourself from the screen. A separate, unticked choice per worktree
+  also deletes its branch on the remote with your own git sign-in (`git push
+  --delete` with a lease on the commit the dialog showed), offered only when
+  a merged pull request covers that branch's remote tip, no open pull request
+  uses it, and it is not a default or long-lived branch. `deleteRemoteBranch`
+  or `deleteRemoteBranchFor` only mark that choice as suggested. The tool
+  waits up to 5 minutes for your answer and returns what was removed, what
+  was skipped and why, and what happened to each remote branch.
+
+The removal is the screen's own: the full check again under the repository
+lock, a recovery ref for the last commit, and a refusal if anything changed
+since the dialog showed it. A worktree whose only local work is ignored files
+can be removed once you tick it, since the dialog listed those files; a
+branch with commits that are not merged always stays. Read-only and edit-only
+Pi workers may scan but not remove, and imported pull-request runs do not get
+the tool.
 
 ## Whiteboard and board
 

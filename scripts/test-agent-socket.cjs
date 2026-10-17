@@ -803,6 +803,7 @@ async function main() {
       ["worktree.list", { runId: "run-untrusted-pr", callerRole: "manager" }],
       ["worktree.remove", { runId: "run-untrusted-pr", callerRole: "manager", workspaceId: "ws-x" }],
       ["worktree.setup", { runId: "run-untrusted-pr", callerRole: "manager" }],
+      ["worktree.cleanup", { runId: "run-untrusted-pr", callerRole: "manager" }],
     ]) {
       const denied = await rpc(handshake, method, params);
       check(
@@ -819,6 +820,16 @@ async function main() {
     check("worktree.create checks parameter types", badType.error?.code === -32602, JSON.stringify(badType).slice(0, 180));
     const fromWorker = await rpc(handshake, "worktree.list", { callerRole: "worker" });
     check("a worker cannot manage worktrees", fromWorker.result?.code === "WORKTREE_FORBIDDEN", JSON.stringify(fromWorker).slice(0, 180));
+    const badCleanup = await rpc(handshake, "worktree.cleanup", { action: "delete" });
+    check("worktree.cleanup checks its action", badCleanup.error?.code === -32602, JSON.stringify(badCleanup).slice(0, 180));
+    const noPaths = await rpc(handshake, "worktree.cleanup", { action: "remove" });
+    check("a cleanup removal needs paths", noPaths.error?.code === -32602, JSON.stringify(noPaths).slice(0, 180));
+    const workerCleanup = await rpc(handshake, "worktree.cleanup", { action: "remove", paths: ["/tmp/x"], callerRole: "worker" });
+    check(
+      "a worker cannot ask to remove worktrees",
+      workerCleanup.result?.code === "WORKTREE_FORBIDDEN",
+      JSON.stringify(workerCleanup).slice(0, 180),
+    );
     const fromTalk = await rpc(handshake, "worktree.create", { callerRole: "talk", runId: "run-socket-test" });
     check("a chat worker's run id grants nothing", fromTalk.result?.code === "WORKTREE_FORBIDDEN", JSON.stringify(fromTalk).slice(0, 180));
     const placelessWorktree = await rpc(handshake, "worktree.list", { callerRole: "studio", callerPid: 1 });

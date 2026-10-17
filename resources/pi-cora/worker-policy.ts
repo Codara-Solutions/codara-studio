@@ -272,6 +272,16 @@ export function fenceDecision(
       };
     }
   }
+  // A fenced worker may read the worktree cleanup scan but never ask to
+  // remove worktrees, even with the user's approval.
+  if (fenceAccess(env) && name === "codara_worktree_cleanup" && input && typeof input === "object") {
+    if ((input as { action?: unknown }).action === "remove") {
+      return {
+        block: true,
+        reason: `This worker (access preset "${fenceAccess(env)}") may scan worktrees but not remove them. Report what the scan recommends instead.`,
+      };
+    }
+  }
   // Containment applies only when a preset armed the fence; blockedTools-only
   // workers keep full path reach on the tools they still have. Read/search
   // tools are contained as well: a pull request must not turn a worker into a

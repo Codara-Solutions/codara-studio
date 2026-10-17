@@ -45,6 +45,7 @@ import { ShareOfferGate } from "./share/offer";
 import {
   createAgentWorktree,
   createWorktreeAuditLog,
+  gateCaller,
   getAgentWorktreeSetup,
   listAgentWorktrees,
   removeAgentWorktree,
@@ -620,6 +621,7 @@ const UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS = new Set<string>([
   "worktree.list",
   "worktree.remove",
   "worktree.setup",
+  "worktree.cleanup",
 ]);
 
 function isUntrustedPullRequestBlockedMethod(method: string): boolean {
@@ -683,7 +685,7 @@ async function dispatch(
         }
       }
     }
-    if (MID_COMPACTION_BLOCKED_METHODS.has(method)) {
+    if (MID_COMPACTION_BLOCKED_METHODS.has(method) || (method === "worktree.cleanup" && params.action === "remove")) {
       const runId = stringParam(params, "runId");
       if (runId && (await getRunStore()).isRunMidAutoCompaction(runId)) {
         return errorResponse(
@@ -751,6 +753,8 @@ async function dispatch(
       case "worktree.remove":
       case "worktree.setup":
         return await handleWorktree(method, params, id);
+      case "worktree.cleanup":
+        return await handleWorktreeCleanup(params, id);
       case "accounts.list":
         return await handleAccountsList(id);
       case "accounts.anthropic.renew":
@@ -2066,6 +2070,79 @@ async function handleWorktree(
         },
         deps,
       ),
+    );
+  } catch (err) {
+    return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));
+  }
+}
+
+// codara_worktree_cleanup. Scanning reads only; a removal goes through the
+// user's approval in Codara, and only a caller that may change worktrees
+// (the same gate as codara_worktree_remove) may ask for one.
+async function handleWorktreeCleanup(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+  const action = params.action === undefined || params.action === null ? "scan" : params.action;
+  if (action !== "scan" && action !== "remove") return errorResponse(id, ERR_INVALID_PARAMS, "action must be scan or remove");
+  for (const [key, type] of [["checkMerge", "boolean"], ["deleteRemoteBranch", "boolean"]] as const) {
+    const problem = optionalTypedParam(params, key, type);
+    if (problem) return errorResponse(id, ERR_INVALID_PARAMS, problem);
+  }
+  const staleDays = params.staleDays;
+  if (staleDays !== undefined && staleDays !== null && (typeof staleDays !== "number" || !Number.isFinite(staleDays))) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "staleDays must be a number");
+  }
+  let items: Array<{ path: string; deleteRemoteBranch?: boolean }> = [];
+  if (action === "remove") {
+    const raw = params.paths ?? params.items;
+    if (!Array.isArray(raw) || raw.length === 0) {
+      return errorResponse(id, ERR_INVALID_PARAMS, "remove needs paths: the absolute worktree paths from the scan");
+    }
+    for (const entry of raw) {
+      const item =
+        typeof entry === "string"
+          ? { path: entry }
+          : entry && typeof entry === "object" && typeof (entry as { path?: unknown }).path === "string"
+            ? {
+                path: (entry as { path: string }).path,
+                ...(typeof (entry as { deleteRemoteBranch?: unknown }).deleteRemoteBranch === "boolean"
+                  ? { deleteRemoteBranch: (entry as { deleteRemoteBranch: boolean }).deleteRemoteBranch }
+                  : {}),
+              }
+            : null;
+      if (!item || !isAbsolute(item.path)) return errorResponse(id, ERR_INVALID_PARAMS, "every path must be absolute");
+      items.push(item);
+    }
+    const remoteFor = Array.isArray(params.deleteRemoteBranchFor)
+      ? new Set(params.deleteRemoteBranchFor.filter((entry): entry is string => typeof entry === "string"))
+      : null;
+    if (remoteFor) {
+      items = items.map((item) => (remoteFor.has(item.path) ? { ...item, deleteRemoteBranch: true } : item));
+    }
+    items = items.slice(0, 50);
+  }
+  try {
+    const caller = await worktreeCaller(params);
+    const deps = worktreeDeps();
+    if (action === "remove") {
+      const gate = await gateCaller(caller, deps, { mutation: true });
+      if ("ok" in gate && gate.ok === false) return successResponse(id, gate);
+    }
+    const state = await loadState();
+    let workspaceId: string | null = null;
+    if (caller.runId) workspaceId = (await deps.getRun(caller.runId))?.workspaceId ?? null;
+    else if (caller.paneId) workspaceId = await deps.paneWorkspaceId(caller.paneId).catch(() => null);
+    const workspaceName = state.workspaces.find((workspace) => workspace.id === workspaceId)?.name ?? null;
+    const { runAgentWorktreeCleanup } = await import("./worktree-cleanup");
+    return successResponse(
+      id,
+      await runAgentWorktreeCleanup({
+        action,
+        checkMerge: params.checkMerge === true,
+        ...(typeof staleDays === "number" ? { staleDays } : {}),
+        items,
+        deleteRemoteBranch: params.deleteRemoteBranch === true,
+        caller,
+        agent: { client: caller.client, workspaceName },
+      }),
     );
   } catch (err) {
     return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));

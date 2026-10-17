@@ -548,6 +548,27 @@
   font-size: 11px;
 }
 
+/* ── An agent's removal request (WorktreeCleanupApproval.tsx) ────────────── */
+
+.wtc-dialog.wtc-dialog--approval {
+  width: min(720px, calc(100vw - 48px));
+  height: auto;
+  max-height: min(720px, calc(100vh - 72px));
+}
+.wtc-dialog--approval .wtc-review-head > label {
+  cursor: pointer;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wtc-dialog--approval .wtc-review-head > input,
+.wtc-dialog--approval .wtc-review-confirm input,
+.wtc-dialog--approval .wtc-review-toggle input {
+  margin: 0;
+  flex: none;
+}
+
 /* ── Footer ───────────────────────────────────────────────────────────────── */
 
 .wtc-footer {

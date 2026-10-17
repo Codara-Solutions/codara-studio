@@ -297,7 +297,7 @@ for (const automation of [false, true]) {
   assert.equal(policy.isWorkerSafeBridgeTool("codara_remember", automation, { CODARA_PI_DIRECT_TASK: "1" }), !automation);
 }
 assert.equal(policy.isWorkerSafeBridgeTool("codara_remember", false, { CODARA_PI_DIRECT_TASK: "1", CODARA_PI_PROJECT_POLICY: "untrusted-pull-request" }), false);
-for (const tool of ["codara_worktree_create", "codara_worktree_list", "codara_worktree_remove", "codara_worktree_setup"]) {
+for (const tool of ["codara_worktree_create", "codara_worktree_list", "codara_worktree_remove", "codara_worktree_setup", "codara_worktree_cleanup"]) {
   assert.equal(policy.isWorkerSafeBridgeTool(tool, false, {}), false, `${tool} stays out of chat workers`);
   assert.equal(policy.isWorkerSafeBridgeTool(tool, true, { CODARA_PI_DIRECT_TASK: "1" }), false, `${tool} stays out of loom workers`);
   assert.equal(policy.isWorkerSafeBridgeTool(tool, false, { CODARA_PI_DIRECT_TASK: "1" }), true, `${tool} reaches a direct task`);
@@ -306,6 +306,15 @@ for (const tool of ["codara_worktree_create", "codara_worktree_list", "codara_wo
     false,
   );
 }
+// A fenced worker may scan worktrees for cleanup but never ask to remove any.
+for (const access of ["readonly", "edits"]) {
+  const env = { CODARA_PI_DIRECT_TASK: "1", CODARA_PI_WORKER_ACCESS: access };
+  const fence = policy.fencedToolNames(env);
+  assert.equal(policy.fenceDecision("codara_worktree_cleanup", { action: "scan" }, fence, env), undefined);
+  assert.equal(policy.fenceDecision("codara_worktree_cleanup", {}, fence, env), undefined);
+  assert.equal(policy.fenceDecision("codara_worktree_cleanup", { action: "remove", paths: ["/x"] }, fence, env)?.block, true);
+}
+assert.equal(policy.fenceDecision("codara_worktree_cleanup", { action: "remove" }, new Set(), { CODARA_PI_DIRECT_TASK: "1" }), undefined);
 assert.match(workerExtensionSource, /CODARA_PI_DIRECT_STUDIO_TOOLS !== "1" &&\s+tool.name !== "codara_remember" &&\s+tool.name !== "codara_recall"/);
 assert.equal(policy.isWorkerSafeBridgeTool("codara_recall", false, { CODARA_PI_DIRECT_TASK: "1" }), true);
 assert.equal(policy.isWorkerSafeBridgeTool("codara_recall", false, {}), false, "delegated workers get memory in the prompt, not the search tool");

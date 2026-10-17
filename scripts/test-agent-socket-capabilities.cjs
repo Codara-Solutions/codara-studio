@@ -164,7 +164,7 @@ assert.match(
   "chat.resume must keep an explicit root-only dispatch gate even if a future scoped roster changes",
 );
 
-for (const method of ["worktree.create", "worktree.list", "worktree.remove", "worktree.setup"]) {
+for (const method of ["worktree.create", "worktree.list", "worktree.remove", "worktree.setup", "worktree.cleanup"]) {
   assert.match(
     socketSource,
     new RegExp(`UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS = new Set<string>\\(\\[[^\\]]*"${method.replace(".", "\\.")}"`),
@@ -178,6 +178,12 @@ for (const method of ["worktree.create", "worktree.remove"]) {
     `${method} waits out a compaction`,
   );
 }
+
+assert.match(
+  socketSource,
+  /MID_COMPACTION_BLOCKED_METHODS\.has\(method\) \|\| \(method === "worktree\.cleanup" && params\.action === "remove"\)/,
+  "a worktree cleanup removal waits out a compaction",
+);
 
 const bridgeSource = fs.readFileSync(
   path.join(ROOT, "resources", "codara-studio-mcp", "server.js"),

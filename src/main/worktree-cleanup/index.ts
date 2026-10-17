@@ -5,6 +5,7 @@
 // window.spark.worktreeCleanup (src/preload/areas/worktree-cleanup.ts).
 
 import { app, BrowserWindow } from "electron";
+import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
@@ -12,9 +13,15 @@ import type {
   WorktreeCleanupScan,
   WorktreeSizeEvent,
 } from "@shared/worktree-cleanup";
-import { createWorktreeAuditLog, scanProcessesUnderCwds, type RendererTerminal } from "../agent-worktrees";
+import type {
+  WorktreeCleanupAgentResult,
+  WorktreeCleanupApprovalAnswer,
+  WorktreeCleanupApprovalRequest,
+} from "@shared/worktree-cleanup-agent";
+import { createWorktreeAuditLog, scanProcessesUnderCwds, type RendererTerminal, type WorktreeCaller } from "../agent-worktrees";
 import { codaraHome } from "../codara-home";
 import type { IpcHandle } from "../ipc";
+import { getTrustedMainWindow } from "../main-window-trust";
 import { isProtectedCliPath, protectedCliPaths } from "../outside-write-guard";
 import { loadPreferences } from "../preferences-store";
 import * as pty from "../pty-manager";
@@ -22,6 +29,7 @@ import { serversService } from "../servers/service";
 import { loadState, updateState } from "../storage";
 import { requestTerminalOp } from "../terminal-bridge";
 import { publishState } from "../workspace-state-publish";
+import type { AgentCleanupDeps, ApprovalAsker } from "./agent-tool";
 import type { RepoPullRequests, WorktreeCleanupDeps } from "./inspect";
 import type { ScannedWorktree } from "./scan";
 import type { SizeMeasurer, SizeStore } from "./space";
@@ -208,4 +216,152 @@ export function registerWorktreeCleanupIpc(handle: IpcHandle): void {
     }
     return result;
   });
+
+  // The approval dialog's answer. Resolves with what the removal did, so the
+  // dialog can show it; null when the request is no longer waited for.
+  handle("worktreeCleanup:approvalAnswer", async (_event, answer: unknown): Promise<WorktreeCleanupAgentResult | null> => {
+    const value = answer as Partial<WorktreeCleanupApprovalAnswer> | null;
+    const pending = value && typeof value.id === "string" ? approvals.get(value.id) : undefined;
+    if (!pending) return null;
+    approvals.delete(pending.id);
+    pending.answer({
+      id: pending.id,
+      approved: value!.approved === true,
+      items: Array.isArray(value!.items) ? value!.items : [],
+      deleteMergedBranches: value!.deleteMergedBranches === true,
+    });
+    return pending.done;
+  });
+}
+
+// ── codara_worktree_cleanup ────────────────────────────────────────────────
+
+export const APPROVAL_TIMEOUT_MS = 5 * 60_000;
+
+interface PendingApproval {
+  id: string;
+  answer(value: WorktreeCleanupApprovalAnswer | null): void;
+  done: Promise<WorktreeCleanupAgentResult>;
+}
+
+const approvals = new Map<string, PendingApproval>();
+
+async function agentDeps(): Promise<AgentCleanupDeps> {
+  const { store: cache, measurer: queue } = await sizes();
+  const { gitRemoteOps } = await import("./agent-tool");
+  return {
+    cleanup: deps(await gitCacheInvalidator()),
+    sizeOf: (id) => cache.get(id),
+    forgetSize: (id) => cache.delete(id),
+    async measureSizes(items, budgetMs) {
+      const deadline = Date.now() + budgetMs;
+      queue.enqueue(items.map((item) => ({ ...item, priority: 0 })));
+      while (queue.pending() > 0 && Date.now() < deadline) {
+        await queue.settled(Math.min(2_000, Math.max(0, deadline - Date.now())));
+        await new Promise((done) => setTimeout(done, 50));
+      }
+    },
+    freshPullRequests: async (root) => {
+      pullRequestCache.delete(root);
+      return pullRequests(root);
+    },
+    closedPullRequests: async (root) => {
+      const { createGitHubCliAdapter } = await import("../github-cli");
+      const adapter = (githubAdapter ??= createGitHubCliAdapter());
+      if (!adapter.listClosedPullRequests) return [];
+      return adapter.listClosedPullRequests(root, 100);
+    },
+    remote: gitRemoteOps,
+  };
+}
+
+/**
+ * Shows the approval dialog in the app window and waits for the answer.
+ * `finished` receives what the removal did once it ran, for the dialog.
+ */
+function askInWindow(
+  finished: Promise<WorktreeCleanupAgentResult>,
+  timeoutMs: number,
+): ApprovalAsker {
+  return async (request) => {
+    const win = getTrustedMainWindow();
+    if (!win || win.webContents.isDestroyed()) return "no-window";
+    const id = randomBytes(12).toString("hex");
+    const full: WorktreeCleanupApprovalRequest = { ...request, id, expiresAt: Date.now() + timeoutMs };
+    const answer = await new Promise<WorktreeCleanupApprovalAnswer | null>((resolve) => {
+      const timer = setTimeout(() => {
+        approvals.delete(id);
+        if (!win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send("worktreeCleanup:approvalClosed", { id });
+        resolve(null);
+      }, timeoutMs);
+      approvals.set(id, {
+        id,
+        answer: (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        done: finished,
+      });
+      win.webContents.send("worktreeCleanup:approval", full);
+      if (!win.isFocused()) win.flashFrame(true);
+    });
+    if (answer?.approved && measurer) {
+      // As for the screen's removal: no du may still read a folder git deletes.
+      measurer.cancel();
+      await measurer.settled(5_000);
+    }
+    return answer;
+  };
+}
+
+export interface AgentWorktreeCleanupCall {
+  action: "scan" | "remove";
+  checkMerge?: boolean;
+  staleDays?: number;
+  items?: Array<{ path: string; deleteRemoteBranch?: boolean }>;
+  deleteRemoteBranch?: boolean;
+  caller: WorktreeCaller;
+  agent: { client: string; workspaceName: string | null };
+}
+
+/** The agent socket's entry for codara_worktree_cleanup. */
+export async function runAgentWorktreeCleanup(
+  call: AgentWorktreeCleanupCall,
+  options: { approvalTimeoutMs?: number } = {},
+): Promise<Record<string, unknown> | WorktreeCleanupAgentResult> {
+  const tool = await import("./agent-tool");
+  const agentDependencies = await agentDeps();
+  if (call.action === "scan") {
+    return tool.scanForAgent(agentDependencies, { checkMerge: call.checkMerge, staleDays: call.staleDays });
+  }
+  let finish!: (result: WorktreeCleanupAgentResult) => void;
+  const finished = new Promise<WorktreeCleanupAgentResult>((resolve) => {
+    finish = resolve;
+  });
+  try {
+    const result = await tool.removeForAgent(
+      agentDependencies,
+      { items: call.items ?? [], deleteRemoteBranch: call.deleteRemoteBranch, staleDays: call.staleDays },
+      { caller: call.caller, agent: call.agent },
+      askInWindow(finished, options.approvalTimeoutMs ?? APPROVAL_TIMEOUT_MS),
+    );
+    finish(result);
+    if (result.removed.length) {
+      for (const outcome of result.removed) {
+        for (const [id, worktree] of known) if (worktree.path === outcome.path) known.delete(id);
+      }
+    }
+    return result;
+  } catch (err) {
+    const failed: WorktreeCleanupAgentResult = {
+      ok: false,
+      status: "done",
+      removed: [],
+      skipped: [],
+      remoteBranches: [],
+      note: `The removal failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+    finish(failed);
+    throw err;
+  }
 }

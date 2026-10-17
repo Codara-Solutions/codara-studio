@@ -102,6 +102,9 @@ const WORKTREE_TIMEOUT_MS = 150_000;
 // codara_worktree_setup up to 9; both stay under Codex's 11-minute tool limit.
 const WORKTREE_CREATE_TIMEOUT_MS = WORKTREE_TIMEOUT_MS + 5 * 60_000 + 30_000;
 const WORKTREE_SETUP_TIMEOUT_MS = 9 * 60_000 + 30_000;
+// codara_worktree_cleanup remove waits up to 5 minutes for the user's answer,
+// then removes; the deadline stays under Codex's 11-minute tool limit.
+const WORKTREE_CLEANUP_TIMEOUT_MS = 10 * 60_000 + 30_000;
 
 // ===========================================================================
 // Browser tool set (drive the built-in browser tabs). The definitions live in
@@ -360,6 +363,23 @@ const WORKTREE_TOOLS = [
       additionalProperties: false,
     },
   },
+  {
+    name: "codara_worktree_cleanup",
+    description:
+      "Every worktree of the user's repositories (not SSH) with size, activity, git, PR and remote branch, and a recommendation: safe to remove, review or keep. Scan, explain it to the user, then remove; the user approves in Codara.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        action: { type: "string", enum: ["scan", "remove"], description: "Default scan." },
+        checkMerge: { type: "boolean", description: "Ask GitHub and the remote now." },
+        staleDays: { type: "number", description: "Default 14." },
+        paths: { type: "array", items: { type: "string" } },
+        deleteRemoteBranch: { type: "boolean", description: "Offer to delete merged remote branches." },
+        deleteRemoteBranchFor: { type: "array", items: { type: "string" }, description: "Only for these paths." },
+      },
+      additionalProperties: false,
+    },
+  },
 ];
 
 const WORKTREE_TOOL_TO_RPC = {
@@ -367,6 +387,7 @@ const WORKTREE_TOOL_TO_RPC = {
   codara_worktree_list: "worktree.list",
   codara_worktree_remove: "worktree.remove",
   codara_worktree_setup: "worktree.setup",
+  codara_worktree_cleanup: "worktree.cleanup",
 };
 
 // Workflows: a JavaScript script that fans work out to many Cora agents. Only
@@ -1792,6 +1813,8 @@ const DESTRUCTIVE_TOOL_NAMES = new Set([
   // Runs the repository's setup command (once the user approved it).
   "codara_worktree_create",
   "codara_worktree_remove",
+  // Its remove action deletes worktrees and remote branches the user approves.
+  "codara_worktree_cleanup",
 ]);
 const IDEMPOTENT_TOOL_NAMES = new Set([
   ...TOOL_REGISTRY.annotations.idempotent,
@@ -1809,6 +1832,8 @@ const OPEN_WORLD_TOOL_NAMES = new Set([
   "codara_terminal_write",
   // Fetches the base and runs the repository's setup command.
   "codara_worktree_create",
+  // Asks GitHub and the remote, and may delete a remote branch.
+  "codara_worktree_cleanup",
 ]);
 
 function toolTitle(name) {
@@ -1875,7 +1900,7 @@ function buildInstructions() {
   }
   if (listed.has("codara_worktree_create")) {
     parts.push(
-      "Worktrees: codara_worktree_create gives you an isolated checkout of your repository on its own branch, shown in the user's rail. Work there with absolute paths or git -C; your cwd stays put. Codara prepares it from the repository's .worktreeinclude and .codara/worktree.json (copied files, linked folders, setup command); when the result's setup is not finished, call codara_worktree_setup with wait:true before building, and read its logTail if it failed. Linked folders are shared with the main checkout: never install into or delete them from the worktree. A setup in state awaiting-approval waits for the user to approve its commands; never run them, or the setup file's terminal commands, yourself. Once the branch is merged, call codara_worktree_remove. It refuses anything unmerged, dirty or in use and never forces, so act on its code and hint instead of retrying.",
+      "Worktrees: codara_worktree_create gives you an isolated checkout of your repository on its own branch, shown in the user's rail. Work there with absolute paths or git -C; your cwd stays put. Codara prepares it from the repository's .worktreeinclude and .codara/worktree.json (copied files, linked folders, setup command); when the result's setup is not finished, call codara_worktree_setup with wait:true before building, and read its logTail if it failed. Linked folders are shared with the main checkout: never install into or delete them from the worktree. A setup in state awaiting-approval waits for the user to approve its commands; never run them, or the setup file's terminal commands, yourself. Once the branch is merged, call codara_worktree_remove. It refuses anything unmerged, dirty or in use and never forces, so act on its code and hint instead of retrying. When the user wants to clean up worktrees in general, scan with codara_worktree_cleanup, explain its recommendations, then call it with action remove: Codara asks the user to approve each worktree.",
     );
   }
   if (listed.has("codara_notify_user")) {
@@ -1940,6 +1965,7 @@ const PROGRESS_RPCS = new Set([
   "worktree.create",
   "worktree.remove",
   "worktree.setup",
+  "worktree.cleanup",
 ]);
 const PROGRESS_INTERVAL_MS = 10_000;
 
@@ -1948,6 +1974,7 @@ function rpcTimeoutMs(rpc) {
   if (rpc === "terminal.run") return TERMINAL_RUN_TIMEOUT_MS;
   if (rpc === "worktree.create") return WORKTREE_CREATE_TIMEOUT_MS;
   if (rpc === "worktree.setup") return WORKTREE_SETUP_TIMEOUT_MS;
+  if (rpc === "worktree.cleanup") return WORKTREE_CLEANUP_TIMEOUT_MS;
   if (rpc.startsWith("worktree.")) return WORKTREE_TIMEOUT_MS;
   return PREVIEW_TERMINAL_TIMEOUT_MS;
 }

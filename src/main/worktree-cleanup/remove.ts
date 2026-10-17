@@ -19,6 +19,7 @@ import {
   cleanText,
   pruneRecoveryRefs,
   withRepoLock,
+  type WorktreeCaller,
 } from "../agent-worktrees";
 import { deleteBranchIfAt } from "../git-branches";
 import { errorText, readGitText, runGit } from "../git-exec";
@@ -67,6 +68,8 @@ export interface RemoveOptions {
   sizeOf?: (id: string) => WorktreeSize | null;
   forgetSize?: (id: string) => void;
   usageFreshMs?: number;
+  /** Who asked, for the audit log; the cleanup screen when absent. */
+  caller?: WorktreeCaller;
 }
 
 function sameRepo(repos: readonly RepoContext[], root: string): RepoContext | undefined {
@@ -248,7 +251,7 @@ async function removeOne(
         action: "remove",
         outcome: result,
         code: extra.code ?? null,
-        caller: { role: "studio", client: "cleanup-screen" },
+        caller: options.caller ?? { role: "studio", client: "cleanup-screen" },
         repo: repo.root,
         workspaceId: check.workspace?.id ?? null,
         path: check.path,
