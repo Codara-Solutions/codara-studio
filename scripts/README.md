@@ -369,6 +369,10 @@ not leave half-saved workspaces in memory), `test-storage-openrouter-key`
 file watcher behind the explorer, `src/main/fs-watcher.ts`),
 `test-fs-watcher-events` (runs that watcher on a temporary workspace: changes
 in nested and symlinked folders reach the explorer),
+`test-fs-watcher-budget` (Linux: counts the process's inotify watches while
+that watcher serves a tree full of nested `node_modules`: one per expanded
+folder within a budget, polling past it, and back to the baseline after
+hundreds of open, expand, collapse and close cycles),
 `test-system-metrics` (the title-bar meters and System activity samplers,
 `src/main/system-metrics*.ts`: every platform's parsers on captured output,
 the Linux sampler on a fake `/proc` and `/sys`, Intel, AMD and NVIDIA GPUs

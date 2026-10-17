@@ -1052,6 +1052,10 @@ function createWindow(): void {
     armBootWatchdog();
     // Pane overlays are document state with no restore path.
     closeAllPaneOverlays();
+    // So are Explorer watches: the new document arms the roots it shows, and a
+    // root it no longer shows would otherwise stay watched until the window
+    // closes.
+    fsWatcher.disposeForWebContents(windowForEvents.webContents);
   });
   // The page itself failed to load (dead dev server, missing asset). Retry via
   // the same escalation ladder after a short delay — an immediate reload against

@@ -840,6 +840,15 @@ const api = {
     addWatchRoot: (root: string): Promise<void> => ipcRenderer.invoke("fs:addWatchRoot", root),
     removeWatchRoot: (root: string): Promise<void> =>
       ipcRenderer.invoke("fs:removeWatchRoot", root),
+    // The expanded folders of a watched root. Resolves with the ones that were
+    // not watched until now, which the caller should re-list.
+    setWatchedDirs: (root: string, dirs: string[]): Promise<string[]> =>
+      ipcRenderer.invoke("fs:setWatchedDirs", root, dirs),
+    // Keep fs:changed coming for a previewed file's folder, wherever it is.
+    watchPreviewFile: (path: string): Promise<void> =>
+      ipcRenderer.invoke("fs:watchPreviewFile", path),
+    unwatchPreviewFile: (path: string): Promise<void> =>
+      ipcRenderer.invoke("fs:unwatchPreviewFile", path),
     revealInOS: (path: string): Promise<void> => ipcRenderer.invoke("fs:revealInOS", path),
     onChanged: (handler: FsChangeHandler): (() => void) => {
       const listener = (_e: Electron.IpcRendererEvent, event: FsChangeEvent) => handler(event);

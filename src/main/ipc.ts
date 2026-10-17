@@ -2060,6 +2060,25 @@ export function registerIpc(): void {
     fsWatcher.removeWatchRoot(e.sender, root);
   });
 
+  // The folders a root's Explorer shows expanded. Only folders inside a root
+  // this window already armed (and so gated) are accepted.
+  handle("fs:setWatchedDirs", async (e, root: string, dirs: unknown): Promise<string[]> => {
+    if (typeof root !== "string" || isRemotePath(root) || !Array.isArray(dirs)) return [];
+    const cleaned = dirs.filter((d): d is string => typeof d === "string" && d.length > 0);
+    return fsWatcher.setWatchedDirs(e.sender, root, cleaned);
+  });
+
+  handle("fs:watchPreviewFile", async (e, path: string): Promise<void> => {
+    if (typeof path !== "string" || isRemotePath(path)) return;
+    await assertAllowedReadPathResolved(path);
+    fsWatcher.watchPreviewFile(e.sender, path);
+  });
+
+  handle("fs:unwatchPreviewFile", async (e, path: string): Promise<void> => {
+    if (typeof path !== "string" || isRemotePath(path)) return;
+    fsWatcher.unwatchPreviewFile(e.sender, path);
+  });
+
   // The renderer is authoritative about which workspaces are open, but the
   // sandbox lives in main. Renderer pushes the cwd list whenever it changes;
   // main treats the list as the source of truth for read-path checks.

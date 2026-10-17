@@ -345,6 +345,10 @@ export default function FileTree({
   // back into view when `activePath` changes from outside the visible window
   // (e.g. opening a file via search, or F2 rename on an off-screen node).
   const virtuosoRef = useRef<VirtuosoHandle | null>(null);
+  // The expanded folders whose rows are shown, for main's watcher, and the
+  // sender the watcher effect installs once the root is armed.
+  const watchedDirsRef = useRef<string[]>([]);
+  const scheduleWatchedDirsSyncRef = useRef<() => void>(() => undefined);
 
   const updateRowElement = useCallback((path: string, element: HTMLDivElement | null) => {
     if (element) rowElementsRef.current.set(path, element);
@@ -532,6 +536,36 @@ export default function FileTree({
   // Watch the workspace for filesystem changes and refresh affected dirs.
   useEffect(() => {
     let cancelled = false;
+    // Where recursive watching is not native (Linux), main watches only the
+    // root and the expanded folders reported here, so collapsing a folder
+    // releases its watch. A folder starts being watched after it was listed,
+    // and a re-expanded one was not watched while collapsed: main returns the
+    // folders it newly watches and they are re-listed.
+    let armed = false;
+    let sentKey: string | null = null;
+    let syncTimer: number | null = null;
+    const syncWatchedDirs = async (relist: boolean) => {
+      syncTimer = null;
+      const dirs = watchedDirsRef.current;
+      const key = dirs.join("\0");
+      if (cancelled || !armed || key === sentKey) return;
+      sentKey = key;
+      const added = await window.spark.fs.setWatchedDirs(cwd, dirs).catch(() => [] as string[]);
+      if (cancelled || !relist || added.length === 0) return;
+      const stale = added
+        .map((path) => findDir(rootRef.current, path))
+        .filter((dir): dir is DirNode & { kind: "dir" } => dir !== null && dir.loaded);
+      if (stale.length === 0) return;
+      await Promise.allSettled(stale.map((dir) => reloadDirInPlace(dir)));
+      if (!cancelled) {
+        restoreExpandedPaths(cwd, rootRef.current);
+        force((n) => n + 1);
+      }
+    };
+    scheduleWatchedDirsSyncRef.current = () => {
+      if (syncTimer !== null) return;
+      syncTimer = window.setTimeout(() => void syncWatchedDirs(true), 50);
+    };
     // Arm the watcher with the same bounded backoff as the initial list: a
     // freshly-created workspace can reach this effect before its root is in
     // the main-process sandbox allowlist, so `addWatchRoot` may reject with
@@ -545,11 +579,15 @@ export default function FileTree({
       // `addWatchRoot` resolves to `undefined` on success; `callWithRetry`
       // returns `null` only when cancelled or every attempt failed, so test
       // against `null` (not falsiness) to detect a genuine failure.
-      const armed = await callWithRetry(
+      const armedRoot = await callWithRetry(
         () => window.spark.fs.addWatchRoot(cwd),
         () => cancelled,
       );
-      if (cancelled || armed === null) return;
+      if (cancelled || armedRoot === null) return;
+      armed = true;
+      // The reconciling reload below re-lists every expanded folder anyway.
+      await syncWatchedDirs(false);
+      if (cancelled) return;
       try {
         await reloadExpandedTreeInPlace(rootRef.current);
         if (!cancelled) {
@@ -582,6 +620,8 @@ export default function FileTree({
     });
     return () => {
       cancelled = true;
+      if (syncTimer !== null) window.clearTimeout(syncTimer);
+      scheduleWatchedDirsSyncRef.current = () => undefined;
       unsub();
       // Remove only THIS tree's root: with external folders, several FileTree
       // instances watch different roots in the same window, so a blanket
@@ -1425,6 +1465,12 @@ export default function FileTree({
     return rows;
   })();
   flatRef.current = flat;
+  const watchedDirs = expandedDirPaths(flat, cwd);
+  const watchedDirsKey = watchedDirs.join("\0");
+  useEffect(() => {
+    watchedDirsRef.current = watchedDirsKey ? watchedDirsKey.split("\0") : [];
+    scheduleWatchedDirsSyncRef.current();
+  }, [watchedDirsKey]);
   const selectedEntries = entriesForPaths(flat, selectedFilePaths);
   // Right-clicking a row that is part of the selection acts on the WHOLE
   // selection (files and folders alike); an unselected row acts on itself only.
@@ -2137,6 +2183,17 @@ function flatten(node: Node, depth: number, out: FlatRow[] = []): FlatRow[] {
     }
   }
   return out;
+}
+
+// The expanded folders among the visible rows, in display order. The root is
+// left out: main always watches it.
+function expandedDirPaths(rows: FlatRow[], root: string): string[] {
+  const dirs: string[] = [];
+  for (const row of rows) {
+    if (row.kind !== "node" || row.node.kind !== "dir" || !row.node.open) continue;
+    if (row.node.entry.path !== root) dirs.push(row.node.entry.path);
+  }
+  return dirs;
 }
 
 // Every visible row — files AND directories — in display order. Selection is
