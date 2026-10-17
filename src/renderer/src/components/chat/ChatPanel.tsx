@@ -15,7 +15,6 @@ import ChatComposer, { type ChatComposerStartConfig } from "./ChatComposer";
 import CopyBranchWelcome from "./CopyBranchWelcome";
 import { describeRunStatus, statusToneColor } from "./timeline";
 import { retryableFailedCallId } from "./failed-turn";
-import CoraWhiteboardSurface from "./CoraWhiteboard";
 import WelcomeAutomations from "./WelcomeAutomations";
 import { isUnstartedChatRun, type CoraView } from "./cora-view";
 import { needsCoraAccount, openAccountsSettings, useCoraAccountReadiness } from "./account-readiness";
@@ -28,6 +27,10 @@ const FIND_CHORD = mod("f");
 // The Cora Board sub-view. Lazy like App's other heavyweight stacks so the
 // kanban chunk stays out of the startup bundle until the user opens the view.
 const BoardView = lazy(() => import("../board/BoardView"));
+// The run whiteboard is a React Flow canvas. It loads, and mounts, the first
+// time this panel shows it; from then on it stays mounted (hidden) like the
+// conversation, so in-flight canvas state survives view switches.
+const CoraWhiteboardSurface = lazy(() => import("./CoraWhiteboard"));
 
 // Fallbacks for callers that don't thread the board callbacks (tests,
 // isolated mounts). Module-level so their identities are stable across
@@ -129,6 +132,11 @@ export default function ChatPanel({
     [onChatViewChange],
   );
   const usingHoistedChatView = chatViewProp !== undefined;
+  const [whiteboardOpened, setWhiteboardOpened] = useState(false);
+  const mountWhiteboard = whiteboardOpened || chatView === "whiteboard";
+  useEffect(() => {
+    if (chatView === "whiteboard") setWhiteboardOpened(true);
+  }, [chatView]);
 
   // Mod+F opens find in the visible chat when focus is inside this panel (or
   // nowhere). Editors and terminals elsewhere keep their own find.
@@ -275,36 +283,40 @@ export default function ChatPanel({
                   />
                 )}
               </div>
-              <div
-                style={{
-                  position: "absolute",
-                  inset: 0,
-                  visibility: chatView === "whiteboard" ? undefined : "hidden",
-                  pointerEvents: chatView === "whiteboard" ? undefined : "none",
-                }}
-                aria-hidden={chatView !== "whiteboard"}
-              >
-                <CoraWhiteboardSurface
-                  // Keyed like ChatConversation: the canvas holds optimistic
-                  // board state, and reusing the instance across runs could
-                  // persist run A's board into run B.
-                  key={activeRun.id}
-                  run={activeRun}
-                  workspacePath={workspace?.cwd}
-                  visible={chatView === "whiteboard" && suspendGlobalEvents !== true}
-                  onAskCora={(prompt) => {
-                    setChatView("chat");
-                    window.requestAnimationFrame(() => {
-                      window.dispatchEvent(
-                        new CustomEvent("spark:prefill-composer", {
-                          detail: { text: prompt, replace: true },
-                        }),
-                      );
-                      window.dispatchEvent(new Event("spark:focus-composer"));
-                    });
+              {mountWhiteboard && (
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    visibility: chatView === "whiteboard" ? undefined : "hidden",
+                    pointerEvents: chatView === "whiteboard" ? undefined : "none",
                   }}
-                />
-              </div>
+                  aria-hidden={chatView !== "whiteboard"}
+                >
+                  <Suspense fallback={null}>
+                    <CoraWhiteboardSurface
+                      // Keyed like ChatConversation: the canvas holds optimistic
+                      // board state, and reusing the instance across runs could
+                      // persist run A's board into run B.
+                      key={activeRun.id}
+                      run={activeRun}
+                      workspacePath={workspace?.cwd}
+                      visible={chatView === "whiteboard" && suspendGlobalEvents !== true}
+                      onAskCora={(prompt) => {
+                        setChatView("chat");
+                        window.requestAnimationFrame(() => {
+                          window.dispatchEvent(
+                            new CustomEvent("spark:prefill-composer", {
+                              detail: { text: prompt, replace: true },
+                            }),
+                          );
+                          window.dispatchEvent(new Event("spark:focus-composer"));
+                        });
+                      }}
+                    />
+                  </Suspense>
+                </div>
+              )}
               {boardSurface && (
                 <div
                   style={{
