@@ -2,7 +2,7 @@ import type { Options } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
-import rehypeHighlight from "rehype-highlight";
+import { rehypeHighlightShared } from "../../lib/rehype-highlight-shared";
 
 // The markdown pipeline, shared by the preview pane and the Share packager so
 // a shared page is rendered by exactly the code the user previewed.
@@ -41,7 +41,7 @@ type RehypePlugins = NonNullable<Options["rehypePlugins"]>;
 // `afterSanitize` runs between the sanitizer and the highlighter: the preview
 // adds its source-line marks there, which the sanitizer would strip.
 export function markdownRehypePipeline(afterSanitize: RehypePlugins = []): RehypePlugins {
-  return [rehypeRaw, [rehypeSanitize, markdownSanitizeSchema], ...afterSanitize, rehypeHighlight];
+  return [rehypeRaw, [rehypeSanitize, markdownSanitizeSchema], ...afterSanitize, rehypeHighlightShared];
 }
 
 export const markdownRehypePlugins: RehypePlugins = markdownRehypePipeline();

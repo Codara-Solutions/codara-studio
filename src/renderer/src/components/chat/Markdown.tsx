@@ -2,7 +2,7 @@ import React, { useContext, useEffect, useId, useMemo, useRef, useState } from "
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkBreaks from "remark-breaks";
-import rehypeHighlight from "rehype-highlight";
+import { rehypeHighlightShared } from "../../lib/rehype-highlight-shared";
 import {
   classifyChatHref,
   codeSpanFileReference,
@@ -16,7 +16,9 @@ import {
 // line-by-line, and collapsing soft breaks is what produced wall-of-text
 // question cards.
 const REMARK_PLUGINS = [remarkGfm, remarkBreaks];
-const REHYPE_PLUGINS = [rehypeHighlight];
+// react-markdown still rebuilds its processor per render; the shared plugin
+// keeps the highlighter it attaches from being rebuilt with it.
+const REHYPE_PLUGINS = [rehypeHighlightShared];
 
 // The workspace that relative paths in an answer belong to. Null (the
 // default) keeps links external-only, for markdown rendered outside a run.

@@ -40,6 +40,44 @@ async function loadLinks() {
   return mod.exports;
 }
 
+// The chat pipeline (react-markdown's unified chain with Cora's plugins),
+// once with rehype-highlight attached fresh per processor and once with the
+// shared transformer, so the two outputs can be compared.
+async function loadHighlightPipeline() {
+  const out = await esbuild.build({
+    stdin: {
+      contents: `
+        import { unified } from "unified";
+        import remarkParse from "remark-parse";
+        import remarkGfm from "remark-gfm";
+        import remarkBreaks from "remark-breaks";
+        import remarkRehype from "remark-rehype";
+        import rehypeHighlight from "rehype-highlight";
+        import { rehypeHighlightShared } from "./src/renderer/src/lib/rehype-highlight-shared";
+        const run = (plugin, text) => {
+          const processor = unified().use(remarkParse).use([remarkGfm, remarkBreaks]).use(remarkRehype).use([plugin]);
+          return processor.runSync(processor.parse(text));
+        };
+        export const fresh = (text) => run(rehypeHighlight, text);
+        export const shared = (text) => run(rehypeHighlightShared, text);
+        export { rehypeHighlightShared };
+      `,
+      resolveDir: ROOT,
+      loader: "ts",
+    },
+    bundle: true,
+    format: "cjs",
+    platform: "node",
+    write: false,
+    logLevel: "silent",
+    tsconfig: path.join(ROOT, "tsconfig.node.json"),
+  });
+  const mod = { exports: {} };
+  // eslint-disable-next-line no-new-func
+  new Function("module", "exports", "require", out.outputFiles[0].text)(mod, mod.exports, require);
+  return mod.exports;
+}
+
 let passed = 0;
 function test(name, fn) {
   fn();
@@ -156,6 +194,34 @@ async function main() {
     // The preview's palette is untouched.
     const preview = read("src/renderer/src/components/markdown-preview/markdown.css");
     assert.match(preview, /\.spark-markdown \.hljs-keyword/);
+  });
+
+  const H = await loadHighlightPipeline();
+  test("one shared highlighter renders exactly what a fresh one does", () => {
+    assert.equal(H.rehypeHighlightShared(), H.rehypeHighlightShared());
+    const samples = [
+      "Plain text with `code` and a [link](src/a.ts).",
+      "```ts\nexport const a: number = 1; // note\n```",
+      "```python\ndef f(x):\n    return x + 1\n```\n\n```bash\nnpm test && echo \"ok\"\n```",
+      "```nosuchlanguage\nkeep me plain\n```",
+      "```\nno language at all\n```",
+      "```mermaid\ngraph TD; A-->B\n```",
+      "| a | b |\n| - | - |\n| `x` | **y** |",
+    ];
+    // Twice through the shared one: compiled grammars must not change later output.
+    for (let round = 0; round < 2; round += 1) {
+      for (const text of samples) {
+        assert.deepEqual(H.shared(text), H.fresh(text), text);
+      }
+    }
+  });
+
+  test("chat and preview markdown attach the shared highlighter", () => {
+    assert.match(markdown, /const REHYPE_PLUGINS = \[rehypeHighlightShared\];/);
+    assert.doesNotMatch(markdown, /from "rehype-highlight"/);
+    const pipeline = read("src/renderer/src/components/markdown-preview/pipeline.ts");
+    assert.match(pipeline, /\.\.\.afterSanitize, rehypeHighlightShared\]/);
+    assert.doesNotMatch(pipeline, /from "rehype-highlight"/);
   });
 
   console.log(`\n${passed} passed`);
