@@ -187,7 +187,7 @@ import { useGlobalRuns } from "./lib/useGlobalRuns";
 import { onSettingsChanged, publishSettings } from "./lib/useOpenAiFastMode";
 import { isRunningStatus } from "./lib/run-status";
 import { isSettingsTab } from "./lib/settings-sections";
-import { isLiveOnlyEvent } from "@shared/live-events";
+import { leavesRunListUnchanged } from "@shared/live-events";
 import type { SettingsTab } from "./components/SettingsDialog";
 import { isAppTearingDown, markAppTearingDown } from "./lib/app-lifecycle";
 import { requestEditorReveal } from "./components/editor-cm/reveal";
@@ -1836,7 +1836,7 @@ export default function App() {
     };
 
     return window.spark.orchestration.onEvent((event) => {
-      if (!event.workspaceId || isLiveOnlyEvent(event)) return;
+      if (!event.workspaceId || leavesRunListUnchanged(event)) return;
       // Record the affected workspace and (re)arm the trailing timer. The
       // active workspace's runs/counts still update — just batched into one
       // refresh per burst rather than one per event.

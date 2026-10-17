@@ -116,22 +116,32 @@ async function main() {
     const mod = { exports: {} };
     // eslint-disable-next-line no-new-func
     new Function("module", "exports", "require", out.outputFiles[0].text)(mod, mod.exports, require);
-    const { isLiveOnlyEvent } = mod.exports;
+    const { isLiveOnlyEvent, leavesRunListUnchanged } = mod.exports;
     test("tool progress is live-only; journaled chat events are not", () => {
       assert.equal(isLiveOnlyEvent({ type: "chat.tool_progress" }), true);
       assert.equal(isLiveOnlyEvent({ type: "chat.tool_result" }), false);
       assert.equal(isLiveOnlyEvent({ type: "chat.assistant_block" }), false);
     });
+    test("streamed text and live-only events leave the run list unchanged", () => {
+      assert.equal(leavesRunListUnchanged({ type: "chat.tool_progress" }), true);
+      assert.equal(leavesRunListUnchanged({ type: "chat.assistant_block" }), true);
+      // Low-rate chat events still refresh: a tool call can launch a worker,
+      // and a backend notice follows the turn's settle write.
+      assert.equal(leavesRunListUnchanged({ type: "chat.tool_use" }), false);
+      assert.equal(leavesRunListUnchanged({ type: "chat.tool_result" }), false);
+      assert.equal(leavesRunListUnchanged({ type: "chat.backend_notice" }), false);
+      assert.equal(leavesRunListUnchanged({ type: "run.status_updated" }), false);
+    });
   })();
 
-  test("run-list refreshers ignore live-only events", () => {
+  test("run-list refreshers ignore live-only and streamed text events", () => {
     // Each of these refetches runs (or a run's detail) on any event; a long
-    // command would otherwise re-list every run, and re-render the app, once
-    // a second for as long as it prints.
+    // command, or a streaming Cora reply, would otherwise re-list every run,
+    // and re-render the app, once a second for as long as it prints.
     const globalRuns = read("src/renderer/src/lib/useGlobalRuns.ts");
-    assert.match(globalRuns, /onEvent\(\(event\) => \{\s*if \(isLiveOnlyEvent\(event\)\) return;/);
+    assert.match(globalRuns, /onEvent\(\(event\) => \{\s*if \(leavesRunListUnchanged\(event\)\) return;/);
     const app = read("src/renderer/src/App.tsx");
-    assert.match(app, /if \(!event\.workspaceId \|\| isLiveOnlyEvent\(event\)\) return;/);
+    assert.match(app, /if \(!event\.workspaceId \|\| leavesRunListUnchanged\(event\)\) return;/);
     const automations = read("src/renderer/src/components/automations/AutomationsPage.tsx");
     assert.match(automations, /event\.runId === liveRun\?\.id && !isLiveOnlyEvent\(event\)/);
   });

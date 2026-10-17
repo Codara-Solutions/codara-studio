@@ -18,7 +18,7 @@
  * digest — can read the latest runs without taking `runs` as a dependency.
  */
 import React, { useEffect, useRef, useState } from "react";
-import { isLiveOnlyEvent } from "@shared/live-events";
+import { leavesRunListUnchanged } from "@shared/live-events";
 import type { RunState } from "@shared/types";
 
 export function useGlobalRuns(booted: boolean): {
@@ -63,8 +63,8 @@ export function useGlobalRuns(booted: boolean): {
     // refresh once events stop arriving for this long.
     const RUN_REFRESH_DEBOUNCE_MS = 250;
     // Ceiling on how long a sustained stream may hold that trailing window
-    // open. A streaming backend emits chat.* deltas dozens of times a second,
-    // so events never fall 250 ms apart and a pure trailing debounce starved:
+    // open. A busy run (tool calls and results, worker chatter) can keep
+    // events under 250 ms apart, and a pure trailing debounce starved:
     // the cockpit's fleet list froze for the whole turn and only caught up
     // once the run went quiet. Past this age the pending refresh fires anyway.
     const RUN_REFRESH_MAX_WAIT_MS = 1000;
@@ -72,7 +72,7 @@ export function useGlobalRuns(booted: boolean): {
     let pendingSince = 0;
 
     const off = window.spark.orchestration.onEvent((event) => {
-      if (isLiveOnlyEvent(event)) return;
+      if (leavesRunListUnchanged(event)) return;
       const now = Date.now();
       if (refreshTimer === null) {
         pendingSince = now;
