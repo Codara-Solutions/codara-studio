@@ -13,6 +13,7 @@ import {
   type WebContents,
 } from "electron";
 import { logMain } from "./file-log";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { broadcastGitRemoteUpdated, registerIpc, setTrayHook } from "./ipc";
@@ -69,6 +70,16 @@ import {
   terminalAgentsMidTurn,
 } from "./terminal-agent-notify";
 import { collectLiveWork, hasLiveWork, quitPromptText, type LiveWork } from "./quit-guard";
+import {
+  acquireLockAfterHandoff,
+  handoffNonceOf,
+  installQuitSignals,
+  isProcessAlive,
+  readHandoffAnswer,
+  shouldWatchDevParent,
+  watchParentProcess,
+  writeHandoffAnswer,
+} from "./app-exit";
 import { flushTerminalScrollback, initTerminalScrollback } from "./terminal-scrollback";
 import {
   isAllowedMainWindowUrl,
@@ -217,19 +228,31 @@ if (process.platform === "win32") {
 // alongside a dev instance. `ownsSingleInstanceLock` gates the whenReady body
 // below so a lost lock exits cleanly even if 'ready' still fires before
 // app.quit() lands.
-const ownsSingleInstanceLock =
+//
+// An instance whose window cannot load (a dead dev server, a boot that gave
+// up) would otherwise hold the lock forever, so the holder answers each
+// newcomer through the hand-off file (app-exit.ts): when it is broken it
+// quits, and the newcomer waits for the lock instead of quitting.
+const handoffNonce = randomUUID();
+let ownsSingleInstanceLock =
   process.env.SPARK_ALLOW_MULTI === "1" ||
-  app.requestSingleInstanceLock();
-if (!ownsSingleInstanceLock) {
-  app.quit();
-} else if (process.env.SPARK_ALLOW_MULTI !== "1") {
-  app.on("second-instance", () => {
-    showMainWindow();
+  app.requestSingleInstanceLock({ codaraHandoff: handoffNonce });
+const lockHandoff: Promise<boolean> | null = ownsSingleInstanceLock
+  ? null
+  : acquireLockAfterHandoff({
+      requestLock: () => app.requestSingleInstanceLock({ codaraHandoff: handoffNonce }),
+      readAnswer: () => readHandoffAnswer(app.getPath("userData"), handoffNonce),
+    });
+if (process.env.SPARK_ALLOW_MULTI !== "1") {
+  app.on("second-instance", (_event, _argv, _cwd, additionalData) => {
+    onSecondInstance(handoffNonceOf(additionalData));
   });
 }
 // Before `ready`: Chromium launches its GPU and network processes by then,
 // and Crashpad records only the processes launched after it starts.
 if (ownsSingleInstanceLock) startCrashReporterEarly();
+// Recorded before anything can reparent this process.
+const bootParentPid = process.ppid;
 
 const isDev = !app.isPackaged;
 // On win32 use the .ico; on macOS/Linux use .png — icon.ico fails to load on
@@ -439,6 +462,9 @@ const BOOT_WATCHDOG_MS = 25_000;
 const RELAUNCHED_FLAG = "--spark-boot-relaunch";
 let bootWatchdog: NodeJS.Timeout | null = null;
 let bootFailures = 0;
+// Set when the boot ladder ran out (the dialog below), cleared when React
+// mounts. A second launch then replaces this instance instead of focusing it.
+let bootGaveUp = false;
 // `app:renderer-ready` is document-load scoped. React StrictMode, HMR, and
 // overlapping component teardown can all deliver the same ready signal more
 // than once; only the first one for the current WebContents load may flush
@@ -458,6 +484,7 @@ ipcMain.on("app:renderer-ready", (e) => {
     bootWatchdog = null;
   }
   bootFailures = 0;
+  bootGaveUp = false;
   // A run-owned terminal cleanup may have stopped its PTY while the previous
   // renderer was reloading, then retained the tab ownership after the bridge
   // timed out. React is mounted again now, so retry those exact pending
@@ -486,12 +513,49 @@ function onBootFailure(reason: string): void {
   }
   logMain("boot", "relaunch unavailable (dev mode or already relaunched); surfacing dialog");
   bootFailures = 0; // let the user retry after dismissing
-  dialog.showErrorBox(
-    "Codara Studio couldn't finish loading",
-    app.isPackaged
-      ? "The app failed to boot repeatedly. Please quit and start it again; if this persists, check <spark home>/logs/main.log."
-      : "The renderer loaded but the app never booted — in dev mode this usually means the Vite dev server died (e.g. during system sleep). Restart `npm run dev`.",
-  );
+  bootGaveUp = true;
+  // Not showErrorBox: a modal that blocks the main thread would also keep a
+  // termination signal, the dev launcher watch and a second launch from
+  // reaching this process. One dialog at a time; the ladder may come round
+  // again while it is open.
+  if (bootDialogOpen) return;
+  bootDialogOpen = true;
+  void dialog
+    .showMessageBox({
+      type: "error",
+      title: "Codara Studio couldn't finish loading",
+      message: "Codara Studio couldn't finish loading",
+      detail: app.isPackaged
+        ? "The app failed to boot repeatedly. Please quit and start it again; if this persists, check <spark home>/logs/main.log."
+        : "The renderer loaded but the app never booted. In dev mode this usually means the Vite dev server died (e.g. during system sleep). Restart `npm run dev`.",
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      bootDialogOpen = false;
+    });
+}
+let bootDialogOpen = false;
+
+// The window can no longer show the app: the boot ladder gave up, the entry
+// fails its own allowlist, or a boot failure is still unrecovered.
+function rendererCannotBoot(): boolean {
+  return bootGaveUp || rendererEntryRejected || (bootFailures > 0 && !rendererReadyForCurrentLoad);
+}
+
+function onSecondInstance(nonce: string | null): void {
+  const userData = app.getPath("userData");
+  // Already on its way out (cleanup in flight): the newcomer waits for the lock.
+  if (cleanupRan || forcedQuitReason) {
+    if (nonce) writeHandoffAnswer(userData, nonce, "quitting");
+    return;
+  }
+  if (rendererCannotBoot()) {
+    if (nonce) writeHandoffAnswer(userData, nonce, "quitting");
+    quitWithoutPrompt("a new launch found this instance unable to load its window");
+    return;
+  }
+  if (nonce) writeHandoffAnswer(userData, nonce, "focused");
+  showMainWindow();
 }
 
 // ── Renderer-entry self-check ──────────────────────────────────────────────
@@ -527,15 +591,21 @@ function reportRendererEntryRejected(
   );
   // Off the load path so a modal never blocks the navigation we are starting.
   const notify = setTimeout(() => {
-    dialog.showErrorBox(
-      "Codara Studio can't trust its own window",
-      `The app's renderer entry does not pass its navigation allowlist, so every privileged action is blocked and the window will not work.\n\n` +
-        `Cause: ${cause}.\n\n` +
-        (offender
-          ? `Fix: reinstall or move Codara Studio to a path with no "${offender}" character in it.\n\n`
-          : "") +
-        `Details are in ${join(codaraHome(), "logs", "main.log")}.`,
-    );
+    // Not showErrorBox, for the same reason as the boot dialog above.
+    void dialog
+      .showMessageBox({
+        type: "error",
+        title: "Codara Studio can't trust its own window",
+        message: "Codara Studio can't trust its own window",
+        detail:
+          `The app's renderer entry does not pass its navigation allowlist, so every privileged action is blocked and the window will not work.\n\n` +
+          `Cause: ${cause}.\n\n` +
+          (offender
+            ? `Fix: reinstall or move Codara Studio to a path with no "${offender}" character in it.\n\n`
+            : "") +
+          `Details are in ${join(codaraHome(), "logs", "main.log")}.`,
+      })
+      .catch(() => undefined);
   }, 0);
   notify.unref?.();
 }
@@ -792,6 +862,7 @@ function createWindow(): void {
   // "shutdown" on macOS and Linux.
   mainWindow.on("session-end", () => {
     quitWithLiveWorkConfirmed = true;
+    quitPrompt?.abort();
   });
   mainWindow.on("close", (e) => {
     if (isQuitting) return; // real quit in flight — let the window close
@@ -1024,9 +1095,17 @@ function createWindow(): void {
 }
 
 app.whenReady().then(async () => {
-  // Lost the single-instance lock — another Codara Studio owns it. app.quit()
-  // was already called; bail before doing any startup work or opening a window.
-  if (!ownsSingleInstanceLock) return;
+  // Lost the single-instance lock: another Codara Studio owns it. Unless that
+  // one said it is quitting and then let go, bail before doing any startup
+  // work or opening a window.
+  if (!ownsSingleInstanceLock) {
+    if (!(await lockHandoff)) {
+      app.quit();
+      return;
+    }
+    ownsSingleInstanceLock = true;
+    startCrashReporterEarly();
+  }
 
   // macOS bounces an app into the Dock and activates it on launch even when it
   // opens no visible window. "accessory" keeps the process out of the Dock and
@@ -1045,6 +1124,29 @@ app.whenReady().then(async () => {
     "boot",
     `app start pid=${process.pid} packaged=${app.isPackaged} relaunched=${process.argv.includes(RELAUNCHED_FLAG)}`,
   );
+  // Chromium installs its own signal handlers after ready; see app-exit.ts.
+  // Once now and once more a little later, so ours are the last installed
+  // whichever turn Chromium's land on, even when the window never loads.
+  installQuitSignals(onQuitSignal);
+  setTimeout(() => installQuitSignals(onQuitSignal), 3000).unref();
+  // `npm run dev`: the electron-vite process that spawned us also serves the
+  // renderer. Once it is gone the window can never load again, so go too
+  // rather than hold the single-instance lock behind a dead window.
+  if (
+    shouldWatchDevParent({
+      isPackaged: app.isPackaged,
+      rendererUrl: process.env.ELECTRON_RENDERER_URL,
+      parentPid: bootParentPid,
+    })
+  ) {
+    logMain("lifecycle", `dev mode: watching the launcher (pid ${bootParentPid})`);
+    watchParentProcess({
+      parentPid: bootParentPid,
+      currentParentPid: () => process.ppid,
+      isAlive: (pid) => isProcessAlive(pid),
+      onGone: (reason) => quitWithoutPrompt(`dev launcher ${reason}`),
+    });
+  }
   if (usesWaylandSoftwareFallback) {
     logMain("boot", "graphics backend=wayland-software (automatic crash-safety fallback)");
   } else if (usesNativeWayland) {
@@ -1293,6 +1395,7 @@ app.whenReady().then(async () => {
   // A logout or shutdown must not stall behind the live-work quit prompt.
   powerMonitor.on("shutdown", () => {
     quitWithLiveWorkConfirmed = true;
+    quitPrompt?.abort();
   });
   powerMonitor.on("suspend", () => {
     logMain("power", "system suspend");
@@ -1465,7 +1568,9 @@ app.whenReady().then(async () => {
       // Re-arm manager stages whose linked answer was persisted before the
       // previous process exited. The durable record is claimed idempotently by
       // run-store immediately before the intended stage starts.
-      const runStore = await import("./orchestration/run-store");
+      // Through getRunStore, so the quit guard and the quit-time worker drain
+      // (which only consult an already loaded run-store) see this session's runs.
+      const runStore = await getRunStore();
       await runStore.recoverPendingConversationRewinds();
       await runStore.recoverAbandonedActiveRpcQuestions();
       await runStore.recoverOrphanedManagerTurns();
@@ -1630,23 +1735,58 @@ function currentLiveWork(): LiveWork {
   return collectLiveWork(runStoreMod?.liveWorkForQuit(), terminalAgentsMidTurn());
 }
 
+function describeLiveWork(live: LiveWork): string {
+  return `${live.chats} chat(s), ${live.automations} automation(s), ${live.workers} worker(s), ${live.terminalAgents.length} terminal agent(s)`;
+}
+
+// The live-work prompt, while it is open. Aborting it closes the dialog.
+let quitPrompt: AbortController | null = null;
+// Why a quit skipped the prompt; set once.
+let forcedQuitReason: string | null = null;
+
+// Quits nobody is there to confirm (a termination signal, the dev launcher
+// gone, a newer launch replacing a broken window) skip the live-work prompt
+// and close an open one. The quit itself is the ordinary guarded cleanup, so
+// terminal output and agent sessions are saved as on any quit.
+function onQuitSignal(signal: NodeJS.Signals): void {
+  quitWithoutPrompt(`received ${signal}`);
+}
+
+function quitWithoutPrompt(reason: string): void {
+  if (forcedQuitReason) return;
+  forcedQuitReason = reason;
+  logMain("lifecycle", `${reason}: quitting without the live-work prompt (live: ${describeLiveWork(currentLiveWork())})`);
+  quitWithLiveWorkConfirmed = true;
+  quitPrompt?.abort();
+  isQuitting = true;
+  app.quit();
+}
+
 // Quitting stops every manager turn, worker and terminal agent in seconds:
 // runs come back paused with half-applied edits, and a terminal agent loses
 // the turn it was in. Ask first. The check is synchronous and memory-only, so
-// it can decide inside before-quit.
+// it can decide inside before-quit; the question itself is asynchronous, so a
+// signal or a second launch still reaches this process while it is open, and
+// a yes quits again.
 function confirmQuitWithLiveWork(): boolean {
   if (quitWithLiveWorkConfirmed || E2E_BACKGROUND) return true;
   // Restart now on a waiting update restart already answered this.
   if (updaterModCached?.isInstallForced() === true) return true;
   const live = currentLiveWork();
   if (!hasLiveWork(live)) return true;
+  askToQuitWithLiveWork(live);
+  return false;
+}
+
+function askToQuitWithLiveWork(live: LiveWork): void {
+  if (quitPrompt) return;
   const restartingForUpdate = updaterModCached?.isInstallRequested() === true;
   const prompt = quitPromptText(live, {
     restartingForUpdate,
     resumesTerminalAgents: getPreferenceCached("restoreAgentSessions") === true,
     keepsTerminalOutput: getPreferenceCached("restoreTerminalOutput") !== false,
   });
-  const options: Electron.MessageBoxSyncOptions = {
+  const options: Electron.MessageBoxOptions = {
     type: "warning",
     buttons: [prompt.confirmLabel, prompt.cancelLabel],
     defaultId: 1,
@@ -1655,14 +1795,26 @@ function confirmQuitWithLiveWork(): boolean {
     message: prompt.message,
     detail: prompt.detail,
   };
+  const asking = new AbortController();
+  quitPrompt = asking;
   const parent = mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() ? mainWindow : null;
-  const choice = parent ? dialog.showMessageBoxSync(parent, options) : dialog.showMessageBoxSync(options);
-  if (choice !== 0) {
-    if (restartingForUpdate) updaterModCached?.cancelInstallRequest();
-    return false;
-  }
-  quitWithLiveWorkConfirmed = true;
-  return true;
+  const withSignal = { ...options, signal: asking.signal };
+  const shown = parent ? dialog.showMessageBox(parent, withSignal) : dialog.showMessageBox(withSignal);
+  void shown
+    .then(({ response: choice }) => {
+      if (asking.signal.aborted) return;
+      if (choice !== 0) {
+        if (restartingForUpdate) updaterModCached?.cancelInstallRequest();
+        return;
+      }
+      quitWithLiveWorkConfirmed = true;
+      isQuitting = true;
+      app.quit();
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      if (quitPrompt === asking) quitPrompt = null;
+    });
 }
 
 app.on("before-quit", (event) => {
@@ -1781,15 +1933,25 @@ app.on("before-quit", (event) => {
       // it applies the downloaded update and relaunches the app. Everything
       // else is a plain quit. cleanQuit is already true, so the quit Squirrel
       // issues passes straight through this handler.
+      // The second quit still closes the window, and a renderer that hangs in
+      // its unload would hold that close (and the process) forever.
+      const plainQuit = (): void => {
+        const lastResort = setTimeout(() => {
+          process.stderr.write("spark: forcing exit after the window did not close\n");
+          app.exit(0);
+        }, 3000);
+        lastResort.unref();
+        app.quit();
+      };
       void import("./auto-updater")
         .then((updater) => {
           if (app.isPackaged && updater.isInstallRequested()) {
             updater.performQuitAndInstall();
           } else {
-            app.quit();
+            plainQuit();
           }
         })
-        .catch(() => app.quit());
+        .catch(plainQuit);
     }
   })();
 });

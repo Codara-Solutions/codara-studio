@@ -493,8 +493,12 @@ Debugging:
   with its own home, as `docs/harness-lab/README.md` describes:
   `CODARA_HOME_DIR`, `SPARK_HOME_DIR` and `SPARK_USER_DATA_DIR` pointing at
   one directory outside the repository, plus `SPARK_ALLOW_MULTI=1` to lift
-  the single-instance lock. On its first start a build also removes what
-  earlier builds wrote into the CLIs' own configs, with a backup; see
+  the single-instance lock. When `npm run dev` stops, the app it started
+  quits too (it watches the electron-vite process), and a new launch
+  replaces an instance whose window cannot load instead of quitting, so a
+  dead dev instance never keeps the next one from starting. On its first
+  start a build also removes what earlier builds wrote into the CLIs' own
+  configs, with a backup; see
   [on-your-machine.md](./on-your-machine.md).
 - **Talk to the running app.** `node cli/cora.cjs rpc <method> [params-json]`
   calls any agent-socket method. The `app.*` methods (`app.screenshot`,

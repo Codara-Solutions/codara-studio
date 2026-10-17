@@ -92,7 +92,7 @@ Most suites need only `npm install`. These are the exceptions:
 
 | Need | Suites | Notes |
 |---|---|---|
-| A build in `out/` | `test-agent-socket.cjs` | Launches `out/main/index.js` under Electron with a temporary home. Run `npm run build` (which is `electron-vite build`) first. Without a build the app never writes its handshake file and the suite fails. |
+| A build in `out/` | `test-agent-socket.cjs`, `test-app-exit-electron.cjs` | Launches `out/main/index.js` under Electron with a temporary home. Run `npm run build` (which is `electron-vite build`) first. Without a build the app never writes its handshake file and the suite fails. |
 | The Electron binary | `test-agent-socket.cjs`, `test-trusted-sender.cjs` | Both boot a headless Electron from `node_modules`. |
 | Playwright's Chromium | `test-chat-surface-routing.cjs`, `test-csv-preview-ui.cjs`, `test-browser-cdp-session.cjs`, `test-browser-screenshot-locator.cjs`, `test-browser-devtools.cjs`, `test-browser-insight.cjs`, `test-browser-capture-chromium.cjs`, `test-preview-waits.cjs`, `test-preview-dialogs.cjs`, `test-preview-find-outline.cjs`, `test-preview-console-filter.cjs`, `test-studio-csp.cjs` | Install it with `npx playwright install chromium`. Without it they print SKIP for the real-page checks. |
 | Real `git` | `test-worktrees.cjs`, `test-agent-worktrees.cjs`, `test-worktree-cleanup.cjs`, `test-worktree-setup.cjs`, `test-git-auto-fetch-git.cjs`, `test-git-split-commits.cjs`, `test-git-optional-locks.cjs`, `test-git-stash.cjs`, `test-github-pull-request-git.cjs`, `test-review-diff.cjs`, `test-result-manifest.cjs`, `test-worker-diff.cjs`, `test-browser-storage-boundary.cjs` | Most create throwaway repositories in a temp dir. `test-browser-storage-boundary.cjs` runs `git ls-files` on this checkout, so it needs a git clone. |
@@ -150,8 +150,8 @@ line for each check and exits with a non-zero code on failure. A few use
 - **Structural checks**: read the source as text and check wiring that cannot
   run under Node. For example, `test-ipc-gate-default.cjs` checks that every
   `ipcMain.handle` goes through the trusted-sender gate.
-- **Real processes**: `test-agent-socket.cjs` and `test-trusted-sender.cjs`
-  start Electron. `remote-access-e2e.mjs` starts the real remote-access
+- **Real processes**: `test-agent-socket.cjs`, `test-app-exit-electron.cjs`
+  and `test-trusted-sender.cjs` start Electron. `remote-access-e2e.mjs` starts the real remote-access
   service.
 
 To add a suite:
@@ -257,6 +257,7 @@ its first send (`run-store.ts`).
 | `test-terminal-scrollback-store` | Each pane's output kept across restarts (`terminal-scrollback-store.ts`, `terminal-scrollback-render.ts`, with the real `@xterm/headless`): the replayed text holds only text, colors and line breaks; folding old bytes keeps screen, cursor and history; endless footer repaints cannot push history out; 0600 files, debounced saves, per-pane and total limits, deletion on close, age and setting off; a replay until the pane's process starts, never over a live PTY. |
 | `test-quit-guard` | What a quit or an update restart would cut off (`quit-guard.ts`, `terminalAgentsMidTurn`): terminal agents mid-turn or waiting inside a turn, the quit prompt's wording, and the update restart that waits, restarts on its own after the settle window, on Restart now, or not at all after Don't restart yet. |
 | `test-agent-hibernation-policy`, `test-agent-hibernation-census`, `test-agent-hibernation-main`, `test-pty-hibernate` | Idle agents sleeping in background workspaces (agent hibernation): the setting, which panes are candidates, the notifier evidence and idle clock that must hold, the process census that keeps a pane with a dev server or a late child awake (POSIX and Windows listings, the Windows console-list answer), a pane a phone has open, main's re-check and generation-fenced stop, the output kept for the sleeping view, the sleeping record a reloaded window reads and that ends once the woken pane exits, a hibernated exit that raises no alert, and a sleeping pane across persist, hydration and the quit snapshot. `test-agent-delivery` covers the send refused for a sleeping pane, `test-studio-terminal-share` the phone check. |
+| `test-app-exit`, `test-app-exit-electron` | Quits nobody confirms (`app-exit.ts`): the dev launcher watch that quits once electron-vite is gone, SIGTERM, SIGINT and SIGHUP quitting without the live-work prompt (installed after Chromium's own handlers), and a new launch replacing an instance whose window cannot load while still only focusing a healthy one. The Electron suite drives all of it in the built app. |
 | `test-clipboard-files` | Pasting files into a terminal on macOS. |
 | `test-terminal-unicode-width` | Character widths (`src/shared/terminal-unicode.ts`): emoji and CJK take two cells and box drawing one in every pane, the headless screens in main (`codara_terminal_read`, the Codex mirror) wrap where the pane wraps, and file links (`file-link-provider.ts`) underline the right cells after wide characters. |
 | `test-terminal-osc52` | OSC 52 copies from programs in a pane (`osc52.ts`, `terminalClipboard.ts`): parsing as tmux, Neovim and SSH send them, a size cap, clipboard reads never answered, the setting, replayed history, hidden panes and mirrors blocking copies, a burst collapsing to its last copy. |

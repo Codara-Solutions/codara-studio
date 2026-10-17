@@ -1671,7 +1671,7 @@ async function main() {
     );
     check(
       "declining a restart for an update drops the install request, so the next quit stays a plain quit",
-      /if \(choice !== 0\) \{\s*if \(restartingForUpdate\) updaterModCached\?\.cancelInstallRequest\(\);\s*return false;/.test(
+      /if \(choice !== 0\) \{\s*if \(restartingForUpdate\) updaterModCached\?\.cancelInstallRequest\(\);\s*return;\s*\}\s*quitWithLiveWorkConfirmed = true;\s*isQuitting = true;\s*app\.quit\(\);/.test(
         indexSource,
       ),
     );
