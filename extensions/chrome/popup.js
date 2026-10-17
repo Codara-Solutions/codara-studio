@@ -149,8 +149,8 @@ function render() {
   renderShared(view.shared);
 }
 
-async function refresh() {
-  view = await call("state");
+async function refresh(extra = {}) {
+  view = await call("state", extra);
   render();
 }
 
@@ -205,7 +205,8 @@ async function start() {
     if (await ask("Disconnect this browser from Codara? Agents lose access to every tab until you connect again.", "Disconnect")) void act("unpair");
   });
 
-  await refresh();
+  // Opening the popup looks for Codara now; the 1 s refresh only reads.
+  await refresh({ opened: true });
   setInterval(() => void refresh(), 1000);
 }
 

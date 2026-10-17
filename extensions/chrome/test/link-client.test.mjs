@@ -130,6 +130,7 @@ export async function run() {
   const statuses = [];
   const requests = [];
   const reloads = [];
+  let scanMemo = null;
   const client = new LinkClient({
     WebSocket,
     ports: async () => ports,
@@ -147,6 +148,10 @@ export async function run() {
       return { echoed: request.method };
     },
     onReload: (message) => reloads.push(message),
+    loadScan: async () => scanMemo,
+    saveScan: async (next) => {
+      scanMemo = next;
+    },
     onStatus: (status) => {
       statuses.push(status.state);
       if (status.code) shown.push(status.code);
@@ -165,6 +170,7 @@ export async function run() {
   assert.match(issued, /^[0-9a-f]{64}$/);
   assert.equal(token, issued, "both sides derived the same token");
   assert.equal(client.status.port, codara.address().port, "the closed port and the stranger were skipped");
+  assert.equal(scanMemo.lastPort, codara.address().port, "the port that worked is remembered");
   assert.match(hellos[0].pairCommit, /^[0-9a-f]{64}$/);
   assert.deepEqual({ ...hellos[0], protocol: undefined, pairCommit: undefined }, {
     type: "hello", protocol: undefined, browser: { name: "Chromium", version: "141" }, extension: { id: "a".repeat(32), version: "1.0.0" }, pair: true, pairCommit: undefined,
@@ -215,6 +221,10 @@ export async function run() {
     other.address().port,
     codara.address().port,
   ];
+  // Forget the port that worked, so this search walks past every program
+  // that holds an earlier port.
+  scanMemo = null;
+  client.scan = null;
   codaraSocket.close();
   await until(() => client.status.state === "offline", "the loss");
   const hellosBefore = hellos.length;
@@ -272,6 +282,113 @@ export async function run() {
   assert.match(client.status.error, /declined/);
 
   client.disconnect();
+
+  // The search order and the offline backoff, with a probe that says which
+  // ports something listens on and a clock the test moves.
+  mode = "pair";
+  const dialed = [];
+  class CountingSocket extends WebSocket {
+    constructor(url) {
+      dialed.push(Number(new URL(url).port));
+      super(url);
+    }
+  }
+  const listening = new Set([stranger.address().port, codara.address().port]);
+  const probes = [];
+  let clock = 1_000_000;
+  let memo = null;
+  const unused2 = await freePort();
+  let searched = [unused, stranger.address().port, codara.address().port];
+  const scanning = new LinkClient({
+    WebSocket: CountingSocket,
+    ports: async () => searched,
+    hello: async () => ({ browser: { name: "Chromium", version: "141" }, extension: { id: "a".repeat(32), version: "1.1.1" } }),
+    loadPairing: async () => ({ token: issued, linkId: "chrome-ab12" }),
+    savePairing: async () => {},
+    clearPairing: async () => {},
+    onRequest: async () => ({}),
+    probe: async (port) => {
+      probes.push(port);
+      return listening.has(port);
+    },
+    loadScan: async () => memo,
+    saveScan: async (next) => {
+      memo = next;
+    },
+    now: () => clock,
+  });
+  await scanning.connect();
+  await until(() => scanning.status.state === "connected", "the probed connect");
+  assert.deepEqual(dialed, [stranger.address().port, codara.address().port], "a port nothing listens on never gets a WebSocket");
+  assert.equal(memo.lastPort, codara.address().port);
+
+  scanning.disconnect();
+  dialed.length = 0;
+  probes.length = 0;
+  await scanning.connect({ wake: true });
+  await until(() => scanning.status.state === "connected", "the reconnect on the last port");
+  assert.deepEqual(probes, [codara.address().port], "the last port that worked is tried first");
+  assert.deepEqual(dialed, [codara.address().port], "and with Codara there no other port is touched");
+
+  // Codara is closed: no port answers the probe.
+  scanning.disconnect();
+  listening.clear();
+  searched = [unused, unused2, codara.address().port];
+  dialed.length = 0;
+  const waits = [];
+  for (let i = 0; i < 5; i += 1) {
+    probes.length = 0;
+    await scanning.connect();
+    assert.equal(scanning.status.state, "offline");
+    assert.equal(probes.length, 3, "a due search probes every port");
+    waits.push(memo.retryAt - clock);
+    probes.length = 0;
+    clock += waits.at(-1) - 1;
+    await scanning.connect();
+    assert.equal(probes.length, 0, "the alarm before the backoff is over searches nothing");
+    clock += 1;
+  }
+  assert.deepEqual(waits, [30_000, 60_000, 120_000, 300_000, 300_000], "the search backs off up to 5 minutes");
+  assert.deepEqual(dialed, [], "while Codara is unreachable the background search opens no WebSocket");
+
+  // Opening the popup (or Chrome starting, or a tab shared) searches at
+  // once, still without a WebSocket on a port the probe finds closed.
+  probes.length = 0;
+  await scanning.wake();
+  assert.equal(probes.length, 3, "a wake searches before the backoff is over");
+  assert.deepEqual(dialed, []);
+  assert.equal(memo.misses, 1, "and the backoff starts over");
+  assert.equal(memo.retryAt - clock, 30_000);
+  listening.add(codara.address().port);
+  await scanning.wake();
+  await until(() => scanning.status.state === "connected", "the wake");
+  assert.deepEqual(dialed, [codara.address().port], "Codara back: only its port was dialed");
+  assert.equal(memo.misses, 0);
+  assert.equal(memo.retryAt, 0);
+
+  // Should a browser refuse the probe itself, pressing Connect still opens a
+  // WebSocket on every port.
+  scanning.disconnect();
+  listening.clear();
+  dialed.length = 0;
+  await scanning.connect({ pair: true });
+  await until(() => scanning.status.state === "connected", "Connect past a refused probe");
+  assert.deepEqual(dialed, [codara.address().port], "the last port that worked, first");
+
+  // A lost link climbs the quick reconnect delays before the long ones.
+  scanning.disconnect();
+  memo = { ...memo, recovering: true };
+  scanning.scan = null;
+  searched = [unused];
+  const recovering = [];
+  for (let i = 0; i < 6; i += 1) {
+    clock = memo.retryAt || clock;
+    await scanning.connect();
+    recovering.push(memo.retryAt - clock);
+  }
+  assert.deepEqual(recovering, [1_000, 2_000, 5_000, 10_000, 30_000, 60_000]);
+  scanning.disconnect();
+
   stranger.close();
   eager.close();
   bluffer.close();
@@ -279,5 +396,5 @@ export async function run() {
   refuser.close();
   other.close();
   codara.close();
-  return "link client: skips closed and foreign ports, pairs, answers requests, reconnects, tries past a Codara that does not know it, answers only a Codara that proves the pairing (never an unproven pairing offer), honors revoke and deny, pairs over ECDH without sending the token, reloads only when the sealed session asks, and drops the link on an unsealed or replayed frame";
+  return "link client: skips closed and foreign ports, pairs, answers requests, reconnects, tries past a Codara that does not know it, answers only a Codara that proves the pairing (never an unproven pairing offer), honors revoke and deny, pairs over ECDH without sending the token, reloads only when the sealed session asks, drops the link on an unsealed or replayed frame, tries the last port that worked first, opens no WebSocket on a port the probe finds closed, and backs off while Codara is unreachable until a wake";
 }

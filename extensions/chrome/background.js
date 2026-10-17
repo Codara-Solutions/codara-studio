@@ -14,6 +14,7 @@ import { LinkClient } from "./lib/link-client.js";
 import {
   DEFAULT_BLOCKED_SITES,
   DEFAULT_PORTS,
+  LINK_PATH,
   agentGroupFor,
   agentGroupTitle,
   agentTabId,
@@ -50,10 +51,12 @@ const LOCAL_DEFAULTS = {
   allowOpen: false,
   ports: null,
   lastReload: null,
+  linkScan: null,
 };
 const RELOAD_CARRY = "reloadCarry";
 const ALARM = "codara-link";
 const OPEN_LOAD_TIMEOUT_MS = 15_000;
+const PORT_PROBE_TIMEOUT_MS = 1_500;
 
 let state = null;
 let rules = parseBlockedSites(DEFAULT_BLOCKED_SITES);
@@ -131,6 +134,27 @@ const link = new LinkClient({
   onRequest: handleRequest,
   onMessage: handleMessage,
   onReload: (message) => void reloadForUpdate(message),
+  // A no-cors GET with nothing attached: Codara's link server answers it
+  // 404 and the opaque answer only says something listens. Unlike a
+  // WebSocket that cannot connect, a fetch that cannot connect is not
+  // written to the extension's Errors list.
+  probe: async (port) => {
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), PORT_PROBE_TIMEOUT_MS);
+    try {
+      await fetch(`http://127.0.0.1:${port}${LINK_PATH}`, { mode: "no-cors", credentials: "omit", cache: "no-store", signal: abort.signal });
+      return true;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+  loadScan: async () => {
+    await ready;
+    return state.linkScan;
+  },
+  saveScan: (scan) => save({ linkScan: scan }),
   onConnected: () => void reportTabs(),
   onDisconnected: () => void detachAll(),
 });
@@ -493,6 +517,7 @@ async function handlePopup(request) {
   await ready;
   switch (request.type) {
     case "state":
+      if (request.opened === true) void link.wake();
       return popupState(request);
     case "connect":
       await link.connect({ pair: true });
@@ -505,6 +530,7 @@ async function handlePopup(request) {
       break;
     case "shareTab":
       await setTabShared(Number(request.tabId), request.on === true);
+      if (request.on === true) void link.wake();
       break;
     case "stopTab":
       await setTabShared(Number(request.tabId), false);
@@ -514,6 +540,7 @@ async function handlePopup(request) {
       if (request.on === true) {
         const inWindow = (await chrome.tabs.query({ windowId })).map((tab) => tab.id);
         await save({ shareWindows: withValue(state.shareWindows, windowId), stopped: state.stopped.filter((id) => !inWindow.includes(id)) });
+        void link.wake();
       } else {
         await save({ shareWindows: without(state.shareWindows, windowId) });
       }
@@ -521,6 +548,7 @@ async function handlePopup(request) {
     }
     case "shareAll":
       await save(request.on === true ? { shareAll: true, stopped: [] } : { shareAll: false });
+      if (request.on === true) void link.wake();
       break;
     case "stopAll":
       await save({ shareAll: false, shareWindows: [], shareTabs: [], stopped: [], storageTabs: [] });
@@ -552,14 +580,15 @@ chrome.runtime.onMessage.addListener((request, sender, respond) => {
 });
 
 // The ports of a second Codara (or a test instance) are set from the service
-// worker's console with chrome.storage.local.set({ ports: [...] }); the next
-// connect uses them without reloading the extension.
+// worker's console with chrome.storage.local.set({ ports: [...] }); they are
+// searched at once, without reloading the extension.
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local" || !state) return;
   for (const key of ["ports", "blockedSites", "allowOpen"]) {
     if (key in changes) state[key] = changes[key].newValue ?? LOCAL_DEFAULTS[key];
   }
   if ("blockedSites" in changes) rules = parseBlockedSites(state.blockedSites);
+  if ("ports" in changes && !link.connected) void link.wake();
 });
 
 // ── Waking up ───────────────────────────────────────────────────────────────
@@ -567,8 +596,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === ALARM) void link.connect();
 });
-chrome.runtime.onStartup.addListener(() => void link.connect());
-chrome.runtime.onInstalled.addListener(() => void link.connect());
+chrome.runtime.onStartup.addListener(() => void link.wake());
+chrome.runtime.onInstalled.addListener(() => void link.wake());
 void chrome.alarms.create(ALARM, { periodInMinutes: 0.5 });
 void ready.then(async () => {
   // Debugger sessions do not outlive a browser restart; drop stale marks.

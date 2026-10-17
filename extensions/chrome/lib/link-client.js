@@ -14,6 +14,10 @@ const PING_INTERVAL_MS = 20_000;
 // Two missed pongs: the socket is dead even though it never closed.
 const PONG_DEADLINE_MS = 2 * PING_INTERVAL_MS + 5_000;
 const RECONNECT_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
+// While no Codara answers on any port. A lost link climbs the quick
+// RECONNECT_DELAYS_MS first, since Codara restarting for an update is the
+// usual reason; a worker that wakes up to find nothing starts here.
+const OFFLINE_DELAYS_MS = [30_000, 60_000, 120_000, 300_000];
 const REQUEST_TYPES = new Set(["attach", "detach", "cdp", "open", "close", "activate"]);
 
 export class LinkClient {
@@ -31,6 +35,10 @@ export class LinkClient {
    * @param {(status: object) => void} [deps.onStatus]
    * @param {() => void} [deps.onConnected]
    * @param {() => void} [deps.onDisconnected]
+   * @param {(port: number) => Promise<boolean>} [deps.probe]  whether anything listens on the port, without a WebSocket
+   * @param {() => Promise<object | null>} [deps.loadScan]  the scan memo that outlives a suspended worker
+   * @param {(scan: object) => Promise<void>} [deps.saveScan]
+   * @param {() => number} [deps.now]
    */
   constructor(deps) {
     this.deps = deps;
@@ -40,6 +48,9 @@ export class LinkClient {
     this.pingTimer = null;
     this.attempt = 0;
     this.lastPong = 0;
+    // lastPort: where Codara last answered. misses and retryAt: the offline
+    // backoff; recovering: the misses count from a lost link.
+    this.scan = null;
     this.status = { state: "idle", code: null, port: null, linkId: null, app: null, error: null };
   }
 
@@ -47,17 +58,27 @@ export class LinkClient {
     return this.status.state === "connected" && this.socket !== null;
   }
 
-  /** Connect if a token exists, or pair when `pair` is set (the user pressed Connect). */
-  connect({ pair = false } = {}) {
+  /**
+   * Connect if a token exists, or pair when `pair` is set (the user pressed
+   * Connect). `wake` is a user-facing moment (the popup opened, Chrome
+   * started, a tab was shared): it skips the offline backoff.
+   */
+  connect({ pair = false, wake = false } = {}) {
     if (this.socket) {
       if (pair && this.status.state !== "connected" && this.status.state !== "pairing") this.close();
       else return Promise.resolve(this.status);
     }
     if (this.connecting) return this.connecting;
-    this.connecting = this.run(pair).finally(() => {
+    this.connecting = this.run(pair, wake).finally(() => {
       this.connecting = null;
     });
     return this.connecting;
+  }
+
+  /** Look for Codara now, whatever the backoff says. */
+  async wake() {
+    await this.updateScan({ misses: 0, retryAt: 0, recovering: false });
+    return this.connect({ wake: true });
   }
 
   /** Stop and stay stopped until connect() is called again. */
@@ -83,29 +104,48 @@ export class LinkClient {
     return true;
   }
 
-  async run(pair) {
+  async run(pair, wake) {
     this.clearReconnect();
     const pairing = await this.deps.loadPairing();
     if (!pairing && !pair) {
       this.setStatus({ state: "idle", code: null, error: null });
       return this.status;
     }
+    const scan = await this.loadScan();
+    const now = this.now();
+    if (!pair && !wake && scan.retryAt > now) {
+      // The alarm wakes the worker every 30 s; the backoff decides.
+      this.scheduleAt(scan.retryAt - now);
+      return this.status;
+    }
     this.setStatus({ state: "searching", code: null, error: null });
-    const ports = (await this.deps.ports?.()) ?? DEFAULT_PORTS;
-    let unknown = false;
-    let refusal = null;
+    const configured = (await this.deps.ports?.()) ?? DEFAULT_PORTS;
+    // The port that worked last time first: when Codara is there, no other
+    // port is touched.
+    const ports = configured.includes(scan.lastPort) ? [scan.lastPort, ...configured.filter((port) => port !== scan.lastPort)] : configured;
     // With a pairing, the Codara that can prove it is looked for on every
     // port before any of them may start a new pairing: pressing Connect
     // again must not hand the browser to whatever answers first.
     const rounds = pairing && pair ? [false, true] : [pair];
-    for (const asking of rounds) {
-      for (const port of ports) {
-        const outcome = await this.tryPort(port, pairing, asking);
-        if (outcome === "unknown") unknown = true;
-        else if (outcome && typeof outcome === "object") refusal ??= outcome;
-        else if (outcome !== "next") return this.status;
-      }
+    // A WebSocket that cannot connect lands in the user's extension Errors
+    // list; a failed no-cors fetch does not. So ports are probed first, and
+    // only a port something listens on gets a WebSocket.
+    const probed = new Map();
+    const listening = async (port) => {
+      if (!this.deps.probe) return true;
+      if (!probed.has(port)) probed.set(port, await this.deps.probe(port).catch(() => false));
+      return probed.get(port);
+    };
+    let result = await this.scanPorts(ports, rounds, pairing, listening);
+    if (result.done) return this.status;
+    if (!result.reached && this.deps.probe && pair) {
+      // Nothing answered the probe. Should a browser ever refuse the probe
+      // itself, pressing Connect still reaches Codara: it opens a WebSocket
+      // on every port.
+      result = await this.scanPorts(ports, rounds, pairing, async () => true);
+      if (result.done) return this.status;
     }
+    const { unknown, refusal } = result;
     if (refusal && !unknown) {
       this.setStatus({ state: "error", error: refusal.message ?? "Codara refused the connection." });
       this.scheduleReconnect();
@@ -120,14 +160,36 @@ export class LinkClient {
       return this.status;
     }
     this.setStatus({ state: "offline", error: "Codara is not running, or its Chrome link is off." });
-    this.scheduleReconnect();
+    await this.backOff();
     return this.status;
+  }
+
+  async scanPorts(ports, rounds, pairing, listening) {
+    let unknown = false;
+    let refusal = null;
+    let reached = false;
+    for (const asking of rounds) {
+      for (const port of ports) {
+        if (!(await listening(port))) continue;
+        const outcome = await this.tryPort(port, pairing, asking);
+        if (outcome === "closed") continue;
+        reached = true;
+        if (outcome === "unknown") unknown = true;
+        else if (outcome && typeof outcome === "object") refusal ??= outcome;
+        else if (outcome !== "next") {
+          if (outcome === "ok") await this.updateScan({ lastPort: port, misses: 0, retryAt: 0, recovering: false });
+          return { done: true, unknown, refusal, reached };
+        }
+      }
+    }
+    return { done: false, unknown, refusal, reached };
   }
 
   tryPort(port, pairing, pair) {
     return new Promise((resolve) => {
       let settled = false;
       let socket;
+      let opened = false;
       let proven = false;
       let session = null;
       const nonce = pairing ? randomNonce() : null;
@@ -144,22 +206,23 @@ export class LinkClient {
         } catch {
           /* already closed */
         }
-        finish("next");
+        finish(opened ? "next" : "closed");
       }, PROBE_TIMEOUT_MS);
       try {
         socket = new this.deps.WebSocket(`ws://127.0.0.1:${port}${LINK_PATH}`);
       } catch {
-        finish("next");
+        finish("closed");
         return;
       }
       socket.onopen = async () => {
+        opened = true;
         const hello = await this.deps.hello();
         const commit = keys ? { pairCommit: await pairCommitment((await keys).key) } : {};
         socket.send(JSON.stringify({ type: "hello", protocol: PROTOCOL, ...hello, ...(pairing ? { linkId: pairing.linkId, nonce } : {}), pair: pair === true, ...commit }));
       };
-      socket.onerror = () => finish("next");
+      socket.onerror = () => finish(opened ? "next" : "closed");
       socket.onclose = () => {
-        if (!settled) finish("next");
+        if (!settled) finish(opened ? "next" : "closed");
         else if (this.socket === socket) this.lost();
       };
       const frame = async (data) => {
@@ -337,7 +400,7 @@ export class LinkClient {
     if (!this.socket) return;
     this.close();
     this.setStatus({ state: "offline", code: null, error: "Lost the connection to Codara." });
-    this.scheduleReconnect();
+    void this.updateScan({ misses: 0, retryAt: 0, recovering: true }).then(() => this.scheduleReconnect());
   }
 
   close() {
@@ -361,10 +424,48 @@ export class LinkClient {
     if (!(await this.deps.loadPairing())) return;
     const delay = RECONNECT_DELAYS_MS[Math.min(this.attempt, RECONNECT_DELAYS_MS.length - 1)];
     this.attempt += 1;
+    this.scheduleAt(delay);
+  }
+
+  /** No Codara on any port: wait longer each time, and remember it across worker restarts. */
+  async backOff() {
+    const scan = await this.loadScan();
+    const ladder = scan.recovering ? [...RECONNECT_DELAYS_MS.slice(0, -1), ...OFFLINE_DELAYS_MS] : OFFLINE_DELAYS_MS;
+    const delay = ladder[Math.min(scan.misses, ladder.length - 1)];
+    await this.updateScan({ misses: scan.misses + 1, retryAt: this.now() + delay });
+    this.clearReconnect();
+    if (!(await this.deps.loadPairing())) return;
+    this.scheduleAt(delay);
+  }
+
+  scheduleAt(delay) {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       void this.connect();
     }, delay);
+  }
+
+  now() {
+    return this.deps.now?.() ?? Date.now();
+  }
+
+  async loadScan() {
+    if (!this.scan) {
+      const stored = (await this.deps.loadScan?.().catch(() => null)) ?? {};
+      this.scan = {
+        lastPort: Number.isInteger(stored.lastPort) ? stored.lastPort : null,
+        misses: Number.isInteger(stored.misses) && stored.misses > 0 ? stored.misses : 0,
+        retryAt: Number.isFinite(stored.retryAt) ? stored.retryAt : 0,
+        recovering: stored.recovering === true,
+      };
+    }
+    return this.scan;
+  }
+
+  async updateScan(patch) {
+    this.scan = { ...(await this.loadScan()), ...patch };
+    await this.deps.saveScan?.(this.scan).catch(() => {});
   }
 
   clearReconnect() {

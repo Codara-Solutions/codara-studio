@@ -22,8 +22,14 @@ tools it uses for its own browser tabs.
 ## How it connects
 
 - The service worker opens a WebSocket to `ws://127.0.0.1:<port>/codara-chrome`,
-  trying ports 47615 to 47619. There is no native messaging host and nothing
-  is installed outside the browser and Codara's own folder.
+  trying ports 47615 to 47619, the one that worked last first. There is no
+  native messaging host and nothing is installed outside the browser and
+  Codara's own folder.
+- Before it opens a WebSocket on a port it probes the port with a no-cors
+  `fetch` that carries nothing (Codara answers 404). A WebSocket that cannot
+  connect is written to the extension's Errors list on `chrome://extensions`;
+  a fetch that cannot connect is not, so a closed Codara leaves no entries
+  there.
 - Codara accepts only loopback connections whose `Origin` is a
   `chrome-extension://` id, and only after the user allowed the pairing code.
   Pairing is an ECDH exchange: the extension commits to its key before it
@@ -42,7 +48,10 @@ tools it uses for its own browser tabs.
   not open.
 - The socket pings every 20 seconds, which keeps the MV3 service worker
   alive while connected. An alarm every 30 seconds reconnects after the
-  worker was suspended or Codara restarted. A Codara that does not know the
+  worker was suspended or Codara restarted. While no Codara answers, the
+  search backs off (after a lost link 1, 2, 5 and 10 seconds, then 30
+  seconds, 1, 2 and 5 minutes); opening the popup, Chrome starting or
+  sharing a tab searches at once. A Codara that does not know the
   token (a second install, a test run) does not cost the pairing; only
   **Disconnect** in Codara or in the popup forgets it.
 - Codara relays the DevTools protocol through `chrome.debugger`. While an
