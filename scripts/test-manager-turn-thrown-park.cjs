@@ -52,6 +52,7 @@ export async function disposeManagerSessions(runId) {
 }`;
 
 const PI_RUNTIME_STUB = `export async function resolveCodaraPiExecutionAccount() {
+  if (globalThis.__coraAccountFailure) throw new Error(globalThis.__coraAccountFailure);
   return {
     accountProfileId: "3f9a1c72-6b0e-4a2d-9c11-5e7d8a4b2f10",
     provider: "anthropic",
@@ -261,6 +262,40 @@ async function main() {
     readRun(oddRun).managerTurnRecovery === undefined,
     JSON.stringify(readRun(oddRun).managerTurnRecovery),
   );
+
+  // 3. No connected account for the chat model throws while run-store freezes
+  // the turn's account, before any backend call. That is the same startup
+  // failure: it parks with Retry instead of failing the run as "planning
+  // failed", and the backend is never asked.
+  const noAccountRun = writeRun(pausedRun("run-thrown-no-account", { chatModel: "gpt-5.5" }));
+  let backendCalled = false;
+  managerBehavior.set(noAccountRun, async () => {
+    backendCalled = true;
+    throw new Error("the backend must not run without an account");
+  });
+  globalThis.__coraAccountFailure =
+    "Cora is not authenticated with a ChatGPT account (openai-codex). Connect one in Settings > Agents, or pick a model from an account you have connected.";
+  await runStore.resumeRun({ runId: noAccountRun }).catch(() => undefined);
+  const noAccountParked = await waitFor(
+    () => readRun(noAccountRun).managerTurnRecovery?.state === "parked",
+  );
+  delete globalThis.__coraAccountFailure;
+  const noAccount = readRun(noAccountRun);
+  check(
+    "a missing account parks the run instead of failing it",
+    noAccountParked && noAccount.status === "paused",
+    `${noAccount.status} ${noAccount.autopilot?.lastAction}`,
+  );
+  check("the missing-account park is classified as auth", noAccount.managerTurnRecovery?.failureKind === "auth");
+  const noAccountCall = noAccount.sparkCalls.find(
+    (call) => call.status === "failed" && call.id !== "spark-interrupted",
+  );
+  check(
+    "the failed account resolution is recorded as the turn's call",
+    Boolean(noAccountCall) && noAccount.managerTurnRecovery?.failedSparkCallId === noAccountCall.id,
+    JSON.stringify(noAccount.sparkCalls.map((call) => call.status)),
+  );
+  check("the backend is never asked without an account", !backendCalled);
 
   completed = true;
   console.log(failures === 0 ? "\nAll thrown-park checks passed." : `\n${failures} check(s) failed.`);

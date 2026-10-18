@@ -102,9 +102,10 @@ export async function disposeManagerSessions(runId) {
 // Account resolution is the only other thing a manager turn touches before the
 // backend call, and a throwaway CODARA_HOME_DIR has no connected accounts.
 const PI_RUNTIME_STUB = `export async function resolveCodaraPiExecutionAccount() {
-  // Account resolution is the last thing a manager turn does BEFORE it owns a
-  // SparkCall, so a throw here escapes askManagerBackend's whole failure policy
-  // — the shape the resume path has to survive. The harness arms it per case.
+  // Account resolution runs before the backend call. A throw here is recorded
+  // as the turn's own failed SparkCall and goes through the startup-failure
+  // policy, and the resume path must still leave a driver. The harness arms it
+  // per case.
   if ((globalThis.__coraAccountFailures ?? 0) > 0) {
     globalThis.__coraAccountFailures -= 1;
     throw new Error("stub: no connected Pi account for this provider");
@@ -835,11 +836,11 @@ async function main() {
     afterLiveTurn.status,
   );
 
-  // ── 3c. a turn that throws BEFORE it owns a SparkCall still leaves a driver ──
-  // askManagerBackend's park/retry/fail policy only covers failures inside a
-  // turn: an unresolvable account (or the untrusted-PR refusal) throws straight
-  // out of it. Unguarded, that escapes resumeRun with "running" already
-  // committed — no driver, and no Resume button left to try again.
+  // ── 3c. a turn whose account cannot be resolved still leaves a driver ──
+  // An unresolvable account throws before the backend is asked. It must not
+  // escape resumeRun with "running" already committed (no driver, and no
+  // Resume button left to try again); it is recorded as the turn's own failed
+  // SparkCall instead, so the startup-failure policy owns it.
   const throwId = "run-resume-turn-throws";
   const throwDriverEntered = gate();
   const releaseThrowDriver = gate();
@@ -866,12 +867,12 @@ async function main() {
   );
   // The chat turn is scheduled, so the injected failure must outlive resumeRun.
   await waitFor(() =>
-    readEvents(throwId).some((event) => event.type === "run.resume_chat_turn_failed"),
+    readEvents(throwId).some((event) => event.type === "spark_call.failed"),
   );
   globalThis.__coraAccountFailures = 0;
   check(
-    "the failed resume turn is journalled",
-    readEvents(throwId).some((event) => event.type === "run.resume_chat_turn_failed"),
+    "the failed resume turn is journalled as its own failed call",
+    readEvents(throwId).some((event) => event.type === "spark_call.failed"),
     JSON.stringify(readEvents(throwId).map((event) => event.type)),
   );
   const throwDriverArrived = await waitFor(() => callsFor(throwId).length > 0);

@@ -7095,10 +7095,22 @@ async function askManagerBackendUnderTurnLock(
     });
     return null;
   }
-  run = await pinImplicitPiManagerAccount(run);
-  const chatConfig = await freezeManagerExecutionAccount(
-    resolveChatBackendConfig(run),
-  );
+  // Resolving the turn's account can throw before any provider turn exists:
+  // no connected account for the chat model (NoConnectedPiAccountError) or a
+  // pinned profile that was disconnected. That is a startup failure like any
+  // other, so it must reach the catch below with a recorded SparkCall: the
+  // policy then parks auth failures with Retry, and manual fallback still gets
+  // its null. Escaping from here instead failed the whole run as "planning
+  // failed".
+  let accountFailure: unknown;
+  let chatConfig: ChatBackendConfig;
+  try {
+    run = await pinImplicitPiManagerAccount(run);
+    chatConfig = await freezeManagerExecutionAccount(resolveChatBackendConfig(run));
+  } catch (error) {
+    accountFailure = error ?? new Error("Cora could not resolve an account for this turn");
+    chatConfig = resolveChatBackendConfig(run);
+  }
   // The Pi manager backend owns its own request
   // lifecycle, spawn/resume a real agent session, stream events, and return
   // a SparkManagerDecision. Run-store forwards streaming chat events onto the
@@ -7224,6 +7236,7 @@ async function askManagerBackendUnderTurnLock(
   // replayed as a startup retry or parked for a replay.
   let providerTurnStarted = false;
   try {
+    if (accountFailure !== undefined) throw accountFailure;
     const result = await backend.requestManagerDecision(
       {
         run: frozenRun,

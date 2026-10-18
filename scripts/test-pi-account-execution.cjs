@@ -290,7 +290,7 @@ async function main() {
     "utf8",
   );
   const managerStart = runStoreSource.indexOf(
-    "const chatConfig = await freezeManagerExecutionAccount(",
+    "chatConfig = await freezeManagerExecutionAccount(",
   );
   const managerPin = runStoreSource.lastIndexOf(
     "run = await pinImplicitPiManagerAccount(run);",
