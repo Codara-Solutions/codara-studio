@@ -347,14 +347,14 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
 
     await clickAttached(settingsNav(page).getByRole("button", { name: "Accounts", exact: true }));
     await expect(page.locator('[data-settings-tab="agents"][aria-busy="false"]')).toBeVisible();
-    // The synthetic auth.json above is a legacy single-account store, which the
-    // account registry migrates into one Pi profile per provider named after
-    // the provider's plan (defaultProfileLabel in pi-account-auth-store.ts).
-    // That label is on screen twice once the usage overview resolves: the
-    // title-bar usage pill (UsageMeters' UsagePill renders usage.label) and the
-    // account card in Settings. .first() keeps the assertion timing-proof.
-    await expect(page.getByText("ChatGPT Plus / Pro", { exact: true }).first()).toBeVisible();
-    await expect(page.getByText("Claude Pro / Max", { exact: true }).first()).toBeVisible();
+    // The synthetic auth.json above is a legacy single login. The accounts
+    // migration archives it and never folds it into a row (bfc17dd3: the list
+    // changes only through the user), so every provider starts at its empty
+    // state and no plan label is shown for the old login.
+    await expect(page.getByText("No Anthropic account yet.")).toBeVisible();
+    await expect(page.getByText("No OpenAI account yet.")).toBeVisible();
+    await expect(page.getByText("ChatGPT Plus / Pro", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Claude Pro / Max", { exact: true })).toHaveCount(0);
     // The runtime explainer, then "How switching works", which says per
     // provider what a switch reaches.
     await expect(page.getByText(/Each account keeps its own private sign-in/)).toBeVisible();
@@ -362,7 +362,7 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
     await expect(page.getByText(/Running Claude Code sessions switch on their next request/)).toBeVisible();
     await expect(page.getByText(/New Codex sessions use the new account/)).toBeVisible();
     // The fake OAuth strings deliberately cannot pass the current provider
-    // probe. The profile labels/header counts above prove migration without
+    // probe. The empty states above prove the legacy login is not adopted, without
     // pretending these synthetic credentials are a live Cora connection.
     const serializedSubscriptionStatus = await page.evaluate(async () => {
       const spark = (window as unknown as { spark: any }).spark;
