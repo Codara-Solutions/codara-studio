@@ -129,6 +129,7 @@ import {
   callerInImportedPullRequest,
   crossWorkspaceCwdRefusal,
   crossWorkspaceRefusal,
+  paneIsGone,
   resolveTargetWorkspace,
   type CrossWorkspaceDecision,
 } from "./cross-workspace-terminals";
@@ -1176,7 +1177,15 @@ async function callerPaneForOwnedTerminal(
 ): Promise<string | null> {
   const owner = agentTerminals.ownerPaneOf(paneId);
   if (!owner) return null;
-  if (!pty.hasSession(owner)) {
+  const gone = await paneIsGone(owner, {
+    hasSession: (id) => pty.hasSession(id),
+    listPaneIds: async () => {
+      const panes = await requestTerminalOp<Array<{ paneId: string }>>("panes", {}, { timeoutMs: 5_000 });
+      if (!Array.isArray(panes)) throw new Error("no pane inventory");
+      return panes.map((pane) => pane.paneId);
+    },
+  });
+  if (gone) {
     agentTerminals.releasePaneOwner(paneId);
     return null;
   }

@@ -174,6 +174,25 @@ export async function callerInImportedPullRequest(input: {
   return false;
 }
 
+/**
+ * True only when the pane is known to be closed: no process runs in it and
+ * the window's layouts no longer hold it. A sleeping (hibernated) or
+ * respawning agent keeps its pane in the layout without a process, so it
+ * keeps what it owns. When the layouts cannot be read, the pane counts as
+ * still there.
+ */
+export async function paneIsGone(
+  paneId: string,
+  deps: { hasSession: (paneId: string) => boolean; listPaneIds: () => Promise<readonly string[]> },
+): Promise<boolean> {
+  if (deps.hasSession(paneId)) return false;
+  try {
+    return !(await deps.listPaneIds()).includes(paneId);
+  } catch {
+    return false;
+  }
+}
+
 // ── "Always" grants ─────────────────────────────────────────────────────────
 
 export interface CrossWorkspaceGrantStore {

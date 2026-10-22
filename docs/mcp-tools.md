@@ -565,8 +565,9 @@ in other workspaces lists each pair with Revoke.
 The new tab carries a small "from <caller>" label. The pane that opened it
 owns it: only that pane may `codara_terminal_write` to it, run in it with
 `codara_terminal_run` or close it, while `codara_terminal_read` works as for
-any pane. Once the opening pane is gone, the terminal follows the rule for
-every terminal opened outside a run. A Cora run's terminal stays owned by the
+any pane. Once the opening pane is closed, the terminal follows the rule for
+every terminal opened outside a run. A pane that is asleep (hibernated) or
+restarting its agent is not closed: it keeps its terminals. A Cora run's terminal stays owned by the
 run and closes with it. The
 result adds `workspaceId` and the workspace's name.
 

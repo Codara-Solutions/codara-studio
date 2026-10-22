@@ -27,7 +27,9 @@
 //   5. A terminal opened across workspaces by a run-less agent is written to,
 //      run in and closed only from the pane that opened it; run-owned and
 //      ordinary terminals keep their old rules, and a dev-server handoff or
-//      the opening pane going away drops the pane owner.
+//      the opening pane closing drops the pane owner. A pane that is asleep
+//      (hibernated) or respawning has no process but is still in the layout,
+//      so it keeps its terminals; so does a pane whose layout cannot be read.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -379,7 +381,43 @@ async function main() {
     "once its opener's pane is gone it follows the rule for every run-less terminal",
   );
 
-  console.log("ok 5 a cross-workspace terminal is steered only from the pane that opened it");
+  // Whether the opener's pane is really gone (agent-socket releases the owner
+  // only then).
+  let layoutReads = 0;
+  const panes = (sessions, layout) => ({
+    hasSession: (id) => sessions.includes(id),
+    listPaneIds: async () => {
+      layoutReads += 1;
+      if (layout instanceof Error) throw layout;
+      return layout;
+    },
+  });
+  assert.equal(await cross.paneIsGone("p-ceo", panes(["p-ceo"], ["p-ceo"])), false, "a live pane is there");
+  assert.equal(layoutReads, 0, "a live pane needs no layout read");
+  assert.equal(
+    await cross.paneIsGone("p-ceo", panes([], ["p-ceo", "p-x"])),
+    false,
+    "a hibernated or respawning pane has no process but is still in the layout",
+  );
+  assert.equal(
+    await cross.paneIsGone("p-ceo", panes([], new Error("no window"))),
+    false,
+    "an unreadable layout keeps the owner",
+  );
+  assert.equal(await cross.paneIsGone("p-ceo", panes([], ["p-x"])), true, "a closed pane is gone");
+
+  registry.register({ paneId: "p-sleep", tabId: "t-sleep", runId: null, ownerPaneId: "p-ceo" });
+  const steer = async (callerPaneId, sessions, layout) => {
+    const owner = registry.ownerPaneOf("p-sleep");
+    if (owner && (await cross.paneIsGone(owner, panes(sessions, layout)))) registry.releasePaneOwner("p-sleep");
+    return registry.isActiveOwnedBy("p-sleep", null, callerPaneId);
+  };
+  assert.equal(await steer("p-other", [], ["p-ceo"]), false, "another agent cannot take over while the owner sleeps");
+  assert.equal(registry.ownerPaneOf("p-sleep"), "p-ceo", "sleeping keeps the owner");
+  assert.equal(await steer("p-ceo", ["p-ceo"], ["p-ceo"]), true, "the owner steers again once it wakes");
+  assert.equal(await steer("p-other", [], ["p-other"]), true, "once the owner's pane is closed, the old rule applies");
+  assert.equal(registry.ownerPaneOf("p-sleep"), null);
+  console.log("ok 5 a cross-workspace terminal is steered only from the pane that opened it, also while it sleeps");
 }
 
 main().catch((error) => {
