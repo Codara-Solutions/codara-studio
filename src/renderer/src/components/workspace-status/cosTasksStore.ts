@@ -21,11 +21,29 @@ function put(workspaceId: string, summary: TaskSummary | null): void {
   emit();
 }
 
+// "done today" is counted when main computes a summary; past midnight
+// nothing changes on its own, so the summaries are fetched again then.
+function refreshAtMidnight(): void {
+  const next = new Date();
+  next.setHours(24, 0, 5, 0);
+  setTimeout(() => {
+    void window.spark?.cosTasks
+      ?.summaries()
+      .then((listed) => {
+        summaries = listed;
+        emit();
+      })
+      .catch(() => undefined)
+      .finally(refreshAtMidnight);
+  }, next.getTime() - Date.now());
+}
+
 function start(): void {
   if (started) return;
   started = true;
   const api = window.spark?.cosTasks;
   if (!api) return;
+  refreshAtMidnight();
   // A change that lands while the first list is in flight is newer than it.
   const changedDuringLoad = new Set<string>();
   let loaded = false;

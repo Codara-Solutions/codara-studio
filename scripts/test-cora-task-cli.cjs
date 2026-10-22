@@ -67,6 +67,14 @@ const TASK = {
   fs.writeFileSync(path.join(home, "agent-socket.json"), JSON.stringify({ url: `http://127.0.0.1:${server.address().port}`, token }));
   const env = { PATH: process.env.PATH, HOME: home, CODARA_HOME_DIR: home, SPARK_PANE_ID: "pane-3" };
   try {
+    for (const help of [["task", "--help"], ["task", "-h"], ["task", "help"], ["inbox", "add", "--help"]]) {
+      const before = calls.length;
+      const shown = await run(help, env);
+      assert.equal(shown.code, 0, shown.stderr);
+      assert.match(shown.stdout, /^usage:/, help.join(" "));
+      assert.equal(calls.length, before, `${help.join(" ")} calls nothing`);
+    }
+
     const list = await run(["task", "list"], env);
     assert.equal(list.code, 0, list.stderr);
     assert.equal(calls.at(-1).method, "task.list");

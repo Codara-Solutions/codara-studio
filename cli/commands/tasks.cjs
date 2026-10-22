@@ -24,7 +24,7 @@ const USAGE = `usage:
   cora inbox add <text> [--link URL]`;
 
 const REPEATED = new Set(["done"]);
-const BOOLEAN = new Set(["all", "json"]);
+const BOOLEAN = new Set(["all", "json", "help"]);
 
 function parse(argv) {
   const args = [];
@@ -101,7 +101,7 @@ function printList(result) {
 async function task(argv) {
   const { args, flags } = parse(argv);
   const [action = "list", ...rest] = args;
-  if (action === "help" || action === "-h" || action === "--help") return console.log(USAGE);
+  if (flags.help || action === "help" || action === "-h") return console.log(USAGE);
   if (action === "list") {
     const result = await call("codara_task_list", { ...(flags.state ? { state: flags.state } : {}), ...(flags.all ? { all: true } : {}) }, flags);
     if (result) printList(result);
@@ -145,6 +145,7 @@ async function task(argv) {
 
 async function inboxAdd(argv) {
   const { args, flags } = parse(argv);
+  if (flags.help) return console.log(USAGE);
   if (!args.length) {
     console.error(USAGE);
     process.exitCode = 2;
