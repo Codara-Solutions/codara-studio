@@ -1,6 +1,6 @@
 // The verify gate: the only thing that closes a task. It reads the checks the
-// repository owns (<repo>/.codara/verify.json), runs the ones the change can
-// affect in the task's folder, writes each check's full output to a log, and
+// repository owns (.codara/verify.json as committed on the base branch), runs
+// the ones the change can affect in the task's folder, writes each check's full output to a log, and
 // hands the store the exit codes and log paths as evidence. The store closes
 // the task when every check passed and otherwise sends it back to its worker,
 // or to the user with one plain sentence; no model's opinion is involved.
@@ -17,6 +17,7 @@ import { join } from "node:path";
 
 import type { Task, TaskEvidence } from "@shared/cos-tasks";
 import { processEnvWithoutElectronViteDev } from "../env-sanitize";
+import { gitChildEnv } from "../git-env";
 import type { TaskStore } from "./task-store";
 
 export const VERIFY_CONFIG_PATH = join(".codara", "verify.json");
@@ -110,12 +111,14 @@ export function selectChecks(config: VerifyConfig, changed: readonly string[] | 
 export interface CommandResult {
   exitCode: number | null;
   timedOut: boolean;
+  /** Stopped because a newer verify run of the task, or the app quitting, superseded it. */
+  cancelled?: boolean;
   spawnError?: string;
 }
 
 export type CommandRunner = (
   command: string,
-  options: { cwd: string; env: Record<string, string>; logFile: string; timeoutMs: number },
+  options: { cwd: string; env: Record<string, string>; logFile: string; timeoutMs: number; signal?: AbortSignal },
 ) => Promise<CommandResult>;
 
 export type GitRunner = (args: string[], cwd: string) => Promise<string>;
@@ -129,11 +132,22 @@ function loginShell(): string {
   return process.platform === "win32" ? process.env.ComSpec || "cmd.exe" : sh;
 }
 
+// Every check still running, so the app can stop them when it quits instead
+// of leaving a build holding the machine-wide heavy slot.
+const liveChecks = new Set<() => void>();
+
+/** Stops every check this process started; for app quit. */
+export function stopRunningChecks(): void {
+  for (const stop of [...liveChecks]) stop();
+}
+
 /**
  * Runs `command` through the user's login shell (PATH from their profile, as
- * in a terminal), output to `logFile`, killing the whole process group on
- * timeout. With `heavy` it runs inside codara-heavy: one machine-wide slot
- * and a memory cap, the same wrapper workflow agents use.
+ * in a terminal), output to `logFile`. The check is over when its shell
+ * exits, times out or is cancelled; its whole process group is killed then,
+ * so a background process it left cannot hold the gate open. With `heavy` it
+ * runs inside codara-heavy: one machine-wide slot and a memory cap, the same
+ * wrapper workflow agents use.
  */
 export function createCommandRunner(heavy?: { bin: string; env: Record<string, string> } | null): CommandRunner {
   return (command, options) =>
@@ -142,20 +156,47 @@ export function createCommandRunner(heavy?: { bin: string; env: Record<string, s
       const shell = loginShell();
       const args = process.platform === "win32" ? ["/d", "/s", "/c", line] : ["-lc", line];
       const log = createWriteStream(options.logFile, { flags: "w", mode: 0o600 });
+      log.on("error", () => undefined);
       log.write(`$ ${command}\n\n`);
       let settled = false;
       let timedOut = false;
+      let cancelled = false;
       let timer: NodeJS.Timeout | undefined;
-      const finish = (result: Omit<CommandResult, "timedOut">) => {
+      let child: ReturnType<typeof spawn> | null = null;
+      const killGroup = () => {
+        if (!child?.pid) return;
+        try {
+          if (process.platform !== "win32") process.kill(-child.pid, "SIGKILL");
+          else child.kill("SIGKILL");
+        } catch {
+          // Already gone.
+        }
+      };
+      const stop = () => {
+        cancelled = true;
+        finish({ exitCode: null });
+      };
+      const finish = (result: Omit<CommandResult, "timedOut" | "cancelled">) => {
         if (settled) return;
         settled = true;
         if (timer) clearTimeout(timer);
+        liveChecks.delete(stop);
+        options.signal?.removeEventListener("abort", stop);
+        killGroup();
+        for (const stream of [child?.stdout, child?.stderr]) {
+          stream?.unpipe(log);
+          stream?.destroy();
+        }
         const tail = result.spawnError
           ? `\n[could not start: ${result.spawnError}]\n`
-          : `\n[exit ${result.exitCode ?? "none"}${timedOut ? ", timed out" : ""}]\n`;
-        log.end(tail, () => resolve({ ...result, timedOut }));
+          : `\n[exit ${result.exitCode ?? "none"}${timedOut ? ", timed out" : ""}${cancelled ? ", cancelled" : ""}]\n`;
+        log.end(tail, () => resolve({ ...result, timedOut, ...(cancelled ? { cancelled } : {}) }));
       };
-      let child: ReturnType<typeof spawn>;
+      if (options.signal?.aborted) {
+        cancelled = true;
+        finish({ exitCode: null });
+        return;
+      }
       try {
         child = spawn(shell, args, {
           cwd: options.cwd,
@@ -168,25 +209,24 @@ export function createCommandRunner(heavy?: { bin: string; env: Record<string, s
         finish({ exitCode: null, spawnError: error instanceof Error ? error.message : String(error) });
         return;
       }
+      liveChecks.add(stop);
+      options.signal?.addEventListener("abort", stop);
       child.stdout?.pipe(log, { end: false });
       child.stderr?.pipe(log, { end: false });
       child.on("error", (error) => finish({ exitCode: null, spawnError: error.message }));
-      child.on("close", (code) => finish({ exitCode: code }));
+      // "exit", not "close": a background process the check started can keep
+      // the pipes open long after the shell is gone.
+      child.on("exit", (code) => finish({ exitCode: code }));
       timer = setTimeout(() => {
         timedOut = true;
-        try {
-          if (process.platform !== "win32" && child.pid) process.kill(-child.pid, "SIGKILL");
-          else child.kill("SIGKILL");
-        } catch {
-          // Already gone.
-        }
+        finish({ exitCode: null });
       }, options.timeoutMs);
     });
 }
 
 export const defaultGitRunner: GitRunner = (args, cwd) =>
   new Promise((resolve, reject) => {
-    const child = spawn("git", args, { cwd, stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+    const child = spawn("git", args, { cwd, env: gitChildEnv(), stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
     let out = "";
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
@@ -201,7 +241,7 @@ export async function changedSinceBase(
   cwd: string,
   bases: readonly string[],
   git: GitRunner,
-): Promise<{ base: string; files: string[] } | null> {
+): Promise<{ ref: string; base: string; files: string[] } | null> {
   for (const ref of bases) {
     let base: string;
     try {
@@ -214,7 +254,7 @@ export async function changedSinceBase(
       const tracked = await git(["diff", "--name-only", base], cwd);
       const untracked = await git(["ls-files", "--others", "--exclude-standard"], cwd);
       const files = [...new Set(`${tracked}\n${untracked}`.split("\n").map((line) => line.trim()).filter(Boolean))];
-      return { base, files };
+      return { ref, base, files };
     } catch {
       return null;
     }
@@ -251,34 +291,74 @@ export interface VerifyGateOptions {
   runId: string;
   /** The folder the task's work is in: its worktree, else the workspace's folder. */
   cwd: string | null;
+  /** The workspace's own folder; a different `cwd` must be a checkout of the same repository. */
+  workspaceDir?: string | null;
   runCommand: CommandRunner;
   git?: GitRunner;
   now?: () => number;
+  /** Aborted when a newer verify run of the task starts; this one then records nothing. */
+  signal?: AbortSignal;
 }
 
-/** Runs the gate for one verify run and records its result; resolves to the task as it then stands. */
-export async function runVerifyGate(options: VerifyGateOptions): Promise<Task> {
+async function gitCommonDir(cwd: string, git: GitRunner): Promise<string | null> {
+  try {
+    return (await git(["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd)).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Runs the gate for one verify run and records its result; resolves to the
+ * task as it then stands, or null when the run was cancelled.
+ *
+ * The checks come from .codara/verify.json as committed on the base branch
+ * (at the merge base), never from the task's working tree: the agent whose
+ * work is being checked cannot loosen what checks it. Only `base`, the refs
+ * to measure from, is read from the working tree.
+ */
+export async function runVerifyGate(options: VerifyGateOptions): Promise<Task | null> {
   const { store, workspaceId, taskId, runId } = options;
   const now = options.now ?? (() => Date.now());
+  const git = options.git ?? defaultGitRunner;
   const blocked = (sentence: string) => store.finishVerify(workspaceId, taskId, { runId, evidence: [], blocked: sentence });
 
   const cwd = options.cwd;
   if (!cwd || !(await fs.stat(cwd).then((stat) => stat.isDirectory(), () => false))) {
     return blocked("Codara cannot tell which folder this task's work is in, so nothing could be checked; set the task's worktree.");
   }
-  let config: VerifyConfig;
-  try {
-    config = parseVerifyConfig(JSON.parse(await fs.readFile(join(cwd, VERIFY_CONFIG_PATH), "utf8")));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") {
-      return blocked("This repository has no .codara/verify.json, so nothing can prove the task is done.");
+  if (options.workspaceDir && options.workspaceDir !== cwd) {
+    const [own, theirs] = await Promise.all([gitCommonDir(options.workspaceDir, git), gitCommonDir(cwd, git)]);
+    if (!own || own !== theirs) {
+      return blocked("The task's worktree is not a checkout of this workspace's repository, so its checks cannot be trusted.");
     }
-    const detail = error instanceof VerifyConfigError ? error.message : "it is not valid JSON";
-    return blocked(`The repository's .codara/verify.json cannot be used: ${detail}.`);
   }
 
-  const changed = await changedSinceBase(cwd, config.base, options.git ?? defaultGitRunner);
-  const checks = selectChecks(config, changed?.files ?? null);
+  let bases = DEFAULT_BASES;
+  try {
+    bases = parseVerifyConfig(JSON.parse(await fs.readFile(join(cwd, VERIFY_CONFIG_PATH), "utf8"))).base;
+  } catch {
+    // The committed copy below decides; a missing or broken working copy only loses its base list.
+  }
+  const changed = await changedSinceBase(cwd, bases, git);
+  if (!changed) {
+    return blocked(`Codara cannot find the base branch (${bases.join(" or ")}) to read the repository's checks from.`);
+  }
+  let config: VerifyConfig;
+  let raw: string;
+  try {
+    raw = await git(["show", `${changed.base}:.codara/verify.json`], cwd);
+  } catch {
+    return blocked(`${changed.ref} has no .codara/verify.json, so nothing can prove the task is done.`);
+  }
+  try {
+    config = parseVerifyConfig(JSON.parse(raw));
+  } catch (error) {
+    const detail = error instanceof VerifyConfigError ? error.message : "it is not valid JSON";
+    return blocked(`The .codara/verify.json on ${changed.ref} cannot be used: ${detail}.`);
+  }
+
+  const checks = selectChecks(config, changed.files);
   const logDir = join(store.paths(workspaceId).dir, "verify", taskId, runId);
   await fs.mkdir(logDir, { recursive: true });
 
@@ -286,15 +366,18 @@ export async function runVerifyGate(options: VerifyGateOptions): Promise<Task> {
   const timedOut = new Set<string>();
   const timeouts: Record<string, number> = {};
   for (const check of checks) {
+    if (options.signal?.aborted) return null;
     const logFile = join(logDir, `${check.id}.log`);
     const timeoutSec = check.timeoutSec ?? DEFAULT_TIMEOUT_SEC;
     timeouts[check.id] = timeoutSec;
     const result = await options.runCommand(check.run, {
       cwd,
-      env: changed ? { CODARA_VERIFY_BASE: changed.base } : {},
+      env: { CODARA_VERIFY_BASE: changed.base },
       logFile,
       timeoutMs: timeoutSec * 1000,
+      ...(options.signal ? { signal: options.signal } : {}),
     });
+    if (result.cancelled) return null;
     if (result.timedOut) timedOut.add(check.id);
     evidence.push({
       checkId: check.id,

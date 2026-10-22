@@ -8,7 +8,7 @@
 import { existsSync, promises as fs } from "node:fs";
 import * as os from "node:os";
 import { join } from "node:path";
-import { webContents } from "electron";
+import { app, webContents } from "electron";
 
 import type { TaskSummary, TaskSummaryChange } from "@shared/cos-tasks";
 import { isRemotePath } from "@shared/remote";
@@ -20,7 +20,7 @@ import type { IpcHandle } from "../ipc";
 import { loadState } from "../storage";
 import { provideCosService } from "./service";
 import { createTaskStore, isTaskWorkspaceId, type TaskStore } from "./task-store";
-import { createCommandRunner, runVerifyGate, type CommandRunner } from "./verify-gate";
+import { createCommandRunner, runVerifyGate, stopRunningChecks, type CommandRunner } from "./verify-gate";
 
 export const COS_TASKS_CHANGED_CHANNEL = "cosTasks:changed";
 
@@ -82,25 +82,52 @@ function gateCommandRunner(): CommandRunner {
   return commandRunner;
 }
 
-const runningGates = new Set<string>();
+// One gate per task: a newer verify run cancels the older one, whose result
+// would be stale anyway and whose checks would only hold the heavy slot.
+const runningGates = new Map<string, { runId: string; abort: AbortController }>();
 
 function startVerify(workspaceId: string, taskId: string, runId: string): void {
-  const key = `${workspaceId}/${taskId}/${runId}`;
-  if (runningGates.has(key)) return;
-  runningGates.add(key);
+  const key = `${workspaceId}/${taskId}`;
+  const current = runningGates.get(key);
+  if (current?.runId === runId) return;
+  current?.abort.abort();
+  const abort = new AbortController();
+  runningGates.set(key, { runId, abort });
   void (async () => {
     const list = await taskStore().read(workspaceId);
     const task = list.tasks.find((candidate) => candidate.id === taskId);
     const workspace = await workspaceById(workspaceId);
     // The task's own worktree when it names one; else the workspace's folder.
     // An SSH workspace's folder is not on this machine.
-    const folder = task?.assignee?.worktree ?? workspace?.cwd ?? null;
-    const cwd = folder && !isRemotePath(folder) ? folder : null;
-    const result = await runVerifyGate({ store: taskStore(), workspaceId, taskId, runId, cwd, runCommand: gateCommandRunner() });
-    logMain("cos", `verify ${workspaceId} ${taskId} ${runId}: ${result.state}`);
+    const local = (folder: string | null | undefined) => (folder && !isRemotePath(folder) ? folder : null);
+    const workspaceDir = local(workspace?.cwd);
+    const cwd = local(task?.assignee?.worktree) ?? workspaceDir;
+    const result = await runVerifyGate({
+      store: taskStore(),
+      workspaceId,
+      taskId,
+      runId,
+      cwd,
+      workspaceDir,
+      runCommand: gateCommandRunner(),
+      signal: abort.signal,
+    });
+    logMain("cos", `verify ${workspaceId} ${taskId} ${runId}: ${result?.state ?? "cancelled"}`);
   })()
-    .catch((error) => logMain("cos", `verify ${workspaceId} ${taskId} ${runId} failed: ${String(error)}`))
-    .finally(() => runningGates.delete(key));
+    .catch(async (error) => {
+      logMain("cos", `verify ${workspaceId} ${taskId} ${runId} failed: ${String(error)}`);
+      // Left alone, the task would sit in verifying until the next restart.
+      await taskStore()
+        .finishVerify(workspaceId, taskId, {
+          runId,
+          evidence: [],
+          blocked: "The verify gate itself failed before it could check anything; Codara's log has the error.",
+        })
+        .catch(() => undefined);
+    })
+    .finally(() => {
+      if (runningGates.get(key)?.runId === runId) runningGates.delete(key);
+    });
 }
 
 provideCosService({
@@ -142,5 +169,8 @@ async function resumeInterruptedVerifies(): Promise<void> {
 export function registerCosTasksIpc(handle: IpcHandle): void {
   taskStore();
   handle("cosTasks:summaries", (): Promise<Record<string, TaskSummary>> => summaries());
+  // A check left running after quit would hold the heavy slot the gate
+  // resumed at the next boot then waits for.
+  app.on("will-quit", stopRunningChecks);
   void resumeInterruptedVerifies().catch(() => undefined);
 }

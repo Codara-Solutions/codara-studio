@@ -1,8 +1,9 @@
 "use strict";
 // The verify gate (src/main/cos/verify-gate.ts): verify.json parsing, which
-// checks a change selects, and a gate run end to end against the real task
-// store, a throwaway git repository and real shell commands (no heavy
-// wrapper). Also checks this repository's own .codara/verify.json parses.
+// checks a change selects, that the checks come from the base branch and the
+// workspace's own repository, how the command runner ends (exit, timeout,
+// cancel, quit), and a gate run end to end against the real task store, a
+// throwaway git repository and real shell commands (no heavy wrapper). Also checks this repository's own .codara/verify.json parses.
 //
 //   node scripts/test-cos-verify-gate.cjs
 
@@ -160,6 +161,80 @@ async function endToEnd() {
   assert.match(fs.readFileSync(timedOut.evidence[0].artifact, "utf8"), /timed out/);
 }
 
+async function baseOwnsTheChecks() {
+  const store = gate.createTaskStore({ root: path.join(TMP, "cos-base") });
+  const runCommand = gate.createCommandRunner(null);
+  const repo = makeRepo("loosened", { base: ["main"], checks: [{ id: "strict", run: "exit 3" }] });
+  // The agent being checked rewrites the checks in its own working tree.
+  fs.writeFileSync(path.join(repo, ".codara", "verify.json"), JSON.stringify({ base: ["main"], checks: [{ id: "strict", run: "true" }] }));
+  const one = await verifyingTask(store);
+  const task = await gate.runVerifyGate({ store, workspaceId: WS, taskId: one.id, runId: one.runId, cwd: repo, runCommand });
+  assert.notEqual(task.state, "done", "the committed checks on the base branch decide, not the working copy");
+  assert.equal(task.evidence[0].exitCode, 3);
+
+  const fresh = makeRepo("fresh", undefined);
+  fs.writeFileSync(path.join(fresh, ".codara", "verify.json"), JSON.stringify({ base: ["main"], checks: [{ id: "ok", run: "true" }] }));
+  const two = await verifyingTask(store);
+  const notYet = await gate.runVerifyGate({ store, workspaceId: WS, taskId: two.id, runId: two.runId, cwd: fresh, runCommand });
+  assert.equal(notYet.state, "needs_you", "checks that exist only on the branch cannot close its task");
+  assert.match(notYet.needsYouReason, /^main has no \.codara\/verify\.json/);
+
+  // A worktree of the same repository is accepted; a folder of another one is not.
+  const linked = path.join(TMP, "loosened-wt");
+  git(repo, "worktree", "add", "-q", "-b", "wt", linked, "main");
+  const three = await verifyingTask(store);
+  const fromWorktree = await gate.runVerifyGate({ store, workspaceId: WS, taskId: three.id, runId: three.runId, cwd: linked, workspaceDir: repo, runCommand });
+  assert.equal(fromWorktree.evidence.at(-1).checkId, "strict", "a worktree of the workspace's repository runs its checks");
+  const elsewhere = makeRepo("elsewhere", { base: ["main"], checks: [{ id: "ok", run: "true" }] });
+  const four = await verifyingTask(store);
+  const foreign = await gate.runVerifyGate({ store, workspaceId: WS, taskId: four.id, runId: four.runId, cwd: elsewhere, workspaceDir: repo, runCommand });
+  assert.equal(foreign.state, "needs_you");
+  assert.match(foreign.needsYouReason, /not a checkout of this workspace's repository/);
+}
+
+async function runnerEnds() {
+  const runCommand = gate.createCommandRunner(null);
+  const log = path.join(TMP, "runner.log");
+  // A background process in its own session keeps the pipes open after the
+  // shell exits; the check still ends with the shell.
+  let started = Date.now();
+  const detached = await runCommand("setsid sleep 4 & exit 0", { cwd: TMP, env: {}, logFile: log, timeoutMs: 10_000 });
+  assert.equal(detached.exitCode, 0);
+  assert.ok(Date.now() - started < 2500, `the check ended with its shell (${Date.now() - started} ms)`);
+
+  started = Date.now();
+  const stuck = await runCommand("setsid sleep 4 & sleep 4", { cwd: TMP, env: {}, logFile: log, timeoutMs: 500 });
+  assert.equal(stuck.timedOut, true);
+  assert.ok(Date.now() - started < 2500, "a timeout ends the check whatever holds its pipes");
+
+  const abort = new AbortController();
+  started = Date.now();
+  const pending = runCommand("sleep 5", { cwd: TMP, env: {}, logFile: log, timeoutMs: 10_000, signal: abort.signal });
+  setTimeout(() => abort.abort(), 200);
+  const cancelled = await pending;
+  assert.equal(cancelled.cancelled, true);
+  assert.ok(Date.now() - started < 2500, "a cancelled check stops at once");
+  assert.match(fs.readFileSync(log, "utf8"), /cancelled\]\n$/);
+
+  started = Date.now();
+  const quitting = runCommand("sleep 5", { cwd: TMP, env: {}, logFile: log, timeoutMs: 10_000 });
+  setTimeout(() => gate.stopRunningChecks(), 200);
+  assert.equal((await quitting).cancelled, true, "quitting the app stops running checks");
+  assert.ok(Date.now() - started < 2500);
+
+  // A cancelled gate run records nothing: a newer run owns the task.
+  const store = gate.createTaskStore({ root: path.join(TMP, "cos-cancel") });
+  const repo = makeRepo("cancel", { base: ["main"], checks: [{ id: "slow", run: "sleep 5" }] });
+  const { id, runId } = await verifyingTask(store);
+  const runAbort = new AbortController();
+  setTimeout(() => runAbort.abort(), 300);
+  const result = await gate.runVerifyGate({ store, workspaceId: WS, taskId: id, runId, cwd: repo, runCommand, signal: runAbort.signal });
+  assert.equal(result, null);
+  const task = (await store.read(WS)).tasks.find((candidate) => candidate.id === id);
+  assert.equal(task.state, "verifying");
+  assert.equal(task.evidence.length, 0);
+}
+
 async function blocked() {
   const store = gate.createTaskStore({ root: path.join(TMP, "cos-blocked") });
   const runCommand = async () => assert.fail("no command runs when the gate is blocked");
@@ -167,7 +242,7 @@ async function blocked() {
     [null, /cannot tell which folder/],
     [path.join(TMP, "missing"), /cannot tell which folder/],
     [makeRepo("none", undefined), /has no \.codara\/verify\.json/],
-    [makeRepo("broken", "{nope"), /cannot be used: it is not valid JSON/],
+    [makeRepo("broken", "{nope"), /^The \.codara\/verify\.json on main cannot be used: it is not valid JSON/],
     [makeRepo("empty", { checks: [] }), /cannot be used: it needs at least one check/],
   ];
   for (const [cwd, pattern] of cases) {
@@ -196,7 +271,7 @@ function sentences() {
 
 (async () => {
   gate = await load();
-  const suites = { config, selection, endToEnd, blocked, sentences };
+  const suites = { config, selection, endToEnd, baseOwnsTheChecks, runnerEnds, blocked, sentences };
   let failed = 0;
   for (const [name, run] of Object.entries(suites)) {
     try {
