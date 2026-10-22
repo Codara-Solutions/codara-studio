@@ -555,7 +555,9 @@ export function scrubSecrets(text: string): string {
     if (pattern === KEYWORD_SECRET) {
       out = out.replace(global, (match) =>
         match.replace(/^(.*?(?:\bis|\bes|=|:)\s*)(\S+?)([.,;:!?)\]]*)$/i, (whole, head: string, value: string, tail: string) =>
-          credentialLike(value) ? `${head}${SECRET_REDACTED}${tail}` : whole,
+          // Already scrubbed: "[redacted]" would otherwise lose its "]" to
+          // the tail and gain another on every pass.
+          credentialLike(value) && !`${value}${tail}`.startsWith(SECRET_REDACTED) ? `${head}${SECRET_REDACTED}${tail}` : whole,
         ),
       );
     } else if (pattern === URL_CREDENTIALS) {

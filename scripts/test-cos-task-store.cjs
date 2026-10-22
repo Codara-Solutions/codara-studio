@@ -1,8 +1,8 @@
 "use strict";
 // Cora's task list: the state machine and its log (src/main/cos/task-store.ts),
-// the count line the rail shows (src/shared/cos-tasks.ts) and the secret
-// scrubber both use (scrubSecrets in src/shared/memory-items.ts). The store is
-// bundled with the real fs-atomic writer and a throwaway home.
+// the count line the rail shows (src/shared/cos-tasks.ts), and that prose is
+// scrubbed on the way in (the scrubber itself: test-scrub-secrets.cjs). The
+// store is bundled with the real fs-atomic writer and a throwaway home.
 //
 //   node scripts/test-cos-task-store.cjs
 
@@ -19,7 +19,6 @@ async function load() {
     stdin: {
       contents: [
         `export * from "@shared/cos-tasks";`,
-        `export { containsSecret, scrubSecrets } from "@shared/memory-items";`,
         `export * from "./task-store";`,
       ].join("\n"),
       resolveDir: path.join(ROOT, "src", "main", "cos"),
@@ -89,34 +88,6 @@ function sharedRules() {
   }
   assert.ok(cos.canMoveTask("verifying", "dispatched"));
   assert.ok(!cos.canMoveTask("done", "verifying"), "a closed task reopens to ready first");
-}
-
-function scrubbing() {
-  const key = "sk-proj-AbCdEfGhIjKlMnOpQrStUvWx1234";
-  const out = cos.scrubSecrets(`use this key ${key} for the deploy`);
-  assert.equal(out, "use this key [redacted] for the deploy");
-  assert.ok(!cos.containsSecret(out));
-  assert.equal(cos.scrubSecrets("my password is hunter2hunter2 ok"), "my password is [redacted] ok");
-  assert.equal(cos.scrubSecrets("postgres://admin:s3cretpw@db:5432/x"), "postgres://[redacted]@db:5432/x");
-  assert.equal(cos.scrubSecrets("card 4111 1111 1111 1111 please"), "card [redacted] please");
-  const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----";
-  assert.ok(!cos.containsSecret(cos.scrubSecrets(`here ${pem} done`)));
-  assert.equal(cos.scrubSecrets("password=Tr0ub4dor&3"), "password=[redacted]");
-  // Ordinary text that only looks like a credential to containsSecret is
-  // written as the user typed it.
-  for (const plain of [
-    "run npm test in src/main and open PR #42",
-    "the token is expired, can you refresh it",
-    "the password is incorrect",
-    "la clave es correcta",
-    "https://github.com/Ed3scombe3s/codara-studio/pull/1234",
-    "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abc/edit",
-    "src/main/cos/TaskStore2Helpers/x.ts",
-    "/Users/Etienne/code/app/worktrees/fix-login2",
-    "use sk-learn-compatible-models here",
-  ]) {
-    assert.equal(cos.scrubSecrets(plain), plain, plain);
-  }
 }
 
 async function lifecycle() {
@@ -273,7 +244,7 @@ async function concurrency() {
 
 (async () => {
   cos = await load();
-  const suites = { sharedRules, scrubbing, lifecycle, failuresComeToTheUser, inbox, persistence, concurrency };
+  const suites = { sharedRules, lifecycle, failuresComeToTheUser, inbox, persistence, concurrency };
   let failed = 0;
   for (const [name, run] of Object.entries(suites)) {
     try {
