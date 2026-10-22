@@ -272,8 +272,12 @@ export const defaultGitRunner: GitRunner = (args, cwd) =>
   new Promise((resolve, reject) => {
     // Replace refs are the agent's to write; they could stand another
     // commit's checks in for the base's.
-    const env = { ...gitChildEnv(), GIT_NO_REPLACE_OBJECTS: "1" };
-    const child = spawn("git", args, { cwd, env, stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+    const child = spawn("git", args, {
+      cwd,
+      env: gitChildEnv({ ...process.env, GIT_NO_REPLACE_OBJECTS: "1" }),
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+    });
     let out = "";
     const timer = setTimeout(() => child.kill("SIGKILL"), GIT_TIMEOUT_MS);
     child.stdout.setEncoding("utf8");
