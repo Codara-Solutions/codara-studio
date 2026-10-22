@@ -394,6 +394,19 @@ async function slotWait() {
   assert.equal(slow.timedOut, true, "the check's own time still runs out");
   assert.ok(Date.now() - started < 4500);
 
+  // A slot that never frees ends the wait, as its own failure.
+  hold(4000);
+  started = Date.now();
+  const never = await runCommand("echo never", { cwd: TMP, env: {}, logFile: log, timeoutMs: 1000, slotWaitMs: 1500 });
+  assert.equal(never.noSlot, true);
+  assert.equal(never.timedOut, false);
+  assert.ok(Date.now() - started < 3500, "the slot wait is capped");
+  await new Promise((resolve) => setTimeout(resolve, 2700));
+  assert.equal(
+    gate.failureSentence([{ checkId: "unit", ok: false, kind: "command", artifact: "/v/unit.log", runId: "r", at: "" }], new Set(), {}, new Set(["unit"])),
+    "The unit check never got a heavy-work slot in 2 hours; its log is /v/unit.log.",
+  );
+
   const free = await runCommand("echo free", { cwd: TMP, env: {}, logFile: log, timeoutMs: 5000 });
   assert.equal(free.exitCode, 0, "with the slot free the check runs at once");
 }

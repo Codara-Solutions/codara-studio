@@ -31,6 +31,9 @@ const BASE_REF_PREFIX = "refs/codara/verify-base";
 const GIT_TIMEOUT_MS = 90_000;
 const DEFAULT_TIMEOUT_SEC = 20 * 60;
 const MAX_TIMEOUT_SEC = 2 * 60 * 60;
+/** How long a check waits for codara-heavy's slot before the wait is its own failure. */
+const SLOT_WAIT_MAX_MS = 2 * 60 * 60 * 1000;
+const SLOT_WAIT_LABEL = "2 hours";
 const CHECK_ID = /^[a-z0-9][a-z0-9_-]{0,39}$/i;
 
 export interface VerifyCheck {
@@ -118,12 +121,22 @@ export interface CommandResult {
   timedOut: boolean;
   /** Stopped because a newer verify run of the task, or the app quitting, superseded it. */
   cancelled?: boolean;
+  /** Never started: codara-heavy's slot stayed taken for the whole wait. */
+  noSlot?: boolean;
   spawnError?: string;
 }
 
 export type CommandRunner = (
   command: string,
-  options: { cwd: string; env: Record<string, string>; logFile: string; timeoutMs: number; signal?: AbortSignal },
+  options: {
+    cwd: string;
+    env: Record<string, string>;
+    logFile: string;
+    timeoutMs: number;
+    /** The cap on waiting for the heavy slot; 2 hours by default. */
+    slotWaitMs?: number;
+    signal?: AbortSignal;
+  },
 ) => Promise<CommandResult>;
 
 export type GitRunner = (args: string[], cwd: string) => Promise<string>;
@@ -170,7 +183,9 @@ export function createCommandRunner(heavy?: { bin: string; env: Record<string, s
       let settled = false;
       let timedOut = false;
       let cancelled = false;
+      let noSlot = false;
       let timer: NodeJS.Timeout | undefined;
+      let slotTimer: NodeJS.Timeout | undefined;
       let child: ReturnType<typeof spawn> | null = null;
       const killGroup = () => {
         if (!child?.pid) return;
@@ -185,10 +200,11 @@ export function createCommandRunner(heavy?: { bin: string; env: Record<string, s
         cancelled = true;
         finish({ exitCode: null });
       };
-      const finish = (result: Omit<CommandResult, "timedOut" | "cancelled">) => {
+      const finish = (result: Omit<CommandResult, "timedOut" | "cancelled" | "noSlot">) => {
         if (settled) return;
         settled = true;
         if (timer) clearTimeout(timer);
+        if (slotTimer) clearTimeout(slotTimer);
         liveChecks.delete(stop);
         options.signal?.removeEventListener("abort", stop);
         killGroup();
@@ -199,8 +215,8 @@ export function createCommandRunner(heavy?: { bin: string; env: Record<string, s
         child?.stdio[3]?.destroy();
         const tail = result.spawnError
           ? `\n[could not start: ${result.spawnError}]\n`
-          : `\n[exit ${result.exitCode ?? "none"}${timedOut ? ", timed out" : ""}${cancelled ? ", cancelled" : ""}]\n`;
-        log.end(tail, () => resolve({ ...result, timedOut, ...(cancelled ? { cancelled } : {}) }));
+          : `\n[exit ${result.exitCode ?? "none"}${timedOut ? ", timed out" : ""}${noSlot ? ", no heavy-work slot" : ""}${cancelled ? ", cancelled" : ""}]\n`;
+        log.end(tail, () => resolve({ ...result, timedOut, ...(cancelled ? { cancelled } : {}), ...(noSlot ? { noSlot } : {}) }));
       };
       if (options.signal?.aborted) {
         cancelled = true;
@@ -228,6 +244,7 @@ export function createCommandRunner(heavy?: { bin: string; env: Record<string, s
       // the pipes open long after the shell is gone.
       child.on("exit", (code) => finish({ exitCode: code }));
       const startClock = () => {
+        if (slotTimer) clearTimeout(slotTimer);
         if (timer || settled) return;
         timer = setTimeout(() => {
           timedOut = true;
@@ -236,6 +253,10 @@ export function createCommandRunner(heavy?: { bin: string; env: Record<string, s
       };
       const started = signalsStart ? child.stdio[3] : null;
       if (started) {
+        slotTimer = setTimeout(() => {
+          noSlot = true;
+          finish({ exitCode: null });
+        }, options.slotWaitMs ?? SLOT_WAIT_MAX_MS);
         started.on("error", () => undefined);
         started.once("data", () => {
           startClock();
@@ -343,11 +364,18 @@ function minutes(seconds: number): string {
 }
 
 /** One plain sentence on what failed, for the task's needs_you reason. */
-export function failureSentence(evidence: readonly TaskEvidence[], timedOut: ReadonlySet<string>, timeouts: Record<string, number>): string {
+export function failureSentence(
+  evidence: readonly TaskEvidence[],
+  timedOut: ReadonlySet<string>,
+  timeouts: Record<string, number>,
+  noSlot: ReadonlySet<string> = new Set(),
+): string {
   const failed = evidence.filter((item) => !item.ok);
   if (failed.length === 1) {
     const [item] = failed;
-    const why = timedOut.has(item.checkId)
+    const why = noSlot.has(item.checkId)
+      ? `never got a heavy-work slot in ${SLOT_WAIT_LABEL}`
+      : timedOut.has(item.checkId)
       ? `timed out after ${minutes(timeouts[item.checkId] ?? DEFAULT_TIMEOUT_SEC)}`
       : item.exitCode === undefined
         ? "could not start"
@@ -522,6 +550,7 @@ export async function runVerifyGate(options: VerifyGateOptions): Promise<Task | 
 
   const evidence: TaskEvidence[] = [];
   const timedOut = new Set<string>();
+  const noSlot = new Set<string>();
   const timeouts: Record<string, number> = {};
   for (const check of checks) {
     if (options.signal?.aborted) return null;
@@ -537,6 +566,7 @@ export async function runVerifyGate(options: VerifyGateOptions): Promise<Task | 
     });
     if (result.cancelled) return null;
     if (result.timedOut) timedOut.add(check.id);
+    if (result.noSlot) noSlot.add(check.id);
     evidence.push({
       checkId: check.id,
       kind: "command",
@@ -551,7 +581,7 @@ export async function runVerifyGate(options: VerifyGateOptions): Promise<Task | 
   return store.finishVerify(workspaceId, taskId, {
     runId,
     evidence,
-    ...(ok ? {} : { reason: failureSentence(evidence, timedOut, timeouts) }),
+    ...(ok ? {} : { reason: failureSentence(evidence, timedOut, timeouts, noSlot) }),
   });
 }
 
