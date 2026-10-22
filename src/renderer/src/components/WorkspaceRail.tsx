@@ -21,6 +21,7 @@ import GitPanel from "./git/GitPanel";
 import AnchoredMenu from "./chat/composer/AnchoredMenu";
 import WorkspaceIconPicker from "./WorkspaceIconPicker";
 import { WorkspaceStatusLine } from "./workspace-status/WorkspaceStatusChip";
+import { WorkspaceTasksLine } from "./workspace-status/WorkspaceTasksLine";
 import WorkspaceStatusPicker from "./workspace-status/WorkspaceStatusPicker";
 import { setWorkspaceStatus, useWorkspaceStatus } from "./workspace-status/workspaceStatusStore";
 import { WorkspaceIconGlyph } from "./workspace-icons";
@@ -2443,6 +2444,7 @@ function WorkspaceRow({
               </span>
             )}
             <WorkspaceStatusLine workspaceId={ws.id} active={active} />
+            <WorkspaceTasksLine workspaceId={ws.id} active={active} />
           </div>
         )}
 
