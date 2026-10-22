@@ -62,6 +62,8 @@ export default function PdfPreview({ path, mtimeMs, toolbarAction, forceLocalToo
     };
   }, [path, mtimeMs]);
 
+  // The scroller mounts with the document (a loading message stands in until
+  // then), so the observer attaches once there is one.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -69,7 +71,7 @@ export default function PdfPreview({ path, mtimeMs, toolbarAction, forceLocalToo
     ro.observe(el);
     setContainerWidth(el.clientWidth);
     return () => ro.disconnect();
-  }, []);
+  }, [doc, baseWidth]);
 
   if (error) {
     return (
