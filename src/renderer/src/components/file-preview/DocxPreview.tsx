@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { renderAsync } from "docx-preview";
 import { DockablePaneBar } from "../../tabs/dockChromeSlot";
+import FindBar from "../find/FindBar";
+import { useDomFind } from "../find/useDomFind";
 
 interface Props {
   path: string;
@@ -27,6 +29,14 @@ export default function DocxPreview({ path, mtimeMs, toolbarAction, forceLocalTo
   const [zoom, setZoom] = useState(1);
   // Natural width of the rendered page, used to center it in the scroller.
   const [pageWidth, setPageWidth] = useState<number | null>(null);
+  const findHostRef = useRef<HTMLDivElement>(null);
+  const find = useDomFind({
+    hostRef: findHostRef,
+    contentRef: hostRef,
+    scrollerRef: scrollRef,
+    enabled: error === null,
+    label: "Find in document",
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -110,25 +120,31 @@ export default function DocxPreview({ path, mtimeMs, toolbarAction, forceLocalTo
         </button>
         {toolbarAction}
       </DockablePaneBar>
-      <div
-        ref={scrollRef}
-        style={{
-          flex: 1,
-          minHeight: 0,
-          overflow: "auto",
-          padding: "16px 24px",
-          background: "var(--bg)",
-        }}
-      >
+      <div ref={findHostRef} className="codara-find-host" onKeyDown={find.onKeyDown}>
         <div
+          ref={scrollRef}
+          className="codara-find-scroller"
+          // Focusable so a click inside makes Ctrl+F find in this document.
+          tabIndex={-1}
           style={{
-            width: pageWidth ?? undefined,
-            margin: "0 auto",
-            zoom,
+            flex: 1,
+            minHeight: 0,
+            overflow: "auto",
+            padding: "16px 24px",
+            background: "var(--bg)",
           }}
         >
-          <div ref={hostRef} />
+          <div
+            style={{
+              width: pageWidth ?? undefined,
+              margin: "0 auto",
+              zoom,
+            }}
+          >
+            <div ref={hostRef} />
+          </div>
         </div>
+        {find.bar && <FindBar {...find.bar} />}
       </div>
     </div>
   );

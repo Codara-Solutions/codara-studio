@@ -2,6 +2,8 @@ import { memo, useMemo, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import MermaidBlock from "./MermaidBlock";
 import MarkdownReviewLayer from "../review/MarkdownReviewLayer";
+import FindBar from "../find/FindBar";
+import { useDomFind } from "../find/useDomFind";
 import { markdownRehypePipeline, markdownRemarkPlugins } from "./pipeline";
 import "./markdown.css";
 
@@ -72,7 +74,14 @@ function resolveResource(href: string, baseDir: string): string {
 
 function MarkdownPreview({ text, basePath }: Props) {
   const baseDir = useMemo(() => dirnameOf(basePath), [basePath]);
+  const hostRef = useRef<HTMLDivElement>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const find = useDomFind({
+    hostRef,
+    contentRef: rootRef,
+    scrollerRef: rootRef,
+    label: "Find in Markdown preview",
+  });
 
   const components = useMemo(
     () => ({
@@ -130,24 +139,29 @@ function MarkdownPreview({ text, basePath }: Props) {
   );
 
   return (
-    <div
-      ref={rootRef}
-      className="spark-markdown"
-      style={{
-        flex: 1,
-        minHeight: 0,
-        overflowY: "auto",
-        background: "var(--bg)",
-      }}
-    >
-      <MarkdownReviewLayer containerRef={rootRef} basePath={basePath} text={text} />
-      <ReactMarkdown
-        remarkPlugins={markdownRemarkPlugins}
-        rehypePlugins={previewRehypePlugins}
-        components={components}
+    <div ref={hostRef} className="codara-find-host" onKeyDown={find.onKeyDown}>
+      <div
+        ref={rootRef}
+        className="spark-markdown codara-find-scroller"
+        // Focusable so a click inside makes Ctrl+F find in this document.
+        tabIndex={-1}
+        style={{
+          flex: 1,
+          minHeight: 0,
+          overflowY: "auto",
+          background: "var(--bg)",
+        }}
       >
-        {text}
-      </ReactMarkdown>
+        <MarkdownReviewLayer containerRef={rootRef} basePath={basePath} text={text} />
+        <ReactMarkdown
+          remarkPlugins={markdownRemarkPlugins}
+          rehypePlugins={previewRehypePlugins}
+          components={components}
+        >
+          {text}
+        </ReactMarkdown>
+      </div>
+      {find.bar && <FindBar {...find.bar} />}
     </div>
   );
 }

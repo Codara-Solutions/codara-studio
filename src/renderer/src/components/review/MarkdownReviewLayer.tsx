@@ -226,7 +226,7 @@ export default function MarkdownReviewLayer({ containerRef, basePath, text }: Pr
   return (
     <>
       {mine.length ? (
-        <div className="rv-md-bar" data-testid="markdown-review-bar">
+        <div className="rv-md-bar" data-testid="markdown-review-bar" data-find-skip="">
           <span>
             {mine.length === 1 ? "1 review note" : `${mine.length} review notes`} on this file
           </span>
