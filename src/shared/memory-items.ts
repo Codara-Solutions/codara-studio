@@ -522,6 +522,40 @@ export function containsSecret(text: string): boolean {
   return false;
 }
 
+export const SECRET_REDACTED = "[redacted]";
+
+// The keyword pattern keeps its keyword ("password is [redacted]") and the
+// URL pattern its scheme, so the scrubbed text still says what was there.
+const KEYWORD_SECRET = SECRET_PATTERNS[SECRET_PATTERNS.length - 2];
+const URL_CREDENTIALS = SECRET_PATTERNS[SECRET_PATTERNS.length - 1];
+
+/**
+ * The text with every credential containsSecret would find replaced by
+ * "[redacted]", for text a person typed that is about to be written to disk
+ * (run files, the task list). Text without one comes back as it was.
+ */
+export function scrubSecrets(text: string): string {
+  if (!containsSecret(text)) return text;
+  let out = text.replace(
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
+    `${SECRET_REDACTED} private key`,
+  );
+  for (const pattern of SECRET_PATTERNS) {
+    const global = new RegExp(pattern.source, `${pattern.flags.replace("g", "")}g`);
+    if (pattern === KEYWORD_SECRET) out = out.replace(global, (match) => match.replace(/\S{6,}$/, SECRET_REDACTED));
+    else if (pattern === URL_CREDENTIALS) out = out.replace(global, (match) => `${match.slice(0, match.indexOf("://") + 3)}${SECRET_REDACTED}@`);
+    else out = out.replace(global, SECRET_REDACTED);
+  }
+  out = out.replace(/\b(?:\d[ -]?){13,19}\b/g, (match) => {
+    const digits = match.replace(/\D/g, "");
+    if (digits.length < 13 || digits.length > 19 || !luhnValid(digits)) return match;
+    return `${SECRET_REDACTED}${match.slice(match.trimEnd().length)}`;
+  });
+  return out.replace(/[A-Za-z0-9+/_=-]{36,}/g, (token) =>
+    /[a-z]/.test(token) && /[A-Z]/.test(token) && /\d/.test(token) && !/^[a-f0-9-]+$/i.test(token) ? SECRET_REDACTED : token,
+  );
+}
+
 // ── ranking ─────────────────────────────────────────────────────────────────
 
 const DAY_MS = 24 * 60 * 60 * 1000;
