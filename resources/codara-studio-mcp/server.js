@@ -145,12 +145,12 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_create",
     description:
-      "Open a new agent-owned terminal tab next to your own pane, or in another workspace of the rail with workspace (a workspace id or an absolute folder path; a worktree folder opens in that worktree's workspace). The first time, Codara asks the user to allow your workspace to open terminals there; only you can then write to or close that terminal. Temporary terminals are closed automatically when their Cora run finishes; use retention='service' only for a dev server or watcher the user explicitly needs afterwards (it is still closed when the run is deleted). Returns { tabId, paneId, cwd }.",
+      "Open a new agent-owned terminal tab next to your own pane, or in workspace (an id or folder; the user approves once). Temporary terminals are closed automatically when their Cora run finishes; use retention='service' only for a dev server or watcher the user needs afterwards. Returns { tabId, paneId, cwd }.",
     inputSchema: {
       type: "object",
       properties: {
         cwd: { type: "string", description: "Absolute; default the workspace root." },
-        workspace: { type: "string", description: "Open in this workspace instead of yours: its id or an absolute folder path." },
+        workspace: { type: "string" },
         command: { type: "string", description: "Run right after it opens." },
         title: { type: "string" },
         group: { type: "string", description: "Tab group, named after your task." },

@@ -207,6 +207,9 @@ interactive Claude Code, Codex, Grok or Pi sessions for you to drive
 `codara_terminal_create` opens a terminal the agent drives itself, for
 example to run a dev server; `agent-terminal-registry.ts` and
 `agent-terminal-lifecycle.ts` track those and close them when the run ends.
+With `workspace` it opens in another workspace after the user's one-time
+approval (`cross-workspace-terminals.ts` resolves and gates the target,
+`cross-workspace-ipc.ts` shows the prompt and keeps the "Always" grants).
 
 **Which Pi runs Cora.** `resolveCodaraPiRuntime` in `pi-runtime-electron.ts`
 picks the user's own Pi install (`npm install -g

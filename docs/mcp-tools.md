@@ -523,13 +523,45 @@ In every set, except `codara_spawn_terminals`, which is only in `execute`.
 
 | Tool | What it does |
 |---|---|
-| `codara_terminal_create` | Opens a new terminal tab owned by the agent, tinted so you can see an agent drives it, in the tab group `group` names. Temporary terminals close when the run finishes; `retention: "service"` keeps one (a dev server, say) until the run is deleted. |
+| `codara_terminal_create` | Opens a new terminal tab owned by the agent, tinted so you can see an agent drives it, in the tab group `group` names. Temporary terminals close when the run finishes; `retention: "service"` keeps one (a dev server, say) until the run is deleted. `workspace` opens it in another workspace instead; see [Terminals in another workspace](#terminals-in-another-workspace). |
 | `codara_terminal_run` | Runs one command in a terminal the agent created, or in a new one, and waits for it: returns the exit code, the output and a `cursor`. With Codara's shell integration the shell reports when the command ended; otherwise the call returns once output has been quiet. A command still running at `timeoutMs` (default 30 seconds, at most 10 minutes) keeps running. Refuses a pane that is busy, including one another `codara_terminal_run` call is still using. `group` puts a new terminal in a tab group, or moves the tab of `paneId` into it. |
-| `codara_terminal_list` | Lists the terminal panes in the agent's workspace: title, tab group, cwd, which agent CLI runs there and its state, whether the shell is running a command, which pane is the caller's and which ones it may write to. |
+| `codara_terminal_list` | Lists the terminal panes in the agent's workspace: title, tab group, cwd, which agent CLI runs there and its state, whether the shell is running a command, which pane is the caller's and which ones it may write to. Terminals the agent opened in other workspaces are listed too, with their `workspaceId`. |
 | `codara_terminal_write` | Types into a terminal the agent created, or into the session of a dev server Codara keeps (to answer its prompts), submitting with Enter by default. |
 | `codara_terminal_read` | Reads a terminal pane without escape codes. Returns a `cursor`; pass it back as `since` to get only output written after it. `mode: "screen"` renders what a full-screen program (an agent CLI, vim, top) shows instead of the raw stream. |
 | `codara_terminal_close` | Closes a terminal the agent created. It cannot close yours or another run's. |
 | `codara_spawn_terminals` | Opens one tab split into Claude Code, Codex, Grok or Pi panes for you to drive, launched the way the **+** menu launches them. An optional model and effort apply to each group; for Pi they become `--model` and `--thinking`. |
+
+### Terminals in another workspace
+
+`codara_terminal_create` takes an optional `workspace`, so a coordinator can
+open a worker's terminal under the workspace it works on, where the user looks
+for it, instead of beside the coordinator. It is a workspace id or an absolute
+local folder. A folder resolves to the workspace whose folder it is or lies in,
+the deepest one when they nest, so a worktree's folder opens in that
+worktree's own workspace; a subfolder also becomes the default `cwd`. A folder
+outside every workspace is refused: Codara never creates a workspace for a
+terminal. Naming the caller's own workspace changes nothing.
+
+Only an agent running with the user's own authority may target another
+workspace: Claude Code, Codex, Grok or Pi in a Codara terminal, or a trusted
+Cora run. A pane's own credential (`codara-pane`), the scoped credential of a
+Cora run on an imported pull request, and SSH workspaces on either side are
+refused. Codara must also know the caller's workspace: its run's, or the one
+its pane sits in.
+
+The first time a workspace targets another, Codara shows "Allow <caller> to
+open terminals in <target>?" with Deny, Allow once and Always. Calls that
+arrive while the card is open wait for the same answer. With no answer within
+40 seconds the call is refused and the agent is told to ask the user. Always is
+kept per caller and target workspace pair in
+`<codara home>/cross-workspace-grants.json`, and Settings, Agents, Terminals
+in other workspaces lists each pair with Revoke.
+
+The new tab carries a small "from <caller>" label. The pane that opened it
+owns it: only that pane may `codara_terminal_write` to it, run in it with
+`codara_terminal_run` or close it, while `codara_terminal_read` works as for
+any pane. A Cora run's terminal stays owned by the run and closes with it. The
+result adds `workspaceId` and the workspace's name.
 
 ### Tab groups
 

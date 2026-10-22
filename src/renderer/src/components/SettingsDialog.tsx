@@ -121,7 +121,7 @@ import KeepAwakeSettings from "./keep-awake/KeepAwakeSettings";
 import QuickCommandsSettings from "../quick-commands/QuickCommandsSettings";
 import { useDiagnostics } from "./settings/DiagnosticsControls";
 import WorktreeSetupSettingsControl from "./worktree-setup/WorktreeSetupSettingsControl";
-import CrossWorkspaceGrantsRow from "./cross-workspace/CrossWorkspaceGrantsRow";
+import CrossWorkspaceGrantsList from "./cross-workspace/CrossWorkspaceGrantsList";
 
 export type { SettingsTab } from "./settings/settings-index";
 
@@ -2843,7 +2843,13 @@ function AgentsSettings({ onClose }: { onClose: () => void }) {
       <LaunchArgsSection />
 
       <SettingsSection title="Workspaces">
-        <CrossWorkspaceGrantsRow />
+        <SettingRow
+          title="Terminals in other workspaces"
+          desc="When an agent opens a terminal in another workspace, Codara asks you first. Pairs you always allow are listed here; revoke one to be asked again."
+          stacked
+        >
+          <CrossWorkspaceGrantsList />
+        </SettingRow>
       </SettingsSection>
 
       <SettingsSection title="Tools">
