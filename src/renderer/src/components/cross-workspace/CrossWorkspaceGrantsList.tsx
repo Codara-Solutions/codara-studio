@@ -12,7 +12,11 @@ export default function CrossWorkspaceGrantsList(): React.ReactElement {
   const load = useCallback(() => {
     void window.spark.crossWorkspace.grants().then(setGrants, () => setGrants([]));
   }, []);
-  useEffect(load, [load]);
+  useEffect(() => {
+    load();
+    // An "Always" answered while Settings is open shows up at once.
+    return window.spark.crossWorkspace.onGrantsChanged(load);
+  }, [load]);
 
   const revoke = async (grant: CrossWorkspaceGrant, key: string) => {
     setBusy(key);

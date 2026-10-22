@@ -13,6 +13,13 @@ export interface CrossWorkspaceApprovalRequest {
   expiresAt: number;
 }
 
+// Main stopped waiting for a card: it timed out ("expired"), or another
+// card's Always answered it ("answered").
+export interface CrossWorkspaceApprovalClosed {
+  id: string;
+  reason: "expired" | "answered";
+}
+
 export interface CrossWorkspaceGrant {
   callerWorkspaceId: string;
   callerName: string;

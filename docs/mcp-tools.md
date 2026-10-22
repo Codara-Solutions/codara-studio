@@ -553,8 +553,11 @@ its pane sits in.
 
 The first time a workspace targets another, Codara shows "Allow <caller> to
 open terminals in <target>?" with Deny, Allow once and Always. Calls the same
-agent makes while its card is open wait for the same answer. With no answer
-within 40 seconds the call is refused and the agent is told to ask the user.
+agent makes while its card is open wait for the same answer. Answering Always
+also answers the cards other agents of the same workspace have open for the
+same target. The card counts down the seconds left; with no answer within 40
+seconds the call is refused, the agent is told to ask the user, and the card
+says "Request expired" for a few seconds instead of vanishing.
 After Deny the pair is refused without a new card for five minutes. A `cwd`
 must be a local folder inside the target workspace. If the agent stopped
 waiting before the user answered, no terminal opens. Allow once covers that
@@ -563,7 +566,7 @@ in it, including Cora runs, later sessions and agents started in the terminals
 it opens, may then open terminals in the target without asking. The card says
 so. Always is kept per caller and target workspace pair in
 `<codara home>/cross-workspace-grants.json`, and Settings, Agents, Terminals
-in other workspaces lists each pair with Revoke.
+in other workspaces lists each pair with Revoke, and updates while open.
 
 The new tab carries a small "from <caller>" label. The pane that opened it
 owns it: only that pane may `codara_terminal_write` to it, run in it with

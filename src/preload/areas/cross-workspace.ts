@@ -6,6 +6,7 @@ import { ipcRenderer } from "electron";
 
 import type {
   CrossWorkspaceAnswer,
+  CrossWorkspaceApprovalClosed,
   CrossWorkspaceApprovalRequest,
   CrossWorkspaceGrant,
 } from "@shared/cross-workspace";
@@ -18,9 +19,9 @@ export const crossWorkspaceApi = {
     ipcRenderer.on("crossWorkspace:approval", wrapped);
     return () => ipcRenderer.removeListener("crossWorkspace:approval", wrapped);
   },
-  /** The request is no longer waited for (it timed out). */
-  onApprovalClosed: (listener: (payload: { id: string }) => void): (() => void) => {
-    const wrapped = (_event: unknown, payload: { id: string }): void => listener(payload);
+  /** The request is no longer waited for (it timed out, or another card's Always answered it). */
+  onApprovalClosed: (listener: (payload: CrossWorkspaceApprovalClosed) => void): (() => void) => {
+    const wrapped = (_event: unknown, payload: CrossWorkspaceApprovalClosed): void => listener(payload);
     ipcRenderer.on("crossWorkspace:approvalClosed", wrapped);
     return () => ipcRenderer.removeListener("crossWorkspace:approvalClosed", wrapped);
   },
@@ -28,6 +29,12 @@ export const crossWorkspaceApi = {
   answer: (id: string, answer: CrossWorkspaceAnswer): Promise<boolean> =>
     ipcRenderer.invoke("crossWorkspace:answer", { id, answer }),
   grants: (): Promise<CrossWorkspaceGrant[]> => ipcRenderer.invoke("crossWorkspace:grants"),
+  /** A grant was added or revoked. */
+  onGrantsChanged: (listener: () => void): (() => void) => {
+    const wrapped = (): void => listener();
+    ipcRenderer.on("crossWorkspace:grantsChanged", wrapped);
+    return () => ipcRenderer.removeListener("crossWorkspace:grantsChanged", wrapped);
+  },
   revoke: (callerWorkspaceId: string, targetWorkspaceId: string): Promise<boolean> =>
     ipcRenderer.invoke("crossWorkspace:revoke", { callerWorkspaceId, targetWorkspaceId }),
 };

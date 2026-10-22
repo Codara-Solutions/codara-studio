@@ -6,6 +6,7 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import type {
   CrossWorkspaceAnswer,
+  CrossWorkspaceApprovalClosed,
   CrossWorkspaceApprovalRequest,
   CrossWorkspaceGrant,
 } from "@shared/cross-workspace";
@@ -28,13 +29,39 @@ let approver: CrossWorkspaceApprover | null = null;
 
 interface PendingAsk {
   request: CrossWorkspaceApprovalRequest;
+  pair: string;
   answer(value: CrossWorkspaceAnswer | null): void;
 }
 
 const pending = new Map<string, PendingAsk>();
 
+function sendToWindow(channel: string, payload: unknown): void {
+  const win = getTrustedMainWindow();
+  if (win && !win.isDestroyed() && !win.webContents.isDestroyed()) win.webContents.send(channel, payload);
+}
+
+function closeCard(payload: CrossWorkspaceApprovalClosed): void {
+  sendToWindow("crossWorkspace:approvalClosed", payload);
+}
+
+// Settings lists the grants while it is open; tell it when they change.
 function grantStore(): CrossWorkspaceGrantStore {
-  store ??= fileGrantStore(join(codaraHome(), CROSS_WORKSPACE_GRANTS_FILE));
+  if (!store) {
+    const file = fileGrantStore(join(codaraHome(), CROSS_WORKSPACE_GRANTS_FILE));
+    store = {
+      list: () => file.list(),
+      has: (caller, target) => file.has(caller, target),
+      async grant(entry) {
+        await file.grant(entry);
+        sendToWindow("crossWorkspace:grantsChanged", null);
+      },
+      async revoke(caller, target) {
+        const removed = await file.revoke(caller, target);
+        if (removed) sendToWindow("crossWorkspace:grantsChanged", null);
+        return removed;
+      },
+    };
+  }
   return store;
 }
 
@@ -52,13 +79,12 @@ const askInWindow: CrossWorkspaceAsk = async ({ caller, target, agent }) => {
   return new Promise<CrossWorkspaceAnswer | null>((resolve) => {
     const timer = setTimeout(() => {
       pending.delete(id);
-      if (!win.isDestroyed() && !win.webContents.isDestroyed()) {
-        win.webContents.send("crossWorkspace:approvalClosed", { id });
-      }
+      closeCard({ id, reason: "expired" });
       resolve(null);
     }, CROSS_WORKSPACE_APPROVAL_TIMEOUT_MS);
     pending.set(id, {
       request,
+      pair: JSON.stringify([caller.id, target.id]),
       answer: (value) => {
         clearTimeout(timer);
         pending.delete(id);
@@ -88,6 +114,15 @@ export function registerCrossWorkspaceIpc(handle: IpcHandle): void {
     const entry = value && typeof value.id === "string" ? pending.get(value.id) : undefined;
     if (!entry || !isAnswer(value!.answer)) return false;
     entry.answer(value!.answer);
+    // Always covers the whole caller workspace, so the cards other agents of
+    // that workspace queued for the same target are answered with it.
+    if (value!.answer === "always") {
+      for (const [otherId, other] of [...pending]) {
+        if (other.pair !== entry.pair) continue;
+        other.answer("always");
+        closeCard({ id: otherId, reason: "answered" });
+      }
+    }
     return true;
   });
   handle("crossWorkspace:grants", async (): Promise<CrossWorkspaceGrant[]> => {
