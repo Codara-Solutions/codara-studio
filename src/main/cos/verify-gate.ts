@@ -151,12 +151,16 @@ export function stopRunningChecks(): void {
  * exits, times out or is cancelled; its whole process group is killed then,
  * so a background process it left cannot hold the gate open. With `heavy` it
  * runs inside codara-heavy: one machine-wide slot and a memory cap, the same
- * wrapper workflow agents use.
+ * wrapper workflow agents use. The timeout then counts from when the command
+ * starts, not while the wrapper waits for the slot: the command writes one
+ * byte to fd 3 first.
  */
 export function createCommandRunner(heavy?: { bin: string; env: Record<string, string> } | null): CommandRunner {
   return (command, options) =>
     new Promise((resolve) => {
-      const line = heavy ? `${quoteForShell(heavy.bin)} /bin/sh -c ${quoteForShell(command)}` : command;
+      const signalsStart = Boolean(heavy) && process.platform !== "win32";
+      const inner = signalsStart ? `printf . >&3 2>/dev/null; exec 3>&-; ${command}` : command;
+      const line = heavy ? `${quoteForShell(heavy.bin)} /bin/sh -c ${quoteForShell(inner)}` : command;
       const shell = loginShell();
       const args = process.platform === "win32" ? ["/d", "/s", "/c", line] : ["-lc", line];
       const log = createWriteStream(options.logFile, { flags: "w", mode: 0o600 });
@@ -191,6 +195,7 @@ export function createCommandRunner(heavy?: { bin: string; env: Record<string, s
           stream?.unpipe(log);
           stream?.destroy();
         }
+        child?.stdio[3]?.destroy();
         const tail = result.spawnError
           ? `\n[could not start: ${result.spawnError}]\n`
           : `\n[exit ${result.exitCode ?? "none"}${timedOut ? ", timed out" : ""}${cancelled ? ", cancelled" : ""}]\n`;
@@ -205,7 +210,7 @@ export function createCommandRunner(heavy?: { bin: string; env: Record<string, s
         child = spawn(shell, args, {
           cwd: options.cwd,
           env: { ...processEnvWithoutElectronViteDev(), ...(heavy?.env ?? {}), ...options.env },
-          stdio: ["ignore", "pipe", "pipe"],
+          stdio: signalsStart ? ["ignore", "pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"],
           windowsHide: true,
           detached: process.platform !== "win32",
         });
@@ -221,10 +226,21 @@ export function createCommandRunner(heavy?: { bin: string; env: Record<string, s
       // "exit", not "close": a background process the check started can keep
       // the pipes open long after the shell is gone.
       child.on("exit", (code) => finish({ exitCode: code }));
-      timer = setTimeout(() => {
-        timedOut = true;
-        finish({ exitCode: null });
-      }, options.timeoutMs);
+      const startClock = () => {
+        if (timer || settled) return;
+        timer = setTimeout(() => {
+          timedOut = true;
+          finish({ exitCode: null });
+        }, options.timeoutMs);
+      };
+      const started = signalsStart ? child.stdio[3] : null;
+      if (started) {
+        started.on("error", () => undefined);
+        started.once("data", () => {
+          startClock();
+          started.destroy();
+        });
+      } else startClock();
     });
 }
 
@@ -497,4 +513,72 @@ export async function runVerifyGate(options: VerifyGateOptions): Promise<Task | 
     evidence,
     ...(ok ? {} : { reason: failureSentence(evidence, timedOut, timeouts) }),
   });
+}
+
+export interface GateJob {
+  workspaceId: string;
+  taskId: string;
+  runId: string;
+  /** Aborted when the task leaves this verify run: moved out of verifying, dropped, or a newer run started. */
+  signal: AbortSignal;
+}
+
+export interface GateScheduler {
+  /** Starts the gate for a verify run; a second start of the same run does nothing. */
+  start(workspaceId: string, taskId: string, runId: string): void;
+  /** The run whose gate is going for the task, or null. */
+  running(workspaceId: string, taskId: string): string | null;
+}
+
+/**
+ * One gate per task. A newer verify run cancels the older one, and so does
+ * the task leaving verifying: either way the old result would be stale and
+ * its checks would only hold the heavy slot. A gate that throws sends the
+ * task to the user instead of leaving it in verifying.
+ */
+export function createGateScheduler(options: {
+  store: TaskStore;
+  run: (job: GateJob) => Promise<void>;
+  log?: (line: string) => void;
+}): GateScheduler {
+  const gates = new Map<string, { workspaceId: string; taskId: string; runId: string; abort: AbortController }>();
+  const keyOf = (workspaceId: string, taskId: string) => `${workspaceId}/${taskId}`;
+
+  options.store.onChange((workspaceId, state) => {
+    for (const gate of gates.values()) {
+      if (gate.workspaceId !== workspaceId) continue;
+      const task = state.tasks.find((candidate) => candidate.id === gate.taskId);
+      if (task?.state !== "verifying" || task.verify?.runId !== gate.runId) gate.abort.abort();
+    }
+  });
+
+  return {
+    start(workspaceId, taskId, runId) {
+      const key = keyOf(workspaceId, taskId);
+      const current = gates.get(key);
+      if (current?.runId === runId) return;
+      current?.abort.abort();
+      const abort = new AbortController();
+      gates.set(key, { workspaceId, taskId, runId, abort });
+      void options
+        .run({ workspaceId, taskId, runId, signal: abort.signal })
+        .catch(async (error) => {
+          options.log?.(`verify ${workspaceId} ${taskId} ${runId} failed: ${String(error)}`);
+          await options.store
+            .finishVerify(workspaceId, taskId, {
+              runId,
+              evidence: [],
+              blocked: "The verify gate itself failed before it could check anything; Codara's log has the error.",
+            })
+            .catch(() => undefined);
+        })
+        .finally(() => {
+          if (gates.get(key)?.runId === runId) gates.delete(key);
+        });
+    },
+    running(workspaceId, taskId) {
+      const gate = gates.get(keyOf(workspaceId, taskId));
+      return gate && !gate.abort.signal.aborted ? gate.runId : null;
+    },
+  };
 }

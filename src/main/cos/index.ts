@@ -19,7 +19,15 @@ import type { IpcHandle } from "../ipc";
 import { loadState } from "../storage";
 import { provideCosService } from "./service";
 import { createTaskStore, isTaskWorkspaceId, type TaskStore } from "./task-store";
-import { createCommandRunner, resolveGateTarget, runVerifyGate, stopRunningChecks, type CommandRunner } from "./verify-gate";
+import {
+  createCommandRunner,
+  createGateScheduler,
+  resolveGateTarget,
+  runVerifyGate,
+  stopRunningChecks,
+  type CommandRunner,
+  type GateScheduler,
+} from "./verify-gate";
 
 export const COS_TASKS_CHANGED_CHANNEL = "cosTasks:changed";
 
@@ -81,50 +89,40 @@ function gateCommandRunner(): CommandRunner {
   return commandRunner;
 }
 
-// One gate per task: a newer verify run cancels the older one, whose result
-// would be stale anyway and whose checks would only hold the heavy slot.
-const runningGates = new Map<string, { runId: string; abort: AbortController }>();
+// One gate per task; leaving verifying or a newer run cancels it (see
+// createGateScheduler).
+let scheduler: GateScheduler | null = null;
+
+function gateScheduler(): GateScheduler {
+  if (scheduler) return scheduler;
+  scheduler = createGateScheduler({
+    store: taskStore(),
+    log: (line) => logMain("cos", line),
+    run: async ({ workspaceId, taskId, runId, signal }) => {
+      const list = await taskStore().read(workspaceId);
+      const task = list.tasks.find((candidate) => candidate.id === taskId);
+      const state = await loadState().catch(() => null);
+      const target = await resolveGateTarget(state?.workspaces ?? [], workspaceId, task?.assignee?.worktree);
+      const result =
+        "blocked" in target
+          ? await taskStore().finishVerify(workspaceId, taskId, { runId, evidence: [], blocked: target.blocked })
+          : await runVerifyGate({
+              store: taskStore(),
+              workspaceId,
+              taskId,
+              runId,
+              ...target,
+              runCommand: gateCommandRunner(),
+              signal,
+            });
+      logMain("cos", `verify ${workspaceId} ${taskId} ${runId}: ${result?.state ?? "cancelled"}`);
+    },
+  });
+  return scheduler;
+}
 
 function startVerify(workspaceId: string, taskId: string, runId: string): void {
-  const key = `${workspaceId}/${taskId}`;
-  const current = runningGates.get(key);
-  if (current?.runId === runId) return;
-  current?.abort.abort();
-  const abort = new AbortController();
-  runningGates.set(key, { runId, abort });
-  void (async () => {
-    const list = await taskStore().read(workspaceId);
-    const task = list.tasks.find((candidate) => candidate.id === taskId);
-    const state = await loadState().catch(() => null);
-    const target = await resolveGateTarget(state?.workspaces ?? [], workspaceId, task?.assignee?.worktree);
-    const result =
-      "blocked" in target
-        ? await taskStore().finishVerify(workspaceId, taskId, { runId, evidence: [], blocked: target.blocked })
-        : await runVerifyGate({
-            store: taskStore(),
-            workspaceId,
-            taskId,
-            runId,
-            ...target,
-            runCommand: gateCommandRunner(),
-            signal: abort.signal,
-          });
-    logMain("cos", `verify ${workspaceId} ${taskId} ${runId}: ${result?.state ?? "cancelled"}`);
-  })()
-    .catch(async (error) => {
-      logMain("cos", `verify ${workspaceId} ${taskId} ${runId} failed: ${String(error)}`);
-      // Left alone, the task would sit in verifying until the next restart.
-      await taskStore()
-        .finishVerify(workspaceId, taskId, {
-          runId,
-          evidence: [],
-          blocked: "The verify gate itself failed before it could check anything; Codara's log has the error.",
-        })
-        .catch(() => undefined);
-    })
-    .finally(() => {
-      if (runningGates.get(key)?.runId === runId) runningGates.delete(key);
-    });
+  gateScheduler().start(workspaceId, taskId, runId);
 }
 
 provideCosService({

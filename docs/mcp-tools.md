@@ -677,13 +677,16 @@ has it, fetched at that moment into Codara's own ref
 the branch the user forked the workspace from, else the branch `origin`'s
 HEAD names. Nothing in the task's folder (its working tree, its commits, a
 `base` key in its `verify.json`, its local or remote-tracking refs) can
-choose the base or loosen the checks. A newer verify run of the task cancels
-the older one. Each check is a shell command with optional `when` globs (it
+choose the base or loosen the checks. A newer verify run of the task, or
+the task leaving `verifying` (moved or dropped), cancels the checks still
+running. Each check is a shell command with optional `when` globs (it
 runs when the change touches a matching file) and `timeoutSec`; the change
 is measured from the merge base with the fetched branch, which the commands
 see as `CODARA_VERIFY_BASE`.
 They run through `codara-heavy`, one at a time machine-wide and
-memory-capped, with each check's full output kept as a log. Every check
+memory-capped, with each check's full output kept as a log; a check's
+timeout (20 minutes unless `timeoutSec` says otherwise) counts from when it
+starts, not while it waits for the slot. Every check
 green closes the task with the exit codes and log paths as evidence. A red
 run sends it back to `dispatched`; the third red run in a row, a missing or
 broken `verify.json`, a base branch it cannot fetch, or an unknown folder

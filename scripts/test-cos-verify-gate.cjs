@@ -50,6 +50,7 @@ async function load() {
 let gate;
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "codara-cos-gate-"));
 const AGENT = { kind: "agent", label: "Claude Code" };
+const USER_AUTHOR = { kind: "user", label: "You" };
 const WS = "ws-gate";
 
 function config() {
@@ -330,6 +331,88 @@ async function runnerEnds() {
   assert.equal(task.evidence.length, 0);
 }
 
+// The timeout counts from when the check starts, not while codara-heavy
+// waits for the machine-wide slot another build holds.
+async function slotWait() {
+  const lockDir = path.join(TMP, "heavy-locks");
+  const slot = path.join(lockDir, "heavy-0");
+  const heavy = { bin: path.join(ROOT, "resources", "orchestration", "bin", "codara-heavy"), env: { CODARA_HEAVY_LOCK_DIR: lockDir, CODARA_HEAVY_SLOTS: "1", CODARA_HEAVY_MEMORY_MAX: "512M" } };
+  const runCommand = gate.createCommandRunner(heavy);
+  const log = path.join(TMP, "slot.log");
+  const hold = (ms) => {
+    fs.mkdirSync(slot, { recursive: true });
+    fs.writeFileSync(path.join(slot, "pid"), String(process.pid));
+    setTimeout(() => fs.rmSync(slot, { recursive: true, force: true }), ms);
+  };
+
+  hold(1500);
+  let started = Date.now();
+  const waited = await runCommand("echo ran", { cwd: TMP, env: {}, logFile: log, timeoutMs: 1000 });
+  assert.equal(waited.timedOut, false, "two seconds waiting for the slot is not the check's time");
+  assert.equal(waited.exitCode, 0);
+  assert.ok(Date.now() - started >= 1500, "it did wait for the slot");
+  assert.match(fs.readFileSync(log, "utf8"), /waiting for a heavy-work slot[\s\S]*ran\n/);
+
+  hold(1500);
+  started = Date.now();
+  const slow = await runCommand("sleep 5", { cwd: TMP, env: {}, logFile: log, timeoutMs: 1000 });
+  assert.equal(slow.timedOut, true, "the check's own time still runs out");
+  assert.ok(Date.now() - started < 4500);
+
+  const free = await runCommand("echo free", { cwd: TMP, env: {}, logFile: log, timeoutMs: 5000 });
+  assert.equal(free.exitCode, 0, "with the slot free the check runs at once");
+}
+
+// Leaving verifying (a move by the agent or the user, or a newer run)
+// cancels the checks still running for the old run.
+async function leavingCancels() {
+  const store = gate.createTaskStore({ root: path.join(TMP, "cos-leave") });
+  const seen = [];
+  const scheduler = gate.createGateScheduler({
+    store,
+    run: ({ runId, signal }) =>
+      new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(seen.push(`${runId} finished`)), 3000);
+        signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          seen.push(`${runId} cancelled`);
+          resolve();
+        });
+      }),
+  });
+  const { id, runId } = await verifyingTask(store);
+  scheduler.start(WS, id, runId);
+  scheduler.start(WS, id, runId);
+  assert.equal(scheduler.running(WS, id), runId, "one gate per run");
+  await store.updateTask(WS, id, { state: "dispatched" }, AGENT);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual(seen, [`${runId} cancelled`], "moving the task out of verifying stops its checks");
+  assert.equal(scheduler.running(WS, id), null);
+
+  const { verifyRunId: second } = await store.updateTask(WS, id, { state: "verifying" }, AGENT);
+  scheduler.start(WS, id, second);
+  const { verifyRunId: third } = await (async () => {
+    await store.updateTask(WS, id, { state: "dispatched" }, AGENT);
+    return store.updateTask(WS, id, { state: "verifying" }, AGENT);
+  })();
+  scheduler.start(WS, id, third);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.ok(seen.includes(`${second} cancelled`), "a newer run cancels the older one");
+  assert.equal(scheduler.running(WS, id), third);
+  await store.updateTask(WS, id, { state: "dropped" }, USER_AUTHOR);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.ok(seen.includes(`${third} cancelled`), "dropping the task stops its checks");
+
+  // A crash in the gate sends the task to the user instead of leaving it in verifying.
+  const crash = gate.createGateScheduler({ store, run: async () => { throw new Error("boom"); } });
+  const other = await verifyingTask(store);
+  crash.start(WS, other.id, other.runId);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const task = (await store.read(WS)).tasks.find((candidate) => candidate.id === other.id);
+  assert.equal(task.state, "needs_you");
+  assert.match(task.needsYouReason, /verify gate itself failed/);
+}
+
 async function blocked() {
   const store = gate.createTaskStore({ root: path.join(TMP, "cos-blocked") });
   const runCommand = async () => assert.fail("no command runs when the gate is blocked");
@@ -366,7 +449,7 @@ function sentences() {
 
 (async () => {
   gate = await load();
-  const suites = { config, selection, endToEnd, baseOwnsTheChecks, taskFolder, runnerEnds, blocked, sentences };
+  const suites = { config, selection, endToEnd, baseOwnsTheChecks, taskFolder, runnerEnds, slotWait, leavingCancels, blocked, sentences };
   let failed = 0;
   for (const [name, run] of Object.entries(suites)) {
     try {
