@@ -104,6 +104,10 @@ function fewerFalsePositives() {
   assert.equal(scrub("mc 5555-5555-5555-4444 ok"), "mc [redacted] ok");
   assert.ok(!memory.containsSecret("Discord channel 1296016829456515086"), "a Discord id is not a card");
   assert.ok(memory.containsSecret("card 4012888888881881"));
+  assert.equal(scrub("a short icon data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk ok"), "a short icon data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk ok");
+  // Quotes around a value stay, so a pasted config line still reads as one.
+  assert.equal(scrub("SECRET_TOKEN: 'aB3dEf9hIjK2'"), "SECRET_TOKEN: '[redacted]'");
+  assert.equal(scrub('password="Tr0ub4dor&3",'), 'password="[redacted]",');
   const random = "aDCMbRgNdSV2WpcxjCoE5845BJMJ4dHtzLAFekOl";
   assert.equal(scrub(`STRIPE_SECRET_KEY=${"sk_" + "live"}_51HqLyjWDarjtT1zdp7dcXaBcDeFgHiJkLmNoPq`), "STRIPE_SECRET_KEY=[redacted]");
   assert.equal(scrub(`SENDGRID_KEY=${random}`), "SENDGRID_KEY=[redacted]");
@@ -143,6 +147,8 @@ const SAMPLES = [
   "SENDGRID_KEY=aDCMbRgNdSV2WpcxjCoE5845BJMJ4dHtzLAFekOl",
   "Authorization: Bearer 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b",
   "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+  "SECRET_TOKEN: 'aB3dEf9hIjK2'",
+  'password="Tr0ub4dor&3",',
 ];
 
 function idempotent() {
@@ -171,35 +177,54 @@ function listsWhatItReplaced() {
 async function pastedSecrets() {
   const pasted = await loadPasted();
   const key = "sk-proj-Zq8Xw2Lp9Rt4Vb7Nm3Kd6Hf1Gj5Sc0Ya";
+  const other = "sk-proj-Ab1Xw2Lp9Rt4Vb7Nm3Kd6Hf1Gj5Sc0Yb";
   const raw = `  deploy with ${key} please `;
-  const stored = pasted.scrubPastedText(raw);
+  const stored = pasted.scrubPastedText(raw, "run-a");
   assert.equal(stored, "  deploy with [redacted] please ");
-  assert.equal(pasted.scrubPastedText("no key here"), "no key here");
-  assert.equal(pasted.livePastedText("deploy with [redacted] please"), raw.trim(), "the live prompt gets the raw text");
+  assert.equal(pasted.scrubPastedText("no key here", "run-a"), "no key here");
+  assert.equal(pasted.livePastedText("run-a", "deploy with [redacted] please"), raw.trim(), "the live prompt gets the raw text");
+
+  // Another chat's identical-looking message never gets this chat's key.
+  pasted.scrubPastedText(`deploy with ${other} please`, "run-b");
+  assert.equal(pasted.livePastedText("run-a", "deploy with [redacted] please"), raw.trim());
+  assert.equal(pasted.livePastedText("run-b", "deploy with [redacted] please"), `deploy with ${other} please`);
+  assert.equal(pasted.withPastedText("run-c", "Task:\ndeploy with [redacted] please\n").used.length, 0, "a third chat gets nothing");
+
+  // A new chat's first message is scrubbed before its run exists; the run
+  // claims it when the message is stored (already scrubbed).
+  const first = pasted.scrubPastedText(`rotate ${key} now`);
+  assert.equal(pasted.scrubPastedText(first, "run-new"), first);
+  assert.equal(pasted.livePastedText("run-new", first), `rotate ${key} now`);
+  assert.equal(pasted.livePastedText("", first), undefined, "claimed once");
 
   // A direct-lane worker prompt read back from disk: the newest copy is
   // this turn's message, an older copy is history and stays scrubbed.
   const prompt = `History:\nuser: deploy with [redacted] please\n\nTask:\ndeploy with [redacted] please\n`;
-  const live = pasted.withPastedText(prompt);
+  const live = pasted.withPastedText("run-a", prompt);
   assert.equal(live.prompt, `History:\nuser: deploy with [redacted] please\n\nTask:\n${raw.trim()}\n`);
   assert.deepEqual(live.used, ["deploy with [redacted] please"]);
-  pasted.forgetPastedText(live.used);
-  assert.equal(pasted.livePastedText("deploy with [redacted] please"), undefined, "once delivered, gone");
-  assert.equal(pasted.withPastedText(prompt).prompt, prompt, "a relaunch reads the scrubbed text");
+  pasted.forgetPastedText("run-a", live.used);
+  assert.equal(pasted.livePastedText("run-a", "deploy with [redacted] please"), undefined, "once delivered, gone");
+  assert.equal(pasted.withPastedText("run-a", prompt).prompt, prompt, "a relaunch reads the scrubbed text");
 
-  const later = time => pasted.livePastedText("x [redacted]", time);
-  pasted.scrubPastedText(`x ${key.replace("Zq8", "Ab1")}`, 1_000);
-  assert.ok(later(1_000 + 60_000), "kept for the turn");
-  assert.equal(later(1_000 + 2 * 60 * 60 * 1000), undefined, "dropped after an hour");
+  pasted.scrubPastedText(`x ${key.replace("Zq8", "Cd3")}`, "run-t", 1_000);
+  assert.ok(pasted.livePastedText("run-t", "x [redacted]", 1_000 + 60_000), "kept for the turn");
+  assert.equal(pasted.livePastedText("run-t", "x [redacted]", 1_000 + 2 * 60 * 60 * 1000), undefined, "dropped after an hour");
 
   // The model repeating the key, in text and in serialized JSON.
   assert.equal(pasted.redactPastedSecrets(`stored ${key} as OPENAI_KEY`), "stored [redacted] as OPENAI_KEY");
   const tricky = 'password: Tr0ub"4dor\\3x';
-  pasted.scrubPastedText(tricky);
+  pasted.scrubPastedText(tricky, "run-a");
   const json = JSON.stringify({ text: `echo ${key} and Tr0ub"4dor\\3x` });
-  const redacted = pasted.redactPastedSecrets(json, { json: true });
-  assert.deepEqual(JSON.parse(redacted), { text: "echo [redacted] and [redacted]" }, "still valid JSON");
+  assert.deepEqual(JSON.parse(pasted.redactPastedSecrets(json, { json: true })), { text: "echo [redacted] and [redacted]" }, "still valid JSON");
   assert.deepEqual(pasted.redactPastedSecretsIn({ a: [key] }), { a: ["[redacted]"] });
+
+  // Numbers and short values are not remembered as keys, and nothing outside
+  // a JSON string is ever touched.
+  assert.equal(pasted.scrubPastedText("set max token: 128000 and date: 2026-10-23", "run-a"), "set max token: 128000 and date: 2026-10-23");
+  pasted.scrubPastedText("pwd: ab12cd", "run-a");
+  const settings = JSON.stringify({ contextWindow: 128000, at: "2026-10-23", note: "ab12cd stays" });
+  assert.equal(pasted.redactPastedSecrets(settings, { json: true }), settings);
 }
 
 (async () => {

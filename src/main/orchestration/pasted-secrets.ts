@@ -5,8 +5,10 @@
 // of the turn that delivers the message, so it can store it with secret-put
 // when asked to.
 //
-// The raw text is held in memory, never written, keyed by the scrubbed text
-// that was stored, and goes once that prompt is accepted (or after an hour).
+// The raw text is held in memory, never written, keyed by its run and the
+// scrubbed text that was stored, and goes once that prompt is accepted (or
+// after an hour). A new chat's first message is scrubbed before its run
+// exists; the run claims it when the message is stored.
 // The keys themselves stay known for the life of the process, so whatever a
 // run writes later has them replaced as well: the model repeating a key, or
 // a worker task it wrote with one.
@@ -19,46 +21,70 @@ const LIVE_TTL_MS = 60 * 60 * 1000;
 const LIVE_MAX = 200;
 const KNOWN_MAX = 500;
 
-const live = new Map<string, { raw: string; at: number }>();
+// Shorter pieces, or ones without a letter ("128000" after "max token:",
+// a date), are left to the scrubber alone: replacing them everywhere a run
+// writes would rewrite ordinary numbers.
+const KNOWN_MIN = 8;
+
+interface LiveText {
+  runId: string;
+  scrubbed: string;
+  raw: string;
+  at: number;
+}
+
+// `${runId}\n${scrubbed}`; an empty run id is a first message not yet claimed.
+const live = new Map<string, LiveText>();
 const known = new Set<string>();
 
+const keyOf = (runId: string, scrubbed: string) => `${runId}\n${scrubbed.trim()}`;
+
 function prune(now: number): void {
-  for (const [scrubbed, entry] of live) {
-    if (now - entry.at > LIVE_TTL_MS || live.size > LIVE_MAX) live.delete(scrubbed);
+  for (const [key, entry] of live) {
+    if (now - entry.at > LIVE_TTL_MS || live.size > LIVE_MAX) live.delete(key);
   }
 }
 
 /**
  * What a person typed, scrubbed for storage. When a credential was replaced,
- * the raw text is kept for the live prompt (livePastedText) and its keys for
- * redaction (redactPastedSecrets).
+ * the raw text is kept for the live prompt of `runId` (livePastedText) and
+ * its keys for redaction (redactPastedSecrets). Text that comes in already
+ * scrubbed claims a first message no run had yet.
  */
-export function scrubPastedText(raw: string, now = Date.now()): string {
+export function scrubPastedText(raw: string, runId = "", now = Date.now()): string {
   const scrubbed = scrubSecrets(raw);
-  if (scrubbed === raw) return raw;
   prune(now);
-  live.set(scrubbed.trim(), { raw: raw.trim(), at: now });
+  if (scrubbed === raw) {
+    const unclaimed = runId ? live.get(keyOf("", raw)) : undefined;
+    if (unclaimed) {
+      live.delete(keyOf("", raw));
+      live.set(keyOf(runId, raw), { ...unclaimed, runId });
+    }
+    return raw;
+  }
+  live.set(keyOf(runId, scrubbed), { runId, scrubbed: scrubbed.trim(), raw: raw.trim(), at: now });
   for (const secret of secretsIn(raw)) {
+    if (secret.length < KNOWN_MIN || !/[A-Za-z]/.test(secret)) continue;
     if (known.size >= KNOWN_MAX) known.delete(known.values().next().value!);
     known.add(secret);
   }
   return scrubbed;
 }
 
-/** The raw text behind a stored message, for the live prompt only; undefined when there is none. */
-export function livePastedText(stored: string, now = Date.now()): string | undefined {
-  const entry = live.get(stored.trim());
+/** The raw text behind a message stored in `runId`, for the live prompt only; undefined when there is none. */
+export function livePastedText(runId: string, stored: string, now = Date.now()): string | undefined {
+  const entry = live.get(keyOf(runId, stored));
   if (!entry) return undefined;
   if (now - entry.at > LIVE_TTL_MS) {
-    live.delete(stored.trim());
+    live.delete(keyOf(runId, stored));
     return undefined;
   }
   return entry.raw;
 }
 
-/** Forgets the raw text behind these stored messages: their prompt was delivered. */
-export function forgetPastedText(stored: readonly string[]): void {
-  for (const text of stored) live.delete(text.trim());
+/** Forgets the raw text behind these messages of `runId`: their prompt was delivered. */
+export function forgetPastedText(runId: string, stored: readonly string[]): void {
+  for (const text of stored) live.delete(keyOf(runId, text));
 }
 
 /**
@@ -66,11 +92,12 @@ export function forgetPastedText(stored: readonly string[]): void {
  * stored message it holds, for handing to the worker in memory; `used` lists
  * the stored texts it replaced, to forget once the worker has it.
  */
-export function withPastedText(prompt: string, now = Date.now()): { prompt: string; used: string[] } {
+export function withPastedText(runId: string, prompt: string, now = Date.now()): { prompt: string; used: string[] } {
   let out = prompt;
   const used: string[] = [];
-  for (const scrubbed of live.keys()) {
-    const raw = livePastedText(scrubbed, now);
+  for (const { runId: owner, scrubbed } of [...live.values()]) {
+    if (owner !== runId) continue;
+    const raw = livePastedText(runId, scrubbed, now);
     if (!raw || !out.includes(scrubbed)) continue;
     // The newest copy is this turn's message; earlier ones are history.
     const at = out.lastIndexOf(scrubbed);
@@ -80,20 +107,25 @@ export function withPastedText(prompt: string, now = Date.now()): { prompt: stri
   return { prompt: out, used };
 }
 
+function replaceKnown(text: string, form: (secret: string) => string): string {
+  let out = text;
+  for (const secret of known) {
+    const needle = form(secret);
+    if (out.includes(needle)) out = out.split(needle).join(SECRET_REDACTED);
+  }
+  return out;
+}
+
 /**
  * `text` with every key a person pasted in this process replaced, for
  * anything about to be written to disk. With `json`, the text is serialized
- * JSON and the keys are matched as JSON escapes them, so the result stays
- * valid JSON.
+ * JSON: keys are matched as JSON escapes them and only inside string values,
+ * so the result is always valid JSON.
  */
 export function redactPastedSecrets(text: string, options: { json?: boolean } = {}): string {
   if (!known.size) return text;
-  let out = text;
-  for (const secret of known) {
-    const form = options.json ? JSON.stringify(secret).slice(1, -1) : secret;
-    if (out.includes(form)) out = out.split(form).join(SECRET_REDACTED);
-  }
-  return out;
+  if (!options.json) return replaceKnown(text, (secret) => secret);
+  return text.replace(/"(?:[^"\\]|\\.)*"/g, (literal) => replaceKnown(literal, (secret) => JSON.stringify(secret).slice(1, -1)));
 }
 
 /** A JSON-shaped value with the pasted keys replaced; the same value when there are none. */

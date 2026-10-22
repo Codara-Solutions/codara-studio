@@ -540,16 +540,19 @@ export const SECRET_REDACTED = "[redacted]";
 
 // containsSecret refuses a whole memory on a hint; scrubbing rewrites what
 // the user said, so it replaces only what reads like a credential. A value
-// after "password is" must hold a digit or a symbol ("the token is expired"
-// stays), a provider-looking token must hold a digit ("sk-learn-models"
-// stays), and a long opaque token must stand alone, not be a piece of a link
-// or a path.
+// after "password is" must mix letters with a digit or a symbol ("the token
+// is expired" and "max token: 128000" stay), a provider-looking token must
+// hold a digit ("sk-learn-models" stays), and a long opaque token must stand
+// alone, not be a piece of a link or a path.
+// A bare number ("max token: 128000") is a setting, not a credential, unless
+// it is long enough to be a PIN-free account key.
 function credentialLike(value: string): boolean {
-  return /\d/.test(value) || /[^A-Za-z]/.test(value);
+  if (/^\d+$/.test(value)) return value.length >= 10;
+  return /[A-Za-z]/.test(value) && (/\d/.test(value) || /[^A-Za-z]/.test(value));
 }
 
-// Longer than this, an opaque run of characters is data (an inline image, a
-// pasted blob), not a key someone typed.
+// Longer than this, an opaque run of characters is data (a pasted blob), not
+// a key someone typed; inline "base64," data of any length is skipped too.
 const OPAQUE_TOKEN_MAX = 120;
 
 // Identifiers are made of words: "useTaskSummary2Helper" splits into use,
@@ -585,12 +588,15 @@ function scrub(text: string, found?: string[]): string {
     const global = new RegExp(pattern.source, `${pattern.flags.replace("g", "")}g`);
     if (pattern === KEYWORD_SECRET) {
       out = out.replace(global, (match) =>
-        match.replace(/^(.*?(?:\bis|\bes|=|:)\s*)(\S+?)([.,;:!?)\]]*)$/i, (whole, head: string, value: string, tail: string) =>
-          // Already scrubbed: "[redacted]" would otherwise lose its "]" to
-          // the tail and gain another on every pass.
-          credentialLike(value) && !`${value}${tail}`.startsWith(SECRET_REDACTED)
-            ? replaced(value, `${head}${SECRET_REDACTED}${tail}`)
-            : whole,
+        // Quotes around the value stay: SECRET_TOKEN: '[redacted]'.
+        match.replace(
+          /^(.*?(?:\bis|\bes|=|:)\s*)(["'`]?)(\S+?)(\2)([.,;:!?)\]]*)$/i,
+          (whole, head: string, open: string, value: string, close: string, tail: string) =>
+            // Already scrubbed: "[redacted]" would otherwise lose its "]" to
+            // the tail and gain another on every pass.
+            credentialLike(value) && !`${value}${close}${tail}`.startsWith(SECRET_REDACTED)
+              ? replaced(value, `${head}${open}${SECRET_REDACTED}${close}${tail}`)
+              : whole,
         ),
       );
     } else if (pattern === BEARER_TOKEN) {
@@ -615,7 +621,7 @@ function scrub(text: string, found?: string[]): string {
   });
   // A variable name before the token stays: "SENDGRID_KEY=[redacted]".
   return out.replace(
-    /(?<![\w./:@#?&=%-])((?:[A-Za-z_][A-Za-z0-9_]*=)?)([A-Za-z0-9+/_-]{36,}={0,2})(?![\w./=-])/g,
+    /(?<![\w./:@#?&=%+-])(?<!base64,)((?:[A-Za-z_][A-Za-z0-9_]*=)?)([A-Za-z0-9+/_-]{36,}={0,2})(?![\w./=-])/g,
     (whole, name: string, token: string) => (opaqueToken(token) ? replaced(token, `${name}${SECRET_REDACTED}`) : whole),
   );
 }

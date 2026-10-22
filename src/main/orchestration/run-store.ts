@@ -6853,7 +6853,7 @@ async function prepareManagerTurn(
 }
 
 function withLiveUserText(message: HumanRunMessage): HumanRunMessage {
-  const raw = message.author === "user" ? livePastedText(message.message) : undefined;
+  const raw = message.author === "user" ? livePastedText(message.runId, message.message) : undefined;
   return raw ? { ...message, message: raw } : message;
 }
 
@@ -7271,7 +7271,7 @@ async function askManagerBackendUnderTurnLock(
         onPromptAccepted: async () => {
           providerTurnStarted = true;
           promptAcceptedCalls.add(callId);
-          forgetPastedText(preparedTurn.inputMessages.map((message) => message.message));
+          forgetPastedText(run.id, preparedTurn.inputMessages.map((message) => message.message));
           await updateManagerInputDelivery(
             run.id,
             callId,
@@ -11051,7 +11051,7 @@ export async function postRunQuestion(input: PostRunQuestionInput): Promise<Post
 
 /** Validate and answer exactly one question, then apply its resume strategy. */
 export async function answerRunQuestion(input: AnswerRunQuestionInput): Promise<RunState> {
-  input = { ...input, message: scrubPastedText(input.message) };
+  input = { ...input, message: scrubPastedText(input.message, input.runId) };
   const run = await requireRun(input.runId);
   if (activeConversationRewinds.has(run.id)) {
     throw new Error("Conversation rewind is still in progress. Try answering again when it finishes.");
@@ -12496,7 +12496,7 @@ export async function addRunMessage(
   // A person may paste a key into the chat. Everything below writes the text
   // to run.json, events.jsonl or a worker's prompt, so it is scrubbed first;
   // only the live prompt that delivers it sees the key (pasted-secrets.ts).
-  if (input.author === "user") input = { ...input, message: scrubPastedText(input.message) };
+  if (input.author === "user") input = { ...input, message: scrubPastedText(input.message, input.runId) };
   let run = await requireRun(input.runId);
   // A desktop chat may start on the direct lane; a follow-up that needs
   // parallel workers or a Studio surface the direct worker cannot write
@@ -14905,7 +14905,7 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
   // A direct chat's worker is the turn that delivers the user's message, so
   // its Pi session gets what they pasted, in memory; prompt.md, a relaunch
   // and the shell/manual pty paste keep the scrubbed text.
-  const livePiPrompt = isPiWorker && run.executionMode === "direct" ? withPastedText(promptText) : null;
+  const livePiPrompt = isPiWorker && run.executionMode === "direct" ? withPastedText(run.id, promptText) : null;
   const workerSettings = isPiWorker && !isAutomationRun ? await loadSettings() : null;
   const usableWorkerRuntimes = workerSettings
     ? await detectConfiguredAgentRuntimes()
@@ -15108,7 +15108,7 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
         });
   } finally {
     if (peerCommsAcquired) releasePeerCommsWatcher(run.id);
-    if (livePiPrompt) forgetPastedText(livePiPrompt.used);
+    if (livePiPrompt) forgetPastedText(run.id, livePiPrompt.used);
   }
 
   run = await requireRun(input.runId);
