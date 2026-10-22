@@ -37,6 +37,10 @@ import {
   inlineCompletion,
   type InlineAutocompleteStatus,
 } from "./editor-cm/autocomplete/inlineExtension";
+import { useEditorFind } from "./editor-cm/find";
+import FindBar from "./find/FindBar";
+import { seedFromSelection } from "./find/find-engine";
+import { DocumentFindContext, useFindSession } from "./find/useFindSession";
 import { usePreferences } from "../preferences/usePreferences";
 const MarkdownPreview = lazy(() => import("./markdown-preview/MarkdownPreview"));
 const CsvPreview = lazy(() => import("./file-preview/CsvPreview"));
@@ -143,6 +147,26 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     skip: previewOnly,
     syncContent: isCsv,
   });
+  const codeVisible = doc.status === "ready" && (!hasViewToggle || viewMode === "edit");
+
+  // Find in the editor: the bar floats over the CodeMirror host and drives
+  // CodeMirror's search state (editor-cm/find.ts).
+  const editorHostRef = useRef<HTMLDivElement>(null);
+  const getView = useCallback(() => cmRef.current?.view ?? null, []);
+  const findSession = useFindSession({
+    rootRef: editorHostRef,
+    enabled: codeVisible,
+    readSelection: () => {
+      const view = cmRef.current?.view;
+      if (!view) return null;
+      const { from, to } = view.state.selection.main;
+      return seedFromSelection(view.state.sliceDoc(from, to));
+    },
+    fallbackFocus: () => cmRef.current?.view?.contentDOM ?? null,
+  });
+  const editorFind = useEditorFind(findSession, getView, editorHostRef, "Find in file");
+  const findContext = useMemo(() => ({ active, focused }), [active, focused]);
+
   const reloadRef = useRef(reload);
   reloadRef.current = reload;
   const flushRef = useRef(flush);
@@ -211,6 +235,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         close: () => onCloseRef.current?.(pathRef.current),
       })),
       ...buildSharedExtensions(),
+      editorFind.extension,
       // Seed with the synchronously-available default-theme extension; the
       // theme useEffect reconfigures to the real (possibly lazy-loaded)
       // theme once its loader resolves.
@@ -312,7 +337,6 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     window.addEventListener(EDITOR_REVEAL_EVENT, onReveal);
     return () => window.removeEventListener(EDITOR_REVEAL_EVENT, onReveal);
   }, [path]);
-  const codeVisible = doc.status === "ready" && (!hasViewToggle || viewMode === "edit");
   useEffect(() => {
     if (!codeVisible) return;
     let frame = 0;
@@ -439,7 +463,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     [path, focusEditor],
   );
 
-  return (
+  const pane = (
     <div
       style={{
         background: "var(--bg)",
@@ -571,27 +595,33 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             </Suspense>
           </div>
         )}
-        {doc.status === "ready" && (!hasViewToggle || viewMode === "edit") && (
-          <CodeMirror
-            ref={cmRef}
-            value={doc.content}
-            onChange={onChange}
-            extensions={extensions}
-            theme="none"
-            height="100%"
-            style={{ flex: 1, minHeight: 0, height: "100%" }}
-            basicSetup={{
-              lineNumbers: true,
-              highlightActiveLineGutter: true,
-              foldGutter: true,
-              bracketMatching: true,
-              closeBrackets: true,
-              autocompletion: true,
-              highlightActiveLine: true,
-              highlightSelectionMatches: true,
-              searchKeymap: true,
-            }}
-          />
+        {codeVisible && (
+          <div ref={editorHostRef} className="codara-find-host">
+            <CodeMirror
+              ref={cmRef}
+              value={doc.content}
+              onChange={onChange}
+              onCreateEditor={editorFind.onViewCreated}
+              extensions={extensions}
+              theme="none"
+              height="100%"
+              style={{ flex: 1, minHeight: 0, height: "100%" }}
+              basicSetup={{
+                lineNumbers: true,
+                highlightActiveLineGutter: true,
+                foldGutter: true,
+                bracketMatching: true,
+                closeBrackets: true,
+                autocompletion: true,
+                highlightActiveLine: true,
+                highlightSelectionMatches: true,
+                // The find bar replaces the stock search panel and its keys
+                // (editor-cm/find.ts).
+                searchKeymap: false,
+              }}
+            />
+            {editorFind.bar && <FindBar {...editorFind.bar} />}
+          </div>
         )}
       </div>
 
@@ -661,6 +691,9 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       </div>
     </div>
   );
+  // Tells the previews inside whether this pane is on screen and focused,
+  // which decides where Ctrl+F goes when focus is outside every document.
+  return <DocumentFindContext.Provider value={findContext}>{pane}</DocumentFindContext.Provider>;
 });
 
 export default EditorPane;
