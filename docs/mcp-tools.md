@@ -687,7 +687,11 @@ memory-capped, with each check's full output kept as a log. Every check
 green closes the task with the exit codes and log paths as evidence. A red
 run sends it back to `dispatched`; the third red run in a row, a missing or
 broken `verify.json`, a base branch it cannot fetch, or an unknown folder
-sends it to `needs_you` with one sentence. Preview steps are not run yet.
+sends it to `needs_you` with one sentence; a gate that could not run is not
+counted as a red run. From `needs_you` only the user sends a task back to
+`verifying`, which starts the count again; an agent may move it to
+`dispatched` to keep working, and its next red run comes straight back to
+the user. Preview steps are not run yet.
 
 The workspace is the caller's own, as for the status, with the same
 `not_in_codara_workspace`, `workspace_gone` and `codara_offline` answers.

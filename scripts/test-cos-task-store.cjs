@@ -166,10 +166,35 @@ async function failuresComeToTheUser() {
   assert.equal(summary.line, "1 needs you");
   assert.deepEqual(summary.needsYou, { taskId: "T1", title: "Fix CI", reason: "The unit tests failed (exit 1); the log is at /logs/unit.log." });
 
+  // Only the user sends a task from needs_you back to the gate.
+  await rejects(store.updateTask(WS, "T1", { state: "verifying" }, AGENT), /Only the user sends a task from needs_you back to verifying/);
   const { verifyRunId } = await store.updateTask(WS, "T1", { state: "verifying" }, USER);
+  assert.equal((await store.read(WS)).tasks[0].verify.failures, 0, "the user's retry starts the count again");
   const blocked = await store.finishVerify(WS, "T1", { runId: verifyRunId, evidence: [], blocked: "This repository has no .codara/verify.json." });
   assert.equal(blocked.state, "needs_you", "a gate that cannot run sends the task to the user at once");
   assert.equal(blocked.needsYouReason, "This repository has no .codara/verify.json.");
+  assert.equal(blocked.verify.failures, 0, "a gate that could not run is not a red run");
+
+  // An agent may take its work back from needs_you, but the count stays: its
+  // next red run comes straight back to the user.
+  await store.addTask(WS, { title: "Flaky", doneWhen: ["green"], state: "dispatched" }, AGENT);
+  for (let n = 1; n <= cos.VERIFY_MAX_FAILURES; n += 1) {
+    const { verifyRunId: run } = await store.updateTask(WS, "T2", { state: "verifying" }, AGENT);
+    await store.finishVerify(WS, "T2", { runId: run, evidence: [red(run)] });
+  }
+  await store.updateTask(WS, "T2", { state: "dispatched" }, AGENT);
+  const { verifyRunId: again } = await store.updateTask(WS, "T2", { state: "verifying" }, AGENT);
+  const back = await store.finishVerify(WS, "T2", { runId: again, evidence: [red(again)] });
+  assert.equal(back.state, "needs_you", "one more red after three goes to the user, not the worker");
+
+  // Blocked runs never add up to three reds.
+  await store.addTask(WS, { title: "No base", doneWhen: ["green"], state: "dispatched" }, AGENT);
+  for (let n = 1; n <= cos.VERIFY_MAX_FAILURES + 1; n += 1) {
+    await store.updateTask(WS, "T3", { state: "dispatched" }, AGENT).catch(() => undefined);
+    const { verifyRunId: run } = await store.updateTask(WS, "T3", { state: "verifying" }, AGENT);
+    const task = await store.finishVerify(WS, "T3", { runId: run, evidence: [], blocked: "Codara cannot reach origin." });
+    assert.equal(task.verify.failures, 0);
+  }
 }
 
 async function inbox() {

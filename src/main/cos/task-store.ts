@@ -220,11 +220,23 @@ export function applyTaskEvent(state: TaskListState, event: TaskLogEvent): TaskL
       }
       if (event.to === "needs_you" && !event.reason) throw new TaskRuleError("needs_you takes a one-sentence reason.");
       if (event.to === "verifying" && !event.runId) throw new TaskRuleError("A move to verifying starts a verify run.");
+      // A task waiting on the user goes back to the gate only on their word.
+      // The agent may take the work back (dispatched), but the red count
+      // stays, so its next red run comes straight back to the user.
+      const fromUser = task.state === "needs_you" && event.by?.kind === "user";
+      if (task.state === "needs_you" && event.to === "verifying" && !fromUser) {
+        throw new TaskRuleError(
+          "Only the user sends a task from needs_you back to verifying. Ask them, or move it to dispatched to keep working; a red run then comes straight back to them.",
+        );
+      }
       const next: Task = { ...task, state: event.to, updatedAt: at };
       delete next.needsYouReason;
       if (event.to === "needs_you") next.needsYouReason = event.reason;
+      const failures = fromUser ? 0 : (task.verify?.failures ?? 0);
       if (event.to === "verifying") {
-        next.verify = { runId: event.runId!, startedAt: at, failures: task.verify?.failures ?? 0 };
+        next.verify = { runId: event.runId!, startedAt: at, failures };
+      } else if (fromUser && next.verify) {
+        next.verify = { ...next.verify, failures };
       }
       if (task.state === "done") {
         delete next.doneAt;
@@ -249,7 +261,9 @@ export function applyTaskEvent(state: TaskListState, event: TaskLogEvent): TaskL
       // started) is kept as evidence and changes nothing else.
       if (task.state !== "verifying" || task.verify?.runId !== event.runId) return replaceTask(state, next, seq);
       const ok = !event.blocked && allGreen(event.evidence);
-      const failures = (task.verify.failures ?? 0) + (ok ? 0 : 1);
+      // A gate that could not run (no base, no verify.json) proves nothing
+      // about the work, so it is not a red run.
+      const failures = (task.verify.failures ?? 0) + (ok || event.blocked ? 0 : 1);
       next.verify = { ...task.verify, endedAt: at, ok, failures };
       delete next.needsYouReason;
       if (ok) {
