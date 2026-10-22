@@ -676,8 +676,11 @@ has it, fetched at that moment into Codara's own ref
 (`refs/codara/verify-base/<branch>`). The base branch is the app's choice:
 the branch the user forked the workspace from, else the branch `origin`'s
 HEAD names. Nothing in the task's folder (its working tree, its commits, a
-`base` key in its `verify.json`, its local or remote-tracking refs) can
-choose the base or loosen the checks. A newer verify run of the task, or
+`base` key in its `verify.json`, its local or remote-tracking refs, replace
+refs) can choose the base or loosen the checks. `origin`'s URL is pinned on
+the gate's first run for the repository; a changed URL or a `url.insteadOf`
+rewrite blocks the task until the user deletes the pin file the sentence
+names. The checks run from the top of the checkout. A newer verify run of the task, or
 the task leaving `verifying` (moved or dropped), cancels the checks still
 running. Each check is a shell command with optional `when` globs (it
 runs when the change touches a matching file) and `timeoutSec`; the change

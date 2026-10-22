@@ -205,6 +205,41 @@ async function baseOwnsTheChecks() {
   const base = fs.readFileSync(task.evidence.at(-1).artifact, "utf8");
   assert.match(base, /exit 3/);
 
+  // Route 3: it swaps the base commit's content with git replace.
+  const loose = execFileSync("git", ["commit-tree", execFileSync("git", ["mktree"], { cwd: repo, input: `100644 blob ${execFileSync("git", ["hash-object", "-w", "--stdin"], { cwd: repo, input: JSON.stringify({ checks: [{ id: "strict", run: "true" }] }) }).toString().trim()}\tverify.json\n` }).toString().trim(), "-m", "x"], { cwd: repo }).toString().trim();
+  const codaraTree = execFileSync("git", ["mktree"], { cwd: repo, input: `040000 tree ${execFileSync("git", ["rev-parse", `${loose}^{tree}`], { cwd: repo }).toString().trim()}\t.codara\n` }).toString().trim();
+  const fake = execFileSync("git", ["commit-tree", codaraTree, "-m", "fake base"], { cwd: repo }).toString().trim();
+  const realBase = execFileSync("git", ["rev-parse", "main"], { cwd: path.join(TMP, "loosened-origin.git") }).toString().trim();
+  git(repo, "replace", realBase, fake);
+  task = await run(repo);
+  assert.notEqual(task.state, "done", "a replace ref cannot swap the base's checks");
+  assert.equal(task.evidence.at(-1).exitCode, 3);
+  git(repo, "replace", "-d", realBase);
+
+  // Route 4: it points origin at a repository it controls.
+  const evilOrigin = path.join(TMP, "evil-origin.git");
+  git(TMP, "init", "-q", "--bare", "-b", "main", evilOrigin);
+  git(repo, "push", "-q", evilOrigin, "HEAD:refs/heads/main");
+  const realUrl = execFileSync("git", ["remote", "get-url", "origin"], { cwd: repo }).toString().trim();
+  git(repo, "remote", "set-url", "origin", evilOrigin);
+  task = await run(repo);
+  assert.equal(task.state, "needs_you", "a changed origin URL is refused");
+  assert.match(task.needsYouReason, /origin now points at .*evil-origin\.git/);
+  git(repo, "remote", "set-url", "origin", realUrl);
+  git(repo, "config", `url.${evilOrigin}.insteadOf`, realUrl);
+  task = await run(repo);
+  assert.equal(task.state, "needs_you", "an insteadOf rule that rewrites origin is refused");
+  assert.match(task.needsYouReason, /insteadOf|origin now points at .*evil-origin/);
+  git(repo, "config", "--unset", `url.${evilOrigin}.insteadOf`);
+
+  // Route 5: it runs the gate from a subfolder with its own package scripts;
+  // the checks run from the repository's top.
+  fs.mkdirSync(path.join(repo, "sub"), { recursive: true });
+  const where = makeRepo("rooted", { checks: [{ id: "where", run: "pwd" }] });
+  fs.mkdirSync(path.join(where, "sub"));
+  task = await run(path.join(where, "sub"));
+  assert.equal(fs.readFileSync(task.evidence.at(-1).artifact, "utf8").split("\n")[2], fs.realpathSync(where), "checks run at the top of the checkout");
+
   // The base comes from the app (the workspace's fork point), never the tree.
   git(repo, "push", "-q", "origin", "HEAD:refs/heads/dev");
   task = await run(repo, { baseBranch: "dev" });

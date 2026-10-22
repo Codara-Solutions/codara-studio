@@ -13,8 +13,9 @@
 // it to the app and supplies the codara-heavy wrapper.
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createWriteStream, promises as fs } from "node:fs";
-import { join, sep } from "node:path";
+import { dirname, join, sep } from "node:path";
 
 import type { Task, TaskEvidence } from "@shared/cos-tasks";
 import { isRemotePath } from "@shared/remote";
@@ -248,7 +249,10 @@ export function createCommandRunner(heavy?: { bin: string; env: Record<string, s
 // blocked instead of holding the task in verifying.
 export const defaultGitRunner: GitRunner = (args, cwd) =>
   new Promise((resolve, reject) => {
-    const child = spawn("git", args, { cwd, env: gitChildEnv(), stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+    // Replace refs are the agent's to write; they could stand another
+    // commit's checks in for the base's.
+    const env = { ...gitChildEnv(), GIT_NO_REPLACE_OBJECTS: "1" };
+    const child = spawn("git", args, { cwd, env, stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
     let out = "";
     const timer = setTimeout(() => child.kill("SIGKILL"), GIT_TIMEOUT_MS);
     child.stdout.setEncoding("utf8");
@@ -268,10 +272,39 @@ export const defaultGitRunner: GitRunner = (args, cwd) =>
 
 const BRANCH_NAME = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]{1,200}$/;
 
-/** The branch origin's HEAD points at, asked of origin itself: a local origin/HEAD is the agent's to move. */
-async function remoteDefaultBranch(cwd: string, git: GitRunner): Promise<string | null> {
+// origin's URL lives in the repository's config, which the agent can edit,
+// so the gate keeps the URL it saw on its first run for the workspace and
+// refuses to fetch anything else.
+async function pinnedOrigin(cwd: string, pinFile: string, git: GitRunner): Promise<{ url: string } | { blocked: string }> {
+  const current = (await git(["remote", "get-url", REMOTE], cwd).catch(() => "")).trim();
+  if (!current) return { blocked: `Codara cannot reach ${REMOTE} to find the base branch the repository's checks are read from.` };
+  let pinned: string | null = null;
   try {
-    const out = await git(["ls-remote", "--symref", REMOTE, "HEAD"], cwd);
+    const value = JSON.parse(await fs.readFile(pinFile, "utf8")) as { url?: unknown };
+    pinned = typeof value.url === "string" && value.url ? value.url : null;
+  } catch {
+    pinned = null;
+  }
+  if (!pinned) {
+    await fs.mkdir(dirname(pinFile), { recursive: true });
+    await fs.writeFile(pinFile, `${JSON.stringify({ url: current })}\n`, { mode: 0o600 });
+    pinned = current;
+  } else if (pinned !== current) {
+    return {
+      blocked: `${REMOTE} now points at ${current}, not ${pinned} as when Codara first checked this workspace's work; if you changed it on purpose, delete ${pinFile} and verify again.`,
+    };
+  }
+  const resolved = (await git(["ls-remote", "--get-url", pinned], cwd).catch(() => "")).trim();
+  if (resolved !== pinned) {
+    return { blocked: `A url.insteadOf rule in git's config rewrites ${REMOTE}'s URL, so Codara cannot trust what it would fetch.` };
+  }
+  return { url: pinned };
+}
+
+/** The branch origin's HEAD points at, asked of origin itself: a local origin/HEAD is the agent's to move. */
+async function remoteDefaultBranch(cwd: string, url: string, git: GitRunner): Promise<string | null> {
+  try {
+    const out = await git(["ls-remote", "--symref", url, "HEAD"], cwd);
     const match = /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(out);
     return match && BRANCH_NAME.test(match[1]) ? match[1] : null;
   } catch {
@@ -280,10 +313,10 @@ async function remoteDefaultBranch(cwd: string, git: GitRunner): Promise<string 
 }
 
 /** Fetches origin's `branch` into Codara's own ref and returns its commit, or null. */
-async function fetchBase(cwd: string, branch: string, git: GitRunner): Promise<string | null> {
+async function fetchBase(cwd: string, url: string, branch: string, git: GitRunner): Promise<string | null> {
   const ref = `${BASE_REF_PREFIX}/${branch}`;
   try {
-    await git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", REMOTE, `+refs/heads/${branch}:${ref}`], cwd);
+    await git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", url, `+refs/heads/${branch}:${ref}`], cwd);
     return (await git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], cwd)).trim() || null;
   } catch {
     return null;
@@ -454,15 +487,22 @@ export async function runVerifyGate(options: VerifyGateOptions): Promise<Task | 
     }
   }
 
-  const branch = options.baseBranch?.trim() || (await remoteDefaultBranch(cwd, git));
+  // verify.json and its commands are written for the top of the checkout;
+  // a subfolder could hold its own package.json with looser scripts.
+  const top = (await git(["rev-parse", "--show-toplevel"], cwd).catch(() => "")).trim();
+  if (!top) return blocked("The task's folder is not a git checkout, so its change cannot be measured.");
+  const repoId = createHash("sha256").update((await gitCommonDir(top, git)) ?? top).digest("hex").slice(0, 16);
+  const origin = await pinnedOrigin(top, join(store.paths(workspaceId).dir, "verify-origin", `${repoId}.json`), git);
+  if ("blocked" in origin) return blocked(origin.blocked);
+  const branch = options.baseBranch?.trim() || (await remoteDefaultBranch(top, origin.url, git));
   if (!branch) return blocked(`Codara cannot reach ${REMOTE} to find the base branch the repository's checks are read from.`);
   if (!BRANCH_NAME.test(branch)) return blocked(`The base branch "${branch}" is not a branch name Codara can fetch.`);
   const ref = `${REMOTE}/${branch}`;
-  const baseCommit = await fetchBase(cwd, branch, git);
+  const baseCommit = await fetchBase(top, origin.url, branch, git);
   if (!baseCommit) return blocked(`Codara could not fetch ${ref}, so the repository's checks could not be read.`);
   let raw: string;
   try {
-    raw = await git(["show", `${baseCommit}:.codara/verify.json`], cwd);
+    raw = await git(["cat-file", "blob", `${baseCommit}:.codara/verify.json`], top);
   } catch {
     return blocked(`${ref} has no .codara/verify.json, so nothing can prove the task is done.`);
   }
@@ -473,7 +513,7 @@ export async function runVerifyGate(options: VerifyGateOptions): Promise<Task | 
     const detail = error instanceof VerifyConfigError ? error.message : "it is not valid JSON";
     return blocked(`The .codara/verify.json on ${ref} cannot be used: ${detail}.`);
   }
-  const changed = await changedSince(cwd, baseCommit, git);
+  const changed = await changedSince(top, baseCommit, git);
   if (!changed) return blocked(`The task's work shares no history with ${ref}, so the change cannot be measured.`);
 
   const checks = selectChecks(config, changed.files);
@@ -489,7 +529,7 @@ export async function runVerifyGate(options: VerifyGateOptions): Promise<Task | 
     const timeoutSec = check.timeoutSec ?? DEFAULT_TIMEOUT_SEC;
     timeouts[check.id] = timeoutSec;
     const result = await options.runCommand(check.run, {
-      cwd,
+      cwd: top,
       env: { CODARA_VERIFY_BASE: changed.base },
       logFile,
       timeoutMs: timeoutSec * 1000,
