@@ -296,7 +296,9 @@ workspace task list in `src/main/cos/task-store.ts`: states, the gate-only
 `done`, the log and `TASKS.md`, and `scrubSecrets`), `test-cos-verify-gate`
 (`.codara/verify.json`, check selection and gate runs against a throwaway
 repository), `test-cos-task-tools` (the `task.*` and `inbox.add` socket
-methods), `test-agent-socket` (needs a build).
+methods), `test-run-message-scrub` (a key pasted into a Cora chat or an answer
+never reaches run files or manager prompts), `test-agent-socket` (needs a
+build).
 
 ### Preview browser
 

@@ -96,6 +96,7 @@ import {
   unresolvedRunQuestions,
 } from "@shared/run-questions";
 import { makeId } from "@shared/ids";
+import { scrubSecrets } from "@shared/memory-items";
 import { stripAnsiAndControls } from "@shared/agent-patterns";
 import {
   formatPaneCollapsedBlock,
@@ -1442,7 +1443,7 @@ function chatTitleFromInput(input: StartAutopilotInput): string {
   if (explicitTitle) return explicitTitle;
   const planTitle = input.planTitle?.trim();
   if (planTitle) return `Autopilot - ${planTitle}`;
-  const note = input.initialUserNote?.trim().replace(/\s+/g, " ");
+  const note = input.initialUserNote ? scrubSecrets(input.initialUserNote).trim().replace(/\s+/g, " ") : "";
   if (note) {
     if (note.length <= 52) return note;
     const cut = note.slice(0, 49);
@@ -11029,6 +11030,7 @@ export async function postRunQuestion(input: PostRunQuestionInput): Promise<Post
 
 /** Validate and answer exactly one question, then apply its resume strategy. */
 export async function answerRunQuestion(input: AnswerRunQuestionInput): Promise<RunState> {
+  input = { ...input, message: scrubSecrets(input.message) };
   const run = await requireRun(input.runId);
   if (activeConversationRewinds.has(run.id)) {
     throw new Error("Conversation rewind is still in progress. Try answering again when it finishes.");
@@ -12470,6 +12472,9 @@ export async function addRunMessage(
   // Internal: set on the single retry after Stop moved the epoch mid-send.
   retriedAfterEpochMove = false,
 ): Promise<RunState> {
+  // A person may paste a key into the chat. Everything below writes the text
+  // to run.json, events.jsonl or a worker's prompt, so it is scrubbed first.
+  if (input.author === "user") input = { ...input, message: scrubSecrets(input.message) };
   let run = await requireRun(input.runId);
   // A desktop chat may start on the direct lane; a follow-up that needs
   // parallel workers or a Studio surface the direct worker cannot write
