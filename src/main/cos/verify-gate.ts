@@ -14,9 +14,10 @@
 
 import { spawn } from "node:child_process";
 import { createWriteStream, promises as fs } from "node:fs";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 
 import type { Task, TaskEvidence } from "@shared/cos-tasks";
+import { isRemotePath } from "@shared/remote";
 import { processEnvWithoutElectronViteDev } from "../env-sanitize";
 import { gitChildEnv } from "../git-env";
 import type { TaskStore } from "./task-store";
@@ -327,6 +328,57 @@ export function workspaceBaseBranch(workspace: GateWorkspace | null | undefined)
   const copy = workspace?.copyBranch;
   if (!copy?.baseBranch?.trim() || copy.createdBy?.kind === "agent") return null;
   return copy.baseBranch.trim().replace(/^(?:refs\/heads\/|refs\/remotes\/origin\/|origin\/)/, "") || null;
+}
+
+export type GateTarget = { cwd: string; workspaceDir: string; baseBranch: string | null } | { blocked: string };
+
+function atOrUnder(path: string, root: string): boolean {
+  return path === root || path.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
+}
+
+/**
+ * Where a task's checks run: its worktree, else the workspace's folder. The
+ * folder must be the workspace's own checkout (or inside it), or a worktree
+ * an agent made of the same repository; the workspace that holds it decides,
+ * the deepest one when they nest. Another workspace's checkout of the same
+ * repository (a user's branch, the tree a running app reloads from) is
+ * refused, and so is an SSH workspace: the checks run on this machine.
+ */
+export async function resolveGateTarget(
+  workspaces: readonly GateWorkspace[],
+  workspaceId: string,
+  worktree: string | null | undefined,
+  realpath: (path: string) => Promise<string> = (path) => fs.realpath(path),
+): Promise<GateTarget> {
+  const real = (path: string) => realpath(path).catch(() => null);
+  const local = (workspace: GateWorkspace) => !workspace.remote && !isRemotePath(workspace.cwd);
+  const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
+  if (!workspace) return { blocked: "This task's workspace is no longer in Codara, so nothing could be checked." };
+  if (!local(workspace) || (worktree && isRemotePath(worktree))) {
+    return { blocked: "The verify gate runs checks on this machine only, so it cannot check an SSH workspace's work yet." };
+  }
+  const folder = await real(worktree?.trim() || workspace.cwd);
+  const home = await real(workspace.cwd);
+  if (!folder || !home) {
+    return { blocked: "Codara cannot tell which folder this task's work is in, so nothing could be checked; set the task's worktree." };
+  }
+  let owner: { workspace: GateWorkspace; root: string } | null = null;
+  for (const candidate of workspaces) {
+    if (!local(candidate)) continue;
+    const root = await real(candidate.cwd);
+    if (root && atOrUnder(folder, root) && (!owner || root.length > owner.root.length)) owner = { workspace: candidate, root };
+  }
+  if (!owner) return { blocked: "The task's worktree is not a folder of this workspace or of a worktree made for it, so its checks cannot run." };
+  if (owner.workspace.id !== workspace.id) {
+    const copy = owner.workspace.copyBranch;
+    const repo = await real(workspace.copyBranch?.repoCwd ?? workspace.cwd);
+    const madeForIt = copy?.createdBy?.kind === "agent" && repo !== null && (await real(copy.repoCwd)) === repo;
+    if (!madeForIt) {
+      const name = owner.workspace.name?.trim() || "another workspace";
+      return { blocked: `The task's worktree is ${name}'s checkout, not this workspace's, so its checks cannot run from here.` };
+    }
+  }
+  return { cwd: folder, workspaceDir: home, baseBranch: workspaceBaseBranch(workspace) };
 }
 
 export interface VerifyGateOptions {

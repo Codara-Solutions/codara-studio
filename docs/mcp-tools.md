@@ -666,8 +666,11 @@ task list and inbox that its agents, Cora and you share. It lives in
 The states are `inbox`, `ready`, `dispatched`, `verifying`, `needs_you`,
 `done` and `dropped`. No tool moves a task to `done`: moving it to
 `verifying` starts the verify gate (`src/main/cos/verify-gate.ts`), which
-runs the repository's own checks in the task's `assignee.worktree` (a
-checkout of the workspace's repository), or in the workspace's folder. The
+runs the repository's own checks in the task's `assignee.worktree`, or in
+the workspace's folder. The worktree must be the workspace's own checkout (or
+a folder in it), or a worktree an agent made of the same repository; another
+workspace's checkout (a user's branch, the tree a running app reloads from)
+and SSH workspaces are refused with one sentence. The
 checks are read from `.codara/verify.json` on the base branch as `origin`
 has it, fetched at that moment into Codara's own ref
 (`refs/codara/verify-base/<branch>`). The base branch is the app's choice:

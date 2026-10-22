@@ -239,6 +239,54 @@ async function baseOwnsTheChecks() {
   assert.match(foreign.needsYouReason, /not a checkout of this workspace's repository/);
 }
 
+// Which folder a task's checks may run in: the workspace's own checkout or a
+// worktree an agent made of its repository, never another workspace's
+// checkout (a user's branch, the tree a running app reloads from).
+async function taskFolder() {
+  const dir = (...parts) => {
+    const out = path.join(TMP, "folders", ...parts);
+    fs.mkdirSync(out, { recursive: true });
+    return out;
+  };
+  const repo = dir("repo");
+  const agentTree = dir("worktrees", "fix-1");
+  const userTree = dir("worktrees", "Cora");
+  const otherCheckout = dir("other-checkout");
+  const workspaces = [
+    { id: "main", name: "Codara Studio", cwd: repo },
+    { id: "fix-1", name: "fix-1", cwd: agentTree, copyBranch: { repoCwd: repo, baseBranch: "Cora", createdBy: { kind: "agent" } } },
+    { id: "cora", name: "Cora", cwd: userTree, copyBranch: { repoCwd: repo, baseBranch: "main" } },
+    { id: "other", name: "Second copy", cwd: otherCheckout },
+    { id: "ssh", name: "Server", cwd: "ssh://host-1/srv/app", remote: { hostId: "host-1" } },
+  ];
+  const target = (workspaceId, worktree) => gate.resolveGateTarget(workspaces, workspaceId, worktree);
+
+  assert.deepEqual(await target("main", undefined), { cwd: repo, workspaceDir: repo, baseBranch: null }, "no worktree: the workspace's folder");
+  assert.equal((await target("main", dir("repo", "packages", "a"))).cwd, path.join(repo, "packages", "a"), "a folder inside the workspace");
+  assert.deepEqual(await target("main", agentTree), { cwd: agentTree, workspaceDir: repo, baseBranch: null }, "a worktree an agent made of the repo");
+  assert.deepEqual(await target("cora", undefined), { cwd: userTree, workspaceDir: userTree, baseBranch: "main" }, "the Cora workspace checks its own tree");
+
+  const refused = async (workspaceId, worktree, pattern, why) => {
+    const result = await target(workspaceId, worktree);
+    assert.ok(result.blocked, `${why}: ${JSON.stringify(result)}`);
+    assert.match(result.blocked, pattern, why);
+  };
+  await refused("main", userTree, /Cora's checkout, not this workspace's/, "a user's checkout of the same repo, such as the live Cora tree");
+  await refused("main", otherCheckout, /Second copy's checkout/, "another workspace's checkout");
+  await refused("other", repo, /Codara Studio's checkout/, "the other way round");
+  await refused("fix-1", agentTree + "/..", /checkout, not this workspace's|not a folder of this workspace/, "a path that climbs out");
+  await refused("main", dir("elsewhere"), /not a folder of this workspace/, "a folder no workspace holds");
+  await refused("ssh", repo, /SSH workspace/, "an SSH workspace, whatever local folder the task names");
+  await refused("main", "ssh://host-1/srv/app", /SSH workspace/, "a remote worktree");
+  await refused("gone", undefined, /no longer in Codara/, "a removed workspace");
+  await refused("main", path.join(TMP, "folders", "missing"), /cannot tell which folder/, "a folder that does not exist");
+
+  // A symlink into another workspace's checkout is that checkout.
+  const link = path.join(repo, "cora-link");
+  fs.symlinkSync(userTree, link);
+  await refused("main", link, /Cora's checkout/, "a symlink to the Cora tree");
+}
+
 async function runnerEnds() {
   const runCommand = gate.createCommandRunner(null);
   const log = path.join(TMP, "runner.log");
@@ -318,7 +366,7 @@ function sentences() {
 
 (async () => {
   gate = await load();
-  const suites = { config, selection, endToEnd, baseOwnsTheChecks, runnerEnds, blocked, sentences };
+  const suites = { config, selection, endToEnd, baseOwnsTheChecks, taskFolder, runnerEnds, blocked, sentences };
   let failed = 0;
   for (const [name, run] of Object.entries(suites)) {
     try {

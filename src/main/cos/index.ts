@@ -11,7 +11,6 @@ import { join } from "node:path";
 import { app, webContents } from "electron";
 
 import type { TaskSummary, TaskSummaryChange } from "@shared/cos-tasks";
-import { isRemotePath } from "@shared/remote";
 import { WORKFLOW_DEFAULTS } from "@shared/workflow";
 import { resolveBundledResourcePath } from "../bundled-resources";
 import { codaraHome } from "../codara-home";
@@ -20,7 +19,7 @@ import type { IpcHandle } from "../ipc";
 import { loadState } from "../storage";
 import { provideCosService } from "./service";
 import { createTaskStore, isTaskWorkspaceId, type TaskStore } from "./task-store";
-import { createCommandRunner, runVerifyGate, stopRunningChecks, workspaceBaseBranch, type CommandRunner } from "./verify-gate";
+import { createCommandRunner, resolveGateTarget, runVerifyGate, stopRunningChecks, type CommandRunner } from "./verify-gate";
 
 export const COS_TASKS_CHANGED_CHANNEL = "cosTasks:changed";
 
@@ -96,23 +95,20 @@ function startVerify(workspaceId: string, taskId: string, runId: string): void {
   void (async () => {
     const list = await taskStore().read(workspaceId);
     const task = list.tasks.find((candidate) => candidate.id === taskId);
-    const workspace = await workspaceById(workspaceId);
-    // The task's own worktree when it names one; else the workspace's folder.
-    // An SSH workspace's folder is not on this machine.
-    const local = (folder: string | null | undefined) => (folder && !isRemotePath(folder) ? folder : null);
-    const workspaceDir = local(workspace?.cwd);
-    const cwd = local(task?.assignee?.worktree) ?? workspaceDir;
-    const result = await runVerifyGate({
-      store: taskStore(),
-      workspaceId,
-      taskId,
-      runId,
-      cwd,
-      workspaceDir,
-      baseBranch: workspaceBaseBranch(workspace),
-      runCommand: gateCommandRunner(),
-      signal: abort.signal,
-    });
+    const state = await loadState().catch(() => null);
+    const target = await resolveGateTarget(state?.workspaces ?? [], workspaceId, task?.assignee?.worktree);
+    const result =
+      "blocked" in target
+        ? await taskStore().finishVerify(workspaceId, taskId, { runId, evidence: [], blocked: target.blocked })
+        : await runVerifyGate({
+            store: taskStore(),
+            workspaceId,
+            taskId,
+            runId,
+            ...target,
+            runCommand: gateCommandRunner(),
+            signal: abort.signal,
+          });
     logMain("cos", `verify ${workspaceId} ${taskId} ${runId}: ${result?.state ?? "cancelled"}`);
   })()
     .catch(async (error) => {
