@@ -1,7 +1,9 @@
-import { forwardRef, useEffect, useMemo, useState, type ReactNode } from "react";
+import { forwardRef, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import readExcelFile, { type SheetData } from "read-excel-file/browser";
-import { TableVirtuoso, type TableComponents } from "react-virtuoso";
+import { TableVirtuoso, type TableComponents, type TableVirtuosoHandle } from "react-virtuoso";
 import { DockablePaneBar } from "../../tabs/dockChromeSlot";
+import FindBar from "../find/FindBar";
+import { useGridFind, type GridSource } from "../find/useGridFind";
 
 interface Props {
   path: string;
@@ -92,8 +94,31 @@ export default function SpreadsheetPreview({
     sheet !== null &&
     (sheet.sourceRows > MAX_VISIBLE_ROWS || sheet.sourceColumns > MAX_VISIBLE_COLUMNS);
 
+  const rootRef = useRef<HTMLDivElement>(null);
+  const tableRef = useRef<TableVirtuosoHandle>(null);
+  const scrollerRef = useRef<HTMLElement | null>(null);
+  const findGrid = useMemo<GridSource | null>(
+    () =>
+      sheet && sheet.rows.length > 0 && visibleColumns > 0
+        ? {
+            rows: sheet.rows.length,
+            columns: visibleColumns,
+            text: (row, column) => formatCell(sheet.rows[row][column]),
+            cellId: (row, column) => `${row}:${column}`,
+          }
+        : null,
+    [sheet, visibleColumns],
+  );
+  const find = useGridFind({
+    hostRef: rootRef,
+    scrollerRef,
+    grid: loading || error ? null : findGrid,
+    scrollToRow: (row) => tableRef.current?.scrollToIndex({ index: row, align: "center" }),
+    label: "Find in spreadsheet",
+  });
+
   return (
-    <div style={hostStyle}>
+    <div ref={rootRef} style={hostStyle} onKeyDown={find.onKeyDown}>
       <DockablePaneBar forceLocal={forceLocalToolbar}>
         <span
           style={{
@@ -149,41 +174,48 @@ export default function SpreadsheetPreview({
               and {Math.min(sheet.sourceColumns, MAX_VISIBLE_COLUMNS).toLocaleString()} columns.
             </div>
           )}
-          <TableVirtuoso
-            key={activeSheet}
-            data={sheet.rows}
-            components={tableComponents}
-            fixedItemHeight={31}
-            fixedHeaderContent={() => (
-              <tr>
-                <th
-                  style={{ ...headerCell, ...rowNumberCell, top: 0, zIndex: 3 }}
-                  aria-label="Row number"
-                />
-                {columnIndexes.map((column) => (
-                  <th key={column} style={headerCell}>
-                    {columnLabel(column)}
+          <div className="codara-find-host">
+            <TableVirtuoso
+              ref={tableRef}
+              scrollerRef={(element) => {
+                scrollerRef.current = element instanceof HTMLElement ? element : null;
+              }}
+              key={activeSheet}
+              data={sheet.rows}
+              components={tableComponents}
+              fixedItemHeight={31}
+              fixedHeaderContent={() => (
+                <tr>
+                  <th
+                    style={{ ...headerCell, ...rowNumberCell, top: 0, zIndex: 3 }}
+                    aria-label="Row number"
+                  />
+                  {columnIndexes.map((column) => (
+                    <th key={column} style={headerCell}>
+                      {columnLabel(column)}
+                    </th>
+                  ))}
+                </tr>
+              )}
+              itemContent={(rowIndex, row) => (
+                <>
+                  <th scope="row" style={rowNumberCell}>
+                    {rowIndex + 1}
                   </th>
-                ))}
-              </tr>
-            )}
-            itemContent={(rowIndex, row) => (
-              <>
-                <th scope="row" style={rowNumberCell}>
-                  {rowIndex + 1}
-                </th>
-                {columnIndexes.map((column) => {
-                  const display = formatCell(row[column]);
-                  return (
-                    <td key={column} style={dataCell} title={display}>
-                      {display}
-                    </td>
-                  );
-                })}
-              </>
-            )}
-            style={{ flex: 1, minHeight: 0 }}
-          />
+                  {columnIndexes.map((column) => {
+                    const display = formatCell(row[column]);
+                    return (
+                      <td key={column} data-cell={`${rowIndex}:${column}`} style={dataCell} title={display}>
+                        {display}
+                      </td>
+                    );
+                  })}
+                </>
+              )}
+              style={{ flex: 1, minHeight: 0 }}
+            />
+            {find.bar && <FindBar {...find.bar} />}
+          </div>
         </>
       )}
     </div>
