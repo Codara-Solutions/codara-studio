@@ -88,11 +88,15 @@ const WORKFLOW_TOOLS = [
 // for the user (a terminal agent, a manager chat, a direct Pi task), never to
 // workers.
 const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, ...WHITEBOARD_TOOLS, ...BOARD_TOOLS];
+// The workspace's task list and inbox: a terminal agent and Cora's manager
+// file into it; chat workers report to their manager instead.
+const TASK_TOOLS = ["codara_task_add", "codara_task_update", "codara_task_list", "codara_inbox_add"];
 const TERMINAL_STUDIO_TOOLS = [
   ...PREVIEW_TOOLS,
   ...TERMINAL_TOOLS,
   "codara_notify_user",
   "codara_workspace_status",
+  ...TASK_TOOLS,
   ...WORKTREE_TOOLS,
   "codara_session_search",
   "codara_share_offer",
@@ -109,8 +113,10 @@ const RUN = { SPARK_RUN_ID: "run-roster" };
 // codara_worktree_setup; studio by 200 for codara_session_search, about
 // 450, with the rest of it and all of codara_share_offer paid for by shorter
 // terminal and worktree descriptions, which also kept execute in place;
-// studio and execute by 900 for codara_worktree_cleanup, about 850).
-const LIST_BUDGET = { studio: 31_400, run: 39_000, worker: 35_000, execute: 96_900, automation: 69_000 };
+// studio and execute by 900 for codara_worktree_cleanup, about 850;
+// studio and execute by 2,700 for the four task list tools, about 2,650,
+// which let every agent in a workspace share one task list).
+const LIST_BUDGET = { studio: 34_100, run: 39_000, worker: 35_000, execute: 99_600, automation: 69_000 };
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",
@@ -293,6 +299,11 @@ function sortedEqual(actual, expected, label) {
       /codara_workspace_status.*note at each milestone.*in_review or done when you finish.*blocked/,
       "a terminal agent learns to post milestones and its final status",
     );
+    assert.match(
+      studio.init.instructions,
+      /Task list: .*codara_task_add.*verify\.json checks run then and alone close it.*needs_you with one plain sentence/,
+      "a terminal agent learns that only the repo's checks close a task",
+    );
     assert.match(studio.init.instructions, /Dev servers: .*codara_terminal_servers.*keeps them running when you exit or restart/, "dev servers go to the keeper, not the agent's own shell");
     assert.match(
       studio.init.instructions,
@@ -322,6 +333,7 @@ function sortedEqual(actual, expected, label) {
     assert.doesNotMatch(runStudio.init.instructions, /codara_worktree/, "chat workers get no worktree guidance");
     assert.doesNotMatch(runStudio.init.instructions, /codara_workspace_status/, "chat workers leave the workspace status to their chat");
     assert.doesNotMatch(runStudio.init.instructions, /codara_session_search/, "chat workers get no session search");
+    assert.doesNotMatch(runStudio.init.instructions, /codara_task_/, "chat workers leave the task list to their manager");
 
     // Execute mode. Carries the automation-management tools too (Cora creates
     // and manages looms from an ordinary auto/execute chat), minus
@@ -336,6 +348,7 @@ function sortedEqual(actual, expected, label) {
         ...AUTOMATION_TOOLS.filter((name) => !EXECUTE_TOOLS.includes(name)),
         ...WORKTREE_TOOLS,
         ...WORKFLOW_TOOLS,
+        ...TASK_TOOLS,
         "codara_session_search",
         "codara_share_offer",
       ],

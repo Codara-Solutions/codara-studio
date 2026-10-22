@@ -93,9 +93,9 @@ environment variable that Codara sets for the agent:
 
 | Set | Who sees it | What it adds |
 |---|---|---|
-| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, `codara_notify_user`, `codara_workspace_status`, `codara_session_search`, `codara_share_offer` and the worktree tools; whiteboard and board only inside a Cora chat |
+| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, `codara_notify_user`, `codara_workspace_status`, the task list tools, `codara_session_search`, `codara_share_offer` and the worktree tools; whiteboard and board only inside a Cora chat |
 | `worker` | Workers in automation passes | `studio` with the whiteboard and board read-only, plus `codara_ask_user` and `codara_request_next_iteration` |
-| `execute` | A Cora chat that orchestrates work | `studio`, plus orchestration, automation management, `codara_session_search`, the worktree tools and `codara_share_offer` |
+| `execute` | A Cora chat that orchestrates work | `studio`, plus orchestration, automation management, the task list tools, `codara_session_search`, the worktree tools and `codara_share_offer` |
 | `automation` | The chat that designs automations | `studio`, plus automation management, `codara_ask_user` and `codara_name_chat` |
 
 A Cora chat that answers directly, without workers, gets `studio` plus
@@ -648,6 +648,41 @@ each overwrite the other's latest value, and every change is kept as a
 checkpoint. Statuses live in `<codaraHome>/workspace-status.json` and are
 dropped when their workspace is deleted. Agents without MCP use
 `cora tool workspace_status --status in_progress --note "..."`.
+
+## Task list
+
+In `studio` outside a Cora chat and in `execute`. Each workspace keeps one
+task list and inbox that its agents, Cora and you share. It lives in
+`<codaraHome>/cos/<workspaceId>/`: `tasks.jsonl` is the event log and
+`TASKS.md` beside it is rewritten after every change for anyone to read.
+
+| Tool | What it does |
+|---|---|
+| `codara_task_add` | Adds a task with a `title` and `done_when` lines (how anyone can tell it is finished; at least one). It starts in `inbox`, or in `ready` or `dispatched` when `state` says so. `kind` is `code`, `browser_op`, `research` or `chore`. `from_inbox` turns an inbox item into the task, which keeps the item's source. |
+| `codara_task_update` | Moves or edits a task (`T1`, ...): `state`, `title`, `done_when`, `assignee` (`cli`, `model`, `branch` and `worktree`, an absolute path). `needs_you` takes a one-sentence `reason`. For an inbox item (`I1`, ...), `state: "dropped"` drops it and `merge_into` folds it into a task. |
+| `codara_task_list` | The count line ("3 running · 1 needs you · 5 done today"), the oldest task that needs you and why, the open tasks with the evidence of their latest verify run, the inbox items nobody triaged, and the `TASKS.md` path. `state` filters; `all` adds every done and dropped task. |
+| `codara_inbox_add` | Files `text` (with an optional `link` and `source`) in the inbox without making it a task. |
+
+The states are `inbox`, `ready`, `dispatched`, `verifying`, `needs_you`,
+`done` and `dropped`. No tool moves a task to `done`: moving it to
+`verifying` starts the verify gate (`src/main/cos/verify-gate.ts`), which
+runs the repository's own checks from `.codara/verify.json` in the task's
+`assignee.worktree`, or in the workspace's folder. Each check is a shell
+command with optional `when` globs (it runs when the change touches a
+matching file) and `timeoutSec`; `base` lists the refs the change is
+measured from, and the commands see the merge base as `CODARA_VERIFY_BASE`.
+They run through `codara-heavy`, one at a time machine-wide and
+memory-capped, with each check's full output kept as a log. Every check
+green closes the task with the exit codes and log paths as evidence. A red
+run sends it back to `dispatched`; the third red run in a row, a missing or
+broken `verify.json`, or an unknown folder sends it to `needs_you` with one
+sentence. Preview steps are not run yet.
+
+The workspace is the caller's own, as for the status, with the same
+`not_in_codara_workspace`, `workspace_gone` and `codara_offline` answers.
+Imported pull request runs cannot call them. The rail shows the count line
+under the workspace's name, and the reason in red when a task needs you.
+From a shell: `cora task list|add|move|merge|worktree` and `cora inbox add`.
 
 ## Share offer
 

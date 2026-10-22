@@ -291,8 +291,12 @@ roster, worker fences for new tools), `test-agent-delivery` (sending to a
 pane, a chat or the inbox, and `preview.inbox`), `test-workspace-status`
 (workspace statuses and notes: the rules in `src/shared/workspace-status.ts`,
 the store in `src/main/workspace-status/` and the `workspace.status` socket
-method that routes an agent to its own workspace), `test-agent-socket` (needs a
-build).
+method that routes an agent to its own workspace), `test-cos-task-store` (the
+workspace task list in `src/main/cos/task-store.ts`: states, the gate-only
+`done`, the log and `TASKS.md`, and `scrubSecrets`), `test-cos-verify-gate`
+(`.codara/verify.json`, check selection and gate runs against a throwaway
+repository), `test-cos-task-tools` (the `task.*` and `inbox.add` socket
+methods), `test-agent-socket` (needs a build).
 
 ### Preview browser
 
@@ -497,7 +501,8 @@ renderer no longer has fails here).
 
 `test-cora-cli` (runs the CLI offline against made-up runs), `test-cora-tool`
 (`cora tool` against a fake socket: pane identity, images as files, exit
-codes), `test-bench-*` (`cli/bench/`).
+codes), `test-cora-task-cli` (`cora task` and `cora inbox add` against a fake
+socket), `test-bench-*` (`cli/bench/`).
 
 ### Release tooling
 
