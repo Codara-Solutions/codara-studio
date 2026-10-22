@@ -510,6 +510,13 @@ function luhnValid(digits: string): boolean {
   return sum % 10 === 0;
 }
 
+// Luhn-valid and starting the way issued cards do (Mastercard 2 and 5, Amex,
+// Diners and JCB 3, Visa 4, Discover and UnionPay 6). Millisecond timestamps
+// and Discord ids start with 1 and pass Luhn one time in ten.
+function cardNumberLike(digits: string): boolean {
+  return digits.length >= 13 && digits.length <= 19 && /^[2-6]/.test(digits) && luhnValid(digits);
+}
+
 /**
  * Whether a memory would carry a credential. Memory is pasted into every
  * future prompt and shown on the Memory page, so a secret must never land in
@@ -518,8 +525,7 @@ function luhnValid(digits: string): boolean {
 export function containsSecret(text: string): boolean {
   if (SECRET_PATTERNS.some((pattern) => pattern.test(text))) return true;
   for (const match of text.matchAll(/\b(?:\d[ -]?){13,19}\b/g)) {
-    const digits = match[0].replace(/\D/g, "");
-    if (digits.length >= 13 && digits.length <= 19 && luhnValid(digits)) return true;
+    if (cardNumberLike(match[0].replace(/\D/g, ""))) return true;
   }
   for (const match of text.matchAll(/[A-Za-z0-9+/_=-]{36,}/g)) {
     const token = match[0];
@@ -542,12 +548,26 @@ function credentialLike(value: string): boolean {
   return /\d/.test(value) || /[^A-Za-z]/.test(value);
 }
 
-// Mixed case and a digit, not a hex id or hash. "/" belongs to base64 and to
-// paths, so a token holding one must be plain base64 parts ("wJal/K7MD/bPx"),
-// not "/Users/x" or "fix-login2/src".
+// Longer than this, an opaque run of characters is data (an inline image, a
+// pasted blob), not a key someone typed.
+const OPAQUE_TOKEN_MAX = 120;
+
+// Identifiers are made of words: "useTaskSummary2Helper" splits into use,
+// Task, Summary, 2, Helper, four characters a piece. A random key changes
+// case or turns to digits every two characters or so.
+function looksRandom(token: string): boolean {
+  const runs = token.match(/[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+/g) ?? [];
+  const chars = runs.reduce((sum, run) => sum + run.length, 0);
+  return runs.length > 0 && chars / runs.length < 3.5;
+}
+
+// Mixed case and a digit, not a hex id or hash, not words. "/" belongs to
+// base64 and to paths, so a token holding one must be plain base64
+// ("wJal/K7MD/bPx"), with no "-", "_" or "." the way paths have.
 function opaqueToken(token: string): boolean {
-  if (!/[a-z]/.test(token) || !/[A-Z]/.test(token) || !/\d/.test(token) || /^[a-f0-9-]+$/i.test(token)) return false;
-  return !token.includes("/") || /^[A-Za-z0-9+]+(?:\/[A-Za-z0-9+]+)+={0,2}$/.test(token);
+  if (token.length > OPAQUE_TOKEN_MAX || !/[a-z]/.test(token) || !/[A-Z]/.test(token) || !/\d/.test(token)) return false;
+  if (/^[a-f0-9-]+$/i.test(token) || !looksRandom(token)) return false;
+  return !token.includes("/") || /^[A-Za-z0-9+/]+={0,2}$/.test(token);
 }
 
 /**
@@ -582,12 +602,13 @@ export function scrubSecrets(text: string): string {
     }
   }
   out = out.replace(/\b(?:\d[ -]?){13,19}\b/g, (match) => {
-    const digits = match.replace(/\D/g, "");
-    if (digits.length < 13 || digits.length > 19 || !luhnValid(digits)) return match;
+    if (!cardNumberLike(match.replace(/\D/g, ""))) return match;
     return `${SECRET_REDACTED}${match.slice(match.trimEnd().length)}`;
   });
-  return out.replace(/(?<![\w./:@#?&=%-])[A-Za-z0-9+/_=-]{36,}(?![\w./-])/g, (token) =>
-    opaqueToken(token) ? SECRET_REDACTED : token,
+  // A variable name before the token stays: "SENDGRID_KEY=[redacted]".
+  return out.replace(
+    /(?<![\w./:@#?&=%-])((?:[A-Za-z_][A-Za-z0-9_]*=)?)([A-Za-z0-9+/_-]{36,}={0,2})(?![\w./=-])/g,
+    (whole, name: string, token: string) => (opaqueToken(token) ? `${name}${SECRET_REDACTED}` : whole),
   );
 }
 

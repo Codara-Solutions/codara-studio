@@ -58,6 +58,36 @@ function catchesEnvAndBearer() {
   for (const text of [`AWS_SECRET_ACCESS_KEY=${aws}`, `Bearer ${hex}`]) assert.ok(memory.containsSecret(text), text);
 }
 
+// What the first scrubber replaced although nobody typed a credential:
+// identifiers, base64 data, timestamps and ids that happen to pass Luhn. A
+// variable name before a key is kept, so the text still says which key it was.
+function fewerFalsePositives() {
+  for (const plain of [
+    "rename useWorkspaceTaskSummaryForRail2Helper to something shorter",
+    "createVerifyGateCommandRunnerForWorkspace3 throws",
+    "the TestCosTaskStoreReplaysTornLogLines2026Oct case",
+    "MAX_RETRIES_FOR_THE_VERIFY_GATE_V2_FALLBACK is 3",
+    "img src=data:image/png;base64,SqTLL8SyAnfDec7oq5iml8og0vZMBzpnzdZ3K0CgZUsPhnlU/8DzBWfFLP/XZq9/ztqUTe8td7fLTYdAM25slu0cj8mZdHRAP9jghkH6a95cTrvEXKNcuR3TL/C0jo/oXeZ3cuRVJrKIAAp5RkH+5o7kibQTTTypIRURVAbD+5o1JP18VFMo3aTXc+jif9XYi+em53kg",
+    "SqTLL8SyAnfDec7oq5iml8og0vZMBzpnzdZ3K0CgZUsPhnlU/8DzBWfFLP/XZq9/ztqUTe8td7fLTYdAM25slu0cj8mZdHRAP9jghkH6a95cTrvEXKNcuR3TL/C0jo/oXeZ3cuRVJrKIAAp5RkH+5o7kibQTTTypIRURVAbD+5o1JP18VFMo3aTXc+jif9XYi+em53kg",
+    "the run started at 1761177600000 and ended later",
+    "ping the bot in channel 1296016829456515086",
+  ]) {
+    assert.equal(scrub(plain), plain, plain);
+  }
+  // Card numbers still go: Visa, Amex and Mastercard test numbers.
+  assert.equal(scrub("visa 4012888888881881"), "visa [redacted]");
+  assert.equal(scrub("amex 378282246310005"), "amex [redacted]");
+  assert.equal(scrub("mc 5555-5555-5555-4444 ok"), "mc [redacted] ok");
+  assert.ok(!memory.containsSecret("Discord channel 1296016829456515086"), "a Discord id is not a card");
+  assert.ok(memory.containsSecret("card 4012888888881881"));
+  const random = "aDCMbRgNdSV2WpcxjCoE5845BJMJ4dHtzLAFekOl";
+  assert.equal(scrub(`STRIPE_SECRET_KEY=${"sk_" + "live"}_51HqLyjWDarjtT1zdp7dcXaBcDeFgHiJkLmNoPq`), "STRIPE_SECRET_KEY=[redacted]");
+  assert.equal(scrub(`SENDGRID_KEY=${random}`), "SENDGRID_KEY=[redacted]");
+  assert.equal(scrub(`export SENDGRID_KEY=${random}`), "export SENDGRID_KEY=[redacted]");
+  assert.equal(scrub(`key ${random} here`), "key [redacted] here");
+  assert.equal(scrub(`https://x.io/cb?state=${random}`), `https://x.io/cb?state=${random}`, "a piece of a link stays");
+}
+
 function leavesProseAlone() {
   for (const plain of [
     "run npm test in src/main and open PR #42",
@@ -86,6 +116,9 @@ const SAMPLES = [
   "card 4111 1111 1111 1111 please",
   "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY----- done",
   "secret = [redacted] and passwd = [redacted]]",
+  "SENDGRID_KEY=aDCMbRgNdSV2WpcxjCoE5845BJMJ4dHtzLAFekOl",
+  "Authorization: Bearer 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b",
+  "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 ];
 
 function idempotent() {
@@ -100,7 +133,7 @@ function idempotent() {
 
 (async () => {
   memory = await load();
-  const suites = { replacesCredentials, catchesEnvAndBearer, leavesProseAlone, idempotent };
+  const suites = { replacesCredentials, catchesEnvAndBearer, fewerFalsePositives, leavesProseAlone, idempotent };
   let failed = 0;
   for (const [name, run] of Object.entries(suites)) {
     try {
