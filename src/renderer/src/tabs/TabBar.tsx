@@ -1329,6 +1329,22 @@ const TabItem = React.memo(function TabItem({
       >
         {labelFor(tab)}
       </span>
+      {openedByName(tab) ? (
+        <span
+          style={{
+            flex: "0 1 auto",
+            minWidth: 0,
+            maxWidth: 96,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            fontSize: 11,
+            color: "var(--muted)",
+          }}
+        >
+          from {openedByName(tab)}
+        </span>
+      ) : null}
       {tab.kind === "editor" && tab.dirty && !closeHover ? (
         <span
           aria-label="Unsaved changes"
@@ -2034,6 +2050,8 @@ function titleFor(t: Tab): string {
     const devices = phoneDeviceNames(t);
     if (devices.length === 1) return `${t.title}, opened from phone (${devices[0]})`;
     if (devices.length > 1) return `${t.title}, opened from phones (${devices.join(", ")})`;
+    const openedBy = openedByName(t);
+    if (openedBy) return `${t.title}, opened by an agent in ${openedBy}`;
     return t.title;
   }
   if (t.kind === "automations") return t.title;
@@ -2045,6 +2063,15 @@ function titleFor(t: Tab): string {
       : `${t.path} ${t.staged ? "(Staged)" : "(Working Tree)"}`;
   }
   return t.title;
+}
+
+// The workspace whose agent opened this terminal tab from there, if any.
+function openedByName(tab: Tab): string | null {
+  if (tab.kind !== "terminal") return null;
+  for (const pane of collectLeaves(tab.root)) {
+    if (pane.openedBy) return pane.openedBy;
+  }
+  return null;
 }
 
 function phoneDeviceNames(tab: TerminalTab): string[] {

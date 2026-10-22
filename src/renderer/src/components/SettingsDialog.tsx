@@ -121,6 +121,7 @@ import KeepAwakeSettings from "./keep-awake/KeepAwakeSettings";
 import QuickCommandsSettings from "../quick-commands/QuickCommandsSettings";
 import { useDiagnostics } from "./settings/DiagnosticsControls";
 import WorktreeSetupSettingsControl from "./worktree-setup/WorktreeSetupSettingsControl";
+import CrossWorkspaceGrantsRow from "./cross-workspace/CrossWorkspaceGrantsRow";
 
 export type { SettingsTab } from "./settings/settings-index";
 
@@ -2840,6 +2841,10 @@ function AgentsSettings({ onClose }: { onClose: () => void }) {
       <AccountsSettings />
 
       <LaunchArgsSection />
+
+      <SettingsSection title="Workspaces">
+        <CrossWorkspaceGrantsRow />
+      </SettingsSection>
 
       <SettingsSection title="Tools">
         <SettingRow

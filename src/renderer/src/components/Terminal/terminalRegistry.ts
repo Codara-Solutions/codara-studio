@@ -37,6 +37,9 @@ export interface CreateAgentTerminalInput {
   requestedFromPane?: boolean;
   // Tab group to put the new tab in, joined by name within its workspace.
   group?: string;
+  // Main-resolved name of the caller's workspace when an agent opens this tab
+  // in another workspace; shown on the tab.
+  openedBy?: string;
 }
 
 export interface CreateAgentTerminalResult {

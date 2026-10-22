@@ -125,6 +125,8 @@ import {
   type AgentSocketCapabilityClaim,
 } from "./agent-socket-capabilities";
 import { createPaneOpener, PaneOpenError, parsePaneOpenParams } from "./pane-open";
+import { crossWorkspaceRefusal, resolveTargetWorkspace } from "./cross-workspace-terminals";
+import { crossWorkspaceApprover } from "./cross-workspace-ipc";
 import {
   CODEX_MODEL_CATALOG,
   normalizeCodexModelId,
@@ -701,13 +703,13 @@ async function dispatch(
       case "terminal.read":
         return await handleTerminalRead(params, id);
       case "terminal.create":
-        return await handleTerminalCreate(params, id);
+        return await handleTerminalCreate(params, id, auth.kind);
       case "terminal.write":
         return await handleTerminalWrite(params, id);
       case "terminal.close":
         return await handleTerminalClose(params, id);
       case "terminal.run":
-        return await handleTerminalRun(params, id, res);
+        return await handleTerminalRun(params, id, res, auth.kind);
       case "terminal.list":
         return await handleTerminalList(params, id);
       case "pane.open":
@@ -1000,6 +1002,7 @@ async function handleTerminalRun(
   params: Record<string, unknown>,
   id: JsonRpcId,
   res: ServerResponse,
+  authKind: AgentSocketAuth["kind"],
 ): Promise<JsonRpcResponse> {
   const command = typeof params.command === "string" ? params.command.trim() : "";
   if (!command) return errorResponse(id, ERR_INVALID_PARAMS, "command is required");
@@ -1011,7 +1014,8 @@ async function handleTerminalRun(
   const runId = stringParam(params, "runId");
   const requestedPaneId = stringParam(params, "paneId");
   if (requestedPaneId) {
-    if (!agentTerminals.isActiveOwnedBy(requestedPaneId, runId)) {
+    const callerPaneId = await callerPaneForOwnedTerminal(requestedPaneId, params);
+    if (!agentTerminals.isActiveOwnedBy(requestedPaneId, runId, callerPaneId)) {
       return errorResponse(
         id,
         ERR_INVALID_PARAMS,
@@ -1076,7 +1080,7 @@ async function handleTerminalRun(
         if (params[key] !== undefined) createParams[key] = params[key];
       }
       if (group) createParams.group = group;
-      const createdResponse = await handleTerminalCreate(createParams, id);
+      const createdResponse = await handleTerminalCreate(createParams, id, authKind);
       if (createdResponse.error) return createdResponse;
       created = createdResponse.result as { tabId: string; paneId: string; cwd: string; group?: string };
       paneId = created.paneId;
@@ -1149,6 +1153,22 @@ async function listStudioTerminals(): Promise<StudioTerminalListing[]> {
   return Array.isArray(inventory) ? inventory : [];
 }
 
+async function paneWorkspaceId(paneId: string): Promise<string | null> {
+  const watched = terminalPanePlacement(paneId);
+  if (watched) return watched.workspaceId;
+  const listed = (await listStudioTerminals().catch(() => [])).find((entry) => entry.paneId === paneId);
+  return listed?.workspaceId ?? null;
+}
+
+// The caller's pane, looked up only for a terminal that records one as its
+// owner (opened in another workspace), so other writes skip the process walk.
+async function callerPaneForOwnedTerminal(
+  paneId: string,
+  params: Record<string, unknown>,
+): Promise<string | null> {
+  return agentTerminals.ownerPaneOf(paneId) ? resolveCallerPaneId(params) : null;
+}
+
 // Where the calling agent's own pane sits, so browser, list and notify calls
 // act on the agent's workspace rather than whichever one is on screen.
 async function resolveCallerPlacement(params: Record<string, unknown>): Promise<CallerPlacement | null> {
@@ -1208,9 +1228,31 @@ async function handleTerminalList(
         ...(agent ? { agentState: agent.state } : {}),
         shell: shellActivity(pty.readTail(entry.paneId, TERMINAL_SHELL_STATE_BYTES)),
         ...(caller?.paneId === entry.paneId ? { isCaller: true } : {}),
-        ...(agentTerminals.isActiveOwnedBy(entry.paneId, runId) ? { writable: true } : {}),
+        ...(agentTerminals.isActiveOwnedBy(entry.paneId, runId, caller?.paneId ?? null) ? { writable: true } : {}),
       };
     });
+  // Terminals this agent opened in other workspaces, so it can keep steering
+  // them without knowing where they went.
+  const listed = new Set(panes.map((pane) => pane.paneId));
+  const elsewhere = !runId && caller ? agentTerminals.listOwnedByPane(caller.paneId) : [];
+  for (const owned of elsewhere) {
+    if (listed.has(owned.paneId)) continue;
+    const entry = inventory.find((item) => item.paneId === owned.paneId);
+    if (!entry) continue;
+    const agent = states.get(entry.paneId);
+    panes.push({
+      paneId: entry.paneId,
+      tabId: entry.tabId,
+      workspaceId: entry.workspaceId,
+      ...(entry.title ? { title: entry.title } : {}),
+      ...(entry.group ? { group: entry.group } : {}),
+      ...(entry.cwd ? { cwd: entry.cwd } : {}),
+      agent: agent?.runtime ?? (entry.profile && entry.profile !== "shell" ? entry.profile : null),
+      ...(agent ? { agentState: agent.state } : {}),
+      shell: shellActivity(pty.readTail(entry.paneId, TERMINAL_SHELL_STATE_BYTES)),
+      writable: true,
+    });
+  }
   return successResponse(id, { workspaceId, panes });
 }
 
@@ -1338,8 +1380,13 @@ async function resolveCallerPaneId(params: Record<string, unknown>): Promise<str
 async function handleTerminalCreate(
   params: Record<string, unknown>,
   id: JsonRpcId,
+  authKind: AgentSocketAuth["kind"],
 ): Promise<JsonRpcResponse> {
-  const cwd = stringParam(params, "cwd");
+  let cwd = stringParam(params, "cwd");
+  if (params.workspace !== undefined && params.workspace !== null && typeof params.workspace !== "string") {
+    return errorResponse(id, ERR_INVALID_PARAMS, "workspace must be a workspace id or an absolute folder path");
+  }
+  const requestedWorkspace = stringParam(params, "workspace");
   const command = stringParam(params, "command");
   const title = stringParam(params, "title");
   const group = tabGroupParam(params);
@@ -1365,8 +1412,8 @@ async function handleTerminalCreate(
   const runId = stringParam(params, "runId");
   let workspaceId: string | null = null;
   let workspaceCwd: string | null = null;
+  let run: RunState | null = null;
   if (runId) {
-    let run: RunState | null;
     try {
       run = await (await getRunStore()).getRun(runId);
     } catch (error) {
@@ -1406,6 +1453,50 @@ async function handleTerminalCreate(
     }
   }
   const callerPaneId = await resolveCallerPaneId(params);
+  let crossWorkspace: { callerName: string; target: { id: string; name: string } } | null = null;
+  if (requestedWorkspace) {
+    let state: AppState;
+    try {
+      state = await loadState();
+    } catch (error) {
+      return errorResponse(id, ERR_INTERNAL, error instanceof Error ? error.message : String(error));
+    }
+    const resolved = await resolveTargetWorkspace(state.workspaces, requestedWorkspace);
+    if (!resolved.ok) return errorResponse(id, ERR_INVALID_PARAMS, resolved.message);
+    const target = resolved.workspace;
+    // A run speaks for its own workspace; an interactive agent for the
+    // workspace of the pane it runs in. Neither comes from tool JSON.
+    const callerWorkspaceId = run
+      ? (run.workspaceId ?? null)
+      : callerPaneId
+        ? await paneWorkspaceId(callerPaneId)
+        : null;
+    const caller = state.workspaces.find((workspace) => workspace.id === callerWorkspaceId) ?? null;
+    if (caller?.id !== target.id) {
+      const refusal = crossWorkspaceRefusal({
+        authKind,
+        untrustedRun: run !== null && runProjectPolicyMode(run) === "untrusted-pull-request",
+        caller,
+        target,
+      });
+      if (refusal || !caller) return errorResponse(id, ERR_FORBIDDEN, refusal ?? "caller workspace unknown");
+      const runtime = callerPaneId
+        ? terminalAgentStateSnapshot().find((entry) => entry.paneId === callerPaneId)?.runtime
+        : undefined;
+      const decision = await crossWorkspaceApprover().authorize({
+        caller,
+        target,
+        agent: run ? "Cora" : (runtime && AGENT_NOTIFY_LABELS[runtime]) || null,
+      });
+      if (!decision.ok) return errorResponse(id, ERR_FORBIDDEN, decision.message);
+      crossWorkspace = { callerName: caller.name, target: { id: target.id, name: target.name } };
+    }
+    if (crossWorkspace || !workspaceId) {
+      workspaceId = target.id;
+      workspaceCwd = target.cwd;
+    }
+    if (!cwd && resolved.folder) cwd = resolved.folder;
+  }
   try {
     const result = await requestTerminalOp<{ tabId: string; paneId: string; cwd: string; group?: string }>(
       "create",
@@ -1417,6 +1508,7 @@ async function handleTerminalCreate(
         ...(workspaceCwd ? { workspaceCwd } : {}),
         ...(callerPaneId ? { callerPaneId } : {}),
         ...(group ? { group } : {}),
+        ...(crossWorkspace ? { openedBy: crossWorkspace.callerName } : {}),
       },
     );
     // The renderer resolves as soon as the tab is added to state, but the PTY
@@ -1464,6 +1556,7 @@ async function handleTerminalCreate(
       tabId: result.tabId,
       runId,
       retention: rawRetention === "service" ? "service" : "temporary",
+      ...(crossWorkspace && !runId && callerPaneId ? { ownerPaneId: callerPaneId } : {}),
     };
     if (!registerAgentTerminal(registration)) {
       // The run settled/deleted while its renderer tab was spawning. The
@@ -1496,7 +1589,10 @@ async function handleTerminalCreate(
       offExit();
       agentTerminals.markExited(registration);
     }
-    return successResponse(id, result);
+    return successResponse(id, {
+      ...result,
+      ...(crossWorkspace ? { workspaceId: crossWorkspace.target.id, workspace: crossWorkspace.target.name } : {}),
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return errorResponse(id, ERR_INTERNAL, message);
@@ -1536,7 +1632,8 @@ async function handleTerminalWrite(
   // panes, so their paneIds are discoverable. The bridge stamps SPARK_RUN_ID
   // onto writes; require the same run that created this terminal so one Cora
   // run cannot type into another run's agent-owned shell.
-  if (!agentTerminals.isActiveOwnedBy(paneId, runId) && !isKeptServerSession(paneId)) {
+  const callerPaneId = await callerPaneForOwnedTerminal(paneId, params);
+  if (!agentTerminals.isActiveOwnedBy(paneId, runId, callerPaneId) && !isKeptServerSession(paneId)) {
     return errorResponse(
       id,
       ERR_INVALID_PARAMS,
@@ -1602,6 +1699,7 @@ async function handleTerminalClose(
     const result = await agentTerminals.close({
       paneId,
       runId,
+      callerPaneId: await callerPaneForOwnedTerminal(paneId, params),
       stop: () => pty.killImmediate(paneId),
       destroyTab: (registration) =>
         requestTerminalOp("destroy", {
@@ -1895,12 +1993,7 @@ function worktreeDeps(): AgentWorktreeDeps {
     invalidateGitCache,
     getRun: async (runId) => (await getRunStore()).getRun(runId),
     listRuns: async () => (await getRunStore()).listRuns(),
-    paneWorkspaceId: async (paneId) => {
-      const watched = terminalPanePlacement(paneId);
-      if (watched) return watched.workspaceId;
-      const listed = (await listStudioTerminals().catch(() => [])).find((entry) => entry.paneId === paneId);
-      return listed?.workspaceId ?? null;
-    },
+    paneWorkspaceId,
     sessionCwd: (paneId) => pty.sessionCwd(paneId),
     sessionsUnderCwd: (dir) => pty.sessionsUnderCwd(dir),
     listRendererTerminals: async () => {

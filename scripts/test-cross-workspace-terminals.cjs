@@ -1,0 +1,315 @@
+#!/usr/bin/env node
+"use strict";
+
+// codara_terminal_create can open a terminal in another workspace of the rail
+// (`workspace`), for example a coordinator dispatching a worker pane under the
+// worktree it works on.
+//
+// Proven here:
+//   1. `workspace` resolves by id, by a workspace's folder, by a worktree's
+//      folder (its own workspace, also when nested in its repository), and by
+//      a subfolder (which becomes the default cwd); symlinks are followed.
+//      Unknown ids, relative paths, folders outside every workspace and SSH
+//      paths are refused; no workspace is ever created.
+//   2. Only the user's own authority may target another workspace: a pane or
+//      scoped credential, an imported pull-request run, an unknown caller
+//      workspace and SSH workspaces on either side are refused.
+//   3. "Always" grants persist per caller and target pair in a mode-600 file,
+//      survive a new store, read a broken file as none, and revoke.
+//   4. The approver asks only across workspaces and only without a grant,
+//      remembers "always" and not "once", refuses deny and silence, shares
+//      one prompt between concurrent calls for a pair, and still allows when
+//      saving the grant fails.
+//   5. A terminal opened across workspaces by a run-less agent is written to,
+//      run in and closed only from the pane that opened it; run-owned and
+//      ordinary terminals keep their old rules, and a dev-server handoff
+//      drops the pane owner.
+
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { build } = require("esbuild");
+
+const ROOT = path.resolve(__dirname, "..");
+const OUT_DIR = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "codara-cross-workspace-"));
+process.on("exit", () => fs.rmSync(OUT_DIR, { recursive: true, force: true }));
+
+async function bundle(entry, name) {
+  const outfile = path.join(OUT_DIR, `${name}.cjs`);
+  await build({
+    entryPoints: [path.join(ROOT, entry)],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    target: "node20",
+    outfile,
+    logLevel: "silent",
+    alias: { "@shared": path.join(ROOT, "src", "shared") },
+  });
+  return require(outfile);
+}
+
+function mkdir(...parts) {
+  const dir = path.join(OUT_DIR, ...parts);
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function memoryStore() {
+  const grants = [];
+  return {
+    grants,
+    failGrant: false,
+    async list() {
+      return [...grants];
+    },
+    async has(caller, target) {
+      return grants.some((g) => g.callerWorkspaceId === caller && g.targetWorkspaceId === target);
+    },
+    async grant(entry) {
+      if (this.failGrant) throw new Error("disk full");
+      grants.push({ ...entry, grantedAt: "now" });
+    },
+    async revoke() {
+      return false;
+    },
+  };
+}
+
+async function main() {
+  const cross = await bundle("src/main/cross-workspace-terminals.ts", "cross");
+  const { AgentTerminalRegistry, AgentTerminalOwnershipError } = await bundle(
+    "src/main/agent-terminal-registry.ts",
+    "registry",
+  );
+
+  // ── 1. Resolution ──────────────────────────────────────────────────────
+  const repo = mkdir("repo");
+  const nested = mkdir("repo", ".worktrees", "feature");
+  const managed = mkdir("home", ".codarastudio", "worktrees", "repo-abc", "fix");
+  const sub = mkdir("repo", "packages", "app");
+  const outside = mkdir("elsewhere");
+  const link = path.join(OUT_DIR, "repo-link");
+  fs.symlinkSync(repo, link);
+  const workspaces = [
+    { id: "ws-repo", name: "Repo", cwd: repo },
+    { id: "ws-nested", name: "Feature", cwd: nested },
+    { id: "ws-managed", name: "Fix", cwd: managed },
+    { id: "ws-ssh", name: "Server", cwd: "ssh://box/home/me/app", remote: { hostId: "box" } },
+  ];
+  const resolve = (raw) => cross.resolveTargetWorkspace(workspaces, raw);
+
+  let r = await resolve("ws-managed");
+  assert.equal(r.ok, true);
+  assert.equal(r.workspace.id, "ws-managed");
+  assert.equal(r.folder, undefined);
+  r = await resolve(repo);
+  assert.equal(r.workspace.id, "ws-repo");
+  assert.equal(r.folder, undefined);
+  r = await resolve(`${repo}/`);
+  assert.equal(r.workspace.id, "ws-repo", "a trailing slash names the same folder");
+  r = await resolve(managed);
+  assert.equal(r.workspace.id, "ws-managed", "a worktree folder resolves to the worktree's workspace");
+  r = await resolve(nested);
+  assert.equal(r.workspace.id, "ws-nested", "a worktree nested in its repository resolves to the worktree");
+  r = await resolve(path.join(nested, "src"));
+  assert.equal(r.workspace.id, "ws-nested");
+  r = await resolve(sub);
+  assert.equal(r.workspace.id, "ws-repo");
+  assert.equal(r.folder, fs.realpathSync(sub), "a subfolder becomes the default cwd");
+  r = await resolve(link);
+  assert.equal(r.workspace.id, "ws-repo", "a symlink resolves to the folder it points at");
+  r = await resolve("ws-ssh");
+  assert.equal(r.ok, true, "an id resolves even to an SSH workspace; the gate refuses it");
+
+  for (const raw of ["", "   ", "ws-gone", "relative/path", outside, "ssh://box/home/me/app", "x".repeat(5000)]) {
+    r = await resolve(raw);
+    assert.equal(r.ok, false, `refused: ${raw.slice(0, 40)}`);
+    assert.equal(typeof r.message, "string");
+  }
+  assert.match((await resolve(outside)).message, /does not create workspaces/);
+  const before = workspaces.length;
+  await resolve(path.join(OUT_DIR, "new-folder"));
+  assert.equal(workspaces.length, before, "resolution never adds a workspace");
+  const prefixTwin = mkdir("repo-twin");
+  r = await resolve(prefixTwin);
+  assert.equal(r.ok, false, "a sibling folder sharing a name prefix is not inside the workspace");
+  console.log("ok 1 workspace resolves by id, folder, worktree folder and subfolder; nothing else");
+
+  // ── 2. Gate ────────────────────────────────────────────────────────────
+  const local = workspaces[0];
+  const target = workspaces[2];
+  const ssh = workspaces[3];
+  const gate = (overrides) =>
+    cross.crossWorkspaceRefusal({ authKind: "root", untrustedRun: false, caller: local, target, ...overrides });
+  assert.equal(gate({}), null, "the user's own agents may ask");
+  assert.match(gate({ authKind: "pane" }), /credential/);
+  assert.match(gate({ authKind: "scoped" }), /credential/);
+  assert.match(gate({ untrustedRun: true }), /imported pull-request/);
+  assert.match(gate({ caller: null }), /could not tell/);
+  assert.match(gate({ caller: ssh }), /SSH/);
+  assert.match(gate({ target: ssh }), /SSH/);
+  assert.match(gate({ target: { id: "x", name: "X", cwd: "ssh://h/p" } }), /SSH/);
+  assert.match(
+    gate({ authKind: "scoped", untrustedRun: true, caller: null }),
+    /credential/,
+    "the credential is checked first",
+  );
+  console.log("ok 2 pane and scoped credentials, untrusted runs, unknown callers and SSH are refused");
+
+  // ── 3. Grants file ─────────────────────────────────────────────────────
+  const file = path.join(OUT_DIR, "home", "codara", cross.CROSS_WORKSPACE_GRANTS_FILE);
+  let store = cross.fileGrantStore(file);
+  assert.deepEqual(await store.list(), []);
+  assert.equal(await store.has("a", "b"), false);
+  await store.grant({ callerWorkspaceId: "a", callerName: "CEO", targetWorkspaceId: "b", targetName: "Cora" });
+  await store.grant({ callerWorkspaceId: "a", callerName: "CEO", targetWorkspaceId: "b", targetName: "Cora" });
+  await store.grant({ callerWorkspaceId: "b", callerName: "Cora", targetWorkspaceId: "a", targetName: "CEO" });
+  if (process.platform !== "win32") assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  store = cross.fileGrantStore(file);
+  assert.equal(await store.has("a", "b"), true);
+  assert.equal(await store.has("b", "a"), true, "each direction is its own grant");
+  assert.equal(await store.has("a", "c"), false);
+  assert.equal((await store.list()).length, 2, "a repeated grant is stored once");
+  assert.equal(await store.revoke("a", "b"), true);
+  assert.equal(await store.revoke("a", "b"), false);
+  assert.equal(await cross.fileGrantStore(file).has("a", "b"), false);
+  assert.equal(await cross.fileGrantStore(file).has("b", "a"), true);
+  fs.writeFileSync(file, "{not json");
+  assert.deepEqual(await cross.fileGrantStore(file).list(), [], "a broken file reads as no grants");
+  fs.writeFileSync(file, JSON.stringify({ version: 1, grants: [{ callerWorkspaceId: "a" }, null, 7] }));
+  assert.deepEqual(await cross.fileGrantStore(file).list(), [], "malformed entries are dropped");
+  console.log("ok 3 always grants persist per pair, survive a new store and revoke");
+
+  // ── 4. Approver ────────────────────────────────────────────────────────
+  const caller = { id: "ws-ceo", name: "CEO", cwd: "/ceo" };
+  const cora = { id: "ws-cora", name: "Cora", cwd: "/cora" };
+  const answers = [];
+  let asks = 0;
+  const memory = memoryStore();
+  let release = null;
+  const approver = cross.createCrossWorkspaceApprover({
+    store: memory,
+    ask: async () => {
+      asks += 1;
+      if (release) return new Promise((done) => (release = done));
+      const next = answers.shift();
+      if (next instanceof Error) throw next;
+      return next;
+    },
+  });
+  const authorize = () => approver.authorize({ caller, target: cora, agent: "Claude Code" });
+
+  assert.deepEqual(await approver.authorize({ caller, target: caller, agent: null }), {
+    ok: true,
+    via: "same-workspace",
+  });
+  assert.equal(asks, 0, "the own workspace never asks");
+
+  answers.push("deny");
+  let decision = await authorize();
+  assert.equal(decision.ok, false);
+  assert.match(decision.message, /declined/);
+  answers.push(null);
+  decision = await authorize();
+  assert.equal(decision.ok, false);
+  assert.match(decision.message, /did not answer/);
+  answers.push(new Error("window gone"));
+  assert.equal((await authorize()).ok, false, "a failing prompt refuses");
+
+  answers.push("once");
+  assert.deepEqual(await authorize(), { ok: true, via: "once" });
+  answers.push("deny");
+  assert.equal((await authorize()).ok, false, "once is not remembered");
+
+  answers.push("always");
+  assert.deepEqual(await authorize(), { ok: true, via: "always" });
+  const asked = asks;
+  assert.deepEqual(await authorize(), { ok: true, via: "grant" });
+  assert.equal(asks, asked, "a grant answers without asking");
+  assert.equal(memory.grants.length, 1);
+  assert.equal(memory.grants[0].callerWorkspaceId, "ws-ceo");
+  assert.equal(memory.grants[0].targetWorkspaceId, "ws-cora");
+
+  const other = { id: "ws-other", name: "Other", cwd: "/other" };
+  release = () => undefined;
+  const first = approver.authorize({ caller, target: other, agent: null });
+  const second = approver.authorize({ caller, target: other, agent: null });
+  await new Promise((done) => setImmediate(done));
+  const waiting = asks;
+  const resolveAsk = release;
+  release = null;
+  resolveAsk("once");
+  assert.deepEqual(await first, { ok: true, via: "once" });
+  assert.deepEqual(await second, { ok: true, via: "once" });
+  assert.equal(asks, waiting, "concurrent calls for one pair share one prompt");
+
+  memory.failGrant = true;
+  answers.push("always");
+  const third = { id: "ws-third", name: "Third", cwd: "/third" };
+  assert.deepEqual(await approver.authorize({ caller, target: third, agent: null }), { ok: true, via: "always" });
+  console.log("ok 4 the approver asks once per pair, remembers always, refuses deny and silence");
+
+  // ── 5. Ownership ───────────────────────────────────────────────────────
+  const registry = new AgentTerminalRegistry();
+  registry.register({ paneId: "p-cross", tabId: "t-cross", runId: null, ownerPaneId: "p-ceo" });
+  registry.register({ paneId: "p-plain", tabId: "t-plain", runId: null });
+  registry.register({ paneId: "p-run", tabId: "t-run", runId: "run-1", ownerPaneId: "p-ceo" });
+
+  assert.equal(registry.isActiveOwnedBy("p-cross", null, "p-ceo"), true, "the opening pane may write");
+  assert.equal(registry.isActiveOwnedBy("p-cross", null, "p-other"), false, "another agent's pane may not");
+  assert.equal(registry.isActiveOwnedBy("p-cross", null, null), false, "an unplaced caller may not");
+  assert.equal(registry.isActiveOwnedBy("p-cross", null), false);
+  assert.equal(registry.isActiveOwnedBy("p-cross", "run-1", "p-ceo"), false, "a run may not");
+  assert.equal(registry.isActiveOwnedBy("p-plain", null), true, "ordinary terminals keep their old rule");
+  assert.equal(registry.isActiveOwnedBy("p-plain", null, "p-anyone"), true);
+  assert.equal(registry.isActiveOwnedBy("p-run", "run-1", null), true, "a run-owned terminal follows its run");
+  assert.equal(registry.isActiveOwnedBy("p-run", "run-2", "p-ceo"), false);
+  assert.equal(registry.ownerPaneOf("p-cross"), "p-ceo");
+  assert.equal(registry.ownerPaneOf("p-plain"), null);
+  assert.equal(registry.ownerPaneOf("p-run"), null, "a run's terminal is steered by the run, not a pane");
+  assert.deepEqual(
+    registry.listOwnedByPane("p-ceo").map((t) => t.paneId),
+    ["p-cross"],
+    "the caller lists the terminals it opened elsewhere",
+  );
+  assert.deepEqual(registry.listOwnedByPane("p-other"), []);
+
+  let destroyed = 0;
+  const close = (callerPaneId) =>
+    registry.close({
+      paneId: "p-cross",
+      runId: null,
+      callerPaneId,
+      stop: () => undefined,
+      destroyTab: () => {
+        destroyed += 1;
+      },
+    });
+  await assert.rejects(close("p-other"), AgentTerminalOwnershipError);
+  await assert.rejects(close(null), AgentTerminalOwnershipError);
+  assert.equal(destroyed, 0);
+  assert.deepEqual(await close("p-ceo"), { paneId: "p-cross", alreadyClosed: false });
+  assert.equal(destroyed, 1);
+  assert.deepEqual(await close("p-ceo"), { paneId: "p-cross", alreadyClosed: true }, "a retry is idempotent");
+
+  registry.register({ paneId: "p-exit", tabId: "t-exit", runId: null, ownerPaneId: "p-ceo" });
+  registry.markExited({ paneId: "p-exit", tabId: "t-exit" });
+  assert.equal(registry.ownerPaneOf("p-exit"), "p-ceo", "an exited terminal keeps its owner for close");
+  await assert.rejects(
+    registry.close({ paneId: "p-exit", runId: null, callerPaneId: "p-x", stop() {}, destroyTab() {} }),
+    AgentTerminalOwnershipError,
+  );
+
+  registry.register({ paneId: "p-dev", tabId: "t-dev", runId: null, ownerPaneId: "p-ceo" });
+  assert.equal(registry.transferToWorkspace("p-dev"), true);
+  assert.equal(registry.ownerPaneOf("p-dev"), null);
+  assert.equal(registry.isActiveOwnedBy("p-dev", null, "p-anyone"), true, "a kept dev server belongs to its workspace");
+  console.log("ok 5 a cross-workspace terminal is steered only from the pane that opened it");
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
