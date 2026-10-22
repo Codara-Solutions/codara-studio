@@ -120,6 +120,15 @@ export class AgentTerminalRegistry {
     return terminal && terminal.runId === null && terminal.ownerPaneId ? terminal.ownerPaneId : null;
   }
 
+  /**
+   * The pane that opened this terminal is gone: fall back to the rule for
+   * every run-less terminal rather than leave it unmanageable by any agent.
+   */
+  releasePaneOwner(paneId: string): void {
+    const terminal = this.active.get(paneId) ?? this.exited.get(paneId);
+    if (terminal) delete terminal.ownerPaneId;
+  }
+
   /** Active panes a run-less agent's pane opened in other workspaces. */
   listOwnedByPane(callerPaneId: string): AgentTerminalRegistration[] {
     const owned: AgentTerminalRegistration[] = [];

@@ -125,7 +125,12 @@ import {
   type AgentSocketCapabilityClaim,
 } from "./agent-socket-capabilities";
 import { createPaneOpener, PaneOpenError, parsePaneOpenParams } from "./pane-open";
-import { crossWorkspaceRefusal, resolveTargetWorkspace } from "./cross-workspace-terminals";
+import {
+  crossWorkspaceCwdRefusal,
+  crossWorkspaceRefusal,
+  resolveTargetWorkspace,
+  type CrossWorkspaceDecision,
+} from "./cross-workspace-terminals";
 import { crossWorkspaceApprover } from "./cross-workspace-ipc";
 import {
   CODEX_MODEL_CATALOG,
@@ -262,6 +267,8 @@ const TERMINAL_SPAWN_WAIT_MS = 10_000;
 // enough for a bad-cwd shell to have exited (chdir failure is near-instant),
 // short enough not to add noticeable latency to a healthy create.
 const TERMINAL_SPAWN_SETTLE_MS = 750;
+// Under the MCP server's 60 s timeout for terminal.create.
+const CROSS_WORKSPACE_CREATE_BUDGET_MS = 55_000;
 // A burst of creates from one agent shares one process listing.
 const CALLER_PROCESS_LIST_MAX_AGE_MS = 2_000;
 // Cap on chat.append message length. Big enough for a verifier verdict
@@ -703,7 +710,7 @@ async function dispatch(
       case "terminal.read":
         return await handleTerminalRead(params, id);
       case "terminal.create":
-        return await handleTerminalCreate(params, id, auth.kind);
+        return await handleTerminalCreate(params, id, auth.kind, res);
       case "terminal.write":
         return await handleTerminalWrite(params, id);
       case "terminal.close":
@@ -1080,7 +1087,7 @@ async function handleTerminalRun(
         if (params[key] !== undefined) createParams[key] = params[key];
       }
       if (group) createParams.group = group;
-      const createdResponse = await handleTerminalCreate(createParams, id, authKind);
+      const createdResponse = await handleTerminalCreate(createParams, id, authKind, res);
       if (createdResponse.error) return createdResponse;
       created = createdResponse.result as { tabId: string; paneId: string; cwd: string; group?: string };
       paneId = created.paneId;
@@ -1166,7 +1173,13 @@ async function callerPaneForOwnedTerminal(
   paneId: string,
   params: Record<string, unknown>,
 ): Promise<string | null> {
-  return agentTerminals.ownerPaneOf(paneId) ? resolveCallerPaneId(params) : null;
+  const owner = agentTerminals.ownerPaneOf(paneId);
+  if (!owner) return null;
+  if (!pty.hasSession(owner)) {
+    agentTerminals.releasePaneOwner(paneId);
+    return null;
+  }
+  return resolveCallerPaneId(params);
 }
 
 // Where the calling agent's own pane sits, so browser, list and notify calls
@@ -1381,7 +1394,9 @@ async function handleTerminalCreate(
   params: Record<string, unknown>,
   id: JsonRpcId,
   authKind: AgentSocketAuth["kind"],
+  res: ServerResponse,
 ): Promise<JsonRpcResponse> {
+  const startedAt = Date.now();
   let cwd = stringParam(params, "cwd");
   if (params.workspace !== undefined && params.workspace !== null && typeof params.workspace !== "string") {
     return errorResponse(id, ERR_INVALID_PARAMS, "workspace must be a workspace id or an absolute folder path");
@@ -1483,12 +1498,32 @@ async function handleTerminalCreate(
       const runtime = callerPaneId
         ? terminalAgentStateSnapshot().find((entry) => entry.paneId === callerPaneId)?.runtime
         : undefined;
-      const decision = await crossWorkspaceApprover().authorize({
-        caller,
-        target,
-        agent: run ? "Cora" : (runtime && AGENT_NOTIFY_LABELS[runtime]) || null,
-      });
+      if (cwd) {
+        const cwdRefusal = await crossWorkspaceCwdRefusal(cwd, target);
+        if (cwdRefusal) return errorResponse(id, ERR_INVALID_PARAMS, cwdRefusal);
+      }
+      let callerGone = false;
+      const onCallerGone = () => {
+        callerGone = true;
+      };
+      res.once("close", onCallerGone);
+      let decision: CrossWorkspaceDecision;
+      try {
+        decision = await crossWorkspaceApprover().authorize({
+          caller,
+          target,
+          agent: run ? "Cora" : (runtime && AGENT_NOTIFY_LABELS[runtime]) || null,
+          requester: run ? `run:${run.id}` : `pane:${callerPaneId}`,
+        });
+      } finally {
+        res.off("close", onCallerGone);
+      }
       if (!decision.ok) return errorResponse(id, ERR_FORBIDDEN, decision.message);
+      // The user may answer after the agent stopped waiting (interrupted, or
+      // its call timed out): nobody would drive a terminal opened now.
+      if (callerGone || res.destroyed || res.socket?.destroyed) {
+        return errorResponse(id, ERR_INTERNAL, "the caller disconnected before the terminal opened");
+      }
       crossWorkspace = { callerName: caller.name, target: { id: target.id, name: target.name } };
     }
     if (crossWorkspace || !workspaceId) {
@@ -1510,6 +1545,16 @@ async function handleTerminalCreate(
         ...(group ? { group } : {}),
         ...(crossWorkspace ? { openedBy: crossWorkspace.callerName } : {}),
       },
+      // Waiting for the user took part of the MCP server's 60 s budget; keep
+      // the whole call inside it, spawn wait included.
+      crossWorkspace
+        ? {
+            timeoutMs: Math.max(
+              5_000,
+              CROSS_WORKSPACE_CREATE_BUDGET_MS - (Date.now() - startedAt) - TERMINAL_SPAWN_WAIT_MS - TERMINAL_SPAWN_SETTLE_MS,
+            ),
+          }
+        : undefined,
     );
     // The renderer resolves as soon as the tab is added to state, but the PTY
     // spawns a beat later when TerminalPane mounts and calls pty:spawn. Wait for

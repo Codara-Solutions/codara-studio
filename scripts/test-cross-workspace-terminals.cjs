@@ -17,13 +17,15 @@
 //   3. "Always" grants persist per caller and target pair in a mode-600 file,
 //      survive a new store, read a broken file as none, and revoke.
 //   4. The approver asks only across workspaces and only without a grant,
-//      remembers "always" and not "once", refuses deny and silence, shares
-//      one prompt between concurrent calls for a pair, and still allows when
-//      saving the grant fails.
+//      remembers "always" and not "once", refuses silence, refuses a denied
+//      pair without asking again for a while, shares one prompt only between
+//      concurrent calls of one requester, and still allows when saving the
+//      grant fails. A cross-workspace cwd must be a local folder inside the
+//      target.
 //   5. A terminal opened across workspaces by a run-less agent is written to,
 //      run in and closed only from the pane that opened it; run-owned and
-//      ordinary terminals keep their old rules, and a dev-server handoff
-//      drops the pane owner.
+//      ordinary terminals keep their old rules, and a dev-server handoff or
+//      the opening pane going away drops the pane owner.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -189,8 +191,10 @@ async function main() {
   let asks = 0;
   const memory = memoryStore();
   let release = null;
+  let clock = 1_000_000;
   const approver = cross.createCrossWorkspaceApprover({
     store: memory,
+    now: () => clock,
     ask: async () => {
       asks += 1;
       if (release) return new Promise((done) => (release = done));
@@ -199,20 +203,16 @@ async function main() {
       return next;
     },
   });
-  const authorize = () => approver.authorize({ caller, target: cora, agent: "Claude Code" });
+  const authorize = () => approver.authorize({ caller, target: cora, agent: "Claude Code", requester: "pane:p1" });
 
-  assert.deepEqual(await approver.authorize({ caller, target: caller, agent: null }), {
+  assert.deepEqual(await approver.authorize({ caller, target: caller, agent: null, requester: "pane:p1" }), {
     ok: true,
     via: "same-workspace",
   });
   assert.equal(asks, 0, "the own workspace never asks");
 
-  answers.push("deny");
-  let decision = await authorize();
-  assert.equal(decision.ok, false);
-  assert.match(decision.message, /declined/);
   answers.push(null);
-  decision = await authorize();
+  let decision = await authorize();
   assert.equal(decision.ok, false);
   assert.match(decision.message, /did not answer/);
   answers.push(new Error("window gone"));
@@ -221,7 +221,22 @@ async function main() {
   answers.push("once");
   assert.deepEqual(await authorize(), { ok: true, via: "once" });
   answers.push("deny");
-  assert.equal((await authorize()).ok, false, "once is not remembered");
+  decision = await authorize();
+  assert.equal(decision.ok, false, "once is not remembered");
+  assert.match(decision.message, /declined/);
+  const before4 = asks;
+  decision = await authorize();
+  assert.equal(decision.ok, false);
+  assert.match(decision.message, /Do not retry/);
+  assert.equal(asks, before4, "a denied pair is refused without a new card");
+  clock += cross.CROSS_WORKSPACE_DENY_COOLDOWN_MS - 1;
+  assert.equal((await authorize()).ok, false);
+  assert.equal(asks, before4, "still inside the cooldown");
+  clock += 2;
+  answers.push(null);
+  decision = await authorize();
+  assert.equal(asks, before4 + 1, "after the cooldown the user is asked again");
+  assert.match(decision.message, /did not answer/);
 
   answers.push("always");
   assert.deepEqual(await authorize(), { ok: true, via: "always" });
@@ -233,23 +248,42 @@ async function main() {
   assert.equal(memory.grants[0].targetWorkspaceId, "ws-cora");
 
   const other = { id: "ws-other", name: "Other", cwd: "/other" };
-  release = () => undefined;
-  const first = approver.authorize({ caller, target: other, agent: null });
-  const second = approver.authorize({ caller, target: other, agent: null });
+  const resolvers = [];
+  const ask = async () => {
+    asks += 1;
+    return new Promise((done) => resolvers.push(done));
+  };
+  const shared = cross.createCrossWorkspaceApprover({ store: memoryStore(), ask });
+  const startAsks = asks;
+  const first = shared.authorize({ caller, target: other, agent: null, requester: "pane:p1" });
+  const second = shared.authorize({ caller, target: other, agent: null, requester: "pane:p1" });
+  const stranger = shared.authorize({ caller, target: other, agent: null, requester: "run:r9" });
   await new Promise((done) => setImmediate(done));
-  const waiting = asks;
-  const resolveAsk = release;
-  release = null;
-  resolveAsk("once");
+  assert.equal(asks - startAsks, 2, "one card per requester, shared by its concurrent calls");
+  resolvers[0]("once");
+  resolvers[1]("deny");
   assert.deepEqual(await first, { ok: true, via: "once" });
   assert.deepEqual(await second, { ok: true, via: "once" });
-  assert.equal(asks, waiting, "concurrent calls for one pair share one prompt");
+  assert.equal((await stranger).ok, false, "another requester's answer is its own");
 
   memory.failGrant = true;
   answers.push("always");
   const third = { id: "ws-third", name: "Third", cwd: "/third" };
-  assert.deepEqual(await approver.authorize({ caller, target: third, agent: null }), { ok: true, via: "always" });
-  console.log("ok 4 the approver asks once per pair, remembers always, refuses deny and silence");
+  assert.deepEqual(await approver.authorize({ caller, target: third, agent: null, requester: "pane:p1" }), {
+    ok: true,
+    via: "always",
+  });
+
+  const targetWs = { id: "ws-repo", name: "Repo", cwd: repo };
+  assert.equal(await cross.crossWorkspaceCwdRefusal(repo, targetWs), null);
+  assert.equal(await cross.crossWorkspaceCwdRefusal(sub, targetWs), null);
+  assert.equal(await cross.crossWorkspaceCwdRefusal(link, targetWs), null, "a symlink into the target is inside");
+  assert.match(await cross.crossWorkspaceCwdRefusal(outside, targetWs), /inside Repo/);
+  assert.match(await cross.crossWorkspaceCwdRefusal(prefixTwin, targetWs), /inside Repo/);
+  assert.match(await cross.crossWorkspaceCwdRefusal(`${repo}/../elsewhere`, targetWs), /inside Repo/);
+  assert.match(await cross.crossWorkspaceCwdRefusal("ssh://box/home/me", targetWs), /local folder/);
+  assert.match(await cross.crossWorkspaceCwdRefusal("relative", targetWs), /absolute/);
+  console.log("ok 4 the approver asks once per pair and requester, remembers always and a recent deny; cwd stays in the target");
 
   // ── 5. Ownership ───────────────────────────────────────────────────────
   const registry = new AgentTerminalRegistry();
@@ -306,6 +340,16 @@ async function main() {
   assert.equal(registry.transferToWorkspace("p-dev"), true);
   assert.equal(registry.ownerPaneOf("p-dev"), null);
   assert.equal(registry.isActiveOwnedBy("p-dev", null, "p-anyone"), true, "a kept dev server belongs to its workspace");
+
+  registry.register({ paneId: "p-orphan", tabId: "t-orphan", runId: null, ownerPaneId: "p-gone" });
+  assert.equal(registry.isActiveOwnedBy("p-orphan", null, "p-other"), false);
+  registry.releasePaneOwner("p-orphan");
+  assert.equal(registry.ownerPaneOf("p-orphan"), null);
+  assert.equal(
+    registry.isActiveOwnedBy("p-orphan", null, "p-other"),
+    true,
+    "once its opener's pane is gone it follows the rule for every run-less terminal",
+  );
   console.log("ok 5 a cross-workspace terminal is steered only from the pane that opened it");
 }
 

@@ -21,6 +21,7 @@ import {
 } from "./cross-workspace-terminals";
 import type { IpcHandle } from "./ipc";
 import { getTrustedMainWindow } from "./main-window-trust";
+import { loadState } from "./storage";
 
 let store: CrossWorkspaceGrantStore | null = null;
 let approver: CrossWorkspaceApprover | null = null;
@@ -89,7 +90,17 @@ export function registerCrossWorkspaceIpc(handle: IpcHandle): void {
     entry.answer(value!.answer);
     return true;
   });
-  handle("crossWorkspace:grants", async (): Promise<CrossWorkspaceGrant[]> => grantStore().list());
+  handle("crossWorkspace:grants", async (): Promise<CrossWorkspaceGrant[]> => {
+    const grants = await grantStore().list();
+    // A removed workspace's id never comes back, so its grants are dead weight.
+    const live = new Set((await loadState()).workspaces.map((workspace) => workspace.id));
+    const kept: CrossWorkspaceGrant[] = [];
+    for (const grant of grants) {
+      if (live.has(grant.callerWorkspaceId) && live.has(grant.targetWorkspaceId)) kept.push(grant);
+      else await grantStore().revoke(grant.callerWorkspaceId, grant.targetWorkspaceId).catch(() => false);
+    }
+    return kept;
+  });
   handle("crossWorkspace:revoke", async (_event, raw: unknown): Promise<boolean> => {
     const value = raw as { callerWorkspaceId?: unknown; targetWorkspaceId?: unknown } | null;
     if (typeof value?.callerWorkspaceId !== "string" || typeof value.targetWorkspaceId !== "string") return false;

@@ -101,6 +101,24 @@ export async function resolveTargetWorkspace<W extends WorkspaceRef>(
     : { ok: true, workspace: best.workspace, folder: target };
 }
 
+/**
+ * Why `cwd` may not be the folder of a terminal opened in `target` from
+ * another workspace, or null. The user allowed terminals under the target,
+ * so the folder must be a local one inside it.
+ */
+export async function crossWorkspaceCwdRefusal(
+  cwd: string,
+  target: WorkspaceRef,
+  realpath: (path: string) => Promise<string> = realpathOrResolve,
+): Promise<string | null> {
+  if (isRemotePath(cwd) || !isAbsolute(cwd)) {
+    return `cwd must be an absolute local folder inside ${target.name}`;
+  }
+  return isAtOrUnder(await realpath(cwd), await realpath(target.cwd))
+    ? null
+    : `cwd must be inside ${target.name} (${target.cwd})`;
+}
+
 export type CrossWorkspaceAuthKind = "root" | "scoped" | "pane";
 
 /**
@@ -233,6 +251,10 @@ export interface CrossWorkspaceAskInput {
   caller: WorkspaceRef;
   target: WorkspaceRef;
   agent: string | null;
+  // Who asks within the caller workspace (its pane or run). Only calls from
+  // the same requester share one card, so one answer never covers an agent
+  // the card did not name.
+  requester: string;
 }
 
 /** Shows the prompt and resolves with the answer, or null when nobody answered (timeout, no window). */
@@ -246,17 +268,25 @@ export interface CrossWorkspaceApprover {
   authorize(input: CrossWorkspaceAskInput): Promise<CrossWorkspaceDecision>;
 }
 
+// After Deny the pair is refused without asking for a while, so a looping or
+// steered agent cannot keep putting the card in front of the user.
+export const CROSS_WORKSPACE_DENY_COOLDOWN_MS = 5 * 60_000;
+
 /**
  * Asks the user the first time a caller workspace opens a terminal in a
- * target workspace and remembers "always". Calls that arrive while a prompt
- * for the same pair is open wait for that prompt instead of stacking another
- * one, so its answer covers all of them.
+ * target workspace and remembers "always". Calls from one requester that
+ * arrive while its prompt is open wait for that prompt instead of stacking
+ * another one, so its answer covers all of them.
  */
 export function createCrossWorkspaceApprover(deps: {
   store: CrossWorkspaceGrantStore;
   ask: CrossWorkspaceAsk;
+  now?: () => number;
 }): CrossWorkspaceApprover {
+  const now = deps.now ?? Date.now;
   const pending = new Map<string, Promise<CrossWorkspaceDecision>>();
+  const deniedAt = new Map<string, number>();
+  const pairKey = (input: CrossWorkspaceAskInput) => JSON.stringify([input.caller.id, input.target.id]);
   const decide = async (input: CrossWorkspaceAskInput): Promise<CrossWorkspaceDecision> => {
     const answer = await deps.ask(input).catch(() => null);
     if (answer === "always") {
@@ -272,6 +302,10 @@ export function createCrossWorkspaceApprover(deps: {
       return { ok: true, via: "always" };
     }
     if (answer === "once") return { ok: true, via: "once" };
+    if (answer === "deny") {
+      if (deniedAt.size > 256) deniedAt.clear();
+      deniedAt.set(pairKey(input), now());
+    }
     return {
       ok: false,
       message:
@@ -284,7 +318,14 @@ export function createCrossWorkspaceApprover(deps: {
     async authorize(input) {
       if (input.caller.id === input.target.id) return { ok: true, via: "same-workspace" };
       if (await deps.store.has(input.caller.id, input.target.id)) return { ok: true, via: "grant" };
-      const key = JSON.stringify([input.caller.id, input.target.id]);
+      const denied = deniedAt.get(pairKey(input));
+      if (denied !== undefined && now() - denied < CROSS_WORKSPACE_DENY_COOLDOWN_MS) {
+        return {
+          ok: false,
+          message: `the user declined: ${input.caller.name} may not open terminals in ${input.target.name}. Do not retry; open the terminal in your own workspace or ask the user`,
+        };
+      }
+      const key = JSON.stringify([input.caller.id, input.target.id, input.requester]);
       const open = pending.get(key);
       if (open) return open;
       const decision = decide(input).finally(() => pending.delete(key));
