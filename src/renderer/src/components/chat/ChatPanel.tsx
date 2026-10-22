@@ -20,9 +20,7 @@ import { isUnstartedChatRun, type CoraView } from "./cora-view";
 import { needsCoraAccount, openAccountsSettings, useCoraAccountReadiness } from "./account-readiness";
 import DismissErrorButton from "./DismissErrorButton";
 import { filterChatHistory } from "./conversation-search";
-import { chordMatches, mod } from "../../shortcuts/chord";
-
-const FIND_CHORD = mod("f");
+import { isShown, registerFindTarget } from "../find/find-router";
 
 // The Cora Board sub-view. Lazy like App's other heavyweight stacks so the
 // kanban chunk stays out of the startup bundle until the user opens the view.
@@ -138,24 +136,20 @@ export default function ChatPanel({
     if (chatView === "whiteboard") setWhiteboardOpened(true);
   }, [chatView]);
 
-  // Mod+F opens find in the visible chat when focus is inside this panel (or
-  // nowhere). Editors and terminals elsewhere keep their own find.
+  // Mod+F opens find in the visible chat when focus is inside this panel, or
+  // nowhere and the chat was the last thing clicked (find/find-router.ts
+  // decides). Documents and terminals elsewhere keep their own find.
   const panelRef = useRef<HTMLDivElement | null>(null);
   const [findRequest, setFindRequest] = useState(0);
   const canFind = chatView === "chat" && activeRun !== null && !isUnstartedChatRun(activeRun);
   useEffect(() => {
     if (suspendGlobalEvents || !canFind) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || !chordMatches(FIND_CHORD, event)) return;
-      const focused = document.activeElement;
-      const inPanel =
-        !focused || focused === document.body || Boolean(panelRef.current?.contains(focused));
-      if (!inPanel) return;
-      event.preventDefault();
-      setFindRequest((value) => value + 1);
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return registerFindTarget({
+      root: () => panelRef.current,
+      eligible: () => isShown(panelRef.current),
+      primary: () => false,
+      open: () => setFindRequest((value) => value + 1),
+    });
   }, [suspendGlobalEvents, canFind]);
   // A new chat starts in the normal conversation view. Terminal-view state
   // should not leak between runs because their PTYs are run-scoped. When the

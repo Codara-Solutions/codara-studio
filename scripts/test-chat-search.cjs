@@ -96,13 +96,13 @@ async function main() {
     assert.match(panel, /snippet=\{snippet\}/);
   });
 
-  test("Mod+F opens find only for the visible chat with focus in the panel", () => {
-    assert.match(panel, /const FIND_CHORD = mod\("f"\);/);
+  test("Mod+F opens find only for the visible chat, through the shared find router", () => {
+    // find/find-router.ts owns the chord: focus in the panel, or on the body
+    // after the chat was last clicked, opens this find; a document never does.
     assert.match(panel, /if \(suspendGlobalEvents \|\| !canFind\) return;/);
-    assert.match(
-      panel,
-      /!focused \|\| focused === document\.body \|\| Boolean\(panelRef\.current\?\.contains\(focused\)\)/,
-    );
+    assert.match(panel, /return registerFindTarget\(\{\s*root: \(\) => panelRef\.current,/);
+    assert.match(panel, /eligible: \(\) => isShown\(panelRef\.current\),\s*primary: \(\) => false,/);
+    assert.doesNotMatch(panel, /FIND_CHORD/);
     assert.match(panel, /findRequest=\{findRequest\}/);
     // A remount (chat switch) must not reopen find from a stale request.
     assert.match(conversation, /const seenFindRequestRef = useRef\(findRequest\);/);
