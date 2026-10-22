@@ -20,7 +20,7 @@ import type { IpcHandle } from "../ipc";
 import { loadState } from "../storage";
 import { provideCosService } from "./service";
 import { createTaskStore, isTaskWorkspaceId, type TaskStore } from "./task-store";
-import { createCommandRunner, runVerifyGate, stopRunningChecks, type CommandRunner } from "./verify-gate";
+import { createCommandRunner, runVerifyGate, stopRunningChecks, workspaceBaseBranch, type CommandRunner } from "./verify-gate";
 
 export const COS_TASKS_CHANGED_CHANNEL = "cosTasks:changed";
 
@@ -109,6 +109,7 @@ function startVerify(workspaceId: string, taskId: string, runId: string): void {
       runId,
       cwd,
       workspaceDir,
+      baseBranch: workspaceBaseBranch(workspace),
       runCommand: gateCommandRunner(),
       signal: abort.signal,
     });

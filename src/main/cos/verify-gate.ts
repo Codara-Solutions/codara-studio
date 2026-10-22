@@ -1,6 +1,7 @@
 // The verify gate: the only thing that closes a task. It reads the checks the
-// repository owns (.codara/verify.json as committed on the base branch), runs
-// the ones the change can affect in the task's folder, writes each check's full output to a log, and
+// repository owns (.codara/verify.json on the base branch, fetched from
+// origin), runs the ones the change can affect in the task's folder, writes
+// each check's full output to a log, and
 // hands the store the exit codes and log paths as evidence. The store closes
 // the task when every check passed and otherwise sends it back to its worker,
 // or to the user with one plain sentence; no model's opinion is involved.
@@ -21,7 +22,11 @@ import { gitChildEnv } from "../git-env";
 import type { TaskStore } from "./task-store";
 
 export const VERIFY_CONFIG_PATH = join(".codara", "verify.json");
-const DEFAULT_BASES = ["origin/main", "main"];
+const REMOTE = "origin";
+// Where the gate fetches the base branch to: a namespace of Codara's own that
+// it overwrites before every read, so no ref the agent moved is ever trusted.
+const BASE_REF_PREFIX = "refs/codara/verify-base";
+const GIT_TIMEOUT_MS = 90_000;
 const DEFAULT_TIMEOUT_SEC = 20 * 60;
 const MAX_TIMEOUT_SEC = 2 * 60 * 60;
 const CHECK_ID = /^[a-z0-9][a-z0-9_-]{0,39}$/i;
@@ -34,9 +39,8 @@ export interface VerifyCheck {
   timeoutSec?: number;
 }
 
+/** The base branch is the app's choice (VerifyGateOptions.baseBranch); a `base` key an older file has is ignored. */
 export interface VerifyConfig {
-  /** Refs the change is measured against, first that resolves wins. */
-  base: string[];
   checks: VerifyCheck[];
 }
 
@@ -52,7 +56,6 @@ function stringList(raw: unknown, what: string): string[] {
 export function parseVerifyConfig(raw: unknown): VerifyConfig {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new VerifyConfigError("it must be a JSON object");
   const value = raw as Record<string, unknown>;
-  const base = value.base === undefined ? DEFAULT_BASES : stringList(typeof value.base === "string" ? [value.base] : value.base, "base");
   if (!Array.isArray(value.checks) || value.checks.length === 0) throw new VerifyConfigError("it needs at least one check in checks");
   const seen = new Set<string>();
   const checks = value.checks.map((entry, index): VerifyCheck => {
@@ -74,7 +77,7 @@ export function parseVerifyConfig(raw: unknown): VerifyConfig {
     }
     return out;
   });
-  return { base, checks };
+  return { checks };
 }
 
 /** "src/**", "scripts/*.cjs", "**\/*.ts": `**` crosses folders, `*` and `?` stay inside one. */
@@ -224,42 +227,64 @@ export function createCommandRunner(heavy?: { bin: string; env: Record<string, s
     });
 }
 
+// A fetch that waits on a network or an SSH prompt ends with the gate
+// blocked instead of holding the task in verifying.
 export const defaultGitRunner: GitRunner = (args, cwd) =>
   new Promise((resolve, reject) => {
     const child = spawn("git", args, { cwd, env: gitChildEnv(), stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
     let out = "";
+    const timer = setTimeout(() => child.kill("SIGKILL"), GIT_TIMEOUT_MS);
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
       out += chunk;
     });
-    child.on("error", reject);
-    child.on("close", (code) => (code === 0 ? resolve(out) : reject(new Error(`git ${args[0]} exited ${code}`))));
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve(out);
+      else reject(new Error(`git ${args[0]} exited ${code}`));
+    });
   });
 
-/** The merge base the change is measured from and the files it touches, or null when git cannot say. */
-export async function changedSinceBase(
-  cwd: string,
-  bases: readonly string[],
-  git: GitRunner,
-): Promise<{ ref: string; base: string; files: string[] } | null> {
-  for (const ref of bases) {
-    let base: string;
-    try {
-      base = (await git(["merge-base", "HEAD", ref], cwd)).trim();
-    } catch {
-      continue;
-    }
-    if (!base) continue;
-    try {
-      const tracked = await git(["diff", "--name-only", base], cwd);
-      const untracked = await git(["ls-files", "--others", "--exclude-standard"], cwd);
-      const files = [...new Set(`${tracked}\n${untracked}`.split("\n").map((line) => line.trim()).filter(Boolean))];
-      return { ref, base, files };
-    } catch {
-      return null;
-    }
+const BRANCH_NAME = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]{1,200}$/;
+
+/** The branch origin's HEAD points at, asked of origin itself: a local origin/HEAD is the agent's to move. */
+async function remoteDefaultBranch(cwd: string, git: GitRunner): Promise<string | null> {
+  try {
+    const out = await git(["ls-remote", "--symref", REMOTE, "HEAD"], cwd);
+    const match = /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(out);
+    return match && BRANCH_NAME.test(match[1]) ? match[1] : null;
+  } catch {
+    return null;
   }
-  return null;
+}
+
+/** Fetches origin's `branch` into Codara's own ref and returns its commit, or null. */
+async function fetchBase(cwd: string, branch: string, git: GitRunner): Promise<string | null> {
+  const ref = `${BASE_REF_PREFIX}/${branch}`;
+  try {
+    await git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", REMOTE, `+refs/heads/${branch}:${ref}`], cwd);
+    return (await git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], cwd)).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** The merge base with `baseCommit` and the files changed since it, or null when git cannot say. */
+export async function changedSince(cwd: string, baseCommit: string, git: GitRunner): Promise<{ base: string; files: string[] } | null> {
+  try {
+    const base = (await git(["merge-base", "HEAD", baseCommit], cwd)).trim();
+    if (!base) return null;
+    const tracked = await git(["diff", "--name-only", base], cwd);
+    const untracked = await git(["ls-files", "--others", "--exclude-standard"], cwd);
+    const files = [...new Set(`${tracked}\n${untracked}`.split("\n").map((line) => line.trim()).filter(Boolean))];
+    return { base, files };
+  } catch {
+    return null;
+  }
 }
 
 function minutes(seconds: number): string {
@@ -284,6 +309,26 @@ export function failureSentence(evidence: readonly TaskEvidence[], timedOut: Rea
   return `The ${list} checks failed; their logs are in ${failed[0].artifact ? failed[0].artifact.replace(/[\\/][^\\/]+$/, "") : "the task's verify folder"}.`;
 }
 
+/** What the gate needs of a workspace record (@shared/types Workspace). */
+export interface GateWorkspace {
+  id: string;
+  name?: string;
+  cwd: string;
+  remote?: unknown;
+  copyBranch?: { repoCwd: string; baseBranch?: string; createdBy?: { kind: string } };
+}
+
+/**
+ * The branch the user forked the workspace from, or null for origin's
+ * default branch. An agent-made worktree's fork point was the agent's choice,
+ * so it does not count.
+ */
+export function workspaceBaseBranch(workspace: GateWorkspace | null | undefined): string | null {
+  const copy = workspace?.copyBranch;
+  if (!copy?.baseBranch?.trim() || copy.createdBy?.kind === "agent") return null;
+  return copy.baseBranch.trim().replace(/^(?:refs\/heads\/|refs\/remotes\/origin\/|origin\/)/, "") || null;
+}
+
 export interface VerifyGateOptions {
   store: TaskStore;
   workspaceId: string;
@@ -291,6 +336,12 @@ export interface VerifyGateOptions {
   runId: string;
   /** The folder the task's work is in: its worktree, else the workspace's folder. */
   cwd: string | null;
+  /**
+   * The branch on origin the change is measured against and the checks are
+   * read from: the app's choice from the workspace, never anything in the
+   * task's folder. Absent: the branch origin's HEAD names.
+   */
+  baseBranch?: string | null;
   /** The workspace's own folder; a different `cwd` must be a checkout of the same repository. */
   workspaceDir?: string | null;
   runCommand: CommandRunner;
@@ -312,10 +363,11 @@ async function gitCommonDir(cwd: string, git: GitRunner): Promise<string | null>
  * Runs the gate for one verify run and records its result; resolves to the
  * task as it then stands, or null when the run was cancelled.
  *
- * The checks come from .codara/verify.json as committed on the base branch
- * (at the merge base), never from the task's working tree: the agent whose
- * work is being checked cannot loosen what checks it. Only `base`, the refs
- * to measure from, is read from the working tree.
+ * The checks come from .codara/verify.json at the tip of the base branch as
+ * origin has it, fetched now into Codara's own ref; the merge base with it is
+ * what the change is measured from. Nothing in the task's folder (its
+ * working tree, its commits, its local or remote-tracking refs) can choose
+ * the base or loosen the checks.
  */
 export async function runVerifyGate(options: VerifyGateOptions): Promise<Task | null> {
   const { store, workspaceId, taskId, runId } = options;
@@ -334,29 +386,27 @@ export async function runVerifyGate(options: VerifyGateOptions): Promise<Task | 
     }
   }
 
-  let bases = DEFAULT_BASES;
-  try {
-    bases = parseVerifyConfig(JSON.parse(await fs.readFile(join(cwd, VERIFY_CONFIG_PATH), "utf8"))).base;
-  } catch {
-    // The committed copy below decides; a missing or broken working copy only loses its base list.
-  }
-  const changed = await changedSinceBase(cwd, bases, git);
-  if (!changed) {
-    return blocked(`Codara cannot find the base branch (${bases.join(" or ")}) to read the repository's checks from.`);
-  }
-  let config: VerifyConfig;
+  const branch = options.baseBranch?.trim() || (await remoteDefaultBranch(cwd, git));
+  if (!branch) return blocked(`Codara cannot reach ${REMOTE} to find the base branch the repository's checks are read from.`);
+  if (!BRANCH_NAME.test(branch)) return blocked(`The base branch "${branch}" is not a branch name Codara can fetch.`);
+  const ref = `${REMOTE}/${branch}`;
+  const baseCommit = await fetchBase(cwd, branch, git);
+  if (!baseCommit) return blocked(`Codara could not fetch ${ref}, so the repository's checks could not be read.`);
   let raw: string;
   try {
-    raw = await git(["show", `${changed.base}:.codara/verify.json`], cwd);
+    raw = await git(["show", `${baseCommit}:.codara/verify.json`], cwd);
   } catch {
-    return blocked(`${changed.ref} has no .codara/verify.json, so nothing can prove the task is done.`);
+    return blocked(`${ref} has no .codara/verify.json, so nothing can prove the task is done.`);
   }
+  let config: VerifyConfig;
   try {
     config = parseVerifyConfig(JSON.parse(raw));
   } catch (error) {
     const detail = error instanceof VerifyConfigError ? error.message : "it is not valid JSON";
-    return blocked(`The .codara/verify.json on ${changed.ref} cannot be used: ${detail}.`);
+    return blocked(`The .codara/verify.json on ${ref} cannot be used: ${detail}.`);
   }
+  const changed = await changedSince(cwd, baseCommit, git);
+  if (!changed) return blocked(`The task's work shares no history with ${ref}, so the change cannot be measured.`);
 
   const checks = selectChecks(config, changed.files);
   const logDir = join(store.paths(workspaceId).dir, "verify", taskId, runId);

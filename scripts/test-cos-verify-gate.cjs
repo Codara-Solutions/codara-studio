@@ -55,8 +55,8 @@ const WS = "ws-gate";
 function config() {
   const { parseVerifyConfig: parse, VerifyConfigError } = gate;
   const parsed = parse({ checks: [{ id: "types", run: " npm run typecheck ", when: ["src/**"] }] });
-  assert.deepEqual(parsed, { base: ["origin/main", "main"], checks: [{ id: "types", run: "npm run typecheck", when: ["src/**"] }] });
-  assert.deepEqual(parse({ base: "origin/dev", checks: [{ id: "a", run: "true" }] }).base, ["origin/dev"]);
+  assert.deepEqual(parsed, { checks: [{ id: "types", run: "npm run typecheck", when: ["src/**"] }] });
+  assert.equal(parse({ base: ["HEAD"], checks: [{ id: "a", run: "true" }] }).base, undefined, "a file never names its own base");
   const refuses = (raw, pattern) => assert.throws(() => parse(raw), (e) => e instanceof VerifyConfigError && pattern.test(e.message));
   refuses([], /JSON object/);
   refuses({ checks: [] }, /at least one check/);
@@ -82,7 +82,6 @@ function selection() {
   assert.ok(!glob("a.b").test("axb"), "dots are literal");
 
   const cfg = {
-    base: ["main"],
     checks: [
       { id: "types", run: "t", when: ["src/**"] },
       { id: "unit", run: "u", when: ["scripts/**"] },
@@ -92,7 +91,7 @@ function selection() {
   const ids = (checks) => checks.map((check) => check.id);
   assert.deepEqual(ids(select(cfg, ["src/a.ts"])), ["types", "lint"]);
   assert.deepEqual(ids(select(cfg, null)), ["types", "unit", "lint"], "unknown changes run everything");
-  const scoped = { base: ["main"], checks: cfg.checks.slice(0, 2) };
+  const scoped = { checks: cfg.checks.slice(0, 2) };
   assert.deepEqual(ids(select(scoped, ["docs/x.md"])), ["types", "unit"], "a change nothing selects still runs every check");
 }
 
@@ -100,7 +99,9 @@ function git(cwd, ...args) {
   execFileSync("git", args, { cwd, stdio: "ignore" });
 }
 
-function makeRepo(name, verify) {
+// A clone with a bare origin whose main holds `verify`, checked out on a
+// work branch: the gate reads the checks from origin, as in a real checkout.
+function makeRepo(name, verify, { remote = true } = {}) {
   const repo = path.join(TMP, name);
   fs.mkdirSync(path.join(repo, ".codara"), { recursive: true });
   git(repo, "init", "-q", "-b", "main");
@@ -110,8 +111,19 @@ function makeRepo(name, verify) {
   if (verify !== undefined) fs.writeFileSync(path.join(repo, ".codara", "verify.json"), typeof verify === "string" ? verify : JSON.stringify(verify));
   git(repo, "add", "-A");
   git(repo, "commit", "-q", "-m", "init");
+  if (remote) {
+    const origin = path.join(TMP, `${name}-origin.git`);
+    git(TMP, "init", "-q", "--bare", "-b", "main", origin);
+    git(repo, "remote", "add", "origin", origin);
+    git(repo, "push", "-q", "origin", "main");
+  }
   git(repo, "checkout", "-q", "-b", "work");
   return repo;
+}
+
+function commitAll(repo, message) {
+  git(repo, "add", "-A");
+  git(repo, "commit", "-q", "-m", message);
 }
 
 async function verifyingTask(store) {
@@ -126,7 +138,6 @@ async function endToEnd() {
   const runCommand = gate.createCommandRunner(null);
 
   const repo = makeRepo("green", {
-    base: ["main"],
     checks: [
       { id: "types", run: "test -f src/a.ts && echo typed", when: ["src/**"] },
       { id: "base", run: 'test -n "$CODARA_VERIFY_BASE" && echo "base $CODARA_VERIFY_BASE"' },
@@ -152,7 +163,7 @@ async function endToEnd() {
   assert.equal(failed.verify.failures, 1);
   assert.equal(failed.evidence.find((item) => item.checkId === "docs").exitCode, 7);
 
-  const slow = makeRepo("slow", { base: ["main"], checks: [{ id: "slow", run: "sleep 5", timeoutSec: 1 }] });
+  const slow = makeRepo("slow", { checks: [{ id: "slow", run: "sleep 5", timeoutSec: 1 }] });
   const third = await verifyingTask(store);
   const started = Date.now();
   const timedOut = await gate.runVerifyGate({ store, workspaceId: WS, taskId: third.id, runId: third.runId, cwd: slow, runCommand });
@@ -164,30 +175,66 @@ async function endToEnd() {
 async function baseOwnsTheChecks() {
   const store = gate.createTaskStore({ root: path.join(TMP, "cos-base") });
   const runCommand = gate.createCommandRunner(null);
-  const repo = makeRepo("loosened", { base: ["main"], checks: [{ id: "strict", run: "exit 3" }] });
+  const run = async (cwd, extra = {}) => {
+    const { id, runId } = await verifyingTask(store);
+    return gate.runVerifyGate({ store, workspaceId: WS, taskId: id, runId, cwd, runCommand, ...extra });
+  };
+  const repo = makeRepo("loosened", { checks: [{ id: "strict", run: "exit 3" }] });
+
   // The agent being checked rewrites the checks in its own working tree.
-  fs.writeFileSync(path.join(repo, ".codara", "verify.json"), JSON.stringify({ base: ["main"], checks: [{ id: "strict", run: "true" }] }));
-  const one = await verifyingTask(store);
-  const task = await gate.runVerifyGate({ store, workspaceId: WS, taskId: one.id, runId: one.runId, cwd: repo, runCommand });
-  assert.notEqual(task.state, "done", "the committed checks on the base branch decide, not the working copy");
-  assert.equal(task.evidence[0].exitCode, 3);
+  fs.writeFileSync(path.join(repo, ".codara", "verify.json"), JSON.stringify({ checks: [{ id: "strict", run: "true" }] }));
+  let task = await run(repo);
+  assert.notEqual(task.state, "done", "the checks on origin decide, not the working copy");
+  assert.equal(task.evidence.at(-1).exitCode, 3);
+
+  // Route 1: it commits a verify.json that names HEAD as its own base.
+  fs.writeFileSync(path.join(repo, ".codara", "verify.json"), JSON.stringify({ base: ["HEAD"], checks: [{ id: "strict", run: "true" }] }));
+  commitAll(repo, "loosen the checks");
+  task = await run(repo);
+  assert.notEqual(task.state, "done", "a committed base: [HEAD] is ignored");
+  assert.equal(task.evidence.at(-1).exitCode, 3);
+
+  // Route 2: it moves the local refs a base could be read from to its commit.
+  git(repo, "update-ref", "refs/heads/main", "HEAD");
+  git(repo, "update-ref", "refs/remotes/origin/main", "HEAD");
+  git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
+  task = await run(repo);
+  assert.notEqual(task.state, "done", "moved local refs are not the base: origin is fetched");
+  assert.equal(task.evidence.at(-1).exitCode, 3);
+  const base = fs.readFileSync(task.evidence.at(-1).artifact, "utf8");
+  assert.match(base, /exit 3/);
+
+  // The base comes from the app (the workspace's fork point), never the tree.
+  git(repo, "push", "-q", "origin", "HEAD:refs/heads/dev");
+  task = await run(repo, { baseBranch: "dev" });
+  assert.equal(task.state, "done", "origin/dev, which the workspace names, holds the looser checks");
+  const missing = await run(repo, { baseBranch: "nope" });
+  assert.equal(missing.state, "needs_you");
+  assert.match(missing.needsYouReason, /could not fetch origin\/nope/);
+
+  const pick = gate.workspaceBaseBranch;
+  assert.equal(pick({ id: "w", cwd: "/r" }), null, "a plain workspace uses origin's default branch");
+  assert.equal(pick({ id: "w", cwd: "/r", copyBranch: { repoCwd: "/r", baseBranch: "origin/Cora" } }), "Cora", "the branch the user forked from");
+  assert.equal(pick({ id: "w", cwd: "/r", copyBranch: { repoCwd: "/r", baseBranch: "Cora", createdBy: { kind: "agent" } } }), null, "never an agent's fork point");
 
   const fresh = makeRepo("fresh", undefined);
-  fs.writeFileSync(path.join(fresh, ".codara", "verify.json"), JSON.stringify({ base: ["main"], checks: [{ id: "ok", run: "true" }] }));
-  const two = await verifyingTask(store);
-  const notYet = await gate.runVerifyGate({ store, workspaceId: WS, taskId: two.id, runId: two.runId, cwd: fresh, runCommand });
+  fs.writeFileSync(path.join(fresh, ".codara", "verify.json"), JSON.stringify({ checks: [{ id: "ok", run: "true" }] }));
+  const notYet = await run(fresh);
   assert.equal(notYet.state, "needs_you", "checks that exist only on the branch cannot close its task");
-  assert.match(notYet.needsYouReason, /^main has no \.codara\/verify\.json/);
+  assert.match(notYet.needsYouReason, /^origin\/main has no \.codara\/verify\.json/);
+
+  const offline = makeRepo("offline", { checks: [{ id: "ok", run: "true" }] }, { remote: false });
+  const noRemote = await run(offline);
+  assert.equal(noRemote.state, "needs_you");
+  assert.match(noRemote.needsYouReason, /cannot reach origin/);
 
   // A worktree of the same repository is accepted; a folder of another one is not.
   const linked = path.join(TMP, "loosened-wt");
-  git(repo, "worktree", "add", "-q", "-b", "wt", linked, "main");
-  const three = await verifyingTask(store);
-  const fromWorktree = await gate.runVerifyGate({ store, workspaceId: WS, taskId: three.id, runId: three.runId, cwd: linked, workspaceDir: repo, runCommand });
+  git(repo, "worktree", "add", "-q", "-b", "wt", linked, "origin/main");
+  const fromWorktree = await run(linked, { workspaceDir: repo });
   assert.equal(fromWorktree.evidence.at(-1).checkId, "strict", "a worktree of the workspace's repository runs its checks");
-  const elsewhere = makeRepo("elsewhere", { base: ["main"], checks: [{ id: "ok", run: "true" }] });
-  const four = await verifyingTask(store);
-  const foreign = await gate.runVerifyGate({ store, workspaceId: WS, taskId: four.id, runId: four.runId, cwd: elsewhere, workspaceDir: repo, runCommand });
+  const elsewhere = makeRepo("elsewhere", { checks: [{ id: "ok", run: "true" }] });
+  const foreign = await run(elsewhere, { workspaceDir: repo });
   assert.equal(foreign.state, "needs_you");
   assert.match(foreign.needsYouReason, /not a checkout of this workspace's repository/);
 }
@@ -224,7 +271,7 @@ async function runnerEnds() {
 
   // A cancelled gate run records nothing: a newer run owns the task.
   const store = gate.createTaskStore({ root: path.join(TMP, "cos-cancel") });
-  const repo = makeRepo("cancel", { base: ["main"], checks: [{ id: "slow", run: "sleep 5" }] });
+  const repo = makeRepo("cancel", { checks: [{ id: "slow", run: "sleep 5" }] });
   const { id, runId } = await verifyingTask(store);
   const runAbort = new AbortController();
   setTimeout(() => runAbort.abort(), 300);
@@ -242,7 +289,7 @@ async function blocked() {
     [null, /cannot tell which folder/],
     [path.join(TMP, "missing"), /cannot tell which folder/],
     [makeRepo("none", undefined), /has no \.codara\/verify\.json/],
-    [makeRepo("broken", "{nope"), /^The \.codara\/verify\.json on main cannot be used: it is not valid JSON/],
+    [makeRepo("broken", "{nope"), /^The \.codara\/verify\.json on origin\/main cannot be used: it is not valid JSON/],
     [makeRepo("empty", { checks: [] }), /cannot be used: it needs at least one check/],
   ];
   for (const [cwd, pattern] of cases) {

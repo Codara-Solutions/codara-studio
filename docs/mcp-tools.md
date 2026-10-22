@@ -668,18 +668,23 @@ The states are `inbox`, `ready`, `dispatched`, `verifying`, `needs_you`,
 `verifying` starts the verify gate (`src/main/cos/verify-gate.ts`), which
 runs the repository's own checks in the task's `assignee.worktree` (a
 checkout of the workspace's repository), or in the workspace's folder. The
-checks are read from `.codara/verify.json` as committed on the base branch,
-never from the task's working tree, so the work being checked cannot loosen
-them; a newer verify run of the task cancels the older one. Each check is a shell
-command with optional `when` globs (it runs when the change touches a
-matching file) and `timeoutSec`; `base` lists the refs the change is
-measured from, and the commands see the merge base as `CODARA_VERIFY_BASE`.
+checks are read from `.codara/verify.json` on the base branch as `origin`
+has it, fetched at that moment into Codara's own ref
+(`refs/codara/verify-base/<branch>`). The base branch is the app's choice:
+the branch the user forked the workspace from, else the branch `origin`'s
+HEAD names. Nothing in the task's folder (its working tree, its commits, a
+`base` key in its `verify.json`, its local or remote-tracking refs) can
+choose the base or loosen the checks. A newer verify run of the task cancels
+the older one. Each check is a shell command with optional `when` globs (it
+runs when the change touches a matching file) and `timeoutSec`; the change
+is measured from the merge base with the fetched branch, which the commands
+see as `CODARA_VERIFY_BASE`.
 They run through `codara-heavy`, one at a time machine-wide and
 memory-capped, with each check's full output kept as a log. Every check
 green closes the task with the exit codes and log paths as evidence. A red
 run sends it back to `dispatched`; the third red run in a row, a missing or
-broken `verify.json`, or an unknown folder sends it to `needs_you` with one
-sentence. Preview steps are not run yet.
+broken `verify.json`, a base branch it cannot fetch, or an unknown folder
+sends it to `needs_you` with one sentence. Preview steps are not run yet.
 
 The workspace is the caller's own, as for the status, with the same
 `not_in_codara_workspace`, `workspace_gone` and `codara_offline` answers.
