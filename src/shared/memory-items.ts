@@ -473,6 +473,13 @@ export const MEMORY_DUPLICATE_SIMILARITY = 0.75;
 
 // ── secret scanning ─────────────────────────────────────────────────────────
 
+// A keyword starts after anything but a letter, so "AWS_SECRET_ACCESS_KEY="
+// and "DB_PASSWORD:" count; "_KEY" or "_ACCESS_KEY" may follow it.
+const KEYWORD_SECRET =
+  /(?<![A-Za-z])(?:password|passwd|pwd|passphrase|secret|token|api[_ -]?key|access[_ -]?key|contrase(?:n|ñ)a|clave|mot de passe|passwort)(?:[_-](?:access[_-]?)?key)?\s*(?:is|es|=|:)\s*\S{6,}/i;
+const BEARER_TOKEN = /\bbearer\s+[A-Za-z0-9._~+/-]{20,}=*/i;
+const URL_CREDENTIALS = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:[^\s@/]{3,}@/i;
+
 const SECRET_PATTERNS: RegExp[] = [
   /\b(?:sk|rk|pk)-(?:ant-|proj-|live-|test-)?[A-Za-z0-9_-]{16,}/,
   /\bgh[pousr]_[A-Za-z0-9]{20,}/,
@@ -483,8 +490,9 @@ const SECRET_PATTERNS: RegExp[] = [
   /\bAIza[0-9A-Za-z_-]{30,}/,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/,
-  /\b(?:password|passwd|pwd|passphrase|secret|token|api[_ -]?key|access[_ -]?key|contrase(?:n|ñ)a|clave|mot de passe|passwort)\s*(?:is|es|=|:)\s*\S{6,}/i,
-  /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:[^\s@/]{3,}@/i,
+  BEARER_TOKEN,
+  KEYWORD_SECRET,
+  URL_CREDENTIALS,
 ];
 
 function luhnValid(digits: string): boolean {
@@ -524,9 +532,6 @@ export function containsSecret(text: string): boolean {
 
 export const SECRET_REDACTED = "[redacted]";
 
-const KEYWORD_SECRET = SECRET_PATTERNS[SECRET_PATTERNS.length - 2];
-const URL_CREDENTIALS = SECRET_PATTERNS[SECRET_PATTERNS.length - 1];
-
 // containsSecret refuses a whole memory on a hint; scrubbing rewrites what
 // the user said, so it replaces only what reads like a credential. A value
 // after "password is" must hold a digit or a symbol ("the token is expired"
@@ -535,6 +540,14 @@ const URL_CREDENTIALS = SECRET_PATTERNS[SECRET_PATTERNS.length - 1];
 // or a path.
 function credentialLike(value: string): boolean {
   return /\d/.test(value) || /[^A-Za-z]/.test(value);
+}
+
+// Mixed case and a digit, not a hex id or hash. "/" belongs to base64 and to
+// paths, so a token holding one must be plain base64 parts ("wJal/K7MD/bPx"),
+// not "/Users/x" or "fix-login2/src".
+function opaqueToken(token: string): boolean {
+  if (!/[a-z]/.test(token) || !/[A-Z]/.test(token) || !/\d/.test(token) || /^[a-f0-9-]+$/i.test(token)) return false;
+  return !token.includes("/") || /^[A-Za-z0-9+]+(?:\/[A-Za-z0-9+]+)+={0,2}$/.test(token);
 }
 
 /**
@@ -560,6 +573,8 @@ export function scrubSecrets(text: string): string {
           credentialLike(value) && !`${value}${tail}`.startsWith(SECRET_REDACTED) ? `${head}${SECRET_REDACTED}${tail}` : whole,
         ),
       );
+    } else if (pattern === BEARER_TOKEN) {
+      out = out.replace(global, (match) => (/\d/.test(match) ? match.replace(/^(bearer\s+)[\s\S]*$/i, `$1${SECRET_REDACTED}`) : match));
     } else if (pattern === URL_CREDENTIALS) {
       out = out.replace(global, (match) => `${match.slice(0, match.indexOf("://") + 3)}${SECRET_REDACTED}@`);
     } else {
@@ -571,8 +586,8 @@ export function scrubSecrets(text: string): string {
     if (digits.length < 13 || digits.length > 19 || !luhnValid(digits)) return match;
     return `${SECRET_REDACTED}${match.slice(match.trimEnd().length)}`;
   });
-  return out.replace(/(?<![\w./:@#?&=%-])[A-Za-z0-9+_=-]{36,}(?![\w./-])/g, (token) =>
-    /[a-z]/.test(token) && /[A-Z]/.test(token) && /\d/.test(token) && !/^[a-f0-9-]+$/i.test(token) ? SECRET_REDACTED : token,
+  return out.replace(/(?<![\w./:@#?&=%-])[A-Za-z0-9+/_=-]{36,}(?![\w./-])/g, (token) =>
+    opaqueToken(token) ? SECRET_REDACTED : token,
   );
 }
 

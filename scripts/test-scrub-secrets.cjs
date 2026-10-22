@@ -42,6 +42,22 @@ function replacesCredentials() {
   assert.equal(scrub("password=Tr0ub4dor&3"), "password=[redacted]");
 }
 
+// Shapes the first scrubber let through: a keyword glued to a variable name
+// by "_", a key holding "/", and a Bearer token made only of hex.
+function catchesEnvAndBearer() {
+  const aws = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+  assert.equal(scrub(`AWS_SECRET_ACCESS_KEY=${aws}`), "AWS_SECRET_ACCESS_KEY=[redacted]");
+  assert.equal(scrub(`export aws_secret_access_key = ${aws}`), "export aws_secret_access_key = [redacted]");
+  assert.equal(scrub(`GITHUB_TOKEN=Zq8Xw2Lp9Rt4Vb7Nm3Kd`), "GITHUB_TOKEN=[redacted]");
+  assert.equal(scrub(`DB_PASSWORD: hunter2hunter2`), "DB_PASSWORD: [redacted]");
+  assert.equal(scrub(`the key is ${aws} ok`), "the key is [redacted] ok");
+  assert.equal(scrub(`here ${aws}`), "here [redacted]");
+  const hex = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+  assert.equal(scrub(`curl -H "Authorization: Bearer ${hex}" https://api.x.io`), `curl -H "Authorization: Bearer [redacted]" https://api.x.io`);
+  assert.equal(scrub(`bearer ${hex.slice(0, 32)}`), "bearer [redacted]");
+  for (const text of [`AWS_SECRET_ACCESS_KEY=${aws}`, `Bearer ${hex}`]) assert.ok(memory.containsSecret(text), text);
+}
+
 function leavesProseAlone() {
   for (const plain of [
     "run npm test in src/main and open PR #42",
@@ -84,7 +100,7 @@ function idempotent() {
 
 (async () => {
   memory = await load();
-  const suites = { replacesCredentials, leavesProseAlone, idempotent };
+  const suites = { replacesCredentials, catchesEnvAndBearer, leavesProseAlone, idempotent };
   let failed = 0;
   for (const [name, run] of Object.entries(suites)) {
     try {
