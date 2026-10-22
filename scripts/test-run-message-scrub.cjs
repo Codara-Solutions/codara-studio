@@ -1,8 +1,11 @@
 // A key the user pastes into a Cora chat never reaches the run's files:
 // addRunMessage and answerRunQuestion scrub user text (scrubSecrets in
-// src/shared/memory-items.ts) before it is written to run.json, events.jsonl
-// or a manager prompt. Runs against the REAL run-store.ts with the manager
-// backend stubbed, the same esbuild/stub technique as
+// src/shared/memory-items.ts) before it is written to run.json or
+// events.jsonl. The model sees the key only in the live prompt of the turn
+// that delivers it (src/main/orchestration/pasted-secrets.ts), so it can
+// store it; later turns, and anything the run writes, even the model
+// repeating the key, stay scrubbed. Runs against the REAL run-store.ts with
+// the manager backend stubbed, the same esbuild/stub technique as
 // scripts/test-queued-messages.cjs.
 //
 //   node scripts/test-run-message-scrub.cjs
@@ -167,11 +170,14 @@ async function waitFor(condition, ms = 4000) {
 const prompts = [];
 globalThis.__coraManagerStub = async (input) => {
   prompts.push(String(input.prompt ?? ""));
+  // As a real backend does once the provider has the turn.
+  await input.onPromptAccepted?.();
   return {
     decision: {
       status: "ask_user",
-      summary: "stub turn",
-      question: "Which account should the deploy use?",
+      // The model repeats what it was shown: the run must not write it.
+      summary: `stub turn; I saw ${KEY} and ${PASSWORD}`,
+      question: `Which account should the deploy with ${KEY} use?`,
       questionCategory: "irreducible_product_scope",
       questionReason: "The stub always asks so the run settles.",
       steps: [],
@@ -215,10 +221,26 @@ async function main() {
   check("the answer is kept, with the password replaced", answer?.message === "use prod, password: [redacted]", answer?.message);
   await waitFor(() => prompts.length >= 2);
 
+  check("the turn that delivers the note sees the key", prompts[0]?.includes(KEY), prompts[0]?.slice(-400));
+  check("the turn that delivers the answer sees the password", prompts[1]?.includes(PASSWORD), prompts[1]?.slice(-400));
+
+  // A later turn: the earlier messages are history now, scrubbed.
+  const answered = readRun();
+  const nextQuestion = answered.humanMessages.filter((message) => message.kind === "question").at(-1);
+  if (nextQuestion && answered.blockedOn) {
+    await runStore.answerRunQuestion({ runId, questionMessageId: nextQuestion.id, message: "staging is fine" });
+  } else {
+    await runStore.addRunMessage({ runId, author: "user", kind: "note", message: "staging is fine" });
+  }
+  await waitFor(() => prompts.length >= 3);
+  check("a third turn ran", prompts.length >= 3, prompts.length);
+  check("later turns never see the key or the password", prompts.slice(2).every((prompt) => !prompt.includes(KEY) && !prompt.includes(PASSWORD)));
+
   const files = runFiles(runId);
-  check("no run file holds the key", !files.includes(KEY));
-  check("no run file holds the password", !files.includes(PASSWORD));
-  check("no manager prompt holds either", prompts.every((prompt) => !prompt.includes(KEY) && !prompt.includes(PASSWORD)), prompts.length);
+  check("no run file holds the key, though the model repeated it", !files.includes(KEY));
+  check("no run file holds the password, though the model repeated it", !files.includes(PASSWORD));
+  check("the model's question was kept, with the key it repeated replaced", files.includes("Which account should the deploy with [redacted] use?"));
+  check("run.json is still valid JSON", Boolean(readRun().id));
 
   // The first message of a new chat names it and, on the direct lane, is the
   // worker's task: both come from the scrubbed text. The stubbed worker

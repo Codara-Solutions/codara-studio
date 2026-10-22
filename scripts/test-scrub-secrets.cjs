@@ -26,6 +26,30 @@ async function load() {
   return mod.exports;
 }
 
+async function loadPasted() {
+  const out = await esbuild.build({
+    entryPoints: [path.join(ROOT, "src", "main", "orchestration", "pasted-secrets.ts")],
+    bundle: true,
+    write: false,
+    platform: "node",
+    format: "cjs",
+    logLevel: "silent",
+    plugins: [
+      {
+        name: "shared-alias",
+        setup(build) {
+          build.onResolve({ filter: /^@shared\// }, (args) => ({
+            path: path.join(ROOT, "src", "shared", `${args.path.slice("@shared/".length)}.ts`),
+          }));
+        },
+      },
+    ],
+  });
+  const mod = { exports: {} };
+  new Function("module", "exports", "require", out.outputFiles[0].text)(mod, mod.exports, require);
+  return mod.exports;
+}
+
 let memory;
 const scrub = (text) => memory.scrubSecrets(text);
 
@@ -131,9 +155,56 @@ function idempotent() {
   assert.equal(scrub("password=[redacted]."), "password=[redacted].");
 }
 
+// run-store redacts these exact pieces wherever a run writes later, in case
+// the model repeats a key it was shown.
+function listsWhatItReplaced() {
+  const aws = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+  const text = `AWS_SECRET_ACCESS_KEY=${aws} and postgres://admin:s3cretpw@db/x, card 4012888888881881, Bearer 9f86d081884c7d659a2feaa0c55ad015`;
+  assert.deepEqual(memory.secretsIn(text).sort(), [aws, "admin:s3cretpw", "4012888888881881", "9f86d081884c7d659a2feaa0c55ad015"].sort());
+  assert.deepEqual(memory.secretsIn("nothing to see here"), []);
+  for (const secret of memory.secretsIn(text)) assert.ok(text.includes(secret), secret);
+}
+
+// The live-prompt side (src/main/orchestration/pasted-secrets.ts): the raw
+// text for the one prompt that delivers it, then gone; the keys replaced in
+// anything written later, JSON included.
+async function pastedSecrets() {
+  const pasted = await loadPasted();
+  const key = "sk-proj-Zq8Xw2Lp9Rt4Vb7Nm3Kd6Hf1Gj5Sc0Ya";
+  const raw = `  deploy with ${key} please `;
+  const stored = pasted.scrubPastedText(raw);
+  assert.equal(stored, "  deploy with [redacted] please ");
+  assert.equal(pasted.scrubPastedText("no key here"), "no key here");
+  assert.equal(pasted.livePastedText("deploy with [redacted] please"), raw.trim(), "the live prompt gets the raw text");
+
+  // A direct-lane worker prompt read back from disk: the newest copy is
+  // this turn's message, an older copy is history and stays scrubbed.
+  const prompt = `History:\nuser: deploy with [redacted] please\n\nTask:\ndeploy with [redacted] please\n`;
+  const live = pasted.withPastedText(prompt);
+  assert.equal(live.prompt, `History:\nuser: deploy with [redacted] please\n\nTask:\n${raw.trim()}\n`);
+  assert.deepEqual(live.used, ["deploy with [redacted] please"]);
+  pasted.forgetPastedText(live.used);
+  assert.equal(pasted.livePastedText("deploy with [redacted] please"), undefined, "once delivered, gone");
+  assert.equal(pasted.withPastedText(prompt).prompt, prompt, "a relaunch reads the scrubbed text");
+
+  const later = time => pasted.livePastedText("x [redacted]", time);
+  pasted.scrubPastedText(`x ${key.replace("Zq8", "Ab1")}`, 1_000);
+  assert.ok(later(1_000 + 60_000), "kept for the turn");
+  assert.equal(later(1_000 + 2 * 60 * 60 * 1000), undefined, "dropped after an hour");
+
+  // The model repeating the key, in text and in serialized JSON.
+  assert.equal(pasted.redactPastedSecrets(`stored ${key} as OPENAI_KEY`), "stored [redacted] as OPENAI_KEY");
+  const tricky = 'password: Tr0ub"4dor\\3x';
+  pasted.scrubPastedText(tricky);
+  const json = JSON.stringify({ text: `echo ${key} and Tr0ub"4dor\\3x` });
+  const redacted = pasted.redactPastedSecrets(json, { json: true });
+  assert.deepEqual(JSON.parse(redacted), { text: "echo [redacted] and [redacted]" }, "still valid JSON");
+  assert.deepEqual(pasted.redactPastedSecretsIn({ a: [key] }), { a: ["[redacted]"] });
+}
+
 (async () => {
   memory = await load();
-  const suites = { replacesCredentials, catchesEnvAndBearer, fewerFalsePositives, leavesProseAlone, idempotent };
+  const suites = { replacesCredentials, catchesEnvAndBearer, fewerFalsePositives, leavesProseAlone, idempotent, listsWhatItReplaced, pastedSecrets };
   let failed = 0;
   for (const [name, run] of Object.entries(suites)) {
     try {

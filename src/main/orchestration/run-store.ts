@@ -96,7 +96,14 @@ import {
   unresolvedRunQuestions,
 } from "@shared/run-questions";
 import { makeId } from "@shared/ids";
-import { scrubSecrets } from "@shared/memory-items";
+import {
+  forgetPastedText,
+  livePastedText,
+  redactPastedSecrets,
+  redactPastedSecretsIn,
+  scrubPastedText,
+  withPastedText,
+} from "./pasted-secrets";
 import { stripAnsiAndControls } from "@shared/agent-patterns";
 import {
   formatPaneCollapsedBlock,
@@ -715,25 +722,27 @@ function assertManagerDecisionMutationCurrent(runId: string | undefined): void {
   }
 }
 
+// Events are written to events.jsonl; a key the user pasted never is
+// (pasted-secrets.ts), even when the model repeats it.
 const appendEvent = (
-  ...args: Parameters<typeof appendEventRaw>
+  ...[input, ...rest]: Parameters<typeof appendEventRaw>
 ): ReturnType<typeof appendEventRaw> => {
-  assertManagerDecisionMutationCurrent(args[0].runId);
-  return appendEventRaw(...args);
+  assertManagerDecisionMutationCurrent(input.runId);
+  return appendEventRaw(redactPastedSecretsIn(input), ...rest);
 };
 
 const appendEvents = (
-  ...args: Parameters<typeof appendEventsRaw>
+  ...[inputs, ...rest]: Parameters<typeof appendEventsRaw>
 ): ReturnType<typeof appendEventsRaw> => {
-  for (const input of args[0]) assertManagerDecisionMutationCurrent(input.runId);
-  return appendEventsRaw(...args);
+  for (const input of inputs) assertManagerDecisionMutationCurrent(input.runId);
+  return appendEventsRaw(redactPastedSecretsIn(inputs), ...rest);
 };
 
 const appendBufferedEvent = (
-  ...args: Parameters<typeof appendBufferedEventRaw>
+  ...[input, ...rest]: Parameters<typeof appendBufferedEventRaw>
 ): ReturnType<typeof appendBufferedEventRaw> => {
-  assertManagerDecisionMutationCurrent(args[0].runId);
-  return appendBufferedEventRaw(...args);
+  assertManagerDecisionMutationCurrent(input.runId);
+  return appendBufferedEventRaw(redactPastedSecretsIn(input), ...rest);
 };
 
 // One-shot per process: fired lazily from listRuns(). Keeps the runs/ dir
@@ -1467,8 +1476,9 @@ async function directChatPassModel(run: RunState): Promise<string> {
 
 export async function startAutopilot(input: StartAutopilotInput): Promise<RunState> {
   // The first message names the chat and, on the direct lane, becomes the
-  // worker's task; scrubbed here, before either is written.
-  if (input.initialUserNote) input = { ...input, initialUserNote: scrubSecrets(input.initialUserNote) };
+  // worker's task; scrubbed here, before either is written. Only the live
+  // prompt that delivers it sees the key (pasted-secrets.ts).
+  if (input.initialUserNote) input = { ...input, initialUserNote: scrubPastedText(input.initialUserNote) };
   // "Always verify edits with a worker" promises a verifier on every change,
   // which only the managed path provides; an explicit direct request from the
   // caller still wins.
@@ -6812,7 +6822,9 @@ async function prepareManagerTurn(
     // memory sections are replayed here, in the dynamic half, and never in the
     // cacheable system prompt. Read at turn time so a memory written a minute
     // ago is already live for the next turn.
-    prompt: buildManagerTurnPrompt(prepared, inputMessages, {
+    // The new messages carry what the user pasted in this live prompt only;
+    // memoryQuery above and every replay read the stored, scrubbed text.
+    prompt: buildManagerTurnPrompt(prepared, inputMessages.map(withLiveUserText), {
       followsSendNow,
       includeCanonicalReplay,
       compactionSummary: includeCanonicalReplay ? compactionReplaySummary(prepared) : null,
@@ -6838,6 +6850,11 @@ async function prepareManagerTurn(
         query: memoryQuery,
       }),
   };
+}
+
+function withLiveUserText(message: HumanRunMessage): HumanRunMessage {
+  const raw = message.author === "user" ? livePastedText(message.message) : undefined;
+  return raw ? { ...message, message: raw } : message;
 }
 
 const DELIVERY_RANK: Record<RunMessageDeliveryState, number> = {
@@ -7254,6 +7271,7 @@ async function askManagerBackendUnderTurnLock(
         onPromptAccepted: async () => {
           providerTurnStarted = true;
           promptAcceptedCalls.add(callId);
+          forgetPastedText(preparedTurn.inputMessages.map((message) => message.message));
           await updateManagerInputDelivery(
             run.id,
             callId,
@@ -11033,7 +11051,7 @@ export async function postRunQuestion(input: PostRunQuestionInput): Promise<Post
 
 /** Validate and answer exactly one question, then apply its resume strategy. */
 export async function answerRunQuestion(input: AnswerRunQuestionInput): Promise<RunState> {
-  input = { ...input, message: scrubSecrets(input.message) };
+  input = { ...input, message: scrubPastedText(input.message) };
   const run = await requireRun(input.runId);
   if (activeConversationRewinds.has(run.id)) {
     throw new Error("Conversation rewind is still in progress. Try answering again when it finishes.");
@@ -12476,8 +12494,9 @@ export async function addRunMessage(
   retriedAfterEpochMove = false,
 ): Promise<RunState> {
   // A person may paste a key into the chat. Everything below writes the text
-  // to run.json, events.jsonl or a worker's prompt, so it is scrubbed first.
-  if (input.author === "user") input = { ...input, message: scrubSecrets(input.message) };
+  // to run.json, events.jsonl or a worker's prompt, so it is scrubbed first;
+  // only the live prompt that delivers it sees the key (pasted-secrets.ts).
+  if (input.author === "user") input = { ...input, message: scrubPastedText(input.message) };
   let run = await requireRun(input.runId);
   // A desktop chat may start on the direct lane; a follow-up that needs
   // parallel workers or a Studio surface the direct worker cannot write
@@ -14724,8 +14743,8 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
   });
 
   await fs.mkdir(paths.attemptDir, { recursive: true });
-  await fs.writeFile(paths.taskJson, JSON.stringify(envelope, null, 2), "utf8");
-  await fs.writeFile(paths.promptMd, prompt, "utf8");
+  await fs.writeFile(paths.taskJson, redactPastedSecrets(JSON.stringify(envelope, null, 2), { json: true }), "utf8");
+  await fs.writeFile(paths.promptMd, redactPastedSecrets(prompt), "utf8");
 
   attempt.promptPath = paths.promptMd;
   attempt.finalReportPath = paths.finalReportJson;
@@ -14883,6 +14902,10 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
     (task.runtimePreference === "claude" ||
       task.runtimePreference === "codex" ||
       task.runtimePreference === "grok");
+  // A direct chat's worker is the turn that delivers the user's message, so
+  // its Pi session gets what they pasted, in memory; prompt.md, a relaunch
+  // and the shell/manual pty paste keep the scrubbed text.
+  const livePiPrompt = isPiWorker && run.executionMode === "direct" ? withPastedText(promptText) : null;
   const workerSettings = isPiWorker && !isAutomationRun ? await loadSettings() : null;
   const usableWorkerRuntimes = workerSettings
     ? await detectConfiguredAgentRuntimes()
@@ -15069,7 +15092,7 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
           attemptId: attempt.id,
           paths,
           cwd: attempt.cwd,
-          promptText,
+          promptText: livePiPrompt?.prompt ?? promptText,
           command,
           model: piWorkerModel!,
           launchAborted: () => workerLaunchAborted(attempt.id),
@@ -15085,6 +15108,7 @@ async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promis
         });
   } finally {
     if (peerCommsAcquired) releasePeerCommsWatcher(run.id);
+    if (livePiPrompt) forgetPastedText(livePiPrompt.used);
   }
 
   run = await requireRun(input.runId);
@@ -18468,7 +18492,7 @@ async function writeRunFile(run: RunState): Promise<void> {
   // run.json is machine-read, never shown to a human, so persist it compact —
   // no pretty-print whitespace. Human-facing artifacts (spark-call request/
   // response files, final reports) stay pretty-printed elsewhere.
-  await fs.writeFile(tmp, JSON.stringify(run), "utf8");
+  await fs.writeFile(tmp, redactPastedSecrets(JSON.stringify(run), { json: true }), "utf8");
   let lastError: unknown = null;
   for (let attempt = 0; attempt < 5; attempt += 1) {
     try {

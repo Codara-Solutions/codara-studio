@@ -570,18 +570,16 @@ function opaqueToken(token: string): boolean {
   return !token.includes("/") || /^[A-Za-z0-9+/]+={0,2}$/.test(token);
 }
 
-/**
- * The text with the credentials in it replaced by "[redacted]", for text a
- * person typed that is about to be written to disk (run files, the task
- * list). The keyword keeps its keyword ("password is [redacted]") and a URL
- * its scheme and host, so the text still says what was there. Text without
- * one comes back as it was.
- */
-export function scrubSecrets(text: string): string {
+// Replaces what reads like a credential and, given `found`, lists each
+// replaced piece exactly as it stood in the text.
+function scrub(text: string, found?: string[]): string {
   if (!containsSecret(text)) return text;
-  let out = text.replace(
-    /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
-    `${SECRET_REDACTED} private key`,
+  const replaced = (secret: string, replacement: string): string => {
+    found?.push(secret);
+    return replacement;
+  };
+  let out = text.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, (block) =>
+    replaced(block, `${SECRET_REDACTED} private key`),
   );
   for (const pattern of SECRET_PATTERNS) {
     const global = new RegExp(pattern.source, `${pattern.flags.replace("g", "")}g`);
@@ -590,26 +588,54 @@ export function scrubSecrets(text: string): string {
         match.replace(/^(.*?(?:\bis|\bes|=|:)\s*)(\S+?)([.,;:!?)\]]*)$/i, (whole, head: string, value: string, tail: string) =>
           // Already scrubbed: "[redacted]" would otherwise lose its "]" to
           // the tail and gain another on every pass.
-          credentialLike(value) && !`${value}${tail}`.startsWith(SECRET_REDACTED) ? `${head}${SECRET_REDACTED}${tail}` : whole,
+          credentialLike(value) && !`${value}${tail}`.startsWith(SECRET_REDACTED)
+            ? replaced(value, `${head}${SECRET_REDACTED}${tail}`)
+            : whole,
         ),
       );
     } else if (pattern === BEARER_TOKEN) {
-      out = out.replace(global, (match) => (/\d/.test(match) ? match.replace(/^(bearer\s+)[\s\S]*$/i, `$1${SECRET_REDACTED}`) : match));
+      out = out.replace(global, (match) => {
+        if (!/\d/.test(match)) return match;
+        const head = /^bearer\s+/i.exec(match)![0];
+        return replaced(match.slice(head.length), `${head}${SECRET_REDACTED}`);
+      });
     } else if (pattern === URL_CREDENTIALS) {
-      out = out.replace(global, (match) => `${match.slice(0, match.indexOf("://") + 3)}${SECRET_REDACTED}@`);
+      out = out.replace(global, (match) => {
+        const start = match.indexOf("://") + 3;
+        return replaced(match.slice(start, -1), `${match.slice(0, start)}${SECRET_REDACTED}@`);
+      });
     } else {
-      out = out.replace(global, (match) => (/\d/.test(match) ? SECRET_REDACTED : match));
+      out = out.replace(global, (match) => (/\d/.test(match) ? replaced(match, SECRET_REDACTED) : match));
     }
   }
   out = out.replace(/\b(?:\d[ -]?){13,19}\b/g, (match) => {
     if (!cardNumberLike(match.replace(/\D/g, ""))) return match;
-    return `${SECRET_REDACTED}${match.slice(match.trimEnd().length)}`;
+    const number = match.trimEnd();
+    return replaced(number, `${SECRET_REDACTED}${match.slice(number.length)}`);
   });
   // A variable name before the token stays: "SENDGRID_KEY=[redacted]".
   return out.replace(
     /(?<![\w./:@#?&=%-])((?:[A-Za-z_][A-Za-z0-9_]*=)?)([A-Za-z0-9+/_-]{36,}={0,2})(?![\w./=-])/g,
-    (whole, name: string, token: string) => (opaqueToken(token) ? `${name}${SECRET_REDACTED}` : whole),
+    (whole, name: string, token: string) => (opaqueToken(token) ? replaced(token, `${name}${SECRET_REDACTED}`) : whole),
   );
+}
+
+/**
+ * The text with the credentials in it replaced by "[redacted]", for text a
+ * person typed that is about to be written to disk (run files, the task
+ * list). The keyword keeps its keyword ("password is [redacted]") and a URL
+ * its scheme and host, so the text still says what was there. Text without
+ * one comes back as it was.
+ */
+export function scrubSecrets(text: string): string {
+  return scrub(text);
+}
+
+/** The pieces scrubSecrets replaces in `text`, exactly as they stand there. */
+export function secretsIn(text: string): string[] {
+  const found: string[] = [];
+  scrub(text, found);
+  return [...new Set(found)];
 }
 
 // ── ranking ─────────────────────────────────────────────────────────────────
