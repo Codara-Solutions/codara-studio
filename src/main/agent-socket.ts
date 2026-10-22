@@ -126,6 +126,7 @@ import {
 } from "./agent-socket-capabilities";
 import { createPaneOpener, PaneOpenError, parsePaneOpenParams } from "./pane-open";
 import {
+  callerInImportedPullRequest,
   crossWorkspaceCwdRefusal,
   crossWorkspaceRefusal,
   resolveTargetWorkspace,
@@ -1491,6 +1492,13 @@ async function handleTerminalCreate(
       const refusal = crossWorkspaceRefusal({
         authKind,
         untrustedRun: run !== null && runProjectPolicyMode(run) === "untrusted-pull-request",
+        untrustedCaller:
+          caller !== null &&
+          (await callerInImportedPullRequest({
+            caller,
+            callerCwd: callerPaneId ? pty.sessionCwd(callerPaneId) : null,
+            workspaces: state.workspaces,
+          })),
         caller,
         target,
       });

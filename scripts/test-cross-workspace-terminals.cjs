@@ -12,8 +12,10 @@
 //      Unknown ids, relative paths, folders outside every workspace and SSH
 //      paths are refused; no workspace is ever created.
 //   2. Only the user's own authority may target another workspace: a pane or
-//      scoped credential, an imported pull-request run, an unknown caller
-//      workspace and SSH workspaces on either side are refused.
+//      scoped credential, an imported pull-request run, an agent the user
+//      started by hand in an imported pull-request workspace (or in a folder
+//      inside one), an unknown caller workspace and SSH workspaces on either
+//      side are refused.
 //   3. "Always" grants persist per caller and target pair in a mode-600 file,
 //      survive a new store, read a broken file as none, and revoke.
 //   4. The approver asks only across workspaces and only without a grant,
@@ -158,7 +160,33 @@ async function main() {
     /credential/,
     "the credential is checked first",
   );
-  console.log("ok 2 pane and scoped credentials, untrusted runs, unknown callers and SSH are refused");
+  assert.match(gate({ untrustedCaller: true }), /imported pull-request workspace/);
+
+  const prOrigin = { kind: "github-pull-request", repo: "o/r", number: 7 };
+  const prRoot = mkdir("pr-import");
+  const prWorkspace = {
+    id: "ws-pr",
+    name: "PR #7",
+    cwd: prRoot,
+    copyBranch: { repoCwd: repo, branch: "pr-7", city: "pr-7", createdAt: "now", origin: prOrigin },
+  };
+  const railWithPr = [...workspaces, prWorkspace];
+  const inPr = (callerWs, callerCwd = null) =>
+    cross.callerInImportedPullRequest({ caller: callerWs, callerCwd, workspaces: railWithPr });
+  assert.equal(await inPr(prWorkspace), true, "a hand-started agent in an imported PR workspace is untrusted");
+  assert.equal(
+    await inPr({ id: "ws-loose", name: "Loose", cwd: path.join(prRoot, "sub") }),
+    true,
+    "a workspace whose folder lies inside an imported PR is untrusted too",
+  );
+  assert.equal(
+    await inPr(local, path.join(prRoot, "src")),
+    true,
+    "a pane that started inside an imported PR checkout is untrusted",
+  );
+  assert.equal(await inPr(local, repo), false, "an ordinary workspace and pane are trusted");
+  assert.equal(await inPr(local), false);
+  console.log("ok 2 pane and scoped credentials, imported PR runs and agents, unknown callers and SSH are refused");
 
   // ── 3. Grants file ─────────────────────────────────────────────────────
   const file = path.join(OUT_DIR, "home", "codara", cross.CROSS_WORKSPACE_GRANTS_FILE);
@@ -350,6 +378,7 @@ async function main() {
     true,
     "once its opener's pane is gone it follows the rule for every run-less terminal",
   );
+
   console.log("ok 5 a cross-workspace terminal is steered only from the pane that opened it");
 }
 

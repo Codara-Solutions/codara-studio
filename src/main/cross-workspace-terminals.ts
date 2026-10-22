@@ -17,7 +17,9 @@ import { promises as fsp } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { isRemotePath } from "@shared/remote";
 import type { CrossWorkspaceAnswer, CrossWorkspaceGrant } from "@shared/cross-workspace";
+import type { Workspace } from "@shared/types";
 import { writeFileAtomic } from "./fs-atomic";
+import { workspaceProjectPolicyModeForTerminalCwd } from "./orchestration/project-policy";
 
 export const CROSS_WORKSPACE_GRANTS_FILE = "cross-workspace-grants.json";
 // Inside the MCP server's 60 s terminal.create timeout (and Codex's default
@@ -128,6 +130,7 @@ export type CrossWorkspaceAuthKind = "root" | "scoped" | "pane";
 export function crossWorkspaceRefusal(input: {
   authKind: CrossWorkspaceAuthKind;
   untrustedRun: boolean;
+  untrustedCaller?: boolean;
   caller: WorkspaceRef | null;
   target: WorkspaceRef;
 }): string | null {
@@ -137,6 +140,9 @@ export function crossWorkspaceRefusal(input: {
   if (input.untrustedRun) {
     return "an imported pull-request run cannot open terminals in another workspace";
   }
+  if (input.untrustedCaller) {
+    return "an agent in an imported pull-request workspace cannot open terminals in another workspace";
+  }
   if (!input.caller) {
     return "Codara could not tell which workspace this agent runs in, so it cannot open terminals in another one";
   }
@@ -144,6 +150,28 @@ export function crossWorkspaceRefusal(input: {
     return "terminals cannot be opened across SSH workspaces";
   }
   return null;
+}
+
+/**
+ * True when the caller runs inside an imported pull request: its workspace
+ * was imported from one, or its workspace folder or its pane's current folder
+ * lies in one. A Claude or Codex the user started by hand in a plain shell
+ * there holds the root token like any other, but the checkout it reads is
+ * untrusted, so it may not reach into other workspaces.
+ */
+export async function callerInImportedPullRequest(input: {
+  caller: Pick<Workspace, "cwd" | "copyBranch">;
+  callerCwd: string | null;
+  workspaces: readonly Pick<Workspace, "cwd" | "copyBranch">[];
+}): Promise<boolean> {
+  if (input.caller.copyBranch?.origin?.kind === "github-pull-request") return true;
+  for (const cwd of [input.caller.cwd, input.callerCwd]) {
+    if (!cwd) continue;
+    if ((await workspaceProjectPolicyModeForTerminalCwd(cwd, input.workspaces)) === "untrusted-pull-request") {
+      return true;
+    }
+  }
+  return false;
 }
 
 // ── "Always" grants ─────────────────────────────────────────────────────────
