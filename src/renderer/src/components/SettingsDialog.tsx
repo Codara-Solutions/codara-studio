@@ -2845,7 +2845,7 @@ function AgentsSettings({ onClose }: { onClose: () => void }) {
       <SettingsSection title="Workspaces">
         <SettingRow
           title="Terminals in other workspaces"
-          desc="When an agent opens a terminal in another workspace, Codara asks you first. Pairs you always allow are listed here; revoke one to be asked again."
+          desc="When an agent opens a terminal in another workspace, Codara asks you first. Pairs you always allow are listed here: every agent in the first workspace, including Cora runs and later sessions, may open terminals in the second without asking. Revoke one to be asked again."
           stacked
         >
           <CrossWorkspaceGrantsList />

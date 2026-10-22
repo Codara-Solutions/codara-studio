@@ -52,7 +52,11 @@ export default function CrossWorkspacePrompt(): React.ReactElement | null {
       </div>
       <p className="chrome-pairing__body">
         {request.agent ?? "An agent"} in {request.callerName} wants to open a terminal under {request.targetName}{" "}
-        and type into it. Always lets it do so again without asking; revoke it in Settings, Agents.
+        and type into it. Allow once covers this one terminal.
+      </p>
+      <p className="chrome-pairing__body">
+        Always lets every agent in {request.callerName} do this without asking, from now on: other sessions, Cora
+        runs, and agents started in the terminals it opens. Revoke it in Settings, Agents.
       </p>
       <div className="chrome-pairing__actions">
         <button type="button" className="spark-btn" disabled={busy} onClick={() => void decide("deny")}>
