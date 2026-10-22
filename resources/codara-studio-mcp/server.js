@@ -1919,6 +1919,8 @@ const DESTRUCTIVE_TOOL_NAMES = new Set([
   "codara_worktree_remove",
   // Its remove action deletes worktrees and remote branches the user approves.
   "codara_worktree_cleanup",
+  // A move to verifying runs the repository's check commands.
+  "codara_task_update",
 ]);
 const IDEMPOTENT_TOOL_NAMES = new Set([
   ...TOOL_REGISTRY.annotations.idempotent,
@@ -1938,6 +1940,8 @@ const OPEN_WORLD_TOOL_NAMES = new Set([
   "codara_worktree_create",
   // Asks GitHub and the remote, and may delete a remote branch.
   "codara_worktree_cleanup",
+  // A move to verifying fetches the base branch from origin.
+  "codara_task_update",
 ]);
 
 function toolTitle(name) {

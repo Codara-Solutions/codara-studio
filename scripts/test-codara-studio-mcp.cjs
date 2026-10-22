@@ -599,6 +599,11 @@ function sortedEqual(actual, expected, label) {
     assert.strictEqual(byName(studio, "codara_worktree_cleanup").annotations.destructiveHint, true);
     assert.strictEqual(byName(studio, "codara_worktree_cleanup").annotations.openWorldHint, true);
     assert.match(studio.init.instructions, /codara_worktree_cleanup/);
+    // A move to verifying runs the repository's check commands and fetches
+    // the base branch from origin.
+    assert.strictEqual(byName(studio, "codara_task_update").annotations.destructiveHint, true);
+    assert.strictEqual(byName(studio, "codara_task_update").annotations.openWorldHint, true);
+    assert.strictEqual(byName(studio, "codara_task_list").annotations.readOnlyHint, true);
     for (const name of WORKTREE_TOOLS) {
       const properties = byName(studio, name).inputSchema.properties;
       for (const field of ["repo", "repoCwd", "cwd", "callerRole", "callerClient", "callerPaneId", "force"]) {
