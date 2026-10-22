@@ -524,15 +524,25 @@ export function containsSecret(text: string): boolean {
 
 export const SECRET_REDACTED = "[redacted]";
 
-// The keyword pattern keeps its keyword ("password is [redacted]") and the
-// URL pattern its scheme, so the scrubbed text still says what was there.
 const KEYWORD_SECRET = SECRET_PATTERNS[SECRET_PATTERNS.length - 2];
 const URL_CREDENTIALS = SECRET_PATTERNS[SECRET_PATTERNS.length - 1];
 
+// containsSecret refuses a whole memory on a hint; scrubbing rewrites what
+// the user said, so it replaces only what reads like a credential. A value
+// after "password is" must hold a digit or a symbol ("the token is expired"
+// stays), a provider-looking token must hold a digit ("sk-learn-models"
+// stays), and a long opaque token must stand alone, not be a piece of a link
+// or a path.
+function credentialLike(value: string): boolean {
+  return /\d/.test(value) || /[^A-Za-z]/.test(value);
+}
+
 /**
- * The text with every credential containsSecret would find replaced by
- * "[redacted]", for text a person typed that is about to be written to disk
- * (run files, the task list). Text without one comes back as it was.
+ * The text with the credentials in it replaced by "[redacted]", for text a
+ * person typed that is about to be written to disk (run files, the task
+ * list). The keyword keeps its keyword ("password is [redacted]") and a URL
+ * its scheme and host, so the text still says what was there. Text without
+ * one comes back as it was.
  */
 export function scrubSecrets(text: string): string {
   if (!containsSecret(text)) return text;
@@ -542,16 +552,24 @@ export function scrubSecrets(text: string): string {
   );
   for (const pattern of SECRET_PATTERNS) {
     const global = new RegExp(pattern.source, `${pattern.flags.replace("g", "")}g`);
-    if (pattern === KEYWORD_SECRET) out = out.replace(global, (match) => match.replace(/\S{6,}$/, SECRET_REDACTED));
-    else if (pattern === URL_CREDENTIALS) out = out.replace(global, (match) => `${match.slice(0, match.indexOf("://") + 3)}${SECRET_REDACTED}@`);
-    else out = out.replace(global, SECRET_REDACTED);
+    if (pattern === KEYWORD_SECRET) {
+      out = out.replace(global, (match) =>
+        match.replace(/^(.*?(?:\bis|\bes|=|:)\s*)(\S+?)([.,;:!?)\]]*)$/i, (whole, head: string, value: string, tail: string) =>
+          credentialLike(value) ? `${head}${SECRET_REDACTED}${tail}` : whole,
+        ),
+      );
+    } else if (pattern === URL_CREDENTIALS) {
+      out = out.replace(global, (match) => `${match.slice(0, match.indexOf("://") + 3)}${SECRET_REDACTED}@`);
+    } else {
+      out = out.replace(global, (match) => (/\d/.test(match) ? SECRET_REDACTED : match));
+    }
   }
   out = out.replace(/\b(?:\d[ -]?){13,19}\b/g, (match) => {
     const digits = match.replace(/\D/g, "");
     if (digits.length < 13 || digits.length > 19 || !luhnValid(digits)) return match;
     return `${SECRET_REDACTED}${match.slice(match.trimEnd().length)}`;
   });
-  return out.replace(/[A-Za-z0-9+/_=-]{36,}/g, (token) =>
+  return out.replace(/(?<![\w./:@#?&=%-])[A-Za-z0-9+_=-]{36,}(?![\w./-])/g, (token) =>
     /[a-z]/.test(token) && /[A-Z]/.test(token) && /\d/.test(token) && !/^[a-f0-9-]+$/i.test(token) ? SECRET_REDACTED : token,
   );
 }

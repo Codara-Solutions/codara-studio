@@ -220,10 +220,31 @@ async function main() {
   check("no run file holds the password", !files.includes(PASSWORD));
   check("no manager prompt holds either", prompts.every((prompt) => !prompt.includes(KEY) && !prompt.includes(PASSWORD)), prompts.length);
 
+  // The first message of a new chat names it and, on the direct lane, is the
+  // worker's task: both come from the scrubbed text. The stubbed worker
+  // launch may refuse; only what reached disk matters here.
+  const started = await runStore
+    .startAutopilot({
+      workspaceId: "ws-scrub",
+      workspaceName: "scrub",
+      cwd: HOME,
+      executionStrategy: "direct",
+      initialUserNote: `rotate ${KEY} now`,
+    })
+    .catch(() => null);
+  const newRuns = fs.readdirSync(path.join(HOME, "runs")).filter((id) => id !== runId);
+  check("the new chat was created", newRuns.length === 1, newRuns.join(","));
+  const newFiles = newRuns.map(runFiles).join("\n");
+  check("the new chat's files never hold the key", newFiles.length > 0 && !newFiles.includes(KEY));
+  if (started) check("its title is scrubbed", started.title === "rotate [redacted] now", started.title);
+
   completed = true;
   fs.rmSync(HOME, { recursive: true, force: true });
   if (failures) process.exit(1);
   console.log("run message scrub: all passed");
+  // The new chat leaves background work (memory, recovery) that would write
+  // into the home just removed.
+  process.exit(0);
 }
 
 main().catch((error) => {

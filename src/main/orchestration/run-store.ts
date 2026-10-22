@@ -1443,7 +1443,7 @@ function chatTitleFromInput(input: StartAutopilotInput): string {
   if (explicitTitle) return explicitTitle;
   const planTitle = input.planTitle?.trim();
   if (planTitle) return `Autopilot - ${planTitle}`;
-  const note = input.initialUserNote ? scrubSecrets(input.initialUserNote).trim().replace(/\s+/g, " ") : "";
+  const note = input.initialUserNote?.trim().replace(/\s+/g, " ");
   if (note) {
     if (note.length <= 52) return note;
     const cut = note.slice(0, 49);
@@ -1466,6 +1466,9 @@ async function directChatPassModel(run: RunState): Promise<string> {
 }
 
 export async function startAutopilot(input: StartAutopilotInput): Promise<RunState> {
+  // The first message names the chat and, on the direct lane, becomes the
+  // worker's task; scrubbed here, before either is written.
+  if (input.initialUserNote) input = { ...input, initialUserNote: scrubSecrets(input.initialUserNote) };
   // "Always verify edits with a worker" promises a verifier on every change,
   // which only the managed path provides; an explicit direct request from the
   // caller still wins.
