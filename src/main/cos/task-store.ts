@@ -107,27 +107,34 @@ const CONTROL_CHARS = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g;
 const INVISIBLE_CHARS =
   /[\u{061c}\u{200b}-\u{200f}\u{202a}-\u{202e}\u{2060}-\u{2064}\u{2066}-\u{2069}\u{feff}\u{e0000}-\u{e007f}\u{e0100}-\u{e01ef}]/gu;
 
-function cleanText(raw: string, max: number, multiline: boolean): string {
+// Prose (titles, done-when lines, reasons, inbox text) is scrubbed of
+// credentials; paths, refs and names are not, since a rewritten path points
+// nowhere.
+function cleanText(raw: string, max: number, multiline: boolean, scrub: boolean): string {
   let text = raw.slice(0, max * 4).replace(ANSI_SEQUENCES, "").replace(CONTROL_CHARS, " ").replace(INVISIBLE_CHARS, "");
   text = multiline ? text.replace(/\r\n?/g, "\n").replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n") : text.replace(/\s+/g, " ");
-  text = scrubSecrets(text.trim());
+  text = scrub ? scrubSecrets(text.trim()) : text.trim();
   const points = Array.from(text);
   return points.length <= max ? text : `${points.slice(0, max - 1).join("").trimEnd()}…`;
 }
 
 function oneLine(raw: unknown, max: number): string {
-  return typeof raw === "string" ? cleanText(raw, max, false) : "";
+  return typeof raw === "string" ? cleanText(raw, max, false, false) : "";
 }
 
-function requireLine(raw: unknown, max: number, what: string): string {
-  const text = oneLine(raw, max);
+function proseLine(raw: unknown, max: number): string {
+  return typeof raw === "string" ? cleanText(raw, max, false, true) : "";
+}
+
+function requireLine(raw: unknown, max: number, what: string, prose = false): string {
+  const text = prose ? proseLine(raw, max) : oneLine(raw, max);
   if (!text) throw new TaskRuleError(`${what} is required.`);
   return text;
 }
 
 function cleanDoneWhen(raw: unknown): string[] {
   const items = Array.isArray(raw) ? raw : typeof raw === "string" ? [raw] : [];
-  const out = items.map((item) => oneLine(item, DONE_WHEN_ITEM_MAX)).filter(Boolean);
+  const out = items.map((item) => proseLine(item, DONE_WHEN_ITEM_MAX)).filter(Boolean);
   if (out.length > DONE_WHEN_MAX_ITEMS) throw new TaskRuleError(`A task takes at most ${DONE_WHEN_MAX_ITEMS} done-when lines.`);
   return out;
 }
@@ -453,6 +460,9 @@ export function createTaskStore(options: TaskStoreOptions): TaskStore {
   const newRunId = options.newRunId ?? (() => `v${now().toString(36)}${Math.random().toString(36).slice(2, 6)}`);
   const listeners = new Set<(workspaceId: string, state: TaskListState) => void>();
   const cache = new Map<string, TaskListState>();
+  // A log whose last line was torn (a crash mid-append) gets a newline before
+  // the next event, so that event is not glued onto the torn line and lost.
+  const tornTail = new Set<string>();
   // One writer per workspace: each change reads the state the previous one left.
   const queues = new Map<string, Promise<unknown>>();
 
@@ -472,6 +482,7 @@ export function createTaskStore(options: TaskStoreOptions): TaskStore {
       if ((error as NodeJS.ErrnoException | null)?.code !== "ENOENT") throw error;
     }
     const state = replayTaskLog(workspaceId, raw);
+    if (raw.length > 0 && !raw.endsWith("\n")) tornTail.add(workspaceId);
     cache.set(workspaceId, state);
     return state;
   }
@@ -500,8 +511,14 @@ export function createTaskStore(options: TaskStoreOptions): TaskStore {
     await fs.mkdir(dir, { recursive: true });
     const handle = await fs.open(log, "a", 0o600);
     try {
-      await handle.writeFile(`${events.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
+      const prefix = tornTail.has(workspaceId) ? "\n" : "";
+      await handle.writeFile(`${prefix}${events.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
       await handle.sync();
+      tornTail.delete(workspaceId);
+    } catch (error) {
+      // A partial write (a full disk) may have left part of a line behind.
+      tornTail.add(workspaceId);
+      throw error;
     } finally {
       await handle.close();
     }
@@ -559,7 +576,7 @@ export function createTaskStore(options: TaskStoreOptions): TaskStore {
     addTask(workspaceId, input, by) {
       return enqueue(workspaceId, async () => {
         const current = await load(workspaceId);
-        const title = requireLine(input.title, TITLE_MAX, "A title");
+        const title = requireLine(input.title, TITLE_MAX, "A title", true);
         const doneWhen = cleanDoneWhen(input.doneWhen);
         if (!doneWhen.length) throw new TaskRuleError("A task needs at least one done-when line: how anyone can tell it is finished.");
         if (input.kind !== undefined && !isTaskKind(input.kind)) throw new TaskRuleError(`Unknown kind "${String(input.kind)}".`);
@@ -598,7 +615,7 @@ export function createTaskStore(options: TaskStoreOptions): TaskStore {
         findTask(current, taskId);
         const bodies: TaskLogEventBody[] = [];
         const patch: Extract<TaskLogEventBody, { type: "task.edited" }>["patch"] = {};
-        if (input.title !== undefined) patch.title = requireLine(input.title, TITLE_MAX, "A title");
+        if (input.title !== undefined) patch.title = requireLine(input.title, TITLE_MAX, "A title", true);
         if (input.doneWhen !== undefined) {
           patch.doneWhen = cleanDoneWhen(input.doneWhen);
           if (!patch.doneWhen.length) throw new TaskRuleError("A task needs at least one done-when line.");
@@ -616,7 +633,7 @@ export function createTaskStore(options: TaskStoreOptions): TaskStore {
           if (input.state === "done") {
             throw new TaskRuleError("Only the verify gate closes a task: move it to verifying and the repo's checks decide.");
           }
-          const reason = oneLine(input.reason, REASON_MAX);
+          const reason = proseLine(input.reason, REASON_MAX);
           if (input.state === "verifying") verifyRunId = newRunId();
           bodies.push({
             type: "task.moved",
@@ -636,7 +653,7 @@ export function createTaskStore(options: TaskStoreOptions): TaskStore {
     addInboxItem(workspaceId, input, by) {
       return enqueue(workspaceId, async () => {
         const current = await load(workspaceId);
-        const text = typeof input.text === "string" ? cleanText(input.text, INBOX_TEXT_MAX, true) : "";
+        const text = typeof input.text === "string" ? cleanText(input.text, INBOX_TEXT_MAX, true, true) : "";
         if (!text) throw new TaskRuleError("Inbox text is required.");
         const link = oneLine(input.link, REF_MAX);
         const id = `I${nextNumber(current.inbox.map((item) => item.id), "I")}`;

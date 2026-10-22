@@ -101,8 +101,22 @@ function scrubbing() {
   assert.equal(cos.scrubSecrets("card 4111 1111 1111 1111 please"), "card [redacted] please");
   const pem = "-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----";
   assert.ok(!cos.containsSecret(cos.scrubSecrets(`here ${pem} done`)));
-  const plain = "run npm test in src/main and open PR #42";
-  assert.equal(cos.scrubSecrets(plain), plain, "text without a secret is untouched");
+  assert.equal(cos.scrubSecrets("password=Tr0ub4dor&3"), "password=[redacted]");
+  // Ordinary text that only looks like a credential to containsSecret is
+  // written as the user typed it.
+  for (const plain of [
+    "run npm test in src/main and open PR #42",
+    "the token is expired, can you refresh it",
+    "the password is incorrect",
+    "la clave es correcta",
+    "https://github.com/Ed3scombe3s/codara-studio/pull/1234",
+    "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrStUvWxYz0123456789abc/edit",
+    "src/main/cos/TaskStore2Helpers/x.ts",
+    "/Users/Etienne/code/app/worktrees/fix-login2",
+    "use sk-learn-compatible-models here",
+  ]) {
+    assert.equal(cos.scrubSecrets(plain), plain, plain);
+  }
 }
 
 async function lifecycle() {
@@ -232,7 +246,11 @@ async function persistence() {
   assert.equal(state.inbox.length, 1);
   const third = await second.addTask(WS, { title: "Three", doneWhen: ["c"] }, AGENT);
   assert.equal(third.id, "T3");
-  assert.ok(fs.readFileSync(path.join(root, WS, "tasks.jsonl"), "utf8").includes('"title":"Three"'));
+  assert.deepEqual(
+    (await makeStore("persist").read(WS)).tasks.map((task) => task.id),
+    ["T1", "T2", "T3"],
+    "the event after a torn line starts a line of its own and survives a restart",
+  );
 
   const markdown = fs.readFileSync(path.join(root, WS, "TASKS.md"), "utf8");
   assert.match(markdown, /^# Tasks: Codara Studio\n\n1 needs you · 1 ready · 2 in inbox\n/);
