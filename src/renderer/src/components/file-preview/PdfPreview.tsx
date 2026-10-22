@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 // Legacy build required: the modern build assumes Uint8Array.prototype.toHex
 // (Chromium 140+), but Electron 32 ships Chromium 128 — every document load
 // died with "a.toHex is not a function" while computing the fingerprint.
@@ -8,8 +8,13 @@ import type { PDFDocumentProxy, PDFPageProxy } from "pdfjs-dist";
 // (which worker-src falls back to) covers it — no CDN, no CSP exception.
 import pdfWorkerUrl from "pdfjs-dist/legacy/build/pdf.worker.min.mjs?url";
 import { DockablePaneBar } from "../../tabs/dockChromeSlot";
+import FindBar from "../find/FindBar";
+import { usePdfFind } from "./usePdfFind";
+import "./pdf-text-layer.css";
 
 pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+
+type PdfTextContent = Awaited<ReturnType<PDFPageProxy["getTextContent"]>>;
 
 interface Props {
   path: string;
@@ -24,7 +29,9 @@ const ZOOM_STEPS = [0.5, 0.67, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 2, 3];
 // Scrollable, lazily-rendered pdf.js viewer. Document bytes arrive over IPC
 // (fetch()/XHR cannot read file:// URLs from either the dev http origin or
 // the packaged file origin); pages render to canvases only when scrolled
-// near the viewport so 1000-page documents stay cheap.
+// near the viewport so 1000-page documents stay cheap. Each rendered page
+// also gets pdf.js's text layer, which makes its text findable (Ctrl+F) and
+// selectable.
 export default function PdfPreview({ path, mtimeMs, toolbarAction, forceLocalToolbar }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [doc, setDoc] = useState<PDFDocumentProxy | null>(null);
@@ -33,6 +40,28 @@ export default function PdfPreview({ path, mtimeMs, toolbarAction, forceLocalToo
   // Width of page 1 at scale 1, used to compute the fit-width base scale.
   const [baseWidth, setBaseWidth] = useState<number | null>(null);
   const [containerWidth, setContainerWidth] = useState(0);
+  const findHostRef = useRef<HTMLDivElement>(null);
+
+  // One text extraction per page, shared by find (which needs every page)
+  // and the text layers (which need the pages on screen).
+  const textCache = useRef<{ doc: PDFDocumentProxy | null; pages: Map<number, Promise<PdfTextContent>> }>({
+    doc: null,
+    pages: new Map(),
+  });
+  const getTextContent = useCallback(
+    (pageNumber: number): Promise<PdfTextContent> => {
+      if (!doc) return Promise.reject(new Error("No document"));
+      if (textCache.current.doc !== doc) textCache.current = { doc, pages: new Map() };
+      let content = textCache.current.pages.get(pageNumber);
+      if (!content) {
+        content = doc.getPage(pageNumber).then((page) => page.getTextContent());
+        textCache.current.pages.set(pageNumber, content);
+      }
+      return content;
+    },
+    [doc],
+  );
+  const find = usePdfFind({ doc, hostRef: findHostRef, scrollerRef: containerRef, getTextContent });
 
   useEffect(() => {
     let cancelled = false;
@@ -131,13 +160,26 @@ export default function PdfPreview({ path, mtimeMs, toolbarAction, forceLocalToo
         </button>
         {toolbarAction}
       </DockablePaneBar>
-      <div
-        ref={containerRef}
-        style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "16px 24px", display: "grid", gap: 16 }}
-      >
-        {Array.from({ length: doc.numPages }, (_, i) => (
-          <PdfPage key={`${i + 1}@${scale.toFixed(3)}`} doc={doc} pageNumber={i + 1} scale={scale} />
-        ))}
+      <div ref={findHostRef} className="codara-find-host" onKeyDown={find.onKeyDown}>
+        <div
+          ref={containerRef}
+          className="codara-find-scroller"
+          // Focusable so a click inside makes Ctrl+F find in this document.
+          tabIndex={-1}
+          style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "16px 24px", display: "grid", gap: 16 }}
+        >
+          {Array.from({ length: doc.numPages }, (_, i) => (
+            <PdfPage
+              key={`${i + 1}@${scale.toFixed(3)}`}
+              doc={doc}
+              pageNumber={i + 1}
+              scale={scale}
+              getTextContent={getTextContent}
+              onTextLayer={find.onTextLayer}
+            />
+          ))}
+        </div>
+        {find.bar && <FindBar {...find.bar} />}
       </div>
     </div>
   );
@@ -155,11 +197,25 @@ const zoomBtnStyle: React.CSSProperties = {
   pointerEvents: "auto",
 };
 
-// One page: a fixed-size placeholder that swaps in a rendered canvas when
-// scrolled near the viewport (IntersectionObserver, 600px lookahead).
-function PdfPage({ doc, pageNumber, scale }: { doc: PDFDocumentProxy; pageNumber: number; scale: number }) {
+// One page: a fixed-size placeholder that swaps in a rendered canvas, and
+// the text layer over it, when scrolled near the viewport
+// (IntersectionObserver, 600px lookahead).
+function PdfPage({
+  doc,
+  pageNumber,
+  scale,
+  getTextContent,
+  onTextLayer,
+}: {
+  doc: PDFDocumentProxy;
+  pageNumber: number;
+  scale: number;
+  getTextContent: (pageNumber: number) => Promise<PdfTextContent>;
+  onTextLayer: (pageNumber: number, divs: HTMLElement[] | null) => void;
+}) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const layerRef = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(pageNumber <= 2);
   const [size, setSize] = useState<{ w: number; h: number } | null>(null);
 
@@ -180,6 +236,8 @@ function PdfPage({ doc, pageNumber, scale }: { doc: PDFDocumentProxy; pageNumber
     if (!visible) return;
     let cancelled = false;
     let page: PDFPageProxy | null = null;
+    let textLayer: InstanceType<typeof pdfjs.TextLayer> | null = null;
+    let reported = false;
     void (async () => {
       try {
         page = await doc.getPage(pageNumber);
@@ -199,6 +257,16 @@ function PdfPage({ doc, pageNumber, scale }: { doc: PDFDocumentProxy; pageNumber
           viewport,
           transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : undefined,
         }).promise;
+        const layer = layerRef.current;
+        if (cancelled || !layer) return;
+        const content = await getTextContent(pageNumber);
+        if (cancelled) return;
+        layer.replaceChildren();
+        textLayer = new pdfjs.TextLayer({ textContentSource: content, container: layer, viewport });
+        await textLayer.render();
+        if (cancelled) return;
+        reported = true;
+        onTextLayer(pageNumber, textLayer.textDivs);
       } catch {
         // Render races (scale change mid-render) throw RenderingCancelled;
         // the replacement keyed instance takes over.
@@ -206,13 +274,21 @@ function PdfPage({ doc, pageNumber, scale }: { doc: PDFDocumentProxy; pageNumber
     })();
     return () => {
       cancelled = true;
+      textLayer?.cancel();
+      if (reported) onTextLayer(pageNumber, null);
     };
-  }, [visible, doc, pageNumber, scale]);
+  }, [visible, doc, pageNumber, scale, getTextContent, onTextLayer]);
 
   return (
     <div
       ref={hostRef}
+      data-pdf-page={pageNumber}
       style={{
+        position: "relative",
+        // The text layer sizes its runs from these (see pdf-text-layer.css).
+        ["--total-scale-factor" as string]: scale,
+        ["--scale-round-x" as string]: "1px",
+        ["--scale-round-y" as string]: "1px",
         justifySelf: "center",
         width: size?.w,
         height: size?.h,
@@ -227,6 +303,7 @@ function PdfPage({ doc, pageNumber, scale }: { doc: PDFDocumentProxy; pageNumber
       {visible && (
         <canvas ref={canvasRef} style={{ width: size?.w, height: size?.h, display: "block" }} />
       )}
+      {visible && <div ref={layerRef} className="codara-pdf-text-layer" />}
     </div>
   );
 }

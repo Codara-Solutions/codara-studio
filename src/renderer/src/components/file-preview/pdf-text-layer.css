@@ -1,0 +1,48 @@
+/* pdf.js text layer: transparent text runs laid over the page canvas so a
+   PDF's text can be found, selected and copied. Adapted from the .textLayer
+   rules in pdfjs-dist/web/pdf_viewer.css; the page host sets
+   --total-scale-factor to the render scale. */
+.codara-pdf-text-layer {
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  line-height: 1;
+  text-align: initial;
+  letter-spacing: normal;
+  word-spacing: normal;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  caret-color: CanvasText;
+  z-index: 0;
+}
+.codara-pdf-text-layer :is(span, br) {
+  position: absolute;
+  color: transparent;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+  user-select: text;
+}
+.codara-pdf-text-layer > :not(.markedContent),
+.codara-pdf-text-layer .markedContent span:not(.markedContent) {
+  --font-height: 0;
+  --scale-x: 1;
+  --rotate: 0deg;
+  z-index: 1;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+.codara-pdf-text-layer .markedContent {
+  display: contents;
+}
+.codara-pdf-text-layer ::selection {
+  background: color-mix(in oklch, var(--accent) 32%, transparent);
+  color: transparent;
+}
+.codara-pdf-text-layer br::selection {
+  background: transparent;
+}
