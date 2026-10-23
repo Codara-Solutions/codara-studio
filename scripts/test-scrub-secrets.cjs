@@ -244,7 +244,7 @@ async function pastedSecrets() {
   pasted.scrubPastedText(tricky, "run-a");
   const value = { text: `echo ${key} and Tr0ub"4dor\\3x` };
   assert.deepEqual(JSON.parse(JSON.stringify(pasted.redactPastedSecretsIn("run-a", value))), { text: "echo [redacted] and [redacted]" });
-  assert.deepEqual(pasted.redactPastedSecretsIn("run-a", { a: [key] }), { a: ["[redacted]"] });
+  assert.deepEqual(pasted.redactPastedSecretsIn("run-a", { content: [{ type: "text", text: key }] }), { content: [{ type: "text", text: "[redacted]" }] });
   assert.equal(pasted.redactPastedSecretsIn("run-a", value.text), "echo [redacted] and [redacted]");
   const untouched = { a: ["nothing"] };
   assert.equal(pasted.redactPastedSecretsIn("run-a", untouched), untouched, "the same value when nothing changed");
@@ -289,6 +289,30 @@ async function pastedSecretsStayInTheirRun() {
   assert.deepEqual(Object.keys(written.meta), ["codara-studio2"], "JSON keys stay");
   assert.equal(written.messages[0].message, "the model said [redacted]", "text the run writes is redacted");
   assert.equal(written.messages[0].createdAt, "codara-studio2", "times stay");
+
+  // Only message-text fields are rewritten; a field the old list of
+  // protected names missed (branch, url, command, ...) stays as written.
+  const task = {
+    title: "build codara-studio2",
+    description: "run the tests in codara-studio2",
+    branch: "codara-studio2",
+    worktree: "/w/codara-studio2",
+    url: "https://github.com/u/codara-studio2.git",
+    command: "cd codara-studio2 && npm test",
+    sandboxBranch: "codara/codara-studio2",
+    sandboxBaseRepo: "/home/u/codara-studio2",
+    verificationCommands: ["npm --prefix codara-studio2 test"],
+    payload: { input: { command: "ls codara-studio2" }, text: "listed codara-studio2" },
+  };
+  const taskWritten = pasted.redactPastedSecretsIn("run-typed", task);
+  for (const field of ["branch", "worktree", "url", "command", "sandboxBranch", "sandboxBaseRepo"]) {
+    assert.equal(taskWritten[field], task[field], `${field} stays`);
+  }
+  assert.deepEqual(taskWritten.verificationCommands, task.verificationCommands, "verificationCommands stay");
+  assert.equal(taskWritten.payload.input.command, "ls codara-studio2", "a nested command stays");
+  assert.equal(taskWritten.title, "build [redacted]");
+  assert.equal(taskWritten.description, "run the tests in [redacted]");
+  assert.equal(taskWritten.payload.text, "listed [redacted]");
 }
 
 (async () => {

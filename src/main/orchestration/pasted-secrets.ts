@@ -12,9 +12,9 @@
 // The keys themselves stay known to that run for the life of the process, so
 // whatever it writes later has them replaced as well: the model repeating a
 // key, or a worker task it wrote with one. Only that run's writes, and only
-// text values in them: the scrubber can take an ordinary word for a key
-// ("token: codara-studio2"), and that word must not rewrite another chat, a
-// JSON key or a folder name.
+// their message-text fields: the scrubber can take an ordinary word for a
+// key ("token: codara-studio2"), and that word must not rewrite another
+// chat, a JSON key, a folder, a branch or a command.
 //
 // No Electron import, so the unit suite bundles it directly.
 
@@ -139,21 +139,27 @@ export function redactPastedSecrets(runId: string | null | undefined, text: stri
   return keys ? replaceKnown(text, keys) : text;
 }
 
-// Fields that name things rather than say them: ids, folders, files, times.
-const STRUCTURAL_KEY = /^(?:id|ids|cwd|path|paths|dir|dirs|file|files|at)$|(?:Id|Ids|Cwd|Path|Paths|Dir|Dirs|File|Files|At)$/;
+// The fields that hold what someone said: user messages and answers, the
+// first message, prompt text, what the model wrote back (its summary, its
+// question and the reason a run stopped). Everything else
+// (branches, worktrees, URLs, commands, ids, folders, times) names things,
+// and a word the scrubber took for a key must not rename them.
+const TEXT_FIELD =
+  /^(?:message|messages|text|prompt|title|description|question|questionReason|answer|content|body|summary|goal|note|notes|reason|rationale|details|response|result|initialUserNote|delta)$/;
 
 /**
  * A JSON-shaped value `runId` writes, with the keys pasted into that run
- * replaced in its text values; object keys and structural fields (ids,
- * cwd, paths, times) are left alone. The same value when nothing changed.
+ * replaced in its message-text fields only (TEXT_FIELD); object keys and
+ * every other field are left alone. A bare string is text. The same value
+ * when nothing changed.
  */
 export function redactPastedSecretsIn<T>(runId: string | null | undefined, value: T): T {
   const keys = runId ? known.get(runId) : undefined;
   if (!keys) return value;
-  const walk = (node: unknown): unknown => {
-    if (typeof node === "string") return replaceKnown(node, keys);
+  const walk = (node: unknown, text: boolean): unknown => {
+    if (typeof node === "string") return text ? replaceKnown(node, keys) : node;
     if (Array.isArray(node)) {
-      const items = node.map(walk);
+      const items = node.map((item) => walk(item, text));
       return items.some((item, index) => item !== node[index]) ? items : node;
     }
     if (!node || typeof node !== "object") return node;
@@ -162,10 +168,10 @@ export function redactPastedSecretsIn<T>(runId: string | null | undefined, value
     let changed = false;
     const out: Record<string, unknown> = {};
     for (const [field, item] of Object.entries(node)) {
-      out[field] = STRUCTURAL_KEY.test(field) ? item : walk(item);
+      out[field] = walk(item, TEXT_FIELD.test(field));
       changed ||= out[field] !== item;
     }
     return changed ? out : node;
   };
-  return walk(value) as T;
+  return walk(value, true) as T;
 }
