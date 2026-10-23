@@ -229,10 +229,63 @@ async function baseOwnsTheChecks() {
   git(repo, "config", `url.${evilOrigin}.insteadOf`, realUrl);
   task = await run(repo);
   assert.equal(task.state, "needs_you", "an insteadOf rule that rewrites origin is refused");
-  assert.match(task.needsYouReason, /insteadOf|origin now points at .*evil-origin/);
+  assert.match(task.needsYouReason, /origin now points at .*evil-origin/);
   git(repo, "config", "--unset", `url.${evilOrigin}.insteadOf`);
 
-  // Route 5: it runs the gate from a subfolder with its own package scripts;
+  // Route 5: a reference-transaction hook in the repository's shared hooks
+  // moves Codara's base ref to a commit with looser checks the moment a
+  // fetch writes it, from the gate's first run on.
+  const hooked = makeRepo("hooked", { checks: [{ id: "strict", run: "exit 3" }] });
+  const hook = path.join(hooked, ".git", "hooks", "reference-transaction");
+  fs.writeFileSync(
+    hook,
+    [
+      "#!/bin/sh",
+      '[ "$1" = committed ] || exit 0',
+      '[ -n "$LOOSEN" ] && exit 0',
+      "export LOOSEN=1",
+      'while read old new ref; do case "$ref" in refs/codara/*) git update-ref "$ref" "$(git rev-parse refs/loose)";; esac; done',
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  const looseBlob = execFileSync("git", ["hash-object", "-w", "--stdin"], { cwd: hooked, input: JSON.stringify({ checks: [{ id: "strict", run: "true" }] }) }).toString().trim();
+  const looseDir = execFileSync("git", ["mktree"], { cwd: hooked, input: `100644 blob ${looseBlob}\tverify.json\n` }).toString().trim();
+  const looseTree = execFileSync("git", ["mktree"], { cwd: hooked, input: `040000 tree ${looseDir}\t.codara\n` }).toString().trim();
+  git(hooked, "update-ref", "refs/loose", execFileSync("git", ["commit-tree", looseTree, "-p", "HEAD", "-m", "loose"], { cwd: hooked }).toString().trim());
+  task = await run(hooked);
+  assert.notEqual(task.state, "done", "a hook in the checkout cannot move the base the checks are read from");
+  assert.equal(task.evidence.at(-1).exitCode, 3, "origin's own checks ran");
+
+  // Route 6: it hides a working-tree change from git, so the check that
+  // change needs is not selected: assume-unchanged in its index, then a
+  // clean filter that hands git the committed content back.
+  const hidden = makeRepo("hidden", {
+    checks: [
+      { id: "docs", run: "true", when: ["docs/**"] },
+      { id: "types", run: "exit 4", when: ["src/**"] },
+    ],
+  });
+  fs.mkdirSync(path.join(hidden, "src"));
+  fs.mkdirSync(path.join(hidden, "docs"));
+  fs.writeFileSync(path.join(hidden, "src", "a.ts"), "export const a = 1;\n");
+  commitAll(hidden, "src");
+  git(hidden, "push", "-q", "origin", "HEAD:main");
+  fs.writeFileSync(path.join(hidden, "docs", "x.md"), "x\n");
+  fs.writeFileSync(path.join(hidden, ".gitattributes"), "src/* filter=same\n");
+  commitAll(hidden, "docs");
+  fs.writeFileSync(path.join(hidden, "src", "a.ts"), "export const a: number = 'broken';\n");
+  git(hidden, "update-index", "--assume-unchanged", "src/a.ts");
+  task = await run(hidden);
+  assert.deepEqual(task.evidence.map((item) => item.checkId).sort(), ["docs", "types"], "an assume-unchanged file still counts as changed");
+  assert.notEqual(task.state, "done");
+  git(hidden, "update-index", "--no-assume-unchanged", "src/a.ts");
+  git(hidden, "config", "filter.same.clean", "git cat-file blob HEAD:%f");
+  task = await run(hidden);
+  assert.deepEqual(task.evidence.map((item) => item.checkId).sort(), ["docs", "types"], "a clean filter cannot hide a change");
+  assert.notEqual(task.state, "done");
+
+  // Route 7: it runs the gate from a subfolder with its own package scripts;
   // the checks run from the repository's top.
   fs.mkdirSync(path.join(repo, "sub"), { recursive: true });
   const where = makeRepo("rooted", { checks: [{ id: "where", run: "pwd" }] });

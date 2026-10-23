@@ -15,7 +15,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createWriteStream, promises as fs } from "node:fs";
-import { dirname, join, sep } from "node:path";
+import { dirname, isAbsolute, join, resolve as resolvePath, sep } from "node:path";
 
 import type { Task, TaskEvidence } from "@shared/cos-tasks";
 import { isRemotePath } from "@shared/remote";
@@ -25,9 +25,10 @@ import type { TaskStore } from "./task-store";
 
 export const VERIFY_CONFIG_PATH = join(".codara", "verify.json");
 const REMOTE = "origin";
-// Where the gate fetches the base branch to: a namespace of Codara's own that
-// it overwrites before every read, so no ref the agent moved is ever trusted.
+// Where the gate fetches the base branch and the task's commit to, in its
+// own repository (originFlags), overwritten before every read.
 const BASE_REF_PREFIX = "refs/codara/verify-base";
+const HEAD_REF_PREFIX = "refs/codara/verify-head";
 const GIT_TIMEOUT_MS = 90_000;
 const DEFAULT_TIMEOUT_SEC = 20 * 60;
 const MAX_TIMEOUT_SEC = 2 * 60 * 60;
@@ -266,13 +267,28 @@ export function createCommandRunner(heavy?: { bin: string; env: Record<string, s
     });
 }
 
+// Config that would run a program, or tell git the working tree is other
+// than it is, during the gate's own git calls: hooks (reference-transaction
+// fires on every ref a fetch writes), an fsmonitor, a stale untracked cache,
+// ext:: transports.
+const GIT_HARDENING = [
+  "-c",
+  "core.hooksPath=/dev/null",
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  "core.untrackedCache=false",
+  "-c",
+  "protocol.ext.allow=never",
+];
+
 // A fetch that waits on a network or an SSH prompt ends with the gate
 // blocked instead of holding the task in verifying.
 export const defaultGitRunner: GitRunner = (args, cwd) =>
   new Promise((resolve, reject) => {
     // Replace refs are the agent's to write; they could stand another
     // commit's checks in for the base's.
-    const child = spawn("git", args, {
+    const child = spawn("git", [...GIT_HARDENING, ...args], {
       cwd,
       env: gitChildEnv({ ...process.env, GIT_NO_REPLACE_OBJECTS: "1" }),
       stdio: ["ignore", "pipe", "ignore"],
@@ -291,17 +307,25 @@ export const defaultGitRunner: GitRunner = (args, cwd) =>
     child.on("close", (code) => {
       clearTimeout(timer);
       if (code === 0) resolve(out);
-      else reject(new Error(`git ${args[0]} exited ${code}`));
+      else reject(new Error(`git ${args.find((arg, index) => !arg.startsWith("-") && args[index - 1] !== "-c")} exited ${code}`));
     });
   });
 
 const BRANCH_NAME = /^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]{1,200}$/;
 
+// A path URL ("../origin.git") is relative to the checkout, not to the
+// gate's repository the fetch runs in.
+function fetchableUrl(url: string, top: string): string {
+  const local = !isAbsolute(url) && !/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(url) && !/^[^/]*:/.test(url);
+  return local ? resolvePath(top, url) : url;
+}
+
 // origin's URL lives in the repository's config, which the agent can edit,
 // so the gate keeps the URL it saw on its first run for the workspace and
-// refuses to fetch anything else.
-async function pinnedOrigin(cwd: string, pinFile: string, git: GitRunner): Promise<{ url: string } | { blocked: string }> {
-  const current = (await git(["remote", "get-url", REMOTE], cwd).catch(() => "")).trim();
+// refuses to fetch anything else. The fetch runs in the gate's repository,
+// where the checkout's url.insteadOf rules do not apply.
+async function pinnedOrigin(top: string, pinFile: string, git: GitRunner): Promise<{ url: string } | { blocked: string }> {
+  const current = (await git(["remote", "get-url", REMOTE], top).catch(() => "")).trim();
   if (!current) return { blocked: `Codara cannot reach ${REMOTE} to find the base branch the repository's checks are read from.` };
   let pinned: string | null = null;
   try {
@@ -319,17 +343,43 @@ async function pinnedOrigin(cwd: string, pinFile: string, git: GitRunner): Promi
       blocked: `${REMOTE} now points at ${current}, not ${pinned} as when Codara first checked this workspace's work; if you changed it on purpose, delete ${pinFile} and verify again.`,
     };
   }
-  const resolved = (await git(["ls-remote", "--get-url", pinned], cwd).catch(() => "")).trim();
-  if (resolved !== pinned) {
-    return { blocked: `A url.insteadOf rule in git's config rewrites ${REMOTE}'s URL, so Codara cannot trust what it would fetch.` };
-  }
-  return { url: pinned };
+  return { url: fetchableUrl(pinned, top) };
+}
+
+// The gate's own bare repository for a repository a workspace works in,
+// under Codara's folder. origin's base branch is fetched into it, and so is
+// the task's commit, from the checkout; the checks file, the merge base and
+// the committed change are all read here. Nothing in the checkout (its
+// hooks, its config, its refs, objects planted in its store) takes part.
+// It holds commits and trees; a blob comes from origin when first read.
+function originFlags(url: string): string[] {
+  return ["-c", `remote.${REMOTE}.url=${url}`, "-c", `remote.${REMOTE}.promisor=true`, "-c", `remote.${REMOTE}.partialclonefilter=blob:none`];
+}
+
+async function ensureBaseRepo(dir: string, objectFormat: string, git: GitRunner): Promise<boolean> {
+  if (await fs.stat(join(dir, "HEAD")).then(() => true, () => false)) return true;
+  await fs.mkdir(dirname(dir), { recursive: true });
+  const format = objectFormat === "sha256" ? "sha256" : "sha1";
+  return git(["init", "--quiet", "--bare", `--object-format=${format}`, dir], dirname(dir)).then(() => true, () => false);
+}
+
+// Two gates of one workspace share its repository; git's ref locks would
+// fail the second fetch, so they take turns.
+const repoTurns = new Map<string, Promise<unknown>>();
+function inTurn<T>(dir: string, work: () => Promise<T>): Promise<T> {
+  const next = (repoTurns.get(dir) ?? Promise.resolve()).catch(() => undefined).then(work);
+  repoTurns.set(dir, next);
+  next.then(
+    () => repoTurns.get(dir) === next && repoTurns.delete(dir),
+    () => repoTurns.get(dir) === next && repoTurns.delete(dir),
+  );
+  return next;
 }
 
 /** The branch origin's HEAD points at, asked of origin itself: a local origin/HEAD is the agent's to move. */
-async function remoteDefaultBranch(cwd: string, url: string, git: GitRunner): Promise<string | null> {
+async function remoteDefaultBranch(repo: string, url: string, git: GitRunner): Promise<string | null> {
   try {
-    const out = await git(["ls-remote", "--symref", url, "HEAD"], cwd);
+    const out = await git(["ls-remote", "--symref", url, "HEAD"], repo);
     const match = /^ref: refs\/heads\/(\S+)\s+HEAD$/m.exec(out);
     return match && BRANCH_NAME.test(match[1]) ? match[1] : null;
   } catch {
@@ -337,29 +387,92 @@ async function remoteDefaultBranch(cwd: string, url: string, git: GitRunner): Pr
   }
 }
 
-/** Fetches origin's `branch` into Codara's own ref and returns its commit, or null. */
-async function fetchBase(cwd: string, url: string, branch: string, git: GitRunner): Promise<string | null> {
+/** Fetches origin's `branch` into the gate's repository and returns its commit, or null. */
+async function fetchBase(repo: string, url: string, branch: string, git: GitRunner): Promise<string | null> {
   const ref = `${BASE_REF_PREFIX}/${branch}`;
   try {
-    await git(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head", url, `+refs/heads/${branch}:${ref}`], cwd);
-    return (await git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], cwd)).trim() || null;
+    await git([...originFlags(url), "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--filter=blob:none", REMOTE, `+refs/heads/${branch}:${ref}`], repo);
+    return (await git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], repo)).trim() || null;
   } catch {
     return null;
   }
 }
 
-/** The merge base with `baseCommit` and the files changed since it, or null when git cannot say. */
-export async function changedSince(cwd: string, baseCommit: string, git: GitRunner): Promise<{ base: string; files: string[] } | null> {
+/** Fetches the checkout's HEAD into the gate's repository as `ref` and returns its commit, or null. */
+async function fetchHead(repo: string, url: string, top: string, ref: string, git: GitRunner): Promise<string | null> {
   try {
-    const base = (await git(["merge-base", "HEAD", baseCommit], cwd)).trim();
-    if (!base) return null;
-    const tracked = await git(["diff", "--name-only", base], cwd);
-    const untracked = await git(["ls-files", "--others", "--exclude-standard"], cwd);
-    const files = [...new Set(`${tracked}\n${untracked}`.split("\n").map((line) => line.trim()).filter(Boolean))];
-    return { base, files };
+    await git([...originFlags(url), "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", top, `+HEAD:${ref}`], repo);
+    return (await git(["rev-parse", "--verify", "--quiet", `${ref}^{commit}`], repo)).trim() || null;
   } catch {
     return null;
   }
+}
+
+/** The merge base of `head` with `baseCommit` and the files its commits changed since, or null when git cannot say. */
+export async function changedSince(
+  repo: string,
+  baseCommit: string,
+  head: string,
+  git: GitRunner,
+): Promise<{ base: string; files: string[] } | null> {
+  try {
+    const base = (await git(["merge-base", head, baseCommit], repo)).trim();
+    if (!base) return null;
+    const files = await git(["diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv", base, head], repo);
+    return { base, files: files.split("\0").filter(Boolean) };
+  } catch {
+    return null;
+  }
+}
+
+/** Every path in `commit` with its mode and object id. */
+async function commitTree(repo: string, commit: string, git: GitRunner): Promise<Map<string, { mode: string; oid: string }>> {
+  const tree = new Map<string, { mode: string; oid: string }>();
+  for (const line of (await git(["ls-tree", "-r", "-z", "--full-tree", commit], repo)).split("\0")) {
+    const match = /^(\d+) \w+ ([0-9a-f]+)\t(.+)$/s.exec(line);
+    if (match) tree.set(match[3], { mode: match[1], oid: match[2] });
+  }
+  return tree;
+}
+
+const HASH_MAX_BYTES = 16 * 1024 * 1024;
+
+/**
+ * What the checkout changes beyond its commit, or null when git cannot list
+ * its files. Codara hashes the files itself: the index is the agent's to
+ * mark (assume-unchanged, skip-worktree) and a clean filter its program to
+ * run. A file too big to hash counts as changed.
+ */
+async function workingTreeChanges(top: string, tree: Map<string, { mode: string; oid: string }>, git: GitRunner): Promise<string[] | null> {
+  const hash = (data: Buffer, oid: string) =>
+    createHash(oid.length === 64 ? "sha256" : "sha1").update(`blob ${data.length}\0`).update(data).digest("hex");
+  const differs = async (path: string, { mode, oid }: { mode: string; oid: string }): Promise<boolean> => {
+    if (mode === "160000") return false;
+    const file = join(top, path);
+    try {
+      if (mode === "120000") return hash(Buffer.from(await fs.readlink(file)), oid) !== oid;
+      const stat = await fs.lstat(file);
+      if (!stat.isFile() || stat.size > HASH_MAX_BYTES) return true;
+      return hash(await fs.readFile(file), oid) !== oid;
+    } catch {
+      return true;
+    }
+  };
+  const changed = new Set<string>();
+  const entries = [...tree];
+  for (let i = 0; i < entries.length; i += 32) {
+    const batch = entries.slice(i, i + 32);
+    const results = await Promise.all(batch.map(([path, entry]) => differs(path, entry)));
+    batch.forEach(([path], index) => results[index] && changed.add(path));
+  }
+  // New files, whether or not the index holds them.
+  try {
+    const listed = await git(["ls-files", "-z", "--cached", "--others", "--exclude-standard"], top);
+    for (const path of listed.split("\0")) if (path && !tree.has(path)) changed.add(path);
+  } catch {
+    return null;
+  }
+  return [...changed];
 }
 
 function minutes(seconds: number): string {
@@ -523,21 +636,47 @@ export async function runVerifyGate(options: VerifyGateOptions): Promise<Task | 
   // a subfolder could hold its own package.json with looser scripts.
   const top = (await git(["rev-parse", "--show-toplevel"], cwd).catch(() => "")).trim();
   if (!top) return blocked("The task's folder is not a git checkout, so its change cannot be measured.");
-  const repoId = createHash("sha256").update((await gitCommonDir(top, git)) ?? top).digest("hex").slice(0, 16);
+  const commonDir = await gitCommonDir(top, git);
+  const repoId = createHash("sha256").update(commonDir ?? top).digest("hex").slice(0, 16);
   const origin = await pinnedOrigin(top, join(store.paths(workspaceId).dir, "verify-origin", `${repoId}.json`), git);
   if ("blocked" in origin) return blocked(origin.blocked);
-  const branch = options.baseBranch?.trim() || (await remoteDefaultBranch(top, origin.url, git));
-  if (!branch) return blocked(`Codara cannot reach ${REMOTE} to find the base branch the repository's checks are read from.`);
-  if (!BRANCH_NAME.test(branch)) return blocked(`The base branch "${branch}" is not a branch name Codara can fetch.`);
-  const ref = `${REMOTE}/${branch}`;
-  const baseCommit = await fetchBase(top, origin.url, branch, git);
-  if (!baseCommit) return blocked(`Codara could not fetch ${ref}, so the repository's checks could not be read.`);
-  let raw: string;
-  try {
-    raw = await git(["cat-file", "blob", `${baseCommit}:.codara/verify.json`], top);
-  } catch {
-    return blocked(`${ref} has no .codara/verify.json, so nothing can prove the task is done.`);
-  }
+  const objectFormat = (await git(["rev-parse", "--show-object-format"], top).catch(() => "sha1")).trim();
+  const repo = join(store.paths(workspaceId).dir, "verify-repo", `${repoId}.git`);
+
+  type BaseRead =
+    | { blocked: string }
+    | { ref: string; raw: string; committed: { base: string; files: string[] }; tree: Map<string, { mode: string; oid: string }> };
+  const read = await inTurn(repo, async (): Promise<BaseRead> => {
+    if (!(await ensureBaseRepo(repo, objectFormat, git))) {
+      return { blocked: "Codara could not set up its own copy of the repository to read the checks from." };
+    }
+    const branch = options.baseBranch?.trim() || (await remoteDefaultBranch(repo, origin.url, git));
+    if (!branch) return { blocked: `Codara cannot reach ${REMOTE} to find the base branch the repository's checks are read from.` };
+    if (!BRANCH_NAME.test(branch)) return { blocked: `The base branch "${branch}" is not a branch name Codara can fetch.` };
+    const ref = `${REMOTE}/${branch}`;
+    const baseCommit = await fetchBase(repo, origin.url, branch, git);
+    if (!baseCommit) return { blocked: `Codara could not fetch ${ref}, so the repository's checks could not be read.` };
+    const listed = await git(["ls-tree", "--name-only", baseCommit, ".codara/verify.json"], repo).catch(() => "");
+    if (!listed.trim()) return { blocked: `${ref} has no .codara/verify.json, so nothing can prove the task is done.` };
+    let raw: string;
+    try {
+      raw = await git([...originFlags(origin.url), "cat-file", "blob", `${baseCommit}:.codara/verify.json`], repo);
+    } catch {
+      return { blocked: `Codara could not read .codara/verify.json from ${ref}.` };
+    }
+    const headRef = `${HEAD_REF_PREFIX}/${taskId}`;
+    const head = await fetchHead(repo, origin.url, top, headRef, git);
+    if (!head) return { blocked: "Codara could not read the task's commit from its checkout, so its change cannot be measured." };
+    try {
+      const committed = await changedSince(repo, baseCommit, head, git);
+      if (!committed) return { blocked: `The task's work shares no history with ${ref}, so the change cannot be measured.` };
+      return { ref, raw, committed, tree: await commitTree(repo, head, git) };
+    } finally {
+      await git(["update-ref", "-d", headRef], repo).catch(() => undefined);
+    }
+  });
+  if ("blocked" in read) return blocked(read.blocked);
+  const { ref, raw, committed } = read;
   let config: VerifyConfig;
   try {
     config = parseVerifyConfig(JSON.parse(raw));
@@ -545,8 +684,9 @@ export async function runVerifyGate(options: VerifyGateOptions): Promise<Task | 
     const detail = error instanceof VerifyConfigError ? error.message : "it is not valid JSON";
     return blocked(`The .codara/verify.json on ${ref} cannot be used: ${detail}.`);
   }
-  const changed = await changedSince(top, baseCommit, git);
-  if (!changed) return blocked(`The task's work shares no history with ${ref}, so the change cannot be measured.`);
+  // Unknown changes in the working tree run every check.
+  const local = await workingTreeChanges(top, read.tree, git);
+  const changed = { base: committed.base, files: local ? [...new Set([...committed.files, ...local])] : null };
 
   const checks = selectChecks(config, changed.files);
   const logDir = join(store.paths(workspaceId).dir, "verify", taskId, runId);

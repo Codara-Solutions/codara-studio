@@ -672,15 +672,20 @@ a folder in it), or a worktree an agent made of the same repository; another
 workspace's checkout (a user's branch, the tree a running app reloads from)
 and SSH workspaces are refused with one sentence. The
 checks are read from `.codara/verify.json` on the base branch as `origin`
-has it, fetched at that moment into Codara's own ref
-(`refs/codara/verify-base/<branch>`). The base branch is the app's choice:
-the branch the user forked the workspace from, else the branch `origin`'s
-HEAD names. Nothing in the task's folder (its working tree, its commits, a
-`base` key in its `verify.json`, its local or remote-tracking refs, replace
-refs) can choose the base or loosen the checks. `origin`'s URL is pinned on
-the gate's first run for the repository; a changed URL or a `url.insteadOf`
-rewrite blocks the task until the user deletes the pin file the sentence
-names. The checks run from the top of the checkout. A newer verify run of the task, or
+has it, fetched at that moment into a bare repository Codara owns
+(`<codaraHome>/cos/<workspace>/verify-repo/`, commits and trees only). The
+task's commit is fetched there from the checkout too, and the merge base and
+the committed change are read there; files changed but not committed are
+found by hashing the working tree against that commit. The base branch is
+the app's choice: the branch the user forked the workspace from, else the
+branch `origin`'s HEAD names. Nothing in the task's folder (its working tree,
+its commits, a `base` key in its `verify.json`, its refs, replace refs,
+hooks, config such as `url.insteadOf` or `core.fsmonitor`, index flags,
+objects planted in its store) can choose the base or loosen the checks; the
+gate's git calls run with hooks and the fsmonitor off. `origin`'s URL is
+pinned on the gate's first run for the repository; a changed URL blocks the
+task until the user deletes the pin file the sentence names. The checks run
+from the top of the checkout. A newer verify run of the task, or
 the task leaving `verifying` (moved or dropped), cancels the checks still
 running. Each check is a shell command with optional `when` globs (it
 runs when the change touches a matching file) and `timeoutSec`; the change
