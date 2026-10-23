@@ -567,9 +567,10 @@ After Deny the pair is refused without a new card for five minutes. A `cwd`
 must be a local folder inside the target workspace. If the agent stopped
 waiting before the user answered, no terminal opens. Allow once covers that
 one call. Always covers the whole caller workspace, not one agent: every agent
-in it, including Cora runs, later sessions and agents started in the terminals
-it opens, may then open terminals in the target without asking. The card says
-so. Always is kept per caller and target workspace pair in
+in it, including Cora runs and later sessions, may then open terminals in the
+target without asking. The card says so. An agent started inside a terminal
+opened this way sits in the target workspace, so it counts as the target's,
+not the caller's. Always is kept per caller and target workspace pair in
 `<codara home>/cross-workspace-grants.json`, and Settings, Agents, Terminals
 in other workspaces lists each pair with Revoke, and updates while open.
 

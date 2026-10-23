@@ -113,8 +113,8 @@ export default function CrossWorkspacePrompt(): React.ReactElement | null {
         and type into it. Allow once covers this one terminal.
       </p>
       <p className="chrome-pairing__body">
-        Always lets every agent in {request.callerName} do this without asking, from now on: other sessions, Cora
-        runs, and agents started in the terminals it opens. Revoke it in Settings, Agents.
+        Always lets every agent in {request.callerName} do this without asking from now on, including other
+        sessions and Cora runs there. Revoke it in Settings, Agents.
       </p>
       <div className="chrome-pairing__actions">
         <span className="chrome-pairing__countdown" aria-live="off">
