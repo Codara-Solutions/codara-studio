@@ -176,6 +176,8 @@ export interface TaskSummary {
   line: string;
   /** The oldest open needs_you task, so the rail can say why in one sentence. */
   needsYou?: { taskId: string; title: string; reason: string };
+  /** origin's URL the gate found in a workspace from before Codara recorded origins, for the user to confirm. */
+  originToConfirm?: string;
   updatedAt: number;
 }
 

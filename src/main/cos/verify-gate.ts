@@ -332,18 +332,29 @@ export async function originUrl(dir: string, git: GitRunner = defaultGitRunner):
 
 /**
  * origin's URL per workspace as Codara recorded it when the workspace was
- * added (index.ts), before any agent worked in it; the gate fetches from
- * nothing else. A checkout's config is the agent's to edit, and a worktree
- * shares its main checkout's, so the URL it holds when the gate first runs
- * proves nothing.
+ * added (index.ts), before any agent worked in it, or as the user confirmed
+ * it; the gate fetches from nothing else. A checkout's config is the agent's
+ * to edit, and a worktree shares its main checkout's, so the URL it holds
+ * when the gate first runs proves nothing until the user says it is right.
  */
 export interface OriginRecords {
+  /** The recorded URL, or null; a URL waiting for the user is not one. */
   get(workspaceId: string): Promise<string | null>;
   /** Keeps the first URL recorded for a workspace. */
   record(workspaceId: string, url: string): Promise<void>;
+  /** The URL waiting for the user to confirm, or null. */
+  pending(workspaceId: string): Promise<string | null>;
+  /** Puts `url` up for the user to confirm, in place of an earlier one; nothing once a URL is recorded. */
+  propose(workspaceId: string, url: string): Promise<void>;
+  /** The user's word: records `url` when it is the one waiting. False otherwise. */
+  confirm(workspaceId: string, url: string): Promise<boolean>;
 }
 
-/** Records kept in one JSON file in Codara's own folder ({ workspaceId: url }). */
+/**
+ * Records kept in one JSON file in Codara's own folder: { workspaceId: url }
+ * once recorded, { workspaceId: { pending: url } } while the user has not
+ * confirmed it.
+ */
 export function createOriginRecords(file: string): OriginRecords {
   let queue: Promise<unknown> = Promise.resolve();
   const read = async (): Promise<Record<string, unknown>> => {
@@ -354,23 +365,54 @@ export function createOriginRecords(file: string): OriginRecords {
       return {};
     }
   };
+  const recorded = (value: unknown): string | null => (typeof value === "string" && value ? value : null);
+  const waiting = (value: unknown): string | null => {
+    const url = value && typeof value === "object" ? (value as { pending?: unknown }).pending : null;
+    return typeof url === "string" && url ? url : null;
+  };
+  // Writes go one at a time; `change` returns false to leave the file as it is.
+  const update = <T>(change: (all: Record<string, unknown>) => T | false): Promise<T | false> => {
+    const next = queue.then(async () => {
+      const all = await read();
+      const result = change(all);
+      if (result === false) return false;
+      await fs.mkdir(dirname(file), { recursive: true });
+      const temp = `${file}.${process.pid}.tmp`;
+      await fs.writeFile(temp, `${JSON.stringify(all, null, 2)}\n`, { mode: 0o600 });
+      await fs.rename(temp, file);
+      return result;
+    });
+    queue = next.catch(() => undefined);
+    return next;
+  };
   return {
     async get(workspaceId) {
-      const url = (await read())[workspaceId];
-      return typeof url === "string" && url ? url : null;
+      return recorded((await read())[workspaceId]);
     },
-    record(workspaceId, url) {
-      const next = queue.then(async () => {
-        const all = await read();
-        if (typeof all[workspaceId] === "string" && all[workspaceId]) return;
+    async record(workspaceId, url) {
+      await update((all) => {
+        if (recorded(all[workspaceId])) return false;
         all[workspaceId] = url;
-        await fs.mkdir(dirname(file), { recursive: true });
-        const temp = `${file}.${process.pid}.tmp`;
-        await fs.writeFile(temp, `${JSON.stringify(all, null, 2)}\n`, { mode: 0o600 });
-        await fs.rename(temp, file);
+        return true;
       });
-      queue = next.catch(() => undefined);
-      return next;
+    },
+    async pending(workspaceId) {
+      return waiting((await read())[workspaceId]);
+    },
+    async propose(workspaceId, url) {
+      await update((all) => {
+        if (recorded(all[workspaceId]) || waiting(all[workspaceId]) === url) return false;
+        all[workspaceId] = { pending: url };
+        return true;
+      });
+    },
+    async confirm(workspaceId, url) {
+      const done = await update((all) => {
+        if (!url || waiting(all[workspaceId]) !== url) return false;
+        all[workspaceId] = url;
+        return true;
+      });
+      return done === true;
     },
   };
 }
@@ -404,8 +446,10 @@ export async function recordAddedWorkspaces(
 }
 
 // The checkout's origin must still be the recorded one. A workspace added
-// before Codara recorded origins has its URL recorded now from its own
-// checkout, and the task goes to the user once with that URL to confirm.
+// before Codara recorded origins has its checkout's URL put up for the user
+// to confirm (in the rail), and every run refuses until they have: an agent
+// could have repointed origin before this first run, and moving the task
+// back to verifying is in its power.
 async function recordedOrigin(
   workspaceId: string,
   top: string,
@@ -419,9 +463,9 @@ async function recordedOrigin(
   if (!recorded) {
     const found = await originUrl(home, git);
     if (!found) return { blocked: `Codara cannot reach ${REMOTE} to find the base branch the repository's checks are read from.` };
-    await origins.record(workspaceId, found);
+    await origins.propose(workspaceId, found);
     return {
-      blocked: `Codara had no record of this workspace's ${REMOTE} and recorded ${found} from its checkout; if that is the right repository, verify again.`,
+      blocked: `Confirm ${found} as this workspace's ${REMOTE} under its name in the sidebar; until you do, no task here can close.`,
     };
   }
   if (recorded !== current) {

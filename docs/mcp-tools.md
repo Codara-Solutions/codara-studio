@@ -689,8 +689,11 @@ the one Codara recorded when the user added the workspace
 (`<codaraHome>/cos/workspace-origins.json`); a checkout whose `origin` now
 differs, or a `url.insteadOf` rule (global or in the gate's repository) that
 rewrites it, blocks the task. A workspace added before Codara recorded
-origins gets its URL recorded from its checkout on the gate's first run, and
-that task goes to the user once with the URL to confirm. The checks run
+origins gets its checkout's URL put up for confirmation on the gate's first
+run: a "Confirm origin" button under the workspace in the sidebar, which only
+the user can press. Until they do, every run of the gate there sends its
+task to `needs_you`, however often an agent moves it back to `verifying`.
+The checks run
 from the top of the checkout. A newer verify run of the task, or
 the task leaving `verifying` (moved or dropped), cancels the checks still
 running. Each check is a shell command with optional `when` globs (it

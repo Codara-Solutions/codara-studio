@@ -64,8 +64,7 @@ function taskStore(): TaskStore {
     workspaceName: async (workspaceId) => (await workspaceById(workspaceId))?.name ?? null,
   });
   store.onChange((workspaceId) => {
-    void store
-      ?.summary(workspaceId)
+    void summaryOf(workspaceId)
       .then((summary) => broadcast({ workspaceId, summary }))
       .catch(() => undefined);
   });
@@ -77,6 +76,17 @@ let origins: OriginRecords | null = null;
 function originRecords(): OriginRecords {
   origins ??= createOriginRecords(join(cosRoot(), "workspace-origins.json"));
   return origins;
+}
+
+// The rail's summary, with the origin URL waiting for the user's word when
+// there is one.
+async function summaryOf(workspaceId: string): Promise<TaskSummary | null> {
+  const summary = await taskStore().summary(workspaceId);
+  if (!summary) return null;
+  const url = await originRecords()
+    .pending(workspaceId)
+    .catch(() => null);
+  return url ? { ...summary, originToConfirm: url } : summary;
 }
 
 // The same wrapper and machine-wide slots workflow agents use, so a gate run
@@ -150,9 +160,7 @@ async function listedWorkspaceIds(): Promise<string[]> {
 async function summaries(): Promise<Record<string, TaskSummary>> {
   const out: Record<string, TaskSummary> = {};
   for (const workspaceId of await listedWorkspaceIds()) {
-    const summary = await taskStore()
-      .summary(workspaceId)
-      .catch(() => null);
+    const summary = await summaryOf(workspaceId).catch(() => null);
     if (summary) out[workspaceId] = summary;
   }
   return out;
@@ -175,6 +183,18 @@ async function resumeInterruptedVerifies(): Promise<void> {
 export function registerCosTasksIpc(handle: IpcHandle): void {
   taskStore();
   handle("cosTasks:summaries", (): Promise<Record<string, TaskSummary>> => summaries());
+  // The user's click under the workspace in the rail (the trusted main
+  // window; no agent tool reaches it). Only the URL the rail showed, while it
+  // is still the one waiting, is recorded.
+  handle("cosTasks:confirmOrigin", async (_event, workspaceId: unknown, url: unknown): Promise<boolean> => {
+    if (typeof workspaceId !== "string" || !isTaskWorkspaceId(workspaceId) || typeof url !== "string") return false;
+    const confirmed = await originRecords().confirm(workspaceId, url);
+    if (confirmed) {
+      logMain("cos", `origin of ${workspaceId} confirmed by the user: ${url}`);
+      broadcast({ workspaceId, summary: await summaryOf(workspaceId) });
+    }
+    return confirmed;
+  });
   // A check left running after quit would hold the heavy slot the gate
   // resumed at the next boot then waits for.
   app.on("will-quit", stopRunningChecks);

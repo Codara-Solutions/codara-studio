@@ -405,23 +405,55 @@ async function recordedOrigin() {
   assert.equal(task.state, "needs_you", "a global insteadOf rule is refused");
   assert.match(task.needsYouReason, /globalrule-evil\.git/);
 
-  // A workspace added before Codara recorded origins: the first run records
-  // the main checkout's URL and asks the user once; then the gate runs.
+  // A workspace added before Codara recorded origins, whose origin an agent
+  // swapped before the gate's first run: the checkout's URL waits for the
+  // user, and every run refuses until they confirm it, however often the
+  // agent sends the task back through dispatched to verifying.
   const legacy = makeRepo("legacy", strict);
-  const file = path.join(TMP, "cos-legacy", "workspace-origins.json");
+  const legacyEvil = evilTwin(legacy, "legacy");
+  git(legacy, "remote", "set-url", "origin", legacyEvil);
+  const legacyRoot = path.join(TMP, "cos-legacy");
+  const file = path.join(legacyRoot, "workspace-origins.json");
   const origins = gate.createOriginRecords(file);
-  task = await runIn(path.join(TMP, "cos-legacy"), legacy, { origins });
+  const legacyStore = gate.createTaskStore({ root: legacyRoot });
+  const legacyTask = await verifyingTask(legacyStore);
+  const runLegacy = (runId) =>
+    gate.runVerifyGate({ store: legacyStore, workspaceId: WS, taskId: legacyTask.id, runId, cwd: legacy, origins, runCommand });
+  task = await runLegacy(legacyTask.runId);
   assert.equal(task.state, "needs_you");
-  assert.equal(
-    task.needsYouReason,
-    `Codara had no record of this workspace's origin and recorded ${added.get(legacy)} from its checkout; if that is the right repository, verify again.`,
-  );
-  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { [WS]: added.get(legacy) });
+  assert.equal(task.needsYouReason, `Confirm ${legacyEvil} as this workspace's origin under its name in the sidebar; until you do, no task here can close.`);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { [WS]: { pending: legacyEvil } });
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.equal(await origins.get(WS), null, "a URL waiting for the user is not recorded");
+  assert.equal(await origins.pending(WS), legacyEvil);
+  for (let round = 0; round < 3; round += 1) {
+    await legacyStore.updateTask(WS, legacyTask.id, { state: "dispatched" }, AGENT);
+    const { verifyRunId } = await legacyStore.updateTask(WS, legacyTask.id, { state: "verifying" }, AGENT);
+    task = await runLegacy(verifyRunId);
+    assert.equal(task.state, "needs_you", `the agent's round ${round + 1} closes nothing`);
+    assert.match(task.needsYouReason, /^Confirm .*legacy-evil\.git as this workspace's origin/);
+  }
+  assert.equal(task.evidence.length, 0, "no check ever ran on the swapped origin's word");
+
+  // The user sees the swapped URL and sets origin back instead; the waiting
+  // URL follows the checkout, and only the one shown can be confirmed.
+  git(legacy, "remote", "set-url", "origin", added.get(legacy));
+  await legacyStore.updateTask(WS, legacyTask.id, { state: "dispatched" }, AGENT);
+  let { verifyRunId } = await legacyStore.updateTask(WS, legacyTask.id, { state: "verifying" }, AGENT);
+  task = await runLegacy(verifyRunId);
+  assert.equal(task.state, "needs_you");
+  assert.equal(await origins.pending(WS), added.get(legacy));
+  assert.equal(await origins.confirm(WS, legacyEvil), false, "a URL no longer waiting cannot be confirmed");
+  assert.equal(await origins.confirm(WS, added.get(legacy)), true);
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { [WS]: added.get(legacy) });
   await origins.record(WS, "/somewhere/else.git");
-  assert.equal(await origins.get(WS), added.get(legacy), "the first record stays");
-  task = await runIn(path.join(TMP, "cos-legacy"), legacy, { origins });
-  assert.equal(task.evidence.at(-1).exitCode, 3, "the next run reads origin's checks");
+  await origins.propose(WS, "/somewhere/else.git");
+  assert.equal(await origins.get(WS), added.get(legacy), "the confirmed record stays");
+  assert.equal(await origins.pending(WS), null);
+  await legacyStore.updateTask(WS, legacyTask.id, { state: "dispatched" }, AGENT);
+  ({ verifyRunId } = await legacyStore.updateTask(WS, legacyTask.id, { state: "verifying" }, AGENT));
+  task = await runLegacy(verifyRunId);
+  assert.equal(task.evidence.at(-1).exitCode, 3, "once confirmed, the gate reads origin's strict checks");
 
   // What the app records as workspaces are added (index.ts on each save).
   const fresh = makeRepo("added", strict);
