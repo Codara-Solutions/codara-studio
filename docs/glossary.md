@@ -73,7 +73,7 @@ that defines it (types are in `src/shared/types.ts` unless noted).
 - **Agent line.** One agent's line in the rail: its state, which Codara
   computes (working, needs you, done or idle), and the one-line note the agent
   adds with `codara_workspace_status`. The note goes when the agent's tab
-  closes. The workspace's row sums its agent lines and its task list into one
+  closes (for a Cora chat, when the chat leaves the Agents view). The workspace's row sums its agent lines and its task list into one
   summary line (`src/shared/agent-status.ts`).
 - **Dock, docked tab.** A tab placed inside a terminal tab's split grid
   instead of filling the whole area (`src/renderer/src/tabs/dock.ts`).

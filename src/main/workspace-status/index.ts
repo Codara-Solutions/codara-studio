@@ -9,6 +9,7 @@
 import { join } from "node:path";
 import { webContents } from "electron";
 
+import { coraRunPlacement } from "@shared/agent-board";
 import { paneNoteKey, type AgentNoteChange, type AgentNoteMap } from "@shared/agent-status";
 import {
   isWorkspaceIdLike,
@@ -22,7 +23,7 @@ import {
 import { codaraHome } from "../codara-home";
 import type { IpcHandle } from "../ipc";
 import { loadState, onStateSaved } from "../storage";
-import { onTerminalPaneRemoved, terminalAgentStateSnapshot } from "../terminal-agent-notify";
+import { onTerminalPaneRemoved, terminalAgentStateSnapshot, terminalPanePlacement } from "../terminal-agent-notify";
 import { createAgentNoteBook, type AgentNoteBook } from "./agent-notes";
 import { provideWorkspaceStatusService } from "./service";
 import { createWorkspaceStatusStore, type WorkspaceStatusStore } from "./store";
@@ -76,9 +77,21 @@ async function workspaceName(workspaceId: string): Promise<string | null> {
   return state?.workspaces.find((workspace) => workspace.id === workspaceId)?.name ?? null;
 }
 
+// A pane's note goes with its pane (onTerminalPaneRemoved). A chat has no
+// pane, so its note lasts while the chat is on the Agents view, as its line
+// does, and the next tool call in its workspace drops it after that.
+async function agentIsLive(key: string): Promise<boolean> {
+  if (key.startsWith("pane:")) return terminalPanePlacement(key.slice("pane:".length)) !== null;
+  if (!key.startsWith("run:")) return false;
+  const { getRun } = await import("../orchestration/run-store");
+  const run = await getRun(key.slice("run:".length)).catch(() => null);
+  return run !== null && coraRunPlacement(run, Date.now()) !== null;
+}
+
 provideWorkspaceStatusService({
   store: workspaceStatusStore,
   notes: agentNotes,
+  agentIsLive,
   workspaceName,
   agentLabelForPane(paneId) {
     const runtime = terminalAgentStateSnapshot().find((entry) => entry.paneId === paneId)?.runtime;

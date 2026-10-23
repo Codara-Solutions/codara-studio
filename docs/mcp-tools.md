@@ -632,7 +632,7 @@ on the workspace's row).
 
 | Tool | What it does |
 |---|---|
-| `codara_workspace_status` | Reads (no arguments) or sets the one-line note on the calling agent's own line in the rail. Each agent has its own line, keyed to the terminal pane it runs in (or its Cora chat), so agents sharing a workspace never overwrite each other. `note` is one plain line of at most 140 characters (longer text is cut and the result says `noteTruncated`; an empty note clears it); `clear: true` removes the line's note and status. `status` (`todo`, `in_progress`, `in_review`, `done`, `blocked`) is still accepted and read back for older callers, but the rail shows the state Codara sees itself. The result carries the caller's note, its status, the five latest checkpoints of its own line, newest first, and `otherAgents`: the notes of the other agents in the workspace. |
+| `codara_workspace_status` | Reads (no arguments) or sets the one-line note on the calling agent's own line in the rail. Each agent has its own line, keyed to the terminal pane it runs in (or its Cora chat), so agents sharing a workspace never overwrite each other. `note` is one plain line of at most 140 characters (longer text is cut and the result says `noteTruncated`; an empty note clears it); `clear: true` removes the line's note and status. `status` (`todo`, `in_progress`, `in_review`, `done`, `blocked`) is still accepted and read back for older callers, but the rail shows the state Codara sees itself. The result carries the caller's note, its status, the five latest checkpoints of its own line, newest first, and `otherAgents`: the notes of the other agents still in the workspace. |
 
 Codara computes every agent's state on its own: **working**, **needs you**
 (waiting on a question, a permission or an approval; it stays until you open
@@ -640,8 +640,10 @@ that agent's tab), **done** (its turn ended since you last looked; it turns
 idle once you focus the tab) and **idle**. The note an agent adds lives and
 dies with the agent: it stays on the line through the agent's turns and while
 the agent sleeps, and goes when its tab or pane closes, when its workspace is
-deleted, or when Codara restarts. Nothing stale is left behind, and no agent
-has to remember to clear anything.
+deleted, or when Codara restarts. A Cora chat's note lasts while the chat is
+on the Agents view (working, waiting on you, or finished and not yet seen or
+aged out). Nothing stale is left behind, and no agent has to remember to
+clear anything.
 
 The workspace's row shows one summary line computed from its agents and its
 task list, for example `2 working · 1 needs you · 3 done today` (agents

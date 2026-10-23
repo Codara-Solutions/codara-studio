@@ -79,7 +79,9 @@ const lineText = {
   minWidth: 0,
 } as const;
 
-// Stops the row under it from switching workspace or starting a drag.
+// Stops the row under it from switching workspace. A press inside an element
+// marked data-workspace-agents-area never starts the row's drag either
+// (WorkspaceRail checks the mark, since dragstart fires on the row itself).
 function keepToSelf(event: MouseEvent | KeyboardEvent): void {
   event.stopPropagation();
 }
@@ -128,8 +130,9 @@ function AgentLineItem({ line, now, active }: { line: AgentLine; now: number; ac
           keepToSelf(event);
           open();
         }}
-        onKeyDown={keepToSelf}
-        onPointerDown={keepToSelf}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" || event.key === " ") keepToSelf(event);
+        }}
         className="workspace-agent-line"
         style={{
           display: "grid",
@@ -202,6 +205,7 @@ export function WorkspaceAgentList({ workspaceId, active = false }: { workspaceI
   return (
     <ul
       data-testid="workspace-agent-lines"
+      data-workspace-agents-area=""
       aria-label="Agents in this workspace"
       style={{ margin: "3px 0 0", padding: "0 0 0 24px", minWidth: 0, width: "100%", boxSizing: "border-box" }}
     >
@@ -220,6 +224,7 @@ function ConfirmOriginButton({ workspaceId, origin }: { workspaceId: string; ori
       data-testid="workspace-tasks-confirm-origin"
       title={`Confirm ${origin} as this workspace's origin`}
       disabled={confirming}
+      data-workspace-agents-area=""
       onMouseDown={(event) => event.stopPropagation()}
       onClick={(event) => {
         event.stopPropagation();
@@ -269,13 +274,13 @@ export function WorkspaceAgentsLine({ workspaceId, active = false }: { workspace
         aria-label={`${summary.line}. ${summary.description}`}
         title={summary.description}
         data-testid="workspace-agents-summary"
+        data-workspace-agents-area=""
         data-needs-you={summary.needsYou > 0 ? "true" : "false"}
         onClick={(event) => {
           if (!expandable) return;
           keepToSelf(event);
           toggle();
         }}
-        onPointerDown={expandable ? keepToSelf : undefined}
         onKeyDown={(event) => {
           if (!expandable || (event.key !== "Enter" && event.key !== " ")) return;
           keepToSelf(event);

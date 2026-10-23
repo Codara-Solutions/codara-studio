@@ -2053,6 +2053,7 @@ function WorkspaceRow({
   const inputRef = useRef<HTMLInputElement | null>(null);
   const colorRef = useRef<HTMLInputElement | null>(null);
   const rowRef = useRef<HTMLDivElement | null>(null);
+  const pressInAgents = useRef(false);
   const [name, setName] = useState(ws.name);
   const [rowHover, setRowHover] = useState(false);
   const [rowPressed, setRowPressed] = useState(false);
@@ -2184,7 +2185,15 @@ function WorkspaceRow({
       data-workspace-id={ws.id}
       data-active={active ? "true" : undefined}
       draggable={!editing}
-      onDragStart={onRowDragStart}
+      onDragStart={(event) => {
+        // dragstart fires on the row, not on what was pressed: a press that
+        // began on the agents line or list must not start a reorder.
+        if (pressInAgents.current) {
+          event.preventDefault();
+          return;
+        }
+        onRowDragStart(event);
+      }}
       onDragEnd={onRowDragEnd}
       onClick={editing ? undefined : onActivate}
       onContextMenu={(event) => {
@@ -2202,8 +2211,10 @@ function WorkspaceRow({
         setRowHover(false);
         setRowPressed(false);
       }}
-      onMouseDown={() => {
-        if (!editing) setRowPressed(true);
+      onMouseDown={(event) => {
+        pressInAgents.current =
+          event.target instanceof Element && event.target.closest("[data-workspace-agents-area]") !== null;
+        if (!editing && !pressInAgents.current) setRowPressed(true);
       }}
       onMouseUp={() => setRowPressed(false)}
       aria-busy={working}

@@ -163,7 +163,14 @@ async function runWorkspaceStatus(
     return { updated: false, reason: "workspace_gone", note: "Your workspace was removed from Codara." };
   }
   const book = service.notes();
-  const others = book.inWorkspace(target.workspaceId).filter((note) => note.key !== target.agentKey);
+  // Notes of agents that are gone (a chat that left the Agents view, a pane
+  // main never saw close) are dropped here rather than read back.
+  const others: AgentNote[] = [];
+  for (const note of book.inWorkspace(target.workspaceId)) {
+    if (note.key === target.agentKey) continue;
+    if (await service.agentIsLive(note.key)) others.push(note);
+    else book.drop(note.key);
+  }
   const own = target.agentKey ? book.get(target.agentKey) : null;
   if (isRead(patch)) return view(target.workspaceId, name, own, others);
   if (!target.agentKey) {

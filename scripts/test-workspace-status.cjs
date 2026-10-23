@@ -310,9 +310,11 @@ async function toolWritesTheCallersOwnLine() {
   const store = ws.createWorkspaceStatusStore({ file: path.join(TMP, "home-3", "workspace-status.json") });
   const book = ws.createAgentNoteBook({ now: () => Date.UTC(2026, 9, 15) });
   const names = { "ws-pane": "Pane workspace", "ws-run": "Run workspace", "ws-other": "Other" };
+  const gone = new Set();
   ws.provideWorkspaceStatusService({
     store: () => store,
     notes: () => book,
+    agentIsLive: async (key) => !gone.has(key),
     workspaceName: async (id) => names[id] ?? null,
     agentLabelForPane: (paneId) => (paneId === "pane-claude" ? "Claude Code" : null),
   });
@@ -396,13 +398,22 @@ async function toolWritesTheCallersOwnLine() {
     note: "This chat's workspace could not be found.",
   });
 
+  // A chat that left the Agents view (or a pane that closed unseen) is gone:
+  // its note is not read back, and is dropped.
+  book.update("run:run-old", "ws-pane", { note: "Long finished" }, { kind: "agent", label: "Cora" });
+  assert.equal((await call({ callerPaneId: "pane-claude" })).otherAgents.length, 2);
+  gone.add("run:run-old");
+  const afterGone = await call({ callerPaneId: "pane-claude" });
+  assert.deepEqual(afterGone.otherAgents.map((other) => other.agent), ["Codex"]);
+  assert.equal(book.get("run:run-old"), null, "a gone agent's note is dropped");
+
   // An agent outside every Codara pane gets an answer, not an error, and
   // never the workspace on screen.
   const outside = await call({ status: "done", callerPid: 99999, workspaceId: "ws-other" });
   assert.equal(outside.updated, false);
   assert.equal(outside.reason, "not_in_codara_workspace");
-  const gone = await call({ status: "done", callerPaneId: "pane-gone" });
-  assert.equal(gone.reason, "workspace_gone");
+  const removed = await call({ status: "done", callerPaneId: "pane-gone" });
+  assert.equal(removed.reason, "workspace_gone");
   // Placed in a workspace but not in a pane: it can read, not write a line.
   const unplaced = await call({ note: "Somewhere", callerPid: 4242 });
   assert.equal(unplaced.updated, false);
