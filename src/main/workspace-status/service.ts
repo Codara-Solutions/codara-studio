@@ -3,10 +3,13 @@
 // main loads it, so that handler never imports Electron, the pty manager or
 // the state file and stays loadable on its own (the routing suite bundles it).
 
+import type { AgentNoteBook } from "./agent-notes";
 import type { WorkspaceStatusStore } from "./store";
 
 export interface WorkspaceStatusService {
   store(): WorkspaceStatusStore;
+  /** Each agent's own note, which the tool writes. */
+  notes(): AgentNoteBook;
   /** The workspace's name, or null when no such workspace exists any more. */
   workspaceName(workspaceId: string): Promise<string | null>;
   /** "Claude Code", "Codex", ... for the agent Codara sees in that pane, if any. */

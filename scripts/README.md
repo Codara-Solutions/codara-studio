@@ -290,8 +290,11 @@ credential and `pane.open`: overlays over the calling pane, tabs beside it),
 roster, worker fences for new tools), `test-agent-delivery` (sending to a
 pane, a chat or the inbox, and `preview.inbox`), `test-workspace-status`
 (workspace statuses and notes: the rules in `src/shared/workspace-status.ts`,
-the store in `src/main/workspace-status/` and the `workspace.status` socket
-method that routes an agent to its own workspace), `test-cos-task-store` (the
+the store in `src/main/workspace-status/`, each agent's own note in
+`agent-notes.ts`, and the `workspace.status` socket method that writes the
+caller's own line), `test-agent-status` (each agent's line in the rail and the
+workspace's summary line in `src/shared/agent-status.ts`, a focused tab
+clearing done, and a closed pane taking its note along), `test-cos-task-store` (the
 workspace task list in `src/main/cos/task-store.ts`: states, the gate-only
 `done`, the log and `TASKS.md`, and `scrubSecrets`), `test-cos-verify-gate`
 (`.codara/verify.json`, check selection and gate runs against a throwaway

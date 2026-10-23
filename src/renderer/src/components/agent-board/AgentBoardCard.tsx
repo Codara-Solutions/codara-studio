@@ -5,7 +5,7 @@ import { CodaraMark, RuntimeMark } from "../BrandMarks";
 import { agentBrandColor } from "../../lib/agent-brand";
 import { WORKSPACE_STATUS_LABELS } from "@shared/workspace-status";
 import { WorkspaceStatusChip } from "../workspace-status/WorkspaceStatusChip";
-import { useWorkspaceStatus } from "../workspace-status/workspaceStatusStore";
+import { useUserWorkspaceStatus } from "../workspace-status/workspaceStatusStore";
 import { WorkspaceIconGlyph } from "../workspace-icons";
 import { normalizeWorkspaceColor, workspaceAccentInk } from "@shared/workspace-colors";
 import AgentReplyBox from "./AgentReplyBox";
@@ -33,7 +33,7 @@ interface Props {
 function AgentBoardCardView({ card, time, timeTitle, active, here, focusable, onOpen, onFocusCard }: Props) {
   // The workspace's status (set by an agent or by hand in the rail), so the
   // card says where the work stands as well as what the agent does.
-  const workspaceStatus = useWorkspaceStatus(card.workspaceId)?.status ?? null;
+  const workspaceStatus = useUserWorkspaceStatus(card.workspaceId)?.status ?? null;
   // The harness is the mark alone; its name stays in the tooltip and in what
   // a screen reader hears. Cora's mark is plain ink, not the accent, which
   // follows the active workspace and would repaint it on every switch.

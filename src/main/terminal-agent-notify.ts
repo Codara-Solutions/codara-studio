@@ -524,11 +524,30 @@ function attach(w: PaneWatcher): void {
   }
 }
 
+const paneRemovedListeners = new Set<(paneId: string) => void>();
+
+/**
+ * Called once a pane's watcher goes: its pane was closed (it left its
+ * workspace's layout, or Codara disposed its terminal). A sleeping agent's
+ * pane keeps its watcher.
+ */
+export function onTerminalPaneRemoved(listener: (paneId: string) => void): () => void {
+  paneRemovedListeners.add(listener);
+  return () => paneRemovedListeners.delete(listener);
+}
+
 function removeWatcher(paneId: string): void {
   const w = watchers.get(paneId);
   if (!w) return;
   tanLog(`pane=${paneId} watcher removed`);
   watchers.delete(paneId);
+  for (const listener of paneRemovedListeners) {
+    try {
+      listener(paneId);
+    } catch {
+      /* a listener's failure is its own */
+    }
+  }
   // A closed agent pane leaves the Agents view (and its Needs you count) now.
   if (w.runtime && !w.excluded) signalAgentBoardChanged();
   clearCodexScreen(w);

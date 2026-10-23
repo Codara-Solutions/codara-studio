@@ -73,9 +73,9 @@ export function layoutAgentPanes(layouts: readonly AgentBoardLayout[]): AgentBoa
   return out;
 }
 
-function unseenPanes(sources: AgentBoardSources): Record<string, "blocked" | "complete"> {
+export function unseenPanes(attention: AgentBoardSources["attention"]): Record<string, "blocked" | "complete"> {
   const out: Record<string, "blocked" | "complete"> = {};
-  for (const panes of Object.values(sources.attention)) {
+  for (const panes of Object.values(attention)) {
     for (const [paneId, entry] of Object.entries(panes)) out[paneId] = entry.kind;
   }
   return out;
@@ -333,6 +333,7 @@ const SCALAR_FIELDS = [
   "agentLabel",
   "account",
   "title",
+  "tabTitle",
   "message",
   "tool",
   "detail",
@@ -390,7 +391,7 @@ export function useAgentBoard(live: boolean): AgentBoardState {
     layoutPanes.some((pane) => pane.accountProfileId) || Boolean(activity?.some((entry) => entry.accountProfileId));
   const wantCoraLabels = useMemo(() => sources.runs.some((run) => run.chatAccountProfileId), [sources.runs]);
   const accountLabels = useAccountLabels(live, wantCliLabels, wantCoraLabels);
-  const unseen = useMemo(() => unseenPanes(sources), [sources]);
+  const unseen = useMemo(() => unseenPanes(sources.attention), [sources.attention]);
   const workspaces = useMemo(
     () =>
       sources.workspaces.map((workspace) => ({

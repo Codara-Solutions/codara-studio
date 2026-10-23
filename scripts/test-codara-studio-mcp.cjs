@@ -296,8 +296,8 @@ function sortedEqual(actual, expected, label) {
     assert.match(studio.init.instructions, /awaiting-approval waits for the user to approve its commands; never run them, or the setup file's terminal commands, yourself/);
     assert.match(
       studio.init.instructions,
-      /codara_workspace_status.*note at each milestone.*in_review or done when you finish.*blocked/,
-      "a terminal agent learns to post milestones and its final status",
+      /Codara shows .* whether you are working, need the user or are done, by itself\. codara_workspace_status adds a one-line note to your own line.*at each milestone/,
+      "a terminal agent learns its state is shown for it and it only adds milestone notes",
     );
     assert.match(
       studio.init.instructions,

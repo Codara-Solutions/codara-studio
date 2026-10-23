@@ -1,6 +1,7 @@
 import { Suspense, lazy, useRef } from "react";
 import type { KeyboardEvent } from "react";
 import { useAgentBoard } from "./useAgentBoard";
+import { usePublishAgentLines } from "../workspace-status/agentLinesStore";
 import { RAIL_VIEW_PANEL_ID, type RailView } from "./railView";
 import "./rail-view-switch.css";
 
@@ -35,6 +36,8 @@ export default function AgentsRailSwitch({
 }) {
   const live = view === "agents";
   const board = useAgentBoard(live);
+  // The workspace rows' agent lines come from the same board.
+  usePublishAgentLines(board.model);
   const needsYou = board.model.needsYou.length;
   const tabRefs = useRef(new Map<RailView, HTMLButtonElement>());
 
