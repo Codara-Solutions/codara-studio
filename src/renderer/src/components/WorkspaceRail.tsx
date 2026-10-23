@@ -44,6 +44,7 @@ import {
   type VerticalReorderSlot,
 } from "./workspaceReorder";
 import { openWorktreeCleanup } from "./worktree-cleanup/open-worktree-cleanup";
+import type { WorktreeRailState } from "@shared/worktree-cleanup";
 
 const PANEL_SECTION_MIME = "application/x-codara-panel-section";
 const WORKSPACE_ROW_MIME = "application/x-codara-workspace-row";
@@ -156,6 +157,11 @@ interface RailProps {
   agentsByWorkspaceId?: Record<string, { total: number; working: number; sleeping?: number }>;
   // Current git branch per workspace for the row subtitle; null/absent hides it.
   branchByWorkspaceId?: Record<string, string | null>;
+  // Merge and folder state of each copy-branch workspace (useWorktreeRailStates):
+  // the "merged" mark and the row's Clean up.
+  worktreeByWorkspaceId?: Record<string, WorktreeRailState>;
+  // Clean up a merged worktree, or remove a workspace whose folder is gone.
+  onCleanUpWorkspace?: (id: string) => Promise<void>;
   // The first section's share when exactly two sections are stacked here.
   split: number;
   collapsed: Record<PanelSectionKey, boolean>;
@@ -791,7 +797,9 @@ function WorkspaceRail(props: RailProps) {
         agentWorking={props.agentsByWorkspaceId?.[w.id]?.working ?? 0}
         agentSleeping={props.agentsByWorkspaceId?.[w.id]?.sleeping ?? 0}
         branch={props.branchByWorkspaceId?.[w.id] ?? null}
-        missing={missingWorkspaceIds.has(w.id)}
+        missing={missingWorkspaceIds.has(w.id) || props.worktreeByWorkspaceId?.[w.id]?.missing === true}
+        worktree={props.worktreeByWorkspaceId?.[w.id] ?? null}
+        onCleanUp={props.onCleanUpWorkspace ? () => props.onCleanUpWorkspace!(w.id) : undefined}
         folderColorManaged={groupId !== null}
         menuBoundaryRef={wsScrollRef}
         onActivate={() => props.onActivate(w.id)}
@@ -1992,6 +2000,10 @@ interface RowProps {
   branch?: string | null;
   /** The workspace's folder is not on disk right now (moved/renamed/unmounted). */
   missing?: boolean;
+  /** A copy-branch workspace's merge and folder state; null for other rows or before the first read. */
+  worktree?: WorktreeRailState | null;
+  /** Clean up (merged) or Remove from rail (missing); absent hides both. */
+  onCleanUp?: () => Promise<void>;
   /** Folder members inherit their ordered shade from the folder family. */
   folderColorManaged?: boolean;
   /** Flip boundary for the row's "…" AnchoredMenu (the workspaces scroll container). */
@@ -2037,6 +2049,8 @@ function WorkspaceRow({
   agentSleeping = 0,
   branch = null,
   missing = false,
+  worktree = null,
+  onCleanUp,
   folderColorManaged = false,
   menuBoundaryRef,
   onActivate,
@@ -2060,6 +2074,7 @@ function WorkspaceRow({
   const [menuOpen, setMenuOpen] = useState(false);
   const [iconPickerOpen, setIconPickerOpen] = useState(false);
   const [statusPickerOpen, setStatusPickerOpen] = useState(false);
+  const [cleaning, setCleaning] = useState(false);
   const statusEntry = useWorkspaceStatus(ws.id);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
   // In-flight color while the OS color dialog is open. The native
@@ -2083,6 +2098,16 @@ function WorkspaceRow({
   // The live draft (if a pick is in progress) wins over the committed color.
   const accent = draftColor || ws.color || "var(--accent)";
   const agentCreator = ws.copyBranch?.createdBy?.kind === "agent" ? ws.copyBranch.createdBy : null;
+  // Merged: the branch's work is in its base. A gone branch with a gone
+  // folder has nothing left but the row, which reads the same way.
+  const merged = worktree?.merge === "merged" || (missing && worktree?.merge === "gone");
+  const canRemoveFromRail = missing && Boolean(onCleanUp);
+  const canCleanUp = !missing && merged && Boolean(onCleanUp);
+  const runCleanUp = () => {
+    if (!onCleanUp || cleaning) return;
+    setCleaning(true);
+    void onCleanUp().finally(() => setCleaning(false));
+  };
 
   useEffect(() => setName(ws.name), [ws.id, ws.name]);
   useEffect(() => {
@@ -2410,6 +2435,22 @@ function WorkspaceRow({
             >
               {ws.name}
             </span>
+            {missing && (
+              <span
+                data-testid="workspace-missing"
+                style={{
+                  fontSize: 10.5,
+                  lineHeight: "13px",
+                  color: "var(--muted)",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                }}
+              >
+                Folder gone
+                {merged && <MergedTag />}
+              </span>
+            )}
             {branch && !missing && (
               <span
                 data-testid="workspace-branch"
@@ -2440,6 +2481,7 @@ function WorkspaceRow({
                   </span>
                 )}
                 {branch}
+                {merged && <MergedTag />}
               </span>
             )}
             <WorkspaceStatusLine workspaceId={ws.id} active={active} />
@@ -2448,6 +2490,23 @@ function WorkspaceRow({
 
         {agentTotal > 0 && !editing && (
           <AgentCount total={agentTotal} working={agentWorking} sleeping={agentSleeping} accent={accent} />
+        )}
+
+        {!editing && (canCleanUp || canRemoveFromRail) && (rowHover || cleaning || moreFocus) && (
+          <RowQuickAction
+            label={canRemoveFromRail ? "×" : cleaning ? "Cleaning…" : "Clean up"}
+            title={
+              canRemoveFromRail
+                ? ws.copyBranch
+                  ? "Remove from rail: drops git's record of the worktree, and deletes its branch only if merged"
+                  : "Remove from rail"
+                : "Clean up: remove the worktree, its merged branch and this row"
+            }
+            testId={canRemoveFromRail ? "workspace-remove-from-rail" : "workspace-clean-up"}
+            iconOnly={canRemoveFromRail}
+            disabled={cleaning}
+            onClick={runCleanUp}
+          />
         )}
 
         <div style={{ flex: "0 0 18px" }}>
@@ -2531,6 +2590,24 @@ function WorkspaceRow({
             align="end"
           >
             <div style={{ minWidth: 168, maxWidth: 240, padding: 4, display: "grid", gap: 2 }}>
+              {canRemoveFromRail && (
+                <RowMenuItem
+                  label="Remove from rail"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    runCleanUp();
+                  }}
+                />
+              )}
+              {canCleanUp && (
+                <RowMenuItem
+                  label="Clean up (worktree and branch)"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    runCleanUp();
+                  }}
+                />
+              )}
               <RowMenuItem
                 label="Change icon…"
                 onClick={() => {
@@ -2731,6 +2808,87 @@ function RailContextMenu({
       {children}
     </div>,
     document.body,
+  );
+}
+
+function MergedTag() {
+  return (
+    <span
+      data-testid="workspace-merged"
+      title="Its branch is merged into its base"
+      style={{
+        display: "inline-block",
+        marginLeft: 6,
+        padding: "0 5px",
+        borderRadius: 4,
+        fontSize: 9.5,
+        lineHeight: "13px",
+        fontWeight: 600,
+        letterSpacing: "0.02em",
+        color: "var(--ok, var(--ink-dim))",
+        background: "color-mix(in oklab, var(--ok, var(--ink)) 14%, transparent)",
+        verticalAlign: "0px",
+      }}
+    >
+      merged
+    </span>
+  );
+}
+
+// The one action a merged or missing row offers right on the row, shown on
+// hover. Clicks never reach the row, which would activate the workspace.
+function RowQuickAction({
+  label,
+  title,
+  testId,
+  iconOnly = false,
+  disabled = false,
+  onClick,
+}: {
+  label: string;
+  title: string;
+  testId: string;
+  iconOnly?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      data-testid={testId}
+      title={title}
+      aria-label={title}
+      disabled={disabled}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      onMouseDown={(e) => e.stopPropagation()}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        appearance: "none",
+        flex: "0 0 auto",
+        height: 20,
+        minWidth: iconOnly ? 18 : undefined,
+        padding: iconOnly ? 0 : "0 7px",
+        marginRight: 2,
+        border: "none",
+        borderRadius: "var(--radius-control, 7px)",
+        fontFamily: "inherit",
+        fontSize: iconOnly ? 14 : 10.5,
+        lineHeight: "20px",
+        fontWeight: 600,
+        cursor: "default",
+        color: hover ? "var(--ink)" : "var(--ink-dim)",
+        background: hover ? "var(--hover-strong, var(--hover))" : "color-mix(in oklab, var(--ink) 6%, transparent)",
+        opacity: disabled ? 0.6 : 1,
+        transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      {label}
+    </button>
   );
 }
 

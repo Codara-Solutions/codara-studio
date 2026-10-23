@@ -10,6 +10,9 @@ import type {
   WorktreeCleanupRemoveResult,
   WorktreeCleanupScan,
   WorktreeCleanupTarget,
+  WorktreeRailCleanupRequest,
+  WorktreeRailCleanupResult,
+  WorktreeRailState,
   WorktreeRemovalCheck,
   WorktreeSizeEvent,
 } from "@shared/worktree-cleanup";
@@ -29,6 +32,11 @@ export const worktreeCleanupApi = {
     ipcRenderer.invoke("worktreeCleanup:check", targets),
   remove: (request: WorktreeCleanupRemoveRequest): Promise<WorktreeCleanupRemoveResult> =>
     ipcRenderer.invoke("worktreeCleanup:remove", request),
+  /** Merge and folder state of each copy-branch workspace, for the rail. */
+  railStates: (): Promise<WorktreeRailState[]> => ipcRenderer.invoke("worktreeCleanup:railStates"),
+  /** Clean up one copy-branch workspace from its rail row. */
+  railCleanUp: (request: WorktreeRailCleanupRequest): Promise<WorktreeRailCleanupResult> =>
+    ipcRenderer.invoke("worktreeCleanup:railCleanUp", request),
   onSize: (listener: (event: WorktreeSizeEvent) => void): (() => void) => {
     const wrapped = (_event: unknown, payload: WorktreeSizeEvent): void => listener(payload);
     ipcRenderer.on("worktreeCleanup:size", wrapped);

@@ -1,4 +1,4 @@
-import type { AppState, GitCopyWorktreeResult, GitOpResult, Workspace } from "@shared/types";
+import type { AppState, GitCopyWorktreeResult, GitOpResult, GitRemoveWorktreeResult, Workspace } from "@shared/types";
 
 // Pure AppState edits shared by every main-process path that adds or drops a
 // copy-branch workspace (GitHub issue workspaces, agent worktrees). No
@@ -103,7 +103,7 @@ export interface CreatedWorktreeRollbackDependencies {
     branch: string;
     force?: boolean;
     deleteBranch?: boolean;
-  }): Promise<GitOpResult>;
+  }): Promise<GitRemoveWorktreeResult>;
   forceDeleteBranch(cwd: string, branch: string): Promise<GitOpResult>;
 }
 
@@ -121,7 +121,7 @@ export async function rollbackCreatedWorktree(
     force: true,
     deleteBranch: true,
   }).catch(() => ({ ok: false as const, error: "cleanup failed" }));
-  if (removed.ok) return true;
+  if (removed.ok && !removed.branchKept) return true;
   // Nothing ran in this transaction-owned worktree, so a branch left after
   // successful directory removal is safe to force-delete.
   const branch = await dependencies
