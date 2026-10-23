@@ -95,6 +95,9 @@ function fewerFalsePositives() {
     "SqTLL8SyAnfDec7oq5iml8og0vZMBzpnzdZ3K0CgZUsPhnlU/8DzBWfFLP/XZq9/ztqUTe8td7fLTYdAM25slu0cj8mZdHRAP9jghkH6a95cTrvEXKNcuR3TL/C0jo/oXeZ3cuRVJrKIAAp5RkH+5o7kibQTTTypIRURVAbD+5o1JP18VFMo3aTXc+jif9XYi+em53kg",
     "the run started at 1761177600000 and ended later",
     "ping the bot in channel 1296016829456515086",
+    "run id is 4532015112830366",
+    "order_id=4532015112830366",
+    "the task ID: 4532015112830366 failed",
   ]) {
     assert.equal(scrub(plain), plain, plain);
   }
@@ -104,6 +107,10 @@ function fewerFalsePositives() {
   assert.equal(scrub("mc 5555-5555-5555-4444 ok"), "mc [redacted] ok");
   assert.ok(!memory.containsSecret("Discord channel 1296016829456515086"), "a Discord id is not a card");
   assert.ok(memory.containsSecret("card 4012888888881881"));
+  // A number labelled as an id is one, even when it passes Luhn.
+  assert.ok(!memory.containsSecret("run id is 4532015112830366"));
+  assert.equal(scrub("card 4532015112830366, run id 7"), "card [redacted], run id 7");
+  assert.equal(scrub("paid 4532015112830366 for the valid run"), "paid [redacted] for the valid run");
   assert.equal(scrub("a short icon data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk ok"), "a short icon data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk ok");
   // Quotes around a value stay, so a pasted config line still reads as one.
   assert.equal(scrub("SECRET_TOKEN: 'aB3dEf9hIjK2'"), "SECRET_TOKEN: '[redacted]'");

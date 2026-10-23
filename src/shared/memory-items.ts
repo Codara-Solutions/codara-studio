@@ -517,6 +517,13 @@ function cardNumberLike(digits: string): boolean {
   return digits.length >= 13 && digits.length <= 19 && /^[2-6]/.test(digits) && luhnValid(digits);
 }
 
+// "run id is 4532015112830366": a number labelled as an id is one, even when
+// it passes Luhn.
+const ID_LABEL = /(?<![A-Za-z])id\s*(?:(?:is|es)\s+|[:=#]\s*)?$/i;
+function labelledId(text: string, index: number): boolean {
+  return ID_LABEL.test(text.slice(Math.max(0, index - 16), index));
+}
+
 /**
  * Whether a memory would carry a credential. Memory is pasted into every
  * future prompt and shown on the Memory page, so a secret must never land in
@@ -525,7 +532,7 @@ function cardNumberLike(digits: string): boolean {
 export function containsSecret(text: string): boolean {
   if (SECRET_PATTERNS.some((pattern) => pattern.test(text))) return true;
   for (const match of text.matchAll(/\b(?:\d[ -]?){13,19}\b/g)) {
-    if (cardNumberLike(match[0].replace(/\D/g, ""))) return true;
+    if (cardNumberLike(match[0].replace(/\D/g, "")) && !labelledId(text, match.index)) return true;
   }
   for (const match of text.matchAll(/[A-Za-z0-9+/_=-]{36,}/g)) {
     const token = match[0];
@@ -614,8 +621,8 @@ function scrub(text: string, found?: string[]): string {
       out = out.replace(global, (match) => (/\d/.test(match) ? replaced(match, SECRET_REDACTED) : match));
     }
   }
-  out = out.replace(/\b(?:\d[ -]?){13,19}\b/g, (match) => {
-    if (!cardNumberLike(match.replace(/\D/g, ""))) return match;
+  out = out.replace(/\b(?:\d[ -]?){13,19}\b/g, (match, offset: number, whole: string) => {
+    if (!cardNumberLike(match.replace(/\D/g, "")) || labelledId(whole, offset)) return match;
     const number = match.trimEnd();
     return replaced(number, `${SECRET_REDACTED}${match.slice(number.length)}`);
   });
