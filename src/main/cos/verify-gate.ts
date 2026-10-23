@@ -657,7 +657,7 @@ export async function runVerifyGate(options: VerifyGateOptions): Promise<Task | 
     const baseCommit = await fetchBase(repo, origin.url, branch, git);
     if (!baseCommit) return { blocked: `Codara could not fetch ${ref}, so the repository's checks could not be read.` };
     const listed = await git(["ls-tree", "--name-only", baseCommit, ".codara/verify.json"], repo).catch(() => "");
-    if (!listed.trim()) return { blocked: `${ref} has no .codara/verify.json, so nothing can prove the task is done.` };
+    if (!listed.trim()) return { blocked: `No .codara/verify.json on ${ref} yet` };
     let raw: string;
     try {
       raw = await git([...originFlags(origin.url), "cat-file", "blob", `${baseCommit}:.codara/verify.json`], repo);

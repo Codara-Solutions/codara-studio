@@ -1,12 +1,16 @@
 import { useTaskSummary } from "./cosTasksStore";
 
+// Each line wraps to at most two rows at the rail's default width; the
+// full text stays in the tooltip and the aria-label.
 const lineStyle = {
   minWidth: 0,
   fontSize: 10.5,
   lineHeight: "13px",
-  whiteSpace: "nowrap",
+  display: "-webkit-box",
+  WebkitBoxOrient: "vertical",
+  WebkitLineClamp: 2,
   overflow: "hidden",
-  textOverflow: "ellipsis",
+  overflowWrap: "anywhere",
 } as const;
 
 // The workspace's task list under its name in the rail: the count line

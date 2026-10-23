@@ -310,7 +310,7 @@ async function baseOwnsTheChecks() {
   fs.writeFileSync(path.join(fresh, ".codara", "verify.json"), JSON.stringify({ checks: [{ id: "ok", run: "true" }] }));
   const notYet = await run(fresh);
   assert.equal(notYet.state, "needs_you", "checks that exist only on the branch cannot close its task");
-  assert.match(notYet.needsYouReason, /^origin\/main has no \.codara\/verify\.json/);
+  assert.match(notYet.needsYouReason, /^No \.codara\/verify\.json on origin\/main yet$/);
 
   const offline = makeRepo("offline", { checks: [{ id: "ok", run: "true" }] }, { remote: false });
   const noRemote = await run(offline);
@@ -520,7 +520,7 @@ async function blocked() {
   const cases = [
     [null, /cannot tell which folder/],
     [path.join(TMP, "missing"), /cannot tell which folder/],
-    [makeRepo("none", undefined), /has no \.codara\/verify\.json/],
+    [makeRepo("none", undefined), /^No \.codara\/verify\.json on origin\/main yet$/],
     [makeRepo("broken", "{nope"), /^The \.codara\/verify\.json on origin\/main cannot be used: it is not valid JSON/],
     [makeRepo("empty", { checks: [] }), /cannot be used: it needs at least one check/],
   ];
