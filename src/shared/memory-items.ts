@@ -639,7 +639,8 @@ function scrub(text: string, found?: string[]): string {
     /(?<![\w./:@#?&=%+-])(?<!base64,)((?:[A-Za-z_][A-Za-z0-9_]*=)?)([A-Za-z0-9+/_-]{36,}={0,2})(?![\w/=-])/g,
     (whole, name: string, token: string, offset: number, text: string) => {
       const isPath = token.includes("/") && pathLike(token);
-      if (text[offset + whole.length] === "." && !isPath) return whole;
+      // "<key>." ends a sentence; "<token>.json" or "<token>.example.com" is a name.
+      if (!isPath && /^\.\w/.test(text.slice(offset + whole.length, offset + whole.length + 2))) return whole;
       if (!isPath) return opaqueToken(token) ? replaced(token, `${name}${SECRET_REDACTED}`) : whole;
       let hit = false;
       const parts = token.split("/").map((part) => {

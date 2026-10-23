@@ -80,6 +80,11 @@ function catchesEnvAndBearer() {
   assert.equal(scrub(`curl -H "Authorization: Bearer ${hex}" https://api.x.io`), `curl -H "Authorization: Bearer [redacted]" https://api.x.io`);
   assert.equal(scrub(`bearer ${hex.slice(0, 32)}`), "bearer [redacted]");
   for (const text of [`AWS_SECRET_ACCESS_KEY=${aws}`, `Bearer ${hex}`]) assert.ok(memory.containsSecret(text), text);
+  // A key that ends a sentence; a file name made of one is left alone.
+  const token = "Zq8Xw2Lp9Rt4Vb7Nm3Kd6Hf1Gj5Sc0YaQ7pW2xK";
+  assert.equal(scrub(`use ${token}.`), "use [redacted].");
+  assert.equal(scrub(`use ${token}. Then deploy.`), "use [redacted]. Then deploy.");
+  assert.equal(scrub(`open ${token}.json`), `open ${token}.json`);
 }
 
 // A path keeps its folders: only an opaque piece of it is replaced.
