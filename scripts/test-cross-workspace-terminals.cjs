@@ -21,7 +21,8 @@
 //   4. The approver asks only across workspaces and only without a grant,
 //      remembers "always" and not "once", refuses silence, refuses a denied
 //      pair without asking again for a while, shares one prompt only between
-//      concurrent calls of one requester, and still allows when saving the
+//      concurrent calls of one requester (Allow once lets only one of them
+//      through; Always and Deny answer all), and still allows when saving the
 //      grant fails. A cross-workspace cwd must be a local folder inside the
 //      target.
 //   5. A terminal opened across workspaces by a run-less agent is written to,
@@ -330,9 +331,26 @@ async function main() {
   assert.equal(asks - startAsks, 2, "one card per requester, shared by its concurrent calls");
   resolvers[0]("once");
   resolvers[1]("deny");
-  assert.deepEqual(await first, { ok: true, via: "once" });
-  assert.deepEqual(await second, { ok: true, via: "once" });
+  const onceResults = [await first, await second];
+  assert.equal(onceResults.filter((d) => d.ok).length, 1, "Allow once lets exactly one waiting call through");
+  const leftOver = onceResults.find((d) => !d.ok);
+  assert.match(leftOver.message, /call again/);
   assert.equal((await stranger).ok, false, "another requester's answer is its own");
+
+  // Always and Deny answer every call waiting on the card.
+  for (const [answer, ok] of [["always", true], ["deny", false]]) {
+    const waiting = [];
+    const card = cross.createCrossWorkspaceApprover({
+      store: memoryStore(),
+      ask: async () => new Promise((done) => waiting.push(done)),
+    });
+    const calls = [1, 2, 3].map(() => card.authorize({ caller, target: other, agent: null, requester: "pane:p1" }));
+    await new Promise((done) => setImmediate(done));
+    assert.equal(waiting.length, 1, "one card for the three calls");
+    waiting[0](answer);
+    const results = await Promise.all(calls);
+    assert.deepEqual(results.map((d) => d.ok), [ok, ok, ok], `${answer} answers all three`);
+  }
 
   memory.failGrant = true;
   answers.push("always");

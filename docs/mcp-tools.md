@@ -556,7 +556,9 @@ its pane sits in.
 
 The first time a workspace targets another, Codara shows "Allow <caller> to
 open terminals in <target>?" with Deny, Allow once and Always. Calls the same
-agent makes while its card is open wait for the same answer. Answering Always
+agent makes while its card is open wait for the same answer: Deny and Always
+answer all of them, Allow once lets exactly one through and tells the others
+to call again. Answering Always
 also answers the cards other agents of the same workspace have open for the
 same target. The card counts down the seconds left; with no answer within 40
 seconds the call is refused, the agent is told to ask the user, and the card

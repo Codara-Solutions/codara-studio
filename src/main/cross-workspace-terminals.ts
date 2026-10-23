@@ -353,7 +353,7 @@ export const CROSS_WORKSPACE_DENY_COOLDOWN_MS = 5 * 60_000;
  * Asks the user the first time a caller workspace opens a terminal in a
  * target workspace and remembers "always". Calls from one requester that
  * arrive while its prompt is open wait for that prompt instead of stacking
- * another one, so its answer covers all of them.
+ * another one: Deny and Always answer all of them, Allow once only one.
  */
 export function createCrossWorkspaceApprover(deps: {
   store: CrossWorkspaceGrantStore;
@@ -361,7 +361,11 @@ export function createCrossWorkspaceApprover(deps: {
   now?: () => number;
 }): CrossWorkspaceApprover {
   const now = deps.now ?? Date.now;
-  const pending = new Map<string, Promise<CrossWorkspaceDecision>>();
+  interface PendingCard {
+    decision: Promise<CrossWorkspaceDecision>;
+    onceUsed: boolean;
+  }
+  const pending = new Map<string, PendingCard>();
   const deniedAt = new Map<string, number>();
   const pairKey = (input: CrossWorkspaceAskInput) => JSON.stringify([input.caller.id, input.target.id]);
   const decide = async (input: CrossWorkspaceAskInput): Promise<CrossWorkspaceDecision> => {
@@ -403,10 +407,23 @@ export function createCrossWorkspaceApprover(deps: {
         };
       }
       const key = JSON.stringify([input.caller.id, input.target.id, input.requester]);
-      const open = pending.get(key);
-      if (open) return open;
-      const decision = decide(input).finally(() => pending.delete(key));
-      pending.set(key, decision);
+      let card = pending.get(key);
+      if (!card) {
+        const entry: PendingCard = { decision: decide(input).finally(() => pending.delete(key)), onceUsed: false };
+        pending.set(key, entry);
+        card = entry;
+      }
+      const decision = await card.decision;
+      // Allow once lets exactly one of the calls waiting on the card through.
+      if (decision.ok && decision.via === "once") {
+        if (card.onceUsed) {
+          return {
+            ok: false,
+            message: `the user allowed ${input.caller.name} to open one terminal in ${input.target.name}, and another call took it; call again to ask for this one`,
+          };
+        }
+        card.onceUsed = true;
+      }
       return decision;
     },
   };
