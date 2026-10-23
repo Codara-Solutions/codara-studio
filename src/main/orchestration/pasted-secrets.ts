@@ -9,14 +9,19 @@
 // scrubbed text that was stored, and goes once that prompt is accepted (or
 // after an hour). A new chat's first message is scrubbed before its run
 // exists; the run claims it when the message is stored.
-// The keys themselves stay known to that run for the life of the process, so
-// whatever it writes later has them replaced as well: the model repeating a
-// key, or a worker task it wrote with one. Only that run's writes, and only
+// The keys themselves stay known to that run, so whatever it writes later
+// has them replaced as well: the model repeating a key, or a worker task it
+// wrote with one. They are kept across restarts in one 0600 file per run
+// beside the Pi sessions (setPastedKeyDir), which already hold the key;
+// never in the run's own folder, which stays scrubbed. Only that run's writes, and only
 // their message-text fields: the scrubber can take an ordinary word for a
 // key ("token: codara-studio2"), and that word must not rewrite another
 // chat, a JSON key, a folder, a branch or a command.
 //
 // No Electron import, so the unit suite bundles it directly.
+
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 import { SECRET_REDACTED, scrubSecrets, secretsIn } from "@shared/memory-items";
 
@@ -42,18 +47,78 @@ interface LiveText {
 // `${runId}\n${scrubbed}`; an empty run id is a first message not yet claimed.
 const live = new Map<string, LiveText>();
 const known = new Map<string, Set<string>>();
+// Runs whose key file was read this process (or that have none).
+const loaded = new Set<string>();
+let keyDir: (() => string) | null = null;
 
-function remember(runId: string, secrets: readonly string[]): void {
+/** Where each run's keys are kept across restarts (run-store sets it). */
+export function setPastedKeyDir(dir: () => string): void {
+  keyDir = dir;
+  loaded.clear();
+}
+
+const RUN_FILE_NAME = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,199}$/;
+
+function keyFile(runId: string): string | null {
+  return keyDir && RUN_FILE_NAME.test(runId) ? join(keyDir(), `${runId}.json`) : null;
+}
+
+function keysOf(runId: string): Set<string> | undefined {
+  if (known.has(runId) || loaded.has(runId)) return known.get(runId);
+  loaded.add(runId);
+  const file = keyFile(runId);
+  if (!file) return undefined;
+  try {
+    const value = JSON.parse(readFileSync(file, "utf8")) as unknown;
+    const keys = Array.isArray(value) ? value.filter((key): key is string => typeof key === "string" && key.length >= KNOWN_MIN) : [];
+    if (keys.length) remember(runId, keys, false);
+  } catch {
+    // No file: nothing was pasted into this run.
+  }
+  return known.get(runId);
+}
+
+function persist(runId: string, keys: ReadonlySet<string>): void {
+  const file = keyFile(runId);
+  if (!file) return;
+  try {
+    mkdirSync(join(file, ".."), { recursive: true, mode: 0o700 });
+    const temp = `${file}.${process.pid}.tmp`;
+    writeFileSync(temp, JSON.stringify([...keys]), { mode: 0o600 });
+    renameSync(temp, file);
+  } catch {
+    // Kept in memory for this process all the same.
+  }
+}
+
+function remember(runId: string, secrets: readonly string[], save = true): void {
   if (!runId || !secrets.length) return;
-  let keys = known.get(runId);
+  let keys = save ? keysOf(runId) : known.get(runId);
   if (!keys) {
-    if (known.size >= KNOWN_RUNS_MAX) known.delete(known.keys().next().value!);
+    if (known.size >= KNOWN_RUNS_MAX) {
+      const oldest = known.keys().next().value!;
+      known.delete(oldest);
+      loaded.delete(oldest);
+    }
     keys = new Set();
     known.set(runId, keys);
   }
   for (const secret of secrets) {
     if (keys.size >= KNOWN_MAX) keys.delete(keys.values().next().value!);
     keys.add(secret);
+  }
+  if (save) persist(runId, keys);
+}
+
+/** Forgets the keys pasted into `runId`, on disk too: the run was deleted. */
+export function forgetPastedKeys(runId: string): void {
+  known.delete(runId);
+  loaded.delete(runId);
+  const file = keyFile(runId);
+  try {
+    if (file) rmSync(file, { force: true });
+  } catch {
+    // Deleting the run goes on; the file holds only what Pi's session does.
   }
 }
 
@@ -135,7 +200,7 @@ function replaceKnown(text: string, keys: ReadonlySet<string>): string {
 
 /** `text` with every key a person pasted into `runId` replaced, for that run's text about to be written to disk. */
 export function redactPastedSecrets(runId: string | null | undefined, text: string): string {
-  const keys = runId ? known.get(runId) : undefined;
+  const keys = runId ? keysOf(runId) : undefined;
   return keys ? replaceKnown(text, keys) : text;
 }
 
@@ -154,7 +219,7 @@ const TEXT_FIELD =
  * when nothing changed.
  */
 export function redactPastedSecretsIn<T>(runId: string | null | undefined, value: T): T {
-  const keys = runId ? known.get(runId) : undefined;
+  const keys = runId ? keysOf(runId) : undefined;
   if (!keys) return value;
   const walk = (node: unknown, text: boolean): unknown => {
     if (typeof node === "string") return text ? replaceKnown(node, keys) : node;

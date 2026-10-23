@@ -7,6 +7,8 @@
 //   node scripts/test-scrub-secrets.cjs
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 const esbuild = require("esbuild");
 
@@ -315,9 +317,40 @@ async function pastedSecretsStayInTheirRun() {
   assert.equal(taskWritten.payload.text, "listed [redacted]");
 }
 
+// After a restart the run still knows the keys pasted into it: the model
+// repeating one then is redacted too. The list lives in a 0600 file outside
+// the run's folder, and goes with the run.
+async function pastedKeysOutliveARestart() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-pasted-keys-"));
+  try {
+    const keys = path.join(dir, "pi-agent", "pasted-keys");
+    const key = ["sk", "proj", "Rs7Tq2Wx9Lm4Vb8Nc3Kd6Hf1Gj5Pa0Ye"].join("-");
+    const before = await loadPasted();
+    before.setPastedKeyDir?.(() => keys);
+    assert.equal(before.scrubPastedText(`deploy with ${key}`, "run-restart"), "deploy with [redacted]");
+    before.scrubPastedText(`token: ${key}`, "../escape");
+
+    const after = await loadPasted();
+    after.setPastedKeyDir?.(() => keys);
+    assert.deepEqual(after.redactPastedSecretsIn("run-restart", { message: `I saw ${key}` }), { message: "I saw [redacted]" }, "the model repeating it after a restart");
+    assert.equal(after.redactPastedSecrets("run-restart", `again ${key}`), "again [redacted]");
+    assert.equal(after.redactPastedSecrets("run-other", `again ${key}`), `again ${key}`, "only in its own run");
+
+    const file = path.join(keys, "run-restart.json");
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600, "the key file is the user's alone");
+    assert.equal(fs.statSync(keys).mode & 0o777, 0o700);
+    assert.deepEqual(fs.readdirSync(keys), ["run-restart.json"], "a run id never names a path outside the folder");
+    after.forgetPastedKeys("run-restart");
+    assert.equal(fs.existsSync(file), false, "deleting the run deletes its keys");
+    assert.equal(after.redactPastedSecrets("run-restart", key), key);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 (async () => {
   memory = await load();
-  const suites = { replacesCredentials, catchesEnvAndBearer, pathsKeepTheirFolders, fewerFalsePositives, leavesProseAlone, idempotent, listsWhatItReplaced, pastedSecrets, pastedSecretsStayInTheirRun };
+  const suites = { replacesCredentials, catchesEnvAndBearer, pathsKeepTheirFolders, fewerFalsePositives, leavesProseAlone, idempotent, listsWhatItReplaced, pastedSecrets, pastedSecretsStayInTheirRun, pastedKeysOutliveARestart };
   let failed = 0;
   for (const [name, run] of Object.entries(suites)) {
     try {

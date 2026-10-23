@@ -241,6 +241,11 @@ async function main() {
   check("no run file holds the password, though the model repeated it", !files.includes(PASSWORD));
   check("the model's question was kept, with the key it repeated replaced", files.includes("Which account should the deploy with [redacted] use?"));
   check("run.json is still valid JSON", Boolean(readRun().id));
+  // The run's key list survives a restart beside the Pi sessions, never in
+  // the run's own folder.
+  const keyFile = path.join(HOME, "pi-agent", "pasted-keys", `${runId}.json`);
+  check("the run's keys are kept for after a restart", fs.existsSync(keyFile) && fs.readFileSync(keyFile, "utf8").includes(KEY));
+  check("in a file only the user can read", fs.existsSync(keyFile) && (fs.statSync(keyFile).mode & 0o777) === 0o600);
 
   // The scrubber takes an ordinary word for a key ("token: codara-studio2"
   // is a folder name). What is remembered from it stays in the run it was

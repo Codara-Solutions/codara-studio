@@ -97,11 +97,13 @@ import {
 } from "@shared/run-questions";
 import { makeId } from "@shared/ids";
 import {
+  forgetPastedKeys,
   forgetPastedText,
   livePastedText,
   redactPastedSecrets,
   redactPastedSecretsIn,
   scrubPastedText,
+  setPastedKeyDir,
   withPastedText,
 } from "./pasted-secrets";
 import { stripAnsiAndControls } from "@shared/agent-patterns";
@@ -721,6 +723,10 @@ function assertManagerDecisionMutationCurrent(runId: string | undefined): void {
     );
   }
 }
+
+// A run's pasted keys outlive a restart beside the Pi sessions, which hold
+// them already; never in the run's own folder.
+setPastedKeyDir(() => join(codaraHome(), "pi-agent", "pasted-keys"));
 
 // Events are written to events.jsonl; a key the user pasted never is
 // (pasted-secrets.ts), even when the model repeats it.
@@ -15383,6 +15389,7 @@ export async function deleteRun(runId: string): Promise<void> {
   // what the user taught (an active preference) stays. Both never throw.
   await forgetRunMemory(run);
   await forgetRunLearning(run);
+  forgetPastedKeys(run.id);
   await appendEvent({
     timestamp,
     workspaceId: run.workspaceId,
