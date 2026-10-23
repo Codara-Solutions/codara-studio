@@ -682,7 +682,9 @@ branch `origin`'s HEAD names. Nothing in the task's folder (its working tree,
 its commits, a `base` key in its `verify.json`, its refs, replace refs,
 hooks, config such as `url.insteadOf` or `core.fsmonitor`, index flags,
 objects planted in its store) can choose the base or loosen the checks; the
-gate's git calls run with hooks and the fsmonitor off. `origin`'s URL is
+gate's git calls run with hooks and the fsmonitor off, and reach an SSH
+origin with `ssh` itself (a `core.sshCommand` or `GIT_SSH_COMMAND` is
+ignored; `~/.ssh/config` still applies). `origin`'s URL is
 the one Codara recorded when the user added the workspace
 (`<codaraHome>/cos/workspace-origins.json`); a checkout whose `origin` now
 differs, or a `url.insteadOf` rule (global or in the gate's repository) that

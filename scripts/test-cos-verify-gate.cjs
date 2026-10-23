@@ -444,6 +444,60 @@ async function recordedOrigin() {
   assert.equal(await atAdd.get("new"), added.get(fresh));
 }
 
+// An SSH origin, and a core.sshCommand (in ~/.gitconfig, or in the gate's
+// own repository's config) or GIT_SSH_COMMAND that answers every fetch from
+// a repository with looser checks: the gate's git calls use ssh itself, so
+// the fetch fails and the task does not close.
+async function sshCommandIgnored() {
+  const runCommand = gate.createCommandRunner(null);
+  const repo = makeRepo("sshorigin", { checks: [{ id: "strict", run: "exit 3" }] });
+  const evil = evilTwin(repo, "sshorigin");
+  const sshUrl = "ssh://git@codara-gate-test.invalid/team/sshorigin.git";
+  git(repo, "remote", "set-url", "origin", sshUrl);
+  const marker = path.join(TMP, "fake-ssh-ran");
+  const fakeSsh = path.join(TMP, "fake-ssh");
+  fs.writeFileSync(fakeSsh, `#!/bin/sh\ntouch '${marker}'\nexec git-upload-pack '${evil}'\n`, { mode: 0o755 });
+  const origins = { get: async () => sshUrl, record: async () => assert.fail("the workspace was recorded at add time") };
+  const root = path.join(TMP, "cos-ssh");
+  const runOnce = async () => {
+    const store = gate.createTaskStore({ root });
+    const { id, runId } = await verifyingTask(store);
+    return runGate({ store, workspaceId: WS, taskId: id, runId, cwd: repo, baseBranch: "main", origins, runCommand });
+  };
+  const saved = { GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL, GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND };
+  const restore = () => {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  };
+  try {
+    const globalConfig = path.join(TMP, "ssh.gitconfig");
+    fs.writeFileSync(globalConfig, `[core]\n\tsshCommand = ${fakeSsh}\n`);
+    process.env.GIT_CONFIG_GLOBAL = globalConfig;
+    let task = await runOnce();
+    assert.notEqual(task.state, "done", "a core.sshCommand in ~/.gitconfig closes nothing");
+    assert.equal(task.state, "needs_you");
+    assert.match(task.needsYouReason, /could not fetch origin\/main/);
+    assert.ok(!fs.existsSync(marker), "the configured SSH command never ran");
+
+    process.env.GIT_CONFIG_GLOBAL = path.join(TMP, "empty.gitconfig");
+    const [gateRepo] = fs.readdirSync(path.join(root, WS, "verify-repo"));
+    git(path.join(root, WS, "verify-repo", gateRepo), "config", "core.sshCommand", fakeSsh);
+    task = await runOnce();
+    assert.notEqual(task.state, "done", "a core.sshCommand in the gate's repository closes nothing");
+    assert.ok(!fs.existsSync(marker), "the gate repository's SSH command never ran");
+
+    git(path.join(root, WS, "verify-repo", gateRepo), "config", "--unset", "core.sshCommand");
+    process.env.GIT_SSH_COMMAND = fakeSsh;
+    task = await runOnce();
+    assert.notEqual(task.state, "done", "GIT_SSH_COMMAND closes nothing");
+    assert.ok(!fs.existsSync(marker), "GIT_SSH_COMMAND never ran");
+  } finally {
+    restore();
+  }
+}
+
 async function taskFolder() {
   const dir = (...parts) => {
     const out = path.join(TMP, "folders", ...parts);
@@ -663,7 +717,7 @@ function sentences() {
 
 (async () => {
   gate = await load();
-  const suites = { config, selection, endToEnd, baseOwnsTheChecks, recordedOrigin, taskFolder, runnerEnds, slotWait, leavingCancels, blocked, sentences };
+  const suites = { config, selection, endToEnd, baseOwnsTheChecks, recordedOrigin, sshCommandIgnored, taskFolder, runnerEnds, slotWait, leavingCancels, blocked, sentences };
   let failed = 0;
   for (const [name, run] of Object.entries(suites)) {
     try {

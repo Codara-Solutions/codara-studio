@@ -270,10 +270,15 @@ export function createCommandRunner(heavy?: { bin: string; env: Record<string, s
 // Config that would run a program, or tell git the working tree is other
 // than it is, during the gate's own git calls: hooks (reference-transaction
 // fires on every ref a fetch writes), an fsmonitor, a stale untracked cache,
-// ext:: transports.
+// ext:: transports, an SSH command other than ssh (in ~/.gitconfig, the
+// checkout's or the gate's repository's config, or GIT_SSH and
+// GIT_SSH_COMMAND, which win over the config) that could answer a fetch from
+// any repository. ssh's own config still picks keys and hosts.
 const GIT_HARDENING = [
   "-c",
   "core.hooksPath=/dev/null",
+  "-c",
+  "core.sshCommand=ssh",
   "-c",
   "core.fsmonitor=false",
   "-c",
@@ -290,7 +295,7 @@ export const defaultGitRunner: GitRunner = (args, cwd) =>
     // commit's checks in for the base's.
     const child = spawn("git", [...GIT_HARDENING, ...args], {
       cwd,
-      env: gitChildEnv({ ...process.env, GIT_NO_REPLACE_OBJECTS: "1" }),
+      env: gitChildEnv({ ...process.env, GIT_NO_REPLACE_OBJECTS: "1", GIT_SSH_COMMAND: "ssh" }),
       stdio: ["ignore", "pipe", "ignore"],
       windowsHide: true,
     });
