@@ -320,30 +320,111 @@ function fetchableUrl(url: string, top: string): string {
   return local ? resolvePath(top, url) : url;
 }
 
-// origin's URL lives in the repository's config, which the agent can edit,
-// so the gate keeps the URL it saw on its first run for the workspace and
-// refuses to fetch anything else. The fetch runs in the gate's repository,
-// where the checkout's url.insteadOf rules do not apply.
-async function pinnedOrigin(top: string, pinFile: string, git: GitRunner): Promise<{ url: string } | { blocked: string }> {
-  const current = (await git(["remote", "get-url", REMOTE], top).catch(() => "")).trim();
-  if (!current) return { blocked: `Codara cannot reach ${REMOTE} to find the base branch the repository's checks are read from.` };
-  let pinned: string | null = null;
-  try {
-    const value = JSON.parse(await fs.readFile(pinFile, "utf8")) as { url?: unknown };
-    pinned = typeof value.url === "string" && value.url ? value.url : null;
-  } catch {
-    pinned = null;
+/** origin's URL as the checkout's config gives it (url.insteadOf applied), or null. */
+export async function originUrl(dir: string, git: GitRunner = defaultGitRunner): Promise<string | null> {
+  return (await git(["remote", "get-url", REMOTE], dir).catch(() => "")).trim() || null;
+}
+
+/**
+ * origin's URL per workspace as Codara recorded it when the workspace was
+ * added (index.ts), before any agent worked in it; the gate fetches from
+ * nothing else. A checkout's config is the agent's to edit, and a worktree
+ * shares its main checkout's, so the URL it holds when the gate first runs
+ * proves nothing.
+ */
+export interface OriginRecords {
+  get(workspaceId: string): Promise<string | null>;
+  /** Keeps the first URL recorded for a workspace. */
+  record(workspaceId: string, url: string): Promise<void>;
+}
+
+/** Records kept in one JSON file in Codara's own folder ({ workspaceId: url }). */
+export function createOriginRecords(file: string): OriginRecords {
+  let queue: Promise<unknown> = Promise.resolve();
+  const read = async (): Promise<Record<string, unknown>> => {
+    try {
+      const value = JSON.parse(await fs.readFile(file, "utf8")) as unknown;
+      return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+    } catch {
+      return {};
+    }
+  };
+  return {
+    async get(workspaceId) {
+      const url = (await read())[workspaceId];
+      return typeof url === "string" && url ? url : null;
+    },
+    record(workspaceId, url) {
+      const next = queue.then(async () => {
+        const all = await read();
+        if (typeof all[workspaceId] === "string" && all[workspaceId]) return;
+        all[workspaceId] = url;
+        await fs.mkdir(dirname(file), { recursive: true });
+        const temp = `${file}.${process.pid}.tmp`;
+        await fs.writeFile(temp, `${JSON.stringify(all, null, 2)}\n`, { mode: 0o600 });
+        await fs.rename(temp, file);
+      });
+      queue = next.catch(() => undefined);
+      return next;
+    },
+  };
+}
+
+/**
+ * Records origin's URL for each workspace not in `seen` (the ones there when
+ * the app started, and every one handled since): the first time a newly
+ * added workspace is saved, before any agent has worked in it. A copy branch
+ * takes its source workspace's record; an agent's worktree records nothing
+ * (the agent could already have changed the shared config), and neither do
+ * SSH workspaces. Workspaces that were there at start are recorded by the
+ * gate on its first run, which asks the user to confirm.
+ */
+export async function recordAddedWorkspaces(
+  workspaces: readonly GateWorkspace[],
+  seen: Set<string>,
+  records: OriginRecords,
+  git: GitRunner = defaultGitRunner,
+): Promise<void> {
+  for (const workspace of workspaces) {
+    if (seen.has(workspace.id)) continue;
+    seen.add(workspace.id);
+    if (workspace.remote || isRemotePath(workspace.cwd) || workspace.copyBranch?.createdBy?.kind === "agent") continue;
+    if (await records.get(workspace.id)) continue;
+    const source = workspace.copyBranch
+      ? workspaces.find((other) => other.id !== workspace.id && other.cwd === workspace.copyBranch?.repoCwd)
+      : undefined;
+    const url = (source && (await records.get(source.id))) || (await originUrl(workspace.copyBranch?.repoCwd ?? workspace.cwd, git));
+    if (url) await records.record(workspace.id, url);
   }
-  if (!pinned) {
-    await fs.mkdir(dirname(pinFile), { recursive: true });
-    await fs.writeFile(pinFile, `${JSON.stringify({ url: current })}\n`, { mode: 0o600 });
-    pinned = current;
-  } else if (pinned !== current) {
+}
+
+// The checkout's origin must still be the recorded one. A workspace added
+// before Codara recorded origins has its URL recorded now from its own
+// checkout, and the task goes to the user once with that URL to confirm.
+async function recordedOrigin(
+  workspaceId: string,
+  top: string,
+  home: string,
+  origins: OriginRecords,
+  git: GitRunner,
+): Promise<{ url: string } | { blocked: string }> {
+  const current = await originUrl(top, git);
+  if (!current) return { blocked: `Codara cannot reach ${REMOTE} to find the base branch the repository's checks are read from.` };
+  const recorded = await origins.get(workspaceId);
+  if (!recorded) {
+    const found = await originUrl(home, git);
+    if (!found) return { blocked: `Codara cannot reach ${REMOTE} to find the base branch the repository's checks are read from.` };
+    await origins.record(workspaceId, found);
     return {
-      blocked: `${REMOTE} now points at ${current}, not ${pinned} as when Codara first checked this workspace's work; if you changed it on purpose, delete ${pinFile} and verify again.`,
+      blocked: `Codara had no record of this workspace's ${REMOTE} and recorded ${found} from its checkout; if that is the right repository, verify again.`,
     };
   }
-  return { url: fetchableUrl(pinned, top) };
+  if (recorded !== current) {
+    return {
+      blocked: `${REMOTE} now points at ${current}, not ${recorded} as Codara recorded when the workspace was added; set it back to verify this task.`,
+    };
+  }
+  return { url: fetchableUrl(recorded, home) };
 }
 
 // The gate's own bare repository for a repository a workspace works in,
@@ -590,6 +671,8 @@ export interface VerifyGateOptions {
   baseBranch?: string | null;
   /** The workspace's own folder; a different `cwd` must be a checkout of the same repository. */
   workspaceDir?: string | null;
+  /** origin's URL per workspace as Codara recorded it; the gate fetches from nothing else. */
+  origins: OriginRecords;
   runCommand: CommandRunner;
   git?: GitRunner;
   now?: () => number;
@@ -638,7 +721,7 @@ export async function runVerifyGate(options: VerifyGateOptions): Promise<Task | 
   if (!top) return blocked("The task's folder is not a git checkout, so its change cannot be measured.");
   const commonDir = await gitCommonDir(top, git);
   const repoId = createHash("sha256").update(commonDir ?? top).digest("hex").slice(0, 16);
-  const origin = await pinnedOrigin(top, join(store.paths(workspaceId).dir, "verify-origin", `${repoId}.json`), git);
+  const origin = await recordedOrigin(workspaceId, top, options.workspaceDir ?? top, options.origins, git);
   if ("blocked" in origin) return blocked(origin.blocked);
   const objectFormat = (await git(["rev-parse", "--show-object-format"], top).catch(() => "sha1")).trim();
   const repo = join(store.paths(workspaceId).dir, "verify-repo", `${repoId}.git`);
@@ -649,6 +732,12 @@ export async function runVerifyGate(options: VerifyGateOptions): Promise<Task | 
   const read = await inTurn(repo, async (): Promise<BaseRead> => {
     if (!(await ensureBaseRepo(repo, objectFormat, git))) {
       return { blocked: "Codara could not set up its own copy of the repository to read the checks from." };
+    }
+    // url.insteadOf in the user's or this repository's git config would
+    // send the fetch somewhere else; credential helpers still apply.
+    const expanded = (await git([...originFlags(origin.url), "ls-remote", "--get-url", REMOTE], repo).catch(() => "")).trim();
+    if (expanded !== origin.url) {
+      return { blocked: `A url.insteadOf rule in git's config sends ${REMOTE} (${origin.url}) to ${expanded || "another address"}, so Codara will not fetch from it.` };
     }
     const branch = options.baseBranch?.trim() || (await remoteDefaultBranch(repo, origin.url, git));
     if (!branch) return { blocked: `Codara cannot reach ${REMOTE} to find the base branch the repository's checks are read from.` };

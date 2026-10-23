@@ -117,9 +117,22 @@ function makeRepo(name, verify, { remote = true } = {}) {
     git(TMP, "init", "-q", "--bare", "-b", "main", origin);
     git(repo, "remote", "add", "origin", origin);
     git(repo, "push", "-q", "origin", "main");
+    added.set(repo, origin);
   }
   git(repo, "checkout", "-q", "-b", "work");
   return repo;
+}
+
+// origin's URL as Codara recorded it when each repository's workspace was
+// added (makeRepo), before any agent touched its config.
+const added = new Map();
+function recordedAtAdd(dir) {
+  const root = [...added.keys()].filter((repo) => dir && (dir === repo || dir.startsWith(`${repo}${path.sep}`))).sort((a, b) => b.length - a.length)[0];
+  return { get: async () => (root ? added.get(root) : null), record: async () => assert.fail("a workspace recorded at add time is not recorded again") };
+}
+
+function runGate(options) {
+  return gate.runVerifyGate({ origins: recordedAtAdd(options.workspaceDir ?? options.cwd), ...options });
 }
 
 function commitAll(repo, message) {
@@ -148,7 +161,7 @@ async function endToEnd() {
   fs.mkdirSync(path.join(repo, "src"));
   fs.writeFileSync(path.join(repo, "src", "a.ts"), "export {};\n");
   const first = await verifyingTask(store);
-  const done = await gate.runVerifyGate({ store, workspaceId: WS, taskId: first.id, runId: first.runId, cwd: repo, runCommand });
+  const done = await runGate({ store, workspaceId: WS, taskId: first.id, runId: first.runId, cwd: repo, runCommand });
   assert.equal(done.state, "done", "every selected check passed");
   assert.deepEqual(done.evidence.map((item) => [item.checkId, item.ok, item.exitCode]), [["types", true, 0], ["base", true, 0]], "the docs check was not selected");
   const log = fs.readFileSync(done.evidence[0].artifact, "utf8");
@@ -159,7 +172,7 @@ async function endToEnd() {
   fs.mkdirSync(path.join(repo, "docs"));
   fs.writeFileSync(path.join(repo, "docs", "x.md"), "x\n");
   const second = await verifyingTask(store);
-  const failed = await gate.runVerifyGate({ store, workspaceId: WS, taskId: second.id, runId: second.runId, cwd: repo, runCommand });
+  const failed = await runGate({ store, workspaceId: WS, taskId: second.id, runId: second.runId, cwd: repo, runCommand });
   assert.equal(failed.state, "dispatched", "a red run goes back to the worker");
   assert.equal(failed.verify.failures, 1);
   assert.equal(failed.evidence.find((item) => item.checkId === "docs").exitCode, 7);
@@ -167,7 +180,7 @@ async function endToEnd() {
   const slow = makeRepo("slow", { checks: [{ id: "slow", run: "sleep 5", timeoutSec: 1 }] });
   const third = await verifyingTask(store);
   const started = Date.now();
-  const timedOut = await gate.runVerifyGate({ store, workspaceId: WS, taskId: third.id, runId: third.runId, cwd: slow, runCommand });
+  const timedOut = await runGate({ store, workspaceId: WS, taskId: third.id, runId: third.runId, cwd: slow, runCommand });
   assert.ok(Date.now() - started < 4000, "the timeout kills the command");
   assert.equal(timedOut.evidence[0].ok, false);
   assert.match(fs.readFileSync(timedOut.evidence[0].artifact, "utf8"), /timed out/);
@@ -178,7 +191,7 @@ async function baseOwnsTheChecks() {
   const runCommand = gate.createCommandRunner(null);
   const run = async (cwd, extra = {}) => {
     const { id, runId } = await verifyingTask(store);
-    return gate.runVerifyGate({ store, workspaceId: WS, taskId: id, runId, cwd, runCommand, ...extra });
+    return runGate({ store, workspaceId: WS, taskId: id, runId, cwd, runCommand, ...extra });
   };
   const repo = makeRepo("loosened", { checks: [{ id: "strict", run: "exit 3" }] });
 
@@ -331,6 +344,106 @@ async function baseOwnsTheChecks() {
 // Which folder a task's checks may run in: the workspace's own checkout or a
 // worktree an agent made of its repository, never another workspace's
 // checkout (a user's branch, the tree a running app reloads from).
+// An origin with looser checks that shares the task's history: what an
+// agent would point the gate at.
+function evilTwin(repo, name) {
+  const evil = path.join(TMP, `${name}-evil.git`);
+  git(TMP, "init", "-q", "--bare", "-b", "main", evil);
+  fs.writeFileSync(path.join(repo, ".codara", "verify.json"), JSON.stringify({ checks: [{ id: "strict", run: "true" }] }));
+  commitAll(repo, "loosen the checks");
+  git(repo, "push", "-q", evil, "HEAD:refs/heads/main");
+  return evil;
+}
+
+// The gate fetches only from origin's URL as Codara recorded it when the
+// workspace was added, whatever the checkout or git's config says by the
+// time the gate first runs.
+async function recordedOrigin() {
+  const runCommand = gate.createCommandRunner(null);
+  const strict = { checks: [{ id: "strict", run: "exit 3" }] };
+  const runIn = async (root, cwd, extra = {}) => {
+    const store = gate.createTaskStore({ root });
+    const { id, runId } = await verifyingTask(store);
+    return runGate({ store, workspaceId: WS, taskId: id, runId, cwd, runCommand, ...extra });
+  };
+
+  // Route 1: the agent repoints origin (in the config every worktree shares)
+  // before the gate's first run for the workspace.
+  const swapped = makeRepo("swapped", strict);
+  const evil = evilTwin(swapped, "swapped");
+  git(swapped, "remote", "set-url", "origin", evil);
+  let task = await runIn(path.join(TMP, "cos-swapped"), swapped);
+  assert.equal(task.state, "needs_you", "an origin changed before the first run is refused");
+  assert.match(task.needsYouReason, /^origin now points at .*swapped-evil\.git, not .*swapped-origin\.git as Codara recorded/);
+
+  // Route 2: a url.insteadOf rule in the gate's own repository config.
+  const rewired = makeRepo("rewired", strict);
+  const rewiredRoot = path.join(TMP, "cos-rewired");
+  task = await runIn(rewiredRoot, rewired);
+  assert.equal(task.evidence.at(-1).exitCode, 3, "the first run reads origin's strict checks");
+  const rewiredEvil = evilTwin(rewired, "rewired");
+  const verifyRepos = path.join(rewiredRoot, WS, "verify-repo");
+  const [gateRepo] = fs.readdirSync(verifyRepos);
+  git(path.join(verifyRepos, gateRepo), "config", `url.${rewiredEvil}.insteadOf`, added.get(rewired));
+  task = await runIn(rewiredRoot, rewired);
+  assert.equal(task.state, "needs_you", "an insteadOf rule in the gate's repository is refused");
+  assert.match(task.needsYouReason, /^A url\.insteadOf rule in git's config sends origin \(.*rewired-origin\.git\) to .*rewired-evil\.git/);
+
+  // Route 3: a url.insteadOf rule in the user's global git config.
+  const global = makeRepo("globalrule", strict);
+  const globalEvil = evilTwin(global, "globalrule");
+  const globalConfig = path.join(TMP, "global.gitconfig");
+  fs.writeFileSync(globalConfig, `[url "${globalEvil}"]\n\tinsteadOf = ${added.get(global)}\n`);
+  const before = process.env.GIT_CONFIG_GLOBAL;
+  process.env.GIT_CONFIG_GLOBAL = globalConfig;
+  try {
+    task = await runIn(path.join(TMP, "cos-globalrule"), global);
+  } finally {
+    if (before === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+    else process.env.GIT_CONFIG_GLOBAL = before;
+  }
+  assert.equal(task.state, "needs_you", "a global insteadOf rule is refused");
+  assert.match(task.needsYouReason, /globalrule-evil\.git/);
+
+  // A workspace added before Codara recorded origins: the first run records
+  // the main checkout's URL and asks the user once; then the gate runs.
+  const legacy = makeRepo("legacy", strict);
+  const file = path.join(TMP, "cos-legacy", "workspace-origins.json");
+  const origins = gate.createOriginRecords(file);
+  task = await runIn(path.join(TMP, "cos-legacy"), legacy, { origins });
+  assert.equal(task.state, "needs_you");
+  assert.equal(
+    task.needsYouReason,
+    `Codara had no record of this workspace's origin and recorded ${added.get(legacy)} from its checkout; if that is the right repository, verify again.`,
+  );
+  assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { [WS]: added.get(legacy) });
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  await origins.record(WS, "/somewhere/else.git");
+  assert.equal(await origins.get(WS), added.get(legacy), "the first record stays");
+  task = await runIn(path.join(TMP, "cos-legacy"), legacy, { origins });
+  assert.equal(task.evidence.at(-1).exitCode, 3, "the next run reads origin's checks");
+
+  // What the app records as workspaces are added (index.ts on each save).
+  const fresh = makeRepo("added", strict);
+  const atAdd = gate.createOriginRecords(path.join(TMP, "cos-added", "workspace-origins.json"));
+  const seen = new Set(["was-there"]);
+  const list = [
+    { id: "was-there", cwd: legacy },
+    { id: "new", cwd: fresh },
+    { id: "ssh", cwd: "ssh://host/repo", remote: { hostId: "host" } },
+    { id: "agent-tree", cwd: path.join(TMP, "agent-tree"), copyBranch: { repoCwd: fresh, createdBy: { kind: "agent" } } },
+  ];
+  await gate.recordAddedWorkspaces(list, seen, atAdd);
+  assert.equal(await atAdd.get("new"), added.get(fresh), "a new workspace records its origin");
+  for (const id of ["was-there", "ssh", "agent-tree"]) assert.equal(await atAdd.get(id), null, `${id} records nothing`);
+  // Later an agent repoints the shared config; a copy branch the user makes
+  // then takes the source workspace's record, and nothing is recorded twice.
+  git(fresh, "remote", "set-url", "origin", path.join(TMP, "elsewhere.git"));
+  await gate.recordAddedWorkspaces([...list, { id: "copy", cwd: path.join(TMP, "copy"), copyBranch: { repoCwd: fresh } }], seen, atAdd);
+  assert.equal(await atAdd.get("copy"), added.get(fresh));
+  assert.equal(await atAdd.get("new"), added.get(fresh));
+}
+
 async function taskFolder() {
   const dir = (...parts) => {
     const out = path.join(TMP, "folders", ...parts);
@@ -412,7 +525,7 @@ async function runnerEnds() {
   const { id, runId } = await verifyingTask(store);
   const runAbort = new AbortController();
   setTimeout(() => runAbort.abort(), 300);
-  const result = await gate.runVerifyGate({ store, workspaceId: WS, taskId: id, runId, cwd: repo, runCommand, signal: runAbort.signal });
+  const result = await runGate({ store, workspaceId: WS, taskId: id, runId, cwd: repo, runCommand, signal: runAbort.signal });
   assert.equal(result, null);
   const task = (await store.read(WS)).tasks.find((candidate) => candidate.id === id);
   assert.equal(task.state, "verifying");
@@ -526,7 +639,7 @@ async function blocked() {
   ];
   for (const [cwd, pattern] of cases) {
     const { id, runId } = await verifyingTask(store);
-    const task = await gate.runVerifyGate({ store, workspaceId: WS, taskId: id, runId, cwd, runCommand });
+    const task = await runGate({ store, workspaceId: WS, taskId: id, runId, cwd, runCommand });
     assert.equal(task.state, "needs_you");
     assert.match(task.needsYouReason, pattern);
   }
@@ -550,7 +663,7 @@ function sentences() {
 
 (async () => {
   gate = await load();
-  const suites = { config, selection, endToEnd, baseOwnsTheChecks, taskFolder, runnerEnds, slotWait, leavingCancels, blocked, sentences };
+  const suites = { config, selection, endToEnd, baseOwnsTheChecks, recordedOrigin, taskFolder, runnerEnds, slotWait, leavingCancels, blocked, sentences };
   let failed = 0;
   for (const [name, run] of Object.entries(suites)) {
     try {

@@ -16,17 +16,20 @@ import { resolveBundledResourcePath } from "../bundled-resources";
 import { codaraHome } from "../codara-home";
 import { logMain } from "../file-log";
 import type { IpcHandle } from "../ipc";
-import { loadState } from "../storage";
+import { loadState, onStateSaved } from "../storage";
 import { provideCosService } from "./service";
 import { createTaskStore, isTaskWorkspaceId, type TaskStore } from "./task-store";
 import {
   createCommandRunner,
   createGateScheduler,
+  createOriginRecords,
+  recordAddedWorkspaces,
   resolveGateTarget,
   runVerifyGate,
   stopRunningChecks,
   type CommandRunner,
   type GateScheduler,
+  type OriginRecords,
 } from "./verify-gate";
 
 export const COS_TASKS_CHANGED_CHANNEL = "cosTasks:changed";
@@ -67,6 +70,13 @@ function taskStore(): TaskStore {
       .catch(() => undefined);
   });
   return store;
+}
+
+let origins: OriginRecords | null = null;
+
+function originRecords(): OriginRecords {
+  origins ??= createOriginRecords(join(cosRoot(), "workspace-origins.json"));
+  return origins;
 }
 
 // The same wrapper and machine-wide slots workflow agents use, so a gate run
@@ -112,6 +122,7 @@ function gateScheduler(): GateScheduler {
               taskId,
               runId,
               ...target,
+              origins: originRecords(),
               runCommand: gateCommandRunner(),
               signal,
             });
@@ -167,5 +178,13 @@ export function registerCosTasksIpc(handle: IpcHandle): void {
   // A check left running after quit would hold the heavy slot the gate
   // resumed at the next boot then waits for.
   app.on("will-quit", stopRunningChecks);
+  const seen = loadState().then((state) => new Set(state.workspaces.map((workspace) => workspace.id)));
+  let recording: Promise<void> = Promise.resolve();
+  onStateSaved((state) => {
+    recording = recording
+      .then(() => seen)
+      .then((ids) => recordAddedWorkspaces(state.workspaces, ids, originRecords()))
+      .catch((error) => logMain("cos", `recording origin failed: ${String(error)}`));
+  });
   void resumeInterruptedVerifies().catch(() => undefined);
 }

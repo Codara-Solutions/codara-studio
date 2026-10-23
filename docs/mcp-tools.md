@@ -683,8 +683,12 @@ its commits, a `base` key in its `verify.json`, its refs, replace refs,
 hooks, config such as `url.insteadOf` or `core.fsmonitor`, index flags,
 objects planted in its store) can choose the base or loosen the checks; the
 gate's git calls run with hooks and the fsmonitor off. `origin`'s URL is
-pinned on the gate's first run for the repository; a changed URL blocks the
-task until the user deletes the pin file the sentence names. The checks run
+the one Codara recorded when the user added the workspace
+(`<codaraHome>/cos/workspace-origins.json`); a checkout whose `origin` now
+differs, or a `url.insteadOf` rule (global or in the gate's repository) that
+rewrites it, blocks the task. A workspace added before Codara recorded
+origins gets its URL recorded from its checkout on the gate's first run, and
+that task goes to the user once with the URL to confirm. The checks run
 from the top of the checkout. A newer verify run of the task, or
 the task leaving `verifying` (moved or dropped), cancels the checks still
 running. Each check is a shell command with optional `when` globs (it
