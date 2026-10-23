@@ -580,6 +580,13 @@ function opaqueToken(token: string): boolean {
   return !token.includes("/") || /^[A-Za-z0-9+/]+={0,2}$/.test(token);
 }
 
+// A path, not a key with "/" in it: it starts at a folder, or one of its
+// parts is a lowercase word ("uploads", "tmp"). A key's parts are random.
+const PATH_PART_MIN = 16;
+function pathLike(token: string): boolean {
+  return token.startsWith("/") || token.split("/").some((part) => /^[a-z]{3,}$/.test(part));
+}
+
 // Replaces what reads like a credential and, given `found`, lists each
 // replaced piece exactly as it stood in the text.
 function scrub(text: string, found?: string[]): string {
@@ -626,10 +633,22 @@ function scrub(text: string, found?: string[]): string {
     const number = match.trimEnd();
     return replaced(number, `${SECRET_REDACTED}${match.slice(number.length)}`);
   });
-  // A variable name before the token stays: "SENDGRID_KEY=[redacted]".
+  // A variable name before the token stays: "SENDGRID_KEY=[redacted]". A
+  // path keeps its folders and file name: "/tmp/[redacted]/report.txt".
   return out.replace(
-    /(?<![\w./:@#?&=%+-])(?<!base64,)((?:[A-Za-z_][A-Za-z0-9_]*=)?)([A-Za-z0-9+/_-]{36,}={0,2})(?![\w./=-])/g,
-    (whole, name: string, token: string) => (opaqueToken(token) ? replaced(token, `${name}${SECRET_REDACTED}`) : whole),
+    /(?<![\w./:@#?&=%+-])(?<!base64,)((?:[A-Za-z_][A-Za-z0-9_]*=)?)([A-Za-z0-9+/_-]{36,}={0,2})(?![\w/=-])/g,
+    (whole, name: string, token: string, offset: number, text: string) => {
+      const isPath = token.includes("/") && pathLike(token);
+      if (text[offset + whole.length] === "." && !isPath) return whole;
+      if (!isPath) return opaqueToken(token) ? replaced(token, `${name}${SECRET_REDACTED}`) : whole;
+      let hit = false;
+      const parts = token.split("/").map((part) => {
+        if (part.length < PATH_PART_MIN || !opaqueToken(part)) return part;
+        hit = true;
+        return replaced(part, SECRET_REDACTED);
+      });
+      return hit ? `${name}${parts.join("/")}` : whole;
+    },
   );
 }
 

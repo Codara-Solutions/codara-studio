@@ -82,6 +82,20 @@ function catchesEnvAndBearer() {
   for (const text of [`AWS_SECRET_ACCESS_KEY=${aws}`, `Bearer ${hex}`]) assert.ok(memory.containsSecret(text), text);
 }
 
+// A path keeps its folders: only an opaque piece of it is replaced.
+function pathsKeepTheirFolders() {
+  const token = "Zq8Xw2Lp9Rt4Vb7Nm3Kd6Hf1Gj5Sc0YaQ7pW2xK";
+  assert.equal(scrub(`file at /home/u/uploads/${token}/report`), "file at /home/u/uploads/[redacted]/report");
+  assert.equal(scrub(`file at /home/u/uploads/${token}/report.txt`), "file at /home/u/uploads/[redacted]/report.txt");
+  assert.equal(scrub(`file at uploads/${token}/report`), "file at uploads/[redacted]/report");
+  assert.equal(scrub(`file at /tmp/${token}`), "file at /tmp/[redacted]");
+  assert.equal(scrub(`cd ~/keys/${token} now`), "cd ~/keys/[redacted] now");
+  assert.deepEqual(memory.secretsIn(`file at /tmp/${token}`), [token]);
+  const plainPath = "/home/u/Documents/codara-studio2/src/main/orchestration/run-store.ts";
+  assert.equal(scrub(`open ${plainPath}`), `open ${plainPath}`);
+  assert.equal(scrub(scrub(`file at /tmp/${token}`)), "file at /tmp/[redacted]");
+}
+
 // What the first scrubber replaced although nobody typed a credential:
 // identifiers, base64 data, timestamps and ids that happen to pass Luhn. A
 // variable name before a key is kept, so the text still says which key it was.
@@ -274,7 +288,7 @@ async function pastedSecretsStayInTheirRun() {
 
 (async () => {
   memory = await load();
-  const suites = { replacesCredentials, catchesEnvAndBearer, fewerFalsePositives, leavesProseAlone, idempotent, listsWhatItReplaced, pastedSecrets, pastedSecretsStayInTheirRun };
+  const suites = { replacesCredentials, catchesEnvAndBearer, pathsKeepTheirFolders, fewerFalsePositives, leavesProseAlone, idempotent, listsWhatItReplaced, pastedSecrets, pastedSecretsStayInTheirRun };
   let failed = 0;
   for (const [name, run] of Object.entries(suites)) {
     try {
