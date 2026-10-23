@@ -85,6 +85,8 @@ function memoryStore() {
 
 async function main() {
   const cross = await bundle("src/main/cross-workspace-terminals.ts", "cross");
+  const { processCwds } = await bundle("src/main/pi-session-tracker.ts", "pi-session-tracker");
+  const { processChain } = await bundle("src/main/owned-process-tree.ts", "owned-process-tree");
   const { AgentTerminalRegistry, AgentTerminalOwnershipError } = await bundle(
     "src/main/agent-terminal-registry.ts",
     "registry",
@@ -162,7 +164,9 @@ async function main() {
     /credential/,
     "the credential is checked first",
   );
-  assert.match(gate({ untrustedCaller: true }), /imported pull-request workspace/);
+  assert.match(gate({ callerTrust: "untrusted-pull-request" }), /imported pull-request workspace/);
+  assert.match(gate({ callerTrust: "unknown" }), /could not read which folder/);
+  assert.equal(gate({ callerTrust: "trusted" }), null);
 
   const prOrigin = { kind: "github-pull-request", repo: "o/r", number: 7 };
   const prRoot = mkdir("pr-import");
@@ -173,21 +177,55 @@ async function main() {
     copyBranch: { repoCwd: repo, branch: "pr-7", city: "pr-7", createdAt: "now", origin: prOrigin },
   };
   const railWithPr = [...workspaces, prWorkspace];
-  const inPr = (callerWs, callerCwd = null) =>
-    cross.callerInImportedPullRequest({ caller: callerWs, callerCwd, workspaces: railWithPr });
-  assert.equal(await inPr(prWorkspace), true, "a hand-started agent in an imported PR workspace is untrusted");
+  const trust = (callerWs, processCwds, rail = railWithPr) =>
+    cross.callerPullRequestTrust({ caller: callerWs, processCwds, workspaces: rail });
+  assert.equal(await trust(prWorkspace, []), "untrusted-pull-request", "an agent in an imported PR workspace");
   assert.equal(
-    await inPr({ id: "ws-loose", name: "Loose", cwd: path.join(prRoot, "sub") }),
-    true,
-    "a workspace whose folder lies inside an imported PR is untrusted too",
+    await trust({ id: "ws-loose", name: "Loose", cwd: path.join(prRoot, "sub") }, []),
+    "untrusted-pull-request",
+    "a workspace whose folder lies inside an imported PR",
   );
+  // `cd <pr checkout> && claude` in a trusted workspace's shell: the pane's
+  // start folder is still the trusted one; only the processes moved.
   assert.equal(
-    await inPr(local, path.join(prRoot, "src")),
-    true,
-    "a pane that started inside an imported PR checkout is untrusted",
+    await trust(local, [path.join(OUT_DIR, "elsewhere"), path.join(prRoot, "src"), repo]),
+    "untrusted-pull-request",
+    "a hand-started agent whose process sits in an imported PR checkout is refused",
   );
-  assert.equal(await inPr(local, repo), false, "an ordinary workspace and pane are trusted");
-  assert.equal(await inPr(local), false);
+  const prLink = path.join(OUT_DIR, "pr-link");
+  fs.symlinkSync(prRoot, prLink);
+  assert.equal(await trust(local, [prLink]), "untrusted-pull-request", "also through a symlink");
+  assert.equal(await trust(local, [repo, sub]), "trusted", "an ordinary workspace and processes are trusted");
+  assert.equal(await trust(local, null), "unknown", "unreadable folders with an imported PR open are unknown");
+  assert.equal(await trust(local, null, workspaces), "trusted", "with no imported PR open nothing can be untrusted");
+
+  // Which processes count: MCP server, agent, shell; not Codara or above.
+  const inspect = (chain) =>
+    cross.callerProcessesToInspect(chain, { isPaneShell: (pid) => pid === 30, appPid: 40 });
+  assert.deepEqual(inspect([10, 20, 30, 40, 1]), [10, 20, 30], "from the MCP server up to the pane's shell");
+  assert.deepEqual(inspect([10, 20, 40, 1]), [10, 20], "never Codara itself or its parents");
+
+  if (process.platform === "linux" || process.platform === "darwin") {
+    // Live: a shell started in a trusted folder that then `cd`s into the
+    // imported PR checkout and runs an agent there, read the way
+    // agent-socket reads the caller.
+    const { spawn } = require("node:child_process");
+    const shell = spawn("/bin/sh", ["-c", `cd "${prRoot}" && exec sleep 30`], { cwd: repo, stdio: "ignore" });
+    try {
+      // Wait for the shell to have run its `cd`.
+      for (let i = 0; i < 50; i++) {
+        if ((await processCwds([shell.pid]))?.get(shell.pid)?.includes("pr-import")) break;
+        await new Promise((done) => setTimeout(done, 100));
+      }
+      const chain = await processChain(shell.pid);
+      const pids = cross.callerProcessesToInspect(chain, { isPaneShell: () => false, appPid: process.pid });
+      assert.deepEqual(pids, [shell.pid], "the agent's chain stops below the process that asks (here: this test)");
+      const live = await processCwds(pids);
+      assert.equal(await trust(local, [...live.values()]), "untrusted-pull-request", "the real current folder is read");
+    } finally {
+      shell.kill("SIGKILL");
+    }
+  }
   console.log("ok 2 pane and scoped credentials, imported PR runs and agents, unknown callers and SSH are refused");
 
   // ── 3. Grants file ─────────────────────────────────────────────────────

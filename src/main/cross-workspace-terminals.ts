@@ -130,7 +130,7 @@ export type CrossWorkspaceAuthKind = "root" | "scoped" | "pane";
 export function crossWorkspaceRefusal(input: {
   authKind: CrossWorkspaceAuthKind;
   untrustedRun: boolean;
-  untrustedCaller?: boolean;
+  callerTrust?: CallerTrust;
   caller: WorkspaceRef | null;
   target: WorkspaceRef;
 }): string | null {
@@ -140,8 +140,11 @@ export function crossWorkspaceRefusal(input: {
   if (input.untrustedRun) {
     return "an imported pull-request run cannot open terminals in another workspace";
   }
-  if (input.untrustedCaller) {
+  if (input.callerTrust === "untrusted-pull-request") {
     return "an agent in an imported pull-request workspace cannot open terminals in another workspace";
+  }
+  if (input.callerTrust === "unknown") {
+    return "Codara could not read which folder this agent runs in, and an imported pull request is open, so it cannot open terminals in another workspace";
   }
   if (!input.caller) {
     return "Codara could not tell which workspace this agent runs in, so it cannot open terminals in another one";
@@ -152,26 +155,53 @@ export function crossWorkspaceRefusal(input: {
   return null;
 }
 
+export type CallerTrust = "trusted" | "untrusted-pull-request" | "unknown";
+
 /**
- * True when the caller runs inside an imported pull request: its workspace
- * was imported from one, or its workspace folder or its pane's current folder
- * lies in one. A Claude or Codex the user started by hand in a plain shell
- * there holds the root token like any other, but the checkout it reads is
- * untrusted, so it may not reach into other workspaces.
+ * Whether the caller runs inside an imported pull request: its workspace was
+ * imported from one, or its workspace folder or the current folder of any
+ * process between the agent and its pane's shell lies in one. A Claude or
+ * Codex the user started by hand holds the root token like any other, and
+ * `cd <pr checkout> && claude` in a trusted workspace's shell leaves only the
+ * processes' current folders pointing at the untrusted checkout (the pane's
+ * start folder does not move). `processCwds` null means those folders could
+ * not be read: "unknown" when an imported pull request is open, since it
+ * might be the one.
  */
-export async function callerInImportedPullRequest(input: {
+export async function callerPullRequestTrust(input: {
   caller: Pick<Workspace, "cwd" | "copyBranch">;
-  callerCwd: string | null;
+  processCwds: readonly string[] | null;
   workspaces: readonly Pick<Workspace, "cwd" | "copyBranch">[];
-}): Promise<boolean> {
-  if (input.caller.copyBranch?.origin?.kind === "github-pull-request") return true;
-  for (const cwd of [input.caller.cwd, input.callerCwd]) {
+}): Promise<CallerTrust> {
+  if (input.caller.copyBranch?.origin?.kind === "github-pull-request") return "untrusted-pull-request";
+  if (!input.workspaces.some((workspace) => workspace.copyBranch?.origin?.kind === "github-pull-request")) {
+    return "trusted";
+  }
+  for (const cwd of [input.caller.cwd, ...(input.processCwds ?? [])]) {
     if (!cwd) continue;
     if ((await workspaceProjectPolicyModeForTerminalCwd(cwd, input.workspaces)) === "untrusted-pull-request") {
-      return true;
+      return "untrusted-pull-request";
     }
   }
-  return false;
+  return input.processCwds === null ? "unknown" : "trusted";
+}
+
+/**
+ * The caller's processes whose current folder counts: from the MCP server up
+ * to and including its pane's shell, or up to (not including) Codara itself
+ * when no pane holds it.
+ */
+export function callerProcessesToInspect(
+  chain: readonly number[],
+  stopAt: { isPaneShell: (pid: number) => boolean; appPid: number },
+): number[] {
+  const out: number[] = [];
+  for (const pid of chain) {
+    if (pid === stopAt.appPid) break;
+    out.push(pid);
+    if (stopAt.isPaneShell(pid)) break;
+  }
+  return out;
 }
 
 /**

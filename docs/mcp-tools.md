@@ -546,9 +546,12 @@ Only an agent running with the user's own authority may target another
 workspace: Claude Code, Codex, Grok or Pi in a Codara terminal, or a trusted
 Cora run. A pane's own credential (`codara-pane`), the scoped credential of a
 Cora run on an imported pull request, any agent whose workspace is an imported
-pull request (or whose workspace or pane folder lies inside one, including a
-Claude or Codex started by hand in a shell there), and SSH workspaces on
-either side are refused. Codara must also know the caller's workspace: its run's, or the one
+pull request, or whose workspace folder or current folder lies inside one
+(Codara reads the current folder of each process from the agent's MCP server
+up to its pane's shell, so `cd <pr checkout> && claude` in another
+workspace's shell is caught too), and SSH workspaces on either side are
+refused. When those folders cannot be read while an imported pull request is
+open, the call is refused as well. Codara must also know the caller's workspace: its run's, or the one
 its pane sits in.
 
 The first time a workspace targets another, Codara shows "Allow <caller> to

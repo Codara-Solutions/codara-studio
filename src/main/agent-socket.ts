@@ -17,6 +17,7 @@ import {
 } from "./preview-tools";
 import { getTrustedMainWindow } from "./main-window-trust";
 import { processChain } from "./owned-process-tree";
+import { processCwds } from "./pi-session-tracker";
 import { requestTerminalOp } from "./terminal-bridge";
 import {
   cleanTerminalText,
@@ -126,7 +127,8 @@ import {
 } from "./agent-socket-capabilities";
 import { createPaneOpener, PaneOpenError, parsePaneOpenParams } from "./pane-open";
 import {
-  callerInImportedPullRequest,
+  callerProcessesToInspect,
+  callerPullRequestTrust,
   crossWorkspaceCwdRefusal,
   crossWorkspaceRefusal,
   paneIsGone,
@@ -1396,6 +1398,24 @@ async function resolveCallerPaneId(params: Record<string, unknown>): Promise<str
   return chain ? pty.sessionForProcessChain(chain) : null;
 }
 
+// Where the caller's processes are right now, from its MCP server up to its
+// pane's shell: a pane's recorded folder is only where its shell started.
+// Null when they cannot be read.
+async function callerProcessCwds(params: Record<string, unknown>): Promise<string[] | null> {
+  const callerPid = params.callerPid;
+  if (typeof callerPid !== "number" || !Number.isSafeInteger(callerPid)) return null;
+  const chain =
+    (await processChain(callerPid, CALLER_PROCESS_LIST_MAX_AGE_MS).catch(() => null)) ??
+    (await processChain(callerPid).catch(() => null));
+  if (!chain) return null;
+  const pids = callerProcessesToInspect(chain, {
+    isPaneShell: (pid) => pty.sessionForProcessChain([pid]) !== null,
+    appPid: process.pid,
+  });
+  const cwds = await processCwds(pids).catch(() => null);
+  return cwds ? [...cwds.values()] : null;
+}
+
 // Create a new terminal tab on the user's behalf. Tab/pane state is owned by
 // the renderer, so we round-trip through the terminal-bridge; the renderer
 // mints an agent-tinted, UNFOCUSED tab and returns the tabId + paneId (the PTY
@@ -1501,13 +1521,13 @@ async function handleTerminalCreate(
       const refusal = crossWorkspaceRefusal({
         authKind,
         untrustedRun: run !== null && runProjectPolicyMode(run) === "untrusted-pull-request",
-        untrustedCaller:
-          caller !== null &&
-          (await callerInImportedPullRequest({
-            caller,
-            callerCwd: callerPaneId ? pty.sessionCwd(callerPaneId) : null,
-            workspaces: state.workspaces,
-          })),
+        callerTrust: caller
+          ? await callerPullRequestTrust({
+              caller,
+              processCwds: await callerProcessCwds(params),
+              workspaces: state.workspaces,
+            })
+          : undefined,
         caller,
         target,
       });
