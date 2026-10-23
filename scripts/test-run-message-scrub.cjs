@@ -242,6 +242,29 @@ async function main() {
   check("the model's question was kept, with the key it repeated replaced", files.includes("Which account should the deploy with [redacted] use?"));
   check("run.json is still valid JSON", Boolean(readRun().id));
 
+  // The scrubber takes an ordinary word for a key ("token: codara-studio2"
+  // is a folder name). What is remembered from it stays in the run it was
+  // typed in, and even there never rewrites the run's folder.
+  const folder = path.join(HOME, "Documents", "codara-studio2");
+  for (const id of ["run-typed", "run-other"]) {
+    fs.mkdirSync(path.join(HOME, "runs", id), { recursive: true });
+    fs.writeFileSync(path.join(HOME, "runs", id, "run.json"), JSON.stringify({ ...pausedRun(id), cwd: folder }, null, 2));
+  }
+  const readOf = (id) => JSON.parse(fs.readFileSync(path.join(HOME, "runs", id, "run.json"), "utf8"));
+  const before = prompts.length;
+  await runStore.addRunMessage({ runId: "run-typed", author: "user", kind: "note", message: "token: codara-studio2" });
+  await waitFor(() => prompts.length > before && Boolean(readOf("run-typed").blockedOn));
+  check("the typed run's folder is not rewritten", readOf("run-typed").cwd === folder, readOf("run-typed").cwd);
+  await runStore.addRunMessage({ runId: "run-other", author: "user", kind: "note", message: "open codara-studio2 please" });
+  await waitFor(() => Boolean(readOf("run-other").blockedOn));
+  const other = readOf("run-other");
+  check("another run's folder is not rewritten", other.cwd === folder, other.cwd);
+  check(
+    "another run's text is not rewritten",
+    other.humanMessages.some((message) => message.message === "open codara-studio2 please"),
+    JSON.stringify(other.humanMessages.map((message) => message.message)),
+  );
+
   // The first message of a new chat names it and, on the direct lane, is the
   // worker's task: both come from the scrubbed text. The stubbed worker
   // launch may refuse; only what reached disk matters here.
@@ -254,7 +277,7 @@ async function main() {
       initialUserNote: `rotate ${KEY} now`,
     })
     .catch(() => null);
-  const newRuns = fs.readdirSync(path.join(HOME, "runs")).filter((id) => id !== runId);
+  const newRuns = fs.readdirSync(path.join(HOME, "runs")).filter((id) => ![runId, "run-typed", "run-other"].includes(id));
   check("the new chat was created", newRuns.length === 1, newRuns.join(","));
   const newFiles = newRuns.map(runFiles).join("\n");
   check("the new chat's files never hold the key", newFiles.length > 0 && !newFiles.includes(KEY));

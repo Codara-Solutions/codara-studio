@@ -211,25 +211,63 @@ async function pastedSecrets() {
   assert.ok(pasted.livePastedText("run-t", "x [redacted]", 1_000 + 60_000), "kept for the turn");
   assert.equal(pasted.livePastedText("run-t", "x [redacted]", 1_000 + 2 * 60 * 60 * 1000), undefined, "dropped after an hour");
 
-  // The model repeating the key, in text and in serialized JSON.
-  assert.equal(pasted.redactPastedSecrets(`stored ${key} as OPENAI_KEY`), "stored [redacted] as OPENAI_KEY");
+  // The model repeating the key, in text and in the values of JSON it
+  // writes, in the run the key was pasted into.
+  assert.equal(pasted.redactPastedSecrets("run-a", `stored ${key} as OPENAI_KEY`), "stored [redacted] as OPENAI_KEY");
   const tricky = 'password: Tr0ub"4dor\\3x';
   pasted.scrubPastedText(tricky, "run-a");
-  const json = JSON.stringify({ text: `echo ${key} and Tr0ub"4dor\\3x` });
-  assert.deepEqual(JSON.parse(pasted.redactPastedSecrets(json, { json: true })), { text: "echo [redacted] and [redacted]" }, "still valid JSON");
-  assert.deepEqual(pasted.redactPastedSecretsIn({ a: [key] }), { a: ["[redacted]"] });
+  const value = { text: `echo ${key} and Tr0ub"4dor\\3x` };
+  assert.deepEqual(JSON.parse(JSON.stringify(pasted.redactPastedSecretsIn("run-a", value))), { text: "echo [redacted] and [redacted]" });
+  assert.deepEqual(pasted.redactPastedSecretsIn("run-a", { a: [key] }), { a: ["[redacted]"] });
+  assert.equal(pasted.redactPastedSecretsIn("run-a", value.text), "echo [redacted] and [redacted]");
+  const untouched = { a: ["nothing"] };
+  assert.equal(pasted.redactPastedSecretsIn("run-a", untouched), untouched, "the same value when nothing changed");
+  // The first message's keys go to the run that claims it.
+  assert.equal(pasted.redactPastedSecrets("run-new", `again ${key}`), "again [redacted]");
 
-  // Numbers and short values are not remembered as keys, and nothing outside
-  // a JSON string is ever touched.
+  // Numbers and short values are not remembered as keys.
   assert.equal(pasted.scrubPastedText("set max token: 128000 and date: 2026-10-23", "run-a"), "set max token: 128000 and date: 2026-10-23");
   pasted.scrubPastedText("pwd: ab12cd", "run-a");
-  const settings = JSON.stringify({ contextWindow: 128000, at: "2026-10-23", note: "ab12cd stays" });
-  assert.equal(pasted.redactPastedSecrets(settings, { json: true }), settings);
+  const settings = { contextWindow: 128000, at: "2026-10-23", note: "ab12cd stays" };
+  assert.equal(pasted.redactPastedSecretsIn("run-a", settings), settings);
+}
+
+// The scrubber can take an ordinary word for a key: "token: codara-studio2"
+// is the user's folder name. Remembering it must not rewrite another run, a
+// JSON key, or a folder or id field of the run it was typed in.
+async function pastedSecretsStayInTheirRun() {
+  const pasted = await loadPasted();
+  assert.equal(pasted.scrubPastedText("token: codara-studio2", "run-typed"), "token: [redacted]");
+  const otherRun = {
+    id: "run-other",
+    cwd: "/home/u/Documents/codara-studio2",
+    files: { "codara-studio2": { note: "codara-studio2 builds" } },
+    messages: [{ message: "open codara-studio2" }],
+  };
+  assert.equal(pasted.redactPastedSecretsIn("run-other", otherRun), otherRun, "another run is never rewritten");
+  assert.equal(pasted.redactPastedSecrets("run-other", "cd codara-studio2"), "cd codara-studio2");
+  assert.equal(pasted.redactPastedSecretsIn(undefined, otherRun), otherRun);
+
+  const ownRun = {
+    id: "run-typed",
+    cwd: "/home/u/Documents/codara-studio2",
+    workspaceId: "codara-studio2",
+    worktreePath: "/w/codara-studio2",
+    meta: { "codara-studio2": 1 },
+    messages: [{ message: "the model said codara-studio2", createdAt: "codara-studio2" }],
+  };
+  const written = pasted.redactPastedSecretsIn("run-typed", ownRun);
+  assert.equal(written.cwd, ownRun.cwd, "cwd stays");
+  assert.equal(written.workspaceId, ownRun.workspaceId, "ids stay");
+  assert.equal(written.worktreePath, ownRun.worktreePath, "paths stay");
+  assert.deepEqual(Object.keys(written.meta), ["codara-studio2"], "JSON keys stay");
+  assert.equal(written.messages[0].message, "the model said [redacted]", "text the run writes is redacted");
+  assert.equal(written.messages[0].createdAt, "codara-studio2", "times stay");
 }
 
 (async () => {
   memory = await load();
-  const suites = { replacesCredentials, catchesEnvAndBearer, fewerFalsePositives, leavesProseAlone, idempotent, listsWhatItReplaced, pastedSecrets };
+  const suites = { replacesCredentials, catchesEnvAndBearer, fewerFalsePositives, leavesProseAlone, idempotent, listsWhatItReplaced, pastedSecrets, pastedSecretsStayInTheirRun };
   let failed = 0;
   for (const [name, run] of Object.entries(suites)) {
     try {

@@ -9,9 +9,12 @@
 // scrubbed text that was stored, and goes once that prompt is accepted (or
 // after an hour). A new chat's first message is scrubbed before its run
 // exists; the run claims it when the message is stored.
-// The keys themselves stay known for the life of the process, so whatever a
-// run writes later has them replaced as well: the model repeating a key, or
-// a worker task it wrote with one.
+// The keys themselves stay known to that run for the life of the process, so
+// whatever it writes later has them replaced as well: the model repeating a
+// key, or a worker task it wrote with one. Only that run's writes, and only
+// text values in them: the scrubber can take an ordinary word for a key
+// ("token: codara-studio2"), and that word must not rewrite another chat, a
+// JSON key or a folder name.
 //
 // No Electron import, so the unit suite bundles it directly.
 
@@ -19,7 +22,8 @@ import { SECRET_REDACTED, scrubSecrets, secretsIn } from "@shared/memory-items";
 
 const LIVE_TTL_MS = 60 * 60 * 1000;
 const LIVE_MAX = 200;
-const KNOWN_MAX = 500;
+const KNOWN_MAX = 50;
+const KNOWN_RUNS_MAX = 200;
 
 // Shorter pieces, or ones without a letter ("128000" after "max token:",
 // a date), are left to the scrubber alone: replacing them everywhere a run
@@ -30,12 +34,28 @@ interface LiveText {
   runId: string;
   scrubbed: string;
   raw: string;
+  /** The keys in it, for the run that claims a first message. */
+  secrets: string[];
   at: number;
 }
 
 // `${runId}\n${scrubbed}`; an empty run id is a first message not yet claimed.
 const live = new Map<string, LiveText>();
-const known = new Set<string>();
+const known = new Map<string, Set<string>>();
+
+function remember(runId: string, secrets: readonly string[]): void {
+  if (!runId || !secrets.length) return;
+  let keys = known.get(runId);
+  if (!keys) {
+    if (known.size >= KNOWN_RUNS_MAX) known.delete(known.keys().next().value!);
+    keys = new Set();
+    known.set(runId, keys);
+  }
+  for (const secret of secrets) {
+    if (keys.size >= KNOWN_MAX) keys.delete(keys.values().next().value!);
+    keys.add(secret);
+  }
+}
 
 const keyOf = (runId: string, scrubbed: string) => `${runId}\n${scrubbed.trim()}`;
 
@@ -59,15 +79,13 @@ export function scrubPastedText(raw: string, runId = "", now = Date.now()): stri
     if (unclaimed) {
       live.delete(keyOf("", raw));
       live.set(keyOf(runId, raw), { ...unclaimed, runId });
+      remember(runId, unclaimed.secrets);
     }
     return raw;
   }
-  live.set(keyOf(runId, scrubbed), { runId, scrubbed: scrubbed.trim(), raw: raw.trim(), at: now });
-  for (const secret of secretsIn(raw)) {
-    if (secret.length < KNOWN_MIN || !/[A-Za-z]/.test(secret)) continue;
-    if (known.size >= KNOWN_MAX) known.delete(known.values().next().value!);
-    known.add(secret);
-  }
+  const secrets = secretsIn(raw).filter((secret) => secret.length >= KNOWN_MIN && /[A-Za-z]/.test(secret));
+  live.set(keyOf(runId, scrubbed), { runId, scrubbed: scrubbed.trim(), raw: raw.trim(), secrets, at: now });
+  remember(runId, secrets);
   return scrubbed;
 }
 
@@ -107,32 +125,47 @@ export function withPastedText(runId: string, prompt: string, now = Date.now()):
   return { prompt: out, used };
 }
 
-function replaceKnown(text: string, form: (secret: string) => string): string {
+function replaceKnown(text: string, keys: ReadonlySet<string>): string {
   let out = text;
-  for (const secret of known) {
-    const needle = form(secret);
-    if (out.includes(needle)) out = out.split(needle).join(SECRET_REDACTED);
+  for (const secret of keys) {
+    if (out.includes(secret)) out = out.split(secret).join(SECRET_REDACTED);
   }
   return out;
 }
 
-/**
- * `text` with every key a person pasted in this process replaced, for
- * anything about to be written to disk. With `json`, the text is serialized
- * JSON: keys are matched as JSON escapes them and only inside string values,
- * so the result is always valid JSON.
- */
-export function redactPastedSecrets(text: string, options: { json?: boolean } = {}): string {
-  if (!known.size) return text;
-  if (!options.json) return replaceKnown(text, (secret) => secret);
-  return text.replace(/"(?:[^"\\]|\\.)*"/g, (literal) => replaceKnown(literal, (secret) => JSON.stringify(secret).slice(1, -1)));
+/** `text` with every key a person pasted into `runId` replaced, for that run's text about to be written to disk. */
+export function redactPastedSecrets(runId: string | null | undefined, text: string): string {
+  const keys = runId ? known.get(runId) : undefined;
+  return keys ? replaceKnown(text, keys) : text;
 }
 
-/** A JSON-shaped value with the pasted keys replaced; the same value when there are none. */
-export function redactPastedSecretsIn<T>(value: T): T {
-  if (!known.size) return value;
-  const json = JSON.stringify(value);
-  if (json === undefined) return value;
-  const redacted = redactPastedSecrets(json, { json: true });
-  return redacted === json ? value : (JSON.parse(redacted) as T);
+// Fields that name things rather than say them: ids, folders, files, times.
+const STRUCTURAL_KEY = /^(?:id|ids|cwd|path|paths|dir|dirs|file|files|at)$|(?:Id|Ids|Cwd|Path|Paths|Dir|Dirs|File|Files|At)$/;
+
+/**
+ * A JSON-shaped value `runId` writes, with the keys pasted into that run
+ * replaced in its text values; object keys and structural fields (ids,
+ * cwd, paths, times) are left alone. The same value when nothing changed.
+ */
+export function redactPastedSecretsIn<T>(runId: string | null | undefined, value: T): T {
+  const keys = runId ? known.get(runId) : undefined;
+  if (!keys) return value;
+  const walk = (node: unknown): unknown => {
+    if (typeof node === "string") return replaceKnown(node, keys);
+    if (Array.isArray(node)) {
+      const items = node.map(walk);
+      return items.some((item, index) => item !== node[index]) ? items : node;
+    }
+    if (!node || typeof node !== "object") return node;
+    const proto = Object.getPrototypeOf(node);
+    if (proto !== Object.prototype && proto !== null) return node;
+    let changed = false;
+    const out: Record<string, unknown> = {};
+    for (const [field, item] of Object.entries(node)) {
+      out[field] = STRUCTURAL_KEY.test(field) ? item : walk(item);
+      changed ||= out[field] !== item;
+    }
+    return changed ? out : node;
+  };
+  return walk(value) as T;
 }

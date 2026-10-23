@@ -728,21 +728,24 @@ const appendEvent = (
   ...[input, ...rest]: Parameters<typeof appendEventRaw>
 ): ReturnType<typeof appendEventRaw> => {
   assertManagerDecisionMutationCurrent(input.runId);
-  return appendEventRaw(redactPastedSecretsIn(input), ...rest);
+  return appendEventRaw(redactPastedSecretsIn(input.runId, input), ...rest);
 };
 
 const appendEvents = (
   ...[inputs, ...rest]: Parameters<typeof appendEventsRaw>
 ): ReturnType<typeof appendEventsRaw> => {
   for (const input of inputs) assertManagerDecisionMutationCurrent(input.runId);
-  return appendEventsRaw(redactPastedSecretsIn(inputs), ...rest);
+  return appendEventsRaw(
+    inputs.map((input) => redactPastedSecretsIn(input.runId, input)),
+    ...rest,
+  );
 };
 
 const appendBufferedEvent = (
   ...[input, ...rest]: Parameters<typeof appendBufferedEventRaw>
 ): ReturnType<typeof appendBufferedEventRaw> => {
   assertManagerDecisionMutationCurrent(input.runId);
-  return appendBufferedEventRaw(redactPastedSecretsIn(input), ...rest);
+  return appendBufferedEventRaw(redactPastedSecretsIn(input.runId, input), ...rest);
 };
 
 // One-shot per process: fired lazily from listRuns(). Keeps the runs/ dir
@@ -14743,8 +14746,8 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
   });
 
   await fs.mkdir(paths.attemptDir, { recursive: true });
-  await fs.writeFile(paths.taskJson, redactPastedSecrets(JSON.stringify(envelope, null, 2), { json: true }), "utf8");
-  await fs.writeFile(paths.promptMd, redactPastedSecrets(prompt), "utf8");
+  await fs.writeFile(paths.taskJson, JSON.stringify(redactPastedSecretsIn(run.id, envelope), null, 2), "utf8");
+  await fs.writeFile(paths.promptMd, redactPastedSecrets(run.id, prompt), "utf8");
 
   attempt.promptPath = paths.promptMd;
   attempt.finalReportPath = paths.finalReportJson;
@@ -18492,7 +18495,7 @@ async function writeRunFile(run: RunState): Promise<void> {
   // run.json is machine-read, never shown to a human, so persist it compact —
   // no pretty-print whitespace. Human-facing artifacts (spark-call request/
   // response files, final reports) stay pretty-printed elsewhere.
-  await fs.writeFile(tmp, redactPastedSecrets(JSON.stringify(run), { json: true }), "utf8");
+  await fs.writeFile(tmp, JSON.stringify(redactPastedSecretsIn(run.id, run)), "utf8");
   let lastError: unknown = null;
   for (let attempt = 0; attempt < 5; attempt += 1) {
     try {
