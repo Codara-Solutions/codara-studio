@@ -13,17 +13,19 @@
 // has them replaced as well: the model repeating a key, or a worker task it
 // wrote with one. They are kept across restarts in one 0600 file per run
 // beside the Pi sessions (setPastedKeyDir), which already hold the key;
-// never in the run's own folder, which stays scrubbed. Only that run's writes, and only
-// their message-text fields: the scrubber can take an ordinary word for a
-// key ("token: codara-studio2"), and that word must not rewrite another
-// chat, a JSON key, a folder, a branch or a command.
+// never in the run's own folder, which stays scrubbed. Only that run's
+// writes. A key that reads as one on its own (keyLike: "sk-proj-…", a random
+// mix of letters and digits) is replaced in every string the run writes: a
+// command, a tool's output, an error. A word the scrubber took for a key only
+// because of its label ("token: codara-studio2") is replaced in message-text
+// fields alone, so it cannot rewrite a folder, a branch or a command.
 //
 // No Electron import, so the unit suite bundles it directly.
 
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { SECRET_REDACTED, scrubSecrets, secretsIn } from "@shared/memory-items";
+import { SECRET_REDACTED, keyLike, scrubSecrets, secretsIn } from "@shared/memory-items";
 
 const LIVE_TTL_MS = 60 * 60 * 1000;
 const LIVE_MAX = 200;
@@ -46,7 +48,12 @@ interface LiveText {
 
 // `${runId}\n${scrubbed}`; an empty run id is a first message not yet claimed.
 const live = new Map<string, LiveText>();
-const known = new Map<string, Set<string>>();
+interface RunKeys {
+  all: Set<string>;
+  /** The ones keyLike, replaced in every field. */
+  strong: Set<string>;
+}
+const known = new Map<string, RunKeys>();
 // Runs whose key file was read this process (or that have none).
 const loaded = new Set<string>();
 let keyDir: (() => string) | null = null;
@@ -63,7 +70,7 @@ function keyFile(runId: string): string | null {
   return keyDir && RUN_FILE_NAME.test(runId) ? join(keyDir(), `${runId}.json`) : null;
 }
 
-function keysOf(runId: string): Set<string> | undefined {
+function keysOf(runId: string): RunKeys | undefined {
   if (known.has(runId) || loaded.has(runId)) return known.get(runId);
   loaded.add(runId);
   const file = keyFile(runId);
@@ -78,13 +85,13 @@ function keysOf(runId: string): Set<string> | undefined {
   return known.get(runId);
 }
 
-function persist(runId: string, keys: ReadonlySet<string>): void {
+function persist(runId: string, keys: RunKeys): void {
   const file = keyFile(runId);
   if (!file) return;
   try {
     mkdirSync(join(file, ".."), { recursive: true, mode: 0o700 });
     const temp = `${file}.${process.pid}.tmp`;
-    writeFileSync(temp, JSON.stringify([...keys]), { mode: 0o600 });
+    writeFileSync(temp, JSON.stringify([...keys.all]), { mode: 0o600 });
     renameSync(temp, file);
   } catch {
     // Kept in memory for this process all the same.
@@ -100,12 +107,17 @@ function remember(runId: string, secrets: readonly string[], save = true): void 
       known.delete(oldest);
       loaded.delete(oldest);
     }
-    keys = new Set();
+    keys = { all: new Set(), strong: new Set() };
     known.set(runId, keys);
   }
   for (const secret of secrets) {
-    if (keys.size >= KNOWN_MAX) keys.delete(keys.values().next().value!);
-    keys.add(secret);
+    if (keys.all.size >= KNOWN_MAX) {
+      const oldest = keys.all.values().next().value!;
+      keys.all.delete(oldest);
+      keys.strong.delete(oldest);
+    }
+    keys.all.add(secret);
+    if (keyLike(secret)) keys.strong.add(secret);
   }
   if (save) persist(runId, keys);
 }
@@ -201,28 +213,29 @@ function replaceKnown(text: string, keys: ReadonlySet<string>): string {
 /** `text` with every key a person pasted into `runId` replaced, for that run's text about to be written to disk. */
 export function redactPastedSecrets(runId: string | null | undefined, text: string): string {
   const keys = runId ? keysOf(runId) : undefined;
-  return keys ? replaceKnown(text, keys) : text;
+  return keys ? replaceKnown(text, keys.all) : text;
 }
 
 // The fields that hold what someone said: user messages and answers, the
 // first message, prompt text, what the model wrote back (its summary, its
 // question and the reason a run stopped). Everything else
 // (branches, worktrees, URLs, commands, ids, folders, times) names things,
-// and a word the scrubber took for a key must not rename them.
+// and a word the scrubber took for a key only by its label must not rename
+// them; a key that reads as one on its own is replaced there too.
 const TEXT_FIELD =
   /^(?:message|messages|text|prompt|title|description|question|questionReason|answer|content|body|summary|goal|note|notes|reason|rationale|details|response|result|initialUserNote|delta)$/;
 
 /**
  * A JSON-shaped value `runId` writes, with the keys pasted into that run
- * replaced in its message-text fields only (TEXT_FIELD); object keys and
- * every other field are left alone. A bare string is text. The same value
- * when nothing changed.
+ * replaced: keyLike ones in every string, the others in message-text fields
+ * only (TEXT_FIELD). Object keys are left alone. A bare string is text. The
+ * same value when nothing changed.
  */
 export function redactPastedSecretsIn<T>(runId: string | null | undefined, value: T): T {
   const keys = runId ? keysOf(runId) : undefined;
   if (!keys) return value;
   const walk = (node: unknown, text: boolean): unknown => {
-    if (typeof node === "string") return text ? replaceKnown(node, keys) : node;
+    if (typeof node === "string") return replaceKnown(node, text ? keys.all : keys.strong);
     if (Array.isArray(node)) {
       const items = node.map((item) => walk(item, text));
       return items.some((item, index) => item !== node[index]) ? items : node;

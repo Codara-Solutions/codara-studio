@@ -671,6 +671,21 @@ export function secretsIn(text: string): string[] {
   return [...new Set(found)];
 }
 
+// Shorter than this, a random-looking run ("ab12cd") is too common to call a
+// key without its label.
+const KEY_LIKE_MIN = 12;
+
+/**
+ * Whether a piece secretsIn found reads as a key with nothing around it: the
+ * scrubber still replaces it alone, or it is a random mix of letters and
+ * digits. "codara-studio2" after "token:" was a credential only because of
+ * its label.
+ */
+export function keyLike(secret: string): boolean {
+  if (scrub(secret) !== secret) return true;
+  return secret.length >= KEY_LIKE_MIN && /[A-Za-z]/.test(secret) && /\d/.test(secret) && looksRandom(secret);
+}
+
 // ── ranking ─────────────────────────────────────────────────────────────────
 
 const DAY_MS = 24 * 60 * 60 * 1000;

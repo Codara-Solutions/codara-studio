@@ -317,6 +317,44 @@ async function pastedSecretsStayInTheirRun() {
   assert.equal(taskWritten.payload.text, "listed [redacted]");
 }
 
+// Two tiers in the run a key was pasted into: a key that reads as one on its
+// own is replaced in every string the run writes (a tool's command, output,
+// stdout, an error, the final report), a word that was a key only by its
+// label ("token: codara-studio2") in message-text fields alone.
+async function realKeysLeaveNoFieldRaw() {
+  const pasted = await loadPasted();
+  const key = ["sk", "proj", "Hm4Wq8Zt2Xc6Vb1Nk9Rd3Lf7Gj5Pa0Ys"].join("-");
+  const envKey = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+  const hex = "9f86d081884c7d659a2feaa0c55ad015";
+  assert.equal(pasted.scrubPastedText(`use ${key}, AWS_SECRET_ACCESS_KEY=${envKey} and Bearer ${hex}`, "run-keys"), "use [redacted], AWS_SECRET_ACCESS_KEY=[redacted] and Bearer [redacted]");
+  assert.equal(pasted.scrubPastedText("token: codara-studio2", "run-keys"), "token: [redacted]");
+
+  const event = {
+    runId: "run-keys",
+    type: "tool.finished",
+    output: `stored ${key}`,
+    stdout: `export KEY=${key}\n`,
+    error: `401 for Bearer ${hex}`,
+    command: `secret-put OPENAI_KEY ${key} && cd codara-studio2`,
+    branch: "codara-studio2",
+    finalReport: { changes: [`added ${envKey} to .env`], text: "built codara-studio2" },
+    runtimeActivity: [{ label: `curl -H "Authorization: Bearer ${hex}"`, cwd: "/w/codara-studio2" }],
+  };
+  const written = JSON.stringify(pasted.redactPastedSecretsIn("run-keys", event));
+  for (const secret of [key, envKey, hex]) assert.ok(!written.includes(secret), `${secret} written raw: ${written}`);
+  const back = JSON.parse(written);
+  assert.equal(back.output, "stored [redacted]");
+  assert.equal(back.stdout, "export KEY=[redacted]\n");
+  assert.equal(back.error, "401 for Bearer [redacted]");
+  assert.equal(back.command, "secret-put OPENAI_KEY [redacted] && cd codara-studio2", "the weak word stays in a command");
+  assert.equal(back.branch, "codara-studio2");
+  assert.deepEqual(back.finalReport, { changes: ["added [redacted] to .env"], text: "built [redacted]" });
+  assert.deepEqual(back.runtimeActivity, [{ label: 'curl -H "Authorization: Bearer [redacted]"', cwd: "/w/codara-studio2" }]);
+  assert.equal(pasted.redactPastedSecretsIn("run-elsewhere", event), event, "another run is never rewritten");
+  for (const secret of [key, envKey, hex]) assert.ok(memory.keyLike(secret), `${secret} reads as a key alone`);
+  for (const word of ["codara-studio2", "hunter2hunter2"]) assert.ok(!memory.keyLike(word), `${word} is a key only by its label`);
+}
+
 // After a restart the run still knows the keys pasted into it: the model
 // repeating one then is redacted too. The list lives in a 0600 file outside
 // the run's folder, and goes with the run.
@@ -333,6 +371,7 @@ async function pastedKeysOutliveARestart() {
     const after = await loadPasted();
     after.setPastedKeyDir?.(() => keys);
     assert.deepEqual(after.redactPastedSecretsIn("run-restart", { message: `I saw ${key}` }), { message: "I saw [redacted]" }, "the model repeating it after a restart");
+    assert.deepEqual(after.redactPastedSecretsIn("run-restart", { command: `echo ${key}` }), { command: "echo [redacted]" }, "in every field after a restart too");
     assert.equal(after.redactPastedSecrets("run-restart", `again ${key}`), "again [redacted]");
     assert.equal(after.redactPastedSecrets("run-other", `again ${key}`), `again ${key}`, "only in its own run");
 
@@ -350,7 +389,7 @@ async function pastedKeysOutliveARestart() {
 
 (async () => {
   memory = await load();
-  const suites = { replacesCredentials, catchesEnvAndBearer, pathsKeepTheirFolders, fewerFalsePositives, leavesProseAlone, idempotent, listsWhatItReplaced, pastedSecrets, pastedSecretsStayInTheirRun, pastedKeysOutliveARestart };
+  const suites = { replacesCredentials, catchesEnvAndBearer, pathsKeepTheirFolders, fewerFalsePositives, leavesProseAlone, idempotent, listsWhatItReplaced, pastedSecrets, pastedSecretsStayInTheirRun, realKeysLeaveNoFieldRaw, pastedKeysOutliveARestart };
   let failed = 0;
   for (const [name, run] of Object.entries(suites)) {
     try {
