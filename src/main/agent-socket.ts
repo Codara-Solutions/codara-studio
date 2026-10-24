@@ -28,6 +28,7 @@ import {
   type PaneIo,
 } from "./agent-terminal-io";
 import { terminalAgentStateSnapshot, terminalAgentTurnsSignaled, terminalPanePlacement } from "./terminal-agent-notify";
+import { paneAgentRuntime } from "./pane-agent-runtime";
 import {
   AgentTerminalOwnershipError,
   type AgentTerminalRegistration,
@@ -1912,6 +1913,7 @@ const PREVIEW_TOOL_HOST: PreviewToolHost = {
   // Only an exited agent loses nothing when its pane closes.
   agentRunningIn: (paneId) =>
     terminalAgentStateSnapshot().some((entry) => entry.paneId === paneId && entry.state !== "done" && entry.state !== "error"),
+  paneRuntime: paneAgentRuntime,
 };
 
 async function handlePreviewToolRpc(

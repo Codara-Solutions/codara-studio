@@ -18,6 +18,8 @@ export interface PreviewToolHost {
   ownsTerminalPane?(paneId: string, params: Record<string, unknown>): Promise<boolean>;
   /** Whether an agent CLI still holds a session in this pane, idle at its prompt included. */
   agentRunningIn?(paneId: string): boolean;
+  /** The agent CLI running in a terminal pane (claude, codex, ...), for the tab's driving banner. */
+  paneRuntime?(paneId: string): string | null;
 }
 
 export type PreviewToolHandler = (params: Record<string, unknown>, method: string, host: PreviewToolHost) => Promise<unknown>;

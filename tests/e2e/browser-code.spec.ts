@@ -6,7 +6,7 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-// codara_preview_code in the built app, through the stdio MCP server as any
+// codara_browser_use in the built app, through the stdio MCP server as any
 // agent runs it, on four realistic flows served locally: sign in to an app,
 // fill and submit a form, read a long table, compose a webmail draft. Each
 // flow also runs with the single tools and with codara_preview_run, the way
@@ -205,7 +205,7 @@ function startMcp(home: string) {
 
 const json = (text: string) => JSON.parse(text);
 
-test("codara_preview_code drives four real flows in fewer calls than the single tools", async () => {
+test("codara_browser_use drives four real flows in fewer calls than the single tools", async () => {
   test.setTimeout(300_000);
   const root = await mkdtemp(join(tmpdir(), "codara-browser-code-"));
   const home = join(root, "home");
@@ -243,14 +243,16 @@ test("codara_preview_code drives four real flows in fewer calls than the single 
     mcp = startMcp(home);
     await mcp.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "any-agent", version: "1" } });
     const { tools } = await mcp.request("tools/list");
-    const codeTool = tools.find((tool: { name: string }) => tool.name === "codara_preview_code");
+    const codeTool = tools.find((tool: { name: string }) => tool.name === "codara_browser_use");
     expect(codeTool.description).toContain("browser.documentation()");
-    expect(tools.some((tool: { name: string }) => tool.name === "codara_preview_locate")).toBe(false);
+    for (const hidden of ["codara_preview_locate", "codara_preview_cdp", "codara_preview_cdp_events"]) {
+      expect(tools.some((tool: { name: string }) => tool.name === hidden)).toBe(false);
+    }
 
     // The sandbox, end to end: no Node, and a syntax error is an error result.
-    const sandbox = await mcp.call("codara_preview_code", { code: "[typeof require, typeof process, typeof fetch].join(',')" });
+    const sandbox = await mcp.call("codara_browser_use", { code: "[typeof require, typeof process, typeof fetch].join(',')" });
     expect(sandbox.text).toBe("undefined,undefined,undefined");
-    const broken = await mcp.call("codara_preview_code", { code: "const = 1" });
+    const broken = await mcp.call("codara_browser_use", { code: "const = 1" });
     expect(broken.isError).toBe(true);
     expect(broken.text).toMatch(/^Error: SyntaxError/);
     mcp.take();
@@ -281,13 +283,13 @@ test("codara_preview_code drives four real flows in fewer calls than the single 
     record("Sign in to a local app", "codara_preview_run");
 
     // The first code call also reads the documentation, once per session.
-    const first = await mcp.call("codara_preview_code", { code: `const docs = browser.documentation();
+    const first = await mcp.call("codara_browser_use", { code: `const docs = browser.documentation();
 const tab = browser.tab();
 await tab.goto(${JSON.stringify(fixture.url("/login"))});
 docs + "\\n\\n" + await tab.snapshot()` });
     expect(first.text).toContain("# Codara browser API");
     expect(first.text).toMatch(/textbox @\S+ "Email"/);
-    const login = await mcp.call("codara_preview_code", { code: `await tab.getByLabel("Email").fill("ana@acme.test");
+    const login = await mcp.call("codara_browser_use", { code: `await tab.getByLabel("Email").fill("ana@acme.test");
 await tab.getByLabel("Password").fill("correct horse");
 await tab.getByLabel("Keep me signed in").check();
 await tab.getByRole("button", { name: "Sign in" }).click();
@@ -298,7 +300,7 @@ await tab.snapshot()` });
     expect(login.text).toContain("Welcome back, Ana");
     expect(login.images).toHaveLength(1);
     await writeFile(join(OUT, "browser-code-login.jpg"), Buffer.from(login.images[0].data!, "base64"));
-    record("Sign in to a local app", "codara_preview_code");
+    record("Sign in to a local app", "codara_browser_use");
     expect(await pageValue("document.body.dataset.signedIn")).toBe("ana@acme.test");
 
     // ---- Flow 2: fill and submit a form, recovering from a validation error
@@ -338,8 +340,8 @@ await tab.snapshot()` });
     ] });
     record("Fill and submit a form", "codara_preview_run");
 
-    await mcp.call("codara_preview_code", { code: `await tab.goto(${JSON.stringify(fixture.url("/form"))}); await tab.snapshot()` });
-    const form = await mcp.call("codara_preview_code", { code: `await tab.getByLabel("Full name").fill(${JSON.stringify(expected.name)});
+    await mcp.call("codara_browser_use", { code: `await tab.goto(${JSON.stringify(fixture.url("/form"))}); await tab.snapshot()` });
+    const form = await mcp.call("codara_browser_use", { code: `await tab.getByLabel("Full name").fill(${JSON.stringify(expected.name)});
 await tab.getByLabel("Work email").fill(${JSON.stringify(expected.email)});
 await tab.getByLabel("Company").fill(${JSON.stringify(expected.company)});
 await tab.getByLabel("Country").selectOption({ label: "Spain" });
@@ -357,7 +359,7 @@ await tab.screenshot();
     expect(form.isError, form.text).toBe(false);
     expect(json(form.text)).toEqual({ problem: "Missing: terms", toast: "Customer saved: #1042" });
     await writeFile(join(OUT, "browser-code-form.jpg"), Buffer.from(form.images[0].data!, "base64"));
-    record("Fill and submit a form", "codara_preview_code");
+    record("Fill and submit a form", "codara_browser_use");
     expect(JSON.parse(await pageValue("document.body.dataset.saved"))).toEqual(expected);
 
     // ---- Flow 3: read a long table ----------------------------------------
@@ -377,14 +379,14 @@ await tab.screenshot();
     ] });
     record("Read a long table", "codara_preview_run");
 
-    const table = await mcp.call("codara_preview_code", { code: `await tab.goto(${JSON.stringify(fixture.url("/table"))});
+    const table = await mcp.call("codara_browser_use", { code: `await tab.goto(${JSON.stringify(fixture.url("/table"))});
 const header = await tab.locator("thead th").allTextContents();
 const cells = await tab.locator("tbody tr").evaluateAll((rows) => rows.map((row) => Array.from(row.cells, (cell) => cell.textContent)));
 const overdue = cells.filter((row) => row[3] === "overdue");
 ({ header, rows: cells.length, overdueCount: overdue.length, overdueTotal: overdue.reduce((sum, row) => sum + Number(row[2].replace(/[^0-9]/g, "")), 0) })` });
     expect(table.isError, table.text).toBe(false);
     expect(json(table.text)).toEqual({ header: ["Invoice", "Customer", "Amount", "Status"], rows: 240, overdueCount: OVERDUE_COUNT, overdueTotal: OVERDUE_TOTAL });
-    record("Read a long table", "codara_preview_code");
+    record("Read a long table", "codara_browser_use");
 
     // ---- Flow 4: compose an email draft in a webmail page -----------------
     const draft = { to: "ben@contoso.test", subject: "Invoice INV-2042", body: "Hi Ben, the invoice is attached. Thanks!" };
@@ -414,8 +416,8 @@ const overdue = cells.filter((row) => row[3] === "overdue");
     ] });
     record("Compose a webmail draft", "codara_preview_run");
 
-    await mcp.call("codara_preview_code", { code: `await tab.goto(${JSON.stringify(fixture.url("/mail"))}); await tab.snapshot()` });
-    const mail = await mcp.call("codara_preview_code", { code: `await tab.getByRole("button", { name: "New message" }).click();
+    await mcp.call("codara_browser_use", { code: `await tab.goto(${JSON.stringify(fixture.url("/mail"))}); await tab.snapshot()` });
+    const mail = await mcp.call("codara_browser_use", { code: `await tab.getByRole("button", { name: "New message" }).click();
 const composer = tab.getByRole("dialog", { name: "New message" });
 await composer.getByLabel("To").fill(${JSON.stringify(draft.to)});
 await composer.getByLabel("Subject").fill(${JSON.stringify(draft.subject)});
@@ -430,15 +432,40 @@ await tab.locator("#drafts li").allTextContents()` });
     expect(mail.images).toHaveLength(2);
     await writeFile(join(OUT, "browser-code-mail-compose.jpg"), Buffer.from(mail.images[0].data!, "base64"));
     await writeFile(join(OUT, "browser-code-mail-saved.jpg"), Buffer.from(mail.images[1].data!, "base64"));
-    record("Compose a webmail draft", "codara_preview_code");
+    record("Compose a webmail draft", "codara_browser_use");
     expect(JSON.parse(await pageValue("document.body.dataset.draft"))).toEqual(draft);
 
+    // DevTools access: protocol commands and events on the tab, refusals for
+    // anything past it, and the network recorder alive after Network.disable.
+    const devtools = await mcp.call("codara_browser_use", { code: `await tab.goto(${JSON.stringify(fixture.url("/login"))});
+const sub = await tab.cdp.on("Network.responseReceived");
+await tab.cdp.send("Network.disable");
+await tab.evaluate("fetch(location.href + '?probe=1')");
+const event = await sub.next({ filter: (params) => params.response.url.includes("probe=1"), timeout: 10000 });
+await sub.close();
+const doc = await tab.cdp.send("DOM.getDocument", { depth: 0 });
+const ax = await tab.cdp.send("Accessibility.getFullAXTree");
+const refused = [];
+for (const method of ["Browser.getVersion", "Target.getTargets", "Fetch.enable", "Storage.clearDataForOrigin", "Input.dispatchMouseEvent"]) {
+  refused.push(await tab.cdp.send(method).then(() => method + " sent", (error) => error.name));
+}
+const fileNav = await tab.cdp.send("Page.navigate", { url: "file:///etc/hostname" }).then(() => "navigated", (error) => error.message);
+const rows = await tab.network.list({ filter: "probe=1" });
+const detail = await tab.network.get(rows[0].id);
+({ status: event.params.response.status, root: doc.root.nodeName, axNodes: ax.nodes.length > 3, refused, fileNav, rows: rows.length, detailStatus: detail.status })` });
+    expect(devtools.isError, devtools.text).toBe(false);
+    const probe = json(devtools.text);
+    expect(probe).toMatchObject({ status: 200, root: "#document", axNodes: true, rows: 1, detailStatus: 200 });
+    expect(probe.refused).toEqual(["BrowserError", "BrowserError", "BrowserError", "BrowserError", "BrowserError"]);
+    expect(probe.fileNav).toMatch(/http and https pages only/);
+    expect(await pageValue("location.protocol")).toBe("http:");
+
     // Bindings persist, and another MCP process (a new agent session) starts clean.
-    const again = await mcp.call("codara_preview_code", { code: "typeof tab.goto" });
+    const again = await mcp.call("codara_browser_use", { code: "typeof tab.goto" });
     expect(again.text).toBe("function");
     const other = startMcp(home);
     await other.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "another-agent", version: "1" } });
-    expect((await other.call("codara_preview_code", { code: "typeof tab" })).text).toBe("undefined");
+    expect((await other.call("codara_browser_use", { code: "typeof tab" })).text).toBe("undefined");
     other.close();
 
     // Page model: the outline every tool reads against an accessibility-tree
@@ -488,7 +515,7 @@ await tab.locator("#drafts li").allTextContents()` });
     await writeFile(join(OUT, "browser-code-bench.md"), `${lines.join("\n")}\n`);
     console.log(lines.join("\n"));
     for (const ways of Object.values(bench)) {
-      expect(ways.codara_preview_code.calls).toBeLessThan(ways["single tools"].calls);
+      expect(ways.codara_browser_use.calls).toBeLessThan(ways["single tools"].calls);
     }
   } finally {
     mcp?.close();

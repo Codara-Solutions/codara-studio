@@ -16,6 +16,10 @@ function createHarness() {
     hostGates: [],
     deferredHosts: new Set(),
     statuses: [],
+    wakes: [],
+    freshKeyBudget: new Map(),
+    clearedFreshKeys: [],
+    hostOverrides: {},
     getHost(hostId) {
       const host = {
         id: hostId,
@@ -24,6 +28,7 @@ function createHarness() {
         port: 22,
         username: "codara",
         source: "manual",
+        ...this.hostOverrides[hostId],
       };
       if (!this.deferredHosts.has(hostId)) return Promise.resolve(host);
       return new Promise((resolve) => {
@@ -56,13 +61,19 @@ function stubPlugin() {
         }
         connect(config) {
           this.connectConfig = config;
+          globalThis.__codaraSshLifecycleHarness.onConnect?.(this);
         }
         end() {
           this.endCalls += 1;
+          // Like ssh2, ending the client ends its socket (a ProxyCommand's stdin).
+          this.connectConfig?.sock?.end?.();
           return this;
         }
         destroy() {
           this.destroyCalls += 1;
+          // Like ssh2, destroying the client destroys its socket, which for a
+          // ProxyCommand host kills the proxy process.
+          this.connectConfig?.sock?.destroy?.();
           return this;
         }
       }
@@ -75,6 +86,27 @@ function stubPlugin() {
     "./ssh-hosts": `
       export function getHost(hostId) {
         return globalThis.__codaraSshLifecycleHarness.getHost(hostId);
+      }
+    `,
+    "./codara-boxes": `
+      export async function wakeCodaraBox(boxId, opts) {
+        const harness = globalThis.__codaraSshLifecycleHarness;
+        harness.wakes.push(boxId);
+        opts.onPhase("Waking dev: starting the box");
+      }
+    `,
+    "./box-key-retry": `
+      export function nextFreshKeyDelayMs(hostId, attempt) {
+        const h = globalThis.__codaraSshLifecycleHarness;
+        const left = h.freshKeyBudget.get(hostId) ?? 0;
+        if (attempt >= left) return null;
+        return 1;
+      }
+      export function clearFreshBoxKey(hostId) {
+        globalThis.__codaraSshLifecycleHarness.clearedFreshKeys.push(hostId);
+      }
+      export function abortableDelay(ms) {
+        return new Promise((resolve) => setTimeout(resolve, ms));
       }
     `,
     "./secret-store": `
@@ -257,6 +289,104 @@ async function testNoUnhandledRejectionOrListenerLeak(api, harness) {
   }
 }
 
+async function testProxyHost(api, harness) {
+  const hostId = "codara-proxy-host";
+  harness.hostOverrides[hostId] = {
+    source: "codara-cloud",
+    proxyCommand: [process.execPath, "-e", "setInterval(() => {}, 1000)"],
+    hostKeyAlias: "codara-box.test",
+    codaraBoxId: "6f1c2d3e-0000-4000-8000-00000000abcd",
+  };
+  const statusesBefore = harness.statuses.length;
+  const connection = await api.getConnection(hostId);
+  const resultPromise = observe(connection.ensure());
+  await waitForClientCount(harness, 5);
+  const client = harness.clients[4];
+  assert.deepEqual(harness.wakes, ["6f1c2d3e-0000-4000-8000-00000000abcd"], "the box is woken first");
+  assert(
+    harness.statuses.slice(statusesBefore).some((s) => s.progress === "Waking dev: starting the box"),
+    "wake phases are reported as progress",
+  );
+  const sock = client.connectConfig.sock;
+  assert(sock, "a proxy host connects over the proxy's stdio");
+  assert.equal(client.connectConfig.readyTimeout, 120000);
+  const pid = sock.child.pid;
+  client.emit("ready");
+  assert.equal((await resultPromise).ok, true);
+  client.emit("close");
+  await new Promise((resolve) => sock.child.once("close", resolve));
+  assert.throws(() => process.kill(pid, 0), "closing the client must kill the proxy child");
+}
+
+async function testFreshKeyRetry(api, harness) {
+  const boxId = "6f1c2d3e-0000-4000-8000-00000000abcd";
+  const authError = () => new Error("All configured authentication methods failed");
+  const base = {
+    source: "codara-cloud",
+    proxyCommand: [process.execPath, "-e", "setInterval(() => {}, 1000)"],
+    hostKeyAlias: "codara-box.fresh",
+    codaraBoxId: boxId,
+  };
+  // One round is every auth method in turn (agent, then the stored password
+  // here); a round ends at the attempt that carries the password.
+  const run = async (hostId, { budget, acceptRound, error = authError }) => {
+    harness.hostOverrides[hostId] = base;
+    if (budget) harness.freshKeyBudget.set(hostId, budget);
+    const first = harness.clients.length;
+    let rounds = 0;
+    harness.onConnect = (client) => {
+      const endsRound = typeof client.connectConfig.password === "string";
+      if (endsRound) rounds += 1;
+      setImmediate(() => {
+        if (endsRound && rounds === acceptRound) client.emit("ready");
+        else client.emit("error", error());
+      });
+    };
+    const statusesBefore = harness.statuses.length;
+    try {
+      const result = await observe((await api.getConnection(hostId)).ensure());
+      return { result, rounds, clients: harness.clients.length - first, statusesBefore };
+    } finally {
+      harness.onConnect = null;
+    }
+  };
+
+  // A freshly added key: refused twice, then it reaches the box.
+  const fresh = await run("codara-fresh-key", { budget: 5, acceptRound: 3 });
+  assert.equal(fresh.result.ok, true);
+  assert.equal(fresh.rounds, 3);
+  assert(
+    harness.statuses.slice(fresh.statusesBefore).some((s) => /new SSH key/.test(s.progress ?? "")),
+    "the wait is reported as progress",
+  );
+  assert(harness.clearedFreshKeys.includes("codara-fresh-key"), "success clears the fresh-key state");
+  const freshClient = harness.clients[harness.clients.length - 1];
+  api.disconnectHost("codara-fresh-key");
+  // This proxy ignores the end of its input; dispose still closes it.
+  await new Promise((resolve) => setTimeout(resolve, 2_200));
+  assert(freshClient.destroyCalls >= 1, "a disposed client that stays open is force-closed");
+
+  // The window ends: the authentication failure is reported.
+  const spent = await run("codara-fresh-budget", { budget: 1, acceptRound: 99 });
+  assert.equal(spent.result.ok, false);
+  assert.match(spent.result.error.message, /authentication/i);
+  assert.equal(spent.rounds, 2, "one retry, then stop");
+
+  // No freshly added key: an authentication failure is final.
+  const plain = await run("codara-plain-key", { acceptRound: 99 });
+  assert.equal(plain.result.ok, false);
+  assert.equal(plain.rounds, 1, "an ordinary auth failure is not retried");
+
+  // A fresh key does not excuse other errors.
+  const net = await run("codara-fresh-network", {
+    budget: 5,
+    acceptRound: 99,
+    error: () => new Error("connect ECONNREFUSED"),
+  });
+  assert.equal(net.result.ok, false);
+  assert.equal(net.clients, 1, "a network error stops at the first attempt");
+}
+
 async function main() {
   const harness = createHarness();
   const api = await loadConnections(harness);
@@ -267,6 +397,8 @@ async function main() {
     await testNewerAttemptWins(api, harness);
     await testHostLookupCannotRecreateAfterDisconnect(api, harness);
     await testNoUnhandledRejectionOrListenerLeak(api, harness);
+    await testProxyHost(api, harness);
+    await testFreshKeyRetry(api, harness);
   } finally {
     api.disposeAllConnections();
     delete globalThis.__codaraSshLifecycleHarness;

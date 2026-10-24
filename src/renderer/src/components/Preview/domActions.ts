@@ -1,6 +1,23 @@
 import type { createPreviewDOM } from "@shared/preview-dom";
 
 // Stringified into the guest; the DOM factory is passed explicitly.
+
+/**
+ * Where an action is about to land, so the agent's cursor can get there
+ * first. One look, no waiting: when the element is not ready yet the cursor
+ * stays put and the action itself waits for it and reports why it failed.
+ */
+export async function locateProbe(opts: { selector: string }, createDOM: typeof createPreviewDOM) {
+  try {
+    const dom = createDOM();
+    const el = await dom.ready(opts.selector, 0);
+    const rect = el.getBoundingClientRect();
+    return { ...dom.point(el), box: { x: rect.left, y: rect.top, width: rect.width, height: rect.height } };
+  } catch {
+    return null;
+  }
+}
+
 export async function clickProbe(opts: { selector: string }, createDOM: typeof createPreviewDOM) {
   const dom = createDOM();
   const el = await dom.ready(opts.selector);

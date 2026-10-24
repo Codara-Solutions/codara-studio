@@ -116,7 +116,7 @@ const RUN = { SPARK_RUN_ID: "run-roster" };
 // studio and execute by 900 for codara_worktree_cleanup, about 850;
 // studio and execute by 2,700 for the four task list tools, about 2,650,
 // which let every agent in a workspace share one task list; studio by 100
-// for codara_preview_code, about 390, with the rest paid for by a shorter
+// for codara_browser_use, about 390, with the rest paid for by a shorter
 // codara_preview_run).
 const LIST_BUDGET = { studio: 34_200, run: 39_000, worker: 35_000, execute: 99_600, automation: 69_000 };
 const EXECUTE_TOOLS = [

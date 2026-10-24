@@ -48,7 +48,7 @@ module.exports = {
       annotations: { readOnly: true },
       step: { order: 70 },
       description:
-        "The page as a compact outline: @references (any tool's selector), labels, values, states, link targets. selector scopes it; since=<snapshotId> returns only the diff. Re-read after a stale reference.",
+        "Read the page: @references (any tool's selector), labels, values, states, link targets. selector scopes it; since=<snapshotId> returns only the diff. Re-read after a stale reference.",
       inputSchema: {
         type: "object",
         properties: {

@@ -12,11 +12,11 @@ module.exports = {
   budget: 400,
   tools: [
     {
-      name: "codara_preview_code",
-      rpc: "preview.code",
+      name: "codara_browser_use",
+      rpc: "browser.use",
       annotations: { destructive: true, openWorld: true },
       description:
-        "Run JavaScript on a Playwright-style browser API; one call runs a whole flow and bindings persist. Read browser.documentation() first.",
+        "Run JavaScript on a Playwright-style browser API (network and CDP too); one call runs whole flows, bindings persist. Read browser.documentation() first.",
       inputSchema: {
         type: "object",
         required: ["code"],
@@ -28,7 +28,10 @@ module.exports = {
         additionalProperties: false,
       },
     },
-    // The locator lookups codara_preview_code's snippets make.
+    // The locator lookups and DevTools protocol calls codara_browser_use's
+    // snippets make.
     { name: "codara_preview_locate", rpc: "preview.locate", hidden: true },
+    { name: "codara_preview_cdp", rpc: "preview.cdp", hidden: true },
+    { name: "codara_preview_cdp_events", rpc: "preview.cdp_events", hidden: true },
   ],
 };

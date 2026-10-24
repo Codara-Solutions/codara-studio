@@ -96,10 +96,10 @@ const ORCHESTRATION_TIMEOUT_MS =
 // terminal; the client deadline sits above both.
 const TERMINAL_RUN_MAX_WAIT_MS = 10 * 60_000;
 const TERMINAL_RUN_TIMEOUT_MS = TERMINAL_RUN_MAX_WAIT_MS + 60_000;
-// codara_preview_code runs a snippet for up to 110 s on the Codara side
+// codara_browser_use runs a snippet for up to 110 s on the Codara side
 // (CODE_MAX_TIMEOUT_MS in preview-tools/code.ts).
-const PREVIEW_CODE_TIMEOUT_MS = 120_000;
-// One id per server process: Codara keys a codara_preview_code session by it,
+const BROWSER_USE_TIMEOUT_MS = 120_000;
+// One id per server process: Codara keys a codara_browser_use session by it,
 // so a new agent session starts with fresh bindings and this process's exit
 // (the pid in front) ends the session.
 const CODE_SESSION = `${process.pid}:${crypto.randomBytes(12).toString("base64url")}`;
@@ -1986,7 +1986,7 @@ function buildInstructions() {
   ];
   if (listed.has("codara_preview_navigate")) {
     parts.push(
-      "Browser: for any multi-step flow prefer codara_preview_code, one call of JavaScript against a Playwright-style API (read browser.documentation() once). Single steps: open or reuse this session's tab with codara_preview_navigate, read it with codara_preview_snapshot, and act on its @references. Use the trusted input tools (mouse, key, scroll, hover, drag) when a page ignores synthetic events. Close the tabs you opened with codara_preview_close when you are done, unless the user needs them.",
+      "Browser: for any multi-step flow prefer codara_browser_use, one call of JavaScript against a Playwright-style API (read browser.documentation() once). Single steps: open or reuse this session's tab with codara_preview_navigate, read it with codara_preview_snapshot, and act on its @references. Use the trusted input tools (mouse, key, scroll, hover, drag) when a page ignores synthetic events. Close the tabs you opened with codara_preview_close when you are done, unless the user needs them.",
     );
     parts.push(...TOOL_REGISTRY.instructions);
     parts.push(
@@ -2082,7 +2082,7 @@ function isLongPollRpc(rpc) {
 const PROGRESS_RPCS = new Set([
   ...LONG_POLL_RPCS,
   "terminal.run",
-  "preview.code",
+  "browser.use",
   "automation.update",
   "automation.delete",
   "automation.set_enabled",
@@ -2096,7 +2096,7 @@ const PROGRESS_INTERVAL_MS = 10_000;
 function rpcTimeoutMs(rpc) {
   if (isOrchestrationRpc(rpc)) return ORCHESTRATION_TIMEOUT_MS;
   if (rpc === "terminal.run") return TERMINAL_RUN_TIMEOUT_MS;
-  if (rpc === "preview.code") return PREVIEW_CODE_TIMEOUT_MS;
+  if (rpc === "browser.use") return BROWSER_USE_TIMEOUT_MS;
   if (rpc === "worktree.create") return WORKTREE_CREATE_TIMEOUT_MS;
   if (rpc === "worktree.setup") return WORKTREE_SETUP_TIMEOUT_MS;
   if (rpc === "worktree.cleanup") return WORKTREE_CLEANUP_TIMEOUT_MS;
@@ -2129,9 +2129,14 @@ const CALLER_LOCATED_RPCS = new Set([
   "inbox.add",
   "tab.action",
 ]);
+// The browser code tool is scoped like the single browser tools it drives.
+function isBrowserRpc(rpc) {
+  return rpc.startsWith("preview.") || rpc === "browser.use";
+}
+
 function injectRunIdForStudioOwnership(rpc, args) {
   if (
-    !rpc.startsWith("preview.") &&
+    !isBrowserRpc(rpc) &&
     !rpc.startsWith("terminal.") &&
     !CALLER_LOCATED_RPCS.has(rpc)
   ) return;
@@ -2140,7 +2145,7 @@ function injectRunIdForStudioOwnership(rpc, args) {
   else delete args.runId;
   // The workspace is the caller's (its run, or the pane it runs in), never
   // one the tool JSON names.
-  if (rpc.startsWith("preview.") || CALLER_LOCATED_RPCS.has(rpc)) delete args.workspaceId;
+  if (isBrowserRpc(rpc) || CALLER_LOCATED_RPCS.has(rpc)) delete args.workspaceId;
   delete args.callerPaneId;
   delete args.callerPid;
   // Codara places a new terminal beside, and scopes the browser, the terminal
@@ -2148,12 +2153,12 @@ function injectRunIdForStudioOwnership(rpc, args) {
   // arrives when the CLI passed its environment through (Codex starts MCP
   // servers with a cleared one), so the pid lets Codara find the pane by
   // walking up the process tree instead. A run is scoped by its run id.
-  if (CALLER_LOCATED_RPCS.has(rpc) || (rpc.startsWith("preview.") && !envRunId)) {
+  if (CALLER_LOCATED_RPCS.has(rpc) || (isBrowserRpc(rpc) && !envRunId)) {
     const envPaneId = (process.env.SPARK_AGENT_PANE_ID || process.env.SPARK_PANE_ID || "").trim();
     if (envPaneId) args.callerPaneId = envPaneId;
     args.callerPid = process.pid;
   }
-  if (rpc === "preview.code") args.codeSession = CODE_SESSION;
+  if (rpc === "browser.use") args.codeSession = CODE_SESSION;
   else delete args.codeSession;
 }
 
@@ -2830,7 +2835,7 @@ function codeToolResult(value) {
 }
 
 function toToolResult(value, rpc = "") {
-  if (rpc === "preview.code" && value && typeof value === "object") return codeToolResult(value);
+  if (rpc === "browser.use" && value && typeof value === "object") return codeToolResult(value);
   // MCP tool result format: { content: [{type:'text', text}] } + optional isError.
   // A screenshot result includes a data URL we surface as an image content block.
   if (value && typeof value === "object" && typeof value.dataUrl === "string" && value.dataUrl.startsWith("data:image/")) {

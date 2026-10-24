@@ -13,7 +13,7 @@ module.exports = {
       name: "codara_preview_run",
       annotations: { destructive: true, openWorld: true },
       description:
-        "Run a fixed list of browser steps in ONE call; codara_preview_code also branches and loops. Steps fire the same input as their single tools and obey the task's tool restrictions. Stops at the first failure unless continueOnError.",
+        "Run a fixed list of browser steps in ONE call; codara_browser_use also branches and loops. Steps fire the same input as their single tools and obey the task's tool restrictions. Stops at the first failure unless continueOnError.",
       inputSchema: {
         type: "object",
         required: ["steps"],

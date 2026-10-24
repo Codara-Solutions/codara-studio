@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer, webFrame, webUtils } from "electron";
 import type {
+  CodaraBoxConnectInfoResult,
+  CodaraBoxesListResult,
   RemoteAuthPromptAnswer,
   RemoteAuthPromptRequest,
   RemoteBrowseResult,
@@ -1567,6 +1569,11 @@ const api = {
       ipcRenderer.invoke("remote:saveHost", host),
     deleteHost: (hostId: string): Promise<RemoteHostConfig[]> =>
       ipcRenderer.invoke("remote:deleteHost", hostId),
+    codaraBoxes: {
+      list: (): Promise<CodaraBoxesListResult> => ipcRenderer.invoke("remote:codara-boxes:list"),
+      connectInfo: (boxId: string): Promise<CodaraBoxConnectInfoResult> =>
+        ipcRenderer.invoke("remote:codara-boxes:connect-info", boxId),
+    },
     connect: (hostId: string): Promise<RemoteConnectionStatus> =>
       ipcRenderer.invoke("remote:connect", hostId),
     disconnect: (hostId: string): Promise<void> => ipcRenderer.invoke("remote:disconnect", hostId),

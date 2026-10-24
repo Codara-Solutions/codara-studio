@@ -164,7 +164,7 @@ workspace on screen.
 | `codara_preview_inspect` | Describes one element (an `@reference`, a unique selector, or `x`,`y` in viewport CSS pixels) for editing it: selector, role, name and text, box model, the computed styles that matter, the CSS rules that set them with their stylesheet, the DOM path, the component names and the source file and line, and a cropped image (also saved as a file, its `path` returned). |
 | `codara_preview_inbox` | Reads what the user queued for this agent from Codara (picked elements, page comments, screenshots): text, source tab and URL, and attached file paths. Read items are removed, except when a Cora run reads the workspace's items: those stay for the agent the user works with. |
 | `codara_preview_run` | Runs a fixed list of the steps above in one call. |
-| `codara_preview_code` | Runs JavaScript against a Playwright-style browser API in a persistent session, so one call can drive a whole flow, branch on what the page shows and return only what matters. See [Code mode](#code-mode). |
+| `codara_browser_use` | Runs JavaScript against a Playwright-style browser API in a persistent session, so one call can drive a whole flow, branch on what the page shows and return only what matters. Includes the tab's network log and DevTools protocol access. See [Code mode](#code-mode). |
 | `codara_preview_chrome` | The user's own browser through the Codara extension: `status` (connected browsers and their shared `chrome:` tabs), `open` a URL in a new tab (in a Chrome tab group with `group`), `close` a tab an agent opened or the user shared, `activate` a shared tab. |
 
 Every browser tool takes a `tabId`: a Codara tab's id as `codara_preview_list`
@@ -179,7 +179,7 @@ drives the tab) or from the tab's context menu.
 
 ### Code mode
 
-`codara_preview_code { code, timeoutMs?, reset? }` is the tool to reach for
+`codara_browser_use { code, timeoutMs?, reset? }` is the tool to reach for
 when a task takes more than one or two browser actions. The agent writes a
 few lines of JavaScript instead of one tool call per click:
 
@@ -202,13 +202,30 @@ return await tab.snapshot({ diff: true });
   one, or `chrome:<id>`), `browser.tabs()`, `browser.chrome.open/status`,
   `browser.call(tool, args)` for any other browser tool; on a tab `goto`,
   `snapshot`, `screenshot`, `evaluate`, `find`, `waitFor`, `keyboard`,
-  `mouse`, `console`, `network`, `dialog`, and locators (`locator(css)`,
+  `mouse`, `console`, `dialog`, and locators (`locator(css)`,
   `getByRole`, `getByText`, `getByLabel`, `getByPlaceholder`,
   `getByTestId`, `getByAltText`, `getByTitle`, `ref(@ref)`) with `click`,
   `fill`, `type`, `press`, `hover`, `check`, `selectOption`, `waitFor`,
   `count`, `nth`, `filter`, `textContent`, `inputValue`, `isVisible` and the
   rest of the usual Playwright reads. Locators are strict: an action on one
   that matches several elements fails and names them.
+- `tab.network` reads the tab's requests: `list({ filter, type, status,
+  failed })`, `get(id)` for headers, timings, initiator and bodies,
+  `waitForResponse(urlPart | /re/)`, `har()` and `clear()`.
+- `tab.cdp` speaks the DevTools protocol to the tab: `send(method, params)`,
+  `on(events)` for a subscription read with `next({ filter, timeout })` or
+  `take()` from a buffer of the latest 500 events, and
+  `waitForEvent(name)`. An allowlist keeps it on the tab: Network, Page
+  (http and https navigation, resources, layout, screenshots), Runtime, DOM,
+  CSS, Accessibility, Overlay, Performance, Emulation, Log and a read-only
+  Debugger that never pauses the page. Browser, Target, SystemInfo, IO,
+  Storage, Input, Security, profile-wide cookies and cache, downloads, file
+  inputs and request interception (Fetch) are refused with the reason.
+  `Domain.enable` and `Domain.disable` are counted per caller, so Codara's
+  console and network recorders keep running. In the user's Chrome the
+  extension's own checks apply as well, cookie and authorization headers
+  stay redacted, and script and DOM edits stay with `tab.evaluate`. [browser-code-mode.md](browser-code-mode.md#devtools-access)
+  explains each refusal.
 - Each browser call the snippet makes is an ordinary call of the matching
   tool, scoped to the caller's workspace, run or pane, with the same Chrome
   permission, block list and page-dialog handling. The snippet itself runs in
@@ -219,7 +236,8 @@ return await tab.snapshot({ diff: true });
   most 110 s) stops the snippet and keeps the bindings; timers and calls a
   snippet leaves waiting never run. An imported pull request's run may not
   use it, and Cora's fenced workers treat it like `codara_preview_evaluate`
-  and block it when any other browser tool is blocked.
+  and block it, DevTools commands included, when any other browser tool is
+  blocked.
 
 Design and measurements: [browser-code-mode.md](browser-code-mode.md).
 

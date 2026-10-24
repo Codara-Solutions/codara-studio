@@ -94,7 +94,7 @@ Most suites need only `npm install`. These are the exceptions:
 |---|---|---|
 | A build in `out/` | `test-agent-socket.cjs`, `test-app-exit-electron.cjs` | Launches `out/main/index.js` under Electron with a temporary home. Run `npm run build` (which is `electron-vite build`) first. Without a build the app never writes its handshake file and the suite fails. |
 | The Electron binary | `test-agent-socket.cjs`, `test-trusted-sender.cjs` | Both boot a headless Electron from `node_modules`. |
-| Playwright's Chromium | `test-chat-surface-routing.cjs`, `test-csv-preview-ui.cjs`, `test-browser-cdp-session.cjs`, `test-browser-screenshot-locator.cjs`, `test-browser-devtools.cjs`, `test-browser-insight.cjs`, `test-browser-capture-chromium.cjs`, `test-preview-waits.cjs`, `test-preview-dialogs.cjs`, `test-preview-find-outline.cjs`, `test-preview-console-filter.cjs`, `test-studio-csp.cjs`, `test-browser-code.cjs` | Install it with `npx playwright install chromium`. Without it they print SKIP for the real-page checks. |
+| Playwright's Chromium | `test-chat-surface-routing.cjs`, `test-csv-preview-ui.cjs`, `test-browser-cdp-session.cjs`, `test-browser-screenshot-locator.cjs`, `test-browser-devtools.cjs`, `test-browser-cdp-access.cjs`, `test-browser-insight.cjs`, `test-browser-capture-chromium.cjs`, `test-preview-waits.cjs`, `test-preview-dialogs.cjs`, `test-preview-find-outline.cjs`, `test-preview-console-filter.cjs`, `test-studio-csp.cjs`, `test-browser-code.cjs` | Install it with `npx playwright install chromium`. Without it they print SKIP for the real-page checks. |
 | Real `git` | `test-worktrees.cjs`, `test-agent-worktrees.cjs`, `test-worktree-cleanup.cjs`, `test-worktree-cleanup-agent.cjs`, `test-worktree-setup.cjs`, `test-git-auto-fetch-git.cjs`, `test-git-split-commits.cjs`, `test-git-optional-locks.cjs`, `test-git-stash.cjs`, `test-github-pull-request-git.cjs`, `test-review-diff.cjs`, `test-result-manifest.cjs`, `test-worker-diff.cjs`, `test-browser-storage-boundary.cjs` | Most create throwaway repositories in a temp dir. `test-browser-storage-boundary.cjs` runs `git ls-files` on this checkout, so it needs a git clone. |
 | POSIX tools | `test-owned-process-tree-descendants.cjs` (needs `ps`), `test-pty-inherited-env.cjs` (skips its zsh probes without `/bin/zsh`), `test-ssh-keys.cjs` (skips key generation without `ssh-keygen`) | On Windows they run a reduced set of checks. |
 | A `codara-mobile` checkout next to this repo | `test-cora-history-interop.cjs`, `test-cora-run-interop.cjs`, and some checks in `test-remote-access.cjs` | They print `SKIP` when the sibling repo is missing, as on CI. |
@@ -333,6 +333,17 @@ and zoomed shots, a diff across a reload, sizes in light and dark,
 recordings, and WebM when `ffmpeg` is installed); it prints SKIP without
 Chromium too.
 
+The agent's cursor and driving banner (`components/Preview/agent-presence/`):
+`test-agent-presence` checks the glide (duration by distance, easing, the
+curve), that an action waits for its cursor but never past the cap, Stop and
+Undo per agent and tab, and the driver main stamps on every call.
+`tests/e2e/agent-presence.spec.ts` drives a Claude Code pane's MCP server in
+the built app: the cursor glides before the click lands, the banner names the
+agent and its workspace, the agent's own screenshot has no cursor in it, and
+Stop refuses its next calls until Undo. Run it with
+`CODARA_PRESENCE_VIDEO=1` to film the glide and take stills from the private
+X display with `ffmpeg` into `test-results/agent-presence/`.
+
 What agents do on a page: `test-preview-key-chords` (chord notation, the case
 and codes of chord keys, and which of the user's chords stay in the page),
 `test-preview-waits` (codara_preview_wait_for: url, navigation, load,
@@ -349,7 +360,7 @@ the built app over the socket, the stdio MCP server and `cora tool`, and
 `tests/e2e/preview-hot-reload.spec.ts` runs hot reload waits against a real
 Vite dev server.
 
-Browser code mode (`codara_preview_code`, `src/main/browser/code/`):
+Browser code mode (`codara_browser_use`, `src/main/browser/code/`):
 `test-browser-code` checks the snippet transform (persistent declarations,
 top-level await, syntax errors with line and column), the QuickJS kernel as a
 sandbox (no require, process, fetch, import or host functions; an endless
@@ -357,8 +368,15 @@ loop is interrupted and the session lives on; a timeout keeps the bindings;
 late calls are refused), the session lifecycle (reset, isolation, the
 dead-owner and idle sweep, six images per call) and Playwright-style locators
 driving a login form, a table and a settings form on a real Chromium page.
+`test-browser-cdp-access` checks the DevTools allowlist
+(`src/main/browser/cdp-policy.ts`: what reaches past the tab or the machine
+is refused, navigation stays on http and https) and drives `tab.cdp` and
+`tab.network` on a real Chromium page: commands, refusals as BrowserErrors,
+`Network.disable` leaving the recorder running, a Debugger that never pauses,
+subscriptions that belong to their caller, big results saved to a file, and
+redacted sign-in headers on a Chrome tab.
 `tests/e2e/browser-code.spec.ts` runs it in the built app over the stdio MCP
-server and measures it against the single tools.
+server, DevTools access included, and measures it against the single tools.
 
 The Chrome extension link: `test-chrome-extension` (the extension's own
 tests in `extensions/chrome/test/`: sharing and blocked-site rules, which
@@ -432,7 +450,8 @@ it proves Crashpad starts early), Settings, About and the export.
 | `test-terminal-leases`, `test-studio-terminal-share`, `test-phone-terminal-spawn`, `test-worker-terminal-controls`, `test-remote-access-terminal-launch` | Terminals used from the phone, and that they run the desktop's own launch commands. |
 | `test-remote-access-workspace-roots`, `test-remote-access-cora-send-rate` | What a phone may not do: add the home folder or a credentials folder as a workspace, or send Cora messages faster than its budget. |
 | `test-phone-notify`, `test-terminal-phone-notify` | Notifications sent to the phone. |
-| `test-remote-connection-lifecycle`, `test-ssh-keys` | SSH workspaces (`src/main/remote/`), not the phone. |
+| `test-remote-connection-lifecycle`, `test-box-key-retry`, `test-ssh-keys` | SSH workspaces (`src/main/remote/`), not the phone. |
+| `test-remote-proxycommand`, `test-ssh-config-include`, `test-codara-boxes-cli` | SSH over a ProxyCommand (`proxy-command.ts`), `~/.ssh/config` Include and ProxyCommand reading with the refusal of unsafe `%h`/`%r`/`%n`, and the Codara Cloud boxes picker that reads the `codaracloud` CLI (`codara-boxes.ts`). |
 
 ### Git and GitHub
 

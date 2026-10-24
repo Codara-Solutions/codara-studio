@@ -9,7 +9,8 @@ import { buildIntegratedShellLaunch } from "./shell-init";
 import { createFile, createFolder, deleteFile, deleteToStash, importEntries, listDir, listFiles, moveEntries, purgeDeleteStash, readFileBytes, readFileEx, readTextFile, readTextFileTail, renameFile, statFile, undoDeleteFromStash, writeTextFile } from "./fs-tree";
 import { assertAllowedReadPathResolved, setAllowedRoots } from "./fs-sandbox";
 import { readClipboardFilePaths, writeClipboardFilePaths } from "./clipboard-files";
-import { deleteManualHost, listHosts, saveManualHost } from "./remote/ssh-hosts";
+import { deleteManualHost, listHosts, saveCodaraHost, saveManualHost } from "./remote/ssh-hosts";
+import { codaraBoxConnectInfo, isBoxId, listCodaraBoxes } from "./remote/codara-boxes";
 import {
   listKeys as listSshKeys,
   generateKey as generateSshKey,
@@ -30,6 +31,8 @@ import { isRemotePath } from "@shared/remote";
 import { MUTE_KEY_PATTERN } from "@shared/notify-center";
 import type { UsageSummaryInput } from "@shared/usage-analytics";
 import type {
+  CodaraBoxConnectInfoResult,
+  CodaraBoxesListResult,
   RemoteAuthPromptAnswer,
   RemoteBrowseResult,
   RemoteConnectionStatus,
@@ -3938,6 +3941,25 @@ export function registerIpc(): void {
   handle(
     "remote:deleteHost",
     async (_e, hostId: string): Promise<RemoteHostConfig[]> => deleteManualHost(hostId),
+  );
+  // Codara Cloud boxes, read through the codaracloud CLI. connect-info saves
+  // the host (main-only, with its proxy argv) so remote:connect can use it.
+  handle(
+    "remote:codara-boxes:list",
+    async (): Promise<CodaraBoxesListResult> => listCodaraBoxes(),
+  );
+  handle(
+    "remote:codara-boxes:connect-info",
+    async (_e, boxId: string): Promise<CodaraBoxConnectInfoResult> => {
+      if (!isBoxId(boxId)) return { ok: false, code: "failed", message: "That is not a box id." };
+      const info = await codaraBoxConnectInfo(boxId);
+      if (!info.ok) return info;
+      try {
+        return { ok: true, host: await saveCodaraHost(info.host) };
+      } catch {
+        return { ok: false, code: "failed", message: "The box host could not be saved." };
+      }
+    },
   );
   handle(
     "remote:connect",
