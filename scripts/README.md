@@ -333,6 +333,17 @@ and zoomed shots, a diff across a reload, sizes in light and dark,
 recordings, and WebM when `ffmpeg` is installed); it prints SKIP without
 Chromium too.
 
+The agent's cursor and driving banner (`components/Preview/agent-presence/`):
+`test-agent-presence` checks the glide (duration by distance, easing, the
+curve), that an action waits for its cursor but never past the cap, Stop and
+Undo per agent and tab, and the driver main stamps on every call.
+`tests/e2e/agent-presence.spec.ts` drives a Claude Code pane's MCP server in
+the built app: the cursor glides before the click lands, the banner names the
+agent and its workspace, the agent's own screenshot has no cursor in it, and
+Stop refuses its next calls until Undo. Run it with
+`CODARA_PRESENCE_VIDEO=1` to film the glide and take stills from the private
+X display with `ffmpeg` into `test-results/agent-presence/`.
+
 What agents do on a page: `test-preview-key-chords` (chord notation, the case
 and codes of chord keys, and which of the user's chords stay in the page),
 `test-preview-waits` (codara_preview_wait_for: url, navigation, load,

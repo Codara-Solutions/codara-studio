@@ -18,6 +18,7 @@ import {
   agentGroupFor,
   agentGroupTitle,
   agentTabId,
+  badgeTitle,
   blockingRule,
   carriedSession,
   cdpPermission,
@@ -28,6 +29,7 @@ import {
   isTabShared,
   openedTabAnswer,
   parseBlockedSites,
+  USAGE_ACTIVE_MS,
   redactCdpEvent,
   shouldReload,
   storageScopeError,
@@ -284,10 +286,21 @@ async function groupOpenedTab(tab, requested) {
   }
 }
 
+const usageBadgeTimers = new Map();
+
 function handleMessage(message) {
   if (message.type === "usage" && typeof message.tabId === "number") {
     void save({
       usage: { ...state.usage, [message.tabId]: { agent: String(message.agent ?? "An agent"), tool: String(message.tool ?? ""), at: Number(message.at) || Date.now() } },
+    }).then(() => {
+      // The button names the agent while it acts, then goes back to "an agent".
+      const tabId = message.tabId;
+      void updateTabBadge(tabId);
+      clearTimeout(usageBadgeTimers.get(tabId));
+      usageBadgeTimers.set(tabId, setTimeout(() => {
+        usageBadgeTimers.delete(tabId);
+        void updateTabBadge(tabId);
+      }, USAGE_ACTIVE_MS + 100));
     });
   } else if (message.type === "revoked") {
     void detachAll();
@@ -404,21 +417,25 @@ async function reportTabs() {
   link.send({ type: "tabs", tabs: shared, allowOpen: state.allowOpen });
 }
 
+async function updateBadge(tab) {
+  const shared = isTabShared(shareChoice(), tab) && !blockingRule(tab.url, rules);
+  const attached = state.attached.includes(tab.id);
+  const text = !shared ? "" : attached ? "AI" : "ON";
+  await chrome.action.setBadgeText({ tabId: tab.id, text }).catch(() => {});
+  if (text) await chrome.action.setBadgeBackgroundColor({ tabId: tab.id, color: attached ? "#b45309" : "#15803d" }).catch(() => {});
+  const title = badgeTitle({ shared, attached, usage: state.usage[tab.id], now: Date.now() });
+  await chrome.action.setTitle({ tabId: tab.id, title }).catch(() => {});
+}
+
 async function updateBadges() {
   await ready;
-  const tabs = await chrome.tabs.query({});
-  for (const tab of tabs) {
-    const shared = isTabShared(shareChoice(), tab) && !blockingRule(tab.url, rules);
-    const attached = state.attached.includes(tab.id);
-    const text = !shared ? "" : attached ? "AI" : "ON";
-    await chrome.action.setBadgeText({ tabId: tab.id, text }).catch(() => {});
-    if (text) {
-      await chrome.action.setBadgeBackgroundColor({ tabId: tab.id, color: attached ? "#b45309" : "#15803d" }).catch(() => {});
-      await chrome.action.setTitle({ tabId: tab.id, title: attached ? "Codara: an agent is using this tab" : "Codara: agents may use this tab" }).catch(() => {});
-    } else {
-      await chrome.action.setTitle({ tabId: tab.id, title: "Codara" }).catch(() => {});
-    }
-  }
+  for (const tab of await chrome.tabs.query({})) await updateBadge(tab);
+}
+
+/** The button of one tab, after an agent's call on it. */
+async function updateTabBadge(tabId) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (tab) await updateBadge(tab);
 }
 
 async function refresh() {

@@ -24,7 +24,7 @@ function viewScale(wc: WebContents): number {
 
 /** The renderer's routing fields, forwarded so it picks the same tab for every call. */
 function routing(params: Record<string, unknown>, tabId: string): Record<string, unknown> {
-  return { tabId, runId: params.runId, workspaceId: params.workspaceId, callerPaneId: params.callerPaneId };
+  return { tabId, runId: params.runId, workspaceId: params.workspaceId, callerPaneId: params.callerPaneId, driver: params.driver };
 }
 
 async function resolvePreviewTarget(ref: BrowserTabRef | null, params: Record<string, unknown>): Promise<BrowserTarget> {

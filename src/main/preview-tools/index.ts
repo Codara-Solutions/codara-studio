@@ -6,6 +6,7 @@
 // The MCP side mirrors this layout: resources/codara-studio-mcp/tools/ holds
 // one module per area and names the method each tool calls here.
 
+import { describeDriver } from "../browser/agent-driver";
 import { guardPageDialogs } from "../browser/dialog-guard";
 import { recordActedTab, withActedTab } from "../browser/acted-tab";
 import { noteChromeToolCall } from "../browser/chrome/activity";
@@ -110,9 +111,16 @@ async function dispatchPreviewTool(
   const entry = HANDLERS.get(method);
   if (!entry) throw new Error(`unknown method: ${method}`);
   const scope = entry.scope ?? (method.startsWith("preview.") ? "browser" : "none");
+  // Who drives the tab comes from the scoped caller, never from tool JSON:
+  // the tab's banner names it and its Stop button refuses it by key.
+  delete params.driver;
   if (scope === "browser") {
+    // Scoping drops the pid once it found the pane; an agent outside any pane
+    // keeps it as its key, so stopping one such agent leaves the others alone.
+    const callerPid = params.callerPid;
     await host.scopeToCaller(params);
     await scopePreviewWorkspace(params, host.getRun);
+    params.driver = await describeDriver({ callerPid, ...params }, host);
   }
   readGroupParam(params);
   let ref;
