@@ -7,6 +7,7 @@
 // owns the active id. Mounting is the contract that keeps editor cursors,
 // terminal PTYs, and dev-server iframes alive across tab switches.
 
+import type { TerminalAgentOwner } from "@shared/agent-terminal-owner";
 import type {
   FsEntry,
   RuntimeState,
@@ -167,6 +168,9 @@ export interface TerminalLeaf {
   // (codara_terminal_create with `workspace`), shown on the tab. Stripped on
   // persist like origin, since a relaunch starts a fresh shell.
   openedBy?: string;
+  // Durable: the agent that opened this pane through codara_terminal_create,
+  // so it may still close the pane after a relaunch.
+  agentOwner?: TerminalAgentOwner;
   // Runtime scrollback snapshot used to preserve context while panes move
   // between mounted workspace layers. Cold hydration strips it, so a full app
   // relaunch always starts with a clean shell.

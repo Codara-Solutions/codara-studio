@@ -5,6 +5,7 @@ import {
   trimTerminalScrollbackLines,
   type FsEntry,
 } from "@shared/types";
+import { sanitizeTerminalAgentOwner, type TerminalAgentOwner } from "@shared/agent-terminal-owner";
 import { makeId } from "@shared/ids";
 import { basename } from "../path-utils";
 import {
@@ -658,6 +659,11 @@ export function cleanupTransientTerminalState(node: PaneNode): void {
     // without `active`, idle panes, malformed or pending captures) hydrates
     // without one and never auto-resumes. When the restore preference is off,
     // persist() already stripped the pointer, so nothing mints here.
+    if ("agentOwner" in node) {
+      const owner = sanitizeTerminalAgentOwner(node.agentOwner);
+      if (owner) node.agentOwner = owner;
+      else delete node.agentOwner;
+    }
     const session = validatedTerminalAgentSession(node.agentSession);
     if (session) {
       node.agentSession = session;
@@ -1132,6 +1138,7 @@ export interface AgentTerminalTabOptions {
   origin?: TerminalLeafOrigin;
   // The caller's workspace when an agent opened this tab from another one.
   openedBy?: string;
+  agentOwner?: TerminalAgentOwner;
   nativeClaudeProfileId?: string;
   nativeGrokProfileId?: string;
   // Opened at the request of a program in one of the user's own panes
@@ -1169,6 +1176,7 @@ export function appendAgentTerminalToWorkspaceLayout(
     root: {
       ...leaf(paneId, options?.cwd, options?.autorun, options?.origin),
       ...(options?.openedBy ? { openedBy: options.openedBy } : {}),
+      ...(options?.agentOwner ? { agentOwner: options.agentOwner } : {}),
       ...(options?.nativeClaudeProfileId
         ? { nativeClaudeProfileId: options.nativeClaudeProfileId }
         : {}),
@@ -2290,6 +2298,7 @@ export function useTabs(
       const root = {
         ...leaf(paneId, options?.cwd, options?.autorun, options?.origin),
         ...(options?.openedBy ? { openedBy: options.openedBy } : {}),
+        ...(options?.agentOwner ? { agentOwner: options.agentOwner } : {}),
         ...(options?.nativeClaudeProfileId
           ? { nativeClaudeProfileId: options.nativeClaudeProfileId }
           : {}),

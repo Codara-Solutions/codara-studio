@@ -108,6 +108,7 @@ import { normalizePiAccountProfileId } from "./orchestration/pi-account-executio
 import { effectiveChatMode } from "@shared/chat-policy";
 import { normalizeTabGroupName } from "@shared/tab-group-name";
 import { groupLink, tabLink } from "@shared/tab-links";
+import { restoredAgentTerminal, type TerminalAgentOwner } from "@shared/agent-terminal-owner";
 import { DEFAULT_PREFERENCES } from "@shared/types";
 import { whiteboardIssues } from "@shared/whiteboard-quality";
 import {
@@ -1026,6 +1027,7 @@ async function handleTerminalRun(
   const runId = stringParam(params, "runId");
   const requestedPaneId = stringParam(params, "paneId");
   if (requestedPaneId) {
+    await adoptRestoredAgentTerminal(requestedPaneId, params);
     const callerPaneId = await callerPaneForOwnedTerminal(requestedPaneId, params);
     if (!agentTerminals.isActiveOwnedBy(requestedPaneId, runId, callerPaneId)) {
       return errorResponse(
@@ -1156,6 +1158,8 @@ interface StudioTerminalListing {
   profile?: string;
   group?: string;
   groupId?: string;
+  agentOwner?: TerminalAgentOwner;
+  agentSessionId?: string;
 }
 
 const CALLER_PLACEMENT_CACHE_MS = 5_000;
@@ -1433,6 +1437,57 @@ async function callerProcessCwds(params: Record<string, unknown>): Promise<strin
 // the renderer, so we round-trip through the terminal-bridge; the renderer
 // mints an agent-tinted, UNFOCUSED tab and returns the tabId + paneId (the PTY
 // session id the agent then drives via terminal.write / terminal.read).
+// What the layout saves about the agent opening a terminal, so the same run,
+// or the same agent CLI session after a resume, still owns it once Codara
+// restarts (shared/agent-terminal-owner.ts). An agent whose session Codara
+// has not captured gets no record and keeps the in-memory ownership only.
+async function openingAgentOwner(
+  run: RunState | null,
+  targetWorkspaceId: string | null,
+  callerPaneId: string | null,
+  service: boolean,
+): Promise<TerminalAgentOwner | null> {
+  const retention = service ? { retention: "service" as const } : {};
+  if (run) {
+    const workspaceId = run.workspaceId ?? targetWorkspaceId;
+    return workspaceId ? { workspaceId, runId: run.id, ...retention } : null;
+  }
+  if (!callerPaneId) return null;
+  const caller = (await listStudioTerminals().catch(() => [])).find((entry) => entry.paneId === callerPaneId);
+  return caller?.agentSessionId ? { workspaceId: caller.workspaceId, sessionId: caller.agentSessionId, ...retention } : null;
+}
+
+// After a relaunch the ownership ledger is empty while the layout brought
+// back the agent terminals with their owner record. When the run or agent
+// session that opened one asks about it, admit it again so a resumed agent
+// keeps writing to and closing its own tabs. A pane this process already
+// registered, or closed, is never re-adopted.
+async function adoptRestoredAgentTerminal(paneId: string, params: Record<string, unknown>): Promise<void> {
+  if (agentTerminals.knows(paneId)) return;
+  const listing = await listStudioTerminals().catch(() => []);
+  const entry = listing.find((item) => item.paneId === paneId);
+  if (!entry?.agentOwner) return;
+  const runId = stringParam(params, "runId");
+  const callerPaneId = runId ? null : await resolveCallerPaneId(params);
+  const caller = callerPaneId ? listing.find((item) => item.paneId === callerPaneId) : undefined;
+  const registration = restoredAgentTerminal(entry, {
+    runId,
+    paneId: callerPaneId,
+    sessionId: caller?.agentSessionId ?? null,
+    workspaceId: caller?.workspaceId ?? null,
+  });
+  if (!registration || agentTerminals.knows(paneId)) return;
+  if (!registerAgentTerminal(registration)) return;
+  const offExit = pty.onExit(paneId, () => {
+    offExit();
+    agentTerminals.markExited(registration);
+  });
+  if (!pty.exists(paneId)) {
+    offExit();
+    agentTerminals.markExited(registration);
+  }
+}
+
 async function handleTerminalCreate(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -1582,6 +1637,7 @@ async function handleTerminalCreate(
     }
     if (!cwd && resolved.folder) cwd = resolved.folder;
   }
+  const agentOwner = await openingAgentOwner(run, workspaceId, callerPaneId, rawRetention === "service");
   try {
     const result = await requestTerminalOp<{ tabId: string; paneId: string; cwd: string; group?: string }>(
       "create",
@@ -1594,6 +1650,7 @@ async function handleTerminalCreate(
         ...(callerPaneId ? { callerPaneId } : {}),
         ...(group ? { group } : {}),
         ...(crossWorkspace ? { openedBy: crossWorkspace.callerName } : {}),
+        ...(agentOwner ? { agentOwner } : {}),
       },
       // Waiting for the user took part of the MCP server's 60 s budget; keep
       // the whole call inside it, spawn wait included.
@@ -1727,6 +1784,7 @@ async function handleTerminalWrite(
   // panes, so their paneIds are discoverable. The bridge stamps SPARK_RUN_ID
   // onto writes; require the same run that created this terminal so one Cora
   // run cannot type into another run's agent-owned shell.
+  await adoptRestoredAgentTerminal(paneId, params);
   const callerPaneId = await callerPaneForOwnedTerminal(paneId, params);
   if (!agentTerminals.isActiveOwnedBy(paneId, runId, callerPaneId) && !isKeptServerSession(paneId)) {
     return errorResponse(
@@ -1791,6 +1849,7 @@ async function handleTerminalClose(
   const runId = stringParam(params, "runId");
 
   try {
+    await adoptRestoredAgentTerminal(paneId, params);
     const result = await agentTerminals.close({
       paneId,
       runId,
@@ -1846,7 +1905,10 @@ const PREVIEW_TOOL_HOST: PreviewToolHost = {
     const id = workspaceId ?? state.activeWorkspaceId;
     return state.workspaces.find((workspace) => workspace.id === id)?.name ?? null;
   },
-  ownsTerminalPane: (paneId, runId, callerPaneId) => agentTerminals.isActiveOwnedBy(paneId, runId, callerPaneId),
+  ownsTerminalPane: async (paneId, params) => {
+    await adoptRestoredAgentTerminal(paneId, params);
+    return agentTerminals.isActiveOwnedBy(paneId, stringParam(params, "runId"), stringParam(params, "callerPaneId"));
+  },
   // Only an exited agent loses nothing when its pane closes.
   agentRunningIn: (paneId) =>
     terminalAgentStateSnapshot().some((entry) => entry.paneId === paneId && entry.state !== "done" && entry.state !== "error"),

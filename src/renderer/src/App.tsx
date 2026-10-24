@@ -5448,6 +5448,8 @@ export default function App() {
               title: tab.title,
               ...(leaf.cwd ? { cwd: leaf.cwd } : {}),
               ...(tab.group ? { group: tab.group.name, groupId: tab.group.id } : {}),
+              ...(leaf.agentOwner ? { agentOwner: leaf.agentOwner } : {}),
+              ...(leaf.agentSession?.sessionId ? { agentSessionId: leaf.agentSession.sessionId } : {}),
               // The phone protocol has no Pi profile; a Pi pane is shared
               // as the shell it runs in.
               profile:
@@ -5527,6 +5529,7 @@ export default function App() {
         requestedFromPane: input.requestedFromPane,
         group: input.group,
         openedBy: input.openedBy,
+        agentOwner: input.agentOwner,
       };
       // A background run's terminal must not land in the ACTIVE workspace's
       // strip (same invariant as the spawn_terminals queue path). The hidden

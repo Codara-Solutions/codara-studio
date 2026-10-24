@@ -37,7 +37,7 @@ export interface TabActionCaller {
 }
 
 export interface TabActionDeps {
-  ownsTerminalPane: (paneId: string, caller: TabActionCaller) => boolean;
+  ownsTerminalPane: (paneId: string, caller: TabActionCaller) => boolean | Promise<boolean>;
   agentRunningIn: (paneId: string) => boolean;
   hasWorkspaceGrant: (callerWorkspaceId: string, targetWorkspaceId: string) => Promise<boolean>;
 }
@@ -53,10 +53,12 @@ export type TabActionDecision =
       skipped: Array<{ tabId: string; reason: string }>;
     };
 
-function ownsTab(member: TabActionMember, caller: TabActionCaller, deps: TabActionDeps): boolean {
+async function ownsTab(member: TabActionMember, caller: TabActionCaller, deps: TabActionDeps): Promise<boolean> {
   if (member.kind === "terminal") {
     const panes = member.paneIds ?? [];
-    return panes.length > 0 && panes.every((paneId) => deps.ownsTerminalPane(paneId, caller));
+    if (panes.length === 0) return false;
+    for (const paneId of panes) if (!(await deps.ownsTerminalPane(paneId, caller))) return false;
+    return true;
   }
   if (member.kind === "preview" && member.openedBy) {
     if (caller.runId) return member.openedBy.runId === caller.runId;
@@ -133,7 +135,13 @@ export async function decideTabAction(
       reason: skipped.length > 0 ? `Nothing to ${action}: ${skipped.map((entry) => entry.reason).join("; ")}.` : `Nothing to ${action}.`,
     };
   }
-  const needsApproval = acting.some((member) => !ownsTab(member, caller, deps));
+  let needsApproval = false;
+  for (const member of acting) {
+    if (!(await ownsTab(member, caller, deps))) {
+      needsApproval = true;
+      break;
+    }
+  }
   return {
     kind: "act",
     tabIds: acting.map((member) => member.tabId),

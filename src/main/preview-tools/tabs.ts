@@ -96,7 +96,7 @@ async function tabAction(params: Record<string, unknown>, _method: string, host:
   }
 
   const deps = {
-    ownsTerminalPane: (paneId: string, who: TabActionCaller) => host.ownsTerminalPane?.(paneId, who.runId, who.paneId) ?? false,
+    ownsTerminalPane: async (paneId: string) => (await host.ownsTerminalPane?.(paneId, params)) ?? false,
     agentRunningIn: (paneId: string) => host.agentRunningIn?.(paneId) ?? false,
     hasWorkspaceGrant: hasCrossWorkspaceGrant,
   };

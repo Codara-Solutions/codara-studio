@@ -20,6 +20,7 @@ import { closePaneOverlay, openPaneOverlay } from "./paneOverlays";
 import { assignPaneToGroup } from "../../tabs/tabGroupBridge";
 import { tabLinkBridge } from "../../tabs/tabLinkBridge";
 import { previewTabOpener } from "../Preview/registry";
+import { sanitizeTerminalAgentOwner } from "@shared/agent-terminal-owner";
 import { parseTabLink } from "@shared/tab-links";
 import type { TerminalLeafOrigin } from "../../tabs/types";
 
@@ -108,6 +109,7 @@ async function create(params: Record<string, unknown>): Promise<unknown> {
   const requestedFromPane = params.requestedFromPane === true;
   const groupName = readString(params, "group");
   const openedBy = readString(params, "openedBy");
+  const agentOwner = sanitizeTerminalAgentOwner(params.agentOwner);
   return createAgentTerminal({
     cwd: cwd ?? undefined,
     command: command ?? undefined,
@@ -120,6 +122,7 @@ async function create(params: Record<string, unknown>): Promise<unknown> {
     ...(requestedFromPane ? { requestedFromPane } : {}),
     ...(groupName ? { group: groupName } : {}),
     ...(openedBy ? { openedBy: openedBy.slice(0, 200) } : {}),
+    ...(agentOwner ? { agentOwner } : {}),
   });
 }
 

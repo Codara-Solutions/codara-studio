@@ -107,6 +107,11 @@ export class AgentTerminalRegistry {
     });
   }
 
+  /** Whether this process ever registered the pane, closed ones included. */
+  knows(paneId: string): boolean {
+    return this.active.has(paneId) || this.exited.has(paneId) || this.closed.has(paneId);
+  }
+
   isActiveOwnedBy(paneId: string, runId: string | null, callerPaneId: string | null = null): boolean {
     const terminal = this.active.get(paneId);
     if (!terminal) return false;
