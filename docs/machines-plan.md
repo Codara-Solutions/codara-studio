@@ -24,11 +24,12 @@ Studio already does more of this than it looks:
 
 What is missing, and blocks the goal:
 
-1. **Agents cannot start in a remote workspace.** `spawnWithSessionLock`
-   throws "Native agent account profiles are only available in local
-   terminals", and the review send menu disables new agents there (commit
-   `0e789c9e`). You can type `claude` in a remote shell by hand, and Studio
-   already recognizes it from its output, but nothing launches it for you.
+1. **Remote agents are fragile, and one hand-off is blocked.** Agents do
+   start in a remote workspace: the "+" menu's Claude worker runs `claude`
+   in the host's SSH shell and Studio detects it from its output (checked
+   end to end against a container, 2026-10-25). What is missing is item 2
+   below, plus the review "send to new agent" hand-off, which stays disabled
+   there (commit `0e789c9e`) because its notes file lives on this computer.
 2. **Remote terminals die with the connection.** The shell is an ssh2
    channel. Closing Studio, sleeping the laptop or a Wi-Fi drop ends every
    agent on the host. For "extra compute" this is the biggest gap.
@@ -350,7 +351,7 @@ preference until phase 2 ships.
 
 | Phase | Delivers | Size | Tests |
 |---|---|---|---|
-| **1. Agents on an SSH host** | The "+" menu and `codara_spawn_terminals` start Claude Code, Codex, Grok or Pi in a remote workspace with the host's own CLI and sign-in, inside tmux when present, reattached after reconnect or restart. Clear errors when a CLI is missing or signed out. Review "send to new agent" works there again. No Codara tools on remote agents yet. | Small: 1 PR, about 2 days | Unit: launch command building, tmux wrap and reattach, missing-CLI parsing, against the in-process ssh2 server of `test-remote-port-forward`. New headless smoke `smoke:remote-agent` against a local sshd container (Ubuntu image, fake `claude` script that prints the real banner), proving launch, turn detection, disconnect and reattach. |
+| **1. Agents on an SSH host** | The "+" menu and `codara_spawn_terminals` start Claude Code, Codex, Grok or Pi in a remote workspace with the host's own CLI and sign-in, inside tmux when present, reattached after reconnect or restart. A clear message when a CLI is missing. No Codara tools on remote agents yet. The review "send to new agent" hand-off and a signed-out check move later. Built in #59. | Small: 1 PR, about 2 days | Unit: the generated launch, attach, probe and kill lines run under `/bin/sh` against fake `tmux` and `claude`; reconnects against fake ssh2 channels; the wiring in the real `pty-manager.ts`. A Playwright spec against a real sshd and tmux in a throwaway Ubuntu container (fake `claude` that prints the real banner) proves launch, turn detection, quit and reattach, a dropped connection, and close. |
 | **2. Machines list** | The Machines view: This computer plus SSH hosts and Cloud boxes, with status, CPU, RAM, disk, load and agents; Add machine with host key confirmation; "Where" picker in the "+" menu; the cgroup-aware probe. | Medium: 1 to 2 PRs, about 4 days | Unit: probe parser on recorded Linux, macOS and container outputs (including the cgroup case above); host key confirm and change flows. e2e (headless Playwright): add a machine pointing at the sshd container, see its numbers, start an agent from the picker. |
 | **3. codara-host helper and Codara tools on machines** | Signed helper upload and update, persistent PTYs without tmux, hook events, the machine token over a remote-forwarded Unix socket, the MCP shim, Accounts shows remote sign-ins read-only. | Large: 3 PRs, about 2 weeks | Unit: signature check refuses a tampered file; token allowlist refuses every local-only method (a table test over all socket methods); daemon survives channel close. Container smoke: upload, start, kill the connection, reconnect, agent still running; a remote Claude stub calls a Codara tool through the socket. |
 | **4. Cora workers on a machine** | "Run on" for runs and steps, remote worktrees and setup, remote worker PTYs, reports through the machine token, `git fetch` of results, worker diff for remote attempts. | Large: 2 to 3 PRs, about 2 weeks | Extend `test-step-lifecycle` and `test-loom-steps` with a fake remote transport; container smoke: a two-step run with one worker on the container, result fetched and reviewed. |
