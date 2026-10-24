@@ -102,26 +102,26 @@ const CHART_W = 720;
 const CHART_H = 230;
 const PAD = { left: 38, right: 14, top: 18, bottom: 26 };
 
-function timeTicks(fromMs: number, toMs: number, nowMs: number): Array<{ ms: number; label: string }> {
+// Steps by calendar fields, not fixed milliseconds, so a daylight-saving
+// change inside a 7-day window does not label two ticks with the same day.
+function timeTicks(fromMs: number, toMs: number): Array<{ ms: number; label: string }> {
   const span = toMs - fromMs;
   const hour = 3_600_000;
-  const step = span <= 6 * hour ? hour : span <= 2 * 86_400_000 ? 6 * hour : 86_400_000;
-  const first = new Date(fromMs);
-  if (step >= 86_400_000) first.setHours(0, 0, 0, 0);
-  else first.setMinutes(0, 0, 0);
+  const stepHours = span <= 6 * hour ? 1 : span <= 2 * 86_400_000 ? 6 : 24;
+  const date = new Date(fromMs);
+  if (stepHours === 24) date.setHours(0, 0, 0, 0);
+  else date.setHours(Math.floor(date.getHours() / stepHours) * stepHours, 0, 0, 0);
   const ticks: Array<{ ms: number; label: string }> = [];
-  for (let t = first.getTime(); t <= toMs; t += step) {
-    if (t < fromMs) continue;
-    const date = new Date(t);
+  for (; date.getTime() <= toMs; stepHours === 24 ? date.setDate(date.getDate() + 1) : date.setHours(date.getHours() + stepHours)) {
+    if (date.getTime() < fromMs) continue;
     ticks.push({
-      ms: t,
+      ms: date.getTime(),
       label:
-        step >= 86_400_000
+        stepHours === 24
           ? date.toLocaleDateString("en-GB", { weekday: "short" })
           : `${String(date.getHours()).padStart(2, "0")}:00`,
     });
   }
-  void nowMs;
   return ticks;
 }
 
@@ -138,7 +138,7 @@ export function ForecastChart({ view }: { view: WindowForecastView }) {
   const lower = result.cone.map((point) => `${x(point.ms).toFixed(1)},${y(point.p10).toFixed(1)}`).reverse();
   const median = result.cone.map((point) => `${x(point.ms).toFixed(1)},${y(point.p50).toFixed(1)}`).join(" ");
   const hit = result.inUse && result.hitProbability >= 0.5 ? result.hitAt : null;
-  const ticks = timeTicks(result.windowStartMs, result.resetsAtMs, result.nowMs);
+  const ticks = timeTicks(result.windowStartMs, result.resetsAtMs);
   const nowX = x(result.nowMs);
   const resetX = x(result.resetsAtMs);
   return (
@@ -198,7 +198,7 @@ export function ForecastChart({ view }: { view: WindowForecastView }) {
       <text x={resetX - 4} y={PAD.top - 8} textAnchor="end" fontSize={9.5} fill="var(--ink-dim)">
         Resets {formatClock(result.resetsAtMs, result.nowMs)}
       </text>
-      {result.inUse ? (
+      {result.inUse && !hit ? (
         <text x={resetX - 4} y={y(result.endPercent.p50) - 6} textAnchor="end" fontSize={10} fill="var(--accent-text, var(--accent))">
           ≈ {Math.round(result.endPercent.p50)}%
         </text>
