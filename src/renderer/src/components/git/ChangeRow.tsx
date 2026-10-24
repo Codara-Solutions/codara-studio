@@ -68,7 +68,7 @@ const ChangeRow = React.memo(function ChangeRow({
       onDoubleClick={() => onPinDiff(file)}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      title={`${statusLabel(file.status)} — ${file.path} (double-click to keep the tab open)`}
+      title={`${statusLabel(file.status)}: ${file.path} (double-click to keep the tab open)`}
       style={{
         display: "flex",
         alignItems: "center",

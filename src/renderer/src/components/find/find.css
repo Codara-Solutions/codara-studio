@@ -1,0 +1,204 @@
+/* Find in a document. The bar is a floating layer over the document, so it
+   takes the read tier of glass (.spark-glass--strong.spark-overlay-surface,
+   as the page picker does): a deep enough tint to stay legible over a white
+   slide or PDF page in either theme, with an opaque fallback when glass is
+   off. The controls inside reuse .spark-icon-btn and the .spark-input field
+   recipe.
+
+   Match colours are fixed, not the workspace accent: an amber or red
+   workspace would otherwise hide its own matches. Every match is a soft
+   yellow and the current one a stronger orange, the convention browsers and
+   editors share. The editor keeps its syntax colours under a translucent
+   current match with a ring (--find-current-code-bg: in light mode it sits on
+   the grey selection, so it is denser there or it turns brown); rendered
+   text, which has one ink colour, gets an opaque current match with dark
+   ink. */
+:root {
+  --find-match-bg: oklch(0.83 0.15 95 / 0.30);
+  --find-current-bg: oklch(0.74 0.17 58 / 0.48);
+  --find-current-code-bg: var(--find-current-bg);
+  --find-current-edge: oklch(0.78 0.16 62);
+  --find-current-solid: oklch(0.76 0.16 60);
+  --find-current-ink: #17120a;
+}
+:root[data-theme-mode="light"] {
+  --find-match-bg: oklch(0.91 0.16 98 / 0.75);
+  --find-current-bg: oklch(0.80 0.16 62 / 0.55);
+  --find-current-code-bg: oklch(0.84 0.15 66 / 0.85);
+  --find-current-edge: oklch(0.66 0.17 55);
+  --find-current-solid: oklch(0.80 0.16 62);
+  --find-current-ink: #17120a;
+}
+
+::highlight(codara-find-match) {
+  background-color: var(--find-match-bg);
+}
+::highlight(codara-find-current) {
+  background-color: var(--find-current-solid);
+  color: var(--find-current-ink);
+}
+/* PDF text sits transparent over the page canvas: tint, never ink. */
+.codara-pdf-text-layer ::highlight(codara-find-current) {
+  background-color: var(--find-current-bg);
+  color: transparent;
+}
+.codara-pdf-text-layer ::highlight(codara-find-match) {
+  color: transparent;
+}
+
+/* Host for a surface with a find bar: the bar floats over its top-right. */
+.codara-find-host {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+/* Scrollers that take focus on click, so Ctrl+F knows which document the
+   user is in, never show a focus ring for it. */
+.codara-find-scroller:focus {
+  outline: none;
+}
+
+.codara-find {
+  position: absolute;
+  top: 8px;
+  right: 18px;
+  z-index: 20;
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+  width: min(452px, calc(100% - 28px));
+  padding: 4px;
+  border-radius: var(--radius-popover, 12px);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: var(--ink);
+}
+/* The read tint is tuned for text over app content, which is dark under a
+   dark theme. The bar often floats over a white page (a PDF, a slide, a web
+   page), where that tint turns grey and the count fades into it, so under a
+   dark theme its fill is denser. */
+@media not (prefers-reduced-transparency: reduce) {
+  html:not([data-glass="off"]):not([data-theme-mode="light"]) .codara-find.spark-overlay-surface {
+    background-color: color-mix(in oklab, var(--bg) 84%, transparent);
+  }
+}
+.codara-find__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+.codara-find__row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+.codara-find__field {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 96px;
+  height: 26px;
+  margin-right: 4px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control, 7px);
+  background: var(--bg);
+  box-shadow: var(--well);
+  transition:
+    border-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
+}
+.codara-find__field:hover {
+  border-color: var(--rule-strong);
+}
+.codara-find__field:focus-within {
+  border-color: var(--accent-edge);
+  box-shadow: var(--focus-ring);
+}
+.codara-find__field.is-none {
+  border-color: color-mix(in oklch, var(--danger) 55%, transparent);
+}
+.codara-find__field.is-invalid,
+.codara-find__field.is-invalid:focus-within {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px var(--danger-soft);
+}
+/* Scoped under the bar so a host's own field rules (the CSV view styles
+   every input inside it) do not reach these. */
+.codara-find .codara-find__input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  padding: 0 8px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--ink);
+  font: 12px/1 var(--font-sans);
+}
+/* The field around the input carries the focus ring. */
+.codara-find .codara-find__input:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+.codara-find__input::placeholder {
+  color: var(--muted-2);
+}
+.codara-find__toggles {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding-right: 3px;
+}
+.codara-find__toggle.spark-icon-btn {
+  --spark-icon-btn-size: 20px;
+  border-radius: 5px;
+  font: 600 11px/1 var(--font-sans);
+  letter-spacing: 0;
+}
+.codara-find__toggle.is-active {
+  box-shadow: inset 0 0 0 1px var(--accent-edge);
+}
+.codara-find__toggle--mono {
+  font-family: var(--font-mono) !important;
+}
+.codara-find__count {
+  flex: 0 0 auto;
+  min-width: 68px;
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  white-space: nowrap;
+}
+html:not([data-glass="off"]) .codara-find__count {
+  color: var(--glass-muted);
+}
+.codara-find__count.is-none,
+.codara-find__count.is-invalid {
+  color: var(--danger);
+}
+.codara-find .spark-icon-btn {
+  --spark-icon-btn-size: 24px;
+  border-radius: var(--radius-control, 7px);
+}
+.codara-find .spark-icon-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.codara-find__expander svg {
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+.codara-find__expander[aria-expanded="true"] svg {
+  transform: rotate(90deg);
+}
+.codara-find__spacer {
+  flex: 0 0 68px;
+}

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentEffortLevel,
+  AutomationLoopKind,
   AutomationTrigger,
   FolderTriggerEvent,
   GuardPredicate,
@@ -24,6 +25,8 @@ import {
   type TriggerDraft,
 } from "./model";
 import { STEP_META, STEP_TONE, STEP_TYPES, defaultStepAction, stepTitle, validateStepAction } from "./step-meta";
+import TriggerGateFields from "./TriggerGateFields";
+import type { GateDraft } from "./gate-model";
 
 // The per-selected-node config panel — a fill-height column DOCKED beside the
 // canvas (mirrors LoopInspector). Dispatches on node kind: the trigger
@@ -95,6 +98,13 @@ export interface NodeContextPanelProps {
   // Trigger editing surface.
   trigger: TriggerDraft;
   onTriggerChange: (next: TriggerDraft) => void;
+  /** Precheck + missed-run policy, edited under the trigger's fields. */
+  gate?: GateDraft;
+  onGateChange?: (next: GateDraft) => void;
+  /** The trigger as it would be saved (null while incomplete). */
+  builtTrigger?: AutomationTrigger | null;
+  /** The loop kind: a cadence loop's passes take the precheck too. */
+  loopKind?: AutomationLoopKind;
   cwd: string;
   chainableJobs: ScheduledJob[];
   /** Looms v3: the most recent pass's per-node outputs (what each node
@@ -162,12 +172,23 @@ export default function NodeContextPanel(props: NodeContextPanelProps): React.Re
 
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", overflowX: "hidden", padding: "16px 18px 22px", display: "flex", flexDirection: "column", gap: 18 }}>
         {kind === "trigger" ? (
-          <TriggerForm
-            trigger={props.trigger}
-            onChange={props.onTriggerChange}
-            cwd={props.cwd}
-            chainableJobs={props.chainableJobs}
-          />
+          <>
+            <TriggerForm
+              trigger={props.trigger}
+              onChange={props.onTriggerChange}
+              cwd={props.cwd}
+              chainableJobs={props.chainableJobs}
+            />
+            {props.gate && props.onGateChange && (
+              <TriggerGateFields
+                gate={props.gate}
+                onChange={props.onGateChange}
+                trigger={props.builtTrigger ?? null}
+                loopKind={props.loopKind}
+                cwd={props.cwd}
+              />
+            )}
+          </>
         ) : kind === "worker" ? (
           <WorkerForm {...props} node={node} />
         ) : kind === "guard" ? (
@@ -418,7 +439,7 @@ function TriggerForm({
               }
             />
           </div>
-          <Field label="Branch (optional — any branch when empty)">
+          <Field label="Branch (optional, any branch when empty)">
             <input
               className="spark-input spark-mono"
               value={t.gitBranch}
@@ -429,7 +450,7 @@ function TriggerForm({
           </Field>
           <Hint>
             Watches this workspace's repository. Local moves are noticed within ~20 seconds;
-            pushes are noticed by the background fetch within a few minutes — or in seconds
+            pushes are noticed by the background fetch within a few minutes, or in seconds
             with the{" "}
             <a
               href="https://github.com/apps/codara-studio/installations/new"

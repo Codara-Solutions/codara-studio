@@ -152,6 +152,34 @@ export function scanRowForPaths(row: string): RawMatch[] {
   return out;
 }
 
+/** The parts of an xterm buffer row cellColumnsOfRow reads; IBufferLine has them. */
+export interface CellRowLike {
+  readonly length: number;
+  getCell(x: number): { getChars(): string; getWidth(): number } | undefined;
+}
+
+/**
+ * The 0-based cell column of every UTF-16 code unit of the row's
+ * translateToString text, plus one entry for the end of the text. A string
+ * index is not a column: a wide character (CJK, or an emoji under the
+ * Unicode 11 widths) spans two cells, and an emoji outside the BMP is two
+ * code units. Built the way xterm builds that string: an empty cell reads as
+ * a space, and the second half of a wide character adds nothing.
+ */
+export function cellColumnsOfRow(line: CellRowLike): number[] {
+  const columns: number[] = [];
+  let x = 0;
+  while (x < line.length) {
+    const cell = line.getCell(x);
+    if (!cell) break;
+    const chars = cell.getChars() || " ";
+    for (let i = 0; i < chars.length; i += 1) columns.push(x);
+    x += cell.getWidth() || 1;
+  }
+  columns.push(x);
+  return columns;
+}
+
 export function createFileLinkProvider(
   term: Terminal,
   opts: FileLinkProviderOptions,
@@ -180,6 +208,9 @@ export function createFileLinkProvider(
         return;
       }
       const cwd = opts.getCwd();
+      // The matches are string positions; the range is in cells, which part
+      // ways after the first emoji or CJK character on the row.
+      const columns = cellColumnsOfRow(line);
       // Resolve every match's existence in parallel — provideLinks fires once
       // per row entry so we're not doing this on every mouse-move.
       void Promise.all(
@@ -187,8 +218,11 @@ export function createFileLinkProvider(
           const resolved = await opts.resolveExisting(m.file, cwd);
           if (!resolved) return null;
           const range: IBufferRange = {
-            start: { x: m.startCol, y: bufferLineNumber },
-            end: { x: m.endCol, y: bufferLineNumber },
+            // startCol - 1 is the first character's string index; endCol is
+            // the index just past the last one, whose 0-based column is the
+            // 1-based inclusive end column.
+            start: { x: (columns[m.startCol - 1] ?? m.startCol - 1) + 1, y: bufferLineNumber },
+            end: { x: columns[m.endCol] ?? m.endCol, y: bufferLineNumber },
           };
           const link: ILink = {
             range,

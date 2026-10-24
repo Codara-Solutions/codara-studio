@@ -469,7 +469,7 @@ const FileEntry = React.memo(function FileEntry({
         onDoubleClick={() => onOpenTab(true)}
         onMouseEnter={() => setHover(true)}
         onMouseLeave={() => setHover(false)}
-        title={`Open diff in a tab (double-click to pin) — ${statusLabel(file.status)}: ${file.oldPath ? `${file.oldPath} → ` : ""}${file.path}`}
+        title={`Open diff in a tab (double-click to pin): ${statusLabel(file.status)}: ${file.oldPath ? `${file.oldPath} → ` : ""}${file.path}`}
         style={{
           display: "flex",
           alignItems: "center",
@@ -567,7 +567,7 @@ const FileEntry = React.memo(function FileEntry({
           ) : !diff || diff.error ? (
             <DiffNote danger>{diff?.error ?? "Could not load this diff."}</DiffNote>
           ) : diff.binary ? (
-            <DiffNote>Binary file — no inline preview.</DiffNote>
+            <DiffNote>Binary file, no inline preview.</DiffNote>
           ) : diff.lines.length === 0 ? (
             <DiffNote>No textual changes to show.</DiffNote>
           ) : (

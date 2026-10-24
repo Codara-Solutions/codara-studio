@@ -17,6 +17,13 @@
 //     user's own ZDOTDIR (SPARK_USER_ZDOTDIR), so every integration file
 //     sourced itself until zsh stopped with "job table full or recursion
 //     limit exceeded".
+//   - A Studio started from a terminal (`npm run dev` in WezTerm) inherits
+//     that terminal's identity and pane address. In a pane, Claude Code's
+//     /sessions picker ran `wezterm cli split-pane --pane-id $WEZTERM_PANE`
+//     and opened in the WezTerm window running `npm run dev`, not in Codara.
+//   - An installed AppImage hands its panes APPIMAGE and APPDIR. An unpacked
+//     build started there took itself for that AppImage, so its boot cleanup
+//     treated it as installed and rewrote the user's real CLI configs.
 //
 // Drives the real shell-init and pty-manager env construction (node-pty and
 // the account runtimes stubbed as in test-pty-spawn-serialization.cjs), then
@@ -60,6 +67,23 @@ function realEnvSanitize() {
   };
 }
 
+// The harness stubs injectEnrichedPath to a no-op; this one hands the pane
+// the PATH a test sets, as the real one hands it the login shell's merged
+// with the process's own.
+function enrichedPathStub() {
+  return {
+    name: "enriched-path-stub",
+    setup(build) {
+      build.onResolve({ filter: /^\.\/path-reconstruction$/ }, () => ({ path: "path-reconstruction", namespace: "enriched-path" }));
+      build.onLoad({ filter: /.*/, namespace: "enriched-path" }, () => ({
+        contents:
+          "export function injectEnrichedPath(env) { if (globalThis.__codaraEnrichedPath) env.PATH = globalThis.__codaraEnrichedPath; }",
+        loader: "js",
+      }));
+    },
+  };
+}
+
 function materializeIntegration(dir) {
   fs.mkdirSync(dir, { recursive: true });
   for (const [source, target] of [
@@ -82,6 +106,40 @@ function writeUserStartupFiles(dir, tag) {
   }
 }
 
+// What WezTerm, tmux and kitty export to the shell Codara was started from.
+const HOST_TERMINAL = {
+  TERM_PROGRAM: "WezTerm",
+  TERM_PROGRAM_VERSION: "20240203-110809-5046fc22",
+  WEZTERM_PANE: "1",
+  WEZTERM_UNIX_SOCKET: "/run/user/1000/wezterm/gui-sock-8167",
+  WEZTERM_EXECUTABLE: "/usr/bin/wezterm-gui",
+  WEZTERM_EXECUTABLE_DIR: "/usr/bin",
+  TMUX: "/tmp/tmux-1000/default,4242,0",
+  TMUX_PANE: "%3",
+  KITTY_WINDOW_ID: "7",
+  KITTY_LISTEN_ON: "unix:/tmp/kitty-4242",
+  WINDOWID: "62914571",
+};
+
+// What the AppImage runtime and electron-updater export to an installed
+// Codara, plus a runtime knob of the user's own.
+const APPIMAGE_LAUNCH = {
+  APPIMAGE: "/home/user/Applications/Codara.AppImage",
+  APPDIR: "/tmp/.mount_CodaraAb12Cd",
+  OWD: "/home/user",
+  ARGV0: "Codara.AppImage",
+  APPIMAGE_SILENT_INSTALL: "true",
+  APPIMAGE_EXIT_AFTER_INSTALL: "true",
+};
+const USER_APPIMAGE_KNOB = { APPIMAGE_EXTRACT_AND_RUN: "1" };
+// What electron-builder's AppRun exports before it starts Codara.
+const MOUNT = APPIMAGE_LAUNCH.APPDIR;
+const APPRUN_SEARCH_PATHS = {
+  LD_LIBRARY_PATH: `${MOUNT}/usr/lib:/opt/user/lib`,
+  XDG_DATA_DIRS: `${MOUNT}/usr/share/:/usr/share/gnome:/usr/local/share/:/usr/share/`,
+  GSETTINGS_SCHEMA_DIR: `${MOUNT}/usr/share/glib-2.0/schemas`,
+};
+
 const INHERITED_KEYS = [
   "ELECTRON_RENDERER_URL",
   "ELECTRON_CLI_ARGS",
@@ -92,12 +150,17 @@ const INHERITED_KEYS = [
   "NODE_ENV",
   "ZDOTDIR",
   "SPARK_USER_ZDOTDIR",
+  ...Object.keys(HOST_TERMINAL),
+  ...Object.keys(APPIMAGE_LAUNCH),
+  ...Object.keys(USER_APPIMAGE_KNOB),
+  ...Object.keys(APPRUN_SEARCH_PATHS),
 ];
 
 const PROBE =
   'print -r -- "@@[${NODE_ENV-unset}][${ELECTRON_RENDERER_URL-unset}]' +
   '[${HOME_ZSHENV:-0}${HOME_ZPROFILE:-0}${HOME_ZSHRC:-0}${HOME_ZLOGIN:-0}]' +
-  '[${CUSTOM_ZSHENV:-0}${CUSTOM_ZPROFILE:-0}${CUSTOM_ZSHRC:-0}${CUSTOM_ZLOGIN:-0}]@@"';
+  '[${CUSTOM_ZSHENV:-0}${CUSTOM_ZPROFILE:-0}${CUSTOM_ZSHRC:-0}${CUSTOM_ZLOGIN:-0}]' +
+  '[${WEZTERM_PANE-unset}][${TERM_PROGRAM-unset}][${TMUX-unset}]@@"';
 
 function runZsh(call) {
   const result = spawnSync(call.exe, [...call.args, "-i", "-c", PROBE], {
@@ -107,13 +170,14 @@ function runZsh(call) {
     timeout: 20_000,
   });
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
-  const match = /@@\[(.*?)\]\[(.*?)\]\[(\d{4})\]\[(\d{4})\]@@/.exec(output);
+  const match = /@@\[(.*?)\]\[(.*?)\]\[(\d{4})\]\[(\d{4})\]\[(.*?)\]\[(.*?)\]\[(.*?)\]@@/.exec(output);
   return {
     output,
     nodeEnv: match?.[1],
     rendererUrl: match?.[2],
     homeFiles: match?.[3],
     customFiles: match?.[4],
+    hostTerminal: match ? match.slice(5, 8) : undefined,
     recursed: /job table full|recursion limit exceeded/.test(output),
   };
 }
@@ -155,7 +219,7 @@ async function main() {
       platform: "node",
       format: "cjs",
       outfile,
-      plugins: [realEnvSanitize(), stubPlugin()],
+      plugins: [realEnvSanitize(), enrichedPathStub(), stubPlugin()],
       logLevel: "silent",
     });
     const controller = createController();
@@ -226,6 +290,85 @@ async function main() {
         !("NODE_ENV" in call.options.env),
         call.options.env.NODE_ENV,
       );
+    }
+
+    // --- the terminal Codara was started from ------------------------------
+    for (const integrated of [true, false]) {
+      const kind = integrated ? "an integrated" : "a plain";
+      const call = await spawnPane(HOST_TERMINAL, { integrated });
+      const env = call.options.env;
+      const leaked = Object.keys(HOST_TERMINAL).filter((key) => key in env);
+      check(
+        `${kind} pane carries no pane address or identity of the launching terminal`,
+        leaked.length === 0,
+        leaked,
+      );
+      check(`${kind} pane still names its own terminal type`, env.TERM === "xterm-256color", env.TERM);
+      if (HAS_ZSH) {
+        const zsh = runZsh(call);
+        check(
+          `zsh in ${kind} pane sees no WEZTERM_PANE, TERM_PROGRAM or TMUX`,
+          JSON.stringify(zsh.hostTerminal) === JSON.stringify(["unset", "unset", "unset"]),
+          zsh.hostTerminal ?? zsh.output.slice(-400),
+        );
+      }
+    }
+
+    // --- an installed AppImage's own launch --------------------------------
+    for (const integrated of [true, false]) {
+      const kind = integrated ? "an integrated" : "a plain";
+      const call = await spawnPane({ ...APPIMAGE_LAUNCH, ...USER_APPIMAGE_KNOB }, { integrated });
+      const env = call.options.env;
+      const leaked = Object.keys(APPIMAGE_LAUNCH).filter((key) => key in env);
+      check(`${kind} pane does not inherit Codara's AppImage identity`, leaked.length === 0, leaked);
+      check(
+        `${kind} pane keeps the user's own AppImage runtime knob`,
+        env.APPIMAGE_EXTRACT_AND_RUN === "1",
+        env.APPIMAGE_EXTRACT_AND_RUN,
+      );
+      if (HAS_ZSH) {
+        const result = spawnSync(
+          call.exe,
+          [...call.args, "-i", "-c", 'print -r -- "@@[${APPIMAGE-unset}][${APPDIR-unset}][${OWD-unset}][${ARGV0-unset}]@@"'],
+          { cwd: call.options.cwd, env: call.options.env, encoding: "latin1", timeout: 20_000 },
+        );
+        const seen = /@@(.*?)@@/.exec(`${result.stdout ?? ""}${result.stderr ?? ""}`)?.[1];
+        check(`zsh in ${kind} pane sees no APPIMAGE, APPDIR, OWD or ARGV0`, seen === "[unset][unset][unset][unset]", seen);
+      }
+    }
+
+    // --- AppRun's search paths into the mount ------------------------------
+    try {
+      // The enriched PATH keeps the process's own entries, AppRun's among them.
+      globalThis.__codaraEnrichedPath = `/usr/local/bin:/usr/bin:${MOUNT}:${MOUNT}/usr/sbin:${MOUNT}Other/bin`;
+      const call = await spawnPane({ ...APPIMAGE_LAUNCH, ...APPRUN_SEARCH_PATHS });
+      const env = call.options.env;
+      check(
+        "a pane's PATH loses the mount and keeps every other entry",
+        env.PATH === `/usr/local/bin:/usr/bin:${MOUNT}Other/bin`,
+        env.PATH,
+      );
+      check("a pane's LD_LIBRARY_PATH loses the mount's usr/lib", env.LD_LIBRARY_PATH === "/opt/user/lib", env.LD_LIBRARY_PATH);
+      check(
+        "a pane's XDG_DATA_DIRS keeps the rest exactly as AppRun left it",
+        env.XDG_DATA_DIRS === "/usr/share/gnome:/usr/local/share/:/usr/share/",
+        env.XDG_DATA_DIRS,
+      );
+      check(
+        "a search path left empty goes",
+        !("GSETTINGS_SCHEMA_DIR" in env),
+        env.GSETTINGS_SCHEMA_DIR,
+      );
+      // An unpacked build that inherited a launch had it dropped at boot, so
+      // without APPDIR nothing is taken for a mount.
+      const unpacked = await spawnPane({ LD_LIBRARY_PATH: `${MOUNT}/usr/lib:/opt/user/lib` });
+      check(
+        "without APPDIR, LD_LIBRARY_PATH is left alone",
+        unpacked.options.env.LD_LIBRARY_PATH === `${MOUNT}/usr/lib:/opt/user/lib`,
+        unpacked.options.env.LD_LIBRARY_PATH,
+      );
+    } finally {
+      delete globalThis.__codaraEnrichedPath;
     }
 
     // --- nested instance: ZDOTDIR inherited from an outer Codara pane -------

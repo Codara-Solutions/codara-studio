@@ -205,6 +205,8 @@ function stubPlugin() {
       export function sanitizeNestedAgentEnv() {}
       export function sanitizeElectronViteDevEnv() {}
       export function sanitizeNpmRunScriptEnv() {}
+      export function sanitizeHostTerminalEnv() {}
+      export function sanitizeAppImageChildEnv() {}
       export function restoreUserZdotdir() {}
       export function userZdotdirFromEnv() { return undefined; }
     `,
@@ -260,8 +262,12 @@ function stubPlugin() {
       }
       export function notifyNativeGrokProfileLeaseReleased() {}
     `,
-    "./orchestration/codex-trust": `
-      export function ensureCodexProjectTrust() { return Promise.resolve(); }
+    "./agent-launch-integration": `
+      export function integrationFilesReady() { return Promise.resolve(); }
+      export function agentArgsDir() { return "/codara/integrations"; }
+      export function claudeLaunchArgs() { return []; }
+      export function codexLaunchArgs() { return []; }
+      export function plainAgentLaunchArgs() { return []; }
     `,
     "./orchestration/claude-cli-profile-environment": `
       export function buildClaudeCliProfileEnvironment(baseEnv, configDir) {
@@ -294,8 +300,12 @@ function stubPlugin() {
         return env;
       }
     `,
-    "./hook-installer": `
-      export function installClaudeHooks() { return Promise.resolve(); }
+    "./terminal-foreground": `
+      export async function continueForegroundJob(pid) {
+        const controller = globalThis.__codaraPtySpawnHarness;
+        (controller.continuedForeground ??= []).push(pid);
+        return null;
+      }
     `,
   };
 

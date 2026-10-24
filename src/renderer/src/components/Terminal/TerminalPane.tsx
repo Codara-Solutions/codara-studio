@@ -1,5 +1,5 @@
 import type { SearchAddon } from "@xterm/addon-search";
-import { forwardRef, useImperativeHandle, useRef } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
 import type {
   PtyExitInfo,
   RuntimeState,
@@ -10,7 +10,8 @@ import {
   useTerminalSession,
   type SparkOpenInput,
 } from "./useTerminalSession";
-import type { TerminalAgentSession } from "../../tabs/types";
+import type { TerminalAgentSession, TerminalLeafHibernation } from "../../tabs/types";
+import { TerminalLinkMenu, type TerminalLinkMenuRequest } from "./TerminalLinkMenu";
 
 // TerminalPane wraps a single xterm pane in a forwardRef component so the
 // parent strip can imperatively `write`, `focus`, copy the visible buffer,
@@ -65,6 +66,8 @@ interface Props {
   // persistent live-TUI hosts and normal workspace terminals whose rendered
   // buffer must remain immediately ready across tab/workspace switches.
   writeWhileHidden?: boolean;
+  // See useTerminalSession: gates the pane taking the keyboard on its own.
+  mayAutoFocus?: () => boolean;
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (info: PtyExitInfo) => void;
   onCwd?: (cwd: string) => void;
@@ -94,6 +97,13 @@ interface Props {
   // Fires once the boot restore was attempted (any outcome) so the owner can
   // clear the leaf's `bootResume` marker.
   onBootResumeConsumed?: () => void;
+  // Agent hibernation: the leaf says this pane's agent sleeps; the pane
+  // resumes it once on screen and then reports onWoke.
+  hibernated?: boolean;
+  onWoke?: () => void;
+  // Main says the pane's agent sleeps though the leaf has no mark (a window
+  // reload while it slept): the owner marks the leaf.
+  onAsleep?: (hibernation: TerminalLeafHibernation) => void;
 }
 
 // Far enough past any display edge that no part of the pane intersects the
@@ -117,6 +127,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       initialExternalRows,
       rawTailReattach,
       writeWhileHidden,
+      mayAutoFocus,
       onSearchReady,
       onExit,
       onCwd,
@@ -134,10 +145,14 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onResumeUnavailable,
       onResumeFallback,
       onBootResumeConsumed,
+      hibernated,
+      onWoke,
+      onAsleep,
     },
     ref,
   ) {
     const containerRef = useRef<HTMLDivElement>(null);
+    const [linkMenu, setLinkMenu] = useState<TerminalLinkMenuRequest | null>(null);
 
     const session = useTerminalSession({
       container: containerRef,
@@ -155,11 +170,13 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       initialExternalRows,
       rawTailReattach,
       writeWhileHidden,
+      mayAutoFocus,
       onSearchReady,
       onExit,
       onCwd,
       onDetectedLocalUrl,
       onSparkOpen,
+      onLinkMenu: setLinkMenu,
       onActivity,
       onUserInput,
       onAgentState,
@@ -172,7 +189,23 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
       onResumeUnavailable,
       onResumeFallback,
       onBootResumeConsumed,
+      hibernated,
+      onWoke,
+      onAsleep,
     });
+
+    // A pane that leaves the screen takes its link menu with it.
+    useEffect(() => {
+      if (!visible) setLinkMenu(null);
+    }, [visible]);
+    const focusTerminal = session.focus;
+    const closeLinkMenu = useCallback(
+      (refocusTerminal: boolean) => {
+        setLinkMenu(null);
+        if (refocusTerminal) focusTerminal();
+      },
+      [focusTerminal],
+    );
 
     useImperativeHandle(
       ref,
@@ -188,6 +221,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
     return (
       <div
         className="codara-terminal-session"
+        // Lets the jump palette put the keyboard in this exact pane.
+        data-pane-id={sessionId}
         style={{
           display: "flex",
           flex: 1,
@@ -227,6 +262,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(
             queueMicrotask(() => session.focus());
           }}
         />
+        {linkMenu ? <TerminalLinkMenu request={linkMenu} onClose={closeLinkMenu} /> : null}
       </div>
     );
   },

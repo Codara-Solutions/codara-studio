@@ -12,6 +12,7 @@ const path = require("node:path");
 const os = require("node:os");
 const fs = require("node:fs");
 const esbuild = require("esbuild");
+const { installFakeClock } = require("./fake-clock.cjs");
 
 const ROOT = path.resolve(__dirname, "..");
 
@@ -50,7 +51,11 @@ function check(name, condition, detail) {
   }
 }
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// The module's debounce runs on a fake clock (installed just before the bundle
+// loads), so waiting past it costs no real time. esbuild is driven by real I/O,
+// so the clock is installed only after the bundles are built.
+let clock = null;
+const sleep = (ms) => clock.advance(ms);
 // The module's trailing debounce is 400ms; wait comfortably past it.
 const SETTLE_MS = 700;
 
@@ -65,7 +70,7 @@ async function main() {
   // packages:"external" + a bundle under node_modules: event-log's transitive
   // deps include native .node addons (ssh2) esbuild cannot bundle; they must
   // resolve from the project's node_modules at require time.
-  const bundleDir = path.join(ROOT, "node_modules", ".codara-board-nudge-test");
+  const bundleDir = path.join(ROOT, "node_modules", `.codara-board-nudge-test-${process.pid}`);
   fs.mkdirSync(bundleDir, { recursive: true });
   const outfile = path.join(bundleDir, "bundle.cjs");
 
@@ -80,6 +85,7 @@ async function main() {
     plugins: [electronStub],
     tsconfig: path.join(ROOT, "tsconfig.node.json"),
   });
+  clock = installFakeClock();
   const nudgeModule = require(outfile);
 
   // ── Fake world ───────────────────────────────────────────────────────────

@@ -1,5 +1,5 @@
 import type { GitOpResult, GitStashEntry, GitStashList } from "@shared/types";
-import { errorText, isNotARepo, runGit } from "./git-exec";
+import { errorText, isNotARepo, readGitText, runGit } from "./git-exec";
 import { invalidateGitCache } from "./git-ops";
 
 // Stash management for the Source Control panel: list, save, apply, pop, drop.
@@ -46,6 +46,40 @@ export async function listStashes(cwd: string): Promise<GitStashList> {
   }
 }
 
+// `git stash push` fails this way, before it saves anything, when another
+// process holds the index lock: "could not write index", or no message at all
+// from Git versions that do not print one.
+const INDEX_BUSY = /^(?:error: could not write index)?$/;
+const PUSH_ATTEMPTS = 5;
+
+async function stashTip(cwd: string): Promise<string> {
+  return readGitText(cwd, ["rev-parse", "-q", "--verify", "refs/stash"]);
+}
+
+async function pushStash(cwd: string, args: string[]): Promise<{ stdout: string }> {
+  for (let attempt = 1; ; attempt++) {
+    const before = await stashTip(cwd);
+    try {
+      return await runGit(cwd, args);
+    } catch (err) {
+      const failure = err as { stderr?: unknown; killed?: boolean; signal?: unknown };
+      const stderr = typeof failure?.stderr === "string" ? failure.stderr.trim() : "";
+      // A timed-out or killed push says nothing either, but may have stopped
+      // anywhere.
+      const busy = !failure?.killed && !failure?.signal && INDEX_BUSY.test(stderr);
+      // A failure after the entry was written may have cleaned files too;
+      // retrying it would stash what is left a second time.
+      if (!busy || (await stashTip(cwd)) !== before) throw err;
+      if (attempt === PUSH_ATTEMPTS) {
+        throw new Error(
+          "Git could not write the index. Another Git operation may still be running: wait for it to finish and try again.",
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 150 * attempt));
+    }
+  }
+}
+
 async function run(cwd: string, args: string[]): Promise<GitOpResult> {
   try {
     await runGit(cwd, args);
@@ -69,7 +103,7 @@ export async function saveStash(
   // "No local changes to save". Inspect stdout so the UI gets an accurate
   // result instead of a phantom success.
   try {
-    const { stdout } = await runGit(cwd, args);
+    const { stdout } = await pushStash(cwd, args);
     invalidateGitCache(cwd);
     if (/no local changes to save/i.test(stdout)) {
       return { ok: false, error: "No local changes to stash." };

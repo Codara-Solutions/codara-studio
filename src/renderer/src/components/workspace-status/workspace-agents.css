@@ -1,0 +1,11 @@
+/* The rail row's agent lines (WorkspaceAgentsLine.tsx). */
+.workspace-agent-line:not(:disabled):hover {
+  background: var(--hover) !important;
+}
+
+.workspace-agent-line:focus-visible,
+[data-testid="workspace-agents-summary"]:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 4px;
+}

@@ -3,6 +3,7 @@ import type {
   AgentEffortLevel,
   AgentLoopSignal,
   AutomationContinuationSource,
+  AutomationLoopKind,
   AutomationRunRecord,
   AutomationStatus,
   AutomationStopReason,
@@ -22,8 +23,10 @@ import {
   SPARK_LOOP_CONTINUE,
   SPARK_LOOP_DONE,
 } from "@shared/types";
-import { appendHistory, getJob, injectTriggerNote, listJobs, patchJob } from "./scheduler";
-import { automationSourceKey, publish, rearm } from "../notify";
+import { appendHistory, appendSkip, getJob, injectTriggerNote, listJobs, patchJob } from "./scheduler";
+import { normalizeAutomationPrecheck, precheckSkipDetail } from "@shared/automation-catchup";
+import { PRECHECK_STOPPED_ERROR, runAutomationPrecheck, stopRunningPrechecks } from "./automation-precheck";
+import { automationSourceKey, publish, rearm, settleAutomationQuestions } from "../notify";
 import { appendEvent, subscribeToEvents } from "./event-log";
 import { nextReadyWave, planLoomLayers, renderNodePrompt, sinkNodeIds, upstreamOf } from "./loom-graph";
 import { resolveInlineNodes, stepNoteMessage, type Projection } from "./loom-resolve";
@@ -83,6 +86,11 @@ interface LoopRunner {
   // today's behaviour.
   watchdogTimers: Map<string, ReturnType<typeof setTimeout>>;
   firing: boolean;
+  // A precheck is running for the next pass: further fires hold meanwhile.
+  prechecking?: boolean;
+  // A cadence tick landed on that check: if the check skips, the cadence is
+  // re-armed, or the loop would wait for its trigger forever.
+  cadenceWaiting?: boolean;
   // The chain of automation ids that led here (onFinishOf cycle guard).
   chain: string[];
 }
@@ -203,6 +211,71 @@ export interface StartIterationOpts {
   source: AutomationContinuationSource;
   firedPath?: string;
   chain?: string[];
+  /** This pass catches up a scheduled time Codara missed (scheduler.ts). */
+  catchUp?: import("@shared/types").AutomationCatchUp;
+}
+
+// Passes a trigger or a cadence loop starts on its own are gated by the
+// precheck. Run now is the user asking, and count/until/agent/continuous
+// continuations belong to a loop whose cycle already passed its gate.
+function precheckApplies(job: ScheduledJob, source: AutomationContinuationSource): boolean {
+  return (source === "trigger" || source === "cadence") && normalizeAutomationPrecheck(job.precheck) !== undefined;
+}
+
+// The sources that start a fresh cycle of a finalized loop (the stopped-loop
+// branch of startIteration lists the same three).
+function revivesStoppedLoop(source: AutomationContinuationSource): boolean {
+  return source === "trigger" || source === "continuous" || source === "manual";
+}
+
+// Run the precheck for the pass about to start. True means go ahead. A "no"
+// is recorded as a skip (no run, no worker, no tokens), and a cadence loop
+// keeps its rhythm: the next pass is scheduled as if this one had run.
+async function passesPrecheck(id: string, job: ScheduledJob, opts: StartIterationOpts): Promise<boolean> {
+  const precheck = normalizeAutomationPrecheck(job.precheck);
+  if (!precheck) return true;
+  const runner = runnerFor(id);
+  // Another start (or check) is in flight; this fire would be dropped anyway.
+  if (runner.firing || runner.prechecking) {
+    if (runner.prechecking && opts.source === "cadence") runner.cadenceWaiting = true;
+    return false;
+  }
+  // A live pass holds the fire below; do not spend a check on it.
+  if (job.state.currentRunId) {
+    const live = await safeGetRun(job.state.currentRunId);
+    if (live && !TERMINAL.has(live.status)) return false;
+  }
+  runner.prechecking = true;
+  let result: import("@shared/types").AutomationPrecheckResult;
+  try {
+    result = await runAutomationPrecheck(precheck, {
+      cwd: job.input.cwd,
+      env: { SPARK_AUTOMATION_ID: id, CODARA_AUTOMATION_PRECHECK: "1" },
+    });
+  } finally {
+    runner.prechecking = false;
+  }
+  // A passing check starts a pass, and the cadence continues after it.
+  const cadenceWaiting = runner.cadenceWaiting === true;
+  runner.cadenceWaiting = false;
+  if (result.passed) return true;
+  // Codara is quitting: that is not the check's answer, so nothing to record.
+  if (result.error === PRECHECK_STOPPED_ERROR) return false;
+  await appendSkip(id, {
+    reason: "precheck",
+    detail: precheckSkipDetail(result, precheck.timeoutSeconds),
+    precheck: { command: precheck.command, ...result },
+  });
+  if (opts.source === "cadence" || cadenceWaiting) {
+    const fresh = await getJob(id);
+    if (fresh?.enabled && fresh.loop.kind === "cadence" && fresh.state.status !== "paused" && fresh.state.status !== "stopped") {
+      const everyMs = Math.max(1000, Math.floor(fresh.loop.everyMs ?? 60_000));
+      const nextFireAt = new Date(Date.now() + everyMs).toISOString();
+      await patchJob(id, (j) => ({ ...j, state: { ...j.state, nextFireAt } }));
+      scheduleCadence(id, everyMs);
+    }
+  }
+  return false;
 }
 
 // Start the next iteration of an automation's loop. Idempotent against an
@@ -211,6 +284,20 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
   let job = await getJob(id);
   if (!job || !job.enabled) return;
   if (job.state.status === "paused") return; // explicit user hold; resumeLoop re-drives
+  // Before the stopped-loop reset below: a skipped fire leaves the last
+  // cycle's state exactly as it was.
+  if (precheckApplies(job, opts.source)) {
+    // A loop-internal tick never revives a finalized loop (below), so it must
+    // not spend a check or record a skip either.
+    if (job.state.status === "stopped" && !revivesStoppedLoop(opts.source)) return;
+    const stoppedBefore = job.state.status === "stopped";
+    if (!(await passesPrecheck(id, job, opts))) return;
+    job = await getJob(id);
+    if (!job || !job.enabled || job.state.status === "paused") return;
+    // Stopped while its check ran: the user's Stop came after this fire, so
+    // the fire must not start a fresh cycle the moment the check passes.
+    if (!stoppedBefore && job.state.status === "stopped") return;
+  }
   if (job.state.status === "stopped") {
     // A finalized loop is NOT dead to its trigger: a cron/interval/folder fire
     // (or an onFinishOf chain / manual kick) starts a FRESH cycle, exactly like
@@ -346,13 +433,14 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
       // BYTE-IDENTICAL: pendingNextPrompt takes precedence over the rendered
       // template, then BOTH flavors get the firedPath note + agent footer (the
       // legacy code applied those transforms after the `??`, to either source).
+      const template = job.prompt?.template ?? job.input.initialUserNote ?? "";
       const prompt = decoratePrompt(
         job.state.pendingNextPrompt ??
-          renderNodePrompt(job.prompt?.template ?? job.input.initialUserNote ?? "", {
+          `${renderNodePrompt(template, {
             vars: passVars,
             nodeOutputs: {},
             incoming: [],
-          }),
+          })}${previousPassHandoff(job, template, passIter, lastRecord?.summary)}`,
       );
       const resolved = resolveWorker(job);
       // Per-worker tool access lives on the graph node (not job.worker), so the
@@ -685,6 +773,7 @@ export async function startIteration(id: string, opts: StartIterationOpts): Prom
           startedAt,
           status: "running",
           continuationSource: opts.source,
+          ...(opts.catchUp ? { catchUp: opts.catchUp } : {}),
         },
       ]),
     }));
@@ -911,6 +1000,8 @@ export function teardownAllLoops(): void {
   }
   loops.clear();
   watchedRuns.clear();
+  // A check in its own process group would outlive the app.
+  stopRunningPrechecks();
 }
 
 // onFinishOf chain registry (called from scheduler.armJob).
@@ -1206,10 +1297,40 @@ const answerResumes = new Set<string>();
 // ONLY on the job-level worker (degenerate single-node passes + answer
 // resumes) — resolveWorker never consumes a handoff for a graph entry node's
 // own worker, so steerable=false there keeps the prompt honest.
+const PREVIOUS_PASS_MAX_CHARS = 4_000;
+const PREVIOUS_PASS_LOOPS: ReadonlySet<AutomationLoopKind> = new Set(["agent", "continuous", "until"]);
+
+// A repeating single-worker loop whose template never asks for {{lastOutput}}
+// would otherwise start every pass from scratch and redo the first pass's work.
+// Graph entry nodes are excluded: their inputs arrive through {{node:id}}, and
+// appending text there would change graph semantics.
+export function previousPassHandoff(
+  job: Pick<ScheduledJob, "loop">,
+  template: string,
+  passIter: number,
+  lastSummary: string | undefined,
+): string {
+  if (passIter <= 0 || !PREVIOUS_PASS_LOOPS.has(job.loop.kind)) return "";
+  if (/\{\{\s*last(?:Output|Summary)\b/.test(template)) return "";
+  // Signal lines are dropped: decoratePrompt skips the agent-loop footer when
+  // the prompt already mentions the signal, and the old signal is no answer
+  // for this pass anyway.
+  const summary = lastSummary
+    ?.split("\n")
+    .filter((line) => !/SPARK_LOOP_(?:CONTINUE|DONE)|codara_request_next_iteration/.test(line))
+    .join("\n")
+    .trim();
+  if (!summary) return "";
+  const clipped = summary.length > PREVIOUS_PASS_MAX_CHARS
+    ? `${summary.slice(0, PREVIOUS_PASS_MAX_CHARS).trimEnd()}\n[truncated]`
+    : summary;
+  return `\n\n[Previous pass summary]\n${clipped}\n[End previous pass summary]\nContinue from where the previous pass stopped instead of starting over.`;
+}
+
 function agentLoopFooter(job: ScheduledJob, steerable = true): string {
   if (job.loop.kind !== "agent") return "";
   const handoffNote = steerable
-    ? ` You may also pass nextModel (claude-opus-5, claude-fable-5, gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna) and nextEffort to codara_request_next_iteration to pick the next pass's worker.`
+    ? ` You may also pass nextModel (claude-opus-5, claude-fable-5, gpt-5.6-sol, gpt-5.6-terra, or gpt-5.6-luna) and nextEffort to codara_request_next_iteration to pick the next pass's worker, and a prompt to hand the next pass its exact instructions.`
     : "";
   return `\n\n---\nThis is an automation loop. When you finish this pass, decide whether to continue: call the codara_request_next_iteration tool (done=false to run another iteration, done=true to stop), or end your final summary with ${SPARK_LOOP_CONTINUE} or ${SPARK_LOOP_DONE} on its own last line.${handoffNote} If you give no signal the loop stops. Your safety caps always stop it regardless.`;
 }
@@ -1613,6 +1734,9 @@ async function finalize(
   });
   const finalJob = await getJob(id);
   void emitIteration(id, finalJob?.state.iteration ?? 0, undefined, "stopped");
+  // Every stop, user-stop included: a stopped loop can no longer take the
+  // answer an iteration was waiting on.
+  settleAutomationQuestions(id);
 
   // Loop-level completion alert — once per finalize, never per iteration.
   // user-stop is skipped: the user clicked stop themselves; pinging them
@@ -1625,7 +1749,7 @@ async function finalize(
       kind: failed ? "automation.failed" : "automation.finished",
       sourceKey: automationSourceKey(id),
       tone: failed ? "danger" : "success",
-      title: failed ? "Automation — failed" : "Automation — finished",
+      title: failed ? "Automation failed" : "Automation finished",
       body: failed
         ? `“${finalJob.name}” stopped after ${passes} (${reason}).`
         : `“${finalJob.name}” finished after ${passes} (${reason}).`,

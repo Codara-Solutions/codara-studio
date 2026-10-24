@@ -17,6 +17,9 @@ function check(name, condition, detail = "") {
 const homeStub = {
   name: "cora-profile-home",
   setup(build) {
+    build.onResolve({ filter: /^@shared\// }, (args) => ({
+      path: path.join(__dirname, "..", "src", "shared", `${args.path.slice("@shared/".length)}.ts`),
+    }));
     build.onResolve({ filter: /\/codara-home$/ }, () => ({
       path: "codara-home-stub",
       namespace: "stub",
@@ -68,6 +71,38 @@ async function main() {
 
   const hostile = await profiles.createCoraProfile({ name: "../../Review Agent" });
   check("profile ids cannot traverse directories", hostile.id === "review-agent", hostile.id);
+
+  // A profile created without instructions gets a hint for the reader, never
+  // placeholder prose that Cora would take as the user's direction.
+  const blankIdentity = fs.readFileSync(hostile.identityPath, "utf8");
+  check("a blank profile's template carries its hint as a comment", /<!-- Describe this profile's role/.test(blankIdentity), blankIdentity);
+  check(
+    "a blank profile injects nothing into Cora's turn",
+    profiles.formatCoraProfileForTurn(hostile.id) === null,
+    String(profiles.formatCoraProfileForTurn(hostile.id)),
+  );
+  fs.writeFileSync(
+    hostile.identityPath,
+    "# Review Agent\n\n## Instructions\n\nDescribe this profile's role, priorities, and communication style here. Keep project facts in workspace memory.\n",
+    "utf8",
+  );
+  check(
+    "a legacy placeholder line written by older builds is not injected either",
+    profiles.formatCoraProfileForTurn(hostile.id) === null,
+    String(profiles.formatCoraProfileForTurn(hostile.id)),
+  );
+  fs.writeFileSync(hostile.identityPath, "# Review Agent\n\n<!-- private note -->\nReview for security first.\n", "utf8");
+  const reviewTurn = profiles.formatCoraProfileForTurn(hostile.id) ?? "";
+  check(
+    "real instructions reach the turn without the reader's comments",
+    reviewTurn.includes("Review for security first.") && !reviewTurn.includes("private note"),
+    reviewTurn,
+  );
+  check(
+    "creating a profile does not make it the default",
+    profiles.resolveCoraProfile().id === "default",
+    profiles.resolveCoraProfile().id,
+  );
   check(
     "profile paths stay below the profile root",
     hostile.identityPath.startsWith(path.join(HOME, "memory", "profiles") + path.sep),
@@ -82,6 +117,45 @@ async function main() {
     "concurrent profile creation keeps both entries",
     concurrentIds.has("concurrent-one") && concurrentIds.has("concurrent-two"),
   );
+
+  const nonLatin = await profiles.createCoraProfile({ name: "日本語" });
+  check("a non-ASCII profile name gets a hashed id", /^p-[0-9a-f]{8}$/.test(nonLatin.id), nonLatin.id);
+  check(
+    "a non-ASCII profile name resolves to itself, not the built-in",
+    profiles.resolveCoraProfile("日本語").id === nonLatin.id,
+    profiles.resolveCoraProfile("日本語").id,
+  );
+  let unknownNonLatin = "";
+  try {
+    profiles.resolveCoraProfile("한국어");
+  } catch (error) {
+    unknownNonLatin = error.message;
+  }
+  check("an unknown non-ASCII reference is unknown, not the built-in", /Unknown Cora profile/.test(unknownNonLatin), unknownNonLatin);
+  let reservedDefault = "";
+  try {
+    await profiles.createCoraProfile({ name: "Default" });
+  } catch (error) {
+    reservedDefault = error.message;
+  }
+  check("the built-in id stays reserved with a plain message", /reserved for the built-in profile/.test(reservedDefault), reservedDefault);
+
+  await profiles.setDefaultCoraProfile("日本語");
+  check("a non-ASCII profile can become the default", profiles.resolveCoraProfile().id === nonLatin.id);
+  const builtInByName = await profiles.setDefaultCoraProfile("Cora");
+  check(
+    "the built-in profile is selectable by the name list prints",
+    builtInByName.id === "default" && profiles.resolveCoraProfile().id === "default",
+    builtInByName.id,
+  );
+  await profiles.deleteCoraProfile(nonLatin.id);
+  let builtInByNameDelete = "";
+  try {
+    await profiles.deleteCoraProfile("Cora");
+  } catch (error) {
+    builtInByNameDelete = error.message;
+  }
+  check("the built-in profile cannot be deleted by name either", /built-in Cora profile cannot be deleted/.test(builtInByNameDelete), builtInByNameDelete);
 
   await profiles.setDefaultCoraProfile("Careful Coder");
   check("profiles resolve by name", profiles.resolveCoraProfile().id === coder.id);
@@ -111,6 +185,20 @@ async function main() {
   check("memory status reports both isolated files", status.global.bytesUsed > 0 && status.workspace.bytesUsed > 0);
 
   await memory.setMemoryEnabled("global", "", false, coder.id);
+  const identityOnlyWorker = memory.formatCoraMemoryForWorker("ws-a", coder.id) ?? "";
+  check(
+    "turning global memory off keeps the profile identity for workers",
+    identityOnlyWorker.includes("CORA PROFILE: Careful Coder") && !identityOnlyWorker.includes("CORA MEMORY"),
+    identityOnlyWorker,
+  );
+  const identityOnlyTurn = (await memory.formatCoraMemoryForTurn("ws-a", "run-identity", { profileId: coder.id })) ?? "";
+  check(
+    "turning global memory off keeps the profile identity for Cora's turns",
+    identityOnlyTurn.includes("CORA PROFILE: Careful Coder") &&
+      identityOnlyTurn.includes("Prefer small patches") &&
+      !identityOnlyTurn.includes("CORA MEMORY"),
+    identityOnlyTurn,
+  );
   await memory.setMemoryEnabled("workspace", "ws-a", false, coder.id);
   await memory.deleteProfileMemoryState(coder.id);
   const memoryState = JSON.parse(

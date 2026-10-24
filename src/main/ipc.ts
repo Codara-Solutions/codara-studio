@@ -28,6 +28,7 @@ import {
   setStatusSender,
 } from "./remote/connections";
 import { isRemotePath } from "@shared/remote";
+import { MUTE_KEY_PATTERN } from "@shared/notify-center";
 import type { UsageSummaryInput } from "@shared/usage-analytics";
 import type {
   CodaraBoxConnectInfoResult,
@@ -53,14 +54,18 @@ function assertLocalWorkspace(cwd: string, feature: string): void {
   }
 }
 import { loadSettings, loadState, saveSettings, saveState } from "./storage";
+import { workspaceAllowedRoots } from "./workspace-state-edits";
 import { loadOnboardingProgress, saveOnboardingProgress, setupService } from "./onboarding";
 import { codaraHome } from "./codara-home";
 import { logMain } from "./file-log";
 import { isTrustedOnSender, requireTrustedSender } from "./main-window-trust";
 import { detectAgentRuntimes } from "./agent-runtimes";
 import { loadPreferences, setPreference } from "./preferences-store";
+import { openInSystemBrowser, openLinkFromApp } from "./open-link";
 import * as pty from "./pty-manager";
-import { systemResourceSnapshot } from "./system-metrics";
+import { systemResourceSnapshot, type PaneRoot } from "./system-metrics";
+import { serversService } from "./servers/service";
+import { registerKeepAwakeIpc } from "./keep-awake";
 import {
   configuredOpenRouterCoraModels,
   validateOpenRouterConfiguration,
@@ -70,6 +75,14 @@ import * as fsWatcher from "./fs-watcher";
 import { streamGrep, type StreamGrepHandle } from "./search/grep";
 import { remoteStreamGrep } from "./remote/remote-search";
 import { listEvents, subscribeToEvents } from "./orchestration/event-log";
+import type {
+  SavedWorkflow,
+  SavedWorkflowSummary,
+  StartWorkflowRunInput,
+  WorkflowCaps,
+  WorkflowCheckResult,
+  WorkflowRunStatus,
+} from "@shared/workflow";
 import {
   claudeSessionTranscriptPath,
   discoverClaudeSessionForCwd,
@@ -90,7 +103,6 @@ import {
 } from "./orchestration/native-grok-profile-runtime";
 import { latestSessionStart } from "./agent-session-registry";
 import { findPiSessionFile } from "./pi-session-tracker";
-import { ensureCodexProjectTrust } from "./orchestration/codex-trust";
 import { parseManualAgentStartupCommand } from "./manual-agent-startup";
 import { workspaceProjectPolicyModeForTerminalCwd } from "./orchestration/project-policy";
 import {
@@ -108,39 +120,58 @@ import {
   providerForRuntime,
   unifiedAccountsFor,
 } from "./orchestration/unified-account-registry";
-import { UnifiedAccountSessionsError } from "./orchestration/unified-account-errors";
 import { unifiedAccountsReady } from "./orchestration/unified-account-migration";
 import {
   assertPiAccountProfileIsNotActive as assertPiAccountProfileIsNotActiveInRuns,
   PI_ACCOUNT_IN_USE_MESSAGE,
 } from "./orchestration/pi-account-run-guard";
-import { shutdownExternalNativeCliProcesses } from "./orchestration/native-cli-process-shutdown";
 import { anthropicAccounts } from "./orchestration/unified-account-registry";
 import { detectNativeCliShellProfileLeftover } from "./orchestration/native-cli-terminal-cleanup";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
+import type { ClaudeFollowStatus } from "@shared/claude-follow";
 import * as mcpInstaller from "./mcp-installer";
 import { setSparkBuiltinInstalled } from "./builtin-mcp-actions";
 import * as coraMemory from "./orchestration/cora-memory";
+import * as memoryItems from "./orchestration/memory-items";
+import type {
+  CoraMemoryItem,
+  MemoryItemKind,
+  MemoryItemPatch,
+  MemoryItemScope,
+  MemoryItemsView,
+  MemoryLearningSettings,
+} from "@shared/memory-items";
 import {
   deleteWorkerSession,
   listAllWorkerSessions,
-  listWorkerSessions,
 } from "./worker-sessions";
 import {
+  centerSummary,
   clearCenter,
   listCenterEntries,
   markCenterAllRead,
   markCenterRead,
+  markCenterViewed,
+  muteCenterSource,
+  noteCenterWorkspaces,
+  removeCenterEntries,
   removeCenterEntry,
+  restoreCenterEntries,
   setAttention,
+  setCenterRead,
+  settleCenterEntries,
+  unmuteCenterSource,
 } from "./notify";
 import {
   noteTerminalWillDispose,
   noteTerminalUserInput,
   syncTerminalNotifyPanes,
+  terminalAgentActivitySnapshot,
   terminalAgentStateSnapshot,
+  terminalPanePlacement,
   type TerminalNotifyPaneEntry,
 } from "./terminal-agent-notify";
+import { registerAgentBoardIpc } from "./agent-board";
 import type {
   InlineAiCompletionRequest,
   InlineAiCompletionResponse,
@@ -239,7 +270,14 @@ async function getGitWorktrees(): Promise<typeof import("./git-worktrees")> {
 
 let agentSyncMod: typeof import("./agent-sync") | undefined;
 async function getAgentSync(): Promise<typeof import("./agent-sync")> {
-  agentSyncMod ??= await import("./agent-sync");
+  if (!agentSyncMod) {
+    const mod = await import("./agent-sync");
+    mod.configureAgentSync({
+      trashItem: (path) => shell.trashItem(path),
+      piAgentDir: join(codaraHome(), "pi-agent"),
+    });
+    agentSyncMod = mod;
+  }
   return agentSyncMod;
 }
 
@@ -344,6 +382,7 @@ import type {
   AnswerRunQuestionInput,
   AppPreferences,
   AppSettings,
+  AgentMcpProbeRequest,
   AgentMcpServerDraft,
   AppState,
   CreateEntryInput,
@@ -351,6 +390,8 @@ import type {
   AutomationWorkerInfo,
   LoomStepResult,
   TestStepInput,
+  AutomationPrecheckResult,
+  TestPrecheckInput,
   CreateScheduledJobInput,
   CreateStepInput,
   CreateRunInput,
@@ -370,6 +411,7 @@ import type {
   GitFileChange,
   GitLog,
   GitOpResult,
+  GitRemoveWorktreeResult,
   GitStashList,
   GitStatus,
   LaunchWorkerAttemptInput,
@@ -382,9 +424,14 @@ import type {
   CoraProfile,
   CoraProfileCreateInput,
   CoraProfileDeleteResult,
+  CoraProfileDocumentView,
   MemoryClearInput,
+  MemoryEnsureFileInput,
   MemorySetEnabledInput,
   MemoryStatusInput,
+  AgentMcpSnippetParseResult,
+  AgentSkillCreateInput,
+  AgentSkillImportSource,
   UpdateChatBackendInput,
   UpdateCoraWhiteboardInput,
   ExportCoraWhiteboardFileInput,
@@ -398,6 +445,7 @@ import type {
   OpenRouterValidationInput,
   OpenRouterValidationResult,
   NativeCliAccountRuntime,
+  PiCodexResetResult,
   PiSubscriptionAddAccountInput,
   PiSubscriptionDeleteAccountInput,
   PiSubscriptionMakeDefaultInput,
@@ -411,6 +459,9 @@ import type {
   GitRemoteUpdatedPayload,
   PrepareWorkerTaskInput,
   NotificationCenterEntry,
+  NotificationCenterSummary,
+  NotificationViewSnapshot,
+  LiveWorkerActivity,
   RenameRunInput,
   ResumeRunInput,
   RenameFileInput,
@@ -426,16 +477,42 @@ import type {
   SparkEvent,
   StartAutopilotInput,
   StartSearchResponse,
+  SystemResource,
   UiAttentionSnapshot,
   UndoToCheckpointInput,
   UndoToCheckpointResult,
   UpdateScheduledJobInput,
   DeleteWorkerSessionInput,
   DeleteWorkerSessionResult,
-  WorkerSessionRuntime,
   WorkerSessionSummary,
 } from "@shared/types";
 import { isPiSubscriptionProvider } from "../shared/agent-families";
+import type { AgentDeliveryRequest, AgentDeliveryResult } from "../shared/agent-delivery";
+import { agentDelivery } from "./agent-delivery";
+import { registerCaptureIpc } from "./browser/capture/ipc";
+import { registerChromeLinkIpc } from "./browser/chrome";
+import { registerPointIpc } from "./browser/point";
+import { registerReviewIpc } from "./review";
+import { registerGitFixIpc } from "./git-fix-ipc";
+import { registerDiagnosticsIpc } from "./diagnostics";
+import { registerFeatureTipsIpc } from "./feature-tips";
+import { registerSessionSearchIpc } from "./session-search/service";
+import { registerServersIpc } from "./servers";
+import { registerWorkspaceStatusIpc } from "./workspace-status";
+import { registerCosTasksIpc } from "./cos";
+import { afterSkillAssetDeleted, afterSkillAssetInstalled, registerSkillUpdatesIpc, skillOriginsDir } from "./skill-updates-ipc";
+import {
+  forgetTerminalScrollback,
+  registerTerminalScrollbackIpc,
+  setTerminalScrollbackEnabled,
+  trackTerminalScrollbackPanes,
+} from "./terminal-scrollback";
+import { agentPaneAsleep, registerAgentHibernationIpc } from "./agent-hibernation";
+import { registerWorktreeCleanupIpc } from "./worktree-cleanup";
+import { registerCrossWorkspaceIpc } from "./cross-workspace-ipc";
+import { registerWorktreeSetupIpc } from "./worktree-setup";
+import { registerPortForwardIpc } from "./remote/port-forward-runtime";
+import { registerShareIpc } from "./share/ipc";
 
 function nativeCliAccountRuntimeFromIpc(value: unknown): NativeCliAccountRuntime {
   if (value === "claude" || value === "codex" || value === "grok") return value;
@@ -634,10 +711,44 @@ export function broadcastGitRemoteUpdated(cwds: string[]): void {
 // exposes no ipcRenderer.invoke, so no non-main-window sender can reach these
 // channels at all).
 
+const SYSTEM_RESOURCES: readonly SystemResource[] = ["cpu", "memory", "gpu", "swap"];
+
+// The local panes the System activity popover groups processes under, with
+// main's own placement for panes the window has not loaded since a reload,
+// and the agent main sees in each (its runtime and latest prompt name the row).
+function systemPaneRoots(): PaneRoot[] {
+  let keeper: ReturnType<ReturnType<typeof serversService>["keeper"]> | null = null;
+  try {
+    keeper = serversService().keeper();
+  } catch {
+    keeper = null;
+  }
+  const agents = new Map(terminalAgentActivitySnapshot().map((entry) => [entry.paneId, entry]));
+  return pty
+    .resourceSnapshot()
+    .sessions.filter((session) => !session.remote && session.pid > 0)
+    .map((session) => {
+      const placement = terminalPanePlacement(session.id);
+      const server = keeper?.serverOfPane(session.id) ?? null;
+      const agent = agents.get(session.id);
+      return {
+        paneId: session.id,
+        pid: session.pid,
+        workspaceId: placement?.workspaceId ?? server?.workspaceId ?? null,
+        tabId: placement?.tabId ?? null,
+        serverId: server?.id ?? null,
+        runtime: agent?.runtime ?? null,
+        task: agent?.prompt ?? null,
+      };
+    });
+}
+
 // Mirror Electron's own ipcMain.handle listener signature exactly (its args are
 // `...args: any[]`), so every existing typed listener stays assignable through
 // the wrapper without widening or casting at 200 call sites.
 type InvokeListener = Parameters<typeof ipcMain.handle>[1];
+/** The gated registration, handed to the areas that keep their channels in their own module. */
+export type IpcHandle = (channel: string, listener: InvokeListener) => void;
 
 // Gate-by-default registration. Every channel registered through `handle`
 // requires the trusted main-window sender BEFORE its listener runs. This is the
@@ -664,44 +775,43 @@ function handleOpen(channel: string, listener: InvokeListener): void {
 }
 void handleOpen;
 
+function notifyIdsFromIpc(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((id): id is string => typeof id === "string" && id.length > 0).slice(0, 500);
+}
+
+function notifyViewFromIpc(
+  raw: Partial<NotificationViewSnapshot> | null | undefined,
+): NotificationViewSnapshot | null {
+  if (!raw || typeof raw !== "object") return null;
+  const str = (value: unknown): string | null =>
+    typeof value === "string" && value.length > 0 ? value : null;
+  const terminal = raw.terminal;
+  const workspaceId = str(terminal?.workspaceId);
+  const tabId = str(terminal?.tabId);
+  const paneId = str(terminal?.paneId);
+  const automationWorkspaceId = str(raw.automation?.workspaceId);
+  const jobId = str(raw.automation?.jobId);
+  return {
+    workspaceId: str(raw.workspaceId),
+    visibleRunId: str(raw.visibleRunId),
+    terminal: workspaceId && tabId && paneId ? { workspaceId, tabId, paneId } : null,
+    automation: automationWorkspaceId && jobId ? { workspaceId: automationWorkspaceId, jobId } : null,
+  };
+}
+
 export function registerIpc(): void {
   handle("onboarding:load", () => loadOnboardingProgress());
   handle("onboarding:save", (_event, value: unknown) => saveOnboardingProgress(value));
   handle("onboarding:check", () => setupService.check());
   handle("onboarding:install", (_event, tool: unknown) => setupService.installTool(tool));
   handle("onboarding:install-status", () => setupService.installStatus());
-  // A Codex switch is a runtime-wide transaction: Codex keeps one sign-in
-  // for every terminal, so first give every Codara-owned Codex terminal the
-  // normal PTY close path so transcripts flush, then close codex sessions
-  // started in other local terminals. Only after both stages settle may the
-  // live slot change. The service asks for consent (with the count) first.
-  const closeEveryCodexSession = async () => {
-    const studio = await pty.disposeNativeCliRuntimeGraceful("codex");
-    const external = await shutdownExternalNativeCliProcesses("codex");
-    return {
-      closedSessionCount:
-        studio.closedSessionCount + external.closedProcessCount,
-    };
-  };
-  codexAccounts.setSessionShutdown(closeEveryCodexSession);
-  // The unified account services close only the terminals of the account
-  // being deleted, and only after the user confirmed it; the pty layer owns
-  // the session table, so it is handed in here. Claude and Grok panes are
-  // per-account; Codex panes all share the live slot.
-  anthropicAccounts.setTerminalSessions({
-    liveOwnerIds: () => pty.liveSessionOwnerIds(),
-    disposeProfileSessions: (profileId) =>
-      pty.disposeNativeClaudeProfileSessions(profileId),
-  });
-  grokAccounts.setTerminalSessions({
-    liveOwnerIds: () => pty.liveSessionOwnerIds(),
-    disposeProfileSessions: (profileId) => pty.disposeNativeGrokProfileSessions(profileId),
-  });
-  codexAccounts.setTerminalSessions({
-    liveOwnerIds: () => pty.liveSessionOwnerIds(),
-    liveRuntimeSessionCount: () => pty.liveNativeCliRuntimeSessionCount("codex"),
-    disposeProfileSessions: () => closeEveryCodexSession(),
-  });
+  // Account changes never close a terminal: a deleted account's home waits
+  // for its terminals to exit. The pty layer owns the session table, so the
+  // services learn which lease owners are still alive from it.
+  for (const accounts of [anthropicAccounts, codexAccounts, grokAccounts]) {
+    accounts.setTerminalSessions({ liveOwnerIds: () => pty.liveSessionOwnerIds() });
+  }
   for (const provider of ["anthropic", "openai-codex", "xai"] as const) {
     unifiedAccountsFor(provider).setBroadcast(() => {
       broadcastPiSubscriptionChanged(provider);
@@ -717,15 +827,15 @@ export function registerIpc(): void {
     // Persisting workspaces re-seeds the fs sandbox allowlist (below), so this
     // channel can widen readable roots. It is gated to the trusted renderer by
     // default via handle() (see the sender-gating section above).
-    await saveState(state);
+    // A save that crossed a main-process workspace edit in flight is
+    // reconciled with it, so roots come from what was stored.
+    const saved = await saveState(state, { fromRenderer: true });
     // Refresh the fs sandbox allowlist whenever workspaces change. The
     // renderer also pushes via ui:setAllowedRoots, but updating here means a
     // newly-added workspace is reachable the instant it's persisted, even
     // before the renderer effect that calls setAllowedRoots fires.
-    const roots = state.workspaces
-      .flatMap((w) => [w.cwd, ...(w.extraFolders ?? [])])
-      .filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0);
-    setAllowedRoots(roots);
+    setAllowedRoots(workspaceAllowedRoots(saved));
+    void noteCenterWorkspaces(saved.workspaces.map((w) => w.id)).catch(() => undefined);
   });
 
   handle("settings:load", async (): Promise<AppSettings> => {
@@ -805,8 +915,26 @@ export function registerIpc(): void {
 
   // READ-ONLY: reports whether a shell startup file still carries the block
   // the retired "Active account in your terminal" feature appended, so the
-  // Accounts panel can tell the user how to delete it themselves. Codara no
-  // longer writes to shell startup files anywhere.
+  // Accounts panel can tell the user how to delete it themselves. That
+  // feature's block is never edited; the one line Codara does keep in
+  // startup files now is claude-follow's, handled below.
+  handle(
+    "claude-follow:status",
+    async (): Promise<ClaudeFollowStatus> => {
+      const { claudeFollowStatus } = await import("./claude-follow/claude-follow-service");
+      return claudeFollowStatus();
+    },
+  );
+  handle(
+    "claude-follow:set",
+    async (_event, input?: { enabled?: unknown }): Promise<ClaudeFollowStatus> => {
+      if (typeof input?.enabled !== "boolean") throw new TypeError("enabled must be true or false");
+      const { setClaudeFollowEnabled } = await import("./claude-follow/claude-follow-service");
+      const status = await setClaudeFollowEnabled(input.enabled);
+      broadcastPreferencesChanged({ key: "claudeFollowsActiveAccount", value: status.enabled });
+      return status;
+    },
+  );
   handle(
     "native-cli-shell-leftover:status",
     async (): Promise<NativeCliShellProfileLeftover | null> => {
@@ -865,18 +993,40 @@ export function registerIpc(): void {
       await unifiedAccountsReady();
       const provider = piSubscriptionProviderFromIpc(input?.provider);
       const profileId = piAccountProfileIdFromIpc(input?.profileId);
-      // One switch for both halves: Cora and the CLI move together. A Codex
-      // switch that would close sessions refuses with their count until the
-      // card asks again with closeSessions; the count travels in the message.
-      try {
-        await unifiedAccountsFor(provider).useAccount(profileId, {
-          closeSessions: input?.closeSessions === true,
-        });
-      } catch (error) {
-        if (error instanceof UnifiedAccountSessionsError) throw new Error(error.message);
-        throw error;
-      }
+      // One switch for both halves: Cora and the CLI move together.
+      await unifiedAccountsFor(provider).useAccount(profileId);
       broadcastNativeCliAccountsChanged();
+      return inspectAfterPiAccountMetadataChange(provider);
+    },
+  );
+  // The System login: new sessions use the CLI's own login, the offer line
+  // adds it as an account, or hides it. None of them touches that login.
+  handle(
+    "pi-subscriptions:use-system-login",
+    async (_event, input?: Partial<Record<"provider", unknown>>) => {
+      await unifiedAccountsReady();
+      const provider = piSubscriptionProviderFromIpc(input?.provider);
+      await unifiedAccountsFor(provider).useSystemLogin();
+      broadcastNativeCliAccountsChanged();
+      return inspectAfterPiAccountMetadataChange(provider);
+    },
+  );
+  handle(
+    "pi-subscriptions:add-system-account",
+    async (_event, input?: Partial<Record<"provider", unknown>>) => {
+      await unifiedAccountsReady();
+      const provider = piSubscriptionProviderFromIpc(input?.provider);
+      await unifiedAccountsFor(provider).addSystemAccount();
+      broadcastNativeCliAccountsChanged();
+      return inspectAfterPiAccountMetadataChange(provider);
+    },
+  );
+  handle(
+    "pi-subscriptions:dismiss-system-offer",
+    async (_event, input?: Partial<Record<"provider", unknown>>) => {
+      await unifiedAccountsReady();
+      const provider = piSubscriptionProviderFromIpc(input?.provider);
+      await unifiedAccountsFor(provider).dismissSystemOffer();
       return inspectAfterPiAccountMetadataChange(provider);
     },
   );
@@ -890,20 +1040,12 @@ export function registerIpc(): void {
         (profile) => profile.id === profileId,
       );
       if (!target) throw new Error(`Pi account profile not found: ${profileId}`);
-      try {
-        await unifiedAccountsFor(target.provider).deleteAccount(profileId, {
-          closeSessions: input?.closeSessions === true,
-          ownershipGuard: async (profile) => {
-            await assertPiAccountProfileIsNotActive(profile.id);
-            return false;
-          },
-        });
-      } catch (error) {
-        // The count travels in the message so the card's second step can say
-        // how many terminals it would close.
-        if (error instanceof UnifiedAccountSessionsError) throw new Error(error.message);
-        throw error;
-      }
+      await unifiedAccountsFor(target.provider).deleteAccount(profileId, {
+        ownershipGuard: async (profile) => {
+          await assertPiAccountProfileIsNotActive(profile.id);
+          return false;
+        },
+      });
       broadcastNativeCliAccountsChanged();
       return inspectAfterPiAccountMetadataChange(target.provider);
     },
@@ -952,6 +1094,11 @@ export function registerIpc(): void {
     const { cancelPiSubscriptionLogin } = await getPiSubscriptionAuth();
     cancelPiSubscriptionLogin(input?.requestId, event.sender);
   });
+  handle("pi-subscriptions:resume-login", async (event) => {
+    await unifiedAccountsReady();
+    const { resumePiSubscriptionLogin } = await getPiSubscriptionAuth();
+    return resumePiSubscriptionLogin(event.sender);
+  });
   handle("pi-runtime:install", async (event) => {
     const { installPiRuntimeForWindow } = await getPiSubscriptionAuth();
     return installPiRuntimeForWindow(event.sender);
@@ -961,6 +1108,24 @@ export function registerIpc(): void {
     const { inspectPiSubscriptionUsage } = await import("./orchestration/pi-subscription-usage");
     return inspectPiSubscriptionUsage(input?.force === true);
   });
+  // Spends one Codex rate-limit reset of one account, after the user
+  // confirmed it in the usage panel. Every window then re-reads that
+  // account, whose cached reading the call dropped.
+  handle(
+    "pi-subscriptions:codex-reset",
+    async (_event, input?: { profileId?: unknown }): Promise<PiCodexResetResult> => {
+      await unifiedAccountsReady();
+      const profileId = piAccountProfileIdFromIpc(input?.profileId);
+      const { redeemCodexRateLimitReset } = await import("./orchestration/pi-subscription-usage");
+      try {
+        return { outcome: await redeemCodexRateLimitReset(profileId) };
+      } finally {
+        for (const contents of webContents.getAllWebContents()) {
+          if (!contents.isDestroyed()) contents.send("pi-subscriptions:event", { type: "usage" });
+        }
+      }
+    },
+  );
   // Lazily imported like the pi-subscription handlers: the scanner pulls in the
   // transcript readers and the persisted memo, none of which is worth loading
   // for a session that never opens the Usage tab.
@@ -968,28 +1133,41 @@ export function registerIpc(): void {
     const { readUsageSummary } = await import("./usage-analytics");
     return readUsageSummary(input);
   });
+  // The chat and manager pickers read the same discovered list as the worker
+  // models page, so a model the provider lists for the account is pickable
+  // everywhere at once.
   handle("pi-models:catalog", async (_event, input?: { force?: unknown }) => {
-    const { inspectPiModelCatalog } = await import("./orchestration/pi-model-catalog");
-    return inspectPiModelCatalog(input?.force === true);
+    const { inspectUnifiedPiModelCatalog } = await import("./orchestration/worker-model-catalog");
+    return inspectUnifiedPiModelCatalog(input?.force === true);
+  });
+  handle("worker-models:catalog", async (_event, input?: { force?: unknown }) => {
+    const { inspectWorkerModelCatalog } = await import("./orchestration/worker-model-catalog");
+    return inspectWorkerModelCatalog(input?.force === true);
   });
 
+  // Remote access imports agent-sync directly, so its trash and Pi wiring must
+  // be in place before any phone-initiated removal, not on first IPC use.
+  void getAgentSync();
   handle(
     "agents:sync",
-    async (_e, input?: { cwd?: string | null }) => {
+    async (_e, input?: { cwd?: string | null; dryRun?: boolean }) => {
       const { syncAgentAssets } = await getAgentSync();
-      const result = await syncAgentAssets({ cwd: input?.cwd ?? null });
-      // Sync is also the manual repair path for the built-in: an entry stranded
-      // by a moved install (command path gone) is rewritten to the current app
-      // path here instead of waiting for the next launch. Repair only: a runtime
-      // the user removed the built-in from must not get it back from a sync
-      // click, so nothing is reported for it either.
+      const dryRun = input?.dryRun === true;
+      const result = await syncAgentAssets({ cwd: input?.cwd ?? null, dryRun });
+      // The built-in repair below writes, so a preview leaves it out.
+      if (dryRun) return result;
+      // Sync is also the manual repair path for the opt-in global entries: one
+      // stranded by a moved install (command path gone) is rewritten to the
+      // current app path. Repair only, and only while "Codara tools in other
+      // apps" is on: without the opt-in Codara keeps out of the CLIs' configs.
       const settings = await loadSettings();
-      if (settings.playwrightMcpAutoInstall !== false) {
+      if (settings.studioToolsInOtherApps === true) {
         try {
           const { repairSparkBuiltinEntries, SPARK_BUILTIN_SERVER_NAME } = mcpInstaller;
           const repaired = await repairSparkBuiltinEntries();
           if (repaired.claude) result.mcp.toClaude.push(SPARK_BUILTIN_SERVER_NAME);
           if (repaired.codex) result.mcp.toCodex.push(SPARK_BUILTIN_SERVER_NAME);
+          if (repaired.grok) (result.mcp.toGrok ??= []).push(SPARK_BUILTIN_SERVER_NAME);
         } catch (err) {
           result.mcp.errors.push(
             `Could not refresh the built-in MCP entry: ${err instanceof Error ? err.message : String(err)}`,
@@ -1003,21 +1181,30 @@ export function registerIpc(): void {
     "agents:assets",
     async (_e, input?: { cwd?: string | null }) => {
       const { listAgentAssets } = await getAgentSync();
-      return listAgentAssets({ cwd: input?.cwd ?? null, settings: await loadSettings() });
+      const { keepAgentsInChromeEnabled } = await import("./browser/chrome/keep-agents-in-chrome");
+      return listAgentAssets({
+        cwd: input?.cwd ?? null,
+        settings: await loadSettings(),
+        separateBrowserToolsOff: keepAgentsInChromeEnabled(),
+      });
     },
   );
   handle(
     "agents:deleteAsset",
     async (_e, input: { id: string }) => {
       const { deleteAgentAsset } = await getAgentSync();
-      return deleteAgentAsset({ id: input.id });
+      const result = await deleteAgentAsset({ id: input.id });
+      await afterSkillAssetDeleted(result);
+      return result;
     },
   );
   handle(
     "agents:installAsset",
     async (_e, input: { id: string; target: "claude" | "codex" | "grok" }) => {
       const { installAgentAssetToRuntime } = await getAgentSync();
-      return installAgentAssetToRuntime({ id: input.id, target: input.target });
+      const result = await installAgentAssetToRuntime({ id: input.id, target: input.target });
+      await afterSkillAssetInstalled(input.id, result);
+      return result;
     },
   );
   handle(
@@ -1054,11 +1241,110 @@ export function registerIpc(): void {
       });
     },
   );
+  handle(
+    "agents:piMcpPreview",
+    async (_e, input?: { cwd?: string | null }) => {
+      const [{ describePiMcpDelivery }, piElectron, settings] = await Promise.all([
+        getAgentSync(),
+        import("./orchestration/pi-runtime-electron"),
+        loadSettings(),
+      ]);
+      const preview = describePiMcpDelivery({
+        cwd: input?.cwd ?? null,
+        settings,
+        live: await piElectron.readLivePiMcpStatuses(),
+      });
+      const discoveryError = piElectron.piMcpDiscoveryError();
+      if (discoveryError) preview.errors.push(discoveryError);
+      return preview;
+    },
+  );
+  handle(
+    "agents:probeMcp",
+    async (_e, input: AgentMcpProbeRequest) => {
+      await getAgentSync();
+      const [{ runMcpProbe }, state] = await Promise.all([import("./mcp-probe"), loadState()]);
+      return runMcpProbe(input ?? {}, { workspaces: state.workspaces, piAgentDir: join(codaraHome(), "pi-agent") });
+    },
+  );
+  handle(
+    "agents:parseMcpSnippet",
+    async (_e, input: { text?: unknown }): Promise<AgentMcpSnippetParseResult> => {
+      const [{ parseMcpSnippet }, { mcpServerFromDraft }] = await Promise.all([
+        import("./mcp-snippet"),
+        getAgentSync(),
+      ]);
+      const parsed = parseMcpSnippet(typeof input?.text === "string" ? input.text : "");
+      if (!parsed.ok) return parsed;
+      // Same rules as the save path, reported up front. A missing name is
+      // left for the form, where the user types one.
+      for (const server of parsed.servers) {
+        if (!server.name) continue;
+        const checked = mcpServerFromDraft(server);
+        if ("error" in checked) parsed.notes.push(`'${server.name}': ${checked.error}`);
+      }
+      return parsed;
+    },
+  );
+  handle(
+    "agents:mcpImportCandidates",
+    async (_e, input?: { cwd?: string | null }) => {
+      const { listMcpImportCandidates } = await getAgentSync();
+      return listMcpImportCandidates({ cwd: input?.cwd ?? null });
+    },
+  );
+  handle(
+    "agents:importMcp",
+    async (_e, input: { cwd?: string | null; ids?: unknown }) => {
+      const { importMcpServersToCodara } = await getAgentSync();
+      const ids = Array.isArray(input?.ids) ? input.ids.filter((id): id is string => typeof id === "string") : [];
+      return importMcpServersToCodara({ cwd: input?.cwd ?? null, ids });
+    },
+  );
+  handle("agents:createSkill", async (_e, input: AgentSkillCreateInput) => {
+    const [{ codaraSkillsDir }, { createCodaraSkill }] = await Promise.all([getAgentSync(), import("./skill-import")]);
+    return createCodaraSkill(
+      {
+        name: typeof input?.name === "string" ? input.name : "",
+        description: typeof input?.description === "string" ? input.description : "",
+        instructions: typeof input?.instructions === "string" ? input.instructions : "",
+      },
+      { skillsDir: codaraSkillsDir(), originsDir: skillOriginsDir() },
+    );
+  });
+  handle("agents:importSkill", async (_e, input: AgentSkillImportSource) => {
+    const [{ codaraSkillsDir }, { importCodaraSkill }] = await Promise.all([getAgentSync(), import("./skill-import")]);
+    const subdir = typeof input?.subdir === "string" && input.subdir ? input.subdir : undefined;
+    const source: AgentSkillImportSource | null =
+      input?.kind === "folder" && typeof input.path === "string"
+        ? { kind: "folder", path: input.path, subdir }
+        : input?.kind === "zip" && typeof input.path === "string"
+          ? { kind: "zip", path: input.path, subdir }
+          : input?.kind === "git" && typeof input.url === "string"
+            ? { kind: "git", url: input.url, subdir }
+            : null;
+    if (!source) return { ok: false, error: "Choose a folder, a zip file or a git address to import." };
+    return importCodaraSkill(source, {
+      skillsDir: codaraSkillsDir(),
+      stagingDir: join(codaraHome(), "tmp"),
+      originsDir: skillOriginsDir(),
+    });
+  });
+  handle("dialog:openSkillArchive", async (e): Promise<string | null> => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    const result = await dialog.showOpenDialog(win!, {
+      title: "Import a skill archive",
+      properties: ["openFile"],
+      defaultPath: app.getPath("downloads"),
+      filters: [{ name: "Zip archive", extensions: ["zip"] }],
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    return result.filePaths[0];
+  });
   handle("agents:builtins", async () => {
-    const [{ getSparkBuiltinStatus }, runtimes, settings] = await Promise.all([
+    const [{ getSparkBuiltinStatus }, runtimes] = await Promise.all([
       mcpInstaller,
       detectAgentRuntimes(false),
-      loadSettings(),
     ]);
     const isAvailable = (kind: "claude" | "codex" | "grok") =>
       runtimes.some((r) => r.kind === kind && r.installed);
@@ -1066,7 +1352,6 @@ export function registerIpc(): void {
       claudeRuntimeAvailable: isAvailable("claude"),
       codexRuntimeAvailable: isAvailable("codex"),
       grokRuntimeAvailable: isAvailable("grok"),
-      autoInstallEnabled: settings.playwrightMcpAutoInstall !== false,
     });
   });
   handle(
@@ -1092,10 +1377,29 @@ export function registerIpc(): void {
     ): Promise<AppPreferences> => {
       const next = await setPreference(args.key, args.value);
       broadcastPreferencesChanged({ key: args.key, value: next[args.key] });
+      // Off deletes every saved terminal output at once, not at the next save.
+      if (args.key === "restoreTerminalOutput") {
+        void setTerminalScrollbackEnabled(next.restoreTerminalOutput !== false).catch(() => undefined);
+      }
       // Reflect keepRunningInBackground changes in the tray immediately so the
       // user doesn't have to restart the app to see the menu-bar icon appear or
       // disappear. The hook is registered by index.ts after ensureTray /
       // destroyTray are defined; it's null if somehow called before that.
+      // The claude-follow setting adds or takes out the line in the user's
+      // startup files; Settings uses claude-follow:set, this keeps any
+      // other writer of the preference in step.
+      if (args.key === "claudeFollowsActiveAccount") {
+        void import("./claude-follow/claude-follow-service")
+          .then(({ applyClaudeFollowSetting }) => applyClaudeFollowSetting())
+          .catch(() => undefined);
+      }
+      // New sessions follow "Keep agents in your Chrome": the launch flags
+      // are rewritten with or without the browser tools it turns off.
+      if (args.key === "keepAgentsInYourChrome") {
+        void import("./browser/chrome/keep-agents-in-chrome")
+          .then(({ applyKeepAgentsInChrome }) => applyKeepAgentsInChrome())
+          .catch(() => undefined);
+      }
       if (args.key === "keepRunningInBackground" && _trayHook) {
         if (args.value) {
           _trayHook.ensure();
@@ -1114,7 +1418,7 @@ export function registerIpc(): void {
   handle(
     "memory:get",
     async (_e, input?: MemoryStatusInput): Promise<CoraMemoryStatus> => {
-      return readMemoryStatus(input?.workspaceId ?? null);
+      return readMemoryStatus(input?.workspaceId ?? null, input?.profileId);
     },
   );
 
@@ -1124,8 +1428,18 @@ export function registerIpc(): void {
       const workspaceId = requireMemoryWorkspace(input.scope, input.workspaceId);
       const { setMemoryEnabled } = coraMemory;
       const { resolveCoraProfile } = await import("./orchestration/cora-profiles");
-      await setMemoryEnabled(input.scope, workspaceId, input.enabled, resolveCoraProfile().id);
-      return readMemoryStatus(input.workspaceId ?? null);
+      await setMemoryEnabled(input.scope, workspaceId, input.enabled, resolveCoraProfile(input.profileId).id);
+      return readMemoryStatus(input.workspaceId ?? null, input.profileId);
+    },
+  );
+
+  handle(
+    "memory:ensureFile",
+    async (_e, input: MemoryEnsureFileInput): Promise<string> => {
+      const workspaceId = requireMemoryWorkspace(input.scope, input.workspaceId);
+      const { ensureMemoryFile } = coraMemory;
+      const { resolveCoraProfile } = await import("./orchestration/cora-profiles");
+      return ensureMemoryFile(input.scope, workspaceId, resolveCoraProfile(input.profileId).id);
     },
   );
 
@@ -1141,9 +1455,118 @@ export function registerIpc(): void {
         input.scope,
         workspaceId,
         input.includeUserLines === true,
-        resolveCoraProfile().id,
+        resolveCoraProfile(input.profileId).id,
       );
-      return readMemoryStatus(input.workspaceId ?? null);
+      return readMemoryStatus(input.workspaceId ?? null, input.profileId);
+    },
+  );
+
+  // Learned memory (memory v3): the items Cora learned by itself, under the
+  // two files. Every channel resolves to the fresh view so the Memory page
+  // never re-reads after a change, and every store write is announced on
+  // "memory:items-changed" so an open chat can update its chips.
+  memoryItems.onMemoryItemsChanged((profileId) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      const contents = window.webContents;
+      if (contents.isDestroyed()) continue;
+      try {
+        contents.send("memory:items-changed", { profileId });
+      } catch {
+        // A closing window must not fail the write that already landed.
+      }
+    }
+  });
+
+  handle(
+    "memory:items",
+    async (_e, input?: { workspaceId?: string | null; profileId?: string }): Promise<MemoryItemsView> =>
+      readMemoryItemsView(input?.workspaceId ?? null, input?.profileId),
+  );
+
+  handle(
+    "memory:items:update",
+    async (
+      _e,
+      input: { workspaceId?: string | null; profileId?: string; id: string; patch: MemoryItemPatch },
+    ): Promise<MemoryItemsView> => {
+      const profileId = await resolveMemoryProfileId(input.profileId);
+      await memoryItems.updateMemoryItem(profileId, String(input.id), sanitizeMemoryPatch(input.patch), input.workspaceId ?? null);
+      return readMemoryItemsView(input.workspaceId ?? null, profileId);
+    },
+  );
+
+  handle(
+    "memory:items:delete",
+    async (_e, input: { workspaceId?: string | null; profileId?: string; id: string }): Promise<MemoryItemsView> => {
+      const profileId = await resolveMemoryProfileId(input.profileId);
+      await memoryItems.deleteMemoryItem(profileId, String(input.id));
+      return readMemoryItemsView(input.workspaceId ?? null, profileId);
+    },
+  );
+
+  handle(
+    "memory:items:add",
+    async (
+      _e,
+      input: { workspaceId?: string | null; profileId?: string; scope: MemoryItemScope; kind?: MemoryItemKind; text: string },
+    ): Promise<MemoryItemsView> => {
+      const profileId = await resolveMemoryProfileId(input.profileId);
+      const scope: MemoryItemScope = input.scope === "workspace" ? "workspace" : "global";
+      if (scope === "workspace" && !input.workspaceId) throw new Error("Open a workspace to add a workspace memory.");
+      await memoryItems.addManualMemoryItem(profileId, {
+        scope,
+        workspaceId: input.workspaceId ?? null,
+        kind: MEMORY_KINDS.has(input.kind as MemoryItemKind) ? (input.kind as MemoryItemKind) : "preference",
+        text: String(input.text ?? ""),
+      });
+      return readMemoryItemsView(input.workspaceId ?? null, profileId);
+    },
+  );
+
+  handle(
+    "memory:learning:set",
+    async (
+      _e,
+      input: { workspaceId?: string | null; profileId?: string; patch: Partial<MemoryLearningSettings> },
+    ): Promise<MemoryItemsView> => {
+      const { writeMemoryLearningSettings } = await import("./orchestration/memory-learning");
+      const patch: Partial<MemoryLearningSettings> = {};
+      for (const key of ["capture", "reflection", "consolidation"] as const) {
+        if (typeof input.patch?.[key] === "boolean") patch[key] = input.patch[key];
+      }
+      await writeMemoryLearningSettings(patch);
+      return readMemoryItemsView(input.workspaceId ?? null, input.profileId);
+    },
+  );
+
+  handle(
+    "memory:runHistory:clear",
+    async (_e, input: { workspaceId: string; profileId?: string }): Promise<MemoryItemsView> => {
+      if (!input.workspaceId) throw new Error("Open a workspace first.");
+      const profileId = await resolveMemoryProfileId(input.profileId);
+      const { clearRunHistory } = await import("./orchestration/run-memory");
+      await clearRunHistory(input.workspaceId, profileId);
+      return readMemoryItemsView(input.workspaceId, profileId);
+    },
+  );
+
+  // What one chat taught memory, for the "Remembered" chips under its
+  // messages. Resolved from the run so the renderer cannot ask for another
+  // profile's items through a chat it does not show, and so Undo deletes in
+  // the profile the item was learned in rather than the default one.
+  handle(
+    "memory:runItems",
+    async (_e, input: { runId: string }): Promise<{ profileId: string; items: CoraMemoryItem[] }> => {
+      const { getRun } = await import("./orchestration/run-store");
+      const run = await getRun(String(input.runId));
+      if (!run) return { profileId: "default", items: [] };
+      const profileId = await resolveMemoryProfileId(run.coraProfileId);
+      return {
+        profileId,
+        items: memoryItems
+          .listMemoryItems(profileId, { workspaceId: run.workspaceId })
+          .filter((item) => item.evidence.some((entry) => entry.runId === run.id)),
+      };
     },
   );
 
@@ -1167,6 +1590,28 @@ export function registerIpc(): void {
       const { listCoraProfiles, setDefaultCoraProfile } = await import("./orchestration/cora-profiles");
       await setDefaultCoraProfile(reference);
       return listCoraProfiles();
+    },
+  );
+
+  // PROFILE.md as one revision-checked document, the same pair the phone
+  // edits through, so the Capability Center edits instructions in place
+  // instead of opening a file behind its own modal.
+  handle(
+    "cora-profiles:readDocument",
+    async (_e, reference: string): Promise<CoraProfileDocumentView> => {
+      const { readCoraProfileDocument } = await import("./orchestration/cora-profiles");
+      return readCoraProfileDocument(reference);
+    },
+  );
+
+  handle(
+    "cora-profiles:saveDocument",
+    async (
+      _e,
+      input: { reference: string; revision: string; content: string },
+    ): Promise<CoraProfileDocumentView> => {
+      const { saveCoraProfileDocument } = await import("./orchestration/cora-profiles");
+      return saveCoraProfileDocument(input.reference, input.revision, String(input.content ?? ""));
     },
   );
 
@@ -1619,6 +2064,25 @@ export function registerIpc(): void {
 
   handle("fs:removeWatchRoot", async (e, root: string): Promise<void> => {
     fsWatcher.removeWatchRoot(e.sender, root);
+  });
+
+  // The folders a root's Explorer shows expanded. Only folders inside a root
+  // this window already armed (and so gated) are accepted.
+  handle("fs:setWatchedDirs", async (e, root: string, dirs: unknown): Promise<string[]> => {
+    if (typeof root !== "string" || isRemotePath(root) || !Array.isArray(dirs)) return [];
+    const cleaned = dirs.filter((d): d is string => typeof d === "string" && d.length > 0);
+    return fsWatcher.setWatchedDirs(e.sender, root, cleaned);
+  });
+
+  handle("fs:watchPreviewFile", async (e, path: string): Promise<void> => {
+    if (typeof path !== "string" || isRemotePath(path)) return;
+    await assertAllowedReadPathResolved(path);
+    fsWatcher.watchPreviewFile(e.sender, path);
+  });
+
+  handle("fs:unwatchPreviewFile", async (e, path: string): Promise<void> => {
+    if (typeof path !== "string" || isRemotePath(path)) return;
+    fsWatcher.unwatchPreviewFile(e.sender, path);
   });
 
   // The renderer is authoritative about which workspaces are open, but the
@@ -2106,7 +2570,7 @@ export function registerIpc(): void {
         force?: boolean;
         deleteBranch?: boolean;
       },
-    ): Promise<GitOpResult> => {
+    ): Promise<GitRemoveWorktreeResult> => {
       const { removeCopyWorktree } = await getGitWorktrees();
       const result = await removeCopyWorktree(input, {
         // A shell or agent pane whose cwd is the worktree holds the directory
@@ -2229,6 +2693,51 @@ export function registerIpc(): void {
       }
       const { readWorkerAttemptPrompt } = await getRunStore();
       return readWorkerAttemptPrompt(input.runId, input.attemptId);
+    },
+  );
+
+  handle(
+    "orchestration:readWorkerLog",
+    async (
+      _e,
+      input: { runId: string; attemptId: string },
+    ): Promise<{ text: string; truncated: boolean } | null> => {
+      if (!input || typeof input.runId !== "string" || typeof input.attemptId !== "string") {
+        throw new Error("Invalid worker log request.");
+      }
+      const { readWorkerAttemptLog } = await getRunStore();
+      return readWorkerAttemptLog(input.runId, input.attemptId);
+    },
+  );
+
+  handle(
+    "orchestration:stopWorkerAttempt",
+    async (_e, input: { runId: string; attemptId: string }): Promise<RunState> => {
+      if (!input || typeof input.runId !== "string" || typeof input.attemptId !== "string") {
+        throw new Error("Invalid worker stop request.");
+      }
+      const { stopWorkerAttempt } = await getRunStore();
+      return stopWorkerAttempt(input.runId, input.attemptId);
+    },
+  );
+
+  handle(
+    "orchestration:retryWorkerTask",
+    async (_e, input: { runId: string; workerTaskId: string }): Promise<RunState> => {
+      if (!input || typeof input.runId !== "string" || typeof input.workerTaskId !== "string") {
+        throw new Error("Invalid worker retry request.");
+      }
+      const { retryWorkerTask } = await getRunStore();
+      return retryWorkerTask(input.runId, input.workerTaskId);
+    },
+  );
+
+  handle(
+    "orchestration:getLiveActivity",
+    async (_e, workspaceId: string): Promise<LiveWorkerActivity[]> => {
+      if (typeof workspaceId !== "string") return [];
+      const { liveWorkerActivity } = await getRunStore();
+      return liveWorkerActivity(workspaceId);
     },
   );
 
@@ -2520,10 +3029,93 @@ export function registerIpc(): void {
     });
   });
 
+  // The editor's "Test check": run an automation's precheck once, exactly as
+  // the loop driver would before a pass. Never rejects.
+  handle(
+    "automations:testPrecheck",
+    async (_e, input: TestPrecheckInput): Promise<AutomationPrecheckResult> => {
+      const { normalizeAutomationPrecheck } = await import("@shared/automation-catchup");
+      const precheck = normalizeAutomationPrecheck(input?.precheck);
+      if (!precheck) {
+        return { passed: false, exitCode: null, timedOut: false, durationMs: 0, outputTail: "", error: "no command" };
+      }
+      // A missing or relative folder is the runner's to report, in its words.
+      const cwd = typeof input.cwd === "string" ? input.cwd : "";
+      const { runAutomationPrecheck } = await import("./orchestration/automation-precheck");
+      return runAutomationPrecheck(precheck, { cwd, env: { CODARA_AUTOMATION_PRECHECK: "1" } });
+    },
+  );
+
   // Looms v2: live direct-worker inventory for the Hub's Workers sub-tab.
   handle("automations:listActiveWorkers", async (): Promise<AutomationWorkerInfo[]> => {
     const { listActiveAutomationWorkers } = await import("./orchestration/direct-worker");
     return listActiveAutomationWorkers();
+  });
+
+  // Workflows: the hub's saved workflows, run form and progress tree. Running
+  // from here is the user acting, so there is no consent card.
+  handle("workflows:list", async (_e, cwd?: string): Promise<SavedWorkflowSummary[]> => {
+    const { listWorkflows } = await import("./orchestration/workflow-driver");
+    return listWorkflows(cwd || undefined);
+  });
+  handle("workflows:get", async (_e, input: { ref: string; cwd?: string }): Promise<SavedWorkflow | null> => {
+    const { getWorkflow } = await import("./orchestration/workflow-driver");
+    return getWorkflow(input.ref, input.cwd || undefined);
+  });
+  handle(
+    "workflows:check",
+    async (
+      _e,
+      input: { workflow?: string; source?: string; args?: unknown; caps?: Partial<WorkflowCaps>; cwd?: string },
+    ): Promise<WorkflowCheckResult> => {
+      const { checkWorkflow } = await import("./orchestration/workflow-driver");
+      return checkWorkflow(input);
+    },
+  );
+  handle("workflows:start", async (_e, input: StartWorkflowRunInput): Promise<RunState> => {
+    const { startWorkflowRun } = await import("./orchestration/workflow-driver");
+    return startWorkflowRun(input);
+  });
+  handle("workflows:status", async (_e, runId: string): Promise<WorkflowRunStatus> => {
+    const { workflowRunStatus } = await import("./orchestration/workflow-driver");
+    return workflowRunStatus(runId, { includeResult: true });
+  });
+  handle("workflows:listRuns", async (_e, workspaceId?: string): Promise<RunState[]> => {
+    const { listWorkflowRuns } = await import("./orchestration/workflow-driver");
+    return listWorkflowRuns(workspaceId || undefined);
+  });
+  handle("workflows:stop", async (_e, runId: string): Promise<void> => {
+    const { stopWorkflowRun } = await import("./orchestration/workflow-driver");
+    await stopWorkflowRun(runId, "Stopped by the user");
+  });
+  handle(
+    "workflows:resume",
+    async (_e, input: { runId: string; useLatestScript?: boolean }): Promise<void> => {
+      const { resumeWorkflowRun } = await import("./orchestration/workflow-driver");
+      await resumeWorkflowRun(input.runId, { useLatestScript: input.useLatestScript === true });
+    },
+  );
+  handle("workflows:cancel", async (_e, runId: string): Promise<void> => {
+    const { cancelWorkflowRun } = await import("./orchestration/workflow-driver");
+    await cancelWorkflowRun(runId, "Cancelled by the user");
+  });
+  handle("workflows:skip", async (_e, input: { runId: string; seq: number }): Promise<boolean> => {
+    const { skipWorkflowCall } = await import("./orchestration/workflow-driver");
+    return skipWorkflowCall(input.runId, input.seq);
+  });
+  handle(
+    "workflows:save",
+    async (
+      _e,
+      input: { sourceText: string; scope: "user" | "project"; cwd?: string; overwrite?: boolean },
+    ): Promise<SavedWorkflowSummary> => {
+      const { saveWorkflow } = await import("./orchestration/workflow-driver");
+      return saveWorkflow(input);
+    },
+  );
+  handle("workflows:delete", async (_e, input: { ref: string; cwd?: string }): Promise<boolean> => {
+    const { deleteWorkflow } = await import("./orchestration/workflow-driver");
+    return deleteWorkflow(input.ref, input.cwd || undefined);
   });
 
   handle(
@@ -2581,8 +3173,8 @@ export function registerIpc(): void {
   // spawns, and focuses in one tick, but main can hold the spawn for seconds
   // (native-account resolution shells out to the claude/codex CLIs before a
   // plain shell starts). pty.write/inject silently no-op on an unknown id, so
-  // bytes sent in that window — early keystrokes, or the session picker's
-  // injected launch command landing in a still-booting pane — used to vanish.
+  // bytes sent in that window (early keystrokes, or an injected launch
+  // command landing in a still-booting pane) used to vanish.
   // Ride out the in-flight spawn instead; a session that never comes up still
   // drops the bytes after the bound. IPC arrival order is preserved across the
   // wait: spawnWaiters resolve in registration order, so queued writes land in
@@ -2594,10 +3186,25 @@ export function registerIpc(): void {
   handle("pty:write", async (_e, args: { id: string; data: string }) => {
     await awaitPendingSpawn(args.id);
     pty.write(args.id, args.data);
-    // User keystrokes are the notifier's "a fresh turn may start" signal —
-    // they re-arm the pane's alert dedup (see noteTerminalUserInput).
+    // A submit starts the pane's next agent turn; other keys can answer a
+    // prompt or interrupt (see noteTerminalUserInput).
     noteTerminalUserInput(args.id, args.data);
   });
+
+  // UI sends to an agent: pasted into a pane's prompt, added to a Cora chat,
+  // or queued for an agent to pull. Each send carries its own workspace; the
+  // service refuses a pane or chat that belongs to another one.
+  handle("agent:deliver", async (_e, request: AgentDeliveryRequest): Promise<AgentDeliveryResult> => {
+    // A sleeping agent's pane spawns only when the user opens it: no point
+    // waiting for it, the service refuses the send right away.
+    if (request?.target?.kind === "pane" && !agentPaneAsleep(request.target.paneId)) {
+      await awaitPendingSpawn(request.target.paneId);
+    }
+    return agentDelivery().deliver(request);
+  });
+  handle("agent:inboxPending", async (_e, args: { workspaceId: string; paneId?: string | null }): Promise<number> =>
+    agentDelivery().pending(args.workspaceId, args.paneId ?? null),
+  );
 
   handle(
     "pty:inject",
@@ -2607,9 +3214,9 @@ export function registerIpc(): void {
         submit: args.submit ?? true,
         stashDraft: args.stashDraft === true,
       });
-      // Injected prompts (slash commands, drag-drop paths) start turns the
-      // same way keystrokes do.
-      noteTerminalUserInput(args.id);
+      // A submitted injection (slash command, Cora handing a prompt over)
+      // starts a turn the way Enter does; an unsubmitted one is only text.
+      noteTerminalUserInput(args.id, (args.submit ?? true) ? undefined : "");
     },
   );
 
@@ -2627,6 +3234,9 @@ export function registerIpc(): void {
     }
     noteTerminalWillDispose(args.id);
     pty.dispose(args.id);
+    // Every renderer pane close funnels here, and nothing else does: the
+    // user is done with this pane, so its saved output goes too.
+    void forgetTerminalScrollback(args.id).catch(() => undefined);
   });
 
   // Probe for an existing session. Used by ChatPanel's backend-terminal tab
@@ -2639,9 +3249,13 @@ export function registerIpc(): void {
   handle("pty:resourceSnapshot", async () => {
     return pty.resourceSnapshot();
   });
-  handle("system:resourceSnapshot", async () => {
-    return systemResourceSnapshot();
+  handle("system:resourceSnapshot", async (_e, args: unknown) => {
+    const options = typeof args === "object" && args !== null ? (args as { detail?: unknown; focus?: unknown }) : {};
+    const focus = SYSTEM_RESOURCES.find((resource) => resource === options.focus);
+    return systemResourceSnapshot({ detail: options.detail === true, focus }, systemPaneRoots);
   });
+  // Keep awake, the control beside the system meters.
+  registerKeepAwakeIpc(handle);
 
   // Pause / resume the live byte stream while the renderer-side TerminalPane
   // is unmounted (workspace switch). Paused sessions buffer pty output into a
@@ -2681,71 +3295,6 @@ export function registerIpc(): void {
   });
 
   // ── Agent session restore (manual Claude/Codex terminal panes) ──────────
-  handle(
-    "agentSession:list",
-    async (
-      _e,
-      args: {
-        runtime: WorkerSessionRuntime;
-        cwd: string;
-        nativeCodexProfileId?: string;
-        nativeClaudeProfileId?: string;
-        nativeGrokProfileId?: string;
-      },
-    ): Promise<WorkerSessionSummary[]> => {
-      if (
-        !args ||
-        (args.runtime !== "claude" && args.runtime !== "codex" && args.runtime !== "grok")
-      ) {
-        return [];
-      }
-      if (typeof args.cwd !== "string" || !args.cwd.trim()) return [];
-      assertLocalWorkspace(args.cwd, "Worker session history");
-      if (args.runtime === "claude") {
-        const execution =
-          args.nativeClaudeProfileId === undefined
-            ? await resolveNewNativeClaudeProfile()
-            : await resolveFrozenNativeClaudeProfile(
-                args.nativeClaudeProfileId,
-              );
-        const items = await listWorkerSessions(args.runtime, args.cwd, {
-          claudeStateDir:
-            execution.env.CLAUDE_CONFIG_DIR ?? null,
-        });
-        return items.map((item) => ({
-          ...item,
-          nativeClaudeProfileId: execution.profileId,
-        }));
-      }
-      if (args.runtime === "grok") {
-        const execution =
-          args.nativeGrokProfileId === undefined
-            ? await resolveNewNativeGrokProfile()
-            : await resolveFrozenNativeGrokProfile(args.nativeGrokProfileId);
-        const items = await listWorkerSessions(args.runtime, args.cwd, {
-          grokHome: execution.env.GROK_HOME,
-        });
-        return items.map((item) => ({
-          ...item,
-          nativeGrokProfileId: execution.profileId,
-        }));
-      }
-      const execution =
-        args.nativeCodexProfileId === undefined
-          ? await resolveNewNativeCodexProfile()
-          : await resolveFrozenNativeCodexProfile(
-              args.nativeCodexProfileId,
-            );
-      const items = await listWorkerSessions(args.runtime, args.cwd, {
-        codexHome: execution.stateHome,
-      });
-      return items.map((item) => ({
-        ...item,
-        nativeCodexProfileId: execution.profileId,
-      }));
-    },
-  );
-
   handle(
     "agentSession:listAll",
     async (): Promise<WorkerSessionSummary[]> => {
@@ -2840,10 +3389,15 @@ export function registerIpc(): void {
       const exclude = new Set(
         (args.excludeSessionIds ?? []).map((id) => id.toLowerCase()).filter(Boolean),
       );
+      // The pane's live process is the authority on its account. The
+      // renderer's pointer can predate an account switch, and a pane that
+      // re-attached after one still runs where it started.
+      const liveCodexProfileId = args.paneId ? pty.nativeCodexProfileId(args.paneId) : undefined;
+      const liveClaudeProfileId = args.paneId ? pty.nativeClaudeProfileId(args.paneId) : undefined;
+      const liveGrokProfileId = args.paneId ? pty.nativeGrokProfileId(args.paneId) : undefined;
       const nativeCodexProfileId =
         args.runtime === "codex"
-          ? args.nativeCodexProfileId ??
-            (args.paneId ? pty.nativeCodexProfileId(args.paneId) : undefined)
+          ? liveCodexProfileId ?? args.nativeCodexProfileId
           : undefined;
       const nativeCodexExecution =
         args.runtime === "codex"
@@ -2851,8 +3405,7 @@ export function registerIpc(): void {
           : null;
       const nativeClaudeProfileId =
         args.runtime === "claude"
-          ? args.nativeClaudeProfileId ??
-            (args.paneId ? pty.nativeClaudeProfileId(args.paneId) : undefined)
+          ? liveClaudeProfileId ?? args.nativeClaudeProfileId
           : undefined;
       const nativeClaudeExecution =
         args.runtime === "claude"
@@ -2860,8 +3413,7 @@ export function registerIpc(): void {
           : null;
       const nativeGrokProfileId =
         args.runtime === "grok"
-          ? args.nativeGrokProfileId ??
-            (args.paneId ? pty.nativeGrokProfileId(args.paneId) : undefined)
+          ? liveGrokProfileId ?? args.nativeGrokProfileId
           : undefined;
       const nativeGrokExecution =
         args.runtime === "grok"
@@ -2885,7 +3437,9 @@ export function registerIpc(): void {
           found = discovered
             ? {
                 ...discovered,
-                nativeClaudeProfileId: nativeClaudeExecution?.profileId,
+                // Claude resolution always returns the Active account, so it
+                // would rename a pane that started on another one.
+                nativeClaudeProfileId: liveClaudeProfileId ?? nativeClaudeExecution?.profileId,
               }
             : null;
         } else if (args.runtime === "grok") {
@@ -3072,23 +3626,6 @@ export function registerIpc(): void {
     },
   );
 
-  // Pre-seed Codex directory trust before a resumed (or fresh) `codex --yolo`
-  // pane so its TUI never stalls on the "trust this directory?" prompt.
-  handle("agentSession:ensureCodexTrust", async (
-    _e,
-    args: { cwd: string; nativeCodexProfileId?: string },
-  ): Promise<void> => {
-    const execution =
-      args.nativeCodexProfileId === undefined
-        ? await resolveNewNativeCodexProfile()
-        : await resolveFrozenNativeCodexProfile(
-            args.nativeCodexProfileId,
-          );
-    await ensureCodexProjectTrust(
-      args.cwd,
-      execution.stateHome,
-    ).catch(() => undefined);
-  });
 
   // Repair a Claude transcript whose tail was truncated by an abrupt kill
   // (sleep/crash mid-write) so `claude --resume` accepts it. Truncates the
@@ -3145,10 +3682,20 @@ export function registerIpc(): void {
       _e,
       input: { workspaceId: string; workspaceName?: string; panes: TerminalNotifyPaneEntry[] },
     ) => {
-      return syncTerminalNotifyPanes(input);
+      const states = syncTerminalNotifyPanes(input);
+      if (Array.isArray(input?.panes)) {
+        trackTerminalScrollbackPanes(
+          input.panes
+            .filter((pane) => pane && !pane.excluded && typeof pane.paneId === "string")
+            .map((pane) => pane.paneId),
+        );
+      }
+      return states;
     },
   );
   handle("terminalNotify:snapshot", async () => terminalAgentStateSnapshot());
+  // The rail's Agents view: per-pane activity and its change ping.
+  registerAgentBoardIpc(handle);
 
   // Renderer reports what the user is looking at (focus + active workspace/
   // tab/run/pane) in one snapshot; the notify policy suppresses alerts for
@@ -3165,17 +3712,65 @@ export function registerIpc(): void {
     "notify:list",
     async (): Promise<NotificationCenterEntry[]> => listCenterEntries(),
   );
+  handle(
+    "notify:summary",
+    async (): Promise<NotificationCenterSummary> => centerSummary(),
+  );
   handle("notify:markRead", async (_e, id: string): Promise<void> => {
     if (typeof id === "string") await markCenterRead(id);
   });
+  handle(
+    "notify:setRead",
+    async (_e, input: { ids?: unknown; read?: unknown } | null): Promise<void> => {
+      const ids = notifyIdsFromIpc(input?.ids);
+      if (ids.length > 0) await setCenterRead(ids, input?.read !== false);
+    },
+  );
   handle("notify:markAllRead", async (): Promise<void> => {
     await markCenterAllRead();
   });
-  handle("notify:remove", async (_e, id: string): Promise<void> => {
+  handle("notify:remove", async (_e, id: unknown): Promise<void> => {
     if (typeof id === "string") await removeCenterEntry(id);
+    else {
+      const ids = notifyIdsFromIpc(id);
+      if (ids.length > 0) await removeCenterEntries(ids);
+    }
+  });
+  handle("notify:settle", async (_e, ids: unknown): Promise<void> => {
+    const list = notifyIdsFromIpc(ids);
+    if (list.length > 0) await settleCenterEntries(list);
   });
   handle("notify:clear", async (): Promise<void> => {
     await clearCenter();
+  });
+  // Undo for Dismiss and Clear all: the renderer hands back the rows it just
+  // removed. The store sanitizes them like a persisted file.
+  handle("notify:restore", async (_e, rows: unknown): Promise<void> => {
+    if (Array.isArray(rows)) await restoreCenterEntries(rows.slice(0, 500));
+  });
+  handle(
+    "notify:markViewed",
+    async (_e, view: Partial<NotificationViewSnapshot> | null): Promise<void> => {
+      const snapshot = notifyViewFromIpc(view);
+      if (snapshot) await markCenterViewed(snapshot);
+    },
+  );
+  handle(
+    "notify:mute",
+    async (
+      _e,
+      input: { key?: unknown; label?: unknown; durationMs?: unknown } | null,
+    ): Promise<void> => {
+      const key = typeof input?.key === "string" ? input.key.slice(0, 512) : "";
+      if (!MUTE_KEY_PATTERN.test(key)) return;
+      const durationMs = typeof input?.durationMs === "number" ? input.durationMs : 60 * 60_000;
+      if (!Number.isFinite(durationMs)) return;
+      const label = typeof input?.label === "string" ? input.label.slice(0, 200) : key;
+      await muteCenterSource(key, label, durationMs);
+    },
+  );
+  handle("notify:unmute", async (_e, key: unknown): Promise<void> => {
+    if (typeof key === "string") await unmuteCenterSource(key);
   });
 
   handle("window:minimize", async (e): Promise<void> => {
@@ -3234,6 +3829,10 @@ export function registerIpc(): void {
 
   handle("app:platform", async (): Promise<NodeJS.Platform> => process.platform);
   handle("app:home", async (): Promise<string> => app.getPath("home"));
+  handle("app:global-config-cleanup-notice", async (): Promise<string | null> => {
+    const { globalConfigCleanupNotice } = await import("./global-config-cleanup");
+    return globalConfigCleanupNotice();
+  });
 
   // Resolve the absolute file:// URL of the webview-side inspector preload
   // bundle so the renderer can attach it via `<webview preload="...">`.
@@ -3505,10 +4104,10 @@ export function registerIpc(): void {
     // file: URLs are deliberately NOT handed to shell.openExternal — on
     // Windows that executes the file with its default handler (e.g. a .bat),
     // so a malicious file:// URL would be remote code execution. Instead
-    // reveal the target in the OS file manager (never run it). The preload's
-    // openExternal already routes file:// to Codara's in-app browser, so this
-    // branch only fires for callers (openInSystemBrowser) that hit the channel
-    // directly.
+    // reveal the target in the OS file manager (never run it). Plain link
+    // clicks go through app:openLink, which opens file:// in Codara's viewer,
+    // so this branch only fires for callers (openInSystemBrowser) that hit the
+    // channel directly.
     if (/^file:/i.test(url)) {
       try {
         const filePath = fileURLToPath(url);
@@ -3518,16 +4117,16 @@ export function registerIpc(): void {
       }
       return;
     }
-    // Electron's shell.openExternal accepts http(s) and a few extra schemes by
-    // default; reject anything else so a malicious URL detected on the PTY
-    // stream cannot launch arbitrary handlers.
-    const safe = /^(https?:|mailto:)/i.test(url);
-    if (!safe) return;
-    try {
-      await shell.openExternal(url);
-    } catch {
-      /* shell.openExternal rejects when no handler is registered; ignore. */
-    }
+    // openInSystemBrowser accepts only http(s) and mailto, so a malicious URL
+    // detected on the PTY stream cannot launch arbitrary handlers.
+    await openInSystemBrowser(url);
+  });
+
+  // A plain link click. The user's linkOpenTarget preference decides whether
+  // it opens in the default browser or a Codara browser tab.
+  handle("app:openLink", async (event, url: string): Promise<void> => {
+    if (typeof url !== "string" || url.length === 0) return;
+    await openLinkFromApp(url, event.sender);
   });
 
   // Auto-updater: renderer's "Restart and install" button calls this after
@@ -3537,6 +4136,16 @@ export function registerIpc(): void {
     const { quitAndInstall } = await import("./auto-updater");
     quitAndInstall();
   });
+  // While that restart waits for agents to finish: Restart now, or stop
+  // waiting. The update stays downloaded either way.
+  handle("updater:restartNow", async (): Promise<void> => {
+    const { restartForUpdateNow } = await import("./auto-updater");
+    restartForUpdateNow();
+  });
+  handle("updater:cancelRestart", async (): Promise<void> => {
+    const { cancelUpdateRestart } = await import("./auto-updater");
+    cancelUpdateRestart();
+  });
 
   // Manual "Check for updates" button in Settings › About. Returns a summary
   // the panel renders inline; lifecycle events still stream to the banner.
@@ -3544,22 +4153,81 @@ export function registerIpc(): void {
     const { checkForUpdatesNow } = await import("./auto-updater");
     return checkForUpdatesNow();
   });
+
+  // Areas that keep their channels next to their code.
+  registerDiagnosticsIpc(handle);
+  registerServersIpc(handle);
+  registerSkillUpdatesIpc(handle);
+  registerGitFixIpc(handle);
+  registerWorktreeSetupIpc(handle);
+  registerChromeLinkIpc(handle);
+  registerCaptureIpc(handle);
+  registerPointIpc(handle);
+  registerWorkspaceStatusIpc(handle);
+  registerCosTasksIpc(handle);
+  registerReviewIpc(handle);
+  registerTerminalScrollbackIpc(handle);
+  registerAgentHibernationIpc(handle);
+  registerWorktreeCleanupIpc(handle);
+  registerCrossWorkspaceIpc(handle);
+  registerFeatureTipsIpc(handle);
+  registerPortForwardIpc(handle);
+  registerShareIpc(handle);
+  registerSessionSearchIpc(handle);
+}
+
+const MEMORY_KINDS = new Set<MemoryItemKind>(["preference", "correction", "fact", "procedure", "lesson"]);
+
+async function resolveMemoryProfileId(profileId?: string): Promise<string> {
+  const { resolveCoraProfile } = await import("./orchestration/cora-profiles");
+  return resolveCoraProfile(profileId).id;
+}
+
+function sanitizeMemoryPatch(raw: MemoryItemPatch | undefined): MemoryItemPatch {
+  const patch: MemoryItemPatch = {};
+  if (!raw || typeof raw !== "object") return patch;
+  if (typeof raw.text === "string") patch.text = raw.text;
+  if (typeof raw.pinned === "boolean") patch.pinned = raw.pinned;
+  if (raw.scope === "global" || raw.scope === "workspace") patch.scope = raw.scope;
+  if (MEMORY_KINDS.has(raw.kind as MemoryItemKind)) patch.kind = raw.kind;
+  if (raw.status === "active" || raw.status === "archived") patch.status = raw.status;
+  if (raw.feedback === 1 || raw.feedback === -1) patch.feedback = raw.feedback;
+  return patch;
+}
+
+async function readMemoryItemsView(workspaceId: string | null, profileReference?: string): Promise<MemoryItemsView> {
+  const profileId = await resolveMemoryProfileId(profileReference);
+  const [{ readMemoryLearningSettings }, { countRunHistory }] = await Promise.all([
+    import("./orchestration/memory-learning"),
+    import("./orchestration/run-memory"),
+  ]);
+  return {
+    profileId,
+    items: memoryItems.listMemoryItems(profileId, { workspaceId }),
+    digest: memoryItems.memoryDigest(profileId, workspaceId),
+    settings: readMemoryLearningSettings(),
+    runHistoryCount: countRunHistory(workspaceId, profileId),
+  };
 }
 
 // cora-memory keys the workspace tier by workspaceId and sanitizes whatever it
 // is given, so an empty id would silently resolve to a real "_unknown.md" file
 // the user could then toggle and clear. With no workspace open there is no
 // workspace tier to report, so say so instead of inventing one.
-async function readMemoryStatus(workspaceId: string | null): Promise<CoraMemoryStatus> {
+// `profileId` absent means the default profile for new chats. An unknown id
+// throws (resolveCoraProfile), so a deleted profile is an error the dialog can
+// show rather than a silent switch to someone else's memory.
+async function readMemoryStatus(workspaceId: string | null, profileId?: string): Promise<CoraMemoryStatus> {
   const { getMemoryStatus, MEMORY_FILE_MAX_BYTES } = coraMemory;
   const { resolveCoraProfile } = await import("./orchestration/cora-profiles");
-  const status = await getMemoryStatus(workspaceId ?? "", resolveCoraProfile().id);
+  const status = await getMemoryStatus(workspaceId ?? "", resolveCoraProfile(profileId).id);
   if (workspaceId) return status;
   return {
     profile: status.profile,
     global: status.global,
     workspace: {
       enabled: false,
+      blockedByGlobal: false,
       path: "",
       bytesUsed: 0,
       bytesCap: MEMORY_FILE_MAX_BYTES,

@@ -39,7 +39,17 @@ export function isWorkerSafeBridgeTool(
   ) {
     return true;
   }
-  if (name === "codara_remember") return !automationWorker && env.CODARA_PI_DIRECT_TASK === "1";
+  // A workflow agent runs on the direct lane but answers a script: it neither
+  // touches the user's memory nor manages their worktrees.
+  const chatDirectTask = env.CODARA_PI_DIRECT_TASK === "1" && env.CODARA_PI_WORKFLOW !== "1";
+  if (name === "codara_remember" || name === "codara_recall") {
+    return !automationWorker && chatDirectTask;
+  }
+  // A direct task is the user's own chat run as a single worker, so it
+  // manages worktrees like a manager; a worker a manager spawned never does.
+  if (name.startsWith("codara_worktree_")) {
+    return !automationWorker && chatDirectTask;
+  }
   if (automationWorker) {
     return (
       name === "codara_ask_user" ||
@@ -62,48 +72,76 @@ export function isWorkerSafeBridgeTool(
 //
 // Pi 0.84.4's native tools are exactly: bash, edit, find, grep, ls, read,
 // write. The session also carries extension tools: web_search + url_context
-// (pi-web-search), deep_search (bundled fallback), and the codara_* bridge
-// roster. The fence names below are asserted against that inventory in
+// (pi-web-search), deep_search and fetch_url (bundled), and the codara_*
+// bridge roster. The fence names below are asserted against that inventory in
 // scripts/test-pi-cora-extension.cjs.
 //
 // blockedTools entries use the familiar bare vocabulary (Bash, WebSearch,
 // Edit, Write, ...). They are mapped onto the real tool names; a handful need
 // explicit aliases.
 const FENCE_ALIASES: Record<string, string[]> = {
-  websearch: ["web_search", "deep_search", "url_context"],
-  webfetch: ["url_context", "deep_search"],
+  websearch: ["web_search", "deep_search", "url_context", "fetch_url"],
+  webfetch: ["url_context", "deep_search", "fetch_url"],
   glob: ["find"],
   multiedit: ["edit"],
 };
-const FENCE_WEB_AND_SHELL = ["bash", "web_search", "deep_search", "url_context"];
+const FENCE_WEB_AND_SHELL = ["bash", "web_search", "deep_search", "url_context", "fetch_url"];
 const FENCE_READONLY_EXTRA = ["edit"];
 // Bridge tools that ARE a shell or arbitrary code execution: any fenced preset
 // blocks them ("no shell/web" must include the terminal tab that takes a
 // command and the preview's JS evaluator; codara_preview_run is included
-// because its step batch can embed evaluate steps).
+// because its step batch can embed evaluate steps, and codara_preview_code
+// because its snippet can call every browser tool, evaluate among them).
+const CODE_TOOL = "codara_preview_code";
 const FENCE_BRIDGE_SHELL = [
+  "codara_terminal_run",
   "codara_terminal_create",
   "codara_terminal_write",
   "codara_terminal_read",
+  "codara_terminal_list",
   "codara_terminal_close",
+  // servers stream: starts and stops the workspace's dev servers.
+  "codara_terminal_servers",
   "codara_preview_evaluate",
   "codara_preview_run",
+  "codara_preview_code",
 ];
 // Bridge tools that mutate page state; blocked for readonly only (navigation,
 // screenshots, snapshots, console, and network inspection stay available).
 const FENCE_BRIDGE_MUTATING = [
   "codara_preview_click",
+  "codara_preview_dialog",
   "codara_preview_drag",
   "codara_preview_key",
   "codara_preview_mouse",
   "codara_preview_press_key",
   "codara_preview_type",
   "codara_preview_upload",
+  // devtools stream: cookies and site storage, and logged-out tabs.
+  "codara_preview_storage",
+  // chrome stream: opens, closes and brings forward tabs of the user's own browser.
+  "codara_preview_chrome",
 ];
+
+// Navigation and resizing stay open to readonly workers on Codara's own tabs,
+// but on a tab of the user's browser (a chrome: tabId) they act inside the
+// user's signed-in session, where loading a URL can change account state.
+// Closing one ends a tab the user may be using.
+// Emulation (device size, offline network, CPU, user agent) stays on the
+// user's tab after the worker ends, the same lasting change resize makes.
+const FENCE_READONLY_USER_BROWSER = new Set(["navigate", "resize", "emulate", "close"]);
+
+function isUserBrowserTab(value: unknown): boolean {
+  return typeof value === "string" && value.trim().toLowerCase().startsWith("chrome:");
+}
 
 function fenceAccess(env: WorkerEnv): "edits" | "readonly" | undefined {
   const access = env.CODARA_PI_WORKER_ACCESS?.trim().toLowerCase();
   return access === "edits" || access === "readonly" ? access : undefined;
+}
+
+function blockedByName(env: WorkerEnv, tool: string): boolean {
+  return (env.CODARA_PI_WORKER_BLOCKED_TOOLS ?? "").split(",").some((raw) => raw.trim().toLowerCase() === tool);
 }
 
 export function fencedToolNames(env: WorkerEnv = process.env): Set<string> {
@@ -126,6 +164,10 @@ export function fencedToolNames(env: WorkerEnv = process.env): Set<string> {
     blocked.add(snake);
     for (const alias of FENCE_ALIASES[flat] ?? []) blocked.add(alias);
   }
+  // A snippet reaches every browser tool through browser.call and
+  // browser.chrome, and its inner calls never pass through this fence, so
+  // blocking any one of them must block code mode too.
+  if ([...blocked].some((name) => name.startsWith("codara_preview_") && name !== CODE_TOOL)) blocked.add(CODE_TOOL);
   return blocked;
 }
 
@@ -210,6 +252,14 @@ export function fenceDecision(
   env: WorkerEnv = process.env,
 ): { block: true; reason: string } | undefined {
   const name = String(toolName ?? "").toLowerCase();
+  if (name === CODE_TOOL && fence.has(name) && !fenceAccess(env) && !blockedByName(env, CODE_TOOL)) {
+    return {
+      block: true,
+      reason:
+        "codara_preview_code is disabled for this automation worker because its config blocks browser tools a snippet could call. " +
+        "Use the single codara_preview_* tools that remain, or note the limitation in your final report.",
+    };
+  }
   if (fence.has(name)) {
     const access = env.CODARA_PI_WORKER_ACCESS?.trim();
     return {
@@ -229,6 +279,26 @@ export function fenceDecision(
       if (index >= 0) {
         return { block: true, reason: `Preview batch step ${index + 1} uses a tool disabled by this worker's config. No batch steps were run. Use the remaining tools or report the limitation.` };
       }
+    }
+  }
+  // codara_preview_run is fenced by name for every preset, so only single calls reach this.
+  if (fenceAccess(env) === "readonly" && name.startsWith("codara_preview_") && input && typeof input === "object") {
+    const action = name.slice("codara_preview_".length);
+    if (FENCE_READONLY_USER_BROWSER.has(action) && isUserBrowserTab((input as { tabId?: unknown }).tabId)) {
+      return {
+        block: true,
+        reason: "This readonly worker may look at a tab of the user's own browser but not navigate, resize or emulate on it. Use the remaining tools, or note the limitation in your final report.",
+      };
+    }
+  }
+  // A fenced worker may read the worktree cleanup scan but never ask to
+  // remove worktrees, even with the user's approval.
+  if (fenceAccess(env) && name === "codara_worktree_cleanup" && input && typeof input === "object") {
+    if ((input as { action?: unknown }).action === "remove") {
+      return {
+        block: true,
+        reason: `This worker (access preset "${fenceAccess(env)}") may scan worktrees but not remove them. Report what the scan recommends instead.`,
+      };
     }
   }
   // Containment applies only when a preset armed the fence; blockedTools-only

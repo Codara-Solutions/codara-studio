@@ -45,7 +45,7 @@ test("tabs reorder from anywhere in the strip, including the gaps and the empty 
     while ((await tabIds(page)).length < 4) {
       const before = (await tabIds(page)).length;
       await page.getByRole("button", { name: "New tab", exact: true }).dispatchEvent("click");
-      await page.getByRole("button", { name: "Terminal" }).click();
+      await page.getByRole("button", { name: /^Terminal\b/ }).click();
       await expect.poll(() => tabIds(page), { timeout: 20_000 }).toHaveLength(before + 1);
     }
     // Park the pointer away from the "+" picker before the first gesture and

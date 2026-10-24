@@ -1,23 +1,39 @@
+import { FAST_MODE_COST_NOTE } from "@shared/fast-mode";
+
 interface Props {
   enabled: boolean;
   onToggle: () => void;
+  /** Set when the chat's model cannot run fast; the button then explains why. */
+  unavailableReason?: string;
 }
 
-// The composer's fast-mode control. It is rendered only for an OpenAI model
-// (ChatComposer gates on chatModelIsOpenAi), because fast mode buys OpenAI's
-// priority service tier and Anthropic has no such thing — an Anthropic chat
-// must never show, let alone offer, this button.
-export default function FastModeToggle({ enabled, onToggle }: Props) {
-  const title = enabled
-    ? "Fast mode on — OpenAI responses use the faster tier"
-    : "Fast mode off";
+// The composer's fast-mode control. Fast mode is one global setting that the
+// manager and every worker it launches read, so the button stays clickable
+// while it is on even for a model without fast mode: that model runs at
+// standard speed, but the user must still be able to turn the setting off for
+// the workers. Off on such a model, it is disabled and says why.
+function fastModeToggleTitle(enabled: boolean, unavailableReason?: string): string {
+  if (unavailableReason) {
+    return enabled
+      ? `Fast mode is on for workers on supported models. ${unavailableReason} Click to turn it off.`
+      : `Fast mode unavailable. ${unavailableReason}`;
+  }
+  return enabled
+    ? `Fast mode on for Cora and her workers. ${FAST_MODE_COST_NOTE}`
+    : `Fast mode off. ${FAST_MODE_COST_NOTE}`;
+}
+
+export default function FastModeToggle({ enabled, onToggle, unavailableReason }: Props) {
+  const title = fastModeToggleTitle(enabled, unavailableReason);
+  const disabled = Boolean(unavailableReason) && !enabled;
   return (
     <button
       type="button"
-      className={`composer-fast${enabled ? " is-on" : ""}`}
+      className={`composer-fast${enabled ? " is-on" : ""}${unavailableReason ? " is-unavailable" : ""}`}
       title={title}
       aria-label={title}
       aria-pressed={enabled}
+      disabled={disabled}
       onClick={onToggle}
     >
       <FlashGlyph filled={enabled} />

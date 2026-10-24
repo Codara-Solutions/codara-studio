@@ -18,8 +18,7 @@ async function loadService() {
   mkdirSync(cache, { recursive: true });
   const servicePath = path.join(ROOT, "src", "main", "github-issue-workspace.ts");
   const stubs = new Set([
-    "electron",
-    "./fs-sandbox",
+    "./workspace-state-publish",
     "./git-branches",
     "./github-cli",
     "./git-worktrees",
@@ -27,6 +26,7 @@ async function loadService() {
     "./preferences-store",
     "./codara-home",
     "./storage",
+    "./worktree-setup",
   ]);
   await esbuild.build({
     entryPoints: [servicePath],
@@ -46,11 +46,8 @@ async function loadService() {
           return undefined;
         });
         build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => {
-          if (args.path === "electron") {
-            return { contents: "export const BrowserWindow = { getAllWindows: () => [] };" };
-          }
           const exports = {
-            "./fs-sandbox": ["setAllowedRoots"],
+            "./workspace-state-publish": ["publishState"],
             "./git-branches": ["listBranches", "deleteBranch"],
             "./github-cli": ["createGitHubCliAdapter"],
             "./git-worktrees": [
@@ -63,6 +60,7 @@ async function loadService() {
             "./preferences-store": ["loadPreferences"],
             "./codara-home": ["codaraHome"],
             "./storage": ["loadState", "updateState"],
+            "./worktree-setup": ["startWorktreeSetup"],
           }[args.path] || [];
           return {
             contents: exports.map((name) => `export const ${name} = () => { throw new Error("production stub"); };`).join("\n"),
@@ -248,6 +246,33 @@ async function main() {
     assert.match(happy.dependencies.lastStart.initialUserNoteClientMessageId, /^github-issue-[a-f0-9]{32}$/);
     assert.ok(happy.calls.indexOf("persist") < happy.calls.indexOf("start"));
     assert.ok(happy.calls.indexOf("start") < happy.calls.indexOf("activate"));
+
+    // With worktree setup, Codara runs the commands and Cora waits for them.
+    const withSetup = harness();
+    const setupCalls = [];
+    withSetup.dependencies.startWorktreeSetup = async (input) => {
+      setupCalls.push(input);
+      withSetup.calls.push("setup");
+      return true;
+    };
+    const setupCreated = await startGitHubIssueWorkspace(
+      { sourceWorkspaceId: "ws-source", issueNumber: 42 },
+      withSetup.dependencies,
+    );
+    assert.equal(setupCreated.ok, true);
+    assert.equal(setupCalls.length, 1);
+    assert.equal(setupCalls[0].sourceCwd, "/repo/codara");
+    assert.equal(setupCalls[0].workspaceId, setupCreated.workspaceId);
+    assert.ok(withSetup.calls.indexOf("persist") < withSetup.calls.indexOf("setup"));
+    assert.ok(withSetup.calls.indexOf("setup") < withSetup.calls.indexOf("start"));
+    const setupNote = withSetup.dependencies.lastStart.initialUserNote;
+    assert.match(setupNote, /codara_worktree_setup with wait:true/);
+    assert.doesNotMatch(setupNote, /npm install/, "Codara already runs the user's command");
+    const nothingConfigured = harness();
+    nothingConfigured.dependencies.startWorktreeSetup = async () => false;
+    await startGitHubIssueWorkspace({ sourceWorkspaceId: "ws-source", issueNumber: 42 }, nothingConfigured.dependencies);
+    assert.match(nothingConfigured.dependencies.lastStart.initialUserNote, /npm install/);
+    assert.doesNotMatch(nothingConfigured.dependencies.lastStart.initialUserNote, /codara_worktree_setup/);
 
     happy.calls.length = 0;
     const replay = await startGitHubIssueWorkspace(

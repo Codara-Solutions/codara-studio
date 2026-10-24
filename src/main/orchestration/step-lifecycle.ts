@@ -369,3 +369,48 @@ export function reconcileAcceptedVerifierOnlySteps(
   }
   return completed;
 }
+
+/**
+ * Where an MCP-managed worker task lands when its report is reviewed without a
+ * Cora turn (run-store's worker cycle). Only a `complete` report is success. A
+ * failed or missing report is a failure, and a partial or blocked one is work
+ * the worker did not finish: both must reach a status codara_wait_for_workers
+ * treats as terminal (so a waiting manager unblocks) without ever reading as
+ * accepted, or a broken worker shows as a green step and can complete the run.
+ */
+export function autoReviewedTaskStatus(
+  reportStatus: "complete" | "partial" | "blocked" | "failed" | null | undefined,
+): "accepted" | "blocked" | "failed" {
+  if (reportStatus === "complete") return "accepted";
+  if (reportStatus === "partial" || reportStatus === "blocked") return "blocked";
+  return "failed";
+}
+
+const LIVE_STEP_TASK_STATUSES = new Set([
+  "created",
+  "queued",
+  "claimed",
+  "running",
+  "needs_review",
+  "retry_queued",
+]);
+
+/**
+ * The status a reviewed step settles to, judged on the worst outcome among its
+ * tasks. Undefined while any task is still live (a sibling or a declared
+ * verifier still owes its result) or when nothing in the step produced an
+ * outcome. A failed task fails the step; an unfinished one leaves it
+ * `completed_unverified`, which blocks automatic completion until someone
+ * decides; only unanimous acceptance completes it.
+ */
+export function settledReviewedStepStatus(
+  run: RunState,
+  stepId: string,
+): "complete" | "completed_unverified" | "failed" | undefined {
+  const tasks = (run.workerTasks ?? []).filter((task) => task.stepId === stepId);
+  if (tasks.some((task) => LIVE_STEP_TASK_STATUSES.has(task.status))) return undefined;
+  if (tasks.some((task) => task.status === "failed")) return "failed";
+  if (tasks.some((task) => task.status === "blocked")) return "completed_unverified";
+  if (tasks.some((task) => task.status === "accepted")) return "complete";
+  return undefined;
+}

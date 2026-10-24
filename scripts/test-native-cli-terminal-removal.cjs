@@ -151,16 +151,27 @@ async function main() {
 
   await check("no source resolves a home-directory shell startup file to write it", () => {
     // A path like join(<home>, ".zshrc") is the user's own dotfile. Only the
-    // read-only leftover detection may build one; shell-init.ts materializes
-    // Codara's OWN rc shims strictly under its shell-integration cache dir.
+    // read-only leftover detection may build one, plus claude-follow's
+    // startup-files.ts: the one module that adds (and takes out) the single
+    // guarded line that lets a plain `claude` follow the active account. It
+    // never exports CLAUDE_CONFIG_DIR into the shell; its scripts set the
+    // variable for one `claude` child only (scripts/test-claude-follow-hooks.cjs).
+    // shell-init.ts materializes Codara's OWN rc shims strictly under its
+    // shell-integration cache dir.
+    const claudeFollowPath = path.join(ROOT, "src", "main", "claude-follow", "startup-files.ts");
     const homeRcJoin =
       /(?:homedir\(\)|homeDir|home)\s*,\s*["']\.(?:zshrc|bashrc|bash_profile|zprofile)["']/;
     const joining = sources
-      .filter((file) => file !== cleanupPath)
+      .filter((file) => file !== cleanupPath && file !== claudeFollowPath)
       .filter((file) => homeRcJoin.test(fs.readFileSync(file, "utf8")));
     assert.deepEqual(
       joining.map((file) => path.relative(ROOT, file)),
       [],
+    );
+    const follow = fs.readFileSync(claudeFollowPath, "utf8");
+    assert.ok(
+      follow.includes('outsideWriteCapability(\n  "claude-follow: the guarded line in the user\'s shell startup files",\n)'),
+      "claude-follow writes startup files only through its own pinned capability",
     );
     const shellInit = fs.readFileSync(
       path.join(ROOT, "src", "main", "shell-init.ts"),

@@ -28,7 +28,9 @@ import type {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { arrangeWhiteboard } from "@shared/whiteboard-layout";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { isShown, registerFindTarget } from "../find/find-router";
+import { DocumentFindContext } from "../find/useFindSession";
 import type {
   CoraWhiteboard,
   CoraWhiteboardEdge,
@@ -488,6 +490,7 @@ function WhiteboardCanvasInner({
   const [zoomBand, setZoomBand] = useState<ZoomBand>("near");
   const rootRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
   const nodesRef = useRef(nodes);
   const edgesRef = useRef(edges);
   const boardRef = useRef(cloneBoard(board));
@@ -498,6 +501,24 @@ function WhiteboardCanvasInner({
   const { fitView, screenToFlowPosition, getViewport, setViewport } = useReactFlow();
   const nodesInitialized = useNodesInitialized();
   const initiallyFramed = useRef(false);
+  const findDocument = useContext(DocumentFindContext);
+  const findDocumentRef = useRef(findDocument);
+  findDocumentRef.current = findDocument;
+
+  // Ctrl+F on a board goes to its own "Find on board" field.
+  useEffect(
+    () =>
+      registerFindTarget({
+        root: () => rootRef.current,
+        eligible: () => findDocumentRef.current.active && isShown(searchInputRef.current),
+        primary: () => findDocumentRef.current.focused,
+        open: () => {
+          searchInputRef.current?.focus();
+          searchInputRef.current?.select();
+        },
+      }),
+    [],
+  );
   const userMovedViewport = useRef(false);
   useEffect(() => {
     if (!visible || !nodesInitialized || !nodes.length || initiallyFramed.current) return;
@@ -1553,6 +1574,7 @@ function WhiteboardCanvasInner({
         <div className="cora-board-editor__search" role="search">
           <ToolbarIcon path="M6.2 10a3.8 3.8 0 1 0 0-7.6 3.8 3.8 0 0 0 0 7.6zM9 9l2.8 2.8" />
           <input
+            ref={searchInputRef}
             value={search}
             onChange={(event) => setSearch(event.target.value)}
             onKeyDown={(event) => {

@@ -14,7 +14,17 @@ const main = read("src/main/index.ts");
 const privateUserData = read("src/main/private-user-data.ts");
 const gitignore = read(".gitignore");
 
-assert.doesNotMatch(browserPane, /setAttribute\("partition"/, "existing browser logins stay in place");
+// Every tab keeps the default session with the user's logins, except a
+// logged-out tab, whose partition is in memory only.
+const partitionWrites = browserPane.match(/[^\n]*setAttribute\("partition"[^\n]*/g) ?? [];
+assert.deepEqual(
+  partitionWrites.map((line) => line.trim()),
+  ['if (isFreshPartition(partition)) webview.setAttribute("partition", partition);'],
+  "existing browser logins stay in place",
+);
+const freshPartition = read("src/shared/browser-partition.ts");
+assert.match(freshPartition, /FRESH_PARTITION = \/\^codara-fresh-\[a-f0-9\]\{12\}\$\//);
+assert.doesNotMatch(freshPartition, /persist:\w/, "a logged-out tab's partition never reaches disk");
 assert.doesNotMatch(browserPane, /document\.cookie|session\.cookies/);
 assert.match(privateUserData, /isInsideGitRepository/);
 assert.match(privateUserData, /existsSync\(join\(cursor, "\.git"\)\)/);

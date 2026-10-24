@@ -169,6 +169,13 @@ export function registerTrustedMainWindow(
     guest.once("destroyed", () => {
       if (previewGuestHosts.get(guestId) === wc.id) previewGuestHosts.delete(guestId);
     });
+    for (const listener of previewGuestListeners) {
+      try {
+        listener(guest);
+      } catch (error) {
+        console.warn("[main-window-trust] preview guest listener failed:", error);
+      }
+    }
   });
   wc.on("destroyed", () => {
     if (trustedWindow === win) {
@@ -228,6 +235,17 @@ export function isTrustedOnSender(event: Electron.IpcMainEvent, channel: string)
 // trusted main window. Used by the preview computer-use executor to reject a
 // webContentsId that did not come from a genuine preview guest of this window,
 // before it attaches the DevTools protocol / runs executeJavaScript against it.
+const previewGuestListeners = new Set<(guest: WebContents) => void>();
+
+/**
+ * Called with every <webview> guest of the trusted main window as Chromium
+ * attaches it, before its first page loads.
+ */
+export function onTrustedPreviewGuestAttached(listener: (guest: WebContents) => void): () => void {
+  previewGuestListeners.add(listener);
+  return () => previewGuestListeners.delete(listener);
+}
+
 export function isTrustedPreviewGuest(wc: WebContents | null | undefined): boolean {
   if (!wc || wc.isDestroyed()) return false;
   const win = getTrustedMainWindow();

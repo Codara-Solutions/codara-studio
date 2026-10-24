@@ -51,6 +51,9 @@ async function expectThrow(name, fn, match) {
 const harness = {
   name: "cora-memory-harness",
   setup(build) {
+    build.onResolve({ filter: /^@shared\// }, (args) => ({
+      path: path.join(__dirname, "..", "src", "shared", `${args.path.slice("@shared/".length)}.ts`),
+    }));
     build.onResolve({ filter: /\/codara-home$/ }, () => ({
       path: "codara-home-stub",
       namespace: "stub",
@@ -215,7 +218,7 @@ async function main() {
       "# Cora memory (workspace: ttl)",
       `- [auto ${daysAgoStamp(40)} run:run-old] expired auto line`,
       `- [auto ${daysAgoStamp(5)} run:run-new] fresh auto line`,
-      `- [cora ${daysAgoStamp(100)}] expired cora line`,
+      `- [cora ${daysAgoStamp(400)}] old cora line never expires`,
       `- [cora ${daysAgoStamp(50)}] fresh cora line`,
       "- [auto 2026-99-99] unparseable date reads as fresh",
       "- a user line never expires",
@@ -224,10 +227,10 @@ async function main() {
   );
   const ttlInjected = await mem.formatCoraMemoryForTurn("ws-ttl", "run-ttl-1");
   check(
-    "expired auto (30d) and cora (90d) lines are filtered at injection",
+    "expired auto (30d) lines are filtered at injection while [cora] lines never expire",
     ttlInjected !== null &&
       !ttlInjected.includes("expired auto line") &&
-      !ttlInjected.includes("expired cora line") &&
+      ttlInjected.includes("old cora line never expires") &&
       ttlInjected.includes("fresh auto line") &&
       ttlInjected.includes("fresh cora line") &&
       ttlInjected.includes("unparseable date reads as fresh") &&
@@ -244,7 +247,7 @@ async function main() {
   check(
     "the next programmatic write physically prunes expired lines",
     !ttlAfterWrite.includes("expired auto line") &&
-      !ttlAfterWrite.includes("expired cora line") &&
+      ttlAfterWrite.includes("old cora line never expires") &&
       ttlAfterWrite.includes("fresh auto line") &&
       ttlAfterWrite.includes("a user line never expires"),
     ttlAfterWrite,
@@ -491,14 +494,66 @@ async function main() {
 
   await mem.setMemoryEnabled("global", null, false);
   const allDisabled = await mem.formatCoraMemoryForTurn("ws-main", "run-toggle-4");
-  check("the global toggle is the master off switch for injection", allDisabled === null, String(allDisabled));
+  check("the global toggle is the master off switch for memory", allDisabled === null, String(allDisabled));
   await expectThrow(
     "rememberAdd global errors while globally disabled",
     () => mem.rememberAdd("global", "", ["should not land"], "run-toggle-5"),
     /^memory is disabled for this global; tell the user if they asked you to remember something$/,
   );
+  // The Capability Center explains an off workspace tier: it is off because of
+  // the master switch, not because the user turned this workspace off.
+  await mem.setMemoryEnabled("workspace", "ws-main", true);
+  const masterOff = await mem.getMemoryStatus("ws-main");
+  check(
+    "a workspace tier switched on but silenced by the global switch reports blockedByGlobal",
+    masterOff.workspace.enabled === false && masterOff.workspace.blockedByGlobal === true &&
+      masterOff.global.blockedByGlobal === false,
+    JSON.stringify(masterOff),
+  );
+  await mem.setMemoryEnabled("workspace", "ws-main", false);
+  check(
+    "a workspace tier the user switched off is not reported as blocked by the global switch",
+    (await mem.getMemoryStatus("ws-main")).workspace.blockedByGlobal === false,
+    JSON.stringify(await mem.getMemoryStatus("ws-main")),
+  );
+  check(
+    "no workspace is never reported as blocked by the global switch",
+    (await mem.getMemoryStatus(null)).workspace.blockedByGlobal === false,
+    JSON.stringify(await mem.getMemoryStatus(null)),
+  );
   await mem.setMemoryEnabled("global", null, true);
   await mem.setMemoryEnabled("workspace", "ws-main", true);
+  check(
+    "with both switches on nothing is blocked",
+    (await mem.getMemoryStatus("ws-main")).workspace.blockedByGlobal === false,
+    JSON.stringify(await mem.getMemoryStatus("ws-main")),
+  );
+
+  // ── ensureMemoryFile: "Open in editor" on a tier with nothing in it ───────
+  const ensurePath = workspaceFile(mem, "ws-ensure");
+  check("the ensure fixture starts without a file", !fs.existsSync(ensurePath), ensurePath);
+  const ensured = await mem.ensureMemoryFile("workspace", "ws-ensure");
+  check(
+    "ensureMemoryFile creates the tier's file from its template and returns its path",
+    ensured === ensurePath && fs.existsSync(ensurePath) && fs.readFileSync(ensurePath, "utf8").length > 0,
+    ensured,
+  );
+  fs.appendFileSync(ensurePath, "- a note the user typed\n", "utf8");
+  const ensuredBefore = fs.readFileSync(ensurePath, "utf8");
+  await mem.ensureMemoryFile("workspace", "ws-ensure");
+  check(
+    "ensureMemoryFile leaves an existing file untouched",
+    fs.readFileSync(ensurePath, "utf8") === ensuredBefore,
+    fs.readFileSync(ensurePath, "utf8"),
+  );
+  const globalEnsured = await mem.ensureMemoryFile("global", null);
+  check("ensureMemoryFile works for the global tier", fs.existsSync(globalEnsured), globalEnsured);
+  await expectThrow(
+    "ensureMemoryFile refuses a workspace tier without a workspace",
+    () => mem.ensureMemoryFile("workspace", null),
+    /workspace scope requires a workspaceId/,
+  );
+
   const reEnabled = await mem.formatCoraMemoryForTurn("ws-main", "run-toggle-6");
   check("re-enabling restores both sections", reEnabled !== null && reEnabled.includes("CORA MEMORY, THIS WORKSPACE"), String(reEnabled));
 
@@ -508,6 +563,18 @@ async function main() {
     "getMemoryStatus counts line provenance per tier",
     status.workspace.counts.user >= 1 && status.workspace.counts.auto >= 1 && status.workspace.counts.cora >= 1,
     JSON.stringify(status.workspace),
+  );
+  const expiredStatusPath = workspaceFile(mem, "ws-expired-status");
+  fs.writeFileSync(
+    expiredStatusPath,
+    `# Cora memory (workspace: expired)\n- [auto ${daysAgoStamp(45)}] expired auto still on disk\n- [auto ${daysAgoStamp(2)}] live auto\n`,
+    "utf8",
+  );
+  const expiredStatus = await mem.getMemoryStatus("ws-expired-status");
+  check(
+    "status counts skip expired lines that are no longer injected",
+    expiredStatus.workspace.counts.auto === 1,
+    JSON.stringify(expiredStatus.workspace.counts),
   );
   check(
     "getMemoryStatus with a null workspace reports a disabled empty workspace tier",
@@ -528,9 +595,48 @@ async function main() {
   await mem.clearMemory("workspace", "ws-ttl", true);
   const clearedAll = fs.readFileSync(ttlPath, "utf8");
   check(
-    "clearMemory includeUserLines rewrites to the fresh template",
+    "clearMemory includeUserLines leaves only the managed header",
     clearedAll.startsWith("# Cora memory (workspace:") && !clearedAll.includes("a user line never expires"),
     clearedAll,
+  );
+  await mem.clearMemory("global", null, true);
+  const globalCleared = fs.readFileSync(GLOBAL_FILE, "utf8");
+  const globalClearedStatus = await mem.getMemoryStatus(null);
+  check(
+    "delete all on global memory does not bring the starter heading back as a user line",
+    !globalCleared.includes("## About the user") &&
+      globalClearedStatus.global.counts.user === 0 &&
+      globalClearedStatus.global.counts.cora === 0,
+    `${globalCleared} ${JSON.stringify(globalClearedStatus.global)}`,
+  );
+
+  // ── the starter heading is the app's, not the user's ──────────────────────
+  fs.rmSync(GLOBAL_FILE);
+  await mem.rememberAdd("global", "", ["The user prefers pnpm."], "run-template-1");
+  const templated = fs.readFileSync(GLOBAL_FILE, "utf8");
+  const templatedStatus = await mem.getMemoryStatus(null);
+  check(
+    "a fresh global file carries the starter heading without counting it as yours",
+    templated.includes("## About the user") && templatedStatus.global.counts.user === 0,
+    `${templated} ${JSON.stringify(templatedStatus.global.counts)}`,
+  );
+  await mem.rememberReplace("global", "", "- The user prefers pnpm everywhere.\n", false, "run-template-2");
+  check(
+    "replace may drop the bare starter heading without a confirmation",
+    !fs.readFileSync(GLOBAL_FILE, "utf8").includes("## About the user"),
+    fs.readFileSync(GLOBAL_FILE, "utf8"),
+  );
+  await mem.rememberReplace(
+    "global",
+    "",
+    "## About the user\n- The user prefers pnpm everywhere.\n",
+    false,
+    "run-template-3",
+  );
+  check(
+    "replace may also bring the starter heading back",
+    fs.readFileSync(GLOBAL_FILE, "utf8").includes("## About the user"),
+    fs.readFileSync(GLOBAL_FILE, "utf8"),
   );
 
   // ── replace cannot launder a user line into a tagged (expirable) line ─────
@@ -703,6 +809,68 @@ async function main() {
     "release after an already-carried turn re-injects rather than skips",
     afterNullRelease !== null,
     String(afterNullRelease),
+  );
+
+  // ── reset: a compacted session gets the memory sections again ─────────────
+  const resetFirst = await mem.formatCoraMemoryForTurn("ws-release", "run-reset");
+  const resetGated = await mem.formatCoraMemoryForTurn("ws-release", "run-reset");
+  mem.resetCoraMemoryInjection("run-reset");
+  const resetAgain = await mem.formatCoraMemoryForTurn("ws-release", "run-reset");
+  check(
+    "after a reset the unchanged memory is injected again",
+    resetFirst !== null && resetGated === null && resetAgain === resetFirst,
+    `${resetFirst === null} / ${resetGated === null} / ${resetAgain === null}`,
+  );
+
+  // ── the remember budget is per user turn, not per chat lifetime ───────────
+  const budgetRun = {
+    id: "run-budget",
+    humanMessages: [
+      { id: "m-1", author: "user" },
+      { id: "m-2", author: "spark" },
+    ],
+  };
+  const firstTurnKey = mem.rememberBudgetKey(budgetRun);
+  check(
+    "Cora's own replies do not start a new remember budget",
+    firstTurnKey === "run-budget:m-1",
+    firstTurnKey,
+  );
+  budgetRun.humanMessages.push({ id: "m-3", author: "user" });
+  check(
+    "a new user message starts a new remember budget",
+    mem.rememberBudgetKey(budgetRun) !== firstTurnKey && mem.rememberBudgetKey(budgetRun) === "run-budget:m-3",
+    mem.rememberBudgetKey(budgetRun),
+  );
+  check(
+    "a run with no user message keys the budget by the run",
+    mem.rememberBudgetKey({ id: "run-auto" }) === "run-auto",
+    mem.rememberBudgetKey({ id: "run-auto" }),
+  );
+
+  // ── overlong bullets are rejected, never silently cut ─────────────────────
+  const longPath = workspaceFile(mem, "ws-long");
+  fs.writeFileSync(longPath, "# Cora memory (workspace: long)\n- a short user note\n", "utf8");
+  const longBefore = fs.readFileSync(longPath, "utf8");
+  const longBullet = `Run the e2e suite with xvfb and drive the built Electron app ${"with Playwright ".repeat(30)}end`;
+  await expectThrow(
+    "an add with an overlong bullet is rejected with its index and length",
+    () => mem.rememberAdd("workspace", "ws-long", ["A fine short bullet.", longBullet], "run-long-1"),
+    new RegExp(`^bullet 2 is ${longBullet.replace(/\s+/g, " ").trim().length} characters; the limit is ${mem.MAX_BULLET_LENGTH}\\.`),
+  );
+  check("a rejected add leaves the file unchanged", fs.readFileSync(longPath, "utf8") === longBefore, fs.readFileSync(longPath, "utf8"));
+  await expectThrow(
+    "a replace with an overlong new bullet is rejected too",
+    () => mem.rememberReplace("workspace", "ws-long", `- a short user note\n- ${longBullet}\n`, false, "run-long-2"),
+    /^bullet 1 is \d+ characters/,
+  );
+  check("a rejected replace leaves the file unchanged", fs.readFileSync(longPath, "utf8") === longBefore, fs.readFileSync(longPath, "utf8"));
+  const fitting = "x".repeat(mem.MAX_BULLET_LENGTH);
+  await mem.rememberAdd("workspace", "ws-long", [fitting], "run-long-3");
+  check(
+    "a bullet at the limit is stored whole",
+    fs.readFileSync(longPath, "utf8").includes(`${fitting}\n`) && !fs.readFileSync(longPath, "utf8").includes("…"),
+    fs.readFileSync(longPath, "utf8"),
   );
 
   // ── sanitize path safety with a hostile workspaceId ───────────────────────

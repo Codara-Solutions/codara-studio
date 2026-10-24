@@ -49,6 +49,7 @@ function isLiveRuntimeState(state: RuntimeState | undefined): boolean {
   return (
     state === "launching" ||
     state === "working" ||
+    state === "background" ||
     state === "blocked" ||
     state === "idle" ||
     state === "stalled" ||
@@ -108,7 +109,8 @@ export function terminalAgentCensus(
       // cannot prove the CLI launched, but a live chip must count immediately.
       if (!liveTerminalRuntime(worker)) return;
       agents.add(leaf.paneId);
-      if (worker.runtimeState === "working") working.add(leaf.paneId);
+      // An agent whose background work still runs is busy too.
+      if (worker.runtimeState === "working" || worker.runtimeState === "background") working.add(leaf.paneId);
       else if (worker.runtimeState) working.delete(leaf.paneId);
     });
   }

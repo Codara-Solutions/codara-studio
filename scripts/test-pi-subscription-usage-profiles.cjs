@@ -201,6 +201,7 @@ async function main() {
   let anthropicFetches = 0;
   let anthropicHeaders = null;
   let rateLimitAnthropic = false;
+  let anthropicFiveHour = { utilization: 12, resets_at: "2026-08-01T00:00:00.000Z" };
   const realDateNow = Date.now;
   let syntheticNow = realDateNow();
   Date.now = () => syntheticNow;
@@ -220,7 +221,7 @@ async function main() {
         status: 200,
         async text() {
           return JSON.stringify({
-            five_hour: { utilization: 12, resets_at: "2026-08-01T00:00:00.000Z" },
+            five_hour: anthropicFiveHour,
             seven_day: { utilization: 34, resets_at: "2026-08-07T00:00:00.000Z" },
           });
         },
@@ -328,6 +329,22 @@ async function main() {
     usage.inspectCachedPiSubscriptionUsageProfiles().length === 1 &&
       usage.inspectCachedPiSubscriptionUsageProfiles()[0].provider === "anthropic",
   );
+  // The manager-prompt reader outlives the provider TTL but not its own bound.
+  const lastKnown = usage.inspectLastKnownPiSubscriptionUsageProfiles(30 * 60_000);
+  check(
+    "the last-known reader keeps usage past the provider TTL",
+    lastKnown.length === 3 && lastKnown.some((entry) => entry.provider === "openai-codex"),
+    JSON.stringify(lastKnown.map((entry) => entry.provider)),
+  );
+  lastKnown[0].windows[0].usedPercent = 999;
+  check(
+    "the last-known reader is mutation-safe",
+    usage.inspectLastKnownPiSubscriptionUsageProfiles(30 * 60_000)[0].windows[0].usedPercent !== 999,
+  );
+  check(
+    "the last-known reader drops reads older than its bound",
+    usage.inspectLastKnownPiSubscriptionUsageProfiles(30_000).length === 0,
+  );
   await usage.inspectPiSubscriptionUsage(true);
   check("forced refresh bypasses every profile cache", fetches === 6, `fetches=${fetches}`);
 
@@ -353,6 +370,197 @@ async function main() {
   check(
     "invalidation clears the synchronous profile projection",
     usage.inspectCachedPiSubscriptionUsageProfiles().length === 0,
+  );
+
+  // A full window that resets inside the five-minute Claude TTL.
+  rateLimitAnthropic = false;
+  const claudeUsage = (overview) =>
+    overview.profiles.find((entry) => entry.profileId === profiles[3].id);
+  anthropicFiveHour = { utilization: 100, resets_at: new Date(syntheticNow + 60_000).toISOString() };
+  await usage.inspectPiSubscriptionUsage(true);
+  const fetchesBeforeReset = anthropicFetches;
+  syntheticNow += 30_000;
+  await usage.inspectPiSubscriptionUsage(false);
+  check(
+    "a read whose windows have not reset is served from cache",
+    anthropicFetches === fetchesBeforeReset,
+    `anthropicFetches=${anthropicFetches}`,
+  );
+  anthropicFiveHour = { utilization: 3, resets_at: new Date(syntheticNow + 5 * 3_600_000).toISOString() };
+  syntheticNow += 45_000;
+  check(
+    "the synchronous projection drops a read whose window has since reset",
+    !usage.inspectCachedPiSubscriptionUsageProfiles().some((entry) => entry.provider === "anthropic"),
+    JSON.stringify(usage.inspectCachedPiSubscriptionUsageProfiles().map((entry) => entry.provider)),
+  );
+  const afterReset = claudeUsage(await usage.inspectPiSubscriptionUsage(false));
+  check(
+    "a window that reset since the read is read again inside the TTL",
+    anthropicFetches === fetchesBeforeReset + 1 &&
+      afterReset.windows.some((window) => window.usedPercent === 3) &&
+      !afterReset.windows.some((window) => window.usedPercent === 100),
+    JSON.stringify({ anthropicFetches, windows: afterReset.windows }),
+  );
+  // A vendor that has not rolled over yet still reports the passed reset; that
+  // read is cached like any other instead of making every read live.
+  anthropicFiveHour = { utilization: 100, resets_at: new Date(syntheticNow - 1_000).toISOString() };
+  await usage.inspectPiSubscriptionUsage(true);
+  const fetchesAtLateRollover = anthropicFetches;
+  syntheticNow += 10_000;
+  await usage.inspectPiSubscriptionUsage(false);
+  check(
+    "a reset that was already past when read does not defeat the cache",
+    anthropicFetches === fetchesAtLateRollover,
+    `anthropicFetches=${anthropicFetches}`,
+  );
+
+  // Codex credits and rate-limit resets ride the same wham/usage read; the
+  // reset list is fetched only when there is a reset to spend, for its expiry.
+  const codexRequests = [];
+  let resetListStatus = 200;
+  globalThis.fetch = async (url, options = {}) => {
+    const href = String(url);
+    codexRequests.push({ href, method: options.method ?? "GET", headers: options.headers, body: options.body });
+    if (href.includes("api.anthropic.com")) {
+      return new Response(JSON.stringify({ five_hour: { utilization: 5 } }), { status: 200 });
+    }
+    if (href.endsWith("/wham/rate-limit-reset-credits")) {
+      return new Response(
+        JSON.stringify({
+          available_count: 2,
+          credits: [
+            { status: "available", expires_at: new Date(syntheticNow + 3 * 86_400_000).toISOString() },
+            { status: "available", expires_at: new Date(syntheticNow + 9 * 86_400_000).toISOString() },
+          ],
+        }),
+        { status: resetListStatus },
+      );
+    }
+    if (href.endsWith("/wham/rate-limit-reset-credits/consume")) {
+      return new Response(JSON.stringify({ code: consumeCode }), { status: consumeStatus });
+    }
+    const isDefault = options.headers.authorization === "Bearer access-secret-default";
+    return new Response(
+      JSON.stringify({
+        plan_type: "plus",
+        rate_limit: {
+          primary_window: { used_percent: 30, limit_window_seconds: 18_000, reset_after_seconds: 600 },
+        },
+        credits: { has_credits: true, unlimited: false, balance: "17" },
+        rate_limit_reset_credits: { available_count: isDefault ? 2 : 0 },
+      }),
+      { status: 200 },
+    );
+  };
+  let consumeCode = "reset";
+  let consumeStatus = 200;
+  usage.invalidatePiSubscriptionUsageCache();
+  const withResets = await usage.inspectPiSubscriptionUsage(true);
+  const resetDefault = withResets.profiles.find((entry) => entry.profileId === profiles[0].id);
+  const resetSecond = withResets.profiles.find((entry) => entry.profileId === profiles[1].id);
+  check(
+    "Codex credits and resets are reported beside the windows",
+    resetDefault.credits?.kind === "balance" &&
+      resetDefault.credits.balance === 17 &&
+      resetDefault.resetCredits?.available === 2 &&
+      resetDefault.resetCredits.nextExpiresAt ===
+        new Date(syntheticNow + 3 * 86_400_000).toISOString() &&
+      resetSecond.resetCredits?.available === 0 &&
+      resetSecond.resetCredits.nextExpiresAt === undefined,
+    JSON.stringify({ resetDefault, resetSecond }),
+  );
+  check(
+    "the reset list is read only for the account with a reset to spend",
+    codexRequests.filter((request) => request.href.endsWith("/wham/rate-limit-reset-credits")).length === 1,
+    JSON.stringify(codexRequests.map((request) => request.href)),
+  );
+  check(
+    "credits and resets never change the windows routing reads",
+    resetDefault.windows.length === 1 && resetDefault.windows[0].usedPercent === 30,
+    JSON.stringify(resetDefault.windows),
+  );
+  resetListStatus = 500;
+  usage.invalidatePiSubscriptionUsageCache();
+  const listFailed = (await usage.inspectPiSubscriptionUsage(true)).profiles.find(
+    (entry) => entry.profileId === profiles[0].id,
+  );
+  check(
+    "a failed reset list keeps the count without an expiry",
+    listFailed.status === "ok" &&
+      listFailed.resetCredits?.available === 2 &&
+      listFailed.resetCredits.nextExpiresAt === undefined,
+    JSON.stringify(listFailed),
+  );
+
+  // Spending a reset: one POST with a fresh request id, the account's own
+  // token and account id, and the cached reading dropped afterwards.
+  codexRequests.length = 0;
+  const outcome = await usage.redeemCodexRateLimitReset(profiles[0].id);
+  const consume = codexRequests.find((request) => request.href.endsWith("/consume"));
+  let redeemBody = null;
+  try {
+    redeemBody = JSON.parse(consume?.body ?? "null");
+  } catch {
+    redeemBody = null;
+  }
+  check(
+    "a confirmed reset is one POST with a request id for that account",
+    outcome === "reset" &&
+      codexRequests.length === 1 &&
+      consume?.method === "POST" &&
+      consume.headers.authorization === "Bearer access-secret-default" &&
+      consume.headers["chatgpt-account-id"] === "vendor-account-default" &&
+      /^[0-9a-f-]{36}$/.test(redeemBody?.redeem_request_id ?? ""),
+    JSON.stringify(codexRequests),
+  );
+  codexRequests.length = 0;
+  await usage.inspectPiSubscriptionUsage(false);
+  check(
+    "the account is read again after a reset",
+    codexRequests.some(
+      (request) =>
+        request.href.endsWith("/wham/usage") &&
+        request.headers.authorization === "Bearer access-secret-default",
+    ),
+    JSON.stringify(codexRequests.map((request) => request.href)),
+  );
+  consumeCode = "no_credit";
+  check(
+    "the provider's answer is passed on as an outcome",
+    (await usage.redeemCodexRateLimitReset(profiles[0].id)) === "no_credit",
+  );
+  const redeemError = async (profileId) => {
+    try {
+      await usage.redeemCodexRateLimitReset(profileId);
+      return null;
+    } catch (error) {
+      return error.message;
+    }
+  };
+  consumeCode = "something_new";
+  check(
+    "an unknown answer is an error, never a guessed outcome",
+    (await redeemError(profiles[0].id))?.includes("does not recognize"),
+  );
+  consumeCode = "reset";
+  consumeStatus = 500;
+  check(
+    "an HTTP failure says the limits were not reset",
+    (await redeemError(profiles[0].id)) === "ChatGPT did not reset the limits (HTTP 500).",
+  );
+  check(
+    "only Codex accounts can spend a reset",
+    (await redeemError(profiles[3].id)) === "This Codex account is no longer in Codara." &&
+      (await redeemError("not-a-profile")) === "This Codex account is no longer in Codara.",
+  );
+  globalThis.fetch = async () => {
+    throw new Error(`connect failed with access-secret-default at ${TMP}`);
+  };
+  const transportError = await redeemError(profiles[0].id);
+  check(
+    "a transport failure crosses IPC as fixed copy",
+    transportError === "The reset could not be sent. Check your connection and try again.",
+    transportError,
   );
   Date.now = realDateNow;
 

@@ -14,13 +14,21 @@ import ChatConversation from "./ChatConversation";
 import ChatComposer, { type ChatComposerStartConfig } from "./ChatComposer";
 import CopyBranchWelcome from "./CopyBranchWelcome";
 import { describeRunStatus, statusToneColor } from "./timeline";
-import CoraWhiteboardSurface from "./CoraWhiteboard";
+import { retryableFailedCallId } from "./failed-turn";
 import WelcomeAutomations from "./WelcomeAutomations";
 import { isUnstartedChatRun, type CoraView } from "./cora-view";
+import { needsCoraAccount, openAccountsSettings, useCoraAccountReadiness } from "./account-readiness";
+import DismissErrorButton from "./DismissErrorButton";
+import { filterChatHistory } from "./conversation-search";
+import { isShown, registerFindTarget } from "../find/find-router";
 
 // The Cora Board sub-view. Lazy like App's other heavyweight stacks so the
 // kanban chunk stays out of the startup bundle until the user opens the view.
 const BoardView = lazy(() => import("../board/BoardView"));
+// The run whiteboard is a React Flow canvas. It loads, and mounts, the first
+// time this panel shows it; from then on it stays mounted (hidden) like the
+// conversation, so in-flight canvas state survives view switches.
+const CoraWhiteboardSurface = lazy(() => import("./CoraWhiteboard"));
 
 // Fallbacks for callers that don't thread the board callbacks (tests,
 // isolated mounts). Module-level so their identities are stable across
@@ -41,6 +49,7 @@ interface Props {
   composerDraftKey?: string;
   suspendGlobalEvents?: boolean;
   error: string | null;
+  onDismissError?: () => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
   collapsible?: boolean;
@@ -71,7 +80,7 @@ interface Props {
     attachments?: AddRunMessageAttachmentInput[],
     chatConfig?: ChatComposerStartConfig,
   ) => RunState | void | Promise<RunState | void>;
-  onForcePauseRun: () => void;
+  onForcePauseRun: () => void | Promise<unknown>;
   // Open a past chat from the history popover. The handler is expected to
   // both select the run (so the conversation switches) and surface the
   // chat tab in the top strip; OrchestrationSidebar's handleSelectRun
@@ -91,6 +100,7 @@ export default function ChatPanel({
   composerDraftKey,
   suspendGlobalEvents,
   error,
+  onDismissError,
   collapsed,
   onToggleCollapse,
   collapsible = true,
@@ -120,6 +130,27 @@ export default function ChatPanel({
     [onChatViewChange],
   );
   const usingHoistedChatView = chatViewProp !== undefined;
+  const [whiteboardOpened, setWhiteboardOpened] = useState(false);
+  const mountWhiteboard = whiteboardOpened || chatView === "whiteboard";
+  useEffect(() => {
+    if (chatView === "whiteboard") setWhiteboardOpened(true);
+  }, [chatView]);
+
+  // Mod+F opens find in the visible chat when focus is inside this panel, or
+  // nowhere and the chat was the last thing clicked (find/find-router.ts
+  // decides). Documents and terminals elsewhere keep their own find.
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const [findRequest, setFindRequest] = useState(0);
+  const canFind = chatView === "chat" && activeRun !== null && !isUnstartedChatRun(activeRun);
+  useEffect(() => {
+    if (suspendGlobalEvents || !canFind) return;
+    return registerFindTarget({
+      root: () => panelRef.current,
+      eligible: () => isShown(panelRef.current),
+      primary: () => false,
+      open: () => setFindRequest((value) => value + 1),
+    });
+  }, [suspendGlobalEvents, canFind]);
   // A new chat starts in the normal conversation view. Terminal-view state
   // should not leak between runs because their PTYs are run-scoped. When the
   // parent owns chatView, the parent is also responsible for the reset —
@@ -157,6 +188,7 @@ export default function ChatPanel({
 
   return (
     <div
+      ref={panelRef}
       style={{
         display: "flex",
         flexDirection: "column",
@@ -174,21 +206,30 @@ export default function ChatPanel({
         onToggleCollapse={onToggleCollapse}
         collapsible={collapsible}
         {...headerDrag}
+        compactLead
+        hideLabel={Boolean(activeRun?.title)}
         meta={activeRun ? <HeaderMeta run={activeRun} /> : null}
         actions={
-          onSelectChat ? (
-            <ChatHistoryButton
-              runs={runs}
-              activeRunId={activeRun?.id ?? null}
-              onSelect={onSelectChat}
-              onDelete={onDeleteChat}
-            />
+          activeRun || onSelectChat ? (
+            <>
+              {/* Beside history, away from the title: next to the status pill
+                  a copy glyph read as "copy this title". */}
+              {activeRun ? <RunIdChip runId={activeRun.id} compact hoverLabel="Copy run id" /> : null}
+              {onSelectChat ? (
+                <ChatHistoryButton
+                  runs={runs}
+                  activeRunId={activeRun?.id ?? null}
+                  onSelect={onSelectChat}
+                  onDelete={onDeleteChat}
+                />
+              ) : null}
+            </>
           ) : null
         }
       />
       {!collapsed && (
         <>
-          {error && <ErrorBar message={error} />}
+          {error && <ErrorBar message={error} onDismiss={onDismissError} />}
           {activeRun ? (
             // Both views stack absolutely so each ALWAYS has real
             // dimensions, even when "hidden". xterm's fit-addon measures
@@ -230,39 +271,46 @@ export default function ChatPanel({
                   <ChatConversation
                     key={`conversation:${activeRun.id}`}
                     run={activeRun}
+                    cwd={workspace?.cwd ?? null}
+                    onOpenWorkerTerminal={onOpenBoardWorkerTerminal}
+                    findRequest={findRequest}
                   />
                 )}
               </div>
-              <div
-                style={{
-                  position: "absolute",
-                  inset: 0,
-                  visibility: chatView === "whiteboard" ? undefined : "hidden",
-                  pointerEvents: chatView === "whiteboard" ? undefined : "none",
-                }}
-                aria-hidden={chatView !== "whiteboard"}
-              >
-                <CoraWhiteboardSurface
-                  // Keyed like ChatConversation: the canvas holds optimistic
-                  // board state, and reusing the instance across runs could
-                  // persist run A's board into run B.
-                  key={activeRun.id}
-                  run={activeRun}
-                  workspacePath={workspace?.cwd}
-                  visible={chatView === "whiteboard" && suspendGlobalEvents !== true}
-                  onAskCora={(prompt) => {
-                    setChatView("chat");
-                    window.requestAnimationFrame(() => {
-                      window.dispatchEvent(
-                        new CustomEvent("spark:prefill-composer", {
-                          detail: { text: prompt, replace: true },
-                        }),
-                      );
-                      window.dispatchEvent(new Event("spark:focus-composer"));
-                    });
+              {mountWhiteboard && (
+                <div
+                  style={{
+                    position: "absolute",
+                    inset: 0,
+                    visibility: chatView === "whiteboard" ? undefined : "hidden",
+                    pointerEvents: chatView === "whiteboard" ? undefined : "none",
                   }}
-                />
-              </div>
+                  aria-hidden={chatView !== "whiteboard"}
+                >
+                  <Suspense fallback={null}>
+                    <CoraWhiteboardSurface
+                      // Keyed like ChatConversation: the canvas holds optimistic
+                      // board state, and reusing the instance across runs could
+                      // persist run A's board into run B.
+                      key={activeRun.id}
+                      run={activeRun}
+                      workspacePath={workspace?.cwd}
+                      visible={chatView === "whiteboard" && suspendGlobalEvents !== true}
+                      onAskCora={(prompt) => {
+                        setChatView("chat");
+                        window.requestAnimationFrame(() => {
+                          window.dispatchEvent(
+                            new CustomEvent("spark:prefill-composer", {
+                              detail: { text: prompt, replace: true },
+                            }),
+                          );
+                          window.dispatchEvent(new Event("spark:focus-composer"));
+                        });
+                      }}
+                    />
+                  </Suspense>
+                </div>
+              )}
               {boardSurface && (
                 <div
                   style={{
@@ -337,52 +385,22 @@ export default function ChatPanel({
 }
 
 function HeaderMeta({ run }: { run: RunState }) {
-  // Status + cost + run-id share one row to keep the SectionHeader compact.
-  // The cost pill hides itself until the run records a priced manager call;
-  // the id chip is always shown so the user has something to copy and share
-  // for support / debugging on every chat.
-  //
-  // The status text is the ONLY elastic member. SectionHeader's meta slot
-  // clips its overflow, and a paused run's detail is the manager-turn park
-  // reason — a whole sentence — which used to push the cost pill and the id
-  // chip past the clip line: the id became invisible and unclickable exactly
-  // when a user hit trouble and wanted to copy it (run-msa0s2t6-sz26w1).
-  // Status now ellipsizes and the chips hold their width in every run state.
+  // Title, status and cost share one row to keep the SectionHeader compact.
+  // The title is the only member that gives way: the status and cost pills
+  // hold their width in every run state. The copy-id button lives with the
+  // header actions, where it stays reachable exactly when a user hits trouble
+  // and wants to share it (run-msa0s2t6-sz26w1). A paused run's park reason is
+  // a whole sentence; it lives in the pill's tooltip and in the conversation,
+  // never in this row.
   return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 8,
-        minWidth: 0,
-        maxWidth: "100%",
-        whiteSpace: "nowrap",
-      }}
-    >
-      {/* The chat's name — Cora titles the run early via name_chat and may
-          rename it later; run.renamed events re-render this live. Capped so
-          the status/cost/id chips always keep their row space. */}
+    <span className="cora-header-meta">
       {run.title ? (
-        <span
-          title={run.title}
-          style={{
-            flex: "0 1 auto",
-            minWidth: 0,
-            maxWidth: 200,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-            fontSize: 11,
-            fontWeight: 600,
-            color: "var(--ink)",
-          }}
-        >
+        <span className="cora-header-meta__title" title={run.title}>
           {run.title}
         </span>
       ) : null}
       <StatusMeta run={run} />
       <CostPill run={run} />
-      <RunIdChip runId={run.id} />
     </span>
   );
 }
@@ -523,6 +541,8 @@ function ChatHistoryPopover({
   onPick: (runId: string) => void;
   onDelete?: (runId: string) => void;
 }) {
+  const [query, setQuery] = useState("");
+  const matches = useMemo(() => filterChatHistory(runs, query), [runs, query]);
   return (
     <div
       ref={(node) => { popRef.current = node; }}
@@ -543,16 +563,41 @@ function ChatHistoryPopover({
       <div className="spark-eyebrow" style={{ padding: "6px 8px 5px" }}>
         Recent chats
       </div>
+      {runs.length > 0 ? (
+        <div style={{ padding: "0 4px 4px" }}>
+          <input
+            autoFocus
+            type="search"
+            className="spark-input"
+            aria-label="Search chats"
+            placeholder="Search titles and messages"
+            value={query}
+            onChange={(event) => setQuery(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && matches.length > 0) {
+                event.preventDefault();
+                onPick(matches[0].run.id);
+              }
+            }}
+            style={{ width: "100%", boxSizing: "border-box", height: 26, fontSize: 12 }}
+          />
+        </div>
+      ) : null}
       {runs.length === 0 ? (
         <div className="spark-empty" style={{ minHeight: 0, padding: "18px 8px" }}>
           <div className="spark-eyebrow">No chats yet</div>
           <div className="spark-empty__body">Start one below to see it here.</div>
         </div>
+      ) : matches.length === 0 ? (
+        <div className="spark-empty__body" style={{ padding: "12px 8px", color: "var(--muted)" }}>
+          No chat mentions "{query.trim()}".
+        </div>
       ) : (
-        runs.map((run) => (
+        matches.map(({ run, snippet }) => (
           <ChatHistoryRow
             key={run.id}
             run={run}
+            snippet={snippet}
             active={run.id === activeRunId}
             onClick={() => onPick(run.id)}
             onDelete={onDelete}
@@ -565,11 +610,14 @@ function ChatHistoryPopover({
 
 function ChatHistoryRow({
   run,
+  snippet,
   active,
   onClick,
   onDelete,
 }: {
   run: RunState;
+  /** The message text a search matched, when the title did not. */
+  snippet?: string;
   active: boolean;
   onClick: () => void;
   onDelete?: (runId: string) => void;
@@ -703,19 +751,34 @@ function ChatHistoryRow({
           style={{
             flex: 1,
             minWidth: 0,
-            fontFamily: "var(--font-mono)",
-            fontSize: 10,
-            color: "var(--ink-dim)",
+            fontSize: 11,
+            color: "var(--muted)",
             whiteSpace: "nowrap",
             overflow: "hidden",
             textOverflow: "ellipsis",
           }}
         >
-          {status.label}
-          {status.detail ? ` ${status.detail}` : ""}
+          <span style={{ color: "var(--ink-dim)" }}>{status.label}</span>
+          {status.detail ? ` · ${status.detail}` : ""}
         </span>
-        <RunIdChip runId={run.id} />
+        <RunIdChip runId={run.id} compact />
       </div>
+      {snippet ? (
+        <div
+          style={{
+            paddingLeft: 12,
+            fontSize: 11,
+            lineHeight: 1.4,
+            color: "var(--ink-dim)",
+            overflow: "hidden",
+            display: "-webkit-box",
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: "vertical",
+          }}
+        >
+          {snippet}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -832,56 +895,19 @@ function formatRelativeTime(iso: string): string {
 
 function StatusMeta({ run }: { run: RunState }) {
   const status = describeRunStatus(run);
-  const color = statusToneColor(status.tone);
+  // A run parked on a failed turn is paused, but the reason is a failure the
+  // user has to act on; the calm info tone undersold it next to the error
+  // card below.
+  const color = retryableFailedCallId(run) ? "var(--warn)" : statusToneColor(status.tone);
   return (
     <span
-      // The one shrinkable member of the header meta row: it gives up width
-      // (and ellipsizes its detail) so the cost pill and the run-id chip stay
-      // whole. The full detail survives in the tooltip.
+      className="cora-status-pill"
+      data-tone={status.tone}
       title={status.detail ? `${status.label} · ${status.detail}` : status.label}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 5,
-        flex: "0 1 auto",
-        minWidth: 0,
-        overflow: "hidden",
-        fontFamily: "var(--font-mono)",
-        fontSize: 10,
-        fontVariantNumeric: "tabular-nums",
-        color: "var(--muted)",
-        whiteSpace: "nowrap",
-      }}
+      style={{ "--cora-status-color": color } as React.CSSProperties}
     >
-      <span
-        aria-hidden
-        style={{
-          width: 6,
-          height: 6,
-          borderRadius: 999,
-          background: color,
-          flex: "0 0 6px",
-          // The done state glows softly off only when live; everything else is
-          // a static token-colored dot (--ok for done) reading as calm meta.
-          boxShadow:
-            status.tone === "live"
-              ? `0 0 6px color-mix(in oklch, ${color} 55%, transparent)`
-              : "none",
-          animation: status.tone === "live" ? "spark-pulse 1.3s ease-in-out infinite" : undefined,
-        }}
-      />
-      <span style={{ color: "var(--ink-dim)", flex: "0 0 auto" }}>{status.label}</span>
-      {status.detail && (
-        <span
-          style={{
-            minWidth: 0,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-          }}
-        >
-          {status.detail}
-        </span>
-      )}
+      <span aria-hidden className="cora-status-pill__dot" />
+      {status.label}
     </span>
   );
 }
@@ -1002,18 +1028,19 @@ function CostPill({ run }: { run: RunState }) {
       style={{
         display: "inline-flex",
         alignItems: "center",
-        gap: 4,
-        height: 18,
-        padding: "0 7px",
+        gap: 2,
+        height: 20,
+        padding: "0 8px",
         borderRadius: 999,
         border: "1px solid var(--rule-soft)",
-        background: "var(--panel-2)",
+        background: "transparent",
         color: "var(--ink-dim)",
-        fontFamily: "var(--font-mono)",
-        fontSize: 10,
+        fontFamily: "var(--font-sans)",
+        fontSize: 11,
+        fontWeight: 500,
         fontVariantNumeric: "tabular-nums",
         whiteSpace: "nowrap",
-        // Never the member that gives way when the status text is long.
+        // Never the member that gives way when the title is long.
         flex: "0 0 auto",
       }}
     >
@@ -1070,10 +1097,16 @@ const PROJECT_STARTERS = [
 ] as const;
 
 function WelcomeState({ workspace }: { workspace: Workspace | null }) {
+  const accounts = useCoraAccountReadiness();
+  // Only a settled read that found nothing claims "no account": an unreadable
+  // status keeps the welcome as it was rather than nagging on a guess, and an
+  // OpenRouter setup already runs Cora without a subscription.
+  const needsAccount = needsCoraAccount(accounts);
   const prefill = (text: string) => {
+    // A starter frames the task; it must not wipe a half-typed description.
     window.dispatchEvent(
       new CustomEvent("spark:prefill-composer", {
-        detail: { text, replace: true },
+        detail: { text, prepend: true },
       }),
     );
   };
@@ -1099,7 +1132,6 @@ function WelcomeState({ workspace }: { workspace: Workspace | null }) {
         <SparkMark size={20} />
       </div>
       <div className="cora-welcome__copy">
-        <div className="spark-eyebrow">New chat</div>
         <div className="cora-welcome__title">Work with Cora on this project</div>
         <div className="cora-welcome__body">
           Ask a question or describe an outcome. Cora can inspect the project,
@@ -1117,6 +1149,21 @@ function WelcomeState({ workspace }: { workspace: Workspace | null }) {
           <span className="cora-welcome__project-path">{workspace.cwd}</span>
         </div>
       )}
+      {needsAccount && (
+        <div className="cora-welcome__connect" role="status">
+          <div className="cora-welcome__connect-copy">
+            <strong>Connect an account to start</strong>
+            <span>
+              {accounts.runtimeMissing
+                ? "Cora runs on Pi with your Claude, ChatGPT or Grok subscription. Install Pi and sign in once in Settings > Agents."
+                : "Cora runs on your Claude, ChatGPT or Grok subscription. Sign in once in Settings > Agents."}
+            </span>
+          </div>
+          <button type="button" className="cora-failure-action" onClick={openAccountsSettings}>
+            {accounts.runtimeMissing ? "Install Pi" : "Connect an account"}
+          </button>
+        </div>
+      )}
       <div className="cora-welcome__starters" aria-label="Suggested ways to start">
         {PROJECT_STARTERS.map((starter) => (
           <button
@@ -1126,9 +1173,15 @@ function WelcomeState({ workspace }: { workspace: Workspace | null }) {
             onClick={() => prefill(starter.prompt)}
           >
             <span className="cora-starter__label">{starter.label}</span>
-            <span className="cora-starter__title">{starter.title}</span>
+            <span className="cora-starter__title">
+              {starter.title}
+              <span className="cora-starter__arrow" aria-hidden>
+                <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
+                  <path d="M3.5 8.5 8.5 3.5M4.5 3.5h4v4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </span>
+            </span>
             <span className="cora-starter__body">{starter.body}</span>
-            <span className="cora-starter__arrow" aria-hidden>↗</span>
           </button>
         ))}
       </div>
@@ -1138,11 +1191,15 @@ function WelcomeState({ workspace }: { workspace: Workspace | null }) {
   );
 }
 
-function ErrorBar({ message }: { message: string }) {
+function ErrorBar({ message, onDismiss }: { message: string; onDismiss?: () => void }) {
   return (
     <div
+      role="alert"
       style={{
         flex: "0 0 auto",
+        display: "flex",
+        alignItems: "flex-start",
+        gap: 8,
         padding: "7px 12px",
         background: "var(--danger-soft)",
         borderBottom: "1px solid color-mix(in oklch, var(--danger) 30%, transparent)",
@@ -1151,7 +1208,8 @@ function ErrorBar({ message }: { message: string }) {
         lineHeight: 1.4,
       }}
     >
-      {message}
+      <span style={{ flex: "1 1 auto", minWidth: 0 }}>{message}</span>
+      {onDismiss ? <DismissErrorButton onClick={onDismiss} /> : null}
     </div>
   );
 }

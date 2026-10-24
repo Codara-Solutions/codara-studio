@@ -21,10 +21,20 @@ export interface PiMcpBridgeConfig {
   version: 1;
   audience: PiMcpAudience;
   connectTimeoutMs: number;
+  stdioConnectTimeoutMs: number;
   callTimeoutMs: number;
   maxTotalCallMs: number;
   maxToolsPerServer: number;
   servers: PiMcpServerConfig[];
+  // A live roster is rewritten while the session runs (the Capability Center
+  // assigned or removed a server); the bridge re-reads it before each prompt.
+  // Only a live roster may be empty.
+  live?: boolean;
+}
+
+/** Sidecar the bridge writes next to a live roster with each server's state. */
+export function piMcpStatusPath(configPath: string): string {
+  return configPath.replace(/\.json$/, "") + ".status.json";
 }
 
 export interface RawMcpServer {
@@ -56,10 +66,15 @@ export const RESERVED_MCP_SERVER_NAMES = [
 
 export const PI_MCP_DEFAULTS = {
   connectTimeoutMs: 10_000,
+  // A first `npx -y` run installs the package before the handshake.
+  stdioConnectTimeoutMs: 30_000,
   callTimeoutMs: 60_000,
   maxTotalCallMs: 600_000,
-  maxServers: 8,
-  maxToolsPerServer: 64,
+  // Remote tools stay inactive until codara_external_tools loads them, so a
+  // server costs a connection, not prompt tokens; the caps bound connection
+  // fan-out and a runaway server.
+  maxServers: 16,
+  maxToolsPerServer: 256,
 } as const;
 
 const RESERVED = new Set<string>(RESERVED_MCP_SERVER_NAMES.map((name) => name.toLowerCase()));
@@ -109,6 +124,14 @@ function isSupportedUrl(url: string): boolean {
   }
 }
 
+export type PiMcpDropReason = "turned-off" | "reserved" | "duplicate" | "unsupported" | "over-cap";
+
+export interface PiMcpDroppedServer {
+  name: string;
+  reason: PiMcpDropReason;
+  detail: string;
+}
+
 /**
  * Turn discovered runtime-agnostic entries into the exact roster the Pi bridge
  * connects to. Entries that cannot be launched (no command and no usable url),
@@ -119,22 +142,53 @@ export function normalizePiMcpServers(
   raw: readonly RawMcpServer[],
   options: { cwd?: string; env?: NodeJS.ProcessEnv; maxServers?: number } = {},
 ): PiMcpServerConfig[] {
+  return normalizePiMcpServersDetailed(raw, options).servers.map(({ rawName: _rawName, ...server }) => server);
+}
+
+/** The same roster plus every dropped entry and why, for the Capability Center. */
+export function normalizePiMcpServersDetailed(
+  raw: readonly RawMcpServer[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; maxServers?: number } = {},
+): { servers: Array<PiMcpServerConfig & { rawName: string }>; dropped: PiMcpDroppedServer[] } {
   const env = options.env ?? process.env;
   const maxServers = options.maxServers ?? PI_MCP_DEFAULTS.maxServers;
   const seen = new Set<string>();
-  const servers: PiMcpServerConfig[] = [];
+  const servers: Array<PiMcpServerConfig & { rawName: string }> = [];
+  const dropped: PiMcpDroppedServer[] = [];
+  const drop = (name: string, reason: PiMcpDropReason, detail: string) => {
+    dropped.push({ name, reason, detail });
+  };
   for (const entry of raw) {
-    if (servers.length >= maxServers) break;
     const rawName = typeof entry?.name === "string" ? entry.name.trim() : "";
-    if (!rawName || entry.enabled === false) continue;
-    if (RESERVED.has(rawName.toLowerCase())) continue;
+    if (!rawName) continue;
+    if (entry.enabled === false) {
+      drop(rawName, "turned-off", "Its config entry sets enabled = false.");
+      continue;
+    }
+    if (RESERVED.has(rawName.toLowerCase())) {
+      drop(rawName, "reserved", "Codara's built-in tools already reach Cora directly.");
+      continue;
+    }
     const name = sanitizeMcpSegment(rawName);
-    if (!name || seen.has(name.toLowerCase())) continue;
+    if (!name || seen.has(name.toLowerCase())) {
+      drop(rawName, "duplicate", "Another assigned server already uses this name.");
+      continue;
+    }
     const transport = inferTransport(entry);
-    if (!transport) continue;
+    if (!transport) {
+      drop(rawName, "unsupported", "The entry has no command and no URL.");
+      continue;
+    }
+    if (servers.length >= maxServers) {
+      drop(rawName, "over-cap", `A session connects to at most ${maxServers} servers; turn one off to make room.`);
+      continue;
+    }
     if (transport === "stdio") {
       const command = expandEnvPlaceholders(entry.command!.trim(), env);
-      if (!command) continue;
+      if (!command) {
+        drop(rawName, "unsupported", "The command is empty.");
+        continue;
+      }
       const args = Array.isArray(entry.args)
         ? entry.args.filter((arg): arg is string => typeof arg === "string")
           .map((arg) => expandEnvPlaceholders(arg, env))
@@ -142,6 +196,7 @@ export function normalizePiMcpServers(
       const serverEnv = stringRecord(entry.env, env);
       seen.add(name.toLowerCase());
       servers.push({
+        rawName,
         name,
         transport,
         command,
@@ -152,17 +207,21 @@ export function normalizePiMcpServers(
       continue;
     }
     const url = expandEnvPlaceholders(entry.url!.trim(), env);
-    if (!isSupportedUrl(url)) continue;
+    if (!isSupportedUrl(url)) {
+      drop(rawName, "unsupported", "The URL is not an http(s) address.");
+      continue;
+    }
     const headers = stringRecord(entry.headers, env);
     seen.add(name.toLowerCase());
     servers.push({
+      rawName,
       name,
       transport,
       url,
       ...(headers ? { headers } : {}),
     });
   }
-  return servers;
+  return { servers, dropped };
 }
 
 export function buildPiMcpBridgeConfig(
@@ -173,10 +232,12 @@ export function buildPiMcpBridgeConfig(
     version: 1,
     audience: options.audience,
     connectTimeoutMs: options.connectTimeoutMs ?? PI_MCP_DEFAULTS.connectTimeoutMs,
+    stdioConnectTimeoutMs: options.stdioConnectTimeoutMs ?? PI_MCP_DEFAULTS.stdioConnectTimeoutMs,
     callTimeoutMs: options.callTimeoutMs ?? PI_MCP_DEFAULTS.callTimeoutMs,
     maxTotalCallMs: options.maxTotalCallMs ?? PI_MCP_DEFAULTS.maxTotalCallMs,
     maxToolsPerServer: options.maxToolsPerServer ?? PI_MCP_DEFAULTS.maxToolsPerServer,
     servers: [...servers],
+    ...(options.live ? { live: true } : {}),
   };
 }
 

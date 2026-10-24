@@ -139,7 +139,9 @@ export function parseLsofCwds(output: string): Map<number, string> {
   return result;
 }
 
-async function processCwds(pids: number[]): Promise<Map<number, string> | null> {
+// Current folder of each process: /proc on Linux, lsof on macOS, null
+// elsewhere or when lsof fails. A process that exited is simply missing.
+export async function processCwds(pids: number[]): Promise<Map<number, string> | null> {
   if (pids.length === 0) return new Map();
   if (process.platform === "linux") {
     const entries = await Promise.all(pids.map(async (pid) =>

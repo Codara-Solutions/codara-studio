@@ -22,7 +22,6 @@ import {
   normalizeCodexCliProfileId,
   type CodexCliProfileConnection,
 } from "./codex-cli-account-profiles";
-import { codexCliPersonalAuthFile, readCodexCliSelection } from "./codex-cli-auth-selector";
 import { CodexCliProfileLeaseRegistry } from "./codex-cli-profile-execution";
 import {
   GROK_CLI_PERSONAL_PROFILE_ID,
@@ -37,7 +36,7 @@ import {
   type GrokCliProfileConnection,
 } from "./grok-cli-account-profiles";
 import { GrokCliProfileLeaseRegistry } from "./grok-cli-profile-execution";
-import { readClaudeProfileIdentity } from "./claude-cli-live-login";
+import { readClaudeProfileIdentity, readClaudeSystemIdentity } from "./claude-cli-live-login";
 import {
   readCodexCliAccountIdentity,
   readGrokCliAccountIdentity,
@@ -313,7 +312,10 @@ export class NativeCliAccountService {
     this.grokIdentityReader = options.grokIdentityReader ?? readGrokCliAccountIdentity;
     this.claudeIdentityReader =
       options.claudeIdentityReader ??
-      ((profileId) => readClaudeProfileIdentity(this.claudeStore, profileId));
+      ((profileId) =>
+        profileId === CLAUDE_CLI_PERSONAL_PROFILE_ID
+          ? readClaudeSystemIdentity(this.claudeStore)
+          : readClaudeProfileIdentity(this.claudeStore, profileId));
   }
 
   private normalizeProfileId(
@@ -350,28 +352,22 @@ export class NativeCliAccountService {
   }
 
   /**
-   * Account identities for connected Codex sign-ins, keyed by profile id.
-   * The slot that answers for a profile depends on the marker: the live
-   * ~/.codex/auth.json while the profile is active, its vault slot otherwise.
+   * Account identities for connected Codex sign-ins, keyed by profile id:
+   * a managed profile's own home, or the System login's claims (read, never
+   * written).
    */
   private async codexAccountIdentities(
     profiles: readonly CodexCliProfileConnection[],
   ): Promise<Map<string, NativeCliAccountIdentity>> {
     const identities = new Map<string, NativeCliAccountIdentity>();
-    const active =
-      (await readCodexCliSelection(this.codexStore.rootDir).catch(() => null)) ??
-      CODEX_CLI_PERSONAL_PROFILE_ID;
     await Promise.all(
       profiles.map(async (profile) => {
         if (!profile.connected) return;
         let authFile: string;
         try {
-          authFile =
-            profile.id === active
-              ? this.codexStore.personalAuthFile
-              : profile.managed
-                ? codexCliManagedProfilePaths(this.codexStore.rootDir, profile.id).authFile
-                : codexCliPersonalAuthFile(this.codexStore.rootDir);
+          authFile = profile.managed
+            ? codexCliManagedProfilePaths(this.codexStore.rootDir, profile.id).authFile
+            : this.codexStore.personalAuthFile;
         } catch {
           return;
         }

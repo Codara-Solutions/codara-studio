@@ -6,6 +6,10 @@ import { FS_READ_TEXT_LIMIT_BYTES } from "@shared/types";
 import { writeFileAtomic } from "./fs-atomic";
 import { isRemotePath } from "@shared/remote";
 import * as remoteFs from "./remote/remote-fs";
+import { outsideWriteCapability } from "./outside-write-guard";
+
+/** Explicit exception to the outside-write guard: the user saved a file they opened in the editor. */
+const USER_FILE_SAVE = outsideWriteCapability("the user saved a file they opened in the editor");
 
 const MAX_TEXT_FILE_BYTES = FS_READ_TEXT_LIMIT_BYTES;
 const MAX_FILE_LIST_FILES = 10000;
@@ -226,7 +230,7 @@ export async function writeTextFile(
       return { kind: "conflict", path, reason: "modified", diskMtimeMs: before.mtimeMs };
     }
   }
-  await writeFileAtomic(path, content);
+  await writeFileAtomic(path, content, { outsideWrite: USER_FILE_SAVE });
   const st = await fs.stat(path);
   return { kind: "ok", path, size: st.size, mtimeMs: st.mtimeMs };
 }

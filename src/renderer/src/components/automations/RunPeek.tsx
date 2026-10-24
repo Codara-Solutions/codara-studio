@@ -127,7 +127,7 @@ export default function RunPeek({
         )}
         {missing ? (
           <span style={{ fontSize: 11, color: "var(--muted-2)" }}>
-            This iteration's run was cleaned up by run retention — only the history summary remains.
+            This iteration's run was cleaned up by run retention. Only the history summary remains.
           </span>
         ) : !run ? (
           <span style={{ fontSize: 11, color: "var(--muted-2)" }}>Loading…</span>

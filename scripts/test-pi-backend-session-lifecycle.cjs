@@ -33,14 +33,27 @@ function createHarness() {
     nextStart: null,
     nextStop: null,
     nextPromptError: null,
+    nextPromptHang: false,
+    // A deferred the next prompt request waits on before Pi answers it, the
+    // window in which Pi is still in prompt preflight.
+    nextPromptGate: null,
+    nextAbortHang: false,
+    nextStartStderr: "",
     nextCompaction: null,
     promptReplies: [],
+    promptToolCalls: [],
+    planSources: [],
     turnOptions: [],
+    holdNextTurn: false,
     // Stands in for AppSettings.openAiFastMode, which the composer's flash
-    // button writes. Anthropic never sees it.
+    // button writes, narrowed the way resolveCodaraPiFastMode narrows it: a
+    // Claude model without fast mode never sees it.
     fastMode: false,
-    fastModeFor(provider) {
-      return provider !== "anthropic" && harness.fastMode;
+    fastModeFor(provider, model) {
+      if (provider === "anthropic" && !["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"].includes(model)) {
+        return false;
+      }
+      return harness.fastMode;
     },
     resolveAccount: async () => ({
       accountProfileId: "11111111-1111-4111-8111-111111111111",
@@ -61,12 +74,15 @@ function createHarness() {
         model: options.model,
         thinking: options.thinking,
         sessionId: options.sessionId,
-        openAiFastMode: options.openAiFastMode,
+        fastMode: options.fastMode,
         executionPolicy: options.executionPolicy,
         projectPolicyMode: options.projectPolicyMode,
         mcpConfigPath: null,
         agentSocketCapabilityId: capabilityId,
         agentSocketCapabilityExpiresAt: expiresAt,
+        ...(harness.planSources.length > 0
+          ? { runtimeSource: harness.planSources.shift(), runtimeVersion: "9.9.9" }
+          : {}),
       };
     },
     isCapabilityActive(id, now) {
@@ -108,7 +124,8 @@ async function loadBackend() {
         createCodaraPiLaunchPlan: async (options) => h().createPlan(options),
         resolveCodaraOpenRouterApiKey: async () => "test-openrouter-key",
         resolveCodaraPiExecutionAccount: async (request) => h().resolveAccount(request),
-        resolveCodaraPiFastMode: async (provider) => h().fastModeFor(provider),
+        resolveCodaraPiFastMode: async (provider, model) => h().fastModeFor(provider, model),
+        markUserPiRuntimeFailed: (version) => h().events.push("mark-failed:" + version),
       };`,
     "./pi-rpc-client": `
       const h = () => globalThis.${HARNESS_KEY};
@@ -119,17 +136,31 @@ async function loadBackend() {
             this.id = "client-" + (h().clients.length + 1);
             this.phase = "idle";
             this.listeners = new Set();
+            this.failureListeners = new Set();
+            this.failure = null;
+            this.stderr = "";
             this.prompts = [];
             this.stopCalls = 0;
             this.abortCalls = 0;
             h().clients.push(this);
           }
-          state() { return { phase: this.phase }; }
+          state() { return { phase: this.phase, failure: this.failure }; }
           async start() {
             this.phase = "starting";
+            this.stderr = h().nextStartStderr;
+            h().nextStartStderr = "";
             await h().takeStart(this);
             if (this.phase !== "stopped") this.phase = "running";
             return { sessionId: this.plan.sessionId };
+          }
+          onFailure(listener) {
+            this.failureListeners.add(listener);
+            return () => this.failureListeners.delete(listener);
+          }
+          crash(message) {
+            this.phase = "failed";
+            this.failure = { code: "PROCESS_EXIT", message };
+            for (const listener of [...this.failureListeners]) listener(this.failure);
           }
           async stop() {
             this.stopCalls += 1;
@@ -142,6 +173,9 @@ async function loadBackend() {
           async abort() {
             this.abortCalls += 1;
             h().events.push("abort:" + this.id);
+            const hang = h().nextAbortHang;
+            h().nextAbortHang = false;
+            if (hang) await new Promise(() => undefined);
           }
           onEvent(listener) {
             this.listeners.add(listener);
@@ -153,24 +187,51 @@ async function loadBackend() {
             const error = h().nextPromptError;
             h().nextPromptError = null;
             if (error) throw error;
+            const gate = h().nextPromptGate;
+            h().nextPromptGate = null;
+            if (gate) await gate.promise;
+            if (h().nextPromptHang) {
+              h().nextPromptHang = false;
+              return;
+            }
             const reply = h().promptReplies.length > 0
               ? h().promptReplies.shift()
               : "ok";
-            for (const listener of [...this.listeners]) {
-              listener({
-                type: "message_end",
-                message: {
-                  role: "assistant",
-                  id: "assistant-" + this.prompts.length,
-                  content: reply ? [{ type: "text", text: reply }] : [],
-                },
-              });
-              if (h().nextCompaction) listener({ type: "entry_appended", entry: { type: "custom", customType: "codara-context-pause", data: { reason: "threshold" } } });
-              listener({ type: "agent_settled" });
+            const toolCalls = h().promptToolCalls.splice(0);
+            const finish = () => {
+              for (const listener of [...this.listeners]) {
+                for (const call of toolCalls) {
+                  listener({ type: "tool_execution_start", toolCallId: call.id, toolName: call.name, args: call.args });
+                  listener({ type: "tool_execution_end", toolCallId: call.id, toolName: call.name, isError: false, result: {} });
+                }
+                listener({
+                  type: "message_end",
+                  message: {
+                    role: "assistant",
+                    id: "assistant-" + this.prompts.length,
+                    content: reply ? [{ type: "text", text: reply }] : [],
+                  },
+                });
+                if (h().nextCompaction) listener({ type: "entry_appended", entry: { type: "custom", customType: "codara-context-pause", data: { reason: "threshold" } } });
+                listener({ type: "agent_settled" });
+              }
+            };
+            // A held turn is accepted but streams until the test finishes it.
+            if (h().holdNextTurn) {
+              h().holdNextTurn = false;
+              this.finishTurn = finish;
+              return;
             }
+            finish();
+          }
+          emit(event) {
+            for (const listener of [...this.listeners]) listener(event);
           }
           async request(command) {
-            if (command.type !== "compact") return { text: "ok" };
+            if (command.type !== "compact") {
+              h().events.push("request:" + command.type + ":" + this.id);
+              return { text: "ok" };
+            }
             const gate = h().nextCompaction;
             h().nextCompaction = null;
             h().events.push("compact:" + this.id);
@@ -178,7 +239,7 @@ async function loadBackend() {
             for (const listener of [...this.listeners]) listener({ type: "compaction_end", result, aborted: false });
             return result;
           }
-          diagnostics() { return { stderr: "" }; }
+          diagnostics() { return { stderr: this.stderr }; }
         },
       };`,
     "./pi-session-identity": `
@@ -194,8 +255,12 @@ async function loadBackend() {
             h().turnOptions.push(options ?? {});
             this.finalText = "";
             this.assistantIds = new Set();
+            this.toolCalls = [];
           }
           consume(event) {
+            if (event.type === "tool_execution_start") {
+              this.toolCalls.push({ toolName: event.toolName, toolUseId: event.toolCallId, input: event.args });
+            }
             if (event.type === "message_end") {
               this.assistantIds.add(event.message?.id ?? "assistant-unknown");
               this.finalText = event.message?.content?.[0]?.text ?? "";
@@ -205,13 +270,14 @@ async function loadBackend() {
             return {
               finalText: this.finalText,
               assistantMessageCount: this.assistantIds.size,
-              toolCalls: [],
-              successfulToolCalls: [],
+              toolCalls: this.toolCalls.map((call) => ({ ...call })),
+              successfulToolCalls: this.toolCalls.map((call) => ({ ...call })),
               providerResponseIds: [],
               usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 },
               contextTokens: 0,
               contextWindowTokens: null,
               failure: null,
+              providerRetried: false,
               settled: true,
             };
           }
@@ -220,6 +286,11 @@ async function loadBackend() {
     "./agent-backend": `
       module.exports = {
         buildTalkReplyDecision: (reply) => ({ status: "reply", reply }),
+      };`,
+    "./cora-memory": `
+      const h = () => globalThis.${HARNESS_KEY};
+      module.exports = {
+        resetCoraMemoryInjection: (runId) => h().events.push("memory-reset:" + runId),
       };`,
     "./project-policy": `
       module.exports = {
@@ -471,15 +542,15 @@ async function testSupersedingRequestReclaimsPendingOwner(backend, harness) {
 // Fast mode reaches the runtime only as launch-time env (CODARA_PI_FAST_MODE),
 // so it has to sit in the session's reuse key: flipping the composer's flash
 // button must rotate the process on the next turn instead of silently doing
-// nothing. Anthropic is exempt in the only way that matters — it never carries
-// fast mode at all, so no flip can ever rotate an Anthropic session.
+// nothing. A model without fast mode never carries it, so a flip cannot
+// restart (and re-cache) a session it would not change.
 async function testFastModeIsPartOfSessionIdentity(backend, harness) {
   harness.fastMode = false;
   const input = requestInput("run-fast-mode");
   await backend.requestManagerDecision(input);
   const off = harness.clients.at(-1);
   assert.equal(
-    off.plan.openAiFastMode,
+    off.plan.fastMode,
     false,
     "the launch plan must carry the fast mode the identity check compared",
   );
@@ -494,35 +565,44 @@ async function testFastModeIsPartOfSessionIdentity(backend, harness) {
   await backend.requestManagerDecision(input);
   const on = harness.clients.at(-1);
   assert.notEqual(on, off, "flipping fast mode on must relaunch the session");
-  assert.equal(on.plan.openAiFastMode, true);
+  assert.equal(on.plan.fastMode, true);
   assert.equal(off.stopCalls, 1);
 
   harness.fastMode = false;
   await backend.requestManagerDecision(input);
   const backOff = harness.clients.at(-1);
   assert.notEqual(backOff, on, "flipping fast mode off must relaunch the session");
-  assert.equal(backOff.plan.openAiFastMode, false);
+  assert.equal(backOff.plan.fastMode, false);
   await backend.disposeChat("run-fast-mode");
 
-  const anthropic = requestInput("run-fast-mode-anthropic", "claude-opus-5");
+  // Claude Opus runs fast like a GPT model does.
+  const opus = requestInput("run-fast-mode-opus", "claude-opus-5");
   harness.fastMode = false;
-  await backend.requestManagerDecision(anthropic);
-  const claude = harness.clients.at(-1);
-  assert.equal(
-    claude.plan.openAiFastMode,
-    false,
-    "an anthropic session must never be launched with fast mode",
-  );
+  await backend.requestManagerDecision(opus);
+  const opusOff = harness.clients.at(-1);
+  assert.equal(opusOff.plan.fastMode, false);
   harness.fastMode = true;
-  await backend.requestManagerDecision(anthropic);
+  await backend.requestManagerDecision(opus);
+  const opusOn = harness.clients.at(-1);
+  assert.notEqual(opusOn, opusOff, "fast mode on must relaunch a Claude Opus session");
+  assert.equal(opusOn.plan.fastMode, true, "a Claude Opus session launches with fast mode");
+  harness.fastMode = false;
+  await backend.disposeChat("run-fast-mode-opus");
+
+  const sonnet = requestInput("run-fast-mode-sonnet", "claude-sonnet-5");
+  await backend.requestManagerDecision(sonnet);
+  const claude = harness.clients.at(-1);
+  assert.equal(claude.plan.fastMode, false);
+  harness.fastMode = true;
+  await backend.requestManagerDecision(sonnet);
   assert.equal(
     harness.clients.at(-1),
     claude,
-    "fast mode cannot rotate an anthropic session: it never applies to one",
+    "fast mode cannot rotate a session whose model has no fast mode",
   );
-  assert.equal(harness.clients.at(-1).plan.openAiFastMode, false);
+  assert.equal(harness.clients.at(-1).plan.fastMode, false);
   harness.fastMode = false;
-  await backend.disposeChat("run-fast-mode-anthropic");
+  await backend.disposeChat("run-fast-mode-sonnet");
 }
 
 async function testEmptyFinalGetsOneRecoveryPrompt(backend, harness) {
@@ -546,6 +626,7 @@ async function testRepeatedEmptyFinalFailsClearly(backend, harness) {
   const client = harness.clients.at(-1);
   assert.equal(client.prompts.length, 2, "empty-final recovery must not loop forever");
   assert.equal(result.turnFailed, true);
+  assert.equal(result.failureCause, "empty_reply", "the policy parks this instead of failing the run");
   assert.match(result.notice, /without a final response after one retry/);
   assert.match(result.decision.reply, /without a final response after one retry/);
   await backend.disposeChat("run-empty-final-failure");
@@ -588,6 +669,10 @@ async function testCompactionWaitsWithoutRepeatingAnswer(backend, harness) {
   assert.equal(result.decision.reply, "Completed once.");
   assert.equal(result.turnFailed, undefined);
   assert.equal(client.prompts.length, 1);
+  assert.ok(
+    harness.events.includes("memory-reset:run-manager-compaction"),
+    "a finished compaction must make the next turn re-send Cora's memory and profile",
+  );
   await backend.disposeChat("run-manager-compaction");
 }
 
@@ -605,6 +690,10 @@ async function testFailedCompactionPreservesAnswerAndStopsRuntime(backend, harne
   assert.equal(result.decision.reply, "The completed answer survives.");
   assert.equal(result.turnFailed, undefined);
   assert.equal(client.stopCalls, 1, "unconfirmed compaction must not survive after its turn returns");
+  assert.ok(
+    !harness.events.includes("memory-reset:run-manager-compaction-failure"),
+    "a failed compaction left the context intact, so the memory gate stays",
+  );
   assert.ok(notes.some(event => event.kind === "system_note" && /compaction failed/.test(event.message)));
   await backend.requestManagerDecision(requestInput("run-manager-compaction-failure"));
   assert.notEqual(harness.clients.at(-1), client, "next turn must use a fresh process");
@@ -629,6 +718,353 @@ async function testCompactionCleanupCannotReturnStaleAnswer(backend, harness) {
   await backend.disposeChat("run-manager-compaction-race");
 }
 
+async function settlesWithin(promise, ms, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// A crash after the prompt was accepted leaves no pending request to reject;
+// without the failure subscription the chat sat "working" for 25 minutes.
+async function testRuntimeCrashMidTurnFailsPromptly(backend, harness) {
+  const before = harness.clients.length;
+  harness.nextPromptHang = true;
+  const outcome = backend.requestManagerDecision(requestInput("run-crash-mid-turn"));
+  await waitFor(
+    () => harness.clients.length > before && harness.clients.at(-1).prompts.length === 1,
+    "the prompt should be accepted before the crash",
+  );
+  const client = harness.clients.at(-1);
+  client.stderr = "warning: something noisy\nHTTP 429 rate limit (retried)";
+  client.crash("Pi RPC process exited (SIGKILL)");
+  const result = await settlesWithin(outcome, 2_000, "a crashed runtime must settle the turn at once");
+  assert.equal(result.turnFailed, true);
+  assert.equal(result.failureCause, "runtime");
+  assert.equal(result.notice, "Pi RPC process exited (SIGKILL)", "stderr never reaches the classified notice");
+  assert.match(result.diagnostics, /429 rate limit/, "stderr is kept for Technical details");
+  assert.equal(result.replaySafe, true);
+  assert.equal(client.stopCalls, 1);
+  await backend.disposeChat("run-crash-mid-turn");
+}
+
+async function testDisposeMidTurnIsAnAbortNotAFailure(backend, harness) {
+  const before = harness.clients.length;
+  harness.nextPromptHang = true;
+  const outcome = backend.requestManagerDecision(requestInput("run-dispose-mid-turn"));
+  await waitFor(
+    () => harness.clients.length > before && harness.clients.at(-1).prompts.length === 1,
+    "the prompt should be accepted before disposal",
+  );
+  await backend.disposeChat("run-dispose-mid-turn");
+  const result = await settlesWithin(outcome, 2_000, "disposal must release the turn");
+  assert.equal(result.turnAborted, true);
+  assert.equal(result.turnFailed, undefined);
+}
+
+async function testInterruptReusesAnIdleProcess(backend, harness) {
+  const before = harness.clients.length;
+  const input = requestInput("run-interrupt-reuse");
+  harness.nextPromptHang = true;
+  const outcome = backend.requestManagerDecision(input);
+  await waitFor(
+    () => harness.clients.length > before && harness.clients.at(-1).prompts.length === 1,
+    "the first prompt should be accepted",
+  );
+  const client = harness.clients.at(-1);
+  backend.interruptChat("run-interrupt-reuse");
+  const interrupted = await settlesWithin(outcome, 2_000, "interrupt must release the turn");
+  assert.equal(interrupted.turnAborted, true);
+  const notes = [];
+  const next = await backend.requestManagerDecision(input, (event) => notes.push(event));
+  assert.equal(next.turnFailed, undefined);
+  assert.equal(next.turnAborted, undefined);
+  assert.equal(harness.clients.at(-1), client, "an aborted, idle process is reused");
+  assert.equal(client.stopCalls, 0);
+  assert.equal(client.abortCalls, 1);
+  assert.equal(notes.some((event) => event.kind === "system_note" && /Restarting/.test(event.message)), false);
+  await backend.disposeChat("run-interrupt-reuse");
+}
+
+async function testInterruptRestartsWhenAbortNeverSettles(backend, harness) {
+  const before = harness.clients.length;
+  const input = requestInput("run-interrupt-restart");
+  harness.nextPromptHang = true;
+  const outcome = backend.requestManagerDecision(input);
+  await waitFor(
+    () => harness.clients.length > before && harness.clients.at(-1).prompts.length === 1,
+    "the first prompt should be accepted",
+  );
+  const client = harness.clients.at(-1);
+  harness.nextAbortHang = true;
+  backend.interruptChat("run-interrupt-restart");
+  await outcome;
+  const notes = [];
+  await backend.requestManagerDecision(input, (event) => notes.push(event));
+  assert.notEqual(harness.clients.at(-1), client, "a process still busy after abort is replaced");
+  assert.equal(client.stopCalls, 1);
+  assert.ok(
+    notes.some((event) => event.kind === "system_note" && event.message === "Restarting Cora's runtime after the interrupted turn."),
+    "the restart note names the interrupt, not a settings change",
+  );
+  await backend.disposeChat("run-interrupt-restart");
+}
+
+// Pi answers abort at once while a prompt is still in preflight and then starts
+// that prompt's run anyway, so such a process must never be adopted as idle.
+async function testInterruptDuringPromptPreflightRestarts(backend, harness) {
+  const before = harness.clients.length;
+  const input = requestInput("run-interrupt-preflight");
+  const gate = deferred();
+  harness.nextPromptGate = gate;
+  harness.nextPromptHang = true;
+  const outcome = backend.requestManagerDecision(input);
+  await waitFor(
+    () => harness.clients.length > before && harness.clients.at(-1).prompts.length === 1,
+    "the prompt request should be sent",
+  );
+  const client = harness.clients.at(-1);
+  backend.interruptChat("run-interrupt-preflight");
+  gate.resolve();
+  const interrupted = await settlesWithin(outcome, 2_000, "interrupt must release the turn");
+  assert.equal(interrupted.turnAborted, true);
+  const notes = [];
+  await backend.requestManagerDecision(input, (event) => notes.push(event));
+  assert.notEqual(harness.clients.at(-1), client, "a process interrupted in preflight is replaced");
+  assert.equal(client.stopCalls, 1);
+  assert.ok(
+    notes.some((event) => event.kind === "system_note" && event.message === "Restarting Cora's runtime after the interrupted turn."),
+    JSON.stringify(notes),
+  );
+  await backend.disposeChat("run-interrupt-preflight");
+}
+
+async function testRestartNoteNamesWhatChanged(backend, harness) {
+  const input = requestInput("run-restart-note");
+  await backend.requestManagerDecision(input);
+  const notes = [];
+  await backend.requestManagerDecision(
+    { ...input, chat: { ...input.chat, effort: "medium" } },
+    (event) => notes.push(event),
+  );
+  assert.ok(
+    notes.some((event) => event.kind === "system_note" && event.message === "Restarting Cora's runtime for the new effort."),
+    JSON.stringify(notes),
+  );
+  await backend.disposeChat("run-restart-note");
+}
+
+async function testEmptyFinalAfterLiveSpawnKeepsTheWorkers(backend, harness) {
+  harness.promptToolCalls.push({
+    id: "spawn-1",
+    name: "codara_spawn_workers",
+    args: { workers: [{ title: "Fix login", description: "Repair the login form" }] },
+  });
+  harness.promptReplies.push("", "");
+  const events = [];
+  const result = await backend.requestManagerDecision(
+    requestInput("run-empty-final-after-spawn"),
+    (event) => events.push(event),
+  );
+  assert.equal(result.turnFailed, undefined, "an empty closing message must not fail an applied turn");
+  assert.equal(result.decisionAlreadyApplied, true);
+  const block = events.find((event) => event.kind === "assistant_block");
+  assert.ok(block && /Spawning 1 worker/.test(block.text), "the tool summary reaches the transcript");
+  assert.match(result.notice, /closing message was empty/);
+  await backend.disposeChat("run-empty-final-after-spawn");
+}
+
+async function testStartupFailureExplainsItself(backend, harness) {
+  const gate = deferred();
+  harness.nextStart = gate;
+  harness.nextStartStderr =
+    "Error: Failed to load extension /app/pi-cora/index.ts: Cannot find module '@modelcontextprotocol/sdk'\n    at load (loader.js:1:1)";
+  const outcome = backend
+    .requestManagerDecision(requestInput("run-startup-stderr"))
+    .then((value) => ({ value }), (error) => ({ error }));
+  await waitFor(() => harness.clients.at(-1)?.phase === "starting", "startup should begin");
+  gate.reject(new Error("Pi RPC startup handshake failed: Pi RPC process exited (1)"));
+  const { error } = await outcome;
+  assert.match(error.message, /exited while loading its extensions: Error: Failed to load extension/);
+  assert.match(error.message, /Reinstall Pi from Settings > Accounts/);
+  assert.match(error.diagnostics, /Pi RPC process exited \(1\)/, "the raw cause stays in diagnostics");
+  assert.match(error.diagnostics, /at load/);
+  await backend.disposeChat("run-startup-stderr");
+}
+
+async function testUserRuntimeFallsBackToBundled(backend, harness) {
+  harness.planSources.push("user", "bundled");
+  const gate = deferred();
+  harness.nextStart = gate;
+  const notes = [];
+  const outcome = backend.requestManagerDecision(
+    requestInput("run-runtime-fallback"),
+    (event) => notes.push(event),
+  );
+  await waitFor(() => harness.clients.at(-1)?.phase === "starting", "user runtime should start first");
+  const failed = harness.clients.at(-1);
+  gate.reject(new Error("Pi RPC startup handshake failed: Pi RPC process exited (1)"));
+  const result = await outcome;
+  assert.equal(result.turnFailed, undefined);
+  assert.notEqual(harness.clients.at(-1), failed, "the bundled runtime runs the turn");
+  assert.equal(harness.clients.at(-1).plan.runtimeSource, "bundled");
+  assert.ok(harness.events.includes("mark-failed:9.9.9"));
+  assert.ok(notes.some((event) => event.kind === "system_note" && /Your installed Pi 9\.9\.9 failed to start/.test(event.message)));
+  await backend.disposeChat("run-runtime-fallback");
+}
+
+async function testIdleSessionsAreCapped(backend, harness) {
+  const runIds = ["run-cap-1", "run-cap-2", "run-cap-3", "run-cap-4", "run-cap-5"];
+  const clients = [];
+  for (const runId of runIds) {
+    await backend.requestManagerDecision(requestInput(runId));
+    clients.push(harness.clients.at(-1));
+  }
+  assert.equal(clients[0].stopCalls, 1, "the least recently used idle process is stopped");
+  for (const client of clients.slice(1)) assert.equal(client.stopCalls, 0);
+  for (const runId of runIds) await backend.disposeChat(runId);
+}
+
+// An interrupted process nobody resumed is idle like any other and must not
+// hold a slot past the cap.
+async function testInterruptedIdleSessionCountsTowardTheCap(backend, harness) {
+  const before = harness.clients.length;
+  harness.nextPromptHang = true;
+  const interruptedRun = "run-cap-interrupted";
+  const outcome = backend.requestManagerDecision(requestInput(interruptedRun));
+  await waitFor(
+    () => harness.clients.length > before && harness.clients.at(-1).prompts.length === 1,
+    "the prompt should be accepted",
+  );
+  const interruptedClient = harness.clients.at(-1);
+  backend.interruptChat(interruptedRun);
+  await outcome;
+  const runIds = ["run-cap-b", "run-cap-c", "run-cap-d", "run-cap-e"];
+  for (const runId of runIds) await backend.requestManagerDecision(requestInput(runId));
+  assert.equal(interruptedClient.stopCalls, 1, "the interrupted idle process is evicted first");
+  for (const runId of [interruptedRun, ...runIds]) await backend.disposeChat(runId);
+}
+
+async function loadTurnPolicy() {
+  const outfile = path.join(TMP, "manager-turn-policy.cjs");
+  await esbuild.build({
+    entryPoints: [path.join(ROOT, "src/main/orchestration/manager-turn-policy.ts")],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile,
+    logLevel: "silent",
+    tsconfig: path.join(ROOT, "tsconfig.node.json"),
+  });
+  return require(outfile);
+}
+
+async function startHeldTurn(backend, harness, runId) {
+  // A session first, so the held turn reuses it instead of racing startup.
+  await backend.requestManagerDecision(requestInput(runId));
+  const client = harness.clients.at(-1);
+  harness.holdNextTurn = true;
+  let accepted = false;
+  const input = { ...requestInput(runId), onPromptAccepted: async () => { accepted = true; } };
+  const outcome = backend.requestManagerDecision(input);
+  await waitFor(() => accepted && typeof client.finishTurn === "function", "the held turn should be accepted");
+  return { client, outcome };
+}
+
+// The bug: a second prompt on a streaming session failed, and that failure
+// stopped the process the live turn was using, which then hung to the idle
+// timeout. The second turn must back off without touching the live one.
+async function testOverlappingTurnLeavesTheLiveTurnAlone(backend, harness) {
+  const { client, outcome } = await startHeldTurn(backend, harness, "run-overlap");
+  const promptsBefore = client.prompts.length;
+  const second = await backend.requestManagerDecision(requestInput("run-overlap"));
+  assert.equal(second.turnAborted, true, "an overlapping turn must report itself aborted");
+  assert.equal(client.prompts.length, promptsBefore, "an overlapping turn must never prompt the live session");
+  assert.equal(client.stopCalls, 0, "an overlapping turn must never stop the live session");
+  client.finishTurn();
+  const first = await outcome;
+  assert.equal(first.turnFailed, undefined);
+  assert.equal(first.turnAborted, undefined);
+  await backend.disposeChat("run-overlap");
+}
+
+// Send now: run-store interrupts the live turn from its onPromptAccepted
+// callback once a message is queued behind it. The turn ends as an abort, the
+// idle process carries the next turn, and nothing is ever steered into Pi.
+async function testSendNowInterruptReusesTheProcess(backend, harness) {
+  assert.equal("steerChat" in backend, false, "the backend offers no channel into a live turn");
+  const before = harness.clients.length;
+  harness.nextPromptHang = true;
+  const input = {
+    ...requestInput("run-send-now"),
+    onPromptAccepted: async () => {
+      backend.interruptChat("run-send-now");
+    },
+  };
+  const outcome = backend.requestManagerDecision(input);
+  const interrupted = await settlesWithin(outcome, 2_000, "Send now must release the turn");
+  assert.equal(interrupted.turnAborted, true, "a turn Send now stopped reports an abort");
+  assert.equal(interrupted.turnFailed, undefined);
+  const client = harness.clients.at(-1);
+  assert.ok(harness.clients.length > before, "the turn ran on a process of its own");
+  const next = await backend.requestManagerDecision(requestInput("run-send-now"));
+  assert.equal(next.turnAborted, undefined);
+  assert.equal(next.turnFailed, undefined);
+  assert.equal(harness.clients.at(-1), client, "the next turn reuses the idle process");
+  assert.equal(client.stopCalls, 0);
+  assert.equal(client.prompts.length, 2, "the next turn's prompt goes to the same process");
+  assert.equal(
+    harness.events.some((event) => event.startsWith("request:steer:") || event.startsWith("request:clear_queue:")),
+    false,
+    "no message is ever steered into a live turn",
+  );
+  await backend.disposeChat("run-send-now");
+}
+
+// A crashed manager runtime says nothing about the work: the run parks for
+// Retry with its workers alive instead of failing and killing them.
+async function testDeadProcessParksTheRun(backend, harness) {
+  const { client, outcome } = await startHeldTurn(backend, harness, "run-dead-mid-turn");
+  client.crash("Pi RPC process exited (SIGKILL)");
+  const result = await outcome;
+  assert.equal(result.turnFailed, true, "a runtime that died mid-turn fails the turn");
+  const policy = await loadTurnPolicy();
+  const plan = policy.planManagerTurnFailure({
+    error: result.notice,
+    runStatus: "running",
+    mode: "chat",
+    transientRetryCount: 0,
+    backend: "pi",
+    failureCause: result.failureCause,
+    replaySafe: result.replaySafe,
+  });
+  assert.equal(plan.action, "park", `a runtime that died mid-turn parks the run (got ${JSON.stringify(plan)})`);
+  await backend.disposeChat("run-dead-mid-turn");
+}
+
+// The friendly startup sentence hides the raw handshake error, so it rides
+// along as startupCause for run-store's retry-or-park decision.
+async function testStartupFailureKeepsItsRawCause(backend, harness) {
+  const gate = deferred();
+  harness.nextStart = gate;
+  harness.nextStartStderr = "Error: Cannot find module 'codara-extension'\n    at load (extension.js:12)";
+  const outcome = backend
+    .requestManagerDecision(requestInput("run-start-stderr"))
+    .then((value) => ({ value }), (error) => ({ error }));
+  await waitFor(() => harness.clients.at(-1)?.phase === "starting", "startup should begin");
+  gate.reject(new Error("Pi RPC process exited (1)"));
+  const result = await outcome;
+  assert.equal(result.error?.startupCause, "Pi RPC process exited (1)");
+  assert.match(result.error?.message ?? "", /Cannot find module 'codara-extension'/, "startup failures name Pi's own error");
+}
+
 async function main() {
   const harness = createHarness();
   globalThis[HARNESS_KEY] = harness;
@@ -645,8 +1081,30 @@ async function main() {
   await testCompactionWaitsWithoutRepeatingAnswer(backend, harness);
   await testFailedCompactionPreservesAnswerAndStopsRuntime(backend, harness);
   await testCompactionCleanupCannotReturnStaleAnswer(backend, harness);
+  await testRuntimeCrashMidTurnFailsPromptly(backend, harness);
+  await testDisposeMidTurnIsAnAbortNotAFailure(backend, harness);
+  await testInterruptReusesAnIdleProcess(backend, harness);
+  await testInterruptRestartsWhenAbortNeverSettles(backend, harness);
+  await testInterruptDuringPromptPreflightRestarts(backend, harness);
+  await testRestartNoteNamesWhatChanged(backend, harness);
+  await testEmptyFinalAfterLiveSpawnKeepsTheWorkers(backend, harness);
+  await testStartupFailureExplainsItself(backend, harness);
+  await testUserRuntimeFallsBackToBundled(backend, harness);
+  await testIdleSessionsAreCapped(backend, harness);
+  await testInterruptedIdleSessionCountsTowardTheCap(backend, harness);
+  // The backend's turn timers are unref'd; hold the loop open while a held
+  // turn waits on them.
+  const keepAlive = setInterval(() => undefined, 1000);
+  try {
+    await testOverlappingTurnLeavesTheLiveTurnAlone(backend, harness);
+    await testSendNowInterruptReusesTheProcess(backend, harness);
+    await testDeadProcessParksTheRun(backend, harness);
+    await testStartupFailureKeepsItsRawCause(backend, harness);
+  } finally {
+    clearInterval(keepAlive);
+  }
   console.log(
-    "PASS Pi ownership, lease rotation, fast-mode identity, and empty-final recovery",
+    "PASS Pi ownership, lease rotation, fast-mode identity, empty-final recovery, crash detection, interrupt reuse, startup diagnostics, idle caps, one turn per session, and Send now's interrupt",
   );
 }
 

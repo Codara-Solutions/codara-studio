@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// test-runner: serial (a full production Vite build of the renderer, about 2 GB)
 
 import assert from "node:assert/strict";
 import path from "node:path";
@@ -107,7 +108,11 @@ const genericVendor = chunks.find(
 assert(!genericVendor, `generic vendor chunk returned as ${genericVendor?.fileName}`);
 
 const normalizeId = (id) => id.replaceAll("\\", "/");
-const reactModulePattern = /\/node_modules\/(?:react|react-dom)\//;
+// The React runtime. react-dom/server is a separate renderer with no state
+// of its own, used only by the Share packager; it gets its own lazy chunk
+// (react-dom-server-vendor) and is checked below as feature-only.
+const reactServerPattern = /\/node_modules\/react-dom\/(?:server|cjs\/react-dom-server)/;
+const reactModulePattern = { test: (id) => /\/node_modules\/(?:react|react-dom)\//.test(id) && !reactServerPattern.test(id) };
 const reactOwners = chunks.filter((chunk) =>
   Object.keys(chunk.modules).some((id) => reactModulePattern.test(normalizeId(id))),
 );
@@ -141,6 +146,10 @@ const featureOnlyPackages = [
     pattern: /\/node_modules\/(?:mermaid|@mermaid-js)\//,
   },
   {
+    label: "React server rendering (Share packager)",
+    pattern: reactServerPattern,
+  },
+  {
     label: "QR code",
     pattern: /\/node_modules\/qrcode\//,
   },
@@ -152,14 +161,26 @@ const featureOnlyPackages = [
     label: "Excel preview parsing",
     pattern: /\/node_modules\/(?:read-excel-file|worker-f|saxen|fflate)\//,
   },
+  {
+    label: "React Flow (run graphs, looms, whiteboards)",
+    pattern: /\/node_modules\/@xyflow\//,
+  },
 ];
 const closedSurfaceModules = [
-  "components/WorkerSessionPicker.tsx",
+  "components/session-search/SessionSearchList.tsx",
+  "components/session-search/SessionSearchIntro.tsx",
   "components/RunSwitcher.tsx",
   "components/CreateCopyDialog.tsx",
   "components/CopyBranchDialogs.tsx",
   "shortcuts/ShortcutsDialog.tsx",
   "components/file-preview/SpreadsheetPreview.tsx",
+  "components/review/ReviewTabHost.tsx",
+  "components/review/ReviewNoteCards.tsx",
+  "components/jump/jump-model.ts",
+  "components/system-activity/SystemActivityPopover.tsx",
+  "components/system-activity/model.ts",
+  "components/chat/CoraWhiteboard.tsx",
+  "components/whiteboard/CoraWhiteboardCanvas.tsx",
 ];
 const allModuleIds = chunks.flatMap((chunk) => Object.keys(chunk.modules));
 const staticModuleIds = staticChunks.flatMap((chunk) => Object.keys(chunk.modules));
@@ -223,7 +244,7 @@ const staticBrotliBytes = staticChunks.reduce(
 
 console.log("PASS renderer chunk graph has no generic vendor chunk or circular imports");
 console.log(`PASS React is owned only by ${reactOwners[0].fileName}`);
-console.log("PASS Mermaid, QR code, Markdown, and Excel preview-only packages remain outside the static closure");
+console.log("PASS Mermaid, QR code, Markdown, Excel preview and React Flow packages remain outside the static closure");
 console.log("PASS closed dialogs and pickers remain outside the startup closure");
 console.log(
   `PASS static renderer JS closure ${staticRawBytes.toLocaleString()} raw / ${staticGzipBytes.toLocaleString()} gzip / ${staticBrotliBytes.toLocaleString()} Brotli (${staticChunks.length} chunks, ${STATIC_RAW_BUDGET_BYTES.toLocaleString()}-byte raw budget)`,

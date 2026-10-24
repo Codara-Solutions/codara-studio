@@ -84,6 +84,25 @@ async function main() {
     ["runtime network fetch failure before final report", "transport"],
     ["fetch failed", "transport"],
     ["read ECONNRESET", "transport"],
+    // Pi's own process going away and the SDK wordings Pi retries before it
+    // gives up: unclassified, these failed the run and killed its workers.
+    ["Pi RPC process exited (1)", "transport"],
+    ["Pi RPC process exited (SIGKILL)", "transport"],
+    ["Pi RPC output exceeded the line limit", "transport"],
+    ["Pi RPC emitted invalid UTF-8 or JSON", "transport"],
+    ["Pi RPC stdin failed: write EPIPE", "transport"],
+    ["Pi RPC client stopped", "transport"],
+    ["Pi RPC client is not running", "transport"],
+    ["Connection error.", "transport"],
+    ["terminated", "transport"],
+    ["Cora Pi backend error: terminated", "transport"],
+    ["Codex error: stream disconnected before completion", "transport"],
+    ["Request was aborted.", "transport"],
+    ["WebSocket stream closed before response.completed", "transport"],
+    // provider: Pi's own fallback after its retries, and capacity wordings
+    ["Pi exhausted automatic retries.", "provider"],
+    ["This model is currently experiencing high load", "provider"],
+    ["The server had an error processing your request. Sorry about that!", "provider"],
     // auth
     ["Pi provider anthropic is not authenticated with OAuth", "auth"],
     ["Pi provider openai has no OAuth access token", "auth"],
@@ -91,6 +110,8 @@ async function main() {
     ["401 Unauthorized", "auth"],
     ["HTTP 401 Unauthorized; service unavailable", "auth"],
     ["invalid api key provided", "auth"],
+    ["Codex token refresh was refused (400)", "auth"],
+    ["Cora's Claude sign-in expired and cannot be renewed (OAuth session expired). Sign in again in Settings > Accounts.", "auth"],
     // launch
     ["runtime binary did not start (saw 'command not found')", "launch"],
     ["no TUI banner observed", "launch"],
@@ -112,6 +133,11 @@ async function main() {
     // timeout
     ["Pi worker timed out after 90 minutes.", "timeout"],
     ["Worker timed out after 90 minutes.", "timeout"],
+    ["Pi worker timed out: no finished tool call or message for 92 min.", "timeout"],
+    [
+      "Pi worker exceeded its 6h turn ceiling while still making progress and did not wrap up within 15 min.",
+      "timeout",
+    ],
     // tool
     ["Pi worker extension failed.", "tool"],
     ["Codara Pi bridge is incompatible: /tmp/bridge.cjs", "tool"],
@@ -123,9 +149,25 @@ async function main() {
     assert.equal(classifyWorkerFailure(text), expected, `classify(${JSON.stringify(text)})`);
   }
 
+  // A worker that ran its turn but left no usable report did not fail to
+  // launch: its edits are likely on disk, so it must not read as a launch or
+  // auth failure that reruns the task cold elsewhere.
+  for (const text of [
+    "The worker finished its turn without a valid final report: final-report.json is not valid JSON. Its edits may already be on disk.",
+    "The claude worker finished without a valid final report: status \"in_progress\" is not one of \"complete\", \"partial\", \"blocked\", \"failed\".",
+    "Pi worker completed without a parseable final-report.json (the file is not valid JSON (Unexpected token }))",
+  ]) {
+    const kind = classifyWorkerFailure(text);
+    assert.ok(kind !== "launch" && kind !== "auth", `${JSON.stringify(text)} classified as ${kind}`);
+  }
+
   // Unknown text keeps the pre-taxonomy behaviour instead of being forced into
   // a bucket, and empty input is never a failure kind.
   assert.equal(classifyWorkerFailure("the migration script left the schema half applied"), undefined);
+  // "terminated" counts only as undici's bare stream message, not prose.
+  assert.equal(classifyWorkerFailure("a loop-back never terminated. Pass failed."), undefined);
+  // A context overflow is deterministic; replaying it would loop.
+  assert.equal(classifyWorkerFailure("prompt is too long: 210000 tokens > 200000 maximum"), undefined);
   assert.equal(classifyWorkerFailure(""), undefined);
   assert.equal(classifyWorkerFailure("   "), undefined);
   assert.equal(classifyWorkerFailure(undefined), undefined);
@@ -262,6 +304,38 @@ async function main() {
     assert.equal(typeof plan.reason, "string");
     assert.ok(plan.reason.length > 0);
   }
+
+  // run-store's launch fallback cannot bundle standalone, so its runtime gate
+  // is pinned by source: a Grok worker hitting a one-off 500 must get the same
+  // fast retry as Claude and Codex instead of failing outright, while switch
+  // targets stay limited to the runtimes the hint translators understand.
+  const runStoreSource = fs.readFileSync(
+    path.join(ROOT, "src", "main", "orchestration", "run-store.ts"),
+    "utf8",
+  );
+  const fallbackStart = runStoreSource.indexOf("async function maybeQueueCliLaunchFallback(");
+  const fallbackBody = runStoreSource.slice(fallbackStart, runStoreSource.indexOf("\n}\n", fallbackStart));
+  assert.ok(fallbackStart >= 0, "maybeQueueCliLaunchFallback exists");
+  assert.doesNotMatch(
+    fallbackBody,
+    /task\.runtimePreference !== "claude" &&\s*task\.runtimePreference !== "codex"/,
+    "the fallback no longer rejects every runtime but claude and codex",
+  );
+  assert.match(
+    fallbackBody,
+    /task\.runtimePreference === "shell" \|\| task\.runtimePreference === "manual"/,
+    "only non-agent runtimes skip the fallback",
+  );
+  assert.match(fallbackBody, /const preferenceOrder: WorkerRuntime\[\] = \["claude", "codex"\];/);
+  assert.ok(
+    fallbackBody.indexOf("planWorkerFailureRetry(") < fallbackBody.indexOf("retriesSameRuntime ? task.runtimePreference"),
+    "a same-runtime retry keeps the task's own runtime",
+  );
+  assert.equal(
+    planWorkerFailureRetry({ kind: "transport", sameRuntimeAttempts: 1, oppositeRuntimeAvailable: false }).action,
+    "retry_same_runtime",
+    "a Grok transport failure with no switch target still earns one fast retry",
+  );
 
   console.log("failure taxonomy: ok");
 }

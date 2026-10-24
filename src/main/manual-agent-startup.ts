@@ -18,16 +18,48 @@ export function formatManualAgentStartup(
 ): string {
   const args = startup.childArgv.slice(1);
   if (family === "pwsh" || family === "powershell") {
-    const quote = (value: string): string => `'${value.replace(/'/g, "''")}'`;
+    // PowerShell ends a single-quoted string at any of its five single-quote
+    // characters, the curly ones included, so each is doubled.
+    const quote = (value: string): string => `'${value.replace(/['\u2018\u2019\u201A\u201B]/g, "$&$&")}'`;
     return `& ${[binary, ...args].map(quote).join(" ")}`;
   }
   if (family === "cmd") {
-    return `"${binary}" ${args.map((arg) => `"${arg}"`).join(" ")}`;
+    // The child parses its command line with the C runtime's rules, so an
+    // embedded quote is escaped as \" and the backslashes before it doubled.
+    const quote = (value: string): string =>
+      `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, "$1$1")}"`;
+    const line = `"${binary}" ${args.map(quote).join(" ")}`;
+    const unsafe = cmdUnsafeChar(line);
+    if (unsafe) {
+      throw new Error(
+        `A startup argument contains ${unsafe}, which Command Prompt would not pass on as typed. Change it in Settings > Startup flags, or use PowerShell for this pane.`,
+      );
+    }
+    return line;
   }
   const quote = (value: string): string => family === "fish"
     ? `'${value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")}'`
     : `'${value.replace(/'/g, "'\\''")}'`;
   return [binary, ...args].map(quote).join(" ");
+}
+
+/**
+ * cmd reads the line before the child does and has no escape that works
+ * inside quotes: every " flips its quoting, whatever backslash the C runtime
+ * wants before it, so an odd one leaves the rest of a value outside quotes,
+ * where & | < > ^ start or change a command. %NAME% (and !NAME! with delayed
+ * expansion on) expands even inside quotes. Such a line cannot carry a value
+ * as typed, so the launch is refused rather than reinterpreted.
+ */
+function cmdUnsafeChar(line: string): string | null {
+  let quoted = false;
+  for (const char of line) {
+    if (char === '"') quoted = !quoted;
+    else if (char === "\r" || char === "\n") return "a new line";
+    else if (char === "%" || char === "!") return char;
+    else if (!quoted && "&|<>^".includes(char)) return char;
+  }
+  return null;
 }
 
 /**

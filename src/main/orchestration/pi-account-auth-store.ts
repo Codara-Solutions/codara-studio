@@ -6,13 +6,14 @@ import type { PiSubscriptionProvider } from "@shared/types";
 import {
   familyForSubscription,
   isPiSubscriptionProvider,
-  PI_SUBSCRIPTION_PROVIDERS,
 } from "../../shared/agent-families";
 
 import { jwtEmailClaim, jwtSubjectClaim } from "./native-cli-account-identity";
+import { NoConnectedPiAccountError } from "./pi-account-execution";
 import {
   PiAccountProfileProtectedError,
   PiAccountProfileRegistry,
+  type PiAccountPendingPurge,
   type PiAccountProfile,
   type PiAccountProfilesSnapshot,
 } from "./pi-account-profiles";
@@ -25,7 +26,6 @@ export const PI_ACCOUNT_AUTH_FILE = "auth.json";
 
 const PROFILE_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const SUPPORTED_PROVIDERS: readonly PiSubscriptionProvider[] = PI_SUBSCRIPTION_PROVIDERS;
 const mutationTails = new Map<string, Promise<void>>();
 
 export interface PiAccountRuntimeProfile {
@@ -66,6 +66,10 @@ export interface PiAccountProfileAuthStatus {
 }
 
 export interface PiAccountAuthReconciliation {
+  /**
+   * Always empty: the legacy single login (pi-agent/auth.json) is archived by
+   * the accounts migration and never folded into a row.
+   */
   migratedProfileIds: string[];
   missingCredentialProfileIds: string[];
   orphanCredentialProfileIds: string[];
@@ -100,6 +104,10 @@ export type PiAccountProfileOwnershipGuard = (
 
 export interface DeletePiAccountCredentialProfileOptions {
   ownershipGuard?: PiAccountProfileOwnershipGuard;
+  /** Managed homes a running terminal still holds, purged once it lets go. */
+  pendingPurge?: readonly PiAccountPendingPurge[];
+  /** Dismissed for a System row that has no fingerprint of its own. */
+  systemOfferFingerprint?: string;
 }
 
 /** Process-local lease for OAuth implementations that bind fixed callback ports. */
@@ -183,11 +191,6 @@ export function piAccountProfilePaths(
   return { configDir, authFile: join(configDir, PI_ACCOUNT_AUTH_FILE) };
 }
 
-function legacyPaths(piRootDir: string): { configDir: string; authFile: string } {
-  const configDir = resolve(piRootDir);
-  return { configDir, authFile: join(configDir, PI_ACCOUNT_AUTH_FILE) };
-}
-
 async function withMutationLock<T>(rootDir: string, operation: () => Promise<T>): Promise<T> {
   const key = resolve(rootDir);
   const previous = mutationTails.get(key) ?? Promise.resolve();
@@ -209,28 +212,6 @@ async function withMutationLock<T>(rootDir: string, operation: () => Promise<T>)
 async function ensurePrivateDirectory(path: string): Promise<void> {
   await fs.mkdir(path, { recursive: true, mode: 0o700 });
   if (process.platform !== "win32") await fs.chmod(path, 0o700);
-}
-
-async function writePrivateJsonAtomic(path: string, value: unknown): Promise<void> {
-  await ensurePrivateDirectory(dirname(path));
-  const temporary = join(
-    dirname(path),
-    `.${basename(path)}.${process.pid}.${Date.now()}.${randomBytes(6).toString("hex")}.tmp`,
-  );
-  let handle: import("node:fs").promises.FileHandle | null = null;
-  try {
-    handle = await fs.open(temporary, "wx", 0o600);
-    await handle.writeFile(JSON.stringify(value), "utf8");
-    await handle.sync();
-    await handle.close();
-    handle = null;
-    await fs.rename(temporary, path);
-    if (process.platform !== "win32") await fs.chmod(path, 0o600);
-  } catch (error) {
-    await handle?.close().catch(() => undefined);
-    await fs.rm(temporary, { force: true }).catch(() => undefined);
-    throw error;
-  }
 }
 
 async function readJsonObject(path: string): Promise<Record<string, unknown> | null> {
@@ -308,13 +289,6 @@ function credentialAccountEmail(
   );
 }
 
-function sameOAuthCredential(left: unknown, right: unknown): boolean {
-  if (!isOAuthCredential(left) || !isOAuthCredential(right)) return false;
-  return left.access === right.access &&
-    left.refresh === right.refresh &&
-    left.expires === right.expires;
-}
-
 export function piAccountCredentialIdentityFingerprint(
   provider: PiSubscriptionProvider,
   credential: unknown,
@@ -383,80 +357,6 @@ async function inspectProfileStatus(
   }
 }
 
-async function migrateLegacyAuthLocked(
-  rootDir: string,
-  registry: PiAccountProfileRegistry,
-): Promise<string[]> {
-  const legacy = legacyPaths(rootDir);
-  const parsed = await readJsonObject(legacy.authFile);
-  if (!parsed) return [];
-
-  const supported = SUPPORTED_PROVIDERS.filter((provider) =>
-    isOAuthCredential(parsed[provider]),
-  );
-  if (supported.length === 0) return [];
-
-  const migratedProfileIds: string[] = [];
-  for (const provider of supported) {
-    const credential = parsed[provider] as Record<string, unknown>;
-    const fingerprint = identityFingerprint(provider, credential);
-    const snapshot = await registry.snapshot();
-    const providerProfiles = snapshot.profiles.filter((profile) => profile.provider === provider);
-    let profile = fingerprint
-      ? providerProfiles.find((entry) => entry.identityFingerprint === fingerprint)
-      : undefined;
-    if (!profile && !fingerprint) {
-      // Anthropic exposes no stable account identity. Exact credential equality
-      // identifies a retry after a crash; otherwise only reuse a disconnected
-      // default. Never retire a second legacy account into an unrelated live
-      // profile merely because both belong to Anthropic.
-      for (const candidate of providerProfiles) {
-        const candidateAuth = await readJsonObject(
-          piAccountProfilePaths(rootDir, candidate.id).authFile,
-        ).catch(() => null);
-        if (sameOAuthCredential(candidateAuth?.[provider], credential)) {
-          profile = candidate;
-          break;
-        }
-      }
-      if (!profile && snapshot.defaults[provider]) {
-        const candidate = providerProfiles.find(
-          (entry) => entry.id === snapshot.defaults[provider],
-        );
-        if (candidate) {
-          const candidateStatus = await inspectProfileStatus(rootDir, candidate);
-          if (!candidateStatus.connected) profile = candidate;
-        }
-      }
-    }
-    if (!profile) {
-      profile = (await registry.registerProfile({
-        provider,
-        label: defaultProfileLabel(provider),
-        ...(fingerprint ? { identityFingerprint: fingerprint } : {}),
-      })).profile;
-    }
-
-    const target = piAccountProfilePaths(rootDir, profile.id);
-    const existing = await inspectProfileStatus(rootDir, profile);
-    if (!existing.connected) {
-      await writePrivateJsonAtomic(target.authFile, { [provider]: credential });
-    }
-    // Validate the committed copy before retiring this provider from legacy.
-    await inspectPiSubscriptionAuth(target.authFile, provider);
-    migratedProfileIds.push(profile.id);
-  }
-
-  const remaining = { ...parsed };
-  for (const provider of supported) delete remaining[provider];
-  if (Object.keys(remaining).length === 0) {
-    await fs.rm(legacy.authFile, { force: true });
-  } else {
-    await writePrivateJsonAtomic(legacy.authFile, remaining);
-  }
-  return migratedProfileIds;
-}
-
 async function reconcileDeletingDirectoriesLocked(
   rootDir: string,
   snapshot: PiAccountProfilesSnapshot,
@@ -493,11 +393,22 @@ export class PiAccountAuthStore {
       await ensurePrivateDirectory(join(this.rootDir, PI_ACCOUNT_AUTH_DIRECTORY));
       let snapshot = await this.registry.snapshot();
       await reconcileDeletingDirectoriesLocked(this.rootDir, snapshot);
-      const migratedProfileIds = await migrateLegacyAuthLocked(this.rootDir, this.registry);
       snapshot = await this.registry.snapshot();
       const statuses = await Promise.all(
         snapshot.profiles.map((profile) => inspectProfileStatus(this.rootDir, profile)),
       );
+      // A borrowed grant has no refresh token, so once its access token is
+      // spent the row is not connected for Cora any more and says so; it is
+      // never refreshed from the System login it was copied from.
+      const spentBorrowed = snapshot.profiles.filter((profile) => {
+        if (profile.cora !== "borrowed") return false;
+        const status = statuses.find((entry) => entry.profileId === profile.id);
+        return !status?.connected || (status.expired && !status.canRefresh);
+      });
+      for (const profile of spentBorrowed) {
+        await this.registry.recordCoraHalf(profile.id, "none").catch(() => undefined);
+      }
+      if (spentBorrowed.length > 0) snapshot = await this.registry.snapshot();
       const missingCredentialProfileIds = statuses
         .filter((status) => !status.connected)
         .map((status) => status.profileId);
@@ -518,7 +429,7 @@ export class PiAccountAuthStore {
         snapshot,
         statuses,
         reconciliation: {
-          migratedProfileIds: [...new Set(migratedProfileIds)],
+          migratedProfileIds: [],
           missingCredentialProfileIds,
           orphanCredentialProfileIds,
         },
@@ -556,15 +467,19 @@ export class PiAccountAuthStore {
           .filter((status) => status.provider === provider && status.connected)
           .map((status) => status.profileId),
       );
+      // A row whose Cora half is "none" has no grant to route to, whatever
+      // file a crash may have left behind.
+      const routable = (entry: PiAccountProfile) =>
+        entry.provider === provider && entry.cora !== "none" && connectedIds.has(entry.id);
       profile = inspection.snapshot.profiles.find(
-        (entry) => entry.id === defaultId && connectedIds.has(entry.id),
+        (entry) => entry.id === defaultId && routable(entry),
       );
-      profile ??= inspection.snapshot.profiles.find(
-        (entry) => entry.provider === provider && connectedIds.has(entry.id),
-      );
+      profile ??= inspection.snapshot.profiles.find(routable);
     }
 
-    if (!profile) return legacyPaths(this.rootDir);
+    // There is no account-less fallback: the legacy single login is archived
+    // by the accounts migration, never used.
+    if (!profile) throw new NoConnectedPiAccountError(provider);
     return {
       accountProfileId: profile.id,
       profile,
@@ -628,6 +543,10 @@ export class PiAccountAuthStore {
           input.accountEmail,
         );
       }
+      // A reconnect gives Cora its own grant again: shared with the CLI half
+      // for a managed account, independent for every other row.
+      const cora = stamped.cli.kind === "managed" ? "linked" : "own";
+      if (stamped.cora !== cora) stamped = await this.registry.recordCoraHalf(profile.id, cora);
       if (input.makeDefault) await this.registry.setDefaultProfile(provider, profile.id);
       return {
         profile: stamped,
@@ -642,6 +561,10 @@ export class PiAccountAuthStore {
       ...(input.identityFingerprint ? { identityFingerprint: input.identityFingerprint } : {}),
       ...(input.accountEmail ? { accountEmail: input.accountEmail } : {}),
       ...(input.makeDefault ? { makeDefault: true } : {}),
+      // Signing in through Add account is the explicit add a deleted
+      // account needs to come back.
+      cora: "own",
+      explicitUserAdd: true,
     });
     return {
       profile: registered.profile,
@@ -684,6 +607,8 @@ export class PiAccountAuthStore {
       try {
         const result = await this.registry.deleteProfile(profileId, {
           protectedProfileIds: options.ownershipGuard ? [] : undefined,
+          ...(options.pendingPurge ? { pendingPurge: options.pendingPurge } : {}),
+          ...(options.systemOfferFingerprint ? { systemOfferFingerprint: options.systemOfferFingerprint } : {}),
         });
         await fs.rm(staged, { recursive: true, force: true });
         return result.snapshot;

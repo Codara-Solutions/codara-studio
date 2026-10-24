@@ -66,7 +66,14 @@ async function main() {
     plugins: [harnessPlugin],
     logLevel: "silent",
   });
-  const { modelScopedWindows, resetsAtValue } = require(outfile);
+  const {
+    modelScopedWindows,
+    resetsAtValue,
+    codexCreditsValue,
+    codexResetCreditsValue,
+    codexResetCreditDetails,
+    claudeExtraUsageValue,
+  } = require(outfile);
 
   let pass = 0;
   const check = (name, ok) => {
@@ -79,6 +86,15 @@ async function main() {
   };
   const eq = (name, actual, expected) =>
     check(`${name} (got ${JSON.stringify(actual)}, want ${JSON.stringify(expected)})`, actual === expected);
+  const same = (name, actual, expected) => {
+    let ok = true;
+    try {
+      require("node:assert/strict").deepEqual(actual, expected);
+    } catch {
+      ok = false;
+    }
+    check(`${name} (got ${JSON.stringify(actual)}, want ${JSON.stringify(expected)})`, ok);
+  };
 
   // ── the Fable window: the whole point of this file ──
   const limits = [
@@ -175,6 +191,94 @@ async function main() {
     ])[0].usedPercent,
     0,
   );
+
+  // ── Codex credits: a balance only when the account has any.
+  same(
+    "codex credits balance",
+    codexCreditsValue({ has_credits: true, unlimited: false, balance: "42.5" }),
+    { kind: "balance", balance: 42.5, unlimited: false },
+  );
+  same("codex without credits says nothing", codexCreditsValue({ has_credits: false, balance: "0" }), undefined);
+  same(
+    "codex unlimited credits",
+    codexCreditsValue({ has_credits: true, unlimited: true, balance: null }),
+    { kind: "balance", balance: 0, unlimited: true },
+  );
+  same("codex credits garbage", codexCreditsValue("nope"), undefined);
+
+  // ── Codex rate-limit resets: the count from wham/usage, the expiry from
+  // the reset list, counting only unspent future entries.
+  same("reset summary", codexResetCreditsValue({ available_count: 3 }), { available: 3 });
+  same("reset summary missing", codexResetCreditsValue({}), undefined);
+  const NOW = Date.parse("2026-10-15T12:00:00.000Z");
+  same(
+    "reset details soonest unspent expiry",
+    codexResetCreditDetails(
+      {
+        available_count: 2,
+        credits: [
+          { status: "redeemed", expires_at: "2026-10-15T13:00:00.000Z" },
+          { status: "available", expires_at: "2026-10-20T12:00:00.000Z" },
+          { status: "available", expires_at: Date.parse("2026-10-18T12:00:00.000Z") / 1000 },
+          { status: "available", expires_at: "2026-10-14T12:00:00.000Z" },
+        ],
+      },
+      NOW,
+    ),
+    { available: 2, nextExpiresAt: "2026-10-18T12:00:00.000Z" },
+  );
+  same(
+    "reset details count from statuses",
+    codexResetCreditDetails(
+      { credits: [{ status: "available" }, { status: "expired" }] },
+      NOW,
+    ),
+    { available: 1 },
+  );
+  same("reset details without a count", codexResetCreditDetails({ credits: [{}] }, NOW), undefined);
+
+  // ── Claude extra usage: minor units (cents for USD), only while enabled.
+  same(
+    "claude extra usage cents",
+    claudeExtraUsageValue({
+      extra_usage: { is_enabled: true, monthly_limit: 5000, used_credits: 1250, utilization: 25, currency: "usd" },
+    }),
+    { kind: "spend", currency: "USD", spent: 12.5, limit: 50, usedPercent: 25 },
+  );
+  same(
+    "claude extra usage without a cap",
+    claudeExtraUsageValue({
+      extra_usage: { is_enabled: true, monthly_limit: null, used_credits: 300, utilization: null },
+    }),
+    { kind: "spend", currency: "USD", spent: 3, limit: null, usedPercent: null },
+  );
+  same(
+    "claude extra usage off",
+    claudeExtraUsageValue({
+      extra_usage: { is_enabled: false, monthly_limit: 5000, used_credits: 0, utilization: 0 },
+    }),
+    undefined,
+  );
+  same(
+    "claude extra usage beats spend",
+    claudeExtraUsageValue({
+      extra_usage: { is_enabled: false, monthly_limit: 5000, used_credits: 0, utilization: 0 },
+      spend: { enabled: true, used: { amount_minor: 100, currency: "USD" } },
+    }),
+    undefined,
+  );
+  same(
+    "claude spend object",
+    claudeExtraUsageValue({
+      spend: {
+        enabled: true,
+        used: { amount_minor: 2500, currency: "EUR", exponent: 2 },
+        limit: { amount_minor: 10000, currency: "EUR", exponent: 2 },
+      },
+    }),
+    { kind: "spend", currency: "EUR", spent: 25, limit: 100, usedPercent: 25 },
+  );
+  same("claude nothing reported", claudeExtraUsageValue({}), undefined);
 
   console.log(`\nAll ${pass} usage-window checks passed.`);
 }

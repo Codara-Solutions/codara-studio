@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import { UpdateRestartWait } from "./UpdateRestartWait";
 
 // Compact update control for the window chrome: invisible until an update
 // exists, then a download glyph that carries the whole story — a progress
@@ -17,7 +18,10 @@ type UpdaterEventKind =
   | "update-not-available"
   | "download-progress"
   | "update-downloaded"
-  | "error";
+  | "error"
+  | "restart-waiting"
+  | "restart-cancelled"
+  | "restart-starting";
 
 interface UpdaterEvent {
   kind: UpdaterEventKind;
@@ -35,6 +39,10 @@ type ChipState =
       bytesPerSecond: number;
     }
   | { kind: "ready"; version: string }
+  // Restart and install was clicked while an agent was mid-turn: main
+  // restarts once they finish. `items` names what is still working.
+  | { kind: "waiting"; version: string; items: string[] }
+  | { kind: "restarting"; version: string }
   | { kind: "error"; message: string };
 
 function asString(v: unknown, fallback = ""): string {
@@ -44,8 +52,25 @@ function asNumber(v: unknown, fallback = 0): number {
   return typeof v === "number" && Number.isFinite(v) ? v : fallback;
 }
 
+function versionOf(state: ChipState): string {
+  return state.kind === "ready" || state.kind === "waiting" || state.kind === "restarting" || state.kind === "downloading"
+    ? state.version
+    : "?";
+}
+
 function reduceEvent(state: ChipState, event: UpdaterEvent): ChipState {
   switch (event.kind) {
+    case "restart-waiting": {
+      const p = event.payload as { items?: unknown } | undefined;
+      const items = Array.isArray(p?.items) ? p.items.filter((item): item is string => typeof item === "string") : [];
+      return { kind: "waiting", version: versionOf(state), items };
+    }
+    case "restart-cancelled":
+      return state.kind === "waiting" || state.kind === "restarting"
+        ? { kind: "ready", version: state.version }
+        : state;
+    case "restart-starting":
+      return { kind: "restarting", version: versionOf(state) };
     case "update-available": {
       const p = event.payload as { version?: unknown } | undefined;
       return {
@@ -73,7 +98,8 @@ function reduceEvent(state: ChipState, event: UpdaterEvent): ChipState {
     }
     case "update-downloaded": {
       const p = event.payload as { version?: unknown } | undefined;
-      return { kind: "ready", version: asString(p?.version, "?") };
+      const version = asString(p?.version, "?");
+      return state.kind === "waiting" ? { ...state, version } : { kind: "ready", version };
     }
     case "error": {
       const p = event.payload as { message?: unknown } | undefined;
@@ -106,19 +132,36 @@ function fmtMB(bytes: number): string {
 
 export default function UpdateChip(): React.ReactElement | null {
   const [state, setState] = useState<ChipState>({ kind: "idle" });
+  // Read by the updater listener, which subscribes once.
+  const stateKindRef = useRef<ChipState["kind"]>(state.kind);
+  stateKindRef.current = state.kind;
   const [hover, setHover] = useState(false);
   // Details popover, toggled by clicking the chip while the download runs.
   const [open, setOpen] = useState(false);
   useEffect(() => {
     if (!open) return undefined;
     const close = (): void => setOpen(false);
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") setOpen(false);
+    };
     window.addEventListener("mousedown", close);
-    return () => window.removeEventListener("mousedown", close);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("keydown", onKey);
+    };
   }, [open]);
 
   useEffect(() => {
     if (!window.spark?.updater) return undefined;
     const off = window.spark.updater.onEvent((event) => {
+      // A restart that starts waiting says so where the click happened. A
+      // later change to what it waits for (an agent finished) updates the
+      // list without reopening a popover the user closed.
+      if (event.kind === "restart-waiting" && stateKindRef.current !== "waiting") {
+        stateKindRef.current = "waiting";
+        setOpen(true);
+      }
       setState((current) => reduceEvent(current, event));
     });
     return off;
@@ -128,11 +171,17 @@ export default function UpdateChip(): React.ReactElement | null {
 
   const ready = state.kind === "ready";
   const error = state.kind === "error";
+  const waiting = state.kind === "waiting";
+  const restarting = state.kind === "restarting";
   const title = ready
-    ? `Update v${state.version} ready — click to restart into it`
-    : error
-      ? `Updater error: ${state.message}`
-      : `Downloading update v${state.version}… ${state.percent.toFixed(0)}%`;
+    ? `Update v${state.version} is ready. Click to restart into it.`
+    : waiting
+      ? `Update v${state.version} restarts when agents finish`
+      : restarting
+        ? `Restarting into v${state.version}`
+        : error
+          ? `Updater error: ${state.message}`
+          : `Downloading update v${state.version}… ${state.percent.toFixed(0)}%`;
   const tone = error ? "var(--danger)" : "var(--accent)";
 
   const install = (): void => {
@@ -141,6 +190,12 @@ export default function UpdateChip(): React.ReactElement | null {
     void window.spark.updater.quitAndInstall().catch(() => {
       /* a main-side failure comes back as an updater error event */
     });
+  };
+  const restartNow = (): void => {
+    void window.spark.updater.restartNow?.().catch(() => undefined);
+  };
+  const cancelRestart = (): void => {
+    void window.spark.updater.cancelRestart?.().catch(() => undefined);
   };
   const handleClick = (): void => {
     if (ready) {
@@ -217,7 +272,7 @@ export default function UpdateChip(): React.ReactElement | null {
         <DownloadGlyph color={state.kind === "downloading" ? "var(--ink-dim)" : tone} />
       </span>
       {/* Notification badge: the "something is waiting for you" dot. */}
-      {(ready || error) && (
+      {(ready || error || waiting || restarting) && (
         <span
           aria-hidden
           style={{
@@ -238,7 +293,7 @@ export default function UpdateChip(): React.ReactElement | null {
     {open && (
       <div
         onMouseDown={(e) => e.stopPropagation()}
-        className="spark-fade-in"
+        className="spark-fade-in spark-glass"
         style={{
           position: "fixed",
           right: 8,
@@ -247,9 +302,6 @@ export default function UpdateChip(): React.ReactElement | null {
           width: 260,
           padding: "10px 12px",
           borderRadius: "var(--radius-surface)",
-          border: "1px solid var(--rule)",
-          background: "var(--panel)",
-          boxShadow: "var(--shadow-1)",
           display: "flex",
           flexDirection: "column",
           gap: 8,
@@ -317,6 +369,14 @@ export default function UpdateChip(): React.ReactElement | null {
               Restart and install
             </button>
           </>
+        )}
+        {state.kind === "waiting" && (
+          <UpdateRestartWait items={state.items} onRestartNow={restartNow} onCancel={cancelRestart} />
+        )}
+        {restarting && (
+          <span role="status" style={{ fontSize: 10.5, color: "var(--muted)" }}>
+            Restarting to install the update.
+          </span>
         )}
         {error && (
           <span style={{ fontSize: 10.5, color: "var(--danger)", whiteSpace: "pre-wrap" }}>

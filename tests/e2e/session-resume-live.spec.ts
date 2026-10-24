@@ -108,8 +108,12 @@ test("settings switch persists restoreAgentSessions to disk", async () => {
     const page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
     await page.getByTitle("Settings").first().click();
+    const dialog = page.getByRole("dialog", { name: "Settings" });
+    await dialog.locator("nav").getByRole("button", { name: "Sessions", exact: true }).click();
 
-    const toggle = page.getByRole("switch", { name: "Resume agent sessions on relaunch" });
+    const toggle = dialog.getByRole("switch", {
+      name: "Resume running agent sessions when Codara reopens",
+    });
     await expect(toggle).toBeVisible({ timeout: 10_000 });
     await expect(toggle).toHaveAttribute("aria-checked", "false");
 

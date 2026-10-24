@@ -124,6 +124,25 @@ const PULL_REQUEST_CHECKOUT_JSON_FIELDS = [
   "statusCheckRollup",
 ].join(",");
 
+const MERGED_PULL_REQUEST_JSON_FIELDS = [
+  "number",
+  "url",
+  "headRefName",
+  "headRefOid",
+  "baseRefName",
+  "isCrossRepository",
+].join(",");
+export const GITHUB_MERGED_PULL_REQUEST_LIST_LIMIT = 100;
+
+export interface GitHubMergedPullRequest {
+  number: number;
+  url: string;
+  headRefName: string;
+  headRefOid: string;
+  baseRefName: string;
+  isCrossRepository: boolean;
+}
+
 export type GitHubCliErrorCode =
   | "not-installed"
   | "not-authenticated"
@@ -206,6 +225,13 @@ export interface GitHubCliAdapter {
     cwd: string,
     repository: GitHubRepositoryIdentity,
   ): Promise<GitHubPullRequestSummary[]>;
+  // Merged pull requests whose head is `branch`, for the agent worktree
+  // merge proof.
+  listPullRequestsForHead?(cwd: string, branch: string): Promise<GitHubMergedPullRequest[]>;
+  // The most recent merged pull requests, one call for a whole worktree list.
+  listMergedPullRequests?(cwd: string, limit?: number): Promise<GitHubMergedPullRequest[]>;
+  // The most recent pull requests closed without merging.
+  listClosedPullRequests?(cwd: string, limit?: number): Promise<GitHubMergedPullRequest[]>;
   createPullRequest?(input: {
     cwd: string;
     title: string;
@@ -654,6 +680,74 @@ export function createGitHubCliAdapter(
         PULL_REQUEST_SUMMARY_JSON_FIELDS,
       ]);
       return parsePullRequestSummaries(stdout, repository);
+    },
+
+    async listPullRequestsForHead(
+      cwd: string,
+      branch: string,
+    ): Promise<GitHubMergedPullRequest[]> {
+      const head = boundedBranch(branch, "head branch");
+      const stdout = await runRead(cwd, [
+        "pr",
+        "list",
+        "--state",
+        "merged",
+        "--head",
+        head,
+        "--limit",
+        "20",
+        "--json",
+        MERGED_PULL_REQUEST_JSON_FIELDS,
+      ]);
+      return parseMergedPullRequests(stdout);
+    },
+
+    async listMergedPullRequests(
+      cwd: string,
+      limit = GITHUB_MERGED_PULL_REQUEST_LIST_LIMIT,
+    ): Promise<GitHubMergedPullRequest[]> {
+      const bounded = Math.max(1, Math.min(GITHUB_MERGED_PULL_REQUEST_LIST_LIMIT, Math.trunc(limit)));
+      const stdout = await runRead(cwd, [
+        "pr",
+        "list",
+        "--state",
+        "merged",
+        "--limit",
+        String(bounded),
+        "--json",
+        MERGED_PULL_REQUEST_JSON_FIELDS,
+      ]);
+      return parseMergedPullRequests(stdout);
+    },
+
+    async listClosedPullRequests(
+      cwd: string,
+      limit = GITHUB_MERGED_PULL_REQUEST_LIST_LIMIT,
+    ): Promise<GitHubMergedPullRequest[]> {
+      const bounded = Math.max(1, Math.min(GITHUB_MERGED_PULL_REQUEST_LIST_LIMIT, Math.trunc(limit)));
+      // gh counts merged pull requests as closed; mergedAt tells them apart.
+      const stdout = await runRead(cwd, [
+        "pr",
+        "list",
+        "--state",
+        "closed",
+        "--limit",
+        String(bounded),
+        "--json",
+        `${MERGED_PULL_REQUEST_JSON_FIELDS},mergedAt`,
+      ]);
+      const merged = new Set<number>();
+      try {
+        const raw: unknown = JSON.parse(stdout);
+        if (Array.isArray(raw)) {
+          for (const entry of raw) {
+            if (isRecord(entry) && typeof entry.number === "number" && entry.mergedAt) merged.add(entry.number);
+          }
+        }
+      } catch {
+        /* parseMergedPullRequests reports the invalid JSON. */
+      }
+      return parseMergedPullRequests(stdout).filter((pr) => !merged.has(pr.number));
     },
 
     async createPullRequest(input): Promise<void> {
@@ -1182,6 +1276,51 @@ function parseRepositoryIdentity(stdout: string): GitHubRepositoryIdentity {
     hostname: url.hostname,
     ...(defaultBranch ? { defaultBranch } : {}),
   };
+}
+
+// Entries that do not validate are dropped rather than failing the list: a
+// missing pull request only ever withholds a merge proof.
+function parseMergedPullRequests(stdout: string): GitHubMergedPullRequest[] {
+  let value: unknown;
+  try {
+    value = JSON.parse(stdout);
+  } catch {
+    throw invalidResponse("GitHub CLI returned invalid JSON for pull requests.");
+  }
+  if (!Array.isArray(value) || value.length > GITHUB_MERGED_PULL_REQUEST_LIST_LIMIT) {
+    throw invalidResponse("GitHub CLI returned an invalid pull request list.");
+  }
+  const out: GitHubMergedPullRequest[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry)) continue;
+    const { number, url, headRefName, headRefOid, baseRefName, isCrossRepository } = entry;
+    if (
+      typeof number !== "number" ||
+      !Number.isSafeInteger(number) ||
+      number < 1 ||
+      typeof url !== "string" ||
+      url.length > MAX_URL ||
+      UNSAFE_GITHUB_TEXT.test(url) ||
+      typeof headRefName !== "string" ||
+      headRefName.length > MAX_BRANCH_NAME ||
+      typeof baseRefName !== "string" ||
+      baseRefName.length > MAX_BRANCH_NAME ||
+      typeof headRefOid !== "string" ||
+      !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu.test(headRefOid) ||
+      typeof isCrossRepository !== "boolean"
+    ) {
+      continue;
+    }
+    out.push({
+      number,
+      url,
+      headRefName,
+      headRefOid: headRefOid.toLowerCase(),
+      baseRefName,
+      isCrossRepository,
+    });
+  }
+  return out;
 }
 
 function parsePullRequestSummaries(

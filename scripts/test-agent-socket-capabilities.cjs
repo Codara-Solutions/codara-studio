@@ -70,6 +70,11 @@ assert.equal(
   "scoped manager credentials must never receive user-owned recovery authority",
 );
 assert.equal(managerClaim.allowedMethods.some((method) => method.startsWith("automation.")), false);
+assert.equal(
+  managerClaim.allowedMethods.some((method) => method.startsWith("worktree.")),
+  false,
+  "an imported pull request's manager never creates or removes worktrees",
+);
 
 const worker = capabilities.mintAgentSocketCapability({
   audience: "untrusted-pi-worker",
@@ -157,6 +162,27 @@ assert.match(
   socketSource,
   /case "chat\.resume":[\s\S]*auth\.kind !== "root"[\s\S]*handleChatResume/,
   "chat.resume must keep an explicit root-only dispatch gate even if a future scoped roster changes",
+);
+
+for (const method of ["worktree.create", "worktree.list", "worktree.remove", "worktree.setup", "worktree.cleanup"]) {
+  assert.match(
+    socketSource,
+    new RegExp(`UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS = new Set<string>\\(\\[[^\\]]*"${method.replace(".", "\\.")}"`),
+    `${method} is refused for an imported pull-request run even with root credentials`,
+  );
+}
+for (const method of ["worktree.create", "worktree.remove"]) {
+  assert.match(
+    socketSource,
+    new RegExp(`MID_COMPACTION_BLOCKED_METHODS = new Set<string>\\(\\[[^\\]]*"${method.replace(".", "\\.")}"`),
+    `${method} waits out a compaction`,
+  );
+}
+
+assert.match(
+  socketSource,
+  /MID_COMPACTION_BLOCKED_METHODS\.has\(method\) \|\| \(method === "worktree\.cleanup" && params\.action === "remove"\)/,
+  "a worktree cleanup removal waits out a compaction",
 );
 
 const bridgeSource = fs.readFileSync(

@@ -22,6 +22,25 @@ export function locateTerminalPane(
   return null;
 }
 
+// The workspace of the pane an agent runs in. After the window reloads, panes
+// keep running in workspaces whose layout this renderer has not loaded (or has
+// loaded only as a background shell holding a bridge-opened tab), so their
+// saved layouts are consulted too. tabId is null when only a saved layout
+// knows the pane.
+export function locateCallerPane(
+  loaded: readonly WorkspaceTabs[],
+  paneId: string,
+  workspaceIds: Iterable<string>,
+  savedPaneIds: (workspaceId: string) => ReadonlySet<string>,
+): { workspaceId: string; tabId: TabId | null } | null {
+  const found = locateTerminalPane(loaded, paneId);
+  if (found) return found;
+  for (const workspaceId of workspaceIds) {
+    if (savedPaneIds(workspaceId).has(paneId)) return { workspaceId, tabId: null };
+  }
+  return null;
+}
+
 // The caller's own tab, or the last of the terminals it already opened right
 // behind it, so several creates from one agent keep their order beside it.
 export function agentTerminalAnchor(

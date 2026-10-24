@@ -27,7 +27,12 @@ of suites by area). `CONTRIBUTING.md` covers setup and pull requests.
   `npm test -- <regex>` (the registry globs `scripts/test-*.{cjs,mjs}`), for
   example `npm test -- step-lifecycle` or `npm test -- loom-steps` for
   orchestration changes and `npm test -- terminal-agent-notify` for the
-  terminal notifier. `npm test` runs everything and takes a while. A few
+  terminal notifier. `npm run test:changed` picks the suites that can see
+  your changes since `origin/main` for you; use it while you iterate.
+  `npm test` runs everything, a few suites at a time, in about two minutes;
+  run it before you land. `CODARA_TEST_JOBS=1` makes it run one suite at a
+  time, and `scripts/README.md` explains the `heavy` and `serial` tags a
+  memory-hungry suite needs. A few
   suites need a build or extra tools first (`test-agent-socket` needs
   `npm run build`); `scripts/README.md` lists them.
 - Tests that need a real subscription or network are the `smoke:*` scripts
@@ -76,8 +81,11 @@ of suites by area). `CONTRIBUTING.md` covers setup and pull requests.
   `run-store.ts`, and `automation-loop.ts`; accounts span
   `unified-accounts.ts`, `credential-mirror.ts`, the adapters in
   `account-adapters/`, the `*-cli-account-profiles.ts` files,
-  `claude-cli-live-login.ts` and `claude-login-keeper.ts` (Claude's one
-  home and its one refresher), and `codex-cli-auth-selector.ts`. Cora runs
+  `claude-cli-live-login.ts` and `claude-login-keeper.ts` (Claude's live
+  slot and its one refresher), `cli-account-homes.ts` (the managed homes),
+  `system-cli-login.ts`, and `accounts-v2-migration.ts`. Nothing there may
+  write into the user's CLI homes: `src/main/outside-write-guard.ts`
+  refuses it. Cora runs
   on Pi: `pi-runtime-electron.ts` resolves and launches it, `pi-backend.ts`
   runs manager turns.
 - Shared types and catalogs are in `src/shared/`; the renderer reads them via

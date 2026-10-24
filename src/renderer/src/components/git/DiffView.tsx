@@ -446,7 +446,7 @@ export default function DiffView({
             {diff?.error ?? "Could not load this diff."}
           </DiffHint>
         ) : diff.binary ? (
-          <DiffHint eyebrow="Binary">Binary file — no inline preview.</DiffHint>
+          <DiffHint eyebrow="Binary">Binary file, no inline preview.</DiffHint>
         ) : diff.lines.length === 0 ? (
           <DiffHint eyebrow="No changes">No textual changes to show.</DiffHint>
         ) : (
@@ -857,7 +857,7 @@ function ConflictBar({
           color: "color-mix(in oklch, var(--danger) 80%, var(--ink))",
         }}
       >
-        Merge conflict — keep one side, then commit.
+        Merge conflict: keep one side, then commit.
       </span>
       <TextAction
         label={oursBusy ? "Keeping…" : "Accept Current"}

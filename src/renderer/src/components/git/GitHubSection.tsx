@@ -15,6 +15,7 @@ import {
 import type { GitStatus } from "@shared/types";
 import { ChevronIcon } from "../icons";
 import GitHubWorkQueue from "./GitHubWorkQueue";
+import FixWithAgentButton from "./fix/FixWithAgentButton";
 import { RefreshIcon, SparkleIcon, Spinner } from "./git-ui";
 
 interface Props {
@@ -465,7 +466,7 @@ export default function GitHubSection({
         >
           <RoomTab
             label="Save"
-            title="Save your work locally — sync, commit, split"
+            title="Save your work locally: sync, commit, split"
             active={activeRoom === "save"}
             count={dirtyCount}
             onClick={() => setRoom("save")}
@@ -517,6 +518,7 @@ export default function GitHubSection({
             />
             {status.pullRequest ? (
               <PullRequestView
+                cwd={cwd}
                 status={status}
                 markingReady={markingReady}
                 markReadyResult={markReadyResult}
@@ -551,7 +553,7 @@ export default function GitHubSection({
                     flex: "0 0 auto",
                   }}
                 />
-                All clear — no open pull requests or issues.
+                All clear. No open pull requests or issues.
               </div>
             ) : null}
             {queue ? (
@@ -581,7 +583,7 @@ export default function GitHubSection({
                 <button
                   type="button"
                   title="Open this repository's issues on GitHub"
-                  onClick={() => openInSystemBrowser(issuesUrl)}
+                  onClick={() => openLink(issuesUrl)}
                   style={linkButtonStyle}
                 >
                   View all issues
@@ -665,7 +667,7 @@ function publishBlockReason(
     status.staged.length + status.unstaged.length === 0 &&
     status.ahead === 0
   ) {
-    return "No new work to share yet — everything is already on GitHub.";
+    return "No new work to share yet. Everything is already on GitHub.";
   }
   return null;
 }
@@ -800,22 +802,20 @@ function ShareForReviewDialog({
         display: "grid",
         placeItems: "center",
         padding: 24,
-        background: "rgba(4, 5, 10, 0.68)",
+        background: "var(--modal-scrim)",
       }}
     >
       <div
         role="dialog"
         aria-modal="true"
         aria-label="Share your work for review on GitHub"
+        className="spark-glass--strong spark-overlay-surface"
         style={{
           width: "min(600px, calc(100vw - 48px))",
           maxHeight: "calc(100vh - 48px)",
           overflowY: "auto",
           padding: 18,
           borderRadius: 12,
-          border: "1px solid var(--rule-strong)",
-          background: "var(--panel)",
-          boxShadow: "0 20px 70px rgba(0, 0, 0, 0.45)",
           display: "grid",
           gap: 13,
         }}
@@ -1117,22 +1117,20 @@ function MergePullRequestDialog({
         display: "grid",
         placeItems: "center",
         padding: 24,
-        background: "rgba(4, 5, 10, 0.68)",
+        background: "var(--modal-scrim)",
       }}
     >
       <div
         role="dialog"
         aria-modal="true"
         aria-label={`Merge pull request ${pullRequest.number}`}
+        className="spark-glass--strong spark-overlay-surface"
         style={{
           width: "min(520px, calc(100vw - 48px))",
           maxHeight: "calc(100vh - 48px)",
           overflowY: "auto",
           padding: 18,
           borderRadius: 12,
-          border: "1px solid var(--rule-strong)",
-          background: "var(--panel)",
-          boxShadow: "0 20px 70px rgba(0, 0, 0, 0.45)",
           display: "grid",
           gap: 13,
         }}
@@ -1316,7 +1314,7 @@ function Guidance({
               ? "Open the GitHub CLI download page to update `gh`"
               : "Open the GitHub CLI installation guide"
           }
-          onClick={() => openInSystemBrowser("https://cli.github.com/")}
+          onClick={() => openLink("https://cli.github.com/")}
         />
       )}
     </>
@@ -1324,12 +1322,14 @@ function Guidance({
 }
 
 function PullRequestView({
+  cwd,
   status,
   markingReady,
   markReadyResult,
   onMarkReady,
   onMerge,
 }: {
+  cwd: string;
   status: Extract<GitHubWorkspaceStatus, { kind: "ready" }>;
   markingReady: boolean;
   markReadyResult: GitHubMarkReadyResult | null;
@@ -1422,7 +1422,7 @@ function PullRequestView({
         <ActionButton
           label="Open PR"
           title={`Open pull request #${pullRequest.number} in your browser`}
-          onClick={() => openInSystemBrowser(pullRequest.url)}
+          onClick={() => openLink(pullRequest.url)}
         />
         {pullRequest.state === "OPEN" && pullRequest.isDraft ? (
           <ActionButton
@@ -1437,6 +1437,24 @@ function PullRequestView({
             label="Review merge"
             title={`Review safeguards before merging pull request #${pullRequest.number}`}
             onClick={onMerge}
+          />
+        ) : null}
+        {pullRequest.state === "OPEN" ? (
+          <FixWithAgentButton
+            cwd={cwd}
+            kind="checks"
+            label="Fix checks with agent"
+            title={`Send the failing checks on #${pullRequest.number} and their logs to an agent`}
+            tone="danger"
+            hidden={pullRequest.checks.failed === 0}
+          />
+        ) : null}
+        {pullRequest.state === "OPEN" ? (
+          <FixWithAgentButton
+            cwd={cwd}
+            kind="review"
+            label="Address review comments"
+            title={`Send the unresolved review threads on #${pullRequest.number} to an agent`}
           />
         ) : null}
       </div>
@@ -1595,14 +1613,14 @@ function JourneyTimeline({
         title: dirty > 0 ? "New edits not shared yet" : "Work saved",
         detail:
           dirty > 0
-            ? `${dirty} file${dirty === 1 ? "" : "s"} changed since sharing — save and push to update the PR`
+            ? `${dirty} file${dirty === 1 ? "" : "s"} changed since sharing. Save and push to update the PR`
             : "everything is committed",
       },
       {
         key: "shared",
         state: "done",
         title: `Shared as PR #${pullRequest.number}`,
-        detail: pullRequest.isDraft ? "draft — mark it ready below" : "open for review",
+        detail: pullRequest.isDraft ? "draft, mark it ready below" : "open for review",
       },
       {
         key: "checks",
@@ -1622,7 +1640,7 @@ function JourneyTimeline({
         title: "Merge",
         detail:
           checksDone && !pullRequest.isDraft
-            ? "ready — review and merge below"
+            ? "ready, review and merge below"
             : "after checks pass",
       },
     ];
@@ -1634,7 +1652,7 @@ function JourneyTimeline({
         title: dirty > 0 ? "Save your work" : "Work saved",
         detail:
           dirty > 0
-            ? `${dirty} file${dirty === 1 ? "" : "s"} changed — commit in the Save room`
+            ? `${dirty} file${dirty === 1 ? "" : "s"} changed. Commit in the Save room`
             : `${ahead} commit${ahead === 1 ? "" : "s"} ready to share`,
       },
       {
@@ -1733,7 +1751,7 @@ function ShareButton({ onClick }: { onClick: () => void }): React.ReactElement {
   return (
     <button
       type="button"
-      title="Save your changes, send them to GitHub, and open a pull request for review — Codara drafts the summary for you"
+      title="Save your changes, send them to GitHub, and open a pull request for review. Codara drafts the summary for you"
       onClick={onClick}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => {
@@ -1824,9 +1842,8 @@ function checkLabel(checks: GitHubCheckSummary): string {
   return parts.join(" · ");
 }
 
-function openInSystemBrowser(url: string): void {
-  // This preload method lands in ipc.ts's allowlisted shell.openExternal
-  // handler. It is an explicit user click and never creates a PR by itself.
-  const open = window.spark.openInSystemBrowser ?? window.spark.openExternal;
-  void open(url);
+function openLink(url: string): void {
+  // A plain link click: it follows the linkOpenTarget preference like every
+  // other link, and never creates a PR by itself.
+  void window.spark.openExternal(url);
 }

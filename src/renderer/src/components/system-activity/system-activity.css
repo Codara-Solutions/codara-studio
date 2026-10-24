@@ -1,0 +1,389 @@
+/* System activity popover: what uses the machine, one row per pane. A
+   floating layer, so its surface takes the menu glass from .spark-menu and
+   nothing inside frosts again. Figures are tabular so nothing shifts as they
+   change, and nothing animates on a reading: every painted frame
+   recomposites the glass. */
+
+.spark-menu.system-activity {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  overflow: hidden;
+  font-family: var(--font-sans);
+  color: var(--ink);
+}
+
+.sa-num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+}
+
+/* Resource tabs, each with its machine total. */
+
+.sa-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 2px;
+  padding: 2px;
+  border-radius: var(--radius-control);
+  background: color-mix(in oklab, var(--ink) 5%, transparent);
+}
+
+.sa-tab {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  height: 26px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: calc(var(--radius-control) - 2px);
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: default;
+}
+
+.sa-tab:hover {
+  color: var(--ink);
+}
+
+.sa-tab[aria-selected="true"] {
+  background: var(--panel);
+  box-shadow: 0 0 0 1px var(--rule-soft), 0 1px 2px color-mix(in oklab, black 12%, transparent);
+  color: var(--ink);
+}
+
+.sa-tab:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.sa-tab svg {
+  flex: none;
+}
+
+.sa-tab__label {
+  font-weight: 600;
+}
+
+.sa-tab__value {
+  margin-left: auto;
+  color: var(--ink-dim);
+  font-size: 10.5px;
+}
+
+.sa-tab[aria-selected="true"] .sa-tab__value {
+  color: var(--ink);
+}
+
+.system-activity__panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+/* The total's last minute and a line of facts. */
+
+.sa-overview {
+  display: grid;
+  gap: 4px;
+  padding: 0 2px;
+}
+
+.sa-chart {
+  position: relative;
+}
+
+.sa-chart svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.sa-chart__base {
+  stroke: var(--rule);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.sa-chart__cursor {
+  stroke: var(--ink-dim);
+  stroke-width: 1;
+}
+
+.sa-chart__readout {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 1px 5px;
+  border: 1px solid var(--rule-soft);
+  border-radius: 5px;
+  background: var(--panel-2);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.sa-facts {
+  margin: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Low memory. Status colour with an icon and words, never colour alone. */
+
+.sa-warning {
+  --sa-status: var(--warn);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 6px 5px 8px;
+  border: 1px solid color-mix(in oklch, var(--sa-status) 45%, transparent);
+  border-radius: var(--radius-control);
+  background: color-mix(in oklch, var(--sa-status) 13%, transparent);
+  color: var(--sa-status);
+}
+
+.sa-warning[data-level="critical"] {
+  --sa-status: var(--danger);
+}
+
+.sa-warning svg {
+  flex: none;
+}
+
+.sa-warning__text {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-dim);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sa-warning__text strong {
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.sa-warning__go {
+  flex: none;
+  margin-left: auto;
+  padding: 2px 8px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control);
+  background: var(--panel);
+  color: var(--ink);
+  font: inherit;
+  font-size: 10.5px;
+}
+
+.sa-warning__go:hover {
+  background: var(--hover-strong);
+}
+
+/* Rows: owner mark, name over workspace, the figure, and a disclosure. */
+
+.system-activity__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 0;
+  margin: 0 -2px;
+  padding: 0 2px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.sa-rows {
+  display: grid;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sa-rows--rest {
+  padding-top: 4px;
+  border-top: 1px solid var(--rule-soft);
+}
+
+.sa-row__line {
+  display: flex;
+  align-items: stretch;
+  border-radius: var(--radius-control);
+}
+
+.sa-row__line:hover {
+  background: var(--hover);
+}
+
+.sa-row__main {
+  display: grid;
+  flex: 1;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 4px 4px 6px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+
+.sa-row__main:focus-visible,
+.sa-row__more:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.sa-mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: var(--ink-dim);
+}
+
+.sa-mark--codara {
+  color: var(--accent);
+}
+
+.sa-mark--outside,
+.sa-mark--shell {
+  color: var(--muted);
+}
+
+.sa-row__text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.sa-row__name,
+.sa-row__where {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sa-row__name {
+  font-size: 11.5px;
+  font-weight: 550;
+}
+
+.sa-row__where {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.sa-row__dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.sa-row__value {
+  min-width: 58px;
+  color: var(--ink);
+  font-size: 11.5px;
+  font-weight: 600;
+  text-align: right;
+}
+
+.sa-row__more {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  border: 0;
+  border-radius: var(--radius-control);
+  background: none;
+  color: var(--muted);
+  cursor: default;
+}
+
+.sa-row__more:hover {
+  color: var(--ink);
+}
+
+.sa-row__chevron {
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+
+.sa-row[data-expanded] .sa-row__chevron {
+  transform: rotate(90deg);
+}
+
+.sa-row__detail {
+  display: grid;
+  gap: 1px;
+  margin: 0 22px 4px 32px;
+  padding: 0;
+  list-style: none;
+}
+
+.sa-row__detail li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding: 1px 4px;
+  color: var(--ink-dim);
+  font-size: 10.5px;
+}
+
+.sa-row__detail-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sa-row__detail .sa-num {
+  min-width: 58px;
+  text-align: right;
+}
+
+.sa-note {
+  margin: 0;
+  padding: 6px;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.sa-note--fine {
+  padding: 0 6px;
+  font-size: 9.5px;
+  text-align: right;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sa-row__chevron {
+    transition: none;
+  }
+}

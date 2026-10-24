@@ -15,13 +15,39 @@ import type {
 
 export type TabId = string;
 
+// The colors Chrome offers for its tab groups, so a group an agent mirrors
+// into the user's Chrome keeps its color there.
+export type TabGroupColor =
+  | "grey"
+  | "blue"
+  | "red"
+  | "yellow"
+  | "green"
+  | "pink"
+  | "purple"
+  | "cyan"
+  | "orange";
+
+// A named, colored run of adjacent tabs in one workspace's strip. Every member
+// carries the same record (see tabGroups.ts), so the group persists and moves
+// with the tab list alone.
+export interface TabGroup {
+  id: string;
+  name: string;
+  color: TabGroupColor;
+  collapsed?: boolean;
+}
+
 export interface BaseTab {
   id: TabId;
   title: string;
+  group?: TabGroup;
 }
 
 export interface ChatTab extends BaseTab {
   kind: "chat";
+  // Hover text naming the chat; every chat tab's label is the same "Cora".
+  tooltip?: string;
 }
 
 export interface EditorTab extends BaseTab {
@@ -36,6 +62,12 @@ export interface EditorTab extends BaseTab {
   // VS Code-style preview tabs are temporary: opening another file replaces
   // the preview until the tab is pinned by double-clicking or by editing.
   preview?: boolean;
+}
+
+// A sleeping agent pane (see TerminalLeaf.hibernation).
+export interface TerminalLeafHibernation {
+  runtime: "claude" | "codex" | "grok" | "pi";
+  sleptAt: number;
 }
 
 // Durable pointer to a Claude/Codex CLI session detected in a terminal leaf,
@@ -131,6 +163,10 @@ export interface TerminalLeaf {
   // unrelated sibling panes. Cold hydration strips it before spawning a fresh
   // local shell.
   origin?: TerminalLeafOrigin;
+  // Runtime-only: the workspace whose agent opened this pane from there
+  // (codara_terminal_create with `workspace`), shown on the tab. Stripped on
+  // persist like origin, since a relaunch starts a fresh shell.
+  openedBy?: string;
   // Runtime scrollback snapshot used to preserve context while panes move
   // between mounted workspace layers. Cold hydration strips it, so a full app
   // relaunch always starts with a clean shell.
@@ -158,6 +194,13 @@ export interface TerminalLeaf {
   // Runtime-only, one-shot cold-restore marker. It is derived from a validated
   // active agentSession during hydration and is never written to localStorage.
   bootResume?: boolean;
+  // Runtime-only: Codara stopped this pane's idle agent to save memory (agent
+  // hibernation, lib/agentHibernation.ts) and resumes it when the pane is
+  // opened again. Never written to localStorage; at quit a sleeping pane
+  // counts as a running agent, so the opt-in relaunch restore resumes it.
+  hibernation?: TerminalLeafHibernation | null;
+  // The user pinned this pane awake: agent hibernation never stops it.
+  keepAwake?: boolean;
   // Runtime-only frozen account for a phone-created Claude pane before its
   // durable session pointer has been discovered.
   nativeClaudeProfileId?: string;
@@ -264,6 +307,10 @@ export interface PreviewTab extends BaseTab {
   // Retained as provenance and the default automation target. Browser tabs
   // belong to the workspace and survive their originating chat/run.
   runId?: string;
+  // A logged-out tab's in-memory Electron partition (codara-fresh-...). It is
+  // fixed when the webview is created; after a restart the same name is an
+  // empty partition again, so the tab comes back logged out.
+  partition?: string;
 }
 
 // Runs tabs are derived from the selected chat. `runId === null` is kept only
@@ -298,6 +345,10 @@ export interface DiffTab extends BaseTab {
   // row or the tab pill. One shared preview slot across both diff flavors.
   // Mirrors EditorTab.preview.
   preview?: boolean;
+  // The review tab: every change of the workspace in one diff, with notes for
+  // an agent (components/review). One per workspace; path is "" and staged,
+  // commitHash and preview are unused.
+  review?: boolean;
 }
 
 // Automations tabs host the workspace's scheduler + overnight-queue panel.

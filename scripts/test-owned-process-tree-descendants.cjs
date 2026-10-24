@@ -9,7 +9,7 @@ const path = require("node:path");
 const os = require("node:os");
 const fs = require("node:fs");
 const assert = require("node:assert");
-const { spawn } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
@@ -56,6 +56,39 @@ async function main() {
   await new Promise((r) => root.on("exit", r));
   await sleep(300);
   check("exited processes drop out of the alive set", mod.aliveProcesses(found).length === 0);
+
+  // `lstart` follows the locale's time format; the listing pins it to C so
+  // every row parses whatever language the user runs.
+  const env = mod.psTimeEnvironment({ LANG: "es_ES.UTF-8", LC_ALL: "fr_FR.UTF-8", PATH: "/bin" });
+  check(
+    "the ps environment keeps a C time stamp and the user's character set",
+    env.LC_TIME === "C" && env.LC_ALL === undefined && env.LC_CTYPE === "fr_FR.UTF-8" && env.LANG === "es_ES.UTF-8" && env.PATH === "/bin",
+  );
+  check("a ps environment without LC_ALL only gains LC_TIME", mod.psTimeEnvironment({ LANG: "de_DE.UTF-8" }).LC_CTYPE === undefined);
+  const localized = spawnSync("ps", ["-o", "lstart=", "-p", String(process.pid)], {
+    encoding: "utf8",
+    env: { ...process.env, LC_ALL: "fr_FR.UTF-8" },
+  });
+  if (localized.status === 0 && !/^\s*[A-Z][a-z]{2} [A-Z][a-z]{2} /.test(localized.stdout)) {
+    const savedAll = process.env.LC_ALL;
+    process.env.LC_ALL = "fr_FR.UTF-8";
+    const probe = spawn("sleep", ["5"], { stdio: "ignore" });
+    try {
+      await sleep(200);
+      const listed = await mod.listProcessesWithCommands(0);
+      const entry = listed?.find((p) => p.pid === probe.pid);
+      check(
+        "a French locale still lists every process with a readable start time",
+        Boolean(entry) && mod.processStartMs(entry.startedAt) !== null && Math.abs(mod.processStartMs(entry.startedAt) - Date.now()) < 60_000,
+      );
+    } finally {
+      probe.kill("SIGKILL");
+      if (savedAll === undefined) delete process.env.LC_ALL;
+      else process.env.LC_ALL = savedAll;
+    }
+  } else {
+    console.log("SKIP localized listing: this machine has no French locale for ps");
+  }
   console.log(`\nAll ${pass} owned-process-tree checks passed.`);
 }
 

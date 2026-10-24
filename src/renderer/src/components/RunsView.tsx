@@ -358,7 +358,7 @@ function RunHeader({ run }: { run: RunState }) {
           <StatMetric
             label="Turns"
             value={turnCalls.length}
-            detail={paused ? "paused" : liveTurn ? "Cora is answering" : "conversation"}
+            detail={paused ? "paused" : liveTurn ? "Cora is answering" : "in this chat"}
             tone={
               paused
                 ? "var(--info)"
@@ -512,8 +512,8 @@ function ConversationRestState({ run }: { run: RunState }) {
           {live ? "Cora is answering in chat" : "Just a conversation so far"}
         </div>
         <div style={{ color: "var(--muted)", fontSize: 12.5, lineHeight: 1.5, maxWidth: 380 }}>
-          The moment Cora delegates real work — parallel workers, steps,
-          verification — the orchestration graph appears here.
+          The moment Cora delegates real work (parallel workers, steps,
+          verification), the orchestration graph appears here.
         </div>
       </div>
     </div>
@@ -643,7 +643,9 @@ function StatMetric({
         display: "flex",
         flexDirection: "column",
         gap: 4,
-        justifyContent: "center",
+        // Top-aligned, so every column's label sits on one line whatever
+        // the length of the caption under it.
+        justifyContent: "flex-start",
         minWidth: 0,
         minHeight: 54,
         padding: "7px 11px 8px",
@@ -680,7 +682,9 @@ function StatMetric({
           color: tone ?? "var(--ink)",
           fontFamily: "var(--font-mono)",
           fontSize: text ? 11.5 : 18,
-          lineHeight: 1,
+          // One line box for numbers and names alike, so a model name sits
+          // on the same baseline grid as a turn count.
+          lineHeight: "18px",
           fontWeight: text ? 650 : 720,
           fontVariantNumeric: "tabular-nums",
           // The old "Engine" metric was uppercased because a bare runtime name
@@ -698,13 +702,16 @@ function StatMetric({
       <span
         title={detail}
         style={{
+          // A narrow column wraps its caption to a second line rather than
+          // cutting it off mid-word.
+          display: "-webkit-box",
+          WebkitBoxOrient: "vertical",
+          WebkitLineClamp: 2,
           color: "var(--muted)",
           fontFamily: "var(--font-sans)",
           fontSize: 10,
           lineHeight: 1.2,
           overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
         }}
       >
         {detail}

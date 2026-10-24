@@ -10,6 +10,9 @@ export default function ContextPill({ used, budget }: Props) {
   // The bar and its label are one gauge, so they must use the same denominator.
   // 97k/256k is ~38%; dividing the bar by a hidden provider fallback made it
   // appear almost full while the adjacent numbers said otherwise.
+  // An empty gauge in every fresh or restored chat read as a broken progress
+  // bar; it appears once the chat has used any context.
+  if (!(used > 0)) return null;
   const pct = contextMeterRatio(used, budget);
   const title = `${formatTokens(used)} / ${formatTokens(budget)} tokens before Cora compacts the chat`;
   return (

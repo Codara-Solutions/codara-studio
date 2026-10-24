@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// test-runner: heavy (launches Chromium through Playwright)
 "use strict";
 
 // Chat sub-surface routing regressions
@@ -167,7 +168,12 @@ async function launchChromium() {
               ["chrome-headless-shell-mac-x64", "chrome-headless-shell"],
               ["chrome-mac-arm64", "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"],
             ]
-          : [["chrome-linux", "headless_shell"], ["chrome-linux", "chrome"]];
+          : [
+              ["chrome-headless-shell-linux64", "chrome-headless-shell"],
+              ["chrome-linux64", "chrome"],
+              ["chrome-linux", "headless_shell"],
+              ["chrome-linux", "chrome"],
+            ];
       for (const [sub, bin] of suffixes) {
         const executablePath = path.join(cacheRoot, dir, sub, bin);
         if (fs.existsSync(executablePath)) candidates.push(executablePath);
@@ -316,12 +322,12 @@ async function main() {
     const anywhereSource = appSource.slice(anywhereStart, anywhereEnd);
     assert.match(
       anywhereSource,
-      /if \(route === "automation"\) \{\s*setAwayDigest\(\(current\) =>\s*current \? pruneAwayDigest\(current, runId\) : current,\s*\);\s*tabsRef\.current\.openAutomationsTab\(\);/,
+      /if \(route === "automation"\) \{\s*setAwayDigest\(\(current\) =>\s*current \? pruneAwayDigest\(current, runId\) : current,\s*\);\s*if \(target\?\.workflow\) requestWorkflowRunFocus\(runId\);\s*tabsRef\.current\.openAutomationsTab\(\);/,
       "same-workspace automation routing must prune the routed run id",
     );
     assert.match(
       anywhereSource,
-      /if \(pending\.route === "automation"\) \{\s*setAwayDigest\(\(current\) =>\s*current \? pruneAwayDigest\(current, pending\.runId\) : current,\s*\);\s*tabsRef\.current\.openAutomationsTab\(\);/,
+      /if \(pending\.route === "automation"\) \{\s*setAwayDigest\(\(current\) =>\s*current \? pruneAwayDigest\(current, pending\.runId\) : current,\s*\);\s*if \([^\n]*\?\.workflow\) \{\s*requestWorkflowRunFocus\(pending\.runId\);\s*\}\s*tabsRef\.current\.openAutomationsTab\(\);/,
       "cross-workspace automation replay must prune the routed run id",
     );
     assert.doesNotMatch(

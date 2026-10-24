@@ -187,7 +187,7 @@ async function main() {
     );
     assert.match(
       runStore,
-      /taskWritesWorkspace\(task\) &&\s*runProjectPolicyMode\(run\) === "trusted"/,
+      /taskWritesWorkspace\(task\) &&\s*!task\.workflowCall &&\s*runProjectPolicyMode\(run\) === "trusted"/,
       "PR workers do not run automatic git checkpoint filters",
     );
     const piDisplayPty = runStore.slice(
@@ -285,8 +285,8 @@ async function main() {
           /const projectPolicy = renderRunProjectPolicy\(run\);/g,
         ) ?? []
       ).length,
-      3,
-      "direct, managed implementation, and verifier prompts all carry the policy",
+      4,
+      "direct, managed implementation, verifier and workflow agent prompts all carry the policy",
     );
     assert.equal(
       (

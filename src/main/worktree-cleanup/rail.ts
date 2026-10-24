@@ -1,0 +1,406 @@
+import { promises as fsp } from "node:fs";
+import { basename, dirname, join } from "node:path";
+import { isRemotePath } from "@shared/remote";
+import type { AppState, Workspace } from "@shared/types";
+import type {
+  WorktreeCleanupOutcome,
+  WorktreeInUseKind,
+  WorktreeRailCleanupRequest,
+  WorktreeRailCleanupResult,
+  WorktreeRailState,
+  WorktreeRemovalCheck,
+} from "@shared/worktree-cleanup";
+import {
+  RECOVERY_REF_PREFIX,
+  RepoLockTimeoutError,
+  cleanText,
+  pruneRecoveryRefs,
+  withRepoLock,
+  type WorktreeCaller,
+} from "../agent-worktrees";
+import { deleteBranchIfAt } from "../git-branches";
+import { errorText, readGitText } from "../git-exec";
+import type { WorktreeRegistration } from "../git-worktree-porcelain";
+import { removeWorkspaceFromAppState } from "../workspace-state-edits";
+import {
+  ROW_CONCURRENCY,
+  canonicalPath,
+  discoverRepos,
+  isKeptBranch,
+  listWorktrees,
+  mapLimited,
+  mergeFacts,
+  pathKey,
+  targetFor,
+  usageContext,
+  usageOf,
+  type RepoContext,
+  type WorktreeCleanupDeps,
+} from "./inspect";
+import {
+  checkCleanupTargets,
+  dateStamp,
+  fallbackFor,
+  refSafe,
+  removeCleanupWorktrees,
+  saveRecoveryRef,
+  type RemoveOptions,
+} from "./remove";
+
+// The workspace rail's view of copy-branch worktrees: which are merged, which
+// lost their folder, and the one-click cleanup of a row. A worktree git still
+// registers goes through the cleanup screen's guarded removal (check, then
+// remove under the repository lock against the same fingerprint). One whose
+// registration is gone too (an agent ran `git worktree remove` itself) has
+// nothing on disk left, so only its branch and its row are handled here.
+//
+// An automatic cleanup needs every one of: the folder is gone while the
+// folder above it is still there (so not an unmounted drive), the branch is
+// merged or gone, the branch has nothing its upstream lacks, no lock, and
+// nothing in use, the workspace's own terminals included.
+
+// What a click on the row accepts: the workspace's own idle shells close with
+// it, and once the folder is gone the agent that made the worktree has
+// nothing left in it either. Running processes, Cora runs and dev servers
+// still block.
+const MANUAL_ALLOWED: ReadonlySet<WorktreeInUseKind> = new Set(["terminal"]);
+const MANUAL_MISSING_ALLOWED: ReadonlySet<WorktreeInUseKind> = new Set(["terminal", "agent"]);
+
+function allowedUses(mode: WorktreeRailCleanupRequest["mode"], missing: boolean): ReadonlySet<WorktreeInUseKind> | undefined {
+  if (mode === "auto") return undefined;
+  return missing ? MANUAL_MISSING_ALLOWED : MANUAL_ALLOWED;
+}
+
+const KEPT_WORDS: Record<NonNullable<WorktreeCleanupOutcome["branchKept"]>, string> = {
+  unmerged: "it has unmerged commits",
+  "not-requested": "it was not asked to be deleted",
+  moved: "it moved since the check",
+  "checked-out": "it is checked out in another worktree",
+  protected: "it is a long-lived branch",
+};
+
+function callerFor(mode: WorktreeRailCleanupRequest["mode"]): WorktreeCaller {
+  return { role: "studio", client: mode === "auto" ? "workspace-rail-auto" : "workspace-rail" };
+}
+
+function isLocalCopy(workspace: Workspace): workspace is Workspace & { copyBranch: NonNullable<Workspace["copyBranch"]> } {
+  return Boolean(workspace.copyBranch && !workspace.remote && workspace.cwd && !isRemotePath(workspace.cwd));
+}
+
+async function folderGone(path: string): Promise<boolean> {
+  try {
+    await fsp.lstat(path);
+    return false;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return code === "ENOENT" || code === "ENOTDIR";
+  }
+}
+
+// The folder above a missing worktree must be there and hold something: an
+// unmounted drive leaves its mount point behind as an empty folder.
+async function parentHoldsFolders(path: string): Promise<boolean> {
+  const parent = dirname(path);
+  if ((await fsp.stat(parent).catch(() => null))?.isDirectory() !== true) return false;
+  return ((await fsp.readdir(parent).catch(() => [])) as string[]).length > 0;
+}
+
+// canonicalPath falls back to the path as given once it is gone, which no
+// longer matches git's real path when a parent folder is a symlink.
+async function canonicalMaybeMissing(path: string): Promise<string> {
+  try {
+    return await fsp.realpath(path);
+  } catch {
+    return join(await canonicalPath(dirname(path)), basename(path));
+  }
+}
+
+async function registrationOf(repo: RepoContext, cwd: string): Promise<WorktreeRegistration | undefined> {
+  const key = pathKey(await canonicalMaybeMissing(cwd));
+  for (const entry of repo.registrations) {
+    if (pathKey(await canonicalMaybeMissing(entry.path)) === key) return entry;
+  }
+  return undefined;
+}
+
+async function branchTip(root: string, branch: string): Promise<string | null> {
+  if (!branch) return null;
+  const out = await readGitText(root, ["rev-parse", "--verify", "--quiet", "--end-of-options", `refs/heads/${branch}^{commit}`]);
+  return /^[0-9a-f]{40,64}$/i.test(out) ? out.toLowerCase() : null;
+}
+
+function shortName(ref: string | null | undefined): string | null {
+  return ref ? ref.replace(/^refs\/heads\//, "") : null;
+}
+
+// Commits on the branch its upstream does not have. A gone upstream (the
+// remote branch was deleted after its merge) holds nothing to compare.
+function unpushed(repo: RepoContext, branch: string | null): number {
+  if (!branch) return 0;
+  const tracking = repo.tracking.get(branch);
+  if (!tracking?.upstream || tracking.gone) return 0;
+  return tracking.ahead;
+}
+
+// An ancestor of the base with no commit of its own is where the worktree
+// started, not merged work: its tip was committed before the worktree was
+// made. A commit made in it since is newer than that.
+async function hasOwnCommits(repo: RepoContext, head: string, workspace: Workspace): Promise<boolean> {
+  const createdAt = Date.parse(workspace.copyBranch?.createdAt ?? "");
+  if (!Number.isFinite(createdAt)) return false;
+  const seconds = Number(await readGitText(repo.root, ["log", "-1", "--format=%ct", head]));
+  return Number.isFinite(seconds) && seconds > 0 && seconds * 1000 >= createdAt - 1_000;
+}
+
+/** The rail's state of every local copy-branch workspace. Reads only. */
+export async function railWorktreeStates(deps: WorktreeCleanupDeps): Promise<WorktreeRailState[]> {
+  const state = await deps.loadState();
+  const { repos } = await discoverRepos(state, {
+    withPullRequests: (root) => deps.pullRequests(root).catch(() => null),
+  });
+  const items: Array<{ repo: RepoContext; workspace: Workspace & { copyBranch: NonNullable<Workspace["copyBranch"]> } }> = [];
+  for (const repo of repos) {
+    for (const workspace of repo.workspaces) if (isLocalCopy(workspace)) items.push({ repo, workspace });
+  }
+  return mapLimited(items, ROW_CONCURRENCY, async ({ repo, workspace }) => {
+    const missing = await folderGone(workspace.cwd);
+    const registration = await registrationOf(repo, workspace.cwd);
+    const branch = shortName(registration?.branch) ?? workspace.copyBranch.branch;
+    const registered = registration?.head && !/^0+$/.test(registration.head) ? registration.head : null;
+    const tip = await branchTip(repo.root, branch);
+    const head = registered ?? tip;
+    const base = { workspaceId: workspace.id, missing, branch, branchGone: tip === null };
+    if (!head) return { ...base, merge: "gone", autoCandidate: missing };
+    const facts = await mergeFacts(repo, head, branch, await targetFor(repo, workspace)).catch(() => ({ state: "unknown" as const }));
+    const empty = facts.state === "merged" && "proof" in facts && facts.proof === "ancestor" && !(await hasOwnCommits(repo, head, workspace));
+    return {
+      ...base,
+      merge: empty ? "empty" : facts.state,
+      ...("proof" in facts && facts.proof ? { proof: facts.proof } : {}),
+      ...("target" in facts && facts.target ? { target: facts.target } : {}),
+      // An empty branch loses nothing either, so a missing one goes too.
+      autoCandidate: missing && facts.state === "merged",
+    };
+  });
+}
+
+function refused(message: string, workspaceName?: string): WorktreeRailCleanupResult {
+  return { status: "refused", message, branchDeleted: false, ...(workspaceName ? { workspaceName } : {}) };
+}
+
+async function dropRow(
+  deps: WorktreeCleanupDeps,
+  workspaceId: string,
+  repo: RepoContext | null,
+): Promise<boolean> {
+  try {
+    const next = await deps.updateState((current: AppState) =>
+      removeWorkspaceFromAppState(current, workspaceId, repo ? fallbackFor(current, repo, new Set([workspaceId])) : null),
+    );
+    deps.publishState(next);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// The cleanup screen's rules, plus the rail's own: Clean up is for a merged
+// branch only, and never confirms local work away.
+function railRefusal(
+  check: WorktreeRemovalCheck,
+  request: WorktreeRailCleanupRequest,
+  repo: RepoContext,
+  parentPresent: boolean,
+): string | null {
+  if (check.blockers.length) return check.blockers[0].message;
+  if (request.mode === "auto") {
+    if (!check.alreadyRemoved) return "The folder is still there.";
+    if (!parentPresent) return "The folder above it is gone or empty, so its drive may only be unmounted.";
+    if (check.merge.state !== "merged") return "Its branch is not merged.";
+    const ahead = unpushed(repo, check.branch);
+    if (ahead) return `Its branch has ${ahead} unpushed commit${ahead === 1 ? "" : "s"}.`;
+    return null;
+  }
+  if (check.alreadyRemoved) return null;
+  if (check.localWork) return "It has uncommitted work. Use Delete to review it.";
+  if (check.merge.state !== "merged") return "Its branch is not merged yet.";
+  return null;
+}
+
+async function cleanUpRegistered(
+  deps: WorktreeCleanupDeps,
+  repo: RepoContext,
+  workspace: Workspace,
+  path: string,
+  request: WorktreeRailCleanupRequest,
+  options: RemoveOptions,
+): Promise<WorktreeRailCleanupResult> {
+  const allowInUse = allowedUses(request.mode, await folderGone(path));
+  const [check] = await checkCleanupTargets(deps, [{ repoRoot: repo.root, path }], { allowInUse });
+  if (!check) return refused("The worktree could not be checked.", workspace.name);
+  const parentPresent = await parentHoldsFolders(path);
+  const why = railRefusal(check, request, repo, parentPresent);
+  if (why) return refused(why, workspace.name);
+  // The removal checks again under the repository lock and refuses unless the
+  // fingerprint of what was just judged still matches.
+  const { outcomes } = await removeCleanupWorktrees(
+    deps,
+    {
+      items: [{ repoRoot: repo.root, path, fingerprint: check.fingerprint, confirmDirty: false, confirmUnmerged: false }],
+      deleteMergedBranches: true,
+    },
+    { ...options, caller: callerFor(request.mode), ...(allowInUse ? { allowInUse } : {}) },
+  );
+  const outcome = outcomes[0];
+  if (!outcome) return { status: "failed", message: "The removal did not run.", workspaceName: workspace.name, branchDeleted: false };
+  if (outcome.status === "refused" || outcome.status === "failed") {
+    return {
+      status: outcome.status,
+      message: outcome.message ?? "The worktree was not removed.",
+      workspaceName: workspace.name,
+      branchDeleted: false,
+    };
+  }
+  // The removal drops the rows it links to the worktree by path; a missing
+  // folder reached through a symlinked parent may not link, so this one
+  // row is dropped here then.
+  const rowGone = Boolean(outcome.workspaceRemoved) || (await dropRow(deps, workspace.id, repo));
+  return {
+    status: "removed",
+    workspaceName: workspace.name,
+    branchDeleted: outcome.branchDeleted,
+    ...(outcome.branchKept ? { branchKept: KEPT_WORDS[outcome.branchKept] } : {}),
+    ...(rowGone ? {} : { message: "The workspace row could not be removed." }),
+  };
+}
+
+// Folder and registration both gone: only the branch and the row are left.
+async function cleanUpUnregistered(
+  deps: WorktreeCleanupDeps,
+  repo: RepoContext,
+  workspace: Workspace & { copyBranch: NonNullable<Workspace["copyBranch"]> },
+  request: WorktreeRailCleanupRequest,
+): Promise<WorktreeRailCleanupResult> {
+  const caller = callerFor(request.mode);
+  const branch = workspace.copyBranch.branch;
+  const tip = await branchTip(repo.root, branch);
+  const target = await targetFor(repo, workspace);
+  const facts = tip ? await mergeFacts(repo, tip, branch, target) : null;
+  const audit = (outcome: "removed" | "refused", extra: { code?: string; recoveryRef?: string | null } = {}) =>
+    deps
+      .audit({
+        action: "remove",
+        outcome,
+        code: extra.code ?? null,
+        caller,
+        repo: repo.root,
+        workspaceId: workspace.id,
+        path: workspace.cwd,
+        branch,
+        tip,
+        target: facts?.target ?? target?.name ?? null,
+        proof: facts?.proof ?? null,
+        blockers: [],
+        recoveryRef: extra.recoveryRef ?? null,
+      })
+      .catch(() => undefined);
+  const refuse = async (code: string, message: string) => {
+    await audit("refused", { code });
+    return refused(message, workspace.name);
+  };
+
+  const ctx = await usageContext(deps, []);
+  const allowed = allowedUses(request.mode, true);
+  const uses = (await usageOf(ctx, workspace.cwd, await canonicalPath(workspace.cwd), [workspace])).filter(
+    (use) => !allowed?.has(use.kind),
+  );
+  if (uses.length) return refuse("IN_USE", `In use: ${uses.map((use) => use.label).join(", ")}.`);
+  const merged = facts?.state === "merged";
+  if (request.mode === "auto") {
+    if (!(await parentHoldsFolders(workspace.cwd))) {
+      return refuse("PARENT_MISSING", "The folder above it is gone or empty, so its drive may only be unmounted.");
+    }
+    if (tip && !merged) return refuse("UNMERGED", "Its branch is not merged.");
+    const ahead = unpushed(repo, branch);
+    if (tip && ahead) return refuse("UNPUSHED", `Its branch has ${ahead} unpushed commit${ahead === 1 ? "" : "s"}.`);
+  }
+
+  let branchDeleted = false;
+  let branchKept: string | undefined;
+  let recoveryRef: string | null = null;
+  if (tip) {
+    if (!merged) branchKept = "it has unmerged commits";
+    else if (isKeptBranch(branch, facts?.target)) branchKept = "it is a long-lived branch";
+    else {
+      recoveryRef = await saveRecoveryRef(repo.root, `${RECOVERY_REF_PREFIX}/${dateStamp(deps.now())}/${refSafe(workspace.id)}`, tip);
+      if (!recoveryRef) return refuse("GIT_FAILED", "The recovery ref for its last commit could not be saved, so nothing was removed.");
+      const deleted = await deleteBranchIfAt(repo.root, branch, tip);
+      if (deleted.ok) branchDeleted = true;
+      else branchKept = deleted.reason === "BRANCH_CHECKED_OUT" ? "it is checked out in another worktree" : "it moved since the check";
+    }
+  }
+  const dropped = await dropRow(deps, workspace.id, repo);
+  await audit(dropped ? "removed" : "refused", { recoveryRef, ...(dropped ? {} : { code: "STATE_FAILED" }) });
+  await pruneRecoveryRefs(repo.root, deps.now()).catch(() => undefined);
+  deps.invalidateGitCache(repo.root);
+  if (!dropped) {
+    return {
+      status: "failed",
+      message: "The workspace row could not be removed.",
+      workspaceName: workspace.name,
+      branchDeleted,
+      ...(branchKept ? { branchKept } : {}),
+    };
+  }
+  return { status: "removed", workspaceName: workspace.name, branchDeleted, ...(branchKept ? { branchKept } : {}) };
+}
+
+/** Clean up or remove one copy-branch workspace from its rail row. */
+export async function cleanUpRailWorkspace(
+  deps: WorktreeCleanupDeps,
+  request: WorktreeRailCleanupRequest,
+  options: RemoveOptions = {},
+): Promise<WorktreeRailCleanupResult> {
+  const mode = request?.mode === "auto" ? "auto" : "manual";
+  const normalized: WorktreeRailCleanupRequest = { workspaceId: String(request?.workspaceId ?? ""), mode };
+  const state = await deps.loadState();
+  const workspace = state.workspaces.find((candidate) => candidate.id === normalized.workspaceId);
+  if (!workspace || !isLocalCopy(workspace)) return refused("This workspace is not a local worktree.");
+  const missing = await folderGone(workspace.cwd);
+  const { repos } = await discoverRepos(state, {
+    withPullRequests: (root) => deps.pullRequests(root).catch(() => null),
+  });
+  const repo = repos.find((candidate) => candidate.workspaces.some((entry) => entry.id === workspace.id)) ?? null;
+  if (!repo) {
+    // Neither the worktree nor its repository is there to check or touch:
+    // the row is all that is left, and only the user may drop it.
+    if (mode === "manual" && missing) {
+      return (await dropRow(deps, workspace.id, null))
+        ? { status: "removed", workspaceName: workspace.name, branchDeleted: false }
+        : { status: "failed", message: "The workspace row could not be removed.", workspaceName: workspace.name, branchDeleted: false };
+    }
+    return refused("Its repository could not be read.", workspace.name);
+  }
+  if (mode === "auto" && !missing) return refused("The folder is still there.", workspace.name);
+
+  try {
+    // Read the registrations under the lock agent create and remove share,
+    // then let go of it: a registered worktree is removed by
+    // removeCleanupWorktrees, which takes the same lock itself.
+    const registration = await withRepoLock(repo.root, async () => {
+      repo.registrations = (await listWorktrees(repo.root)).registrations;
+      const found = await registrationOf(repo, workspace.cwd);
+      if (found) return found;
+      if (!missing) return null;
+      return { unregistered: await cleanUpUnregistered(deps, repo, workspace, normalized) } as const;
+    });
+    if (registration === null) return refused("git does not list this folder as a worktree. Use Delete instead.", workspace.name);
+    if ("unregistered" in registration) return registration.unregistered;
+    return await cleanUpRegistered(deps, repo, workspace, registration.path, normalized, options);
+  } catch (err) {
+    if (err instanceof RepoLockTimeoutError) {
+      return refused("Another worktree change on this repository is running. Try again shortly.", workspace.name);
+    }
+    return { status: "failed", message: cleanText(errorText(err), 300), workspaceName: workspace.name, branchDeleted: false };
+  }
+}

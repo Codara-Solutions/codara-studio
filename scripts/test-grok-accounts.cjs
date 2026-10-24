@@ -2,10 +2,11 @@
 "use strict";
 
 // The unified account service over the Grok adapter, against real temp
-// roots: a real Pi account store and registry, a real managed Grok profile
-// store (with the shared-state links), the real credential mirror and the
-// REAL pinned Pi AuthStorage. Only the terminal session table is stubbed;
-// identities come from the JWT claims, so nothing touches the network.
+// roots: a real Pi account store and registry, real per-account GROK_HOMEs
+// under Codara's home, the real credential mirror and the REAL pinned Pi
+// AuthStorage. The terminal session table is a stub; identities come from
+// JWT claims. HOME is a fake home whose ~/.grok is the System login;
+// nothing in it may change.
 //
 //   node scripts/test-grok-accounts.cjs
 
@@ -21,6 +22,7 @@ const ROOT = path.resolve(__dirname, "..");
 const PI_PACKAGE_ROOT = path.join(ROOT, "node_modules", "@earendil-works", "pi-coding-agent");
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "codara-grok-accounts-"));
 const HOME = path.join(TMP, "home");
+process.env.HOME = HOME;
 process.env.CODARA_HOME_DIR = path.join(HOME, ".codarastudio");
 delete process.env.GROK_HOME;
 
@@ -28,11 +30,11 @@ const CLI_IDS = [
   "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
   "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
   "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3",
-  "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa4",
 ];
-const SUBJECT_A = "11111111-1111-4111-8111-111111111111";
-const SUBJECT_B = "22222222-2222-4222-8222-222222222222";
-const SUBJECT_C = "33333333-3333-4333-8333-333333333333";
+const SYSTEM_SUBJECT = "11111111-1111-4111-8111-111111111111";
+const WORK_SUBJECT = "22222222-2222-4222-8222-222222222222";
+const HOME_SUBJECT = "33333333-3333-4333-8333-333333333333";
+const STRANGER = "44444444-4444-4444-8444-444444444444";
 const fingerprintOf = (subject) => crypto.createHash("sha256").update(subject).digest("hex");
 const SKEW = 5 * 60 * 1000;
 const T0 = 1_900_000_000;
@@ -40,8 +42,8 @@ const SLOT = "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828";
 
 const b64 = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
 const jwt = (claims) => `${b64({ alg: "RS256", typ: "JWT" })}.${b64(claims)}.sig`;
-const keyFor = (subject, n, email) =>
-  jwt({ sub: subject, iat: T0 + n, exp: T0 + n + 3600, email: email ?? `${subject.slice(0, 8)}@example.com` });
+const keyFor = (subject, n) =>
+  jwt({ sub: subject, iat: T0 + n, exp: T0 + n + 3600, email: `${subject.slice(0, 8)}@example.com` });
 
 const orchestration = (name) => path.join(ROOT, "src", "main", "orchestration", name);
 
@@ -57,7 +59,6 @@ async function buildHarness() {
       `export * as piStore from ${JSON.stringify(orchestration("pi-account-auth-store.ts"))};`,
       `export * as grokProfiles from ${JSON.stringify(orchestration("grok-cli-account-profiles.ts"))};`,
       `export * as execution from ${JSON.stringify(orchestration("grok-cli-profile-execution.ts"))};`,
-      `export * as runtime from ${JSON.stringify(orchestration("native-grok-profile-runtime.ts"))};`,
     ].join("\n"),
   );
   const out = path.join(TMP, "harness.cjs");
@@ -105,8 +106,23 @@ function privateDir(dir) {
   if (process.platform !== "win32") fs.chmodSync(dir, 0o700);
 }
 
-function mode(file) {
-  return fs.statSync(file).mode & 0o777;
+function privateFile(file, content) {
+  privateDir(path.dirname(file));
+  fs.writeFileSync(file, content, { mode: 0o600 });
+  if (process.platform !== "win32") fs.chmodSync(file, 0o600);
+}
+
+function snapshotTree(dir) {
+  const out = {};
+  const walk = (current) => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else out[path.relative(dir, full)] = fs.readFileSync(full, "utf8");
+    }
+  };
+  walk(dir);
+  return out;
 }
 
 let passes = 0;
@@ -118,98 +134,68 @@ function pass(name) {
 async function main() {
   const H = await buildHarness();
   const AuthStorage = await loadAuthStorage();
-  const piRoot = path.join(HOME, ".codarastudio", "pi-agent");
-  const grokRoot = path.join(HOME, ".codarastudio", "grok-cli");
-  const personalHome = path.join(HOME, ".grok");
-  privateDir(personalHome);
-  const piStore = new H.piStore.PiAccountAuthStore(piRoot);
-  const leases = new H.execution.GrokCliProfileLeaseRegistry();
-  let cliIndex = 0;
-  const grokStore = new H.grokProfiles.GrokCliAccountProfileStore(grokRoot, {
-    personalHomeDir: personalHome,
-    leases,
-    idFactory: () => CLI_IDS[cliIndex++],
-  });
-  const adapter = H.grokAdapter.createGrokAccountAdapter({ store: grokStore, leases });
-  const mirror = new H.mirror.CredentialMirror({
-    loadAuthStorage,
-    pollWhenWatchBlind: null,
-    debounceMs: 30,
-    retryDelayMs: 20,
-  });
-  // These pairs are WATCHED: writing a file the mirror watches schedules a
-  // debounced reconcile that can perform the write before the explicit call
-  // below reaches it, leaving that call with an already-synced pair. Both
-  // orders are the mirror doing the same correct thing, so accept either and
-  // let the state assertions that follow pin the credential that had to move.
-  const syncedInto = (result, side) =>
-    result.wrote === side || result.verdict === "equal" || result.verdict === "none";
-  let broadcasts = 0;
-  let invalidations = 0;
-  const liveOwners = new Set();
-  const disposed = [];
-  const logs = [];
-  const service = new H.accounts.UnifiedAccountService(adapter, {
-    piStore,
-    mirror,
-    loadAuthStorage,
-    invalidateCaches: async () => {
-      invalidations += 1;
-    },
-    broadcast: () => {
-      broadcasts += 1;
-    },
-    sessions: {
-      liveOwnerIds: () => liveOwners,
-      disposeProfileSessions: async (profileId) => {
-        disposed.push(profileId);
-        let count = 0;
-        for (const owner of leases.owners(profileId)) {
-          if (owner.startsWith("terminal:")) {
-            liveOwners.delete(owner);
-            count += 1;
-          }
-        }
-        void service.reconcileCliProfile(profileId).catch(() => null);
-        return { closedSessionCount: count };
-      },
-    },
-    log: (message) => logs.push(message),
-  });
-  assert.equal(service.provider, "xai");
-  assert.equal(adapter.labels.cliLabel, "Grok");
 
-  const slotFile = (subject, n, extra = {}) => ({
+  const slotFile = (subject, n) => ({
     [SLOT]: {
       key: keyFor(subject, n),
       auth_mode: "oidc",
       create_time: "2026-06-01T00:00:00.000Z",
       user_id: subject,
       email: `${subject.slice(0, 8)}@example.com`,
-      first_name: "First",
-      last_name: "Last",
-      profile_image_asset_id: "",
       principal_type: "User",
       principal_id: subject,
-      team_id: "",
-      coding_data_retention_opt_out: false,
       refresh_token: `refresh-${subject.slice(0, 8)}-${n}`,
       expires_at: new Date((T0 + n + 3600) * 1000).toISOString(),
       oidc_issuer: "https://auth.x.ai",
       oidc_client_id: "b1a00492-073a-47ea-816f-4c329264a828",
-      ...extra,
     },
   });
-  const writeSlot = (homeDir, file) => {
-    privateDir(homeDir);
-    const target = path.join(homeDir, "auth.json");
-    fs.writeFileSync(target, JSON.stringify(file, null, 2), { mode: 0o600 });
-    fs.chmodSync(target, 0o600);
-  };
-  const readSlot = (homeDir) => {
-    const target = path.join(homeDir, "auth.json");
-    return fs.existsSync(target) ? JSON.parse(fs.readFileSync(target, "utf8"))[SLOT] : null;
-  };
+  const readJson = (file) => (fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : null);
+
+  // The System login: the user's own ~/.grok, signed in as SYSTEM_SUBJECT.
+  const systemHome = path.join(HOME, ".grok");
+  privateFile(path.join(systemHome, "auth.json"), JSON.stringify(slotFile(SYSTEM_SUBJECT, 1)));
+  privateFile(path.join(systemHome, "config.toml"), 'model = "grok-4"\n');
+  privateFile(path.join(systemHome, "sessions", "one.json"), "{}\n");
+  const ownBefore = snapshotTree(systemHome);
+
+  const piRoot = path.join(HOME, ".codarastudio", "pi-agent");
+  const grokRoot = path.join(HOME, ".codarastudio", "grok-cli");
+  const homeOf = (cliId) => H.grokProfiles.grokCliManagedProfilePaths(grokRoot, cliId);
+  const piStore = new H.piStore.PiAccountAuthStore(piRoot);
+  const leases = new H.execution.GrokCliProfileLeaseRegistry();
+  let cliIndex = 0;
+  const grokStore = new H.grokProfiles.GrokCliAccountProfileStore(grokRoot, {
+    personalHomeDir: systemHome,
+    leases,
+    idFactory: () => CLI_IDS[cliIndex++],
+  });
+  const liveOwners = new Set();
+  let defaultsChanged = 0;
+  const logs = [];
+  const makeService = () =>
+    new H.accounts.UnifiedAccountService(
+      H.grokAdapter.createGrokAccountAdapter({ store: grokStore, leases }),
+      {
+        piStore,
+        mirror: new H.mirror.CredentialMirror({
+          loadAuthStorage,
+          pollWhenWatchBlind: null,
+          debounceMs: 30,
+          retryDelayMs: 20,
+        }),
+        loadAuthStorage,
+        invalidateCaches: async () => undefined,
+        sessions: { liveOwnerIds: () => liveOwners },
+        defaultsChanged: () => {
+          defaultsChanged += 1;
+        },
+        log: (message) => logs.push(message),
+      },
+    );
+  let service = makeService();
+  assert.equal(service.provider, "xai");
+
   const piCredential = (subject, n) => ({
     type: "oauth",
     access: keyFor(subject, n),
@@ -217,220 +203,131 @@ async function main() {
     expires: (T0 + n + 3600) * 1000 - SKEW,
   });
   const piAuthFile = (coraId) => H.piStore.piAccountProfilePaths(piRoot, coraId).authFile;
-  const readPi = (coraId) =>
-    fs.existsSync(piAuthFile(coraId))
-      ? JSON.parse(fs.readFileSync(piAuthFile(coraId), "utf8")).xai ?? null
-      : null;
+  const readPi = (coraId) => readJson(piAuthFile(coraId))?.xai ?? null;
   const writePi = async (coraId, credential) => {
     const { configDir, authFile } = H.piStore.piAccountProfilePaths(piRoot, coraId);
     privateDir(configDir);
     await AuthStorage.create(authFile).modify("xai", async () => credential);
     fs.chmodSync(authFile, 0o600);
   };
-  const managedHome = (cliId) => H.grokProfiles.grokCliManagedProfilePaths(grokRoot, cliId).homeDir;
   const connectCora = async (label, subject, n) => {
     const target = await piStore.prepareCredentialTarget({
       provider: "xai",
       label,
       identityFingerprint: fingerprintOf(subject),
-      accountEmail: `${subject.slice(0, 8)}@example.com`,
     });
     await writePi(target.profile.id, piCredential(subject, n));
     return target.profile;
   };
+  const defaults = async () => (await piStore.registry.snapshot()).defaults.xai;
 
-  // No login in ~/.grok: no Account 1 row.
-  assert.equal(await service.ensureAccountOne(), null);
+  // --- The System login is offered, never adopted ----------------------------
+  assert.deepEqual(await service.systemOffer(), { email: "11111111@example.com" });
+  assert.deepEqual(await piStore.registry.listProfiles(), [], "an offer registers nothing");
+  await service.dismissSystemOffer();
+  assert.equal(await service.systemOffer(), null, "a dismissed offer stays hidden");
   assert.deepEqual(await piStore.registry.listProfiles(), []);
-  pass("ensureAccountOne creates nothing while ~/.grok holds no login");
+  const system = await service.addSystemAccount();
+  assert.equal(system.cli.kind, "system");
+  assert.equal(system.identityFingerprint, fingerprintOf(SYSTEM_SUBJECT));
+  assert.equal(readPi(system.id), null);
+  pass("the System login is offered and dismissible, and Use in Codara copies nothing");
 
-  // A login lands in ~/.grok (as grok login writes it): Account 1 is created
-  // losslessly, with the skewed expiry Pi expects.
-  writeSlot(personalHome, slotFile(SUBJECT_A, 2));
-  const accountOne = await service.ensureAccountOne();
-  assert.equal(accountOne.label, "Account 1");
-  assert.equal(accountOne.cliProfileId, "personal");
-  assert.equal(accountOne.identityFingerprint, fingerprintOf(SUBJECT_A));
-  assert.equal(accountOne.accountEmail, "11111111@example.com");
-  assert.deepEqual(readPi(accountOne.id), {
-    type: "oauth",
-    access: keyFor(SUBJECT_A, 2),
-    refresh: "refresh-11111111-2",
-    expires: (T0 + 2 + 3600) * 1000 - SKEW,
-  });
-  assert.equal(mode(piAuthFile(accountOne.id)), 0o600);
-  assert.equal((await piStore.registry.snapshot()).defaults.xai, accountOne.id);
-  assert.equal((await service.ensureAccountOne()).id, accountOne.id, "rerun is idempotent");
-  assert.equal(mirror.pairFor(accountOne.id).cliProfileId, "personal");
-  assert.equal(mirror.pairFor(accountOne.id).provider, "xai");
-  pass("ensureAccountOne creates the Account 1 row from ~/.grok and mirrors its token to Cora");
-
-  // A Cora sign-in gets its Grok half: a managed GROK_HOME with the full
-  // verified slot and the shared-state links to ~/.grok.
-  const work = await connectCora("Work", SUBJECT_B, 5);
-  const canonical = H.grokCodec.canonicalFromGrokPi(piCredential(SUBJECT_B, 5));
-  const workCli = await service.ensureCliHalf(work.id, canonical, { fingerprint: fingerprintOf(SUBJECT_B), email: "22222222@example.com" });
-  assert.equal(workCli, CLI_IDS[0]);
-  const workHome = managedHome(workCli);
-  assert.equal(mode(workHome), 0o700);
-  assert.equal(mode(path.join(workHome, "auth.json")), 0o600);
-  const workSlot = readSlot(workHome);
-  assert.equal(workSlot.key, keyFor(SUBJECT_B, 5));
-  assert.equal(workSlot.refresh_token, "refresh-22222222-5");
-  assert.equal(workSlot.user_id, SUBJECT_B);
-  assert.equal(workSlot.principal_id, SUBJECT_B);
-  assert.equal(workSlot.auth_mode, "oidc");
-  assert.equal(workSlot.email, "22222222@example.com");
-  assert.equal(workSlot.oidc_client_id, "b1a00492-073a-47ea-816f-4c329264a828");
-  assert.equal(workSlot.expires_at, new Date((T0 + 5 + 3600) * 1000).toISOString());
+  // --- A Cora sign-in becomes its own GROK_HOME --------------------------------
+  const work = await connectCora("Work", WORK_SUBJECT, 5);
+  const workCli = await service.ensureCliHalf(
+    work.id,
+    H.grokCodec.canonicalFromGrokPi(piCredential(WORK_SUBJECT, 5)),
+  );
+  const workHome = homeOf(workCli);
+  assert.equal(workHome.homeDir, path.join(grokRoot, "accounts", workCli));
+  const slot = readJson(workHome.authFile)[SLOT];
+  assert.equal(slot.key, keyFor(WORK_SUBJECT, 5));
+  assert.equal(slot.refresh_token, "refresh-22222222-5");
   if (process.platform !== "win32") {
-    assert.ok(fs.lstatSync(path.join(workHome, "sessions")).isSymbolicLink(), "sessions are shared with ~/.grok");
-    assert.equal(fs.realpathSync(path.join(workHome, "sessions")), fs.realpathSync(path.join(personalHome, "sessions")));
+    assert.equal(fs.readlinkSync(path.join(workHome.homeDir, "sessions")), path.join(systemHome, "sessions"));
+    assert.equal(fs.lstatSync(path.join(workHome.homeDir, "config.toml")).isSymbolicLink(), false,
+      "the config is a private copy, so Grok never writes through to the user's");
+    assert.equal(fs.readFileSync(path.join(workHome.homeDir, "config.toml"), "utf8"), 'model = "grok-4"\n');
   }
-  assert.equal((await piStore.registry.getProfile(work.id)).cliProfileId, workCli);
-  assert.equal(mirror.pairFor(work.id).location.homeDir, workHome);
-  assert.equal(await service.ensureCliHalf(work.id, canonical), workCli, "a linked row keeps its half");
-  pass("ensureCliHalf writes a managed GROK_HOME with the verified slot and the shared-state links");
+  pass("a Cora sign-in becomes a GROK_HOME of its own with shared state linked");
 
-  // Use this account: both defaults move together, nothing is disposed.
-  broadcasts = 0;
-  invalidations = 0;
+  // Rotations flow both ways; a stranger's login is never adopted.
+  privateFile(workHome.authFile, JSON.stringify(slotFile(WORK_SUBJECT, 10)));
+  await service.reconcileCliProfile(workCli);
+  assert.equal(readPi(work.id).access, keyFor(WORK_SUBJECT, 10));
+  await writePi(work.id, piCredential(WORK_SUBJECT, 20));
+  await service.reconcileProfile(work.id);
+  assert.equal(readJson(workHome.authFile)[SLOT].key, keyFor(WORK_SUBJECT, 20));
+  const piBefore = readPi(work.id);
+  const before = fs.readFileSync(workHome.authFile, "utf8");
+  privateFile(workHome.authFile, JSON.stringify(slotFile(STRANGER, 30)));
+  assert.equal((await service.reconcileProfile(work.id)).verdict, "foreign");
+  assert.deepEqual(readPi(work.id), piBefore);
+  fs.writeFileSync(workHome.authFile, before, { mode: 0o600 });
+  pass("rotations flow through the account's own auth.json and a stranger's login is refused");
+
+  // --- Use: new sessions start in the account's home ---------------------------
+  const homeRow = await connectCora("Home", HOME_SUBJECT, 7);
+  const homeCli = await service.ensureCliHalf(
+    homeRow.id,
+    H.grokCodec.canonicalFromGrokPi(piCredential(HOME_SUBJECT, 7)),
+  );
+  defaultsChanged = 0;
   await service.useAccount(work.id);
-  assert.equal((await piStore.registry.snapshot()).defaults.xai, work.id);
+  assert.equal(await defaults(), work.id);
   assert.equal((await grokStore.snapshot()).defaultProfileId, workCli);
-  assert.equal(disposed.length, 0);
-  assert.ok(broadcasts >= 1 && invalidations >= 1);
-  const resolved = await H.execution.resolveGrokCliExecutionProfile(grokStore, { useDefault: true, baseEnv: { PATH: "/bin", XAI_API_KEY: "leak" } });
-  assert.equal(resolved.env.GROK_HOME, workHome, "a new Grok terminal starts in the managed home");
-  assert.equal(resolved.env.XAI_API_KEY, undefined);
-  await service.useAccount(accountOne.id);
-  assert.equal((await grokStore.snapshot()).defaultProfileId, "personal");
-  const personalResolved = await H.execution.resolveGrokCliExecutionProfile(grokStore, { useDefault: true, baseEnv: { PATH: "/bin" } });
-  assert.equal(personalResolved.env.GROK_HOME, personalHome);
-  const empty = (await piStore.registry.registerProfile({ provider: "xai", label: "Empty" })).profile;
-  await assert.rejects(
-    () => service.useAccount(empty.id),
-    (error) => error.name === "UnifiedAccountNotConnectedError" && /Grok/.test(error.message),
-  );
-  await piStore.registry.deleteProfile(empty.id);
-  pass("useAccount flips both defaults in one step and kills nothing");
+  assert.equal((await grokStore.resolveProfile({ useDefault: true })).homeDir, workHome.homeDir);
+  assert.ok(defaultsChanged >= 1, "the shell pointer is told to follow");
+  const workBefore = fs.readFileSync(workHome.authFile, "utf8");
+  await service.useAccount(homeRow.id);
+  assert.equal((await grokStore.resolveProfile({ useDefault: true })).homeDir, homeOf(homeCli).homeDir);
+  assert.equal(fs.readFileSync(workHome.authFile, "utf8"), workBefore, "a running Work session keeps its login");
+  await service.useSystemLogin();
+  assert.equal(await defaults(), system.id);
+  assert.equal((await grokStore.resolveProfile({ useDefault: true })).homeDir, systemHome);
+  await service.useAccount(work.id);
+  pass("Use only changes which home new sessions start in");
 
-  // The mirror: a rotation in the managed home (Grok refreshed) reaches
-  // Cora; a Pi rotation reaches the slot with its metadata intact.
-  writeSlot(workHome, slotFile(SUBJECT_B, 30, { first_name: "Rotated" }));
-  const rotated = await service.reconcileCliProfile(workCli);
-  assert.ok(syncedInto(rotated, "pi"), JSON.stringify(rotated));
-  assert.equal(readPi(work.id).access, keyFor(SUBJECT_B, 30));
-  assert.equal(readPi(work.id).expires, (T0 + 30 + 3600) * 1000 - SKEW);
-  await writePi(work.id, piCredential(SUBJECT_B, 40));
-  const back = await service.reconcileProfile(work.id);
-  assert.ok(syncedInto(back, "cli"), JSON.stringify(back));
-  const rotatedSlot = readSlot(workHome);
-  assert.equal(rotatedSlot.key, keyFor(SUBJECT_B, 40));
-  assert.equal(rotatedSlot.refresh_token, "refresh-22222222-40");
-  assert.equal(rotatedSlot.first_name, "Rotated", "slot metadata survives a Cora rotation");
-  assert.equal(rotatedSlot.expires_at, new Date((T0 + 40 + 3600) * 1000).toISOString());
-  assert.equal(mode(path.join(workHome, "auth.json")), 0o600);
-  assert.equal((await service.reconcileProfile(work.id)).verdict, "equal");
-  pass("rotations flow both ways with the slot's metadata preserved");
+  // --- Delete -------------------------------------------------------------------
+  liveOwners.add("terminal:grok-pane");
+  const release = leases.acquire(workCli, "terminal:grok-pane");
+  const deleted = await service.deleteAccount(work.id);
+  assert.deepEqual(deleted, { deleted: true, purgePending: true });
+  assert.equal(await defaults(), undefined, "no other account is promoted");
+  assert.equal(fs.existsSync(workHome.homeDir), true, "the running terminal keeps its home");
+  assert.equal(fs.existsSync(workHome.authFile), false, "the login leaves the home at once");
+  assert.deepEqual(await service.purgePending(), []);
+  release();
+  liveOwners.clear();
+  assert.deepEqual(await service.purgePending(), [workHome.homeDir]);
+  assert.equal(fs.existsSync(workHome.homeDir), false);
+  assert.ok(await piStore.registry.isTombstoned("xai", { identityFingerprint: fingerprintOf(WORK_SUBJECT) }));
+  assert.deepEqual(await service.deleteAccount(homeRow.id), { deleted: true, purgePending: false });
+  assert.equal(fs.existsSync(homeOf(homeCli).homeDir), false);
+  pass("delete tombstones the account and purges its home once no terminal holds it");
 
-  // Share from Grok to Cora: a terminal-only managed profile.
-  const terminalOnly = await grokStore.createProfile({ label: "Terminal only" });
-  writeSlot(managedHome(terminalOnly.profile.id), slotFile(SUBJECT_C, 8));
-  await grokStore.setDefaultProfile(terminalOnly.profile.id);
-  const listedBefore = await service.listAccounts();
-  assert.deepEqual(listedBefore.terminalOnly.map((entry) => entry.cliProfileId), [terminalOnly.profile.id]);
-  assert.equal(listedBefore.terminalOnly[0].terminal.connected, true);
-  assert.equal(listedBefore.terminalOnly[0].terminal.canRefresh, true);
-  const sharedCli = await service.shareLogin({ cliProfileId: terminalOnly.profile.id });
-  const sharedRow = await piStore.registry.getProfile(sharedCli.coraProfileId);
-  assert.equal(sharedRow.label, "Terminal only");
-  assert.equal(sharedRow.identityFingerprint, fingerprintOf(SUBJECT_C));
-  assert.equal(sharedRow.accountEmail, "33333333@example.com");
-  assert.equal(readPi(sharedRow.id).access, keyFor(SUBJECT_C, 8));
-  assert.equal((await piStore.registry.snapshot()).defaults.xai, sharedRow.id, "sharing the CLI default makes the pair active");
-  assert.deepEqual((await service.listAccounts()).terminalOnly, []);
-  pass("shareLogin gives a terminal-only Grok profile its Cora half");
-
-  // The list carries both halves, token-blind.
-  const listed = await service.listAccounts();
-  const byId = new Map(listed.accounts.map((entry) => [entry.coraProfileId, entry]));
-  assert.equal(byId.get(accountOne.id).isAccount1, true);
-  assert.equal(byId.get(accountOne.id).terminal.connected, true);
-  assert.equal(byId.get(work.id).terminal.expired, false);
-  assert.equal(byId.get(sharedRow.id).isDefault, true);
-  const listedJson = JSON.stringify(listed);
-  for (const forbidden of [grokRoot, piRoot, "refresh-", "eyJ"]) {
-    assert.equal(listedJson.includes(forbidden), false, `${forbidden} must not be listed`);
-  }
-  pass("listAccounts reports both halves without paths or tokens");
-
-  // Delete: the active account is refused while leased, then hands both
-  // defaults to Account 1 and removes the managed home.
-  const releaseLease = leases.acquire(terminalOnly.profile.id, "terminal:pane-1");
-  liveOwners.add("terminal:pane-1");
-  await assert.rejects(
-    () => service.deleteAccount(sharedRow.id),
-    (error) => error.name === "UnifiedAccountSessionsError" && error.sessionCount === 1,
-  );
-  assert.equal((await piStore.registry.snapshot()).defaults.xai, sharedRow.id, "a refused delete moves nothing");
-  const deleted = await service.deleteAccount(sharedRow.id, { closeSessions: true });
-  assert.deepEqual(deleted, { deleted: true, closedSessionCount: 1 });
-  assert.deepEqual(disposed, [terminalOnly.profile.id]);
-  releaseLease();
-  assert.equal((await piStore.registry.snapshot()).defaults.xai, accountOne.id);
-  assert.equal((await grokStore.snapshot()).defaultProfileId, "personal");
-  assert.equal(await piStore.registry.getProfile(sharedRow.id), null);
-  assert.equal(fs.existsSync(managedHome(terminalOnly.profile.id)), false);
-  assert.equal(mirror.pairFor(sharedRow.id), undefined);
-  await new Promise((resolve) => setTimeout(resolve, 200));
-  assert.equal(fs.existsSync(managedHome(terminalOnly.profile.id)), false, "a racing reconcile must not rebuild the half");
-  assert.deepEqual((await grokStore.reconcile()).orphanProfileIds, []);
-  pass("deleteAccount hands off to Account 1, respects leases, and removes the managed home");
-
-  // A grok logout in ~/.grok signs Account 1 out of Cora; a new personal
-  // login of another account that already has a managed row is rejected once.
-  fs.rmSync(path.join(personalHome, "auth.json"));
-  const signedOut = await service.reconcileProfile(accountOne.id);
-  assert.ok(
-    signedOut.wrote === "pi-delete" || signedOut.verdict === "none",
-    JSON.stringify(signedOut),
-  );
-  assert.equal(readPi(accountOne.id), null);
-  writeSlot(personalHome, slotFile(SUBJECT_A, 50));
-  assert.ok(syncedInto(await service.reconcileProfile(accountOne.id), "pi"));
-  assert.equal(readPi(accountOne.id).access, keyFor(SUBJECT_A, 50));
-  pass("a personal logout signs Account 1 out of Cora and a new login signs it back in");
-
-  // Every produced file is owner-only.
-  const offending = [];
-  const visit = (dir) => {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      const file = path.join(dir, entry.name);
-      if (entry.isSymbolicLink()) continue;
-      if (entry.isDirectory()) visit(file);
-      else if (/auth\.json$|account-profiles\.json$/.test(entry.name) && (mode(file) & 0o077) !== 0) {
-        offending.push(file);
-      }
-    }
-  };
-  visit(path.join(HOME, ".codarastudio"));
-  visit(personalHome);
-  assert.deepEqual(offending, []);
-  pass("every produced file is owner-only");
-
-  mirror.stop();
+  // --- Restart: nothing comes back ---------------------------------------------
   service.stop();
-  console.log(`\nPASS unified Grok account service (${passes} groups)`);
+  service = makeService();
+  await service.clearDanglingLinks();
+  await service.reprojectDefaults();
+  await service.purgePending();
+  assert.deepEqual((await piStore.registry.listProfiles()).map((profile) => profile.id), [system.id]);
+  assert.equal((await grokStore.snapshot()).profiles.length, 0);
+  pass("a restart resurrects nothing");
+
+  assert.deepEqual(snapshotTree(systemHome), ownBefore, "~/.grok is byte-for-byte unchanged");
+  pass("the user's own Grok home is never written");
+
+  console.log(`\nPASS Grok accounts (${passes} checks)`);
 }
 
 main()
-  .then(() => {
-    fs.rmSync(TMP, { recursive: true, force: true });
-    process.exit(0);
-  })
   .catch((error) => {
     console.error(error);
+    process.exitCode = 1;
+  })
+  .finally(() => {
     fs.rmSync(TMP, { recursive: true, force: true });
-    process.exit(1);
   });

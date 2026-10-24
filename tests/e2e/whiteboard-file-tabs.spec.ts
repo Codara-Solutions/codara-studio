@@ -29,10 +29,7 @@ test("the + picker opens an editable whiteboard draft and Ctrl+S saves it into t
   let app: ElectronApplication | null = null;
   try {
     app = await electron.launch({
-      // --ozone-platform=x11 keeps Linux launches deterministic: Chromium's
-      // Wayland auto-detection can hang the whole app when the compositor
-      // is unavailable to new clients (headless CI, stale sessions).
-      args: [".", "--ozone-platform=x11"],
+      args: ["."],
       env: {
         ...process.env,
         SPARK_USER_DATA_DIR: userDataDir,

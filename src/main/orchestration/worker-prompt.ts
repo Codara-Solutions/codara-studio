@@ -63,6 +63,7 @@ export function renderWorkerPrompt({
   /** Verifier-class tasks only: what the previous verifier round already settled. */
   priorVerifierRound?: PriorVerifierRound | null;
 }): string {
+  if (task.workflowCall) return renderWorkflowAgentPrompt({ cwd, run, task, paths });
   if (task.taskClass === "verifier") {
     return renderVerifierWorkerPrompt({ cwd, run, step, task, paths, settings, priorHandoffs, priorVerifierRound });
   }
@@ -87,17 +88,29 @@ function renderPriorHandoffSection(priorHandoffs: WorkerHandoffArtifact[] | unde
   return lines;
 }
 
-function renderWorkerMemorySection(run: RunState): string[] {
-  if (run.automationId) return [];
-  const memory = formatCoraMemoryForWorker(run.workspaceId, run.coraProfileId);
+/**
+ * The memory a worker prompt carries, also re-sent after a worker compaction.
+ * A workflow agent gets none, before or after a compaction: its prompt is its
+ * whole input, and a resumed run trusts a cached answer to the same prompt.
+ */
+export function workerMemoryContext(
+  run: RunState,
+  task: Pick<WorkerTask, "title" | "description" | "workflowCall">,
+): string | null {
+  if (run.automationId || task.workflowCall) return null;
+  return formatCoraMemoryForWorker(run.workspaceId, run.coraProfileId, `${task.title}\n${task.description}`);
+}
+
+function renderWorkerMemorySection(run: RunState, task: WorkerTask): string[] {
+  const memory = workerMemoryContext(run, task);
   if (!memory) return [];
   return [
     "",
     run.executionMode === "direct" ? "## CORA MEMORY" : "## READ-ONLY CORA CONTEXT",
     memory,
     run.executionMode === "direct"
-      ? "Use codara_remember for durable corrections or lessons. Do not edit memory files directly."
-      : "Do not edit these memory files. Put durable new lessons in your final report so Cora can curate them.",
+      ? "Follow these preferences. When the user corrects you or states a lasting preference, save it right away with codara_remember (global for the user's preferences, workspace for this repository). Do not edit memory files directly."
+      : "Follow these preferences. Do not edit these memory files. Put durable new lessons in the final report's `lessons` field so Cora can curate them.",
   ];
 }
 
@@ -273,7 +286,6 @@ function sparkPreviewToolsAvailable(
   run: RunState,
   task: WorkerTask,
   cwd: string,
-  settings: AppSettings,
 ): boolean {
   if (usesPiWorkerHarness(task)) return true;
   // Structured automation workers always get the tools regardless of config
@@ -289,10 +301,7 @@ function sparkPreviewToolsAvailable(
   ) {
     return true;
   }
-  return isSparkPreviewMcpAvailable({
-    cwd,
-    autoInstallEnabled: settings.playwrightMcpAutoInstall !== false,
-  });
+  return isSparkPreviewMcpAvailable({ cwd });
 }
 
 // Only the Pi harness loads the vendored pi-web-search extension, so only
@@ -496,8 +505,8 @@ function managerInboxIsRead(run: RunState): boolean {
   );
 }
 
-function taskLooksLikeVisibleUi(step: StepState | undefined, task: WorkerTask): boolean {
-  const text = [
+function uiSignalText(step: StepState | undefined, task: WorkerTask): string {
+  return [
     task.title,
     task.description,
     step?.title ?? "",
@@ -505,21 +514,21 @@ function taskLooksLikeVisibleUi(step: StepState | undefined, task: WorkerTask): 
     ...(step?.acceptanceCriteria ?? []),
     ...(task.expectedOutputs ?? []),
   ].join(" ");
-  return /\b(ui|ux|frontend|front-end|html|css|page|screen|component|layout|form|button|modal|view|visual|design|calculator|dashboard|professional\s+ui|polished)\b/i.test(
-    text,
-  );
 }
 
-function taskLooksLikeCalculator(step: StepState | undefined, task: WorkerTask): boolean {
-  const text = [
-    task.title,
-    task.description,
-    step?.title ?? "",
-    step?.goal ?? "",
-    ...(step?.acceptanceCriteria ?? []),
-    ...(task.expectedOutputs ?? []),
-  ].join(" ");
-  return /\b(calculator|calculate|arithmetic|keypad|numeric input)\b/i.test(text);
+// Generic words (page, form, view, design, button, screen) also describe
+// backend work ("page 2 of the API", "form validation endpoint", "database
+// design"), and a false match tells the verifier to call a correct backend
+// fix unsure without a browser snapshot. Only unambiguous UI vocabulary counts.
+const VISIBLE_UI_SIGNAL =
+  /\b(?:ui|ux|frontend|front-end|html|css|scss|tailwind|component|layout|modal|dialog|dashboard|visual(?:ly)?|styling|stylesheet|responsive|polished|webpage|(?:landing|web|home|settings|login|sign-?up|checkout)\s+(?:page|screen|form)|(?:professional|nice)\s+(?:ui|interface|look))\b/i;
+
+export function taskLooksLikeVisibleUi(step: StepState | undefined, task: WorkerTask): boolean {
+  return VISIBLE_UI_SIGNAL.test(uiSignalText(step, task));
+}
+
+export function taskLooksLikeCalculator(step: StepState | undefined, task: WorkerTask): boolean {
+  return /\bcalculator\b/i.test(uiSignalText(step, task)) && taskLooksLikeVisibleUi(step, task);
 }
 
 function renderCodexImageGenerationGuidance(
@@ -572,7 +581,7 @@ function renderUiQualityGuidance(
   if (opts?.sparkPreviewMcpAvailable) {
     lines.push(
       "- The `codara-studio` MCP server is available in this session. It drives the actual <preview> tab inside Codara, same DOM the user sees, no separate browser window. Call `codara_preview_navigate` with a `file://` URL (for standalone HTML) or your dev-server URL; if no preview tab is open Codara will open one automatically. Capture the final snapshot or `codara_preview_screenshot` evidence in `proof[]`.",
-      "- BATCH your interaction probes with `codara_preview_run`: pass an ordered `steps` array (navigate/click/type/press_key/evaluate/wait_for/snapshot/screenshot) to drive a whole flow in ONE call. Each step fires the same real event as the single-shot tool, so you keep full fidelity but pay one round-trip instead of one per keystroke. Probe e.g. `7 / 2 =` plus a display read as a single `codara_preview_run`. A calculator should need only a handful of `codara_preview_run` calls total, NOT 50+ individual `codara_preview_press_key` calls.",
+      "- BATCH your interaction probes with `codara_preview_run`: pass an ordered `steps` array (navigate/click/type/press_key/evaluate/wait_for/snapshot/screenshot) to drive a whole flow in ONE call. Each step fires the same real event as the single-shot tool, so you keep full fidelity but pay one round-trip instead of one per keystroke. Probe e.g. `7 / 2 =` plus a display read as a single `codara_preview_run`. A calculator should need only a handful of `codara_preview_run` calls total, NOT 50+ individual `codara_preview_press_key` calls. When the flow needs logic (branch on what the page shows, loop over rows), write it as one `codara_preview_code` snippet instead; read `browser.documentation()` once.",
       "- For an existing browser the user asks you to use, call `codara_preview_list`, match its title/URL or last-viewed marker, and pass its explicit `tabId`. Otherwise omit `tabId` to reuse or open your own run's browser. Browser tabs remain open after completion. Check the list before choosing a dev-server port; never replace an unrelated tab or server.",
       "- Reserve the single-shot `codara_preview_click` / `codara_preview_type` / `codara_preview_press_key` tools only for probes that must isolate ONE real key/click event (e.g. the focus double-activation guard: focus equals, press Enter once, read the display).",
       "- Do NOT substitute an inline Node VM + JSDOM probe for the `codara_preview_run` batch. The whole point is that the verifier and the human see the same DOM/CSS the real browser produces.",
@@ -668,7 +677,7 @@ function renderImplementationWorkerPrompt({
     "",
     task.description.trim(),
     ...renderPriorHandoffSection(priorHandoffs),
-    ...renderWorkerMemorySection(run),
+    ...renderWorkerMemorySection(run, task),
   );
 
   if (step) {
@@ -692,7 +701,7 @@ function renderImplementationWorkerPrompt({
     "Treat exact public names, shapes, formats, and examples as tests. If the brief is mechanically impossible, make only the smallest safe in-scope repair, report `partial`, and prove why; otherwise report `blocked`.",
   );
 
-  const sparkPreviewMcpAvailable = sparkPreviewToolsAvailable(run, task, cwd, settings);
+  const sparkPreviewMcpAvailable = sparkPreviewToolsAvailable(run, task, cwd);
   const uiQualityGuidance = renderUiQualityGuidance(step, task, { sparkPreviewMcpAvailable });
   if (uiQualityGuidance.length) {
     lines.push("", "## UI QUALITY BAR", ...uiQualityGuidance);
@@ -795,6 +804,7 @@ function renderImplementationWorkerPrompt({
     `When done, write valid JSON to ${paths.finalReportJson}.`,
     ...promptProfile.workerPrompt.finalReportIntro,
     "Required keys: `status` (`complete|partial|blocked|failed`), `summary`, `files_changed` (`path`,`reason`), `commands_run` (`command`,`exitCode`,`summary`), `tests` (`command`,`result`,`details`), `proof`, `risks`, `followups`, and `handoff` (`path`,`description`,`reuse`). Use empty arrays when none. List only workspace files in `files_changed`; use absolute paths for reusable handoffs.",
+    "Optional `lessons`: up to 3 one-sentence durable lessons about this repository or environment that a later task would otherwise pay to rediscover (a command that really works, a gotcha you hit). Never task status, never secrets. Cora reviews them before they become memory.",
   );
 
   return lines.join("\n");
@@ -807,13 +817,63 @@ function renderImplementationWorkerPrompt({
  * managed runs. The worker extension supplies submit_result for the durable
  * report, so the model can finish in one tool call after its real checks pass.
  */
+// A workflow agent answers one agent() call inside a script. Prior handoffs
+// and run memory stay out on purpose: the call's prompt is its whole input,
+// which is what lets a resumed run trust a cached answer to the same prompt.
+function renderWorkflowAgentPrompt({
+  cwd,
+  run,
+  task,
+  paths,
+}: {
+  cwd: string;
+  run: RunState;
+  task: WorkerTask;
+  paths: WorkerArtifactPaths;
+}): string {
+  const call = task.workflowCall!;
+  const lines = [
+    `You are one agent inside the workflow "${run.workflow?.name ?? "workflow"}", phase "${call.phase}".`,
+    "Your submit_result call is the return value of a function call inside a script, not a message to a person. Return raw data: no greetings, no preamble, no markdown decoration the script would have to strip.",
+    "Do exactly the task below and nothing else. You cannot ask anyone a question: if you are blocked, submit status blocked with the reason in the summary.",
+    "Do not commit, push, install packages, or delete data unless the task explicitly asks.",
+  ];
+  if (call.isolation === "worktree") {
+    lines.push(
+      `You work in your own git worktree at ${cwd}. Edit freely there; do not commit, Codara commits your changes to its branch when you finish.`,
+    );
+  }
+  if (task.accessHint === "readonly") {
+    lines.push("Your access is read-only: inspect and report, do not edit files or run commands that change anything.");
+  } else if (task.accessHint === "edits") {
+    lines.push("You may edit files but have no shell and no web access.");
+  }
+  if (call.heavy) {
+    lines.push(
+      "Wrap builds, full test suites and end-to-end runs in `codara-heavy <command>`: it serializes heavy work across agents and caps its memory so the machine stays responsive.",
+    );
+  }
+  lines.push("", "## TASK", task.description.trim());
+  const projectPolicy = renderRunProjectPolicy(run);
+  if (projectPolicy) lines.push("", projectPolicy);
+  lines.push(
+    "",
+    "## FINISH",
+    call.schemaPath
+      ? "Call `submit_result` exactly once. Put the answer in `result`, matching the schema in the tool's parameters exactly; `summary` is one or two lines for the progress view."
+      : "Call `submit_result` exactly once. The script receives your `summary` verbatim as the answer, so put the complete answer there.",
+    `Workspace: ${cwd}`,
+    `Report destination (handled by submit_result): ${paths.finalReportJson}`,
+  );
+  return lines.join("\n");
+}
+
 function renderDirectTaskPrompt({
   cwd,
   run,
   step,
   task,
   paths,
-  settings,
   priorHandoffs,
 }: {
   cwd: string;
@@ -834,7 +894,7 @@ function renderDirectTaskPrompt({
     "## TASK",
     task.description.trim(),
     ...renderPriorHandoffSection(priorHandoffs),
-    ...renderWorkerMemorySection(run),
+    ...renderWorkerMemorySection(run, task),
   ];
 
   const projectPolicy = renderRunProjectPolicy(run);
@@ -857,12 +917,12 @@ function renderDirectTaskPrompt({
     lines.push("", "## VERIFY", ...task.verificationCommands.map((command) => `- ${command}`));
   }
 
-  if (sparkPreviewToolsAvailable(run, task, cwd, settings)) {
+  if (sparkPreviewToolsAvailable(run, task, cwd)) {
     lines.push("", "## BROWSER", "Use `codara_preview_list` to identify an existing workspace browser by title, URL, or last-viewed marker when the user refers to it; pass its tabId and ask if ambiguous. Otherwise navigate without tabId to use your own browser. Read `codara_preview_snapshot` first for page text and controls. Use its @references as selectors, scoped snapshots for sections, and since with the previous snapshotId for changes. Use screenshots for layout, images, or canvas; they include CSS viewport and image scale. Stop after the requested result is verified. Browser tabs remain open when you finish.");
   }
 
   if (taskLooksLikeVisibleUi(step, task)) {
-    const previewAvailable = sparkPreviewToolsAvailable(run, task, cwd, settings);
+    const previewAvailable = sparkPreviewToolsAvailable(run, task, cwd);
     lines.push(
       "",
       "## UI CHECK",
@@ -875,7 +935,7 @@ function renderDirectTaskPrompt({
   lines.push(
     "",
     "## FINISH",
-    "Call `submit_result` exactly once after the work and checks are finished. Keep its summary and evidence concise. Do not write the report file by hand.",
+    "Call `submit_result` exactly once after the work and checks are finished. Its summary is your reply to the user, shown verbatim: the complete answer for a question, or what changed and how it was checked for a change. Keep the evidence fields concise. Do not write the report file by hand.",
     `Workspace: ${cwd}`,
     `Report destination (handled by submit_result): ${paths.finalReportJson}`,
   );
@@ -924,7 +984,7 @@ function renderVerifierWorkerPrompt({
     task.description.trim(),
     ...renderPriorHandoffSection(priorHandoffs),
     ...renderPriorVerifierRoundSection(priorVerifierRound),
-    ...renderWorkerMemorySection(run),
+    ...renderWorkerMemorySection(run, task),
   );
 
   if (step) {
@@ -965,7 +1025,7 @@ function renderVerifierWorkerPrompt({
     );
   }
 
-  const sparkPreviewMcpAvailable = sparkPreviewToolsAvailable(run, task, cwd, settings);
+  const sparkPreviewMcpAvailable = sparkPreviewToolsAvailable(run, task, cwd);
   const uiVerifierGuidance = renderUiVerifierGuidance(step, task, { sparkPreviewMcpAvailable });
   if (uiVerifierGuidance.length) {
     lines.push("", ...uiVerifierGuidance);

@@ -8,9 +8,12 @@
 // circular import back into run-store).
 
 import { promises as fs } from "node:fs";
+import { dirname, join } from "node:path";
 import type { WorkerArtifactPaths, WorkerReport, WorkerTask } from "@shared/types";
 import { stripAnsiWorkerTap, workerSubmitTurnStarted } from "@shared/agent-patterns";
+import { pasteBody, plainTerminalText } from "@shared/terminal-text";
 import * as pty from "../pty-manager";
+import { workerReportStatusOf } from "./worker-report";
 
 // Local copy of run-store's delay — replicated here rather than imported to
 // avoid a circular import (run-store imports this module's launch helpers).
@@ -108,17 +111,36 @@ export function detectFatalWorkerRuntimeError(
 // synthetic failure. In that case the late error is appended to the existing
 // report's risks and `preservedExisting: true` tells the caller the worker's
 // verdict still stands.
+//
+// `cause` names failures that are NOT the runtime breaking, so their risk text
+// must stay clear of the "CLI failed before producing a final report" marker
+// that sends a task to a cold rerun on the other provider:
+//   - no_valid_report: the worker ran its turn but its report was missing or
+//     invalid. The work is likely on disk; a rerun from scratch elsewhere wastes
+//     it, so the manager (or the user) decides.
+//   - turn_ceiling: the worker was still making progress when it hit the turn
+//     time limit. Its work continues; it does not start over.
+// An existing file this function cannot keep is copied aside first
+// (final-report.invalid.json) and its summary folded in, so the worker's own
+// account of what it did is never lost.
+export type AutoFailureCause = "no_valid_report" | "turn_ceiling";
+
 export async function writeAutoFailureReport(
   paths: WorkerArtifactPaths,
   task: WorkerTask,
   reason: string,
-  options?: { interrupted?: boolean },
+  options?: { interrupted?: boolean; cause?: AutoFailureCause },
 ): Promise<{ preservedExisting: boolean }> {
   const interrupted = options?.interrupted === true;
+  const cause = interrupted ? undefined : options?.cause;
+  let priorSummary = "";
+  let priorRaw: string | null = null;
   try {
     const raw = await fs.readFile(paths.finalReportJson, "utf8");
+    priorRaw = raw;
     const existing = JSON.parse(raw) as Record<string, unknown>;
-    const status = existing?.status;
+    if (typeof existing?.summary === "string") priorSummary = existing.summary.trim();
+    const status = workerReportStatusOf(existing?.status);
     if (status === "complete" || status === "partial" || status === "blocked") {
       const risks = Array.isArray(existing.risks)
         ? existing.risks.filter((item): item is string => typeof item === "string")
@@ -139,23 +161,41 @@ export async function writeAutoFailureReport(
   } catch {
     /* absent, unreadable, or unparseable: write the synthetic failure below */
   }
+  if (priorRaw !== null) {
+    await fs
+      .writeFile(join(dirname(paths.finalReportJson), "final-report.invalid.json"), priorRaw, "utf8")
+      .catch(() => undefined);
+  }
+  const workerSaid = priorSummary ? ` The worker's own summary: ${priorSummary}` : "";
   const report: WorkerReport = {
     status: "failed",
     summary: interrupted
       ? `The ${task.runtimePreference} worker was stopped before it could finish: ${reason}.`
-      : `Cora could not complete the ${task.runtimePreference} CLI worker for this task: ${reason}.`,
+      : cause === "no_valid_report"
+        ? `The ${task.runtimePreference} worker finished without a valid final report: ${reason}.${workerSaid}`
+        : cause === "turn_ceiling"
+          ? `The ${task.runtimePreference} worker ran out of time while still working: ${reason}.${workerSaid}`
+          : `Cora could not complete the ${task.runtimePreference} CLI worker for this task: ${reason}.${workerSaid}`,
     filesChanged: [],
     commandsRun: [],
     tests: [],
     proof: [],
     risks: interrupted
       ? [`The worker was interrupted by a user stop or run pause before producing a final report: ${reason}.`]
-      : [
-          `${task.runtimePreference} CLI failed before producing a final report: ${reason}. Verify it is installed, logged in, reachable, and the model id is valid.`,
-        ],
+      : cause === "no_valid_report"
+        ? [`The worker finished its turn without a valid final report: ${reason}. Its edits may already be on disk.`]
+        : cause === "turn_ceiling"
+          ? [`The worker reached the turn time limit while still making progress: ${reason}. Its work so far is on disk.`]
+          : [
+              `${task.runtimePreference} CLI failed before producing a final report: ${reason}. Verify it is installed, logged in, reachable, and the model id is valid.`,
+            ],
     followups: interrupted
       ? ["Resume the run or retry the worker when you want it to continue."]
-      : ["Verify the CLI is installed, on PATH, and logged in, then re-run."],
+      : cause === "no_valid_report"
+        ? ["Inspect the diff for this worker's scope, then accept it or continue the work from where it stopped."]
+        : cause === "turn_ceiling"
+          ? ["Continue the work from where it stopped (follow_up_of keeps the session); do not start it over."]
+          : ["Verify the CLI is installed, on PATH, and logged in, then re-run."],
   };
   try {
     await fs.writeFile(paths.finalReportJson, JSON.stringify(report, null, 2), "utf8");
@@ -177,6 +217,9 @@ export async function pasteAndSubmit(
   const body = promptText.replace(/\r\n?/g, "\n").trim();
   if (!body) return true;
   if (runtime === "claude" || runtime === "codex") {
+    // The prompt can quote page text the user sent to Cora; a paste marker
+    // inside it would end the paste early and type the rest as keystrokes.
+    const pasted = pasteBody(body);
     const PASTE_BEGIN = "\x1b[200~";
     const PASTE_END = "\x1b[201~";
 
@@ -200,7 +243,7 @@ export async function pasteAndSubmit(
     try {
       handle.write(PASTE_BEGIN);
       await delay(25);
-      handle.write(body);
+      handle.write(pasted);
       await delay(25);
       handle.write(PASTE_END);
       // Let the TUI commit the bracketed paste into its input box before the
@@ -232,9 +275,11 @@ export async function pasteAndSubmit(
   }
   // Manual / shell runtimes: just dump the prompt as text into pwsh as a
   // here-string comment so the user can read it. They drive the work
-  // themselves and write the final-report.json by hand.
+  // themselves and write the final-report.json by hand. These lines are
+  // typed, not pasted, so a control character in them (Ctrl+U, ESC) would
+  // edit the line and could turn the comment into a command.
   handle.write(`# Prompt:\r`);
-  for (const line of body.split("\n")) {
+  for (const line of plainTerminalText(body).split("\n")) {
     handle.write(`# ${line}\r`);
   }
   return true;

@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AutomationRunRecord,
+  AutomationSkipRecord,
   AutomationWorkerInfo,
   CreateScheduledJobInput,
   GuardPredicate,
@@ -11,6 +12,7 @@ import type {
   UpdateScheduledJobInput,
 } from "@shared/types";
 import { resolveOpenRunQuestion, runQuestionDraftScopeKey } from "@shared/run-questions";
+import { isLiveOnlyEvent } from "@shared/live-events";
 import { runStatusColor } from "../../lib/run-status";
 import {
   STOP_REASON_LABEL,
@@ -27,7 +29,9 @@ import {
   jobWorkerSummary,
   workerSummary,
 } from "./presentation";
-import { consumePendingAutomationFocus } from "./focus-request";
+import { consumePendingAutomationFocus, consumePendingWorkflowRunFocus } from "./focus-request";
+import { reportViewedAutomation } from "../../notifications/viewed-automation";
+import WorkflowsView from "../workflows/WorkflowsView";
 import { LoomIcon, WORKER_TONE } from "./flow/FlowNodes";
 import { graphForJob } from "./flow/model";
 import { STEP_TONE, stepActionLine, stepTitle } from "./flow/step-meta";
@@ -39,6 +43,8 @@ import MiniFlow from "./MiniFlow";
 import LiveBoard from "./LiveBoard";
 import LiveRunHero from "./LiveRunHero";
 import NodeFlowEditor from "./flow/NodeFlowEditor";
+import SkippedHistoryRow, { mergeTimeline } from "./SkippedHistoryRow";
+import { missedRunsSummary, precheckSummary } from "@shared/automation-catchup";
 
 // AutomationsPage — the operations console for this workspace's automations.
 // An automation is a TRIGGER (when to start) + a LOOP (how it repeats) +
@@ -63,7 +69,7 @@ export interface Props {
 
 // view: rail + detail. create/edit: the node-flow editor owns the stage.
 type Mode = { kind: "view" } | { kind: "create" } | { kind: "edit"; job: ScheduledJob };
-type SubTab = "looms" | "workers";
+type SubTab = "looms" | "workers" | "workflows";
 
 const SUBTAB_STORAGE_KEY = "spark.automations.subtab";
 
@@ -92,7 +98,7 @@ export default function AutomationsPage({
       const remembered =
         window.localStorage.getItem(subTabStorageKey(workspaceId)) ??
         window.localStorage.getItem(SUBTAB_STORAGE_KEY);
-      return remembered === "workers" ? "workers" : "looms";
+      return remembered === "workers" || remembered === "workflows" ? remembered : "looms";
     } catch {
       return "looms";
     }
@@ -182,7 +188,7 @@ export default function AutomationsPage({
       if (event.type === "automation.updated" || event.type === "automation.iteration") {
         void refresh();
         void refreshDetail();
-      } else if (event.runId && event.runId === liveRun?.id) {
+      } else if (event.runId && event.runId === liveRun?.id && !isLiveOnlyEvent(event)) {
         void refreshDetail();
       }
     });
@@ -226,6 +232,26 @@ export default function AutomationsPage({
     window.addEventListener("spark:open-automation", handler);
     return () => window.removeEventListener("spark:open-automation", handler);
   }, []);
+
+  // "Show this workflow run" jumps, through the same two channels.
+  const [workflowFocus, setWorkflowFocus] = useState<string | null>(null);
+  useEffect(() => {
+    const pending = consumePendingWorkflowRunFocus();
+    if (pending !== null) {
+      setWorkflowFocus(pending);
+      switchSubTab("workflows");
+    }
+    const handler = (event: Event) => {
+      consumePendingWorkflowRunFocus();
+      const id = (event as CustomEvent<{ runId?: unknown }>).detail?.runId;
+      if (typeof id !== "string") return;
+      setWorkflowFocus(id);
+      switchSubTab("workflows");
+    };
+    window.addEventListener("spark:open-workflow-run", handler);
+    return () => window.removeEventListener("spark:open-workflow-run", handler);
+  }, [switchSubTab]);
+  const clearWorkflowFocus = useCallback(() => setWorkflowFocus(null), []);
   useEffect(() => {
     if (focusRequest === null || loading) return;
     setFocusRequest(null);
@@ -239,6 +265,15 @@ export default function AutomationsPage({
   }, [focusRequest, loading, jobs, switchSubTab]);
 
   const selected = useMemo(() => jobs.find((j) => j.id === selectedId) ?? null, [jobs, selectedId]);
+
+  // While this automation's page is on screen, its own finished, failed and
+  // blocked alerts count as seen (isTargetViewed). The editor, the other
+  // sub-tabs and a hidden tab show no automation.
+  const viewedJobId = active && subTab === "looms" && mode.kind === "view" ? (selected?.id ?? null) : null;
+  useEffect(() => {
+    if (!viewedJobId) return;
+    return reportViewedAutomation(workspaceId, viewedJobId);
+  }, [workspaceId, viewedJobId]);
 
   // ── live board open/close ───────────────────────────────────────────────
   // Selection change always closes the board (a different automation's board
@@ -437,6 +472,49 @@ export default function AutomationsPage({
         )}
       </div>
 
+      {/* Workflows: saved scripts that fan work out to many agents, and
+          their runs. */}
+      <button
+        type="button"
+        data-testid="automations-workflows-tab"
+        onClick={() => switchSubTab(subTab === "workflows" ? "looms" : "workflows")}
+        aria-pressed={subTab === "workflows"}
+        style={{
+          appearance: "none",
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          padding: "10px 12px",
+          border: "none",
+          borderTop: "1px solid var(--rule)",
+          background:
+            subTab === "workflows" ? "color-mix(in oklch, var(--accent) 10%, var(--panel))" : "transparent",
+          textAlign: "left",
+          cursor: "default",
+        }}
+        onMouseEnter={(e) => {
+          if (subTab !== "workflows") e.currentTarget.style.background = "var(--hover)";
+        }}
+        onMouseLeave={(e) => {
+          if (subTab !== "workflows") e.currentTarget.style.background = "transparent";
+        }}
+        title={subTab === "workflows" ? "Back to the automation detail" : "Saved workflows and their runs"}
+      >
+        <span
+          style={{
+            flex: 1,
+            fontSize: 12,
+            fontWeight: 650,
+            color: subTab === "workflows" ? "var(--ink)" : "var(--muted)",
+          }}
+        >
+          Workflows
+        </span>
+        <span aria-hidden className="spark-mono" style={{ fontSize: 11, color: "var(--muted-2)" }}>
+          {subTab === "workflows" ? "‹" : "›"}
+        </span>
+      </button>
+
       {/* Footer: the global workers grid. Click to flip the stage there and
           back; never automatic. */}
       <button
@@ -604,6 +682,17 @@ export default function AutomationsPage({
                 onNewLoom={startCreate}
               />
             </div>
+          )}
+
+          {subTab === "workflows" && (
+            <WorkflowsView
+              workspaceId={workspaceId}
+              workspaceName={workspaceName}
+              cwd={cwd}
+              visible={active}
+              focusRunId={workflowFocus}
+              onFocusConsumed={clearWorkflowFocus}
+            />
           )}
 
           {!editing && subTab === "looms" && (
@@ -888,6 +977,7 @@ const AutomationRow = React.memo(function AutomationRow({
     <button
       type="button"
       onClick={onSelect}
+      aria-current={selected ? "true" : undefined}
       className={`spark-fade-in automation-row${live ? " is-live" : ""}`}
       onMouseEnter={(e) => {
         setHover(true);
@@ -1214,8 +1304,8 @@ function AutomationDetail({
       )}
 
       {/* History */}
-      <Section label="History" count={job.history.length}>
-        <HistoryTimeline jobId={job.id} history={job.history} liveRunId={job.state.currentRunId} onOpenLiveBoard={onOpenLiveBoard} />
+      <Section label="History" count={job.history.length + (job.skips?.length ?? 0)}>
+        <HistoryTimeline jobId={job.id} history={job.history} skips={job.skips} liveRunId={job.state.currentRunId} onOpenLiveBoard={onOpenLiveBoard} />
       </Section>
 
       {/* Read-only configuration; the actions for it (Edit / Delete) live in
@@ -1578,7 +1668,9 @@ function LivePassCard({
     <div
       style={{
         borderRadius: "var(--radius-surface)",
-        background: "var(--notify-surface)",
+        // A card in the window, so solid: --notify-surface turns into toast
+        // glass when glass is on.
+        background: "var(--panel-2)",
         border: "1px solid var(--rule)",
         boxShadow: `inset 3px 0 0 ${edge}, var(--shadow-1)`,
         padding: "12px 14px",
@@ -1683,11 +1775,13 @@ function LivePassCard({
 function HistoryTimeline({
   jobId,
   history,
+  skips,
   liveRunId,
   onOpenLiveBoard,
 }: {
   jobId: string;
   history: AutomationRunRecord[];
+  skips?: AutomationSkipRecord[];
   liveRunId?: string;
   onOpenLiveBoard: () => void;
 }): React.ReactElement {
@@ -1697,13 +1791,14 @@ function HistoryTimeline({
   const [expanded, setExpanded] = useState<string | null>(null);
   const [peekRunId, setPeekRunId] = useState<string | null>(null);
 
-  if (history.length === 0) {
+  if (history.length === 0 && !skips?.length) {
     return <div style={{ fontSize: 11, color: "var(--muted-2)" }}>No iterations yet.</div>;
   }
-  const rows = [...history].reverse();
+  const rows = mergeTimeline(history, skips);
   return (
     <div style={{ display: "flex", flexDirection: "column" }}>
       {rows.map((rec) => {
+        if ("skip" in rec) return <SkippedHistoryRow key={`skip-${rec.skip.id}`} jobId={jobId} skip={rec.skip} />;
         const recKey = `${rec.iteration}-${rec.runId}`;
         const dot = rec.status === "running" ? "var(--accent)" : runStatusColor(rec.status);
         const isExpanded = expanded === recKey;
@@ -1780,6 +1875,15 @@ function HistoryTimeline({
                 <span className="spark-mono" style={{ flex: "0 0 auto", fontSize: 9.5, color: "var(--muted-2)" }}>
                   {fmtTime(rec.finishedAt ?? rec.startedAt)}
                 </span>
+                {rec.catchUp && (
+                  <span
+                    className="spark-badge"
+                    style={{ flex: "0 0 auto" }}
+                    title={`Ran to catch up the scheduled time ${fmtTime(rec.catchUp.scheduledFor)}, which was missed`}
+                  >
+                    caught up
+                  </span>
+                )}
                 {rec.stopReason && (
                   <span
                     className={`spark-badge${
@@ -2034,6 +2138,8 @@ function ConfigSummary({ job }: { job: ScheduledJob }): React.ReactElement {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
       <KeyVal k="Trigger" v={triggerSummary(job.trigger)} />
+      {precheckSummary(job.precheck) && <KeyVal k="Check first" v={precheckSummary(job.precheck) as string} />}
+      {missedRunsSummary(job) && <KeyVal k="If missed" v={missedRunsSummary(job) as string} />}
       <KeyVal k="Loop" v={loopSummary(job.loop)} />
       <div style={{ display: "flex", gap: 8 }}>
         <ConfigKey label="Stops" />
@@ -2041,9 +2147,9 @@ function ConfigSummary({ job }: { job: ScheduledJob }): React.ReactElement {
           {chips.length === 0 ? (
             <span
               style={{ fontSize: 11, color: "var(--muted-2)" }}
-              title="No stop conditions set — the loop runs its natural course. Add caps in the editor: Loop node → Safety caps."
+              title="No stop conditions set. The loop runs its natural course. Add caps in the editor: Loop node → Safety caps."
             >
-              no caps — engine defaults
+              no caps, engine defaults
             </span>
           ) : (
             chips.map((c) => (

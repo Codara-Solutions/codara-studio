@@ -33,6 +33,9 @@ function check(name, condition, detail) {
 const harness = {
   name: "workspace-lessons-harness",
   setup(build) {
+    build.onResolve({ filter: /^@shared\// }, (args) => ({
+      path: path.join(__dirname, "..", "src", "shared", `${args.path.slice("@shared/".length)}.ts`),
+    }));
     // codara-home pulls in electron; the modules only need a home directory.
     build.onResolve({ filter: /\/codara-home$/ }, () => ({
       path: "codara-home-stub",
@@ -338,14 +341,15 @@ async function main() {
   );
   check(
     "run-store renders Cora memory through the hash-gated per-run seam",
-    /formatCoraMemoryForTurn\(\s*prepared\.workspaceId,\s*prepared\.id,\s*\{\s*force:\s*includeCanonicalReplay,\s*profileId:\s*prepared\.coraProfileId,?\s*\}/s.test(
-      runStoreSrc,
-    ),
+    /const memoryQuery = \[prepared\.title, \.\.\.inputMessages\.map/.test(runStoreSrc) &&
+      /formatCoraMemoryForTurn\(\s*prepared\.workspaceId,\s*prepared\.id,\s*\{\s*force:\s*includeCanonicalReplay,\s*profileId:\s*prepared\.coraProfileId,\s*query:\s*memoryQuery,?\s*\}/s.test(
+        runStoreSrc,
+      ),
     "prepareManagerTurn no longer calls formatCoraMemoryForTurn",
   );
   check(
     "run-store feeds the rendered memory into the live turn prompt",
-    /buildManagerTurnPrompt\(\s*prepared,\s*inputMessages,\s*\{[^}]*coraMemory/s.test(runStoreSrc),
+    /buildManagerTurnPrompt\(\s*prepared,\s*inputMessages(?:\.map\(\w+\))?,\s*\{[^}]*coraMemory/s.test(runStoreSrc),
     "prepareManagerTurn no longer passes coraMemory",
   );
   check(

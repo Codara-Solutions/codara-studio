@@ -38,6 +38,11 @@ async function main() {
         refreshProfiles: async () => { refreshed++; },
         workspaceId: "new-workspace", setMemory: () => {}, setProfiles: () => {},
         setStatus: (message) => { throw new Error(message); },
+        // The Capability Center also tracks which profile's memory it shows
+        // and reports a failed read next to the memory rows.
+        viewedProfileId: null, setViewedProfileId: () => {}, setProfilesLoading: () => {},
+        errorText: (error) => String(error),
+        setMemoryError: (message) => { if (message) throw new Error(message); },
       };
       vm.runInNewContext(code, sandbox, { filename });
       const mount = sandbox.module.exports;

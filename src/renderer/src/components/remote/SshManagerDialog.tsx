@@ -48,7 +48,7 @@ export default function SshManagerDialog({ onClose, onPick }: Props) {
     >
       <div className="spark-scrim" style={{ position: "absolute", inset: 0, zIndex: 0 }} />
       <div
-        className="spark-glass"
+        className="spark-glass--strong spark-overlay-surface"
         onClick={(e) => e.stopPropagation()}
         style={{
           // Above the sibling scrim, which is the only other positioned child.
@@ -498,7 +498,7 @@ function HostForm({
             style={{ flex: 1, minWidth: 0 }}
             value={identityFile}
             onChange={(e) => setIdentityFile(e.target.value)}
-            placeholder="~/.ssh/id_ed25519 — leave blank to use defaults or a password"
+            placeholder="~/.ssh/id_ed25519, leave blank to use defaults or a password"
           />
           <button type="button" className="spark-btn" onClick={openKeyPicker}>
             Choose…

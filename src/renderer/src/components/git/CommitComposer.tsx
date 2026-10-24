@@ -98,7 +98,7 @@ export default function CommitComposer({
       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
         {detached && (
           <span
-            title="HEAD is detached — checkout a branch to move it again"
+            title="HEAD is detached. Check out a branch to move it again"
             style={{
               display: "inline-flex",
               alignItems: "center",
@@ -143,7 +143,7 @@ export default function CommitComposer({
       >
         <SyncButton
           label="Pull"
-          title="Pull — download remote commits and integrate them into this branch"
+          title="Pull: download remote commits and integrate them into this branch"
           onClick={onPull}
           disabled={anyBusy}
           count={behind}
@@ -153,7 +153,7 @@ export default function CommitComposer({
         </SyncButton>
         <SyncButton
           label="Push"
-          title="Push — upload this branch's local commits to the remote"
+          title="Push: upload this branch's local commits to the remote"
           onClick={onPush}
           disabled={anyBusy}
           count={ahead}
@@ -163,7 +163,7 @@ export default function CommitComposer({
         </SyncButton>
         <SyncButton
           label="Fetch"
-          title="Fetch — download remote updates without changing this branch or your files"
+          title="Fetch: download remote updates without changing this branch or your files"
           onClick={onFetch}
           disabled={anyBusy}
           busy={busy === "fetch"}
@@ -333,7 +333,7 @@ export default function CommitComposer({
             type="button"
             disabled={!canSplit || anyBusy}
             onClick={onSplit}
-            title="Group related changes into separate commits — you review the plan before anything is saved"
+            title="Group related changes into separate commits. You review the plan before anything is saved"
             style={{
               appearance: "none",
               display: "flex",
