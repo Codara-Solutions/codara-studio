@@ -5851,6 +5851,17 @@ export default function App() {
           }
         }
       }
+      // Mod+Shift+V is also the terminal's paste chord. The preview toggle only
+      // acts on a focused markdown editor, so swallowing it at capture phase
+      // over a terminal left the paste undelivered (an agent CLI read the
+      // leftover ^V as a bare "v").
+      if (
+        id === "markdown.togglePreview" &&
+        event.target instanceof Element &&
+        event.target.closest(".codara-terminal-session")
+      ) {
+        return true;
+      }
       // The terminal split chords only act on terminal tabs; swallowing them
       // at capture phase elsewhere would kill surface-local bindings that
       // share the chord (the whiteboard's Ctrl+D duplicate).
