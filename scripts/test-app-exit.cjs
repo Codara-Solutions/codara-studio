@@ -159,6 +159,9 @@ async function main() {
     check("no temp file is left", fs.readdirSync(dir).join() === mod.HANDOFF_FILE, fs.readdirSync(dir).join());
     fs.writeFileSync(path.join(dir, mod.HANDOFF_FILE), "{not json");
     check("a torn file is no answer", mod.readHandoffAnswer(dir, nonce) === null);
+    mod.writeHandoffAnswer(dir, nonce, "quitting");
+    check("the answer names the holder's pid", mod.readHandoffHolderPid(dir, nonce) === process.pid);
+    check("but not to another launch", mod.readHandoffHolderPid(dir, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee") === null);
     fs.rmSync(dir, { recursive: true, force: true });
   }
   {
@@ -197,6 +200,17 @@ async function main() {
     check("retrying every 250 ms", requests >= 55 && requests <= 61, requests);
   }
 
+  {
+    const { spawn } = require("node:child_process");
+    const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 300)"], { stdio: "ignore" });
+    const started = Date.now();
+    const gone = await mod.waitForProcessExit(child.pid, 5_000, 20);
+    check("the wait ends when the holder's process is gone", gone && Date.now() - started >= 200, `${gone} ${Date.now() - started} ms`);
+    const lingering = spawn(process.execPath, ["-e", "setTimeout(() => {}, 5000)"], { stdio: "ignore" });
+    check("and gives up on one that stays", (await mod.waitForProcessExit(lingering.pid, 200, 20)) === false);
+    lingering.kill();
+  }
+
   // ── wiring in index.ts ──────────────────────────────────────────────────
   const index = fs.readFileSync(INDEX_TS, "utf8");
   const ready = index.slice(index.indexOf("app.whenReady().then(async () => {"));
@@ -208,6 +222,9 @@ async function main() {
   check("the live-work prompt never blocks the main thread", !/showMessageBoxSync|showErrorBox\(/.test(index));
   check("the dev launcher watch is gated on the dev renderer URL", /shouldWatchDevParent\(\{\s*isPackaged: app\.isPackaged,\s*rendererUrl: process\.env\.ELECTRON_RENDERER_URL,/.test(index));
   check("the boot parent is recorded at load", /const bootParentPid = process\.ppid;/.test(index));
+  const handoff = index.slice(index.indexOf("void lockHandoff?.then("), index.indexOf("app.on(\"second-instance\""));
+  check("a launch that lost the lock exits without waiting for ready (macOS never sends it)", /if \(!owned\) \{[^}]*app\.exit\(0\);/.test(handoff));
+  check("on macOS a launch handed the lock starts over once the holder is gone", handoff.indexOf("waitForProcessExit(holder") < handoff.indexOf("app.releaseSingleInstanceLock();") && handoff.indexOf("app.releaseSingleInstanceLock();") < handoff.indexOf("app.relaunch();"));
   check("the lock carries the hand-off nonce", /app\.requestSingleInstanceLock\(\{ codaraHandoff: handoffNonce \}\)/.test(index));
   check("SPARK_ALLOW_MULTI still skips the lock and the hand-off", /process\.env\.SPARK_ALLOW_MULTI === "1" \|\|\s*app\.requestSingleInstanceLock/.test(index) && /if \(process\.env\.SPARK_ALLOW_MULTI !== "1"\) \{\s*app\.on\("second-instance"/.test(index));
   const second = index.slice(index.indexOf("function onSecondInstance("), index.indexOf("function onSecondInstance(") + 1200);

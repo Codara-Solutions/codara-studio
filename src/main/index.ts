@@ -72,11 +72,14 @@ import {
 import { collectLiveWork, hasLiveWork, quitPromptText, type LiveWork } from "./quit-guard";
 import {
   acquireLockAfterHandoff,
+  HANDOFF_HOLDER_EXIT_WAIT_MS,
   handoffNonceOf,
   installQuitSignals,
   isProcessAlive,
   readHandoffAnswer,
+  readHandoffHolderPid,
   shouldWatchDevParent,
+  waitForProcessExit,
   watchParentProcess,
   writeHandoffAnswer,
 } from "./app-exit";
@@ -243,13 +246,25 @@ const lockHandoff: Promise<boolean> | null = ownsSingleInstanceLock
       requestLock: () => app.requestSingleInstanceLock({ codaraHandoff: handoffNonce }),
       readAnswer: () => readHandoffAnswer(app.getPath("userData"), handoffNonce),
     });
-// TEMP macOS CI diagnostics (fix/cora-macos-ci): where a lock-losing launch stalls.
-if (!ownsSingleInstanceLock) {
-  console.warn(`[single-instance:diag] lost the lock at load, pid=${process.pid}`);
-  app.on("will-finish-launching", () => console.warn("[single-instance:diag] will-finish-launching"));
-  app.on("ready", () => console.warn("[single-instance:diag] ready"));
-  void lockHandoff?.then((owned) => console.warn(`[single-instance:diag] hand-off settled: ${owned}`));
-}
+// A launch that lost the lock never gets `ready` on macOS (Electron emits
+// will-finish-launching, then nothing), so it acts on the hand-off without
+// waiting for it: it exits when the holder keeps the lock, and on macOS,
+// once the holder has handed the lock over and gone, it starts again as a
+// fresh launch that macOS does finish. Elsewhere the whenReady body goes on.
+void lockHandoff?.then(async (owned) => {
+  if (!owned) {
+    console.warn("[single-instance] the running instance kept the lock; quitting");
+    app.exit(0);
+    return;
+  }
+  console.warn("[single-instance] the running instance handed the lock over");
+  if (process.platform !== "darwin") return;
+  const holder = readHandoffHolderPid(app.getPath("userData"), handoffNonce);
+  if (holder) await waitForProcessExit(holder, HANDOFF_HOLDER_EXIT_WAIT_MS);
+  app.releaseSingleInstanceLock();
+  app.relaunch();
+  app.exit(0);
+});
 if (process.env.SPARK_ALLOW_MULTI !== "1") {
   app.on("second-instance", (_event, _argv, _cwd, additionalData) => {
     onSecondInstance(handoffNonceOf(additionalData));
@@ -1114,13 +1129,8 @@ app.whenReady().then(async () => {
   // one said it is quitting and then let go, bail before doing any startup
   // work or opening a window.
   if (!ownsSingleInstanceLock) {
-    console.warn("[single-instance] another Codara instance holds the lock; waiting for its answer");
-    if (!(await lockHandoff)) {
-      console.warn("[single-instance] the running instance kept the lock; quitting");
-      app.quit();
-      return;
-    }
-    console.warn("[single-instance] the running instance handed the lock over");
+    // The hand-off handler above exits or relaunches this process.
+    if (!(await lockHandoff) || process.platform === "darwin") return;
     ownsSingleInstanceLock = true;
     startCrashReporterEarly();
   }
