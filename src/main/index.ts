@@ -1107,10 +1107,13 @@ app.whenReady().then(async () => {
   // one said it is quitting and then let go, bail before doing any startup
   // work or opening a window.
   if (!ownsSingleInstanceLock) {
+    console.warn("[single-instance] another Codara instance holds the lock; waiting for its answer");
     if (!(await lockHandoff)) {
+      console.warn("[single-instance] the running instance kept the lock; quitting");
       app.quit();
       return;
     }
+    console.warn("[single-instance] the running instance handed the lock over");
     ownsSingleInstanceLock = true;
     startCrashReporterEarly();
   }
