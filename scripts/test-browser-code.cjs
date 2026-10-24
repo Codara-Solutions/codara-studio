@@ -1,6 +1,6 @@
 // test-runner: heavy (launches Chromium through Playwright and QuickJS worker threads)
 "use strict";
-// codara_preview_code (src/main/browser/code/, src/shared/preview-query.ts):
+// codara_browser_use (src/main/browser/code/, src/shared/preview-query.ts):
 // - the snippet transform: top-level await, declarations that persist across
 //   calls, redeclaration, the last expression as the value, syntax errors
 //   with line and column;
@@ -147,14 +147,15 @@ async function transformAndSessions() {
     for (let i = 0; i < 7; i++) shots.push((await tab.screenshot()).image);
     let failure = null;
     try { await tab.click("#save"); } catch (error) { failure = error.name + ": " + error.message; }
-    const refused = await browser.call("code", { code: "1" }).then(() => "ran", (error) => error.message);
-    ({ shots, failure, refused })
+    ({ shots, failure })
   `, { dispatch });
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.deepEqual(result.result.shots, [1, 2, 3, 4, 5, 6, null], "at most six images per call");
   assert.equal(result.images.length, 6);
   assert.match(result.result.failure, /^BrowserError: Cannot interact with @x-1: covered/);
-  assert.equal(result.result.refused, "preview.code is not a browser method.");
+  // browser.call only builds preview.* names, and only those reach main,
+  // so a snippet can never start another snippet through browser.use.
+  assert.ok(seen.every((call) => call.method.startsWith("preview.")), "a snippet reaches browser methods only");
   assert.ok(seen.every((call) => call.args.tabId === "tab-9"), "a tab's calls name its id");
   assert.deepEqual(seen.find((call) => call.method === "preview.locate").args.chain, [{ css: "#save" }]);
   assert.equal(result.calls, 9);
