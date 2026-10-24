@@ -113,7 +113,15 @@ async function holdDomain(session: CdpSession, domain: string, params?: Record<s
   const release = await session.enable(domain, params && Object.keys(params).length ? params : undefined);
   // A paused page runs nothing, and no snippet could resume it (stepping is
   // refused), so the read-only debugger never stops on a breakpoint.
-  if (domain === "Debugger") await session.send("Debugger.setSkipAllPauses", { skip: true }).catch(() => {});
+  if (domain === "Debugger") {
+    // TEMP macOS CI diagnostics (fix/cora-macos-ci)
+    const off = process.env.CODARA_DIAG_SKIP ? session.on("Debugger.paused", (params: unknown) => console.error("[diag] Debugger.paused", JSON.stringify(params).slice(0, 300))) : null;
+    void off;
+    await session.send("Debugger.setSkipAllPauses", { skip: true }).then(
+      (r) => process.env.CODARA_DIAG_SKIP && console.error("[diag] setSkipAllPauses ok", JSON.stringify(r)),
+      (e) => process.env.CODARA_DIAG_SKIP && console.error("[diag] setSkipAllPauses failed", String(e)),
+    );
+  }
   return release;
 }
 

@@ -1,7 +1,6 @@
 name: macOS debug (temporary)
 
-# Temporary, for fix/cora-macos-ci only: test-browser-cdp-access with the
-# headless shell and with full Chromium. Removed before the Cora PR.
+# Temporary, for fix/cora-macos-ci only. Removed before the Cora PR.
 
 on:
   pull_request:
@@ -23,6 +22,5 @@ jobs:
       - run: npm ci
       - run: npx playwright install chromium
       - run: |
-          for i in 1 2 3; do echo "== shell run $i"; node scripts/test-browser-cdp-access.cjs 2>&1 | tail -3; done
-          rm -rf ~/Library/Caches/ms-playwright/chromium_headless_shell-*
-          for i in 1 2 3; do echo "== full chromium run $i"; node scripts/test-browser-cdp-access.cjs 2>&1 | tail -3; done
+          echo "== raw CDP, headless shell"; node scripts/diag-skip-pauses.cjs || true
+          echo "== product test with diagnostics"; CODARA_DIAG_SKIP=1 node scripts/test-browser-cdp-access.cjs 2>&1 | tail -60 || true
