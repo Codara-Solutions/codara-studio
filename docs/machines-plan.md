@@ -117,7 +117,7 @@ you try.
    `name.tailnet.ts.net` and a hint when Tailscale is not running here. No
    Tailscale code in Studio: it is just a host name that resolves.
 3. **Codara Cloud box.** The existing picker from PR #44.
-4. **Pair through the relay** (later, decision 3). For a machine behind NAT
+4. **Pair through the relay** (a later option, not planned now; see section 9). For a machine behind NAT
    without Tailscale: install the helper there, run `codara-host pair`, scan
    or type the code in Studio, confirm the short code, same as the phone.
 
