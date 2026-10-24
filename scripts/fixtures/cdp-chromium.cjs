@@ -63,13 +63,12 @@ async function startCdpChromium() {
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-gpu",
-    // Playwright passes the same switches: no throttling of a page Chromium
-    // counts as in the background.
-    "--disable-backgrounding-occluded-windows",
-    "--disable-renderer-backgrounding",
-    "--disable-background-timer-throttling",
     "about:blank",
-  ], { stdio: ["ignore", "ignore", "pipe"] });
+  ], {
+    stdio: ["ignore", "ignore", "pipe"],
+    // Its own process group, so close() also ends the helper processes.
+    detached: process.platform !== "win32",
+  });
   const wsUrl = await new Promise((resolve, reject) => {
     let buffered = "";
     const timer = setTimeout(() => reject(new Error("Chromium did not print its DevTools endpoint")), 15_000);
@@ -169,8 +168,18 @@ async function startCdpChromium() {
       } catch {
         /* already closed */
       }
-      child.kill("SIGKILL");
-      await new Promise((resolve) => (child.exitCode !== null ? resolve() : child.once("exit", resolve)));
+      // Killing the browser alone leaves its helpers running on macOS, and
+      // they hold the stderr pipe (and keep-alive sockets to test servers)
+      // open, so the suite finishes but its process never exits.
+      const exited = new Promise((resolve) => (child.exitCode !== null || child.signalCode !== null ? resolve() : child.once("exit", resolve)));
+      try {
+        if (process.platform === "win32") child.kill("SIGKILL");
+        else process.kill(-child.pid, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+      await exited;
+      child.stderr.destroy();
       // Chromium's helper processes outlive the browser by a moment and can
       // still be writing the profile; a busy machine made rmSync race them.
       try {
