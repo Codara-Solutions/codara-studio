@@ -106,11 +106,10 @@
      placeholder and a real tab are the same object. */
   --tab-h: 28px;
 
-  /* Tab group colors, Chrome's nine. Each is a dot, an underline and a tint
-     on the strip, so dark themes take the light tones (at least 4.5:1 on
-     every dark panel); the light palettes swap in deep ones below.
-     --tab-group-on is the text on a solid group color (the collapsed chip's
-     count), at least 7:1 here. */
+  /* Tab group colors, Chrome's nine. Each is the group label's text and the
+     tint of its pocket on the strip, so dark themes take the light tones (at
+     least 4.5:1 on every dark panel); the light palettes swap in deep ones
+     below. */
   --tab-group-grey: #dadce0;
   --tab-group-blue: #8ab4f8;
   --tab-group-red: #f28b82;
@@ -120,7 +119,6 @@
   --tab-group-purple: #c58af9;
   --tab-group-cyan: #78d9ec;
   --tab-group-orange: #fcad70;
-  --tab-group-on: #17181a;
 
   /* Motion */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);          /* expo-ish out  */
@@ -299,7 +297,7 @@
 }
 
 /* Deep group tones for bright paper: each keeps at least 3.5:1 against the
-   light panels and 5:1 under white text. */
+   light panels. The group label mixes in ink to reach 4.5:1 as text. */
 :root[data-theme-mode="light"] {
   --tab-group-grey: #5f6368;
   --tab-group-blue: #1a62d0;
@@ -310,7 +308,6 @@
   --tab-group-purple: #8430ce;
   --tab-group-cyan: #00707a;
   --tab-group-orange: #b3530a;
-  --tab-group-on: #ffffff;
 }
 
 :root[data-theme="codara-classic"] {
@@ -688,6 +685,9 @@ a { color: inherit; }
   /* Containing block for the reorder ghost slot, which is positioned in strip
      CONTENT coordinates so it scrolls with the tabs. */
   position: relative;
+  /* The stacking context the tab group pockets (z-index: -1) paint in, so
+     they sit behind the tabs and in front of the bar. */
+  isolation: isolate;
 }
 
 .spark-tabbar-scroll--overflow-left {
@@ -801,24 +801,64 @@ a { color: inherit; }
   outline-offset: 1px;
 }
 
-/* Tab groups. Members carry a line in the group's color in the strip's
-   bottom slack, running on under the gap to the next member and stopping at
-   the last one, so a group reads as one run from its chip onwards. The
-   strip stays solid: the group's only floating layer is its editor. */
-.spark-tab[data-tab-group]::after {
+/* Tab groups. A group is a tinted pocket around its label and its tabs, so
+   it reads as one place rather than tabs with a decoration (DESIGN.md, "Tab
+   groups"). There is no wrapper element: the label and each member paint
+   their own slice of the pocket, through the strip gap after them, so the
+   pocket follows the offsets its tabs move by during a reorder. The slices
+   sit behind the tabs in the strip's isolated stacking context. The strip
+   stays solid: the group's only floating layer is its editor. */
+.spark-tab-group-chip::before,
+.spark-tab[data-tab-group]::before {
   content: "";
   position: absolute;
-  left: -1px;
-  right: -5px;
-  bottom: -3px;
-  height: 2px;
-  border-radius: 1px;
-  background: var(--tab-group-color);
+  z-index: -1;
+  border: 1px solid color-mix(in oklab, var(--tab-group-color) 32%, transparent);
+  border-inline-width: 0;
+  background: color-mix(in oklab, var(--tab-group-color) 10%, transparent);
   pointer-events: none;
 }
 
-.spark-tab[data-tab-group][data-group-last="true"]::after {
-  right: 8px;
+/* 1px outside the member's border box, and on through the gap after it. */
+.spark-tab[data-tab-group]::before {
+  top: -2px;
+  bottom: -2px;
+  left: -1px;
+  right: -5px;
+}
+
+.spark-tab[data-tab-group][data-group-last="true"]::before {
+  border-right-width: 1px;
+  border-radius: 0 calc(var(--tab-radius) + 3px) calc(var(--tab-radius) + 3px) 0;
+}
+
+/* As a stacking context of its own, the active tab would paint its slice
+   over its face instead of behind it. Floating tabs never overlap at rest,
+   so it gives up the z-index it has outside a group. */
+.spark-tab--active[data-tab-group] {
+  z-index: auto;
+}
+
+/* Members show the pocket through their face; hover and press keep the
+   strip's ink steps on top of it. */
+.spark-tab[data-tab-group]:not(.spark-tab--active) {
+  background: transparent;
+}
+
+.spark-tab[data-tab-group]:hover:not(.spark-tab--active) {
+  background: color-mix(in oklab, var(--ink) 6%, transparent);
+}
+
+.spark-tab[data-tab-group]:active:not(.spark-tab--active) {
+  background: color-mix(in oklab, var(--ink) 12%, transparent);
+}
+
+/* Air between a pocket and the tabs beside it. The reorder planner reads the
+   strip gap as the narrowest space between neighbours, so these margins never
+   widen the hole a drag opens (tabReorder.ts, stripGap). */
+.spark-tab[data-tab-group][data-group-last="true"],
+.spark-tab-group-chip[data-collapsed="true"] {
+  margin-right: 10px;
 }
 
 .spark-tab-group-chip {
@@ -830,11 +870,12 @@ a { color: inherit; }
   height: 22px;
   max-width: 168px;
   min-width: 0;
-  padding: 0 9px 0 8px;
-  border: 1px solid color-mix(in oklab, var(--tab-group-color) 55%, transparent);
+  margin-left: 10px;
+  padding: 0 6px 0 8px;
+  border: 0;
   border-radius: 999px;
-  background: color-mix(in oklab, var(--tab-group-color) 16%, var(--panel));
-  color: var(--ink);
+  background: transparent;
+  color: var(--tab-group-color);
   font-family: var(--font-sans);
   font-size: 11.5px;
   font-weight: 600;
@@ -843,29 +884,38 @@ a { color: inherit; }
   -webkit-user-drag: none;
   transition:
     background var(--motion-fast) var(--ease-out),
-    border-color var(--motion-fast) var(--ease-out),
     box-shadow var(--motion-fast) var(--ease-out);
 }
 
-/* The chip's share of the line: from its middle to the first member. */
-.spark-tab-group-chip[data-collapsed="false"]::after {
-  content: "";
-  position: absolute;
-  left: 50%;
-  right: -5px;
-  bottom: -6px;
-  height: 2px;
-  border-radius: 1px;
-  background: var(--tab-group-color);
-  pointer-events: none;
+/* The deep tones alone fall to 3.75:1 on a light pocket (orange on Rosé
+   Pine Dawn); a share of the theme's ink keeps every label at 4.5:1. */
+:root[data-theme-mode="light"] .spark-tab-group-chip {
+  color: color-mix(in oklab, var(--tab-group-color) 60%, var(--ink));
+}
+
+/* The label's slice opens the pocket: from 4px before it, as tall as the
+   members' slices, through the gap to the first member. Collapsed, it is the
+   whole pocket. */
+.spark-tab-group-chip::before {
+  top: calc((22px - var(--tab-h)) / 2 - 1px);
+  bottom: calc((22px - var(--tab-h)) / 2 - 1px);
+  left: -4px;
+  right: -4px;
+  border-left-width: 1px;
+  border-radius: calc(var(--tab-radius) + 3px) 0 0 calc(var(--tab-radius) + 3px);
+}
+
+.spark-tab-group-chip[data-collapsed="true"]::before {
+  border-right-width: 1px;
+  border-radius: calc(var(--tab-radius) + 3px);
 }
 
 .spark-tab-group-chip:hover {
-  background: color-mix(in oklab, var(--tab-group-color) 26%, var(--panel));
+  background: color-mix(in oklab, var(--tab-group-color) 14%, transparent);
 }
 
 .spark-tab-group-chip:active {
-  background: color-mix(in oklab, var(--tab-group-color) 34%, var(--panel));
+  background: color-mix(in oklab, var(--tab-group-color) 22%, transparent);
 }
 
 .spark-tab-group-chip:focus-visible {
@@ -892,18 +942,10 @@ a { color: inherit; }
   white-space: nowrap;
 }
 
+/* Plain text: a solid colored circle read as an unread badge. */
 .spark-tab-group-chip__count {
   flex: 0 0 auto;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  border-radius: 999px;
-  background: var(--tab-group-color);
-  color: var(--tab-group-on);
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 16px;
-  text-align: center;
+  opacity: 0.7;
   font-variant-numeric: tabular-nums;
 }
 
