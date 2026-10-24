@@ -19,6 +19,9 @@ import type {
 import { ClaudeMark, CodexMark, GrokMark } from "../BrandMarks";
 import { ReloadIcon } from "../icons";
 import { openAccountsSettings } from "../chat/account-readiness";
+import type { UsageForecastReport, WindowForecastView } from "@shared/usage-forecast";
+import { ForecastGhost, ForecastLine } from "./UsageForecast";
+import { forecastFor, useForecastStyle, type ForecastPanelStyle } from "./useUsageForecast";
 import {
   buildUsageRoster,
   describeCredits,
@@ -195,7 +198,17 @@ function RosterRow({
   );
 }
 
-function WindowSection({ window: usageWindow, nowMs }: { window: PiUsageWindow; nowMs: number }) {
+function WindowSection({
+  window: usageWindow,
+  nowMs,
+  forecast = null,
+  forecastStyle = "line",
+}: {
+  window: PiUsageWindow;
+  nowMs: number;
+  forecast?: WindowForecastView | null;
+  forecastStyle?: ForecastPanelStyle;
+}) {
   const used = Math.min(100, Math.max(0, usageWindow.usedPercent));
   const resets =
     formatResetsIn(usageWindow.resetsAt, nowMs) ??
@@ -216,8 +229,10 @@ function WindowSection({ window: usageWindow, nowMs }: { window: PiUsageWindow; 
         className="usage-window__meter"
       >
         <Bar usedPercent={used} className="usage-window__bar" />
+        {forecast && forecastStyle === "ghost" ? <ForecastGhost view={forecast} /> : null}
       </div>
       {resets ? <span className="usage-window__reset">{resets}</span> : null}
+      {forecast ? <ForecastLine view={forecast} compact={forecastStyle !== "line"} /> : null}
     </div>
   );
 }
@@ -309,6 +324,7 @@ function ProviderFlyout({
   resetMessage,
   onReset,
   onManageAccounts,
+  forecast,
 }: {
   entry: RosterProvider;
   id: string;
@@ -324,8 +340,14 @@ function ProviderFlyout({
   resetMessage: { text: string; danger: boolean } | null;
   onReset: () => void;
   onManageAccounts: () => void;
+  forecast: UsageForecastReport | null;
 }) {
   const usage = entry.usage;
+  const forecastStyle = useForecastStyle();
+  const nextAccount =
+    entry.provider === "anthropic" || entry.provider === "openai-codex"
+      ? (forecast?.nextAccount[entry.provider] ?? null)
+      : null;
   const updated = usage?.status === "ok" ? formatUpdatedAgo(usage.checkedAt, nowMs) : null;
   const credits = describeCredits(usage?.credits);
   const resets = describeResetCredits(usage, nowMs);
@@ -360,7 +382,13 @@ function ProviderFlyout({
       {entry.windows.length > 0 ? (
         <div className="usage-flyout__windows">
           {entry.windows.map((usageWindow) => (
-            <WindowSection key={usageWindow.id} window={usageWindow} nowMs={nowMs} />
+            <WindowSection
+              key={usageWindow.id}
+              window={usageWindow}
+              nowMs={nowMs}
+              forecast={forecastFor(forecast, usage?.profileId, usageWindow.id)}
+              forecastStyle={forecastStyle}
+            />
           ))}
         </div>
       ) : entry.detail ? (
@@ -462,6 +490,7 @@ function ProviderFlyout({
             />
           ))}
         </div>
+        {nextAccount ? <span className="usage-forecast__extra">{nextAccount}</span> : null}
         {switching?.error ? (
           <span className="usage-flyout__line is-danger" role="alert">
             {switching.error}
@@ -502,6 +531,8 @@ export interface UsageRosterProps {
   /** Elements that count as inside for click-away (the pills). */
   ownerRef: React.RefObject<HTMLElement | null>;
   onOpenUsage?: () => void;
+  /** Labs: the usage forecast, null while it is off. */
+  forecast?: UsageForecastReport | null;
 }
 
 function navItems(root: HTMLElement | null, attribute: string): HTMLElement[] {
@@ -539,6 +570,7 @@ export default function UsageRoster({
   onClose,
   ownerRef,
   onOpenUsage,
+  forecast = null,
 }: UsageRosterProps) {
   const rosterRef = useRef<HTMLDivElement>(null);
   const flyoutRef = useRef<HTMLDivElement>(null);
@@ -901,6 +933,7 @@ export default function UsageRoster({
       </div>
       {flyoutEntry ? (
         <ProviderFlyout
+          forecast={forecast}
           entry={flyoutEntry}
           id={flyoutId}
           nowMs={nowMs}

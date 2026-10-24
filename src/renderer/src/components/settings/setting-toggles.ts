@@ -58,6 +58,7 @@ export const PREFERENCE_TOGGLES = {
   restoreAgentSessions: defaultOff("restoreAgentSessions"),
   restoreTerminalOutput: defaultOn("restoreTerminalOutput"),
   keepAgentsInYourChrome: defaultOn("keepAgentsInYourChrome"),
+  usageForecast: defaultOff("usageForecast"),
 } satisfies Record<string, PreferenceToggle>;
 
 export type PreferenceToggleId = keyof typeof PREFERENCE_TOGGLES;

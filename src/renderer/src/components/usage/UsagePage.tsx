@@ -15,6 +15,10 @@ import {
   type UsageSummaryInput,
 } from "@shared/usage-analytics";
 import { ClaudeMark, CodexMark } from "../BrandMarks";
+import Segmented from "./Segmented";
+import { UsageForecastSection } from "./UsageForecast";
+import { useUsageForecast } from "./useUsageForecast";
+import { usePreferences } from "../../preferences/usePreferences";
 import { SparkIcon } from "../icons";
 import {
   formatCount,
@@ -178,6 +182,9 @@ const NOTE: React.CSSProperties = {
 };
 
 export default function UsagePage() {
+  const { preferences } = usePreferences();
+  const forecastOn = preferences.usageForecast === true;
+  const forecast = useUsageForecast(forecastOn);
   const [windowDays, setWindowDays] = useState<number>(30);
   const [metric, setMetric] = useState<UsageMetric>("cost");
   const [breakdown, setBreakdown] = useState<UsageBreakdown>("model");
@@ -354,6 +361,10 @@ export default function UsagePage() {
             <RefreshButton onClick={refresh} busy={loading} />
           </div>
         </header>
+
+        {forecastOn ? (
+          <UsageForecastSection report={forecast.report} loading={forecast.loading} error={forecast.error} />
+        ) : null}
 
         {error !== null && (
           <div
@@ -1944,64 +1955,6 @@ function SourcesFooter({ summary }: { summary: UsageSummary }) {
 }
 
 /* ── Small pieces ────────────────────────────────────────────────────────── */
-
-function Segmented({
-  label,
-  options,
-  value,
-  onChange,
-}: {
-  label: string;
-  options: { value: string; label: string }[];
-  value: string;
-  onChange: (value: string) => void;
-}) {
-  return (
-    <div
-      role="group"
-      aria-label={label}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 2,
-        padding: 2,
-        borderRadius: 99,
-        border: "1px solid var(--rule)",
-      }}
-    >
-      {options.map((option) => {
-        const selected = option.value === value;
-        return (
-          <button
-            key={option.value}
-            type="button"
-            aria-pressed={selected}
-            onClick={() => onChange(option.value)}
-            style={{
-              appearance: "none",
-              border: "none",
-              borderRadius: 99,
-              padding: "3px 10px",
-              background: selected
-                ? "color-mix(in oklab, var(--ink) 9%, transparent)"
-                : "transparent",
-              color: selected ? "var(--ink)" : "var(--muted)",
-              fontFamily: "var(--font-sans)",
-              fontSize: 10,
-              letterSpacing: "0.06em",
-              textTransform: "uppercase",
-              cursor: "default",
-              transition:
-                "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-            }}
-          >
-            {option.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
 
 function RefreshButton({
   onClick,

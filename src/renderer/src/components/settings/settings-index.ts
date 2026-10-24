@@ -253,6 +253,7 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "api", title: "Models for Cora", desc: "OpenRouter models offered in the Cora picker.", section: "OpenRouter", keywords: "model picker openrouter favorite" },
   { tab: "api", title: "Commit message model", desc: "The model that drafts commit messages.", section: "Git commit messages", keywords: "commit draft model git" },
   { tab: "agents", title: "Add account", desc: "Sign in to another Claude, ChatGPT or xAI account.", keywords: "new sign in login another account connect claude codex grok" },
+  { tab: "agents", title: "Usage forecast", desc: "Labs: say whether a limit runs out before it resets.", section: "Labs", keywords: "usage limit forecast predict run out reset quota labs experiment", toggle: "usageForecast" },
   { tab: "agents", title: "How switching works", desc: "What a switch moves, and which sessions follow.", keywords: "switch account active use change sessions" },
   { tab: "agents", title: "Anthropic", label: "Anthropic accounts", desc: "Claude accounts for Cora and Claude Code.", keywords: "claude code claude login account email limits switch system own login" },
   { tab: "agents", title: "OpenAI", label: "OpenAI accounts", desc: "ChatGPT accounts for Cora and Codex.", keywords: "codex chatgpt codex login account email limits switch system own login" },

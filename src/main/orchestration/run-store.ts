@@ -6791,6 +6791,17 @@ async function prepareManagerTurn(
   } catch {
     subscriptionHeadroom = null;
   }
+  // Labs: the usage forecast's line for Cora, only when the user turned on
+  // both the forecast and its Cora idea. Same rule: never cost a turn.
+  try {
+    const { readCoraForecastHint } = await import("../usage-forecast");
+    const forecastHint = readCoraForecastHint();
+    if (forecastHint) {
+      subscriptionHeadroom = subscriptionHeadroom ? `${subscriptionHeadroom}\n${forecastHint}` : forecastHint;
+    }
+  } catch {
+    // The forecast is optional; the turn goes on without it.
+  }
   // Cora memory rides the same dynamic tail. formatCoraMemoryForTurn is
   // hash-gated per run (null when this run already carries the unchanged
   // content) and forced on canonical replay, which rebuilds the CLI session

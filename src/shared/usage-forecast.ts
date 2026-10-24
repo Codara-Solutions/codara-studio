@@ -619,6 +619,7 @@ export function burnNudge(result: ForecastResult, activeAgents: number, label: s
 
 /** "Go ahead": plenty left and the reset is close, so unused quota is lost. */
 export function goAheadNote(result: ForecastResult, label: string): string | null {
+  if (!result.inUse) return null;
   const length = result.resetsAtMs - result.windowStartMs;
   const left = result.resetsAtMs - result.nowMs;
   if (length <= 0 || left > length * 0.3 || result.endPercent.p90 > 70) return null;
@@ -653,9 +654,9 @@ export function coraForecastHint(result: ForecastResult, accountLabel: string, l
   const verdict = describeForecast(result, label);
   const hit = result.hitAt.p50;
   if (result.inUse && result.hitProbability >= 0.5 && hit !== null) {
-    return `${accountLabel}: at the current pace its ${label} limit runs out around ${formatClock(hit, result.nowMs)}, before it resets at ${formatClock(result.resetsAtMs, result.nowMs)}. Dispatch fewer workers, or put some on another account.`;
+    return `${accountLabel} ${label}: at the current pace it runs out around ${formatClock(hit, result.nowMs)}, before it resets at ${formatClock(result.resetsAtMs, result.nowMs)}. Dispatch fewer workers, or put some on another account.`;
   }
-  return `${accountLabel}: ${verdict.headline}`;
+  return `${accountLabel} ${label}: ${verdict.headline}`;
 }
 
 /* ── Back-test ───────────────────────────────────────────────────────────── */
@@ -950,7 +951,10 @@ export interface BacktestWindowLine {
   resetsAtMs: number;
   actual: number;
   hit: boolean;
-  /** What the panel would have said halfway through the window. */
+  /** When the replayed forecast was made: halfway, or an hour before the
+   * window ran out when that came first. */
+  saidAtMs: number;
+  /** What the panel would have said then. */
   saidAtHalf: string;
   predictedAtHalf: number;
 }

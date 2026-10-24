@@ -16,6 +16,7 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { codaraHome } from "./codara-home";
+import { getPreferenceCached } from "./preferences-store";
 import { readForecastScan } from "./usage-analytics";
 import type { ForecastScan } from "./usage-scan-worker";
 import type { PiUsageOverview, PiUsageProfile, PiUsageWindow } from "@shared/types";
@@ -374,7 +375,12 @@ function recentLines(windows: readonly PastWindow[], history: BurnSeries, factor
     .filter((window) => window.endPercent >= 5)
     .slice(-4)
     .map((window) => {
-      const atMs = window.startMs + (window.resetsAtMs - window.startMs) / 2;
+      // Halfway through, or an hour before it ran out when that came first.
+      const half = window.startMs + (window.resetsAtMs - window.startMs) / 2;
+      const atMs =
+        window.hitAtMs !== null && window.hitAtMs - HOUR_MS < half
+          ? Math.max(window.startMs + 15 * 60_000, window.hitAtMs - HOUR_MS)
+          : half;
       const truncated: BurnSeries = {
         ...history,
         values: history.values.slice(0, Math.max(0, Math.floor((atMs - history.startMs) / history.bucketMs))),
@@ -383,7 +389,7 @@ function recentLines(windows: readonly PastWindow[], history: BurnSeries, factor
         nowMs: atMs,
         windowStartMs: window.startMs,
         resetsAtMs: window.resetsAtMs,
-        usedPercent: window.hitAtMs !== null && window.hitAtMs <= atMs ? 100 : window.usedAt(atMs),
+        usedPercent: window.usedAt(atMs),
         kind,
         history: truncated,
         percentPerUnit: factors,
@@ -395,6 +401,7 @@ function recentLines(windows: readonly PastWindow[], history: BurnSeries, factor
         resetsAtMs: window.resetsAtMs,
         actual: Math.round(Math.min(100, window.endPercent)),
         hit: window.hitAtMs !== null,
+        saidAtMs: atMs,
         saidAtHalf: describeForecast(result, label).headline,
         predictedAtHalf: Math.round(result.endPercent.p50),
       };
@@ -446,10 +453,21 @@ function backtests(
   return tracks;
 }
 
+let lastReport: UsageForecastReport | null = null;
+
 export async function buildUsageForecastReport(
   overview: PiUsageOverview,
   ideasInput: unknown,
   nowMs = Date.now(),
+): Promise<UsageForecastReport> {
+  lastReport = await buildReport(overview, ideasInput, nowMs);
+  return lastReport;
+}
+
+async function buildReport(
+  overview: PiUsageOverview,
+  ideasInput: unknown,
+  nowMs: number,
 ): Promise<UsageForecastReport> {
   const ideas = normalizeForecastIdeas(ideasInput);
   const [scan, recorded] = await Promise.all([forecastScan(nowMs), readRecordedReadings(nowMs - HISTORY_DAYS * DAY_MS)]);
@@ -480,7 +498,20 @@ export async function buildUsageForecastReport(
       if (lengthMs === 0 || Number.isNaN(resetsAtMs) || resetsAtMs <= nowMs) continue;
       let track: Track | null = null;
       const readings = provider === "openai-codex" ? codexReadings(scan, lengthMs / 60_000) : [];
-      if (readings.length >= 5) {
+      if (!profile.isDefault) {
+        // The transcripts do not say which account spent, so all spend is
+        // the active account's; any other one only moves when switched to.
+        track = {
+          history: provider === "anthropic" ? claudeSpend : codexSpend,
+          factors: [0],
+          calibration: {
+            method: "readings",
+            anchors: 0,
+            spread: [1, 1],
+            note: "Not the active account, so it only grows if you switch to it.",
+          },
+        };
+      } else if (readings.length >= 5) {
         track = {
           history: trimLeadingIdle(percentSeriesFromReadings(readings, scan.timeline.startMs, nowMs)),
           factors: [1],
@@ -601,4 +632,24 @@ export function coraForecastLines(report: UsageForecastReport): string[] {
   return report.windows
     .filter((view) => view.active)
     .map((view) => coraForecastHint(view.result, view.accountLabel, view.windowLabel));
+}
+
+const CORA_HINT_MAX_AGE_MS = 30 * 60_000;
+
+/**
+ * The prompt section for Cora's manager turn, from the last report the panel
+ * or the Usage tab built: a manager turn never waits on a transcript scan.
+ * Null unless the forecast and its Cora idea are both on.
+ */
+export function readCoraForecastHint(nowMs = Date.now()): string | null {
+  if (getPreferenceCached("usageForecast") !== true) return null;
+  if (!normalizeForecastIdeas(getPreferenceCached("usageForecastIdeas")).coraHint) return null;
+  if (!lastReport || nowMs - lastReport.generatedAt > CORA_HINT_MAX_AGE_MS) return null;
+  const lines = coraForecastLines(lastReport);
+  if (lines.length === 0) return null;
+  return [
+    "Usage forecast (from the user's own history, at the current pace):",
+    ...lines.map((line) => `- ${line}`),
+    "Before dispatching several workers on an account that runs out early, dispatch fewer or use another account.",
+  ].join("\n");
 }
