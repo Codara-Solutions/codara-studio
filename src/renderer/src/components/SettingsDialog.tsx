@@ -2850,6 +2850,13 @@ function AgentsSettings({ onClose }: { onClose: () => void }) {
         >
           <CrossWorkspaceGrantsList />
         </SettingRow>
+        <SettingRow
+          title="Tabs agents did not open"
+          desc="An agent that wants to close, split or unsplit tabs it did not open asks you first. Pairs you always allow are listed here: agents in the first workspace may change tabs in the second without asking, except closing a tab with a running agent or unsaved edits, which Codara always asks about. Revoke one to be asked again."
+          stacked
+        >
+          <CrossWorkspaceGrantsList source={window.spark.tabActions} verb="may close and move tabs in" />
+        </SettingRow>
       </SettingsSection>
 
       <SettingsSection title="Tools">

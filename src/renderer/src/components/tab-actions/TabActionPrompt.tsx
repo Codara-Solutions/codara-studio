@@ -37,6 +37,12 @@ export function tabActionTitle(request: TabActionApprovalRequest): string {
   return `${request.agent} wants to close ${what}${where}`;
 }
 
+// "Always allow “web” to close tabs here".
+export function tabActionAlwaysLabel(request: TabActionApprovalRequest): string {
+  const verb = request.action === "close" ? "close" : "move";
+  return `Always allow ${quoted(request.callerName)} to ${verb} tabs here`;
+}
+
 function warningLabel(tab: TabActionApprovalTab): string | null {
   if (tab.warning === "agent") return "agent running";
   if (tab.warning === "unsaved") return "unsaved changes";
@@ -48,6 +54,8 @@ function warningLabel(tab: TabActionApprovalTab): string | null {
  * (codara_tab). Same floating card as the cross-workspace prompt; one
  * request at a time, oldest first, counting down to main's timeout. It names
  * every tab that would change and marks the ones where something is lost.
+ * "Always allow" stores a grant for the agent's workspace, listed in
+ * Settings; it never covers a close that loses an agent or unsaved edits.
  */
 export default function TabActionPrompt(): React.ReactElement | null {
   const [queue, setQueue] = useState<QueuedRequest[]>([]);
@@ -160,7 +168,7 @@ export default function TabActionPrompt(): React.ReactElement | null {
       </ul>
       {losesWork && (
         <p className="chrome-pairing__body tab-action-prompt__note" role="note">
-          Closing stops the agents and drops the unsaved changes marked above.
+          Closing stops the agents and drops the unsaved changes marked above. Codara asks about these every time.
         </p>
       )}
       <div className="chrome-pairing__actions">
@@ -170,10 +178,19 @@ export default function TabActionPrompt(): React.ReactElement | null {
         <button type="button" className="spark-btn" disabled={busy} onClick={() => void decide("deny")}>
           Deny
         </button>
-        <button type="button" className="spark-btn is-primary" disabled={busy} onClick={() => void decide("allow")}>
-          Allow
+        <button type="button" className="spark-btn is-primary" disabled={busy} onClick={() => void decide("once")}>
+          Allow once
         </button>
       </div>
+      <button
+        type="button"
+        className="spark-btn tab-action-prompt__always"
+        disabled={busy}
+        title="Revoke it in Settings, Workspaces"
+        onClick={() => void decide("always")}
+      >
+        {tabActionAlwaysLabel(request)}
+      </button>
     </section>
   );
 }

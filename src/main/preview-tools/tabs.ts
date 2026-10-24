@@ -6,7 +6,7 @@
 import { groupLink, parseTabLink, tabLink, type TabLinkRef } from "@shared/tab-links";
 import type { TabActionKind } from "@shared/tab-actions";
 import { hasCrossWorkspaceGrant } from "../cross-workspace-ipc";
-import { askTabActionApproval } from "../tab-action-ipc";
+import { askTabActionApproval, hasTabActionGrant } from "../tab-action-ipc";
 import { decideTabAction, type TabActionCaller, type TabActionTarget } from "../tab-actions";
 import { requestTerminalOp } from "../terminal-bridge";
 import { loadState } from "../storage";
@@ -102,16 +102,24 @@ async function tabAction(params: Record<string, unknown>, _method: string, host:
   };
   const decision = await decideTabAction(action as TabActionKind, first.target, caller, first.activeWorkspaceId, deps);
   if (decision.kind === "refuse") return { ok: false, reason: decision.code, ...base, note: decision.reason };
-  let approved = false;
-  if (decision.approval) {
+  let approved: "card" | "grant" | null = null;
+  // A stored "Always allow" stands in for the card, except when closing
+  // would stop an agent or drop unsaved edits: the user sees those every time.
+  const losesWork = action === "close" && Boolean(decision.approval?.some((tab) => tab.warning));
+  if (decision.approval && !losesWork && (await hasTabActionGrant(caller.workspaceId, first.target.workspaceId))) {
+    approved = "grant";
+  } else if (decision.approval) {
     const answer = await askTabActionApproval({
       agent: located.by.label,
       action: action as TabActionKind,
+      callerWorkspaceId: caller.workspaceId,
+      callerName: await workspaceName(caller.workspaceId, host),
+      workspaceId: first.target.workspaceId,
       workspaceName: await workspaceName(first.target.workspaceId, host),
       groupName: first.target.group ? first.target.group.name || "unnamed group" : null,
       tabs: decision.approval,
     });
-    if (answer !== "allow") {
+    if (answer !== "once" && answer !== "always") {
       return {
         ok: false,
         reason: answer === "deny" ? "denied" : "no_answer",
@@ -119,22 +127,22 @@ async function tabAction(params: Record<string, unknown>, _method: string, host:
         note: answer === "deny" ? "The user said no. Do not ask again for these tabs unless they tell you to." : "The user did not answer in time. Ask them in your reply.",
       };
     }
-    approved = true;
+    approved = "card";
   }
   // The user may have closed or moved tabs while the card was open: act only
   // on what was asked for and is still there.
-  const now = approved ? (await resolve(ref)).target : first.target;
+  const now = approved === "card" ? (await resolve(ref)).target : first.target;
   const still = new Set(now?.tabs.map((tab) => tab.tabId) ?? []);
   const tabIds = decision.tabIds.filter((tabId) => still.has(tabId));
   if (tabIds.length === 0) return { ok: false, reason: "closed", ...base, note: "Those tabs closed while the user was deciding." };
   const skipped = decision.skipped.length > 0 ? { skipped: decision.skipped } : {};
   if (action === "close") {
     const result = await requestTerminalOp<{ closed?: string[] }>("tabAct", { action, workspaceId: first.target.workspaceId, tabIds });
-    return { ok: true, action, ...base, closed: result?.closed ?? [], ...(approved ? { approved } : {}), ...skipped };
+    return { ok: true, action, ...base, closed: result?.closed ?? [], ...(approved ? { approvedBy: approved } : {}), ...skipped };
   }
   const change = await requestTerminalOp<{ ok?: boolean; reason?: string }>("tabAct", { action, tabId: tabIds[0], direction });
   if (!change?.ok) return { ok: false, reason: "layout", ...base, note: change?.reason ?? `Codara could not ${action} that tab.` };
-  return { ok: true, action, ...base, ...(action === "split" ? { direction } : {}), ...(approved ? { approved } : {}) };
+  return { ok: true, action, ...base, ...(action === "split" ? { direction } : {}), ...(approved ? { approvedBy: approved } : {}) };
 }
 
 export const tabTools: PreviewToolTable = {

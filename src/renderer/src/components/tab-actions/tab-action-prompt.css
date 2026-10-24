@@ -60,3 +60,12 @@
 .tab-action-prompt__note {
   color: var(--ink);
 }
+
+/* The grant is a full-width line under Deny and Allow once: its label names
+   the workspace, so it would crowd the row. */
+.tab-action-prompt__always {
+  justify-self: stretch;
+  justify-content: center;
+  white-space: normal;
+  text-align: center;
+}
