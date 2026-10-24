@@ -1,4 +1,4 @@
-// codara_preview_code: the agent's JavaScript runs in a sandboxed session
+// codara_browser_use: the agent's JavaScript runs in a sandboxed session
 // (browser/code/) and every browser call it makes comes back here as an
 // ordinary preview.* call carrying the caller's identity, so the workspace
 // scoping, a run's own tabs, Chrome access, the block list and the dialog
@@ -9,6 +9,7 @@ import { createPreviewDOM } from "../../shared/preview-dom";
 import { createPreviewLocator } from "../../shared/preview-locator";
 import { createPreviewQuery, type LocatorOp, type LocatorStep } from "../../shared/preview-query";
 import { runBrowserCode } from "../browser/code/sessions";
+import { CDP_OWNER } from "./cdp";
 import { scopePreviewWorkspace } from "../preview-workspace";
 import { requireTarget } from "./core";
 import { PreviewToolParamsError, type PreviewToolHost, type PreviewToolTable } from "./types";
@@ -61,7 +62,9 @@ async function code(params: Record<string, unknown>, _method: string, host: Prev
       const inner: Record<string, unknown> = { ...args };
       for (const field of IDENTITY_FIELDS) delete inner[field];
       delete inner.codeSession;
-      return run(method, { ...inner, ...identity }, host);
+      const call: Record<string, unknown> = { ...inner, ...identity };
+      (call as { [CDP_OWNER]?: string })[CDP_OWNER] = key;
+      return run(method, call, host);
     },
   });
 }
@@ -96,7 +99,7 @@ export function codePreviewTools(run: PreviewToolRunner): PreviewToolTable {
     // call only finds the session.
     // Its tabs are whatever the snippet names, Chrome ones included, each
     // checked by its own call, so a stray tabId here is no reason to refuse.
-    "preview.code": { run: (params, method, host) => code(params, method, host, run), scope: "none", targets: "any", trustedRunsOnly: true },
+    "browser.use": { run: (params, method, host) => code(params, method, host, run), scope: "none", targets: "any", trustedRunsOnly: true },
     "preview.locate": { run: locate, targets: "any" },
   };
 }
