@@ -1,9 +1,12 @@
-// A terminal an agent opened stays that agent's after Codara restarts
-// (src/shared/agent-terminal-owner.ts): the owner record is saved with the
-// pane in the layout, survives persist and hydration, and lets the same run,
-// or the same resumed agent CLI session in the same workspace, adopt the
-// pane back into a fresh, empty ownership ledger and close it. Anyone else
-// still gets the old refusal.
+// A terminal an agent without a run opened belongs to that agent only: the
+// ledger (src/main/agent-terminal-registry.ts) records the opener's pane and
+// agent CLI session, so Codex in another pane, or a new agent started in the
+// opener's pane, cannot write to or close it. It stays that agent's after
+// Codara restarts (src/shared/agent-terminal-owner.ts): the owner record is
+// saved with the pane in the layout, survives persist and hydration, and
+// lets the same run, or the same resumed agent CLI session in the same
+// workspace, adopt the pane back into a fresh, empty ownership ledger and
+// close it. Anyone else still gets the refusal.
 //
 //   node scripts/test-agent-terminal-owner.cjs
 
@@ -86,29 +89,67 @@ async function main() {
   console.log("the record survives persist and hydration");
 
   const { AgentTerminalRegistry, AgentTerminalOwnershipError } = await load("src/main/agent-terminal-registry.ts");
-  const ledger = new AgentTerminalRegistry();
-  const restored = { paneId: saved.paneId, tabId: minted.tabId, workspaceId: "ws-a", agentOwner: saved.agentOwner };
   const stop = async () => {};
   const destroyTab = async () => ({ ok: true });
 
+  const opened = new AgentTerminalRegistry();
+  const claudeInA = { paneId: "pane-a", sessionId: "sess-claude" };
+  const codexInB = { paneId: "pane-b", sessionId: "sess-codex" };
+  opened.register({ paneId: "dev", tabId: "t-dev", runId: null, ownerPaneId: "pane-a", ownerSessionId: "sess-claude" });
+  assert.equal(opened.isActiveOwnedBy("dev", null, claudeInA), true, "the opener writes to it");
+  assert.equal(opened.isActiveOwnedBy("dev", null, codexInB), false, "an agent in another pane does not");
+  assert.equal(opened.isActiveOwnedBy("dev", null, null), false, "nor a caller outside any pane");
+  assert.equal(opened.isActiveOwnedBy("dev", null, { paneId: "pane-a", sessionId: "sess-codex" }), false, "nor a new agent started in the opener's pane");
+  assert.equal(opened.isActiveOwnedBy("dev", null, { paneId: "pane-c", sessionId: "sess-claude" }), true, "the same session resumed in another pane does");
+  assert.equal(opened.isActiveOwnedBy("dev", null, { paneId: "pane-a", sessionId: null }), true, "the opener's pane before its session is captured does");
+  assert.equal(opened.isActiveOwnedBy("dev", "run-1", claudeInA), false, "a run does not");
+  assert.deepEqual(opened.openerOf("dev"), { paneId: "pane-a", sessionId: "sess-claude" });
+  await assert.rejects(
+    opened.close({ paneId: "dev", runId: null, caller: codexInB, stop, destroyTab }),
+    AgentTerminalOwnershipError,
+    "codara_terminal_close refuses another agent",
+  );
+  assert.equal((await opened.close({ paneId: "dev", runId: null, caller: claudeInA, stop, destroyTab })).alreadyClosed, false);
+
+  opened.register({ paneId: "pane-only", tabId: "t-p", runId: null, ownerPaneId: "pane-a" });
+  assert.equal(opened.isActiveOwnedBy("pane-only", null, { paneId: "pane-a", sessionId: "sess-claude" }), true);
+  assert.equal(opened.isActiveOwnedBy("pane-only", null, codexInB), false, "an opener without a captured session is its pane");
+  opened.register({ paneId: "anon", tabId: "t-anon", runId: null });
+  assert.equal(opened.isActiveOwnedBy("anon", null, null), true, "a caller outside any pane owns what it opened outside one");
+  assert.equal(opened.isActiveOwnedBy("anon", null, claudeInA), false, "an agent in a pane does not own it");
+  assert.equal(opened.isActiveOwnedBy("anon", null, { paneId: null, sessionId: null }), true);
+  console.log("a run-less agent owns only what its own pane and session opened");
+
+  const ledger = new AgentTerminalRegistry();
+  const restored = { paneId: saved.paneId, tabId: minted.tabId, workspaceId: "ws-a", agentOwner: saved.agentOwner };
+
   assert.equal(ledger.knows(restored.paneId), false, "a relaunch starts with an empty ledger");
   await assert.rejects(
-    ledger.close({ paneId: restored.paneId, runId: null, callerPaneId: "pane-caller", stop, destroyTab }),
+    ledger.close({ paneId: restored.paneId, runId: null, caller: { paneId: "pane-caller", sessionId: claude.sessionId }, stop, destroyTab }),
     AgentTerminalOwnershipError,
-    "without adoption the old refusal stands",
+    "without adoption the refusal stands",
   );
   assert.equal(restoredAgentTerminal(restored, { ...sameSession, sessionId: "intruder", paneId: "pane-x" }), null);
   assert.equal(restoredAgentTerminal(restored, { runId: "run-7", sessionId: null, workspaceId: null, paneId: null }), null);
   const registration = restoredAgentTerminal(restored, { ...sameSession, paneId: "pane-caller" });
-  assert.deepEqual(registration, { paneId: restored.paneId, tabId: minted.tabId, runId: null, retention: "temporary" });
+  assert.deepEqual(registration, {
+    paneId: restored.paneId,
+    tabId: minted.tabId,
+    runId: null,
+    retention: "temporary",
+    ownerPaneId: "pane-caller",
+    ownerSessionId: claude.sessionId,
+  });
   ledger.register(registration);
-  assert.equal(ledger.isActiveOwnedBy(restored.paneId, null, "pane-caller"), true, "the resumed agent writes to it again");
-  const closed = await ledger.close({ paneId: restored.paneId, runId: null, callerPaneId: "pane-caller", stop, destroyTab });
+  const resumed = { paneId: "pane-caller", sessionId: claude.sessionId };
+  assert.equal(ledger.isActiveOwnedBy(restored.paneId, null, resumed), true, "the resumed agent writes to it again");
+  assert.equal(ledger.isActiveOwnedBy(restored.paneId, null, { paneId: "pane-other", sessionId: "sess-codex" }), false, "another agent still may not");
+  const closed = await ledger.close({ paneId: restored.paneId, runId: null, caller: resumed, stop, destroyTab });
   assert.equal(closed.alreadyClosed, false, "and closes it");
   assert.equal(ledger.knows(restored.paneId), true, "a closed pane is never adopted again");
 
   const elsewhere = restoredAgentTerminal({ ...restored, workspaceId: "ws-b" }, { ...sameSession, paneId: "pane-caller" });
-  assert.equal(elsewhere.ownerPaneId, "pane-caller", "a pane opened in another workspace is steered by its opener's pane again");
+  assert.equal(elsewhere.ownerSessionId, claude.sessionId, "a pane opened in another workspace is steered by its opener again");
   const run = restoredAgentTerminal({ ...restored, agentOwner: cora }, { runId: "run-7", sessionId: null, workspaceId: null, paneId: null });
   assert.deepEqual(run, { paneId: restored.paneId, tabId: minted.tabId, runId: "run-7", retention: "service" });
   console.log("after a restart the opener adopts and closes its pane; others are refused");

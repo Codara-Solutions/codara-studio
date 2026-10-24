@@ -639,14 +639,24 @@ not the caller's. Always is kept per caller and target workspace pair in
 `<codara home>/cross-workspace-grants.json`, and Settings, Agents, Terminals
 in other workspaces lists each pair with Revoke, and updates while open.
 
-The new tab carries a small "from <caller>" label. The pane that opened it
-owns it: only that pane may `codara_terminal_write` to it, run in it with
-`codara_terminal_run` or close it, while `codara_terminal_read` works as for
-any pane. Once the opening pane is closed, the terminal follows the rule for
-every terminal opened outside a run. A pane that is asleep (hibernated) or
-restarting its agent is not closed: it keeps its terminals. A Cora run's terminal stays owned by the
-run and closes with it. The
-result adds `workspaceId` and the workspace's name.
+The new tab carries a small "from <caller>" label. It is owned like any
+terminal an agent opens (below). The result adds `workspaceId` and the
+workspace's name.
+
+### Who owns an agent's terminal
+
+A terminal an agent without a run opens belongs to that agent: Codara records
+the pane it runs in and the agent CLI session it captured there. Only that
+agent may `codara_terminal_write` to it, run in it with `codara_terminal_run`,
+close it with `codara_terminal_close`, or close and move it with `codara_tab`
+without the user's approval; `codara_terminal_read` works as for any pane.
+Another agent in another pane, or a new agent started in the opener's pane,
+is refused. When both sessions are known the session decides, so the same
+session resumed in another pane keeps its terminals; before the session is
+captured the pane decides. A terminal opened by a caller outside any pane
+(the `cora` CLI) belongs to such callers only. A Cora run's terminal stays
+owned by the run and closes with it. A dev server Codara keeps
+(`codara_terminal_servers`) belongs to its workspace.
 
 ### Tab groups
 

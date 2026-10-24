@@ -56,12 +56,13 @@ export interface RestoredAgentTerminal {
   runId: string | null;
   retention: "temporary" | "service";
   ownerPaneId?: string;
+  ownerSessionId?: string;
 }
 
 // The ledger entry to admit for a restored pane the caller asks about, or
-// null when its saved owner is someone else. A run-less agent that opened
-// the pane in another workspace becomes its owner pane again, as when it
-// created it there.
+// null when its saved owner is someone else. A run-less agent's session, and
+// the pane it now runs in, become the opener again, as when it created the
+// pane, so no other agent inherits it.
 export function restoredAgentTerminal(
   pane: { paneId: string; tabId: string; workspaceId: string; agentOwner?: unknown },
   caller: TerminalAgentCaller & { paneId: string | null },
@@ -73,6 +74,7 @@ export function restoredAgentTerminal(
     tabId: pane.tabId,
     runId: owner.runId ?? null,
     retention: owner.retention ?? "temporary",
-    ...(!owner.runId && caller.paneId && owner.workspaceId !== pane.workspaceId ? { ownerPaneId: caller.paneId } : {}),
+    ...(!owner.runId && caller.paneId ? { ownerPaneId: caller.paneId } : {}),
+    ...(owner.sessionId ? { ownerSessionId: owner.sessionId } : {}),
   };
 }

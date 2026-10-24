@@ -22,12 +22,19 @@ export interface AgentTerminalRegistration {
    */
   retention?: AgentTerminalRetention;
   /**
-   * The pane of the run-less agent that opened this terminal in another
-   * workspace. Only that pane may write to or close it, so a pane opened
-   * across workspaces is steered by the agent that asked for it rather than
-   * by every agent of the user.
+   * The pane and agent CLI session of the run-less agent that opened this
+   * terminal. Only that agent may write to or close it, so one agent of the
+   * user cannot steer or close a terminal another agent opened. A terminal
+   * with neither was opened by a caller outside any pane.
    */
   ownerPaneId?: string;
+  ownerSessionId?: string;
+}
+
+/** Who asks about a run-less terminal: the pane it runs in and its agent CLI session, when known. */
+export interface AgentTerminalCaller {
+  paneId?: string | null;
+  sessionId?: string | null;
 }
 
 export interface AgentTerminalSnapshot extends AgentTerminalRegistration {
@@ -63,6 +70,7 @@ interface ActiveAgentTerminal {
   runId: string | null;
   retention: AgentTerminalRetention;
   ownerPaneId?: string;
+  ownerSessionId?: string;
   /**
    * A dev server was found running here (src/main/servers/), so no run's
    * cleanup closes the pane any more. It stays writable by the run that made
@@ -74,8 +82,16 @@ interface ActiveAgentTerminal {
   closePromise?: Promise<AgentTerminalCloseResult>;
 }
 
-function paneOwnerMatches(terminal: ActiveAgentTerminal, callerPaneId: string | null): boolean {
-  return !terminal.ownerPaneId || terminal.runId !== null || terminal.ownerPaneId === callerPaneId;
+// A known session decides on both sides, because a new agent started in the
+// opener's pane keeps the pane id but not the session. The pane decides only
+// while one side's session is not captured yet.
+function openerMatches(terminal: ActiveAgentTerminal, caller: AgentTerminalCaller | null): boolean {
+  if (terminal.runId !== null) return true;
+  const paneId = caller?.paneId ?? null;
+  const sessionId = caller?.sessionId ?? null;
+  if (!terminal.ownerPaneId && !terminal.ownerSessionId) return !paneId && !sessionId;
+  if (terminal.ownerSessionId && sessionId) return terminal.ownerSessionId === sessionId;
+  return Boolean(terminal.ownerPaneId) && terminal.ownerPaneId === paneId;
 }
 
 export class AgentTerminalOwnershipError extends Error {
@@ -112,34 +128,32 @@ export class AgentTerminalRegistry {
     return this.active.has(paneId) || this.exited.has(paneId) || this.closed.has(paneId);
   }
 
-  isActiveOwnedBy(paneId: string, runId: string | null, callerPaneId: string | null = null): boolean {
+  isActiveOwnedBy(paneId: string, runId: string | null, caller: AgentTerminalCaller | null = null): boolean {
     const terminal = this.active.get(paneId);
     if (!terminal) return false;
-    if (terminal.workspaceOwned === true && terminal.adoptedFromRunId === runId) return true;
-    return terminal.runId === runId && paneOwnerMatches(terminal, callerPaneId);
-  }
-
-  /** The pane that must be the caller to steer this terminal, when one is recorded. */
-  ownerPaneOf(paneId: string): string | null {
-    const terminal = this.active.get(paneId) ?? this.exited.get(paneId);
-    return terminal && terminal.runId === null && terminal.ownerPaneId ? terminal.ownerPaneId : null;
+    if (terminal.workspaceOwned === true) return runId === null || terminal.adoptedFromRunId === runId;
+    return terminal.runId === runId && openerMatches(terminal, caller);
   }
 
   /**
-   * The pane that opened this terminal is gone: fall back to the rule for
-   * every run-less terminal rather than leave it unmanageable by any agent.
+   * The run-less agent recorded as this terminal's opener, or null when a
+   * run or the workspace owns it, or a caller outside any pane opened it.
+   * Callers resolve their own pane and session only when this is set.
    */
-  releasePaneOwner(paneId: string): void {
+  openerOf(paneId: string): { paneId: string | null; sessionId: string | null } | null {
     const terminal = this.active.get(paneId) ?? this.exited.get(paneId);
-    if (terminal) delete terminal.ownerPaneId;
+    if (!terminal || terminal.runId !== null || terminal.workspaceOwned) return null;
+    if (!terminal.ownerPaneId && !terminal.ownerSessionId) return null;
+    return { paneId: terminal.ownerPaneId ?? null, sessionId: terminal.ownerSessionId ?? null };
   }
 
-  /** Active panes a run-less agent's pane opened in other workspaces. */
-  listOwnedByPane(callerPaneId: string): AgentTerminalRegistration[] {
+  /** Active run-less terminals this caller opened. */
+  listOpenedBy(caller: AgentTerminalCaller): AgentTerminalRegistration[] {
     const owned: AgentTerminalRegistration[] = [];
+    if (!caller.paneId && !caller.sessionId) return owned;
     for (const terminal of this.active.values()) {
-      if (terminal.ownerPaneId !== callerPaneId || terminal.runId !== null) continue;
-      owned.push({ paneId: terminal.paneId, tabId: terminal.tabId, runId: null, ownerPaneId: callerPaneId });
+      if (terminal.runId !== null || terminal.workspaceOwned || !openerMatches(terminal, caller)) continue;
+      owned.push({ paneId: terminal.paneId, tabId: terminal.tabId, runId: null });
     }
     return owned;
   }
@@ -158,6 +172,7 @@ export class AgentTerminalRegistry {
     terminal.retention = "service";
     terminal.workspaceOwned = true;
     delete terminal.ownerPaneId;
+    delete terminal.ownerSessionId;
     return true;
   }
 
@@ -211,7 +226,7 @@ export class AgentTerminalRegistry {
   async close(input: {
     paneId: string;
     runId: string | null;
-    callerPaneId?: string | null;
+    caller?: AgentTerminalCaller | null;
     stop: () => void | Promise<void>;
     destroyTab: (registration: AgentTerminalRegistration) => void | Promise<void>;
   }): Promise<AgentTerminalCloseResult> {
@@ -231,11 +246,15 @@ export class AgentTerminalRegistry {
       return { paneId: input.paneId, alreadyClosed: true };
     }
 
-    if (!registration.workspaceOwned || registration.adoptedFromRunId !== input.runId) {
+    if (registration.workspaceOwned) {
+      if (input.runId !== null && registration.adoptedFromRunId !== input.runId) {
+        this.assertSameOwner(registration.runId, input.runId);
+      }
+    } else {
       this.assertSameOwner(registration.runId, input.runId);
-      if (!paneOwnerMatches(registration, input.callerPaneId ?? null)) {
+      if (!openerMatches(registration, input.caller ?? null)) {
         throw new AgentTerminalOwnershipError(
-          "terminal.close cannot close a terminal another agent opened in a different workspace",
+          "terminal.close cannot close a terminal another agent opened",
         );
       }
     }
