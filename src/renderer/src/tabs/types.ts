@@ -163,6 +163,10 @@ export interface TerminalLeaf {
   // unrelated sibling panes. Cold hydration strips it before spawning a fresh
   // local shell.
   origin?: TerminalLeafOrigin;
+  // Runtime-only: the workspace whose agent opened this pane from there
+  // (codara_terminal_create with `workspace`), shown on the tab. Stripped on
+  // persist like origin, since a relaunch starts a fresh shell.
+  openedBy?: string;
   // Runtime scrollback snapshot used to preserve context while panes move
   // between mounted workspace layers. Cold hydration strips it, so a full app
   // relaunch always starts with a clean shell.

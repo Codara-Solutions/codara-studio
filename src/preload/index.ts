@@ -53,6 +53,7 @@ import { skillOriginsApi } from "./areas/skill-origins";
 import { terminalScrollbackApi } from "./areas/terminal-scrollback";
 import { agentHibernationApi } from "./areas/agent-hibernation";
 import { worktreeCleanupApi } from "./areas/worktree-cleanup";
+import { crossWorkspaceApi } from "./areas/cross-workspace";
 import { worktreeSetupApi } from "./areas/worktree-setup";
 import { portsApi } from "./areas/ports";
 import { shareApi } from "./areas/share";
@@ -142,6 +143,7 @@ import type {
   GitFileChange,
   GitLog,
   GitOpResult,
+  GitRemoveWorktreeResult,
   GitRemoteUpdatedPayload,
   GitStashList,
   GitStatus,
@@ -948,7 +950,7 @@ const api = {
       branch: string;
       force?: boolean;
       deleteBranch?: boolean;
-    }): Promise<GitOpResult> => ipcRenderer.invoke("git:removeCopyWorktree", input),
+    }): Promise<GitRemoveWorktreeResult> => ipcRenderer.invoke("git:removeCopyWorktree", input),
 
     // Stash
     stashes: (cwd: string): Promise<GitStashList> => ipcRenderer.invoke("git:stashes", cwd),
@@ -1816,6 +1818,7 @@ const api = {
   review: reviewApi,
   terminalScrollback: terminalScrollbackApi,
   worktreeCleanup: worktreeCleanupApi,
+  crossWorkspace: crossWorkspaceApi,
   featureTips: featureTipsApi,
   ports: portsApi,
   sessionSearch: sessionSearchApi,

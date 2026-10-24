@@ -408,6 +408,7 @@ import type {
   GitFileChange,
   GitLog,
   GitOpResult,
+  GitRemoveWorktreeResult,
   GitStashList,
   GitStatus,
   LaunchWorkerAttemptInput,
@@ -505,6 +506,7 @@ import {
 } from "./terminal-scrollback";
 import { agentPaneAsleep, registerAgentHibernationIpc } from "./agent-hibernation";
 import { registerWorktreeCleanupIpc } from "./worktree-cleanup";
+import { registerCrossWorkspaceIpc } from "./cross-workspace-ipc";
 import { registerWorktreeSetupIpc } from "./worktree-setup";
 import { registerPortForwardIpc } from "./remote/port-forward-runtime";
 import { registerShareIpc } from "./share/ipc";
@@ -2565,7 +2567,7 @@ export function registerIpc(): void {
         force?: boolean;
         deleteBranch?: boolean;
       },
-    ): Promise<GitOpResult> => {
+    ): Promise<GitRemoveWorktreeResult> => {
       const { removeCopyWorktree } = await getGitWorktrees();
       const result = await removeCopyWorktree(input, {
         // A shell or agent pane whose cwd is the worktree holds the directory
@@ -4145,6 +4147,7 @@ export function registerIpc(): void {
   registerTerminalScrollbackIpc(handle);
   registerAgentHibernationIpc(handle);
   registerWorktreeCleanupIpc(handle);
+  registerCrossWorkspaceIpc(handle);
   registerFeatureTipsIpc(handle);
   registerPortForwardIpc(handle);
   registerShareIpc(handle);

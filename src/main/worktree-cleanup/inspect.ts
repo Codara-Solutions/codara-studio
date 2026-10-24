@@ -6,6 +6,7 @@ import type { AppState, RunState, Workspace } from "@shared/types";
 import type {
   WorktreeCleanupCode,
   WorktreeInUse,
+  WorktreeInUseKind,
   WorktreeLinkedWorkspace,
   WorktreeLocalWork,
   WorktreeMergeProof,
@@ -308,6 +309,11 @@ function shortBranch(target: string): string {
   return target.replace(/^[^/]+\//, "");
 }
 
+/** A long-lived branch, or the base itself, which cleanup never deletes even when merged. */
+export function isKeptBranch(branch: string, target: string | undefined | null): boolean {
+  return PROTECTED_BRANCHES.has(branch) || branch === shortBranch(target ?? "");
+}
+
 // ── Linked workspaces ──────────────────────────────────────────────────────
 
 /** Each Codara workspace of the repository, under the deepest worktree that holds its folder. */
@@ -542,6 +548,9 @@ export interface CheckContext {
   usage: UsageContext;
   linked: Map<string, Workspace[]>;
   regenerable: string[];
+  // Uses the caller accepts, such as the workspace's own idle shells when
+  // the user clicked Clean up on its row. Every other use still blocks.
+  allowInUse?: ReadonlySet<WorktreeInUseKind>;
 }
 
 function block(check: WorktreeRemovalCheck, code: WorktreeCleanupCode, message: string): void {
@@ -631,7 +640,9 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
   // drive that is not mounted), so a locked one stays even when it looks gone.
   if (registration.locked) block(check, "LOCKED", "Locked with git worktree lock. Unlock it first.");
   if (stat === null) check.alreadyRemoved = true;
-  const uses = await usageOf(ctx.usage, registration.path, real, workspaces);
+  const uses = (await usageOf(ctx.usage, registration.path, real, workspaces)).filter(
+    (use) => !ctx.allowInUse?.has(use.kind),
+  );
   if (uses.length) block(check, "IN_USE", `In use: ${uses.map((use) => use.label).join(", ")}.`);
 
   const target = await targetFor(repo, workspaces.find((workspace) => workspace.copyBranch) ?? null);
@@ -650,8 +661,7 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
       commits,
     };
   }
-  check.branchDeletable =
-    Boolean(branch) && merge.state === "merged" && !PROTECTED_BRANCHES.has(branch!) && branch !== shortBranch(merge.target ?? "");
+  check.branchDeletable = Boolean(branch) && merge.state === "merged" && !isKeptBranch(branch!, merge.target);
 
   if (check.alreadyRemoved) return finish();
 

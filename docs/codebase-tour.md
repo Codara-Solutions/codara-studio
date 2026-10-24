@@ -207,6 +207,9 @@ interactive Claude Code, Codex, Grok or Pi sessions for you to drive
 `codara_terminal_create` opens a terminal the agent drives itself, for
 example to run a dev server; `agent-terminal-registry.ts` and
 `agent-terminal-lifecycle.ts` track those and close them when the run ends.
+With `workspace` it opens in another workspace after the user's one-time
+approval (`cross-workspace-terminals.ts` resolves and gates the target,
+`cross-workspace-ipc.ts` shows the prompt and keeps the "Always" grants).
 
 **Which Pi runs Cora.** `resolveCodaraPiRuntime` in `pi-runtime-electron.ts`
 picks the user's own Pi install (`npm install -g
@@ -541,7 +544,7 @@ Debugging:
 | Workflows | `workflow-driver.ts` (runs), `workflow-runtime.ts` (script API, journal) | `components/workflows/`; `test-workflow-*`, `tests/e2e/workflow-run.spec.ts` |
 | Git or GitHub features | `src/main/git-*.ts`, `src/main/github-*.ts` | `components/git/` |
 | Worktrees agents create and remove | `src/main/agent-worktrees.ts` (the policy, no Electron) | The `worktree.*` handlers in `agent-socket.ts`; `workspace-state-edits.ts`; `test-agent-worktrees`, `tests/e2e/agent-worktree.spec.ts` |
-| Clean up worktrees | `src/main/worktree-cleanup/` (`inspect.ts` the facts and the full check, `scan.ts` the list, `remove.ts` the guarded removal, `space.ts` sizes; only `index.ts` touches Electron) | `src/shared/worktree-cleanup.ts` (filters, the removal outlook); `components/worktree-cleanup/`; `test-worktree-cleanup`, `tests/e2e/worktree-cleanup.spec.ts` |
+| Clean up worktrees | `src/main/worktree-cleanup/` (`inspect.ts` the facts and the full check, `scan.ts` the list, `remove.ts` the guarded removal, `rail.ts` the rail's merged mark, Clean up and automatic cleanup of missing folders, `space.ts` sizes; only `index.ts` touches Electron) | `src/shared/worktree-cleanup.ts` (filters, the removal outlook); `components/worktree-cleanup/`, `git/useWorktreeRailStates.ts` (the rail); `test-worktree-cleanup`, `test-worktree-rail-cleanup`, `tests/e2e/worktree-cleanup.spec.ts`, `tests/e2e/worktree-rail-cleanup.spec.ts` |
 | What a new worktree gets (copied files, links, setup commands) | `src/main/worktree-setup/` (`service.ts` runs it, `plan.ts` and `materialize.ts` decide and copy), `src/shared/worktree-setup.ts` (the file format) | `components/worktree-setup/` (the tray, the log, the setup file dialog); `test-worktree-setup`, `tests/e2e/worktree-setup.spec.ts`; [worktree-setup.md](./worktree-setup.md) |
 | The phone protocol | `remote-access/rpc.ts` | `production.ts`; the interop suites in [scripts/README.md](../scripts/README.md#remote-access-phone-and-ssh-workspaces) |
 | The Claude Code hook | `src/main/hook-installer.ts` | `resources/claude-hooks/codara-hook.py`, `hook-watcher.ts` |

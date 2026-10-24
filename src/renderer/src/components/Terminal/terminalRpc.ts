@@ -100,6 +100,7 @@ async function create(params: Record<string, unknown>): Promise<unknown> {
   const origin = readPhoneOrigin(params.origin);
   const requestedFromPane = params.requestedFromPane === true;
   const groupName = readString(params, "group");
+  const openedBy = readString(params, "openedBy");
   return createAgentTerminal({
     cwd: cwd ?? undefined,
     command: command ?? undefined,
@@ -111,6 +112,7 @@ async function create(params: Record<string, unknown>): Promise<unknown> {
     origin: origin ?? undefined,
     ...(requestedFromPane ? { requestedFromPane } : {}),
     ...(groupName ? { group: groupName } : {}),
+    ...(openedBy ? { openedBy: openedBy.slice(0, 200) } : {}),
   });
 }
 
