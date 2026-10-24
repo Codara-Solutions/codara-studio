@@ -1,4 +1,4 @@
-// codara_preview_code: the agent's JavaScript runs in a sandboxed session
+// codara_browser_use: the agent's JavaScript runs in a sandboxed session
 // (browser/code/) and every browser call it makes comes back here as an
 // ordinary preview.* call carrying the caller's identity, so the workspace
 // scoping, a run's own tabs, Chrome access, the block list and the dialog
@@ -96,7 +96,7 @@ export function codePreviewTools(run: PreviewToolRunner): PreviewToolTable {
     // call only finds the session.
     // Its tabs are whatever the snippet names, Chrome ones included, each
     // checked by its own call, so a stray tabId here is no reason to refuse.
-    "preview.code": { run: (params, method, host) => code(params, method, host, run), scope: "none", targets: "any", trustedRunsOnly: true },
+    "browser.use": { run: (params, method, host) => code(params, method, host, run), scope: "none", targets: "any", trustedRunsOnly: true },
     "preview.locate": { run: locate, targets: "any" },
   };
 }

@@ -11,6 +11,7 @@ import { workspaceDataDir } from "../workspace-data";
 export type BrowserArtifactKind =
   | "screenshots"
   | "network"
+  | "cdp"
   | "console"
   | "snapshots"
   | "audits"
