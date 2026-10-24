@@ -1,8 +1,7 @@
 # Machines: other computers as extra compute (plan)
 
-Status: plan only, no app code yet. Written 2026-10-25 on branch
-`feat/machines` (off `Cora`). Waiting for Etienne's pick on the decisions at
-the end.
+Status: plan approved 2026-10-25 (decisions in section 10). Phases 1 and 2
+are being built, each as its own PR against `Cora`.
 
 The goal, in Etienne's words: "a way to connect servers or an old computer I
 have at home and use them as extra compute from Codara Studio, or even agent
@@ -311,26 +310,25 @@ auto-merge.
 | | Home machine / old laptop | Docker sandbox | Codara Cloud box |
 |---|---|---|---|
 | Who pays for the hardware | the user | the user (it runs on one of their machines) | Codara, recovered through the plan |
-| Reach | SSH, Tailscale, later relay | through its machine | through platform-api only, never public |
+| Reach | LAN, Tailscale or plain SSH | through its machine | through platform-api only, never public |
 | Always on | if the user leaves it on | idle-stop | sleeps after idle (default 30 min), wakes on connect |
 | Isolation | the user's own box | container | gVisor, dedicated nodes |
 | In Studio | the same row, the same "Run on" picker, the same agents |||
 
 Studio treats all three the same way, which is the point: one list, one
-picker. That raises a question that is **Etienne's call, not an
-engineering one**:
+picker.
 
-> Bring-your-own machines make Studio more useful and are free to Codara to
-> run. They may also make some users need a Cloud box less. Should "use your
-> own machines" be free in Studio for everyone, with Cloud boxes as the paid
-> "no machine at home, or want it isolated and always reachable" option? And
-> should per-task Cloud sandboxes (a box per Cora worker, created and deleted
-> automatically) be part of the box allowance in plans, or not offered yet?
+**Decided (Etienne, 2026-10-25): using your own machines is free for every
+Studio user.** They connect over the LAN, Tailscale or plain SSH, straight
+from Studio to the machine, so Codara carries no traffic and runs nothing
+for them. Codara Cloud boxes stay the paid option for people with no machine
+of their own, or who want one that is isolated and always reachable.
+Per-task Cloud sandboxes (a box per Cora worker, created and deleted
+automatically) are decided later.
 
-Cost flags: home machines and local sandboxes cost Codara nothing. Relay
-pairing (decision 3) puts machine traffic through Codara's relay, which
-today is sized and capped for phones. Per-task Cloud sandboxes create and
-delete boxes often; each box home is a Hetzner Volume with a 10 GB minimum.
+Cost note for that later decision: per-task Cloud sandboxes create and
+delete boxes often, and each box home is a Hetzner Volume with a 10 GB
+minimum.
 
 ## 8. Scheduling
 
@@ -358,20 +356,25 @@ preference until phase 2 ships.
 | **4. Cora workers on a machine** | "Run on" for runs and steps, remote worktrees and setup, remote worker PTYs, reports through the machine token, `git fetch` of results, worker diff for remote attempts. | Large: 2 to 3 PRs, about 2 weeks | Extend `test-step-lifecycle` and `test-loom-steps` with a fake remote transport; container smoke: a two-step run with one worker on the container, result fetched and reviewed. |
 | **5. Sandboxes** | Docker sandboxes on this computer or a machine, the `codara-sandbox` image, direct-tcpip hop, idle-stop, stop, archive, delete; imported pull request runs can choose a sandbox. | Medium to large: 2 PRs, about 1 week | Container-in-container is avoided: tests run the sandbox on this computer's Docker headless. Lifecycle state machine unit tests; smoke: create, idle-stop after a shortened timeout, wake, archive, delete. |
 | **6. Anywhere with room** | Opt-in automatic placement for new agents and Cora steps. | Small: 1 PR, about 2 days | Unit: placement rule over recorded machine snapshots. |
-| Later | Relay pairing for NAT machines without Tailscale (decision 3); per-task Cloud box sandboxes (business decision); a whole Cora run on a machine. | | |
+| Later | Relay pairing for NAT machines without Tailscale (see below); per-task Cloud box sandboxes (decided later); a whole Cora run on a machine. | | |
+
+**Later option: relay pairing on Codara Cloud.** For a machine behind NAT
+with no Tailscale, the helper could pair through a relay like the phone's
+(outbound connections on both sides, Noise IK end to end). Today's relay is
+sized and capped for phones. If it is built, it could run on Codara Cloud,
+which has large unused egress: Hetzner includes 20 TB of traffic per server,
+then 1 EUR per TB. Not planned now: Tailscale and SSH cover the case.
 
 No phase touches Etienne's real servers or `~/.ssh/config`: every test and
 smoke uses a throwaway sshd container and a temporary Codara home.
 
-## 10. Decisions for Etienne
+## 10. Decisions (Etienne, 2026-10-25)
 
-1. **First build.** Recommended: phases 1 and 2 now (agents on an SSH host,
-   then the Machines list), about a week of work in 2 to 3 PRs, then decide
-   on the helper. Alternative: go straight to the helper (phase 3) and skip
-   the tmux step.
-2. **Business: own machines and Cloud boxes.** Is "use your own machines"
-   free in Studio for everyone, and are per-task Cloud sandboxes part of the
-   box allowance, later, or not at all? (Section 7.)
-3. **Machines behind NAT.** Recommended: Tailscale and plain SSH only for
-   now (no Codara cost, no new code). Alternative: build relay pairing
-   through Codara's relay (more work, Codara carries the traffic).
+1. **First build: phases 1 and 2** (agents on an SSH host, then the
+   Machines list), each as its own PR against `Cora`, behind the `machines`
+   preference until phase 2 ships.
+2. **Using your own machines is free for every Studio user**, over the LAN,
+   Tailscale or plain SSH, so Codara carries no traffic (section 7).
+   Per-task Cloud sandboxes are decided later.
+3. **Machines behind NAT: Tailscale and SSH only for now.** Relay pairing
+   stays a later option, possibly hosted on Codara Cloud (section 9).

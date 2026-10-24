@@ -118,13 +118,13 @@
 </head>
 <body>
 <main>
-  <div class="meta">Codara Studio · plan only, nothing built yet · 25 Oct 2026 · branch feat/machines</div>
+  <div class="meta">Codara Studio · plan approved, phases 1 and 2 in progress · 25 Oct 2026 · branch feat/machines</div>
   <h1>Machines</h1>
   <p class="lede">Use a home server, an old laptop, a Codara Cloud box or a throwaway sandbox as extra compute. Agents and Cora workers run there; their terminals, files, ports and previews show up in Studio as if they were local. The full plan is <code>docs/machines-plan.md</code>.</p>
   <nav class="toc">
     <a href="#how">How it fits</a><a href="#list">Machines list</a><a href="#run">Running work there</a>
     <a href="#sandbox">Sandboxes</a><a href="#security">Security</a><a href="#cloud">Cloud boxes</a>
-    <a href="#phases">Build plan</a><a href="#decide">Your 3 decisions</a>
+    <a href="#phases">Build plan</a><a href="#decide">Decisions</a>
   </nav>
 
   <h2 id="how">How it fits together</h2>
@@ -243,7 +243,7 @@
         <li><b>SSH host or alias</b> from <code>~/.ssh/config</code>, or <code>user@host</code>.</li>
         <li><b>Tailscale name</b>, like <code>nas.tail1234.ts.net</code>. Nothing extra to install in Studio.</li>
         <li><b>Codara Cloud box</b>, from the existing picker.</li>
-        <li><b>Pair through the relay</b> for a machine behind NAT, later (your decision 3).</li>
+        <li><b>Pair through the relay</b> for a machine behind NAT: a later option, not planned now.</li>
       </ol>
     </div>
     <div class="card">
@@ -346,7 +346,7 @@
       <tr><td>Codara's cost</td><td>none</td><td>none</td><td>server + 10 GB volume per box</td></tr>
     </table>
   </div>
-  <p>Studio treats all three the same way: one list, one picker. That makes the business question yours (decision 2).</p>
+  <p>Studio treats all three the same way: one list, one picker. Using your own machines is free for every Studio user: Codara carries no traffic.</p>
 
   <h2 id="phases">Build plan</h2>
   <div class="phases">
@@ -359,22 +359,11 @@
   </div>
   <p class="note">Every test runs headless against a throwaway SSH container and a temporary Codara home. None touches your real servers or SSH config.</p>
 
-  <h2 id="decide">Your 3 decisions</h2>
+  <h2 id="decide">Decided (25 Oct 2026)</h2>
   <div class="dec">
-    <div class="card">
-      <h4>What do we build first?</h4>
-      <p class="opt"><b>A.</b> Phases 1 and 2: agents on an SSH host, then the Machines list. About a week, 2 to 3 PRs. <span class="rec">Recommended</span></p>
-      <p class="opt"><b>B.</b> Go straight to the helper (phase 3) and skip the tmux step.</p>
-    </div>
-    <div class="card">
-      <h4>Business: your own machines next to Cloud boxes</h4>
-      <p class="opt">Is "use your own machines" free in Studio for everyone, with Cloud boxes as the paid "always reachable, isolated, no hardware" option? And are per-task Cloud sandboxes (a box per Cora worker, made and deleted automatically) part of the box allowance, later, or not offered? <b>Your call.</b></p>
-    </div>
-    <div class="card">
-      <h4>Machines behind NAT</h4>
-      <p class="opt"><b>A.</b> Tailscale and plain SSH only for now. No cost to Codara, no new code. <span class="rec">Recommended</span></p>
-      <p class="opt"><b>B.</b> Build pairing through Codara's relay. More work, and Codara carries the traffic.</p>
-    </div>
+    <div class="card"><h4>Build phases 1 and 2 now</h4><p class="opt">Agents on an SSH host, then the Machines list, each as its own PR against Cora, behind the machines preference until phase 2 ships.</p></div>
+    <div class="card"><h4>Your own machines are free for every Studio user</h4><p class="opt">They connect over the LAN, Tailscale or plain SSH, so Codara carries no traffic. Per-task Cloud sandboxes are decided later.</p></div>
+    <div class="card"><h4>Machines behind NAT: Tailscale and SSH only for now</h4><p class="opt">Relay pairing stays a later option. It could run on Codara Cloud, which has large unused egress (Hetzner includes 20 TB per server, then 1 EUR per TB).</p></div>
   </div>
 </main>
 </body>
