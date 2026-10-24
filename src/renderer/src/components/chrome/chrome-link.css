@@ -45,6 +45,15 @@
   gap: 8px;
 }
 
+/* Seconds left on a card that times out; it sits left of the buttons. */
+.chrome-pairing__countdown {
+  margin-right: auto;
+  align-self: center;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
 .chrome-steps {
   margin: 0;
   padding-left: 18px;

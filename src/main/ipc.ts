@@ -505,6 +505,7 @@ import {
 } from "./terminal-scrollback";
 import { agentPaneAsleep, registerAgentHibernationIpc } from "./agent-hibernation";
 import { registerWorktreeCleanupIpc } from "./worktree-cleanup";
+import { registerCrossWorkspaceIpc } from "./cross-workspace-ipc";
 import { registerWorktreeSetupIpc } from "./worktree-setup";
 import { registerPortForwardIpc } from "./remote/port-forward-runtime";
 import { registerShareIpc } from "./share/ipc";
@@ -4144,6 +4145,7 @@ export function registerIpc(): void {
   registerTerminalScrollbackIpc(handle);
   registerAgentHibernationIpc(handle);
   registerWorktreeCleanupIpc(handle);
+  registerCrossWorkspaceIpc(handle);
   registerFeatureTipsIpc(handle);
   registerPortForwardIpc(handle);
   registerShareIpc(handle);

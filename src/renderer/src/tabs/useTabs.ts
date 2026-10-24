@@ -605,6 +605,7 @@ export function cleanupTransientTerminalState(node: PaneNode): void {
     delete node.worker;
     delete node.autorun;
     delete node.origin;
+    delete node.openedBy;
     delete node.nativeClaudeProfileId;
     // A sleeping pane is process state of the run that put it to sleep.
     delete node.hibernation;
@@ -736,6 +737,7 @@ export function stripTransientPaneState(node: PaneNode, keepAgentState = false):
       !("worker" in node) &&
       !("autorun" in node) &&
       !("origin" in node) &&
+      !("openedBy" in node) &&
       !("nativeClaudeProfileId" in node) &&
       !("bootResume" in node) &&
       !("hibernation" in node) &&
@@ -747,6 +749,7 @@ export function stripTransientPaneState(node: PaneNode, keepAgentState = false):
       worker: _worker,
       autorun: _autorun,
       origin: _origin,
+      openedBy: _openedBy,
       nativeClaudeProfileId: _nativeClaudeProfileId,
       bootResume: _bootResume,
       hibernation: _hibernation,
@@ -1088,6 +1091,8 @@ export interface AgentTerminalTabOptions {
   title?: string;
   color?: string;
   origin?: TerminalLeafOrigin;
+  // The caller's workspace when an agent opened this tab from another one.
+  openedBy?: string;
   nativeClaudeProfileId?: string;
   nativeGrokProfileId?: string;
   // Opened at the request of a program in one of the user's own panes
@@ -1124,6 +1129,7 @@ export function appendAgentTerminalToWorkspaceLayout(
     title: options?.title?.trim() || "terminals",
     root: {
       ...leaf(paneId, options?.cwd, options?.autorun, options?.origin),
+      ...(options?.openedBy ? { openedBy: options.openedBy } : {}),
       ...(options?.nativeClaudeProfileId
         ? { nativeClaudeProfileId: options.nativeClaudeProfileId }
         : {}),
@@ -2241,6 +2247,7 @@ export function useTabs(
       const paneId = makeId("pane");
       const root = {
         ...leaf(paneId, options?.cwd, options?.autorun, options?.origin),
+        ...(options?.openedBy ? { openedBy: options.openedBy } : {}),
         ...(options?.nativeClaudeProfileId
           ? { nativeClaudeProfileId: options.nativeClaudeProfileId }
           : {}),

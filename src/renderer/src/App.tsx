@@ -102,6 +102,7 @@ import { useWorkspaceBranches } from "./git/useWorkspaceBranches";
 import { useWorktreeRailStates } from "./git/useWorktreeRailStates";
 import RemoteAuthPrompt from "./components/remote/RemoteAuthPrompt";
 import ChromePairingPrompt from "./components/chrome/ChromePairingPrompt";
+import CrossWorkspacePrompt from "./components/cross-workspace/CrossWorkspacePrompt";
 import SshManagerDialog from "./components/remote/SshManagerDialog";
 import { makeRemotePath, type RemoteHostConfig } from "@shared/remote";
 import { useTabs, isDraftChatTabId, persistedTerminalPaneIds, restoredChatRunIds, sameWorkerMeta } from "./tabs/useTabs";
@@ -5392,6 +5393,7 @@ export default function App() {
         placeAfter,
         requestedFromPane: input.requestedFromPane,
         group: input.group,
+        openedBy: input.openedBy,
       };
       // A background run's terminal must not land in the ACTIVE workspace's
       // strip (same invariant as the spawn_terminals queue path). The hidden
@@ -6695,6 +6697,7 @@ export default function App() {
         )}
         <RemoteAuthPrompt />
         <ChromePairingPrompt />
+        <CrossWorkspacePrompt />
 
         {booted && (
           <Suspense fallback={null}>

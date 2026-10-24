@@ -21,6 +21,13 @@ export interface AgentTerminalRegistration {
    * and retain the safe temporary default.
    */
   retention?: AgentTerminalRetention;
+  /**
+   * The pane of the run-less agent that opened this terminal in another
+   * workspace. Only that pane may write to or close it, so a pane opened
+   * across workspaces is steered by the agent that asked for it rather than
+   * by every agent of the user.
+   */
+  ownerPaneId?: string;
 }
 
 export interface AgentTerminalSnapshot extends AgentTerminalRegistration {
@@ -55,6 +62,7 @@ interface ActiveAgentTerminal {
   tabId: string;
   runId: string | null;
   retention: AgentTerminalRetention;
+  ownerPaneId?: string;
   /**
    * A dev server was found running here (src/main/servers/), so no run's
    * cleanup closes the pane any more. It stays writable by the run that made
@@ -64,6 +72,10 @@ interface ActiveAgentTerminal {
   workspaceOwned?: boolean;
   adoptedFromRunId?: string | null;
   closePromise?: Promise<AgentTerminalCloseResult>;
+}
+
+function paneOwnerMatches(terminal: ActiveAgentTerminal, callerPaneId: string | null): boolean {
+  return !terminal.ownerPaneId || terminal.runId !== null || terminal.ownerPaneId === callerPaneId;
 }
 
 export class AgentTerminalOwnershipError extends Error {
@@ -95,10 +107,36 @@ export class AgentTerminalRegistry {
     });
   }
 
-  isActiveOwnedBy(paneId: string, runId: string | null): boolean {
+  isActiveOwnedBy(paneId: string, runId: string | null, callerPaneId: string | null = null): boolean {
     const terminal = this.active.get(paneId);
     if (!terminal) return false;
-    return terminal.runId === runId || (terminal.workspaceOwned === true && terminal.adoptedFromRunId === runId);
+    if (terminal.workspaceOwned === true && terminal.adoptedFromRunId === runId) return true;
+    return terminal.runId === runId && paneOwnerMatches(terminal, callerPaneId);
+  }
+
+  /** The pane that must be the caller to steer this terminal, when one is recorded. */
+  ownerPaneOf(paneId: string): string | null {
+    const terminal = this.active.get(paneId) ?? this.exited.get(paneId);
+    return terminal && terminal.runId === null && terminal.ownerPaneId ? terminal.ownerPaneId : null;
+  }
+
+  /**
+   * The pane that opened this terminal is gone: fall back to the rule for
+   * every run-less terminal rather than leave it unmanageable by any agent.
+   */
+  releasePaneOwner(paneId: string): void {
+    const terminal = this.active.get(paneId) ?? this.exited.get(paneId);
+    if (terminal) delete terminal.ownerPaneId;
+  }
+
+  /** Active panes a run-less agent's pane opened in other workspaces. */
+  listOwnedByPane(callerPaneId: string): AgentTerminalRegistration[] {
+    const owned: AgentTerminalRegistration[] = [];
+    for (const terminal of this.active.values()) {
+      if (terminal.ownerPaneId !== callerPaneId || terminal.runId !== null) continue;
+      owned.push({ paneId: terminal.paneId, tabId: terminal.tabId, runId: null, ownerPaneId: callerPaneId });
+    }
+    return owned;
   }
 
   /** True while the pane is registered as created through terminal.create. */
@@ -114,6 +152,7 @@ export class AgentTerminalRegistry {
     terminal.runId = null;
     terminal.retention = "service";
     terminal.workspaceOwned = true;
+    delete terminal.ownerPaneId;
     return true;
   }
 
@@ -167,6 +206,7 @@ export class AgentTerminalRegistry {
   async close(input: {
     paneId: string;
     runId: string | null;
+    callerPaneId?: string | null;
     stop: () => void | Promise<void>;
     destroyTab: (registration: AgentTerminalRegistration) => void | Promise<void>;
   }): Promise<AgentTerminalCloseResult> {
@@ -188,6 +228,11 @@ export class AgentTerminalRegistry {
 
     if (!registration.workspaceOwned || registration.adoptedFromRunId !== input.runId) {
       this.assertSameOwner(registration.runId, input.runId);
+      if (!paneOwnerMatches(registration, input.callerPaneId ?? null)) {
+        throw new AgentTerminalOwnershipError(
+          "terminal.close cannot close a terminal another agent opened in a different workspace",
+        );
+      }
     }
     if (registration.closePromise) return registration.closePromise;
 
