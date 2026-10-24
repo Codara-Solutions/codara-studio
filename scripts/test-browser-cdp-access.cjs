@@ -105,6 +105,17 @@ function policyChecks() {
     assert.ok(policy.cdpParamsError("Page.navigate", { url }), `Page.navigate refuses ${url || "an empty url"}`);
   }
   assert.equal(policy.cdpParamsError("Runtime.evaluate", { expression: "1" }), null);
+  // Script, URL and access-flag parameters: an allowed command never takes
+  // one that makes it stronger.
+  assert.match(policy.cdpParamsError("Page.reload", { ignoreCache: true, scriptToEvaluateOnLoad: "steal()" }), /may not take scriptToEvaluateOnLoad: it injects script into every frame/);
+  assert.equal(policy.cdpParamsError("Page.reload", { ignoreCache: true }), null);
+  assert.equal(policy.cdpParamsError("Page.reload", {}), null);
+  assert.match(policy.cdpParamsError("Page.reload", { loaderId: "x" }), /takes only ignoreCache/);
+  assert.match(policy.cdpParamsError("Page.createIsolatedWorld", { frameId: "f", grantUniveralAccess: true }), /universal access ignores the same-origin rules/);
+  assert.equal(policy.cdpParamsError("Page.createIsolatedWorld", { frameId: "f", grantUniveralAccess: false }), null);
+  assert.equal(policy.cdpParamsError("Page.createIsolatedWorld", { frameId: "f", worldName: "probe" }), null);
+  assert.match(policy.cdpParamsError("Page.navigate", { url: "https://example.com", somethingNew: 1 }), /takes only url/);
+  assert.match(policy.cdpParamsError("Runtime.evaluate", { expression: "1", scriptToEvaluateOnLoad: "x" }), /may not take scriptToEvaluateOnLoad/, "forbidden on every method");
   assert.equal(policy.checkCdpEvent("Network.responseReceived").ok, true);
   assert.equal(policy.checkCdpEvent("Debugger.scriptParsed").ok, true);
   assert.equal(policy.checkCdpEvent("Target.attachedToTarget").ok, false);
@@ -151,7 +162,10 @@ async function realPage() {
     logLevel: "silent",
   }).outputFiles[0].text);
   // The tab comes from the test, and big results land in a temporary folder.
-  const cdp = await bundle(`export * from "./cdp";`, TOOLS_DIR, {
+  // code.ts is in the same bundle, so the owner symbol it sets is cdp.ts's.
+  const cdp = await bundle(`export * from "./cdp"; export { codePreviewTools } from "./code";`, TOOLS_DIR, {
+    "../browser/code/sessions": `export async function runBrowserCode(request: any) { (globalThis as any).__codeRequest = request; return { ok: true }; }`,
+    "../preview-workspace": `export async function scopePreviewWorkspace() {}`,
     "./core": `export async function requireTarget(params: Record<string, unknown>) { return (globalThis as any).__cdpTargets[String(params.tabId ?? "tab-1")]; }`,
     "../browser/artifacts": `
       import { writeFileSync } from "node:fs";
@@ -173,9 +187,9 @@ async function realPage() {
   chromePage.target.kind = "chrome";
   globalThis.__cdpTargets = { "tab-1": page.target, "chrome:7": chromePage.target };
   const tools = cdp.cdpPreviewTools;
-  const identity = { callerPaneId: "pane-a", callerPid: 101, workspaceId: "ws-1" };
-  const dispatchAs = (who) => async (method, args) => {
-    const params = { ...args, ...who };
+  const identity = { callerPaneId: "pane-a", workspaceId: "ws-1" };
+  const dispatchAs = (who, owner = "owner-a") => async (method, args) => {
+    const params = { ...args, ...who, [cdp.CDP_OWNER]: owner };
     const target = globalThis.__cdpTargets[String(params.tabId ?? "tab-1")];
     switch (method) {
       case "preview.cdp": return tools["preview.cdp"].run(params, method, {});
@@ -185,7 +199,21 @@ async function realPage() {
       default: throw new Error(`no fake for ${method}`);
     }
   };
-  const run = (snippet, who = identity, key = "cdp") => code.runBrowserCode({ key, ownerPid: null, code: snippet, timeoutMs: 20_000, dispatch: dispatchAs(who) });
+  const run = (snippet, who = identity, key = "cdp", owner = "owner-a") => code.runBrowserCode({ key, ownerPid: null, code: snippet, timeoutMs: 20_000, dispatch: dispatchAs(who, owner) });
+  const asOwner = (owner, params) => ({ ...params, ...identity, [cdp.CDP_OWNER]: owner });
+
+  // code.ts stamps every inner call with its session key, on a symbol a
+  // snippet's JSON arguments cannot carry or replace.
+  const forwarded = [];
+  await cdp.codePreviewTools(async (method, params) => { forwarded.push(params); return {}; })["browser.use"].run(
+    { code: "1", codeSession: "4242:abcdefgh1234", callerPaneId: "pane-a", workspaceId: "ws-1" },
+    "browser.use",
+    { scopeToCaller: async () => {} },
+  );
+  const request = globalThis.__codeRequest;
+  await request.dispatch("preview.cdp", { method: "DOM.getDocument", cdpOwner: "someone-else" });
+  assert.equal(forwarded[0][cdp.CDP_OWNER], request.key, "the owner is the code session's key");
+  assert.match(request.key, /4242:abcdefgh1234/, "the key names the agent's MCP process");
   try {
     let result = await run(`
       const tab = browser.tab("tab-1");
@@ -241,14 +269,32 @@ async function realPage() {
     assert.equal(result.result.none, null, "next() returns null at its timeout");
     const subscriptionId = result.result.id;
     await assert.rejects(
-      tools["preview.cdp_events"].run({ action: "read", subscription: subscriptionId, callerPaneId: "pane-b", callerPid: 202, workspaceId: "ws-1" }, "preview.cdp_events", {}),
+      tools["preview.cdp_events"].run({ action: "read", subscription: subscriptionId, callerPaneId: "pane-b", workspaceId: "ws-1" }, "preview.cdp_events", {}),
       /No such event subscription/,
       "another caller cannot read a subscription",
     );
-    const own = await tools["preview.cdp_events"].run({ action: "read", subscription: subscriptionId, ...identity }, "preview.cdp_events", {});
-    assert.equal(own.ok, true, "its own caller reads it");
-    await tools["preview.cdp_events"].run({ action: "unsubscribe", subscription: subscriptionId, ...identity }, "preview.cdp_events", {});
+    // Two MCP processes in one pane (callerPid is gone by now) are two owners.
+    await assert.rejects(
+      tools["preview.cdp_events"].run(asOwner("owner-b", { action: "read", subscription: subscriptionId }), "preview.cdp_events", {}),
+      /No such event subscription/,
+      "another agent session in the same pane cannot read it",
+    );
+    const own = await tools["preview.cdp_events"].run(asOwner("owner-a", { action: "read", subscription: subscriptionId }), "preview.cdp_events", {});
+    assert.equal(own.ok, true, "its own session reads it");
+    await tools["preview.cdp_events"].run(asOwner("owner-a", { action: "unsubscribe", subscription: subscriptionId }), "preview.cdp_events", {});
     assert.equal(cdp.cdpSubscriptionCount(), 0);
+
+    // Holds are per owner: another session's disable leaves this one's domain on.
+    await tools["preview.cdp"].run(asOwner("owner-a", { method: "DOM.enable" }), "preview.cdp", {});
+    await tools["preview.cdp"].run(asOwner("owner-b", { method: "DOM.enable" }), "preview.cdp", {});
+    await tools["preview.cdp"].run(asOwner("owner-b", { method: "DOM.disable" }), "preview.cdp", {});
+    let updates = 0;
+    const stopCounting = page.session.on("DOM.documentUpdated", () => { updates += 1; });
+    await page.session.send("Page.reload", {});
+    await sleep(500);
+    stopCounting();
+    assert.ok(updates > 0, "owner a's DOM hold survived owner b's disable");
+    await tools["preview.cdp"].run(asOwner("owner-a", { method: "DOM.disable" }), "preview.cdp", {});
 
     // The read-only Debugger never stops the page on a debugger statement.
     result = await run(`

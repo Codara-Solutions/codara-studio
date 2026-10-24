@@ -176,13 +176,29 @@ export function checkCdpCommand(method: unknown, context: CdpContext = {}): CdpD
   return { ok: true, domain };
 }
 
-/**
- * Why the parameters of an allowed command are refused, or null. A
- * navigation stays on web pages: a file: or browser-internal URL would hand
- * the page, and with it Runtime, the machine's files.
- */
-export function cdpParamsError(method: string, params: Record<string, unknown>): string | null {
-  if (method !== "Page.navigate") return null;
+// Parameters that turn an allowed command into something stronger, whatever
+// the command: script injected into every frame, or a world that ignores
+// the same-origin rules.
+const FORBIDDEN_PARAMS: Readonly<Record<string, string>> = {
+  scriptToEvaluateOnLoad: "it injects script into every frame of the page, past the checks on Runtime; reload, then run tab.evaluate",
+  grantUniveralAccess: "a world with universal access ignores the same-origin rules",
+  grantUniversalAccess: "a world with universal access ignores the same-origin rules",
+};
+
+// The allowed commands that take a script, a URL or an access flag accept
+// only the parameters named here. Reviewed for the rest of the allowlist:
+// Page.getResourceContent and Page.searchInResource read resources the
+// frame already loaded and fetch nothing; Network.setBlockedURLs takes
+// patterns that only block; Runtime's scripts are the Runtime domain itself
+// (refused in the user's Chrome), and so are DOM and CSS edits, whose
+// attributes and markup can carry event handlers.
+const STRICT_PARAMS: Readonly<Record<string, readonly string[]>> = {
+  "Page.navigate": ["url", "referrer", "transitionType", "frameId", "referrerPolicy"],
+  "Page.reload": ["ignoreCache"],
+  "Page.createIsolatedWorld": ["frameId", "worldName"],
+};
+
+function navigationUrlError(params: Record<string, unknown>): string | null {
   const url = typeof params.url === "string" ? params.url.trim() : "";
   if (/^about:blank$/i.test(url)) return null;
   let protocol = "";
@@ -192,6 +208,24 @@ export function cdpParamsError(method: string, params: Record<string, unknown>):
     return "Page.navigate needs an absolute http or https url.";
   }
   return protocol === "http:" || protocol === "https:" ? null : `Page.navigate opens http and https pages only, not ${protocol} URLs; use tab.goto for anything else Codara supports.`;
+}
+
+/**
+ * Why the parameters of an allowed command are refused, or null. A
+ * navigation stays on web pages: a file: or browser-internal URL would hand
+ * the page, and with it Runtime, the machine's files.
+ */
+export function cdpParamsError(method: string, params: Record<string, unknown>): string | null {
+  for (const [name, reason] of Object.entries(FORBIDDEN_PARAMS)) {
+    if (params[name] !== undefined && params[name] !== false && params[name] !== "") return `${method} may not take ${name}: ${reason}.`;
+  }
+  const allowed = STRICT_PARAMS[method];
+  if (allowed) {
+    // A forbidden flag that is off passed the loop above.
+    const extra = Object.keys(params).filter((name) => !allowed.includes(name) && !(name in FORBIDDEN_PARAMS));
+    if (extra.length) return `${method} takes only ${allowed.join(", ")} here, not ${extra.join(", ")}.`;
+  }
+  return method === "Page.navigate" ? navigationUrlError(params) : null;
 }
 
 /** Whether a snippet may subscribe to this event: one of an allowed domain's events. */

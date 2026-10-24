@@ -9,6 +9,7 @@ import { createPreviewDOM } from "../../shared/preview-dom";
 import { createPreviewLocator } from "../../shared/preview-locator";
 import { createPreviewQuery, type LocatorOp, type LocatorStep } from "../../shared/preview-query";
 import { runBrowserCode } from "../browser/code/sessions";
+import { CDP_OWNER } from "./cdp";
 import { scopePreviewWorkspace } from "../preview-workspace";
 import { requireTarget } from "./core";
 import { PreviewToolParamsError, type PreviewToolHost, type PreviewToolTable } from "./types";
@@ -61,7 +62,9 @@ async function code(params: Record<string, unknown>, _method: string, host: Prev
       const inner: Record<string, unknown> = { ...args };
       for (const field of IDENTITY_FIELDS) delete inner[field];
       delete inner.codeSession;
-      return run(method, { ...inner, ...identity }, host);
+      const call: Record<string, unknown> = { ...inner, ...identity };
+      (call as { [CDP_OWNER]?: string })[CDP_OWNER] = key;
+      return run(method, call, host);
     },
   });
 }

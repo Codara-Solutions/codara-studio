@@ -33,9 +33,19 @@ const MAX_READ_WAIT_MS = 30_000;
 const MAX_READ = 500;
 const IDLE_MS = 10 * 60_000;
 
-/** The caller, from the identity the socket stamped: a snippet's calls all carry its outer call's. */
+/**
+ * Set by code.ts on each call a snippet makes: the code session's key, which
+ * names the agent's own MCP process. A symbol, so neither tool JSON nor a
+ * snippet can set it, and the socket's scoping (which drops callerPid) keeps
+ * it, since it edits the params object in place.
+ */
+export const CDP_OWNER: unique symbol = Symbol("cdpOwner");
+
+/** Whose holds and subscriptions these are: the code session, else the scoped caller. */
 function ownerOf(params: Record<string, unknown>): string {
-  return ["runId", "callerPaneId", "callerPid", "workspaceId"].map((field) => String(params[field] ?? "")).join("|");
+  const session = (params as { [CDP_OWNER]?: unknown })[CDP_OWNER];
+  if (typeof session === "string" && session) return `session:${session}`;
+  return `caller:${["runId", "callerPaneId", "workspaceId"].map((field) => String(params[field] ?? "")).join("|")}`;
 }
 
 function plainObject(value: unknown, what: string): Record<string, unknown> {

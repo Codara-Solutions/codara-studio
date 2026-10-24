@@ -188,6 +188,12 @@ browser tool. `src/main/preview-tools/cdp.ts` adds:
   keep running for whoever uses the tab next) and `Page.handleJavaScriptDialog`
   (the dialog guard answers dialogs). `Page.navigate` opens http, https and
   about:blank only: a file: page would hand Runtime the machine's files.
+- **Parameters too.** No command may take `scriptToEvaluateOnLoad` (script
+  in every frame, past the Runtime refusal in the user's Chrome) or
+  `grantUniveralAccess` (a world that ignores the same-origin rules). The
+  allowed commands that take a script, a URL or an access flag
+  (`Page.navigate`, `Page.reload`, `Page.createIsolatedWorld`) accept only
+  the parameters the policy names.
 - **Fetch is refused on purpose.** `Fetch.enable` pauses every matching
   request until the client continues it, and a snippet's calls die with the
   snippet, so one that ends or times out would leave the tab hanging. In the
@@ -199,8 +205,10 @@ browser tool. `src/main/preview-tools/cdp.ts` adds:
   snippet's `Domain.enable` takes a counted hold and `Domain.disable` gives
   that hold back; `Network.disable` never stops the network recorder.
   Subscribing holds the event's domain. Holds and subscriptions belong to
-  their caller (run, pane and MCP process; another caller's subscription id
-  reads as unknown) and end after 10 idle minutes, on close, or with the tab.
+  the code session that made them, so two agents in one pane never share
+  them (code.ts passes the session key on a symbol that neither a snippet
+  nor tool JSON can set; another session's subscription id reads as
+  unknown). They end after 10 idle minutes, on close, or with the tab.
   The read-only Debugger is enabled with pauses skipped, so a `debugger;`
   statement never freezes the page.
 - **Bounded results.** A command result over 1 MB is saved as a browser

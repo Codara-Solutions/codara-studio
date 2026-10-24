@@ -109,8 +109,8 @@ On a chrome: tab (the user's own Chrome) Runtime, Debugger and DOM or CSS
 edits are refused too: use tab.evaluate there.
 Refused: Browser, Target, SystemInfo, IO, Storage, Fetch, Input, Security,
 ServiceWorker, cookies (use codara_preview_storage), downloads, file inputs
-(use codara_preview_upload), Page.addScriptToEvaluateOnNewDocument and
-breakpoints. A refused call throws a BrowserError that says why.
+(use codara_preview_upload), Page.addScriptToEvaluateOnNewDocument,
+scriptToEvaluateOnLoad and grantUniveralAccess parameters, and breakpoints. A refused call throws a BrowserError that says why.
 Settings you change (throttling, headers, emulation) stay on the tab until
 you change them back.
 
