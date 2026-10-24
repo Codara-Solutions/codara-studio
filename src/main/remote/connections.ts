@@ -1,9 +1,12 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { promises as fs, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Client, ClientChannel, ConnectConfig, SFTPWrapper } from "ssh2";
 import type {
+  HostKeyChange,
+  HostKeyPromptAnswer,
+  HostKeyPromptRequest,
   RemoteAuthPromptAnswer,
   RemoteAuthPromptRequest,
   RemoteConnectionStatus,
@@ -16,6 +19,13 @@ import { openProxySocket, resolveProxyInvocation, type ProxySocket } from "./pro
 import { wakeCodaraBox } from "./codara-boxes";
 import { abortableDelay, clearFreshBoxKey, nextFreshKeyDelayMs } from "./box-key-retry";
 import { deleteSecret, getSecret, setSecret } from "./secret-store";
+import {
+  displayFingerprint,
+  hostKeyType,
+  knownHostsVerdict,
+  sshFingerprint,
+  storedFingerprint,
+} from "./host-keys";
 
 // One multiplexed SSH connection per host, shared by every consumer (SFTP
 // file ops, git/search exec channels, terminal shell channels). Connections
@@ -59,6 +69,8 @@ function loadSsh2(): Promise<Ssh2Module> {
 const READY_TIMEOUT_MS = 20_000;
 // Through a ProxyCommand the handshake also waits for the proxy to dial.
 const PROXY_READY_TIMEOUT_MS = 120_000;
+// The handshake waits while the user reads a new host key's fingerprint.
+const HOST_KEY_PROMPT_READY_TIMEOUT_MS = 5 * 60_000;
 const KEEPALIVE_INTERVAL_MS = 15_000;
 const KEEPALIVE_COUNT_MAX = 3;
 // A ProxyCommand that ignores the end of its input would outlive a closed
@@ -174,6 +186,77 @@ async function rememberHostKey(key: string, fingerprint: string): Promise<void> 
   );
 }
 
+// ── Host key confirmation ────────────────────────────────────────────────────
+//
+// With confirmation on (the Machines preference), a key Studio has not seen is
+// trusted silently only when the user's own ~/.ssh/known_hosts already lists
+// it; otherwise the user confirms the fingerprint first. Codara Cloud boxes
+// keep trust on first use: their alias-keyed entry comes from the signed-in
+// CLI. A changed key is always refused; the user can trust the new one
+// explicitly, which replaces only that host's entry.
+
+type HostKeyPromptSender = (request: HostKeyPromptRequest) => void;
+let hostKeyPromptSender: HostKeyPromptSender | null = null;
+const pendingHostKeyPrompts = new Map<string, (trust: boolean) => void>();
+let confirmNewHostKeys: () => Promise<boolean> = async () => false;
+
+export function setHostKeyPromptSender(sender: HostKeyPromptSender | null): void {
+  hostKeyPromptSender = sender;
+}
+
+/** Whether a new host key needs the user's confirmation; read on each connect. */
+export function setHostKeyConfirmation(enabled: () => Promise<boolean>): void {
+  confirmNewHostKeys = enabled;
+}
+
+export function answerHostKeyPrompt(answer: HostKeyPromptAnswer): void {
+  pendingHostKeyPrompts.get(answer.requestId)?.(answer.trust === true);
+}
+
+function promptHostKey(request: Omit<HostKeyPromptRequest, "requestId">, signal: AbortSignal): Promise<boolean> {
+  if (!hostKeyPromptSender || signal.aborted) return Promise.resolve(false);
+  const requestId = randomUUID();
+  return new Promise((resolve) => {
+    const finish = (trust: boolean) => {
+      if (!pendingHostKeyPrompts.delete(requestId)) return;
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      resolve(trust);
+    };
+    const onAbort = () => finish(false);
+    // ssh2's handshake waits on this answer; an unanswered prompt must not
+    // hold a connection open forever.
+    const timer = setTimeout(() => finish(false), 5 * 60_000);
+    pendingHostKeyPrompts.set(requestId, finish);
+    signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      hostKeyPromptSender?.({ requestId, ...request });
+    } catch {
+      finish(false);
+    }
+  });
+}
+
+async function readUserKnownHosts(): Promise<string> {
+  const files = ["known_hosts", "known_hosts2"].map((name) => join(homedir(), ".ssh", name));
+  const texts = await Promise.all(files.map((file) => fs.readFile(file, "utf8").catch(() => "")));
+  return texts.join("\n");
+}
+
+/** Changed keys the user may trust, by host id: the entry to replace and the new key. */
+const changedHostKeys = new Map<string, { storeId: string; fingerprint: string }>();
+
+/** Trusts the key a host presented when it was refused as changed. */
+export async function trustChangedHostKey(hostId: string): Promise<boolean> {
+  const pending = changedHostKeys.get(hostId);
+  if (!pending) return false;
+  changedHostKeys.delete(hostId);
+  await rememberHostKey(pending.storeId, pending.fingerprint);
+  const conn = connections.get(hostId);
+  if (conn) conn.hostKeyChange = null;
+  return true;
+}
+
 // ── Status broadcast ─────────────────────────────────────────────────────────
 
 type StatusSender = (status: RemoteConnectionStatus) => void;
@@ -216,6 +299,9 @@ class RemoteConnection {
   private sftpCached: Promise<SFTPWrapper> | null = null;
   state: RemoteConnectionStatus["state"] = "disconnected";
   lastError: string | null = null;
+  hostKeyChange: HostKeyChange | null = null;
+  // Why verifyHostKey refused, which ssh2 only reports as "verification failed".
+  private hostKeyRefusal: string | null = null;
 
   constructor(public readonly host: RemoteHostConfig) {}
 
@@ -232,6 +318,7 @@ class RemoteConnection {
       state,
       ...(error ? { error } : {}),
       ...(progress ? { progress } : {}),
+      ...(state === "error" && this.hostKeyChange ? { hostKeyChange: this.hostKeyChange } : {}),
     });
   }
 
@@ -263,6 +350,8 @@ class RemoteConnection {
   private async connect(generation: number, signal: AbortSignal): Promise<Client> {
     const host = this.host;
     this.assertCurrent(generation, signal);
+    this.hostKeyChange = null;
+    this.hostKeyRefusal = null;
     this.setState("connecting");
     const { utils: sshUtils } = await loadSsh2();
     this.assertCurrent(generation, signal);
@@ -431,7 +520,7 @@ class RemoteConnection {
       }
     }
 
-    const message = lastErr?.message ?? "Unable to authenticate.";
+    const message = this.hostKeyRefusal ?? lastErr?.message ?? "Unable to authenticate.";
     this.assertCurrent(generation, signal);
     this.setState("error", message);
     throw new Error(`SSH connection to ${host.id} failed: ${message}`);
@@ -446,6 +535,8 @@ class RemoteConnection {
   ): Promise<Client> {
     const host = this.host;
     const { Client } = await loadSsh2();
+    this.assertCurrent(generation, signal);
+    const mayAskHostKey = await this.mayAskForHostKey();
     this.assertCurrent(generation, signal);
     return new Promise((resolve, reject) => {
       const client = new Client();
@@ -532,7 +623,11 @@ class RemoteConnection {
           host: host.host,
           port: host.port,
           username: host.username,
-          readyTimeout: proxy ? PROXY_READY_TIMEOUT_MS : READY_TIMEOUT_MS,
+          readyTimeout: mayAskHostKey
+            ? HOST_KEY_PROMPT_READY_TIMEOUT_MS
+            : proxy
+              ? PROXY_READY_TIMEOUT_MS
+              : READY_TIMEOUT_MS,
           ...(proxy ? { sock: proxy } : {}),
           keepaliveInterval: KEEPALIVE_INTERVAL_MS,
           keepaliveCountMax: KEEPALIVE_COUNT_MAX,
@@ -549,27 +644,66 @@ class RemoteConnection {
     });
   }
 
+  private async mayAskForHostKey(): Promise<boolean> {
+    const host = this.host;
+    if (host.hostKeyAlias || host.codaraBoxId) return false;
+    const known = await readKnownHosts();
+    return !known[`${host.host}:${host.port}`] && (await confirmNewHostKeys());
+  }
+
   private async verifyHostKey(
     key: Buffer,
     generation: number,
     signal: AbortSignal,
   ): Promise<boolean> {
-    // Trust-on-first-use: remember the key's fingerprint per host:port and
-    // refuse silently-changed keys (the workspace row shows the error).
-    const id = this.host.hostKeyAlias ?? `${this.host.host}:${this.host.port}`;
-    const fingerprint = createHash("sha256").update(key).digest("base64");
+    // Fingerprints are kept per host:port (or the box's alias); a key that
+    // changed is refused until the user trusts it (trustChangedHostKey).
+    const host = this.host;
+    const id = host.hostKeyAlias ?? `${host.host}:${host.port}`;
+    const fingerprint = storedFingerprint(key);
     const known = await readKnownHosts();
     if (!this.isCurrent(generation, signal)) return false;
     const prior = known[id];
+    if (prior === fingerprint) return true;
+    const confirm = !host.hostKeyAlias && !host.codaraBoxId && (await confirmNewHostKeys());
+    if (!this.isCurrent(generation, signal)) return false;
     if (!prior) {
+      if (confirm) {
+        const verdict = knownHostsVerdict(await readUserKnownHosts(), host.host, host.port, key);
+        if (!this.isCurrent(generation, signal)) return false;
+        if (verdict === "revoked") {
+          this.hostKeyRefusal = `The host key of ${id} is marked revoked in ~/.ssh/known_hosts.`;
+          return false;
+        }
+        if (verdict === "none") {
+          const trust = await promptHostKey(
+            { hostId: host.id, hostLabel: id, keyType: hostKeyType(key), fingerprint: sshFingerprint(key) },
+            signal,
+          );
+          if (!this.isCurrent(generation, signal)) return false;
+          if (!trust) {
+            this.hostKeyRefusal = `The host key of ${id} was not trusted.`;
+            return false;
+          }
+        }
+      }
       await rememberHostKey(id, fingerprint);
       return true;
     }
-    if (prior === fingerprint) return true;
-    this.setState(
-      "error",
-      `Host key for ${id} changed (possible MITM). Remove it from spark-known-hosts.json to trust the new key.`,
-    );
+    if (confirm) {
+      this.hostKeyChange = {
+        hostLabel: id,
+        previousFingerprint: displayFingerprint(prior),
+        newFingerprint: sshFingerprint(key),
+        keyType: hostKeyType(key),
+      };
+      changedHostKeys.set(host.id, { storeId: id, fingerprint });
+      this.hostKeyRefusal =
+        `The host key of ${id} changed since Codara last connected. ` +
+        "Someone may be intercepting the connection, or the machine was reinstalled.";
+      return false;
+    }
+    this.hostKeyRefusal = `Host key for ${id} changed (possible MITM). Remove it from spark-known-hosts.json to trust the new key.`;
     return false;
   }
 
@@ -802,6 +936,7 @@ export function getConnectionStatus(hostId: string): RemoteConnectionStatus {
     hostId,
     state: conn.state,
     ...(conn.lastError ? { error: conn.lastError } : {}),
+    ...(conn.state === "error" && conn.hostKeyChange ? { hostKeyChange: conn.hostKeyChange } : {}),
   };
 }
 

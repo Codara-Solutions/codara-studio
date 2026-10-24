@@ -452,12 +452,45 @@ keeps working when Studio quits or the network drops.
   grace period leave it running. A pane closed while its host is
   disconnected leaves the agent running on the machine.
 
+#### Machines
+
+**Settings, Machines** (`components/machines/MachinesSettings.tsx`) lists
+this computer and every SSH host: status, CPU, memory, free disk and load,
+which agent CLIs and tmux are on the machine's login PATH, the agents
+running there (with Show, which jumps to the pane), and agent sessions no
+pane shows any more (with Stop). **Add a machine** reuses the SSH manager's
+host form, which also takes `user@host:port`.
+
+- **Numbers.** `machines.ts` builds the rows; it probes a host only while it
+  is connected, never connecting one itself, and reuses a reading younger
+  than 4 seconds. The probe (`machine-probe.ts`) is one `sh -lc` exec with
+  marked sections. Inside a container `/proc` describes the host, so
+  cgroup v2's `cpu.max` and `memory.max` win when set, and CPU share comes
+  from `cpu.stat` usage over wall time. This computer reads Node's `os`.
+- **Where.** With the preference on, the Add pane menu shows a Where row: the
+  pane's own machine and every other connected one
+  (`components/machines/whereChoices.ts`). A pane on another machine opens
+  in the folder of a workspace already on it, else the SSH user's home.
+- **Host keys.** With the preference on, a key Studio has not stored is
+  trusted silently only when `~/.ssh/known_hosts` lists it (read only,
+  `host-keys.ts` handles hashed names, patterns and `@revoked`); otherwise
+  `HostKeyPrompt.tsx` asks "Is this <host>?" with the fingerprint, and the
+  handshake timeout stretches to 5 minutes while it waits. A changed key is
+  refused; the Machines card shows both fingerprints and **Trust the new
+  key** (`trustChangedHostKey`). Codara Cloud boxes keep trust on first use.
+  With the preference off, keys behave as before.
+
 Tests: `test-remote-agents` runs the generated lines under `/bin/sh` with
 fake `tmux` and `claude`, `test-remote-pty` covers reconnects with fake
 channels, `test-pty-remote-agents` covers the wiring in `pty-manager.ts`, and
 `tests/e2e/remote-agent.spec.ts` runs the built app against a real sshd and
 tmux in a container (`tests/e2e/fixtures/ssh-host`, started by
-`scripts/ssh-test-host.cjs`; skipped without Docker).
+`scripts/ssh-test-host.cjs`; skipped without Docker). `test-machine-probe`
+parses recorded probe output (a host, a 1 CPU and 512 MiB container, macOS)
+and drives the service with fake connections, `test-host-keys` covers
+fingerprints, known_hosts and the confirm flow, and
+`tests/e2e/machines.spec.ts` adds a machine, confirms its key, reads its
+limits and starts an agent on it from the Where row.
 
 ### 3.6 Claude Code hooks
 

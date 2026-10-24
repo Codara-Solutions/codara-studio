@@ -402,7 +402,7 @@ function CodaraBoxesSection({ onConnect }: { onConnect: (host: RemoteHostConfig)
   );
 }
 
-function HostForm({
+export function HostForm({
   initial,
   existingIds,
   onCancel,
@@ -424,7 +424,12 @@ function HostForm({
   const [keyPickerOpen, setKeyPickerOpen] = useState(false);
 
   const save = async () => {
-    const trimmedId = id.trim();
+    // "user@host:port" in the host field fills the other fields.
+    const address = /^(?:([^@\s]+)@)?([^@\s:]+)(?::(\d{1,5}))?$/.exec(host.trim());
+    const hostName = address?.[2] ?? host.trim();
+    const user = username.trim() || address?.[1] || "";
+    const portNumber = address?.[3] ? Number(address[3]) : Number(port) || 22;
+    const trimmedId = id.trim() || (initial ? "" : hostName);
     if (!isValidHostId(trimmedId)) {
       setError("Name may only contain letters, numbers, dot, dash, underscore.");
       return;
@@ -433,15 +438,15 @@ function HostForm({
       setError("A host with that name already exists.");
       return;
     }
-    if (!host.trim() || !username.trim()) {
+    if (!hostName || !user) {
       setError("Host and username are required.");
       return;
     }
     await window.spark.remote.saveHost({
       id: trimmedId,
-      host: host.trim(),
-      username: username.trim(),
-      port: Number(port) || 22,
+      host: hostName,
+      username: user,
+      port: portNumber,
       identityFile: identityFile.trim() || undefined,
       source: "manual",
     });
@@ -487,7 +492,7 @@ function HostForm({
         {field("Port", <input className="spark-input" value={port} onChange={(e) => setPort(e.target.value)} />)}
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 8 }}>
-        {field("Host", <input className="spark-input" value={host} onChange={(e) => setHost(e.target.value)} placeholder="203.0.113.7" />)}
+        {field("Host", <input className="spark-input" value={host} onChange={(e) => setHost(e.target.value)} placeholder="203.0.113.7 or dev@nas.tail1234.ts.net:22" />)}
         {field("User", <input className="spark-input" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="root" />)}
       </div>
       {field(

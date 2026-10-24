@@ -136,3 +136,12 @@ export function buildRemoteAgentAttach(paneId: string): string {
 export function buildRemoteAgentKill(paneId: string): string {
   return `sh -lc ${shQuote(`${TMUX} kill-session -t ${sessionTarget(paneId)}`)} >/dev/null 2>&1; true`;
 }
+
+/**
+ * Ends an agent session by its name, for one no pane shows any more (the
+ * Machines page lists them). Only Studio's own `codara-` sessions qualify.
+ */
+export function buildRemoteAgentSessionKill(sessionName: string): string | null {
+  if (!/^codara-[A-Za-z0-9_-]{1,64}$/.test(sessionName)) return null;
+  return `sh -lc ${shQuote(`${TMUX} kill-session -t ${shQuote(`=${sessionName}`)}`)} >/dev/null 2>&1; true`;
+}

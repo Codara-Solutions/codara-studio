@@ -75,6 +75,7 @@ import {
 } from "../lib/account-provider-descriptors";
 import { stableAccountCardKeys } from "../lib/account-card-keys";
 import RemoteAccessSettings from "./RemoteAccessSettings";
+import MachinesSettings from "./machines/MachinesSettings";
 import SharedPagesSettings from "./share/SharedPagesSettings";
 import { CardOverflowMenu } from "./AccountCardPrimitives";
 import { CodaraMark, RuntimeMark } from "./BrandMarks";
@@ -482,6 +483,7 @@ export default function SettingsDialog({
               {renderedTab === "sessions" && (
                 <SessionsSettings onOpenWorkerSession={onOpenWorkerSession} />
               )}
+              {renderedTab === "machines" && <MachinesSettings onClose={onClose} />}
               {renderedTab === "remote-access" && <RemoteAccessSettings />}
               {renderedTab === "shared-pages" && <SharedPagesSettings />}
               {renderedTab === "keybindings" && <KeybindingsTab />}
@@ -3182,16 +3184,6 @@ function SessionsSettings({
             title="Keep terminal output across restarts"
             desc="Shows each pane's earlier output again after a quit, an update or a crash, above the new shell or resumed agent. Kept in Codara's folder on this computer until you close the pane. Turning this off deletes it all."
             {...bindToggle("restoreTerminalOutput", preferences, setPreference)}
-          />
-        ) : null}
-      </SettingsSection>
-
-      <SettingsSection title="SSH machines">
-        {hydrated ? (
-          <ToggleRow
-            title="Keep agents running on SSH machines"
-            desc="Claude Code, Codex, Grok or Pi started in an SSH workspace runs in tmux on that machine, with the machine's own install and sign-in. It keeps working when Codara quits or loses the connection, and its pane attaches to it again when it reopens. Closing the pane stops it. Needs tmux on the machine. Preview."
-            {...bindToggle("machinesEnabled", preferences, setPreference)}
           />
         ) : null}
       </SettingsSection>

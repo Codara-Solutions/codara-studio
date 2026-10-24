@@ -88,6 +88,8 @@ export interface RemoteConnectionStatus {
   error?: string;
   /** Present while connecting, e.g. the phase of a Codara box that is waking. */
   progress?: string;
+  /** Set when the host's key changed: Studio refuses until the user trusts the new one. */
+  hostKeyChange?: HostKeyChange;
 }
 
 // ── Codara Cloud boxes ───────────────────────────────────────────────────────
@@ -155,4 +157,29 @@ export interface RemoteAuthPromptAnswer {
 
 export function isValidHostId(id: string): boolean {
   return /^[A-Za-z0-9._-]+$/.test(id);
+}
+
+// ── Host keys ────────────────────────────────────────────────────────────────
+
+/** Asked before the first connection to a host whose key Studio has not seen. */
+export interface HostKeyPromptRequest {
+  requestId: string;
+  hostId: string;
+  /** `host:port`, or the host key alias. */
+  hostLabel: string;
+  keyType: string;
+  /** `SHA256:<base64 without padding>`, as `ssh-keygen -l` prints it. */
+  fingerprint: string;
+}
+
+export interface HostKeyPromptAnswer {
+  requestId: string;
+  trust: boolean;
+}
+
+export interface HostKeyChange {
+  hostLabel: string;
+  previousFingerprint: string;
+  newFingerprint: string;
+  keyType: string;
 }

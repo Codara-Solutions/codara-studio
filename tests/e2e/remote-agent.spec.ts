@@ -205,6 +205,18 @@ async function prepare({ machinesEnabled }: { machinesEnabled: boolean }): Promi
   await mkdir(userDataDir, { recursive: true });
   await mkdir(home, { recursive: true });
   const host = await startSshTestHost({ dir: join(root, "ssh") });
+  // The user's ssh already knows the machine, so connecting asks nothing
+  // (machines.spec.ts covers the question).
+  const hostKeys = await host.exec("cat /etc/ssh/ssh_host_*_key.pub");
+  await mkdir(join(home, ".ssh"), { recursive: true });
+  await writeFile(
+    join(home, ".ssh", "known_hosts"),
+    hostKeys
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => `[127.0.0.1]:${host.port} ${line.split(" ").slice(0, 2).join(" ")}`)
+      .join("\n") + "\n",
+  );
   await writeFile(
     join(userDataDir, "spark-remote-hosts.json"),
     JSON.stringify([

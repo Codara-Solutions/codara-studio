@@ -105,6 +105,7 @@ import RemoteAuthPrompt from "./components/remote/RemoteAuthPrompt";
 import ChromePairingPrompt from "./components/chrome/ChromePairingPrompt";
 import CrossWorkspacePrompt from "./components/cross-workspace/CrossWorkspacePrompt";
 import SshManagerDialog from "./components/remote/SshManagerDialog";
+import HostKeyPrompt from "./components/remote/HostKeyPrompt";
 import { makeRemotePath, type RemoteHostConfig } from "@shared/remote";
 import { useTabs, isDraftChatTabId, persistedTerminalPaneIds, restoredChatRunIds, sameWorkerMeta } from "./tabs/useTabs";
 import { selectTerminalWorkspaceLayers } from "./tabs/terminalWorkspaceLayers";
@@ -6682,6 +6683,7 @@ export default function App() {
           />
         )}
         <RemoteAuthPrompt />
+        <HostKeyPrompt />
         <ChromePairingPrompt />
         <CrossWorkspacePrompt />
 
@@ -7801,8 +7803,9 @@ const Workspace = React.memo(function Workspace({
       direction: Parameters<typeof splitTerminalPane>[2],
       autorun?: string,
       agentSession?: TerminalAgentSession | null,
+      cwd?: string,
     ) => {
-      return splitTerminalPane(tabId, paneId, direction, autorun, agentSession);
+      return splitTerminalPane(tabId, paneId, direction, autorun, agentSession, cwd);
     },
     [splitTerminalPane],
   );

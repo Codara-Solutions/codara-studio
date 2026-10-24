@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer, webFrame, webUtils } from "electron";
 import type {
   CodaraBoxConnectInfoResult,
   CodaraBoxesListResult,
+  HostKeyPromptAnswer,
+  HostKeyPromptRequest,
   RemoteAuthPromptAnswer,
   RemoteAuthPromptRequest,
   RemoteBrowseResult,
@@ -68,6 +70,7 @@ import type {
   MemoryLearningSettings,
 } from "@shared/memory-items";
 import type { SshKeyImportResult, SshKeyInfo } from "@shared/ssh-keys";
+import type { MachinesSnapshot } from "@shared/machines";
 import type { UsageSummary, UsageSummaryInput } from "@shared/usage-analytics";
 import type {
   SavedWorkflow,
@@ -1597,6 +1600,22 @@ const api = {
     },
     // Which agent CLIs (claude/codex) are installed on the host — used to
     // hint before launching a remote agent terminal.
+    answerHostKeyPrompt: (answer: HostKeyPromptAnswer): void => {
+      ipcRenderer.send("remote:hostKeyPromptAnswer", answer);
+    },
+    onHostKeyPrompt: (handler: (request: HostKeyPromptRequest) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, request: HostKeyPromptRequest) => handler(request);
+      ipcRenderer.on("remote:hostKeyPrompt", listener);
+      return () => ipcRenderer.off("remote:hostKeyPrompt", listener);
+    },
+    trustChangedHostKey: (hostId: string): Promise<RemoteConnectionStatus> =>
+      ipcRenderer.invoke("remote:trustChangedHostKey", hostId),
+  },
+  // The Machines page: this computer and SSH hosts, their load and agents.
+  machines: {
+    snapshot: (): Promise<MachinesSnapshot> => ipcRenderer.invoke("machines:snapshot"),
+    stopSession: (hostId: string, sessionName: string): Promise<boolean> =>
+      ipcRenderer.invoke("machines:stopSession", { hostId, sessionName }),
   },
   // SSH key management (SSH manager → Keys tab). Paths never leave ~/.ssh
   // except the import source, which comes from the native file picker.
