@@ -98,6 +98,19 @@ function mainLog(home) {
   }
 }
 
+// Where a process that should have quit or started is stuck: its main
+// thread's stack, from macOS's own sampler.
+function stackOf(child) {
+  if (process.platform !== "darwin" || child.exitCode !== null || child.signalCode !== null) return "";
+  try {
+    const out = require("node:child_process").execFileSync("sample", [String(child.pid), "1", "-mayDie"], { encoding: "utf8", timeout: 15_000, stdio: ["ignore", "pipe", "pipe"] });
+    const start = out.indexOf("Call graph:");
+    return `\nstack of ${child.pid}:\n${out.slice(start, start + 6000)}`;
+  } catch (error) {
+    return `\nsample failed: ${error.message}`;
+  }
+}
+
 const electron = require("electron");
 const launched = new Set();
 function launchApp(env) {
@@ -219,7 +232,7 @@ async function newLaunchReplacesBrokenInstance() {
   check("the broken instance quits for the new launch", firstGone);
   check("and says why", /a new launch found this instance unable to load its window: quitting/.test(mainLog(home)), mainLog(home).slice(-600));
   const secondStarted = await until(() => mainLog(home).includes(`app start pid=${second.child.pid} `), 20_000);
-  check("the new launch takes the lock and starts", secondStarted && second.child.exitCode === null, `${mainLog(home).slice(-600)}\nnew launch: exit=${second.child.exitCode} signal=${second.child.signalCode} stderr=${second.stderr().slice(-1500)}`);
+  check("the new launch takes the lock and starts", secondStarted && second.child.exitCode === null, `${mainLog(home).slice(-600)}\nnew launch: exit=${second.child.exitCode} signal=${second.child.signalCode} stderr=${second.stderr().slice(-1500)}${stackOf(second.child)}`);
   second.child.kill("SIGTERM");
   const secondGone = await Promise.race([second.exited.then(() => true), sleep(10_000).then(() => false)]);
   check("and quits on SIGTERM", secondGone);
@@ -236,7 +249,7 @@ async function newLaunchFocusesHealthyInstance() {
   const startedAt = Date.now();
   const second = launchApp(env);
   const secondGone = await Promise.race([second.exited.then(() => true), sleep(10_000).then(() => false)]);
-  check("the new launch quits at once", secondGone && Date.now() - startedAt < 10_000, `${Date.now() - startedAt} ms; main.log ${mainLog(home).slice(-600)}\nnew launch stderr=${second.stderr().slice(-1500)}`);
+  check("the new launch quits at once", secondGone && Date.now() - startedAt < 10_000, `${Date.now() - startedAt} ms; main.log ${mainLog(home).slice(-600)}\nnew launch stderr=${second.stderr().slice(-1500)}${stackOf(second.child)}`);
   check("the healthy instance keeps running", first.child.exitCode === null && first.child.signalCode === null);
   check("and started no second app", !mainLog(home).includes(`app start pid=${second.child.pid} `));
   first.child.kill("SIGTERM");

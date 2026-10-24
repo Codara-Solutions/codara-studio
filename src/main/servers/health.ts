@@ -91,7 +91,7 @@ export async function processCommand(pid: number): Promise<{ command: string; cw
 // separated (sysctl KERN_PROCARGS2, what ps itself reads); macOS ships Perl,
 // whose syscall() is the one way to reach it without a native module.
 // Layout: int argc, the executable path, NUL padding, then argc strings.
-const DARWIN_ARGV_SCRIPT = `
+const DARWIN_ARGV_SCRIPT = String.raw`
 my $max = pack("i", 0); my $len = pack("Q", 4);
 syscall(202, pack("i2", 1, 8), 2, $max, $len, 0, 0) == 0 or exit 1;
 my $size = unpack("i", $max);

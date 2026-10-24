@@ -345,7 +345,7 @@ async function inChromium(lib) {
     await sleep(600);
     const first = await lib.measureVitals(perfTarget);
     assert.equal(first.action, "vitals");
-    assert.ok(first.lcp && first.lcp.ms > 0, `${JSON.stringify(first)} visibility=${await perfTarget.evaluate("document.visibilityState")}`);
+    assert.ok(first.lcp && first.lcp.ms > 0, `${JSON.stringify(first)} page=${JSON.stringify(await perfTarget.evaluate("({ visibility: document.visibilityState, focus: document.hasFocus(), paint: performance.getEntriesByType('paint').map((e) => e.name), types: PerformanceObserver.supportedEntryTypes })"))}`);
     assert.match(first.lcp.element.selector, /#story|#headline/);
     assert.match(first.lcp.element.ref, /^@/);
     assert.ok(first.cls.value > 0, "the late banner shifts the layout");
