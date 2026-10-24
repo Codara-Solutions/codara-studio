@@ -5,6 +5,11 @@ import { userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { lock } from "proper-lockfile";
 import { atomicWritePrivateFile } from "./native-cli-atomic-file";
+import {
+  assertCodaraOwnedClaudeKeychainHome,
+  assertCodaraOwnedWrite,
+  OutsideWriteError,
+} from "../outside-write-guard";
 
 /**
  * Claude Code's credential slot, read and written the way Claude Code itself
@@ -217,7 +222,14 @@ export function readKeychainCredential(service: string): Promise<string | null> 
   });
 }
 
+/** The base item belongs to the System login: Codara never writes or deletes it. */
+function refuseBaseKeychainItem(service: string): Promise<never> | null {
+  return service === KEYCHAIN_SERVICE ? Promise.reject(new OutsideWriteError(KEYCHAIN_SERVICE)) : null;
+}
+
 export function writeKeychainCredential(service: string, credential: string): Promise<void> {
+  const refused = refuseBaseKeychainItem(service);
+  if (refused) return refused;
   if (seams.platform !== "darwin") return Promise.resolve();
   const normalized = normalizeCredentialStore(credential);
   return new Promise((resolvePromise, reject) => {
@@ -252,6 +264,8 @@ export function writeKeychainCredential(service: string, credential: string): Pr
 }
 
 export function deleteKeychainCredential(service: string): Promise<void> {
+  const refused = refuseBaseKeychainItem(service);
+  if (refused) return refused;
   if (seams.platform !== "darwin") return Promise.resolve();
   return new Promise((resolvePromise, reject) => {
     execFile(
@@ -368,6 +382,16 @@ function useKeychainBackend(options: ClaudeCredentialStoreOptions): boolean {
   return !options.fileOnly && !keychainDisabled() && seams.platform === "darwin";
 }
 
+/** Every write path of this module asks first; see outside-write-guard.ts. */
+function assertCodaraOwnedClaudeHome(
+  configDir: string,
+  configDirEnv: string | null,
+  options: ClaudeCredentialStoreOptions,
+): void {
+  assertCodaraOwnedWrite(configDir);
+  if (useKeychainBackend(options)) assertCodaraOwnedClaudeKeychainHome(configDirEnv);
+}
+
 /** Both backends of a directory, read without the storage lock. Throws when either is unreadable. */
 export async function readClaudeCredentialStores(
   configDir: string,
@@ -400,6 +424,7 @@ export async function updateClaudeCredentialStores<T>(
   update: (stores: ClaudeCredentialStores) => ClaudeCredentialStoreUpdate<T>,
   options: ClaudeCredentialStoreOptions = {},
 ): Promise<T> {
+  assertCodaraOwnedClaudeHome(configDir, configDirEnv, options);
   const created = await fs.mkdir(configDir, { recursive: true, mode: 0o700 });
   let compromised = false;
   const release = await lock(join(configDir, STORAGE_LOCK_FILE), {
@@ -454,6 +479,7 @@ export async function removeClaudeCredentialStores(
   configDirEnv: string | null,
   options: ClaudeCredentialStoreOptions = {},
 ): Promise<void> {
+  assertCodaraOwnedClaudeHome(configDir, configDirEnv, options);
   if (useKeychainBackend(options)) {
     await deleteKeychainCredential(claudeCliKeychainService(configDirEnv));
   }
@@ -499,6 +525,8 @@ export async function withClaudeCodeRefreshLock<T>(
   operation: () => Promise<T>,
   options: { retries?: number } = {},
 ): Promise<T> {
+  assertCodaraOwnedWrite(configDir);
+  assertCodaraOwnedWrite(`${resolve(configDir)}.lock`);
   await fs.mkdir(configDir, { recursive: true, mode: 0o700 });
   const retries = {
     retries: options.retries ?? 30,

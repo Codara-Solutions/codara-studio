@@ -233,7 +233,12 @@ async function main() {
     );
     assert.match(
       storage,
-      /workspaces:\s*candidate\.workspaces\.map\(normalizeWorkspaceGitHubOrigin\)/,
+      /function normalizeAppState\(state: AppState\): AppState \{[\s\S]*?workspaces:\s*state\.workspaces\.map\(normalizeWorkspaceGitHubOrigin\)/,
+      "saved states normalize provenance before publication",
+    );
+    assert.match(
+      storage,
+      /normalizeAppState\(await mutator\(cloneAppState\(current\)\)\)/,
       "atomic state updates normalize provenance before publication",
     );
 

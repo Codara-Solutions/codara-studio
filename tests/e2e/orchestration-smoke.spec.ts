@@ -65,7 +65,7 @@ test("autopilot runs from a selected markdown plan", async () => {
     // click would KILL the pty — forcePauseRun has no graceful ESC path — and
     // a manual-fallback run has no manager to relaunch the task afterwards, so
     // we assert its presence without clicking it).
-    await expect(page.getByRole("button", { name: "Stop run" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Stop Cora" })).toBeVisible();
 
     // Play the worker: write its final report (partial). The launch driver
     // polls final-report.json every 750ms and settles the attempt once it
@@ -345,23 +345,24 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
     expect(settingsGlass!.surfaceBackdrop).not.toContain("url(");
     expect(settingsGlass!.scrimBackdrop).toBe("none");
 
-    await clickAttached(page.getByRole("button", { name: "Agents" }));
-    await expect(page.getByText("Accounts", { exact: true })).toBeVisible();
-    // The synthetic auth.json above is a legacy single-account store, which the
-    // account registry migrates into one Pi profile per provider named after
-    // the provider's plan (defaultProfileLabel in pi-account-auth-store.ts).
-    // That label is on screen twice once the usage overview resolves: the
-    // title-bar usage pill (UsageMeters' UsagePill renders usage.label) and the
-    // account card in Settings. .first() keeps the assertion timing-proof.
-    await expect(page.getByText("ChatGPT Plus / Pro", { exact: true }).first()).toBeVisible();
-    await expect(page.getByText("Claude Pro / Max", { exact: true }).first()).toBeVisible();
-    // The Accounts section explainer, then one group per provider, each
-    // explaining how a switch moves Cora and that provider's CLI together.
+    await clickAttached(settingsNav(page).getByRole("button", { name: "Accounts", exact: true }));
+    await expect(page.locator('[data-settings-tab="agents"][aria-busy="false"]')).toBeVisible();
+    // The synthetic auth.json above is a legacy single login. The accounts
+    // migration archives it and never folds it into a row (bfc17dd3: the list
+    // changes only through the user), so every provider starts at its empty
+    // state and no plan label is shown for the old login.
+    await expect(page.getByText("No Anthropic account yet.")).toBeVisible();
+    await expect(page.getByText("No OpenAI account yet.")).toBeVisible();
+    await expect(page.getByText("ChatGPT Plus / Pro", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Claude Pro / Max", { exact: true })).toHaveCount(0);
+    // The runtime explainer, then "How switching works", which says per
+    // provider what a switch reaches.
     await expect(page.getByText(/Each account keeps its own private sign-in/)).toBeVisible();
-    await expect(page.getByText(/moves Cora and Claude Code together/)).toBeVisible();
-    await expect(page.getByText(/moves Cora and Codex together/)).toBeVisible();
+    await clickAttached(page.getByRole("button", { name: "How switching works" }));
+    await expect(page.getByText(/Running Claude Code sessions switch on their next request/)).toBeVisible();
+    await expect(page.getByText(/New Codex sessions use the new account/)).toBeVisible();
     // The fake OAuth strings deliberately cannot pass the current provider
-    // probe. The profile labels/header counts above prove migration without
+    // probe. The empty states above prove the legacy login is not adopted, without
     // pretending these synthetic credentials are a live Cora connection.
     const serializedSubscriptionStatus = await page.evaluate(async () => {
       const spark = (window as unknown as { spark: any }).spark;
@@ -382,15 +383,18 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
 
     await clickAttached(page.getByRole("button", { name: "Editor" }));
     await expect(page.getByRole("textbox", { name: "Inline AI model" })).toHaveCount(0);
+    // The custom wait slider sits in the section's Advanced fold.
+    await clickAttached(page.locator('[data-setting-anchor="Inline AI advanced"]'));
     const inlineWaitInput = page.getByLabel("Inline AI wait time");
     await expect(inlineWaitInput).toHaveValue("0");
     await clickAttached(page.getByRole("button", { name: /After pause/ }));
     await expect(inlineWaitInput).toHaveValue("1500");
 
-    await clickAttached(page.getByRole("button", { name: "Default terminal" }));
-    const terminalButton = page.getByRole("button", { name: /Use .* as default terminal/ }).first();
-    await expect(terminalButton).toBeVisible();
-    await clickAttached(terminalButton);
+    await clickAttached(settingsNav(page).getByRole("button", { name: "Terminal", exact: true }));
+    await clickAttached(page.getByRole("button", { name: "Default shell", exact: true }));
+    const shellOption = page.getByRole("option").first();
+    await expect(shellOption).toBeVisible();
+    await clickAttached(shellOption);
 
     await clickAttached(page.getByRole("button", { name: "API and model" }));
     await page.getByLabel("OPENROUTER API KEY").fill("test-openrouter-key");
@@ -426,10 +430,11 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
       })
       .toBe("google/gemini-3.5-flash:1500:true");
 
-    // The Capability Center shares Settings' footprint. Its shell must also
-    // paint without the SVG lens/full-screen blur combination that made
-    // opening and typing visibly trail the pointer.
-    const capabilityOpenLatencyMs = await page.getByTitle("MCP and skills").evaluate((button) => new Promise<number>((resolve) => {
+    // The Capability Center opens at Settings' exact size; its MCP table
+    // adapts to the pane instead. Its shell must also paint without the SVG
+    // lens/full-screen blur combination that made opening and typing visibly
+    // trail the pointer.
+    const capabilityOpenLatencyMs = await page.getByRole("button", { name: "Tools, skills and memory" }).evaluate((button) => new Promise<number>((resolve) => {
       const startedAt = performance.now();
       const observer = new MutationObserver(() => {
         if (!document.querySelector("[data-agent-capabilities-surface]")) return;
@@ -456,8 +461,10 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
         width: surface.getBoundingClientRect().width,
         height: surface.getBoundingClientRect().height,
         borderRadius: getComputedStyle(surface).borderRadius,
-        expectedWidth: Math.min(880, window.innerWidth - 44),
-        expectedHeight: Math.min(760, window.innerHeight - 44),
+        expectedWidth: Math.min(1000, window.innerWidth - 48),
+        // The surface is sized to the overlay (the workbench row), 20px
+        // clear of the title bar and the status bar, not to the window.
+        expectedHeight: Math.min(800, surface.parentElement!.getBoundingClientRect().height - 40),
       };
     });
     expect(capabilityGlass).not.toBeNull();
@@ -473,9 +480,9 @@ test("settings dialog saves default terminal, OpenRouter, commit, and inline set
     if (process.env.SPARK_CAPABILITY_SCREENSHOT) {
       await page.screenshot({ path: process.env.SPARK_CAPABILITY_SCREENSHOT });
     }
-    // Four tabs (MCP servers, Skills, Memory, Policy) beside one content pane.
-    // MCP is the tab that opens first, so its section heading is on screen —
-    // the nav button of the same name is a button, not a heading.
+    // The tabs sit beside one content pane. MCP is the tab that opens first,
+    // so the title bar names it; the nav button of the same name is a tab,
+    // not a heading.
     await expect(page.getByRole("heading", { name: "MCP servers" })).toBeVisible();
     const capabilitySearch = page.getByPlaceholder("Filter servers");
     await capabilitySearch.fill("playwright");
@@ -629,6 +636,10 @@ async function clickButton(page: Page, name: string): Promise<void> {
   const button = page.getByRole("button", { name, exact: true });
   await expect(button).toBeEnabled();
   await button.dispatchEvent("click");
+}
+
+function settingsNav(page: Page): Locator {
+  return page.getByRole("dialog", { name: "Settings" }).locator("nav");
 }
 
 async function clickAttached(locator: Locator): Promise<void> {

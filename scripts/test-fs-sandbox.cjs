@@ -152,6 +152,18 @@ async function main() {
   check("workspace file allowed after push", allowed(path.join(ws, "src", "a.ts")));
   check("sibling of workspace rejected", !allowed(path.join(ws, "..", "elsewhere.txt")));
 
+  // A workspace opened through a symlink (every temp folder on macOS) is
+  // also asked about by its real path, which the share offer resolves first.
+  const realWs = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "codara-fs-sandbox-real-")));
+  const linkedWs = `${realWs}-link`;
+  fs.symlinkSync(realWs, linkedWs);
+  sandbox.setAllowedRoots([linkedWs]);
+  check("a symlinked workspace allows its own spelling", allowed(path.join(linkedWs, "a.md")));
+  check("and its real path", allowed(path.join(realWs, "a.md")));
+  check("but not the real path's siblings", !allowed(path.join(path.dirname(realWs), "elsewhere.md")));
+  fs.unlinkSync(linkedWs);
+  fs.rmSync(realWs, { recursive: true, force: true });
+
   fs.rmSync(home, { recursive: true, force: true });
   fs.rmSync(ws, { recursive: true, force: true });
   fs.rmSync(bundleDir, { recursive: true, force: true });

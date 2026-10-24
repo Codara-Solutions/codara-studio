@@ -446,14 +446,14 @@ export function verdictTone(kind: StepVerdictKind): VerdictTone | null {
       return { color: "var(--ok)", label: "Verified", title: "Verifier confirmed the work" };
     case "partial":
     case "feedback":
-      return { color: "var(--warn)", label: "Partial", title: "Verifier found gaps — partial" };
+      return { color: "var(--warn)", label: "Partial", title: "Verifier found gaps, partial" };
     case "failed":
       return { color: "var(--danger)", label: "Failed", title: "Verifier rejected the work" };
     case "unverified-accepted":
       return {
         color: "var(--muted)",
         label: "Unverified",
-        title: "Unverified — accepted to avoid deadlock",
+        title: "Unverified, accepted to avoid deadlock",
       };
     case "none":
       return null;
@@ -507,7 +507,7 @@ export const SparkNode = React.memo(function SparkNode({
         : "var(--ink-dim)";
   return (
     <div
-      title="Cora — the orchestration manager"
+      title="Cora, the orchestration manager"
       style={{
         width: "100%",
         height: "100%",
@@ -726,7 +726,7 @@ function CollapsedStepNode({
       }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      title={`${step.title}\n${step.goal || ""}\n\n${stepStatusLabel(status)} — collapsed. Click to inspect, or use the chevron to expand.`}
+      title={`${step.title}\n${step.goal || ""}\n\n${stepStatusLabel(status)}, collapsed. Click to inspect, or use the chevron to expand.`}
       style={{
         width: "100%",
         height: "100%",
@@ -1221,7 +1221,7 @@ function CheckpointNode({
       }}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
-      title={`${step.goal || step.title}\n\nCheckpoint — Cora replans here.`}
+      title={`${step.goal || step.title}\n\nCheckpoint: Cora replans here.`}
       style={{
         position: "relative",
         width: "100%",
@@ -1554,7 +1554,7 @@ export const WorkerNode = React.memo(function WorkerNode({
       onMouseLeave={() => setHover(false)}
       title={
         queued
-          ? `${label}\n\nQueued — Cora has not spawned this worker yet.`
+          ? `${label}\n\nQueued: Cora has not spawned this worker yet.`
           : `${label}${row.retryNote ? `\n${row.retryNote}` : ""}\n\nClick to open this worker's terminal.`
       }
       style={{

@@ -2,9 +2,10 @@
 "use strict";
 
 // The Claude login keeper (claude-login-keeper.ts): the one refresher of the
-// live login, ahead of Claude Code and Cora, under Claude Code's own refresh
-// lock and with its compare-and-swap. The Keychain is off, so the live store
-// is the home's `.credentials.json`.
+// managed login in Codara's live slot, ahead of Claude Code and Cora, under
+// Claude Code's own refresh lock and with its compare-and-swap. The System
+// login is never refreshed. The Keychain is off, so the slot's store is its
+// `.credentials.json`.
 //
 //   node scripts/test-claude-login-keeper.cjs
 
@@ -42,17 +43,20 @@ async function load() {
 }
 
 let index = 0;
+const LIVE_ID = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 function fixture(liveLogin) {
   index += 1;
   const base = path.join(TMP, `case-${index}`);
-  const store = {
-    rootDir: path.join(base, "claude-cli"),
-    personalConfigDir: path.join(base, "home", ".claude"),
-    personalConfigDirEnv: null,
-  };
-  fs.mkdirSync(store.personalConfigDir, { recursive: true, mode: 0o700 });
-  fs.mkdirSync(store.rootDir, { recursive: true, mode: 0o700 });
-  const liveFile = path.join(store.personalConfigDir, ".credentials.json");
+  const rootDir = path.join(base, "claude-cli");
+  const store = { rootDir, liveConfigDir: path.join(rootDir, "live", "home") };
+  fs.mkdirSync(store.liveConfigDir, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(path.join(rootDir, "accounts", LIVE_ID), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(
+    path.join(rootDir, "live-login.json"),
+    JSON.stringify({ version: 1, profileId: LIVE_ID }),
+    { mode: 0o600 },
+  );
+  const liveFile = path.join(store.liveConfigDir, ".credentials.json");
   if (liveLogin) {
     fs.writeFileSync(
       liveFile,
@@ -64,7 +68,7 @@ function fixture(liveLogin) {
     store,
     liveFile,
     live: () => JSON.parse(fs.readFileSync(liveFile, "utf8")),
-    vault: () => JSON.parse(fs.readFileSync(path.join(store.rootDir, "personal-login.json"), "utf8")),
+    vault: () => JSON.parse(fs.readFileSync(path.join(rootDir, "accounts", LIVE_ID, "login.json"), "utf8")),
   };
 }
 
@@ -144,9 +148,9 @@ async function main() {
   {
     const f = fixture(login("current", 2 * MINUTE));
     const lockfile = require("proper-lockfile");
-    const release = await lockfile.lock(f.store.personalConfigDir, {
+    const release = await lockfile.lock(f.store.liveConfigDir, {
       realpath: false,
-      lockfilePath: path.join(f.store.personalConfigDir, ".oauth_refresh.lock"),
+      lockfilePath: path.join(f.store.liveConfigDir, ".oauth_refresh.lock"),
     });
     const run = deps(f, { refreshLockRetries: 20 });
     const pending = mod.refreshLiveClaudeLoginIfDue(run.deps);
@@ -199,9 +203,9 @@ async function main() {
 
     const busy = fixture(login("current", 2 * MINUTE));
     const lockfile = require("proper-lockfile");
-    const release = await lockfile.lock(busy.store.personalConfigDir, {
+    const release = await lockfile.lock(busy.store.liveConfigDir, {
       realpath: false,
-      lockfilePath: path.join(busy.store.personalConfigDir, ".oauth_refresh.lock"),
+      lockfilePath: path.join(busy.store.liveConfigDir, ".oauth_refresh.lock"),
     });
     const busyRun = deps(busy, { refreshLockRetries: 0 });
     assert.equal(await mod.refreshLiveClaudeLoginIfDue(busyRun.deps), "busy");
@@ -237,7 +241,7 @@ async function main() {
   {
     const f = fixture(login("claude", 60 * MINUTE));
     const run = deps(f);
-    const renewal = await mod.renewClaudeLoginForCora(run.deps, "personal", "refresh-cora-old");
+    const renewal = await mod.renewClaudeLoginForCora(run.deps, LIVE_ID, "refresh-cora-old");
     assert.equal(renewal.outcome, "adopted");
     assert.deepEqual(renewal.tokens, {
       access: "access-claude",
@@ -253,7 +257,7 @@ async function main() {
   {
     const f = fixture(login("claude", 2 * MINUTE));
     const run = deps(f);
-    const renewal = await mod.renewClaudeLoginForCora(run.deps, "personal", "refresh-claude");
+    const renewal = await mod.renewClaudeLoginForCora(run.deps, LIVE_ID, "refresh-claude");
     assert.equal(renewal.outcome, "refreshed");
     assert.deepEqual(renewal.tokens, grant("next"));
     assert.deepEqual(run.calls, ["refresh-claude"]);
@@ -270,7 +274,7 @@ async function main() {
   {
     const f = fixture({ accessToken: "", refreshToken: "", expiresAt: 0, scopes: ["user:inference"] });
     const run = deps(f);
-    const renewal = await mod.renewClaudeLoginForCora(run.deps, "personal", "refresh-cora");
+    const renewal = await mod.renewClaudeLoginForCora(run.deps, LIVE_ID, "refresh-cora");
     assert.equal(renewal.outcome, "refreshed");
     assert.deepEqual(run.calls, ["refresh-cora"]);
     assert.equal(f.live().claudeAiOauth.accessToken, "access-next");
@@ -287,7 +291,7 @@ async function main() {
         return grant("next");
       },
     });
-    const renewal = await mod.renewClaudeLoginForCora(run.deps, "personal", "refresh-cora");
+    const renewal = await mod.renewClaudeLoginForCora(run.deps, LIVE_ID, "refresh-cora");
     assert.deepEqual(run.calls, ["refresh-stale", "refresh-cora"]);
     assert.equal(renewal.tokens.refresh, "refresh-next");
     assert.equal(f.live().claudeAiOauth.refreshToken, "refresh-next");
@@ -299,7 +303,7 @@ async function main() {
       },
     });
     const before = fs.readFileSync(dead.liveFile, "utf8");
-    await assert.rejects(mod.renewClaudeLoginForCora(deadRun.deps, "personal", "refresh-cora"), /invalid_grant/);
+    await assert.rejects(mod.renewClaudeLoginForCora(deadRun.deps, LIVE_ID, "refresh-cora"), /invalid_grant/);
     assert.equal(fs.readFileSync(dead.liveFile, "utf8"), before, "a failed renewal writes nothing");
     console.log("PASS the slot's token first, Cora's next, and nothing written when both fail");
   }
@@ -336,10 +340,10 @@ async function main() {
   {
     const f = fixture(null);
     const run = deps(f);
-    const renewal = await mod.renewClaudeLoginForCora(run.deps, "personal", "refresh-cora");
+    const renewal = await mod.renewClaudeLoginForCora(run.deps, LIVE_ID, "refresh-cora");
     assert.equal(renewal.outcome, "refreshed");
     assert.equal(fs.existsSync(f.liveFile), false);
-    await assert.rejects(mod.renewClaudeLoginForCora(run.deps, "personal", ""), /no refresh token/);
+    await assert.rejects(mod.renewClaudeLoginForCora(run.deps, LIVE_ID, ""), /no refresh token/);
     console.log("PASS a signed-out slot is not signed back in");
   }
 
@@ -347,12 +351,12 @@ async function main() {
   {
     const f = fixture(login("current", 2 * MINUTE));
     const lockfile = require("proper-lockfile");
-    const release = await lockfile.lock(f.store.personalConfigDir, {
+    const release = await lockfile.lock(f.store.liveConfigDir, {
       realpath: false,
-      lockfilePath: path.join(f.store.personalConfigDir, ".oauth_refresh.lock"),
+      lockfilePath: path.join(f.store.liveConfigDir, ".oauth_refresh.lock"),
     });
     const run = deps(f, { refreshLockRetries: 20 });
-    const pending = mod.renewClaudeLoginForCora(run.deps, "personal", "refresh-current");
+    const pending = mod.renewClaudeLoginForCora(run.deps, LIVE_ID, "refresh-current");
     await new Promise((resolve) => setTimeout(resolve, 150));
     fs.writeFileSync(
       f.liveFile,
@@ -386,7 +390,7 @@ async function main() {
     );
     // Claude Code recorded the stranger's account on /login.
     fs.writeFileSync(
-      path.join(path.dirname(f.store.personalConfigDir), ".claude.json"),
+      path.join(f.store.liveConfigDir, ".claude.json"),
       JSON.stringify({ oauthAccount: { accountUuid: "uuid-stranger" } }),
       { mode: 0o600 },
     );
@@ -395,6 +399,21 @@ async function main() {
     const keeper = deps(f);
     assert.equal(await mod.refreshLiveClaudeLoginIfDue(keeper.deps), "foreign");
     assert.deepEqual(keeper.calls, [], "the stranger's login is not refreshed");
+
+    // While a plain `claude` follows Codara, claude-follow takes a foreign
+    // login on through the handler; without one, the pass leaves it alone.
+    let handled = 0;
+    mod.startClaudeLoginKeeper(keeper.deps);
+    assert.equal(await mod.nudgeClaudeLoginKeeper(), "foreign");
+    assert.equal(handled, 0);
+    mod.setClaudeForeignLoginHandler(async () => {
+      handled += 1;
+    });
+    assert.equal(await mod.nudgeClaudeLoginKeeper(), "foreign");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(handled, 1, "the handler runs once per foreign pass");
+    mod.setClaudeForeignLoginHandler(null);
+    mod.stopClaudeLoginKeeper();
 
     const cora = deps(f);
     const renewal = await mod.renewClaudeLoginForCora(cora.deps, id, "refresh-own");
@@ -407,11 +426,25 @@ async function main() {
 
     // A live slot that still records no account counts as the profile's own.
     const g = fixture(login("claude", 60 * MINUTE));
-    const adopt = await mod.renewClaudeLoginForCora(deps(g).deps, "personal", "refresh-x", {
+    const adopt = await mod.renewClaudeLoginForCora(deps(g).deps, LIVE_ID, "refresh-x", {
       expectedFingerprint: "fp-someone",
     });
     assert.equal(adopt.outcome, "adopted", "an unrecorded account is not treated as foreign");
     console.log("PASS a stranger's terminal login is never refreshed or handed to Cora as the profile's");
+  }
+
+  // The System login is never refreshed: with no managed account in the
+  // slot the keeper has nothing to do, and Cora cannot renew it through here.
+  {
+    const f = fixture(login("system", 2 * MINUTE));
+    fs.rmSync(path.join(f.store.rootDir, "live-login.json"));
+    const before = fs.readFileSync(f.liveFile, "utf8");
+    const run = deps(f);
+    assert.equal(await mod.refreshLiveClaudeLoginIfDue(run.deps), "no-login");
+    await assert.rejects(mod.renewClaudeLoginForCora(run.deps, "personal", "refresh-system"), /managed/);
+    assert.deepEqual(run.calls, []);
+    assert.equal(fs.readFileSync(f.liveFile, "utf8"), before);
+    console.log("PASS the System login is never refreshed");
   }
 
   console.log("\nPASS Claude login keeper");

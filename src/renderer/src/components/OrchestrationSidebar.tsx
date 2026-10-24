@@ -4,6 +4,7 @@ import type { SectionHeaderDragProps } from "../panels/SectionHeader";
 import ChatPanel from "./chat/ChatPanel";
 import type { ChatComposerStartConfig } from "./chat/ChatComposer";
 import { isUnstartedChatRun, type CoraView } from "./chat/cora-view";
+import { unwrapIpcError } from "../lib/ipc-error";
 
 interface Props {
   workspace: Workspace | null;
@@ -62,6 +63,13 @@ export default function OrchestrationSidebar({
 }: Props) {
   const [creatingNewRun, setCreatingNewRun] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const dismissError = useCallback(() => setError(null), []);
+  // An error belongs to the chat it happened in; switching chats (or starting
+  // a new one) must not carry it over. A failed delete stays visible because
+  // it does not change the selection.
+  useEffect(() => {
+    setError(null);
+  }, [activeRunId, creatingNewRun]);
 
   const selectedRun = useMemo(
     () => runs.find((run) => run.id === activeRunId) ?? null,
@@ -143,12 +151,10 @@ export default function OrchestrationSidebar({
   // throws.
   //
   // chatConfig carries the draft composer's chip selections
-  // (backend/model/mode/effort). When any are set we create the run up-front
-  // through createRun so those fields are stamped on the fresh RunState, then
-  // hand the runId to startAutopilot — this avoids touching the autopilot
-  // input contract while still threading the chip's choice through to the
-  // first manager call. When chatConfig is empty we keep the original
-  // single-call path so legacy callers (no chip selection) behave identically.
+  // (backend/model/mode/effort/profile). They go straight to startAutopilot,
+  // which stamps them on the run it creates. Pre-creating the run here would
+  // hand startAutopilot a runId, and a runId bypasses the direct-lane routing
+  // that sends a bounded first message to one worker instead of the manager.
   const startChat = useCallback(
     async (
       message: string,
@@ -157,45 +163,28 @@ export default function OrchestrationSidebar({
       chatConfig?: ChatComposerStartConfig,
     ) => {
       if (!workspace) return;
-      const hasChatConfig = Boolean(
-        chatConfig &&
-          (chatConfig.backend !== undefined ||
-            chatConfig.model !== undefined ||
-            chatConfig.mode !== undefined ||
-            chatConfig.effort !== undefined ||
-            chatConfig.profileId !== undefined),
-      );
       // A board-minted run that never had a conversation is reused for the
       // first send instead of minting a sibling chat: the welcome the user is
       // typing under belongs to THAT run (its board may already hold cards).
       // Chip selections were already persisted onto it via updateChatBackend,
-      // so the chatConfig path below is skipped for it.
-      const reuseUnstartedRunId =
+      // and it stays on the manager path because startAutopilot only routes
+      // runs it creates itself.
+      const runId =
         activeRun && isUnstartedChatRun(activeRun) ? activeRun.id : undefined;
-      let runId: string | undefined = reuseUnstartedRunId;
-      if (!runId && hasChatConfig) {
-        const created = await window.spark.orchestration.createRun({
-          workspaceId: workspace.id,
-          workspaceName: workspace.name,
-          cwd: workspace.cwd,
-          title: deriveDraftChatTitle(message, workspace.name),
-          chatBackend: chatConfig?.backend,
-          chatModel: chatConfig?.model,
-          chatMode: chatConfig?.mode,
-          chatEffort: chatConfig?.effort,
-          coraProfileId: chatConfig?.profileId,
-        });
-        runId = created.id;
-      }
       const run = await window.spark.orchestration.startAutopilot({
         workspaceId: workspace.id,
         workspaceName: workspace.name,
         cwd: workspace.cwd,
         runId,
+        title: runId ? undefined : deriveDraftChatTitle(message, workspace.name),
         initialUserNote: message,
         initialUserNoteClientMessageId: clientMessageId,
         initialAttachments: attachments,
         coraProfileId: chatConfig?.profileId,
+        chatBackend: chatConfig?.backend,
+        chatModel: chatConfig?.model,
+        chatMode: chatConfig?.mode,
+        chatEffort: chatConfig?.effort,
       });
       setCreatingNewRun(false);
       onRunSnapshot(run, { select: true, focusRuns: false });
@@ -209,7 +198,7 @@ export default function OrchestrationSidebar({
     try {
       await action();
     } catch (err) {
-      setError((err as Error).message);
+      setError(unwrapIpcError(err));
     }
   }, []);
 
@@ -225,7 +214,7 @@ export default function OrchestrationSidebar({
 
   const forcePauseRun = useCallback(() => {
     if (!activeRun) return;
-    void mutate(async () => {
+    return mutate(async () => {
       // Stop means stop in place: interrupt the active manager, kill live
       // workers, and preserve every chat turn and completed workspace change.
       // Conversation/code rewind belongs exclusively to the explicit Undo UI.
@@ -242,6 +231,7 @@ export default function OrchestrationSidebar({
       composerDraftKey={composerDraftKey}
       suspendGlobalEvents={suspendGlobalEvents}
       error={error}
+      onDismissError={dismissError}
       collapsed={collapsed}
       onToggleCollapse={onToggleCollapse}
       collapsible={collapsible}

@@ -1,5 +1,4 @@
 import { indentUnit } from "@codemirror/language";
-import { search } from "@codemirror/search";
 import { Compartment, EditorState, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 
@@ -12,13 +11,12 @@ export const vimCompartment = new Compartment();
 
 // Only what basicSetup doesn't already cover — basicSetup gives us line
 // numbers, fold gutter, history, indentOnInput, bracketMatching,
-// closeBrackets, autocompletion, highlightActiveLine,
-// highlightSelectionMatches, and the search keymap.
+// closeBrackets, autocompletion, highlightActiveLine and
+// highlightSelectionMatches. Search is the find bar's (./find.ts).
 export function buildSharedExtensions(): Extension[] {
   return [
     indentUnit.of("  "),
     EditorState.tabSize.of(2),
-    search({ top: true }),
     EditorView.theme({
       "&, &.cm-editor, &.cm-editor.cm-focused": {
         backgroundColor: "transparent !important",

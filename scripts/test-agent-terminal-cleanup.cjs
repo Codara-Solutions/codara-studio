@@ -405,8 +405,8 @@ async function main() {
   );
   for (const surface of [settingsSource, settingsGuide]) {
     assert.match(surface, /Temporary worker panes close/);
-    assert.match(surface, /Service panes\s+remain until (?:the|their) run is deleted/);
-    assert.match(surface, /failed closes retry automatically/i);
+    assert.match(surface, /Service panes\s+(?:remain|stay) until (?:the|their) run is deleted/i);
+    assert.match(surface, /failed closes? (?:retry automatically|is retried)/i);
   }
 
   console.log(

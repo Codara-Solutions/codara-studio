@@ -76,9 +76,15 @@ const SCANNED_DIRS = [path.join(ROOT, "src", "main"), path.join(ROOT, "src", "sh
 
 // Event-style ipcMain.on registrations that are intentionally ungated. Each
 // entry is keyed "<basename>:<channelLiteralOrSnippet>" and must be justified
-// at its call site. Empty today: every ipcMain.on in the main process gates its
-// sender.
-const ON_OPT_OUT = new Set([]);
+// at its call site. The only ones are the browser pane's guest preload
+// channels: their sender is a <webview> guest by design, which the main-window
+// gate always refuses, so each listener checks isTrustedPreviewGuest and the
+// top frame instead, and acts only on that guest's own chords or dialog.
+const ON_OPT_OUT = new Set([
+  "guest-chords.ts:GUEST_CHORD_READY_CHANNEL",
+  "guest-chords.ts:GUEST_CHORD_REPORT_CHANNEL",
+  "preview-dialogs.ts:DIALOG_CHANNEL",
+]);
 
 // Invoke channels registered through the explicit ungated opt-out wrapper
 // handleOpen(...) in ipc.ts. Each must be justified at its call site. Empty

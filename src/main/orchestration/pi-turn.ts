@@ -1,6 +1,12 @@
 import type { ChatStreamHandler } from "./agent-backend";
 import type { PiRpcEvent } from "./pi-rpc-client";
-import { resolveCompactAtTokens } from "@shared/context-compaction";
+import {
+  autoCompactLimitTokens,
+  compactAtOverrideTokens,
+  normalizeAutoCompactPercent,
+} from "@shared/context-compaction";
+import { contextWindowForModel } from "@shared/context-window";
+import { fastModeFallbackNote } from "@shared/fast-mode";
 
 export interface PiTurnToolCall {
   toolName: string;
@@ -38,6 +44,10 @@ export interface PiTurnResult {
   /** The provider's context window when it reported one, else null. */
   contextWindowTokens: number | null;
   failure: string | null;
+  /** True once Pi started its own provider retry loop during this turn, so
+   *  the manager-turn policy knows whether a further replay would multiply
+   *  load or is the first retry the turn gets. */
+  providerRetried: boolean;
   settled: boolean;
 }
 
@@ -128,12 +138,53 @@ function assistantMessageId(messageValue: unknown, fallback: string): string {
   return fallback;
 }
 
+/**
+ * Extension hooks that only observe a turn. Pi catches a throwing handler,
+ * reports extension_error and carries on, so a failure here leaves the answer
+ * intact and is reported as a diagnostic. Every other hook (before_agent_start
+ * injects Cora's contract, before_provider_request and tool_call enforce
+ * policy, session_start wires the bridge) stays fatal, as does an unnamed one.
+ */
+const OBSERVER_EXTENSION_EVENTS: ReadonlySet<string> = new Set([
+  "agent_start",
+  "agent_end",
+  "turn_start",
+  "turn_end",
+  "message_start",
+  "message_update",
+  "message_end",
+  "tool_execution_start",
+  "tool_execution_update",
+  "tool_execution_end",
+  "tool_result",
+  "input",
+  "session_before_compact",
+  "session_compact",
+  "session_compact_failed",
+  "session_shutdown",
+]);
+
 function toolOutput(resultValue: unknown): string {
   const text = textBlocks(resultValue);
   if (text) return text;
   if (resultValue === undefined) return "";
   try { return JSON.stringify(resultValue); }
   catch { return String(resultValue); }
+}
+
+// Live output of a running tool (Pi's bash streams tool_execution_update with
+// everything so far). Only a tail is forwarded, at most this often, because the
+// final tool_result carries the whole output.
+export const TOOL_PROGRESS_INTERVAL_MS = 250;
+export const TOOL_PROGRESS_MAX_LINES = 40;
+export const TOOL_PROGRESS_MAX_CHARS = 4000;
+
+export function toolProgressTail(partialResult: unknown): string {
+  const text = textBlocks(partialResult);
+  if (!text) return "";
+  const lines = text.replace(/\s+$/, "").split(/\r?\n/);
+  const tail = lines.slice(-TOOL_PROGRESS_MAX_LINES).join("\n");
+  return tail.length > TOOL_PROGRESS_MAX_CHARS ? tail.slice(-TOOL_PROGRESS_MAX_CHARS) : tail;
 }
 
 /**
@@ -164,15 +215,34 @@ export class PiTurnAccumulator {
   // response can clear only the retryable failure, never a broken bridge.
   private providerFailure: string | null = null;
   private fatalFailure: string | null = null;
+  private providerRetried = false;
   private readonly providerResponseIds = new Set<string>();
   private settled = false;
+  private readonly launchEnv: NodeJS.ProcessEnv;
+  private readonly model: string | undefined;
+  // Per running tool: when its last tail went out, and the newest tail held
+  // back by the throttle (sent by a trailing timer so the final lines before a
+  // quiet stretch are never lost).
+  private readonly toolProgress = new Map<
+    string,
+    { sentAt: number; pending: string | null; timer: ReturnType<typeof setTimeout> | null }
+  >();
 
   constructor(
     onStream?: ChatStreamHandler,
-    options: { captureCost?: boolean } = {},
+    options: {
+      captureCost?: boolean;
+      /** The Pi session's launch env: its compaction limit is the one the
+       *  extension enforces, not this process's. */
+      launchEnv?: NodeJS.ProcessEnv;
+      /** The session's model, for its catalog window until Pi reports one. */
+      model?: string;
+    } = {},
   ) {
     this.onStream = onStream;
     this.captureCost = options.captureCost === true;
+    this.launchEnv = options.launchEnv ?? process.env;
+    this.model = options.model;
   }
 
   consume(event: PiRpcEvent): void {
@@ -183,14 +253,27 @@ export class PiTurnAccumulator {
     }
 
     if (event.type === "message_update") {
-      const message = asRecord(event.message);
       const delta = asRecord(event.assistantMessageEvent);
-      if (message?.role !== "assistant" || delta?.type !== "text_delta" || typeof delta.delta !== "string") {
-        return;
-      }
-      const messageId = this.ensureAssistant(message);
+      if (delta?.type !== "text_delta" || typeof delta.delta !== "string") return;
+      // Pi 0.84+ strips `message` from message_update, so the delta belongs
+      // to the assistant message message_start opened. Older builds still
+      // send it and keep their own attribution.
+      const message = asRecord(event.message);
+      if (message && message.role !== "assistant") return;
+      // Without message_start there is no id that message_end will later
+      // agree with, and minting one would count a phantom assistant message.
+      if (!message && !this.currentAssistantId) return;
+      const messageId = message ? this.ensureAssistant(message) : this.currentAssistantId!;
       this.streamedText.set(messageId, `${this.streamedText.get(messageId) ?? ""}${delta.delta}`);
       this.onStream?.({ kind: "assistant_block", messageId, text: delta.delta });
+      return;
+    }
+
+    if (event.type === "compaction_start") {
+      this.onStream?.({
+        kind: "system_note",
+        message: "Compacting the conversation so Cora stays fast. This can take a minute.",
+      });
       return;
     }
 
@@ -250,8 +333,17 @@ export class PiTurnAccumulator {
       return;
     }
 
+    if (event.type === "tool_execution_update") {
+      if (typeof event.toolCallId !== "string" || !event.toolCallId || !this.onStream) return;
+      if (!this.toolIds.has(event.toolCallId) || this.completedToolIds.has(event.toolCallId)) return;
+      const tail = toolProgressTail(event.partialResult);
+      if (tail) this.queueToolProgress(event.toolCallId, tail);
+      return;
+    }
+
     if (event.type === "tool_execution_end") {
       if (typeof event.toolCallId !== "string" || !event.toolCallId) return;
+      this.clearToolProgress(event.toolCallId);
       this.completedToolIds.add(event.toolCallId);
       if (event.isError === true) this.failedToolIds.add(event.toolCallId);
       this.onStream?.({
@@ -267,8 +359,34 @@ export class PiTurnAccumulator {
       const detail = typeof event.error === "string" && event.error.trim()
         ? event.error.trim()
         : "Pi extension failed.";
+      const hook = typeof event.event === "string" ? event.event : "";
+      if (OBSERVER_EXTENSION_EVENTS.has(hook)) {
+        this.onStream?.({
+          kind: "system_note",
+          message: `A Cora extension hook (${hook}) failed and was skipped: ${detail}`,
+        });
+        return;
+      }
       this.fatalFailure = detail;
       this.onStream?.({ kind: "error", message: detail });
+      return;
+    }
+
+    if (event.type === "auto_retry_start") {
+      this.providerRetried = true;
+      const fallback = fastModeFallbackNote(event.errorMessage);
+      if (fallback) {
+        this.onStream?.({ kind: "system_note", message: fallback });
+        return;
+      }
+      const attempt = finiteCount(event.attempt);
+      const maxAttempts = finiteCount(event.maxAttempts);
+      const seconds = Math.max(1, Math.round(finiteCount(event.delayMs) / 1000));
+      const count = attempt > 0 && maxAttempts > 0 ? ` (${attempt}/${maxAttempts})` : "";
+      this.onStream?.({
+        kind: "system_note",
+        message: `The provider is busy or unreachable; retrying${count} in ${seconds}s.`,
+      });
       return;
     }
 
@@ -288,6 +406,32 @@ export class PiTurnAccumulator {
     }
 
     if (event.type === "agent_settled") this.settled = true;
+  }
+
+  private queueToolProgress(toolUseId: string, output: string): void {
+    const state = this.toolProgress.get(toolUseId) ?? { sentAt: 0, pending: null, timer: null };
+    this.toolProgress.set(toolUseId, state);
+    const wait = TOOL_PROGRESS_INTERVAL_MS - (Date.now() - state.sentAt);
+    if (wait <= 0 && !state.timer) {
+      state.sentAt = Date.now();
+      this.onStream?.({ kind: "tool_progress", toolUseId, output });
+      return;
+    }
+    state.pending = output;
+    state.timer ??= setTimeout(() => {
+      state.timer = null;
+      if (state.pending === null || this.completedToolIds.has(toolUseId)) return;
+      const pending = state.pending;
+      state.pending = null;
+      state.sentAt = Date.now();
+      this.onStream?.({ kind: "tool_progress", toolUseId, output: pending });
+    }, Math.max(0, wait));
+  }
+
+  private clearToolProgress(toolUseId: string): void {
+    const state = this.toolProgress.get(toolUseId);
+    if (state?.timer) clearTimeout(state.timer);
+    this.toolProgress.delete(toolUseId);
   }
 
   result(): PiTurnResult {
@@ -311,6 +455,7 @@ export class PiTurnAccumulator {
       contextTokens: this.contextTokens,
       contextWindowTokens: this.contextWindowTokens,
       failure: this.fatalFailure ?? this.providerFailure,
+      providerRetried: this.providerRetried,
       settled: this.settled,
     };
   }
@@ -348,9 +493,24 @@ export class PiTurnAccumulator {
           : {}),
         // The ceiling this session will actually compact at. Only Pi sessions
         // carry it, which is exactly the set of chats the extension runs in.
-        compactAtTokens: resolveCompactAtTokens(process.env.CODARA_PI_COMPACT_AT_TOKENS),
+        compactAtTokens: this.compactAtTokens(),
       });
     }
+  }
+
+  /** The launch plan stamps CODARA_PI_COMPACT_AT_TOKENS on every session and
+   *  adds CODARA_PI_COMPACT_PERCENT only when no developer override exists,
+   *  so a percentage present here outranks the stamped token count, exactly
+   *  as the extension reads them. */
+  private compactAtTokens(): number {
+    const percent = normalizeAutoCompactPercent(this.launchEnv.CODARA_PI_COMPACT_PERCENT);
+    return autoCompactLimitTokens({
+      contextWindowTokens:
+        this.contextWindowTokens ?? (this.model ? contextWindowForModel(this.model).tokens : null),
+      percent,
+      overrideTokens:
+        percent === null ? compactAtOverrideTokens(this.launchEnv.CODARA_PI_COMPACT_AT_TOKENS) : null,
+    });
   }
 
   private ensureAssistant(message: Record<string, unknown>, begin = false): string {

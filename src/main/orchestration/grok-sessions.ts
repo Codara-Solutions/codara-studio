@@ -12,10 +12,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 
 import { isCodaraManagedCliPath } from "./codara-managed-cli-roots";
 import { defaultPersonalGrokHomeDir } from "./grok-cli-account-profiles";
-import {
-  GROK_CLI_SHARED_STATE_DIR_SET,
-  GROK_CLI_SHARED_STATE_FILE_SET,
-} from "./native-cli-shared-state";
+import { GROK_SHARED_STATE_NAMES } from "./cli-account-homes";
 
 const GROK_SESSION_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -63,12 +60,7 @@ export function isGrokSessionId(value: string): boolean {
 function isCodaraSharedGrokStateLink(root: string, path: string): boolean {
   if (dirname(path) !== root) return false;
   const name = basename(path);
-  if (
-    !GROK_CLI_SHARED_STATE_DIR_SET.has(name) &&
-    !GROK_CLI_SHARED_STATE_FILE_SET.has(name)
-  ) {
-    return false;
-  }
+  if (!GROK_SHARED_STATE_NAMES.includes(name)) return false;
   return isCodaraManagedCliPath(root);
 }
 

@@ -108,3 +108,50 @@ export function normalizePiExecutionAccount(
     configDir: resolve(selection.configDir),
   };
 }
+
+const ACCOUNT_NAME_BY_PROVIDER: Record<PiSubscriptionProvider, string> = {
+  anthropic: "Claude",
+  "openai-codex": "ChatGPT",
+  xai: "Grok",
+};
+
+/**
+ * No connected account exists for the provider a turn needs. The message is
+ * shown to the user, names the account they know, and keeps the phrase "not
+ * authenticated" so both failure taxonomies (main and chat) classify it as
+ * auth: the run then parks with Retry instead of failing on the legacy auth
+ * store's ENOENT, which reads as a launch error.
+ */
+export class NoConnectedPiAccountError extends Error {
+  readonly provider: PiSubscriptionProvider;
+
+  constructor(provider: PiSubscriptionProvider) {
+    const name = ACCOUNT_NAME_BY_PROVIDER[provider] ?? provider;
+    super(
+      `Cora is not authenticated with a ${name} account (${provider}). Connect one in Settings > Agents, or pick a model from an account you have connected.`,
+    );
+    this.name = "NoConnectedPiAccountError";
+    this.provider = provider;
+  }
+}
+
+/**
+ * Map a legacy auth-store inspection failure to NoConnectedPiAccountError.
+ * Only the legacy route (no account profile resolved) can mean "never
+ * connected": a missing file or a store without this provider's OAuth entry.
+ * Anything else, such as unsafe file permissions, stays as thrown.
+ */
+export function legacyAuthFailureAsNoAccount(
+  error: unknown,
+  provider: PiSubscriptionProvider,
+): unknown {
+  const code = (error as { code?: unknown } | null)?.code;
+  const message = error instanceof Error ? error.message : "";
+  if (
+    code === "ENOENT" ||
+    /is not authenticated with OAuth|has no OAuth access token/.test(message)
+  ) {
+    return new NoConnectedPiAccountError(provider);
+  }
+  return error;
+}

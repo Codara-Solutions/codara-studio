@@ -89,6 +89,19 @@ test("workspace switches retain the expanded Explorer and refresh it in the back
     await expect(page.getByText("arrived-while-active.ts", { exact: true })).toBeVisible({
       timeout: 10_000,
     });
+
+    // On Linux only expanded folders are watched, so collapsing src releases
+    // its watch. A file that lands meanwhile is listed once src opens again.
+    await sourceRow.dispatchEvent("click");
+    await expect(page.getByText("cached.ts", { exact: true })).toBeHidden();
+    // The renderer reports the collapse after a short debounce; writing before
+    // main released the watch would pass on the live event instead.
+    await page.waitForTimeout(500);
+    await writeFile(join(sourceDir, "arrived-while-collapsed.ts"), "export const late = true;\n", "utf8");
+    await sourceRow.dispatchEvent("click");
+    await expect(page.getByText("arrived-while-collapsed.ts", { exact: true })).toBeVisible({
+      timeout: 10_000,
+    });
   } finally {
     await app?.close();
   }

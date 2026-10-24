@@ -26,6 +26,7 @@
   "include": [
     "src/renderer/src/**/*",
     "src/shared/**/*",
-    "src/preload/preload-types.d.ts"
+    "src/preload/preload-types.d.ts",
+    "src/preload/areas/**/*"
   ]
 }

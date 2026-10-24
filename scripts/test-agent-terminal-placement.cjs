@@ -14,6 +14,9 @@
 //   3. Without an anchor the tab is appended, as before.
 //   4. A process is traced to its pane through its ancestors, and a pid
 //      cycle or an unlisted pid cannot hang or mislead the walk.
+//   5. After a window reload the caller's pane is still found in a workspace
+//      whose layout is only saved, or loaded only as a shell holding a tab a
+//      bridge opened there, so its calls stay out of the workspace on screen.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -110,6 +113,25 @@ async function main() {
     }
   }
   console.log("ok 4 a process is traced through its ancestors");
+
+  const saved = { "ws-a": new Set(["pane-shell", "pane-agent"]), "ws-b": new Set(["pane-b"]) };
+  const savedPaneIds = (workspaceId) => saved[workspaceId] ?? new Set();
+  const onScreenOnly = [{ workspaceId: "ws-b", tabs: workspaceB }];
+  assert.deepEqual(
+    placement.locateCallerPane(onScreenOnly, "pane-agent", ["ws-a", "ws-b"], savedPaneIds),
+    { workspaceId: "ws-a", tabId: null },
+  );
+  const withBridgeShell = [...onScreenOnly, { workspaceId: "ws-a", tabs: [{ id: "preview-1", kind: "preview", title: "p", url: "" }] }];
+  assert.deepEqual(
+    placement.locateCallerPane(withBridgeShell, "pane-agent", ["ws-a", "ws-b"], savedPaneIds),
+    { workspaceId: "ws-a", tabId: null },
+  );
+  assert.deepEqual(
+    placement.locateCallerPane(layouts, "pane-agent", ["ws-b"], () => new Set(["pane-agent"])),
+    { workspaceId: "ws-a", tabId: "tab-caller" },
+  );
+  assert.equal(placement.locateCallerPane(onScreenOnly, "pane-gone", ["ws-a", "ws-b"], savedPaneIds), null);
+  console.log("ok 5 a reloaded window still finds the caller's pane in a saved layout");
 }
 
 main().catch((err) => {

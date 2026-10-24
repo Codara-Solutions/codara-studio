@@ -31,6 +31,50 @@ a 30 fps clock with four-tick frame holds, plus live phase and turn timers.
 Cora redraws only when the visible frame changes, keeping that motion smooth
 without spending CPU repainting idle screens.
 
+## Tools for any agent
+
+`cora tool` calls the codara-studio tools from a shell, for agents without an
+MCP client and for scripts. It loads the same server module as MCP clients,
+so the tools, the caller's workspace and the results are the same
+(see [docs/mcp-tools.md](../docs/mcp-tools.md)).
+
+```sh
+cora tool list
+cora tool help preview_wait_for
+cora tool preview_navigate --url http://localhost:5173/
+cora tool preview_find '{"query":"the search button"}'      # ranked @references
+cora tool preview_click --selector @e12
+cora tool preview_wait_for --url /results --load networkidle
+cora tool preview_wait_for --selector h1 --fresh              # only an h1 added since the click
+cora tool preview_wait_for --hmr                              # after saving a file
+cora tool preview_key --key Mod+K                             # the page's palette, never Codara's
+cora tool preview_dialog                                      # open dialogs and the policy
+cora tool preview_dialog --accept true --promptText "Ada"
+cora tool preview_dialog --policy dismiss
+```
+
+## Dev servers
+
+`cora server` keeps the workspace's dev servers running apart from any agent,
+so they survive an agent restarting or finishing. It is a face over the
+`codara_terminal_servers` tool (see `docs/mcp-tools.md`): it acts on the
+workspace of the pane it runs in, with the same rules and results.
+
+```
+cora server list                                  # id, state, port check, URL
+cora server start web --command "pnpm dev" --port 3000 --autoStart
+cora server start web                             # a saved one; never a second copy
+cora server logs web --follow                     # plain output, polled by cursor
+cora server restart web
+cora server stop web
+cora server save web --url http://localhost:3000/admin
+cora server forget web
+```
+
+`--env '{"API_URL":"http://localhost:4000"}'` passes values for that start only;
+Codara stores the names, never the values. A busy port is refused with what
+holds it. `--json` prints the raw tool result.
+
 ## Layout
 
 - `cora.cjs` — entry point: arg parsing, help, dispatch.
@@ -44,7 +88,10 @@ without spending CPU repainting idle screens.
   pieces of the chat UI.
 - `commands/` — one file per command group (`chat.cjs` owns the TUI; the rest
   cover sessions, runs, agents/watch, board/whiteboard, automations, auth,
-  profiles, bench, and status).
+  profiles, bench, and status). `tool.cjs` calls any codara-studio tool for
+  agents without MCP; `point.cjs` adds `cora inbox` (what the user picked or
+  commented on in a browser tab) and `cora inspect` (describe an element to
+  edit it) as short names for two of those calls.
 - `bench/tasks.cjs` — the harness benchmark suite: tiered tasks with hidden
   contract checks and reference solutions; `bench/score.cjs` is the scorer;
   `bench/adopt.cjs` re-attaches to a live bench run whose bench process was
@@ -69,6 +116,7 @@ cora auth list
 cora auth add anthropic "Work Claude"
 cora auth login anthropic "Work Claude"       # reconnect
 cora auth use anthropic "Work Claude"         # Active for Cora and Claude Code
+cora auth use anthropic system                # back to your own Claude Code login
 cora auth rename anthropic "Work Claude" "Team Claude"
 cora auth remove anthropic "Team Claude"
 
@@ -82,12 +130,12 @@ Every printed `#1`, `#2`, and so on is selectable, so the short form
 
 Sign-in opens the provider page and finishes in the invoking terminal. Add
 `--default` to make a reconnected account Active once it succeeds;
-destructive commands confirm unless `--yes` is present. Cora runs already
-going keep the account they started with. Claude Code runs every account in
-your own `~/.claude`, so an open Claude Code terminal, in Studio or any other
-terminal app, moves to the new account on its next request. A Codex switch
-stops and reports the open Codex sessions; close them (or switch from the
-account card, which offers to) and run it again.
+destructive commands confirm unless `--yes` is present. Accounts live in
+Codara's own folder; your `~/.claude` and `~/.codex` logins are never
+changed. Cora runs already going keep the account they started with. Claude
+Code terminals that Codara opened switch on their next request; new Codex
+sessions use the new account and running ones keep theirs. Switching to or
+from `system` (the CLI's own login on this computer) applies to new sessions.
 
 ## The live dashboard
 

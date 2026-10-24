@@ -21,6 +21,9 @@
 // (7906 inter-event gaps) the widest gap a healthy worker ever produced was
 // 5.1 min, and p99 was 68s.
 
+// Declared ahead of both turn policies so the worker cap can reuse it.
+const PI_TURN_ABSOLUTE_CEILING_MS_VALUE = 6 * 60 * 60 * 1000;
+
 /** Widest inter-event gap ever observed from a healthy worker, for reference. */
 export const OBSERVED_HEALTHY_WORKER_GAP_MS = 5.1 * 60 * 1000;
 
@@ -51,8 +54,76 @@ export const PI_WORKER_PROVIDER_FAILURE_WARN_MS = 60 * 1000;
 export const PI_WORKER_PROVIDER_FAILURE_GRACE_MS = 6 * 60 * 1000;
 /** Silence after which any worker is failed, with or without a diagnosis. */
 export const PI_WORKER_STALL_FAIL_MS = 20 * 60 * 1000;
-/** Backstop for a worker that keeps emitting events but never settles. */
-export const PI_WORKER_TURN_CEILING_MS = 90 * 60 * 1000;
+/**
+ * Backstop for a worker that keeps emitting events but never finishes
+ * anything: the longest it may go without completing a tool call or an
+ * assistant message. Progress re-arms it. This used to be a flat 90 minutes
+ * from the start of the turn, which killed long slices that were working
+ * steadily and relaunched them cold on the other provider.
+ */
+export const PI_WORKER_NO_PROGRESS_CEILING_MS = 90 * 60 * 1000;
+/** Wall-clock cap on one worker turn, matching the manager's. */
+export const PI_WORKER_TURN_ABSOLUTE_CEILING_MS = PI_TURN_ABSOLUTE_CEILING_MS_VALUE;
+/**
+ * How long a worker that reached the absolute cap gets to hand in a partial
+ * report after being asked to wrap up, before it is stopped.
+ */
+export const PI_WORKER_WRAP_UP_GRACE_MS = 15 * 60 * 1000;
+
+export const PI_WORKER_WRAP_UP_PROMPT =
+  "You have reached the time limit for one worker turn. Stop starting new work now. " +
+  'Write your final-report.json at the path from your task prompt with status "partial": ' +
+  "put what is done in summary and proof, and everything still left to do in followups, " +
+  "so the next worker can continue from it instead of starting over. Then end your turn.";
+
+const WORKER_TURN_CEILING_FAILURE = /while still making progress/i;
+
+/** True for the failure a worker that was still working gets at the cap. */
+export function isWorkerTurnCeilingFailure(message: string | null | undefined): boolean {
+  return typeof message === "string" && WORKER_TURN_CEILING_FAILURE.test(message);
+}
+
+export type WorkerTurnCeilingAction = "continue" | "wrap_up" | "fail";
+
+/**
+ * Decide what a worker turn's age earns. A turn that keeps finishing tool calls
+ * and messages runs until the absolute cap; there it is asked once to wrap up
+ * with a partial report and given a grace period. Only a worker that stopped
+ * making progress, or ignored the wrap-up, is failed. Both failure texts read
+ * as a timeout to the failure taxonomy; the cap one also says the worker was
+ * still making progress, so the retry path never treats it as a stall.
+ */
+export function classifyWorkerTurnCeiling(input: {
+  now: number;
+  startedAt: number;
+  lastProgressAt: number;
+  wrapUpRequestedAt: number | null;
+}): { action: WorkerTurnCeilingAction; detail: string } {
+  const { now, startedAt, lastProgressAt, wrapUpRequestedAt } = input;
+  const idleMinutes = Math.round((now - lastProgressAt) / 60_000);
+  if (now - lastProgressAt >= PI_WORKER_NO_PROGRESS_CEILING_MS) {
+    return {
+      action: "fail",
+      detail: `Pi worker timed out: no finished tool call or message for ${idleMinutes} min.`,
+    };
+  }
+  if (wrapUpRequestedAt !== null) {
+    if (now - wrapUpRequestedAt >= PI_WORKER_WRAP_UP_GRACE_MS) {
+      const hours = Math.round(PI_WORKER_TURN_ABSOLUTE_CEILING_MS / 3_600_000);
+      return {
+        action: "fail",
+        detail:
+          `Pi worker exceeded its ${hours}h turn ceiling while still making progress ` +
+          `and did not wrap up within ${Math.round(PI_WORKER_WRAP_UP_GRACE_MS / 60_000)} min.`,
+      };
+    }
+    return { action: "continue", detail: "" };
+  }
+  if (now - startedAt >= PI_WORKER_TURN_ABSOLUTE_CEILING_MS) {
+    return { action: "wrap_up", detail: PI_WORKER_WRAP_UP_PROMPT };
+  }
+  return { action: "continue", detail: "" };
+}
 
 export type WorkerSilenceAction = "continue" | "warn" | "fail";
 
@@ -120,8 +191,8 @@ export function classifyWorkerSilence(input: {
  * that has lost its tool_execution_end.
  */
 export const PI_TURN_IDLE_TIMEOUT_MS = 25 * 60 * 1000;
-export const PI_TURN_ABSOLUTE_CEILING_MS = 6 * 60 * 60 * 1000;
-/** Maximum time a normal Pi tool may produce no result. */
+export const PI_TURN_ABSOLUTE_CEILING_MS = PI_TURN_ABSOLUTE_CEILING_MS_VALUE;
+/** Maximum time a normal Pi tool may produce neither a result nor progress. */
 export const PI_TOOL_RESULT_TIMEOUT_MS = 25 * 60 * 1000;
 export const PI_LONG_POLL_TRUST_MS = 30 * 60 * 1000;
 
@@ -136,6 +207,8 @@ export interface TurnInFlightTool {
   name: string;
   startedAt: number;
   longPoll: boolean;
+  /** Last streamed progress (tool_execution_update), e.g. bash output. */
+  lastProgressAt?: number;
 }
 
 export function classifyTurnLiveness(input: {
@@ -155,14 +228,23 @@ export function classifyTurnLiveness(input: {
   }
 
   if (inFlightTools.length > 0) {
+    // A normal tool that keeps streaming output (a long build, a test suite)
+    // is alive, so it is timed from its latest progress. A long-poll is timed
+    // from its start: its bound is the RPC's own legal duration.
     const expired = inFlightTools
-      .map((tool) => ({
-        tool,
-        waitingFor: now - tool.startedAt,
-        timeout: tool.longPoll ? PI_LONG_POLL_TRUST_MS : PI_TOOL_RESULT_TIMEOUT_MS,
-      }))
+      .map((tool) => {
+        const since = tool.longPoll
+          ? tool.startedAt
+          : Math.max(tool.startedAt, tool.lastProgressAt ?? tool.startedAt);
+        return {
+          tool,
+          since,
+          waitingFor: now - since,
+          timeout: tool.longPoll ? PI_LONG_POLL_TRUST_MS : PI_TOOL_RESULT_TIMEOUT_MS,
+        };
+      })
       .filter((entry) => entry.waitingFor >= entry.timeout)
-      .sort((left, right) => (left.tool.startedAt + left.timeout) - (right.tool.startedAt + right.timeout))[0];
+      .sort((left, right) => (left.since + left.timeout) - (right.since + right.timeout))[0];
     if (!expired) return { action: "continue", detail: "" };
     return {
       action: "fail",
@@ -170,7 +252,7 @@ export function classifyTurnLiveness(input: {
         ? `Cora's Pi turn is stuck in ${expired.tool.name}: ` +
           `${Math.round(expired.waitingFor / 60_000)} min with no result, past the point that call can legally take.`
         : `Cora's Pi turn is stuck in ${expired.tool.name}: ` +
-          `${Math.round(expired.waitingFor / 60_000)} min with no result.`,
+          `${Math.round(expired.waitingFor / 60_000)} min with no result or output.`,
     };
   }
 

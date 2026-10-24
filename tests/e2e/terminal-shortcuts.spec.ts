@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 test("terminal defaults split in the expected direction and Cmd/Ctrl+W closes only the active pane", async () => {
-  // Covers two full worker-shortcut flows (fresh launch + session picker) on
-  // top of the split/close/search assertions — the default 30s is too tight.
+  // Covers two worker launches (the shortcut and the tab strip's "+") on top
+  // of the split/close/search assertions, so the default 30s is too tight.
   test.setTimeout(60_000);
   const fixture = await prepareFixture();
   let app: ElectronApplication | null = null;
@@ -85,25 +85,8 @@ test("terminal defaults split in the expected direction and Cmd/Ctrl+W closes on
     await page.keyboard.press("Escape");
     await expect(searchDialog).toHaveCount(0);
 
-    // The tab strip's "+" carries the two worker rows beside Terminal and
-    // Browser, and picking one opens the same session picker the worker
-    // chords open — the surface that lists this workspace's history.
-    await page.getByRole("button", { name: "New tab", exact: true }).dispatchEvent("click");
-    const tabPicker = page.locator(".spark-tabbar-picker");
-    await expect(tabPicker.getByRole("button", { name: "Claude worker" })).toBeVisible();
-    const codexRow = tabPicker.getByRole("button", { name: "Codex worker" });
-    await expect(codexRow).toBeVisible();
-    await codexRow.dispatchEvent("click");
-    const codexSessions = page.getByRole("dialog", { name: "Codex sessions" });
-    await expect(codexSessions).toBeVisible();
-    // The dialog takes focus on a rAF callback; wait for that before Escape,
-    // otherwise the key can still land in the terminal underneath.
-    await expect(codexSessions).toBeFocused();
-    await page.keyboard.press("Escape");
-    await expect(codexSessions).toHaveCount(0);
-
     // The fresh-worker shortcut must launch the exact public command with no
-    // picker dialog in between — muscle-memory bindings spawn immediately. In
+    // dialog in between: muscle-memory bindings spawn immediately. In
     // particular, interactive panes must not acquire a generated --session-id.
     await app.evaluate(({ ipcMain }) => {
       const state = globalThis as typeof globalThis & { __coraInjects?: unknown[] };
@@ -115,7 +98,6 @@ test("terminal defaults split in the expected direction and Cmd/Ctrl+W closes on
     });
     await focusTerminal(panes.nth(1));
     await page.keyboard.press("Control+Alt+g");
-    const claudeSessions = page.getByRole("dialog", { name: "Claude sessions" });
     await expect.poll(
       async () => app!.evaluate(() => {
         const state = globalThis as typeof globalThis & { __coraInjects?: unknown[] };
@@ -127,19 +109,14 @@ test("terminal defaults split in the expected direction and Cmd/Ctrl+W closes on
       text: "claude --dangerously-skip-permissions",
       submit: true,
     }]);
-    await expect(claudeSessions).toHaveCount(0);
+    await expect(page.getByRole("dialog")).toHaveCount(0);
 
-    // The session-picker shortcut is a separate command: it opens the recent
-    // sessions dialog, and "New session" from there launches the same public
-    // command.
+    // The tab strip's "+" carries the worker rows beside Terminal and
+    // Browser. Picking one starts a new session of that agent in a new tab
+    // at once; earlier sessions are resumed from the rail's Sessions view.
     //
-    // It does NOT arrive as an inject, and that is the app being right rather
-    // than wrong: the pane the previous shortcut launched into is now a live
-    // worker, so handleNewWorkerTab refuses to type into it and splits a fresh
-    // pane instead, where the command travels as that pane's startupCommand.
-    // Watch both channels, so this pins the thing that actually matters — the
-    // exact public command with no generated --session-id — wherever the app
-    // decided to put it, and fails loudly if a future change reroutes it.
+    // Watch both launch channels: a new tab's command travels as its pane's
+    // startupCommand, and this pins the command, not the channel.
     await app.evaluate(({ ipcMain }) => {
       const state = globalThis as typeof globalThis & { __coraLaunches?: unknown[] };
       state.__coraLaunches = [];
@@ -156,15 +133,15 @@ test("terminal defaults split in the expected direction and Cmd/Ctrl+W closes on
         return { id: args?.id, pid: 0, startupCommandHandled: true };
       });
     });
-    await page.keyboard.press("Control+Alt+h");
-    await expect(claudeSessions).toBeVisible();
-    await claudeSessions.getByRole("button", { name: "New session" }).dispatchEvent("click");
-    // Assert the COMMAND, not the channel. Which of the two paths
-    // handleNewWorkerTab takes depends on whether the pane the previous
-    // shortcut launched has finished registering as a worker, and both
-    // outcomes are correct — injecting into a pane that is genuinely still
-    // free, or splitting a fresh one when it is not. What must never vary is
-    // what gets run: the exact public command, with no generated --session-id.
+    const tabsBefore = await page.locator(".spark-tab").count();
+    await page.getByRole("button", { name: "New tab", exact: true }).dispatchEvent("click");
+    const tabPicker = page.locator(".spark-tabbar-picker");
+    await expect(tabPicker.getByRole("button", { name: "Claude worker" })).toBeVisible();
+    const codexRow = tabPicker.getByRole("button", { name: "Codex worker" });
+    await expect(codexRow).toBeVisible();
+    await codexRow.dispatchEvent("click");
+    await expect(page.locator(".spark-tab")).toHaveCount(tabsBefore + 1);
+    await expect(page.getByRole("dialog")).toHaveCount(0);
     await expect.poll(
       async () => {
         const launches = await app!.evaluate(() => {
@@ -173,16 +150,12 @@ test("terminal defaults split in the expected direction and Cmd/Ctrl+W closes on
           };
           return state.__coraLaunches ?? [];
         });
-        // Distinct commands, not the raw list. The stubbed spawn above hands
-        // back no real pty, so the renderer can retry it — a duplicate here
-        // would be the stub's doing, not the app's, and pinning the count
-        // would be asserting the harness. Pinning the SET still catches what
-        // matters: anything launching a different command, in particular one
-        // carrying a generated --session-id, adds an entry and fails.
-        return [...new Set(launches.map((launch) => launch.command))];
+        // Distinct commands: the stubbed spawn hands back no real pty, so the
+        // renderer may retry it, and pinning the count would assert the harness.
+        return [...new Set(launches.map((launch) => launch.command).filter(Boolean))];
       },
       { timeout: 15_000 },
-    ).toEqual(["claude --dangerously-skip-permissions"]);
+    ).toEqual(["codex --yolo"]);
   } finally {
     await app?.close();
   }
@@ -232,7 +205,6 @@ async function prepareFixture(): Promise<{
       {
         keybindings: {
           "worker.newClaude": "ctrl+alt+g",
-          "worker.claudeSessions": "ctrl+alt+h",
         },
       },
       null,

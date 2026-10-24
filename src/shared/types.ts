@@ -5,6 +5,9 @@ import type {
   SparkBuiltinRuntime as SparkBuiltinFamily,
   WorkerSessionRuntime as WorkerSessionFamily,
 } from "./agent-families";
+import type { WorkflowCallMarker, WorkflowRunInfo } from "./workflow";
+import type { QuickCommand, TerminalRightClickPref } from "./quick-commands";
+import type { SessionSearchPreferences } from "./session-search";
 
 export type ShellId = string;
 
@@ -511,6 +514,10 @@ export interface Workspace {
     createdAt: string; // ISO timestamp
     fileCount?: number; // tracked files copied into the worktree (chat banner)
     origin?: GitHubOrigin;
+    // Who made the worktree. Absent means the user did. Agents may remove
+    // only worktrees an agent created unless the user opts in
+    // (agentsMayRemoveUserWorktrees), so this must survive every save.
+    createdBy?: CopyBranchCreator;
   };
   // Present only on SSH remote workspaces (cwd is then ssh://<hostId>/...).
   // Host connection details live in the remote-hosts registry, keyed by id,
@@ -523,6 +530,50 @@ export interface Workspace {
   // (never ssh://), even when the workspace itself is remote — the folder
   // picker is always the local OS dialog.
   extraFolders?: string[];
+}
+
+export interface CopyBranchCreator {
+  kind: "user" | "agent";
+  // Label of the agent client ("claude-code", "codex", "cora"); display only.
+  client?: string;
+  runId?: string;
+  paneId?: string;
+  purpose?: string;
+}
+
+// Sent to the renderer ("workspace:agentEvent") when an agent creates or
+// removes a worktree through the Codara Studio MCP, so the user hears about
+// a rail row they did not add or remove themselves.
+export interface AgentWorktreeEvent {
+  kind: "created" | "removed";
+  workspaceId: string;
+  name: string;
+  branch: string;
+  client: string;
+  pullRequest?: { number: number; url: string };
+}
+
+export const COPY_BRANCH_CREATOR_LIMITS = {
+  client: 40,
+  runId: 120,
+  paneId: 120,
+  purpose: 200,
+} as const;
+
+// Field-level validation for a persisted creator: an unknown kind drops the
+// whole record, strings are control-stripped and bounded.
+export function normalizeCopyBranchCreator(value: unknown): CopyBranchCreator | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const raw = value as Record<string, unknown>;
+  if (raw.kind !== "user" && raw.kind !== "agent") return undefined;
+  const creator: CopyBranchCreator = { kind: raw.kind };
+  for (const key of ["client", "runId", "paneId", "purpose"] as const) {
+    const field = raw[key];
+    if (typeof field !== "string") continue;
+    const text = field.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").trim().slice(0, COPY_BRANCH_CREATOR_LIMITS[key]);
+    if (text) creator[key] = text;
+  }
+  return creator;
 }
 
 export interface WorkspaceGroup {
@@ -581,6 +632,9 @@ export const DEFAULT_COMMIT_MESSAGE_MODEL: CommitMessageModel = "auto";
 export interface AppSettings {
   defaultShellId: string | null;
   terminalScrollbackLineLimit: number;
+  // Programs in a terminal (tmux, nvim, anything over SSH) may put text on
+  // the system clipboard with OSC 52. Write only, size capped; absent = on.
+  terminalOsc52Clipboard?: boolean;
   // OpenRouter API access. `openRouterModel` is the inexpensive utility model
   // shared by editor inline AI and git commit drafts when OpenRouter is picked
   // below. Cora models are kept separately so changing the editor model never
@@ -611,7 +665,11 @@ export interface AppSettings {
   // both Cora and Pi workers. Claude/Codex delivery ignores them entirely.
   agentMcpCoraManagerIds: string[];
   agentMcpPiWorkerIds: string[];
-  playwrightMcpAutoInstall: boolean;
+  // "Codara tools in other apps": when true, the codara-studio server is also
+  // written into the user's global Claude Code, Codex and Grok config so
+  // sessions outside Codara can use it. Off by default; sessions Codara starts
+  // get the server per launch either way.
+  studioToolsInOtherApps: boolean;
   // When true, autopilot/unattended workers launch inside a throwaway git
   // worktree forked off the run checkpoint (refs/spark/runs/{runId}) and run
   // with worktree-scoped permissions instead of full skip-permissions —
@@ -620,11 +678,23 @@ export interface AppSettings {
   // afterwards. Default off. Interactive / non-autopilot launches are
   // unaffected and stay byte-identical regardless of this flag.
   autopilotSandbox: boolean;
-  // Applies OpenAI's faster (and pricier) service tier to every Cora session
-  // that runs on a GPT model: chat, planning, and workers. Off by default.
-  // Anthropic sessions are unaffected and can never run a fast/priority tier;
-  // resources/pi-cora/service-tier.ts strips one structurally.
+  // Fast mode for every Cora session whose model has one: the manager and
+  // every worker it launches. OpenAI GPT models get the priority tier, Claude
+  // Opus 5.5 / Opus 5 / Opus 4.8 get `speed: "fast"` (billed as extra usage on
+  // a subscription). Off by default. The name predates Anthropic support and
+  // is kept so existing settings files carry over; src/shared/fast-mode.ts
+  // and resources/pi-cora/service-tier.ts own the policy.
   openAiFastMode: boolean;
+  // "Always verify edits with a worker". Off by default: Cora makes small,
+  // low-risk edits herself. On restores the old rule that every project
+  // change goes through a worker and its cross-provider verifier. Optional
+  // only so renderer fallbacks need not list it; storage always normalizes it.
+  coraAlwaysVerifyEdits?: boolean;
+  // When Cora and every sub agent compact their context, as a percentage of
+  // the model's context window (context-compaction.ts). null is Auto. Applied
+  // per launch to the manager, Pi workers and the Claude/Codex terminals Cora
+  // opens. Optional for the same reason as coraAlwaysVerifyEdits.
+  coraAutoCompactPercent?: number | null;
 }
 
 export interface OpenRouterValidationInput {
@@ -654,6 +724,14 @@ export interface PiSubscriptionConnection {
   canRefresh: boolean;
   expiresAt: number | null;
   error?: string;
+}
+
+/** A signed-in System login no account uses yet, offered as one line. Its
+ * email is display-only, like a connection's below, and no token or path
+ * crosses with it. */
+export interface PiSubscriptionSystemOffer {
+  email?: string;
+  apiKey?: boolean;
 }
 
 /** Sanitized local account row. Opaque ids are safe to persist on runs; no
@@ -690,12 +768,15 @@ export interface PiSubscriptionProfileConnection {
   email?: string;
   /**
    * Opaque id of the CLI half of this account (Claude Code, Codex or Grok):
-   * "personal" for the user's own CLI login (Account 1), a managed profile
-   * id otherwise. Absent when the account has no terminal half yet.
+   * "personal" when its terminals use the CLI's own login on this computer
+   * (the System login), a managed profile id otherwise. Absent when the
+   * account has no terminal half.
    */
   cliProfileId?: string;
-  /** Account 1: the row for the user's own CLI login, never deleted from here. */
+  /** The account's terminals use the System login, which Codara never changes. */
   builtIn?: true;
+  /** What Cora holds for this account (see pi-account-profiles.ts). */
+  coraHalf?: "linked" | "own" | "borrowed" | "none";
   /** Token-blind status of the CLI half; absent when there is none. */
   terminal?: {
     connected: boolean;
@@ -725,17 +806,13 @@ export interface PiSubscriptionRenameAccountInput {
 export interface PiSubscriptionMakeDefaultInput {
   provider: PiSubscriptionProvider;
   profileId: string;
-  /**
-   * Codex keeps one sign-in for every terminal, so switching it closes the
-   * running Codex sessions; the switch refuses with their count until the
-   * caller agrees. Anthropic and Grok switches close nothing.
-   */
+  /** Ignored: no account change closes a terminal any more. */
   closeSessions?: boolean;
 }
 
 export interface PiSubscriptionDeleteAccountInput {
   profileId: string;
-  /** Close the terminals still running on this account before deleting it. */
+  /** Ignored: a deleted account's home waits for its terminals to exit. */
   closeSessions?: boolean;
 }
 
@@ -755,8 +832,10 @@ export interface PiSubscriptionProfileLoginRequest {
 }
 
 export interface PiSubscriptionOverview {
-  /** Current sessions a provider-wide account switch would close. */
+  /** Always absent: no account switch closes sessions any more. */
   switchSessionCounts?: Partial<Record<PiSubscriptionProvider, number>>;
+  /** Per provider, the System login an account could be added for. */
+  systemOffers?: Partial<Record<PiSubscriptionProvider, PiSubscriptionSystemOffer>>;
   runtimeInstalled: boolean;
   runtimeVersion: string | null;
   runtimeError?: string;
@@ -862,6 +941,43 @@ export interface PiCatalogModel {
   thinkingLevels: string[];
 }
 
+/** Where a worker model was seen: Pi's catalog, the provider's own model
+ * list for the signed-in account, or a cache a CLI keeps on disk. */
+export type WorkerModelSource = "pi" | "provider" | "cli";
+
+export interface WorkerCatalogModel {
+  id: string;
+  /** Curated name, else the vendor's, else Pi's, else the raw id. */
+  label: string;
+  provider: PiSubscriptionProvider;
+  premium: boolean;
+  /** First seen after the catalog's baseline, within the last two weeks. */
+  isNew: boolean;
+  /** Null when Cora can launch it now, else a short reason it cannot. */
+  unavailable: string | null;
+  sources: WorkerModelSource[];
+  reasoning: boolean;
+  contextWindow?: number;
+  thinkingLevels: string[];
+  firstSeenAt: string;
+}
+
+export interface WorkerModelProviderState {
+  provider: PiSubscriptionProvider;
+  signedIn: boolean;
+  /** How the list for this provider was built on the last refresh. */
+  listedFrom: "provider" | "cli" | "pi";
+  /** One short sentence when the provider's own list could not be read. */
+  note: string | null;
+  checkedAt: string | null;
+}
+
+export interface WorkerModelCatalog {
+  models: WorkerCatalogModel[];
+  providers: WorkerModelProviderState[];
+  refreshedAt: string | null;
+}
+
 export type PiUsageWindowScope =
   | { kind: "general" }
   | { kind: "code_review" }
@@ -890,6 +1006,33 @@ export interface PiUsageWindow {
   resetsAt?: string;
 }
 
+/**
+ * What an account can spend once its windows are used up, read in the same
+ * request as the windows. Never a quota window: it does not refill on a
+ * schedule and routing never reads it.
+ *
+ * - `balance`: Codex credits, a unitless count the plan spends into.
+ * - `spend`: Claude extra usage, money spent against a monthly cap.
+ */
+export type PiUsageCredits =
+  | { kind: "balance"; balance: number; unlimited: boolean }
+  | {
+      kind: "spend";
+      /** ISO 4217 code, e.g. "USD". */
+      currency: string;
+      /** Major units (dollars, euros). Null when the provider did not say. */
+      spent: number | null;
+      limit: number | null;
+      usedPercent: number | null;
+    };
+
+/** Codex rate-limit resets the account has earned and not spent yet. */
+export interface PiUsageResetCredits {
+  available: number;
+  /** When the soonest unspent reset expires, if the provider said. */
+  nextExpiresAt?: string;
+}
+
 export interface PiUsageProvider {
   provider: PiSubscriptionProvider;
   label: string;
@@ -904,6 +1047,8 @@ export interface PiUsageProvider {
   generalLimitReached?: boolean;
   limitReached?: boolean;
   message?: string;
+  credits?: PiUsageCredits;
+  resetCredits?: PiUsageResetCredits;
 }
 
 /** Sanitized quota snapshot for one locally named subscription account.
@@ -923,6 +1068,15 @@ export interface PiUsageProfile {
   generalLimitReached?: boolean;
   limitReached?: boolean;
   message?: string;
+  credits?: PiUsageCredits;
+  resetCredits?: PiUsageResetCredits;
+}
+
+/** What spending one Codex rate-limit reset did, as the provider answered. */
+export type PiCodexResetOutcome = "reset" | "nothing_to_reset" | "no_credit" | "already_redeemed";
+
+export interface PiCodexResetResult {
+  outcome: PiCodexResetOutcome;
 }
 
 export interface PiUsageOverview {
@@ -1156,15 +1310,60 @@ export interface AppPreferences {
   // and keeps the process alive so main-process timers (automations / loops)
   // keep firing instead of quitting. Quit explicitly from the tray menu.
   keepRunningInBackground?: boolean;
+  // When true (default), a plain `claude` typed in a terminal outside Codara
+  // uses the Claude account active in Codara (src/main/claude-follow). Only
+  // an installed app sets it up; turning it off takes it out again.
+  claudeFollowsActiveAccount?: boolean;
+  // Keep the computer out of idle sleep (src/main/keep-awake/): "agents"
+  // (default) only while a terminal agent, Cora run, automation or worker is
+  // working, "always" while Codara is open, "off" never. The display may
+  // still sleep in every mode. src/shared/keep-awake.ts owns the policy.
+  keepAwakeMode?: "off" | "agents" | "always";
+  // Opt-in, Linux laptops only: while Codara holds the computer awake, a
+  // closed lid does not suspend it either (a systemd-inhibit lock, no power
+  // settings change). Ignored where it cannot work; the UI hides it there.
+  keepAwakeLidClosed?: boolean;
+  // When true (default), the Claude Code and Codex sessions Codara starts
+  // get the browser tools that open a separate Chrome turned off, so agents
+  // use the user's own Chrome through the Codara extension
+  // (src/main/separate-browser-tools.ts). Applies to new sessions.
+  keepAgentsInYourChrome?: boolean;
   // When true, a localhost dev URL sniffed from any terminal pane's stdout
   // auto-opens a preview tab. Default false: the detected-URL chip still shows
   // so the user can click to open, but Codara never yanks a tab open on its own
   // (and agent/worker panes never auto-open a preview regardless of this flag).
   autoOpenPreview?: boolean;
+  // Where a clicked link opens: the machine's default browser ("system",
+  // the default) or a Codara browser tab ("studio"). Only plain link clicks
+  // follow it; explicit "open in Codara browser" actions, agent browser tools
+  // and sign-in flows keep their fixed destination (src/main/link-routing.ts).
+  linkOpenTarget?: LinkOpenTarget;
+  // A plain click on a terminal link opens a small menu (Codara browser,
+  // default browser, copy); Ctrl or Cmd+click opens it per linkOpenTarget.
+  // Off: a plain click opens it straight away. Default on.
+  terminalLinkMenu?: boolean;
   // "Create copy branch" setup command, keyed by absolute repo cwd. Run live
   // in a terminal in the new worktree after creation. Repos with no entry use
   // DEFAULT_COPY_BRANCH_SETUP_COMMAND.
   copyBranchSetupCommandByRepo: Record<string, string>;
+  // Saved shell commands and agent prompts, in the order the user arranged
+  // them (src/shared/quick-commands.ts). Global or scoped to one repository
+  // by the same key as copyBranchSetupCommandByRepo.
+  quickCommands?: QuickCommand[];
+  // What a plain right-click in a terminal does: "paste" keeps quick edit
+  // (copy the selection, otherwise paste) and Shift+right-click opens the
+  // quick command menu; "menu" swaps the two. Default "paste".
+  terminalRightClick?: TerminalRightClickPref;
+  // Agent worktrees (codara_worktree_* MCP tools, src/main/agent-worktrees.ts).
+  // Off turns create and remove away; list keeps working. Default on.
+  agentWorktreesEnabled?: boolean;
+  // Lets agents remove merged worktrees the user created too. Default off:
+  // agents remove only worktrees an agent created.
+  agentsMayRemoveUserWorktrees?: boolean;
+  // Extra git-ignored paths, per repo, that removal may delete because a
+  // build regenerates them (on top of node_modules/, dist/, ...). Entries are
+  // a first path segment ("generated/") or a basename glob ("*.log").
+  agentWorktreeRegenerableIgnoredByRepo?: Record<string, string[]>;
   // Opt-in (default off): persist terminal agent-session pointers + scrollback
   // and resume Claude/Codex sessions after a full app relaunch (boot-once
   // restore, in-place auto-resume after an unexpected pty death, and the
@@ -1172,6 +1371,14 @@ export interface AppPreferences {
   // that had already exited still open as fresh shells. Off = fresh shells on
   // every relaunch.
   restoreAgentSessions?: boolean;
+  // Default on: keep each terminal pane's output on disk (Codara's own
+  // folder, bounded, deleted with the pane) and show it again when the pane
+  // is restored after a quit, an update or a crash. Off deletes it all.
+  restoreTerminalOutput?: boolean;
+  // Agent hibernation (src/main/agent-hibernation.ts): minutes a finished,
+  // untouched agent terminal in a background workspace may sit before Codara
+  // stops it to save memory; opening the pane resumes it. 0 = off.
+  agentHibernationMinutes?: number;
   // Opt-in (default off): the phone Remote Access listener
   // (docs/remote-access.md). While on, paired devices can reach this
   // computer over LAN or the blind relay; pairing and revocation live in Settings,
@@ -1191,6 +1398,10 @@ export interface AppPreferences {
   // raises one notification per PR. Default on; requires auto-fetch and a
   // signed-in gh.
   notifyPullRequests?: boolean;
+  // When on, a check failing on the pull request of a local workspace's
+  // branch raises one notification per failing head commit
+  // (src/main/github-ci-watch.ts). Default on; requires a signed-in gh.
+  notifyCiFailures?: boolean;
   // How long an in-app toast stays on screen before auto-dismissing, in ms.
   // 0 = stay until clicked or closed. Missed toasts always remain in the
   // notification center regardless.
@@ -1199,6 +1410,11 @@ export interface AppPreferences {
   // stays on screen after activating another workspace, in ms. 0 = never
   // show it. Capped at 10s.
   workspaceSwitchHudMs?: number;
+  // Agent session search: whether the local index of agent transcripts is
+  // kept, which agents it reads, and what the agent tool may search
+  // (src/main/session-search/). Unset reads as the defaults in
+  // shared/session-search.ts; this module imports types only.
+  sessionSearch?: SessionSearchPreferences;
 }
 
 export const DEFAULT_TOAST_DURATION_MS = 6_000;
@@ -1330,14 +1546,29 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   glassRefraction: 100,
   glassChroma: 100,
   keepRunningInBackground: true,
+  claudeFollowsActiveAccount: true,
+  keepAwakeMode: "agents",
+  keepAwakeLidClosed: false,
+  keepAgentsInYourChrome: true,
   autoOpenPreview: false,
+  linkOpenTarget: "system",
+  terminalLinkMenu: true,
   copyBranchSetupCommandByRepo: {},
+  quickCommands: [],
+  terminalRightClick: "paste",
+  agentWorktreesEnabled: true,
+  agentsMayRemoveUserWorktrees: false,
+  agentWorktreeRegenerableIgnoredByRepo: {},
   restoreAgentSessions: false,
+  restoreTerminalOutput: true,
+  // DEFAULT_AGENT_HIBERNATION_MINUTES in shared/agent-hibernation.ts.
+  agentHibernationMinutes: 30,
   remoteAccessEnabled: false,
   gitAutoFetchEnabled: true,
   gitAutoFetchIntervalMinutes: DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES,
   notifyTeammatePushes: true,
   notifyPullRequests: true,
+  notifyCiFailures: true,
   toastDurationMs: DEFAULT_TOAST_DURATION_MS,
   workspaceSwitchHudMs: DEFAULT_WORKSPACE_SWITCH_HUD_MS,
 };
@@ -1405,6 +1636,9 @@ export interface PtyExitInfo {
   exitCode: number;
   signal?: number;
   sanctioned?: boolean;
+  // Codara stopped an idle agent pane to save memory (agent hibernation).
+  // The pane resumes the agent's session when the user opens it again.
+  hibernated?: boolean;
 }
 
 /** Main-owned, observation-only resource data for one live PTY session. */
@@ -1443,18 +1677,145 @@ export interface PtyResourceSnapshot {
   };
 }
 
+export type SystemGpuVendor = "nvidia" | "amd" | "intel" | "apple" | "other";
+
+/** One graphics adapter in the system monitor. */
+export interface SystemGpuSnapshot {
+  /** Stable across samples: a PCI address, an NVIDIA bus id or a Windows LUID. */
+  id: string;
+  name: string;
+  vendor: SystemGpuVendor;
+  /** Null when the driver gives no figure; 0 while the GPU sleeps. */
+  utilizationPercent: number | null;
+  memoryUsedBytes: number | null;
+  memoryTotalBytes: number | null;
+  temperatureC: number | null;
+  /** Powered down by runtime power management, so it was not woken to ask. */
+  asleep: boolean;
+  /** Why a GPU that is present gives no figures, in a sentence for the UI. */
+  note: string | null;
+}
+
+/** ok, low: under 12% available or sustained stalls; critical: under 5% or heavy stalls. */
+export type SystemMemoryLevel = "ok" | "low" | "critical";
+
+/** What the System activity popover breaks down by owner. */
+export type SystemResource = "cpu" | "memory" | "gpu" | "swap";
+
+export interface SystemProcessSnapshot {
+  pid: number;
+  name: string;
+  /** The command line, cut to a few hundred characters; empty when unreadable. */
+  command: string;
+  /** Percent of one core, as top shows it: a process on two full cores reads 200. */
+  cpuPercent: number;
+  /** Private resident memory where the platform reports it, else resident. */
+  memoryBytes: number;
+  /** Video memory, where the driver reports it per process; null where it does not. */
+  gpuMemoryBytes: number | null;
+  /** Memory swapped out, read only while the swap breakdown is open; null otherwise. */
+  swapBytes: number | null;
+}
+
+/** Processes outside Codara added up by program name ("chrome", "slack"). */
+export interface SystemAppUsage {
+  name: string;
+  processCount: number;
+  cpuPercent: number;
+  memoryBytes: number;
+  gpuMemoryBytes: number | null;
+  swapBytes: number | null;
+}
+
+/**
+ * Processes grouped by who started them: a Codara terminal pane with every
+ * process under it (the pane id is the pty id), Codara itself, or anything
+ * else on the machine.
+ */
+export interface SystemProcessGroup {
+  owner: "pane" | "codara" | "outside";
+  paneId: string | null;
+  /** Main's last known placement of the pane, for panes the window has not loaded. */
+  workspaceId: string | null;
+  tabId: string | null;
+  /** Set when the pane runs one of the workspace's dev servers. */
+  serverId: string | null;
+  /** The agent CLI main sees in the pane ("claude", "codex"), if any. */
+  runtime: string | null;
+  /** The agent's latest prompt, one line, when its hooks report it. */
+  task: string | null;
+  cpuPercent: number;
+  memoryBytes: number;
+  gpuMemoryBytes: number | null;
+  swapBytes: number | null;
+  processCount: number;
+  /** The group's heaviest processes by each resource. */
+  processes: SystemProcessSnapshot[];
+  /** Outside Codara only: the heaviest programs by each resource. */
+  apps: SystemAppUsage[];
+}
+
+export interface SystemProcessesSnapshot {
+  groups: SystemProcessGroup[];
+  processCount: number;
+  /** False on the first reading after opening: CPU needs two samples. */
+  cpuMeasured: boolean;
+  /** Whether processes carry video memory; when not, why, in a sentence. */
+  gpuMeasured: boolean;
+  gpuUnavailableReason: string | null;
+  /** Whether processes carry swap; only while the swap breakdown is open. */
+  swapMeasured: boolean;
+  swapUnavailableReason: string | null;
+  /** Why no process list is available, when it is not. */
+  unavailableReason: string | null;
+}
+
 /** Whole-machine activity shown in the title-bar system monitor. */
 export interface SystemResourceSnapshot {
   sampledAt: number;
+  platform: string;
   cpuPercent: number;
   cpuLogicalCores: number;
+  /** Per logical core, in core order. */
+  cpuCorePercents: number[];
+  cpuModel: string | null;
+  /** 1, 5 and 15 minute load averages; null where the OS has none (Windows). */
+  loadAverage: [number, number, number] | null;
+  cpuTemperatureC: number | null;
+  /** The busiest GPU. */
   gpuPercent: number | null;
+  gpus: SystemGpuSnapshot[];
+  /** Why no GPU figures are shown, when none are. */
+  gpuUnavailableReason: string | null;
   ramPercent: number;
   ramUsedBytes: number;
   ramTotalBytes: number;
+  ramAvailableBytes: number;
+  /** Page cache the kernel can drop under pressure; null where unknown. */
+  ramCachedBytes: number | null;
+  /** Share of time some tasks stalled on memory over the last interval (Linux PSI). */
+  memoryPressurePercent: number | null;
+  memoryLevel: SystemMemoryLevel;
   swapPercent: number | null;
   swapUsedBytes: number | null;
   swapTotalBytes: number | null;
+  swapInBytesPerSecond: number | null;
+  swapOutBytesPerSecond: number | null;
+  diskReadBytesPerSecond: number | null;
+  diskWriteBytesPerSecond: number | null;
+  networkReceiveBytesPerSecond: number | null;
+  networkSendBytesPerSecond: number | null;
+  /** Only in a detailed snapshot (the popover is open). */
+  processes: SystemProcessesSnapshot | null;
+  /** The sampler's own CPU time as a share of one core, child processes included. */
+  samplerCpuPercent: number | null;
+}
+
+export interface SystemResourceSnapshotOptions {
+  /** Per-process figures, read only while the popover is open. */
+  detail?: boolean;
+  /** The breakdown on screen: per-process swap is only read for "swap". */
+  focus?: SystemResource;
 }
 
 export type NotificationSoundKind = "needs-you" | "done";
@@ -1481,7 +1842,13 @@ export type NotifyKind =
   | "git.teammate-push"
   // Someone opened (or reopened, or marked ready) a pull request on a watched
   // GitHub repository (src/main/github-push-watch.ts). One alert per PR.
-  | "git.pull-request";
+  | "git.pull-request"
+  // A check failed on the pull request of a workspace's branch
+  // (src/main/github-ci-watch.ts). One alert per failing head commit.
+  | "git.ci-failed"
+  // A worktree's repository setup command is new or changed, so it waits for
+  // the user to run it (src/main/worktree-setup). One alert per setup.
+  | "worktree.setup-approval";
 
 // Where clicking a notification (toast card, native notification, center
 // entry) navigates. Terminal targets reuse the TerminalAgentTarget shape.
@@ -1521,17 +1888,63 @@ export interface NotifyEvent {
 }
 
 // A NotifyEvent as persisted in the notification center's ring buffer.
-// `suppressed` records WHY delivery was skipped (e.g. "watching", "dnd")
-// while the entry still lands in the history.
+// `suppressed` records WHY delivery was skipped (e.g. "watching", "dnd",
+// "muted") while the entry still lands in the history.
 export interface NotificationCenterEntry extends NotifyEvent {
   read: boolean;
   suppressed?: string;
+  // Repeats from one source fold into a single row: how many events of this
+  // kind the row stands for, and when the first of them arrived. Absent on
+  // rows written by older builds, which read as a count of one.
+  count?: number;
+  firstAt?: string;
+  // Counts (and earlier bodies) the same source built up under other kinds
+  // before its latest state replaced them, so an agent that finished 6
+  // times, asked once and then finished again reads "finished 7 times"
+  // rather than starting over.
+  kindCounts?: Partial<Record<NotifyKind, { count: number; firstAt: string; earlier?: string[] }>>;
+  // Up to three earlier distinct bodies of the folded events, newest first:
+  // the branches a bot pushed to, what an agent finished before its latest
+  // turn.
+  earlier?: string[];
+  // The source moved on after asking (the agent resumed, the run continued,
+  // the pane closed), so a needs-you row no longer waits on the user.
+  settled?: boolean;
+}
+
+// A per-source silence the user chose from the center ("mute this workspace
+// for an hour"). `key` is "workspace:<id>", "source:<sourceKey>",
+// "agent:<agent id>" or "job:<automation id>" (MUTE_KEY_PATTERN in
+// notify-center.ts); `until` is an epoch-ms deadline after which the mute
+// lapses on its own.
+export interface NotificationMute {
+  key: string;
+  label: string;
+  until: number;
 }
 
 // Pushed on "notify:center-updated" whenever the center's contents change,
-// so the renderer bell badge tracks unread without refetching the list.
+// so every window and the dock badge track counts. `needsYou` is what the
+// badge shows (countsAsNeedsYou in notify-center.ts); `notable` is the unread
+// rows that light the bell's quiet dot instead. `version` increases on every
+// change so a renderer knows its cached rows are stale.
 export interface NotificationCenterSummary {
   unread: number;
+  needsYou: number;
+  notable: number;
+  mutes: NotificationMute[];
+  version: number;
+}
+
+// What the user is looking at, as far as acknowledging center rows goes: the
+// visible run, the selected terminal pane and the automation whose page is
+// open in the Automations hub. A row whose target is exactly this surface is
+// marked read; it stays in the history.
+export interface NotificationViewSnapshot {
+  workspaceId: string | null;
+  visibleRunId: string | null;
+  terminal: { workspaceId: string; tabId: string; paneId: string } | null;
+  automation: { workspaceId: string; jobId: string } | null;
 }
 
 // The renderer's report of what the user is looking at, sent on every
@@ -1543,9 +1956,16 @@ export interface UiAttentionSnapshot {
   tabId: string | null;
   runId: string | null;
   paneId: string | null;
+  // The split shown alone in the selected terminal tab; its siblings are
+  // hidden while it is set.
+  zoomedPaneId?: string | null;
 }
 
 export type PrefKey = keyof AppPreferences;
+
+export type LinkOpenTarget = "system" | "studio";
+
+export const LINK_OPEN_TARGETS: readonly LinkOpenTarget[] = ["system", "studio"];
 
 export interface PreferencesChange<K extends PrefKey = PrefKey> {
   key: K;
@@ -1562,7 +1982,7 @@ export type TerminalAgentRuntime = AgentFamilyRuntime | "pi";
 export type WorkerSessionRuntime = WorkerSessionFamily;
 
 // Lightweight metadata read from the CLI-owned transcript stores for the
-// manual-worker session picker. The transcript itself never crosses IPC.
+// session lists (Settings, the phone). The transcript itself never crosses IPC.
 export interface WorkerSessionSummary {
   runtime: WorkerSessionRuntime;
   /** Frozen native Claude configuration. Undefined is legacy personal/unset. */
@@ -1573,10 +1993,6 @@ export interface WorkerSessionSummary {
   nativeGrokProfileId?: string;
   sessionId: string;
   title: string;
-  // First real user question, set when `title` is Claude Code's generated
-  // ai-title (the picker shows it as a dim second line). Null when the title
-  // already IS the first question, or none was found.
-  preview: string | null;
   cwd: string;
   cwdExists: boolean;
   updatedAt: string;
@@ -1678,9 +2094,14 @@ export interface AgentRuntimeDiagnostic {
 export interface AgentSyncResult {
   startedAt: string;
   completedAt: string;
+  // A preview: the lists name what a real sync would copy, and nothing was
+  // written.
+  dryRun?: boolean;
   mcp: {
     toClaude: string[];
     toCodex: string[];
+    // Built-in entries the sync repaired in Grok Build's config.
+    toGrok?: string[];
     skipped: string[];
     errors: string[];
   };
@@ -1693,7 +2114,9 @@ export interface AgentSyncResult {
 }
 
 export type AgentAssetKind = "mcp" | "skill";
-export type AgentAssetRuntime = AgentFamilyRuntime | "shared";
+// "codara" is Codara's own MCP list and skill folder under the Codara home:
+// only Cora and her workers load them, no CLI does.
+export type AgentAssetRuntime = AgentFamilyRuntime | "shared" | "codara";
 export type AgentAssetScope = "user" | "workspace";
 export type AgentAssetCompatibility = "both" | "claude" | "codex" | "grok" | "unknown";
 
@@ -1720,11 +2143,32 @@ export interface AgentAssetInventoryItem {
   // discovered by name but its definition could not be parsed.
   mcpTransport?: AgentMcpTransport;
   mcpSummary?: string;
+  // MCP only: the agent CLIs that actually load this entry's config file, and
+  // a caveat when that differs from what the file's location suggests (a
+  // .claude/settings.json entry reaches no CLI; a project .mcp.json needs
+  // Claude's approval). Cora and Pi workers read every listed file.
+  readBy?: AgentFamilyRuntime[];
+  readByNote?: string;
+  // MCP only: the entry lives in Claude's private per-project map in
+  // ~/.claude.json (Claude's "local" scope) for the active workspace.
+  claudeLocalScope?: boolean;
+  // MCP only: why the Claude Code and Codex sessions Codara starts do not
+  // load it ("Keep agents in your Chrome" turns off servers that open a
+  // separate Chrome). Absent when Codara leaves it on.
+  offInCodara?: string;
+  // MCP only: this copy is the definition Cora and Pi workers connect with
+  // when the name is defined in several files (the first readable, enabled
+  // one in discovery order).
+  piDefinition?: boolean;
+  // Skills only: the skill's own folder, its SKILL.md frontmatter
+  // description, and whether Cora's and Pi workers' sessions load it.
+  skillDir?: string;
+  skillDescription?: string;
+  piLoads?: boolean;
 }
 
-// stdio and streamable HTTP are the two shapes the add/edit form writes. "sse"
-// only ever arrives from a config the user wrote by hand; the form reads it as
-// HTTP and preserves the url, so a saved edit migrates it to streamable-http.
+// stdio, streamable HTTP and SSE. The form writes all three, so an SSE entry
+// keeps its transport when it is edited.
 export type AgentMcpTransport = "stdio" | "http" | "sse";
 
 // One config file the Capability Center is willing to write a user-authored
@@ -1737,11 +2181,15 @@ export interface AgentMcpTarget {
   path: string;
   label: string;
   format: "json" | "toml";
+  // The CLIs that load this file, and a short caveat for the location picker
+  // (for example that a project file is usually committed to git).
+  readBy?: AgentFamilyRuntime[];
+  hint?: string;
 }
 
 export interface AgentMcpServerDraft {
   name: string;
-  transport: "stdio" | "http";
+  transport: AgentMcpTransport;
   command?: string;
   args?: string[];
   env?: Record<string, string>;
@@ -1764,6 +2212,116 @@ export interface AgentMcpSaveResult {
 export interface AgentAssetInventory {
   mcp: AgentAssetInventoryItem[];
   skills: AgentAssetInventoryItem[];
+  // A skill root held more skill folders than the scan reads.
+  skillsTruncated?: boolean;
+}
+
+// How one MCP server assigned to Cora or Pi workers reaches a Pi session for
+// the active workspace. "needs-oauth" is delivered but will fail: the server
+// signs in through Claude's OAuth store, which Pi cannot use.
+export type AgentPiMcpDeliveryState =
+  | "delivered"
+  | "needs-oauth"
+  | "turned-off"
+  | "no-definition"
+  | "reserved"
+  | "duplicate"
+  | "unsupported"
+  | "over-cap";
+
+export interface AgentPiMcpLiveStatus {
+  status: "pending" | "connected" | "failed" | "disconnected";
+  tools: number;
+  error?: string;
+  updatedAt: string;
+}
+
+export interface AgentPiMcpDelivery {
+  sessionKey: string;
+  name: string;
+  state: AgentPiMcpDeliveryState;
+  reason?: string;
+  // Connection state reported by an open Cora chat, when one is running.
+  live?: AgentPiMcpLiveStatus;
+}
+
+export interface AgentPiMcpPreview {
+  cora: AgentPiMcpDelivery[];
+  worker: AgentPiMcpDelivery[];
+  maxServers: number;
+  errors: string[];
+}
+
+// Connection test for one MCP server: either a discovered entry (`id`) or an
+// unsaved add/edit form draft. It starts the server, so it runs only on an
+// explicit click.
+export interface AgentMcpProbeRequest {
+  cwd?: string | null;
+  id?: string;
+  draft?: AgentMcpServerDraft;
+}
+
+export interface AgentMcpProbeResult {
+  ok: boolean;
+  transport?: AgentMcpTransport;
+  tools: Array<{ name: string; description?: string }>;
+  serverName?: string;
+  serverVersion?: string;
+  durationMs: number;
+  error?: string;
+  // Last stderr lines of a stdio server, with env and header values redacted.
+  stderrTail?: string[];
+}
+
+// A pasted server definition (an mcpServers JSON block, one server object, a
+// Codex [mcp_servers.*] TOML table, or a `claude mcp add` / `codex mcp add`
+// command line) turned into form drafts. Several servers come back when the
+// snippet held several, and the form asks which one to use.
+export type AgentMcpSnippetParseResult =
+  | { ok: true; servers: AgentMcpServerDraft[]; notes: string[] }
+  | { ok: false; error: string };
+
+// A server found in the Claude, Codex or Grok config that can be copied into
+// Codara's own list. Listing and importing only read those files.
+export interface AgentMcpImportCandidate {
+  id: string;
+  name: string;
+  runtime: AgentAssetRuntime;
+  scope: AgentAssetScope;
+  path: string;
+  transport: AgentMcpTransport;
+  summary: string;
+  // A server of the same name is already in Codara's own list.
+  alreadyInCodara: boolean;
+}
+
+export interface AgentMcpImportResult {
+  ok: boolean;
+  imported: string[];
+  skipped: string[];
+  error?: string;
+}
+
+// A skill written in the Capability Center, or imported from a folder, a zip
+// archive or a git repository into Codara's own skill folder.
+export interface AgentSkillCreateInput {
+  name: string;
+  description: string;
+  instructions: string;
+}
+
+export type AgentSkillImportSource =
+  | { kind: "folder"; path: string; subdir?: string }
+  | { kind: "zip"; path: string; subdir?: string }
+  | { kind: "git"; url: string; subdir?: string };
+
+export interface AgentSkillWriteResult {
+  ok: boolean;
+  name?: string;
+  path?: string;
+  error?: string;
+  // The source held several skills: their folders, relative to the source.
+  candidates?: string[];
 }
 
 export interface AgentAssetDeleteResult {
@@ -1779,6 +2337,8 @@ export interface AgentAssetInstallResult {
   ok: boolean;
   installed: string[];
   error?: string;
+  // Skills only: the folder the copy landed in.
+  path?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -1820,8 +2380,8 @@ export interface SparkBuiltinMcpStatus {
   detail: string;
   // Tool names the server exposes (for the "N tools" badge + tooltip).
   tools: string[];
-  // When true, Codara auto-installs/refreshes this server on launch (governed
-  // by the playwrightMcpAutoInstall setting). Shown as an "auto" hint.
+  // When true, Codara passes this server to the sessions it starts instead of
+  // installing it anywhere. Shown as an "auto" hint.
   autoManaged: boolean;
   claude: SparkBuiltinRuntimeStatus;
   codex: SparkBuiltinRuntimeStatus;
@@ -1998,6 +2558,13 @@ export interface GitDiff {
 
 /** Result of a git mutation — stderr is surfaced verbatim on failure. */
 export type GitOpResult = { ok: true } | { ok: false; error: string };
+
+// Result of removing a copy-branch worktree. The worktree is gone whenever ok
+// is true; `branchKept` says why a requested branch delete did not happen
+// ("it has unmerged commits"), for a note rather than an error.
+export type GitRemoveWorktreeResult =
+  | { ok: true; branchKept?: string }
+  | { ok: false; error: string };
 
 // Result of git:createCopyWorktree. Shared so renderer + main agree on shape.
 // mode "fork" = new branch created from baseBranch (baseBranch present);
@@ -2340,6 +2907,10 @@ export type WorkerAttemptStatus =
 //                  before the first working/idle classification resolves so a
 //                  freshly-launched agent reads as "starting", not busy.
 //   - "working" : the agent is actively thinking / streaming tokens.
+//   - "background": the agent's own turn ended but work it started still runs
+//                 (background subagents, shells, workflows, monitors) and
+//                 will report back and wake it. Busy, not ready; the user may
+//                 still type to it. Set only by the main-process notifier.
 //   - "blocked" : the agent is waiting for the user (permission prompt,
 //                 confirmation, "do you want to proceed?").
 //   - "idle"    : the WIRE name for "turn complete / waiting for your input /
@@ -2364,11 +2935,21 @@ export type WorkerAttemptStatus =
 export type RuntimeState =
   | "launching"
   | "working"
+  | "background"
   | "blocked"
   | "idle"
   | "done"
   | "error"
   | "stalled";
+
+/**
+ * The agent is doing work right now, in its turn or in the background:
+ * what keep-awake, the quit guard and the rail's activity count treat as
+ * "agents work".
+ */
+export function runtimeStateIsBusy(state: RuntimeState | null | undefined): boolean {
+  return state === "working" || state === "background";
+}
 
 // Binary foreground-agent lifecycle emitted by a terminal pane. A false state
 // can be heuristic (the visible UI disappeared briefly) or confirmed (the
@@ -2408,16 +2989,25 @@ export interface PlanState {
  */
 export type ProjectPolicyMode = "trusted" | "untrusted-pull-request";
 
-export type ManagerTurnRecoveryFailureKind =
-  | "rate_limit"
-  | "provider"
-  | "transport"
-  // Cora's own turn cap, not a provider problem: the work and any workers it
-  // started are untouched, so the run parks resumable rather than failing.
-  | "timeout"
-  // Expired/revoked provider credential: only the user can re-authenticate,
-  // so the run parks with a sign-in-again prompt instead of failing.
-  | "auth";
+/**
+ * Every failure kind a parked manager turn can record. run.json validation
+ * reads this list, so a kind the turn policy parks can never be dropped on
+ * save. "timeout" is Cora's own turn cap, not a provider problem: the work and
+ * any workers it started are untouched. "auth" is an expired or revoked
+ * provider credential that only the user can renew. "runtime" means Cora's own
+ * runtime crashed, the model ended without a reply, or the turn failed for an
+ * unnamed reason while workers were still running; it parks so they survive.
+ */
+export const MANAGER_TURN_RECOVERY_FAILURE_KINDS = [
+  "rate_limit",
+  "provider",
+  "transport",
+  "timeout",
+  "auth",
+  "runtime",
+] as const;
+
+export type ManagerTurnRecoveryFailureKind = (typeof MANAGER_TURN_RECOVERY_FAILURE_KINDS)[number];
 
 /**
  * Durable, user-owned recovery handle for a manager turn that could not reach
@@ -2452,6 +3042,29 @@ export interface ManagerTurnRecovery {
    * retry rebuilds that fresh session from canonical persisted history.
    */
   forceCanonicalReplay?: boolean;
+}
+
+export type RunManagerPlanMilestoneStatus = "pending" | "in_progress" | "done" | "deferred";
+
+export interface RunManagerPlanMilestone {
+  id: string;
+  title: string;
+  status: RunManagerPlanMilestoneStatus;
+  /** Evidence for done, the reason for deferred, or what is in the way. */
+  note?: string;
+  workerTaskIds?: string[];
+}
+
+export interface RunManagerPlan {
+  /** The user's request in their own words. */
+  goal: string;
+  milestones: RunManagerPlanMilestone[];
+  decisions?: string[];
+  nextActions?: string[];
+  updatedAt: string;
+  /** The user message whose request this plan serves. A rewind that removes
+   * it drops the plan with the conversation it belonged to. */
+  requestMessageId?: string;
 }
 
 export interface RunState {
@@ -2611,6 +3224,21 @@ export interface RunState {
    */
   verificationRounds?: number;
   /**
+   * The same corrective rounds keyed by implementation lineage (the first task
+   * of a retry / follow-up chain). A multi-area run legitimately draws one
+   * corrective verdict per area, so the run-level ceiling scales with the
+   * number of lineages and a single lineage is judged on its own count.
+   * Reset together with verificationRounds.
+   */
+  verificationRoundsByLineage?: Record<string, number>;
+  /**
+   * Cora's own working plan for multi-phase work, written only through
+   * codara_plan_update. Unlike the conversation it survives compaction and
+   * restarts, so it is shown back to the manager as part of each turn's run
+   * state, and codara_complete refuses while a milestone is still open.
+   */
+  managerPlan?: RunManagerPlan;
+  /**
    * Which Cora manager backend drives this chat. Undefined on legacy runs and
    * treated as "pi" by the dispatch layer. A run persisted with a retired
    * backend ("openrouter", "claude", "codex") is rewritten to "pi" by
@@ -2709,6 +3337,12 @@ export interface RunState {
    * finalizeDirectRun replaces the manager review.
    */
   executionMode?: "managed" | "direct";
+  /**
+   * Present on a workflow run: a direct run whose agents a workflow script
+   * issues (workflow-driver.ts). The driver owns its lifecycle, so the direct
+   * finalize, the direct conversation and the loom recovery all skip it.
+   */
+  workflow?: WorkflowRunInfo;
   /**
    * Looms v2.5: the live state of ONE loom PASS over the node graph. Seeded by
    * automation-loop.startIteration from the job's graph (every node "pending"
@@ -2924,6 +3558,10 @@ export interface CoraProfileDeleteResult {
 export interface MemoryTierStatus {
   /** Whether this tier is read into prompts and writable by `codara_remember`. */
   enabled: boolean;
+  /** The workspace tier's own switch is on, but the profile's global switch
+   *  is off and acts as the master switch, so `enabled` is false. Optional
+   *  so an older main process still type-checks against this shape. */
+  blockedByGlobal?: boolean;
   /** Absolute path of the backing markdown file, resolved by the main process.
    *  The UI opens exactly this, it never recomputes the location. */
   path: string;
@@ -2952,6 +3590,9 @@ export interface CoraMemoryStatus {
  *  the workspace tier then reports disabled with an empty path. */
 export interface MemoryStatusInput {
   workspaceId: string | null;
+  /** The profile whose memory to report. Absent means the default profile
+   *  for new chats; an unknown id is an error, not a silent fallback. */
+  profileId?: string;
 }
 
 /** `memory:setEnabled` payload. */
@@ -2959,6 +3600,7 @@ export interface MemorySetEnabledInput {
   scope: CoraMemoryScope;
   workspaceId: string | null;
   enabled: boolean;
+  profileId?: string;
 }
 
 /** `memory:clear` payload. `includeUserLines` defaults to false at the handler,
@@ -2967,6 +3609,22 @@ export interface MemoryClearInput {
   scope: CoraMemoryScope;
   workspaceId: string | null;
   includeUserLines?: boolean;
+  profileId?: string;
+}
+
+/** `memory:ensureFile` payload: create the tier's file from its template when
+ *  it does not exist yet, and resolve to its path. */
+export interface MemoryEnsureFileInput {
+  scope: CoraMemoryScope;
+  workspaceId: string | null;
+  profileId?: string;
+}
+
+/** A profile's PROFILE.md as one revision-checked document. */
+export interface CoraProfileDocumentView {
+  content: string;
+  revision: string;
+  maxChars: number;
 }
 
 export interface Checkpoint {
@@ -2990,6 +3648,10 @@ export interface Checkpoint {
   /** Short label rendered in the undo popover. */
   label: string;
   createdAt: string;
+  /** Why sha is null when the workspace is a git repository (a git timeout
+   * on a large repo, a git error), so the undo menu can say why the code
+   * undo is unavailable. */
+  snapshotError?: string;
 }
 
 export interface UndoToCheckpointInput {
@@ -3110,7 +3772,7 @@ export interface HumanRunMessage {
   questionContext?: RunQuestionContext;
   attachments?: RunMessageAttachment[];
   createdAt: string;
-  /** Normal user turn, queued mid-turn steering, or Cora/linked-answer reply. */
+  /** Normal user turn, a message queued while Cora worked, or Cora/linked-answer reply. */
   intent?: RunConversationMessageIntent;
   /** User-input delivery lifecycle. Cora/system rows normalize to acknowledged. */
   deliveryState?: RunMessageDeliveryState;
@@ -3146,6 +3808,14 @@ export interface HumanRunMessage {
    *  the synthetic resume note is backend-only context and UI surfaces fold it
    *  into this message instead of showing a second, fake user turn. */
   resumesMessageId?: string;
+  /** Manager turns that took this message as input and then failed or were
+   *  aborted, releasing it back to the queue. Past a small cap the message no
+   *  longer drives automatic turns; an explicit user action still delivers it. */
+  deliveryAttempts?: number;
+  /** A turn that had already received this message was interrupted before it
+   *  finished, so the next turn is told it is not new and not to redo work
+   *  that already started. */
+  redelivered?: true;
 }
 
 export interface WorkerArtifactPaths {
@@ -3445,6 +4115,8 @@ export interface WorkerTask {
    * a manager waiting on the implementation also waits on its verifier.
    */
   autoVerifierForTaskId?: string;
+  /** The workflow agent() call this task answers, on a workflow run only. */
+  workflowCall?: WorkflowCallMarker;
   /**
    * Looms v2.5: which graph node (LoomNodeDef.id) this task executes within a
    * loom pass. Stamped by run-store's node launcher; undefined on managed runs
@@ -3652,13 +4324,20 @@ export interface WorkerAttempt {
    */
   preWorkerCheckpointSha?: string | null;
   /**
-   * Pi session id this attempt ran under, recorded at session finish. This is
-   * what makes warm follow-up spawns possible: launching a new Pi process with
-   * the same `--session-id` against the canonical session dir continues the
-   * finished worker's transcript. Absent for non-Pi transports (legacy CLI,
-   * structured e2e workers) and for attempts recorded before this field.
+   * Pi session id this attempt ran under, recorded when the session starts and
+   * again at finish. This is what makes warm follow-up spawns possible:
+   * launching a new Pi process with the same `--session-id` against the
+   * canonical session dir continues the worker's transcript. Absent for non-Pi
+   * transports (legacy CLI, structured e2e workers) and for attempts recorded
+   * before this field.
    */
   piSessionId?: string;
+  /**
+   * Set when the attempt ended because the run was paused or the app closed,
+   * not because of anything the worker did. Such an attempt's session may be
+   * continued with follow_up_of even though its task never finished.
+   */
+  interruptedBy?: "pause" | "app_restart";
   /**
    * Context occupancy at session finish: the newest message's input +
    * cacheRead + cacheWrite, a gauge over the last provider request (same
@@ -3670,6 +4349,17 @@ export interface WorkerAttempt {
    * so the reuse gate falls back to contextWindowForModel(attempt.model).
    */
   contextWindowTokens?: number;
+}
+
+/**
+ * A live worker attempt's activity readout, polled by the renderer on its own
+ * so a running worker does not cost a full listRuns every second.
+ */
+export interface LiveWorkerActivity {
+  runId: string;
+  attemptId: string;
+  runtimeActivity?: string;
+  runtimeActivityAt?: string;
 }
 
 export interface WorkerTaskEnvelope {
@@ -3713,6 +4403,13 @@ export interface WorkerReport {
    * must be lucky enough to be told about.
    */
   handoff?: WorkerHandoffArtifact[];
+  /**
+   * Durable lessons about this repository or environment that a later task
+   * would otherwise pay to rediscover (a command that really works, a
+   * gotcha). Read at completion by memory-learning.ts, which offers them as
+   * memory suggestions; never task status.
+   */
+  lessons?: string[];
   /**
    * Populated only by verifier-class workers. The 5-confidence-ladder verdict
    * the manager uses during worker_result_review to decide accept / retry-impl
@@ -3849,6 +4546,10 @@ export interface SparkCall {
    * decision, and the timeline styles it as maintenance rather than a reply.
    */
   purpose?: "compaction";
+  /** A completed compaction call: the conversation's context before the
+   *  cutover, and the estimated size of the summary note that replaced it. */
+  compactedFromTokens?: number;
+  compactedToTokens?: number;
   contextPacketId?: string;
   requestPath?: string;
   responsePath?: string;
@@ -3920,6 +4621,7 @@ export interface CreateRunInput {
   // the renderer can suppress tabs synchronously from the very first event.
   automationId?: string;
   executionMode?: "managed" | "direct";
+  workflow?: WorkflowRunInfo;
 }
 
 export interface UpdateRunStatusInput {
@@ -4227,6 +4929,7 @@ export interface CreateWorkerTaskInput {
   // Declared-at-spawn verification; thread onto the created WorkerTask.
   verifierBrief?: string;
   autoVerifierForTaskId?: string;
+  workflowCall?: WorkflowCallMarker;
 }
 
 export interface PrepareWorkerTaskInput {
@@ -4873,6 +5576,9 @@ export interface StartDirectWorkerRunInput {
   prompt: string; // fully rendered loop prompt
   clientMessageId?: string;
   model: string; // provider-native id; selects the Pi provider (claude-*/gpt-*)
+  /** The chat's chip model, kept as run.chatModel when it differs from the
+   *  worker model. Defaults to `model`. */
+  chatModel?: string;
   effort?: AgentEffortLevel;
   /** Looms v2.5: the graph node this pass's single worker executes (its prompt
    *  IS the rendered `prompt` above). Defaults to "w0" when omitted, so a
@@ -5012,6 +5718,75 @@ export interface AutomationRunRecord {
   measuredCostUsd?: number; // measured-only portion of costUsd (totalCostUsd + measuredWorkerCostUsd delta)
   stopReason?: AutomationStopReason; // set only on the final record when stopping
   continuationSource?: AutomationContinuationSource;
+  /** Set when this pass ran to catch up a scheduled time Codara missed
+   *  (closed or asleep) under the "run once when back" policy. */
+  catchUp?: AutomationCatchUp;
+}
+
+// ── Precheck and missed-run catch-up ────────────────────────────────────────
+// A precheck is a shell command run in the automation's folder before a pass a
+// trigger (or a cadence loop) starts on its own: exit 0 runs the pass, any
+// other outcome skips it without starting a worker. "Run now" never checks.
+// Shapes and defaults live in src/shared/automation-catchup.ts.
+
+/** Which shell runs the precheck. "default" is the login shell on macOS and
+ *  Linux and cmd.exe on Windows; "powershell" is powershell.exe on Windows and
+ *  pwsh elsewhere. */
+export type AutomationPrecheckShell = "default" | "powershell";
+
+export interface AutomationPrecheck {
+  command: string;
+  /** Seconds before the check is stopped and the pass skipped (1..600, default 60). */
+  timeoutSeconds?: number;
+  shell?: AutomationPrecheckShell;
+}
+
+export interface AutomationPrecheckResult {
+  /** True only for a clean exit 0 within the timeout. */
+  passed: boolean;
+  exitCode: number | null;
+  timedOut: boolean;
+  durationMs: number;
+  /** The last characters of stdout and stderr, in the order they arrived. */
+  outputTail: string;
+  /** Why the command could not run at all (missing shell or folder). */
+  error?: string;
+}
+
+/** What happens to a scheduled time Codara missed. "skip" (the default) records
+ *  it; "runOnce" starts a single pass when Codara is back, if the latest missed
+ *  time is within graceMinutes. Never more than one pass, however many were missed. */
+export type AutomationMissedRunPolicy = "skip" | "runOnce";
+
+export interface AutomationMissedRuns {
+  policy: AutomationMissedRunPolicy;
+  /** runOnce only: older missed times are skipped (default 720 = 12 hours). */
+  graceMinutes?: number;
+}
+
+export interface AutomationCatchUp {
+  /** ISO time of the latest scheduled run that was missed. */
+  scheduledFor: string;
+  /** How many scheduled times were missed (capped by the scan). */
+  missedCount: number;
+}
+
+/** A pass that did not start: its precheck said no, or its scheduled time was
+ *  missed and not caught up. Kept apart from `history` (which only ever holds
+ *  real passes with a run) and capped to AUTOMATION_SKIP_CAP. */
+export interface AutomationSkipRecord {
+  id: string;
+  at: string; // ISO time the skip was recorded
+  reason: "precheck" | "missed";
+  /** One plain-words line for the history row. */
+  detail: string;
+  precheck?: AutomationPrecheckResult & { command: string };
+  missed?: AutomationCatchUp & { noticedOn: "start" | "wake" };
+  /** How many skips in a row this row stands for (absent means 1): a skip
+   *  that repeats the newest one updates it instead of adding a row. */
+  repeats?: number;
+  /** ISO time of the first of those repeated skips (absent means `at`). */
+  firstAt?: string;
 }
 
 // Persisted live state of an automation's loop.
@@ -5068,6 +5843,17 @@ export interface ScheduledJob {
    *  of being silently swallowed into an in-memory baseline. */
   lastGitRemoteSha?: string;
   lastGitLocalSha?: string;
+  /** Optional shell gate run before each automatically started pass. */
+  precheck?: AutomationPrecheck;
+  /** cron and interval triggers: what to do about a missed scheduled time.
+   *  Absent means skip. */
+  missedRuns?: AutomationMissedRuns;
+  /** ISO time up to which scheduled times are settled (fired, held, caught
+   *  up or recorded as missed). PERSISTED so a restart can tell which times
+   *  passed while Codara was closed. */
+  scheduleCheckedAt?: string;
+  /** Passes that did not start, newest last. */
+  skips?: AutomationSkipRecord[];
   createdAt: string; // ISO timestamp
   /** The chat run that authored this loom: the Hub's assist ("Create with
    *  Cora") chat, or an ordinary auto/execute chat that created it with
@@ -5089,6 +5875,8 @@ export interface CreateScheduledJobInput {
   graph?: LoomGraph; // backfilled by normalizeJob when omitted (single w0 node)
   enabled?: boolean;
   createdByRunId?: string; // the chat run that authored this loom (assist or ordinary chat, never a loom run)
+  precheck?: AutomationPrecheck;
+  missedRuns?: AutomationMissedRuns;
 }
 
 // Edit payload (scheduler:update). Partial; id required. enabled/state/history
@@ -5102,6 +5890,16 @@ export interface UpdateScheduledJobInput {
   prompt?: AutomationPrompt;
   worker?: LoomWorkerConfig;
   graph?: LoomGraph;
+  /** null removes the precheck. */
+  precheck?: AutomationPrecheck | null;
+  /** null restores the default (skip). */
+  missedRuns?: AutomationMissedRuns | null;
+}
+
+/** automations:testPrecheck: run a precheck once from the editor. */
+export interface TestPrecheckInput {
+  cwd: string;
+  precheck: AutomationPrecheck;
 }
 
 // scheduler:getDetail response: the automation + its resolved live run.

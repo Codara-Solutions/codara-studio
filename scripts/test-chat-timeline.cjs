@@ -771,7 +771,7 @@ async function main() {
     const bubble = timeline.find((item) => item.kind === "message" && item.id === "msg-resume");
     assert.ok(bubble, "the resume note must render as a chat message");
     assert.equal(bubble.author, "user");
-    assert.equal(bubble.text, "Resume — hand 2 interrupted attempts back to Cora");
+    assert.equal(bubble.text, "Resume: hand 2 interrupted attempts back to Cora");
     assert.equal(bubble.at, at(30));
     assert.equal(
       timeline.some((item) => item.id === "resume-note:msg-resume"),
@@ -794,7 +794,7 @@ async function main() {
     ].join("\n");
     const timeline = T.buildChatTimeline(syntheticNoteRun("msg-capped", "resumeNote", capped));
     const bubble = timeline.find((item) => item.kind === "message" && item.id === "msg-capped");
-    assert.equal(bubble.text, "Resume — hand 5 interrupted attempts back to Cora");
+    assert.equal(bubble.text, "Resume: hand 5 interrupted attempts back to Cora");
   });
 
   test("a plain resume note (no interrupted attempts) renders as a bare Resume bubble", () => {
@@ -1360,6 +1360,33 @@ async function main() {
     assert.equal(T.attemptStatusColor("finishing"), "var(--accent)");
   });
 
+  test("the graph never paints an unfinished or failed worker as done", () => {
+    const task = (status) => ({ id: "t", status });
+    const attempt = (status) => ({ id: "a", status });
+    // A failed attempt whose synthetic report left the task awaiting review.
+    assert.equal(T.deriveAgentStatus(task("needs_review"), attempt("failed"), "reviewing"), "blocked");
+    assert.equal(T.deriveAgentStatus(task("needs_review"), attempt("timed_out"), "reviewing"), "blocked");
+    // A clean exit whose report said failed or partial.
+    assert.equal(T.deriveAgentStatus(task("failed"), attempt("succeeded"), "failed"), "blocked");
+    assert.equal(T.deriveAgentStatus(task("blocked"), attempt("succeeded"), "blocked"), "blocked");
+    // Finished but not yet reviewed is still in progress.
+    assert.equal(T.deriveAgentStatus(task("needs_review"), attempt("succeeded"), "reviewing"), "running");
+    // Only an accepted task, or a settled success with no task verdict, is done.
+    assert.equal(T.deriveAgentStatus(task("accepted"), attempt("succeeded"), "complete"), "done");
+    assert.equal(T.deriveAgentStatus(undefined, attempt("succeeded"), "running"), "done");
+  });
+
+  test("a relaunched attempt never shows the previous run's report", () => {
+    // A relaunch reuses the attempt id and the report path, so the cache must
+    // be keyed by when and how the attempt settled, and a live attempt shows
+    // no report at all.
+    const source = fs.readFileSync(RUN_FORMAT, "utf8");
+    const hook = source.slice(source.indexOf("export function useRunReports("));
+    assert.match(hook, /key: `\$\{attempt\.finalReportPath\}\|\$\{attempt\.finishedAt \?\? ""\}\|\$\{attempt\.status\}`/);
+    assert.match(hook, /LIVE_REPORT_ATTEMPT_STATUSES\.has\(attempt\.status\)\) continue;/);
+    assert.match(hook, /cacheRef\.current\.get\(key\)/);
+  });
+
   test("a queued worker row names its allowed roster model", () => {
     const state = pausedRunWithQueuedWorker();
     const timeline = T.buildChatTimeline(state);
@@ -1367,6 +1394,14 @@ async function main() {
     assert.equal(row.meta.find((meta) => meta.label === "Model").value, "Sonnet 5");
     const step = timeline.filter((item) => item.kind === "step").find((item) => item.id === "step-2");
     assert.equal(step.workers[0].model, "claude-sonnet-5");
+  });
+
+  test("a step worker row keeps the root key but opens the surviving task's pane", () => {
+    const timeline = T.buildChatTimeline(pausedRunWithQueuedWorker());
+    const step = timeline.filter((item) => item.kind === "step").find((item) => item.id === "step-1");
+    assert.equal(step.workers.length, 1);
+    assert.equal(step.workers[0].id, "task-s1-dead");
+    assert.equal(step.workers[0].taskId, "task-s1-live");
   });
 
   // ── Awaiting-answer manager turns (run-msafk7yu-zkudx6) ───────────────────
@@ -1726,6 +1761,32 @@ async function main() {
     assert.equal(T.isBackendFailurePark(run), true);
     assert.equal(T.describeRunStatus(run).tone, "failed");
     assert.equal(T.workspaceRailTone([run]), null);
+  });
+
+  test("a backend-failure park renders as a failure row and retries the failed message", () => {
+    const question = parkQuestion({ backendFailure: true });
+    const userMessage = {
+      id: "msg-user",
+      runId: "run-park",
+      author: "user",
+      kind: "note",
+      message: "Hello Cora, what can you do?",
+      createdAt: at(5),
+    };
+    const resume = { ...userMessage, id: "msg-resume", message: "resume", resumeNote: true, createdAt: at(7) };
+    const run = parkedRun({ flagged: true, question });
+    run.humanMessages = [userMessage, resume, question];
+    const row = T.buildChatTimeline(run).find((item) => item.kind === "message" && item.id === question.id);
+    assert.equal(row?.backendFailure, true);
+    assert.equal(T.backendFailureRetryText(run, question), "Hello Cora, what can you do?");
+    const genuine = parkQuestion();
+    genuine.message = "Which database should the importer write to?";
+    genuine.questionContext.reason = "Two schemas are equally valid.";
+    const genuineRun = parkedRun({ flagged: false, question: genuine });
+    genuineRun.humanMessages = [userMessage, genuine];
+    assert.equal(T.backendFailureRetryText(genuineRun, genuine), null);
+    const genuineRow = T.buildChatTimeline(genuineRun).find((item) => item.kind === "message" && item.id === genuine.id);
+    assert.equal(genuineRow?.backendFailure, undefined);
   });
 
   test("a genuine question still needs you and still lights the rail", () => {

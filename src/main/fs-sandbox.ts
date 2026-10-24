@@ -1,7 +1,7 @@
 import { app } from "electron";
 import path from "node:path";
 import os from "node:os";
-import { promises as fsp } from "node:fs";
+import { promises as fsp, realpathSync } from "node:fs";
 import { isRemotePath } from "@shared/remote";
 import { codaraHome } from "./codara-home";
 import { claudeConfigDir } from "./orchestration/claude-paths";
@@ -59,7 +59,20 @@ function resolveAll(roots: string[]): string[] {
     // turn them into garbage relative to cwd. Remote fs access is authorized
     // by its own remote-root check (see isAllowedReadPath), not this list.
     .filter((r) => !isRemotePath(r))
-    .map((r) => path.resolve(r));
+    .flatMap((r) => withRealSpelling(path.resolve(r)));
+}
+
+// A root and its canonical spelling are the same folder, and callers that
+// resolve symlinks first (the share offer, the verify gate) ask with the
+// canonical one: on macOS /tmp and /var/folders live under /private. Adding the
+// real path widens nothing; links inside a root are still not followed.
+function withRealSpelling(root: string): string[] {
+  try {
+    const real = realpathSync(root);
+    return real === root ? [root] : [root, real];
+  } catch {
+    return [root];
+  }
 }
 
 export function setSeededRoots(roots: string[]): void {
@@ -89,8 +102,9 @@ function staticAllowed(): string[] {
     // scoped to the memory subdirectory only: the Codara home also holds
     // auth tokens (pi-agent/auth.json) AND the Remote Access key material
     // in remote/ (identity.json is the computer's private key; see
-    // src/main/remote-access/). Neither the home root nor remote/ may EVER
-    // be allowlisted here.
+    // src/main/remote-access/) and the share key in share/ (see
+    // src/main/share/identity.ts). Neither the home root, remote/ nor share/
+    // may EVER be allowlisted here.
     path.join(codaraHome(), "memory"),
     // Run artifacts (worker stdout/raw logs, prompts, final reports under
     // runs/<runId>/...) are rendered by the automations live feed, the Runs
@@ -100,7 +114,7 @@ function staticAllowed(): string[] {
     path.join(codaraHome(), "runs"),
     app.getPath("userData"),
     app.getPath("temp"),
-  ].map((p) => path.resolve(p));
+  ].flatMap((p) => withRealSpelling(path.resolve(p)));
   return staticAllowedCache;
 }
 

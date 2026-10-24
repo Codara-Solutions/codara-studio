@@ -9,6 +9,7 @@ export function CopyBranchDeleteDialog({
   branch,
   busy,
   error,
+  defaultDeleteBranch = false,
   onCancel,
   onConfirm,
 }: {
@@ -16,10 +17,14 @@ export function CopyBranchDeleteDialog({
   branch: string;
   busy: boolean;
   error: string | null;
+  // An agent's fork made the branch for this worktree alone, so deleting it
+  // with the worktree is the expected outcome; a branch the user checked out
+  // or forked themselves is kept unless they tick the box.
+  defaultDeleteBranch?: boolean;
   onCancel: () => void;
   onConfirm: (opts: { deleteBranch: boolean; force: boolean }) => void;
 }) {
-  const [deleteBranch, setDeleteBranch] = useState(false);
+  const [deleteBranch, setDeleteBranch] = useState(defaultDeleteBranch);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -43,7 +48,7 @@ export function CopyBranchDeleteDialog({
       style={{
         position: "absolute",
         inset: 0,
-        background: "color-mix(in oklab, var(--bg) 70%, transparent)",
+        background: "var(--modal-scrim)",
         display: "grid",
         placeItems: "center",
         zIndex: 1200,
@@ -53,12 +58,10 @@ export function CopyBranchDeleteDialog({
       }}
     >
       <div
+        className="spark-glass--strong spark-overlay-surface"
         style={{
           width: "min(420px, calc(100vw - 48px))",
-          background: "var(--panel-2)",
-          border: "1px solid var(--rule)",
           borderRadius: 10,
-          boxShadow: "var(--shadow-2)",
           padding: 18,
           fontFamily: "var(--font-sans)",
           display: "grid",

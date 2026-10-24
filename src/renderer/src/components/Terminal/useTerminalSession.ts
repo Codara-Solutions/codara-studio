@@ -32,10 +32,14 @@ import {
   type PublicAgentRuntime,
 } from "@shared/agent-patterns";
 import { formatPaneExitLine } from "@shared/pane-format";
+import { pasteBody } from "@shared/terminal-text";
+import { applyUnicode11Widths } from "@shared/terminal-unicode";
 import { detectMonoFontFamily } from "../../lib/fonts";
 import { subscribeAppTokens } from "../../lib/theme-tokens";
 import { createFileLinkProvider } from "./file-link-provider";
 import { createReplayTracker } from "./replayTracker";
+import { openTerminalContextMenu } from "../../quick-commands/terminal-context-menu";
+import { replayFloorRow, replayPersistedScrollback } from "./persistedScrollback";
 import {
   registerCwdHandler,
   registerPromptTracker,
@@ -50,8 +54,10 @@ import {
   isAgentSessionLaunchCommand,
   PI_LAUNCH_COMMAND,
 } from "../../workers/launch-commands";
-import type { TerminalAgentSession } from "../../tabs/types";
+import type { TerminalAgentSession, TerminalLeafHibernation } from "../../tabs/types";
+import { isAgentHibernationRuntime } from "@shared/agent-hibernation";
 import {
+  adoptLiveSessionAccount,
   canAutoResume,
   decideResume,
   mergeSessionStart,
@@ -63,6 +69,19 @@ import { isAppTearingDown } from "../../lib/app-lifecycle";
 import { subscribeExternalTerminalSize } from "./terminalRegistry";
 import { createTerminalViewportRecovery, preserveTerminalViewport } from "./terminalViewport";
 import { createTerminalWakeRecovery, type TerminalRecoveryReason } from "./terminalWakeRecovery";
+import { asciiBytes, indexOfBytes } from "./terminalByteScan";
+import { isParsingReplay, writeAsReplay } from "./osc52";
+import { registerOsc52Clipboard } from "./terminalClipboard";
+import { readRecentOutput, registerTerminalContextSource } from "./terminalContext";
+import { resolveTerminalLinkClick } from "./terminalLinks";
+import type { TerminalLinkMenuRequest } from "./TerminalLinkMenu";
+import { preloadTerminalPrefs, terminalLinkMenuEnabled } from "./terminalPrefs";
+import {
+  captureTerminalScreenModes,
+  setTerminalPaneAlternateScreen,
+  terminalScreenModesSequence,
+  type TerminalScreenModes,
+} from "./terminalScreenModes";
 
 export type { SparkOpenInput };
 
@@ -73,6 +92,24 @@ const FIT_DEBOUNCE_MS = 8;
 // renderer, so a machine that can't hold a context (GPU eviction storms, driver
 // flake) doesn't thrash a new addon on every tab switch.
 const WEBGL_MAX_RELOADS = 3;
+// Whether this renderer process can create a WebGL2 context at all. With
+// hardware acceleration off (the Wayland software fallback) it cannot, and
+// the addon then fails inside term.open where the error is swallowed, leaving
+// a handle to an addon that never started. Probed once: the answer cannot
+// change without a restart.
+let webgl2Supported: boolean | null = null;
+function canUseWebgl2(): boolean {
+  if (webgl2Supported !== null) return webgl2Supported;
+  try {
+    const gl = document.createElement("canvas").getContext("webgl2");
+    webgl2Supported = gl !== null;
+    // Chromium caps live contexts per window; give the probe's back now.
+    gl?.getExtension("WEBGL_lose_context")?.loseContext();
+  } catch {
+    webgl2Supported = false;
+  }
+  return webgl2Supported;
+}
 // How long to wait after an alt-screen leave before deciding it was an exit.
 // Long enough for the agent's restored frame to reach the rows, short enough
 // that a real exit clears the chip promptly.
@@ -82,7 +119,11 @@ const ALT_SCREEN_EXIT_CONFIRM_MS = 400;
 // once, a tab transition), which would otherwise stay blank.
 const REVEAL_TRAILING_REPAINT_MS = 250;
 const PTY_RESIZE_DEBOUNCE_MS = 256;
-const PTY_MANAGER_RESET_SEQUENCE = "\x1bc\x1b[H\x1b[2J\x1b[3J\x1b[?1049l";
+const PTY_MANAGER_RESET_BYTES = asciiBytes("\x1bc\x1b[H\x1b[2J\x1b[3J\x1b[?1049l");
+// The searches jump between occurrences of their rarest byte in terminal
+// output (see terminalByteScan): the first "J", and the first "/".
+const PTY_MANAGER_RESET_ANCHOR = PTY_MANAGER_RESET_BYTES.indexOf(0x4a);
+const SCHEME_SEPARATOR_BYTES = asciiBytes("://");
 
 // Shell-escape a dropped file path for insertion at the terminal cursor,
 // replicating iTerm2's default drag-and-drop behavior.
@@ -144,25 +185,28 @@ const autoResumeAttempts = new Map<string, number[]>();
 // Panes that already printed the "previous session available" hint this app
 // run — the hint fires once per pane, not on every workspace-switch remount.
 const resumeHintShown = new Set<string>();
+// A sleeping pane (agent hibernation) wakes this long after it comes on
+// screen, so a workspace the user only flicks past stays asleep.
+const WAKE_DELAY_MS = 450;
 
-// Bracketed-paste mode (DECSET 2004) per live session. A TUI enables it ONCE
-// at startup, but a pane's xterm is disposed and recreated on every workspace
-// switch while its PTY keeps running, and the replay that rebuilds the fresh
-// instance is flattened TEXT: it carries no escape sequences, so the new
-// Terminal starts with the mode off while the still-running TUI believes it is
-// on. Anything that frames input for a paste-aware TUI then stops framing it,
-// which is why a dropped image path arrived in Claude Code as literal text
-// instead of an attachment after a few hours of switching around. One boolean
-// per session, remembered across the dispose so the fresh instance can be told
-// what the remote terminal is still doing.
-const bracketedPasteModes = new Map<string, boolean>();
+// Screen modes per live session (alternate screen, bracketed paste, mouse
+// reporting, ...). A TUI enables them ONCE at startup, but a pane's xterm is
+// disposed and recreated while its PTY keeps running, and the replay that
+// rebuilds the fresh instance is flattened TEXT: it carries no escape
+// sequences, so the new Terminal starts with every mode off while the
+// still-running TUI believes they are on. A lost bracketed paste is why a
+// dropped image path arrived in Claude Code as literal text; a lost alternate
+// screen is why its repaint landed in the scrollback with the mouse wheel no
+// longer reaching it. Remembered across the dispose so the fresh instance can
+// be told what the remote terminal is still doing.
+const rememberedScreenModes = new Map<string, TerminalScreenModes>();
 
 // These registries are remount guards, not durable terminal state. App calls
 // this only after a pane disappears from every active/inactive workspace
 // layout. Exact lifecycle cleanup keeps them bounded without an arbitrary cap
 // that could evict a still-live terminal in an unusually large workspace.
 export function forgetTerminalSessionMemory(sessionId: string): void {
-  bracketedPasteModes.delete(sessionId);
+  rememberedScreenModes.delete(sessionId);
   autorunFiredSessions.delete(sessionId);
   autoResumeAttempts.delete(sessionId);
   resumeHintShown.delete(sessionId);
@@ -236,14 +280,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
       `probe(exists=${p.exists} resumable=${p.resumable ?? "-"} repairable=${p.repairable ?? "-"}) -> ${decision.kind}`,
   );
   if (decision.kind === "resume" || decision.kind === "repair-resume") {
-    if (restore.runtime === "codex") {
-      await window.spark.agentSession
-        .ensureCodexTrust(
-          restore.cwd,
-          restore.nativeCodexProfileId,
-        )
-        .catch(() => undefined);
-    } else if (decision.kind === "repair-resume") {
+    if (restore.runtime === "claude" && decision.kind === "repair-resume") {
       // The transcript's last line is a truncated partial write (sleep/crash).
       // Repair it in place (keeps a .bak) so `claude --resume` accepts it and
       // the conversation is preserved.
@@ -280,7 +317,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
       return {
         resumeCommand: fresh.command,
         resumeIsFreshFallback: true,
-        fallbackNotice: "previous Grok session couldn't be resumed — starting a fresh one",
+        fallbackNotice: "previous Grok session couldn't be resumed, starting a fresh one",
         fallbackSession: {
           runtime: "grok",
           sessionId: fresh.sessionId,
@@ -298,7 +335,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
     return {
       resumeCommand: fresh.command,
       resumeIsFreshFallback: true,
-      fallbackNotice: "previous Claude session couldn't be resumed — starting a fresh one",
+      fallbackNotice: "previous Claude session couldn't be resumed, starting a fresh one",
       fallbackSession: {
         runtime: "claude",
         sessionId: fresh.sessionId,
@@ -318,6 +355,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
     fallbackSession: null,
   };
 }
+const VIEWPORT_KEYS = new Set(["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End"]);
 // In-memory cache of the full xterm buffer captured right before a TerminalPane
 // unmounts. Workspace switches can dispose a pane's xterm while its PTY keeps
 // running in main. Stashing the full buffer here and replaying it on the next
@@ -456,6 +494,10 @@ interface Options {
   // workspace terminal stays a fully live in-memory surface. That trades some
   // background renderer work for instant, lossless tab/workspace returns.
   writeWhileHidden?: boolean;
+  // Asked each time the pane would take the keyboard on its own (first
+  // attach, reveal). Returning false leaves the focus where the user put it.
+  // The explicit focus() handle ignores it.
+  mayAutoFocus?: () => boolean;
   onSearchReady?: (addon: SearchAddon) => void;
   onExit?: (info: PtyExitInfo) => void;
   onCwd?: (cwd: string) => void;
@@ -467,6 +509,9 @@ interface Options {
   // URL (auto-opening a preview tab) must not confuse.
   onDetectedLocalUrl?: (url: string, meta?: { replayed?: boolean }) => void;
   onSparkOpen?: (input: SparkOpenInput) => void;
+  // A plain click on a link asks for the link menu (terminalLinks.ts decides
+  // when). Without it every link click opens the link straight away.
+  onLinkMenu?: (request: TerminalLinkMenuRequest) => void;
   // Fires on every PTY data chunk (input or output activity). Used by the
   // orchestration claim logic to decide whether a pane is "doing nothing"
   // and therefore safe to take over for a worker. Throttled implicitly by
@@ -526,6 +571,16 @@ interface Options {
   // (resume typed, fresh fallback, pointer cleared, prefs-disabled, probe
   // failure) — so the owner clears the leaf's one-shot `bootResume` marker.
   onBootResumeConsumed?: () => void;
+  // Agent hibernation (lib/agentHibernation.ts): Codara stopped this pane's
+  // idle agent to save memory. A pane that mounts sleeping does not spawn a
+  // shell; once it is on screen it resumes the agent's session in place.
+  hibernated?: boolean;
+  // The sleeping pane is running again (resumed, or a plain shell when the
+  // session could not be resumed), so the owner clears the leaf's mark.
+  onWoke?: () => void;
+  // Main says this pane's agent sleeps although the leaf carries no mark (the
+  // window reloaded while it slept), so the owner marks the leaf.
+  onAsleep?: (hibernation: TerminalLeafHibernation) => void;
 }
 
 export interface TerminalSessionApi {
@@ -539,8 +594,8 @@ export interface TerminalSessionApi {
 // must not pull focus out of one: mounting a dialog over a pane can make that
 // pane "visible" again in React's terms, and grabbing focus back would send
 // the user's next arrow/Enter/Escape to the terminal underneath instead of to
-// the dialog they are looking at. Observed with the worker session picker,
-// which focuses itself on mount and then lost focus to the pane behind it.
+// the dialog they are looking at: a dialog that focuses itself on mount
+// would lose focus to the pane behind it.
 //
 // Every dialog in the app marks itself aria-modal, so this needs no registry
 // and no plumbing — and it self-clears, because the attribute goes away with
@@ -565,11 +620,13 @@ export function useTerminalSession({
   initialExternalRows,
   rawTailReattach = false,
   writeWhileHidden = false,
+  mayAutoFocus,
   onSearchReady,
   onExit,
   onCwd,
   onDetectedLocalUrl,
   onSparkOpen,
+  onLinkMenu,
   onActivity,
   onClear,
   onUserInput,
@@ -583,6 +640,9 @@ export function useTerminalSession({
   onResumeUnavailable,
   onResumeFallback,
   onBootResumeConsumed,
+  hibernated = false,
+  onWoke,
+  onAsleep,
 }: Options): TerminalSessionApi {
   // Latest-value ref so the input/resize closures (captured once per
   // sessionId) see the freshest readOnly flag without re-running the
@@ -598,6 +658,8 @@ export function useTerminalSession({
   useEffect(() => {
     inputBlockedRef.current = inputBlocked;
   }, [inputBlocked]);
+  const mayAutoFocusRef = useRef(mayAutoFocus);
+  mayAutoFocusRef.current = mayAutoFocus;
   const externalSizeOwnerRef = useRef<boolean>(externalSizeOwner);
   const externalGridRef = useRef<{ cols: number; rows: number } | null>(
     initialExternalCols && initialExternalRows
@@ -637,6 +699,17 @@ export function useTerminalSession({
   // cleanly leave the TUI first?" — the crash-vs-clean discriminator that gates
   // the in-place auto-resume.
   const agentRunningRef = useRef(false);
+  // Agent hibernation. `sleepingRef` is this pane's own truth: set by a
+  // hibernated pty exit or a sleeping mount, cleared once the wake spawn ran.
+  // The `hibernated` prop is the leaf's mirror of it, for the UI.
+  const hibernatedRef = useRef(hibernated);
+  hibernatedRef.current = hibernated;
+  const sleepingRef = useRef(false);
+  const wakeRef = useRef<(() => void) | null>(null);
+  const onWokeRef = useRef(onWoke);
+  onWokeRef.current = onWoke;
+  const onAsleepRef = useRef(onAsleep);
+  onAsleepRef.current = onAsleep;
 
   const detectedRef = useRef<string | null>(null);
   // Latest-callback refs so the effect can run exactly once per `sessionId`
@@ -646,6 +719,8 @@ export function useTerminalSession({
   const onExitRef = useRef(onExit);
   const onSearchReadyRef = useRef(onSearchReady);
   const onSparkOpenRef = useRef(onSparkOpen);
+  const onLinkMenuRef = useRef(onLinkMenu);
+  onLinkMenuRef.current = onLinkMenu;
   const onActivityRef = useRef(onActivity);
   const onClearRef = useRef(onClear);
   const onUserInputRef = useRef(onUserInput);
@@ -867,13 +942,30 @@ export function useTerminalSession({
       if (disposed || !container.current) return;
 
       // Route every terminal link activation through the preload's
-      // openExternal — Electron's shell.open is the only hop that survives
-      // Chrome's external navigation block, and it keeps browser URLs inside
-      // Codara's preview tab. Shared by the WebLinksAddon (plain-text URLs)
-      // and the linkHandler below (OSC 8 hyperlinks).
+      // openExternal: main is the only hop that survives Chrome's external
+      // navigation block, and it applies the linkOpenTarget preference.
+      // Shared by the WebLinksAddon (plain-text URLs) and the linkHandler
+      // below (OSC 8 hyperlinks).
       const openTerminalUri = (uri: string) => {
         void window.spark.openExternal?.(uri);
       };
+      // A plain click opens the link menu, Ctrl or Cmd+click opens the link
+      // (resolveTerminalLinkClick). Hosts without a menu keep the direct open.
+      const activateTerminalLink = (event: MouseEvent | undefined, uri: string) => {
+        const showMenu = onLinkMenuRef.current;
+        const click = resolveTerminalLinkClick({
+          button: event?.button,
+          ctrlKey: event?.ctrlKey,
+          metaKey: event?.metaKey,
+          menuEnabled: showMenu !== undefined && terminalLinkMenuEnabled(),
+          hasSelection: termRef.current?.hasSelection() ?? false,
+        });
+        if (click === "open") openTerminalUri(uri);
+        else if (click === "menu" && event && showMenu) {
+          showMenu({ url: uri, x: event.clientX, y: event.clientY });
+        }
+      };
+      preloadTerminalPrefs();
 
       const term = new Terminal({
         fontFamily: detectMonoFontFamily(),
@@ -888,18 +980,24 @@ export function useTerminalSession({
         scrollback: scrollbackLineLimitRef.current,
         allowProposedApi: true,
         allowTransparency: true,
+        // A glyph a font draws wider than its cell (box drawing and symbols
+        // from a fallback font, roman numerals) is squeezed into the cell
+        // instead of overlapping its neighbor. WebGL only; never emoji.
+        rescaleOverlappingGlyphs: true,
         convertEol: false,
         // OSC 8 hyperlinks (CLIs like Claude Code emit their localhost URLs
         // this way) are activated by xterm's core, not WebLinksAddon. With no
         // linkHandler, xterm falls back to a window.confirm("navigate to …?")
         // whose OK branch calls window.open() with no URL — so the click just
         // shows a scary dialog and opens nothing. Handle it ourselves so these
-        // links open the in-app preview like plain-text URLs do.
+        // links open like plain-text URLs do.
         linkHandler: {
-          activate: (_event, uri) => openTerminalUri(uri),
+          activate: (event, uri) => activateTerminalLink(event, uri),
         },
       });
       termRef.current = term;
+      // Before anything is written: widths are fixed as bytes are parsed.
+      applyUnicode11Widths(term);
 
       // Observe the erase sequence xterm actually parses rather than guessing
       // from keyboard input or shell command names. Returning false keeps xterm's
@@ -928,7 +1026,7 @@ export function useTerminalSession({
       const search = new SearchAddon();
       term.loadAddon(search);
 
-      term.loadAddon(new WebLinksAddon((_e, uri) => openTerminalUri(uri)));
+      term.loadAddon(new WebLinksAddon((event, uri) => activateTerminalLink(event, uri)));
 
       // ── Ctrl/Cmd+click on file paths → open in editor ─────────────────────
       // Sister to the WebLinksAddon above. Detects path-shaped tokens in
@@ -968,11 +1066,18 @@ export function useTerminalSession({
       // default; the WebGL renderer is several × faster on agent-style output
       // (full-screen redraws, scrollback, large bursts). On context loss
       // (driver crash, lost GPU, tab move between displays) we dispose the
-      // addon and xterm transparently falls back to DOM.
+      // addon and xterm transparently falls back to DOM. Loaded after
+      // term.open below, so a renderer that cannot start throws here instead
+      // of inside open.
       let webgl: WebglAddon | null = null;
       // Consecutive reloads triggered by a lost GL context on re-show (see
       // recoverRendererOnShow). Reset once a live context is observed.
       let webglReloads = 0;
+      // Set when a context loss dropped the pane to the DOM renderer, so the
+      // next reveal can try WebGL again. Chromium caps live contexts per
+      // window and evicts the oldest, which is usually a hidden pane; the one
+      // the user is looking at should get a context back.
+      let webglLost = false;
       const attachWebglLossHandler = (addon: WebglAddon) => {
         addon.onContextLoss(() => {
           try {
@@ -980,7 +1085,10 @@ export function useTerminalSession({
           } catch {
             /* ignore */
           }
-          if (webgl === addon) webgl = null;
+          if (webgl === addon) {
+            webgl = null;
+            webglLost = true;
+          }
           // Disposing the WebGL addon makes xterm fall back to the DOM renderer.
           // The DOM renderer derives a WIDER css cell width than WebGL (it does
           // NOT floor device char width the way WebglRenderer does), and the
@@ -996,18 +1104,19 @@ export function useTerminalSession({
         });
       };
       const loadWebgl = (): boolean => {
+        if (!canUseWebgl2()) return false;
         try {
           const addon = new WebglAddon();
           attachWebglLossHandler(addon);
           term.loadAddon(addon);
           webgl = addon;
+          webglLost = false;
           return true;
         } catch {
           webgl = null;
           return false;
         }
       };
-      loadWebgl();
 
       // Renderer recovery on pane re-activation. Two failure modes are healed
       // here, both invisible until the pane is shown again — this is the fix for
@@ -1029,7 +1138,10 @@ export function useTerminalSession({
       const recoverRendererOnShow = (resetRenderer = false) => {
         const t = termRef.current;
         if (!t) return;
-        if (webgl) {
+        if (!webgl && webglLost && webglReloads < WEBGL_MAX_RELOADS) {
+          webglReloads += 1;
+          if (loadWebgl()) refitAfterRendererSwapRef.current?.();
+        } else if (webgl) {
           // Find the WebGL renderer's OWN canvas. .xterm-screen also holds the
           // renderer's link layer — a 2D canvas (class xterm-link-layer) that is
           // appended BEFORE the WebGL canvas — so a plain ".xterm-screen canvas"
@@ -1114,10 +1226,11 @@ export function useTerminalSession({
       // chip. A plain shell that has NOT enabled the mode (e.g. a bare command
       // line, or one mid-typing) gets the raw bytes so the token still lands at
       // the cursor like typed input. Null bytes are stripped because shells
-      // reject them and ConPTY can corrupt the stream around them.
+      // reject them and ConPTY can corrupt the stream around them, and paste
+      // markers are removed so nothing inside can end the paste early.
       const writeTokenRespectingBracketMode = (raw: string) => {
         if (readOnlyRef.current || inputBlockedRef.current) return;
-        const sanitized = raw.replace(/\x00/g, "");
+        const sanitized = pasteBody(raw);
         if (!sanitized) return;
         const bracketed = termRef.current?.modes.bracketedPasteMode ?? false;
         const payload = bracketed ? `\x1b[200~${sanitized}\x1b[201~` : sanitized;
@@ -1132,7 +1245,7 @@ export function useTerminalSession({
         onUserInputRef.current?.();
         void (async () => {
           const text = await window.spark.clipboard.readText();
-          const sanitized = (text ?? "").replace(/\x00/g, "");
+          const sanitized = pasteBody(text ?? "");
           const pasteText = () => {
             void window.spark.pty.write(sessionId, `\x1b[200~${sanitized}\x1b[201~`);
           };
@@ -1270,12 +1383,16 @@ export function useTerminalSession({
       term.attachCustomKeyEventHandler((event) => {
         if (event.type !== "keydown") return true;
         // Cmd/Ctrl+F → open inline find overlay. Checked before the
-        // copy/paste branch since that one bails on metaKey.
+        // copy/paste branch since that one bails on metaKey. A full-screen
+        // program (fzf pickers such as /sessions, vim, less) owns Ctrl+F on
+        // the alternate screen, where scrollback find has nothing to search,
+        // so only Cmd+F still opens find there.
         if (
           (event.ctrlKey || event.metaKey) &&
           !event.altKey &&
           !event.shiftKey &&
-          (event.key === "f" || event.key === "F")
+          (event.key === "f" || event.key === "F") &&
+          (event.metaKey || term.buffer.active.type !== "alternate")
         ) {
           event.preventDefault();
           openSearch();
@@ -1377,9 +1494,29 @@ export function useTerminalSession({
           const term2 = termRef.current;
           if (!term2) return;
           const selection = term2.getSelection();
-          if (selection) {
+          const copySelection = () => {
+            if (!selection) return;
             void window.spark.clipboard.writeText(selection);
             term2.clearSelection();
+          };
+          // Shift+right-click (or a plain one, by preference) opens the quick
+          // command menu instead; see quick-commands/terminal-context-menu.ts.
+          if (
+            openTerminalContextMenu({
+              paneId: sessionId,
+              x: event.clientX,
+              y: event.clientY,
+              shiftKey: event.shiftKey,
+              selection,
+              readOnly: readOnlyRef.current || inputBlockedRef.current,
+              copy: copySelection,
+              paste: writePasteFromClipboard,
+            })
+          ) {
+            return;
+          }
+          if (selection) {
+            copySelection();
             return;
           }
           writePasteFromClipboard();
@@ -1467,8 +1604,20 @@ export function useTerminalSession({
           if (searchInput && event.target === searchInput) return;
           const data = event.clipboardData;
           if (!data) return;
-          // Any usable text on the clipboard → defer to xterm's native paste.
-          if (data.getData("text")?.trim()) return;
+          const text = data.getData("text");
+          if (text?.trim()) {
+            // xterm brackets the text as it is, so text copied from a web page
+            // could end the paste with its own CSI 201~ and type the rest as
+            // keystrokes. Such text is pasted without its markers instead.
+            const body = pasteBody(text);
+            if (body !== text) {
+              event.preventDefault();
+              event.stopPropagation();
+              termRef.current?.paste(body);
+            }
+            // Any other usable text → defer to xterm's native paste.
+            return;
+          }
           const hasImage =
             Array.from(data.items ?? []).some(
               (item) => item.kind === "file" && item.type.startsWith("image/"),
@@ -1494,16 +1643,36 @@ export function useTerminalSession({
       }
 
       term.open(container.current);
+      loadWebgl();
       const viewportHost = container.current;
+      // A measurable host is remembered from observation rather than read
+      // from clientWidth each time: the predicate runs on parsed writes, and a
+      // layout read there forces a synchronous layout of the rows xterm just
+      // changed. An unmeasurable host is read again, since a reveal can ask
+      // before the observer has reported the new size.
+      const measureViewportHost = () =>
+        viewportHost.clientWidth > 0 && viewportHost.clientHeight > 0;
+      let viewportHostMeasurable = measureViewportHost();
+      const viewportHostObserver = new ResizeObserver((entries) => {
+        const box = entries[entries.length - 1]?.contentRect;
+        if (box) viewportHostMeasurable = box.width > 0 && box.height > 0;
+      });
+      viewportHostObserver.observe(viewportHost);
+      cleanups.push(() => viewportHostObserver.disconnect());
       const viewportRecovery = createTerminalViewportRecovery(term, () =>
         visibleRef.current && document.visibilityState === "visible" &&
-        viewportHost.clientWidth > 0 && viewportHost.clientHeight > 0,
+        (viewportHostMeasurable || (viewportHostMeasurable = measureViewportHost())),
       );
       viewportRecoveryRef.current = viewportRecovery;
       const scrollSubscription = term.onScroll(() => viewportRecovery.observe());
       const writeSubscription = term.onWriteParsed(() => viewportRecovery.observe());
-      const onViewportInput = () => viewportRecovery.userInput();
-      const viewportInputEvents = ["wheel", "pointerdown", "touchstart", "keydown", "input"] as const;
+      // Only keys that can scroll the viewport count as a scroll gesture;
+      // typing a prompt does not.
+      const onViewportInput = (event: Event) => {
+        if (event instanceof KeyboardEvent && !VIEWPORT_KEYS.has(event.key)) return;
+        viewportRecovery.userInput();
+      };
+      const viewportInputEvents = ["wheel", "pointerdown", "touchstart", "keydown"] as const;
       for (const event of viewportInputEvents) viewportHost.addEventListener(event, onViewportInput, { capture: true, passive: true });
       viewportRecovery.recover();
       cleanups.push(() => {
@@ -1517,17 +1686,30 @@ export function useTerminalSession({
       } catch {
         /* host may be 0×0 on first paint; ResizeObserver will fix it. */
       }
-      // Re-arm the mode the still-running TUI enabled before this pane's
-      // previous xterm was disposed. Written to the LOCAL terminal only: it
-      // teaches this instance what the remote side is doing and sends nothing
-      // to the PTY. A session whose TUI has since exited re-learns the mode
-      // from its own output, so a stale `true` costs at most one framed paste.
-      if (bracketedPasteModes.get(sessionId) === true) {
+      // Re-arm the modes the still-running TUI enabled before this pane's
+      // previous xterm was disposed, once the normal-screen snapshot below has
+      // been written. Local terminal only: it teaches this instance what the
+      // remote side is doing and sends nothing to the PTY. A TUI that has since
+      // exited leaves the alternate screen and its modes in its own output, and
+      // the redraw requested on attach repaints the rest.
+      const screenModes = readOnlyRef.current ? undefined : rememberedScreenModes.get(sessionId);
+      const restoreScreenModes = () => {
+        if (!screenModes) return;
         try {
-          term.write("\u001b[?2004h");
+          const sequence = terminalScreenModesSequence(screenModes);
+          if (sequence) term.write(sequence);
         } catch {
-          /* a terminal disposed mid-mount just starts without the mode */
+          /* a terminal disposed mid-mount just starts without the modes */
         }
+      };
+      if (!readOnlyRef.current) {
+        const screenSubscription = term.buffer.onBufferChange((buffer) => {
+          setTerminalPaneAlternateScreen(sessionId, buffer.type === "alternate");
+        });
+        cleanups.push(() => {
+          screenSubscription.dispose();
+          setTerminalPaneAlternateScreen(sessionId, false);
+        });
       }
       if (externalSizeOwnerRef.current) {
         const unsubscribeExternalSize = subscribeExternalTerminalSize(
@@ -1593,27 +1775,40 @@ export function useTerminalSession({
           forgetXtermBufferSnapshot(sessionId);
           viewportRecovery.restoreSnapshot(liveSnapshot.viewportFromBottom);
         };
-        if (replay) {
-          term.write(`${normalizeForTerminalReplay(replay)}\r\n`, () => {
-            // Write the hidden-era bytes verbatim after the text replay has
-            // parsed, then clear the pending flag in the final callback so the
-            // ordering (text → hidden bytes) is preserved even under chunked
-            // parsing.
-            if (pendingBytes && pendingBytes.length > 0) {
-              term.write(pendingBytes, finishReplay);
-            } else {
-              finishReplay();
-            }
-          });
-        } else if (pendingBytes && pendingBytes.length > 0) {
-          term.write(pendingBytes, finishReplay);
-        } else {
-          finishReplay();
-        }
+        writeAsReplay(term, () => {
+          if (replay) {
+            term.write(`${normalizeForTerminalReplay(replay)}\r\n`);
+          }
+          restoreScreenModes();
+          // Write the hidden-era bytes verbatim after the text replay and the
+          // modes, then clear the pending flag in the final callback so the
+          // ordering (text, modes, hidden bytes) holds even under chunked parsing.
+          if (pendingBytes && pendingBytes.length > 0) {
+            term.write(pendingBytes, finishReplay);
+          } else {
+            term.write("", finishReplay);
+          }
+        });
+      } else {
+        restoreScreenModes();
       }
 
       const prompt = registerPromptTracker(term);
       cleanups.push(
+        registerOsc52Clipboard(term, {
+          // Only live output of a pane the user can see and type into may
+          // write the clipboard: a mirror would copy twice, and a hidden or
+          // watch-only pane is a program acting on its own.
+          paneBlock: () => {
+            if (readOnlyRef.current || inputBlockedRef.current) return "mirror";
+            // History written back into the pane (a snapshot, main's
+            // announced replay, output that arrived while hidden) is not
+            // a copy anyone asked for today. See writeAsReplay.
+            if (isParsingReplay(term)) return "replay";
+            if (!visibleRef.current) return "background";
+            return null;
+          },
+        }),
         registerCwdHandler(term, (cwd) => {
           // Mirror to the link-provider closure first so the very next
           // hover-driven match resolves relatives against the freshest
@@ -1625,6 +1820,21 @@ export function useTerminalSession({
         registerSparkOpenHandler(term, (input) => onSparkOpenRef.current?.(input)),
         prompt.dispose,
       );
+      // "Copy terminal context" reads the pane that owns the session, never a
+      // read-only mirror of it.
+      if (!readOnlyRef.current) {
+        cleanups.push(
+          registerTerminalContextSource(sessionId, () => {
+            const selection = term.getSelection();
+            return {
+              cwd: latestCwd,
+              shell: shell.label || null,
+              output: selection.trim() ? selection : readRecentOutput(term.buffer.active),
+              fromSelection: selection.trim().length > 0,
+            };
+          }),
+        );
+      }
       onSearchReadyRef.current?.(search);
 
       // Keep the xterm theme in sync with Codara design tokens so theme switches
@@ -1927,8 +2137,13 @@ export function useTerminalSession({
         const t = termRef.current;
         if (!t || !activeRuntime) return;
         const now = Date.now();
+        // A pane nobody can see (a hidden window, tab or workspace) only
+        // needs its state for notifications and the tab badge, and main
+        // watches the same output for those. Every loaded workspace with a
+        // live agent keeps its panes mounted, so polling them all at the
+        // visible rate added up.
         if (
-          document.visibilityState !== "visible" &&
+          (document.visibilityState !== "visible" || !visibleRef.current) &&
           now - lastProcessedTickMs < HIDDEN_STATE_POLL_MS
         ) {
           return;
@@ -2404,6 +2619,83 @@ export function useTerminalSession({
       });
       cleanups.push(() => osc133Dispose.dispose());
 
+      // Fix 1 (linchpin): self-healing, LEVEL-triggered re-detection.
+      // The launch signals processAgentChunkText reacts to (launch banner,
+      // 633;E command line, alt-screen-enter) are EDGE-triggered: they only fire on a fresh
+      // launch. So if a still-running agent's chip was ever torn down (by
+      // the poller's absence-reset firing early on a transient anchor
+      // dropout, or by any pane remount that reset agentPhase to "idle"),
+      // it would never recover, leaving the chip gone and Shift+Enter
+      // sending a literal backslash. Re-detect an already-running agent
+      // from its PERSISTENT footer chrome: if the bottom tail still shows
+      // a known runtime's chrome, re-enter agent phase. setAgentRunning
+      // early-returns once agentPhase==="agent", so this only fires from
+      // idle and won't re-trigger every chunk.
+      //
+      // Guards:
+      //  - BOTTOM tail only (readTerminalTail → last STATE_TAIL_ROWS rows,
+      //    same as the poller). A stale footer sitting up in scrollback
+      //    after a REAL exit, shell prompt now at the bottom, reads as
+      //    UI-absent, so a genuinely-exited agent is NOT resurrected.
+      //  - Skip when this chunk carried a prompt-marker / alt-screen-leave:
+      //    those are exit signals, and re-detecting on the same chunk that
+      //    a real exit arrived on would immediately undo the reset.
+      //  - Post-exit LATCH (set only by a POSITIVE exit signal): right
+      //    after a real `/exit`/`exit` the agent's footer lingers in the
+      //    bottom tail far longer than any timer: a 1-2 line shell prompt
+      //    barely pushes a 5-8 line footer up, so it stays inside the tail
+      //    (forever on an idle shell). So we stay suppressed until the
+      //    footer has left the tail at least once (liveRuntime === null),
+      //    then re-arm. Absence-poller teardowns omit the flag AND only
+      //    fire when the UI was already absent, so a FALSE teardown
+      //    self-heals immediately when the footer reappears.
+      //  - VISIBLE panes only: a hidden pane's xterm buffer is frozen
+      //    (hidden panes skip term.write), so its tail is stale and could
+      //    re-detect against an old frame.
+      //  - THROTTLED (scheduleTailRedetect): at most one read per
+      //    TAIL_REDETECT_INTERVAL_MS, with a trailing read so the last
+      //    repaint of a burst is still seen; an exit-signal chunk cancels
+      //    a pending read.
+      const redetectFromTail = () => {
+        const term = termRef.current;
+        if (!term) return;
+        const liveRuntime = liveRuntimeFromTail(readTerminalTail(term, STATE_TAIL_ROWS));
+        if (!liveRuntime) {
+          // Agent chrome is gone from the bottom tail: a real exit's
+          // stale footer has finally scrolled out (or a false teardown was
+          // already UI-absent). Re-arm: future repaints may re-detect.
+          redetectSuppressedAfterExit = false;
+        } else if (!redetectSuppressedAfterExit) {
+          setAgentRunning(liveRuntime);
+        }
+        // else: footer present but still post-exit-suppressed (lingering
+        // stale frame) → do nothing until it leaves the tail once.
+      };
+      let tailRedetectAt = 0;
+      let tailRedetectTimer: number | null = null;
+      const cancelTailRedetect = () => {
+        if (tailRedetectTimer === null) return;
+        window.clearTimeout(tailRedetectTimer);
+        tailRedetectTimer = null;
+      };
+      const scheduleTailRedetect = () => {
+        const now = Date.now();
+        if (now - tailRedetectAt >= TAIL_REDETECT_INTERVAL_MS) {
+          cancelTailRedetect();
+          tailRedetectAt = now;
+          redetectFromTail();
+          return;
+        }
+        if (tailRedetectTimer !== null) return;
+        tailRedetectTimer = window.setTimeout(() => {
+          tailRedetectTimer = null;
+          if (disposed || agentPhase !== "idle" || !visibleRef.current) return;
+          tailRedetectAt = Date.now();
+          redetectFromTail();
+        }, TAIL_REDETECT_INTERVAL_MS - (now - tailRedetectAt));
+      };
+      cleanups.push(cancelTailRedetect);
+
       const processAgentChunkText = (chunkText: string) => {
         if (!onAgentStateRef.current) return;
         if (chunkText.length > 0) {
@@ -2442,8 +2734,14 @@ export function useTerminalSession({
           clearRecentAgentInput();
         }
         if (agentPhase === "idle") {
+          // The ring is emptied whenever the pane returns to idle, so anything
+          // older than this chunk was already sniffed while idle and did not
+          // match. Scanning only the fresh text plus an overlap that bridges a
+          // marker split across chunks avoids stripping and matching the whole
+          // ring on every chunk of a busy shell.
+          const sniffWindow = agentTextRing.slice(-(chunkText.length + AGENT_SNIFF_OVERLAP));
           const runtime =
-            sniffOsc633CommandRuntime(agentTextRing) ?? sniffLiveRuntime(agentTextRing);
+            sniffOsc633CommandRuntime(sniffWindow) ?? sniffLiveRuntime(sniffWindow);
           if (runtime) {
             setAgentRunning(runtime);
           } else if (chunkText.includes("\x1b[?1049h")) {
@@ -2460,60 +2758,10 @@ export function useTerminalSession({
             // the same lifecycle as banner-based detection. setAgentRunning
             // arms the runtime-promotion bookkeeping for this null arm.
             setAgentRunning(null);
-          } else if (
-            !sawAltScreenLeave &&
-            !sawPromptMarker &&
-            visibleRef.current
-          ) {
-            // Fix 1 (linchpin) — self-healing, LEVEL-triggered re-detection.
-            // The signals above (launch banner, 633;E command line,
-            // alt-screen-enter) are EDGE-triggered: they only fire on a fresh
-            // launch. So if a still-running agent's chip was ever torn down —
-            // by the poller's absence-reset firing early on a transient anchor
-            // dropout, or by any pane remount that reset agentPhase to "idle" —
-            // it would never recover, leaving the chip gone and Shift+Enter
-            // sending a literal backslash. Re-detect an already-running agent
-            // from its PERSISTENT footer chrome: if the bottom tail still shows
-            // a known runtime's chrome, re-enter agent phase. setAgentRunning
-            // early-returns once agentPhase==="agent", so this only fires from
-            // idle and won't re-trigger every chunk.
-            //
-            // Guards:
-            //  - BOTTOM tail only (readTerminalTail → last STATE_TAIL_ROWS rows,
-            //    same as the poller). A stale footer sitting up in scrollback
-            //    after a REAL exit — shell prompt now at the bottom — reads as
-            //    UI-absent, so a genuinely-exited agent is NOT resurrected.
-            //  - Skip when this chunk carried a prompt-marker / alt-screen-leave:
-            //    those are exit signals, and re-detecting on the same chunk that
-            //    a real exit arrived on would immediately undo the reset.
-            //  - Post-exit LATCH (set only by a POSITIVE exit signal): right
-            //    after a real `/exit`/`exit` the agent's footer lingers in the
-            //    bottom tail far longer than any timer — a 1-2 line shell prompt
-            //    barely pushes a 5-8 line footer up, so it stays inside the tail
-            //    (forever on an idle shell). So we stay suppressed until the
-            //    footer has left the tail at least once (liveRuntime === null),
-            //    then re-arm. Absence-poller teardowns omit the flag AND only
-            //    fire when the UI was already absent, so a FALSE teardown
-            //    self-heals immediately when the footer reappears.
-            //  - VISIBLE panes only: a hidden pane's xterm buffer is frozen
-            //    (hidden panes skip term.write), so its tail is stale and could
-            //    re-detect against an old frame.
-            const term = termRef.current;
-            if (term) {
-              const liveRuntime = liveRuntimeFromTail(
-                readTerminalTail(term, STATE_TAIL_ROWS),
-              );
-              if (!liveRuntime) {
-                // Agent chrome is gone from the bottom tail — a real exit's
-                // stale footer has finally scrolled out (or a false teardown was
-                // already UI-absent). Re-arm: future repaints may re-detect.
-                redetectSuppressedAfterExit = false;
-              } else if (!redetectSuppressedAfterExit) {
-                setAgentRunning(liveRuntime);
-              }
-              // else: footer present but still post-exit-suppressed (lingering
-              // stale frame) → do nothing until it leaves the tail once.
-            }
+          } else if (sawAltScreenLeave || sawPromptMarker) {
+            cancelTailRedetect();
+          } else if (visibleRef.current) {
+            scheduleTailRedetect();
           }
           return;
         }
@@ -2684,6 +2932,10 @@ export function useTerminalSession({
         // which must still consume the bytes or the replay would leak its
         // "history" marking onto the live output that follows.
         const isReplayedChunk = replayTracker.consume(bytes.length);
+        const writeChunk = (write: () => void) => {
+          if (isReplayedChunk) writeAsReplay(term, write);
+          else write();
+        };
 
         // Keep the agent lifecycle sniffer running even while the pane is
         // hidden. Some hosts defer hidden xterm writes, so byte-level detection
@@ -2705,7 +2957,7 @@ export function useTerminalSession({
           // INVARIANT: hiddenBufferRef stays empty, so reveal is a repaint of the
           // same xterm instance rather than a replay step.
           if (writeWhileHiddenRef.current) {
-            term.write(bytes, () => ack(bytes.length));
+            writeChunk(() => term.write(bytes, () => ack(bytes.length)));
             onActivityRef.current?.();
             return;
           }
@@ -2727,12 +2979,14 @@ export function useTerminalSession({
           const token = {};
           clearNotificationSuppressionRef.current = token;
           try {
-            term.write(bytes, () => {
-              ack(bytes.length);
-              if (clearNotificationSuppressionRef.current === token) {
-                clearNotificationSuppressionRef.current = null;
-              }
-            });
+            writeChunk(() =>
+              term.write(bytes, () => {
+                ack(bytes.length);
+                if (clearNotificationSuppressionRef.current === token) {
+                  clearNotificationSuppressionRef.current = null;
+                }
+              }),
+            );
           } catch (error) {
             ack(bytes.length);
             if (clearNotificationSuppressionRef.current === token) {
@@ -2741,7 +2995,7 @@ export function useTerminalSession({
             throw error;
           }
         } else {
-          term.write(bytes, () => ack(bytes.length));
+          writeChunk(() => term.write(bytes, () => ack(bytes.length)));
         }
         onActivityRef.current?.();
 
@@ -2796,7 +3050,7 @@ export function useTerminalSession({
           const fresh = buildClaudeLaunch();
           logRestore(`pane=${sessionId} claude REFUSED resume; self-healing to fresh id=${fresh.sessionId}`);
           term.write(
-            `\r\n\x1b[2m[couldn't resume the previous Claude session — starting a fresh one]\x1b[0m\r\n`,
+            `\r\n\x1b[2m[couldn't resume the previous Claude session, starting a fresh one]\x1b[0m\r\n`,
           );
           onResumeFallbackRef.current?.({
             runtime: "claude",
@@ -2877,14 +3131,24 @@ export function useTerminalSession({
               session.nativeCodexProfileId ?? nativeCodexProfileId,
             nativeClaudeProfileId:
               session.nativeClaudeProfileId ?? nativeClaudeProfileId,
+            nativeGrokProfileId:
+              session.nativeGrokProfileId ?? nativeGrokProfileId,
           });
           if (disposed) return;
+          const adopted = adoptLiveSessionAccount(plan.fallbackSession ?? session, spawnResult);
+          if (adopted) {
+            if (plan.fallbackSession) plan.fallbackSession = adopted;
+            else {
+              agentSessionRef.current = adopted;
+              onResumeFallbackRef.current?.(adopted);
+            }
+          }
           if (!spawnResult.startupCommandHandled) {
             // The pty just died and was deleted, so a fresh spawn should deliver;
             // if it somehow attached to a live session, mutate nothing, otherwise
             // the shell family couldn't run a startup command — print the manual line.
             if (!spawnResult.attached) {
-              term.write(`\x1b[2m[couldn't auto-resume — run: ${plan.resumeCommand}]\x1b[0m\r\n`);
+              term.write(`\x1b[2m[couldn't auto-resume. Run: ${plan.resumeCommand}]\x1b[0m\r\n`);
             }
             return;
           }
@@ -2900,7 +3164,115 @@ export function useTerminalSession({
         }
       };
 
+      // Agent hibernation: bring a sleeping pane back once it is on screen.
+      // Same delivery as the death re-arm above (a same-id spawn whose shell
+      // runs the resume as its first action), but never gated on the restore
+      // preference: Codara stopped this agent itself and owes the user its
+      // session back. When the session cannot be resumed the pane still
+      // comes back as a working shell with a one-line notice.
+      let waking = false;
+      const wakeFromSleep = async () => {
+        if (disposed || waking || !sleepingRef.current || !visibleRef.current) return;
+        if (readOnlyRef.current || inputBlockedRef.current) return;
+        waking = true;
+        try {
+          let session = agentSessionRef.current?.sessionId ? agentSessionRef.current : null;
+          if (session) {
+            const healed = await fetchSessionStartHeal(sessionId, session);
+            if (disposed) return;
+            if (healed) {
+              logRestore(
+                `pane=${sessionId} pointer healed from SessionStart hook before wake (${session.sessionId} -> ${healed.sessionId})`,
+              );
+              session = healed;
+              agentSessionRef.current = healed;
+              onResumeFallbackRef.current?.(healed);
+            }
+          }
+          const plan = session ? await computeResumePlan(session) : null;
+          if (disposed) return;
+          const command = plan?.resumeCommand ?? null;
+          logRestore(`pane=${sessionId} waking from sleep (${session?.runtime ?? "no session"}) cmd=${command ?? "none"}`);
+          if (session && command && !plan?.resumeIsFreshFallback) {
+            term.write(`\x1b[2m[waking up: resuming the ${session.runtime} session]\x1b[0m\r\n`);
+          }
+          const spawnResult = await window.spark.pty.spawn({
+            id: sessionId,
+            shell,
+            cwd: session?.cwd ?? (initialCwd && initialCwd.trim().length > 0 ? initialCwd : ""),
+            cols: Math.max(1, term.cols),
+            rows: Math.max(1, term.rows),
+            env: command ? { ...(extraEnv ?? {}), SPARK_NO_SHELL_INTEGRATION: "1" } : extraEnv,
+            startupCommand: command ?? undefined,
+            nativeCodexProfileId: session?.nativeCodexProfileId ?? nativeCodexProfileId,
+            nativeClaudeProfileId: session?.nativeClaudeProfileId ?? nativeClaudeProfileId,
+            nativeGrokProfileId: session?.nativeGrokProfileId ?? nativeGrokProfileId,
+          });
+          if (disposed) return;
+          sleepingRef.current = false;
+          spawned = true;
+          // Input opens only once a shell is there to take it; a failed spawn
+          // leaves the pane asleep and the next reveal tries again.
+          term.options.disableStdin = false;
+          if (session && plan && command && spawnResult.startupCommandHandled) {
+            autorunFiredSessions.add(sessionId);
+            const adopted = adoptLiveSessionAccount(plan.fallbackSession ?? session, spawnResult);
+            if (adopted) {
+              if (plan.fallbackSession) plan.fallbackSession = adopted;
+              else {
+                agentSessionRef.current = adopted;
+                onResumeFallbackRef.current?.(adopted);
+              }
+            }
+            if (plan.fallbackSession) {
+              if (plan.fallbackNotice) term.write(`\x1b[2m[${plan.fallbackNotice}]\x1b[0m\r\n`);
+              onResumeFallbackRef.current?.(plan.fallbackSession);
+            } else if (session.runtime === "claude" && !plan.resumeIsFreshFallback) {
+              armClaudeRefusalWatch(session.cwd);
+            }
+            // The pane's agent phase outlived the stop. Restart its poller so
+            // the chip settles from the new process instead of keeping
+            // whatever it last confirmed for the stopped one.
+            const wokeRuntime = coercePublicRuntime((plan.fallbackSession ?? session).runtime);
+            if (agentPhase === "agent" && wokeRuntime) promoteAgentRuntime(wokeRuntime);
+            else setAgentRunning((plan.fallbackSession ?? session).runtime);
+          } else if (command && !spawnResult.attached) {
+            term.write(`\x1b[2m[couldn't resume automatically: run ${command}]\x1b[0m\r\n`);
+          } else if (!command && plan?.fallbackNotice) {
+            term.write(`\x1b[2m[${plan.fallbackNotice}]\x1b[0m\r\n`);
+            onResumeUnavailableRef.current?.();
+          }
+          onWokeRef.current?.();
+          refitAndResizeRef.current?.();
+        } catch (err) {
+          term.write(`\r\n\x1b[31mcouldn't wake this pane: ${(err as Error).message}\x1b[0m\r\n`);
+        } finally {
+          waking = false;
+        }
+      };
+      const wake = () => void wakeFromSleep();
+      wakeRef.current = wake;
+      cleanups.push(() => {
+        if (wakeRef.current === wake) wakeRef.current = null;
+      });
+      const scheduleWake = () => {
+        const timer = window.setTimeout(() => {
+          if (!disposed && visibleRef.current) void wakeFromSleep();
+        }, WAKE_DELAY_MS);
+        cleanups.push(() => window.clearTimeout(timer));
+      };
+
       const offExit = window.spark.pty.onExit(sessionId, (info) => {
+        if (info.hibernated) {
+          // Codara stopped the idle agent (agent hibernation). Not an exit the
+          // user should read as one: keep the output, say how it comes back.
+          sleepingRef.current = true;
+          term.options.disableStdin = true;
+          term.write(`\r\n\x1b[2m[sleeping to save memory: opening this pane resumes it]\x1b[0m\r\n`);
+          onExitRef.current?.(info);
+          if (visibleRef.current) scheduleWake();
+          return;
+        }
         // `info.sanctioned` is set by pty-manager for teardowns Codara asked
         // for (a finished worker's host shell, the app-quit sweep), and the
         // status chip already renders those calm-grey "done" vs red "crashed".
@@ -2926,7 +3298,7 @@ export function useTerminalSession({
         const prior = pruneAttempts(autoResumeAttempts.get(sessionId) ?? [], now);
         if (!canAutoResume(prior, now)) {
           term.write(
-            `\x1b[2m[auto-resume paused after repeated exits — run: ${buildAgentResumeCommand(session)}]\x1b[0m\r\n`,
+            `\x1b[2m[auto-resume paused after repeated exits. Run: ${buildAgentResumeCommand(session)}]\x1b[0m\r\n`,
           );
           return;
         }
@@ -2992,7 +3364,42 @@ export function useTerminalSession({
       };
       let bootSession = agentSession;
       let registryBootResume = false;
-      if (!cmd && !readOnlyRef.current && !inputBlockedRef.current && !autorunFiredSessions.has(sessionId)) {
+      // A pane that mounts while its agent sleeps (agent hibernation) has no
+      // pty to spawn or attach to: it shows its saved output and waits for
+      // wakeFromSleep, which resumes the session once the pane is on screen.
+      let sleepingAtMount =
+        hibernatedRef.current && !readOnlyRef.current && !inputBlockedRef.current;
+      // Main remembers which panes sleep and keeps what they printed (the
+      // stop dropped the pty with its tail and backlog): a view restored from
+      // its own snapshot above gets only what it never received, an empty one
+      // (after a window reload) the pane's newest output. Asked for every
+      // agent pane, not only marked ones: after a reload the leaf has lost
+      // its runtime-only mark, and a plain spawn here would bring the pane
+      // back as a shell without its agent.
+      const sleepCandidate = agentSessionRef.current ?? agentSession;
+      if (
+        !readOnlyRef.current &&
+        !inputBlockedRef.current &&
+        (sleepingAtMount || (sleepCandidate?.sessionId && isAgentHibernationRuntime(sleepCandidate.runtime)))
+      ) {
+        const asleep = await window.spark.agentHibernation
+          ?.sleepingPane?.(sessionId, { freshView: !liveSnapshot })
+          .catch(() => null);
+        if (disposed) return;
+        if (asleep) {
+          if (asleep.output && asleep.output.byteLength > 0) term.write(asleep.output);
+          if (!sleepingAtMount) {
+            sleepingAtMount = true;
+            logRestore(`pane=${sessionId} mounts asleep (${asleep.runtime}), marked from main`);
+            onAsleepRef.current?.({ runtime: asleep.runtime, sleptAt: asleep.sleptAt });
+          }
+        }
+      }
+      if (sleepingAtMount) sleepingRef.current = true;
+      const spawnOrSleep: typeof window.spark.pty.spawn = sleepingAtMount
+        ? async (args) => ({ id: args.id, pid: 0, attached: true, startupCommandHandled: false })
+        : window.spark.pty.spawn;
+      if (!sleepingAtMount && !cmd && !readOnlyRef.current && !inputBlockedRef.current && !autorunFiredSessions.has(sessionId)) {
         const start = await window.spark.agentSession.latestStart?.(sessionId).catch(() => null);
         if (start?.restoreOnBoot && start.active) {
           const healed = mergeSessionStart(bootSession, start);
@@ -3005,6 +3412,7 @@ export function useTerminalSession({
         }
       }
       if (
+        !sleepingAtMount &&
         (bootResume === true || registryBootResume) &&
         bootSession?.sessionId &&
         !cmd &&
@@ -3056,6 +3464,22 @@ export function useTerminalSession({
       }
       if (disposed) return;
 
+      // A pane reopened after Codara restarted shows the output it had
+      // before, ahead of anything its new shell or resumed agent draws. Main
+      // answers only for a pane with no live PTY that has not run yet this
+      // session, so a remount (which replays its own snapshot above) or an
+      // in-place respawn never gets it twice. Mirrors and worker hosts do
+      // not own the pane's history.
+      if (
+        !liveSnapshot &&
+        !readOnlyRef.current &&
+        !rawTailReattachRef.current &&
+        !inputBlockedRef.current
+      ) {
+        await replayPersistedScrollback(term, sessionId, scrollbackLineLimitRef.current);
+        if (disposed) return;
+      }
+
       // Spawn the PTY. We pass the pre-fit cols/rows so the shell starts at
       // the real visible size — without this, ConPTY paints at 80×24 then
       // reflows once the renderer reports the actual size, which the user
@@ -3081,7 +3505,7 @@ export function useTerminalSession({
         ? { ...(extraEnv ?? {}), SPARK_NO_SHELL_INTEGRATION: "1" }
         : extraEnv;
       try {
-        const spawnResult = await window.spark.pty.spawn({
+        const spawnResult = await spawnOrSleep({
           id: sessionId,
           shell,
           cwd,
@@ -3125,6 +3549,20 @@ export function useTerminalSession({
         if (startupCommandHandled) {
           autorunFiredSessions.add(sessionId);
         }
+        // A mirror does not own the pane's pointer.
+        if (!readOnlyRef.current) {
+          if (fallbackSession) {
+            fallbackSession = adoptLiveSessionAccount(fallbackSession, spawnResult) ?? fallbackSession;
+          }
+          const adopted = adoptLiveSessionAccount(
+            agentSessionRef.current ?? agentSession,
+            spawnResult,
+          );
+          if (adopted) {
+            agentSessionRef.current = adopted;
+            onResumeFallbackRef.current?.(adopted);
+          }
+        }
         // Cold hydration deliberately strips the transient worker chip, but a
         // successfully delivered resume already gives us authoritative runtime
         // identity from the durable session pointer. Re-arm the renderer state
@@ -3161,6 +3599,7 @@ export function useTerminalSession({
       //     resume by hand; the pointer stays intact.
       // The codex clear-pointer case (resumeCommand null, notice only) is
       // unaffected: it never had anything to deliver.
+      if (sleepingAtMount) term.options.disableStdin = true;
       const resumeUndelivered = resumeCommand !== null && !startupCommandHandled;
       if (bootResumeEntered || resumeCommand !== null) {
         logRestore(
@@ -3202,7 +3641,7 @@ export function useTerminalSession({
           if (!disposed) {
             logRestore(`pane=${sessionId} hint: inactive pointer (${hintSession.runtime} id=${hintSession.sessionId})`);
             term.write(
-              `\x1b[2m[previous ${hintSession.runtime} session available — resume: ${buildAgentResumeCommand(hintSession)}]\x1b[0m\r\n`,
+              `\x1b[2m[previous ${hintSession.runtime} session available. Resume: ${buildAgentResumeCommand(hintSession)}]\x1b[0m\r\n`,
             );
           }
         }
@@ -3222,7 +3661,7 @@ export function useTerminalSession({
         }
       } else if (!attachedExistingSession) {
         term.write(
-          `\x1b[2m[couldn't auto-resume the previous ${agentSession?.runtime ?? "agent"} session in this shell — run: ${resumeCommand}]\x1b[0m\r\n`,
+          `\x1b[2m[couldn't auto-resume the previous ${agentSession?.runtime ?? "agent"} session in this shell. Run: ${resumeCommand}]\x1b[0m\r\n`,
         );
       }
       // Boot restore attempted — every outcome lands here (resume riding the
@@ -3254,7 +3693,7 @@ export function useTerminalSession({
       // Read-only mirrors also skip it: they never pause on unmount, and a
       // resume issued here would drain a backlog the CANONICAL pane paused for,
       // stealing its bytes onto the shared channel at the wrong moment.
-      if (!rawTailReattachRef.current && !readOnlyRef.current) {
+      if (!rawTailReattachRef.current && !readOnlyRef.current && !sleepingAtMount) {
         void window.spark.pty.resume(sessionId, attachedExistingSession && !externalSizeOwnerRef.current);
       }
 
@@ -3275,6 +3714,15 @@ export function useTerminalSession({
       let ptyTimer: number | null = null;
       let rafFits = 0;
       let rafHandle: number | null = null;
+      // A hidden pane keeps the size it was last shown at. Layout around the
+      // hidden layers still moves (a workspace whose active tab is a chat adds
+      // a tab strip above every layer), and resizing a hidden agent TUI makes it
+      // repaint in full twice per round trip: at the hidden size, then at the
+      // restored one a PTY_RESIZE_DEBOUNCE_MS after the reveal, with its rows
+      // blank in between. The reveal path re-fits once the pane is shown. A pane
+      // first mounted hidden still takes its first real measurement.
+      let measuredOnce = lastW > 0 && lastH > 0;
+      const holdHiddenSize = () => measuredOnce && !visibleRef.current;
 
       const scheduleFitRetry = () => {
         if (disposed || !spawned) return;
@@ -3282,6 +3730,7 @@ export function useTerminalSession({
           resizeXtermForOwner();
           return;
         }
+        if (holdHiddenSize()) return;
         if (rafHandle !== null) window.cancelAnimationFrame(rafHandle);
         rafFits = 0;
         const tick = () => {
@@ -3304,11 +3753,19 @@ export function useTerminalSession({
             if (rafFits < 3) rafHandle = window.requestAnimationFrame(tick);
             return;
           }
+          if (holdHiddenSize()) return;
           try {
             resizeXtermForOwner();
           } catch {
             return;
           }
+          measuredOnce = true;
+          // The observer skips sizes it saw while the pane was hidden, so a
+          // reveal at a new size is fitted here. Record that size as the
+          // observer's baseline, or a later return to the size it last
+          // recorded would read as no change and leave the grid stale.
+          lastW = host.clientWidth;
+          lastH = host.clientHeight;
           lastAppliedCols = term.cols;
           lastAppliedRows = term.rows;
           // Fit is local + cheap and runs every frame so xterm visually tracks a
@@ -3386,6 +3843,9 @@ export function useTerminalSession({
             // fire on the display:none→block transition still sees a size
             // change and lands the real fit.
             if (w === 0 || h === 0) return;
+            // Not recorded while hidden: the host usually returns to its shown
+            // size on reveal, and that must read as no change at all.
+            if (holdHiddenSize()) return;
             if (w === lastW && h === lastH) return;
             lastW = w;
             lastH = h;
@@ -3407,6 +3867,7 @@ export function useTerminalSession({
             } catch {
               return;
             }
+            measuredOnce = true;
             lastAppliedCols = term.cols;
             lastAppliedRows = term.rows;
             if (!externalSizeOwnerRef.current) {
@@ -3454,7 +3915,8 @@ export function useTerminalSession({
         visible &&
         !readOnlyRef.current &&
         !inputBlockedRef.current &&
-        !modalDialogIsOpen()
+        !modalDialogIsOpen() &&
+        (mayAutoFocusRef.current?.() ?? true)
       ) {
         term.focus();
       }
@@ -3480,6 +3942,7 @@ export function useTerminalSession({
       // the resume here would land it inside the live TUI's input box.
       const typedCommand = cmd;
       if (
+        !sleepingAtMount &&
         typedCommand &&
         typedCommand.length > 0 &&
         !startupCommandHandled &&
@@ -3515,6 +3978,8 @@ export function useTerminalSession({
       ) {
         armClaudeRefusalWatch(agentSession.cwd);
       }
+
+      if (sleepingRef.current && visibleRef.current) scheduleWake();
     };
 
     return () => {
@@ -3591,8 +4056,8 @@ export function useTerminalSession({
           // limit on the stashed combination too, reusing the same trim helper
           // the hot path uses.
           // Remembered unconditionally: a pane with nothing worth snapshotting
-          // still has a mode the running TUI expects to survive the remount.
-          bracketedPasteModes.set(sessionId, dyingTerm.modes.bracketedPasteMode === true);
+          // still has modes the running TUI expects to survive the remount.
+          rememberedScreenModes.set(sessionId, captureTerminalScreenModes(dyingTerm));
           const pendingBytes = mergeHiddenBuffer(
             hiddenBufferRef.current,
             hiddenBytesRef.current,
@@ -3653,6 +4118,17 @@ export function useTerminalSession({
     }
   }, [visible]);
 
+  // Agent hibernation: a sleeping pane resumes once it is on screen. The pty
+  // exit and the sleeping mount schedule the same wake for a pane that is
+  // already visible; this covers a pane revealed later.
+  useEffect(() => {
+    if (!visible || !(hibernated || sleepingRef.current)) return;
+    const timer = window.setTimeout(() => {
+      if (visibleRef.current) wakeRef.current?.();
+    }, WAKE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [visible, hibernated]);
+
   // Let the newly selected workspace paint once, then coalesce and enqueue its
   // hidden output. requestAnimationFrame + a zero-delay task is intentional:
   // an rAF callback itself still runs before paint, while the following task
@@ -3686,11 +4162,15 @@ export function useTerminalSession({
         const token = {};
         clearNotificationSuppressionRef.current = token;
         try {
-          term.write(merged, () => {
-            if (clearNotificationSuppressionRef.current === token) {
-              clearNotificationSuppressionRef.current = null;
-            }
-          });
+          // Output that arrived while the pane was hidden: an OSC 52 copy in
+          // it was not asked for by anyone looking at this pane.
+          writeAsReplay(term, () =>
+            term.write(merged, () => {
+              if (clearNotificationSuppressionRef.current === token) {
+                clearNotificationSuppressionRef.current = null;
+              }
+            }),
+          );
         } catch {
           if (clearNotificationSuppressionRef.current === token) {
             clearNotificationSuppressionRef.current = null;
@@ -3773,7 +4253,12 @@ export function useTerminalSession({
     // open modal dialog is the same hazard: it focused itself deliberately and
     // this must not take that back. Click-to-focus (the explicit focus() API)
     // still works for copy/scroll in every case.
-    if (!readOnlyRef.current && !inputBlockedRef.current && !modalDialogIsOpen()) {
+    if (
+      !readOnlyRef.current &&
+      !inputBlockedRef.current &&
+      !modalDialogIsOpen() &&
+      (mayAutoFocusRef.current?.() ?? true)
+    ) {
       termRef.current?.focus();
     }
     return () => {
@@ -3794,6 +4279,8 @@ export function useTerminalSession({
         const host = container.current;
         // Unlock can briefly expose zero-size geometry before the next frame.
         if (!host || host.clientWidth === 0 || host.clientHeight === 0) return;
+        // A hidden pane keeps its size until the reveal path re-fits it.
+        if (!visibleRef.current && !externalSizeOwnerRef.current) return;
         try {
           resizeXtermForOwner();
         } catch {
@@ -3967,31 +4454,14 @@ function stripTrailingPunct(url: string): string {
 }
 
 function containsPtyManagerReset(bytes: Uint8Array): boolean {
-  const sequenceLength = PTY_MANAGER_RESET_SEQUENCE.length;
-  for (let i = 0; i <= bytes.length - sequenceLength; i++) {
-    let matches = true;
-    for (let j = 0; j < sequenceLength; j++) {
-      if (bytes[i + j] !== PTY_MANAGER_RESET_SEQUENCE.charCodeAt(j)) {
-        matches = false;
-        break;
-      }
-    }
-    if (matches) return true;
-  }
-  return false;
+  return indexOfBytes(bytes, PTY_MANAGER_RESET_BYTES, PTY_MANAGER_RESET_ANCHOR) !== -1;
 }
 
 // Looks for the literal byte sequence ":" "/" "/" — the cheapest signal that
 // a chunk *might* contain a URL. Avoids per-chunk UTF-8 decode + regex scan
 // when running noisy commands (build outputs, test runs, log tails).
 function containsSchemeSeparator(bytes: Uint8Array): boolean {
-  const n = bytes.length;
-  for (let i = 0; i < n - 2; i++) {
-    if (bytes[i] === 0x3a && bytes[i + 1] === 0x2f && bytes[i + 2] === 0x2f) {
-      return true;
-    }
-  }
-  return false;
+  return indexOfBytes(bytes, SCHEME_SEPARATOR_BYTES, 1) !== -1;
 }
 
 // Read the last `maxRows` lines of an xterm Terminal buffer as plain text.
@@ -4002,7 +4472,9 @@ function containsSchemeSeparator(bytes: Uint8Array): boolean {
 function readTerminalTail(term: Terminal, maxRows: number): string {
   const buf = term.buffer.active;
   const total = buf.length;
-  const start = Math.max(0, total - maxRows);
+  // Output replayed from before a restart is history, never a live agent.
+  const windowStart = Math.max(0, total - maxRows);
+  const start = Math.max(windowStart, replayFloorRow(term, windowStart));
   const parts: string[] = [];
   for (let i = start; i < total; i++) {
     const line = buf.getLine(i);
@@ -4024,10 +4496,18 @@ function readTerminalTail(term: Terminal, maxRows: number): string {
 // operation per row; reading 40 rows per tick across a dozen panes is well
 // under 1 ms of renderer work per second.
 const STATE_POLL_MS = 300;
-// Effective cadence while the app window is hidden. The poller keeps running
-// (background panes must still transition so turn-complete notifications fire)
-// but at a fraction of the cost — nobody is watching the chip, and the tick-
-// count backstops below only get more conservative when ticks are rarer.
+// Fresh text sniffed together with the end of the previous chunk, so a
+// banner or command marker split across two chunks still matches. Same
+// bound as the main-process notifier's SNIFF_OVERLAP.
+const AGENT_SNIFF_OVERLAP = 512;
+// Shortest gap between two reads of an idle pane's bottom rows for agent
+// chrome on output (see scheduleTailRedetect).
+const TAIL_REDETECT_INTERVAL_MS = 250;
+// Effective cadence while the pane cannot be seen (hidden window, tab or
+// workspace). The poller keeps running (background panes must still
+// transition so turn-complete notifications fire) but at a fraction of the
+// cost: nobody is watching the chip, and the tick-count backstops below only
+// get more conservative when ticks are rarer.
 const HIDDEN_STATE_POLL_MS = 2_000;
 // How many post-arm bytes the runtime-promotion sniff will scan before giving
 // up on a generic/non-public arm. A first-party launch banner appears within

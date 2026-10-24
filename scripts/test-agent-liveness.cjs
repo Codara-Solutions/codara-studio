@@ -281,6 +281,39 @@ check("one tool result does not clear another parallel in-flight tool", () => {
   assert.match(verdict.detail, /bash/);
 });
 
+check("a normal tool that keeps streaming output is alive, a silent one is not", () => {
+  // A long build or test suite in the manager's bash prints the whole time.
+  const streaming = classifyTurnLiveness({
+    ...base,
+    now: 40 * MIN,
+    lastEventAt: 39 * MIN,
+    inFlightTools: [{ name: "bash", startedAt: 0, longPoll: false, lastProgressAt: 39 * MIN }],
+  });
+  assert.equal(streaming.action, "continue", "40 min of streamed output is progress, not a hang");
+
+  const silent = classifyTurnLiveness({
+    ...base,
+    now: 40 * MIN,
+    lastEventAt: 14 * MIN,
+    inFlightTools: [{ name: "bash", startedAt: 0, longPoll: false, lastProgressAt: 14 * MIN }],
+  });
+  assert.equal(silent.action, "fail");
+  assert.match(silent.detail, /stuck in bash: 26 min with no result or output/);
+
+  // A long-poll's bound is its own legal duration, so progress never extends it.
+  const longPoll = classifyTurnLiveness({
+    ...base,
+    now: PI_LONG_POLL_TRUST_MS,
+    inFlightTools: [{
+      name: "codara_wait_for_workers",
+      startedAt: 0,
+      longPoll: true,
+      lastProgressAt: PI_LONG_POLL_TRUST_MS - MIN,
+    }],
+  });
+  assert.equal(longPoll.action, "fail");
+});
+
 check("the absolute ceiling still bounds everything, even mid-long-poll", () => {
   const verdict = classifyTurnLiveness({
     ...base,
@@ -307,6 +340,71 @@ check("long-poll tool names match bare and mcp-prefixed forms", () => {
   assert.equal(isLongPollToolName(undefined), false);
   assert.equal(isLongPollToolName(42), false);
 });
+
+// The worker turn ceiling used to be a flat 90 minutes from the start of the
+// turn: a worker finishing tool calls every few seconds was killed at 90 min
+// and relaunched cold on the other provider.
+{
+  const {
+    classifyWorkerTurnCeiling,
+    isWorkerTurnCeilingFailure,
+    PI_WORKER_NO_PROGRESS_CEILING_MS,
+    PI_WORKER_TURN_ABSOLUTE_CEILING_MS,
+    PI_WORKER_WRAP_UP_GRACE_MS,
+  } = liveness;
+  const { classifyWorkerFailure } = loadTypeScriptModule(
+    path.join(__dirname, "..", "src", "main", "orchestration", "failure-taxonomy.ts"),
+  );
+  const turn = { startedAt: 0, wrapUpRequestedAt: null };
+
+  check("a worker that keeps making progress is not cut off at 90 minutes", () => {
+    const verdict = classifyWorkerTurnCeiling({ ...turn, now: 3 * 60 * MIN, lastProgressAt: 3 * 60 * MIN - MIN });
+    assert.equal(verdict.action, "continue");
+  });
+
+  check("a worker that finishes nothing for the no-progress window is failed as a timeout", () => {
+    const verdict = classifyWorkerTurnCeiling({
+      ...turn,
+      now: 2 * PI_WORKER_NO_PROGRESS_CEILING_MS,
+      lastProgressAt: PI_WORKER_NO_PROGRESS_CEILING_MS,
+    });
+    assert.equal(verdict.action, "fail");
+    assert.equal(classifyWorkerFailure(verdict.detail), "timeout");
+    assert.equal(isWorkerTurnCeilingFailure(verdict.detail), false);
+  });
+
+  check("the absolute cap asks a progressing worker to wrap up instead of killing it", () => {
+    const verdict = classifyWorkerTurnCeiling({
+      ...turn,
+      now: PI_WORKER_TURN_ABSOLUTE_CEILING_MS,
+      lastProgressAt: PI_WORKER_TURN_ABSOLUTE_CEILING_MS - MIN,
+    });
+    assert.equal(verdict.action, "wrap_up");
+    assert.match(verdict.detail, /"partial"/);
+    assert.ok(PI_WORKER_TURN_ABSOLUTE_CEILING_MS >= 6 * 60 * MIN);
+  });
+
+  check("a worker gets the grace period to hand in its partial report", () => {
+    const requested = PI_WORKER_TURN_ABSOLUTE_CEILING_MS;
+    const inside = classifyWorkerTurnCeiling({
+      startedAt: 0,
+      wrapUpRequestedAt: requested,
+      now: requested + PI_WORKER_WRAP_UP_GRACE_MS - MIN,
+      lastProgressAt: requested + PI_WORKER_WRAP_UP_GRACE_MS - 2 * MIN,
+    });
+    assert.equal(inside.action, "continue");
+    const after = classifyWorkerTurnCeiling({
+      startedAt: 0,
+      wrapUpRequestedAt: requested,
+      now: requested + PI_WORKER_WRAP_UP_GRACE_MS,
+      lastProgressAt: requested + PI_WORKER_WRAP_UP_GRACE_MS - MIN,
+    });
+    assert.equal(after.action, "fail");
+    // Still a timeout to the taxonomy, but recognisably one that was working.
+    assert.equal(classifyWorkerFailure(after.detail), "timeout");
+    assert.equal(isWorkerTurnCeilingFailure(after.detail), true);
+  });
+}
 
 for (const name of results) console.log(`PASS ${name}`);
 console.log(`\n${results.length} agent liveness checks passed.`);

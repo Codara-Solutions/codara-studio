@@ -14,6 +14,8 @@
 //      fills keep a real window, parented to the app window, never full screen.
 //   3. Non-web schemes, and file: from a web page, open nothing.
 //   4. A popup window's own links follow the same rules.
+//   5. Every new tab names the browser tab its page (or popup chain) started
+//      from, so the renderer opens it in that tab's workspace.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -53,9 +55,11 @@ async function load() {
   return require(outfile);
 }
 
+let nextContentsId = 1;
 function fakeContents(type, url, ownerWindow = null) {
   const listeners = new Map();
   return {
+    id: nextContentsId++,
     ownerWindow,
     handler: null,
     sent: [],
@@ -118,7 +122,7 @@ async function main() {
   const link = guest.handler({ url: "https://docs.example.com/", disposition: "foreground-tab", features: "" });
   assert.deepEqual(link, { action: "deny" });
   assert.deepEqual(host.sent, [
-    ["app:open-browser-url", "https://docs.example.com/", { forceNew: true, background: false }],
+    ["app:open-browser-url", "https://docs.example.com/", { forceNew: true, background: false, sourceWebContentsId: guest.id }],
   ]);
 
   const signin = guest.handler({
@@ -150,11 +154,12 @@ async function main() {
   assert.deepEqual(host.sent.at(-1), [
     "app:open-browser-url",
     "https://accounts.example.com/help",
-    { forceNew: true, background: false },
+    { forceNew: true, background: false, sourceWebContentsId: guest.id },
   ]);
   const nested = popupContents.handler({ url: "about:blank", disposition: "new-window", features: "width=300" });
   assert.equal(nested.overrideBrowserWindowOptions.parent, popupWindow);
   console.log("ok 4 a popup window's own links follow the same rules");
+  console.log("ok 5 new tabs name the browser tab they came from");
 }
 
 main().catch((err) => {

@@ -52,6 +52,7 @@ async function main() {
     coerceWorkerModelToRoster,
     enabledWorkerModelFor,
     rosterModelFor,
+    runtimeForWorkerModelId,
   } = mod;
 
   let pass = 0;
@@ -165,6 +166,59 @@ async function main() {
     "google/gemini-flash-latest",
   );
   eq("empty enabled list rejects a worker", enabledWorkerModelFor("codex", undefined, []), undefined);
+
+  // A Pi worker's provider follows its model, so the model's family is what
+  // must have a connected account.
+  eq("claude ids belong to claude", runtimeForWorkerModelId("claude-opus-5@high"), "claude");
+  eq("gpt ids belong to codex", runtimeForWorkerModelId("gpt-5.6-sol"), "codex");
+  eq("grok ids belong to grok", runtimeForWorkerModelId("grok-5"), "grok");
+  eq("OpenRouter ids belong to no native family", runtimeForWorkerModelId("x-ai/grok-5"), undefined);
+  eq("unknown ids belong to no native family", runtimeForWorkerModelId("mystery"), undefined);
+  // Only Claude is connected and the user left only GPT models enabled plus
+  // one Claude model: a codex request lands on the Claude model, not on a GPT
+  // model no account can launch.
+  const onlyClaude = new Set(["claude"]);
+  eq(
+    "fallback skips enabled models whose provider has no account",
+    enabledWorkerModelFor("codex", "gpt-5.6-luna", ["gpt-5.6-sol", "claude-opus-5"], onlyClaude),
+    "claude-opus-5",
+  );
+  eq(
+    "a claude task hinted at a GPT model still lands on a launchable model",
+    enabledWorkerModelFor("claude", "gpt-5.6-sol", ["gpt-5.6-sol", "claude-opus-5"], onlyClaude),
+    "claude-opus-5",
+  );
+  eq(
+    "OpenRouter favorites are never excluded by account state",
+    enabledWorkerModelFor("codex", undefined, ["google/gemini-2.5-pro", "gpt-5.6-sol"], onlyClaude),
+    "google/gemini-2.5-pro",
+  );
+  eq(
+    "with no launchable model the enabled list is used as is",
+    enabledWorkerModelFor("claude", "claude-opus-5", ["gpt-5.6-sol"], onlyClaude),
+    "gpt-5.6-sol",
+  );
+  eq(
+    "without account state the exact enabled hint still wins",
+    enabledWorkerModelFor("claude", "gpt-5.6-sol", ["gpt-5.6-sol", "claude-opus-5"]),
+    "gpt-5.6-sol",
+  );
+  eq(
+    "plannedWorkerModel passes the account state through",
+    plannedWorkerModel({ runtimePreference: "codex", modelHint: "gpt-5.6-sol" }, {
+      enabledModels: ["gpt-5.6-sol", "claude-opus-5"],
+      usableRuntimes: onlyClaude,
+    }),
+    "claude-opus-5",
+  );
+  const runStoreSource = fs.readFileSync(
+    path.join(ROOT, "src", "main", "orchestration", "run-store.ts"),
+    "utf8",
+  );
+  check(
+    "the worker provider is derived from the resolved model",
+    /const runtime = runtimeForWorkerModelId\(model\) \?\? task\.runtimePreference;/.test(runStoreSource),
+  );
 
   for (const model of ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-astra", "gpt-5.4", "claude-fable-5-1", "claude-sonnet-4-6"]) {
     const task = { runtimePreference: model.startsWith("claude-") ? "claude" : "codex", modelHint: model };

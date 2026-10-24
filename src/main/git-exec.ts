@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { isRemotePath } from "@shared/remote";
+import { gitChildEnv } from "./git-env";
 import { runRemoteGit } from "./remote/remote-git";
 
 // Shared low-level git plumbing for every Source Control backend module
@@ -91,8 +92,9 @@ function leaveNetworkOp(cwd: string, succeeded: boolean): void {
 }
 
 // Single choke point for every git invocation. `credential.interactive=false`
-// + GIT_TERMINAL_PROMPT=0 make an auth-required network op fail fast instead
-// of blocking on a credential prompt that has nowhere to surface.
+// + the gitChildEnv variables make an auth-required network op fail fast
+// instead of blocking on a credential prompt that has nowhere to surface, and
+// keep the panel's background status reads off the user's index lock.
 export async function runGit(
   cwd: string,
   args: string[],
@@ -116,10 +118,7 @@ export async function runGit(
         windowsHide: true,
         maxBuffer: MAX_BUFFER,
         timeout: opts.timeout ?? LOCAL_TIMEOUT_MS,
-        env: {
-          ...(opts.env ?? process.env),
-          GIT_TERMINAL_PROMPT: "0",
-        },
+        env: gitChildEnv(opts.env ?? process.env),
       },
     );
     succeeded = true;

@@ -29,3 +29,21 @@ export function consumePendingAutomationFocus(): string | null {
   if (id === null || Date.now() - pendingAt > PENDING_TTL_MS) return null;
   return id;
 }
+
+// The same two channels for a workflow run: the hub opens its Workflows
+// sub-tab with that run selected.
+let pendingWorkflowRunId: string | null = null;
+let pendingWorkflowAt = 0;
+
+export function requestWorkflowRunFocus(runId: string): void {
+  pendingWorkflowRunId = runId;
+  pendingWorkflowAt = Date.now();
+  window.dispatchEvent(new CustomEvent("spark:open-workflow-run", { detail: { runId } }));
+}
+
+export function consumePendingWorkflowRunFocus(): string | null {
+  const id = pendingWorkflowRunId;
+  pendingWorkflowRunId = null;
+  if (id === null || Date.now() - pendingWorkflowAt > PENDING_TTL_MS) return null;
+  return id;
+}

@@ -11,7 +11,7 @@ import {
 } from "react";
 import CodeMirror, { type ReactCodeMirrorRef } from "@uiw/react-codemirror";
 import { Prec } from "@codemirror/state";
-import { keymap } from "@codemirror/view";
+import { EditorView, keymap } from "@codemirror/view";
 import { githubDark, githubLight } from "@uiw/codemirror-theme-github";
 import {
   findNext,
@@ -32,10 +32,15 @@ import { EDITOR_THEME_EXT } from "./editor-cm/themes";
 import { initVimGlobals, vimHandlersExtension } from "./editor-cm/vim";
 import { languageLabel, resolveLanguage } from "./editor-cm/languageResolver";
 import { useDocument } from "./editor-cm/useDocument";
+import { EDITOR_REVEAL_EVENT, revealOffset, takeEditorReveal } from "./editor-cm/reveal";
 import {
   inlineCompletion,
   type InlineAutocompleteStatus,
 } from "./editor-cm/autocomplete/inlineExtension";
+import { useEditorFind } from "./editor-cm/find";
+import FindBar from "./find/FindBar";
+import { seedFromSelection } from "./find/find-engine";
+import { DocumentFindContext, useFindSession } from "./find/useFindSession";
 import { usePreferences } from "../preferences/usePreferences";
 const MarkdownPreview = lazy(() => import("./markdown-preview/MarkdownPreview"));
 const CsvPreview = lazy(() => import("./file-preview/CsvPreview"));
@@ -47,6 +52,8 @@ import {
   PreviewFullscreenButton,
   usePreviewFullscreen,
 } from "./file-preview/PreviewFullscreenButton";
+import { shareableKind } from "@shared/share";
+import ShareButton from "./share/ShareButton";
 
 // Path-based detection used to decide whether to expose the "Preview" toggle
 // and listen for the markdown.togglePreview shortcut. Keeping this co-located
@@ -116,6 +123,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     setViewMode(toggleKind || isCsv ? "preview" : "edit");
   }, [path, toggleKind, isCsv]);
   const [copiedAt, setCopiedAt] = useState<number | null>(null);
+  const shareable = useMemo(() => shareableKind(path) !== null, [path]);
 
   const cmRef = useRef<ReactCodeMirrorRef>(null);
   const { preferences } = usePreferences();
@@ -139,6 +147,26 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     skip: previewOnly,
     syncContent: isCsv,
   });
+  const codeVisible = doc.status === "ready" && (!hasViewToggle || viewMode === "edit");
+
+  // Find in the editor: the bar floats over the CodeMirror host and drives
+  // CodeMirror's search state (editor-cm/find.ts).
+  const editorHostRef = useRef<HTMLDivElement>(null);
+  const getView = useCallback(() => cmRef.current?.view ?? null, []);
+  const findSession = useFindSession({
+    rootRef: editorHostRef,
+    enabled: codeVisible,
+    readSelection: () => {
+      const view = cmRef.current?.view;
+      if (!view) return null;
+      const { from, to } = view.state.selection.main;
+      return seedFromSelection(view.state.sliceDoc(from, to));
+    },
+    fallbackFocus: () => cmRef.current?.view?.contentDOM ?? null,
+  });
+  const editorFind = useEditorFind(findSession, getView, editorHostRef, "Find in file");
+  const findContext = useMemo(() => ({ active, focused }), [active, focused]);
+
   const reloadRef = useRef(reload);
   reloadRef.current = reload;
   const flushRef = useRef(flush);
@@ -207,6 +235,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
         close: () => onCloseRef.current?.(pathRef.current),
       })),
       ...buildSharedExtensions(),
+      editorFind.extension,
       // Seed with the synchronously-available default-theme extension; the
       // theme useEffect reconfigures to the real (possibly lazy-loaded)
       // theme once its loader resolves.
@@ -295,6 +324,42 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     };
   }, [path, doc.status]);
 
+  // A link to path:line opens the file and asks for that line. The view
+  // mounts a frame or two after the document is ready, so the reveal waits
+  // for it instead of being dropped.
+  const [revealRequest, setRevealRequest] = useState(0);
+  useEffect(() => {
+    const onReveal = (event: Event) => {
+      if ((event as CustomEvent<{ path?: string }>).detail?.path === path) {
+        setRevealRequest((count) => count + 1);
+      }
+    };
+    window.addEventListener(EDITOR_REVEAL_EVENT, onReveal);
+    return () => window.removeEventListener(EDITOR_REVEAL_EVENT, onReveal);
+  }, [path]);
+  useEffect(() => {
+    if (!codeVisible) return;
+    let frame = 0;
+    let attempts = 0;
+    const reveal = () => {
+      const view = cmRef.current?.view;
+      if (!view) {
+        if (attempts++ < 30) frame = requestAnimationFrame(reveal);
+        return;
+      }
+      const target = takeEditorReveal(path);
+      if (!target) return;
+      const offset = revealOffset(view.state.doc, target);
+      view.dispatch({
+        selection: { anchor: offset },
+        effects: EditorView.scrollIntoView(offset, { y: "center" }),
+      });
+      view.focus();
+    };
+    reveal();
+    return () => cancelAnimationFrame(frame);
+  }, [path, codeVisible, revealRequest]);
+
   // Autosave flush points: a pending debounce fires immediately when the
   // window loses focus or this pane goes inactive (tab switch), so edits
   // aren't left unsaved while the user is looking elsewhere.
@@ -318,6 +383,23 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     return () =>
       window.removeEventListener("spark:markdown.togglePreview", onToggle);
   }, [hasViewToggle, focused]);
+
+  // The Share prompt reads the buffer when it opens, so it shares what is on
+  // screen, unsaved edits included. useDocument resets `doc` in an effect, so
+  // for one render after the path changes it still holds the previous file:
+  // the path a doc object first appeared with is the file it holds, and Share
+  // shows only once that is this pane's file.
+  const docRef = useRef(doc);
+  const docPathRef = useRef(path);
+  if (docRef.current !== doc) {
+    docRef.current = doc;
+    docPathRef.current = path;
+  }
+  const shareReady = shareable && doc.status === "ready" && docPathRef.current === path;
+  const getShareText = useCallback(
+    () => (docRef.current.status === "ready" ? docRef.current.content : ""),
+    [],
+  );
 
   // Copy raw markdown source to the system clipboard. The 1200ms badge is
   // long enough to confirm but short enough not to linger if the user
@@ -381,7 +463,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     [path, focusEditor],
   );
 
-  return (
+  const pane = (
     <div
       style={{
         background: "var(--bg)",
@@ -416,6 +498,11 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             onCopy={handleCopy}
             onSetMode={setViewMode}
             fullscreenAction={viewMode === "preview" ? fullscreenAction : null}
+            shareAction={
+              shareReady ? (
+                <ShareButton key={path} path={path} getText={getShareText} style={toolbarIconButton} />
+              ) : null
+            }
             forceLocalToolbar={fullscreen}
             table={isCsv}
           />
@@ -508,27 +595,33 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             </Suspense>
           </div>
         )}
-        {doc.status === "ready" && (!hasViewToggle || viewMode === "edit") && (
-          <CodeMirror
-            ref={cmRef}
-            value={doc.content}
-            onChange={onChange}
-            extensions={extensions}
-            theme="none"
-            height="100%"
-            style={{ flex: 1, minHeight: 0, height: "100%" }}
-            basicSetup={{
-              lineNumbers: true,
-              highlightActiveLineGutter: true,
-              foldGutter: true,
-              bracketMatching: true,
-              closeBrackets: true,
-              autocompletion: true,
-              highlightActiveLine: true,
-              highlightSelectionMatches: true,
-              searchKeymap: true,
-            }}
-          />
+        {codeVisible && (
+          <div ref={editorHostRef} className="codara-find-host">
+            <CodeMirror
+              ref={cmRef}
+              value={doc.content}
+              onChange={onChange}
+              onCreateEditor={editorFind.onViewCreated}
+              extensions={extensions}
+              theme="none"
+              height="100%"
+              style={{ flex: 1, minHeight: 0, height: "100%" }}
+              basicSetup={{
+                lineNumbers: true,
+                highlightActiveLineGutter: true,
+                foldGutter: true,
+                bracketMatching: true,
+                closeBrackets: true,
+                autocompletion: true,
+                highlightActiveLine: true,
+                highlightSelectionMatches: true,
+                // The find bar replaces the stock search panel and its keys
+                // (editor-cm/find.ts).
+                searchKeymap: false,
+              }}
+            />
+            {editorFind.bar && <FindBar {...editorFind.bar} />}
+          </div>
         )}
       </div>
 
@@ -598,6 +691,9 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       </div>
     </div>
   );
+  // Tells the previews inside whether this pane is on screen and focused,
+  // which decides where Ctrl+F goes when focus is outside every document.
+  return <DocumentFindContext.Provider value={findContext}>{pane}</DocumentFindContext.Provider>;
 });
 
 export default EditorPane;
@@ -719,6 +815,7 @@ function MarkdownToolbar({
   onCopy,
   onSetMode,
   fullscreenAction,
+  shareAction,
   forceLocalToolbar,
   table = false,
 }: {
@@ -727,6 +824,7 @@ function MarkdownToolbar({
   onCopy: () => void;
   onSetMode: (next: ViewMode) => void;
   fullscreenAction?: React.ReactNode;
+  shareAction?: React.ReactNode;
   forceLocalToolbar?: boolean;
   table?: boolean;
 }) {
@@ -763,6 +861,7 @@ function MarkdownToolbar({
           {table ? "Source" : "Edit"}
         </SegmentedButton>
       </div>
+      {shareAction}
       {fullscreenAction}
     </DockablePaneBar>
   );

@@ -1,14 +1,14 @@
 #!/usr/bin/env node
 "use strict";
 
-// Plain Studio shells follow the Active Grok account: a terminal tab with no
-// Studio startup command still hands a hand-typed Grok CLI the default
-// profile's home. Claude and Codex are intentionally absent: each switches
-// the login inside one home, so a shell needs nothing to follow them. This
-// suite drives the selector resolution pty-manager consumes, with injected
-// resolvers so no real store, filesystem, or CLI is touched. The invariants:
+// Plain Studio shells follow the Active accounts: a terminal tab with no
+// Studio startup command still hands a hand-typed `claude`, `codex` or `grok`
+// the Active managed account's home (Claude's live slot, a Codex or Grok
+// home of its own). This suite drives the selector resolution pty-manager
+// consumes, with injected resolvers so no real store, filesystem, or CLI is
+// touched. The invariants:
 //
-//   - a personal default changes NOTHING (the shell keeps its inherited env),
+//   - the System login changes NOTHING (the shell keeps its inherited env),
 //   - a managed default contributes exactly its home selector,
 //   - resolution is best-effort: a failure yields null (spawn untouched).
 
@@ -23,6 +23,8 @@ const TMP = fs.mkdtempSync(
   path.join(os.tmpdir(), "codara-native-cli-shell-defaults-"),
 );
 const OUT = path.join(TMP, "native-cli-shell-defaults.cjs");
+process.env.HOME = path.join(TMP, "home");
+process.env.CODARA_HOME_DIR = path.join(TMP, "codara");
 
 buildSync({
   entryPoints: [
@@ -37,12 +39,31 @@ buildSync({
 
 const { resolvePlainShellAccountSelectors, personalCliShellHomeEnvironment } = require(OUT);
 
-const personalGrok = {
+const system = (label) => ({
   profileId: "personal",
-  label: "Account 1",
+  label,
   managed: false,
   connected: true,
   env: { PATH: "/safe/bin" },
+});
+const SYSTEM = {
+  resolveClaude: async () => system("Claude Code login"),
+  resolveCodex: async () => system("Codex login"),
+  resolveGrok: async () => system("Grok login"),
+};
+const managedClaude = {
+  profileId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  label: "Claude Work",
+  managed: true,
+  connected: true,
+  env: { PATH: "/safe/bin", CLAUDE_CONFIG_DIR: "/codara/claude-cli/live/home" },
+};
+const managedCodex = {
+  profileId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  label: "Codex Work",
+  managed: true,
+  connected: true,
+  env: { PATH: "/safe/bin", CODEX_HOME: "/codara/codex-cli/accounts/b/home" },
 };
 const managedGrok = {
   profileId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
@@ -54,47 +75,67 @@ const managedGrok = {
 
 async function main() {
   const customClaude = path.join(TMP, "custom claude");
+  const customCodex = path.join(TMP, "custom codex");
   const customGrok = path.join(TMP, "custom grok");
   assert.deepEqual(personalCliShellHomeEnvironment({
     CLAUDE_CONFIG_DIR: customClaude,
+    CODEX_HOME: customCodex,
     GROK_HOME: customGrok,
   }), {
     SPARK_PERSONAL_CLAUDE_CONFIG_DIR: customClaude,
+    SPARK_PERSONAL_CODEX_HOME: customCodex,
     SPARK_PERSONAL_GROK_HOME: customGrok,
   });
   assert.deepEqual(personalCliShellHomeEnvironment({}), {
     SPARK_PERSONAL_CLAUDE_CONFIG_DIR: "",
+    SPARK_PERSONAL_CODEX_HOME: "",
     SPARK_PERSONAL_GROK_HOME: "",
   });
-  const codaraRoot = path.resolve(process.env.CODARA_HOME_DIR || process.env.SPARK_HOME_DIR || path.join(os.homedir(), ".codarastudio"));
-  assert.equal(personalCliShellHomeEnvironment({
-    CLAUDE_CONFIG_DIR: path.join(codaraRoot, "claude-cli", "accounts", "managed"),
-  }).SPARK_PERSONAL_CLAUDE_CONFIG_DIR, "");
+  const codaraRoot = path.resolve(process.env.CODARA_HOME_DIR);
+  const managedSnapshot = personalCliShellHomeEnvironment({
+    CLAUDE_CONFIG_DIR: path.join(codaraRoot, "claude-cli", "live", "home"),
+    CODEX_HOME: path.join(codaraRoot, "codex-cli", "accounts", "b", "home"),
+  });
+  assert.equal(managedSnapshot.SPARK_PERSONAL_CLAUDE_CONFIG_DIR, "");
+  assert.equal(managedSnapshot.SPARK_PERSONAL_CODEX_HOME, "");
   console.log("PASS personal home snapshots preserve custom paths and exclude managed selectors");
-  // A personal Grok default: nothing to apply, the shell stays untouched.
+
   assert.equal(
-    await resolvePlainShellAccountSelectors({ resolveGrok: async () => personalGrok }),
+    await resolvePlainShellAccountSelectors(SYSTEM),
     null,
-    "a personal default must resolve to null so the shell env is not rebuilt",
+    "the System login must resolve to null so the shell env is not rebuilt",
   );
-  console.log("PASS a personal default leaves the shell untouched");
+  console.log("PASS the System login leaves the shell untouched");
 
-  // A managed Grok default contributes exactly its home. Claude never
-  // contributes anything: every Claude account runs in the one home.
   assert.deepEqual(
-    await resolvePlainShellAccountSelectors({ resolveGrok: async () => managedGrok }),
-    { grokHome: "/codara/grok-cli/accounts/c" },
-    "a managed Grok default must contribute exactly its home",
-  );
-  console.log("PASS a managed Grok default contributes its home, and Claude contributes nothing");
-
-  // A failing resolver: null, the shell must still open untouched.
-  assert.equal(
     await resolvePlainShellAccountSelectors({
-      resolveGrok: async () => {
-        throw new Error("store corrupt");
-      },
+      resolveClaude: async () => managedClaude,
+      resolveCodex: async () => managedCodex,
+      resolveGrok: async () => managedGrok,
     }),
+    {
+      claudeConfigDir: "/codara/claude-cli/live/home",
+      codexHome: "/codara/codex-cli/accounts/b/home",
+      grokHome: "/codara/grok-cli/accounts/c",
+    },
+  );
+  assert.deepEqual(
+    await resolvePlainShellAccountSelectors({ ...SYSTEM, resolveCodex: async () => managedCodex }),
+    { codexHome: "/codara/codex-cli/accounts/b/home" },
+    "each CLI contributes only its own selector",
+  );
+  console.log("PASS a managed default contributes exactly its home");
+
+  // A failing resolver costs only its own selector; all failing is null.
+  const fail = async () => {
+    throw new Error("store corrupt");
+  };
+  assert.deepEqual(
+    await resolvePlainShellAccountSelectors({ resolveClaude: fail, resolveCodex: fail, resolveGrok: async () => managedGrok }),
+    { grokHome: "/codara/grok-cli/accounts/c" },
+  );
+  assert.equal(
+    await resolvePlainShellAccountSelectors({ resolveClaude: fail, resolveCodex: fail, resolveGrok: fail }),
     null,
     "a failing resolver must resolve to null, never throw",
   );
@@ -103,6 +144,8 @@ async function main() {
   // Defensive: a managed profile whose env lost its selector is skipped.
   assert.equal(
     await resolvePlainShellAccountSelectors({
+      ...SYSTEM,
+      resolveClaude: async () => ({ ...managedClaude, env: { PATH: "/safe/bin" } }),
       resolveGrok: async () => ({ ...managedGrok, env: { PATH: "/safe/bin" } }),
     }),
     null,
@@ -119,11 +162,9 @@ async function main() {
     pty.includes("resolvePlainShellAccountSelectors"),
     "pty-manager must consult the plain-shell selectors",
   );
-  assert.ok(
-    !pty.includes("plainShellClaudeConfigDir"),
-    "a plain shell never gets a Claude config directory: every account runs in the one home",
-  );
   for (const guard of [
+    "plainShellClaudeConfigDir",
+    "plainShellCodexHome",
     "plainShellGrokHome",
     // The follow flag rides the same gate as the selectors: only a plain
     // user shell gets it, whether or not a selector resolved.
@@ -142,7 +183,7 @@ async function main() {
   console.log("PASS pty-manager wires and gates the plain-shell selectors");
 
   console.log(
-    "\nPASS native CLI shell defaults: plain Studio shells follow the Active Grok account, Claude needs no selector, personal stays untouched, and resolution is best-effort",
+    "\nPASS native CLI shell defaults: plain Studio shells follow the Active managed accounts, the System login stays untouched, and resolution is best-effort",
   );
 }
 

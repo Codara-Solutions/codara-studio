@@ -12,6 +12,7 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { codaraHome } from "./codara-home";
+import { recordBreadcrumb } from "./diagnostics/breadcrumbs";
 
 const MAX_LOG_BYTES = 1_000_000;
 
@@ -24,6 +25,9 @@ function logPath(): string {
 
 export function logMain(category: string, message: string): void {
   const line = `${new Date().toISOString()} [${category}] ${message}\n`;
+  // Every logged event is notable by definition; the black box keeps the
+  // last ones for freeze records and the diagnostics export.
+  recordBreadcrumb(category, message);
   // Mirror to the console so dev runs still see everything in one place.
   console.log(`[${category}] ${message}`);
   chain = chain

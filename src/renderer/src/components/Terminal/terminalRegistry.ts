@@ -31,6 +31,15 @@ export interface CreateAgentTerminalInput {
   // Trusted device origin supplied by main. Phone-created terminals use this
   // for a live tab badge and tooltip instead of the amber agent tint.
   origin?: TerminalLeafOrigin;
+  // A program in one of the user's panes asked for this tab (pane.open, the
+  // `codara-pane tab` helper): the user's own tab, so it takes focus and
+  // carries no agent tint.
+  requestedFromPane?: boolean;
+  // Tab group to put the new tab in, joined by name within its workspace.
+  group?: string;
+  // Main-resolved name of the caller's workspace when an agent opens this tab
+  // in another workspace; shown on the tab.
+  openedBy?: string;
 }
 
 export interface CreateAgentTerminalResult {
@@ -38,6 +47,8 @@ export interface CreateAgentTerminalResult {
   paneId: string;
   // The cwd actually used (input.cwd or the resolved active-workspace default).
   cwd: string;
+  // The group the tab joined, under its existing name when it already existed.
+  group?: string;
 }
 
 export interface ShareableStudioTerminal {
@@ -47,6 +58,8 @@ export interface ShareableStudioTerminal {
   title?: string;
   cwd?: string;
   profile: "shell" | "claude" | "codex" | "grok";
+  // The name of the tab group the pane's tab is in.
+  group?: string;
 }
 
 type ListShareableStudioTerminalsFn = () => ShareableStudioTerminal[];
@@ -63,6 +76,20 @@ export function listShareableStudioTerminals(): ShareableStudioTerminal[] {
     throw new Error("Studio terminal inventory is not ready.");
   }
   return listShareableStudioTerminalsFn();
+}
+
+type ListDeliverablePanesFn = () => Array<{ paneId: string; workspaceId: string }>;
+let listDeliverablePanesFn: ListDeliverablePanesFn | null = null;
+
+export function setListDeliverablePanesFn(fn: ListDeliverablePanesFn | null): void {
+  listDeliverablePanesFn = fn;
+}
+
+export function listDeliverablePanes(): Array<{ paneId: string; workspaceId: string }> {
+  if (!listDeliverablePanesFn) {
+    throw new Error("Studio terminal inventory is not ready.");
+  }
+  return listDeliverablePanesFn();
 }
 
 type CreateAgentTerminalFn = (

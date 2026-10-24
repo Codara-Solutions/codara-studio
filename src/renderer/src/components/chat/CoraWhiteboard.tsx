@@ -113,7 +113,7 @@ export default function CoraWhiteboardSurface({
         setSaveState("error");
         const message = (error as Error).message ?? "";
         setNotice(/changed since revision/i.test(message)
-          ? "Cora updated the board while you were editing — it will refresh with the latest version."
+          ? "Cora updated the board while you were editing. It will refresh with the latest version."
           : message || "The whiteboard could not be saved.");
       })
       .finally(() => {

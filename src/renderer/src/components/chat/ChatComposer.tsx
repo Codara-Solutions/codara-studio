@@ -1,41 +1,48 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   AddRunMessageAttachmentInput,
   AgentEffortLevel,
   ChatBackendKind,
   ChatMode,
   CoraProfile,
-  FsEntry,
   PiCatalogModel,
   RunState,
   SparkEvent,
   UpdateChatBackendInput,
 } from "@shared/types";
 import { makeId } from "@shared/ids";
+import { isQuestionInactiveError } from "@shared/run-questions";
 import { pathToFileUrl } from "../../lib/pathToFileUrl";
+import { unwrapIpcError } from "../../lib/ipc-error";
 import AnchoredMenu from "./composer/AnchoredMenu";
 import { DEFAULT_PI_COMPACT_AT_TOKENS } from "@shared/context-compaction";
-import {
-  chatModelIsOpenAi,
-} from "@shared/chat-policy";
+import { fastModeSupportFor } from "@shared/fast-mode";
 import { useOpenAiFastMode } from "../../lib/useOpenAiFastMode";
 import {
+  backendFailureRetryText,
   deriveComposerWorkerActivity,
   findOpenQuestion,
   type ComposerWorkerActivity,
 } from "./timeline";
 import { isUnstartedChatRun } from "./cora-view";
+import { retryableFailedCallId } from "./failed-turn";
+import { isBackendFailureQuestion } from "@shared/run-questions";
+import { loadCoraAccountReadiness } from "./account-readiness";
+import { chordToHint, mod } from "../../shortcuts/chord";
+import DismissErrorButton from "./DismissErrorButton";
 import ContextPill from "./composer/ContextPill";
 import FastModeToggle from "./composer/FastModeToggle";
 import ModelThinkingPicker from "./composer/ModelThinkingPicker";
+import { readModelVisibility, shownModelGroups } from "./composer/model-visibility";
+import { prefillDraft } from "./composer/prefill-draft";
 import ProfilePicker from "./composer/ProfilePicker";
+import CapabilitiesButton from "./composer/CapabilitiesButton";
 import {
   DEFAULT_CHAT_BACKEND,
   DEFAULT_CHAT_EFFORT,
   DEFAULT_CHAT_MODE,
   DEFAULT_CHAT_MODEL,
   EFFORT_LABELS,
-  buildVisibleGroups,
   composeModelId,
   clampEffort,
   decomposeModelId,
@@ -106,15 +113,20 @@ interface Props {
     attachments?: AddRunMessageAttachmentInput[],
     chatConfig?: ChatComposerStartConfig,
   ) => RunState | void | Promise<RunState | void>;
-  onForcePauseRun: () => void;
+  /** Resolves once the stop landed, so the button can show it is pending. */
+  onForcePauseRun: () => void | Promise<unknown>;
 }
 
 const MAX_TEXTAREA_H = 168;
+// Workspace key of a composer that unmounted while focused; see the handoff
+// effects in ChatComposer.
+let composerFocusHandoff: string | null = null;
 const MAX_IMAGE_ATTACHMENTS = 4;
 const MAX_ATTACHMENTS = 8;
 const MAX_MENTION_RESULTS = 8;
-const MAX_FILE_SCAN_DEPTH = 6;
-const MAX_FILE_SCAN_RESULTS = 700;
+// How long a workspace file index serves new "@" mentions before a mention
+// re-reads it in the background (files created since then become mentionable).
+const FILE_INDEX_TTL_MS = 30_000;
 const SUPPORTED_PASTED_IMAGE_TYPES = new Set([
   "image/png",
   "image/jpeg",
@@ -122,17 +134,6 @@ const SUPPORTED_PASTED_IMAGE_TYPES = new Set([
   "image/gif",
   "image/bmp",
 ]);
-const SKIPPED_MENTION_DIRS = new Set([
-  ".git",
-  ".next",
-  ".turbo",
-  "build",
-  "coverage",
-  "dist",
-  "node_modules",
-  "out",
-]);
-
 interface FileMention {
   path: string;
   name: string;
@@ -312,6 +313,9 @@ export default function ChatComposer({
   // CLI that reports cumulative usage repeatedly cannot inflate the pill into
   // millions/billions of tokens.
   const [tokensUsed, setTokensUsed] = useState(0);
+  // The limit the live session reports with its usage: the owner's
+  // auto-compact percentage priced off this model's window.
+  const [compactBudget, setCompactBudget] = useState(DEFAULT_PI_COMPACT_AT_TOKENS);
   // Read by the run-change seed below, which must see the run being switched TO
   // without taking `run` as a dependency (that would re-seed on every snapshot
   // and stomp the live gauge mid-turn).
@@ -403,6 +407,22 @@ export default function ChatComposer({
     return () => window.removeEventListener("spark:focus-composer", handler);
   }, [suspendGlobalEvents]);
 
+  // The first send of a draft remounts the composer under the new run's key.
+  // Hand focus held at unmount to the next visible instance for the same
+  // workspace; a hidden chat tab (suspendGlobalEvents) must never take it.
+  const focusHandoffKey = cwd ?? "";
+  useLayoutEffect(() => {
+    const node = textareaRef.current;
+    return () => {
+      if (node && document.activeElement === node) composerFocusHandoff = focusHandoffKey;
+    };
+  }, [focusHandoffKey]);
+  useEffect(() => {
+    if (suspendGlobalEvents || composerFocusHandoff !== focusHandoffKey) return;
+    composerFocusHandoff = null;
+    textareaRef.current?.focus({ preventScroll: true });
+  }, [suspendGlobalEvents, focusHandoffKey]);
+
   // Resolve a new draft from the saved explicit choice and the current model
   // catalog. The synchronous seed above handles another draft opened after a
   // pick in this process. This pass handles app relaunches and rejects a saved
@@ -415,8 +435,9 @@ export default function ChatComposer({
       window.spark.piSubscriptions.catalog().catch(() => [] as PiCatalogModel[]),
       window.spark.openRouter.coraModels().catch(() => [] as string[]),
       loadPreferredChatModel().catch(() => undefined),
+      loadCoraAccountReadiness(),
     ])
-      .then(([piCatalog, openRouterModels, preferredModel]) => {
+      .then(([piCatalog, openRouterModels, preferredModel, accounts]) => {
         if (cancelled) return;
         draftDefaultsResolved.current = true;
         piCatalogRef.current = piCatalog;
@@ -424,8 +445,12 @@ export default function ChatComposer({
         // A pick that landed while this was in flight outranks every loaded
         // default, including an older preference read.
         if (selectorsChosenRef.current) return;
-        const groups = buildVisibleGroups({ piCatalog, openRouterModels });
-        const first = resolvePreferredChatModel(groups, preferredModel);
+        const groups = shownModelGroups(piCatalog, openRouterModels, readModelVisibility());
+        const first = resolvePreferredChatModel(
+          groups,
+          preferredModel,
+          accounts.usableProviders ?? undefined,
+        );
         if (!first) return;
         const { baseId } = decomposeModelId(first.id);
         setDraftChatBackend(first.backend);
@@ -450,12 +475,18 @@ export default function ChatComposer({
   // by dispatching `spark:prefill-composer`. Default behavior appends to the
   // current draft so a user typing in the composer doesn't lose their work
   // mid-thought; pass `replace: true` to overwrite the draft entirely (used
-  // by undo so the just-removed message reappears verbatim for editing).
+  // by undo so the just-removed message reappears verbatim for editing), or
+  // `prepend: true` to put the text in front of an existing draft.
   useEffect(() => {
     if (suspendGlobalEvents) return;
     const handler = (event: Event) => {
       const detail = (
-        event as CustomEvent<{ text?: unknown; replace?: unknown; attachments?: unknown }>
+        event as CustomEvent<{
+          text?: unknown;
+          replace?: unknown;
+          prepend?: unknown;
+          attachments?: unknown;
+        }>
       ).detail;
       const text = typeof detail?.text === "string" ? detail.text : "";
       // Image attachments can ride along with the text (Unqueue restores a
@@ -488,11 +519,10 @@ export default function ChatComposer({
       }
       if (!text) return;
       const replace = detail?.replace === true;
-      setDraft((current) => {
-        if (replace) return text;
-        if (!current.trim()) return text;
-        return current.endsWith("\n") ? `${current}${text}` : `${current}\n${text}`;
-      });
+      // Welcome starters frame a task ("Investigate and fix this bug: "), so
+      // they go in front of what the user already typed instead of replacing it.
+      const prepend = detail?.prepend === true;
+      setDraft((current) => prefillDraft(current, text, { replace, prepend }));
       window.setTimeout(() => {
         const node = textareaRef.current;
         if (!node) return;
@@ -554,6 +584,11 @@ export default function ChatComposer({
     setTokensUsed(call?.promptTokens ?? 0);
   }, [run?.id, run?.conversationEpoch]);
 
+  // Another chat may run another model; its session reports its own limit.
+  useEffect(() => {
+    setCompactBudget(DEFAULT_PI_COMPACT_AT_TOKENS);
+  }, [run?.id]);
+
   // Track the latest live context gauge. Modern backends provide
   // contextTokens explicitly; older ones expose only inputTokens, which is
   // still a better estimate when treated as the latest snapshot rather than
@@ -580,28 +615,67 @@ export default function ChatComposer({
       // counts, and accepting it wiped the gauge to 0/256.0k. Compaction is
       // the only legitimate reset, handled above via run.conversation_compacted.
       if (value > 0) setTokensUsed(value);
+      const budget = payload.compactAtTokens;
+      if (typeof budget === "number" && Number.isFinite(budget) && budget > 0) setCompactBudget(budget);
     });
     return off;
   }, [run?.id, run?.conversationEpoch]);
 
+  // One file index per composer and workspace. Loaded on the first "@" (never
+  // eagerly: a hidden composer or a user who never mentions a file must not
+  // walk the workspace), reused by later mentions and by send, and re-read in
+  // the background once it is older than FILE_INDEX_TTL_MS.
+  const fileIndexRef = useRef<{
+    cwd: string;
+    loadedAt: number;
+    ready: boolean;
+    files: Promise<FileMention[]>;
+  } | null>(null);
+  const loadFileIndex = useCallback(
+    (force: boolean): { files: Promise<FileMention[]>; ready: boolean } | null => {
+      if (!cwd) return null;
+      const current = fileIndexRef.current;
+      if (
+        !force &&
+        current &&
+        current.cwd === cwd &&
+        (!current.ready || Date.now() - current.loadedAt < FILE_INDEX_TTL_MS)
+      ) {
+        return { files: current.files, ready: current.ready };
+      }
+      const files = collectWorkspaceFiles(cwd);
+      const entry = { cwd, loadedAt: Date.now(), ready: false, files };
+      fileIndexRef.current = entry;
+      files.then(
+        () => {
+          entry.ready = true;
+          entry.loadedAt = Date.now();
+        },
+        () => {
+          if (fileIndexRef.current === entry) fileIndexRef.current = null;
+        },
+      );
+      // A background re-read keeps the previous list on screen meanwhile.
+      return { files, ready: Boolean(current?.ready && current.cwd === cwd) };
+    },
+    [cwd],
+  );
+
   useEffect(() => {
+    fileIndexRef.current = null;
     setFileReferences([]);
     setMentionQuery(null);
     setFileMentions([]);
     setFilesLoading(false);
   }, [cwd]);
 
-  // Building the @file index is intentionally lazy. Eagerly walking every
-  // directory whenever a workspace became active flooded the main process
-  // with hundreds of fs:list IPC calls—even when the composer was hidden or
-  // the user never typed "@". This is especially noticeable for parent
-  // workspaces that contain several repositories. The first mention opens the
-  // picker immediately in its loading state and populates it in the background.
   useEffect(() => {
     if (!cwd || !mentionQuery) return;
+    const index = loadFileIndex(false);
+    if (!index) return;
     let cancelled = false;
-    setFilesLoading(true);
-    void collectWorkspaceFiles(cwd)
+    if (!index.ready) setFilesLoading(true);
+    void index.files
       .then((files) => {
         if (!cancelled) setFileMentions(files);
       })
@@ -612,7 +686,7 @@ export default function ChatComposer({
     return () => {
       cancelled = true;
     };
-  }, [cwd, mentionQuery?.start]);
+  }, [cwd, mentionQuery?.start, loadFileIndex]);
 
   const mentionSuggestions = useMemo(
     () => rankMentionSuggestions(fileMentions, mentionQuery?.query ?? "").slice(0, MAX_MENTION_RESULTS),
@@ -631,6 +705,15 @@ export default function ChatComposer({
   }, [draft]);
 
   const openQuestion = useMemo(() => (run ? findOpenQuestion(run) : null), [run]);
+  // A park on a manager turn that threw is a failure notice, not an ask: the
+  // composer must not read "Answer Cora", and Retry re-answers it with the
+  // message that failed.
+  const failedTurnRetryText = useMemo(
+    () => (run ? backendFailureRetryText(run, openQuestion) : null),
+    [run, openQuestion],
+  );
+  const backendFailureQuestion =
+    openQuestion !== null && isBackendFailureQuestion(openQuestion);
   const status = run?.status;
   const isActive =
     status === "running" || status === "planning" || status === "reviewing";
@@ -671,17 +754,23 @@ export default function ChatComposer({
       kind: "file" as const,
     })),
   ];
-  const canSend =
-    !busy && !pastingImages && !disabled && (draft.trim().length > 0 || attachmentsForSend.length > 0);
+  const hasDraftToSend = draft.trim().length > 0 || attachmentsForSend.length > 0;
+  const canSend = !busy && !pastingImages && !disabled && hasDraftToSend;
 
   const run_ = run; // local alias so the async helpers narrow cleanly
 
   const attachmentsForCurrentDraft = async (): Promise<AddRunMessageAttachmentInput[]> => {
     let mentionFiles = fileMentions;
-    if (cwd && draft.includes("@")) {
+    // Re-read the index only for a mention it cannot answer (a file created
+    // since, or a mention typed without the picker). An email address never
+    // parses as a mention token, so it costs nothing.
+    if (cwd && unresolvedMentionTokens(draft, mentionFiles).length > 0) {
       try {
-        mentionFiles = await collectWorkspaceFiles(cwd);
-        setFileMentions(mentionFiles);
+        const index = loadFileIndex(fileMentions.length > 0);
+        if (index) {
+          mentionFiles = await index.files;
+          if (mountedRef.current) setFileMentions(mentionFiles);
+        }
       } catch {
         // Keep the existing index; the main process also resolves textual
         // @file mentions before deciding whether a manager plan is needed.
@@ -705,6 +794,10 @@ export default function ChatComposer({
     if (inFlight.current || disabled || pastingImages) return;
     const clientMessageId = makeId("client-msg");
     const sendScope = run_ ? chatBackendMutationScope(run_) : null;
+    // The attachments this send carries. The composer stays editable while it
+    // is in flight, so anything attached meanwhile belongs to the next message.
+    const sentImages = images;
+    const sentFileReferences = fileReferences;
     inFlight.current = true;
     setBusy(true);
     setError(null);
@@ -724,7 +817,8 @@ export default function ChatComposer({
         return;
       }
       const latestDraft = draftSnapshotRef.current;
-      const message = messageForSend(latestDraft?.draft ?? draft, attachments.length);
+      const sentDraft = latestDraft?.draft ?? draft;
+      const message = messageForSend(sentDraft, attachments.length);
       if (!message) return;
       if (!run_ || isUnstartedChatRun(run_)) {
         // No run yet, or a run the board's draft promotion minted that has
@@ -740,13 +834,36 @@ export default function ChatComposer({
         };
         await onStartChat(message, clientMessageId, attachments, chatConfig);
       } else if (openQuestion) {
-        await window.spark.orchestration.answerRunQuestion({
-          runId: run_.id,
-          questionMessageId: openQuestion.id,
-          clientMessageId,
-          message,
-          attachments,
-        });
+        try {
+          await window.spark.orchestration.answerRunQuestion({
+            runId: run_.id,
+            questionMessageId: openQuestion.id,
+            clientMessageId,
+            message,
+            attachments,
+          });
+        } catch (err) {
+          // The question closed (a Stop, a park) after this composer last saw
+          // it. The reply is still the user's next message; a finished run is
+          // left alone, since a message there would restart it.
+          const latestStatus = runRef.current?.status ?? run_.status;
+          if (
+            !isQuestionInactiveError((err as Error)?.message) ||
+            latestStatus === "complete" ||
+            latestStatus === "failed" ||
+            latestStatus === "cancelled"
+          ) {
+            throw err;
+          }
+          await window.spark.orchestration.addRunMessage({
+            runId: run_.id,
+            clientMessageId,
+            author: "user",
+            kind: "note",
+            message,
+            attachments,
+          });
+        }
       } else {
         await window.spark.orchestration.addRunMessage({
           runId: run_.id,
@@ -758,12 +875,18 @@ export default function ChatComposer({
         });
       }
       if (draftKey) chatComposerDrafts.delete(draftKey);
-      setDraft("");
-      setImages([]);
-      setFileReferences([]);
+      // The textarea stays editable while a send is in flight; text typed in
+      // the meantime is the next message, not part of this one.
+      setDraft((current) =>
+        current.startsWith(sentDraft) ? current.slice(sentDraft.length).trimStart() : current,
+      );
+      setImages((current) => current.filter((image) => !sentImages.includes(image)));
+      setFileReferences((current) =>
+        current.filter((reference) => !sentFileReferences.includes(reference)),
+      );
       setMentionQuery(null);
     } catch (err) {
-      if (mountedRef.current) setError((err as Error).message);
+      if (mountedRef.current) setError(unwrapIpcError(err));
     } finally {
       inFlight.current = false;
       if (mountedRef.current) setBusy(false);
@@ -785,6 +908,27 @@ export default function ChatComposer({
         return;
       }
       await window.spark.orchestration.resumeRun({ runId: run_.id });
+    } catch (err) {
+      if (mountedRef.current) setError(unwrapIpcError(err));
+    } finally {
+      inFlight.current = false;
+      if (mountedRef.current) setBusy(false);
+    }
+  };
+
+  const retryFailedTurn = async () => {
+    if (!run_ || !openQuestion || !failedTurnRetryText || inFlight.current) return;
+    inFlight.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      await window.spark.orchestration.answerRunQuestion({
+        runId: run_.id,
+        questionMessageId: openQuestion.id,
+        clientMessageId: makeId("client-msg"),
+        message: failedTurnRetryText,
+        attachments: [],
+      });
     } catch (err) {
       if (mountedRef.current) setError((err as Error).message);
     } finally {
@@ -851,6 +995,12 @@ export default function ChatComposer({
       if ((event.key === "Enter" || event.key === "Tab") && mentionSuggestions.length > 0) {
         event.preventDefault();
         insertFileMention(mentionSuggestions[Math.min(mentionIndex, mentionSuggestions.length - 1)]);
+        return;
+      }
+      // While the index loads, Enter means "pick the file", not "send the
+      // half-typed @token"; swallow it until suggestions arrive.
+      if ((event.key === "Enter" || event.key === "Tab") && filesLoading) {
+        event.preventDefault();
         return;
       }
       if (event.key === "Escape") {
@@ -981,12 +1131,23 @@ export default function ChatComposer({
     window.setTimeout(() => textareaRef.current?.focus({ preventScroll: true }), 0);
   };
 
+  // A chat freezes its profile on the first send; before that (no run, or a
+  // run the board minted and never started) the draft's pick still applies.
+  const frozenProfileId = run_ && !isUnstartedChatRun(run_) ? run_.coraProfileId ?? "default" : null;
+  // Memory in the Capability Center belongs to a profile, so it opens on this
+  // chat's profile rather than the registry default.
   const openCapabilities = () => {
-    window.dispatchEvent(new CustomEvent("spark:open-capabilities"));
+    window.dispatchEvent(
+      new CustomEvent("spark:open-capabilities", {
+        detail: { profileId: frozenProfileId ?? draftCoraProfileId },
+      }),
+    );
   };
   const openProfileManager = () => {
     window.dispatchEvent(
-      new CustomEvent("spark:open-capabilities", { detail: { tab: "memory" } }),
+      new CustomEvent("spark:open-capabilities", {
+        detail: { tab: "profiles", profileId: frozenProfileId ?? draftCoraProfileId },
+      }),
     );
   };
 
@@ -1014,13 +1175,11 @@ export default function ChatComposer({
     activeChatModelId,
     false,
   );
-  // Fast mode remains a single GLOBAL setting even
-  // though its control now lives here: the flash button writes
-  // AppSettings.openAiFastMode, and there is still no per-chat fast-mode
-  // state. It shows only for an OpenAI model — Anthropic has no priority tier
-  // and must never be offered one.
+  // Fast mode remains a single GLOBAL setting even though its control lives
+  // here: the flash button writes AppSettings.openAiFastMode, which the manager
+  // and every worker read at launch, and there is no per-chat fast-mode state.
   const fastMode = useOpenAiFastMode();
-  const fastModeAvailable = chatModelIsOpenAi(activeChatModelId);
+  const fastModeSupport = fastModeSupportFor(activeChatModelId);
   const availableEfforts: AgentEffortLevel[] = effortsFor(activeChatModelOption);
   const visibleEffort: AgentEffortLevel = availableEfforts.includes(activeChatEffort)
     ? activeChatEffort
@@ -1128,10 +1287,11 @@ export default function ChatComposer({
       // cache), which turned the chord into a dead key. The menu has the same
       // contract — it paints the curated rows immediately and folds the live
       // catalog in whenever it lands.
-      const models = buildVisibleGroups({
-        piCatalog: piCatalogRef.current,
-        openRouterModels: openRouterModelsRef.current,
-      }).flatMap(
+      const models = shownModelGroups(
+        piCatalogRef.current,
+        openRouterModelsRef.current,
+        readModelVisibility(),
+      ).flatMap(
         (group) => group.models,
       );
       if (models.length === 0) return;
@@ -1181,6 +1341,49 @@ export default function ChatComposer({
     };
   }, [suspendGlobalEvents]);
 
+  // A run that is stopping looks unchanged until the next snapshot, so the
+  // button holds a pending state instead of inviting repeated clicks.
+  const [stopping, setStopping] = useState(false);
+  const canStop = isActive || workerActivity?.state === "live";
+  const stop = async () => {
+    if (stopping) return;
+    setStopping(true);
+    try {
+      await onForcePauseRun();
+    } finally {
+      if (mountedRef.current) setStopping(false);
+    }
+  };
+  const stopRef = useRef(stop);
+  stopRef.current = stop;
+  const canStopRef = useRef(canStop);
+  canStopRef.current = canStop;
+  useEffect(() => {
+    if (suspendGlobalEvents) return;
+    const onStop = () => {
+      if (canStopRef.current) void stopRef.current();
+    };
+    window.addEventListener("spark:stop-chat", onStop);
+    return () => window.removeEventListener("spark:stop-chat", onStop);
+  }, [suspendGlobalEvents]);
+  // A failed turn's card in the conversation offers Retry; it runs exactly
+  // what this composer's own Retry button would for the same run.
+  const retryRef = useRef<(() => void) | null>(null);
+  retryRef.current = isParkedTurn
+    ? () => void resume()
+    : backendFailureQuestion && failedTurnRetryText
+      ? () => void retryFailedTurn()
+      : null;
+  useEffect(() => {
+    if (suspendGlobalEvents) return;
+    const onRetry = (event: Event) => {
+      const runId = (event as CustomEvent<{ runId?: string }>).detail?.runId;
+      if (runId && runId === runRef.current?.id) retryRef.current?.();
+    };
+    window.addEventListener("spark:retry-turn", onRetry);
+    return () => window.removeEventListener("spark:retry-turn", onRetry);
+  }, [suspendGlobalEvents]);
+
   // 1M context used to be a standalone pill; it now lives as virtual rows
   // in the model dropdown ("Opus 4.8 1M" etc.), so onPickModel writes
   // chat1mContext directly via applyChatBackendChange. No standalone
@@ -1189,12 +1392,21 @@ export default function ChatComposer({
   // Click-outside / Escape handling lives in the shared AnchoredMenu; this
   // composer only gates the app-wide keyboard broadcasts by tab visibility.
 
+  // While the conversation shows the failed turn as a card with its own Retry,
+  // the composer is just the place for a follow-up: repeating the failure in
+  // the placeholder and a second Retry here said the same thing three times.
+  const failureCardOffersRetry = run_ ? retryableFailedCallId(run_) !== null : false;
+
   // An unstarted board-minted run still reads like a fresh chat: its first
   // send is a first message (see the isUnstartedChatRun branch in send()).
   const placeholder = !run_ || isUnstartedChatRun(run_)
     ? lockedMode === "automation"
-      ? "Describe the loom you want — trigger, loop, and worker."
+      ? "Describe the loom you want: trigger, loop, and worker."
       : "Tell Cora what to build, or describe a task."
+    : failureCardOffersRetry
+      ? "Send a follow-up. Cora picks the work back up."
+    : backendFailureQuestion
+      ? "Cora's last turn failed. Retry it, or send a new message."
     : openQuestion
       ? "Answer Cora, and it keeps going."
       : isTerminal
@@ -1206,9 +1418,9 @@ export default function ChatComposer({
           // (run-store's scheduleResumeForUserMessage), so the placeholder
           // must not send the user hunting for the Resume button. Resume
           // still works on its own for an empty composer.
-          ? "Send to resume — your message goes with it."
+          ? "Send to resume. Your message goes with it."
           : isActive
-            ? "Queue a message. Cora reads it after this turn."
+            ? "Message Cora. It waits for her next turn, or press Send now on it to interrupt her."
             : "Reply, steer, or add context.";
 
   return (
@@ -1233,6 +1445,9 @@ export default function ChatComposer({
             role="alert"
             style={{
               flex: "0 0 auto",
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 8,
               marginBottom: 8,
               padding: "6px 9px",
               borderRadius: "var(--radius-surface, 10px)",
@@ -1243,7 +1458,8 @@ export default function ChatComposer({
               lineHeight: 1.4,
             }}
           >
-            {error}
+            <span style={{ flex: "1 1 auto", minWidth: 0 }}>{error}</span>
+            <DismissErrorButton onClick={() => setError(null)} />
           </div>
         )}
         <div
@@ -1307,7 +1523,11 @@ export default function ChatComposer({
         <textarea
           ref={textareaRef}
           value={draft}
-          disabled={disabled || busy}
+          // Stays editable while a send is in flight: send() clears only the
+          // text it sent, so a follow-up typed meanwhile is kept, and disabling
+          // a focused element would blur it.
+          disabled={disabled}
+          aria-label="Message Cora"
           spellCheck={false}
           onChange={(event) => {
             const next = event.target.value;
@@ -1360,20 +1580,21 @@ export default function ChatComposer({
               openModelSignal={modelPickerSignal}
               openEffortSignal={effortPickerSignal}
             />
-            {!run_ ? (
-              <ProfilePicker
-                profiles={profiles}
-                activeProfileId={draftCoraProfileId}
-                onPick={(profileId) => {
-                  profileChosenRef.current = true;
-                  setDraftCoraProfileId(profileId);
-                }}
-                onManage={openProfileManager}
-              />
-            ) : null}
-            {fastModeAvailable && (
-              <FastModeToggle enabled={fastMode.enabled} onToggle={fastMode.toggle} />
-            )}
+            <ProfilePicker
+              profiles={profiles}
+              activeProfileId={frozenProfileId ?? draftCoraProfileId}
+              locked={frozenProfileId !== null}
+              onPick={(profileId) => {
+                profileChosenRef.current = true;
+                setDraftCoraProfileId(profileId);
+              }}
+              onManage={openProfileManager}
+            />
+            <FastModeToggle
+              enabled={fastMode.enabled}
+              onToggle={fastMode.toggle}
+              unavailableReason={fastModeSupport.supported ? undefined : fastModeSupport.reason}
+            />
           </div>
           {workerActivity ? (
             <WorkerActivityStatus
@@ -1381,20 +1602,11 @@ export default function ChatComposer({
               steeringQueues={isActive}
             />
           ) : (
+            // Status only. Keyboard tips competed with the model pill for the
+            // same row and truncated both; the placeholder and the Send
+            // button's tooltip already say what Enter does.
             <span className="composer-toolbar__hint">
-              {busy
-                ? "Working..."
-                : pastingImages
-                  ? "Adding pasted image..."
-                : isActive
-                  ? "Enter to queue · delivered when this turn ends"
-                  : openQuestion
-                    // No Resume button here — the answer IS the resume — so the
-                    // hint must not point at one.
-                    ? "Enter to answer · Cora picks the work back up"
-                    : isPaused
-                      ? "Enter to send and resume · Resume alone skips the note"
-                      : "Enter to send, Shift+Enter for a new line"}
+              {busy ? "Working..." : pastingImages ? "Adding pasted image..." : null}
             </span>
           )}
           {/* Right cluster: context gauge | capabilities | resume | send read
@@ -1404,34 +1616,35 @@ export default function ChatComposer({
           <div className="composer-toolbar__right">
             <ContextPill
               used={tokensUsed}
-              budget={DEFAULT_PI_COMPACT_AT_TOKENS}
+              budget={compactBudget}
             />
-            <IconButton
-              title="MCP and skills"
-              disabled={false}
-              onClick={openCapabilities}
-            >
-              <CapabilitiesGlyph />
-            </IconButton>
-            {isPaused && (
+            <CapabilitiesButton onOpen={openCapabilities} />
+            {isPaused && !(isParkedTurn && failureCardOffersRetry) && (
               <TextButton onClick={resume} disabled={busy} tone="accent">
                 {isParkedTurn ? "Retry" : "Resume"}
               </TextButton>
             )}
-            <SendButton
-              onClick={send}
-              disabled={!canSend}
-              label={isActive ? "Queue" : "Send"}
-            />
+            {backendFailureQuestion && failedTurnRetryText && !failureCardOffersRetry && (
+              <TextButton onClick={retryFailedTurn} disabled={busy} tone="accent">
+                Retry
+              </TextButton>
+            )}
+            {/* While Cora works and there is nothing to queue, Stop takes the
+                send slot alone instead of sitting beside a dead arrow. */}
+            {!(canStop && !hasDraftToSend) && (
+              <SendButton
+                onClick={send}
+                disabled={!canSend}
+                label={isActive ? "Queue" : "Send"}
+              />
+            )}
             {/* Stop follows the work, not only the run status. A soft-paused
                 run can still own a live worker process (pause stops autopilot;
                 it doesn't reach into a worker already running), and in that
                 state the user could see a worker "working" with nothing to
                 stop it. forcePauseRun kills every active worker pty, so it is
                 the right control for both cases. */}
-            {(isActive || workerActivity?.state === "live") && (
-              <StopButton onClick={onForcePauseRun} />
-            )}
+            {canStop && <StopButton onClick={() => void stop()} stopping={stopping} />}
           </div>
         </div>
         </div>
@@ -1486,25 +1699,28 @@ function WorkerActivityStatus({
       className="composer-toolbar__hint composer-toolbar__hint--worker"
       title={titles.join("\n") || undefined}
     >
-      <span
-        aria-hidden
-        style={{
-          width: 6,
-          height: 6,
-          borderRadius: "50%",
-          background: tone,
-          // Only a running worker pulses. A steady dot for a queued one keeps
-          // the "something is happening right now" signal honest.
-          ...(live ? { animation: "spark-pulse 1.3s ease-in-out infinite" } : {}),
-          flex: "0 0 auto",
-        }}
-      />
-      <span style={{ color: tone, fontWeight: 600 }}>{headline}</span>
-      {/* The only elastic child: when the row runs out of room this segment
-          ellipsises, rather than every child being cut mid-glyph. Sizing lives
-          in .composer-toolbar__hint--worker so the rule sits with the rest of
-          the row's collapse behaviour. Solo shows the task title; a fleet
-          shows the model mix, which says more than one truncated title. */}
+      <span className="composer-toolbar__hint-head">
+        <span
+          aria-hidden
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: "50%",
+            background: tone,
+            // Only a running worker pulses. A steady dot for a queued one keeps
+            // the "something is happening right now" signal honest.
+            ...(live ? { animation: "spark-pulse 1.3s ease-in-out infinite" } : {}),
+            flex: "0 0 auto",
+          }}
+        />
+        <span style={{ color: live ? "var(--ink-dim)" : tone, fontWeight: 600 }}>{headline}</span>
+      </span>
+      {/* When the row runs out of room whole segments drop off the end (tail
+          first, then this one) instead of ending on a cut word or a dangling
+          separator. Sizing lives in .composer-toolbar__hint--worker so the
+          rule sits with the rest of the row's collapse behaviour. Solo shows
+          the task title; a fleet shows the model mix, which says more than
+          one truncated title. */}
       {solo
         ? titles[0] && <span className="composer-toolbar__hint-title">· {titles[0]}</span>
         : mixLabel && <span className="composer-toolbar__hint-title">· {mixLabel}</span>}
@@ -1512,9 +1728,9 @@ function WorkerActivityStatus({
           follows the RUN, not the workers: a paused run takes notes, only a
           run with a turn in flight queues steering. */}
       {runPaused ? (
-        <span style={{ flex: "0 0 auto" }}>· paused</span>
+        <span>· paused</span>
       ) : steeringQueues ? (
-        <span style={{ flex: "0 0 auto" }}>· messages queue</span>
+        <span>· messages queue</span>
       ) : null}
     </span>
   );
@@ -1592,38 +1808,32 @@ function fileToDataUrl(file: File): Promise<string> {
   });
 }
 
+// One main-process walk (fs:listFiles: a 10,000 file cap, the same skipped
+// build and dependency folders, and SSH workspace support). The renderer walk
+// it replaced made one serial fs:list IPC per folder and stopped depth-first
+// at 700 files, so in a big repo the later folders could never be mentioned.
 async function collectWorkspaceFiles(cwd: string): Promise<FileMention[]> {
-  const files: FileMention[] = [];
   const root = normalizePath(cwd);
+  const result = await window.spark.fs.listFiles(cwd);
+  return result.files
+    .filter((entry) => !entry.isDir)
+    .map((entry) => ({
+      path: entry.path,
+      name: entry.name,
+      relativePath: relativeWorkspacePath(root, entry.path),
+      ext: entry.ext,
+    }))
+    .sort((a, b) => a.relativePath.localeCompare(b.relativePath, undefined, { sensitivity: "base" }));
+}
 
-  async function walk(dir: string, depth: number): Promise<void> {
-    if (depth > MAX_FILE_SCAN_DEPTH || files.length >= MAX_FILE_SCAN_RESULTS) return;
-    let entries: FsEntry[] = [];
-    try {
-      entries = await window.spark.fs.list(dir);
-    } catch {
-      return;
-    }
-
-    const dirs = entries.filter((entry) => entry.isDir && !SKIPPED_MENTION_DIRS.has(entry.name));
-    const leafFiles = entries.filter((entry) => !entry.isDir);
-    for (const entry of leafFiles) {
-      if (files.length >= MAX_FILE_SCAN_RESULTS) return;
-      files.push({
-        path: entry.path,
-        name: entry.name,
-        relativePath: relativeWorkspacePath(root, entry.path),
-        ext: entry.ext,
-      });
-    }
-    for (const entry of dirs) {
-      await walk(entry.path, depth + 1);
-      if (files.length >= MAX_FILE_SCAN_RESULTS) return;
-    }
-  }
-
-  await walk(cwd, 0);
-  return files.sort((a, b) => a.relativePath.localeCompare(b.relativePath, undefined, { sensitivity: "base" }));
+/** Mention tokens in a draft that no indexed file answers to. */
+function unresolvedMentionTokens(draft: string, files: FileMention[]): string[] {
+  return parseMentionTokens(draft).filter(
+    (token) =>
+      !files.some(
+        (file) => normalizeQuery(file.relativePath) === token || normalizeQuery(file.name) === token,
+      ),
+  );
 }
 
 function rankMentionSuggestions(files: FileMention[], rawQuery: string): FileMention[] {
@@ -2094,84 +2304,6 @@ function AttachmentChip({
   );
 }
 
-function IconButton({
-  title,
-  disabled,
-  onClick,
-  children,
-}: {
-  title: string;
-  disabled: boolean;
-  onClick: () => void;
-  children?: React.ReactNode;
-}) {
-  const [hover, setHover] = useState(false);
-  const [pressed, setPressed] = useState(false);
-  const [focusRing, setFocusRing] = useState(false);
-  const live = !disabled;
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-      aria-label={title}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => {
-        setHover(false);
-        setPressed(false);
-      }}
-      onMouseDown={() => setPressed(true)}
-      onMouseUp={() => setPressed(false)}
-      // Compose the global --focus-ring into the inline box-shadow on keyboard
-      // focus; an inline box-shadow would otherwise clobber the global rule.
-      onFocus={(event) => setFocusRing(event.target.matches(":focus-visible"))}
-      onBlur={() => setFocusRing(false)}
-      style={{
-        appearance: "none",
-        width: 26,
-        height: 26,
-        flex: "0 0 26px",
-        border: "1px solid var(--rule-soft)",
-        borderRadius: "var(--radius-control, 7px)",
-        background:
-          pressed && live
-            ? "var(--press, color-mix(in oklab, var(--ink) 12%, transparent))"
-            : hover && live
-              ? "var(--hover)"
-              : "transparent",
-        boxShadow: focusRing
-          ? "var(--focus-ring)"
-          : pressed && live
-            ? "var(--well)"
-            : disabled
-              ? "none"
-              : "var(--lift-hi)",
-        color: disabled ? "var(--muted-2)" : hover ? "var(--ink)" : "var(--ink-dim)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 0,
-        cursor: live ? "pointer" : "default",
-        transition:
-          "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-function CapabilitiesGlyph() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden>
-      <path d="M2.5 4h9M2.5 10h9" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" />
-      <circle cx="5" cy="4" r="1.4" stroke="currentColor" strokeWidth="1.25" />
-      <circle cx="9" cy="10" r="1.4" stroke="currentColor" strokeWidth="1.25" />
-    </svg>
-  );
-}
-
 function FileGlyph() {
   return (
     <svg width="13" height="13" viewBox="0 0 14 14" fill="none" aria-hidden>
@@ -2187,7 +2319,9 @@ function FileGlyph() {
   );
 }
 
-function StopButton({ onClick }: { onClick: () => void }) {
+const STOP_HINT = chordToHint(mod("."));
+
+function StopButton({ onClick, stopping }: { onClick: () => void; stopping: boolean }) {
   const [hover, setHover] = useState(false);
   const [pressed, setPressed] = useState(false);
   const [focusRing, setFocusRing] = useState(false);
@@ -2195,8 +2329,10 @@ function StopButton({ onClick }: { onClick: () => void }) {
     <button
       type="button"
       onClick={onClick}
-      title="Stop run"
-      aria-label="Stop run"
+      disabled={stopping}
+      aria-busy={stopping || undefined}
+      title={stopping ? "Stopping Cora…" : `Stop Cora (${STOP_HINT})`}
+      aria-label={stopping ? "Stopping Cora" : "Stop Cora"}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => {
         setHover(false);
@@ -2213,28 +2349,34 @@ function StopButton({ onClick }: { onClick: () => void }) {
         flex: "0 0 26px",
         border: "none",
         borderRadius: "var(--radius-control, 7px)",
-        background: hover
-          ? "color-mix(in oklch, var(--danger) 88%, var(--ink))"
-          : "var(--danger)",
+        background: hover ? "var(--panel-3)" : "var(--panel-2)",
         // Keyboard focus restores the accent ring (the inline box-shadow would
         // otherwise clobber the global :focus-visible rule).
         boxShadow: focusRing
           ? "var(--focus-ring)"
           : pressed
             ? "var(--well)"
-            : "var(--lift-hi)",
-        color: "var(--accent-ink)",
+            : "inset 0 0 0 1px var(--rule)",
+        color: "var(--ink)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
         padding: 0,
-        cursor: "default",
+        cursor: stopping ? "progress" : "default",
+        opacity: stopping ? 0.55 : 1,
         transform: pressed ? "translateY(0.5px)" : "translateY(0)",
         transition:
-          "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out)",
+          "background var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
       }}
     >
-      <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" aria-hidden>
+      <svg
+        width="10"
+        height="10"
+        viewBox="0 0 10 10"
+        fill="currentColor"
+        aria-hidden
+        className={stopping ? "composer-stop-glyph is-stopping" : "composer-stop-glyph"}
+      >
         <rect x="1" y="1" width="8" height="8" rx="1.5" />
       </svg>
     </button>
@@ -2259,7 +2401,7 @@ function SendButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      title={label}
+      title={`${label} (Enter) · Shift+Enter for a new line`}
       aria-label={label}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => {

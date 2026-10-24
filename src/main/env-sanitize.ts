@@ -19,7 +19,7 @@
 // via CliSessionOptions.env / SpawnOptions.env) are applied AFTER this strip,
 // so they always survive.
 
-import { delimiter, dirname, join, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 
 // Exact-name nesting markers that don't share the CLAUDE_CODE_ prefix.
 const NESTED_AGENT_ENV_EXACT = new Set([
@@ -80,6 +80,134 @@ export function sanitizeElectronViteDevEnv(env: Record<string, string | undefine
   delete env[ELECTRON_VITE_MODE_MARKER];
 }
 
+// Host terminal identity.
+//
+// Codara started from another terminal (`npm run dev` typed into WezTerm, a
+// launcher run inside kitty or tmux) inherits that terminal's name and the
+// address of the pane it ran in. A Codara pane is not that pane. Tools that
+// act on "the current pane" through these variables reach the launcher's
+// window instead: `wezterm cli split-pane` (what a /sessions picker uses to
+// open over the current pane) splits the WezTerm pane running `npm run dev`,
+// so nothing appears in Codara. Claude Code also reads TERM_PROGRAM and
+// WEZTERM_PANE to pick its keyboard protocol and clipboard path, and would
+// configure itself for WezTerm inside xterm.js.
+const HOST_TERMINAL_ENV = [
+  "TERM_PROGRAM",
+  "TERM_PROGRAM_VERSION",
+  "TERM_SESSION_ID",
+  "LC_TERMINAL",
+  "LC_TERMINAL_VERSION",
+  "WINDOWID",
+  "WEZTERM_PANE",
+  "WEZTERM_UNIX_SOCKET",
+  "WEZTERM_EXECUTABLE",
+  "WEZTERM_EXECUTABLE_DIR",
+  "KITTY_WINDOW_ID",
+  "KITTY_PID",
+  "KITTY_LISTEN_ON",
+  "KITTY_PUBLIC_KEY",
+  "TMUX",
+  "TMUX_PANE",
+  "STY",
+  "ZELLIJ",
+  "ZELLIJ_SESSION_NAME",
+  "ZELLIJ_PANE_ID",
+  "ITERM_SESSION_ID",
+  "ITERM_PROFILE",
+  "WT_SESSION",
+  "WT_PROFILE_ID",
+  "ALACRITTY_WINDOW_ID",
+  "ALACRITTY_SOCKET",
+  "GHOSTTY_RESOURCES_DIR",
+  "GHOSTTY_BIN_DIR",
+  "GHOSTTY_SHELL_FEATURES",
+  "VTE_VERSION",
+  "GNOME_TERMINAL_SCREEN",
+  "GNOME_TERMINAL_SERVICE",
+  "TILIX_ID",
+  "KONSOLE_VERSION",
+  "KONSOLE_DBUS_SERVICE",
+  "KONSOLE_DBUS_SESSION",
+  "KONSOLE_DBUS_WINDOW",
+  "TERMINATOR_UUID",
+  "TERMINATOR_DBUS_NAME",
+  "TERMINATOR_DBUS_PATH",
+];
+
+/** Delete the launching terminal's identity and pane address from `env`, in place. */
+export function sanitizeHostTerminalEnv(env: Record<string, string | undefined>): void {
+  for (const key of HOST_TERMINAL_ENV) delete env[key];
+}
+
+// AppImage identity.
+//
+// The AppImage runtime exports APPIMAGE (the .AppImage file), APPDIR (its
+// mount), OWD and ARGV0 to the app it starts, and electron-updater adds
+// APPIMAGE_SILENT_INSTALL or APPIMAGE_EXIT_AFTER_INSTALL to the Codara it
+// relaunches after an update. All of them describe Codara's own launch. In a
+// pane they make an unpacked or dev build started there take itself for the
+// installed AppImage (its updater would replace that file, and its config
+// gates would treat it as installed), and electron-builder's AppRun, run from
+// an extracted AppDir, would start Codara's binary from the inherited APPDIR.
+// The user's own APPIMAGE_* runtime knobs (APPIMAGE_EXTRACT_AND_RUN) stay.
+const APPIMAGE_LAUNCH_ENV = [
+  "APPIMAGE",
+  "APPDIR",
+  "OWD",
+  "ARGV0",
+  "APPIMAGE_SILENT_INSTALL",
+  "APPIMAGE_EXIT_AFTER_INSTALL",
+];
+
+/** Delete the AppImage runtime's description of Codara's own launch from `env`, in place. */
+export function sanitizeAppImageLaunchEnv(env: Record<string, string | undefined>): void {
+  for (const key of APPIMAGE_LAUNCH_ENV) delete env[key];
+}
+
+// electron-builder's AppRun puts the mount in front of these lists before it
+// starts Codara: the mount itself and usr/sbin on PATH, usr/lib (its bundled
+// libnotify, libXss, libgconf and friends) on LD_LIBRARY_PATH, usr/share on
+// XDG_DATA_DIRS and the glib schemas. A pane's programs then load Codara's old
+// copies ahead of the system's. Codara's own children that run its binary as
+// Node (the codara-studio server, Pi) link none of those libraries.
+const APPRUN_SEARCH_PATH_ENV = ["PATH", "LD_LIBRARY_PATH", "XDG_DATA_DIRS", "GSETTINGS_SCHEMA_DIR"];
+
+function isInsideDir(entry: string, dir: string): boolean {
+  if (!isAbsolute(entry)) return false;
+  const target = resolve(entry);
+  return target === dir || target.startsWith(dir.endsWith(sep) ? dir : `${dir}${sep}`);
+}
+
+/**
+ * Remove the entries inside `appDir` from the search paths AppRun extended,
+ * in place, leaving every other entry as it was. A list left empty goes.
+ */
+export function stripAppImageSearchPaths(env: Record<string, string | undefined>, appDir: string | undefined): void {
+  // AppRun writes the entries from $APPDIR as it is, so no realpath.
+  if (!appDir || !isAbsolute(appDir)) return;
+  const dir = resolve(appDir);
+  for (const key of APPRUN_SEARCH_PATH_ENV) {
+    const value = env[key];
+    if (value === undefined) continue;
+    const entries = value.split(delimiter);
+    const kept = entries.filter((entry) => !isInsideDir(entry, dir));
+    if (kept.length === entries.length) continue;
+    if (kept.length === 0) delete env[key];
+    else env[key] = kept.join(delimiter);
+  }
+}
+
+/**
+ * Remove Codara's AppImage launch from a child's `env`, in place: AppRun's
+ * search path entries, then the launch variables. Once boot has dropped an
+ * inherited launch (appimage-launch.ts), an APPDIR still in process.env is
+ * the mount this Codara runs from.
+ */
+export function sanitizeAppImageChildEnv(env: Record<string, string | undefined>): void {
+  stripAppImageSearchPaths(env, env.APPDIR);
+  sanitizeAppImageLaunchEnv(env);
+}
+
 /**
  * A copy of process.env without electron-vite's dev wiring, for a child that
  * runs the user's own commands outside pty-manager (automation steps and
@@ -89,6 +217,7 @@ export function processEnvWithoutElectronViteDev(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   sanitizeElectronViteDevEnv(env);
   sanitizeNpmRunScriptEnv(env);
+  sanitizeAppImageChildEnv(env);
   return env;
 }
 

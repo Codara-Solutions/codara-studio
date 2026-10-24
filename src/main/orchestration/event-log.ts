@@ -245,6 +245,18 @@ export function appendBufferedEvent(input: AppendEventInput): void {
 }
 
 /**
+ * Send a live-only event to renderer windows without journaling it. It has no
+ * sequence, so it sorts after every durable event; callers give it a stable id
+ * so each new one replaces the last instead of accumulating. Main-process
+ * subscribers never see it: they track journaled state (worker panes, board
+ * pushes, phone invalidations), and a display-only frame several times a
+ * second would make the phone refetch a run that did not change.
+ */
+export function broadcastLiveEvent(input: AppendEventInput): void {
+  sendToWindows([createEvent(input)]);
+}
+
+/**
  * Force buffered stream events to disk now. Called for one run when its manager
  * turn ends, and for every run on shutdown, so a quit inside the flush window
  * cannot drop the tail of a stream.
@@ -439,6 +451,10 @@ function broadcast(events: SparkEvent[]): void {
       }
     }
   }
+  sendToWindows(events);
+}
+
+function sendToWindows(events: SparkEvent[]): void {
   for (const win of BrowserWindow.getAllWindows()) {
     if (win.webContents.isDestroyed()) continue;
     if (events.length === 1) {

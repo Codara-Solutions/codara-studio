@@ -14,12 +14,29 @@ import { UnifiedAccountService, type UnifiedTerminalStatus } from "./unified-acc
 
 const log = (message: string): void => console.warn(message);
 
+const defaultsListeners = new Set<() => Promise<void>>();
+
+/**
+ * Run `listener` after every change of an Active account, behind the shell
+ * pointer. claude-follow registers its flag here at boot, so this registry
+ * never imports the Electron-side module.
+ */
+export function onActiveAccountsChanged(listener: () => Promise<void>): () => void {
+  defaultsListeners.add(listener);
+  return () => defaultsListeners.delete(listener);
+}
+
 const defaultsChanged = async (): Promise<void> => {
   // Imported lazily: the pointer module reads the two profile stores, which
   // this registry's adapters also resolve, and a plain shell follows the
   // pointer rather than any service.
   const { refreshActiveCliEnvPointer } = await import("./active-cli-env-pointer");
   await refreshActiveCliEnvPointer();
+  for (const listener of defaultsListeners) {
+    await listener().catch((error: unknown) => {
+      log(`[accounts] an Active-account listener failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }
 };
 
 export const anthropicAccounts = new UnifiedAccountService(claudeAccountAdapter, {

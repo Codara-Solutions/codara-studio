@@ -53,6 +53,12 @@ that defines it (types are in `src/shared/types.ts` unless noted).
   at all.
 - **Pass.** One execution of a loom, that is, one iteration of an
   automation's loop. Each pass is a run.
+- **Workflow.** A script that fans work out to many agents with `agent`,
+  `parallel` and `pipeline` (`src/main/orchestration/workflow-*.ts`). A
+  workflow run is a `direct` run with a `workflow` block (`WorkflowRunInfo`).
+- **Workflow journal.** The record of every `agent` call a workflow run made
+  and what it returned (`workflow-journal.ts`). Resume replays it, so
+  finished agents are not run again.
 
 ## Workspace and interface
 
@@ -60,14 +66,25 @@ that defines it (types are in `src/shared/types.ts` unless noted).
   color, tabs and terminals (`Workspace`).
 - **Copy-branch workspace.** A workspace backed by a new git worktree, so
   agents can work on a copy of the repository.
+- **Workspace status.** The state (To do, In progress, In review, Done or
+  Blocked) and one-line note you set on a workspace from the row's menu,
+  shown under its name in the rail and on the Agents view's cards. Each
+  change is kept as a checkpoint (`src/shared/workspace-status.ts`).
+- **Agent line.** One agent's line in the rail: its state, which Codara
+  computes (working, needs you, done or idle), and the one-line note the agent
+  adds with `codara_workspace_status`. The note goes when the agent's tab
+  closes (for a Cora chat, when the chat leaves the Agents view). The workspace's row sums its agent lines and its task list into one
+  summary line (`src/shared/agent-status.ts`).
 - **Dock, docked tab.** A tab placed inside a terminal tab's split grid
   instead of filling the whole area (`src/renderer/src/tabs/dock.ts`).
 - **Browser tab, preview.** The built-in Chromium tab. The UI calls it the
   browser; the MCP tools that drive it are named `codara_preview_*`.
-- **Capability Center.** The dialog for MCP servers, skills, Cora memory,
-  worker models and session policy, opened with the **MCP and skills** button
-  in the Cora composer
-  (`src/renderer/src/components/AgentCapabilitiesDialog.tsx`).
+- **Capability Center.** The dialog for MCP servers, skills, Cora profiles
+  and memory, worker models and agent behavior, opened with the **Tools**
+  button in the Cora composer, from Settings > Agents, or with the
+  `capabilities.open` command
+  (`src/renderer/src/components/AgentCapabilitiesDialog.tsx`, sections in
+  `src/renderer/src/components/capabilities/`).
 
 ## Accounts
 
@@ -76,10 +93,11 @@ See [accounts.md](./accounts.md) for how these fit together.
 - **Account.** One sign-in with Claude, ChatGPT or Grok. It has a Cora side
   (the subscription Cora uses) and a CLI side (the login Claude Code, Codex or
   Grok uses), which hold the same sign-in.
-- **Account 1.** Your own login in the CLI's usual home.
-- **Active account.** The account a CLI's terminals, and new Cora chats, use.
-  For Claude Code and Codex its login is the one in your own `~/.claude` or
-  `~/.codex`.
+- **System login.** Your own login in the CLI's usual home (`~/.claude`,
+  `~/.codex`, `~/.grok`). Codara reads who it is signed in as and never
+  changes it; added to Codara, it shows the badge "Your Claude Code login".
+- **Active account.** The account new Codara terminals and new Cora chats
+  use. With none Active, terminals use the System login.
 - **Credential mirror.** The process that keeps an account's two sides
   holding the same, newest login (`credential-mirror.ts`).
 

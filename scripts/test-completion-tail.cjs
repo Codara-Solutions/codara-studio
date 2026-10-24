@@ -126,6 +126,8 @@ function settledRun(id) {
       workerTaskId: task.id,
       status: "succeeded",
       engine: "pi",
+      // The prior-runs ledger records only runs whose workers left a report.
+      finalReportPath: path.join(HOME, "runs", id, "reports", `att-${i + 1}.json`),
       createdAt: NOW,
       updatedAt: NOW,
     })),
@@ -158,6 +160,15 @@ function settledRun(id) {
 function writeRun(run) {
   const dir = path.join(HOME, "runs", run.id);
   fs.mkdirSync(dir, { recursive: true });
+  for (const attempt of run.workerAttempts || []) {
+    if (!attempt.finalReportPath) continue;
+    fs.mkdirSync(path.dirname(attempt.finalReportPath), { recursive: true });
+    fs.writeFileSync(
+      attempt.finalReportPath,
+      // The ledger skips runs whose workers changed and ran nothing.
+      JSON.stringify({ status: "complete", summary: "did the thing", filesChanged: [{ path: "src/thing.ts", summary: "the thing" }], verification: [] }),
+    );
+  }
   fs.writeFileSync(path.join(dir, "run.json"), JSON.stringify(run, null, 2));
   return run.id;
 }

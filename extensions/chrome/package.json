@@ -1,0 +1,10 @@
+{
+  "name": "codara-chrome-extension",
+  "private": true,
+  "type": "module",
+  "description": "Development manifest for the Codara browser extension; Chrome reads manifest.json.",
+  "scripts": {
+    "pack": "node build/pack.mjs",
+    "test": "node test/run.mjs"
+  }
+}

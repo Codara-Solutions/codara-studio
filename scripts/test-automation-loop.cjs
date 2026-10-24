@@ -24,7 +24,23 @@ const ORCH_DIR = path.join(ROOT, "src", "main", "orchestration");
 const SCHEDULER_TS = path.join(ORCH_DIR, "scheduler.ts");
 const AUTOMATION_LOOP_TS = path.join(ORCH_DIR, "automation-loop.ts");
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// The loop driver is promise-chained (lazy imports, stubbed stores) plus one
+// timer (cadence), so the suite runs on a fake clock instead of real sleeps.
+// settle() lets those promise chains drain; clock.advance() moves cadence time.
+// Only the real child process behind a steps-only pass needs real time, and
+// that is awaited with until() on the actual condition.
+const clock = require("./fake-clock.cjs").installFakeClock();
+const settle = async () => {
+  for (let i = 0; i < 20; i += 1) await new Promise((r) => clock.real.setImmediate(r));
+};
+const until = async (pred, timeoutMs = 10_000) => {
+  const deadline = clock.real.Date.now() + timeoutMs;
+  // advance(1) also runs the driver's zero-delay timers (step-only settle).
+  while (!(await pred()) && clock.real.Date.now() < deadline) {
+    await clock.advance(1);
+    await new Promise((r) => clock.real.setTimeout(r, 2));
+  }
+};
 
 const harnessPlugin = {
   name: "automation-loop-test-harness",
@@ -72,10 +88,11 @@ const harnessPlugin = {
         // Unified notify pipeline: record publishes/rearms for assertions.
         return {
           contents:
-            "globalThis.__NOTIFY ??= { published: [], rearms: [] };\n" +
+            "globalThis.__NOTIFY ??= { published: [], rearms: [], settledJobs: [] };\n" +
             "export const automationSourceKey = (id) => `automation:${id}`;\n" +
             "export function publish(e){ globalThis.__NOTIFY.published.push(e); }\n" +
-            "export function rearm(k){ globalThis.__NOTIFY.rearms.push(k); }\n",
+            "export function rearm(k){ globalThis.__NOTIFY.rearms.push(k); }\n" +
+            "export function settleAutomationQuestions(id){ globalThis.__NOTIFY.settledJobs.push(id); }\n",
           loader: "js",
         };
       }
@@ -201,7 +218,7 @@ async function main() {
     runId,
     { status = "complete", summary, cost = 0, measuredWorkerCost = 0, estimatedWorkerCost = 0 } = {},
   ) => {
-    await sleep(40);
+    await settle();
     const run = L.runs.get(runId);
     if (!run) throw new Error(`completeRun: unknown run ${runId}`);
     run.status = status;
@@ -210,17 +227,17 @@ async function main() {
     run.estimatedWorkerCostUsd = estimatedWorkerCost;
     if (summary !== undefined) run.humanMessages = [{ author: "spark", kind: "note", message: summary, createdAt: new Date().toISOString() }];
     for (const h of [...L.subs]) h({ runId });
-    await sleep(40);
+    await settle();
   };
 
   // Fire an event for a run WITHOUT making it terminal (e.g. it left "blocked"
   // back to "running"). Used to test the stale-blocked-status reset.
   const fireRunStatus = async (runId, status) => {
-    await sleep(40);
+    await settle();
     const run = L.runs.get(runId);
     if (run) run.status = status;
     for (const h of [...L.subs]) h({ runId });
-    await sleep(40);
+    await settle();
   };
 
   const nextPending = () => L.pending[L.pending.length - 1];
@@ -442,6 +459,10 @@ async function main() {
     st = await getState(job.id);
     ok("stopJob finalizes (user-stop)", st.status === "stopped" && st.lastStopReason === "user-stop");
     ok("stopJob force-paused the live run", (L.forcePaused ?? 0) >= 1);
+    ok(
+      "stopJob settles the questions its iterations asked",
+      globalThis.__NOTIFY.settledJobs.includes(job.id),
+    );
   }
 
   // ── 7) state + history persist to scheduler.json; legacy job normalizes ──
@@ -515,7 +536,7 @@ async function main() {
     ok("paused loop does not advance while paused", L.launches.length === launchesAtPause);
     // Resume ALONE (no runJobNow) must re-drive the loop.
     await sched.resumeJob(job.id);
-    await sleep(80);
+    await settle();
     const st = await getState(job.id);
     ok("resume re-drives a paused loop", L.launches.length > launchesAtPause && st.status === "running");
   }
@@ -785,7 +806,7 @@ async function main() {
 
     L.launches.length = 0;
     await sched.fireJob(job.id); // the next cron tick
-    await sleep(80);
+    await settle();
     st = await getState(job.id);
     ok(
       "trigger fire on a finished loom starts a fresh cycle",
@@ -856,7 +877,7 @@ async function main() {
     });
     await sched.pauseJob(job.id);
     await sched.resumeJob(job.id);
-    await sleep(1300); // > everyMs
+    await clock.advance(1300); // > everyMs
     ok("resuming a never-fired cadence loom launches nothing", L.launches.length === 0);
 
     // A cycle in progress (pass 1 done, parked between fires) re-arms on resume.
@@ -867,7 +888,7 @@ async function main() {
     await sched.pauseJob(job.id); // clears the timer (and nextFireAt)
     const launchesAtPause = L.launches.length;
     await sched.resumeJob(job.id);
-    await sleep(1500);
+    await clock.advance(1500);
     ok("resuming a mid-cycle cadence loom re-arms the next fire", L.launches.length > launchesAtPause);
     await sched.stopJob(job.id);
   }
@@ -908,7 +929,7 @@ async function main() {
     L.pending.length = 0;
 
     // The worker exits report-blocked: terminal attempt + spark question.
-    await sleep(40);
+    await settle();
     const run = L.runs.get(rid);
     run.status = "blocked";
     run.workerAttempts = [{ id: "att-q", status: "succeeded" }];
@@ -922,7 +943,7 @@ async function main() {
       },
     ];
     for (const h of [...L.subs]) h({ runId: rid });
-    await sleep(60);
+    await settle();
     let st = await getState(job.id);
     ok("report-blocked pass parks the loom blocked", st.status === "blocked");
     ok("no continuation launches before the answer", !L.launches.some((l) => l.kind === "chain"));
@@ -937,7 +958,7 @@ async function main() {
       createdAt: new Date().toISOString(),
     });
     for (const h of [...L.subs]) h({ runId: rid });
-    await sleep(80);
+    await settle();
     const chain = L.launches[L.launches.length - 1];
     ok(
       "the answer resumes the pass in the SAME run with question+answer context",
@@ -1060,7 +1081,7 @@ async function main() {
     L.pending.length = 0;
     await sched.fireWatchdog(job.id, rid, "wd-B", 5);
     for (const h of [...L.subs]) h({ runId: rid }); // watchTerminal sees the failed run
-    await sleep(60);
+    await settle();
     const st = await getState(job.id);
     ok("once the whole wave fails, the loop records iteration-failed", st.status === "stopped" && st.lastStopReason === "iteration-failed");
   }
@@ -1136,7 +1157,7 @@ async function main() {
 
     // The wave exits with TWO report-blocked nodes (A and B), each a terminal
     // attempt + a loomNodeId-stamped question.
-    await sleep(40);
+    await settle();
     const run = L.runs.get(rid);
     run.status = "blocked";
     run.workerTasks = [
@@ -1162,7 +1183,7 @@ async function main() {
       { id: "q-B", author: "spark", kind: "question", message: "Which target?", loomNodeId: "B", createdAt: new Date(t0 - 1000).toISOString() },
     ];
     for (const h of [...L.subs]) h({ runId: rid });
-    await sleep(60);
+    await settle();
     let st = await getState(job.id);
     ok("multi-node report-blocked pass parks the loom blocked", st.status === "blocked");
     ok("no continuation launches before any answer lands", !L.launches.some((l) => l.kind === "chain"));
@@ -1178,7 +1199,7 @@ async function main() {
       createdAt: new Date(t0 + 100).toISOString(),
     });
     for (const h of [...L.subs]) h({ runId: rid });
-    await sleep(80);
+    await settle();
     const chainsAfterA = L.launches.filter((l) => l.kind === "chain");
     ok(
       "answering node A resumes ONLY node A (stamped + carries question/answer)",
@@ -1206,7 +1227,7 @@ async function main() {
       createdAt: new Date(t0 + 1000).toISOString(),
     });
     for (const h of [...L.subs]) h({ runId: rid });
-    await sleep(80);
+    await settle();
     const chainsAfterB = L.launches.filter((l) => l.kind === "chain" && l.loomNodeId === "B");
     ok(
       "the second blocked node resumes on the next finalize re-entry",
@@ -1313,7 +1334,7 @@ async function main() {
     await sched.runJobNow(ans.id);
     rid = nextPending();
     L.pending.length = 0;
-    await sleep(40);
+    await settle();
     const run = L.runs.get(rid);
     run.status = "blocked";
     run.workerAttempts = [{ id: "att-q", status: "succeeded" }];
@@ -1321,10 +1342,10 @@ async function main() {
       { id: "q-path", author: "spark", kind: "question", message: "Which path?", createdAt: new Date(Date.now() - 1000).toISOString() },
     ];
     for (const h of [...L.subs]) h({ runId: rid });
-    await sleep(60);
+    await settle();
     run.humanMessages.push({ id: "a-path", author: "user", kind: "answer", message: "Use /tmp", answersMessageId: "q-path", createdAt: new Date().toISOString() });
     for (const h of [...L.subs]) h({ runId: rid });
-    await sleep(80);
+    await settle();
     const resume = L.launches[L.launches.length - 1];
     ok(
       "answer-resume continuation does NOT set freshPass (mid-pass preserve)",
@@ -1394,7 +1415,8 @@ async function main() {
       graph,
     });
     await sched.runJobNow(job.id);
-    await sleep(300);
+    await until(async () => (await getState(job.id))?.status === "stopped");
+    await settle();
     const recs = L.launches.filter((l) => l.kind === "step-only");
     ok("steps-only loom records a step-only pass per iteration (count 2 → 2 passes, no worker launch)", recs.length === 2 && !L.launches.some((l) => l.kind === "start" || l.kind === "chain"));
     ok("each pass settles complete with the SINK step's output as summary", recs.every((r) => r.status === "complete" && r.summary === "second after first"));
@@ -1412,10 +1434,64 @@ async function main() {
       graph: { version: 1, nodes: [{ id: "x", kind: "step", action: { type: "command", command: "echo nope; exit 2" } }], edges: [], entryNodeIds: ["x"] },
     });
     await sched.runJobNow(bad.id);
-    await sleep(300);
+    await until(async () => (await getState(bad.id))?.status === "stopped");
+    await settle();
     const badFin = (await sched.listJobs()).find((j) => j.id === bad.id);
     const badRec = L.launches.find((l) => l.kind === "step-only");
     ok("a failing entry step records a FAILED pass and stops the loop (iteration-failed)", badRec && badRec.status === "failed" && /Step "x" failed:[\s\S]*\[exit 2\]/.test(badRec.summary) && badFin.state.status === "stopped" && badFin.state.lastStopReason === "iteration-failed" && L.launches.length === 1);
+  }
+
+  // ── 31) A repeating single-worker loop without {{lastOutput}} hands the ──
+  // previous pass's summary to the next pass (signal lines dropped, so the
+  // agent footer still appears); a template that uses the token, a first pass,
+  // and a count loop get nothing extra.
+  {
+    L.launches.length = 0;
+    L.pending.length = 0;
+    const job = await sched.createJob({
+      name: "handoff",
+      trigger: { kind: "manual" },
+      loop: { kind: "agent", stop: { maxIterations: 5 }, isolate: true },
+      input: baseInput,
+      prompt: { template: "migrate the next module" },
+    });
+    await sched.runJobNow(job.id);
+    const first = L.launches.at(-1);
+    ok("pass 1 has no previous-pass block", !/\[Previous pass summary\]/.test(first.note));
+    await completeRun(nextPending(), { summary: "migrated auth.ts; next is billing.ts\nSPARK_LOOP_CONTINUE" });
+    const second = L.launches.at(-1);
+    ok(
+      "pass 2 receives the previous summary without its signal line",
+      /\[Previous pass summary\]\nmigrated auth\.ts; next is billing\.ts\n\[End previous pass summary\]/.test(second.note) &&
+        (second.note.match(/SPARK_LOOP_CONTINUE/g) ?? []).length === 1,
+    );
+    ok("pass 2 still carries the agent-loop footer", /This is an automation loop/.test(second.note));
+
+    L.launches.length = 0;
+    L.pending.length = 0;
+    const tokenJob = await sched.createJob({
+      name: "handoff-token",
+      trigger: { kind: "manual" },
+      loop: { kind: "agent", stop: { maxIterations: 5 }, isolate: true },
+      input: baseInput,
+      prompt: { template: "continue from: {{lastOutput}}" },
+    });
+    await sched.runJobNow(tokenJob.id);
+    await completeRun(nextPending(), { summary: "step one done\nSPARK_LOOP_CONTINUE" });
+    ok("a template using {{lastOutput}} gets no extra block", !/\[Previous pass summary\]/.test(L.launches.at(-1).note));
+
+    L.launches.length = 0;
+    L.pending.length = 0;
+    const countJob = await sched.createJob({
+      name: "handoff-count",
+      trigger: { kind: "manual" },
+      loop: { kind: "count", stop: { maxIterations: 2 }, isolate: true },
+      input: baseInput,
+      prompt: { template: "independent pass" },
+    });
+    await sched.runJobNow(countJob.id);
+    await completeRun(nextPending(), { summary: "pass one" });
+    ok("a count loop keeps independent passes", !/\[Previous pass summary\]/.test(L.launches.at(-1).note));
   }
 
   sched.stopScheduler();

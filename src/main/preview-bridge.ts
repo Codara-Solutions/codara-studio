@@ -37,15 +37,26 @@ export type PreviewOpName =
   | "click"
   | "type"
   | "press_key"
-  | "wait_for"
   | "screenshot"
+  // Internal: keep a background tab rendering during a performance trace.
+  | "paint"
   | "url"
   // Renderer-side webview-element resize (changes the guest viewport).
   | "resize"
   // Internal: resolve the picked tab's guest webContents id (+ viewport/dpr)
   // so the main-side computer-use executor can drive it directly. Not an MCP
   // tool — only preview-input.ts calls it.
-  | "get_web_contents_id";
+  | "get_web_contents_id"
+  // Show a page's alert/confirm/prompt in its tab; answers with the user's
+  // choice (browser/preview-dialogs.ts). dialog_hide takes it down.
+  | "dialog_show"
+  | "dialog_hide"
+  // A logged-out tab in its own temporary partition, and closing one
+  // (browser/fresh-tabs.ts wipes its data).
+  | "open_isolated"
+  | "close_isolated"
+  // codara_preview_close: closes a tab the way the user's close button does.
+  | "close";
 
 export interface PreviewOpParams {
   tabId?: string | null;
@@ -147,7 +158,10 @@ export async function requestPreviewOp<T = unknown>(
 }
 
 async function waitForRendererLoad(webContents: WebContents): Promise<void> {
-  if (!webContents.isLoading()) return;
+  // Only the app's own document matters. isLoading() is also true while a
+  // browser tab's guest page loads, and did-finish-load never follows for
+  // that, so a request sent then waited out the timeout and failed.
+  if (!webContents.isLoadingMainFrame()) return;
   await new Promise<void>((resolve, reject) => {
     const cleanup = () => {
       clearTimeout(timer);
@@ -176,7 +190,7 @@ async function waitForRendererLoad(webContents: WebContents): Promise<void> {
     webContents.once("render-process-gone", gone);
     // Close the race where loading ended between the initial check and the
     // listener registration.
-    if (!webContents.isLoading()) ready();
+    if (!webContents.isLoadingMainFrame()) ready();
   });
 }
 

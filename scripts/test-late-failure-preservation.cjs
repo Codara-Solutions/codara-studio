@@ -261,6 +261,16 @@ async function main() {
     resInterrupted.preservedExisting === true && readReport(pInterrupted).status === "complete",
   );
 
+  // readWorkerReport reads "done" as complete, so a late error must keep such a
+  // report exactly as it keeps a literal "complete" one.
+  const pAlias = reportFile("alias.json", { ...completeReport("Done in other words."), status: "done" });
+  const resAlias = await workerLaunch.writeAutoFailureReport({ finalReportJson: pAlias }, wtask, "late boom");
+  check(
+    "a report whose status is an accepted synonym of complete is preserved",
+    resAlias.preservedExisting === true && readReport(pAlias).summary === "Done in other words.",
+    JSON.stringify(readReport(pAlias)),
+  );
+
   const pMissing = reportFile("missing.json");
   const resMissing = await workerLaunch.writeAutoFailureReport({ finalReportJson: pMissing }, wtask, "no TUI banner observed");
   const afterMissing = readReport(pMissing);
@@ -287,6 +297,59 @@ async function main() {
   check(
     "a corrupt report file is replaced with the synthetic failure",
     resCorrupt.preservedExisting === false && readReport(pCorrupt).status === "failed",
+  );
+
+  // A worker that did its work but wrote the report in the wrong shape, or was
+  // still working at the turn time limit, did not hit a broken CLI. Its risk
+  // must not carry the launch-failure marker that sends the task to a cold
+  // rerun on the other provider, and its own report must survive.
+  const LAUNCH_FAILURE_RISK = /CLI failed (?:to launch|before producing a final report)|runtime API error|socket connection/i;
+  const pInvalid = reportFile(
+    path.join("invalid-shape", "final-report.json"),
+    { status: "in_progress", summary: "Added the parser and its tests." },
+  );
+  await workerLaunch.writeAutoFailureReport(
+    { finalReportJson: pInvalid },
+    wtask,
+    "Pi worker completed without a parseable final-report.json.",
+    { cause: "no_valid_report" },
+  );
+  const afterInvalid = readReport(pInvalid);
+  const invalidCopy = path.join(path.dirname(pInvalid), "final-report.invalid.json");
+  check(
+    "an invalid report is kept aside before it is replaced",
+    fs.existsSync(invalidCopy) && readReport(invalidCopy).summary === "Added the parser and its tests.",
+  );
+  check(
+    "the synthetic report keeps the worker's own summary",
+    afterInvalid.summary.includes("Added the parser and its tests."),
+    afterInvalid.summary,
+  );
+  check(
+    "a missing or invalid report is not mistaken for a launch failure",
+    afterInvalid.status === "failed" && !afterInvalid.risks.some((risk) => LAUNCH_FAILURE_RISK.test(risk)),
+    JSON.stringify(afterInvalid.risks),
+  );
+  const pCeiling = reportFile(path.join("ceiling", "final-report.json"));
+  await workerLaunch.writeAutoFailureReport(
+    { finalReportJson: pCeiling },
+    wtask,
+    "Pi worker exceeded its 6h turn ceiling while still making progress and did not wrap up within 15 min.",
+    { cause: "turn_ceiling" },
+  );
+  const afterCeiling = readReport(pCeiling);
+  check(
+    "a worker stopped at the turn limit while working is not mistaken for a launch failure",
+    afterCeiling.status === "failed" && !afterCeiling.risks.some((risk) => LAUNCH_FAILURE_RISK.test(risk)),
+    JSON.stringify(afterCeiling.risks),
+  );
+  check(
+    "a real launch failure still carries the launch marker",
+    afterMissing.risks.some((risk) => LAUNCH_FAILURE_RISK.test(risk)),
+  );
+  check(
+    "the launch-failure marker above is the one the cross-provider fallback matches",
+    fs.readFileSync(RUN_STORE_TS, "utf8").includes(LAUNCH_FAILURE_RISK.source),
   );
 
   // ── 2. end to end: preserved report settles the direct run complete ──────

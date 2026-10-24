@@ -4,8 +4,8 @@ import { getConnection, shQuote } from "./connections";
 // Remote git: run `git -C <path> …` on the host over the exec channel. Git's
 // porcelain output is transport-agnostic, so every parser in git-ops/branches/
 // stash/inspect works unchanged — only where git runs differs. We reproduce
-// runGit's contract exactly: same flags, GIT_TERMINAL_PROMPT=0 in the remote
-// env (plus the SSH connection itself is BatchMode, so nothing can prompt),
+// runGit's contract exactly: same flags, GIT_TERMINAL_PROMPT=0 and
+// GIT_OPTIONAL_LOCKS=0 in the remote env (plus the SSH connection itself is BatchMode, so nothing can prompt),
 // and a non-zero exit throws an error whose `.stderr` carries git's message
 // (errorText() reads that).
 
@@ -29,7 +29,7 @@ function buildGitCommand(remoteCwd: string, args: string[]): { hostId: string; c
   const quoted = ["-C", parts.path, "-c", "credential.interactive=false", ...args]
     .map((a) => shQuote(a))
     .join(" ");
-  return { hostId: parts.hostId, command: `GIT_TERMINAL_PROMPT=0 git ${quoted}` };
+  return { hostId: parts.hostId, command: `GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 git ${quoted}` };
 }
 
 export async function runRemoteGit(

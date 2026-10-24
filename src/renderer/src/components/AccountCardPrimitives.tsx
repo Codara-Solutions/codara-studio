@@ -2,75 +2,27 @@ import React, { useEffect, useRef, useState } from "react";
 import AnchoredMenu from "./chat/composer/AnchoredMenu";
 
 /**
- * The pieces every account card is built from, shared by the one card shape
+ * The pieces every account row is built from, shared by the one row shape
  * (AccountCard) and the Add-account picker (AccountCards). Nothing here
- * knows which provider it is drawing for.
+ * knows which provider it is drawing for. The look lives in styles.css
+ * under `.st-acct*`, next to the rest of the Settings styles.
  */
 
 export const INPUT_STYLE: React.CSSProperties = {
   minWidth: 0,
   width: "100%",
-  height: 30,
-  borderRadius: "var(--radius-control, 5px)",
-  border: "1px solid var(--rule-strong)",
-  background: "color-mix(in oklab, var(--bg) 68%, transparent)",
-  color: "var(--ink)",
-  padding: "0 9px",
-  fontFamily: "var(--font-sans)",
-  fontSize: 12,
-  outline: "none",
-};
-
-export const BUTTON_STYLE: React.CSSProperties = {
-  minHeight: 27,
-  borderRadius: "var(--radius-control, 5px)",
-  border: "1px solid var(--rule-strong)",
-  background: "color-mix(in oklab, var(--ink) 4%, transparent)",
-  color: "var(--ink)",
-  padding: "4px 8px",
-  fontFamily: "var(--font-sans)",
-  fontSize: 11,
-  fontWeight: 600,
-  cursor: "pointer",
-};
-
-export const PRIMARY_BUTTON_STYLE: React.CSSProperties = {
-  ...BUTTON_STYLE,
-  border: "1px solid var(--accent-edge)",
-  background: "var(--accent-soft)",
-  color: "var(--accent-text)",
 };
 
 /**
- * Card-scale controls. A column of account cards is the dense part of this
- * panel, so the buttons inside a card (the next step and the "···" trigger)
- * run one step below the form-scale buttons the Add-account row and the
- * rename forms use. `height` has to be set and not just `minHeight`:
- * .spark-btn pins its own 26px, which a smaller minimum alone cannot undo.
- */
-export const COMPACT_BUTTON_STYLE: React.CSSProperties = {
-  ...BUTTON_STYLE,
-  height: 21,
-  minHeight: 21,
-  padding: "0 7px",
-  fontSize: 10.5,
-};
-
-export const COMPACT_PRIMARY_BUTTON_STYLE: React.CSSProperties = {
-  ...COMPACT_BUTTON_STYLE,
-  border: "1px solid var(--accent-edge)",
-  background: "var(--accent-soft)",
-  color: "var(--accent-text)",
-};
-
-/**
- * One entry in a card's action model. `run` may return false to keep the
+ * One entry in a row's action model. `run` may return false to keep the
  * overflow menu open, which is how Delete keeps its two-step arming inside
  * the menu instead of firing on the first click.
  */
 export interface CardAction {
   id: string;
   label: string;
+  /** What the button does in full, when the label names only the outcome. */
+  title?: string;
   disabled: boolean;
   danger?: boolean;
   run: () => void | boolean;
@@ -86,70 +38,49 @@ export function ActionButton({
   children,
   disabled,
   primary = false,
-  compact = false,
-  tone,
+  quiet = false,
+  title,
   onClick,
 }: {
   children: React.ReactNode;
   disabled?: boolean;
+  title?: string;
+  /** The one committing action in a cluster. */
   primary?: boolean;
-  /** Card-scale rather than form-scale, see COMPACT_BUTTON_STYLE. */
-  compact?: boolean;
-  /** Agent brand colour; when set, the button follows the family instead of the workspace accent. */
-  tone?: string;
+  /** Borderless, for secondary actions beside a primary one. */
+  quiet?: boolean;
   onClick: () => void;
 }) {
-  const base = compact
-    ? primary
-      ? COMPACT_PRIMARY_BUTTON_STYLE
-      : COMPACT_BUTTON_STYLE
-    : primary
-      ? PRIMARY_BUTTON_STYLE
-      : BUTTON_STYLE;
-  const tinted = tone
-    ? {
-        ...base,
-        ...(primary
-          ? {
-              border: `1px solid color-mix(in oklch, ${tone} 40%, transparent)`,
-              background: `color-mix(in oklch, ${tone} 16%, transparent)`,
-              color: tone,
-            }
-          : {}),
-      }
-    : base;
   return (
     <button
       type="button"
-      className="spark-btn"
+      className={`spark-btn st-acct-btn${primary ? " is-primary" : ""}${quiet ? " st-btn-quiet" : ""}`}
       disabled={disabled}
+      title={title}
       onClick={onClick}
-      style={{
-        ...tinted,
-        ...(disabled ? { cursor: "default", opacity: 0.5 } : {}),
-      }}
     >
       {children}
     </button>
   );
 }
 
-export function UsingChip({ label, color }: { label: string; color: string }) {
+/** The marker on the account Cora and the terminal tool are using right now. */
+export function ActiveBadge({ label }: { label: string }) {
   return (
-    <span
-      style={{
-        color,
-        border: `1px solid color-mix(in oklch, ${color} 55%, transparent)`,
-        background: `color-mix(in oklch, ${color} 18%, var(--panel-2))`,
-        borderRadius: 99,
-        padding: "2px 8px",
-        fontFamily: "var(--font-sans)",
-        fontSize: 10,
-        fontWeight: 650,
-        lineHeight: 1.3,
-        whiteSpace: "nowrap",
-      }}
-    >
+    <span className="st-acct-active">
+      <svg
+        aria-hidden
+        width="11"
+        height="11"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M5 12.5l4.5 4.5L19 7" />
+      </svg>
       {label}
     </span>
   );
@@ -159,23 +90,19 @@ export function UsingChip({ label, color }: { label: string; color: string }) {
  * Why these menus portal (AnchoredMenu) instead of hanging position:absolute
  * off their trigger: the Accounts panel lives inside the Settings dialog's
  * scrolling content pane, and `overflow: auto` clips everything in its
- * subtree. A card's right-aligned menu reaches left of its narrow trigger, so
+ * subtree. A row's right-aligned menu reaches left of its narrow trigger, so
  * the clipped half painted nothing and its clicks fell through to the nav
  * column beside the pane, menu items that plain did not work. Portalling to
- * <body> also moves the menu out from under .settings-dialog-surface, whose
- * backdrop-filter + contain:paint make it a backdrop root: in there .spark-menu
- * is swapped to a preblended 78%-alpha face (styles.css), which over dense
- * card text read as a ghost box. At <body> the menu is real glass again,
- * frosting the dialog beneath it exactly as the composer menus do. z 120
- * clears the dialog wrapper's z 100.
+ * <body> also keeps the menu a top-level surface with its own material.
+ * z 120 clears the dialog wrapper's z 100.
  */
 export const SETTINGS_MENU_Z = 120;
 
 /**
- * The card's "···" menu, on the same shared .spark-menu surface the
+ * The row's overflow menu, on the same shared .spark-menu surface the
  * Add-account chooser uses. Groups render with a hairline between them, which
- * is how the destructive block (Sign out, Delete) stays at the bottom and
- * apart. Closing the menu in any way tells the caller, so a half-armed Delete
+ * is how the destructive block (Delete) stays at the bottom and apart.
+ * Closing the menu in any way tells the caller, so a half-armed Delete
  * disarms rather than surviving to the next open.
  */
 export function CardOverflowMenu({
@@ -201,14 +128,18 @@ export function CardOverflowMenu({
       <button
         ref={triggerRef}
         type="button"
-        className="spark-btn"
+        className={`spark-icon-btn st-icon-btn${open ? " is-active" : ""}`}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label={label}
+        title="More actions"
         onClick={() => (open ? close() : setOpen(true))}
-        style={{ ...COMPACT_BUTTON_STYLE, padding: "0 8px", letterSpacing: 1 }}
       >
-        ···
+        <svg aria-hidden width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+          <circle cx="6" cy="12" r="1.6" />
+          <circle cx="12" cy="12" r="1.6" />
+          <circle cx="18" cy="12" r="1.6" />
+        </svg>
       </button>
       <AnchoredMenu
         anchorRef={triggerRef}
@@ -221,15 +152,10 @@ export function CardOverflowMenu({
         align="end"
         zIndex={SETTINGS_MENU_Z}
       >
-        <div style={{ minWidth: 208, display: "grid", gap: 2 }}>
+        <div className="st-acct-menu">
           {visibleGroups.map((group, groupIndex) => (
             <React.Fragment key={groupIndex}>
-              {groupIndex > 0 ? (
-                <div
-                  aria-hidden
-                  style={{ borderTop: "1px solid var(--rule-soft)", margin: "2px 0" }}
-                />
-              ) : null}
+              {groupIndex > 0 ? <div aria-hidden className="st-acct-menu__rule" /> : null}
               {group.map((action) => (
                 <button
                   key={action.id}
@@ -243,11 +169,7 @@ export function CardOverflowMenu({
                     if (action.run() === false) return;
                     close();
                   }}
-                  style={{
-                    textAlign: "left",
-                    whiteSpace: "nowrap",
-                    ...(action.danger ? { color: "var(--danger)" } : {}),
-                  }}
+                  style={action.danger ? { color: "var(--danger)" } : undefined}
                 >
                   {action.label}
                 </button>
@@ -261,53 +183,123 @@ export function CardOverflowMenu({
 }
 
 /**
- * One sign-in's state, as an inline mark-plus-sentence pair rather than a row
- * of its own. A long state ("...is not installed on this Mac", an error)
- * wraps to its own line and stays readable at full length. The wording is
- * what tells states apart, so it is never shortened here.
+ * One sign-in's state as a mark and a sentence. A long state (an error)
+ * wraps and stays readable at full length; a caller that shortens it passes
+ * the full sentence as `title`. `action` puts the fix right beside the
+ * problem instead of in the overflow menu.
  */
-export function ConnectionLine({ state }: { state: ConnectionState }) {
+export function ConnectionLine({
+  state,
+  title,
+  hint,
+  code,
+  action,
+}: {
+  state: ConnectionState;
+  /** The full sentence, as a tooltip, when the line shows a shortened one. */
+  title?: string;
+  /** A second, quieter sentence that says what to do. */
+  hint?: string;
+  /** A command named in the sentences, drawn as code wherever it appears. */
+  code?: string;
+  action?: React.ReactNode;
+}) {
+  // A problem is a warning glyph on a quiet line, not red text: the row's
+  // button is where the eye should land. A healthy state is a small dot and
+  // a word or two, so a signed-in account is not a row of check marks.
+  const tone = state.danger ? "warn" : state.ok ? "ok" : "muted";
+  if (state.ok && !hint && !action) {
+    return (
+      <div className="st-acct-status st-acct-status--ok" title={title}>
+        <span aria-hidden className="st-acct-status__dot" />
+        <span className="st-acct-status__text">{withCode(state.text, code)}</span>
+      </div>
+    );
+  }
   return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "baseline",
-        gap: 4,
-        minWidth: 0,
-      }}
-    >
-      <span
+    <div className={`st-acct-status st-acct-status--${tone}`} title={title}>
+      <svg
         aria-hidden
-        style={{
-          flex: "0 0 auto",
-          color: state.ok
-            ? "var(--accent)"
-            : state.danger
-              ? "var(--danger)"
-              : "var(--muted)",
-          fontFamily: "var(--font-sans)",
-          fontSize: 10,
-          lineHeight: 1.35,
-        }}
+        width="13"
+        height="13"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className="st-acct-status__glyph"
       >
-        {state.ok ? "✓" : "·"}
+        {state.danger ? (
+          <>
+            <path d="M12 4.5 21 19.5H3z" />
+            <line x1="12" y1="10" x2="12" y2="14" />
+            <circle cx="12" cy="16.9" r="0.4" fill="currentColor" />
+          </>
+        ) : state.ok ? (
+          <path d="M5 12.5l4.5 4.5L19 7" />
+        ) : (
+          <>
+            <circle cx="12" cy="12" r="8.5" />
+            <line x1="12" y1="11" x2="12" y2="16" />
+            <circle cx="12" cy="8" r="0.4" fill="currentColor" />
+          </>
+        )}
+      </svg>
+      <span className="st-acct-status__text">
+        {withCode(state.text, code)}
+        {hint ? <span className="st-acct-status__hint"> {withCode(hint, code)}</span> : null}
       </span>
-      <span
-        style={{
-          minWidth: 0,
-          color: state.danger
-            ? "var(--danger)"
-            : state.ok
-              ? "var(--ink)"
-              : "var(--muted)",
-          fontFamily: "var(--font-sans)",
-          fontSize: 10.5,
-          lineHeight: 1.35,
-        }}
-      >
-        {state.text}
-      </span>
-    </span>
+      {action ? <span className="st-acct-status__action">{action}</span> : null}
+    </div>
+  );
+}
+
+function withCode(text: string, code: string | undefined): React.ReactNode {
+  if (!code || !text.includes(code)) return text;
+  return text.split(code).flatMap((part, index) =>
+    index === 0
+      ? [part]
+      : [<code key={index} className="st-code">{code}</code>, part],
+  );
+}
+
+/**
+ * The one confirmation a Remove asks for, drawn inside the row like Rename,
+ * so the sentence names exactly what goes and what stays before anything is
+ * deleted.
+ */
+export function RemoveConfirm({
+  text,
+  confirmLabel,
+  disabled,
+  onConfirm,
+  onCancel,
+}: {
+  text: string;
+  confirmLabel: string;
+  disabled: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div role="alertdialog" aria-label={text} className="st-acct-confirm">
+      <p className="st-acct-confirm__text">{text}</p>
+      <div className="st-acct-confirm__buttons">
+        <ActionButton disabled={disabled} onClick={onCancel}>
+          Cancel
+        </ActionButton>
+        <button
+          type="button"
+          autoFocus
+          className="spark-btn st-acct-btn is-danger"
+          disabled={disabled}
+          onClick={onConfirm}
+        >
+          {confirmLabel}
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -339,11 +331,7 @@ export function RenameForm({
         if (!next || busy) return;
         void onSave(next);
       }}
-      style={{
-        display: "grid",
-        gridTemplateColumns: "minmax(0, 1fr) auto auto",
-        gap: 6,
-      }}
+      className="st-input-group"
     >
       <input
         aria-label="Account name"

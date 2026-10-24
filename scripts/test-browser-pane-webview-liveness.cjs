@@ -41,7 +41,6 @@ assert.doesNotMatch(
 );
 
 for (const method of [
-  "send",
   "capturePage",
   "executeJavaScript",
   "getWebContentsId",

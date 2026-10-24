@@ -17,6 +17,17 @@ export const PI_LAUNCH_COMMAND = "pi";
 // Runtimes whose CLI sessions Codara can capture + restore across app restarts.
 export type AgentSessionRuntime = "claude" | "codex" | "grok" | "pi";
 
+/** A past session to resume in a new terminal tab of its workspace. */
+export interface AgentSessionResumeRequest {
+  runtime: AgentSessionRuntime;
+  /** The folder the session ran in; its resume must start there. */
+  cwd: string;
+  sessionId: string;
+  transcriptPath?: string;
+  nativeCodexProfileId?: string;
+  nativeGrokProfileId?: string;
+}
+
 // Fresh Claude launch with a Codara-minted session id. Forcing `--session-id`
 // makes the transcript path deterministic (~/.claude/projects/<enc-cwd>/<id>.jsonl)
 // and lets a pane record its resume pointer synchronously at launch — no fragile

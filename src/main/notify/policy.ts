@@ -57,6 +57,9 @@ export interface PolicyContext {
   watching: boolean;
   // Do Not Disturb preference: mute delivery, still record unread.
   dnd: boolean;
+  // The user muted this source or its workspace from the center for a while:
+  // like DND, but scoped to that source.
+  muted?: boolean;
 }
 
 export interface PolicyDecision {
@@ -105,11 +108,28 @@ export function decide(
     return { deliver: false, record: true, read: true, reason: "watching" };
   }
 
+  if (ctx.muted) {
+    return { deliver: false, record: true, read: false, reason: "muted" };
+  }
+
   if (ctx.dnd) {
     return { deliver: false, record: true, read: false, reason: "dnd" };
   }
 
   return { deliver: true, record: true, read: false, reason: "deliver" };
+}
+
+// What "watching" means for a terminal-agent alert. A finished turn in a pane
+// that is on screen in the focused window is already visible, so it needs no
+// toast even when a sibling split holds keyboard focus. A prompt or a failure
+// still alerts unless its pane is the selected one: a visible sibling cannot
+// take the answer until the user selects it.
+export function terminalAlertWatched(
+  kind: NotifyKind,
+  pane: { selected: boolean; visible: boolean },
+): boolean {
+  if (kind === "terminal.agent.done") return pane.selected || pane.visible;
+  return pane.selected;
 }
 
 // Real new activity began on this source (run re-entered running/planning/

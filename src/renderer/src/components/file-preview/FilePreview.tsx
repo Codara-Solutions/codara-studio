@@ -102,11 +102,19 @@ export default function FilePreview({
     }
     // fs:changed only fires for create/delete/rename (content writes are
     // filtered main-side), so this catches deletion/replacement of the
-    // previewed file; the mtime doubles as the <img> cache-buster.
+    // previewed file; the mtime doubles as the <img> cache-buster. Main
+    // watches only the folders an Explorer shows expanded, so ask it to watch
+    // this file's folder too.
     const off = window.spark.fs.onChanged(() => refreshStat());
+    const watching = isRemotePath(path)
+      ? Promise.resolve(false)
+      : window.spark.fs.watchPreviewFile(path).then(() => true, () => false);
     return () => {
       cancelled = true;
       off();
+      void watching.then((ok) => {
+        if (ok) void window.spark.fs.unwatchPreviewFile(path);
+      });
     };
   }, [path, kind, activateBlobFallback]);
 
@@ -435,9 +443,8 @@ function FloatingPreviewAction({ children }: { children: ReactNode }) {
         display: "flex",
         padding: 2,
         borderRadius: 9,
-        background: "color-mix(in oklch, var(--panel) 86%, transparent)",
+        background: "var(--panel)",
         boxShadow: "var(--lift-hi), 0 5px 18px rgba(0,0,0,0.16)",
-        backdropFilter: "blur(12px) saturate(1.25)",
       }}
     >
       {children}

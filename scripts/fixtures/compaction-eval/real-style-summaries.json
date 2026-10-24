@@ -1,0 +1,18 @@
+{
+  "description": "Summary fragments in the style real summarizers return for the billing-migration scenario in scripts/test-compaction-eval.mjs. Each fragment appears once its step has run. Like real summaries they paraphrase the user's constraints, keep some IDs and drop others, and the oldest details fall out after a few rolling updates (dropAfterCompactions).",
+  "fragments": [
+    { "afterStep": 0, "section": "Goal", "text": "Move the billing service over to the new ledger API." },
+    { "afterStep": 0, "section": "Constraints & Preferences", "text": "- Stay out of the vendored code (user asked not to touch it).", "dropAfterCompactions": 4 },
+    { "afterStep": 0, "section": "Constraints & Preferences", "text": "- Prefer pnpm for package scripts.", "dropAfterCompactions": 3 },
+    { "afterStep": 6, "section": "Progress", "text": "- [x] Read the existing billing client and the ledger SDK." },
+    { "afterStep": 12, "section": "Key Decisions", "text": "- Keep the ledger client synchronous; queue retries already give backpressure.", "dropAfterCompactions": 2 },
+    { "afterStep": 20, "section": "Progress", "text": "- [x] Rewrote the ledger client wrapper in src/billing/ledger-client.ts." },
+    { "afterStep": 40, "section": "Critical Context", "text": "- The refunds spec timed out against the ledger sandbox; investigating.", "dropAfterCompactions": 2 },
+    { "afterStep": 55, "section": "Progress", "text": "- [x] Fixed the refunds spec timeout by raising the sandbox deadline." },
+    { "afterStep": 60, "section": "Progress", "text": "- [x] Added a refunds module on top of the new client." },
+    { "afterStep": 80, "section": "Progress", "text": "- [ ] A worker is porting the remaining refund paths.", "dropAfterCompactions": 3 },
+    { "afterStep": 120, "section": "Progress", "text": "- [x] The refund worker finished; its report is in the run folder." },
+    { "afterStep": 150, "section": "Next Steps", "text": "1. Remove the legacy adapter once callers are migrated." },
+    { "afterStep": 200, "section": "Next Steps", "text": "2. Run the full suite and write the migration notes." }
+  ]
+}

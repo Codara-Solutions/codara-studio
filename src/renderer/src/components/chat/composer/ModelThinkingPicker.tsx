@@ -6,10 +6,21 @@ import {
   composeModelId,
   effortsFor,
   findOptionInCatalog,
+  subscriptionForChatModel,
   type ChatBackendGroup,
   type ChatModelOption,
 } from "./types";
 import AnchoredMenu from "./AnchoredMenu";
+import {
+  allModelGroups,
+  isModelShown,
+  modelVisibilityKey,
+  readModelVisibility,
+  shownModelGroups,
+  writeModelVisibility,
+  type ModelVisibility,
+} from "./model-visibility";
+import { openAccountsSettings, useCoraAccountReadiness } from "../account-readiness";
 
 interface Props {
   activeBackend: ChatBackendKind;
@@ -55,9 +66,22 @@ export default function ModelThinkingPicker({
   const [piCatalog, setPiCatalog] = useState<PiCatalogModel[]>([]);
   const [openRouterModels, setOpenRouterModels] = useState<string[]>([]);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const groups: ChatBackendGroup[] = buildVisibleGroups({ piCatalog, openRouterModels });
+  const { usableProviders } = useCoraAccountReadiness();
+  const [visibility, setVisibility] = useState<ModelVisibility>(readModelVisibility);
   const activeCompoundId = composeModelId(activeModelId, false);
-  const activeOption = groups
+  const isActive = (model: ChatModelOption) =>
+    model.id === activeCompoundId && model.backend === activeBackend;
+  const allGroups: ChatBackendGroup[] = allModelGroups(piCatalog, openRouterModels);
+  const groups: ChatBackendGroup[] = shownModelGroups(piCatalog, openRouterModels, visibility, isActive);
+  const lineup = new Set(
+    buildVisibleGroups({ piCatalog, openRouterModels }).flatMap((group) => group.models.map(modelVisibilityKey)),
+  );
+  const toggleShown = (model: ChatModelOption) => {
+    const next = { ...visibility, [modelVisibilityKey(model)]: !isModelShown(model, lineup, visibility) };
+    setVisibility(next);
+    writeModelVisibility(next);
+  };
+  const activeOption = allGroups
     .filter((group) => group.backend === activeBackend)
     .flatMap((group) => group.models)
     .find((model) => model.id === activeCompoundId);
@@ -155,9 +179,17 @@ export default function ModelThinkingPicker({
         ) : (
           <ModelPicker
             groups={groups}
+            allGroups={allGroups}
+            isShown={(model) => isModelShown(model, lineup, visibility)}
+            onToggleShown={toggleShown}
             activeBackend={activeBackend}
             activeCompoundId={activeCompoundId}
+            usableProviders={usableProviders}
             onPick={chooseModel}
+            onConnect={() => {
+              close();
+              openAccountsSettings();
+            }}
           />
         )}
       </AnchoredMenu>
@@ -165,48 +197,176 @@ export default function ModelThinkingPicker({
   );
 }
 
+const PROVIDER_TAB_KEY = "codara.modelPicker.provider";
+
+function readProviderTab(): string | null {
+  try {
+    return localStorage.getItem(PROVIDER_TAB_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeProviderTab(key: string): void {
+  try {
+    localStorage.setItem(PROVIDER_TAB_KEY, key);
+  } catch {
+    // Storage can be unavailable; the tab then resets next time.
+  }
+}
+
 function ModelPicker({
   groups,
+  allGroups,
+  isShown,
+  onToggleShown,
   activeBackend,
   activeCompoundId,
+  usableProviders,
   onPick,
+  onConnect,
 }: {
+  /** What the picker lists: the user's choices applied to the catalog. */
   groups: ChatBackendGroup[];
+  /** Every model the subscriptions serve, for Edit list. */
+  allGroups: ChatBackendGroup[];
+  isShown: (model: ChatModelOption) => boolean;
+  onToggleShown: (model: ChatModelOption) => void;
   activeBackend: ChatBackendKind;
   activeCompoundId: string;
+  /** Null while account state is unknown: nothing is marked unconnected. */
+  usableProviders: ReadonlySet<string> | null;
   onPick: (model: ChatModelOption) => void;
+  onConnect: () => void;
 }) {
-  const hasModels = groups.some((group) => group.models.length > 0);
+  const isActive = (model: ChatModelOption) =>
+    model.id === activeCompoundId && model.backend === activeBackend;
+  const [editing, setEditing] = useState(false);
+  // A provider keeps its tab while every model of it is hidden, so Edit list
+  // can bring them back.
+  const filled = (editing ? allGroups : groups).filter((group) =>
+    allGroups.some((full) => full.key === group.key && full.models.length > 0),
+  );
+  const hasModels = filled.length > 0;
+  const activeGroupKey = filled.find((group) => group.models.some(isActive))?.key;
+  const [tab, setTab] = useState<string | null>(() => activeGroupKey ?? readProviderTab());
+  // Opens on the current model's provider; a tab the user picked is
+  // remembered for when no model of the list is current.
+  const tabKey = filled.some((group) => group.key === tab) ? tab : (activeGroupKey ?? filled[0]?.key);
+  const shownGroups = filled.length > 1 ? filled.filter((group) => group.key === tabKey) : filled;
+
+  const chooseTab = (key: string) => {
+    setTab(key);
+    writeProviderTab(key);
+  };
+
   return (
     <>
-      <div className="composer-picker-title">Choose model</div>
+      <div className="composer-picker-title composer-picker-title-row">
+        <span>{editing ? "Models to show" : "Choose model"}</span>
+        {hasModels ? (
+          <button type="button" className="composer-picker-edit" onClick={() => setEditing(!editing)}>
+            {editing ? "Done" : "Edit list"}
+          </button>
+        ) : null}
+      </div>
+      {filled.length > 1 ? (
+        <div className="composer-provider-tabs" role="tablist" aria-label="Provider">
+          {filled.map((group) => {
+            const selected = shownGroups[0]?.key === group.key;
+            return (
+              <button
+                key={group.key}
+                type="button"
+                role="tab"
+                aria-selected={selected}
+                className={`composer-provider-tab${selected ? " is-active" : ""}`}
+                onClick={() => chooseTab(group.key)}
+              >
+                {group.label}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
       <div className="composer-model-thinking-list" role="listbox" aria-label="Model">
         {!hasModels ? (
           <div className="composer-model-empty">
             No models available. Connect a subscription or OpenRouter in Settings.
           </div>
         ) : null}
-        {groups.map((group) => (
-          <div key={group.key} className="composer-model-group">
-            <div className="composer-model-group-label">{group.label}</div>
-            {group.models.map((model) => {
-              const active = model.id === activeCompoundId && model.backend === activeBackend;
-              return (
-                <button
-                  key={`${model.backend}:${model.id}`}
-                  type="button"
-                  role="option"
-                  aria-selected={active}
-                  className={`composer-picker-row${active ? " is-active" : ""}`}
-                  onClick={() => onPick(model)}
-                >
-                  <span>{model.label}</span>
-                  <span className="composer-picker-row-tail" aria-hidden>{active ? "Current" : "›"}</span>
-                </button>
-              );
-            })}
-          </div>
-        ))}
+        {shownGroups.map((group) => {
+          // Rows stay pickable: the catalog is deliberately not filtered by
+          // auth, and a stale status must never lock a model out. The group
+          // only says it needs an account and offers the way to connect one.
+          const provider = group.models[0] ? subscriptionForChatModel(group.models[0]) : null;
+          const unconnected =
+            usableProviders !== null && provider !== null && !usableProviders.has(provider);
+          const rows = group.models;
+          return (
+            <div
+              key={group.key}
+              className={`composer-model-group${unconnected ? " is-unconnected" : ""}`}
+            >
+              {unconnected ? (
+                <div className="composer-model-group-label">
+                  <span>{group.label}</span>
+                  <button
+                    type="button"
+                    className="composer-model-connect"
+                    title={`Connect a ${group.label} account in Settings > Agents`}
+                    onClick={onConnect}
+                  >
+                    Not connected · Connect
+                  </button>
+                </div>
+              ) : filled.length > 1 ? null : (
+                <div className="composer-model-group-label">
+                  <span>{group.label}</span>
+                </div>
+              )}
+              {rows.length === 0 ? (
+                <div className="composer-model-empty">
+                  Every {group.label} model is hidden. Use Edit list to show some.
+                </div>
+              ) : null}
+              {rows.map((model) => {
+                const active = isActive(model);
+                if (editing) {
+                  const shown = isShown(model);
+                  return (
+                    <button
+                      key={modelVisibilityKey(model)}
+                      type="button"
+                      role="option"
+                      aria-selected={shown}
+                      className="composer-picker-row composer-picker-row-toggle"
+                      onClick={() => onToggleShown(model)}
+                    >
+                      <span>{model.label}</span>
+                      <span className={`composer-picker-check${shown ? " is-on" : ""}`} aria-hidden>
+                        {shown ? "✓" : ""}
+                      </span>
+                    </button>
+                  );
+                }
+                return (
+                  <button
+                    key={modelVisibilityKey(model)}
+                    type="button"
+                    role="option"
+                    aria-selected={active}
+                    className={`composer-picker-row${active ? " is-active" : ""}`}
+                    onClick={() => onPick(model)}
+                  >
+                    <span>{model.label}</span>
+                    <span className="composer-picker-row-tail" aria-hidden>{active ? "Current" : "›"}</span>
+                  </button>
+                );
+              })}
+            </div>
+          );
+        })}
       </div>
     </>
   );

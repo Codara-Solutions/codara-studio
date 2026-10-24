@@ -18,48 +18,42 @@ export interface AccountProviderDescriptor {
   label: string;
   /** How the terminal half is named in copy; matches the main-process adapter labels. */
   cliLabel: "Claude Code" | "Codex" | "Grok";
-  /** The command that signs Account 1 in from a terminal. */
-  loginHint: "claude login" | "codex login" | "grok login";
   brand: "claude" | "codex" | "grok";
+  /** The CLI's own folder, named where copy promises Codara leaves it alone. */
+  systemHome: "~/.claude" | "~/.codex" | "~/.grok";
   /**
-   * Codex keeps one sign-in for every terminal, so switching it closes the
-   * running Codex sessions; main refuses with their count until the card
-   * asks again. Anthropic and Grok switches close nothing.
+   * Claude Code re-reads the credential in its live slot on every request,
+   * so a switch reaches running sessions. Codex loads its login once per
+   * process, and Grok is not known to re-read it, so only new sessions move.
    */
-  switchClosesSessions: boolean;
+  runningSessionsSwitch: boolean;
   /**
-   * Every session runs on whichever login is live (Claude Code's one home),
-   * so a switch reaches running sessions too and deleting an account never
-   * has to close one.
+   * The limit windows every account row draws, by the label main gives them.
+   * A row with no reading yet draws these as empty meters so every row keeps
+   * one shape.
    */
-  sessionsFollowLiveLogin: boolean;
+  usageWindows: ReadonlyArray<string>;
+  /** False when the provider publishes no client-readable limits at all. */
+  reportsUsage: boolean;
 }
 
 const CLI_WORDS: Record<
   AgentRuntimeKind,
-  Pick<
-    AccountProviderDescriptor,
-    "cliLabel" | "loginHint" | "switchClosesSessions" | "sessionsFollowLiveLogin"
-  >
+  Pick<AccountProviderDescriptor, "cliLabel" | "systemHome" | "runningSessionsSwitch">
 > = {
-  claude: {
-    cliLabel: "Claude Code",
-    loginHint: "claude login",
-    switchClosesSessions: false,
-    sessionsFollowLiveLogin: true,
-  },
-  codex: {
-    cliLabel: "Codex",
-    loginHint: "codex login",
-    switchClosesSessions: true,
-    sessionsFollowLiveLogin: false,
-  },
-  grok: {
-    cliLabel: "Grok",
-    loginHint: "grok login",
-    switchClosesSessions: false,
-    sessionsFollowLiveLogin: false,
-  },
+  claude: { cliLabel: "Claude Code", systemHome: "~/.claude", runningSessionsSwitch: true },
+  codex: { cliLabel: "Codex", systemHome: "~/.codex", runningSessionsSwitch: false },
+  grok: { cliLabel: "Grok", systemHome: "~/.grok", runningSessionsSwitch: false },
+};
+
+// pi-subscription-usage.ts labels windows by their length. Every row draws
+// the same two so the list reads as one table; SuperGrok has no
+// client-readable quota, so xAI rows keep them empty and say why.
+const USAGE_WINDOWS: ReadonlyArray<string> = ["5-hour", "7-day"];
+const REPORTS_USAGE: Record<AgentRuntimeKind, boolean> = {
+  claude: true,
+  codex: true,
+  grok: false,
 };
 
 /** One descriptor per family, in the order the Accounts panel lists them. */
@@ -69,16 +63,25 @@ export const ACCOUNT_PROVIDER_DESCRIPTORS: ReadonlyArray<AccountProviderDescript
     runtime: id,
     label: AGENT_FAMILIES[id].vendorLabel,
     brand: id,
+    usageWindows: USAGE_WINDOWS,
+    reportsUsage: REPORTS_USAGE[id],
     ...CLI_WORDS[id],
   }));
 
-/** The line under the provider name: what one account is and what a switch does. */
+/**
+ * What a switch reaches for this provider, shown under "How switching works".
+ * The System login is never written to, so it cannot be swapped into a
+ * running session.
+ */
 export function accountProviderDetail(descriptor: AccountProviderDescriptor): string {
-  if (descriptor.switchClosesSessions) {
-    return `One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together and closes running ${descriptor.cliLabel} sessions, because ${descriptor.cliLabel} keeps one sign-in for every terminal. Account 1 is your own ${descriptor.loginHint}.`;
-  }
-  if (descriptor.sessionsFollowLiveLogin) {
-    return `One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together, in every terminal app, the way ${descriptor.loginHint} does; running sessions pick it up on their next request. MCP sign-ins, settings and history are shared by every account. Account 1 is your own ${descriptor.loginHint}.`;
-  }
-  return `One sign-in per account. Switching an account moves Cora and ${descriptor.cliLabel} together. Open terminals follow at their next prompt; a ${descriptor.cliLabel} session that is already running keeps its account until it exits. Account 1 is your own ${descriptor.loginHint}.`;
+  const { cliLabel } = descriptor;
+  const running = descriptor.runningSessionsSwitch
+    ? `Running ${cliLabel} sessions switch on their next request.`
+    : `New ${cliLabel} sessions use the new account. Running ones keep theirs.`;
+  return `${running} Switching to or from your own ${cliLabel} login applies to new sessions.`;
+}
+
+/** The badge on the row for the CLI's own login on this computer. */
+export function systemLoginBadge(descriptor: AccountProviderDescriptor): string {
+  return `Your ${descriptor.cliLabel} login`;
 }

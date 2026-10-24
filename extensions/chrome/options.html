@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Codara: blocked sites</title>
+    <link rel="stylesheet" href="popup.css" />
+    <style>
+      body {
+        width: auto;
+        max-width: 560px;
+        margin: 0 auto;
+        padding: 16px;
+      }
+      textarea {
+        width: 100%;
+        min-height: 320px;
+        font: 12px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+        background: var(--bg);
+        color: var(--ink);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <section class="card">
+      <h2>Blocked sites</h2>
+      <p class="note">
+        Agents never use a tab on these sites, even one you shared, and cannot open or navigate to them.
+        One site per line: a domain covers its subdomains, * matches any characters, and a path such as
+        example.com/admin limits the rule to that part of the site. Lines starting with # are notes.
+      </p>
+      <textarea id="sites" spellcheck="false" aria-label="Blocked sites"></textarea>
+      <div class="row">
+        <button id="reset" type="button">Restore the examples</button>
+        <span id="saved" class="note" hidden>Saved</span>
+        <button id="save" type="button" class="primary" style="width: auto">Save</button>
+      </div>
+    </section>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

@@ -48,6 +48,18 @@ cora agent spawn <run> "Audit the fix" --title "Independent audit" --runtime cod
 cora agent message <run> all "Re-check the acceptance criteria"
 ```
 
+Agents without MCP support call the same browser, terminal and worktree
+tools through `cora tool` (see [MCP tools](mcp-tools.md)):
+
+```sh
+cora tool list
+cora tool preview_audit --kind accessibility     # axe-core failures with @refs
+cora tool preview_audit --kind quality           # performance, best-practice and SEO checks
+cora tool preview_performance --action load      # traced reload with Core Web Vitals
+cora tool preview_performance --action start     # then interact, then --action stop
+cora tool preview_performance --action memory --ms 5000 --snapshot
+```
+
 ## Command reference
 
 ### Sessions
@@ -118,6 +130,22 @@ forms are gone; `cora` points you to `auth add`, `auth login`, `auth use` or
 Automation commands work in the workspace of the newest run on disk, or of
 the run you pass with `--run`.
 
+### Workflows
+
+| Command | What it does |
+|---|---|
+| `workflow list` | Lists saved workflows (built-in, yours, and the project's). |
+| `workflow show <name>` | Prints one workflow's source. |
+| `workflow check <name \| file.js> [--args JSON]` | Checks a script without running it and prints the estimate. |
+| `workflow run <name \| file.js> [--args JSON --max-agents N --concurrency N --tokens N]` | Asks for approval in the context chat, then starts the workflow. |
+| `workflow status <workflow-run>` | Prints its progress; works offline. |
+| `workflow wait <workflow-run> [--timeout SECONDS]` | Waits until it finishes or stops. |
+| `workflow stop \| resume <workflow-run>` | Stops it, or resumes it; finished agents do not run again. |
+| `workflow save <file.js> [--scope user \| project]` | Saves a script under its `meta.name`, after approval in the chat. |
+
+Like automations, workflow commands use the newest chat run (or `--run`) for
+their workspace.
+
 ### Benchmark
 
 | Command | What it does |
@@ -129,6 +157,49 @@ the run you pass with `--run`.
 | `bench list` | Shows the suite's tasks. |
 | `bench history` | Shows the score history. |
 
+### Agent tools
+
+`cora tool` calls the Codara Studio MCP tools from a terminal, for agents
+without an MCP client and for scripts. It runs in a Codara terminal, acts on
+that terminal's workspace, and answers like an MCP call; images and long
+bodies are saved under Codara's workspace data folder and their paths printed.
+The `codara_` prefix of a tool name is optional, and every command takes
+`--json` for the raw result. Flag values are read as JSON
+when they parse, otherwise as text, and a flag with no value is true.
+[mcp-tools.md](mcp-tools.md) describes every tool.
+
+| Command | What it does |
+|---|---|
+| `tool list` | Lists the tools. |
+| `tool help <name>` | One tool's description and arguments. |
+| `tool <name> ['{"arg":1}'] [--arg value ...]` | Calls a tool. |
+| `inbox [--peek] [--limit N]` | What the user picked or commented on in a Codara browser tab and sent to the inbox, oldest first. Read items are removed unless `--peek`. Same as `tool preview_inbox`. |
+| `inspect <@ref\|selector> [--tabId ID]` | Describes an element to edit it: selector, box model, styles, CSS rules, source `file:line`, and a cropped image saved as a file. `--x N --y N` names a point instead. Same as `tool preview_inspect`. |
+
+```sh
+cora tool preview_network --failed                       # failed requests of your tab
+cora tool preview_network --status 4xx --type fetch,xhr
+cora tool preview_network --id 1234.5                    # one request with its response body
+cora tool preview_network --har                          # HAR 1.2 file, secrets redacted
+cora tool preview_emulate --device phone --colorScheme dark
+cora tool preview_emulate --network slow3g --cpu 4
+cora tool preview_emulate --reset
+cora tool preview_storage --action get --area local
+cora tool preview_storage --action clear --area cookies
+cora tool preview_storage --action fresh --url http://localhost:3000   # logged-out tab
+cora tool preview_storage --action discard --tabId <id>
+```
+
+The browser tools reach the tabs of the user's own browser through the
+Codara extension (see [mcp-tools.md](mcp-tools.md#the-users-own-browser)):
+
+```sh
+cora tool preview_chrome --action status       # paired browsers and shared chrome: tabs
+cora tool preview_snapshot --tabId chrome:1234567
+cora tool preview_click --tabId chrome:1234567 --selector @e12
+cora tool preview_screenshot --tabId chrome:1234567
+```
+
 ### App
 
 | Command | What it does |
@@ -137,8 +208,32 @@ the run you pass with `--run`.
 | `read <paneId> [--lines N]` | Prints the recent output of a terminal pane. |
 | `ws prune` | Removes workspaces whose folder no longer exists. |
 | `rpc <method> [params-json]` | Calls any socket method directly. |
+| `tool list \| help <name> \| <name> [args-json] [--arg value]` | Calls a codara-studio tool from any Codara terminal, with the same tool set and results as an MCP call. |
 
 The `app.*` methods reachable through `cora rpc` (screenshots, in-page
 evaluation) are for development: they are available in unpackaged builds,
 and in packaged builds only when the app was started with
 `CODARA_DEV_TOOLS=1`.
+
+### Browser capture from a shell
+
+`cora tool` calls the same browser tools an MCP client gets (see
+[mcp-tools.md](mcp-tools.md#screenshots-visual-diffs-sizes-and-recordings)),
+so an agent without MCP support can capture the page from its Codara pane.
+Each call prints the result as JSON; images and recordings are files, and
+their `path` is in the output.
+
+```sh
+cora tool preview_screenshot --fullPage --maxWidth 800        # compact JPEG of the whole page
+cora tool preview_screenshot --selector @e12 --format png     # one element
+cora tool preview_screenshot '{"clip":{"x":0,"y":0,"width":320,"height":200},"scale":2}'
+cora tool preview_compare --mode baseline --name home         # before a change
+cora tool preview_compare --name home                         # after: percent, regions, diff image path
+cora tool preview_compare --mode sizes --colorScheme both     # phone, tablet, desktop in one image
+cora tool preview_record --format gif                         # start; drive the flow, then:
+cora tool preview_record --stop                               # the GIF's path
+cora tool preview_record --format mp4                         # a sharp, small video instead
+```
+
+Add `--tabId <id>` (from `cora tool preview_list`) to act on a tab other
+than the agent's own.

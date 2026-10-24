@@ -697,7 +697,7 @@ function EventRow({ event, highlight }: { event: SparkEvent; highlight: boolean 
         >
           {event.type}
           {event.message ? (
-            <span style={{ color: "var(--muted)" }}> — {event.message}</span>
+            <span style={{ color: "var(--muted)" }}>: {event.message}</span>
           ) : null}
         </span>
       </button>
@@ -792,7 +792,7 @@ function ContextWindowTab({ run }: { run: RunState }) {
         title="Approximate context usage"
         detail={
           latest.contextWindowSource === "default"
-            ? "Latest manager call. Window size is the per-model default — actual capacity may differ."
+            ? "Latest manager call. Window size is the per-model default. Actual capacity may differ."
             : "Latest manager call's prompt-token estimate against the model's known context window."
         }
       />

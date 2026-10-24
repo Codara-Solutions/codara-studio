@@ -250,8 +250,7 @@ export default function SearchPanel({ open, cwd, onClose, onOpenFile }: Props) {
         ext: ext && ext.length > 0 && ext !== hit.path ? ext : undefined,
       };
       onOpenFile(entry, { line: hit.line, column: hit.column });
-      // Also broadcast for any future listener that wants to seek inside
-      // an editor we have not wired up yet (wave 3 integration point).
+      // The App listener opens the same tab and reveals the hit's line.
       window.dispatchEvent(
         new CustomEvent("spark:open-file", {
           detail: { path: hit.path, line: hit.line, column: hit.column },
@@ -294,7 +293,7 @@ export default function SearchPanel({ open, cwd, onClose, onOpenFile }: Props) {
     >
       {/* The card is liquid glass; the full-window scrim is a plain tint so
           search never asks Chromium to blur the live workbench. */}
-      <div className="spark-scrim spark-scrim--clear" style={{ zIndex: 0 }} />
+      <div className="spark-scrim spark-scrim--clear spark-scrim--palette" style={{ zIndex: 0 }} />
       <section
         role="dialog"
         aria-modal="true"
@@ -610,7 +609,7 @@ export default function SearchPanel({ open, cwd, onClose, onOpenFile }: Props) {
           <span style={{ flex: 1 }} />
           {hitCap && (
             <span style={{ color: "var(--warn)" }}>
-              {HIT_CAP}+ hits — refine the query
+              {HIT_CAP}+ hits. Refine the query
             </span>
           )}
         </footer>

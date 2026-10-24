@@ -1,9 +1,10 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ChatTab, Tab, TabId, TerminalTab } from "./types";
-import { buildDockIndex, canDockTab } from "./dock";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { ChatTab, Tab, TabGroup, TabGroupColor, TabId, TerminalTab } from "./types";
+import { buildDockIndex, canDockTab, isDockLeaf } from "./dock";
 import { CloseIcon, FileIcon, GlobeIcon, PhoneIcon, PlusIcon } from "../components/icons";
 import { AutomationsGlyph } from "../components/automations/AutomationsGlyph";
 import AutomationsStripButton from "../components/automations/AutomationsStripButton";
+import QuickCommandsButton from "../quick-commands/QuickCommandsButton";
 import { CodaraMark, RuntimeMark, type BrandRuntime } from "../components/BrandMarks";
 import { agentBrandTone } from "../lib/agent-brand";
 import { liveTerminalRuntime } from "./terminalAgentState";
@@ -28,11 +29,17 @@ import {
 import {
   edgeAutoScrollDelta,
   planTabReorder,
-  reorderTargetFor,
   toStripContentX,
-  type TabReorderTarget,
-  type TabSlot,
 } from "./tabReorder";
+import {
+  TAB_GROUP_COLORS,
+  resolveStripDrop,
+  tabGroupsIn,
+  tabStripEntries,
+  type StripDrop,
+  type StripDropSlot,
+} from "./tabGroups";
+import { TAB_GROUP_NAME_MAX } from "@shared/tab-group-name";
 import { tabStripOverflow, type TabStripOverflow } from "./tabStripOverflow";
 
 // Delay before a terminal-pane drag hovering over an inactive tab in the strip
@@ -63,9 +70,8 @@ interface Props {
   onClose: (id: TabId) => void;
   onNewTerminal: () => void;
   onNewPreview: () => void;
-  // Open the worker session picker for a runtime: the picker lists this
-  // workspace's Claude / Codex history so a "+" row either starts a fresh
-  // worker or resumes (or deletes) an earlier session.
+  // Each starts a new session of that agent in its own terminal tab.
+  // Earlier sessions are resumed from the Sessions view of the rail.
   onNewClaudeWorker: () => void;
   onNewCodexWorker: () => void;
   onNewGrokWorker: () => void;
@@ -78,7 +84,9 @@ interface Props {
   onRenameChat: (id: TabId, title: string) => void;
   onCloseChat: (id: TabId) => void;
   onTerminalPaneDrop: (payload: TerminalPaneDragPayload, targetTabId?: TabId) => void;
-  onReorderTab: (fromId: TabId, toId: TabId, position: "before" | "after") => void;
+  // Tab groups. A reorder drop goes through groupActions.moveTab, which also
+  // sets the group the tab lands in. Memoized upstream like pickerHints.
+  groupActions: TabGroupActions;
   onPinEditorTab: (id: TabId) => void;
   onPinDiffTab: (id: TabId) => void;
   // "Open in split" from a pill's context menu — the keyboard/menu route to
@@ -101,9 +109,28 @@ interface Props {
 }
 
 export interface PickerHints {
+  chat?: string;
   terminal?: string;
   preview?: string;
 }
+
+export interface TabGroupActions {
+  moveTab: (tabId: TabId, drop: StripDrop) => void;
+  // A new, unnamed group holding the tab; returns its id.
+  create: (tabId: TabId) => string;
+  add: (tabId: TabId, groupId: string) => void;
+  remove: (tabId: TabId) => void;
+  rename: (groupId: string, name: string) => void;
+  recolor: (groupId: string, color: TabGroupColor) => void;
+  toggleCollapsed: (groupId: string) => void;
+  ungroup: (groupId: string) => void;
+  // Closes the group's tabs in this strip.
+  close: (groupId: string) => void;
+}
+
+// Opens the group editor for a group in the strip on screen, for the
+// keyboard commands that act on the selected tab's group.
+export const TAB_GROUP_MENU_EVENT = "spark:tab-group-menu";
 
 // Live preview of where a reorder drag would land. Derived entirely from
 // planTabReorder, so what the strip paints and what the drop commits come from
@@ -123,6 +150,8 @@ interface ReorderPreview {
   ghostWidth: number;
   // translateX px by tab id; absent means 0.
   offsets: Record<TabId, number>;
+  // The group the tab would join here, which tints the ghost slot.
+  groupColor: TabGroupColor | null;
 }
 
 // React.memo: TabBar's props from App.tsx are referentially stable (the
@@ -144,7 +173,7 @@ function TabBar({
   onRenameChat,
   onCloseChat,
   onTerminalPaneDrop,
-  onReorderTab,
+  groupActions,
   onPinEditorTab,
   onPinDiffTab,
   onOpenInSplit,
@@ -153,6 +182,9 @@ function TabBar({
   workspaceId,
 }: Props) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const tabsRef = useRef(tabs);
+  tabsRef.current = tabs;
+  const stripEntries = useMemo(() => tabStripEntries(tabs), [tabs]);
   const [stripOverflow, setStripOverflow] = useState<TabStripOverflow>({
     left: false,
     right: false,
@@ -176,6 +208,66 @@ function TabBar({
   const onTabContextMenu = useRef((id: TabId, x: number, y: number) => {
     setTabMenu({ id, x, y });
   }).current;
+  // The group editor: name, color, ungroup, close. Opened from a chip's
+  // context menu, from "Add to new group", or by the keyboard commands.
+  const [groupMenu, setGroupMenu] = useState<{ groupId: string; x: number; y: number } | null>(null);
+  const openGroupMenu = useRef((groupId: string, x: number, y: number) => {
+    setTabMenu(null);
+    setGroupMenu({ groupId, x, y });
+  }).current;
+  const groupMenuRef = useRef(groupMenu);
+  groupMenuRef.current = groupMenu;
+  const closeGroupMenu = useCallback((returnFocus: boolean) => {
+    const current = groupMenuRef.current;
+    setGroupMenu(null);
+    if (current && returnFocus) {
+      const chip = scrollRef.current?.querySelector<HTMLElement>(
+        `[data-tab-group-chip="${cssEscape(current.groupId)}"]`,
+      );
+      window.requestAnimationFrame(() => chip?.focus());
+    }
+  }, []);
+  // Anchored under the chip, which may only appear once the state that made
+  // the group has rendered.
+  const openGroupMenuAtChip = useCallback((groupId: string) => {
+    let attempts = 0;
+    const place = () => {
+      const chip = scrollRef.current?.querySelector<HTMLElement>(
+        `[data-tab-group-chip="${cssEscape(groupId)}"]`,
+      );
+      if (!chip) {
+        attempts += 1;
+        if (attempts < 10) window.requestAnimationFrame(place);
+        return;
+      }
+      chip.scrollIntoView({ block: "nearest", inline: "nearest" });
+      const rect = chip.getBoundingClientRect();
+      openGroupMenu(groupId, rect.left, rect.bottom + 4);
+    };
+    window.requestAnimationFrame(place);
+  }, [openGroupMenu]);
+  useEffect(() => {
+    const onRequest = (event: Event) => {
+      const groupId = (event as CustomEvent<{ groupId?: unknown }>).detail?.groupId;
+      if (typeof groupId === "string") openGroupMenuAtChip(groupId);
+    };
+    window.addEventListener(TAB_GROUP_MENU_EVENT, onRequest);
+    return () => window.removeEventListener(TAB_GROUP_MENU_EVENT, onRequest);
+  }, [openGroupMenuAtChip]);
+  useEffect(() => {
+    if (!groupMenu) return;
+    const close = () => closeGroupMenu(false);
+    document.addEventListener("mousedown", close);
+    window.addEventListener("blur", close);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      window.removeEventListener("blur", close);
+    };
+  }, [groupMenu, closeGroupMenu]);
+  // A group that lost its last tab in this strip takes its editor with it.
+  useEffect(() => {
+    if (groupMenu && !tabs.some((tab) => tab.group?.id === groupMenu.groupId)) setGroupMenu(null);
+  }, [tabs, groupMenu]);
 
   // Close the new-tab picker on outside click / Escape.
   useEffect(() => {
@@ -250,7 +342,7 @@ function TabBar({
   // tabs, and moving boundaries make the insertion index oscillate whenever the
   // pointer rests near a midpoint. Content coordinates also survive the edge
   // auto-scroll below without a re-measure.
-  const reorderSlotsRef = useRef<TabSlot[] | null>(null);
+  const reorderSlotsRef = useRef<StripDropSlot[] | null>(null);
   const reorderPointerRef = useRef<number | null>(null);
   const autoScrollRef = useRef<number | null>(null);
   const reorderPlanRef = useRef<ReorderPreview | null>(null);
@@ -266,23 +358,24 @@ function TabBar({
     autoScrollRef.current = null;
   }, []);
 
-  // Layout boxes of every tab, in strip content space. `offsets` (when given)
-  // undoes the preview transforms so a mid-gesture re-measure still reads
-  // layout positions.
+  // Layout boxes of every tab and group chip, in strip content space.
+  // `offsets` (when given) undoes the preview transforms so a mid-gesture
+  // re-measure still reads layout positions. Chips are slots too: they slide
+  // out of the way like tabs, and landing just after one joins its group.
   const measureSlots = useCallback(
-    (offsets?: Record<TabId, number>): TabSlot[] => {
+    (offsets?: Record<TabId, number>): StripDropSlot[] => {
       const el = scrollRef.current;
       if (!el) return [];
       const stripLeft = el.getBoundingClientRect().left;
       const scrollLeft = el.scrollLeft;
-      const slots: TabSlot[] = [];
-      for (const node of el.querySelectorAll<HTMLElement>("[data-tab-id]")) {
-        const id = node.dataset.tabId;
-        if (!id) continue;
+      const slots: StripDropSlot[] = [];
+      for (const node of el.querySelectorAll<HTMLElement>(STRIP_SLOT_SELECTOR)) {
+        const slot = stripSlotOf(node);
+        if (!slot) continue;
         const rect = node.getBoundingClientRect();
-        const shift = offsets?.[id] ?? 0;
+        const shift = offsets?.[slot.id] ?? 0;
         slots.push({
-          id,
+          ...slot,
           start: toStripContentX(rect.left, stripLeft, scrollLeft) - shift,
           end: toStripContentX(rect.right, stripLeft, scrollLeft) - shift,
         });
@@ -295,15 +388,23 @@ function TabBar({
   // Cached geometry, refreshed only when the strip's membership changed under
   // the drag (an agent opening or closing a tab mid-gesture).
   const ensureSlots = useCallback(
-    (offsets?: Record<TabId, number>): TabSlot[] => {
+    (offsets?: Record<TabId, number>): StripDropSlot[] => {
       const el = scrollRef.current;
       const cached = reorderSlotsRef.current;
       if (el && cached) {
-        const nodes = el.querySelectorAll<HTMLElement>("[data-tab-id]");
+        const nodes = el.querySelectorAll<HTMLElement>(STRIP_SLOT_SELECTOR);
         if (nodes.length === cached.length) {
           let same = true;
           nodes.forEach((node, index) => {
-            if (node.dataset.tabId !== cached[index].id) same = false;
+            const slot = stripSlotOf(node);
+            if (
+              !slot ||
+              slot.id !== cached[index].id ||
+              slot.groupId !== cached[index].groupId ||
+              slot.collapsed !== cached[index].collapsed
+            ) {
+              same = false;
+            }
           });
           if (same) return cached;
         }
@@ -327,23 +428,35 @@ function TabBar({
       if (!dragged || !el) return;
       reorderPointerRef.current = clientX;
       const slots = ensureSlots(reorderPlanRef.current?.offsets);
-      const plan = planTabReorder(
-        slots,
-        dragged,
-        toStripContentX(clientX, el.getBoundingClientRect().left, el.scrollLeft),
-      );
+      const pointerX = toStripContentX(clientX, el.getBoundingClientRect().left, el.scrollLeft);
+      const plan = planTabReorder(slots, dragged, pointerX);
       // Dragged tab is not in this strip (another window, or it was closed
       // mid-gesture) — show nothing rather than guess a destination.
       if (!plan) {
         clearReorderPreview();
         return;
       }
+      const drop = resolveStripDrop({
+        slots,
+        draggedId: dragged,
+        insertIndex: plan.insertIndex,
+        pointerX,
+        membersOf: (groupId) => groupMemberIds(tabsRef.current, groupId),
+      });
+      const landingGroupId = drop
+        ? drop.groupId
+        : slots.find((slot) => slot.id === dragged)?.groupId ?? null;
+      const groupColor = landingGroupId
+        ? tabsRef.current.find((tab) => tab.group?.id === landingGroupId)?.group?.color ?? null
+        : null;
       const prev = reorderPlanRef.current;
       if (
         prev &&
         prev.draggedId === plan.draggedId &&
         prev.insertIndex === plan.insertIndex &&
-        prev.ghostStart === plan.ghostStart
+        prev.ghostStart === plan.ghostStart &&
+        prev.changed === (drop !== null) &&
+        prev.groupColor === groupColor
       ) {
         return;
       }
@@ -354,10 +467,13 @@ function TabBar({
       const next: ReorderPreview = {
         draggedId: plan.draggedId,
         insertIndex: plan.insertIndex,
-        changed: plan.changed,
+        // A drop at the tab's own place still changes something when it
+        // joins or leaves a group there.
+        changed: drop !== null,
         ghostStart: plan.ghostStart,
         ghostWidth: plan.ghostWidth,
         offsets,
+        groupColor,
       };
       reorderPlanRef.current = next;
       setReorderPlan(next);
@@ -432,20 +548,25 @@ function TabBar({
   const handleReorderDrop = useCallback(
     (event: React.DragEvent, payload: TabReorderDragPayload) => {
       const el = scrollRef.current;
-      let target: TabReorderTarget | null = null;
+      let drop: StripDrop | null = null;
       if (el) {
         const slots = ensureSlots(reorderPlanRef.current?.offsets);
-        const plan = planTabReorder(
-          slots,
-          payload.tabId,
-          toStripContentX(event.clientX, el.getBoundingClientRect().left, el.scrollLeft),
-        );
-        if (plan) target = reorderTargetFor(slots, plan);
+        const pointerX = toStripContentX(event.clientX, el.getBoundingClientRect().left, el.scrollLeft);
+        const plan = planTabReorder(slots, payload.tabId, pointerX);
+        if (plan) {
+          drop = resolveStripDrop({
+            slots,
+            draggedId: payload.tabId,
+            insertIndex: plan.insertIndex,
+            pointerX,
+            membersOf: (groupId) => groupMemberIds(tabsRef.current, groupId),
+          });
+        }
       }
       endReorderDrag();
-      if (target) onReorderTab(payload.tabId, target.toId, target.position);
+      if (drop) groupActions.moveTab(payload.tabId, drop);
     },
-    [endReorderDrag, ensureSlots, onReorderTab],
+    [endReorderDrag, ensureSlots, groupActions],
   );
 
   // A tab closed mid-drag (agents can close tabs) never fires dragend on its
@@ -624,7 +745,7 @@ function TabBar({
     const resizeObserver = new ResizeObserver(updateStripOverflow);
     el.addEventListener("scroll", onScroll, { passive: true });
     resizeObserver.observe(el);
-    for (const tab of el.querySelectorAll<HTMLElement>("[data-tab-id]")) {
+    for (const tab of el.querySelectorAll<HTMLElement>(STRIP_SLOT_SELECTOR)) {
       resizeObserver.observe(tab);
     }
     updateStripOverflow();
@@ -759,22 +880,40 @@ function TabBar({
                 ? "spark-tab-reorder-ghost spark-tab-reorder-ghost--visible"
                 : "spark-tab-reorder-ghost"
             }
+            data-group-color={reorderPlan.groupColor ?? undefined}
             style={{
               width: Math.round(reorderPlan.ghostWidth),
               // -50% pairs with the rule's top: 50% to sit on the chips' own
               // centreline; x is whole-pixel so the hairline stays crisp.
               transform: `translate3d(${Math.round(reorderPlan.ghostStart)}px, -50%, 0)`,
+              ...groupColorStyle(reorderPlan.groupColor),
             }}
           />
         )}
-        {tabs.map((t) =>
-          t.kind === "chat" ? (
+        {stripEntries.map((entry) => {
+          if (entry.kind === "group") {
+            return (
+              <TabGroupChip
+                key={chipSlotId(entry.group.id)}
+                group={entry.group}
+                count={entry.memberIds.length}
+                dragOffset={reorderPlan?.offsets[chipSlotId(entry.group.id)] ?? 0}
+                onToggle={groupActions.toggleCollapsed}
+                onOpenMenu={openGroupMenu}
+              />
+            );
+          }
+          const t = entry.tab;
+          return t.kind === "chat" ? (
             <ChatTabItem
               key={t.id}
               tab={t}
               active={t.id === activeId}
               dragging={t.id === draggingTabId}
               dragOffset={reorderPlan?.offsets[t.id] ?? 0}
+              groupId={entry.group?.id ?? null}
+              groupColor={entry.group?.color ?? null}
+              groupLast={entry.lastInGroup}
               onSelect={onSelect}
               onRename={onRenameChat}
               onClose={onCloseChat}
@@ -800,6 +939,9 @@ function TabBar({
               paneDragHover={t.id === paneHoverTabId}
               dragging={t.id === draggingTabId}
               dragOffset={reorderPlan?.offsets[t.id] ?? 0}
+              groupId={entry.group?.id ?? null}
+              groupColor={entry.group?.color ?? null}
+              groupLast={entry.lastInGroup}
               onSelect={onSelect}
               onClose={onClose}
               onTerminalPaneDrop={onTerminalPaneDrop}
@@ -809,8 +951,8 @@ function TabBar({
               onContextMenu={onTabContextMenu}
               closeOnMiddleClick={closeOnMiddleClick}
             />
-          ),
-        )}
+          );
+        })}
         {newTabDropActive && <NewTabDropZone />}
       </div>
       {tabMenu && (() => {
@@ -827,14 +969,40 @@ function TabBar({
             (id) => id !== menuTab.id && tabs.find((t) => t.id === id)?.kind === "chat",
           );
         const canDock = canDockTab(menuTab) && !chatDockTaken;
-        if (!path && !canDock) return null;
+        const browserTabId = menuTab.kind === "preview" ? menuTab.id : null;
+        const ownGroupId = menuTab.group?.id ?? null;
         return (
           <TabContextMenu
             path={path}
+            browserTabId={browserTabId}
             x={tabMenu.x}
             y={tabMenu.y}
             onOpenInSplit={canDock ? () => onOpenInSplit(menuTab.id) : undefined}
+            otherGroups={tabGroupsIn(tabs).filter((group) => group.id !== ownGroupId)}
+            grouped={ownGroupId !== null}
+            onNewGroup={() => openGroupMenuAtChip(groupActions.create(menuTab.id))}
+            onAddToGroup={(groupId) => groupActions.add(menuTab.id, groupId)}
+            onRemoveFromGroup={() => groupActions.remove(menuTab.id)}
             onDismiss={() => setTabMenu(null)}
+          />
+        );
+      })()}
+      {groupMenu && (() => {
+        const members = tabs.filter((tab) => tab.group?.id === groupMenu.groupId);
+        const group = members[0]?.group;
+        if (!group) return null;
+        return (
+          <TabGroupMenu
+            key={group.id}
+            group={group}
+            terminalCount={members.reduce((count, tab) => count + runningTerminalCount(tab), 0)}
+            x={groupMenu.x}
+            y={groupMenu.y}
+            onRename={(name) => groupActions.rename(group.id, name)}
+            onRecolor={(color) => groupActions.recolor(group.id, color)}
+            onUngroup={() => groupActions.ungroup(group.id)}
+            onCloseGroup={() => groupActions.close(group.id)}
+            onDismiss={closeGroupMenu}
           />
         );
       })()}
@@ -854,6 +1022,8 @@ function TabBar({
           than a sub-tab affordance. Quiet loop glyph when idle; live cue
           (spinner / needs-you dot + name) while an automation runs. */}
       {workspaceId && <AutomationsStripButton workspaceId={workspaceId} />}
+      {/* Saved shell commands and agent prompts, one click away. */}
+      {workspaceId && <QuickCommandsButton />}
       <div ref={pickerRef} style={{ position: "relative" }}>
         <button
           type="button"
@@ -892,9 +1062,6 @@ function TabBar({
                 onNewPreview();
               }}
             />
-            {/* Workers open the session picker rather than a bare terminal:
-                the same surface that starts a fresh agent also lists this
-                workspace's history so it can be resumed or deleted. */}
             <PickerSectionLabel label="Workers" />
             <PickerItem
               label="Claude worker"
@@ -956,6 +1123,11 @@ interface TabItemProps {
   // slides out of the way of the incoming tab instead of the list reflowing in
   // one discrete jump at drop time. 0 at rest.
   dragOffset: number;
+  // The tab's group, as primitives so React.memo still compares cheaply.
+  // groupLast ends the group's colored underline at this tab.
+  groupId: string | null;
+  groupColor: TabGroupColor | null;
+  groupLast: boolean;
   // Take the tab id rather than a pre-bound closure: the parent can hand
   // down ONE stable callback for every row, which (together with React.memo
   // below) lets a single tab's change skip re-rendering its siblings.
@@ -966,8 +1138,8 @@ interface TabItemProps {
   onReorderDragStart: (id: TabId, event: React.DragEvent) => void;
   onPinEditorTab: (id: TabId) => void;
   onPinDiffTab: (id: TabId) => void;
-  // Right-click. Only file-backed tab kinds report it (currently editors);
-  // the parent owns the menu state so one menu serves the whole strip.
+  // Right-click. The parent owns the menu state so one menu serves the whole
+  // strip.
   onContextMenu: (id: TabId, x: number, y: number) => void;
   closeOnMiddleClick: boolean;
 }
@@ -982,6 +1154,9 @@ const TabItem = React.memo(function TabItem({
   paneDragHover,
   dragging,
   dragOffset,
+  groupId,
+  groupColor,
+  groupLast,
   onSelect,
   onClose,
   onTerminalPaneDrop,
@@ -1020,13 +1195,17 @@ const TabItem = React.memo(function TabItem({
   ]
     .filter(Boolean)
     .join(" ");
-  const tabStyle = tabStyleFor(dragOffset);
+  const tabStyle = tabStyleFor(dragOffset, groupColor);
+  const openedBy = openedByName(tab);
 
   return (
     <div
       role="tab"
       aria-selected={active}
+      aria-describedby={groupId ? groupNameDomId(groupId) : undefined}
       data-tab-id={tab.id}
+      data-tab-group={groupId ?? undefined}
+      data-group-last={groupLast ? "true" : undefined}
       data-preview-editor={isPreviewEditor ? "true" : undefined}
       className={tabClass}
       style={tabStyle}
@@ -1133,8 +1312,8 @@ const TabItem = React.memo(function TabItem({
         }
       }}
       onContextMenu={(e) => {
-        // Editors get file actions; any dockable tab gets "Open in split".
-        if (tab.kind !== "editor" && !canDockTab(tab)) return;
+        // Every tab gets the group actions; editors add file actions and
+        // dockable tabs "Open in split".
         e.preventDefault();
         e.stopPropagation();
         onContextMenu(tab.id, e.clientX, e.clientY);
@@ -1151,6 +1330,14 @@ const TabItem = React.memo(function TabItem({
       >
         {labelFor(tab)}
       </span>
+      {openedBy ? (
+        // The workspace's name made the tab twice as wide; it stays in the
+        // tooltip (titleFor) and the tab's accessible name.
+        <span style={{ flex: "0 0 auto", fontSize: 12, lineHeight: 1, color: "var(--muted)" }}>
+          <span aria-hidden>↗</span>
+          <span className="spark-sr-only">, opened by an agent in {openedBy}</span>
+        </span>
+      ) : null}
       {tab.kind === "editor" && tab.dirty && !closeHover ? (
         <span
           aria-label="Unsaved changes"
@@ -1197,9 +1384,12 @@ const TabItem = React.memo(function TabItem({
 interface ChatTabItemProps {
   tab: ChatTab;
   active: boolean;
-  // Same strip-owned reorder contract as TabItem — see TabItemProps.
+  // Same strip-owned reorder and group contract as TabItem; see TabItemProps.
   dragging: boolean;
   dragOffset: number;
+  groupId: string | null;
+  groupColor: TabGroupColor | null;
+  groupLast: boolean;
   onSelect: (id: TabId) => void;
   onRename: (id: TabId, title: string) => void;
   onClose: (id: TabId) => void;
@@ -1213,6 +1403,9 @@ const ChatTabItem = React.memo(function ChatTabItem({
   active,
   dragging,
   dragOffset,
+  groupId,
+  groupColor,
+  groupLast,
   onSelect,
   onRename,
   onClose,
@@ -1265,9 +1458,12 @@ const ChatTabItem = React.memo(function ChatTabItem({
     <div
       role="tab"
       aria-selected={active}
+      aria-describedby={groupId ? groupNameDomId(groupId) : undefined}
       data-tab-id={tab.id}
+      data-tab-group={groupId ?? undefined}
+      data-group-last={groupLast ? "true" : undefined}
       className={className}
-      style={tabStyleFor(dragOffset)}
+      style={tabStyleFor(dragOffset, groupColor)}
       // Not draggable while renaming: the text selection inside the input has
       // to win over the tab gesture.
       draggable={!editing}
@@ -1311,7 +1507,7 @@ const ChatTabItem = React.memo(function ChatTabItem({
           onClose(tab.id);
         }
       }}
-      title={tab.title}
+      title={tab.tooltip ?? tab.title}
     >
       <span style={{ display: "inline-flex", flex: "0 0 14px", color: "var(--accent-text)" }}>
         <CodaraMark size={13} />
@@ -1392,11 +1588,284 @@ const ChatTabItem = React.memo(function ChatTabItem({
 });
 
 // Keep reorder motion on the compositor so the strip never reflows mid-drag.
-// The normal case returns no style object at all.
-function tabStyleFor(dragOffset: number): React.CSSProperties | undefined {
-  return dragOffset
-    ? { transform: `translate3d(${dragOffset}px, 0, 0)` }
-    : undefined;
+// An ungrouped tab at rest gets no style object at all.
+function tabStyleFor(
+  dragOffset: number,
+  groupColor: TabGroupColor | null = null,
+): React.CSSProperties | undefined {
+  if (!dragOffset && !groupColor) return undefined;
+  return {
+    ...(dragOffset ? { transform: `translate3d(${dragOffset}px, 0, 0)` } : {}),
+    ...groupColorStyle(groupColor),
+  };
+}
+
+// The strip paints a group in its color through one custom property, whose
+// per-theme values (styles.css, --tab-group-*) keep it readable.
+function groupColorStyle(color: TabGroupColor | null): React.CSSProperties {
+  return color ? ({ "--tab-group-color": `var(--tab-group-${color})` } as React.CSSProperties) : {};
+}
+
+const STRIP_SLOT_SELECTOR = "[data-tab-id], [data-tab-group-chip]";
+
+function chipSlotId(groupId: string): string {
+  return `group:${groupId}`;
+}
+
+function groupNameDomId(groupId: string): string {
+  return `spark-tab-group-name-${groupId}`;
+}
+
+// A strip element as a drag slot, read from the data attributes the tabs and
+// chips render, so the geometry and the group of each box come from one read.
+function stripSlotOf(node: HTMLElement): Omit<StripDropSlot, "start" | "end"> | null {
+  const tabId = node.dataset.tabId;
+  if (tabId) return { id: tabId, chip: false, groupId: node.dataset.tabGroup ?? null, collapsed: false };
+  const groupId = node.dataset.tabGroupChip;
+  if (groupId) {
+    return { id: chipSlotId(groupId), chip: true, groupId, collapsed: node.dataset.collapsed === "true" };
+  }
+  return null;
+}
+
+function groupMemberIds(tabs: readonly Tab[], groupId: string): TabId[] {
+  return tabs.filter((tab) => tab.group?.id === groupId).map((tab) => tab.id);
+}
+
+// Terminal panes a close would stop; a docked cell hosts another tab, not a
+// shell.
+function runningTerminalCount(tab: Tab): number {
+  if (tab.kind !== "terminal") return 0;
+  return collectLeaves(tab.root).filter((leaf) => !isDockLeaf(leaf)).length;
+}
+
+const TAB_GROUP_COLOR_LABELS: Record<TabGroupColor, string> = {
+  grey: "Grey",
+  blue: "Blue",
+  red: "Red",
+  yellow: "Yellow",
+  green: "Green",
+  pink: "Pink",
+  purple: "Purple",
+  cyan: "Cyan",
+  orange: "Orange",
+};
+
+interface TabGroupChipProps {
+  group: TabGroup;
+  count: number;
+  dragOffset: number;
+  onToggle: (groupId: string) => void;
+  onOpenMenu: (groupId: string, x: number, y: number) => void;
+}
+
+// The group's handle in the strip: click folds or unfolds its tabs, the
+// context menu (or Shift+F10 / the Menu key) opens the group editor. Its name
+// is plain text in the group's color; the tinted pocket around the group is
+// what ties the members to it (styles.css).
+const TabGroupChip = React.memo(function TabGroupChip({
+  group,
+  count,
+  dragOffset,
+  onToggle,
+  onOpenMenu,
+}: TabGroupChipProps) {
+  const collapsed = Boolean(group.collapsed);
+  const tabsLabel = `${count} ${count === 1 ? "tab" : "tabs"}`;
+  const label = group.name ? `Tab group ${group.name}` : "Unnamed tab group";
+  return (
+    <button
+      type="button"
+      className="spark-tab-group-chip"
+      data-tab-group-chip={group.id}
+      data-collapsed={collapsed ? "true" : "false"}
+      data-unnamed={group.name ? undefined : "true"}
+      aria-expanded={!collapsed}
+      aria-haspopup="dialog"
+      aria-label={`${label}, ${TAB_GROUP_COLOR_LABELS[group.color]}, ${tabsLabel}`}
+      title={`${group.name || "Unnamed group"}: ${tabsLabel}. Click to ${collapsed ? "expand" : "collapse"}; right-click to edit.`}
+      draggable={false}
+      style={{
+        ...groupColorStyle(group.color),
+        ...(dragOffset ? { transform: `translate3d(${dragOffset}px, 0, 0)` } : {}),
+      }}
+      onClick={(e) => {
+        e.stopPropagation();
+        onToggle(group.id);
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onOpenMenu(group.id, e.clientX, e.clientY);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "ContextMenu" || (e.key === "F10" && e.shiftKey)) {
+          e.preventDefault();
+          const rect = e.currentTarget.getBoundingClientRect();
+          onOpenMenu(group.id, rect.left, rect.bottom + 4);
+        }
+      }}
+    >
+      {group.name ? (
+        <span className="spark-tab-group-chip__name" aria-hidden>
+          {group.name}
+        </span>
+      ) : (
+        <span className="spark-tab-group-chip__dot" aria-hidden />
+      )}
+      {collapsed && (
+        <span className="spark-tab-group-chip__count" aria-hidden>
+          {count}
+        </span>
+      )}
+      <span id={groupNameDomId(group.id)} className="spark-sr-only">
+        {group.name ? `In tab group ${group.name}` : "In an unnamed tab group"}
+      </span>
+    </button>
+  );
+});
+
+// The group editor, Chrome's bubble: name, color, ungroup, close. Edits apply
+// as they are made. Enter or Escape closes it and returns focus to the chip.
+function TabGroupMenu({
+  group,
+  terminalCount,
+  x,
+  y,
+  onRename,
+  onRecolor,
+  onUngroup,
+  onCloseGroup,
+  onDismiss,
+}: {
+  group: TabGroup;
+  terminalCount: number;
+  x: number;
+  y: number;
+  onRename: (name: string) => void;
+  onRecolor: (color: TabGroupColor) => void;
+  onUngroup: () => void;
+  onCloseGroup: () => void;
+  onDismiss: (returnFocus: boolean) => void;
+}) {
+  const width = 236;
+  const [draft, setDraft] = useState(group.name);
+  const [confirmClose, setConfirmClose] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const swatchRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  useLayoutEffect(() => {
+    inputRef.current?.focus();
+    inputRef.current?.select();
+  }, []);
+  const moveColor = (delta: number) => {
+    const index = TAB_GROUP_COLORS.indexOf(group.color);
+    const next = TAB_GROUP_COLORS[(index + delta + TAB_GROUP_COLORS.length) % TAB_GROUP_COLORS.length];
+    onRecolor(next);
+    swatchRefs.current[TAB_GROUP_COLORS.indexOf(next)]?.focus();
+  };
+  const terminalsLabel = `${terminalCount} running terminal${terminalCount === 1 ? "" : "s"}`;
+  return (
+    <div
+      className="spark-tabbar-picker spark-glass spark-tab-group-menu"
+      role="dialog"
+      aria-label={group.name ? `Tab group ${group.name}` : "Unnamed tab group"}
+      onMouseDown={(e) => e.stopPropagation()}
+      onClick={(e) => e.stopPropagation()}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          onDismiss(true);
+        }
+      }}
+      style={{
+        position: "fixed",
+        zIndex: 100,
+        left: Math.max(8, Math.min(x, window.innerWidth - width - 8)),
+        top: y,
+        width,
+      }}
+    >
+      <div className="spark-tab-group-menu__field">
+        <input
+          ref={inputRef}
+          value={draft}
+          maxLength={TAB_GROUP_NAME_MAX}
+          placeholder="Name this group"
+          aria-label="Group name"
+          spellCheck={false}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            onRename(e.target.value);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              onDismiss(true);
+            }
+          }}
+        />
+      </div>
+      <div
+        role="radiogroup"
+        aria-label="Group color"
+        className="spark-tab-group-menu__colors"
+        onKeyDown={(e) => {
+          if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+            e.preventDefault();
+            moveColor(1);
+          } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+            e.preventDefault();
+            moveColor(-1);
+          }
+        }}
+      >
+        {TAB_GROUP_COLORS.map((color, index) => (
+          <button
+            key={color}
+            ref={(node) => {
+              swatchRefs.current[index] = node;
+            }}
+            type="button"
+            role="radio"
+            aria-checked={color === group.color}
+            aria-label={TAB_GROUP_COLOR_LABELS[color]}
+            title={TAB_GROUP_COLOR_LABELS[color]}
+            tabIndex={color === group.color ? 0 : -1}
+            className="spark-tab-group-swatch"
+            style={groupColorStyle(color)}
+            onClick={() => onRecolor(color)}
+          />
+        ))}
+      </div>
+      <div className="spark-tab-group-menu__rule" role="separator" />
+      <PickerItem
+        label="Ungroup"
+        hint="tabs stay"
+        onClick={() => {
+          onUngroup();
+          onDismiss(false);
+        }}
+      />
+      <PickerItem
+        label={confirmClose ? `Close group and ${terminalsLabel}` : "Close group"}
+        danger={confirmClose}
+        onClick={() => {
+          if (terminalCount > 0 && !confirmClose) {
+            setConfirmClose(true);
+            return;
+          }
+          onCloseGroup();
+          onDismiss(false);
+        }}
+      />
+      {confirmClose && (
+        <div role="alert" className="spark-tab-group-menu__warning">
+          This group has {terminalsLabel}. Choose Close group again to stop them and close its tabs.
+        </div>
+      )}
+    </div>
+  );
 }
 
 function PencilGlyph() {
@@ -1561,6 +2030,7 @@ function labelFor(t: Tab): string {
   if (t.kind === "automations") return t.title || "Automations";
   if (t.kind === "usage") return t.title || "Usage";
   if (t.kind === "diff") {
+    if (t.review) return t.title;
     // Commit tabs already carry "name @ hash" in the title; don't re-suffix.
     return t.commitHash ? t.title : `${t.title} ${t.staged ? "(Staged)" : "(Working Tree)"}`;
   }
@@ -1573,18 +2043,30 @@ function titleFor(t: Tab): string {
   if (t.kind === "preview") return t.url;
   if (t.kind === "terminal") {
     const devices = phoneDeviceNames(t);
-    if (devices.length === 1) return `${t.title} — opened from phone (${devices[0]})`;
-    if (devices.length > 1) return `${t.title} — opened from phones (${devices.join(", ")})`;
+    if (devices.length === 1) return `${t.title}, opened from phone (${devices[0]})`;
+    if (devices.length > 1) return `${t.title}, opened from phones (${devices.join(", ")})`;
+    const openedBy = openedByName(t);
+    if (openedBy) return `${t.title}, opened by an agent in ${openedBy}`;
     return t.title;
   }
   if (t.kind === "automations") return t.title;
   if (t.kind === "usage") return t.title;
   if (t.kind === "diff") {
+    if (t.review) return "Review every change of the workspace and leave notes for an agent";
     return t.commitHash
       ? `${t.path} @ ${t.commitHash.slice(0, 7)} (Commit)`
       : `${t.path} ${t.staged ? "(Staged)" : "(Working Tree)"}`;
   }
   return t.title;
+}
+
+// The workspace whose agent opened this terminal tab from there, if any.
+function openedByName(tab: Tab): string | null {
+  if (tab.kind !== "terminal") return null;
+  for (const pane of collectLeaves(tab.root)) {
+    if (pane.openedBy) return pane.openedBy;
+  }
+  return null;
 }
 
 function phoneDeviceNames(tab: TerminalTab): string[] {
@@ -1629,12 +2111,17 @@ function PickerItem({
   label,
   hint,
   glyph,
+  swatch,
   accent = "shell",
   primary = false,
+  danger = false,
   onClick,
 }: {
   label: string;
   hint?: string;
+  // A tab group's color dot, for the rows that name a group.
+  swatch?: TabGroupColor;
+  danger?: boolean;
   // Optional leading swatch. Rows that carry one share the pane toolbar's
   // add-pane menu vocabulary (22px tinted square, provider letter or icon);
   // rows without one — the file context menu — keep the plain text layout.
@@ -1655,7 +2142,7 @@ function PickerItem({
         background: "transparent",
         border: "none",
         padding: "8px 12px",
-        color: primary ? "var(--accent-text)" : "var(--ink)",
+        color: danger ? "var(--danger)" : primary ? "var(--accent-text)" : "var(--ink)",
         fontFamily: "var(--font-sans)",
         fontSize: 12,
         fontWeight: primary ? 600 : 500,
@@ -1686,9 +2173,10 @@ function PickerItem({
           {glyph}
         </span>
       )}
-      <span style={{ flex: 1 }}>{label}</span>
+      {swatch && <span aria-hidden className="spark-tab-group-dot" style={groupColorStyle(swatch)} />}
+      <span style={{ flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>
       {hint && (
-        <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 10 }}>
+        <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 10, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={hint}>
           {hint}
         </span>
       )}
@@ -1767,18 +2255,32 @@ function RuntimeGlyph({ runtime }: { runtime: BrandRuntime }) {
 // long enough to fire.
 function TabContextMenu({
   path,
+  browserTabId,
   x,
   y,
   onOpenInSplit,
+  otherGroups,
+  grouped,
+  onNewGroup,
+  onAddToGroup,
+  onRemoveFromGroup,
   onDismiss,
 }: {
   path: string | null;
+  // A browser tab's id, the one agents pass as tabId.
+  browserTabId: string | null;
   x: number;
   y: number;
   onOpenInSplit?: () => void;
+  // The strip's groups other than this tab's own.
+  otherGroups: TabGroup[];
+  grouped: boolean;
+  onNewGroup: () => void;
+  onAddToGroup: (groupId: string) => void;
+  onRemoveFromGroup: () => void;
   onDismiss: () => void;
 }) {
-  const width = 200;
+  const width = 220;
   return (
     <div
       className="spark-tabbar-picker spark-glass"
@@ -1812,12 +2314,49 @@ function TabContextMenu({
           }}
         />
       )}
+      {browserTabId && (
+        <PickerItem
+          label="Copy tab id"
+          hint={browserTabId}
+          onClick={() => {
+            onDismiss();
+            void window.spark.clipboard.writeText(browserTabId).catch(() => {});
+          }}
+        />
+      )}
       {path && (
         <PickerItem
           label="Copy Path"
           onClick={() => {
             onDismiss();
             void navigator.clipboard.writeText(path).catch(() => {});
+          }}
+        />
+      )}
+      <PickerItem
+        label="Add to new group"
+        onClick={() => {
+          onDismiss();
+          onNewGroup();
+        }}
+      />
+      {otherGroups.map((group) => (
+        <PickerItem
+          key={group.id}
+          label={`Add to ${group.name ? `"${group.name}"` : "unnamed group"}`}
+          swatch={group.color}
+          onClick={() => {
+            onDismiss();
+            onAddToGroup(group.id);
+          }}
+        />
+      ))}
+      {grouped && (
+        <PickerItem
+          label="Remove from group"
+          onClick={() => {
+            onDismiss();
+            onRemoveFromGroup();
           }}
         />
       )}

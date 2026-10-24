@@ -1,14 +1,22 @@
-import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { TerminalPane, type TerminalPaneHandle } from "../components/Terminal/TerminalPane";
+import { KeepAwakeButton, SleepingPaneChip } from "../components/Terminal/AgentSleepControls";
+import type { TerminalLeafHibernation } from "./types";
+import {
+  overlayStartupCommand,
+  paneOverlaysSnapshot,
+  subscribePaneOverlays,
+} from "../components/Terminal/paneOverlays";
 import type {
   PtyExitInfo,
   RuntimeState,
   ShellInfo,
   TerminalAgentForegroundState,
-  WorkerSessionRuntime,
 } from "@shared/types";
 import type { SparkOpenInput } from "../components/Terminal/useTerminalSession";
+import { copyTerminalContext } from "../components/Terminal/terminalActions";
+import { TerminalContextGlyph } from "../components/Terminal/TerminalGlyphs";
 import DockedPaneChrome from "./DockedPaneChrome";
 import { dockLeaf, isDockLeaf } from "./dock";
 import {
@@ -128,11 +136,6 @@ interface Props {
     autorun?: string,
     agentSession?: TerminalAgentSession | null,
   ) => void;
-  onOpenWorkerSessionPicker: (
-    runtime: WorkerSessionRuntime,
-    cwd: string | undefined,
-    launch: (command: string, session: TerminalAgentSession | null) => void,
-  ) => void;
   onMovePane: (
     payload: TerminalPaneDragPayload,
     targetTabId: TabId,
@@ -188,6 +191,11 @@ interface Props {
   // A restored pane's first mount made its boot-restore attempt — clear the
   // leaf's one-shot `bootResume` hydration marker.
   onPaneBootResumeConsumed: (tabId: TabId, paneId: string) => void;
+  // Agent hibernation (lib/agentHibernation.ts): a sleeping pane came back,
+  // and the user flipped a pane's "Keep running" pin.
+  onPaneWoke?: (tabId: TabId, paneId: string) => void;
+  onPaneAsleep?: (tabId: TabId, paneId: string, hibernation: TerminalLeafHibernation) => void;
+  onPaneKeepAwake?: (tabId: TabId, paneId: string, keepAwake: boolean) => void;
   // Run-owned worker terminals are an observation surface by default. This
   // returns to the owning run canvas without tearing down the xterm or its PTY.
   onBackToRuns: () => void;
@@ -205,7 +213,6 @@ type Bundle = {
   onSplitRight: () => void;
   onSplitDown: () => void;
   onSmartAdd: (autorun?: string, agentSession?: TerminalAgentSession | null) => void;
-  onOpenWorkerSessions: (runtime: WorkerSessionRuntime) => void;
   onClose: () => void;
   onToggleZoom: () => void;
   onCwd: (cwd: string) => void;
@@ -216,6 +223,9 @@ type Bundle = {
   onResumeUnavailable: () => void;
   onResumeFallback: (session: TerminalAgentSession) => void;
   onBootResumeConsumed: () => void;
+  onWoke: () => void;
+  onAsleep: (hibernation: TerminalLeafHibernation) => void;
+  onKeepAwake: (keepAwake: boolean) => void;
 };
 
 // React.memo: with the useTabs API object now memoized, TerminalStack's
@@ -234,7 +244,6 @@ function TerminalStack({
   onActivatePane,
   onSplitRatioChange,
   onSplitPane,
-  onOpenWorkerSessionPicker,
   onMovePane,
   onClosePane,
   onDockTabDrop,
@@ -251,6 +260,9 @@ function TerminalStack({
   onPaneResumeUnavailable,
   onPaneResumeFallback,
   onPaneBootResumeConsumed,
+  onPaneWoke,
+  onPaneAsleep,
+  onPaneKeepAwake,
   onBackToRuns,
 }: Props) {
   // Memoize the filtered list so it keeps a stable identity when an
@@ -270,7 +282,6 @@ function TerminalStack({
   const activateRef = useRef(onActivatePane);
   const ratioRef = useRef(onSplitRatioChange);
   const splitRef = useRef(onSplitPane);
-  const openWorkerSessionPickerRef = useRef(onOpenWorkerSessionPicker);
   const moveRef = useRef(onMovePane);
   const closeRef = useRef(onClosePane);
   const dockDropRef = useRef(onDockTabDrop);
@@ -288,6 +299,12 @@ function TerminalStack({
   const resumeUnavailableRef = useRef(onPaneResumeUnavailable);
   const resumeFallbackRef = useRef(onPaneResumeFallback);
   const bootResumeConsumedRef = useRef(onPaneBootResumeConsumed);
+  const wokeRef = useRef(onPaneWoke);
+  wokeRef.current = onPaneWoke;
+  const asleepRef = useRef(onPaneAsleep);
+  asleepRef.current = onPaneAsleep;
+  const keepAwakeRef = useRef(onPaneKeepAwake);
+  keepAwakeRef.current = onPaneKeepAwake;
   useEffect(() => {
     detectedRef.current = onDetectedUrl;
     sparkOpenRef.current = onSparkOpen;
@@ -295,7 +312,6 @@ function TerminalStack({
     activateRef.current = onActivatePane;
     ratioRef.current = onSplitRatioChange;
     splitRef.current = onSplitPane;
-    openWorkerSessionPickerRef.current = onOpenWorkerSessionPicker;
     moveRef.current = onMovePane;
     closeRef.current = onClosePane;
     dockDropRef.current = onDockTabDrop;
@@ -313,7 +329,7 @@ function TerminalStack({
     resumeUnavailableRef.current = onPaneResumeUnavailable;
     resumeFallbackRef.current = onPaneResumeFallback;
     bootResumeConsumedRef.current = onPaneBootResumeConsumed;
-  }, [workspaceVisible, onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onOpenWorkerSessionPicker, onMovePane, onClosePane, onDockTabDrop, onUndockTab, onCloseDockedTab, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState, onPaneRuntimeState, onPaneResumeUnavailable, onPaneResumeFallback, onPaneBootResumeConsumed]);
+  }, [workspaceVisible, onDetectedUrl, onSparkOpen, onPaneExit, onActivatePane, onSplitRatioChange, onSplitPane, onMovePane, onClosePane, onDockTabDrop, onUndockTab, onCloseDockedTab, onTabZoomToggle, onPaneCwd, onPaneActivity, onPaneUserInput, onPaneScrollback, onFlushScrollback, onPaneAgentState, onPaneRuntimeState, onPaneResumeUnavailable, onPaneResumeFallback, onPaneBootResumeConsumed]);
 
   // Stable identities for the dock chrome: TerminalTabPane is memoized, and a
   // fresh callback identity here would re-render every tab (and with it every
@@ -410,25 +426,6 @@ function TerminalStack({
           onSplitRight: () => splitRef.current(tabId, paneId, "horizontal"),
           onSplitDown: () => splitRef.current(tabId, paneId, "vertical"),
           onSmartAdd: (autorun, agentSession) => smartAddInTab(tabId, autorun, agentSession),
-          onOpenWorkerSessions: (runtime) => {
-            const target = smartAddTargetInTab(tabId);
-            if (!target) return;
-            const tab = tabsRef.current.find((item) => item.id === tabId);
-            const targetLeaf = tab ? findLeaf(tab.root, target.paneId) : null;
-            openWorkerSessionPickerRef.current(
-              runtime,
-              targetLeaf?.cwd,
-              (command, session) => {
-                splitRef.current(
-                  tabId,
-                  target.paneId,
-                  target.direction,
-                  command,
-                  session,
-                );
-              },
-            );
-          },
           onClose: () => closeRef.current(tabId, paneId),
           onToggleZoom: () => zoomToggleRef.current(tabId, paneId),
           onCwd: (cwd: string) => cwdRef.current(tabId, paneId, cwd),
@@ -447,6 +444,9 @@ function TerminalStack({
           onResumeUnavailable: () => resumeUnavailableRef.current(tabId, paneId),
           onResumeFallback: (session) => resumeFallbackRef.current(tabId, paneId, session),
           onBootResumeConsumed: () => bootResumeConsumedRef.current(tabId, paneId),
+          onWoke: () => wokeRef.current?.(tabId, paneId),
+          onAsleep: (hibernation) => asleepRef.current?.(tabId, paneId, hibernation),
+          onKeepAwake: (keepAwake) => keepAwakeRef.current?.(tabId, paneId, keepAwake),
         };
         bundles.current.set(key, b);
       }
@@ -723,6 +723,15 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
   );
   const tabDrag = tabDragState?.payload ?? null;
   const ghostPos = dragState ? dragGhostPosition(dragState) : null;
+  const paneOverlays = useSyncExternalStore(subscribePaneOverlays, paneOverlaysSnapshot);
+  // The overlays as of the last commit. Read during render so a host revealed
+  // by its overlay closing can tell that apart from a tab or workspace reveal;
+  // written in a layout effect, which React runs after every child's reveal
+  // effect of the same commit.
+  const committedOverlaysRef = useRef(paneOverlays);
+  useLayoutEffect(() => {
+    committedOverlaysRef.current = paneOverlays;
+  });
   const workerTerminal = tab.scope?.kind === "workers";
   // Worker terminals open in observation mode. Keep this renderer-local: it
   // is a safety latch for the current view, not durable run state, so every
@@ -1044,6 +1053,13 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
       {renderLeaves.map(({ leaf }) => {
         const bundle = getBundle(tab.id, leaf.paneId);
         const isActive = tab.activePaneId === leaf.paneId;
+        const overlay = paneOverlays.get(leaf.paneId) ?? null;
+        const overlayJustClosed = !overlay && committedOverlaysRef.current.has(leaf.paneId);
+        const overlayFocusGate = () =>
+          overlayMayTakeFocus(
+            isActive,
+            tabRootRef.current?.querySelector(`[data-terminal-pane-id="${CSS.escape(leaf.paneId)}"]`) ?? null,
+          );
         const workerChip = visibleWorkerChip(leaf.worker);
         const isZoomed = zoomedPaneId === leaf.paneId;
         const isHiddenByZoom = zoomedPaneId !== null && !isZoomed;
@@ -1260,7 +1276,15 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
                 leaf.worker?.nativeGrokProfileId
               }
               bootResume={leaf.bootResume === true}
-              visible={visible && !placeOffScreen}
+              hibernated={Boolean(leaf.hibernation)}
+              onWoke={bundle.onWoke}
+              onAsleep={bundle.onAsleep}
+              // Hidden under an overlay: it keeps its size and buffer but can
+              // neither take the keyboard nor refit, and revealing it again
+              // when the overlay's command exits hands the focus back, but
+              // only to a user who was in the overlay.
+              visible={visible && !placeOffScreen && !overlay}
+              mayAutoFocus={overlayJustClosed ? overlayFocusGate : undefined}
               // An opened workspace terminal is a live in-memory surface, even
               // while another tab or workspace is selected. Keep feeding its
               // xterm so returning reveals the existing buffer immediately.
@@ -1282,20 +1306,56 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               initialExternalCols={leaf.origin?.initialCols}
               initialExternalRows={leaf.origin?.initialRows}
             />
-            {!placeOffScreen && !workerTerminal && workerChip ? (
+            {overlay ? (
+              <div
+                data-pane-overlay-id={overlay.paneId}
+                data-pane-overlay-host={leaf.paneId}
+                style={{
+                  position: "absolute",
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  top: labelled ? DOCK_CHROME_H : 0,
+                  display: "flex",
+                  background: "var(--bg)",
+                  borderRadius: "inherit",
+                  overflow: "hidden",
+                }}
+              >
+                <TerminalPane
+                  sessionId={overlay.paneId}
+                  shell={shell}
+                  initialCwd={overlay.cwd ?? leaf.cwd}
+                  initialCommand={overlayStartupCommand(overlay.command, shell.family)}
+                  visible={visible && !placeOffScreen}
+                  mayAutoFocus={overlayFocusGate}
+                  writeWhileHidden
+                  scrollbackLineLimit={scrollbackLineLimit}
+                  onUserInput={bundle.onUserInput}
+                />
+              </div>
+            ) : null}
+            {!placeOffScreen && !workerTerminal && leaf.hibernation ? (
+              <SleepingPaneChip hibernation={leaf.hibernation} waking={visible} />
+            ) : !placeOffScreen && !workerTerminal && workerChip ? (
               <WorkerChip worker={workerChip} />
             ) : null}
             {!placeOffScreen && !workerTerminal ? (
               <PaneToolbar
                 dragPayload={{ tabId: tab.id, paneId: leaf.paneId }}
                 onSmartAdd={bundle.onSmartAdd}
-                onOpenWorkerSessions={bundle.onOpenWorkerSessions}
                 onSplitRight={bundle.onSplitRight}
                 onSplitDown={bundle.onSplitDown}
+                onCopyContext={() => void copyTerminalContext(leaf.paneId)}
                 onClose={bundle.onClose}
                 onToggleZoom={bundle.onToggleZoom}
                 isZoomed={isZoomed}
                 visible={visible && !placeOffScreen}
+                keepAwake={
+                  leaf.agentSession?.sessionId || workerChip
+                    ? { pinned: leaf.keepAwake === true, onToggle: () => bundle.onKeepAwake(leaf.keepAwake !== true) }
+                    : null
+                }
               />
             ) : null}
           </div>
@@ -1554,6 +1614,17 @@ const RESIZE_SNAP_RATIOS = [
 ];
 const MIN_RATIO = 0.05;
 const MAX_RATIO = 0.95;
+
+// A pane overlay opens and closes when a program says so, not when the user
+// acts, so it moves the keyboard only for a user who is in that pane: the
+// focus ring follows tab.activePaneId, and a program in another split cell
+// must not pull keystrokes away from the pane, chat or field being typed in.
+// A closing overlay's xterm leaves the focus on the body.
+function overlayMayTakeFocus(isActive: boolean, frame: Element | null): boolean {
+  if (!isActive) return false;
+  const focused = document.activeElement;
+  return !focused || focused === document.body || !!frame?.contains(focused);
+}
 
 function pct(fraction: number): string {
   return `${fraction * 100}%`;
@@ -1953,8 +2024,6 @@ function TerminalDragGhost({ x, y }: { x: number; y: number }) {
           "0 0 28px color-mix(in oklch, var(--accent) 18%, transparent)",
         ].join(", "),
         transform: "rotate(-1.5deg) scale(1.02)",
-        backdropFilter: "blur(8px)",
-        WebkitBackdropFilter: "blur(8px)",
       }}
     >
       <div
@@ -2293,25 +2362,28 @@ function ResizeIntersectionGrip({
 interface PaneToolbarProps {
   dragPayload: TerminalPaneDragPayload;
   onSmartAdd: (autorun?: string, agentSession?: TerminalAgentSession | null) => void;
-  onOpenWorkerSessions: (runtime: WorkerSessionRuntime) => void;
   onSplitRight: () => void;
   onSplitDown: () => void;
+  onCopyContext: () => void;
   onClose: () => void;
   onToggleZoom: () => void;
   isZoomed: boolean;
   visible: boolean;
+  // Agent panes only: the "Keep running" pin (agent hibernation).
+  keepAwake?: { pinned: boolean; onToggle: () => void } | null;
 }
 
 function PaneToolbar({
   dragPayload,
   onSmartAdd,
-  onOpenWorkerSessions,
   onSplitRight,
   onSplitDown,
+  onCopyContext,
   onClose,
   onToggleZoom,
   isZoomed,
   visible,
+  keepAwake = null,
 }: PaneToolbarProps) {
   const stop = (e: React.MouseEvent | React.PointerEvent) => e.stopPropagation();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -2387,17 +2459,13 @@ function PaneToolbar({
       ref={wrapRef}
       onMouseDown={stop}
       onPointerDown={stop}
-      // The app's liquid-glass material, exactly as every other glass surface
-      // wears it: --strong is the same recipe the menus and dialogs use, so
-      // the Appearance sliders (veil / blur / refraction / chroma) move this
-      // pill along with everything else, and turning glass off reverts it with
-      // the rest. It used to carry a bespoke --over-terminal variant with
-      // hardcoded blur and veil, which those sliders could not reach.
-      // Visibility is CSS-owned (.spark-pane-toolbar): hidden at rest,
+      // Solid in every mode (.spark-pane-toolbar): it is part of the pane,
+      // not a layer opened over it, and a backdrop filter here re-sampled the
+      // terminal on every frame. Visibility is CSS-owned too: hidden at rest,
       // revealed while the pane is hovered / a button holds focus / the
-      // add-pane menu is open — so the pill never crowds a prompt's
+      // add-pane menu is open, so the pill never crowds a prompt's
       // right-aligned segment while the user is just reading or typing.
-      className="spark-glass spark-glass--strong spark-pane-toolbar"
+      className="spark-pane-toolbar"
       data-menu-open={menuOpen ? "true" : undefined}
       style={{
         position: "absolute",
@@ -2440,6 +2508,9 @@ function PaneToolbar({
           background: "color-mix(in oklab, var(--rule-soft) 70%, transparent)",
         }}
       />
+      <ToolbarButton title="Copy terminal context" onClick={onCopyContext}>
+        <TerminalContextGlyph size={12} />
+      </ToolbarButton>
       <ToolbarButton title="Split right (Ctrl+\\)" onClick={onSplitRight}>
         <SplitRightIcon size={12} />
       </ToolbarButton>
@@ -2453,6 +2524,7 @@ function PaneToolbar({
       >
         <ZoomPaneIcon size={12} zoomed={isZoomed} />
       </ToolbarButton>
+      {keepAwake ? <KeepAwakeButton pinned={keepAwake.pinned} onToggle={keepAwake.onToggle} /> : null}
       <ToolbarButton title="Close pane" onClick={onClose} danger>
         <CloseIcon size={12} />
       </ToolbarButton>
@@ -2460,12 +2532,9 @@ function PaneToolbar({
         <AddPaneMenu
           ref={menuRef}
           position={menuPosition}
-          onPick={(kind) => {
+          onPick={(command) => {
             setMenuOpen(false);
-            if (kind === "shell") onSmartAdd();
-            // Pi keeps its own sessions (`pi --resume` inside the pane).
-            else if (kind === "pi") onSmartAdd(PI_LAUNCH_COMMAND);
-            else onOpenWorkerSessions(kind);
+            onSmartAdd(command);
           }}
         />,
         document.body,
@@ -2540,12 +2609,12 @@ export function PaneDragHandle({ payload }: { payload: TerminalPaneDragPayload }
 type AddPaneKind = "shell" | "claude" | "codex" | "grok" | "pi";
 
 // Polished popover anchored to the toolbar's + button. The shell entry is the
-// default smart-add behavior (split the most spacious leaf); the two worker
+// default smart-add behavior (split the most spacious leaf); the worker
 // entries do the same split but seed the new leaf with an `autorun` so the
-// shell auto-launches claude/codex once its prompt is ready.
+// shell starts a new session of that agent once its prompt is ready.
 const AddPaneMenu = React.forwardRef<
   HTMLDivElement,
-  { onPick: (kind: AddPaneKind) => void; position: { top: number; left: number } }
+  { onPick: (command: string | undefined) => void; position: { top: number; left: number } }
 >(function AddPaneMenu({ onPick, position }, ref) {
   const items: Array<{
     kind: AddPaneKind;
@@ -2622,7 +2691,7 @@ const AddPaneMenu = React.forwardRef<
             command={item.command}
             accent={item.accent}
             glyph={item.glyph}
-            onClick={() => onPick(item.kind)}
+            onClick={() => onPick(item.command)}
           />
         ))}
       </div>
@@ -2880,6 +2949,20 @@ function deriveChipTone(worker: TerminalLeafWorker): ChipTone {
       frame: "accent",
     };
   }
+  if (runtime === "background") {
+    // The turn ended but work the agent started (subagents, shells) still
+    // runs and will wake it: busy, not ready. A hollow ring in the brand
+    // colour, the way the agent CLIs mark a background task, keeps it apart
+    // from the filled "working" dot.
+    const brand = workerBrandColor(worker);
+    return {
+      status: "working in background",
+      dot: "transparent",
+      dotGlow: `inset 0 0 0 1.5px ${brand}, 0 0 9px color-mix(in oklch, ${brand} 35%, transparent)`,
+      pulse: true,
+      frame: "accent",
+    };
+  }
   if (runtime === "blocked") {
     return {
       status: "needs you",
@@ -3123,7 +3206,7 @@ function WorkerPaneHeader({
         role="status"
         aria-live="polite"
         aria-atomic="true"
-        aria-label={`${title} — Cora ${tone.status}`}
+        aria-label={`${title}, Cora ${tone.status}`}
         style={{ flex: "0 0 auto", color: statusColor }}
       >
         {tone.status}
@@ -3210,17 +3293,15 @@ function WorkerChip({ worker }: { worker: TerminalLeafWorker }) {
         maxWidth: "max(80px, calc(100% - 180px))",
         minWidth: 0,
         whiteSpace: "nowrap",
-        // Earned mild-glass chip: a panel veil over the terminal canvas so
-        // the label stays legible without baking white/black (which invert
-        // on the light themes).
+        // A panel veil over the terminal canvas keeps the label legible
+        // without baking white/black (which invert on the light themes). It
+        // is part of the pane, so it stays unblurred with glass on or off.
         background: "color-mix(in oklab, var(--panel-2) 82%, transparent)",
         // Glows live, calms when done: a working worker carries the accent
         // (edge + text + halo), a blocked one carries amber to flag it needs
         // you, and an idle / finished one drops to a neutral --rule border +
         // --ink-dim text + no glow so it stops reading as live.
         border: `1px solid ${frameEdge}`,
-        backdropFilter: "blur(6px)",
-        WebkitBackdropFilter: "blur(6px)",
         color: frameColor,
         fontFamily: "var(--font-mono)",
         fontSize: 10,

@@ -26,6 +26,7 @@ import type {
 } from "./manager-protocol";
 import { effectiveChatMode } from "@shared/chat-policy";
 import { effectiveRunExecutionPolicy } from "./execution-policy";
+import type { ManagerTurnFailureCause } from "./manager-turn-policy";
 
 /**
  * Per-chat configuration passed into every backend call. Resolved by
@@ -71,6 +72,10 @@ export interface ManagerRequestInput {
   conversationEpoch: number;
   /** Called only after the provider/PTY has accepted this exact prompt. */
   onPromptAccepted?: () => void | Promise<void>;
+  /** A fresh copy of the turn's Cora memory sections, for a backend that
+   *  compacts the session mid-turn: its summary leaves them out, and the
+   *  continuation has to carry them for the rest of the turn. */
+  reloadCoraMemory?: () => Promise<string | null>;
   /** Called as soon as the backend knows which provider session this turn is
    *  writing to — before the turn settles. Run-store persists the uuid
    *  durably here so a crash mid-turn can still resume the same transcript;
@@ -138,8 +143,20 @@ export interface ManagerCallResult {
    * or mark a genuine turn failure.
    */
   turnFailed?: boolean;
+  /** Structured cause of a failed turn, when the backend knows it better
+   *  than its error text says. Wins over text classification in
+   *  manager-turn-policy. */
+  failureCause?: ManagerTurnFailureCause;
+  /** Raw diagnostic output (a stderr tail) for a failed turn. Kept out of
+   *  `notice` so it never drives classification or the user-facing text. */
+  diagnostics?: string;
+  /** The backend's own provider retry loop ran during this turn. */
+  providerRetried?: boolean;
+  /** No tool started during this turn, so replaying it cannot repeat a side
+   *  effect. Absent means unknown. */
+  replaySafe?: boolean;
   /**
-   * The turn ended because the USER interrupted it (Stop button →
+   * The turn ended because the USER interrupted it (Stop or Send now →
    * interruptChat), not because anything went wrong. run-store treats this
    * as a quiet no-op: no manager decision applied (no "Cora answered the
    * chat turn"), no run.failed, run status untouched — the Stop path
@@ -147,6 +164,10 @@ export interface ManagerCallResult {
    * belongs. Wins over turnFailed when both could apply.
    */
   turnAborted?: boolean;
+  /** With turnAborted: the session was still streaming another turn, so this
+   *  prompt never reached the provider. Nobody stopped it; its input still
+   *  needs a turn of its own once the other one ends. */
+  sessionBusy?: boolean;
 }
 
 /**
@@ -180,6 +201,14 @@ export type ChatStreamEvent =
       toolUseId: string;
       output: string;
       isError?: boolean;
+    }
+  | {
+      /** Tail of a still-running tool's output (Pi's bash). Throttled at the
+       *  source and never journaled: only the newest one per call matters, and
+       *  tool_result carries the full output. */
+      kind: "tool_progress";
+      toolUseId: string;
+      output: string;
     }
   | { kind: "system_note"; message: string }
   | {
@@ -300,8 +329,9 @@ export interface AgentBackend {
    * Interrupt the in-flight turn for this chat without tearing the session
    * down. Sends ESC (or the runtime's equivalent) to the live CLI so the
    * model stops calling tools mid-turn. Called from forcePauseRun so the
-   * user's "stop" doesn't have to wait for the 90s turn timeout. No-op if
-   * the backend has no active session for this run.
+   * user's "stop" doesn't have to wait for the 90s turn timeout, and by Send
+   * now to start the next turn with the queued messages. No-op if the
+   * backend has no active session for this run.
    */
   interruptChat?(runId: string): void;
 }
@@ -392,6 +422,12 @@ function renderMessageAttachments(message: HumanRunMessage): string[] {
  * renders every turn-start input (fresh sends and messages queued during the
  * previous turn) through buildManagerTurnPrompt with these section labels.
  */
+const SEND_NOW_NOTE =
+  "[The user stopped your previous reply to send this now. What that reply already did stands, and workers it started keep running.]";
+
+const REDELIVERED_INPUT_LABEL =
+  "Already received; your previous reply was interrupted. Do not redo work already started";
+
 export function renderBundledManagerInput(messages: HumanRunMessage[]): string {
   if (messages.length === 0) {
     return "Continue Cora's current manager workflow from the existing run state. There is no new user message attached to this turn.";
@@ -399,8 +435,8 @@ export function renderBundledManagerInput(messages: HumanRunMessage[]): string {
   if (messages.length === 1) {
     const attachments = renderMessageAttachments(messages[0]);
     const text = messages[0].message.trim();
-    if (attachments.length === 0) return text;
-    return [text, "", ...attachments].join("\n").trim();
+    const body = attachments.length === 0 ? text : [text, "", ...attachments].join("\n").trim();
+    return messages[0].redelivered ? `[${REDELIVERED_INPUT_LABEL}]\n${body}` : body;
   }
   return [
     "The user sent the following queued messages in this order. Treat all of them as input for this manager turn:",
@@ -410,7 +446,7 @@ export function renderBundledManagerInput(messages: HumanRunMessage[]): string {
       // that numbered section rather than in one merged list at the end.
       const attachments = renderMessageAttachments(message);
       return [
-        `${index + 1}. [${message.intent === "answer" ? "Linked answer" : message.intent === "steer" ? "Queued message" : "User turn"}]`,
+        `${index + 1}. [${message.redelivered ? REDELIVERED_INPUT_LABEL : message.intent === "answer" ? "Linked answer" : message.intent === "steer" ? "Queued message" : "User turn"}]`,
         message.message.trim(),
         ...(attachments.length === 0 ? [] : ["", ...attachments]),
         "",
@@ -438,7 +474,7 @@ export function buildManagerTurnPrompt(
   return appendSubscriptionHeadroom(
     appendCoraMemory(
       appendPriorRuns(
-        buildManagerTurnInput(run, inputMessages, opts),
+        appendRunState(buildManagerTurnInput(run, inputMessages, opts), opts?.runState),
         opts?.priorRuns,
       ),
       opts?.coraMemory,
@@ -448,6 +484,9 @@ export function buildManagerTurnPrompt(
 }
 
 export interface ManagerTurnPromptOptions {
+  /** The user stopped Cora's previous reply with Send now to deliver this
+   *  turn's input. */
+  followsSendNow?: boolean;
   includeCanonicalReplay?: boolean;
   /**
    * The stored auto-compaction summary, when the fresh session this turn is
@@ -485,6 +524,18 @@ export interface ManagerTurnPromptOptions {
    * byte of it in the stable prefix would kill the prompt cache for the run.
    */
   subscriptionHeadroom?: string | null;
+  /**
+   * Rendered [CORA RUN STATE] block (manager-plan.ts renderRunStateDigest):
+   * the manager's plan and the worker-task table from the run record. The
+   * caller decides when a turn carries it; it changes as work progresses, so
+   * it rides the dynamic tail only.
+   */
+  runState?: string | null;
+}
+
+function appendRunState(prompt: string, runState: string | null | undefined): string {
+  if (!runState || !runState.trim()) return prompt;
+  return [prompt, "", runState.trim()].join("\n");
 }
 
 /**
@@ -529,7 +580,9 @@ function buildManagerTurnInput(
   inputMessages: HumanRunMessage[],
   opts?: ManagerTurnPromptOptions,
 ): string {
-  const bundledInput = renderBundledManagerInput(inputMessages);
+  const bundledInput = opts?.followsSendNow && inputMessages.length > 0
+    ? [SEND_NOW_NOTE, renderBundledManagerInput(inputMessages)].join("\n")
+    : renderBundledManagerInput(inputMessages);
   const recentAssumptions = (run.assumptions ?? []).slice(-8);
   const promptInput =
     recentAssumptions.length === 0

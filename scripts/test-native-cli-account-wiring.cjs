@@ -19,7 +19,6 @@ const card = read("src/renderer/src/components/AccountCard.tsx");
 const app = read("src/renderer/src/App.tsx");
 const tabs = read("src/renderer/src/tabs/useTabs.ts");
 const tabBar = read("src/renderer/src/tabs/TabBar.tsx");
-const picker = read("src/renderer/src/components/WorkerSessionPicker.tsx");
 const shortcutCommands = read("src/renderer/src/shortcuts/commands.ts");
 const terminalStack = read("src/renderer/src/tabs/TerminalStack.tsx");
 const session = read(
@@ -146,20 +145,16 @@ assert.doesNotMatch(
 );
 assert.match(tabBar, /workerRuntimes\.length > 1/);
 assert.match(tabBar, /<SplitAgentsMark runtimes=\{workerRuntimes\}/);
-assert.match(picker, /const \[selectedIndex, setSelectedIndex\] = useState\(-1\)/);
-assert.match(picker, /historyKeyboardArmedRef\.current = true/);
-assert.match(
-  picker,
-  /if \(!historyKeyboardArmedRef\.current \|\| !session\) \{\s*void launchNew\(\)/,
-);
 for (const [id, label, handler] of [
   ["worker.newGrok", "New Grok worker pane", "handleNewWorkerPane(GROK_LAUNCH_COMMAND)"],
-  ["worker.grokSessions", "Open Grok worker sessions…", 'openShortcutWorkerSessions("grok")'],
 ]) {
   assert.match(shortcutCommands, new RegExp(`\\| "${id}"`));
   assert.match(shortcutCommands, new RegExp(`id: "${id}"[\\s\\S]*?label: "${label}"`));
   assert.ok(app.includes(`"${id}": () => ${handler}`), `${id} must have an App handler`);
 }
+// No picker stands between a worker row or shortcut and a new session.
+assert.ok(!fs.existsSync(path.join(ROOT, "src/renderer/src/components/WorkerSessionPicker.tsx")));
+assert.doesNotMatch(shortcutCommands, /worker\.(claude|codex|grok)Sessions/);
 assert.match(
   app,
   /const launchWorkerInNewTerminalTab = useCallback\([\s\S]*?tabs\.newTerminalTab\(cwd, launchCommand/,
@@ -167,27 +162,32 @@ assert.match(
 );
 assert.match(
   app,
-  /const openTabBarWorkerSessions = useCallback\([\s\S]*?launchWorkerInNewTerminalTab\(command, \{ cwd, session \}\)/,
-  "tab-strip session resumes must use the new-tab launcher too",
+  /const launchNewWorkerTab = useCallback\([\s\S]*?launchWorkerInNewTerminalTab\(command, cwd \? \{ cwd \} : undefined\)/,
+  "the tab-strip worker rows start a new session in a new tab",
 );
-for (const runtime of ["claude", "codex", "grok"]) {
+for (const [runtime, command] of [
+  ["Claude", "CLAUDE_LAUNCH_COMMAND"],
+  ["Codex", "CODEX_LAUNCH_COMMAND"],
+  ["Grok", "GROK_LAUNCH_COMMAND"],
+  ["Pi", "PI_LAUNCH_COMMAND"],
+]) {
   assert.ok(
-    app.includes(`() => openTabBarWorkerSessions("${runtime}")`),
-    `the tab-strip ${runtime} row must use tab scope`,
+    app.includes(`() => launchNewWorkerTab(${command})`) && app.includes(`onNew${runtime}Worker={open${runtime}Worker}`),
+    `the tab-strip ${runtime} row must start a new session in its own tab`,
   );
 }
 assert.match(
   terminalStack,
-  /onOpenWorkerSessions: \(runtime\)[\s\S]*?splitRef\.current\(\s*tabId,\s*target\.paneId,\s*target\.direction,\s*command,\s*session/,
-  "the terminal-toolbar worker launcher must split inside its own tab",
+  /onPick=\{\(command\) => \{[\s\S]*?onSmartAdd\(command\)/,
+  "the terminal-toolbar worker launcher must add a pane inside its own tab",
 );
 
 // ---------------------------------------------------------------------------
-// Settings presents one merged Accounts section with one card model for
+// Settings presents one merged Accounts page with one card model for
 // every provider: an account is one sign-in with two halves paired in the
 // main process, and the words come from a per-provider descriptor.
-assert.match(settings, /title="Accounts"/);
-assert.match(settings, /Every account is one sign-in for both Cora and its terminal tool/);
+assert.match(settings, /<SettingsSection anchor="Accounts" plain>/);
+assert.match(settings, /Every account is one sign-in for Cora and its terminal tool/);
 assert.doesNotMatch(settings, /closes that tool's running sessions first/);
 assert.match(settings, /<AccountCards providers=\{providerViews\}/);
 assert.ok(
@@ -202,7 +202,7 @@ assert.ok(
 // and delete of a terminal-only half.
 assert.match(settings, /return ACCOUNT_PROVIDER_DESCRIPTORS\.map\(\(descriptor\) => \{/);
 assert.doesNotMatch(settings, /descriptor\.provider === "anthropic"/);
-assert.match(settings, /void makeDefault\(card\.provider, card\.coraProfileId, closeSessions\)/);
+assert.match(settings, /void makeDefault\(card\.provider, card\.coraProfileId\)/);
 assert.match(settings, /reconnectAccount\(card\.provider, card\.coraProfileId, card\.label\)/);
 assert.match(settings, /nativeCliAccounts\.rename\(\{\s*runtime: runtimeForSubscription\(card\.provider\),/);
 assert.match(settings, /nativeCliAccounts\.delete\(\{\s*runtime: runtimeForSubscription\(card\.provider\),/);
@@ -212,13 +212,17 @@ assert.doesNotMatch(
   "no switch or sign-in may go through the native CLI account store",
 );
 assert.doesNotMatch(card, /nativeCliAccounts|spark:open-native-cli/);
-// Card keys are ids main assigned, so pairing never remounts a card.
+// Card keys start as ids main assigned and are kept while an account gains
+// or loses a half, so pairing never remounts a card.
 assert.match(settings, /key: `\$\{provider\}:\$\{profile\.id\}`/);
 assert.match(settings, /key: `\$\{provider\}:cli:\$\{profile\.id\}`/);
-assert.match(settings, /key: `\$\{provider\}:account-one`/);
-// Account 1 keeps the Cora row's label for every provider (renameable
-// there); the Codara-side label preference is gone with the two-facet card.
-assert.match(settings, /label: personal\.label \|\| "Account 1"/);
+assert.match(
+  settings,
+  /const cards = stableAccountCardKeys\(\[\.\.\.rows, \.\.\.terminalOnly\], cardKeysRef\.current\);/,
+);
+// No pseudo-card for the CLI's own login; the Codara-side label preference
+// is gone with the two-facet card.
+assert.doesNotMatch(settings, /account-one|"Account 1"/);
 assert.doesNotMatch(settings, /nativeCliAccountLabels/);
 assert.doesNotMatch(shared, /nativeCliAccountLabels/);
 assert.doesNotMatch(read("src/main/preferences-store.ts"), /nativeCliAccountLabels/);
@@ -226,14 +230,12 @@ assert.doesNotMatch(read("src/main/preferences-store.ts"), /nativeCliAccountLabe
 assert.doesNotMatch(settings, /Identity pairing|cliByFingerprint|cliByEmail|pairHint|pairedCliIds|unmatchedSignedInCli/);
 assert.match(settings, /function accountCardShowsUsage/);
 assert.match(settings, /accountCardShowsUsage\(usage\)/);
-// The switch refusal (Codex only) travels the same way as the delete one.
-assert.match(settings, /refusedWithSessions\(profileId, "use", err\)/);
-assert.match(settings, /refusedWithSessions\(profileId, "delete", err\)/);
-assert.match(card, /switchCloseSessionsCount/);
-assert.match(card, /`Close \$\{sessions\(switchCount\)\} and switch`/);
+// No switch or delete is refused for running sessions any more, so nothing
+// counts them or offers to close them.
+assert.doesNotMatch(settings, /refusedWithSessions|closeSessions/);
+assert.doesNotMatch(card, /switchCloseSessionsCount|and switch`/);
 const descriptors = read("src/renderer/src/lib/account-provider-descriptors.ts");
-assert.match(descriptors, /codex: \{\s*cliLabel: "Codex",\s*loginHint: "codex login",\s*switchClosesSessions: true,/);
-assert.equal((descriptors.match(/switchClosesSessions: true/g) ?? []).length, 1);
+assert.doesNotMatch(descriptors, /switchClosesSessions|closes running/);
 
 // The fingerprint is a one-way digest of the account id, computed in main with
 // the same scheme on both sides. The id itself never crosses IPC.
@@ -341,26 +343,25 @@ for (const source of [card, settingsView, settings, app]) {
 }
 assert.match(settingsView, /export function AccountAddPicker\(/);
 assert.match(settingsView, /<AccountCard\s+key=\{card\.key\}\s+card=\{card\}\s+descriptor=\{descriptor\}/);
-assert.match(settingsView, /`Sign in once in your browser\. Cora and \$\{selectedView\.descriptor\.cliLabel\} both use it\.`/);
+assert.match(settingsView, /`Sign in in your browser\. Codara keeps this account in its own folder and never touches \$\{selectedView\.descriptor\.systemHome\}\.`/);
 
-// The main process owns the Codex shutdown boundary, and only Codex has
-// one: Codara PTYs get a graceful close first, external codex processes are
-// then quiesced, and the service does not move the live slot until that
-// callback resolves. Claude and Grok switches close nothing; each service
-// closes only the panes of the account being deleted.
-assert.match(ipc, /codexAccounts\.setSessionShutdown\(closeEveryCodexSession\)/);
-assert.match(ipc, /pty\.disposeNativeCliRuntimeGraceful\("codex"\)/);
-assert.match(ipc, /shutdownExternalNativeCliProcesses\("codex"\)/);
-assert.doesNotMatch(ipc, /grokAccounts\.setSessionShutdown|anthropicAccounts\.setSessionShutdown/);
-assert.match(ipc, /anthropicAccounts\.setTerminalSessions\(\{[\s\S]*?pty\.disposeNativeClaudeProfileSessions\(profileId\)/);
-assert.match(ipc, /grokAccounts\.setTerminalSessions\(\{[\s\S]*?pty\.disposeNativeGrokProfileSessions\(profileId\)/);
-assert.match(ipc, /unifiedAccountsFor\(provider\)\.useAccount\(profileId, \{\s*closeSessions: input\?\.closeSessions === true/);
+// An account change never closes a terminal, Codara's or anyone else's: a
+// switch replaces credentials, and a deleted account's home waits for its
+// terminals to exit. The services only learn from the pty layer which lease
+// owners are still alive.
+assert.doesNotMatch(ipc, /setSessionShutdown|closeEveryCodexSession|shutdownExternalNativeCliProcesses|disposeNativeCliRuntimeGraceful/);
+assert.doesNotMatch(ipc, /disposeNative(?:Claude|Codex|Grok)ProfileSessions/);
+assert.match(ipc, /for \(const accounts of \[anthropicAccounts, codexAccounts, grokAccounts\]\) \{\s*accounts\.setTerminalSessions\(\{ liveOwnerIds: \(\) => pty\.liveSessionOwnerIds\(\) \}\);/);
+assert.match(ipc, /unifiedAccountsFor\(provider\)\.useAccount\(profileId\);/);
+assert.match(ipc, /unifiedAccountsFor\(provider\)\.useSystemLogin\(\);/);
 assert.match(ipc, /unifiedAccountsFor\(target\.provider\)\.deleteAccount\(profileId, \{/);
 const nativeAccounts = read("src/main/orchestration/native-cli-accounts.ts");
 assert.match(nativeAccounts, /NATIVE_CLI_ACCOUNT_UNIFIED/);
 assert.doesNotMatch(nativeAccounts, /sessionShutdown|prepareLogin|execFile/);
 const socket = read("src/main/agent-socket.ts");
-assert.match(socket, /unifiedAccountsFor\(provider\)\.useAccount\(profileId, \{\s*closeSessions: params\.closeSessions === true/);
+assert.match(socket, /unifiedAccountsFor\(provider\)\.useAccount\(profileId\);/);
+assert.match(socket, /unifiedAccountsFor\(provider\)\.useSystemLogin\(\);/);
+assert.doesNotMatch(socket, /closeSessions: params\.closeSessions/);
 assert.match(socket, /unifiedAccountsFor\(current\.provider\)\.deleteAccount\(profileId, \{/);
 assert.doesNotMatch(socket, /openNativeCliAccountLogin|nativeCliAccounts\.(?:create|setDefault|logout|delete|prepareLogin)\(/);
 

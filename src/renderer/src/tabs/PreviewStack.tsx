@@ -99,12 +99,13 @@ function PreviewStack({ tabs, activeId, dockIndex, onUrlChange, workspaceId, wor
     h: BrowserPaneHandle | null,
     url: string,
     runId: string | null,
+    partition: string | null,
   ) => {
     // React replaces imperative handles during navigation. Keep control
     // ownership until the replacement arrives; closed tabs are removed below.
     if (h) {
       handles.current.set(id, h);
-      registerPreviewTab({ id, handle: h, url, runId, workspaceId });
+      registerPreviewTab({ id, handle: h, url, runId, workspaceId, partition });
       lastRegisteredUrl.current.set(id, url);
     }
   };
@@ -116,7 +117,7 @@ function PreviewStack({ tabs, activeId, dockIndex, onUrlChange, workspaceId, wor
   const getHandleRef = (tab: PreviewTab) => {
     let callback = handleRefs.current.get(tab.id);
     if (!callback) {
-      callback = (handle) => setHandle(tab.id, handle, tab.url, tab.runId ?? null);
+      callback = (handle) => setHandle(tab.id, handle, tab.url, tab.runId ?? null, tab.partition ?? null);
       handleRefs.current.set(tab.id, callback);
     }
     return callback;
@@ -181,6 +182,8 @@ function PreviewStack({ tabs, activeId, dockIndex, onUrlChange, workspaceId, wor
             // addressable without reaching through to the <webview> (which
             // sits below the address bar and is a smaller box).
             data-dock-content-id={docked ? t.id : undefined}
+            // Lets the jump palette focus this tab's page.
+            data-tab-content={t.id}
             aria-hidden={!visible}
             style={
               docked
@@ -207,8 +210,11 @@ function PreviewStack({ tabs, activeId, dockIndex, onUrlChange, workspaceId, wor
           >
             <BrowserPane
               ref={getHandleRef(t)}
+              tabId={t.id}
               url={t.url}
+              partition={t.partition}
               visible={visible}
+              workspaceId={workspaceId}
               onUrlChange={getUrlCallback(t.id)}
               onReady={(webContentsId) =>
                 window.spark.previewBridge.announce?.({ tabId: t.id, webContentsId })

@@ -27,6 +27,11 @@ async function main() {
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
 
+  const codaraHome = path.join(dir, "codara-home");
+  process.env.CODARA_HOME_DIR = codaraHome;
+  process.env.SPARK_SKIP_LEGACY_MIGRATION = "1";
+  process.env.CLAUDE_CONFIG_DIR = path.join(dir, "personal-claude");
+
   const outfile = path.join(dir, "claude-paths.cjs");
   await esbuild.build({
     entryPoints: [ENTRY],
@@ -40,6 +45,7 @@ async function main() {
     inspectClaudeTranscriptTail,
     repairClaudeTranscriptTail,
     resolveSafeClaudeTranscriptPath,
+    assertSafeClaudeStoragePath,
   } = require(outfile);
 
   let failures = 0;
@@ -172,6 +178,56 @@ async function main() {
     encodedLinkRejected = true;
   }
   check("repair rejects a symlinked encoded-project ancestor", encodedLinkRejected);
+
+  // A managed Claude home links projects into the user's own home, and the
+  // resume probe must find transcripts through that one link (otherwise every
+  // pane restarts fresh after a relaunch). A managed home's link anywhere else
+  // and a deeper link are still refused.
+  const personalHome = path.join(dir, "personal-claude");
+  const personalProject = path.join(personalHome, "projects", encoded);
+  fs.mkdirSync(personalProject, { recursive: true });
+  const personalTranscript = path.join(personalProject, `${sessionId}.jsonl`);
+  fs.writeFileSync(personalTranscript, `${goodPart}`, "utf8");
+  const liveHome = path.join(codaraHome, "claude-cli", "live", "home");
+  fs.mkdirSync(liveHome, { recursive: true });
+  fs.symlinkSync(path.join(personalHome, "projects"), path.join(liveHome, "projects"), "dir");
+  const throughShared = await resolveSafeClaudeTranscriptPath(cwd, sessionId, liveHome, {
+    requireExisting: true,
+  }).catch((error) => error);
+  check(
+    "a managed home finds transcripts through its link to the personal projects",
+    throughShared === path.join(liveHome, "projects", encoded, `${sessionId}.jsonl`),
+  );
+  // The session list reads history.jsonl, a shared FILE link.
+  fs.writeFileSync(path.join(personalHome, "history.jsonl"), "{}\n", "utf8");
+  fs.symlinkSync(path.join(personalHome, "history.jsonl"), path.join(liveHome, "history.jsonl"));
+  const history = await assertSafeClaudeStoragePath(liveHome, path.join(liveHome, "history.jsonl"), {
+    includeLeaf: true,
+    leafType: "file",
+  }).catch((error) => error);
+  check(
+    "a managed home reads history.jsonl through its link to the personal home",
+    history === path.join(liveHome, "history.jsonl"),
+  );
+  const strayHome = path.join(codaraHome, "claude-cli", "accounts", "x", "home");
+  fs.mkdirSync(strayHome, { recursive: true });
+  fs.symlinkSync(outside, path.join(strayHome, "projects"), "dir");
+  let strayRejected = false;
+  try {
+    await resolveSafeClaudeTranscriptPath(cwd, sessionId, strayHome, { requireExisting: true });
+  } catch {
+    strayRejected = true;
+  }
+  check("a managed home's link outside the personal home is refused", strayRejected);
+  fs.rmSync(personalProject, { recursive: true });
+  fs.symlinkSync(path.join(outside, encoded), personalProject, "dir");
+  let deeperRejected = false;
+  try {
+    await resolveSafeClaudeTranscriptPath(cwd, sessionId, liveHome, { requireExisting: true });
+  } catch {
+    deeperRejected = true;
+  }
+  check("a link below the shared projects folder is refused", deeperRejected);
 
   const leafLinkHome = path.join(dir, "leaf-link-home");
   const leafLinkProject = path.join(leafLinkHome, "projects", encoded);

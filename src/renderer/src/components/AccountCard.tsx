@@ -1,13 +1,18 @@
 import React, { useState } from "react";
 import type { PiSubscriptionProvider } from "@shared/types";
 import { agentBrandColor } from "../lib/agent-brand";
-import type { AccountProviderDescriptor } from "../lib/account-provider-descriptors";
+import {
+  systemLoginBadge,
+  type AccountProviderDescriptor,
+} from "../lib/account-provider-descriptors";
+import { UsagePlaceholder } from "./SubscriptionUsage";
 import {
   ActionButton,
+  ActiveBadge,
   CardOverflowMenu,
   ConnectionLine,
+  RemoveConfirm,
   RenameForm,
-  UsingChip,
   type CardAction,
   type ConnectionState,
 } from "./AccountCardPrimitives";
@@ -20,12 +25,12 @@ import {
  * provider the card is for changes the words and the brand, nothing else.
  *
  * A card is one of six states, derived below from what main reported:
- *   active                  the account Cora and the terminal tool are using
- *   signed-in               signed in, one click away from being active
- *   needs-reconnect         the Cora sign-in lapsed with no way back
- *   terminal-only           a terminal sign-in Cora does not have yet
- *   cora-only               a Cora sign-in the terminal tool does not have yet
- *   account-one-signed-out  the user's own CLI login, currently absent
+ *   active           the account new Cora chats and Codara terminals use
+ *   signed-in        signed in, one click away from being active
+ *   needs-reconnect  the Cora sign-in lapsed with no way back
+ *   terminal-only    a terminal sign-in Cora does not have yet
+ *   cora-only        a Cora sign-in the terminal tool does not have yet
+ *   system           the CLI's own login on this computer, used as it is
  */
 export type AccountCardState =
   | "active"
@@ -33,10 +38,13 @@ export type AccountCardState =
   | "needs-reconnect"
   | "terminal-only"
   | "cora-only"
-  | "account-one-signed-out";
+  | "system";
 
 export interface AccountCardView {
-  /** Stable across pairing: <provider>:<coraId>, <provider>:cli:<cliId>, or <provider>:account-one. */
+  /**
+   * <provider>:<coraId> or <provider>:cli:<cliId> when first drawn, then kept
+   * while the account gains or loses a half (stableAccountCardKeys).
+   */
   key: string;
   provider: PiSubscriptionProvider;
   label: string;
@@ -44,19 +52,21 @@ export interface AccountCardView {
   email?: string;
   /** Plan name, e.g. "Max". */
   plan?: string;
-  /** Cora row id. Absent on a terminal-only half and on the unlinked Account 1 slot. */
+  /** Cora row id. Absent on a terminal-only half. */
   coraProfileId?: string;
   /** Terminal half id. Absent on a Cora-only row. */
   cliProfileId?: string;
-  /** Account 1: the user's own CLI login. Renameable, never deleted or reconnected here. */
+  /** The CLI's own login on this computer, which Codara never changes. */
   builtIn: boolean;
-  /** The account Cora and the terminal tool are running on; both switch together. */
+  /** The account new sessions use; Cora and the terminal tool switch together. */
   active: boolean;
   cora?: {
     connected: boolean;
     expired: boolean;
     canRefresh: boolean;
     error?: string;
+    /** False when the row holds no Cora grant at all (a System row before Connect Cora). */
+    held?: boolean;
   };
   terminal?: {
     connected: boolean;
@@ -70,56 +80,32 @@ export interface AccountCardView {
   busy: boolean;
   /** Usage limits for this account, rendered inside the card body. */
   usage?: React.ReactNode;
-  /**
-   * Terminals still running on this account (the count main refused a delete
-   * with, or the live count): the next Delete closes that many first.
-   */
-  closeSessionsCount?: number;
-  /**
-   * Set after main refused a switch because terminals are running on this
-   * account: the next Use closes that many first. Only a provider whose
-   * switch closes sessions (Codex) ever reports it.
-   */
-  switchCloseSessionsCount?: number;
+  /** Said on the empty meters when this account has no reading to draw. */
+  usageNote?: string;
+  /** Why the last limit read failed, said once under the empty meters. */
+  usageMessage?: string;
 }
 
 export interface AccountCardActions {
-  /** Switch Cora and the terminal tool to this account together. */
-  onUse: (card: AccountCardView, options: { closeSessions: boolean }) => void;
-  /** Browser sign-in that rewrites both halves of this account. */
+  /** Make this the Active account for new sessions. */
+  onUse: (card: AccountCardView) => void;
+  /** Browser sign-in that rewrites this account's Cora grant (and its managed copy). */
   onReconnect: (card: AccountCardView) => void;
   /** Give a half account its other half. */
   onShare: (card: AccountCardView) => void;
   onRename: (card: AccountCardView, label: string) => Promise<boolean>;
-  onDelete: (
-    card: AccountCardView,
-    options: { closeSessions: boolean },
-  ) => void;
+  onDelete: (card: AccountCardView) => void;
 }
 
-export function accountCardState(card: AccountCardView): AccountCardState {
-  if (!card.coraProfileId) {
-    return card.builtIn ? "account-one-signed-out" : "terminal-only";
-  }
-  // Access tokens are short-lived and renewed silently from the refresh
-  // token, so a lapsed one is the normal resting state between sessions.
-  // Only a credential with no way back needs the user.
-  const coraUsable =
+/** Usable the way Cora counts it: held, present, and not expired without a way back. */
+function coraUsable(card: AccountCardView): boolean {
+  return (
+    card.cora?.held !== false &&
     Boolean(card.cora?.connected) &&
-    !(card.cora?.expired && !card.cora.canRefresh);
-  if (card.builtIn && !coraUsable) return "account-one-signed-out";
-  if (!coraUsable) return "needs-reconnect";
-  if (!card.cliProfileId) return "cora-only";
-  return card.active ? "active" : "signed-in";
+    !(card.cora?.expired && !card.cora.canRefresh)
+  );
 }
 
-export function accountOneSignedOutHint(
-  descriptor: AccountProviderDescriptor,
-): string {
-  return `Run ${descriptor.loginHint} in a terminal to use this account.`;
-}
-
-/** Usable the way Cora counts it: present, and not expired without a way back. */
 function terminalUsable(card: AccountCardView): boolean {
   return (
     Boolean(card.terminal?.connected) &&
@@ -127,8 +113,37 @@ function terminalUsable(card: AccountCardView): boolean {
   );
 }
 
-function sessions(count: number): string {
-  return `${count} ${count === 1 ? "session" : "sessions"}`;
+export function accountCardState(card: AccountCardView): AccountCardState {
+  if (card.builtIn) return "system";
+  if (!card.coraProfileId) return "terminal-only";
+  // Access tokens are short-lived and renewed silently from the refresh
+  // token, so a lapsed one is the normal resting state between sessions.
+  // Only a credential with no way back needs the user.
+  if (!coraUsable(card)) return "needs-reconnect";
+  if (!card.cliProfileId) return "cora-only";
+  return card.active ? "active" : "signed-in";
+}
+
+/**
+ * Ready is what the row shows, never a separate guess: an account counts
+ * when its row carries the Active badge with no problem under it, or the
+ * Switch button. A System row counts while its own login is signed in,
+ * since terminals can use it whether or not Cora is connected.
+ */
+export function accountCardReady(card: AccountCardView): boolean {
+  const state = accountCardState(card);
+  if (state === "system") return terminalUsable(card);
+  return (state === "active" || state === "signed-in") && !card.cora?.error;
+}
+
+/**
+ * The state alone, without the instruction that follows it. A row whose
+ * button already carries the fix shows only this, so the sentence and the
+ * button never say the same thing twice.
+ */
+function firstSentence(text: string): string {
+  const match = /^(.+?)[.!?](?:\s|$)/.exec(text);
+  return match ? match[1] : text;
 }
 
 function connectionState(
@@ -137,18 +152,18 @@ function connectionState(
   descriptor: AccountProviderDescriptor,
 ): ConnectionState {
   const { cliLabel } = descriptor;
-  // Account 1 always says what to do; a raw store error on its own would
-  // hide the one instruction that helps.
-  if (card.cora?.error && state !== "account-one-signed-out") {
+  if (card.cora?.error && state !== "system" && state !== "terminal-only") {
     return { ok: false, text: card.cora.error, danger: true };
   }
   switch (state) {
+    // A healthy row says only that it is signed in. What Codara does with
+    // each kind of account is said once, under "How switching works".
+    case "system":
+      return terminalUsable(card)
+        ? { ok: true, text: "Signed in" }
+        : { ok: false, text: `${cliLabel} on this computer is signed out.` };
     case "needs-reconnect":
-      return {
-        ok: false,
-        text: "The Cora sign-in expired. Reconnect to keep using this account.",
-        danger: true,
-      };
+      return { ok: false, text: "Sign-in expired.", danger: true };
     case "cora-only":
       return {
         ok: false,
@@ -160,77 +175,77 @@ function connectionState(
       if (card.terminal?.unsafe) {
         return {
           ok: false,
-          text: `${cliLabel} cannot use this profile's folder. Delete it and add the account again.`,
+          text: `${cliLabel} cannot use this profile's folder. Remove it and add the account again.`,
           danger: true,
         };
       }
       if (!card.terminal?.connected) {
         return {
           ok: false,
-          text: `Not signed in to ${cliLabel}. Delete it and add the account again.`,
+          text: `Not signed in to ${cliLabel}. Remove it and add the account again.`,
         };
       }
       return {
         ok: false,
-        text: card.cliDefault
-          ? `Signed in to ${cliLabel} only, and the terminal is using it. Share it so Cora can use it too.`
-          : `Signed in to ${cliLabel} only. Share it so Cora can use it too.`,
-      };
-    case "account-one-signed-out":
-      return {
-        ok: false,
-        text: terminalUsable(card)
-          ? `Found your ${descriptor.loginHint}. Cora is linking it now.`
-          : card.cora?.error
-            ? `${card.cora.error} ${accountOneSignedOutHint(descriptor)}`
-            : accountOneSignedOutHint(descriptor),
+        text: `Signed in to ${cliLabel} only. Share it so Cora can use it too.`,
       };
     case "active":
     case "signed-in":
       if (card.cora?.expired && card.cora.canRefresh) {
-        return { ok: true, text: "Refreshing the Cora sign-in." };
+        return { ok: true, text: "Refreshing the sign-in." };
       }
       if (card.terminal && !card.terminal.connected) {
-        return {
-          ok: true,
-          text: `Signed in to Cora. The ${cliLabel} copy is catching up.`,
-        };
+        return { ok: true, text: `Signed in. The ${cliLabel} copy is catching up.` };
       }
-      return { ok: true, text: `Signed in to Cora and ${cliLabel}.` };
+      return { ok: true, text: "Signed in" };
   }
+}
+
+/** The second line on a System row: whether Cora has its own grant for it. */
+function systemCoraState(card: AccountCardView): ConnectionState {
+  if (coraUsable(card)) return { ok: true, text: "Cora connected" };
+  if (card.cora?.held !== false && card.cora?.connected) {
+    return { ok: false, text: "Cora's sign-in expired.", danger: true };
+  }
+  return { ok: false, text: "Cora isn't connected." };
 }
 
 function primaryAction(
   card: AccountCardView,
   state: AccountCardState,
+  status: ConnectionState,
   descriptor: AccountProviderDescriptor,
   actions: AccountCardActions,
   disabled: boolean,
 ): CardAction | undefined {
+  // A lapsed sign-in is fixed by reconnecting it, never by switching to it.
+  if (status.danger && card.coraProfileId && state !== "system" && state !== "terminal-only") {
+    return {
+      id: "reconnect",
+      label: "Reconnect",
+      disabled,
+      run: () => actions.onReconnect(card),
+    };
+  }
   switch (state) {
     case "active":
-    case "account-one-signed-out":
+    case "needs-reconnect":
       return undefined;
-    case "signed-in": {
-      // Main refused the switch with a count; the same button now closes
-      // those sessions and switches. Only Codex ever reports one.
-      const switchCount = card.switchCloseSessionsCount ?? 0;
+    case "system":
+      if (card.active || !terminalUsable(card)) return undefined;
       return {
         id: "use",
-        label:
-          switchCount > 0
-            ? `Close ${sessions(switchCount)} and switch`
-            : "Use this account",
+        label: "Switch to this account",
+        title: `New sessions use your own ${descriptor.cliLabel} login`,
         disabled,
-        run: () => actions.onUse(card, { closeSessions: switchCount > 0 }),
+        run: () => actions.onUse(card),
       };
-    }
-    case "needs-reconnect":
+    case "signed-in":
       return {
-        id: "reconnect",
-        label: "Reconnect",
+        id: "use",
+        label: "Switch to this account",
         disabled,
-        run: () => actions.onReconnect(card),
+        run: () => actions.onUse(card),
       };
     case "cora-only":
       return {
@@ -250,25 +265,72 @@ function primaryAction(
   }
 }
 
+function SwitchGlyph() {
+  return (
+    <svg
+      aria-hidden
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M4 8h13l-3.5-3.5M20 16H7l3.5 3.5" />
+    </svg>
+  );
+}
+
+/** The text a Remove asks to confirm (accounts spec 13). */
+export function removeConfirmText(
+  card: AccountCardView,
+  descriptor: AccountProviderDescriptor,
+): string {
+  const { cliLabel } = descriptor;
+  if (card.builtIn) {
+    return `Remove "${card.label}" from Codara? Your ${cliLabel} login stays as it is. Codara stops offering it.`;
+  }
+  return `Remove "${card.label}"? Codara deletes this sign-in from its own folder. Your ${cliLabel} login outside Codara is not affected. This can't be undone; to use it again, add it again.`;
+}
+
+/**
+ * Avatar colors after the provider's own: two accounts of one provider
+ * should not wear the same badge, so the first takes the brand and each one
+ * after it the next of these.
+ */
+const AVATAR_TONES = [
+  "oklch(0.66 0.13 250)",
+  "oklch(0.64 0.15 300)",
+  "oklch(0.66 0.13 160)",
+  "oklch(0.66 0.15 15)",
+  "oklch(0.72 0.13 85)",
+];
+
 export default function AccountCard({
   card,
   descriptor,
   disabled,
   actions,
+  position = 0,
 }: {
   card: AccountCardView;
   descriptor: AccountProviderDescriptor;
   /** The Pi runtime is missing or another account action is in flight. */
   disabled: boolean;
   actions: AccountCardActions;
+  /** The card's place in its provider's list, which picks its avatar color. */
+  position?: number;
 }) {
   const [renaming, setRenaming] = useState(false);
-  const [deleteArmed, setDeleteArmed] = useState(false);
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
   const brand = agentBrandColor(descriptor.brand);
+  const tone = position === 0 ? brand : AVATAR_TONES[(position - 1) % AVATAR_TONES.length];
   const state = accountCardState(card);
   const controlsDisabled = disabled || card.busy;
   const status = connectionState(card, state, descriptor);
-  const action = primaryAction(card, state, descriptor, actions, controlsDisabled);
+  const action = primaryAction(card, state, status, descriptor, actions, controlsDisabled);
   const renameable = Boolean(card.coraProfileId || card.cliProfileId);
 
   const menuActions: CardAction[] = [];
@@ -279,194 +341,160 @@ export default function AccountCard({
       disabled: controlsDisabled,
       run: () => {
         setRenaming(true);
-        setDeleteArmed(false);
+        setConfirmingRemove(false);
       },
     });
   }
+  const systemCora = state === "system" ? systemCoraState(card) : null;
   const destructiveActions: CardAction[] = [];
   if (renameable) {
-    // Account 1 is the user's own CLI login, so its card is FORGOTTEN rather
-    // than deleted: the Cora sign-in and the pairing go, the login itself
-    // stays, and no terminal has to close. The wording deliberately avoids
-    // the retired two-role vocabulary, where an action dropped one half of
-    // a card that went on living as the other.
-    const closeCount = card.builtIn ? 0 : card.closeSessionsCount ?? 0;
     destructiveActions.push({
       id: "delete",
-      label: deleteArmed
-        ? closeCount > 0
-          ? `Close ${sessions(closeCount)} and delete`
-          : card.builtIn
-            ? "Confirm forget"
-            : "Confirm delete"
-        : card.builtIn
-          ? "Forget this account"
-          : "Delete",
+      label: card.builtIn ? "Remove from Codara" : "Remove",
       danger: true,
       disabled: controlsDisabled,
       run: () => {
-        if (!deleteArmed) {
-          setDeleteArmed(true);
-          return false;
-        }
-        setDeleteArmed(false);
-        actions.onDelete(card, { closeSessions: closeCount > 0 });
+        setConfirmingRemove(true);
+        setRenaming(false);
       },
     });
   }
+
+  const signedOut = state === "system" ? !terminalUsable(card) : false;
+  const initial = (card.label.trim().charAt(0) || "?").toUpperCase();
+  const connectCora =
+    systemCora && !systemCora.ok && card.coraProfileId ? (
+      <ActionButton
+        quiet
+        disabled={controlsDisabled}
+        onClick={() => actions.onReconnect(card)}
+      >
+        Connect Cora
+      </ActionButton>
+    ) : null;
 
   return (
     <div
       aria-busy={card.busy || undefined}
       aria-current={card.active ? "true" : undefined}
-      style={{
-        display: "grid",
-        gap: 10,
-        padding: "12px 13px",
-        borderRadius: "var(--radius-surface, 7px)",
-        border: "1px solid var(--rule)",
-        background: "var(--panel-2)",
-        boxShadow: card.active ? `inset 2px 0 0 ${brand}` : "none",
-      }}
+      className={`st-acct${card.active ? " is-active" : ""}${signedOut ? " is-signed-out" : ""}`}
     >
-      <div
+      <span
+        aria-hidden
+        className="st-acct__avatar"
         style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 8,
+          color: tone,
+          background: `color-mix(in oklch, ${tone} 15%, transparent)`,
         }}
       >
-        <div
-          style={{
-            minWidth: 0,
-            display: "grid",
-            gridAutoFlow: "column",
-            gridAutoColumns: "minmax(0, max-content)",
-            justifyContent: "start",
-            alignItems: "baseline",
-            columnGap: 7,
-          }}
-        >
-          <span
-            style={{
-              minWidth: 0,
-              color: "var(--ink)",
-              fontFamily: "var(--font-sans)",
-              fontSize: 13,
-              fontWeight: 650,
-              lineHeight: 1.3,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {card.label}
-          </span>
-          {card.email ? (
-            <span
-              title={card.email}
-              style={{
-                minWidth: 0,
-                color: "var(--muted)",
-                fontFamily: "var(--font-sans)",
-                fontSize: 11,
-                lineHeight: 1.3,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {card.email}
-            </span>
-          ) : null}
-          {card.plan ? (
-            <span
-              style={{
-                minWidth: 0,
-                color: "var(--muted)",
-                fontFamily: "var(--font-sans)",
-                fontSize: 10.5,
-                lineHeight: 1.3,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {card.plan} plan
-            </span>
-          ) : null}
+        {initial}
+      </span>
+      <div className="st-acct__body">
+        <div className="st-acct__head">
+          <div className="st-acct__id">
+            <div className="st-acct__name-line">
+              <span className="st-acct__name">{card.label}</span>
+              {/* Every badge rides the name line, so the line under it is
+                  only the email. */}
+              {card.plan ? <span className="st-acct__plan">{card.plan} plan</span> : null}
+              {card.builtIn ? (
+                <span className="st-acct-badge">{systemLoginBadge(descriptor)}</span>
+              ) : null}
+            </div>
+            <div className="st-acct__meta">
+              {/* A System row is named after its email by default; one line of it is enough. */}
+              {card.email && card.email === card.label ? null : card.email ? (
+                <span className="st-acct__email" title={card.email}>
+                  {card.email}
+                </span>
+              ) : (
+                <span className="st-acct__email is-missing">Email not reported</span>
+              )}
+            </div>
+          </div>
+          <div className="st-acct__actions">
+            {/* The state and the way to change it share one slot at the end of
+                the row, so Active and Switch line up down the list and the
+                eye finds either in the same place. */}
+            {card.busy ? (
+              <span className="st-acct__working">
+                <span aria-hidden className="st-spinner" />
+                Working…
+              </span>
+            ) : action ? (
+              // Every row action is the same quiet button: the only accent in
+              // the list is the Active badge and its rule.
+              <ActionButton
+                disabled={action.disabled}
+                title={action.title}
+                onClick={() => void action.run()}
+              >
+                {action.id === "use" ? <SwitchGlyph /> : null}
+                {action.label}
+              </ActionButton>
+            ) : null}
+            {card.active ? <ActiveBadge label="Active" /> : null}
+            {/* A row with nothing in its menu keeps the menu's slot, so every
+                row's button ends on the same edge down the list. */}
+            {menuActions.length > 0 || destructiveActions.length > 0 ? (
+              <CardOverflowMenu
+                label={`More actions for ${card.label}`}
+                groups={[menuActions, destructiveActions]}
+                onClose={() => undefined}
+              />
+            ) : (
+              <span aria-hidden className="st-acct__menu-slot" />
+            )}
+          </div>
         </div>
-        <span
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 7,
-            flex: "0 0 auto",
-          }}
-        >
-          {card.active ? <UsingChip label="Using" color={brand} /> : null}
-          {card.busy ? (
-            <span
-              style={{
-                color: "var(--muted)",
-                fontFamily: "var(--font-sans)",
-                fontSize: 10.5,
-                lineHeight: 1.3,
-                whiteSpace: "nowrap",
-              }}
-            >
-              Working…
-            </span>
-          ) : action ? (
-            <ActionButton
-              compact
-              primary
-              tone={brand}
-              disabled={action.disabled}
-              onClick={() => void action.run()}
-            >
-              {action.label}
-            </ActionButton>
-          ) : null}
-          {menuActions.length > 0 || destructiveActions.length > 0 ? (
-            <CardOverflowMenu
-              label={`More actions for ${card.label}`}
-              groups={[menuActions, destructiveActions]}
-              onClose={() => setDeleteArmed(false)}
+
+        {/* One quiet status line: the sign-in states sit side by side and
+            wrap only when the row is narrow. */}
+        <div className="st-acct__status">
+          <ConnectionLine
+            state={action && status.danger ? { ...status, text: firstSentence(status.text) } : status}
+            title={status.text}
+          />
+          {systemCora ? <ConnectionLine state={systemCora} action={connectCora} /> : null}
+        </div>
+
+        <div className="st-acct__usage">
+          {card.usage ?? (
+            <UsagePlaceholder
+              labels={descriptor.usageWindows}
+              note={card.usageNote ?? "Not available"}
+              message={card.usageMessage}
             />
-          ) : null}
-        </span>
-      </div>
-
-      <ConnectionLine state={status} />
-
-      {card.usage ? (
-        <div
-          style={{
-            display: "grid",
-            gap: 6,
-            paddingTop: 10,
-            borderTop: "1px solid var(--rule-soft)",
-          }}
-        >
-          {card.usage}
+          )}
         </div>
-      ) : null}
 
-      {renaming ? (
-        <RenameForm
-          ariaLabel={`Rename ${card.label}`}
-          initial={card.label}
-          busy={card.busy}
-          onSave={async (label) => {
-            const saved = await actions.onRename(card, label);
-            if (saved) setRenaming(false);
-            return saved;
-          }}
-          onCancel={() => setRenaming(false)}
-        />
-      ) : null}
+        {renaming ? (
+          <RenameForm
+            ariaLabel={`Rename ${card.label}`}
+            initial={card.label}
+            busy={card.busy}
+            onSave={async (label) => {
+              const saved = await actions.onRename(card, label);
+              if (saved) setRenaming(false);
+              return saved;
+            }}
+            onCancel={() => setRenaming(false)}
+          />
+        ) : null}
+
+        {confirmingRemove ? (
+          <RemoveConfirm
+            text={removeConfirmText(card, descriptor)}
+            confirmLabel={card.builtIn ? "Remove from Codara" : "Remove"}
+            disabled={controlsDisabled}
+            onConfirm={() => {
+              setConfirmingRemove(false);
+              actions.onDelete(card);
+            }}
+            onCancel={() => setConfirmingRemove(false)}
+          />
+        ) : null}
+      </div>
     </div>
   );
 }

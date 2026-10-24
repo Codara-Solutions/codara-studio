@@ -50,19 +50,30 @@ const { PiTurnAccumulator } = piTurnModule;
 // The frontier policy (and its required-completion gate) was removed 2026-08.
 assert.equal(piTurnModule.frontierTurnHasRequiredCompletion, undefined);
 
+// Pi 0.84+ (the bundled 0.85.1 included) sends message_update as
+// { type, usage, assistantMessageEvent } with no `message`; the delta belongs
+// to the assistant message that message_start opened.
 const stream = [];
 const turn = new PiTurnAccumulator((event) => stream.push(event));
 turn.consume({ type: "message_start", message: { role: "assistant", timestamp: 10, content: [] } });
 turn.consume({
   type: "message_update",
-  message: { role: "assistant", timestamp: 10, content: [] },
-  assistantMessageEvent: { type: "text_delta", delta: "Hello " },
+  usage: { input: 0, output: 1 },
+  assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Hello " },
 });
 turn.consume({
   type: "message_update",
-  message: { role: "assistant", timestamp: 10, content: [] },
-  assistantMessageEvent: { type: "text_delta", delta: "world" },
+  usage: { input: 0, output: 2 },
+  assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "world" },
 });
+assert.deepEqual(
+  stream.filter((event) => event.kind === "assistant_block"),
+  [
+    { kind: "assistant_block", messageId: "pi-assistant-10", text: "Hello " },
+    { kind: "assistant_block", messageId: "pi-assistant-10", text: "world" },
+  ],
+  "deltas stream live under the message_start id, before message_end",
+);
 turn.consume({
   type: "tool_execution_start",
   toolCallId: "call-1",
@@ -104,6 +115,7 @@ assert.deepEqual(turn.result(), {
   contextTokens: 180,
   contextWindowTokens: null,
   failure: null,
+  providerRetried: false,
   settled: true,
 });
 
@@ -223,9 +235,84 @@ assert.equal(recovered.result().failure, null);
 assert.deepEqual(recovered.result().providerResponseIds, ["resp_failed", "resp_recovered"]);
 
 const extensionFailed = new PiTurnAccumulator();
-extensionFailed.consume({ type: "extension_error", error: "bridge unavailable" });
+extensionFailed.consume({ type: "extension_error", event: "session_start", error: "bridge unavailable" });
 extensionFailed.consume({ type: "auto_retry_end", success: true, attempt: 1 });
 assert.equal(extensionFailed.result().failure, "bridge unavailable");
+
+// A hook that shapes the prompt or enforces policy stays fatal even when the
+// model still answers: the turn ran without Cora's contract.
+{
+  const contractMissing = new PiTurnAccumulator();
+  contractMissing.consume({ type: "extension_error", event: "before_agent_start", error: "prompt hook threw" });
+  contractMissing.consume({ type: "message_end", message: { role: "assistant", id: "a", content: [{ type: "text", text: "answer" }] } });
+  assert.equal(contractMissing.result().failure, "prompt hook threw");
+  const unnamed = new PiTurnAccumulator();
+  unnamed.consume({ type: "extension_error", error: "unknown hook" });
+  assert.equal(unnamed.result().failure, "unknown hook", "an unnamed hook is treated as fatal");
+}
+
+// Pi catches a throwing observer hook and carries on; the answer stands and
+// the failure is reported as a note rather than failing the turn.
+{
+  const notes = [];
+  const observer = new PiTurnAccumulator((event) => notes.push(event));
+  observer.consume({ type: "message_end", message: { role: "assistant", id: "a", content: [{ type: "text", text: "Done." }] } });
+  observer.consume({ type: "extension_error", extensionPath: "/x/pi-web-search/index.ts", event: "agent_end", error: "observer threw" });
+  assert.equal(observer.result().failure, null);
+  assert.equal(observer.result().finalText, "Done.");
+  assert.ok(notes.some((event) => event.kind === "system_note" && /agent_end/.test(event.message)));
+  assert.equal(notes.some((event) => event.kind === "error"), false);
+}
+
+// Pi's own provider retry loop is visible and recorded, so the manager-turn
+// policy can tell a turn Pi already retried from one it never did.
+{
+  const notes = [];
+  const retrying = new PiTurnAccumulator((event) => notes.push(event));
+  assert.equal(retrying.result().providerRetried, false);
+  retrying.consume({ type: "auto_retry_start", attempt: 2, maxAttempts: 6, delayMs: 4000, errorMessage: "overloaded" });
+  assert.equal(retrying.result().providerRetried, true);
+  assert.ok(notes.some((event) => event.kind === "system_note" && /retrying \(2\/6\) in 4s/.test(event.message)));
+}
+
+// A provider that declined fast mode is retried at standard speed by the Pi
+// extension; the user sees that, not a "provider is busy" note, and a
+// successful retry clears the provisional failure.
+{
+  const notes = [];
+  const fallback = new PiTurnAccumulator((event) => notes.push(event));
+  const errorMessage =
+    "[codara-fast-fallback] claude-opus-4-7 declined fast mode (HTTP 400); it runs at standard speed for this session, so you can retry your request.";
+  fallback.consume({ type: "message_start", message: { role: "assistant", timestamp: 1 } });
+  fallback.consume({ type: "message_end", message: { role: "assistant", timestamp: 1, stopReason: "error", errorMessage, content: [] } });
+  fallback.consume({ type: "auto_retry_start", attempt: 1, maxAttempts: 6, delayMs: 2000, errorMessage });
+  const note = notes.find((event) => event.kind === "system_note");
+  assert.equal(
+    note?.message,
+    "claude-opus-4-7 declined fast mode (HTTP 400); it runs at standard speed for this session. Retrying now.",
+  );
+  assert.equal(notes.some((event) => /provider is busy/.test(event.message ?? "")), false);
+  fallback.consume({ type: "message_start", message: { role: "assistant", timestamp: 2 } });
+  fallback.consume({ type: "message_end", message: { role: "assistant", timestamp: 2, stopReason: "stop", content: [{ type: "text", text: "Done." }] } });
+  assert.equal(fallback.result().failure, null);
+  assert.equal(fallback.result().finalText, "Done.");
+}
+
+// Compaction holds the reply back; say so instead of going silent.
+{
+  const notes = [];
+  const compacting = new PiTurnAccumulator((event) => notes.push(event));
+  compacting.consume({ type: "compaction_start", reason: "manual" });
+  assert.ok(notes.some((event) => event.kind === "system_note" && /Compacting the conversation/.test(event.message)));
+}
+
+// A delta with no message_start has no id that message_end will agree with,
+// so it is skipped rather than counted as a phantom assistant message.
+{
+  const orphan = new PiTurnAccumulator();
+  orphan.consume({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "stray" } });
+  assert.equal(orphan.result().assistantMessageCount, 0);
+}
 
 const rejectedTool = new PiTurnAccumulator();
 rejectedTool.consume({
@@ -250,4 +337,97 @@ idless.consume({ type: "message_update", message: { role: "assistant", content: 
 idless.consume({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "same message" }] } });
 assert.equal(idless.result().finalText, "same message");
 
-console.log("pi-turn: ok");
+// Pre-0.84 builds put the message on every update; that shape still streams.
+{
+  const legacyStream = [];
+  const legacy = new PiTurnAccumulator((event) => legacyStream.push(event));
+  legacy.consume({ type: "message_start", message: { role: "assistant", timestamp: 5, content: [] } });
+  legacy.consume({
+    type: "message_update",
+    message: { role: "assistant", timestamp: 5, content: [] },
+    assistantMessageEvent: { type: "text_delta", delta: "legacy" },
+  });
+  legacy.consume({ type: "message_end", message: { role: "assistant", timestamp: 5, content: [{ type: "text", text: "legacy" }] } });
+  assert.deepEqual(
+    legacyStream.filter((event) => event.kind === "assistant_block").map((event) => event.messageId),
+    ["pi-assistant-5"],
+  );
+  assert.equal(legacy.result().assistantMessageCount, 1);
+}
+
+
+// A running bash call's output streams as throttled tails: the first update
+// goes out at once, a burst inside the interval collapses into one trailing
+// send of the newest tail, and nothing follows the tool's end.
+(async () => {
+  const progress = [];
+  const running = new PiTurnAccumulator((event) => progress.push(event));
+  const update = (text) =>
+    running.consume({
+      type: "tool_execution_update",
+      toolCallId: "bash-1",
+      toolName: "bash",
+      partialResult: { content: [{ type: "text", text }] },
+    });
+  update("ignored: no tool_execution_start yet");
+  assert.equal(progress.length, 0);
+  running.consume({ type: "tool_execution_start", toolCallId: "bash-1", toolName: "bash", args: { command: "npm test" } });
+  progress.length = 0;
+  update("line 1");
+  update("line 1\nline 2");
+  update("line 1\nline 2\nline 3");
+  assert.deepEqual(progress, [{ kind: "tool_progress", toolUseId: "bash-1", output: "line 1" }]);
+  await new Promise((resolve) => setTimeout(resolve, piTurnModule.TOOL_PROGRESS_INTERVAL_MS + 60));
+  assert.deepEqual(progress.at(-1), {
+    kind: "tool_progress",
+    toolUseId: "bash-1",
+    output: "line 1\nline 2\nline 3",
+  });
+  assert.equal(progress.length, 2);
+
+  update("line 1\nline 2\nline 3\nline 4");
+  running.consume({
+    type: "tool_execution_end",
+    toolCallId: "bash-1",
+    toolName: "bash",
+    result: { content: [{ type: "text", text: "done" }] },
+    isError: false,
+  });
+  await new Promise((resolve) => setTimeout(resolve, piTurnModule.TOOL_PROGRESS_INTERVAL_MS + 60));
+  assert.equal(progress.filter((event) => event.kind === "tool_progress").length, 2);
+  assert.equal(progress.at(-1).kind, "tool_result");
+  update("after the end");
+  assert.equal(progress.at(-1).kind, "tool_result");
+
+  // Only the tail travels.
+  const many = Array.from({ length: 100 }, (_, i) => `row ${i}`).join("\n");
+  const tail = piTurnModule.toolProgressTail({ content: [{ type: "text", text: `${many}\n\n` }] });
+  assert.equal(tail.split("\n").length, piTurnModule.TOOL_PROGRESS_MAX_LINES);
+  assert.ok(tail.endsWith("row 99"));
+  const wide = piTurnModule.toolProgressTail({ content: [{ type: "text", text: "x".repeat(10_000) }] });
+  assert.equal(wide.length, piTurnModule.TOOL_PROGRESS_MAX_CHARS);
+  assert.equal(piTurnModule.toolProgressTail({ content: [] }), "");
+
+  // The usage stream reports the limit the session's own extension enforces:
+  // the owner's percentage of the model's window, else the stamped tokens.
+  {
+    const budgetFor = (launchEnv, model) => {
+      const events = [];
+      const accumulator = new PiTurnAccumulator((event) => events.push(event), { launchEnv, model });
+      accumulator.consume({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "ok" }], usage: { input: 1000, output: 10, cacheRead: 0, cacheWrite: 0 } },
+      });
+      return events.filter((event) => event.kind === "usage").at(-1)?.compactAtTokens;
+    };
+    assert.equal(budgetFor({ CODARA_PI_COMPACT_AT_TOKENS: "256000", CODARA_PI_COMPACT_PERCENT: "70" }, "claude-sonnet-4-5"), 140_000);
+    assert.equal(budgetFor({ CODARA_PI_COMPACT_AT_TOKENS: "256000", CODARA_PI_COMPACT_PERCENT: "70" }, "claude-fable-5"), 700_000);
+    assert.equal(budgetFor({ CODARA_PI_COMPACT_AT_TOKENS: "256000" }, "claude-fable-5"), 256_000);
+    assert.equal(budgetFor({ CODARA_PI_COMPACT_AT_TOKENS: "120000" }, "claude-fable-5"), 120_000);
+  }
+
+  console.log("pi-turn: ok");
+})().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

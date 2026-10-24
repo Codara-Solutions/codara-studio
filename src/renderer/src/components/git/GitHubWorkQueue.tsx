@@ -481,21 +481,19 @@ function PullRequestDetailsDialog({
         display: "grid",
         placeItems: "center",
         padding: 24,
-        background: "rgba(4, 5, 10, 0.72)",
+        background: "var(--modal-scrim)",
       }}
     >
       <div
         role="dialog"
         aria-modal="true"
         aria-label={`Review pull request ${pullRequest.number}`}
+        className="spark-glass--strong spark-overlay-surface"
         style={{
           width: "min(680px, calc(100vw - 48px))",
           maxHeight: "calc(100vh - 48px)",
           overflowY: "auto",
           borderRadius: 12,
-          border: "1px solid var(--rule-strong)",
-          background: "var(--panel)",
-          boxShadow: "0 24px 80px rgba(0, 0, 0, 0.5)",
         }}
       >
         <div

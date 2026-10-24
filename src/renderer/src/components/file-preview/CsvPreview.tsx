@@ -7,6 +7,8 @@ import {
   compareCsvCells, csvColumnLabel, CSV_COLUMN_LIMIT, CSV_ROW_LIMIT, isCsvNumber,
   replaceCsvCell, resolveCsv, type CsvDelimiter,
 } from "./csv";
+import FindBar from "../find/FindBar";
+import { useGridFind, type GridSource } from "../find/useGridFind";
 import "./csv.css";
 
 interface ViewSettings {
@@ -97,6 +99,8 @@ export default function CsvPreview({ path, text, onChange, dirty, onSave }: {
   const [editError, setEditError] = useState<string | null>(null);
   const tableRef = useRef<TableVirtuosoHandle>(null);
   const gridRef = useRef<HTMLDivElement>(null);
+  const viewRef = useRef<HTMLElement>(null);
+  const scrollerRef = useRef<HTMLElement | null>(null);
   const pendingFocus = useRef<Selection | null>(null);
   const settingsButtonRef = useRef<HTMLButtonElement>(null);
   const settingsId = useId();
@@ -138,6 +142,29 @@ export default function CsvPreview({ path, text, onChange, dirty, onSave }: {
   const delimiterLabel = separators.find((option) => option.value === parsed.delimiter)?.label ?? "Comma (,)";
   const schema = `${settings.delimiter}:${parsed.delimiter}:${settings.header}:${columnCount}`;
   const schemaRef = useRef(schema);
+  const findGrid = useMemo<GridSource>(() => {
+    const shown = columns.filter((column) => !hidden.includes(column.index));
+    return {
+      rows: rows.length,
+      columns: shown.length,
+      text: (row, column) => rows[row].cells[shown[column].index] ?? "",
+      cellId: (row, column) => `${rows[row].index}:${shown[column].index}`,
+    };
+  }, [rows, columns, hidden]);
+  const find = useGridFind({
+    hostRef: viewRef,
+    scrollerRef,
+    focusRef: gridRef,
+    grid: columnCount > 0 ? findGrid : null,
+    scrollToRow: (row) => tableRef.current?.scrollToIndex({ index: row, align: "center" }),
+    anchorCell: () => {
+      if (!selection) return null;
+      const row = rows.findIndex((candidate) => candidate.index === selection.row);
+      const column = visibleColumns.findIndex((candidate) => candidate.index === selection.column);
+      return row >= 0 && column >= 0 ? { row, column } : null;
+    },
+    label: "Find in table",
+  });
   const mismatch = parsed.rows.some((row) => row.length !== parsed.rows[0]?.length);
 
   useEffect(() => {
@@ -257,12 +284,14 @@ export default function CsvPreview({ path, text, onChange, dirty, onSave }: {
   };
 
   return (
-    <section className="csv-view" aria-label="CSV table viewer" onKeyDown={(event) => {
+    <section ref={viewRef} className="csv-view" aria-label="CSV table viewer" onKeyDown={(event) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
         event.stopPropagation();
         void saveChanges();
+        return;
       }
+      find.onKeyDown(event);
     }} style={{
       "--csv-font-size": `${settings.fontSize}px`, "--csv-row-height": `${rowHeight}px`,
       "--csv-number-width": settings.rowNumbers ? "52px" : "0px",
@@ -292,64 +321,68 @@ export default function CsvPreview({ path, text, onChange, dirty, onSave }: {
         {mismatch && !parsed.malformed ? "Rows have different column counts. Missing cells are shown empty." : ""}
       </div>}
       <div className="csv-body">
-        <div ref={gridRef} tabIndex={-1} className={`csv-grid${settings.stripes ? " csv-striped" : ""}${settings.wrap ? " csv-wrapped" : ""}`} onKeyDown={onTableKeyDown}>
-          {columnCount === 0 ? <EmptyState title="A clean slate" detail="This file is empty. Add data in Source to see it here." />
-            : rows.length === 0 ? <EmptyState title={query ? "No matching rows" : "Just the headers"} detail={query ? "Try another search. All columns are included, even hidden ones." : "This file has column names but no data rows."} action={query ? <button className="csv-button" onClick={() => setQuery("")}>Clear search</button> : undefined} />
-            : <TableVirtuoso
-              ref={tableRef}
-              key={`${settings.density}-${settings.wrap}-${settings.fontSize}`}
-              data={rows}
-              computeItemKey={(_, row) => row.index}
-              rangeChanged={() => requestAnimationFrame(focusPendingCell)}
-              components={tableComponents}
-              defaultItemHeight={rowHeight}
-              fixedItemHeight={settings.wrap ? undefined : rowHeight}
-              style={{ height: "100%", width: "100%", "--csv-table-width": `${totalWidth}px` } as CSSProperties}
-              fixedHeaderContent={() => <tr>
-                {settings.rowNumbers && <th className="csv-row-number csv-corner" scope="col" aria-label="Row number">#</th>}
-                {visibleColumns.map((column) => <th key={column.index} scope="col" className={cellClass(column.index)} style={{ width: widthFor(column.index) }} aria-sort={sort?.column === column.index ? sort.direction === 1 ? "ascending" : "descending" : "none"}>
-                  <button className="csv-column-button" aria-label={`Sort by ${column.name}`} title={`Sort by ${column.name}`} onClick={() => setSort((current) => current?.column === column.index ? current.direction === 1 ? { column: column.index, direction: -1 } : null : { column: column.index, direction: 1 })}>
-                    <span className="csv-column-letter">{csvColumnLabel(column.index)}</span><span className="csv-column-name">{column.name}</span>
-                    <span className={`csv-sort-icon${sort?.column === column.index ? " is-active" : ""}`}>{sort?.column === column.index ? sort.direction === 1 ? "↑" : "↓" : "↕"}</span>
-                  </button>
-                  <div className="csv-resize" role="separator" aria-label={`Resize ${column.name}`} aria-orientation="vertical" aria-valuemin={80} aria-valuemax={640} aria-valuenow={Math.round(widthFor(column.index))} tabIndex={0}
-                    onDoubleClick={() => setWidths((current) => ({ ...current, [column.index]: baseWidths[column.index] }))}
-                    onKeyDown={(event) => {
-                      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-                      event.preventDefault();
-                      setWidths((current) => ({ ...current, [column.index]: Math.max(80, Math.min(640, widthFor(column.index) + (event.key === "ArrowRight" ? 16 : -16))) }));
-                    }}
-                    onPointerDown={(event) => {
-                      event.preventDefault();
-                      event.currentTarget.setPointerCapture(event.pointerId);
-                      event.currentTarget.dataset.startX = String(event.clientX);
-                      event.currentTarget.dataset.startWidth = String(widthFor(column.index));
-                    }}
-                    onPointerMove={(event) => {
-                      if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
-                      const width = Number(event.currentTarget.dataset.startWidth) + event.clientX - Number(event.currentTarget.dataset.startX);
-                      setWidths((current) => ({ ...current, [column.index]: Math.max(80, Math.min(640, width)) }));
-                    }}
-                    onPointerUp={(event) => event.currentTarget.releasePointerCapture(event.pointerId)}
-                  />
-                </th>)}
-              </tr>}
-              itemContent={(_, row) => <>
-                {settings.rowNumbers && <th scope="row" className="csv-row-number">{row.index + 1}</th>}
-                {visibleColumns.map((column, position) => {
-                  const value = row.cells[column.index] ?? "";
-                  const selected = selection?.row === row.index && selection.column === column.index;
-                  return <td key={column.index} data-cell={`${row.index}:${column.index}`} className={`${cellClass(column.index)}${selected ? " csv-selected" : ""}${isCsvNumber(value) ? " csv-number" : ""}`}
-                    tabIndex={selected || (!hasSelection && row.index === rows[0]?.index && position === 0) ? 0 : -1}
-                    onFocus={() => chooseCell({ row: row.index, column: column.index })}
-                    onClick={(event) => { chooseCell({ row: row.index, column: column.index }); event.currentTarget.focus(); }}
-                    onDoubleClick={() => beginEdit({ row: row.index, column: column.index })}
-                    title={value || "Empty cell"}>
-                    <div className="csv-cell-value">{value ? <HighlightedValue value={value} query={deferredQuery} /> : <span className="csv-empty-cell">∅</span>}</div>
-                  </td>;
-                })}
-              </>}
-            />}
+        <div className="codara-find-host">
+          <div ref={gridRef} tabIndex={-1} className={`csv-grid${settings.stripes ? " csv-striped" : ""}${settings.wrap ? " csv-wrapped" : ""}`} onKeyDown={onTableKeyDown}>
+            {columnCount === 0 ? <EmptyState title="A clean slate" detail="This file is empty. Add data in Source to see it here." />
+              : rows.length === 0 ? <EmptyState title={query ? "No matching rows" : "Just the headers"} detail={query ? "Try another search. All columns are included, even hidden ones." : "This file has column names but no data rows."} action={query ? <button className="csv-button" onClick={() => setQuery("")}>Clear search</button> : undefined} />
+              : <TableVirtuoso
+                ref={tableRef}
+                scrollerRef={(element) => { scrollerRef.current = element instanceof HTMLElement ? element : null; }}
+                key={`${settings.density}-${settings.wrap}-${settings.fontSize}`}
+                data={rows}
+                computeItemKey={(_, row) => row.index}
+                rangeChanged={() => requestAnimationFrame(focusPendingCell)}
+                components={tableComponents}
+                defaultItemHeight={rowHeight}
+                fixedItemHeight={settings.wrap ? undefined : rowHeight}
+                style={{ height: "100%", width: "100%", "--csv-table-width": `${totalWidth}px` } as CSSProperties}
+                fixedHeaderContent={() => <tr>
+                  {settings.rowNumbers && <th className="csv-row-number csv-corner" scope="col" aria-label="Row number">#</th>}
+                  {visibleColumns.map((column) => <th key={column.index} scope="col" className={cellClass(column.index)} style={{ width: widthFor(column.index) }} aria-sort={sort?.column === column.index ? sort.direction === 1 ? "ascending" : "descending" : "none"}>
+                    <button className="csv-column-button" aria-label={`Sort by ${column.name}`} title={`Sort by ${column.name}`} onClick={() => setSort((current) => current?.column === column.index ? current.direction === 1 ? { column: column.index, direction: -1 } : null : { column: column.index, direction: 1 })}>
+                      <span className="csv-column-letter">{csvColumnLabel(column.index)}</span><span className="csv-column-name">{column.name}</span>
+                      <span className={`csv-sort-icon${sort?.column === column.index ? " is-active" : ""}`}>{sort?.column === column.index ? sort.direction === 1 ? "↑" : "↓" : "↕"}</span>
+                    </button>
+                    <div className="csv-resize" role="separator" aria-label={`Resize ${column.name}`} aria-orientation="vertical" aria-valuemin={80} aria-valuemax={640} aria-valuenow={Math.round(widthFor(column.index))} tabIndex={0}
+                      onDoubleClick={() => setWidths((current) => ({ ...current, [column.index]: baseWidths[column.index] }))}
+                      onKeyDown={(event) => {
+                        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+                        event.preventDefault();
+                        setWidths((current) => ({ ...current, [column.index]: Math.max(80, Math.min(640, widthFor(column.index) + (event.key === "ArrowRight" ? 16 : -16))) }));
+                      }}
+                      onPointerDown={(event) => {
+                        event.preventDefault();
+                        event.currentTarget.setPointerCapture(event.pointerId);
+                        event.currentTarget.dataset.startX = String(event.clientX);
+                        event.currentTarget.dataset.startWidth = String(widthFor(column.index));
+                      }}
+                      onPointerMove={(event) => {
+                        if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+                        const width = Number(event.currentTarget.dataset.startWidth) + event.clientX - Number(event.currentTarget.dataset.startX);
+                        setWidths((current) => ({ ...current, [column.index]: Math.max(80, Math.min(640, width)) }));
+                      }}
+                      onPointerUp={(event) => event.currentTarget.releasePointerCapture(event.pointerId)}
+                    />
+                  </th>)}
+                </tr>}
+                itemContent={(_, row) => <>
+                  {settings.rowNumbers && <th scope="row" className="csv-row-number">{row.index + 1}</th>}
+                  {visibleColumns.map((column, position) => {
+                    const value = row.cells[column.index] ?? "";
+                    const selected = selection?.row === row.index && selection.column === column.index;
+                    return <td key={column.index} data-cell={`${row.index}:${column.index}`} className={`${cellClass(column.index)}${selected ? " csv-selected" : ""}${isCsvNumber(value) ? " csv-number" : ""}`}
+                      tabIndex={selected || (!hasSelection && row.index === rows[0]?.index && position === 0) ? 0 : -1}
+                      onFocus={() => chooseCell({ row: row.index, column: column.index })}
+                      onClick={(event) => { chooseCell({ row: row.index, column: column.index }); event.currentTarget.focus(); }}
+                      onDoubleClick={() => beginEdit({ row: row.index, column: column.index })}
+                      title={value || "Empty cell"}>
+                      <div className="csv-cell-value">{value ? <HighlightedValue value={value} query={deferredQuery} /> : <span className="csv-empty-cell">∅</span>}</div>
+                    </td>;
+                  })}
+                </>}
+              />}
+          </div>
+          {find.bar && <FindBar {...find.bar} />}
         </div>
         {settingsOpen && <aside id={settingsId} className="csv-settings" aria-label="CSV view settings" onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); closeSettings(); } }}>
           <div className="csv-settings-heading"><div><h3>Make it your view</h3><p>Saved for this file</p></div><button className="csv-icon-button" aria-label="Close view settings" onClick={closeSettings}><CsvIcon name="close" /></button></div>

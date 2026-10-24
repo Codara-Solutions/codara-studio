@@ -27,7 +27,7 @@ const sharedAliasPlugin = {
 };
 
 // Each case runs against a fresh PolicyState. Steps:
-//   { kind, sourceKey?, watching?, dnd?, expect: { deliver, record?, read?, reason? } }
+//   { kind, sourceKey?, watching?, dnd?, muted?, expect: { deliver, record?, read?, reason? } }
 //   { rearm: sourceKey } | { clearLastAlerted: sourceKey }
 // sourceKey defaults to "run:r1"; watching/dnd default false.
 const CASES = [
@@ -198,6 +198,39 @@ const CASES = [
     ],
   },
   {
+    name: "a muted source records unread without delivering",
+    steps: [
+      {
+        kind: "run.blocked",
+        muted: true,
+        expect: { deliver: false, record: true, read: false, reason: "muted" },
+      },
+    ],
+  },
+  {
+    name: "watching a muted source still records it pre-read",
+    steps: [
+      {
+        kind: "run.complete",
+        watching: true,
+        muted: true,
+        expect: { deliver: false, record: true, read: true, reason: "watching" },
+      },
+    ],
+  },
+  {
+    name: "a muted terminal alert while watching is not recorded at all",
+    steps: [
+      {
+        kind: "terminal.agent.done",
+        sourceKey: "pane:p1",
+        watching: true,
+        muted: true,
+        expect: { deliver: false, record: false, reason: "watching" },
+      },
+    ],
+  },
+  {
     name: "DND-muted event still sets the dedup state",
     steps: [
       { kind: "run.blocked", dnd: true, expect: { deliver: false, reason: "dnd" } },
@@ -235,6 +268,49 @@ const CASES = [
       },
       { rearm: "run:loom1" },
       { kind: "automation.blocked", sourceKey: "run:loom1", expect: { deliver: true } },
+    ],
+  },
+  {
+    // Audit 2026-10-11: a false mid-turn "finished" armed the completion
+    // guard, and the real permission prompt later in that turn was swallowed.
+    // The notifier now rearms only when a new turn starts or a prompt is
+    // answered; this pins down the policy half of that contract.
+    name: "terminal: a second prompt in one turn needs the answer to rearm",
+    steps: [
+      { kind: "terminal.agent.needs-input", sourceKey: "pane:a", expect: { deliver: true } },
+      {
+        kind: "terminal.agent.needs-input",
+        sourceKey: "pane:a",
+        expect: { deliver: false, reason: "duplicate" },
+      },
+      { rearm: "pane:a" },
+      { kind: "terminal.agent.needs-input", sourceKey: "pane:a", expect: { deliver: true } },
+    ],
+  },
+  {
+    name: "terminal: one finished alert per turn until the next turn rearms",
+    steps: [
+      { kind: "terminal.agent.done", sourceKey: "pane:a", expect: { deliver: true } },
+      { kind: "terminal.agent.done", sourceKey: "pane:a", expect: { deliver: false, reason: "duplicate" } },
+      {
+        kind: "terminal.agent.needs-input",
+        sourceKey: "pane:a",
+        expect: { deliver: false, reason: "completion-guard" },
+      },
+      { rearm: "pane:a" },
+      { kind: "terminal.agent.done", sourceKey: "pane:a", expect: { deliver: true } },
+    ],
+  },
+  {
+    name: "terminal: a finished turn seen in the pane is not recorded as history",
+    steps: [
+      {
+        kind: "terminal.agent.done",
+        sourceKey: "pane:a",
+        watching: true,
+        expect: { deliver: false, record: false, reason: "watching" },
+      },
+      { kind: "terminal.agent.done", sourceKey: "pane:a", expect: { deliver: false, reason: "duplicate" } },
     ],
   },
   {
@@ -279,7 +355,7 @@ async function main() {
       }
       const decision = P.decide(
         { kind: step.kind, sourceKey: step.sourceKey ?? "run:r1" },
-        { watching: step.watching === true, dnd: step.dnd === true },
+        { watching: step.watching === true, dnd: step.dnd === true, muted: step.muted === true },
         state,
       );
       for (const [key, want] of Object.entries(step.expect)) {
@@ -297,6 +373,84 @@ async function main() {
     } else {
       failed += 1;
     }
+  }
+
+  // Which terminal alerts count as watched. A finished turn in any pane of
+  // the tab on screen is already visible; a prompt only counts as watched in
+  // the selected pane, because a sibling split cannot take the answer.
+  const WATCHED = [
+    ["terminal.agent.done", { selected: true, visible: true }, true],
+    ["terminal.agent.done", { selected: false, visible: true }, true],
+    ["terminal.agent.done", { selected: false, visible: false }, false],
+    ["terminal.agent.needs-input", { selected: true, visible: true }, true],
+    ["terminal.agent.needs-input", { selected: false, visible: true }, false],
+    ["terminal.agent.failed", { selected: false, visible: true }, false],
+    ["terminal.agent.failed", { selected: true, visible: true }, true],
+  ];
+  for (const [kind, pane, want] of WATCHED) {
+    const name = `${kind} watched=${want} for selected=${pane.selected} visible=${pane.visible}`;
+    if (P.terminalAlertWatched(kind, pane) === want) {
+      passed += 1;
+      console.log(`  PASS ${name}`);
+    } else {
+      failed += 1;
+      console.error(`  FAIL ${name}`);
+    }
+  }
+
+  // Which panes are on screen. A zoomed split hides its siblings, so a turn
+  // finishing behind the zoom is not visible.
+  const attentionOut = path.join(os.tmpdir(), "spark-notify-policy-test", "attention.cjs");
+  await esbuild.build({
+    entryPoints: [path.join(ROOT, "src", "main", "notify", "attention.ts")],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile: attentionOut,
+    logLevel: "silent",
+    plugins: [
+      sharedAliasPlugin,
+      {
+        name: "electron-stub",
+        setup(build) {
+          build.onResolve({ filter: /^electron$/ }, () => ({ path: "electron", namespace: "stub" }));
+          build.onLoad({ filter: /.*/, namespace: "stub" }, () => ({
+            contents: "export const BrowserWindow = { getFocusedWindow: () => globalThis.__focusedWindow ?? null };\n",
+            loader: "js",
+          }));
+        },
+      },
+    ],
+  });
+  delete require.cache[attentionOut];
+  const A = require(attentionOut);
+  globalThis.__focusedWindow = {};
+  const base = { focused: true, workspaceId: "w", tabId: "t", runId: null, paneId: "p1" };
+  const VISIBLE = [
+    ["split layout: a sibling is visible", { ...base, zoomedPaneId: null }, "p2", true],
+    ["split layout: the selected pane is visible", { ...base }, "p1", true],
+    ["zoomed pane: a hidden sibling is not visible", { ...base, zoomedPaneId: "p1" }, "p2", false],
+    ["zoomed pane: the zoomed pane is visible", { ...base, zoomedPaneId: "p1" }, "p1", true],
+    ["another tab: not visible", { ...base, tabId: "other" }, "p2", false],
+  ];
+  for (const [name, snapshot, paneId, want] of VISIBLE) {
+    A.setAttention(snapshot);
+    if (A.isPaneVisible("w", "t", paneId) === want) {
+      passed += 1;
+      console.log(`  PASS ${name}`);
+    } else {
+      failed += 1;
+      console.error(`  FAIL ${name}`);
+    }
+  }
+  globalThis.__focusedWindow = null;
+  A.setAttention({ ...base });
+  if (A.isPaneVisible("w", "t", "p2") === false) {
+    passed += 1;
+    console.log("  PASS an unfocused window shows nothing");
+  } else {
+    failed += 1;
+    console.error("  FAIL an unfocused window shows nothing");
   }
 
   if (failed > 0) {

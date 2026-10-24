@@ -7,7 +7,9 @@
 // Guards that a file created in a top-level folder, in a nested folder, and
 // inside a top-level SYMLINK to a folder (a workspace's `SharePoint` shortcut
 // into OneDrive) each produce an `fs:changed` event naming its directory, so
-// the tree refreshes without a workspace switch.
+// the tree refreshes without a workspace switch. The folders are reported as
+// expanded, as the Explorer does: on Linux only those are watched. A write
+// inside a nested node_modules never reaches the renderer.
 "use strict";
 
 const assert = require("node:assert/strict");
@@ -38,6 +40,7 @@ async function main() {
   const root = path.join(base, "workspace");
   const elsewhere = path.join(base, "onedrive", "digar");
   fs.mkdirSync(path.join(root, "Webinars", "2026"), { recursive: true });
+  fs.mkdirSync(path.join(root, "Webinars", "node_modules", "pkg"), { recursive: true });
   fs.mkdirSync(path.join(elsewhere, "Proposals"), { recursive: true });
   fs.symlinkSync(elsewhere, path.join(root, "SharePoint"), "dir");
 
@@ -76,6 +79,12 @@ async function main() {
 
   try {
     await watcher.addWatchRoot(webContents, root);
+    await watcher.setWatchedDirs(webContents, root, [
+      path.join(root, "Webinars"),
+      path.join(root, "Webinars", "2026"),
+      path.join(root, "SharePoint"),
+      path.join(root, "SharePoint", "Proposals"),
+    ]);
     await check("file at the workspace root", path.join(root, "notes.md"));
     await check("file in a top-level folder", path.join(root, "Webinars", "plan.md"));
     await check("file in a nested folder", path.join(root, "Webinars", "2026", "deck.pptx"));
@@ -87,6 +96,15 @@ async function main() {
       path.join(elsewhere, "Proposals", "v2.pdf"),
       path.join(root, "SharePoint", "Proposals"),
     );
+    // Events reach the renderer in order, so once a later write in a watched
+    // folder has arrived, the ignored one would have arrived too.
+    const ignoredDir = path.join(root, "Webinars", "node_modules", "pkg");
+    changed.clear();
+    fs.writeFileSync(path.join(ignoredDir, "index.js"), "x");
+    await check("file after a write inside a nested node_modules", path.join(root, "Webinars", "after.md"));
+    assert.ok(!changed.has(ignoredDir), "a write inside node_modules reached the renderer");
+    passed += 1;
+    console.log("  PASS write inside a nested node_modules is not reported");
   } finally {
     watcher.disposeForWebContents(webContents);
     fs.rmSync(base, { recursive: true, force: true });

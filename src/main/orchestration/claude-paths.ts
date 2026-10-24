@@ -86,6 +86,26 @@ export function claudeSessionTranscriptPath(
   );
 }
 
+/**
+ * A Codara-managed Claude home links shared state (projects, sessions, ...)
+ * into the user's own Claude home (cli-account-homes.ts), so transcripts of a
+ * managed launch live behind that link. Only a top-level link of a managed
+ * home that points exactly at the same entry of the personal home is
+ * followed; any other link is still refused. Returns the entry to continue
+ * from, or null.
+ */
+async function sharedPersonalEntry(
+  root: string,
+  name: string,
+  linkPath: string,
+): Promise<string | null> {
+  if (!isCodaraManagedCliPath(root)) return null;
+  const target = await fs.readlink(linkPath).catch(() => null);
+  if (!target) return null;
+  const personal = join(personalClaudeConfigDir(), name);
+  return resolve(dirname(linkPath), target) === resolve(personal) ? personal : null;
+}
+
 export async function assertSafeClaudeStoragePath(
   stateDir: string,
   targetPath: string,
@@ -114,19 +134,30 @@ export async function assertSafeClaudeStoragePath(
   let sawLeaf = false;
   for (let index = -1; index < pieces.length; index += 1) {
     if (index >= 0) cursor = join(cursor, pieces[index]);
-    const isLeaf = options.includeLeaf && cursor === target;
-    const stat = await fs.lstat(cursor).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-      throw error;
-    });
+    // By position, since a followed shared link moves cursor off target's path.
+    const isLeaf = options.includeLeaf && index === pieces.length - 1 && checkedTarget === target;
+    const lstatOrNull = (path: string) =>
+      fs.lstat(path).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+        throw error;
+      });
+    let stat = await lstatOrNull(cursor);
+    if (stat?.isSymbolicLink()) {
+      const shared = index === 0 ? await sharedPersonalEntry(root, pieces[0], cursor) : null;
+      if (!shared) throw new Error("Claude storage path contains a symbolic-link ancestor.");
+      // Judge the user's own entry instead (a folder like projects or a file
+      // like history.jsonl); below it no further link is allowed.
+      cursor = shared;
+      stat = await lstatOrNull(cursor);
+      if (stat?.isSymbolicLink()) {
+        throw new Error("Claude storage path contains a symbolic-link ancestor.");
+      }
+    }
     if (!stat) {
       if (isLeaf && options.requireLeaf) {
         throw new Error("Claude transcript does not exist.");
       }
       break;
-    }
-    if (stat.isSymbolicLink()) {
-      throw new Error("Claude storage path contains a symbolic-link ancestor.");
     }
     if (!isLeaf && !stat.isDirectory()) {
       throw new Error("Claude storage ancestor is not a directory.");

@@ -53,6 +53,40 @@ function loadTypeScriptModule(sourcePath) {
   return loaded.exports;
 }
 
+const CORA_ACCOUNT_ID = "33333333-3333-4333-8333-333333333333";
+
+/**
+ * Register one Cora-only Claude account as the default and write its
+ * credential where the auth store keeps it. The retired single login
+ * (pi-agent/auth.json) is archived by the accounts migration and never read.
+ */
+function seedDefaultCoraAccount(codaraHome, credential) {
+  const piRoot = path.join(codaraHome, "pi-agent");
+  const accountDir = path.join(piRoot, "accounts", CORA_ACCOUNT_ID);
+  fs.mkdirSync(accountDir, { recursive: true, mode: 0o700 });
+  const createdAt = "2026-10-01T00:00:00.000Z";
+  fs.writeFileSync(path.join(piRoot, "account-profiles.json"), JSON.stringify({
+    version: 2,
+    profiles: [{
+      id: CORA_ACCOUNT_ID,
+      provider: "anthropic",
+      label: "Cora Claude",
+      createdAt,
+      updatedAt: createdAt,
+      cli: { kind: "none" },
+      cora: "own",
+    }],
+    defaults: { anthropic: CORA_ACCOUNT_ID },
+    tombstones: [],
+    dismissedSystemOffers: [],
+    pendingPurge: [],
+  }));
+  const authPath = path.join(accountDir, "auth.json");
+  fs.writeFileSync(authPath, JSON.stringify({ anthropic: credential }));
+  fs.chmodSync(authPath, 0o600);
+  return { piRoot, accountDir, authPath };
+}
+
 async function withTempDirectory(run) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codara-pi-runtime-"));
   try { return await run(directory); }
@@ -69,7 +103,7 @@ const runtime = loadTypeScriptModule(
  * three edges stubbed so the assembled --extension roster can be asserted for
  * real instead of being re-implemented here.
  */
-async function loadElectronLaunchPlans(outDirectory) {
+async function loadElectronLaunchPlans(outDirectory, bundleDirectory = outDirectory) {
   const stub = (contents) => ({ contents, loader: "js" });
   const stubs = {
     electron: `module.exports = { app: {
@@ -77,8 +111,12 @@ async function loadElectronLaunchPlans(outDirectory) {
       getAppPath: () => ${JSON.stringify(ROOT)},
       getPath: () => ${JSON.stringify(outDirectory)},
     } };`,
-    storage: "module.exports = { loadSettings: async () => ({}) };",
-    "agent-sync": "module.exports = { listPiMcpServers: () => [] };",
+    storage: "module.exports = { loadSettings: async () => ({}), onSettingsSaved: () => () => undefined };",
+    "agent-sync": `module.exports = {
+      listPiMcpServers: () => globalThis.__codaraTestMcpServers ?? [],
+      listPiSkillPaths: () => ["/fixture/skills/review"],
+      onAgentAssetsChanged: () => () => undefined,
+    };`,
     "path-reconstruction": "module.exports = { getEnrichedEnv: async () => process.env };",
     // The user's installed Pi: a fake global package outside the app tree.
     "binary-resolver": `module.exports = {
@@ -98,7 +136,7 @@ async function loadElectronLaunchPlans(outDirectory) {
       revokeAgentSocketCapability: () => undefined,
     };`,
   };
-  const outfile = path.join(outDirectory, "pi-runtime-electron.cjs");
+  const outfile = path.join(bundleDirectory, "pi-runtime-electron.cjs");
   await esbuild.build({
     entryPoints: [path.join(ROOT, "src", "main", "orchestration", "pi-runtime-electron.ts")],
     outfile,
@@ -156,6 +194,7 @@ async function main() {
     path.join(__dirname, "..", "node_modules"),
   ]);
   assert.equal(installedRuntime.version, "0.85.1");
+  assert.equal(installedRuntime.source, "bundled");
   assert.equal(path.basename(installedRuntime.entrypoint), "cli.js");
 
   await withTempDirectory(async (directory) => {
@@ -190,7 +229,15 @@ async function main() {
   // Cora runs the Pi the user installed: any version from the minimum up,
   // found through the package its `pi` links into or npm's global layout.
   assert.equal(runtime.CODARA_PI_MIN_VERSION, "0.85.1");
-  assert.equal(runtime.PI_INSTALL_COMMAND, "npm install -g @earendil-works/pi-coding-agent");
+  // The Install button pins the tested minor line; npm's latest may be a
+  // major version Codara never ran.
+  assert.equal(runtime.CODARA_PI_INSTALL_SPEC, "@earendil-works/pi-coding-agent@~0.85.1");
+  assert.equal(runtime.PI_INSTALL_COMMAND, "npm install -g @earendil-works/pi-coding-agent@~0.85.1");
+  const installSource = fs.readFileSync(
+    path.join(ROOT, "src", "main", "orchestration", "pi-runtime-install.ts"),
+    "utf8",
+  );
+  assert.match(installSource, /"--global",\s*CODARA_PI_INSTALL_SPEC,/, "npm installs the pinned spec");
   assert.equal(runtime.comparePiVersions("0.87.1", "0.85.1"), 1);
   assert.equal(runtime.comparePiVersions("0.85.1", "0.85.1"), 0);
   assert.equal(runtime.comparePiVersions("0.85.0", "0.85.1"), -1);
@@ -215,6 +262,7 @@ async function main() {
     assert.equal(roots[0], fs.realpathSync(packageRoot), "the link resolves into its package first");
     const located = await runtime.resolveInstalledPiRuntime(roots);
     assert.equal(located.version, "0.87.1", "a newer Pi than the tested one runs Cora");
+    assert.equal(located.source, "user");
     assert.equal(located.entrypoint, path.join(fs.realpathSync(packageRoot), "dist", "bundle", "cli.js"));
 
     // A shim that is not a link (Windows' pi.cmd, some managers) finds npm's layout.
@@ -331,6 +379,12 @@ async function main() {
     NODE_ENV_ELECTRON_VITE: "development",
     ELECTRON_RENDERER_URL: "http://localhost:5173",
     ELECTRON_EXEC_PATH: "/opt/electron/Electron",
+    APPIMAGE: "/home/user/Applications/Codara.AppImage",
+    APPDIR: "/tmp/.mount_CodaraAb12Cd",
+    OWD: "/home/user",
+    ARGV0: "Codara.AppImage",
+    APPIMAGE_EXTRACT_AND_RUN: "1",
+    LD_LIBRARY_PATH: "/tmp/.mount_CodaraAb12Cd/usr/lib:/opt/user/lib",
   }, "/tmp/codara-pi-config", "/tmp/codara-pi-sessions");
   assert.equal(sanitized.ANTHROPIC_API_KEY, undefined);
   assert.equal(sanitized.OPENAI_API_KEY, undefined);
@@ -349,6 +403,10 @@ async function main() {
   assert.equal(sanitized.NODE_ENV_ELECTRON_VITE, undefined);
   assert.equal(sanitized.ELECTRON_RENDERER_URL, undefined);
   assert.equal(sanitized.ELECTRON_EXEC_PATH, undefined);
+  // Nor an installed AppImage's description of Codara's own launch.
+  for (const key of ["APPIMAGE", "APPDIR", "OWD", "ARGV0"]) assert.equal(sanitized[key], undefined, key);
+  assert.equal(sanitized.APPIMAGE_EXTRACT_AND_RUN, "1");
+  assert.equal(sanitized.LD_LIBRARY_PATH, "/opt/user/lib", "AppRun's library path into the mount");
   assert.equal(
     runtime.buildPiSubscriptionEnvironment(
       { NODE_ENV: "production", NODE_ENV_ELECTRON_VITE: "development" },
@@ -431,7 +489,7 @@ async function main() {
     bridgePath: "/bridge/server.js",
     extensionPaths: ["/extensions/cora.ts"],
     model: "google/gemini-flash-latest",
-    openAiFastMode: true,
+    fastMode: true,
     baseEnv: { OPENROUTER_API_KEY: "stale-inherited-key" },
   });
   assert.equal(openRouterPlan.provider, "openrouter");
@@ -487,11 +545,49 @@ async function main() {
     }).env.CODARA_PI_COMPACT_AT_TOKENS;
   assert.equal(compactPlanFor("120000"), "120000");
 
-  // Service tier: the extension needs the provider stamped, and the fast-mode
-  // flag is stamped ONLY for OpenAI. An anthropic plan never carries it, which
-  // is the launcher half of the two-layer guarantee that Anthropic can never
-  // run a fast/priority tier (the extension strips one regardless).
-  const tierPlanFor = (provider, openAiFastMode) =>
+  // The user's auto-compact percentage reaches the extension per launch; a
+  // developer token override in the base environment outranks it.
+  const percentPlanFor = (autoCompactPercent, baseEnv = {}) =>
+    runtime.buildPiManagerLaunchPlan({
+      runtime: fakeRuntime,
+      provider: "anthropic",
+      configDir: "/config",
+      sessionDir: "/sessions",
+      sessionId: "session-123",
+      runId: "run-123",
+      mode: "execute",
+      cwd: "/workspace",
+      bridgePath: "/bridge/server.js",
+      extensionPaths: ["/extensions/cora.ts"],
+      processExecutable: "/electron",
+      autoCompactPercent,
+      baseEnv,
+    }).env;
+  assert.equal(percentPlanFor(70).CODARA_PI_COMPACT_PERCENT, "70");
+  assert.equal(percentPlanFor(70).CODARA_PI_COMPACT_AT_TOKENS, "256000");
+  assert.equal(percentPlanFor(null).CODARA_PI_COMPACT_PERCENT, undefined, "Auto stamps no percentage");
+  assert.equal(percentPlanFor(7).CODARA_PI_COMPACT_PERCENT, undefined, "an unsupported percentage is Auto");
+  assert.equal(
+    percentPlanFor(70, { CODARA_PI_COMPACT_AT_TOKENS: "90000" }).CODARA_PI_COMPACT_PERCENT,
+    undefined,
+    "a developer token override outranks the percentage",
+  );
+  assert.equal(
+    percentPlanFor(70, { CODARA_PI_COMPACT_PERCENT: "40" }).CODARA_PI_COMPACT_PERCENT,
+    "70",
+    "an inherited percentage never leaks past the user's setting",
+  );
+  assert.equal(
+    percentPlanFor(null, { CODARA_PI_COMPACT_PERCENT: "40" }).CODARA_PI_COMPACT_PERCENT,
+    undefined,
+    "Auto drops an inherited percentage",
+  );
+
+  // Fast mode: the extension needs the provider stamped, and the fast-mode
+  // flag is stamped only when the caller resolved it on. The caller has
+  // already narrowed it to the provider and model (resolveCodaraPiFastMode);
+  // the extension still checks the model on every request.
+  const tierPlanFor = (provider, fastMode) =>
     runtime.buildPiManagerLaunchPlan({
       runtime: fakeRuntime,
       provider,
@@ -504,7 +600,7 @@ async function main() {
       bridgePath: "/bridge/server.js",
       extensionPaths: ["/extensions/cora.ts"],
       processExecutable: "/electron",
-      ...(openAiFastMode === undefined ? {} : { openAiFastMode }),
+      ...(fastMode === undefined ? {} : { fastMode }),
       baseEnv: {},
     }).env;
   assert.equal(tierPlanFor("anthropic").CODARA_PI_PROVIDER, "anthropic");
@@ -554,13 +650,10 @@ async function main() {
       `${provider} must not carry a fast-mode stamp when the setting is off`,
     );
   }
-  // Setting on: OpenAI gets it, Anthropic still does not.
+  // Setting on: OpenAI and Anthropic both get it, so a Claude Opus worker
+  // runs fast exactly like a GPT one. OpenRouter never does (checked above).
   assert.equal(tierPlanFor("openai-codex", true).CODARA_PI_FAST_MODE, "1");
-  assert.equal(
-    tierPlanFor("anthropic", true).CODARA_PI_FAST_MODE,
-    undefined,
-    "an anthropic plan must never carry the fast-mode stamp, even with the setting on",
-  );
+  assert.equal(tierPlanFor("anthropic", true).CODARA_PI_FAST_MODE, "1");
   for (const absurd of ["0", "-5", "NaN", "later", "Infinity"]) {
     assert.equal(
       compactPlanFor(absurd),
@@ -606,6 +699,35 @@ async function main() {
       `untrusted PR launch must include ${flag}`,
     );
   }
+  // The Capability Center's skill list is authoritative for a trusted launch:
+  // Pi's own discovery is off and each enabled folder is passed explicitly. An
+  // imported pull request never gets one, even when a list is supplied.
+  const skillPlanFor = (projectPolicyMode, skillPaths) => runtime.buildPiManagerLaunchPlan({
+    runtime: fakeRuntime,
+    provider: "openai-codex",
+    configDir: "/config",
+    sessionDir: "/sessions",
+    sessionId: "session-skills",
+    runId: "run-skills",
+    mode: "execute",
+    cwd: "/workspace",
+    bridgePath: "/bridge/server.js",
+    extensionPaths: ["/extensions/cora.ts"],
+    ...(projectPolicyMode ? { projectPolicyMode } : {}),
+    ...(skillPaths ? { skillPaths } : {}),
+  }).args;
+  const skillArgs = (args) => args.flatMap((arg, index) => (arg === "--skill" ? [args[index + 1]] : []));
+  const trustedSkills = skillPlanFor(undefined, ["/home/me/.agents/skills/review", "/workspace/.pi/skills/ship"]);
+  assert.ok(trustedSkills.includes("--no-skills"));
+  assert.deepEqual(skillArgs(trustedSkills), [
+    path.resolve("/home/me/.agents/skills/review"),
+    path.resolve("/workspace/.pi/skills/ship"),
+  ]);
+  const noneEnabled = skillPlanFor(undefined, []);
+  assert.ok(noneEnabled.includes("--no-skills"), "an empty list still turns Pi's own discovery off");
+  assert.deepEqual(skillArgs(noneEnabled), []);
+  assert.equal(skillPlanFor(undefined, undefined).includes("--no-skills"), false);
+  assert.deepEqual(skillArgs(skillPlanFor("untrusted-pull-request", ["/workspace/.pi/skills/ship"])), []);
   const codexPlan = runtime.buildPiManagerLaunchPlan({
     runtime: fakeRuntime,
     provider: "openai-codex",
@@ -675,6 +797,62 @@ async function main() {
   });
   assert.equal(partialMcpPlan.env.CODARA_PI_MCP_CONFIG, undefined);
   assert.equal(partialMcpPlan.mcpConfigPath, null);
+  assert.equal(mcpPlan.runtimeVersion, fakeRuntime.version, "a plan names the Pi build it runs");
+
+  // An ssh:// workspace path would resolve to a nonsense local directory and
+  // fail as a misleading ENOENT; say what is actually unsupported.
+  assert.throws(() => runtime.buildPiManagerLaunchPlan({
+    runtime: fakeRuntime,
+    provider: "anthropic",
+    configDir: "/config",
+    sessionDir: "/sessions",
+    sessionId: "session-remote",
+    runId: "run-remote",
+    mode: "execute",
+    cwd: "ssh://devbox/home/u/project",
+    bridgePath: "/bridge/server.js",
+    extensionPaths: ["/extensions/cora.ts"],
+  }), /Cora runs on local folders only for now/);
+
+  // Pi's retry budget is merged into the isolated settings.json without
+  // disturbing anything else, and a hand-set shellPath survives.
+  assert.deepEqual(runtime.mergeCodaraPiAgentSettings(undefined), {
+    retry: { enabled: true, maxRetries: 6, baseDelayMs: 2000 },
+  });
+  assert.deepEqual(
+    runtime.mergeCodaraPiAgentSettings(
+      { theme: "dark", shellPath: "D:\\tools\\bash.exe", retry: { enabled: false, provider: { maxRetryDelayMs: 1000 } } },
+    ),
+    {
+      theme: "dark",
+      shellPath: "D:\\tools\\bash.exe",
+      retry: { enabled: true, maxRetries: 6, baseDelayMs: 2000, provider: { maxRetryDelayMs: 1000 } },
+    },
+  );
+  assert.equal(
+    runtime.mergeCodaraPiAgentSettings({}, { shellPath: "C:\\Git\\bin\\bash.exe" }).shellPath,
+    "C:\\Git\\bin\\bash.exe",
+  );
+  // The longest single backoff sleep stays inside the worker's
+  // provider-failure grace, so a retrying worker is never failed mid-sleep.
+  assert.ok(
+    runtime.CODARA_PI_RETRY_SETTINGS.baseDelayMs * 2 ** (runtime.CODARA_PI_RETRY_SETTINGS.maxRetries - 1) < 6 * 60 * 1000,
+  );
+
+  // Git for Windows' bash is found in user-scope installs too, never the WSL
+  // launcher that a PATH search can land on.
+  const bashCandidates = runtime.windowsGitBashCandidates(
+    {
+      ProgramFiles: "C:\\Program Files",
+      LOCALAPPDATA: "C:\\Users\\u\\AppData\\Local",
+      USERPROFILE: "C:\\Users\\u",
+    },
+    "C:\\Users\\u\\AppData\\Local\\Programs\\Git\\cmd\\git.exe",
+  );
+  assert.equal(bashCandidates[0], "C:\\Program Files\\Git\\bin\\bash.exe");
+  assert.ok(bashCandidates.includes("C:\\Users\\u\\AppData\\Local\\Programs\\Git\\bin\\bash.exe"));
+  assert.ok(bashCandidates.includes("C:\\Users\\u\\scoop\\apps\\git\\current\\bin\\bash.exe"));
+  assert.equal(bashCandidates.some((candidate) => /System32/i.test(candidate)), false);
 
   assert.throws(() => runtime.buildPiManagerLaunchPlan({
     ...codexPlan,
@@ -692,13 +870,9 @@ async function main() {
   await withTempDirectory(async (directory) => {
     process.env.CODARA_HOME_DIR = directory;
     const plans = await loadElectronLaunchPlans(directory);
-    const configDir = path.join(directory, "pi-agent");
-    fs.mkdirSync(configDir, { recursive: true });
-    const authPath = path.join(configDir, "auth.json");
-    fs.writeFileSync(authPath, JSON.stringify({
-      anthropic: { type: "oauth", access: "synthetic-access", refresh: "synthetic-refresh" },
-    }));
-    fs.chmodSync(authPath, 0o600);
+    const { piRoot: configDir } = seedDefaultCoraAccount(directory, {
+      type: "oauth", access: "synthetic-access", refresh: "synthetic-refresh",
+    });
 
     await assert.rejects(
       plans.createCodaraPiLaunchPlan({
@@ -737,6 +911,29 @@ async function main() {
       managerPlan.env.PI_CODING_AGENT_SESSION_DIR,
       path.join(configDir, "sessions"),
     );
+    assert.equal(managerPlan.runtimeSource, "user");
+    const agentSettingsPath = path.join(managerPlan.env.PI_CODING_AGENT_DIR, "settings.json");
+    assert.deepEqual(
+      JSON.parse(fs.readFileSync(agentSettingsPath, "utf8")).retry,
+      { enabled: true, maxRetries: 6, baseDelayMs: 2000 },
+      "every launch carries Codara's Pi retry budget",
+    );
+    if (process.platform !== "win32") {
+      assert.equal(fs.statSync(agentSettingsPath).mode & 0o077, 0, "settings.json stays owner-only");
+    }
+    // A settings file the user broke by hand is left alone, not replaced.
+    fs.writeFileSync(agentSettingsPath, "{ not json");
+    await plans.createCodaraPiLaunchPlan({
+      provider: "anthropic",
+      runId: "run-settings-broken",
+      mode: "execute",
+      sessionId: "session-settings-broken",
+      cwd: directory,
+    });
+    assert.equal(fs.readFileSync(agentSettingsPath, "utf8"), "{ not json");
+    fs.rmSync(agentSettingsPath);
+    assert.ok(managerPlan.args.includes("--no-skills"), "Cora loads only the Capability Center's skills");
+    assert.equal(managerPlan.args[managerPlan.args.indexOf("--skill") + 1], path.resolve("/fixture/skills/review"));
 
     await assert.rejects(
       plans.createCodaraPiLaunchPlan({
@@ -760,6 +957,7 @@ async function main() {
       projectPolicyMode: "untrusted-pull-request",
     });
     assert.equal(untrustedManagerPlan.env.SPARK_AGENT_CAPABILITY, "scoped");
+    assert.equal(untrustedManagerPlan.args.includes("--skill"), false, "an imported PR loads no skills");
     assert.equal(
       untrustedManagerPlan.env.SPARK_AGENT_SOCKET,
       "http://127.0.0.1:43210",
@@ -853,6 +1051,42 @@ async function main() {
       untrustedWorkerPlan.agentSocketCapabilityExpiresAt,
       4_102_444_800_000,
     );
+  });
+
+  // The manager's MCP roster holds credentials: a launch that throws after
+  // writing it must remove it. The bundle lives under the repo so the MCP SDK
+  // resolves and a real roster is written.
+  await withTempDirectory(async (directory) => {
+    process.env.CODARA_HOME_DIR = directory;
+    const bundleDirectory = fs.mkdtempSync(path.join(ROOT, "node_modules", ".codara-pi-runtime-test-"));
+    try {
+      const plans = await loadElectronLaunchPlans(directory, bundleDirectory);
+      seedDefaultCoraAccount(directory, { type: "oauth", access: "synthetic-access", expires: 1 });
+      globalThis.__codaraTestMcpServers = [{ name: "files", command: "npx", args: ["-y", "files-mcp"] }];
+      await assert.rejects(
+        plans.createCodaraPiLaunchPlan({
+          provider: "anthropic",
+          runId: "run-expired-auth",
+          mode: "execute",
+          sessionId: "session-expired-auth",
+          cwd: directory,
+        }),
+        /Cora's Claude sign-in expired and cannot be renewed \(OAuth session expired\)\. Sign in again in Settings > Accounts\./,
+      );
+      // The account's private dir is created by the auth store; its mcp/
+      // folder exists only because the roster was written there.
+      const entries = fs.readdirSync(directory, { recursive: true }).map(String);
+      const mcpDirs = entries.filter((entry) => path.basename(entry) === "mcp");
+      assert.equal(mcpDirs.length, 1, "the roster was written before the launch failed");
+      assert.deepEqual(
+        fs.readdirSync(path.join(directory, mcpDirs[0])).filter((name) => name.endsWith(".json")),
+        [],
+        "a failed launch must not leave its credential roster behind",
+      );
+    } finally {
+      delete globalThis.__codaraTestMcpServers;
+      fs.rmSync(bundleDirectory, { recursive: true, force: true });
+    }
   });
 
   console.log("pi runtime policy: ok");

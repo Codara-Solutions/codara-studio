@@ -42,6 +42,7 @@ import type {
   StartGitHubPullRequestResult,
 } from "@shared/github";
 import { isRemotePath } from "@shared/remote";
+import { compactAtOverrideTokens } from "@shared/context-compaction";
 import {
   applyWorkspaceGroupShades,
   ensureWorkspaceGroupColors,
@@ -105,7 +106,6 @@ import { inspectPiModelCatalog } from "../orchestration/pi-model-catalog";
 import { inspectCachedPiSubscriptionUsageProfiles } from "../orchestration/pi-subscription-usage";
 import { nativeCliAccounts } from "../orchestration/native-cli-accounts";
 import { BOARD_MAX_CARDS } from "../orchestration/board-store";
-import { ensureCodexProjectTrust } from "../orchestration/codex-trust";
 import { resolveNewNativeClaudeProfile } from "../orchestration/native-claude-profile-runtime";
 import { runsRoot, subscribeToEvents } from "../orchestration/event-log";
 import {
@@ -158,7 +158,7 @@ import {
 import { repairCoraRetryFromRunWindow } from "./cora-retry-repair";
 import { CoraSendReceiptIndex } from "./cora-send-receipts";
 import { normalizeCoraMessage } from "./cora-message-policy";
-import { remoteCoraRunContext } from "./cora-run-context";
+import { remoteCoraRunContext, type RemoteCoraRunContextLimits } from "./cora-run-context";
 import { projectBoundedRemoteCoraRun, projectRemoteCoraQuestionOptions } from "./cora-run-projection";
 import {
   CORA_HISTORY_RUNS_JSON_MAX_BYTES,
@@ -565,9 +565,14 @@ async function getCapabilitiesForRemote(input: {
   const { listCoraProfiles } = await import("../orchestration/cora-profiles");
   const cwd = await workspaceCwdForRemote(input.workspaceId);
   const enabled = new Set(settings.coraWorkerModels.map((id) => id.trim()).filter(Boolean));
+  const discovered = await import("../orchestration/worker-model-catalog")
+    .then((catalog) => catalog.inspectWorkerModelCatalog())
+    .then((catalog) => catalog.models.filter((model) => model.sources.length > 0).map((model) => model.id))
+    .catch(() => [] as string[]);
   const choices = [
     ...new Set([
       ...CORA_WORKER_MODEL_CHOICES,
+      ...discovered,
       ...settings.openRouterCoraModels.map((id) => id.trim()).filter(Boolean),
       ...enabled,
     ]),
@@ -615,7 +620,6 @@ async function getCapabilitiesForRemote(input: {
       claudeRuntimeAvailable: isAvailable("claude"),
       codexRuntimeAvailable: isAvailable("codex"),
       grokRuntimeAvailable: isAvailable("grok"),
-      autoInstallEnabled: settings.playwrightMcpAutoInstall !== false,
     });
     builtins = status.map((entry) => ({
       id: entry.id,
@@ -641,7 +645,7 @@ async function getCapabilitiesForRemote(input: {
     policy: {
       mcpAwareness: settings.agentMcpSyncEnabled,
       skillAwareness: settings.agentSkillSyncEnabled,
-      autoInstallStudioMcp: settings.playwrightMcpAutoInstall !== false,
+      autoInstallStudioMcp: settings.studioToolsInOtherApps === true,
     },
     ...remoteCapabilityPage(
       inventory.mcp.filter((item) => !REMOTE_BUILTIN_MCP_NAMES.has(item.name)).map(asset),
@@ -686,14 +690,14 @@ async function updateCapabilityAssetForRemote(input: RemoteAssetUpdate) {
       const available = (kind: string) => runtimes.some((runtime) => runtime.kind === kind && runtime.installed);
       const status = await getSparkBuiltinStatus({
         claudeRuntimeAvailable: available("claude"), codexRuntimeAvailable: available("codex"),
-        grokRuntimeAvailable: available("grok"), autoInstallEnabled: settings.playwrightMcpAutoInstall !== false,
+        grokRuntimeAvailable: available("grok"),
       });
       const state = status.find((item) => item.id === input.builtinId)?.[input.runtime].state;
       if (state === "user-managed") throw new Error("This server entry is user-managed. Codara will not replace or remove it.");
       if (state === "unavailable" || !state) throw new Error(`Install ${input.runtime} in Studio before managing its built-in server.`);
       const result = await setSparkBuiltinInstalled(input.builtinId, input.runtime, input.installed);
       if (!result.ok) throw new Error(result.error ?? "Could not update the built-in server.");
-      message = `Codara Studio MCP was ${input.installed ? "installed" : "removed"} for ${input.runtime}.`;
+      message = `Codara Studio MCP is ${input.installed ? "on" : "off"} for ${input.runtime} sessions Codara starts.`;
     } else {
       message = await updateRemoteAgentAsset({ cwd, settings }, input);
     }
@@ -798,7 +802,7 @@ async function updateCapabilitiesForRemote(
         ? { agentSkillSyncEnabled: input.skillAwareness }
         : {}),
       ...(input.autoInstallStudioMcp !== undefined
-        ? { playwrightMcpAutoInstall: input.autoInstallStudioMcp }
+        ? { studioToolsInOtherApps: input.autoInstallStudioMcp }
         : {}),
     });
     broadcastSettingsChanged(saved);
@@ -812,7 +816,10 @@ async function listCoraModelsForRemote(): Promise<RemoteCoraModel[]> {
   // user's verified OpenRouter favourites after them. One function builds
   // both menus, so a model that appears on the desktop appears on the phone.
   const [live, settings] = await Promise.all([
-    inspectPiModelCatalog().catch(() => [] as PiCatalogModel[]),
+    import("../orchestration/worker-model-catalog")
+      .then((catalog) => catalog.inspectUnifiedPiModelCatalog())
+      .catch(() => inspectPiModelCatalog())
+      .catch(() => [] as PiCatalogModel[]),
     loadSettings(),
   ]);
   const groups = buildVisibleGroups({
@@ -1896,7 +1903,16 @@ async function getCoraGraphForRemote(input: {
   // Deliberately bypass the message-window projector. This route exists for
   // the graph, so sending a 400 KiB transcript after a pass tap would undo the
   // mobile data savings that the bounded step/worker projection provides.
-  return toRemoteRun(run, await automationJoinForRun(run), []);
+  return toRemoteRun(run, await automationJoinForRun(run), [], await remoteContextLimits());
+}
+
+// The same inputs the Pi session's limit was priced from, so the phone's pill
+// reads exactly what the desktop composer's does. Unreadable settings are Auto.
+async function remoteContextLimits(): Promise<RemoteCoraRunContextLimits> {
+  const percent = await loadSettings()
+    .then((settings) => settings.coraAutoCompactPercent ?? null)
+    .catch(() => null);
+  return { percent, overrideTokens: compactAtOverrideTokens(process.env.CODARA_PI_COMPACT_AT_TOKENS) };
 }
 
 async function projectCoraRunForRemote(
@@ -1904,7 +1920,7 @@ async function projectCoraRunForRemote(
   afterCursor?: string,
 ): Promise<RemoteCoraRunProjection> {
   const runId = requireRemoteCoraIdentity(run.id, "run.id");
-  const base = toRemoteRun(run, await automationJoinForRun(run), []);
+  const base = toRemoteRun(run, await automationJoinForRun(run), [], await remoteContextLimits());
   const sourceMessages = remoteCoraSourceMessages(run);
   return projectBoundedRemoteCoraRun({
     base,
@@ -2652,6 +2668,7 @@ function toRemoteRun(
   run: RunState,
   automation?: RemoteAutomationJoin,
   messages: RemoteCoraMessage[] = [],
+  contextLimits: RemoteCoraRunContextLimits = {},
 ): RemoteCoraRun {
   const workerProjection = toRemoteRunWorkers(run);
   const workers = workerProjection.workers;
@@ -2695,7 +2712,7 @@ function toRemoteRun(
   const projectedBlockedMessage = blockedMessage
     ? toRemoteCoraMessage(blockedMessage)
     : undefined;
-  const context = remoteCoraRunContext(run);
+  const context = remoteCoraRunContext(run, contextLimits);
   const undo = remoteCoraUndoTarget(run);
   const workersOmitted = Math.max(0, workerProjection.total - workers.length);
   const stepsOmitted = Math.max(0, plan.total - plan.steps.length);
@@ -3100,8 +3117,8 @@ async function updateCoraBoardForRemote(input: {
 
 // Fast mode is one global app setting (AppSettings.openAiFastMode), the same
 // one Studio's composer bolt writes. An absent value means OFF, matching the
-// desktop hook's fail-closed read: the wrong answer costs 2x on every OpenAI
-// token rather than merely running at normal speed.
+// desktop hook's fail-closed read: the wrong answer bills a premium rate on
+// every token rather than merely running at normal speed.
 async function getOpenAiFastModeForRemote(): Promise<boolean> {
   const settings = await loadSettings();
   return settings.openAiFastMode === true;
@@ -3850,9 +3867,6 @@ async function createRemoteTerminal(
     throw new Error(
       "That worker session is no longer resumable in this workspace.",
     );
-  }
-  if (request.profile === "codex") {
-    await ensureCodexProjectTrust(cwd.path).catch(() => undefined);
   }
   const command = remoteTerminalLaunchCommand(
     request.profile,

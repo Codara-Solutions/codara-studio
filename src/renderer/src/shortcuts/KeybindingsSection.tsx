@@ -1,16 +1,21 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { AppPreferences, KeybindingOverridesPref, PrefKey } from "@shared/types";
 import {
+  bindingChips,
   buildBindingTable,
   findConflicts,
+  hiddenDefaults,
+  isUsableDigitRangeChord,
   overrideForChord,
   unboundOverride,
   type BindingTable,
   type EffectiveBinding,
 } from "./bindings";
-import { chordFromEvent, chordToDisplay, type Chord } from "./chord";
+import { chordFromEvent, chordToDisplay, chordToHint, type Chord } from "./chord";
 import { COMMAND_GROUPS, type CommandId } from "./commands";
+import { IS_MAC } from "./platform";
 import { setRecording } from "./recording";
+import { DangerRow, SettingsSection } from "../components/settings/SettingsPrimitives";
 
 type SetPreferenceFn = <K extends PrefKey>(
   key: K,
@@ -22,10 +27,10 @@ interface KeybindingsSectionProps {
   setPreference: SetPreferenceFn;
 }
 
-// Settings tab body: lists every command, shows the current chord chips,
-// lets the user record a new chord per row. Conflict detection runs against
-// the live binding table so the user sees other commands a chord would
-// shadow before committing.
+// Settings page body: lists every command with its current chord, and lets
+// the user record a new chord per row. Conflict detection runs against the
+// live binding table so the user sees other commands a chord would shadow
+// before committing. The page title and description come from the dialog.
 export default function KeybindingsSection({
   preferences,
   setPreference,
@@ -37,6 +42,7 @@ export default function KeybindingsSection({
   );
 
   const [recordingId, setRecordingId] = useState<CommandId | null>(null);
+  const [filter, setFilter] = useState("");
 
   // Whenever a row enters/leaves recording mode, mirror that into the
   // module-level flag the global dispatcher reads. Always clear on unmount
@@ -68,110 +74,103 @@ export default function KeybindingsSection({
   };
 
   const customizedCount = Object.keys(overrides).length;
+  const query = filter.trim().toLowerCase();
+  const matches = (binding: EffectiveBinding): boolean => {
+    if (!query) return true;
+    const keys = binding.chords.flatMap((chord) => chordToDisplay(chord)).join(" ");
+    return `${binding.command.label} ${binding.command.group} ${keys}`
+      .toLowerCase()
+      .includes(query);
+  };
+  const visibleGroups = COMMAND_GROUPS.map((group) => ({
+    group,
+    items: table.filter((b) => b.command.group === group && matches(b)),
+  })).filter((entry) => entry.items.length > 0);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "flex-start",
-          justifyContent: "space-between",
-          gap: 12,
-        }}
-      >
-        <div>
-          <div
-            style={{
-              fontFamily: "var(--font-sans)",
-              fontSize: 13,
-              fontWeight: 700,
-              color: "var(--ink)",
-            }}
-          >
-            Keybindings
-          </div>
-          <div
-            style={{
-              marginTop: 4,
-              color: "var(--muted)",
-              fontFamily: "var(--font-sans)",
-              fontSize: 12,
-              lineHeight: 1.45,
-            }}
-          >
-            Choose Edit, press the new key combination, then press Enter.
-            Changes apply immediately.
-          </div>
-        </div>
-        <ResetAllButton
-          disabled={customizedCount === 0}
-          count={customizedCount}
-          onClick={resetAll}
-        />
+    <>
+      <div className="st-toolbar">
+        <span className="st-search st-search--inline">
+          <span className="st-search__icon">
+            <svg aria-hidden width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <circle cx="11" cy="11" r="6.5" />
+              <path d="M16 16l4.5 4.5" />
+            </svg>
+          </span>
+          <input
+            className="st-search__input"
+            type="text"
+            aria-label="Filter shortcuts"
+            placeholder="Filter by command or key"
+            value={filter}
+            onChange={(event) => setFilter(event.currentTarget.value)}
+          />
+        </span>
       </div>
 
-      {COMMAND_GROUPS.map((group) => {
-        const items = table.filter((b) => b.command.group === group);
-        if (items.length === 0) return null;
-        return (
-          <section
-            key={group}
-            style={{
-              overflow: "hidden",
-              border: "1px solid var(--rule-soft)",
-              borderRadius: 9,
-              background: "color-mix(in oklab, var(--panel) 68%, transparent)",
-            }}
-          >
-            <h3
-              style={{
-                margin: 0,
-                fontFamily: "var(--font-sans)",
-                padding: "9px 10px",
-                borderBottom: "1px solid var(--rule-soft)",
-                fontSize: 11,
-                fontWeight: 700,
-                color: "var(--ink-dim)",
-              }}
-            >
-              {group}
-            </h3>
-            <ul
-              style={{
-                listStyle: "none",
-                margin: 0,
-                padding: 0,
-                display: "flex",
-                flexDirection: "column",
-              }}
-            >
-              {items.map((binding) => (
-                <Row
-                  key={binding.command.id}
-                  binding={binding}
-                  table={table}
-                  isRecording={recordingId === binding.command.id}
-                  onStartRecording={() => setRecordingId(binding.command.id)}
-                  onCancelRecording={() => setRecordingId(null)}
-                  onAssign={async (chord) => {
-                    await applyOverride(binding.command.id, overrideForChord(chord));
-                    setRecordingId(null);
-                  }}
-                  onUnbind={async () => {
-                    await applyOverride(binding.command.id, unboundOverride());
-                    setRecordingId(null);
-                  }}
-                  onReset={async () => {
-                    await resetOverride(binding.command.id);
-                    setRecordingId(null);
-                  }}
-                />
-              ))}
-            </ul>
-          </section>
-        );
-      })}
-    </div>
+      {visibleGroups.length === 0 ? (
+        <div className="st-empty">
+          <span className="st-empty__title">No shortcuts match “{filter.trim()}”.</span>
+          <span className="st-empty__action">
+            <button type="button" className="spark-btn" onClick={() => setFilter("")}>
+              Clear filter
+            </button>
+          </span>
+        </div>
+      ) : null}
+
+      {visibleGroups.map(({ group, items }) => (
+        <section key={group} className="st-section" aria-label={group}>
+          <div className="st-section__head">
+            <div className="st-section__titles">
+              <h3 className="st-section__title">{group}</h3>
+            </div>
+          </div>
+          <ul className="st-card st-kb-list">
+            {items.map((binding) => (
+              <Row
+                key={binding.command.id}
+                binding={binding}
+                table={table}
+                isRecording={recordingId === binding.command.id}
+                onStartRecording={() => setRecordingId(binding.command.id)}
+                onCancelRecording={() => setRecordingId(null)}
+                onAssign={async (chord) => {
+                  await applyOverride(binding.command.id, overrideForChord(chord));
+                  setRecordingId(null);
+                }}
+                onUnbind={async () => {
+                  await applyOverride(binding.command.id, unboundOverride());
+                  setRecordingId(null);
+                }}
+                onReset={async () => {
+                  await resetOverride(binding.command.id);
+                  setRecordingId(null);
+                }}
+              />
+            ))}
+          </ul>
+        </section>
+      ))}
+
+      {query ? null : (
+        <SettingsSection title="Reset">
+          <DangerRow
+            title="Reset all shortcuts"
+            desc={
+              customizedCount === 0
+                ? "Every shortcut is at its default."
+                : `${customizedCount} changed shortcut${customizedCount === 1 ? "" : "s"} go back to the default keys.`
+            }
+            action="Reset all"
+            confirmLabel="Confirm reset"
+            disabled={customizedCount === 0}
+            buttonTitle={customizedCount === 0 ? "No custom bindings" : undefined}
+            onConfirm={() => void resetAll()}
+          />
+        </SettingsSection>
+      )}
+    </>
   );
 }
 
@@ -196,71 +195,55 @@ function Row({
 }) {
   const { command, chords, customized } = binding;
   const fixed = command.fixed === true;
+  const hidden = useMemo(() => hiddenDefaults(table, command.id), [table, command.id]);
 
   return (
     <li
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: 12,
-        padding: "9px 10px",
-        borderTop: "1px solid var(--rule-soft)",
-        minHeight: 38,
-      }}
+      className={`st-kb-row${isRecording ? " is-recording" : ""}`}
+      data-setting-anchor={command.label}
     >
-      <div style={{ display: "flex", flexDirection: "column", gap: 2, minWidth: 0 }}>
-        <span
-          style={{
-            fontFamily: "var(--font-sans)",
-            fontSize: 12,
-            color: "var(--ink)",
-          }}
-        >
+      <div className="st-kb-row__text">
+        <span className="st-kb-row__label">
           {command.label}
-          {customized && (
-            <span
-              style={{
-                marginLeft: 8,
-                fontSize: 10,
-                color: "var(--accent-text)",
-                letterSpacing: "0.08em",
-                textTransform: "uppercase",
-              }}
-            >
-              modified
-            </span>
-          )}
+          {customized ? <span className="st-kb-row__tag">Changed</span> : null}
         </span>
-        {fixed && (
-          <span
-            style={{
-              fontFamily: "var(--font-sans)",
-              fontSize: 10,
-              color: "var(--muted)",
-            }}
-          >
-            Built-in chord, not rebindable
+        {fixed ? <span className="st-kb-row__desc">Built-in, cannot be changed</span> : null}
+        {hidden.map(({ chord, by }) => (
+          <span key={chordToHint(chord)} className="st-kb-row__desc" data-testid="kb-hidden-default">
+            {chordToHint(chord)} is taken by your shortcut for {by.command.label}, so it does not
+            work here. Record a new shortcut for this command.
           </span>
-        )}
+        ))}
       </div>
 
       {isRecording ? (
         <Recorder
           command={command.id}
+          digitRange={command.digitRange === true}
           table={table}
           onAssign={onAssign}
           onCancel={onCancelRecording}
           onUnbind={chords.length > 0 ? onUnbind : undefined}
         />
       ) : (
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <ChordChips binding={binding} />
-          {!fixed && (
-            <>
-              <RowButton onClick={onStartRecording}>Edit</RowButton>
-              {customized && <RowButton onClick={onReset}>Reset</RowButton>}
-            </>
+        <div className="st-kb-row__control">
+          {customized && !fixed ? (
+            <button type="button" className="st-link-btn" onClick={() => void onReset()}>
+              Reset
+            </button>
+          ) : null}
+          {fixed ? (
+            <ChordChips binding={binding} />
+          ) : (
+            <button
+              type="button"
+              className="st-kb-chord"
+              aria-label={`Edit shortcut for ${command.label}`}
+              title="Click to record a new shortcut"
+              onClick={onStartRecording}
+            >
+              <ChordChips binding={binding} />
+            </button>
           )}
         </div>
       )}
@@ -268,31 +251,16 @@ function Row({
   );
 }
 
-function ChordChips({ binding }: { binding: EffectiveBinding }) {
-  if (binding.command.id === "view.selectByIndex") {
-    const chips = [...chordToDisplay(binding.chords[0]).slice(0, -1), "1…9"];
-    return <ChipRow chips={chips} />;
-  }
+export function ChordChips({ binding }: { binding: EffectiveBinding }) {
   if (binding.chords.length === 0) {
-    return (
-      <span
-        style={{
-          fontFamily: "var(--font-sans)",
-          fontSize: 11,
-          color: "var(--muted)",
-          fontStyle: "italic",
-        }}
-      >
-        unbound
-      </span>
-    );
+    return <span className="st-kb-unset">Set shortcut</span>;
   }
-  return <ChipRow chips={chordToDisplay(binding.chords[0])} />;
+  return <ChipRow chips={bindingChips(binding, chordToDisplay)} />;
 }
 
 function ChipRow({ chips }: { chips: string[] }) {
   return (
-    <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+    <span className="st-kb-chips">
       {chips.map((k, i) => (
         <Kbd key={i}>{k}</Kbd>
       ))}
@@ -302,12 +270,17 @@ function ChipRow({ chips }: { chips: string[] }) {
 
 function Recorder({
   command,
+  digitRange,
   table,
   onAssign,
   onCancel,
   onUnbind,
 }: {
   command: CommandId;
+  // The command binds modifiers to the digits 1 to 9: only the modifiers of
+  // what is pressed count, and at least Ctrl, Alt or Cmd is required so the
+  // digits keep typing numbers.
+  digitRange: boolean;
   table: BindingTable;
   onAssign: (chord: Chord) => void | Promise<void>;
   onCancel: () => void;
@@ -315,6 +288,11 @@ function Recorder({
 }) {
   const [captured, setCaptured] = useState<Chord | null>(null);
   const inputRef = useRef<HTMLDivElement>(null);
+  const unusable = digitRange && captured !== null && !isUsableDigitRangeChord(captured);
+  const assign = (chord: Chord) => {
+    if (digitRange && !isUsableDigitRangeChord(chord)) return;
+    void onAssign(digitRange ? { ...chord, key: "1" } : chord);
+  };
 
   useEffect(() => {
     const el = inputRef.current;
@@ -332,7 +310,7 @@ function Recorder({
       return;
     }
     if (e.key === "Enter" && captured) {
-      void onAssign(captured);
+      assign(captured);
       return;
     }
     const chord = chordFromEvent(e.nativeEvent);
@@ -345,172 +323,53 @@ function Recorder({
   );
 
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+    <div className="st-kb-recorder">
       <div
         ref={inputRef}
         tabIndex={0}
         onKeyDown={onKeyDown}
         role="textbox"
         aria-label="Press a key combination"
-        style={{
-          minWidth: 132,
-          padding: "5px 10px",
-          border: "1px dashed var(--accent)",
-          borderRadius: 6,
-          background: "color-mix(in oklch, var(--accent) 8%, transparent)",
-          color: captured ? "var(--ink)" : "var(--muted)",
-          fontFamily: "var(--font-mono)",
-          fontSize: 11,
-          outline: "none",
-          display: "flex",
-          alignItems: "center",
-          gap: 4,
-        }}
+        className="st-kb-recorder__field"
       >
         {captured ? (
-          chordToDisplay(captured).map((k, i) => <Kbd key={i}>{k}</Kbd>)
+          (digitRange
+            ? [...chordToDisplay(captured).slice(0, -1), "1…9"]
+            : chordToDisplay(captured)
+          ).map((k, i) => <Kbd key={i}>{k}</Kbd>)
         ) : (
-          <span style={{ fontFamily: "var(--font-sans)", fontStyle: "italic" }}>
-            Press a key…
-          </span>
+          <span className="st-kb-recorder__prompt">Press keys…</span>
         )}
       </div>
-      {conflicts.length > 0 && captured && (
-        <span
-          style={{
-            color: "var(--warn)",
-            fontFamily: "var(--font-sans)",
-            fontSize: 10,
-            maxWidth: 160,
-          }}
-        >
-          Shadows {conflicts.map((c) => c.command.label).join(", ")}
+      {unusable ? (
+        <span className="st-kb-recorder__conflict">
+          {IS_MAC ? "Add Control, Option or Command" : "Add Ctrl or Alt"}
         </span>
-      )}
-      <RowButton
-        onClick={() => captured && void onAssign(captured)}
-        disabled={!captured}
-        primary
+      ) : conflicts.length > 0 && captured ? (
+        <span className="st-kb-recorder__conflict">
+          Replaces {conflicts.map((c) => c.command.label).join(", ")}
+        </span>
+      ) : null}
+      <button
+        type="button"
+        className="spark-btn is-primary"
+        onClick={() => captured && assign(captured)}
+        disabled={!captured || unusable}
       >
         Save
-      </RowButton>
-      <RowButton onClick={onCancel}>Cancel</RowButton>
-      {onUnbind && <RowButton onClick={() => void onUnbind()}>Unbind</RowButton>}
+      </button>
+      <button type="button" className="spark-btn st-btn-quiet" onClick={onCancel}>
+        Cancel
+      </button>
+      {onUnbind ? (
+        <button type="button" className="spark-btn st-btn-quiet" onClick={() => void onUnbind()}>
+          Remove
+        </button>
+      ) : null}
     </div>
   );
 }
 
-function RowButton({
-  children,
-  onClick,
-  disabled,
-  primary,
-}: {
-  children: React.ReactNode;
-  onClick: () => void;
-  disabled?: boolean;
-  primary?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      style={{
-        appearance: "none",
-        border: primary
-          ? "1px solid color-mix(in oklch, var(--accent) 50%, var(--rule-strong))"
-          : "1px solid var(--rule-strong)",
-        borderRadius: 999,
-        background: primary
-          ? "color-mix(in oklab, var(--ink) 3%, transparent)"
-          : "transparent",
-        color: disabled ? "var(--muted)" : "var(--ink)",
-        padding: "3px 10px",
-        fontFamily: "var(--font-sans)",
-        fontSize: 11,
-        fontWeight: 600,
-        cursor: disabled ? "default" : "pointer",
-        opacity: disabled ? 0.5 : 1,
-        transition: "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-function ResetAllButton({
-  count,
-  disabled,
-  onClick,
-}: {
-  count: number;
-  disabled: boolean;
-  onClick: () => void;
-}) {
-  // Two-step reset: first click arms, second click confirms. Disarms on
-  // mouse leave / blur, so a stray click never wipes the custom bindings.
-  const [armed, setArmed] = useState(false);
-  return (
-    <button
-      type="button"
-      onClick={() => {
-        if (disabled) return;
-        if (!armed) {
-          setArmed(true);
-          return;
-        }
-        setArmed(false);
-        onClick();
-      }}
-      onMouseLeave={() => setArmed(false)}
-      onBlur={() => setArmed(false)}
-      disabled={disabled}
-      title={disabled ? "No custom bindings" : `Reset ${count} custom binding${count === 1 ? "" : "s"}`}
-      style={{
-        appearance: "none",
-        border: armed ? "1px solid var(--danger)" : "1px solid var(--rule-strong)",
-        borderRadius: 999,
-        background: "transparent",
-        color: disabled ? "var(--muted)" : armed ? "var(--danger)" : "var(--ink)",
-        padding: "5px 12px",
-        fontFamily: "var(--font-sans)",
-        fontSize: 11,
-        fontWeight: 600,
-        cursor: disabled ? "default" : "pointer",
-        opacity: disabled ? 0.55 : 1,
-        whiteSpace: "nowrap",
-        transition: "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out), opacity var(--motion-fast) var(--ease-out)",
-      }}
-    >
-      {armed ? "Confirm reset" : `Reset all${count > 0 ? ` (${count})` : ""}`}
-    </button>
-  );
-}
-
 function Kbd({ children }: { children: React.ReactNode }) {
-  return (
-    <kbd
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        minWidth: 22,
-        height: 22,
-        padding: "0 6px",
-        border: "1px solid var(--rule-strong)",
-        borderRadius: 5,
-        background: "var(--panel-3)",
-        color: "var(--ink-dim)",
-        fontFamily: "var(--font-mono)",
-        fontSize: 11,
-        fontWeight: 600,
-        fontVariantNumeric: "tabular-nums",
-        boxShadow: "var(--lift-hi), var(--well)",
-      }}
-    >
-      {children}
-    </kbd>
-  );
+  return <kbd className="st-kbd">{children}</kbd>;
 }

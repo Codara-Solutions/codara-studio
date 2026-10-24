@@ -15,6 +15,17 @@ export const MANAGER_TURN_FAILURE_REASON =
   "The Cora manager backend could not complete the turn.";
 
 /**
+ * Prefix on the error answerRunQuestion throws when the question closed (a
+ * Stop, a park, a terminal verdict) after the client last saw it. The reply
+ * is still the user's next message, so the composer sends it as one.
+ */
+export const QUESTION_INACTIVE_ERROR_PREFIX = "QUESTION_INACTIVE:";
+
+export function isQuestionInactiveError(message: string | undefined): boolean {
+  return typeof message === "string" && message.includes(QUESTION_INACTIVE_ERROR_PREFIX);
+}
+
+/**
  * Whether a spark question is a backend-failure notice rather than a real ask.
  *
  * These are not answerable: the text says "send the message again", and every
