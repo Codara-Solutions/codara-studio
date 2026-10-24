@@ -21,9 +21,9 @@ import GitPanel from "./git/GitPanel";
 import AnchoredMenu from "./chat/composer/AnchoredMenu";
 import WorkspaceIconPicker from "./WorkspaceIconPicker";
 import { WorkspaceStatusLine } from "./workspace-status/WorkspaceStatusChip";
-import { WorkspaceTasksLine } from "./workspace-status/WorkspaceTasksLine";
+import { WorkspaceAgentList, WorkspaceAgentsLine } from "./workspace-status/WorkspaceAgentsLine";
 import WorkspaceStatusPicker from "./workspace-status/WorkspaceStatusPicker";
-import { setWorkspaceStatus, useWorkspaceStatus } from "./workspace-status/workspaceStatusStore";
+import { setWorkspaceStatus, useUserWorkspaceStatus } from "./workspace-status/workspaceStatusStore";
 import { WorkspaceIconGlyph } from "./workspace-icons";
 import { resolveWorkspaceAccent } from "../lib/workspace-accent";
 import { useTheme } from "../theme/theme-context";
@@ -2067,6 +2067,7 @@ function WorkspaceRow({
   const inputRef = useRef<HTMLInputElement | null>(null);
   const colorRef = useRef<HTMLInputElement | null>(null);
   const rowRef = useRef<HTMLDivElement | null>(null);
+  const pressInAgents = useRef(false);
   const [name, setName] = useState(ws.name);
   const [rowHover, setRowHover] = useState(false);
   const [rowPressed, setRowPressed] = useState(false);
@@ -2076,7 +2077,7 @@ function WorkspaceRow({
   const [iconPickerOpen, setIconPickerOpen] = useState(false);
   const [statusPickerOpen, setStatusPickerOpen] = useState(false);
   const [cleaning, setCleaning] = useState(false);
-  const statusEntry = useWorkspaceStatus(ws.id);
+  const statusEntry = useUserWorkspaceStatus(ws.id);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
   // In-flight color while the OS color dialog is open. The native
   // <input type="color"> streams `input` events 30-60×/sec (sometimes faster)
@@ -2209,7 +2210,15 @@ function WorkspaceRow({
       data-workspace-id={ws.id}
       data-active={active ? "true" : undefined}
       draggable={!editing}
-      onDragStart={onRowDragStart}
+      onDragStart={(event) => {
+        // dragstart fires on the row, not on what was pressed: a press that
+        // began on the agents line or list must not start a reorder.
+        if (pressInAgents.current) {
+          event.preventDefault();
+          return;
+        }
+        onRowDragStart(event);
+      }}
       onDragEnd={onRowDragEnd}
       onClick={editing ? undefined : onActivate}
       onContextMenu={(event) => {
@@ -2227,8 +2236,10 @@ function WorkspaceRow({
         setRowHover(false);
         setRowPressed(false);
       }}
-      onMouseDown={() => {
-        if (!editing) setRowPressed(true);
+      onMouseDown={(event) => {
+        pressInAgents.current =
+          event.target instanceof Element && event.target.closest("[data-workspace-agents-area]") !== null;
+        if (!editing && !pressInAgents.current) setRowPressed(true);
       }}
       onMouseUp={() => setRowPressed(false)}
       aria-busy={working}
@@ -2236,7 +2247,9 @@ function WorkspaceRow({
       data-copy-branch={ws.copyBranch ? "true" : undefined}
       style={{
         display: "flex",
-        alignItems: "center",
+        // The row's own line, then the agent list when its status line is open.
+        flexDirection: "column",
+        justifyContent: "center",
         minHeight: 32,
         // Copy-branch rows indent so they read as a child of their parent repo.
         marginLeft: ws.copyBranch ? 14 : 0,
@@ -2486,7 +2499,7 @@ function WorkspaceRow({
               </span>
             )}
             <WorkspaceStatusLine workspaceId={ws.id} active={active} />
-            <WorkspaceTasksLine workspaceId={ws.id} active={active} />
+            <WorkspaceAgentsLine workspaceId={ws.id} active={active} />
           </div>
         )}
 
@@ -2715,6 +2728,7 @@ function WorkspaceRow({
           </AnchoredMenu>
         </div>
       </div>
+      {!editing && <WorkspaceAgentList workspaceId={ws.id} active={active} />}
     </div>
   );
 }

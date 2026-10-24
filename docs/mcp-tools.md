@@ -684,22 +684,42 @@ on the workspace's row).
 
 | Tool | What it does |
 |---|---|
-| `codara_workspace_status` | Reads (no arguments) or sets the status and one-line progress note of the agent's own workspace, which the rail shows under the workspace's name. `status` is one of `todo`, `in_progress`, `in_review`, `done` and `blocked`; `note` is one plain line of at most 140 characters (longer text is cut and the result says `noteTruncated`, an empty note clears it); `clear: true` removes both. The result carries the current state, who set it and the five latest checkpoints, newest first, so an agent picking up another session's work can read where it stands. |
+| `codara_workspace_status` | Reads (no arguments) or sets the one-line note on the calling agent's own line in the rail. Each agent has its own line, keyed to the terminal pane it runs in (or its Cora chat), so agents sharing a workspace never overwrite each other. `note` is one plain line of at most 140 characters (longer text is cut and the result says `noteTruncated`; an empty note clears it); `clear: true` removes the line's note and status. `status` (`todo`, `in_progress`, `in_review`, `done`, `blocked`) is still accepted and read back for older callers, but the rail shows the state Codara sees itself. The result carries the caller's note, its status, the five latest checkpoints of its own line, newest first, and `otherAgents`: the notes of the other agents still in the workspace. |
+
+Codara computes every agent's state on its own: **working**, **needs you**
+(waiting on a question, a permission or an approval; it stays until you open
+that agent's tab), **done** (its turn ended since you last looked; it turns
+idle once you focus the tab) and **idle**. The note an agent adds lives and
+dies with the agent: it stays on the line through the agent's turns and while
+the agent sleeps, and goes when its tab or pane closes, when its workspace is
+deleted, or when Codara restarts. A Cora chat's note lasts while the chat is
+on the Agents view (working, waiting on you, or finished and not yet seen or
+aged out). Nothing stale is left behind, and no agent has to remember to
+clear anything.
+
+The workspace's row shows one summary line computed from its agents and its
+task list, for example `2 working · 1 needs you · 3 done today` (agents
+working and tasks running count as working, agents and tasks waiting on you
+as needs you, in red, and finished turns you have not opened plus tasks closed
+today as done). Click the line to list the workspace's agents, one line each
+with its name, state, note (or, without one, what Codara saw it say or ask
+last, in italics) and how long it has been in that state; click an agent to
+open its tab.
 
 The workspace is always the caller's own, found from the terminal pane the
 agent runs in, never named by the call. An agent outside a Codara terminal
 gets `updated: false` with `reason: "not_in_codara_workspace"`, one whose
-workspace was removed gets `reason: "workspace_gone"`, and with Codara closed
-the call returns `reason: "codara_offline"` rather than an error. Imported
-pull request runs cannot call it. The server's instructions ask agents to set
-`in_progress` with a short note when they start, a new note at each
-milestone, `in_review` or `done` when they finish, and `blocked` with the
-reason when they need you. You set, change or clear a status yourself from the
-row's menu (**Set status…**, or right-click the row); an agent and you can
-each overwrite the other's latest value, and every change is kept as a
-checkpoint. Statuses live in `<codaraHome>/workspace-status.json` and are
-dropped when their workspace is deleted. Agents without MCP use
-`cora tool workspace_status --status in_progress --note "..."`.
+workspace was removed gets `reason: "workspace_gone"`, one Codara placed in a
+workspace but not in a pane gets `reason: "pane_unknown"` for a write (a read
+still lists the other agents' notes), and with Codara closed the call returns
+`reason: "codara_offline"` rather than an error. Imported pull request runs
+cannot call it. The status you set on a workspace yourself from the row's
+menu (**Set status…**, or right-click the row) is separate: it stays on the
+row as a chip until you change or clear it, lives in
+`<codaraHome>/workspace-status.json` and is dropped when the workspace is
+deleted. Agents no longer write it, and entries agents wrote there before are
+not shown. Agents without MCP use
+`cora tool workspace_status --note "..."`.
 
 ## Task list
 

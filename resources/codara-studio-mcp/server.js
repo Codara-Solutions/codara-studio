@@ -250,7 +250,7 @@ const NOTIFY_TOOL = {
 const WORKSPACE_STATUS_TOOL = {
   name: "codara_workspace_status",
   description:
-    "Read (no arguments) or set your workspace's status and one-line progress note, shown in Codara's rail.",
+    "Read (no arguments) or set your one-line note in Codara's rail. Codara shows your state (working, needs you, done); status is for older callers.",
   inputSchema: {
     type: "object",
     properties: {
@@ -2019,7 +2019,7 @@ function buildInstructions() {
   }
   if (listed.has("codara_workspace_status")) {
     parts.push(
-      "Workspace status: codara_workspace_status shows the user where your work stands, under the workspace's name in the rail. Set in_progress with a short note when you start a task, post a new one-line note at each milestone, set in_review or done when you finish and blocked, with the reason as the note, when you need the user. Read it first when you pick up work another session started.",
+      "Your line in the rail: Codara shows under the workspace's name whether you are working, need the user or are done, by itself. codara_workspace_status adds a one-line note to your own line (other agents keep theirs): post one at each milestone saying what you are on or what is left. It stays until your tab closes. A read also lists the other agents' notes in this workspace.",
     );
   }
   if (listed.has("codara_task_list")) {

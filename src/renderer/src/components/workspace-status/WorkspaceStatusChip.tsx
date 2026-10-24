@@ -5,7 +5,7 @@ import {
   type WorkspaceStatusEntry,
   type WorkspaceStatusId,
 } from "@shared/workspace-status";
-import { useWorkspaceStatus } from "./workspaceStatusStore";
+import { useUserWorkspaceStatus } from "./workspaceStatusStore";
 
 // A workspace's status as a small tinted pill, in the status's own tone (the
 // theme's info, ok, danger... tokens, which the light palettes re-tint), so
@@ -51,10 +51,12 @@ export function describeWorkspaceStatus(entry: WorkspaceStatusEntry, now = Date.
   return parts.join(" ");
 }
 
-// The line under a workspace's name in the rail: the chip, then the note cut
-// to one line. Renders nothing for a workspace with neither.
+// The status you set on a workspace by hand, under its name in the rail: the
+// chip, then the note cut to one line. Agents no longer write here (their
+// notes sit on their own lines, WorkspaceAgentsLine.tsx), so an entry an
+// agent wrote before that is stale and not shown.
 export function WorkspaceStatusLine({ workspaceId, active = false }: { workspaceId: string; active?: boolean }) {
-  const entry = useWorkspaceStatus(workspaceId);
+  const entry = useUserWorkspaceStatus(workspaceId);
   if (!entry) return null;
   const description = describeWorkspaceStatus(entry);
   return (

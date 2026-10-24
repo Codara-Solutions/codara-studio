@@ -36,6 +36,7 @@ import type {
   GitHubWorkQueueItem,
 } from "@shared/github";
 import { makeId } from "@shared/ids";
+import { clearSeenAttention } from "@shared/agent-status";
 import {
   applyWorkspaceGroupShades,
   ensureWorkspaceGroupColors,
@@ -2967,25 +2968,10 @@ export default function App() {
     const t = tabsRef.current;
     const wsId = t.tabsWorkspaceId;
     if (!wsId) return;
-    setTerminalAttention((current) => {
-      const entries = current[wsId];
-      if (!entries) return current;
-      const liveTabIds = new Set(t.tabs.map((tab) => tab.id));
-      let changed = false;
-      const kept: typeof entries = {};
-      for (const [paneId, info] of Object.entries(entries)) {
-        if (info.tabId === t.activeId || !liveTabIds.has(info.tabId)) {
-          changed = true;
-          continue;
-        }
-        kept[paneId] = info;
-      }
-      if (!changed) return current;
-      const next = { ...current };
-      if (Object.keys(kept).length === 0) delete next[wsId];
-      else next[wsId] = kept;
-      return next;
-    });
+    const liveTabIds = new Set(t.tabs.map((tab) => tab.id));
+    setTerminalAttention(
+      (current) => clearSeenAttention(current, wsId, t.activeId, liveTabIds) as typeof current,
+    );
   }, []);
 
   useEffect(() => {

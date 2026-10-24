@@ -151,6 +151,8 @@ export interface AgentBoardCard {
   agentLabel: string;
   account: string | null;
   title: string;
+  /** The terminal tab the agent runs in; null for a Cora chat. */
+  tabTitle: string | null;
   message: string | null;
   tool: string | null;
   detail: string | null;
@@ -444,6 +446,7 @@ function coraCard(
     agentLabel: agentBoardRuntimeLabel("cora"),
     account: (run.chatAccountProfileId && input.accountLabels?.[run.chatAccountProfileId]) || null,
     title: agentBoardLine(run.title, 120) ?? "Cora chat",
+    tabTitle: null,
     message: question
       ? agentBoardLine(question.message)
       : (placement.bucket === "working" ? agentBoardLine(live?.text) : null) ?? lastCoraLine(run),
@@ -542,6 +545,7 @@ function terminalCard(
     agentLabel: agentBoardRuntimeLabel(pane.runtime),
     account: (pane.accountProfileId && input.accountLabels?.[pane.accountProfileId]) || null,
     title: activity?.prompt ?? (agentBoardLine(pane.tabTitle, 120) || agentBoardRuntimeLabel(pane.runtime)),
+    tabTitle: agentBoardLine(pane.tabTitle, 120),
     message: agentBoardLine(message),
     tool:
       pane.state === "working" || pane.state === "blocked" || pane.state === "stalled"
@@ -576,6 +580,7 @@ function sleepingCard(pane: MergedPane, workspace: AgentBoardWorkspace, input: A
     agentLabel: agentBoardRuntimeLabel(pane.runtime),
     account: (pane.accountProfileId && input.accountLabels?.[pane.accountProfileId]) || null,
     title: pane.activity?.prompt ?? (agentBoardLine(pane.tabTitle, 120) || agentBoardRuntimeLabel(pane.runtime)),
+    tabTitle: agentBoardLine(pane.tabTitle, 120),
     message: SLEEPING_MESSAGE,
     tool: null,
     detail: null,

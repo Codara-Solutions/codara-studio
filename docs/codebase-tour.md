@@ -452,7 +452,7 @@ owns each file:
 | `memory/` (Cora's memory) | `cora-memory.ts`, `cora-profiles.ts` |
 | `memory/learned/items.json`, `memory/profiles/<id>/learned/items.json` (what Cora learned by itself), `memory/learning.json` (its switches) | `memory-items.ts`, `memory-learning.ts` |
 | `scheduler.json` (armed automation triggers) | `scheduler.ts` |
-| `workspace-status.json` (each workspace's status, note and checkpoints) | `workspace-status/` |
+| `workspace-status.json` (the status you set on each workspace, note and checkpoints; agents' own notes stay in memory, `workspace-status/agent-notes.ts`) | `workspace-status/` |
 | `cos/<workspaceId>/tasks.jsonl`, `TASKS.md`, `verify/<task>/<run>/*.log` (the workspace's task list, its rendered view and the verify gate's logs) | `cos/task-store.ts`, `cos/verify-gate.ts` |
 | `session-index/sessions.sqlite` (the agent session search index) | `session-search/` |
 | `claude-cli/` (the live slot `live/home`, saved logins, `live-login.json`) | `claude-cli-live-login.ts`, `claude-cli-account-profiles.ts`, `cli-account-homes.ts` |
@@ -537,6 +537,7 @@ Debugging:
 | Notifications | `src/main/notify/policy.ts` (whether to deliver) | `deliver.ts`; `src/renderer/src/notifications/` |
 | Agent session search (the rail's Sessions view) | `src/main/session-search/session-index.ts` (the index, no Electron) | `transcript-parsers.ts`, `session-index-worker.ts` (its thread), `service.ts` (pacing, IPC, the agent tool); `components/session-search/`; `test-session-search`, `tests/e2e/session-search.spec.ts`; [agent-session-search.md](./agent-session-search.md) |
 | The rail's Agents view | `src/shared/agent-board.ts` (which group a card lands in) | `components/agent-board/`; `src/main/agent-board.ts` and `terminalAgentActivitySnapshot` in `terminal-agent-notify.ts`; `test-agent-board`, `tests/e2e/agent-board.spec.ts` |
+| A workspace's status line and its agent lines in the rail | `src/shared/agent-status.ts` (each agent's state, the summary line) | `components/workspace-status/WorkspaceAgentsLine.tsx`, `agentLinesStore.ts`; `src/main/workspace-status/agent-notes.ts` and `preview-tools/workspace-status.ts` (the note an agent writes); `test-agent-status`, `test-workspace-status` |
 | The preview browser | `components/Preview/previewRpc.ts` (DOM actions) or `src/main/preview-input.ts` (trusted input) | The socket handlers in `src/main/preview-tools/` (one table per area, merged in `index.ts`); `test-preview-tools-routing` |
 | The chat UI | `components/chat/` | `lib/useRunExecutionRecord.ts`, `chat/timeline.ts` |
 | Automations and looms | `scheduler.ts`, `automation-loop.ts`, `loom-*.ts` | `components/automations/` |

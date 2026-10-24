@@ -10,7 +10,7 @@ import {
 } from "@shared/workspace-status";
 import { unwrapIpcError } from "../../lib/ipc-error";
 import { WorkspaceStatusChip } from "./WorkspaceStatusChip";
-import { setWorkspaceStatus, useWorkspaceStatus } from "./workspaceStatusStore";
+import { setWorkspaceStatus, useUserWorkspaceStatus, useWorkspaceStatus } from "./workspaceStatusStore";
 
 const sectionLabel: CSSProperties = {
   fontSize: 10.5,
@@ -33,7 +33,12 @@ export default function WorkspaceStatusPicker({
   workspaceId: string;
   onClose: (options?: { restoreFocus?: boolean }) => void;
 }) {
-  const entry = useWorkspaceStatus(workspaceId);
+  // An entry an agent wrote before agents had lines of their own is stale.
+  const entry = useUserWorkspaceStatus(workspaceId);
+  // The store merges a patch into what it holds, so a save over such an entry
+  // would bring the agent's hidden note back as the user's. It is cleared first.
+  const stored = useWorkspaceStatus(workspaceId);
+  const staleAgentEntry = stored !== null && entry === null;
   // What the user picked or typed, null until they touch that field. Until
   // then the picker shows the live value, and Save sends only what they
   // changed: an agent's status or note posted while the picker is open is
@@ -58,6 +63,7 @@ export default function WorkspaceStatusPicker({
     setSaving(true);
     setError(null);
     try {
+      if (staleAgentEntry && !patch.clear) await setWorkspaceStatus(workspaceId, { clear: true });
       await setWorkspaceStatus(workspaceId, patch);
       onClose({ restoreFocus });
     } catch (err) {

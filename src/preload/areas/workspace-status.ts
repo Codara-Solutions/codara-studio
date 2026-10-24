@@ -1,9 +1,10 @@
 // window.spark.workspaceStatus: the renderer side of src/main/workspace-status/
-// (each workspace's status and progress note). Kept out of index.ts so its
-// owner adds calls here only.
+// (the status you set on each workspace, and each agent's own note). Kept out
+// of index.ts so its owner adds calls here only.
 
 import { ipcRenderer } from "electron";
 
+import type { AgentNoteChange, AgentNoteMap } from "@shared/agent-status";
 import type {
   WorkspaceStatusChange,
   WorkspaceStatusEntry,
@@ -19,5 +20,11 @@ export const workspaceStatusApi = {
     const wrapped = (_event: unknown, change: WorkspaceStatusChange): void => listener(change);
     ipcRenderer.on("workspaceStatus:changed", wrapped);
     return () => ipcRenderer.removeListener("workspaceStatus:changed", wrapped);
+  },
+  agentNotes: (): Promise<AgentNoteMap> => ipcRenderer.invoke("workspaceStatus:agentNotes"),
+  onAgentNoteChanged: (listener: (change: AgentNoteChange) => void): (() => void) => {
+    const wrapped = (_event: unknown, change: AgentNoteChange): void => listener(change);
+    ipcRenderer.on("workspaceStatus:agentNoteChanged", wrapped);
+    return () => ipcRenderer.removeListener("workspaceStatus:agentNoteChanged", wrapped);
   },
 };

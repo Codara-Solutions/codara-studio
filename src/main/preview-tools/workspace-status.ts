@@ -1,9 +1,12 @@
-// codara_workspace_status (server.js): an agent reads or sets the status and
-// one-line progress note of the workspace it works in, which the rail shows
-// under the workspace's name. The workspace is always the caller's own: its
-// Cora chat's, or that of the terminal pane it runs in, never one the call
-// names. The store lives in ../workspace-status/.
+// codara_workspace_status (server.js): an agent reads or sets its own line in
+// the rail: a status it declares and a one-line note, keyed to the agent (the
+// terminal pane it runs in, or its Cora chat), never to the whole workspace,
+// so agents sharing a workspace keep separate lines. The rail computes each
+// agent's state itself and shows the note beside it. The workspace is always
+// the caller's own, never one the call names. The notes live in
+// ../workspace-status/agent-notes.ts.
 
+import { paneNoteKey, runNoteKey, type AgentNote, type AgentNoteKey } from "@shared/agent-status";
 import {
   WORKSPACE_STATUS_IDS,
   WORKSPACE_STATUS_LABELS,
@@ -11,7 +14,6 @@ import {
   parseWorkspaceStatusId,
   workspaceStatusAgentLabel,
   type WorkspaceStatusAuthor,
-  type WorkspaceStatusEntry,
   type WorkspaceStatusPatch,
 } from "@shared/workspace-status";
 import { workspaceStatusService } from "../workspace-status/service";
@@ -23,12 +25,13 @@ function text(params: Record<string, unknown>, key: string): string | undefined 
 }
 
 export type CallerWorkspace =
-  | { workspaceId: string; by: WorkspaceStatusAuthor }
+  | { workspaceId: string; by: WorkspaceStatusAuthor; agentKey: AgentNoteKey | null }
   | { refusal: Record<string, unknown> };
 
 /**
- * The workspace a caller-located tool acts on, and who to credit: the chat's
- * workspace for a run, else that of the terminal pane the caller runs in.
+ * The workspace a caller-located tool acts on, who to credit, and the
+ * caller's own agent line: the chat's for a run, else the terminal pane's the
+ * caller runs in (null when Codara placed the workspace but not the pane).
  * Also used by the task list tools (cos-tasks.ts).
  */
 export async function callerWorkspace(
@@ -47,7 +50,11 @@ export async function callerWorkspace(
       return { refusal: { updated: false, reason: "workspace_unknown", note: "This chat's workspace could not be found." } };
     }
     const label = workspaceStatusAgentLabel(client);
-    return { workspaceId: run.workspaceId, by: { kind: "agent", label: label === "Agent" ? "Cora" : label } };
+    return {
+      workspaceId: run.workspaceId,
+      by: { kind: "agent", label: label === "Agent" ? "Cora" : label },
+      agentKey: runNoteKey(runId),
+    };
   }
   await host.scopeToCaller(params);
   const workspaceId = text(params, "workspaceId");
@@ -69,7 +76,7 @@ export async function callerWorkspace(
   const fromClient = workspaceStatusAgentLabel(client);
   const label =
     (paneId ? workspaceStatusService().agentLabelForPane(paneId) : null) ?? (fromClient === "Cora" ? "Agent" : fromClient);
-  return { workspaceId, by: { kind: "agent", label } };
+  return { workspaceId, by: { kind: "agent", label }, agentKey: paneId ? paneNoteKey(paneId) : null };
 }
 
 const STATUS_CHOICES = WORKSPACE_STATUS_IDS.join(", ");
@@ -105,9 +112,19 @@ function iso(at: number): string | null {
   return at > 0 ? new Date(at).toISOString() : null;
 }
 
-/** What the agent reads back: the current state and the latest checkpoints, newest first. */
-function view(workspaceId: string, name: string, entry: WorkspaceStatusEntry | null): Record<string, unknown> {
-  if (!entry) return { workspaceId, workspace: name, status: null, note: null };
+/** What the agent reads back: its own line with its latest checkpoints, newest first, and the other agents' notes. */
+function view(
+  workspaceId: string,
+  name: string,
+  own: AgentNote | null,
+  others: readonly AgentNote[],
+): Record<string, unknown> {
+  const entry = own?.entry ?? null;
+  const otherAgents = others
+    .filter((note) => note.entry.note)
+    .sort((a, b) => b.entry.updatedAt - a.entry.updatedAt)
+    .map((note) => ({ agent: note.entry.by.label, note: note.entry.note, updatedAt: iso(note.entry.updatedAt) }));
+  if (!entry) return { workspaceId, workspace: name, status: null, note: null, otherAgents };
   return {
     workspaceId,
     workspace: name,
@@ -125,8 +142,12 @@ function view(workspaceId: string, name: string, entry: WorkspaceStatusEntry | n
         at: iso(checkpoint.at),
         by: checkpoint.by.label,
       })),
+    otherAgents,
   };
 }
+
+const STATE_HINT =
+  "Codara shows your state (working, needs you, done) on your line by itself; the rail shows your note beside it.";
 
 async function runWorkspaceStatus(
   params: Record<string, unknown>,
@@ -141,14 +162,33 @@ async function runWorkspaceStatus(
   if (name === null) {
     return { updated: false, reason: "workspace_gone", note: "Your workspace was removed from Codara." };
   }
-  if (isRead(patch)) return view(target.workspaceId, name, await service.store().get(target.workspaceId));
-  const result = await service.store().update(target.workspaceId, patch, target.by);
+  const book = service.notes();
+  // Notes of agents that are gone (a chat that left the Agents view, a pane
+  // main never saw close) are dropped here rather than read back.
+  const others: AgentNote[] = [];
+  for (const note of book.inWorkspace(target.workspaceId)) {
+    if (note.key === target.agentKey) continue;
+    if (await service.agentIsLive(note.key)) others.push(note);
+    else book.drop(note.key);
+  }
+  const own = target.agentKey ? book.get(target.agentKey) : null;
+  if (isRead(patch)) return view(target.workspaceId, name, own, others);
+  if (!target.agentKey) {
+    return {
+      updated: false,
+      reason: "pane_unknown",
+      note: "Codara could not tell which terminal pane you run in, so you have no line to write to.",
+    };
+  }
+  const result = book.update(target.agentKey, target.workspaceId, patch, target.by);
+  const hints: string[] = [];
+  if (result.noteTruncated) hints.push(`A note is one line of at most ${WORKSPACE_STATUS_NOTE_MAX} characters; the rest was cut.`);
+  if (patch.status) hints.push(STATE_HINT);
   return {
-    ...view(target.workspaceId, name, result.entry),
+    ...view(target.workspaceId, name, result.note, others),
     updated: result.changed,
-    ...(result.noteTruncated
-      ? { noteTruncated: true, hint: `A note is one line of at most ${WORKSPACE_STATUS_NOTE_MAX} characters; the rest was cut.` }
-      : {}),
+    ...(result.noteTruncated ? { noteTruncated: true } : {}),
+    ...(hints.length > 0 ? { hint: hints.join(" ") } : {}),
   };
 }
 

@@ -68,6 +68,12 @@ export function useWorkspaceStatus(workspaceId: string | null | undefined): Work
   return useSyncExternalStore(subscribe, () => (workspaceId ? statuses[workspaceId] ?? null : null));
 }
 
+/** The status the user set on the workspace by hand, or null; see WorkspaceStatusLine. */
+export function useUserWorkspaceStatus(workspaceId: string | null | undefined): WorkspaceStatusEntry | null {
+  const entry = useWorkspaceStatus(workspaceId);
+  return entry?.by.kind === "user" ? entry : null;
+}
+
 /** Every workspace's status, keyed by workspace id. */
 export function useWorkspaceStatuses(): WorkspaceStatusMap {
   return useSyncExternalStore(subscribe, () => statuses);

@@ -1,10 +1,12 @@
 "use strict";
 // Workspace status: the shared rules (src/shared/workspace-status.ts), the
-// store that keeps them on disk (src/main/workspace-status/store.ts) and the
-// socket method behind codara_workspace_status
-// (src/main/preview-tools/workspace-status.ts). The store is bundled with
-// the real fs-atomic writer and a throwaway home; the handler gets a stub
-// host that stands in for the agent socket's caller resolution.
+// store that keeps the status you set by hand on disk
+// (src/main/workspace-status/store.ts), each agent's own note
+// (src/main/workspace-status/agent-notes.ts) and the socket method behind
+// codara_workspace_status (src/main/preview-tools/workspace-status.ts),
+// which writes the caller's own note. The store is bundled with the real
+// fs-atomic writer and a throwaway home; the handler gets a stub host that
+// stands in for the agent socket's caller resolution.
 //
 //   node scripts/test-workspace-status.cjs
 
@@ -22,6 +24,7 @@ async function load() {
       contents: [
         `export * from "@shared/workspace-status";`,
         `export { createWorkspaceStatusStore } from "../workspace-status/store";`,
+        `export { createAgentNoteBook } from "../workspace-status/agent-notes";`,
         `export { provideWorkspaceStatusService } from "../workspace-status/service";`,
         `export { workspaceStatusTools } from "./workspace-status";`,
         `export { PreviewToolParamsError } from "./types";`,
@@ -249,11 +252,69 @@ async function storeKeepsStatusesOnDisk() {
   assert.equal(JSON.parse(fs.readFileSync(corruptFile, "utf8")).workspaces["ws-c"].status, "todo");
 }
 
-async function toolActsOnTheCallersWorkspace() {
-  const store = ws.createWorkspaceStatusStore({ file: path.join(TMP, "home-3", "workspace-status.json"), now: () => Date.UTC(2026, 9, 15) });
+function agentNotesLiveWithTheirAgent() {
+  let clock = 1_000;
+  const book = ws.createAgentNoteBook({ now: () => clock });
+  const events = [];
+  book.onChange((key, note) => events.push([key, note?.entry.note ?? null]));
+
+  // Two agents in one workspace keep separate lines.
+  book.update("pane:p1", "ws-a", { status: "in_progress", note: "Wiring the store" }, AGENT);
+  book.update("pane:p2", "ws-a", { note: "Reviewing PR 45" }, { kind: "agent", label: "Claude Code" });
+  book.update("run:r1", "ws-b", { note: "Planning" }, { kind: "agent", label: "Cora" });
+  assert.equal(book.get("pane:p1").entry.note, "Wiring the store");
+  assert.equal(book.get("pane:p2").entry.note, "Reviewing PR 45", "the second agent did not overwrite the first");
+  assert.deepEqual(book.inWorkspace("ws-a").map((note) => note.key).sort(), ["pane:p1", "pane:p2"]);
+
+  // Each write is a checkpoint on that agent's own line.
+  clock = 2_000;
+  book.update("pane:p1", "ws-a", { note: "Tests pass" }, AGENT);
+  assert.deepEqual(book.get("pane:p1").entry.checkpoints.map((c) => c.note), ["Wiring the store", "Tests pass"]);
+  assert.equal(book.get("pane:p1").entry.status, "in_progress", "a note alone keeps the declared status");
+  assert.equal(book.update("pane:p1", "ws-a", { note: "Tests pass" }, AGENT).changed, false);
+
+  // A note dies with its agent's tab: dropping the pane's key removes it.
+  assert.equal(book.drop("pane:p2"), true);
+  assert.equal(book.get("pane:p2"), null);
+  assert.deepEqual(events.at(-1), ["pane:p2", null], "the removal is broadcast");
+  assert.equal(book.drop("pane:p2"), false, "dropping twice is a no-op");
+
+  // A cleared note is gone too, and a deleted workspace takes its notes.
+  book.update("pane:p3", "ws-c", { note: "x" }, AGENT);
+  assert.equal(book.update("pane:p3", "ws-c", { clear: true }, AGENT).note, null);
+  assert.equal(book.get("pane:p3"), null);
+  assert.deepEqual(book.pruneWorkspaces(new Set()), [], "an empty workspace list drops nothing");
+  assert.deepEqual(book.pruneWorkspaces(new Set(["ws-a"])), ["run:r1"]);
+  assert.deepEqual(Object.keys(book.list()), ["pane:p1"]);
+
+  // A pane moved to another workspace takes its note along.
+  const moved = book.update("pane:p1", "ws-z", {}, AGENT);
+  assert.equal(moved.changed, true);
+  assert.equal(book.get("pane:p1").workspaceId, "ws-z");
+
+  // Keys are a pane's or a run's, nothing else; a copy never leaks the store.
+  assert.throws(() => book.update("workspace:ws-a", "ws-a", { note: "x" }, AGENT), /key is invalid/);
+  assert.throws(() => book.update("pane:p9", "__proto__", { note: "x" }, AGENT), /workspaceId is invalid/);
+  book.get("pane:p1").entry.note = "mutated";
+  assert.equal(book.get("pane:p1").entry.note, "Tests pass");
+
+  // Past the cap, the oldest note goes first.
+  const many = ws.createAgentNoteBook();
+  for (let i = 0; i < 505; i += 1) many.update(`pane:n${i}`, "ws-a", { note: `n${i}` }, AGENT);
+  assert.equal(Object.keys(many.list()).length, 500);
+  assert.equal(many.get("pane:n0"), null);
+  assert.equal(many.get("pane:n504").entry.note, "n504");
+}
+
+async function toolWritesTheCallersOwnLine() {
+  const store = ws.createWorkspaceStatusStore({ file: path.join(TMP, "home-3", "workspace-status.json") });
+  const book = ws.createAgentNoteBook({ now: () => Date.UTC(2026, 9, 15) });
   const names = { "ws-pane": "Pane workspace", "ws-run": "Run workspace", "ws-other": "Other" };
+  const gone = new Set();
   ws.provideWorkspaceStatusService({
     store: () => store,
+    notes: () => book,
+    agentIsLive: async (key) => !gone.has(key),
     workspaceName: async (id) => names[id] ?? null,
     agentLabelForPane: (paneId) => (paneId === "pane-claude" ? "Claude Code" : null),
   });
@@ -264,8 +325,14 @@ async function toolActsOnTheCallersWorkspace() {
   const host = {
     async scopeToCaller(params) {
       scoped.push({ ...params });
-      if (params.callerPaneId === "pane-claude" || params.callerPaneId === "pane-unknown") params.workspaceId = "ws-pane";
+      if (params.callerPaneId === "pane-claude" || params.callerPaneId === "pane-codex") params.workspaceId = "ws-pane";
       if (params.callerPaneId === "pane-gone") params.workspaceId = "ws-deleted";
+      // Codex can start its MCP server with a cleared environment: the
+      // socket places the workspace from the pid but finds no pane.
+      if (params.callerPid === 4242) {
+        params.workspaceId = "ws-pane";
+        delete params.callerPaneId;
+      }
     },
     async getRun(runId) {
       return runId === "run-live" ? { workspaceId: "ws-run" } : null;
@@ -276,6 +343,8 @@ async function toolActsOnTheCallersWorkspace() {
   };
   const call = (params) => entry.run({ ...params }, "workspace.status", host);
 
+  // An old caller's call keeps working, unchanged in shape: status and note
+  // land on the caller's own line.
   const set = await call({
     status: "In progress",
     note: "Wiring the store\nand the rail",
@@ -293,47 +362,74 @@ async function toolActsOnTheCallersWorkspace() {
   assert.equal(set.by, "Claude Code");
   assert.equal(set.updated, true);
   assert.equal(set.updatedAt, "2026-10-15T00:00:00.000Z");
-  assert.equal((await store.get("ws-other")), null, "the named workspace is untouched");
+  assert.match(set.hint, /shows your state/, "a status write learns Codara computes the state now");
+  assert.deepEqual(set.otherAgents, []);
+  assert.equal(book.get("pane:pane-claude").workspaceId, "ws-pane");
+  assert.deepEqual(await store.list(), {}, "no agent writes the workspace-wide status any more");
 
-  // Without a pane agent Codara recognizes, the MCP client names the agent.
-  const second = await call({ status: "in_review", note: "x".repeat(300), callerPaneId: "pane-unknown", callerClient: "codex-mcp-client" });
+  // A second agent in the same workspace gets its own line.
+  const second = await call({ status: "in_review", note: "x".repeat(300), callerPaneId: "pane-codex", callerClient: "codex-mcp-client" });
   assert.equal(second.by, "Codex");
+  assert.equal(second.status, "in_review");
   assert.equal(second.noteTruncated, true);
   assert.match(second.hint, /at most 140 characters/);
   assert.equal(Array.from(second.note).length, 140);
+  assert.deepEqual(second.otherAgents.map((other) => [other.agent, other.note]), [["Claude Code", "Wiring the store and the rail"]]);
+  assert.equal(book.get("pane:pane-claude").entry.status, "in_progress", "the first agent's line is untouched");
 
-  // No arguments reads, newest checkpoint first.
+  // No arguments reads the caller's own line, newest checkpoint first.
+  await call({ note: "Tests pass", callerPaneId: "pane-claude" });
   const read = await call({ callerPaneId: "pane-claude" });
   assert.equal(read.updated, undefined, "a read changes nothing");
-  assert.equal(read.status, "in_review");
-  assert.deepEqual(read.checkpoints.map((c) => c.status), ["in_review", "in_progress"]);
-  assert.deepEqual(read.checkpoints.map((c) => c.by), ["Codex", "Claude Code"]);
+  assert.equal(read.note, "Tests pass");
+  assert.equal(read.status, "in_progress");
+  assert.deepEqual(read.checkpoints.map((c) => c.note), ["Tests pass", "Wiring the store and the rail"]);
+  assert.equal(read.otherAgents.length, 1);
+  assert.equal(read.otherAgents[0].agent, "Codex");
 
-  // A run works in its own workspace.
-  const run = await call({ runId: "run-live", status: "done", callerClient: "cora" });
+  // A Cora chat writes its run's line.
+  const run = await call({ runId: "run-live", status: "done", note: "Shipped", callerClient: "cora" });
   assert.equal(run.workspaceId, "ws-run");
   assert.equal(run.by, "Cora");
+  assert.equal(book.get("run:run-live").entry.note, "Shipped");
   assert.deepEqual(await call({ runId: "run-gone", status: "done" }), {
     updated: false,
     reason: "workspace_unknown",
     note: "This chat's workspace could not be found.",
   });
 
+  // A chat that left the Agents view (or a pane that closed unseen) is gone:
+  // its note is not read back, and is dropped.
+  book.update("run:run-old", "ws-pane", { note: "Long finished" }, { kind: "agent", label: "Cora" });
+  assert.equal((await call({ callerPaneId: "pane-claude" })).otherAgents.length, 2);
+  gone.add("run:run-old");
+  const afterGone = await call({ callerPaneId: "pane-claude" });
+  assert.deepEqual(afterGone.otherAgents.map((other) => other.agent), ["Codex"]);
+  assert.equal(book.get("run:run-old"), null, "a gone agent's note is dropped");
+
   // An agent outside every Codara pane gets an answer, not an error, and
   // never the workspace on screen.
   const outside = await call({ status: "done", callerPid: 99999, workspaceId: "ws-other" });
   assert.equal(outside.updated, false);
   assert.equal(outside.reason, "not_in_codara_workspace");
-  assert.equal(await store.get("ws-other"), null);
-  const gone = await call({ status: "done", callerPaneId: "pane-gone" });
-  assert.equal(gone.reason, "workspace_gone");
+  const removed = await call({ status: "done", callerPaneId: "pane-gone" });
+  assert.equal(removed.reason, "workspace_gone");
+  // Placed in a workspace but not in a pane: it can read, not write a line.
+  const unplaced = await call({ note: "Somewhere", callerPid: 4242 });
+  assert.equal(unplaced.updated, false);
+  assert.equal(unplaced.reason, "pane_unknown");
+  const unplacedRead = await call({ callerPid: 4242 });
+  assert.equal(unplacedRead.note, null);
+  assert.equal(unplacedRead.otherAgents.length, 2);
 
-  // clear, "none" and an empty note.
+  // clear, "none" and an empty note act on the caller's line only.
   const noneStatus = await call({ status: "none", callerPaneId: "pane-claude" });
   assert.equal(noneStatus.status, null);
   assert.ok(noneStatus.note, "clearing the status keeps the note");
   const cleared = await call({ clear: true, callerPaneId: "pane-claude" });
   assert.deepEqual([cleared.status, cleared.note, cleared.updated], [null, null, true]);
+  assert.equal(book.get("pane:pane-claude"), null);
+  assert.ok(book.get("pane:pane-codex"), "the other agent keeps its line");
   const numeric = await call({ note: 42, callerPaneId: "pane-claude" });
   assert.equal(numeric.note, "42", "cora tool sends a typed number as a number");
 
@@ -341,12 +437,12 @@ async function toolActsOnTheCallersWorkspace() {
   for (const params of [{ status: "shipped" }, { note: { text: "x" } }, { clear: "yes" }]) {
     await assert.rejects(call({ ...params, callerPaneId: "pane-claude" }), (error) => error instanceof ws.PreviewToolParamsError);
   }
-  assert.equal((await store.get("ws-pane")).note, "42");
+  assert.equal(book.get("pane:pane-claude").entry.note, "42");
 
   // Outside a chat, client "cora" is the in-process bridge `cora tool` and a
   // pane's Pi use: a shell or aider is never credited as Cora. The pane's own
   // agent still names itself when Codara knows it.
-  const fromShell = await call({ note: "From a shell", callerPaneId: "pane-unknown", callerClient: "cora" });
+  const fromShell = await call({ note: "From a shell", callerPaneId: "pane-codex", callerClient: "cora" });
   assert.equal(fromShell.by, "Agent");
   const fromPaneAgent = await call({ note: "From Claude", callerPaneId: "pane-claude", callerClient: "cora" });
   assert.equal(fromPaneAgent.by, "Claude Code");
@@ -359,7 +455,9 @@ async function toolActsOnTheCallersWorkspace() {
     console.log("workspace status rules: ok");
     await storeKeepsStatusesOnDisk();
     console.log("workspace status store: ok");
-    await toolActsOnTheCallersWorkspace();
+    agentNotesLiveWithTheirAgent();
+    console.log("agent notes: ok");
+    await toolWritesTheCallersOwnLine();
     console.log("workspace status tool: ok");
   } finally {
     fs.rmSync(TMP, { recursive: true, force: true });

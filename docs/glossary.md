@@ -66,11 +66,15 @@ that defines it (types are in `src/shared/types.ts` unless noted).
   color, tabs and terminals (`Workspace`).
 - **Copy-branch workspace.** A workspace backed by a new git worktree, so
   agents can work on a copy of the repository.
-- **Workspace status.** A workspace's state (To do, In progress, In review,
-  Done or Blocked) and one-line progress note, shown under its name in the
-  rail and on the Agents view's cards. You set it from the row's menu; agents in its terminals set it with
-  `codara_workspace_status`. Each change is kept as a checkpoint
-  (`src/shared/workspace-status.ts`).
+- **Workspace status.** The state (To do, In progress, In review, Done or
+  Blocked) and one-line note you set on a workspace from the row's menu,
+  shown under its name in the rail and on the Agents view's cards. Each
+  change is kept as a checkpoint (`src/shared/workspace-status.ts`).
+- **Agent line.** One agent's line in the rail: its state, which Codara
+  computes (working, needs you, done or idle), and the one-line note the agent
+  adds with `codara_workspace_status`. The note goes when the agent's tab
+  closes (for a Cora chat, when the chat leaves the Agents view). The workspace's row sums its agent lines and its task list into one
+  summary line (`src/shared/agent-status.ts`).
 - **Dock, docked tab.** A tab placed inside a terminal tab's split grid
   instead of filling the whole area (`src/renderer/src/tabs/dock.ts`).
 - **Browser tab, preview.** The built-in Chromium tab. The UI calls it the
