@@ -48,6 +48,14 @@ ${c.bold("RUNS & AGENTS")}
   agent spawn <run> <prompt> [--title T --runtime claude|codex|grok --effort E]
   agent message <run> <all|task-id> <message>
 
+${c.bold("TASKS")}  the workspace's one task list and inbox (TASKS.md), shared with its agents
+  task list [--state S --all]  open tasks, what needs you, the inbox
+  task add <title> --done "how to tell it is finished" [--done …] [--kind K --state S --from I1]
+  task move <T1|I1> <state> [reason]   verifying runs the repo's .codara/verify.json
+  task merge <I1> <T1>         fold an inbox item into a task
+  task worktree <T1> <claude|codex> <path> [--branch B]
+  inbox add <text> [--link URL]
+
 ${c.bold("SURFACES")}
   board <run>                  the run's kanban board
   whiteboard <run>             the run's whiteboard markdown
@@ -193,7 +201,14 @@ async function main() {
       return;
     }
 
+    case "task":
+    case "tasks":
+      // Repeated flags (--done) skip parseArgs.
+      return require("./commands/tasks.cjs").task(rest);
+
     case "inbox":
+      if (rest[0] === "add") return require("./commands/tasks.cjs").inboxAdd(rest.slice(1));
+    // falls through: `cora inbox` alone reads the preview inbox
     case "inspect": {
       const point = require("./commands/point.cjs");
       const parsed = point.parsePointArgs(rest);

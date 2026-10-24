@@ -349,7 +349,7 @@ async function main() {
   );
   check(
     "run-store feeds the rendered memory into the live turn prompt",
-    /buildManagerTurnPrompt\(\s*prepared,\s*inputMessages,\s*\{[^}]*coraMemory/s.test(runStoreSrc),
+    /buildManagerTurnPrompt\(\s*prepared,\s*inputMessages(?:\.map\(\w+\))?,\s*\{[^}]*coraMemory/s.test(runStoreSrc),
     "prepareManagerTurn no longer passes coraMemory",
   );
   check(

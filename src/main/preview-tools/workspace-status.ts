@@ -22,11 +22,20 @@ function text(params: Record<string, unknown>, key: string): string | undefined 
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-type CallerWorkspace =
+export type CallerWorkspace =
   | { workspaceId: string; by: WorkspaceStatusAuthor }
   | { refusal: Record<string, unknown> };
 
-async function callerWorkspace(params: Record<string, unknown>, host: PreviewToolHost): Promise<CallerWorkspace> {
+/**
+ * The workspace a caller-located tool acts on, and who to credit: the chat's
+ * workspace for a run, else that of the terminal pane the caller runs in.
+ * Also used by the task list tools (cos-tasks.ts).
+ */
+export async function callerWorkspace(
+  params: Record<string, unknown>,
+  host: PreviewToolHost,
+  tool = "codara_workspace_status",
+): Promise<CallerWorkspace> {
   // The MCP server never sends one; a hand-made call must not pick a
   // workspace either.
   delete params.workspaceId;
@@ -49,7 +58,7 @@ async function callerWorkspace(params: Record<string, unknown>, host: PreviewToo
       refusal: {
         updated: false,
         reason: "not_in_codara_workspace",
-        note: "codara_workspace_status only works for an agent running in a Codara terminal pane or chat.",
+        note: `${tool} only works for an agent running in a Codara terminal pane or chat.`,
       },
     };
   }

@@ -15,6 +15,7 @@ import { normalizeTabGroupName } from "../../shared/tab-group-name";
 import { capturePreviewTools } from "./capture";
 import { chromeLinkTools, chromeTargetTools } from "./chrome";
 import { corePreviewTools } from "./core";
+import { cosTaskTools } from "./cos-tasks";
 import { devtoolsPreviewTools } from "./devtools";
 import { inboxPreviewTools } from "./inbox";
 import { inputPreviewTools } from "./input";
@@ -37,6 +38,7 @@ const TABLES: readonly PreviewToolTable[] = [
   pointPreviewTools,
   serverTools,
   workspaceStatusTools,
+  cosTaskTools,
   sessionSearchTools,
   chromeLinkTools,
 ];

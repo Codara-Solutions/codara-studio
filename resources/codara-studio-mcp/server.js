@@ -262,6 +262,98 @@ const WORKSPACE_STATUS_TOOL = {
   },
 };
 
+// Cora's task list for the workspace: one list and inbox any agent in it and
+// the user share, rendered to TASKS.md. Like the status, the workspace is
+// always the caller's own. Only the verify gate closes a task, so no tool
+// takes state done. The store is src/main/cos/ and the socket methods
+// src/main/preview-tools/cos-tasks.ts.
+const TASK_STATE_NAMES = ["inbox", "ready", "dispatched", "verifying", "needs_you", "done", "dropped"];
+const TASK_TOOLS = [
+  {
+    name: "codara_task_add",
+    description: "Add a task to your workspace's shared task list (TASKS.md). Starts in inbox unless state says otherwise.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: { type: "string" },
+        done_when: { type: "array", items: { type: "string" }, description: "How anyone can tell it is finished." },
+        kind: { type: "string", enum: ["code", "browser_op", "research", "chore"] },
+        state: { type: "string", enum: ["inbox", "ready", "dispatched"] },
+        from_inbox: { type: "string", description: "Inbox item id it comes from." },
+      },
+      required: ["title", "done_when"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_task_update",
+    description:
+      "Move or edit a task (T1...), or drop or merge an inbox item (I1...). verifying runs the repo's .codara/verify.json checks, which alone close a task.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string" },
+        state: { type: "string", enum: TASK_STATE_NAMES.filter((state) => state !== "done") },
+        reason: { type: "string", description: "needs_you: one plain sentence." },
+        title: { type: "string" },
+        done_when: { type: "array", items: { type: "string" } },
+        assignee: {
+          type: "object",
+          description: "worktree: absolute path the checks run in.",
+          properties: {
+            cli: { type: "string", enum: ["claude", "codex"] },
+            model: { type: "string" },
+            worktree: { type: "string" },
+            branch: { type: "string" },
+          },
+          required: ["cli"],
+          additionalProperties: false,
+        },
+        merge_into: { type: "string", description: "Inbox item: the task it joins." },
+      },
+      required: ["id"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_task_list",
+    description: "Your workspace's task list: counts, open tasks with evidence, untriaged inbox, TASKS.md path.",
+    inputSchema: {
+      type: "object",
+      properties: { state: { type: "string", enum: TASK_STATE_NAMES }, all: { type: "boolean" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "codara_inbox_add",
+    description: "File a request, finding or failure in your workspace's inbox without making it a task yet.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string" },
+        link: { type: "string" },
+        source: {
+          type: "object",
+          properties: {
+            kind: { type: "string", enum: ["you", "ci", "issue", "preview_inbox", "schedule", "agent"] },
+            ref: { type: "string" },
+          },
+          required: ["kind"],
+          additionalProperties: false,
+        },
+      },
+      required: ["text"],
+      additionalProperties: false,
+    },
+  },
+];
+const TASK_TOOL_TO_RPC = {
+  codara_task_add: "task.add",
+  codara_task_update: "task.update",
+  codara_task_list: "task.list",
+  codara_inbox_add: "inbox.add",
+};
+
 // Past agent sessions, searched by what was said (the index is
 // src/main/session-search/, the socket method
 // src/main/preview-tools/session-search.ts). Read only. Codara limits it to
@@ -1720,6 +1812,7 @@ if (IS_AUTOMATION_MODE) {
     ...MANAGER_AUTOMATION_TOOLS,
     ...WORKTREE_TOOLS,
     ...WORKFLOW_TOOLS,
+    ...TASK_TOOLS,
     SESSION_SEARCH_TOOL,
     SHARE_TOOL,
   ];
@@ -1729,6 +1822,7 @@ if (IS_AUTOMATION_MODE) {
     ...EXECUTE_TOOL_TO_RPC,
     ...WORKTREE_TOOL_TO_RPC,
     ...WORKFLOW_TOOL_TO_RPC,
+    ...TASK_TOOL_TO_RPC,
     codara_session_search: "session.search",
     codara_share_offer: "share.offer",
   };
@@ -1752,11 +1846,20 @@ if (IS_AUTOMATION_MODE) {
 } else {
   // A user's own terminal agent. A Cora run already announces its outcome, so
   // only this roster carries the explicit notification.
-  TOOLS = [...STUDIO_TOOLS, NOTIFY_TOOL, WORKSPACE_STATUS_TOOL, ...WORKTREE_TOOLS, SESSION_SEARCH_TOOL, SHARE_TOOL];
+  TOOLS = [
+    ...STUDIO_TOOLS,
+    NOTIFY_TOOL,
+    WORKSPACE_STATUS_TOOL,
+    ...TASK_TOOLS,
+    ...WORKTREE_TOOLS,
+    SESSION_SEARCH_TOOL,
+    SHARE_TOOL,
+  ];
   TOOL_TO_RPC = {
     ...STUDIO_TOOL_TO_RPC,
     codara_notify_user: "agent.notify",
     codara_workspace_status: "workspace.status",
+    ...TASK_TOOL_TO_RPC,
     ...WORKTREE_TOOL_TO_RPC,
     codara_session_search: "session.search",
     codara_share_offer: "share.offer",
@@ -1797,6 +1900,7 @@ const READ_ONLY_TOOL_NAMES = new Set([
   "codara_workflow_status",
   "codara_workflow_wait",
   "codara_session_search",
+  "codara_task_list",
 ]);
 // Anything that runs a caller-chosen shell command or page script can destroy
 // data, and a client may auto-approve a tool that says it cannot.
@@ -1816,6 +1920,8 @@ const DESTRUCTIVE_TOOL_NAMES = new Set([
   "codara_worktree_remove",
   // Its remove action deletes worktrees and remote branches the user approves.
   "codara_worktree_cleanup",
+  // A move to verifying runs the repository's check commands.
+  "codara_task_update",
 ]);
 const IDEMPOTENT_TOOL_NAMES = new Set([
   ...TOOL_REGISTRY.annotations.idempotent,
@@ -1835,6 +1941,8 @@ const OPEN_WORLD_TOOL_NAMES = new Set([
   "codara_worktree_create",
   // Asks GitHub and the remote, and may delete a remote branch.
   "codara_worktree_cleanup",
+  // A move to verifying fetches the base branch from origin.
+  "codara_task_update",
 ]);
 
 function toolTitle(name) {
@@ -1912,6 +2020,11 @@ function buildInstructions() {
   if (listed.has("codara_workspace_status")) {
     parts.push(
       "Workspace status: codara_workspace_status shows the user where your work stands, under the workspace's name in the rail. Set in_progress with a short note when you start a task, post a new one-line note at each milestone, set in_review or done when you finish and blocked, with the reason as the note, when you need the user. Read it first when you pick up work another session started.",
+    );
+  }
+  if (listed.has("codara_task_list")) {
+    parts.push(
+      "Task list: the workspace keeps one task list and inbox that you, other agents and the user share (TASKS.md). When the user asks for work worth tracking, add it with codara_task_add and done-when lines anyone can check; move it to dispatched when you start and to verifying when you believe it is done. The repo's .codara/verify.json checks run then and alone close it: a red run comes back to you as dispatched, so read codara_task_list, fix and verify again. Use needs_you with one plain sentence when only the user can decide. File what you notice but will not do with codara_inbox_add.",
     );
   }
   if (listed.has("codara_session_search")) {
@@ -1999,6 +2112,10 @@ const CALLER_LOCATED_RPCS = new Set([
   "workspace.status",
   "session.search",
   "share.offer",
+  "task.add",
+  "task.update",
+  "task.list",
+  "inbox.add",
 ]);
 function injectRunIdForStudioOwnership(rpc, args) {
   if (
@@ -2055,7 +2172,7 @@ function stampWorktreeCaller(rpc, args, ctx) {
 
 // Which agent wrote a workspace status, when Codara cannot tell from the pane.
 function stampWorkspaceStatusCaller(rpc, args, ctx) {
-  if (rpc !== "workspace.status") return;
+  if (rpc !== "workspace.status" && !Object.values(TASK_TOOL_TO_RPC).includes(rpc)) return;
   args.callerClient = (ctx && ctx.client) || CLIENT_NAME || "agent";
 }
 
@@ -2562,6 +2679,9 @@ async function callTool(params, ctx = {}) {
     if (rpc === "workspace.status" && err && err.code === "SPARK_OFFLINE") {
       return toToolResult({ updated: false, reason: "codara_offline" });
     }
+    if (Object.values(TASK_TOOL_TO_RPC).includes(rpc) && err && err.code === "SPARK_OFFLINE") {
+      return toToolResult({ changed: false, reason: "codara_offline", note: "Codara is not open, so the task list was not read or changed." });
+    }
     if (rpc === "share.offer" && err && err.code === "SPARK_OFFLINE") {
       return toToolResult({ offered: false, reason: "codara_offline", note: "Codara is not open, so nothing was offered." });
     }
@@ -2713,6 +2833,7 @@ function toolManifest() {
     terminal: names(TERMINAL_TOOLS),
     notify: names([NOTIFY_TOOL]),
     status: names([WORKSPACE_STATUS_TOOL]),
+    tasks: names(TASK_TOOLS),
     share: names([SHARE_TOOL]),
     worktree: names(WORKTREE_TOOLS),
     whiteboard: names(WHITEBOARD_TOOLS),

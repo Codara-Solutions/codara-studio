@@ -48,6 +48,7 @@ import { featureTipsApi } from "./areas/feature-tips";
 import { sessionSearchApi } from "./areas/session-search";
 import { serversApi } from "./areas/servers";
 import { workspaceStatusApi } from "./areas/workspace-status";
+import { cosTasksApi } from "./areas/cos-tasks";
 import { skillOriginsApi } from "./areas/skill-origins";
 import { terminalScrollbackApi } from "./areas/terminal-scrollback";
 import { agentHibernationApi } from "./areas/agent-hibernation";
@@ -1813,6 +1814,7 @@ const api = {
   capture: captureApi,
   point: pointApi,
   workspaceStatus: workspaceStatusApi,
+  cosTasks: cosTasksApi,
   review: reviewApi,
   terminalScrollback: terminalScrollbackApi,
   worktreeCleanup: worktreeCleanupApi,

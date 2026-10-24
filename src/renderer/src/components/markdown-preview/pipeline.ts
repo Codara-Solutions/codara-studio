@@ -1,7 +1,7 @@
 import type { Options } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
-import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+import rehypeSanitize, { defaultSchema, type Options as SanitizeSchema } from "rehype-sanitize";
 import { rehypeHighlightShared } from "../../lib/rehype-highlight-shared";
 
 // The markdown pipeline, shared by the preview pane and the Share packager so
@@ -26,7 +26,7 @@ import { rehypeHighlightShared } from "../../lib/rehype-highlight-shared";
 // raw HTML. Relative/anchor/root-relative img+link refs pass through cleanly,
 // so the preview's custom `a`/`img` components still resolve them to file://
 // URLs and the Share packager can inline them.
-export const markdownSanitizeSchema = {
+export const markdownSanitizeSchema: SanitizeSchema = {
   ...defaultSchema,
   protocols: {
     ...defaultSchema.protocols,

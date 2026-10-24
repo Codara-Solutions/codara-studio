@@ -1,0 +1,6 @@
+{
+  "checks": [
+    { "id": "types", "run": "npm run typecheck", "when": ["src/**", "tests/**", "tsconfig*.json", "package.json"] },
+    { "id": "unit", "run": "npm run test:changed -- \"${CODARA_VERIFY_BASE:-origin/main}\"", "when": ["src/**", "scripts/**", "resources/**", "cli/**", "package.json"] }
+  ]
+}

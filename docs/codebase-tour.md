@@ -453,6 +453,7 @@ owns each file:
 | `memory/learned/items.json`, `memory/profiles/<id>/learned/items.json` (what Cora learned by itself), `memory/learning.json` (its switches) | `memory-items.ts`, `memory-learning.ts` |
 | `scheduler.json` (armed automation triggers) | `scheduler.ts` |
 | `workspace-status.json` (each workspace's status, note and checkpoints) | `workspace-status/` |
+| `cos/<workspaceId>/tasks.jsonl`, `TASKS.md`, `verify/<task>/<run>/*.log` (the workspace's task list, its rendered view and the verify gate's logs) | `cos/task-store.ts`, `cos/verify-gate.ts` |
 | `session-index/sessions.sqlite` (the agent session search index) | `session-search/` |
 | `claude-cli/` (the live slot `live/home`, saved logins, `live-login.json`) | `claude-cli-live-login.ts`, `claude-cli-account-profiles.ts`, `cli-account-homes.ts` |
 | `codex-cli/` (one managed `CODEX_HOME` per account) | `codex-cli-account-profiles.ts`, `cli-account-homes.ts` |

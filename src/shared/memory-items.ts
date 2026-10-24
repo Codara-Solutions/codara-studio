@@ -473,6 +473,13 @@ export const MEMORY_DUPLICATE_SIMILARITY = 0.75;
 
 // ── secret scanning ─────────────────────────────────────────────────────────
 
+// A keyword starts after anything but a letter, so "AWS_SECRET_ACCESS_KEY="
+// and "DB_PASSWORD:" count; "_KEY" or "_ACCESS_KEY" may follow it.
+const KEYWORD_SECRET =
+  /(?<![A-Za-z])(?:password|passwd|pwd|passphrase|secret|token|api[_ -]?key|access[_ -]?key|contrase(?:n|ñ)a|clave|mot de passe|passwort)(?:[_-](?:access[_-]?)?key)?\s*(?:is|es|=|:)\s*\S{6,}/i;
+const BEARER_TOKEN = /\bbearer\s+[A-Za-z0-9._~+/-]{20,}=*/i;
+const URL_CREDENTIALS = /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:[^\s@/]{3,}@/i;
+
 const SECRET_PATTERNS: RegExp[] = [
   /\b(?:sk|rk|pk)-(?:ant-|proj-|live-|test-)?[A-Za-z0-9_-]{16,}/,
   /\bgh[pousr]_[A-Za-z0-9]{20,}/,
@@ -483,8 +490,9 @@ const SECRET_PATTERNS: RegExp[] = [
   /\bAIza[0-9A-Za-z_-]{30,}/,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/,
-  /\b(?:password|passwd|pwd|passphrase|secret|token|api[_ -]?key|access[_ -]?key|contrase(?:n|ñ)a|clave|mot de passe|passwort)\s*(?:is|es|=|:)\s*\S{6,}/i,
-  /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:[^\s@/]{3,}@/i,
+  BEARER_TOKEN,
+  KEYWORD_SECRET,
+  URL_CREDENTIALS,
 ];
 
 function luhnValid(digits: string): boolean {
@@ -502,6 +510,20 @@ function luhnValid(digits: string): boolean {
   return sum % 10 === 0;
 }
 
+// Luhn-valid and starting the way issued cards do (Mastercard 2 and 5, Amex,
+// Diners and JCB 3, Visa 4, Discover and UnionPay 6). Millisecond timestamps
+// and Discord ids start with 1 and pass Luhn one time in ten.
+function cardNumberLike(digits: string): boolean {
+  return digits.length >= 13 && digits.length <= 19 && /^[2-6]/.test(digits) && luhnValid(digits);
+}
+
+// "run id is 4532015112830366": a number labelled as an id is one, even when
+// it passes Luhn.
+const ID_LABEL = /(?<![A-Za-z])id\s*(?:(?:is|es)\s+|[:=#]\s*)?$/i;
+function labelledId(text: string, index: number): boolean {
+  return ID_LABEL.test(text.slice(Math.max(0, index - 16), index));
+}
+
 /**
  * Whether a memory would carry a credential. Memory is pasted into every
  * future prompt and shown on the Memory page, so a secret must never land in
@@ -510,8 +532,7 @@ function luhnValid(digits: string): boolean {
 export function containsSecret(text: string): boolean {
   if (SECRET_PATTERNS.some((pattern) => pattern.test(text))) return true;
   for (const match of text.matchAll(/\b(?:\d[ -]?){13,19}\b/g)) {
-    const digits = match[0].replace(/\D/g, "");
-    if (digits.length >= 13 && digits.length <= 19 && luhnValid(digits)) return true;
+    if (cardNumberLike(match[0].replace(/\D/g, "")) && !labelledId(text, match.index)) return true;
   }
   for (const match of text.matchAll(/[A-Za-z0-9+/_=-]{36,}/g)) {
     const token = match[0];
@@ -520,6 +541,149 @@ export function containsSecret(text: string): boolean {
     }
   }
   return false;
+}
+
+export const SECRET_REDACTED = "[redacted]";
+
+// containsSecret refuses a whole memory on a hint; scrubbing rewrites what
+// the user said, so it replaces only what reads like a credential. A value
+// after "password is" must mix letters with a digit or a symbol ("the token
+// is expired" and "max token: 128000" stay), a provider-looking token must
+// hold a digit ("sk-learn-models" stays), and a long opaque token must stand
+// alone, not be a piece of a link or a path.
+// A bare number ("max token: 128000") is a setting, not a credential, unless
+// it is long enough to be a PIN-free account key.
+function credentialLike(value: string): boolean {
+  if (/^\d+$/.test(value)) return value.length >= 10;
+  return /[A-Za-z]/.test(value) && (/\d/.test(value) || /[^A-Za-z]/.test(value));
+}
+
+// Longer than this, an opaque run of characters is data (a pasted blob), not
+// a key someone typed; inline "base64," data of any length is skipped too.
+const OPAQUE_TOKEN_MAX = 120;
+
+// Identifiers are made of words: "useTaskSummary2Helper" splits into use,
+// Task, Summary, 2, Helper, four characters a piece. A random key changes
+// case or turns to digits every two characters or so.
+function looksRandom(token: string): boolean {
+  const runs = token.match(/[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+/g) ?? [];
+  const chars = runs.reduce((sum, run) => sum + run.length, 0);
+  return runs.length > 0 && chars / runs.length < 3.5;
+}
+
+// Mixed case and a digit, not a hex id or hash, not words. "/" belongs to
+// base64 and to paths, so a token holding one must be plain base64
+// ("wJal/K7MD/bPx"), with no "-", "_" or "." the way paths have.
+function opaqueToken(token: string): boolean {
+  if (token.length > OPAQUE_TOKEN_MAX || !/[a-z]/.test(token) || !/[A-Z]/.test(token) || !/\d/.test(token)) return false;
+  if (/^[a-f0-9-]+$/i.test(token) || !looksRandom(token)) return false;
+  return !token.includes("/") || /^[A-Za-z0-9+/]+={0,2}$/.test(token);
+}
+
+// A path, not a key with "/" in it: it starts at a folder, or one of its
+// parts is a lowercase word ("uploads", "tmp"). A key's parts are random.
+const PATH_PART_MIN = 16;
+function pathLike(token: string): boolean {
+  return token.startsWith("/") || token.split("/").some((part) => /^[a-z]{3,}$/.test(part));
+}
+
+// Replaces what reads like a credential and, given `found`, lists each
+// replaced piece exactly as it stood in the text.
+function scrub(text: string, found?: string[]): string {
+  if (!containsSecret(text)) return text;
+  const replaced = (secret: string, replacement: string): string => {
+    found?.push(secret);
+    return replacement;
+  };
+  let out = text.replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, (block) =>
+    replaced(block, `${SECRET_REDACTED} private key`),
+  );
+  for (const pattern of SECRET_PATTERNS) {
+    const global = new RegExp(pattern.source, `${pattern.flags.replace("g", "")}g`);
+    if (pattern === KEYWORD_SECRET) {
+      out = out.replace(global, (match) =>
+        // Quotes around the value stay: SECRET_TOKEN: '[redacted]'.
+        match.replace(
+          /^(.*?(?:\bis|\bes|=|:)\s*)(["'`]?)(\S+?)(\2)([.,;:!?)\]]*)$/i,
+          (whole, head: string, open: string, value: string, close: string, tail: string) =>
+            // Already scrubbed: "[redacted]" would otherwise lose its "]" to
+            // the tail and gain another on every pass.
+            credentialLike(value) && !`${value}${close}${tail}`.startsWith(SECRET_REDACTED)
+              ? replaced(value, `${head}${open}${SECRET_REDACTED}${close}${tail}`)
+              : whole,
+        ),
+      );
+    } else if (pattern === BEARER_TOKEN) {
+      out = out.replace(global, (match) => {
+        if (!/\d/.test(match)) return match;
+        const head = /^bearer\s+/i.exec(match)![0];
+        return replaced(match.slice(head.length), `${head}${SECRET_REDACTED}`);
+      });
+    } else if (pattern === URL_CREDENTIALS) {
+      out = out.replace(global, (match) => {
+        const start = match.indexOf("://") + 3;
+        return replaced(match.slice(start, -1), `${match.slice(0, start)}${SECRET_REDACTED}@`);
+      });
+    } else {
+      out = out.replace(global, (match) => (/\d/.test(match) ? replaced(match, SECRET_REDACTED) : match));
+    }
+  }
+  out = out.replace(/\b(?:\d[ -]?){13,19}\b/g, (match, offset: number, whole: string) => {
+    if (!cardNumberLike(match.replace(/\D/g, "")) || labelledId(whole, offset)) return match;
+    const number = match.trimEnd();
+    return replaced(number, `${SECRET_REDACTED}${match.slice(number.length)}`);
+  });
+  // A variable name before the token stays: "SENDGRID_KEY=[redacted]". A
+  // path keeps its folders and file name: "/tmp/[redacted]/report.txt".
+  return out.replace(
+    /(?<![\w./:@#?&=%+-])(?<!base64,)((?:[A-Za-z_][A-Za-z0-9_]*=)?)([A-Za-z0-9+/_-]{36,}={0,2})(?![\w/=-])/g,
+    (whole, name: string, token: string, offset: number, text: string) => {
+      const isPath = token.includes("/") && pathLike(token);
+      // "<key>." ends a sentence; "<token>.json" or "<token>.example.com" is a name.
+      if (!isPath && /^\.\w/.test(text.slice(offset + whole.length, offset + whole.length + 2))) return whole;
+      if (!isPath) return opaqueToken(token) ? replaced(token, `${name}${SECRET_REDACTED}`) : whole;
+      let hit = false;
+      const parts = token.split("/").map((part) => {
+        if (part.length < PATH_PART_MIN || !opaqueToken(part)) return part;
+        hit = true;
+        return replaced(part, SECRET_REDACTED);
+      });
+      return hit ? `${name}${parts.join("/")}` : whole;
+    },
+  );
+}
+
+/**
+ * The text with the credentials in it replaced by "[redacted]", for text a
+ * person typed that is about to be written to disk (run files, the task
+ * list). The keyword keeps its keyword ("password is [redacted]") and a URL
+ * its scheme and host, so the text still says what was there. Text without
+ * one comes back as it was.
+ */
+export function scrubSecrets(text: string): string {
+  return scrub(text);
+}
+
+/** The pieces scrubSecrets replaces in `text`, exactly as they stand there. */
+export function secretsIn(text: string): string[] {
+  const found: string[] = [];
+  scrub(text, found);
+  return [...new Set(found)];
+}
+
+// Shorter than this, a random-looking run ("ab12cd") is too common to call a
+// key without its label.
+const KEY_LIKE_MIN = 12;
+
+/**
+ * Whether a piece secretsIn found reads as a key with nothing around it: the
+ * scrubber still replaces it alone, or it is a random mix of letters and
+ * digits. "codara-studio2" after "token:" was a credential only because of
+ * its label.
+ */
+export function keyLike(secret: string): boolean {
+  if (scrub(secret) !== secret) return true;
+  return secret.length >= KEY_LIKE_MIN && /[A-Za-z]/.test(secret) && /\d/.test(secret) && looksRandom(secret);
 }
 
 // ── ranking ─────────────────────────────────────────────────────────────────
