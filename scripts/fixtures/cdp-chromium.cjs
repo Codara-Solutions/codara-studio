@@ -53,6 +53,12 @@ async function startCdpChromium() {
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-gpu",
+    // On macOS every target is its own window and Chromium stops painting
+    // the ones it counts as occluded, so a page in an older window never
+    // reports LCP or layout shifts. Playwright passes the same switches.
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--disable-background-timer-throttling",
     "about:blank",
   ], { stdio: ["ignore", "ignore", "pipe"] });
   const wsUrl = await new Promise((resolve, reject) => {

@@ -345,7 +345,7 @@ async function inChromium(lib) {
     await sleep(600);
     const first = await lib.measureVitals(perfTarget);
     assert.equal(first.action, "vitals");
-    assert.ok(first.lcp && first.lcp.ms > 0, JSON.stringify(first));
+    assert.ok(first.lcp && first.lcp.ms > 0, `${JSON.stringify(first)} visibility=${await perfTarget.evaluate("document.visibilityState")}`);
     assert.match(first.lcp.element.selector, /#story|#headline/);
     assert.match(first.lcp.element.ref, /^@/);
     assert.ok(first.cls.value > 0, "the late banner shifts the layout");

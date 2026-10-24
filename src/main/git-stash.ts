@@ -47,9 +47,11 @@ export async function listStashes(cwd: string): Promise<GitStashList> {
 }
 
 // `git stash push` fails this way, before it saves anything, when another
-// process holds the index lock: "could not write index", or no message at all
-// from Git versions that do not print one.
-const INDEX_BUSY = /^(?:error: could not write index)?$/;
+// process holds the index lock. Newer Git names the lock file first ("Unable
+// to create '.../index.lock': File exists." and a hint), then "could not
+// write index"; older Git prints only the last line, or nothing at all.
+const INDEX_BUSY =
+  /^(?:(?:error|fatal): Unable to create '[^']*index\.lock': File exists\.[\s\S]*?)?(?:error: could not write index)?$/;
 const PUSH_ATTEMPTS = 5;
 
 async function stashTip(cwd: string): Promise<string> {

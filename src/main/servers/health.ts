@@ -79,8 +79,39 @@ export async function processCommand(pid: number): Promise<{ command: string; cw
       return null;
     }
   }
-  const args = (await run("ps", ["-o", "args=", "-p", String(pid)]))?.trim();
+  const argv = process.platform === "darwin" ? await darwinArgv(pid) : null;
+  const args = argv ? argv.map(shellWord).join(" ") : (await run("ps", ["-o", "args=", "-p", String(pid)]))?.trim();
   if (!args) return null;
   const cwdOut = await run("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"]);
   return { command: args, cwd: cwdOut ? /^n(.+)$/m.exec(cwdOut)?.[1] ?? null : null };
+}
+
+// `ps -o args=` joins argv with spaces, so `node -e 'a b'` would come back as
+// a line that no longer starts the same process. The kernel keeps argv
+// separated (sysctl KERN_PROCARGS2, what ps itself reads); macOS ships Perl,
+// whose syscall() is the one way to reach it without a native module.
+// Layout: int argc, the executable path, NUL padding, then argc strings.
+const DARWIN_ARGV_SCRIPT = `
+my $max = pack("i", 0); my $len = pack("Q", 4);
+syscall(202, pack("i2", 1, 8), 2, $max, $len, 0, 0) == 0 or exit 1;
+my $size = unpack("i", $max);
+my $buf = "\0" x $size; $len = pack("Q", $size);
+syscall(202, pack("i3", 1, 49, $ARGV[0]), 3, $buf, $len, 0, 0) == 0 or exit 1;
+$buf = substr($buf, 0, unpack("Q", $len));
+my $argc = unpack("i", $buf);
+my ($rest) = substr($buf, 4) =~ /^[^\0]*\0+(.*)\z/s or exit 1;
+my @argv = split /\0/, $rest, -1;
+exit 1 if $argc < 1 || @argv < $argc;
+print join("\0", @argv[0 .. $argc - 1]);
+`;
+
+function darwinArgv(pid: number): Promise<string[] | null> {
+  return new Promise((resolve) => {
+    execFile(
+      "/usr/bin/perl",
+      ["-e", DARWIN_ARGV_SCRIPT, String(pid)],
+      { timeout: OWNER_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024 },
+      (error, stdout) => resolve(error || !stdout ? null : String(stdout).split("\0")),
+    );
+  });
 }
