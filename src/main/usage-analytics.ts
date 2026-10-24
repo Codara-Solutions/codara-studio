@@ -15,7 +15,13 @@ import { dirname, join } from "node:path";
 import { Worker } from "node:worker_threads";
 import { codaraHome } from "./codara-home";
 import { scanUsage, type UsageScanRequest, type UsageScanRoot } from "./usage-scan";
-import type { UsageScanJob, UsageScanReply } from "./usage-scan-worker";
+import type {
+  ForecastScan,
+  UsageScanJob,
+  UsageScanReply,
+  UsageScanResult,
+  UsageScanWork,
+} from "./usage-scan-worker";
 import type { UsageSummary, UsageSummaryInput } from "@shared/usage-analytics";
 
 const WORKER_IDLE_MS = 3 * 60 * 1000;
@@ -81,7 +87,7 @@ function usageScanWorkerCode(): string | null {
 }
 
 interface PendingScan {
-  resolve: (summary: UsageSummary) => void;
+  resolve: (summary: UsageScanResult) => void;
   reject: (err: Error) => void;
 }
 
@@ -129,7 +135,7 @@ function armIdleStop(): void {
   idleTimer.unref();
 }
 
-function scanOnWorker(code: string, request: UsageScanRequest): Promise<UsageSummary> {
+function scanOnWorker<T extends UsageScanResult>(code: string, job: UsageScanWork): Promise<T> {
   if (idleTimer !== null) {
     clearTimeout(idleTimer);
     idleTimer = null;
@@ -137,9 +143,9 @@ function scanOnWorker(code: string, request: UsageScanRequest): Promise<UsageSum
   if (worker === null) worker = startWorker(code);
   const id = nextJobId++;
   const thread = worker;
-  return new Promise<UsageSummary>((resolve, reject) => {
-    pending.set(id, { resolve, reject });
-    thread.postMessage({ id, request } satisfies UsageScanJob);
+  return new Promise<T>((resolve, reject) => {
+    pending.set(id, { resolve: resolve as PendingScan["resolve"], reject });
+    thread.postMessage({ id, ...job } as UsageScanJob);
   });
 }
 
@@ -154,5 +160,33 @@ export async function readUsageSummary(input: UsageSummaryInput): Promise<UsageS
   const code = usageScanWorkerCode();
   // A build without the worker bundle (unit harnesses, a stale out/) still
   // answers, on this thread.
-  return code === null ? scanUsage(request) : scanOnWorker(code, request);
+  return code === null ? scanUsage(request) : scanOnWorker<UsageSummary>(code, { request });
+}
+
+/** Priced spend per time bucket since sinceMs, and the CLIs' own limit
+ * readings, for the usage forecast. */
+export async function readForecastScan(sinceMs: number, bucketMs: number): Promise<ForecastScan> {
+  const resolved = await resolveProviderRoots();
+  // Codex moves finished sessions to archived_sessions beside sessions; the
+  // forecast needs their limit readings, which go back months.
+  const roots = [
+    ...resolved,
+    ...resolved
+      .filter((root) => root.provider === "codex" && root.error === null && root.dir.length > 0)
+      .map((root) => ({ ...root, dir: join(dirname(root.dir), "archived_sessions") })),
+  ];
+  const timeline = {
+    roots,
+    cachePath: join(codaraHome(), "usage-scan-cache.json"),
+    sinceMs,
+    bucketMs,
+    nowMs: Date.now(),
+  };
+  const signals = { roots, memoPath: join(codaraHome(), "usage-forecast-signals.json"), sinceMs };
+  const code = usageScanWorkerCode();
+  if (code === null) {
+    const { runForecastScan } = await import("./usage-scan-worker");
+    return runForecastScan(timeline, signals);
+  }
+  return scanOnWorker<ForecastScan>(code, { timeline, signals });
 }
