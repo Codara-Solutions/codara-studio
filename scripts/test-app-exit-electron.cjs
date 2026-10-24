@@ -114,7 +114,8 @@ function stackOf(child) {
 const electron = require("electron");
 const launched = new Set();
 function launchApp(env) {
-  const child = spawn(electron, [MAIN], { env, stdio: ["ignore", "ignore", "pipe"] });
+  // TEMP macOS CI diagnostics: Chromium's own log on stderr.
+  const child = spawn(electron, [...(process.platform === "darwin" ? ["--enable-logging=stderr", "--v=0"] : []), MAIN], { env, stdio: ["ignore", "ignore", "pipe"] });
   let stderr = "";
   child.stderr.on("data", (chunk) => (stderr += chunk));
   launched.add(child.pid);

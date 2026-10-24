@@ -243,6 +243,13 @@ const lockHandoff: Promise<boolean> | null = ownsSingleInstanceLock
       requestLock: () => app.requestSingleInstanceLock({ codaraHandoff: handoffNonce }),
       readAnswer: () => readHandoffAnswer(app.getPath("userData"), handoffNonce),
     });
+// TEMP macOS CI diagnostics (fix/cora-macos-ci): where a lock-losing launch stalls.
+if (!ownsSingleInstanceLock) {
+  console.warn(`[single-instance:diag] lost the lock at load, pid=${process.pid}`);
+  app.on("will-finish-launching", () => console.warn("[single-instance:diag] will-finish-launching"));
+  app.on("ready", () => console.warn("[single-instance:diag] ready"));
+  void lockHandoff?.then((owned) => console.warn(`[single-instance:diag] hand-off settled: ${owned}`));
+}
 if (process.env.SPARK_ALLOW_MULTI !== "1") {
   app.on("second-instance", (_event, _argv, _cwd, additionalData) => {
     onSecondInstance(handoffNonceOf(additionalData));
