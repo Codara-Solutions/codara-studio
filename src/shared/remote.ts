@@ -57,8 +57,26 @@ export interface RemoteHostConfig {
   username: string;
   /** Local path to a private key, when key auth is configured. */
   identityFile?: string;
-  /** Where the entry came from — ssh-config entries are read-only in the UI. */
-  source: "ssh-config" | "manual";
+  /**
+   * Where the entry came from. ssh-config and codara-cloud entries are
+   * read-only in the UI.
+   */
+  source: "ssh-config" | "manual" | "codara-cloud";
+  /**
+   * Argv spawned WITHOUT a shell; its stdio becomes the SSH transport. Only
+   * entries written by main (Codara Cloud boxes) carry it: the renderer can
+   * never set it through saveHost.
+   */
+  proxyCommand?: string[];
+  /**
+   * An ssh_config ProxyCommand line, unexpanded. Expanded and run through the
+   * platform shell only when the user connects (see proxy-command.ts).
+   */
+  proxyCommandTemplate?: string;
+  /** Known-hosts key to use instead of host:port. */
+  hostKeyAlias?: string;
+  /** Codara Cloud box id; the box is woken before the SSH handshake. */
+  codaraBoxId?: string;
 }
 
 export type RemoteConnectionState = "disconnected" | "connecting" | "connected" | "error";
@@ -68,7 +86,40 @@ export interface RemoteConnectionStatus {
   state: RemoteConnectionState;
   /** Present when state === "error"; shown in the workspace row tooltip. */
   error?: string;
+  /** Present while connecting, e.g. the phase of a Codara box that is waking. */
+  progress?: string;
 }
+
+// ── Codara Cloud boxes ───────────────────────────────────────────────────────
+
+/** Projection of one box from `codaracloud boxes list -o json`. */
+export interface CodaraBoxSummary {
+  id: string;
+  name: string;
+  clientSlug: string;
+  projectSlug: string | null;
+  environmentSlug: string | null;
+  region: string | null;
+  /** Pending, Starting, Running, Sleeping, Suspended, Blocked, Failed or Deleting. */
+  phase: string;
+  message: string | null;
+  canConnect: boolean;
+}
+
+export type CodaraBoxesErrorCode =
+  | "cli_missing"
+  | "cli_outdated"
+  | "not_signed_in"
+  | "boxes_disabled"
+  | "failed";
+
+export type CodaraBoxesListResult =
+  | { ok: true; boxes: CodaraBoxSummary[] }
+  | { ok: false; code: CodaraBoxesErrorCode; message: string; installUrl?: string };
+
+export type CodaraBoxConnectInfoResult =
+  | { ok: true; host: RemoteHostConfig }
+  | { ok: false; code: CodaraBoxesErrorCode; message: string; installUrl?: string };
 
 /** Directory entry returned by the pre-workspace remote folder browser. */
 export interface RemoteBrowseEntry {
