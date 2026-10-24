@@ -250,7 +250,7 @@ const NOTIFY_TOOL = {
 const WORKSPACE_STATUS_TOOL = {
   name: "codara_workspace_status",
   description:
-    "Read (no arguments) or set the one-line note on your own line in Codara's rail. Codara shows your state (working, needs you, done) itself; status is kept for older callers.",
+    "Read (no arguments) or set your one-line note in Codara's rail. Codara shows your state (working, needs you, done); status is for older callers.",
   inputSchema: {
     type: "object",
     properties: {
