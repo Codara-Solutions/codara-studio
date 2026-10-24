@@ -104,6 +104,18 @@ async function main() {
   assert.doesNotThrow(() => store.assertDriverAllowed("t2", claude), "and the stopped agent may use another tab");
   assert.doesNotThrow(() => store.assertDriverAllowed("t1", null), "the user's own actions are never refused");
 
+  // Stop pressed while the cursor glides keeps the action that would follow.
+  store.allowDriver("t1", "pane:p1");
+  store.registerCursorAnimator("t1", () => new Promise((resolve) => setTimeout(() => {
+    store.stopDriver("t1", claude);
+    resolve();
+  }, 30)));
+  await assert.rejects(
+    store.moveAgentCursor("t1", claude, { action: "Clicking", point: { x: 9, y: 9 }, press: true }),
+    (error) => error instanceof store.StoppedDriverError,
+    "the call fails once the glide ends, before the click",
+  );
+
   // Undo lets it back; closing the tab forgets every stop.
   store.allowDriver("t1", "pane:p1");
   assert.doesNotThrow(() => store.assertDriverAllowed("t1", claude));
@@ -128,7 +140,90 @@ async function main() {
   const throwing = { paneRuntime: () => { throw new Error("gone"); } };
   assert.equal((await driver.describeDriver({ callerPaneId: "p1" }, throwing)).name, "An agent", "a failing lookup never fails the call");
 
-  console.log("agent presence: glide math, waiting for the cursor, Stop and Undo, run end, driver identity");
+  await trustedInput();
+
+  console.log("agent presence: glide math, waiting for the cursor, Stop and Undo, run end, driver identity, trusted input around the glide");
+}
+
+// Main's trusted input (src/main/preview-input.ts) waits for the cursor
+// through the renderer's "activity" op; these drive it with a fake guest.
+async function trustedInput() {
+  const output = await esbuild.build({
+    entryPoints: [path.join(ROOT, "src/main/preview-input.ts")], bundle: true, write: false, platform: "node", format: "cjs",
+    external: ["electron", "./preview-bridge", "../preview-bridge", "./main-window-trust", "../main-window-trust"],
+  });
+  let center = { x: 50, y: 30 };
+  let probes = 0;
+  let destroyed = false;
+  let onActivity = () => {};
+  const events = [];
+  const activities = [];
+  const wc = {
+    id: 7, on() {}, once() {},
+    isDestroyed: () => destroyed,
+    executeJavaScript: async () => { probes++; return { ok: true, ...center }; },
+    sendInputEvent: (event) => events.push(event),
+    debugger: { on() {}, isAttached: () => true, sendCommand: async () => {} },
+  };
+  const mod = { exports: {} };
+  new Function("module", "exports", "require", output.outputFiles[0].text)(mod, mod.exports, (name) => {
+    if (name === "electron") return { ipcMain: { on() {} }, webContents: { fromId: () => wc } };
+    if (name.endsWith("main-window-trust")) return { isTrustedPreviewGuest: () => true, isTrustedOnSender: () => true, onTrustedPreviewGuestAttached: () => () => {} };
+    if (name.endsWith("preview-bridge")) return { requestPreviewOp: async (op, params) => {
+      if (op === "activity") {
+        activities.push(params);
+        await onActivity(params, activities.length);
+        return { ok: true };
+      }
+      return { webContentsId: 7, tabId: "tab-a", viewport: { width: 400, height: 400 }, devicePixelRatio: 1 };
+    } };
+    return require(name);
+  });
+  const call = mod.exports.handlePreviewInputOp;
+  const reset = () => { events.length = 0; activities.length = 0; probes = 0; destroyed = false; center = { x: 50, y: 30 }; onActivity = () => {}; };
+
+  // The page shifts while the cursor glides: the click lands on the target's new place.
+  onActivity = (_params, n) => { if (n === 1) center = { x: 80, y: 70 }; };
+  await call("mouse", { selector: "#buy" });
+  assert.deepEqual(events.map((e) => [e.type, e.x, e.y]), [["mouseMove", 80, 70], ["mouseDown", 80, 70], ["mouseUp", 80, 70]], "input goes where the target is after the glide");
+  assert.equal(activities.length, 2, "the cursor snaps to the new place");
+  assert.equal(activities[1].follow, true);
+
+  // A still page costs one extra probe and no extra move; explicit coordinates cost none.
+  reset();
+  await call("hover", { selector: "#buy" });
+  assert.equal(activities.length, 1);
+  assert.equal(probes, 2);
+  reset();
+  await call("mouse", { x: 10, y: 12 });
+  assert.equal(probes, 0, "explicit coordinates are never re-measured");
+  assert.equal(events[1].x, 10);
+
+  // Stop during the glide: the renderer refuses the activity, and no input follows.
+  reset();
+  onActivity = () => { throw new Error("The user stopped Claude Code from using browser tab tab-a and took it back."); };
+  await assert.rejects(call("mouse", { selector: "#buy" }), /The user stopped Claude Code/);
+  await assert.rejects(call("scroll", { selector: "#list", deltaY: 200 }), /The user stopped Claude Code/);
+  assert.equal(events.length, 0, "a stopped agent's click never reaches the page");
+
+  // Stop mid-drag releases the button where the drag got to.
+  reset();
+  onActivity = (_params, n) => { if (n === 4) throw new Error("The user stopped Claude Code from using browser tab tab-a and took it back."); };
+  await assert.rejects(call("drag", { from: { x: 0, y: 0 }, to: { x: 100, y: 0 }, steps: 10 }), /The user stopped/);
+  assert.equal(events.at(-1).type, "mouseUp", "the page is not left with its button held");
+  assert.equal(events.at(-1).x, 20, "released at the last point it reached");
+  assert.equal(events.filter((e) => e.type === "mouseUp").length, 1);
+
+  // A finished drag releases once, at its end.
+  reset();
+  await call("drag", { from: { x: 0, y: 0 }, to: { x: 100, y: 0 }, steps: 4 });
+  assert.deepEqual(events.filter((e) => e.type === "mouseUp").map((e) => [e.x, e.y]), [[100, 0]]);
+
+  // The tab closed mid-drag: nothing is sent to the dead page, and the error is the close's.
+  reset();
+  onActivity = (_params, n) => { if (n === 3) { destroyed = true; throw new Error("No browser tab is open."); } };
+  await assert.rejects(call("drag", { from: { x: 0, y: 0 }, to: { x: 100, y: 0 }, steps: 10 }), /No browser tab is open/);
+  assert.equal(events.filter((e) => e.type === "mouseUp").length, 0);
 }
 
 main().catch((error) => {

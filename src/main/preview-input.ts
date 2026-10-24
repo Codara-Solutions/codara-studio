@@ -186,6 +186,28 @@ async function showCursor(
   });
 }
 
+// A selector's point is measured again once the cursor arrived: the page can
+// shift during the glide, and input at the old point would land on whatever
+// moved under it. The cursor then snaps to the new point.
+async function glideToTarget(
+  wc: WebContents,
+  info: GuestInfo,
+  params: Record<string, unknown>,
+  spec: { x?: unknown; y?: unknown; selector?: unknown },
+  action: string,
+  options: { press?: boolean; scrollIntoView?: boolean } = {},
+): Promise<{ x: number; y: number }> {
+  const { scrollIntoView = true, ...cursor } = options;
+  const first = await resolvePoint(wc, spec, { scrollIntoView });
+  await showCursor(info, params, action, first, cursor);
+  if (typeof spec.selector !== "string" || (typeof spec.x === "number" && typeof spec.y === "number")) return first;
+  const settled = await resolvePoint(wc, spec, { scrollIntoView: false });
+  if (Math.round(settled.x) !== Math.round(first.x) || Math.round(settled.y) !== Math.round(first.y)) {
+    await showCursor(info, params, action, settled, { follow: true });
+  }
+  return settled;
+}
+
 async function opScroll(params: Record<string, unknown>): Promise<unknown> {
   const { wc, info } = await resolveGuest(params);
   const deltaX = typeof params.deltaX === "number" ? params.deltaX : 0;
@@ -193,8 +215,7 @@ async function opScroll(params: Record<string, unknown>): Promise<unknown> {
   if (deltaX === 0 && deltaY === 0) throw new Error("scroll requires a non-zero deltaX or deltaY");
   // For scroll, do NOT scrollIntoView the selector — the point is only the
   // wheel origin; centering it would fight the scroll the caller asked for.
-  const { x, y } = await resolvePoint(wc, params, { scrollIntoView: false });
-  await showCursor(info, params, "Scrolling", { x, y });
+  const { x, y } = await glideToTarget(wc, info, params, params, "Scrolling", { scrollIntoView: false });
   wc.sendInputEvent({
     type: "mouseWheel",
     x: Math.round(x),
@@ -208,8 +229,7 @@ async function opScroll(params: Record<string, unknown>): Promise<unknown> {
 
 async function opHover(params: Record<string, unknown>): Promise<unknown> {
   const { wc, info } = await resolveGuest(params);
-  const { x, y } = await resolvePoint(wc, params);
-  await showCursor(info, params, "Moving", { x, y });
+  const { x, y } = await glideToTarget(wc, info, params, params, "Moving");
   wc.sendInputEvent({ type: "mouseMove", x: Math.round(x), y: Math.round(y) });
   return { ok: true, x, y };
 }
@@ -217,8 +237,7 @@ async function opHover(params: Record<string, unknown>): Promise<unknown> {
 async function opMouse(params: Record<string, unknown>): Promise<unknown> {
   const action = typeof params.action === "string" ? params.action : "click";
   const { wc, info } = await resolveGuest(params);
-  const { x, y } = await resolvePoint(wc, params);
-  await showCursor(info, params, action === "up" ? "Releasing" : "Clicking", { x, y }, { press: action !== "up" });
+  const { x, y } = await glideToTarget(wc, info, params, params, action === "up" ? "Releasing" : "Clicking", { press: action !== "up" });
   const modifiers = normalizeModifiers(params.modifiers);
   const px = Math.round(x);
   const py = Math.round(y);
@@ -265,30 +284,36 @@ async function opDrag(params: Record<string, unknown>): Promise<unknown> {
     unknown
   >;
   const to = (params.to && typeof params.to === "object" ? params.to : {}) as Record<string, unknown>;
-  const start = await resolvePoint(wc, from);
-  const end = await resolvePoint(wc, to);
   const steps = Math.max(1, Math.min(typeof params.steps === "number" ? params.steps | 0 : 12, 100));
-  await showCursor(info, params, "Dragging", start);
+  const start = await glideToTarget(wc, info, params, from, "Dragging");
+  const end = await resolvePoint(wc, to);
   const sx = Math.round(start.x);
   const sy = Math.round(start.y);
+  let at = { x: sx, y: sy };
   wc.sendInputEvent({ type: "mouseMove", x: sx, y: sy });
   wc.sendInputEvent({ type: "mouseDown", x: sx, y: sy, button: "left", clickCount: 1 } as Parameters<
     WebContents["sendInputEvent"]
   >[0]);
-  for (let i = 1; i <= steps; i++) {
-    const t = i / steps;
-    const mx = Math.round(start.x + (end.x - start.x) * t);
-    const my = Math.round(start.y + (end.y - start.y) * t);
-    await showCursor(info, params, "Dragging", { x: mx, y: my }, { follow: true });
-    wc.sendInputEvent({ type: "mouseMove", x: mx, y: my, button: "left" } as Parameters<
-      WebContents["sendInputEvent"]
-    >[0]);
+  // A Stop or a closed tab mid-drag throws out of the loop; the page must not
+  // be left with its button held down.
+  try {
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      const mx = Math.round(start.x + (end.x - start.x) * t);
+      const my = Math.round(start.y + (end.y - start.y) * t);
+      await showCursor(info, params, "Dragging", { x: mx, y: my }, { follow: true });
+      wc.sendInputEvent({ type: "mouseMove", x: mx, y: my, button: "left" } as Parameters<
+        WebContents["sendInputEvent"]
+      >[0]);
+      at = { x: mx, y: my };
+    }
+  } finally {
+    if (!wc.isDestroyed()) {
+      wc.sendInputEvent({ type: "mouseUp", ...at, button: "left", clickCount: 1 } as Parameters<
+        WebContents["sendInputEvent"]
+      >[0]);
+    }
   }
-  const ex = Math.round(end.x);
-  const ey = Math.round(end.y);
-  wc.sendInputEvent({ type: "mouseUp", x: ex, y: ey, button: "left", clickCount: 1 } as Parameters<
-    WebContents["sendInputEvent"]
-  >[0]);
   return { ok: true, from: start, to: end, steps };
 }
 

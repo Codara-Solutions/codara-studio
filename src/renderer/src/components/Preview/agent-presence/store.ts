@@ -103,7 +103,10 @@ export function noteDriving(tabId: string, driver: Driver | null, action?: strin
   update(tabId, { ...previous, driver, action: action ?? previous.action ?? "Working", activeAt: Date.now() });
 }
 
-/** Resolves once the cursor reached the move's point, or at once when no pane draws it. */
+/**
+ * Resolves once the cursor reached the move's point, or at once when no pane
+ * draws it. Throws when the user stopped the driver while the cursor moved.
+ */
 export async function moveAgentCursor(tabId: string, driver: Driver | null, move: CursorMove): Promise<void> {
   if (!driver) return;
   noteDriving(tabId, driver, move.action);
@@ -117,6 +120,8 @@ export async function moveAgentCursor(tabId: string, driver: Driver | null, move
     }),
   ]);
   clearTimeout(timer);
+  // Stop pressed during the glide must keep the action that follows it.
+  assertDriverAllowed(tabId, driver);
 }
 
 export function registerCursorAnimator(tabId: string, animate: Animator): () => void {
