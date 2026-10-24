@@ -93,8 +93,8 @@ environment variable that Codara sets for the agent:
 
 | Set | Who sees it | What it adds |
 |---|---|---|
-| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, `codara_notify_user`, `codara_workspace_status`, the task list tools, `codara_session_search`, `codara_share_offer` and the worktree tools; whiteboard and board only inside a Cora chat |
-| `worker` | Workers in automation passes | `studio` with the whiteboard and board read-only, plus `codara_ask_user` and `codara_request_next_iteration` |
+| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, `codara_tab`, `codara_notify_user`, `codara_workspace_status`, the task list tools, `codara_session_search`, `codara_share_offer` and the worktree tools; whiteboard and board only inside a Cora chat |
+| `worker` | Workers in automation passes | `studio` with the whiteboard and board read-only and without `codara_tab`, plus `codara_ask_user` and `codara_request_next_iteration` |
 | `execute` | A Cora chat that orchestrates work | `studio`, plus orchestration, automation management, the task list tools, `codara_session_search`, the worktree tools and `codara_share_offer` |
 | `automation` | The chat that designs automations | `studio`, plus automation management, `codara_ask_user` and `codara_name_chat` |
 
@@ -134,7 +134,7 @@ workspace on screen.
 
 | Tool | What it does |
 |---|---|
-| `codara_preview_list` | Lists the browser tabs in the workspace, with id, title, URL, tab group and which one is active. |
+| `codara_preview_list` | Lists the browser tabs in the workspace, with id, `link`, title, URL, tab group and which one is active. |
 | `codara_preview_navigate` | Loads a URL (http, https or file) in a tab, creating one for the run if needed. `group` puts a tab it opens in a tab group; with `tabId` it moves that tab into the group, and `url` may then be left out. |
 | `codara_preview_close` | Closes a browser tab: this session's own by default, or the `tabId` given. A `chrome:` tabId closes a Chrome tab an agent opened or the user shared. |
 | `codara_preview_snapshot` | Reads the page as a compact outline with `@references` that other tools accept as selectors, link targets (`-> /path`) and names for icon-only links and buttons. Can return only what changed since a previous snapshot. |
@@ -572,10 +572,10 @@ In every set, except `codara_spawn_terminals`, which is only in `execute`.
 |---|---|
 | `codara_terminal_create` | Opens a new terminal tab owned by the agent, tinted so you can see an agent drives it, in the tab group `group` names. Temporary terminals close when the run finishes; `retention: "service"` keeps one (a dev server, say) until the run is deleted. `workspace` opens it in another workspace instead; see [Terminals in another workspace](#terminals-in-another-workspace). |
 | `codara_terminal_run` | Runs one command in a terminal the agent created, or in a new one, and waits for it: returns the exit code, the output and a `cursor`. With Codara's shell integration the shell reports when the command ended; otherwise the call returns once output has been quiet. A command still running at `timeoutMs` (default 30 seconds, at most 10 minutes) keeps running. Refuses a pane that is busy, including one another `codara_terminal_run` call is still using. `group` puts a new terminal in a tab group, or moves the tab of `paneId` into it. |
-| `codara_terminal_list` | Lists the terminal panes in the agent's workspace: title, tab group, cwd, which agent CLI runs there and its state, whether the shell is running a command, which pane is the caller's and which ones it may write to. Terminals the agent opened in other workspaces are listed too, with their `workspaceId`. |
+| `codara_terminal_list` | Lists the terminal panes in the agent's workspace: the tab's `link` (and `groupLink` in a group), title, tab group, cwd, which agent CLI runs there and its state, whether the shell is running a command, which pane is the caller's and which ones it may write to. Terminals the agent opened in other workspaces are listed too, with their `workspaceId`. |
 | `codara_terminal_write` | Types into a terminal the agent created, or into the session of a dev server Codara keeps (to answer its prompts), submitting with Enter by default. |
 | `codara_terminal_read` | Reads a terminal pane without escape codes. Returns a `cursor`; pass it back as `since` to get only output written after it. `mode: "screen"` renders what a full-screen program (an agent CLI, vim, top) shows instead of the raw stream. |
-| `codara_terminal_close` | Closes a terminal the agent created. It cannot close yours or another run's. |
+| `codara_terminal_close` | Closes a terminal the agent created, after a Codara restart too (see [Tab links](#tab-links)). It cannot close yours or another run's. |
 | `codara_spawn_terminals` | Opens one tab split into Claude Code, Codex, Grok or Pi panes for you to drive, launched the way the **+** menu launches them. An optional model and effort apply to each group; for Pi they become `--model` and `--thinking`. |
 
 ### Terminals in another workspace
@@ -650,6 +650,52 @@ Groups are the user's too: they can rename, recolor, ungroup or close them, and
 group the extension made with that title in the same window, or starts one;
 it never groups a tab the user shared or joins a group the user made. Without
 `group` it uses the workspace's name, cleaned the same way.
+
+### Tab links
+
+Every tab and tab group has a link: `codara://tab/<workspace>/<tab>` and
+`codara://group/<workspace>/<group>`, made from the ids the layout already
+saves, so a link keeps working across restarts for as long as its tab is
+open. The user copies one with **Copy link** in a tab's or a group's menu and
+pastes it to an agent; `codara_preview_list` and `codara_terminal_list` return
+them too. Clicking a link in a Codara terminal or in Cora's chat brings the tab
+on screen (see [Tab menu](shortcuts-and-settings.md#tab-menu)). Codara does not
+register `codara://` with the operating system, so a link clicked outside
+Codara does nothing.
+
+`codara_tab` (socket method `tab.action`) takes `link`, a link or a bare
+`tabId` from the list tools (a tab in the caller's workspace), and `action`:
+
+| Action | What it does |
+|---|---|
+| `info` | The tab, or the group's tabs: id, link, kind, title, pane ids, whether it sits in a split and whether an editor has unsaved changes. |
+| `focus` | Shows it to the user, as clicking the link would: switches workspace, unfolds the group, highlights the tab. Always allowed. |
+| `close` | Closes the tab, or every tab of the group. Never the terminal the agent runs in; in a workspace that is not on screen only terminal and browser tabs close. |
+| `split` | Puts the tab beside the tab on screen, `direction` `right` (default) or `down`. Works in the workspace on screen only. |
+| `unsplit` | Takes the tab out of a split, or releases everything split into it. |
+
+Close, split and unsplit act at once on tabs the agent opened: terminals it
+created and browser tabs it opened. Any other tab waits for the user's answer
+on a card listing every tab that would change, marking a running agent or
+unsaved edits. **Deny** returns `reason: "denied"`, no answer within 40 seconds
+returns `reason: "no_answer"`; neither changes anything. **Allow once** acts
+this time. **Always allow** stores a grant for the agent's workspace in
+`tab-action-grants.json` in Codara's home (the cross-workspace grant format),
+listed in Settings > Agents under Workspaces ("Tabs agents did not open")
+with Revoke; later requests from agents of that workspace
+act without the card (`approvedBy: "grant"`), except a close that would stop a
+running agent or drop unsaved edits, which always shows the card. Only the
+card or a stored grant approves: a pasted link or an agent saying the user
+agreed does not. A tab in another workspace is refused unless the user
+already allowed this workspace's agents there for terminals (see [Terminals in
+another workspace](#terminals-in-another-workspace)). Imported pull request
+runs and automation workers never get the tool.
+
+Ownership of a terminal an agent created survives a restart: the pane saves
+which run, or which agent CLI session in which workspace, opened it. After a
+relaunch, when that run or the resumed session (Claude Code and Codex keep
+their session id) writes to, closes or acts on the pane, Codara recognizes it
+as the owner again. Another agent still cannot.
 
 ### Dev servers
 

@@ -138,6 +138,27 @@ group they name (`group` on the codara-studio tools, see
 [mcp-tools.md](mcp-tools.md#tab-groups)); those groups are the same and can be
 edited the same way.
 
+#### Tab menu
+
+Right-click a tab (or a group's chip) for these, next to the group items:
+
+- **Split right** and **Split down** put the tab beside the tab on screen: a
+  browser, editor or chat tab takes a cell in the terminal's grid, a terminal
+  tab's panes join it, and two tabs with no grid get one. **Undock to tab** in
+  a docked cell's header puts it back; moved terminal panes drag back out like
+  any pane. Shown when the tab can go beside the one on screen; otherwise the
+  menu keeps **Open in split**.
+- **Copy link** copies `codara://tab/<workspace>/<tab>` (on a chip,
+  `codara://group/...`). Paste it to an agent so it knows exactly which tab you
+  mean; agents also get these links from their list tools. Clicking a link in a
+  Codara terminal (plain click, no modifier) or in Cora's chat switches to its
+  workspace, unfolds its group and highlights the tab for a moment. A link to a
+  closed tab or an empty group says so. Links only open inside Codara; the
+  operating system does not know `codara://`.
+
+What an agent may do with a link, and the approval card for tabs it did not
+open, is in [mcp-tools.md](mcp-tools.md#tab-links).
+
 ### Terminal
 
 | Action | Default | Command id |
