@@ -16,30 +16,40 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 
+const HEADLESS_SHELLS = [
+  "chrome-headless-shell-linux64/chrome-headless-shell",
+  "chrome-linux/headless_shell",
+  "chrome-headless-shell-mac-arm64/chrome-headless-shell",
+  "chrome-headless-shell-mac-x64/chrome-headless-shell",
+];
+const FULL_BROWSERS = ["chrome-linux64/chrome", "chrome-linux/chrome", "chrome-mac/Chromium.app/Contents/MacOS/Chromium"];
+
+function inPlaywrightCache(binaries) {
+  const cache = process.env.PLAYWRIGHT_BROWSERS_PATH || path.join(os.homedir(), process.platform === "darwin" ? "Library/Caches/ms-playwright" : ".cache/ms-playwright");
+  const candidates = [];
+  for (const directory of fs.existsSync(cache) ? fs.readdirSync(cache) : []) {
+    for (const binary of binaries) {
+      const candidate = path.join(cache, directory, binary);
+      if (fs.existsSync(candidate)) candidates.push(candidate);
+    }
+  }
+  return candidates.sort().pop() ?? null;
+}
+
+// The headless shell first, as Playwright itself runs headless: it draws
+// without any window. Full Chromium in --headless=new opens real windows,
+// and macOS stops painting the ones it counts as hidden, so a page there
+// can stay unpainted (no FCP, LCP or layout shifts).
 function findChromium() {
+  const shell = inPlaywrightCache(HEADLESS_SHELLS);
+  if (shell) return shell;
   try {
     const expected = require("playwright").chromium.executablePath();
     if (fs.existsSync(expected)) return expected;
   } catch {
     /* fall through to the cache scan */
   }
-  const cache = path.join(os.homedir(), process.platform === "darwin" ? "Library/Caches/ms-playwright" : ".cache/ms-playwright");
-  const candidates = [];
-  for (const directory of fs.existsSync(cache) ? fs.readdirSync(cache) : []) {
-    for (const binary of [
-      "chrome-linux64/chrome",
-      "chrome-linux/chrome",
-      "chrome-headless-shell-linux64/chrome-headless-shell",
-      "chrome-linux/headless_shell",
-      "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
-      "chrome-headless-shell-mac-arm64/chrome-headless-shell",
-      "chrome-headless-shell-mac-x64/chrome-headless-shell",
-    ]) {
-      const candidate = path.join(cache, directory, binary);
-      if (fs.existsSync(candidate)) candidates.push(candidate);
-    }
-  }
-  return candidates.sort().pop() ?? null;
+  return inPlaywrightCache(FULL_BROWSERS);
 }
 
 async function startCdpChromium() {
@@ -53,9 +63,8 @@ async function startCdpChromium() {
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-gpu",
-    // On macOS every target is its own window and Chromium stops painting
-    // the ones it counts as occluded, so a page in an older window never
-    // reports LCP or layout shifts. Playwright passes the same switches.
+    // Playwright passes the same switches: no throttling of a page Chromium
+    // counts as in the background.
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
     "--disable-background-timer-throttling",
