@@ -706,8 +706,15 @@ Close, split and unsplit act at once on tabs the agent opened: terminals it
 created and browser tabs it opened. Any other tab waits for the user's answer
 on a card listing every tab that would change, marking a running agent or
 unsaved edits. **Deny** returns `reason: "denied"`, no answer within 40 seconds
-returns `reason: "no_answer"`; neither changes anything. **Allow once** acts
-this time. **Always allow** stores a grant for the agent's workspace and that
+returns `reason: "no_answer"`; neither changes anything. If the agent stops
+waiting first (its call timed out or it went away), the card is withdrawn and
+says so, and nothing changes. Cards and the change itself fit inside the MCP
+call's 60 seconds. **Allow once** acts
+this time. After an Allow, Codara reads the tabs again: a tab that closed
+meanwhile is left alone, the terminal the agent runs in is never closed even
+if it moved into one of the tabs, and a tab or pane that joined, or now has an
+agent running or unsaved edits, gets a new card instead of being closed
+unseen. **Always allow** stores a grant for the agent's workspace and that
 kind of action: closing (`tab-action-close-grants.json` in Codara's home) or
 moving, which covers split and unsplit (`tab-action-move-grants.json`), in the
 cross-workspace grant format. Allowing moves never allows closing, or the

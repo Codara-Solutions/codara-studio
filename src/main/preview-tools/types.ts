@@ -20,6 +20,8 @@ export interface PreviewToolHost {
   agentRunningIn?(paneId: string): boolean;
   /** The agent CLI running in a terminal pane (claude, codex, ...), for the tab's driving banner. */
   paneRuntime?(paneId: string): string | null;
+  /** Aborts when the caller stops waiting for this call: its request timed out or its connection closed. */
+  signal?: AbortSignal;
 }
 
 export type PreviewToolHandler = (params: Record<string, unknown>, method: string, host: PreviewToolHost) => Promise<unknown>;

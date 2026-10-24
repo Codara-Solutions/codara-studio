@@ -67,9 +67,11 @@ export default function TabActionPrompt(): React.ReactElement | null {
     const add = (request: TabActionApprovalRequest) =>
       setQueue((current) => (current.some((entry) => entry.id === request.id) ? current : [...current, request]));
     const offApproval = api.onApproval(add);
-    const offClosed = api.onApprovalClosed(({ id }) =>
+    // A card another card's Always answered just goes; one the agent stopped
+    // waiting for says so on screen, so an Allow is never clicked into nothing.
+    const offClosed = api.onApprovalClosed(({ id, reason }) =>
       setQueue((current) =>
-        current[0]?.id === id
+        current[0]?.id === id && reason !== "answered"
           ? [{ ...current[0], expired: true }, ...current.slice(1)]
           : current.filter((entry) => entry.id !== id),
       ),

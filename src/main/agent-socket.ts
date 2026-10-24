@@ -712,7 +712,7 @@ async function dispatch(
       }
     }
     // The browser and other studio tools, one module per area (preview-tools/).
-    if (hasPreviewTool(method)) return await handlePreviewToolRpc(method, params, id);
+    if (hasPreviewTool(method)) return await handlePreviewToolRpc(method, params, id, res);
     switch (method) {
       case "terminal.read":
         return await handleTerminalRead(params, id);
@@ -1933,12 +1933,22 @@ async function handlePreviewToolRpc(
   method: string,
   params: Record<string, unknown>,
   id: JsonRpcId,
+  res: ServerResponse,
 ): Promise<JsonRpcResponse> {
+  // A handler that waits on the user (codara_tab's card) stops when the
+  // caller does: its request timed out or its connection dropped.
+  const callerGone = new AbortController();
+  const onClose = () => {
+    if (!res.writableFinished) callerGone.abort();
+  };
+  res.once("close", onClose);
   try {
-    return successResponse(id, await runPreviewTool(method, params, PREVIEW_TOOL_HOST));
+    return successResponse(id, await runPreviewTool(method, params, { ...PREVIEW_TOOL_HOST, signal: callerGone.signal }));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return errorResponse(id, err instanceof PreviewToolParamsError ? ERR_INVALID_PARAMS : ERR_INTERNAL, message);
+  } finally {
+    res.off("close", onClose);
   }
 }
 
