@@ -2127,6 +2127,7 @@ const CALLER_LOCATED_RPCS = new Set([
   "task.update",
   "task.list",
   "inbox.add",
+  "tab.action",
 ]);
 function injectRunIdForStudioOwnership(rpc, args) {
   if (
