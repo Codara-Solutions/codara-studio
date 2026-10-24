@@ -349,6 +349,17 @@ the built app over the socket, the stdio MCP server and `cora tool`, and
 `tests/e2e/preview-hot-reload.spec.ts` runs hot reload waits against a real
 Vite dev server.
 
+The agent's cursor and driving banner (`components/Preview/agent-presence/`):
+`test-agent-presence` checks the glide (duration by distance, easing, the
+curve), that an action waits for its cursor but never past the cap, Stop and
+Undo per agent and tab, and the driver main stamps on every call.
+`tests/e2e/agent-presence.spec.ts` drives a Claude Code pane's MCP server in
+the built app: the cursor glides before the click lands, the banner names the
+agent and its workspace, the agent's own screenshot has no cursor in it, and
+Stop refuses its next calls until Undo. Run it with
+`CODARA_PRESENCE_VIDEO=1` to film the glide and take stills from the private
+X display with `ffmpeg` into `test-results/agent-presence/`.
+
 Browser code mode (`codara_preview_code`, `src/main/browser/code/`):
 `test-browser-code` checks the snippet transform (persistent declarations,
 top-level await, syntax errors with line and column), the QuickJS kernel as a

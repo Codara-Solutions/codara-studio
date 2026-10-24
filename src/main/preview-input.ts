@@ -164,8 +164,26 @@ export async function handlePreviewInputOp(
   }
 }
 
-async function showCursor(info: GuestInfo, params: Record<string, unknown>, action: string, point?: { x: number; y: number }): Promise<void> {
-  await requestPreviewOp("activity", { tabId: info.tabId, workspaceId: params.workspaceId, runId: params.runId, callerPaneId: params.callerPaneId, action, ...point });
+// The renderer answers once the agent's cursor reached the point (it glides
+// there in a few hundred milliseconds), so the page gets the input only after
+// the user saw where it lands. follow moves it at once, for drag steps.
+async function showCursor(
+  info: GuestInfo,
+  params: Record<string, unknown>,
+  action: string,
+  point?: { x: number; y: number },
+  options: { press?: boolean; follow?: boolean } = {},
+): Promise<void> {
+  await requestPreviewOp("activity", {
+    tabId: info.tabId,
+    workspaceId: params.workspaceId,
+    runId: params.runId,
+    callerPaneId: params.callerPaneId,
+    driver: params.driver,
+    action,
+    ...point,
+    ...options,
+  });
 }
 
 async function opScroll(params: Record<string, unknown>): Promise<unknown> {
@@ -200,7 +218,7 @@ async function opMouse(params: Record<string, unknown>): Promise<unknown> {
   const action = typeof params.action === "string" ? params.action : "click";
   const { wc, info } = await resolveGuest(params);
   const { x, y } = await resolvePoint(wc, params);
-  await showCursor(info, params, "Clicking", { x, y });
+  await showCursor(info, params, action === "up" ? "Releasing" : "Clicking", { x, y }, { press: action !== "up" });
   const modifiers = normalizeModifiers(params.modifiers);
   const px = Math.round(x);
   const py = Math.round(y);
@@ -261,7 +279,7 @@ async function opDrag(params: Record<string, unknown>): Promise<unknown> {
     const t = i / steps;
     const mx = Math.round(start.x + (end.x - start.x) * t);
     const my = Math.round(start.y + (end.y - start.y) * t);
-    await showCursor(info, params, "Dragging", { x: mx, y: my });
+    await showCursor(info, params, "Dragging", { x: mx, y: my }, { follow: true });
     wc.sendInputEvent({ type: "mouseMove", x: mx, y: my, button: "left" } as Parameters<
       WebContents["sendInputEvent"]
     >[0]);
@@ -343,19 +361,23 @@ async function opPressKey(params: Record<string, unknown>): Promise<unknown> {
   const key = typeof params.key === "string" ? params.key : null;
   if (!key) throw new Error("press_key requires 'key'");
   let wc: WebContents;
+  let info: GuestInfo;
   try {
-    ({ wc } = await resolveGuest(params, true));
+    ({ wc, info } = await resolveGuest(params, true));
   } catch {
     return requestPreviewOp("press_key", {
       tabId: (params.tabId as string) ?? null,
       runId: typeof params.runId === "string" ? params.runId : null,
       workspaceId: params.workspaceId,
       callerPaneId: params.callerPaneId,
+      driver: params.driver,
       key,
       selector: (params.selector as string) ?? null,
     });
   }
   if (typeof params.selector === "string" && params.selector) {
+    const point = await resolvePoint(wc, { selector: params.selector }).catch(() => null);
+    if (point) await showCursor(info, params, "Typing", point);
     const focused = await wc.executeJavaScript(
       `(async () => { const el = await (${createPreviewDOM.toString()})().ready(${JSON.stringify(params.selector)});
         if (!el || typeof el.focus !== "function") return false;

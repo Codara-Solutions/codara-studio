@@ -1,0 +1,151 @@
+/* The agent's presence on a browser tab (AgentPresence.tsx): its cursor, the
+   field it types into, and the banner naming who drives the tab. The layer
+   lets every click through to the page; only the banner takes input, for its
+   Stop button. The color is the agent's own (--agent-claude, --agent-codex,
+   ...), the same one its terminal tab carries. */
+
+.agent-presence {
+  --agent-presence-color: var(--accent);
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  overflow: hidden;
+  pointer-events: none;
+  font-family: var(--font-sans);
+}
+
+.agent-presence__cursor {
+  position: absolute;
+  left: 0;
+  top: 0;
+  opacity: 0;
+  color: var(--agent-presence-color);
+  will-change: transform;
+  transition: opacity var(--motion) var(--ease-out);
+}
+.agent-presence__cursor[data-active] {
+  opacity: 1;
+}
+/* The arrow's tip is the point the action lands on. */
+.agent-presence__arrow {
+  position: absolute;
+  left: -2px;
+  top: -2px;
+  overflow: visible;
+  filter: drop-shadow(0 1px 2px oklch(0 0 0 / 0.45));
+}
+.agent-presence__arrow path {
+  fill: currentColor;
+  stroke: oklch(1 0 0 / 0.95);
+  stroke-width: 1.6;
+  stroke-linejoin: round;
+}
+.agent-presence__ring {
+  position: absolute;
+  left: -14px;
+  top: -14px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 2px solid var(--agent-presence-color);
+  opacity: 0;
+  transform: scale(0.4);
+}
+.agent-presence__cursor[data-pressing] .agent-presence__ring {
+  animation: agent-presence-press 260ms var(--ease-out);
+}
+.agent-presence__cursor[data-pressing] .agent-presence__arrow {
+  transform: scale(0.88);
+  transform-origin: 2px 2px;
+  transition: transform 90ms var(--ease-out);
+}
+@keyframes agent-presence-press {
+  0% { opacity: 0.9; transform: scale(0.4); }
+  100% { opacity: 0; transform: scale(1.25); }
+}
+.agent-presence__tag {
+  position: absolute;
+  left: 16px;
+  top: 18px;
+  padding: 2px 6px;
+  border-radius: var(--radius-control);
+  background: var(--agent-presence-color);
+  color: var(--accent-ink);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  white-space: nowrap;
+  box-shadow: 0 1px 3px oklch(0 0 0 / 0.35);
+}
+
+.agent-presence__field {
+  position: absolute;
+  left: 0;
+  top: 0;
+  box-sizing: border-box;
+  border: 2px solid var(--agent-presence-color);
+  border-radius: 4px;
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--agent-presence-color) 22%, transparent);
+  opacity: 0;
+  transition: opacity var(--motion) var(--ease-out);
+}
+.agent-presence__field[data-active] {
+  opacity: 1;
+}
+
+.agent-presence__banner {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 24px);
+  padding: 4px 4px 4px 10px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-surface);
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 18px;
+  pointer-events: auto;
+  box-shadow: 0 6px 24px oklch(0 0 0 / 0.28);
+  animation: agent-presence-in var(--motion) var(--ease-out);
+}
+@keyframes agent-presence-in {
+  from { opacity: 0; transform: translate(-50%, -4px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+.agent-presence__dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--agent-presence-color);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--agent-presence-color) 24%, transparent);
+}
+.agent-presence__text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-dim);
+}
+.agent-presence__text strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+.agent-presence__action.spark-btn {
+  flex: 0 0 auto;
+  height: 22px;
+  padding: 0 9px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-presence__banner {
+    animation: none;
+  }
+  .agent-presence__cursor[data-pressing] .agent-presence__ring {
+    animation-duration: 1ms;
+  }
+}

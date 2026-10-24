@@ -319,6 +319,23 @@ export function isTabShared(share, tab) {
   return share.all === true || (share.windows ?? []).includes(tab.windowId) || (share.tabs ?? []).includes(tab.id);
 }
 
+/** How long after an agent's last call its name stays on the toolbar button. */
+export const USAGE_ACTIVE_MS = 8_000;
+
+/**
+ * The toolbar button's tooltip for a tab: who is driving it right now, so the
+ * user knows which agent the popup's Stop would end. usage is the last call
+ * Codara reported for the tab ({ agent, at }).
+ */
+export function badgeTitle({ shared, attached, usage, now }) {
+  if (!shared) return "Codara";
+  if (!attached) return "Codara: agents may use this tab";
+  if (usage && typeof usage.agent === "string" && now - Number(usage.at) < USAGE_ACTIVE_MS) {
+    return `Codara: ${usage.agent} is using this tab. Open to stop it.`;
+  }
+  return "Codara: an agent is using this tab";
+}
+
 /** The tab id agents pass to Codara's browser tools. */
 export function agentTabId(tabId) {
   return `chrome:${tabId}`;
