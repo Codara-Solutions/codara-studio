@@ -240,7 +240,7 @@ The pages:
 | Editor | Code editor (Vim mode, autosave) and inline AI autocomplete. |
 | Terminal | The shell for new panes, output history and scrollback lines, whether programs may copy to the clipboard, clearing the terminal output Codara saved (**Clear saved terminal output**), a resource overview, and the run terminal lifecycle for worker panes. |
 | Quick commands | Saved shell commands and agent prompts: add, edit, reorder, delete, and where each is offered. Also what a right-click in a terminal does. See [Quick commands](#quick-commands). |
-| Git | Remotes (background fetch, Instant git triggers, and a custom webhook receiver under Advanced), Alerts (notify on teammate pushes, new pull requests, and CI failing on your pull request), Worktrees (whether agents may create and remove worktrees, and remove ones you created, the repository's worktree setup file, and under Advanced your own setup command for new worktrees and extra ignored files an agent may delete with a merged worktree). |
+| Git | Remotes (background fetch, Instant git triggers, and a custom webhook receiver under Advanced), Alerts (notify on teammate pushes, new pull requests, and CI failing on your pull request; watch pull requests on the rail and tell agents when CI fails), Worktrees (whether agents may create and remove worktrees, and remove ones you created, the repository's worktree setup file, and under Advanced your own setup command for new worktrees and extra ignored files an agent may delete with a merged worktree). |
 | Browser | Links (auto-open the browser for local dev servers, open links in the default browser or the Codara browser, ask where terminal links open), and the Chrome extension (**Keep agents in your Chrome**, link status, pairing, paired browsers, agent activity). |
 | Shared pages | The links you shared from the editor: copy one, change when it expires, or delete it (see [share-links.md](./share-links.md)). |
 | API and model | An OpenRouter key, and how Git commit messages are generated. |
@@ -403,9 +403,29 @@ one alert when a check fails on the pull request of a workspace's branch,
 once per failing commit, including a pull request opened after the push
 whose checks failed before Codara first read it. Checks that failed while
 Codara was closed, or while the setting was off, stay quiet until a later
-run fails. Clicking the alert opens Source Control. It asks GitHub only
-when the branch or its upstream moved, every 90 seconds while checks run,
-and every 15 minutes otherwise.
+run fails. Clicking the alert opens Source Control.
+
+**Watch pull requests and tell agents when CI fails** (Settings, Git,
+Alerts, on by default) puts each branch's pull request on its row in the
+rail: `#42`, draft, merged or closed, and ✓, ✕ or a dot while checks run.
+When the checks fail, the agent working on that branch gets one line:
+"CI failed on PR #42: build. Fix it with the fix-ci skill, push, and watch
+the checks." That agent is the one that created the worktree, else one in
+the workspace's panes, else one whose terminal opened in its folder. The
+line goes once per failing commit, and only while the agent is free: never
+mid-turn, while it asks for a permission, or within 20 seconds of you
+typing in its pane. Checks that go green again leave a silent note in the
+notification center. "Stop watching pull requests in this repo" in a row's
+menu turns it off for one repository; Settings lists those with "Watch
+again".
+
+Both read GitHub with your signed-in `gh`, using conditional requests: an
+unchanged pull request costs a 304, which GitHub does not count against
+your rate limit. An open pull request is asked every minute while checks
+run, then after 1, 2, 4 and 8 minutes and every 15 while nothing changes;
+a commit or a push asks at once. A branch with no pull request, or a merged
+or closed one, is asked every 15 minutes, and every 5 minutes become the
+floor while you are away from the computer.
 
 ### Quick commands
 
