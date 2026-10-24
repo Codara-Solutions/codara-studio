@@ -1,5 +1,6 @@
 import type { BrowserPaneHandle } from "./BrowserPane";
 import type { PreviewControl } from "./PreviewCursor";
+import { tabLink } from "@shared/tab-links";
 import { tabGroupNameOf } from "../../tabs/tabGroupBridge";
 
 interface RegistryEntry {
@@ -148,6 +149,7 @@ export function listPreviewTabs(workspaceId?: string | null, callerPaneId?: stri
     const group = tabGroupNameOf(entry.id);
     return {
       id: entry.id,
+      ...(entry.workspaceId ? { link: tabLink(entry.workspaceId, entry.id) } : {}),
       title: entry.handle.getTitle() || entry.url,
       url: entry.handle.getURL() || entry.url,
       workspaceId: entry.workspaceId,
@@ -194,6 +196,11 @@ export function setClosePreviewTabFn(fn: ClosePreviewTabFn | null): void {
 /** Every tab running in one logged-out partition: the one an agent opened and the pages it opened in new tabs. */
 export function previewTabsInPartition(partition: string): string[] {
   return [...entries.values()].filter((entry) => entry.partition === partition).map((entry) => entry.id);
+}
+
+/** Who opened a browser tab: the run, or the terminal pane of an agent with no run. */
+export function previewTabOpener(id: string): { runId: string | null; paneId: string | null } {
+  return { runId: entries.get(id)?.runId ?? null, paneId: agentPaneOwners.get(id) ?? null };
 }
 
 /** Whether any workspace has this browser tab open. */

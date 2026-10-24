@@ -12,7 +12,7 @@
 //     (drive the live <preview> tab) + the terminal tool set (open and drive
 //     agent-owned terminal tabs). This is what any claude/codex sub-agent,
 //     worker, or verifier sees.
-//   - "worker": the studio roster minus whiteboard writes, plus the two
+//   - "worker": the studio roster minus whiteboard writes and codara_tab, plus the two
 //     run-lifecycle tools a headless automation pass needs (codara_ask_user,
 //     codara_request_next_iteration). Automation workers run on the bundled Pi
 //     runtime, which loads this module in-process as the bridge with this
@@ -135,7 +135,7 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_run",
     description:
-      "Run one shell command in a terminal tab and wait for it to finish. Returns status (exited, timeout, quiet), exitCode, and only the output the command printed, plus a cursor for codara_terminal_read. Without paneId it opens a temporary terminal and returns its paneId; with paneId it reuses an idle terminal you created. On timeout the command keeps running.",
+      "Run one shell command in a terminal tab and wait for it to finish. Returns status (exited, timeout, quiet), exitCode, the command's own output and a cursor for codara_terminal_read. Without paneId it opens a temporary terminal and returns its paneId; with paneId it reuses an idle one you created. On timeout the command keeps running.",
     inputSchema: {
       type: "object",
       required: ["command"],
@@ -174,7 +174,7 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_write",
     description:
-      "Type text into a terminal you created with codara_terminal_create or codara_terminal_run, pressing Enter unless submit=false (use submit=false for raw keys such as \"\\u0003\" for Ctrl+C). Writing to any other pane is rejected.",
+      "Type into a terminal you created, pressing Enter unless submit=false (for raw keys such as \"\\u0003\" for Ctrl+C). Writing to any other pane is rejected.",
     inputSchema: {
       type: "object",
       required: ["paneId", "text"],
@@ -189,7 +189,7 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_read",
     description:
-      "Read a terminal pane's recent output as plain text. Every result carries a cursor: pass it back as since to get only the output printed after that read. mode \"screen\" renders the screen instead, for full-screen programs such as agent CLIs, vim or top.",
+      "Read a terminal pane's recent output as plain text, with a cursor: pass it back as since for only newer output. mode \"screen\" renders the screen, for full-screen programs (agent CLIs, vim, top).",
     inputSchema: {
       type: "object",
       required: ["paneId"],
@@ -205,13 +205,13 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_list",
     description:
-      "List the terminal panes in your workspace: paneId, title, group, cwd, which agent runs there and its state, whether the shell is running a command or idle, isCaller for your own pane, and writable for panes you may write to.",
+      "The terminal panes in your workspace: paneId, link, title, group, cwd, its agent and state, whether the shell is busy, isCaller (your pane), writable (you may write to it).",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "codara_terminal_close",
     description:
-      "Stop and close a terminal returned by codara_terminal_create or codara_terminal_run. It cannot close the user's terminal or another run's terminal. It is idempotent: a retry after a lost response returns alreadyClosed=true. Close temporary servers and watchers when done; leave one open only when the user needs the live service.",
+      "Stop and close a terminal you opened with codara_terminal_create or codara_terminal_run, not the user's or another run's terminal; idempotent: a retry returns alreadyClosed=true. Close temporary servers and watchers when done; leave one open only when the user needs it.",
     inputSchema: {
       type: "object",
       required: ["paneId"],
@@ -1772,13 +1772,14 @@ const DIRECT_MEMORY_TOOL = {
 
 // Worker mode: the studio surface a headless automation worker may drive
 // (whiteboard and board stay read-only; the board is the calling chat's own
-// kanban and its edits are the manager's call) plus
+// kanban and its edits are the manager's call; codara_tab acts on the user's
+// tabs, which no unattended pass may do) plus
 // the two run-lifecycle tools its loop prompt references: codara_ask_user
 // (blocked on a genuinely human decision) and codara_request_next_iteration
 // (agent-loop continuation). Deliberately NO manager orchestration tools, a
 // worker never spawns, steers, messages, or completes.
 
-const WORKER_READ_ONLY_STUDIO_TOOL_NAMES = ["codara_whiteboard_update", "codara_whiteboard_arrange", "codara_whiteboard_review", "codara_board_update"];
+const WORKER_READ_ONLY_STUDIO_TOOL_NAMES = ["codara_whiteboard_update", "codara_whiteboard_arrange", "codara_whiteboard_review", "codara_board_update", "codara_tab"];
 const WORKER_LIFECYCLE_TOOL_NAMES = ["codara_ask_user", "codara_request_next_iteration"];
 const WORKER_TOOLS = [
   ...STUDIO_TOOLS.filter((tool) => !WORKER_READ_ONLY_STUDIO_TOOL_NAMES.includes(tool.name)),

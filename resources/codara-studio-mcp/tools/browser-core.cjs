@@ -7,14 +7,14 @@ const { PREVIEW_WAIT_MAX_MS } = require("./lib/limits.cjs");
 
 module.exports = {
   order: 10,
-  budget: 4900,
+  budget: 4690,
   tools: [
     {
       name: "codara_preview_list",
       rpc: "preview.list",
       annotations: { readOnly: true },
       description:
-        "List your workspace's browser tabs, then ones the user shared from Chrome (kind \"chrome\"): id, title, URL, group, isActive, isLastViewed. Match the user's references here and pass that tabId; ask if ambiguous.",
+        "Your workspace's browser tabs, then Chrome tabs the user shared (kind \"chrome\"): id, link, title, URL, group, isActive, isLastViewed. Match the user's references to a tabId; ask if ambiguous.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
     },
     {
@@ -29,7 +29,7 @@ module.exports = {
         properties: {
           tabId: { type: "string" },
           url: { type: "string", description: "Absolute URL to load." },
-          group: { type: "string", description: "Tab group for the tab this opens, or for tabId (url then optional). Name it after your task." },
+          group: { type: "string", description: "Tab group for the new tab, or for tabId (url then optional), named after your task." },
         },
         additionalProperties: false,
       },
@@ -39,7 +39,7 @@ module.exports = {
       rpc: "preview.close",
       annotations: { destructive: true, idempotent: true },
       description:
-        "Close a browser tab you are done with: tabId, or this session's tab. A chrome: tabId closes a Chrome tab an agent opened or the user shared. Only tabs of your workspace; a retry returns alreadyClosed=true.",
+        "Close tabId, or this session's tab, in your workspace. A chrome: tabId closes a Chrome tab an agent opened or the user shared. A retry returns alreadyClosed=true.",
       inputSchema: { type: "object", properties: { tabId: { type: "string" } }, additionalProperties: false },
     },
     {
@@ -48,7 +48,7 @@ module.exports = {
       annotations: { readOnly: true },
       step: { order: 70 },
       description:
-        "Read the page as a compact outline: @references, labels, values, states, link targets. Pass an @reference as another tool's selector. selector scopes it; since=<snapshotId> returns only the diff. Re-read after a stale reference.",
+        "The page as a compact outline: @references (any tool's selector), labels, values, states, link targets. selector scopes it; since=<snapshotId> returns only the diff. Re-read after a stale reference.",
       inputSchema: {
         type: "object",
         properties: {
@@ -66,13 +66,13 @@ module.exports = {
       rpc: "preview.click",
       step: { order: 20 },
       description:
-        "Click one element (@reference or unique CSS selector) with DOM events once visible and enabled; ambiguous, stale, disabled or covered targets fail. codara_preview_mouse sends trusted native clicks.",
+        "Click one element (@reference or unique CSS selector) with DOM events once visible and enabled; ambiguous, stale, disabled or covered targets fail. Trusted clicks: codara_preview_mouse.",
       inputSchema: {
         type: "object",
         required: ["selector"],
         properties: {
           tabId: { type: "string" },
-          selector: { type: "string", description: "@reference or unique CSS selector." },
+          selector: { type: "string" },
         },
         additionalProperties: false,
       },
@@ -82,7 +82,7 @@ module.exports = {
       rpc: "preview.type",
       step: { order: 30 },
       description:
-        "Type text into an input, textarea or contentEditable (@reference or unique selector), or pick a native dropdown option by exact value. clearFirst empties the field.",
+        "Type into an input, textarea or contentEditable (@reference or unique selector), or pick a native dropdown option by exact value. clearFirst empties it first.",
       inputSchema: {
         type: "object",
         required: ["selector", "text"],
@@ -100,7 +100,7 @@ module.exports = {
       rpc: "preview.press_key",
       step: { order: 40 },
       description:
-        "Send one key (Enter, Escape, Tab, ArrowUp, Backspace or a character) to the focused element or selector, as trusted input when possible. codara_preview_key does chords.",
+        "One key (Enter, Escape, Tab, ArrowUp, Backspace, a character) to the focused element or selector, trusted when possible. Chords: codara_preview_key.",
       inputSchema: {
         type: "object",
         required: ["key"],
@@ -118,7 +118,7 @@ module.exports = {
       annotations: { destructive: true, openWorld: true },
       step: { order: 50 },
       description:
-        "Run JavaScript in the page and return the last expression's value as JSON. Set awaitPromise to await an async expression.",
+        "Run JavaScript in the page; returns the last expression's value as JSON. awaitPromise awaits an async one.",
       inputSchema: {
         type: "object",
         required: ["code"],

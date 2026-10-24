@@ -18,6 +18,9 @@ import {
 } from "./terminalRegistry";
 import { closePaneOverlay, openPaneOverlay } from "./paneOverlays";
 import { assignPaneToGroup } from "../../tabs/tabGroupBridge";
+import { tabLinkBridge } from "../../tabs/tabLinkBridge";
+import { previewTabOpener } from "../Preview/registry";
+import { parseTabLink } from "@shared/tab-links";
 import type { TerminalLeafOrigin } from "../../tabs/types";
 
 interface BridgeRequest {
@@ -79,6 +82,10 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
       return closeOverlay(req.params);
     case "group":
       return group(req.params);
+    case "tabs":
+      return tabs(req.params);
+    case "tabAct":
+      return tabAct(req.params);
     default:
       throw new Error(`unknown terminal op: ${req.op || "?"}`);
   }
@@ -124,6 +131,43 @@ async function group(params: Record<string, unknown>): Promise<unknown> {
   const joined = assignPaneToGroup(paneId, name);
   if (!joined) throw new Error(`No terminal pane '${paneId}' is open in Codara.`);
   return { paneId, group: joined };
+}
+
+// codara_tab: what a link names, and the workspace on screen. Main decides
+// what the caller may do with it before asking for tabAct.
+async function tabs(params: Record<string, unknown>): Promise<unknown> {
+  const ref = parseTabLink(params.link);
+  if (!ref) throw new Error("tabs requires a codara://tab or codara://group link");
+  const bridge = tabLinkBridge();
+  const target = bridge.resolve(ref);
+  return {
+    target: target && {
+      ...target,
+      tabs: target.tabs.map((tab) => (tab.kind === "preview" ? { ...tab, openedBy: previewTabOpener(tab.tabId) } : tab)),
+    },
+    activeWorkspaceId: bridge.activeWorkspaceId(),
+  };
+}
+
+async function tabAct(params: Record<string, unknown>): Promise<unknown> {
+  const bridge = tabLinkBridge();
+  const action = readString(params, "action");
+  if (action === "focus") {
+    const ref = parseTabLink(params.link);
+    if (!ref) throw new Error("focus requires a link");
+    return { ok: bridge.focus(ref) };
+  }
+  if (action === "close") {
+    const workspaceId = readString(params, "workspaceId");
+    const tabIds = Array.isArray(params.tabIds) ? params.tabIds.filter((id): id is string => typeof id === "string") : [];
+    if (!workspaceId || tabIds.length === 0) throw new Error("close requires workspaceId and tabIds");
+    return { closed: bridge.close(workspaceId, tabIds) };
+  }
+  const tabId = readString(params, "tabId");
+  if (!tabId) throw new Error(`${action ?? "?"} requires tabId`);
+  if (action === "split") return bridge.split(tabId, params.direction === "down" ? "down" : "right");
+  if (action === "unsplit") return bridge.unsplit(tabId);
+  throw new Error(`unknown tab action: ${action ?? "?"}`);
 }
 
 async function overlay(params: Record<string, unknown>): Promise<unknown> {

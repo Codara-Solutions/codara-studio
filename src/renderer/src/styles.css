@@ -942,6 +942,32 @@ a { color: inherit; }
   white-space: nowrap;
 }
 
+/* A tab or group a codara:// link just brought on screen: an accent ring
+   that fades, so the eye finds it without the strip changing shape. Inset,
+   because the strip clips anything drawn outside a tab. */
+.spark-tab[data-link-flash="true"],
+.spark-tab-group-chip[data-link-flash="true"] {
+  animation: spark-tab-link-flash 1.6s ease-out;
+}
+
+@keyframes spark-tab-link-flash {
+  0%,
+  35% {
+    box-shadow: inset 0 0 0 2px var(--accent), inset 0 0 0 40px var(--accent-soft);
+  }
+  100% {
+    box-shadow: inset 0 0 0 2px transparent, inset 0 0 0 40px transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spark-tab[data-link-flash="true"],
+  .spark-tab-group-chip[data-link-flash="true"] {
+    animation: none;
+    box-shadow: inset 0 0 0 2px var(--accent);
+  }
+}
+
 /* Plain text: a solid colored circle read as an unread badge. */
 .spark-tab-group-chip__count {
   flex: 0 0 auto;

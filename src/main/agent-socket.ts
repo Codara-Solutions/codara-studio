@@ -107,6 +107,7 @@ import {
 import { normalizePiAccountProfileId } from "./orchestration/pi-account-execution";
 import { effectiveChatMode } from "@shared/chat-policy";
 import { normalizeTabGroupName } from "@shared/tab-group-name";
+import { groupLink, tabLink } from "@shared/tab-links";
 import { DEFAULT_PREFERENCES } from "@shared/types";
 import { whiteboardIssues } from "@shared/whiteboard-quality";
 import {
@@ -1154,6 +1155,7 @@ interface StudioTerminalListing {
   cwd?: string;
   profile?: string;
   group?: string;
+  groupId?: string;
 }
 
 const CALLER_PLACEMENT_CACHE_MS = 5_000;
@@ -1219,6 +1221,15 @@ async function resolveCallerPlacement(params: Record<string, unknown>): Promise<
   return placement;
 }
 
+// codara://tab and codara://group links (shared/tab-links.ts) an agent can
+// hand the user or pass to codara_tab.
+function tabLinks(entry: StudioTerminalListing): { link: string; groupLink?: string } {
+  return {
+    link: tabLink(entry.workspaceId, entry.tabId),
+    ...(entry.groupId ? { groupLink: groupLink(entry.workspaceId, entry.groupId) } : {}),
+  };
+}
+
 async function handleTerminalList(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -1245,6 +1256,7 @@ async function handleTerminalList(
       return {
         paneId: entry.paneId,
         tabId: entry.tabId,
+        ...tabLinks(entry),
         ...(workspaceId ? {} : { workspaceId: entry.workspaceId }),
         ...(entry.title ? { title: entry.title } : {}),
         ...(entry.group ? { group: entry.group } : {}),
@@ -1268,6 +1280,7 @@ async function handleTerminalList(
     panes.push({
       paneId: entry.paneId,
       tabId: entry.tabId,
+      ...tabLinks(entry),
       workspaceId: entry.workspaceId,
       ...(entry.title ? { title: entry.title } : {}),
       ...(entry.group ? { group: entry.group } : {}),
@@ -1833,6 +1846,10 @@ const PREVIEW_TOOL_HOST: PreviewToolHost = {
     const id = workspaceId ?? state.activeWorkspaceId;
     return state.workspaces.find((workspace) => workspace.id === id)?.name ?? null;
   },
+  ownsTerminalPane: (paneId, runId, callerPaneId) => agentTerminals.isActiveOwnedBy(paneId, runId, callerPaneId),
+  // Only an exited agent loses nothing when its pane closes.
+  agentRunningIn: (paneId) =>
+    terminalAgentStateSnapshot().some((entry) => entry.paneId === paneId && entry.state !== "done" && entry.state !== "error"),
 };
 
 async function handlePreviewToolRpc(

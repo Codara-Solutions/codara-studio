@@ -74,6 +74,8 @@ import { isParsingReplay, writeAsReplay } from "./osc52";
 import { registerOsc52Clipboard } from "./terminalClipboard";
 import { readRecentOutput, registerTerminalContextSource } from "./terminalContext";
 import { resolveTerminalLinkClick } from "./terminalLinks";
+import { isTabLink, TAB_LINK_TEXT_PATTERN } from "@shared/tab-links";
+import { openTabLink } from "../../tabs/tabLinkBridge";
 import type { TerminalLinkMenuRequest } from "./TerminalLinkMenu";
 import { preloadTerminalPrefs, terminalLinkMenuEnabled } from "./terminalPrefs";
 import {
@@ -957,10 +959,12 @@ export function useTerminalSession({
           button: event?.button,
           ctrlKey: event?.ctrlKey,
           metaKey: event?.metaKey,
-          menuEnabled: showMenu !== undefined && terminalLinkMenuEnabled(),
+          // A tab link only goes to its tab, so a plain click follows it.
+          menuEnabled: showMenu !== undefined && terminalLinkMenuEnabled() && !isTabLink(uri),
           hasSelection: termRef.current?.hasSelection() ?? false,
         });
-        if (click === "open") openTerminalUri(uri);
+        if (click === "open" && isTabLink(uri)) openTabLink(uri);
+        else if (click === "open") openTerminalUri(uri);
         else if (click === "menu" && event && showMenu) {
           showMenu({ url: uri, x: event.clientX, y: event.clientY });
         }
@@ -993,6 +997,10 @@ export function useTerminalSession({
         // links open like plain-text URLs do.
         linkHandler: {
           activate: (event, uri) => activateTerminalLink(event, uri),
+          // An agent's markdown link to a tab arrives as an OSC 8 codara://
+          // link. Other schemes become links too; activateTerminalLink only
+          // follows web, file and tab links (main drops the rest).
+          allowNonHttpProtocols: true,
         },
       });
       termRef.current = term;
@@ -1027,6 +1035,12 @@ export function useTerminalSession({
       term.loadAddon(search);
 
       term.loadAddon(new WebLinksAddon((event, uri) => activateTerminalLink(event, uri)));
+      // codara://tab and codara://group links an agent printed as plain text.
+      term.loadAddon(
+        new WebLinksAddon((event, uri) => activateTerminalLink(event, uri), {
+          urlRegex: new RegExp(TAB_LINK_TEXT_PATTERN.source),
+        }),
+      );
 
       // ── Ctrl/Cmd+click on file paths → open in editor ─────────────────────
       // Sister to the WebLinksAddon above. Detects path-shaped tokens in

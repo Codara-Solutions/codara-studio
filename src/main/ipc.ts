@@ -507,6 +507,7 @@ import {
 import { agentPaneAsleep, registerAgentHibernationIpc } from "./agent-hibernation";
 import { registerWorktreeCleanupIpc } from "./worktree-cleanup";
 import { registerCrossWorkspaceIpc } from "./cross-workspace-ipc";
+import { registerTabActionIpc } from "./tab-action-ipc";
 import { registerWorktreeSetupIpc } from "./worktree-setup";
 import { registerPortForwardIpc } from "./remote/port-forward-runtime";
 import { registerShareIpc } from "./share/ipc";
@@ -4148,6 +4149,7 @@ export function registerIpc(): void {
   registerAgentHibernationIpc(handle);
   registerWorktreeCleanupIpc(handle);
   registerCrossWorkspaceIpc(handle);
+  registerTabActionIpc(handle);
   registerFeatureTipsIpc(handle);
   registerPortForwardIpc(handle);
   registerShareIpc(handle);

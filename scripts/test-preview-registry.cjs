@@ -4,7 +4,9 @@ const path = require("node:path");
 const esbuild = require("esbuild");
 
 async function main() {
-  const output = await esbuild.build({ entryPoints: [path.join(__dirname, "../src/renderer/src/components/Preview/registry.ts")], bundle: true, write: false, platform: "node", format: "cjs" });
+  const output = await esbuild.build({ entryPoints: [path.join(__dirname, "../src/renderer/src/components/Preview/registry.ts")], bundle: true, write: false, platform: "node", format: "cjs",
+    plugins: [{ name: "shared", setup(build) { build.onResolve({ filter: /^@shared\// }, (args) => ({ path: path.join(__dirname, "../src/shared", `${args.path.slice("@shared/".length)}.ts`) })); } }],
+  });
   const mod = { exports: {} };
   new Function("module", "exports", "require", output.outputFiles[0].text)(mod, mod.exports, require);
   const r = mod.exports;
@@ -16,7 +18,7 @@ async function main() {
   r.setActivePreviewTab("user-a", "a");
   r.setActivePreviewTab("chat-a", "a");
   assert.equal(r.listPreviewTabs().length, 2);
-  assert.deepEqual(r.listPreviewTabs()[0], { id: "user-a", title: "Live title", url: "https://example.test/live", workspaceId: "a", isActive: false, isLastViewed: true });
+  assert.deepEqual(r.listPreviewTabs()[0], { id: "user-a", link: "codara://tab/a/user-a", title: "Live title", url: "https://example.test/live", workspaceId: "a", isActive: false, isLastViewed: true });
   assert.equal(r.pickPreviewTab(null, "run-1").id, "run-a");
   assert.equal(r.pickPreviewTab(null, "run-2"), null);
   assert.equal(r.pickPreviewTab("user-a", "run-1").id, "user-a");

@@ -14,6 +14,10 @@ export interface PreviewToolHost {
   mayUseUserBrowser(params: Record<string, unknown>): Promise<boolean>;
   /** A workspace's name, or the one on screen for null; null when there is none. */
   workspaceName?(workspaceId: string | null): Promise<string | null>;
+  /** Whether the caller opened this terminal pane and it is still running (codara_tab). */
+  ownsTerminalPane?(paneId: string, runId: string | null, callerPaneId: string | null): boolean;
+  /** Whether an agent CLI still holds a session in this pane, idle at its prompt included. */
+  agentRunningIn?(paneId: string): boolean;
 }
 
 export type PreviewToolHandler = (params: Record<string, unknown>, method: string, host: PreviewToolHost) => Promise<unknown>;
