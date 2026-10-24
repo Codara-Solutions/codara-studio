@@ -7,24 +7,24 @@
 
 module.exports = {
   order: 1000,
-  budget: 1800,
+  budget: 1400,
   tools: [
     {
       name: "codara_preview_run",
       annotations: { destructive: true, openWorld: true },
       description:
-        "Run an ordered batch of browser steps in ONE call instead of one call per click or key. Each step fires the same real input as its single tool, so prefer this for any multi-step flow, for example typing `7 / 2 =` and reading the display. Every step must obey the task's tool restrictions. Stops at the first failing step unless continueOnError. Returns one result per step; screenshot steps also come back as images.",
+        "Run a fixed list of browser steps in ONE call; codara_preview_code also branches and loops. Steps fire the same input as their single tools and obey the task's tool restrictions. Stops at the first failure unless continueOnError.",
       inputSchema: {
         type: "object",
         required: ["steps"],
         properties: {
-          tabId: { type: "string", description: "Default tab for steps without their own." },
+          tabId: { type: "string" },
           continueOnError: { type: "boolean" },
           steps: {
             type: "array",
             minItems: 1,
             description:
-              "Each step is { action, ...the fields of the matching codara_preview_* tool }, e.g. {action:'press_key', key:'7'}, {action:'click', selector:'#equals'}, {action:'evaluate', code:\"document.querySelector('#lcd').textContent\"}.",
+              "Each step is { action, ...the fields of that codara_preview_* tool }, e.g. {action:'press_key', key:'7'}, {action:'click', selector:'#go'}.",
             items: {
               type: "object",
               required: ["action"],
@@ -33,7 +33,7 @@ module.exports = {
                   type: "string",
                   enum: [],
                 },
-                label: { type: "string", description: "Echoed back in the step result." },
+                label: { type: "string" },
                 tabId: { type: "string" },
                 url: { type: "string" },
                 selector: { type: "string" },

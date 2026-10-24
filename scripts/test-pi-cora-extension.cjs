@@ -180,6 +180,7 @@ for (const browserTool of [
   "codara_preview_network",
   "codara_preview_resize",
   "codara_preview_run",
+  "codara_preview_code",
 ]) {
   assert.equal(executeToolNames.has(browserTool), true, `execute mode exposes ${browserTool}`);
 }
@@ -417,6 +418,7 @@ const noInput = {};
   assert.equal(blocked("codara_terminal_close")?.block, true, "readonly blocks terminal close");
   assert.equal(blocked("codara_preview_evaluate")?.block, true, "readonly blocks preview evaluate");
   assert.equal(blocked("codara_preview_run")?.block, true, "readonly blocks preview run (can embed evaluate steps)");
+  assert.equal(blocked("codara_preview_code")?.block, true, "readonly blocks browser code (can call evaluate)");
   assert.equal(blocked("codara_preview_click")?.block, true, "readonly blocks preview click");
   assert.equal(blocked("codara_preview_type")?.block, true, "readonly blocks preview type");
   assert.equal(blocked("codara_preview_screenshot"), undefined, "readonly keeps preview screenshot");

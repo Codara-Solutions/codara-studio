@@ -14,6 +14,7 @@ import { scopePreviewWorkspace } from "../preview-workspace";
 import { normalizeTabGroupName } from "../../shared/tab-group-name";
 import { capturePreviewTools } from "./capture";
 import { chromeLinkTools, chromeTargetTools } from "./chrome";
+import { codePreviewTools } from "./code";
 import { corePreviewTools } from "./core";
 import { cosTaskTools } from "./cos-tasks";
 import { devtoolsPreviewTools } from "./devtools";
@@ -41,6 +42,8 @@ const TABLES: readonly PreviewToolTable[] = [
   cosTaskTools,
   sessionSearchTools,
   chromeLinkTools,
+  // A snippet's browser calls go through runPreviewTool like any socket call.
+  codePreviewTools((method, params, host) => runPreviewTool(method, params, host)),
 ];
 
 function mergeTables(tables: readonly PreviewToolTable[]): Map<string, PreviewToolEntry> {

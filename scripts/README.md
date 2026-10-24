@@ -94,7 +94,7 @@ Most suites need only `npm install`. These are the exceptions:
 |---|---|---|
 | A build in `out/` | `test-agent-socket.cjs`, `test-app-exit-electron.cjs` | Launches `out/main/index.js` under Electron with a temporary home. Run `npm run build` (which is `electron-vite build`) first. Without a build the app never writes its handshake file and the suite fails. |
 | The Electron binary | `test-agent-socket.cjs`, `test-trusted-sender.cjs` | Both boot a headless Electron from `node_modules`. |
-| Playwright's Chromium | `test-chat-surface-routing.cjs`, `test-csv-preview-ui.cjs`, `test-browser-cdp-session.cjs`, `test-browser-screenshot-locator.cjs`, `test-browser-devtools.cjs`, `test-browser-insight.cjs`, `test-browser-capture-chromium.cjs`, `test-preview-waits.cjs`, `test-preview-dialogs.cjs`, `test-preview-find-outline.cjs`, `test-preview-console-filter.cjs`, `test-studio-csp.cjs` | Install it with `npx playwright install chromium`. Without it they print SKIP for the real-page checks. |
+| Playwright's Chromium | `test-chat-surface-routing.cjs`, `test-csv-preview-ui.cjs`, `test-browser-cdp-session.cjs`, `test-browser-screenshot-locator.cjs`, `test-browser-devtools.cjs`, `test-browser-insight.cjs`, `test-browser-capture-chromium.cjs`, `test-preview-waits.cjs`, `test-preview-dialogs.cjs`, `test-preview-find-outline.cjs`, `test-preview-console-filter.cjs`, `test-studio-csp.cjs`, `test-browser-code.cjs` | Install it with `npx playwright install chromium`. Without it they print SKIP for the real-page checks. |
 | Real `git` | `test-worktrees.cjs`, `test-agent-worktrees.cjs`, `test-worktree-cleanup.cjs`, `test-worktree-cleanup-agent.cjs`, `test-worktree-setup.cjs`, `test-git-auto-fetch-git.cjs`, `test-git-split-commits.cjs`, `test-git-optional-locks.cjs`, `test-git-stash.cjs`, `test-github-pull-request-git.cjs`, `test-review-diff.cjs`, `test-result-manifest.cjs`, `test-worker-diff.cjs`, `test-browser-storage-boundary.cjs` | Most create throwaway repositories in a temp dir. `test-browser-storage-boundary.cjs` runs `git ls-files` on this checkout, so it needs a git clone. |
 | POSIX tools | `test-owned-process-tree-descendants.cjs` (needs `ps`), `test-pty-inherited-env.cjs` (skips its zsh probes without `/bin/zsh`), `test-ssh-keys.cjs` (skips key generation without `ssh-keygen`) | On Windows they run a reduced set of checks. |
 | A `codara-mobile` checkout next to this repo | `test-cora-history-interop.cjs`, `test-cora-run-interop.cjs`, and some checks in `test-remote-access.cjs` | They print `SKIP` when the sibling repo is missing, as on CI. |
@@ -348,6 +348,17 @@ and in Chromium; `tests/e2e/preview-agent-input.spec.ts` covers all of it in
 the built app over the socket, the stdio MCP server and `cora tool`, and
 `tests/e2e/preview-hot-reload.spec.ts` runs hot reload waits against a real
 Vite dev server.
+
+Browser code mode (`codara_preview_code`, `src/main/browser/code/`):
+`test-browser-code` checks the snippet transform (persistent declarations,
+top-level await, syntax errors with line and column), the QuickJS kernel as a
+sandbox (no require, process, fetch, import or host functions; an endless
+loop is interrupted and the session lives on; a timeout keeps the bindings;
+late calls are refused), the session lifecycle (reset, isolation, the
+dead-owner and idle sweep, six images per call) and Playwright-style locators
+driving a login form, a table and a settings form on a real Chromium page.
+`tests/e2e/browser-code.spec.ts` runs it in the built app over the stdio MCP
+server and measures it against the single tools.
 
 The Chrome extension link: `test-chrome-extension` (the extension's own
 tests in `extensions/chrome/test/`: sharing and blocked-site rules, which

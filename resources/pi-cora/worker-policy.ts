@@ -90,7 +90,8 @@ const FENCE_READONLY_EXTRA = ["edit"];
 // Bridge tools that ARE a shell or arbitrary code execution: any fenced preset
 // blocks them ("no shell/web" must include the terminal tab that takes a
 // command and the preview's JS evaluator; codara_preview_run is included
-// because its step batch can embed evaluate steps).
+// because its step batch can embed evaluate steps, and codara_preview_code
+// because its snippet can call every browser tool, evaluate among them).
 const FENCE_BRIDGE_SHELL = [
   "codara_terminal_run",
   "codara_terminal_create",
@@ -102,6 +103,7 @@ const FENCE_BRIDGE_SHELL = [
   "codara_terminal_servers",
   "codara_preview_evaluate",
   "codara_preview_run",
+  "codara_preview_code",
 ];
 // Bridge tools that mutate page state; blocked for readonly only (navigation,
 // screenshots, snapshots, console, and network inspection stay available).
