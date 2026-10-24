@@ -24,6 +24,7 @@ import { normalizeKeepAwakeMode } from "@shared/keep-awake";
 import { normalizeQuickCommands, normalizeTerminalRightClick } from "@shared/quick-commands";
 import { normalizeAgentHibernationMinutes } from "@shared/agent-hibernation";
 import { normalizeSessionSearchPreferences } from "@shared/session-search";
+import { normalizeRepository } from "@shared/pull-request-watch";
 import { writeFileAtomic } from "./fs-atomic";
 import { codaraHome } from "./codara-home";
 
@@ -357,10 +358,27 @@ function normalize(
       typeof src.notifyCiFailures === "boolean"
         ? src.notifyCiFailures
         : DEFAULT_PREFERENCES.notifyCiFailures,
+    watchPullRequests:
+      typeof src.watchPullRequests === "boolean"
+        ? src.watchPullRequests
+        : DEFAULT_PREFERENCES.watchPullRequests,
+    pullRequestWatchOffRepos: normalizeRepositoryList(src.pullRequestWatchOffRepos),
     toastDurationMs: normalizeToastDuration(src.toastDurationMs),
     workspaceSwitchHudMs: normalizeWorkspaceSwitchHud(src.workspaceSwitchHudMs),
     sessionSearch: normalizeSessionSearchPreferences(src.sessionSearch),
   };
+}
+
+// owner/name entries, lowercase and unique; anything else is dropped.
+function normalizeRepositoryList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out = new Set<string>();
+  for (const item of value) {
+    const repository = normalizeRepository(item);
+    if (repository) out.add(repository);
+    if (out.size >= 200) break;
+  }
+  return [...out];
 }
 
 // Workspace-switch badge on-screen time: 0 (off) to 10s.

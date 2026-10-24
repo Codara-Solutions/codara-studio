@@ -50,6 +50,7 @@ import { featureTipsApi } from "./areas/feature-tips";
 import { sessionSearchApi } from "./areas/session-search";
 import { serversApi } from "./areas/servers";
 import { workspaceStatusApi } from "./areas/workspace-status";
+import { pullRequestWatchApi } from "./areas/pull-request-watch";
 import { cosTasksApi } from "./areas/cos-tasks";
 import { skillOriginsApi } from "./areas/skill-origins";
 import { terminalScrollbackApi } from "./areas/terminal-scrollback";
@@ -1821,6 +1822,7 @@ const api = {
   capture: captureApi,
   point: pointApi,
   workspaceStatus: workspaceStatusApi,
+  pullRequestWatch: pullRequestWatchApi,
   cosTasks: cosTasksApi,
   review: reviewApi,
   terminalScrollback: terminalScrollbackApi,
