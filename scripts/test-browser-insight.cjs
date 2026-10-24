@@ -348,7 +348,7 @@ async function inChromium(lib) {
     assert.ok(first.lcp && first.lcp.ms > 0, `${JSON.stringify(first)} page=${JSON.stringify(await perfTarget.evaluate("({ visibility: document.visibilityState, focus: document.hasFocus(), paint: performance.getEntriesByType('paint').map((e) => e.name), types: PerformanceObserver.supportedEntryTypes })"))}`);
     assert.match(first.lcp.element.selector, /#story|#headline/);
     assert.match(first.lcp.element.ref, /^@/);
-    assert.ok(first.cls.value > 0, "the late banner shifts the layout");
+    assert.ok(first.cls.value > 0, `the late banner shifts the layout: ${JSON.stringify(first.cls)} page=${JSON.stringify(await perfTarget.evaluate("({ fcpSeenAt: window.__fcpSeenAt, bannerAt: window.__bannerAt, now: performance.now() })"))}`);
     assert.ok(first.cls.elements.some((element) => /#content|#headline|#story|#slow/.test(element.selector)), JSON.stringify(first.cls));
     assert.ok(first.fcp && first.ttfb);
     assert.ok(first.notes.some((note) => /started now/.test(note)), "a late observer says what it missed");
@@ -378,7 +378,7 @@ async function inChromium(lib) {
     assert.equal((load.summary.match(/long tasks? blocking/g) ?? []).length, 1, "long tasks are reported once");
     assert.ok(load.lcp && load.ttfb && load.fcp, JSON.stringify(load));
     assert.ok(!load.notes?.some((note) => /started now/.test(note)), "the observer ran from the first byte");
-    assert.ok(load.cls.value > 0);
+    assert.ok(load.cls.value > 0, `${JSON.stringify(load.cls)} page=${JSON.stringify(await perfTarget.evaluate("({ fcpSeenAt: window.__fcpSeenAt, bannerAt: window.__bannerAt, now: performance.now(), paint: performance.getEntriesByType('paint').map((e) => [e.name, Math.round(e.startTime)]) })"))}`);
     assert.match(load.summary, /^Page load: LCP .* Main thread busy \d+ ms .*long tasks? blocking/);
     assert.ok(JSON.stringify(load).length < 4_000, `compact: ${JSON.stringify(load).length}`);
 

@@ -74,7 +74,8 @@ const PAGES = {
         new PerformanceObserver((list, observer) => {
           if (!list.getEntriesByName("first-contentful-paint").length) return;
           observer.disconnect();
-          setTimeout(() => { const banner = document.createElement("div"); banner.id = "banner"; banner.textContent = "Banner"; document.getElementById("slot").appendChild(banner); }, 250);
+          window.__fcpSeenAt = performance.now();
+          setTimeout(() => { const banner = document.createElement("div"); banner.id = "banner"; banner.textContent = "Banner"; document.getElementById("slot").appendChild(banner); window.__bannerAt = performance.now(); }, 250);
         }).observe({ type: "paint", buffered: true });
         document.getElementById("slow").addEventListener("click", () => {
           const start = performance.now(); while (performance.now() - start < 300) {}
