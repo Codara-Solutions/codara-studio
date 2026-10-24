@@ -225,6 +225,7 @@ async function main() {
   const handoff = index.slice(index.indexOf("void lockHandoff?.then("), index.indexOf("app.on(\"second-instance\""));
   check("a launch that lost the lock exits without waiting for ready (macOS never sends it)", /if \(!owned\) \{[^}]*app\.exit\(0\);/.test(handoff));
   check("on macOS a launch handed the lock starts over once the holder is gone", handoff.indexOf("waitForProcessExit(holder") < handoff.indexOf("app.releaseSingleInstanceLock();") && handoff.indexOf("app.releaseSingleInstanceLock();") < handoff.indexOf("app.relaunch();"));
+  check("a launch before ready (a macOS relaunch wait) never opens the window", /function showMainWindow\(\): void \{[^}]*if \(!app\.isReady\(\)\) return;/.test(index));
   check("the lock carries the hand-off nonce", /app\.requestSingleInstanceLock\(\{ codaraHandoff: handoffNonce \}\)/.test(index));
   check("SPARK_ALLOW_MULTI still skips the lock and the hand-off", /process\.env\.SPARK_ALLOW_MULTI === "1" \|\|\s*app\.requestSingleInstanceLock/.test(index) && /if \(process\.env\.SPARK_ALLOW_MULTI !== "1"\) \{\s*app\.on\("second-instance"/.test(index));
   const second = index.slice(index.indexOf("function onSecondInstance("), index.indexOf("function onSecondInstance(") + 1200);

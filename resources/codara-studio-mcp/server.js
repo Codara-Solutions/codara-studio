@@ -2494,10 +2494,10 @@ function startStdioServer() {
     }
   });
 
-  // The client is gone: requests it already sent still get their answer
-  // unless they are waits, which are cancelled. stdout to a pipe is
-  // asynchronous on macOS, so exiting before it drains cuts a long reply
-  // (tools/list is over 64 KB) off mid-line.
+  // The client is gone: every request still in flight is cancelled and gets
+  // no answer, and the process exits once the replies already written have
+  // drained. stdout to a pipe is asynchronous on macOS, so exiting before that
+  // cuts a long reply (tools/list is over 64 KB) off mid-line.
   process.stdin.on("end", () => {
     for (const controller of inFlight.values()) controller.abort();
     const exit = () => process.stdout.write("", () => process.exit(0));

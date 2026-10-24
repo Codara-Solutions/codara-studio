@@ -164,6 +164,36 @@ async function main() {
   fs.unlinkSync(linkedWs);
   fs.rmSync(realWs, { recursive: true, force: true });
 
+  console.log("a Codara home reached through a symlink:");
+  // The runs root has two spellings then (a linked ~ or ~/.codarastudio, or a
+  // home under macOS /var/folders), and the allowlist admits both. A link a
+  // worker planted must stay unreadable whichever spelling asks for it. The
+  // caches are per load, so a fresh copy of the module sees this home.
+  const realHome = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "codara-fs-sandbox-realhome-")));
+  const linkedHome = `${realHome}-link`;
+  fs.symlinkSync(realHome, linkedHome);
+  const realAttempt = path.join(realHome, "runs", "run-y", "attempts", "a1");
+  fs.mkdirSync(realAttempt, { recursive: true });
+  fs.writeFileSync(path.join(realAttempt, "stdout.log"), "real worker output", "utf8");
+  fs.symlinkSync(secret, path.join(realAttempt, "planted.log"));
+  process.env.CODARA_HOME_DIR = linkedHome;
+  delete require.cache[require.resolve(outfile)];
+  const linkedSandbox = require(outfile);
+  const linkedOk = async (p) => {
+    try {
+      await linkedSandbox.assertAllowedReadPathResolved(p);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const linkedAttempt = path.join(linkedHome, "runs", "run-y", "attempts", "a1");
+  check("a planted link asked for by the home's own spelling is rejected", !(await linkedOk(path.join(linkedAttempt, "planted.log"))));
+  check("a planted link asked for by the real spelling is rejected", !(await linkedOk(path.join(realAttempt, "planted.log"))));
+  check("a worker log is readable by either spelling", (await linkedOk(path.join(linkedAttempt, "stdout.log"))) && (await linkedOk(path.join(realAttempt, "stdout.log"))));
+  fs.unlinkSync(linkedHome);
+  fs.rmSync(realHome, { recursive: true, force: true });
+
   fs.rmSync(home, { recursive: true, force: true });
   fs.rmSync(ws, { recursive: true, force: true });
   fs.rmSync(bundleDir, { recursive: true, force: true });

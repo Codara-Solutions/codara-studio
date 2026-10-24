@@ -176,8 +176,8 @@ async function realpathDeepestExisting(abs: string): Promise<string> {
  * allowlist check first (unchanged, fail-fast), then — for targets under the
  * runs root only — re-checks containment against the REAL path so a SYMLINK
  * planted by a worker cannot read out of the run tree. Hardlinks are not
- * covered (see the header). Non-runs paths pay no filesystem cost and behave
- * exactly as before.
+ * covered (see the header). Non-runs paths cost one realpath of the runs root
+ * and are otherwise checked exactly as before.
  *
  * Like every path-based check this is TOCTOU-racy against a process that can
  * plant a link between the check and the open; it closes the standing hole, not
@@ -187,8 +187,11 @@ export async function assertAllowedReadPathResolved(target: string): Promise<voi
   assertAllowedReadPath(target);
   if (isRemotePath(target)) return;
   const abs = path.resolve(target);
-  if (!isInside(runsRoot(), abs)) return;
+  // The allowlist admits the runs root by its real spelling too (a linked home
+  // or ~/.codarastudio, a home under macOS /var/folders), so a target under
+  // either spelling gets the real-path check.
   const realRoot = await realpathDeepestExisting(runsRoot());
+  if (!isInside(runsRoot(), abs) && !isInside(realRoot, abs)) return;
   const realTarget = await realpathDeepestExisting(abs);
   if (!isInside(realRoot, realTarget)) {
     throw new Error(`Path not allowed: ${target}`);

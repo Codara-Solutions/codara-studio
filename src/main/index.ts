@@ -324,6 +324,10 @@ function pauseTerminalDelivery(reason: TerminalPauseReason): void {
 // Bring the main window back from the tray (or recreate it if it was somehow
 // destroyed). On Windows we re-show the taskbar button that hide-to-tray hid.
 function showMainWindow(): void {
+  // A macOS launch waiting to relaunch after a hand-off holds the lock before
+  // `ready`, so a third launch reaches here first; its fresh launch opens the
+  // window, and createWindow() would throw before `ready`.
+  if (!app.isReady()) return;
   if (!mainWindow || mainWindow.isDestroyed()) {
     createWindow();
     return;
