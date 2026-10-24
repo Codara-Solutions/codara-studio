@@ -219,6 +219,11 @@ class RemoteConnection {
 
   constructor(public readonly host: RemoteHostConfig) {}
 
+  /** The user disconnected the host, or Studio is quitting: never reconnect. */
+  get isDisposed(): boolean {
+    return this.disposed;
+  }
+
   private setState(state: RemoteConnectionStatus["state"], error?: string, progress?: string): void {
     this.state = state;
     this.lastError = error ?? null;

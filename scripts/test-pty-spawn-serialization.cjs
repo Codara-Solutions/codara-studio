@@ -201,6 +201,17 @@ function stubPlugin() {
         return JSON.stringify(value);
       }
     `,
+    // Imported by pty-manager for remote agent panes (remote/remote-agents.ts).
+    "./preferences-store": `
+      export async function loadPreferences() {
+        return globalThis.__codaraPtySpawnHarness?.preferences ?? {};
+      }
+    `,
+    "./connections": `
+      export function shQuote(value) {
+        return "'" + value.replace(/'/g, "'\\\\''") + "'";
+      }
+    `,
     "./env-sanitize": `
       export function sanitizeNestedAgentEnv() {}
       export function sanitizeElectronViteDevEnv() {}

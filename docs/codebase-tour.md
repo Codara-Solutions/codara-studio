@@ -421,6 +421,44 @@ choice), `port-forward-runtime.ts` (wiring and IPC), `forwardOut` and
 ordinary `RemoteConnection` whose transport is a ProxyCommand, so it forwards
 the same way.
 
+#### Agents on SSH machines
+
+With the **Keep agents running on SSH machines** setting on (the
+`machinesEnabled` preference, off by default while Machines is in preview),
+an agent pane in an SSH workspace (Claude Code, Codex, Grok or Pi) runs inside
+tmux on the machine instead of directly in the SSH shell. The agent then
+keeps working when Studio quits or the network drops.
+
+- **Start.** `buildRemoteAgentLaunch` in `remote-agents.ts` types one line
+  into the remote shell. It attaches when the pane's session
+  (`codara-<paneId>`) is already alive, reports a CLI missing from the login
+  shell's PATH, and otherwise starts the agent with `tmux new-session -A` in
+  the workspace folder. tmux runs as a private server (`tmux -L codara -f
+  /dev/null`) so the user's own tmux config and sessions are never touched,
+  with no status bar and the alternate screen off so the pane's scrollback
+  and agent detection work as on a plain shell. Without tmux the agent starts
+  directly, with a note that it stops when Studio disconnects.
+- **Restore.** A restored pane that has no startup command (the agent was
+  already running) probes the machine for its session and attaches when it
+  is alive, so the agent is not started a second time.
+- **Dropped connection.** `remote-pty.ts` keeps an agent pane open when its
+  channel closes without an exit status, prints a dim note, reconnects with
+  backoff (1 s up to 30 s, repeating), checks the session is still alive and
+  attaches on a new channel. It stops when the session is gone or the user
+  disconnects the host.
+- **Ending.** Closing the pane, Cora stopping it, or deleting its folder ends
+  the tmux session (`markRemoteAgentEnd` in `pty-manager.ts`). Quitting
+  Studio, closing a window, or a pane that comes back within the close's
+  grace period leave it running. A pane closed while its host is
+  disconnected leaves the agent running on the machine.
+
+Tests: `test-remote-agents` runs the generated lines under `/bin/sh` with
+fake `tmux` and `claude`, `test-remote-pty` covers reconnects with fake
+channels, `test-pty-remote-agents` covers the wiring in `pty-manager.ts`, and
+`tests/e2e/remote-agent.spec.ts` runs the built app against a real sshd and
+tmux in a container (`tests/e2e/fixtures/ssh-host`, started by
+`scripts/ssh-test-host.cjs`; skipped without Docker).
+
 ### 3.6 Claude Code hooks
 
 `hook-installer.ts` builds the `hooks` block that `agent-launch-integration.ts`

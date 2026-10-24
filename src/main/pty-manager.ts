@@ -28,6 +28,14 @@ import { getHookRpcEnvSafe } from "./hook-rpc";
 import { codaraHome } from "./codara-home";
 import { logMain } from "./file-log";
 import { getConnection, shQuote } from "./remote/connections";
+import {
+  buildRemoteAgentAttach,
+  buildRemoteAgentLaunch,
+  buildRemoteAgentProbe,
+  remoteAgentRuntime,
+} from "./remote/remote-agents";
+import { createRemotePtyHandle } from "./remote/remote-pty";
+import { loadPreferences } from "./preferences-store";
 import { formatManualAgentStartup, parseManualAgentStartupCommand } from "./manual-agent-startup";
 import { assertManualAgentLaunchAllowed } from "./orchestration/project-policy";
 import { buildCodexCliSharedEnvironment } from "./orchestration/codex-cli-profile-execution";
@@ -661,6 +669,8 @@ async function spawnWithSessionLock(
   if (pending) {
     clearTimeout(pending);
     pendingKills.delete(opts.id);
+    // The pane came back before its close took effect: its agent stays.
+    endRemoteAgentOnKill.delete(opts.id);
   }
 
   const existing = sessions.get(opts.id);
@@ -981,6 +991,29 @@ function serializeSessionSpawn<T>(id: string, operation: () => Promise<T>): Prom
 // path and optionally fire the startup command as the shell's first input,
 // so callers get `startupCommandHandled: true` (no renderer type-after-mount
 // race, same as the pwsh args-takeover path locally).
+// Remote panes whose agent session (remote/remote-agents.ts) must end with
+// the pane: closed by the user, stopped by Cora, or under a deleted folder.
+// Anything else that drops the channel (quitting Studio, a closed window, a
+// lost connection) leaves the agent working on the machine for the pane to
+// attach to again.
+const endRemoteAgentOnKill = new Set<string>();
+
+function markRemoteAgentEnd(id: string): void {
+  const session = sessions.get(id);
+  if (session && isRemotePath(session.cwd)) endRemoteAgentOnKill.add(id);
+}
+
+async function remoteAgentSessionAlive(
+  conn: Awaited<ReturnType<typeof getConnection>>,
+  paneId: string,
+): Promise<boolean> {
+  try {
+    return (await conn.exec(buildRemoteAgentProbe(paneId), { timeoutMs: 8_000 })).code === 0;
+  } catch {
+    return false;
+  }
+}
+
 async function doSpawnRemote(
   opts: SpawnOptions,
 ): Promise<{ id: string; pid: number; startupCommandHandled?: boolean }> {
@@ -989,49 +1022,29 @@ async function doSpawnRemote(
   const cols = Math.max(1, opts.cols | 0);
   const rows = Math.max(1, opts.rows | 0);
   const conn = await getConnection(parts.hostId);
-  const channel = await conn.shell({ cols, rows });
+  const startup = opts.startupCommand?.trim();
+  const machines = (await loadPreferences()).machinesEnabled === true;
+  const agentRuntime = machines ? remoteAgentRuntime(startup) : null;
+  const [channel, reattach] = await Promise.all([
+    conn.shell({ cols, rows }),
+    // A plain shell pane may be a restored pane whose agent is still running.
+    machines && !agentRuntime ? remoteAgentSessionAlive(conn, opts.id) : Promise.resolve(false),
+  ]);
+  const agentPane = agentRuntime !== null || reattach;
+  endRemoteAgentOnKill.delete(opts.id);
 
-  const handle: PtyHandle = {
-    pid: 0,
-    write: (data: string) => {
-      try {
-        channel.write(data);
-      } catch {
-        /* channel already closed */
-      }
-    },
-    resize: (c: number, r: number) => {
-      try {
-        // ssh2 order is (rows, cols, heightPx, widthPx).
-        channel.setWindow(r, c, 0, 0);
-      } catch {
-        /* ignore */
-      }
-    },
-    kill: () => {
-      try {
-        channel.close();
-      } catch {
-        /* ignore */
-      }
-    },
-    onData: (cb: (data: string) => void) => {
-      const listener = (d: Buffer) => cb(d as unknown as string);
-      channel.on("data", listener);
-      channel.stderr.on("data", listener);
-      return {
-        dispose: () => {
-          channel.off("data", listener);
-          channel.stderr.off("data", listener);
-        },
-      };
-    },
-    onExit: (cb: (e: { exitCode: number; signal?: number }) => void) => {
-      const listener = () => cb({ exitCode: 0 });
-      channel.on("close", listener);
-      return { dispose: () => channel.off("close", listener) };
-    },
-  };
+  const handle: PtyHandle = createRemotePtyHandle({
+    conn,
+    channel,
+    paneId: opts.id,
+    hostLabel: parts.hostId,
+    cwd: parts.path,
+    cols,
+    rows,
+    agentPane,
+    endAgentOnKill: () => endRemoteAgentOnKill.delete(opts.id),
+    log: (message) => logMain("pty", message),
+  });
 
   const stranded = opts.webContents ? null : consumeStrandedBinding(opts.id);
   const createdAt = Date.now();
@@ -1134,10 +1147,22 @@ async function doSpawnRemote(
   // First input: land in the workspace directory, mark the pane, wipe the
   // banner + echoed setup line, then run the caller's startup command (if
   // any) as the shell's first real action.
-  const startup = opts.startupCommand?.trim();
+  const first = agentRuntime && startup
+    ? buildRemoteAgentLaunch({
+        cwd: parts.path,
+        paneId: opts.id,
+        hostLabel: parts.hostId,
+        cols,
+        rows,
+        startup,
+        runtime: agentRuntime,
+      })
+    : reattach
+      ? buildRemoteAgentAttach(opts.id)
+      : startup;
   const setup =
     `cd ${shQuote(parts.path)} && export SPARK_TERMINAL=1 SPARK_REMOTE=1 && clear` +
-    (startup ? ` && ${startup}` : "") +
+    (first ? ` && ${first}` : "") +
     "\n";
   channel.write(setup);
 
@@ -2444,6 +2469,7 @@ function exitPayload(s: Session, exitCode: number, signal: number | undefined): 
 export function dispose(id: string, opts?: { sanctioned?: boolean }): void {
   if (!sessions.has(id) || pendingKills.has(id)) return;
   if (opts?.sanctioned) markSanctioned(id);
+  markRemoteAgentEnd(id);
   const timer = setTimeout(() => {
     pendingKills.delete(id);
     killNow(id);
@@ -2459,6 +2485,7 @@ export function dispose(id: string, opts?: { sanctioned?: boolean }): void {
 // must never repaint that worker as crashed.
 export function killImmediate(id: string): void {
   markSanctioned(id);
+  markRemoteAgentEnd(id);
   killNow(id);
 }
 
@@ -2495,6 +2522,7 @@ export function disposeUnderCwd(dir: string): number {
       // Reaping the shells that hold a deleted worktree open is Codara's own
       // teardown, not a process dying on its own.
       markSanctioned(id);
+      markRemoteAgentEnd(id);
       killNow(id);
       killed += 1;
     }
