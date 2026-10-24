@@ -1,4 +1,4 @@
-// The browser API a codara_preview_code snippet sees, evaluated once per
+// The browser API a codara_browser_use snippet sees, evaluated once per
 // session inside the kernel's QuickJS context (kernel-worker.ts). It takes the
 // host functions the worker installed, hides them, and returns the settle
 // function the worker hands each snippet's promise to. Every browser action is
@@ -294,12 +294,110 @@ export const BROWSER_PRELUDE = String.raw`(function () {
     wheel(deltaX, deltaY, at) { return this.tab._call("preview.scroll", Object.assign({ deltaX: deltaX || 0, deltaY: deltaY || 0 }, at || {})); }
   }
 
+  function matchesUrl(url, match) {
+    if (match instanceof RegExp) return match.test(url);
+    if (typeof match === "function") return Boolean(match(url));
+    return String(url).indexOf(String(match)) >= 0;
+  }
+
+  // tab.network(options) still answers like codara_preview_network; the
+  // methods are the readable form of the same calls.
+  function networkApi(tab) {
+    var network = function (options) { return tab._call("preview.network", options); };
+    network.list = async function (filter) {
+      var result = await tab._call("preview.network", pick(filter, ["filter", "type", "status", "failed", "limit"]));
+      return result.requests;
+    };
+    network.get = async function (id, options) {
+      var result = await tab._call("preview.network", Object.assign({ id: String(id) }, pick(options, ["body", "redact"])));
+      return result.request;
+    };
+    network.har = function (options) {
+      return tab._call("preview.network", Object.assign({ har: true }, pick(options, ["filter", "type", "status", "failed", "body", "redact"])));
+    };
+    network.clear = function () { return tab._call("preview.network", { clear: true }); };
+    network.waitForResponse = async function (match, options) {
+      options = options || {};
+      var seen = new Set((await network.list({ limit: 500 })).map(function (row) { return row.id; }));
+      var deadline = Date.now() + timeoutOf(options, 15000);
+      for (;;) {
+        var rows = await network.list({ limit: 500 });
+        for (var row of rows) {
+          if (seen.has(row.id) || row.pending || !matchesUrl(row.url, match)) continue;
+          return options.detail === false ? row : network.get(row.id, pick(options, ["body", "redact"]));
+        }
+        if (Date.now() > deadline) throw new BrowserError("No finished response matched " + String(match) + " in time.");
+        await sleep(100);
+      }
+    };
+    return network;
+  }
+
+  class CdpSubscription {
+    constructor(tab, id, events) {
+      this.tab = tab;
+      this.id = id;
+      this.events = events;
+      this.pending = [];
+    }
+    async take(options) {
+      options = options || {};
+      var result = await this.tab._call("preview.cdp_events", { action: "read", subscription: this.id, waitMs: options.wait || 0, max: options.max });
+      var events = this.pending.concat(result.events);
+      this.pending = [];
+      return events;
+    }
+    async next(options) {
+      options = options || {};
+      var filter = typeof options.filter === "function" ? options.filter : null;
+      var deadline = Date.now() + timeoutOf(options, 15000);
+      for (;;) {
+        while (this.pending.length) {
+          var event = this.pending.shift();
+          if (!filter || filter(event.params, event.method)) return event;
+        }
+        var left = deadline - Date.now();
+        if (left <= 0) return null;
+        var result = await this.tab._call("preview.cdp_events", { action: "read", subscription: this.id, waitMs: Math.min(left, 30000) });
+        this.pending = result.events;
+        if (result.closed && !this.pending.length) throw new BrowserError("The event subscription closed (its tab closed).");
+      }
+    }
+    close() { return this.tab._call("preview.cdp_events", { action: "unsubscribe", subscription: this.id }); }
+    toJSON() { return { subscription: this.id, events: this.events }; }
+  }
+
+  function cdpApi(tab) {
+    return {
+      send: async function (method, params) {
+        var result = await tab._call("preview.cdp", { method: String(method), params: params || {} });
+        return result.path ? { path: result.path, chars: result.chars, note: result.note } : result.result;
+      },
+      on: async function (events) {
+        var result = await tab._call("preview.cdp_events", { action: "subscribe", events: events });
+        return new CdpSubscription(tab, result.subscription, result.events);
+      },
+      waitForEvent: async function (event, options) {
+        var subscription = await this.on(event);
+        try {
+          var found = await subscription.next(options);
+          if (!found) throw new BrowserError("No " + event + " event in time.");
+          return found.params;
+        } finally {
+          await subscription.close().catch(function () {});
+        }
+      },
+    };
+  }
+
   class Tab {
     constructor(id) {
       this.id = id || null;
       this.lastSnapshotId = null;
       this.keyboard = new Keyboard(this);
       this.mouse = new Mouse(this);
+      this.network = networkApi(this);
+      this.cdp = cdpApi(this);
     }
     async _call(method, args) {
       var withTab = Object.assign({}, args);
@@ -371,7 +469,6 @@ export const BROWSER_PRELUDE = String.raw`(function () {
       return asLocator(this, targetOrKey).press(key, options);
     }
     console(options) { return this._call("preview.console", options); }
-    network(options) { return this._call("preview.network", options); }
     dialog(options) { return this._call("preview.dialog", options); }
     close() { return this._call("preview.close", {}); }
     call(tool, args) { return this._call("preview." + String(tool).replace(/^codara_preview_/, ""), args); }

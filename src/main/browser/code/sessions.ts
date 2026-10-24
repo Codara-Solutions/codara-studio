@@ -1,4 +1,4 @@
-// codara_preview_code sessions: one kernel (kernel.ts) per agent session, so
+// codara_browser_use sessions: one kernel (kernel.ts) per agent session, so
 // a snippet's bindings are there for the agent's next call and never for
 // another agent's. preview-tools/code.ts builds the session key from the
 // caller's resolved workspace, run or pane and the MCP process's own session
@@ -105,7 +105,7 @@ async function answer(session: Session, callId: number, execId: number, method: 
     session.kernel.reply(callId, { ok: false, error: "The snippet that made this call has already ended. Await browser calls inside your snippet." });
     return;
   }
-  if (!method.startsWith("preview.") || method === "preview.code") {
+  if (!method.startsWith("preview.")) {
     session.kernel.reply(callId, { ok: false, error: `${method} is not a browser method.` });
     return;
   }

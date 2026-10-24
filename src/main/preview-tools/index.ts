@@ -13,6 +13,7 @@ import { BrowserTabRefError, parseTabRef } from "../browser/tab-ref";
 import { scopePreviewWorkspace } from "../preview-workspace";
 import { normalizeTabGroupName } from "../../shared/tab-group-name";
 import { capturePreviewTools } from "./capture";
+import { cdpPreviewTools } from "./cdp";
 import { chromeLinkTools, chromeTargetTools } from "./chrome";
 import { codePreviewTools } from "./code";
 import { corePreviewTools } from "./core";
@@ -34,6 +35,7 @@ const TABLES: readonly PreviewToolTable[] = [
   capturePreviewTools,
   inputPreviewTools,
   devtoolsPreviewTools,
+  cdpPreviewTools,
   inboxPreviewTools,
   insightPreviewTools,
   pointPreviewTools,
