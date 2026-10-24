@@ -409,15 +409,22 @@ run fails. Clicking the alert opens Source Control.
 Alerts, on by default) puts each branch's pull request on its row in the
 rail: `#42`, draft, merged or closed, and ✓, ✕ or a dot while checks run.
 When the checks fail, the agent working on that branch gets one line:
-"CI failed on PR #42: build. Fix it with the fix-ci skill, push, and watch
-the checks." That agent is the one that created the worktree, else one in
-the workspace's panes, else one whose terminal opened in its folder. The
-line goes once per failing commit, and only while the agent is free: never
-mid-turn, while it asks for a permission, or within 20 seconds of you
-typing in its pane. Checks that go green again leave a silent note in the
+'CI failed on PR #42 (branch feat/widgets in /path/to/worktree): "build".
+Fix it with the fix-ci skill, push, and watch the checks.' The line goes
+to the agent that created the worktree; when there is none, to an agent
+in the workspace's panes; when there is none of those either, to one whose
+terminal opened in its folder (not in a worktree nested inside it). It
+waits for that agent rather than telling another one. It goes once per
+failing commit, and only while the agent is free: never mid-turn, while
+it asks for a permission, or within 20 seconds of you typing in its pane.
+In Claude Code a half-written prompt is stashed first (Ctrl+S) so it is
+not sent along. Checks that go green again leave a silent note in the
 notification center. "Stop watching pull requests in this repo" in a row's
-menu turns it off for one repository; Settings lists those with "Watch
-again".
+menu turns rows and agents off for one repository (the CI failure alert
+above still follows its own setting); Settings lists those with "Watch
+again". Branches pushed to a fork find their pull request on the parent
+repository, and ssh host aliases and GitHub Enterprise hosts you are
+signed in to with `gh` work too.
 
 Both read GitHub with your signed-in `gh`, using conditional requests: an
 unchanged pull request costs a 304, which GitHub does not count against

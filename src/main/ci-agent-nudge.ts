@@ -4,12 +4,15 @@
 //
 // The line waits while the agent is mid-turn, asking for a permission, or
 // starting, and while the user typed into that pane in the last few seconds
-// (a paste would join their draft and submit it). It goes to the first
-// agent that is free, in this order: the agent that created the worktree,
-// an agent in a pane of the worktree's workspace, an agent whose terminal
-// opened inside the worktree's folder. With no agent there it is dropped;
-// the watcher reports the failure again on its next pass, so an agent that
-// opens later still hears about it.
+// (a paste would join their draft and submit it). Agents are ranked: the
+// one that created the worktree, then the agents in panes of the worktree's
+// workspace, then those whose terminal opened inside the worktree's folder.
+// Only the best rank present may hear it, and the line waits for one of
+// them to be free: a reviewer idling next to a busy creator must not be told
+// to fix and push someone else's branch. With no agent there (a pane
+// hibernated or relaunching) the line waits up to ten minutes, then is
+// dropped; the watcher reports the failure again on later passes, so an
+// agent that opens afterwards still hears about it.
 //
 // createCiAgentNudger takes its effects as dependencies; github-ci-watch.ts
 // wires the live pty and agent notifier.
@@ -20,6 +23,7 @@ import { agentCiFailureLine } from "@shared/pull-request-watch";
 export const CI_NUDGE_RETRY_MS = 5_000;
 // Typed in the last few seconds: the user may be writing to that agent.
 export const CI_NUDGE_QUIET_INPUT_MS = 20_000;
+export const CI_NUDGE_NO_AGENT_TTL_MS = 10 * 60_000;
 const TOLD_CAP = 200;
 
 const FREE_STATES: ReadonlySet<RuntimeState> = new Set(["idle", "done"]);
@@ -29,6 +33,8 @@ export interface CiAgentPane {
   state: RuntimeState;
   /** When the pane last got input (user keys or a paste); 0 when unknown. */
   lastInputAt: number;
+  /** 0 the worktree's creator, 1 the workspace's panes, 2 terminals inside its folder. Lower wins. */
+  rank: number;
 }
 
 export interface CiFailure {
@@ -36,6 +42,8 @@ export interface CiFailure {
   number: number;
   headOid: string;
   failed: string[];
+  /** The branch on the remote, named in the line. */
+  branch?: string;
 }
 
 export interface CiAgentNudgeDeps {
@@ -63,6 +71,8 @@ interface Queued {
   workspace: Workspace;
   told: string;
   line: string;
+  /** Since when no agent was there to hear it; 0 while one is. */
+  aloneSince: number;
 }
 
 function pullRequestKey(repository: string, number: number): string {
@@ -87,10 +97,15 @@ export function createCiAgentNudger(deps: CiAgentNudgeDeps): CiAgentNudger {
     for (const [key, item] of [...queue]) {
       const panes = deps.panesFor(item.workspace);
       if (panes.length === 0) {
-        queue.delete(key);
+        if (!item.aloneSince) item.aloneSince = now;
+        if (now - item.aloneSince >= CI_NUDGE_NO_AGENT_TTL_MS) queue.delete(key);
         continue;
       }
-      const free = panes.find((pane) => FREE_STATES.has(pane.state) && now - pane.lastInputAt >= CI_NUDGE_QUIET_INPUT_MS);
+      item.aloneSince = 0;
+      const best = Math.min(...panes.map((pane) => pane.rank));
+      const free = panes.find(
+        (pane) => pane.rank === best && FREE_STATES.has(pane.state) && now - pane.lastInputAt >= CI_NUDGE_QUIET_INPUT_MS,
+      );
       if (!free) continue;
       if (!deps.type(free.paneId, item.line)) continue;
       queue.delete(key);
@@ -106,7 +121,13 @@ export function createCiAgentNudger(deps: CiAgentNudgeDeps): CiAgentNudger {
       const key = pullRequestKey(failure.repository, failure.number);
       const commit = `${key}@${failure.headOid}`;
       if (told.includes(commit)) return;
-      queue.set(key, { workspace, told: commit, line: agentCiFailureLine(failure.number, failure.failed) });
+      if (queue.get(key)?.told === commit) return;
+      queue.set(key, {
+        workspace,
+        told: commit,
+        line: agentCiFailureLine(failure.number, failure.failed, { branch: failure.branch, folder: workspace.cwd }),
+        aloneSince: 0,
+      });
       attempt();
     },
     settled(repository, number) {

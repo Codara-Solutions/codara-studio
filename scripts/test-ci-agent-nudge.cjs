@@ -34,7 +34,7 @@ const HEAD_B = "b".repeat(40);
 const WS = { id: "ws-wt", name: "browser use v2", cwd: "/wt/browser-use-v2", color: "#000", workers: [] };
 
 function failure(head = HEAD_A, failed = ["build"]) {
-  return { repository: "Acme/Widgets", number: 54, headOid: head, failed };
+  return { repository: "Acme/Widgets", number: 54, headOid: head, failed, branch: "feat/v2" };
 }
 
 function harness(nudge, panes = []) {
@@ -68,25 +68,30 @@ function harness(nudge, panes = []) {
   return h;
 }
 
-const pane = (paneId, state, lastInputAt = 0) => ({ paneId, state, lastInputAt });
-const LINE = "CI failed on PR #54: build. Fix it with the fix-ci skill, push, and watch the checks.";
+const pane = (paneId, state, lastInputAt = 0, rank = 1) => ({ paneId, state, lastInputAt, rank });
+const LINE = 'CI failed on PR #54 (branch feat/v2 in /wt/browser-use-v2): "build". Fix it with the fix-ci skill, push, and watch the checks.';
 
 const TESTS = [];
 function test(name, fn) {
   TESTS.push({ name, fn });
 }
 
-test("the line names the pull request and up to four checks, cleaned", ({ shared }) => {
-  assert.equal(shared.agentCiFailureLine(54, ["build"]), LINE);
+test("the line names the pull request, its checkout and up to four checks, cleaned", ({ shared }) => {
+  assert.equal(shared.agentCiFailureLine(54, ["build"], { branch: "feat/v2", folder: "/wt/browser-use-v2" }), LINE);
   assert.equal(
     shared.agentCiFailureLine(7, ["a", "b", "c", "d", "e", "f"]),
-    "CI failed on PR #7: a, b, c, d and 2 more. Fix it with the fix-ci skill, push, and watch the checks.",
+    'CI failed on PR #7: "a", "b", "c", "d" and 2 more. Fix it with the fix-ci skill, push, and watch the checks.',
   );
   assert.equal(shared.agentCiFailureLine(7, []), "CI failed on PR #7: a check. Fix it with the fix-ci skill, push, and watch the checks.");
-  // A workflow author picks the names: no line breaks, escapes or paste markers reach the agent.
-  const hostile = shared.agentCiFailureLine(7, ["test\r\nrm -rf ~\u001b[201~", "\u0007e2e (macOS)"]);
-  assert.equal(hostile, "CI failed on PR #7: test rm -rf 201, e2e (macOS). Fix it with the fix-ci skill, push, and watch the checks.");
+  // A workflow author picks the names: no line breaks, escapes, quotes or paste markers reach the agent.
+  const hostile = shared.agentCiFailureLine(7, ['test\r\nrm -rf ~\u001b[201~"', "\u0007e2e (macOS)"]);
+  assert.equal(hostile, 'CI failed on PR #7: "test rm -rf 201", "e2e (macOS)". Fix it with the fix-ci skill, push, and watch the checks.');
   assert.doesNotMatch(hostile, /[\u0000-\u001f\u007f]/);
+  // The checkout keeps its spaces but loses control characters.
+  assert.equal(
+    shared.agentCiFailureLine(7, ["x"], { branch: "feat/a\nb", folder: "/home/e/Codara SL/wt\u001b[2J" }),
+    'CI failed on PR #7 (branch feat/a b in /home/e/Codara SL/wt [2J): "x". Fix it with the fix-ci skill, push, and watch the checks.',
+  );
   assert.equal(shared.cleanCheckName("x".repeat(100)).length, 60);
   assert.equal(shared.normalizeRepository(" Acme/Widgets "), "acme/widgets");
   assert.equal(shared.normalizeRepository("acme"), null);
@@ -106,7 +111,7 @@ test("an idle agent is told at once, exactly once per failing commit", ({ nudge 
   // A new commit that fails is news.
   h.nudger.failing(WS, failure(HEAD_B, ["lint"]));
   assert.equal(h.typed.length, 2);
-  assert.match(h.typed[1].line, /: lint\./);
+  assert.match(h.typed[1].line, /: "lint"\./);
   assert.equal(h.nudger.queued(), 0);
 });
 
@@ -136,10 +141,20 @@ test("a pane the user typed into in the last 20 seconds waits", ({ nudge }) => {
   assert.equal(h.typed.length, 1);
 });
 
-test("the first free agent in order gets it; a pane that refuses is skipped next time", ({ nudge }) => {
-  const h = harness(nudge, [pane("creator", "working"), pane("in-workspace", "idle"), pane("in-folder", "idle")]);
+test("only the best-ranked agents hear it: a busy creator is waited for, not passed over", ({ nudge }) => {
+  const h = harness(nudge, [pane("creator", "working", 0, 0), pane("in-workspace", "idle", 0, 1), pane("in-folder", "idle", 0, 2)]);
   h.nudger.failing(WS, failure());
-  assert.deepEqual(h.typed.map((t) => t.paneId), ["in-workspace"]);
+  assert.deepEqual(h.typed, [], "an idle reviewer next to a busy creator is not told to push");
+  h.panes = [pane("creator", "done", 0, 0), pane("in-workspace", "idle", 0, 1)];
+  h.fire();
+  assert.deepEqual(h.typed.map((t) => t.paneId), ["creator"]);
+  // No creator: any free agent of the workspace, before a terminal that merely opened in the folder.
+  const nocreator = harness(nudge, [pane("in-folder", "idle", 0, 2), pane("busy", "working", 0, 1), pane("free", "idle", 0, 1)]);
+  nocreator.nudger.failing(WS, failure());
+  assert.deepEqual(nocreator.typed.map((t) => t.paneId), ["free"]);
+  const folderOnly = harness(nudge, [pane("in-folder", "idle", 0, 2)]);
+  folderOnly.nudger.failing(WS, failure());
+  assert.deepEqual(folderOnly.typed.map((t) => t.paneId), ["in-folder"]);
   const refused = harness(nudge, [pane("gone", "idle")]);
   refused.refuse.add("gone");
   refused.nudger.failing(WS, failure());
@@ -147,14 +162,25 @@ test("the first free agent in order gets it; a pane that refuses is skipped next
   assert.equal(refused.nudger.queued(), 1);
 });
 
-test("with no agent there it is dropped, and an agent that opens later still hears", ({ nudge }) => {
+test("with no agent there it waits ten minutes, so a pane waking from hibernation still hears", ({ nudge }) => {
   const h = harness(nudge, []);
   h.nudger.failing(WS, failure());
-  assert.equal(h.nudger.queued(), 0);
-  assert.deepEqual(h.timers, []);
-  h.panes = [pane("late", "idle")];
-  h.nudger.failing(WS, failure());
-  assert.deepEqual(h.typed.map((t) => t.paneId), ["late"]);
+  assert.equal(h.nudger.queued(), 1);
+  h.now += 4 * 60_000;
+  h.fire();
+  h.panes = [pane("woke", "idle")];
+  h.fire();
+  assert.deepEqual(h.typed.map((t) => t.paneId), ["woke"]);
+  const gone = harness(nudge, []);
+  gone.nudger.failing(WS, failure());
+  gone.fire();
+  gone.now += 10 * 60_000;
+  gone.fire();
+  assert.equal(gone.nudger.queued(), 0, "dropped after ten minutes alone");
+  assert.deepEqual(gone.timers, []);
+  gone.panes = [pane("late", "idle")];
+  gone.nudger.failing(WS, failure());
+  assert.deepEqual(gone.typed.map((t) => t.paneId), ["late"], "the watcher's next report reaches an agent that opens later");
 });
 
 test("green or running again drops a waiting line; a newer failing commit replaces an older one", ({ nudge }) => {
@@ -168,7 +194,7 @@ test("green or running again drops a waiting line; a newer failing commit replac
   h.panes = [pane("p1", "idle")];
   h.fire();
   assert.equal(h.typed.length, 1);
-  assert.match(h.typed[0].line, /: lint\./, "only the newest failure is typed");
+  assert.match(h.typed[0].line, /: "lint"\./, "only the newest failure is typed");
   h.nudger.failing(WS, failure(HEAD_A));
   assert.equal(h.typed.length, 2, "the older commit was never told, so it still counts");
   h.nudger.stop();
@@ -215,6 +241,22 @@ test("the second read sends If-None-Match; a 304 reuses the body for free", asyn
   assert.deepEqual(await reader.get(path), { value: [{ number: 2 }], notModified: false });
   assert.match(calls[2].join(" "), /If-None-Match: W\/"v1"/);
   reader.forget("repos/acme/");
+  assert.equal(reader.size(), 0);
+});
+
+test("a --jq read is cached apart from the plain read of the same path", async ({ conditional }) => {
+  const calls = [];
+  const reader = conditional.createConditionalGitHubReader(async (args) => {
+    calls.push(args);
+    return { stdout: included(200, { ETag: `"${calls.length}"` }, "{}") };
+  });
+  await reader.get("repos/a/b", { jq: "{fork}" });
+  assert.deepEqual(calls[0], ["api", "--include", "--method", "GET", "--jq", "{fork}", "repos/a/b"]);
+  await reader.get("repos/a/b");
+  assert.deepEqual(calls[1], ["api", "--include", "--method", "GET", "repos/a/b"], "no ETag borrowed from the filtered answer");
+  await reader.get("repos/a/b", { jq: "{fork}" });
+  assert.deepEqual(calls[2], ["api", "--include", "--method", "GET", "--header", 'If-None-Match: "1"', "--jq", "{fork}", "repos/a/b"]);
+  reader.forget("repos/a/");
   assert.equal(reader.size(), 0);
 });
 

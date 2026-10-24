@@ -7,6 +7,10 @@
 // `gh api` exits 1 on a 304 (and on a 404) but still prints the status line
 // and headers it was asked for with --include, so the answer is read from
 // stdout whatever the exit code.
+//
+// A --jq filter trims an answer before it leaves gh (check runs carry their
+// whole output text, hundreds of KB on a busy commit); the ETag still
+// applies, so a filtered read is cached and answered 304 the same way.
 
 export interface GhApiResult {
   stdout: string;
@@ -45,7 +49,7 @@ export interface ConditionalReadResult {
 }
 
 export interface ConditionalGitHubReader {
-  get(path: string): Promise<ConditionalReadResult>;
+  get(path: string, options?: { jq?: string }): Promise<ConditionalReadResult>;
   /** Forgets every path under `prefix` (a repository switched off). */
   forget(prefix: string): void;
   size(): number;
@@ -57,10 +61,12 @@ export function createConditionalGitHubReader(run: GhApiRunner): ConditionalGitH
   const cache = new Map<string, { etag: string; value: unknown }>();
 
   return {
-    async get(path) {
-      const cached = cache.get(path);
+    async get(path, options) {
+      const key = options?.jq ? `${path}\u0000${options.jq}` : path;
+      const cached = cache.get(key);
       const args = ["api", "--include", "--method", "GET"];
       if (cached) args.push("--header", `If-None-Match: ${cached.etag}`);
+      if (options?.jq) args.push("--jq", options.jq);
       args.push(path);
       let stdout: string;
       try {
@@ -74,12 +80,12 @@ export function createConditionalGitHubReader(run: GhApiRunner): ConditionalGitH
       if (!response) throw new Error("gh api answered without a status line");
       if (response.status === 304 && cached) {
         // Most recently used last, so the oldest path is evicted first.
-        cache.delete(path);
-        cache.set(path, cached);
+        cache.delete(key);
+        cache.set(key, cached);
         return { value: cached.value, notModified: true };
       }
       if (response.status === 404) {
-        cache.delete(path);
+        cache.delete(key);
         return { value: null, notModified: false };
       }
       if (response.status < 200 || response.status >= 300) {
@@ -87,9 +93,9 @@ export function createConditionalGitHubReader(run: GhApiRunner): ConditionalGitH
       }
       const value = JSON.parse(response.body) as unknown;
       const etag = response.headers.etag;
-      cache.delete(path);
+      cache.delete(key);
       if (etag) {
-        cache.set(path, { etag, value });
+        cache.set(key, { etag, value });
         while (cache.size > MAX_CACHED_PATHS) cache.delete(cache.keys().next().value as string);
       }
       return { value, notModified: false };

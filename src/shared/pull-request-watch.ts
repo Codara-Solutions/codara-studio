@@ -40,10 +40,12 @@ export function normalizeRepository(value: unknown): string | null {
   return /^[a-z0-9_.-]+\/[a-z0-9_.-]+$/.test(trimmed) ? trimmed : null;
 }
 
-// A check's name is chosen by whoever writes the workflow, and it is typed
-// into an agent as if the user said it. Only the characters a job or suite
-// name needs survive, so a name cannot carry a line break, an escape
-// sequence or a paste marker into the agent's prompt.
+// A check's name is chosen by whoever writes the workflow or posts a commit
+// status, and it is typed into an agent as if the user said it. Only the
+// characters a job or suite name needs survive, so a name cannot carry a
+// line break, an escape sequence, a quote or a paste marker into the agent's
+// prompt. The line quotes each name so it reads as data; fix-ci reads the
+// failing logs from GitHub anyway, which the same people write.
 export function cleanCheckName(name: string): string {
   return name
     .replace(/[^\p{L}\p{N} ._:/()+#@-]+/gu, " ")
@@ -52,11 +54,33 @@ export function cleanCheckName(name: string): string {
     .slice(0, 60);
 }
 
-/** The one line typed into an agent whose branch's checks failed. */
-export function agentCiFailureLine(number: number, failed: readonly string[]): string {
-  const names = failed.map(cleanCheckName).filter(Boolean);
+// Branch and folder come from the user's own checkout; only control
+// characters (escapes, line breaks) are taken out.
+function cleanLocalText(value: string, max: number): string {
+  return value
+    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, max);
+}
+
+export interface AgentCiFailurePlace {
+  branch?: string;
+  folder?: string;
+}
+
+/**
+ * The one line typed into an agent whose branch's checks failed. It names
+ * the branch and folder: the agent that created several worktrees from one
+ * pane has to know which checkout to fix.
+ */
+export function agentCiFailureLine(number: number, failed: readonly string[], place: AgentCiFailurePlace = {}): string {
+  const names = failed.map(cleanCheckName).filter(Boolean).map((name) => `"${name}"`);
   const shown = names.slice(0, 4).join(", ");
   const more = names.length > 4 ? ` and ${names.length - 4} more` : "";
   const what = shown ? `${shown}${more}` : "a check";
-  return `CI failed on PR #${number}: ${what}. Fix it with the fix-ci skill, push, and watch the checks.`;
+  const branch = place.branch ? cleanLocalText(place.branch, 120) : "";
+  const folder = place.folder ? cleanLocalText(place.folder, 200) : "";
+  const where = [branch && `branch ${branch}`, folder && `in ${folder}`].filter(Boolean).join(" ");
+  return `CI failed on PR #${number}${where ? ` (${where})` : ""}: ${what}. Fix it with the fix-ci skill, push, and watch the checks.`;
 }

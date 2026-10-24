@@ -22,6 +22,10 @@
 // one, is asked every 15 minutes. While nobody has touched the computer for
 // ten minutes it looks every five minutes instead of every minute.
 //
+// A repository switched off in the row menu shows nothing on its rows and
+// its agents are not told; it is still read for the user's own CI alert
+// when that is on, as before the watcher existed.
+//
 // A pull request whose checks had already failed before the watcher started
 // (Codara was closed, or the setting off) is not news, so it stays quiet;
 // every later failure of a new head commit, or of a re-run that went back to
@@ -40,7 +44,7 @@ import {
 } from "@shared/pull-request-watch";
 import { isRemotePath } from "@shared/remote";
 import type { AppState, Workspace } from "@shared/types";
-import type { CiAgentNudger, CiFailure } from "./ci-agent-nudge";
+import type { CiAgentNudger, CiAgentPane, CiFailure } from "./ci-agent-nudge";
 
 export const CI_WATCH_FIRST_DELAY_MS = 45_000;
 export const CI_WATCH_TICK_MS = 60_000;
@@ -103,7 +107,7 @@ export interface GitHubCiWatchDeps {
   alertsEnabled?(): boolean;
   /** "Watch pull requests": rows, agents and the green note; absent means on. */
   watchEnabled?(): boolean;
-  /** The per-repository switch; absent means every repository is watched. */
+  /** The per-repository switch (rows and agents), by the remote's owner/name; absent means every repository is watched. */
   repositoryWatched?(repository: string): boolean;
   pathExists(path: string): Promise<boolean>;
   /** The branch's refs and remote, or null when it cannot have a pull request (detached, no upstream, the default branch, not GitHub). */
@@ -142,6 +146,8 @@ interface WorkspaceTrack {
   /** What the last read said, to tell a change from a quiet minute. */
   fingerprint: string;
   retryAt: number;
+  /** The repository's switch at that read: turning it back on reads at once. */
+  on: boolean;
 }
 
 interface PullRequestTrack {
@@ -226,7 +232,7 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
     }
   }
 
-  function observe(workspace: Workspace, pr: CiPullRequestSnapshot): void {
+  function observe(workspace: Workspace, pr: CiPullRequestSnapshot, branch: string, repositoryOn: boolean): void {
     const key = `${pr.repository.toLowerCase()}#${pr.number}`;
     let track = pullRequests.get(key);
     if (!track) {
@@ -248,7 +254,7 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
       if (pr.headOid === track.firstHead) track.firstFailed = false;
       deps.nudger?.settled(pr.repository, pr.number);
       // Green after the watcher saw it fail or run, never on a first look.
-      if (checks === "passing" && before !== null && (before !== "passing" || !sameHead) && watching()) {
+      if (checks === "passing" && before !== null && (before !== "passing" || !sameHead) && watching() && repositoryOn) {
         deps.rearm(sourceKey);
         deps.publish({
           kind: "git.ci-passed",
@@ -266,8 +272,8 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
     if (pr.headOid === track.firstHead && track.firstFailed) return;
     // Every pass while it fails: the nudger tells an agent once per commit,
     // and one that opens after the failure still hears about it.
-    if (watching()) {
-      const failure: CiFailure = { repository: pr.repository, number: pr.number, headOid: pr.headOid, failed: pr.failed };
+    if (watching() && repositoryOn) {
+      const failure: CiFailure = { repository: pr.repository, number: pr.number, headOid: pr.headOid, failed: pr.failed, branch };
       deps.nudger?.failing(workspace, failure);
     }
     if (track.notified.includes(pr.headOid)) return;
@@ -324,16 +330,18 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
         show(ids, null);
         continue;
       }
-      if (deps.repositoryWatched && !deps.repositoryWatched(refs.repository)) {
+      const repositoryOn = deps.repositoryWatched?.(refs.repository) !== false;
+      const switchedOff = (workspaceId: string): PullRequestWatchEntry => ({ workspaceId, repository: refs.repository, watching: false });
+      if (!repositoryOn && !alerts()) {
         workspaces.delete(cwd);
-        show(ids, (workspaceId) => ({ workspaceId, repository: refs.repository, watching: false }));
+        show(ids, switchedOff);
         continue;
       }
       const now = deps.now();
       const track = workspaces.get(cwd);
       // New refs are asked about at once; otherwise after an error's backoff,
       // or when the pull request is due another look.
-      const moved = !track || track.refs !== refs.key;
+      const moved = !track || track.refs !== refs.key || track.on !== repositoryOn;
       const due = moved || (track.retryAt ? now >= track.retryAt : now - track.queriedAt >= track.interval);
       if (!due) continue;
       let pr: CiPullRequestSnapshot | null;
@@ -350,6 +358,7 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
           interval: wait.open,
           fingerprint: track?.fingerprint ?? "",
           retryAt: now + wait.error,
+          on: repositoryOn,
         });
         continue;
       }
@@ -362,21 +371,26 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
         const quiet = !moved && track!.fingerprint === fingerprint && !track!.retryAt;
         interval = quiet ? Math.min(track!.interval * 2, wait.settled) : wait.open;
       }
-      workspaces.set(cwd, { refs: refs.key, queriedAt: now, interval, fingerprint, retryAt: 0 });
+      workspaces.set(cwd, { refs: refs.key, queriedAt: now, interval, fingerprint, retryAt: 0, on: repositoryOn });
       if (!pr) {
-        show(ids, null);
+        show(ids, repositoryOn ? null : switchedOff);
         continue;
       }
-      if (open) observe(group[0], pr);
+      if (open) observe(group[0], pr, refs.branch, repositoryOn);
       else deps.nudger?.settled(pr.repository, pr.number);
-      const repository = pr.repository.toLowerCase();
+      if (!repositoryOn) {
+        show(ids, switchedOff);
+        continue;
+      }
+      // The row's repository is the remote's, which is what the switch is
+      // keyed on; a fork's pull request or a renamed repository can differ.
       show(ids, (workspaceId) => ({
         workspaceId,
-        repository,
+        repository: refs.repository,
         watching: true,
         pullRequest: {
           workspaceId,
-          repository,
+          repository: pr!.repository.toLowerCase(),
           number: pr!.number,
           url: pr!.url,
           title: pr!.title,
@@ -453,13 +467,14 @@ function text(value: unknown): string {
 }
 
 /**
- * The newest pull request in `GET /repos/{repo}/pulls?head=…&state=all`, in
- * the snapshot's terms; null when there is none or it is malformed. Checks
- * come from summarizeRestChecks.
+ * The branch's pull request in `GET /repos/{repo}/pulls?head=…&state=all`
+ * (newest first), in the snapshot's terms: the newest open one, else the
+ * newest; null when there is none or it is malformed. Checks come from
+ * summarizeRestChecks.
  */
 export function parseRestPullRequest(pulls: unknown): Omit<CiPullRequestSnapshot, "failed" | "failedAt" | "pending" | "passed"> | null {
   if (!Array.isArray(pulls)) return null;
-  const pull = record(pulls[0]);
+  const pull = record(pulls.find((item) => record(item)?.state === "open") ?? pulls[0]);
   if (!pull) return null;
   const url = text(pull.html_url);
   const match = /^https:\/\/[^/]+\/([^/]+\/[^/]+)\/pull\/\d+/.exec(url);
@@ -498,8 +513,12 @@ export function summarizeRestChecks(
     const run = record(raw);
     if (!run) continue;
     const completed = text(run.status).toLowerCase() === "completed";
+    // REST runs carry no workflow name; the suite stands for it, so a job
+    // named like one in another workflow keeps its own result.
+    const suite = record(run.check_suite)?.id;
     contexts.push({
       __typename: "CheckRun",
+      workflowName: suite === undefined || suite === null ? "" : String(suite),
       name: text(run.name),
       status: text(run.status).toUpperCase(),
       conclusion: completed ? text(run.conclusion).toUpperCase() : "",
@@ -530,31 +549,77 @@ export function summarizeRestChecks(
   return { failed, failedAt, pending, passed };
 }
 
-/** owner/name and host of a GitHub remote URL (https, ssh, scp-like); null for anything else. */
-export function parseGitHubRemoteUrl(url: string): { host: string; repository: string } | null {
+/** owner/name, host and whether it goes over ssh, for any remote URL (https, ssh, scp-like); null for a local path. */
+export function parseRemoteUrl(url: string): { host: string; repository: string; ssh: boolean } | null {
   const trimmed = url.trim();
-  const match =
-    /^(?:https?:\/\/(?:[^@/]+@)?|ssh:\/\/(?:[^@/]+@)?|git:\/\/)([^/:]+)(?::\d+)?\/([^/]+\/[^/]+?)(?:\.git)?\/?$/.exec(trimmed) ??
-    /^(?:[^@/:]+@)?([^/:]+):([^/]+\/[^/]+?)(?:\.git)?\/?$/.exec(trimmed);
-  if (!match) return null;
-  const host = match[1].toLowerCase();
-  const repository = normalizeRepository(match[2]);
+  const web = /^(https?:\/\/(?:[^@/]+@)?|ssh:\/\/(?:[^@/]+@)?|git:\/\/)([^/:]+)(?::\d+)?\/([^/]+\/[^/]+?)(?:\.git)?\/?$/.exec(trimmed);
+  const scp = web ? null : /^(?:[^@/:]+@)?([^/:]+):([^/]+\/[^/]+?)(?:\.git)?\/?$/.exec(trimmed);
+  const host = (web ? web[2] : scp?.[1])?.toLowerCase();
+  const repository = normalizeRepository(web ? web[3] : scp?.[2]);
+  if (!host || !repository) return null;
+  return { host, repository, ssh: !!scp || !!web?.[1].startsWith("ssh:") };
+}
+
+/** owner/name and host of a GitHub remote URL; null for anything else. */
+export function parseGitHubRemoteUrl(url: string): { host: string; repository: string } | null {
+  const remote = parseRemoteUrl(url);
   // Enterprise hosts are allowed when they say GitHub; gh knows which ones the user signed in to.
-  if (!repository || (host !== "github.com" && !host.includes("github"))) return null;
-  return { host, repository };
+  if (!remote || (remote.host !== "github.com" && !remote.host.includes("github"))) return null;
+  return { host: remote.host, repository: remote.repository };
+}
+
+/**
+ * The GitHub host gh should be asked for a remote's host, or null when it is
+ * not GitHub. An ssh remote's host may be an alias from ~/.ssh/config
+ * ("github.com-work"), so the caller resolves it first; GitHub's own ssh
+ * endpoints mean github.com; an Enterprise host counts when gh is signed in
+ * to it or its name says GitHub.
+ */
+export function githubHostFor(resolved: string, signedIn: ReadonlySet<string>): string | null {
+  const host = resolved.toLowerCase();
+  if (host === "github.com" || host === "ssh.github.com" || host === "www.github.com") return "github.com";
+  if (signedIn.has(host) || host.includes("github")) return host;
+  return null;
+}
+
+/** The hosts in gh's hosts.yml (its top-level keys). */
+export function parseGhHostsYaml(text: string): Set<string> {
+  const hosts = new Set<string>();
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^([A-Za-z0-9.-]+):\s*$/.exec(line);
+    if (match) hosts.add(match[1].toLowerCase());
+  }
+  return hosts;
+}
+
+export interface CiRemoteHostResolver {
+  /** The real host behind an ssh host alias (`ssh -G`), or the alias itself. */
+  sshHost(alias: string): Promise<string>;
+  /** Hosts gh is signed in to. */
+  signedIn(): Promise<ReadonlySet<string>>;
 }
 
 /**
  * GitHubCiWatchDeps.localRefs on plain git: one `git rev-parse` a minute per
  * workspace for HEAD, its upstream and the upstream's name. Which branch the
  * remote calls its default and where the remote points rarely change, so
- * those answers are kept for the settled requery interval.
+ * those answers are kept for the settled requery interval. Without a host
+ * resolver only hosts that say GitHub count.
  */
 export function createCiLocalRefsReader(
   read: (cwd: string, args: string[]) => Promise<string>,
   now: () => number,
+  hosts?: CiRemoteHostResolver,
 ): (cwd: string) => Promise<CiLocalRefs | null> {
-  const remotes = new Map<string, { defaultBranch: string; url: string; at: number }>();
+  const remotes = new Map<string, { defaultBranch: string; github: { host: string; repository: string } | null; at: number }>();
+  const githubOf = async (url: string): Promise<{ host: string; repository: string } | null> => {
+    if (!hosts) return parseGitHubRemoteUrl(url);
+    const remote = parseRemoteUrl(url);
+    if (!remote) return null;
+    const resolved = remote.ssh && remote.host !== "github.com" ? await hosts.sshHost(remote.host).catch(() => remote.host) : remote.host;
+    const host = githubHostFor(resolved, await hosts.signedIn().catch(() => new Set<string>()));
+    return host ? { host, repository: remote.repository } : null;
+  };
   return async (cwd) => {
     const lines = (await read(cwd, ["rev-parse", "HEAD", "@{upstream}", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"]))
       .split(/\r?\n/)
@@ -566,17 +631,14 @@ export function createCiLocalRefsReader(
     const key = `${cwd}\u0000${remote}`;
     let known = remotes.get(key);
     if (!known || now() - known.at >= CI_WATCH_SETTLED_REQUERY_MS) {
-      known = {
-        defaultBranch: await read(cwd, ["symbolic-ref", "--quiet", "--short", `refs/remotes/${remote}/HEAD`]),
-        url: await read(cwd, ["config", "--get", `remote.${remote}.url`]),
-        at: now(),
-      };
+      const defaultBranch = await read(cwd, ["symbolic-ref", "--quiet", "--short", `refs/remotes/${remote}/HEAD`]);
+      const url = await read(cwd, ["config", "--get", `remote.${remote}.url`]);
+      known = { defaultBranch, github: await githubOf(url), at: now() };
       remotes.set(key, known);
     }
     if (known.defaultBranch && known.defaultBranch === upstream) return null;
-    const github = parseGitHubRemoteUrl(known.url);
-    if (!github) return null;
-    return { key: `${head} ${upstreamOid}`, host: github.host, repository: github.repository, branch: upstream.slice(remote.length + 1) };
+    if (!known.github) return null;
+    return { key: `${head} ${upstreamOid}`, host: known.github.host, repository: known.github.repository, branch: upstream.slice(remote.length + 1) };
   };
 }
 
@@ -585,27 +647,57 @@ export function createCiLocalRefsReader(
 let live: GitHubCiWatch | null = null;
 let liveStop: (() => void) | null = null;
 
-function e2eTickMs(): number | null {
+// Only under the e2e harness: a stray variable in a user's shell must not
+// turn every backoff into a second.
+function e2eTickMs(background: boolean): number | null {
+  if (!background) return null;
   const value = Number(process.env.SPARK_E2E_PR_WATCH_TICK_MS);
   return Number.isFinite(value) && value >= 500 ? value : null;
 }
 
+const CHECK_RUNS_JQ =
+  "{check_runs: [.check_runs[] | {name, status, conclusion, started_at, completed_at, check_suite: {id: .check_suite.id}}]}";
+
+function ghConfigDir(home: string): string {
+  if (process.env.GH_CONFIG_DIR) return process.env.GH_CONFIG_DIR;
+  if (process.platform === "win32" && process.env.APPDATA) return `${process.env.APPDATA}\\GitHub CLI`;
+  return `${process.env.XDG_CONFIG_HOME || `${home}/.config`}/gh`;
+}
+
 async function productionDeps(): Promise<{ deps: GitHubCiWatchDeps; stop: () => void }> {
-  const [{ powerMonitor, webContents }, { access }, { runGit }, { resolveBinary }, github, conditional, notify, prefs, storage, pty, agents, nudge] =
-    await Promise.all([
-      import("electron"),
-      import("node:fs/promises"),
-      import("./git-exec"),
-      import("./binary-resolver"),
-      import("./github-cli"),
-      import("./github-conditional"),
-      import("./notify"),
-      import("./preferences-store"),
-      import("./storage"),
-      import("./pty-manager"),
-      import("./terminal-agent-notify"),
-      import("./ci-agent-nudge"),
-    ]);
+  const [
+    { powerMonitor, webContents },
+    { access, readFile },
+    { execFile },
+    { homedir },
+    { E2E_BACKGROUND },
+    { runGit },
+    { resolveBinary },
+    github,
+    conditional,
+    notify,
+    prefs,
+    storage,
+    pty,
+    agents,
+    nudge,
+  ] = await Promise.all([
+    import("electron"),
+    import("node:fs/promises"),
+    import("node:child_process"),
+    import("node:os"),
+    import("./e2e-background"),
+    import("./git-exec"),
+    import("./binary-resolver"),
+    import("./github-cli"),
+    import("./github-conditional"),
+    import("./notify"),
+    import("./preferences-store"),
+    import("./storage"),
+    import("./pty-manager"),
+    import("./terminal-agent-notify"),
+    import("./ci-agent-nudge"),
+  ]);
   const read = async (cwd: string, args: string[]): Promise<string> => {
     try {
       return (await runGit(cwd, args, { internal: true })).stdout.trim();
@@ -631,27 +723,40 @@ async function productionDeps(): Promise<{ deps: GitHubCiWatchDeps; stop: () => 
   };
   const inside = (root: string, path: string | null): boolean =>
     !!path && (path === root || path.startsWith(root.endsWith("/") ? root : `${root}/`));
+  // Every local workspace folder as of the last pass: a terminal inside a
+  // folder nested in this one (a worktree under .claude/worktrees) belongs
+  // to that nested workspace's branch, not this one.
+  let roots: string[] = [];
+  const runtimes = new Map<string, string>();
   const nudger = nudge.createCiAgentNudger({
     panesFor(workspace) {
       const agentPanes = agents.terminalAgentStateSnapshot().filter((entry) => entry.runtime && pty.hasSession(entry.paneId));
       const creator = workspace.copyBranch?.createdBy?.paneId;
-      const ordered = [
-        ...agentPanes.filter((entry) => entry.paneId === creator),
-        ...agentPanes.filter((entry) => entry.workspaceId === workspace.id),
-        ...agentPanes.filter((entry) => inside(workspace.cwd, pty.sessionCwd(entry.paneId))),
-      ];
-      const seen = new Set<string>();
-      return ordered
-        .filter((entry) => !seen.has(entry.paneId) && seen.add(entry.paneId))
-        .map((entry) => ({
-          paneId: entry.paneId,
-          state: entry.state,
-          lastInputAt: pty.hibernationSessionInfo(entry.paneId)?.lastInputAt ?? 0,
-        }));
+      const nested = roots.filter((root) => root !== workspace.cwd && inside(workspace.cwd, root));
+      const inFolder = (paneId: string): boolean => {
+        const cwd = pty.sessionCwd(paneId);
+        return inside(workspace.cwd, cwd) && !nested.some((root) => inside(root, cwd));
+      };
+      const rankOf = (entry: (typeof agentPanes)[number]): number | null => {
+        if (entry.paneId === creator) return 0;
+        if (entry.workspaceId === workspace.id) return 1;
+        return inFolder(entry.paneId) ? 2 : null;
+      };
+      runtimes.clear();
+      const panes: CiAgentPane[] = [];
+      for (const entry of agentPanes) {
+        const rank = rankOf(entry);
+        if (rank === null) continue;
+        runtimes.set(entry.paneId, String(entry.runtime));
+        panes.push({ paneId: entry.paneId, state: entry.state, rank, lastInputAt: pty.hibernationSessionInfo(entry.paneId)?.lastInputAt ?? 0 });
+      }
+      return panes;
     },
     type(paneId, line) {
       if (!pty.hasSession(paneId)) return false;
-      pty.inject(paneId, line, { submit: true });
+      // Claude parks a draft older than the quiet window (Ctrl+S) and brings
+      // it back after the line is sent, so the two are never submitted together.
+      pty.inject(paneId, line, { submit: true, stashDraft: runtimes.get(paneId) === "claude" });
       // A submitted line starts the agent's turn, as the user's Enter would.
       agents.noteTerminalUserInput(paneId);
       return true;
@@ -671,8 +776,32 @@ async function productionDeps(): Promise<{ deps: GitHubCiWatchDeps; stop: () => 
   const unsubscribe = prefs.onPreferenceChange((key) => {
     if (key === "watchPullRequests" || key === "notifyCiFailures" || key === "pullRequestWatchOffRepos") live?.nudge();
   });
+  const run = (file: string, args: string[]): Promise<string> =>
+    new Promise((resolve, reject) =>
+      execFile(file, args, { timeout: 5_000, maxBuffer: 256 * 1024, windowsHide: true }, (error, stdout) =>
+        error ? reject(error) : resolve(String(stdout)),
+      ),
+    );
+  let signedIn: { hosts: Set<string>; at: number } | null = null;
+  const hosts: CiRemoteHostResolver = {
+    async sshHost(alias) {
+      const config = await run("ssh", ["-G", "--", alias]);
+      return /^hostname\s+(\S+)/m.exec(config)?.[1] ?? alias;
+    },
+    async signedIn() {
+      if (!signedIn || Date.now() - signedIn.at >= CI_WATCH_SETTLED_REQUERY_MS) {
+        const text = await readFile(`${ghConfigDir(homedir())}/hosts.yml`, "utf8").catch(() => "");
+        signedIn = { hosts: parseGhHostsYaml(text), at: Date.now() };
+      }
+      return signedIn.hosts;
+    },
+  };
   const deps: GitHubCiWatchDeps = {
-    loadState: storage.loadState,
+    async loadState() {
+      const state = await storage.loadState();
+      roots = state.workspaces.filter((workspace) => !isRemotePath(workspace.cwd)).map((workspace) => workspace.cwd);
+      return state;
+    },
     enabled: () => watchEnabled() || alertsEnabled(),
     alertsEnabled,
     watchEnabled,
@@ -685,21 +814,29 @@ async function productionDeps(): Promise<{ deps: GitHubCiWatchDeps; stop: () => 
         return false;
       }
     },
-    localRefs: createCiLocalRefsReader(read, Date.now),
+    localRefs: createCiLocalRefsReader(read, Date.now, hosts),
     async readPullRequest(_cwd, refs) {
       // Without gh there is nothing to watch; asked again in 15 minutes.
       const executablePath = await resolveBinary("gh");
       if (!executablePath) return null;
       const reader = readerFor(executablePath, refs.host);
       const [owner] = refs.repository.split("/");
-      const base = `repos/${refs.repository}`;
+      const pullsIn = (repository: string) =>
+        reader.get(`repos/${repository}/pulls?head=${encodeURIComponent(`${owner}:${refs.branch}`)}&state=all&per_page=5`);
       try {
-        const pulls = await reader.get(`${base}/pulls?head=${encodeURIComponent(`${owner}:${refs.branch}`)}&state=all&per_page=5`);
-        const pull = parseRestPullRequest(pulls.value);
+        let pull = parseRestPullRequest((await pullsIn(refs.repository)).value);
+        if (!pull) {
+          // A branch pushed to the user's fork has its pull request on the parent.
+          const repo = record((await reader.get(`repos/${refs.repository}`, { jq: "{fork, parent: .parent.full_name}" })).value);
+          const parent = repo?.fork === true ? normalizeRepository(repo.parent) : null;
+          if (parent) pull = parseRestPullRequest((await pullsIn(parent)).value);
+        }
         if (!pull) return null;
         if (pull.phase === "merged" || pull.phase === "closed") return { ...pull, failed: [], failedAt: 0, pending: 0, passed: 0 };
+        // Checks live on the repository the pull request is in.
+        const base = `repos/${pull.repository}`;
         const [runs, status] = await Promise.all([
-          reader.get(`${base}/commits/${pull.headOid}/check-runs?per_page=100`),
+          reader.get(`${base}/commits/${pull.headOid}/check-runs?per_page=100`, { jq: CHECK_RUNS_JQ }),
           reader.get(`${base}/commits/${pull.headOid}/status?per_page=100`),
         ]);
         return { ...pull, ...summarizeRestChecks(runs.value, status.value) };
@@ -736,7 +873,7 @@ async function productionDeps(): Promise<{ deps: GitHubCiWatchDeps; stop: () => 
       }
     },
   };
-  const tick = e2eTickMs();
+  const tick = e2eTickMs(E2E_BACKGROUND);
   // End-to-end runs ask every tick: nothing waits minutes for a requery.
   if (tick) deps.intervals = { first: tick, tick, idleTick: tick, open: tick, settled: tick, error: tick };
   return {

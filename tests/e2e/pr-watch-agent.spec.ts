@@ -14,10 +14,12 @@ const execFileAsync = promisify(execFile);
 // workspace's pane that records what it is sent. The checks of PR #42 run,
 // then fail while the agent is mid-turn: the row shows it at once, the line
 // for the agent waits until its turn ends and arrives once. Green checks
-// turn the row's mark green, unchanged answers cost 304s, and switching the
-// repository off from the row menu stops the reads.
+// turn the row's mark green, unchanged answers cost 304s, and with the
+// repository switched off from the row menu a new failing commit leaves the
+// row blank and the agent untold.
 
-const LINE = "CI failed on PR #42: build. Fix it with the fix-ci skill, push, and watch the checks.";
+const LINE_START = "CI failed on PR #42 (branch feat/widgets in ";
+const LINE_END = '): "build". Fix it with the fix-ci skill, push, and watch the checks.';
 
 interface Fixture {
   env: Record<string, string>;
@@ -78,10 +80,14 @@ test("a failing check reaches the agent on its branch once it is free, and the r
     await test.step("its turn ends: the line arrives, once", async () => {
       await writeFile(fixture.releaseFile, "done\n", "utf8");
       // The line also waits out 20 seconds after the user last typed there.
-      await expect.poll(() => recorded(fixture.recordFile), { timeout: 60_000 }).toContain(LINE);
+      await expect.poll(() => recorded(fixture.recordFile), { timeout: 60_000 }).toContain(LINE_END);
       await page.waitForTimeout(6_000);
       const received = await recorded(fixture.recordFile);
       expect(received.split("CI failed").length - 1).toBe(1);
+      // Claude's Ctrl+S parks any draft first, so the two are never submitted together.
+      const stash = received.lastIndexOf("\x13", received.indexOf(LINE_START));
+      expect(stash).toBeGreaterThanOrEqual(0);
+      expect(received.slice(stash, received.indexOf(LINE_START))).toMatch(/^\x13(\x1b\[200~)?$/);
       expect(paneId).toBeTruthy();
     });
 
@@ -95,13 +101,20 @@ test("a failing check reaches the agent on its branch once it is free, and the r
       expect(log.some((call) => call.includes(`repos/acme/widgets/commits/${fixture.head}/check-runs`))).toBe(true);
     });
 
-    await test.step("switched off from the row menu, the repository is not read again", async () => {
+    await test.step("switched off from the row menu, the row shows nothing and the agent is not told", async () => {
       await openRowMenu(page, "ws-wt");
       await page.getByRole("menuitem", { name: "Stop watching pull requests in this repo" }).click();
       await expect(mark).toHaveCount(0, { timeout: 10_000 });
+      // A new commit fails: the user's own CI alert still reads it, the agent hears nothing.
+      const pulls = JSON.parse(await readFile(join(fixture.ghDir, "pulls.json"), "utf8"));
+      pulls[0].head.sha = "c".repeat(40);
+      await writeFile(join(fixture.ghDir, "pulls.json"), JSON.stringify(pulls), "utf8");
+      await writeChecks(fixture, "failing");
       const before = (await calls(fixture)).length;
-      await page.waitForTimeout(4_000);
-      expect((await calls(fixture)).length).toBe(before);
+      await expect.poll(async () => (await calls(fixture)).some((call, index) => index >= before && call.includes("c".repeat(40))), { timeout: 15_000 }).toBe(true);
+      await page.waitForTimeout(25_000);
+      expect((await recorded(fixture.recordFile)).split("CI failed").length - 1).toBe(1);
+      await expect(mark).toHaveCount(0);
       await openRowMenu(page, "ws-wt");
       await expect(page.getByRole("menuitem", { name: "Watch pull requests in this repo" })).toBeVisible();
       await page.keyboard.press("Escape");
@@ -230,6 +243,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --header) match="$(printf '%s' "$2" | sed -n 's/^If-None-Match: //p')"; shift 2 ;;
     --include|-i) shift ;;
+    --jq) shift 2 ;;
     --method) shift 2 ;;
     *) path="$1"; shift ;;
   esac

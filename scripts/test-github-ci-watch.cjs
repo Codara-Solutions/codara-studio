@@ -183,6 +183,8 @@ test("parseRestPullRequest reads the newest pull request and its phase", ({ mod 
   assert.equal(mod.parseRestPullRequest(null), null);
   assert.equal(mod.parseRestPullRequest([pull({ head: { sha: "nope" } })]), null);
   assert.equal(mod.parseRestPullRequest([pull({ html_url: "ftp://x/a/b/pull/1" })]), null);
+  // A newer closed duplicate does not hide the open pull request.
+  assert.equal(mod.parseRestPullRequest([pull({ number: 50, state: "closed" }), pull({ number: 42 })]).number, 42);
 });
 
 test("summarizeRestChecks reads failing, running and passing checks and statuses", ({ mod }) => {
@@ -232,6 +234,28 @@ test("summarizeRestChecks judges each check by its newest run", ({ mod }) => {
     const parsed = view(runs);
     assert.deepEqual([parsed.failed, parsed.pending], [[], 1]);
   }
+});
+
+test("same-named jobs in different workflows keep their own results", ({ mod }) => {
+  const at = (minute) => `2026-10-01T10:${String(minute).padStart(2, "0")}:00Z`;
+  const runs = [
+    { ...run("build", "completed", "failure", { started: at(0), completed: at(5) }), check_suite: { id: 1 } },
+    { ...run("build", "completed", "success", { started: at(1), completed: at(6) }), check_suite: { id: 2 } },
+  ];
+  assert.deepEqual(mod.summarizeRestChecks({ check_runs: runs }, null).failed, ["build"]);
+});
+
+test("remote hosts: ssh aliases, GitHub's ssh endpoint and signed-in Enterprise hosts", ({ mod }) => {
+  assert.deepEqual(mod.parseRemoteUrl("git@github.com-work:Acme/Widgets.git"), { host: "github.com-work", repository: "acme/widgets", ssh: true });
+  assert.deepEqual(mod.parseRemoteUrl("ssh://git@ssh.github.com:443/acme/widgets"), { host: "ssh.github.com", repository: "acme/widgets", ssh: true });
+  assert.deepEqual(mod.parseRemoteUrl("https://code.corp/acme/widgets"), { host: "code.corp", repository: "acme/widgets", ssh: false });
+  assert.equal(mod.parseRemoteUrl("/srv/remote.git"), null);
+  const signedIn = mod.parseGhHostsYaml("github.com:\n    user: e\n    git_protocol: ssh\ncode.corp:\n    user: e\n");
+  assert.deepEqual([...signedIn], ["github.com", "code.corp"]);
+  assert.equal(mod.githubHostFor("ssh.github.com", signedIn), "github.com");
+  assert.equal(mod.githubHostFor("code.corp", signedIn), "code.corp");
+  assert.equal(mod.githubHostFor("github.acme.corp", new Set()), "github.acme.corp");
+  assert.equal(mod.githubHostFor("gitlab.com", signedIn), null);
 });
 
 test("parseGitHubRemoteUrl takes https, ssh and scp-like GitHub remotes only", ({ mod }) => {
@@ -306,6 +330,19 @@ test("local refs: one git call a minute, the remote looked up once per interval"
     assert.equal(await localRefs(repo), null, "no upstream yet");
     git(repo, ["checkout", "-q", "--detach"]);
     assert.equal(await localRefs(repo), null, "a detached HEAD has no pull request");
+    // An ssh host alias resolves to github.com before gh is asked.
+    git(repo, ["checkout", "-q", "feat/x"]);
+    git(repo, ["remote", "set-url", "origin", "git@github.com-work:Acme/Widgets.git"]);
+    const aliases = [];
+    const resolved = mod.createCiLocalRefsReader(read, () => now, {
+      sshHost: async (alias) => {
+        aliases.push(alias);
+        return "github.com";
+      },
+      signedIn: async () => new Set(["github.com"]),
+    });
+    assert.deepEqual(await resolved(repo), expected);
+    assert.deepEqual(aliases, ["github.com-work"]);
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
@@ -344,7 +381,9 @@ test("a pull request first seen already failing alerts when it failed after the 
   assert.equal(h.reads.length, 2);
   assert.equal(h.published.length, 1);
   assert.equal(h.published[0].title, "CI failed on pull request #42");
-  assert.deepEqual(h.failing, [{ workspaceId: "ws-1", repository: "acme/widgets", number: 42, headOid: HEAD_A, failed: ["build"] }]);
+  assert.deepEqual(h.failing, [
+    { workspaceId: "ws-1", repository: "acme/widgets", number: 42, headOid: HEAD_A, failed: ["build"], branch: "feat/widgets" },
+  ]);
   h.advance(15 * 60_000);
   await h.pass();
   assert.equal(h.published.length, 1, "the user hears once per failing commit");
@@ -518,20 +557,41 @@ test("rows get the pull request's phase and checks, once per change", async ({ m
   assert.deepEqual(h.entries.at(-1), { workspaceId: "ws-2", entry: null });
 });
 
-test("a repository switched off is never read and says so on its rows", async ({ mod }) => {
+test("a repository switched off says so on its rows and tells no agent; it is read only for the user's alert", async ({ mod }) => {
   const h = harness(mod, { prs: { "/repo": pr(HEAD_A, { pending: 1 }) } });
   await h.pass();
   h.off.add("acme/widgets");
   h.advance(60_000);
   await h.pass();
-  assert.equal(h.reads.length, 1);
-  assert.deepEqual(h.entries.at(-1), { workspaceId: "ws-1", entry: { workspaceId: "ws-1", repository: "acme/widgets", watching: false } });
+  const off = { workspaceId: "ws-1", entry: { workspaceId: "ws-1", repository: "acme/widgets", watching: false } };
+  assert.deepEqual(h.entries.at(-1), off);
+  // "Notify me when CI fails" is its own setting and still holds.
+  h.prs["/repo"] = pr(HEAD_A, { failed: ["build"] });
+  h.advance(60_000);
+  await h.pass();
+  assert.equal(h.published.length, 1, "the user is still alerted");
+  assert.equal(h.failing.length, 0, "no agent is told");
+  assert.deepEqual(h.entries.at(-1), off);
+  // With that alert off too, the repository is not read at all.
+  h.alerts = false;
+  const reads = h.reads.length;
   h.advance(60 * 60_000);
   await h.pass();
-  assert.equal(h.reads.length, 1);
+  assert.equal(h.reads.length, reads);
   h.off.clear();
+  h.alerts = true;
   await h.pass();
-  assert.equal(h.reads.length, 2, "switched back on, it is read at once");
+  assert.equal(h.reads.length, reads + 1, "switched back on, it is read at once");
+  assert.equal(h.entries.at(-1).entry.watching, true);
+});
+
+test("the row's repository is the remote's, which the switch is keyed on", async ({ mod }) => {
+  // A fork's pull request lives on the parent; a renamed repository answers with its new name.
+  const h = harness(mod, { prs: { "/repo": { ...pr(HEAD_A, { pending: 1 }), repository: "Upstream/Widgets" } } });
+  await h.pass();
+  const entry = h.entries.at(-1).entry;
+  assert.equal(entry.repository, "acme/widgets");
+  assert.equal(entry.pullRequest.repository, "upstream/widgets");
 });
 
 // ── Cadence ─────────────────────────────────────────────────────────────────
