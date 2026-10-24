@@ -20,23 +20,6 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-      - name: argv probe
-        run: |
-          cat > "$RUNNER_TEMP/probe.pl" <<'PERL'
-          my $max = pack("i", 0); my $len = pack("Q", 4);
-          my $r = syscall(202, pack("i2", 1, 8), 2, $max, $len, 0, 0);
-          print "argmax r=$r err=$! max=", unpack("i", $max), " len=", unpack("Q", $len), "\n";
-          my $size = unpack("i", $max);
-          my $buf = "\0" x $size; $len = pack("Q", $size);
-          $r = syscall(202, pack("i3", 1, 49, $ARGV[0]), 3, $buf, $len, 0, 0);
-          print "procargs r=$r err=$! len=", unpack("Q", $len), "\n";
-          my $n = unpack("Q", $len); my $show = substr($buf, 0, $n > 200 ? 200 : $n); $show =~ s/\0/|/g;
-          print "head: $show\n";
-          PERL
-          sleep 30 & pid=$!
-          perl -v | head -2
-          perl "$RUNNER_TEMP/probe.pl" $pid; echo "exit=$?"
-          kill $pid
       - run: npm ci
       - run: npm run build
       - run: npx playwright install chromium

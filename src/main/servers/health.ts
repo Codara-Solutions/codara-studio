@@ -88,30 +88,60 @@ export async function processCommand(pid: number): Promise<{ command: string; cw
 
 // `ps -o args=` joins argv with spaces, so `node -e 'a b'` would come back as
 // a line that no longer starts the same process. The kernel keeps argv
-// separated (sysctl KERN_PROCARGS2, what ps itself reads); macOS ships Perl,
-// whose syscall() is the one way to reach it without a native module.
-// Layout: int argc, the executable path, NUL padding, then argc strings.
-const DARWIN_ARGV_SCRIPT = String.raw`
-my $max = pack("i", 0); my $len = pack("Q", 4);
-syscall(202, pack("i2", 1, 8), 2, $max, $len, 0, 0) == 0 or exit 1;
-my $size = unpack("i", $max);
-my $buf = "\0" x $size; $len = pack("Q", $size);
-syscall(202, pack("i3", 1, 49, $ARGV[0]), 3, $buf, $len, 0, 0) == 0 or exit 1;
-$buf = substr($buf, 0, unpack("Q", $len));
-my $argc = unpack("i", $buf);
-my ($rest) = substr($buf, 4) =~ /^[^\0]*\0+(.*)\z/s or exit 1;
-my @argv = split /\0/, $rest, -1;
-exit 1 if $argc < 1 || @argv < $argc;
-print join("\0", @argv[0 .. $argc - 1]);
+// separated (sysctl KERN_PROCARGS2, what ps itself reads). Without a native
+// module the one way to it that every Mac ships is JavaScript for
+// Automation, whose ObjC bridge can call sysctl; the bytes come back as
+// base64 and are parsed here.
+const DARWIN_PROCARGS_SCRIPT = `
+ObjC.import("Foundation");
+ObjC.bindFunction("sysctl", ["int", ["void *", "unsigned int", "void *", "void *", "void *", "unsigned long"]]);
+function run(argv) {
+  const data = (b64) => $.NSMutableData.alloc.initWithBase64EncodedStringOptions(b64, 0);
+  const mib = data(argv[0]);
+  const len = data(argv[2]);
+  const buf = $.NSMutableData.dataWithLength(Number(argv[1]));
+  if ($.sysctl(mib.mutableBytes, 3, buf.mutableBytes, len.mutableBytes, null, 0) !== 0) return "";
+  return len.base64EncodedStringWithOptions(0).js + " " + buf.base64EncodedStringWithOptions(0).js;
+}
 `;
+const DARWIN_ARGV_TIMEOUT_MS = 5_000;
 
-function darwinArgv(pid: number): Promise<string[] | null> {
+/** KERN_PROCARGS2's layout: int argc, the executable path, NUL padding, then argc NUL-terminated strings. */
+export function parseProcArgs(buf: Buffer): string[] | null {
+  if (buf.length < 4) return null;
+  const argc = buf.readInt32LE(0);
+  let at = buf.indexOf(0, 4);
+  if (argc < 1 || at < 0) return null;
+  while (at < buf.length && buf[at] === 0) at += 1;
+  const argv: string[] = [];
+  while (argv.length < argc) {
+    const end = buf.indexOf(0, at);
+    if (end < 0) return null;
+    argv.push(buf.toString("utf8", at, end));
+    at = end + 1;
+  }
+  return argv;
+}
+
+async function darwinArgv(pid: number): Promise<string[] | null> {
+  const argMax = Number((await run("sysctl", ["-n", "kern.argmax"]))?.trim());
+  if (!Number.isInteger(argMax) || argMax <= 0) return null;
+  const mib = Buffer.alloc(12);
+  [1, 49, pid].forEach((value, index) => mib.writeInt32LE(value, index * 4));
+  const len = Buffer.alloc(8);
+  len.writeBigUInt64LE(BigInt(argMax));
   return new Promise((resolve) => {
     execFile(
-      "/usr/bin/perl",
-      ["-e", DARWIN_ARGV_SCRIPT, String(pid)],
-      { timeout: OWNER_TIMEOUT_MS, maxBuffer: 2 * 1024 * 1024 },
-      (error, stdout) => resolve(error || !stdout ? null : String(stdout).split("\0")),
+      "osascript",
+      ["-l", "JavaScript", "-e", DARWIN_PROCARGS_SCRIPT, mib.toString("base64"), String(argMax), len.toString("base64")],
+      { timeout: DARWIN_ARGV_TIMEOUT_MS, maxBuffer: 4 * argMax },
+      (error, stdout) => {
+        const [lenOut, bufOut] = String(stdout ?? "").trim().split(" ");
+        const sizeBytes = Buffer.from(lenOut ?? "", "base64");
+        if (error || !bufOut || sizeBytes.length !== 8) return resolve(null);
+        const size = Number(sizeBytes.readBigUInt64LE(0));
+        resolve(parseProcArgs(Buffer.from(bufOut, "base64").subarray(0, size)));
+      },
     );
   });
 }

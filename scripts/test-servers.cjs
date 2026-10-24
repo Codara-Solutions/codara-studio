@@ -255,7 +255,7 @@ async function main() {
       export * from "./servers/detect";
       export * from "./servers/keeper";
       export { createServerStore, serversFile } from "./servers/store";
-      export { portAnswers, portOwner, processCommand, shellWord } from "./servers/health";
+      export { parseProcArgs, portAnswers, portOwner, processCommand, shellWord } from "./servers/health";
       export { createPaneLearner } from "./servers/pane-learner";
       export { createStatusRegistry } from "./servers/status";
       export { AgentTerminalRegistry } from "./agent-terminal-registry";
@@ -320,6 +320,16 @@ async function main() {
     assert.throws(() => lib.checkServerCommand(`$env:KEY="a$b"; pnpm dev`), /KEY's value/);
     assert.deepEqual(lib.checkServerCommand("PORT=$PORT pnpm dev"), { command: "PORT=$PORT pnpm dev", env: {} });
     assert.deepEqual(lib.checkServerCommand("pnpm dev FOO=bar"), { command: "pnpm dev FOO=bar", env: {} });
+  });
+
+  await check("macOS argv blocks keep each argument whole", () => {
+    const argc = Buffer.alloc(4);
+    argc.writeInt32LE(3);
+    const block = (count, body) => Buffer.concat([count, Buffer.from(body)]);
+    assert.deepEqual(lib.parseProcArgs(block(argc, "/usr/bin/node\0\0\0\0node\0-e\0a b\0HOME=/x\0")), ["node", "-e", "a b"]);
+    assert.deepEqual(lib.parseProcArgs(block(argc, "/bin/x\0\0x\0\0é\0")), ["x", "", "é"], "an empty argument stays");
+    assert.equal(lib.parseProcArgs(block(argc, "/bin/x\0\0only\0two")), null, "a cut-off block");
+    assert.equal(lib.parseProcArgs(Buffer.alloc(2)), null);
   });
 
   await check("the command line and folder of a running process, to start it again", async () => {
