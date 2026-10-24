@@ -423,12 +423,18 @@ export const BROWSER_PRELUDE = String.raw`(function () {
     return text ? { text: out } : { json: out };
   }
 
+  var MAX_ERROR_CHARS = 4000;
+  function clip(text, max) {
+    text = String(text);
+    return text.length > max ? text.slice(0, max) + " ... (" + (text.length - max) + " more characters)" : text;
+  }
+
   function describeError(error) {
     if (error instanceof Error) {
       var line = typeof error.stack === "string" ? /snippet\.js:(\d+)/.exec(error.stack) : null;
-      return error.name + ": " + error.message + (line ? " (line " + line[1] + ")" : "");
+      return clip(error.name + ": " + error.message, MAX_ERROR_CHARS) + (line ? " (line " + line[1] + ")" : "");
     }
-    return "Thrown: " + format(error);
+    return clip("Thrown: " + format(error), MAX_ERROR_CHARS);
   }
 
   return function settle(id, promise) {

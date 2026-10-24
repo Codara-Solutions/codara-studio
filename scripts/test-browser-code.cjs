@@ -7,9 +7,11 @@
 // - the kernel is a sandbox: no require, process, fetch, import or host
 //   functions, a loop that never awaits is interrupted and the session lives
 //   on, a timeout keeps the bindings, calls made after a snippet ended are
-//   refused;
+//   refused, and timers, loops or calls a finished or timed-out snippet left
+//   behind never act during the next one; huge errors and console lines are
+//   cut inside the kernel;
 // - sessions: one per key, reset, the idle and dead-owner sweep, at most six
-//   screenshots per call kept in main;
+//   screenshots per call kept in main, a hard cap of sixteen sessions;
 // - on a real Chromium page, through the same page ops the Chrome tabs use:
 //   a login form, a table and a settings form driven with Playwright-style
 //   locators, strict-mode failures, and a session binding reused by the next
@@ -80,6 +82,8 @@ async function transformAndSessions() {
   assert.deepEqual([result.ok, "result" in result, "text" in result], [true, false, false], "undefined has no value");
   result = await run('"use strict"; const strictValue = 4; strictValue');
   assert.equal(result.result, 4, "a use strict prologue still persists declarations");
+  result = await run("const pair = (1, 2); let inc = (x => x + 1), base = (3); inc(pair + base)");
+  assert.equal(result.result, 6, "an initializer keeps its own parentheses");
   result = await run("return 7");
   assert.equal(result.result, 7, "an explicit return is the value");
   result = await run("x y");
@@ -96,6 +100,14 @@ async function transformAndSessions() {
   assert.deepEqual(result.result, { when: { k: 1 }, set: [1, 2], self: { o: "[Circular]" } });
   result = await run("throw new TypeError('nope')");
   assert.deepEqual([result.ok, result.error], [false, "TypeError: nope (line 1)"]);
+  for (const huge of ["throw new Error('x'.repeat(2e7))", "throw 'x'.repeat(2e7)", "throw { big: 'x'.repeat(2e7) }"]) {
+    result = await run(huge);
+    assert.equal(result.ok, false);
+    assert.ok(result.error.length < 4_200, `a huge error is cut before it leaves the kernel (${huge}: ${result.error.length})`);
+    assert.match(result.error, /more characters\)/);
+  }
+  result = await run("console.log('y'.repeat(3e6)); 'logged'");
+  assert.deepEqual([result.text, result.logs], ["logged", ["(a console line over 1 MB was dropped)"]]);
 
   // The sandbox: nothing of Node or the host is reachable.
   result = await run("[typeof require, typeof process, typeof fetch, typeof Buffer, typeof __cbCall, typeof __cbInit, typeof WebAssembly, this.constructor.constructor('return typeof process')()]");
@@ -152,6 +164,34 @@ async function transformAndSessions() {
   await sleep(300);
   assert.equal(seen.length, before, "a call made after its snippet ended never reaches the browser");
 
+  // Work a snippet leaves running is suspended for good, so it never acts
+  // while a later snippet runs, with that snippet's dispatcher.
+  const leftover = seen.length;
+  result = await run(`
+    setInterval(() => browser.call("list", {}), 20);
+    (async () => { for (;;) { await sleep(20); await browser.call("list", {}).catch(() => {}); } })();
+    "left running"`, { dispatch });
+  assert.equal(result.text, "left running");
+  result = await run("await sleep(400); 'next'", { dispatch });
+  assert.deepEqual([result.text, result.calls, seen.length], ["next", 0, leftover], "a finished snippet's timers and loops never call again");
+
+  result = await run("for (;;) { await sleep(20); await browser.call('list', {}); }", { dispatch, timeoutMs: 200 });
+  assert.match(result.error, /did not finish within/);
+  const timedOut = seen.length;
+  assert.ok(timedOut > leftover, "the loop made calls before its timeout");
+  result = await run("await sleep(400); 'after timeout'", { dispatch });
+  assert.deepEqual([result.text, result.calls, seen.length], ["after timeout", 0, timedOut], "a timed-out loop never acts during the next snippet");
+
+  // A call already on its way when the snippet timed out gets no answer back.
+  let release;
+  const slow = (method) => (method === "preview.list" ? new Promise((resolve) => { release = () => resolve({ tabs: [] }); }) : dispatch(method));
+  result = await run("globalThis.resumed = false; await browser.call('list', {}); globalThis.resumed = true; 'done'", { dispatch: slow, timeoutMs: 150 });
+  assert.match(result.error, /did not finish within/);
+  release();
+  await sleep(100);
+  result = await run("resumed");
+  assert.equal(result.result, false, "a timed-out snippet does not resume when its last call answers");
+
   result = await run("typeof a", { key: "session-2" });
   assert.equal(result.text, "undefined", "another session has none of these bindings");
   result = await run("typeof a", { reset: true });
@@ -168,6 +208,19 @@ async function transformAndSessions() {
   assert.equal(code.browserCodeSessionCount(), count - 1, "the owner's exit ends its session");
   code.sweepBrowserCodeSessions(Date.now() + 21 * 60_000);
   assert.equal(code.browserCodeSessionCount(), 0, "idle sessions end after 20 minutes");
+
+  // The session cap is hard: busy sessions are never evicted, so a new
+  // session is refused while all sixteen run.
+  const busy = Array.from({ length: 16 }, (_, index) => run("await sleep(1500); 'busy'", { key: `cap-${index}` }));
+  await sleep(300);
+  result = await run("1", { key: "cap-16" });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /16 browser code sessions are running/);
+  assert.ok((await Promise.all(busy)).every((entry) => entry.text === "busy"));
+  result = await run("2", { key: "cap-16" });
+  assert.equal(result.result, 2, "an idle session makes room again");
+  assert.equal(code.browserCodeSessionCount(), 16);
+  await code.closeBrowserCodeSessions();
 }
 
 const APP = `<!doctype html><title>Acme</title>

@@ -30,7 +30,9 @@ export const DEFAULT_KERNEL_LIMITS: BrowserKernelLimits = {
 export type MainToKernel =
   | { type: "start"; limits: BrowserKernelLimits; docs: string }
   | { type: "exec"; id: number; code: string }
-  | { type: "reply"; callId: number; ok: boolean; value?: unknown; error?: string };
+  | { type: "reply"; callId: number; ok: boolean; value?: unknown; error?: string }
+  /** Main gave up on the snippet (timeout); its outstanding work never resumes. */
+  | { type: "cancel"; id: number };
 
 /** A snippet's value: text for a string, JSON text for anything else, nothing for undefined. */
 export interface KernelValue {
@@ -41,6 +43,7 @@ export interface KernelValue {
 
 export type KernelToMain =
   | { type: "ready" }
-  | { type: "call"; callId: number; method: string; args: Record<string, unknown> }
+  /** execId: the snippet running when the guest made the call. */
+  | { type: "call"; callId: number; execId: number; method: string; args: Record<string, unknown> }
   | { type: "done"; id: number; ok: boolean; value?: KernelValue; error?: string; logs: string[] }
   | { type: "fatal"; error: string };

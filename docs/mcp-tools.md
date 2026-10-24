@@ -216,8 +216,10 @@ return await tab.snapshot({ diff: true });
   objects, a 64 MB heap, and an interrupt for a loop that never awaits (5 s).
 - A session belongs to one agent session: a new agent, `reset: true`, the
   agent's exit or 20 idle minutes start over. A timeout (default 30 s, at
-  most 110 s) keeps the bindings. An imported pull request's run may not use
-  it, and Cora's fenced workers treat it like `codara_preview_evaluate`.
+  most 110 s) stops the snippet and keeps the bindings; timers and calls a
+  snippet leaves waiting never run. An imported pull request's run may not
+  use it, and Cora's fenced workers treat it like `codara_preview_evaluate`
+  and block it when any other browser tool is blocked.
 
 Design and measurements: [browser-code-mode.md](browser-code-mode.md).
 

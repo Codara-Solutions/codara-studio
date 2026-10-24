@@ -111,18 +111,26 @@ agent ── MCP stdio ──▶ server.js ── agent socket ──▶ main: p
    the snippet passed, and calls `runPreviewTool`, the function the socket
    uses for every browser tool. Workspace scoping, a run's own tabs,
    `chrome:` tab access, the user's block list and the dialog guard all
-   apply per call. A call made after its snippet ended (an unawaited timer)
-   is refused. `preview.code` itself is refused for an imported pull-request
-   run, and Cora's worker fences treat it like `codara_preview_evaluate`.
+   apply per call. Each call carries the id of the snippet that was running
+   when the guest made it, and main answers only calls of the snippet it is
+   waiting for. When a snippet ends or times out, the kernel drops every
+   browser call and sleep it left waiting without settling them, so an
+   unawaited loop or timer stays suspended for good and never acts while a
+   later snippet runs. Inside the kernel, an error is cut at 4,000
+   characters and a console line over 1 MB is dropped. `preview.code` itself is refused for an
+   imported pull-request run. Cora's worker fences treat it like
+   `codara_preview_evaluate`, and also block it whenever a worker's
+   `blockedTools` names any other browser tool, since a snippet reaches
+   every browser tool through `browser.call`.
 4. **Sessions.** A session is keyed by the caller's resolved workspace, its
    run or pane, and a random id the MCP server process picks at startup, so a
    new agent session starts clean and two agents never share bindings, even
    in one pane. Snippets in one session run one at a time. A session ends
    when its agent's MCP process exits (checked every minute), after 20 idle
    minutes, on `reset`, or when the kernel thread dies (out of memory). A
-   timeout keeps the session: main stops waiting and refuses the late calls.
-   At most 16 sessions live at once; the least recently used idle one goes
-   first.
+   timeout stops the snippet and keeps the session's bindings. At most 16
+   sessions live at once: the least recently used idle one goes first, and
+   when all 16 are running a snippet a new session is refused.
 5. **Locators.** `preview.locate` (main, any tab kind) resolves a locator
    chain in the page with `src/shared/preview-query.ts`, built on the shared
    `preview-locator.ts`, and returns the element's `@reference`. Actions

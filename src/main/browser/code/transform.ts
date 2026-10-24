@@ -66,7 +66,9 @@ export function transformSnippet(code: string): string {
       const parts: string[] = [];
       for (const declarator of node.declarations) {
         boundNames(declarator.id, names);
-        if (declarator.init) parts.push(`(${source(code, declarator.id)} = ${source(code, declarator.init)})`);
+        // acorn's node range leaves out the init's own parentheses, so
+        // `const a = (1, 2)` must not become `(a = 1, 2)`.
+        if (declarator.init) parts.push(`(${source(code, declarator.id)} = (${source(code, declarator.init)}))`);
         else if (node.kind !== "var") parts.push(`(${source(code, declarator.id)} = undefined)`);
       }
       edits.push({ start: node.start, end: node.end, text: parts.length ? `void (${parts.join(", ")});` : ";" });

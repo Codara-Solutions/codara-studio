@@ -78,6 +78,7 @@ nth(i).
   matches, covered, disabled). Catch it to branch, or let it end the call.
 - Return small values. Large results are cut at 60,000 characters.
 - Bindings live until the session ends (the agent exits, 20 idle minutes,
-  or reset: true). A timeout keeps the session; a loop that never awaits is
-  interrupted after 5 s.
+  or reset: true). A timeout stops the snippet and keeps the session; a loop
+  that never awaits is interrupted after 5 s. Await what you start: timers and
+  calls still waiting when a snippet ends never run.
 `;

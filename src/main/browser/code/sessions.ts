@@ -99,9 +99,9 @@ function keepImage(session: Session, value: unknown): unknown {
   return { ...rest, image: session.images.length };
 }
 
-async function answer(session: Session, callId: number, method: string, args: Record<string, unknown>): Promise<void> {
+async function answer(session: Session, callId: number, execId: number, method: string, args: Record<string, unknown>): Promise<void> {
   const dispatch = session.dispatch;
-  if (!session.kernel.busy || !dispatch) {
+  if (session.kernel.activeId === null || session.kernel.activeId !== execId || !dispatch) {
     session.kernel.reply(callId, { ok: false, error: "The snippet that made this call has already ended. Await browser calls inside your snippet." });
     return;
   }
@@ -118,15 +118,15 @@ async function answer(session: Session, callId: number, method: string, args: Re
   }
 }
 
-function createSession(key: string, ownerPid: number | null): Session {
+function createSession(key: string, ownerPid: number | null): Session | null {
   while (sessions.size >= MAX_SESSIONS) {
     const idle = [...sessions.values()].filter((entry) => !entry.kernel.busy).sort((a, b) => a.lastUsed - b.lastUsed)[0];
-    if (!idle) break;
+    if (!idle) return null;
     closeSession(idle);
   }
   const session = { key, ownerPid, lastUsed: Date.now(), queue: Promise.resolve(), dispatch: null, images: [], calls: 0 } as unknown as Session;
   session.kernel = startBrowserKernel({
-    onCall: (callId, method, args) => void answer(session, callId, method, args),
+    onCall: (callId, execId, method, args) => void answer(session, callId, execId, method, args),
     onExit: () => {
       if (sessions.get(key) === session) sessions.delete(key);
     },
@@ -172,7 +172,13 @@ export async function runBrowserCode(request: BrowserCodeRequest): Promise<Brows
   if (existing && (request.reset || existing.kernel.dead)) closeSession(existing);
   let session = sessions.get(request.key);
   const fresh = !session;
-  if (!session) session = createSession(request.key, request.ownerPid);
+  if (!session) {
+    const created = createSession(request.key, request.ownerPid);
+    if (!created) {
+      return { ok: false, error: `${MAX_SESSIONS} browser code sessions are running snippets right now; try again when one finishes.`, calls: 0, ms: 0, session: "new" };
+    }
+    session = created;
+  }
   session.lastUsed = Date.now();
   ensureSweeper();
   const current = session;

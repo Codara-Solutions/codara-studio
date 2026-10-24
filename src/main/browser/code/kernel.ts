@@ -26,6 +26,8 @@ export interface BrowserKernel {
   /** Run one transformed snippet; resolves when it settles or timeoutMs passes. */
   run(code: string, timeoutMs: number): Promise<KernelRunResult>;
   reply(callId: number, reply: { ok: boolean; value?: unknown; error?: string }): void;
+  /** The snippet main is waiting for, or null; a call carrying another snippet's id is stale. */
+  readonly activeId: number | null;
   terminate(): Promise<void>;
   readonly dead: boolean;
   /** Whether a snippet is running; browser calls are only answered then. */
@@ -34,7 +36,7 @@ export interface BrowserKernel {
 
 export interface BrowserKernelHandlers {
   /** A browser call from the guest; answer it with reply(). */
-  onCall(callId: number, method: string, args: Record<string, unknown>): void;
+  onCall(callId: number, execId: number, method: string, args: Record<string, unknown>): void;
   /** The thread ended on its own (crash, heap limit). */
   onExit(reason: string): void;
 }
@@ -96,7 +98,7 @@ export function startBrowserKernel(handlers: BrowserKernelHandlers, limits: Part
   worker.on("message", (message: KernelToMain) => {
     switch (message.type) {
       case "call":
-        handlers.onCall(message.callId, message.method, message.args);
+        handlers.onCall(message.callId, message.execId, message.method, message.args);
         return;
       case "done":
         settle(message.id, { ok: message.ok, value: message.value, error: message.error, logs: message.logs ?? [] });
@@ -124,14 +126,17 @@ export function startBrowserKernel(handlers: BrowserKernelHandlers, limits: Part
       if (active) return Promise.resolve({ ok: false, error: "another snippet is still running in this session", logs: [] });
       const id = nextId++;
       return new Promise<KernelRunResult>((resolve) => {
-        // The guest keeps whatever it was awaiting; main stops waiting and
-        // refuses browser calls that arrive afterwards, so the session and its
+        // The kernel drops what the snippet was awaiting, so it never resumes,
+        // and main refuses the calls it had already sent; the session and its
         // bindings survive a timeout.
-        const timer = setTimeout(() => settle(id, {
-          ok: false,
-          error: `the snippet did not finish within ${Math.round(timeoutMs / 1000)} s. Bindings are kept; browser calls it still makes are refused.`,
-          logs: [],
-        }), timeoutMs);
+        const timer = setTimeout(() => {
+          settle(id, {
+            ok: false,
+            error: `the snippet did not finish within ${Math.round(timeoutMs / 1000)} s and was stopped. Bindings are kept.`,
+            logs: [],
+          });
+          if (!dead) worker.postMessage({ type: "cancel", id } satisfies MainToKernel);
+        }, timeoutMs);
         active = { id, resolve, timer };
         const message: MainToKernel = { type: "exec", id, code };
         worker.postMessage(message);
@@ -152,6 +157,9 @@ export function startBrowserKernel(handlers: BrowserKernelHandlers, limits: Part
     },
     get busy() {
       return active !== null;
+    },
+    get activeId() {
+      return active ? active.id : null;
     },
   };
 }

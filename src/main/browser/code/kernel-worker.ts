@@ -34,6 +34,9 @@ let logs: string[] = [];
 let logChars = 0;
 let nextCallId = 1;
 const pendingCalls = new Map<number, QuickJSDeferredPromise>();
+const pendingSleeps = new Map<QuickJSDeferredPromise, NodeJS.Timeout | null>();
+// Guest text longer than this is refused before it is copied out of QuickJS.
+const MAX_GUEST_TEXT = 1_000_000;
 const queue: MainToKernel[] = [];
 
 function post(message: KernelToMain): void {
@@ -60,6 +63,29 @@ function errorText(context: QuickJSContext, handle: QuickJSHandle): string {
   }
 }
 
+function stringLength(context: QuickJSContext, handle: QuickJSHandle): number {
+  const length = context.getProp(handle, "length");
+  try {
+    return context.typeof(length) === "number" ? context.getNumber(length) : 0;
+  } finally {
+    length.dispose();
+  }
+}
+
+// Whatever a snippet left running (an unawaited loop, a timer, a browser call
+// it never awaited) waits on a host call or sleep. Dropping those without
+// settling them leaves that work suspended for good, so it can never act
+// while a later snippet runs with that snippet's permissions.
+function dropPending(): void {
+  for (const deferred of pendingCalls.values()) if (deferred.alive) deferred.dispose();
+  pendingCalls.clear();
+  for (const [deferred, timer] of pendingSleeps) {
+    if (timer) clearTimeout(timer);
+    if (deferred.alive) deferred.dispose();
+  }
+  pendingSleeps.clear();
+}
+
 // The interrupt reaches the guest as a rejected promise that the prelude
 // reports as an ordinary InternalError; once it fired, the snippet failed for
 // being busy, whatever the guest made of it.
@@ -73,6 +99,7 @@ function finish(id: number, result: { ok: boolean; value?: KernelValue; error?: 
   post({ type: "done", id, ...result, logs });
   logs = [];
   logChars = 0;
+  dropPending();
 }
 
 // Runs every queued guest job. A job that throws stops executePendingJobs
@@ -107,19 +134,25 @@ function resolveWith(deferred: QuickJSDeferredPromise, text: string): void {
 function installHost(context: QuickJSContext): void {
   const call = context.newFunction("__cbCall", (methodHandle, argsHandle) => {
     const deferred = context.newPromise();
+    const callId = nextCallId++;
+    pendingCalls.set(callId, deferred);
+    // Work left over from a finished snippet stays suspended (dropPending).
+    if (activeExec === null) return deferred.handle;
     try {
-      const method = context.getString(methodHandle);
+      const method = context.getString(methodHandle).slice(0, 200);
+      if (stringLength(context, argsHandle) > limits.maxCallBytes) {
+        throw new RangeError(`the arguments of ${method} are over ${Math.floor(limits.maxCallBytes / 1024)} KB`);
+      }
       const text = context.getString(argsHandle);
       if (Buffer.byteLength(text, "utf8") > limits.maxCallBytes) {
         throw new RangeError(`the arguments of ${method} are over ${Math.floor(limits.maxCallBytes / 1024)} KB`);
       }
-      if (pendingCalls.size >= limits.maxPendingCalls) {
+      if (pendingCalls.size > limits.maxPendingCalls) {
         throw new RangeError(`more than ${limits.maxPendingCalls} browser calls are waiting; await some before starting more`);
       }
-      const callId = nextCallId++;
-      pendingCalls.set(callId, deferred);
-      post({ type: "call", callId, method, args: JSON.parse(text) as Record<string, unknown> });
+      post({ type: "call", callId, execId: activeExec, method, args: JSON.parse(text) as Record<string, unknown> });
     } catch (error) {
+      pendingCalls.delete(callId);
       resolveWith(deferred, JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }));
     }
     return deferred.handle;
@@ -129,11 +162,16 @@ function installHost(context: QuickJSContext): void {
 
   const sleep = context.newFunction("__cbSleep", (msHandle) => {
     const deferred = context.newPromise();
+    if (activeExec === null) {
+      pendingSleeps.set(deferred, null);
+      return deferred.handle;
+    }
     const ms = Math.min(600_000, Math.max(0, Number(context.getNumber(msHandle)) || 0));
-    setTimeout(() => {
+    pendingSleeps.set(deferred, setTimeout(() => {
+      pendingSleeps.delete(deferred);
       resolveWith(deferred, "");
       drain();
-    }, ms);
+    }, ms));
     return deferred.handle;
   });
   context.setProp(context.global, "__cbSleep", sleep);
@@ -141,7 +179,7 @@ function installHost(context: QuickJSContext): void {
 
   const log = context.newFunction("__cbLog", (textHandle) => {
     if (activeExec === null || logChars >= limits.maxLogChars) return;
-    const text = context.getString(textHandle);
+    const text = stringLength(context, textHandle) > MAX_GUEST_TEXT ? "(a console line over 1 MB was dropped)" : context.getString(textHandle);
     const room = limits.maxLogChars - logChars;
     const kept = text.length > room ? `${text.slice(0, room)} ... (console output truncated)` : text;
     logs.push(kept);
@@ -153,6 +191,10 @@ function installHost(context: QuickJSContext): void {
   const done = context.newFunction("__cbDone", (idHandle, resultHandle) => {
     const id = context.getNumber(idHandle);
     try {
+      if (stringLength(context, resultHandle) > limits.maxResultChars + MAX_GUEST_TEXT) {
+        finish(id, { ok: false, error: "the snippet's result or error was too large to return" });
+        return;
+      }
       const result = JSON.parse(context.getString(resultHandle)) as { ok: boolean; value?: KernelValue; error?: string };
       finish(id, result);
     } catch {
@@ -195,6 +237,7 @@ async function start(message: Extract<MainToKernel, { type: "start" }>): Promise
 
 function exec(message: Extract<MainToKernel, { type: "exec" }>): void {
   if (!ctx || !settleHandle) return;
+  dropPending();
   activeExec = message.id;
   logs = [];
   logChars = 0;
@@ -228,10 +271,19 @@ function reply(message: Extract<MainToKernel, { type: "reply" }>): void {
   drain();
 }
 
+function cancel(message: Extract<MainToKernel, { type: "cancel" }>): void {
+  if (activeExec !== message.id) return;
+  activeExec = null;
+  logs = [];
+  logChars = 0;
+  dropPending();
+}
+
 function handle(message: MainToKernel): void {
   try {
     if (message.type === "exec") exec(message);
     else if (message.type === "reply") reply(message);
+    else if (message.type === "cancel") cancel(message);
   } catch (error) {
     // A host-side failure (a WebAssembly stack overflow, a disposed handle)
     // ends the snippet; main decides whether the session survives.
