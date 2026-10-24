@@ -163,7 +163,9 @@ async function trustedInput() {
     isDestroyed: () => destroyed,
     executeJavaScript: async () => { probes++; return { ok: true, ...center }; },
     sendInputEvent: (event) => events.push(event),
-    debugger: { on() {}, isAttached: () => true, sendCommand: async () => {} },
+    debugger: { on() {}, isAttached: () => true, sendCommand: async (method, command) => {
+      if (method === "Input.dispatchKeyEvent") events.push({ type: `key:${command.type}`, key: command.key });
+    } },
   };
   const mod = { exports: {} };
   new Function("module", "exports", "require", output.outputFiles[0].text)(mod, mod.exports, (name) => {
@@ -206,24 +208,30 @@ async function trustedInput() {
   await assert.rejects(call("scroll", { selector: "#list", deltaY: 200 }), /The user stopped Claude Code/);
   assert.equal(events.length, 0, "a stopped agent's click never reaches the page");
 
-  // Stop mid-drag releases the button where the drag got to.
+  // Stop mid-drag cancels it: Escape while the button is held, then back to
+  // the start, then release, so nothing is dropped where the drag got to.
   reset();
   onActivity = (_params, n) => { if (n === 4) throw new Error("The user stopped Claude Code from using browser tab tab-a and took it back."); };
-  await assert.rejects(call("drag", { from: { x: 0, y: 0 }, to: { x: 100, y: 0 }, steps: 10 }), /The user stopped/);
+  await assert.rejects(call("drag", { from: { x: 10, y: 5 }, to: { x: 110, y: 5 }, steps: 10 }), /The user stopped/);
   assert.equal(events.at(-1).type, "mouseUp", "the page is not left with its button held");
-  assert.equal(events.at(-1).x, 20, "released at the last point it reached");
+  assert.deepEqual([events.at(-1).x, events.at(-1).y], [10, 5], "released where the drag began, not midway");
+  assert.deepEqual([events.at(-2).type, events.at(-2).x, events.at(-2).y], ["mouseMove", 10, 5], "after moving back there");
+  const escape = events.findIndex((e) => e.type === "key:rawKeyDown" && e.key === "Escape");
+  assert.ok(escape > events.findIndex((e) => e.type === "mouseDown") && escape < events.length - 2, "Escape goes while the button is still held");
   assert.equal(events.filter((e) => e.type === "mouseUp").length, 1);
 
   // A finished drag releases once, at its end.
   reset();
   await call("drag", { from: { x: 0, y: 0 }, to: { x: 100, y: 0 }, steps: 4 });
   assert.deepEqual(events.filter((e) => e.type === "mouseUp").map((e) => [e.x, e.y]), [[100, 0]]);
+  assert.equal(events.some((e) => e.key === "Escape"), false, "a finished drag is never cancelled");
 
   // The tab closed mid-drag: nothing is sent to the dead page, and the error is the close's.
   reset();
   onActivity = (_params, n) => { if (n === 3) { destroyed = true; throw new Error("No browser tab is open."); } };
   await assert.rejects(call("drag", { from: { x: 0, y: 0 }, to: { x: 100, y: 0 }, steps: 10 }), /No browser tab is open/);
   assert.equal(events.filter((e) => e.type === "mouseUp").length, 0);
+  assert.equal(events.some((e) => e.key === "Escape"), false);
 }
 
 main().catch((error) => {
