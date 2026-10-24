@@ -22,7 +22,7 @@ function developmentVersion(): string {
   return `${packageJson.version}-dev`;
 }
 
-// The workflow sandbox and usage scan threads start from source text
+// The workflow sandbox, browser code kernel and usage scan threads start from source text
 // (`eval: true`), so each file must be one self-contained CommonJS bundle (the
 // sandbox's with QuickJS inside): a relative require or a rollup chunk would
 // not resolve from an eval'd worker. They are built beside the main bundle
@@ -31,6 +31,7 @@ function developmentVersion(): string {
 // app's executable as plain Node (package.json unpacks it from the asar).
 const THREAD_WORKERS: ReadonlyArray<{ entry: string; outfile: string }> = [
   { entry: "src/main/orchestration/workflow-sandbox-worker.ts", outfile: "workflow-sandbox-worker.js" },
+  { entry: "src/main/browser/code/kernel-worker.ts", outfile: "browser-code-worker.js" },
   { entry: "src/main/usage-scan-worker.ts", outfile: "usage-scan-worker.js" },
   { entry: "src/main/session-search/session-index-worker.ts", outfile: "session-index-worker.js" },
   { entry: "src/main/claude-follow/uninstall-entry.ts", outfile: "claude-follow-uninstall.js" },

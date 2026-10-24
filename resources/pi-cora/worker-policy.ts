@@ -90,7 +90,9 @@ const FENCE_READONLY_EXTRA = ["edit"];
 // Bridge tools that ARE a shell or arbitrary code execution: any fenced preset
 // blocks them ("no shell/web" must include the terminal tab that takes a
 // command and the preview's JS evaluator; codara_preview_run is included
-// because its step batch can embed evaluate steps).
+// because its step batch can embed evaluate steps, and codara_preview_code
+// because its snippet can call every browser tool, evaluate among them).
+const CODE_TOOL = "codara_preview_code";
 const FENCE_BRIDGE_SHELL = [
   "codara_terminal_run",
   "codara_terminal_create",
@@ -102,6 +104,7 @@ const FENCE_BRIDGE_SHELL = [
   "codara_terminal_servers",
   "codara_preview_evaluate",
   "codara_preview_run",
+  "codara_preview_code",
 ];
 // Bridge tools that mutate page state; blocked for readonly only (navigation,
 // screenshots, snapshots, console, and network inspection stay available).
@@ -137,6 +140,10 @@ function fenceAccess(env: WorkerEnv): "edits" | "readonly" | undefined {
   return access === "edits" || access === "readonly" ? access : undefined;
 }
 
+function blockedByName(env: WorkerEnv, tool: string): boolean {
+  return (env.CODARA_PI_WORKER_BLOCKED_TOOLS ?? "").split(",").some((raw) => raw.trim().toLowerCase() === tool);
+}
+
 export function fencedToolNames(env: WorkerEnv = process.env): Set<string> {
   const blocked = new Set<string>();
   const access = fenceAccess(env);
@@ -157,6 +164,10 @@ export function fencedToolNames(env: WorkerEnv = process.env): Set<string> {
     blocked.add(snake);
     for (const alias of FENCE_ALIASES[flat] ?? []) blocked.add(alias);
   }
+  // A snippet reaches every browser tool through browser.call and
+  // browser.chrome, and its inner calls never pass through this fence, so
+  // blocking any one of them must block code mode too.
+  if ([...blocked].some((name) => name.startsWith("codara_preview_") && name !== CODE_TOOL)) blocked.add(CODE_TOOL);
   return blocked;
 }
 
@@ -241,6 +252,14 @@ export function fenceDecision(
   env: WorkerEnv = process.env,
 ): { block: true; reason: string } | undefined {
   const name = String(toolName ?? "").toLowerCase();
+  if (name === CODE_TOOL && fence.has(name) && !fenceAccess(env) && !blockedByName(env, CODE_TOOL)) {
+    return {
+      block: true,
+      reason:
+        "codara_preview_code is disabled for this automation worker because its config blocks browser tools a snippet could call. " +
+        "Use the single codara_preview_* tools that remain, or note the limitation in your final report.",
+    };
+  }
   if (fence.has(name)) {
     const access = env.CODARA_PI_WORKER_ACCESS?.trim();
     return {

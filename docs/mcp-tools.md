@@ -163,7 +163,8 @@ workspace on screen.
 | `codara_preview_performance` | Core Web Vitals, traced page loads and interactions, and memory with heap snapshots. |
 | `codara_preview_inspect` | Describes one element (an `@reference`, a unique selector, or `x`,`y` in viewport CSS pixels) for editing it: selector, role, name and text, box model, the computed styles that matter, the CSS rules that set them with their stylesheet, the DOM path, the component names and the source file and line, and a cropped image (also saved as a file, its `path` returned). |
 | `codara_preview_inbox` | Reads what the user queued for this agent from Codara (picked elements, page comments, screenshots): text, source tab and URL, and attached file paths. Read items are removed, except when a Cora run reads the workspace's items: those stay for the agent the user works with. |
-| `codara_preview_run` | Runs a batch of the steps above in one call. |
+| `codara_preview_run` | Runs a fixed list of the steps above in one call. |
+| `codara_preview_code` | Runs JavaScript against a Playwright-style browser API in a persistent session, so one call can drive a whole flow, branch on what the page shows and return only what matters. See [Code mode](#code-mode). |
 | `codara_preview_chrome` | The user's own browser through the Codara extension: `status` (connected browsers and their shared `chrome:` tabs), `open` a URL in a new tab (in a Chrome tab group with `group`), `close` a tab an agent opened or the user shared, `activate` a shared tab. |
 
 Every browser tool takes a `tabId`: a Codara tab's id as `codara_preview_list`
@@ -175,6 +176,52 @@ acted on one tab names it in a `tabId` field, so an agent that called without
 one learns the id to pass next time. The user copies a tab's id from the tab
 id button in the browser's address bar (its menu also copies the URL and who
 drives the tab) or from the tab's context menu.
+
+### Code mode
+
+`codara_preview_code { code, timeoutMs?, reset? }` is the tool to reach for
+when a task takes more than one or two browser actions. The agent writes a
+few lines of JavaScript instead of one tool call per click:
+
+```js
+const tab = browser.tab();
+await tab.goto("http://localhost:5173/login");
+await tab.getByLabel("Email").fill("ana@example.com");
+await tab.getByRole("button", { name: "Sign in" }).click();
+await tab.waitFor({ text: "Welcome" });
+return await tab.snapshot({ diff: true });
+```
+
+- Top-level `await`. Top-level `const`, `let`, `function` and `class`
+  declarations stay defined for the agent's next call; redeclaring replaces
+  them. The last expression (or a `return`) is the result: a string comes
+  back as plain text, anything else as JSON, followed by the snippet's
+  `console` lines and up to six screenshots as images.
+- `browser.documentation()` returns the full API; the tool description only
+  points at it. The API: `browser.tab(id?)` (this session's own tab, a listed
+  one, or `chrome:<id>`), `browser.tabs()`, `browser.chrome.open/status`,
+  `browser.call(tool, args)` for any other browser tool; on a tab `goto`,
+  `snapshot`, `screenshot`, `evaluate`, `find`, `waitFor`, `keyboard`,
+  `mouse`, `console`, `network`, `dialog`, and locators (`locator(css)`,
+  `getByRole`, `getByText`, `getByLabel`, `getByPlaceholder`,
+  `getByTestId`, `getByAltText`, `getByTitle`, `ref(@ref)`) with `click`,
+  `fill`, `type`, `press`, `hover`, `check`, `selectOption`, `waitFor`,
+  `count`, `nth`, `filter`, `textContent`, `inputValue`, `isVisible` and the
+  rest of the usual Playwright reads. Locators are strict: an action on one
+  that matches several elements fails and names them.
+- Each browser call the snippet makes is an ordinary call of the matching
+  tool, scoped to the caller's workspace, run or pane, with the same Chrome
+  permission, block list and page-dialog handling. The snippet itself runs in
+  a QuickJS sandbox thread with no file system, network, processes or host
+  objects, a 64 MB heap, and an interrupt for a loop that never awaits (5 s).
+- A session belongs to one agent session: a new agent, `reset: true`, the
+  agent's exit or 20 idle minutes start over. A timeout (default 30 s, at
+  most 110 s) stops the snippet and keeps the bindings; timers and calls a
+  snippet leaves waiting never run. An imported pull request's run may not
+  use it, and Cora's fenced workers treat it like `codara_preview_evaluate`
+  and block it when any other browser tool is blocked.
+
+Design and measurements: [browser-code-mode.md](browser-code-mode.md).
 
 ### Pointing at the page
 

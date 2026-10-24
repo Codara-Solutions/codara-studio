@@ -208,6 +208,7 @@
     "@xterm/headless": "^5.5.0",
     "@xterm/xterm": "^5.5.0",
     "@xyflow/react": "^12.11.5",
+    "acorn": "^8.18.0",
     "ajv": "8.20.0",
     "axe-core": "4.13.0",
     "croner": "^10.0.1",

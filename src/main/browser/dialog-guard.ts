@@ -14,7 +14,8 @@ import type { CdpSession } from "./cdp-session";
 import { describeDialog, dialogState, type DialogState, type PageDialog } from "./recorders/dialogs";
 
 // Methods that never need the page, so they neither resolve a tab nor wait.
-const UNGUARDED = new Set(["preview.list", "preview.inbox", "preview.url"]);
+// preview.code runs many calls, each guarded on its own.
+const UNGUARDED = new Set(["preview.list", "preview.inbox", "preview.url", "preview.code"]);
 // Methods that still work while a dialog holds the page. A navigation drops
 // the dialog with the page, as in a browser; a navigate without a tabId may
 // also be about to open the caller's own tab rather than the one resolved here.

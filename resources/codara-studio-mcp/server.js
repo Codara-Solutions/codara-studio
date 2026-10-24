@@ -39,6 +39,7 @@
 
 "use strict";
 
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -95,6 +96,13 @@ const ORCHESTRATION_TIMEOUT_MS =
 // terminal; the client deadline sits above both.
 const TERMINAL_RUN_MAX_WAIT_MS = 10 * 60_000;
 const TERMINAL_RUN_TIMEOUT_MS = TERMINAL_RUN_MAX_WAIT_MS + 60_000;
+// codara_preview_code runs a snippet for up to 110 s on the Codara side
+// (CODE_MAX_TIMEOUT_MS in preview-tools/code.ts).
+const PREVIEW_CODE_TIMEOUT_MS = 120_000;
+// One id per server process: Codara keys a codara_preview_code session by it,
+// so a new agent session starts with fresh bindings and this process's exit
+// (the pid in front) ends the session.
+const CODE_SESSION = `${process.pid}:${crypto.randomBytes(12).toString("base64url")}`;
 // A worktree call may fetch (30 s cap), wait its turn on the repository lock
 // (60 s cap) and then check out or delete a large tree.
 const WORKTREE_TIMEOUT_MS = 150_000;
@@ -1977,7 +1985,7 @@ function buildInstructions() {
   ];
   if (listed.has("codara_preview_navigate")) {
     parts.push(
-      "Browser: open or reuse this session's tab with codara_preview_navigate, read it with codara_preview_snapshot, and act on its @references. Batch multi-step flows into one codara_preview_run. Use the trusted input tools (mouse, key, scroll, hover, drag) when a page ignores synthetic events. Close the tabs you opened with codara_preview_close when you are done, unless the user needs them.",
+      "Browser: for any multi-step flow prefer codara_preview_code, one call of JavaScript against a Playwright-style API (read browser.documentation() once). Single steps: open or reuse this session's tab with codara_preview_navigate, read it with codara_preview_snapshot, and act on its @references. Use the trusted input tools (mouse, key, scroll, hover, drag) when a page ignores synthetic events. Close the tabs you opened with codara_preview_close when you are done, unless the user needs them.",
     );
     parts.push(...TOOL_REGISTRY.instructions);
     parts.push(
@@ -2073,6 +2081,7 @@ function isLongPollRpc(rpc) {
 const PROGRESS_RPCS = new Set([
   ...LONG_POLL_RPCS,
   "terminal.run",
+  "preview.code",
   "automation.update",
   "automation.delete",
   "automation.set_enabled",
@@ -2086,6 +2095,7 @@ const PROGRESS_INTERVAL_MS = 10_000;
 function rpcTimeoutMs(rpc) {
   if (isOrchestrationRpc(rpc)) return ORCHESTRATION_TIMEOUT_MS;
   if (rpc === "terminal.run") return TERMINAL_RUN_TIMEOUT_MS;
+  if (rpc === "preview.code") return PREVIEW_CODE_TIMEOUT_MS;
   if (rpc === "worktree.create") return WORKTREE_CREATE_TIMEOUT_MS;
   if (rpc === "worktree.setup") return WORKTREE_SETUP_TIMEOUT_MS;
   if (rpc === "worktree.cleanup") return WORKTREE_CLEANUP_TIMEOUT_MS;
@@ -2141,6 +2151,8 @@ function injectRunIdForStudioOwnership(rpc, args) {
     if (envPaneId) args.callerPaneId = envPaneId;
     args.callerPid = process.pid;
   }
+  if (rpc === "preview.code") args.codeSession = CODE_SESSION;
+  else delete args.codeSession;
 }
 
 // Who is asking, for the worktree RPCs. Codara decides from these fields
@@ -2793,7 +2805,30 @@ function screenshotMetadata(value, allFields = false) {
   return { url: value.url ?? null, ...Object.fromEntries(keys.map(key => [key, value[key]])) };
 }
 
+// A snippet's result reads as what it returned: a string as plain text (a
+// snapshot, the documentation), anything else as JSON, then its console
+// lines, with its screenshots as images.
+function codeToolResult(value) {
+  const images = [];
+  for (const dataUrl of Array.isArray(value.images) ? value.images : []) {
+    const m = typeof dataUrl === "string" ? /^data:(image\/[\w+.-]+);base64,(.+)$/.exec(dataUrl) : null;
+    if (m) images.push({ type: "image", mimeType: m[1], data: m[2] });
+  }
+  const parts = [];
+  if (value.ok === false) parts.push(`Error: ${value.error || "the snippet failed"}`);
+  else if (typeof value.text === "string") parts.push(value.text);
+  else if (value.result !== undefined) parts.push(JSON.stringify(value.result));
+  else parts.push("(no value)");
+  if (value.truncated) parts.push("(result truncated)");
+  if (Array.isArray(value.logs) && value.logs.length) parts.push(`console:\n${value.logs.join("\n")}`);
+  return {
+    ...(value.ok === false ? { isError: true } : {}),
+    content: [...images, { type: "text", text: parts.join("\n\n") }],
+  };
+}
+
 function toToolResult(value, rpc = "") {
+  if (rpc === "preview.code" && value && typeof value === "object") return codeToolResult(value);
   // MCP tool result format: { content: [{type:'text', text}] } + optional isError.
   // A screenshot result includes a data URL we surface as an image content block.
   if (value && typeof value === "object" && typeof value.dataUrl === "string" && value.dataUrl.startsWith("data:image/")) {

@@ -31,7 +31,9 @@ export const CORA_REPLY_LANGUAGE = `Reply in the language of the user's actual r
 export const CORA_BROWSER_WORKFLOW = `For browser tasks, navigate and read a snapshot first. Use its @references
   as selectors instead of guessing CSS. Re-read after navigation or a stale
   reference error. Use snapshot selector to focus a section and since with
-  the previous snapshotId to read changes. Batch known actions with
+  the previous snapshotId to read changes. Run a multi-step flow as one
+  codara_preview_code snippet (Playwright-style locators; read
+  browser.documentation() once), or batch known actions with
   codara_preview_run; wait_for the expected next control or loading state
   before observing asynchronous results. Stop a batch when the next action
   depends on new evidence. Use screenshots for layout, images, canvas, or
