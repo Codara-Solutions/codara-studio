@@ -233,6 +233,15 @@ async function main() {
         fromLeft.ghostStart === fromRight.ghostStart &&
         fromLeft.ghostWidth === fromRight.ghostWidth,
       `${fromLeft.ghostStart} / ${fromRight.ghostStart}`);
+
+    // A tab group's margin widens the space at its edge. Dragging the group's
+    // last tab still opens a hole one strip gap around it, not one margin.
+    const margin = 10;
+    const grouped = layout([100, 100, 100]);
+    grouped.push({ id: "t3", start: grouped[2].end + GAP + margin, end: grouped[2].end + GAP + margin + 100 });
+    const fromGroupEnd = planTabReorder(grouped, "t2", centre(grouped[0]) - 1);
+    check("a group's edge margin does not widen the hole",
+      fromGroupEnd.offsets.join() === [100 + GAP, 100 + GAP, 0, 0].join(), fromGroupEnd.offsets.join());
     // Ends of the strip: the hole there is one gap narrower than in the middle,
     // so a slot centred on the midpoint between two boxes would overhang the
     // edge tab. Landing first takes over the flow origin exactly; landing last

@@ -1196,6 +1196,7 @@ const TabItem = React.memo(function TabItem({
     .filter(Boolean)
     .join(" ");
   const tabStyle = tabStyleFor(dragOffset, groupColor);
+  const openedBy = openedByName(tab);
 
   return (
     <div
@@ -1329,20 +1330,12 @@ const TabItem = React.memo(function TabItem({
       >
         {labelFor(tab)}
       </span>
-      {openedByName(tab) ? (
-        <span
-          style={{
-            flex: "0 1 auto",
-            minWidth: 0,
-            maxWidth: 96,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-            fontSize: 11,
-            color: "var(--muted)",
-          }}
-        >
-          from {openedByName(tab)}
+      {openedBy ? (
+        // The workspace's name made the tab twice as wide; it stays in the
+        // tooltip (titleFor) and the tab's accessible name.
+        <span style={{ flex: "0 0 auto", fontSize: 12, lineHeight: 1, color: "var(--muted)" }}>
+          <span aria-hidden>↗</span>
+          <span className="spark-sr-only">, opened by an agent in {openedBy}</span>
         </span>
       ) : null}
       {tab.kind === "editor" && tab.dirty && !closeHover ? (
@@ -1667,8 +1660,9 @@ interface TabGroupChipProps {
 }
 
 // The group's handle in the strip: click folds or unfolds its tabs, the
-// context menu (or Shift+F10 / the Menu key) opens the group editor. Solid
-// like the tabs beside it; only the editor floats.
+// context menu (or Shift+F10 / the Menu key) opens the group editor. Its name
+// is plain text in the group's color; the tinted pocket around the group is
+// what ties the members to it (styles.css).
 const TabGroupChip = React.memo(function TabGroupChip({
   group,
   count,
@@ -1712,11 +1706,12 @@ const TabGroupChip = React.memo(function TabGroupChip({
         }
       }}
     >
-      <span className="spark-tab-group-chip__dot" aria-hidden />
-      {group.name && (
+      {group.name ? (
         <span className="spark-tab-group-chip__name" aria-hidden>
           {group.name}
         </span>
+      ) : (
+        <span className="spark-tab-group-chip__dot" aria-hidden />
       )}
       {collapsed && (
         <span className="spark-tab-group-chip__count" aria-hidden>
