@@ -440,6 +440,11 @@ one-hunk patch git applies), `test-worktree-cleanup`
 (the worktree cleanup screen: the scan's git facts, filters, the full check,
 every refusal, confirmed removals with their recovery refs, kept branches,
 sizes and their cache, against throwaway repositories with a fake git config),
+`test-worktree-rail-cleanup` (merged and missing worktrees in the rail:
+a branch already gone counts as deleted and an unmerged one is kept with a
+note, the rail's merge state, Clean up and Remove from rail, and the automatic
+cleanup of a missing folder refusing dirty, unpushed, busy, locked and
+possibly unmounted worktrees),
 `test-worktree-cleanup-agent` (codara_worktree_cleanup: the recommendation
 rules, the scan's facts across repositories, nothing removed without the
 user's approval, unticked, unsaved and busy worktrees kept, and remote

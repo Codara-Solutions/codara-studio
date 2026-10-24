@@ -15364,8 +15364,8 @@ export async function deleteRun(runId: string): Promise<void> {
 
   // Tear down any throwaway sandbox worktrees this run provisioned for its
   // unattended workers. Best-effort and idempotent: dedup by worktree path,
-  // and a failed removal (e.g. unmerged branch) just leaves the dir for the
-  // next worktree-prune. Workers were killed above so the dirs are released.
+  // a failed removal just leaves the dir for the next worktree-prune, and an
+  // unmerged branch is kept after the dir is gone. Workers were killed above so the dirs are released.
   const removedSandboxPaths = new Set<string>();
   for (const attempt of run.workerAttempts) {
     if (

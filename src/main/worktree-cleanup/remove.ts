@@ -9,6 +9,7 @@ import type {
   WorktreeCleanupRemoveRequest,
   WorktreeCleanupRemoveResult,
   WorktreeCleanupTarget,
+  WorktreeInUseKind,
   WorktreeKeptBranch,
   WorktreeRemovalCheck,
   WorktreeSize,
@@ -66,6 +67,8 @@ export const USAGE_FRESH_MS = 2_000;
 
 export interface RemoveOptions {
   sizeOf?: (id: string) => WorktreeSize | null;
+  /** Uses that do not block, as in CheckContext.allowInUse. */
+  allowInUse?: ReadonlySet<WorktreeInUseKind>;
   forgetSize?: (id: string) => void;
   usageFreshMs?: number;
   /** Who asked, for the audit log; the cleanup screen when absent. */
@@ -87,11 +90,17 @@ function validTarget(target: unknown): target is WorktreeCleanupTarget {
   );
 }
 
-async function contextFor(deps: WorktreeCleanupDeps, repo: RepoContext, paths: string[]): Promise<CheckContext> {
+async function contextFor(
+  deps: WorktreeCleanupDeps,
+  repo: RepoContext,
+  paths: string[],
+  allowInUse?: ReadonlySet<WorktreeInUseKind>,
+): Promise<CheckContext> {
   const reals = await Promise.all(paths.map((path) => canonicalPath(path)));
   return {
     deps,
     repo,
+    ...(allowInUse ? { allowInUse } : {}),
     usage: await usageContext(deps, reals),
     linked: await linkWorkspaces(repo),
     regenerable: await deps
@@ -120,6 +129,7 @@ function missingRepoCheck(target: WorktreeCleanupTarget): WorktreeRemovalCheck {
 export async function checkCleanupTargets(
   deps: WorktreeCleanupDeps,
   targets: readonly unknown[],
+  options: { allowInUse?: ReadonlySet<WorktreeInUseKind> } = {},
 ): Promise<WorktreeRemovalCheck[]> {
   const valid = targets.filter(validTarget).slice(0, MAX_ITEMS);
   const state = await deps.loadState();
@@ -138,6 +148,7 @@ export async function checkCleanupTargets(
         deps,
         repo,
         valid.filter((item) => pathKey(item.repoRoot) === pathKey(repo.root)).map((item) => item.path),
+        options.allowInUse,
       );
       contexts.set(repo, ctx);
     }
@@ -145,11 +156,11 @@ export async function checkCleanupTargets(
   });
 }
 
-function refSafe(text: string): string {
+export function refSafe(text: string): string {
   return text.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[-.]+|[-.]+$/g, "").slice(0, 80) || "worktree";
 }
 
-function dateStamp(date: Date): string {
+export function dateStamp(date: Date): string {
   return date.toISOString().slice(0, 10);
 }
 
@@ -160,7 +171,7 @@ async function revParse(cwd: string, rev: string): Promise<string | null> {
 
 // Create-only: an existing ref of that name is never moved. A second removal
 // of the same id on the same day takes the next free suffix.
-async function saveRecoveryRef(repoRoot: string, base: string, oid: string): Promise<string | null> {
+export async function saveRecoveryRef(repoRoot: string, base: string, oid: string): Promise<string | null> {
   for (let attempt = 1; attempt <= 20; attempt += 1) {
     const ref = attempt === 1 ? base : `${base}-${attempt}`;
     try {
@@ -397,7 +408,7 @@ async function removeOne(
   return { outcome, ...(kept ? { kept } : {}), dropWorkspaces };
 }
 
-function fallbackFor(state: AppState, repo: RepoContext, removed: ReadonlySet<string>): string | null {
+export function fallbackFor(state: AppState, repo: RepoContext, removed: ReadonlySet<string>): string | null {
   const parent = repo.workspaces.find((workspace) => !workspace.copyBranch && !removed.has(workspace.id));
   return parent && state.workspaces.some((workspace) => workspace.id === parent.id) ? parent.id : null;
 }
@@ -462,6 +473,7 @@ export async function removeCleanupWorktrees(
           deps,
           repo,
           repoItems.map((item) => item.path),
+          options.allowInUse,
         );
         let usageAt = Date.now();
         for (const [index, item] of repoItems.entries()) {

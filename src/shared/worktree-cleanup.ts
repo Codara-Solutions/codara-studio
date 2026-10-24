@@ -330,6 +330,50 @@ export interface WorktreeCleanupRemoveResult {
   keptBranches: WorktreeKeptBranch[];
 }
 
+// ── The workspace rail ─────────────────────────────────────────────────────
+
+/**
+ * "gone": the branch no longer exists and git keeps no record of the worktree.
+ * "empty": in its base only because it has no commits of its own yet, as
+ * right after the worktree was made; the rail does not call that merged.
+ */
+export type WorktreeRailMerge = WorktreeMergeState | "gone" | "empty";
+
+/** What the rail shows for one copy-branch workspace. */
+export interface WorktreeRailState {
+  workspaceId: string;
+  /** The worktree folder is not on disk. */
+  missing: boolean;
+  branch: string;
+  /** No local branch of that name is left. */
+  branchGone: boolean;
+  merge: WorktreeRailMerge;
+  proof?: WorktreeMergeProof;
+  target?: string;
+  /** Missing, and merged or gone: the rail asks main to remove it, and main checks everything again. */
+  autoCandidate: boolean;
+}
+
+/**
+ * manual: the user clicked Clean up or Remove from rail on the row; the
+ * workspace's own idle shells do not block it. auto: the rail found a missing
+ * folder whose branch is merged or gone; anything in use blocks it.
+ */
+export interface WorktreeRailCleanupRequest {
+  workspaceId: string;
+  mode: "manual" | "auto";
+}
+
+export interface WorktreeRailCleanupResult {
+  status: "removed" | "refused" | "failed";
+  /** Why it was refused or failed, or what was left behind. */
+  message?: string;
+  workspaceName?: string;
+  branchDeleted: boolean;
+  /** Plain words for why the branch stayed, such as "it has unmerged commits". */
+  branchKept?: string;
+}
+
 // ── Formatting ─────────────────────────────────────────────────────────────
 
 export function formatBytes(bytes: number): string {

@@ -935,3 +935,27 @@ changes when they are small enough (ignored files never), under
 the repository lock and stops if anything changed since the review. A
 workspace row for a removed worktree leaves the rail, and every removal is
 logged to `logs/worktree-audit.jsonl`.
+
+### Merged and missing worktrees in the rail
+
+A worktree workspace whose branch is merged into its base shows **merged**
+under its name. Hovering the row shows **Clean up**, which removes the
+worktree, deletes the merged branch and drops the row in one click, with the
+same checks and recovery ref as Clean up worktrees. Its own idle terminals
+close with it; uncommitted work, a branch that is not merged, a running
+program, an active Cora run or a dev server stop it, and the toast says why.
+A worktree with no commits of its own yet is not called merged.
+
+A workspace whose folder is gone is struck through and reads **Folder gone**.
+Hovering it shows **×** (**Remove from rail** in its menu), which drops the
+row and git's record of the worktree; for a worktree it deletes the branch
+only when it is merged, and keeps one with unmerged commits.
+
+When a worktree's folder is already gone and its branch is merged or gone
+too, Codara cleans it up by itself (git's record, the merged branch and the row) and says so. It never does that while a
+terminal, run or dev server of that workspace is open, while the branch has
+commits its upstream lacks, for a locked worktree, or when the folder above
+it is gone too (a drive that may only be unmounted). Deleting a worktree
+workspace with **Also delete the branch** no longer fails when the branch was
+already deleted (by a merge on GitHub or an agent); a branch with unmerged
+commits is kept and a note says so.

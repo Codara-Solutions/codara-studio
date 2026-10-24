@@ -18,6 +18,7 @@ import {
   type GitCopyWorktreeResult,
   type GitHubIssueOrigin,
   type GitOpResult,
+  type GitRemoveWorktreeResult,
   type RunState,
   type StartAutopilotInput,
   type Workspace,
@@ -67,7 +68,7 @@ export interface GitHubIssueWorkspaceDependencies {
     branch: string;
     force?: boolean;
     deleteBranch?: boolean;
-  }): Promise<GitOpResult>;
+  }): Promise<GitRemoveWorktreeResult>;
   forceDeleteBranch(cwd: string, branch: string): Promise<GitOpResult>;
   loadPreferences(): Promise<AppPreferences>;
   listRuns(workspaceId: string): Promise<RunState[]>;

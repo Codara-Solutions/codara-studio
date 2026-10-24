@@ -141,6 +141,7 @@ import type {
   GitFileChange,
   GitLog,
   GitOpResult,
+  GitRemoveWorktreeResult,
   GitRemoteUpdatedPayload,
   GitStashList,
   GitStatus,
@@ -947,7 +948,7 @@ const api = {
       branch: string;
       force?: boolean;
       deleteBranch?: boolean;
-    }): Promise<GitOpResult> => ipcRenderer.invoke("git:removeCopyWorktree", input),
+    }): Promise<GitRemoveWorktreeResult> => ipcRenderer.invoke("git:removeCopyWorktree", input),
 
     // Stash
     stashes: (cwd: string): Promise<GitStashList> => ipcRenderer.invoke("git:stashes", cwd),

@@ -30,6 +30,7 @@ import {
   TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
   runtimeStateIsBusy,
 } from "@shared/types";
+import type { WorktreeRailCleanupResult } from "@shared/worktree-cleanup";
 import type {
   GitHubIssueSummary,
   GitHubWorkQueueItem,
@@ -98,6 +99,7 @@ import { copyTerminalContext } from "./components/Terminal/terminalActions";
 import DiffStack from "./tabs/DiffStack";
 import { useSharedGitStatus } from "./git/useSharedGitStatus";
 import { useWorkspaceBranches } from "./git/useWorkspaceBranches";
+import { useWorktreeRailStates } from "./git/useWorktreeRailStates";
 import RemoteAuthPrompt from "./components/remote/RemoteAuthPrompt";
 import ChromePairingPrompt from "./components/chrome/ChromePairingPrompt";
 import SshManagerDialog from "./components/remote/SshManagerDialog";
@@ -816,6 +818,21 @@ export default function App() {
   const branchByWorkspaceId = useWorkspaceBranches(
     workspaces,
     `${activeWorkspace?.cwd ?? ""}:${sharedGit.status?.branch ?? ""}`,
+  );
+
+  // Merged and missing copy-branch workspaces for the rail; a missing one
+  // whose branch is merged or gone is cleaned up without asking (main
+  // refuses anything in use, unpushed or possibly only unmounted).
+  const { states: worktreeByWorkspaceId, refresh: refreshWorktreeStates } = useWorktreeRailStates(
+    workspaces,
+    useCallback((result: WorktreeRailCleanupResult) => {
+      emitLocalToast(
+        `Removed ${result.workspaceName ?? "a merged workspace"}`,
+        result.branchKept
+          ? `Its folder was gone and its work is merged. Branch kept: ${result.branchKept}.`
+          : "Its folder was gone and its work is merged.",
+      );
+    }, []),
   );
 
   // Switch HUD: bumps once per real workspace change (never on first load),
@@ -3884,15 +3901,15 @@ export default function App() {
               // Checkout mode may point at a user's pre-existing branch.
               deleteBranch: res.mode === "fork",
             });
-            if (cleanup.ok) {
+            if (cleanup.ok && !cleanup.branchKept) {
               cleanupSucceeded = true;
             } else {
               const pathState = await window.spark.fs.pathExists({
                 target: res.path,
               });
               if (!pathState.exists && res.mode === "fork") {
-                // removeCopyWorktree can remove the directory successfully and
-                // then report failure because its safe `branch -d` refused.
+                // removeCopyWorktree can remove the directory and then keep
+                // the branch because its safe `branch -d` refused.
                 // No setup or Cora work has run yet, so this transaction-owned
                 // branch is safe to force-delete.
                 const branchCleanup = await window.spark.git.deleteBranch(
@@ -3923,7 +3940,7 @@ export default function App() {
                 cleanupSucceeded = true;
               } else {
                 cleanupDetail =
-                  `Automatic cleanup failed: ${cleanup.error} ` +
+                  `Automatic cleanup failed: ${cleanup.ok ? cleanup.branchKept : cleanup.error} ` +
                   `Recover or remove the worktree at '${res.path}' ` +
                   `(branch '${res.branch}') before retrying.`;
               }
@@ -4259,8 +4276,48 @@ export default function App() {
       }
       removeWorkspaceFromState(target.id);
       setPendingCopyDelete(null);
+      if (result.branchKept) {
+        emitLocalToast(`Branch kept: ${result.branchKept}`, target.copyBranch.branch);
+      }
     },
     [pendingCopyDelete, removeWorkspaceFromState],
+  );
+
+  // The rail row's one-click Clean up (a merged worktree) and Remove from
+  // rail (a folder that is gone). A plain workspace only has its row, so it
+  // goes like Delete; a copy-branch one goes through main's guarded cleanup.
+  const handleCleanUpWorkspace = useCallback(
+    async (id: string) => {
+      const target = workspacesRef.current.find((w) => w.id === id);
+      if (!target) return;
+      if (!target.copyBranch) {
+        removeWorkspaceFromState(id);
+        return;
+      }
+      const result = await window.spark.worktreeCleanup
+        .railCleanUp({ workspaceId: id, mode: "manual" })
+        .catch((cause: unknown) => ({
+          status: "failed" as const,
+          message: cause instanceof Error ? cause.message : String(cause),
+          branchDeleted: false,
+        }));
+      refreshWorktreeStates();
+      if (result.status === "removed") {
+        const body = result.branchKept
+          ? `Branch ${target.copyBranch.branch} kept: ${result.branchKept}.`
+          : result.branchDeleted
+            ? `The worktree and branch ${target.copyBranch.branch} are gone.`
+            : "The worktree is gone.";
+        emitLocalToast(`Cleaned up ${target.name}`, result.message ? `${body} ${result.message}` : body);
+        return;
+      }
+      emitLocalToast(
+        `${target.name} was not cleaned up`,
+        result.message ?? "",
+        result.status === "failed" ? "danger" : "warning",
+      );
+    },
+    [refreshWorktreeStates, removeWorkspaceFromState],
   );
 
   // ── File / editor tab integration ──────────────────────────────────────────
@@ -6427,6 +6484,8 @@ export default function App() {
             workingByWorkspaceId={workingByWorkspaceId}
             agentsByWorkspaceId={agentsByWorkspaceId}
             branchByWorkspaceId={branchByWorkspaceId}
+            worktreeByWorkspaceId={worktreeByWorkspaceId}
+            onCleanUpWorkspace={handleCleanUpWorkspace}
             sections={panels.sections.left}
             draggingSection={draggingPanelSection}
             workspaces={workspaces}
@@ -6571,6 +6630,8 @@ export default function App() {
             workingByWorkspaceId={workingByWorkspaceId}
             agentsByWorkspaceId={agentsByWorkspaceId}
             branchByWorkspaceId={branchByWorkspaceId}
+            worktreeByWorkspaceId={worktreeByWorkspaceId}
+            onCleanUpWorkspace={handleCleanUpWorkspace}
             sections={panels.sections.right}
             draggingSection={draggingPanelSection}
             workspaces={workspaces}

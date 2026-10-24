@@ -408,6 +408,7 @@ import type {
   GitFileChange,
   GitLog,
   GitOpResult,
+  GitRemoveWorktreeResult,
   GitStashList,
   GitStatus,
   LaunchWorkerAttemptInput,
@@ -2564,7 +2565,7 @@ export function registerIpc(): void {
         force?: boolean;
         deleteBranch?: boolean;
       },
-    ): Promise<GitOpResult> => {
+    ): Promise<GitRemoveWorktreeResult> => {
       const { removeCopyWorktree } = await getGitWorktrees();
       const result = await removeCopyWorktree(input, {
         // A shell or agent pane whose cwd is the worktree holds the directory

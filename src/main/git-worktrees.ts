@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
-import { readdir, rm } from "node:fs/promises";
+import { lstat, readdir, rm } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
-import type { GitCopyWorktreeResult, GitOpResult } from "@shared/types";
+import type { GitCopyWorktreeResult, GitOpResult, GitRemoveWorktreeResult } from "@shared/types";
 import { gitChildEnv } from "./git-env";
 import { errorText, readGitText, runGit } from "./git-exec";
 import { parseWorktreePorcelain, type WorktreeRegistration } from "./git-worktree-porcelain";
@@ -323,7 +323,7 @@ export async function createSandboxWorktree(
 // removeCopyWorktree directly.
 export async function removeSandboxWorktree(
   input: RemoveSandboxWorktreeInput,
-): Promise<GitOpResult> {
+): Promise<GitRemoveWorktreeResult> {
   return removeCopyWorktree({
     repoCwd: input.repoCwd,
     worktreePath: input.worktreePath,
@@ -461,7 +461,7 @@ export async function dropMissingWorktreeRegistration(
     const entry = (await listWorktreeRegistrations(repoCwd)).find(
       (candidate) => normalizePathForCompare(candidate.path) === target,
     );
-    if (!entry || entry.locked || existsSync(entry.path)) return { ok: true };
+    if (!entry || entry.locked || !(await pathIsAbsent(entry.path))) return { ok: true };
     await runGit(repoCwd, ["worktree", "remove", entry.path]);
     return { ok: true };
   } catch (err) {
@@ -515,21 +515,28 @@ function sleep(ms: number): Promise<void> {
 async function tryRemoveWorktreeOnce(
   input: RemoveCopyWorktreeInput,
 ): Promise<{ ok: true } | { ok: false; error: string; retryable: boolean }> {
-  try {
-    if (!input.force) {
-      const status = await readGitText(input.worktreePath, [
-        "status",
-        "--porcelain",
-        "--untracked-files=all",
-      ]);
-      if (status.trim()) {
-        return {
-          ok: false,
-          error: "Worktree has uncommitted changes. Use force removal to discard them.",
-          retryable: false,
-        };
+  if (!input.force) {
+    // A status git could not read is not a clean one: an unreadable folder
+    // (wrong permissions, a stale mount) may hold anything, and git would
+    // drop its registration as if it were gone.
+    let status: string;
+    try {
+      status = (await runGit(input.worktreePath, ["status", "--porcelain", "--untracked-files=all"])).stdout;
+    } catch (err) {
+      if (await isRegisteredWorktree(input.repoCwd, input.worktreePath)) {
+        return { ok: false, error: `git could not read the worktree: ${errorText(err)}`, retryable: false };
       }
+      status = "";
     }
+    if (status.trim()) {
+      return {
+        ok: false,
+        error: "Worktree has uncommitted changes. Use force removal to discard them.",
+        retryable: false,
+      };
+    }
+  }
+  try {
     await runGit(
       input.repoCwd,
       ["worktree", "remove", ...(input.force ? ["--force"] : []), input.worktreePath],
@@ -564,13 +571,35 @@ async function tryRemoveWorktreeOnce(
 export async function removeCopyWorktree(
   input: RemoveCopyWorktreeInput,
   hooks?: RemoveCopyWorktreeHooks,
-): Promise<GitOpResult> {
+): Promise<GitRemoveWorktreeResult> {
   // Retry briefly on a transient lock. On Windows a shell or agent pane whose
   // cwd is the worktree holds the directory open, so removal fails with EBUSY
   // / "unable to remove" until that process is gone. On the first such failure
   // we ask the caller (via onBusy) to kill the worktree's PTYs, then keep
   // retrying while ConPTY + taskkill tear them down asynchronously (~1s).
   const backoffMs = [0, 150, 300, 600, 1000, 1500];
+  // A folder that is already gone (deleted by hand, or by an agent's own
+  // cleanup) has nothing left to remove: `git worktree remove` would refuse
+  // it, so only its registration is dropped before the branch step. Only a
+  // folder that does not exist counts: one that cannot be read (a stale
+  // network mount) may still hold everything.
+  if (await pathIsAbsent(input.worktreePath)) {
+    const target = normalizePathForCompare(resolve(input.worktreePath));
+    const entry = (await listWorktreeRegistrations(input.repoCwd).catch(() => [])).find(
+      (candidate) => normalizePathForCompare(candidate.path) === target,
+    );
+    if (entry?.locked) {
+      return { ok: false, error: "The worktree is locked with git worktree lock. Unlock it first." };
+    }
+    // Its HEAD may hold commits no branch does; the cleanup screen saves a
+    // recovery ref for those before it drops the registration.
+    if (entry && !entry.branch) {
+      return { ok: false, error: "The worktree had a detached HEAD. Remove it from Clean up worktrees, which saves its last commit." };
+    }
+    const dropped = await dropMissingWorktreeRegistration(input.repoCwd, input.worktreePath);
+    if (!dropped.ok) return dropped;
+    return finishBranch(input);
+  }
   // Folders setup linked in from the main checkout go first, so removal can
   // never reach through them; they come back if the worktree stays.
   let releasedLinks: Awaited<ReturnType<typeof prepareWorktreeRemoval>>;
@@ -607,15 +636,57 @@ export async function removeCopyWorktree(
 
   // Best-effort: only this worktree's own registration, if one was left.
   await dropMissingWorktreeRegistration(input.repoCwd, input.worktreePath);
-  if (input.deleteBranch) {
-    try {
-      // Safe delete: git refuses (-d) if the branch has unmerged commits.
-      await runGit(input.repoCwd, ["branch", "-d", input.branch]);
-    } catch (err) {
-      return { ok: false, error: errorText(err) };
-    }
+  return finishBranch(input);
+}
+
+async function pathIsAbsent(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return false;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    return code === "ENOENT" || code === "ENOTDIR";
+  }
+}
+
+async function finishBranch(input: RemoveCopyWorktreeInput): Promise<GitRemoveWorktreeResult> {
+  if (input.deleteBranch && input.branch.trim()) {
+    const branchKept = await deleteBranchIfMerged(input.repoCwd, input.branch.trim());
+    if (branchKept) return { ok: true, branchKept };
   }
   return { ok: true };
+}
+
+// True or false from git's own listing; null when git could not answer, which
+// must never read as "already deleted".
+async function localBranchPresent(repoCwd: string, branch: string): Promise<boolean | null> {
+  try {
+    const { stdout } = await runGit(repoCwd, ["for-each-ref", "--format=%(refname)", `refs/heads/${branch}`]);
+    return stdout.split(/\r?\n/).some((line) => line.trim() === `refs/heads/${branch}`);
+  } catch {
+    return null;
+  }
+}
+
+// Safe delete (`git branch -d`) after the worktree is gone. A branch that no
+// longer exists (a GitHub merge or an agent already deleted it) counts as
+// deleted. Null when the branch is gone; otherwise why it was kept, which
+// never turns the removal into a failure.
+export async function deleteBranchIfMerged(repoCwd: string, branch: string): Promise<string | null> {
+  const before = await localBranchPresent(repoCwd, branch);
+  if (before === null) return "it could not be read";
+  if (!before) return null;
+  try {
+    await runGit(repoCwd, ["branch", "-d", branch]);
+    return null;
+  } catch (err) {
+    if ((await localBranchPresent(repoCwd, branch)) === false) return null;
+    const text = errorText(err);
+    if (/not fully merged/i.test(text)) return "it has unmerged commits";
+    const checkedOut = await branchWorktreePath(repoCwd, branch).catch(() => null);
+    if (checkedOut) return `it is checked out at ${checkedOut}`;
+    return text.split(/\r?\n/)[0]?.replace(/^error:\s*/i, "").trim() || "git refused to delete it";
+  }
 }
 
 // --- Agent worktree checks --------------------------------------------------

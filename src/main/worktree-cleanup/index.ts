@@ -11,6 +11,7 @@ import { join } from "node:path";
 import type {
   WorktreeCleanupRemoveRequest,
   WorktreeCleanupScan,
+  WorktreeRailCleanupRequest,
   WorktreeSizeEvent,
 } from "@shared/worktree-cleanup";
 import type {
@@ -214,6 +215,30 @@ export function registerWorktreeCleanupIpc(handle: IpcHandle): void {
         for (const [id, worktree] of known) if (worktree.path === outcome.path) known.delete(id);
       }
     }
+    return result;
+  });
+
+  // The workspace rail: which copy-branch workspaces are merged or lost their
+  // folder, and the one-click cleanup of a row (rail.ts).
+  handle("worktreeCleanup:railStates", async () => {
+    const { railWorktreeStates } = await import("./rail");
+    return railWorktreeStates(deps(await gitCacheInvalidator()));
+  });
+
+  handle("worktreeCleanup:railCleanUp", async (_event, request: WorktreeRailCleanupRequest) => {
+    const { store: cache, measurer: queue } = await sizes();
+    // As for the screen's removal, unless only missing folders can go: the
+    // automatic cleanup never removes a folder that is there, so it leaves
+    // measuring alone.
+    if (request?.mode !== "auto") {
+      queue.cancel();
+      await queue.settled(5_000);
+    }
+    const { cleanUpRailWorkspace } = await import("./rail");
+    const result = await cleanUpRailWorkspace(deps(await gitCacheInvalidator()), request, {
+      sizeOf: (id) => cache.get(id),
+      forgetSize: (id) => cache.delete(id),
+    });
     return result;
   });
 
