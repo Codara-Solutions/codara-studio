@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Machines plan</title>
+<style>
+  :root {
+    --bg: #0e0d0b; --panel: #171513; --panel-2: #201e1b; --panel-3: #292724;
+    --ink: #f4f3f1; --ink-dim: #bdbcb8; --muted: #7c7a75; --muted-2: #5a5853;
+    --rule: #34332f; --rule-soft: #242320;
+    --accent: #2AA298; --accent-soft: color-mix(in oklch, var(--accent) 18%, transparent);
+    --agent-claude: oklch(0.76 0.16 52); --agent-codex: oklch(0.74 0.13 175);
+    --agent-grok: oklch(0.82 0.18 128); --agent-pi: oklch(0.74 0.14 300);
+    --danger: oklch(0.70 0.20 25); --ok: oklch(0.78 0.16 145); --warn: oklch(0.80 0.16 80);
+    --info: oklch(0.78 0.13 235);
+    --metric-cpu: #3987e5; --metric-ram: #9085e9;
+    --font-sans: Inter, "Segoe UI", system-ui, -apple-system, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f7f6f3; --panel: #ffffff; --panel-2: #f1efeb; --panel-3: #e7e5e0;
+      --ink: #1b1a17; --ink-dim: #45433e; --muted: #6f6c66; --muted-2: #9a978f;
+      --rule: #dcd9d2; --rule-soft: #ebe9e4; --accent: #1f7f77;
+      --agent-claude: oklch(0.58 0.16 52); --agent-codex: oklch(0.55 0.12 175);
+      --agent-grok: oklch(0.58 0.16 128); --agent-pi: oklch(0.55 0.14 300);
+      --ok: oklch(0.55 0.15 145); --warn: oklch(0.60 0.15 80); --danger: oklch(0.55 0.20 25);
+      --info: oklch(0.55 0.13 235);
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f7f6f3; --panel: #ffffff; --panel-2: #f1efeb; --panel-3: #e7e5e0;
+    --ink: #1b1a17; --ink-dim: #45433e; --muted: #6f6c66; --muted-2: #9a978f;
+    --rule: #dcd9d2; --rule-soft: #ebe9e4; --accent: #1f7f77;
+    --agent-claude: oklch(0.58 0.16 52); --agent-codex: oklch(0.55 0.12 175);
+    --agent-grok: oklch(0.58 0.16 128); --agent-pi: oklch(0.55 0.14 300);
+    --ok: oklch(0.55 0.15 145); --warn: oklch(0.60 0.15 80); --danger: oklch(0.55 0.20 25);
+    --info: oklch(0.55 0.13 235);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.55 var(--font-sans); }
+  main { max-width: 980px; margin: 0 auto; padding: 40px 16px 80px; }
+  h1 { font-size: 28px; letter-spacing: -0.02em; margin: 0 0 6px; }
+  h2 { font-size: 19px; margin: 48px 0 10px; letter-spacing: -0.01em; }
+  h3 { font-size: 14px; margin: 22px 0 8px; color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
+  p, li { color: var(--ink-dim); }
+  .lede { font-size: 16px; color: var(--ink-dim); max-width: 720px; }
+  .meta { color: var(--muted); font-size: 12px; }
+  code { font: 12.5px var(--font-mono); background: var(--panel-2); padding: 1px 5px; border-radius: 5px; }
+  .card { background: var(--panel); border: 1px solid var(--rule); border-radius: 12px; padding: 18px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } }
+  .toc { display: flex; flex-wrap: wrap; gap: 6px; margin: 18px 0 0; }
+  .toc a { color: var(--ink-dim); text-decoration: none; font-size: 12.5px; padding: 4px 10px; border: 1px solid var(--rule); border-radius: 999px; }
+  .toc a:hover { border-color: var(--accent); color: var(--ink); }
+  svg { max-width: 100%; height: auto; display: block; }
+  svg text { font-family: var(--font-sans); }
+
+  /* Mockups: Studio-like surfaces */
+  .mock { background: var(--panel); border: 1px solid var(--rule); border-radius: 14px; overflow: hidden; box-shadow: 0 20px 50px -30px rgba(0,0,0,.6); }
+  .mock-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--rule-soft); }
+  .mock-head b { font-size: 14px; }
+  .mock-head .sp { flex: 1; }
+  .btn { font: 12.5px var(--font-sans); color: var(--ink); background: var(--panel-3); border: 1px solid var(--rule); border-radius: 8px; padding: 5px 11px; }
+  .btn.primary { background: var(--accent); color: #0f0e0c; border-color: transparent; font-weight: 600; }
+  .row { display: grid; grid-template-columns: 22px minmax(150px, 1.3fr) 1.6fr 1.4fr; gap: 14px; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--rule-soft); }
+  .row:last-child { border-bottom: 0; }
+  @media (max-width: 760px) { .row { grid-template-columns: 22px 1fr; } .row .meters, .row .agents { grid-column: 2; } }
+  .dot { width: 9px; height: 9px; border-radius: 50%; margin: 0 auto; }
+  .name { font-weight: 600; font-size: 13.5px; }
+  .sub { color: var(--muted); font-size: 12px; }
+  .kind { font-size: 11px; color: var(--muted); border: 1px solid var(--rule); border-radius: 6px; padding: 0 6px; margin-left: 6px; font-weight: 500; }
+  .meters { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .m { font-size: 11px; color: var(--muted); }
+  .m .v { color: var(--ink-dim); font-variant-numeric: tabular-nums; }
+  .bar { height: 4px; border-radius: 3px; background: var(--panel-3); margin-top: 4px; overflow: hidden; }
+  .bar i { display: block; height: 100%; border-radius: 3px; }
+  .agents { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 2px 9px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--rule-soft); color: var(--ink-dim); }
+  .chip .a { width: 7px; height: 7px; border-radius: 50%; }
+  .chip.need { border-color: color-mix(in oklch, var(--warn) 50%, transparent); }
+  .note { font-size: 12px; color: var(--muted); }
+  .warnline { color: var(--warn); font-size: 12px; }
+  .dangerline { color: var(--danger); font-size: 12px; }
+
+  .menu { width: 300px; background: var(--panel-2); border: 1px solid var(--rule); border-radius: 12px; padding: 6px; box-shadow: 0 20px 40px -20px rgba(0,0,0,.6); }
+  .menu .lbl { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; padding: 8px 10px 4px; }
+  .mi { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 8px; font-size: 13px; }
+  .mi.on { background: var(--accent-soft); }
+  .mi .r { margin-left: auto; color: var(--muted); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+  .mi.dis { opacity: .5; }
+  .adot { width: 8px; height: 8px; border-radius: 50%; }
+  .sep { height: 1px; background: var(--rule-soft); margin: 5px 4px; }
+
+  .phases { display: grid; gap: 10px; }
+  .ph { display: grid; grid-template-columns: 44px 1fr auto; gap: 14px; align-items: start; padding: 14px 16px; background: var(--panel); border: 1px solid var(--rule); border-radius: 12px; }
+  .ph .n { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; font-weight: 700; background: var(--panel-3); }
+  .ph.first .n { background: var(--accent); color: #0f0e0c; }
+  .ph .t { font-weight: 600; }
+  .ph .size { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .ph p { margin: 4px 0 0; font-size: 13px; }
+
+  .dec { counter-reset: d; display: grid; gap: 12px; }
+  .dec .card { position: relative; padding-left: 56px; }
+  .dec .card::before { counter-increment: d; content: counter(d); position: absolute; left: 16px; top: 16px; width: 28px; height: 28px; border-radius: 8px; background: var(--accent); color: #0f0e0c; display: grid; place-items: center; font-weight: 700; }
+  .dec h4 { margin: 0 0 6px; font-size: 15px; }
+  .opt { font-size: 13px; color: var(--ink-dim); margin: 4px 0; }
+  .opt b { color: var(--ink); }
+  .rec { color: var(--accent); font-weight: 600; font-size: 12px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  td { color: var(--ink-dim); }
+  .tablewrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+<main>
+  <div class="meta">Codara Studio · plan only, nothing built yet · 25 Oct 2026 · branch feat/machines</div>
+  <h1>Machines</h1>
+  <p class="lede">Use a home server, an old laptop, a Codara Cloud box or a throwaway sandbox as extra compute. Agents and Cora workers run there; their terminals, files, ports and previews show up in Studio as if they were local. The full plan is <code>docs/machines-plan.md</code>.</p>
+  <nav class="toc">
+    <a href="#how">How it fits</a><a href="#list">Machines list</a><a href="#run">Running work there</a>
+    <a href="#sandbox">Sandboxes</a><a href="#security">Security</a><a href="#cloud">Cloud boxes</a>
+    <a href="#phases">Build plan</a><a href="#decide">Your 3 decisions</a>
+  </nav>
+
+  <h2 id="how">How it fits together</h2>
+  <p>Studio already opens projects over SSH, forwards dev server ports, and reaches Cloud boxes through a proxy. A <b>machine</b> is any of those connections, shown in one list. Work runs over there; only the screen comes back here.</p>
+  <div class="card">
+    <svg viewBox="0 0 900 400" role="img" aria-label="This computer connects to a home server, a Cloud box and a sandbox">
+      <defs>
+        <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/></marker>
+      </defs>
+      <!-- this computer -->
+      <rect x="20" y="40" width="270" height="320" rx="14" fill="var(--panel-2)" stroke="var(--rule)"/>
+      <text x="40" y="70" fill="var(--ink)" font-size="15" font-weight="700">This computer</text>
+      <text x="40" y="90" fill="var(--muted)" font-size="12">Codara Studio</text>
+      <rect x="40" y="108" width="230" height="40" rx="8" fill="var(--panel-3)"/>
+      <text x="54" y="133" fill="var(--ink-dim)" font-size="13">Panes, files, Ports, previews</text>
+      <rect x="40" y="156" width="230" height="40" rx="8" fill="var(--panel-3)"/>
+      <text x="54" y="181" fill="var(--ink-dim)" font-size="13">Cora manager (stays here)</text>
+      <rect x="40" y="204" width="230" height="40" rx="8" fill="var(--panel-3)"/>
+      <text x="54" y="229" fill="var(--ink-dim)" font-size="13">Your logins, Cora memory, runs</text>
+      <rect x="40" y="252" width="230" height="40" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+      <text x="54" y="277" fill="var(--ink)" font-size="13">Agent socket · machine token</text>
+      <text x="40" y="320" fill="var(--muted)" font-size="11.5">A machine only ever gets the</text>
+      <text x="40" y="336" fill="var(--muted)" font-size="11.5">narrow machine token, never the rest.</text>
+
+      <!-- home server -->
+      <rect x="560" y="20" width="320" height="120" rx="14" fill="var(--panel-2)" stroke="var(--rule)"/>
+      <text x="580" y="48" fill="var(--ink)" font-size="15" font-weight="700">homeserver</text>
+      <text x="680" y="48" fill="var(--muted)" font-size="12">SSH · Tailscale name</text>
+      <text x="580" y="74" fill="var(--ink-dim)" font-size="12.5">codara-host helper (no open port)</text>
+      <text x="580" y="94" fill="var(--ink-dim)" font-size="12.5">claude · codex signed in here</text>
+      <text x="580" y="114" fill="var(--ink-dim)" font-size="12.5">repo clone + worker worktrees</text>
+
+      <!-- sandbox inside home server -->
+      <rect x="600" y="152" width="280" height="86" rx="12" fill="var(--panel-2)" stroke="var(--warn)" stroke-dasharray="5 4"/>
+      <text x="618" y="178" fill="var(--ink)" font-size="14" font-weight="700">sbx/fix-login-142</text>
+      <text x="618" y="198" fill="var(--muted)" font-size="12">Docker on homeserver, 2 CPU / 4 GiB</text>
+      <text x="618" y="218" fill="var(--muted)" font-size="12">idle-stop 30 min · archive · delete</text>
+      <path d="M600 160 C 580 150, 580 130, 600 128" stroke="var(--muted-2)" fill="none" stroke-dasharray="3 3"/>
+
+      <!-- cloud box -->
+      <rect x="560" y="262" width="320" height="110" rx="14" fill="var(--panel-2)" stroke="var(--info)"/>
+      <text x="580" y="290" fill="var(--ink)" font-size="15" font-weight="700">box/dev-1</text>
+      <text x="665" y="290" fill="var(--muted)" font-size="12">Codara Cloud · paid</text>
+      <text x="580" y="316" fill="var(--ink-dim)" font-size="12.5">gVisor · sleeps when idle</text>
+      <text x="580" y="336" fill="var(--ink-dim)" font-size="12.5">reached only through platform-api</text>
+      <text x="580" y="356" fill="var(--ink-dim)" font-size="12.5">already supported (PR #44)</text>
+
+      <!-- links -->
+      <line x1="290" y1="110" x2="556" y2="80" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar)"/>
+      <text x="350" y="84" fill="var(--ink-dim)" font-size="12">SSH (one connection)</text>
+      <line x1="290" y1="170" x2="596" y2="195" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar)"/>
+      <text x="300" y="158" fill="var(--ink-dim)" font-size="12">hop through homeserver</text>
+      <line x1="290" y1="300" x2="556" y2="318" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar)"/>
+      <text x="340" y="296" fill="var(--ink-dim)" font-size="12">SSH over codaracloud proxy</text>
+      <line x1="556" y1="130" x2="294" y2="272" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ar)"/>
+      <text x="410" y="236" fill="var(--accent)" font-size="12">reports, hook events</text>
+    </svg>
+  </div>
+
+  <h2 id="list">One Machines list</h2>
+  <p>Every place compute can come from is one row: status, CPU, RAM, disk, load, and the agents running there. Numbers come from one tiny command every 10 seconds (about 5 ms). Inside containers it reads the real limits: a probe in a 1 CPU / 1 GiB container otherwise reports the host's 24 CPUs and 31 GiB.</p>
+  <div class="mock">
+    <div class="mock-head"><b>Machines</b><span class="sub">4 connected · 1 asleep</span><span class="sp"></span><button class="btn">New sandbox</button><button class="btn primary">Add machine</button></div>
+    <div class="row">
+      <div class="dot" style="background:var(--ok)"></div>
+      <div><div class="name">This computer</div><div class="sub">Linux · 24 CPU · 31 GiB</div></div>
+      <div class="meters">
+        <div class="m">CPU <span class="v">38%</span><div class="bar"><i style="width:38%;background:var(--metric-cpu)"></i></div></div>
+        <div class="m">RAM <span class="v">19.1 / 31 GiB</span><div class="bar"><i style="width:62%;background:var(--metric-ram)"></i></div></div>
+        <div class="m">Disk <span class="v">220 GB free</span><div class="bar"><i style="width:55%;background:var(--muted-2)"></i></div></div>
+      </div>
+      <div class="agents"><span class="chip"><span class="a" style="background:var(--agent-claude)"></span>Claude ×4</span><span class="chip"><span class="a" style="background:var(--agent-codex)"></span>Codex ×2</span><span class="chip need"><span class="a" style="background:var(--warn)"></span>1 needs you</span></div>
+    </div>
+    <div class="row">
+      <div class="dot" style="background:var(--ok)"></div>
+      <div><div class="name">homeserver<span class="kind">SSH</span></div><div class="sub">Ubuntu · 8 CPU · 64 GiB · load 1.2</div></div>
+      <div class="meters">
+        <div class="m">CPU <span class="v">14%</span><div class="bar"><i style="width:14%;background:var(--metric-cpu)"></i></div></div>
+        <div class="m">RAM <span class="v">9.4 / 64 GiB</span><div class="bar"><i style="width:15%;background:var(--metric-ram)"></i></div></div>
+        <div class="m">Disk <span class="v">1.6 TB free</span><div class="bar"><i style="width:20%;background:var(--muted-2)"></i></div></div>
+      </div>
+      <div class="agents"><span class="chip"><span class="a" style="background:var(--agent-claude)"></span>Claude · working</span><span class="chip"><span class="a" style="background:var(--agent-pi)"></span>Cora worker · step 3</span></div>
+    </div>
+    <div class="row">
+      <div class="dot" style="background:var(--ok)"></div>
+      <div><div class="name">old-thinkpad<span class="kind">Tailscale</span></div><div class="sub">Debian · 4 CPU · 8 GiB</div></div>
+      <div class="meters">
+        <div class="m">CPU <span class="v">3%</span><div class="bar"><i style="width:3%;background:var(--metric-cpu)"></i></div></div>
+        <div class="m">RAM <span class="v">1.1 / 8 GiB</span><div class="bar"><i style="width:14%;background:var(--metric-ram)"></i></div></div>
+        <div class="m">Disk <span class="v">41 GB free</span><div class="bar"><i style="width:70%;background:var(--muted-2)"></i></div></div>
+      </div>
+      <div><div class="warnline">Codex is not installed</div><div class="note">Claude Code signed out · <u>Sign in on old-thinkpad</u></div></div>
+    </div>
+    <div class="row">
+      <div class="dot" style="background:var(--warn)"></div>
+      <div><div class="name">sbx/fix-login-142<span class="kind">Sandbox</span></div><div class="sub">on homeserver · limit 2 CPU / 4 GiB</div></div>
+      <div class="meters">
+        <div class="m">CPU <span class="v">0%</span><div class="bar"><i style="width:0%"></i></div></div>
+        <div class="m">RAM <span class="v">0.6 / 4 GiB</span><div class="bar"><i style="width:15%;background:var(--metric-ram)"></i></div></div>
+        <div class="m">Disk <span class="v">3.2 GB used</span><div class="bar"><i style="width:10%;background:var(--muted-2)"></i></div></div>
+      </div>
+      <div><div class="note">Idle 22 min · stops in 8 min</div><div class="note"><u>Stop</u> · <u>Archive</u> · <u>Delete…</u></div></div>
+    </div>
+    <div class="row">
+      <div class="dot" style="background:var(--muted-2)"></div>
+      <div><div class="name">box/dev-1<span class="kind">Cloud box</span></div><div class="sub">Small · 2 CPU · 4 GiB</div></div>
+      <div class="note">Asleep. Wakes when you open it.</div>
+      <div class="agents"><span class="note">No agents</span></div>
+    </div>
+  </div>
+
+  <div class="grid2" style="margin-top:14px">
+    <div class="card">
+      <h3>Add a machine</h3>
+      <ol>
+        <li><b>SSH host or alias</b> from <code>~/.ssh/config</code>, or <code>user@host</code>.</li>
+        <li><b>Tailscale name</b>, like <code>nas.tail1234.ts.net</code>. Nothing extra to install in Studio.</li>
+        <li><b>Codara Cloud box</b>, from the existing picker.</li>
+        <li><b>Pair through the relay</b> for a machine behind NAT, later (your decision 3).</li>
+      </ol>
+    </div>
+    <div class="card">
+      <h3>First connect: confirm the key</h3>
+      <p style="margin:0 0 8px"><b style="color:var(--ink)">Is this homeserver?</b></p>
+      <p style="margin:0 0 4px" class="note">ED25519 key fingerprint</p>
+      <code>SHA256:p3V0q…k9Qx2s</code>
+      <p class="note">Already in your <code>~/.ssh/known_hosts</code>? Then no question. A key that later changes stops the connection and shows old and new side by side.</p>
+      <div style="display:flex;gap:8px"><button class="btn">Cancel</button><button class="btn primary">Trust and connect</button></div>
+    </div>
+  </div>
+
+  <h3>What goes on the machine</h3>
+  <p><b>First release: nothing.</b> Studio uses the machine's own shell, its own agent CLIs and <code>tmux</code> if present, so agents survive Studio closing. <b>Later: <code>codara-host</code></b>, a small signed helper Studio uploads itself (the machine never downloads code on its own). It opens no network port, runs as your user, keeps agents alive across disconnects, and updates with Studio.</p>
+
+  <h2 id="run">Running work on a machine</h2>
+  <div class="grid2">
+    <div>
+      <p>The "+" menu gets a <b>Where</b> choice. Free RAM and load are shown so the pick is informed. Agents use the sign-in that lives on that machine; Studio never copies your logins there by itself.</p>
+      <div class="menu">
+        <div class="lbl">New agent</div>
+        <div class="mi"><span class="adot" style="background:var(--agent-claude)"></span>Claude Code</div>
+        <div class="mi"><span class="adot" style="background:var(--agent-codex)"></span>Codex</div>
+        <div class="sep"></div>
+        <div class="lbl">Where</div>
+        <div class="mi">This computer<span class="r">12 GiB free</span></div>
+        <div class="mi on">homeserver<span class="r">54 GiB free · load 1.2</span></div>
+        <div class="mi">old-thinkpad<span class="r">6.9 GiB free</span></div>
+        <div class="mi">New sandbox…<span class="r">on homeserver</span></div>
+        <div class="mi dis">box/dev-1<span class="r">asleep, wakes</span></div>
+      </div>
+    </div>
+    <div>
+      <p>For Cora, the <b>manager stays here</b> (light, holds your memory and logins) and <b>workers run there</b> (heavy: builds, tests, installs). Results come back as git commits and go through the same review as any worker.</p>
+      <div class="card">
+        <svg viewBox="0 0 420 250" role="img" aria-label="Cora manager here, worker on homeserver, result fetched back with git">
+          <defs><marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/></marker></defs>
+          <rect x="10" y="20" width="150" height="56" rx="10" fill="var(--panel-3)"/>
+          <text x="24" y="44" fill="var(--ink)" font-size="13" font-weight="600">Cora manager</text>
+          <text x="24" y="63" fill="var(--muted)" font-size="11.5">this computer</text>
+          <rect x="260" y="20" width="150" height="56" rx="10" fill="var(--panel-3)"/>
+          <text x="274" y="44" fill="var(--ink)" font-size="13" font-weight="600">Worker</text>
+          <text x="274" y="63" fill="var(--muted)" font-size="11.5">worktree on homeserver</text>
+          <line x1="160" y1="40" x2="256" y2="40" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar2)"/>
+          <text x="172" y="33" fill="var(--ink-dim)" font-size="11">1 start step</text>
+          <line x1="260" y1="62" x2="164" y2="62" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ar2)"/>
+          <text x="176" y="80" fill="var(--accent)" font-size="11">2 report (token)</text>
+          <rect x="10" y="150" width="150" height="56" rx="10" fill="var(--panel-3)"/>
+          <text x="24" y="174" fill="var(--ink)" font-size="13" font-weight="600">Review + merge</text>
+          <text x="24" y="193" fill="var(--muted)" font-size="11.5">same as local workers</text>
+          <path d="M335 76 C 335 150, 220 180, 164 178" stroke="var(--muted)" fill="none" stroke-width="1.5" marker-end="url(#ar2)"/>
+          <text x="232" y="140" fill="var(--ink-dim)" font-size="11">3 git fetch over SSH</text>
+          <text x="10" y="236" fill="var(--muted)" font-size="11">No auto-merge from a machine marked Shared.</text>
+        </svg>
+      </div>
+    </div>
+  </div>
+
+  <h2 id="sandbox">Sandboxes</h2>
+  <p>A throwaway machine for one task: a Docker container on this computer or on a machine, made from a repo and branch. The safe place for untrusted pull requests and "let the agent run with full permissions". Limited CPU and RAM, no host mounts, no Docker socket inside, no logins unless you opt in.</p>
+  <div class="card">
+    <svg viewBox="0 0 900 130" role="img" aria-label="Sandbox lifecycle: create, running, idle-stop, archive, delete">
+      <defs><marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--muted)"/></marker></defs>
+      <g font-size="13">
+        <rect x="10" y="40" width="130" height="50" rx="10" fill="var(--panel-3)"/><text x="26" y="62" fill="var(--ink)" font-weight="600">Create</text><text x="26" y="80" fill="var(--muted)" font-size="11">clone, branch, setup</text>
+        <rect x="190" y="40" width="130" height="50" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="206" y="62" fill="var(--ink)" font-weight="600">Running</text><text x="206" y="80" fill="var(--muted)" font-size="11">agents, ports, files</text>
+        <rect x="370" y="40" width="140" height="50" rx="10" fill="var(--panel-3)"/><text x="386" y="62" fill="var(--ink)" font-weight="600">Stopped</text><text x="386" y="80" fill="var(--muted)" font-size="11">idle 30 min or Stop</text>
+        <rect x="560" y="40" width="140" height="50" rx="10" fill="var(--panel-3)"/><text x="576" y="62" fill="var(--ink)" font-weight="600">Archived</text><text x="576" y="80" fill="var(--muted)" font-size="11">branch pushed, tarball</text>
+        <rect x="750" y="40" width="140" height="50" rx="10" fill="var(--panel-3)" stroke="var(--danger)"/><text x="766" y="62" fill="var(--ink)" font-weight="600">Deleted</text><text x="766" y="80" fill="var(--muted)" font-size="11">you confirm</text>
+      </g>
+      <line x1="140" y1="65" x2="186" y2="65" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar3)"/>
+      <line x1="320" y1="58" x2="366" y2="58" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar3)"/>
+      <line x1="370" y1="74" x2="324" y2="74" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar3)"/>
+      <text x="326" y="100" fill="var(--muted)" font-size="11">wake on open</text>
+      <line x1="510" y1="65" x2="556" y2="65" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar3)"/>
+      <line x1="700" y1="65" x2="746" y2="65" stroke="var(--muted)" stroke-width="1.5" marker-end="url(#ar3)"/>
+    </svg>
+  </div>
+
+  <h2 id="security">Security: what a machine can do to this computer</h2>
+  <div class="tablewrap card" style="padding:6px 8px">
+    <table>
+      <tr><th>A connected machine can</th><th>A connected machine can never</th></tr>
+      <tr><td>Show output in its own panes (clipboard writes only from a pane you are typing in; never read your clipboard)</td><td>Read or write files on this computer</td></tr>
+      <tr><td>Serve pages through forwarded ports (opened in their own browser partition)</td><td>Open terminals on this computer, or in your other workspaces without asking</td></tr>
+      <tr><td>Report worker results and hook events with its machine token</td><td>Touch your logins, accounts or Codara settings</td></tr>
+      <tr><td>Hand back git commits, which you review like any worker's</td><td>Get the full agent socket token, or SSH agent forwarding</td></tr>
+    </table>
+  </div>
+  <p><b>If a home machine is hacked</b>, the attacker gets that machine and the agent sign-ins stored on it. That is why Studio never copies your logins to machines: the damage stays one machine. They can send fake worker reports, which is why results come back as commits through review, and why a machine marked <b>Shared</b> never gets auto-merge. Removing a machine kills its token and forgets its key in one click. On a home server, a dedicated <code>codara</code> user keeps agents away from your other files.</p>
+
+  <h2 id="cloud">Home machines and Cloud boxes, side by side</h2>
+  <div class="tablewrap card" style="padding:6px 8px">
+    <table>
+      <tr><th></th><th>Home machine</th><th>Docker sandbox</th><th>Codara Cloud box</th></tr>
+      <tr><td>Hardware paid by</td><td>you</td><td>you (runs on one of your machines)</td><td>Codara, through the plan</td></tr>
+      <tr><td>Reach</td><td>SSH, Tailscale</td><td>through its machine</td><td>platform-api only</td></tr>
+      <tr><td>Always reachable</td><td>if left on</td><td>stops when idle</td><td>sleeps when idle, wakes on connect</td></tr>
+      <tr><td>Isolation</td><td>your box</td><td>container</td><td>gVisor, dedicated servers</td></tr>
+      <tr><td>Codara's cost</td><td>none</td><td>none</td><td>server + 10 GB volume per box</td></tr>
+    </table>
+  </div>
+  <p>Studio treats all three the same way: one list, one picker. That makes the business question yours (decision 2).</p>
+
+  <h2 id="phases">Build plan</h2>
+  <div class="phases">
+    <div class="ph first"><div class="n">1</div><div><div class="t">Agents on an SSH host</div><p>Start Claude Code, Codex, Grok or Pi in a remote workspace with that machine's own CLI and sign-in, kept alive in tmux. Clear message when a CLI is missing or signed out.</p></div><div class="size">1 PR · ~2 days</div></div>
+    <div class="ph first"><div class="n">2</div><div><div class="t">Machines list</div><p>The list above, Add machine with key confirmation, the Where picker, container-aware numbers.</p></div><div class="size">1–2 PRs · ~4 days</div></div>
+    <div class="ph"><div class="n">3</div><div><div class="t">codara-host helper and Codara tools on machines</div><p>Signed helper, agents survive without tmux, hook events, the narrow machine token, Codara tools for remote agents.</p></div><div class="size">3 PRs · ~2 weeks</div></div>
+    <div class="ph"><div class="n">4</div><div><div class="t">Cora workers on a machine</div><p>"Run on" for runs and steps, remote worktrees, results fetched back with git.</p></div><div class="size">2–3 PRs · ~2 weeks</div></div>
+    <div class="ph"><div class="n">5</div><div><div class="t">Sandboxes</div><p>Docker sandboxes here or on a machine, idle-stop, stop, archive, delete.</p></div><div class="size">2 PRs · ~1 week</div></div>
+    <div class="ph"><div class="n">6</div><div><div class="t">Anywhere with room</div><p>Opt-in automatic placement by free RAM and load. Nothing moves a running agent.</p></div><div class="size">1 PR · ~2 days</div></div>
+  </div>
+  <p class="note">Every test runs headless against a throwaway SSH container and a temporary Codara home. None touches your real servers or SSH config.</p>
+
+  <h2 id="decide">Your 3 decisions</h2>
+  <div class="dec">
+    <div class="card">
+      <h4>What do we build first?</h4>
+      <p class="opt"><b>A.</b> Phases 1 and 2: agents on an SSH host, then the Machines list. About a week, 2 to 3 PRs. <span class="rec">Recommended</span></p>
+      <p class="opt"><b>B.</b> Go straight to the helper (phase 3) and skip the tmux step.</p>
+    </div>
+    <div class="card">
+      <h4>Business: your own machines next to Cloud boxes</h4>
+      <p class="opt">Is "use your own machines" free in Studio for everyone, with Cloud boxes as the paid "always reachable, isolated, no hardware" option? And are per-task Cloud sandboxes (a box per Cora worker, made and deleted automatically) part of the box allowance, later, or not offered? <b>Your call.</b></p>
+    </div>
+    <div class="card">
+      <h4>Machines behind NAT</h4>
+      <p class="opt"><b>A.</b> Tailscale and plain SSH only for now. No cost to Codara, no new code. <span class="rec">Recommended</span></p>
+      <p class="opt"><b>B.</b> Build pairing through Codara's relay. More work, and Codara carries the traffic.</p>
+    </div>
+  </div>
+</main>
+</body>
+</html>
