@@ -51,6 +51,9 @@ export type PreviewInputOp =
   | "press_key";
 
 const RING_CAP = 500;
+// A renderer that never answers the Escape must not hold the page's mouse
+// button down, nor the Stop error the agent is waiting for.
+const DRAG_ABORT_TIMEOUT_MS = 500;
 
 // ---------------------------------------------------------------------------
 // Registration: a tab announces its guest at dom-ready, which binds the guest
@@ -294,8 +297,10 @@ async function opDrag(params: Record<string, unknown>): Promise<unknown> {
   wc.sendInputEvent({ type: "mouseDown", x: sx, y: sy, button: "left", clickCount: 1 } as Parameters<
     WebContents["sendInputEvent"]
   >[0]);
-  // A Stop or a closed tab mid-drag throws out of the loop; the page must not
-  // be left with its button held down.
+  let finished = false;
+  // A Stop or a closed tab mid-drag throws out of the loop. The page must not
+  // be left with its button held down, and releasing it where the drag got to
+  // would drop the item there, so the drag is cancelled instead.
   try {
     for (let i = 1; i <= steps; i++) {
       const t = i / steps;
@@ -307,14 +312,37 @@ async function opDrag(params: Record<string, unknown>): Promise<unknown> {
       >[0]);
       at = { x: mx, y: my };
     }
+    finished = true;
   } finally {
+    const release = finished ? at : { x: sx, y: sy };
+    if (!finished && !wc.isDestroyed()) await abortDrag(wc, release);
+    // The tab can close during the Escape; a throw here would replace the
+    // error that ended the drag.
     if (!wc.isDestroyed()) {
-      wc.sendInputEvent({ type: "mouseUp", ...at, button: "left", clickCount: 1 } as Parameters<
+      wc.sendInputEvent({ type: "mouseUp", ...release, button: "left", clickCount: 1 } as Parameters<
         WebContents["sendInputEvent"]
       >[0]);
     }
   }
   return { ok: true, from: start, to: end, steps };
+}
+
+// Escape cancels a native drag and most drag libraries' drags while the
+// button is still held. For a page that ignores it, the pointer goes back to
+// where the drag began, so the release drops the item where it already was.
+async function abortDrag(wc: WebContents, origin: { x: number; y: number }): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([
+    dispatchKey(wc, "Escape", [], null).catch(() => {}),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, DRAG_ABORT_TIMEOUT_MS);
+    }),
+  ]);
+  clearTimeout(timer);
+  if (wc.isDestroyed()) return;
+  wc.sendInputEvent({ type: "mouseMove", ...origin, button: "left" } as Parameters<
+    WebContents["sendInputEvent"]
+  >[0]);
 }
 
 async function opUpload(params: Record<string, unknown>): Promise<unknown> {

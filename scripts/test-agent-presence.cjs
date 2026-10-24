@@ -156,14 +156,22 @@ async function trustedInput() {
   let probes = 0;
   let destroyed = false;
   let onActivity = () => {};
+  let onKey = () => {};
   const events = [];
   const activities = [];
   const wc = {
     id: 7, on() {}, once() {},
     isDestroyed: () => destroyed,
     executeJavaScript: async () => { probes++; return { ok: true, ...center }; },
-    sendInputEvent: (event) => events.push(event),
-    debugger: { on() {}, isAttached: () => true, sendCommand: async () => {} },
+    sendInputEvent: (event) => {
+      if (destroyed) throw new Error("Object has been destroyed");
+      events.push(event);
+    },
+    debugger: { on() {}, isAttached: () => true, sendCommand: async (method, command) => {
+      if (method !== "Input.dispatchKeyEvent") return;
+      events.push({ type: `key:${command.type}`, key: command.key });
+      await onKey(command);
+    } },
   };
   const mod = { exports: {} };
   new Function("module", "exports", "require", output.outputFiles[0].text)(mod, mod.exports, (name) => {
@@ -180,7 +188,7 @@ async function trustedInput() {
     return require(name);
   });
   const call = mod.exports.handlePreviewInputOp;
-  const reset = () => { events.length = 0; activities.length = 0; probes = 0; destroyed = false; center = { x: 50, y: 30 }; onActivity = () => {}; };
+  const reset = () => { events.length = 0; activities.length = 0; probes = 0; destroyed = false; center = { x: 50, y: 30 }; onActivity = () => {}; onKey = () => {}; };
 
   // The page shifts while the cursor glides: the click lands on the target's new place.
   onActivity = (_params, n) => { if (n === 1) center = { x: 80, y: 70 }; };
@@ -206,24 +214,57 @@ async function trustedInput() {
   await assert.rejects(call("scroll", { selector: "#list", deltaY: 200 }), /The user stopped Claude Code/);
   assert.equal(events.length, 0, "a stopped agent's click never reaches the page");
 
-  // Stop mid-drag releases the button where the drag got to.
+  // Stop mid-drag cancels it: Escape while the button is held, then back to
+  // the start, then release, so nothing is dropped where the drag got to.
   reset();
   onActivity = (_params, n) => { if (n === 4) throw new Error("The user stopped Claude Code from using browser tab tab-a and took it back."); };
-  await assert.rejects(call("drag", { from: { x: 0, y: 0 }, to: { x: 100, y: 0 }, steps: 10 }), /The user stopped/);
+  await assert.rejects(call("drag", { from: { x: 10, y: 5 }, to: { x: 110, y: 5 }, steps: 10 }), /The user stopped/);
   assert.equal(events.at(-1).type, "mouseUp", "the page is not left with its button held");
-  assert.equal(events.at(-1).x, 20, "released at the last point it reached");
+  assert.deepEqual([events.at(-1).x, events.at(-1).y], [10, 5], "released where the drag began, not midway");
+  assert.deepEqual([events.at(-2).type, events.at(-2).x, events.at(-2).y], ["mouseMove", 10, 5], "after moving back there");
+  const escape = events.findIndex((e) => e.type === "key:rawKeyDown" && e.key === "Escape");
+  assert.ok(escape > events.findIndex((e) => e.type === "mouseDown") && escape < events.length - 2, "Escape goes while the button is still held");
   assert.equal(events.filter((e) => e.type === "mouseUp").length, 1);
 
   // A finished drag releases once, at its end.
   reset();
   await call("drag", { from: { x: 0, y: 0 }, to: { x: 100, y: 0 }, steps: 4 });
   assert.deepEqual(events.filter((e) => e.type === "mouseUp").map((e) => [e.x, e.y]), [[100, 0]]);
+  assert.equal(events.some((e) => e.key === "Escape"), false, "a finished drag is never cancelled");
+
+  // The tab closes during the Escape: the agent still reads why the drag
+  // stopped, and nothing is sent to the dead page.
+  reset();
+  const stop = new Error("The user stopped Claude Code from using browser tab tab-a and took it back.");
+  onActivity = (_params, n) => { if (n === 4) throw stop; };
+  let sentBeforeClose = -1;
+  onKey = (command) => { if (command.key === "Escape" && sentBeforeClose < 0) { destroyed = true; sentBeforeClose = events.length; } };
+  await assert.rejects(call("drag", { from: { x: 10, y: 5 }, to: { x: 110, y: 5 }, steps: 10 }), (error) => error === stop);
+  assert.ok(sentBeforeClose > 0);
+  assert.equal(events.length, sentBeforeClose, "no input after the tab closed");
+
+  // A renderer that never answers the Escape: the button is released anyway,
+  // and the Stop error arrives within the abort's cap.
+  reset();
+  onActivity = (_params, n) => { if (n === 4) throw stop; };
+  onKey = (command) => (command.key === "Escape" ? new Promise(() => {}) : undefined);
+  const started = Date.now();
+  let deadline;
+  const hung = new Promise((_resolve, reject) => {
+    deadline = setTimeout(() => reject(new Error("the drag never returned while the Escape hung")), 3000);
+  });
+  await assert.rejects(Promise.race([call("drag", { from: { x: 10, y: 5 }, to: { x: 110, y: 5 }, steps: 10 }), hung]), (error) => error === stop);
+  clearTimeout(deadline);
+  const held = Date.now() - started;
+  assert.ok(held >= 450 && held < 1500, `the hung Escape cost about the cap: ${held}`);
+  assert.deepEqual([events.at(-1).type, events.at(-1).x, events.at(-1).y], ["mouseUp", 10, 5], "and the button was released at the start");
 
   // The tab closed mid-drag: nothing is sent to the dead page, and the error is the close's.
   reset();
   onActivity = (_params, n) => { if (n === 3) { destroyed = true; throw new Error("No browser tab is open."); } };
   await assert.rejects(call("drag", { from: { x: 0, y: 0 }, to: { x: 100, y: 0 }, steps: 10 }), /No browser tab is open/);
   assert.equal(events.filter((e) => e.type === "mouseUp").length, 0);
+  assert.equal(events.some((e) => e.key === "Escape"), false);
 }
 
 main().catch((error) => {
