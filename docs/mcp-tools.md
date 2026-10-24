@@ -707,12 +707,16 @@ created and browser tabs it opened. Any other tab waits for the user's answer
 on a card listing every tab that would change, marking a running agent or
 unsaved edits. **Deny** returns `reason: "denied"`, no answer within 40 seconds
 returns `reason: "no_answer"`; neither changes anything. **Allow once** acts
-this time. **Always allow** stores a grant for the agent's workspace in
-`tab-action-grants.json` in Codara's home (the cross-workspace grant format),
-listed in Settings > Agents under Workspaces ("Tabs agents did not open")
-with Revoke; later requests from agents of that workspace
+this time. **Always allow** stores a grant for the agent's workspace and that
+kind of action: closing (`tab-action-close-grants.json` in Codara's home) or
+moving, which covers split and unsplit (`tab-action-move-grants.json`), in the
+cross-workspace grant format. Allowing moves never allows closing, or the
+reverse. Settings > Agents lists both under Workspaces ("Tabs agents did not
+open") with Revoke. Later requests of that kind from agents of that workspace
 act without the card (`approvedBy: "grant"`), except a close that would stop a
-running agent or drop unsaved edits, which always shows the card. Only the
+running agent or drop unsaved edits, which always shows the card. An Always
+also answers the same agent's other cards still open for the same kind of
+action and workspace, never a card for another action or another agent. Only the
 card or a stored grant approves: a pasted link or an agent saying the user
 agreed does not. A tab in another workspace is refused unless the user
 already allowed this workspace's agents there for terminals (see [Terminals in

@@ -106,12 +106,13 @@ async function tabAction(params: Record<string, unknown>, _method: string, host:
   // A stored "Always allow" stands in for the card, except when closing
   // would stop an agent or drop unsaved edits: the user sees those every time.
   const losesWork = action === "close" && Boolean(decision.approval?.some((tab) => tab.warning));
-  if (decision.approval && !losesWork && (await hasTabActionGrant(caller.workspaceId, first.target.workspaceId))) {
+  if (decision.approval && !losesWork && (await hasTabActionGrant(action as TabActionKind, caller.workspaceId, first.target.workspaceId))) {
     approved = "grant";
   } else if (decision.approval) {
     const answer = await askTabActionApproval({
       agent: located.by.label,
       action: action as TabActionKind,
+      requester: caller.runId ? `run:${caller.runId}` : `pane:${caller.paneId ?? "none"}`,
       callerWorkspaceId: caller.workspaceId,
       callerName: await workspaceName(caller.workspaceId, host),
       workspaceId: first.target.workspaceId,

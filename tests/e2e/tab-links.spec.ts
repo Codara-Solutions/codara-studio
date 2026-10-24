@@ -264,14 +264,14 @@ test("copy a tab's link, click it in a terminal, split right; an agent closes ta
     expect(await pending).toMatchObject({ ok: true, closed: [second] });
     await expect
       .poll(() => page.evaluate(() => window.spark.tabActions.grants()))
-      .toEqual([expect.objectContaining({ callerWorkspaceId: "ws-a", targetWorkspaceId: "ws-a" })]);
+      .toEqual([expect.objectContaining({ action: "close", callerWorkspaceId: "ws-a", targetWorkspaceId: "ws-a" })]);
     const third = await openUserTab(fixture, page, "/third");
     const granted = await mcpCall(fixture.home, agent.paneId, "codara_tab", { action: "close", link: `codara://tab/ws-a/${third}` });
     expect(granted).toMatchObject({ ok: true, closed: [third], approvedBy: "grant" });
     await expect(card).toHaveCount(0);
 
     // Revoked, the card comes back.
-    await page.evaluate(() => window.spark.tabActions.revoke("ws-a", "ws-a"));
+    await page.evaluate(() => window.spark.tabActions.revoke("close", "ws-a", "ws-a"));
     const fourth = await openUserTab(fixture, page, "/fourth");
     pending = waiting(mcpCall(fixture.home, agent.paneId, "codara_tab", { action: "close", link: `codara://tab/ws-a/${fourth}` }));
     await expect(card).toBeVisible({ timeout: 20_000 });

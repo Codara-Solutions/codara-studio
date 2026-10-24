@@ -1,10 +1,21 @@
 import React, { useCallback, useEffect, useState } from "react";
 import type { CrossWorkspaceGrant } from "@shared/cross-workspace";
+import type { TabActionGrantKind } from "@shared/tab-actions";
 
 interface GrantSource {
   grants(): Promise<CrossWorkspaceGrant[]>;
   onGrantsChanged(listener: () => void): () => void;
   revoke(callerWorkspaceId: string, targetWorkspaceId: string): Promise<boolean>;
+}
+
+// The tab grants of one action. Reads window.spark per call, so a module can
+// build it before the preload bridge is there.
+export function tabActionGrantSource(action: TabActionGrantKind): GrantSource {
+  return {
+    grants: async () => (await window.spark.tabActions.grants()).filter((grant) => grant.action === action),
+    onGrantsChanged: (listener) => window.spark.tabActions.onGrantsChanged(listener),
+    revoke: (callerWorkspaceId, targetWorkspaceId) => window.spark.tabActions.revoke(action, callerWorkspaceId, targetWorkspaceId),
+  };
 }
 
 /**
@@ -15,9 +26,11 @@ interface GrantSource {
 export default function CrossWorkspaceGrantsList({
   source = window.spark.crossWorkspace,
   verb = "may open terminals in",
+  empty = "No workspace is always allowed yet.",
 }: {
   source?: GrantSource;
   verb?: string;
+  empty?: string;
 }): React.ReactElement {
   const [grants, setGrants] = useState<CrossWorkspaceGrant[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -43,7 +56,7 @@ export default function CrossWorkspaceGrantsList({
 
   if (grants === null) return <></>;
   if (grants.length === 0) {
-    return <div style={{ fontSize: 12, color: "var(--muted)" }}>No workspace is always allowed yet.</div>;
+    return <div style={{ fontSize: 12, color: "var(--muted)" }}>{empty}</div>;
   }
   return (
     <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: 6 }}>

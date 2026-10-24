@@ -9,11 +9,15 @@ export type TabActionKind = "close" | "split" | "unsplit";
 
 export type TabActionAnswer = "once" | "always" | "deny";
 
-// Agents of the caller workspace may change tabs they did not open in the
-// target workspace without a card, unless something would be lost. Same
-// record as a cross-workspace terminal grant; caller and target are often
-// the same workspace.
-export type TabActionGrant = CrossWorkspaceGrant;
+// What an "Always allow" covers: closing tabs, or moving them (split and
+// unsplit). Allowing one never allows the other.
+export type TabActionGrantKind = "close" | "move";
+
+// Agents of the caller workspace may close, or move, tabs they did not open
+// in the target workspace without a card, unless something would be lost.
+// Same record as a cross-workspace terminal grant plus its action; caller
+// and target are often the same workspace.
+export type TabActionGrant = CrossWorkspaceGrant & { action: TabActionGrantKind };
 
 export interface TabActionApprovalTab {
   title: string;
@@ -36,9 +40,10 @@ export interface TabActionApprovalRequest {
   expiresAt: number;
 }
 
-// Main stopped waiting for a card: it timed out, or another card's Always
-// answered it.
+// Main stopped waiting for a card: it timed out, another card's Always
+// answered it, or the agent stopped waiting (its call timed out or it went
+// away), so an Allow now would act for nobody.
 export interface TabActionApprovalClosed {
   id: string;
-  reason: "expired" | "answered";
+  reason: "expired" | "answered" | "withdrawn";
 }

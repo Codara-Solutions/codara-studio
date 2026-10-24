@@ -107,7 +107,8 @@ down to the agent's timeout and stays put if the user is mid-task.
   ("agent running", "unsaved changes") on the row, plus one sentence under
   the list. Color alone never carries the warning.
 - Buttons: Deny, then Allow once as the primary, on one row with the countdown;
-  "Always allow “<workspace>” to close tabs here" is a full-width secondary
+  "Always allow “<workspace>” to close tabs here" (or "to move tabs here" on
+  a split or unsplit card, a separate grant) is a full-width secondary
   button under them, so the riskier, lasting choice is never the default and
   its long label never crowds the row.
 - An expired card says nothing changed and stays a few seconds with Dismiss,

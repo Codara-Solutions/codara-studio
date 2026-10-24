@@ -8,6 +8,7 @@ import type {
   TabActionApprovalClosed,
   TabActionApprovalRequest,
   TabActionGrant,
+  TabActionGrantKind,
 } from "@shared/tab-actions";
 
 export const tabActionsApi = {
@@ -18,7 +19,7 @@ export const tabActionsApi = {
     ipcRenderer.on("tabAction:approval", wrapped);
     return () => ipcRenderer.removeListener("tabAction:approval", wrapped);
   },
-  /** The request is no longer waited for (it timed out, or another card's Always answered it). */
+  /** The request is no longer waited for (it timed out, another card's Always answered it, or the agent left). */
   onApprovalClosed: (listener: (payload: TabActionApprovalClosed) => void): (() => void) => {
     const wrapped = (_event: unknown, payload: TabActionApprovalClosed): void => listener(payload);
     ipcRenderer.on("tabAction:approvalClosed", wrapped);
@@ -27,6 +28,7 @@ export const tabActionsApi = {
   /** False when the request is no longer waited for. */
   answer: (id: string, answer: TabActionAnswer): Promise<boolean> =>
     ipcRenderer.invoke("tabAction:answer", { id, answer }),
+  /** Close and move grants, each with its action. */
   grants: (): Promise<TabActionGrant[]> => ipcRenderer.invoke("tabAction:grants"),
   /** A grant was added or revoked. */
   onGrantsChanged: (listener: () => void): (() => void) => {
@@ -34,6 +36,6 @@ export const tabActionsApi = {
     ipcRenderer.on("tabAction:grantsChanged", wrapped);
     return () => ipcRenderer.removeListener("tabAction:grantsChanged", wrapped);
   },
-  revoke: (callerWorkspaceId: string, targetWorkspaceId: string): Promise<boolean> =>
-    ipcRenderer.invoke("tabAction:revoke", { callerWorkspaceId, targetWorkspaceId }),
+  revoke: (action: TabActionGrantKind, callerWorkspaceId: string, targetWorkspaceId: string): Promise<boolean> =>
+    ipcRenderer.invoke("tabAction:revoke", { action, callerWorkspaceId, targetWorkspaceId }),
 };
