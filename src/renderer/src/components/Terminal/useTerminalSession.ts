@@ -73,7 +73,7 @@ import { asciiBytes, indexOfBytes } from "./terminalByteScan";
 import { isParsingReplay, writeAsReplay } from "./osc52";
 import { registerOsc52Clipboard } from "./terminalClipboard";
 import { readRecentOutput, registerTerminalContextSource } from "./terminalContext";
-import { resolveTerminalLinkClick } from "./terminalLinks";
+import { followsHiddenTargetLink, resolveTerminalLinkClick } from "./terminalLinks";
 import { isTabLink, TAB_LINK_TEXT_PATTERN } from "@shared/tab-links";
 import { openTabLink } from "../../tabs/tabLinkBridge";
 import type { TerminalLinkMenuRequest } from "./TerminalLinkMenu";
@@ -996,10 +996,12 @@ export function useTerminalSession({
         // shows a scary dialog and opens nothing. Handle it ourselves so these
         // links open like plain-text URLs do.
         linkHandler: {
-          activate: (event, uri) => activateTerminalLink(event, uri),
+          activate: (event, uri) => {
+            if (followsHiddenTargetLink(uri)) activateTerminalLink(event, uri);
+          },
           // An agent's markdown link to a tab arrives as an OSC 8 codara://
-          // link. Other schemes become links too; activateTerminalLink only
-          // follows web, file and tab links (main drops the rest).
+          // link, which xterm only passes on with this set. Its text hides
+          // its target, so activate follows web and tab links only.
           allowNonHttpProtocols: true,
         },
       });

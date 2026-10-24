@@ -303,7 +303,10 @@ Failed closes retry automatically.
 hyperlink) opens a small menu: **Open in Codara browser**, **Open in default
 browser** and **Copy link**. A `file:` link offers **Open in Codara** and
 **Copy link**, a `mailto:` link **Open in mail app** and **Copy link**, and
-any other scheme only **Copy link**. Ctrl+click (Cmd+click on macOS; either
+any other scheme only **Copy link**. An OSC 8 hyperlink shows text of the
+program's choosing over a hidden target, so only `http:`, `https:` and
+`codara://` tab links react to a click there; a `file:` or `mailto:` target
+behind one does nothing. Ctrl+click (Cmd+click on macOS; either
 works everywhere) skips the menu and opens the link where **Open links in**
 says. Dragging across a link selects text and opens nothing. The menu works
 from the keyboard (arrows, Home, End, Enter, Escape) and gives focus back to
