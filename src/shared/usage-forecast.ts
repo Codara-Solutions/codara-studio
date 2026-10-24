@@ -494,7 +494,9 @@ export function formatClock(ms: number, nowMs: number): string {
   const date = new Date(ms);
   const time = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
   if (localDayStart(ms) === localDayStart(nowMs)) return time;
-  if (localDayStart(ms) - localDayStart(nowMs) === DAY_MS) return `tomorrow ${time}`;
+  const tomorrow = new Date(localDayStart(nowMs));
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  if (localDayStart(ms) === tomorrow.getTime()) return `tomorrow ${time}`;
   return `${date.toLocaleDateString("en-GB", { weekday: "short" })} ${time}`;
 }
 

@@ -13,7 +13,9 @@ const listeners = new Set<(report: UsageForecastReport | null) => void>();
 
 export function loadUsageForecast(force = false): Promise<UsageForecastReport | null> {
   if (!force && cached && Date.now() - cached.at < FRESH_MS) return Promise.resolve(cached.report);
-  if (inflight) return inflight;
+  // A forced read waits for the one in flight and then reads again, since the
+  // one in flight may predate the change that forced it.
+  if (inflight) return force ? inflight.catch(() => null).then(() => loadUsageForecast(true)) : inflight;
   inflight = window.spark.usageAnalytics
     .forecast()
     .then((report) => {

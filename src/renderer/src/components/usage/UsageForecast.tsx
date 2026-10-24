@@ -470,7 +470,9 @@ function LabsControls({ report }: { report: UsageForecastReport | null }) {
   const ideas = normalizeForecastIdeas(preferences.usageForecastIdeas ?? DEFAULT_FORECAST_IDEAS);
   const style = useForecastStyle();
   const toggle = (key: keyof ForecastIdeas) => {
-    void setPreference("usageForecastIdeas", { ...ideas, [key]: !ideas[key] }).then(() => loadUsageForecast(true));
+    void setPreference("usageForecastIdeas", { ...ideas, [key]: !ideas[key] })
+      .then(() => loadUsageForecast(true))
+      .catch(() => undefined);
   };
   return (
     <div style={{ ...CARD, display: "flex", flexDirection: "column", gap: 10 }}>

@@ -99,6 +99,7 @@ async function main() {
     calibrationFactors,
     describeForecast,
     forecastWindow,
+    formatClock,
     goAheadNote,
     groupReadingsByWindow,
     normalizeForecastIdeas,
@@ -111,6 +112,16 @@ async function main() {
     windowLengthMs,
   } = forecast;
   const { parseClaudeLimitLine, parseCodexLimitLine, nextClockTime } = signals;
+
+  /* ── Clock words ─────────────────────────────────────────────────────── */
+  {
+    // 25 Oct 2026 is 25 hours long in Madrid (the clocks go back at 03:00).
+    const noon = new Date(2026, 9, 25, 12, 0).getTime();
+    eq("clock: later today is just the time", formatClock(new Date(2026, 9, 25, 18, 30).getTime(), noon), "18:30");
+    eq("clock: the day after a clock change is still tomorrow", formatClock(new Date(2026, 9, 26, 11, 0).getTime(), noon), "tomorrow 11:00");
+    eq("clock: the day after a spring change is tomorrow", formatClock(new Date(2026, 2, 30, 9, 0).getTime(), new Date(2026, 2, 29, 12, 0).getTime()), "tomorrow 09:00");
+    eq("clock: two days out names the day", formatClock(new Date(2026, 9, 27, 11, 0).getTime(), noon), "Tue 11:00");
+  }
 
   /* ── Window labels ───────────────────────────────────────────────────── */
 

@@ -10,12 +10,14 @@
 //   - the provider's live usage read, and the readings this module records
 //     from it while the preference is on (usage-history.jsonl).
 //
-// Nothing here sends anything anywhere. With the preference off it is never
-// loaded: the IPC handler and the recorder both check the preference first.
+// Nothing here sends anything anywhere. With the preference off nothing in it
+// runs: the IPC handler, the recorder and Cora's hint all check the preference
+// first.
 
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { codaraHome } from "./codara-home";
+import { writeFileAtomic } from "./fs-atomic";
 import { getPreferenceCached } from "./preferences-store";
 import { readForecastScan } from "./usage-analytics";
 import type { ForecastScan } from "./usage-scan-worker";
@@ -89,15 +91,25 @@ function isGeneral(window: PiUsageWindow): boolean {
   return window.scope === undefined || window.scope.kind === "general";
 }
 
-/** Appends this read's windows to usage-history.jsonl. Called only while the
- * usageForecast preference is on. */
-export async function recordUsageReadings(overview: PiUsageOverview, nowMs = Date.now()): Promise<void> {
+let recording: Promise<void> = Promise.resolve();
+
+/** Appends this read's general windows to usage-history.jsonl. Called only
+ * while the usageForecast preference is on. Reads that overlap are queued so
+ * the trim never drops lines another read appended. */
+export function recordUsageReadings(overview: PiUsageOverview, nowMs = Date.now()): Promise<void> {
+  const next = recording.then(() => appendReadings(overview, nowMs));
+  recording = next.catch(() => undefined);
+  return next;
+}
+
+async function appendReadings(overview: PiUsageOverview, nowMs: number): Promise<void> {
   const lines: string[] = [];
   for (const profile of overview.profiles ?? []) {
     if (profile.status !== "ok") continue;
     const at = Date.parse(profile.checkedAt);
     const t = Number.isNaN(at) ? nowMs : at;
     for (const window of profile.windows) {
+      if (!isGeneral(window)) continue;
       const resetsAt = window.resetsAt ? Date.parse(window.resetsAt) : Number.NaN;
       if (Number.isNaN(resetsAt)) continue;
       const key = `${profile.profileId}|${window.id}`;
@@ -131,7 +143,7 @@ export async function recordUsageReadings(overview: PiUsageOverview, nowMs = Dat
   if (stats && stats.size > HISTORY_MAX_BYTES) {
     const raw = await fs.readFile(path, "utf8");
     const kept = raw.split("\n").filter(Boolean);
-    await fs.writeFile(path, `${kept.slice(Math.floor(kept.length / 2)).join("\n")}\n`, "utf8");
+    await writeFileAtomic(path, `${kept.slice(Math.floor(kept.length / 2)).join("\n")}\n`);
   }
 }
 
@@ -242,7 +254,7 @@ function spendCalibration(options: {
     source: "live",
   };
   const own = options.recorded
-    .filter((reading) => reading.profileId === profile.profileId && windowLengthMs(reading.label) === lengthMs)
+    .filter((reading) => reading.profileId === profile.profileId && reading.windowId === window.id)
     .map<CalibrationAnchor>((reading) => ({
       windowStartMs: reading.resetsAt - lengthMs,
       atMs: reading.t,
@@ -413,7 +425,11 @@ function backtests(
   claudeFactors: Partial<Record<"5h" | "7d", number>>,
   nowMs: number,
 ): BacktestTrack[] {
-  const key = JSON.stringify(claudeFactors);
+  // The live reading moves the factors a little on every poll; only a real
+  // change of scale (10% steps) is worth a new back-test before the TTL.
+  const key = JSON.stringify(
+    Object.fromEntries(Object.entries(claudeFactors).map(([kind, factor]) => [kind, Math.round(Math.log(factor ?? 1) * 10)])),
+  );
   if (backtestCache && backtestCache.key === key && nowMs - backtestCache.at < BACKTEST_TTL_MS) {
     return backtestCache.tracks;
   }
