@@ -862,6 +862,13 @@ async function main() {
       /task\.taskClass === "verifier" \|\| !task\.verifierBrief \|\| report\.filesChanged\.length === 0/,
       "declared-verifier steps stay open only when a file change needs verification",
     );
+    // filesChanged holds {path, reason} objects; joining them directly told
+    // the verifier "[object Object], [object Object]" instead of its scope.
+    assert.match(
+      runStore,
+      /const changed = report\.filesChanged\s*\.slice\(0, 20\)\s*\.map\(\(file\) => file\.path\)/,
+      "the declared verifier is told the changed paths, not stringified objects",
+    );
     // The cap decline is journaled, so an unacted verifier verdict is
     // explicable from events.jsonl instead of looking like a dropped verdict.
     assert.match(

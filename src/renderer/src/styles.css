@@ -62,6 +62,16 @@
      you) read as their own group. Named dark themes inherit this base value;
      the light palettes re-tint it darker below (as they do the tone tokens). */
   --automation: oklch(0.72 0.18 300);
+  /* System activity: one fixed hue per metric (never the workspace accent,
+     so CPU is the same blue in every project). Chosen as a set: adjacent
+     pairs stay apart for every kind of colour blindness, none of them is a
+     status amber or red, and each clears 3:1 on the panels. Disk and
+     network are secondary and share a neutral line. */
+  --metric-cpu: #3987e5;
+  --metric-gpu: #199e70;
+  --metric-ram: #9085e9;
+  --metric-swap: #d55181;
+  --metric-io: color-mix(in oklab, var(--ink) 52%, transparent);
 
   /* Type — humanist sans for chrome, mono for data/code.
      Both use system fallbacks: Inter / Segoe UI Variable / SF Pro on
@@ -95,6 +105,20 @@
      The ghost slot the reorder preview drops into shares this height, so the
      placeholder and a real tab are the same object. */
   --tab-h: 28px;
+
+  /* Tab group colors, Chrome's nine. Each is the group label's text and the
+     tint of its pocket on the strip, so dark themes take the light tones (at
+     least 4.5:1 on every dark panel); the light palettes swap in deep ones
+     below. */
+  --tab-group-grey: #dadce0;
+  --tab-group-blue: #8ab4f8;
+  --tab-group-red: #f28b82;
+  --tab-group-yellow: #fdd663;
+  --tab-group-green: #81c995;
+  --tab-group-pink: #ff8bcb;
+  --tab-group-purple: #c58af9;
+  --tab-group-cyan: #78d9ec;
+  --tab-group-orange: #fcad70;
 
   /* Motion */
   --ease-out: cubic-bezier(0.22, 1, 0.36, 1);          /* expo-ish out  */
@@ -177,50 +201,113 @@
      Kill switch: html[data-glass="off"] (user pref) reverts every glass
      surface to the opaque panel look; prefers-reduced-transparency does the
      same at the media-query level. */
-  /* Values port the liquidglass-oss "dark"/"frosted" presets: the material is
-     SEE-THROUGH — a thin theme-bg veil + tiny blur keeps the backdrop legible
-     through the core; the glass reads from the rim (lens refraction via
-     --glass-lens + the fresnel ring below), not from fill opacity. */
+  /* The look is crystal glass: a thin theme-bg veil over a lightly frosted,
+     saturated and dimmed backdrop, so the shapes behind stay visible under
+     the text; a rim lit from the top left with a faint violet glint on the
+     bottom and right; a diagonal glare; menus bend the backdrop strongly at
+     their edges with a prism fringe (--glass-lens). Picked in October 2026
+     from five candidates (the earlier milky look, liquid, clear, frosted and
+     crystal) compared on the real surfaces. */
   /* --glass-veil-scale / --glass-blur-scale are user tuning knobs (Settings →
      Appearance), set on <html> by ThemeProvider as factors of 1; the lens
      bend/chroma knobs live on the SVG filter's scale attributes. */
-  --glass-bg: color-mix(in oklab, var(--bg) min(calc(34% * var(--glass-veil-scale, 1)), 98%), transparent);
-  --glass-bg-strong: color-mix(in oklab, var(--bg) min(calc(48% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg-strong: color-mix(in oklab, var(--bg) min(calc(32% * var(--glass-veil-scale, 1)), 98%), transparent);
   --glass-bg-faint: color-mix(in oklab, var(--bg) min(calc(25% * var(--glass-veil-scale, 1)), 98%), transparent);
   --glass-blur: calc(3px * var(--glass-blur-scale, 1));
-  --glass-blur-strong: calc(7px * var(--glass-blur-scale, 1));
+  --glass-blur-strong: calc(10px * var(--glass-blur-scale, 1));
   --glass-blur-faint: calc(3px * var(--glass-blur-scale, 1));
-  --glass-saturate: 1.12;
-  /* Fresnel rim: cool 1px ring all around + warm top-biased highlight —
-     painted as inset box-shadows (not a pseudo-element) so it stays pinned
-     on scrollable surfaces like tall menus. */
-  --glass-edge-hi: inset 0 1px 0 oklch(1 0.008 90 / 0.32), inset 0 0 0 1px oklch(0.92 0.02 250 / 0.10);
-  --glass-edge-lo: inset 0 -1px 0 oklch(0 0 0 / 0.22);
-  --glass-bloom: inset 0 0 20px oklch(1 0 0 / 0.03);
-  /* Whisper of top sheen (shader's topSheen ≈ 0.055) — must stay faint or the
-     core stops reading as clear glass. */
-  --glass-sheen: linear-gradient(180deg, oklch(1 0 0 / 0.05), transparent 30%);
-  --glass-border: color-mix(in oklab, var(--ink) 20%, transparent);
-  --glass-shadow: 0 24px 60px oklch(0 0 0 / 0.45), 0 2px 8px oklch(0 0 0 / 0.25);
+  --glass-saturate: 1.7;
+  /* Rim lit from the top left: a bright 1px line on the top and left edges,
+     a fainter violet one on the bottom and right, and a cool hairline all
+     around, painted as inset box-shadows (not a pseudo-element) so it stays
+     pinned on scrollable surfaces like tall menus. */
+  --glass-edge-hi: inset 1px 1px 0 oklch(1 0 0 / 0.45), inset -1px -1px 0 oklch(0.85 0.08 280 / 0.28);
+  --glass-edge-lo: inset 0 0 0 1px oklch(0.9 0.05 220 / 0.12);
+  --glass-bloom: inset 0 0 28px oklch(0.9 0.06 250 / 0.09);
+  /* A diagonal glare from the lit corner, and a faint violet glint in the
+     opposite one. */
+  --glass-sheen: linear-gradient(135deg, oklch(1 0 0 / 0.13), transparent 32%, transparent 68%, oklch(0.8 0.1 300 / 0.07));
+  --glass-border: oklch(1 0 0 / 0.20);
+  --glass-shadow: 0 18px 48px oklch(0 0 0 / 0.42), 0 0 0 0.5px oklch(1 0 0 / 0.06);
   /* Refraction lens (SVG feDisplacementMap chain in index.html): bends the
      backdrop at the rim only, with a chromatic fringe. Kept as a token so
      surfaces can opt out. */
   --glass-lens: url(#codara-glass-lens);
+
+  /* The rest of the material family. Glass belongs only to the layers that
+     open above the window (menus, popovers, palettes, toasts, the
+     notification center and dialogs); the window itself is always solid.
+       --glass-bg-menu / --glass-blur-menu: menus that list rows. Enough
+         frost that the text behind a row turns into color, not words.
+       --glass-bg-read / --glass-blur-read / --glass-saturate-read: the
+         legibility tier. Dialogs, palettes, toasts and the Settings nav
+         hold dense text over live content (a scrolling terminal, a
+         streaming chat), so they keep the rim and frost but a deeper tint.
+         The notification center keeps this frost under a thinner fill
+         over a dimmed backdrop, so it reads as glass across its height.
+       --glass-muted: the muted text tier on such a thinner fill, drawn
+         toward ink-dim so secondary text holds up over the frost.
+       --glass-specular: the read tier's glare, a background-image layer over
+         the fill. A touch softer than --glass-sheen under dense text.
+       --modal-scrim: the one dim behind every modal dialog, per theme, with
+         glass on or off. --palette-scrim is the lighter dim behind palettes
+         (Quick Open, the run switcher, search), which stay in context. */
+  --glass-bg-read: color-mix(in oklab, var(--bg) min(calc(46% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-blur-read: calc(14px * var(--glass-blur-scale, 1));
+  --glass-saturate-read: 1.7;
+  --glass-bg-menu: color-mix(in oklab, var(--bg) min(calc(20% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-blur-menu: calc(6px * var(--glass-blur-scale, 1));
+  --modal-scrim: rgb(0 0 0 / 0.45);
+  --palette-scrim: rgb(0 0 0 / 0.24);
+  --glass-specular: linear-gradient(135deg, oklch(1 0 0 / 0.10), transparent 35%, transparent 70%, oklch(0.8 0.1 300 / 0.06));
+  --glass-muted: color-mix(in oklab, var(--muted) 62%, var(--ink-dim));
+  /* --glass-tone-*: a brightness step at the end of each tier's backdrop
+       filter, 1 being neutral. A thin fill needs the backdrop dimmed (lifted
+       on paper) so bright content behind cannot wash the fill toward the
+       text. --glass-bg-panel / --glass-tone-panel: the notification center,
+       a thinner fill than the read tier over that dimmed backdrop. */
+  --glass-tone-menu: 0.7;
+  --glass-tone-read: 0.62;
+  --glass-tone-panel: 0.6;
+  --glass-bg-panel: color-mix(in oklab, var(--panel-2) min(calc(42% * var(--glass-veil-scale, 1)), 98%), transparent);
 }
 
 /* Light glass: higher fill opacity (thin white glass goes milky, not smoky),
-   a bright specular top edge, hairline border, and much softer shadows —
-   mirrors how --lift-hi / --shadow-1 are re-tinted per light palette. */
+   a lifted rather than dimmed backdrop, a bright rim, hairline border, and
+   much softer shadows — mirrors how --lift-hi / --shadow-1 are re-tinted per
+   light palette. */
 :root[data-theme-mode="light"] {
-  --glass-bg: color-mix(in oklab, var(--panel) min(calc(38% * var(--glass-veil-scale, 1)), 98%), transparent);
-  --glass-bg-strong: color-mix(in oklab, var(--panel) min(calc(54% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg-strong: color-mix(in oklab, var(--panel) min(calc(42% * var(--glass-veil-scale, 1)), 98%), transparent);
   --glass-bg-faint: color-mix(in oklab, var(--panel) min(calc(28% * var(--glass-veil-scale, 1)), 98%), transparent);
-  --glass-edge-hi: inset 0 1px 0 oklch(1 0 0 / 0.85), inset 0 0 0 1px oklch(1 0 0 / 0.30);
-  --glass-edge-lo: inset 0 -1px 0 oklch(0 0 0 / 0.08);
-  --glass-bloom: inset 0 0 20px oklch(1 0 0 / 0.15);
-  --glass-sheen: linear-gradient(180deg, oklch(1 0 0 / 0.30), transparent 30%);
+  --glass-edge-hi: inset 1px 1px 0 oklch(1 0 0 / 0.95), inset -1px -1px 0 oklch(0.85 0.08 280 / 0.35);
+  --glass-edge-lo: inset 0 0 0 1px oklch(1 0 0 / 0.4);
+  --glass-bloom: inset 0 0 28px oklch(0.95 0.04 250 / 0.3);
+  --glass-sheen: linear-gradient(135deg, oklch(1 0 0 / 0.6), transparent 35%, transparent 70%, oklch(0.9 0.06 300 / 0.25));
   --glass-border: color-mix(in oklab, var(--ink) 12%, transparent);
-  --glass-shadow: 0 24px 60px oklch(0 0 0 / 0.16), 0 2px 8px oklch(0 0 0 / 0.08);
+  --glass-shadow: 0 18px 48px oklch(0 0 0 / 0.14);
+  --glass-bg-read: color-mix(in oklab, var(--panel) min(calc(66% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --glass-bg-menu: color-mix(in oklab, var(--panel) min(calc(36% * var(--glass-veil-scale, 1)), 98%), transparent);
+  --modal-scrim: rgb(30 28 24 / 0.18);
+  --palette-scrim: rgb(30 28 24 / 0.07);
+  --glass-specular: linear-gradient(135deg, oklch(1 0 0 / 0.5), transparent 40%, transparent 72%, oklch(0.9 0.06 300 / 0.2));
+  --glass-tone-menu: 1.12;
+  --glass-tone-read: 1.12;
+  --glass-tone-panel: 1.15;
+  --glass-bg-panel: color-mix(in oklab, var(--panel) min(calc(50% * var(--glass-veil-scale, 1)), 98%), transparent);
+}
+
+/* Deep group tones for bright paper: each keeps at least 3.5:1 against the
+   light panels. The group label mixes in ink to reach 4.5:1 as text. */
+:root[data-theme-mode="light"] {
+  --tab-group-grey: #5f6368;
+  --tab-group-blue: #1a62d0;
+  --tab-group-red: #c5221f;
+  --tab-group-yellow: #9a5b00;
+  --tab-group-green: #137333;
+  --tab-group-pink: #b8136f;
+  --tab-group-purple: #8430ce;
+  --tab-group-cyan: #00707a;
+  --tab-group-orange: #b3530a;
 }
 
 :root[data-theme="codara-classic"] {
@@ -456,6 +543,14 @@
   --agent-pi: oklch(0.50 0.15 300);
 }
 
+/* The system-activity metric hues stepped darker for bright paper. */
+:root[data-theme-mode="light"] {
+  --metric-cpu: #2a78d6;
+  --metric-gpu: #0f9466;
+  --metric-ram: #6250d6;
+  --metric-swap: #d4497d;
+}
+
 * { box-sizing: border-box; }
 
 html, body, #root {
@@ -590,6 +685,9 @@ a { color: inherit; }
   /* Containing block for the reorder ghost slot, which is positioned in strip
      CONTENT coordinates so it scrolls with the tabs. */
   position: relative;
+  /* The stacking context the tab group pockets (z-index: -1) paint in, so
+     they sit behind the tabs and in front of the bar. */
+  isolation: isolate;
 }
 
 .spark-tabbar-scroll--overflow-left {
@@ -703,6 +801,241 @@ a { color: inherit; }
   outline-offset: 1px;
 }
 
+/* Tab groups. A group is a tinted pocket around its label and its tabs, so
+   it reads as one place rather than tabs with a decoration (DESIGN.md, "Tab
+   groups"). There is no wrapper element: the label and each member paint
+   their own slice of the pocket, through the strip gap after them, so the
+   pocket follows the offsets its tabs move by during a reorder. The slices
+   sit behind the tabs in the strip's isolated stacking context. The strip
+   stays solid: the group's only floating layer is its editor. */
+.spark-tab-group-chip::before,
+.spark-tab[data-tab-group]::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  border: 1px solid color-mix(in oklab, var(--tab-group-color) 32%, transparent);
+  border-inline-width: 0;
+  background: color-mix(in oklab, var(--tab-group-color) 10%, transparent);
+  pointer-events: none;
+}
+
+/* 1px outside the member's border box, and on through the gap after it. */
+.spark-tab[data-tab-group]::before {
+  top: -2px;
+  bottom: -2px;
+  left: -1px;
+  right: -5px;
+}
+
+.spark-tab[data-tab-group][data-group-last="true"]::before {
+  border-right-width: 1px;
+  border-radius: 0 calc(var(--tab-radius) + 3px) calc(var(--tab-radius) + 3px) 0;
+}
+
+/* As a stacking context of its own, the active tab would paint its slice
+   over its face instead of behind it. Floating tabs never overlap at rest,
+   so it gives up the z-index it has outside a group. */
+.spark-tab--active[data-tab-group] {
+  z-index: auto;
+}
+
+/* Members show the pocket through their face; hover and press keep the
+   strip's ink steps on top of it. */
+.spark-tab[data-tab-group]:not(.spark-tab--active) {
+  background: transparent;
+}
+
+.spark-tab[data-tab-group]:hover:not(.spark-tab--active) {
+  background: color-mix(in oklab, var(--ink) 6%, transparent);
+}
+
+.spark-tab[data-tab-group]:active:not(.spark-tab--active) {
+  background: color-mix(in oklab, var(--ink) 12%, transparent);
+}
+
+/* Air between a pocket and the tabs beside it. The reorder planner reads the
+   strip gap as the narrowest space between neighbours, so these margins never
+   widen the hole a drag opens (tabReorder.ts, stripGap). */
+.spark-tab[data-tab-group][data-group-last="true"],
+.spark-tab-group-chip[data-collapsed="true"] {
+  margin-right: 10px;
+}
+
+.spark-tab-group-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  height: 22px;
+  max-width: 168px;
+  min-width: 0;
+  margin-left: 10px;
+  padding: 0 6px 0 8px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--tab-group-color);
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: default;
+  -webkit-user-drag: none;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
+}
+
+/* The deep tones alone fall to 3.75:1 on a light pocket (orange on Rosé
+   Pine Dawn); a share of the theme's ink keeps every label at 4.5:1. */
+:root[data-theme-mode="light"] .spark-tab-group-chip {
+  color: color-mix(in oklab, var(--tab-group-color) 60%, var(--ink));
+}
+
+/* The label's slice opens the pocket: from 4px before it, as tall as the
+   members' slices, through the gap to the first member. Collapsed, it is the
+   whole pocket. */
+.spark-tab-group-chip::before {
+  top: calc((22px - var(--tab-h)) / 2 - 1px);
+  bottom: calc((22px - var(--tab-h)) / 2 - 1px);
+  left: -4px;
+  right: -4px;
+  border-left-width: 1px;
+  border-radius: calc(var(--tab-radius) + 3px) 0 0 calc(var(--tab-radius) + 3px);
+}
+
+.spark-tab-group-chip[data-collapsed="true"]::before {
+  border-right-width: 1px;
+  border-radius: calc(var(--tab-radius) + 3px);
+}
+
+.spark-tab-group-chip:hover {
+  background: color-mix(in oklab, var(--tab-group-color) 14%, transparent);
+}
+
+.spark-tab-group-chip:active {
+  background: color-mix(in oklab, var(--tab-group-color) 22%, transparent);
+}
+
+.spark-tab-group-chip:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.spark-tab-group-chip[data-unnamed="true"] {
+  padding: 0 7px;
+}
+
+.spark-tab-group-chip__dot {
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--tab-group-color);
+}
+
+.spark-tab-group-chip__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Plain text: a solid colored circle read as an unread badge. */
+.spark-tab-group-chip__count {
+  flex: 0 0 auto;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A tab landing in a group shows the group's color in its slot. */
+.spark-tab-reorder-ghost[data-group-color] {
+  border-color: var(--tab-group-color);
+  background: color-mix(in oklab, var(--tab-group-color) 18%, transparent);
+}
+
+.spark-tab-group-dot {
+  flex: 0 0 9px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--tab-group-color);
+}
+
+.spark-tab-group-menu {
+  padding: 10px 0 4px;
+}
+
+.spark-tab-group-menu__field {
+  padding: 0 10px 10px;
+}
+
+.spark-tab-group-menu__field input {
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control, 7px);
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 500;
+  outline: none;
+}
+
+.spark-tab-group-menu__field input::placeholder {
+  color: var(--muted);
+}
+
+.spark-tab-group-menu__field input:focus {
+  border-color: var(--accent-edge);
+  box-shadow: var(--focus-ring);
+}
+
+/* All nine colors on one row. */
+.spark-tab-group-menu__colors {
+  display: grid;
+  grid-template-columns: repeat(9, 18px);
+  justify-content: space-between;
+  padding: 0 12px 10px;
+}
+
+.spark-tab-group-swatch {
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--tab-group-color);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--ink) 16%, transparent);
+  cursor: default;
+}
+
+.spark-tab-group-swatch[aria-checked="true"] {
+  box-shadow: 0 0 0 2px var(--panel-2), 0 0 0 4px var(--tab-group-color);
+}
+
+.spark-tab-group-swatch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
+
+.spark-tab-group-menu__rule {
+  height: 1px;
+  margin: 0 0 4px;
+  background: var(--rule-soft);
+}
+
+.spark-tab-group-menu__warning {
+  padding: 0 12px 8px;
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .spark-tab__label {
   /* Size the box to the title's OWN intrinsic width (width: max-content,
      flex-shrink: 0). Letting the label be a flex-shrinkable auto-width item
@@ -797,6 +1130,7 @@ a { color: inherit; }
    snapping into a new layout at drop time. The modifier is dropped in the same
    commit that applies the new order, so the settle is instant — the committed
    layout never animates backwards out of the preview offsets. */
+.spark-tabbar-scroll--reordering .spark-tab-group-chip,
 .spark-tabbar-scroll--reordering .spark-tab {
   transition:
     background var(--motion-fast) var(--ease-out),
@@ -807,6 +1141,7 @@ a { color: inherit; }
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .spark-tabbar-scroll--reordering .spark-tab-group-chip,
   .spark-tabbar-scroll--reordering .spark-tab {
     transition:
       background var(--motion-fast) var(--ease-out),
@@ -991,9 +1326,9 @@ a { color: inherit; }
   z-index: 50;
   min-width: 200px;
   overflow: hidden;
-  /* One popover language with .spark-menu: 9px radius, --rule hairline, opaque
-     --panel-2 face, --shadow-2. (No blur — translucency is reserved for the
-     worker-chip / toolbar clusters that overlay live content.) */
+  /* One popover language with .spark-menu: radius, --rule hairline, opaque
+     --panel-2 face and --shadow-2 with glass off. Every picker carries
+     .spark-glass, so with glass on it is the same menu glass as the rest. */
   border-radius: var(--radius-popover, 9px);
   border: 1px solid var(--rule);
   background: var(--panel-2);
@@ -1018,15 +1353,16 @@ a { color: inherit; }
    timestamp into the exact corner the pill occupies). Focus-within keeps it
    shown for keyboard users; data-menu-open pins it while the add-pane menu is
    up (the pointer is over the menu, not the pane). */
-/* No fade. A transitioned opacity is compositor-driven, and Chromium cannot
-   composite the --glass-lens reference filter through one — the pill paints
-   flat and the terminal reads straight through it, which is exactly what made
-   this thing look like tinted plastic rather than glass. Toggling opacity
-   without a transition is a plain repaint, which the lens survives. It also
-   puts the pill on the same footing as every other glass surface in the app,
-   which appear instantly for the very same reason (see the `animation: none`
-   note further down). Opacity rather than visibility, so the buttons stay in
-   the tab order for keyboard users. */
+/* Solid with glass on or off: it rests on the terminal's top edge while the
+   user types, and a backdrop filter there re-sampled the xterm canvas on
+   every frame the terminal drew. No fade, so it appears at once. Opacity
+   rather than visibility, so the buttons stay in the tab order for keyboard
+   users. */
+.spark-pane-toolbar {
+  background: var(--panel);
+  border: 1px solid var(--rule-soft);
+  box-shadow: var(--shadow-2), var(--lift-hi);
+}
 .spark-terminal-pane .spark-pane-toolbar {
   opacity: 0;
 }
@@ -1173,6 +1509,13 @@ a { color: inherit; }
   color: var(--muted);
 }
 .spark-fade-in { animation: spark-fade-in var(--motion) var(--ease-out) both; }
+/* A wrapper still holding a filled opacity/transform animation is a backdrop
+   root, so the glass card inside it frosted only the empty wrapper and the
+   terminal behind showed through sharp. These wrappers let the animation go
+   once it ends, so the card samples the real workbench. */
+.spark-fade-in:has(> .spark-overlay-surface, > .spark-toast) {
+  animation-fill-mode: backwards;
+}
 
 /* Travelling dash on a live run-graph wire — see GraphWires.tsx. Slow and
    glow-free: the dash locates the live path without reading arcade. */
@@ -1340,6 +1683,37 @@ a { color: inherit; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.cora-welcome__connect {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: min(620px, 100%);
+  box-sizing: border-box;
+  padding: 11px 12px 11px 14px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius-surface, 10px);
+  background: color-mix(in oklab, var(--ink) 2.5%, var(--panel));
+}
+.cora-welcome__connect-copy {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+  text-align: left;
+}
+.cora-welcome__connect-copy strong {
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.cora-welcome__connect .cora-failure-action {
+  align-self: center;
+  flex: 0 0 auto;
+}
 .cora-welcome__starters {
   display: grid;
   /* auto-fit rather than a fixed pair: the chat is as often half a split as it
@@ -1358,7 +1732,7 @@ a { color: inherit; }
   flex-direction: column;
   align-items: flex-start;
   gap: 4px;
-  padding: 11px 34px 11px 12px;
+  padding: 11px 14px 11px 12px;
   border: 1px solid var(--rule-soft);
   border-radius: var(--radius-surface, 10px);
   background: color-mix(in oklab, var(--ink) 2.5%, var(--panel));
@@ -1381,7 +1755,7 @@ a { color: inherit; }
 }
 .cora-starter:active { transform: translateY(0); }
 .cora-starter__label {
-  color: var(--accent-text);
+  color: var(--muted);
   font-size: 9px;
   font-weight: 750;
   letter-spacing: 0.12em;
@@ -1397,17 +1771,22 @@ a { color: inherit; }
   font-size: 10.5px;
   line-height: 1.4;
 }
-.cora-starter__arrow {
-  position: absolute;
-  top: 11px;
-  right: 12px;
-  color: var(--muted-2);
-  font-size: 12px;
-  transition: color var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
+.cora-starter__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
-.cora-starter:hover .cora-starter__arrow {
+.cora-starter__arrow {
+  display: inline-flex;
   color: var(--accent-text);
-  transform: translate(1px, -1px);
+  opacity: 0;
+  transform: translate(-2px, 1px);
+  transition: opacity var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
+}
+.cora-starter:hover .cora-starter__arrow,
+.cora-starter:focus-visible .cora-starter__arrow {
+  opacity: 1;
+  transform: translate(0, 0);
 }
 /* The welcome's door to Automations: one quiet full-width row under the
    starter cards. While an automation runs (or needs an answer) it lights up
@@ -1480,14 +1859,17 @@ a { color: inherit; }
 .cora-welcome__automations-action {
   flex: 0 0 auto;
   font-size: 11px;
+  line-height: 1;
   font-weight: 600;
   color: var(--muted);
 }
 .cora-welcome__automations.is-live .cora-welcome__automations-action { color: var(--accent-text); }
 .cora-welcome__automations-arrow {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  margin-left: -4px;
   color: var(--muted-2);
-  font-size: 12px;
   transition: transform var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 .cora-welcome__automations:hover .cora-welcome__automations-arrow {
@@ -1931,19 +2313,196 @@ a { color: inherit; }
     background var(--motion-fast) var(--ease-out);
 }
 
+/* Read by assistive tech, never painted. !important because the elements
+   it hides are inline-styled. */
+.spark-sr-only {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  overflow: hidden !important;
+  clip-path: inset(50%) !important;
+  white-space: nowrap !important;
+}
+
+/* Cora chat header: title, then quiet status and cost pills, then the
+   copy-id button. Only the title ellipsizes. */
+.cora-header-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  white-space: nowrap;
+}
+.cora-header-meta__title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font: 600 13px/1.2 var(--font-sans);
+  color: var(--ink);
+  letter-spacing: -0.005em;
+}
+.cora-status-pill {
+  --cora-status-color: var(--muted);
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 20px;
+  padding: 0 8px 0 7px;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--cora-status-color) 11%, transparent);
+  color: var(--ink-dim);
+  font: 500 11px/1 var(--font-sans);
+  white-space: nowrap;
+}
+.cora-status-pill__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--cora-status-color);
+  flex: 0 0 6px;
+}
+.cora-status-pill[data-tone="live"] .cora-status-pill__dot {
+  box-shadow: 0 0 6px color-mix(in oklch, var(--cora-status-color) 55%, transparent);
+  animation: spark-pulse 1.3s ease-in-out infinite;
+}
+
+/* Inter's tabular figures (the body default) also give the hyphen a fixed
+   advance, which spaced out every "run-store" in prose. Chat text sets
+   normal figures; times, durations and counters opt back in inline. */
+.cora-conversation,
+.cora-welcome,
+.cora-header-meta,
+.composer-shell {
+  font-variant-numeric: normal;
+}
+.composer-context-label {
+  font-variant-numeric: tabular-nums;
+}
+
+/* A command, path or pattern inside an activity row. */
+.cora-tool-arg {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.cora-tool-arg--inline {
+  color: var(--ink-dim);
+}
+
+/* The header's copy-id control: a glyph at rest that names itself on hover. */
+.run-id-chip--labelled {
+  width: auto !important;
+  min-width: var(--spark-icon-btn-size);
+  gap: 0;
+  padding: 0 5px !important;
+}
+.run-id-chip__label {
+  max-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  font: 500 11px/1 var(--font-sans);
+  opacity: 0;
+  transition:
+    max-width var(--motion) var(--ease-out),
+    opacity var(--motion-fast) var(--ease-out),
+    margin var(--motion) var(--ease-out);
+}
+.run-id-chip--labelled:hover .run-id-chip__label,
+.run-id-chip--labelled:focus-visible .run-id-chip__label {
+  max-width: 90px;
+  margin-left: 5px;
+  opacity: 1;
+}
+
+/* The chat composer is a plain raised surface. The glass rim and sheen made
+   its top edge the brightest line on screen. */
+.composer-shell.spark-glass--strong,
+html:not([data-glass="off"]) .composer-shell.spark-glass--strong {
+  background-color: var(--panel-2);
+  background-image: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+  border: 1px solid var(--rule);
+  box-shadow: 0 1px 2px oklch(0 0 0 / 0.10), 0 10px 28px oklch(0 0 0 / 0.16);
+}
+.composer-shell.spark-glass--strong:focus-within,
+html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
+  border-color: var(--rule-strong);
+}
+
+/* The conversation column's side padding. Where the minimap shows, the
+   padding grows just enough that text never runs under its marks; on a wide
+   pane the centered column already clears it and the base padding holds. */
+.cora-conversation-column {
+  padding-left: clamp(12px, 2.4vw, 20px);
+  padding-right: clamp(12px, 2.4vw, 20px);
+}
+@container (min-width: 720px) {
+  .cora-conversation-column {
+    padding-left: max(20px, calc(52px - (100cqw - 768px) / 2));
+    padding-right: max(20px, calc(52px - (100cqw - 768px) / 2));
+  }
+}
+
+/* Consecutive tool calls inside a turn: one tight list, not spaced rows. */
+.cora-tool-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: -2px 0;
+}
+
+/* The hover row (time, copy, undo) floats in the gap under the bubble
+   instead of reserving its height at rest; a row with a delivery state
+   (Queued, Send now, Unqueue) stays in flow and keeps only its time and copy
+   for hover. */
+.cora-user-turn {
+  position: relative;
+}
 .cora-user-turn__meta {
   opacity: 0;
-  transform: translateY(-2px);
   pointer-events: none;
-  transition:
-    opacity var(--motion-fast) var(--ease-out),
-    transform var(--motion-fast) var(--ease-out);
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+.cora-user-turn__meta:not(.has-status) {
+  position: absolute;
+  z-index: 2;
+  top: 100%;
+  right: 0;
+  height: 18px;
+  margin-top: 2px;
+}
+.cora-user-turn__hover-meta .cora-message-ghost-action,
+.cora-assistant-turn__meta .cora-message-ghost-action {
+  width: 20px;
+  height: 18px;
+}
+.cora-user-turn__hover-meta time,
+.cora-assistant-turn__meta time {
+  padding: 0 2px;
 }
 .cora-user-turn:hover .cora-user-turn__meta,
 .cora-user-turn:focus-within .cora-user-turn__meta,
 .cora-user-turn__meta.has-status {
   opacity: 1;
-  transform: translateY(0);
+  pointer-events: auto;
+}
+.cora-user-turn__hover-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.cora-user-turn__meta.has-status .cora-user-turn__hover-meta {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+.cora-user-turn:hover .cora-user-turn__meta.has-status .cora-user-turn__hover-meta,
+.cora-user-turn:focus-within .cora-user-turn__meta.has-status .cora-user-turn__hover-meta {
+  opacity: 1;
   pointer-events: auto;
 }
 .cora-message-ghost-action {
@@ -1964,7 +2523,490 @@ a { color: inherit; }
   background: var(--hover);
   color: var(--ink-dim);
 }
+.cora-message-ghost-action:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
 
+/* Small secondary action beside a message or inside a card (Send now,
+   Unqueue, Retry). A real control: hairline edge, hover fill, focus ring. */
+.cora-chip-btn {
+  appearance: none;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--ink-dim);
+  font: 500 11.5px/1 var(--font-sans);
+  white-space: nowrap;
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+.cora-chip-btn:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--rule-strong);
+  color: var(--ink);
+}
+.cora-chip-btn:active:not(:disabled) {
+  background: var(--press);
+}
+.cora-chip-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.cora-chip-btn:disabled {
+  opacity: 0.5;
+}
+.cora-chip-btn > svg {
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+.cora-chip-btn:hover:not(:disabled) > svg {
+  color: inherit;
+}
+.cora-chip-btn--primary {
+  border-color: transparent;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+.cora-chip-btn--primary > svg {
+  color: inherit;
+}
+.cora-chip-btn--primary:hover:not(:disabled) {
+  border-color: transparent;
+  background: color-mix(in oklab, var(--accent) 88%, var(--ink));
+  color: var(--accent-ink);
+}
+/* Same box as its siblings so a row of actions shares one height and
+   baseline; only the edge is missing until hover. */
+.cora-chip-btn--ghost {
+  border-color: transparent;
+  color: var(--muted);
+  padding: 0 8px 0 10px;
+}
+
+.cora-queued-pill {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 8px 0 7px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--ink) 6%, transparent);
+  color: var(--ink-dim);
+  font: 500 11px/1 var(--font-sans);
+  white-space: nowrap;
+}
+.cora-queued-pill > svg {
+  color: var(--warn);
+}
+
+.cora-error-dismiss {
+  appearance: none;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  display: inline-grid;
+  place-items: center;
+  margin: -1px -4px -1px 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: inherit;
+  opacity: 0.75;
+  cursor: default;
+}
+.cora-error-dismiss:hover {
+  opacity: 1;
+  background: color-mix(in oklch, var(--danger) 16%, transparent);
+}
+.cora-error-dismiss:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* Find in a Cora chat. */
+.cora-find-bar {
+  position: absolute;
+  top: 10px;
+  right: 22px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius-surface, 10px);
+  background: var(--panel-2);
+  box-shadow: var(--shadow-float);
+  font-family: var(--font-sans);
+}
+.cora-find-bar input {
+  width: 180px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius-control, 7px);
+  background: var(--bg);
+  color: var(--ink);
+  font: 12px/1 var(--font-sans);
+  outline: none;
+}
+.cora-find-bar input:focus-visible {
+  box-shadow: var(--focus-ring);
+}
+.cora-find-bar__count {
+  min-width: 58px;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.cora-find-bar button {
+  appearance: none;
+  width: 24px;
+  height: 24px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--ink-dim);
+  font: 600 13px/1 var(--font-sans);
+  cursor: default;
+}
+.cora-find-bar button:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--ink);
+}
+.cora-find-bar button:disabled {
+  color: var(--muted);
+  opacity: 0.6;
+}
+.cora-find-bar button:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.cora-timeline-row.is-find-current {
+  border-radius: var(--radius-surface, 10px);
+  box-shadow: 0 0 0 2px var(--accent-edge);
+}
+
+/* Chat markdown. highlight.js token colours come from theme tokens so light
+   themes stay readable; the markdown preview keeps its own .spark-markdown
+   palette in markdown-preview/markdown.css. */
+/* Markdown rhythm for Cora messages. One body size, a short heading scale,
+   and the outer margins of the first and last block dropped so a message
+   (or a user bubble) hugs its content. */
+.cora-md {
+  font-size: 13.5px;
+  line-height: 1.62;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.cora-md p,
+.cora-md ul,
+.cora-md ol,
+.cora-md blockquote,
+.cora-md table,
+.cora-md hr {
+  margin: 0 0 10px;
+}
+.cora-md li + li {
+  margin-top: 3px;
+}
+.cora-md li > ul,
+.cora-md li > ol,
+.cora-md li > p {
+  margin: 3px 0 0;
+}
+.cora-md li::marker {
+  color: var(--muted);
+}
+.cora-md h1,
+.cora-md h2,
+.cora-md h3,
+.cora-md h4 {
+  margin: 18px 0 6px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+.cora-md h1 { font-size: 17px; }
+.cora-md h2 { font-size: 15px; }
+.cora-md h3 { font-size: 13.5px; }
+.cora-md h4 { font-size: 13px; color: var(--ink-dim) !important; }
+.cora-md .cora-md-code,
+.cora-md > pre {
+  margin: 10px 0 12px;
+}
+.cora-md > :first-child { margin-top: 0; }
+.cora-md > :last-child { margin-bottom: 0; }
+.cora-md strong { font-weight: 650; }
+.cora-user-md .cora-md h1 { font-size: 15px; }
+.cora-user-md .cora-md h2,
+.cora-user-md .cora-md h3 { font-size: 13.5px; }
+.cora-user-md .cora-md h1,
+.cora-user-md .cora-md h2,
+.cora-user-md .cora-md h3,
+.cora-user-md .cora-md h4 {
+  margin: 10px 0 4px;
+}
+.cora-user-md .cora-md p,
+.cora-user-md .cora-md ul,
+.cora-user-md .cora-md ol {
+  margin-bottom: 6px;
+}
+.cora-user-md .cora-md > :first-child { margin-top: 0; }
+.cora-user-md .cora-md > :last-child { margin-bottom: 0; }
+
+.cora-md .hljs {
+  color: var(--ink-dim, var(--ink));
+  background: transparent;
+}
+.cora-md .hljs-comment,
+.cora-md .hljs-quote {
+  color: var(--muted);
+  font-style: italic;
+}
+.cora-md .hljs-keyword,
+.cora-md .hljs-selector-tag,
+.cora-md .hljs-literal,
+.cora-md .hljs-section,
+.cora-md .hljs-link {
+  color: var(--danger);
+}
+.cora-md .hljs-built_in,
+.cora-md .hljs-type,
+.cora-md .hljs-class .hljs-title {
+  color: var(--warn);
+}
+.cora-md .hljs-string,
+.cora-md .hljs-attr,
+.cora-md .hljs-template-tag,
+.cora-md .hljs-template-variable {
+  color: var(--info);
+}
+.cora-md .hljs-symbol,
+.cora-md .hljs-bullet,
+.cora-md .hljs-meta {
+  color: var(--accent-text);
+}
+.cora-md .hljs-number,
+.cora-md .hljs-regexp,
+.cora-md .hljs-deletion {
+  color: var(--agent-claude);
+}
+.cora-md .hljs-name,
+.cora-md .hljs-attribute,
+.cora-md .hljs-variable,
+.cora-md .hljs-title.function_,
+.cora-md .hljs-title.class_,
+.cora-md .hljs-title {
+  color: var(--agent-pi);
+}
+.cora-md .hljs-tag,
+.cora-md .hljs-addition {
+  color: var(--ok);
+}
+.cora-md .hljs-emphasis {
+  font-style: italic;
+}
+.cora-md .hljs-strong {
+  font-weight: 700;
+}
+.cora-md-code {
+  position: relative;
+}
+.cora-md-code__bar {
+  position: absolute;
+  top: 13px;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+.cora-md-code:hover .cora-md-code__bar,
+.cora-md-code:focus-within .cora-md-code__bar {
+  opacity: 1;
+}
+.cora-md-code__lang {
+  color: var(--muted);
+  font: 500 10.5px/1 var(--font-mono);
+}
+.cora-md-code__copy {
+  appearance: none;
+  height: 20px;
+  padding: 0 7px;
+  border: 1px solid var(--rule-soft);
+  border-radius: var(--radius-control, 7px);
+  background: var(--bg);
+  color: var(--ink-dim);
+  font: 600 10.5px/1 var(--font-sans);
+  cursor: default;
+}
+.cora-md-code__copy:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.cora-md-code__copy:focus-visible,
+.cora-md-file-ref:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.cora-md-file-ref {
+  cursor: pointer;
+  text-decoration: none;
+  transition:
+    color var(--motion-fast) var(--ease-out),
+    background var(--motion-fast) var(--ease-out);
+}
+.cora-md-file-ref:hover {
+  color: var(--accent-text) !important;
+  background: color-mix(in oklch, var(--accent) 12%, transparent) !important;
+}
+
+/* A failed Cora turn or manager stage. A quiet card with a danger accent on
+   its icon and edge only; the message wraps in full and actions sit below. */
+.cora-turn-error {
+  box-sizing: border-box;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px 12px 13px;
+  border: 1px solid var(--rule-soft);
+  border-left: 2px solid color-mix(in oklch, var(--danger) 75%, transparent);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--ink) 2.5%, var(--panel));
+}
+.cora-turn-error__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.cora-turn-error__icon {
+  flex: 0 0 auto;
+  color: var(--danger);
+}
+.cora-turn-error__title {
+  min-width: 0;
+  color: var(--ink);
+  font: 600 13px/1.35 var(--font-sans);
+}
+.cora-turn-error__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 22px;
+}
+.cora-turn-error__lead {
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.cora-turn-error__hint {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.cora-turn-error__raw {
+  margin-bottom: 8px;
+  padding: 7px 9px;
+  border-radius: var(--radius-control, 7px);
+  background: color-mix(in oklab, var(--bg) 70%, transparent);
+  color: var(--muted);
+  font: 400 11px/1.5 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.cora-turn-error__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  padding-left: 22px;
+}
+.cora-turn-error__details {
+  margin-left: 22px;
+  padding-top: 4px;
+}
+.cora-chip-btn--quiet {
+  border-color: transparent;
+  color: var(--muted);
+  padding: 0 6px 0 8px;
+}
+
+/* The one action a failure card offers (open the accounts tab). */
+.cora-failure-action {
+  appearance: none;
+  align-self: flex-start;
+  height: 26px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control, 7px);
+  background: var(--accent);
+  color: var(--accent-ink);
+  font: 600 11.5px/1 var(--font-sans);
+  cursor: default;
+}
+.cora-failure-action:hover {
+  background: color-mix(in oklab, var(--accent) 88%, var(--ink));
+}
+.cora-failure-action:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.cora-worker-terminal {
+  appearance: none;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 7px 0 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--muted);
+  font: 500 11px/1 var(--font-sans);
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+.cora-worker-terminal:hover:not(:disabled) {
+  border-color: var(--rule);
+  background: var(--hover);
+  color: var(--ink);
+}
+.cora-worker-terminal:disabled {
+  color: var(--muted);
+  border-color: transparent;
+}
+.cora-worker-terminal:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
 .cora-worker-diff-file {
   background: transparent;
   transition:
@@ -1982,11 +3024,20 @@ a { color: inherit; }
   outline-offset: -1px;
 }
 
+.cora-turn {
+  position: relative;
+}
+/* Drawn in the row gap under the turn (MESSAGE_META_GAP in
+   ChatConversation.tsx reserves it), lined up with the prose's left edge. */
 .cora-assistant-turn__meta {
-  min-height: 22px;
+  position: absolute;
+  z-index: 2;
+  left: 4px;
+  top: calc(100% + 2px);
+  height: 18px;
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 2px;
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--motion-fast) var(--ease-out);
@@ -2022,56 +3073,56 @@ a { color: inherit; }
   .cora-timeline-minimap {
     position: absolute;
     z-index: 8;
-    top: 24px;
-    bottom: 24px;
-    left: 10px;
-    width: 38px;
+    top: 28px;
+    bottom: 28px;
+    /* Clear of the scroller's own bar, which must stay draggable. */
+    right: 14px;
+    width: 22px;
     display: block;
-    opacity: 0.38;
-    transition: opacity var(--motion-fast) var(--ease-out);
+    opacity: 0;
+    transition: opacity var(--motion-slow) var(--ease-out);
+  }
+  [data-scrolling="true"] > .cora-timeline-minimap {
+    opacity: 0.6;
+    transition-duration: var(--motion-fast);
   }
   .cora-timeline-minimap:hover,
   .cora-timeline-minimap:focus-within {
-    opacity: 1;
+    opacity: 1 !important;
   }
   .cora-timeline-minimap__rail {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    left: 17px;
-    width: 1px;
-    background: color-mix(in oklab, var(--rule-soft) 55%, transparent);
+    display: none;
   }
   .cora-timeline-minimap__mark {
     position: absolute;
-    left: 10px;
-    width: 9px;
+    right: 6px;
+    width: 8px;
     height: 2px;
     padding: 0;
     transform: translateY(-50%);
     border: 0;
     border-radius: 999px;
-    background: var(--muted);
-    opacity: 0.72;
+    background: var(--muted-2);
     cursor: default;
     transition:
       width var(--motion-fast) var(--ease-out),
-      background var(--motion-fast) var(--ease-out),
-      opacity var(--motion-fast) var(--ease-out);
+      background var(--motion-fast) var(--ease-out);
   }
   .cora-timeline-minimap__mark.is-visible {
-    width: 16px;
-    background: var(--ink-dim);
-    opacity: 1;
+    width: 12px;
+    background: var(--muted);
   }
   .cora-timeline-minimap__mark.is-active {
-    width: 24px;
+    width: 16px;
     background: var(--accent);
-    opacity: 1;
+  }
+  .cora-timeline-minimap__mark:focus-visible {
+    outline: none;
+    box-shadow: var(--focus-ring);
   }
   .cora-timeline-minimap__preview {
     position: absolute;
-    left: 34px;
+    right: 30px;
     width: min(310px, calc(100cqw - 110px));
     padding: 10px 12px;
     transform: translateY(-50%);
@@ -2097,6 +3148,115 @@ a { color: inherit; }
     font: 400 11px/1.4 var(--font-sans);
     -webkit-line-clamp: 3;
   }
+}
+
+/* One 14px status slot leading every activity row. */
+.cora-activity-icon {
+  --cora-activity-color: var(--muted);
+  flex: 0 0 14px;
+  width: 14px;
+  height: 14px;
+  display: inline-grid;
+  place-items: center;
+  color: var(--cora-activity-color);
+}
+.cora-activity-icon[data-state="failed"] {
+  color: var(--danger);
+}
+.cora-activity-icon__spin {
+  width: 10px;
+  height: 10px;
+  box-sizing: border-box;
+  border-radius: 999px;
+  border: 1.5px solid color-mix(in oklch, var(--accent) 24%, transparent);
+  border-top-color: var(--accent);
+}
+.cora-activity-icon__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--cora-activity-color);
+}
+.cora-activity-icon[data-state="hollow"] .cora-activity-icon__dot {
+  width: 7px;
+  height: 7px;
+  box-sizing: border-box;
+  background: transparent;
+  border: 1.5px solid var(--cora-activity-color);
+}
+
+.cora-step-worker__failure {
+  padding: 0 6px 4px 26px;
+  color: color-mix(in oklch, var(--danger) 70%, var(--ink-dim));
+  font-size: 11.5px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/* Scrolled up, the last lines fade into the composer edge, so the jump
+   button below sits on a quiet band instead of on top of a sentence. */
+.cora-conversation-fade {
+  position: absolute;
+  z-index: 3;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 72px;
+  background: linear-gradient(to bottom, transparent, var(--panel) 55%);
+  pointer-events: none;
+}
+.cora-conversation-topfade {
+  position: absolute;
+  z-index: 3;
+  left: 0;
+  right: 12px;
+  top: 0;
+  height: 14px;
+  background: linear-gradient(to bottom, var(--panel), transparent);
+  pointer-events: none;
+}
+
+/* Back to the newest turn: a quiet round button centered above the composer,
+   outside the text column's reading line. The accent marks only new activity. */
+.cora-jump-latest {
+  appearance: none;
+  position: absolute;
+  z-index: 4;
+  left: 50%;
+  bottom: 12px;
+  width: 30px;
+  height: 30px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  transform: translateX(-50%);
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--ink-dim);
+  box-shadow: var(--shadow-1);
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+.cora-jump-latest:hover {
+  background: var(--panel-3);
+  color: var(--ink);
+}
+.cora-jump-latest:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.cora-jump-latest__badge {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--panel);
 }
 
 /* ── Composer toolbar: the bottom pill row ───────────────────────────────────
@@ -2156,35 +3316,49 @@ a { color: inherit; }
    the whole deficit (ellipsizing continuously) before the pills give
    anything up. min-width:0 lets it collapse all the way to nothing. */
 .composer-toolbar__hint {
-  flex: 1 20 auto;
+  flex: 1 1 0;
   min-width: 0;
-  font-size: 10px;
+  padding-left: 4px;
+  font-size: 11px;
   color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: center;
+  text-align: left;
 }
 /* The worker variant is a flex container, which makes the parent's
    text-overflow inert: its children would be cut mid-glyph at both edges
    instead of ellipsised. The truncation has to move onto the child that is
    actually elastic, which is the task title. The dot and the two fixed labels
    never shrink, so the row degrades by shortening the title. */
+/* Segments that do not fit wrap onto a second line that the fixed height
+   clips, so the row always ends on a whole segment: the tail goes first, then
+   the title, and only the headline itself ever ellipsizes. */
 .composer-toolbar__hint--worker {
-  display: inline-flex;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: center;
-  gap: 6px;
+  justify-content: flex-start;
+  column-gap: 5px;
+  height: 16px;
+  line-height: 16px;
 }
 .composer-toolbar__hint--worker > * {
   flex: 0 0 auto;
+  white-space: nowrap;
 }
-.composer-toolbar__hint--worker > .composer-toolbar__hint-title {
-  flex: 0 1 auto;
+.composer-toolbar__hint-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 1 !important;
+  min-width: 0;
+  overflow: hidden;
+}
+.composer-toolbar__hint-head > :last-child {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 /* The model name is the one pill whose text has no upper bound, so its
@@ -2198,7 +3372,7 @@ a { color: inherit; }
   flex: 0 0 auto;
 }
 .composer-toolbar .composer-model:has(.composer-pill-label) {
-  flex: 0 1 auto;
+  flex: 0 0 auto;
   min-width: 0;
   max-width: min(240px, 42cqi);
 }
@@ -2213,12 +3387,6 @@ a { color: inherit; }
   min-width: 0;
 }
 
-@container composer-bar (max-width: 640px) {
-  /* A keyboard tip is the least valuable thing in the row. */
-  .composer-toolbar__hint:not(.composer-toolbar__hint--worker) {
-    display: none;
-  }
-}
 @container composer-bar (max-width: 560px) {
   /* The bar alone still shows context fullness at a glance; the pill's
      tooltip keeps the exact used/budget numbers. */
@@ -2244,9 +3412,11 @@ a { color: inherit; }
     display: none;
   }
   .composer-toolbar .composer-model:has(.composer-pill-label) {
+    flex-shrink: 1;
     max-width: 38cqi;
   }
-  .composer-profile-label {
+  .composer-profile-label,
+  .composer-tools-label {
     display: none;
   }
 }
@@ -2292,6 +3462,25 @@ a { color: inherit; }
 }
 .composer-profile-trigger {
   max-width: 150px;
+}
+/* A started chat keeps its profile, so the pill is a label there, not a menu.
+   It still opens the profile, so hover answers like any ghost control. */
+.composer-profile-trigger.is-locked {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  padding-left: 6px;
+  padding-right: 6px;
+}
+.composer-profile-trigger.is-locked:hover {
+  background: var(--hover);
+  color: var(--ink-dim);
+}
+.composer-profile-trigger.is-locked .composer-profile-glyph {
+  color: inherit;
+}
+.composer-tools-trigger {
+  flex: 0 0 auto;
 }
 .composer-profile-glyph {
   color: var(--accent-text);
@@ -2404,11 +3593,45 @@ a { color: inherit; }
   border-top: 1px solid var(--rule-soft);
 }
 .composer-model-group-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   padding: 4px 8px 2px;
   font-size: 9px;
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: var(--muted);
+}
+.composer-model-group.is-unconnected .composer-picker-row {
+  opacity: 0.55;
+}
+.composer-stop-glyph.is-stopping {
+  animation: runs-pulse 900ms ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-stop-glyph.is-stopping {
+    animation: none;
+  }
+}
+.composer-model-connect {
+  appearance: none;
+  padding: 1px 6px;
+  border: 1px solid var(--accent-edge);
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--accent-text);
+  font: 600 9.5px/1.4 var(--font-sans);
+  letter-spacing: 0;
+  text-transform: none;
+  cursor: default;
+}
+.composer-model-connect:hover {
+  background: var(--accent-soft);
+}
+.composer-model-connect:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
 }
 .composer-picker-title {
   padding: 9px 11px 7px;
@@ -2416,6 +3639,72 @@ a { color: inherit; }
   color: var(--ink);
   font-size: 11px;
   font-weight: 650;
+}
+.composer-picker-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.composer-picker-edit {
+  appearance: none;
+  padding: 1px 6px;
+  border: 0;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--muted);
+  font: 500 10px/1.4 var(--font-sans);
+  cursor: default;
+}
+.composer-picker-edit:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.composer-picker-edit:focus-visible,
+.composer-provider-tab:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.composer-provider-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 5px 5px 0;
+  overflow-x: auto;
+}
+.composer-provider-tab {
+  flex: 0 0 auto;
+  padding: 4px 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: 500 10.5px/1.3 var(--font-sans);
+  cursor: default;
+}
+.composer-provider-tab:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.composer-provider-tab.is-active {
+  background: var(--accent-soft);
+  border-color: var(--accent-edge);
+  color: var(--ink);
+}
+.composer-picker-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  color: var(--accent-ink, #fff);
+  font-size: 9px;
+}
+.composer-picker-check.is-on {
+  background: var(--accent);
+  border-color: var(--accent);
 }
 .composer-picker-title.is-substep {
   border-top: 1px solid var(--rule-soft);
@@ -2527,6 +3816,15 @@ a { color: inherit; }
 }
 .composer-fast:active {
   background: var(--press);
+}
+.composer-fast:disabled {
+  opacity: 0.45;
+  background: transparent;
+  color: var(--ink-dim);
+}
+.composer-fast.is-on.is-unavailable {
+  background: transparent;
+  border-style: dashed;
 }
 .composer-chevron {
   display: inline-flex;
@@ -2957,15 +4255,26 @@ a { color: inherit; }
 }
 
 /* ── Modal scrim ─────────────────────────────────────────────────────────────
-   A translucent veil behind a dialog. The opaque-mode fallback is a plain
-   tint; in glass mode (below) it gains a light blur so the dialog reads as
-   the only sharp layer. The mix darkens dark themes and lightens-then-darkens
-   light ones in-key with --bg. */
+   One dim behind every modal dialog (--modal-scrim), the same with glass on
+   or off, so the window looks the same behind each of them. A light theme
+   dims too: a pale veil over pale paper left the dialog standing apart by
+   its shadow alone. Palettes (.spark-scrim--palette) keep the workbench in
+   view under a lighter dim. Never blurred: a full-window backdrop filter
+   re-rasterizes the terminal-sized workbench on every change behind it
+   (fast-overlays.spec.ts holds that line). */
+.spark-scrim,
+.settings-dialog-scrim,
+.agent-capabilities-scrim,
+.create-copy-scrim {
+  background: var(--modal-scrim);
+}
 .spark-scrim {
   position: absolute;
   inset: 0;
-  background: color-mix(in oklab, var(--bg) 64%, transparent);
   animation: spark-fade-in var(--motion-fast) var(--ease-out) both;
+}
+.spark-scrim.spark-scrim--palette {
+  background: var(--palette-scrim);
 }
 
 /* ── Liquid glass materials ──────────────────────────────────────────────────
@@ -3009,23 +4318,26 @@ a { color: inherit; }
   html:not([data-glass="off"]) {
     /* Toast fill: Toast paints --notify-surface inline, so the translucent
        fill rides the token; the blur comes from .spark-backdrop-glass.
-       Strong fill — toasts land over busy terminals and must stay readable. */
-    --notify-surface: var(--glass-bg-strong);
+       Read tier: toasts land over busy terminals and must stay readable. */
+    --notify-surface: var(--glass-bg-read);
   }
+  /* Menus and popovers list rows of text over whatever they open on, so they
+     take the menu tier: the lens still bends the rim, and the frost turns the
+     words behind a row into color. */
   html:not([data-glass="off"]) .spark-glass,
   html:not([data-glass="off"]) .spark-menu {
-    background-color: var(--glass-bg);
+    background-color: var(--glass-bg-menu);
     background-image: var(--glass-sheen);
-    -webkit-backdrop-filter: var(--glass-lens) blur(var(--glass-blur)) saturate(var(--glass-saturate));
-    backdrop-filter: var(--glass-lens) blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    -webkit-backdrop-filter: var(--glass-lens) blur(var(--glass-blur-menu)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-menu));
+    backdrop-filter: var(--glass-lens) blur(var(--glass-blur-menu)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-menu));
     border: 1px solid var(--glass-border);
     box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), var(--glass-bloom), var(--glass-shadow);
   }
   html:not([data-glass="off"]) .spark-glass--strong {
     background-color: var(--glass-bg-strong);
     background-image: var(--glass-sheen);
-    -webkit-backdrop-filter: var(--glass-lens) blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
-    backdrop-filter: var(--glass-lens) blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    -webkit-backdrop-filter: var(--glass-lens) blur(var(--glass-blur-strong)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-read));
+    backdrop-filter: var(--glass-lens) blur(var(--glass-blur-strong)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-read));
     border: 1px solid var(--glass-border);
     box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), var(--glass-bloom), var(--glass-shadow);
   }
@@ -3041,10 +4353,10 @@ a { color: inherit; }
     backdrop-filter: blur(var(--glass-blur-faint)) saturate(var(--glass-saturate));
   }
   html:not([data-glass="off"]) .spark-toast {
-    background-color: var(--glass-bg-strong);
+    background-color: var(--glass-bg-read);
     background-image: var(--glass-sheen);
-    -webkit-backdrop-filter: var(--glass-lens) blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
-    backdrop-filter: var(--glass-lens) blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    -webkit-backdrop-filter: var(--glass-lens) blur(var(--glass-blur-read)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-read));
+    backdrop-filter: var(--glass-lens) blur(var(--glass-blur-read)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-read));
     border-color: var(--glass-border);
     box-shadow:
       var(--toast-status),
@@ -3066,106 +4378,30 @@ a { color: inherit; }
     -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
     backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
   }
-  /* Scrim blur stays light: the dialog's own lens+blur does the frosting, and
-     a heavy scrim would pre-flatten the backdrop so the glass has nothing
-     left to refract. */
-  html:not([data-glass="off"]) .spark-scrim {
-    background: color-mix(in oklab, var(--bg) 32%, transparent);
-    /* Light on purpose, but still the shared material: scaled by the same
-       Appearance blur slider as everything else, so turning glass down turns
-       the scrim down with it rather than leaving one surface pinned at a
-       hardcoded 3px. */
-    -webkit-backdrop-filter: blur(calc(3px * var(--glass-blur-scale, 1))) saturate(var(--glass-saturate));
-    backdrop-filter: blur(calc(3px * var(--glass-blur-scale, 1))) saturate(var(--glass-saturate));
-  }
-  /* Settings and Capability Center cover most of the viewport and stay open
-     while controls update. Running the three-channel SVG refraction lens over
-     those large surfaces on top of a full-window blurred scrim forces
-     continuous GPU re-rasterization.
-     Keep the same liquid-glass tint, sheen, edge and strong blur, but use one
-     composited blur layer and an unfiltered scrim. Small popovers retain the
-     richer lens material. */
-  html:not([data-glass="off"]) .settings-dialog-surface {
-    -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
-    backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
-    contain: paint;
-  }
-  /* The Capability Center scrolls a dense inventory. Chromium/Wayland
-     re-rasterizes a viewport-sized backdrop-filter whenever that inventory
-     moves, producing visible half-second wheel lag on otherwise fast PCs.
-     Preserve the liquid-glass sheen, rim, bloom, and translucent material,
-     but preblend its face instead of filtering the live workbench underneath. */
-  /* Same recipe as .settings-dialog-surface above, deliberately: the two are
-     peer full-height panels and must read as the same material. The preblended
-     opaque face this used to carry made it the one "glass" surface in the app
-     that wasn't glass at all.
-     The scroll-lag the comment above warns about came from running the
-     three-channel SVG refraction lens over a viewport-sized surface. This uses
-     ONE composited blur layer and no lens, the same compromise Settings has
-     shipped with, and keeps `contain: paint` so the dense inventory's scroll
-     invalidations stay inside the panel instead of re-rasterizing the window
-     behind it. */
-  html:not([data-glass="off"]) .agent-capabilities-surface {
-    -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
-    backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
-    contain: paint;
-  }
-  /* The worker session picker is the third surface with this problem: a tall
-     dialog whose rows repaint under the pointer (the highlight follows hover)
-     while the three-channel SVG lens re-rasterizes the whole dialog on top of
-     a blurred full-window scrim. That is what made the session list feel
-     laggy. Same compromise as the two panels above — one composited blur, no
-     lens, an unfiltered scrim, and `contain: paint` so a row repaint or a
-     list scroll can't invalidate the workbench behind the dialog. */
-  html:not([data-glass="off"]) .worker-session-surface {
-    -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
-    backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
-    contain: paint;
-  }
   /* Fast modal glass: keep the translucent fill, sheen, rim and one local
      frost layer on the card, but never run the SVG refraction lens over a
-     large scrolling dialog. Its sibling scrim is deliberately unfiltered so
-     opening a menu does not re-rasterize the terminal-sized workbench. */
+     large scrolling dialog. */
   html:not([data-glass="off"]) .spark-glass--strong.spark-overlay-surface {
-    -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
-    backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate));
+    -webkit-backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-read));
+    backdrop-filter: blur(var(--glass-blur-strong)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-read));
     contain: paint;
   }
-  html:not([data-glass="off"]) .spark-scrim.spark-scrim--clear {
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
-    background: color-mix(in oklab, var(--bg) 44%, transparent);
-  }
-  html:not([data-glass="off"]) .settings-dialog-scrim,
-  html:not([data-glass="off"]) .agent-capabilities-scrim,
-  html:not([data-glass="off"]) .worker-session-scrim {
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
-    background: color-mix(in oklab, var(--bg) 44%, transparent);
-  }
-  /* The Capability Center's footer bar frosts the panel's OWN interior (the
-     surface above is a backdrop root), so it keeps a blur of its own — but it
-     lives in here now. It used to sit outside this gate with hardcoded values,
-     which made it the one surface that stayed frosted after the user switched
-     liquid glass off, and the one the Appearance sliders could not move. */
-  html:not([data-glass="off"]) .agent-capabilities-footer {
-    -webkit-backdrop-filter: blur(calc(10px * var(--glass-blur-scale, 1))) saturate(var(--glass-saturate));
-    backdrop-filter: blur(calc(10px * var(--glass-blur-scale, 1))) saturate(var(--glass-saturate));
-  }
-  /* .spark-menu belongs in this list too: both surfaces carry their own
-     backdrop-filter AND `contain: paint`, each of which is a backdrop root, so
-     a dropdown nested inside one frosts the panel's interior rather than the
-     workbench and paints flat. Every other nested surface here was already
-     preblended on purpose; the menus were simply missed. */
+  /* Menus nested in either face match its opaque reading pane rather than
+     frost it: they open over its dense rows, and inside the nav they would
+     be glass on glass. The account and session menus are portalled out of
+     the face but open over the same rows, so they are opaque too. */
+  html:not([data-glass="off"]) .agent-capabilities-surface .spark-glass,
+  html:not([data-glass="off"]) .agent-capabilities-surface .spark-glass--strong,
+  html:not([data-glass="off"]) .agent-capabilities-surface .spark-menu,
   html:not([data-glass="off"]) .settings-dialog-surface .spark-glass,
   html:not([data-glass="off"]) .settings-dialog-surface .spark-glass--strong,
   html:not([data-glass="off"]) .settings-dialog-surface .spark-menu,
-  html:not([data-glass="off"]) .agent-capabilities-surface .spark-glass,
-  html:not([data-glass="off"]) .agent-capabilities-surface .spark-glass--strong,
-  html:not([data-glass="off"]) .agent-capabilities-surface .spark-menu {
+  html:not([data-glass="off"]) .spark-menu:has(.st-acct-menu),
+  html:not([data-glass="off"]) .spark-menu:has(.st-acct-picker) {
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
-    background-color: color-mix(in oklab, var(--panel) 78%, transparent);
+    background-color: var(--panel-2);
+    background-image: none;
   }
   /* Glass surfaces appear instantly — no entry animation on the lens carrier.
      The --glass-lens SVG reference filter can't be composited by Chromium while
@@ -3188,65 +4424,209 @@ a { color: inherit; }
   }
 }
 
+/* The QR card is a solid reading surface in both modes: it opens over the
+   Settings face, which is glass, and a code to scan or compare must not sit
+   on see-through material. */
+.st-pair-modal {
+  border: 1px solid var(--rule);
+  background: var(--st-surface, var(--panel));
+  box-shadow: 0 24px 64px oklch(0 0 0 / 0.35), 0 2px 8px oklch(0 0 0 / 0.18);
+}
+:root[data-theme-mode="light"] .st-pair-modal {
+  border-color: color-mix(in oklab, var(--ink) 12%, transparent);
+  box-shadow: 0 24px 64px oklch(0 0 0 / 0.16), 0 2px 8px oklch(0 0 0 / 0.08);
+}
+.spark-quick-open__results {
+  background: var(--bg);
+}
+
+/* ── Glass on dialogs and palettes ───────────────────────────────────────────
+   Only the layers that open above the window are glass. The title bar,
+   rails, tab strips, headers, status bar, chat, composer, board and every
+   other part of the window stay solid with glass on: glass there read as a
+   film over the whole app. Terminal panes and the editor are always opaque. */
+@media not (prefers-reduced-transparency: reduce) {
+  /* Palettes and dialogs hold dense text over live content, so they take
+     the read tier: a deeper tint and frost than menus, no lens. */
+  html:not([data-glass="off"]) .spark-glass--strong.spark-overlay-surface {
+    background-color: var(--glass-bg-read);
+    background-image: var(--glass-specular);
+    -webkit-backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-read));
+    backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-read));
+    border-color: var(--glass-border);
+    box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), var(--glass-bloom), var(--glass-shadow);
+    contain: paint;
+  }
+  html:not([data-glass="off"]) .spark-quick-open__results {
+    background: transparent;
+  }
+  /* Settings and the Capability Center: the nav column is the one glass
+     layer, frosting the dimmed workbench at the read tier so its labels
+     never depend on what is open behind it. The face itself carries no
+     backdrop filter: its title bar, reading pane and footer are opaque, and a
+     filter on the whole face would re-blur that covered area on every frame
+     of a live terminal or chat behind Settings. Nothing inside the nav
+     frosts again. */
+  html:not([data-glass="off"]) .settings-dialog-surface,
+  html:not([data-glass="off"]) .agent-capabilities-surface {
+    --st-sidebar: var(--glass-bg-read);
+    background: transparent;
+    border-color: var(--glass-border);
+    box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), 0 28px 80px oklch(0 0 0 / 0.5), 0 2px 10px oklch(0 0 0 / 0.28);
+  }
+  html:not([data-glass="off"]) .settings-dialog-surface .st-nav,
+  html:not([data-glass="off"]) .agent-capabilities-surface .st-nav {
+    background-image: var(--glass-specular);
+    -webkit-backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read)) brightness(var(--glass-tone-read));
+    backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read)) brightness(var(--glass-tone-read));
+    border-right-color: color-mix(in oklab, var(--ink) 8%, transparent);
+  }
+  html:not([data-glass="off"]) .settings-dialog-surface .st-content,
+  html:not([data-glass="off"]) .agent-capabilities-surface .st-content,
+  html:not([data-glass="off"]) .settings-dialog-surface .st-footer,
+  html:not([data-glass="off"]) .agent-capabilities-surface .st-footer {
+    background: var(--st-surface);
+  }
+  :root[data-theme-mode="light"]:not([data-glass="off"]) .settings-dialog-surface,
+  :root[data-theme-mode="light"]:not([data-glass="off"]) .agent-capabilities-surface {
+    box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), 0 28px 80px oklch(0 0 0 / 0.18), 0 2px 10px oklch(0 0 0 / 0.08);
+  }
+  /* Two small layers that animate in, so they frost without the lens (it
+     cannot composite during an opacity or transform animation): the
+     automation variable tooltip at the menu tier, and the workspace switch
+     badge at the read tier under its own accent tint. */
+  html:not([data-glass="off"]) .automation-variable-chip__tooltip {
+    background-color: var(--glass-bg-menu);
+    background-image: var(--glass-sheen);
+    -webkit-backdrop-filter: blur(var(--glass-blur-menu)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-menu));
+    backdrop-filter: blur(var(--glass-blur-menu)) saturate(var(--glass-saturate)) brightness(var(--glass-tone-menu));
+    box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), var(--glass-bloom), var(--glass-shadow);
+  }
+  html:not([data-glass="off"]) .spark-workspace-switch-hud {
+    background-color: color-mix(in oklab, var(--hud-accent) 14%, var(--glass-bg-read));
+    background-image: var(--glass-specular);
+    -webkit-backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read)) brightness(var(--glass-tone-read));
+    backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read)) brightness(var(--glass-tone-read));
+    box-shadow:
+      var(--glass-edge-hi),
+      0 12px 30px -8px rgba(0, 0, 0, 0.55),
+      0 0 20px color-mix(in oklab, var(--hud-accent) 25%, transparent);
+  }
+}
+
 /* Keep Capability Center scrolling on a single compositor layer. Rows and
-   cards below the viewport skip layout/paint until they approach view. */
+   cards below the viewport skip layout/paint until they approach view. The
+   pane is also the size container the table layouts below query. */
 .agent-capabilities-scroll {
   contain: layout paint style;
+  container: capabilities / inline-size;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
   transform: translateZ(0);
 }
+/* No hover tint: Settings rows have none, and a tinted row under a resting
+   pointer reads as selected. */
 .agent-capability-row {
   content-visibility: auto;
   contain-intrinsic-size: auto 76px;
   contain: layout paint style;
-  transition: background var(--motion-fast) var(--ease-out);
-}
-.agent-capability-row:hover {
-  background: var(--hover);
-}
-
-/* Same treatment for the worker session picker's history list. A workspace
-   with hundreds of transcripts would otherwise lay out and paint every row
-   inside a backdrop-filtered dialog; off-screen rows skip both until they
-   approach view, so the list costs the same at 8 sessions and at 800. */
-.worker-session-list {
-  contain: layout paint style;
-  overscroll-behavior: contain;
-}
-.worker-session-row {
-  content-visibility: auto;
-  contain-intrinsic-size: auto 52px;
 }
 
 /* ── Capability Center ──────────────────────────────────────────────────────
-   A sidebar nav (MCP servers, Skills, Memory, Policy) over one content pane,
-   the same shape Settings uses. The outer surface stays pre-blended (see the
-   performance gate above) so scrolling never re-rasterizes the entire
-   workbench on Wayland. */
+   A sidebar nav (Tools, Skills, Profiles, Memory, Worker models, Behavior)
+   over one content pane, on the same face (a glass frame around an opaque
+   reading pane), scrim, nav rows, switches and buttons as Settings. Its
+   --st-* tokens come from the Settings block below. `contain: paint` keeps the dense inventory's scroll invalidations
+   inside the panel instead of re-rasterizing the workbench behind it. */
 .agent-capabilities-surface {
   position: relative;
+  width: min(1000px, calc(100vw - 48px));
+  /* Sized to the overlay, which spans only the workbench row: 20px clear of
+     the title bar and the status bar, which the scrim does not dim. */
+  height: min(800px, calc(100% - 40px));
+  display: grid;
+  grid-template-columns: 224px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "nav top"
+    "nav content"
+    "nav footer";
+  overflow: hidden;
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  background: var(--st-surface);
+  color: var(--ink);
+  font-size: 13px;
+  font-variant-numeric: normal;
+  box-shadow: 0 28px 80px oklch(0 0 0 / 0.5), 0 2px 10px oklch(0 0 0 / 0.28);
+  contain: paint;
 }
-.agent-capabilities-surface::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  pointer-events: none;
-  border-radius: inherit;
-  box-shadow:
-    inset 0 1px 0 color-mix(in oklab, white 15%, transparent),
-    inset 0 -1px 0 color-mix(in oklab, var(--ink) 6%, transparent);
+.agent-capabilities-surface .spark-input {
+  height: 32px;
+  padding: 0 10px;
+  border-color: var(--st-line-strong);
+  border-radius: 7px;
+  background: var(--st-field);
+  font-size: 12.5px;
+  box-shadow: none;
 }
-.agent-capabilities-surface > * {
-  position: relative;
-  z-index: 1;
+.agent-capabilities-surface textarea.spark-input {
+  height: auto;
+  padding: 8px 10px;
 }
-.agent-capabilities-header {
-  background: color-mix(in oklab, var(--panel) 42%, transparent);
+.agent-capabilities-surface .spark-input:focus {
+  border-color: var(--accent-edge);
+  box-shadow: var(--focus-ring);
 }
-.agent-capabilities-footer {
-  background: color-mix(in oklab, var(--panel) 52%, transparent);
+.agent-capabilities-surface .spark-input::placeholder {
+  color: var(--st-faint);
+}
+/* Capability rows set their own borders inline, so the divider between
+   Settings-style rows has to outrank them. */
+.agent-capabilities-surface .st-rows > * + * {
+  border-top: 1px solid var(--st-line) !important;
+}
+/* Chips are words, not code: sentence case in the body face. The select's
+   detail is a word here too ("default"), not a path as in Terminal. */
+.agent-capabilities-surface .st-select__detail {
+  font-family: var(--font-sans);
+  font-size: 12px;
+}
+.agent-capabilities-surface .spark-badge {
+  height: 18px;
+  padding: 0 7px;
+  border: none;
+  border-radius: 99px;
+  background: var(--st-selected);
+  color: var(--st-desc);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.agent-capabilities-surface .spark-badge.is-accent {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+.agent-capabilities-surface .spark-badge.is-warn {
+  background: color-mix(in oklch, var(--warn) 14%, transparent);
+  color: var(--warn);
+}
+:root[data-theme-mode="light"] .agent-capabilities-surface {
+  border-color: color-mix(in oklab, var(--ink) 14%, transparent);
+  box-shadow: 0 28px 80px oklch(0 0 0 / 0.18), 0 2px 10px oklch(0 0 0 / 0.08);
+}
+.agent-capabilities-surface .spark-btn {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 7px;
+  font-size: 12.5px;
+}
+:root[data-theme-mode="light"] .agent-capabilities-surface .spark-btn:not(.is-primary):not(.is-danger) {
+  background: var(--bg);
+  border-color: color-mix(in oklab, var(--ink) 16%, transparent);
+  box-shadow: 0 1px 1px oklch(0 0 0 / 0.04);
 }
 /* The list draws its own outline, so the last child never doubles it up. This
    covers the pager and the empty state as well as a trailing row. */
@@ -3258,6 +4638,9 @@ a { color: inherit; }
 .agent-capability-cell-label {
   display: none;
 }
+.agent-capability-compact-only {
+  display: none;
+}
 
 /* The tables stack well before the window's 720px floor (src/main/index.ts):
    at 721px the content pane is only ~435px while the MCP grid needs ~442px of
@@ -3265,7 +4648,7 @@ a { color: inherit; }
    and `contain: paint` on the row would clip the trailing columns away. 860px
    is the first width where the grid genuinely fits — pane ~575px, leaving the
    Server column ~133px — so that is where the wide layout starts. */
-@media (max-width: 860px) {
+@container capabilities (max-width: 520px) {
   /* Row internals are inline-styled, so the stacked layout has to outrank them. */
   .agent-capability-row {
     grid-template-columns: minmax(0, 1fr) !important;
@@ -3275,11 +4658,6 @@ a { color: inherit; }
   .agent-capability-row > *:last-child {
     justify-content: flex-start !important;
     flex-wrap: wrap;
-  }
-  /* Give the content pane back what the nav can spare. The nav is inline-styled,
-     so the narrower basis has to outrank it. */
-  .agent-capabilities-nav {
-    flex: 0 0 150px !important;
   }
   /* The columns cannot fit, so rows stack and the table header stops describing
      anything. Each cell shows its own label instead. */
@@ -3291,6 +4669,52 @@ a { color: inherit; }
   }
   .agent-capability-row > * {
     justify-items: start !important;
+  }
+}
+
+/* The MCP table has six fixed columns (about 480px with gaps), so it needs
+   more room than the other lists. Below 1000px its rows switch to a compact
+   wrap instead of stacking every cell on its own line: the server takes the
+   first line, the five switches sit side by side with their labels, and the
+   actions and test result follow underneath. */
+@container capabilities (max-width: 760px) {
+  .agent-capability-row--mcp {
+    display: flex !important;
+    flex-wrap: wrap;
+    align-items: center !important;
+    column-gap: 18px !important;
+    row-gap: 8px !important;
+  }
+  .agent-capability-row--mcp > *:first-child {
+    flex: 1 0 100%;
+  }
+  .agent-capability-row--mcp > .agent-capability-cell {
+    display: inline-flex !important;
+    align-items: center;
+    gap: 6px !important;
+  }
+  .agent-capability-row--mcp > .agent-capability-actions,
+  .agent-capability-row--mcp > .agent-capability-probe {
+    flex: 1 0 100%;
+    justify-content: flex-start !important;
+    flex-wrap: wrap;
+  }
+  .agent-capability-row--mcp > .agent-capability-actions:empty {
+    display: none;
+  }
+  .agent-capability-head--mcp {
+    display: none !important;
+  }
+  .agent-capability-row--mcp .agent-capability-cell-label {
+    display: inline;
+  }
+  /* Fixed states leave the line of switches and say themselves once under
+     the name instead. */
+  .agent-capability-row--mcp > .agent-capability-cell--fixed {
+    display: none !important;
+  }
+  .agent-capability-row--mcp .agent-capability-compact-only {
+    display: inline;
   }
 }
 
@@ -4512,6 +5936,7 @@ a { color: inherit; }
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
   padding: 12px 16px 10px;
 }
 
@@ -4580,10 +6005,13 @@ a { color: inherit; }
 
 .spark-board__filter {
   display: flex;
+  /* The one part of the toolbar that gives way, so New card keeps the
+     toolbar's right padding in a narrow chat panel. */
+  flex: 0 1 240px;
+  min-width: 96px;
   align-items: center;
   gap: 8px;
   height: 28px;
-  width: 240px;
   padding: 0 8px 0 10px;
   border: 1px solid var(--rule);
   border-radius: var(--radius-control);
@@ -4615,6 +6043,7 @@ a { color: inherit; }
 /* Primary action: the one filled teal button on the board. */
 .spark-board__new {
   appearance: none;
+  flex: none;
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -4649,7 +6078,7 @@ a { color: inherit; }
   min-height: 0;
   display: flex;
   gap: 10px;
-  padding: 0 16px 12px;
+  padding: 10px 16px 12px;
   overflow-x: auto;
   overflow-y: hidden;
   align-items: stretch;
@@ -4675,6 +6104,25 @@ a { color: inherit; }
   transition:
     background var(--motion-fast) var(--ease-out),
     border-color var(--motion-fast) var(--ease-out);
+}
+
+/* On bright paper the deep cut turned every lane into a mid-grey slab. A
+   lane there is a step under the page with a hairline edge instead. */
+:root[data-theme-mode="light"] .spark-board-lane {
+  background: color-mix(in oklab, var(--ink) 5.5%, var(--bg));
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--ink) 8%, transparent);
+}
+/* Light board: cards are near-white sheets on the one lane tone, and the
+   tinted chips and card actions write their label in a darkened tint. A
+   pale tint on its own 12% wash measured about 2:1. */
+:root[data-theme-mode="light"] .spark-board-card {
+  background: color-mix(in oklab, white 72%, var(--bg));
+}
+:root[data-theme-mode="light"] .spark-board__chip {
+  color: color-mix(in oklch, var(--chip-tint, var(--accent)) 58%, black);
+}
+:root[data-theme-mode="light"] .spark-board-qa:not(.spark-board-qa--filled):not(.spark-board-qa--plain) {
+  color: color-mix(in oklch, var(--qa-tint, var(--ink-dim)) 58%, black);
 }
 
 .spark-board-lane__head {
@@ -4869,11 +6317,18 @@ a { color: inherit; }
 
 .spark-board-card__meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 6px 8px;
   min-height: 18px;
   font-size: 11px;
   color: var(--muted);
+}
+
+/* Card actions that wrap onto their own line keep to the card's right
+   edge, where they sit when the line fits. */
+.spark-board-card__meta > button:first-of-type {
+  margin-left: auto;
 }
 
 .spark-board-card__mono {
@@ -5476,7 +6931,6 @@ a { color: inherit; }
   display: flex;
   flex-direction: column;
   background: color-mix(in oklab, var(--bg) 88%, transparent);
-  backdrop-filter: blur(4px);
   outline: none;
   animation: spark-fade-in var(--motion-fast) var(--ease-out) both;
 }
@@ -5573,7 +7027,7 @@ a { color: inherit; }
 }
 
 .system-meters-pill:hover,
-.system-meters-pill[aria-expanded="true"] {
+.system-meters-pill[data-open] {
   border-color: color-mix(in oklab, var(--accent) 42%, var(--rule));
   background:
     linear-gradient(110deg, color-mix(in oklab, var(--accent) 13%, transparent), transparent 52%),
@@ -5583,17 +7037,34 @@ a { color: inherit; }
     0 0 12px color-mix(in oklab, var(--accent) 11%, transparent);
 }
 
-.system-meters-pill:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: 1px;
-}
-
+/* Each meter is its own button: pressing one opens what uses it. */
 .system-meter-mini {
+  appearance: none;
+  align-self: stretch;
   display: inline-flex;
   align-items: center;
   gap: 3px;
   min-width: 42px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: inherit;
+  font: inherit;
   white-space: nowrap;
+  cursor: default;
+}
+
+.system-meter-mini:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.system-meter-mini:hover .system-meter-mini-label,
+.system-meter-mini[aria-expanded="true"] .system-meter-mini-label,
+.system-meter-mini[aria-expanded="true"] .system-meter-mini-value {
+  color: var(--ink);
 }
 
 .system-meter-mini + .system-meter-mini {
@@ -5617,128 +7088,27 @@ a { color: inherit; }
   letter-spacing: 0.05em;
 }
 
+/* Figures stay in ink and the rings carry each metric's hue: a light hue
+   as 9px text is unreadable on bright paper. RAM's figure takes the status
+   colour while memory runs low, beside a ring of the same colour. */
 .system-meter-mini-value {
+  color: var(--ink-dim);
   min-width: 17px;
   font-size: 9px;
   font-weight: 700;
+  font-variant-numeric: tabular-nums;
   letter-spacing: -0.04em;
   text-align: right;
 }
-
-.system-meter-popover {
-  display: grid;
-  gap: 10px;
-  padding: 11px;
-  font-family: var(--font-sans);
+.system-meters-pill[data-memory-level="low"] [data-metric="ram"] .system-meter-mini-value {
+  color: var(--warn);
+}
+.system-meters-pill[data-memory-level="critical"] [data-metric="ram"] .system-meter-mini-value {
+  color: var(--danger);
 }
 
-.system-meter-popover-title {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--ink);
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.system-meter-live-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--ok);
-  box-shadow: 0 0 8px color-mix(in oklab, var(--ok) 58%, transparent);
-  animation: system-meter-breathe 2.4s ease-in-out infinite;
-}
-
-.system-meter-live-label {
-  margin-left: auto;
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 8px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
-}
-
-.system-meter-popover-rows {
-  display: grid;
-  gap: 7px;
-}
-
-.system-meter-popover-row {
-  display: grid;
-  gap: 5px;
-  padding: 8px;
-  border: 1px solid var(--rule-soft);
-  border-radius: var(--radius-surface);
-  background: color-mix(in oklab, var(--ink) 3%, transparent);
-}
-
-.system-meter-popover-heading {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.system-meter-popover-mark {
-  display: flex;
-}
-
-.system-meter-popover-label {
-  color: var(--ink-dim);
-  font-size: 10px;
-  font-weight: 650;
-  letter-spacing: 0.04em;
-}
-
-.system-meter-popover-value {
-  margin-left: auto;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 750;
-}
-
-.system-meter-popover-graph {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-}
-
-.system-meter-popover-track {
-  flex: 1;
-  height: 4px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: color-mix(in oklab, var(--ink) 11%, transparent);
-}
-
-.system-meter-popover-track > span {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  transition: width 420ms var(--ease-out);
-}
-
-.system-meter-sparkline {
-  width: 72px;
-  height: 22px;
-  opacity: 0.88;
-}
-
-.system-meter-popover-detail,
-.system-meter-popover-footnote {
-  color: var(--muted);
-  font-family: var(--font-mono);
-  font-size: 8.5px;
-}
-
-.system-meter-popover-footnote {
-  text-align: center;
-}
-
-@keyframes system-meter-breathe {
-  0%, 100% { opacity: 0.62; transform: scale(0.9); }
-  50% { opacity: 1; transform: scale(1.08); }
-}
+/* The popover itself is lazy: its sheet is
+   components/system-activity/system-activity.css. */
 
 @media (max-width: 1320px) {
   .system-meter-mini {
@@ -5753,12 +7123,6 @@ a { color: inherit; }
 @media (max-width: 960px) {
   .system-meters-root {
     display: none;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .system-meter-live-dot {
-    animation: none;
   }
 }
 
@@ -6043,4 +7407,3732 @@ a { color: inherit; }
     animation: none;
     opacity: 0.7;
   }
+}
+
+/* ── Settings ────────────────────────────────────────────────────────────────
+   A sidebar of grouped pages beside a scrolling content pane, a title bar
+   over the content and a footer under it. The reading pane is always opaque:
+   Settings stays open over a live workbench while the user reads long
+   descriptions, and a translucent pane made that text fight whatever moved
+   behind it. With glass on, only the frame around it (the face and the nav)
+   is glass; see "Glass on dialogs and palettes". Popovers opened from here keep
+   the shared menu material.
+
+   The --st-* tokens are declared on the surface and on the portalled account
+   popovers (which render outside it) so every part reads the same palette. */
+.st-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-sans);
+}
+.settings-dialog-surface,
+.agent-capabilities-surface,
+.st-acct-picker,
+.st-acct-menu {
+  --st-surface: var(--panel);
+  --st-sidebar: color-mix(in oklab, var(--bg) 55%, var(--panel));
+  --st-raised: color-mix(in oklab, var(--ink) 9%, var(--panel));
+  --st-field: color-mix(in oklab, var(--bg) 62%, var(--panel));
+  --st-line: color-mix(in oklab, var(--ink) 9%, transparent);
+  --st-line-strong: color-mix(in oklab, var(--ink) 16%, transparent);
+  --st-desc: color-mix(in oklab, var(--ink) 62%, var(--panel));
+  --st-faint: color-mix(in oklab, var(--ink) 46%, var(--panel));
+  --st-hover: color-mix(in oklab, var(--ink) 3.5%, transparent);
+  --st-selected: color-mix(in oklab, var(--ink) 9%, transparent);
+  /* Grouped cards: a step lighter than the pane, with the rows' own
+     padding, so every card's controls end on one edge. */
+  --st-card: color-mix(in oklab, var(--ink) 3.2%, var(--st-surface));
+  --st-card-line: color-mix(in oklab, var(--ink) 8%, transparent);
+  --st-card-radius: 10px;
+  --st-row-x: 16px;
+  --st-pad-x: 32px;
+}
+:root[data-theme-mode="light"] .settings-dialog-surface,
+:root[data-theme-mode="light"] .agent-capabilities-surface,
+:root[data-theme-mode="light"] .st-acct-picker,
+:root[data-theme-mode="light"] .st-acct-menu {
+  --st-surface: var(--bg);
+  --st-sidebar: color-mix(in oklab, var(--panel) 70%, var(--bg));
+  --st-raised: var(--bg);
+  --st-field: var(--bg);
+  --st-line: color-mix(in oklab, var(--ink) 10%, transparent);
+  --st-line-strong: color-mix(in oklab, var(--ink) 18%, transparent);
+  --st-desc: color-mix(in oklab, var(--ink) 70%, var(--bg));
+  --st-faint: color-mix(in oklab, var(--ink) 52%, var(--bg));
+  --st-hover: color-mix(in oklab, var(--ink) 3.5%, transparent);
+  --st-selected: color-mix(in oklab, var(--ink) 7%, transparent);
+  --st-card: var(--bg);
+  --st-card-line: color-mix(in oklab, var(--ink) 11%, transparent);
+}
+/* In light themes Settings reads like grouped system settings: paper cards
+   on a pane a shade darker than the paper. */
+:root[data-theme-mode="light"] .settings-dialog-surface {
+  --st-surface: color-mix(in oklab, var(--panel) 80%, var(--bg));
+  --st-sidebar: var(--panel);
+}
+.settings-dialog-surface {
+  position: relative;
+  z-index: 1;
+  width: min(1000px, calc(100vw - 48px));
+  /* Sized to the overlay, which spans only the workbench row: 20px clear of
+     the title bar and the status bar, which the scrim does not dim. */
+  height: min(800px, calc(100% - 40px));
+  display: grid;
+  grid-template-columns: 224px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-areas:
+    "nav top"
+    "nav content"
+    "nav footer";
+  overflow: hidden;
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  background: var(--st-surface);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  /* The app default is tabular figures for live counters; prose reads better
+     proportional. Columns of numbers opt back in below. */
+  font-variant-numeric: normal;
+  box-shadow: 0 28px 80px oklch(0 0 0 / 0.5), 0 2px 10px oklch(0 0 0 / 0.28);
+  contain: paint;
+  animation: spark-fade-in var(--motion) var(--ease-out);
+}
+:root[data-theme-mode="light"] .settings-dialog-surface {
+  border-color: color-mix(in oklab, var(--ink) 14%, transparent);
+  box-shadow: 0 28px 80px oklch(0 0 0 / 0.18), 0 2px 10px oklch(0 0 0 / 0.08);
+}
+
+/* Sidebar */
+.st-nav {
+  grid-area: nav;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  padding: 18px 10px 12px;
+  background: var(--st-sidebar);
+  border-right: 1px solid var(--st-line);
+}
+.st-nav__brand {
+  padding: 0 8px;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.st-nav__groups {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  overflow-y: auto;
+  padding-top: 4px;
+}
+.st-nav__group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.st-nav__group-label {
+  padding: 0 10px 6px;
+  color: var(--st-faint);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.st-nav__item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--st-desc);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1;
+  text-align: left;
+  white-space: nowrap;
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+.st-nav__item:hover {
+  background: var(--st-hover);
+  color: var(--ink);
+}
+.st-nav__item.is-active {
+  background: var(--st-selected);
+  color: var(--ink);
+  font-weight: 500;
+  box-shadow: inset 0 0 0 1px var(--st-line);
+}
+:root[data-theme-mode="light"] .st-nav__item.is-active {
+  background: var(--bg);
+  box-shadow: 0 0 0 1px var(--st-line), 0 1px 2px oklch(0 0 0 / 0.05);
+}
+.st-nav__item:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.st-nav__icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--st-faint);
+}
+.st-nav__item.is-active .st-nav__icon {
+  color: var(--accent-text);
+}
+
+/* Search fields: the sidebar search and the inline list filters */
+.st-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.st-search--inline {
+  flex: 1 1 auto;
+}
+.st-search__icon {
+  position: absolute;
+  left: 9px;
+  display: inline-flex;
+  color: var(--st-faint);
+  pointer-events: none;
+}
+.st-search__input {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px 0 29px;
+  border: 1px solid var(--st-line-strong);
+  border-radius: 7px;
+  background: var(--st-field);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  outline: none;
+  transition:
+    border-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
+}
+.st-nav .st-search__input {
+  height: 30px;
+  border-color: var(--st-line);
+  background: color-mix(in oklab, var(--ink) 4%, transparent);
+}
+:root[data-theme-mode="light"] .st-nav .st-search__input {
+  background: var(--bg);
+}
+.st-search__input::placeholder {
+  color: var(--st-faint);
+}
+.st-search__input:focus {
+  border-color: var(--accent-edge);
+  box-shadow: var(--focus-ring);
+}
+.st-search__input:disabled {
+  opacity: 0.5;
+}
+.st-search__input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  display: none;
+}
+.st-search__hint {
+  position: absolute;
+  right: 8px;
+  color: var(--st-faint);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  pointer-events: none;
+}
+.st-search__input:focus + .st-search__hint {
+  display: none;
+}
+
+/* Title bar, content pane, footer */
+.st-topbar {
+  grid-area: top;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 20px 16px 16px var(--st-pad-x);
+  border-bottom: 1px solid transparent;
+  background: var(--st-surface);
+  transition: border-color var(--motion-fast) var(--ease-out);
+}
+.settings-dialog-surface.is-scrolled .st-topbar,
+.agent-capabilities-surface.is-scrolled .st-topbar {
+  border-bottom-color: var(--st-line);
+}
+.st-topbar__titles {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.st-topbar__title {
+  margin: 0;
+  color: var(--ink);
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+.st-topbar__desc {
+  margin: 0;
+  overflow: hidden;
+  color: var(--st-desc);
+  font-size: 13px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.st-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--st-desc);
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+.st-close:hover {
+  background: var(--st-hover);
+  color: var(--ink);
+}
+.st-close:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.st-content {
+  grid-area: content;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 8px calc(var(--st-pad-x) - 8px) 40px var(--st-pad-x);
+}
+/* Once scrolled, a line half under the title bar dissolves instead of
+   reading as cut. The fade is painted over the content in the page colour,
+   never a mask: with glass on the face behind .st-content is transparent, so
+   a masked edge would show whatever window sits behind Settings. */
+.st-topbar {
+  position: relative;
+  z-index: 1;
+}
+.settings-dialog-surface.is-scrolled .st-topbar::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  height: 22px;
+  background: linear-gradient(to bottom, var(--st-surface), transparent);
+  pointer-events: none;
+}
+.st-footer {
+  grid-area: footer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px 12px var(--st-pad-x);
+  border-top: 1px solid var(--st-line);
+}
+.st-footer__status {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--st-faint);
+  font-size: 12px;
+}
+.st-footer__error {
+  color: var(--danger);
+}
+.st-footer__dirty {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--ink);
+}
+.st-footer__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn);
+}
+
+/* Page, sections, cards, rows */
+.st-page {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  max-width: 720px;
+}
+.st-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.st-section__head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 0 2px;
+}
+.st-section__titles {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.st-section__title {
+  margin: 0;
+  color: var(--ink);
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+.st-section__desc {
+  margin: 0;
+  max-width: 68ch;
+  color: var(--st-desc);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.st-section__actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+.st-section__body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+/* The Capability Center's row stacks: hairlines, no card. */
+.st-rows {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--st-line);
+}
+.st-rows > * + * {
+  border-top: 1px solid var(--st-line);
+}
+.st-rows > .st-message {
+  margin: 10px 0;
+  border-top: none;
+}
+.st-rows > .st-row {
+  padding-inline: 0;
+}
+/* A card: rows stacked on one fill, split by hairlines. It never clips its
+   content, so a dropdown opened in a row can hang below the card. */
+.st-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--st-card-line);
+  border-radius: var(--st-card-radius);
+  background: var(--st-card);
+}
+:root[data-theme-mode="light"] .st-card {
+  box-shadow: 0 1px 2px oklch(0 0 0 / 0.04);
+}
+.st-card > * + * {
+  border-top: 1px solid var(--st-line);
+}
+.st-card > :first-child {
+  border-top-left-radius: calc(var(--st-card-radius) - 1px);
+  border-top-right-radius: calc(var(--st-card-radius) - 1px);
+}
+.st-card > :last-child {
+  border-bottom-left-radius: calc(var(--st-card-radius) - 1px);
+  border-bottom-right-radius: calc(var(--st-card-radius) - 1px);
+}
+.st-card > .st-message {
+  margin: 10px var(--st-row-x);
+}
+.st-card > * + .st-message {
+  border-top: none;
+}
+.st-card > .st-message:not(:first-child) {
+  margin-top: 0;
+}
+.st-card--danger {
+  border-color: color-mix(in oklch, var(--danger) 32%, transparent);
+}
+.st-card__pad {
+  padding: 16px var(--st-row-x);
+}
+.st-row {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  min-height: 52px;
+  padding: 12px var(--st-row-x);
+}
+.st-row__main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+}
+.st-row__text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.st-row__title {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.35;
+  cursor: default;
+}
+.st-row__desc {
+  max-width: 60ch;
+  color: var(--st-desc);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.st-row__control {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  max-width: 62%;
+}
+.st-row__extra {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+  min-width: 0;
+}
+.st-row--stacked .st-row__extra {
+  margin-top: 10px;
+}
+.st-row.is-disabled .st-row__text {
+  opacity: 0.5;
+}
+.st-row--foot {
+  flex-direction: row;
+  justify-content: flex-end;
+  min-height: 0;
+  padding-block: 10px;
+}
+.st-row--danger .st-confirm-btn:not(.is-armed):not(:disabled) {
+  color: var(--danger);
+}
+/* The fold at the foot of a card: a quiet full-width toggle, and the rows it
+   opens on a faintly deeper fill so they read as belonging to it. */
+.st-advanced {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.st-advanced__toggle {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 40px;
+  padding: 0 var(--st-row-x);
+  border: none;
+  border-radius: inherit;
+  background: transparent;
+  color: var(--st-desc);
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-align: left;
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+.st-advanced.is-open .st-advanced__toggle {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.st-advanced__toggle:hover {
+  background: var(--st-hover);
+  color: var(--ink);
+}
+.st-advanced__toggle:focus-visible {
+  z-index: 1;
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.st-advanced__chevron {
+  display: inline-flex;
+  flex: none;
+}
+.st-advanced__chevron svg {
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+.st-advanced.is-open .st-advanced__chevron svg {
+  transform: rotate(90deg);
+}
+.st-advanced__hint {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--st-desc);
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.st-advanced__body {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--st-line);
+  border-bottom-left-radius: inherit;
+  border-bottom-right-radius: inherit;
+  background: color-mix(in oklab, var(--ink) 1.8%, transparent);
+}
+.st-advanced__body > * + * {
+  border-top: 1px solid var(--st-line);
+}
+.st-text-danger { color: var(--danger); }
+.st-text-ok { color: var(--ok); }
+.st-text-warn { color: var(--warn); }
+.st-live-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+  vertical-align: 1px;
+}
+/* A search result lands here: the row lights up in the accent and fades
+   back over two seconds. Rows inside a card light their own box; a whole
+   section keeps a soft halo around it. */
+[data-setting-anchor].is-flash {
+  border-radius: 8px;
+  animation: st-flash 2.2s var(--ease-out);
+}
+.st-card [data-setting-anchor].is-flash,
+.st-card[data-setting-anchor].is-flash {
+  animation-name: st-flash-inset;
+}
+.st-card > .is-flash {
+  border-radius: 0;
+}
+.st-card > .is-flash:first-child {
+  border-top-left-radius: calc(var(--st-card-radius) - 1px);
+  border-top-right-radius: calc(var(--st-card-radius) - 1px);
+}
+.st-card > .is-flash:last-child {
+  border-bottom-left-radius: calc(var(--st-card-radius) - 1px);
+  border-bottom-right-radius: calc(var(--st-card-radius) - 1px);
+}
+@keyframes st-flash {
+  0%,
+  45% {
+    background: var(--accent-soft);
+    box-shadow: 0 0 0 6px var(--accent-soft);
+  }
+  100% {
+    background: transparent;
+    box-shadow: 0 0 0 6px transparent;
+  }
+}
+@keyframes st-flash-inset {
+  0%,
+  45% {
+    background: var(--accent-soft);
+    box-shadow: inset 0 0 0 1.5px var(--accent-edge);
+  }
+  100% {
+    background: transparent;
+    box-shadow: inset 0 0 0 1.5px transparent;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-setting-anchor].is-flash {
+    animation-duration: 2.2s;
+    animation-timing-function: steps(1, end);
+  }
+}
+
+/* Controls */
+.settings-dialog-surface .spark-btn,
+.st-acct-picker .spark-btn {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 7px;
+  font-size: 12.5px;
+}
+.settings-dialog-surface .spark-btn:focus-visible,
+.st-acct-picker .spark-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+:root[data-theme-mode="light"] .settings-dialog-surface .spark-btn:not(.is-primary):not(.is-danger):not(.st-btn-quiet) {
+  background: var(--bg);
+  border-color: color-mix(in oklab, var(--ink) 16%, transparent);
+  box-shadow: 0 1px 1px oklch(0 0 0 / 0.04);
+}
+:root[data-theme-mode="light"] .settings-dialog-surface .spark-btn:not(.is-primary):not(.is-danger):not(.st-btn-quiet):hover {
+  background: color-mix(in oklab, var(--ink) 4%, var(--bg));
+}
+.spark-btn.st-btn-quiet {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  color: var(--st-desc);
+}
+.spark-btn.st-btn-quiet:hover {
+  background: var(--st-hover);
+  color: var(--ink);
+}
+.spark-btn.st-btn-quiet.is-danger {
+  color: var(--danger);
+}
+.spark-btn.st-btn-quiet.is-danger:hover {
+  background: var(--danger-soft);
+}
+.spark-btn.st-btn-quiet:disabled {
+  background: transparent;
+}
+.settings-dialog-surface .spark-input,
+.st-acct-picker .spark-input {
+  height: 32px;
+  padding: 0 10px;
+  border-color: var(--st-line-strong);
+  border-radius: 7px;
+  background: var(--st-field);
+  font-size: 12.5px;
+  box-shadow: none;
+}
+.settings-dialog-surface .spark-input:focus,
+.st-acct-picker .spark-input:focus {
+  border-color: var(--accent-edge);
+  box-shadow: var(--focus-ring);
+}
+.settings-dialog-surface .spark-input::placeholder {
+  color: var(--st-faint);
+}
+.settings-dialog-surface .spark-input.spark-mono {
+  font-size: 12px;
+}
+.settings-dialog-surface select.st-select {
+  flex: none;
+  width: auto;
+  min-width: 120px;
+  padding-right: 8px;
+}
+.st-number {
+  width: 110px;
+  text-align: right;
+}
+.st-icon-btn {
+  --spark-icon-btn-size: 28px;
+  border-radius: 7px;
+  color: var(--st-desc);
+}
+.st-icon-btn:hover {
+  background: var(--st-hover);
+  color: var(--ink);
+}
+.st-icon-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.st-icon-btn--danger:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.st-button-pair,
+.st-row-actions {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+}
+.st-link-btn {
+  padding: 0 4px;
+  border: none;
+  background: none;
+  color: var(--st-desc);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  cursor: default;
+}
+.st-link-btn:hover {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.st-switch-btn {
+  display: inline-flex;
+  flex: none;
+  padding: 0;
+  border: none;
+  border-radius: 99px;
+  background: transparent;
+  cursor: default;
+}
+.st-switch-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.st-switch-btn:disabled {
+  opacity: 0.45;
+}
+.st-switch {
+  position: relative;
+  display: inline-block;
+  flex: none;
+  width: 34px;
+  height: 20px;
+  border-radius: 99px;
+  background: color-mix(in oklab, var(--ink) 22%, transparent);
+  transition: background var(--motion-fast) var(--ease-out);
+}
+.st-switch__knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px oklch(0 0 0 / 0.35);
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+.st-switch.is-on {
+  background: var(--accent);
+}
+.st-switch.is-on .st-switch__knob {
+  transform: translateX(14px);
+}
+.st-switch-btn:hover:not(:disabled) .st-switch:not(.is-on) {
+  background: color-mix(in oklab, var(--ink) 30%, transparent);
+}
+.st-confirm-btn.is-armed {
+  font-weight: 600;
+}
+
+.st-segmented {
+  display: inline-flex;
+  flex: none;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--ink) 7%, transparent);
+}
+.st-segmented__item {
+  height: 26px;
+  padding: 0 11px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--st-desc);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+.st-segmented__item:hover {
+  color: var(--ink);
+}
+.st-segmented__item.is-active {
+  background: var(--st-raised);
+  color: var(--ink);
+  box-shadow: 0 0 0 1px var(--st-line), 0 1px 2px oklch(0 0 0 / 0.2);
+}
+.st-segmented__item:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.st-range {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+}
+.st-range input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 160px;
+  height: 16px;
+  margin: 0;
+  background: transparent;
+}
+.st-range input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 99px;
+  background: color-mix(in oklab, var(--ink) 16%, transparent);
+}
+.st-range input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border: 1px solid color-mix(in oklab, black 16%, transparent);
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px oklch(0 0 0 / 0.3);
+}
+.st-range input[type="range"]:focus-visible {
+  outline: none;
+}
+.st-range input[type="range"]:focus-visible::-webkit-slider-thumb {
+  box-shadow: var(--focus-ring);
+}
+.st-range__value {
+  min-width: 46px;
+  color: var(--st-desc);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.st-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--st-desc);
+  font-size: 12.5px;
+  line-height: 1.45;
+  cursor: default;
+}
+.st-check.is-danger {
+  color: var(--danger);
+}
+.settings-dialog-surface input[type="checkbox"] {
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  flex: none;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  border: 1px solid color-mix(in oklab, var(--ink) 32%, transparent);
+  border-radius: 4px;
+  background: var(--st-field);
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out);
+}
+.settings-dialog-surface input[type="checkbox"]:hover:not(:disabled) {
+  border-color: color-mix(in oklab, var(--ink) 50%, transparent);
+}
+.settings-dialog-surface input[type="checkbox"]:checked,
+.settings-dialog-surface input[type="checkbox"]:indeterminate {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.settings-dialog-surface input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 4.5px;
+  top: 1.5px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--accent-ink);
+  border-width: 0 1.8px 1.8px 0;
+  transform: rotate(45deg);
+}
+.settings-dialog-surface input[type="checkbox"]:indeterminate::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  right: 3px;
+  top: 6px;
+  height: 1.8px;
+  border-radius: 1px;
+  background: var(--accent-ink);
+}
+.settings-dialog-surface input[type="checkbox"]:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.settings-dialog-surface input[type="checkbox"]:disabled {
+  opacity: 0.45;
+}
+.st-disclosure {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px 0 6px;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  color: var(--st-desc);
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  cursor: default;
+}
+.st-disclosure:hover {
+  color: var(--ink);
+}
+.st-disclosure:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.st-disclosure svg {
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+.st-disclosure[aria-expanded="true"] svg {
+  transform: rotate(90deg);
+}
+.st-disclosure {
+  align-self: flex-start;
+}
+
+/* Stacked form fields */
+.st-field,
+.st-field__label-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+.st-field__label {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+}
+.st-field__hint {
+  color: var(--st-desc);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.st-field__hint--row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.st-input-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.st-input-group > .spark-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.st-model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Custom select */
+.st-select-wrap {
+  position: relative;
+  min-width: 0;
+}
+.st-select-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--st-line-strong);
+  border-radius: 7px;
+  background: var(--st-field);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: default;
+  transition:
+    border-color var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) var(--ease-out);
+}
+.st-select-trigger:hover {
+  border-color: var(--rule-strong);
+}
+.st-select-trigger:disabled {
+  opacity: 0.5;
+}
+.st-select__detail {
+  margin-left: 8px;
+  color: var(--st-faint);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.st-select-option__label {
+  flex: none;
+}
+.st-select-trigger.is-open,
+.st-select-trigger:focus-visible {
+  outline: none;
+  border-color: var(--accent-edge);
+  box-shadow: var(--focus-ring);
+}
+.st-select-trigger__value {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.st-select__chevron {
+  flex: none;
+  color: var(--st-faint);
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+.st-select__chevron.is-open {
+  transform: rotate(180deg);
+}
+.st-select-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.st-select-menu .spark-menu-item {
+  min-height: 28px;
+  font-size: 12.5px;
+}
+.st-select-menu__group {
+  padding: 8px 8px 4px;
+  color: var(--st-faint);
+  font-size: 11px;
+  font-weight: 500;
+}
+.st-select-menu__group.has-rule {
+  margin-top: 4px;
+  border-top: 1px solid var(--st-line);
+}
+
+/* Messages, callouts, empty and loading states */
+.st-message {
+  --st-tone: var(--info);
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--st-tone) 9%, transparent);
+  color: var(--ink);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.st-message--danger { --st-tone: var(--danger); }
+.st-message--warn { --st-tone: var(--warn); }
+.st-message--ok { --st-tone: var(--ok); }
+.st-message--muted { --st-tone: var(--muted); }
+.st-message .st-glyph {
+  flex: none;
+  margin-top: 2px;
+  color: var(--st-tone);
+}
+.st-message__text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.st-message__action {
+  flex: none;
+}
+.st-callout {
+  --st-tone: var(--info);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in oklch, var(--st-tone) 26%, transparent);
+  border-radius: 9px;
+  background: color-mix(in oklch, var(--st-tone) 7%, transparent);
+}
+.st-callout--danger { --st-tone: var(--danger); }
+.st-callout--ok { --st-tone: var(--ok); }
+.st-callout--muted { --st-tone: var(--muted); }
+.st-callout--stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
+.st-callout__text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.st-callout__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+.st-callout__body {
+  color: var(--st-desc);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.st-callout__code {
+  align-self: flex-start;
+  margin-top: 4px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--ink) 7%, transparent);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  user-select: text;
+}
+.st-callout__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.st-callout__actions--end {
+  justify-content: flex-end;
+}
+.st-device-code {
+  align-self: flex-start;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--ink) 7%, transparent);
+  color: var(--ink);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  user-select: all;
+}
+.st-spinner {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid color-mix(in oklab, currentColor 25%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: st-spin 0.8s linear infinite;
+}
+@keyframes st-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.st-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 30px 20px;
+  text-align: center;
+}
+.st-empty__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  margin-bottom: 4px;
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--ink) 5%, transparent);
+  color: var(--st-faint);
+}
+.st-empty__title {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+}
+.st-empty__body {
+  max-width: 46ch;
+  color: var(--st-desc);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.st-empty__action {
+  margin-top: 8px;
+}
+.st-loading {
+  padding: 18px 0;
+  color: var(--st-faint);
+  font-size: 12.5px;
+}
+.st-value {
+  color: var(--st-desc);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+.st-value.is-mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.st-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* Lists: shells, sessions, runs, devices, search results */
+.st-list {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  border: 1px solid var(--st-card-line);
+  border-radius: var(--st-card-radius);
+  background: var(--st-card);
+}
+:root[data-theme-mode="light"] .st-list {
+  box-shadow: 0 1px 2px oklch(0 0 0 / 0.04);
+}
+/* A list inside a row of a card is framed, not filled again. */
+.st-card .st-list {
+  border-color: var(--st-line);
+  border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
+}
+.st-list__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--st-line);
+}
+.st-list__count {
+  color: var(--st-faint);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.st-list__spacer {
+  flex: 1 1 auto;
+}
+.st-list__scroll {
+  max-height: min(52vh, 460px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.st-list__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 48px;
+  padding: 9px 12px;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  text-align: left;
+  cursor: default;
+  transition: background var(--motion-fast) var(--ease-out);
+}
+.st-list__row + .st-list__row {
+  border-top: 1px solid var(--st-line);
+}
+button.st-list__row:hover,
+.st-session:hover,
+.st-run:hover {
+  background: var(--st-hover);
+}
+.st-list__row:focus-visible {
+  outline: none;
+  box-shadow: inset var(--focus-ring);
+}
+.st-list > :first-child,
+.st-list__scroll > :first-child {
+  border-top-left-radius: calc(var(--st-card-radius) - 1px);
+  border-top-right-radius: calc(var(--st-card-radius) - 1px);
+}
+.st-list > :last-child,
+.st-list__scroll > :last-child {
+  border-bottom-left-radius: calc(var(--st-card-radius) - 1px);
+  border-bottom-right-radius: calc(var(--st-card-radius) - 1px);
+}
+.st-chevron {
+  flex: none;
+  color: var(--st-faint);
+}
+.st-choice__text,
+.st-result__text,
+.st-session__text,
+.st-run__text,
+.st-device__text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.st-choice__title,
+.st-result__title,
+.st-session__title,
+.st-run__title,
+.st-device__name {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.st-choice__meta,
+.st-result__crumb,
+.st-device__meta {
+  overflow: hidden;
+  color: var(--st-faint);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.st-choice {
+  min-height: 42px;
+  padding-block: 6px;
+}
+.st-choice__text {
+  gap: 1px;
+}
+.st-choice__meta {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.st-choice__tag {
+  flex: none;
+  color: var(--accent-text);
+  font-size: 12px;
+  font-weight: 500;
+}
+.st-radio {
+  position: relative;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid color-mix(in oklab, var(--ink) 30%, transparent);
+  border-radius: 50%;
+  transition: border-color var(--motion-fast) var(--ease-out);
+}
+.st-choice.is-selected .st-radio {
+  border-color: var(--accent);
+}
+.st-choice.is-selected .st-radio::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.st-session.is-selected {
+  background: color-mix(in oklch, var(--accent) 8%, transparent);
+}
+.st-session.is-locked {
+  opacity: 0.6;
+}
+.st-session__mark,
+.st-device__icon {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  background: color-mix(in oklab, var(--ink) 5%, transparent);
+  color: var(--st-desc);
+}
+.st-session__mark.is-claude { color: var(--agent-claude); }
+.st-session__mark.is-codex { color: var(--agent-codex); }
+.st-session__meta,
+.st-run__meta {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--st-faint);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.st-session__meta > span,
+.st-run__meta > span {
+  flex: none;
+}
+.st-session__meta > span:first-child {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.st-session__id {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.st-run__dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.st-run__dot.is-live {
+  animation: st-pulse 1.6s ease-in-out infinite;
+}
+@keyframes st-pulse {
+  50% {
+    opacity: 0.4;
+  }
+}
+.st-run__title-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.st-run__status {
+  flex: none;
+  font-size: 12px;
+  font-weight: 500;
+}
+.st-results {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+.st-result__desc {
+  overflow: hidden;
+  color: var(--st-desc);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.st-result {
+  cursor: pointer;
+}
+.st-result.is-active {
+  background: var(--st-hover);
+}
+.st-result .st-result__crumb {
+  font-size: 11.5px;
+}
+.st-result__control {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+}
+.st-mark {
+  border-radius: 3px;
+  background: color-mix(in oklch, var(--accent) 22%, transparent);
+  color: inherit;
+  box-shadow: 0 0 0 1px color-mix(in oklch, var(--accent) 22%, transparent);
+}
+
+/* About */
+.st-about {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px var(--st-row-x);
+}
+.st-about__version {
+  flex: none;
+  margin-left: auto;
+  color: var(--st-desc);
+  font-size: 12px;
+}
+.st-about__mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border: 1px solid var(--st-line);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--ink) 4%, var(--st-surface));
+  color: var(--accent-text);
+}
+.st-about__text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.st-about__name {
+  color: var(--ink);
+  font-size: 16px;
+  font-weight: 600;
+}
+.st-about__tag {
+  color: var(--st-desc);
+  font-size: 12.5px;
+}
+
+/* Theme picker */
+.st-themes {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.st-themes__group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.st-themes__label {
+  color: var(--st-faint);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+.st-themes__grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.st-theme {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--st-desc);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  text-align: left;
+  cursor: default;
+}
+.st-theme__preview {
+  display: flex;
+  height: 50px;
+  overflow: hidden;
+  border: 1px solid;
+  border-radius: 8px;
+  box-shadow: 0 0 0 1px var(--st-line);
+  transition: box-shadow var(--motion-fast) var(--ease-out);
+}
+.st-theme:hover .st-theme__preview {
+  box-shadow: 0 0 0 1px var(--st-line-strong);
+}
+.st-theme.is-active .st-theme__preview {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+.st-theme:focus-visible {
+  outline: none;
+}
+.st-theme:focus-visible .st-theme__preview {
+  box-shadow: var(--focus-ring);
+}
+.st-theme__side {
+  width: 26%;
+  height: 100%;
+}
+.st-theme__lines {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 10px;
+}
+.st-theme__lines > span {
+  display: block;
+  height: 4px;
+  border-radius: 99px;
+}
+.st-theme__name {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.st-theme.is-active .st-theme__name {
+  color: var(--ink);
+  font-weight: 500;
+}
+.st-theme.is-active .st-theme__name svg {
+  flex: none;
+  color: var(--accent-text);
+}
+
+/* Accounts */
+.st-acct-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-left: -6px;
+}
+.st-acct-how {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px var(--st-row-x);
+  border: 1px solid var(--st-card-line);
+  border-radius: var(--st-card-radius);
+  background: var(--st-card);
+  color: var(--st-desc);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.st-acct-how p {
+  margin: 0;
+}
+.st-acct-how dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 8px 14px;
+  margin: 0;
+}
+.st-acct-how dt {
+  color: var(--ink);
+  font-weight: 500;
+}
+.st-acct-how dd {
+  margin: 0;
+}
+.st-providers {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  margin-top: 8px;
+}
+.st-provider {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.st-provider__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.st-provider__title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+.st-provider__mark {
+  display: inline-flex;
+}
+/* The count is a status, so it is plain text; only the action beside it
+   looks like something to press. */
+.st-provider__count {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 4px 0 8px;
+  color: var(--st-faint);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+/* "Use your Codex login" is an outline capsule: an icon and ink words in a
+   hairline ring, so it reads as a button beside the plain-text count, and a
+   soft fill under the pointer. */
+.st-provider__head .spark-btn.st-btn-quiet {
+  gap: 6px;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--st-line-strong);
+  border-radius: 99px;
+  background: transparent;
+  color: var(--ink-dim);
+  font-size: 12px;
+  font-weight: 500;
+  box-shadow: none;
+}
+.st-provider__head .spark-btn.st-btn-quiet:hover {
+  border-color: color-mix(in oklab, var(--ink) 24%, transparent);
+  background: color-mix(in oklab, var(--ink) 6%, transparent);
+  color: var(--ink);
+}
+/* Each account is a card on one shared edge: the cards span the column, so
+   every row's last control still ends on the same line as Add account. The
+   Active card is marked twice and no more: a tinted hairline, and the Active
+   pill where the other cards offer Switch. */
+.st-acct-list.st-list {
+  gap: 8px;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+.st-acct {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 14px 14px 16px;
+  border: 1px solid var(--st-line);
+  border-radius: 12px;
+  /* The card fill, itself mixed into the pane's own fill rather than over
+     transparency: the card is solid even inside the glass Settings face. */
+  background: var(--st-card, color-mix(in oklab, var(--ink) 3.2%, var(--st-surface, var(--panel))));
+}
+.st-acct.is-active {
+  border-color: color-mix(in oklch, var(--accent) 48%, transparent);
+  background: color-mix(in oklab, var(--accent) 4%, var(--st-card, color-mix(in oklab, var(--ink) 3.2%, var(--st-surface, var(--panel)))));
+}
+.st-acct-list > .st-acct-empty {
+  padding: 14px 14px 14px 16px;
+  border: 1px dashed var(--st-line-strong);
+  border-radius: 12px;
+}
+/* An account card keeps its own corners: the list's first and last child
+   rounding is for rows on one fill. */
+.st-acct-list > .st-acct,
+.st-acct-list > .st-acct-empty {
+  border-radius: 12px;
+}
+.st-acct__avatar,
+.st-acct-empty__mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  font-size: 13px;
+  font-weight: 600;
+}
+.st-acct-empty__mark {
+  background: color-mix(in oklab, var(--ink) 5%, transparent);
+}
+.st-acct.is-signed-out .st-acct__avatar {
+  opacity: 0.55;
+}
+.st-acct__body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+.st-acct__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+}
+.st-acct__id {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.st-acct__name-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.st-acct__name {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.st-acct__meta:empty {
+  display: none;
+}
+.st-acct__meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  color: var(--st-desc);
+  font-size: 12.5px;
+}
+.st-acct__email {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.st-acct__email.is-missing {
+  color: var(--st-faint);
+}
+.st-acct__plan {
+  display: inline-block;
+  flex: none;
+  padding: 0 6px;
+  border-radius: 5px;
+  background: color-mix(in oklab, var(--ink) 6%, transparent);
+  color: var(--st-desc);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 17px;
+}
+.st-acct__plan::first-letter {
+  text-transform: uppercase;
+}
+.st-acct__actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+}
+/* The overflow trigger's footprint (.st-icon-btn), held empty. */
+.st-acct__menu-slot {
+  flex: none;
+  width: 28px;
+  height: 28px;
+}
+.st-code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in oklab, var(--ink) 8%, transparent);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.st-acct__working {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 6px;
+  color: var(--st-desc);
+  font-size: 12px;
+}
+.st-acct-active {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 11px;
+  border: 1px solid color-mix(in oklch, var(--accent) 40%, transparent);
+  border-radius: 99px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+/* Sign-in states read as one quiet line under the email: a dot and a word
+   or two each, so a healthy account is not three green sentences. Only a
+   problem keeps a sentence and a stronger voice. */
+.st-acct__status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 2px 14px;
+}
+.st-acct-status__dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin: 0 1px;
+  align-self: center;
+  border-radius: 50%;
+  background: var(--ok);
+}
+.st-acct-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--st-desc);
+  font-size: 12px;
+  line-height: 1.45;
+}
+/* Every tone but danger keeps --st-desc: --st-faint falls under 4.5:1 on the
+   card fill at this size, and a muted line can be a problem to act on (a
+   System login whose CLI is signed out). The green dot says "healthy". This
+   rule follows the base one so its size and alignment win. */
+.st-acct-status--ok {
+  flex: none;
+  align-items: center;
+  font-size: 11.5px;
+}
+.st-acct-status--danger { color: var(--danger); }
+.st-acct-status--ok .st-acct-status__glyph { color: var(--ok); }
+.st-acct-status--warn .st-acct-status__glyph { color: var(--warn); }
+.st-acct-status__glyph {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  margin-top: 2px;
+}
+.st-acct-status__text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.st-acct-status__hint {
+  color: var(--st-desc);
+}
+.st-acct-status__action {
+  flex: none;
+}
+.st-acct-empty {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 0;
+}
+/* Quieter than the plan tag beside it: an outline with no fill, since it
+   says where the login lives, not what it buys. */
+.st-acct-badge {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border: 1px solid var(--st-line-strong);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--st-desc);
+  font-size: 11px;
+  font-weight: 500;
+}
+.st-acct-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--st-line);
+  border-radius: 8px;
+}
+.st-acct-confirm__text {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.st-acct-confirm__buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+/* The System login offer and the "no Active account" line sit above the
+   provider's rows, one line each, with their actions at the end. */
+.st-acct-system-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  color: var(--st-desc);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.st-acct-system-line__text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.st-acct-system-line__actions {
+  display: flex;
+  flex: none;
+  gap: 4px;
+}
+.st-acct-footnote {
+  margin: 0;
+  color: var(--st-faint);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.st-acct-empty__text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.st-acct-empty__title {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+}
+.st-acct-empty__body {
+  color: var(--st-desc);
+  font-size: 12.5px;
+}
+.st-acct-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 320px;
+  padding: 4px;
+  font-family: var(--font-sans);
+  font-variant-numeric: normal;
+}
+.st-acct-picker__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+.st-acct-picker__titles {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 3px 4px;
+}
+.st-acct-picker__title {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+.st-acct-picker__sub {
+  color: var(--st-desc);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.st-acct-picker__list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.spark-menu-item.st-acct-picker__option {
+  gap: 10px;
+  padding: 8px;
+}
+.st-acct-picker__mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+}
+.st-acct-picker__option-text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.st-acct-picker__option-name {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+}
+.st-acct-picker__option-sub {
+  color: var(--st-desc);
+  font-size: 11.5px;
+}
+.st-acct-picker__form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 4px 4px;
+}
+.st-acct-picker__buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.st-acct-menu {
+  display: flex;
+  flex-direction: column;
+  min-width: 180px;
+}
+.st-acct-menu .spark-menu-item {
+  min-height: 28px;
+  font-size: 12.5px;
+}
+.st-acct-menu__rule {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--st-line);
+}
+
+/* Usage meters: one aligned grid per account. The fill follows the theme and
+   only turns amber, then red, as a window nears its limit. */
+.st-usage {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--st-line);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.st-usage__limit {
+  font-weight: 500;
+}
+.st-meters {
+  display: grid;
+  grid-template-columns: 6.5em minmax(56px, 1fr) 3em 15.5em;
+  align-items: center;
+  gap: 7px 12px;
+}
+.st-meter {
+  display: contents;
+}
+.st-meter__label {
+  overflow: hidden;
+  color: var(--st-desc);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.st-meter__track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: color-mix(in oklab, var(--ink) 9%, transparent);
+  box-shadow: inset 0 1px 1px oklch(0 0 0 / 0.12);
+}
+/* Flat ends: the track's rounded clip shapes the start, and a short fill
+   (SubscriptionUsage gives any started window a few pixels) stays a bar
+   instead of rounding into a dot that reads as a slider handle. */
+.st-meter__fill {
+  display: block;
+  height: 100%;
+  border-radius: 0;
+  /* Ordinary use is neutral ink; color is kept for a limit that is near or
+     reached, so the eye only lands on a meter that needs it. */
+  background: color-mix(in oklab, var(--ink) 46%, transparent);
+  transition: width 240ms ease;
+}
+.st-meter.is-warn .st-meter__fill { background: var(--warn); }
+.st-meter.is-danger .st-meter__fill { background: var(--danger); }
+.st-meter__pct {
+  color: var(--st-desc);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.st-meter.is-warn .st-meter__pct,
+.st-meter.is-danger .st-meter__pct {
+  color: var(--ink);
+  font-weight: 600;
+}
+.st-meter__reset {
+  overflow: hidden;
+  color: var(--st-faint);
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.st-meter.is-warn .st-meter__alert { color: var(--warn); font-weight: 500; }
+.st-meter.is-danger .st-meter__alert { color: var(--danger); font-weight: 500; }
+.st-meters.is-stale .st-meter__fill {
+  opacity: 0.45;
+}
+.st-usage-empty {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.st-usage-empty__labels {
+  flex: none;
+  color: var(--st-desc);
+}
+.st-usage-empty__note {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--st-faint);
+  text-overflow: ellipsis;
+}
+.st-usage__message {
+  color: var(--st-faint);
+}
+
+/* Keybindings */
+.st-kb-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 44px;
+  padding: 7px var(--st-row-x);
+}
+.st-kb-row.is-recording {
+  flex-wrap: wrap;
+}
+.st-kb-row__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.st-kb-row__label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink);
+  font-size: 13px;
+}
+.st-kb-row__tag {
+  padding: 1px 6px;
+  border-radius: 99px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 10.5px;
+  font-weight: 600;
+}
+.st-kb-row__desc {
+  color: var(--st-faint);
+  font-size: 12px;
+}
+.st-kb-row__control {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+.st-kb-chord {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  cursor: default;
+  transition:
+    background var(--motion-fast) var(--ease-out),
+    border-color var(--motion-fast) var(--ease-out);
+}
+.st-kb-chord:hover {
+  border-color: var(--st-line-strong);
+  background: var(--st-hover);
+}
+.st-kb-chord:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+.st-kb-chips {
+  display: inline-flex;
+  gap: 3px;
+}
+.st-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border: 1px solid var(--st-line-strong);
+  border-radius: 5px;
+  background: var(--st-raised);
+  box-shadow: 0 1px 0 var(--st-line-strong);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 500;
+}
+.st-kbd--inline {
+  min-width: 0;
+  height: 18px;
+  padding: 0 5px;
+  margin: 0 1px;
+  border-radius: 4px;
+  font-size: 11px;
+  vertical-align: 1px;
+}
+.st-kb-unset {
+  padding: 0 6px;
+  color: var(--st-faint);
+  font-size: 12px;
+}
+.st-kb-recorder {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.st-kb-recorder__field {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 140px;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--accent-edge);
+  border-radius: 7px;
+  background: var(--st-field);
+  box-shadow: var(--focus-ring);
+  outline: none;
+}
+.st-kb-recorder__prompt {
+  color: var(--st-faint);
+  font-size: 12px;
+}
+.st-kb-recorder__conflict {
+  color: var(--warn);
+  font-size: 12px;
+}
+
+@media (max-width: 1100px) {
+  .settings-dialog-surface,
+  .agent-capabilities-surface {
+    --st-pad-x: 26px;
+    grid-template-columns: 200px minmax(0, 1fr);
+  }
+}
+@media (max-width: 820px) {
+  .settings-dialog-surface,
+  .agent-capabilities-surface {
+    --st-pad-x: 20px;
+    --st-row-x: 14px;
+    grid-template-columns: 172px minmax(0, 1fr);
+  }
+  .st-themes__grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .st-row__main {
+    flex-wrap: wrap;
+    gap: 10px 24px;
+  }
+  .st-row__control {
+    max-width: 100%;
+  }
+}
+
+/* ── Notification center (the bell panel) ────────────────────────────────────
+   One state vocabulary: --nc-tone on a row or icon is amber for "needs you",
+   red for "failed", green for "done", blue for "info", violet for automation
+   outcomes. Unread rows carry full-ink titles and a dot; read rows recede.
+   Hover is CSS-only so a long history never re-renders on pointer moves, and
+   rows below the fold skip layout and paint (content-visibility). */
+.nc-bell-badge {
+  position: absolute;
+  top: 3px;
+  right: 1px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--warn);
+  color: color-mix(in oklab, var(--bg) 94%, var(--warn));
+  box-shadow: 0 0 0 1.5px var(--bg);
+  font: 700 9.5px/15px var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  text-align: center;
+  pointer-events: none;
+}
+.nc-bell-dot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 1.5px var(--bg);
+  pointer-events: none;
+}
+
+.nc-panel {
+  position: fixed;
+  top: 34px;
+  right: 8px;
+  z-index: 1300;
+  display: flex;
+  flex-direction: column;
+  width: min(412px, calc(100vw - 16px));
+  max-height: min(760px, calc(100vh - 46px));
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-popover, 12px);
+  background: var(--panel-2);
+  box-shadow: var(--shadow-2);
+  font-family: var(--font-sans);
+  color: var(--ink);
+  overflow: hidden;
+  animation: spark-fade-in var(--motion-fast) var(--ease-out) both;
+}
+@media not (prefers-reduced-transparency: reduce) {
+  /* See-through glass with the read tier's frost: the workbench shows
+     through as color and never as words behind a list of small text. The
+     backdrop is dimmed (lifted in light) before the fill tints it, so bright
+     content behind the panel cannot wash the fill toward the text, and the
+     muted tier leans toward ink-dim. No lens: the rows repaint under the
+     pointer, and the SVG lens would rerun over the whole tall panel. */
+  html:not([data-glass="off"]) .nc-panel {
+    --muted: var(--glass-muted);
+    background-color: var(--glass-bg-panel);
+    background-image: var(--glass-specular);
+    -webkit-backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read)) brightness(var(--glass-tone-panel));
+    backdrop-filter: blur(var(--glass-blur-read)) saturate(var(--glass-saturate-read)) brightness(var(--glass-tone-panel));
+    border-color: var(--glass-border);
+    box-shadow: var(--glass-edge-hi), var(--glass-edge-lo), var(--glass-bloom), var(--glass-shadow);
+  }
+  /* A section label rests on the glass. Once it sticks, rows scroll under
+     it, so it shows a band of the panel's own color: opaque, since any
+     translucency ghosts the rows' text through the label, and not frosted,
+     since the panel is already the one glass layer here. */
+  html:not([data-glass="off"]) .nc-section-head {
+    container-type: scroll-state;
+    background: none;
+  }
+  html:not([data-glass="off"]) .nc-section-head::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background: var(--panel-2);
+    box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.09), inset 0 -1px 0 color-mix(in oklab, var(--ink) 7%, transparent);
+  }
+  @container not scroll-state(stuck: top) {
+    html:not([data-glass="off"]) .nc-section-head::before {
+      visibility: hidden;
+    }
+  }
+  html:not([data-glass="off"]) .nc-foot {
+    border-top-color: color-mix(in oklab, var(--ink) 7%, transparent);
+    background: transparent;
+    box-shadow: inset 0 1px 0 oklch(1 0 0 / 0.09);
+  }
+  :root[data-theme-mode="light"]:not([data-glass="off"]) .nc-section-head::before {
+    background: var(--panel);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .nc-panel { animation: none; }
+}
+
+.nc-head {
+  flex: 0 0 auto;
+  padding: 10px 10px 0 14px;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.nc-head-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+}
+.nc-heading {
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.005em;
+  color: var(--ink);
+}
+.nc-spacer { flex: 1 1 auto; min-width: 0; }
+
+.nc-btn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--ink-dim);
+  font: 500 11.5px var(--font-sans);
+  white-space: nowrap;
+  cursor: default;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+.nc-btn:hover:not(:disabled) { background: var(--hover-strong); color: var(--ink); }
+.nc-btn:active:not(:disabled) { background: var(--press); }
+.nc-btn:disabled { opacity: 0.4; }
+.nc-btn-note { color: var(--muted); font-weight: 500; }
+.nc-btn-note::before { content: "·"; margin-right: 5px; opacity: 0.7; }
+.nc-btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.nc-btn svg { flex: 0 0 auto; }
+
+.nc-filters {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 8px;
+}
+.nc-filter {
+  appearance: none;
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 8px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font: 550 11.5px var(--font-sans);
+  cursor: default;
+  transition: color var(--motion-fast) var(--ease-out);
+}
+.nc-filter:hover { color: var(--ink-dim); }
+.nc-filter[aria-selected="true"] { color: var(--ink); }
+.nc-filter[aria-selected="true"]::after {
+  content: "";
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--accent);
+}
+.nc-filter:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: var(--radius-control, 7px); }
+.nc-filters[hidden] { display: none; }
+.nc-filter-count:empty { display: none; }
+.nc-filter-count {
+  min-width: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--hover-strong);
+  color: var(--ink-dim);
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.nc-filter[data-tone="needs-you"] .nc-filter-count:not(:empty) {
+  background: color-mix(in oklch, var(--warn) 22%, transparent);
+  color: color-mix(in oklch, var(--warn) 80%, var(--ink));
+}
+.nc-seg {
+  display: inline-flex;
+  padding: 2px;
+  border-radius: var(--radius-control, 7px);
+  background: var(--hover);
+}
+.nc-seg button {
+  appearance: none;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 20px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  cursor: default;
+}
+.nc-seg button:hover { color: var(--ink); }
+.nc-seg button[aria-pressed="true"] {
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: var(--lift-hi), 0 1px 2px oklch(0 0 0 / 0.18);
+}
+.nc-seg button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+/* No reserved scrollbar gutter: the sticky section bands span the panel,
+   and a reserved gutter stopped them short of its right edge. */
+.nc-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 6px 6px;
+  outline: none;
+}
+/* The list takes focus on open only so the arrow keys work at once; the row
+   that arrow keys land on carries the ring, never the whole list. */
+.nc-list:focus-visible { box-shadow: none; }
+.nc-section + .nc-section { margin-top: 2px; }
+/* Opaque with glass on or off: rows scroll under a sticky header, and any
+   translucency shows their text through the label. It sits above the rows' own stacking contexts (content-visibility implies
+   paint containment). */
+.nc-section-head {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 -6px;
+  padding: 9px 14px 5px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.nc-section[data-tone="needs-you"] .nc-section-head { color: color-mix(in oklch, var(--warn) 78%, var(--ink)); }
+.nc-section-head[data-workspace="true"] { text-transform: none; letter-spacing: 0.01em; font-size: 11.5px; color: var(--ink-dim); }
+.nc-section-count {
+  font-weight: 600;
+  letter-spacing: 0;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.nc-section[data-tone="needs-you"] .nc-section-count { color: inherit; }
+.nc-section-note {
+  color: var(--muted);
+  font-weight: 550;
+  letter-spacing: 0;
+  text-transform: none;
+  font-size: 11px;
+}
+.nc-section-note::before { content: "·"; margin-right: 6px; opacity: 0.7; }
+.nc-section-toggle {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font: 600 10.5px var(--font-sans);
+  letter-spacing: 0;
+  text-transform: none;
+  cursor: default;
+}
+.nc-section-toggle:hover { background: var(--hover); color: var(--ink); }
+.nc-section-toggle:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.nc-ws-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  background: var(--nc-ws, var(--muted));
+}
+
+.nc-row {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 9px 10px 9px 9px;
+  border-radius: var(--radius-surface, 10px);
+  outline: none;
+  cursor: default;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 66px;
+  transition: background var(--motion-fast) var(--ease-out);
+}
+.nc-row:hover { background: var(--hover); }
+.nc-row:focus-visible { background: var(--hover); box-shadow: var(--focus-ring); }
+/* A pinned question is marked by its rule, its icon and its dot. A tint on
+   top of those turned a stack of them into beige warning banners in the
+   light theme. */
+.nc-row[data-waiting="pinned"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 2.5px;
+  border-radius: 0 3px 3px 0;
+  background: var(--warn);
+  transition: background var(--motion-fast) var(--ease-out);
+}
+.nc-row[data-answer="sent"]::before { background: var(--ok); }
+.nc-row[data-waiting="pinned"] + .nc-row[data-waiting="pinned"] { margin-top: 3px; }
+/* content-visibility implies paint containment, which would clip the mute
+   menu; the row with an open menu also has to paint above its neighbours
+   and the sticky section headers. */
+.nc-row[data-menu="true"] { content-visibility: visible; z-index: 4; }
+
+/* The title is the row's open control; a click elsewhere on the row that
+   lands on no other control opens it too. */
+.nc-open {
+  appearance: none;
+  flex: 0 1 auto;
+  display: flex;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: default;
+  outline: none;
+}
+.nc-open:focus-visible { box-shadow: none; }
+
+.nc-icon {
+  position: relative;
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
+  margin-top: 1px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--nc-tone) 15%, var(--panel-2));
+  border: 1px solid color-mix(in oklch, var(--nc-tone) 30%, transparent);
+  color: var(--nc-tone);
+}
+.nc-row[data-unread="false"] .nc-icon {
+  background: color-mix(in oklch, var(--nc-tone) 7%, var(--panel-2));
+  border-color: color-mix(in oklch, var(--nc-tone) 16%, transparent);
+  color: color-mix(in oklch, var(--nc-tone) 70%, var(--muted));
+}
+.nc-row[data-gone="true"] .nc-icon {
+  background: transparent;
+  border-style: dashed;
+  border-color: color-mix(in oklab, var(--muted) 55%, transparent);
+  color: var(--muted);
+}
+
+.nc-main { flex: 1 1 auto; min-width: 0; }
+.nc-line1 {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-height: 17px;
+}
+.nc-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.nc-row[data-unread="false"] .nc-title { font-weight: 500; color: var(--ink-dim); }
+.nc-row[data-gone="true"] .nc-title { color: var(--ink-dim); }
+.nc-row[data-gone="true"] .nc-body { color: var(--muted); }
+.nc-count {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--hover-strong);
+  color: var(--ink-dim);
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 15px;
+  font-variant-numeric: tabular-nums;
+}
+.nc-time {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding-left: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.nc-row[data-unread="true"] .nc-time { color: var(--ink-dim); }
+.nc-unread-dot {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.nc-row[data-waiting="pinned"] .nc-unread-dot { background: var(--warn); }
+
+.nc-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 1px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.nc-meta > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.nc-meta-ws {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  max-width: 55%;
+  color: var(--ink-dim);
+  font-weight: 550;
+}
+.nc-row[data-unread="false"] .nc-meta-ws { color: var(--muted); }
+.nc-meta-sep { flex: 0 0 auto; opacity: 0.6; }
+.nc-tag {
+  flex: 0 0 auto;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--rule);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 15px;
+}
+.nc-tag[data-kind="gone"] { border-style: dashed; }
+.nc-tag[data-kind="waiting"] {
+  border-color: color-mix(in oklch, var(--warn) 45%, transparent);
+  color: color-mix(in oklch, var(--warn) 70%, var(--ink-dim));
+}
+.nc-tag[data-kind="answered"] {
+  border-color: color-mix(in oklch, var(--ok) 45%, transparent);
+  color: color-mix(in oklch, var(--ok) 75%, var(--ink-dim));
+}
+.nc-tag svg { vertical-align: -1px; }
+.nc-meta-text { flex: 0 1 auto; }
+
+.nc-body {
+  margin-top: 3px;
+  color: var(--ink-dim);
+  font-size: 12px;
+  line-height: 1.42;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow-wrap: anywhere;
+}
+.nc-row[data-unread="false"] .nc-body { color: var(--muted); }
+
+/* The row's one action sits at the end of the meta line, so a question card
+   is three lines, not four. */
+.nc-primary {
+  appearance: none;
+  flex: 0 0 auto;
+  margin-left: auto;
+  height: 21px;
+  padding: 0 9px;
+  border: 1px solid color-mix(in oklch, var(--nc-tone, var(--accent)) 55%, transparent);
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: color-mix(in oklch, var(--nc-tone, var(--accent)) 72%, var(--ink));
+  font: 600 11px var(--font-sans);
+  cursor: default;
+  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
+}
+.nc-primary:hover { background: color-mix(in oklch, var(--nc-tone, var(--accent)) 18%, transparent); }
+.nc-primary:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.nc-primary[data-quiet="true"] {
+  border-color: var(--rule);
+  background: transparent;
+  color: var(--ink-dim);
+  font-weight: 550;
+}
+.nc-primary[data-quiet="true"]:hover { background: var(--hover-strong); color: var(--ink); }
+.nc-row[data-waiting] .nc-meta { margin-top: 2px; min-height: 21px; }
+
+.nc-earlier { margin-top: 3px; }
+.nc-earlier-toggle {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 5px 1px 3px;
+  margin-left: -3px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font: 550 11px var(--font-sans);
+  cursor: default;
+}
+.nc-earlier-toggle:hover { background: var(--hover-strong); color: var(--ink-dim); }
+.nc-earlier-list {
+  margin: 3px 0 0;
+  padding: 0 0 0 9px;
+  border-left: 1px solid var(--rule);
+  list-style: none;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.42;
+}
+.nc-earlier-list li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nc-earlier-list li + li { margin-top: 2px; }
+
+.nc-answer {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 7px;
+}
+.nc-options { display: flex; flex-wrap: wrap; gap: 5px; }
+.nc-option {
+  appearance: none;
+  max-width: 100%;
+  height: 23px;
+  padding: 0 9px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--ink);
+  font: 550 11.5px var(--font-sans);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
+  transition: background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out);
+}
+.nc-option:hover:not(:disabled) {
+  border-color: color-mix(in oklch, var(--nc-tone, var(--accent)) 55%, transparent);
+  background: color-mix(in oklch, var(--nc-tone, var(--accent)) 12%, var(--panel));
+}
+.nc-option[data-recommended="true"] {
+  border-color: color-mix(in oklch, var(--nc-tone, var(--accent)) 50%, transparent);
+  background: color-mix(in oklch, var(--nc-tone, var(--accent)) 14%, var(--panel));
+  color: color-mix(in oklch, var(--nc-tone, var(--accent)) 60%, var(--ink));
+}
+.nc-option:disabled { opacity: 0.55; }
+.nc-option:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.nc-reply {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 27px;
+  padding: 0 3px 0 9px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-control, 7px);
+  background: var(--panel);
+  transition: border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out);
+}
+.nc-reply:focus-within {
+  border-color: color-mix(in oklch, var(--accent) 55%, var(--rule));
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--accent) 16%, transparent);
+}
+.nc-reply input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  font: 12px var(--font-sans);
+  outline: none;
+}
+.nc-reply input:focus-visible { box-shadow: none; }
+.nc-reply input::placeholder { color: var(--muted); }
+.nc-reply-send {
+  appearance: none;
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 21px;
+  height: 21px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: var(--accent);
+  color: color-mix(in oklab, var(--bg) 92%, var(--accent));
+  cursor: default;
+}
+.nc-reply-send:disabled { background: var(--hover-strong); color: var(--muted); }
+.nc-reply-send:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.nc-answer-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ok);
+  font-size: 11.5px;
+  font-weight: 550;
+}
+.nc-answer-pending { color: var(--muted); font-size: 11.5px; }
+.nc-answer-error { color: var(--danger); font-size: 11.5px; line-height: 1.4; }
+
+/* The row tools take the place of the time and the unread dot on the title
+   line, which make room for them, so nothing is drawn over text and the
+   meta line's button stays clear. */
+.nc-actions {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  gap: 1px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+.nc-row:hover .nc-actions,
+.nc-row:focus-visible .nc-actions,
+.nc-row:has(:focus-visible) .nc-actions,
+.nc-row[data-menu="true"] .nc-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+.nc-row:is(:hover, :focus-visible, :has(:focus-visible), [data-menu="true"]) .nc-line1 { padding-right: 76px; }
+.nc-row:is(:hover, :focus-visible, :has(:focus-visible), [data-menu="true"]) :is(.nc-time, .nc-unread-dot) { display: none; }
+.nc-action {
+  appearance: none;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-dim);
+  cursor: default;
+}
+.nc-action:hover { background: var(--hover-strong); color: var(--ink); }
+.nc-action[data-danger="true"]:hover { background: var(--danger-soft); color: var(--danger); }
+.nc-action[aria-expanded="true"] { background: var(--hover-strong); color: var(--ink); }
+.nc-action:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+.nc-menu {
+  position: absolute;
+  top: 30px;
+  right: 6px;
+  z-index: 5;
+  min-width: 220px;
+  max-width: calc(100% - 12px);
+  padding: 4px;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: var(--shadow-2);
+}
+.nc-menu-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 2px 4px 0;
+  margin-bottom: 2px;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.nc-menu-span {
+  display: inline-flex;
+  margin-left: auto;
+  padding: 2px;
+  border-radius: 7px;
+  background: var(--hover);
+}
+.nc-menu .nc-menu-span button {
+  width: auto;
+  padding: 2px 8px;
+  border-radius: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 550;
+}
+.nc-menu .nc-menu-span button[aria-checked="true"] {
+  background: var(--panel-2);
+  color: var(--ink);
+  box-shadow: var(--lift-hi), 0 1px 2px oklch(0 0 0 / 0.16);
+}
+.nc-menu-label {
+  padding: 4px 8px 3px;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.nc-menu button {
+  appearance: none;
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  font: 500 12px var(--font-sans);
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: default;
+}
+.nc-menu button:hover, .nc-menu button:focus-visible { background: var(--hover-strong); outline: none; }
+
+.nc-stack-more {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: calc(100% - 45px);
+  margin: -3px 0 4px 45px;
+  padding: 4px 8px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font: 550 11px var(--font-sans);
+  text-align: left;
+  cursor: default;
+}
+.nc-stack-more:hover { background: var(--hover); color: var(--ink-dim); }
+.nc-stack-more:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.nc-stack-layers {
+  position: relative;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 10px;
+}
+.nc-stack-layers::before,
+.nc-stack-layers::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 6px;
+  border-radius: 2px;
+  border: 1px solid currentColor;
+  opacity: 0.55;
+}
+.nc-stack-layers::before { top: 0; transform: scaleX(0.78); }
+.nc-stack-layers::after { top: 3px; background: var(--panel-2); opacity: 0.9; }
+.nc-stack-children { margin-left: 18px; border-left: 1px solid var(--rule-soft); padding-left: 4px; }
+
+.nc-more {
+  appearance: none;
+  display: block;
+  width: 100%;
+  margin: 2px 0 4px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-dim);
+  font: 550 11.5px var(--font-sans);
+  text-align: left;
+  cursor: default;
+}
+.nc-more:hover { background: var(--hover); color: var(--ink); }
+.nc-more:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+.nc-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 38px 28px 34px;
+  text-align: center;
+}
+.nc-empty-art {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  margin-bottom: 6px;
+  border-radius: 14px;
+  background: color-mix(in oklch, var(--accent) 12%, var(--panel-2));
+  border: 1px solid color-mix(in oklch, var(--accent) 26%, transparent);
+  color: var(--accent-text);
+}
+.nc-empty-title { font-size: 13px; font-weight: 650; color: var(--ink); }
+.nc-empty-body { max-width: 290px; font-size: 12px; line-height: 1.45; color: var(--muted); }
+
+.nc-undo {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 8px 8px;
+  padding: 5px 5px 5px 12px;
+  border: 1px solid var(--rule);
+  border-radius: 9px;
+  background: color-mix(in oklab, var(--panel) 92%, var(--ink));
+  box-shadow: var(--lift-hi, none), 0 6px 18px oklch(0 0 0 / 0.22);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 550;
+}
+.nc-undo button {
+  appearance: none;
+  margin-left: auto;
+  padding: 3px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent-text);
+  font: 650 11.5px var(--font-sans);
+  cursor: default;
+}
+.nc-undo button:hover { background: color-mix(in oklch, var(--accent) 14%, transparent); }
+.nc-undo button:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+.nc-foot {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 12px 10px 14px;
+  border-top: 1px solid var(--rule-soft);
+}
+.nc-foot-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.nc-foot-title { font-size: 12px; font-weight: 600; color: var(--ink); }
+.nc-foot-sub { font-size: 11px; color: var(--muted); }
+.nc-mute {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--ink-dim);
+  font-size: 11.5px;
+}
+.nc-mute-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nc-mute-left { flex: 0 0 auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+.nc-switch {
+  appearance: none;
+  flex: 0 0 auto;
+  position: relative;
+  width: 30px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--rule-strong, var(--rule));
+  border-radius: 9px;
+  background: var(--hover-strong);
+  cursor: default;
+  transition: background var(--motion-fast) var(--ease-out);
+}
+.nc-switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--ink-dim);
+  transition: transform var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
+}
+.nc-switch[aria-checked="true"] { background: var(--accent); border-color: transparent; }
+.nc-switch[aria-checked="true"]::after { transform: translateX(12px); background: color-mix(in oklab, var(--bg) 92%, var(--accent)); }
+.nc-switch:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+/* ── Usage panel ─────────────────────────────────────────────────────────────
+   The title bar's Usage roster (UsageRoster.tsx) and the flyout beside it.
+   Both are .spark-menu, so they take the menu glass tier; they sit side by
+   side and never overlap, so there is one glass level. Nothing inside them
+   carries a fill of its own beyond the hover tint and the meters. */
+.usage-roster,
+.usage-flyout {
+  position: fixed;
+  z-index: 1300;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+  overflow: hidden auto;
+  font-family: var(--font-sans);
+  color: var(--ink);
+}
+@media not (prefers-reduced-transparency: reduce) {
+  /* Small grey text on a thin fill leans toward ink-dim to stay readable. */
+  html:not([data-glass="off"]) .usage-roster,
+  html:not([data-glass="off"]) .usage-flyout {
+    --muted: var(--glass-muted);
+  }
+}
+.usage-roster__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 0 2px 6px 8px;
+  border-bottom: 1px solid color-mix(in oklab, var(--ink) 8%, transparent);
+}
+.usage-roster__title {
+  font-size: 12.5px;
+  font-weight: 650;
+}
+.usage-roster__sub {
+  flex: 1 1 auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+.usage-roster__density .spark-segmented-item {
+  height: 20px;
+  padding: 0 8px;
+  font-size: 10.5px;
+}
+.usage-roster__refresh {
+  --spark-icon-btn-size: 22px;
+}
+.usage-roster__refresh[aria-busy="true"] {
+  opacity: 1;
+}
+.usage-roster__spin {
+  display: inline-flex;
+  animation: spark-spin 900ms linear infinite;
+}
+.usage-roster__rows {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 0;
+}
+.usage-roster__empty {
+  margin: 0;
+  padding: 10px 8px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.usage-roster-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 6px 7px 8px;
+  border: none;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: default;
+  transition: background var(--motion-fast) var(--ease-out);
+}
+.usage-roster-row:hover,
+.usage-roster-row.is-open {
+  background: var(--hover);
+}
+.usage-roster-row__mark {
+  display: flex;
+  align-items: center;
+  height: 16px;
+  color: var(--ink);
+}
+.usage-roster-row__body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.usage-roster-row__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 16px;
+}
+.usage-roster-row__name {
+  font-size: 12px;
+  font-weight: 600;
+}
+.usage-roster-row__plan {
+  padding: 1px 5px;
+  border: 1px solid color-mix(in oklab, var(--ink) 14%, transparent);
+  border-radius: 99px;
+  color: var(--muted);
+  font-size: 9.5px;
+  font-weight: 550;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+.usage-roster-row__reset {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usage-roster-row__chips,
+.usage-account__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+.usage-roster-row__status,
+.usage-roster-row__account {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usage-roster-row__chev {
+  display: flex;
+  align-items: center;
+  height: 16px;
+  color: var(--muted);
+}
+.usage-roster-row.is-open .usage-roster-row__chev {
+  color: var(--ink);
+}
+.usage-roster__foot {
+  display: flex;
+  flex-direction: column;
+  padding-top: 4px;
+  border-top: 1px solid color-mix(in oklab, var(--ink) 8%, transparent);
+}
+.usage-roster__foot .spark-menu-item,
+.usage-flyout__foot .spark-menu-item {
+  font-size: 11.5px;
+}
+
+/* One window as "5h ▬ 26%": the label, a 28px bar, the figure in its tone. */
+.usage-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.usage-chip__label {
+  color: var(--muted);
+}
+.usage-chip__pct {
+  font-weight: 650;
+}
+.usage-chip__bar,
+.usage-window__bar {
+  display: block;
+  overflow: hidden;
+  border-radius: 99px;
+  background: color-mix(in oklab, var(--ink) 13%, transparent);
+}
+.usage-chip__bar {
+  width: 28px;
+  height: 4px;
+}
+.usage-chip__bar > span,
+.usage-window__bar > span {
+  display: block;
+  height: 100%;
+  border-radius: 99px;
+  transition: width 240ms ease;
+}
+
+.usage-flyout {
+  gap: 10px;
+  padding: 10px;
+}
+.usage-flyout__head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.usage-flyout__mark {
+  display: flex;
+  color: var(--ink);
+}
+.usage-flyout__name {
+  font-size: 12.5px;
+  font-weight: 650;
+}
+.usage-flyout__updated {
+  flex: 1 1 auto;
+  color: var(--muted);
+  font-size: 10.5px;
+  text-align: right;
+  white-space: nowrap;
+}
+.usage-flyout__active {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+}
+.usage-flyout__active-label {
+  color: var(--accent-text);
+  font-weight: 650;
+}
+.usage-flyout__active-name {
+  overflow: hidden;
+  color: var(--ink-dim);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usage-flyout__windows {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.usage-window {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.usage-window__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11.5px;
+}
+.usage-window__pct {
+  color: var(--ink-dim);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+.usage-window__bar {
+  height: 5px;
+}
+.usage-window__reset,
+.usage-flyout__muted {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+.usage-flyout__detail,
+.usage-flyout__alert {
+  margin: 0;
+  color: var(--ink-dim);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.usage-flyout__alert {
+  color: var(--danger);
+  font-weight: 600;
+}
+.usage-flyout__section {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-top: 9px;
+  border-top: 1px solid color-mix(in oklab, var(--ink) 8%, transparent);
+}
+.usage-flyout__section-title {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.usage-flyout__line {
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.usage-flyout__line.is-danger {
+  color: var(--danger);
+}
+.usage-flyout__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.usage-flyout__actions .spark-btn,
+.usage-account__switch {
+  height: 22px;
+  padding: 0 9px;
+  font-size: 11px;
+}
+.usage-flyout__confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.usage-flyout__accounts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+/* The Active account carries an accent rule and tag; the others stay plain. */
+.usage-account {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px 8px;
+  border-radius: var(--radius-control, 7px);
+  box-shadow: inset 2px 0 0 transparent;
+}
+.usage-account.is-active {
+  background: color-mix(in oklch, var(--accent) 9%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+.usage-account__line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.usage-account__text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.usage-account__label {
+  overflow: hidden;
+  font-size: 11.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usage-account__email {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.usage-account__tag {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border-radius: 99px;
+  background: var(--accent-soft);
+  color: var(--accent-text);
+  font-size: 10px;
+  font-weight: 650;
+}
+.usage-account__note {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+.usage-flyout__foot {
+  display: flex;
+  flex-direction: column;
+  margin: 0 -4px -4px;
+  padding-top: 4px;
+  border-top: 1px solid color-mix(in oklab, var(--ink) 8%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .usage-roster__spin { animation: none; }
+  .usage-chip__bar > span,
+  .usage-window__bar > span { transition: none; }
 }

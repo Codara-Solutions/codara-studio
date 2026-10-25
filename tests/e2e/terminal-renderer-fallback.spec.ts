@@ -218,6 +218,93 @@ test("terminal renderer survives repeated chat↔terminal tab switches", async (
   }
 });
 
+// Regression guard for a pane left permanently blank when Chromium evicted its
+// WebGL context. Chromium keeps at most 16 live WebGL contexts per window and
+// drops the oldest, and every loaded pane holds one. With an addon built for
+// another xterm release the swap to the DOM renderer threw halfway, leaving no
+// canvas and no DOM rows, and the reveal path had nothing left to recover.
+test("a pane whose WebGL context is evicted keeps painting and gets WebGL back on reveal", async () => {
+  const { userDataDir } = await prepareWorkspace();
+
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({
+      args: ["."],
+      env: { ...process.env, SPARK_USER_DATA_DIR: userDataDir, CODARA_HOME_DIR: userDataDir, SPARK_HOME_DIR: userDataDir, SPARK_SKIP_LEGACY_MIGRATION: "1", SPARK_NO_SHELL_INTEGRATION: "1" },
+    });
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await expect(page.locator(".spark-tab--active").first()).toBeVisible();
+    const chatTabId = await page.locator(".spark-tab--active").first().getAttribute("data-tab-id");
+    const chatTab = page.locator(`.spark-tab[data-tab-id="${chatTabId}"]`).first();
+    const terminalTab = page.locator(".spark-tab", { hasText: "terminals" }).first();
+    await terminalTab.click();
+    await expect(page.locator(".xterm-host").first()).toBeVisible({ timeout: 15_000 });
+    const input = page.locator(".xterm-helper-textarea:visible").first();
+    await input.focus();
+    await input.pressSequentially("for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo evicted-context-row-$i-xxxxxxxxxxxxxxxxxxxxxxxx; done", { delay: 2 });
+    await input.press("Enter");
+    await page.waitForTimeout(1200);
+
+    const before = await rendererHealth(page);
+    test.skip(before?.renderer !== "webgl", "Electron started this run without a WebGL terminal renderer");
+    const inked = await xtermInk(app, page);
+    expect(inked, "expected the printed rows on screen").toBeGreaterThan(0.01);
+
+    // Twenty fresh contexts evict the pane's, as other panes would.
+    await page.evaluate(() => {
+      const keep: WebGL2RenderingContext[] = [];
+      for (let i = 0; i < 20; i += 1) {
+        const gl = document.createElement("canvas").getContext("webgl2");
+        if (gl) {
+          gl.clearColor(0, 0, 0, 1);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+          keep.push(gl);
+        }
+      }
+      (window as unknown as { __evictingContexts?: unknown }).__evictingContexts = keep;
+    });
+    await expect.poll(async () => (await rendererHealth(page))?.renderer, {
+      timeout: CONTEXT_LOSS_SETTLE_MS + 2_000,
+    }).toBe("DOM");
+    await expect.poll(() => xtermInk(app!, page), { timeout: 3_000 }).toBeGreaterThan(inked * 0.5);
+
+    await chatTab.click();
+    await page.waitForTimeout(300);
+    await terminalTab.click();
+    await expect.poll(async () => (await rendererHealth(page))?.renderer, { timeout: 3_000 }).toBe("webgl");
+    await expect.poll(() => xtermInk(app!, page), { timeout: 3_000 }).toBeGreaterThan(inked * 0.5);
+  } finally {
+    await app?.close();
+  }
+});
+
+// Share of the visible pane's pixels that differ from its dominant
+// (background) color, read from the composited window so it holds for the
+// WebGL and the DOM renderer alike.
+async function xtermInk(app: ElectronApplication, page: Page): Promise<number> {
+  const rect = await page.locator(".xterm-host:visible .xterm-screen").first().evaluate((node) => {
+    const box = node.getBoundingClientRect();
+    return { x: Math.ceil(box.x), y: Math.ceil(box.y), width: Math.floor(box.width), height: Math.floor(box.height) };
+  });
+  if (rect.width < 10 || rect.height < 10) return 0;
+  return app.evaluate(async ({ BrowserWindow }, area) => {
+    const image = await BrowserWindow.getAllWindows()[0].webContents.capturePage(area);
+    const { width, height } = image.getSize();
+    const bitmap = image.toBitmap();
+    const counts = new Map<number, number>();
+    for (let i = 0; i < width * height; i += 1) {
+      const o = i * 4;
+      const key = ((bitmap[o] >> 4) << 8) | ((bitmap[o + 1] >> 4) << 4) | (bitmap[o + 2] >> 4);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    let background = 0;
+    for (const count of counts.values()) background = Math.max(background, count);
+    const pixels = width * height;
+    return pixels > 0 ? (pixels - background) / pixels : 0;
+  }, rect);
+}
+
 async function prepareWorkspace(): Promise<{ userDataDir: string; workspaceDir: string }> {
   const root = await mkdtemp(join(tmpdir(), "spark-tui-overflow-"));
   const userDataDir = join(root, "user-data");

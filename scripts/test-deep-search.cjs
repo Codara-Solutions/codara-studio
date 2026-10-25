@@ -648,9 +648,63 @@ async function main() {
   // ── tool registration contract ──
 
   const registered = [];
-  registerDeepSearch({ registerTool: (tool) => registered.push(tool) });
-  assert.equal(registered.length, 1);
-  const tool = registered[0];
+  const handlers = new Map();
+  let activeTools = ["read", "bash", "web_search", "deep_search", "fetch_url"];
+  const fakePi = {
+    registerTool: (tool) => registered.push(tool),
+    on: (event, handler) => handlers.set(event, [...(handlers.get(event) ?? []), handler]),
+    getActiveTools: () => [...activeTools],
+    getAllTools: () => activeTools.concat(["web_search"]).map((name) => ({ name })),
+    setActiveTools: (names) => {
+      activeTools = [...names];
+    },
+  };
+  registerDeepSearch(fakePi);
+  assert.deepEqual(registered.map((tool) => tool.name), ["fetch_url", "deep_search"]);
+  const tool = registered.find((candidate) => candidate.name === "deep_search");
+
+  // web_search only works on OpenAI Responses, Anthropic Messages, and Google
+  // APIs. Elsewhere it is hidden so research goes straight to deep_search, and
+  // a later switch back to a supported model restores it.
+  assert.equal(deepSearch.webSearchSupported({ api: "openai-completions", provider: "openrouter" }), false);
+  assert.equal(deepSearch.webSearchSupported({ api: "anthropic-messages", provider: "anthropic" }), true);
+  assert.equal(deepSearch.webSearchSupported({ api: "openai-codex-responses", provider: "openai-codex" }), true);
+  handlers.get("session_start")[0]({}, { model: { api: "openai-completions", provider: "openrouter" } });
+  assert.equal(activeTools.includes("web_search"), false, "OpenRouter sessions hide web_search");
+  handlers.get("model_select")[0]({ model: { api: "openai-responses", provider: "openai" } });
+  assert.equal(activeTools.includes("web_search"), true, "a supported model gets web_search back");
+
+  // fetch_url reads one given page as readable text, with deep_search's limits.
+  {
+    const fetchTool = registered.find((candidate) => candidate.name === "fetch_url");
+    assert.deepEqual(fetchTool.parameters.required, ["url"]);
+    assert.doesNotMatch(fetchTool.description, /[\u2013\u2014]/);
+    const page = "<html><head><title>x</title><script>evil()</script></head><body><nav>menu</nav><h1>Webhooks</h1><p>Send a POST with the event.</p></body></html>";
+    const text = await deepSearch.executeFetchUrl(
+      { url: "https://docs.example.com/v2/webhooks" },
+      { fetchImpl: async () => response({ text: async () => page }) },
+    );
+    assert.match(text, /^https:\/\/docs\.example\.com\/v2\/webhooks/);
+    assert.match(text, /Webhooks\nSend a POST with the event\./);
+    assert.doesNotMatch(text, /evil|menu/);
+    const long = await deepSearch.executeFetchUrl(
+      { url: "https://docs.example.com/long", max_chars: 600 },
+      { fetchImpl: async () => response({ text: async () => `<p>${"word ".repeat(1000)}</p>` }) },
+    );
+    assert.match(long, /digest truncated at 600 characters/);
+    await assert.rejects(deepSearch.executeFetchUrl({ url: "file:///etc/passwd" }), /only http\(s\)/);
+    await assert.rejects(deepSearch.executeFetchUrl({ url: "not a url" }), /absolute http\(s\) URL/);
+    await assert.rejects(
+      deepSearch.executeFetchUrl(
+        { url: "https://a.example.com/" },
+        {
+          fetchImpl: async () =>
+            response({ ok: false, status: 301, headers: { get: () => "https://b.example.org/" } }),
+        },
+      ),
+      /redirect leaves https:\/\/a\.example\.com for https:\/\/b\.example\.org; not followed\. If it redirected/,
+    );
+  }
   assert.equal(tool.name, "deep_search");
   assert.equal(tool.description, DEEP_SEARCH_DESCRIPTION);
   assert.deepEqual(tool.parameters.required, ["query"]);

@@ -7,12 +7,28 @@ import { stripVTControlCharacters } from "node:util";
 import * as pty from "./pty-manager";
 import { codaraHome } from "./codara-home";
 import { writeFileAtomic } from "./fs-atomic";
-import { scopePreviewWorkspace } from "./preview-workspace";
-import { requestPreviewOp, type PreviewOpName, type PreviewOpParams } from "./preview-bridge";
+import { requestPreviewOp } from "./preview-bridge";
+import {
+  hasPreviewTool,
+  PreviewToolParamsError,
+  previewToolRefusesUntrustedRuns,
+  runPreviewTool,
+  type PreviewToolHost,
+} from "./preview-tools";
 import { getTrustedMainWindow } from "./main-window-trust";
 import { processChain } from "./owned-process-tree";
-import { waitForLoopbackPreviewServer } from "./preview-navigation";
+import { processCwds } from "./pi-session-tracker";
 import { requestTerminalOp } from "./terminal-bridge";
+import {
+  cleanTerminalText,
+  PaneOutputCursors,
+  renderTerminalScreen,
+  runInPane,
+  shellActivity,
+  type PaneIo,
+} from "./agent-terminal-io";
+import { terminalAgentStateSnapshot, terminalAgentTurnsSignaled, terminalPanePlacement } from "./terminal-agent-notify";
+import { paneAgentRuntime } from "./pane-agent-runtime";
 import {
   AgentTerminalOwnershipError,
   type AgentTerminalRegistration,
@@ -23,16 +39,35 @@ import {
   quarantineLateAgentTerminal,
   registerAgentTerminal,
 } from "./agent-terminal-lifecycle";
-import { handlePreviewInputOp, type PreviewInputOp } from "./preview-input";
+import { serversService } from "./servers/service";
 import { loadPreferences, setPreference } from "./preferences-store";
-import { loadSettings, loadState, saveState } from "./storage";
-import { setAllowedRoots } from "./fs-sandbox";
+import { loadSettings, loadState, saveState, updateState } from "./storage";
+import { assertAllowedReadPathResolved, setAllowedRoots } from "./fs-sandbox";
+import { ShareOfferGate } from "./share/offer";
+import {
+  createAgentWorktree,
+  createWorktreeAuditLog,
+  gateCaller,
+  getAgentWorktreeSetup,
+  listAgentWorktrees,
+  removeAgentWorktree,
+  scanProcessesUnderCwd,
+  type AgentWorktreeDeps,
+  type AgentWorktreeEvent,
+  type WorktreeCaller,
+  type WorktreeCallerRole,
+} from "./agent-worktrees";
+import { managedWorktreesRoot } from "./git-worktrees";
+import { agentWorktreeSetupRunner } from "./worktree-setup";
+import { invalidateGitCache } from "./git-ops";
+import { createGitHubCliAdapter } from "./github-cli";
+import { publishState } from "./workspace-state-publish";
 import {
   detectWorkerAssignableRuntimes,
   isWorkerAssignable,
 } from "./orchestration/pi-worker-providers";
 import { broadcastPreferencesChanged } from "./ipc";
-import { publish } from "./notify";
+import { paneSourceKey, publish } from "./notify";
 import {
   appendEvent,
   listEvents,
@@ -44,9 +79,11 @@ import {
   findLiveVerifierFeedbackRetry,
 } from "./orchestration/step-lifecycle";
 import {
+  isMemoryEnabled,
   MAX_BULLETS_ADDED_PER_RUN,
   MAX_REMEMBER_CALLS_PER_RUN,
   rememberAdd,
+  rememberBudgetKey,
   rememberReplace,
   type MemoryScope,
 } from "./orchestration/cora-memory";
@@ -57,6 +94,7 @@ import {
   setDefaultCoraProfile,
 } from "./orchestration/cora-profiles";
 import { effectiveRunExecutionPolicy } from "./orchestration/execution-policy";
+import { openPlanMilestones } from "./orchestration/manager-plan";
 import {
   blindApprovalAskProblem,
   parsePlanValidation,
@@ -69,15 +107,36 @@ import {
 } from "./orchestration/worker-session-reuse";
 import { normalizePiAccountProfileId } from "./orchestration/pi-account-execution";
 import { effectiveChatMode } from "@shared/chat-policy";
+import { normalizeTabGroupName } from "@shared/tab-group-name";
 import { DEFAULT_PREFERENCES } from "@shared/types";
 import { whiteboardIssues } from "@shared/whiteboard-quality";
+import {
+  MAX_PRECHECK_COMMAND_CHARS,
+  missedRunsSummary,
+  normalizeAutomationPrecheck,
+  normalizeMissedRuns,
+  precheckSummary,
+} from "@shared/automation-catchup";
 import type { WhiteboardIssue } from "@shared/whiteboard-quality";
 import { rememberWhiteboardInspection, requireWhiteboardInspection, whiteboardSourceIssues } from "./whiteboard-review";
 import {
   authorizeAgentSocketCapability,
+  authorizePaneSocketCapability,
+  PANE_SOCKET_METHODS,
   setAgentSocketCapabilityEndpoint,
   type AgentSocketCapabilityClaim,
 } from "./agent-socket-capabilities";
+import { createPaneOpener, PaneOpenError, parsePaneOpenParams } from "./pane-open";
+import {
+  callerProcessesToInspect,
+  callerPullRequestTrust,
+  crossWorkspaceCwdRefusal,
+  crossWorkspaceRefusal,
+  paneIsGone,
+  resolveTargetWorkspace,
+  type CrossWorkspaceDecision,
+} from "./cross-workspace-terminals";
+import { crossWorkspaceApprover } from "./cross-workspace-ipc";
 import {
   CODEX_MODEL_CATALOG,
   normalizeCodexModelId,
@@ -87,7 +146,17 @@ import {
   enabledWorkerModelFor,
   rosterModelFor,
 } from "./orchestration/worker-model-hint";
-import { availableCoraWorkerModels } from "./openrouter-config";
+import { coraWorkerModelAvailability } from "./orchestration/worker-model-availability";
+import {
+  WORKFLOW_DEFAULTS,
+  clampWorkflowCaps,
+  type WorkflowCaps,
+  type WorkflowEstimate,
+  type WorkflowMeta,
+  type WorkflowRunInfo,
+  type WorkflowRunStatus,
+} from "@shared/workflow";
+import { readWorkflowMeta } from "./orchestration/workflow-meta";
 import {
   constrainedRuntimesForHeadroom,
   headroomForRuntime,
@@ -114,14 +183,18 @@ import type {
   AgentEffortLevel,
   BoardCard,
   BoardCardStatus,
+  CoraWhiteboard,
   ChatBackendKind,
   ChatMode,
   CoraExecutionStrategy,
   InAppNotificationTone,
+  NavigationTarget,
   NotificationSoundKind,
   NotifyKind,
   PrefKey,
   AutomationLoop,
+  AutomationMissedRuns,
+  AutomationPrecheck,
   AutomationTrigger,
   CreateScheduledJobInput,
   LoomGraph,
@@ -132,6 +205,7 @@ import type {
   ScheduledJob,
   UpdateScheduledJobInput,
   UpdateCoraWhiteboardInput,
+  WorkerAttempt,
   WorkerTask,
   Workspace,
 } from "@shared/types";
@@ -167,9 +241,30 @@ const ERR_FORBIDDEN = -32003;
 const ERR_TERMINAL_SPAWN = -32000;
 
 const MAX_REQUEST_BYTES = 64 * 1024;
+// The board and whiteboard writes resend the whole card or node list, which
+// passes 64 KB at about 150 described cards. Only those methods get the larger
+// cap; anything over it is still drained and answered rather than reset, so
+// the caller sees why instead of "socket hang up".
+const MAX_LARGE_REQUEST_BYTES = 1024 * 1024;
+const LARGE_REQUEST_METHODS: ReadonlySet<string> = new Set([
+  "orchestrator.whiteboard_update",
+  "orchestrator.board_update",
+]);
+const MAX_DRAINED_REQUEST_BYTES = 8 * 1024 * 1024;
 const TERMINAL_READ_MAX_BYTES = 32 * 1024;
 const TERMINAL_READ_DEFAULT_LINES = 200;
 const TERMINAL_READ_MAX_LINES = 2000;
+// Enough recent bytes for a full-screen program's last complete repaint.
+const TERMINAL_READ_SCREEN_BYTES = 512 * 1024;
+// Recent bytes scanned for the shell's last prompt or command marker.
+const TERMINAL_SHELL_STATE_BYTES = 64 * 1024;
+const TERMINAL_RUN_DEFAULT_TIMEOUT_MS = 30_000;
+// Stays under the MCP client's terminal.run HTTP deadline so a timeout is
+// reported by this side, with the output so far, not as a dead socket.
+const TERMINAL_RUN_MAX_TIMEOUT_MS = 10 * 60_000;
+const TERMINAL_RUN_DEFAULT_QUIET_MS = 2_500;
+const TERMINAL_RUN_PROMPT_WAIT_MS = 3_000;
+const TERMINAL_RUN_SUBMIT_SETTLE_MS = 2_000;
 // How long terminal.create waits for the renderer-spawned PTY to come online
 // before returning, so the paneId it hands back is immediately writable.
 const TERMINAL_SPAWN_WAIT_MS = 10_000;
@@ -177,6 +272,8 @@ const TERMINAL_SPAWN_WAIT_MS = 10_000;
 // enough for a bad-cwd shell to have exited (chdir failure is near-instant),
 // short enough not to add noticeable latency to a healthy create.
 const TERMINAL_SPAWN_SETTLE_MS = 750;
+// Under the MCP server's 60 s timeout for terminal.create.
+const CROSS_WORKSPACE_CREATE_BUDGET_MS = 55_000;
 // A burst of creates from one agent shares one process listing.
 const CALLER_PROCESS_LIST_MAX_AGE_MS = 2_000;
 // Cap on chat.append message length. Big enough for a verifier verdict
@@ -323,6 +420,7 @@ async function writeHandshakeFile(input: { url: string; token: string }): Promis
     url: input.url,
     token: input.token,
     pid: process.pid,
+    appVersion: app.getVersion(),
     writtenAt: new Date().toISOString(),
   }, null, 2);
   await writeFileAtomic(handshakeFilePath(), payload, { mode: 0o600 });
@@ -345,7 +443,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, expected
 
   const body = await readBody(req);
   if (body === null) {
-    writeJsonRpc(res, errorResponse(null, ERR_INVALID_REQUEST, "request body too large or unreadable"));
+    writeJsonRpc(res, errorResponse(null, ERR_INVALID_REQUEST, "request body is unreadable"));
+    return;
+  }
+  if (typeof body !== "string") {
+    writeJsonRpc(res, errorResponse(null, ERR_INVALID_REQUEST, requestTooLargeMessage(body.tooLarge, MAX_LARGE_REQUEST_BYTES)));
     return;
   }
 
@@ -374,6 +476,11 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, expected
     writeJsonRpc(res, errorResponse(id, ERR_INVALID_REQUEST, "invalid JSON-RPC envelope"));
     return;
   }
+  const bodyBytes = Buffer.byteLength(body, "utf8");
+  if (bodyBytes > MAX_REQUEST_BYTES && !LARGE_REQUEST_METHODS.has(reqObj.method)) {
+    writeJsonRpc(res, errorResponse(id, ERR_INVALID_REQUEST, requestTooLargeMessage(bodyBytes, MAX_REQUEST_BYTES)));
+    return;
+  }
 
   // We have an authenticated, well-formed dispatch. The 30s idle timeout
   // installed per-connection exists only to reap stalled handshakes; the
@@ -389,7 +496,8 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, expected
 
 type AgentSocketAuth =
   | { kind: "root" }
-  | { kind: "scoped"; claim: AgentSocketCapabilityClaim };
+  | { kind: "scoped"; claim: AgentSocketCapabilityClaim }
+  | { kind: "pane"; paneId: string };
 
 function authenticateRequest(
   req: IncomingMessage,
@@ -412,15 +520,27 @@ function authenticateRequest(
     }
   }
   const claim = authorizeAgentSocketCapability(presented);
-  return claim ? { kind: "scoped", claim } : null;
+  if (claim) return { kind: "scoped", claim };
+  const pane = authorizePaneSocketCapability(presented);
+  return pane ? { kind: "pane", paneId: pane.paneId } : null;
 }
 
-function readBody(req: IncomingMessage): Promise<string | null> {
+function requestTooLargeMessage(bytes: number, limit: number): string {
+  const kb = (value: number) => `${Math.ceil(value / 1024)} KB`;
+  return `request too large: ${kb(bytes)} is over the ${kb(limit)} limit. Send a smaller payload (fewer or shorter items).`;
+}
+
+// Resolves the body text, { tooLarge } once the body passes the large-request
+// cap (the rest is drained so the error reaches the caller), or null when the
+// stream fails or exceeds even the drain cap.
+function readBody(req: IncomingMessage): Promise<string | { tooLarge: number } | null> {
   return new Promise((resolve) => {
     let total = 0;
     const chunks: Buffer[] = [];
+    let kept = 0;
+    let overflow = false;
     let done = false;
-    const finish = (value: string | null) => {
+    const finish = (value: string | { tooLarge: number } | null) => {
       if (done) return;
       done = true;
       resolve(value);
@@ -428,7 +548,7 @@ function readBody(req: IncomingMessage): Promise<string | null> {
     req.on("data", (chunk: Buffer) => {
       if (done) return;
       total += chunk.length;
-      if (total > MAX_REQUEST_BYTES) {
+      if (total > MAX_DRAINED_REQUEST_BYTES) {
         finish(null);
         try {
           req.destroy();
@@ -437,9 +557,15 @@ function readBody(req: IncomingMessage): Promise<string | null> {
         }
         return;
       }
+      if (total > MAX_LARGE_REQUEST_BYTES) {
+        overflow = true;
+        chunks.length = 0;
+        return;
+      }
       chunks.push(chunk);
+      kept += chunk.length;
     });
-    req.on("end", () => finish(Buffer.concat(chunks, total).toString("utf8")));
+    req.on("end", () => finish(overflow ? { tooLarge: total } : Buffer.concat(chunks, kept).toString("utf8")));
     req.on("error", () => finish(null));
   });
 }
@@ -466,6 +592,7 @@ const MID_COMPACTION_BLOCKED_METHODS = new Set<string>([
   "orchestrator.request_next_iteration",
   "orchestrator.message_workers",
   "orchestrator.name_chat",
+  "orchestrator.plan_update",
   "orchestrator.whiteboard_update",
   "orchestrator.whiteboard_arrange",
   "orchestrator.whiteboard_review",
@@ -479,6 +606,12 @@ const MID_COMPACTION_BLOCKED_METHODS = new Set<string>([
   "automation.stop",
   "automation.delete",
   "automation.name_chat",
+  "workflow.run",
+  "workflow.stop",
+  "workflow.resume",
+  "workflow.save",
+  "worktree.create",
+  "worktree.remove",
 ]);
 
 // The in-process Pi extension and MCP roster both hide these capabilities for
@@ -491,12 +624,27 @@ const UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS = new Set<string>([
   "terminal.create",
   "terminal.write",
   "terminal.close",
+  "terminal.run",
+  "terminal.list",
+  "agent.notify",
+  "share.offer",
   "orchestrator.spawn_terminals",
   "orchestrator.remember",
+  "orchestrator.recall",
+  "worktree.create",
+  "worktree.list",
+  "worktree.remove",
+  "worktree.setup",
+  "worktree.cleanup",
 ]);
 
 function isUntrustedPullRequestBlockedMethod(method: string): boolean {
-  return UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS.has(method) || method.startsWith("automation.");
+  return (
+    UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS.has(method) ||
+    method.startsWith("automation.") ||
+    method.startsWith("workflow.") ||
+    previewToolRefusesUntrustedRuns(method)
+  );
 }
 
 async function dispatch(
@@ -525,6 +673,19 @@ async function dispatch(
       // otherwise name a trusted sibling run in an allowed method.
       params.runId = auth.claim.runId;
     }
+    if (auth.kind === "pane") {
+      if (!(PANE_SOCKET_METHODS as readonly string[]).includes(method)) {
+        return errorResponse(
+          id,
+          ERR_FORBIDDEN,
+          "a terminal pane's credential only opens terminals over or beside that pane",
+        );
+      }
+      // The token, never the request, names the pane, so a process can only
+      // open terminals over or beside the pane it runs in.
+      delete params.runId;
+      params.paneId = auth.paneId;
+    }
     if (isUntrustedPullRequestBlockedMethod(method)) {
       const runId = stringParam(params, "runId");
       if (runId) {
@@ -538,7 +699,7 @@ async function dispatch(
         }
       }
     }
-    if (MID_COMPACTION_BLOCKED_METHODS.has(method)) {
+    if (MID_COMPACTION_BLOCKED_METHODS.has(method) || (method === "worktree.cleanup" && params.action === "remove")) {
       const runId = stringParam(params, "runId");
       if (runId && (await getRunStore()).isRunMidAutoCompaction(runId)) {
         return errorResponse(
@@ -548,15 +709,27 @@ async function dispatch(
         );
       }
     }
+    // The browser and other studio tools, one module per area (preview-tools/).
+    if (hasPreviewTool(method)) return await handlePreviewToolRpc(method, params, id);
     switch (method) {
       case "terminal.read":
         return await handleTerminalRead(params, id);
       case "terminal.create":
-        return await handleTerminalCreate(params, id);
+        return await handleTerminalCreate(params, id, auth.kind, res);
       case "terminal.write":
         return await handleTerminalWrite(params, id);
       case "terminal.close":
         return await handleTerminalClose(params, id);
+      case "terminal.run":
+        return await handleTerminalRun(params, id, res, auth.kind);
+      case "terminal.list":
+        return await handleTerminalList(params, id);
+      case "pane.open":
+        return await handlePaneOpen(params, id);
+      case "agent.notify":
+        return await handleAgentNotify(params, id);
+      case "share.offer":
+        return await handleShareOffer(params, id);
       case "chat.append":
         return await handleChatAppend(params, id);
       case "chat.create":
@@ -589,6 +762,13 @@ async function dispatch(
         return await handleChatResume(params, id);
       case "workspace.prune":
         return await handleWorkspacePrune(params, id);
+      case "worktree.create":
+      case "worktree.list":
+      case "worktree.remove":
+      case "worktree.setup":
+        return await handleWorktree(method, params, id);
+      case "worktree.cleanup":
+        return await handleWorktreeCleanup(params, id);
       case "accounts.list":
         return await handleAccountsList(id);
       case "accounts.anthropic.renew":
@@ -636,33 +816,6 @@ async function dispatch(
         return await handleAppPrefsGet(params, id);
       case "app.prefs.set":
         return await handleAppPrefsSet(params, id);
-      case "preview.list":
-      case "preview.navigate":
-      case "preview.url":
-      case "preview.snapshot":
-      case "preview.evaluate":
-      case "preview.click":
-      case "preview.type":
-      case "preview.wait_for":
-      case "preview.screenshot":
-      case "preview.resize":
-        // Renderer-side ops: DOM probes, capture, and the webview-element
-        // resize all run in the renderer against the picked preview tab.
-        return await handlePreviewOp(method, params, id);
-      case "preview.scroll":
-      case "preview.hover":
-      case "preview.mouse":
-      case "preview.drag":
-      case "preview.upload":
-      case "preview.console":
-      case "preview.network":
-      case "preview.key":
-      case "preview.press_key":
-        // Computer-use ops: main drives the guest webContents directly with
-        // trusted input (sendInputEvent) + CDP. press_key lives here too so it
-        // uses trusted input when a guest resolves (and falls back to the
-        // renderer probe when it can't).
-        return await handlePreviewInputRpc(method, params, id);
       case "orchestrator.spawn_workers":
         return await handleOrchestratorSpawnWorkers(params, id);
       case "orchestrator.spawn_terminals":
@@ -683,6 +836,8 @@ async function dispatch(
         return await handleOrchestratorCheckMessages(params, id);
       case "orchestrator.name_chat":
         return await handleOrchestratorNameChat(params, id);
+      case "orchestrator.plan_update":
+        return await handleOrchestratorPlanUpdate(params, id);
       case "orchestrator.whiteboard_inspect":
       case "orchestrator.whiteboard_arrange":
       case "orchestrator.whiteboard_review":
@@ -697,6 +852,8 @@ async function dispatch(
         return await handleOrchestratorBoardUpdate(params, id);
       case "orchestrator.remember":
         return await handleOrchestratorRemember(params, id);
+      case "orchestrator.recall":
+        return await handleOrchestratorRecall(params, id);
       case "automation.list":
         return await handleAutomationList(params, id);
       case "automation.get":
@@ -725,6 +882,25 @@ async function dispatch(
         return await handleAutomationDelete(params, id, res);
       case "automation.name_chat":
         return await handleAutomationNameChat(params, id);
+      case "workflow.list":
+        return await handleWorkflowList(params, id);
+      case "workflow.get":
+        return await handleWorkflowGet(params, id);
+      case "workflow.check":
+        return await handleWorkflowCheck(params, id);
+      case "workflow.run":
+        // res threads through for the consent gate and its client-gone abort.
+        return await handleWorkflowRun(params, id, res);
+      case "workflow.status":
+        return await handleWorkflowStatus(params, id);
+      case "workflow.wait":
+        return await handleWorkflowWait(params, id, res);
+      case "workflow.stop":
+        return await handleWorkflowStop(params, id);
+      case "workflow.resume":
+        return await handleWorkflowResume(params, id, res);
+      case "workflow.save":
+        return await handleWorkflowSave(params, id, res);
       case "pane.split":
         // Splitting a pane in an EXISTING tab still needs active-tab/active-pane
         // selection semantics we haven't designed yet. terminal.create (above)
@@ -741,40 +917,467 @@ async function dispatch(
   }
 }
 
+const paneIo: PaneIo = {
+  exists: (paneId) => pty.exists(paneId),
+  readTail: (paneId, maxBytes) => pty.readTail(paneId, maxBytes),
+  tap: (paneId, handler) => pty.tap(paneId, handler),
+  onExit: (paneId, handler) => pty.onExit(paneId, () => handler()),
+  inject: (paneId, text, opts) => pty.inject(paneId, text, opts),
+};
+const paneCursors = new PaneOutputCursors(paneIo);
+// The latest line terminal.write submitted per pane, for terminal.run.
+const recentSubmits = new Map<string, { at: number; cursor: number }>();
+// Panes with a terminal.run in flight. Two parallel calls would both see an
+// idle prompt and type their commands into one shell, each reading the
+// other's output and exit marker as its own.
+const runningPanes = new Set<string>();
+
+function clampNumberParam(
+  params: Record<string, unknown>,
+  key: string,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const value = optionalNumberParam(params, key);
+  return value === null ? fallback : Math.max(min, Math.min(Math.floor(value), max));
+}
+
 async function handleTerminalRead(
   params: Record<string, unknown>,
   id: JsonRpcId,
 ): Promise<JsonRpcResponse> {
   const paneId = stringParam(params, "paneId");
   if (!paneId) return errorResponse(id, ERR_INVALID_PARAMS, "paneId is required");
+  const rawMode = params.mode;
+  if (rawMode !== undefined && rawMode !== "text" && rawMode !== "screen") {
+    return errorResponse(id, ERR_INVALID_PARAMS, "mode must be text or screen");
+  }
+  const lines = clampNumberParam(params, "lines", TERMINAL_READ_DEFAULT_LINES, 1, TERMINAL_READ_MAX_LINES);
+  if (!pty.hasSession(paneId)) {
+    return errorResponse(id, ERR_INVALID_PARAMS, `unknown pane: ${paneId}`);
+  }
 
-  const requestedLines = optionalNumberParam(params, "lines");
-  const lines =
-    requestedLines === null
-      ? TERMINAL_READ_DEFAULT_LINES
-      : Math.max(1, Math.min(requestedLines | 0, TERMINAL_READ_MAX_LINES));
+  const since = optionalNumberParam(params, "since");
+  if (since !== null && rawMode !== "screen") {
+    const read = paneCursors.readSince(paneId, Math.floor(since), TERMINAL_READ_MAX_BYTES);
+    if (!read) return errorResponse(id, ERR_INVALID_PARAMS, `unknown pane: ${paneId}`);
+    const all = cleanTerminalText(read.bytes);
+    const slice = all.slice(-lines);
+    return successResponse(id, {
+      paneId,
+      mode: "text",
+      cursor: read.cursor,
+      lines: slice.length,
+      truncated: read.truncated || all.length > slice.length,
+      ...(read.missedBytes > 0 ? { missedBytes: read.missedBytes } : {}),
+      text: slice.join("\n"),
+    });
+  }
+
+  // Taken before the tail so a follow-up `since` read never skips bytes.
+  const cursor = paneCursors.current(paneId);
+  if (rawMode === "screen") {
+    const tail = pty.readTail(paneId, TERMINAL_READ_SCREEN_BYTES);
+    if (tail === null) return errorResponse(id, ERR_INVALID_PARAMS, `unknown pane: ${paneId}`);
+    const size = pty.sessionDimensions(paneId) ?? { cols: 120, rows: 40 };
+    const screen = await renderTerminalScreen(tail, size.cols, size.rows, lines);
+    return successResponse(id, {
+      paneId,
+      mode: "screen",
+      cursor,
+      altScreen: screen.altScreen,
+      lines: screen.lines.length,
+      text: screen.lines.join("\n"),
+    });
+  }
 
   const tail = pty.readTail(paneId, TERMINAL_READ_MAX_BYTES);
   if (tail === null) {
     return errorResponse(id, ERR_INVALID_PARAMS, `unknown pane: ${paneId}`);
   }
-
-  // Decode raw bytes as UTF-8 (lossy on partial code points at the head -
-  // acceptable for a tail read), then strip ANSI/VT control sequences so a
-  // grader sub-agent gets clean text instead of escape codes.
-  const text = stripVTControlCharacters(tail.toString("utf8"));
-  const allLines = text.split(/\r\n|\r|\n/);
-  // Drop a trailing empty line that comes from a final newline so callers
-  // don't get a phantom blank row when n=lines.
-  if (allLines.length > 0 && allLines[allLines.length - 1] === "") allLines.pop();
+  const allLines = cleanTerminalText(tail);
   const slice = allLines.slice(-lines);
-  const output = slice.join("\n");
-
   return successResponse(id, {
     paneId,
+    mode: "text",
+    cursor,
     lines: slice.length,
     truncatedBytes: tail.length >= TERMINAL_READ_MAX_BYTES,
-    text: output,
+    text: slice.join("\n"),
+  });
+}
+
+// Runs a command in an agent-owned pane (or a new one) and waits for the
+// shell to report it finished, so an agent does not poll write/read/read.
+async function handleTerminalRun(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  res: ServerResponse,
+  authKind: AgentSocketAuth["kind"],
+): Promise<JsonRpcResponse> {
+  const command = typeof params.command === "string" ? params.command.trim() : "";
+  if (!command) return errorResponse(id, ERR_INVALID_PARAMS, "command is required");
+  if (/[\r\n]/.test(command)) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "command must be a single line; join steps with && or ;");
+  }
+  const group = tabGroupParam(params);
+  if (group === undefined) return errorResponse(id, ERR_INVALID_PARAMS, TAB_GROUP_PARAM_ERROR);
+  const runId = stringParam(params, "runId");
+  const requestedPaneId = stringParam(params, "paneId");
+  if (requestedPaneId) {
+    const callerPaneId = await callerPaneForOwnedTerminal(requestedPaneId, params);
+    if (!agentTerminals.isActiveOwnedBy(requestedPaneId, runId, callerPaneId)) {
+      return errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        "terminal.run is only permitted on active panes you created with codara_terminal_create or codara_terminal_run",
+      );
+    }
+    if (!pty.exists(requestedPaneId)) return errorResponse(id, ERR_INVALID_PARAMS, `unknown pane: ${requestedPaneId}`);
+    if (runningPanes.has(requestedPaneId)) {
+      return errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        `pane ${requestedPaneId} already has a codara_terminal_run in progress. Wait for it, or omit paneId to run in a new terminal.`,
+      );
+    }
+    runningPanes.add(requestedPaneId);
+  }
+
+  // Registered before any wait, so a client that cancels while the pane is
+  // still opening or settling never has its command typed afterwards.
+  const abort = new AbortController();
+  const onClose = () => {
+    if (!res.writableEnded) abort.abort();
+  };
+  res.once("close", onClose);
+  let paneId = requestedPaneId;
+  try {
+    let created: { tabId: string; paneId: string; cwd: string; group?: string } | null = null;
+    let joinedGroup: string | null = null;
+    if (paneId) {
+      // Grouping is cosmetic: a pane the renderer cannot place still runs.
+      if (group) {
+        joinedGroup =
+          (
+            await requestTerminalOp<{ group?: string }>("group", { paneId, group }, { timeoutMs: 5_000 }).catch(
+              () => null,
+            )
+          )?.group ?? null;
+      }
+      // A line codara_terminal_write submitted just before this call may not
+      // have started yet, and its markers would be read as this command's.
+      // Wait briefly for the shell to report it finished.
+      const submitted = recentSubmits.get(paneId);
+      if (submitted) {
+        recentSubmits.delete(paneId);
+        const settleBy = submitted.at + TERMINAL_RUN_SUBMIT_SETTLE_MS;
+        while (Date.now() < settleBy && !abort.signal.aborted) {
+          const since = paneCursors.readSince(paneId, submitted.cursor, TERMINAL_SHELL_STATE_BYTES);
+          if (!since || shellActivity(since.bytes) === "idle") break;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+      if (shellActivity(pty.readTail(paneId, TERMINAL_SHELL_STATE_BYTES)) === "running") {
+        return errorResponse(
+          id,
+          ERR_INVALID_PARAMS,
+          `pane ${paneId} is still running a command. Read it with codara_terminal_read, interrupt it with codara_terminal_write (text "\\u0003", submit false), or omit paneId to run in a new terminal.`,
+        );
+      }
+    } else {
+      const createParams: Record<string, unknown> = {};
+      for (const key of ["cwd", "title", "runId", "callerPaneId", "callerPid"]) {
+        if (params[key] !== undefined) createParams[key] = params[key];
+      }
+      if (group) createParams.group = group;
+      const createdResponse = await handleTerminalCreate(createParams, id, authKind, res);
+      if (createdResponse.error) return createdResponse;
+      created = createdResponse.result as { tabId: string; paneId: string; cwd: string; group?: string };
+      paneId = created.paneId;
+      joinedGroup = created.group ?? null;
+      runningPanes.add(paneId);
+      // A new shell prints its first prompt marker once it reads input; a
+      // shell without integration never does, so the wait is bounded.
+      const readyBy = Date.now() + TERMINAL_RUN_PROMPT_WAIT_MS;
+      while (
+        Date.now() < readyBy &&
+        !abort.signal.aborted &&
+        shellActivity(pty.readTail(paneId, TERMINAL_SHELL_STATE_BYTES)) === null
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+
+    paneCursors.current(paneId);
+    const result = await runInPane(paneIo, paneId, command, {
+      timeoutMs: clampNumberParam(params, "timeoutMs", TERMINAL_RUN_DEFAULT_TIMEOUT_MS, 1_000, TERMINAL_RUN_MAX_TIMEOUT_MS),
+      quietMs: clampNumberParam(params, "quietMs", TERMINAL_RUN_DEFAULT_QUIET_MS, 300, 60_000),
+      maxLines: clampNumberParam(params, "lines", TERMINAL_READ_DEFAULT_LINES, 1, TERMINAL_READ_MAX_LINES),
+      signal: abort.signal,
+    });
+    // Outside a Cora run nothing closes a new tab, so an agent that omits
+    // paneId on every call would fill the workspace with them.
+    const next =
+      result.status === "timeout"
+        ? "The command is still running. Read new output with codara_terminal_read since=cursor."
+        : result.status === "quiet"
+          ? "Output went quiet, but this shell reports no exit marker, so the command may still be running. Check with codara_terminal_read since=cursor."
+          : created
+            ? "Pass this paneId to your next codara_terminal_run instead of opening another tab, and close it with codara_terminal_close when you are done."
+            : undefined;
+    return successResponse(id, {
+      paneId,
+      ...(created ? { tabId: created.tabId, cwd: created.cwd } : {}),
+      ...(joinedGroup ? { group: joinedGroup } : {}),
+      ...result,
+      cursor: paneCursors.current(paneId),
+      ...(next ? { next } : {}),
+    });
+  } finally {
+    res.off("close", onClose);
+    if (paneId) runningPanes.delete(paneId);
+  }
+}
+
+interface CallerPlacement {
+  paneId: string;
+  workspaceId: string;
+  tabId: string;
+}
+
+interface StudioTerminalListing {
+  paneId: string;
+  tabId: string;
+  workspaceId: string;
+  title?: string;
+  cwd?: string;
+  profile?: string;
+  group?: string;
+}
+
+const CALLER_PLACEMENT_CACHE_MS = 5_000;
+const callerPlacementCache = new Map<string, { at: number; placement: CallerPlacement | null }>();
+
+async function listStudioTerminals(): Promise<StudioTerminalListing[]> {
+  const inventory = await requestTerminalOp<StudioTerminalListing[]>("list", {}, { timeoutMs: 5_000 });
+  return Array.isArray(inventory) ? inventory : [];
+}
+
+async function paneWorkspaceId(paneId: string): Promise<string | null> {
+  const watched = terminalPanePlacement(paneId);
+  if (watched) return watched.workspaceId;
+  const listed = (await listStudioTerminals().catch(() => [])).find((entry) => entry.paneId === paneId);
+  return listed?.workspaceId ?? null;
+}
+
+// The caller's pane, looked up only for a terminal that records one as its
+// owner (opened in another workspace), so other writes skip the process walk.
+async function callerPaneForOwnedTerminal(
+  paneId: string,
+  params: Record<string, unknown>,
+): Promise<string | null> {
+  const owner = agentTerminals.ownerPaneOf(paneId);
+  if (!owner) return null;
+  const gone = await paneIsGone(owner, {
+    hasSession: (id) => pty.hasSession(id),
+    listPaneIds: async () => {
+      const panes = await requestTerminalOp<Array<{ paneId: string }>>("panes", {}, { timeoutMs: 5_000 });
+      if (!Array.isArray(panes)) throw new Error("no pane inventory");
+      return panes.map((pane) => pane.paneId);
+    },
+  });
+  if (gone) {
+    agentTerminals.releasePaneOwner(paneId);
+    return null;
+  }
+  return resolveCallerPaneId(params);
+}
+
+// Where the calling agent's own pane sits, so browser, list and notify calls
+// act on the agent's workspace rather than whichever one is on screen.
+async function resolveCallerPlacement(params: Record<string, unknown>): Promise<CallerPlacement | null> {
+  const hinted = stringParam(params, "callerPaneId") ?? "";
+  const pid = typeof params.callerPid === "number" ? String(params.callerPid) : "";
+  if (!hinted && !pid) return null;
+  const key = `${hinted}|${pid}`;
+  const cached = callerPlacementCache.get(key);
+  if (cached && Date.now() - cached.at < CALLER_PLACEMENT_CACHE_MS) return cached.placement;
+  let placement: CallerPlacement | null = null;
+  const paneId = await resolveCallerPaneId(params);
+  if (paneId) {
+    const watched = terminalPanePlacement(paneId);
+    if (watched) {
+      placement = { paneId, workspaceId: watched.workspaceId, tabId: watched.tabId };
+    } else {
+      const listed = (await listStudioTerminals().catch(() => [])).find((entry) => entry.paneId === paneId);
+      if (listed) placement = { paneId, workspaceId: listed.workspaceId, tabId: listed.tabId };
+    }
+  }
+  if (callerPlacementCache.size > 64) callerPlacementCache.clear();
+  callerPlacementCache.set(key, { at: Date.now(), placement });
+  return placement;
+}
+
+async function handleTerminalList(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  let workspaceId: string | null = null;
+  if (runId) {
+    const run = await (await getRunStore()).getRun(runId);
+    workspaceId = run?.workspaceId ?? null;
+  }
+  const caller = await resolveCallerPlacement(params);
+  workspaceId ??= caller?.workspaceId ?? null;
+  let inventory: StudioTerminalListing[];
+  try {
+    inventory = await listStudioTerminals();
+  } catch (err) {
+    return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));
+  }
+  const states = new Map(terminalAgentStateSnapshot().map((entry) => [entry.paneId, entry]));
+  const panes = inventory
+    .filter((entry) => !workspaceId || entry.workspaceId === workspaceId)
+    .map((entry) => {
+      const agent = states.get(entry.paneId);
+      return {
+        paneId: entry.paneId,
+        tabId: entry.tabId,
+        ...(workspaceId ? {} : { workspaceId: entry.workspaceId }),
+        ...(entry.title ? { title: entry.title } : {}),
+        ...(entry.group ? { group: entry.group } : {}),
+        ...(entry.cwd ? { cwd: entry.cwd } : {}),
+        agent: agent?.runtime ?? (entry.profile && entry.profile !== "shell" ? entry.profile : null),
+        ...(agent ? { agentState: agent.state } : {}),
+        shell: shellActivity(pty.readTail(entry.paneId, TERMINAL_SHELL_STATE_BYTES)),
+        ...(caller?.paneId === entry.paneId ? { isCaller: true } : {}),
+        ...(agentTerminals.isActiveOwnedBy(entry.paneId, runId, caller?.paneId ?? null) ? { writable: true } : {}),
+      };
+    });
+  // Terminals this agent opened in other workspaces, so it can keep steering
+  // them without knowing where they went.
+  const listed = new Set(panes.map((pane) => pane.paneId));
+  const elsewhere = !runId && caller ? agentTerminals.listOwnedByPane(caller.paneId) : [];
+  for (const owned of elsewhere) {
+    if (listed.has(owned.paneId)) continue;
+    const entry = inventory.find((item) => item.paneId === owned.paneId);
+    if (!entry) continue;
+    const agent = states.get(entry.paneId);
+    panes.push({
+      paneId: entry.paneId,
+      tabId: entry.tabId,
+      workspaceId: entry.workspaceId,
+      ...(entry.title ? { title: entry.title } : {}),
+      ...(entry.group ? { group: entry.group } : {}),
+      ...(entry.cwd ? { cwd: entry.cwd } : {}),
+      agent: agent?.runtime ?? (entry.profile && entry.profile !== "shell" ? entry.profile : null),
+      ...(agent ? { agentState: agent.state } : {}),
+      shell: shellActivity(pty.readTail(entry.paneId, TERMINAL_SHELL_STATE_BYTES)),
+      writable: true,
+    });
+  }
+  return successResponse(id, { workspaceId, panes });
+}
+
+const AGENT_NOTIFY_MIN_INTERVAL_MS = 5_000;
+const AGENT_NOTIFY_MAX_CHARS = 300;
+const agentNotifyLastAt = new Map<string, number>();
+const AGENT_NOTIFY_LABELS: Record<string, string> = {
+  claude: "Claude Code",
+  codex: "Codex",
+  grok: "Grok",
+  pi: "Pi",
+};
+
+// An agent's own "I finished" or "I need you". It shares the pane's sourceKey
+// with the terminal notifier, so the notify policy treats this and the
+// notifier's turn-end guess as one alert instead of two.
+async function handleAgentNotify(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const kind = params.kind;
+  if (kind !== "done" && kind !== "needs_input") {
+    return errorResponse(id, ERR_INVALID_PARAMS, "kind must be done or needs_input");
+  }
+  const message = (stringParam(params, "message") ?? "").slice(0, AGENT_NOTIFY_MAX_CHARS);
+  const placement = await resolveCallerPlacement(params);
+  // The managed MCP entry also loads in agents started outside Codara. Their
+  // notification has nowhere to go, which is an answer, not a failure.
+  if (!placement) {
+    return successResponse(id, {
+      published: false,
+      reason: "not_in_codara_terminal",
+      note: "codara_notify_user only reaches the user from an agent running in a Codara terminal pane.",
+    });
+  }
+  if (terminalAgentTurnsSignaled(placement.paneId)) {
+    return successResponse(id, {
+      published: false,
+      reason: "announced_by_codara",
+      note: "Codara already announces this agent's turn ends and prompts from the agent's own signals; no call is needed.",
+    });
+  }
+  const rateKey = `${placement.paneId}:${kind}`;
+  const now = Date.now();
+  const last = agentNotifyLastAt.get(rateKey);
+  if (last !== undefined && now - last < AGENT_NOTIFY_MIN_INTERVAL_MS) {
+    return successResponse(id, { published: false, reason: "rate_limited" });
+  }
+  if (agentNotifyLastAt.size > 256) agentNotifyLastAt.clear();
+  agentNotifyLastAt.set(rateKey, now);
+  const runtime = terminalAgentStateSnapshot().find((entry) => entry.paneId === placement.paneId)?.runtime;
+  const label = (runtime && AGENT_NOTIFY_LABELS[runtime]) || "Agent";
+  const done = kind === "done";
+  publish({
+    kind: done ? "terminal.agent.done" : "terminal.agent.needs-input",
+    sourceKey: paneSourceKey(placement.paneId),
+    tone: done ? "success" : "warning",
+    title: done ? `${label} finished` : `${label} needs you`,
+    body:
+      message ||
+      (done ? "Finished. Click to jump to the terminal." : "Waiting for your input. Click to jump to the terminal."),
+    soundKind: done ? "done" : "needs-you",
+    target: {
+      type: "terminal",
+      workspaceId: placement.workspaceId,
+      tabId: placement.tabId,
+      paneId: placement.paneId,
+    },
+  });
+  return successResponse(id, { published: true });
+}
+
+const shareOfferGate = new ShareOfferGate({ assertReadable: assertAllowedReadPathResolved });
+
+// An agent asks Studio to offer sharing a page it wrote. This only shows the
+// user the Share prompt for that file; nothing is uploaded unless they click
+// Share there (docs/share-links.md). The page itself is never read here.
+async function handleShareOffer(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  const callerKey = runId
+    ? `run:${runId}`
+    : `pane:${(await resolveCallerPaneId(params)) ?? "none"}`;
+  const checked = await shareOfferGate.check(params.path, callerKey);
+  if (!checked.ok) {
+    return successResponse(id, { offered: false, reason: checked.reason, note: checked.message });
+  }
+  // The trusted app window only: a popup a page opened must never be handed
+  // a path to put in front of the user.
+  const win = getTrustedMainWindow();
+  if (!win || win.webContents.isDestroyed()) {
+    return successResponse(id, { offered: false, reason: "no_window", note: "Codara has no open window." });
+  }
+  win.webContents.send("share:offer", { path: checked.path });
+  return successResponse(id, {
+    offered: true,
+    note: "Codara opened the file and showed the user a Share prompt. Nothing is uploaded unless the user chooses Share; do not ask again.",
   });
 }
 
@@ -796,6 +1399,24 @@ async function resolveCallerPaneId(params: Record<string, unknown>): Promise<str
   return chain ? pty.sessionForProcessChain(chain) : null;
 }
 
+// Where the caller's processes are right now, from its MCP server up to its
+// pane's shell: a pane's recorded folder is only where its shell started.
+// Null when they cannot be read.
+async function callerProcessCwds(params: Record<string, unknown>): Promise<string[] | null> {
+  const callerPid = params.callerPid;
+  if (typeof callerPid !== "number" || !Number.isSafeInteger(callerPid)) return null;
+  const chain =
+    (await processChain(callerPid, CALLER_PROCESS_LIST_MAX_AGE_MS).catch(() => null)) ??
+    (await processChain(callerPid).catch(() => null));
+  if (!chain) return null;
+  const pids = callerProcessesToInspect(chain, {
+    isPaneShell: (pid) => pty.sessionForProcessChain([pid]) !== null,
+    appPid: process.pid,
+  });
+  const cwds = await processCwds(pids).catch(() => null);
+  return cwds ? [...cwds.values()] : null;
+}
+
 // Create a new terminal tab on the user's behalf. Tab/pane state is owned by
 // the renderer, so we round-trip through the terminal-bridge; the renderer
 // mints an agent-tinted, UNFOCUSED tab and returns the tabId + paneId (the PTY
@@ -803,10 +1424,19 @@ async function resolveCallerPaneId(params: Record<string, unknown>): Promise<str
 async function handleTerminalCreate(
   params: Record<string, unknown>,
   id: JsonRpcId,
+  authKind: AgentSocketAuth["kind"],
+  res: ServerResponse,
 ): Promise<JsonRpcResponse> {
-  const cwd = stringParam(params, "cwd");
+  const startedAt = Date.now();
+  let cwd = stringParam(params, "cwd");
+  if (params.workspace !== undefined && params.workspace !== null && typeof params.workspace !== "string") {
+    return errorResponse(id, ERR_INVALID_PARAMS, "workspace must be a workspace id or an absolute folder path");
+  }
+  const requestedWorkspace = stringParam(params, "workspace");
   const command = stringParam(params, "command");
   const title = stringParam(params, "title");
+  const group = tabGroupParam(params);
+  if (group === undefined) return errorResponse(id, ERR_INVALID_PARAMS, TAB_GROUP_PARAM_ERROR);
   const rawRetention = params.retention;
   if (
     rawRetention !== undefined &&
@@ -828,8 +1458,8 @@ async function handleTerminalCreate(
   const runId = stringParam(params, "runId");
   let workspaceId: string | null = null;
   let workspaceCwd: string | null = null;
+  let run: RunState | null = null;
   if (runId) {
-    let run: RunState | null;
     try {
       run = await (await getRunStore()).getRun(runId);
     } catch (error) {
@@ -869,8 +1499,79 @@ async function handleTerminalCreate(
     }
   }
   const callerPaneId = await resolveCallerPaneId(params);
+  let crossWorkspace: { callerName: string; target: { id: string; name: string } } | null = null;
+  if (requestedWorkspace) {
+    let state: AppState;
+    try {
+      state = await loadState();
+    } catch (error) {
+      return errorResponse(id, ERR_INTERNAL, error instanceof Error ? error.message : String(error));
+    }
+    const resolved = await resolveTargetWorkspace(state.workspaces, requestedWorkspace);
+    if (!resolved.ok) return errorResponse(id, ERR_INVALID_PARAMS, resolved.message);
+    const target = resolved.workspace;
+    // A run speaks for its own workspace; an interactive agent for the
+    // workspace of the pane it runs in. Neither comes from tool JSON.
+    const callerWorkspaceId = run
+      ? (run.workspaceId ?? null)
+      : callerPaneId
+        ? await paneWorkspaceId(callerPaneId)
+        : null;
+    const caller = state.workspaces.find((workspace) => workspace.id === callerWorkspaceId) ?? null;
+    if (caller?.id !== target.id) {
+      const refusal = crossWorkspaceRefusal({
+        authKind,
+        untrustedRun: run !== null && runProjectPolicyMode(run) === "untrusted-pull-request",
+        callerTrust: caller
+          ? await callerPullRequestTrust({
+              caller,
+              processCwds: await callerProcessCwds(params),
+              workspaces: state.workspaces,
+            })
+          : undefined,
+        caller,
+        target,
+      });
+      if (refusal || !caller) return errorResponse(id, ERR_FORBIDDEN, refusal ?? "caller workspace unknown");
+      const runtime = callerPaneId
+        ? terminalAgentStateSnapshot().find((entry) => entry.paneId === callerPaneId)?.runtime
+        : undefined;
+      if (cwd) {
+        const cwdRefusal = await crossWorkspaceCwdRefusal(cwd, target);
+        if (cwdRefusal) return errorResponse(id, ERR_INVALID_PARAMS, cwdRefusal);
+      }
+      let callerGone = false;
+      const onCallerGone = () => {
+        callerGone = true;
+      };
+      res.once("close", onCallerGone);
+      let decision: CrossWorkspaceDecision;
+      try {
+        decision = await crossWorkspaceApprover().authorize({
+          caller,
+          target,
+          agent: run ? "Cora" : (runtime && AGENT_NOTIFY_LABELS[runtime]) || null,
+          requester: run ? `run:${run.id}` : `pane:${callerPaneId}`,
+        });
+      } finally {
+        res.off("close", onCallerGone);
+      }
+      if (!decision.ok) return errorResponse(id, ERR_FORBIDDEN, decision.message);
+      // The user may answer after the agent stopped waiting (interrupted, or
+      // its call timed out): nobody would drive a terminal opened now.
+      if (callerGone || res.destroyed || res.socket?.destroyed) {
+        return errorResponse(id, ERR_INTERNAL, "the caller disconnected before the terminal opened");
+      }
+      crossWorkspace = { callerName: caller.name, target: { id: target.id, name: target.name } };
+    }
+    if (crossWorkspace || !workspaceId) {
+      workspaceId = target.id;
+      workspaceCwd = target.cwd;
+    }
+    if (!cwd && resolved.folder) cwd = resolved.folder;
+  }
   try {
-    const result = await requestTerminalOp<{ tabId: string; paneId: string; cwd: string }>(
+    const result = await requestTerminalOp<{ tabId: string; paneId: string; cwd: string; group?: string }>(
       "create",
       {
         ...(cwd ? { cwd } : {}),
@@ -879,7 +1580,19 @@ async function handleTerminalCreate(
         ...(workspaceId ? { workspaceId } : {}),
         ...(workspaceCwd ? { workspaceCwd } : {}),
         ...(callerPaneId ? { callerPaneId } : {}),
+        ...(group ? { group } : {}),
+        ...(crossWorkspace ? { openedBy: crossWorkspace.callerName } : {}),
       },
+      // Waiting for the user took part of the MCP server's 60 s budget; keep
+      // the whole call inside it, spawn wait included.
+      crossWorkspace
+        ? {
+            timeoutMs: Math.max(
+              5_000,
+              CROSS_WORKSPACE_CREATE_BUDGET_MS - (Date.now() - startedAt) - TERMINAL_SPAWN_WAIT_MS - TERMINAL_SPAWN_SETTLE_MS,
+            ),
+          }
+        : undefined,
     );
     // The renderer resolves as soon as the tab is added to state, but the PTY
     // spawns a beat later when TerminalPane mounts and calls pty:spawn. Wait for
@@ -926,6 +1639,7 @@ async function handleTerminalCreate(
       tabId: result.tabId,
       runId,
       retention: rawRetention === "service" ? "service" : "temporary",
+      ...(crossWorkspace && !runId && callerPaneId ? { ownerPaneId: callerPaneId } : {}),
     };
     if (!registerAgentTerminal(registration)) {
       // The run settled/deleted while its renderer tab was spawning. The
@@ -958,7 +1672,10 @@ async function handleTerminalCreate(
       offExit();
       agentTerminals.markExited(registration);
     }
-    return successResponse(id, result);
+    return successResponse(id, {
+      ...result,
+      ...(crossWorkspace ? { workspaceId: crossWorkspace.target.id, workspace: crossWorkspace.target.name } : {}),
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return errorResponse(id, ERR_INTERNAL, message);
@@ -968,6 +1685,20 @@ async function handleTerminalCreate(
 // Deliver text to a terminal pane's PTY. paneId is the pty session id, so this
 // writes straight to node-pty in main (no renderer round-trip) via the same
 // bracketed-paste inject path user input, drag-drop, and slash commands use.
+/**
+ * A dev server Codara runs for a workspace (src/main/servers/keeper.ts)
+ * belongs to no run, and any agent may already stop or restart it through
+ * terminal.servers, so any of them may also answer its prompts. Imported
+ * pull-request runs never reach terminal.write at all.
+ */
+function isKeptServerSession(paneId: string): boolean {
+  try {
+    return serversService().keeper().serverOfPane(paneId)?.owned === true;
+  } catch {
+    return false;
+  }
+}
+
 async function handleTerminalWrite(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -984,7 +1715,8 @@ async function handleTerminalWrite(
   // panes, so their paneIds are discoverable. The bridge stamps SPARK_RUN_ID
   // onto writes; require the same run that created this terminal so one Cora
   // run cannot type into another run's agent-owned shell.
-  if (!agentTerminals.isActiveOwnedBy(paneId, runId)) {
+  const callerPaneId = await callerPaneForOwnedTerminal(paneId, params);
+  if (!agentTerminals.isActiveOwnedBy(paneId, runId, callerPaneId) && !isKeptServerSession(paneId)) {
     return errorResponse(
       id,
       ERR_INVALID_PARAMS,
@@ -993,8 +1725,44 @@ async function handleTerminalWrite(
   }
   if (!pty.exists(paneId)) return errorResponse(id, ERR_INVALID_PARAMS, `unknown pane: ${paneId}`);
   const submit = typeof params.submit === "boolean" ? params.submit : true;
+  if (submit) {
+    if (recentSubmits.size > 64) recentSubmits.clear();
+    recentSubmits.set(paneId, { at: Date.now(), cursor: paneCursors.current(paneId) });
+  }
   pty.inject(paneId, text, { submit });
   return successResponse(id, { ok: true });
+}
+
+const paneOpener = createPaneOpener({
+  paneAlive: (paneId) => pty.exists(paneId),
+  waitForSpawn: (paneId, timeoutMs) => pty.waitForSpawn(paneId, timeoutMs),
+  onExit: (paneId, handler) => pty.onExit(paneId, () => handler()),
+  kill: (paneId) => pty.killImmediate(paneId),
+  isDirectory: async (path) => (await fsp.stat(path).catch(() => null))?.isDirectory() === true,
+  requestTerminalOp: (op, opParams) => requestTerminalOp(op, opParams),
+});
+
+/** The window's document is being replaced: end every pane overlay it showed. */
+export function closeAllPaneOverlays(): void {
+  paneOpener.closeAll();
+}
+
+// pane.open (the `codara-pane` helper): a terminal over the calling pane or
+// in a new tab beside it. A pane credential always names its own pane; a root
+// caller names one explicitly. See pane-open.ts.
+async function handlePaneOpen(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  try {
+    return successResponse(id, await paneOpener.open(parsePaneOpenParams(params)));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (error instanceof PaneOpenError) {
+      return errorResponse(id, error.kind === "spawn" ? ERR_TERMINAL_SPAWN : ERR_INVALID_PARAMS, message);
+    }
+    return errorResponse(id, ERR_INTERNAL, message);
+  }
 }
 
 // Stop an auxiliary terminal created through terminal.create and remove its
@@ -1014,6 +1782,7 @@ async function handleTerminalClose(
     const result = await agentTerminals.close({
       paneId,
       runId,
+      callerPaneId: await callerPaneForOwnedTerminal(paneId, params),
       stop: () => pty.killImmediate(paneId),
       destroyTab: (registration) =>
         requestTerminalOp("destroy", {
@@ -1031,45 +1800,53 @@ async function handleTerminalClose(
   }
 }
 
-async function handlePreviewOp(
-  method: string,
-  params: Record<string, unknown>,
-  id: JsonRpcId,
-): Promise<JsonRpcResponse> {
-  const op = method.replace(/^preview\./, "") as PreviewOpName;
-  const previewParams: PreviewOpParams = { ...params };
-  try {
-    await scopePreviewWorkspace(previewParams, async (runId) => (await getRunStore()).getRun(runId));
-    if (op === "navigate" && typeof previewParams.url === "string") {
-      const reachable = await waitForLoopbackPreviewServer(previewParams.url);
-      if (!reachable) {
-        throw new Error(
-          `Preview server is not accepting connections at ${previewParams.url}. ` +
-          "Start the server (or keep it running) before navigating the Electron preview.",
-        );
-      }
-    }
-    const result = await requestPreviewOp(op, previewParams);
-    return successResponse(id, result);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    return errorResponse(id, ERR_INTERNAL, message);
+// An agent with no run (Claude Code in a plain Studio terminal) drives browser
+// tabs in the workspace of the pane it runs in, not whichever workspace is on
+// screen, and never another agent's or a run's tab. Main stamps the pane's
+// workspace and passes the pane on only when it resolves to a live session,
+// over any workspace the call names; a caller outside any pane keeps the
+// on-screen workspace. A run keeps resolving through scopePreviewWorkspace.
+async function scopePreviewToCaller(params: Record<string, unknown>): Promise<void> {
+  let callerPaneId: string | null = null;
+  if (!stringParam(params, "runId")) {
+    const placement = await resolveCallerPlacement(params);
+    if (placement) params.workspaceId = placement.workspaceId;
+    callerPaneId = placement?.paneId ?? (await resolveCallerPaneId(params));
   }
+  delete params.callerPid;
+  if (callerPaneId) params.callerPaneId = callerPaneId;
+  else delete params.callerPaneId;
 }
 
-async function handlePreviewInputRpc(
+const PREVIEW_TOOL_HOST: PreviewToolHost = {
+  scopeToCaller: scopePreviewToCaller,
+  getRun: async (runId) => (await getRunStore()).getRun(runId),
+  // The user's own browser carries their logged-in sessions: content from an
+  // imported pull request must never steer it.
+  mayUseUserBrowser: async (params) => {
+    const runId = stringParam(params, "runId");
+    if (!runId) return true;
+    const run = await (await getRunStore()).getRun(runId);
+    return !run || runProjectPolicyMode(run) !== "untrusted-pull-request";
+  },
+  workspaceName: async (workspaceId) => {
+    const state = await loadState();
+    const id = workspaceId ?? state.activeWorkspaceId;
+    return state.workspaces.find((workspace) => workspace.id === id)?.name ?? null;
+  },
+  paneRuntime: paneAgentRuntime,
+};
+
+async function handlePreviewToolRpc(
   method: string,
   params: Record<string, unknown>,
   id: JsonRpcId,
 ): Promise<JsonRpcResponse> {
-  const op = method.replace(/^preview\./, "") as PreviewInputOp;
   try {
-    await scopePreviewWorkspace(params, async (runId) => (await getRunStore()).getRun(runId));
-    const result = await handlePreviewInputOp(op, params);
-    return successResponse(id, result);
+    return successResponse(id, await runPreviewTool(method, params, PREVIEW_TOOL_HOST));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return errorResponse(id, ERR_INTERNAL, message);
+    return errorResponse(id, err instanceof PreviewToolParamsError ? ERR_INVALID_PARAMS : ERR_INTERNAL, message);
   }
 }
 
@@ -1273,6 +2050,282 @@ async function handleWorkspacePrune(
   }
 }
 
+// ── Agent worktrees ─────────────────────────────────────────────────────────
+// The policy lives in agent-worktrees.ts; this adapter supplies the app and
+// resolves who is calling. Refusals are ordinary results ({ok:false, code})
+// so the MCP server can hand the agent its code and hint; only a malformed
+// request is a JSON-RPC error.
+
+const WORKTREE_CALLER_ROLES = new Set<WorktreeCallerRole>([
+  "manager",
+  "studio",
+  "talk",
+  "worker",
+  "automation",
+]);
+
+let worktreeAudit: ((entry: Parameters<AgentWorktreeDeps["audit"]>[0]) => Promise<void>) | null = null;
+
+function worktreeDeps(): AgentWorktreeDeps {
+  const github = createGitHubCliAdapter();
+  worktreeAudit ??= createWorktreeAuditLog(join(codaraHome(), "logs", "worktree-audit.jsonl"));
+  return {
+    loadState,
+    updateState,
+    loadPreferences,
+    publishState,
+    invalidateGitCache,
+    getRun: async (runId) => (await getRunStore()).getRun(runId),
+    listRuns: async () => (await getRunStore()).listRuns(),
+    paneWorkspaceId,
+    sessionCwd: (paneId) => pty.sessionCwd(paneId),
+    sessionsUnderCwd: (dir) => pty.sessionsUnderCwd(dir),
+    listRendererTerminals: async () => {
+      try {
+        return await listStudioTerminals();
+      } catch {
+        return null;
+      }
+    },
+    processesUnderCwd: (dir) =>
+      scanProcessesUnderCwd(dir, { appPid: process.pid, sessionPids: pty.sessionPids() }),
+    github: {
+      listPullRequestsForHead: (cwd, branch) =>
+        github.listPullRequestsForHead
+          ? github.listPullRequestsForHead(cwd, branch)
+          : Promise.reject(new Error("GitHub CLI unavailable")),
+      listMergedPullRequests: (cwd, limit) =>
+        github.listMergedPullRequests
+          ? github.listMergedPullRequests(cwd, limit)
+          : Promise.reject(new Error("GitHub CLI unavailable")),
+    },
+    sendAgentEvent: (event: AgentWorktreeEvent) => {
+      for (const window of BrowserWindow.getAllWindows()) {
+        const wc = window.webContents;
+        if (wc.isDestroyed()) continue;
+        try {
+          wc.send("workspace:agentEvent", event);
+        } catch {
+          /* A window may disappear between enumeration and send. */
+        }
+      }
+    },
+    audit: (entry) => worktreeAudit!(entry),
+    worktreesRoot: (repoCwd) => managedWorktreesRoot(codaraHome(), repoCwd),
+    now: () => new Date(),
+    randomId: () => randomBytes(8).toString("hex"),
+    worktreeSetup: agentWorktreeSetupRunner(),
+  };
+}
+
+async function worktreeCaller(params: Record<string, unknown>): Promise<WorktreeCaller> {
+  const rawRole = stringParam(params, "callerRole");
+  const role: WorktreeCallerRole =
+    rawRole && WORKTREE_CALLER_ROLES.has(rawRole as WorktreeCallerRole)
+      ? (rawRole as WorktreeCallerRole)
+      : "studio";
+  const runId = stringParam(params, "runId") ?? undefined;
+  // A run's manager speaks from a chat, not a pane; its workspace comes from
+  // the run. Everyone else is placed by the pane the call came from.
+  const paneId = runId ? undefined : (await resolveCallerPaneId(params)) ?? undefined;
+  return {
+    role,
+    client: (stringParam(params, "callerClient") ?? "agent").slice(0, 40),
+    ...(runId ? { runId } : {}),
+    ...(paneId ? { paneId } : {}),
+  };
+}
+
+function optionalTypedParam(
+  params: Record<string, unknown>,
+  key: string,
+  type: "string" | "boolean",
+): string | null {
+  const value = params[key];
+  if (value === undefined || value === null || typeof value === type) return null;
+  return `${key} must be a ${type}`;
+}
+
+async function handleWorktree(
+  method: "worktree.create" | "worktree.list" | "worktree.remove" | "worktree.setup",
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const checks: Array<[string, "string" | "boolean"]> =
+    method === "worktree.create"
+      ? [["branch", "string"], ["base", "string"], ["checkout", "boolean"], ["purpose", "string"], ["title", "string"], ["fetch", "boolean"], ["waitForSetup", "boolean"]]
+      : method === "worktree.list"
+        ? [["checkMerge", "boolean"]]
+        : method === "worktree.setup"
+          ? [["workspaceId", "string"], ["path", "string"], ["wait", "boolean"]]
+          : [
+            ["workspaceId", "string"],
+            ["path", "string"],
+            ["target", "string"],
+            ["deleteBranch", "boolean"],
+            ["discardIgnoredFiles", "boolean"],
+            ["dryRun", "boolean"],
+          ];
+  for (const [key, type] of checks) {
+    const problem = optionalTypedParam(params, key, type);
+    if (problem) return errorResponse(id, ERR_INVALID_PARAMS, problem);
+  }
+  const bool = (key: string): boolean | undefined =>
+    typeof params[key] === "boolean" ? (params[key] as boolean) : undefined;
+  const str = (key: string): string | undefined => stringParam(params, key) ?? undefined;
+  try {
+    const caller = await worktreeCaller(params);
+    const deps = worktreeDeps();
+    if (method === "worktree.list") {
+      return successResponse(id, await listAgentWorktrees(caller, { checkMerge: bool("checkMerge") }, deps));
+    }
+    if (method === "worktree.setup") {
+      const num = (key: string): number | undefined =>
+        typeof params[key] === "number" && Number.isFinite(params[key]) ? (params[key] as number) : undefined;
+      for (const key of ["timeoutSeconds", "logLines"]) {
+        if (params[key] !== undefined && params[key] !== null && num(key) === undefined) {
+          return errorResponse(id, ERR_INVALID_PARAMS, `${key} must be a number`);
+        }
+      }
+      const setupPath = str("path");
+      if (str("workspaceId") && setupPath) {
+        return errorResponse(id, ERR_INVALID_PARAMS, "pass at most one of workspaceId or path");
+      }
+      if (setupPath && !isAbsolute(setupPath)) return errorResponse(id, ERR_INVALID_PARAMS, "path must be absolute");
+      return successResponse(
+        id,
+        await getAgentWorktreeSetup(
+          caller,
+          {
+            workspaceId: str("workspaceId"),
+            path: setupPath,
+            wait: bool("wait"),
+            timeoutSeconds: num("timeoutSeconds"),
+            logLines: num("logLines"),
+          },
+          deps,
+        ),
+      );
+    }
+    if (method === "worktree.create") {
+      return successResponse(
+        id,
+        await createAgentWorktree(
+          caller,
+          {
+            branch: str("branch"),
+            base: str("base"),
+            checkout: bool("checkout"),
+            purpose: str("purpose"),
+            title: str("title"),
+            fetch: bool("fetch"),
+            waitForSetup: bool("waitForSetup"),
+          },
+          deps,
+        ),
+      );
+    }
+    const workspaceId = str("workspaceId");
+    const path = str("path");
+    if (Boolean(workspaceId) === Boolean(path)) {
+      return errorResponse(id, ERR_INVALID_PARAMS, "pass exactly one of workspaceId or path");
+    }
+    if (path && !isAbsolute(path)) {
+      return errorResponse(id, ERR_INVALID_PARAMS, "path must be absolute");
+    }
+    return successResponse(
+      id,
+      await removeAgentWorktree(
+        caller,
+        {
+          ...(workspaceId ? { workspaceId } : {}),
+          ...(path ? { path } : {}),
+          target: str("target"),
+          deleteBranch: bool("deleteBranch"),
+          discardIgnoredFiles: bool("discardIgnoredFiles"),
+          dryRun: bool("dryRun"),
+        },
+        deps,
+      ),
+    );
+  } catch (err) {
+    return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));
+  }
+}
+
+// codara_worktree_cleanup. Scanning reads only; a removal goes through the
+// user's approval in Codara, and only a caller that may change worktrees
+// (the same gate as codara_worktree_remove) may ask for one.
+async function handleWorktreeCleanup(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+  const action = params.action === undefined || params.action === null ? "scan" : params.action;
+  if (action !== "scan" && action !== "remove") return errorResponse(id, ERR_INVALID_PARAMS, "action must be scan or remove");
+  for (const [key, type] of [["checkMerge", "boolean"], ["deleteRemoteBranch", "boolean"]] as const) {
+    const problem = optionalTypedParam(params, key, type);
+    if (problem) return errorResponse(id, ERR_INVALID_PARAMS, problem);
+  }
+  const staleDays = params.staleDays;
+  if (staleDays !== undefined && staleDays !== null && (typeof staleDays !== "number" || !Number.isFinite(staleDays))) {
+    return errorResponse(id, ERR_INVALID_PARAMS, "staleDays must be a number");
+  }
+  let items: Array<{ path: string; deleteRemoteBranch?: boolean }> = [];
+  if (action === "remove") {
+    const raw = params.paths ?? params.items;
+    if (!Array.isArray(raw) || raw.length === 0) {
+      return errorResponse(id, ERR_INVALID_PARAMS, "remove needs paths: the absolute worktree paths from the scan");
+    }
+    for (const entry of raw) {
+      const item =
+        typeof entry === "string"
+          ? { path: entry }
+          : entry && typeof entry === "object" && typeof (entry as { path?: unknown }).path === "string"
+            ? {
+                path: (entry as { path: string }).path,
+                ...(typeof (entry as { deleteRemoteBranch?: unknown }).deleteRemoteBranch === "boolean"
+                  ? { deleteRemoteBranch: (entry as { deleteRemoteBranch: boolean }).deleteRemoteBranch }
+                  : {}),
+              }
+            : null;
+      if (!item || !isAbsolute(item.path)) return errorResponse(id, ERR_INVALID_PARAMS, "every path must be absolute");
+      items.push(item);
+    }
+    const remoteFor = Array.isArray(params.deleteRemoteBranchFor)
+      ? new Set(params.deleteRemoteBranchFor.filter((entry): entry is string => typeof entry === "string"))
+      : null;
+    if (remoteFor) {
+      items = items.map((item) => (remoteFor.has(item.path) ? { ...item, deleteRemoteBranch: true } : item));
+    }
+    items = items.slice(0, 50);
+  }
+  try {
+    const caller = await worktreeCaller(params);
+    const deps = worktreeDeps();
+    if (action === "remove") {
+      const gate = await gateCaller(caller, deps, { mutation: true });
+      if ("ok" in gate && gate.ok === false) return successResponse(id, gate);
+    }
+    const state = await loadState();
+    let workspaceId: string | null = null;
+    if (caller.runId) workspaceId = (await deps.getRun(caller.runId))?.workspaceId ?? null;
+    else if (caller.paneId) workspaceId = await deps.paneWorkspaceId(caller.paneId).catch(() => null);
+    const workspaceName = state.workspaces.find((workspace) => workspace.id === workspaceId)?.name ?? null;
+    const { runAgentWorktreeCleanup } = await import("./worktree-cleanup");
+    return successResponse(
+      id,
+      await runAgentWorktreeCleanup({
+        action,
+        checkMerge: params.checkMerge === true,
+        ...(typeof staleDays === "number" ? { staleDays } : {}),
+        items,
+        deleteRemoteBranch: params.deleteRemoteBranch === true,
+        caller,
+        agent: { client: caller.client, workspaceName },
+      }),
+    );
+  } catch (err) {
+    return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));
+  }
+}
+
 async function resolveCliRun(runIdOrPrefix: string): Promise<RunState | null> {
   const runStore = await getRunStore();
   const exact = await runStore.getRun(runIdOrPrefix);
@@ -1321,8 +2374,8 @@ async function handleCliChatSettings(
 ): Promise<JsonRpcResponse> {
   try {
     if (method === "models.list") {
-      const { inspectPiModelCatalog } = await import("./orchestration/pi-model-catalog");
-      return successResponse(id, { models: await inspectPiModelCatalog(false) });
+      const { inspectUnifiedPiModelCatalog } = await import("./orchestration/worker-model-catalog");
+      return successResponse(id, { models: await inspectUnifiedPiModelCatalog(false) });
     }
 
     const runIdOrPrefix = stringParam(params, "runId")?.trim();
@@ -1613,13 +2666,11 @@ async function handleSubscriptionAccounts(
   id: JsonRpcId,
 ): Promise<JsonRpcResponse> {
   await pruneCliSubscriptionAuthSessions();
-  const [auth, { unifiedAccountsReady }, { unifiedAccountsFor }, { UnifiedAccountSessionsError }] =
-    await Promise.all([
-      import("./orchestration/pi-subscription-auth"),
-      import("./orchestration/unified-account-migration"),
-      import("./orchestration/unified-account-registry"),
-      import("./orchestration/unified-account-errors"),
-    ]);
+  const [auth, { unifiedAccountsReady }, { unifiedAccountsFor }] = await Promise.all([
+    import("./orchestration/pi-subscription-auth"),
+    import("./orchestration/unified-account-migration"),
+    import("./orchestration/unified-account-registry"),
+  ]);
   await unifiedAccountsReady();
 
   if (method === "accounts.login.start") {
@@ -1707,18 +2758,12 @@ async function handleSubscriptionAccounts(
     if (!isPiSubscriptionProvider(provider)) {
       return errorResponse(id, ERR_INVALID_PARAMS, "provider must be anthropic, openai-codex, or xai");
     }
-    // One switch for both halves. A Codex switch that would close sessions
-    // refuses with their count until the caller repeats it with
-    // closeSessions; the count travels in the error message.
-    try {
-      await unifiedAccountsFor(provider).useAccount(profileId, {
-        closeSessions: params.closeSessions === true,
-      });
-    } catch (error) {
-      if (error instanceof UnifiedAccountSessionsError) {
-        return errorResponse(id, ERR_INVALID_PARAMS, error.message);
-      }
-      throw error;
+    // One switch for both halves; nothing closes. "system" puts new
+    // sessions back on the CLI's own login.
+    if (profileId === "system") {
+      await unifiedAccountsFor(provider).useSystemLogin();
+    } else {
+      await unifiedAccountsFor(provider).useAccount(profileId);
     }
     broadcastNativeCliAccountsChangedFromSocket();
     const overview = await auth.refreshPiSubscriptionsAfterMetadataChange(provider);
@@ -1737,17 +2782,7 @@ async function handleSubscriptionAccounts(
       (profile) => profile.id === profileId,
     );
     if (!current) return errorResponse(id, ERR_INVALID_PARAMS, "account not found");
-    try {
-      await unifiedAccountsFor(current.provider).deleteAccount(profileId, {
-        closeSessions: params.closeSessions === true,
-        ownershipGuard,
-      });
-    } catch (error) {
-      if (error instanceof UnifiedAccountSessionsError) {
-        return errorResponse(id, ERR_INVALID_PARAMS, error.message);
-      }
-      throw error;
-    }
+    await unifiedAccountsFor(current.provider).deleteAccount(profileId, { ownershipGuard });
     broadcastNativeCliAccountsChangedFromSocket();
     const overview = await auth.refreshPiSubscriptionsAfterMetadataChange(current.provider);
     return successResponse(id, { removed: profileId, overview });
@@ -2255,9 +3290,12 @@ const NOTIFY_KINDS: ReadonlySet<string> = new Set<NotifyKind>([
   "automation.finished",
   "automation.failed",
   "automation.blocked",
+  "automation.step",
   "app.update-ready",
   "git.teammate-push",
   "git.pull-request",
+  "git.ci-failed",
+  "worktree.setup-approval",
 ]);
 const NOTIFY_TONES: ReadonlySet<string> = new Set<InAppNotificationTone>([
   "success",
@@ -2304,12 +3342,20 @@ async function handleAppNotify(
   const tabId = stringParam(params, "tabId");
   const paneId = stringParam(params, "paneId");
   const jobId = stringParam(params, "jobId");
-  const target =
+  const runId = stringParam(params, "runId");
+  // Any target a producer can raise: a pane, an automation (and its run), a
+  // run, or a workspace alone (a worktree, or with panel "git" a push or a
+  // pull request).
+  const target: NavigationTarget =
     workspaceId && tabId && paneId
-      ? ({ type: "terminal", workspaceId, tabId, paneId } as const)
+      ? { type: "terminal", workspaceId, tabId, paneId }
       : jobId
-        ? ({ type: "automation", jobId, workspaceId: workspaceId ?? undefined } as const)
-        : ({ type: "run", runId: stringParam(params, "runId") ?? "cli-test" } as const);
+        ? { type: "automation", jobId, ...(runId ? { runId } : {}), ...(workspaceId ? { workspaceId } : {}) }
+        : runId
+          ? { type: "run", runId, ...(workspaceId ? { workspaceId } : {}) }
+          : workspaceId
+            ? { type: "workspace", workspaceId, ...(stringParam(params, "panel") === "git" ? { panel: "git" as const } : {}) }
+            : { type: "run", runId: "cli-test" };
   publish({
     kind: kind as NotifyKind,
     sourceKey,
@@ -2600,10 +3646,12 @@ function verifierRoundCapForRun(run: RunState): number {
 // worker_batch step, and a runaway manager can chain them without limit -
 // chat autopilot has no automation-loop hardCap. Generous on purpose: it
 // bounds pathological loops, not normal runs. Scoped to the current user
-// turn (batches minted since the latest user-authored message) because chat
-// runs are long-lived - legitimate batches spread across many turns must
-// never accumulate into a force-land.
-const SYNTHETIC_STEP_CEILING = 20;
+// turn (batches minted since the latest user-authored message or Resume)
+// because chat runs are long-lived - legitimate batches spread across many
+// turns must never accumulate into a stop. Tripping it asks the user instead
+// of landing the run.
+const SYNTHETIC_STEP_CEILING = 60;
+const NO_PROGRESS_BATCH_LIMIT = 8;
 const UNTRUSTED_PR_MAX_WORKERS_PER_BATCH = 4;
 
 function untrustedPullRequestWorkerPathError(
@@ -2757,14 +3805,22 @@ async function handleOrchestratorSpawnWorkers(
     (raw): raw is Record<string, unknown> & OrchestratorWorkerInput =>
       Boolean(raw) && typeof raw === "object" && !Array.isArray(raw),
   );
-  const enabledWorkerModels = untrustedPullRequest
-    ? [...ALLOWED_WORKER_MODELS]
-    : availableCoraWorkerModels(await loadSettings());
-  if (!untrustedPullRequest && enabledWorkerModels.length === 0) {
+  // Filtered by connected accounts here, not only in the manager's prompt: a
+  // session keeps the roster it was launched with, so a provider signed out
+  // since then must still never receive a worker.
+  const workerModelAvailability = untrustedPullRequest
+    ? null
+    : await coraWorkerModelAvailability(await loadSettings());
+  const enabledWorkerModels = workerModelAvailability
+    ? workerModelAvailability.connected
+    : [...ALLOWED_WORKER_MODELS];
+  if (workerModelAvailability && enabledWorkerModels.length === 0) {
     return errorResponse(
       id,
       ERR_FORBIDDEN,
-      "Cora has no enabled worker model. Enable at least one in Settings > API and model.",
+      workerModelAvailability.disconnected.length > 0
+        ? `None of Cora's enabled worker models has a connected account (${workerModelAvailability.disconnected.join(", ")}). Ask the user to sign in to one of those providers in Settings > Agents.`
+        : "Cora has no enabled worker model. Turn one on in Capability Center > Worker models.",
     );
   }
   const liveFeedbackRetries = [
@@ -2842,7 +3898,8 @@ async function handleOrchestratorSpawnWorkers(
       const capNote =
         `Verification cap reached: ${verifierRoundsUsed} verifier round(s) already ran against this scope ` +
         `(cap ${verifierRoundCap} for the ${policy} policy). Do not spawn another verifier. Either accept ` +
-        "the implementation now (it lands as completed_unverified carrying the existing verifier caveats) " +
+        "the implementation now with codara_complete accept_unverified (a reason plus the task ids of the " +
+        "verifiers you overrule; it lands as completed_unverified with the reason in the summary) " +
         "or ask the user one concrete question. If a verifier could not run because tooling was unavailable, " +
         "treat that as an environmental caveat, not a code failure.";
       if (requestedVerifiers.length === workerEntries.length) {
@@ -3026,32 +4083,49 @@ async function handleOrchestratorSpawnWorkers(
   // ceiling: a fresh user message resets the budget, so the brake catches a
   // runaway single-turn spawn loop without ever tripping on a multi-turn
   // chat run's accumulated history.
-  const latestUserTurnAt = run.humanMessages.reduce((max, message) => {
-    if (message.author !== "user") return max;
-    const at = Date.parse(message.createdAt);
-    return Number.isFinite(at) && at > max ? at : max;
-  }, Number.NEGATIVE_INFINITY);
-  const syntheticStepCount = run.steps.filter(
-    (step) =>
-      (step.kind ?? "worker_batch") === "worker_batch" &&
-      Date.parse(step.createdAt) >= latestUserTurnAt,
-  ).length;
-  if (syntheticStepCount >= SYNTHETIC_STEP_CEILING) {
-    await runStore
-      .forceLandRunUnverified(runId, {
-        trigger: "synthetic_step_ceiling",
-        note:
-          `This run reached the ceiling of ${SYNTHETIC_STEP_CEILING} manager-spawned worker batches in one turn. ` +
-          "Codara accepted the remaining reviewed work and landed the run as unverified rather than keep spawning.",
-      })
-      .catch(() => undefined);
+  // An explicit Resume grants a fresh budget too.
+  const latestUserTurnAt = Math.max(
+    run.humanMessages.reduce((max, message) => {
+      if (message.author !== "user") return max;
+      const at = Date.parse(message.createdAt);
+      return Number.isFinite(at) && at > max ? at : max;
+    }, Number.NEGATIVE_INFINITY),
+    Date.parse(run.autopilot?.resumedAt ?? "") || Number.NEGATIVE_INFINITY,
+  );
+  const turnBatches = run.steps
+    .filter(
+      (step) =>
+        (step.kind ?? "worker_batch") === "worker_batch" &&
+        Date.parse(step.createdAt) >= latestUserTurnAt,
+    )
+    .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt));
+  const syntheticStepCount = turnBatches.length;
+  // A long single request legitimately spawns dozens of batches, so the brake
+  // is lack of progress: the newest batches all ended with every task failed
+  // or cancelled. The raw count stays as a runaway backstop only.
+  let failedBatchStreak = 0;
+  for (let index = turnBatches.length - 1; index >= 0; index -= 1) {
+    const batchTasks = run.workerTasks.filter((task) => task.stepId === turnBatches[index].id);
+    const noProgress =
+      batchTasks.length > 0 &&
+      batchTasks.every((task) => task.status === "failed" || task.status === "cancelled");
+    if (!noProgress) break;
+    failedBatchStreak += 1;
+  }
+  const noProgressBrake = failedBatchStreak >= NO_PROGRESS_BATCH_LIMIT;
+  if (syntheticStepCount >= SYNTHETIC_STEP_CEILING || noProgressBrake) {
+    // Never force-land here: the work may be half done and only the user can
+    // say whether more batches are worth it. Their reply opens a fresh budget.
     return successResponse(id, {
       worker_task_ids: [],
       step_ceiling_reached: true,
-      note:
-        `Step ceiling reached: this turn already spawned ${syntheticStepCount} worker batches ` +
-        `(cap ${SYNTHETIC_STEP_CEILING}). Codara has landed the run with the work completed so far. ` +
-        "Summarize the outcome for the user and end the turn. Do not spawn more workers.",
+      note: noProgressBrake
+        ? `Step brake: the last ${failedBatchStreak} worker batches all failed or were cancelled. ` +
+          "Do not spawn more workers on the same approach. Tell the user what keeps failing and ask with " +
+          "codara_ask_user whether to continue (and with what change) or stop here."
+        : `Step ceiling reached: this turn already spawned ${syntheticStepCount} worker batches ` +
+          `(cap ${SYNTHETIC_STEP_CEILING}). Do not spawn more workers now. Summarize progress (update ` +
+          "codara_plan_update if you keep a plan) and ask with codara_ask_user whether to continue for more batches.",
     });
   }
   const workerTitles = workersToCreate
@@ -3190,7 +4264,21 @@ async function handleOrchestratorSpawnWorkers(
     if (!created) continue;
     workerTaskIds.push(created.id);
     createdTaskClasses.push(typeof w.taskClass === "string" ? w.taskClass : undefined);
-    if (resumePlan) {
+    if (resumePlan?.interrupted) {
+      resumedSessionCount += 1;
+      guardrailNotes.push(
+        `Resumed session: worker "${title}" continues task ${resumePlan.sourceTask.id}, whose ` +
+          `attempt ${resumePlan.sourceAttempt.attemptNumber} was cut off by ` +
+          `${
+            resumePlan.sourceAttempt.interruptedBy === "app_restart"
+              ? "an app restart"
+              : resumePlan.sourceAttempt.interruptedBy === "pause"
+                ? "a pause"
+                : "the turn time limit"
+          }. ` +
+          "The new prompt lands as the next turn of that worker's session; its edits so far are on disk.",
+      );
+    } else if (resumePlan) {
       resumedSessionCount += 1;
       guardrailNotes.push(
         `Resumed session: worker "${title}" continues task ${resumePlan.sourceTask.id} ` +
@@ -3437,9 +4525,11 @@ async function handleOrchestratorAskUser(
   return errorResponse(id, ERR_INTERNAL, "ask_user timed out waiting for human response");
 }
 
-// A worker task is "done" only in these three states. Used by
-// wait_for_workers to report is_terminal.
-const TERMINAL_WORKER_TASK_STATUSES = new Set<string>(["accepted", "failed", "cancelled"]);
+// A worker task is "done" only in these states. Used by wait_for_workers to
+// report is_terminal. `blocked` is where the worker cycle parks a task whose
+// report came back partial or blocked: finished, but not accepted, so the
+// manager has to decide what happens next.
+const TERMINAL_WORKER_TASK_STATUSES = new Set<string>(["accepted", "blocked", "failed", "cancelled"]);
 
 // Worker task statuses that represent REAL in-flight work - an attempt is
 // scheduled, running, awaiting review, or queued to retry - so completing the
@@ -3458,9 +4548,9 @@ const TERMINAL_WORKER_TASK_STATUSES = new Set<string>(["accepted", "failed", "ca
 //     out). createWorkerTask stamps `created`; prepareWorkerTask advances to
 //     `queued`, so a healthy just-spawned task is already past `created` by the
 //     time the model can call codara_complete.
-//   - `blocked`: only ever set on the loom-pass path (run-store), and
-//     loom/automation runs are rejected by rejectIfAutomationRun before this
-//     guard - so it cannot legitimately reach here.
+//   - `blocked`: a worker that reported partial or blocked work. It has
+//     finished; the manager decides whether to retry, re-plan or land without
+//     it, and completing over it is that decision.
 //   - any future/unknown status: fail-open beats a mystery deadlock.
 const IN_FLIGHT_WORKER_TASK_STATUSES = new Set<string>([
   "queued",
@@ -3489,6 +4579,24 @@ function summaryDisclosesPath(summary: string, path: string): boolean {
   return base.length > 2 && haystack.includes(base);
 }
 
+/** Parsed accept_unverified, null when absent, or an error message. */
+function parseAcceptUnverified(
+  value: unknown,
+): { reason: string; overruledVerifierTaskIds: string[] } | null | string {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    return "accept_unverified must be an object with reason and overruled_verifier_task_ids.";
+  }
+  const raw = value as Record<string, unknown>;
+  const reason = typeof raw.reason === "string" ? raw.reason.trim() : "";
+  const ids = Array.isArray(raw.overruled_verifier_task_ids)
+    ? raw.overruled_verifier_task_ids.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  if (!reason) return "accept_unverified.reason must say why the verifier verdicts are overruled.";
+  if (ids.length === 0) return "accept_unverified.overruled_verifier_task_ids must list the verifier task ids you overrule.";
+  return { reason: reason.slice(0, 2_000), overruledVerifierTaskIds: ids.map((item) => item.trim()) };
+}
+
 async function handleOrchestratorComplete(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -3513,8 +4621,9 @@ async function handleOrchestratorComplete(
     return errorResponse(
       id,
       ERR_INVALID_PARAMS,
-      "Cannot complete a run before any worker task exists. " +
-        "Call codara_spawn_workers for the active user request, wait for the workers, verify their reports, then call codara_complete.",
+      "Cannot complete a run before any worker task exists: codara_complete is only for managed worker runs. " +
+        "If you answered the user or made a small change yourself, do not call any tool: reply in natural language, which finishes the turn. " +
+        "Only for substantial work: call codara_spawn_workers, wait for the workers, verify their reports, then call codara_complete.",
     );
   }
   // Guard: never complete the run while a worker task the coordinator spawned is
@@ -3564,10 +4673,24 @@ async function handleOrchestratorComplete(
       ERR_INVALID_PARAMS,
       `Cannot complete: ${waitableTasks.length} worker task(s) still pending/running: ${detail}. ` +
       `Call codara_wait_for_workers with worker_task_ids [${ids}] first, then read each report and call ` +
-        `codara_complete once every worker has reached a terminal state (accepted/failed/cancelled).` +
+        `codara_complete once every worker has reached a terminal state (accepted/blocked/failed/cancelled).` +
         (manualAwaitingUser.length > 0
           ? ` Additionally, ${manualAwaitingUser.length} manual worker report(s) await the user's accept/fail answer and will not settle via waiting: ${manualDetail}.`
           : ""),
+    );
+  }
+  // A recorded plan is the manager's own definition of done, so a run cannot
+  // be called complete after the first green slice of a multi-area request.
+  // Runs without a plan are unaffected, and deferring with a note always
+  // clears the gate.
+  const openMilestones = openPlanMilestones(run.managerPlan);
+  if (openMilestones.length > 0) {
+    return errorResponse(
+      id,
+      ERR_INVALID_PARAMS,
+      `Cannot complete: ${openMilestones.length} plan milestone(s) are still open: ` +
+        openMilestones.map((milestone) => `${milestone.id} "${milestone.title}" (${milestone.status})`).join(", ") +
+        ". Finish them, or call codara_plan_update marking each done (with evidence) or deferred (with the reason), then call codara_complete.",
     );
   }
   // Verification freshness invariant: an earlier green verifier does not cover
@@ -3575,7 +4698,35 @@ async function handleOrchestratorComplete(
   // orchestrator-side terminal hops that complete a run when this tool never
   // arrives, so a manager that skips codara_complete cannot skip the rule.
   const verification = await runStore.describeVerificationFreshness(run);
-  if (!verification.ok) {
+  const acceptUnverified = parseAcceptUnverified(params.accept_unverified);
+  if (typeof acceptUnverified === "string") {
+    return errorResponse(id, ERR_INVALID_PARAMS, acceptUnverified);
+  }
+  // The overrule exit exists so a verdict the manager adjudicated as out of
+  // contract cannot wedge the run. It must name every blocking verifier, so a
+  // second failing shard is never waved through by overruling the first.
+  if (!verification.ok && acceptUnverified) {
+    const listed = new Set(acceptUnverified.overruledVerifierTaskIds);
+    const missing = verification.blockingVerifiers.filter((verifier) => !listed.has(verifier.taskId));
+    if (verification.blockingVerifiers.length === 0) {
+      return errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        "Cannot complete with accept_unverified: no verifier returned a non-passing verdict over the current workspace; " +
+          "the work simply has not been verified yet. Spawn a read-only verifier, or ask the user.",
+      );
+    }
+    if (missing.length > 0) {
+      return errorResponse(
+        id,
+        ERR_INVALID_PARAMS,
+        "Cannot complete with accept_unverified: overruled_verifier_task_ids must list every blocking verifier. Missing: " +
+          missing.map((verifier) => `"${verifier.title}" (${verifier.taskId}, ${verifier.confidence})`).join(", ") +
+          ".",
+      );
+    }
+  }
+  if (!verification.ok && !acceptUnverified) {
     // A failing verifier over the current tree is named explicitly, because
     // with a scope-split round the manager may be looking at one or more GREEN
     // sibling reports and reasonably believe the round passed.
@@ -3586,7 +4737,9 @@ async function handleOrchestratorComplete(
         ? `Cannot complete: "${verification.blockingVerifier.title}" returned ` +
             `${verification.blockingVerifier.confidence} over the current workspace. A passing verdict from ` +
             "another verifier in the same round does not cover its scope. Address its FEEDBACK/FAILED claims, " +
-            "then re-verify the corrected workspace before calling codara_complete."
+            "then re-verify the corrected workspace before calling codara_complete. If you adjudicated its claims as " +
+            "out of contract, call codara_complete with accept_unverified naming " +
+            `${verification.blockingVerifiers.map((verifier) => verifier.taskId).join(", ")}.`
         : "Cannot complete: the latest files-changing implementation does not have a newer passing verifier verdict. " +
             `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}. ` +
             "Spawn a read-only verifier for the corrected workspace, wait for it, and address any FEEDBACK/FAILED claims before calling codara_complete.",
@@ -3619,6 +4772,7 @@ async function handleOrchestratorComplete(
     const applied = await runStore.applyCodaraCompleteFromManagerCall({
       runId,
       summary,
+      ...(!verification.ok && acceptUnverified ? { acceptUnverified } : {}),
     });
     return successResponse(id, applied.result);
   } catch (err) {
@@ -3760,6 +4914,10 @@ async function handleOrchestratorWaitForWorkers(
     finished_at: string | null;
     final_report_path: string | null;
     final_report: unknown;
+    error: string | null;
+    failure_kind: string | null;
+    activity: string | null;
+    activity_at: string | null;
     is_terminal: boolean;
     is_requested: boolean;
   }[]> => {
@@ -3832,6 +4990,7 @@ async function handleOrchestratorWaitForWorkers(
                 : null,
             }
           : null,
+        ...workerAttemptDiagnostics(lastAttempt),
         is_requested: isRequested,
         // A MANUAL task never advances past needs_review on its own: no
         // manager session reviews it, and its resolution comes from the
@@ -3846,13 +5005,16 @@ async function handleOrchestratorWaitForWorkers(
           // An accepted implementation whose declared verifier has not been
           // minted yet is NOT settled: the auto-spawn is imminent, and
           // returning "all_terminal" in that gap would hand the manager a
-          // wait result missing the verdict its brief paid for. A no-files
-          // report never spawns one, so it stays terminal.
+          // wait result missing the verdict its brief paid for. The harness
+          // spawns one only for a complete report that changed files; a
+          // partial or blocked report accepted by the execute-mode cycle
+          // never gets one, and holding for it froze the wait to its timeout.
           !(
             task != null &&
             task.taskClass !== "verifier" &&
             typeof task.verifierBrief === "string" &&
             task.status === "accepted" &&
+            report?.status === "complete" &&
             (report?.filesChanged.length ?? 0) > 0 &&
             !run.workerTasks.some((candidate) => candidate.autoVerifierForTaskId === task.id)
           ) &&
@@ -3878,9 +5040,9 @@ async function handleOrchestratorWaitForWorkers(
     );
   }
   // User messages typed during this wait are NEVER delivered into the live
-  // turn: they stay queued and the steering-followup scheduler starts a fresh
-  // manager turn once this one settles. The wait therefore only reports worker
-  // state and the manager inbox.
+  // turn: they stay queued and the next turn carries them. Send now aborts the
+  // turn, which hangs this client up (clientGone below). The wait therefore
+  // only reports worker state and the manager inbox.
   const waitResult = async (
     snapshot: Awaited<ReturnType<typeof snapshotWorkers>>,
     reason: string,
@@ -4017,6 +5179,9 @@ async function handleOrchestratorGetWorkerStatus(
     const lastAttempt = [...run.workerAttempts]
       .reverse()
       .find((a) => a.workerTaskId === workerTaskId);
+    const report = lastAttempt?.finalReportPath
+      ? await runStore.readWorkerReport(lastAttempt.finalReportPath).catch(() => null)
+      : null;
     return successResponse(id, {
       worker_task_id: workerTaskId,
       task_status: task.status,
@@ -4025,10 +5190,43 @@ async function handleOrchestratorGetWorkerStatus(
       started_at: lastAttempt?.startedAt ?? null,
       finished_at: lastAttempt?.finishedAt ?? null,
       final_report_path: lastAttempt?.finalReportPath ?? null,
+      final_report_status: report?.status ?? null,
+      final_report_summary: report?.summary ?? null,
+      ...workerAttemptDiagnostics(lastAttempt),
     });
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
   }
+}
+
+// Provider stderr can be long; the manager needs the gist to tell the user why,
+// not the whole dump.
+const WORKER_ERROR_SNIPPET_CHARS = 500;
+
+/**
+ * Why an attempt failed and what a live one is doing, for the manager's wait
+ * and status calls. Without these a worker that died before writing a report
+ * reads as a bare "failed", and a slow one as nothing but timestamps.
+ * runtimeActivity only exists on the cached in-memory run, which is what
+ * runStore.getRun returns.
+ */
+function workerAttemptDiagnostics(attempt: WorkerAttempt | null | undefined): {
+  error: string | null;
+  failure_kind: string | null;
+  activity: string | null;
+  activity_at: string | null;
+} {
+  const error = attempt?.error?.trim();
+  return {
+    error: error
+      ? error.length > WORKER_ERROR_SNIPPET_CHARS
+        ? `${error.slice(0, WORKER_ERROR_SNIPPET_CHARS)}...`
+        : error
+      : null,
+    failure_kind: attempt?.failureKind ?? null,
+    activity: attempt?.runtimeActivity ?? null,
+    activity_at: attempt?.runtimeActivityAt ?? null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -4218,6 +5416,7 @@ async function requestUserConsent(opts: {
   id: JsonRpcId;
   question: string;
   denyMessage: string;
+  reason?: string;
 }): Promise<{ approved: true } | { approved: false; response: JsonRpcResponse }> {
   const { runStore, runId, res, id, question, denyMessage } = opts;
   if (pendingConsentRuns.has(runId)) {
@@ -4249,7 +5448,7 @@ async function requestUserConsent(opts: {
           { id: "not_now", label: "Not now", description: "Skip this change for now", answer: "Not now" },
         ],
         category: "destructive_irreversible",
-        reason: "Changing an automation requires explicit user approval.",
+        reason: opts.reason ?? "Changing an automation requires explicit user approval.",
         recommendedOptionId: "allow",
         source: "consent_gate",
         resumeStrategy: "active_rpc",
@@ -4345,6 +5544,453 @@ async function requestUserConsent(opts: {
   }
 }
 
+// ── Workflows (workflow.*) ──────────────────────────────────────────────────
+// Cora proposes a workflow script and runs it only after the user approves it
+// in the chat: workflow.run and workflow.save post the same linked consent
+// question the automation mutators use, with the dry-run estimate in it, so
+// the model cannot start agents or write files on its own say-so.
+
+let workflowDriverMod: typeof import("./orchestration/workflow-driver") | null = null;
+async function getWorkflowDriver(): Promise<typeof import("./orchestration/workflow-driver")> {
+  workflowDriverMod ??= await import("./orchestration/workflow-driver");
+  return workflowDriverMod;
+}
+
+const WORKFLOW_WAIT_DEFAULT_TIMEOUT_MS = 10 * 60_000;
+const WORKFLOW_WAIT_MAX_TIMEOUT_MS = 19 * 60_000;
+const WORKFLOW_WAIT_POLL_MS = 1_000;
+const WORKFLOW_RESULT_MAX_CHARS = 64_000;
+
+async function resolveWorkflowCallerRun(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<{ run: RunState; cwd: string; workspaceName: string } | { error: JsonRpcResponse }> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return { error: errorResponse(id, ERR_INVALID_PARAMS, "runId is required") };
+  const runStore = await getRunStore();
+  const run = await runStore.getRun(runId);
+  if (!run) return { error: errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`) };
+  if (runProjectPolicyMode(run) === "untrusted-pull-request") {
+    return { error: errorResponse(id, ERR_FORBIDDEN, "workflows are unavailable for an imported pull-request run") };
+  }
+  if (run.workflow || run.automationId) {
+    return { error: errorResponse(id, ERR_FORBIDDEN, "workflows can only be started from a Cora chat") };
+  }
+  const cwd =
+    typeof run.settingsSnapshot?.workspaceCwd === "string" ? (run.settingsSnapshot.workspaceCwd as string) : null;
+  if (!cwd) {
+    return { error: errorResponse(id, ERR_INVALID_PARAMS, "Could not resolve this chat's workspace directory.") };
+  }
+  const snapshotName =
+    typeof run.settingsSnapshot?.workspaceName === "string" ? (run.settingsSnapshot.workspaceName as string).trim() : "";
+  return { run, cwd, workspaceName: snapshotName || "workspace" };
+}
+
+async function loadWorkflowRunForCaller(
+  caller: RunState,
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<{ run: RunState } | { error: JsonRpcResponse }> {
+  const workflowRunId = stringParam(params, "workflow_run_id");
+  if (!workflowRunId) return { error: errorResponse(id, ERR_INVALID_PARAMS, "workflow_run_id is required") };
+  const runStore = await getRunStore();
+  const run = await runStore.getRun(workflowRunId);
+  if (!run?.workflow) return { error: errorResponse(id, ERR_INVALID_PARAMS, `Not a workflow run: ${workflowRunId}`) };
+  if (run.workspaceId !== caller.workspaceId) {
+    return { error: errorResponse(id, ERR_INVALID_PARAMS, "That workflow run belongs to a different workspace.") };
+  }
+  return { run };
+}
+
+function workflowCapsParam(params: Record<string, unknown>): Partial<WorkflowCaps> {
+  const caps: Partial<WorkflowCaps> = {};
+  const maxAgents = optionalNumberParam(params, "max_agents");
+  const concurrency = optionalNumberParam(params, "concurrency");
+  const tokenCeiling = optionalNumberParam(params, "token_ceiling");
+  const usdCeiling = optionalNumberParam(params, "usd_ceiling");
+  if (maxAgents !== null) caps.maxAgents = maxAgents;
+  if (concurrency !== null) caps.concurrency = concurrency;
+  if (tokenCeiling !== null) caps.tokenCeiling = tokenCeiling;
+  if (usdCeiling !== null) caps.usdCeiling = usdCeiling;
+  return caps;
+}
+
+function compactTokenCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
+  return String(n);
+}
+
+function summarizeWorkflowTree(info: WorkflowRunInfo): Record<string, unknown> {
+  const phases = (info.tree?.phases ?? []).map((phase) => {
+    const count = (status: string) => phase.calls.filter((call) => call.status === status).length;
+    return {
+      title: phase.title,
+      agents: phase.calls.length,
+      done: count("done"),
+      running: count("running"),
+      queued: count("queued"),
+      nulls: count("null") + count("skipped") + count("error"),
+      cached: phase.calls.filter((call) => call.cached).length,
+    };
+  });
+  const problems = (info.tree?.phases ?? [])
+    .flatMap((phase) => phase.calls)
+    .filter((call) => (call.status === "null" || call.status === "error") && call.note)
+    .slice(0, 10)
+    .map((call) => ({ seq: call.seq, label: call.label, status: call.status, note: call.note }));
+  return {
+    phases,
+    problems,
+    latest_logs: (info.tree?.logs ?? []).slice(-5),
+    ...(info.tree?.memoryWait ? { waiting_for_memory: info.tree.memoryWait } : {}),
+  };
+}
+
+function workflowStatusPayload(status: WorkflowRunStatus): Record<string, unknown> {
+  const info = status.workflow;
+  let result: unknown;
+  let resultTruncated = false;
+  if (status.result !== undefined) {
+    const text = JSON.stringify(status.result ?? null);
+    if (text.length > WORKFLOW_RESULT_MAX_CHARS) {
+      result = `${text.slice(0, WORKFLOW_RESULT_MAX_CHARS)}...`;
+      resultTruncated = true;
+    } else {
+      result = status.result;
+    }
+  }
+  return {
+    workflow_run_id: status.runId,
+    name: info.name,
+    state: info.state,
+    agents: info.counts,
+    tokens: info.spent.inputTokens + info.spent.outputTokens,
+    usd: Math.round(info.spent.usd * 100) / 100,
+    ...(info.error ? { error: info.error } : {}),
+    ...summarizeWorkflowTree(info),
+    ...(result !== undefined ? { result, ...(resultTruncated ? { result_truncated: true } : {}) } : {}),
+  };
+}
+
+async function handleWorkflowList(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+  const caller = await resolveWorkflowCallerRun(params, id);
+  if ("error" in caller) return caller.error;
+  const driver = await getWorkflowDriver();
+  const list = await driver.listWorkflows(caller.cwd);
+  return successResponse(id, {
+    workflows: list.map((entry) => ({
+      id: entry.id,
+      name: entry.name,
+      source: entry.source,
+      ...(entry.meta
+        ? {
+            description: entry.meta.description,
+            when_to_use: entry.meta.whenToUse,
+            phases: entry.meta.phases?.map((phase) => phase.title),
+            args: entry.meta.args,
+          }
+        : {}),
+      ...(entry.error ? { error: entry.error } : {}),
+      ...(entry.shadowed ? { shadowed: true } : {}),
+    })),
+  });
+}
+
+async function handleWorkflowGet(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+  const caller = await resolveWorkflowCallerRun(params, id);
+  if ("error" in caller) return caller.error;
+  const name = stringParam(params, "name");
+  if (!name) return errorResponse(id, ERR_INVALID_PARAMS, "name is required");
+  const driver = await getWorkflowDriver();
+  const entry = await driver.getWorkflow(name, caller.cwd);
+  if (!entry) return errorResponse(id, ERR_INVALID_PARAMS, `No saved workflow named ${name}`);
+  return successResponse(id, {
+    id: entry.id,
+    name: entry.name,
+    source: entry.source,
+    meta: entry.meta ?? null,
+    ...(entry.error ? { error: entry.error } : {}),
+    source_text: entry.source_text,
+  });
+}
+
+async function handleWorkflowCheck(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+  const caller = await resolveWorkflowCallerRun(params, id);
+  if ("error" in caller) return caller.error;
+  const name = stringParam(params, "name");
+  const source = typeof params.source === "string" ? params.source : undefined;
+  if (!name && !source) return errorResponse(id, ERR_INVALID_PARAMS, "name or source is required");
+  const driver = await getWorkflowDriver();
+  const checked = await driver.checkWorkflow({
+    workflow: name ?? undefined,
+    source,
+    args: params.args,
+    caps: workflowCapsParam(params),
+    cwd: caller.cwd,
+  });
+  return successResponse(id, checked);
+}
+
+const WORKFLOW_CONSENT_ARGS_CHARS = 600;
+
+function describeWorkflowForConsent(
+  meta: WorkflowMeta,
+  estimate: WorkflowEstimate | undefined,
+  caps: WorkflowCaps,
+  args: unknown,
+): string {
+  const lines = [`Cora wants to run the workflow "${meta.name}": ${meta.description}`];
+  // The args steer every prompt the script builds, so the user approves them
+  // too, not only the name and the description the script gives itself.
+  if (args !== undefined && args !== null) {
+    let text: string;
+    try {
+      text = JSON.stringify(args) ?? String(args);
+    } catch {
+      text = String(args);
+    }
+    lines.push(
+      `Args: ${text.length > WORKFLOW_CONSENT_ARGS_CHARS ? `${text.slice(0, WORKFLOW_CONSENT_ARGS_CHARS)}...` : text}`,
+    );
+  }
+  if (meta.phases?.length) {
+    lines.push(
+      `Phases: ${meta.phases.map((phase) => (phase.detail ? `${phase.title} (${phase.detail})` : phase.title)).join(", ")}`,
+    );
+  }
+  if (estimate) {
+    lines.push(
+      `Agents: about ${estimate.agents}${estimate.unbounded ? " or more" : ""} (stops at ${caps.maxAgents}), ` +
+        `${caps.concurrency} at a time`,
+    );
+    if (estimate.models.length > 0) {
+      lines.push(
+        `Models: ${estimate.models
+          .map((entry) => `${entry.model} ${entry.effort} x${entry.agents}${entry.connected ? "" : " (not connected)"}`)
+          .join(", ")}`,
+      );
+    }
+    if (estimate.isolated > 0) lines.push(`Isolated agents: ${estimate.isolated}, each on its own codara/wf/ branch`);
+    if (estimate.heavy > 0) lines.push(`Heavy agents (builds, full test runs): ${estimate.heavy}, one at a time`);
+    lines.push(
+      `Rough tokens: ${compactTokenCount(estimate.tokens.low)} to ${compactTokenCount(estimate.tokens.high)}` +
+        (estimate.usd.high > 0 ? ` (about $${estimate.usd.low} to $${estimate.usd.high} at API prices)` : ""),
+    );
+    for (const warning of estimate.warnings.slice(0, 4)) lines.push(`Note: ${warning}`);
+  }
+  if (caps.tokenCeiling !== null) lines.push(`Token ceiling: ${compactTokenCount(caps.tokenCeiling)}`);
+  if (caps.usdCeiling !== null) lines.push(`USD ceiling: $${caps.usdCeiling}`);
+  lines.push("", "Run this workflow?");
+  return lines.join("\n");
+}
+
+async function handleWorkflowRun(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  res: ServerResponse,
+): Promise<JsonRpcResponse> {
+  const caller = await resolveWorkflowCallerRun(params, id);
+  if ("error" in caller) return caller.error;
+  const name = stringParam(params, "name");
+  const source = typeof params.source === "string" ? params.source : undefined;
+  if (!name && !source) return errorResponse(id, ERR_INVALID_PARAMS, "name or source is required");
+  const driver = await getWorkflowDriver();
+  const caps = workflowCapsParam(params);
+  const checked = await driver.checkWorkflow({ workflow: name ?? undefined, source, args: params.args, caps, cwd: caller.cwd });
+  if (!checked.ok || !checked.meta) {
+    return successResponse(id, {
+      approved: false,
+      started: false,
+      message: "The workflow did not pass its check, so nothing was asked or started. Fix these errors first.",
+      errors: checked.errors,
+      warnings: checked.warnings,
+    });
+  }
+  const effectiveCaps = clampWorkflowCaps(caps, {
+    concurrency: checked.meta.caps?.concurrency ?? WORKFLOW_DEFAULTS.concurrency,
+    maxAgents: checked.meta.caps?.maxAgents ?? WORKFLOW_DEFAULTS.maxAgents,
+    tokenCeiling: null,
+    usdCeiling: null,
+  });
+  const runStore = await getRunStore();
+  const consent = await requestUserConsent({
+    runStore,
+    runId: caller.run.id,
+    res,
+    id,
+    question: describeWorkflowForConsent(checked.meta, checked.estimate, effectiveCaps, params.args),
+    denyMessage:
+      `The user declined, so the workflow "${checked.meta.name}" was not started. ` +
+      "Do not retry it; ask the user how they would like to proceed.",
+    reason: "Running a workflow starts many agents and needs explicit user approval.",
+  });
+  if (!consent.approved) return consent.response;
+  try {
+    const run = await driver.startWorkflowRun({
+      workspaceId: caller.run.workspaceId,
+      workspaceName: caller.workspaceName,
+      cwd: caller.cwd,
+      workflow: name ?? undefined,
+      source,
+      args: params.args,
+      caps: effectiveCaps,
+      expectedSourceHash: checked.sourceHash,
+      launchedFromRunId: caller.run.id,
+    });
+    return successResponse(id, {
+      approved: true,
+      started: true,
+      workflow_run_id: run.id,
+      message:
+        "The user approved; the workflow is running as its own run. Wait for it with codara_workflow_wait, " +
+        "or end your turn and check later with codara_workflow_status.",
+    });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
+async function handleWorkflowStatus(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+  const caller = await resolveWorkflowCallerRun(params, id);
+  if ("error" in caller) return caller.error;
+  const target = await loadWorkflowRunForCaller(caller.run, params, id);
+  if ("error" in target) return target.error;
+  const driver = await getWorkflowDriver();
+  return successResponse(id, workflowStatusPayload(await driver.workflowRunStatus(target.run.id, { includeResult: true })));
+}
+
+async function handleWorkflowWait(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  res: ServerResponse,
+): Promise<JsonRpcResponse> {
+  const caller = await resolveWorkflowCallerRun(params, id);
+  if ("error" in caller) return caller.error;
+  const target = await loadWorkflowRunForCaller(caller.run, params, id);
+  if ("error" in target) return target.error;
+  const requested = optionalNumberParam(params, "timeout_ms");
+  const timeoutMs =
+    requested && requested > 0 ? Math.min(requested, WORKFLOW_WAIT_MAX_TIMEOUT_MS) : WORKFLOW_WAIT_DEFAULT_TIMEOUT_MS;
+  const driver = await getWorkflowDriver();
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (clientGone(res)) return errorResponse(id, ERR_INTERNAL, "workflow wait aborted: client disconnected");
+    const status = await driver.workflowRunStatus(target.run.id, { includeResult: true });
+    if (status.workflow.state !== "running") {
+      return successResponse(id, { reason: "settled", ...workflowStatusPayload(status) });
+    }
+    if (Date.now() >= deadline) return successResponse(id, { reason: "timeout", ...workflowStatusPayload(status) });
+    await new Promise<void>((resolve) => setTimeout(resolve, WORKFLOW_WAIT_POLL_MS));
+  }
+}
+
+async function handleWorkflowStop(params: Record<string, unknown>, id: JsonRpcId): Promise<JsonRpcResponse> {
+  const caller = await resolveWorkflowCallerRun(params, id);
+  if ("error" in caller) return caller.error;
+  const target = await loadWorkflowRunForCaller(caller.run, params, id);
+  if ("error" in target) return target.error;
+  const driver = await getWorkflowDriver();
+  await driver.stopWorkflowRun(target.run.id, "Stopped by Cora");
+  return successResponse(id, workflowStatusPayload(await driver.workflowRunStatus(target.run.id)));
+}
+
+async function handleWorkflowResume(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  res: ServerResponse,
+): Promise<JsonRpcResponse> {
+  const caller = await resolveWorkflowCallerRun(params, id);
+  if ("error" in caller) return caller.error;
+  const target = await loadWorkflowRunForCaller(caller.run, params, id);
+  if ("error" in target) return target.error;
+  const driver = await getWorkflowDriver();
+  const useLatestScript = params.use_latest_script === true;
+  let expectedSourceHash: string | undefined;
+  if (useLatestScript) {
+    // The user approved the script the run started with. A newer saved
+    // version is code nobody approved yet (Cora can edit a project workflow
+    // with its file tools), so switching to it asks first.
+    let latest: Awaited<ReturnType<typeof driver.latestWorkflowScript>>;
+    try {
+      latest = await driver.latestWorkflowScript(target.run.id);
+    } catch (err) {
+      return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+    }
+    if (latest?.changed) {
+      const runStore = await getRunStore();
+      const consent = await requestUserConsent({
+        runStore,
+        runId: caller.run.id,
+        res,
+        id,
+        question:
+          `Cora wants to resume the workflow run "${target.run.title}" with the newer saved version of ` +
+          `"${latest.name}" and the workflows it calls: ${latest.description}\nAgents whose prompts are unchanged keep their results; ` +
+          "the rest run again under the new script.\n\nResume with the new version?",
+        denyMessage:
+          `The user declined, so the workflow run was not resumed with the new version of "${latest.name}". ` +
+          "Do not retry it; ask the user how they would like to proceed.",
+        reason: "Resuming with an edited workflow runs code the user has not approved yet.",
+      });
+      if (!consent.approved) return consent.response;
+    }
+    expectedSourceHash = latest?.sourceHash;
+  }
+  try {
+    await driver.resumeWorkflowRun(target.run.id, { useLatestScript, expectedSourceHash });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+  return successResponse(id, workflowStatusPayload(await driver.workflowRunStatus(target.run.id)));
+}
+
+async function handleWorkflowSave(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  res: ServerResponse,
+): Promise<JsonRpcResponse> {
+  const caller = await resolveWorkflowCallerRun(params, id);
+  if ("error" in caller) return caller.error;
+  const source = typeof params.source === "string" ? params.source : "";
+  const scope = params.scope === "project" ? "project" : "user";
+  let meta: WorkflowMeta;
+  try {
+    meta = readWorkflowMeta(source);
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+  const where =
+    scope === "project"
+      ? `into this repository at .codara/workflows/${meta.name}.js (it will show up in git)`
+      : "to your workflows in Codara";
+  const runStore = await getRunStore();
+  const consent = await requestUserConsent({
+    runStore,
+    runId: caller.run.id,
+    res,
+    id,
+    question:
+      `Cora wants to save the workflow "${meta.name}" ${where}` +
+      `${params.overwrite === true ? ", replacing the existing one" : ""}.\n${meta.description}\n\nSave it?`,
+    denyMessage: `The user declined, so the workflow "${meta.name}" was not saved.`,
+    reason: "Saving a workflow writes a file and needs explicit user approval.",
+  });
+  if (!consent.approved) return consent.response;
+  try {
+    const driver = await getWorkflowDriver();
+    const saved = await driver.saveWorkflow({
+      sourceText: source,
+      scope,
+      cwd: caller.cwd,
+      overwrite: params.overwrite === true,
+    });
+    return successResponse(id, { approved: true, saved: { id: saved.id, name: saved.name, source: saved.source } });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
 function summarizeTrigger(t: AutomationTrigger): string {
   switch (t.kind) {
     case "cron":
@@ -4400,7 +6046,17 @@ function summarizeJob(job: ScheduledJob): Record<string, unknown> {
       status: h.status,
       stopReason: h.stopReason ?? null,
       costUsd: h.costUsd ?? null,
+      ...(h.catchUp ? { caughtUpMissedRunAt: h.catchUp.scheduledFor } : {}),
     })),
+    ...(precheckSummary(job.precheck) ? { precheck: precheckSummary(job.precheck) } : {}),
+    ...(missedRunsSummary(job) ? { missedRuns: missedRunsSummary(job) } : {}),
+    ...(job.skips?.length
+      ? {
+          skipped: job.skips
+            .slice(-3)
+            .map((s) => ({ at: s.at, reason: s.reason, detail: s.detail, ...(s.repeats ? { times: s.repeats } : {}) })),
+        }
+      : {}),
   };
 }
 
@@ -4768,6 +6424,36 @@ function paramGraph(params: Record<string, unknown>): LoomGraph | undefined {
   const g = params.graph;
   return g && typeof g === "object" ? (g as LoomGraph) : undefined;
 }
+/** precheck / missed_runs: undefined = not supplied, null = remove. An empty
+ *  precheck command also removes it. Any other value that does not normalize
+ *  is an error, so a typo is never saved as "no precheck". */
+function paramGate(params: Record<string, unknown>):
+  | { precheck?: AutomationPrecheck | null; missedRuns?: AutomationMissedRuns | null }
+  | { error: string } {
+  const out: { precheck?: AutomationPrecheck | null; missedRuns?: AutomationMissedRuns | null } = {};
+  const rawPrecheck = params.precheck;
+  if (rawPrecheck === null) out.precheck = null;
+  else if (rawPrecheck !== undefined) {
+    const command = typeof rawPrecheck === "object" ? (rawPrecheck as { command?: unknown }).command : undefined;
+    if (typeof rawPrecheck === "object" && (command === undefined || (typeof command === "string" && !command.trim()))) {
+      out.precheck = null;
+    } else {
+      const p = normalizeAutomationPrecheck(rawPrecheck);
+      if (!p) return { error: "precheck must be an object with a 'command' string" };
+      if (p.command.length > MAX_PRECHECK_COMMAND_CHARS) {
+        return { error: `precheck.command is longer than ${MAX_PRECHECK_COMMAND_CHARS} characters` };
+      }
+      out.precheck = p;
+    }
+  }
+  if (params.missed_runs === null) out.missedRuns = null;
+  else if (params.missed_runs !== undefined) {
+    const m = normalizeMissedRuns(params.missed_runs);
+    if (!m) return { error: "missed_runs.policy must be 'skip' or 'runOnce' (or null for the default)" };
+    out.missedRuns = m;
+  }
+  return out;
+}
 
 async function handleAutomationList(
   params: Record<string, unknown>,
@@ -4807,6 +6493,7 @@ async function handleAutomationGet(
     return successResponse(id, {
       ...job,
       history: (Array.isArray(job.history) ? job.history : []).slice(-5),
+      ...(Array.isArray(job.skips) ? { skips: job.skips.slice(-5) } : {}),
     });
   } catch (err) {
     return errorResponse(id, ERR_INTERNAL, (err as Error).message);
@@ -4853,6 +6540,8 @@ async function handleAutomationCreate(
   if (!promptTemplate && !graph) {
     return errorResponse(id, ERR_INVALID_PARAMS, "prompt_template is required when no graph is given");
   }
+  const gate = paramGate(params);
+  if ("error" in gate) return errorResponse(id, ERR_INVALID_PARAMS, gate.error);
   // Resolve workspace binding server-side from the calling run. The architect
   // never supplies paths - the automation runs in the same workspace as the
   // chat that created it. Unlike the one-shot spawn_workers analog we do NOT
@@ -4887,6 +6576,8 @@ async function handleAutomationCreate(
     prompt: { template: promptTemplate },
     worker,
     graph,
+    ...(gate.precheck ? { precheck: gate.precheck } : {}),
+    ...(gate.missedRuns ? { missedRuns: gate.missedRuns } : {}),
     input: {
       workspaceId: run.workspaceId,
       workspaceName,
@@ -4948,6 +6639,16 @@ function describeUpdate(existing: ScheduledJob, update: UpdateScheduledJobInput)
       x ? [x.model, x.effort].filter(Boolean).join("/") : "(unset)";
     lines.push(`worker: ${fmt(ew)} → ${fmt(w)}`);
   }
+  if (update.precheck !== undefined) {
+    // The command runs on the user's machine before each pass: show it whole.
+    lines.push(
+      `precheck: ${precheckSummary(existing.precheck) ?? "(none)"} → ${precheckSummary(update.precheck ?? undefined) ?? "(none)"}`,
+    );
+  }
+  if (update.missedRuns !== undefined) {
+    const next = { trigger: update.trigger ?? existing.trigger, missedRuns: update.missedRuns ?? undefined };
+    lines.push(`if a run is missed: ${missedRunsSummary(existing) ?? "skip"} → ${missedRunsSummary(next) ?? "skip"}`);
+  }
   if (update.graph !== undefined) {
     const n = update.graph.nodes?.length ?? 0;
     const e = update.graph.edges?.length ?? 0;
@@ -4982,8 +6683,12 @@ async function handleAutomationUpdate(
   if (tlwErr) return errorResponse(id, ERR_INVALID_PARAMS, tlwErr);
   const name = stringParam(params, "name");
   const promptTemplate = stringParam(params, "prompt_template");
+  const gate = paramGate(params);
+  if ("error" in gate) return errorResponse(id, ERR_INVALID_PARAMS, gate.error);
   const update: UpdateScheduledJobInput = {
     id: automationId,
+    ...(gate.precheck !== undefined ? { precheck: gate.precheck } : {}),
+    ...(gate.missedRuns !== undefined ? { missedRuns: gate.missedRuns } : {}),
     ...(name ? { name } : {}),
     ...(paramTrigger(params) ? { trigger: paramTrigger(params) } : {}),
     ...(paramLoop(params) ? { loop: paramLoop(params) } : {}),
@@ -5341,6 +7046,34 @@ async function handleOrchestratorNameChat(
   }
 }
 
+async function handleOrchestratorPlanUpdate(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const runStore = await getRunStore();
+  const run = await runStore.getRun(runId);
+  if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
+  const blocked = rejectIfAutomationRun(run, id, "codara_plan_update");
+  if (blocked) return blocked;
+  try {
+    const updated = await runStore.updateManagerPlan(run.id, params);
+    const plan = updated.managerPlan;
+    const open = openPlanMilestones(plan);
+    return successResponse(id, {
+      ok: true,
+      milestones: plan?.milestones.length ?? 0,
+      open_milestones: open.map((milestone) => milestone.id),
+      note: open.length > 0
+        ? "Plan saved. codara_complete stays refused until every milestone is done or deferred with a note."
+        : "Plan saved. Every milestone is done or deferred.",
+    });
+  } catch (err) {
+    return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
+  }
+}
+
 async function handleOrchestratorWhiteboardGet(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -5355,6 +7088,21 @@ async function handleOrchestratorWhiteboardGet(
     whiteboard: run.whiteboard ?? null,
     issues: run.whiteboard ? whiteboardIssues(run.whiteboard) : [],
   });
+}
+
+// Write results echo what changed, not the whole canvas the caller just sent:
+// a 40-card board is several thousand tokens per round trip. The revision and
+// review fields keep the shape Cora's draft guard reads
+// (resources/pi-cora/whiteboard-review-policy.ts).
+function whiteboardWriteSummary(board: CoraWhiteboard | undefined): Record<string, unknown> | null {
+  if (!board) return null;
+  return {
+    revision: board.revision ?? 0,
+    title: board.title,
+    nodeCount: board.nodes.length,
+    edgeCount: board.edges.length,
+    review: board.review ? { revision: board.review.revision } : null,
+  };
 }
 
 async function handleOrchestratorWhiteboardUpdate(
@@ -5396,7 +7144,7 @@ async function handleOrchestratorWhiteboardUpdate(
     return successResponse(id, {
       ok: true,
       run_id: updated.id,
-      whiteboard: updated.whiteboard ?? null,
+      whiteboard: whiteboardWriteSummary(updated.whiteboard),
       issues: updated.whiteboard ? whiteboardIssues(updated.whiteboard) : [],
       next: updated.whiteboard ? "Draft saved. Inspect the rendered board, fix issues, and review the final revision before finishing." : undefined,
     });
@@ -5421,7 +7169,7 @@ async function handleOrchestratorWhiteboardQuality(
       const { arrangeWhiteboard } = await import("@shared/whiteboard-layout");
       const nodes = arrangeWhiteboard(board.nodes, board.edges);
       const updated = await store.updateCoraWhiteboard({ runId, action: "merge", editor: "cora", baseRevision: revision, nodes });
-      return successResponse(id, { ok: true, whiteboard: updated.whiteboard, issues: whiteboardIssues(updated.whiteboard!), next: "Inspect the arranged revision before reviewing it." });
+      return successResponse(id, { ok: true, whiteboard: whiteboardWriteSummary(updated.whiteboard), issues: whiteboardIssues(updated.whiteboard!), next: "Inspect the arranged revision before reviewing it." });
     }
     if (method === "orchestrator.whiteboard_review") {
       const issues = requireWhiteboardInspection(runId, board);
@@ -5430,7 +7178,7 @@ async function handleOrchestratorWhiteboardQuality(
       const limitations = Array.isArray(params.limitations) ? params.limitations.filter((value): value is string => typeof value === "string" && Boolean(value.trim())) : [];
       if (issues.some((issue) => issue.severity === "warning") && !limitations.length) throw new Error("Record unresolved inspection warnings as limitations, or fix them and inspect again.");
       const updated = await store.reviewCoraWhiteboard({ runId, baseRevision: revision, summary, limitations });
-      return successResponse(id, { ok: true, whiteboard: updated.whiteboard });
+      return successResponse(id, { ok: true, whiteboard: whiteboardWriteSummary(updated.whiteboard) });
     }
     const nodeIds = Array.isArray(params.nodeIds) ? params.nodeIds.filter((value): value is string => typeof value === "string").slice(0, 50) : [];
     const result = await requestPreviewOp<{
@@ -5662,10 +7410,20 @@ async function handleOrchestratorBoardUpdate(
       baseRevision: Math.max(0, Math.floor(params.baseRevision)),
       cards: authorized.cards,
     });
+    // The caller sent the full list; echo only the new revision and which
+    // cards it created, changed or deleted.
+    const before = new Map(current.cards.map((card) => [card.id, JSON.stringify(card)]));
+    const after = new Set(board.cards.map((card) => card.id));
     return successResponse(id, {
       ok: true,
       run_id: run.id,
-      board,
+      revision: board.revision,
+      cardCount: board.cards.length,
+      created: board.cards.filter((card) => !before.has(card.id)).map((card) => card.id),
+      updated: board.cards
+        .filter((card) => before.has(card.id) && before.get(card.id) !== JSON.stringify(card))
+        .map((card) => card.id),
+      deleted: current.cards.filter((card) => !after.has(card.id)).map((card) => card.id),
     });
   } catch (err) {
     return errorResponse(id, ERR_INVALID_PARAMS, (err as Error).message);
@@ -5676,16 +7434,16 @@ async function handleOrchestratorBoardUpdate(
 // the tool name onto this method). Only Cora, the Execute/Auto manager, holds
 // this tool; workers never write memory. The heavy lifting (tag grammar,
 // dedup, TTL, byte caps, the user-line preservation guardrail) lives in
-// cora-memory.ts; this handler owns the per-run write budget, an in-memory
-// map that resets on app restart by design.
+// cora-memory.ts; this handler owns the per-turn write budget (keyed by
+// rememberBudgetKey), an in-memory map that resets on app restart by design.
 const rememberBudgetByRun = new Map<string, { calls: number; bulletsAdded: number }>();
 const REMEMBER_BUDGET_RUN_LIMIT = 256;
 
-function rememberBudgetFor(runId: string): { calls: number; bulletsAdded: number } {
-  let budget = rememberBudgetByRun.get(runId);
+function rememberBudgetFor(key: string): { calls: number; bulletsAdded: number } {
+  let budget = rememberBudgetByRun.get(key);
   if (!budget) {
     budget = { calls: 0, bulletsAdded: 0 };
-    rememberBudgetByRun.set(runId, budget);
+    rememberBudgetByRun.set(key, budget);
     while (rememberBudgetByRun.size > REMEMBER_BUDGET_RUN_LIMIT) {
       const oldest = rememberBudgetByRun.keys().next();
       if (oldest.done) break;
@@ -5713,12 +7471,12 @@ async function handleOrchestratorRemember(
   const run = await runStore.getRun(runId);
   if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
 
-  const budget = rememberBudgetFor(runId);
+  const budget = rememberBudgetFor(rememberBudgetKey(run));
   if (budget.calls >= MAX_REMEMBER_CALLS_PER_RUN) {
     return errorResponse(
       id,
       ERR_INVALID_PARAMS,
-      `memory write limit reached for this run (${MAX_REMEMBER_CALLS_PER_RUN} codara_remember calls): consolidate what you have, or ask the user to edit the file directly`,
+      `memory write limit reached for this turn (${MAX_REMEMBER_CALLS_PER_RUN} codara_remember calls): consolidate what you have, or ask the user to edit the file directly`,
     );
   }
 
@@ -5737,7 +7495,7 @@ async function handleOrchestratorRemember(
       return errorResponse(
         id,
         ERR_INVALID_PARAMS,
-        `memory bullet limit reached for this run (${MAX_BULLETS_ADDED_PER_RUN} bullets): consolidate with action "replace" instead of adding more`,
+        `memory bullet limit reached for this turn (${MAX_BULLETS_ADDED_PER_RUN} bullets): consolidate with action "replace" instead of adding more`,
       );
     }
   }
@@ -5780,6 +7538,46 @@ async function handleOrchestratorRemember(
   }
 }
 
+// orchestrator.recall, the codara_recall tool: a read-only search over the
+// run's profile's learned items (memory-items.ts), scoped to the run's
+// workspace. Honors the memory switches like injection does.
+async function handleOrchestratorRecall(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+): Promise<JsonRpcResponse> {
+  const runId = stringParam(params, "runId");
+  if (!runId) return errorResponse(id, ERR_INVALID_PARAMS, "runId is required");
+  const query = stringParam(params, "query");
+  if (!query) return errorResponse(id, ERR_INVALID_PARAMS, "query is required");
+  const runStore = await getRunStore();
+  const run = await runStore.getRun(runId);
+  if (!run) return errorResponse(id, ERR_INVALID_PARAMS, `Run not found: ${runId}`);
+  if (!isMemoryEnabled("global", run.workspaceId, run.coraProfileId)) {
+    return successResponse(id, { memories: [], message: "Memory is switched off for this profile." });
+  }
+  const limit = Math.min(20, Math.max(1, Math.floor(optionalNumberParam(params, "limit") ?? 8)));
+  const workspaceOn = isMemoryEnabled("workspace", run.workspaceId, run.coraProfileId);
+  const profileId = run.coraProfileId ?? "default";
+  const { markMemoryItemsUsed, searchMemoryItems } = await import("./orchestration/memory-items");
+  // Suggestions stay out: they are tool output (a worker's lesson, a review
+  // the user's words did not back) that the user has not approved, and the
+  // model reads whatever this returns as guidance.
+  const found = searchMemoryItems(profileId, run.workspaceId, query, limit * 3)
+    .filter((item) => item.status === "active" && (workspaceOn || item.scope === "global"))
+    .slice(0, limit);
+  markMemoryItemsUsed(profileId, found.map((item) => item.id));
+  return successResponse(id, {
+    memories: found.map((item) => ({
+      id: item.id,
+      scope: item.scope,
+      kind: item.kind,
+      text: item.text,
+      learned: item.createdAt.slice(0, 10),
+    })),
+    message: found.length === 0 ? "Nothing relevant remembered." : `${found.length} memories.`,
+  });
+}
+
 function successResponse(id: JsonRpcId, result: unknown): JsonRpcResponse {
   return { jsonrpc: "2.0", id, result };
 }
@@ -5791,6 +7589,18 @@ function errorResponse(
   data?: unknown,
 ): JsonRpcResponse {
   return { jsonrpc: "2.0", id, error: { code, message, ...(data === undefined ? {} : { data }) } };
+}
+
+const TAB_GROUP_PARAM_ERROR = "group must be a tab group name";
+
+// The `group` argument of the terminal tools: a name, null when absent or
+// blank, undefined when it is not a name at all. The CLI sends a numeric name
+// as a number.
+function tabGroupParam(params: Record<string, unknown>): string | null | undefined {
+  const raw = params.group;
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "string" && typeof raw !== "number") return undefined;
+  return normalizeTabGroupName(raw) || null;
 }
 
 function stringParam(params: Record<string, unknown>, key: string): string | null {

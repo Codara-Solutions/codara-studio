@@ -7,7 +7,7 @@ import {
   codaraHomeDir,
   isCodaraManagedCliPath,
 } from "./codara-managed-cli-roots";
-import { ensureSharedCliState } from "./native-cli-shared-state";
+import { ensureGrokManagedHome } from "./cli-account-homes";
 
 export const GROK_CLI_PERSONAL_PROFILE_ID = "personal" as const;
 export const GROK_CLI_ACCOUNT_PROFILES_VERSION = 1 as const;
@@ -608,36 +608,26 @@ export class GrokCliAccountProfileStore {
   }
 
   /**
-   * Managed accounts share the user-state surfaces (sessions, history,
-   * config, prompts) with the personal Grok home so switching accounts
-   * behaves like logout+login in one home; auth.json stays per-account.
+   * Managed accounts link the user's sessions, skills and personas from the
+   * System Grok home and keep a private copy of its config.toml
+   * (cli-account-homes.ts); auth.json stays per-account. Nothing is ever
+   * moved into or written under the System home.
    *
    * Best-effort by design: resolution must never start failing because a
-   * symlink could not be made. A leased profile is skipped entirely: every
-   * launch resolves BEFORE acquiring its lease, so the first spawn of a
-   * profile always healed its directory, and migrating a real directory out
-   * from under a live CLI would lose its writes. The per-profile mutation key
-   * serializes concurrent resolutions of the same profile without blocking
-   * other profiles or the metadata lock.
+   * link could not be made. The per-profile mutation key serializes
+   * concurrent resolutions of the same profile without blocking other
+   * profiles or the metadata lock.
    */
   private async ensureManagedSharedState(
     profileId: string,
     homeDir: string,
   ): Promise<void> {
-    if (process.platform === "win32") return;
-    if (this.leases?.isLeased(profileId)) return;
     try {
-      await withMutationLock(`${this.filePath}::share::${profileId}`, async () => {
-        if (this.leases?.isLeased(profileId)) return;
-        await ensureSharedCliState({
-          managedDir: homeDir,
-          personalDir: this.personalHomeDir,
-          runtime: "grok",
-        });
-      });
+      await withMutationLock(`${this.filePath}::share::${profileId}`, () =>
+        ensureGrokManagedHome({ home: homeDir, root: this.rootDir, systemHome: this.personalHomeDir }),
+      );
     } catch {
-      // ensureSharedCliState reports per-name outcomes and never throws; this
-      // guard keeps even an unexpected failure out of the launch path.
+      // Keeps an unexpected provisioning failure out of the launch path.
     }
   }
 
@@ -839,8 +829,6 @@ export class GrokCliAccountProfileStore {
 
       await fs.mkdir(homeDir, { mode: 0o700 });
       if (process.platform !== "win32") await fs.chmod(homeDir, 0o700);
-      // A fresh directory takes the pure "managed entry missing" branch of
-      // the heal: every shared name becomes a link before first use.
       await this.ensureManagedSharedState(id, homeDir);
       const timestamp = this.now().toISOString();
       const profile: GrokCliManagedProfile = {
@@ -975,12 +963,18 @@ export class GrokCliAccountProfileStore {
     };
   }
 
+  /**
+   * Remove a managed profile. With keepDirectory the entry goes and the
+   * directory stays for the caller to purge once the terminals still
+   * running in it have exited (reconcile never deletes an orphan).
+   */
   async deleteProfile(
     rawProfileId: string,
+    options: { keepDirectory?: boolean } = {},
   ): Promise<DeleteGrokCliProfileResult> {
     if (!isGrokCliManagedProfileId(rawProfileId)) {
       if (rawProfileId === GROK_CLI_PERSONAL_PROFILE_ID) {
-        throw new TypeError("The existing personal Grok home cannot be deleted");
+        throw new TypeError("The Grok System login cannot be deleted");
       }
       throw new TypeError("Managed native Grok profile id must be a lowercase UUIDv4");
     }
@@ -993,14 +987,20 @@ export class GrokCliAccountProfileStore {
       if (snapshot.defaultProfileId === rawProfileId) {
         throw new GrokCliDefaultProfileDeletionError(rawProfileId);
       }
+      if (options.keepDirectory) {
+        const next: GrokCliAccountProfilesSnapshot = {
+          ...snapshot,
+          profiles: snapshot.profiles.filter((profile) => profile.id !== rawProfileId),
+        };
+        await persistSnapshotAtomically(this.rootDir, this.filePath, next);
+        return { deleted: true, snapshot: cloneSnapshot(next) };
+      }
       if (this.leases?.isLeased(rawProfileId)) {
         throw new GrokCliAccountProfileLeasedError(rawProfileId);
       }
 
-      // Serialize against the shared-state heal for this profile: a heal
-      // mid-migration keeps rollouts in a temporary stage inside the home,
-      // and deleting the home in that window would destroy state the heal
-      // was moving into the personal ~/.grok.
+      // Serialize against provisioning of this profile's home, which may be
+      // placing a link inside it.
       return withMutationLock(
         `${this.filePath}::share::${rawProfileId}`,
         async () => {
@@ -1031,11 +1031,13 @@ export class GrokCliAccountProfileStore {
             if (homeStats) await fs.rename(staged, homeDir).catch(() => undefined);
             throw error;
           }
+          // rm removes the links inside the home, never what they point at.
           if (homeStats) await fs.rm(staged, { recursive: true, force: true });
           return { deleted: true, snapshot: cloneSnapshot(next) };
         },
       );
     });
+    if (options.keepDirectory) return mutate();
     if (this.leases?.runWhileUnleased) {
       return this.leases.runWhileUnleased(rawProfileId, mutate);
     }

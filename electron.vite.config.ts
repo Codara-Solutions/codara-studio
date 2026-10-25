@@ -2,7 +2,10 @@ import { resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 import react from "@vitejs/plugin-react";
+import { build as esbuild } from "esbuild";
+import type { Plugin } from "vite";
 import packageJson from "./package.json";
+import { applyStudioCsp } from "./src/main/studio-csp";
 
 function developmentVersion(): string {
   try {
@@ -19,6 +22,59 @@ function developmentVersion(): string {
   return `${packageJson.version}-dev`;
 }
 
+// The workflow sandbox, browser code kernel and usage scan threads start from source text
+// (`eval: true`), so each file must be one self-contained CommonJS bundle (the
+// sandbox's with QuickJS inside): a relative require or a rollup chunk would
+// not resolve from an eval'd worker. They are built beside the main bundle
+// with esbuild instead of as rollup inputs. The Windows uninstaller runs the
+// claude-follow cleanup the same way, a self-contained script started by the
+// app's executable as plain Node (package.json unpacks it from the asar).
+const THREAD_WORKERS: ReadonlyArray<{ entry: string; outfile: string }> = [
+  { entry: "src/main/orchestration/workflow-sandbox-worker.ts", outfile: "workflow-sandbox-worker.js" },
+  { entry: "src/main/browser/code/kernel-worker.ts", outfile: "browser-code-worker.js" },
+  { entry: "src/main/usage-scan-worker.ts", outfile: "usage-scan-worker.js" },
+  { entry: "src/main/session-search/session-index-worker.ts", outfile: "session-index-worker.js" },
+  { entry: "src/main/claude-follow/uninstall-entry.ts", outfile: "claude-follow-uninstall.js" },
+];
+
+function threadWorkersPlugin(): Plugin {
+  let outDir = resolve(__dirname, "out/main");
+  return {
+    name: "codara-thread-workers",
+    apply: "build",
+    configResolved(config) {
+      outDir = resolve(config.root, config.build.outDir);
+    },
+    async writeBundle() {
+      await Promise.all(
+        THREAD_WORKERS.map((worker) =>
+          esbuild({
+            entryPoints: [resolve(__dirname, worker.entry)],
+            outfile: resolve(outDir, worker.outfile),
+            bundle: true,
+            platform: "node",
+            format: "cjs",
+            target: "node22",
+            minify: true,
+            legalComments: "none",
+            logLevel: "warning",
+            alias: { "@shared": resolve(__dirname, "src/shared") },
+          }),
+        ),
+      );
+    },
+  };
+}
+
+// Runs after every other HTML transform (Vite's client and the React refresh
+// preamble included) so the policy it writes hashes the final inline scripts.
+function studioCspPlugin(): Plugin {
+  return {
+    name: "codara-studio-csp",
+    transformIndexHtml: { order: "post", handler: (html) => applyStudioCsp(html) },
+  };
+}
+
 export default defineConfig(({ command }) => ({
   main: {
     // electron-updater is BUNDLED (not externalized): electron-builder's
@@ -27,7 +83,7 @@ export default defineConfig(({ command }) => ({
     // sax, ...), which broke every update check in the packaged app with
     // "Cannot find module 'debug'". Bundling it into the main chunk removes
     // the runtime dependency on asar node_modules resolution entirely.
-    plugins: [externalizeDepsPlugin({ exclude: ["electron-updater"] })],
+    plugins: [externalizeDepsPlugin({ exclude: ["electron-updater"] }), threadWorkersPlugin()],
     resolve: {
       alias: {
         "@shared": resolve(__dirname, "src/shared"),
@@ -58,6 +114,9 @@ export default defineConfig(({ command }) => ({
           // attribute on the tag; communicates with the host via
           // `ipcRenderer.sendToHost`.
           "inspector-preload": resolve(__dirname, "src/preload/inspector-preload.ts"),
+          // The hidden page that encodes browser recordings to video with
+          // WebCodecs (src/main/browser/record/video-encoder.ts).
+          "record-encoder": resolve(__dirname, "src/preload/record-encoder.ts"),
         },
       },
     },
@@ -70,7 +129,7 @@ export default defineConfig(({ command }) => ({
         command === "serve" ? developmentVersion() : packageJson.version,
       ),
     },
-    plugins: [react()],
+    plugins: [react(), studioCspPlugin()],
     resolve: {
       alias: {
         "@shared": resolve(__dirname, "src/shared"),
@@ -89,6 +148,10 @@ export default defineConfig(({ command }) => ({
         output: {
           manualChunks(id: string) {
             if (!id.includes("node_modules")) return undefined;
+            // react-dom/server is only used by the Share packager, which renders
+            // Markdown to a page off screen. Without its own chunk it would ride
+            // in the eager react-vendor chunk below and load with every window.
+            if (/[\\/]node_modules[\\/]react-dom[\\/](server|cjs[\\/]react-dom-server)/.test(id)) return "react-dom-server-vendor";
             // react-vendor must stay a leaf chunk (no imports back into "vendor",
             // which would make the chunk graph circular), so react-dom's runtime
             // helpers ride along with it.

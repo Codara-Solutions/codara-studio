@@ -1,3 +1,4 @@
+// test-runner: heavy (boots Electron)
 // Integration test for the agent-socket RPC layer + MCP discovery contract.
 //
 // Unlike the esbuild-stub harnesses, this drives the REAL app: it launches the
@@ -168,10 +169,36 @@ function parkedManagerTurn(runId, overrides = {}) {
 }
 
 async function main() {
+  // One registered Cora-only Claude account, the default. The retired single
+  // login (pi-agent/auth.json) is archived by the accounts migration and
+  // never becomes an account.
   const piRoot = path.join(HOME, "pi-agent");
-  fs.mkdirSync(piRoot, { recursive: true, mode: 0o700 });
+  const accountId = "44444444-4444-4444-8444-444444444444";
+  const accountDir = path.join(piRoot, "accounts", accountId);
+  fs.mkdirSync(accountDir, { recursive: true, mode: 0o700 });
+  const createdAt = "2026-10-01T00:00:00.000Z";
   fs.writeFileSync(
-    path.join(piRoot, "auth.json"),
+    path.join(piRoot, "account-profiles.json"),
+    JSON.stringify({
+      version: 2,
+      profiles: [{
+        id: accountId,
+        provider: "anthropic",
+        label: "Socket account",
+        createdAt,
+        updatedAt: createdAt,
+        cli: { kind: "none" },
+        cora: "own",
+      }],
+      defaults: { anthropic: accountId },
+      tombstones: [],
+      dismissedSystemOffers: [],
+      pendingPurge: [],
+    }),
+    { mode: 0o600 },
+  );
+  fs.writeFileSync(
+    path.join(accountDir, "auth.json"),
     JSON.stringify({
       anthropic: {
         type: "oauth",
@@ -184,17 +211,30 @@ async function main() {
   );
 
   const electron = require("electron");
+  // The booted app reads the System logins and cleans the global CLI configs
+  // of the HOME it runs in, so it gets a throwaway one; the live app's pane
+  // variables and any CLI home it exported must not reach it either.
+  const userHome = path.join(HOME, "user-home");
+  fs.mkdirSync(userHome, { recursive: true });
+  const inheritedEnv = Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([key]) => !/^(SPARK_|CODARA_|CLAUDE_CONFIG_DIR$|CODEX_HOME$|GROK_HOME$|ZDOTDIR$)/.test(key),
+    ),
+  );
   const app = spawn(electron, [path.join(ROOT, "out", "main", "index.js")], {
     // Isolate both Codara's durable home and Electron's Chromium userData.
     // Without the latter this integration process can contend with a running
     // development app and start the socket before a usable renderer bridge.
     env: {
-      ...process.env,
+      ...inheritedEnv,
+      HOME: userHome,
       CODARA_HOME_DIR: HOME,
       SPARK_HOME_DIR: HOME,
       SPARK_USER_DATA_DIR: HOME,
       SPARK_SKIP_LEGACY_MIGRATION: "1",
       SPARK_NO_SHELL_INTEGRATION: "1",
+      // Keeps the booted app off the user's desktop (headless on Linux).
+      SPARK_E2E_BACKGROUND: "1",
     },
     stdio: "ignore",
   });
@@ -220,6 +260,25 @@ async function main() {
     // Unknown method → JSON-RPC error, not a crash.
     const unknown = await rpc(handshake, "nope.nothing", {});
     check("unknown method errors", Boolean(unknown.error), JSON.stringify(unknown).slice(0, 120));
+    // pane.open (the codara-pane helper): a made-up pane token is no
+    // credential at all, and the method checks its parameters and caller.
+    const forgedPane = await rpcRaw(
+      { ...handshake, token: "b".repeat(64) },
+      { jsonrpc: "2.0", id: 1, method: "pane.open", params: { mode: "tab" } },
+    );
+    check("a forged pane token is rejected", forgedPane.status === 401, `status=${forgedPane.status}`);
+    const badMode = await rpc(handshake, "pane.open", { paneId: "pane-x", mode: "window" });
+    check(
+      "pane.open rejects an unknown mode",
+      badMode.error?.code === -32602 && /mode must be/.test(badMode.error?.message ?? ""),
+      JSON.stringify(badMode).slice(0, 160),
+    );
+    const noPane = await rpc(handshake, "pane.open", { paneId: "pane-not-running", mode: "overlay", command: "true" });
+    check(
+      "pane.open refuses a pane that is not running",
+      noPane.error?.code === -32602 && /not running/.test(noPane.error?.message ?? ""),
+      JSON.stringify(noPane).slice(0, 160),
+    );
     const unownedClose = await rpc(handshake, "terminal.close", {
       paneId: "pane-not-created-by-agent",
       runId: "run-socket-test",
@@ -726,6 +785,10 @@ async function main() {
     for (const [method, params] of [
       ["terminal.read", { runId: "run-untrusted-pr", paneId: "foreign-pane" }],
       ["terminal.create", { runId: "run-untrusted-pr", command: "id" }],
+      ["terminal.run", { runId: "run-untrusted-pr", command: "id" }],
+      ["terminal.list", { runId: "run-untrusted-pr" }],
+      ["agent.notify", { runId: "run-untrusted-pr", kind: "done" }],
+      ["share.offer", { runId: "run-untrusted-pr", path: "/tmp/page.html" }],
       ["orchestrator.spawn_terminals", { runId: "run-untrusted-pr", terminals: [] }],
       ["orchestrator.remember", {
         runId: "run-untrusted-pr",
@@ -733,8 +796,14 @@ async function main() {
         action: "add",
         bullets: ["poison"],
       }],
+      ["orchestrator.recall", { runId: "run-untrusted-pr", query: "preferences" }],
       ["automation.list", { runId: "run-untrusted-pr" }],
       ["automation.create", { runId: "run-untrusted-pr" }],
+      ["worktree.create", { runId: "run-untrusted-pr", callerRole: "manager" }],
+      ["worktree.list", { runId: "run-untrusted-pr", callerRole: "manager" }],
+      ["worktree.remove", { runId: "run-untrusted-pr", callerRole: "manager", workspaceId: "ws-x" }],
+      ["worktree.setup", { runId: "run-untrusted-pr", callerRole: "manager" }],
+      ["worktree.cleanup", { runId: "run-untrusted-pr", callerRole: "manager" }],
     ]) {
       const denied = await rpc(handshake, method, params);
       check(
@@ -743,6 +812,121 @@ async function main() {
         JSON.stringify(denied).slice(0, 180),
       );
     }
+    // Worktree methods: a malformed request is a JSON-RPC error, a refusal is
+    // an ordinary {ok:false, code} result the MCP server hands the agent.
+    const bothTargets = await rpc(handshake, "worktree.remove", { workspaceId: "ws-a", path: "/tmp/x" });
+    check("worktree.remove needs exactly one target", bothTargets.error?.code === -32602, JSON.stringify(bothTargets).slice(0, 180));
+    const badType = await rpc(handshake, "worktree.create", { checkout: "yes" });
+    check("worktree.create checks parameter types", badType.error?.code === -32602, JSON.stringify(badType).slice(0, 180));
+    const fromWorker = await rpc(handshake, "worktree.list", { callerRole: "worker" });
+    check("a worker cannot manage worktrees", fromWorker.result?.code === "WORKTREE_FORBIDDEN", JSON.stringify(fromWorker).slice(0, 180));
+    const badCleanup = await rpc(handshake, "worktree.cleanup", { action: "delete" });
+    check("worktree.cleanup checks its action", badCleanup.error?.code === -32602, JSON.stringify(badCleanup).slice(0, 180));
+    const noPaths = await rpc(handshake, "worktree.cleanup", { action: "remove" });
+    check("a cleanup removal needs paths", noPaths.error?.code === -32602, JSON.stringify(noPaths).slice(0, 180));
+    const workerCleanup = await rpc(handshake, "worktree.cleanup", { action: "remove", paths: ["/tmp/x"], callerRole: "worker" });
+    check(
+      "a worker cannot ask to remove worktrees",
+      workerCleanup.result?.code === "WORKTREE_FORBIDDEN",
+      JSON.stringify(workerCleanup).slice(0, 180),
+    );
+    const fromTalk = await rpc(handshake, "worktree.create", { callerRole: "talk", runId: "run-socket-test" });
+    check("a chat worker's run id grants nothing", fromTalk.result?.code === "WORKTREE_FORBIDDEN", JSON.stringify(fromTalk).slice(0, 180));
+    const placelessWorktree = await rpc(handshake, "worktree.list", { callerRole: "studio", callerPid: 1 });
+    check(
+      "a caller outside any Codara pane has no repository",
+      placelessWorktree.result?.code === "WORKTREE_NO_WORKSPACE" && placelessWorktree.result?.ok === false,
+      JSON.stringify(placelessWorktree).slice(0, 180),
+    );
+    const listed = await rpc(handshake, "terminal.list", {});
+    check(
+      "terminal.list answers with the studio's panes",
+      Array.isArray(listed.result?.panes),
+      JSON.stringify(listed).slice(0, 180),
+    );
+    const multiline = await rpc(handshake, "terminal.run", { command: "echo one\necho two" });
+    check(
+      "terminal.run refuses a multi-line command",
+      /single line/.test(multiline.error?.message ?? ""),
+      JSON.stringify(multiline).slice(0, 180),
+    );
+    const foreignRun = await rpc(handshake, "terminal.run", { command: "id", paneId: "foreign-pane" });
+    check(
+      "terminal.run refuses a pane the caller did not create",
+      /only permitted on active panes you created/.test(foreignRun.error?.message ?? ""),
+      JSON.stringify(foreignRun).slice(0, 180),
+    );
+    const placeless = await rpc(handshake, "agent.notify", { kind: "done", callerPid: 1 });
+    check(
+      "agent.notify outside a Codara pane publishes nothing and is not an error",
+      !placeless.error &&
+        placeless.result?.published === false &&
+        placeless.result?.reason === "not_in_codara_terminal",
+      JSON.stringify(placeless).slice(0, 180),
+    );
+    // A share offer only ever names a page in a folder the app may read, and
+    // a refusal is an answer for the agent, not an error.
+    const shareDir = fs.mkdtempSync(path.join(os.tmpdir(), "cora-share-offer-"));
+    fs.writeFileSync(path.join(shareDir, "notes.txt"), "plain");
+    for (const [label, offerPath, reason] of [
+      ["a relative path", "page.html", "invalid"],
+      ["a file that is not a page", path.join(shareDir, "notes.txt"), "not_shareable"],
+      ["a missing file", path.join(shareDir, "gone.md"), "missing"],
+    ]) {
+      const refused = await rpc(handshake, "share.offer", { path: offerPath, callerPid: 1 });
+      check(
+        `share.offer refuses ${label}`,
+        !refused.error && refused.result?.offered === false && refused.result?.reason === reason,
+        JSON.stringify(refused).slice(0, 180),
+      );
+    }
+    fs.rmSync(shareDir, { recursive: true, force: true });
+    // The workspace status passes the same gates in the real app: an
+    // imported pull request cannot write the rail, and a caller outside every
+    // pane gets an answer, never the workspace on screen.
+    const untrustedWorkspaceStatus = await rpc(handshake, "workspace.status", { runId: "run-untrusted-pr", status: "done" });
+    check(
+      "untrusted PR socket policy blocks workspace.status",
+      Boolean(untrustedWorkspaceStatus.error) && /unavailable|pull-request/i.test(untrustedWorkspaceStatus.error?.message ?? ""),
+      JSON.stringify(untrustedWorkspaceStatus).slice(0, 180),
+    );
+    const placelessStatus = await rpc(handshake, "workspace.status", { status: "done", callerPid: 1 });
+    check(
+      "workspace.status outside a Codara pane changes nothing and is not an error",
+      !placelessStatus.error &&
+        placelessStatus.result?.updated === false &&
+        placelessStatus.result?.reason === "not_in_codara_workspace" &&
+        !fs.existsSync(path.join(HOME, "workspace-status.json")),
+      JSON.stringify(placelessStatus).slice(0, 180),
+    );
+    // The remember budget stops write loops within one turn; it does not cap
+    // a chat's whole life.
+    fabricateRun("run-remember-budget", {
+      chatMode: "execute",
+      humanMessages: [{
+        id: "msg-remember-budget-1",
+        runId: "run-remember-budget",
+        author: "user",
+        kind: "note",
+        message: "Remember a few things.",
+        createdAt: new Date().toISOString(),
+      }],
+    });
+    const budgetReplies = [];
+    for (let i = 0; i < 6; i += 1) {
+      budgetReplies.push(await rpc(handshake, "orchestrator.remember", {
+        runId: "run-remember-budget",
+        scope: "workspace",
+        action: "add",
+        bullets: [`Budget fact number ${i} for this workspace.`],
+      }));
+    }
+    check(
+      "remember accepts five calls in one turn and rejects the sixth with a per-turn limit",
+      budgetReplies.slice(0, 5).every((reply) => reply.result?.ok === true) &&
+        /limit reached for this turn/.test(budgetReplies[5].error?.message ?? ""),
+      JSON.stringify(budgetReplies.map((reply) => reply.error?.message ?? "ok")).slice(0, 300),
+    );
     const untrustedStatus = await rpc(handshake, "orchestrator.get_worker_status", {
       runId: "run-untrusted-pr",
       worker_task_id: "wt-untrusted-status",
@@ -836,10 +1020,12 @@ async function main() {
         { id: "delegates", from: "manager", to: "worker", label: "delegates", tone: "accent" },
       ],
     });
+    // The write answers with a summary, not the whole graph the agent sent.
     check(
       "whiteboard update reaches durable run state",
       whiteboardUpdated.result?.whiteboard?.title === "Socket architecture map" &&
-        whiteboardUpdated.result?.whiteboard?.nodes?.length === 2,
+        whiteboardUpdated.result?.whiteboard?.nodeCount === 2 &&
+        whiteboardUpdated.result?.whiteboard?.nodes === undefined,
       JSON.stringify(whiteboardUpdated).slice(0, 220),
     );
     const whiteboardRead = await rpc(handshake, "orchestrator.whiteboard_get", {
@@ -858,7 +1044,9 @@ async function main() {
     });
     check(
       "codara_complete rejected before any execute worker exists",
-      Boolean(emptyComplete.error) && /before any worker task exists/i.test(emptyComplete.error?.message ?? ""),
+      Boolean(emptyComplete.error) &&
+        /before any worker task exists/i.test(emptyComplete.error?.message ?? "") &&
+        /reply in natural language/i.test(emptyComplete.error?.message ?? ""),
       JSON.stringify(emptyComplete).slice(0, 200),
     );
 
@@ -931,6 +1119,51 @@ async function main() {
       "automation.create accepts a mixed-case claude id (validation passes to the workspace gate)",
       Boolean(mixedCaseAccepted.error) && /workspace directory/i.test(mixedCaseAccepted.error?.message ?? ""),
       JSON.stringify(mixedCaseAccepted.error ?? mixedCaseAccepted.result).slice(0, 200),
+    );
+
+    // Precheck and missed-run policy: a malformed value is an error, never
+    // silently saved as "none"; well-formed ones pass to the workspace gate.
+    const okWorker = { model: "claude-opus-5", effort: "medium" };
+    const precheckRejected = await rpc(handshake, "automation.create", {
+      ...createBase,
+      worker: okWorker,
+      precheck: { command: 42 },
+    });
+    check(
+      "automation.create rejects a precheck without a command string",
+      Boolean(precheckRejected.error) && /precheck must be/i.test(precheckRejected.error?.message ?? ""),
+      JSON.stringify(precheckRejected.error ?? precheckRejected.result).slice(0, 200),
+    );
+    const longRejected = await rpc(handshake, "automation.create", {
+      ...createBase,
+      worker: okWorker,
+      precheck: { command: `test -f ${"x".repeat(4100)}` },
+    });
+    check(
+      "automation.create refuses an over-long precheck command instead of cutting it",
+      Boolean(longRejected.error) && /longer than 4000 characters/i.test(longRejected.error?.message ?? ""),
+      JSON.stringify(longRejected.error ?? longRejected.result).slice(0, 200),
+    );
+    const missedRejected = await rpc(handshake, "automation.create", {
+      ...createBase,
+      worker: okWorker,
+      missed_runs: { policy: "always" },
+    });
+    check(
+      "automation.create rejects an unknown missed_runs policy",
+      Boolean(missedRejected.error) && /missed_runs\.policy/i.test(missedRejected.error?.message ?? ""),
+      JSON.stringify(missedRejected.error ?? missedRejected.result).slice(0, 200),
+    );
+    const gateAccepted = await rpc(handshake, "automation.create", {
+      ...createBase,
+      worker: okWorker,
+      precheck: { command: "test -f TODO.md", timeoutSeconds: 30 },
+      missed_runs: { policy: "runOnce", graceMinutes: 60 },
+    });
+    check(
+      "automation.create accepts a precheck and missed_runs (validation passes to the workspace gate)",
+      Boolean(gateAccepted.error) && /workspace directory/i.test(gateAccepted.error?.message ?? ""),
+      JSON.stringify(gateAccepted.error ?? gateAccepted.result).slice(0, 200),
     );
 
     // The agent-loop handoff lowercases nextModel for the same reason; the
@@ -1237,6 +1470,92 @@ async function main() {
       JSON.stringify(waitedDeclared).slice(0, 280),
     );
 
+    // The harness spawns a declared verifier only for a complete report. A
+    // partial one the execute-mode cycle accepted never gets a verifier, so a
+    // wait holding for it froze Cora until the timeout (run-mv1b57e8).
+    const partialReportPath = path.join(HOME, "partial-report.json");
+    fs.writeFileSync(partialReportPath, JSON.stringify({
+      status: "partial",
+      summary: "Wrote the script; python was not on PATH.",
+      files_changed: [{ path: "tool.py", reason: "the requested script" }],
+      proof: [],
+      risks: [],
+      followups: [],
+    }));
+    fabricateRun("run-declared-partial-wait", {
+      chatMode: "execute",
+      workerTasks: [
+        {
+          id: "wt-partial-impl",
+          title: "write the script",
+          status: "accepted",
+          taskClass: "feature",
+          verifierBrief: "Run the script on the sample input.",
+        },
+      ],
+      workerAttempts: [
+        {
+          id: "attempt-partial-impl",
+          workerTaskId: "wt-partial-impl",
+          status: "succeeded",
+          runtime: "codex",
+          finishedAt: "2026-07-18T10:00:00.000Z",
+          finalReportPath: partialReportPath,
+        },
+      ],
+    });
+    const waitedPartial = await rpc(handshake, "orchestrator.wait_for_workers", {
+      runId: "run-declared-partial-wait",
+      worker_task_ids: ["wt-partial-impl"],
+      timeout_ms: 5000,
+    });
+    check(
+      "wait_for_workers returns a partial report instead of holding for a verifier that never spawns",
+      waitedPartial.result?.reason === "all_terminal" &&
+        waitedPartial.result?.workers?.[0]?.final_report?.status === "partial",
+      JSON.stringify(waitedPartial).slice(0, 280),
+    );
+
+    // A message the user sends during the wait is queued for Cora's next
+    // turn, so it never cuts the wait short.
+    const queuedTurn = liveManagerTurn("run-queued-wait", "spark-queued-wait");
+    queuedTurn.humanMessages.push({
+      id: "msg-queued-wait",
+      runId: "run-queued-wait",
+      author: "user",
+      kind: "note",
+      message: "Also handle empty input.",
+      attachments: [],
+      intent: "steer",
+      deliveryState: "queued",
+      targetTurnId: "after:spark-queued-wait",
+      conversationEpoch: 0,
+      createdAt: new Date().toISOString(),
+    });
+    fabricateRun("run-queued-wait", {
+      chatMode: "execute",
+      ...queuedTurn,
+      workerTasks: [{ id: "wt-queued-wait", title: "long build", status: "running", taskClass: "feature" }],
+      workerAttempts: [{
+        id: "attempt-queued-wait",
+        workerTaskId: "wt-queued-wait",
+        status: "running",
+        runtime: "codex",
+        startedAt: "2026-07-18T10:00:00.000Z",
+      }],
+    });
+    const waitStartedAt = Date.now();
+    const waitedQueued = await rpc(handshake, "orchestrator.wait_for_workers", {
+      runId: "run-queued-wait",
+      worker_task_ids: ["wt-queued-wait"],
+      timeout_ms: 3000,
+    });
+    check(
+      "wait_for_workers does not yield to a message queued for the next turn",
+      waitedQueued.result?.reason === "timeout" && Date.now() - waitStartedAt >= 900,
+      JSON.stringify(waitedQueued).slice(0, 280),
+    );
+
     // Runtime fallback lineage: waiting on the cancelled predecessor must
     // transparently follow the system replacement. Otherwise the manager sees
     // a terminal cancellation, spawns another verifier, and duplicates work.
@@ -1288,6 +1607,88 @@ async function main() {
         waitedFallback.result?.workers?.[0]?.requested_worker_task_id === "wt-codex-verifier" &&
         waitedFallback.result?.workers?.[0]?.runtime === "claude",
       JSON.stringify(waitedFallback).slice(0, 280),
+    );
+
+    // A worker that died before writing a report, and one parked blocked by a
+    // partial report: the manager must see why, and `blocked` must unblock the
+    // wait instead of holding it to the timeout.
+    fabricateRun("run-worker-diagnostics", {
+      chatMode: "execute",
+      workerTasks: [
+        {
+          id: "wt-crashed",
+          title: "build the parser",
+          description: "implementation",
+          status: "failed",
+          taskClass: "feature",
+          runtimePreference: "claude",
+          createdBy: "spark",
+          createdAt: "2026-07-18T10:00:00.000Z",
+          updatedAt: "2026-07-18T10:00:30.000Z",
+        },
+        {
+          id: "wt-partial",
+          title: "write the docs",
+          description: "implementation",
+          status: "blocked",
+          taskClass: "feature",
+          runtimePreference: "codex",
+          createdBy: "spark",
+          createdAt: "2026-07-18T10:00:00.000Z",
+          updatedAt: "2026-07-18T10:00:30.000Z",
+        },
+      ],
+      workerAttempts: [
+        {
+          id: "attempt-crashed",
+          workerTaskId: "wt-crashed",
+          status: "failed",
+          runtime: "claude",
+          error: `Provider stream closed: ${"x".repeat(900)}`,
+          failureKind: "transport",
+          startedAt: "2026-07-18T10:00:01.000Z",
+          finishedAt: "2026-07-18T10:00:30.000Z",
+        },
+        {
+          id: "attempt-partial",
+          workerTaskId: "wt-partial",
+          status: "succeeded",
+          runtime: "codex",
+          startedAt: "2026-07-18T10:00:01.000Z",
+          finishedAt: "2026-07-18T10:00:30.000Z",
+        },
+      ],
+    });
+    const waitedDiagnostics = await rpc(handshake, "orchestrator.wait_for_workers", {
+      runId: "run-worker-diagnostics",
+      worker_task_ids: ["wt-crashed", "wt-partial"],
+      timeout_ms: 5000,
+    });
+    const crashed = waitedDiagnostics.result?.workers?.find((w) => w.worker_task_id === "wt-crashed");
+    check(
+      "wait_for_workers treats a blocked worker as terminal",
+      waitedDiagnostics.result?.reason === "all_terminal",
+      JSON.stringify(waitedDiagnostics).slice(0, 280),
+    );
+    check(
+      "wait_for_workers says why a worker without a report failed",
+      crashed?.error?.startsWith("Provider stream closed") &&
+        crashed.error.length <= 503 &&
+        crashed.failure_kind === "transport" &&
+        "activity" in crashed &&
+        "activity_at" in crashed,
+      JSON.stringify(crashed).slice(0, 280),
+    );
+    const crashedStatus = await rpc(handshake, "orchestrator.get_worker_status", {
+      runId: "run-worker-diagnostics",
+      worker_task_id: "wt-crashed",
+    });
+    check(
+      "get_worker_status carries the failure reason",
+      crashedStatus.result?.failure_kind === "transport" &&
+        crashedStatus.result?.error?.startsWith("Provider stream closed") &&
+        crashedStatus.result?.final_report_status === null,
+      JSON.stringify(crashedStatus).slice(0, 280),
     );
 
     fabricateRun("run-live-verifier", {
@@ -1545,6 +1946,197 @@ async function main() {
         /verify async contract/.test(failedVerifierComplete.error?.message ?? ""),
       JSON.stringify(failedVerifierComplete).slice(0, 240),
     );
+    check(
+      "the refusal names the accept_unverified exit and the blocking verifier id",
+      /accept_unverified/.test(failedVerifierComplete.error?.message ?? "") &&
+        /wt-verifier/.test(failedVerifierComplete.error?.message ?? ""),
+      JSON.stringify(failedVerifierComplete).slice(0, 400),
+    );
+
+    // An adjudicated out-of-contract verdict must not wedge the run: the
+    // manager overrules it explicitly, naming every blocking verifier, and the
+    // run lands with the implementation step labelled completed_unverified.
+    fabricateRun("run-overrule", {
+      ...liveManagerTurn("run-overrule", "spark-overrule"),
+      chatMode: "execute",
+      steps: [
+        { id: "step-impl", title: "implement", status: "complete", createdAt: "2026-07-18T09:59:00.000Z", updatedAt: "2026-07-18T10:00:00.000Z" },
+        { id: "step-verify", title: "verify", status: "complete", createdAt: "2026-07-18T10:00:00.000Z", updatedAt: "2026-07-18T10:01:00.000Z" },
+      ],
+      workerTasks: [
+        { id: "wt-ov-impl", stepId: "step-impl", title: "implement async contract", status: "accepted", taskClass: "feature" },
+        {
+          id: "wt-ov-verifier",
+          stepId: "step-verify",
+          title: "verify async contract",
+          status: "accepted",
+          taskClass: "verifier",
+          autoVerifierForTaskId: "wt-ov-impl",
+        },
+      ],
+      workerAttempts: [
+        {
+          id: "attempt-ov-impl",
+          workerTaskId: "wt-ov-impl",
+          status: "succeeded",
+          runtime: "claude",
+          finishedAt: "2026-07-18T10:00:00.000Z",
+          finalReportPath: implementationReportPath,
+        },
+        {
+          id: "attempt-ov-verifier",
+          workerTaskId: "wt-ov-verifier",
+          status: "succeeded",
+          runtime: "claude",
+          finishedAt: "2026-07-18T10:01:00.000Z",
+          finalReportPath: verifierReportPath,
+        },
+      ],
+    });
+    const overruleNoReason = await rpc(handshake, "orchestrator.complete", {
+      runId: "run-overrule",
+      summary: "done",
+      accept_unverified: { reason: " ", overruled_verifier_task_ids: ["wt-ov-verifier"] },
+    });
+    check(
+      "accept_unverified requires a reason",
+      /reason must say why/.test(overruleNoReason.error?.message ?? ""),
+      JSON.stringify(overruleNoReason).slice(0, 240),
+    );
+    const overruleWrongId = await rpc(handshake, "orchestrator.complete", {
+      runId: "run-overrule",
+      summary: "done",
+      accept_unverified: { reason: "out of contract", overruled_verifier_task_ids: ["wt-ov-impl"] },
+    });
+    check(
+      "accept_unverified must list every blocking verifier",
+      /must list every blocking verifier/.test(overruleWrongId.error?.message ?? "") &&
+        /wt-ov-verifier/.test(overruleWrongId.error?.message ?? ""),
+      JSON.stringify(overruleWrongId).slice(0, 300),
+    );
+    const overruled = await rpc(handshake, "orchestrator.complete", {
+      runId: "run-overrule",
+      summary: "Implemented the async contract.",
+      accept_unverified: {
+        reason: "The verifier demanded unicode handling the brief never asked for.",
+        overruled_verifier_task_ids: ["wt-ov-verifier"],
+      },
+    });
+    const overruledSnapshot = JSON.parse(
+      fs.readFileSync(path.join(HOME, "runs", "run-overrule", "run.json"), "utf8"),
+    );
+    check(
+      "accept_unverified lands the run as completed_unverified with the reason disclosed",
+      Boolean(overruled.result?.ok) &&
+        overruledSnapshot.status === "complete" &&
+        overruledSnapshot.steps.find((step) => step.id === "step-impl")?.status === "completed_unverified" &&
+        overruledSnapshot.humanMessages.some((message) =>
+          /Landed unverified: Cora overruled "verify async contract"\. Reason: The verifier demanded unicode/.test(message.message)),
+      JSON.stringify({ overruled, steps: overruledSnapshot.steps }).slice(0, 500),
+    );
+
+    // The step brake is lack of progress, not a raw batch count, and it asks
+    // the user instead of force-landing the run.
+    const brakeSteps = Array.from({ length: 8 }, (_, index) => ({
+      id: `step-brake-${index}`,
+      title: `batch ${index}`,
+      kind: "worker_batch",
+      status: "failed",
+      createdAt: new Date(Date.UTC(2026, 6, 18, 11, index)).toISOString(),
+      updatedAt: new Date(Date.UTC(2026, 6, 18, 11, index)).toISOString(),
+    }));
+    fabricateRun("run-step-brake", {
+      chatMode: "execute",
+      status: "running",
+      humanMessages: [{
+        id: "msg-brake",
+        runId: "run-step-brake",
+        author: "user",
+        kind: "note",
+        message: "migrate everything",
+        attachments: [],
+        createdAt: "2026-07-18T10:00:00.000Z",
+      }],
+      steps: brakeSteps,
+      workerTasks: brakeSteps.map((step, index) => ({
+        id: `wt-brake-${index}`,
+        stepId: step.id,
+        title: `attempt ${index}`,
+        status: index % 2 === 0 ? "failed" : "cancelled",
+        taskClass: "feature",
+      })),
+      workerAttempts: [],
+    });
+    const braked = await rpc(handshake, "orchestrator.spawn_workers", {
+      runId: "run-step-brake",
+      workers: [{ title: "try again", description: "same approach", taskClass: "feature", runtimePreference: "claude" }],
+    });
+    const brakedSnapshot = JSON.parse(fs.readFileSync(path.join(HOME, "runs", "run-step-brake", "run.json"), "utf8"));
+    check(
+      "eight failed batches in a row trip the no-progress brake without landing the run",
+      braked.result?.step_ceiling_reached === true &&
+        /last 8 worker batches all failed/.test(braked.result?.note ?? "") &&
+        /codara_ask_user/.test(braked.result?.note ?? "") &&
+        brakedSnapshot.status === "running" &&
+        brakedSnapshot.steps.length === 8,
+      JSON.stringify({ braked, status: brakedSnapshot.status }).slice(0, 400),
+    );
+
+    // codara_plan_update stores the manager's plan, and an open milestone
+    // holds codara_complete until it is done or deferred with a reason.
+    fabricateRun("run-plan", {
+      ...liveManagerTurn("run-plan", "spark-plan"),
+      chatMode: "execute",
+      workerTasks: [{ id: "wt-plan-a", title: "auth service", status: "accepted", taskClass: "feature" }],
+      workerAttempts: [],
+    });
+    const badPlan = await rpc(handshake, "orchestrator.plan_update", {
+      runId: "run-plan",
+      goal: "Migrate every service",
+      milestones: [{ id: "m1", title: "auth", status: "deferred" }],
+    });
+    check(
+      "plan_update rejects a deferred milestone without a reason",
+      /deferred without a note/.test(badPlan.error?.message ?? ""),
+      JSON.stringify(badPlan).slice(0, 240),
+    );
+    const savedPlan = await rpc(handshake, "orchestrator.plan_update", {
+      runId: "run-plan",
+      goal: "Migrate every service",
+      milestones: [
+        { id: "m1", title: "auth", status: "done", note: "tests pass", worker_task_ids: ["wt-plan-a"] },
+        { id: "m2", title: "billing", status: "pending" },
+      ],
+    });
+    const planSnapshot = JSON.parse(fs.readFileSync(path.join(HOME, "runs", "run-plan", "run.json"), "utf8"));
+    check(
+      "plan_update persists the plan and reports the open milestones",
+      savedPlan.result?.ok === true &&
+        savedPlan.result.open_milestones?.join(",") === "m2" &&
+        planSnapshot.managerPlan?.goal === "Migrate every service" &&
+        planSnapshot.managerPlan.milestones[0].workerTaskIds?.[0] === "wt-plan-a",
+      JSON.stringify({ savedPlan, plan: planSnapshot.managerPlan }).slice(0, 400),
+    );
+    const planBlocked = await rpc(handshake, "orchestrator.complete", { runId: "run-plan", summary: "done" });
+    check(
+      "codara_complete is refused while a plan milestone is open",
+      /plan milestone\(s\) are still open: m2 "billing" \(pending\)/.test(planBlocked.error?.message ?? ""),
+      JSON.stringify(planBlocked).slice(0, 300),
+    );
+    await rpc(handshake, "orchestrator.plan_update", {
+      runId: "run-plan",
+      goal: "Migrate every service",
+      milestones: [
+        { id: "m1", title: "auth", status: "done", note: "tests pass" },
+        { id: "m2", title: "billing", status: "deferred", note: "the user asked to stop after auth" },
+      ],
+    });
+    const planComplete = await rpc(handshake, "orchestrator.complete", { runId: "run-plan", summary: "auth migrated" });
+    check(
+      "codara_complete succeeds once every milestone is done or deferred",
+      Boolean(planComplete.result?.ok) && !planComplete.error,
+      JSON.stringify(planComplete).slice(0, 300),
+    );
 
     // Deadlock-avoidance: a task stuck at "created" (prepareWorkerTask never
     // succeeded, or a user hand-added task that was never launched) must NOT
@@ -1569,16 +2161,35 @@ async function main() {
       JSON.stringify(completeStuck).slice(0, 200),
     );
 
-    // Oversized body cap (64 KB): the server tears the connection down, so
-    // either an error status or a socket reset counts as enforcement.
+    // Oversized body cap (64 KB): the caller gets a JSON-RPC error that says
+    // why, instead of a reset connection it would read as Codara being down.
     const big = await rpcRaw(
       handshake,
-      JSON.stringify({ jsonrpc: "2.0", id: 1, method: "preview.list", params: { pad: "x".repeat(70 * 1024) } }),
+      JSON.stringify({ jsonrpc: "2.0", id: 7, method: "preview.list", params: { pad: "x".repeat(70 * 1024) } }),
     ).catch((err) => ({ status: null, reset: true, code: err.code ?? err.message }));
+    let bigBody = null;
+    try {
+      bigBody = JSON.parse(big.body);
+    } catch {
+      /* reported by the check below */
+    }
     check(
-      "64KB body cap enforced",
-      big.reset === true || big.status === 413 || big.status === 400,
-      JSON.stringify(big).slice(0, 100),
+      "64KB body cap enforced with a readable error",
+      bigBody?.id === 7 && /request too large: 71 KB is over the 64 KB limit/.test(bigBody?.error?.message ?? ""),
+      JSON.stringify(big).slice(0, 200),
+    );
+    const bigWhiteboard = await rpc(handshake, "orchestrator.whiteboard_update", {
+      runId: "run-execute-chat",
+      action: "replace",
+      title: "Large map",
+      summary: "s".repeat(70 * 1024),
+      nodes: [{ id: "only", kind: "topic", title: "Only", x: 0, y: 0 }],
+      edges: [],
+    });
+    check(
+      "a whiteboard write over 64 KB is not refused for its size",
+      !/request too large/.test(bigWhiteboard.error?.message ?? "") && !bigWhiteboard.parseError,
+      JSON.stringify(bigWhiteboard).slice(0, 200),
     );
   } finally {
     // Launch the binary directly and await its exit: killing Electron's Node

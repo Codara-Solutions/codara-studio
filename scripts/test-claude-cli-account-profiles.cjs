@@ -100,7 +100,7 @@ async function main() {
     profiles: [
       {
         id: "personal",
-        label: "Account 1",
+        label: "Claude Code login",
         managed: false,
         isDefault: true,
         connected: true,
@@ -148,12 +148,14 @@ async function main() {
     "a new managed profile starts as an empty vault slot",
   );
 
-  // Every profile runs in the one Claude home.
+  // Every managed profile runs in Codara's one live slot, never in the
+  // user's own Claude home.
   const alphaResolved = await store.resolveProfile({ profileId: alpha.profile.id });
   assert.equal(alphaResolved.managed, true);
   assert.equal(alphaResolved.label, "Work Claude");
-  assert.equal(alphaResolved.configDir, personalConfigDir);
-  assert.equal(alphaResolved.configDirEnv, null);
+  assert.equal(alphaResolved.configDir, store.liveConfigDir);
+  assert.equal(alphaResolved.configDirEnv, store.liveConfigDir);
+  assert.equal(store.liveConfigDir, path.join(storeRoot, "live", "home"));
   assert.deepEqual(fs.readdirSync(alphaDir), [], "resolving never plants anything");
 
   const metadataText = fs.readFileSync(
@@ -179,10 +181,10 @@ async function main() {
         input.profileId === alpha.profile.id &&
         input.managed === true &&
         input.rootDir === storeRoot &&
-        input.configDir === personalConfigDir &&
-        input.configDirEnv === null,
+        input.configDir === store.liveConfigDir &&
+        input.configDirEnv === store.liveConfigDir,
     ),
-    "the checker learns the profile, the account root and the one home",
+    "the checker learns the profile, the account root and the live slot",
   );
   assert.equal(JSON.stringify(inspection).includes(alphaDir), false);
 
@@ -284,7 +286,7 @@ async function main() {
   assert.equal((await store.deleteProfile(gamma.profile.id)).deleted, false);
   await rejects(() => store.deleteProfile("personal"), /cannot be deleted/i);
   // A running terminal never pins a profile: sessions run on the live login
-  // in the one home, not inside a profile's directory.
+  // in the live slot, not inside a profile's directory.
   const leased = new mod.ClaudeCliAccountProfileStore(storeRoot, {
     personalConfigDir,
     personalConfigDirEnv: null,
@@ -304,7 +306,7 @@ async function main() {
   fs.rmSync(symlinkDir, { recursive: true, force: true });
   fs.symlinkSync(personalConfigDir, symlinkDir, "dir");
   const symlinkResolved = await store.resolveProfile({ profileId: symlinkProfile.profile.id });
-  assert.equal(symlinkResolved.configDir, personalConfigDir, "a planted link never becomes a home");
+  assert.equal(symlinkResolved.configDir, store.liveConfigDir, "a planted link never becomes a home");
   await rejects(
     () => store.deleteProfile(symlinkProfile.profile.id),
     /unsafe|symlink/i,
@@ -518,13 +520,11 @@ process.stdout.write(JSON.stringify({ loggedIn: true, token: "MUST_BE_DISCARDED"
     const home = path.join(TMP, "credential-checker", "home", ".claude");
     privateDir(root);
     privateDir(home);
-    const probe = (profileId) => ({
-      profileId,
-      managed: profileId !== "personal",
-      rootDir: root,
-      configDir: home,
-      configDirEnv: null,
-    });
+    const liveSlot = path.join(root, "live", "home");
+    const probe = (profileId) =>
+      profileId === "personal"
+        ? { profileId, managed: false, rootDir: root, configDir: home, configDirEnv: null }
+        : { profileId, managed: true, rootDir: root, configDir: liveSlot, configDirEnv: liveSlot };
     let fallbackCalls = 0;
     const options = {
       liveFallback: () => {
@@ -570,32 +570,31 @@ process.stdout.write(JSON.stringify({ loggedIn: true, token: "MUST_BE_DISCARDED"
     );
     assert.equal(fallbackCalls, 0, "a vaulted profile never consults the fallback");
 
-    // The live profile (personal before any marker) reads the home's store,
-    // and an empty one asks the fallback once and caches the verdict.
+    // The System login is only ever checked for existence: no token is
+    // read, so no expiry is known and Codara never refreshes it.
     assert.deepEqual(
       await mod.claudeCredentialAuthChecker(probe("personal"), options),
-      { connected: true },
+      { connected: false, reason: "missing" },
     );
-    await mod.claudeCredentialAuthChecker(probe("personal"), options);
-    assert.equal(fallbackCalls, 1);
     writePrivateJson(path.join(home, ".credentials.json"), {
+      claudeAiOauth: { accessToken: "a", refreshToken: "r", expiresAt: 5 },
+    });
+    assert.deepEqual(
+      await mod.claudeCredentialAuthChecker(probe("personal"), options),
+      { connected: true, expiresAt: null, canRefresh: false },
+    );
+    assert.equal(fallbackCalls, 0, "the System login never consults the fallback");
+
+    // Once the marker names a profile, that profile reads the live slot.
+    writePrivateJson(path.join(root, "live-login.json"), { version: 1, profileId: IDS[1] });
+    writePrivateJson(path.join(liveSlot, ".credentials.json"), {
       claudeAiOauth: { accessToken: "a", refreshToken: "r", expiresAt: 5 },
       mcpOAuth: { server: { accessToken: "grant" } },
     });
     assert.deepEqual(
-      await mod.claudeCredentialAuthChecker(probe("personal"), { liveFallback: null }),
-      { connected: true, expiresAt: 5, canRefresh: true },
-    );
-    // Once the marker names another profile, personal reads its vault.
-    writePrivateJson(path.join(root, "live-login.json"), { version: 1, profileId: IDS[1] });
-    assert.deepEqual(
-      await mod.claudeCredentialAuthChecker(probe("personal"), { liveFallback: null }),
-      { connected: false, reason: "missing" },
-    );
-    assert.deepEqual(
       await mod.claudeCredentialAuthChecker(probe(IDS[1]), { liveFallback: null }),
       { connected: true, expiresAt: 5, canRefresh: true },
-      "the live profile reads the home's store",
+      "the live profile reads the live slot's store",
     );
 
     // A store built on the credential checker reports expiry per card.
@@ -689,7 +688,7 @@ process.stdout.write(JSON.stringify({ loggedIn: true, token: "MUST_BE_DISCARDED"
   );
 
   console.log(
-    "PASS native Claude account store: private metadata, token-blind status from the live or vaulted login, one home for every profile, path safety, defaults, staged deletion recovery, managed identity, and leak-free projection",
+    "PASS native Claude account store: private metadata, token-blind status from the live or vaulted login, one live slot for every managed profile, path safety, defaults, staged deletion recovery, managed identity, and leak-free projection",
   );
 }
 

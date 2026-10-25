@@ -12,12 +12,18 @@ import {
   DEFAULT_PREFERENCES,
   EDITOR_THEME_IDS,
   LEGACY_DEFAULT_INLINE_AUTOCOMPLETE_MODEL_IDS,
+  LINK_OPEN_TARGETS,
   type AppPreferences,
   type EditorThemeId,
+  type LinkOpenTarget,
   type NotificationChannelsPref,
   type PrefKey,
   type ThemePref,
 } from "@shared/types";
+import { normalizeKeepAwakeMode } from "@shared/keep-awake";
+import { normalizeQuickCommands, normalizeTerminalRightClick } from "@shared/quick-commands";
+import { normalizeAgentHibernationMinutes } from "@shared/agent-hibernation";
+import { normalizeSessionSearchPreferences } from "@shared/session-search";
 import { writeFileAtomic } from "./fs-atomic";
 import { codaraHome } from "./codara-home";
 
@@ -193,6 +199,23 @@ function normalizeStringMap(value: unknown): Record<string, string> {
   return out;
 }
 
+// Per-repo pattern lists: string keys to non-empty trimmed strings, bounded
+// so a hand-edited file cannot grow every removal check without limit.
+function normalizeStringListMap(value: unknown): Record<string, string[]> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const out: Record<string, string[]> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (!key.trim() || !Array.isArray(entry)) continue;
+    const items = entry
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0 && item.length <= 200)
+      .slice(0, 50);
+    if (items.length > 0) out[key] = items;
+  }
+  return out;
+}
+
 function normalize(
   input: Partial<AppPreferences> | null | undefined,
   opts: { migrateLegacyInlineDefault?: boolean } = {},
@@ -253,12 +276,45 @@ function normalize(
       typeof src.keepRunningInBackground === "boolean"
         ? src.keepRunningInBackground
         : DEFAULT_PREFERENCES.keepRunningInBackground,
+    claudeFollowsActiveAccount:
+      typeof src.claudeFollowsActiveAccount === "boolean"
+        ? src.claudeFollowsActiveAccount
+        : DEFAULT_PREFERENCES.claudeFollowsActiveAccount,
+    keepAwakeMode: normalizeKeepAwakeMode(src.keepAwakeMode),
+    keepAwakeLidClosed:
+      typeof src.keepAwakeLidClosed === "boolean"
+        ? src.keepAwakeLidClosed
+        : DEFAULT_PREFERENCES.keepAwakeLidClosed,
+    keepAgentsInYourChrome:
+      typeof src.keepAgentsInYourChrome === "boolean"
+        ? src.keepAgentsInYourChrome
+        : DEFAULT_PREFERENCES.keepAgentsInYourChrome,
     autoOpenPreview:
       typeof src.autoOpenPreview === "boolean"
         ? src.autoOpenPreview
         : DEFAULT_PREFERENCES.autoOpenPreview,
+    linkOpenTarget: (LINK_OPEN_TARGETS as readonly unknown[]).includes(src.linkOpenTarget)
+      ? (src.linkOpenTarget as LinkOpenTarget)
+      : DEFAULT_PREFERENCES.linkOpenTarget,
+    terminalLinkMenu:
+      typeof src.terminalLinkMenu === "boolean"
+        ? src.terminalLinkMenu
+        : DEFAULT_PREFERENCES.terminalLinkMenu,
     copyBranchSetupCommandByRepo: normalizeStringMap(
       src.copyBranchSetupCommandByRepo,
+    ),
+    quickCommands: normalizeQuickCommands(src.quickCommands),
+    terminalRightClick: normalizeTerminalRightClick(src.terminalRightClick),
+    agentWorktreesEnabled:
+      typeof src.agentWorktreesEnabled === "boolean"
+        ? src.agentWorktreesEnabled
+        : DEFAULT_PREFERENCES.agentWorktreesEnabled,
+    agentsMayRemoveUserWorktrees:
+      typeof src.agentsMayRemoveUserWorktrees === "boolean"
+        ? src.agentsMayRemoveUserWorktrees
+        : DEFAULT_PREFERENCES.agentsMayRemoveUserWorktrees,
+    agentWorktreeRegenerableIgnoredByRepo: normalizeStringListMap(
+      src.agentWorktreeRegenerableIgnoredByRepo,
     ),
     // Opt-in: relaunches only resume agent sessions when the user enabled the
     // Settings toggle. Absent/invalid values fall back to the default (off),
@@ -267,6 +323,13 @@ function normalize(
       typeof src.restoreAgentSessions === "boolean"
         ? src.restoreAgentSessions
         : DEFAULT_PREFERENCES.restoreAgentSessions,
+    restoreTerminalOutput:
+      typeof src.restoreTerminalOutput === "boolean"
+        ? src.restoreTerminalOutput
+        : DEFAULT_PREFERENCES.restoreTerminalOutput,
+    // Agent hibernation: one of the Settings presets (0 = off); anything else
+    // falls back to the default.
+    agentHibernationMinutes: normalizeAgentHibernationMinutes(src.agentHibernationMinutes),
     // Opt-in: the phone Remote Access listener. Off for absent/invalid
     // values, so an existing preference file never turns a network listener
     // on by surprise.
@@ -290,8 +353,13 @@ function normalize(
       typeof src.notifyPullRequests === "boolean"
         ? src.notifyPullRequests
         : DEFAULT_PREFERENCES.notifyPullRequests,
+    notifyCiFailures:
+      typeof src.notifyCiFailures === "boolean"
+        ? src.notifyCiFailures
+        : DEFAULT_PREFERENCES.notifyCiFailures,
     toastDurationMs: normalizeToastDuration(src.toastDurationMs),
     workspaceSwitchHudMs: normalizeWorkspaceSwitchHud(src.workspaceSwitchHudMs),
+    sessionSearch: normalizeSessionSearchPreferences(src.sessionSearch),
   };
 }
 
@@ -337,6 +405,19 @@ export async function loadPreferences(): Promise<AppPreferences> {
   return cache;
 }
 
+type PreferenceListener = (key: PrefKey, prefs: AppPreferences) => void;
+const preferenceListeners = new Set<PreferenceListener>();
+
+// Main-process reactions to a change, whichever path wrote it (the
+// preferences:set IPC, the agent socket's app.prefs.set). Called once the
+// cache holds the new value, before the disk write settles.
+export function onPreferenceChange(listener: PreferenceListener): () => void {
+  preferenceListeners.add(listener);
+  return () => {
+    preferenceListeners.delete(listener);
+  };
+}
+
 export async function setPreference<K extends PrefKey>(
   key: K,
   value: AppPreferences[K],
@@ -344,6 +425,13 @@ export async function setPreference<K extends PrefKey>(
   const current = await loadPreferences();
   const next = normalize({ ...current, [key]: value });
   cache = next;
+  for (const listener of preferenceListeners) {
+    try {
+      listener(key, next);
+    } catch (err) {
+      console.error("[preferences] change listener failed:", err);
+    }
+  }
   // Dual-handle: the awaited `write` rejects to the IPC caller on disk
   // failure so the renderer knows the toggle never persisted, while `writing`
   // swallows the rejection so the queue chain survives for later saves.

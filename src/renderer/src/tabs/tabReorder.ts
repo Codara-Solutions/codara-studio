@@ -107,7 +107,7 @@ export function planTabReorder(
     if (pointerX >= (slot.start + slot.end) / 2) insertIndex += 1;
   }
 
-  const gap = gapAround(slots, fromIndex);
+  const gap = stripGap(slots);
   // How far the strip collapses when the dragged tab leaves the flow — the
   // exact distance each displaced neighbour has to travel.
   const advance = Math.max(0, dragged.end - dragged.start) + gap;
@@ -216,15 +216,16 @@ export function edgeAutoScrollDelta(
   return 0;
 }
 
-// Gap between the dragged tab and its neighbour — the flex `gap` of the strip,
-// read off the live layout so a token change never needs a code change. Falls
-// back to the left neighbour for the last tab, and to 0 for a lone tab.
-function gapAround(slots: readonly TabSlot[], index: number): number {
-  if (index + 1 < slots.length) {
-    return Math.max(0, slots[index + 1].start - slots[index].end);
+// The flex `gap` of the strip, read off the live layout so a token change
+// never needs a code change: the narrowest space between two neighbours, since
+// the margins around a tab group only widen the space at its edges. 0 for a
+// lone tab.
+function stripGap(slots: readonly TabSlot[]): number {
+  let gap = Infinity;
+  for (let index = 1; index < slots.length; index += 1) {
+    gap = Math.min(gap, Math.max(0, slots[index].start - slots[index - 1].end));
   }
-  if (index > 0) return Math.max(0, slots[index].start - slots[index - 1].end);
-  return 0;
+  return Number.isFinite(gap) ? gap : 0;
 }
 
 // Left edge of the hole the displaced neighbours open. Computed on the

@@ -1,3 +1,4 @@
+import "./appimage-launch-boot";
 import {
   app,
   BrowserWindow,
@@ -12,6 +13,7 @@ import {
   type WebContents,
 } from "electron";
 import { logMain } from "./file-log";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { broadcastGitRemoteUpdated, registerIpc, setTrayHook } from "./ipc";
@@ -19,8 +21,9 @@ import { isTrustedOnSender, registerTrustedMainWindow } from "./main-window-trus
 import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { disposeAllConnections } from "./remote/connections";
-import { startAgentSocket, stopAgentSocket } from "./agent-socket";
+import { closeAllPaneOverlays, startAgentSocket, stopAgentSocket } from "./agent-socket";
 import { ensureCodaraHomeSync, codaraHome } from "./codara-home";
+import { startCrashReporterEarly, startDiagnostics } from "./diagnostics";
 import { flush, loadSettings, loadState } from "./storage";
 import {
   flushPreferences,
@@ -32,38 +35,73 @@ import { flushNotificationCenter, registerMainWindow, startNotifications } from 
 import { setSeededRoots } from "./fs-sandbox";
 import { getEnrichedPath } from "./path-reconstruction";
 import { startHookRpc, stopHookRpc } from "./hook-rpc";
-import { installClaudeHooks } from "./hook-installer";
-import { installSparkPreviewMcpAtBoot } from "./mcp-installer";
+import { setIntegrationBootPass, writeIntegrationFiles } from "./agent-launch-integration";
+import { writePaneHelperFiles } from "./pane-helper";
+import { watchStudioToolsInOtherApps } from "./builtin-mcp-actions";
+import { readSparkBuiltinOptOuts, withCodaraStudioGrokBlock } from "./mcp-installer";
+import { setManagedGrokConfigTransform } from "./orchestration/cli-account-homes";
+import { runGlobalConfigCleanup } from "./global-config-cleanup";
 import { registerPreviewBridge } from "./preview-bridge";
 import { routeGuestPopups } from "./guest-popups";
+import { isFreshPartition } from "../shared/browser-partition";
+import { openLinkFromApp } from "./open-link";
 import { registerTerminalBridge } from "./terminal-bridge";
 import { retryPendingAgentTerminalCleanups } from "./agent-terminal-lifecycle";
 import { registerPreviewInput } from "./preview-input";
+import { registerPreviewCdpSessions } from "./browser/preview-cdp";
+import { registerPreviewTargets } from "./browser/preview-target";
+import { forwardGuestChords } from "./browser/guest-chords";
+import { registerAgentDelivery } from "./agent-delivery-live";
+import { startChromeLink } from "./browser/chrome";
+import { startKeepAwake } from "./keep-awake";
+import { startServers } from "./servers";
 import { startHookWatcher, stopHookWatcher } from "./hook-watcher";
 import { initAgentSessionRegistry, flushAgentSessionRegistry, snapshotAgentSessionsForQuit } from "./agent-session-registry";
+import { sleepingAgentPanes } from "./agent-hibernation";
 import { agentProcessForPane, createCodexSessionTracker } from "./codex-session-tracker";
 import { createPiSessionTracker } from "./pi-session-tracker";
 import { listProcessesWithCommands } from "./owned-process-tree";
 import { defaultPersonalCodexHomeDir } from "./orchestration/codex-cli-account-profiles";
-import { activeTerminalAgentPaneIds, manualTerminalPaneIds, noteHostResume } from "./terminal-agent-notify";
+import {
+  activeTerminalAgentPaneIds,
+  manualTerminalPaneIds,
+  noteCodexNotifyInstalled,
+  noteHostResume,
+  terminalAgentsMidTurn,
+} from "./terminal-agent-notify";
+import { collectLiveWork, hasLiveWork, quitPromptText, type LiveWork } from "./quit-guard";
+import {
+  acquireLockAfterHandoff,
+  HANDOFF_HOLDER_EXIT_WAIT_MS,
+  handoffNonceOf,
+  installQuitSignals,
+  isProcessAlive,
+  readHandoffAnswer,
+  readHandoffHolderPid,
+  shouldWatchDevParent,
+  waitForProcessExit,
+  watchParentProcess,
+  writeHandoffAnswer,
+} from "./app-exit";
+import { flushTerminalScrollback, initTerminalScrollback } from "./terminal-scrollback";
 import {
   isAllowedMainWindowUrl,
   isSameResolvedPath,
   resolveMainWindowAllowlistConfig,
   type NavigationAllowlistConfig,
 } from "./navigation-allowlist";
-import { E2E_BACKGROUND, hideWindowFromDesktop, revealWindow } from "./e2e-background";
+import { E2E_BACKGROUND, hideWindowFromDesktop, revealWindow, isolateE2eFromDesktop } from "./e2e-background";
 import { safeUserDataOverride } from "./private-user-data";
 import {
   cleanupNativeCliActivePointerArtifacts,
   cleanupRetiredCodexHomeEnvironment,
 } from "./orchestration/native-cli-terminal-cleanup";
 import {
-  followNativeLogins,
-  startNativeLoginFollower,
   startStudioClaudeLoginKeeper,
   startUnifiedAccountMigration,
+  unifiedAccountsReady,
 } from "./orchestration/unified-account-migration";
+import { startClaudeFollow } from "./claude-follow/claude-follow-service";
 import { credentialMirror } from "./orchestration/credential-mirror";
 
 // run-store is heavy (loads the manager protocol and agent-sync transitively).
@@ -108,11 +146,13 @@ app.setName("Codara Studio");
 // has a tested DOM-renderer fallback when WebGL is unavailable. Explicit x11
 // and non-Wayland sessions remain untouched. Developers can opt back into the
 // native hardware path with CODARA_WAYLAND_HARDWARE_ACCELERATION=1.
+isolateE2eFromDesktop();
 const requestedOzonePlatform = app.commandLine.getSwitchValue("ozone-platform").toLowerCase();
 const isWaylandSession = process.platform === "linux" && process.env.XDG_SESSION_TYPE === "wayland";
 const usesNativeWayland =
   isWaylandSession &&
-  requestedOzonePlatform !== "x11";
+  requestedOzonePlatform !== "x11" &&
+  requestedOzonePlatform !== "headless";
 const usesWaylandSoftwareFallback =
   usesNativeWayland && process.env.CODARA_WAYLAND_HARDWARE_ACCELERATION !== "1";
 const disabledChromiumFeatures = new Set(
@@ -191,16 +231,50 @@ if (process.platform === "win32") {
 // alongside a dev instance. `ownsSingleInstanceLock` gates the whenReady body
 // below so a lost lock exits cleanly even if 'ready' still fires before
 // app.quit() lands.
-const ownsSingleInstanceLock =
+//
+// An instance whose window cannot load (a dead dev server, a boot that gave
+// up) would otherwise hold the lock forever, so the holder answers each
+// newcomer through the hand-off file (app-exit.ts): when it is broken it
+// quits, and the newcomer waits for the lock instead of quitting.
+const handoffNonce = randomUUID();
+let ownsSingleInstanceLock =
   process.env.SPARK_ALLOW_MULTI === "1" ||
-  app.requestSingleInstanceLock();
-if (!ownsSingleInstanceLock) {
-  app.quit();
-} else if (process.env.SPARK_ALLOW_MULTI !== "1") {
-  app.on("second-instance", () => {
-    showMainWindow();
+  app.requestSingleInstanceLock({ codaraHandoff: handoffNonce });
+const lockHandoff: Promise<boolean> | null = ownsSingleInstanceLock
+  ? null
+  : acquireLockAfterHandoff({
+      requestLock: () => app.requestSingleInstanceLock({ codaraHandoff: handoffNonce }),
+      readAnswer: () => readHandoffAnswer(app.getPath("userData"), handoffNonce),
+    });
+// A launch that lost the lock never gets `ready` on macOS (Electron emits
+// will-finish-launching, then nothing), so it acts on the hand-off without
+// waiting for it: it exits when the holder keeps the lock, and on macOS,
+// once the holder has handed the lock over and gone, it starts again as a
+// fresh launch that macOS does finish. Elsewhere the whenReady body goes on.
+void lockHandoff?.then(async (owned) => {
+  if (!owned) {
+    console.warn("[single-instance] the running instance kept the lock; quitting");
+    app.exit(0);
+    return;
+  }
+  console.warn("[single-instance] the running instance handed the lock over");
+  if (process.platform !== "darwin") return;
+  const holder = readHandoffHolderPid(app.getPath("userData"), handoffNonce);
+  if (holder) await waitForProcessExit(holder, HANDOFF_HOLDER_EXIT_WAIT_MS);
+  app.releaseSingleInstanceLock();
+  app.relaunch();
+  app.exit(0);
+});
+if (process.env.SPARK_ALLOW_MULTI !== "1") {
+  app.on("second-instance", (_event, _argv, _cwd, additionalData) => {
+    onSecondInstance(handoffNonceOf(additionalData));
   });
 }
+// Before `ready`: Chromium launches its GPU and network processes by then,
+// and Crashpad records only the processes launched after it starts.
+if (ownsSingleInstanceLock) startCrashReporterEarly();
+// Recorded before anything can reparent this process.
+const bootParentPid = process.ppid;
 
 const isDev = !app.isPackaged;
 // On win32 use the .ico; on macOS/Linux use .png — icon.ico fails to load on
@@ -250,6 +324,10 @@ function pauseTerminalDelivery(reason: TerminalPauseReason): void {
 // Bring the main window back from the tray (or recreate it if it was somehow
 // destroyed). On Windows we re-show the taskbar button that hide-to-tray hid.
 function showMainWindow(): void {
+  // A macOS launch waiting to relaunch after a hand-off holds the lock before
+  // `ready`, so a third launch reaches here first; its fresh launch opens the
+  // window, and createWindow() would throw before `ready`.
+  if (!app.isReady()) return;
   if (!mainWindow || mainWindow.isDestroyed()) {
     createWindow();
     return;
@@ -410,6 +488,9 @@ const BOOT_WATCHDOG_MS = 25_000;
 const RELAUNCHED_FLAG = "--spark-boot-relaunch";
 let bootWatchdog: NodeJS.Timeout | null = null;
 let bootFailures = 0;
+// Set when the boot ladder ran out (the dialog below), cleared when React
+// mounts. A second launch then replaces this instance instead of focusing it.
+let bootGaveUp = false;
 // `app:renderer-ready` is document-load scoped. React StrictMode, HMR, and
 // overlapping component teardown can all deliver the same ready signal more
 // than once; only the first one for the current WebContents load may flush
@@ -429,6 +510,7 @@ ipcMain.on("app:renderer-ready", (e) => {
     bootWatchdog = null;
   }
   bootFailures = 0;
+  bootGaveUp = false;
   // A run-owned terminal cleanup may have stopped its PTY while the previous
   // renderer was reloading, then retained the tab ownership after the bridge
   // timed out. React is mounted again now, so retry those exact pending
@@ -457,12 +539,49 @@ function onBootFailure(reason: string): void {
   }
   logMain("boot", "relaunch unavailable (dev mode or already relaunched); surfacing dialog");
   bootFailures = 0; // let the user retry after dismissing
-  dialog.showErrorBox(
-    "Codara Studio couldn't finish loading",
-    app.isPackaged
-      ? "The app failed to boot repeatedly. Please quit and start it again; if this persists, check <spark home>/logs/main.log."
-      : "The renderer loaded but the app never booted — in dev mode this usually means the Vite dev server died (e.g. during system sleep). Restart `npm run dev`.",
-  );
+  bootGaveUp = true;
+  // Not showErrorBox: a modal that blocks the main thread would also keep a
+  // termination signal, the dev launcher watch and a second launch from
+  // reaching this process. One dialog at a time; the ladder may come round
+  // again while it is open.
+  if (bootDialogOpen) return;
+  bootDialogOpen = true;
+  void dialog
+    .showMessageBox({
+      type: "error",
+      title: "Codara Studio couldn't finish loading",
+      message: "Codara Studio couldn't finish loading",
+      detail: app.isPackaged
+        ? "The app failed to boot repeatedly. Please quit and start it again; if this persists, check <spark home>/logs/main.log."
+        : "The renderer loaded but the app never booted. In dev mode this usually means the Vite dev server died (e.g. during system sleep). Restart `npm run dev`.",
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      bootDialogOpen = false;
+    });
+}
+let bootDialogOpen = false;
+
+// The window can no longer show the app: the boot ladder gave up, the entry
+// fails its own allowlist, or a boot failure is still unrecovered.
+function rendererCannotBoot(): boolean {
+  return bootGaveUp || rendererEntryRejected || (bootFailures > 0 && !rendererReadyForCurrentLoad);
+}
+
+function onSecondInstance(nonce: string | null): void {
+  const userData = app.getPath("userData");
+  // Already on its way out (cleanup in flight): the newcomer waits for the lock.
+  if (cleanupRan || forcedQuitReason) {
+    if (nonce) writeHandoffAnswer(userData, nonce, "quitting");
+    return;
+  }
+  if (rendererCannotBoot()) {
+    if (nonce) writeHandoffAnswer(userData, nonce, "quitting");
+    quitWithoutPrompt("a new launch found this instance unable to load its window");
+    return;
+  }
+  if (nonce) writeHandoffAnswer(userData, nonce, "focused");
+  showMainWindow();
 }
 
 // ── Renderer-entry self-check ──────────────────────────────────────────────
@@ -498,15 +617,21 @@ function reportRendererEntryRejected(
   );
   // Off the load path so a modal never blocks the navigation we are starting.
   const notify = setTimeout(() => {
-    dialog.showErrorBox(
-      "Codara Studio can't trust its own window",
-      `The app's renderer entry does not pass its navigation allowlist, so every privileged action is blocked and the window will not work.\n\n` +
-        `Cause: ${cause}.\n\n` +
-        (offender
-          ? `Fix: reinstall or move Codara Studio to a path with no "${offender}" character in it.\n\n`
-          : "") +
-        `Details are in ${join(codaraHome(), "logs", "main.log")}.`,
-    );
+    // Not showErrorBox, for the same reason as the boot dialog above.
+    void dialog
+      .showMessageBox({
+        type: "error",
+        title: "Codara Studio can't trust its own window",
+        message: "Codara Studio can't trust its own window",
+        detail:
+          `The app's renderer entry does not pass its navigation allowlist, so every privileged action is blocked and the window will not work.\n\n` +
+          `Cause: ${cause}.\n\n` +
+          (offender
+            ? `Fix: reinstall or move Codara Studio to a path with no "${offender}" character in it.\n\n`
+            : "") +
+          `Details are in ${join(codaraHome(), "logs", "main.log")}.`,
+      })
+      .catch(() => undefined);
   }, 0);
   notify.unref?.();
 }
@@ -645,12 +770,20 @@ function ensureTray(): void {
   }
 }
 
+// Kept so the quit guard can tell, synchronously, that a quit is the update
+// restart. The install path always runs after this module has loaded.
+let updaterModCached: typeof import("./auto-updater") | undefined;
+
 function registerUpdaterAfterFirstPaint(windowForEvents: BrowserWindow): void {
   // Dev builds load the module too: registerAutoUpdater itself skips update
   // CHECKS when unpackaged but still opens the SSE stream, whose git-push
   // webhook events drive instant fetches for git triggers.
   void import("./auto-updater")
-    .then(({ registerAutoUpdater }) => registerAutoUpdater(windowForEvents))
+    .then((updater) => {
+      updaterModCached = updater;
+      updater.setUpdateRestartLiveWork(currentLiveWork);
+      return updater.registerAutoUpdater(windowForEvents);
+    })
     .catch((err) => console.warn("[main] auto-updater failed to load:", err));
 }
 
@@ -674,6 +807,10 @@ function createWindow(): void {
     titleBarStyle: process.platform === "win32" ? "hidden" : undefined,
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
+      // The e2e suite alone opts its workspaces into a first terminal (see
+      // playwright.config.ts); a real workspace always starts empty.
+      additionalArguments:
+        process.env.CODARA_E2E_SEED_TERMINAL === "1" ? ["--codara-e2e-seed-terminal"] : [],
       // Renderer + preload run in a sandboxed OS process; the preload has no
       // Node deps (verified) so flipping this on costs nothing and gives us
       // Chromium's full process isolation. Keep contextIsolation + no
@@ -751,6 +888,12 @@ function createWindow(): void {
   // window, but a tray is the reliable always-visible re-entry point, so we
   // require it before going headless. On Windows we also drop the taskbar
   // button so the hidden window doesn't linger there.
+  // Windows logoff and shutdown: the same no-prompt rule as powerMonitor's
+  // "shutdown" on macOS and Linux.
+  mainWindow.on("session-end", () => {
+    quitWithLiveWorkConfirmed = true;
+    quitPrompt?.abort();
+  });
   mainWindow.on("close", (e) => {
     if (isQuitting) return; // real quit in flight — let the window close
     // Close-to-tray: the window hides and the app keeps running. On macOS the
@@ -775,8 +918,8 @@ function createWindow(): void {
     app.quit();
   });
 
-  const openBrowserUrlInSpark = (url: string) => {
-    mainWindow?.webContents.send("app:open-browser-url", url);
+  const openLinkFromMainWindow = (url: string) => {
+    void openLinkFromApp(url, mainWindow?.webContents);
   };
 
   // Navigation guard for the privileged main window. The allowlist is derived
@@ -784,7 +927,8 @@ function createWindow(): void {
   // an unpackaged build, and the packaged renderer entry file. Only those two
   // targets may become the document of this webContents (which carries the
   // window.spark preload); everything else is prevented and handed to the
-  // in-app browser instead. Applied to every navigation-ish event, including
+  // link opener instead, which follows the linkOpenTarget preference.
+  // Applied to every navigation-ish event, including
   // subframes via will-frame-navigate, so a hostile iframe cannot navigate the
   // top frame to an attacker origin. This does NOT govern preview <webview>
   // guests: they are separate webContents and do not fire these events on the
@@ -798,7 +942,7 @@ function createWindow(): void {
   const guardNavigation = (details: Electron.Event, url: string) => {
     if (isAllowedMainWindowUrl(url, navAllowlistConfig)) return;
     details.preventDefault();
-    openBrowserUrlInSpark(url);
+    openLinkFromMainWindow(url);
   };
   mainWindow.webContents.on("will-navigate", (details, url) => guardNavigation(details, url));
   mainWindow.webContents.on("will-redirect", (details, url) => guardNavigation(details, url));
@@ -822,7 +966,17 @@ function createWindow(): void {
   // below only reaffirm Electron's own defaults for a webview guest (node off,
   // isolation on); they are defense in depth, not the mechanism. We do NOT
   // newly toggle sandbox here: that would change the guest's process model.
-  mainWindow.webContents.on("will-attach-webview", (_event, webPreferences, params) => {
+  mainWindow.webContents.on("will-attach-webview", (event, webPreferences, params) => {
+    // A guest runs in the default session or in a logged-out tab's own
+    // in-memory partition. Any other name could be a `persist:` one that
+    // writes to disk or is shared with something else, and dropping the
+    // attribute would put a tab meant to be logged out into the user's
+    // signed-in session, so such a guest is refused.
+    if (params.partition && !isFreshPartition(params.partition)) {
+      logMain("security", `refused a browser tab in partition ${JSON.stringify(params.partition)}`);
+      event.preventDefault();
+      return;
+    }
     webPreferences.nodeIntegration = false;
     webPreferences.nodeIntegrationInSubFrames = false;
     webPreferences.contextIsolation = true;
@@ -856,7 +1010,7 @@ function createWindow(): void {
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    openBrowserUrlInSpark(url);
+    openLinkFromMainWindow(url);
     return { action: "deny" };
   });
 
@@ -926,6 +1080,12 @@ function createWindow(): void {
     if (!details.isMainFrame || details.isSameDocument) return;
     rendererReadyForCurrentLoad = false;
     armBootWatchdog();
+    // Pane overlays are document state with no restore path.
+    closeAllPaneOverlays();
+    // So are Explorer watches: the new document arms the roots it shows, and a
+    // root it no longer shows would otherwise stay watched until the window
+    // closes.
+    fsWatcher.disposeForWebContents(windowForEvents.webContents);
   });
   // The page itself failed to load (dead dev server, missing asset). Retry via
   // the same escalation ladder after a short delay — an immediate reload against
@@ -969,9 +1129,15 @@ function createWindow(): void {
 }
 
 app.whenReady().then(async () => {
-  // Lost the single-instance lock — another Codara Studio owns it. app.quit()
-  // was already called; bail before doing any startup work or opening a window.
-  if (!ownsSingleInstanceLock) return;
+  // Lost the single-instance lock: another Codara Studio owns it. Unless that
+  // one said it is quitting and then let go, bail before doing any startup
+  // work or opening a window.
+  if (!ownsSingleInstanceLock) {
+    // The hand-off handler above exits or relaunches this process.
+    if (!(await lockHandoff) || process.platform === "darwin") return;
+    ownsSingleInstanceLock = true;
+    startCrashReporterEarly();
+  }
 
   // macOS bounces an app into the Dock and activates it on launch even when it
   // opens no visible window. "accessory" keeps the process out of the Dock and
@@ -982,41 +1148,86 @@ app.whenReady().then(async () => {
   }
 
   ensureCodaraHomeSync();
+  // The crash and freeze black box: before anything slow runs, so a freeze
+  // during startup is caught, and before the window, so Crashpad watches it
+  // on a first run too.
+  startDiagnostics();
   logMain(
     "boot",
     `app start pid=${process.pid} packaged=${app.isPackaged} relaunched=${process.argv.includes(RELAUNCHED_FLAG)}`,
   );
+  // Chromium installs its own signal handlers after ready; see app-exit.ts.
+  // Once now and once more a little later, so ours are the last installed
+  // whichever turn Chromium's land on, even when the window never loads.
+  installQuitSignals(onQuitSignal);
+  setTimeout(() => installQuitSignals(onQuitSignal), 3000).unref();
+  // `npm run dev`: the electron-vite process that spawned us also serves the
+  // renderer. Once it is gone the window can never load again, so go too
+  // rather than hold the single-instance lock behind a dead window.
+  if (
+    shouldWatchDevParent({
+      isPackaged: app.isPackaged,
+      rendererUrl: process.env.ELECTRON_RENDERER_URL,
+      parentPid: bootParentPid,
+    })
+  ) {
+    logMain("lifecycle", `dev mode: watching the launcher (pid ${bootParentPid})`);
+    watchParentProcess({
+      parentPid: bootParentPid,
+      currentParentPid: () => process.ppid,
+      isAlive: (pid) => isProcessAlive(pid),
+      onGone: (reason) => quitWithoutPrompt(`dev launcher ${reason}`),
+    });
+  }
   if (usesWaylandSoftwareFallback) {
     logMain("boot", "graphics backend=wayland-software (automatic crash-safety fallback)");
   } else if (usesNativeWayland) {
     logMain("boot", "graphics backend=wayland-hardware (Vulkan disabled, ANGLE=OpenGL)");
   }
 
-  // Install Codara's Python hooks into ~/.claude/settings.json so every
-  // Claude Code session pipes SessionStart / PreToolUse / Notification / Stop
-  // / ... events into <spark-home>/hooks/ for the watcher to ingest below.
-  // This is the "CLI hook ingestion (free observability)" big-bet's installer
-  // half. Fire-and-forget — failures (no Claude installed, settings.json
-  // malformed, etc) are logged but never block boot.
-  void installClaudeHooks().catch((err) =>
-    console.warn("[main] hook installer failed:", err),
+  // Codara's hooks, its MCP server and Codex's notify program reach only the
+  // sessions Codara starts, on their command line. First take back what
+  // earlier builds wrote into the user's own CLI configs (exact Codara
+  // entries only, with a backup), then write the per-launch files; the
+  // cleanup runs first so the user's own Codex notify, restored by it, is
+  // the one the injected notify chains to. SPARK_CODEX_NOTIFY=0 leaves the
+  // notify program out.
+  setManagedGrokConfigTransform((source) =>
+    withCodaraStudioGrokBlock(source, !readSparkBuiltinOptOuts().has("grok")),
   );
-
-  // Auto-install the codara-studio MCP server in the user's Claude / Codex
-  // configs so manually-run and orchestrated agents can drive the live
-  // <preview> tab (browser-use / computer-use). Guarded by a setting
-  // (default on). Unlike the older behavior, this createIfMissing's the config
-  // when the corresponding CLI binary resolves on disk — so a user with
-  // `claude`/`codex` installed but never launched still gets the entry.
-  void (async () => {
-    try {
-      const settings = await loadSettings();
-      if (settings.playwrightMcpAutoInstall === false) return;
-      await installSparkPreviewMcpAtBoot();
-    } catch (err) {
-      console.warn("[main] codara-studio mcp installer failed:", err);
-    }
-  })();
+  setIntegrationBootPass(
+    (async () => {
+      try {
+        const settings = await loadSettings();
+        watchStudioToolsInOtherApps(settings);
+        await runGlobalConfigCleanup({ keepMcpEntries: settings.studioToolsInOtherApps === true });
+      } catch (err) {
+        console.warn("[main] global config cleanup failed:", err);
+      }
+      try {
+        const keep = await import("./browser/chrome/keep-agents-in-chrome");
+        const summary = await writeIntegrationFiles({
+          codexNotify: process.env.SPARK_CODEX_NOTIFY !== "0",
+          separateBrowserTools: await keep.separateBrowserToolsGuardForLaunch().catch(() => null),
+        });
+        noteCodexNotifyInstalled(summary.codexNotify);
+        // A browser server added in the Capability Center is off for the
+        // next session too.
+        const { onAgentAssetsChanged } = await import("./agent-sync");
+        onAgentAssetsChanged(() => void keep.applyKeepAgentsInChrome().catch(() => undefined));
+      } catch (err) {
+        console.warn("[main] agent integration files failed:", err);
+      }
+      try {
+        // The interpreter Cora's Pi processes use: on macOS the main binary
+        // run as node puts a Dock tile up for every `codara-pane` call.
+        const { electronAsNodeInterpreter } = await import("./orchestration/pi-runtime-electron");
+        await writePaneHelperFiles({ nodePath: electronAsNodeInterpreter() });
+      } catch (err) {
+        console.warn("[main] pane helper files failed:", err);
+      }
+    })(),
+  );
 
   // Warm the enriched-PATH cache. Electron from Finder/Dock/Explorer inherits
   // a sparse PATH that doesn't include npm-global, nvm, scoop, etc. The first
@@ -1070,17 +1281,17 @@ app.whenReady().then(async () => {
   }
 
   registerIpc();
-  // Unified Anthropic accounts: fold whatever an earlier build left on disk
-  // into the two-halves model and start the credential mirror. Every account
-  // handler registered above awaits this pass, so it must start before any
-  // of them can run, which is why it follows registerIpc() synchronously.
+  // Accounts: migrate an earlier build's registry once, project the Active
+  // accounts and start the credential mirror. Every account handler
+  // registered above awaits this pass, so it must start before any of them
+  // can run, which is why it follows registerIpc() synchronously.
   void startUnifiedAccountMigration();
   // The live Claude login gets one refresher ahead of Claude Code and Cora,
   // so the two never race for its single-use refresh token.
   startStudioClaudeLoginKeeper();
-  // A `/login` or `codex login` in any terminal as another known account
-  // makes that account the Active one here too.
-  startNativeLoginFollower();
+  // A plain `claude` in other terminals follows the active account, set up
+  // only by an installed app (claude-follow/claude-follow.ts).
+  startClaudeFollow(unifiedAccountsReady());
   // Earlier builds installed a copy of Pi of their own under the Codara
   // home. Cora now runs the user's Pi (or the bundled one) and nothing
   // reads that copy any more.
@@ -1125,8 +1336,12 @@ app.whenReady().then(async () => {
   }
   registerPreviewBridge();
   registerTerminalBridge();
-  // Main-side computer-use executor for the preview tab: listens for tab
-  // announcements so console capture starts at dom-ready.
+  // Every preview guest gets its DevTools protocol session (and console and
+  // network recording) as Chromium attaches it; the computer-use executor
+  // binds announced guests to their tabs.
+  registerPreviewCdpSessions();
+  registerPreviewTargets();
+  registerAgentDelivery();
   registerPreviewInput();
 
   // Hook RPC server for sub-agents (big-bet "Hook contract for sub-agents to
@@ -1175,6 +1390,11 @@ app.whenReady().then(async () => {
   }
   codexSessionTracker.start();
   piSessionTracker.start();
+  // Saved terminal output, replayed into panes the renderer restores. Loads
+  // its index in the background; the first restore request waits for it.
+  void initTerminalScrollback().catch((err) => {
+    console.warn("[main] terminal scrollback store failed to init:", err);
+  });
 
   // CLI hook ingestion watcher (big-bet "CLI hook ingestion — free
   // observability"). The installer (called earlier in app.whenReady) drops
@@ -1194,6 +1414,9 @@ app.whenReady().then(async () => {
   await loadPreferences().catch(() => undefined);
 
   createWindow();
+  startServers();
+  startChromeLink();
+  startKeepAwake();
 
   // System sleep/wake handling. On suspend, checkpoint renderer state (its tab
   // tree + scrollback), flush main's stores, and pause PTY delivery into a
@@ -1201,6 +1424,11 @@ app.whenReady().then(async () => {
   // window too: macOS can lock before the actual suspend event while remote
   // PTYs are still producing final bytes.
   powerMonitor.on("lock-screen", () => pauseTerminalDelivery("lock-screen"));
+  // A logout or shutdown must not stall behind the live-work quit prompt.
+  powerMonitor.on("shutdown", () => {
+    quitWithLiveWorkConfirmed = true;
+    quitPrompt?.abort();
+  });
   powerMonitor.on("suspend", () => {
     logMain("power", "system suspend");
     pauseTerminalDelivery("suspend");
@@ -1235,7 +1463,6 @@ app.whenReady().then(async () => {
       void import("./orchestration/claude-login-keeper")
         .then((m) => m.nudgeClaudeLoginKeeper())
         .catch(() => undefined);
-      void followNativeLogins().catch(() => undefined);
       // Waking the machine is exactly when remote state is stale: bring every
       // repository's next background fetch forward (short jitter, not now).
       void import("./git-auto-fetch")
@@ -1243,6 +1470,16 @@ app.whenReady().then(async () => {
         .catch(() => undefined);
       void import("./github-push-watch")
         .then((m) => m.nudgeGitHubPushWatch())
+        .catch(() => undefined);
+      // CI that failed while the lid was shut is news now, not at the next
+      // tick (up to five minutes after an idle stretch).
+      void import("./github-ci-watch")
+        .then((m) => m.nudgeGitHubCiWatch())
+        .catch(() => undefined);
+      // Scheduled automations whose time passed during the sleep follow
+      // their missed-run policy: one catch-up pass or one skip record.
+      void import("./orchestration/scheduler")
+        .then((m) => m.catchUpScheduledJobs("wake"))
         .catch(() => undefined);
     }, 1500);
     resumeTimer.unref();
@@ -1284,34 +1521,12 @@ app.whenReady().then(async () => {
   });
   if (!ok) console.warn("[main] failed to register global automations shortcut");
 
-  // Forward chord keystrokes (Ctrl/Cmd/Alt/Meta + key) from any <webview>
-  // guest back to its host renderer so app-wide shortcuts (Ctrl+1, Ctrl+P
-  // Quick Open,
-  // …) keep working when focus is inside the embedded page. Listening on
-  // the webContents is the only place this fires — the webview *tag* in the
-  // host renderer does NOT emit before-input-event, so the host-side
-  // listener we tried first was always dead. The host preload turns the
-  // forwarded payload into a synthetic KeyboardEvent dispatched on window.
+  // Every guest: popups open in Codara's own tabs, and chord keys reach the
+  // app's shortcuts (browser/guest-chords.ts).
   app.on("web-contents-created", (_e, contents) => {
     if (contents.getType() !== "webview") return;
     routeGuestPopups(contents, () => contents.hostWebContents);
-    contents.on("before-input-event", (_event, input) => {
-      if (input.type !== "keyDown") return;
-      const mods = input.modifiers ?? [];
-      const hasChord =
-        mods.includes("control") ||
-        mods.includes("alt") ||
-        mods.includes("meta");
-      if (!hasChord) return;
-      if (!input.key) return;
-      const host = contents.hostWebContents;
-      if (!host || host.isDestroyed()) return;
-      host.send("webview:chord-key", {
-        key: input.key,
-        code: input.code,
-        modifiers: mods,
-      });
-    });
+    forwardGuestChords(contents);
   });
 
   // Start the four-channel notifier subscription to run-store events. The
@@ -1341,6 +1556,14 @@ app.whenReady().then(async () => {
       logMain("git-auto-fetch", `failed to start: ${String(err)}`);
     });
 
+  // Agent session search: the local index of agent transcripts. Its first
+  // pass waits out the launch and runs on its own low-priority thread.
+  void import("./session-search/service")
+    .then((m) => m.startSessionSearch())
+    .catch((err) => {
+      logMain("session-search", `failed to start: ${String(err)}`);
+    });
+
   // "A teammate pushed" alerts, sourced from GitHub's Events API so the
   // pusher's identity is read rather than guessed from commit emails. Separate
   // from the fetcher above: that one keeps local git state fresh, this one
@@ -1349,6 +1572,21 @@ app.whenReady().then(async () => {
     .then((m) => m.startGitHubPushWatch({ isOnline: () => net.isOnline() }))
     .catch((err) => {
       logMain("github-push-watch", `failed to start: ${String(err)}`);
+    });
+  // "CI failed on your pull request" alerts (Settings, Git).
+  void import("./github-ci-watch")
+    .then((m) => m.startGitHubCiWatch())
+    .catch((err) => {
+      logMain("github-ci-watch", `failed to start: ${String(err)}`);
+    });
+
+  // Re-reads the providers' model lists every few hours so a model released
+  // while Codara runs appears in the worker list, switched off. Its first pass
+  // waits out the launch.
+  void import("./orchestration/worker-model-catalog")
+    .then((m) => m.startWorkerModelCatalogRefresh())
+    .catch((err) => {
+      logMain("worker-model-catalog", `failed to start: ${String(err)}`);
     });
 
   // Arm automations (cron / interval / folder-watch triggers) and resume any
@@ -1362,7 +1600,9 @@ app.whenReady().then(async () => {
       // Re-arm manager stages whose linked answer was persisted before the
       // previous process exited. The durable record is claimed idempotently by
       // run-store immediately before the intended stage starts.
-      const runStore = await import("./orchestration/run-store");
+      // Through getRunStore, so the quit guard and the quit-time worker drain
+      // (which only consult an already loaded run-store) see this session's runs.
+      const runStore = await getRunStore();
       await runStore.recoverPendingConversationRewinds();
       await runStore.recoverAbandonedActiveRpcQuestions();
       await runStore.recoverOrphanedManagerTurns();
@@ -1397,6 +1637,15 @@ app.whenReady().then(async () => {
       await dw.recoverDirectRuns();
     } catch (err) {
       console.warn("[main] direct-worker recovery failed:", err);
+    }
+    try {
+      // Workflow runs are direct runs that recoverDirectRuns skips: park the
+      // ones the previous session left running. Starts nothing.
+      const wf = await import("./orchestration/workflow-driver");
+      await wf.installWorkflowDriver();
+      await wf.recoverWorkflowRuns();
+    } catch (err) {
+      console.warn("[main] workflow recovery failed:", err);
     }
     try {
       const { startScheduler } = await import("./orchestration/scheduler");
@@ -1453,6 +1702,7 @@ async function flushAllStores(): Promise<void> {
     // land while it is still in flight. Only when run-store was already loaded:
     // quitting must not pull the heavy module in just to flush nothing.
     runStoreMod?.flushRunCompletionTails().catch(() => undefined) ?? Promise.resolve(),
+    flushTerminalScrollback().catch(() => undefined),
   ]);
 }
 
@@ -1506,8 +1756,108 @@ const piSessionTracker = createPiSessionTracker({
 // cleanup, then quit again (cleanQuit short-circuits the second pass).
 let cleanQuit = false;
 let cleanupRan = false;
+// Set once a quit is allowed to kill live Cora work, so the second before-quit
+// pass (and a quit the OS forces at shutdown) never asks twice.
+let quitWithLiveWorkConfirmed = false;
+
+// Cora runs with a turn or a worker in flight, and terminal agents in the
+// middle of a turn. Memory-only, so before-quit and the update restart gate
+// can ask synchronously; run-store is only consulted once it has loaded.
+function currentLiveWork(): LiveWork {
+  return collectLiveWork(runStoreMod?.liveWorkForQuit(), terminalAgentsMidTurn());
+}
+
+function describeLiveWork(live: LiveWork): string {
+  return `${live.chats} chat(s), ${live.automations} automation(s), ${live.workers} worker(s), ${live.terminalAgents.length} terminal agent(s)`;
+}
+
+// The live-work prompt, while it is open. Aborting it closes the dialog.
+let quitPrompt: AbortController | null = null;
+// Why a quit skipped the prompt; set once.
+let forcedQuitReason: string | null = null;
+
+// Quits nobody is there to confirm (a termination signal, the dev launcher
+// gone, a newer launch replacing a broken window) skip the live-work prompt
+// and close an open one. The quit itself is the ordinary guarded cleanup, so
+// terminal output and agent sessions are saved as on any quit.
+function onQuitSignal(signal: NodeJS.Signals): void {
+  quitWithoutPrompt(`received ${signal}`);
+}
+
+function quitWithoutPrompt(reason: string): void {
+  if (forcedQuitReason) return;
+  forcedQuitReason = reason;
+  logMain("lifecycle", `${reason}: quitting without the live-work prompt (live: ${describeLiveWork(currentLiveWork())})`);
+  quitWithLiveWorkConfirmed = true;
+  quitPrompt?.abort();
+  isQuitting = true;
+  app.quit();
+}
+
+// Quitting stops every manager turn, worker and terminal agent in seconds:
+// runs come back paused with half-applied edits, and a terminal agent loses
+// the turn it was in. Ask first. The check is synchronous and memory-only, so
+// it can decide inside before-quit; the question itself is asynchronous, so a
+// signal or a second launch still reaches this process while it is open, and
+// a yes quits again.
+function confirmQuitWithLiveWork(): boolean {
+  if (quitWithLiveWorkConfirmed || E2E_BACKGROUND) return true;
+  // Restart now on a waiting update restart already answered this.
+  if (updaterModCached?.isInstallForced() === true) return true;
+  const live = currentLiveWork();
+  if (!hasLiveWork(live)) return true;
+  askToQuitWithLiveWork(live);
+  return false;
+}
+
+function askToQuitWithLiveWork(live: LiveWork): void {
+  if (quitPrompt) return;
+  const restartingForUpdate = updaterModCached?.isInstallRequested() === true;
+  const prompt = quitPromptText(live, {
+    restartingForUpdate,
+    resumesTerminalAgents: getPreferenceCached("restoreAgentSessions") === true,
+    keepsTerminalOutput: getPreferenceCached("restoreTerminalOutput") !== false,
+  });
+  const options: Electron.MessageBoxOptions = {
+    type: "warning",
+    buttons: [prompt.confirmLabel, prompt.cancelLabel],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+    message: prompt.message,
+    detail: prompt.detail,
+  };
+  const asking = new AbortController();
+  quitPrompt = asking;
+  const parent = mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() ? mainWindow : null;
+  const withSignal = { ...options, signal: asking.signal };
+  const shown = parent ? dialog.showMessageBox(parent, withSignal) : dialog.showMessageBox(withSignal);
+  void shown
+    .then(({ response: choice }) => {
+      if (asking.signal.aborted) return;
+      if (choice !== 0) {
+        if (restartingForUpdate) updaterModCached?.cancelInstallRequest();
+        return;
+      }
+      quitWithLiveWorkConfirmed = true;
+      isQuitting = true;
+      app.quit();
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      if (quitPrompt === asking) quitPrompt = null;
+    });
+}
+
 app.on("before-quit", (event) => {
   if (cleanQuit) return;
+  if (!cleanupRan && !confirmQuitWithLiveWork()) {
+    event.preventDefault();
+    // The tray's Quit flags isQuitting before calling app.quit(); undo it so
+    // a later window close hides or quits as it normally would.
+    isQuitting = false;
+    return;
+  }
   // Flag the quit BEFORE anything else. Otherwise the async cleanup below
   // preventDefault()s this quit, then later re-calls app.quit() — and on that
   // second pass the window `close` handler would still see isQuitting === false
@@ -1518,6 +1868,11 @@ app.on("before-quit", (event) => {
   event.preventDefault();
   if (cleanupRan) return; // cleanup already in flight from an earlier quit attempt
   cleanupRan = true;
+  // An update restart still waiting for agents ends with this quit. Its
+  // timer would otherwise see the agents stop during cleanup and turn this
+  // plain quit into an install that reopens the app. (A restart the gate
+  // started itself is no longer waiting, so this leaves it alone.)
+  updaterModCached?.cancelUpdateRestart();
 
   // Hard-exit fallback: if cleanup hangs (e.g. a wedged fs handle), force the
   // process to die rather than block quit forever. Mirrors the headless
@@ -1555,20 +1910,36 @@ app.on("before-quit", (event) => {
           const agent = agentProcessForPane(session.pid, processes);
           if (agent) live.set(session.id, agent.runtime);
         }
+        // Agents Codara put to sleep (agent hibernation) are running
+        // sessions too: the relaunch restore must bring them back.
+        for (const [paneId, runtime] of sleepingAgentPanes()) live.set(paneId, runtime);
       }
       snapshotAgentSessionsForQuit(live);
       if (live) signalRendererBeforeQuit([...live.keys()]);
       await flushAgentSessionRegistry();
+      // Each pane's output, saved as it stands now. Not awaited: the writes
+      // run alongside the agent drain and the graceful PTY teardown below,
+      // which need the 5s budget to let agents save their sessions, and
+      // flushAllStores waits for any still running.
+      void flushTerminalScrollback().catch(() => undefined);
       // Drain orchestration-owned workers and all provider sessions before the
       // broad PTY sweep. This drain is single-flight and bounded (≤2s), leaving
       // room for graceful PTY teardown inside the 5s hard-exit fallback.
       if (runStoreMod) {
+        // Workflow runs first, so the agents this drain kills are not taken
+        // for their answers.
+        await import("./orchestration/workflow-driver")
+          .then((m) => m.suspendWorkflowRunsForQuit())
+          .catch(() => undefined);
         await runStoreMod.shutdownRunRuntimeResources().catch(() => undefined);
       }
       // Graceful (bounded ≤1.5s) PTY teardown so agent CLIs can flush their
       // session transcripts before any force-kill — fits comfortably inside
       // the 5s hard-exit fallback above. See disposeAllGraceful.
       await pty.disposeAllGraceful();
+      await import("./session-search/service")
+        .then((m) => m.stopSessionSearch())
+        .catch(() => undefined);
       fsWatcher.disposeAll();
       disposeAllConnections();
       // Close the hook RPC alongside ptys so any in-flight worker post (which
@@ -1599,15 +1970,25 @@ app.on("before-quit", (event) => {
       // it applies the downloaded update and relaunches the app. Everything
       // else is a plain quit. cleanQuit is already true, so the quit Squirrel
       // issues passes straight through this handler.
+      // The second quit still closes the window, and a renderer that hangs in
+      // its unload would hold that close (and the process) forever.
+      const plainQuit = (): void => {
+        const lastResort = setTimeout(() => {
+          process.stderr.write("spark: forcing exit after the window did not close\n");
+          app.exit(0);
+        }, 3000);
+        lastResort.unref();
+        app.quit();
+      };
       void import("./auto-updater")
         .then((updater) => {
           if (app.isPackaged && updater.isInstallRequested()) {
             updater.performQuitAndInstall();
           } else {
-            app.quit();
+            plainQuit();
           }
         })
-        .catch(() => app.quit());
+        .catch(plainQuit);
     }
   })();
 });

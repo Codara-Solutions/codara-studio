@@ -11,19 +11,27 @@ import { logMain } from "../file-log";
 import { subscribeToEvents } from "../orchestration/event-log";
 import { getPreferenceCached, loadPreferences } from "../preferences-store";
 import { cachedState } from "../storage";
-import { isWatchingPane, isWatchingRun } from "./attention";
+import { isPaneVisible, isWatchingPane, isWatchingRun } from "./attention";
 import {
   activeWindow,
   deliver,
   registerDeliveryWindow,
   signalTerminalAttention,
 } from "./deliver";
-import { recordToCenter } from "./center-store";
+import {
+  isEventMuted,
+  loadNotificationCenter,
+  noteCenterWorkspaces,
+  recordToCenter,
+  settleCenterJob,
+  settleCenterSource,
+} from "./center-store";
 import {
   clearLastAlerted,
   createPolicyState,
   decide,
   rearm as policyRearm,
+  terminalAlertWatched,
 } from "./policy";
 import type { PublishInput } from "./types";
 import { publishDeliveredNotification } from "./subscribers";
@@ -36,12 +44,21 @@ import { publishDeliveredNotification } from "./subscribers";
 
 export { setAttention } from "./attention";
 export {
+  centerSummary,
   clearCenter,
   flushNotificationCenter,
   listCenterEntries,
   markCenterAllRead,
   markCenterRead,
+  markCenterViewed,
+  muteCenterSource,
+  noteCenterWorkspaces,
+  removeCenterEntries,
   removeCenterEntry,
+  restoreCenterEntries,
+  setCenterRead,
+  settleCenterEntries,
+  unmuteCenterSource,
 } from "./center-store";
 export type { PublishInput } from "./types";
 
@@ -56,7 +73,10 @@ function watchingTarget(event: PublishInput): boolean {
   const target = event.target;
   if (target.type === "run") return isWatchingRun(target.runId);
   if (target.type === "terminal") {
-    return isWatchingPane(target.workspaceId, target.tabId, target.paneId);
+    return terminalAlertWatched(event.kind, {
+      selected: isWatchingPane(target.workspaceId, target.tabId, target.paneId),
+      visible: isPaneVisible(target.workspaceId, target.tabId, target.paneId),
+    });
   }
   // Teammate-push alerts (workspace targets) have no exact surface either —
   // being in the workspace doesn't mean the Source Control graph is on
@@ -88,18 +108,19 @@ export function publish(input: PublishInput): void {
   }
   const watching = watchingTarget(input);
   const dnd = getPreferenceCached("notificationsDnd") === true;
+  const muted = isEventMuted(event);
   const decision = decide(
     { kind: event.kind, sourceKey: event.sourceKey },
-    { watching, dnd },
+    { watching, dnd, muted },
     state,
   );
   // Persistent audit trail (<codaraHome>/logs/main.log): one line per
-  // publish, delivered or not. Center entries get auto-acknowledged and
-  // removed the moment the user views the target, so without this line a
-  // background chime leaves no evidence of what raised it.
+  // publish, delivered or not. Center rows fold repeats and get dismissed, so
+  // without this line a background chime can leave no evidence of what
+  // raised it.
   logMain(
     "notify",
-    `${decision.deliver ? "DELIVER" : "skip"} kind=${event.kind} source=${event.sourceKey} reason=${decision.reason} watching=${watching} dnd=${dnd} title="${event.title}" body="${event.body.replace(/\s+/g, " ").slice(0, 120)}"`,
+    `${decision.deliver ? "DELIVER" : "skip"} kind=${event.kind} source=${event.sourceKey} reason=${decision.reason} watching=${watching} dnd=${dnd} muted=${muted} title="${event.title}" body="${event.body.replace(/\s+/g, " ").slice(0, 120)}"`,
   );
   if (decision.record) {
     void recordToCenter(event, {
@@ -130,9 +151,28 @@ export function publish(input: PublishInput): void {
 // Real new activity on a source — clears the no-change memory + completion
 // guard so its next alert delivers. Producers call this where work resumes
 // (terminal working phase, automation iteration start); the run adapter
-// below calls it on active status transitions.
+// below calls it on active status transitions. Resumed work also means any
+// question the source asked was answered or abandoned, so its needs-you rows
+// in the center stop counting toward the badge.
 export function rearm(sourceKey: string): void {
   policyRearm(state, sourceKey);
+  settleSource(sourceKey);
+}
+
+function settleSource(sourceKey: string): void {
+  void settleCenterSource(sourceKey).catch((err) => {
+    console.warn("[notify] center settle failed:", err);
+  });
+}
+
+// An automation stopped for good. Its iteration questions are keyed by run,
+// so the loop's own finish alert (automation:<jobId>) would settle none of
+// them; a stopped loop can no longer take an answer.
+export function settleAutomationQuestions(jobId: string): void {
+  settleSource(automationSourceKey(jobId));
+  void settleCenterJob(jobId).catch((err) => {
+    console.warn("[notify] center settle failed:", err);
+  });
 }
 
 export function registerMainWindow(win: BrowserWindow): void {
@@ -178,6 +218,13 @@ function formatDuration(ms: number): string {
 }
 
 function handleRunEvent(event: SparkEvent): void {
+  // A deleted run (by the user or the retention sweep) can never be
+  // answered, so its question stops counting. Run-scoped automation
+  // questions share the run's source key and settle with it.
+  if (event.type === "run.deleted" && event.runId) {
+    settleSource(runSourceKey(event.runId));
+    return;
+  }
   // Only run-level status transitions alert; worker events fire many times
   // per run and would be pure noise.
   if (event.type !== "run.status_updated") return;
@@ -227,9 +274,20 @@ function handleRunEvent(event: SparkEvent): void {
       }
     } else {
       // paused/idle: allow a future re-entry into the same terminal status
-      // to alert again, but keep the completion guard armed.
+      // to alert again, but keep the completion guard armed. Pausing abandons
+      // the run's open question (a resume asks again), so the old row must
+      // stop waiting even though no alert follows.
       clearLastAlerted(state, sourceKey);
+      settleSource(sourceKey);
     }
+    return;
+  }
+
+  // A cancelled run publishes nothing, but its question can no longer be
+  // answered.
+  if (status === "cancelled") {
+    runActiveSince.delete(runId);
+    settleSource(sourceKey);
     return;
   }
 
@@ -251,7 +309,7 @@ function handleRunEvent(event: SparkEvent): void {
         kind: "automation.blocked",
         sourceKey,
         tone: "warning",
-        title: "Automation — needs you",
+        title: "Automation needs you",
         body: event.message?.trim() || "An automation is waiting on your answer.",
         soundKind: "needs-you",
         // workspaceId lets a cross-workspace click switch projects before
@@ -265,7 +323,7 @@ function handleRunEvent(event: SparkEvent): void {
       sourceKey,
       // A blocked run is the agent asking for you, not a failure — amber.
       tone: "warning",
-      title: "Codara Studio — needs you",
+      title: "Codara Studio needs you",
       body: event.message?.trim() || "A run is blocked and needs your attention.",
       soundKind: "needs-you",
       target: { type: "run", runId, workspaceId },
@@ -280,8 +338,12 @@ function handleRunEvent(event: SparkEvent): void {
     // ping would spam the user, so suppress it here (the runActiveSince cleanup
     // above still runs, so no per-run duration state leaks). The loop-level
     // automation.finished/failed published once per finalize by
-    // automation-loop.ts is the truthful end-of-automation alert.
-    if (automationId) return;
+    // automation-loop.ts is the truthful end-of-automation alert. That alert
+    // has the loop's source key, so this iteration's question settles here.
+    if (automationId) {
+      settleSource(sourceKey);
+      return;
+    }
     const ok = status === "complete";
     let body =
       event.message?.trim() ||
@@ -289,14 +351,14 @@ function handleRunEvent(event: SparkEvent): void {
     if (startedMs !== undefined) {
       const elapsed = Date.parse(event.timestamp) - startedMs;
       if (Number.isFinite(elapsed) && elapsed > 5 * 60_000) {
-        body += ` — ran ${formatDuration(elapsed)}`;
+        body += `, ran ${formatDuration(elapsed)}`;
       }
     }
     publish({
       kind: ok ? "run.complete" : "run.failed",
       sourceKey,
       tone: ok ? "success" : "danger",
-      title: ok ? "Codara Studio — done" : "Codara Studio — failed",
+      title: ok ? "Codara Studio is done" : "Codara Studio failed",
       body,
       soundKind: "done",
       target: { type: "run", runId, workspaceId },
@@ -311,8 +373,12 @@ export function startNotifications(): void {
   if (started) return;
   started = true;
   // Warm the preference cache so getPreferenceCached("notificationsDnd")
-  // reflects disk state from the first publish.
+  // reflects disk state from the first publish, and the center so its mutes
+  // do too.
   void loadPreferences().catch(() => undefined);
+  void loadNotificationCenter().catch(() => undefined);
+  const workspaces = cachedState()?.workspaces;
+  if (workspaces) void noteCenterWorkspaces(workspaces.map((w) => w.id)).catch(() => undefined);
   subscribeToEvents((event) => {
     try {
       handleRunEvent(event);

@@ -208,7 +208,7 @@ async function main() {
       {
         runtime: "claude",
         id: "personal",
-        label: "Account 1",
+        label: "Claude Code login",
         managed: false,
         isDefault: true,
         connected: true,
@@ -218,7 +218,7 @@ async function main() {
       {
         runtime: "codex",
         id: "personal",
-        label: "Account 1",
+        label: "Codex login",
         managed: false,
         isDefault: true,
         connected: true,
@@ -527,8 +527,9 @@ async function main() {
   assert.match(unified.message, /one sign-in serves Cora and the CLI together/);
   const claudeCreated = await claudeStore.createProfile({ label: " Work Claude " });
   assert.equal(claudeCreated.profile.id, IDS[0]);
-  const claudeManagedDir = path.join(claudeRoot, "accounts", claudeCreated.profile.id);
-  claudeConnected.add(claudeManagedDir);
+  // Every managed Claude account runs in Codara's one live slot, so that is
+  // the config directory its sign-in check is handed.
+  claudeConnected.add(claudeStore.liveConfigDir);
   const renamedClaude = await service.rename({
     runtime: "claude",
     profileId: claudeCreated.profile.id,

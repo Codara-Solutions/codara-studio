@@ -62,10 +62,13 @@ export function decideGuestPopup(input: {
 // `host` is the app window's webContents, which owns the browser tabs. Popup
 // windows are parented to the app window so they stay in its space instead of
 // opening as their own full-screen window, and their links follow these rules
-// too.
+// too. `sourceId` is the browser tab's guest the page (or popup chain) started
+// from: the renderer opens the new tab in that tab's workspace and run, not in
+// whichever workspace is on screen.
 export function routeGuestPopups(
   contents: WebContents,
   host: () => WebContents | null | undefined,
+  sourceId: number = contents.id,
 ): void {
   contents.setWindowOpenHandler((details) => {
     const decision = decideGuestPopup({
@@ -81,6 +84,7 @@ export function routeGuestPopups(
         owner.send("app:open-browser-url", details.url, {
           forceNew: true,
           background: decision.background,
+          sourceWebContentsId: sourceId,
         });
       }
       return { action: "deny" };
@@ -100,5 +104,5 @@ export function routeGuestPopups(
       },
     };
   });
-  contents.on("did-create-window", (window) => routeGuestPopups(window.webContents, host));
+  contents.on("did-create-window", (window) => routeGuestPopups(window.webContents, host, sourceId));
 }

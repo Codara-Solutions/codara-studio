@@ -12,22 +12,19 @@ import {
 } from "../claude-cli-account-profiles";
 import {
   CLAUDE_CREDENTIALS_FILE,
-  defaultClaudeCliCredentialBackend,
   removeClaudeCredentialStores,
-  type ClaudeCliCredentialBackend,
   type ClaudeCredentialRecord,
   type ClaudeCredentialStoreOptions,
 } from "../claude-cli-credentials";
 import {
   activateClaudeCliAccount,
-  adoptClaudeNativeLogin,
   claudeCliVaultFile,
-  detectClaudeNativeLogin,
   clearClaudeProfileLogin,
   forgetClaudeVaultIdentity,
   readClaudeLiveProfileId,
   readClaudeProfileIdentity,
   readClaudeProfileLogin,
+  releaseClaudeLiveSlot,
   withClaudeSelectionLock,
   writeClaudeProfileIdentity,
   writeClaudeProfileLogin,
@@ -36,6 +33,7 @@ import type { ClaudeCliProfileLeaseRegistry } from "../claude-cli-profile-execut
 import type { CanonicalCredential, CliSideRead } from "../credential-mirror";
 import type { NativeCliAccountIdentity } from "../native-cli-account-identity";
 import {
+  ensureClaudeLiveHome,
   nativeClaudeProfileLeases,
   nativeClaudeProfileStore,
 } from "../native-claude-profile-runtime";
@@ -43,12 +41,15 @@ import type { AccountIdentity, AccountProviderAdapter, CliProfileStatus } from "
 import { claudeCredentialCodec } from "./claude-credential-codec";
 
 /**
- * Claude Code: one home for every account. Terminals always run in the
- * user's own Claude home; the live profile's login sits in that home's
- * credential store and every other profile's login in its vault (see
- * claude-cli-live-login.ts). A switch moves logins, never terminals, so it
- * closes nothing: running sessions adopt the new login the next time they
- * check their credentials, exactly as after a `/login` in another terminal.
+ * Claude Code: one Codara-owned live slot for every managed account. Every
+ * Claude terminal and worker Codara starts on a managed account runs with
+ * CLAUDE_CONFIG_DIR at that slot; the Active account's login sits in it and
+ * every other managed account's login waits in its vault (see
+ * claude-cli-live-login.ts). Activating an account moves logins, never
+ * terminals: running sessions re-read the credential before each request and
+ * continue on the new account with no restart (the hot swap). The user's own
+ * login is never part of this: a terminal on the System login simply runs
+ * without the variable.
  */
 
 const KEYCHAIN_POLL_ACTIVE_MS = 20_000;
@@ -57,10 +58,9 @@ const KEYCHAIN_POLL_IDLE_MS = 60_000;
 export interface ClaudeLocation {
   cliProfileId: string;
   rootDir: string;
-  /** The Claude home every terminal runs in. */
+  /** The live slot every managed session runs in. */
   configDir: string;
-  /** Null for ~/.claude: CLAUDE_CONFIG_DIR stays unset. */
-  configDirEnv: string | null;
+  configDirEnv: string;
   /** Where the profile's login waits while another profile is live. */
   vaultFile: string;
 }
@@ -68,22 +68,18 @@ export interface ClaudeLocation {
 export interface ClaudeAccountAdapterOptions {
   store?: ClaudeCliAccountProfileStore;
   leases?: ClaudeCliProfileLeaseRegistry;
-  /** The retired selector's backend, still needed to undo that swap once. */
-  backend?: ClaudeCliCredentialBackend;
   /** Test seam: keep every live-slot read and write away from the Keychain. */
   fileOnly?: boolean;
   /** Test seam. Production asks Anthropic's OAuth profile endpoint. */
   readIdentity?: (accessToken: string) => Promise<AnthropicAccountProfile>;
   /** Test seam. Production checks process.platform for the Keychain poll. */
   platform?: NodeJS.Platform;
+  /** Test seam: provision the live slot; production links it into the System home. */
+  prepareLiveHome?: (store: ClaudeCliAccountProfileStore) => Promise<void>;
   log?: (message: string) => void;
 }
 
-export interface ClaudeAccountAdapter
-  extends AccountProviderAdapter<ClaudeLocation, ClaudeCredentialRecord> {
-  /** The per-directory backend the retired selector used, for its one-time undo. */
-  readonly credentialBackend: ClaudeCliCredentialBackend;
-}
+export type ClaudeAccountAdapter = AccountProviderAdapter<ClaudeLocation, ClaudeCredentialRecord>;
 
 export function createClaudeAccountAdapter(
   options: ClaudeAccountAdapterOptions = {},
@@ -101,14 +97,16 @@ export function createClaudeAccountAdapter(
     return leases;
   };
   const readIdentity = options.readIdentity ?? readAnthropicAccountProfile;
+  const prepareLiveHome =
+    options.prepareLiveHome ?? ((current: ClaudeCliAccountProfileStore) => ensureClaudeLiveHome(current, options.log));
 
   const locate = (cliProfileId: string): ClaudeLocation => {
     const current = resolveStore();
     return {
       cliProfileId,
       rootDir: current.rootDir,
-      configDir: current.personalConfigDir,
-      configDirEnv: current.personalConfigDirEnv,
+      configDir: current.liveConfigDir,
+      configDirEnv: current.liveConfigDir,
       vaultFile: claudeCliVaultFile(current.rootDir, cliProfileId),
     };
   };
@@ -123,15 +121,14 @@ export function createClaudeAccountAdapter(
       : null;
 
   const readCli = async (location: ClaudeLocation): Promise<CliSideRead<ClaudeCredentialRecord>> => {
+    if (!isClaudeCliManagedProfileId(location.cliProfileId)) return { kind: "unreadable" };
     const read = await readClaudeProfileLogin(resolveStore(), location.cliProfileId, storeOptions);
     if (read.kind === "unreadable") return { kind: "unreadable" };
     return { kind: "credential", raw: read.record };
   };
 
-  const knownProfileIds = async (): Promise<string[]> => [
-    CLAUDE_CLI_PERSONAL_PROFILE_ID,
-    ...(await resolveStore().snapshot()).profiles.map((profile) => profile.id),
-  ];
+  const knownProfileIds = async (): Promise<string[]> =>
+    (await resolveStore().snapshot()).profiles.map((profile) => profile.id);
 
   const profileExists = async (profileId: string): Promise<boolean> =>
     (await resolveStore().snapshot()).profiles.some((profile) => profile.id === profileId);
@@ -139,8 +136,7 @@ export function createClaudeAccountAdapter(
   return {
     provider: "anthropic",
     runtime: "claude",
-    credentialBackend: options.backend ?? defaultClaudeCliCredentialBackend,
-    personalId: CLAUDE_CLI_PERSONAL_PROFILE_ID,
+    systemProfileId: CLAUDE_CLI_PERSONAL_PROFILE_ID,
     labels: { cliLabel: "Claude Code", loginHint: "claude login" },
     sessionsFollowLiveLogin: true,
     get store() {
@@ -175,16 +171,15 @@ export function createClaudeAccountAdapter(
       await writeClaudeProfileLogin(resolveStore(), location.cliProfileId, raw, storeOptions);
     },
     async clearCli(location) {
+      if (!isClaudeCliManagedProfileId(location.cliProfileId)) return;
       await clearClaudeProfileLogin(resolveStore(), location.cliProfileId, storeOptions);
-      if (isClaudeCliManagedProfileId(location.cliProfileId)) {
-        // A directory from the per-directory model may still name a Keychain
-        // item of its own; it goes with the account.
-        const legacyDir = claudeCliManagedProfileConfigDir(location.rootDir, location.cliProfileId);
-        await removeClaudeCredentialStores(legacyDir, legacyDir, storeOptions).catch(() => undefined);
-      }
+      // A directory from the per-directory model may still name a Keychain
+      // item of its own; it goes with the account.
+      const legacyDir = claudeCliManagedProfileConfigDir(location.rootDir, location.cliProfileId);
+      await removeClaudeCredentialStores(legacyDir, legacyDir, storeOptions).catch(() => undefined);
     },
     async cliSideExists(location) {
-      if (location.cliProfileId === CLAUDE_CLI_PERSONAL_PROFILE_ID) return true;
+      if (!isClaudeCliManagedProfileId(location.cliProfileId)) return false;
       return fs.lstat(dirname(location.vaultFile)).then(
         (stats) => stats.isDirectory(),
         () => false,
@@ -202,23 +197,6 @@ export function createClaudeAccountAdapter(
     lockCli(location, operation) {
       return withClaudeSelectionLock(location.rootDir, operation);
     },
-    personalProbePaths() {
-      const current = resolveStore();
-      const personalVault = claudeCliVaultFile(current.rootDir, CLAUDE_CLI_PERSONAL_PROFILE_ID);
-      return [
-        { directory: current.personalConfigDir, file: CLAUDE_CREDENTIALS_FILE },
-        { directory: dirname(personalVault), file: basename(personalVault) },
-      ];
-    },
-    isDeliberateSignOut(raw) {
-      // Claude Code blanks the tokens of a login whose refresh token turned
-      // out to be spent and keeps the record; a `/logout` removes it.
-      return raw === null || raw === undefined;
-    },
-    async mayCreatePersonalSlot(location) {
-      // Account 1's vault is Codara's; only the live slot is the user's own.
-      return (await readClaudeLiveProfileId(location.rootDir)) !== location.cliProfileId;
-    },
     // Claude Code's tokens are opaque, so the mirror's foreign check reads
     // the account the slot records next to them.
     cliIdentityFingerprint(location) {
@@ -227,12 +205,18 @@ export function createClaudeAccountAdapter(
         .catch(() => undefined);
     },
     readCliIdentity(location) {
+      if (!isClaudeCliManagedProfileId(location.cliProfileId)) {
+        return Promise.resolve({});
+      }
       return readClaudeProfileIdentity(resolveStore(), location.cliProfileId).catch(
         (): NativeCliAccountIdentity => ({}),
       );
     },
     connectTimeIdentity(canonical: CanonicalCredential) {
       return readIdentity(canonical.access).catch((): AnthropicAccountProfile => ({}));
+    },
+    async prepareCliHome() {
+      await prepareLiveHome(resolveStore());
     },
     async afterCliHalfWritten(location, identity) {
       const block = identityBlock(identity);
@@ -259,41 +243,36 @@ export function createClaudeAccountAdapter(
         }
       });
     },
+    managedHome(cliProfileId) {
+      const current = resolveStore();
+      return {
+        path: claudeCliManagedProfileConfigDir(current.rootDir, cliProfileId),
+        accountsRoot: current.accountsDir,
+        holdsSessions: false,
+      };
+    },
+    managedAccountsRoot() {
+      return resolveStore().accountsDir;
+    },
     activeCliProfileId() {
       return readClaudeLiveProfileId(resolveStore().rootDir);
     },
-    async detectNativeLogin() {
+    async activate(target) {
+      if (!isClaudeCliManagedProfileId(target)) return;
       const current = resolveStore();
-      const change = await detectClaudeNativeLogin(
-        current,
-        await knownProfileIds(),
-        async (accessToken) => (await readIdentity(accessToken)).accountUuid,
-        storeOptions,
-      );
-      return change
-        ? {
-            from: change.from,
-            to: change.to,
-            adopt: () => adoptClaudeNativeLogin(current, change, storeOptions),
-          }
-        : null;
+      await prepareLiveHome(current);
+      await activateClaudeCliAccount(current, target, {
+        ...storeOptions,
+        profileExists,
+        knownProfileIds,
+        ...(options.log ? { log: options.log } : {}),
+      });
     },
-    switchSideEffects: {
-      async sessionCount() {
-        return 0;
-      },
-      async beforeSwitch() {
-        return { closedSessionCount: 0 };
-      },
-      async afterDefault(target, effectOptions = {}) {
-        await activateClaudeCliAccount(resolveStore(), target, {
-          ...storeOptions,
-          allowSignedOut: effectOptions.allowSignedOut === true,
-          profileExists,
-          knownProfileIds,
-          ...(options.log ? { log: options.log } : {}),
-        });
-      },
+    async releaseActive(cliProfileId) {
+      const current = resolveStore();
+      await withClaudeSelectionLock(current.rootDir, () =>
+        releaseClaudeLiveSlot(current, cliProfileId, storeOptions),
+      );
     },
   };
 }

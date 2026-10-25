@@ -22,6 +22,8 @@
 //      SessionStart     → appendEvent + capture session_id from payload
 //      every other hook → appendEvent only (PreToolUse, PostToolUse,
 //                         UserPromptSubmit, PreCompact, ...)
+//      CodexNotify      → terminal-agent notifier only (written by Codex's
+//                         notify program, codara-codex-notify.py)
 
 import { promises as fs, type Dir, type FSWatcher } from "node:fs";
 import { watch as fsWatch } from "node:fs";
@@ -793,10 +795,9 @@ async function dispatchEnvelope(state: WatcherState, envelope: HookFileEnvelope)
   }
 
   // Manual panes (a `claude` the user typed into a Studio shell) never reach
-  // the run-store dispatch below, but their subagent lifecycle is exactly
-  // what the terminal-agent notifier needs to avoid a false "finished" while
-  // background agents keep working. Excluded (orchestrated) panes are ignored
-  // inside the notifier.
+  // the run-store dispatch below, but their turn boundaries (UserPromptSubmit,
+  // Stop, permission prompts) are what the terminal-agent notifier announces.
+  // Excluded (orchestrated) panes are ignored inside the notifier.
   noteTerminalHookEvent(
     envelope.paneId,
     envelope.hookName,
@@ -804,6 +805,10 @@ async function dispatchEnvelope(state: WatcherState, envelope: HookFileEnvelope)
       ? (envelope.payload as Record<string, unknown>)
       : null,
   );
+  // Codex's notify program (codara-codex-notify.py) shares this directory.
+  // Its events carry no Claude session and must not reach the Claude-shaped
+  // session registry or run-store routing below.
+  if (envelope.hookName === "CodexNotify") return;
 
   const payloadObj =
     envelope.payload && typeof envelope.payload === "object" && !Array.isArray(envelope.payload)

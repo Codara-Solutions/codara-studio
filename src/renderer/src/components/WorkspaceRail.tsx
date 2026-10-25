@@ -1,17 +1,29 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { CSSProperties } from "react";
-import type { ChatBackendKind, FsEntry, GitFileChange, Workspace, WorkspaceGroup } from "@shared/types";
+import type {
+  ChatBackendKind,
+  CopyBranchCreator,
+  FsEntry,
+  GitFileChange,
+  Workspace,
+  WorkspaceGroup,
+} from "@shared/types";
 import type { GitHubWorkQueueItem } from "@shared/github";
 import { WORKSPACE_COLORS } from "@shared/workspace-colors";
 import type { SharedGitStatus } from "../git/useSharedGitStatus";
 import type { ChatStatusTone } from "./chat/timeline";
 import { statusToneColor, toneWantsAttention } from "./chat/timeline";
-import { PlusIcon } from "./icons";
+import { PlusIcon, SparkIcon } from "./icons";
+import { agentClientLabel } from "../notifications/agent-worktree-toast";
 import FileTree from "./FileTree";
 import GitPanel from "./git/GitPanel";
 import AnchoredMenu from "./chat/composer/AnchoredMenu";
 import WorkspaceIconPicker from "./WorkspaceIconPicker";
+import { WorkspaceStatusLine } from "./workspace-status/WorkspaceStatusChip";
+import { WorkspaceAgentList, WorkspaceAgentsLine } from "./workspace-status/WorkspaceAgentsLine";
+import WorkspaceStatusPicker from "./workspace-status/WorkspaceStatusPicker";
+import { setWorkspaceStatus, useUserWorkspaceStatus } from "./workspace-status/workspaceStatusStore";
 import { WorkspaceIconGlyph } from "./workspace-icons";
 import { resolveWorkspaceAccent } from "../lib/workspace-accent";
 import { useTheme } from "../theme/theme-context";
@@ -24,12 +36,16 @@ import {
 } from "../panels/usePanelLayout";
 import ResizeHandle from "../panels/ResizeHandle";
 import SectionHeader from "../panels/SectionHeader";
+import AgentsRailSwitch from "./agent-board/AgentsRailSwitch";
+import { useRailView } from "./agent-board/railView";
 import {
   beforeItemForVerticalPlan,
   planVerticalReorder,
   railAutoScrollDelta,
   type VerticalReorderSlot,
 } from "./workspaceReorder";
+import { openWorktreeCleanup } from "./worktree-cleanup/open-worktree-cleanup";
+import type { WorktreeRailState } from "@shared/worktree-cleanup";
 
 const PANEL_SECTION_MIME = "application/x-codara-panel-section";
 const WORKSPACE_ROW_MIME = "application/x-codara-workspace-row";
@@ -139,9 +155,14 @@ interface RailProps {
   // manual terminal agent, idle or not) and how many are mid-turn. Renders
   // the quiet count at the row's right edge; zero hides it. Memoized by App
   // like the maps above.
-  agentsByWorkspaceId?: Record<string, { total: number; working: number }>;
+  agentsByWorkspaceId?: Record<string, { total: number; working: number; sleeping?: number }>;
   // Current git branch per workspace for the row subtitle; null/absent hides it.
   branchByWorkspaceId?: Record<string, string | null>;
+  // Merge and folder state of each copy-branch workspace (useWorktreeRailStates):
+  // the "merged" mark and the row's Clean up.
+  worktreeByWorkspaceId?: Record<string, WorktreeRailState>;
+  // Clean up a merged worktree, or remove a workspace whose folder is gone.
+  onCleanUpWorkspace?: (id: string) => Promise<void>;
   // The first section's share when exactly two sections are stacked here.
   split: number;
   collapsed: Record<PanelSectionKey, boolean>;
@@ -285,6 +306,11 @@ function WorkspaceRail(props: RailProps) {
   // their flip boundary so a menu near the section's end opens upward instead
   // of overhanging the section stacked below (Source Control / Explorer).
   const wsScrollRef = useRef<HTMLDivElement | null>(null);
+  const [railView, setRailView] = useRailView();
+  // A workspace being named (a new one, a rename) is named in the list.
+  useEffect(() => {
+    if (props.editingId) setRailView("workspaces");
+  }, [props.editingId, setRailView]);
   // ── Rail reorder ─────────────────────────────────────────────────────────
   // The gesture is owned by the LIST, not by the individual rows — the same
   // shape the tab strip uses. One hit-test against one cached geometry, so
@@ -770,8 +796,11 @@ function WorkspaceRail(props: RailProps) {
         working={props.workingByWorkspaceId?.[w.id] ?? false}
         agentTotal={props.agentsByWorkspaceId?.[w.id]?.total ?? 0}
         agentWorking={props.agentsByWorkspaceId?.[w.id]?.working ?? 0}
+        agentSleeping={props.agentsByWorkspaceId?.[w.id]?.sleeping ?? 0}
         branch={props.branchByWorkspaceId?.[w.id] ?? null}
-        missing={missingWorkspaceIds.has(w.id)}
+        missing={missingWorkspaceIds.has(w.id) || props.worktreeByWorkspaceId?.[w.id]?.missing === true}
+        worktree={props.worktreeByWorkspaceId?.[w.id] ?? null}
+        onCleanUp={props.onCleanUpWorkspace ? () => props.onCleanUpWorkspace!(w.id) : undefined}
         folderColorManaged={groupId !== null}
         menuBoundaryRef={wsScrollRef}
         onActivate={() => props.onActivate(w.id)}
@@ -837,6 +866,8 @@ function WorkspaceRail(props: RailProps) {
                         label="New folder"
                         onClick={() => {
                           setCreateMenuOpen(false);
+                          // The new folder is named in the list, so show it.
+                          setRailView("workspaces");
                           setEditingGroupId(props.onCreateWorkspaceGroup());
                         }}
                       />
@@ -852,7 +883,8 @@ function WorkspaceRail(props: RailProps) {
                 </>
               }
             />
-            {!collapsed.workspaces && (
+            {!collapsed.workspaces && <AgentsRailSwitch view={railView} onChange={setRailView} />}
+            {!collapsed.workspaces && railView === "workspaces" && (
               <div
                 ref={wsScrollRef}
                 className={railListClassName}
@@ -1461,13 +1493,11 @@ function WorkspaceFolder({
           : "1px solid color-mix(in oklab, var(--rule) 72%, transparent)",
         background: landing
           ? `color-mix(in oklab, ${accent} 12%, var(--panel))`
-          : "color-mix(in oklab, var(--panel-raised, var(--panel)) 78%, transparent)",
+          : "var(--panel-raised, var(--panel))",
         boxShadow: landing ? `0 0 18px color-mix(in oklab, ${accent} 18%, transparent)` : "var(--lift-hi)",
         opacity: dragging ? 0.46 : 1,
         // Compositor-only slide while a top-level reorder is previewing.
         ...(dragOffset ? { transform: `translate3d(0, ${dragOffset}px, 0)` } : {}),
-        backdropFilter: "blur(18px) saturate(125%)",
-        WebkitBackdropFilter: "blur(18px) saturate(125%)",
         // See the row: --ws-reorder-motion is 0s at rest, so the committed
         // order settles instantly instead of animating backwards out of the
         // offsets it was previewing.
@@ -1965,10 +1995,16 @@ interface RowProps {
   agentTotal?: number;
   /** How many of those are mid-turn; brightens the count. */
   agentWorking?: number;
+  /** How many of those Codara stopped to save memory (agent hibernation). */
+  agentSleeping?: number;
   /** Current git branch (or short hash when detached); null hides the subtitle. */
   branch?: string | null;
   /** The workspace's folder is not on disk right now (moved/renamed/unmounted). */
   missing?: boolean;
+  /** A copy-branch workspace's merge and folder state; null for other rows or before the first read. */
+  worktree?: WorktreeRailState | null;
+  /** Clean up (merged) or Remove from rail (missing); absent hides both. */
+  onCleanUp?: () => Promise<void>;
   /** Folder members inherit their ordered shade from the folder family. */
   folderColorManaged?: boolean;
   /** Flip boundary for the row's "…" AnchoredMenu (the workspaces scroll container). */
@@ -1984,6 +2020,23 @@ interface RowProps {
   onRowDragEnd: () => void;
 }
 
+function agentWorktreeTitle(
+  creator: CopyBranchCreator,
+  copy: NonNullable<Workspace["copyBranch"]>,
+): string {
+  const created = new Date(copy.createdAt);
+  return [
+    `Created by ${agentClientLabel(creator.client ?? "")}`,
+    creator.purpose,
+    copy.baseBranch ? `from ${copy.baseBranch}` : null,
+    Number.isNaN(created.getTime())
+      ? null
+      : created.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }),
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
 function WorkspaceRow({
   ws,
   active,
@@ -1994,8 +2047,11 @@ function WorkspaceRow({
   working = false,
   agentTotal = 0,
   agentWorking = 0,
+  agentSleeping = 0,
   branch = null,
   missing = false,
+  worktree = null,
+  onCleanUp,
   folderColorManaged = false,
   menuBoundaryRef,
   onActivate,
@@ -2011,6 +2067,7 @@ function WorkspaceRow({
   const inputRef = useRef<HTMLInputElement | null>(null);
   const colorRef = useRef<HTMLInputElement | null>(null);
   const rowRef = useRef<HTMLDivElement | null>(null);
+  const pressInAgents = useRef(false);
   const [name, setName] = useState(ws.name);
   const [rowHover, setRowHover] = useState(false);
   const [rowPressed, setRowPressed] = useState(false);
@@ -2018,6 +2075,9 @@ function WorkspaceRow({
   const [moreFocus, setMoreFocus] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [iconPickerOpen, setIconPickerOpen] = useState(false);
+  const [statusPickerOpen, setStatusPickerOpen] = useState(false);
+  const [cleaning, setCleaning] = useState(false);
+  const statusEntry = useUserWorkspaceStatus(ws.id);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
   // In-flight color while the OS color dialog is open. The native
   // <input type="color"> streams `input` events 30-60×/sec (sometimes faster)
@@ -2039,6 +2099,17 @@ function WorkspaceRow({
 
   // The live draft (if a pick is in progress) wins over the committed color.
   const accent = draftColor || ws.color || "var(--accent)";
+  const agentCreator = ws.copyBranch?.createdBy?.kind === "agent" ? ws.copyBranch.createdBy : null;
+  // Merged: the branch's work is in its base. A gone branch with a gone
+  // folder has nothing left but the row, which reads the same way.
+  const merged = worktree?.merge === "merged" || (missing && worktree?.merge === "gone");
+  const canRemoveFromRail = missing && Boolean(onCleanUp);
+  const canCleanUp = !missing && merged && Boolean(onCleanUp);
+  const runCleanUp = () => {
+    if (!onCleanUp || cleaning) return;
+    setCleaning(true);
+    void onCleanUp().finally(() => setCleaning(false));
+  };
 
   useEffect(() => setName(ws.name), [ws.id, ws.name]);
   useEffect(() => {
@@ -2137,24 +2208,48 @@ function WorkspaceRow({
     <div
       ref={rowRef}
       data-workspace-id={ws.id}
+      data-active={active ? "true" : undefined}
       draggable={!editing}
-      onDragStart={onRowDragStart}
+      onDragStart={(event) => {
+        // dragstart fires on the row, not on what was pressed: a press that
+        // began on the agents line or list must not start a reorder.
+        if (pressInAgents.current) {
+          event.preventDefault();
+          return;
+        }
+        onRowDragStart(event);
+      }}
       onDragEnd={onRowDragEnd}
       onClick={editing ? undefined : onActivate}
+      onContextMenu={(event) => {
+        // The row's popovers are portalled out of it, but React still
+        // bubbles their events here: a right-click in the icon picker must
+        // not swap it for the actions menu.
+        if (editing || !(event.target instanceof Node) || !event.currentTarget.contains(event.target)) return;
+        // A right-click opens the row's "…" actions, where status lives too.
+        event.preventDefault();
+        event.stopPropagation();
+        setMenuOpen(true);
+      }}
       onMouseEnter={() => setRowHover(true)}
       onMouseLeave={() => {
         setRowHover(false);
         setRowPressed(false);
       }}
-      onMouseDown={() => {
-        if (!editing) setRowPressed(true);
+      onMouseDown={(event) => {
+        pressInAgents.current =
+          event.target instanceof Element && event.target.closest("[data-workspace-agents-area]") !== null;
+        if (!editing && !pressInAgents.current) setRowPressed(true);
       }}
       onMouseUp={() => setRowPressed(false)}
       aria-busy={working}
       data-agent-working={working ? "true" : undefined}
+      data-copy-branch={ws.copyBranch ? "true" : undefined}
       style={{
         display: "flex",
-        alignItems: "center",
+        // The row's own line, then the agent list when its status line is open.
+        flexDirection: "column",
+        justifyContent: "center",
         minHeight: 32,
         // Copy-branch rows indent so they read as a child of their parent repo.
         marginLeft: ws.copyBranch ? 14 : 0,
@@ -2208,7 +2303,7 @@ function WorkspaceRow({
                 ? "This workspace's shade follows its folder color and position"
                 : "Change color"
               : working
-                ? `${ws.name} — agent working`
+                ? `${ws.name}, agent working`
                 : undefined
           }
           style={{
@@ -2339,7 +2434,7 @@ function WorkspaceRow({
               // progress), and deleting it on the app's own initiative is not
               // undoable. The strike says "this path is gone" without deciding
               // anything on the user's behalf.
-              title={missing ? `${ws.name} — folder not found at ${ws.cwd}` : ws.name}
+              title={missing ? `${ws.name}: folder not found at ${ws.cwd}` : ws.name}
               style={{
                 fontSize: 12,
                 fontWeight: 600,
@@ -2354,6 +2449,22 @@ function WorkspaceRow({
             >
               {ws.name}
             </span>
+            {missing && (
+              <span
+                data-testid="workspace-missing"
+                style={{
+                  fontSize: 10.5,
+                  lineHeight: "13px",
+                  color: "var(--muted)",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                }}
+              >
+                Folder gone
+                {merged && <MergedTag />}
+              </span>
+            )}
             {branch && !missing && (
               <span
                 data-testid="workspace-branch"
@@ -2368,14 +2479,49 @@ function WorkspaceRow({
                   fontVariantNumeric: "tabular-nums",
                 }}
               >
+                {agentCreator && (
+                  <span
+                    data-testid="workspace-agent-worktree"
+                    title={agentWorktreeTitle(agentCreator, ws.copyBranch!)}
+                    aria-label={agentWorktreeTitle(agentCreator, ws.copyBranch!)}
+                    style={{
+                      display: "inline-flex",
+                      verticalAlign: "-1px",
+                      marginRight: 3,
+                      color: active ? "var(--ink-dim)" : "var(--muted)",
+                    }}
+                  >
+                    <SparkIcon size={9} />
+                  </span>
+                )}
                 {branch}
+                {merged && <MergedTag />}
               </span>
             )}
+            <WorkspaceStatusLine workspaceId={ws.id} active={active} />
+            <WorkspaceAgentsLine workspaceId={ws.id} active={active} />
           </div>
         )}
 
         {agentTotal > 0 && !editing && (
-          <AgentCount total={agentTotal} working={agentWorking} accent={accent} />
+          <AgentCount total={agentTotal} working={agentWorking} sleeping={agentSleeping} accent={accent} />
+        )}
+
+        {!editing && (canCleanUp || canRemoveFromRail) && (rowHover || cleaning || moreFocus) && (
+          <RowQuickAction
+            label={canRemoveFromRail ? "×" : cleaning ? "Cleaning…" : "Clean up"}
+            title={
+              canRemoveFromRail
+                ? ws.copyBranch
+                  ? "Remove from rail: drops git's record of the worktree, and deletes its branch only if merged"
+                  : "Remove from rail"
+                : "Clean up: remove the worktree, its merged branch and this row"
+            }
+            testId={canRemoveFromRail ? "workspace-remove-from-rail" : "workspace-clean-up"}
+            iconOnly={canRemoveFromRail}
+            disabled={cleaning}
+            onClick={runCleanUp}
+          />
         )}
 
         <div style={{ flex: "0 0 18px" }}>
@@ -2459,6 +2605,24 @@ function WorkspaceRow({
             align="end"
           >
             <div style={{ minWidth: 168, maxWidth: 240, padding: 4, display: "grid", gap: 2 }}>
+              {canRemoveFromRail && (
+                <RowMenuItem
+                  label="Remove from rail"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    runCleanUp();
+                  }}
+                />
+              )}
+              {canCleanUp && (
+                <RowMenuItem
+                  label="Clean up (worktree and branch)"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    runCleanUp();
+                  }}
+                />
+              )}
               <RowMenuItem
                 label="Change icon…"
                 onClick={() => {
@@ -2473,12 +2637,37 @@ function WorkspaceRow({
                   onEdit();
                 }}
               />
+              <RowMenuItem
+                label="Set status…"
+                onClick={() => {
+                  setMenuOpen(false);
+                  setStatusPickerOpen(true);
+                }}
+              />
+              {statusEntry && (
+                <RowMenuItem
+                  label="Clear status"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    void setWorkspaceStatus(ws.id, { clear: true }).catch(() => undefined);
+                  }}
+                />
+              )}
               {!ws.remote && (
                 <RowMenuItem
                   label="Create isolated worktree…"
                   onClick={() => {
                     setMenuOpen(false);
                     onCreateCopyBranch();
+                  }}
+                />
+              )}
+              {!ws.remote && (
+                <RowMenuItem
+                  label="Clean up worktrees…"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    openWorktreeCleanup(ws.id);
                   }}
                 />
               )}
@@ -2516,8 +2705,30 @@ function WorkspaceRow({
               onPickColor={(color) => onChange({ color })}
             />
           </AnchoredMenu>
+          <AnchoredMenu
+            anchorRef={menuBtnRef}
+            open={statusPickerOpen && !editing}
+            onClose={() => setStatusPickerOpen(false)}
+            className="spark-menu"
+            role="dialog"
+            ariaLabel={`Status of ${ws.name}`}
+            placement="below"
+            align="end"
+          >
+            <WorkspaceStatusPicker
+              workspaceId={ws.id}
+              onClose={(options) => {
+                setStatusPickerOpen(false);
+                // From the keyboard, focus goes back to the row's "…" button.
+                if (options?.restoreFocus) {
+                  window.requestAnimationFrame(() => menuBtnRef.current?.focus({ preventScroll: true }));
+                }
+              }}
+            />
+          </AnchoredMenu>
         </div>
       </div>
+      {!editing && <WorkspaceAgentList workspaceId={ws.id} active={active} />}
     </div>
   );
 }
@@ -2616,6 +2827,87 @@ function RailContextMenu({
   );
 }
 
+function MergedTag() {
+  return (
+    <span
+      data-testid="workspace-merged"
+      title="Its branch is merged into its base"
+      style={{
+        display: "inline-block",
+        marginLeft: 6,
+        padding: "0 5px",
+        borderRadius: 4,
+        fontSize: 9.5,
+        lineHeight: "13px",
+        fontWeight: 600,
+        letterSpacing: "0.02em",
+        color: "var(--ok, var(--ink-dim))",
+        background: "color-mix(in oklab, var(--ok, var(--ink)) 14%, transparent)",
+        verticalAlign: "0px",
+      }}
+    >
+      merged
+    </span>
+  );
+}
+
+// The one action a merged or missing row offers right on the row, shown on
+// hover. Clicks never reach the row, which would activate the workspace.
+function RowQuickAction({
+  label,
+  title,
+  testId,
+  iconOnly = false,
+  disabled = false,
+  onClick,
+}: {
+  label: string;
+  title: string;
+  testId: string;
+  iconOnly?: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button
+      type="button"
+      data-testid={testId}
+      title={title}
+      aria-label={title}
+      disabled={disabled}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      onMouseDown={(e) => e.stopPropagation()}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{
+        appearance: "none",
+        flex: "0 0 auto",
+        height: 20,
+        minWidth: iconOnly ? 18 : undefined,
+        padding: iconOnly ? 0 : "0 7px",
+        marginRight: 2,
+        border: "none",
+        borderRadius: "var(--radius-control, 7px)",
+        fontFamily: "inherit",
+        fontSize: iconOnly ? 14 : 10.5,
+        lineHeight: "20px",
+        fontWeight: 600,
+        cursor: "default",
+        color: hover ? "var(--ink)" : "var(--ink-dim)",
+        background: hover ? "var(--hover-strong, var(--hover))" : "color-mix(in oklab, var(--ink) 6%, transparent)",
+        opacity: disabled ? 0.6 : 1,
+        transition: "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
+      }}
+    >
+      {label}
+    </button>
+  );
+}
+
 function RowMenuItem({
   label,
   onClick,
@@ -2673,12 +2965,13 @@ function RowMenuItem({
 // accent the moment one of them is mid-turn. Same 10px tabular type as the
 // folder header's member count; the slash and the row placement keep the two
 // apart, and no glyph or chip is drawn so the rail stays quiet.
-function AgentCount(props: { total: number; working: number; accent: string }) {
-  const { total, working, accent } = props;
-  const label =
+function AgentCount(props: { total: number; working: number; sleeping?: number; accent: string }) {
+  const { total, working, sleeping = 0, accent } = props;
+  const base =
     working > 0
       ? `${working} of ${total} agent${total === 1 ? "" : "s"} working`
       : `${total} agent${total === 1 ? "" : "s"} idle`;
+  const label = sleeping > 0 ? `${base}, ${sleeping} sleeping` : base;
   return (
     <span
       role="status"
@@ -2686,6 +2979,7 @@ function AgentCount(props: { total: number; working: number; accent: string }) {
       aria-label={label}
       data-testid="workspace-agent-count"
       data-working={working > 0 ? "true" : "false"}
+      data-sleeping={sleeping > 0 ? String(sleeping) : undefined}
       style={{
         flex: "0 0 auto",
         marginRight: 2,

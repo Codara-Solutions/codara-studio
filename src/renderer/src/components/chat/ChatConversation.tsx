@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   Checkpoint,
   PlanValidation,
@@ -24,7 +24,12 @@ import {
 } from "./timeline";
 import { buildRunMaps, useNowTick, useRunReports, workerModelLabel } from "../runs/run-format";
 import { runVerdict, VerdictPill, type StepVerdictKind } from "../runs/GraphNodes";
-import Markdown from "./Markdown";
+import Markdown, { MarkdownWorkspaceContext } from "./Markdown";
+import { unwrapIpcError } from "../../lib/ipc-error";
+import { chordToHint, mod } from "../../shortcuts/chord";
+import { findMatchingRows, stepMatch } from "./conversation-search";
+import { openAccountsSettings } from "./account-readiness";
+import { retryableFailedCallId } from "./failed-turn";
 import {
   compactPreview,
   formatToolPayload,
@@ -32,6 +37,7 @@ import {
   waitForWorkersTaskIds,
 } from "./tool-labels";
 import { toolFileDiff, type ToolFileChange } from "./tool-file-diff";
+import { MemoryLearnedChips } from "./MemoryLearnedChip";
 import {
   useRunExecutionRecord,
   type ExecutionBlock,
@@ -56,6 +62,8 @@ type ConversationItem = ChatTimelineItem | ActivityGroupItem;
 type ConversationRenderContext = {
   executionByCallId: Map<string, ExecutionTurn>;
   finalAnswerByCallId: Map<string, string>;
+  /** Row of the current find match, or -1. */
+  findCurrentIndex: number;
 };
 
 interface ConversationMinimapEntry {
@@ -77,7 +85,28 @@ const WorkerWaitContext = React.createContext<
   ((taskIds: string[]) => string | null) | null
 >(null);
 
-export default function ChatConversation({ run }: { run: RunState }) {
+// Focuses a worker's terminal pane; false when it has no open pane. A context
+// for the same reason as WorkerWaitContext: worker rows sit inside memoized
+// step cards.
+const WorkerTerminalContext = React.createContext<((workerTaskId: string) => boolean) | null>(null);
+
+// The standalone worker rows folded into step cards (see foldStepWorkers),
+// keyed by logical worker id. A context for the same reason as above.
+const StepWorkerRowsContext = React.createContext<Map<string, ToolItem>>(new Map());
+
+export default function ChatConversation({
+  run,
+  cwd = null,
+  onOpenWorkerTerminal,
+  findRequest = 0,
+}: {
+  run: RunState;
+  /** Workspace that relative file links in Cora's answers resolve against. */
+  cwd?: string | null;
+  onOpenWorkerTerminal?: (workerTaskId: string) => boolean;
+  /** Bumped by the panel's find chord; each change opens and focuses find. */
+  findRequest?: number;
+}) {
   // One durable projection owns both history hydration and live frames. Build
   // it before the timeline so completed conversational turns can omit their
   // otherwise-empty manager disclosure without guessing from prose.
@@ -120,16 +149,18 @@ export default function ChatConversation({ run }: { run: RunState }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [contentfulKey],
   );
-  const items = useMemo(
-    () =>
-      groupCompletedActivity(
+  const { items, stepWorkerRows } = useMemo(
+    () => {
+      const folded = foldStepWorkers(
         buildChatTimeline(run).filter(
           (item) =>
             !isRedundantParkedBackendFailure(item, run, contentfulCalls) &&
             !isSupersededFailedManagerTurn(item, run) &&
             shouldRenderTimelineItem(item, inspectableCalls, execution.hydrated),
         ),
-      ),
+      );
+      return { items: groupCompletedActivity(folded.items), stepWorkerRows: folded.workerRows };
+    },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       execution.hydrated,
@@ -146,6 +177,9 @@ export default function ChatConversation({ run }: { run: RunState }) {
     ],
   );
   const openQuestion = useMemo(() => findOpenQuestion(run), [run]);
+  // The failed turn the composer's Retry would re-run: the latest manager
+  // call, only while the run is parked on it. Its card offers the same Retry.
+  const retryableCallId = useMemo(() => retryableFailedCallId(run), [run]);
   // On a completed run, stamp a tiny "done" marker under the LAST Cora prose
   // message so the user sees the run finished without a separate completion
   // turn duplicating the answer. The id-matching keys the marker to that one
@@ -203,6 +237,9 @@ export default function ChatConversation({ run }: { run: RunState }) {
   }, [run.checkpoints, run.humanMessages]);
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const [readerAtBottom, setReaderAtBottom] = useState(true);
+  // Shows the conversation map while the reader scrolls; at rest it stays out
+  // of sight until hovered.
+  const [scrolling, setScrolling] = useState(false);
   const [visibleRange, setVisibleRange] = useState({ startIndex: 0, endIndex: 0 });
 
   // One durable projection owns history hydration and live frames. It
@@ -225,12 +262,47 @@ export default function ChatConversation({ run }: { run: RunState }) {
   // virtualizer-supported reactive input for data that changes without adding
   // a row; changing it refreshes visible rows without remounting the list or
   // disturbing the reader's scroll position.
+  // Find in this chat. Rows are virtualized, so the browser's own find cannot
+  // see off-screen ones; this searches the row text in memory and scrolls the
+  // match into view. Row text is only built while the bar is open.
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findCurrent, setFindCurrent] = useState(-1);
+  const findInputRef = useRef<HTMLInputElement | null>(null);
+  const seenFindRequestRef = useRef(findRequest);
+  useEffect(() => {
+    if (findRequest === seenFindRequestRef.current) return;
+    seenFindRequestRef.current = findRequest;
+    setFindOpen(true);
+    window.requestAnimationFrame(() => {
+      findInputRef.current?.focus();
+      findInputRef.current?.select();
+    });
+  }, [findRequest]);
+  const findMatches = useMemo(() => {
+    if (!findOpen) return [];
+    const texts = items.map((item) =>
+      conversationRowSearchText(item, executionByCallId, finalAnswerByCallId),
+    );
+    return findMatchingRows(texts, findQuery);
+  }, [findOpen, findQuery, items, executionByCallId, finalAnswerByCallId]);
+  const goToMatch = (position: number) => {
+    setFindCurrent(position);
+    const index = findMatches[position];
+    if (index !== undefined) virtuosoRef.current?.scrollToIndex({ index, align: "center" });
+  };
+  const closeFind = () => {
+    setFindOpen(false);
+    setFindCurrent(-1);
+  };
+  const findCurrentIndex = findOpen && findCurrent >= 0 ? findMatches[findCurrent] ?? -1 : -1;
   const renderContext = useMemo<ConversationRenderContext>(
     () => ({
       executionByCallId,
       finalAnswerByCallId,
+      findCurrentIndex,
     }),
-    [executionByCallId, finalAnswerByCallId],
+    [executionByCallId, finalAnswerByCallId, findCurrentIndex],
   );
   // The result manifest is the worker's final-report envelope, written for
   // Cora to review, not for the reader. It no longer gets a row here: the
@@ -239,6 +311,23 @@ export default function ChatConversation({ run }: { run: RunState }) {
   // "Result evidence" section and the RunsView header's checks count).
   const rowCount = items.length;
   const minimapEntries = useMemo(() => buildConversationMinimap(items), [items]);
+  // "New activity" only when something arrived after the reader left the
+  // bottom; an old chat whose last answer is taller than the viewport opens
+  // scrolled up with nothing new. The event count is ignored until history
+  // hydrates, or the hydration itself would read as activity.
+  const activityMark = execution.hydrated ? `${rowCount}:${execution.events.length}` : null;
+  const leftBottomMarkRef = useRef<string | null>(null);
+  const [newActivity, setNewActivity] = useState(false);
+  useEffect(() => {
+    if (readerAtBottom) {
+      leftBottomMarkRef.current = null;
+      setNewActivity(false);
+      return;
+    }
+    if (activityMark === null) return;
+    if (leftBottomMarkRef.current === null) leftBottomMarkRef.current = activityMark;
+    else if (leftBottomMarkRef.current !== activityMark) setNewActivity(true);
+  }, [readerAtBottom, activityMark]);
   const summarizeWait = useMemo(
     () => (taskIds: string[]) => summarizeWorkerWait(run, taskIds)?.label || null,
     [run],
@@ -246,7 +335,15 @@ export default function ChatConversation({ run }: { run: RunState }) {
 
   return (
     <WorkerWaitContext.Provider value={summarizeWait}>
-      <div style={SCROLL_STYLE} data-testid="cora-conversation">
+      <WorkerTerminalContext.Provider value={onOpenWorkerTerminal ?? null}>
+      <StepWorkerRowsContext.Provider value={stepWorkerRows}>
+      <MarkdownWorkspaceContext.Provider value={cwd || null}>
+      <div
+        className="cora-conversation"
+        style={SCROLL_STYLE}
+        data-testid="cora-conversation"
+        data-scrolling={scrolling ? "true" : undefined}
+      >
         {rowCount === 0 ? (
           <div style={{ ...CONVERSATION_COLUMN_STYLE, padding: "24px 18px" }}><ConversationEmpty /></div>
         ) : (
@@ -276,6 +373,7 @@ export default function ChatConversation({ run }: { run: RunState }) {
             // bottom edge and never falls behind.
             followOutput={readerAtBottom ? "auto" : false}
             atBottomStateChange={setReaderAtBottom}
+            isScrolling={setScrolling}
             rangeChanged={setVisibleRange}
             increaseViewportBy={{ top: 600, bottom: 400 }}
             computeItemKey={(index) =>
@@ -284,22 +382,23 @@ export default function ChatConversation({ run }: { run: RunState }) {
             itemContent={(index, _data, context) => {
               const item = items[index];
               const rowKind = item?.kind === "activity-group" ? "work" : item?.kind ?? "empty";
-              const compactRow = rowKind === "tool" || rowKind === "work" || rowKind === "step";
               return (
                 <div
                   className="cora-conversation-column"
                   data-cora-conversation-column
                   style={{
                     ...CONVERSATION_COLUMN_STYLE,
-                    padding: index === 0
-                      ? "20px clamp(12px, 2.4vw, 20px) 0"
-                      : "0 clamp(12px, 2.4vw, 20px)",
+                    paddingTop: index === 0 ? 20 : 0,
+                    // Padding, not margin: the virtualizer measures each row's
+                    // box, and a child margin would collapse out of it.
+                    paddingBottom: rowGapBelow(item, items[index + 1]),
                   }}
                 >
                   <div
-                    className={`cora-timeline-row cora-timeline-row--${rowKind}`}
+                    className={`cora-timeline-row cora-timeline-row--${rowKind}${
+                      context.findCurrentIndex === index ? " is-find-current" : ""
+                    }`}
                     data-timeline-kind={rowKind}
-                    style={{ ...CHAT_ITEM_STYLE, marginBottom: compactRow ? 8 : CHAT_ITEM_STYLE.marginBottom }}
                   >
                     {item?.kind === "message" ? (
                       <MessageTurn
@@ -309,10 +408,17 @@ export default function ChatConversation({ run }: { run: RunState }) {
                         checkpoint={latestUndoableCheckpoint?.messageId === item.id ? latestUndoableCheckpoint : null}
                         showDoneMarker={doneMarkerSparkMessageId === item.id}
                         completionVerdict={completionVerdict}
+                        runBlocked={run.status === "blocked"}
+                        failureCardShown={retryableCallId !== null}
                       />
                     ) : item?.kind === "tool" ? (
                       <ToolActivityRow
                         item={item}
+                        retryRunId={
+                          retryableCallId && item.activity === "manager" && timelineSparkCallId(item) === retryableCallId
+                            ? run.id
+                            : undefined
+                        }
                         executionTurn={item.activity === "manager" ? context.executionByCallId.get(timelineSparkCallId(item)) : undefined}
                         // The durable final answer belongs to the turn's LAST
                         // slice: earlier slices of a question-split turn ended
@@ -333,16 +439,14 @@ export default function ChatConversation({ run }: { run: RunState }) {
               );
             }}
             // "At bottom" must mean "you can actually SEE the last row", not
-            // "the scroller is within 4px of its end" (Virtuoso's default). The
-            // floating "New activity" pill and the minimap are absolutely
-            // positioned over the list's bottom-right, so the final rows sit
-            // underneath them: with the tight default the reader would scroll
-            // down, still be told there was new activity, and never reach a
-            // resting position where the last response was fully visible.
+            // "the scroller is within 4px of its end" (Virtuoso's default):
+            // with the tight default a reader a few pixels short of the end
+            // would keep being offered the jump button and told there was new
+            // activity while the last response sat fully in view.
             atBottomThreshold={72}
-            // Tall enough to scroll the last row clear of that pill (bottom 18 +
-            // ~32 tall) instead of leaving it pinned under it.
-            components={{ Footer: () => <div style={{ height: 84 }} /> }}
+            // Holds the last message's hover line (MESSAGE_META_GAP) so it
+            // never lands under the composer edge.
+            components={{ Footer: () => <div style={{ height: MESSAGE_META_GAP }} /> }}
           />
         )}
         <ConversationMinimap
@@ -352,16 +456,81 @@ export default function ChatConversation({ run }: { run: RunState }) {
             virtuosoRef.current?.scrollToIndex({ index, align: "start", behavior: "smooth" });
           }}
         />
+        {findOpen && (
+          <div className="cora-find-bar" role="search">
+            <input
+              ref={findInputRef}
+              type="text"
+              aria-label="Find in chat"
+              placeholder="Find in chat"
+              value={findQuery}
+              onChange={(event) => {
+                setFindQuery(event.currentTarget.value);
+                setFindCurrent(-1);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  closeFind();
+                } else if (event.key === "Enter") {
+                  event.preventDefault();
+                  goToMatch(stepMatch(findCurrent, event.shiftKey ? -1 : 1, findMatches.length));
+                }
+              }}
+            />
+            <span className="cora-find-bar__count" aria-live="polite">
+              {findQuery.trim()
+                ? findMatches.length === 0
+                  ? "No results"
+                  : findCurrent >= 0
+                    ? `${findCurrent + 1} of ${findMatches.length}`
+                    : `${findMatches.length} found`
+                : ""}
+            </span>
+            <button
+              type="button"
+              aria-label="Previous match"
+              title="Previous match (Shift+Enter)"
+              disabled={findMatches.length === 0}
+              onClick={() => goToMatch(stepMatch(findCurrent, -1, findMatches.length))}
+            >
+              ↑
+            </button>
+            <button
+              type="button"
+              aria-label="Next match"
+              title="Next match (Enter)"
+              disabled={findMatches.length === 0}
+              onClick={() => goToMatch(stepMatch(findCurrent, 1, findMatches.length))}
+            >
+              ↓
+            </button>
+            <button type="button" aria-label="Close find" title="Close (Esc)" onClick={closeFind}>
+              ×
+            </button>
+          </div>
+        )}
+        {rowCount > 0 && <div className="cora-conversation-topfade" aria-hidden />}
+        {!readerAtBottom && rowCount > 0 && <div className="cora-conversation-fade" aria-hidden />}
         {!readerAtBottom && rowCount > 0 && (
           <button
             type="button"
+            className={`cora-jump-latest${newActivity ? " has-new" : ""}`}
             onClick={() => virtuosoRef.current?.scrollToIndex({ index: rowCount - 1, align: "end", behavior: "smooth" })}
-            style={NEW_ACTIVITY_BUTTON_STYLE}
+            aria-label={newActivity ? "New activity" : "Jump to latest"}
+            title={newActivity ? "New activity, jump to latest" : "Jump to latest"}
           >
-            New activity ↓
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+              <path d="M8 3v9.5M3.75 8.25 8 12.5l4.25-4.25" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            {newActivity && <span className="cora-jump-latest__badge" aria-hidden />}
           </button>
         )}
       </div>
+      </MarkdownWorkspaceContext.Provider>
+      </StepWorkerRowsContext.Provider>
+      </WorkerTerminalContext.Provider>
     </WorkerWaitContext.Provider>
   );
 }
@@ -440,7 +609,7 @@ function ConversationMinimap({
       })}
       {active ? (
         <div
-          className="cora-timeline-minimap__preview spark-glass--strong"
+          className="cora-timeline-minimap__preview spark-glass--strong spark-overlay-surface"
           style={{
             top: `${entries.length === 1 ? 0 : (entries.findIndex((entry) => entry.id === active.id) / (entries.length - 1)) * 100}%`,
           }}
@@ -455,6 +624,32 @@ function ConversationMinimap({
 
 function timelineItemKey(item: ConversationItem): string {
   return `${item.kind}:${item.id}`;
+}
+
+// Everything a reader could see in a row, as one searchable string.
+function conversationRowSearchText(
+  item: ConversationItem,
+  executionByCallId: Map<string, ExecutionTurn>,
+  finalAnswerByCallId: Map<string, string>,
+): string {
+  if (item.kind === "message") return item.text;
+  if (item.kind === "step") {
+    return [item.title, item.goal, ...item.workers.map((worker) => worker.title)].join("\n");
+  }
+  const tools = item.kind === "activity-group" ? item.items : [item];
+  const parts: string[] = [];
+  for (const tool of tools) {
+    parts.push(tool.title, tool.detail ?? "");
+    if (tool.activity !== "manager") continue;
+    const callId = timelineSparkCallId(tool);
+    for (const block of executionByCallId.get(callId)?.blocks ?? []) {
+      if (block.kind === "text") parts.push(block.text);
+      else if (block.kind === "tool") parts.push(block.toolName);
+      else if (block.kind === "error") parts.push(block.message);
+    }
+    parts.push(finalAnswerByCallId.get(callId) ?? "");
+  }
+  return parts.join("\n");
 }
 
 // The SparkCall backing a manager row. Rows written since the field existed
@@ -625,6 +820,94 @@ function groupCompletedActivity(items: ChatTimelineItem[]): ConversationItem[] {
   return grouped;
 }
 
+// One vertical rhythm for the whole stream: a wide gap before each user turn,
+// a medium one between the parts of Cora's answer, and almost none between
+// consecutive activity rows so they read as one list.
+const TURN_GAP = 28;
+const IN_TURN_GAP = 14;
+const ACTIVITY_GAP = 0;
+// A message's hover line (time, copy) is drawn in the gap under it instead of
+// reserving height at rest, so that gap must hold it: a 2px offset, the 18px
+// line, and 8px clear of whatever row comes next.
+const MESSAGE_META_GAP = 28;
+
+function isActivityRow(item: ConversationItem | undefined): boolean {
+  return (
+    item?.kind === "step" ||
+    item?.kind === "activity-group" ||
+    (item?.kind === "tool" && item.activity !== "manager") ||
+    isManagerStageRow(item)
+  );
+}
+
+// A settled manager stage (plan analysis, worker result review) renders as a
+// one-line row between the steps it serves; failed and live ones are cards.
+function isManagerStageRow(item: ConversationItem | undefined): item is ToolItem {
+  return (
+    item?.kind === "tool" &&
+    item.activity === "manager" &&
+    item.tone !== "live" &&
+    item.status !== "failed" &&
+    item.maintenance !== "compaction" &&
+    toolMetaValue(item, "Mode") !== "chat"
+  );
+}
+
+function rowGapBelow(item: ConversationItem | undefined, next: ConversationItem | undefined): number {
+  if (!item || !next) return 0;
+  if (next.kind === "message" && next.author === "user") return TURN_GAP;
+  // A delivery-state row keeps the hover line inside its own flow.
+  if (item.kind === "message" && item.author === "user" && hasDeliveryStatusRow(item)) return IN_TURN_GAP;
+  if (item.kind === "message" && item.author !== "system") return MESSAGE_META_GAP;
+  if (isActivityRow(item) && isActivityRow(next)) return ACTIVITY_GAP;
+  return IN_TURN_GAP;
+}
+
+// Only a mid-turn message (intent "steer") genuinely WAITS: it queues behind
+// the running turn and can still be pulled back (Unqueue). An ordinary "turn"
+// message is also born deliveryState "queued" in the store, but its own turn
+// starts within moments, so flashing QUEUED on every fresh send (most visibly
+// the first message of a new chat) would be noise. A "turn" message that a
+// failed or interrupted turn handed back waits just like a mid-turn one, so it
+// shows the same chip and controls. A claimed message (backendTurnId) is being
+// delivered now.
+function isWaitingInQueue(item: MessageItem): boolean {
+  return (
+    item.deliveryState === "queued" &&
+    !item.backendTurnId &&
+    (item.intent === "steer" || (item.deliveryAttempts ?? 0) > 0)
+  );
+}
+
+function hasDeliveryStatusRow(item: MessageItem): boolean {
+  return (
+    isWaitingInQueue(item) ||
+    Boolean(item.deliveryState && item.deliveryState !== "acknowledged" && item.deliveryState !== "queued")
+  );
+}
+
+// A worker that belongs to a step is listed inside that step's card, so its
+// standalone row would show the same worker twice (and, sorted by creation
+// time, after a later step). The standalone row is dropped and kept aside
+// for the step's worker row, which reads its elapsed time and failure from it.
+function foldStepWorkers(items: ChatTimelineItem[]): {
+  items: ChatTimelineItem[];
+  workerRows: Map<string, ToolItem>;
+} {
+  const stepWorkerIds = new Set<string>();
+  for (const item of items) {
+    if (item.kind === "step") for (const worker of item.workers) stepWorkerIds.add(`worker:${worker.id}`);
+  }
+  const workerRows = new Map<string, ToolItem>();
+  if (stepWorkerIds.size === 0) return { items, workerRows };
+  const kept = items.filter((item) => {
+    if (item.kind !== "tool" || item.activity !== "worker" || !stepWorkerIds.has(item.id)) return true;
+    workerRows.set(item.id.slice("worker:".length), item);
+    return false;
+  });
+  return { items: kept, workerRows };
+}
+
 const MessageTurn = React.memo(function MessageTurn({
   item,
   runId,
@@ -632,6 +915,8 @@ const MessageTurn = React.memo(function MessageTurn({
   checkpoint,
   showDoneMarker,
   completionVerdict,
+  runBlocked,
+  failureCardShown,
 }: {
   item: MessageItem;
   runId: string;
@@ -639,6 +924,9 @@ const MessageTurn = React.memo(function MessageTurn({
   checkpoint: Checkpoint | null;
   showDoneMarker: boolean;
   completionVerdict: StepVerdictKind;
+  runBlocked: boolean;
+  /** The run is parked on a failed turn whose card offers Retry. */
+  failureCardShown: boolean;
 }) {
   if (item.author === "system") {
     return (
@@ -651,27 +939,14 @@ const MessageTurn = React.memo(function MessageTurn({
   }
 
   if (item.author === "user") {
-    // Only a mid-turn message (intent "steer") genuinely WAITS: it queues
-    // behind the running turn and can still be pulled back (Unqueue). An
-    // ordinary "turn" message is also born deliveryState "queued" in the
-    // store, but its own turn starts within moments, so flashing QUEUED on
-    // every fresh send (most visibly the first message of a new chat) would
-    // be noise. A claimed message (backendTurnId) is being delivered now.
-    const queued =
-      item.deliveryState === "queued" && !item.backendTurnId && item.intent === "steer";
-    const hasPersistentStatus =
-      queued ||
-      Boolean(
-        item.deliveryState &&
-          item.deliveryState !== "acknowledged" &&
-          item.deliveryState !== "queued",
-      );
+    const queued = isWaitingInQueue(item);
+    const hasPersistentStatus = hasDeliveryStatusRow(item);
     return (
       <div
         className={`cora-user-turn${queued ? " cora-user-turn--queued" : ""}`}
         data-message-intent={item.intent ?? "turn"}
         data-delivery-state={item.deliveryState ?? "acknowledged"}
-        style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}
+        style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}
       >
         <div
           className={`cora-message cora-message--user${queued ? " cora-message--queued" : ""}`}
@@ -681,18 +956,39 @@ const MessageTurn = React.memo(function MessageTurn({
             ...(queued ? USER_QUEUED_BUBBLE_STYLE : null),
           }}
         >
-          <div>{item.text}</div>
+          <div className="cora-user-md">
+            <Markdown text={item.text} />
+          </div>
           <AttachmentStrip attachments={item.attachments} align="end" />
         </div>
         <div
           className={`cora-user-turn__meta${hasPersistentStatus ? " has-status" : ""}`}
           style={USER_HEADER_STYLE}
         >
-          <time dateTime={item.at} title={new Date(item.at).toLocaleString()} style={USER_TIME_STYLE}>
-            {formatMessageTime(item.at)}
-          </time>
-          {queued ? (
-            <span style={QUEUED_CHIP_STYLE}>Queued</span>
+          {/* Time and copy are reference, shown on hover; only the delivery
+              state and its controls stay visible at rest. */}
+          <span className="cora-user-turn__hover-meta">
+            <time dateTime={item.at} title={new Date(item.at).toLocaleString()} style={USER_TIME_STYLE}>
+              {formatMessageTime(item.at)}
+            </time>
+            <CopyMessageControl text={item.text} />
+          </span>
+          {item.repeatCount > 1 && <RepeatChip count={item.repeatCount} />}
+          {queued && failureCardShown ? (
+            // The failure card below owns what happens next (Connect, Retry),
+            // so the message keeps only its state and the way to take it back.
+            <>
+              <span className="cora-queued-pill" title="Cora reads this once the failed turn is retried">
+                <ClockGlyph />
+                Queued
+              </span>
+              <UnqueueControl runId={runId} messageId={item.id} compact />
+            </>
+          ) : queued ? (
+            <span className="cora-queued-pill" title="Cora reads this when her current turn ends">
+              <ClockGlyph />
+              Queued
+            </span>
           ) : (
             item.deliveryState &&
             item.deliveryState !== "acknowledged" &&
@@ -700,15 +996,23 @@ const MessageTurn = React.memo(function MessageTurn({
               <span style={DELIVERY_CHIP_STYLE}>{deliveryStateLabel(item.deliveryState)}</span>
             )
           )}
-          {item.repeatCount > 1 && <RepeatChip count={item.repeatCount} />}
-          <CopyMessageControl text={item.text} />
-          {queued && <SendNowControl runId={runId} />}
-          {queued && <UnqueueControl runId={runId} messageId={item.id} />}
+          {/* A blocked run is waiting for an answer, and the answer carries
+              the queue with it; Send now there would only race that answer. */}
+          {!failureCardShown && (
+            <>
+              {queued && !runBlocked && <SendNowControl runId={runId} />}
+              {queued && runBlocked && (
+                <span style={USER_TIME_STYLE}>Delivered with your answer</span>
+              )}
+              {queued && <UnqueueControl runId={runId} messageId={item.id} />}
+            </>
+          )}
           {/* Undo is a conversation rewind, meaningful only once the message
               was actually delivered. While it is still queued, Unqueue is the
               whole story: nothing has happened yet to undo. */}
           {checkpoint && !queued && <UndoControl runId={runId} checkpoint={checkpoint} />}
         </div>
+        {!queued && <MemoryLearnedChips runId={runId} messageId={item.id} text={item.text} />}
       </div>
     );
   }
@@ -742,6 +1046,19 @@ const MessageTurn = React.memo(function MessageTurn({
               ? "Switch the active account for this provider in Settings, or wait for this account’s usage limit to reset, then retry this message."
               : backendFailure.hint
           }
+          action={backendFailure.action}
+        />
+      </SparkTurn>
+    );
+  }
+  // A park on a turn that threw is a failure notice, not a question: it gets
+  // no "Needs you" tag, and the composer offers Retry instead of "Answer".
+  if (item.backendFailure) {
+    return (
+      <SparkTurn tag={<IssueChip />}>
+        <BackendFailureMessage
+          detail="Cora's turn failed before it could answer."
+          hint="The failed turn above names the cause. Retry below sends your message again."
         />
       </SparkTurn>
     );
@@ -813,10 +1130,10 @@ function CopyMessageControl({ text }: { text: string }) {
 function AssistantMessageMeta({ text, at }: { text: string; at: string }) {
   return (
     <div className="cora-assistant-turn__meta">
-      <CopyMessageControl text={text} />
       <time dateTime={at} title={new Date(at).toLocaleString()} style={USER_TIME_STYLE}>
         {formatMessageTime(at)}
       </time>
+      <CopyMessageControl text={text} />
     </div>
   );
 }
@@ -830,6 +1147,32 @@ function CopyGlyph() {
   );
 }
 
+function SendNowGlyph() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path d="M8 13V3.5M3.75 7.5 8 3.25l4.25 4.25" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function UnqueueGlyph() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path d="M5.5 4 2.75 6.75 5.5 9.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M3 6.75h6.5a3.75 3.75 0 0 1 0 7.5H8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function ClockGlyph() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <circle cx="8" cy="8" r="5.75" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M8 5.2V8l1.9 1.3" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 function CheckGlyph() {
   return (
     <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>
@@ -838,14 +1181,44 @@ function CheckGlyph() {
   );
 }
 
-function backendFailureDetails(
-  text: string,
-): { detail: string; hint: string; kind: "auth" | "billing" | "capacity" | "quota" | "other" } | null {
+function backendFailureDetails(text: string): ProviderFailure | null {
   const match = /^(Codex|Claude Code|Cora Pi) backend error:\s*(.+)$/is.exec(text.trim());
   const source = match?.[1]?.trim();
   const detail = match?.[2]?.trim();
   if (!source || !detail) return null;
+  return classifyProviderFailure(source, detail);
+}
+
+type ProviderFailure = {
+  detail: string;
+  hint: string;
+  kind: "auth" | "billing" | "capacity" | "quota" | "other";
+  /** Opens Settings > Agents, where accounts are connected and switched. */
+  action?: "accounts";
+};
+
+const PROVIDER_ACCOUNT_NAMES: Record<string, string> = {
+  anthropic: "Claude",
+  "openai-codex": "ChatGPT",
+  xai: "Grok",
+};
+
+// Shared by legacy "<backend> backend error:" messages and the raw error a
+// failed manager turn records, so both read the same way to the user.
+function classifyProviderFailure(source: string, detail: string): ProviderFailure {
   const normalizedDetail = detail.replace(/[_-]+/g, " ");
+  // NoConnectedPiAccountError (main): the provider never had an account, so
+  // "reconnect" would name something the user never did.
+  const neverConnected = /not authenticated with an? (\w+) account/i.exec(detail);
+  if (neverConnected) {
+    const name = neverConnected[1];
+    return {
+      detail: `No ${name} account is connected.`,
+      hint: `Connect a ${name} account in Settings > Agents, or pick a model from an account you have connected, then retry this message.`,
+      kind: "auth",
+      action: "accounts",
+    };
+  }
   const authFailure =
     /OAuth refresh failed|not authenticated|no OAuth access token|OAuth session expired|token (?:has )?expired|invalid api key|missing api key|unauthori[sz]ed|(?:status|code|error|http)[^A-Za-z0-9]{0,10}(?:401|403)\b|authentication failed|please (?:run )?\/?login|log ?in (?:again|required)|credentials?(?: are)? (?:invalid|missing|expired)/i.test(
       normalizedDetail,
@@ -865,32 +1238,30 @@ function backendFailureDetails(
   ) {
     return {
       detail: "The Claude account has no Extra Usage available for third-party harness use.",
-      hint: "Anthropic bills third-party harness use against Extra Usage, and this Claude account has none available. Enable Extra Usage at claude.ai/settings/usage, switch the active Claude account in Settings, or use Codex-provider workers.",
+      hint: "Anthropic bills third-party harness use against Extra Usage, and this Claude account has none available. Enable Extra Usage at claude.ai/settings/usage, switch the active Claude account in Settings > Agents, or use Codex-provider workers.",
       kind: "billing",
+      action: "accounts",
     };
   }
-  if (authFailure && /anthropic/i.test(detail)) {
-    return {
-      detail: "The selected Anthropic subscription could not be authenticated.",
-      hint: "Reconnect your Anthropic subscription for Cora · Pi, then retry this message.",
-      kind: "auth",
-    };
-  }
-  if (authFailure && /openai-codex/i.test(detail)) {
-    return {
-      detail: "The selected Codex subscription could not be authenticated.",
-      hint: "Reconnect your Codex subscription for Cora · Pi, then retry this message.",
-      kind: "auth",
-    };
+  for (const [provider, name] of Object.entries(PROVIDER_ACCOUNT_NAMES)) {
+    if (authFailure && detail.toLowerCase().includes(provider)) {
+      return {
+        detail: `The selected ${name} account could not be authenticated.`,
+        hint: `Reconnect your ${name} account in Settings > Agents, then retry this message.`,
+        kind: "auth",
+        action: "accounts",
+      };
+    }
   }
   if (authFailure) {
     return {
       detail: "The selected provider account could not be authenticated.",
       hint:
         source === "Cora Pi"
-          ? "Reconnect the selected subscription in Settings, then retry this message."
+          ? "Reconnect the selected account in Settings > Agents, then retry this message."
           : `Reconnect the ${source} account, then retry this message.`,
       kind: "auth",
+      action: "accounts",
     };
   }
   // A quota envelope can append generic service/transport prose, so its
@@ -904,6 +1275,7 @@ function backendFailureDetails(
       detail: "The selected provider account reached a usage limit.",
       hint: "Switch the active account for this provider in Settings, or wait for this account’s usage limit to reset, then retry this message.",
       kind: "quota",
+      action: "accounts",
     };
   }
   if (
@@ -924,24 +1296,149 @@ function backendFailureDetails(
   };
 }
 
+/** The friendly reading of a failed manager turn's raw error, or null when
+ * the error is unclassified and the raw text says more than a generic line. */
+function failedTurnExplanation(error: string): ProviderFailure | null {
+  const trimmed = error.trim();
+  if (!trimmed) return null;
+  const failure = classifyProviderFailure("Cora Pi", trimmed);
+  return failure.kind === "other" ? null : failure;
+}
+
 function BackendFailureMessage({
   detail,
   hint,
+  action,
 }: {
   detail: string;
   hint: string;
+  action?: ProviderFailure["action"];
 }) {
   return (
     <div
-      className="cora-message cora-message--error"
+      className="cora-message cora-message--error cora-turn-error"
       data-message-author="cora"
       role="alert"
-      style={BACKEND_FAILURE_STYLE}
     >
-      <div style={BACKEND_FAILURE_TITLE_STYLE}>Cora couldn’t complete this turn</div>
-      <div style={BACKEND_FAILURE_DETAIL_STYLE}>{detail}</div>
-      <div style={BACKEND_FAILURE_HINT_STYLE}>{hint}</div>
+      <div className="cora-turn-error__head">
+        <ErrorGlyph />
+        <span className="cora-turn-error__title">Cora couldn’t complete this turn</span>
+      </div>
+      <div className="cora-turn-error__lead">{detail}</div>
+      <div className="cora-turn-error__hint">{hint}</div>
+      {action === "accounts" ? (
+        <div className="cora-turn-error__actions">
+          <OpenAccountsButton />
+        </div>
+      ) : null}
     </div>
+  );
+}
+
+function OpenAccountsButton({ label = "Open accounts" }: { label?: string }) {
+  return (
+    <button
+      type="button"
+      className="cora-chip-btn cora-chip-btn--primary"
+      onClick={openAccountsSettings}
+      title="Open Settings > Agents"
+    >
+      {label}
+    </button>
+  );
+}
+
+// Asks the open composer to run its own Retry (the same resume or re-answer
+// its Retry button performs), so the card never grows a second retry path.
+function RetryTurnButton({ runId }: { runId: string }) {
+  return (
+    <button
+      type="button"
+      className="cora-chip-btn"
+      onClick={() =>
+        window.dispatchEvent(new CustomEvent("spark:retry-turn", { detail: { runId } }))
+      }
+    >
+      <RetryGlyph />
+      Retry
+    </button>
+  );
+}
+
+// A failed Cora turn or manager stage as a calm card: what failed, the
+// friendly reading of the error when it is classified, and what to do next.
+// The raw error sits behind Details whenever a friendly reading replaces it,
+// and is never truncated there: it is what a user pastes into a bug report.
+function TurnErrorCard({
+  title,
+  error,
+  retryRunId,
+  details,
+}: {
+  title: string;
+  error: string;
+  retryRunId?: string | null;
+  details?: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const explanation = error ? failedTurnExplanation(error) : null;
+  const rawError = explanation && error ? error : null;
+  const hasDetails = Boolean(rawError || details);
+  return (
+    <div className="cora-turn-error">
+      <div className="cora-turn-error__head">
+        <ErrorGlyph />
+        <span className="cora-turn-error__title">{title}</span>
+      </div>
+      <div className="cora-turn-error__body">
+        <div className="cora-turn-error__lead">{explanation?.detail ?? (error || "The turn failed.")}</div>
+        {explanation && <div className="cora-turn-error__hint">{explanation.hint}</div>}
+      </div>
+      {(explanation?.action === "accounts" || retryRunId || hasDetails) && (
+        <div className="cora-turn-error__actions">
+          {explanation?.action === "accounts" && (
+            <OpenAccountsButton label={explanation.kind === "auth" ? "Connect account" : "Open accounts"} />
+          )}
+          {retryRunId && <RetryTurnButton runId={retryRunId} />}
+          {hasDetails && (
+            <button
+              type="button"
+              className="cora-chip-btn cora-chip-btn--ghost"
+              aria-expanded={open}
+              onClick={() => setOpen((value) => !value)}
+            >
+              {open ? "Hide details" : "Details"}
+              <Caret open={open} />
+            </button>
+          )}
+        </div>
+      )}
+      {open && hasDetails ? (
+        <div className="cora-turn-error__details">
+          {rawError && <div className="cora-turn-error__raw">{rawError}</div>}
+          {details}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ErrorGlyph() {
+  return (
+    <svg className="cora-turn-error__icon" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <circle cx="8" cy="8" r="6.25" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M8 4.9v3.6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <circle cx="8" cy="10.9" r="0.85" fill="currentColor" />
+    </svg>
+  );
+}
+
+function RetryGlyph() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path d="M13 8a5 5 0 1 1-1.6-3.67" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+      <path d="M13.25 2.75v3.1h-3.1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
 
@@ -964,8 +1461,11 @@ function LiveEllipsis() {
   );
 }
 
-function LiveToolRow({ call }: { call: LiveToolCall }) {
+// `live` marks a row in the turn that is still running. A settled turn can hold
+// a call that never reported a result (an aborted turn); it must not tick.
+function LiveToolRow({ call, live = false }: { call: LiveToolCall; live?: boolean }) {
   const finished = call.output !== undefined;
+  const running = live && !finished;
   const failed = finished && call.isError === true;
   // File-mutating calls (edit/write) carry enough payload to reconstruct a
   // GitHub-style change view locally; everything else yields null and the
@@ -1000,22 +1500,13 @@ function LiveToolRow({ call }: { call: LiveToolCall }) {
   const inlineDetail = failed
     ? compactPreview(readableOutput) || "failed"
     : liveWait ?? headline.detail;
-  const color = failed ? "var(--danger)" : finished ? "var(--muted-2)" : "var(--accent)";
 
   return (
     <div
       style={{
         ...LIVE_TOOL_ROW_STYLE,
-        borderColor: failed
-          ? "color-mix(in oklch, var(--danger) 24%, transparent)"
-          : open
-            ? "var(--rule-soft)"
-            : "transparent",
-        background: failed
-          ? "color-mix(in oklch, var(--danger) 5%, transparent)"
-          : open
-            ? "color-mix(in oklab, var(--ink) 3%, transparent)"
-            : "transparent",
+        borderColor: open ? "var(--rule-soft)" : "transparent",
+        background: open ? "color-mix(in oklab, var(--ink) 3%, transparent)" : "transparent",
       }}
     >
       <DisclosureButton
@@ -1023,23 +1514,34 @@ function LiveToolRow({ call }: { call: LiveToolCall }) {
         baseStyle={TOOL_ROW_BUTTON_STYLE}
         title={`${headline.title} · ${call.toolName}`}
       >
-        <StatusDot color={color} pulse={!finished} size={5} />
-        <span style={{ ...TOOL_TITLE_STYLE, color: failed ? "var(--danger)" : undefined }}>
-          {headline.title}
+        <ActivityIcon
+          state={running ? "running" : failed ? "failed" : finished ? "done" : "dot"}
+          title={failed ? "This action failed" : finished ? "This action completed" : undefined}
+        />
+        <span style={TOOL_TITLE_STYLE}>
+          <ToolHeadlineTitle title={headline.title} />
         </span>
-        <span style={{ ...TOOL_INLINE_DETAIL_STYLE, color: failed ? "var(--danger)" : undefined }}>
+        <span
+          className={!failed && !liveWait && isCodeArgument(inlineDetail) ? "cora-tool-arg" : undefined}
+          style={{ ...TOOL_INLINE_DETAIL_STYLE, color: failed ? "color-mix(in oklch, var(--danger) 70%, var(--ink-dim))" : undefined }}
+        >
           {inlineDetail}
         </span>
+        {running && (
+          <span style={TOOL_STATS_STYLE}>
+            <ElapsedSince since={call.at} />
+          </span>
+        )}
         {appliedFileDiff && (
           <span style={{ ...TOOL_STATS_STYLE, display: "inline-flex", alignItems: "center", gap: 5 }}>
             <span style={{ color: "var(--ok)" }}>+{appliedFileDiff.additions}</span>
             <span style={{ color: "var(--danger)" }}>−{appliedFileDiff.deletions}</span>
           </span>
         )}
-        {finished && <ToolOutcomeGlyph failed={failed} />}
         <Caret open={open} />
       </DisclosureButton>
       {appliedFileDiff && <ToolFileDiffPreview change={appliedFileDiff} />}
+      {running && call.partialOutput ? <LiveToolOutput text={call.partialOutput} /> : null}
       {open && (
         <div style={TOOL_DETAILS_STYLE}>
           {formatToolPayload(call.input).length > 0 && (
@@ -1070,16 +1572,52 @@ function LiveToolRow({ call }: { call: LiveToolCall }) {
 }
 
 
+// A searched pattern is code: the quoted part of "Searched for “a|b”" takes
+// the mono face so its pipes and dashes read as typed.
+function ToolHeadlineTitle({ title }: { title: string }) {
+  const quoted = /^(.*?)“(.+)”$/.exec(title);
+  if (!quoted) return <>{title}</>;
+  return (
+    <>
+      {quoted[1]}
+      <span className="cora-tool-arg cora-tool-arg--inline">{quoted[2]}</span>
+    </>
+  );
+}
+
+// Commands, paths and URLs; prose details ("all results") stay in the UI face.
+function isCodeArgument(detail: string): boolean {
+  return /^\$ |^[a-z]+:\/\/|[\\/]|^[\w.-]+\.[a-z0-9]{1,6}$/i.test(detail.trim());
+}
+
+// What a running command has printed so far, shown without expanding the row
+// so a slow test run can be told from a hung one. Pinned to the newest line.
+function LiveToolOutput({ text }: { text: string }) {
+  const ref = useRef<HTMLPreElement | null>(null);
+  useLayoutEffect(() => {
+    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+  }, [text]);
+  return (
+    <pre ref={ref} className="cora-live-tool-output" aria-live="off" style={LIVE_TOOL_OUTPUT_STYLE}>
+      {text}
+    </pre>
+  );
+}
+
 // GitHub-style changed-lines preview for one manager edit/write call, shown
 // directly under the tool row (the same treatment worker rows give their
-// measured file lists). The path opens the working-tree diff tab; the line
-// rows are colored exactly like a GitHub hunk. Capped so a whole-file
-// rewrite stays a preview, not a wall.
+// measured file lists). Clicking the path expands THIS call's change; the
+// working-tree diff is a separate action, because it shows whatever the file
+// holds now (later edits, staged or committed changes) rather than what this
+// call did. Collapsed, it is capped so a whole-file rewrite stays a preview.
 const TOOL_DIFF_PREVIEW_LINES = 8;
+const TOOL_DIFF_EXPANDED_LINES = 400;
 
 function ToolFileDiffPreview({ change }: { change: ToolFileChange }) {
-  const visible = change.lines.slice(0, TOOL_DIFF_PREVIEW_LINES);
+  const [expanded, setExpanded] = useState(false);
+  const visible = change.lines.slice(0, expanded ? TOOL_DIFF_EXPANDED_LINES : TOOL_DIFF_PREVIEW_LINES);
   const remaining = change.additions + change.deletions - visible.length;
+  const expandable = change.lines.length > TOOL_DIFF_PREVIEW_LINES;
   return (
     <div
       style={{
@@ -1091,17 +1629,17 @@ function ToolFileDiffPreview({ change }: { change: ToolFileChange }) {
         gap: 3,
       }}
     >
+      <div style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}>
       <button
         type="button"
         className="cora-worker-diff-file"
-        title={`Open changes for ${change.path}`}
-        aria-label={`Open changes for ${change.path}`}
+        title={expandable ? (expanded ? "Show less of this change" : "Show all of this change") : change.path}
+        aria-label={`${expanded ? "Collapse" : "Expand"} this change to ${change.path}`}
+        aria-expanded={expandable ? expanded : undefined}
         onClick={() => {
-          window.dispatchEvent(
-            new CustomEvent("spark:open-diff", { detail: { path: change.path } }),
-          );
+          if (expandable) setExpanded((value) => !value);
         }}
-        style={WORKER_DIFF_FILE_BUTTON_STYLE}
+        style={{ ...WORKER_DIFF_FILE_BUTTON_STYLE, cursor: expandable ? "pointer" : "default" }}
       >
         <span
           style={{
@@ -1120,6 +1658,19 @@ function ToolFileDiffPreview({ change }: { change: ToolFileChange }) {
         <span style={{ ...TOOL_STATS_STYLE, color: "var(--ok)" }}>+{change.additions}</span>
         <span style={{ ...TOOL_STATS_STYLE, color: "var(--danger)" }}>−{change.deletions}</span>
       </button>
+      <button
+        type="button"
+        className="cora-worker-terminal"
+        title={`Open the current working-tree diff of ${change.path}`}
+        onClick={() => {
+          window.dispatchEvent(
+            new CustomEvent("spark:open-diff", { detail: { path: change.path } }),
+          );
+        }}
+      >
+        Working tree
+      </button>
+      </div>
       {visible.map((line, index) => (
         <div
           key={`${index}:${line.kind}`}
@@ -1145,34 +1696,52 @@ function ToolFileDiffPreview({ change }: { change: ToolFileChange }) {
       {remaining > 0 && (
         <span style={TOOL_INLINE_DETAIL_STYLE}>
           {remaining} more changed {remaining === 1 ? "line" : "lines"}
-          {change.truncated ? " · preview capped" : " · expand the row for the full payload"}
+          {expanded
+            ? " · expand the row for the full payload"
+            : " · click the path to show them"}
         </span>
       )}
     </div>
   );
 }
 
-// Tiny check / cross at the row's trailing edge once a call settles — status
-// as a glyph, not a text chip, so the line stays quiet. The title carries the
-// words for anyone who hovers.
-function ToolOutcomeGlyph({ failed }: { failed: boolean }) {
+type ActivityIconState = "running" | "done" | "failed" | "dot" | "hollow";
+
+// The one status slot every activity row leads with (tool calls, steps,
+// workers, manager stages), so state reads down a single left edge and the
+// chevron stays the only thing on the right. `color` tints dots and checks;
+// running and failed keep their fixed tones.
+function ActivityIcon({
+  state,
+  color,
+  title,
+}: {
+  state: ActivityIconState;
+  color?: string;
+  title?: string;
+}) {
   return (
     <span
-      title={failed ? "This action failed" : "This action completed"}
-      style={{
-        flex: "0 0 auto",
-        display: "inline-flex",
-        color: failed ? "var(--danger)" : "var(--muted-2)",
-      }}
+      className="cora-activity-icon"
+      data-state={state}
+      title={title}
+      aria-hidden={title ? undefined : true}
+      style={color ? ({ "--cora-activity-color": color } as React.CSSProperties) : undefined}
     >
-      {failed ? (
-        <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
-          <path d="m3 3 6 6M9 3 3 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      {state === "running" ? (
+        <span className="cora-activity-icon__spin spark-activity-spin" />
+      ) : state === "done" ? (
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+          <path d="m2.6 6.3 2.2 2.2 4.6-4.9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      ) : state === "failed" ? (
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden>
+          <circle cx="6" cy="6" r="5.25" fill="currentColor" opacity="0.16" />
+          <path d="M6 3.4v3.1" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+          <circle cx="6" cy="8.5" r="0.75" fill="currentColor" />
         </svg>
       ) : (
-        <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
-          <path d="m2.4 6.3 2.3 2.3 4.9-5.2" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+        <span className="cora-activity-icon__dot" />
       )}
     </span>
   );
@@ -1210,16 +1779,16 @@ function CompletionMessage({ text }: { text: string }) {
   if (!body) {
     return (
       <div style={COMPLETION_INLINE_STYLE}>
-        <StatusDot color="var(--ok)" pulse={false} size={5} />
-        <span style={COMPLETION_INLINE_LABEL_STYLE}>done</span>
+        <ActivityIcon state="done" color="var(--ok)" />
+        <span style={COMPLETION_INLINE_LABEL_STYLE}>Done</span>
       </div>
     );
   }
   return (
     <div style={SPARK_BUBBLE_STYLE}>
       <div style={COMPLETION_INLINE_STYLE}>
-        <StatusDot color="var(--ok)" pulse={false} size={5} />
-        <span style={COMPLETION_INLINE_LABEL_STYLE}>done</span>
+        <ActivityIcon state="done" color="var(--ok)" />
+        <span style={COMPLETION_INLINE_LABEL_STYLE}>Done</span>
       </div>
       <div style={COMPLETION_BODY_STYLE}>
         <Markdown text={body} />
@@ -1450,7 +2019,7 @@ function QuestionChoices({
       <div style={ASK_HEAD_STYLE}>
         <span style={ASK_EYEBROW_STYLE}>Choose an option</span>
         <span style={ASK_HINT_STYLE}>
-          press 1–{options.length} or click
+          press 1 to {options.length} or click
         </span>
       </div>
       <div style={ASK_OPTION_LIST_STYLE}>
@@ -1664,11 +2233,16 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
     item.status === "planning" ||
     item.status === "reviewing" ||
     item.status === "blocked";
-  const [open, setOpen] = useState(false);
+  // A live step shows its workers; it folds itself away once it settles,
+  // unless the user opened or closed it by hand in the meantime.
+  const [open, setOpen] = useState(live);
+  const toggledRef = useRef(false);
+  const wasLiveRef = useRef(live);
+  useEffect(() => {
+    if (wasLiveRef.current && !live && !toggledRef.current) setOpen(false);
+    wasLiveRef.current = live;
+  }, [live]);
   const color = stepStatusColor(item.status);
-  const doneWorkers = item.workers.filter(
-    (worker) => worker.status === "accepted",
-  ).length;
   const stepDiff = item.workers.reduce(
     (total, worker) => ({
       fileCount: total.fileCount + (worker.diff?.fileCount ?? 0),
@@ -1684,13 +2258,16 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
       style={{
         ...TOOL_ROW_STYLE,
         ...TOOL_ROW_STANDALONE_STYLE,
-        borderColor: open ? "var(--rule-soft)" : "transparent",
-        background: open ? "color-mix(in oklab, var(--ink) 3%, transparent)" : "transparent",
+        margin: 0,
+        borderColor: "transparent",
+        background: open ? "color-mix(in oklab, var(--ink) 2.5%, transparent)" : "transparent",
       }}
     >
       <DisclosureButton
         onClick={() => {
-          if (hasBody) setOpen((value) => !value);
+          if (!hasBody) return;
+          toggledRef.current = true;
+          setOpen((value) => !value);
         }}
         baseStyle={{
           ...TOOL_ROW_BUTTON_STYLE,
@@ -1698,10 +2275,12 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
         }}
         title={item.goal || item.title}
       >
-        <StatusDot color={color} pulse={live} size={6} />
-        <span style={STEP_INDEX_TEXT_STYLE}>Step {item.index} ·</span>
+        <ActivityIcon state={stepIconState(item.status)} color={color} />
+        <span style={STEP_INDEX_TEXT_STYLE}>Step {item.index}</span>
         <span style={STEP_TITLE_STYLE}>{item.title}</span>
-        <span style={STEP_GOAL_INLINE_STYLE}>{item.goal}</span>
+        {/* Open, the goal reads in full below; repeating it here only
+            truncated the same sentence twice. */}
+        <span style={STEP_GOAL_INLINE_STYLE}>{open && hasBody ? null : item.goal}</span>
         {stepDiff.fileCount > 0 && (
           <span style={{ ...TOOL_STATS_STYLE, display: "inline-flex", alignItems: "center", gap: 5 }}>
             <span>{stepDiff.fileCount} {stepDiff.fileCount === 1 ? "file" : "files"}</span>
@@ -1710,9 +2289,7 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
           </span>
         )}
         {item.workers.length > 0 && (
-          <span style={STEP_PROGRESS_STYLE}>
-            {doneWorkers} of {item.workers.length} {item.workers.length === 1 ? "worker" : "workers"}
-          </span>
+          <span style={STEP_PROGRESS_STYLE}>{stepProgressLabel(item.workers)}</span>
         )}
         {hasBody && <Caret open={open} />}
       </DisclosureButton>
@@ -1736,6 +2313,30 @@ const StepCard = React.memo(function StepCard({ item }: { item: StepItem }) {
   );
 });
 
+// "2 running" while workers are live, "1/2 done" otherwise: a count of
+// finished workers alone ("0 of 2") reads as failure while both are working.
+function stepProgressLabel(workers: StepItem["workers"]): string {
+  const done = workers.filter((worker) => worker.status === "accepted").length;
+  const running = workers.filter(
+    (worker) =>
+      worker.runtimeState === "working" || worker.status === "running" || worker.status === "claimed",
+  ).length;
+  const failed = workers.filter((worker) => worker.status === "failed" || worker.status === "cancelled").length;
+  const parts: string[] = [];
+  if (running > 0) parts.push(`${running} running`);
+  if (failed > 0) parts.push(`${failed} failed`);
+  if (running === 0 || done > 0) parts.push(`${done}/${workers.length} done`);
+  return parts.join(" · ");
+}
+
+function stepIconState(status: StepItem["status"]): ActivityIconState {
+  if (status === "running" || status === "planning" || status === "reviewing") return "running";
+  if (status === "complete" || status === "completed_unverified") return "done";
+  if (status === "failed") return "failed";
+  if (status === "blocked") return "dot";
+  return "hollow";
+}
+
 const ActivityGroup = React.memo(function ActivityGroup({ item }: { item: ActivityGroupItem }) {
   const [open, setOpen] = useState(false);
   const summary = activityGroupSummary(item.items);
@@ -1747,7 +2348,7 @@ const ActivityGroup = React.memo(function ActivityGroup({ item }: { item: Activi
         baseStyle={ACTIVITY_GROUP_HEADER_STYLE}
         title={summary.detail}
       >
-        <StatusDot color="var(--muted-2)" pulse={false} size={5} />
+        <ActivityIcon state="done" />
         <span style={ACTIVITY_GROUP_TITLE_STYLE}>{summary.title}</span>
         {summary.detail && <span style={TOOL_INLINE_DETAIL_STYLE}>{summary.detail}</span>}
         <Caret open={open} />
@@ -1768,11 +2369,14 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
   embedded = false,
   executionTurn,
   finalAnswer,
+  retryRunId,
 }: {
   item: ToolItem;
   embedded?: boolean;
   executionTurn?: ExecutionTurn;
   finalAnswer?: string;
+  /** Set on the failed turn the run is parked on; its card offers Retry. */
+  retryRunId?: string;
 }) {
   const live = item.tone === "live";
   // Drives the elapsed readouts (the inline stats and the expanded meta line)
@@ -1806,11 +2410,17 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
     // (plan/review) keep the compact disclosure.
     if (item.maintenance !== "compaction" && toolMetaValue(item, "Mode") === "chat") {
       return (
-        <AssistantSettledTurn item={item} executionTurn={executionTurn} finalAnswer={finalAnswer} />
+        <AssistantSettledTurn
+          item={item}
+          executionTurn={executionTurn}
+          finalAnswer={finalAnswer}
+          retryRunId={retryRunId}
+        />
       );
     }
     return (
       <ManagerActivityDisclosure
+        retryRunId={retryRunId}
         item={item}
         open={open}
         setOpen={setOpen}
@@ -1827,18 +2437,10 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
         ...TOOL_ROW_STYLE,
         ...(embedded ? TOOL_ROW_EMBEDDED_STYLE : {}),
         ...(!embedded ? TOOL_ROW_STANDALONE_STYLE : {}),
-        // Same chrome discipline as LiveToolRow: transparent until opened,
-        // the pulsing dot alone says "running"; only failure earns a tint.
-        borderColor: item.status === "failed"
-          ? "color-mix(in oklch, var(--danger) 38%, transparent)"
-          : open
-            ? "var(--rule-soft)"
-            : "transparent",
-        background: item.status === "failed"
-          ? "color-mix(in oklch, var(--danger) 9%, transparent)"
-          : open
-            ? "color-mix(in oklab, var(--ink) 3%, transparent)"
-            : "transparent",
+        // Same chrome discipline as LiveToolRow: transparent until opened;
+        // the status icon alone says running, done or failed.
+        borderColor: open ? "var(--rule-soft)" : "transparent",
+        background: open ? "color-mix(in oklab, var(--ink) 3%, transparent)" : "transparent",
       }}
     >
       <DisclosureButton
@@ -1848,13 +2450,23 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
         baseStyle={TOOL_ROW_BUTTON_STYLE}
         title={item.detail || item.title}
       >
-        <StatusDot color={color} pulse={live} size={5} />
+        <ActivityIcon
+          state={
+            live
+              ? "running"
+              : item.status === "failed"
+                ? "failed"
+                : item.status === "completed"
+                  ? "done"
+                  : item.tone === "queued"
+                    ? "hollow"
+                    : "dot"
+          }
+          color={item.tone === "queued" ? color : undefined}
+        />
         <span style={TOOL_TITLE_STYLE}>{item.title}</span>
         <span style={TOOL_INLINE_DETAIL_STYLE}>{item.detail}</span>
         {stats && <span style={TOOL_STATS_STYLE}>{stats}</span>}
-        {(item.status === "completed" || item.status === "failed") && (
-          <ToolOutcomeGlyph failed={item.status === "failed"} />
-        )}
         {hasDetails && <Caret open={open} />}
       </DisclosureButton>
       {open && hasDetails && <ToolDetails item={item} />}
@@ -1869,6 +2481,7 @@ function ManagerActivityDisclosure({
   hasDetails,
   executionTurn,
   finalAnswer,
+  retryRunId,
 }: {
   item: ToolItem;
   open: boolean;
@@ -1876,26 +2489,50 @@ function ManagerActivityDisclosure({
   hasDetails: boolean;
   executionTurn?: ExecutionTurn;
   finalAnswer?: string;
+  retryRunId?: string;
 }) {
   const sparkCallId = timelineSparkCallId(item);
   const windowedBlocks = executionTurn
     ? blocksInTraceWindow(executionTurn.blocks, item.traceWindow)
     : [];
   const actionCount = windowedBlocks.filter((block) => block.kind === "tool").length;
+  if (item.status === "failed") {
+    return (
+      <div
+        className="cora-manager-disclosure is-failed"
+        data-manager-call-id={sparkCallId}
+        data-has-execution={windowedBlocks.length ? "true" : "false"}
+      >
+        <TurnErrorCard
+          title={`${item.title} failed`}
+          error={item.detail}
+          retryRunId={retryRunId}
+          details={
+            <>
+              {executionTurn && windowedBlocks.length > 0 && (
+                <ExecutionTrace turn={executionTurn} finalAnswer={finalAnswer} window={item.traceWindow} />
+              )}
+              <ToolDetails item={{ ...item, detail: "" }} compact={windowedBlocks.length > 0} />
+            </>
+          }
+        />
+      </div>
+    );
+  }
+  const stage = managerStageLabel(item);
   return (
     <div
-      className={`cora-manager-disclosure${item.status === "failed" ? " is-failed" : ""}`}
+      className="cora-manager-disclosure"
       data-manager-call-id={sparkCallId}
       data-has-execution={windowedBlocks.length ? "true" : "false"}
       data-open={open ? "true" : "false"}
       style={{
         ...MANAGER_DISCLOSURE_STYLE,
+        ...TOOL_ROW_STYLE,
+        margin: 0,
         width: "100%",
-        borderBottom: open
-          ? `1px solid ${item.status === "failed"
-            ? "color-mix(in oklch, var(--danger) 25%, transparent)"
-            : "color-mix(in oklab, var(--rule-soft) 62%, transparent)"}`
-          : "1px solid transparent",
+        borderColor: "transparent",
+        background: open ? "color-mix(in oklab, var(--ink) 2.5%, transparent)" : "transparent",
       }}
     >
       <DisclosureButton
@@ -1903,18 +2540,20 @@ function ManagerActivityDisclosure({
           if (hasDetails) setOpen((value) => !value);
         }}
         baseStyle={{
-          ...MANAGER_DISCLOSURE_BUTTON_STYLE,
+          ...TOOL_ROW_BUTTON_STYLE,
+          cursor: hasDetails ? "pointer" : "default",
         }}
         title={item.detail || item.title}
       >
-        <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>{item.title}</span>
-        {actionCount > 0 && item.status !== "failed" && (
+        <ActivityIcon state="done" />
+        {stage ? <span style={STEP_INDEX_TEXT_STYLE}>{stage.label}</span> : null}
+        <span style={stage ? MANAGER_STAGE_TITLE_STYLE : MANAGER_DISCLOSURE_TITLE_STYLE}>
+          {stage?.title ?? item.title}
+        </span>
+        {actionCount > 0 && (
           <span style={TOOL_INLINE_DETAIL_STYLE}>
             {actionCount === 1 ? "1 action" : `${actionCount} actions`}
           </span>
-        )}
-        {item.status === "failed" && (
-          <span style={{ ...TOOL_INLINE_DETAIL_STYLE, color: "var(--danger)" }}>{item.detail}</span>
         )}
         {hasDetails && <Caret open={open} />}
       </DisclosureButton>
@@ -1928,6 +2567,27 @@ function ManagerActivityDisclosure({
       )}
     </div>
   );
+}
+
+// A manager stage row reads like the step rows around it: a muted kind label
+// where a step shows "Step N", then what the stage did.
+function managerStageLabel(item: ToolItem): { label: string; title: string } | null {
+  switch (toolMetaValue(item, "Mode")) {
+    case "worker result review":
+      return { label: "Review", title: "Worker results" };
+    case "plan analysis":
+      return { label: "Plan", title: "Request analysis" };
+    case "step planning":
+      return { label: "Plan", title: "Next step" };
+    case "worker prompt generation":
+      return { label: "Plan", title: "Worker prompt" };
+    case "retry planning":
+      return { label: "Retry", title: "Retry plan" };
+    case "final summary":
+      return { label: "Summary", title: "Final response" };
+    default:
+      return null;
+  }
 }
 
 // The in-flight assistant turn, rendered as a first-class chat turn rather
@@ -1958,6 +2618,10 @@ function AssistantLiveTurn({
     : [];
   const segments = liveTurnSegments(blocks);
   const waiting = segments.length === 0;
+  // A tool still running (wait_for_workers above all) is legitimately silent
+  // for as long as the workers take, so only a turn with nothing in flight
+  // can be called stalled.
+  const toolInFlight = blocks.some((block) => block.kind === "tool" && block.output === undefined);
   return (
     <SparkTurn>
       <div
@@ -1971,7 +2635,7 @@ function AssistantLiveTurn({
           // pulsing dots, no elapsed ticker — a working timer here would
           // claim activity that is not happening until the user answers.
           <div style={WORKING_LINE_STYLE}>
-            <StatusDot color="var(--warn)" pulse={false} size={6} />
+            <ActivityIcon state="dot" color="var(--warn)" />
             <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>{item.title}</span>
             {item.detail ? (
               <span style={TOOL_INLINE_DETAIL_STYLE}>{item.detail}</span>
@@ -1979,7 +2643,7 @@ function AssistantLiveTurn({
           </div>
         ) : compaction ? (
           <div style={WORKING_LINE_STYLE}>
-            <WorkingDots />
+            <ActivityIcon state="running" />
             <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>
               {item.title}<ElapsedSince since={item.at} />
             </span>
@@ -1989,7 +2653,7 @@ function AssistantLiveTurn({
           </div>
         ) : (
           <div style={WORKING_LINE_STYLE}>
-            <WorkingDots />
+            <ActivityIcon state="running" />
             <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>
               Working<ElapsedSince since={item.at} />
             </span>
@@ -1998,7 +2662,10 @@ function AssistantLiveTurn({
             ) : null}
           </div>
         )}
-        <TurnSegments segments={segments} />
+        {!item.awaitingReply && !compaction && !toolInFlight ? (
+          <StallHint since={executionTurn?.lastEventAt || item.at} />
+        ) : null}
+        <TurnSegments segments={segments} live />
       </div>
     </SparkTurn>
   );
@@ -2014,10 +2681,12 @@ function AssistantSettledTurn({
   item,
   executionTurn,
   finalAnswer,
+  retryRunId,
 }: {
   item: ToolItem;
   executionTurn?: ExecutionTurn;
   finalAnswer?: string;
+  retryRunId?: string;
 }) {
   const sparkCallId = timelineSparkCallId(item);
   const failed = item.status === "failed";
@@ -2037,18 +2706,19 @@ function AssistantSettledTurn({
         data-turn-status={item.status}
         style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0 }}
       >
-        <div style={WORKING_LINE_STYLE}>
-          <StatusDot color={failed ? "var(--danger)" : "var(--muted-2)"} pulse={false} size={5} />
-          <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>{item.title}</span>
-          {!failed && actionCount > 0 && (
-            <span style={TOOL_INLINE_DETAIL_STYLE}>
-              {actionCount === 1 ? "1 action" : `${actionCount} actions`}
-            </span>
-          )}
-          {failed && item.detail && (
-            <span style={{ ...TOOL_INLINE_DETAIL_STYLE, color: "var(--danger)" }}>{item.detail}</span>
-          )}
-        </div>
+        {failed ? (
+          <TurnErrorCard title={item.title} error={item.detail} retryRunId={retryRunId} />
+        ) : (
+          <div style={WORKING_LINE_STYLE}>
+            <ActivityIcon state="done" />
+            <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>{item.title}</span>
+            {actionCount > 0 && (
+              <span style={TOOL_INLINE_DETAIL_STYLE}>
+                {actionCount === 1 ? "1 action" : `${actionCount} actions`}
+              </span>
+            )}
+          </div>
+        )}
         <TurnSegments segments={segments} />
       </div>
     </SparkTurn>
@@ -2057,10 +2727,30 @@ function AssistantSettledTurn({
 
 // The one segment renderer both the live and the settled turn share, so a
 // turn finishing never changes what its prose and tool rows look like.
-function TurnSegments({ segments }: { segments: LiveTurnSegment[] }) {
+function TurnSegments({ segments, live = false }: { segments: LiveTurnSegment[]; live?: boolean }) {
+  const groups: Array<LiveTurnSegment | LiveTurnSegment[]> = [];
+  for (const segment of segments) {
+    const previous = groups[groups.length - 1];
+    if (segment.kind === "tool" && Array.isArray(previous)) previous.push(segment);
+    else groups.push(segment.kind === "tool" ? [segment] : segment);
+  }
   return (
     <>
-      {segments.map((segment) => {
+      {groups.map((group) => {
+        if (Array.isArray(group)) {
+          return (
+            <div key={`tools:${group[0].id}`} className="cora-tool-stack">
+              {group.map((segment) =>
+                segment.kind === "tool" ? (
+                  <div key={segment.id} data-execution-kind="tool">
+                    <LiveToolRow call={segment.call} live={live} />
+                  </div>
+                ) : null,
+              )}
+            </div>
+          );
+        }
+        const segment = group;
         if (segment.kind === "text") {
           return (
             <div
@@ -2077,7 +2767,7 @@ function TurnSegments({ segments }: { segments: LiveTurnSegment[] }) {
         if (segment.kind === "tool") {
           return (
             <div key={segment.id} data-execution-kind="tool">
-              <LiveToolRow call={segment.call} />
+              <LiveToolRow call={segment.call} live={live} />
             </div>
           );
         }
@@ -2116,6 +2806,28 @@ function liveTurnSegments(blocks: ExecutionBlock[]): LiveTurnSegment[] {
   return segments;
 }
 
+const STALL_AFTER_MS = 90_000;
+const STOP_CHORD_HINT = chordToHint(mod("."));
+
+// Shown once a live turn has produced nothing for STALL_AFTER_MS. Ticks on its
+// own so the turn above it does not re-render.
+function StallHint({ since }: { since: string }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 5_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const last = Date.parse(since);
+  if (!Number.isFinite(last) || now - last < STALL_AFTER_MS) return null;
+  const minutes = Math.floor((now - last) / 60_000);
+  const silence = minutes >= 1 ? `${minutes}m` : `${Math.floor((now - last) / 1000)}s`;
+  return (
+    <div className="cora-stall-hint" role="status" style={STALL_HINT_STYLE}>
+      No output for {silence}. Keep waiting, or stop Cora ({STOP_CHORD_HINT}) and retry.
+    </div>
+  );
+}
+
 // Ticks " for 12s" onto the Working header without re-rendering the turn each
 // second: the interval writes textContent through a ref (same trick t3code
 // uses for its Working timer).
@@ -2135,16 +2847,6 @@ function ElapsedSince({ since }: { since: string }) {
     return () => window.clearInterval(timer);
   }, [since]);
   return <span ref={ref} style={{ fontVariantNumeric: "tabular-nums" }}>…</span>;
-}
-
-function WorkingDots() {
-  return (
-    <span className="cora-working-dots" aria-hidden>
-      <span />
-      <span />
-      <span />
-    </span>
-  );
 }
 
 function ExecutionTrace({
@@ -2374,20 +3076,43 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
   const pulse = worker.runtimeState === "working";
   const titleSuffix = worker.runtimeState ? ` · ${worker.runtimeState}` : "";
   const attemptCount = worker.attemptCount ?? 0;
+  const folded = React.useContext(StepWorkerRowsContext).get(worker.id);
+  useNowTick(1000, folded ? isToolRowTicking(folded) : false);
+  const elapsed = folded ? toolDurationLabel(folded) : null;
+  const failure = folded?.tone === "failed" && folded.detail ? folded.detail : null;
+  const iconState: ActivityIconState = pulse
+    ? "running"
+    : worker.status === "accepted"
+      ? "done"
+      : worker.status === "failed" || worker.status === "cancelled"
+        ? "failed"
+        : "dot";
   const detail = [
     // The model, not the runtime: "claude" only names the subscription Pi
     // authenticates against, and two workers wearing it can be very different
     // models. Falls back to the runtime label until an attempt reports one.
     workerModelLabel(worker.model, runtimeLabel(worker.runtime)),
-    workerStatusLabel(worker.status),
+    // The spinner already says running; any other state is worth the words.
+    pulse ? null : workerStatusLabel(worker.status),
     retryPending
       ? `retry ${worker.pending?.number} of ${workerAttemptDenominator((worker.pending?.number ?? 1))}`
       : attemptCount > 1
         ? `attempt ${attemptCount} of ${workerAttemptDenominator(attemptCount)}`
         : null,
+    elapsed,
   ].filter(Boolean).join(" · ");
   const diff = worker.diff;
   const hasDiff = Boolean(diff && diff.fileCount > 0);
+  const openWorkerTerminal = React.useContext(WorkerTerminalContext);
+  // "Closed" holds only for the task and runtime state it was observed on: a
+  // retry or a runtime fallback opens a new pane, and a row the virtualizer
+  // keeps mounted must offer it again rather than stay disabled.
+  const terminalKey = `${worker.taskId ?? ""}:${worker.runtimeState ?? ""}`;
+  const [closedTerminalKey, setClosedTerminalKey] = useState<string | null>(null);
+  const terminalClosed = closedTerminalKey === terminalKey;
+  const hasLiveAttempt =
+    worker.runtimeState !== undefined || worker.status === "claimed" || worker.status === "running";
+  const canOpenTerminal = Boolean(openWorkerTerminal && worker.taskId && hasLiveAttempt);
   return (
     <div
       style={{
@@ -2401,13 +3126,13 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
         style={{
           display: "flex",
           alignItems: "center",
-          gap: 7,
-          minHeight: 20,
+          gap: 8,
+          minHeight: 26,
           minWidth: 0,
           padding: "1px 0",
         }}
       >
-        <StatusDot color={color} pulse={pulse} size={5} />
+        <ActivityIcon state={iconState} color={iconState === "done" ? "var(--ok)" : color} />
         <span style={{ ...TOOL_TITLE_STYLE, fontWeight: 500 }}>{worker.title}</span>
         <span style={TOOL_INLINE_DETAIL_STYLE}>{detail}</span>
         {hasDiff && diff && (
@@ -2417,7 +3142,23 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
             <span style={{ color: "var(--danger)" }}>−{diff.deletions}</span>
           </span>
         )}
+        {canOpenTerminal && (
+          <button
+            type="button"
+            className="cora-worker-terminal"
+            disabled={terminalClosed}
+            title={terminalClosed ? "This worker's terminal is closed" : "Open this worker's terminal"}
+            onClick={() => {
+              if (!worker.taskId || !openWorkerTerminal) return;
+              if (!openWorkerTerminal(worker.taskId)) setClosedTerminalKey(terminalKey);
+            }}
+          >
+            <TerminalGlyph />
+            <span>{terminalClosed ? "Terminal closed" : "Open terminal"}</span>
+          </button>
+        )}
       </div>
+      {failure && <div className="cora-step-worker__failure">{failure}</div>}
       {hasDiff && diff && (
         <div
           style={{
@@ -2434,7 +3175,7 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
               type="button"
               key={file.path}
               className="cora-worker-diff-file"
-              title={`Open changes for ${file.path}`}
+              title={`Open the current working-tree diff of ${file.path} (it can include changes made after this worker)`}
               aria-label={`Open changes for ${file.path}`}
               onClick={() => {
                 window.dispatchEvent(
@@ -2472,6 +3213,15 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
   );
 }
 
+function TerminalGlyph() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <rect x="1.75" y="2.75" width="12.5" height="10.5" rx="2" stroke="currentColor" strokeWidth="1.25" />
+      <path d="m4.75 6.25 2 1.75-2 1.75M8.5 10h2.75" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 // Map the renderer-side terminal poller's RuntimeState to design-token
 // colors. Reuses the same tokens the rest of the chat uses so a theme swap
 // flows through automatically:
@@ -2485,6 +3235,7 @@ function StepWorkerRow({ worker }: { worker: ChatWorker }) {
 function runtimeStateColor(state: ChatWorker["runtimeState"]): string | null {
   switch (state) {
     case "working":
+    case "background":
       return "var(--accent)";
     case "blocked":
       return "var(--danger)";
@@ -2508,14 +3259,13 @@ function deliveryStateLabel(
   return "Acknowledged";
 }
 
-// Force-deliver the queue: interrupt Cora's in-flight response and start a
-// fresh turn that carries every queued message. The unfinished answer is
-// abandoned (workers and the provider session survive), which is why this is
-// an explicit action and never the default.
+// Force-deliver the queue: stop Cora's live turn and start a fresh one that
+// carries every queued message, in order. What the stopped turn already did
+// stays and its workers keep running, but its unfinished answer is abandoned,
+// which is why this is an explicit action and never the default.
 function SendNowControl({ runId }: { runId: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [hover, setHover] = useState(false);
 
   const sendNow = async () => {
     if (busy) return;
@@ -2525,7 +3275,7 @@ function SendNowControl({ runId }: { runId: string }) {
       const run = await window.spark.orchestration.deliverQueuedMessagesNow(runId);
       window.dispatchEvent(new CustomEvent("spark:run-snapshot", { detail: { run } }));
     } catch (err) {
-      setError((err as Error).message);
+      setError(unwrapIpcError(err));
     } finally {
       setBusy(false);
     }
@@ -2536,34 +3286,16 @@ function SendNowControl({ runId }: { runId: string }) {
       <button
         type="button"
         onClick={() => void sendNow()}
-        title="Interrupt Cora's current response and deliver the queue now"
+        title="Stop Cora's current turn and send every queued message now"
         aria-label="Send queued messages now"
         disabled={busy}
-        onMouseEnter={() => setHover(true)}
-        onMouseLeave={() => setHover(false)}
-        style={{
-          appearance: "none",
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 4,
-          height: 20,
-          padding: "0 8px",
-          border: "1px solid transparent",
-          borderRadius: "var(--radius-control, 7px)",
-          background: hover && !busy ? "var(--hover)" : "transparent",
-          color: hover ? "var(--ink-dim)" : "var(--muted)",
-          fontFamily: "var(--font-sans)",
-          fontSize: 10.5,
-          fontWeight: 600,
-          cursor: "default",
-          transition:
-            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-        }}
+        className="cora-chip-btn"
       >
+        <SendNowGlyph />
         <span>Send now</span>
       </button>
       {error && (
-        <span style={{ color: "var(--danger)", fontSize: 10.5 }} title={error}>
+        <span style={{ color: "var(--danger)", fontSize: 11 }} title={error}>
           {error}
         </span>
       )}
@@ -2575,15 +3307,26 @@ function SendNowControl({ runId }: { runId: string }) {
 // (guarded there against the turn having just claimed it) and return its text
 // to the composer for editing/resending. Appears only while the message's
 // deliveryState is "queued", so it can never un-send delivered text.
-function UnqueueControl({ runId, messageId }: { runId: string; messageId: string }) {
+function UnqueueControl({
+  runId,
+  messageId,
+  compact = false,
+}: {
+  runId: string;
+  messageId: string;
+  compact?: boolean;
+}) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [hover, setHover] = useState(false);
+  // Losing the race to the turn that just took the message is not a failure:
+  // the message reached Cora, which is what Send already promised.
+  const [notice, setNotice] = useState<string | null>(null);
 
   const unqueue = async () => {
     if (busy) return;
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
       const result = await window.spark.orchestration.cancelQueuedMessage({ runId, messageId });
       // Same immediate-rerender channel as UndoControl: the queued row
@@ -2602,7 +3345,9 @@ function UnqueueControl({ runId, messageId }: { runId: string; messageId: string
         );
       }
     } catch (err) {
-      setError((err as Error).message);
+      const message = unwrapIpcError(err);
+      if (/already picked this message up/.test(message)) setNotice("Already sent to Cora");
+      else setError(message);
     } finally {
       setBusy(false);
     }
@@ -2613,34 +3358,17 @@ function UnqueueControl({ runId, messageId }: { runId: string; messageId: string
       <button
         type="button"
         onClick={() => void unqueue()}
-        title="Remove from the queue and edit it in the composer"
+        title={compact ? "Unqueue: remove it and edit it in the composer" : "Remove from the queue and edit it in the composer"}
         aria-label="Unqueue message"
         disabled={busy}
-        onMouseEnter={() => setHover(true)}
-        onMouseLeave={() => setHover(false)}
-        style={{
-          appearance: "none",
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 4,
-          height: 20,
-          padding: "0 8px",
-          border: "1px solid transparent",
-          borderRadius: "var(--radius-control, 7px)",
-          background: hover && !busy ? "var(--hover)" : "transparent",
-          color: hover ? "var(--ink-dim)" : "var(--muted)",
-          fontFamily: "var(--font-sans)",
-          fontSize: 10.5,
-          fontWeight: 600,
-          cursor: "default",
-          transition:
-            "background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out)",
-        }}
+        className={compact ? "cora-message-ghost-action" : "cora-chip-btn"}
       >
-        <span>Unqueue</span>
+        <UnqueueGlyph />
+        {compact ? null : <span>Unqueue</span>}
       </button>
+      {notice && <span style={{ color: "var(--muted)", fontSize: 11 }}>{notice}</span>}
       {error && (
-        <span style={{ color: "var(--danger)", fontSize: 10.5 }} title={error}>
+        <span style={{ color: "var(--danger)", fontSize: 11 }} title={error}>
           {error}
         </span>
       )}
@@ -2652,11 +3380,16 @@ function UnqueueControl({ runId, messageId }: { runId: string; messageId: string
 // row — see buildChatTimeline's adjacent-duplicate collapse.
 function UndoControl({ runId, checkpoint }: { runId: string; checkpoint: Checkpoint }) {
   const [open, setOpen] = useState(false);
+  const [confirmCode, setConfirmCode] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hover, setHover] = useState(false);
   const [pressed, setPressed] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) setConfirmCode(false);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -2786,14 +3519,26 @@ function UndoControl({ runId, checkpoint }: { runId: string; checkpoint: Checkpo
             disabled={busy}
           />
           <UndoMenuRow
-            label="Undo message and code"
+            label={confirmCode ? "Click again to restore files" : "Undo message and code"}
             sub={
-              hasCodeSnapshot
-                ? "Rewind chat + restore workspace files"
-                : "No workspace snapshot available"
+              !hasCodeSnapshot
+                ? checkpoint.snapshotError
+                  ? `No workspace snapshot: ${checkpoint.snapshotError}`
+                  : "No workspace snapshot available"
+                : confirmCode
+                  ? "Every file changed since this message goes back, yours included. Your current files are saved first."
+                  : "Rewind chat + restore workspace files"
             }
             danger
-            onClick={() => void undo("chat+code")}
+            onClick={() => {
+              // Restoring files is destructive across the whole workspace, so
+              // it takes a second, explicit click.
+              if (!confirmCode) {
+                setConfirmCode(true);
+                return;
+              }
+              void undo("chat+code");
+            }}
             disabled={busy || !hasCodeSnapshot}
           />
           {error && (
@@ -3009,6 +3754,9 @@ function Caret({ open }: { open: boolean }) {
       style={{
         flex: "0 0 auto",
         display: "inline-flex",
+        // The chevron always closes the row at its right edge, even when no
+        // elastic detail text sits between it and the title.
+        marginLeft: "auto",
         color: "var(--muted-2)",
         transform: open ? "rotate(90deg)" : "rotate(0deg)",
         transition: "transform var(--motion-fast) var(--ease-out)",
@@ -3109,97 +3857,55 @@ const CONVERSATION_COLUMN_STYLE: React.CSSProperties = {
   margin: "0 auto",
 };
 
-const CHAT_ITEM_STYLE: React.CSSProperties = {
-  marginBottom: 16,
-};
-
-const NEW_ACTIVITY_BUTTON_STYLE: React.CSSProperties = {
-  position: "absolute",
-  right: 22,
-  bottom: 18,
-  zIndex: 4,
-  border: "1px solid var(--accent-edge)",
-  borderRadius: 999,
-  background: "var(--panel-2)",
-  color: "var(--accent-text)",
-  boxShadow: "var(--shadow-float)",
-  padding: "7px 12px",
-  fontFamily: "var(--font-sans)",
-  fontSize: 11,
-  fontWeight: 700,
-  cursor: "pointer",
-};
-
 // The user bubble is a calm neutral panel-2 surface with a single hairline —
 // the accent is reserved for live / needs-you / recommended moments, not for
 // every message the user has ever sent. A subtle --lift-hi top highlight gives
 // it tint-first depth instead of a hard drop shadow.
 const USER_HEADER_STYLE: React.CSSProperties = {
   display: "flex",
+  flexWrap: "wrap",
   alignItems: "center",
   justifyContent: "flex-end",
   gap: 6,
-  minHeight: 20,
+  minHeight: 18,
 };
 
 const USER_TIME_STYLE: React.CSSProperties = {
   color: "var(--muted)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 9.5,
+  fontSize: 11,
   fontVariantNumeric: "tabular-nums",
-};
-
-const QUEUED_CHIP_STYLE: React.CSSProperties = {
-  display: "inline-flex",
-  alignItems: "center",
-  height: 18,
-  padding: "0 7px",
-  borderRadius: 999,
-  border: "1px solid color-mix(in oklch, var(--warn) 38%, transparent)",
-  background: "color-mix(in oklch, var(--warn) 10%, transparent)",
-  color: "var(--warn)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 8.5,
-  fontWeight: 700,
-  letterSpacing: "0.05em",
-  textTransform: "uppercase",
 };
 
 const DELIVERY_CHIP_STYLE: React.CSSProperties = {
   display: "inline-flex",
   alignItems: "center",
-  height: 18,
-  padding: "0 7px",
+  height: 20,
+  padding: "0 8px",
   borderRadius: 999,
-  border: "1px solid var(--rule-soft)",
-  color: "var(--muted)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 8.5,
-  fontWeight: 700,
-  letterSpacing: "0.04em",
-  textTransform: "uppercase",
+  background: "color-mix(in oklab, var(--ink) 6%, transparent)",
+  color: "var(--ink-dim)",
+  fontSize: 11,
+  fontWeight: 500,
 };
 
 const USER_BUBBLE_STYLE: React.CSSProperties = {
-  maxWidth: "80%",
-  background: "color-mix(in oklab, var(--ink) 4%, var(--panel-2))",
-  // One soft hairline; the recede stays on --rule-soft so the bubble reads as a
-  // calm premium surface rather than a hard-outlined box.
+  maxWidth: "min(80%, 620px)",
+  boxSizing: "border-box",
+  background: "color-mix(in oklab, var(--ink) 5%, var(--panel-2))",
+  // One soft hairline; the bubble reads as a calm surface, not a box.
   border: "1px solid var(--rule-soft)",
-  borderRadius: 16,
-  padding: 12,
+  borderRadius: 18,
+  borderBottomRightRadius: 6,
+  padding: "9px 14px",
   color: "var(--ink)",
-  fontSize: 13.5,
-  lineHeight: 1.55,
-  whiteSpace: "pre-wrap",
   wordBreak: "break-word",
   boxShadow: "none",
 };
 
+// Waiting, not failed: the bubble is the same surface, only quieter, while
+// the Queued pill under it carries the state in words.
 const USER_QUEUED_BUBBLE_STYLE: React.CSSProperties = {
-  background: "color-mix(in oklch, var(--warn) 5%, var(--panel-2))",
-  borderColor: "color-mix(in oklch, var(--warn) 28%, var(--rule-soft))",
-  boxShadow: "inset -3px 0 0 color-mix(in oklch, var(--warn) 62%, transparent), var(--lift-hi)",
+  opacity: 0.72,
 };
 
 const SPARK_TURN_STYLE: React.CSSProperties = {
@@ -3235,42 +3941,6 @@ const SPARK_BUBBLE_STYLE: React.CSSProperties = {
   overflowWrap: "anywhere",
 };
 
-const BACKEND_FAILURE_STYLE: React.CSSProperties = {
-  width: "fit-content",
-  maxWidth: "min(100%, 68ch)",
-  boxSizing: "border-box",
-  display: "flex",
-  flexDirection: "column",
-  gap: 5,
-  padding: "10px 12px 11px",
-  borderRadius: 12,
-  borderTopLeftRadius: "var(--radius-control, 7px)",
-  border: "1px solid color-mix(in oklch, var(--danger) 28%, var(--rule-soft))",
-  background: "color-mix(in oklch, var(--danger) 7%, var(--panel-2))",
-  boxShadow: "var(--lift-hi)",
-};
-
-const BACKEND_FAILURE_TITLE_STYLE: React.CSSProperties = {
-  color: "var(--ink)",
-  fontSize: 12.5,
-  fontWeight: 700,
-  lineHeight: 1.35,
-};
-
-const BACKEND_FAILURE_DETAIL_STYLE: React.CSSProperties = {
-  color: "var(--danger)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 10.5,
-  lineHeight: 1.45,
-  overflowWrap: "anywhere",
-};
-
-const BACKEND_FAILURE_HINT_STYLE: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 11,
-  lineHeight: 1.4,
-};
-
 // The run-level verdict pill on its own full-width row under the final Cora
 // bubble of a completed run. flexBasis:100% breaks it onto its own line
 // within SparkTurn's flex column.
@@ -3290,11 +3960,8 @@ const COMPLETION_INLINE_STYLE: React.CSSProperties = {
 };
 
 const COMPLETION_INLINE_LABEL_STYLE: React.CSSProperties = {
-  fontFamily: "var(--font-mono)",
-  fontSize: 9,
-  fontWeight: 700,
-  letterSpacing: "0.08em",
-  textTransform: "uppercase",
+  fontSize: 12,
+  fontWeight: 500,
   color: "var(--muted)",
 };
 
@@ -3511,7 +4178,8 @@ const QUESTION_ERROR_STYLE: React.CSSProperties = {
 // chip.
 const STEP_INDEX_TEXT_STYLE: React.CSSProperties = {
   color: "var(--muted)",
-  fontSize: 11,
+  fontSize: 12,
+  fontVariantNumeric: "tabular-nums",
   flex: "0 0 auto",
 };
 
@@ -3519,7 +4187,7 @@ const STEP_TITLE_STYLE: React.CSSProperties = {
   flex: "0 1 auto",
   minWidth: 0,
   color: "var(--ink)",
-  fontSize: 12,
+  fontSize: 12.5,
   fontWeight: 600,
   overflow: "hidden",
   textOverflow: "ellipsis",
@@ -3530,7 +4198,7 @@ const STEP_GOAL_INLINE_STYLE: React.CSSProperties = {
   flex: 1,
   minWidth: 0,
   color: "var(--muted)",
-  fontSize: 11,
+  fontSize: 12,
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
@@ -3541,19 +4209,20 @@ const STEP_PROGRESS_STYLE: React.CSSProperties = {
   flex: "0 0 auto",
   marginLeft: "auto",
   color: "var(--muted)",
-  fontSize: 10.5,
+  fontSize: 11,
   fontVariantNumeric: "tabular-nums",
   whiteSpace: "nowrap",
 };
 
 // Expanded step content is indentation under the row, not a boxed body.
-// Left padding lines the body up with the header title (7px button padding +
-// 6px dot + 7px gap).
+// Left padding lines the goal up with the header title (4px button padding +
+// 14px status slot + 8px gap); worker rows bring their own slot and sit one
+// slot further in.
 const STEP_BODY_STYLE: React.CSSProperties = {
-  padding: "2px 9px 8px 20px",
+  padding: "0 8px 8px 26px",
   display: "flex",
   flexDirection: "column",
-  gap: 7,
+  gap: 4,
 };
 
 const ACTIVITY_GROUP_STYLE: React.CSSProperties = {
@@ -3564,23 +4233,23 @@ const ACTIVITY_GROUP_STYLE: React.CSSProperties = {
 const ACTIVITY_GROUP_HEADER_STYLE: React.CSSProperties = {
   appearance: "none",
   width: "100%",
-  minHeight: 25,
-  border: "1px solid transparent",
+  minHeight: 28,
+  border: "none",
   borderRadius: "var(--radius-control, 7px)",
   background: "transparent",
   color: "inherit",
   display: "flex",
   alignItems: "center",
-  gap: 7,
-  padding: "3px 7px",
+  gap: 8,
+  padding: "3px 8px 3px 4px",
   cursor: "default",
   textAlign: "left",
 };
 
 const ACTIVITY_GROUP_TITLE_STYLE: React.CSSProperties = {
-  color: "var(--muted)",
-  fontSize: 11,
-  fontWeight: 600,
+  color: "var(--ink-dim)",
+  fontSize: 12,
+  fontWeight: 500,
   minWidth: 0,
   flex: "0 1 auto",
   overflow: "hidden",
@@ -3589,8 +4258,8 @@ const ACTIVITY_GROUP_TITLE_STYLE: React.CSSProperties = {
 };
 
 const ACTIVITY_GROUP_BODY_STYLE: React.CSSProperties = {
-  marginLeft: 12,
-  paddingLeft: 8,
+  marginLeft: 10,
+  paddingLeft: 4,
   borderLeft: "1px solid var(--rule-soft)",
   display: "flex",
   flexDirection: "column",
@@ -3627,26 +4296,17 @@ const MANAGER_DISCLOSURE_STYLE: React.CSSProperties = {
   boxSizing: "border-box",
 };
 
-const MANAGER_DISCLOSURE_BUTTON_STYLE: React.CSSProperties = {
-  appearance: "none",
-  width: "100%",
-  minHeight: 24,
-  border: "none",
-  background: "transparent",
-  color: "inherit",
-  display: "flex",
-  alignItems: "center",
-  gap: 7,
-  padding: "2px 4px",
-  cursor: "default",
-  textAlign: "left",
-};
-
 const MANAGER_DISCLOSURE_TITLE_STYLE: React.CSSProperties = {
   color: "var(--muted)",
   fontSize: 12,
   fontWeight: 500,
   whiteSpace: "nowrap",
+};
+
+const MANAGER_STAGE_TITLE_STYLE: React.CSSProperties = {
+  ...STEP_TITLE_STYLE,
+  color: "var(--ink-dim)",
+  fontWeight: 500,
 };
 
 const MANAGER_DISCLOSURE_BODY_STYLE: React.CSSProperties = {
@@ -3668,25 +4328,28 @@ const EXECUTION_TEXT_STYLE: React.CSSProperties = {
   lineHeight: 1.55,
 };
 
+// Every activity row shares one geometry: the 14px status slot sits on the
+// prose's left edge (4px in) and the label starts 8px after it, so icons and
+// titles line up down the whole turn.
 const TOOL_ROW_BUTTON_STYLE: React.CSSProperties = {
   appearance: "none",
   width: "100%",
-  minHeight: 25,
+  minHeight: 28,
   border: "none",
   background: "transparent",
   color: "inherit",
   display: "flex",
   alignItems: "center",
-  gap: 7,
-  padding: "3px 7px",
+  gap: 8,
+  padding: "3px 8px 3px 4px",
   cursor: "default",
   textAlign: "left",
 };
 
 const TOOL_TITLE_STYLE: React.CSSProperties = {
   color: "var(--ink-dim)",
-  fontSize: 11.5,
-  fontWeight: 600,
+  fontSize: 12,
+  fontWeight: 500,
   minWidth: 0,
   flex: "0 1 auto",
   overflow: "hidden",
@@ -3695,8 +4358,8 @@ const TOOL_TITLE_STYLE: React.CSSProperties = {
 };
 
 const TOOL_INLINE_DETAIL_STYLE: React.CSSProperties = {
-  color: "var(--muted-2)",
-  fontSize: 10.5,
+  color: "var(--muted)",
+  fontSize: 12,
   minWidth: 0,
   flex: 1,
   overflow: "hidden",
@@ -3706,8 +4369,7 @@ const TOOL_INLINE_DETAIL_STYLE: React.CSSProperties = {
 
 const TOOL_STATS_STYLE: React.CSSProperties = {
   color: "var(--muted)",
-  fontFamily: "var(--font-mono)",
-  fontSize: 9.5,
+  fontSize: 11,
   fontVariantNumeric: "tabular-nums",
   flex: "0 0 auto",
   whiteSpace: "nowrap",
@@ -3793,14 +4455,37 @@ const TOOL_META_LINE_STYLE: React.CSSProperties = {
   fontVariantNumeric: "tabular-nums",
 };
 
+const LIVE_TOOL_OUTPUT_STYLE: React.CSSProperties = {
+  margin: "2px 0 4px 12px",
+  padding: "6px 9px",
+  maxHeight: 168,
+  overflow: "auto",
+  border: "1px solid var(--rule-soft)",
+  borderRadius: 7,
+  background: "var(--bg)",
+  color: "var(--ink-dim)",
+  fontFamily: "var(--font-mono)",
+  fontSize: 11,
+  lineHeight: 1.45,
+  whiteSpace: "pre-wrap",
+  overflowWrap: "anywhere",
+};
+
+const STALL_HINT_STYLE: React.CSSProperties = {
+  color: "var(--warn)",
+  fontSize: 11.5,
+  lineHeight: 1.4,
+};
+
 // The slim in-flight header: pulsing dots + "Working for Ns". Sits where the
 // completed turn's "Worked for Ns" disclosure line will land, so the
 // live → done transition swaps copy without moving anything.
 const WORKING_LINE_STYLE: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
-  gap: 7,
-  minHeight: 22,
+  gap: 8,
+  minHeight: 24,
+  padding: "0 4px",
 };
 
 const ISSUE_PIP_STYLE: React.CSSProperties = {

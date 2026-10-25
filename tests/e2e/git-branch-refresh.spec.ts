@@ -67,7 +67,7 @@ test("branch picker refreshes refs changed outside Codara when opened", async ()
     // this coding session would; opening the picker must invalidate that cache.
     // The workspace rail also labels its row "On branch main"; the picker is
     // the Source Control trigger, whose title goes on to say what a click does.
-    const trigger = page.getByTitle(/On branch main .*switch or manage branches/);
+    const trigger = page.getByTitle(/On branch main\b.*switch or manage branches/);
     // First boot in a pristine isolated home does one-time work (path
     // enrichment, shell probe) before the git panel settles — allow for it.
     await expect(trigger).toBeVisible({ timeout: 30_000 });

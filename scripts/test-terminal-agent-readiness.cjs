@@ -108,6 +108,14 @@ assert.deepEqual(state.terminalAgentCensus(terminalTabs), { total: 2, working: 1
   "live restored chips count before notifier events arrive");
 assert.deepEqual(state.terminalAgentCensus(terminalTabs, { idle: true, busy: true }, { busy: true }),
   { total: 2, working: 1 }, "renderer and daemon observations of one pane are not double-counted");
+assert.deepEqual(state.terminalAgentCensus([{ ...terminalTabs[0], root: {
+  ...idleLeaf, worker: { ...seededWorker, runtimeState: "background" },
+} }]), { total: 1, working: 1 }, "an agent working in the background counts as working");
+assert.equal(
+  state.visibleWorkerChip({ ...seededWorker, state: "done", runtimeState: "background" })?.runtimeState,
+  "background",
+  "a chip working in the background stays on its pane",
+);
 assert.deepEqual(state.terminalAgentCensus([], { hidden: true }, { hidden: true }),
   { total: 1, working: 1 }, "unmounted background terminals remain in the daemon census");
 assert.deepEqual(state.terminalAgentCensus([{ ...terminalTabs[0], root: {

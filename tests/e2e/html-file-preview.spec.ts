@@ -55,7 +55,7 @@ test("html files open rendered by default and toggle to the source editor", asyn
   let app: ElectronApplication | null = null;
   try {
     app = await electron.launch({
-      args: [".", "--ozone-platform=x11"],
+      args: ["."],
       env: {
         ...process.env,
         SPARK_USER_DATA_DIR: userDataDir,

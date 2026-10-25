@@ -1,6 +1,23 @@
 import type { createPreviewDOM } from "@shared/preview-dom";
 
 // Stringified into the guest; the DOM factory is passed explicitly.
+
+/**
+ * Where an action is about to land, so the agent's cursor can get there
+ * first. One look, no waiting: when the element is not ready yet the cursor
+ * stays put and the action itself waits for it and reports why it failed.
+ */
+export async function locateProbe(opts: { selector: string }, createDOM: typeof createPreviewDOM) {
+  try {
+    const dom = createDOM();
+    const el = await dom.ready(opts.selector, 0);
+    const rect = el.getBoundingClientRect();
+    return { ...dom.point(el), box: { x: rect.left, y: rect.top, width: rect.width, height: rect.height } };
+  } catch {
+    return null;
+  }
+}
+
 export async function clickProbe(opts: { selector: string }, createDOM: typeof createPreviewDOM) {
   const dom = createDOM();
   const el = await dom.ready(opts.selector);
@@ -72,25 +89,4 @@ export async function pressKeyProbe(opts: { key: string; selector: string | null
   dispatchOn.dispatchEvent(new KeyboardEvent("keypress", init));
   dispatchOn.dispatchEvent(new KeyboardEvent("keyup", init));
   return { ok: true, target: dispatchOn?.tagName?.toLowerCase?.() ?? null };
-}
-
-export function waitForProbe(opts: { selector: string; state: string; timeoutMs: number }, createDOM: typeof createPreviewDOM) {
-  const dom = createDOM();
-  return new Promise((resolve, reject) => {
-    const deadline = Date.now() + opts.timeoutMs;
-    const check = () => {
-      let el: HTMLElement | null;
-      try { el = dom.find(opts.selector, opts.state === "hidden"); } catch (error) { reject(error); return; }
-      let match = false;
-      if (opts.state === "attached") match = el !== null;
-      else {
-        const visible = !!el && dom.visible(el);
-        match = opts.state === "hidden" ? !visible : visible;
-      }
-      if (match) return resolve({ ok: true, foundAt: new Date().toISOString() });
-      if (Date.now() >= deadline) return resolve({ ok: false, error: `timed out waiting for '${opts.selector}' to be ${opts.state}` });
-      setTimeout(check, 75);
-    };
-    check();
-  });
 }

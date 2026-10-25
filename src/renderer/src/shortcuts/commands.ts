@@ -1,4 +1,11 @@
 import { ctrl, mod, type Chord } from "./chord";
+import { IS_MAC } from "./platform";
+import {
+  jumpPaletteDefaultChord,
+  workspaceBackDefaultChord,
+  workspaceForwardDefaultChord,
+  workspaceIndexDefaultChord,
+} from "./workspace-jump-chords";
 
 // The command registry. Every keyboard-triggerable action is an entry here:
 // an `id` for handler dispatch, a human label for the cheat sheet / settings
@@ -13,9 +20,16 @@ import { ctrl, mod, type Chord } from "./chord";
 export type CommandId =
   | "shortcuts.open"
   | "runSwitcher.open"
+  | "jump.open"
+  | "workspace.selectByIndex"
+  | "workspace.back"
+  | "workspace.forward"
   | "settings.open"
+  | "capabilities.open"
   | "automations.open"
   | "usage.open"
+  | "review.open"
+  | "worktrees.cleanup"
   | "board.open"
   | "session.openInspector"
   | "composer.focus"
@@ -29,6 +43,8 @@ export type CommandId =
   | "terminal.splitDown"
   | "terminal.closePane"
   | "terminal.toggleZoom"
+  | "terminal.copyContext"
+  | "quickCommands.open"
   | "view.selectByIndex"
   | "view.zoomIn"
   | "view.zoomOut"
@@ -41,18 +57,20 @@ export type CommandId =
   | "tab.closeOthers"
   | "tab.cycleNext"
   | "tab.cyclePrev"
+  | "tab.group"
+  | "tab.ungroup"
   | "worker.newClaude"
   | "worker.newCodex"
   | "worker.newGrok"
   | "worker.newPi"
-  | "worker.claudeSessions"
-  | "worker.codexSessions"
-  | "worker.grokSessions"
   | "agent.cycleModel"
   | "agent.cycleEffort"
   | "agent.openModelPicker"
   | "agent.openEffortPicker"
-  | "markdown.togglePreview";
+  | "chat.stop"
+  | "markdown.togglePreview"
+  | "browser.pickElement"
+  | "browser.comment";
 
 export type CommandGroup =
   | "General"
@@ -69,7 +87,7 @@ export type Command = {
   group: CommandGroup;
   defaultChords: Chord[];
   // When true, the chord can't be rebound from the Keybindings UI — used
-  // for commands whose key portion varies at runtime (e.g. "Switch tab 1–9").
+  // for commands whose key portion varies at runtime (e.g. "Switch tab 1 to 9").
   // The cheat sheet still shows the default chord; the settings UI marks
   // the row as fixed.
   fixed?: boolean;
@@ -77,6 +95,10 @@ export type Command = {
   // `fixed` commands where the chord shape can't be expressed as a fixed
   // key (e.g. variable digit). The dispatcher calls this directly.
   customMatch?: (e: KeyboardEvent) => boolean;
+  // The chord stands for a range: its modifiers with any digit 1 to 9 (the
+  // stored key is a representative "1"). Unlike `fixed`, the modifiers can be
+  // rebound; see digitRangeMatches in ./bindings.ts.
+  digitRange?: boolean;
 };
 
 export const COMMAND_GROUPS: CommandGroup[] = [
@@ -105,11 +127,47 @@ export const COMMANDS: Command[] = [
     // Mod+K — quick access to recent Cora work in registered workspaces.
     defaultChords: [mod("k")],
   },
+  // The jump palette and workspace navigation. Per-platform defaults and why:
+  // ./workspace-jump-chords.ts. On macOS Ctrl+1..9 is the workspace range, so
+  // view.selectByIndex answers only Cmd+digit there.
+  {
+    id: "jump.open",
+    label: "Jump to a workspace, tab or agent",
+    group: "Navigation",
+    defaultChords: [jumpPaletteDefaultChord(IS_MAC)],
+  },
+  {
+    id: "workspace.selectByIndex",
+    label: "Switch to workspace 1 to 9",
+    group: "Navigation",
+    defaultChords: [workspaceIndexDefaultChord(IS_MAC)],
+    digitRange: true,
+  },
+  {
+    id: "workspace.back",
+    label: "Back to the previous workspace",
+    group: "Navigation",
+    defaultChords: [workspaceBackDefaultChord(IS_MAC)],
+  },
+  {
+    id: "workspace.forward",
+    label: "Forward to the next workspace",
+    group: "Navigation",
+    defaultChords: [workspaceForwardDefaultChord(IS_MAC)],
+  },
   {
     id: "settings.open",
     label: "Open settings",
     group: "General",
     defaultChords: [mod(",")],
+  },
+  {
+    id: "capabilities.open",
+    label: "Open Capability Center (tools, skills, memory)",
+    group: "General",
+    // No default chord: the obvious Mod+Shift+K is CodeMirror's delete-line.
+    // Bind one in Settings, Keybindings if you open it often.
+    defaultChords: [],
   },
   {
     id: "automations.open",
@@ -127,6 +185,23 @@ export const COMMANDS: Command[] = [
     // Mod+Shift+U — free chord, and the only U binding in the table. Opens the
     // token/cost analytics scanned from the provider CLIs' transcripts.
     defaultChords: [mod("u", { shift: true })],
+  },
+  {
+    id: "review.open",
+    label: "Review changes",
+    group: "Navigation",
+    // No default chord: Mod+Shift+G is the editor's find-previous. The Source
+    // Control header has a button for it too.
+    defaultChords: [],
+  },
+  {
+    id: "worktrees.cleanup",
+    label: "Clean up worktrees",
+    group: "General",
+    // No default chord: an occasional screen. It lists every worktree of the
+    // workspaces' repositories with size, activity and merge state, and
+    // removes the ones picked under the guarded removal.
+    defaultChords: [],
   },
   {
     id: "board.open",
@@ -230,14 +305,33 @@ export const COMMANDS: Command[] = [
     defaultChords: [mod("Enter", { shift: true })],
   },
   {
+    id: "terminal.copyContext",
+    label: "Copy terminal context",
+    group: "Terminal",
+    // The active pane's recent output (or its selection) and working
+    // directory, ready to paste into an agent. No default chord: the free
+    // Ctrl+Alt letters are AltGr characters on many keyboard layouts, which a
+    // terminal must keep receiving. The pane toolbar has a button for it.
+    defaultChords: [],
+  },
+  {
+    id: "quickCommands.open",
+    label: "Run a quick command",
+    group: "Terminal",
+    // Mod+Shift+P, the command palette chord of VS Code and Sublime, opens
+    // the palette of saved shell commands and agent prompts. Mod+P stays
+    // Quick Open.
+    defaultChords: [mod("p", { shift: true })],
+  },
+  {
     id: "view.selectByIndex",
-    label: "Switch tab 1–9",
+    label: "Switch tab 1 to 9",
     group: "Tabs",
     // Variable-key chord — the digit is the tab index. Not rebindable.
     defaultChords: [mod("1")],
     fixed: true,
     customMatch: (e) =>
-      (e.ctrlKey || e.metaKey) &&
+      (IS_MAC ? e.metaKey && !e.ctrlKey : e.ctrlKey || e.metaKey) &&
       !e.shiftKey &&
       !e.altKey &&
       /^[1-9]$/.test(e.key),
@@ -331,14 +425,26 @@ export const COMMANDS: Command[] = [
     group: "Tabs",
     defaultChords: [ctrl("Tab", { shift: true })],
   },
+  // Tab groups from the keyboard. No default chord: the free ones collide
+  // with editor and terminal bindings. A group's chip is focusable too: Enter
+  // folds it, Shift+F10 opens the same editor.
+  {
+    id: "tab.group",
+    label: "Group active tab (or edit its group)",
+    group: "Tabs",
+    defaultChords: [],
+  },
+  {
+    id: "tab.ungroup",
+    label: "Remove active tab from its group",
+    group: "Tabs",
+    defaultChords: [],
+  },
   // CLI worker spawners. No default chord — the chord-space we'd want
   // (Mod+Shift+C/Mod+Alt+C/…) all collide with built-in or browser
   // bindings. Users bind their own from Settings → Keybindings.
-  //
-  // "New … worker pane" launches a fresh session immediately; the
-  // "… worker sessions" variants open the resume picker over the recent
-  // sessions in the launch directory. Split on purpose — muscle-memory
-  // fresh-session bindings must not grow a dialog in front of them.
+  // Each launches a new session at once; earlier sessions are resumed from
+  // the Sessions view.
   {
     id: "worker.newClaude",
     label: "New Claude worker pane",
@@ -360,24 +466,6 @@ export const COMMANDS: Command[] = [
   {
     id: "worker.newPi",
     label: "New Pi worker pane",
-    group: "Workers",
-    defaultChords: [],
-  },
-  {
-    id: "worker.claudeSessions",
-    label: "Open Claude worker sessions…",
-    group: "Workers",
-    defaultChords: [],
-  },
-  {
-    id: "worker.codexSessions",
-    label: "Open Codex worker sessions…",
-    group: "Workers",
-    defaultChords: [],
-  },
-  {
-    id: "worker.grokSessions",
-    label: "Open Grok worker sessions…",
     group: "Workers",
     defaultChords: [],
   },
@@ -418,11 +506,36 @@ export const COMMANDS: Command[] = [
     defaultChords: [mod("n", { shift: true })],
   },
   {
+    // Stop is not a soft interrupt: it ends the manager turn and kills live
+    // workers. Bare Escape already closes menus, the mention picker and
+    // overlays, so a stray press must never reach this; Mod+. is the
+    // conventional "cancel" chord and nothing else in this table uses it.
+    id: "chat.stop",
+    label: "Stop Cora",
+    group: "Agent",
+    defaultChords: [mod(".")],
+  },
+  {
     // Mirrors VS Code's "Markdown: Open Preview" (Cmd/Ctrl+Shift+V). Only the
     // focused editor reacts, including files inside a split pane.
     id: "markdown.togglePreview",
     label: "Toggle markdown preview",
     group: "View",
     defaultChords: [mod("v", { shift: true })],
+  },
+  {
+    // Mod+Shift+E sits next to Mod+E (new browser tab) and is otherwise free.
+    // The focused browser tab, or the one docked in the focused cell, reacts.
+    id: "browser.pickElement",
+    label: "Point at an element to send to an agent",
+    group: "View",
+    defaultChords: [mod("e", { shift: true })],
+  },
+  {
+    // Mod+Shift+X ("mark"): Alt chords are dead keys on macOS layouts.
+    id: "browser.comment",
+    label: "Comment on the browser page",
+    group: "View",
+    defaultChords: [mod("x", { shift: true })],
   },
 ];

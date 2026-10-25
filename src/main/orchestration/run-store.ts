@@ -12,6 +12,7 @@ import type {
   PlanValidation,
   WorkerHandoffArtifact,
   AgentEffortLevel,
+  AutopilotStatus,
   AgentRuntimeDiagnostic,
   Checkpoint,
   CoraWhiteboardEdge,
@@ -30,6 +31,7 @@ import type {
   StartDirectWorkerRunInput,
   WorkerAttemptStatus,
   LaunchWorkerAttemptInput,
+  LiveWorkerActivity,
   MarkRunSeenInput,
   PauseRunInput,
   RenameRunInput,
@@ -49,6 +51,7 @@ import type {
   RunBlocker,
   HumanRunMessage,
   RunConversationMessageIntent,
+  RunManagerPlanMilestone,
   RunMessageDeliveryState,
   RunMessageAttachment,
   RunQuestionCategory,
@@ -75,18 +78,34 @@ import type {
   WorkerReport,
   WorkerTaskEnvelope,
 } from "@shared/types";
-import { FAN_OUT_DIRECTIVE_MARKER, normalizeGitHubOrigin } from "@shared/types";
+import { fastModeFallbackNote } from "@shared/fast-mode";
+import {
+  FAN_OUT_DIRECTIVE_MARKER,
+  MANAGER_TURN_RECOVERY_FAILURE_KINDS,
+  normalizeGitHubOrigin,
+} from "@shared/types";
 import {
   isBackendFailureQuestion,
   MANAGER_TURN_FAILURE_REASON,
   normalizeHumanRunQuestionMessages,
   normalizeQuestionOptionsForMessage,
+  QUESTION_INACTIVE_ERROR_PREFIX,
   resolveOpenRunQuestion as resolveOpenRunQuestionPure,
   resolveSingleUnresolvedRunQuestion,
   resumeBlockingRunQuestion,
   unresolvedRunQuestions,
 } from "@shared/run-questions";
 import { makeId } from "@shared/ids";
+import {
+  forgetPastedKeys,
+  forgetPastedText,
+  livePastedText,
+  redactPastedSecrets,
+  redactPastedSecretsIn,
+  scrubPastedText,
+  setPastedKeyDir,
+  withPastedText,
+} from "./pasted-secrets";
 import { stripAnsiAndControls } from "@shared/agent-patterns";
 import {
   formatPaneCollapsedBlock,
@@ -105,11 +124,11 @@ import { effectiveChatMode } from "@shared/chat-policy";
 import { contextWindowForModel } from "@shared/context-window";
 import {
   chatContextCapacityTokens,
-  resolveCompactAtTokens,
+  compactAtOverrideTokens,
 } from "@shared/context-compaction";
 import { normalizeCoraExecutionPolicy } from "@shared/cora-execution-policy";
 import { effectiveRunExecutionPolicy } from "./execution-policy";
-import { shouldUseDirectExecution } from "./direct-execution";
+import { followUpNeedsManager, shouldUseDirectExecution } from "./direct-execution";
 import {
   resolveProjectPolicyMode,
   runProjectPolicyMode,
@@ -146,6 +165,7 @@ import {
 } from "./autopilot-wave";
 import {
   appendBufferedEvent as appendBufferedEventRaw,
+  broadcastLiveEvent,
   appendEvent as appendEventRaw,
   appendEvents as appendEventsRaw,
   flushBufferedEvents,
@@ -160,18 +180,26 @@ import {
 } from "./event-log";
 import { buildRunStatusTransitionEvent } from "./run-lifecycle";
 import {
+  autoReviewedTaskStatus,
   countFollowUpLineageAttempts,
   reconcileAcceptedVerifierOnlySteps,
   rehomeSettledStepFeedbackRetry,
   resolveFollowUpDestinationStep,
+  settledReviewedStepStatus,
 } from "./step-lifecycle";
-import { describeRunSettlement, isRunSettled } from "./run-settled";
+import { describeRunSettlement, isRunSettled, unresolvedWorkerTasks } from "./run-settled";
 import { PEER_COMMS_HELPER_SCRIPT } from "./peer-comms-script";
-import { decideWorkerReport, readWorkerReport } from "./worker-report";
+import { decideWorkerReport, readWorkerReport, readWorkerReportWithProblem } from "./worker-report";
+import { evaluateWorkerSessionReuse } from "./worker-session-reuse";
 import { classifyWorkerFailure, planWorkerFailureRetry } from "./failure-taxonomy";
-import { classifyWorkerSilence, PI_WORKER_TURN_CEILING_MS } from "./agent-liveness";
+import {
+  classifyWorkerSilence,
+  classifyWorkerTurnCeiling,
+  isWorkerTurnCeilingFailure,
+} from "./agent-liveness";
 import {
   isParkedManagerTurnAction,
+  managerTurnParkReason,
   managerTurnRetryDelayMs,
   MAX_MANAGER_TRANSIENT_RETRIES,
   planManagerTurnFailure,
@@ -181,6 +209,18 @@ import {
   MANUAL_REVIEW_QUESTION_OPTIONS,
   parseManualReviewVerdict,
 } from "./manual-review";
+// The unverified-completion question is asked instead of completing when the
+// work is finished but unverified. The run stays reviewable and the user owns
+// the call, rather than a cap-broken or never-verified run being reported as a
+// clean green finish.
+import {
+  OPEN_PLAN_MILESTONES_OPTIONS,
+  UNFINISHED_WORKER_OPTIONS,
+  UNVERIFIED_COMPLETION_OPTIONS,
+  UNVERIFIED_COMPLETION_QUESTION,
+  openPlanMilestonesQuestion,
+  parseUnverifiedCompletionChoice,
+} from "./worker-outcome-questions";
 // Re-exported for external importers (ipc.ts reaches it via getRunStore()).
 export { readWorkerReport } from "./worker-report";
 // Spawn-time batch shape guard. agent-socket's codara_spawn_workers handler is
@@ -202,6 +242,7 @@ import {
   renderWorkerPrompt,
   shouldProvisionWorkerMailbox,
   shouldUsePeerComms,
+  workerMemoryContext,
 } from "./worker-prompt";
 import {
   detectFatalWorkerRuntimeError,
@@ -238,18 +279,36 @@ import {
 import { evaluateGuardPredicate } from "./loom-predicates";
 import { resolveInlineNodes, stepNoteMessage, type ResolvedStep } from "./loom-resolve";
 import type { LoomGraph, LoomNodeDef, PreResolvedNode, RecordStepOnlyPassInput } from "@shared/types";
-import { formatPriorRunsSection, recordRunMemory } from "./run-memory";
+import type { WorkflowCallMarker, WorkflowRunInfo } from "@shared/workflow";
+import { sampleFromSchema, validateWorkflowResult } from "./workflow-schema";
+import { forgetRunMemory, formatPriorRunsSection, recordRunMemory } from "./run-memory";
+import { forgetRunLearning, learnFromCompletedRun, noteRunMessages } from "./memory-learning";
+import { normalizeManagerPlanInput, openPlanMilestones, renderRunStateDigest } from "./manager-plan";
+import {
+  compactionNoteBody,
+  CONVERSATION_COMPACTION_PROMPT,
+  conversationDurableState,
+  conversationSummaryProblem,
+  cutoverDecision,
+  type CutoverGuard,
+  describeCutover,
+  estimateTokens,
+  guardAfterCutover,
+  guardAfterFailure,
+  observeCutoverBaseline,
+} from "./conversation-compaction";
 import { recordRunLessons } from "./workspace-lessons";
 import { formatCoraMemoryForTurn, releaseCoraMemoryInjection } from "./cora-memory";
 import { DEFAULT_CORA_PROFILE_ID, resolveCoraProfile } from "./cora-profiles";
 import {
   describeHeadroomForPrompt,
-  readSubscriptionHeadroomSummary,
+  readCachedSubscriptionHeadroomSummary,
 } from "./subscription-headroom";
 import {
   createCheckpoint,
   deleteRunCheckpoints,
   restoreCheckpointCode,
+  restoreCheckpointPaths,
   rewindShadowRef,
   runCheckpointStartPoint,
 } from "./checkpoints";
@@ -263,13 +322,17 @@ import {
 } from "../git-worktrees";
 import { readGitText } from "../git-exec";
 import { codaraHome } from "../codara-home";
+import { prepareWorkerWorktree, waitForWorkerWorktreeSetup } from "../worktree-setup/workers";
 import { defaultShell } from "../shells";
 import {
   isOpenRouterModelId,
+  pickDirectWorkerModel,
   plannedWorkerModel,
   rosterModelFor,
+  runtimeForWorkerModelId,
   sanitizeWorkerModelHint,
 } from "./worker-model-hint";
+import { coraWorkerModelAvailability } from "./worker-model-availability";
 import { shouldResumeForUserMessage } from "./user-message-resume";
 import {
   captureWorkerDiff,
@@ -290,6 +353,7 @@ import {
   spawnedTerminalsTitle,
   standingTerminalTitle,
 } from "./standing-terminals";
+import { standingTerminalCompaction } from "./cli-autocompact";
 import {
   buildManagerTurnPrompt,
   isCheckpointJobCurrent,
@@ -316,6 +380,8 @@ import {
 } from "./pi-runtime-electron";
 import { PiRpcClient, type PiRpcEvent } from "./pi-rpc-client";
 import { PiWorkerCompaction } from "./pi-worker-compaction";
+import { describeCompaction, logCompaction, type CompactionReport } from "./pi-compaction-pipeline";
+import { workerContractSections, workerReportSection } from "./worker-contract-sections";
 import { piWorkerMessageUsage } from "./pi-worker-usage";
 import type { PiProvider, PiSubscriptionProvider, PiThinkingLevel } from "./pi-runtime";
 import {
@@ -480,6 +546,17 @@ interface ActiveWorkerProcess {
 }
 
 const activeWorkerProcesses = new Map<string, ActiveWorkerProcess>();
+// Attempts between launchWorkerAttempt's start and their activeWorkerProcesses
+// entry. That window covers account resolution, the launch plan and Pi
+// startup, and a Stop landing inside it used to find nothing to kill, so the
+// worker went on to run its whole task in a paused run. Stop marks the entry
+// aborted and the launch backs out at its next checkpoint.
+interface LaunchingWorkerAttempt {
+  runId: string;
+  workerTaskId: string;
+  aborted: boolean;
+}
+const launchingWorkerAttempts = new Map<string, LaunchingWorkerAttempt>();
 const activeAutopilotCycles = new Map<string, Promise<void>>();
 const activeAutopilotPlans = new Map<string, Promise<void>>();
 const activeAutopilotReviews = new Map<string, Promise<void>>();
@@ -553,6 +630,68 @@ export function shutdownRunRuntimeResources(maxWaitMs?: number): Promise<void> {
   return drainRunRuntimeResources(maxWaitMs);
 }
 
+/**
+ * Activity readouts of the workspace's live worker attempts, straight from the
+ * run cache that reportActivity writes. The renderer polls this instead of
+ * listRuns while workers run, so a tool call costs a few bytes, not a clone of
+ * every run in the workspace.
+ */
+export function liveWorkerActivity(workspaceId: string): LiveWorkerActivity[] {
+  const live: LiveWorkerActivity[] = [];
+  for (const run of runCache.values()) {
+    if (run.workspaceId !== workspaceId) continue;
+    for (const attempt of run.workerAttempts) {
+      if (attempt.status !== "launching" && attempt.status !== "running" && attempt.status !== "finishing") {
+        continue;
+      }
+      live.push({
+        runId: run.id,
+        attemptId: attempt.id,
+        runtimeActivity: attempt.runtimeActivity,
+        runtimeActivityAt: attempt.runtimeActivityAt,
+      });
+    }
+  }
+  return live;
+}
+
+/**
+ * The work a quit would kill right now: runs with a manager turn in flight or
+ * a worker process alive or starting. Synchronous and memory-only, because the
+ * quit guard has to decide inside before-quit. Run status alone is not enough:
+ * an idle chat can sit at "running" long after its last turn ended.
+ */
+export function liveWorkForQuit(): { chats: number; automations: number; workers: number } {
+  const runIds = new Set<string>();
+  // A launch entry lives until its attempt finishes, so a running worker sits
+  // in both maps: count attempts, not entries.
+  const attemptIds = new Set<string>();
+  for (const worker of activeWorkerProcesses.values()) {
+    runIds.add(worker.runId);
+    attemptIds.add(worker.attemptId);
+  }
+  for (const [attemptId, launching] of launchingWorkerAttempts) {
+    if (launching.aborted) continue;
+    runIds.add(launching.runId);
+    attemptIds.add(attemptId);
+  }
+  for (const run of runCache.values()) {
+    if (isTerminalRunStatus(run.status) || run.status === "paused") continue;
+    if (run.sparkCalls.some((call) => call.status === "started" && !call.completedAt)) runIds.add(run.id);
+  }
+  let chats = 0;
+  let automations = 0;
+  for (const runId of runIds) {
+    if (runCache.get(runId)?.executionMode === "direct") automations += 1;
+    else chats += 1;
+  }
+  return {
+    chats,
+    automations,
+    workers: attemptIds.size,
+  };
+}
+
 interface ManagerDecisionMutationContext {
   runId: string;
   conversationEpoch: number;
@@ -585,25 +724,34 @@ function assertManagerDecisionMutationCurrent(runId: string | undefined): void {
   }
 }
 
+// A run's pasted keys outlive a restart beside the Pi sessions, which hold
+// them already; never in the run's own folder.
+setPastedKeyDir(() => join(codaraHome(), "pi-agent", "pasted-keys"));
+
+// Events are written to events.jsonl; a key the user pasted never is
+// (pasted-secrets.ts), even when the model repeats it.
 const appendEvent = (
-  ...args: Parameters<typeof appendEventRaw>
+  ...[input, ...rest]: Parameters<typeof appendEventRaw>
 ): ReturnType<typeof appendEventRaw> => {
-  assertManagerDecisionMutationCurrent(args[0].runId);
-  return appendEventRaw(...args);
+  assertManagerDecisionMutationCurrent(input.runId);
+  return appendEventRaw(redactPastedSecretsIn(input.runId, input), ...rest);
 };
 
 const appendEvents = (
-  ...args: Parameters<typeof appendEventsRaw>
+  ...[inputs, ...rest]: Parameters<typeof appendEventsRaw>
 ): ReturnType<typeof appendEventsRaw> => {
-  for (const input of args[0]) assertManagerDecisionMutationCurrent(input.runId);
-  return appendEventsRaw(...args);
+  for (const input of inputs) assertManagerDecisionMutationCurrent(input.runId);
+  return appendEventsRaw(
+    inputs.map((input) => redactPastedSecretsIn(input.runId, input)),
+    ...rest,
+  );
 };
 
 const appendBufferedEvent = (
-  ...args: Parameters<typeof appendBufferedEventRaw>
+  ...[input, ...rest]: Parameters<typeof appendBufferedEventRaw>
 ): ReturnType<typeof appendBufferedEventRaw> => {
-  assertManagerDecisionMutationCurrent(args[0].runId);
-  return appendBufferedEventRaw(...args);
+  assertManagerDecisionMutationCurrent(input.runId);
+  return appendBufferedEventRaw(redactPastedSecretsIn(input.runId, input), ...rest);
 };
 
 // One-shot per process: fired lazily from listRuns(). Keeps the runs/ dir
@@ -861,6 +1009,7 @@ async function createRunInternal(
     // patched after) so the run.created event itself already carries them.
     automationId: input.automationId,
     executionMode: input.executionMode,
+    ...(input.workflow ? { workflow: input.workflow } : {}),
   };
   run.artifactDir = runDir(run.id);
 
@@ -944,6 +1093,166 @@ export async function readWorkerAttemptPrompt(
     throw new Error("Worker prompt path is outside its run artifacts.");
   }
   return fs.readFile(promptPath, "utf8");
+}
+
+const WORKER_LOG_TAIL_BYTES = 256 * 1024;
+
+/**
+ * The tail of a worker attempt's transcript (stdout.log, what its pane
+ * showed), so the user can read a worker whose terminal is gone. Confined the
+ * same way as readWorkerAttemptPrompt: the path comes from the attempt record
+ * and must resolve inside the run's own directory.
+ */
+export async function readWorkerAttemptLog(
+  runId: string,
+  attemptId: string,
+): Promise<{ text: string; truncated: boolean } | null> {
+  const run = await requireRun(runId);
+  const attempt = run.workerAttempts.find((candidate) => candidate.id === attemptId);
+  if (!attempt?.stdoutLogPath) return null;
+  let logPath: string;
+  try {
+    logPath = await fs.realpath(resolvePath(attempt.stdoutLogPath));
+  } catch {
+    return null;
+  }
+  const artifactRoot = await fs.realpath(runDir(run.id));
+  const relativeLog = relative(artifactRoot, logPath);
+  if (
+    relativeLog === "" ||
+    relativeLog.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) ||
+    relativeLog === ".." ||
+    isAbsolute(relativeLog)
+  ) {
+    throw new Error("Worker log path is outside its run artifacts.");
+  }
+  const size = (await fs.stat(logPath)).size;
+  const text = await readFileTailUtf8(logPath, WORKER_LOG_TAIL_BYTES);
+  // The log mirrors the pane, so it carries cursor and screen escapes the
+  // inspector would print as literal junk.
+  return { text: stripAnsiAndControls(text ?? ""), truncated: size > WORKER_LOG_TAIL_BYTES };
+}
+
+/**
+ * Stop one worker without pausing its run. The attempt is marked cancelled
+ * BEFORE the kill: the finish path reads a cancelled attempt as an
+ * interruption, so the stopped worker is never reviewed, failed over to the
+ * other provider, or allowed to fail its step. A launch still starting backs
+ * out at its next checkpoint instead of starting Pi.
+ */
+export async function stopWorkerAttempt(runId: string, attemptId: string): Promise<RunState> {
+  const run = await requireRun(runId);
+  const attempt = run.workerAttempts.find((item) => item.id === attemptId);
+  if (!attempt) throw new Error(`Worker attempt not found: ${attemptId}`);
+  if (ATTEMPT_TERMINAL_STATUSES.has(attempt.status)) return run;
+  const launching = launchingWorkerAttempts.get(attemptId);
+  if (launching) launching.aborted = true;
+  const stopped = await commitRunChange(run, {
+    type: "worker_attempt.stopped_by_user",
+    message: "Worker stopped by the user",
+    workerTaskId: attempt.workerTaskId,
+    payload: { attemptId },
+    mutate: (draft, timestamp) => {
+      const target = draft.workerAttempts.find((item) => item.id === attemptId);
+      if (!target || ATTEMPT_TERMINAL_STATUSES.has(target.status)) return false;
+      target.status = "cancelled";
+      target.error = target.error ?? "Stopped by the user.";
+      target.finishedAt = target.finishedAt ?? timestamp;
+      const task = draft.workerTasks.find((item) => item.id === target.workerTaskId);
+      if (task && !["accepted", "failed", "cancelled", "blocked"].includes(task.status)) {
+        task.status = "cancelled";
+        task.updatedAt = timestamp;
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
+  const active = activeWorkerProcesses.get(attemptId);
+  if (active) {
+    try {
+      active.kill();
+    } catch {
+      /* already gone */
+    }
+  }
+  try {
+    pty.killImmediate(attemptId);
+  } catch {
+    /* no display PTY */
+  }
+  return stopped;
+}
+
+/**
+ * Run a failed, stopped, or blocked worker task again as a new attempt, so the
+ * old attempt's log and report stay as they were. Only while the run is
+ * working: a paused or blocked run must be resumed (or its question answered)
+ * first, and an ended run belongs to Cora's follow-up flow.
+ */
+export async function retryWorkerTask(runId: string, workerTaskId: string): Promise<RunState> {
+  const run = await requireRun(runId);
+  const task = run.workerTasks.find((item) => item.id === workerTaskId);
+  if (!task) throw new Error(`Worker task not found: ${workerTaskId}`);
+  if (!["failed", "cancelled", "blocked"].includes(task.status)) {
+    throw new Error("Only a failed, stopped, or blocked worker can be retried.");
+  }
+  if (run.status === "paused") {
+    throw new Error("Resume the run before retrying a worker.");
+  }
+  if (run.status === "blocked") {
+    throw new Error("Answer the open question in the chat before retrying a worker.");
+  }
+  if (run.status !== "running" && run.status !== "reviewing") {
+    throw new Error("This run has ended. Ask Cora to continue the work instead.");
+  }
+  const step = task.stepId ? run.steps.find((item) => item.id === task.stepId) : undefined;
+  // The worker cycle settles a step with a partial or blocked worker at
+  // completed_unverified, and that step is waiting on exactly this decision, so
+  // retrying the blocked worker reopens it. Any other settled step is history.
+  const reopensUnverifiedStep = step?.status === "completed_unverified" && task.status === "blocked";
+  if (step && isImmutableStepStatus(step.status) && !reopensUnverifiedStep) {
+    throw new Error("That worker's step is already settled. Ask Cora for a follow-up instead.");
+  }
+  const lastAttempt = run.workerAttempts
+    .filter((attempt) => attempt.workerTaskId === task.id)
+    .reduce<WorkerAttempt | undefined>(
+      (latest, attempt) => (!latest || attempt.attemptNumber > latest.attemptNumber ? attempt : latest),
+      undefined,
+    );
+  if (lastAttempt && !ATTEMPT_TERMINAL_STATUSES.has(lastAttempt.status)) {
+    throw new Error("That worker is still running.");
+  }
+  await commitRunChange(run, {
+    type: "worker_task.retry_requested",
+    message: `Worker retried by the user: ${task.title}`,
+    workerTaskId: task.id,
+    payload: { previousAttemptId: lastAttempt?.id ?? null },
+    mutate: (draft, timestamp) => {
+      const draftStep = task.stepId ? draft.steps.find((item) => item.id === task.stepId) : undefined;
+      if (
+        draftStep &&
+        (draftStep.status === "failed" ||
+          draftStep.status === "blocked" ||
+          (reopensUnverifiedStep && draftStep.status === "completed_unverified"))
+      ) {
+        draftStep.status = "running";
+        draftStep.updatedAt = timestamp;
+        draft.currentStepId = draftStep.id;
+      }
+      draft.status = "running";
+      draft.updatedAt = timestamp;
+    },
+  });
+  // A sandboxed attempt's cwd is its throwaway worktree; the retry forks a new
+  // one from the real workspace.
+  const cwd = lastAttempt?.sandboxBaseRepo ?? lastAttempt?.cwd ?? autopilotInputFromRun(run).cwd;
+  const envelope = await prepareWorkerTask({
+    runId,
+    workerTaskId,
+    cwd,
+    unattended: Boolean(lastAttempt?.sandboxWorktreePath),
+  });
+  scheduleAutopilotCycles(runId, [envelope.attemptId]);
+  return requireRun(runId);
 }
 
 async function purgeTerminalRunForRetention(runId: string): Promise<void> {
@@ -1108,6 +1417,39 @@ export async function reassignCoraProfileRuns(
   return reassigned;
 }
 
+// Mirrors isUnstartedChatRun in the renderer (chat/cora-view.ts): a run the
+// board minted that has never had a conversation.
+function isUnstartedRun(run: RunState): boolean {
+  return (
+    run.status === "idle" &&
+    run.humanMessages.length === 0 &&
+    run.steps.length === 0 &&
+    run.workerTasks.length === 0
+  );
+}
+
+/** The composer still offers a profile for a board-minted chat that has never
+ * had a conversation, so its first send carries the pick here: nothing has
+ * read the profile it was minted with yet. A started run keeps its profile. */
+export async function adoptCoraProfileForUnstartedRun(
+  run: RunState,
+  reference: string | undefined,
+): Promise<RunState> {
+  if (!reference?.trim() || !isUnstartedRun(run)) return run;
+  const profileId = resolveCoraProfile(reference).id;
+  if (run.coraProfileId === profileId) return run;
+  return commitRunChange(run, {
+    type: "cora_profile.selected",
+    message: "Cora profile picked before the first message",
+    payload: { profileId },
+    mutate: (draft, timestamp) => {
+      if (!isUnstartedRun(draft) || draft.coraProfileId === profileId) return false;
+      draft.coraProfileId = profileId;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
 // A run is a chat in the panel, so it needs a title the user can tell apart
 // from its siblings. A plan run is named after the plan; a conversational
 // chat (no plan, just an opening message) is named after that message, the
@@ -1129,11 +1471,32 @@ function chatTitleFromInput(input: StartAutopilotInput): string {
   return `Autopilot - ${input.workspaceName}`;
 }
 
+async function resolveDirectWorkerModel(chipModel: string | undefined): Promise<string | undefined> {
+  const { connected } = await coraWorkerModelAvailability(await loadSettings());
+  return pickDirectWorkerModel(chipModel, connected);
+}
+
+/** The worker model for the next pass of a direct chat (not a Loom run). */
+async function directChatPassModel(run: RunState): Promise<string> {
+  const chipModel = run.chatModel?.trim() || undefined;
+  if (run.automationId) return chipModel || "gpt-5.6-sol";
+  return (await resolveDirectWorkerModel(chipModel)) ?? chipModel ?? "gpt-5.6-sol";
+}
+
 export async function startAutopilot(input: StartAutopilotInput): Promise<RunState> {
+  // The first message names the chat and, on the direct lane, becomes the
+  // worker's task; scrubbed here, before either is written. Only the live
+  // prompt that delivers it sees the key (pasted-secrets.ts).
+  if (input.initialUserNote) input = { ...input, initialUserNote: scrubPastedText(input.initialUserNote) };
+  // "Always verify edits with a worker" promises a verifier on every change,
+  // which only the managed path provides; an explicit direct request from the
+  // caller still wins.
+  const alwaysVerifyEdits = !input.runId && (await loadSettings()).coraAlwaysVerifyEdits === true;
   const directExecutionRequested =
     !input.runId &&
     (await shouldUseDirectExecution({
-      strategy: input.executionStrategy,
+      strategy:
+        alwaysVerifyEdits && input.executionStrategy !== "direct" ? "managed" : input.executionStrategy,
       cwd: input.cwd,
       prompt: input.initialUserNote,
       chatMode: input.chatMode,
@@ -1142,17 +1505,16 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       hasFanOut: Boolean(input.fanOut),
       hasCouncil: Boolean(input.council),
     }));
-  // A direct Cora turn is implemented as one worker. If the user disabled the
-  // entire worker roster, keep the request on the manager path: the manager's
-  // injected contract tells it to answer directly or ask the user to enable a
-  // worker, instead of creating a run that can never launch.
-  const canLaunchDirectWorker = directExecutionRequested
-    ? availableCoraWorkerModels(await loadSettings()).length > 0
-    : false;
-  if (
-    !input.runId &&
-    canLaunchDirectWorker
-  ) {
+  // A direct Cora turn is implemented as one worker, which may only run a model
+  // the user left enabled in the worker roster and has an account for. With
+  // none, keep the request on the manager path: its injected contract tells
+  // it to answer directly or ask the user to sign in or enable a worker,
+  // instead of creating a run that can never launch.
+  const chipModel = input.chatModel?.trim() || undefined;
+  const directModel = directExecutionRequested
+    ? await resolveDirectWorkerModel(chipModel)
+    : undefined;
+  if (!input.runId && directModel) {
     return startDirectWorkerRun({
       workspaceId: input.workspaceId,
       workspaceName: input.workspaceName,
@@ -1163,13 +1525,17 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       title: chatTitleFromInput(input),
       prompt: input.initialUserNote!.trim(),
       clientMessageId: input.initialUserNoteClientMessageId,
-      model: input.chatModel?.trim() || "gpt-5.6-sol",
+      model: directModel,
+      // The chip stays the chat's model, so later passes and an escalation to
+      // the manager keep what the user picked.
+      chatModel: chipModel,
       effort: input.chatEffort ?? "medium",
       access: "full",
     });
   }
 
   let run = input.runId ? await requireRun(input.runId) : null;
+  if (run) run = await adoptCoraProfileForUnstartedRun(run, input.coraProfileId);
   if (!run) {
     run = await createRun({
       workspaceId: input.workspaceId,
@@ -1350,7 +1716,11 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
       ["paused", "blocked", "cancelled", "complete"].includes(run.status) ||
       forcePausedJustNow ||
       attemptInFlight ||
-      activeWorkersForRun(run.id).length > 0
+      activeWorkersForRun(run.id).length > 0 ||
+      // A live manager turn is the driver: it can complete the run itself, and
+      // a question posted under it would be answered into a second turn on
+      // the same session.
+      Boolean(activeManagerCall(run))
     ) {
       return run;
     }
@@ -1384,14 +1754,7 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
     // auto-accepts a task on process exit without reading its report, so
     // "everything accepted" is not evidence anything was verified.
     if (isRunSettled(run)) {
-      const verification = await describeVerificationFreshness(run);
-      if (verification.ok) {
-        return completeRunFromOrchestrator(run.id);
-      }
-      return askHumanQuestion(run.id, UNVERIFIED_COMPLETION_QUESTION, undefined, {
-        reason: `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}.`,
-        managerMode: "worker_result_review",
-      });
+      return completeSettledRunOrAsk(run);
     }
     // A step sitting in review is NOT blocked on the user, it is blocked on
     // Cora. Boot recovery produces exactly this shape (a worker whose report
@@ -1402,6 +1765,25 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
     if (reviewPending) {
       scheduleAutopilotReview(run.id, input.cwd);
       return run;
+    }
+    // Only steps a partial, blocked or force-accepted worker left unverified
+    // remain. Nothing is left to run, so say what the actual open decision is
+    // instead of claiming the remaining steps wait on a blocker.
+    if (
+      run.steps.length > 0 &&
+      failedSteps.length === 0 &&
+      unfinishedSteps.length === 0 &&
+      run.steps.some((step) => step.status === "completed_unverified")
+    ) {
+      const unresolved = unresolvedWorkerTasks(run).at(-1);
+      if (unresolved) {
+        await escalateUnfinishedWorkerOutcome(run, unresolved.id);
+        return (await getRun(run.id)) ?? run;
+      }
+      return askHumanQuestion(run.id, UNVERIFIED_COMPLETION_QUESTION, UNVERIFIED_COMPLETION_OPTIONS, {
+        reason: "Some steps finished without a check.",
+        managerMode: "worker_result_review",
+      });
     }
     // This branch knows the decision, so its choices must match the failure.
     const allStepsResolved =
@@ -1555,6 +1937,313 @@ export async function startAutopilot(input: StartAutopilotInput): Promise<RunSta
   return scheduledAttemptIds.length > 0 ? await requireRun(run.id) : run;
 }
 
+// ── Workflow runs ───────────────────────────────────────────────────────────
+// A workflow run is a direct run with a `workflow` block. workflow-driver.ts
+// owns its lifecycle: it creates the run, launches one worker task per
+// agent() call through the ordinary prepare/launch path and settles each call
+// from that attempt's report. The driver registers these controls so the
+// generic Stop, Resume, Cancel and Delete entry points reach it.
+
+export interface WorkflowRunControls {
+  stop(runId: string, reason: string): Promise<void>;
+  resume(runId: string): Promise<void>;
+  cancel(runId: string, reason: string): Promise<void>;
+  /** The run is being deleted: end its script without touching run state. */
+  discard(runId: string): Promise<void>;
+}
+
+let workflowRunControls: WorkflowRunControls | null = null;
+
+export function setWorkflowRunControls(controls: WorkflowRunControls | null): void {
+  workflowRunControls = controls;
+}
+
+export async function createWorkflowRun(input: {
+  workspaceId: string;
+  workspaceName?: string;
+  cwd: string;
+  title: string;
+  workflow: WorkflowRunInfo;
+}): Promise<RunState> {
+  const run = await createRun({
+    workspaceId: input.workspaceId,
+    workspaceName: input.workspaceName ?? "workspace",
+    cwd: input.cwd,
+    title: input.title,
+    executionMode: "direct",
+    workflow: input.workflow,
+    chatBackend: "pi",
+    chatModel: input.workflow.defaults.model,
+    chatMode: "auto",
+    chatEffort: input.workflow.defaults.effort,
+  });
+  return commitRunChange(run, {
+    type: "workflow.started",
+    message: `Workflow ${input.workflow.name} started`,
+    payload: { name: input.workflow.name, ref: input.workflow.ref, caps: input.workflow.caps },
+    mutate: (draft, timestamp) => {
+      draft.status = "running";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+        status: "running",
+        lastAction: "workflow_started",
+        startedAt: timestamp,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+/**
+ * Writes the driver's view of a workflow run. Progress writes (no `event`)
+ * persist run.json only, so a run with hundreds of agents does not flood
+ * events.jsonl; state changes pass an event and an optional run status.
+ */
+export async function saveWorkflowRunInfo(
+  runId: string,
+  patch: Partial<WorkflowRunInfo>,
+  options: {
+    event?: { type: string; message: string; payload?: Record<string, unknown> };
+    status?: RunStatus;
+  } = {},
+): Promise<RunState | null> {
+  const run = await getRun(runId);
+  if (!run?.workflow) return run;
+  if (!options.event && options.status === undefined) {
+    // Serialized with commitRunChange: the agents' task and attempt commits
+    // land on the same run.json, and a progress write from an older snapshot
+    // would erase them.
+    let saved: RunState | null = null;
+    const previous = runMutationQueues.get(runId) ?? Promise.resolve();
+    const next = previous
+      .catch(() => {
+        /* an earlier failed commit must not wedge progress writes */
+      })
+      .then(async () => {
+        const latest = await getRun(runId);
+        if (!latest?.workflow) return;
+        latest.workflow = { ...latest.workflow, ...patch };
+        latest.updatedAt = new Date().toISOString();
+        await saveRun(latest);
+        saved = latest;
+      });
+    runMutationQueues.set(runId, next);
+    try {
+      await next;
+    } finally {
+      if (runMutationQueues.get(runId) === next) runMutationQueues.delete(runId);
+    }
+    return saved;
+  }
+  const event = options.event ?? { type: "workflow.updated", message: "Workflow updated" };
+  return commitRunChange(run, {
+    type: event.type,
+    message: event.message,
+    payload: event.payload ?? {},
+    mutate: (draft, timestamp) => {
+      if (!draft.workflow) return false;
+      draft.workflow = { ...draft.workflow, ...patch };
+      if (options.status !== undefined) {
+        draft.status = options.status;
+        const autopilotStatus: AutopilotStatus =
+          options.status === "running"
+            ? "running"
+            : options.status === "paused"
+              ? "paused"
+              : options.status === "complete" || options.status === "failed" || options.status === "cancelled"
+                ? options.status
+                : "idle";
+        draft.autopilot = {
+          ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
+          status: autopilotStatus,
+          lastAction: event.type,
+          updatedAt: timestamp,
+        };
+        // Phases settle with the run: a phase is only "done" once the script
+        // can no longer issue calls into it.
+        for (const step of draft.steps) {
+          if (["complete", "completed_unverified", "skipped", "failed"].includes(step.status)) continue;
+          if (options.status === "paused") {
+            if (step.status === "running" || step.status === "reviewing") {
+              step.status = "ready";
+              step.updatedAt = timestamp;
+            }
+          } else if (isTerminalRunStatus(options.status)) {
+            step.status = options.status === "complete" ? "complete" : "failed";
+            step.updatedAt = timestamp;
+          }
+        }
+        if (isTerminalRunStatus(options.status)) draft.currentStepId = undefined;
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
+export interface WorkflowAgentLaunchInput {
+  runId: string;
+  /** The attempt's working directory: the workspace or the call's worktree. */
+  cwd: string;
+  phase: string;
+  label: string;
+  prompt: string;
+  model: string;
+  effort: AgentEffortLevel;
+  access: "full" | "edits" | "readonly";
+  verifier: boolean;
+  call: WorkflowCallMarker;
+  onStarted?: (info: { workerTaskId: string; attemptId: string }) => void;
+  /** Running usage of the attempt after each model response, for the run's ceilings. */
+  onUsage?: (usage: { in: number; out: number; usd: number }) => void;
+}
+
+// Live usage listeners of workflow attempts, by attempt id. The Pi worker
+// session reports into it as responses arrive, so a workflow's ceilings see
+// what a running agent spends instead of only what a finished one spent.
+// Every autonomous worker runs on Pi; the only other session is the
+// human-assisted pane, which spends no model tokens to report.
+const workflowAttemptUsage = new Map<string, (usage: { in: number; out: number; usd: number }) => void>();
+
+export interface WorkflowAgentLaunchResult {
+  workerTaskId: string;
+  attemptId: string;
+  exitCode: number | null;
+  attemptStatus: WorkerAttemptStatus;
+  error?: string;
+  /** The raw final-report.json, untrusted. */
+  report: Record<string, unknown> | null;
+  usage: { in: number; out: number; usd: number };
+}
+
+const workflowStepLocks = new Map<string, Promise<unknown>>();
+
+// Calls of one phase arrive concurrently from parallel(); the lock keeps them
+// from each creating their own step for the same phase.
+async function workflowPhaseStep(runId: string, phase: string): Promise<string> {
+  const previous = workflowStepLocks.get(runId) ?? Promise.resolve();
+  const next = previous.catch(() => undefined).then(async () => {
+    const run = await requireRun(runId);
+    const existing = run.steps.find((step) => step.title === phase && !isImmutableStepStatus(step.status));
+    if (existing) return existing.id;
+    const created = await createStep({
+      runId,
+      title: phase,
+      goal: `Workflow phase: ${phase}`,
+      kind: "worker_batch",
+      riskLevel: "low",
+      plannedAgents: [],
+      acceptanceCriteria: [],
+    });
+    const step = created.steps.at(-1);
+    if (!step) throw new Error(`Workflow phase step was not created: ${phase}`);
+    return step.id;
+  });
+  workflowStepLocks.set(runId, next);
+  try {
+    return await next;
+  } finally {
+    if (workflowStepLocks.get(runId) === next) workflowStepLocks.delete(runId);
+  }
+}
+
+export async function launchWorkflowAgentTask(input: WorkflowAgentLaunchInput): Promise<WorkflowAgentLaunchResult> {
+  const stepId = await workflowPhaseStep(input.runId, input.phase);
+  const runtime = runtimeForWorkerModelId(input.model) ?? loomRuntimeForModel(input.model);
+  let run = await createWorkerTask({
+    runId: input.runId,
+    stepId,
+    title: input.label,
+    description: input.prompt,
+    runtimePreference: runtime,
+    modelHint: input.model,
+    effortHint: input.effort,
+    allowedPaths: [],
+    forbiddenPaths: [],
+    expectedOutputs: [],
+    verificationCommands: [],
+    canRunParallel: true,
+    conflictsWith: [],
+    taskClass: input.verifier ? "verifier" : "feature",
+    createdBy: "spark",
+    accessHint: input.access === "full" ? undefined : input.access,
+    workflowCall: input.call,
+  });
+  const task = [...run.workerTasks].reverse().find((item) => item.workflowCall?.key === input.call.key);
+  if (!task) throw new Error("Workflow worker task creation failed.");
+  const envelope = await prepareWorkerTask({ runId: input.runId, workerTaskId: task.id, cwd: input.cwd });
+  input.onStarted?.({ workerTaskId: task.id, attemptId: envelope.attemptId });
+  if (input.onUsage) workflowAttemptUsage.set(envelope.attemptId, input.onUsage);
+  try {
+    run = await launchWorkerAttempt({ runId: input.runId, attemptId: envelope.attemptId });
+  } catch (err) {
+    workflowAttemptUsage.delete(envelope.attemptId);
+    run = await requireRun(input.runId);
+    const failed = run.workerAttempts.find((item) => item.id === envelope.attemptId);
+    return {
+      workerTaskId: task.id,
+      attemptId: envelope.attemptId,
+      exitCode: null,
+      attemptStatus: failed?.status ?? "failed",
+      error: err instanceof Error ? err.message : String(err),
+      report: null,
+      usage: { in: 0, out: 0, usd: 0 },
+    };
+  }
+  workflowAttemptUsage.delete(envelope.attemptId);
+  const attempt = run.workerAttempts.find((item) => item.id === envelope.attemptId);
+  let report: Record<string, unknown> | null = null;
+  if (attempt?.finalReportPath) {
+    try {
+      const parsed = JSON.parse(await fs.readFile(attempt.finalReportPath, "utf8")) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) report = parsed as Record<string, unknown>;
+    } catch {
+      report = null;
+    }
+  }
+  return {
+    workerTaskId: task.id,
+    attemptId: envelope.attemptId,
+    exitCode: attempt?.exitCode ?? null,
+    attemptStatus: attempt?.status ?? "failed",
+    error: attempt?.error,
+    report,
+    usage: {
+      in: (attempt?.inputTokens ?? 0) + (attempt?.cacheReadTokens ?? 0) + (attempt?.cacheWriteTokens ?? 0),
+      out: attempt?.outputTokens ?? 0,
+      usd: attempt?.costUsd ?? 0,
+    },
+  };
+}
+
+/** Marks the attempts a restart orphaned on a workflow run; their calls rerun on resume. */
+export async function interruptWorkflowAttempts(runId: string, reason: "app_restart" | "pause"): Promise<RunState> {
+  const run = await requireRun(runId);
+  return commitRunChange(run, {
+    type: "workflow.attempts_interrupted",
+    message: "Workflow agents interrupted",
+    payload: { reason },
+    mutate: (draft, timestamp) => {
+      let changed = false;
+      for (const attempt of draft.workerAttempts) {
+        if (ATTEMPT_TERMINAL_STATUSES.has(attempt.status)) continue;
+        attempt.status = "cancelled";
+        attempt.interruptedBy = reason;
+        attempt.finishedAt = attempt.finishedAt ?? timestamp;
+        attempt.error = attempt.error ?? (reason === "app_restart" ? "Interrupted by an app restart." : "Stopped by the user.");
+        const task = draft.workerTasks.find((item) => item.id === attempt.workerTaskId);
+        if (task && !["accepted", "failed", "cancelled", "blocked"].includes(task.status)) {
+          task.status = "cancelled";
+          task.updatedAt = timestamp;
+        }
+        changed = true;
+      }
+      if (!changed) return false;
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
 // ── Looms v2: direct-worker runs ────────────────────────────────────────────
 // An automation iteration runs ONE CLI worker (claude/codex) with the rendered
 // loop prompt — no manager LLM anywhere in the path. Direct runs reuse the
@@ -1607,7 +2296,7 @@ export async function startDirectWorkerRun(input: StartDirectWorkerRunInput): Pr
     automationId: input.automationId,
     executionMode: "direct",
     chatBackend: "pi",
-    chatModel: input.model,
+    chatModel: input.chatModel ?? input.model,
     chatMode: "auto",
     chatEffort: input.effort,
   });
@@ -2518,6 +3207,7 @@ export async function failWorkerAttempt(
   runId: string,
   attemptId: string,
   error: string,
+  options?: { interruptedBy?: WorkerAttempt["interruptedBy"] },
 ): Promise<RunState> {
   const run = await requireRun(runId);
   const attempt = run.workerAttempts.find((a) => a.id === attemptId);
@@ -2534,6 +3224,7 @@ export async function failWorkerAttempt(
         a.error = error;
         a.failureKind = classifyWorkerFailure(error);
         a.finishedAt = a.finishedAt ?? timestamp;
+        if (options?.interruptedBy) a.interruptedBy = options.interruptedBy;
         const t = draft.workerTasks.find((x) => x.id === a.workerTaskId);
         if (t && !["accepted", "failed", "cancelled"].includes(t.status)) {
           t.status = "failed";
@@ -2835,6 +3526,9 @@ async function loomGraphForRun(run: RunState): Promise<LoomGraph | undefined> {
 async function finalizeDirectRun(runId: string): Promise<void> {
   const run = await requireRun(runId);
   if (run.executionMode !== "direct") return;
+  // A workflow run ends when its script returns, not when its workers go
+  // idle: between two agent() calls none may be running.
+  if (run.workflow) return;
   // paused/cancelled are user decisions; blocked/terminal mean this iteration
   // was already decided (idempotency under watchdog + cycle double-fires).
   if (run.status === "paused" || run.status === "blocked" || run.status === "cancelled") return;
@@ -3646,8 +4340,48 @@ function scheduleInitialManagerDecision(
   void cycle;
 }
 
-function hasQueuedSteering(run: RunState): boolean {
-  return queuedManagerInputMessages(run).some((message) => message.intent === "steer");
+// A queued message whose delivery already failed this many times stops
+// driving turns on its own: the user resends it, presses Send now, or Resume.
+// Without the cap, a turn that fails the same way every time re-armed itself
+// back to back (one run made 1041 manager calls in 4 seconds).
+const MAX_AUTOMATIC_DELIVERY_ATTEMPTS = 2;
+
+function hasQueuedSteering(run: RunState, opts?: { explicit?: boolean }): boolean {
+  return queuedManagerInputMessages(run).some(
+    (message) =>
+      opts?.explicit === true ||
+      (message.intent === "steer" &&
+        (message.deliveryAttempts ?? 0) < MAX_AUTOMATIC_DELIVERY_ATTEMPTS),
+  );
+}
+
+/**
+ * Did the steering follow-up that just ended earn another turn?
+ *
+ * Only input that arrived while that turn ran does. When every queued steer
+ * was already part of the turn's own input, the turn failed or was aborted
+ * with it and released it again, so re-arming would replay the same failure
+ * forever. A turn that never registered a call made no progress either.
+ */
+function steeringFollowupEarnedAnotherTurn(
+  run: RunState,
+  callsBefore: ReadonlySet<string> | null,
+): boolean {
+  if (!callsBefore) return true;
+  const epoch = conversationEpoch(run);
+  const newest = [...run.sparkCalls]
+    .reverse()
+    .find(
+      (call) =>
+        !callsBefore.has(call.id) &&
+        call.purpose !== "compaction" &&
+        (call.conversationEpoch ?? 0) === epoch,
+    );
+  if (!newest) return false;
+  const delivered = new Set(newest.inputMessageIds ?? []);
+  return queuedManagerInputMessages(run).some(
+    (message) => message.intent === "steer" && !delivered.has(message.id),
+  );
 }
 
 /**
@@ -3682,11 +4416,8 @@ function scheduleResumeForUserMessage(
   activeUserMessageResumes.add(run.id);
 
   // Same ordering discipline as the other schedulers: never start a turn on
-  // top of planning/review work that is still settling.
-  const waits = [activeAutopilotPlans.get(run.id), activeAutopilotReviews.get(run.id)].filter(
-    (promise): promise is Promise<void> => Boolean(promise),
-  );
-  void Promise.all(waits.map((promise) => promise.catch(() => undefined)))
+  // top of planning/review work or a manager turn that is still settling.
+  void Promise.all(managerWorkSettled(run.id))
     .then(async () => {
       const latest = await getRun(run.id);
       if (!latest || conversationEpoch(latest) !== scheduledEpoch) return;
@@ -3713,20 +4444,72 @@ function scheduleResumeForUserMessage(
     });
 }
 
-function scheduleQueuedSteeringFollowup(run: RunState): void {
-  if (run.executionMode === "direct" || !hasQueuedSteering(run)) return;
+/**
+ * Everything a newly scheduled manager turn must wait behind: planning and
+ * review cycles still settling, and any manager turn holding the turn lock
+ * (Resume, Retry and answer continuations are not always in the cycle maps).
+ */
+function managerWorkSettled(runId: string): Promise<void>[] {
+  return [
+    activeAutopilotPlans.get(runId),
+    activeAutopilotReviews.get(runId),
+    managerTurnsSettled(runId),
+  ]
+    .filter((promise): promise is Promise<void> => Boolean(promise))
+    .map((promise) => promise.catch(() => undefined));
+}
+
+/**
+ * Resolves once nothing is scheduled or running to drive the run's manager:
+ * planning and review cycles, steering follow-ups, parked-turn recoveries,
+ * answer continuations and the turn lock. Resume and Send now return before
+ * their turn runs; a caller that needs the outcome waits here.
+ */
+export async function settleScheduledManagerWork(runId: string, timeoutMs = 60_000): Promise<void> {
+  const prefix = `${runId}:`;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    // Cycles hand off through setTimeout(0) and a commit or two; let the
+    // hand-off land before deciding the run is idle.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const pending = [
+      activeAutopilotPlans.get(runId),
+      activeAutopilotReviews.get(runId),
+      activeSteeringFollowups.get(runId),
+      ...[...activeManagerTurnRecoveries.entries()]
+        .filter(([key]) => key.startsWith(prefix))
+        .map(([, promise]) => promise),
+    ].filter((promise): promise is Promise<void> => Boolean(promise));
+    const busy =
+      pending.length > 0 ||
+      managerTurnBusy(runId) ||
+      activeUserMessageResumes.has(runId) ||
+      [...activePendingManagerResumes].some((key) => key.startsWith(prefix));
+    if (!busy) return;
+    await Promise.all([...pending, managerTurnsSettled(runId)].map((promise) => promise.catch(() => undefined)));
+    if (pending.length === 0 && !managerTurnBusy(runId)) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+  }
+}
+
+function scheduleQueuedSteeringFollowup(
+  run: RunState,
+  // An explicit user action (Send now) delivers input whose automatic
+  // delivery budget is spent.
+  opts?: { explicit?: boolean },
+): void {
+  if (run.executionMode === "direct" || !hasQueuedSteering(run, opts)) return;
   if (activeSteeringFollowups.has(run.id)) return;
   const scheduledEpoch = conversationEpoch(run);
-  const waits = [activeAutopilotPlans.get(run.id), activeAutopilotReviews.get(run.id)].filter(
-    (promise): promise is Promise<void> => Boolean(promise),
-  );
-  const cycle = Promise.all(waits.map((promise) => promise.catch(() => undefined)))
+  let callsBefore: Set<string> | null = null;
+  const cycle = Promise.all(managerWorkSettled(run.id))
     .then(async () => {
       let latest = await getRun(run.id);
       if (
         !latest ||
         conversationEpoch(latest) !== scheduledEpoch ||
-        !hasQueuedSteering(latest)
+        !hasQueuedSteering(latest, opts)
       ) return;
       if (
         latest.status === "paused" ||
@@ -3735,13 +4518,14 @@ function scheduleQueuedSteeringFollowup(run: RunState): void {
       ) {
         return;
       }
+      callsBefore = new Set(latest.sparkCalls.map((call) => call.id));
       if (latest.status === "complete" || latest.status === "failed") {
         latest = await commitRunChange(latest, {
           type: "run.steering_followup_started",
           message: "Queued steering started a fresh Cora manager turn",
           payload: { conversationEpoch: conversationEpoch(latest) },
           mutate: (draft, timestamp) => {
-            if (!hasQueuedSteering(draft)) return false;
+            if (!hasQueuedSteering(draft, opts)) return false;
             draft.status = "planning";
             draft.autopilot = {
               ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
@@ -3767,7 +4551,8 @@ function scheduleQueuedSteeringFollowup(run: RunState): void {
         activeSteeringFollowups.delete(run.id);
         // Steering can arrive while this follow-up turn itself is active. The
         // in-flight map dedupes that arrival; re-arm after settlement so it gets
-        // its own next Cora turn instead of remaining queued forever.
+        // its own next Cora turn instead of remaining queued forever. Only new
+        // input earns that turn: see steeringFollowupEarnedAnotherTurn.
         void getRun(run.id).then((latest) => {
           if (
             latest &&
@@ -3775,7 +4560,8 @@ function scheduleQueuedSteeringFollowup(run: RunState): void {
             latest.status !== "paused" &&
             latest.status !== "blocked" &&
             latest.status !== "cancelled" &&
-            hasQueuedSteering(latest)
+            hasQueuedSteering(latest) &&
+            steeringFollowupEarnedAnotherTurn(latest, callsBefore)
           ) {
             scheduleQueuedSteeringFollowup(latest);
           }
@@ -3948,15 +4734,17 @@ function schedulePendingManagerResume(run: RunState): void {
   if (activePendingManagerResumes.has(key)) return;
   activePendingManagerResumes.add(key);
 
-  const waits = [activeAutopilotPlans.get(run.id), activeAutopilotReviews.get(run.id)].filter(
-    (promise): promise is Promise<void> => Boolean(promise),
-  );
-  const start = Promise.all(waits.map((promise) => promise.catch(() => undefined))).then(
-    () => undefined,
-  );
+  // Claim only once no manager turn is live. A continuation claimed while a
+  // turn streams would start a second prompt on the same session (answering a
+  // question posted during a resumed chat turn failed the run).
+  const start = Promise.all(managerWorkSettled(run.id)).then(() => undefined);
   const cycle = start
     .then(async () => {
-      const beforeClaim = await getRun(run.id);
+      let beforeClaim = await getRun(run.id);
+      while (beforeClaim && managerTurnBusy(run.id)) {
+        await managerTurnsSettled(run.id);
+        beforeClaim = await getRun(run.id);
+      }
       if (!beforeClaim || conversationEpoch(beforeClaim) !== scheduledEpoch) return;
       const launchClaimId = await claimScheduledManagerResume(run.id, pending);
       if (!launchClaimId) return;
@@ -4080,12 +4868,30 @@ export async function recoverOrphanedManagerTurns(): Promise<void> {
           for (const message of draft.humanMessages) {
             if (!message.backendTurnId || !staleOrphanIds.has(message.backendTurnId)) continue;
             if (message.deliveryState === "acknowledged" || message.deliveryState === "cancelled") continue;
+            if (message.deliveryState === "submitted") message.redelivered = true;
             message.deliveryState = "queued";
             message.conversationEpoch = epoch;
             delete message.backendTurnId;
             if (message.targetTurnId && staleOrphanIds.has(message.targetTurnId)) {
               delete message.targetTurnId;
             }
+            changed = true;
+          }
+          // Input queued behind one of those turns never got a backendTurnId,
+          // so the loop above misses it; it is just as undelivered.
+          for (const message of draft.humanMessages) {
+            const target = message.targetTurnId;
+            if (
+              message.author !== "user" ||
+              message.backendTurnId ||
+              (message.deliveryState ?? "queued") !== "queued" ||
+              !target?.startsWith("after:") ||
+              !staleOrphanIds.has(target.slice("after:".length))
+            ) {
+              continue;
+            }
+            message.conversationEpoch = epoch;
+            delete message.targetTurnId;
             changed = true;
           }
           if (!changed) return false;
@@ -4283,6 +5089,9 @@ export async function recoverOrphanedManagerTurns(): Promise<void> {
         for (const message of draft.humanMessages) {
           if (!message.backendTurnId || !interruptedIds.has(message.backendTurnId)) continue;
           if (message.deliveryState === "acknowledged" || message.deliveryState === "cancelled") continue;
+          // The provider had "submitted" input; the replay must say so, or Cora
+          // redoes work the cut-off turn already started.
+          if (message.deliveryState === "submitted") message.redelivered = true;
           message.deliveryState = "queued";
           delete message.backendTurnId;
           if (message.targetTurnId && orphanedIds.has(message.targetTurnId)) {
@@ -4505,6 +5314,7 @@ export async function recoverOrphanedManagedWorkerAttempts(): Promise<void> {
         run.id,
         attempt.id,
         "the app closed while this worker was running; its process is gone",
+        { interruptedBy: "app_restart" },
       ).catch(() => undefined);
       // requireRun is awaited as an ARGUMENT, so its rejection would escape the
       // trailing .catch and abort recovery for every remaining run. A run
@@ -4544,6 +5354,8 @@ export interface RunVerificationFreshness {
    * the verdict for the round.
    */
   blockingVerifier: { confidence: string; title: string } | null;
+  /** Every non-passing verifier over the current tree, for a manager overrule. */
+  blockingVerifiers: Array<{ taskId: string; confidence: string; title: string }>;
 }
 
 /**
@@ -4563,17 +5375,23 @@ export async function describeVerificationFreshness(
 ): Promise<RunVerificationFreshness> {
   let latestChangedImplementationAt = 0;
   let latestVerifierConfidence: string | null = null;
-  const verdicts: Array<{ at: number; confidence: string; title: string }> = [];
+  const verdicts: Array<{ at: number; confidence: string; title: string; taskId: string }> = [];
   for (const attempt of run.workerAttempts ?? []) {
     if (!attempt.finalReportPath) continue;
     const task = (run.workerTasks ?? []).find((candidate) => candidate.id === attempt.workerTaskId);
     if (!task) continue;
+    // A chat that escalated from the direct lane keeps the direct worker's
+    // passes (the only tasks a chat run stamps with a loom node). Those edits
+    // were answered as the direct lane's own reply, so they must not leave the
+    // manager's first codara_complete, or a settled turn, waiting on a
+    // verifier for work it never orchestrated.
+    if (task.loomNodeId && run.executionMode !== "direct" && !run.automationId) continue;
     const report = await readWorkerReport(attempt.finalReportPath).catch(() => null);
     if (!report) continue;
     const finishedAt = Date.parse(attempt.finishedAt ?? attempt.startedAt ?? "") || 0;
     if (task.taskClass === "verifier" && report.verifier) {
       latestVerifierConfidence = report.verifier.confidence;
-      verdicts.push({ at: finishedAt, confidence: report.verifier.confidence, title: task.title });
+      verdicts.push({ at: finishedAt, confidence: report.verifier.confidence, title: task.title, taskId: task.id });
     } else if (report.filesChanged.length > 0) {
       latestChangedImplementationAt = Math.max(latestChangedImplementationAt, finishedAt);
     }
@@ -4593,7 +5411,8 @@ export async function describeVerificationFreshness(
   // That was mostly latent while every verifier covered the whole surface;
   // splitting a round into disjoint scopes makes "one shard fails" the
   // expected case, so the gate has to see the whole round, not its best member.
-  const blocking = current.find((v) => !PASSING_VERIFIER_CONFIDENCES.has(v.confidence)) ?? null;
+  const blockingVerdicts = current.filter((v) => !PASSING_VERIFIER_CONFIDENCES.has(v.confidence));
+  const blocking = blockingVerdicts[0] ?? null;
   return {
     ok:
       latestChangedImplementationAt === 0 ||
@@ -4602,7 +5421,47 @@ export async function describeVerificationFreshness(
     latestChangedImplementationAt,
     latestPassingVerifierAt,
     blockingVerifier: blocking ? { confidence: blocking.confidence, title: blocking.title } : null,
+    blockingVerifiers: [
+      ...new Map(
+        blockingVerdicts.map((v) => [v.taskId, { taskId: v.taskId, confidence: v.confidence, title: v.title }]),
+      ).values(),
+    ],
   };
+}
+
+/**
+ * Whether an orchestrator-side terminal hop may complete a settled run when
+ * the manager never called codara_complete. It enforces the same two gates
+ * codara_complete does: the manager's recorded plan has no open milestone,
+ * and the work is verified.
+ */
+type AutoCompletionGate =
+  | { ok: true }
+  | { ok: false; kind: "plan"; milestones: RunManagerPlanMilestone[] }
+  | { ok: false; kind: "unverified"; verification: RunVerificationFreshness };
+
+async function canAutoCompleteRun(run: RunState): Promise<AutoCompletionGate> {
+  const milestones = openPlanMilestones(run.managerPlan);
+  if (milestones.length > 0) return { ok: false, kind: "plan", milestones };
+  const verification = await describeVerificationFreshness(run);
+  if (!verification.ok) return { ok: false, kind: "unverified", verification };
+  return { ok: true };
+}
+
+/** Complete a settled run, or ask the user about whatever gate held it back. */
+async function completeSettledRunOrAsk(run: RunState): Promise<RunState> {
+  const gate = await canAutoCompleteRun(run);
+  if (gate.ok) return completeRunFromOrchestrator(run.id);
+  if (gate.kind === "plan") {
+    return askHumanQuestion(run.id, openPlanMilestonesQuestion(gate.milestones), OPEN_PLAN_MILESTONES_OPTIONS, {
+      reason: `Open plan milestones: ${gate.milestones.map((milestone) => milestone.id).join(", ")}.`,
+      managerMode: "worker_result_review",
+    });
+  }
+  return askHumanQuestion(run.id, UNVERIFIED_COMPLETION_QUESTION, UNVERIFIED_COMPLETION_OPTIONS, {
+    reason: `Latest verifier confidence: ${gate.verification.latestVerifierConfidence ?? "none"}.`,
+    managerMode: "worker_result_review",
+  });
 }
 
 export interface RunHandoffArtifactAudit {
@@ -4667,11 +5526,6 @@ export async function describeMissingHandoffArtifacts(
   return { ok: missing.length === 0, missing };
 }
 
-/** Asked instead of completing when the work is finished but unverified. The
- * run stays reviewable and the user owns the call, rather than a cap-broken or
- * never-verified run being reported as a clean green finish. */
-const UNVERIFIED_COMPLETION_QUESTION =
-  "Every worker finished, but the latest code changes never earned a passing verifier verdict, so I won't mark this done on my own. Tell me whether to run a verifier over the final state or accept the work as it stands.";
 
 /**
  * Finish managed runs that a restart found already done.
@@ -4720,10 +5574,10 @@ export async function completeSettledManagedRunsAfterRestart(): Promise<void> {
     if (activeWorkersForRun(run.id).length > 0) continue;
     const settlement = describeRunSettlement(run);
     if (!settlement.settled) continue;
-    // Unverified work is never completed unattended, same rule codara_complete
-    // enforces. The pause pass below parks it instead, so Resume re-drives it
-    // into startAutopilot's question.
-    if (!(await describeVerificationFreshness(run)).ok) continue;
+    // Unverified work, or a plan with open milestones, is never completed
+    // unattended, same rules codara_complete enforces. The pause pass below
+    // parks it instead, so Resume re-drives it into startAutopilot's question.
+    if (!(await canAutoCompleteRun(run)).ok) continue;
     await appendEvent({
       workspaceId: run.workspaceId,
       runId: run.id,
@@ -4941,7 +5795,7 @@ async function runInitialAutopilotPlanning(
     await askHumanQuestion(
       run.id,
       mode === "chat"
-        ? "Cora's manager turn failed before it could answer this chat message. Check the run log for the backend error, then send the message again."
+        ? "Cora's manager turn failed before it could answer this chat message. Your message is saved. Check the run log for the backend error, then reply here (for example, \"retry\") and Cora will try it again."
         : "Cora's manager turn failed before it could plan worker tasks. Check the run log for the backend error, then run the plan again.",
       undefined,
       {
@@ -5049,19 +5903,22 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
   // For execute/auto-mode CC/Codex chat backends, the CC/Codex manager session
   // is doing review itself (reading the worker's final_report_path returned by
   // codara_wait_for_workers and deciding codara_complete vs spawn correctives).
-  // We need the worker_task to reach a TERMINAL status (accepted/failed/
-  // cancelled) so codara_wait_for_workers actually unblocks — `needs_review`
+  // We need the worker_task to reach a TERMINAL status (accepted/blocked/
+  // failed/cancelled) so codara_wait_for_workers actually unblocks: `needs_review`
   // is non-terminal in the WorkerTaskStatus enum, and the manager-review
   // path that normally transitions needs_review → accepted via
-  // decideWorkerReport is explicitly skipped below. So auto-accept on
-  // success here; the CC manager will inspect the report and judge quality.
+  // decideWorkerReport is explicitly skipped below. The terminal status must
+  // still say what the report said: only a `complete` report is accepted, a
+  // failed or missing one fails the task, and a partial or blocked one parks it
+  // at `blocked`. Accepting every report here showed failed workers as green
+  // steps and let the settled-run hop below complete a run nobody reviewed.
   const isExecuteModeCliManager = runHasMcpManager(latest);
   const finishedAttempt = latest.workerAttempts.find((a) => a.id === attemptId);
   const finishedTaskId = finishedAttempt?.workerTaskId;
   const finishedTask = latest.workerTasks.find((t) => t.id === finishedTaskId);
-  const shouldAutoAccept =
+  const autoReviews =
     isExecuteModeCliManager &&
-    finishedTask?.status === "needs_review" &&
+    finishedTask !== undefined &&
     // ...but never for a manual-runtime task. Those exist precisely because
     // the manager yielded no decision (createFallbackAutopilotTask after a
     // failed manager startup): no CLI manager session spawned the task and
@@ -5071,6 +5928,12 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
     // below then marks green; the classic needs_review escalation keeps the
     // verdict with the human.
     finishedTask.runtimePreference !== "manual";
+  const shouldAutoAccept = autoReviews && finishedTask?.status === "needs_review";
+  const finishedReport =
+    shouldAutoAccept && finishedAttempt?.finalReportPath
+      ? await readWorkerReport(finishedAttempt.finalReportPath).catch(() => null)
+      : null;
+  const autoReviewedStatus = shouldAutoAccept ? autoReviewedTaskStatus(finishedReport?.status) : undefined;
 
   await commitRunChange(latest, {
     type: "autopilot.cycle_completed",
@@ -5079,7 +5942,10 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
       workerTasks: latest.workerTasks.length,
       workerAttempts: latest.workerAttempts.length,
       waitingForOtherWorkers: hasOtherActiveCycles || hasOtherActiveWorkers,
-      autoAcceptedForExecuteModeCli: shouldAutoAccept,
+      autoAcceptedForExecuteModeCli: autoReviewedStatus === "accepted",
+      ...(autoReviewedStatus
+        ? { autoReviewedTaskStatus: autoReviewedStatus, reportStatus: finishedReport?.status ?? null }
+        : {}),
     },
     mutate: (draft, timestamp) => {
       draft.status = hasOtherActiveCycles || hasOtherActiveWorkers ? "running" : "reviewing";
@@ -5092,21 +5958,27 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
             : "worker_cycle_completed_needs_manager_review",
         updatedAt: timestamp,
       };
-      if (shouldAutoAccept && finishedTaskId) {
-        const taskInDraft = draft.workerTasks.find((t) => t.id === finishedTaskId);
-        if (taskInDraft && taskInDraft.status === "needs_review") {
-          taskInDraft.status = "accepted";
-          taskInDraft.updatedAt = timestamp;
-          // Also roll up the parent step's review status so it doesn't sit
-          // at "reviewing" forever — the manager (CC) consumes the report
-          // directly via final_report_path.
-          if (taskInDraft.stepId) {
-            const stepInDraft = draft.steps.find((s) => s.id === taskInDraft.stepId);
-            if (stepInDraft && stepInDraft.status === "reviewing") {
-              stepInDraft.status = "complete";
-              stepInDraft.updatedAt = timestamp;
-            }
-          }
+      const taskInDraft = autoReviews && finishedTaskId
+        ? draft.workerTasks.find((t) => t.id === finishedTaskId)
+        : undefined;
+      if (taskInDraft && autoReviewedStatus && taskInDraft.status === "needs_review") {
+        taskInDraft.status = autoReviewedStatus;
+        taskInDraft.updatedAt = timestamp;
+      }
+      // Also roll up the parent step's review status so it doesn't sit at
+      // "reviewing" forever; the manager consumes the report directly via
+      // final_report_path. The step settles on the worst outcome among its
+      // tasks, and only once none of them is still live, so a sibling's success
+      // never paints over this worker's failure (or the reverse).
+      if (taskInDraft?.stepId) {
+        const stepInDraft = draft.steps.find((s) => s.id === taskInDraft.stepId);
+        const rolledUp = stepInDraft?.status === "reviewing"
+          ? settledReviewedStepStatus(draft, stepInDraft.id)
+          : undefined;
+        if (stepInDraft && rolledUp && (autoReviewedStatus || rolledUp !== "complete")) {
+          stepInDraft.status = rolledUp;
+          stepInDraft.updatedAt = timestamp;
+          if (draft.currentStepId === stepInDraft.id) draft.currentStepId = undefined;
         }
       }
       draft.updatedAt = timestamp;
@@ -5184,17 +6056,64 @@ async function runAutopilotWorkerCycle(runId: string, attemptId: string): Promis
     // here: unverified work is handed to the user instead of being reported as
     // a clean finish.
     if (activeManagerCall(settled) || activeWorkersForRun(runId).length > 0) return;
-    if (isRunSettled(settled)) {
-      const verification = await describeVerificationFreshness(settled);
-      if (verification.ok) {
-        await completeRunFromOrchestrator(runId);
-        return;
-      }
-      await askHumanQuestion(runId, UNVERIFIED_COMPLETION_QUESTION, undefined, {
-        reason: `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}.`,
-        managerMode: "worker_result_review",
-      });
+    // A message the user sent while these workers ran is the next thing to
+    // do: hand it to a manager turn rather than completing around it.
+    if (hasQueuedSteering(settled)) {
+      scheduleQueuedSteeringFollowup(settled);
+      return;
     }
+    if (isRunSettled(settled)) {
+      await completeSettledRunOrAsk(settled);
+      return;
+    }
+    // A worker that failed or did not finish is a decision someone still owes,
+    // and with no manager turn live nobody else will take it: without this the
+    // run sits at "reviewing" with nothing driving it.
+    await escalateUnfinishedWorkerOutcome(settled, finishedTaskId);
+  }
+}
+
+async function escalateUnfinishedWorkerOutcome(
+  run: RunState,
+  taskId: string | undefined,
+): Promise<void> {
+  const finished = taskId ? run.workerTasks.find((item) => item.id === taskId) : undefined;
+  const unresolved = unresolvedWorkerTasks(run);
+  const unfinished = (item: WorkerTask) => unresolved.some((entry) => entry.id === item.id);
+  // The last worker of a step to land may have succeeded after a sibling did
+  // not; the step's failure is still the open decision. Failing that, any
+  // unreplaced failure elsewhere in the run is: a worker that succeeded in a
+  // later step leaves an earlier step's failure undecided, and with no manager
+  // turn live the run would otherwise sit at "reviewing" with no driver.
+  const task = finished && unfinished(finished)
+    ? finished
+    : (finished?.stepId
+        ? run.workerTasks.find((item) => item.stepId === finished.stepId && unfinished(item))
+        : undefined) ?? unresolved.at(-1);
+  if (!task) return;
+  if (resolveOpenRunQuestionPure(run)) return;
+  if (run.steps.some((step) => step.status === "running" || step.status === "reviewing")) return;
+  const attempt = [...run.workerAttempts].reverse().find((item) => item.workerTaskId === task.id);
+  const report = attempt?.finalReportPath
+    ? await readWorkerReport(attempt.finalReportPath).catch(() => null)
+    : null;
+  const outcome =
+    task.status === "cancelled"
+      ? "was stopped before it finished"
+      : report?.status === "partial"
+        ? "only finished part of its task"
+        : report?.status === "blocked"
+          ? "got stuck and needs a decision"
+          : "failed";
+  const summary = (report?.summary ?? attempt?.error ?? "").trim().replace(/\s+/g, " ").slice(0, 400);
+  const question = `The worker "${task.title}" ${outcome}${summary ? `: ${summary}` : "."} How should I continue?`;
+  try {
+    await askHumanQuestion(run.id, question, UNFINISHED_WORKER_OPTIONS, {
+      reason: `Worker report status: ${report?.status ?? "missing"}.`,
+      managerMode: "worker_result_review",
+    });
+  } catch (err) {
+    console.warn(`[run-store] unfinished-worker question for ${run.id} not posted:`, err);
   }
 }
 
@@ -5564,6 +6483,69 @@ async function markAutopilotCycleFailed(runId: string, attemptId: string, err: u
   const run = await getRun(runId);
   if (!run) return;
   const error = err instanceof Error ? err.message : String(err);
+  // One worker's launch or review error is that worker's failure. While other
+  // workers or cycles of the run are still going, failing the whole run used
+  // to mark those siblings failed while their processes kept running and
+  // later overwrote the verdict. Only the attempt that threw is terminalized
+  // then, and the manager sees it (with its error) through wait_for_workers.
+  const othersInFlight =
+    hasOtherAutopilotCycles(runId, attemptId) ||
+    activeWorkersForRun(runId).some((worker) => worker.attemptId !== attemptId) ||
+    [...launchingWorkerAttempts].some(
+      ([launchingId, entry]) => entry.runId === runId && launchingId !== attemptId,
+    );
+  if (othersInFlight || run.status === "paused") {
+    await commitRunChange(run, {
+      type: "autopilot.cycle_failed",
+      message: `Worker attempt failed: ${error}`,
+      payload: { attemptId, error, scope: "attempt" },
+      mutate: (draft, timestamp) => {
+        const attempt = draft.workerAttempts.find((item) => item.id === attemptId);
+        if (!attempt) return false;
+        if (
+          attempt.status === "preparing" ||
+          attempt.status === "prompt_ready" ||
+          attempt.status === "launching" ||
+          attempt.status === "running" ||
+          attempt.status === "finishing"
+        ) {
+          attempt.status = "failed";
+          attempt.error = attempt.error ?? error;
+          attempt.failureKind = attempt.failureKind ?? classifyWorkerFailure(error);
+          attempt.finishedAt = attempt.finishedAt ?? timestamp;
+        }
+        const task = draft.workerTasks.find((item) => item.id === attempt.workerTaskId);
+        if (
+          task &&
+          ["created", "queued", "claimed", "running", "needs_review", "retry_queued"].includes(task.status)
+        ) {
+          task.status = "failed";
+          task.updatedAt = timestamp;
+        }
+        const step = task?.stepId ? draft.steps.find((item) => item.id === task.stepId) : undefined;
+        const rolledUp = step && !isTerminalStepStatus(step.status)
+          ? settledReviewedStepStatus(draft, step.id)
+          : undefined;
+        if (step && rolledUp) {
+          step.status = rolledUp;
+          step.updatedAt = timestamp;
+          if (draft.currentStepId === step.id) draft.currentStepId = undefined;
+        }
+        draft.updatedAt = timestamp;
+      },
+    });
+    return;
+  }
+  // Nothing else is in flight, so the run itself has failed. A worker that is
+  // somehow still alive is stopped first, so the recorded state and the
+  // processes agree.
+  for (const worker of activeWorkersForRun(runId)) {
+    try {
+      worker.kill();
+    } catch {
+      /* best-effort */
+    }
+  }
   await commitRunChange(run, {
     type: "autopilot.cycle_failed",
     message: `Autopilot worker cycle failed: ${error}`,
@@ -5572,7 +6554,7 @@ async function markAutopilotCycleFailed(runId: string, attemptId: string, err: u
       error,
     },
     mutate: (draft, timestamp) => {
-      if (draft.status === "cancelled" || draft.status === "complete") return false;
+      if (draft.status === "cancelled" || draft.status === "complete" || draft.status === "paused") return false;
       draft.status = "failed";
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
@@ -5593,6 +6575,7 @@ async function markAutopilotCycleFailed(runId: string, attemptId: string, err: u
           attempt.status === "finishing"
         ) {
           attempt.status = "failed";
+          if (attempt.id === attemptId) attempt.error = attempt.error ?? error;
           attempt.finishedAt = attempt.finishedAt ?? timestamp;
         }
       }
@@ -5633,6 +6616,17 @@ function manualFallbackEnabled(): boolean {
 
 function conversationEpoch(run: RunState): number {
   return run.conversationEpoch ?? 0;
+}
+
+/** The newest conversational manager call of the current epoch, settled or not. */
+function newestManagerCall(run: RunState): SparkCall | undefined {
+  const epoch = conversationEpoch(run);
+  for (let index = run.sparkCalls.length - 1; index >= 0; index -= 1) {
+    const call = run.sparkCalls[index];
+    if ((call.conversationEpoch ?? 0) !== epoch || call.purpose === "compaction") continue;
+    return call;
+  }
+  return undefined;
 }
 
 function activeManagerCall(run: RunState): SparkCall | undefined {
@@ -5724,6 +6718,7 @@ interface PreparedManagerTurn {
   prompt: string;
   inputMessages: HumanRunMessage[];
   conversationEpoch: number;
+  reloadCoraMemory: () => Promise<string | null>;
 }
 
 async function prepareManagerTurn(
@@ -5732,6 +6727,7 @@ async function prepareManagerTurn(
 ): Promise<PreparedManagerTurn> {
   let selectedIds: string[] = [];
   let includeCanonicalReplay = false;
+  let previousCallId: string | undefined;
   const epoch = conversationEpoch(run);
   const prepared = await commitRunChange(run, {
     type: "spark_call.started",
@@ -5750,11 +6746,20 @@ async function prepareManagerTurn(
         recovery?.state === "resuming" &&
         recovery.resumeClaimId === call.managerRecoveryClaimId &&
         recovery.conversationEpoch === epoch;
+      // A chat escalated from the direct lane has worker history and Cora
+      // replies but no manager session yet, so its first manager turn replays
+      // the dialogue the way a rebuilt session does. Its direct passes are the
+      // only chat tasks stamped with a loom node; a fan-out or council batch
+      // forced before the first turn has tasks too but no dialogue to replay.
+      const escalatedFromDirect =
+        draft.sparkCalls.length === 0 && draft.workerTasks.some((task) => Boolean(task.loomNodeId));
       includeCanonicalReplay =
         shouldIncludeCanonicalReplay(draft, epoch) ||
+        escalatedFromDirect ||
         (recoveryOwnsCall && recovery?.forceCanonicalReplay === true);
       const selected = queuedManagerInputMessages(draft);
       selectedIds = selected.map((message) => message.id);
+      previousCallId = newestManagerCall(draft)?.id;
       call.inputMessageIds = selectedIds;
       call.conversationEpoch = epoch;
       call.createdAt = timestamp;
@@ -5770,15 +6775,19 @@ async function prepareManagerTurn(
   if (!persistedCall || conversationEpoch(prepared) !== epoch) {
     throw new Error(`Manager turn ${call.id} became stale before backend startup.`);
   }
+  const followsSendNow =
+    selectedIds.length > 0 &&
+    previousCallId !== undefined &&
+    sendNowStoppedCalls.get(run.id) === previousCallId;
   const inputMessages = selectedIds
     .map((id) => prepared.humanMessages.find((message) => message.id === id))
     .filter((message): message is HumanRunMessage => Boolean(message));
   // Subscription headroom rides the same dynamic tail as the memory. The read
-  // hits pi-subscription-usage's 60s cache (never forced), and any failure
+  // takes the last known usage without waiting on the network, and any failure
   // degrades to "no section": a quota-endpoint hiccup must never cost a turn.
   let subscriptionHeadroom: string | null = null;
   try {
-    subscriptionHeadroom = describeHeadroomForPrompt(await readSubscriptionHeadroomSummary());
+    subscriptionHeadroom = describeHeadroomForPrompt(await readCachedSubscriptionHeadroomSummary());
   } catch {
     subscriptionHeadroom = null;
   }
@@ -5787,11 +6796,15 @@ async function prepareManagerTurn(
   // content) and forced on canonical replay, which rebuilds the CLI session
   // that held the earlier injection. Best-effort: a memory read failure must
   // never cost a turn.
+  // Learned items are ranked against what this turn is about: the new input,
+  // or the title when the turn has none (a resume or a nudge).
+  const memoryQuery = [prepared.title, ...inputMessages.map((message) => message.message)].join("\n").slice(0, 4_000);
   let coraMemory: string | null = null;
   try {
     coraMemory = await formatCoraMemoryForTurn(prepared.workspaceId, prepared.id, {
       force: includeCanonicalReplay,
       profileId: prepared.coraProfileId,
+      query: memoryQuery,
     });
   } catch {
     coraMemory = null;
@@ -5818,16 +6831,39 @@ async function prepareManagerTurn(
     // memory sections are replayed here, in the dynamic half, and never in the
     // cacheable system prompt. Read at turn time so a memory written a minute
     // ago is already live for the next turn.
-    prompt: buildManagerTurnPrompt(prepared, inputMessages, {
+    // The new messages carry what the user pasted in this live prompt only;
+    // memoryQuery above and every replay read the stored, scrubbed text.
+    prompt: buildManagerTurnPrompt(prepared, inputMessages.map(withLiveUserText), {
+      followsSendNow,
       includeCanonicalReplay,
       compactionSummary: includeCanonicalReplay ? compactionReplaySummary(prepared) : null,
       coraMemory,
       priorRuns,
       subscriptionHeadroom,
+      // A resume or replay starts from a session that may have lost the run's
+      // progress, and a run with a plan re-reads it every turn so compaction
+      // cannot paraphrase the goal or the open milestones away.
+      runState:
+        prepared.managerPlan || includeCanonicalReplay || inputMessages.length === 0
+          ? renderRunStateDigest(prepared, {
+              planToolAvailable: runProjectPolicyMode(prepared) !== "untrusted-pull-request",
+            })
+          : null,
     }),
     inputMessages,
     conversationEpoch: epoch,
+    reloadCoraMemory: () =>
+      formatCoraMemoryForTurn(prepared.workspaceId, prepared.id, {
+        force: true,
+        profileId: prepared.coraProfileId,
+        query: memoryQuery,
+      }),
   };
+}
+
+function withLiveUserText(message: HumanRunMessage): HumanRunMessage {
+  const raw = message.author === "user" ? livePastedText(message.runId, message.message) : undefined;
+  return raw ? { ...message, message: raw } : message;
 }
 
 const DELIVERY_RANK: Record<RunMessageDeliveryState, number> = {
@@ -5860,6 +6896,10 @@ async function releaseUnsubmittedManagerInput(
       for (const message of draft.humanMessages) {
         if (message.backendTurnId !== callId) continue;
         if (message.deliveryState === "acknowledged" || message.deliveryState === "cancelled") continue;
+        // "submitted" means the provider had the message: the replay must say
+        // so, or Cora treats it as a fresh request and redoes started work.
+        if (message.deliveryState === "submitted") message.redelivered = true;
+        message.deliveryAttempts = (message.deliveryAttempts ?? 0) + 1;
         message.deliveryState = "queued";
         delete message.backendTurnId;
         if (message.targetTurnId === callId) delete message.targetTurnId;
@@ -5980,7 +7020,87 @@ async function resolveActiveBrakeAndReplan(run: RunState, cwd: string): Promise<
 // question escalates to the human instead of another silent self-answer.
 const MAX_MANAGER_QUESTION_REPROMPTS = 2;
 
+// One manager turn per run at a time. Every path that reaches the provider
+// (initial planning, steering follow-ups, Resume, Retry of a parked turn,
+// question continuations, reviews, step planning) goes through
+// askManagerBackend, so this lock is the single place that enforces it. Two
+// turns on one run share one Pi session: the second prompt is rejected while
+// the first streams, and before this lock the rejection tore down the process
+// the first turn was using (run-mv1b57e8-03y1is).
+//
+// The lock is NOT re-entrant. Nothing that runs while it is held may await
+// another manager turn on the same run: the transient retry calls
+// askManagerBackendUnderTurnLock directly, and every continuation a turn
+// schedules (follow-ups, reprompts, reviews) runs in the background and queues
+// behind the lock.
+const managerTurnLock = createKeyedTaskQueue();
+const managerTurnDepth = new Map<string, number>();
+
+/** Resolves once every manager turn queued on this run so far has finished. */
+function managerTurnsSettled(runId: string): Promise<void> {
+  return managerTurnLock.wait(runId);
+}
+
+function managerTurnBusy(runId: string): boolean {
+  return (managerTurnDepth.get(runId) ?? 0) > 0;
+}
+
 async function askManagerBackend(
+  run: RunState,
+  cwd: string,
+  mode: SparkCall["mode"],
+  managerResumeClaimId?: string,
+  autonomyRetryCount = 0,
+  transientRetryCount = 0,
+  managerRecoveryClaimId?: string,
+): Promise<RunState | null> {
+  const waited = managerTurnBusy(run.id);
+  managerTurnDepth.set(run.id, (managerTurnDepth.get(run.id) ?? 0) + 1);
+  try {
+    return await managerTurnLock(run.id, async () => {
+      let current = run;
+      // Stop and cancel dispose the live session first and commit the paused
+      // or cancelled state after it. A turn that starts in between launches a
+      // fresh runtime that commit never stops, so wait for the commit and
+      // re-decide on it.
+      const stopping = forcePauseWindowClosed(run.id);
+      if (stopping) await stopping;
+      if (waited || stopping) {
+        // The caller decided to start this turn before the previous one (or
+        // the Stop) finished. Re-decide on the state left behind: a Stop, a
+        // rewind, a new question or a terminal verdict all mean this turn is
+        // no longer wanted.
+        const latest = await getRun(run.id);
+        if (
+          !latest ||
+          conversationEpoch(latest) !== conversationEpoch(run) ||
+          latest.status === "paused" ||
+          latest.status === "blocked" ||
+          latest.status === "cancelled" ||
+          isTerminalRunStatus(latest.status)
+        ) {
+          return latest ?? null;
+        }
+        current = latest;
+      }
+      return askManagerBackendUnderTurnLock(
+        current,
+        cwd,
+        mode,
+        managerResumeClaimId,
+        autonomyRetryCount,
+        transientRetryCount,
+        managerRecoveryClaimId,
+      );
+    });
+  } finally {
+    const depth = (managerTurnDepth.get(run.id) ?? 1) - 1;
+    if (depth > 0) managerTurnDepth.set(run.id, depth);
+    else managerTurnDepth.delete(run.id);
+  }
+}
+
+async function askManagerBackendUnderTurnLock(
   run: RunState,
   cwd: string,
   mode: SparkCall["mode"],
@@ -6005,10 +7125,22 @@ async function askManagerBackend(
     });
     return null;
   }
-  run = await pinImplicitPiManagerAccount(run);
-  const chatConfig = await freezeManagerExecutionAccount(
-    resolveChatBackendConfig(run),
-  );
+  // Resolving the turn's account can throw before any provider turn exists:
+  // no connected account for the chat model (NoConnectedPiAccountError) or a
+  // pinned profile that was disconnected. That is a startup failure like any
+  // other, so it must reach the catch below with a recorded SparkCall: the
+  // policy then parks auth failures with Retry, and manual fallback still gets
+  // its null. Escaping from here instead failed the whole run as "planning
+  // failed".
+  let accountFailure: unknown;
+  let chatConfig: ChatBackendConfig;
+  try {
+    run = await pinImplicitPiManagerAccount(run);
+    chatConfig = await freezeManagerExecutionAccount(resolveChatBackendConfig(run));
+  } catch (error) {
+    accountFailure = error ?? new Error("Cora could not resolve an account for this turn");
+    chatConfig = resolveChatBackendConfig(run);
+  }
   // The Pi manager backend owns its own request
   // lifecycle, spawn/resume a real agent session, stream events, and return
   // a SparkManagerDecision. Run-store forwards streaming chat events onto the
@@ -6114,6 +7246,13 @@ async function askManagerBackend(
         appendBufferedEvent(input);
         return;
       }
+      // A running tool's output tail arrives up to 4 times a second for as
+      // long as the command runs; it is display-only, so it is never written
+      // to the journal.
+      if (event.kind === "tool_progress") {
+        broadcastLiveEvent({ ...input, id: `chat-tool-progress:${callId}:${event.toolUseId}` });
+        return;
+      }
       await appendEvent(input);
     })().catch((err) => {
       console.warn("[run-store] appendEvent for chat stream event failed:", err);
@@ -6121,7 +7260,13 @@ async function askManagerBackend(
   };
 
   const callStartedMs = Date.now();
+  // Set once the provider had this turn's prompt or the backend answered.
+  // Only an error before that is a runtime that failed to start; one after it
+  // may follow tools or decision effects that already ran, so it must never be
+  // replayed as a startup retry or parked for a replay.
+  let providerTurnStarted = false;
   try {
+    if (accountFailure !== undefined) throw accountFailure;
     const result = await backend.requestManagerDecision(
       {
         run: frozenRun,
@@ -6131,13 +7276,18 @@ async function askManagerBackend(
         prompt: preparedTurn.prompt,
         inputMessageIds: preparedTurn.call.inputMessageIds ?? [],
         conversationEpoch: preparedTurn.conversationEpoch,
-        onPromptAccepted: () => {
-          return updateManagerInputDelivery(
+        reloadCoraMemory: preparedTurn.reloadCoraMemory,
+        onPromptAccepted: async () => {
+          providerTurnStarted = true;
+          promptAcceptedCalls.add(callId);
+          forgetPastedText(run.id, preparedTurn.inputMessages.map((message) => message.message));
+          await updateManagerInputDelivery(
             run.id,
             callId,
             preparedTurn.conversationEpoch,
             "submitted",
           );
+          await interruptForSendNow(run.id);
         },
         onSessionEstablished: async (sessionUuid: string) => {
           // Persist the provider session id BEFORE the turn settles. The
@@ -6170,7 +7320,10 @@ async function askManagerBackend(
       },
       onStream,
     );
+    providerTurnStarted = true;
     acceptingStreamEvents = false;
+    const promptWasAccepted = promptAcceptedCalls.delete(callId);
+    const interruptedBySendNow = sendNowInterruptedCalls.delete(callId);
     // The turn owns no more stream events, so land the buffered tail now rather
     // than leaving up to one flush interval of the reply undurable.
     await flushBufferedEvents(run.id);
@@ -6260,9 +7413,18 @@ async function askManagerBackend(
     // Doing this before saveRun(latest) lets that stale snapshot overwrite the
     // delivery transition. A failed Pi turn may also have successfully applied
     // a live orchestration tool before its final provider request died; that
-    // input is acknowledged, never replayed on Resume.
+    // input is acknowledged, never replayed on Resume. The same holds for an
+    // interrupted turn whose tools already spawned workers: handing its
+    // request back as new input invited Cora to spawn them again. A turn Send
+    // now cut short keeps its input too: the provider had the prompt (Send now
+    // waits for that), so the prompt and the partial reply are in Cora's
+    // transcript, and handing it back would deliver it a second time.
     let settledRun = latest;
-    if (turnFailed && result.decisionAlreadyApplied) {
+    const keptBySendNow = turnAborted && interruptedBySendNow && promptWasAccepted;
+    if (keptBySendNow) {
+      sendNowStoppedCalls.set(run.id, callId);
+    }
+    if ((turnFailed || turnAborted) && (result.decisionAlreadyApplied || keptBySendNow)) {
       await updateManagerInputDelivery(
         run.id,
         callId,
@@ -6296,6 +7458,35 @@ async function askManagerBackend(
         message: result.notice ?? "Chat turn interrupted by user.",
         payload: { backend: chatConfig.backend, interrupted: true },
       });
+      // Nobody stopped a turn the session refused as busy, so no Stop path
+      // will re-drive its requeued input.
+      if (result.sessionBusy && !result.decisionAlreadyApplied) {
+        scheduleQueuedSteeringFollowup(settledRun, { explicit: true });
+      }
+      // Send now stopped this turn so the queued messages go now. The next
+      // turn starts here, still under the turn lock, as a chat turn like any
+      // queued follow-up: handed back to its caller, a planning cycle hops to
+      // plan_analysis, which refuses a prose answer on a run with no step or
+      // worker and fails the run. With everything unqueued meanwhile, only a
+      // plain conversation continues here; a run with steps or workers goes
+      // back to its driver like any stopped turn. A stopped review or step
+      // planning turn goes back to its cycle, which owns that stage; the
+      // queued follow-up delivers the messages after it.
+      if (keptBySendNow && (mode === "chat" || mode === "plan_analysis")) {
+        const stopping = forcePauseWindowClosed(run.id);
+        if (stopping) await stopping;
+        const fresh = await getRun(run.id);
+        if (
+          fresh &&
+          conversationEpoch(fresh) === preparedTurn.conversationEpoch &&
+          (fresh.status === "planning" || fresh.status === "running" || fresh.status === "reviewing") &&
+          !activeManagerCall(fresh) &&
+          (queuedManagerInputMessages(fresh).length > 0 ||
+            (fresh.steps.length === 0 && fresh.workerTasks.length === 0))
+        ) {
+          return askManagerBackendUnderTurnLock(fresh, cwd, "chat");
+        }
+      }
       return settledRun;
     }
 
@@ -6315,6 +7506,10 @@ async function askManagerBackend(
         mode,
         transientRetryCount,
         backend: chatConfig.backend,
+        failureCause: result.failureCause,
+        providerRetried: result.providerRetried,
+        replaySafe: result.replaySafe,
+        activeWorkerCount: activeWorkersForRun(settledRun.id).length,
       });
 
       // The run already carries a state this dead turn must not rewrite: a
@@ -6392,7 +7587,7 @@ async function askManagerBackend(
         if (fresh.sparkCalls.some((call) => call.status === "started" && !call.completedAt)) {
           return fresh;
         }
-        return askManagerBackend(
+        return askManagerBackendUnderTurnLock(
           fresh,
           cwd,
           mode,
@@ -6418,6 +7613,7 @@ async function askManagerBackend(
           model: result.model,
           backend: chatConfig.backend,
           error: failureMessage,
+          ...(result.diagnostics ? { diagnostics: result.diagnostics } : {}),
           providerResponseIds: result.providerResponseIds,
         },
       });
@@ -6426,6 +7622,13 @@ async function askManagerBackend(
       // so would make an overload string a future manager prompt. The failed
       // SparkCall and typed events above are the sole durable error surface.
       const failedRun = settledRun;
+
+      // A billing decline fails this turn and nothing else: the run keeps
+      // its status and its workers, and the failed SparkCall above is the
+      // visible error.
+      if (failurePlan.action === "fail_turn") {
+        return failedRun;
+      }
 
       // Provider trouble that outlived the retries (or a rate limit, which a
       // fast retry can never clear): park instead of failing. The work did
@@ -6624,6 +7827,8 @@ async function askManagerBackend(
     return (await getRun(run.id)) ?? finalized;
   } catch (err) {
     acceptingStreamEvents = false;
+    promptAcceptedCalls.delete(callId);
+    sendNowInterruptedCalls.delete(callId);
     // The turn owns no more stream events, so land the buffered tail now rather
     // than leaving up to one flush interval of the reply undurable.
     await flushBufferedEvents(run.id);
@@ -6634,6 +7839,10 @@ async function askManagerBackend(
     }
     const completedAt = new Date().toISOString();
     const error = err instanceof Error ? err.message : String(err);
+    const diagnostics =
+      err && typeof (err as { diagnostics?: unknown }).diagnostics === "string"
+        ? (err as { diagnostics: string }).diagnostics
+        : undefined;
     if (targetCall) {
       targetCall.status = "failed";
       targetCall.error = error;
@@ -6656,10 +7865,171 @@ async function askManagerBackend(
       sparkCallId: callId,
       type: "spark_call.failed",
       message: `Cora manager (${chatConfig.backend}) call failed: ${error}`,
-      payload: { mode, model: chatConfig.model, backend: chatConfig.backend, error },
+      payload: {
+        mode,
+        model: chatConfig.model,
+        backend: chatConfig.backend,
+        error,
+        ...(diagnostics ? { diagnostics } : {}),
+      },
     });
-    return null;
+    if (providerTurnStarted) return null;
+    // The backend's message is the user-facing sentence; its raw handshake
+    // cause ("timed out", "process exited") is what the startup policy reads.
+    const startupCause =
+      err && typeof (err as { startupCause?: unknown }).startupCause === "string"
+        ? (err as { startupCause: string }).startupCause
+        : undefined;
+    return handleManagerStartupFailure({
+      runId: run.id,
+      error: startupCause && startupCause !== error ? `${error}\n${startupCause}` : error,
+      mode,
+      cwd,
+      callId,
+      conversationEpoch: preparedTurn.conversationEpoch,
+      backend: chatConfig.backend,
+      failedAccountProfileId:
+        sparkCall.accountProfileId ??
+        sparkCall.nativeClaudeProfileId ??
+        sparkCall.nativeCodexProfileId,
+      managerResumeClaimId,
+      autonomyRetryCount,
+      transientRetryCount,
+      managerRecoveryClaimId,
+    });
   }
+}
+
+/**
+ * A backend that throws before the provider accepted the prompt never ran a
+ * provider turn: the runtime failed to come up (handshake timeout, process
+ * exit) or the login is dead. The caller routes only that case here. The
+ * turn's input is already requeued. One retry covers a runtime that was merely
+ * slow to start; a dead login, a quota or provider trouble parks the run with
+ * the same recovery record a failed turn writes, so Retry replays the saved
+ * input. Nothing ran, so this never fails the run. Returns null for an
+ * unclassified error, which the caller turns into a question.
+ */
+async function handleManagerStartupFailure(input: {
+  runId: string;
+  error: string;
+  mode: SparkCall["mode"];
+  cwd: string;
+  callId: string;
+  conversationEpoch: number;
+  backend: ChatBackendKind;
+  failedAccountProfileId?: string;
+  managerResumeClaimId?: string;
+  autonomyRetryCount: number;
+  transientRetryCount: number;
+  managerRecoveryClaimId?: string;
+}): Promise<RunState | null> {
+  // A claimed recovery hands its token back to "parked" itself when the
+  // replay fails; a second park here would replace that token.
+  if (input.managerRecoveryClaimId) return null;
+  // Manual fallback (the e2e seam) drives a run with no account through
+  // plain-shell workers: every caller's null path, which creates the fallback
+  // task or re-drives review after Resume, must run instead of a park.
+  if (manualFallbackEnabled()) return null;
+  const current = await getRun(input.runId);
+  if (!current || conversationEpoch(current) !== input.conversationEpoch) return null;
+  const plan = planManagerTurnFailure({
+    error: input.error,
+    runStatus: current.status,
+    mode: input.mode,
+    transientRetryCount: input.transientRetryCount,
+    backend: input.backend,
+  });
+  if (plan.action === "keep_state") return current;
+  // The taxonomy has no class for a runtime process that exited during
+  // startup, but it is the same "try once more" case as a handshake timeout.
+  const processExited = /\bPi RPC process (?:exited|failed)\b/.test(input.error);
+  const retryOnce =
+    input.transientRetryCount === 0 &&
+    (plan.action === "retry" ||
+      (plan.action === "park" && (plan.kind === "transport" || plan.kind === "timeout")) ||
+      (plan.action === "fail" && processExited));
+  if (retryOnce) {
+    const delayMs = managerTurnRetryDelayMs(1);
+    await appendEvent({
+      workspaceId: current.workspaceId,
+      runId: current.id,
+      sparkCallId: input.callId,
+      type: "run.chat_turn_retrying",
+      message: `Cora's runtime did not start (${plan.kind ?? "process exit"}); retrying in ${Math.round(delayMs / 1000)}s`,
+      payload: {
+        backend: input.backend,
+        mode: input.mode,
+        error: input.error,
+        failureKind: plan.kind,
+        attempt: 1,
+        delayMs,
+        startup: true,
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    const fresh = await getRun(input.runId);
+    if (
+      !fresh ||
+      conversationEpoch(fresh) !== input.conversationEpoch ||
+      (fresh.status !== "planning" && fresh.status !== "running" && fresh.status !== "reviewing") ||
+      activeManagerCall(fresh)
+    ) {
+      return fresh ?? null;
+    }
+    return askManagerBackendUnderTurnLock(
+      fresh,
+      input.cwd,
+      input.mode,
+      input.managerResumeClaimId,
+      input.autonomyRetryCount,
+      input.transientRetryCount + 1,
+    );
+  }
+  if (plan.action !== "park") return null;
+  console.warn(
+    `[run-store] manager turn ${input.callId} (${input.backend}/${input.mode}) could not start; parked after ${plan.kind} failure: ${input.error}`,
+  );
+  return commitRunChange(current, {
+    type: "run.chat_turn_parked",
+    message: `Cora's ${input.backend} runtime could not start: ${input.error}`,
+    payload: {
+      backend: input.backend,
+      sparkCallId: input.callId,
+      mode: input.mode,
+      error: input.error,
+      failureKind: plan.kind,
+      reason: plan.parkReason,
+      startup: true,
+    },
+    mutate: (draft, timestamp) => {
+      if (conversationEpoch(draft) !== input.conversationEpoch) return false;
+      if (draft.status !== "planning" && draft.status !== "running" && draft.status !== "reviewing") {
+        return false;
+      }
+      draft.status = "paused";
+      draft.managerTurnRecovery = {
+        id: makeId("recovery"),
+        state: "parked",
+        failureKind: plan.kind as ManagerTurnRecoveryFailureKind,
+        backend: input.backend,
+        managerMode: input.mode,
+        conversationEpoch: input.conversationEpoch,
+        failedSparkCallId: input.callId,
+        failedAccountProfileId: input.failedAccountProfileId,
+        parkedAt: timestamp,
+      };
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        status: "paused",
+        lastAction: plan.lastAction,
+        stopReason: plan.parkReason,
+        pausedAt: timestamp,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
 }
 
 // Top-tier worker assignments for trivial-classified runs. The verifier
@@ -7721,7 +9091,7 @@ async function rerouteUnavailableAgentRuntimes(
       rerouted.push({
         from: runtimePreference,
         to: "manual",
-        reason: "Requested provider has no connected subscription, or is disabled by Settings > Agents.",
+        reason: "Requested provider has no connected account (Settings > Agents).",
       });
       return {
         runtimePreference: "manual" as WorkerRuntime,
@@ -7740,7 +9110,7 @@ async function rerouteUnavailableAgentRuntimes(
       to: fallback.kind,
       modelHint: nextModelHint,
       effortHint: nextEffortHint,
-      reason: "Requested provider has no connected subscription, or is disabled by Settings > Agents.",
+      reason: "Requested provider has no connected account (Settings > Agents).",
     });
     return {
       runtimePreference: fallback.kind as WorkerRuntime,
@@ -8224,12 +9594,16 @@ async function applySpawnTerminalsDecision(
   decision: SparkManagerDecision,
 ): Promise<RunState> {
   const terminals: Array<{ runtime: string; title: string; command: string }> = [];
+  const compaction = await standingTerminalCompaction(
+    await loadSettings().then((settings) => settings.coraAutoCompactPercent ?? null).catch(() => null),
+    (decision.terminals ?? []).map((req) => req.runtime),
+  );
   for (const req of decision.terminals ?? []) {
     for (let i = 0; i < req.count; i++) {
       terminals.push({
         runtime: req.runtime,
         title: standingTerminalTitle(req.runtime, req.model),
-        command: buildStandingTerminalCommand(req.runtime, req.model, req.effort),
+        command: buildStandingTerminalCommand(req.runtime, req.model, req.effort, compaction),
       });
     }
   }
@@ -9686,6 +11060,7 @@ export async function postRunQuestion(input: PostRunQuestionInput): Promise<Post
 
 /** Validate and answer exactly one question, then apply its resume strategy. */
 export async function answerRunQuestion(input: AnswerRunQuestionInput): Promise<RunState> {
+  input = { ...input, message: scrubPastedText(input.message, input.runId) };
   const run = await requireRun(input.runId);
   if (activeConversationRewinds.has(run.id)) {
     throw new Error("Conversation rewind is still in progress. Try answering again when it finishes.");
@@ -9702,7 +11077,7 @@ export async function answerRunQuestion(input: AnswerRunQuestionInput): Promise<
     run.status === "failed" ||
     run.status === "cancelled"
   ) {
-    throw new Error(`Run question is no longer active: ${questionMessageId}`);
+    throw new Error(`${QUESTION_INACTIVE_ERROR_PREFIX} Run question is no longer active: ${questionMessageId}`);
   }
   if (run.blockedOn && run.blockedOn.questionMessageId !== questionMessageId) {
     throw new Error(
@@ -9764,7 +11139,32 @@ export async function answerRunQuestion(input: AnswerRunQuestionInput): Promise<
       const applied = applyRunQuestionAnswer(draft, answerMessage, timestamp);
       if (applied.duplicate) return false;
       answerRecorded = true;
+      // A failed-turn notice keeps the message that failed queued for the
+      // retry. A user who retypes it as the answer means the same request,
+      // and the continuation turn would otherwise read it twice.
+      if (isBackendFailureQuestion(applied.question)) {
+        const answerText = message.trim();
+        for (const queued of draft.humanMessages) {
+          if (
+            queued.author === "user" &&
+            queued.id !== messageId &&
+            queued.intent !== "answer" &&
+            (queued.deliveryState ?? "queued") === "queued" &&
+            !queued.backendTurnId &&
+            (queued.conversationEpoch ?? 0) === conversationEpoch(draft) &&
+            queued.message.trim() === answerText
+          ) {
+            queued.deliveryState = "cancelled";
+          }
+        }
+      }
     },
+  }).catch((error: unknown) => {
+    const detail = error instanceof Error ? error.message : String(error);
+    if (/Run question is no longer active/.test(detail) && !detail.startsWith(QUESTION_INACTIVE_ERROR_PREFIX)) {
+      throw new Error(`${QUESTION_INACTIVE_ERROR_PREFIX} ${detail}`);
+    }
+    throw error;
   });
   if (!answerRecorded) {
     schedulePendingManagerResume(updated);
@@ -9774,7 +11174,9 @@ export async function answerRunQuestion(input: AnswerRunQuestionInput): Promise<
   const cwd = workspaceCwdFromRun(updated);
   if (cwd && runProjectPolicyMode(updated) === "trusted") {
     const labelText = message.length > 60 ? `${message.slice(0, 60).trimEnd()}…` : message;
-    void recordCheckpointInBackground({
+    // Awaited like addRunMessage's: the resume scheduled below lets Cora
+    // edit files, and the "answer" snapshot must predate those edits.
+    await recordCheckpointInBackground({
       runId: updated.id,
       cwd,
       kind: "user-message",
@@ -9794,9 +11196,149 @@ export async function answerRunQuestion(input: AnswerRunQuestionInput): Promise<
     schedulePendingManagerResume(manualReview);
     return manualReview;
   }
+  const unverifiedChoice = await maybeApplyUnverifiedCompletionAnswer(
+    updated,
+    questionMessageId,
+    messageId,
+    message,
+  );
+  if (unverifiedChoice) return unverifiedChoice;
 
   schedulePendingManagerResume(updated);
   return updated;
+}
+
+/**
+ * Apply a canned answer to the unverified-completion question without a manager
+ * turn. Returns null for any other question or for free text, which then goes
+ * to Cora as usual.
+ *
+ * "Use it as is" finishes the run but records that nothing checked it, so the
+ * completion never reads as verified. "Check it now" appends one verifier step
+ * over the final state and launches it; the worker cycle's settled-run hop then
+ * completes the run when the verdict passes, or asks again when it does not.
+ * Either way the answer is consumed here, so the pending manager resume the
+ * answer stamped is dropped: a manager turn would only re-decide (and could
+ * spawn a second verifier for) a choice the user already made.
+ */
+async function maybeApplyUnverifiedCompletionAnswer(
+  run: RunState,
+  questionMessageId: string,
+  answerMessageId: string,
+  answerText: string,
+): Promise<RunState | null> {
+  const question = run.humanMessages.find(
+    (entry) => entry.id === questionMessageId && entry.kind === "question",
+  );
+  const options = question?.questionOptions ?? [];
+  if (!options.some((option) => option.id === UNVERIFIED_COMPLETION_OPTIONS[0].id)) return null;
+  const choice = parseUnverifiedCompletionChoice(answerText, options);
+  if (!choice) return null;
+
+  const consumeAnswer = (draft: RunState): void => {
+    abandonRunQuestionOwnership(draft);
+    const answer = draft.humanMessages.find((entry) => entry.id === answerMessageId);
+    if (answer) answer.deliveryState = "acknowledged";
+  };
+
+  if (choice === "accept") {
+    const accepted = await commitRunChange(run, {
+      type: "run.accepted_unverified",
+      message: "The user accepted the changes without a check",
+      payload: { questionMessageId, source: "user_accepted_unverified" },
+      mutate: (draft, timestamp) => {
+        if (isTerminalRunStatus(draft.status)) return false;
+        consumeAnswer(draft);
+        draft.status = "complete";
+        draft.autopilot = {
+          ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+          status: "complete",
+          lastAction: "user_accepted_unverified",
+          stopReason: "Finished at the user's request without a verifier check.",
+          updatedAt: timestamp,
+        };
+        draft.completedAt = timestamp;
+        draft.updatedAt = timestamp;
+      },
+    });
+    await addRunMessage({
+      runId: run.id,
+      author: "system",
+      kind: "note",
+      message: "Finished without a check, as you asked. These changes have not been verified.",
+    }).catch(() => undefined);
+    return requireRun(accepted.id);
+  }
+
+  const cwd = workspaceCwdFromRun(run);
+  if (!cwd) return null;
+  let implementerRuntime: WorkerRuntime | undefined;
+  for (const attempt of [...run.workerAttempts].reverse()) {
+    const task = run.workerTasks.find((item) => item.id === attempt.workerTaskId);
+    if (!task || task.taskClass === "verifier" || !attempt.finalReportPath) continue;
+    const report = await readWorkerReport(attempt.finalReportPath).catch(() => null);
+    if (report && report.filesChanged.length > 0) {
+      implementerRuntime = task.runtimePreference;
+      break;
+    }
+  }
+  const verifierRuntime: WorkerRuntime = implementerRuntime === "claude" ? "codex" : "claude";
+  const stepId = makeId("step");
+  const taskId = makeId("task");
+  const resumed = await commitRunChange(run, {
+    type: "run.verification_requested",
+    message: "The user asked for a check of the final changes",
+    payload: { questionMessageId, stepId, taskId, verifierRuntime },
+    mutate: (draft, timestamp) => {
+      if (isTerminalRunStatus(draft.status)) return false;
+      consumeAnswer(draft);
+      const { step } = resolveFollowUpDestinationStep(draft, {
+        newStepId: stepId,
+        title: "Check the final changes",
+        goal: "Independently verify the run's final changes.",
+        acceptanceCriteria: ["An independent verifier signs off on the final state."],
+        timestamp,
+      });
+      draft.workerTasks.push({
+        id: taskId,
+        runId: draft.id,
+        stepId: step.id,
+        title: "Verify the final changes",
+        description: [
+          "Independently verify the changes this run made, as they stand now.",
+          "Re-derive ground truth from the filesystem; do NOT trust earlier workers' self-reports.",
+          "Return a verifier verdict covering what the user asked for in this chat.",
+        ].join("\n"),
+        runtimePreference: verifierRuntime,
+        effortHint: "low",
+        status: "created",
+        allowedPaths: [],
+        forbiddenPaths: [],
+        expectedOutputs: [],
+        verificationCommands: [],
+        canRunParallel: false,
+        conflictsWith: [],
+        taskClass: "verifier",
+        createdBy: "spark",
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      });
+      if (!step.workerTaskIds.includes(taskId)) step.workerTaskIds.push(taskId);
+      draft.status = "running";
+      draft.autopilot = {
+        ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
+        status: "running",
+        lastAction: "user_requested_verification",
+        stopReason: undefined,
+        updatedAt: timestamp,
+      };
+      draft.updatedAt = timestamp;
+    },
+  });
+  if (!resumed.workerTasks.some((task) => task.id === taskId)) return resumed;
+  const envelope = await prepareWorkerTask({ runId: run.id, workerTaskId: taskId, cwd });
+  scheduleAutopilotCycles(run.id, [envelope.attemptId]);
+  return requireRun(run.id);
 }
 
 /**
@@ -9916,14 +11458,7 @@ async function maybeApplyManualReviewAnswer(
   if (!changed) return null;
 
   if (verdict === "accept" && isRunSettled(applied)) {
-    const verification = await describeVerificationFreshness(applied);
-    if (verification.ok) {
-      return completeRunFromOrchestrator(applied.id);
-    }
-    return askHumanQuestion(applied.id, UNVERIFIED_COMPLETION_QUESTION, undefined, {
-      reason: `Latest verifier confidence: ${verification.latestVerifierConfidence ?? "none"}.`,
-      managerMode: "worker_result_review",
-    });
+    return completeSettledRunOrAsk(applied);
   }
   return applied;
 }
@@ -9946,6 +11481,10 @@ export async function releaseRunQuestion(
 
 export async function pauseRun(input: PauseRunInput): Promise<RunState> {
   const run = await requireRun(input.runId);
+  if (run.workflow && workflowRunControls) {
+    await workflowRunControls.stop(run.id, input.reason?.trim() || "Paused by user");
+    return requireRun(run.id);
+  }
   const reason = input.reason?.trim() || "Paused by user";
   const recordPauseMessage = shouldRecordPauseReasonAsUserNote(reason);
   await sendPauseSignals(run, reason);
@@ -10117,12 +11656,7 @@ async function returnUnfinishedManagerRecoveryToParked(
           recovery.managerMode === "chat"
             ? "chat_turn_parked"
             : "manager_turn_parked",
-        stopReason:
-          recovery.failureKind === "rate_limit"
-            ? "The selected provider account reached its usage limit. Switch accounts or retry after quota resets."
-            : recovery.failureKind === "transport"
-              ? "Cora lost its provider connection. Retry when the connection is stable."
-              : "Cora's provider is temporarily unavailable or at capacity. Retry the saved turn or switch accounts.",
+        stopReason: managerTurnParkReason(recovery.failureKind),
         pausedAt: timestamp,
         updatedAt: timestamp,
       };
@@ -10279,6 +11813,7 @@ export async function resumeManagerTurnRecovery(
       current.resumeRequestedAt = timestamp;
       draft.status = "running";
       draft.verificationRounds = 0;
+      delete draft.verificationRoundsByLineage;
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
         status: "running",
@@ -10298,13 +11833,17 @@ export async function resumeManagerTurnRecovery(
   return { outcome: decision.outcome, run };
 }
 
-/** One worker attempt a pause killed before it could finish. */
+/** One worker attempt a pause or app restart killed before it could finish. */
 interface ResumeInterruptedAttempt {
   attemptId: string;
   attemptNumber: number;
   taskId: string;
   taskTitle: string;
   stepLabel: string;
+  /** Its session can be continued warm with follow_up_of on `runtime`. */
+  continuable: boolean;
+  runtime: WorkerRuntime;
+  cause: "pause" | "app_restart";
 }
 
 // forcePauseRun kills the PTYs first and commits the pause after, so an attempt
@@ -10325,7 +11864,9 @@ const RESUME_INTERRUPTED_NOTE_LIMIT = 12;
 /**
  * The attempts a pause interrupted and nobody has picked back up: their task is
  * still `cancelled` (so no follow-up task superseded it) and their newest
- * attempt is `cancelled` (killed, not failed and not retried). This is the list
+ * attempt is `cancelled` (killed, not failed and not retried). Attempts the app
+ * quit killed are recorded failed with interruptedBy "app_restart" by boot
+ * recovery and are listed the same way. This is the list
  * the manager needs on resume — it owns retry bookkeeping, so Resume's job is
  * to tell it exactly what stopped mid-flight, not to relaunch behind its back.
  */
@@ -10337,15 +11878,23 @@ function interruptedAttemptsForResume(run: RunState): ResumeInterruptedAttempt[]
       .filter((id): id is string => Boolean(id)),
   );
   const rows: ResumeInterruptedAttempt[] = [];
+  const resumedSessionIds = new Set(
+    run.workerTasks
+      .map((task) => task.resumeSessionId)
+      .filter((id): id is string => Boolean(id)),
+  );
   for (const task of run.workerTasks) {
-    if (task.status !== "cancelled") continue;
+    if (task.status !== "cancelled" && task.status !== "failed") continue;
     if (supersededTaskIds.has(task.id)) continue;
     const attempts = run.workerAttempts.filter((attempt) => attempt.workerTaskId === task.id);
     if (attempts.length === 0) continue;
     const latest = attempts.reduce((best, attempt) =>
       (attempt.attemptNumber ?? 0) >= (best.attemptNumber ?? 0) ? attempt : best,
     );
-    if (latest.status !== "cancelled") continue;
+    const restartKilled = latest.status === "failed" && latest.interruptedBy === "app_restart";
+    if (task.status === "failed" ? !restartKilled : latest.status !== "cancelled") continue;
+    // Already continued by a follow-up: that worker owns the work now.
+    if (latest.piSessionId && resumedSessionIds.has(latest.piSessionId)) continue;
     if (Number.isFinite(pausedAtMs)) {
       const finishedMs = Date.parse(latest.finishedAt ?? "");
       if (Number.isFinite(finishedMs) && finishedMs < pausedAtMs - PAUSE_KILL_LEAD_MS) continue;
@@ -10357,6 +11906,14 @@ function interruptedAttemptsForResume(run: RunState): ResumeInterruptedAttempt[]
       taskId: task.id,
       taskTitle: task.title,
       stepLabel: step ? `Step ${step.index} "${step.title}"` : "No step",
+      continuable:
+        evaluateWorkerSessionReuse({
+          run,
+          followUpOfTaskId: task.id,
+          requestedRuntime: latest.runtime,
+        }).kind === "resume",
+      runtime: latest.runtime,
+      cause: restartKilled ? "app_restart" : "pause",
     });
   }
   return rows;
@@ -10372,15 +11929,26 @@ function interruptedAttemptsForResume(run: RunState): ResumeInterruptedAttempt[]
 function composeResumeInterruptedNote(rows: ResumeInterruptedAttempt[]): string {
   const listed = rows.slice(0, RESUME_INTERRUPTED_NOTE_LIMIT);
   const remaining = rows.length - listed.length;
+  const anyContinuable = listed.some((row) => row.continuable);
+  const byRestart = rows.some((row) => row.cause === "app_restart");
   return [
     RESUME_INTERRUPTED_NOTE_HEADER,
-    "Resume this run. The pause stopped the attempts below before they finished, and nothing is running now:",
+    `Resume this run. ${byRestart ? "The app restart or the pause" : "The pause"} stopped the attempts below before they finished, and nothing is running now:`,
     ...listed.map(
       (row) =>
-        `- ${row.stepLabel} · ${row.taskTitle} — task ${row.taskId}, attempt ${row.attemptId} (attempt #${row.attemptNumber}, interrupted)`,
+        `- ${row.stepLabel} · ${row.taskTitle}, task ${row.taskId}, attempt ${row.attemptId} (attempt #${row.attemptNumber}, interrupted${
+          row.continuable ? `, continuable on ${row.runtime}` : ""
+        })`,
     ),
     ...(remaining > 0 ? [`- …and ${remaining} more interrupted attempt(s).`] : []),
-    "Re-issue the work that is still needed (relaunch those tasks, or replace them if the plan changed), then carry on.",
+    ...(anyContinuable
+      ? [
+          "A continuable task keeps its worker's session: spawn one worker with follow_up_of set to that task id, " +
+            "the same runtime, and a brief that says to check its edits so far and finish the remaining work. " +
+            "It continues where it stopped instead of starting over.",
+        ]
+      : []),
+    "Re-issue the work that is still needed (continue or relaunch those tasks, or replace them if the plan changed), then carry on.",
   ].join("\n");
 }
 
@@ -10426,6 +11994,10 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
   if (blockingQuestion) {
     throw new Error(`Run is blocked on question ${blockingQuestion.id}. Answer it to resume.`);
   }
+  if (run.workflow && workflowRunControls) {
+    await workflowRunControls.resume(run.id);
+    return requireRun(run.id);
+  }
   const queuedDirectMessages = queuedManagerInputMessages(run);
   if (
     run.executionMode === "direct" &&
@@ -10436,7 +12008,7 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
     return addDirectIteration({
       runId: run.id,
       prompt: renderBundledManagerInput(queuedDirectMessages),
-      model: run.chatModel?.trim() || "gpt-5.6-sol",
+      model: await directChatPassModel(run),
       effort: run.chatEffort ?? "medium",
       queuedMessageIds: queuedDirectMessages.map((message) => message.id),
       access: "full",
@@ -10484,15 +12056,10 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
     run.executionMode !== "direct" &&
     !run.automationId &&
     !activeManagerCall(run);
-  // Sticky for the fallback below: a resume that already spent its chat turn
-  // must still leave a driver behind if that turn neither settled the run nor
-  // spawned work (a failed/suppressed manager call returns null here).
-  let routedToChat = false;
   if (
     activeWorkersForRun(run.id).length === 0 &&
     (parkedChatTurn || pausedWithNoWorkers || shouldRoutePausedResumeToChat(run))
   ) {
-    routedToChat = true;
     // Leave "paused" BEFORE the turn dispatches. The turn-failure policy and
     // its retry guards read run.status: a turn resumed while the run still
     // says "paused" would forfeit its transient-retry budget (the post-sleep
@@ -10559,6 +12126,7 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
         }
         draft.status = "running";
         draft.verificationRounds = 0;
+        delete draft.verificationRoundsByLineage;
         draft.autopilot = {
           ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
           status: "running",
@@ -10591,50 +12159,98 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
         });
       }
     }
-    // askManagerBackend's own failure policy (park / retry / fail) only covers
-    // what happens INSIDE a turn. Everything before the turn exists throws
-    // straight out: the untrusted-pull-request backend refusal, an account that
-    // will not resolve or freeze, a turn that went stale during startup. Left
-    // unguarded, that throw escapes resumeRun with the commit above already
-    // applied — "running", no driver, and no Resume button to try again, which
-    // is the exact wedge this function is being fixed for. Catch it, journal it,
-    // and fall through: routedToChat is already set, so the tail below still
-    // schedules a driver (and that turn surfaces the same failure through
-    // markAutopilotCycleFailed, where the UI can see it).
-    let chatDecision: RunState | null = null;
-    try {
-      chatDecision = await askManagerForChat(driving, resumeInput.cwd);
-    } catch (error) {
-      const detail = error instanceof Error ? error.message : String(error);
-      console.warn(`[run-store] resume chat turn for ${driving.id} could not start: ${detail}`);
-      await appendEvent({
-        workspaceId: driving.workspaceId,
-        runId: driving.id,
-        type: "run.resume_chat_turn_failed",
-        message: `Cora's resume chat turn could not start: ${detail}`,
-        payload: { route: "chat", error: detail },
-      });
-    }
-    if (chatDecision) {
-      if (
-        chatDecision.status === "paused" ||
-        chatDecision.status === "blocked" ||
-        chatDecision.status === "cancelled" ||
-        chatDecision.status === "complete" ||
-        // "failed" must stay failed. Feeding a just-failed turn into
-        // startAutopilot below revived the run to "running" and, with no
-        // runnable tasks, converted the honest failure (observed: an expired
-        // provider credential) into a misleading "nothing left to run"
-        // question. The failed state carries its own Retry affordance.
-        chatDecision.status === "failed"
-      ) {
-        return chatDecision;
-      }
-      if (chatDecision.steps.length > 0 || chatDecision.workerTasks.length > 0) {
-        return startAutopilot({ ...resumeInput, runId: chatDecision.id });
-      }
-    }
+    // The chat turn runs as a scheduled cycle, not inside this call. Awaiting
+    // it held Resume's IPC (and the composer, disabled while it waited) for
+    // the whole turn, and kept the turn out of the cycle maps every other
+    // scheduler waits behind.
+    scheduleResumeChatTurn(run, driving, resumeInput, shouldScheduleManagerAfterResume);
+    return driving;
   }
+  return finishResumeAfterChatRoute(run, resumeInput, shouldScheduleManagerAfterResume, false);
+}
+
+function scheduleResumeChatTurn(
+  run: RunState,
+  driving: RunState,
+  resumeInput: StartAutopilotInput,
+  shouldScheduleManagerAfterResume: boolean,
+): void {
+  const resumedEpoch = conversationEpoch(driving);
+  const cycle: Promise<void> = Promise.all(managerWorkSettled(run.id))
+    .then(async () => {
+      const current = await getRun(run.id);
+      if (
+        !current ||
+        conversationEpoch(current) !== resumedEpoch ||
+        current.status !== "running"
+      ) {
+        return;
+      }
+      // askManagerBackend's own failure policy (park / retry / fail) only covers
+      // what happens INSIDE a turn. Everything before the turn exists throws
+      // straight out: the untrusted-pull-request backend refusal, an account that
+      // will not resolve or freeze, a turn that went stale during startup. Left
+      // unguarded, that throw escapes this cycle with resumeRun's commit already
+      // applied: "running", no driver, and no Resume button to try again. Catch
+      // it, journal it, and fall through: the tail below still schedules a
+      // driver (and that turn surfaces the same failure through
+      // markAutopilotCycleFailed, where the UI can see it).
+      let chatDecision: RunState | null = null;
+      try {
+        chatDecision = await askManagerForChat(current, resumeInput.cwd);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        console.warn(`[run-store] resume chat turn for ${driving.id} could not start: ${detail}`);
+        await appendEvent({
+          workspaceId: driving.workspaceId,
+          runId: driving.id,
+          type: "run.resume_chat_turn_failed",
+          message: `Cora's resume chat turn could not start: ${detail}`,
+          payload: { route: "chat", error: detail },
+        });
+      }
+      if (chatDecision) {
+        if (
+          chatDecision.status === "paused" ||
+          chatDecision.status === "blocked" ||
+          chatDecision.status === "cancelled" ||
+          chatDecision.status === "complete" ||
+          // "failed" must stay failed. Feeding a just-failed turn into
+          // startAutopilot below revived the run to "running" and, with no
+          // runnable tasks, converted the honest failure (observed: an expired
+          // provider credential) into a misleading "nothing left to run"
+          // question. The failed state carries its own Retry affordance.
+          chatDecision.status === "failed"
+        ) {
+          return;
+        }
+        if (chatDecision.steps.length > 0 || chatDecision.workerTasks.length > 0) {
+          await startAutopilot({ ...resumeInput, runId: chatDecision.id });
+          return;
+        }
+      }
+      await finishResumeAfterChatRoute(run, resumeInput, shouldScheduleManagerAfterResume, true);
+    })
+    .catch(async (err) => {
+      await markInitialAutopilotPlanningFailed(run.id, err);
+    })
+    .finally(() => {
+      if (activeAutopilotPlans.get(run.id) === cycle) {
+        activeAutopilotPlans.delete(run.id);
+      }
+    });
+  activeAutopilotPlans.set(run.id, cycle);
+}
+
+async function finishResumeAfterChatRoute(
+  run: RunState,
+  resumeInput: StartAutopilotInput,
+  shouldScheduleManagerAfterResume: boolean,
+  // Sticky: a resume that already spent its chat turn must still leave a
+  // driver behind if that turn neither settled the run nor spawned work (a
+  // failed or suppressed manager call returns null).
+  routedToChat: boolean,
+): Promise<RunState> {
   const resumePrompt = buildResumePrompt(run);
   await sendResumeSignals(run, resumePrompt);
   const resumed = await commitRunChange(run, {
@@ -10651,6 +12267,7 @@ export async function resumeRun(input: ResumeRunInput): Promise<RunState> {
       // budget so the run doesn't re-trip a saturated round ceiling on its
       // first corrective verdict (mirrors the user-turn reset in addRunMessage).
       draft.verificationRounds = 0;
+      delete draft.verificationRoundsByLineage;
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
         status: "running",
@@ -10709,14 +12326,76 @@ export async function cancelRun(input: CancelRunInput): Promise<RunState> {
   if (run.status === "complete" || run.status === "failed" || run.status === "cancelled") {
     return run;
   }
+  if (run.workflow && workflowRunControls) {
+    await workflowRunControls.cancel(run.id, input.reason?.trim() || "Run cancelled");
+    return requireRun(run.id);
+  }
   const reason = input.reason?.trim() || "Run cancelled";
-  await sendPauseSignals(run, reason);
+  // Tear down like Stop does. An ESC alone left the manager turn running and
+  // each worker exiting on its own, and those exits landed as failures that
+  // overwrote the cancelled tasks and revived skipped steps. The window makes
+  // every exit the cancel causes read as interrupted.
+  openForcePauseWindow(run.id);
+  try {
+    // A worker still starting has no process to kill yet; its launch checks
+    // this flag and stands down instead of running in the cancelled run.
+    abortLaunchingWorkers(run.id);
+    await disposeManagerSessions(run.id);
+    const activeWorkers = activeWorkersForRun(run.id);
+    for (const worker of activeWorkers) {
+      try {
+        worker.kill();
+      } catch {
+        /* best-effort; the hard pty kill follows */
+      }
+      try {
+        pty.killImmediate(worker.attemptId);
+      } catch {
+        /* the session may already have exited */
+      }
+      activeWorkerProcesses.delete(worker.attemptId);
+    }
+    for (const key of [...activeAutopilotCycles.keys()]) {
+      if (key.startsWith(`${run.id}:`)) activeAutopilotCycles.delete(key);
+    }
+    activeAutopilotPlans.delete(run.id);
+    activeAutopilotReviews.delete(run.id);
+    return await commitCancelledRun(run, reason);
+  } finally {
+    closeForcePauseWindow(run.id);
+  }
+}
+
+function commitCancelledRun(run: RunState, reason: string): Promise<RunState> {
   return commitRunChange(run, {
     type: "run.cancelled",
     message: reason,
     payload: { reason },
     mutate: (draft, timestamp) => {
       abandonRunQuestionOwnership(draft);
+      delete draft.managerPlan;
+      for (const call of draft.sparkCalls) {
+        if (call.status !== "started" || call.completedAt) continue;
+        call.status = "failed";
+        call.error = "Manager turn interrupted because the run was cancelled.";
+        call.completedAt = timestamp;
+      }
+      for (const attempt of draft.workerAttempts) {
+        // Cancel opens the force-pause window, so an exit that landed before
+        // this commit was tagged as pause-interrupted. A cancelled run has
+        // nothing to continue.
+        delete attempt.interruptedBy;
+        if (
+          attempt.status === "preparing" ||
+          attempt.status === "prompt_ready" ||
+          attempt.status === "launching" ||
+          attempt.status === "running" ||
+          attempt.status === "finishing"
+        ) {
+          attempt.status = "cancelled";
+          attempt.finishedAt = attempt.finishedAt ?? timestamp;
+        }
+      }
       draft.status = "cancelled";
       draft.autopilot = {
         ...(draft.autopilot ?? { status: "idle", updatedAt: timestamp }),
@@ -10806,8 +12485,51 @@ function sameMessageDeliverySignature(
   );
 }
 
-export async function addRunMessage(input: AddRunMessageInput): Promise<RunState> {
-  const run = await requireRun(input.runId);
+/**
+ * A repeated user message reads as a double-send only while the first copy is
+ * still waiting for Cora. Once a turn has taken it, the same text again is a
+ * new request ("continue" after a quick reply, a retype after a failure), and
+ * swallowing it cleared the composer while nothing happened.
+ */
+function repeatedCopyStillPending(prior: HumanRunMessage): boolean {
+  if (prior.author !== "user") return true;
+  const state = prior.deliveryState ?? "queued";
+  return state === "queued" || state === "submitted";
+}
+
+export async function addRunMessage(
+  input: AddRunMessageInput,
+  // Internal: set on the single retry after Stop moved the epoch mid-send.
+  retriedAfterEpochMove = false,
+): Promise<RunState> {
+  // A person may paste a key into the chat. Everything below writes the text
+  // to run.json, events.jsonl or a worker's prompt, so it is scrubbed first;
+  // only the live prompt that delivers it sees the key (pasted-secrets.ts).
+  if (input.author === "user") input = { ...input, message: scrubPastedText(input.message, input.runId) };
+  let run = await requireRun(input.runId);
+  // A desktop chat may start on the direct lane; a follow-up that needs
+  // parallel workers or a Studio surface the direct worker cannot write
+  // continues with the manager in the same chat instead.
+  if (
+    !input.skipDirectDispatch &&
+    run.executionMode === "direct" &&
+    !run.automationId &&
+    input.author === "user" &&
+    input.kind === "note" &&
+    isTerminalRunStatus(run.status) &&
+    (followUpNeedsManager(input.message) || (await loadSettings()).coraAlwaysVerifyEdits === true)
+  ) {
+    run = await commitRunChange(run, {
+      type: "run.escalated_to_manager",
+      message: "Cora's manager takes over this chat for a request the direct lane cannot serve",
+      payload: {},
+      mutate: (draft, timestamp) => {
+        if (draft.executionMode !== "direct") return false;
+        draft.executionMode = "managed";
+        draft.updatedAt = timestamp;
+      },
+    });
+  }
   if (
     !input.skipDirectDispatch &&
     run.executionMode === "direct" &&
@@ -10820,7 +12542,7 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
     return addDirectIteration({
       runId: run.id,
       prompt,
-      model: run.chatModel?.trim() || "gpt-5.6-sol",
+      model: await directChatPassModel(run),
       effort: run.chatEffort ?? "medium",
       clientMessageId: input.clientMessageId,
       attachments: input.attachments,
@@ -10909,6 +12631,7 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
     }) &&
     !answersDifferentQuestion &&
     !distinctQuestionRepost &&
+    repeatedCopyStillPending(priorSameAuthor) &&
     Date.now() - new Date(priorSameAuthor.createdAt).getTime() < 20000
   ) {
     return run;
@@ -10944,13 +12667,17 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
 
   let messageRecorded = false;
   let revivedTerminal = false;
+  let epochMoved = false;
   let recordedIntent = intent;
   const updated = await commitRunChange(run, {
     type: `human.${input.kind}`,
     message: `${input.author}: ${message.slice(0, 160)}`,
     payload: { message: humanMessage },
     mutate: (draft, timestamp) => {
-      if (conversationEpoch(draft) !== messageEpoch) return false;
+      if (conversationEpoch(draft) !== messageEpoch) {
+        epochMoved = true;
+        return false;
+      }
       if (
         clientMessageId &&
         draft.humanMessages.some((entry) => entry.clientMessageId === clientMessageId)
@@ -10987,6 +12714,7 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
         }) &&
         !answersDifferentQuestionInDraft &&
         !distinctQuestionRepostInDraft &&
+        repeatedCopyStillPending(latestSameAuthor) &&
         Date.now() - new Date(latestSameAuthor.createdAt).getTime() < 20000
       ) {
         return false;
@@ -11003,7 +12731,13 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
       // guards a single runaway corrective loop, not the whole conversation —
       // without this reset a follow-up inherits a saturated counter and the
       // first corrective verdict of the new turn instantly force-lands the run.
-      if (input.author === "user") draft.verificationRounds = 0;
+      if (input.author === "user") {
+        draft.verificationRounds = 0;
+        delete draft.verificationRoundsByLineage;
+        // A claim verified in an earlier turn says nothing about behavior the
+        // user has since asked to change.
+        delete draft.greenClaims;
+      }
       const draftWasTerminal =
         draft.status === "complete" || draft.status === "failed" || draft.status === "cancelled";
       // When the user chats into a finished run, transition it back into a
@@ -11014,6 +12748,9 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
       // transitions, and a stray user note must never wake a manager.
       if (input.author === "user" && draftWasTerminal && draft.executionMode !== "direct") {
         revivedTerminal = true;
+        // The finished request's plan is not this one's: left in place it
+        // would gate codara_complete and steer every turn of the new request.
+        delete draft.managerPlan;
         draft.status = "planning";
         draft.autopilot = {
           ...(draft.autopilot ?? { status: "running", updatedAt: timestamp }),
@@ -11027,7 +12764,19 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
       draft.updatedAt = timestamp;
     },
   });
-  if (!messageRecorded) return updated;
+  if (!messageRecorded) {
+    // Stop landed between reading the run and recording the message. The user
+    // still sent it: record it in the new conversation (once), and if that
+    // races too, fail loudly so the composer keeps the draft instead of
+    // clearing text that was never recorded.
+    if (epochMoved && input.author === "user" && input.conversationEpoch === undefined) {
+      if (retriedAfterEpochMove) {
+        throw new Error("Cora was stopped while your message was sending, so it was not sent. Send it again.");
+      }
+      return addRunMessage(input, true);
+    }
+    return updated;
+  }
 
   // Land the message checkpoint before any new manager turn is allowed to edit
   // the workspace. This makes Chat+Code undo restore the send-time tree rather
@@ -11057,9 +12806,9 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
     const autopilotInput = autopilotInputFromRun(updated);
     scheduleInitialChatDecision(updated.id, autopilotInput, { afterCurrent: true });
   }
-  // A message sent mid-turn is never delivered into the live manager call: it
-  // stays queued and this follow-up scheduler gives it a fresh turn once the
-  // active call (or planning/review work) settles.
+  // A message sent while Cora works waits in the queue: the live turn never
+  // sees it, and the follow-up scheduler starts the next turn with it once
+  // this one settles. Send now (deliverQueuedMessagesNow) cuts the wait short.
   if (
     input.author === "user" &&
     recordedIntent === "steer" &&
@@ -11067,6 +12816,21 @@ export async function addRunMessage(input: AddRunMessageInput): Promise<RunState
       activeAutopilotPlans.has(updated.id) ||
       activeAutopilotReviews.has(updated.id))
   ) {
+    scheduleQueuedSteeringFollowup(updated);
+  } else if (
+    input.author === "user" &&
+    recordedIntent === "steer" &&
+    (updated.status === "running" || updated.status === "reviewing") &&
+    updated.executionMode !== "direct" &&
+    // Manual fallback runs with no manager at all; its plain-shell workers
+    // are reviewed by the user, and a turn here could only fail.
+    !manualFallbackEnabled()
+  ) {
+    // Workers are running but no manager turn is (the turn spawned them and
+    // ended without waiting). Nothing else would ever read this message, and
+    // the last worker finishing could even complete the run around it. A run
+    // still "planning" is left alone: its first turn is being registered and
+    // will claim the message itself.
     scheduleQueuedSteeringFollowup(updated);
   }
   // A paused run has no manager turn to queue behind, so neither branch above
@@ -11144,22 +12908,75 @@ export async function cancelQueuedMessage(
   };
 }
 
+// Send now. A run's request lives here, by conversation epoch, until its live
+// turn is cut short or the queue is delivered some other way. The interrupt
+// waits until the provider has the live turn's prompt: a turn stopped in its
+// preflight can still record that prompt after the next turn sent it again.
+// The request names the messages queued when it was made, so a turn that has
+// since taken them (an in-lock retry, a follow-up) is never stopped for a
+// message sent after the click.
+const sendNowRequests = new Map<string, { epoch: number; messageIds: ReadonlySet<string> }>();
+// Manager calls whose prompt the provider accepted, while they run.
+const promptAcceptedCalls = new Set<string>();
+// Calls Send now interrupted, until their settlement reads the mark.
+const sendNowInterruptedCalls = new Set<string>();
+// The last manager call Send now stopped, by run, so the turn right after it
+// can say why the previous reply stopped.
+const sendNowStoppedCalls = new Map<string, string>();
+
+async function interruptForSendNow(runId: string): Promise<void> {
+  const request = sendNowRequests.get(runId);
+  if (!request) return;
+  const requestedEpoch = request.epoch;
+  const run = await getRun(runId);
+  if (sendNowRequests.get(runId) !== request) return;
+  if (
+    !run ||
+    conversationEpoch(run) !== requestedEpoch ||
+    !queuedManagerInputMessages(run).some((message) => request.messageIds.has(message.id))
+  ) {
+    // Stale, or every message it named was taken or unqueued since.
+    sendNowRequests.delete(runId);
+    return;
+  }
+  const call = activeManagerCall(run);
+  if (!call || !promptAcceptedCalls.has(call.id)) return;
+  sendNowRequests.delete(runId);
+  sendNowInterruptedCalls.add(call.id);
+  await appendEvent({
+    workspaceId: run.workspaceId,
+    runId: run.id,
+    sparkCallId: call.id,
+    type: "run.send_now_interrupted",
+    message: "Cora's turn was stopped so the queued messages go now",
+    payload: { callId: call.id, conversationEpoch: requestedEpoch },
+  }).catch(() => undefined);
+  try {
+    getBackend(run.chatBackend ?? "pi").interruptChat?.(run.id);
+  } catch {
+    // A backend with nothing live to interrupt lets the turn end on its own;
+    // the queue is delivered when it does.
+  }
+}
+
 /**
  * Deliver the queued messages NOW instead of waiting for the current turn to
- * finish: interrupt the manager's in-flight generation (workers and the
- * provider session survive; only the current response is abandoned), then
- * once the interrupted turn settles, start the fresh turn that drains the
- * queue. The interrupted turn's own input is requeued by its failure path
- * (releaseUnsubmittedManagerInput), so nothing is lost; the fresh turn
- * carries everything in order.
+ * finish: stop the manager's live turn (workers keep running and the Pi
+ * process is reused when it goes idle cleanly), then start the next turn with
+ * every queued message, in order. The interrupted turn's prompt and partial
+ * reply stay in Cora's transcript and its input stays delivered, so nothing
+ * reaches her twice. With no live turn, the next turn simply starts.
  */
 export async function deliverQueuedMessagesNow(runId: string): Promise<RunState> {
   const run = await requireRun(runId);
   if (run.executionMode === "direct") {
     throw new Error("Direct runs deliver messages through their loop driver.");
   }
-  if (queuedManagerInputMessages(run).length === 0) {
-    throw new Error("No queued messages to deliver.");
+  // The queue emptied in the meantime: the scheduler already claimed it, which
+  // is what the user asked for, so this is not an error.
+  if (queuedManagerInputMessages(run).length === 0) return run;
+  if (run.status === "blocked") {
+    throw new Error("Cora is waiting for your answer. Queued messages are delivered with it.");
   }
   const scheduledEpoch = conversationEpoch(run);
   await appendEvent({
@@ -11169,29 +12986,25 @@ export async function deliverQueuedMessagesNow(runId: string): Promise<RunState>
     message: "User asked for queued messages to be delivered now",
     payload: { conversationEpoch: scheduledEpoch },
   }).catch(() => undefined);
-  try {
-    getBackend(run.chatBackend ?? "pi").interruptChat?.(run.id);
-  } catch {
-    // Interrupt is best-effort: a backend without a live turn simply has
-    // nothing to interrupt, and the settle-then-deliver below still runs.
-  }
+  const request = {
+    epoch: scheduledEpoch,
+    messageIds: new Set(queuedManagerInputMessages(run).map((message) => message.id)),
+  };
+  sendNowRequests.set(run.id, request);
+  await interruptForSendNow(run.id);
   // Deliver once the interrupted turn (or any planning/review work) settles.
   // Re-read and re-decide then: another scheduler may already own the queue.
-  const waits = [activeAutopilotPlans.get(run.id), activeAutopilotReviews.get(run.id)].filter(
-    (promise): promise is Promise<void> => Boolean(promise),
-  );
-  void Promise.all(waits.map((promise) => promise.catch(() => undefined)))
+  void Promise.all(managerWorkSettled(run.id))
     .then(async () => {
+      if (sendNowRequests.get(run.id) === request) sendNowRequests.delete(run.id);
       const latest = await getRun(run.id);
       if (!latest || conversationEpoch(latest) !== scheduledEpoch) return;
       if (queuedManagerInputMessages(latest).length === 0) return;
       if (activeManagerCall(latest)) return;
       if (latest.status === "paused") {
-        // The failure policy parked the interrupted turn; resume carries the
-        // queue into the retried turn.
         await resumeRun({ runId: latest.id });
       } else if (latest.status !== "blocked" && latest.status !== "cancelled") {
-        scheduleQueuedSteeringFollowup(latest);
+        scheduleQueuedSteeringFollowup(latest, { explicit: true });
       }
     })
     .catch(async (err) => {
@@ -12192,9 +14005,25 @@ export interface CodaraCompleteApplicationOutcome {
 export async function applyCodaraCompleteFromManagerCall(input: {
   runId: string;
   summary: string;
+  /** The manager overruled non-passing verifiers (validated by the caller). */
+  acceptUnverified?: { reason: string; overruledVerifierTaskIds: string[] };
 }): Promise<CodaraCompleteApplicationOutcome> {
   const run = await requireRun(input.runId);
-  const summary = canonicalCodaraCompleteSummary(input.summary);
+  const overruled = input.acceptUnverified
+    ? run.workerTasks.filter(
+        (task) =>
+          task.taskClass === "verifier" && input.acceptUnverified!.overruledVerifierTaskIds.includes(task.id),
+      )
+    : [];
+  // The overrule is disclosed in the user-visible summary, so a run that
+  // landed against a verifier never reads as a verified success.
+  const overruleNote = input.acceptUnverified
+    ? `Landed unverified: Cora overruled ${overruled.map((task) => `"${task.title}"`).join(", ")}. ` +
+      `Reason: ${input.acceptUnverified.reason.trim()}`
+    : "";
+  const summary = canonicalCodaraCompleteSummary(
+    overruleNote ? `${input.summary.trim()}\n\n${overruleNote}`.trim() : input.summary,
+  );
   const payloadSha256 = hashCodaraCompletePayload(summary);
   let outcome: Omit<CodaraCompleteApplicationOutcome, "run"> | undefined;
   const eventPayload: Record<string, unknown> = {
@@ -12290,6 +14119,29 @@ export async function applyCodaraCompleteFromManagerCall(input: {
       };
       call.applicationReceipts = [receipt];
 
+      if (overruled.length > 0) {
+        // An auto-spawned verifier may sit on its own step; the work it judged
+        // is on the implementation task's step, which must carry the label.
+        const overruledStepIds = new Set(
+          overruled
+            .flatMap((task) => [
+              task.stepId,
+              draft.workerTasks.find((candidate) => candidate.id === task.autoVerifierForTaskId)?.stepId,
+            ])
+            .filter((stepId): stepId is string => Boolean(stepId)),
+        );
+        for (const step of draft.steps) {
+          if (!overruledStepIds.has(step.id)) continue;
+          if (step.status === "failed" || step.status === "skipped") continue;
+          step.status = "completed_unverified";
+          step.updatedAt = timestamp;
+        }
+        eventPayload.acceptUnverified = {
+          reason: input.acceptUnverified!.reason.trim(),
+          overruledVerifierTaskIds: overruled.map((task) => task.id),
+        };
+      }
+
       delete draft.blockedOn;
       abandonRunQuestionOwnership(draft);
       draft.status = "complete";
@@ -12345,6 +14197,47 @@ export async function completeRunFromOrchestrator(runId: string): Promise<RunSta
       draft.updatedAt = timestamp;
     },
   });
+}
+
+/**
+ * Replace the manager's working plan (codara_plan_update). Returns the stored
+ * plan, or throws with a message meant for the model.
+ */
+export async function updateManagerPlan(
+  runId: string,
+  raw: Record<string, unknown>,
+): Promise<RunState> {
+  const run = await requireRun(runId);
+  let failure: string | undefined;
+  const updated = await commitRunChange(run, {
+    type: "run.manager_plan_updated",
+    message: "Cora updated her plan",
+    payload: {},
+    mutate: (draft, timestamp) => {
+      const plan = normalizeManagerPlanInput(raw, timestamp);
+      if (typeof plan === "string") {
+        failure = plan;
+        return false;
+      }
+      const previousRequestId = draft.managerPlan?.requestMessageId;
+      const requestMessageId =
+        previousRequestId && draft.humanMessages.some((message) => message.id === previousRequestId)
+          ? previousRequestId
+          : [...draft.humanMessages]
+              .reverse()
+              .find(
+                (message) =>
+                  message.author === "user" &&
+                  !message.compaction &&
+                  !message.boardNote &&
+                  !message.resumeNote,
+              )?.id;
+      draft.managerPlan = requestMessageId ? { ...plan, requestMessageId } : plan;
+      draft.updatedAt = timestamp;
+    },
+  });
+  if (failure) throw new Error(failure);
+  return updated;
 }
 
 // Persist the composer chip's backend/model/mode/effort selection onto the
@@ -12656,6 +14549,7 @@ export async function createWorkerTask(input: CreateWorkerTaskInput): Promise<Ru
     resumeSessionId: input.resumeSessionId,
     verifierBrief: input.verifierBrief,
     autoVerifierForTaskId: input.autoVerifierForTaskId,
+    ...(input.workflowCall ? { workflowCall: input.workflowCall } : {}),
     createdAt: now,
     updatedAt: now,
   };
@@ -12760,6 +14654,28 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
             startPoint: startPoint ?? null,
           },
         });
+        // The repository's worktree setup: files and links before the
+        // worker sees the checkout, the commands before it starts when the
+        // setup file asks agents to wait (launchWorkerAttempt).
+        const setup = await prepareWorkerWorktree({
+          sourceCwd: input.cwd,
+          worktreePath: created.path,
+          workspaceId: run.workspaceId,
+          branch: created.branch,
+        });
+        if (setup) {
+          await appendEvent({
+            timestamp: new Date().toISOString(),
+            workspaceId: run.workspaceId,
+            runId: run.id,
+            stepId: task.stepId,
+            workerTaskId: task.id,
+            attemptId: attempt.id,
+            type: "worker_attempt.worktree_setup",
+            message: setup.message,
+            payload: setup.payload,
+          });
+        }
       } else {
         await appendEvent({
           timestamp,
@@ -12836,8 +14752,8 @@ export async function prepareWorkerTask(input: PrepareWorkerTaskInput): Promise<
   });
 
   await fs.mkdir(paths.attemptDir, { recursive: true });
-  await fs.writeFile(paths.taskJson, JSON.stringify(envelope, null, 2), "utf8");
-  await fs.writeFile(paths.promptMd, prompt, "utf8");
+  await fs.writeFile(paths.taskJson, JSON.stringify(redactPastedSecretsIn(run.id, envelope), null, 2), "utf8");
+  await fs.writeFile(paths.promptMd, redactPastedSecrets(run.id, prompt), "utf8");
 
   attempt.promptPath = paths.promptMd;
   attempt.finalReportPath = paths.finalReportJson;
@@ -12926,9 +14842,44 @@ function isWorkerEffort(value: string): value is NonNullable<WorkerTask["effortH
 }
 
 export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Promise<RunState> {
+  const run = await requireRun(input.runId);
+  const attempt = run.workerAttempts.find((item) => item.id === input.attemptId);
+  if (!attempt || launchingWorkerAttempts.has(attempt.id)) return launchWorkerAttemptInner(input);
+  launchingWorkerAttempts.set(attempt.id, {
+    runId: run.id,
+    workerTaskId: attempt.workerTaskId,
+    aborted: false,
+  });
+  try {
+    if (attempt.sandboxWorktreePath) {
+      const setup = await waitForWorkerWorktreeSetup(attempt.sandboxWorktreePath, {
+        aborted: () => workerLaunchAborted(attempt.id),
+      });
+      if (setup) {
+        await appendEvent({
+          timestamp: new Date().toISOString(),
+          workspaceId: run.workspaceId,
+          runId: run.id,
+          workerTaskId: attempt.workerTaskId,
+          attemptId: attempt.id,
+          type: setup.failed ? "worker_attempt.worktree_setup_failed" : "worker_attempt.worktree_setup",
+          message: setup.message,
+          payload: setup.payload,
+        });
+      }
+    }
+    return await launchWorkerAttemptInner(input);
+  } finally {
+    launchingWorkerAttempts.delete(attempt.id);
+  }
+}
+
+async function launchWorkerAttemptInner(input: LaunchWorkerAttemptInput): Promise<RunState> {
   let run = await requireRun(input.runId);
   const attempt = run.workerAttempts.find((item) => item.id === input.attemptId);
   if (!attempt) throw new Error(`Worker attempt not found: ${input.attemptId}`);
+  // Stopped before its cycle reached it: a cancelled attempt never launches.
+  if (attempt.status === "cancelled") return run;
   if (attempt.status !== "prompt_ready" && attempt.status !== "failed") {
     throw new Error(`Worker attempt is not ready to launch: ${attempt.status}`);
   }
@@ -12951,30 +14902,50 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   ]);
 
   const promptText = await readWorkerPromptForLaunch(paths);
+  const fakeWorkflowWorker = Boolean(task.workflowCall) && process.env.CODARA_WORKFLOW_FAKE_WORKERS === "1";
   // Direct chats keep the user's exact model selection. Managed workers use
   // the enabled roster; automation workers keep their validated model hints.
   // All three paths run on Pi. Shell/manual keep the plain pty escape hatch.
   const isPiWorker =
-    task.runtimePreference === "claude" ||
-    task.runtimePreference === "codex" ||
-    task.runtimePreference === "grok";
+    !fakeWorkflowWorker &&
+    (task.runtimePreference === "claude" ||
+      task.runtimePreference === "codex" ||
+      task.runtimePreference === "grok");
+  // A direct chat's worker is the turn that delivers the user's message, so
+  // its Pi session gets what they pasted, in memory; prompt.md, a relaunch
+  // and the shell/manual pty paste keep the scrubbed text.
+  const livePiPrompt = isPiWorker && run.executionMode === "direct" ? withPastedText(run.id, promptText) : null;
   const workerSettings = isPiWorker && !isAutomationRun ? await loadSettings() : null;
+  const usableWorkerRuntimes = workerSettings
+    ? await detectConfiguredAgentRuntimes()
+        .then((diagnostics) => new Set<string>(diagnostics.filter(runtimeAssignable).map((item) => item.kind)))
+        .catch(() => undefined)
+    : undefined;
   const piWorkerModel = isPiWorker
     ? piModelForWorker(
         task,
         isAutomationRun,
         workerSettings ? availableCoraWorkerModels(workerSettings) : undefined,
         run.executionMode === "direct" && !isAutomationRun,
+        usableWorkerRuntimes,
       )
     : undefined;
+  // Keep the attempt's runtime in step with the provider the model launches
+  // on, so labels and session reuse never contradict the session.
+  const launchRuntime: WorkerRuntime = isPiWorker
+    ? runtimeForWorkerModelId(piWorkerModel) ?? task.runtimePreference
+    : task.runtimePreference;
   if (isPiWorker && !piWorkerModel) {
     throw new Error(
-      "Cora has no enabled worker model. Enable at least one model in Settings > API and model.",
+      "Cora has no enabled worker model. Turn one on in Capability Center > Worker models.",
     );
   }
-  const command = isPiWorker
-    ? `Pi harness (${task.runtimePreference}/${piWorkerModel || "subscription default"}, ${task.effortHint ?? "high"})`
-    : "pwsh (manual)";
+  if (workerLaunchAborted(attempt.id)) return run;
+  const command = fakeWorkflowWorker
+    ? "fake workflow worker"
+    : isPiWorker
+      ? `Pi harness (${launchRuntime}/${piWorkerModel || "subscription default"}, ${task.effortHint ?? "high"})`
+      : "pwsh (manual)";
   const launchTimestamp = new Date().toISOString();
   attempt.status = "launching";
   attempt.startedAt = launchTimestamp;
@@ -12983,6 +14954,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   attempt.error = undefined;
   attempt.failureKind = undefined;
   attempt.command = command;
+  attempt.runtime = launchRuntime;
   attempt.model = piWorkerModel ?? sanitizeWorkerModelHint(task.modelHint?.trim() || undefined);
   attempt.promptPath = paths.promptMd;
   attempt.stdoutLogPath = paths.stdoutLog;
@@ -13018,6 +14990,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
       // a chat terminal tab.
       automationId: run.automationId,
       executionMode: run.executionMode,
+      ...(run.workflow ? { workflow: true } : {}),
     },
   });
   await updatePeerCommsRegistry(run, launchStep, task, attempt.id, paths, "launching").catch(() => undefined);
@@ -13028,12 +15001,17 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   // claim can then auto-restore the workspace to this exact pre-mutation state.
   // Best-effort: a failed snapshot or non-git workspace yields sha=null and just
   // disables restore for this attempt; it must never block the launch.
+  // Workflow agents skip it: a fan-out of dozens would serialize on the
+  // checkpoint lock, and the script, not a verifier verdict, decides what
+  // their results mean.
   if (
     taskWritesWorkspace(task) &&
+    !task.workflowCall &&
     runProjectPolicyMode(run) === "trusted"
   ) {
     try {
       const cwd = workspaceCwdFromRun(run) ?? attempt.cwd;
+      let checkpointError: string | undefined;
       const checkpoint = await withCheckpointLock(run.id, () =>
         createCheckpoint({
           runId: run.id,
@@ -13041,6 +15019,9 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
           kind: "pre-worker",
           messagePointer: run.humanMessages.length,
           label: `pre-worker ${task.title}`,
+          onError: (message) => {
+            checkpointError = message;
+          },
         }),
       );
       attempt.preWorkerCheckpointSha = checkpoint.sha;
@@ -13054,9 +15035,16 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
         stepId: task.stepId,
         workerTaskId: task.id,
         attemptId: attempt.id,
-        type: "run.checkpoint_created",
-        message: `Checkpoint ${checkpoint.kind} ${checkpoint.id}`,
-        payload: { checkpointId: checkpoint.id, sha: checkpoint.sha, kind: checkpoint.kind },
+        type: checkpointError ? "run.checkpoint_failed" : "run.checkpoint_created",
+        message: checkpointError
+          ? `Checkpoint ${checkpoint.kind} failed; undo and regression restore are unavailable for this worker`
+          : `Checkpoint ${checkpoint.kind} ${checkpoint.id}`,
+        payload: {
+          checkpointId: checkpoint.id,
+          sha: checkpoint.sha,
+          kind: checkpoint.kind,
+          ...(checkpointError ? { error: checkpointError } : {}),
+        },
       });
     } catch {
       // Checkpoint capture is best-effort; never let it abort the launch.
@@ -13066,7 +15054,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   // A checkpoint SHA gives Git workspaces their exact before/after diff. For
   // ordinary folders (for example Playground) keep a bounded copy of only the
   // paths this worker owns so those edits receive the same useful summary.
-  if (taskWritesWorkspace(task) && !attempt.preWorkerCheckpointSha) {
+  if (taskWritesWorkspace(task) && !task.workflowCall && !attempt.preWorkerCheckpointSha) {
     const cwd = workspaceCwdFromRun(run) ?? attempt.cwd;
     const declaredPaths = task.allowedPaths.length > 0
       ? task.allowedPaths
@@ -13104,16 +15092,19 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     contextWindowTokens?: number;
   };
   try {
-    result = isPiWorker
+    result = fakeWorkflowWorker
+      ? await runFakeWorkflowWorkerSession({ run, task, attemptId: attempt.id, paths, command })
+      : isPiWorker
       ? await runPiWorkerSession({
           run,
           task,
           attemptId: attempt.id,
           paths,
           cwd: attempt.cwd,
-          promptText,
+          promptText: livePiPrompt?.prompt ?? promptText,
           command,
           model: piWorkerModel!,
+          launchAborted: () => workerLaunchAborted(attempt.id),
         })
       : await runWorkerSession({
           run,
@@ -13126,6 +15117,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
         });
   } finally {
     if (peerCommsAcquired) releasePeerCommsWatcher(run.id);
+    if (livePiPrompt) forgetPastedText(run.id, livePiPrompt.used);
   }
 
   run = await requireRun(input.runId);
@@ -13141,11 +15133,26 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   // user stopped on purpose.
   const pauseInterrupted = workerExitInterruptedByForcePause({
     runId: run.id,
+    attemptId: finishedAttempt.id,
     exitCode: result.exitCode,
     attemptStatus: finishedAttempt.status,
   });
-  finishedAttempt.status =
-    result.exitCode === 0 ? "succeeded" : pauseInterrupted ? "cancelled" : "failed";
+  // A run that already ended (failed or cancelled while this worker ran) owns
+  // the verdicts it wrote. A late exit records its details but must not flip a
+  // terminal attempt or task back to succeeded/needs_review, and nothing may be
+  // reviewed or relaunched from it.
+  const runAlreadyEnded = run.status === "failed" || run.status === "cancelled";
+  const keepAttemptVerdict =
+    runAlreadyEnded && ["failed", "timed_out", "cancelled"].includes(finishedAttempt.status);
+  const keepTaskVerdict =
+    runAlreadyEnded && ["failed", "cancelled", "blocked", "accepted"].includes(finishedTask.status);
+  if (!keepAttemptVerdict) {
+    finishedAttempt.status =
+      result.exitCode === 0 ? "succeeded" : pauseInterrupted ? "cancelled" : "failed";
+  }
+  if (pauseInterrupted && (forcePausingRuns.get(run.id) ?? 0) > 0) {
+    finishedAttempt.interruptedBy = "pause";
+  }
   finishedAttempt.finishedAt = finishedAt;
   finishedAttempt.exitCode = result.exitCode;
   finishedAttempt.error = result.error;
@@ -13183,8 +15190,10 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   // later worker can move the shared tree. Best-effort: non-Git workspaces and
   // legacy attempts without a pre-worker baseline simply omit the counters.
   await persistAttemptDiff(run, finishedAttempt, paths).catch(() => undefined);
-  finishedTask.status =
-    result.exitCode === 0 ? "needs_review" : pauseInterrupted ? "cancelled" : "failed";
+  if (!keepTaskVerdict) {
+    finishedTask.status =
+      result.exitCode === 0 ? "needs_review" : pauseInterrupted ? "cancelled" : "failed";
+  }
   finishedTask.updatedAt = finishedAt;
   const finishedStep = finishedTask.stepId ? run.steps.find((item) => item.id === finishedTask.stepId) : undefined;
   // A pause-interrupted worker says nothing about its step: the force pause owns
@@ -13193,6 +15202,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
   if (
     finishedStep &&
     !pauseInterrupted &&
+    !runAlreadyEnded &&
     !["complete", "completed_unverified", "skipped"].includes(finishedStep.status)
   ) {
     if (result.exitCode !== 0) {
@@ -13310,6 +15320,8 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
     }
   }
 
+  if (runAlreadyEnded) return run;
+
   run = await reviewWorkerReportArtifact({
     run,
     task: finishedTask,
@@ -13322,6 +15334,7 @@ export async function launchWorkerAttempt(input: LaunchWorkerAttemptInput): Prom
 
 export async function deleteRun(runId: string): Promise<void> {
   const run = await requireRun(runId);
+  if (run.workflow && workflowRunControls) await workflowRunControls.discard(run.id);
   const sandboxBlockers = unreconciledSandboxAttempts(run);
   if (sandboxBlockers.length > 0) {
     const labels = sandboxBlockers
@@ -13372,6 +15385,11 @@ export async function deleteRun(runId: string): Promise<void> {
   }
   activeAutopilotPlans.delete(run.id);
   activeAutopilotReviews.delete(run.id);
+  // The chat's outcome record and its quotes in learned memory go with it;
+  // what the user taught (an active preference) stays. Both never throw.
+  await forgetRunMemory(run);
+  await forgetRunLearning(run);
+  forgetPastedKeys(run.id);
   await appendEvent({
     timestamp,
     workspaceId: run.workspaceId,
@@ -13388,8 +15406,8 @@ export async function deleteRun(runId: string): Promise<void> {
 
   // Tear down any throwaway sandbox worktrees this run provisioned for its
   // unattended workers. Best-effort and idempotent: dedup by worktree path,
-  // and a failed removal (e.g. unmerged branch) just leaves the dir for the
-  // next worktree-prune. Workers were killed above so the dirs are released.
+  // a failed removal just leaves the dir for the next worktree-prune, and an
+  // unmerged branch is kept after the dir is gone. Workers were killed above so the dirs are released.
   const removedSandboxPaths = new Set<string>();
   for (const attempt of run.workerAttempts) {
     if (
@@ -13463,32 +15481,15 @@ interface ConversationRewindTarget {
 // new session whose canonical replay is the stored summary instead of the raw
 // last-N-messages window (see buildManagerTurnInput / compactionReplaySummary).
 
-/**
- * Fraction of the model's context window at which a completed manager turn
- * triggers automatic compaction. 0.8 leaves headroom for the summarize turn
- * itself while cutting over before long-context quality degradation.
- * Hardcoded in v1 — no settings UI.
- */
-const AUTO_COMPACTION_CONTEXT_RATIO = 0.8;
-
 /** Header of the compaction note; stripped again when the summary is replayed
  * into the next epoch's first turn. */
 const AUTO_COMPACTION_NOTE_PREFIX =
   "**Conversation compacted.** Older history was summarized to stay within the model's context window:\n\n";
 
-const AUTO_COMPACTION_SUMMARY_PROMPT = [
-  "Create a dense handoff for a fresh Cora session. Preserve the newest user intent;",
-  "requirements and preferences; decisions and rationale; exact files, symbols, commands,",
-  "IDs and configuration that matter; work completed with verification; current workspace",
-  "and process state; failures, blockers, pending work, and the next concrete actions.",
-  "Drop greetings, repetition, and obsolete exploration unless it explains the current state.",
-  "Do not invent. Use concise structured Markdown. Reply only with the handoff; call no tools.",
-].join(" ");
-
-/** A compaction summary shorter than this is a refusal, an error string, or a
- * throwaway reply — not a usable replacement for the conversation history.
- * Reject it and leave the conversation untouched. */
-const MIN_AUTO_COMPACTION_SUMMARY_CHARS = 200;
+/** Per run: the growth a failed or just-applied cutover waits for before the
+ *  trigger may fire again. In memory only; a restart simply allows one
+ *  fresh attempt. */
+const conversationCutoverGuards = new Map<string, CutoverGuard>();
 
 /** Runs currently summarizing/cutting over. Both the trigger and
  * performAutoCompaction itself bail on re-entry. */
@@ -13559,12 +15560,16 @@ async function maybeAutoCompactConversation(
         typeof call.contextWindowTokens === "number" && call.contextWindowTokens > 0
           ? call.contextWindowTokens
           : contextWindowForModel(call.model).tokens,
-      // Same env override the Pi session was stamped with. Resolving it here
-      // keeps the summary trigger aligned with the extension: without it, an
-      // override below ~204.8k would silently disable this summary pass.
-      compactAtTokens: resolveCompactAtTokens(process.env.CODARA_PI_COMPACT_AT_TOKENS),
+      // Same override and percentage the Pi session was launched with, so this
+      // summary pass runs before the extension's own compaction.
+      compactAtTokens: compactAtOverrideTokens(process.env.CODARA_PI_COMPACT_AT_TOKENS),
+      percent: (await loadSettings().catch(() => null))?.coraAutoCompactPercent,
     });
-    if (contextTokens / windowTokens < AUTO_COMPACTION_CONTEXT_RATIO) return;
+    const epoch = call.conversationEpoch ?? 0;
+    const guard = observeCutoverBaseline(conversationCutoverGuards.get(runId), epoch, contextTokens, windowTokens);
+    if (guard) conversationCutoverGuards.set(runId, guard);
+    const decision = cutoverDecision({ contextTokens, capacityTokens: windowTokens, epoch, guard });
+    if (decision !== "compact") return;
     if (runsMidAutoCompaction.has(runId)) return;
     if (run.executionMode === "direct") return;
     if (
@@ -13591,7 +15596,7 @@ async function maybeAutoCompactConversation(
       "retry_queued",
     ]);
     if (run.workerTasks.some((task) => pendingTaskStatuses.has(task.status))) return;
-    await performAutoCompaction(runId, cwd);
+    await performAutoCompaction(runId, cwd, { contextTokens, capacityTokens: windowTokens });
   } catch (err) {
     console.warn("[run-store] auto-compaction failed:", err);
   }
@@ -13603,7 +15608,20 @@ async function settleAutoCompactionCall(
   callId: string,
   epoch: number,
   error: string,
+  trigger?: { contextTokens: number; capacityTokens: number },
 ): Promise<void> {
+  if (trigger) {
+    const guard = guardAfterFailure(
+      conversationCutoverGuards.get(runId),
+      epoch,
+      trigger.contextTokens,
+      trigger.capacityTokens,
+    );
+    conversationCutoverGuards.set(runId, guard);
+    console.warn(
+      `[cora-compaction] run=${runId} cutover failed (attempt ${guard.failures}); next try at ${guard.rearmAtTokens} tokens: ${error}`,
+    );
+  }
   const run = await getRun(runId);
   if (!run) return;
   await commitRunChange(run, {
@@ -13628,7 +15646,11 @@ async function settleAutoCompactionCall(
  * conversation, session ids and queued input are left exactly as they were,
  * and the summarize call is settled as failed for the audit trail.
  */
-async function performAutoCompaction(runId: string, cwd: string): Promise<void> {
+async function performAutoCompaction(
+  runId: string,
+  cwd: string,
+  trigger?: { contextTokens: number; capacityTokens: number },
+): Promise<void> {
   if (runsMidAutoCompaction.has(runId)) return;
   runsMidAutoCompaction.add(runId);
   try {
@@ -13714,8 +15736,8 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
           ? { ...chatConfig, sessionUuid: undefined, sessionMode: undefined }
           : { ...chatConfig },
         prompt: directConversation
-          ? directCompactionInput(compactionSource, AUTO_COMPACTION_SUMMARY_PROMPT)
-          : AUTO_COMPACTION_SUMMARY_PROMPT,
+          ? directCompactionInput(compactionSource, CONVERSATION_COMPACTION_PROMPT)
+          : CONVERSATION_COMPACTION_PROMPT,
         inputMessageIds: [],
         conversationEpoch: epoch,
       });
@@ -13726,6 +15748,7 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
         callId,
         epoch,
         `Compaction summary call failed: ${error}`,
+        trigger,
       );
       return;
     }
@@ -13734,17 +15757,27 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
       !result.turnFailed && !result.turnAborted
         ? result.decision.chatReply?.trim()
         : undefined;
-    if (!summary || summary.length < MIN_AUTO_COMPACTION_SUMMARY_CHARS) {
+    const problem = conversationSummaryProblem(summary);
+    if (!summary || problem) {
       const reason = result.turnAborted
         ? "Compaction summary turn was interrupted."
         : !summary
-          ? result.notice ?? "Compaction summary turn produced no summary text."
-          : `Compaction summary too short to replace the conversation (${summary.length} chars).`;
+          ? result.notice ?? problem ?? "Compaction summary turn produced no summary text."
+          : problem ?? "Compaction summary rejected.";
       console.warn(`[run-store] auto-compaction aborted for run ${runId}: ${reason}`);
-      await settleAutoCompactionCall(runId, callId, epoch, reason);
+      await settleAutoCompactionCall(runId, callId, epoch, reason, result.turnAborted ? undefined : trigger);
       return;
     }
 
+    // Built from the record as it stands at the cutover, not from the
+    // snapshot the summarizer saw: a worker that finished meanwhile counts.
+    const noteBody = compactionNoteBody(
+      summary,
+      conversationDurableState(await requireRun(runId)),
+    );
+    const beforeTokens =
+      trigger?.contextTokens ?? (typeof result.promptTokens === "number" ? result.promptTokens : null);
+    const afterTokens = estimateTokens(`${AUTO_COMPACTION_NOTE_PREFIX}${noteBody}`);
     const noteId = makeId("msg");
     let compacted = false;
     await commitRunChange(await requireRun(runId), {
@@ -13756,6 +15789,8 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
         oldEpoch: epoch,
         newEpoch: epoch + 1,
         summaryMessageId: noteId,
+        tokensBefore: beforeTokens,
+        estimatedTokensAfter: afterTokens,
       },
       mutate: (draft, timestamp) => {
         const call = draft.sparkCalls.find((entry) => entry.id === callId);
@@ -13786,6 +15821,8 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
         call.status = "completed";
         call.completedAt = timestamp;
         call.durationMs = durationMs;
+        if (beforeTokens) call.compactedFromTokens = beforeTokens;
+        call.compactedToTokens = afterTokens;
         if (result.model) call.model = result.model;
         call.accountProfileId = preserveFrozenPiAccountProfileId(
           call.accountProfileId,
@@ -13807,7 +15844,7 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
           author: "spark",
           kind: "note",
           compaction: true,
-          message: `${AUTO_COMPACTION_NOTE_PREFIX}${summary}`,
+          message: `${AUTO_COMPACTION_NOTE_PREFIX}${noteBody}`,
           intent: "answer",
           deliveryState: "acknowledged",
           targetTurnId: callId,
@@ -13834,6 +15871,8 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
       );
       return;
     }
+    conversationCutoverGuards.set(runId, guardAfterCutover(epoch + 1));
+    console.info(`[cora-compaction] run=${runId} ${describeCutover(beforeTokens, afterTokens)}`);
     // The epoch barrier is durable, so stale provider callbacks are already
     // blocked; disposing the outgoing sessions is best-effort cleanup, same as
     // the rewind path.
@@ -13850,6 +15889,27 @@ async function performAutoCompaction(runId: string, cwd: string): Promise<void> 
  * interrupting work or racing queued input.
  */
 export async function compactConversation(runId: string): Promise<RunState> {
+  if (runsMidAutoCompaction.has(runId)) {
+    throw new Error("This conversation is already being compacted.");
+  }
+  if (managerTurnBusy(runId)) {
+    throw new Error("Wait for Cora's current turn to finish before compacting.");
+  }
+  // The summarize call is a turn on the run's one Pi session, so it holds the
+  // manager turn lock: a turn started meanwhile queues behind it and
+  // re-decides on the state the compaction left, instead of being rejected by
+  // the session as a second concurrent turn.
+  managerTurnDepth.set(runId, (managerTurnDepth.get(runId) ?? 0) + 1);
+  try {
+    return await managerTurnLock(runId, () => compactConversationUnderTurnLock(runId));
+  } finally {
+    const depth = (managerTurnDepth.get(runId) ?? 1) - 1;
+    if (depth > 0) managerTurnDepth.set(runId, depth);
+    else managerTurnDepth.delete(runId);
+  }
+}
+
+async function compactConversationUnderTurnLock(runId: string): Promise<RunState> {
   const run = await requireRun(runId);
   if (runsMidAutoCompaction.has(runId)) {
     throw new Error("This conversation is already being compacted.");
@@ -13915,6 +15975,7 @@ async function markConversationRewindFailed(
       for (const userMessage of draft.humanMessages) {
         if (!userMessage.backendTurnId || !activeCallIds.has(userMessage.backendTurnId)) continue;
         if (userMessage.deliveryState === "acknowledged" || userMessage.deliveryState === "cancelled") continue;
+        if (userMessage.deliveryState === "submitted") userMessage.redelivered = true;
         userMessage.deliveryState = "queued";
         delete userMessage.backendTurnId;
         if (userMessage.targetTurnId && activeCallIds.has(userMessage.targetTurnId)) {
@@ -14088,7 +16149,7 @@ async function performConversationRewind(
       }
       const cwd = workspaceCwdFromRun(barrier);
       if (!cwd) throw new Error("Workspace path missing — cannot restore code.");
-      await restoreCheckpointCode({ cwd, sha: target.checkpoint.sha });
+      await restoreCheckpointCode({ cwd, sha: target.checkpoint.sha, runId: barrier.id });
     }
 
     const rewindCwd = workspaceCwdFromRun(barrier);
@@ -14147,6 +16208,18 @@ async function performConversationRewind(
       if (conversationEpoch(draft) !== newEpoch) return false;
       draft.humanMessages = draft.humanMessages.slice(0, pointer);
       draft.checkpoints = keptCheckpoints;
+      // A plan recorded for a request this rewind removed (or, unstamped, after
+      // the cutoff) belongs to the undone conversation.
+      const plan = draft.managerPlan;
+      if (
+        plan &&
+        (!cutoff ||
+          (plan.requestMessageId
+            ? !draft.humanMessages.some((message) => message.id === plan.requestMessageId)
+            : plan.updatedAt >= cutoff))
+      ) {
+        delete draft.managerPlan;
+      }
       delete draft.pendingManagerResume;
       delete draft.managerTurnRecovery;
       delete draft.pendingConversationRewind;
@@ -14327,6 +16400,7 @@ export async function undoToCheckpoint(
 // on the same run (double click, Stop + stopAndUndoPending) must not have the
 // first one to finish close the window under the second.
 const forcePausingRuns = new Map<string, number>();
+const forcePauseWindowWaiters = new Map<string, Array<() => void>>();
 
 function openForcePauseWindow(runId: string): void {
   forcePausingRuns.set(runId, (forcePausingRuns.get(runId) ?? 0) + 1);
@@ -14334,8 +16408,24 @@ function openForcePauseWindow(runId: string): void {
 
 function closeForcePauseWindow(runId: string): void {
   const depth = (forcePausingRuns.get(runId) ?? 0) - 1;
-  if (depth > 0) forcePausingRuns.set(runId, depth);
-  else forcePausingRuns.delete(runId);
+  if (depth > 0) {
+    forcePausingRuns.set(runId, depth);
+    return;
+  }
+  forcePausingRuns.delete(runId);
+  const waiters = forcePauseWindowWaiters.get(runId) ?? [];
+  forcePauseWindowWaiters.delete(runId);
+  for (const resolve of waiters) resolve();
+}
+
+/** Resolves once no Stop or cancel is tearing the run down; null when none is. */
+function forcePauseWindowClosed(runId: string): Promise<void> | null {
+  if ((forcePausingRuns.get(runId) ?? 0) === 0) return null;
+  return new Promise<void>((resolve) => {
+    const waiters = forcePauseWindowWaiters.get(runId) ?? [];
+    waiters.push(resolve);
+    forcePauseWindowWaiters.set(runId, waiters);
+  });
 }
 
 /**
@@ -14347,17 +16437,24 @@ function closeForcePauseWindow(runId: string): void {
  * flight, so Resume and the report surfaces showed a step that "failed" when in
  * truth it was interrupted. `forcePausingRuns` covers the exit landing first,
  * the persisted `cancelled` status covers the pause commit landing first.
- * Everything outside that window is a genuine failure and stays `failed`.
+ * Cancel and the per-worker Stop have no pause window; they mark the attempt's
+ * launch entry aborted before they kill, which covers their exit landing ahead
+ * of their commit. Everything else is a genuine failure and stays `failed`.
  *
  * Exported for scripts/test-force-pause-resume.cjs.
  */
 export function workerExitInterruptedByForcePause(input: {
   runId: string;
+  attemptId?: string;
   exitCode: number;
   attemptStatus: WorkerAttempt["status"];
 }): boolean {
   if (input.exitCode === 0) return false;
-  return (forcePausingRuns.get(input.runId) ?? 0) > 0 || input.attemptStatus === "cancelled";
+  return (
+    (forcePausingRuns.get(input.runId) ?? 0) > 0 ||
+    input.attemptStatus === "cancelled" ||
+    (input.attemptId !== undefined && workerLaunchAborted(input.attemptId))
+  );
 }
 
 // Force-pause: hard-kill every active worker for the run, stop all autopilot
@@ -14368,6 +16465,10 @@ export function workerExitInterruptedByForcePause(input: {
 // deleteRun trips the OS file-in-use prompt. Use this before deleting.
 export async function forcePauseRun(runId: string): Promise<RunState> {
   const run = await requireRun(runId);
+  if (run.workflow && workflowRunControls) {
+    await workflowRunControls.stop(run.id, "Stopped by the user");
+    return requireRun(run.id);
+  }
   // Opened BEFORE the first teardown step and closed only once the pause commit
   // is durable: every worker exit inside this window is the pause's doing.
   openForcePauseWindow(run.id);
@@ -14378,8 +16479,46 @@ export async function forcePauseRun(runId: string): Promise<RunState> {
   }
 }
 
+/**
+ * Move user input still waiting in the queue into the new conversation epoch.
+ * Stop bumps the epoch, and the queue, Send now and Resume only read the
+ * current one: a message queued before the Stop otherwise kept its Queued chip
+ * forever while nothing could deliver it. A reservation that named an
+ * interrupted call or the old epoch's next turn no longer means anything.
+ */
+function carryQueuedInputAcrossEpoch(
+  draft: RunState,
+  oldEpoch: number,
+  newEpoch: number,
+  interruptedCallIds: ReadonlySet<string>,
+): void {
+  for (const message of draft.humanMessages) {
+    // A resume note describes the pause that created it; the next resume
+    // supersedes it with a current one (settleResumeInterruptedNotes).
+    if (
+      message.author !== "user" ||
+      message.resumeNote ||
+      (message.conversationEpoch ?? 0) !== oldEpoch ||
+      (message.deliveryState ?? "queued") !== "queued" ||
+      message.backendTurnId
+    ) {
+      continue;
+    }
+    message.conversationEpoch = newEpoch;
+    const target = message.targetTurnId;
+    if (
+      target &&
+      (target === `epoch:${oldEpoch}:next` ||
+        (target.startsWith("after:") && interruptedCallIds.has(target.slice("after:".length))))
+    ) {
+      delete message.targetTurnId;
+    }
+  }
+}
+
 async function forcePauseRunInner(run: RunState): Promise<RunState> {
   const reason = "Force-paused by user";
+  const launchingWorkers = abortLaunchingWorkers(run.id);
   const activeWorkers = activeWorkersForRun(run.id);
   const oldEpoch = conversationEpoch(run);
 
@@ -14411,10 +16550,13 @@ async function forcePauseRunInner(run: RunState): Promise<RunState> {
   activeAutopilotReviews.delete(run.id);
 
   // 3. Commit the paused status and transition in-flight attempts/tasks to
-  //    cancelled (so the next resume doesn't think they're still alive).
-  const cancelledAttemptIds = new Set(activeWorkers.map((w) => w.attemptId));
+  //    cancelled (so the next resume doesn't think they're still alive). A
+  //    launch can start while the teardown above awaits, so collect launching
+  //    attempts again right before the commit.
+  const stoppedWorkers = [...activeWorkers, ...launchingWorkers, ...abortLaunchingWorkers(run.id)];
+  const cancelledAttemptIds = new Set(stoppedWorkers.map((w) => w.attemptId));
   const cancelledTaskIds = new Set(
-    activeWorkers.map((w) => w.workerTaskId).filter((id): id is string => Boolean(id)),
+    stoppedWorkers.map((w) => w.workerTaskId).filter((id): id is string => Boolean(id)),
   );
   return commitRunChange(run, {
     type: "run.force_paused",
@@ -14447,6 +16589,7 @@ async function forcePauseRunInner(run: RunState): Promise<RunState> {
       for (const message of draft.humanMessages) {
         if (!message.backendTurnId || !interruptedCallIds.has(message.backendTurnId)) continue;
         if (message.deliveryState === "acknowledged" || message.deliveryState === "cancelled") continue;
+        if (message.deliveryState === "submitted") message.redelivered = true;
         message.deliveryState = "queued";
         message.conversationEpoch = oldEpoch + 1;
         delete message.backendTurnId;
@@ -14454,6 +16597,7 @@ async function forcePauseRunInner(run: RunState): Promise<RunState> {
           delete message.targetTurnId;
         }
       }
+      carryQueuedInputAcrossEpoch(draft, oldEpoch, oldEpoch + 1, interruptedCallIds);
       abandonRunQuestionOwnership(draft);
       draft.status = "paused";
       draft.autopilot = {
@@ -14476,6 +16620,7 @@ async function forcePauseRunInner(run: RunState): Promise<RunState> {
           attempt.status = "cancelled";
           attempt.finishedAt = attempt.finishedAt ?? timestamp;
         }
+        if (attempt.status === "cancelled") attempt.interruptedBy = attempt.interruptedBy ?? "pause";
       }
       for (const task of draft.workerTasks) {
         if (!cancelledTaskIds.has(task.id)) continue;
@@ -14599,6 +16744,41 @@ async function chmodReadable(dir: string): Promise<void> {
   }
 }
 
+async function settleWorkflowAgentReport(
+  run: RunState,
+  task: WorkerTask,
+  attempt: WorkerAttempt,
+  paths: WorkerArtifactPaths,
+): Promise<RunState> {
+  const report = await readWorkerReport(paths.finalReportJson).catch(() => null);
+  return commitRunChange(run, {
+    type: "worker_report.parsed",
+    message: report ? `Workflow agent report: ${report.status}` : "Workflow agent ended without a report",
+    stepId: task.stepId,
+    workerTaskId: task.id,
+    payload: { attemptId: attempt.id, reportStatus: report?.status ?? null, finalReportJson: paths.finalReportJson },
+    mutate: (draft, timestamp) => {
+      const target = draft.workerTasks.find((item) => item.id === task.id);
+      if (!target) return false;
+      target.status =
+        report?.status === "complete" || report?.status === "partial"
+          ? "accepted"
+          : report?.status === "blocked"
+            ? "blocked"
+            : "failed";
+      target.updatedAt = timestamp;
+      const targetStep = target.stepId ? draft.steps.find((item) => item.id === target.stepId) : undefined;
+      if (targetStep && targetStep.status === "failed") {
+        // One failed agent resolves to null in the script; it does not fail
+        // the phase, which settles with the run.
+        targetStep.status = "running";
+        targetStep.updatedAt = timestamp;
+      }
+      draft.updatedAt = timestamp;
+    },
+  });
+}
+
 async function reviewWorkerReportArtifact({
   run,
   task,
@@ -14610,6 +16790,21 @@ async function reviewWorkerReportArtifact({
   attempt: WorkerAttempt;
   paths: WorkerArtifactPaths;
 }): Promise<RunState> {
+  // A report that lands after the run was cancelled, or after its step was
+  // skipped, has nothing left to drive: reviewing it set a cancelled run's
+  // task back to needs_review and its skipped step back to reviewing. A
+  // complete step is still reviewed, since its declared verifier reports
+  // after the implementation settled it.
+  const current = (await getRun(run.id)) ?? run;
+  const step = task.stepId ? current.steps.find((entry) => entry.id === task.stepId) : undefined;
+  if (current.status === "cancelled" || step?.status === "skipped") {
+    return current;
+  }
+  // A workflow agent's report is read by the script, not reviewed: no launch
+  // fallback, verifier loop or follow-up may run behind the script's back.
+  if (current.workflow && task.workflowCall) {
+    return settleWorkflowAgentReport(current, task, attempt, paths);
+  }
   const report = await readWorkerReport(paths.finalReportJson);
   if (!report) {
     await appendEvent({
@@ -14688,15 +16883,20 @@ async function reviewWorkerReportArtifact({
     const oracleAccept = await maybeAcceptOracleBlockedVerifierVerdict({ run, task, attempt, report });
     if (oracleAccept) return oracleAccept;
     if (correctiveVerdict) {
-      const ceilingLanded = await maybeForceLandAtVerificationCeiling(run);
+      const ceilingLanded = await maybeForceLandAtVerificationCeiling(run, task);
       if (ceilingLanded) return ceilingLanded;
     }
-    const feedbackRetry = await maybeQueueVerifierFeedbackRetry({
-      run,
-      task,
-      attempt,
-      report,
-    });
+    // A lineage at its base budget stops looping on its own: the verdict goes
+    // to the manager, who can correct once more, overrule it through
+    // codara_complete accept_unverified, or ask the user.
+    const feedbackRetry = correctiveVerdict && verificationLineageSaturated(run, task)
+      ? null
+      : await maybeQueueVerifierFeedbackRetry({
+          run,
+          task,
+          attempt,
+          report,
+        });
     if (feedbackRetry) return feedbackRetry;
   }
 
@@ -14813,7 +17013,7 @@ async function maybeSpawnDeclaredVerifier({
       : task.runtimePreference === "codex"
         ? "claude"
         : task.runtimePreference;
-  const changed = report.filesChanged.slice(0, 20).join(", ");
+  const changed = report.filesChanged.slice(0, 20).map((file) => file.path).filter(Boolean).join(", ");
   const rerun = priorAutoVerifiers.length > 0;
   const description = [
     brief,
@@ -15224,15 +17424,14 @@ async function maybeQueueCliLaunchFallback({
     /CLI failed (?:to launch|before producing a final report)|runtime API error|socket connection/i.test(risk),
   );
   if (!isLaunchFailure) return null;
-  if (
-    task.runtimePreference !== "claude" &&
-    task.runtimePreference !== "codex"
-  ) {
+  if (task.runtimePreference === "shell" || task.runtimePreference === "manual") {
     return null;
   }
   const availableRuntimes = await detectConfiguredAgentRuntimes();
   // Prefer the first installed runtime OTHER than the one that just failed.
-  // Order claude → codex by default, but skip the failing one.
+  // Every agent runtime (Grok included) gets the same-runtime fast retry, but
+  // only claude and codex are switch targets: the hint translators below map
+  // a model and effort into those two rosters and no other.
   const preferenceOrder: WorkerRuntime[] = ["claude", "codex"];
   const opposite: WorkerRuntime | null = preferenceOrder
     .filter((kind) => kind !== task.runtimePreference)
@@ -15374,17 +17573,73 @@ async function recordVerificationRound({
   attempt: WorkerAttempt;
 }): Promise<RunState> {
   const nextRounds = (run.verificationRounds ?? 0) + 1;
+  const lineage = verifierLineageRoot(run, task);
   return commitRunChange(run, {
     type: "autopilot.verification_round_recorded",
     stepId: task.stepId,
     workerTaskId: task.id,
     message: `Verification round ${nextRounds} reviewed`,
-    payload: { attemptId: attempt.id, verificationRounds: nextRounds },
+    payload: {
+      attemptId: attempt.id,
+      verificationRounds: nextRounds,
+      lineage,
+      lineageRounds: (run.verificationRoundsByLineage?.[lineage] ?? 0) + 1,
+    },
     mutate: (draft, timestamp) => {
       draft.verificationRounds = (draft.verificationRounds ?? 0) + 1;
+      draft.verificationRoundsByLineage = {
+        ...(draft.verificationRoundsByLineage ?? {}),
+        [lineage]: (draft.verificationRoundsByLineage?.[lineage] ?? 0) + 1,
+      };
       draft.updatedAt = timestamp;
     },
   });
+}
+
+// The first task of an implementation's retry / follow-up chain.
+function implementationLineageRoot(run: RunState, taskId: string): string {
+  const byId = new Map(run.workerTasks.map((candidate) => [candidate.id, candidate]));
+  let current = byId.get(taskId);
+  const seen = new Set<string>();
+  while (current && !seen.has(current.id)) {
+    seen.add(current.id);
+    const parentId = current.supersedesTaskId ?? current.followUpOfTaskId;
+    const parent = parentId ? byId.get(parentId) : undefined;
+    if (!parent) break;
+    current = parent;
+  }
+  return current?.id ?? taskId;
+}
+
+// The lineage a verifier judges: its declared implementation, else the newest
+// implementation task on its step, else the verifier alone.
+function verifierLineageRoot(run: RunState, verifier: WorkerTask): string {
+  const implementationId =
+    verifier.autoVerifierForTaskId ??
+    [...run.workerTasks]
+      .reverse()
+      .find(
+        (candidate) =>
+          Boolean(verifier.stepId) &&
+          candidate.stepId === verifier.stepId &&
+          candidate.taskClass !== "verifier",
+      )?.id;
+  return implementationId ? implementationLineageRoot(run, implementationId) : `verifier:${verifier.id}`;
+}
+
+function implementationLineageCount(run: RunState): number {
+  const roots = new Set(
+    run.workerTasks
+      .filter((candidate) => candidate.taskClass !== "verifier" && candidate.status !== "cancelled")
+      .map((candidate) => implementationLineageRoot(run, candidate.id)),
+  );
+  return Math.max(1, roots.size);
+}
+
+function verificationLineageSaturated(run: RunState, verifier: WorkerTask): boolean {
+  if (!runHasMcpManager(run)) return false;
+  const base = VERIFICATION_ROUND_CEILING[effectiveRunExecutionPolicy(run)];
+  return (run.verificationRoundsByLineage?.[verifierLineageRoot(run, verifier)] ?? 0) >= base;
 }
 
 // Run-level verification-round ceiling for execute-mode CLI/Pi managers. The
@@ -15394,16 +17649,31 @@ async function recordVerificationRound({
 // runaway loops, not to police normal runs.
 const VERIFICATION_ROUND_CEILING = { fast: 4, deep: 6 } as const;
 
-async function maybeForceLandAtVerificationCeiling(run: RunState): Promise<RunState | null> {
+// One corrective verdict per area is the normal shape of a multi-area run,
+// so the run-level ceiling scales with the number of implementation lineages.
+// A single lineage still trips it on its own at twice the base, which catches
+// a manager-minted follow-up chain ping-ponging past the attempt cap.
+async function maybeForceLandAtVerificationCeiling(
+  run: RunState,
+  verifier: WorkerTask,
+): Promise<RunState | null> {
   if (!runHasMcpManager(run)) return null;
   const rounds = run.verificationRounds ?? 0;
-  const ceiling = VERIFICATION_ROUND_CEILING[effectiveRunExecutionPolicy(run)];
-  if (rounds < ceiling) return null;
+  const base = VERIFICATION_ROUND_CEILING[effectiveRunExecutionPolicy(run)];
+  const lineages = implementationLineageCount(run);
+  const ceiling = base * lineages;
+  const lineageRounds = run.verificationRoundsByLineage?.[verifierLineageRoot(run, verifier)] ?? 0;
+  if (rounds < ceiling && lineageRounds < base * 2) return null;
   return forceLandRunUnverified(run.id, {
     trigger: "verification_rounds_capped",
     note:
-      `Verification hit its hard ceiling: ${rounds} rounds against a limit of ${ceiling} for this policy. ` +
-      "Codara accepted the remaining reviewed work and landed it as unverified — further rounds were repeating the same evidence.",
+      rounds >= ceiling
+        ? `Verification hit its hard ceiling: ${rounds} corrective rounds against a limit of ${ceiling} ` +
+          `(${base} per implementation area, ${lineages} area(s)). ` +
+          "Codara accepted the remaining reviewed work and landed it as unverified; further rounds were repeating the same evidence."
+        : `Verification hit its hard ceiling: one implementation area drew ${lineageRounds} corrective rounds ` +
+          `against a limit of ${base * 2}. Codara accepted the remaining reviewed work and landed it as unverified; ` +
+          "further rounds were repeating the same evidence.",
   });
 }
 
@@ -15953,6 +18223,24 @@ async function maybeQueueVerifierFeedbackRetry({
   return commitRunChange(run, change);
 }
 
+// Claims are scoped to the implementation lineage a verifier judged, so a
+// generic "tests pass" verified for one area cannot trigger a revert when
+// another area's verifier fails the same words mid-migration.
+function greenClaimKey(lineage: string, claim: string): string {
+  return `${lineage}::${normalizeClaimKey(claim)}`;
+}
+
+// A verifier the manager spawned on a step of its own names no
+// implementation, so its claims share one run-wide scope. Per-verifier keys
+// would never match a later re-verifier's and would silently disable the
+// regression guard for that whole shape of run.
+const UNSCOPED_CLAIM_LINEAGE = "unscoped";
+
+function greenClaimLineage(run: RunState, verifier: WorkerTask): string {
+  const lineage = verifierLineageRoot(run, verifier);
+  return lineage.startsWith("verifier:") ? UNSCOPED_CLAIM_LINEAGE : lineage;
+}
+
 // Marks the report's newly-verified atomic claims green on the run (claim key ->
 // the attempt that verified it). Records green even when the same report also
 // triggers a FEEDBACK re-enqueue, so a partial pass isn't lost on the retry.
@@ -15976,8 +18264,10 @@ async function recordGreenClaims({
     payload: { attemptId: attempt.id, count: verified.length },
     mutate: (draft, timestamp) => {
       const greenClaims = (draft.greenClaims ??= {});
+      const verifier = draft.workerTasks.find((candidate) => candidate.id === attempt.workerTaskId);
+      const lineage = verifier ? greenClaimLineage(draft, verifier) : UNSCOPED_CLAIM_LINEAGE;
       for (const claim of verified) {
-        greenClaims[normalizeClaimKey(claim.claim)] = attempt.id;
+        greenClaims[greenClaimKey(lineage, claim.claim)] = attempt.id;
       }
       draft.updatedAt = timestamp;
     },
@@ -15985,11 +18275,11 @@ async function recordGreenClaims({
 }
 
 // Detects regressions on previously-green claims: a verdict that marks an
-// already-green claim as `failed`. When found, restores the workspace to the
-// most recent impl pre-worker checkpoint (the latest non-null
-// preWorkerCheckpointSha) and emits a loud revert notice, then drops the now-
-// stale green entries so the next attempt re-establishes green. Returns the
-// updated run (regression restored) or null when no regression applies.
+// already-green claim of the same lineage as `failed`. When found, restores
+// the files the lineage's newest implementation attempt changed to that
+// attempt's pre-worker checkpoint and emits a loud revert notice, then drops
+// the now-stale green entries so the next attempt re-establishes green.
+// Returns the updated run, or null when no regression applies.
 async function maybeRestoreGreenClaimRegression({
   run,
   task,
@@ -16003,11 +18293,12 @@ async function maybeRestoreGreenClaimRegression({
 }): Promise<{ run: RunState; restoreFailed: boolean } | null> {
   const green = run.greenClaims;
   if (!green) return null;
+  const lineage = greenClaimLineage(run, task);
   const regressedKeys: string[] = [];
   const regressedClaims: string[] = [];
   for (const claim of report.verifier?.atomicClaims ?? []) {
     if (claim.verdict !== "failed") continue;
-    const key = normalizeClaimKey(claim.claim);
+    const key = greenClaimKey(lineage, claim.claim);
     if (green[key]) {
       regressedKeys.push(key);
       regressedClaims.push(claim.claim.trim());
@@ -16015,25 +18306,50 @@ async function maybeRestoreGreenClaimRegression({
   }
   if (regressedKeys.length === 0) return null;
 
-  // Latest impl pre-worker snapshot that predates the regressing change.
+  // The snapshot taken before this lineage's newest implementation attempt,
+  // and only the files that attempt reported changing. A whole-tree reset to
+  // the newest snapshot in the run would also wipe other areas' finished work.
+  // An unscoped verifier judged the run as a whole, so its regression is
+  // attributed to the newest implementation attempt of any lineage.
   let restoredSha: string | null = null;
+  let restorePaths: string[] = [];
   for (let i = run.workerAttempts.length - 1; i >= 0; i--) {
-    const sha = run.workerAttempts[i].preWorkerCheckpointSha;
-    if (sha) {
-      restoredSha = sha;
-      break;
+    const candidate = run.workerAttempts[i];
+    const candidateTask = run.workerTasks.find((item) => item.id === candidate.workerTaskId);
+    if (!candidateTask || candidateTask.taskClass === "verifier") continue;
+    if (
+      lineage !== UNSCOPED_CLAIM_LINEAGE &&
+      implementationLineageRoot(run, candidateTask.id) !== lineage
+    ) {
+      continue;
     }
+    if (!candidate.preWorkerCheckpointSha) continue;
+    const candidateReport = candidate.finalReportPath
+      ? await readWorkerReport(candidate.finalReportPath).catch(() => null)
+      : null;
+    restoredSha = candidate.preWorkerCheckpointSha;
+    restorePaths = (candidateReport?.filesChanged ?? []).map((file) => file.path).filter(Boolean);
+    break;
   }
+  // Restoring under a live writer would race its edits; the manager decides.
+  const otherLiveWriters =
+    activeWorkersForRun(run.id).some((worker) => worker.workerTaskId !== task.id) ||
+    run.workerTasks.some(
+      (item) =>
+        item.id !== task.id &&
+        (item.status === "running" || item.status === "claimed") &&
+        taskWritesWorkspace(item),
+    );
   const cwd = workspaceCwdFromRun(run);
-  if (!restoredSha || !cwd) {
-    // Nothing to restore to (non-git workspace or no prior snapshot). Still drop
-    // the stale green entries below so the regression isn't silently retained.
+  // Nothing safe to restore still drops the stale green entries, so the
+  // regression isn't silently retained.
+  const nothingRestored = async (reason: string) => {
     const unavailable = await commitRunChange(run, {
       type: "autopilot.green_claim_regression_detected",
       stepId: task.stepId,
       workerTaskId: task.id,
-      message: `Detected regression on ${regressedKeys.length} previously-verified claim(s); no pre-worker snapshot available to restore`,
-      payload: { claims: regressedClaims, attemptId: attempt.id },
+      message: `Detected regression on ${regressedKeys.length} previously-verified claim(s); ${reason}`,
+      payload: { claims: regressedClaims, attemptId: attempt.id, lineage, otherLiveWriters },
       mutate: (draft, timestamp) => {
         if (draft.greenClaims) {
           for (const key of regressedKeys) delete draft.greenClaims[key];
@@ -16042,10 +18358,16 @@ async function maybeRestoreGreenClaimRegression({
       },
     });
     return { run: unavailable, restoreFailed: false };
+  };
+  if (otherLiveWriters) return nothingRestored("another worker is still writing, so nothing was restored");
+  if (!restoredSha || !cwd || restorePaths.length === 0) {
+    return nothingRestored("no pre-worker snapshot of this area is available to restore");
   }
 
+  let restoredCount = 0;
   try {
-    await restoreCheckpointCode({ cwd, sha: restoredSha });
+    const result = await restoreCheckpointPaths({ cwd, sha: restoredSha, paths: restorePaths });
+    restoredCount = result.restored.length + result.removed.length;
   } catch (error) {
     const restoreError = error instanceof Error ? error.message : String(error);
     const failed = await commitRunChange(run, {
@@ -16077,6 +18399,9 @@ async function maybeRestoreGreenClaimRegression({
     });
     return { run: failed, restoreFailed: true };
   }
+  if (restoredCount === 0) {
+    return nothingRestored("none of the files the regressing worker reported could be restored from the snapshot");
+  }
   for (const claim of regressedClaims) {
     await appendRegressionRevertEvent({
       workspaceId: run.workspaceId,
@@ -16094,8 +18419,8 @@ async function maybeRestoreGreenClaimRegression({
     type: "autopilot.green_claim_regression_reverted",
     stepId: task.stepId,
     workerTaskId: task.id,
-    message: `Reverted regression on ${regressedKeys.length} previously-verified claim(s) to pre-worker snapshot`,
-    payload: { claims: regressedClaims, restoredSha, attemptId: attempt.id },
+    message: `Reverted regression on ${regressedKeys.length} previously-verified claim(s): restored ${restoredCount} file(s) to the pre-worker snapshot`,
+    payload: { claims: regressedClaims, restoredSha, attemptId: attempt.id, paths: restorePaths },
     mutate: (draft, timestamp) => {
       if (draft.greenClaims) {
         for (const key of regressedKeys) delete draft.greenClaims[key];
@@ -16177,7 +18502,7 @@ async function writeRunFile(run: RunState): Promise<void> {
   // run.json is machine-read, never shown to a human, so persist it compact —
   // no pretty-print whitespace. Human-facing artifacts (spark-call request/
   // response files, final reports) stay pretty-printed elsewhere.
-  await fs.writeFile(tmp, JSON.stringify(run), "utf8");
+  await fs.writeFile(tmp, JSON.stringify(redactPastedSecretsIn(run.id, run)), "utf8");
   let lastError: unknown = null;
   for (let attempt = 0; attempt < 5; attempt += 1) {
     try {
@@ -16388,9 +18713,10 @@ function normalizeRun(run: RunState): RunState {
       typeof recovery.id === "string" &&
       recovery.id.startsWith("recovery-") &&
       (recovery.state === "parked" || recovery.state === "resuming") &&
-      (recovery.failureKind === "rate_limit" ||
-        recovery.failureKind === "provider" ||
-        recovery.failureKind === "transport") &&
+      // Every kind manager-turn-policy parks with. A kind missing here is
+      // deleted by the first saveRun after the park, which strands the run
+      // paused without the exact-replay token its Retry needs.
+      (MANAGER_TURN_RECOVERY_FAILURE_KINDS as readonly string[]).includes(recovery.failureKind) &&
       // A recovery parked by a retired claude/codex manager backend cannot
       // be replayed on Pi; dropping it leaves the run paused and answerable.
       recovery.backend === "pi" &&
@@ -16733,6 +19059,17 @@ async function commitRunChange(
   if (persisted && prevStatus !== "complete" && nextStatus === "complete") {
     scheduleRunCompletionTail(run.id, result ?? undefined);
   }
+  // Every path that adds a user message (managed, direct, Talk, answers)
+  // commits here, so memory capture sees each message once it is durable,
+  // before any compaction can summarize it. A cheap id compare when nothing
+  // new arrived; the scan itself runs detached.
+  if (persisted && result) {
+    try {
+      noteRunMessages(result);
+    } catch {
+      // Learning never costs a commit.
+    }
+  }
   return result ?? (await requireRun(run.id));
 }
 
@@ -16850,6 +19187,10 @@ async function runCompletionTail(
     // memory file as [auto] bullets that later manager turns replay. Also
     // non-throwing.
     await recordRunLessons(completed, readReportOnce);
+    // Memory v3: worker lessons, ledger-backed procedures and, when the chat
+    // earned it, one throttled model review of the conversation. Detached
+    // from the turn like the rest of this tail, and non-throwing.
+    await learnFromCompletedRun(completed, readReportOnce);
   } catch (err) {
     console.error("[run-store] failed to record run memory", err);
   }
@@ -17238,6 +19579,30 @@ function normalizePlannedAgentLabel(label: string | undefined, stepIndex: number
 
 function activeWorkersForRun(runId: string): ActiveWorkerProcess[] {
   return Array.from(activeWorkerProcesses.values()).filter((worker) => worker.runId === runId);
+}
+
+function workerLaunchAborted(attemptId: string): boolean {
+  return launchingWorkerAttempts.get(attemptId)?.aborted === true;
+}
+
+/**
+ * Abort every launch of this run that has not registered a live process yet
+ * and close the display PTYs they may already own. Returns them so the caller
+ * can cancel their attempts in the same commit that stops the run.
+ */
+function abortLaunchingWorkers(runId: string): Array<{ attemptId: string; workerTaskId: string }> {
+  const aborted: Array<{ attemptId: string; workerTaskId: string }> = [];
+  for (const [attemptId, entry] of launchingWorkerAttempts) {
+    if (entry.runId !== runId) continue;
+    entry.aborted = true;
+    aborted.push({ attemptId, workerTaskId: entry.workerTaskId });
+    try {
+      pty.killImmediate(attemptId);
+    } catch {
+      /* no display PTY yet */
+    }
+  }
+  return aborted;
 }
 
 /** How many earlier attempts' handoffs one worker prompt may inherit. */
@@ -18577,10 +20942,14 @@ async function readWorkerReportWithWorkspaceShadowRecovery(
   return { report: shadowReport, relocatedFrom: shadowPath };
 }
 
+// The provider follows the model, not runtimePreference: a fallback from the
+// enabled list, or a plan pairing "claude" with a gpt hint, would otherwise
+// launch the model on the wrong provider and fail validation.
 function piProviderForWorker(task: WorkerTask, model: string | undefined): PiProvider {
   if (model?.includes("/")) return "openrouter";
-  if (task.runtimePreference === "grok") return "xai";
-  return task.runtimePreference === "claude" ? "anthropic" : "openai-codex";
+  const runtime = runtimeForWorkerModelId(model) ?? task.runtimePreference;
+  if (runtime === "grok") return "xai";
+  return runtime === "claude" ? "anthropic" : "openai-codex";
 }
 
 function piThinkingForWorker(task: WorkerTask): PiThinkingLevel {
@@ -18597,10 +20966,11 @@ function piModelForWorker(
   isAutomationRun = false,
   enabledModels?: readonly string[],
   isDirectRun = false,
+  usableRuntimes?: ReadonlySet<string>,
 ): string | undefined {
   // Share selection with queued worker labels so the advertised model and
   // the launch target agree before an attempt has started.
-  return plannedWorkerModel(task, { isAutomationRun, isDirectRun, enabledModels });
+  return plannedWorkerModel(task, { isAutomationRun, isDirectRun, enabledModels, usableRuntimes });
 }
 
 function piWorkerToolLabel(value: unknown): string {
@@ -18616,6 +20986,7 @@ function piWorkerToolLabel(value: unknown): string {
     ls: "List files",
     codara_preview_screenshot: "Inspect preview",
     codara_preview_navigate: "Open preview",
+    codara_preview_close: "Close browser tab",
     codara_whiteboard_update: "Update whiteboard",
   };
   return known[normalized] ?? normalized
@@ -18666,7 +21037,7 @@ function piWorkerToolDetail(event: PiRpcEvent): string {
           ? ["path"]
           : name === "fetch" || name === "web_fetch" || name === "webfetch"
             ? ["url"]
-            : name.startsWith("codara_preview")
+            : name.startsWith("codara_preview") || name === "codara_browser_use"
               ? ["url", "selector", "key", "text", "code"]
               : name.startsWith("codara_terminal")
                 ? ["command", "text"]
@@ -18822,6 +21193,10 @@ function piWorkerMessageContextWindow(event: PiRpcEvent): number | null {
   );
 }
 
+// Finishing something, not merely streaming, is what re-arms a worker turn's
+// no-progress ceiling.
+const PI_WORKER_PROGRESS_EVENTS = new Set<string>(["tool_execution_end", "message_end", "compaction_end"]);
+
 /**
  * Drive one Pi worker turn to completion.
  *
@@ -18836,23 +21211,38 @@ async function waitForPiWorkerTurn(
   prompt: string,
   onStallChange?: (stall: { stalled: boolean; detail: string }) => void,
   interrupted: () => boolean = () => false,
-  onCompaction?: (phase: "compacting" | "resuming") => void,
+  onCompaction?: (phase: "compacting" | "resuming", report?: CompactionReport) => void,
   taskContract?: () => string,
+  onWrapUp?: () => void,
+  scratchpad?: () => Promise<string>,
 ): Promise<void> {
-  let timer: NodeJS.Timeout | null = null;
   let poll: NodeJS.Timeout | null = null;
   let unsubscribe: () => void = () => undefined;
   let compaction: PiWorkerCompaction | undefined;
   try {
     const settled = new Promise<void>((resolve, reject) => {
-      compaction = new PiWorkerCompaction(client, { interrupted, taskContract, onError: reject, onProgress: onCompaction });
+      compaction = new PiWorkerCompaction(client, {
+        interrupted,
+        taskContract,
+        scratchpad,
+        onError: reject,
+        onProgress: (phase) => onCompaction?.(phase),
+        onReport: (report) => {
+          logCompaction("worker", report);
+          onCompaction?.("resuming", report);
+        },
+      });
       let providerFailure: string | null = null;
       let lastEventAt = Date.now();
       let lastEventType: string | null = null;
       let stallReported = false;
+      const startedAt = Date.now();
+      let lastProgressAt = startedAt;
+      let wrapUpRequestedAt: number | null = null;
       unsubscribe = client.onEvent((event) => {
         lastEventAt = Date.now();
         lastEventType = event.type;
+        if (PI_WORKER_PROGRESS_EVENTS.has(event.type)) lastProgressAt = lastEventAt;
         // Any traffic at all means the worker is reachable again. Clear the
         // stall mark so the pane returns to its real state rather than wearing
         // an amber badge for the rest of a turn that recovered.
@@ -18896,13 +21286,23 @@ async function waitForPiWorkerTurn(
           stallReported = true;
           onStallChange?.({ stalled: true, detail: verdict.detail });
         }
+        const ceiling = classifyWorkerTurnCeiling({
+          now: Date.now(),
+          startedAt,
+          lastProgressAt,
+          wrapUpRequestedAt,
+        });
+        if (ceiling.action === "fail") {
+          reject(new Error(ceiling.detail));
+          return;
+        }
+        if (ceiling.action === "wrap_up") {
+          wrapUpRequestedAt = Date.now();
+          onWrapUp?.();
+          void client.prompt(ceiling.detail, "steer").catch(() => undefined);
+        }
       }, 500);
       poll.unref();
-      timer = setTimeout(
-        () => reject(new Error("Pi worker timed out after 90 minutes.")),
-        PI_WORKER_TURN_CEILING_MS,
-      );
-      timer.unref();
     });
     await client.prompt(prompt);
     await settled;
@@ -18910,7 +21310,6 @@ async function waitForPiWorkerTurn(
     compaction?.dispose();
     unsubscribe();
     if (poll) clearInterval(poll);
-    if (timer) clearTimeout(timer);
   }
 }
 
@@ -18953,6 +21352,143 @@ async function ensurePiWorkerDisplayPty(attemptId: string, cwd: string): Promise
  * provider subscriptions, native tools, and extension behavior are uniform
  * with the Cora manager.
  */
+// Frozen contract with resources/pi-cora/worker.ts: CODARA_PI_WORKFLOW turns
+// the direct lane's submit_result into a workflow return value, and the
+// schema file becomes its `result` parameter. Access presets reuse the loom
+// fence, with writes contained to the workspace plus the attempt directory.
+function applyWorkflowWorkerEnv(env: NodeJS.ProcessEnv, task: WorkerTask, paths: WorkerArtifactPaths): void {
+  const call = task.workflowCall;
+  if (!call) return;
+  env.CODARA_PI_WORKFLOW = "1";
+  if (call.schemaPath) env.CODARA_PI_WORKFLOW_RESULT_SCHEMA_PATH = call.schemaPath;
+  if (task.accessHint === "edits" || task.accessHint === "readonly") {
+    env.CODARA_PI_WORKER_ACCESS = task.accessHint;
+    env.CODARA_PI_WORKER_WRITE_ALLOW = JSON.stringify([resolvePath(paths.attemptDir)]);
+  }
+  if (typeof call.compactAtTokens === "number" && call.compactAtTokens > 0) {
+    // The script's own limit for this agent outranks the owner's percentage,
+    // which the extension would otherwise prefer.
+    env.CODARA_PI_COMPACT_AT_TOKENS = String(Math.round(call.compactAtTokens));
+    delete env.CODARA_PI_COMPACT_PERCENT;
+  }
+  const heavyBin = workflowHeavyBinDir;
+  if (heavyBin) {
+    const pathKey = Object.keys(env).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
+    const current = env[pathKey] ?? process.env.PATH ?? "";
+    env[pathKey] = current ? `${heavyBin}${process.platform === "win32" ? ";" : ":"}${current}` : heavyBin;
+    Object.assign(env, workflowHeavyEnv);
+  }
+}
+
+let workflowHeavyBinDir: string | null = null;
+let workflowHeavyEnv: Record<string, string> = {};
+
+/** Where `codara-heavy` lives and its settings; the workflow driver sets them once at boot. */
+export function setWorkflowHeavyBinDir(dir: string | null, env: Record<string, string> = {}): void {
+  workflowHeavyBinDir = dir;
+  workflowHeavyEnv = { ...env };
+}
+
+async function workflowResultProblem(
+  task: WorkerTask,
+  paths: WorkerArtifactPaths,
+  status: string,
+): Promise<string | null> {
+  const schemaPath = task.workflowCall?.schemaPath;
+  if (!schemaPath || (status !== "complete" && status !== "partial")) return null;
+  try {
+    const schema = JSON.parse(await fs.readFile(schemaPath, "utf8")) as Record<string, unknown>;
+    const raw = JSON.parse(await fs.readFile(paths.finalReportJson, "utf8")) as Record<string, unknown>;
+    if (raw.result === undefined) return "the result is missing";
+    const checked = validateWorkflowResult(schema, raw.result);
+    return checked.ok ? null : checked.errors.join("; ");
+  } catch (err) {
+    return `the result could not be read (${err instanceof Error ? err.message : String(err)})`;
+  }
+}
+
+// Test seam for the workflow e2e (CODARA_WORKFLOW_FAKE_WORKERS=1): stands in
+// for the Pi session of a workflow agent so a spec can run whole workflows
+// without a subscription. The prompt drives it: FAKE_DELAY_MS=<n>,
+// FAKE_TOKENS=<n>, FAKE_FAIL, and a `FAKE_RESULT: <json>` line; without one a
+// schema call gets a sample of its schema. Stop kills it like a real worker.
+async function runFakeWorkflowWorkerSession({
+  run,
+  task,
+  attemptId,
+  paths,
+  command,
+}: {
+  run: RunState;
+  task: WorkerTask;
+  attemptId: string;
+  paths: WorkerArtifactPaths;
+  command: string;
+}): Promise<{ exitCode: number; error?: string; inputTokens?: number; outputTokens?: number }> {
+  const prompt = task.description;
+  const delay = Math.min(60_000, Number(/FAKE_DELAY_MS=(\d+)/.exec(prompt)?.[1] ?? 300));
+  const tokens = Number(/FAKE_TOKENS=(\d+)/.exec(prompt)?.[1] ?? 1000);
+  if (!(await markAttemptRunning(run.id, task.id, attemptId, new Date().toISOString()))) {
+    return { exitCode: 1, error: "Fake workflow worker was cancelled before it started." };
+  }
+  let killed = false;
+  let wake: () => void = () => undefined;
+  activeWorkerProcesses.set(attemptId, {
+    runId: run.id,
+    stepId: task.stepId,
+    workerTaskId: task.id,
+    attemptId,
+    command,
+    processGenerationId: randomUUID(),
+    inputCapability: "none",
+    write: () => undefined,
+    kill: () => {
+      killed = true;
+      wake();
+    },
+  });
+  try {
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, delay);
+      wake = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+    if (killed) return { exitCode: 1, error: "Fake workflow worker was stopped." };
+    const fail = /FAKE_FAIL/.test(prompt);
+    let result: unknown;
+    const resultLine = /^FAKE_RESULT:\s*(.+)$/m.exec(prompt)?.[1];
+    if (resultLine) {
+      try {
+        result = JSON.parse(resultLine) as unknown;
+      } catch {
+        result = undefined;
+      }
+    } else if (task.workflowCall?.schemaPath) {
+      const schema = JSON.parse(await fs.readFile(task.workflowCall.schemaPath, "utf8")) as unknown;
+      result = sampleFromSchema(schema);
+    }
+    const report = {
+      status: fail ? "failed" : "complete",
+      summary: fail ? "Fake worker failed on purpose." : `Fake result for: ${task.title}`,
+      ...(result !== undefined && !fail ? { result } : {}),
+      files_changed: [],
+      commands_run: [],
+      tests: [],
+      proof: [],
+      risks: [],
+      followups: [],
+      handoff: [],
+    };
+    await fs.writeFile(paths.finalReportJson, JSON.stringify(report, null, 2), "utf8");
+    await fs.appendFile(paths.stdoutLog, `fake workflow worker: ${report.summary}\n`, "utf8").catch(() => undefined);
+    return { exitCode: 0, inputTokens: tokens, outputTokens: Math.round(tokens / 10) };
+  } finally {
+    activeWorkerProcesses.delete(attemptId);
+  }
+}
+
 async function runPiWorkerSession({
   run,
   task,
@@ -18962,6 +21498,7 @@ async function runPiWorkerSession({
   promptText,
   command,
   model,
+  launchAborted = () => false,
 }: {
   run: RunState;
   task: WorkerTask;
@@ -18971,6 +21508,7 @@ async function runPiWorkerSession({
   promptText: string;
   command: string;
   model: string;
+  launchAborted?: () => boolean;
 }): Promise<{
   exitCode: number;
   error?: string;
@@ -18984,29 +21522,48 @@ async function runPiWorkerSession({
   contextWindowTokens?: number;
 }> {
   const isAutomationRun = run.executionMode === "direct" && Boolean(run.automationId);
-  await ensurePiWorkerDisplayPty(attemptId, cwd);
-  await pty.waitForResize(attemptId, 5_000);
-
   const provider = piProviderForWorker(task, model);
   const thinking = piThinkingForWorker(task);
   const modelLabel = model;
-  pty.publishOutput(
-    attemptId,
-    `\x1b[2J\x1b[H\r\n\x1b[38;2;74;222;208m  ✦  CORA PI WORKER\x1b[0m\r\n` +
-      `\x1b[2m     ${task.title}\x1b[0m\r\n\x1b[2m     ${modelLabel} · ${thinking}\x1b[0m\r\n\r\n` +
-      `\x1b[38;2;74;222;208m  ●\x1b[0m Starting the Pi harness…\r\n`,
-  );
 
   let client: PiRpcClient | null = null;
   let unsubscribe: (() => void) | null = null;
   let interrupted = false;
+  let reportInvalid = false;
   const taskSteering: string[] = [];
-  const taskContract = () => [
-    task.description.trim(),
-    ...(task.allowedPaths.length ? [`Edit only: ${task.allowedPaths.join(", ")}`] : []),
-    ...(task.forbiddenPaths.length ? [`Do not edit: ${task.forbiddenPaths.join(", ")}`] : []),
-    ...taskSteering.map((text, index) => `Later steering ${index + 1}:\n${text}`),
-  ].join("\n\n");
+  // The acceptance, verification and final-report sections live only in
+  // prompt.md, so they are re-sent verbatim; a compaction summary that dropped
+  // them would otherwise leave the worker unable to write a valid report.
+  const contractSections = workerContractSections(promptText);
+  // Memory and the profile are pinned context: the compaction summary is told
+  // to leave them out, and this re-sends a fresh copy exactly once after
+  // each compaction, so the user's preferences survive a long run and
+  // anything learned meanwhile arrives too.
+  const pinnedMemory = (): string | null => {
+    if (runProjectPolicyMode(run) === "untrusted-pull-request") return null;
+    try {
+      return workerMemoryContext(run, task);
+    } catch {
+      return null;
+    }
+  };
+  const taskContract = () => {
+    const memory = pinnedMemory();
+    return [
+      task.description.trim(),
+      ...(task.allowedPaths.length ? [`Edit only: ${task.allowedPaths.join(", ")}`] : []),
+      ...(task.forbiddenPaths.length ? [`Do not edit: ${task.forbiddenPaths.join(", ")}`] : []),
+      ...(contractSections ? [contractSections] : []),
+      ...taskSteering.map((text, index) => `Later steering ${index + 1}:\n${text}`),
+      ...(memory ? [`Cora memory and profile (re-sent after compaction; they still apply):\n${memory}`] : []),
+    ].join("\n\n");
+  };
+  // Outside the workspace, beside the report. Imported pull-request workers
+  // have no scratchpad tool.
+  const scratchpadPath =
+    runProjectPolicyMode(run) === "untrusted-pull-request" ? "" : join(paths.attemptDir, "scratchpad.md");
+  const readScratchpad = async () =>
+    scratchpadPath ? (await fs.readFile(scratchpadPath, "utf8").catch(() => "")).slice(0, 4_000) : "";
   // Real provider token usage summed across the session's message_end events.
   const usageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   let sawUsage = false;
@@ -19101,7 +21658,27 @@ async function runPiWorkerSession({
     target.run.updatedAt = at;
   };
 
+  // A Stop that lands before the worker has a live process aborts its launch.
+  // Throwing an interruption sends it down the normal failure path, where the
+  // pause's cancelled verdict on the attempt keeps it out of review.
+  const backOutIfStopped = () => {
+    if (!launchAborted()) return;
+    interrupted = true;
+    throw new Error("Pi worker was interrupted before it started: the run was stopped.");
+  };
+
   try {
+    // Inside the try so a display failure (no default shell, PTY spawn error)
+    // ends this attempt with a failure report instead of escaping to the cycle,
+    // which would fail the whole run and its sibling workers with it.
+    await ensurePiWorkerDisplayPty(attemptId, cwd);
+    await pty.waitForResize(attemptId, 5_000);
+    pty.publishOutput(
+      attemptId,
+      `\x1b[2J\x1b[H\r\n\x1b[38;2;74;222;208m  ✦  CORA PI WORKER\x1b[0m\r\n` +
+        `\x1b[2m     ${task.title}\x1b[0m\r\n\x1b[2m     ${modelLabel} · ${thinking}\x1b[0m\r\n\r\n` +
+        `\x1b[38;2;74;222;208m  ●\x1b[0m Starting the Pi harness…\r\n`,
+    );
     const step = run.steps.find((item) => item.id === task.stepId);
     // Mailbox provisioning, not group membership: an unflagged batch worker
     // still gets the peer_* tools so Cora can reach it. Which recipients those
@@ -19204,6 +21781,8 @@ async function runPiWorkerSession({
           }
         : undefined,
     });
+    if (scratchpadPath) plan.env.CODARA_PI_SCRATCHPAD_PATH = scratchpadPath;
+    if (task.workflowCall) applyWorkflowWorkerEnv(plan.env, task, paths);
     // The plan creator may write a per-session MCP bridge file. Capture it
     // before the durable profile stamp so any stamp failure still reaches the
     // finally cleanup path.
@@ -19216,14 +21795,19 @@ async function runPiWorkerSession({
     ) {
       throw new Error("Pi worker plan changed its frozen account identity");
     }
+    backOutIfStopped();
     client = new PiRpcClient(plan, {
       requestTimeoutMs: 120_000,
       shutdownGraceMs: 2_000,
     });
     await client.start();
+    backOutIfStopped();
 
     const runningTimestamp = new Date().toISOString();
-    await markAttemptRunning(run.id, task.id, attemptId, runningTimestamp);
+    if (!(await markAttemptRunning(run.id, task.id, attemptId, runningTimestamp, piSessionId))) {
+      interrupted = true;
+      throw new Error("Pi worker was interrupted before it started: the attempt was cancelled.");
+    }
     await appendEvent({
       timestamp: runningTimestamp,
       workspaceId: run.workspaceId,
@@ -19362,9 +21946,22 @@ async function runPiWorkerSession({
           if (gauge > 0) lastContextTokens = gauge;
           reportedContextWindowTokens =
             piWorkerMessageContextWindow(event) ?? reportedContextWindowTokens;
+          try {
+            workflowAttemptUsage.get(attemptId)?.({
+              in: usageTotals.input + usageTotals.cacheRead + usageTotals.cacheWrite,
+              out: usageTotals.output,
+              usd: resolvedPiCostUsd(),
+            });
+          } catch {
+            // A listener failure must not end the worker's session.
+          }
         }
         const failure = piWorkerEventFailure(event);
-        if (failure) {
+        const fastFallback = failure ? fastModeFallbackNote(failure) : null;
+        if (fastFallback) {
+          reportActivity(piWorkerSafeText(fastFallback, 300));
+          paint(`\r\n  ${paneDim(piWorkerSafeText(fastFallback, 700))}\r\n`);
+        } else if (failure) {
           reportActivity(`Provider error: ${piWorkerSafeText(failure, 300)}`);
           paint(`\r\n  \x1b[31mProvider error: ${piWorkerSafeText(failure, 700)}\x1b[0m\r\n`);
         }
@@ -19393,29 +21990,94 @@ async function runPiWorkerSession({
     };
 
     paint(`  \x1b[32m✓ Pi ready\x1b[0m · ${plan.provider}/${plan.model}\r\n`);
-    const compactionProgress = (phase: "compacting" | "resuming") => {
+    backOutIfStopped();
+    const compactionProgress = (phase: "compacting" | "resuming", report?: CompactionReport) => {
+      if (report) {
+        const detail = describeCompaction(report);
+        reportActivity(detail);
+        paint(`\r\n  ${paneDim(detail)}\r\n`);
+        void appendEvent({
+          timestamp: new Date().toISOString(),
+          workspaceId: run.workspaceId,
+          runId: run.id,
+          stepId: task.stepId,
+          workerTaskId: task.id,
+          attemptId,
+          type: "worker_attempt.context_compacted",
+          message: detail,
+          payload: { ...report },
+        }).catch(() => undefined);
+        return;
+      }
       const detail = phase === "compacting" ? "Compacting context…" : "Resuming after context compaction…";
       reportActivity(detail);
       paint(`\r\n  ${detail}\r\n`);
     };
-    await waitForPiWorkerTurn(client, promptText, reportStall, () => interrupted, compactionProgress, taskContract);
+    const wrapUpRequested = () => {
+      reportActivity("Time limit reached: writing a partial report…");
+      paint("\r\n  \x1b[33m⏱ Turn time limit reached: asking the worker to hand in a partial report\x1b[0m\r\n");
+    };
+    await waitForPiWorkerTurn(
+      client,
+      promptText,
+      reportStall,
+      () => interrupted,
+      compactionProgress,
+      taskContract,
+      wrapUpRequested,
+      readScratchpad,
+    );
     if (interrupted) throw new Error("Pi worker was interrupted.");
 
     let report = await readWorkerReport(paths.finalReportJson);
     if (!report) {
+      // Tell the worker exactly what is wrong. A bare "not parseable" made it
+      // rewrite the same shape, and the second miss threw its work away.
+      const { problem } = await readWorkerReportWithProblem(paths.finalReportJson);
       paint("\r\n  \x1b[33m↻ Finalizing the evidence report…\x1b[0m\r\n");
       await waitForPiWorkerTurn(
         client,
-        `Your task turn ended without a parseable final report at ${paths.finalReportJson}. ` +
-          "Do not redo completed work. Inspect the current diff and verification evidence, then write the mandatory final-report.json using the exact schema and absolute path from the original task prompt. End only after confirming the file parses as JSON.",
+        `Your task turn ended without a valid final report at ${paths.finalReportJson}` +
+          `${problem ? `: ${problem}` : ""}. ` +
+          'The "status" field must be exactly one of "complete", "partial", "blocked" or "failed". ' +
+          "Do not redo completed work. Inspect the current diff and verification evidence, then write the mandatory final-report.json using the exact schema and absolute path from the original task prompt. End only after confirming the file parses as JSON." +
+          (workerReportSection(promptText)
+            ? `\n\nThe report contract from the original task prompt, verbatim:\n${workerReportSection(promptText)}`
+            : ""),
         reportStall,
         () => interrupted,
         compactionProgress,
         taskContract,
+        wrapUpRequested,
+        readScratchpad,
       );
       report = await readWorkerReport(paths.finalReportJson);
     }
-    if (!report) throw new Error("Pi worker completed without a parseable final-report.json.");
+    if (!report) {
+      const { problem } = await readWorkerReportWithProblem(paths.finalReportJson);
+      reportInvalid = true;
+      throw new Error(
+        `Pi worker completed without a parseable final-report.json${problem ? ` (${problem})` : ""}.`,
+      );
+    }
+    // The report file is untrusted even though Pi checked the tool call, so
+    // main validates the result too and asks once, naming the exact errors.
+    const resultProblem = await workflowResultProblem(task, paths, report.status);
+    if (resultProblem) {
+      paint("\r\n  \x1b[33m↻ Fixing the workflow result…\x1b[0m\r\n");
+      await waitForPiWorkerTurn(
+        client,
+        `Your submit_result call did not return a valid \`result\`: ${resultProblem}. ` +
+          "Do not redo the work. Call submit_result again with the same status and summary and a `result` that matches the schema in the tool's parameters exactly.",
+        reportStall,
+        () => interrupted,
+        compactionProgress,
+        taskContract,
+        wrapUpRequested,
+        readScratchpad,
+      );
+      report = (await readWorkerReport(paths.finalReportJson)) ?? report;
+    }
 
     applyHookStateReport({ paneId: attemptId, state: "done", note: "Pi worker report ready" });
     paintPiWorkerReportOutcome(paint, report);
@@ -19429,7 +22091,14 @@ async function runPiWorkerSession({
     // provider "servers overloaded" arriving during shutdown, long after the
     // validated report), writeAutoFailureReport preserves it and this session
     // settles as succeeded so the report's verdict decides the node.
-    const failureWrite = await writeAutoFailureReport(paths, task, message, { interrupted }).catch(() => null);
+    const failureWrite = await writeAutoFailureReport(paths, task, message, {
+      interrupted,
+      cause: reportInvalid
+        ? "no_valid_report"
+        : isWorkerTurnCeilingFailure(message)
+          ? "turn_ceiling"
+          : undefined,
+    }).catch(() => null);
     if (failureWrite?.preservedExisting) {
       const report = await readWorkerReport(paths.finalReportJson).catch(() => null);
       if (report && (report.status === "complete" || report.status === "partial")) {
@@ -19497,20 +22166,28 @@ async function stampAttemptAccountProfile(
   });
 }
 
+// Returns false when the attempt was cancelled while it started (a Stop raced
+// the launch): a cancelled attempt never comes back to life as running.
+// The Pi session id is stamped here, not only at finish, because an app quit
+// never reaches the finish path and the session is what lets the interrupted
+// work be continued after the restart.
 async function markAttemptRunning(
   runId: string,
   workerTaskId: string,
   attemptId: string,
   timestamp: string,
-): Promise<void> {
+  piSessionId?: string,
+): Promise<boolean> {
   const run = await requireRun(runId);
   const attempt = run.workerAttempts.find((item) => item.id === attemptId);
   const task = run.workerTasks.find((item) => item.id === workerTaskId);
-  if (!attempt || !task) return;
+  if (!attempt || !task) return true;
+  if (attempt.status === "cancelled") return false;
   const step = task.stepId ? run.steps.find((item) => item.id === task.stepId) : undefined;
   attempt.status = "running";
   task.status = "running";
   attempt.startedAt = attempt.startedAt ?? timestamp;
+  if (piSessionId) attempt.piSessionId = piSessionId;
   task.updatedAt = timestamp;
   if (step && !["complete", "completed_unverified", "failed", "skipped"].includes(step.status)) {
     step.status = "running";
@@ -19519,6 +22196,7 @@ async function markAttemptRunning(
   }
   run.updatedAt = timestamp;
   await saveRun(run);
+  return true;
 }
 
 // Returns the full command line we type into pwsh — the same string a user

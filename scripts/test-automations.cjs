@@ -115,10 +115,11 @@ const harnessPlugin = {
         // Unified notify pipeline: record publishes/rearms for assertions.
         return {
           contents:
-            "globalThis.__NOTIFY ??= { published: [], rearms: [] };\n" +
+            "globalThis.__NOTIFY ??= { published: [], rearms: [], settledJobs: [] };\n" +
             "export const automationSourceKey = (id) => `automation:${id}`;\n" +
             "export function publish(e){ globalThis.__NOTIFY.published.push(e); }\n" +
-            "export function rearm(k){ globalThis.__NOTIFY.rearms.push(k); }\n",
+            "export function rearm(k){ globalThis.__NOTIFY.rearms.push(k); }\n" +
+            "export function settleAutomationQuestions(id){ globalThis.__NOTIFY.settledJobs.push(id); }\n",
           loader: "js",
         };
       }
@@ -527,6 +528,66 @@ async function main() {
   }
 
   sched.stopScheduler();
+
+  // An unreadable scheduler.json must never be overwritten blind: the next
+  // save rewrites the file from the in-memory list. Each case loads a fresh
+  // module instance (the job cache and home dir are per instance).
+  const freshScheduler = async (seed) => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "spark-auto-home-"));
+    if (seed !== undefined) fs.writeFileSync(path.join(home, "scheduler.json"), seed);
+    process.env.SPARK_HOME_DIR = home;
+    const file = path.join(home, "scheduler.bundle.cjs");
+    await esbuild.build({
+      entryPoints: [SCHEDULER_TS],
+      bundle: true,
+      platform: "node",
+      format: "cjs",
+      outfile: file,
+      logLevel: "silent",
+      resolveExtensions: [".ts", ".js", ".cjs", ".mjs", ".json"],
+      plugins: [harnessPlugin],
+    });
+    return { home, sched: require(file) };
+  };
+  const asideCopies = (home) => fs.readdirSync(home).filter((name) => name.startsWith("scheduler.json.corrupt-"));
+  {
+    const garbled = '{"jobs": [{"id": "job-keep", "name": "nightly"'; // cut off mid-sync
+    const { home, sched: s2 } = await freshScheduler(garbled);
+    assert.deepStrictEqual(await s2.listJobs(), [], "an unparseable file starts empty");
+    const copies = asideCopies(home);
+    assert.strictEqual(copies.length, 1, "the unparseable file is copied aside");
+    assert.strictEqual(fs.readFileSync(path.join(home, copies[0]), "utf8"), garbled);
+    await s2.createJob({ name: "after", trigger: { kind: "manual" }, input: fakeInput });
+    assert.strictEqual(
+      fs.readFileSync(path.join(home, copies[0]), "utf8"),
+      garbled,
+      "the copy survives the next save",
+    );
+    console.log("  PASS an unparseable scheduler.json is kept aside, not overwritten");
+    passed++;
+  }
+  {
+    const good = { id: "job-good", name: "good", trigger: { kind: "manual" }, input: fakeInput };
+    const { home, sched: s3 } = await freshScheduler(JSON.stringify({ jobs: [null, good] }));
+    const jobs = await s3.listJobs();
+    assert.deepStrictEqual(jobs.map((job) => job.id), ["job-good"], "one bad job costs only itself");
+    assert.strictEqual(asideCopies(home).length, 1, "the file with the bad job is copied aside");
+    // A failed write reaches the caller instead of reporting success.
+    fs.rmSync(path.join(home, "scheduler.json"));
+    fs.mkdirSync(path.join(home, "scheduler.json"));
+    await assert.rejects(
+      s3.createJob({ name: "unsaved", trigger: { kind: "manual" }, input: fakeInput }),
+      "a write that never reached disk rejects",
+    );
+    fs.rmSync(path.join(home, "scheduler.json"), { recursive: true });
+    await s3.createJob({ name: "saved", trigger: { kind: "manual" }, input: fakeInput });
+    assert.ok(
+      fs.readFileSync(path.join(home, "scheduler.json"), "utf8").includes('"saved"'),
+      "a failed write does not wedge later writes",
+    );
+    console.log("  PASS a bad job is dropped alone and write failures reach the caller");
+    passed++;
+  }
 
   // Cleanup.
   try {

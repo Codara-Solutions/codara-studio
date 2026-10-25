@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { RemoteAssetUpdate, RemoteMcpEditor, RemoteMcpTarget } from "./remote-access/rpc";
 import { deleteAgentAsset, installAgentAssetToRuntime, listAgentAssets, listMcpWriteTargets, mcpServerRevision, readMcpServerDetail, saveMcpServer } from "./agent-sync";
+import { afterSkillAssetDeleted, afterSkillAssetInstalled } from "./skill-updates-ipc";
 
 type InventoryContext = Parameters<typeof listAgentAssets>[0];
 export const REMOTE_BUILTIN_MCP_NAMES = new Set([
@@ -36,7 +37,10 @@ export function readRemoteMcpEditor(context: InventoryContext, assetId?: string)
     targets.push({ id: target, label: "Current location", runtime: asset.runtime, scope: asset.scope,
       format: asset.runtime === "codex" || asset.runtime === "grok" ? "toml" : "json" });
   }
-  return { targets, detail: { assetId: remoteCapabilityId(id), targetId: target, server, revision: mcpServerRevision(detail) } };
+  // The phone's draft contract knows stdio and HTTP only; it edits an SSE
+  // server as HTTP, as Studio's form did before it offered SSE.
+  const phoneServer = { ...server, transport: server.transport === "sse" ? "http" as const : server.transport };
+  return { targets, detail: { assetId: remoteCapabilityId(id), targetId: target, server: phoneServer, revision: mcpServerRevision(detail) } };
 }
 
 export async function updateRemoteAgentAsset(context: InventoryContext, input: Exclude<RemoteAssetUpdate, { action: "builtin" }>): Promise<string> {
@@ -50,7 +54,12 @@ export async function updateRemoteAgentAsset(context: InventoryContext, input: E
     // file is not an offered destination for newly created entries.
     const targetId = target?.id ?? (detail && remoteCapabilityId(detail.targetId) === input.targetId ? detail.targetId : null);
     if (!targetId) throw new Error("This configuration location is no longer available. Reload the form.");
-    const result = await saveMcpServer({ cwd: context.cwd, targetId, server: input.server,
+    // The phone shows an SSE server as HTTP (readRemoteMcpEditor), so its
+    // "http" means "a URL" and must not turn the server into streamable HTTP.
+    const server = detail?.transport === "sse" && input.server.transport === "http"
+      ? { ...input.server, transport: "sse" as const }
+      : input.server;
+    const result = await saveMcpServer({ cwd: context.cwd, targetId, server,
       ...(previous ? { replaceId: previous.id, expectedRevision: input.revision } : {}) });
     if (!result.ok) throw new Error(result.error ?? "Could not save this server.");
     return `${result.name ?? input.server.name} was saved. Assign it to Cora or workers to use it in new sessions.`;
@@ -59,6 +68,7 @@ export async function updateRemoteAgentAsset(context: InventoryContext, input: E
   if (input.action === "remove") {
     if (!asset.canDelete) throw new Error("This capability is managed by its plugin and cannot be removed here.");
     const result = await deleteAgentAsset({ id: asset.id });
+    await afterSkillAssetDeleted(result);
     if (!result.ok) throw new Error(result.error ?? "Could not remove this capability.");
     return `${asset.name} was removed from ${asset.runtime} (${asset.scope === "user" ? "every workspace" : "this workspace"}).`;
   }
@@ -66,6 +76,7 @@ export async function updateRemoteAgentAsset(context: InventoryContext, input: E
     throw new Error("This capability cannot be copied to that runtime.");
   }
   const result = await installAgentAssetToRuntime({ id: asset.id, target: input.runtime });
+  await afterSkillAssetInstalled(asset.id, result);
   if (!result.ok) throw new Error(result.error ?? "Could not install this capability.");
   return `${asset.name} was installed for ${input.runtime}. Changes apply to new sessions.`;
 }

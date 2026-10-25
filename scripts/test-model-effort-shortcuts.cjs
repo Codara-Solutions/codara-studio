@@ -115,7 +115,7 @@ assert.match(
 const ptyManager = read("src/main/pty-manager.ts");
 assert.match(
   ptyManager,
-  /opts\?: \{ submit\?: boolean; stashDraft\?: boolean \}[\s\S]*?if \(opts\?\.stashDraft\) write\(id, "\\x13"\);[\s\S]*?write\(id, `\\x1b\[200~/,
+  /opts\?: \{ submit\?: boolean; stashDraft\?: boolean \}[\s\S]*?if \(opts\?\.stashDraft\) write\(id, "\\x13"\);[\s\S]*?write\(id, bracketedPaste\(text\)\)/,
 );
 assert.match(read("src/main/ipc.ts"), /stashDraft: args\.stashDraft === true/);
 assert.match(read("src/preload/index.ts"), /stashDraft: opts\?\.stashDraft/);
@@ -174,9 +174,13 @@ assert.match(toast, /window\.addEventListener\("spark:local-toast", handler\)/);
 // user is looking at would produce no visible feedback at all.
 assert.match(
   toast,
-  /!isLocalToast\(toast\) && isNotificationTargetViewed\(toast\.target, activeView, toast\.kind\)/,
+  /!isLocalToast\(toast\) && isNotificationTargetViewed\(toast\.target, (?:view|activeView), toast\.kind\)/,
 );
-assert.match(toast, /const clickable = Boolean\(navigateTo\) && !isLocalToast\(toast\)/);
+// A local toast is clickable only when it was emitted with a target.
+assert.match(
+  toast,
+  /const clickable =\s*Boolean\(navigateTo\) && \(!isLocalToast\(toast\) \|\| isNavigableLocalToast\(toast\)\)/,
+);
 
 // ── The routing rules themselves ───────────────────────────────────────────
 async function loadChordTarget() {

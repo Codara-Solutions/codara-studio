@@ -11,9 +11,22 @@
 
 import type { CoraWhiteboard } from "@shared/types";
 import { createPreviewDOM } from "@shared/preview-dom";
+import { createPreviewNames } from "@shared/preview-names";
 import { snapshotProbe } from "./domSnapshot";
-import { clickProbe, typeProbe, pressKeyProbe, waitForProbe } from "./domActions";
-import { ensurePreviewTab, listPreviewTabs, pickPreviewTab, showPreviewControl } from "./registry";
+import { clickProbe, locateProbe, typeProbe, pressKeyProbe } from "./domActions";
+import { assertDriverAllowed, moveAgentCursor, noteDriving, readDriver, type Box, type CursorMove } from "./agent-presence/store";
+import { closeIsolatedTab, openIsolatedTab } from "./isolatedTabs";
+import { closePageDialog, showPageDialog, type PageDialogView } from "./pageDialogs";
+import {
+  closePreviewTab,
+  ensurePreviewTab,
+  findPreviewTabByWebContentsId,
+  findReusablePreviewTab,
+  hasPreviewTab,
+  listPreviewTabs,
+  pickPreviewTab,
+} from "./registry";
+import { assignTabToGroup, tabGroupNameOf } from "../../tabs/tabGroupBridge";
 
 type PreviewOpName =
   | "whiteboard_inspect"
@@ -25,11 +38,16 @@ type PreviewOpName =
   | "click"
   | "type"
   | "press_key"
-  | "wait_for"
   | "screenshot"
+  | "paint"
   | "url"
   | "resize"
-  | "get_web_contents_id";
+  | "get_web_contents_id"
+  | "dialog_show"
+  | "dialog_hide"
+  | "open_isolated"
+  | "close_isolated"
+  | "close";
 
 interface BridgeRequest {
   reqId: string;
@@ -46,6 +64,18 @@ interface BridgeResponse {
 
 let registered = false;
 
+// The tab each request acted on, keyed by its params object, so the response
+// names it even when the op's own result does not.
+const actedTabs = new WeakMap<object, string>();
+
+function stampActedTab(result: unknown, tabId: string | undefined): unknown {
+  if (!tabId || !result || typeof result !== "object" || Array.isArray(result)) return result;
+  if (Object.getPrototypeOf(result) !== Object.prototype) return result;
+  const record = result as Record<string, unknown>;
+  if ("tabId" in record || "tabs" in record) return result;
+  return { tabId, ...record };
+}
+
 export function registerPreviewRpcHandler(): void {
   if (registered) return;
   registered = true;
@@ -61,7 +91,7 @@ export function registerPreviewRpcHandler(): void {
       params: raw.params as BridgeRequest["params"],
     };
     try {
-      const result = await dispatch(req);
+      const result = stampActedTab(await dispatch(req), req.params ? actedTabs.get(req.params) : undefined);
       previewBridge.sendResponse({ reqId: req.reqId, ok: true, result } satisfies BridgeResponse);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -77,10 +107,17 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
       return inspectWhiteboard(req.params.board as CoraWhiteboard, req.params.nodeIds as string[] | undefined);
     }
     case "list":
-      return { tabs: listPreviewTabs(readString(req.params, "workspaceId")) };
+      return { tabs: listPreviewTabs(readString(req.params, "workspaceId"), readString(req.params, "callerPaneId")) };
     case "activity": {
+      // Answers once the cursor arrived, so main sends its input after the glide.
       const tab = requireTab(req.params);
-      showPreviewControl(tab, { action: readString(req.params, "action") ?? "Working", runId: readString(req.params, "runId"), ...(typeof req.params.x === "number" && typeof req.params.y === "number" ? { x: req.params.x, y: req.params.y } : {}) });
+      const point = typeof req.params.x === "number" && typeof req.params.y === "number" ? { x: req.params.x, y: req.params.y } : undefined;
+      await moveAgentCursor(tab.id, readDriver(req.params.driver), {
+        action: readString(req.params, "action") ?? "Working",
+        point,
+        press: req.params.press === true,
+        follow: req.params.follow === true,
+      });
       return { ok: true };
     }
     case "navigate":
@@ -97,14 +134,30 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
       return typeText(req.params);
     case "press_key":
       return pressKey(req.params);
-    case "wait_for":
-      return waitFor(req.params);
     case "screenshot":
       return screenshot(req.params);
+    case "paint":
+      return paint(req.params);
     case "resize":
       return resize(req.params);
     case "get_web_contents_id":
       return getWebContentsId(req.params);
+    case "dialog_show": {
+      // A dialog during a tab's first load arrives before the tab announced
+      // its guest, so main may not know the tab id yet.
+      const dialog = req.params.dialog as PageDialogView & { webContentsId?: number };
+      const tabId = dialog?.tabId || (typeof dialog?.webContentsId === "number" ? findPreviewTabByWebContentsId(dialog.webContentsId)?.id : undefined);
+      return tabId ? showPageDialog({ ...dialog, tabId }) : null;
+    }
+    case "dialog_hide":
+      closePageDialog(readString(req.params, "id") ?? "");
+      return { ok: true };
+    case "open_isolated":
+      return openIsolatedTab(req.params);
+    case "close_isolated":
+      return closeIsolatedTab(req.params);
+    case "close":
+      return closeTab(req.params);
     default:
       throw new Error(`unknown preview op: ${(req.op as string) ?? "?"}`);
   }
@@ -112,22 +165,71 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
 
 // Implicit tab picking is scoped to the calling run: params.runId is stamped by
 // the MCP server from SPARK_RUN_ID, so an agent op with no explicit tabId only
-// ever lands on a tab that run opened. An explicit tabId is still honored.
+// ever lands on a tab that run opened. An agent with no run is scoped to the
+// workspace of the pane it runs in (params.callerPaneId, resolved by main). An
+// explicit tabId is still honored inside that workspace.
 function requireTab(params: Record<string, unknown>) {
   const runId = typeof params.runId === "string" && params.runId ? params.runId : null;
-  const tab = pickPreviewTab(readString(params, "tabId"), runId, readString(params, "workspaceId"));
+  const tab = pickPreviewTab(
+    readString(params, "tabId"),
+    runId,
+    readString(params, "workspaceId"),
+    readString(params, "callerPaneId"),
+  );
   if (!tab) {
     if (runId && !params.tabId) {
       throw new Error(
-        "No preview tab belongs to this run — call codara_preview_navigate first to open one (or pass an explicit tabId).",
+        "No preview tab belongs to this run. Call codara_preview_navigate first to open one (or pass an explicit tabId).",
       );
     }
     throw new Error(
       "No browser tab is open. Open a Browser tab in Codara (right-click a file → Open in Browser, or open a localhost URL) before calling preview tools.",
     );
   }
-  showPreviewControl(tab, { action: "Working", runId });
+  // A driver the user stopped on this tab is refused before anything runs.
+  const driver = readDriver(params.driver);
+  assertDriverAllowed(tab.id, driver);
+  noteDriving(tab.id, driver);
+  actedTabs.set(params, tab.id);
   return tab;
+}
+
+/** Glide the agent's cursor to where an action on selector will land, before it lands. */
+async function approach(tab: ReturnType<typeof requireTab>, params: Record<string, unknown>, selector: string, move: Omit<CursorMove, "point" | "box">, withBox = false): Promise<void> {
+  const driver = readDriver(params.driver);
+  if (!driver) return;
+  const code = `(${locateProbe.toString()})(${JSON.stringify({ selector })}, ${createPreviewDOM.toString()})`;
+  const spot = await runGuestScript(tab.handle, code).catch(() => null) as { x: number; y: number; box: Box } | null;
+  if (!spot) return;
+  await moveAgentCursor(tab.id, driver, { ...move, point: { x: spot.x, y: spot.y }, ...(withBox ? { box: spot.box } : {}) });
+}
+
+// codara_preview_close. A named tab must be in the caller's workspace; with
+// no tabId only a tab this run or agent opened is closed, never the user's.
+// It closes like the user's close button, so groups, history and the layout
+// follow, and a logged-out tab's data is wiped once its last page is gone.
+function closeTab(params: Record<string, unknown>) {
+  const runId = readString(params, "runId");
+  const workspaceId = readString(params, "workspaceId");
+  const callerPaneId = readString(params, "callerPaneId");
+  const tabId = readString(params, "tabId");
+  if (tabId) {
+    const tab = pickPreviewTab(tabId, runId, workspaceId, callerPaneId);
+    if (!tab) {
+      if (!hasPreviewTab(tabId)) return { ok: true, tabId, alreadyClosed: true };
+      throw new Error(`Browser tab ${tabId} is not in your workspace, so you cannot close it.`);
+    }
+    assertDriverAllowed(tab.id, readDriver(params.driver));
+    closePreviewTab(tab.id);
+    return { ok: true, tabId: tab.id, closed: true };
+  }
+  const own = findReusablePreviewTab(runId, workspaceId, callerPaneId);
+  if (!own) {
+    throw new Error("This session has no browser tab of its own open. Pass the tabId from codara_preview_list to close another tab of your workspace.");
+  }
+  assertDriverAllowed(own.id, readDriver(params.driver));
+  closePreviewTab(own.id);
+  return { ok: true, tabId: own.id, closed: true };
 }
 
 // Electron logs EVERY rejected webview.executeJavaScript to the dev terminal as
@@ -157,28 +259,50 @@ async function runGuestScript(
 
 async function navigate(params: Record<string, unknown>): Promise<unknown> {
   const url = readString(params, "url");
-  if (!url) throw new Error("navigate requires 'url'");
+  const group = readString(params, "group");
+  if (!url && !(params.tabId && group)) throw new Error("navigate requires 'url'");
   let tab;
   let opened = false;
+  // The store's own answer: the bridge reads committed state, which lags a
+  // move made in this same call.
+  let joined: string | null = null;
+  const driver = readDriver(params.driver);
   if (params.tabId) {
-    tab = pickPreviewTab(typeof params.tabId === "string" ? params.tabId : null, null, readString(params, "workspaceId"));
+    tab = pickPreviewTab(
+      typeof params.tabId === "string" ? params.tabId : null,
+      null,
+      readString(params, "workspaceId"),
+      readString(params, "callerPaneId"),
+    );
     if (!tab) throw new Error(`preview tab not found: ${String(params.tabId)}`);
-  } else {
+    assertDriverAllowed(tab.id, driver);
+    // A tab the call names joins the group; with no url that is all it does.
+    if (group) joined = assignTabToGroup(tab.id, tab.workspaceId, group);
+    if (!url) {
+      return { url: tab.handle.getURL(), tabId: tab.id, opened, group: joined ?? tabGroupNameOf(tab.id) };
+    }
+  } else if (url) {
     // runId is the calling run's identity, stamped by the MCP server; the
-    // reused-or-opened tab must belong to that run, not the selected one and
-    // never one the user opened.
+    // reused-or-opened tab must belong to that run (or, with no run, to the
+    // calling agent's pane), not the selected one and never one the user
+    // opened.
     const runId = readString(params, "runId");
-    const before = pickPreviewTab(null, runId, readString(params, "workspaceId"));
-    tab = await ensurePreviewTab(url, runId, readString(params, "workspaceId"));
-    opened = !before;
+    const workspaceId = readString(params, "workspaceId");
+    const callerPaneId = readString(params, "callerPaneId");
+    const reusable = findReusablePreviewTab(runId, workspaceId, callerPaneId);
+    if (reusable) assertDriverAllowed(reusable.id, driver);
+    ({ tab, opened } = await ensurePreviewTab(url, runId, workspaceId, callerPaneId, group));
+  } else {
+    throw new Error("navigate requires 'url'");
   }
-  // ensurePreviewTab created the tab with the target URL, so loadURL is a
-  // redundant nav in that case but cheap. For an existing tab it's the real
-  // navigation.
-  showPreviewControl(tab, { action: "Navigating", runId: readString(params, "runId") });
-  tab.handle.loadURL(url);
+  // A tab ensurePreviewTab just opened is already loading the URL. Loading
+  // it again would abort or repeat that first load, which runs the page's
+  // requests twice and records the first load's as never finished.
+  noteDriving(tab.id, driver, "Navigating");
+  if (!opened) tab.handle.loadURL(url);
   await waitDomReady(tab.handle, 15_000);
-  return { url: tab.handle.getURL(), tabId: tab.id, opened };
+  joined ??= tabGroupNameOf(tab.id);
+  return { url: tab.handle.getURL(), tabId: tab.id, opened, ...(joined ? { group: joined } : {}) };
 }
 
 async function urlOf(params: Record<string, unknown>): Promise<unknown> {
@@ -190,7 +314,7 @@ async function snapshot(params: Record<string, unknown>): Promise<unknown> {
   const mode = readString(params, "mode") ?? "outline";
   const maxBytes = readNumber(params, "maxBytes") ?? 12_000;
   const tab = requireTab(params);
-  const code = `(${snapshotProbe.toString()})(${JSON.stringify({ mode, maxBytes, selector: readString(params, "selector"), since: readString(params, "since") })}, ${createPreviewDOM.toString()})`;
+  const code = `(${snapshotProbe.toString()})(${JSON.stringify({ mode, maxBytes, selector: readString(params, "selector"), since: readString(params, "since") })}, ${createPreviewDOM.toString()}, ${createPreviewNames.toString()})`;
   const value = await runGuestScript(tab.handle, code);
   return value;
 }
@@ -249,10 +373,9 @@ async function click(params: Record<string, unknown>): Promise<unknown> {
   const selector = readString(params, "selector");
   if (!selector) throw new Error("click requires 'selector'");
   const tab = requireTab(params);
+  await approach(tab, params, selector, { action: "Clicking", press: true });
   const code = `(${clickProbe.toString()})(${JSON.stringify({ selector })}, ${createPreviewDOM.toString()})`;
-  const result = await runGuestScript(tab.handle, code) as { x?: number; y?: number };
-  showPreviewControl(tab, { action: "Clicking", runId: readString(params, "runId"), x: result.x, y: result.y });
-  return result;
+  return runGuestScript(tab.handle, code);
 }
 
 async function typeText(params: Record<string, unknown>): Promise<unknown> {
@@ -262,10 +385,9 @@ async function typeText(params: Record<string, unknown>): Promise<unknown> {
   if (text === null) throw new Error("type requires 'text'");
   const clearFirst = readBool(params, "clearFirst") ?? false;
   const tab = requireTab(params);
+  await approach(tab, params, selector, { action: "Typing" }, true);
   const code = `(${typeProbe.toString()})(${JSON.stringify({ selector, text, clearFirst })}, ${createPreviewDOM.toString()})`;
-  const result = await runGuestScript(tab.handle, code) as { x?: number; y?: number };
-  showPreviewControl(tab, { action: "Typing", runId: readString(params, "runId"), x: result.x, y: result.y });
-  return result;
+  return runGuestScript(tab.handle, code);
 }
 
 async function pressKey(params: Record<string, unknown>): Promise<unknown> {
@@ -273,17 +395,8 @@ async function pressKey(params: Record<string, unknown>): Promise<unknown> {
   if (!key) throw new Error("press_key requires 'key'");
   const selector = readString(params, "selector");
   const tab = requireTab(params);
+  if (selector) await approach(tab, params, selector, { action: "Typing" }, true);
   const code = `(${pressKeyProbe.toString()})(${JSON.stringify({ key, selector })}, ${createPreviewDOM.toString()})`;
-  return runGuestScript(tab.handle, code);
-}
-
-async function waitFor(params: Record<string, unknown>): Promise<unknown> {
-  const selector = readString(params, "selector");
-  if (!selector) throw new Error("wait_for requires 'selector'");
-  const state = (readString(params, "state") as "attached" | "visible" | "hidden" | null) ?? "visible";
-  const timeoutMs = readNumber(params, "timeoutMs") ?? 5_000;
-  const tab = requireTab(params);
-  const code = `(${waitForProbe.toString()})(${JSON.stringify({ selector, state, timeoutMs })}, ${createPreviewDOM.toString()})`;
   return runGuestScript(tab.handle, code);
 }
 
@@ -304,6 +417,30 @@ async function screenshot(params: Record<string, unknown>): Promise<unknown> {
   return { dataUrl, tabId: tab.id, url: tab.handle.getURL(), title: tab.handle.getTitle(), viewport, imageSize, scale };
 }
 
+// A lease outlives no measurement: main releases it when a trace ends, and
+// the timer releases it when main never does (a crash, a lost reply).
+const PAINT_LEASE_MAX_MS = 90_000;
+const paintLeases = new Map<string, () => void>();
+
+function paint(params: Record<string, unknown>): unknown {
+  const leaseId = readString(params, "leaseId");
+  if (params.hold === false) {
+    if (leaseId) paintLeases.get(leaseId)?.();
+    return { ok: true };
+  }
+  const tab = requireTab(params);
+  const { background, release } = tab.handle.holdPaint();
+  const id = `paint-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const timer = setTimeout(() => end(), Math.min(readNumber(params, "ms") ?? PAINT_LEASE_MAX_MS, PAINT_LEASE_MAX_MS));
+  const end = () => {
+    clearTimeout(timer);
+    paintLeases.delete(id);
+    release();
+  };
+  paintLeases.set(id, end);
+  return { leaseId: id, tabId: tab.id, background };
+}
+
 async function resize(params: Record<string, unknown>): Promise<unknown> {
   const width = readNumber(params, "width");
   const height = readNumber(params, "height");
@@ -312,6 +449,8 @@ async function resize(params: Record<string, unknown>): Promise<unknown> {
   const applied = tab.handle.resizeViewport(width, height);
   return { ok: true, ...applied, tabId: tab.id };
 }
+
+const METRICS_TIMEOUT_MS = 400;
 
 // Internal — only the main-side computer-use executor calls this. Resolves the
 // picked tab's guest webContents id plus viewport metrics so trusted-input
@@ -327,10 +466,15 @@ async function getWebContentsId(params: Record<string, unknown>): Promise<unknow
   let viewport: { width: number; height: number } | null = null;
   let devicePixelRatio = 1;
   try {
-    const metrics = (await runGuestScript(
-      tab.handle,
-      "({ width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio })",
-    )) as { width: number; height: number; dpr: number } | null;
+    // Bounded: a page held by an open alert or confirm answers no script, and
+    // resolving the tab must not hang with it (main reports the dialog).
+    const metrics = (await Promise.race([
+      runGuestScript(
+        tab.handle,
+        "({ width: window.innerWidth, height: window.innerHeight, dpr: window.devicePixelRatio })",
+      ),
+      new Promise((resolve) => setTimeout(() => resolve(null), METRICS_TIMEOUT_MS)),
+    ])) as { width: number; height: number; dpr: number } | null;
     if (metrics) {
       viewport = { width: metrics.width, height: metrics.height };
       devicePixelRatio = metrics.dpr || 1;
@@ -341,6 +485,7 @@ async function getWebContentsId(params: Record<string, unknown>): Promise<unknow
   return {
     webContentsId,
     tabId: tab.id,
+    workspaceId: tab.workspaceId,
     url: tab.handle.getURL(),
     viewport,
     devicePixelRatio,

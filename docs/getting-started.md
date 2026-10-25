@@ -92,14 +92,35 @@ Once the guide is done, try these in your workspace:
    `claude`, `codex`, `grok` or `pi` as you normally would.
 2. **An agent pane.** Open the **+** menu in the tab bar and pick
    **Claude worker**, **Codex worker**, **Grok worker** or **Pi worker**.
-   The first three show the workspace's recent sessions so you can resume
-   one or start fresh; Pi starts right away.
+   A new session starts right away in its own tab. To pick up an earlier
+   one, open **Sessions** at the top of the rail, search for it and click
+   it (see [Agent session search](agent-session-search.md)).
 3. **Cora.** Click **Cora** in the tab bar and describe a small change.
    Cora plans it, runs workers in their own panes, and shows progress on the
    chat's board.
 4. **The browser.** Ask an agent to open your app in the browser and check
    its work. It uses the `codara_preview_*` tools listed in
    [mcp-tools.md](./mcp-tools.md).
+
+### In the Cora chat
+
+- **No account yet.** The welcome screen says when no Claude, ChatGPT or Grok
+  account is connected (and OpenRouter is not set up) and opens Settings,
+  Agents for you. New chats default to a model from an account you have
+  connected.
+- **A turn that fails** shows as a failure, with **Retry** in the composer
+  and, when the cause is a missing or signed-out account, **Open accounts**.
+- **Stop.** The stop button, or Cmd+. (Ctrl+. on Windows and Linux), ends the
+  current turn and its live workers. A turn that has printed nothing for 90
+  seconds, with no tool running, says so.
+- **Running commands** show their latest output and how long they have been
+  running, under the row.
+- **Workers.** A running step lists its workers; **Open terminal** jumps to a
+  worker's pane.
+- **Files.** Type `@` to mention any file in the workspace. Paths in Cora's
+  answers, as links or as `inline/code.ts`, open in the editor.
+- **Find.** Cmd+F (Ctrl+F) in the chat searches the conversation; the history
+  button searches old chats by title and message text.
 
 Keyboard shortcuts are in
 [shortcuts-and-settings.md](./shortcuts-and-settings.md), and

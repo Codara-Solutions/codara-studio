@@ -131,6 +131,9 @@ export async function recoverDirectRuns(): Promise<void> {
   }
   for (const run of runs) {
     if (run.executionMode !== "direct") continue;
+    // recoverWorkflowRuns owns these: it parks them for a journal resume
+    // instead of relaunching or failing single attempts.
+    if (run.workflow) continue;
     if (TERMINAL_RUN_STATUSES.has(run.status)) continue;
     if (run.status === "paused") continue;
 

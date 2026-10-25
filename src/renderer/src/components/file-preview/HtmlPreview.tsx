@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { pathToFileUrl } from "../../lib/pathToFileUrl";
 import { isRemotePath } from "@shared/remote";
+import FindBar from "../find/FindBar";
+import { useWebviewFind } from "../find/useWebviewFind";
 
 // HtmlPreview — rendered view for .html/.htm files, hosted in an Electron
 // <webview> so the page runs in its own guest process with its scripts and
@@ -31,6 +33,8 @@ export default function HtmlPreview({ path, mtimeMs }: Props) {
   const webviewRef = useRef<WebviewElement | null>(null);
   const [domReady, setDomReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const findHostRef = useRef<HTMLDivElement | null>(null);
+  const find = useWebviewFind({ hostRef: findHostRef, webviewRef, ready: domReady && !error });
 
   const remote = isRemotePath(path);
   const url = `${pathToFileUrl(path)}?t=${Math.round(mtimeMs)}`;
@@ -104,7 +108,7 @@ export default function HtmlPreview({ path, mtimeMs }: Props) {
           <div className="spark-eyebrow" style={{ marginBottom: 6 }}>
             Remote file
           </div>
-          Rendered HTML preview needs a local file — remote pages can&apos;t load their linked
+          Rendered HTML preview needs a local file. Remote pages can&apos;t load their linked
           assets. Use the Edit view to read the source.
         </div>
       </div>
@@ -113,26 +117,29 @@ export default function HtmlPreview({ path, mtimeMs }: Props) {
 
   return (
     <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
-      <div ref={hostRef} style={{ flex: 1, minHeight: 0, position: "relative" }}>
-        {error && (
-          <div
-            style={{
-              position: "absolute",
-              inset: 0,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              background: "var(--bg)",
-            }}
-          >
-            <div style={{ textAlign: "center", color: "var(--muted)", fontSize: 12 }}>
-              <div className="spark-eyebrow" style={{ marginBottom: 6, color: "var(--danger)" }}>
-                Page failed to load
+      <div ref={findHostRef} className="codara-find-host" onKeyDown={find.onKeyDown}>
+        <div ref={hostRef} style={{ flex: 1, minHeight: 0, position: "relative" }}>
+          {error && (
+            <div
+              style={{
+                position: "absolute",
+                inset: 0,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                background: "var(--bg)",
+              }}
+            >
+              <div style={{ textAlign: "center", color: "var(--muted)", fontSize: 12 }}>
+                <div className="spark-eyebrow" style={{ marginBottom: 6, color: "var(--danger)" }}>
+                  Page failed to load
+                </div>
+                {error}
               </div>
-              {error}
             </div>
-          </div>
-        )}
+          )}
+        </div>
+        {find.bar && <FindBar {...find.bar} />}
       </div>
       <div
         style={{

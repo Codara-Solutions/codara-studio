@@ -1,10 +1,12 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { ResolvedRunQuestion } from "@shared/types";
+import type { NavigationTarget, ResolvedRunQuestion } from "@shared/types";
 import NotificationCenter from "../notifications/NotificationCenter";
 import SystemMeters from "./SystemMeters";
+import KeepAwakeControl from "./keep-awake/KeepAwakeControl";
 import { CodaraMark } from "./BrandMarks";
 import UsageMeters from "./UsageMeters";
-import type { NavigateTo } from "../notifications/routing";
+import type { NavigateTo, NotifyTargetStatus } from "../notifications/routing";
+import type { NotifyWorkspaceMeta } from "../notifications/center-view";
 
 type AppRegionStyle = React.CSSProperties & {
   WebkitAppRegion?: "drag" | "no-drag";
@@ -200,6 +202,8 @@ interface Props {
   // Notification-center wiring (bell + popover in the right-side controls).
   notifyNavigateTo?: NavigateTo;
   notifyResolveQuestion?: (runId: string) => ResolvedRunQuestion | null;
+  notifyDescribeTarget?: (target: NavigationTarget) => NotifyTargetStatus;
+  notifyWorkspaces?: readonly NotifyWorkspaceMeta[];
 }
 
 // Memoized: App passes the `platform` state value, the two visibility
@@ -215,6 +219,8 @@ function WindowChrome({
   onOpenUsage,
   notifyNavigateTo,
   notifyResolveQuestion,
+  notifyDescribeTarget,
+  notifyWorkspaces,
 }: Props) {
   const isWin = platform === "win32";
   const [maximized, setMaximized] = useState(false);
@@ -370,11 +376,14 @@ function WindowChrome({
         }}
       >
         <SystemMeters />
+        <KeepAwakeControl />
         <UsageMeters onOpenUsage={onOpenUsage} />
         <PanelToggle on={rightOn} side="right" onClick={onToggleRight} title="Toggle right sidebar" edge="right" />
         <NotificationCenter
           navigateTo={notifyNavigateTo}
           resolveQuestion={notifyResolveQuestion}
+          describeTarget={notifyDescribeTarget}
+          workspaces={notifyWorkspaces}
         />
         <ChromeButton title="Settings" onClick={() => onOpenSettings?.()} borderLeft>
           <GearIcon size={12} />

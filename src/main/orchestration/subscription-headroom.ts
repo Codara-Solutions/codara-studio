@@ -13,10 +13,10 @@
 //      Deliberately blunt: it names a runtime only when the gap is decisive,
 //      and stays null otherwise so routing keeps following task affinity.
 //
-// Everything except readSubscriptionHeadroomSummary is pure and unit-tested in
-// scripts/test-subscription-headroom.cjs; the reader is the only function that
-// touches the Electron-side usage cache, via a lazy import so this module stays
-// bundleable standalone.
+// Everything except the two readers at the bottom is pure and unit-tested in
+// scripts/test-subscription-headroom.cjs; the readers are the only functions
+// that touch the Electron-side usage cache, via a lazy import so this module
+// stays bundleable standalone.
 
 import {
   AGENT_FAMILIES,
@@ -439,16 +439,44 @@ export function describeHeadroomForPrompt(
 }
 
 /**
- * The one Electron-touching entry point: read the cached subscription usage
- * (60s cache upstream, never forced from here) and fold it into a summary.
- * Any failure, including the usage module failing to load, degrades to null,
- * a usage hiccup must never break a manager turn or a spawn. Imported lazily
- * so the pure functions above stay bundleable without Electron.
+ * The spawn-time reader: read the cached subscription usage (60s cache
+ * upstream, never forced from here) and fold it into a summary. Any failure,
+ * including the usage module failing to load, degrades to null, a usage
+ * hiccup must never break a manager turn or a spawn. Imported lazily so the
+ * pure functions above stay bundleable without Electron.
  */
 export async function readSubscriptionHeadroomSummary(): Promise<SubscriptionHeadroomSummary | null> {
   try {
     const { inspectPiSubscriptionUsage } = await import("./pi-subscription-usage");
     return summarizeProviderHeadroom(await inspectPiSubscriptionUsage());
+  } catch {
+    return null;
+  }
+}
+
+/** How old a usage read may be and still shape the manager prompt. Older
+ * numbers describe the past more than the next worker. */
+export const CACHED_HEADROOM_MAX_AGE_MS = 30 * 60_000;
+
+/**
+ * The manager-turn reader: the last known usage, stale or not, so a turn never
+ * waits on a quota round trip (up to 15s per account) for a one-line hint. A
+ * background refresh keeps the next turn current. Null when nothing was read
+ * recently or the usage module fails.
+ */
+export async function readCachedSubscriptionHeadroomSummary(): Promise<SubscriptionHeadroomSummary | null> {
+  try {
+    const usage = await import("./pi-subscription-usage");
+    void Promise.resolve()
+      .then(() => usage.inspectPiSubscriptionUsage())
+      .catch(() => undefined);
+    const profiles = usage.inspectLastKnownPiSubscriptionUsageProfiles(CACHED_HEADROOM_MAX_AGE_MS);
+    if (profiles.length === 0) return null;
+    return summarizeProviderHeadroom({
+      checkedAt: new Date().toISOString(),
+      providers: [],
+      profiles,
+    });
   } catch {
     return null;
   }

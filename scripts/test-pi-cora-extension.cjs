@@ -21,6 +21,12 @@ function loadTypeScriptModule(sourcePath) {
   const loaded = new Module(sourcePath, module);
   loaded.filename = sourcePath;
   loaded.paths = Module._nodeModulePaths(path.dirname(sourcePath));
+  // Extension modules import their TypeScript siblings ("./compaction-ledger").
+  loaded.require = (id) => {
+    const sibling = id.startsWith("./") ? path.join(path.dirname(sourcePath), `${id}.ts`) : null;
+    if (sibling && fs.existsSync(sibling)) return loadTypeScriptModule(sibling);
+    return Module.prototype.require.call(loaded, id);
+  };
   loaded._compile(output, sourcePath);
   return loaded.exports;
 }
@@ -41,6 +47,9 @@ const managerExtensionSource = fs.readFileSync(
 );
 assert.match(managerExtensionSource, /tool_call.*studioBrowserOnlyDecision/);
 process.env.SPARK_MCP_MODE = "talk";
+// Pi always launches with its run id; without one the bridge drops the
+// chat-owned whiteboard and board tools.
+process.env.SPARK_RUN_ID = "run-pi-extension-test";
 const studioBridge = require(path.join(
   __dirname,
   "..",
@@ -71,6 +80,34 @@ assert.match(auto, /Do not spawn a\s+worker and do not call codara_complete/);
 assert.match(auto, /explicitly says not to use agents or workers, honor that request/);
 assert.match(auto, /Do not\s+call codara_spawn_workers or codara_complete on this direct path/);
 assert.match(auto, /If no worker models are enabled, use the same direct path/);
+// Small edits: Auto mode makes them herself unless the user asked for every
+// edit to go through a worker; Execute mode always delegates, so its effort
+// calibration must never tell it to edit directly.
+assert.match(auto, /Small, low-risk changes are yours to make/);
+assert.match(auto, /Trivial work is one move: make the small change yourself/);
+const autoAlwaysVerify = extension.buildCoraPiSystemPrompt("auto", "fast", { alwaysVerifyEdits: true });
+assert.match(autoAlwaysVerify, /"Always verify edits with a worker"/);
+assert.doesNotMatch(autoAlwaysVerify, /Small, low-risk changes are yours to make/);
+assert.match(autoAlwaysVerify, /Trivial work is two moves/);
+assert.match(execute, /Trivial work is two moves/);
+assert.doesNotMatch(execute, /make the small change yourself/);
+assert.doesNotMatch(automation, /codara_remember|codara_recall/, "the automation roster has no memory tools");
+// An untrusted pull request's manager has only the orchestration bridge tools,
+// so the prompt must not send it to tools it does not have.
+assert.match(auto, /codara_plan_update/);
+assert.match(auto, /call codara_tools/);
+for (const mode of ["auto", "execute"]) {
+  const untrusted = extension.buildCoraPiSystemPrompt(mode, "fast", { untrusted: true });
+  for (const tool of ["codara_plan_update", "codara_tools", "web_search", "deep_search", "fetch_url", "codara_remember", "codara_recall"]) {
+    assert.doesNotMatch(untrusted, new RegExp(`\\b${tool}\\b`), `untrusted ${mode} prompt names ${tool}`);
+  }
+}
+// Memory guidance names both tiers and asks for an immediate save on a
+// correction, which is what makes the global tier ever get written.
+assert.match(auto, /save it right away with\s+codara_remember: scope global for the user's own preferences/);
+assert.match(auto, /scope workspace for facts about this repository/);
+assert.match(auto, /codara_recall/);
+assert.doesNotMatch(auto, /most runs teach nothing/);
 assert.match(auto, /direct-work exception remains binding here/);
 assert.match(auto, /do not spawn a plan verifier/);
 assert.match(auto, /at least one\s+bounded worker/);
@@ -89,7 +126,7 @@ assert.doesNotMatch(automation, /Call codara_complete/);
 assert.match(deep, /Deep execution policy/);
 assert.match(deep, /actively seek a counterexample/);
 assert.match(execute, /codara_whiteboard_update/);
-assert.match(execute, /Codara Studio's built-in Browser tab/);
+assert.match(execute, /Codara Studio's Browser tabs and the tabs\s+the user shared from their own Chrome/);
 assert.match(execute, /codara_preview_\*/);
 const studioToolNames = new Set(studioBridge.listTools().map((tool) => tool.name));
 assert.equal(studioToolNames.has("codara_whiteboard_get"), true);
@@ -130,6 +167,7 @@ const executeToolNames = new Set(executeBridge.listTools().map((tool) => tool.na
 for (const browserTool of [
   "codara_preview_list",
   "codara_preview_navigate",
+  "codara_preview_close",
   "codara_preview_snapshot",
   "codara_preview_screenshot",
   "codara_preview_mouse",
@@ -142,6 +180,7 @@ for (const browserTool of [
   "codara_preview_network",
   "codara_preview_resize",
   "codara_preview_run",
+  "codara_browser_use",
 ]) {
   assert.equal(executeToolNames.has(browserTool), true, `execute mode exposes ${browserTool}`);
 }
@@ -175,6 +214,15 @@ for (const command of [
   "python3 -m webbrowser https://example.com",
   "python3 -c 'import webbrowser; webbrowser.open(\"https://example.com\")'",
   "npx playwright open https://example.com",
+  "npx playwright codegen https://example.com",
+  "npx playwright test --headed",
+  "echo ready; open https://example.com",
+  // A shell's -c script and an eval string are command lines of their own;
+  // quote-aware splitting must not hide a launch inside them.
+  'bash -c "cd app && open http://localhost:3000"',
+  "sh -lc 'npm run build; xdg-open http://localhost:3000'",
+  "eval 'open https://example.com'",
+  "BROWSER=1 open https://example.com",
 ]) {
   assert.equal(browserPolicy.launchesExternalBrowser(command), true, `blocks external browser: ${command}`);
   assert.equal(
@@ -188,6 +236,13 @@ for (const command of [
   "git grep 'open https'",
   "printf 'open https://example.com'",
   "npm run build",
+  "npx playwright test tests/e2e/chat.spec.ts",
+  "npx playwright install chromium",
+  "pnpm exec playwright test",
+  "git commit -m 'docs: explain; open the panel first'",
+  'echo "step one; open the settings"',
+  'bash -c "npx playwright test && echo done"',
+  "CI=1 npx playwright test",
 ]) {
   assert.equal(browserPolicy.launchesExternalBrowser(command), false, `allows non-GUI shell work: ${command}`);
 }
@@ -209,10 +264,16 @@ const workerExtensionSource = fs.readFileSync(
 assert.match(workerExtensionSource, /tool_call.*studioBrowserOnlyDecision/);
 assert.match(workerExtensionSource, /const SCRATCHPAD_MAX_CHARS = 4_000/);
 assert.match(workerExtensionSource, /name: "scratchpad"/);
-assert.match(workerExtensionSource, /if \(!untrustedPullRequest\) registerScratchpadTool\(pi\)/);
+assert.match(
+  workerExtensionSource,
+  /if \(!untrustedPullRequest\) \{\s*registerScratchpadTool\(pi, process\.env\.CODARA_PI_SCRATCHPAD_PATH/,
+);
 assert.match(workerExtensionSource, /never hidden reasoning/);
 assert.match(workerExtensionSource, /For greetings, opinions, and questions/);
 assert.match(workerExtensionSource, /The result summary\s+is shown to the user verbatim/);
+assert.doesNotMatch(workerExtensionSource, /One concise outcome sentence/);
+assert.doesNotMatch(workerExtensionSource, /promptSnippet: tool\.description/);
+assert.doesNotMatch(managerExtensionSource, /promptSnippet: tool\.description/);
 assert.match(workerExtensionSource, /Do not inspect the repository or say "acknowledged"/);
 
 // Automation detection is the SPARK_AUTOMATION_ID stamp.
@@ -237,7 +298,28 @@ for (const automation of [false, true]) {
   assert.equal(policy.isWorkerSafeBridgeTool("codara_remember", automation, { CODARA_PI_DIRECT_TASK: "1" }), !automation);
 }
 assert.equal(policy.isWorkerSafeBridgeTool("codara_remember", false, { CODARA_PI_DIRECT_TASK: "1", CODARA_PI_PROJECT_POLICY: "untrusted-pull-request" }), false);
-assert.match(workerExtensionSource, /CODARA_PI_DIRECT_STUDIO_TOOLS !== "1" && tool.name !== "codara_remember"/);
+for (const tool of ["codara_worktree_create", "codara_worktree_list", "codara_worktree_remove", "codara_worktree_setup", "codara_worktree_cleanup"]) {
+  assert.equal(policy.isWorkerSafeBridgeTool(tool, false, {}), false, `${tool} stays out of chat workers`);
+  assert.equal(policy.isWorkerSafeBridgeTool(tool, true, { CODARA_PI_DIRECT_TASK: "1" }), false, `${tool} stays out of loom workers`);
+  assert.equal(policy.isWorkerSafeBridgeTool(tool, false, { CODARA_PI_DIRECT_TASK: "1" }), true, `${tool} reaches a direct task`);
+  assert.equal(
+    policy.isWorkerSafeBridgeTool(tool, false, { CODARA_PI_DIRECT_TASK: "1", CODARA_PI_PROJECT_POLICY: "untrusted-pull-request" }),
+    false,
+  );
+}
+// A fenced worker may scan worktrees for cleanup but never ask to remove any.
+for (const access of ["readonly", "edits"]) {
+  const env = { CODARA_PI_DIRECT_TASK: "1", CODARA_PI_WORKER_ACCESS: access };
+  const fence = policy.fencedToolNames(env);
+  assert.equal(policy.fenceDecision("codara_worktree_cleanup", { action: "scan" }, fence, env), undefined);
+  assert.equal(policy.fenceDecision("codara_worktree_cleanup", {}, fence, env), undefined);
+  assert.equal(policy.fenceDecision("codara_worktree_cleanup", { action: "remove", paths: ["/x"] }, fence, env)?.block, true);
+}
+assert.equal(policy.fenceDecision("codara_worktree_cleanup", { action: "remove" }, new Set(), { CODARA_PI_DIRECT_TASK: "1" }), undefined);
+assert.match(workerExtensionSource, /CODARA_PI_DIRECT_STUDIO_TOOLS !== "1" &&\s+tool.name !== "codara_remember" &&\s+tool.name !== "codara_recall"/);
+assert.equal(policy.isWorkerSafeBridgeTool("codara_recall", false, { CODARA_PI_DIRECT_TASK: "1" }), true);
+assert.equal(policy.isWorkerSafeBridgeTool("codara_recall", false, {}), false, "delegated workers get memory in the prompt, not the search tool");
+assert.equal(policy.isWorkerSafeBridgeTool("codara_recall", true, { CODARA_PI_DIRECT_TASK: "1" }), false);
 
 // Automation worker roster: lifecycle pair + board read appear; manager
 // orchestration and mutating board/whiteboard tools stay out.
@@ -322,6 +404,7 @@ const noInput = {};
   assert.equal(blocked("web_search")?.block, true, "readonly blocks web_search");
   assert.equal(blocked("deep_search")?.block, true, "readonly blocks deep_search");
   assert.equal(blocked("url_context")?.block, true, "readonly blocks url_context");
+  assert.equal(blocked("fetch_url")?.block, true, "readonly blocks fetch_url");
   assert.equal(blocked("grep")?.block, true, "blockedTools Grep maps to grep");
   assert.equal(blocked("read"), undefined, "read stays available");
   assert.equal(blocked("write"), undefined, "write (no path arg) stays available for the final report");
@@ -335,10 +418,21 @@ const noInput = {};
   assert.equal(blocked("codara_terminal_close")?.block, true, "readonly blocks terminal close");
   assert.equal(blocked("codara_preview_evaluate")?.block, true, "readonly blocks preview evaluate");
   assert.equal(blocked("codara_preview_run")?.block, true, "readonly blocks preview run (can embed evaluate steps)");
+  assert.equal(blocked("codara_browser_use")?.block, true, "readonly blocks browser code (can call evaluate)");
   assert.equal(blocked("codara_preview_click")?.block, true, "readonly blocks preview click");
   assert.equal(blocked("codara_preview_type")?.block, true, "readonly blocks preview type");
   assert.equal(blocked("codara_preview_screenshot"), undefined, "readonly keeps preview screenshot");
   assert.equal(blocked("codara_preview_navigate"), undefined, "readonly keeps preview navigate");
+  assert.equal(blocked("codara_preview_navigate", { tabId: "preview:3", url: "http://x" }), undefined, "readonly navigates Codara tabs");
+  assert.equal(blocked("codara_preview_navigate", { tabId: "chrome:12", url: "http://x" })?.block, true, "readonly may not navigate the user's browser");
+  assert.equal(blocked("codara_preview_close"), undefined, "readonly may close its own preview tab");
+  assert.equal(blocked("codara_preview_close", { tabId: "preview:3" }), undefined, "readonly closes Codara tabs");
+  assert.equal(blocked("codara_preview_close", { tabId: "chrome:12" })?.block, true, "readonly may not close the user's browser tabs");
+  assert.equal(blocked("codara_preview_resize", { tabId: "chrome:work-1a2b/12", width: 400, height: 800 })?.block, true, "readonly may not resize the user's browser");
+  assert.equal(blocked("codara_preview_emulate", { tabId: "chrome:12", network: "offline" })?.block, true, "readonly may not emulate on the user's browser");
+  assert.equal(blocked("codara_preview_emulate", { tabId: "chrome:12", device: "iPhone" })?.block, true, "readonly may not set a device on the user's browser");
+  assert.equal(blocked("codara_preview_emulate", { tabId: "preview:3", network: "offline" }), undefined, "readonly emulates on Codara tabs");
+  assert.equal(blocked("codara_preview_snapshot", { tabId: "chrome:12" }), undefined, "readonly reads the user's shared tab");
   assert.equal(blocked("codara_ask_user"), undefined, "readonly keeps ask_user");
 }
 {
@@ -351,7 +445,14 @@ const noInput = {};
   assert.equal(blocked("edit", { path: process.cwd() + "/x.txt" }), undefined, "edits keeps the edit tool inside the workspace");
   assert.equal(blocked("bash")?.block, true, "edits blocks bash");
   assert.equal(blocked("url_context")?.block, true, "WebFetch maps to url_context");
+  assert.equal(blocked("fetch_url")?.block, true, "edits blocks fetch_url (no network)");
+  assert.equal(
+    policy.fenceDecision("fetch_url", noInput, policy.fencedToolNames({ CODARA_PI_WORKER_BLOCKED_TOOLS: "WebFetch" }), {})?.block,
+    true,
+    "a bare WebFetch block also covers fetch_url",
+  );
   assert.equal(blocked("codara_terminal_create")?.block, true, "edits blocks terminal create");
+  assert.equal(blocked("codara_terminal_run")?.block, true, "edits blocks terminal run, which executes a command");
   assert.equal(blocked("codara_terminal_close")?.block, true, "edits blocks terminal close");
   assert.equal(blocked("codara_preview_evaluate")?.block, true, "edits blocks preview evaluate");
   assert.equal(blocked("codara_preview_click"), undefined, "edits keeps preview click");
@@ -395,6 +496,33 @@ const noInput = {};
     assert.match(result.reason, /step 2/);
     assert.match(result.reason, /No batch steps were run/);
   }
+}
+{
+  // A snippet reaches every browser tool through browser.call, past this
+  // fence, so blocking any browser tool blocks code mode as well.
+  for (const tool of ["codara_preview_upload", "codara_preview_chrome", "codara_preview_run", "codaraPreviewStorage"]) {
+    const env = { CODARA_PI_WORKER_BLOCKED_TOOLS: `WebSearch,${tool}` };
+    const result = policy.fenceDecision("codara_browser_use", { code: "await browser.call('upload', {})" }, policy.fencedToolNames(env), env);
+    assert.equal(result?.block, true, `blocking ${tool} blocks codara_browser_use`);
+    assert.match(result.reason, /blocks browser tools a snippet could call/);
+  }
+  // Its DevTools protocol commands (tab.cdp) go with it: blocking evaluate,
+  // network or emulate blocks the snippet tool, and the hidden tools behind
+  // tab.cdp are not in the worker roster to be called directly.
+  for (const tool of ["codara_preview_evaluate", "codara_preview_network", "codara_preview_emulate"]) {
+    const env = { CODARA_PI_WORKER_BLOCKED_TOOLS: tool };
+    const result = policy.fenceDecision("codara_browser_use", { code: "await tab.cdp.send('Runtime.evaluate', { expression: '1' })" }, policy.fencedToolNames(env), env);
+    assert.equal(result?.block, true, `blocking ${tool} blocks the DevTools commands of codara_browser_use`);
+  }
+  const workerRoster = new Set(workerBridge.listTools().map((tool) => tool.name));
+  for (const hidden of ["codara_preview_cdp", "codara_preview_cdp_events", "codara_preview_locate"]) {
+    assert.equal(workerRoster.has(hidden), false, `${hidden} is reachable only through a snippet`);
+  }
+  assert.equal(workerRoster.has("codara_browser_use"), true, "workers get the browser code tool");
+  const unrelated = { CODARA_PI_WORKER_BLOCKED_TOOLS: "WebSearch,Bash" };
+  assert.equal(policy.fenceDecision("codara_browser_use", { code: "1" }, policy.fencedToolNames(unrelated), unrelated), undefined);
+  const direct = { CODARA_PI_WORKER_BLOCKED_TOOLS: "codara_browser_use" };
+  assert.match(policy.fenceDecision("codara_browser_use", {}, policy.fencedToolNames(direct), direct).reason, /blocked by its worker config/);
 }
 {
   // No fence env at all: empty set, nothing vetoed.
@@ -618,10 +746,49 @@ const noInput = {};
   // A small-window model still compacts on Pi's earlier trigger.
   assert.equal(decide({ tokens: 200000, contextWindow: 200000 }), true);
 
+  // The user's percentage: the extension and the shared helper (meter, launch
+  // plan, manager trigger) must price it identically on every window.
+  assert.equal(shared.MIN_COMPACT_AT_TOKENS, compaction.MIN_COMPACT_AT_TOKENS);
+  assert.equal(shared.MIN_AUTO_COMPACT_PERCENT, compaction.MIN_AUTO_COMPACT_PERCENT);
+  assert.equal(shared.MAX_AUTO_COMPACT_PERCENT, compaction.MAX_AUTO_COMPACT_PERCENT);
+  for (const window of [32_000, 128_000, 200_000, 256_000, 400_000, 1_000_000]) {
+    for (const pct of [30, 50, 75, 90, 95]) {
+      assert.equal(
+        shared.autoCompactLimitTokens({ contextWindowTokens: window, percent: pct }),
+        compaction.effectiveCompactAtTokens(window, DEFAULT, compaction.resolveCompactPercent({ CODARA_PI_COMPACT_PERCENT: String(pct) })),
+        `percent helpers disagree for window=${window} pct=${pct}`,
+      );
+    }
+  }
+  assert.equal(compaction.resolveCompactPercent({}), null);
+  assert.equal(compaction.resolveCompactPercent({ CODARA_PI_COMPACT_PERCENT: "70" }), 70);
+  for (const absurd of ["", "0", "29", "96", "NaN", "lots"]) {
+    assert.equal(compaction.resolveCompactPercent({ CODARA_PI_COMPACT_PERCENT: absurd }), null, absurd);
+  }
+  assert.equal(compaction.effectiveCompactAtTokens(1_000_000, DEFAULT, 70), 700_000);
+  assert.equal(compaction.effectiveCompactAtTokens(200_000, DEFAULT, 95), 200_000 - 16384, "never later than Pi");
+  assert.equal(compaction.effectiveCompactAtTokens(100_000, DEFAULT, 30), 48_000, "never below the floor");
+  assert.equal(
+    compaction.shouldCompactNow({ usage: { tokens: 150_001, contextWindow: 200_000 }, thresholdTokens: DEFAULT, compactionInFlight: false, percent: 75 }),
+    true,
+    "75% of a 200k window compacts past 150k",
+  );
+  assert.equal(
+    compaction.shouldCompactNow({ usage: { tokens: 150_001, contextWindow: 200_000 }, thresholdTokens: DEFAULT, compactionInFlight: false, percent: 75, rearmAt: 160_000 }),
+    false,
+    "a re-arm point holds the trigger until the context grows past it",
+  );
+  assert.equal(compaction.rearmAtTokens(100_000, 150_000), 115_000);
+  assert.equal(compaction.rearmAtTokens(1_000, 1_000), 9_000);
+
   // Registration: one compaction per crossing, and the in-flight latch holds
   // until the session_compact event (or the completion callback) clears it.
   const handlers = new Map();
-  const pi = { on: (event, handler) => { handlers.set(event, handler); } };
+  const sent = [];
+  const pi = {
+    on: (event, handler) => { handlers.set(event, handler); },
+    sendMessage: (message, options) => { sent.push([message, options]); },
+  };
   let usage = { tokens: 10, contextWindow: 1000000 };
   let compactCalls = 0;
   let lastOptions = null;
@@ -644,14 +811,31 @@ const noInput = {};
     compaction.CORA_COMPACTION_INSTRUCTIONS,
     "automatic compaction uses Cora's continuation handoff prompt",
   );
-  assert.match(lastOptions.customInstructions, /newest user intent/);
-  assert.match(lastOptions.customInstructions, /exact files\/symbols\/commands\/IDs/);
-  assert.match(lastOptions.customInstructions, /pending tasks/);
+  assert.match(lastOptions.customInstructions, /quote every user requirement/);
+  assert.match(lastOptions.customInstructions, /## Errors and fixes/);
+  assert.match(lastOptions.customInstructions, /## Open todos/);
+  assert.match(lastOptions.customInstructions, /carry every unresolved item forward unchanged/);
   agentEnd({ type: "agent_end", messages: [] }, ctx);
   assert.equal(compactCalls, 1, "an in-flight compaction suppresses a second request");
 
   // Pi's own threshold compaction latches the flag the same way.
+  handlers.get("session_before_compact")({
+    type: "session_before_compact",
+    preparation: {
+      firstKeptEntryId: "e9",
+      messagesToSummarize: [
+        { role: "user", content: "Rename the export to parseLedger. Never touch src/legacy/." },
+        { role: "assistant", content: [{ type: "toolCall", id: "c1", name: "edit", arguments: { path: "src/ledger.ts" } }] },
+        { role: "toolResult", toolCallId: "c1", toolName: "edit", content: [{ type: "text", text: "ok" }] },
+      ],
+    },
+  });
   handlers.get("session_compact")({ type: "session_compact", reason: "threshold" });
+  assert.equal(sent.length, 1, "every compaction re-injects the durable state");
+  assert.equal(sent[0][0].customType, "codara-durable-state");
+  assert.match(sent[0][0].content, /Never touch src\/legacy\//, "the user's words survive verbatim");
+  assert.match(sent[0][0].content, /src\/ledger\.ts/, "the files touched survive");
+  assert.deepEqual(sent[0][1], { deliverAs: "nextTurn" }, "an idle session gets the state with its next prompt");
   usage = { tokens: 20, contextWindow: 1000000 };
   agentEnd({ type: "agent_end", messages: [] }, ctx);
   assert.equal(compactCalls, 1, "usage is re-read after a compaction, not looped on");
@@ -662,15 +846,57 @@ const noInput = {};
   assert.equal(compactCalls, 1, "a Pi-initiated compaction suppresses ours while it runs");
   lastOptions.onComplete?.();
   handlers.get("session_compact")({ type: "session_compact", reason: "threshold" });
+  assert.match(sent[1][0].content, /Never touch src\/legacy\//, "the ledger rolls forward across compactions");
+  usage = { tokens: 30, contextWindow: 1000000 };
+  agentEnd({ type: "agent_end", messages: [] }, ctx);
+  usage = { tokens: 1500, contextWindow: 1000000 };
   agentEnd({ type: "agent_end", messages: [] }, ctx);
   assert.equal(compactCalls, 2, "the trigger re-arms once the compaction finishes");
+
+  // No loop: a compaction that leaves the context over the limit (kept turns
+  // alone exceed it) waits for real growth before trying again.
+  handlers.get("session_compact")({ type: "session_compact", reason: "threshold" });
+  agentEnd({ type: "agent_end", messages: [] }, ctx);
+  agentEnd({ type: "agent_end", messages: [] }, ctx);
+  assert.equal(compactCalls, 2, "an over-limit context after compaction does not compact again at once");
+  usage = { tokens: 1500 + 8001, contextWindow: 1000000 };
+  agentEnd({ type: "agent_end", messages: [] }, ctx);
+  assert.equal(compactCalls, 3, "growth past the re-arm point compacts again");
+
+  // Deterministic fallback: the host's last rung asks for a summary built
+  // without a model, which must keep the user's words and cut where Pi cut.
+  const fallback = handlers.get("session_before_compact")({
+    type: "session_before_compact",
+    customInstructions: compaction.DETERMINISTIC_COMPACTION_MARKER,
+    preparation: {
+      firstKeptEntryId: "e42",
+      tokensBefore: 1500,
+      previousSummary: "## Goal\nShip the ledger.",
+      messagesToSummarize: [
+        { role: "assistant", content: [{ type: "toolCall", id: "c2", name: "bash", arguments: { command: "npm test" } }] },
+        { role: "toolResult", toolCallId: "c2", toolName: "bash", isError: true, content: [{ type: "text", text: "1 failing" }] },
+      ],
+      fileOps: { edited: new Set(["src/ledger.ts"]), written: new Set() },
+    },
+  });
+  assert.equal(fallback.compaction.firstKeptEntryId, "e42");
+  assert.match(fallback.compaction.summary, /Ship the ledger\./, "the previous summary carries forward");
+  assert.match(fallback.compaction.summary, /Never touch src\/legacy\//);
+  assert.match(fallback.compaction.summary, /FAILED bash/);
+  assert.deepEqual(fallback.compaction.details.modifiedFiles, ["src/ledger.ts"]);
+  assert.equal(
+    handlers.get("session_before_compact")({ type: "session_before_compact", customInstructions: "normal", preparation: { firstKeptEntryId: "e1" } }),
+    undefined,
+    "an ordinary compaction is left to the model",
+  );
 
   const hostHandlers = new Map();
   const entries = [];
   let aborts = 0;
-  compaction.registerContextCompaction({ on: (event, handler) => hostHandlers.set(event, handler), appendEntry: (...args) => entries.push(args) }, { CODARA_PI_HOST_COMPACTION: "1", CODARA_PI_COMPACT_AT_TOKENS: "1000" });
-  assert.equal(hostHandlers.has("agent_end"), false, "host-owned workers must not race an asynchronous extension compaction");
-  const hostContext = { getContextUsage: () => ({ tokens: 1500, contextWindow: 1000000 }), abort: () => { aborts += 1; } };
+  let hostUsage = { tokens: 1500, contextWindow: 1000000 };
+  compaction.registerContextCompaction({ on: (event, handler) => hostHandlers.set(event, handler), appendEntry: (...args) => entries.push(args), sendMessage: () => undefined }, { CODARA_PI_HOST_COMPACTION: "1", CODARA_PI_COMPACT_AT_TOKENS: "1000" });
+  assert.equal(hostHandlers.has("agent_end"), true, "agent_end only tracks whether a loop is running");
+  const hostContext = { getContextUsage: () => hostUsage, abort: () => { aborts += 1; } };
   const turnEnd = hostHandlers.get("turn_end");
   turnEnd({ toolResults: [] }, hostContext);
   turnEnd({ toolResults: [{ toolName: "submit_result" }] }, hostContext);
@@ -680,21 +906,104 @@ const noInput = {};
   assert.equal(aborts, 1);
   assert.equal(entries[0][0], "codara-context-pause");
   assert.equal(entries[0][1].reason, "threshold");
+  assert.equal(entries[0][1].phase, "mid-turn");
+  hostHandlers.get("session_before_compact")({});
   hostHandlers.get("session_compact")({});
+  hostUsage = { tokens: 200, contextWindow: 1000000 };
+  turnEnd({ toolResults: [{ toolName: "read" }] }, hostContext);
+  hostUsage = { tokens: 1500, contextWindow: 1000000 };
   turnEnd({ toolResults: [{ toolName: "read" }] }, hostContext);
   assert.equal(aborts, 2, "a completed compaction re-arms later tool rounds");
 
   const managerHandlers = new Map();
   const managerEntries = [];
-  compaction.registerContextCompaction({ on: (event, handler) => managerHandlers.set(event, handler), appendEntry: (...args) => managerEntries.push(args) }, { CODARA_PI_HOST_COMPACTION: "settled", CODARA_PI_COMPACT_AT_TOKENS: "1000" });
-  assert.equal(managerHandlers.has("turn_end"), false);
-  managerHandlers.get("agent_end")({}, hostContext);
-  managerHandlers.get("agent_end")({}, hostContext);
+  let managerAborts = 0;
+  let managerUsage = { tokens: 1500, contextWindow: 1000000 };
+  const managerContext = { getContextUsage: () => managerUsage, abort: () => { managerAborts += 1; } };
+  compaction.registerContextCompaction({ on: (event, handler) => managerHandlers.set(event, handler), appendEntry: (...args) => managerEntries.push(args), sendMessage: () => undefined }, { CODARA_PI_HOST_COMPACTION: "settled", CODARA_PI_COMPACT_AT_TOKENS: "1000" });
+  const managerTurnEnd = managerHandlers.get("turn_end");
+  assert.ok(managerTurnEnd, "managers pause mid-turn too");
+  managerTurnEnd({ toolResults: [] }, managerContext);
+  managerTurnEnd({ toolResults: [{ toolName: "codara_complete" }] }, managerContext);
+  assert.equal(managerAborts, 0, "the answer round and the closing tool never pause");
+  managerHandlers.get("agent_end")({}, managerContext);
+  managerHandlers.get("agent_end")({}, managerContext);
   assert.equal(managerEntries.length, 1, "manager marks one request for host settlement");
-  assert.equal(aborts, 2, "manager compaction cannot abort its completed answer");
+  assert.equal(managerEntries[0][1].phase, "settled");
+  assert.equal(managerAborts, 0, "manager compaction cannot abort its completed answer");
   managerHandlers.get("session_compact_failed")({});
-  managerHandlers.get("agent_end")({}, hostContext);
+  managerHandlers.get("agent_end")({}, managerContext);
+  assert.equal(managerEntries.length, 1, "a failed compaction is not retried at the same size");
+  managerUsage = { tokens: 1500 + 8001, contextWindow: 1000000 };
+  managerHandlers.get("agent_end")({}, managerContext);
   assert.equal(managerEntries.length, 2, "failed native compaction cannot disable the early trigger forever");
+
+  // Mid-turn: a long tool loop pauses at a round boundary.
+  const midHandlers = new Map();
+  const midEntries = [];
+  let midAborts = 0;
+  let midUsage = { tokens: 1500, contextWindow: 1000000 };
+  const midContext = { getContextUsage: () => midUsage, abort: () => { midAborts += 1; } };
+  compaction.registerContextCompaction({ on: (event, handler) => midHandlers.set(event, handler), appendEntry: (...args) => midEntries.push(args), sendMessage: () => undefined }, { CODARA_PI_HOST_COMPACTION: "settled", CODARA_PI_COMPACT_AT_TOKENS: "1000" });
+  midHandlers.get("agent_start")({});
+  midHandlers.get("turn_end")({ toolResults: [{ toolName: "bash" }] }, midContext);
+  assert.equal(midAborts, 1, "a manager tool round over the limit aborts at the boundary");
+  assert.equal(midEntries[0][1].phase, "mid-turn");
+  // The host found nothing to compact and resumed: the resumed turn must not
+  // pause again at the same size.
+  midHandlers.get("agent_end")({}, midContext);
+  midHandlers.get("agent_start")({});
+  midHandlers.get("turn_end")({ toolResults: [{ toolName: "bash" }] }, midContext);
+  assert.equal(midAborts, 1, "an unanswered pause re-arms on growth, never in a loop");
+  midUsage = { tokens: 1500 + 8001, contextWindow: 1000000 };
+  midHandlers.get("turn_end")({ toolResults: [{ toolName: "bash" }] }, midContext);
+  assert.equal(midAborts, 2);
+
+  // A round that hands the turn back to the user (a question, a handed-off
+  // iteration, opened terminals) never pauses: the continuation prompt would
+  // invite work the user has not approved. agent_end compacts it instead.
+  for (const tool of ["codara_ask_user", "codara_request_next_iteration", "codara_spawn_terminals"]) {
+    assert.ok(compaction.MANAGER_TURN_ENDING_TOOLS.has(tool), `${tool} ends the manager's turn`);
+    const handlers = new Map();
+    const pauses = [];
+    let aborted = 0;
+    const context = { getContextUsage: () => ({ tokens: 5000, contextWindow: 1000000 }), abort: () => { aborted += 1; } };
+    compaction.registerContextCompaction({ on: (event, handler) => handlers.set(event, handler), appendEntry: (...args) => pauses.push(args), sendMessage: () => undefined }, { CODARA_PI_HOST_COMPACTION: "settled", CODARA_PI_COMPACT_AT_TOKENS: "1000" });
+    handlers.get("agent_start")({});
+    handlers.get("turn_end")({ toolResults: [{ toolName: "read" }, { toolName: tool }] }, context);
+    assert.equal(aborted, 0, `${tool}: no mid-turn pause`);
+    handlers.get("agent_end")({}, context);
+    assert.equal(pauses.length, 1, `${tool}: the settled turn still compacts`);
+    assert.equal(pauses[0][1].phase, "settled");
+  }
+
+  // The model reads a round before any compaction folds it. When only the
+  // results it has not read crossed the limit, compacting now would summarize
+  // output it never saw (and a model that needs it would rerun the tool into
+  // the same compaction); the pause waits one round.
+  const text = (chars) => [{ type: "text", text: "x".repeat(chars) }];
+  assert.equal(compaction.unreadToolResultTokens([{ content: text(4000) }, { content: "y".repeat(400) }, {}]), 1100);
+  const over = { usage: { tokens: 10_000, contextWindow: 1_000_000 }, thresholdTokens: 5_000, compactionInFlight: false };
+  assert.equal(compaction.shouldCompactNow({ ...over, unreadTokens: 6_000 }), false, "the model has seen only 4k");
+  assert.equal(compaction.shouldCompactNow({ ...over, unreadTokens: 5_000 }), false, "exactly at the limit once read");
+  assert.equal(compaction.shouldCompactNow({ ...over, unreadTokens: 4_999 }), true, "already past the limit before this round");
+  assert.equal(compaction.shouldCompactNow(over), true);
+  for (const host of ["1", "settled"]) {
+    const handlers = new Map();
+    const pauses = [];
+    let usage = { tokens: 900, contextWindow: 1000000 };
+    const context = { getContextUsage: () => usage, abort: () => undefined };
+    compaction.registerContextCompaction({ on: (event, handler) => handlers.set(event, handler), appendEntry: (...args) => pauses.push(args), sendMessage: () => undefined }, { CODARA_PI_HOST_COMPACTION: host, CODARA_PI_COMPACT_AT_TOKENS: "1000" });
+    handlers.get("agent_start")({});
+    // A 60k-token log lands on a 900-token context.
+    usage = { tokens: 900 + 60_000, contextWindow: 1000000 };
+    handlers.get("turn_end")({ toolResults: [{ toolName: "bash", content: text(240_000) }] }, context);
+    assert.equal(pauses.length, 0, `host=${host}: the unread log is not compacted away`);
+    // The model answered with it in view; the next round compacts.
+    usage = { tokens: 900 + 60_000 + 300, contextWindow: 1000000 };
+    handlers.get("turn_end")({ toolResults: [{ toolName: "read", content: text(1_200) }] }, context);
+    assert.equal(pauses.length, 1, `host=${host}: the round after it compacts`);
+  }
 
   // Both Cora extensions must actually wire the trigger up.
   for (const file of ["index.ts", "worker.ts"]) {
@@ -710,35 +1019,75 @@ const noInput = {};
   }
 }
 
-// ── Provider service tier (resources/pi-cora/service-tier.ts) ──────────────
-// OpenAI's faster tier is opt-in from Settings; Anthropic can never carry a
-// fast/priority tier at all. The extension's before_provider_request hook is
-// the last code to touch the request body, so this is where both are decided.
+// ── Fast mode (resources/pi-cora/service-tier.ts) ──────────────────────────
+// One opt-in setting: OpenAI's priority tier, or Anthropic's `speed: "fast"`
+// on the Claude models that accept it. The extension's before_provider_request
+// hook is the last code to touch the request body, so this is where it is
+// decided, for the manager and for every worker.
 {
   const tier = loadTypeScriptModule(
     path.join(__dirname, "..", "resources", "pi-cora", "service-tier.ts"),
   );
+  const shared = loadTypeScriptModule(
+    path.join(__dirname, "..", "src", "shared", "fast-mode.ts"),
+  );
   const apply = tier.applyServiceTierPolicy;
   const FAST = tier.OPENAI_FAST_SERVICE_TIER;
+  const BETA = "fast-mode-2026-02-01";
   // "priority" and "fast" are OpenAI aliases for the same tier (renamed to
   // "Fast mode" on 2026-07-30). We send "priority": it is the spelling pi-ai
   // types and prices, and the only one in the OpenAI Responses service_tier
   // union.
   assert.equal(FAST, "priority", "pi-ai types and prices the 'priority' spelling");
 
-  // (a) Setting OFF: no tier on an OpenAI request.
+  // The extension cannot import src/shared, so its copies must not drift.
+  assert.deepEqual([...tier.ANTHROPIC_FAST_MODE_MODELS], [...shared.ANTHROPIC_FAST_MODE_MODELS]);
+  assert.equal(tier.ANTHROPIC_FAST_MODE_BETA, shared.ANTHROPIC_FAST_MODE_BETA);
+  assert.equal(tier.ANTHROPIC_FAST_MODE_BETA, BETA);
+  assert.equal(tier.FAST_MODE_FALLBACK_MARKER, shared.FAST_MODE_FALLBACK_MARKER);
+  for (const model of [
+    "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "Claude-Opus-5", "claude-opus-5:1m",
+    "claude-opus-4-8-20260601", "claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5",
+    "claude-sonnet-5-5", "claude-fable-5-1", "claude-haiku-5-5", "", undefined, 42,
+  ]) {
+    assert.equal(
+      tier.anthropicModelSupportsFastMode(model),
+      shared.anthropicModelSupportsFastMode(typeof model === "string" ? model : undefined),
+      `extension and app disagree about ${String(model)}`,
+    );
+  }
+  for (const model of ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"]) {
+    assert.equal(tier.anthropicModelSupportsFastMode(model), true, `${model} supports fast mode`);
+  }
+  // Opus 4.7 errors on speed:fast and Opus 4.6 silently ignores it; every
+  // Sonnet, Haiku and Fable rejects it.
+  for (const model of ["claude-opus-4-7", "claude-opus-4-6", "claude-sonnet-5", "claude-fable-5-1", "claude-haiku-4-5"]) {
+    assert.equal(tier.anthropicModelSupportsFastMode(model), false, `${model} has no fast mode`);
+  }
+
+  // (a) Setting OFF: nothing fast-mode shaped on any request.
   for (const provider of ["openai-codex", "openai"]) {
     const body = apply({ model: "gpt-5.6-sol", input: [] }, provider, false);
     assert.equal("service_tier" in body, false, `${provider} must carry no tier when fast mode is off`);
   }
-  // An inherited tier is removed rather than left to ride along.
   assert.equal(
     "service_tier" in apply({ service_tier: "priority" }, "openai-codex", false),
     false,
     "fast mode off must strip a tier the body already carried",
   );
+  {
+    const body = apply(
+      { model: "claude-opus-5", speed: "fast", betas: ["oauth-2025-04-20", BETA], messages: [] },
+      "anthropic",
+      false,
+    );
+    assert.equal("speed" in body, false, "fast mode off strips speed");
+    assert.deepEqual(body.betas, ["oauth-2025-04-20"], "fast mode off strips only the fast beta");
+    const lone = apply({ model: "claude-opus-5", betas: [BETA] }, "anthropic", false);
+    assert.equal("betas" in lone, false, "an emptied beta list is removed, not sent empty");
+  }
 
-  // (b) Setting ON: the fast tier is present on OpenAI requests.
+  // (b) Setting ON, OpenAI: the priority tier.
   for (const provider of ["openai-codex", "openai"]) {
     assert.equal(
       apply({ model: "gpt-5.6-sol", input: [] }, provider, true).service_tier,
@@ -747,39 +1096,57 @@ const noInput = {};
     );
   }
 
-  // (c) Anthropic NEVER carries a fast tier, either way. Not gated on the
-  // setting, not gated on anything a prompt or a future UI could reach.
-  for (const fastMode of [false, true]) {
-    const clean = apply({ model: "claude-opus-5", messages: [] }, "anthropic", fastMode);
-    assert.equal(
-      "service_tier" in clean,
-      false,
-      `anthropic must never carry a service tier (fastMode=${fastMode})`,
+  // (c) Setting ON, Anthropic, supported model: speed + beta, appended once
+  // to whatever betas pi-ai already chose.
+  for (const model of ["claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"]) {
+    const body = apply(
+      { model, betas: ["claude-code-20250219", "oauth-2025-04-20"], messages: [] },
+      "anthropic",
+      true,
     );
-    // Even when something upstream already put one there.
+    assert.equal(body.speed, "fast", `${model} gets speed:fast`);
+    assert.deepEqual(body.betas, ["claude-code-20250219", "oauth-2025-04-20", BETA]);
+    assert.equal("service_tier" in body, false, "fast mode is not Anthropic's Priority Tier");
+  }
+  assert.deepEqual(apply({ model: "claude-opus-5" }, "anthropic", true).betas, [BETA]);
+  assert.deepEqual(
+    apply({ model: "claude-opus-5", betas: [BETA] }, "anthropic", true).betas,
+    [BETA],
+    "the beta is never duplicated",
+  );
+
+  // (d) Setting ON, Anthropic, unsupported model: standard speed, nothing
+  // added, and a stray speed is removed, because those models answer it with
+  // an error.
+  for (const model of ["claude-sonnet-5", "claude-opus-4-7", "claude-fable-5-1", "claude-haiku-4-5"]) {
+    const body = apply({ model, speed: "fast", betas: [BETA, "oauth-2025-04-20"] }, "anthropic", true);
+    assert.equal("speed" in body, false, `${model} must not carry speed`);
+    assert.deepEqual(body.betas, ["oauth-2025-04-20"], `${model} must not carry the fast beta`);
+  }
+
+  // (e) Anthropic never carries a service tier, either way.
+  for (const fastMode of [false, true]) {
     for (const key of ["service_tier", "serviceTier"]) {
       const stripped = apply({ [key]: "priority", model: "claude-opus-5" }, "anthropic", fastMode);
-      assert.equal(
-        key in stripped,
-        false,
-        `anthropic must strip an inherited ${key} (fastMode=${fastMode})`,
-      );
+      assert.equal(key in stripped, false, `anthropic must strip an inherited ${key} (fastMode=${fastMode})`);
     }
   }
 
-  // The guard keys off the provider Codara stamps, so verify the classifiers.
+  // (f) A declined model skips fast mode for either provider.
+  assert.equal("speed" in apply({ model: "claude-opus-5" }, "anthropic", true, (m) => m === "claude-opus-5"), false);
+  assert.equal("service_tier" in apply({ model: "gpt-5.6-sol" }, "openai-codex", true, () => true), false);
+
   assert.equal(tier.isAnthropicProvider("anthropic"), true);
   assert.equal(tier.isAnthropicProvider("ANTHROPIC"), true);
   assert.equal(tier.isAnthropicProvider("openai-codex"), false);
   assert.equal(tier.isOpenAiProvider("openai-codex"), true);
   assert.equal(tier.isOpenAiProvider("anthropic"), false);
 
-  // An unknown provider never GAINS a tier from Codara.
-  assert.equal(
-    "service_tier" in apply({ model: "mystery" }, "some-future-provider", true),
-    false,
-    "an unrecognized provider must not be given a tier",
-  );
+  // An unknown provider never GAINS anything from Codara.
+  for (const provider of ["some-future-provider", "openrouter", "xai"]) {
+    const body = apply({ model: "claude-opus-5" }, provider, true);
+    assert.equal("service_tier" in body || "speed" in body || "betas" in body, false, `${provider} gains nothing`);
+  }
 
   // Env reading: only the exact "1" stamp enables fast mode.
   assert.equal(tier.fastModeEnabled({}), false);
@@ -795,21 +1162,179 @@ const noInput = {};
   // A malformed payload passes through instead of failing the turn.
   for (const odd of [null, undefined, 42, "body", []]) {
     assert.equal(apply(odd, "openai-codex", true), odd);
+    assert.equal(apply(odd, "anthropic", true), odd);
   }
 
-  // Registration wires the hook Pi actually consults.
-  const handlers = new Map();
-  tier.registerServiceTierPolicy(
-    { on: (event, handler) => handlers.set(event, handler) },
-    { CODARA_PI_PROVIDER: "anthropic", CODARA_PI_FAST_MODE: "1" },
+  // Refusal classification: only failures that can be about fast mode.
+  const piAiDist = path.join(
+    __dirname, "..", "node_modules", "@earendil-works", "pi-coding-agent", "node_modules",
+    "@earendil-works", "pi-ai", "dist",
   );
-  const hook = handlers.get("before_provider_request");
-  assert.ok(hook, "before_provider_request must be the service-tier seam");
-  assert.equal(
-    "service_tier" in hook({ type: "before_provider_request", payload: { service_tier: "priority" } }),
-    false,
-    "an anthropic session strips the tier even with fast mode stamped on",
+  const { isRetryableAssistantError } = await import(
+    require("node:url").pathToFileURL(path.join(piAiDist, "utils", "retry.js")).href
   );
+  const { isContextOverflow } = await import(
+    require("node:url").pathToFileURL(path.join(piAiDist, "utils", "overflow.js")).href
+  );
+  const refusals = [
+    ['400 {"type":"error","error":{"type":"invalid_request_error","message":"speed: fast mode is not supported for this model"}}', false, "400"],
+    ['429 {"type":"error","error":{"type":"rate_limit_error","message":"Fast mode rate limit exceeded"}}', true, "429"],
+    ['529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}', true, "529"],
+    ['400 {"type":"error","error":{"type":"invalid_request_error","message":"Fast mode requires usage credits; check billing"}}', false, "400"],
+    ['403 {"type":"error","error":{"type":"permission_error","message":"Fast mode has been disabled by your organization"}}', false, "403"],
+    ["400 Unsupported service_tier: priority", false, "400"],
+    // Matched on status alone: it may have nothing to do with fast mode, so it
+    // only cools fast mode down instead of turning it off for the process.
+    ['400 {"type":"error","error":{"type":"invalid_request_error","message":"messages.0.content.1.image.source.base64: image exceeds 5 MB maximum"}}', true, "400"],
+    ['404 {"type":"error","error":{"type":"not_found_error","message":"Not found"}}', true, "404"],
+  ];
+  for (const [error, transient, status] of refusals) {
+    assert.deepEqual(tier.classifyFastModeRefusal(error), { transient, status }, error);
+    const rewritten = tier.fastModeFallbackError("claude-opus-5", tier.classifyFastModeRefusal(error));
+    assert.ok(rewritten.startsWith(tier.FAST_MODE_FALLBACK_MARKER));
+    assert.doesNotMatch(rewritten, /billing/i, "the provider's own wording is never carried over");
+    const failed = { role: "assistant", stopReason: "error", errorMessage: rewritten, content: [], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } };
+    assert.equal(isRetryableAssistantError(failed), true, `Pi must retry after: ${error}`);
+    assert.equal(isContextOverflow(failed, 200_000), false, "the fallback must not read as an overflow");
+    const note = shared.fastModeFallbackNote(rewritten);
+    assert.ok(note && note.includes("claude-opus-5 declined fast mode") && !note.includes(tier.FAST_MODE_FALLBACK_MARKER), note);
+  }
+  assert.equal(shared.fastModeFallbackNote("429 rate limited"), null);
+  for (const unrelated of [
+    '401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}',
+    '400 {"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 300000 tokens > 200000 maximum"}}',
+    "socket hang up",
+    "500 Internal server error",
+    "",
+    undefined,
+    `${tier.FAST_MODE_FALLBACK_MARKER} claude-opus-5 declined fast mode (HTTP 400)`,
+  ]) {
+    assert.equal(tier.classifyFastModeRefusal(unrelated), null, `not a fast-mode refusal: ${unrelated}`);
+  }
+
+  // Declines: permanent for a refusal, a cooldown for a rate limit.
+  {
+    let clock = 1_000;
+    const declines = tier.createFastModeDeclines(() => clock);
+    declines.decline("claude-opus-4-7", { transient: false, status: "400" });
+    declines.decline("claude-opus-5", { transient: true, status: "429" });
+    assert.equal(declines.declined("claude-opus-4-7"), true);
+    assert.equal(declines.declined("claude-opus-5"), true);
+    assert.equal(declines.declined("gpt-5.6-sol"), false);
+    clock += tier.FAST_MODE_COOLDOWN_MS + 1;
+    assert.equal(declines.declined("claude-opus-5"), false, "a rate-limit decline cools down");
+    assert.equal(declines.declined("claude-opus-4-7"), true, "a refusal lasts for the process");
+  }
+
+  // Registration: the hook shapes requests, and a refused fast request is
+  // retried once at standard speed with the marker note.
+  function register(env) {
+    const handlers = new Map();
+    tier.registerServiceTierPolicy({ on: (event, handler) => handlers.set(event, handler) }, env);
+    return handlers;
+  }
+  {
+    const handlers = register({ CODARA_PI_PROVIDER: "anthropic", CODARA_PI_FAST_MODE: "1" });
+    const request = handlers.get("before_provider_request");
+    const messageEnd = handlers.get("message_end");
+    assert.ok(request, "before_provider_request must be the fast-mode seam");
+    assert.ok(messageEnd, "message_end drives the fallback");
+    assert.equal(
+      "service_tier" in request({ type: "before_provider_request", payload: { service_tier: "priority" } }),
+      false,
+      "an anthropic session never sends a service tier",
+    );
+    const first = request({ type: "before_provider_request", payload: { model: "claude-opus-5", betas: ["oauth-2025-04-20"] } });
+    assert.equal(first.speed, "fast");
+    const failed = {
+      role: "assistant",
+      stopReason: "error",
+      errorMessage: '400 {"type":"error","error":{"type":"invalid_request_error","message":"speed is not available"}}',
+      content: [],
+    };
+    const replaced = messageEnd({ type: "message_end", message: failed });
+    assert.ok(replaced?.message, "a refused fast request is rewritten");
+    assert.equal(replaced.message.role, "assistant", "the replacement keeps the role");
+    assert.equal(replaced.message.stopReason, "error");
+    assert.ok(replaced.message.errorMessage.startsWith(tier.FAST_MODE_FALLBACK_MARKER));
+    // Pi's retry rebuilds the body and asks the hook again: standard speed now.
+    const retry = request({ type: "before_provider_request", payload: { model: "claude-opus-5", betas: ["oauth-2025-04-20"] } });
+    assert.equal("speed" in retry, false, "the retry runs at standard speed");
+    assert.deepEqual(retry.betas, ["oauth-2025-04-20"]);
+    // Only once: the retry's own failure is reported as it is.
+    assert.equal(messageEnd({ type: "message_end", message: { ...failed } }), undefined);
+    // A successful fast reply, a user message, or a request that never asked
+    // for fast mode is left alone.
+    const other = register({ CODARA_PI_PROVIDER: "anthropic", CODARA_PI_FAST_MODE: "1" });
+    other.get("before_provider_request")({ type: "before_provider_request", payload: { model: "claude-opus-5" } });
+    assert.equal(other.get("message_end")({ type: "message_end", message: { role: "user", content: [] } }), undefined);
+    assert.equal(other.get("message_end")({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [] } }), undefined);
+    const sonnet = register({ CODARA_PI_PROVIDER: "anthropic", CODARA_PI_FAST_MODE: "1" });
+    sonnet.get("before_provider_request")({ type: "before_provider_request", payload: { model: "claude-sonnet-5" } });
+    assert.equal(sonnet.get("message_end")({ type: "message_end", message: { ...failed } }), undefined);
+  }
+  {
+    const handlers = register({ CODARA_PI_PROVIDER: "openai-codex", CODARA_PI_FAST_MODE: "1" });
+    const request = handlers.get("before_provider_request");
+    assert.equal(request({ type: "before_provider_request", payload: { model: "gpt-5.6-sol" } }).service_tier, FAST);
+    const replaced = handlers.get("message_end")({
+      type: "message_end",
+      message: { role: "assistant", stopReason: "error", errorMessage: "400 Unsupported service_tier: priority", content: [] },
+    });
+    assert.ok(replaced.message.errorMessage.startsWith(tier.FAST_MODE_FALLBACK_MARKER));
+    assert.equal("service_tier" in request({ type: "before_provider_request", payload: { model: "gpt-5.6-sol" } }), false);
+  }
+  {
+    // Fast mode off registers no fallback at all.
+    const handlers = register({ CODARA_PI_PROVIDER: "anthropic" });
+    assert.equal(handlers.has("message_end"), false);
+    assert.equal("speed" in handlers.get("before_provider_request")({ payload: { model: "claude-opus-5" } }), false);
+  }
+
+  // The real request, offline: pi-ai's Anthropic builder runs the hook, and
+  // the SDK it uses turns `betas` into the anthropic-beta header and sends
+  // `speed` in the body. A stub fetch answers, so nothing leaves the machine.
+  {
+    const toUrl = (file) => require("node:url").pathToFileURL(path.join(piAiDist, file)).href;
+    const anthropic = await import(toUrl("api/anthropic-messages.js"));
+    const { getModel } = await import(toUrl("compat.js"));
+    async function capture(modelId, fastMode) {
+      const sent = [];
+      const fetchStub = async (url, init) => {
+        sent.push({ url: String(url), headers: new Headers(init.headers), body: JSON.parse(init.body) });
+        return new Response(
+          JSON.stringify({ type: "error", error: { type: "invalid_request_error", message: "offline stub" } }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      };
+      const stream = anthropic.stream(
+        getModel("anthropic", modelId),
+        { systemPrompt: "x", messages: [{ role: "user", content: "hi", timestamp: Date.now() }] },
+        {
+          apiKey: "sk-ant-oat01-offline-test",
+          fetch: fetchStub,
+          maxRetries: 0,
+          onPayload: (payload) => apply(payload, "anthropic", fastMode),
+        },
+      );
+      for await (const _event of stream) { /* drain */ }
+      assert.equal(sent.length, 1, "exactly one request was attempted");
+      return sent[0];
+    }
+    const fast = await capture("claude-opus-5", true);
+    assert.equal(new URL(fast.url).hostname, "api.anthropic.com");
+    assert.match(new URL(fast.url).search, /beta=true/, "fast mode needs the beta messages endpoint");
+    assert.equal(fast.body.speed, "fast");
+    assert.equal("betas" in fast.body, false, "betas travel as a header, not in the body");
+    assert.ok(fast.headers.get("anthropic-beta").split(",").includes(BETA), fast.headers.get("anthropic-beta"));
+    assert.ok(fast.headers.get("anthropic-beta").split(",").includes("oauth-2025-04-20"), "pi-ai's own betas survive");
+    const standard = await capture("claude-opus-5", false);
+    assert.equal("speed" in standard.body, false);
+    assert.equal(standard.headers.get("anthropic-beta").split(",").includes(BETA), false);
+    const sonnet = await capture("claude-sonnet-5", true);
+    assert.equal("speed" in sonnet.body, false, "an unsupported model is never sent speed");
+    assert.equal(sonnet.headers.get("anthropic-beta").split(",").includes(BETA), false);
+  }
 
   // Both extensions must wire it up.
   for (const file of ["index.ts", "worker.ts"]) {
@@ -820,7 +1345,7 @@ const noInput = {};
     assert.match(
       source,
       /registerServiceTierPolicy\(pi\)/,
-      `${file} must register the service-tier policy`,
+      `${file} must register the fast-mode policy`,
     );
   }
 }
@@ -901,11 +1426,86 @@ const noInput = {};
   assert.equal(typeof studioBridge.requestCodara, "function", "the bridge exposes the socket call");
 }
 
+{
+  const families = loadTypeScriptModule(
+    path.join(__dirname, "..", "resources", "pi-cora", "tool-families.ts"),
+  );
+  process.env.SPARK_MCP_MODE = "execute";
+  delete require.cache[require.resolve(studioBridgePath)];
+  const managerTools = require(studioBridgePath).listTools();
+  const byFamily = {};
+  for (const tool of managerTools) {
+    const family = families.studioToolFamily(tool.name);
+    if (family) byFamily[family] = (byFamily[family] ?? 0) + 1;
+    const snippet = families.toolPromptSnippet(tool.description);
+    assert.ok(snippet.length > 0 && snippet.length <= 100, `${tool.name} snippet stays one short line`);
+    assert.doesNotMatch(snippet, /\n/, `${tool.name} snippet is a single line`);
+  }
+  for (const family of families.STUDIO_TOOL_FAMILIES) {
+    assert.ok(byFamily[family] > 0, `the manager roster has ${family} tools`);
+    assert.ok(families.STUDIO_FAMILY_GUIDANCE[family].length > 0);
+  }
+  // Pi never receives the MCP initialize text, so its own prompts steer dev
+  // servers to the kept-server tool and keep terminal tabs for watchers.
+  assert.match(families.STUDIO_FAMILY_GUIDANCE.terminal, /Dev servers: list the workspace's saved ones with codara_terminal_servers/);
+  assert.match(families.STUDIO_FAMILY_GUIDANCE.terminal, /start watchers and anything else that does not exit with\s+codara_terminal_create/);
+  assert.match(extension.CORA_PROCESS_RULE, /Start a dev server with\s+codara_terminal_servers/);
+  assert.match(extension.CORA_PROCESS_RULE, /Start a watcher or any other command that does not exit in a terminal\s+tab with codara_terminal_create/);
+  assert.equal(extension.coraProcessRule(true), extension.CORA_PROCESS_RULE);
+  assert.doesNotMatch(extension.coraProcessRule(false), /codara_terminal_servers/, "a worker fenced from the servers tool is not sent to it");
+  assert.match(extension.coraProcessRule(false), /Start it in a terminal\s+tab with codara_terminal_create/);
+  assert.match(workerExtensionSource, /coraProcessRule\(!fence\.has\("codara_terminal_servers"\)\)/);
+  for (const core of ["codara_spawn_workers", "codara_complete", "codara_ask_user", "codara_remember", "codara_wait_for_workers"]) {
+    assert.equal(families.studioToolFamily(core), null, `${core} is never deferred`);
+  }
+  assert.equal(families.studioToolFamily("codara_list_automations"), "automations");
+  assert.equal(families.studioToolFamily("codara_set_automation_enabled"), "automations");
+  assert.equal(families.studioToolFamily("codara_worktree_remove"), "worktrees");
+  assert.equal(families.studioToolFamily("codara_browser_use"), "browser", "the browser code tool loads with the browser family");
+  assert.equal(
+    families.toolPromptSnippet("Spawn workers now. They run in parallel and report back."),
+    "Spawn workers now.",
+  );
+  assert.match(families.toolPromptSnippet("x ".repeat(200)), /\.\.\.$/);
+
+  assert.deepEqual(families.familiesForRequest("hi, what does run-store.ts do?"), []);
+  assert.deepEqual(families.familiesForRequest("draw me a diagram of the auth flow"), ["whiteboard"]);
+  assert.deepEqual(families.familiesForRequest("start the dev server and check localhost:5173"), ["browser", "terminal"]);
+  assert.deepEqual(families.familiesForRequest("every monday summarize open PRs"), ["automations"]);
+  assert.deepEqual(families.familiesForRequest("move the card to done on the board"), ["board"]);
+  assert.deepEqual(families.familiesForRequest("do this in separate worktrees"), ["worktrees"]);
+
+  const branch = [
+    { type: "message", message: { role: "user", content: "hello" } },
+    {
+      type: "message",
+      message: { role: "assistant", content: [{ type: "toolCall", name: "codara_tools", arguments: {} }] },
+    },
+    {
+      type: "message",
+      message: { role: "toolResult", toolName: "codara_tools", addedToolNames: ["codara_whiteboard_get"] },
+    },
+    {
+      type: "message",
+      message: { role: "assistant", content: [{ type: "toolCall", name: "codara_preview_navigate" }] },
+    },
+    { type: "custom", message: { role: "assistant", content: [{ type: "toolCall", name: "codara_board_get" }] } },
+  ];
+  assert.deepEqual([...families.familiesUsedInBranch(branch)].sort(), ["browser", "whiteboard"]);
+  assert.equal(families.branchHasAssistantTurn(branch), true);
+  assert.equal(families.branchHasAssistantTurn(branch.slice(0, 1)), false);
+
+  assert.match(managerExtensionSource, /name: STUDIO_TOOL_LOADER_NAME/);
+  assert.match(managerExtensionSource, /familiesUsedInBranch\(ctx\.sessionManager\.getBranch\(\)\)/);
+  assert.match(managerExtensionSource, /CODARA_PI_ALWAYS_VERIFY_EDITS/);
+  console.log("pi manager Studio tool families (lazy loading): ok");
+}
+
 console.log("pi Cora mode + execution-policy prompts: ok");
 console.log("pi Claude login renewal (through Studio): ok");
 console.log("pi worker policy (roster + access fence): ok");
 console.log("pi session compaction (256k trigger): ok");
-console.log("pi provider service tier (OpenAI opt-in, Anthropic never): ok");
+console.log("pi fast mode (opt-in, OpenAI tier + Claude Opus speed, standard-speed fallback): ok");
 })().catch((error) => {
   console.error(error);
   process.exitCode = 1;

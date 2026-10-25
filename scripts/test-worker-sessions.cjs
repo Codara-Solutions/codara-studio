@@ -499,18 +499,18 @@ async function main() {
     listWorkerSessions("codex", workspace, { codexHome: process.env.CODEX_HOME }),
   ]);
   check(
-    "Directory picker lists only the interactive Claude sessions",
+    "Per-folder list lists only the interactive Claude sessions",
     claudeSessions.length === 2 &&
       claudeSessions.some((item) => item.sessionId === claudeId) &&
       claudeSessions.every((item) => item.sessionId !== automatedClaudeId),
   );
   const buriedTitleRow = claudeSessions.find((item) => item.sessionId === buriedTitleClaudeId);
   check(
-    "Directory picker rescues a session whose ai-title sits past the head window",
-    buriedTitleRow?.title === "buried-topic" && buriedTitleRow?.preview === null,
+    "Per-folder list rescues a session whose ai-title sits past the head window",
+    buriedTitleRow?.title === "buried-topic",
   );
   check(
-    "Directory picker still hides command-only transcripts",
+    "Per-folder list still hides command-only transcripts",
     claudeSessions.every((item) => item.sessionId !== commandOnlyClaudeId),
   );
   check(
@@ -518,7 +518,7 @@ async function main() {
     allSessions.every((item) => item.sessionId !== commandOnlyClaudeId),
   );
   check(
-    "Directory picker lists only the interactive Codex session",
+    "Per-folder list lists only the interactive Codex session",
     codexSessions.length === 1 && codexSessions[0].sessionId === codexId,
   );
   const otherCodexSessions = await listWorkerSessions("codex", workspace, {
@@ -632,12 +632,6 @@ async function main() {
 
   const claudeRow = claudeSessions.find((item) => item.sessionId === claudeId);
   check("Per-cwd scan prefers the generated ai-title", claudeRow?.title === "claude-fixture-topic");
-  check(
-    "Per-cwd scan carries the first question as preview",
-    claudeRow?.preview === "Claude fixture session",
-  );
-  const codexRow = allSessions.find((item) => item.sessionId === codexId);
-  check("Codex rows have no preview line", codexRow?.preview === null);
 
   let rejectedOutsideStore = false;
   try {

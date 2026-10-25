@@ -2,9 +2,10 @@
 //
 // Cora's sessions run the `pi` the user installed, the same one their
 // terminals run, so updating it is the user's call. When it is missing,
-// Settings offers to install it with the standard global npm install:
+// Settings offers to install it with the standard global npm install, pinned
+// to the minor line Codara is tested against rather than npm's latest:
 //
-//   npm install -g @earendil-works/pi-coding-agent
+//   npm install -g @earendil-works/pi-coding-agent@~<CODARA_PI_VERSION>
 //
 // The result is re-resolved through the same lookup Cora's launcher uses
 // before the install is reported as done, so "installed" means "Cora will
@@ -23,7 +24,7 @@ import { join } from "node:path";
 import { forgetResolvedBinary } from "../binary-resolver";
 import { codaraHome } from "../codara-home";
 import { getEnrichedEnv } from "../path-reconstruction";
-import { CODARA_PI_PACKAGE, PI_INSTALL_COMMAND } from "./pi-runtime";
+import { CODARA_PI_INSTALL_SPEC, PI_INSTALL_COMMAND } from "./pi-runtime";
 
 const INSTALL_TIMEOUT_MS = 15 * 60 * 1000;
 /** npm chatter is unbounded; only the tail is worth surfacing in a dialog. */
@@ -31,6 +32,29 @@ const MAX_RETAINED_OUTPUT = 8_000;
 
 export interface PiRuntimeInstallProgress {
   message: string;
+}
+
+/**
+ * The next step after npm was refused write access to its global folder.
+ * Re-running the same command would fail the same way, so the advice is about
+ * the folder or the process holding it, and it always says the step is
+ * optional because Cora keeps running on the built-in Pi.
+ */
+export function piInstallPermissionAdvice(platform: NodeJS.Platform = process.platform): string {
+  const optional = " This step is optional: Cora keeps working on the built-in Pi.";
+  if (platform === "win32") {
+    return (
+      " npm could not write to its global folder. Close other Node.js processes (and pause antivirus scanning of the npm folder if it locks files), " +
+      `then retry, or run this in a terminal opened as administrator: ${PI_INSTALL_COMMAND}.` +
+      optional
+    );
+  }
+  return (
+    " npm could not write to its global folder, which is usually owned by root. " +
+    "Point npm at a folder you own with `npm config set prefix ~/.npm-global`, add ~/.npm-global/bin to your PATH, reopen Codara Studio and retry " +
+    "(a Node.js version manager such as nvm or fnm does the same for you)." +
+    optional
+  );
 }
 
 /**
@@ -112,7 +136,7 @@ async function runInstall(
   const args = [
     "install",
     "--global",
-    CODARA_PI_PACKAGE,
+    CODARA_PI_INSTALL_SPEC,
     "--no-audit",
     "--no-fund",
     "--loglevel=http",
@@ -164,7 +188,7 @@ async function runInstall(
       }
       const tail = readTail();
       const permission = /EACCES|EPERM|permission denied/i.test(tail)
-        ? ` npm could not write to its global folder; run this in a terminal instead: ${PI_INSTALL_COMMAND}`
+        ? piInstallPermissionAdvice()
         : "";
       rejectExit(
         new Error(

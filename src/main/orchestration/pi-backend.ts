@@ -12,6 +12,7 @@ import {
 import {
   cleanupPiMcpBridgeConfig,
   createCodaraPiLaunchPlan,
+  markUserPiRuntimeFailed,
   resolveCodaraOpenRouterApiKey,
   resolveCodaraPiExecutionAccount,
   resolveCodaraPiFastMode,
@@ -21,11 +22,17 @@ import {
   type PiProvider,
   type PiThinkingLevel,
 } from "./pi-runtime";
-import { PiRpcClient } from "./pi-rpc-client";
-import { classifyTurnLiveness, isLongPollToolName } from "./agent-liveness";
+import { PiRpcClient, type PiRpcFailure } from "./pi-rpc-client";
+import {
+  classifyTurnLiveness,
+  isLongPollToolName,
+  type TurnInFlightTool,
+} from "./agent-liveness";
 import { piBackendSessionIdentityMatches } from "./pi-session-identity";
 import { PiTurnAccumulator } from "./pi-turn";
 import { PiManagerCompaction } from "./pi-manager-compaction";
+import { describeCompaction, logCompaction } from "./pi-compaction-pipeline";
+import { resetCoraMemoryInjection } from "./cora-memory";
 import {
   buildTalkReplyDecision,
   type ChatStreamHandler,
@@ -58,7 +65,24 @@ interface PiBackendSession extends PiProcessOwner {
   sessionId: string;
   fastMode: boolean;
   interrupted: boolean;
-  settleActiveTurn: (() => void) | null;
+  /** Settlers of every turn running on this process; stopSession and
+   *  interruptChat release all of them, not just the newest. */
+  activeTurns: Set<() => void>;
+  /** Set by interruptChat: resolves true once Pi confirmed the aborted turn
+   *  went idle, which makes the process safe to reuse. */
+  interruptSettling: Promise<boolean> | null;
+  /** Prompt requests Pi has not answered yet. */
+  promptsInFlight: number;
+  idleTimer: ReturnType<typeof setTimeout> | null;
+  lastUsedAt: number;
+  /** The one turn this session is running. Prompting it while another turn
+   *  streams is rejected by Pi, and the old failure handling then stopped the
+   *  process the live turn was using. */
+  activeTurn: ActivePiTurn | null;
+}
+
+interface ActivePiTurn {
+  startedAt: number;
 }
 
 interface PendingPiBackendSession extends PiProcessOwner {}
@@ -72,6 +96,19 @@ const GENERATIONS = new Map<string, number>();
  * shape for an orchestrator.
  */
 const PI_TURN_IDLE_CHECK_MS = 15 * 1000;
+/**
+ * An idle chat's Pi process (and every MCP server its bridge started) is
+ * stopped after this long without a turn. The session file stays on disk, so
+ * the next message relaunches with the same session id at the cost of one
+ * cold start.
+ */
+const PI_SESSION_IDLE_MS = 10 * 60 * 1000;
+/** Live manager processes kept at once; the least recently used idle ones go first. */
+const PI_MAX_LIVE_SESSIONS = 4;
+/** How long an interrupt may take to leave Pi idle before the process is replaced. */
+const PI_INTERRUPT_SETTLE_MS = 3 * 1000;
+/** Stderr kept for Technical details; the user-facing text never carries it. */
+const PI_DIAGNOSTIC_TAIL_CHARS = 2_000;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -150,6 +187,138 @@ function launchPlanCapabilityIsReusable(
   return isAgentSocketCapabilityActive(capabilityId, now);
 }
 
+function stderrTail(client: PiRpcClient | undefined): string | undefined {
+  const stderr = client?.diagnostics().stderr.trim();
+  if (!stderr) return undefined;
+  return stderr.length > PI_DIAGNOSTIC_TAIL_CHARS
+    ? stderr.slice(stderr.length - PI_DIAGNOSTIC_TAIL_CHARS)
+    : stderr;
+}
+
+/**
+ * The one-line, actionable sentence for a Pi process that never came up. The
+ * raw error and stderr stay in the diagnostics; this is what the chat shows.
+ */
+export function describePiStartupFailure(message: string, stderr = ""): string {
+  if (/failed to spawn/i.test(message)) {
+    return `Cora's runtime could not be launched (${message.replace(/^Pi RPC failed to spawn:\s*/i, "")}). Restart Codara; if it keeps failing, reinstall Pi from Settings > Accounts.`;
+  }
+  if (!/startup handshake|Pi RPC process exited/i.test(message)) return message;
+  const lines = stderr.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const extensionLine = lines.find((line) => /Failed to load extension|Cannot find module/i.test(line));
+  if (extensionLine) {
+    return `Cora's runtime exited while loading its extensions: ${extensionLine.slice(0, 300)} Reinstall Pi from Settings > Accounts, or update Codara.`;
+  }
+  const last = lines.at(-1);
+  return `Cora's runtime stopped while starting${last ? `: ${last.slice(0, 300)}` : ` (${message})`}. Try again; if it keeps failing, reinstall Pi from Settings > Accounts.`;
+}
+
+/** A startup failure whose message is the user-facing sentence and whose raw
+ *  cause rides along for the spark_call failure record. */
+function startupError(error: unknown, client?: PiRpcClient): Error & { diagnostics?: string } {
+  const message = error instanceof Error ? error.message : String(error);
+  const stderr = stderrTail(client);
+  const friendly = describePiStartupFailure(message, stderr);
+  const diagnostics = [friendly === message ? "" : message, stderr ?? ""]
+    .filter(Boolean)
+    .join("\n");
+  // startupCause keeps the raw handshake error ("timed out", "process
+  // exited") that run-store's startup retry classifies; the friendly sentence
+  // hides it.
+  return Object.assign(
+    new Error(friendly),
+    { startupCause: message },
+    diagnostics ? { diagnostics } : {},
+  );
+}
+
+function clearIdleTimer(session: PiBackendSession): void {
+  if (session.idleTimer) clearTimeout(session.idleTimer);
+  session.idleTimer = null;
+}
+
+function scheduleIdleStop(runId: string, session: PiBackendSession): void {
+  clearIdleTimer(session);
+  if (SESSIONS.get(runId) !== session || session.activeTurns.size > 0) return;
+  session.idleTimer = setTimeout(() => {
+    session.idleTimer = null;
+    if (SESSIONS.get(runId) === session && session.activeTurns.size === 0) {
+      void stopSession(runId, session);
+    }
+  }, PI_SESSION_IDLE_MS);
+  session.idleTimer.unref?.();
+}
+
+function evictIdleSessions(keepRunId: string): void {
+  const excess = SESSIONS.size - PI_MAX_LIVE_SESSIONS;
+  if (excess <= 0) return;
+  const idle = [...SESSIONS.entries()]
+    .filter(([runId, session]) =>
+      runId !== keepRunId && session.activeTurns.size === 0)
+    .sort(([, left], [, right]) => left.lastUsedAt - right.lastUsedAt)
+    .slice(0, excess);
+  for (const [runId, session] of idle) void stopSession(runId, session);
+}
+
+async function abortWithin(client: PiRpcClient, timeoutMs: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      // Pi answers abort only once the session is idle again.
+      client.abort().then(() => true, () => false),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+type SessionIdentityKey =
+  | "provider"
+  | "accountProfileId"
+  | "model"
+  | "thinking"
+  | "chatMode"
+  | "executionPolicy"
+  | "projectPolicyMode"
+  | "sessionId"
+  | "fastMode";
+
+const IDENTITY_LABELS: ReadonlyArray<readonly [SessionIdentityKey, string]> = [
+  ["provider", "provider"],
+  ["accountProfileId", "account"],
+  ["model", "model"],
+  ["thinking", "effort"],
+  ["chatMode", "mode"],
+  ["executionPolicy", "execution policy"],
+  ["projectPolicyMode", "project policy"],
+  ["sessionId", "conversation"],
+  ["fastMode", "fast mode"],
+];
+
+/** The note that names why a running process is being replaced. */
+function restartNote(
+  session: PiBackendSession,
+  expected: Pick<PiBackendSession, SessionIdentityKey>,
+  observedGeneration: number,
+): string {
+  if (session.generation !== observedGeneration) {
+    return "Restarting Cora's runtime after the interrupted turn.";
+  }
+  if (session.client.state().phase !== "running") {
+    return "Cora's runtime had stopped; starting a fresh one.";
+  }
+  const changed = IDENTITY_LABELS
+    .filter(([key]) => session[key] !== expected[key])
+    .map(([, label]) => label);
+  if (changed.length > 0) {
+    return `Restarting Cora's runtime for the new ${changed.join(", ")}.`;
+  }
+  return "Restarting Cora's runtime to renew its access.";
+}
+
 function cleanupPiProcess(owner: PiProcessOwner): Promise<void> {
   if (owner.cleanupPromise) return owner.cleanupPromise;
   // Revoke synchronously before waiting for process shutdown. A stuck child
@@ -176,8 +345,8 @@ async function stopSession(
   if (session && (!expected || session === expected)) {
     SESSIONS.delete(runId);
     session.interrupted = true;
-    session.settleActiveTurn?.();
-    session.settleActiveTurn = null;
+    clearIdleTimer(session);
+    for (const settle of [...session.activeTurns]) settle();
     cleanup.push(cleanupPiProcess(session));
   }
   const pending = PENDING_SESSIONS.get(runId);
@@ -192,8 +361,14 @@ function supersededStartupError(): Error {
   return new Error("Cora's Pi session startup was superseded by disposal or a newer launch");
 }
 
+/**
+ * The session `turn` runs on. The turn's settler is registered before the
+ * session is handed back, in the same synchronous step that picked it, so no
+ * other run's launch can evict the process in between.
+ */
 async function ensureSession(
   input: ManagerRequestInput,
+  turn: () => void,
   onStream?: ChatStreamHandler,
 ): Promise<PiBackendSession> {
   const runId = input.run.id;
@@ -217,25 +392,52 @@ async function ensureSession(
         // Fast mode reaches the runtime only as launch-time env, so a session
         // launched under the other value cannot be reused: resolve it here,
         // match on it below, and hand the SAME value to the launch plan.
-        resolveCodaraPiFastMode(provider),
+        resolveCodaraPiFastMode(provider, model),
       ]);
+  const settling = SESSIONS.get(runId)?.interruptSettling;
+  const abortedIdle = settling ? await settling : false;
   if ((GENERATIONS.get(runId) ?? 0) !== observedGeneration) {
     throw supersededStartupError();
   }
   const sessionId = safeSessionId(input);
   const current = SESSIONS.get(runId);
   const pendingCurrent = PENDING_SESSIONS.get(runId);
+  if (current && settling && current.interruptSettling === settling) {
+    current.interruptSettling = null;
+    // The interrupt bumped the generation so the aborted turn's late results
+    // are discarded. Once Pi confirmed it is idle the process itself is
+    // healthy, so this turn adopts it instead of cold-starting a new one.
+    if (abortedIdle && !pendingCurrent && current.generation < observedGeneration) {
+      current.generation = observedGeneration;
+    }
+  }
   if (
     current &&
     current.generation === observedGeneration &&
     sessionMatches(current, provider, account.accountProfileId, model, thinking, mode, input.chat.mode, executionPolicy, projectPolicyMode, sessionId, fastMode)
   ) {
+    clearIdleTimer(current);
+    current.lastUsedAt = Date.now();
+    current.activeTurns.add(turn);
     return current;
   }
   const generation = observedGeneration + 1;
   GENERATIONS.set(runId, generation);
   if (current) {
-    onStream?.({ kind: "system_note", message: "Restarting Cora's Pi runtime with the selected model, mode, execution policy, or fast mode." });
+    onStream?.({
+      kind: "system_note",
+      message: restartNote(current, {
+        provider,
+        accountProfileId: account.accountProfileId,
+        model,
+        thinking,
+        chatMode: input.chat.mode,
+        executionPolicy,
+        projectPolicyMode,
+        sessionId,
+        fastMode,
+      }, observedGeneration),
+    });
     await stopSession(runId, current);
   }
   if (pendingCurrent) {
@@ -244,12 +446,12 @@ async function ensureSession(
   if (GENERATIONS.get(runId) !== generation) {
     throw supersededStartupError();
   }
-  const plan = await createCodaraPiLaunchPlan({
+  const launchOptions: Parameters<typeof createCodaraPiLaunchPlan>[0] = {
     provider,
     ...(openRouterApiKey ? { apiKey: openRouterApiKey } : {}),
     accountProfileId: account.accountProfileId,
     resolvedAccount: account,
-    openAiFastMode: fastMode,
+    fastMode,
     runId,
     sessionId,
     cwd: input.cwd,
@@ -260,49 +462,82 @@ async function ensureSession(
     thinking,
     sessionName: input.run.title,
     projectPolicyMode,
-  });
-  if (GENERATIONS.get(runId) !== generation) {
-    await cleanupUnstartedPlan(plan);
-    throw supersededStartupError();
-  }
-  let client: PiRpcClient;
-  try {
-    client = new PiRpcClient(plan, {
-      requestTimeoutMs: 120_000,
-      shutdownGraceMs: 2_000,
-    });
-  } catch (error) {
-    await cleanupUnstartedPlan(plan);
-    throw error;
-  }
-  const pending: PendingPiBackendSession = {
-    client,
-    plan,
-    generation,
-    cleanupPromise: null,
   };
-  PENDING_SESSIONS.set(runId, pending);
-  let state;
+  const launch = async (): Promise<{
+    client: PiRpcClient;
+    plan: PiManagerLaunchPlan;
+    pending: PendingPiBackendSession;
+    state: Record<string, unknown>;
+  }> => {
+    const plan = await createCodaraPiLaunchPlan(launchOptions);
+    if (GENERATIONS.get(runId) !== generation) {
+      await cleanupUnstartedPlan(plan);
+      throw supersededStartupError();
+    }
+    let client: PiRpcClient;
+    try {
+      client = new PiRpcClient(plan, {
+        requestTimeoutMs: 120_000,
+        shutdownGraceMs: 2_000,
+      });
+    } catch (error) {
+      await cleanupUnstartedPlan(plan);
+      throw error;
+    }
+    const pending: PendingPiBackendSession = {
+      client,
+      plan,
+      generation,
+      cleanupPromise: null,
+    };
+    PENDING_SESSIONS.set(runId, pending);
+    let state: Record<string, unknown>;
+    try {
+      state = await client.start();
+    } catch (error) {
+      // Read stderr before cleanup: it is the only record of why Pi exited.
+      const failure = startupError(error, client);
+      if (PENDING_SESSIONS.get(runId) === pending) {
+        PENDING_SESSIONS.delete(runId);
+      }
+      await cleanupPiProcess(pending);
+      throw Object.assign(failure, { runtimePlan: plan });
+    }
+    if (
+      PENDING_SESSIONS.get(runId) !== pending ||
+      GENERATIONS.get(runId) !== generation ||
+      !launchPlanCapabilityIsReusable(plan)
+    ) {
+      if (PENDING_SESSIONS.get(runId) === pending) {
+        PENDING_SESSIONS.delete(runId);
+      }
+      await cleanupPiProcess(pending);
+      throw supersededStartupError();
+    }
+    return { client, plan, pending, state };
+  };
+  let launched: Awaited<ReturnType<typeof launch>>;
   try {
-    state = await client.start();
+    launched = await launch();
   } catch (error) {
-    if (PENDING_SESSIONS.get(runId) === pending) {
-      PENDING_SESSIONS.delete(runId);
+    const failedPlan = (error as { runtimePlan?: PiManagerLaunchPlan }).runtimePlan;
+    if (
+      failedPlan?.runtimeSource !== "user" ||
+      !failedPlan.runtimeVersion ||
+      GENERATIONS.get(runId) !== generation
+    ) {
+      throw error;
     }
-    await cleanupPiProcess(pending);
-    throw error;
+    // The user's own Pi may be a version Codara was never tested against.
+    // The bundled build is, so one retry on it keeps Cora usable.
+    markUserPiRuntimeFailed(failedPlan.runtimeVersion);
+    onStream?.({
+      kind: "system_note",
+      message: `Your installed Pi ${failedPlan.runtimeVersion} failed to start (${error instanceof Error ? error.message : String(error)}). Cora is using the Pi build bundled with Codara instead.`,
+    });
+    launched = await launch();
   }
-  if (
-    PENDING_SESSIONS.get(runId) !== pending ||
-    GENERATIONS.get(runId) !== generation ||
-    !launchPlanCapabilityIsReusable(plan)
-  ) {
-    if (PENDING_SESSIONS.get(runId) === pending) {
-      PENDING_SESSIONS.delete(runId);
-    }
-    await cleanupPiProcess(pending);
-    throw supersededStartupError();
-  }
+  const { client, plan, pending, state } = launched;
   const reportedSessionId = typeof state.sessionId === "string" && state.sessionId
     ? state.sessionId
     : sessionId;
@@ -321,11 +556,17 @@ async function ensureSession(
     fastMode,
     generation,
     interrupted: false,
-    settleActiveTurn: null,
+    activeTurns: new Set([turn]),
+    interruptSettling: null,
+    promptsInFlight: 0,
+    idleTimer: null,
+    lastUsedAt: Date.now(),
+    activeTurn: null,
     cleanupPromise: pending.cleanupPromise,
   };
   PENDING_SESSIONS.delete(runId);
   SESSIONS.set(runId, session);
+  evictIdleSessions(runId);
   onStream?.({
     kind: "system_note",
     message: `Cora Pi session ready · ${provider}/${model} · ${thinking} thinking · ${executionPolicy} chat mode`,
@@ -338,20 +579,29 @@ interface PiTurnLiveness {
   /** Epoch ms of the last stream event. */
   lastEventAt: number;
   /** Tool starts awaiting their matching tool_execution_end event. */
-  inFlightTools: Map<string, { name: string; startedAt: number; longPoll: boolean }>;
+  inFlightTools: Map<string, TurnInFlightTool>;
 }
+
+/** The Pi process died under a turn whose prompt it had already accepted. */
+class PiRuntimeFailure extends Error {}
 
 /**
  * Resolve when the turn settles; reject when it goes QUIET (see
- * PI_TURN_IDLE_TIMEOUT_MS) or blows the absolute ceiling. A turn parked inside
- * a long-poll orchestration tool is never idle, however long it waits.
+ * PI_TURN_IDLE_TIMEOUT_MS), blows the absolute ceiling, or the runtime dies.
+ * A turn parked inside a long-poll orchestration tool is never idle, however
+ * long it waits.
  */
-async function waitForSettled(settled: Promise<void>, liveness: PiTurnLiveness): Promise<void> {
+async function waitForSettled(
+  settled: Promise<void>,
+  liveness: PiTurnLiveness,
+  runtimeFailed: Promise<never>,
+): Promise<void> {
   let poll: ReturnType<typeof setInterval> | null = null;
   const startedAt = Date.now();
   try {
     await Promise.race([
       settled,
+      runtimeFailed,
       new Promise<never>((_, reject) => {
         poll = setInterval(() => {
           const verdict = classifyTurnLiveness({
@@ -383,8 +633,29 @@ async function requestPiDecision(
   const startedAt = Date.now();
   const runId = input.run.id;
   let session: PiBackendSession | undefined;
+  let turn: PiTurnAccumulator | undefined;
+  let generation: number | undefined;
   let unsubscribe: (() => void) | undefined;
+  let unsubscribeFailure: (() => void) | undefined;
   let compaction: PiManagerCompaction | undefined;
+  let settle: () => void = () => undefined;
+  const releaseTurn = (): void => settle();
+  const executes = input.chat.mode === "auto" || input.chat.mode === "execute";
+  // An interrupted turn may already have run live tools (spawned workers).
+  // Saying so lets run-store acknowledge its input instead of handing the same
+  // request to the next turn as new.
+  const interruptedResult = (): ManagerCallResult => ({
+    decision: buildTalkReplyDecision("Cora's Pi turn was interrupted."),
+    decisionAlreadyApplied:
+      (turn !== undefined &&
+        executes &&
+        executeDecisionWasAppliedDuringTurn(turn.result().successfulToolCalls)) ||
+      undefined,
+    durationMs: Date.now() - startedAt,
+    model: input.chat.model,
+    accountProfileId: session?.accountProfileId,
+    turnAborted: true,
+  });
   // Session STARTUP is outside the turn-failure envelope on purpose. A missing
   // or expired subscription auth, an uninstalled pinned runtime, or an RPC
   // process that never came up all mean NO provider turn ever started —
@@ -394,7 +665,7 @@ async function requestPiDecision(
   // the run on an accurate question). Throw instead: askManagerBackend's catch
   // records the spark_call failure and returns null, and the caller degrades.
   try {
-    session = await ensureSession(input, onStream);
+    session = await ensureSession(input, releaseTurn, onStream);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     onStream?.({ kind: "error", message });
@@ -408,8 +679,26 @@ async function requestPiDecision(
   } catch (error) {
     console.warn(`[pi-backend] failed to persist session id for ${runId}:`, error);
   }
+  // Never prompt a session that is still streaming another turn, and never
+  // touch that turn's process: report this one as aborted so run-store
+  // requeues its input behind the live turn.
+  if (session.activeTurn) {
+    session.activeTurns.delete(releaseTurn);
+    return {
+      decision: buildTalkReplyDecision("Cora is already working on a turn in this chat."),
+      durationMs: Date.now() - startedAt,
+      model: input.chat.model,
+      accountProfileId: session.accountProfileId,
+      notice: "Cora is already working on a turn in this chat; this message waits for it.",
+      turnAborted: true,
+      sessionBusy: true,
+    };
+  }
+  const activeTurn: ActivePiTurn = { startedAt };
+  session.activeTurn = activeTurn;
   try {
-    const generation = session.generation;
+    generation = session.generation;
+    const turnGeneration = generation;
     // `interrupted` belongs to the preceding turn. Generation/map ownership
     // below distinguishes a newly resumed turn from the older request that an
     // interrupt invalidated.
@@ -419,39 +708,58 @@ async function requestPiDecision(
       GENERATIONS.get(runId) !== generation ||
       !launchPlanCapabilityIsReusable(session.plan)
     ) {
-      return {
-        decision: buildTalkReplyDecision("Cora's Pi turn was interrupted."),
-        durationMs: Date.now() - startedAt,
-        model: input.chat.model,
-        accountProfileId: session.accountProfileId,
-        turnAborted: true,
-      };
+      return interruptedResult();
     }
-    const turn = new PiTurnAccumulator(onStream, {
+    const accumulator = new PiTurnAccumulator(onStream, {
       // Pi's native model catalog also reports API-equivalent prices for
       // subscription models. Those are not an OpenRouter charge and must not
       // enter the chat cost pill or run budget.
       captureCost: session.provider === "openrouter",
+      launchEnv: session.plan.env,
+      model: session.plan.model,
     });
-    let settle: () => void = () => undefined;
+    turn = accumulator;
     const liveness: PiTurnLiveness = {
       lastEventAt: Date.now(),
       inFlightTools: new Map(),
     };
+    let agentSettledSeen = false;
     const armSettlement = (): Promise<void> => {
       liveness.lastEventAt = Date.now();
       liveness.inFlightTools.clear();
-      const next = new Promise<void>((resolve) => { settle = resolve; });
-      session.settleActiveTurn = settle;
-      return next;
+      agentSettledSeen = false;
+      return new Promise<void>((resolve) => { settle = resolve; });
     };
     let settled = armSettlement();
     let compactionFailure: string | undefined;
-    compaction = new PiManagerCompaction(session.client, {
-      interrupted: () => session.interrupted || GENERATIONS.get(runId) !== generation,
+    const activeSession = session;
+    compaction = new PiManagerCompaction({
+      request: (command, options) => activeSession.client.request(command, options),
+      // A mid-turn continuation is a prompt like any other: interruptChat must
+      // see it in flight to know the process cannot be trusted idle.
+      prompt: async (text) => {
+        activeSession.promptsInFlight += 1;
+        try {
+          return await activeSession.client.prompt(text);
+        } finally {
+          activeSession.promptsInFlight -= 1;
+        }
+      },
+    }, {
+      interrupted: () => activeSession.interrupted || GENERATIONS.get(runId) !== turnGeneration,
       onSettled: () => settle(),
       onError: (error) => { compactionFailure = error.message; },
+      onReport: (report) => {
+        logCompaction(`run=${runId}`, report);
+        onStream?.({ kind: "system_note", message: describeCompaction(report) });
+      },
+      pinnedContext: input.reloadCoraMemory,
     });
+    let failRuntime: (failure: PiRpcFailure) => void = () => undefined;
+    const runtimeFailed = new Promise<never>((_, reject) => {
+      failRuntime = (failure) => reject(new PiRuntimeFailure(failure.message));
+    });
+    runtimeFailed.catch(() => undefined);
     unsubscribe = session.client.onEvent((event) => {
       liveness.lastEventAt = Date.now();
       if (
@@ -465,55 +773,66 @@ async function requestPiDecision(
           longPoll: isLongPollToolName(event.toolName),
         });
       }
+      if (event.type === "tool_execution_update" && typeof event.toolCallId === "string") {
+        const tool = liveness.inFlightTools.get(event.toolCallId);
+        if (tool) tool.lastProgressAt = Date.now();
+      }
       if (event.type === "tool_execution_end" && typeof event.toolCallId === "string") {
         liveness.inFlightTools.delete(event.toolCallId);
       }
-      turn.consume(event);
+      accumulator.consume(event);
+      // A settlement a mid-turn pause produced is not the end of the turn: the
+      // continuation still has to run, and a crash during it must fail the turn.
+      if (event.type === "agent_settled" && !compaction?.holdsTurnOpen()) agentSettledSeen = true;
+      // A finished compaction (host-requested or Pi's native one) summarized
+      // the turn that carried the memory sections, so the next turn re-sends them.
+      if (event.type === "compaction_end" && event.result) resetCoraMemoryInjection(runId);
       if (compaction?.consume(event)) return;
       if (event.type === "agent_settled") settle();
     });
+    // After agent_settled the answer is complete and only the post-turn
+    // compaction can still be running; its own request rejects on a crash and
+    // reports through compactionFailure, which keeps the answer.
+    unsubscribeFailure = session.client.onFailure((failure) => {
+      if (!agentSettledSeen) failRuntime(failure);
+    });
+    const startState = session.client.state();
+    if (startState.phase === "failed") {
+      failRuntime(startState.failure ?? { code: "PROCESS_EXIT", message: "Pi RPC process exited" });
+    }
 
-    await session.client.prompt(input.prompt);
+    const prompt = async (text: string): Promise<void> => {
+      activeSession.promptsInFlight += 1;
+      try {
+        await activeSession.client.prompt(text);
+      } finally {
+        activeSession.promptsInFlight -= 1;
+      }
+    };
+
+    await prompt(input.prompt);
     if (session.interrupted || GENERATIONS.get(runId) !== generation) {
-      return {
-        decision: buildTalkReplyDecision("Cora's Pi turn was interrupted."),
-        durationMs: Date.now() - startedAt,
-        model: input.chat.model,
-        accountProfileId: session.accountProfileId,
-        turnAborted: true,
-      };
+      return interruptedResult();
     }
     await input.onPromptAccepted?.();
-    await waitForSettled(settled, liveness);
+    await waitForSettled(settled, liveness, runtimeFailed);
     if (session.interrupted || GENERATIONS.get(runId) !== generation) {
-      return {
-        decision: buildTalkReplyDecision("Cora's Pi turn was interrupted."),
-        durationMs: Date.now() - startedAt,
-        model: input.chat.model,
-        accountProfileId: session.accountProfileId,
-        turnAborted: true,
-      };
+      return interruptedResult();
     }
 
-    let accumulated = turn.result();
+    let accumulated = accumulator.result();
     // A model can finish its tool loop with an explicit empty assistant
     // message. Never promote earlier progress prose into a fake successful
     // answer. Give it one hidden, tightly-scoped chance to produce the result
     // users should have received.
     if (!compactionFailure && !accumulated.failure && accumulated.assistantMessageCount > 0 && !accumulated.finalText) {
       settled = armSettlement();
-      await session.client.prompt(EMPTY_FINAL_REPROMPT);
-      await waitForSettled(settled, liveness);
+      await prompt(EMPTY_FINAL_REPROMPT);
+      await waitForSettled(settled, liveness, runtimeFailed);
       if (session.interrupted || GENERATIONS.get(runId) !== generation) {
-        return {
-          decision: buildTalkReplyDecision("Cora's Pi turn was interrupted."),
-          durationMs: Date.now() - startedAt,
-          model: input.chat.model,
-          accountProfileId: session.accountProfileId,
-          turnAborted: true,
-        };
+        return interruptedResult();
       }
-      accumulated = turn.result();
+      accumulated = accumulator.result();
     }
 
     if (compactionFailure) {
@@ -521,15 +840,9 @@ async function requestPiDecision(
       // returning the completed answer or allowing another turn to reuse it.
       await stopSession(runId, session);
       if (GENERATIONS.get(runId) !== generation) {
-        return {
-          decision: buildTalkReplyDecision("Cora's Pi turn was interrupted."),
-          durationMs: Date.now() - startedAt,
-          model: input.chat.model,
-          accountProfileId: session.accountProfileId,
-          turnAborted: true,
-        };
+        return interruptedResult();
       }
-      accumulated = turn.result();
+      accumulated = accumulator.result();
       onStream?.({ kind: "system_note", message: `Context compaction failed. The conversation remains saved; Cora will restart its runtime on the next turn. ${compactionFailure}` });
     }
     // costUsd is an OpenRouter catalog-priced estimate for the whole turn.
@@ -562,9 +875,14 @@ async function requestPiDecision(
       const last = asRecord(await session.client.request({ type: "get_last_assistant_text" }));
       if (typeof last?.text === "string") finalText = last.text.trim();
     }
-    const executes = input.chat.mode === "auto" || input.chat.mode === "execute";
     const liveDecisionApplied = executes &&
       executeDecisionWasAppliedDuringTurn(accumulated.successfulToolCalls);
+    // What the manager-turn policy needs to decide whether replaying this
+    // turn is safe and whether Pi already spent its own retry budget.
+    const replayFacts = {
+      ...(accumulated.providerRetried ? { providerRetried: true } : {}),
+      replaySafe: accumulated.toolCalls.length === 0 && !liveDecisionApplied,
+    };
     if (accumulated.failure) {
       return {
         // A partial sentence before a failed tool-loop request is not a
@@ -579,8 +897,32 @@ async function requestPiDecision(
         accountProfileId: session.accountProfileId,
         ...contextUsage,
         ...providerDiagnostics,
+        ...replayFacts,
         notice: accumulated.failure,
         turnFailed: true,
+      };
+    }
+    if (!finalText && liveDecisionApplied) {
+      // The orchestration tool already changed the run (workers started, the
+      // run completed, a question settled). An empty closing message is a
+      // model quirk, not a failed turn, and failing it would tear down the
+      // very workers this turn started. Say what the tools did instead.
+      const decision = buildExecuteDecisionFromToolCalls(accumulated.successfulToolCalls, "");
+      const reply = decision.chatReply?.trim() || decision.summary.trim();
+      // The applied-decision path never replays `decision`, so the reply only
+      // reaches the transcript as a streamed block.
+      onStream?.({ kind: "assistant_block", messageId: `pi-tool-summary-${Date.now()}`, text: reply });
+      return {
+        decision: { ...decision, chatReply: reply },
+        decisionAlreadyApplied: true,
+        durationMs: Date.now() - startedAt,
+        model: input.chat.model,
+        newSessionUuid: session.sessionId,
+        ...cumulativeUsage,
+        accountProfileId: session.accountProfileId,
+        ...contextUsage,
+        ...providerDiagnostics,
+        notice: "Cora's closing message was empty, so its reply summarizes what its tools did.",
       };
     }
     if (!finalText) {
@@ -597,7 +939,9 @@ async function requestPiDecision(
         accountProfileId: session.accountProfileId,
         ...contextUsage,
         ...providerDiagnostics,
+        ...replayFacts,
         notice: detail,
+        failureCause: "empty_reply",
         turnFailed: true,
       };
     }
@@ -617,25 +961,49 @@ async function requestPiDecision(
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    const diagnostic = session?.client.diagnostics().stderr.trim();
-    const detail = diagnostic ? `${message}\n${diagnostic}` : message;
+    // Our own stop (dispose, a superseding launch) is not a failure: the
+    // owner of that stop already decided what happens to the run.
+    if (
+      session &&
+      session.client.state().phase !== "failed" &&
+      (session.interrupted || (generation !== undefined && GENERATIONS.get(runId) !== generation))
+    ) {
+      return interruptedResult();
+    }
+    const runtimeCrashed =
+      error instanceof PiRuntimeFailure || session?.client.state().phase === "failed";
+    // Stderr goes to diagnostics only. Mixed into the message it buried the
+    // cause under stack frames and let a stale "429" line steer the policy.
+    const diagnostics = stderrTail(session?.client);
+    const partial = turn?.result();
     // A turn exception means this runtime cannot be trusted for reuse. Stop it
     // before parking/requeueing so native tools cannot outlive their run.
     if (session) await stopSession(runId, session);
-    onStream?.({ kind: "error", message: detail });
+    if (diagnostics) console.warn(`[pi-backend] turn failed for ${runId}: ${message}\n${diagnostics}`);
+    onStream?.({ kind: "error", message });
     return {
-      decision: buildTalkReplyDecision(`Cora Pi backend error: ${detail}`),
+      decision: buildTalkReplyDecision(`Cora Pi backend error: ${message}`),
       durationMs: Date.now() - startedAt,
       model: input.chat.model,
       accountProfileId: session?.accountProfileId,
       newSessionUuid: session?.sessionId,
-      notice: detail,
+      notice: message,
+      ...(diagnostics ? { diagnostics } : {}),
+      ...(runtimeCrashed ? { failureCause: "runtime" as const } : {}),
+      ...(partial?.providerRetried ? { providerRetried: true } : {}),
+      replaySafe: (partial?.toolCalls.length ?? 0) === 0,
       turnFailed: true,
     };
   } finally {
     compaction?.dispose();
     unsubscribe?.();
-    if (session) session.settleActiveTurn = null;
+    unsubscribeFailure?.();
+    if (session.activeTurn === activeTurn) session.activeTurn = null;
+    if (session) {
+      session.activeTurns.delete(releaseTurn);
+      session.lastUsedAt = Date.now();
+      scheduleIdleStop(runId, session);
+    }
   }
 }
 
@@ -658,7 +1026,14 @@ export const piBackend = {
     const session = SESSIONS.get(runId);
     if (!session) return;
     session.interrupted = true;
-    session.settleActiveTurn?.();
-    void session.client.abort().catch(() => undefined);
+    for (const settle of [...session.activeTurns]) settle();
+    const aborted = abortWithin(session.client, PI_INTERRUPT_SETTLE_MS);
+    // A prompt still in preflight (before_agent_start, a pre-prompt
+    // compaction) has no agent run to abort: Pi answers abort at once and
+    // then starts that prompt's run anyway, so the process cannot be trusted
+    // idle and the next turn replaces it.
+    session.interruptSettling = session.promptsInFlight > 0
+      ? aborted.then(() => false)
+      : aborted;
   },
 } satisfies AgentBackend;

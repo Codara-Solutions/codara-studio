@@ -174,6 +174,76 @@ test("OpenAI picker keeps Sol, Terra, and Luna alongside Astra", async () => {
   }
 });
 
+test("the model picker shows one provider at a time and hides models the user unticks", async () => {
+  test.setTimeout(60_000);
+  const fixture = await prepareFixture();
+  const app = await electron.launch({ args: ["."], env: {
+    ...process.env,
+    SPARK_USER_DATA_DIR: fixture.userDataDir,
+    CODARA_HOME_DIR: fixture.userDataDir,
+    SPARK_HOME_DIR: fixture.userDataDir,
+    CODEX_HOME: join(fixture.userDataDir, "codex-home"),
+    CLAUDE_CONFIG_DIR: join(fixture.userDataDir, "claude-home"),
+    GROK_HOME: join(fixture.userDataDir, "grok-home"),
+    SPARK_SKIP_LEGACY_MIGRATION: "1",
+    SPARK_NO_SHELL_INTEGRATION: "1",
+  } });
+  try {
+    const page = await app.firstWindow();
+    await selectCoraTab(page);
+    const trigger = page.locator(".composer-model-thinking-trigger").first();
+    const menu = page.locator(".composer-model-thinking-menu");
+    const tabs = menu.getByRole("tab");
+    await trigger.click();
+    await expect(tabs.filter({ hasText: "OpenAI" })).toBeVisible();
+    await expect(tabs.filter({ hasText: "Anthropic" })).toBeVisible();
+
+    await tabs.filter({ hasText: "Anthropic" }).click();
+    await expect(tabs.filter({ hasText: "Anthropic" })).toHaveAttribute("aria-selected", "true");
+    await expect(menu.getByRole("option").first()).toContainText(/Claude|Opus|Sonnet|Haiku|Fable/);
+    await expect(menu.getByRole("option").filter({ hasText: "GPT-5.6 Luna" })).toHaveCount(0);
+
+    await tabs.filter({ hasText: "OpenAI" }).click();
+    await menu.getByRole("button", { name: "Edit list" }).click();
+    await menu.getByRole("option").filter({ hasText: "GPT-5.6 Luna" }).click();
+    await menu.getByRole("button", { name: "Done" }).click();
+    await expect(menu.getByRole("option").filter({ hasText: "GPT-5.6 Luna" })).toHaveCount(0);
+    await expect(menu.getByRole("option").filter({ hasText: "GPT-5.6 Sol" })).toBeVisible();
+
+    // Edit list offers every model the subscription serves, including an
+    // older generation the default lineup leaves out, and ticking adds it.
+    await app.evaluate(({ ipcMain }) => {
+      ipcMain.removeHandler("pi-models:catalog");
+      ipcMain.handle("pi-models:catalog", () => [
+        { id: "gpt-5.6-sol", label: "GPT-5.6 Sol", provider: "openai-codex", reasoning: true },
+        { id: "gpt-5.2", label: "GPT-5.2", provider: "openai-codex", reasoning: true },
+      ]);
+    });
+    await page.keyboard.press("Escape");
+    await trigger.click();
+    await tabs.filter({ hasText: "OpenAI" }).click();
+    await expect(menu.getByRole("option").filter({ hasText: "GPT-5.2" })).toHaveCount(0);
+    await menu.getByRole("button", { name: "Edit list" }).click();
+    const older = menu.getByRole("option").filter({ hasText: "GPT-5.2" });
+    await expect(older).toHaveAttribute("aria-selected", "false");
+    await older.click();
+    await menu.getByRole("button", { name: "Done" }).click();
+    await expect(menu.getByRole("option").filter({ hasText: "GPT-5.2" })).toBeVisible();
+
+    // The choice survives closing the picker and reloading the window.
+    await page.keyboard.press("Escape");
+    await page.reload();
+    await selectCoraTab(page);
+    await trigger.click();
+    await tabs.filter({ hasText: "OpenAI" }).click();
+    await expect(menu.getByRole("option").filter({ hasText: "GPT-5.6 Sol" })).toBeVisible();
+    await expect(menu.getByRole("option").filter({ hasText: "GPT-5.6 Luna" })).toHaveCount(0);
+    await expect(menu.getByRole("option").filter({ hasText: "GPT-5.2" })).toBeVisible();
+  } finally {
+    await app.close();
+  }
+});
+
 // The seeded pane id, asserted against the injection the chord produces.
 const LIVE_PANE_ID = "pane-live-agent";
 

@@ -7,8 +7,13 @@ import type {
   ProjectPolicyMode,
 } from "@shared/types";
 import { familyForModelId, familyForSubscription } from "../../shared/agent-families";
-import { resolveCompactAtTokens } from "@shared/context-compaction";
-import { sanitizeElectronViteDevEnv, sanitizeNpmRunScriptEnv } from "../env-sanitize";
+import {
+  compactAtOverrideTokens,
+  normalizeAutoCompactPercent,
+  resolveCompactAtTokens,
+} from "@shared/context-compaction";
+import { isRemotePath } from "@shared/remote";
+import { sanitizeAppImageChildEnv, sanitizeElectronViteDevEnv, sanitizeNpmRunScriptEnv } from "../env-sanitize";
 
 export const CODARA_PI_PACKAGE = "@earendil-works/pi-coding-agent";
 /**
@@ -22,8 +27,14 @@ export const CODARA_PI_VERSION = "0.85.1";
  * the extension events Cora's extensions use are unchanged through 0.87.
  */
 export const CODARA_PI_MIN_VERSION = "0.85.1";
+/**
+ * What Settings' Install button installs: the tested minor line, never npm's
+ * latest. A user who updates Pi themselves still runs that build; the
+ * launcher falls back to the bundled Pi when it cannot start.
+ */
+export const CODARA_PI_INSTALL_SPEC = `${CODARA_PI_PACKAGE}@~${CODARA_PI_VERSION}`;
 /** How the user installs, and later updates, Pi themselves. */
-export const PI_INSTALL_COMMAND = `npm install -g ${CODARA_PI_PACKAGE}`;
+export const PI_INSTALL_COMMAND = `npm install -g ${CODARA_PI_INSTALL_SPEC}`;
 /** Vendored Pi extension that registers the provider-native web_search tool.
  * It is a normal dependency of this repo, never the user's own pi packages. */
 export const CODARA_PI_WEB_SEARCH_PACKAGE = "pi-web-search";
@@ -70,6 +81,9 @@ export interface PiRuntimeLocation {
   packageJsonPath: string;
   entrypoint: string;
   version: string;
+  /** Whether this is the user's own install or the build bundled with the
+   *  app. Absent means unknown and is never retried on another build. */
+  source?: "user" | "bundled";
 }
 
 export interface PiSubscriptionAuthStatus {
@@ -108,6 +122,12 @@ export interface PiManagerLaunchOptions {
    * it by absolute path because a packaged extension cannot resolve bare
    * specifiers from inside app.asar. */
   mcpSdkDir?: string;
+  /** Exact skill folders (or skill .md files) the session loads. When set on a
+   * trusted launch, Pi's own skill discovery is turned off and only these
+   * load, so a skill switched off in the Capability Center stays off and
+   * Claude's and Codex's skill folders reach Pi. Undefined keeps Pi's
+   * default discovery. Untrusted launches never load skills. */
+  skillPaths?: readonly string[];
   processExecutable?: string;
   model?: string;
   thinking?: PiThinkingLevel;
@@ -122,13 +142,15 @@ export interface PiManagerLaunchOptions {
   retainBuiltinToolsForUntrustedWorker?: boolean;
   codaraHomeDir?: string;
   /**
-   * The composer's fast-mode toggle (AppSettings.openAiFastMode). Applies the faster (and
-   * pricier) OpenAI service tier to this session. Anthropic sessions ignore
-   * it entirely: the bundled extension strips any tier for that provider no
-   * matter what this says. Defaults to off so a missing setting can never
-   * silently buy the 2x tier.
+   * The composer's fast-mode toggle (AppSettings.openAiFastMode), already
+   * narrowed to whether this provider and model can run fast. The bundled
+   * extension applies OpenAI's priority tier or Anthropic's `speed: "fast"`
+   * per request. Defaults to off so a missing setting can never silently buy
+   * the pricier mode.
    */
-  openAiFastMode?: boolean;
+  fastMode?: boolean;
+  /** AppSettings.coraAutoCompactPercent. null or absent is Auto. */
+  autoCompactPercent?: number | null;
   baseEnv?: NodeJS.ProcessEnv;
 }
 
@@ -154,6 +176,10 @@ export interface PiManagerLaunchPlan {
   /** Absolute lease boundary for the process-local socket claim. Main-only;
    * a live Pi process must be rotated instead of reusing an expired lease. */
   agentSocketCapabilityExpiresAt?: number;
+  /** Which Pi build this plan runs, so a failed start on the user's install
+   *  can be retried on the bundled one. */
+  runtimeSource?: "user" | "bundled";
+  runtimeVersion?: string;
 }
 
 const DEFAULT_MODELS: Record<PiProvider, string> = {
@@ -242,6 +268,7 @@ export async function resolvePinnedPiRuntime(
       packageJsonPath,
       entrypoint,
       version: CODARA_PI_VERSION,
+      source: "bundled",
     };
   }
   const detail = mismatches.length ? ` Version mismatches: ${mismatches.join(", ")}.` : "";
@@ -297,7 +324,7 @@ export async function resolveInstalledPiRuntime(
     const entrypoint = join(packageRoot, bin);
     const entryStat = await stat(entrypoint).catch(() => null);
     if (!entryStat?.isFile()) continue;
-    return { packageRoot, packageJsonPath, entrypoint, version: manifest.version };
+    return { packageRoot, packageJsonPath, entrypoint, version: manifest.version, source: "user" };
   }
   if (tooOld.length > 0) {
     throw new Error(
@@ -432,6 +459,67 @@ export async function inspectPiSubscriptionAuth(
 }
 
 /**
+ * Pi's own provider retry budget for every Cora process. Pi's default (3
+ * retries from 2s, about 14s in all) is shorter than a typical provider
+ * overload burst, which then parked the run. Six retries back off for about
+ * two minutes; the longest single sleep (64s) stays under the worker's
+ * provider-failure grace in agent-liveness.ts, and Pi emits auto_retry_start
+ * before each sleep, so liveness sees progress throughout.
+ */
+export const CODARA_PI_RETRY_SETTINGS = {
+  enabled: true,
+  maxRetries: 6,
+  baseDelayMs: 2_000,
+} as const;
+
+/**
+ * Merge Codara's keys into the settings.json of an isolated Pi agent dir and
+ * return the result, leaving every other key as it was. `shellPath` is set
+ * only when one was resolved, so a path the user wrote by hand survives.
+ */
+export function mergeCodaraPiAgentSettings(
+  existing: unknown,
+  options: { shellPath?: string | null } = {},
+): Record<string, unknown> {
+  const base = isRecord(existing) ? { ...existing } : {};
+  const retry = isRecord(base.retry) ? base.retry : {};
+  base.retry = { ...retry, ...CODARA_PI_RETRY_SETTINGS };
+  if (options.shellPath) base.shellPath = options.shellPath;
+  return base;
+}
+
+/**
+ * Where Git for Windows' bash.exe may live, best first. Pi itself only checks
+ * %ProgramFiles%\Git and then any bash.exe on PATH, which misses user-scope
+ * installs (winget, scoop) and can land on System32\bash.exe, the WSL
+ * launcher, which runs Cora's commands in Linux against /mnt/c paths.
+ * `gitExecutable` is the git.exe found on PATH, when there is one.
+ */
+export function windowsGitBashCandidates(
+  env: NodeJS.ProcessEnv,
+  gitExecutable?: string | null,
+): string[] {
+  const win = (...parts: string[]): string => parts.join("\\");
+  const candidates: string[] = [];
+  for (const root of [env.ProgramFiles, env.ProgramW6432, env["ProgramFiles(x86)"]]) {
+    if (root) candidates.push(win(root, "Git", "bin", "bash.exe"));
+  }
+  if (env.LOCALAPPDATA) candidates.push(win(env.LOCALAPPDATA, "Programs", "Git", "bin", "bash.exe"));
+  const scoop = env.SCOOP || (env.USERPROFILE ? win(env.USERPROFILE, "scoop") : "");
+  if (scoop) candidates.push(win(scoop, "apps", "git", "current", "bin", "bash.exe"));
+  if (gitExecutable) {
+    // <git root>\cmd\git.exe or <git root>\mingw64\bin\git.exe
+    const segments = gitExecutable.split(/[\\/]/);
+    for (const depth of [2, 3]) {
+      if (segments.length > depth) {
+        candidates.push(win(...segments.slice(0, segments.length - depth), "bin", "bash.exe"));
+      }
+    }
+  }
+  return [...new Set(candidates)];
+}
+
+/**
  * Strip every API-key override before launching Pi. OAuth is read only from
  * Codara's isolated, mode-600 auth store; inheriting a shell API key would
  * silently turn a subscription experiment into metered API usage.
@@ -456,6 +544,7 @@ export function buildPiSubscriptionEnvironment(
   // project, so a dev app's wiring would reach their builds and test runs.
   sanitizeElectronViteDevEnv(env);
   sanitizeNpmRunScriptEnv(env);
+  sanitizeAppImageChildEnv(env);
   env.ELECTRON_RUN_AS_NODE = "1";
   env.PI_CODING_AGENT_DIR = resolve(configDir);
   env.PI_CODING_AGENT_SESSION_DIR = resolve(sessionDir);
@@ -470,6 +559,13 @@ export function buildPiSubscriptionEnvironment(
 
 /** Build the deterministic RPC launch used by the experimental Cora backend. */
 export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiManagerLaunchPlan {
+  // An ssh:// workspace path resolves to a nonsense local directory and the
+  // spawn then fails with a misleading ENOENT.
+  if (isRemotePath(options.cwd)) {
+    throw new Error(
+      "Cora runs on local folders only for now. Open a local clone of this project, or use a terminal agent on the SSH host.",
+    );
+  }
   assertSafeSegment(options.sessionId, "Pi session id");
   assertSafeSegment(options.runId, "Codara run id");
   const model = options.model?.trim() || DEFAULT_MODELS[options.provider];
@@ -521,6 +617,11 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
       "--no-prompt-templates",
       "--no-themes",
     );
+  } else if (options.skillPaths) {
+    // --skill paths stay additive under --no-skills, which is what makes the
+    // explicit list authoritative.
+    args.push("--no-skills");
+    for (const skillPath of options.skillPaths) args.push("--skill", resolve(skillPath));
   }
   if (options.sessionName?.trim()) args.push("--name", options.sessionName.trim());
   if (options.provider === "anthropic") {
@@ -553,12 +654,21 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
   env.CODARA_PI_COMPACT_AT_TOKENS = String(
     resolvePiCompactAtTokens(options.baseEnv ?? process.env),
   );
-  // Service-tier policy inputs. The extension's before_provider_request hook
-  // is the only seam Pi 0.85.1 gives us for the request body, and it needs to
-  // know which provider this process talks to and whether Settings enabled the
-  // faster OpenAI tier. Fast mode is stamped only for OpenAI providers: an
-  // Anthropic plan never carries the flag at all, which is the first of the
-  // two places that guarantee Anthropic can never run a priority tier.
+  // The extension prices the percentage off the window Pi reports for the
+  // model it actually runs, so a 1M and a 200k model each get their own limit.
+  // A developer token override in the base environment outranks it.
+  const autoCompactPercent = normalizeAutoCompactPercent(options.autoCompactPercent);
+  if (
+    autoCompactPercent !== null &&
+    compactAtOverrideTokens((options.baseEnv ?? process.env).CODARA_PI_COMPACT_AT_TOKENS) === null
+  ) {
+    env.CODARA_PI_COMPACT_PERCENT = String(autoCompactPercent);
+  }
+  // Fast-mode policy inputs. The extension's before_provider_request hook is
+  // the only seam Pi 0.85.1 gives us for the request body, and it needs to
+  // know which provider this process talks to and whether Settings enabled
+  // fast mode. OpenRouter never carries the flag: its upstream pricing for a
+  // fast tier is unknown to Codara.
   env.CODARA_PI_PROVIDER = options.provider;
   // A Claude process asks Studio to renew its login (the bundled extension's
   // anthropic-refresh.ts), so it names the account it runs as. An imported-PR
@@ -566,11 +676,7 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
   if (options.provider === "anthropic" && options.accountProfileId) {
     env.CODARA_PI_ACCOUNT_PROFILE_ID = options.accountProfileId;
   }
-  if (
-    options.openAiFastMode === true &&
-    options.provider !== "anthropic" &&
-    options.provider !== "openrouter"
-  ) {
+  if (options.fastMode === true && options.provider !== "openrouter") {
     env.CODARA_PI_FAST_MODE = "1";
   }
   // Both names or neither: a half-configured bridge would leave the extension
@@ -599,5 +705,7 @@ export function buildPiManagerLaunchPlan(options: PiManagerLaunchOptions): PiMan
     executionPolicy,
     projectPolicyMode,
     mcpConfigPath: mcpEnabled ? resolve(options.mcpConfigPath!) : null,
+    ...(options.runtime.source ? { runtimeSource: options.runtime.source } : {}),
+    runtimeVersion: options.runtime.version,
   };
 }

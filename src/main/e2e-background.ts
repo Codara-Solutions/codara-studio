@@ -1,4 +1,4 @@
-import type { BrowserWindow } from "electron";
+import { app, type BrowserWindow } from "electron";
 
 /**
  * True when this process was launched by the e2e suite, which sets
@@ -16,6 +16,23 @@ import type { BrowserWindow } from "electron";
  * Nothing outside a test ever sets it.
  */
 export const E2E_BACKGROUND = process.env.SPARK_E2E_BACKGROUND === "1";
+
+/**
+ * Keep an e2e app from reaching the person at the machine at all: no window on
+ * the desktop, no sound. Must run before the app is ready.
+ *
+ * On Linux the window itself is kept off the desktop by the runner, which
+ * points DISPLAY at a private Xvfb server (scripts/virtual-display.cjs):
+ * setOpacity is a no-op there, and Chromium's headless Ozone backend is no
+ * substitute, because this Electron segfaults creating a window on it and
+ * choosing it from here is too late to take effect anyway. Muting audio
+ * silences the notification chimes the renderer synthesizes without changing
+ * which events reach it, so specs can still assert on them.
+ */
+export function isolateE2eFromDesktop(): void {
+  if (!E2E_BACKGROUND) return;
+  app.commandLine.appendSwitch("mute-audio");
+}
 
 /**
  * Make a window invisible to the person at the machine while leaving it fully
@@ -51,10 +68,16 @@ export function hideWindowFromDesktop(target: BrowserWindow): void {
  * is ONE place that can be switched off, rather than a reveal hiding in a
  * notification handler or a tray callback that a future test happens to
  * trigger. Under an e2e run it does nothing at all.
+ *
+ * Hiding to the tray on Windows also drops the taskbar button, so a window
+ * brought back from there gets it back too, whichever path revealed it.
  */
 export function revealWindow(target: BrowserWindow): void {
   if (E2E_BACKGROUND || target.isDestroyed()) return;
   if (target.isMinimized()) target.restore();
-  if (!target.isVisible()) target.show();
+  if (!target.isVisible()) {
+    if (process.platform === "win32") target.setSkipTaskbar(false);
+    target.show();
+  }
   target.focus();
 }

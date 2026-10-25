@@ -222,7 +222,7 @@ async function main() {
   // The trigger must actually resolve the override, not just accept one.
   check(
     "run-store's trigger resolves the env override for its capacity",
-    /compactAtTokens: resolveCompactAtTokens\(process\.env\.CODARA_PI_COMPACT_AT_TOKENS\)/.test(
+    /compactAtTokens: compactAtOverrideTokens\(process\.env\.CODARA_PI_COMPACT_AT_TOKENS\),\s*percent: \(await loadSettings\(\)[^\n]*\)\?\.coraAutoCompactPercent/.test(
       fs.readFileSync(
         path.join(ROOT, "src", "main", "orchestration", "run-store.ts"),
         "utf8",
@@ -244,8 +244,37 @@ async function main() {
     "utf8",
   );
   check(
-    "the composer labels Cora's stable 256k target",
-    /budget=\{DEFAULT_PI_COMPACT_AT_TOKENS\}/.test(composer),
+    "the composer starts from Cora's 256k default and follows the session's reported limit",
+    /useState\(DEFAULT_PI_COMPACT_AT_TOKENS\)/.test(composer) &&
+      /payload\.compactAtTokens/.test(composer) &&
+      /budget=\{compactBudget\}/.test(composer),
+  );
+
+  // The user's percentage: every route prices it off the model's window.
+  check(
+    "75% of a 200k window compacts at 150k",
+    capacity({ contextWindowTokens: 200_000, percent: 75 }) === 150_000,
+  );
+  check(
+    "70% of a 1M window compacts at 700k",
+    capacity({ contextWindowTokens: 1_000_000, percent: 70 }) === 700_000,
+  );
+  check(
+    "a developer token override outranks the percentage",
+    capacity({ contextWindowTokens: 1_000_000, percent: 70, compactAtTokens: 120_000 }) === 120_000,
+  );
+  check(
+    "an unsupported percentage is Auto",
+    capacity({ contextWindowTokens: 1_000_000, percent: 12 }) === 256_000,
+  );
+  const piTurn = fs.readFileSync(
+    path.join(ROOT, "src", "main", "orchestration", "pi-turn.ts"),
+    "utf8",
+  );
+  check(
+    "the usage stream reports the limit the session's extension enforces",
+    /compactAtTokens: this\.compactAtTokens\(\)/.test(piTurn) &&
+      /this\.launchEnv\.CODARA_PI_COMPACT_PERCENT/.test(piTurn),
   );
   const meter = await bundle(
     "context-meter",

@@ -8,7 +8,8 @@
  * byte-contract test bundles this module and runs the real table instead.
  */
 
-import { DEFAULT_PI_COMPACT_AT_TOKENS } from "@shared/context-compaction";
+import { autoCompactLimitTokens } from "@shared/context-compaction";
+import { contextWindowForModel } from "@shared/context-window";
 import type { SparkCall } from "@shared/types";
 
 /** Occupancy and the ceiling it is measured against, both in context tokens. */
@@ -20,6 +21,14 @@ export interface RemoteCoraRunContextGauge {
 /** Exactly the run fields the gauge reads; RunState satisfies it structurally. */
 export interface RemoteCoraRunContextSource {
   sparkCalls: readonly SparkCall[];
+}
+
+/** The inputs a Pi session's limit is priced from, besides its model. */
+export interface RemoteCoraRunContextLimits {
+  /** AppSettings.coraAutoCompactPercent; null or absent is Auto. */
+  percent?: number | null;
+  /** The CODARA_PI_COMPACT_AT_TOKENS developer override, when set. */
+  overrideTokens?: number | null;
 }
 
 // Exactly the four modes askManagerBackend dispatches today,
@@ -41,18 +50,18 @@ const MANAGER_TURN_MODES = new Set<SparkCall["mode"]>([
  * estimate when the backend reported none. Same preference RunsView's context
  * readout uses.
  *
- * Denominator: Cora's visible 256k product target, exactly matching the
- * desktop ContextPill. Provider-specific safety ceilings remain operational
- * details for auto-compaction; using one here while labelling the desktop
- * gauge 256k made identical usage render as two different percentages.
+ * Denominator: the limit that turn's session compacts at, priced exactly as
+ * the desktop pill's live reading is (pi-turn.ts): the model's window (the one
+ * the turn reported, else the catalogue's) with the user's percentage, or the
+ * 256k default capped below Pi's own trigger on Auto.
  *
  * Undefined when no turn reported usage — a remote client then shows no gauge,
  * exactly as it would against an older Studio.
  */
 export function remoteCoraRunContext(
   run: RemoteCoraRunContextSource,
+  limits: RemoteCoraRunContextLimits = {},
 ): RemoteCoraRunContextGauge | undefined {
-  let usedTokens: number | undefined;
   for (let index = run.sparkCalls.length - 1; index >= 0; index -= 1) {
     const entry = run.sparkCalls[index];
     // The auto-compaction summarize call runs against the OUTGOING session, so
@@ -68,10 +77,19 @@ export function remoteCoraRunContext(
       Number.isFinite(reported) &&
       reported > 0
     ) {
-      usedTokens = Math.floor(reported);
-      break;
+      const windowTokens =
+        typeof entry.contextWindowTokens === "number" && entry.contextWindowTokens > 0
+          ? entry.contextWindowTokens
+          : contextWindowForModel(entry.model).tokens;
+      return {
+        usedTokens: Math.floor(reported),
+        budgetTokens: autoCompactLimitTokens({
+          contextWindowTokens: windowTokens,
+          percent: limits.percent,
+          overrideTokens: limits.overrideTokens,
+        }),
+      };
     }
   }
-  if (usedTokens === undefined) return undefined;
-  return { usedTokens, budgetTokens: DEFAULT_PI_COMPACT_AT_TOKENS };
+  return undefined;
 }

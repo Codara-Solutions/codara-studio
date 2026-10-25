@@ -121,6 +121,9 @@ export default function AnchoredMenu({
   // Callers rebuild onClose every render; the registry must call the latest.
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  // Where the anchor stood when the menu was last placed; the scroll rule
+  // below closes only when the anchor has left it.
+  const placedAnchorRef = useRef<{ top: number; left: number } | null>(null);
   // Exactly one of `top` / `bottom` is set: `bottom` grows the menu upward
   // from the trigger, `top` hangs it underneath.
   const [position, setPosition] = useState<{
@@ -134,6 +137,7 @@ export default function AnchoredMenu({
     const anchor = anchorRef.current;
     if (!anchor) return;
     const rect = anchor.getBoundingClientRect();
+    placedAnchorRef.current = { top: rect.top, left: rect.left };
     // A boundary anchor can leave the boundary's box entirely without a scroll
     // or a window resize: dragging the rail's section divider shrinks the
     // workspaces container while its rows stay put, and `overflow` clips a
@@ -218,6 +222,7 @@ export default function AnchoredMenu({
   // then again after it has a width so the right-edge clamp is real.
   useLayoutEffect(() => {
     if (!open) {
+      placedAnchorRef.current = null;
       setPosition(null);
       return;
     }
@@ -284,6 +289,10 @@ export default function AnchoredMenu({
     // chords) would otherwise dead-end with focus left on the trigger.
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        // Marked handled so a dialog that hosts this menu (Settings, the
+        // Capability Center) leaves its own Escape alone: one press closes
+        // the menu, the next one the dialog.
+        event.preventDefault();
         onClose();
         return;
       }
@@ -316,7 +325,14 @@ export default function AnchoredMenu({
     // A fixed panel anchored to a trigger that scrolled away is worse than no
     // panel, so a scroll that MOVES THE ANCHOR closes the menu. The test is
     // exactly that and nothing broader: did the scrolled container contain the
-    // trigger?
+    // trigger, and is the trigger no longer where the menu was placed?
+    //
+    // The second half matters because scroll events are dispatched on the
+    // next frame, not when the scroll happens. A scroll that brought the
+    // trigger into view just before the click that opened the menu (a
+    // scroll-into-view, the tail of a wheel scroll) is delivered after the
+    // menu is open and already measured against the scrolled position. It
+    // closed the Settings account menus about 3 ms after they opened.
     //
     // Closing on any scroll instead (which is what this did first) breaks the
     // menu during a run. The conversation list follows streamed output, so it
@@ -335,6 +351,15 @@ export default function AnchoredMenu({
       const anchor = anchorRef.current;
       if (!target || !anchor) return;
       if (!target.contains(anchor)) return;
+      const placed = placedAnchorRef.current;
+      const rect = anchor.getBoundingClientRect();
+      if (
+        placed &&
+        Math.abs(rect.top - placed.top) < 1 &&
+        Math.abs(rect.left - placed.left) < 1
+      ) {
+        return;
+      }
       onClose();
     };
     // The anchor can change size while the menu is open, and the old absolute

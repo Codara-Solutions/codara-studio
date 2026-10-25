@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 "use strict";
 
-// The one startup pass over all three providers, against real temp roots
-// and the REAL pinned Pi AuthStorage: per-provider ordering, a failing Grok
-// undo that does not block Codex pairing, a ready gate that resolves after a
-// failure, and no writes on a second run over all three roots.
+// The startup pass over all three providers, against real temp roots, real
+// account services and the REAL pinned Pi AuthStorage: the accounts v2
+// migration runs first, then per provider clear-dangling-links,
+// project-defaults, purge-deleted-homes and start-mirror, then the shell
+// pointer. A failing step does not block the others, the ready gate
+// resolves after a failure, a second pass writes nothing, and no step adds
+// an account or touches the user's CLI homes.
 //
 //   node scripts/test-unified-account-migration.cjs
 
@@ -18,23 +21,26 @@ const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
 const PI_PACKAGE_ROOT = path.join(ROOT, "node_modules", "@earendil-works", "pi-coding-agent");
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "codara-unified-migration-"));
+const TMP = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "codara-unified-migration-")));
 const HOME = path.join(TMP, "home");
-process.env.CODARA_HOME_DIR = path.join(HOME, ".codarastudio");
+const CODARA = path.join(HOME, ".codarastudio");
+process.env.HOME = HOME;
+process.env.CODARA_HOME_DIR = CODARA;
 process.env.CODARA_DISABLE_KEYCHAIN = "1";
 delete process.env.CLAUDE_CONFIG_DIR;
 delete process.env.CODEX_HOME;
 delete process.env.GROK_HOME;
 
-const T0 = 1_900_000_000;
+const sha = (value) => crypto.createHash("sha256").update(value).digest("hex");
 const b64 = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
 const jwt = (claims) => `${b64({ alg: "RS256", typ: "JWT" })}.${b64(claims)}.sig`;
-const sha = (value) => crypto.createHash("sha256").update(value).digest("hex");
-const CLAUDE_UUID = "11111111-2222-4333-8444-555555555555";
-const CODEX_ACCOUNT = "acct-codex-1111";
-const GROK_SUBJECT = "22222222-2222-4222-8222-222222222222";
-const GROK_MANAGED = "cccccccc-cccc-4ccc-8ccc-ccccccccccc1";
-const GROK_SLOT = "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828";
+const MAIN_UUID = "0f8fad5b-d9cb-469f-a165-70867728950e";
+const CODEX_WORK = "acct-22222222-2222-4222-8222-222222222222";
+const CLAUDE_MAIN = "bd5882bc-0000-4000-8000-000000000011";
+const CODEX_WORK_CLI = "224c686d-0000-4000-8000-000000000022";
+const ROW_MAIN = "f7ef8f54-0000-4000-8000-000000000001";
+const ROW_CODEX = "a0000000-0000-4000-8000-000000000006";
+const DAY = 24 * 60 * 60 * 1000;
 
 const orchestration = (name) => path.join(ROOT, "src", "main", "orchestration", name);
 
@@ -45,7 +51,6 @@ async function buildHarness() {
     [
       `export * as accounts from ${JSON.stringify(orchestration("unified-accounts.ts"))};`,
       `export * as migration from ${JSON.stringify(orchestration("unified-account-migration.ts"))};`,
-      `export * as registry from ${JSON.stringify(orchestration("unified-account-registry.ts"))};`,
       `export * as claudeAdapter from ${JSON.stringify(orchestration("account-adapters/claude-account-adapter.ts"))};`,
       `export * as codexAdapter from ${JSON.stringify(orchestration("account-adapters/codex-account-adapter.ts"))};`,
       `export * as grokAdapter from ${JSON.stringify(orchestration("account-adapters/grok-account-adapter.ts"))};`,
@@ -57,10 +62,8 @@ async function buildHarness() {
       `export * as codexExecution from ${JSON.stringify(orchestration("codex-cli-profile-execution.ts"))};`,
       `export * as grokProfiles from ${JSON.stringify(orchestration("grok-cli-account-profiles.ts"))};`,
       `export * as grokExecution from ${JSON.stringify(orchestration("grok-cli-profile-execution.ts"))};`,
-      `export * as credentials from ${JSON.stringify(orchestration("claude-cli-credentials.ts"))};`,
-      `export * as claudeRuntime from ${JSON.stringify(orchestration("native-claude-profile-runtime.ts"))};`,
-      `export * as codexRuntime from ${JSON.stringify(orchestration("native-codex-profile-runtime.ts"))};`,
-      `export * as grokRuntime from ${JSON.stringify(orchestration("native-grok-profile-runtime.ts"))};`,
+      `export * as liveLogin from ${JSON.stringify(orchestration("claude-cli-live-login.ts"))};`,
+      `export * as systemLogin from ${JSON.stringify(orchestration("system-cli-login.ts"))};`,
     ].join("\n"),
   );
   const out = path.join(TMP, "harness.cjs");
@@ -103,15 +106,13 @@ async function loadAuthStorage() {
   return loaded.AuthStorage;
 }
 
-function privateDir(dir) {
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  if (process.platform !== "win32") fs.chmodSync(dir, 0o700);
+function writeJson(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(file, JSON.stringify(value, null, 2), { mode: 0o600 });
 }
 
-function privateFile(file, content) {
-  privateDir(path.dirname(file));
-  fs.writeFileSync(file, content, { mode: 0o600 });
-  if (process.platform !== "win32") fs.chmodSync(file, 0o600);
+function readJson(file) {
+  return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : null;
 }
 
 function snapshotTree(dir) {
@@ -119,13 +120,9 @@ function snapshotTree(dir) {
   const visit = (current) => {
     for (const entry of fs.readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
       const file = path.join(current, entry.name);
-      if (entry.isSymbolicLink()) {
-        entries.push(`${path.relative(dir, file)} -> ${fs.readlinkSync(file)}`);
-      } else if (entry.isDirectory()) {
-        visit(file);
-      } else {
-        entries.push(`${path.relative(dir, file)}:${fs.statSync(file).mtimeMs}:${fs.readFileSync(file, "utf8")}`);
-      }
+      if (entry.isSymbolicLink()) entries.push(`${path.relative(dir, file)} -> ${fs.readlinkSync(file)}`);
+      else if (entry.isDirectory()) visit(file);
+      else entries.push(`${path.relative(dir, file)}:${fs.statSync(file).mtimeMs}:${fs.readFileSync(file, "utf8")}`);
     }
   };
   visit(dir);
@@ -141,308 +138,244 @@ function pass(name) {
 async function main() {
   const H = await buildHarness();
   const AuthStorage = await loadAuthStorage();
-  const codaraHome = path.join(HOME, ".codarastudio");
-  const piRoot = path.join(codaraHome, "pi-agent");
-  const claudeRoot = path.join(codaraHome, "claude-cli");
-  const codexRoot = path.join(codaraHome, "codex-cli");
-  const grokRoot = path.join(codaraHome, "grok-cli");
-  const claudeHome = path.join(HOME, ".claude");
-  const codexHome = path.join(HOME, ".codex");
-  const grokHome = path.join(HOME, ".grok");
-  for (const dir of [claudeHome, codexHome, grokHome]) privateDir(dir);
 
+  // The System logins.
+  writeJson(path.join(HOME, ".claude", ".credentials.json"), { claudeAiOauth: { accessToken: "system" } });
+  writeJson(path.join(HOME, ".claude.json"), { oauthAccount: { accountUuid: MAIN_UUID, emailAddress: "main@example.com" } });
+  fs.mkdirSync(path.join(HOME, ".codex"), { recursive: true });
+  fs.mkdirSync(path.join(HOME, ".grok"), { recursive: true });
+  const systemBefore = () =>
+    [".claude", ".codex", ".grok"].map((name) => snapshotTree(path.join(HOME, name))).join("\n#\n") +
+    fs.readFileSync(path.join(HOME, ".claude.json"), "utf8");
+  const ownBefore = systemBefore();
+
+  // Stores and services.
+  const piRoot = path.join(CODARA, "pi-agent");
+  const claudeRoot = path.join(CODARA, "claude-cli");
+  const codexRoot = path.join(CODARA, "codex-cli");
+  const grokRoot = path.join(CODARA, "grok-cli");
   const piStore = new H.piStore.PiAccountAuthStore(piRoot);
   const claudeLeases = new H.claudeExecution.ClaudeCliProfileLeaseRegistry();
+  const codexLeases = new H.codexExecution.CodexCliProfileLeaseRegistry();
+  const grokLeases = new H.grokExecution.GrokCliProfileLeaseRegistry();
+  const claudeIds = [CLAUDE_MAIN];
+  const codexIds = [CODEX_WORK_CLI];
   const claudeStore = new H.claudeProfiles.ClaudeCliAccountProfileStore(claudeRoot, {
-    personalConfigDir: claudeHome,
+    personalConfigDir: path.join(HOME, ".claude"),
     personalConfigDirEnv: null,
     leases: claudeLeases,
-    authChecker: (input) =>
-      H.claudeProfiles.claudeCredentialAuthChecker(input, {
-        backend: H.credentials.fileOnlyClaudeCliCredentialBackend,
-        personalFallback: null,
-      }),
+    idFactory: () => claudeIds.shift(),
+    authChecker: () => ({ connected: true }),
   });
-  const codexLeases = new H.codexExecution.CodexCliProfileLeaseRegistry();
   const codexStore = new H.codexProfiles.CodexCliAccountProfileStore(codexRoot, {
-    personalHomeDir: codexHome,
+    personalHomeDir: path.join(HOME, ".codex"),
     leases: codexLeases,
+    idFactory: () => codexIds.shift(),
   });
-  const grokLeases = new H.grokExecution.GrokCliProfileLeaseRegistry();
   const grokStore = new H.grokProfiles.GrokCliAccountProfileStore(grokRoot, {
-    personalHomeDir: grokHome,
+    personalHomeDir: path.join(HOME, ".grok"),
     leases: grokLeases,
   });
-  const mirror = new H.mirror.CredentialMirror({ loadAuthStorage, pollWhenWatchBlind: null, debounceMs: 30, retryDelayMs: 20 });
+  const readSystemLogin = (provider) =>
+    H.systemLogin.readSystemLogin(provider, { homeDir: HOME, env: {}, platform: "linux" });
+  const common = (log) => ({
+    piStore,
+    mirror: new H.mirror.CredentialMirror({ loadAuthStorage, pollWhenWatchBlind: null, debounceMs: 30, retryDelayMs: 20 }),
+    loadAuthStorage,
+    invalidateCaches: async () => undefined,
+    sessions: { liveOwnerIds: () => new Set() },
+    readSystemLogin,
+    log,
+  });
   const logs = [];
   const log = (message) => logs.push(message);
-  const common = { piStore, mirror, loadAuthStorage, invalidateCaches: async () => undefined, log };
   const services = {
     anthropic: new H.accounts.UnifiedAccountService(
       H.claudeAdapter.createClaudeAccountAdapter({
         store: claudeStore,
         leases: claudeLeases,
-        backend: H.credentials.fileOnlyClaudeCliCredentialBackend,
-        readIdentity: async () => ({}),
-        homeDir: HOME,
+        fileOnly: true,
         platform: "linux",
+        readIdentity: async () => ({}),
       }),
-      common,
+      common(log),
     ),
     "openai-codex": new H.accounts.UnifiedAccountService(
-      H.codexAdapter.createCodexAccountAdapter({ store: codexStore, leases: codexLeases, loadAuthStorage, externalSessionCount: () => 0 }),
-      common,
+      H.codexAdapter.createCodexAccountAdapter({ store: codexStore, leases: codexLeases }),
+      common(log),
     ),
     xai: new H.accounts.UnifiedAccountService(
       H.grokAdapter.createGrokAccountAdapter({ store: grokStore, leases: grokLeases }),
-      common,
+      common(log),
     ),
   };
+
+  // A v1 machine: Claude Main moved into ~/.claude, a Codex account vaulted.
+  await claudeStore.createProfile({ label: "Main" });
+  await codexStore.createProfile({ label: "Work" });
+  writeJson(path.join(claudeRoot, "live-login.json"), { version: 1, profileId: CLAUDE_MAIN });
+  writeJson(H.liveLogin.claudeCliVaultFile(claudeRoot, CLAUDE_MAIN), {
+    version: 1,
+    store: { claudeAiOauth: { accessToken: "old", refreshToken: "old-r", expiresAt: Date.now() - DAY } },
+  });
+  const workAccess = jwt({ exp: Math.floor(Date.now() / 1000) + 3600, "https://api.openai.com/auth": { chatgpt_account_id: CODEX_WORK } });
+  const workAuth = {
+    auth_mode: "chatgpt",
+    OPENAI_API_KEY: null,
+    tokens: { id_token: jwt({ email: "work@example.com" }), access_token: workAccess, refresh_token: "work-r", account_id: CODEX_WORK },
+  };
+  writeJson(path.join(codexRoot, "accounts", CODEX_WORK_CLI, "auth.json"), workAuth);
+  fs.rmSync(path.join(codexRoot, "accounts", CODEX_WORK_CLI, "home", "auth.json"), { force: true });
+  const writePi = async (row, provider, credential) => {
+    const { configDir, authFile } = H.piStore.piAccountProfilePaths(piRoot, row);
+    fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
+    await AuthStorage.create(authFile).modify(provider, async () => credential);
+    fs.chmodSync(authFile, 0o600);
+  };
+  await writePi(ROW_MAIN, "anthropic", { type: "oauth", access: "main-cora", refresh: "main-cora-r", expires: Date.now() + DAY });
+  await writePi(ROW_CODEX, "openai-codex", { type: "oauth", access: workAccess, refresh: "work-r", expires: Date.now() + 3_000_000, accountId: CODEX_WORK });
+  const at = "2026-01-01T00:00:00.000Z";
+  writeJson(path.join(piRoot, "account-profiles.json"), {
+    version: 1,
+    profiles: [
+      { id: ROW_MAIN, provider: "anthropic", label: "Main", createdAt: at, updatedAt: at, identityFingerprint: sha(MAIN_UUID), cliProfileId: CLAUDE_MAIN },
+      { id: ROW_CODEX, provider: "openai-codex", label: "Work", createdAt: at, updatedAt: at, identityFingerprint: sha(CODEX_WORK), cliProfileId: CODEX_WORK_CLI },
+    ],
+    defaults: { anthropic: ROW_MAIN, "openai-codex": ROW_CODEX },
+  });
+
+  // Every step is recorded in order; the migration must have committed
+  // before the first per-provider step runs.
+  const order = [];
+  for (const [provider, service] of Object.entries(services)) {
+    for (const name of ["clearDanglingLinks", "reprojectDefaults", "purgePending", "startMirror"]) {
+      const original = service[name].bind(service);
+      service[name] = async (...args) => {
+        if (order.length === 0) {
+          assert.equal(await piStore.registry.needsMigration(), false, "the v2 migration ran first");
+        }
+        order.push(`${provider}:${name}`);
+        return original(...args);
+      };
+    }
+  }
+  let pointerWrites = 0;
   const deps = {
     services,
     piStore,
     claudeStore,
-    backend: H.credentials.fileOnlyClaudeCliCredentialBackend,
     codexStore,
     grokStore,
+    codaraHome: CODARA,
+    readSystemLogin,
+    refreshShellPointer: async () => {
+      order.push("shell-pointer");
+      pointerWrites += 1;
+    },
     log,
   };
 
-  // The layout: a personal login for every CLI, a retired Grok live-slot
-  // vault, a legacy pi-agent/auth.json with an xai credential.
-  privateFile(
-    path.join(claudeHome, ".credentials.json"),
-    JSON.stringify({ claudeAiOauth: { accessToken: "claude-access-1", refreshToken: "claude-refresh-1", expiresAt: T0 * 1000 + 1000, scopes: ["user:inference"] } }),
-  );
-  privateFile(path.join(HOME, ".claude.json"), JSON.stringify({ oauthAccount: { accountUuid: CLAUDE_UUID, emailAddress: "claude@example.com" } }));
-  const codexAccess = jwt({ iat: T0, exp: T0 + 240 * 3600, "https://api.openai.com/auth": { chatgpt_account_id: CODEX_ACCOUNT } });
-  privateFile(
-    path.join(codexHome, "auth.json"),
-    JSON.stringify({
-      auth_mode: "chatgpt",
-      OPENAI_API_KEY: null,
-      tokens: { id_token: jwt({ iat: T0, exp: T0 + 3600, email: "codex@example.com" }), access_token: codexAccess, refresh_token: "codex-refresh-1", account_id: CODEX_ACCOUNT },
-      last_refresh: "2026-08-01T00:00:00.000Z",
-    }),
-  );
-  const grokSlot = (n) => ({
-    [GROK_SLOT]: {
-      key: jwt({ sub: GROK_SUBJECT, iat: T0 + n, exp: T0 + n + 3600, email: "grok@example.com" }),
-      auth_mode: "oidc",
-      create_time: "2026-06-01T00:00:00.000Z",
-      user_id: GROK_SUBJECT,
-      principal_id: GROK_SUBJECT,
-      principal_type: "User",
-      refresh_token: `grok-refresh-${n}`,
-      expires_at: new Date((T0 + n + 3600) * 1000).toISOString(),
-      oidc_issuer: "https://auth.x.ai",
-      oidc_client_id: "b1a00492-073a-47ea-816f-4c329264a828",
-    },
-  });
-  privateFile(path.join(grokRoot, "active-auth.json"), JSON.stringify({ version: 1, profileId: "personal" }));
-  privateFile(path.join(grokRoot, "personal", "auth.json"), JSON.stringify(grokSlot(5)));
-  privateFile(path.join(grokRoot, "personal", "auth.json.lock"), "");
-  privateFile(path.join(grokHome, "auth.json"), JSON.stringify(grokSlot(2)));
-  privateFile(
-    path.join(piRoot, "auth.json"),
-    JSON.stringify({ xai: { type: "oauth", access: jwt({ sub: "33333333-3333-4333-8333-333333333333", exp: T0 + 9999 }), refresh: "legacy-refresh", expires: (T0 + 9999) * 1000 - 300000 } }),
-  );
-
-  const report = await H.migration.migrateUnifiedAccounts(deps);
-  assert.equal(report.failedStep, null, JSON.stringify(report));
-  assert.deepEqual(Object.keys(report.providers), ["anthropic", "openai-codex", "xai"], "providers run in order");
-  // Claude: Account 1 from ~/.claude.
-  const claudeOne = await piStore.registry.accountOneProfile("anthropic");
-  assert.equal(claudeOne.identityFingerprint, sha(CLAUDE_UUID));
-  assert.equal(report.providers.anthropic.accountOne, claudeOne.id);
-  // Codex: the vault is seeded from the live login, Account 1 created with
-  // the account id fingerprint, marker personal.
-  assert.deepEqual(report.providers["openai-codex"].beforePairing, { active: "personal" });
-  assert.equal(JSON.parse(fs.readFileSync(path.join(codexRoot, "active-auth.json"), "utf8")).profileId, "personal");
-  assert.ok(fs.existsSync(path.join(codexRoot, "personal", "auth.json")), "the personal backup is seeded");
-  const codexOne = await piStore.registry.accountOneProfile("openai-codex");
-  assert.equal(codexOne.identityFingerprint, sha(CODEX_ACCOUNT));
-  assert.equal(codexOne.accountEmail, "codex@example.com");
-  const codexPi = JSON.parse(fs.readFileSync(H.piStore.piAccountProfilePaths(piRoot, codexOne.id).authFile, "utf8"))["openai-codex"];
-  assert.equal(codexPi.access, codexAccess);
-  assert.equal(codexPi.expires, (T0 + 240 * 3600) * 1000, "the row is created with the JWT expiry");
-  assert.equal(codexPi.accountId, CODEX_ACCOUNT);
-  // Grok: the vault's fresher personal login went back to ~/.grok, the vault
-  // retired, Account 1 created from ~/.grok, the legacy xai row folded.
-  assert.equal(report.providers.xai.beforePairing.personalRestored, true);
-  assert.equal(fs.existsSync(path.join(grokRoot, "active-auth.json")), false);
-  assert.equal(fs.existsSync(path.join(grokRoot, "personal")), false);
-  assert.equal(JSON.parse(fs.readFileSync(path.join(grokHome, "auth.json"), "utf8"))[GROK_SLOT].refresh_token, "grok-refresh-5");
-  const grokOne = await piStore.registry.accountOneProfile("xai");
-  assert.equal(grokOne.identityFingerprint, sha(GROK_SUBJECT));
-  const xaiRows = (await piStore.registry.listProfiles("xai")).length;
-  assert.equal(xaiRows, 2, "the legacy xai credential folded into its own row beside Account 1");
-  assert.equal(fs.existsSync(path.join(piRoot, "auth.json")), false);
-  assert.equal(report.providers.xai.watchedPairs, 1);
-  assert.equal((await piStore.registry.snapshot()).defaults.anthropic, claudeOne.id);
-  assert.equal((await piStore.registry.snapshot()).defaults["openai-codex"], codexOne.id);
-  pass("the pass runs every provider in order and creates the three Account 1 rows");
-
-  // A second run makes no writes on any root.
-  const before = [piRoot, claudeRoot, codexRoot, grokRoot, claudeHome, codexHome, grokHome].map(snapshotTree).join("\n===\n");
-  const rerun = await H.migration.migrateUnifiedAccounts(deps);
-  assert.equal(rerun.failedStep, null);
-  for (const provider of ["anthropic", "openai-codex", "xai"]) {
-    assert.deepEqual(rerun.providers[provider].paired, []);
-    assert.deepEqual(rerun.providers[provider].clearedLinks, []);
-  }
-  assert.equal([piRoot, claudeRoot, codexRoot, grokRoot, claudeHome, codexHome, grokHome].map(snapshotTree).join("\n===\n"), before, "no writes on the second run");
-  pass("the pass is idempotent over all three roots");
-
-  // A failing Grok undo does not block Codex pairing, and the failure is
-  // attributed to its step.
-  const grokManagedHome = H.grokProfiles.grokCliManagedProfilePaths(grokRoot, GROK_MANAGED).homeDir;
-  privateFile(path.join(grokRoot, "active-auth.json"), JSON.stringify({ version: 1, profileId: GROK_MANAGED }));
-  privateFile(path.join(grokRoot, "personal", "auth.json"), "{{{");
-  privateDir(grokManagedHome);
-  privateFile(
-    path.join(grokRoot, "account-profiles.json"),
-    JSON.stringify({ version: 1, profiles: [{ id: GROK_MANAGED, label: "Managed", createdAt: "2026-06-01T00:00:00.000Z", updatedAt: "2026-06-01T00:00:00.000Z" }], defaultProfileId: "personal" }),
-  );
-  // An unlinked Codex row and a managed Codex vault slot of the same account
-  // are paired by sha256(account_id).
-  const CODEX_MANAGED_ACCOUNT = "acct-codex-2222";
-  const codexRow = (await piStore.registry.registerProfile({ provider: "openai-codex", label: "Work", identityFingerprint: sha(CODEX_MANAGED_ACCOUNT) })).profile;
-  const codexManaged = await codexStore.createProfile({ label: "Work" });
-  privateFile(
-    H.codexProfiles.codexCliManagedProfilePaths(codexRoot, codexManaged.profile.id).authFile,
-    JSON.stringify({
-      auth_mode: "chatgpt",
-      OPENAI_API_KEY: null,
-      tokens: { id_token: jwt({ exp: T0 + 3600, email: "work@example.com" }), access_token: jwt({ iat: T0, exp: T0 + 240 * 3600, "https://api.openai.com/auth": { chatgpt_account_id: CODEX_MANAGED_ACCOUNT } }), refresh_token: "work-refresh", account_id: CODEX_MANAGED_ACCOUNT },
-      last_refresh: "2026-08-01T00:00:00.000Z",
-    }),
-  );
-  const partial = await H.migration.migrateUnifiedAccounts(deps);
-  assert.equal(partial.failedStep, null, "an unreadable Grok vault defers rather than fails");
-  assert.ok(logs.some((line) => line.includes("kept for the next launch")));
-  assert.deepEqual(partial.providers["openai-codex"].paired, [{ coraProfileId: codexRow.id, cliProfileId: codexManaged.profile.id, by: "fingerprint" }]);
-  assert.equal((await piStore.registry.getProfile(codexRow.id)).cliProfileId, codexManaged.profile.id);
-  assert.ok(fs.existsSync(path.join(grokRoot, "active-auth.json")), "the deferred Grok undo keeps its marker");
-  const grokFailing = Object.create(services.xai);
-  grokFailing.clearDanglingLinks = async () => {
-    throw new Error("grok boom");
-  };
-  const failed = await H.migration.migrateUnifiedAccounts({ ...deps, services: { ...services, xai: grokFailing } });
-  assert.equal(failed.failedStep, "xai:clear-dangling-links");
-  assert.equal(failed.providers.xai.failedStep, "xai:clear-dangling-links");
-  assert.equal(failed.providers["openai-codex"].failedStep, null);
-  assert.equal(failed.providers.xai.watchedPairs, 1, "the provider's later steps still ran");
-  pass("a failing Grok step is attributed and never blocks Codex");
-
-  // The ready gate resolves after a failed step and installs the three
-  // runtime hooks.
-  H.migration.resetUnifiedAccountMigrationForTests();
-  await H.migration.startUnifiedAccountMigration({ ...deps, services: { ...services, xai: grokFailing } });
-  await H.migration.unifiedAccountsReady();
-  assert.ok(logs.some((line) => line.includes('step "xai:clear-dangling-links" failed')));
-  assert.equal(await H.migration.startUnifiedAccountMigration(deps), await H.migration.unifiedAccountsReady(), "the gate is process-wide");
-  H.migration.resetUnifiedAccountMigrationForTests();
-  pass("the ready gate resolves after a failed step");
-
-  // First launch of a Grok user whose store default is a managed home the
-  // old model let them choose, with no Cora rows and then with a Cora-only
-  // default row of another account: the store default must not be pulled
-  // to personal by a Cora default nobody chose.
-  const GROK_WORK = "cccccccc-cccc-4ccc-8ccc-ccccccccccc9";
-  const GROK_WORK_SUBJECT = "44444444-4444-4444-8444-444444444444";
-  const grokWorld = async (name, rows) => {
-    const root = path.join(TMP, name);
-    const wPiRoot = path.join(root, ".codarastudio", "pi-agent");
-    const wGrokRoot = path.join(root, ".codarastudio", "grok-cli");
-    const wGrokHome = path.join(root, ".grok");
-    privateDir(wGrokHome);
-    const workHome = H.grokProfiles.grokCliManagedProfilePaths(wGrokRoot, GROK_WORK).homeDir;
-    privateDir(workHome);
-    privateFile(
-      path.join(wGrokRoot, "account-profiles.json"),
-      JSON.stringify({ version: 1, profiles: [{ id: GROK_WORK, label: "Work", createdAt: "2026-06-01T00:00:00.000Z", updatedAt: "2026-06-01T00:00:00.000Z" }], defaultProfileId: GROK_WORK }),
-    );
-    const slotFor = (subject, n) => ({
-      [GROK_SLOT]: {
-        key: jwt({ sub: subject, iat: T0 + n, exp: T0 + n + 3600, email: `${subject.slice(0, 8)}@example.com` }),
-        auth_mode: "oidc",
-        create_time: "2026-06-01T00:00:00.000Z",
-        user_id: subject,
-        principal_id: subject,
-        principal_type: "User",
-        refresh_token: `grok-refresh-${subject.slice(0, 8)}-${n}`,
-        expires_at: new Date((T0 + n + 3600) * 1000).toISOString(),
-        oidc_issuer: "https://auth.x.ai",
-        oidc_client_id: "b1a00492-073a-47ea-816f-4c329264a828",
-      },
-    });
-    privateFile(path.join(workHome, "auth.json"), JSON.stringify(slotFor(GROK_WORK_SUBJECT, 4)));
-    privateFile(path.join(wGrokHome, "auth.json"), JSON.stringify(slotFor(GROK_SUBJECT, 1)));
-    const wPiStore = new H.piStore.PiAccountAuthStore(wPiRoot);
-    const registered = {};
-    for (const row of rows) {
-      const { profile } = await wPiStore.registry.registerProfile({ provider: "xai", label: row.label, identityFingerprint: row.fingerprint });
-      const { configDir, authFile: target } = H.piStore.piAccountProfilePaths(wPiRoot, profile.id);
-      privateDir(configDir);
-      await AuthStorage.create(target).modify("xai", async () => row.credential);
-      fs.chmodSync(target, 0o600);
-      registered[row.label] = profile;
-    }
-    const wLeases = new H.grokExecution.GrokCliProfileLeaseRegistry();
-    const wGrokStore = new H.grokProfiles.GrokCliAccountProfileStore(wGrokRoot, { personalHomeDir: wGrokHome, leases: wLeases });
-    const wMirror = new H.mirror.CredentialMirror({ loadAuthStorage, pollWhenWatchBlind: null, debounceMs: 30, retryDelayMs: 20 });
-    const wService = new H.accounts.UnifiedAccountService(
-      H.grokAdapter.createGrokAccountAdapter({ store: wGrokStore, leases: wLeases }),
-      { piStore: wPiStore, mirror: wMirror, loadAuthStorage, invalidateCaches: async () => undefined, log },
-    );
-    const wReport = await H.migration.migrateUnifiedAccounts({ services: { xai: wService }, providers: ["xai"], piStore: wPiStore, grokStore: wGrokStore, log });
-    assert.equal(wReport.failedStep, null, JSON.stringify(wReport));
-    const state = {
-      storeDefault: (await wGrokStore.snapshot()).defaultProfileId,
-      coraDefault: (await wPiStore.registry.snapshot()).defaults.xai,
-      accountOne: await wPiStore.registry.accountOneProfile("xai"),
-      workSubject: JSON.parse(fs.readFileSync(path.join(workHome, "auth.json"), "utf8"))[GROK_SLOT].user_id,
-      registered,
-    };
-    wMirror.stop();
-    wService.stop();
-    return state;
-  };
-  const grokNoRows = await grokWorld("grok-no-rows", []);
-  assert.equal(grokNoRows.storeDefault, GROK_WORK, "the Grok store default stays on the managed home");
-  assert.equal(grokNoRows.workSubject, GROK_WORK_SUBJECT);
-  assert.ok(grokNoRows.accountOne);
-  assert.equal(grokNoRows.coraDefault, undefined);
-  const grokCoraOnly = await grokWorld("grok-cora-only", [
-    { label: "Elsewhere", fingerprint: sha("55555555-5555-4555-8555-555555555555"), credential: { type: "oauth", access: jwt({ sub: "55555555-5555-4555-8555-555555555555", exp: T0 + 9999 }), refresh: "elsewhere-refresh", expires: (T0 + 9999) * 1000 - 300000 } },
+  // --- First pass ------------------------------------------------------------
+  const first = await H.migration.migrateUnifiedAccounts(deps);
+  assert.equal(first.failedStep, null, JSON.stringify(logs));
+  assert.equal(first.accountsV2.migrated, true);
+  assert.deepEqual(first.accountsV2.cases, { [ROW_MAIN]: "system", [ROW_CODEX]: "managed" });
+  const steps = ["clearDanglingLinks", "reprojectDefaults", "purgePending", "startMirror"];
+  assert.deepEqual(order, [
+    ...steps.map((step) => `anthropic:${step}`),
+    ...steps.map((step) => `openai-codex:${step}`),
+    ...steps.map((step) => `xai:${step}`),
+    "shell-pointer",
   ]);
-  assert.equal(grokCoraOnly.storeDefault, GROK_WORK, "a Cora-only default row never pulls Grok to personal");
-  assert.equal(grokCoraOnly.coraDefault, grokCoraOnly.registered.Elsewhere.id);
-  pass("a managed Grok default survives the first launch whatever Cora's default is");
+  pass("the v2 migration runs first, then each provider's steps in order, then the shell pointer");
 
-  // The registry maps providers to runtimes both ways and reports terminal
-  // statuses per provider.
-  assert.equal(H.registry.unifiedAccountsFor("anthropic").adapter.runtime, "claude");
-  assert.equal(H.registry.unifiedAccountsFor("openai-codex").adapter.runtime, "codex");
-  assert.equal(H.registry.unifiedAccountsFor("xai").adapter.runtime, "grok");
-  assert.equal(H.registry.providerForRuntime("grok"), "xai");
-  assert.equal(H.registry.providerForRuntime("codex"), "openai-codex");
-  assert.deepEqual(H.registry.UNIFIED_ACCOUNT_PROVIDERS, ["anthropic", "openai-codex", "xai"]);
-  pass("the registry maps providers and runtimes both ways");
+  // What the pass settled.
+  assert.equal((await claudeStore.snapshot()).defaultProfileId, "personal", "Main is on the System login");
+  assert.equal((await codexStore.snapshot()).defaultProfileId, CODEX_WORK_CLI, "the Codex Active row is projected");
+  assert.equal(readJson(H.codexProfiles.codexCliManagedProfilePaths(codexRoot, CODEX_WORK_CLI).authFile).tokens.refresh_token, "work-r");
+  assert.equal(first.providers["openai-codex"].watchedPairs, 1);
+  assert.equal(first.providers.anthropic.watchedPairs, 0, "a System row is never mirrored");
+  assert.deepEqual(
+    (await piStore.registry.listProfiles()).map((profile) => profile.id).sort(),
+    [ROW_MAIN, ROW_CODEX].sort(),
+    "the pass adds no account",
+  );
+  assert.equal(systemBefore(), ownBefore, "the user's CLI homes are untouched");
+  pass("the pass projects the Active rows, mirrors only managed pairs and adds no account");
 
-  mirror.stop();
+  // --- Second pass: nothing to write ----------------------------------------
   for (const service of Object.values(services)) service.stop();
-  console.log(`\nPASS unified account migration (${passes} groups)`);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const codaraBefore = snapshotTree(CODARA);
+  order.length = 0;
+  const second = await H.migration.migrateUnifiedAccounts(deps);
+  assert.equal(second.failedStep, null);
+  assert.equal(second.accountsV2.migrated, false);
+  for (const service of Object.values(services)) service.stop();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(snapshotTree(CODARA), codaraBefore, "a second pass writes nothing under Codara's home");
+  pass("a second pass writes nothing");
+
+  // --- A vanished half and a home left to purge -----------------------------
+  const codexPaths = H.codexProfiles.codexCliManagedProfilePaths(codexRoot, CODEX_WORK_CLI);
+  await codexStore.setDefaultProfile("personal");
+  await codexStore.deleteProfile(CODEX_WORK_CLI, { keepDirectory: true });
+  await piStore.registry.queuePendingPurge([{ path: codexPaths.profileDir, reason: "codex terminal still running" }]);
+  order.length = 0;
+  const third = await H.migration.migrateUnifiedAccounts(deps);
+  assert.deepEqual(third.providers["openai-codex"].clearedLinks, [ROW_CODEX]);
+  assert.deepEqual(third.providers["openai-codex"].purged, [codexPaths.profileDir]);
+  assert.equal(fs.existsSync(codexPaths.profileDir), false);
+  const codexRow = await piStore.registry.getProfile(ROW_CODEX);
+  assert.deepEqual([codexRow.cli, codexRow.cora], [{ kind: "none" }, "own"], "the row keeps its Cora grant as its own");
+  for (const service of Object.values(services)) service.stop();
+  pass("a vanished managed half is unlinked and a queued home is purged");
+
+  // --- A failing step does not block the rest, and the gate resolves --------
+  const grokClear = services.xai.clearDanglingLinks;
+  services.xai.clearDanglingLinks = async () => {
+    throw new Error("grok store unreadable");
+  };
+  const anthropicMirror = services.anthropic.startMirror;
+  services.anthropic.startMirror = async () => {
+    throw new Error("watch limit");
+  };
+  order.length = 0;
+  logs.length = 0;
+  const failing = await H.migration.migrateUnifiedAccounts(deps);
+  assert.equal(failing.failedStep, "anthropic:start-mirror");
+  assert.equal(failing.providers.xai.failedStep, "xai:clear-dangling-links");
+  assert.ok(order.includes("openai-codex:startMirror"), "Codex still ran after Claude failed");
+  assert.ok(order.includes("xai:purgePending"), "Grok's later steps still ran");
+  assert.equal(order.at(-1), "shell-pointer");
+  assert.ok(logs.some((line) => /grok store unreadable/.test(line)));
+  for (const service of Object.values(services)) service.stop();
+
+  H.migration.resetUnifiedAccountMigrationForTests();
+  const pointerBefore = pointerWrites;
+  services.xai.clearDanglingLinks = async () => {
+    throw new Error("still broken");
+  };
+  await H.migration.startUnifiedAccountMigration(deps);
+  await H.migration.unifiedAccountsReady();
+  assert.equal(pointerWrites, pointerBefore + 1, "the gate resolved after the whole pass, failure included");
+  services.xai.clearDanglingLinks = grokClear;
+  services.anthropic.startMirror = anthropicMirror;
+  for (const service of Object.values(services)) service.stop();
+  H.migration.resetUnifiedAccountMigrationForTests();
+  pass("a failing step is logged and skipped, and the ready gate still resolves");
+
+  assert.equal(systemBefore(), ownBefore, "the user's CLI homes are untouched by every pass");
+  pass("no pass touches the user's CLI homes");
+
+  console.log(`\nPASS unified account startup pass (${passes} checks)`);
 }
 
 main()
-  .then(() => {
-    fs.rmSync(TMP, { recursive: true, force: true });
-    process.exit(0);
-  })
   .catch((error) => {
     console.error(error);
+    process.exitCode = 1;
+  })
+  .finally(() => {
     fs.rmSync(TMP, { recursive: true, force: true });
-    process.exit(1);
   });

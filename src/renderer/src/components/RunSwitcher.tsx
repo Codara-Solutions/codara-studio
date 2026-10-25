@@ -156,7 +156,7 @@ export default function RunSwitcher({
         fontFamily: "var(--font-sans)",
       }}
     >
-      <div className="spark-scrim spark-scrim--clear" style={{ zIndex: 0 }} />
+      <div className="spark-scrim spark-scrim--clear spark-scrim--palette" style={{ zIndex: 0 }} />
       <section
         role="dialog"
         aria-modal="true"
@@ -257,7 +257,12 @@ export default function RunSwitcher({
                     padding: "9px 10px",
                     border: 0,
                     borderRadius: 7,
-                    background: selected ? "var(--hover)" : "transparent",
+                    // The 5% hover fill vanished into the dark palette, so
+                    // the selected row takes the stronger fill and an edge.
+                    background: selected ? "var(--hover-strong)" : "transparent",
+                    boxShadow: selected
+                      ? "inset 0 0 0 1px color-mix(in oklab, var(--ink) 7%, transparent)"
+                      : undefined,
                     color: "var(--ink)",
                     fontFamily: "var(--font-sans)",
                     textAlign: "left",

@@ -36,8 +36,47 @@ import type {
   GitSplitPlanResult,
 } from "@shared/git-split";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
+import type { ClaudeFollowStatus } from "@shared/claude-follow";
+import type { AgentDeliveryRequest, AgentDeliveryResult } from "@shared/agent-delivery";
+import { agentBoardApi } from "./areas/agent-board";
+import { captureApi } from "./areas/capture";
+import { chromeLinkApi } from "./areas/chrome-link";
+import { keepAwakeApi } from "./areas/keep-awake";
+import { gitFixApi } from "./areas/git-fix";
+import { diagnosticsApi } from "./areas/diagnostics";
+import { pointApi } from "./areas/point";
+import { reviewApi } from "./areas/review";
+import { featureTipsApi } from "./areas/feature-tips";
+import { sessionSearchApi } from "./areas/session-search";
+import { serversApi } from "./areas/servers";
+import { workspaceStatusApi } from "./areas/workspace-status";
+import { cosTasksApi } from "./areas/cos-tasks";
+import { skillOriginsApi } from "./areas/skill-origins";
+import { terminalScrollbackApi } from "./areas/terminal-scrollback";
+import { agentHibernationApi } from "./areas/agent-hibernation";
+import { worktreeCleanupApi } from "./areas/worktree-cleanup";
+import { crossWorkspaceApi } from "./areas/cross-workspace";
+import { worktreeSetupApi } from "./areas/worktree-setup";
+import { portsApi } from "./areas/ports";
+import { shareApi } from "./areas/share";
+import type {
+  CoraMemoryItem,
+  MemoryItemKind,
+  MemoryItemPatch,
+  MemoryItemScope,
+  MemoryItemsView,
+  MemoryLearningSettings,
+} from "@shared/memory-items";
 import type { SshKeyImportResult, SshKeyInfo } from "@shared/ssh-keys";
 import type { UsageSummary, UsageSummaryInput } from "@shared/usage-analytics";
+import type {
+  SavedWorkflow,
+  SavedWorkflowSummary,
+  StartWorkflowRunInput,
+  WorkflowCaps,
+  WorkflowCheckResult,
+  WorkflowRunStatus,
+} from "@shared/workflow";
 import type {
   AddRunMessageInput,
   AnswerRunQuestionInput,
@@ -48,7 +87,16 @@ import type {
   AgentAssetInventory,
   AgentMcpSaveResult,
   AgentMcpServerDetail,
+  AgentMcpProbeRequest,
+  AgentMcpProbeResult,
   AgentMcpServerDraft,
+  AgentMcpSnippetParseResult,
+  AgentMcpImportCandidate,
+  AgentMcpImportResult,
+  AgentSkillCreateInput,
+  AgentSkillImportSource,
+  AgentSkillWriteResult,
+  AgentPiMcpPreview,
   AgentMcpTarget,
   AgentSyncResult,
   SparkBuiltinActionResult,
@@ -62,6 +110,8 @@ import type {
   AutomationWorkerInfo,
   LoomStepResult,
   TestStepInput,
+  AutomationPrecheckResult,
+  TestPrecheckInput,
   RunBoard,
   RunBoardChangedPayload,
   RunBoardUpdateInput,
@@ -71,6 +121,7 @@ import type {
   CoraProfile,
   CoraProfileCreateInput,
   CoraProfileDeleteResult,
+  CoraProfileDocumentView,
   CreateEntryInput,
   CreateStepInput,
   CreateRunInput,
@@ -94,6 +145,7 @@ import type {
   GitFileChange,
   GitLog,
   GitOpResult,
+  GitRemoveWorktreeResult,
   GitRemoteUpdatedPayload,
   GitStashList,
   GitStatus,
@@ -109,6 +161,7 @@ import type {
   OpenRouterValidationResult,
   NotificationCenterEntry,
   NotificationCenterSummary,
+  NotificationViewSnapshot,
   NotificationSoundKind,
   NotifyEvent,
   UpdateChatBackendInput,
@@ -116,29 +169,33 @@ import type {
   ExportCoraWhiteboardFileInput,
   ExportFileDialogInput,
   ImportedCoraWhiteboardFile,
-  WorkerSessionRuntime,
   WorkerSessionSummary,
   PiSubscriptionAddAccountInput,
   PiRuntimeInstallEvent,
   PiSubscriptionAuthEvent,
   PiCatalogModel,
+  WorkerModelCatalog,
   PiSubscriptionDeleteAccountInput,
   PiSubscriptionShareLoginInput,
   PiSubscriptionMakeDefaultInput,
   PiSubscriptionOverview,
+  PiSubscriptionProvider,
   PiSubscriptionProfileLoginRequest,
   PiSubscriptionReconnectAccountInput,
   PiSubscriptionRenameAccountInput,
   PiUsageOverview,
+  PiCodexResetResult,
   PrefKey,
   PreferencesChange,
   PrepareWorkerTaskInput,
   PtyExitInfo,
   PtyResourceSnapshot,
   SystemResourceSnapshot,
+  SystemResourceSnapshotOptions,
   RenameRunInput,
   ResumeRunInput,
   RenameFileInput,
+  LiveWorkerActivity,
   RunState,
   RuntimeState,
   ScheduledJob,
@@ -157,6 +214,7 @@ import type {
   UpdateScheduledJobInput,
   WorkerReport,
   WorkerTaskEnvelope,
+  AgentWorktreeEvent,
 } from "@shared/types";
 
 type PtyDataHandler = (data: Uint8Array | string) => void;
@@ -187,7 +245,10 @@ export type UpdaterEventKind =
   | "update-not-available"
   | "download-progress"
   | "update-downloaded"
-  | "error";
+  | "error"
+  | "restart-waiting"
+  | "restart-cancelled"
+  | "restart-starting";
 
 export interface UpdaterEvent {
   kind: UpdaterEventKind;
@@ -250,6 +311,15 @@ const api = {
       return () => ipcRenderer.off("state:changed", listener);
     },
   },
+  workspace: {
+    // An agent created or removed a worktree through the Codara Studio MCP.
+    // The rail itself follows state:changed; this only carries the toast.
+    onAgentEvent: (handler: (event: AgentWorktreeEvent) => void): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: AgentWorktreeEvent) => handler(payload);
+      ipcRenderer.on("workspace:agentEvent", listener);
+      return () => ipcRenderer.off("workspace:agentEvent", listener);
+    },
+  },
   settings: {
     load: (): Promise<AppSettings> => ipcRenderer.invoke("settings:load"),
     save: (settings: AppSettings): Promise<AppSettings> => ipcRenderer.invoke("settings:save", settings),
@@ -274,6 +344,12 @@ const api = {
   nativeCliShellLeftover: {
     status: (): Promise<NativeCliShellProfileLeftover | null> =>
       ipcRenderer.invoke("native-cli-shell-leftover:status"),
+  },
+  // A plain `claude` in other terminals uses the active Claude account.
+  claudeFollow: {
+    status: (): Promise<ClaudeFollowStatus> => ipcRenderer.invoke("claude-follow:status"),
+    set: (enabled: boolean): Promise<ClaudeFollowStatus> =>
+      ipcRenderer.invoke("claude-follow:set", { enabled }),
   },
   nativeCliAccounts: {
     inspect: (): Promise<NativeCliAccountsInspection> =>
@@ -317,6 +393,15 @@ const api = {
       input: PiSubscriptionDeleteAccountInput,
     ): Promise<PiSubscriptionOverview> =>
       ipcRenderer.invoke("pi-subscriptions:delete-account", input),
+    // The System login (the CLI's own ~/.claude or ~/.codex login): use it
+    // as is for new sessions, add it as a Codara account, or hide the offer.
+    // None of them changes that login.
+    useSystemLogin: (provider: PiSubscriptionProvider): Promise<PiSubscriptionOverview> =>
+      ipcRenderer.invoke("pi-subscriptions:use-system-login", { provider }),
+    addSystemAccount: (provider: PiSubscriptionProvider): Promise<PiSubscriptionOverview> =>
+      ipcRenderer.invoke("pi-subscriptions:add-system-account", { provider }),
+    dismissSystemOffer: (provider: PiSubscriptionProvider): Promise<PiSubscriptionOverview> =>
+      ipcRenderer.invoke("pi-subscriptions:dismiss-system-offer", { provider }),
     // Give a half account its other half: a Cora row gets a Claude Code
     // profile, or a terminal-only Claude Code profile gets a Cora row.
     shareLogin: (
@@ -325,8 +410,12 @@ const api = {
       ipcRenderer.invoke("pi-subscriptions:share-login", input),
     respond: (input: { requestId: string; promptId: string; value: string }): Promise<void> =>
       ipcRenderer.invoke("pi-subscriptions:respond", input),
-    cancel: (requestId: string): Promise<void> =>
+    // Without a request id, cancels every sign-in this window has open.
+    cancel: (requestId?: string): Promise<void> =>
       ipcRenderer.invoke("pi-subscriptions:cancel", { requestId }),
+    // Re-sends this window's open sign-in as events; resolves to its request.
+    resumeLogin: (): Promise<PiSubscriptionProfileLoginRequest | null> =>
+      ipcRenderer.invoke("pi-subscriptions:resume-login"),
     onEvent: (handler: (event: PiSubscriptionAuthEvent) => void): (() => void) => {
       const listener = (_event: Electron.IpcRendererEvent, authEvent: PiSubscriptionAuthEvent) =>
         handler(authEvent);
@@ -337,6 +426,10 @@ const api = {
       ipcRenderer.invoke("pi-runtime:install"),
     usage: (force = false): Promise<PiUsageOverview> =>
       ipcRenderer.invoke("pi-subscriptions:usage", { force }),
+    // Spends one of the account's Codex rate-limit resets; the caller has
+    // already asked the user to confirm.
+    redeemCodexReset: (profileId: string): Promise<PiCodexResetResult> =>
+      ipcRenderer.invoke("pi-subscriptions:codex-reset", { profileId }),
     // Returns [] rather than throwing when Pi is absent, so the picker falls
     // back to its curated rows instead of failing to render.
     catalog: (force = false): Promise<PiCatalogModel[]> =>
@@ -348,6 +441,10 @@ const api = {
       return () => ipcRenderer.off("pi-runtime:install-event", listener);
     },
   },
+  workerModels: {
+    catalog: (force = false): Promise<WorkerModelCatalog> =>
+      ipcRenderer.invoke("worker-models:catalog", { force }),
+  },
   usageAnalytics: {
     // Scans the provider CLIs' on-disk transcripts. Cold scans take seconds on
     // a large history, so callers show a scanning state rather than assuming
@@ -356,7 +453,7 @@ const api = {
       ipcRenderer.invoke("usage-analytics:summary", input),
   },
   agents: {
-    sync: (input?: { cwd?: string | null }): Promise<AgentSyncResult> =>
+    sync: (input?: { cwd?: string | null; dryRun?: boolean }): Promise<AgentSyncResult> =>
       ipcRenderer.invoke("agents:sync", input ?? {}).catch((err: unknown) => {
         if (!isMissingIpcHandlerError(err, "agents:sync")) throw err;
         const now = new Date().toISOString();
@@ -408,6 +505,42 @@ const api = {
         }
         throw err;
       }),
+    piMcpPreview: (input?: { cwd?: string | null }): Promise<AgentPiMcpPreview> =>
+      ipcRenderer.invoke("agents:piMcpPreview", input ?? {}).catch((err: unknown) => {
+        if (!isMissingIpcHandlerError(err, "agents:piMcpPreview")) throw err;
+        return { cora: [], worker: [], maxServers: 0, errors: ["Restart Codara to see which servers reach Cora."] };
+      }),
+    probeMcp: (input: AgentMcpProbeRequest): Promise<AgentMcpProbeResult> =>
+      ipcRenderer.invoke("agents:probeMcp", input).catch((err: unknown) => {
+        if (!isMissingIpcHandlerError(err, "agents:probeMcp")) throw err;
+        return { ok: false, tools: [], durationMs: 0, error: "Restart Codara to enable testing MCP servers." };
+      }),
+    parseMcpSnippet: (text: string): Promise<AgentMcpSnippetParseResult> =>
+      ipcRenderer.invoke("agents:parseMcpSnippet", { text }).catch((err: unknown) => {
+        if (!isMissingIpcHandlerError(err, "agents:parseMcpSnippet")) throw err;
+        return { ok: false, error: "Restart Codara to paste server definitions." };
+      }),
+    mcpImportCandidates: (input?: { cwd?: string | null }): Promise<AgentMcpImportCandidate[]> =>
+      ipcRenderer.invoke("agents:mcpImportCandidates", input ?? {}).catch((err: unknown) => {
+        if (isMissingIpcHandlerError(err, "agents:mcpImportCandidates")) return [];
+        throw err;
+      }),
+    importMcp: (input: { cwd?: string | null; ids: string[] }): Promise<AgentMcpImportResult> =>
+      ipcRenderer.invoke("agents:importMcp", input).catch((err: unknown) => {
+        if (!isMissingIpcHandlerError(err, "agents:importMcp")) throw err;
+        return { ok: false, imported: [], skipped: [], error: "Restart Codara to import MCP servers." };
+      }),
+    createSkill: (input: AgentSkillCreateInput): Promise<AgentSkillWriteResult> =>
+      ipcRenderer.invoke("agents:createSkill", input).catch((err: unknown) => {
+        if (!isMissingIpcHandlerError(err, "agents:createSkill")) throw err;
+        return { ok: false, error: "Restart Codara to add skills." };
+      }),
+    importSkill: (source: AgentSkillImportSource): Promise<AgentSkillWriteResult> =>
+      ipcRenderer.invoke("agents:importSkill", source).catch((err: unknown) => {
+        if (!isMissingIpcHandlerError(err, "agents:importSkill")) throw err;
+        return { ok: false, error: "Restart Codara to import skills." };
+      }),
+    pickSkillArchive: (): Promise<string | null> => ipcRenderer.invoke("dialog:openSkillArchive"),
     builtins: (): Promise<SparkBuiltinMcpStatus[]> =>
       ipcRenderer.invoke("agents:builtins").catch((err: unknown) => {
         if (isMissingIpcHandlerError(err, "agents:builtins")) return [];
@@ -437,21 +570,65 @@ const api = {
   // Cora's writable memory files. Reads and mutations both resolve to the
   // fresh status pair for both tiers, so a toggle or a clear needs no follow-up
   // read. Content is edited in the editor, not through this bridge.
+  // `profileId` picks whose memory; leaving it out means the default profile
+  // for new chats.
   memory: {
-    get: (workspaceId: string | null): Promise<CoraMemoryStatus> =>
-      ipcRenderer.invoke("memory:get", { workspaceId }),
+    get: (workspaceId: string | null, profileId?: string): Promise<CoraMemoryStatus> =>
+      ipcRenderer.invoke("memory:get", { workspaceId, profileId }),
     setEnabled: (
       scope: CoraMemoryScope,
       workspaceId: string | null,
       enabled: boolean,
+      profileId?: string,
     ): Promise<CoraMemoryStatus> =>
-      ipcRenderer.invoke("memory:setEnabled", { scope, workspaceId, enabled }),
+      ipcRenderer.invoke("memory:setEnabled", { scope, workspaceId, enabled, profileId }),
     clear: (
       scope: CoraMemoryScope,
       workspaceId: string | null,
       includeUserLines: boolean,
+      profileId?: string,
     ): Promise<CoraMemoryStatus> =>
-      ipcRenderer.invoke("memory:clear", { scope, workspaceId, includeUserLines }),
+      ipcRenderer.invoke("memory:clear", { scope, workspaceId, includeUserLines, profileId }),
+    ensureFile: (
+      scope: CoraMemoryScope,
+      workspaceId: string | null,
+      profileId?: string,
+    ): Promise<string> =>
+      ipcRenderer.invoke("memory:ensureFile", { scope, workspaceId, profileId }),
+    // What Cora learned by itself, under the two files. Each mutation
+    // resolves to the fresh view.
+    items: (workspaceId: string | null, profileId?: string): Promise<MemoryItemsView> =>
+      ipcRenderer.invoke("memory:items", { workspaceId, profileId }),
+    updateItem: (
+      workspaceId: string | null,
+      id: string,
+      patch: MemoryItemPatch,
+      profileId?: string,
+    ): Promise<MemoryItemsView> =>
+      ipcRenderer.invoke("memory:items:update", { workspaceId, id, patch, profileId }),
+    deleteItem: (workspaceId: string | null, id: string, profileId?: string): Promise<MemoryItemsView> =>
+      ipcRenderer.invoke("memory:items:delete", { workspaceId, id, profileId }),
+    addItem: (
+      workspaceId: string | null,
+      input: { scope: MemoryItemScope; kind?: MemoryItemKind; text: string },
+      profileId?: string,
+    ): Promise<MemoryItemsView> =>
+      ipcRenderer.invoke("memory:items:add", { workspaceId, profileId, ...input }),
+    setLearning: (
+      workspaceId: string | null,
+      patch: Partial<MemoryLearningSettings>,
+      profileId?: string,
+    ): Promise<MemoryItemsView> =>
+      ipcRenderer.invoke("memory:learning:set", { workspaceId, patch, profileId }),
+    clearRunHistory: (workspaceId: string, profileId?: string): Promise<MemoryItemsView> =>
+      ipcRenderer.invoke("memory:runHistory:clear", { workspaceId, profileId }),
+    runItems: (runId: string): Promise<{ profileId: string; items: CoraMemoryItem[] }> =>
+      ipcRenderer.invoke("memory:runItems", { runId }),
+    onItemsChanged: (handler: (event: { profileId: string }) => void): (() => void) => {
+      const listener = (_event: unknown, payload: { profileId: string }) => handler(payload);
+      ipcRenderer.on("memory:items-changed", listener);
+      return () => ipcRenderer.off("memory:items-changed", listener);
+    },
   },
   coraProfiles: {
     onChanged: (handler: () => void): (() => void) => {
@@ -466,6 +643,14 @@ const api = {
       ipcRenderer.invoke("cora-profiles:use", reference),
     delete: (reference: string): Promise<CoraProfileDeleteResult> =>
       ipcRenderer.invoke("cora-profiles:delete", reference),
+    readDocument: (reference: string): Promise<CoraProfileDocumentView> =>
+      ipcRenderer.invoke("cora-profiles:readDocument", reference),
+    saveDocument: (
+      reference: string,
+      revision: string,
+      content: string,
+    ): Promise<CoraProfileDocumentView> =>
+      ipcRenderer.invoke("cora-profiles:saveDocument", { reference, revision, content }),
   },
   preferences: {
     load: (): Promise<AppPreferences> => ipcRenderer.invoke("preferences:load"),
@@ -503,22 +688,42 @@ const api = {
     },
     // Where a clicked notification should navigate. Main sends this after
     // focusing the window (native-notification clicks); the renderer's
-    // single routing listener dispatches on the target type.
-    onFocusTarget: (handler: (target: NavigationTarget) => void): (() => void) => {
-      const listener = (_e: Electron.IpcRendererEvent, target: NavigationTarget) =>
-        handler(target);
+    // single routing listener dispatches on the target type. entryId is the
+    // center row the notification belongs to.
+    onFocusTarget: (
+      handler: (target: NavigationTarget, entryId?: string) => void,
+    ): (() => void) => {
+      const listener = (
+        _e: Electron.IpcRendererEvent,
+        target: NavigationTarget,
+        entryId?: unknown,
+      ) => handler(target, typeof entryId === "string" ? entryId : undefined);
       ipcRenderer.on("notify:focus", listener);
       return () => ipcRenderer.off("notify:focus", listener);
     },
-    // Notification-center history (persisted main-side, capped at 200).
+    // Notification-center history (persisted main-side, capped at 200 rows,
+    // repeats folded per source, aged out after a week once read).
     list: (): Promise<NotificationCenterEntry[]> => ipcRenderer.invoke("notify:list"),
+    summary: (): Promise<NotificationCenterSummary> => ipcRenderer.invoke("notify:summary"),
     markRead: (id: string): Promise<void> => ipcRenderer.invoke("notify:markRead", id),
+    setRead: (ids: string[], read: boolean): Promise<void> =>
+      ipcRenderer.invoke("notify:setRead", { ids, read }),
     markAllRead: (): Promise<void> => ipcRenderer.invoke("notify:markAllRead"),
-    // Remove a single entry — fired when the user acts on a notification
-    // (toast click-through, inline answer, or opening the entry). Handled
-    // items must not linger; the main side no-ops if it's already gone.
-    remove: (id: string): Promise<void> => ipcRenderer.invoke("notify:remove", id),
+    // Dismiss rows. Only an explicit Dismiss or Clear all removes history;
+    // opening or viewing a row marks it read and keeps it.
+    remove: (id: string | string[]): Promise<void> => ipcRenderer.invoke("notify:remove", id),
     clear: (): Promise<void> => ipcRenderer.invoke("notify:clear"),
+    // Settle open questions whose pane, run or workspace this window can no
+    // longer find, so main stops counting them toward the dock badge.
+    settle: (ids: string[]): Promise<void> => ipcRenderer.invoke("notify:settle", ids),
+    restore: (entries: NotificationCenterEntry[]): Promise<void> =>
+      ipcRenderer.invoke("notify:restore", entries),
+    // Mark read every row whose target is the surface now on screen.
+    markViewed: (view: NotificationViewSnapshot): Promise<void> =>
+      ipcRenderer.invoke("notify:markViewed", view),
+    mute: (key: string, label: string, durationMs: number): Promise<void> =>
+      ipcRenderer.invoke("notify:mute", { key, label, durationMs }),
+    unmute: (key: string): Promise<void> => ipcRenderer.invoke("notify:unmute", key),
     onCenterUpdated: (
       handler: (summary: NotificationCenterSummary) => void,
     ): (() => void) => {
@@ -640,6 +845,15 @@ const api = {
     addWatchRoot: (root: string): Promise<void> => ipcRenderer.invoke("fs:addWatchRoot", root),
     removeWatchRoot: (root: string): Promise<void> =>
       ipcRenderer.invoke("fs:removeWatchRoot", root),
+    // The expanded folders of a watched root. Resolves with the ones that were
+    // not watched until now, which the caller should re-list.
+    setWatchedDirs: (root: string, dirs: string[]): Promise<string[]> =>
+      ipcRenderer.invoke("fs:setWatchedDirs", root, dirs),
+    // Keep fs:changed coming for a previewed file's folder, wherever it is.
+    watchPreviewFile: (path: string): Promise<void> =>
+      ipcRenderer.invoke("fs:watchPreviewFile", path),
+    unwatchPreviewFile: (path: string): Promise<void> =>
+      ipcRenderer.invoke("fs:unwatchPreviewFile", path),
     revealInOS: (path: string): Promise<void> => ipcRenderer.invoke("fs:revealInOS", path),
     onChanged: (handler: FsChangeHandler): (() => void) => {
       const listener = (_e: Electron.IpcRendererEvent, event: FsChangeEvent) => handler(event);
@@ -738,7 +952,7 @@ const api = {
       branch: string;
       force?: boolean;
       deleteBranch?: boolean;
-    }): Promise<GitOpResult> => ipcRenderer.invoke("git:removeCopyWorktree", input),
+    }): Promise<GitRemoveWorktreeResult> => ipcRenderer.invoke("git:removeCopyWorktree", input),
 
     // Stash
     stashes: (cwd: string): Promise<GitStashList> => ipcRenderer.invoke("git:stashes", cwd),
@@ -839,8 +1053,19 @@ const api = {
       ipcRenderer.invoke("orchestration:getRun", runId),
     readWorkerPrompt: (runId: string, attemptId: string): Promise<string> =>
       ipcRenderer.invoke("orchestration:readWorkerPrompt", { runId, attemptId }),
+    readWorkerLog: (
+      runId: string,
+      attemptId: string,
+    ): Promise<{ text: string; truncated: boolean } | null> =>
+      ipcRenderer.invoke("orchestration:readWorkerLog", { runId, attemptId }),
+    stopWorkerAttempt: (runId: string, attemptId: string): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:stopWorkerAttempt", { runId, attemptId }),
+    retryWorkerTask: (runId: string, workerTaskId: string): Promise<RunState> =>
+      ipcRenderer.invoke("orchestration:retryWorkerTask", { runId, workerTaskId }),
     listRuns: (workspaceId?: string): Promise<RunState[]> =>
       ipcRenderer.invoke("orchestration:listRuns", workspaceId),
+    getLiveActivity: (workspaceId: string): Promise<LiveWorkerActivity[]> =>
+      ipcRenderer.invoke("orchestration:getLiveActivity", workspaceId),
     listEvents: (runId: string): Promise<SparkEvent[]> =>
       ipcRenderer.invoke("orchestration:listEvents", runId),
     startAutopilot: (input: StartAutopilotInput): Promise<RunState> =>
@@ -951,6 +1176,44 @@ const api = {
       ipcRenderer.invoke("automations:listActiveWorkers"),
     testStep: (input: TestStepInput): Promise<LoomStepResult> =>
       ipcRenderer.invoke("automations:testStep", input),
+    testPrecheck: (input: TestPrecheckInput): Promise<AutomationPrecheckResult> =>
+      ipcRenderer.invoke("automations:testPrecheck", input),
+  },
+  // Workflows: saved scripts and their runs (src/main/orchestration/workflow-driver.ts).
+  workflows: {
+    list: (cwd?: string): Promise<SavedWorkflowSummary[]> => ipcRenderer.invoke("workflows:list", cwd),
+    get: (ref: string, cwd?: string): Promise<SavedWorkflow | null> =>
+      ipcRenderer.invoke("workflows:get", { ref, cwd }),
+    check: (input: {
+      workflow?: string;
+      source?: string;
+      args?: unknown;
+      caps?: Partial<WorkflowCaps>;
+      cwd?: string;
+    }): Promise<WorkflowCheckResult> => ipcRenderer.invoke("workflows:check", input),
+    start: (input: StartWorkflowRunInput): Promise<RunState> => ipcRenderer.invoke("workflows:start", input),
+    status: (runId: string): Promise<WorkflowRunStatus> => ipcRenderer.invoke("workflows:status", runId),
+    listRuns: (workspaceId?: string): Promise<RunState[]> => ipcRenderer.invoke("workflows:listRuns", workspaceId),
+    stop: (runId: string): Promise<void> => ipcRenderer.invoke("workflows:stop", runId),
+    resume: (runId: string, useLatestScript = false): Promise<void> =>
+      ipcRenderer.invoke("workflows:resume", { runId, useLatestScript }),
+    cancel: (runId: string): Promise<void> => ipcRenderer.invoke("workflows:cancel", runId),
+    skip: (runId: string, seq: number): Promise<boolean> => ipcRenderer.invoke("workflows:skip", { runId, seq }),
+    save: (input: {
+      sourceText: string;
+      scope: "user" | "project";
+      cwd?: string;
+      overwrite?: boolean;
+    }): Promise<SavedWorkflowSummary> => ipcRenderer.invoke("workflows:save", input),
+    remove: (ref: string, cwd?: string): Promise<boolean> => ipcRenderer.invoke("workflows:delete", { ref, cwd }),
+  },
+  // Send to an agent of any runtime, a Cora chat, or the workspace inbox
+  // (src/main/agent-delivery.ts).
+  agentDelivery: {
+    deliver: (request: AgentDeliveryRequest): Promise<AgentDeliveryResult> =>
+      ipcRenderer.invoke("agent:deliver", request),
+    inboxPending: (workspaceId: string, paneId?: string | null): Promise<number> =>
+      ipcRenderer.invoke("agent:inboxPending", { workspaceId, paneId: paneId ?? null }),
   },
   pty: {
     spawn: (args: {
@@ -1052,23 +1315,13 @@ const api = {
     },
   },
   system: {
-    resourceSnapshot: (): Promise<SystemResourceSnapshot> =>
-      ipcRenderer.invoke("system:resourceSnapshot"),
+    resourceSnapshot: (options?: SystemResourceSnapshotOptions): Promise<SystemResourceSnapshot> =>
+      ipcRenderer.invoke("system:resourceSnapshot", { detail: options?.detail === true, focus: options?.focus }),
   },
   // Manual Claude/Codex terminal-pane session restore. Capture a launched
   // session's id, probe whether it still exists before resuming, and pre-seed
   // Codex directory trust. See src/main/ipc.ts "agentSession:*" handlers.
   agentSession: {
-    // List resumable sessions whose recorded cwd matches the worker launch
-    // directory. The main process reads CLI-owned JSONL metadata; transcript
-    // contents remain on disk.
-    list: (args: {
-      runtime: WorkerSessionRuntime;
-      cwd: string;
-      nativeCodexProfileId?: string;
-      nativeClaudeProfileId?: string;
-      nativeGrokProfileId?: string;
-    }): Promise<WorkerSessionSummary[]> => ipcRenderer.invoke("agentSession:list", args),
     listAll: (): Promise<WorkerSessionSummary[]> => ipcRenderer.invoke("agentSession:listAll"),
     delete: (input: DeleteWorkerSessionInput): Promise<DeleteWorkerSessionResult> =>
       ipcRenderer.invoke("agentSession:delete", input),
@@ -1112,15 +1365,6 @@ const api = {
       nativeGrokProfileId?: string;
     }): Promise<{ exists: boolean; resumable?: boolean; repairable?: boolean; transcriptPath?: string }> =>
       ipcRenderer.invoke("agentSession:probe", args),
-    // Pre-seed Codex directory trust before a `codex --yolo` (re)launch.
-    ensureCodexTrust: (
-      cwd: string,
-      nativeCodexProfileId?: string,
-    ): Promise<void> =>
-      ipcRenderer.invoke("agentSession:ensureCodexTrust", {
-        cwd,
-        nativeCodexProfileId,
-      }),
     // Repair a Claude transcript whose tail a sleep/crash truncated, so
     // `claude --resume` accepts it (keeps a .bak). No-op for Codex.
     repairTranscript: (args: {
@@ -1211,6 +1455,7 @@ const api = {
       return () => ipcRenderer.off("terminal-agent:state", listener);
     },
   },
+  agentBoard: agentBoardApi,
   windowControls: {
     minimize: (): Promise<void> => ipcRenderer.invoke("window:minimize"),
     toggleMaximize: (): Promise<boolean> => ipcRenderer.invoke("window:toggleMaximize"),
@@ -1234,8 +1479,17 @@ const api = {
     },
   },
   app: {
+    /**
+     * True only in the e2e suite, which sets CODARA_E2E_SEED_TERMINAL so the
+     * many specs written around a workspace that starts with a chat and a terminal keep
+     * them. A real workspace always starts empty.
+     */
+    e2eSeedTerminal: process.argv.includes("--codara-e2e-seed-terminal"),
     platform: (): Promise<NodeJS.Platform> => ipcRenderer.invoke("app:platform"),
     home: (): Promise<string> => ipcRenderer.invoke("app:home"),
+    /** Where the one-time cleanup of older builds' global config put its backup; null if it never cleaned anything. */
+    globalConfigCleanupNotice: (): Promise<string | null> =>
+      ipcRenderer.invoke("app:global-config-cleanup-notice"),
     inspectorPreloadUrl: (): Promise<string> =>
       ipcRenderer.invoke("app:inspectorPreloadUrl"),
     // Fired by main just before the OS suspends (system sleep). The renderer
@@ -1454,9 +1708,13 @@ const api = {
       return () => ipcRenderer.off("updater:event", listener);
     },
     // Triggered by the "Restart and install" button after the
-    // update-downloaded event. Main side calls autoUpdater.quitAndInstall()
-    // which quits the app and runs the installer.
+    // update-downloaded event. Main quits and runs the installer, or first
+    // waits while an agent is in the middle of a turn.
     quitAndInstall: (): Promise<void> => ipcRenderer.invoke("updater:quitAndInstall"),
+    // While that restart waits for agents to finish (a "restart-waiting"
+    // event): restart right away, or stop waiting.
+    restartNow: (): Promise<void> => ipcRenderer.invoke("updater:restartNow"),
+    cancelRestart: (): Promise<void> => ipcRenderer.invoke("updater:cancelRestart"),
     // Manual check from Settings › About. Resolves with a summary object
     // ({ status, updateAvailable?, version?, message? }) so the panel can
     // show "up to date" — an outcome the passive banner never surfaces.
@@ -1520,15 +1778,11 @@ const api = {
       };
     },
   },
-  // Browser-ish URLs should stay inside Codara by default. Non-browser
-  // schemes still route through Electron so mailto: and friends work.
-  openExternal: async (url: string): Promise<void> => {
-    if (isBrowserUrl(url)) {
-      dispatchOpenInSparkBrowser(url);
-      return;
-    }
-    await ipcRenderer.invoke("app:openExternal", url);
-  },
+  // A plain link click. Main decides the destination from the user's
+  // linkOpenTarget preference (default browser or a Codara browser tab);
+  // file: always opens in Codara and unknown schemes are dropped.
+  openExternal: (url: string): Promise<void> =>
+    ipcRenderer.invoke("app:openLink", url),
   // Explicit user action: unlike a normal link navigation, this must never
   // recycle an orchestration-owned/background preview. It creates a focused,
   // workspace-level Preview tab with the normal top-strip controls.
@@ -1555,16 +1809,39 @@ const api = {
       webFrame.setZoomLevel(clamped);
     },
   },
+  servers: serversApi,
+  skillOrigins: skillOriginsApi,
+  gitFix: gitFixApi,
+  diagnostics: diagnosticsApi,
+  agentHibernation: agentHibernationApi,
+  worktreeSetup: worktreeSetupApi,
+  share: shareApi,
+  chromeLink: chromeLinkApi,
+  keepAwake: keepAwakeApi,
+  capture: captureApi,
+  point: pointApi,
+  workspaceStatus: workspaceStatusApi,
+  cosTasks: cosTasksApi,
+  review: reviewApi,
+  terminalScrollback: terminalScrollbackApi,
+  worktreeCleanup: worktreeCleanupApi,
+  crossWorkspace: crossWorkspaceApi,
+  featureTips: featureTipsApi,
+  ports: portsApi,
+  sessionSearch: sessionSearchApi,
 };
 
 function isBrowserUrl(url: string): boolean {
   return /^(https?:|file:)/i.test(url);
 }
 
-function dispatchOpenInSparkBrowser(
-  url: string,
-  options?: { forceNew?: boolean; background?: boolean },
-): void {
+interface OpenInSparkBrowserOptions {
+  forceNew?: boolean;
+  background?: boolean;
+  sourceWebContentsId?: number;
+}
+
+function dispatchOpenInSparkBrowser(url: string, options?: OpenInSparkBrowserOptions): void {
   const rendererWindow = globalThis as unknown as {
     dispatchEvent: (event: CustomEvent) => boolean;
   };
@@ -1574,6 +1851,9 @@ function dispatchOpenInSparkBrowser(
         url,
         forceNew: options?.forceNew === true,
         background: options?.background === true,
+        ...(typeof options?.sourceWebContentsId === "number"
+          ? { sourceWebContentsId: options.sourceWebContentsId }
+          : {}),
       },
     }),
   );
@@ -1581,11 +1861,14 @@ function dispatchOpenInSparkBrowser(
 
 ipcRenderer.on(
   "app:open-browser-url",
-  (_event, url: string, options?: { forceNew?: boolean; background?: boolean }) => {
+  (_event, url: string, options?: OpenInSparkBrowserOptions) => {
     if (typeof url === "string" && isBrowserUrl(url)) {
       dispatchOpenInSparkBrowser(url, {
         forceNew: options?.forceNew === true,
         background: options?.background === true,
+        ...(typeof options?.sourceWebContentsId === "number"
+          ? { sourceWebContentsId: options.sourceWebContentsId }
+          : {}),
       });
     }
   },

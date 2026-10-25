@@ -38,7 +38,7 @@ const UNIFIED_CLI_ACTIONS = new Map([
   ["add", "cora auth add <provider> [label]"],
   ["login", "cora auth login <provider> <#|label|id>"],
   ["reconnect", "cora auth login <provider> <#|label|id>"],
-  ["use", "cora auth use <provider> <#|label|id>"],
+  ["use", "cora auth use <provider> <#|label|id|system>"],
   ["logout", "cora auth remove <provider> <#|label|id>"],
 ]);
 
@@ -280,10 +280,19 @@ async function subscriptionAuth(args, flags) {
   }
   if (action === "use") {
     const provider = normalizeProvider(args[1]);
+    const cliName = PROVIDER_CLI_NAMES.get(provider);
+    // "system" is reserved: an account labelled so is still reachable by its
+    // number or id.
+    if (String(args[2] ?? "").trim().toLowerCase() === "system") {
+      const result = await rpc(flags, "accounts.use", { provider, profileId: "system" });
+      if (flags.json) return console.log(JSON.stringify(result, null, 2));
+      console.log(`${c.green("✓")} New ${cliName} sessions in Codara now use the ${cliName} login on this computer`);
+      console.log(c.dim("Running sessions keep the account they started with."));
+      return;
+    }
     const account = resolveAccount(await subscriptionAccounts(flags, provider), args[2]);
     const result = await rpc(flags, "accounts.use", { provider, profileId: account.id });
     if (flags.json) return console.log(JSON.stringify(result, null, 2));
-    const cliName = PROVIDER_CLI_NAMES.get(provider);
     console.log(`${c.green("✓")} ${c.bold(account.label)} is now the Active account for Cora and ${cliName}`);
     console.log(c.dim("Cora chats already running keep the account they started with."));
     return;

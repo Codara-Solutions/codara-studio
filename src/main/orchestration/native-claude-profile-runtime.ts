@@ -3,6 +3,7 @@ import {
   ClaudeCliAccountProfileStore,
   type ClaudeCliProfileId,
 } from "./claude-cli-account-profiles";
+import { ensureClaudeManagedHome } from "./cli-account-homes";
 import {
   defaultClaudeCliProfileLeases,
   resolveClaudeCliExecutionProfile,
@@ -14,10 +15,11 @@ import {
  * launch surfaces resolve through this module so CLAUDE_CONFIG_DIR semantics
  * cannot drift between transports.
  *
- * Every account runs in the user's own Claude home, exactly as `claude` does
- * in any other terminal app; an account switch moves the login inside that
- * home (claude-cli-live-login.ts). A profile id only records which account a
- * session started on.
+ * A launch on a managed account runs in Codara's live slot, whose login the
+ * Active account holds (claude-cli-live-login.ts); a launch on the System
+ * login runs with the inherited environment, exactly as `claude` does in any
+ * other terminal app. A profile id only records which account a session
+ * started on.
  */
 export const nativeClaudeProfileLeases = defaultClaudeCliProfileLeases();
 
@@ -51,6 +53,30 @@ export const nativeClaudeProfileStore = new ClaudeCliAccountProfileStore(
 );
 
 /**
+ * Create or refresh the live slot's links into the System Claude home and
+ * its own `.claude.json`. Failures are logged: a launch never fails because
+ * a shared link could not be made.
+ */
+export async function ensureClaudeLiveHome(
+  store: ClaudeCliAccountProfileStore = nativeClaudeProfileStore,
+  log: (message: string) => void = (message) => console.warn(message),
+): Promise<void> {
+  await ensureClaudeManagedHome({
+    home: store.liveConfigDir,
+    root: store.rootDir,
+    systemHome: store.personalConfigDir,
+    systemConfigDirEnv: store.personalConfigDirEnv,
+    log,
+  }).catch((error: unknown) => {
+    log(
+      `[accounts] the Claude live slot could not be prepared: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  });
+}
+
+/**
  * The account a brand-new Claude terminal launches with: the unified default,
  * after the account migration has settled and the default's credential pair
  * has been reconciled so the terminal starts on the freshest token.
@@ -61,18 +87,19 @@ export async function resolveNewNativeClaudeProfile(
   const hooks = resolutionHooks;
   await hooks?.ready();
   await hooks?.beforeNewProfile().catch(() => undefined);
-  return resolveClaudeCliExecutionProfile(nativeClaudeProfileStore, {
+  const profile = await resolveClaudeCliExecutionProfile(nativeClaudeProfileStore, {
     useDefault: true,
     baseEnv,
   });
+  if (profile.managed) await ensureClaudeLiveHome();
+  return profile;
 }
 
 /**
  * A restored pane or a transcript lookup for an earlier session. Its
- * account is history: every Claude session runs on the live login in the
- * one home, so it resolves like a new launch. A pane that started on another
- * account continues on the active one, the same as a `claude --resume` in
- * any other terminal after a `/login`.
+ * account is history: managed sessions all run in the one live slot, so it
+ * resolves like a new launch and continues on the Active account, the same
+ * as a `claude --resume` in any other terminal after a `/login`.
  */
 export async function resolveFrozenNativeClaudeProfile(
   _nativeClaudeProfileId: string | null | undefined,

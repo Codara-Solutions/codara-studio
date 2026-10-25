@@ -1,0 +1,73 @@
+#!/bin/sh
+# codara-heavy <command> [args...]
+#
+# Runs one heavy command (a build, a full test suite, an end-to-end run) for a
+# Codara workflow agent. Heavy commands from every agent take one of a few
+# machine-wide slots, so many parallel agents cannot all build at once, and on
+# Linux with a user systemd the command runs in a memory-capped scope, so a
+# runaway build is killed instead of freezing the desktop. It writes no
+# configuration anywhere; Codara puts it on the agent's PATH per launch.
+#
+# CODARA_HEAVY_LOCK_DIR    where the slot locks live (set by Codara)
+# CODARA_HEAVY_SLOTS       how many heavy commands may run at once (default 1)
+# CODARA_HEAVY_MEMORY_MAX  memory cap for the scope (default 4G)
+
+if [ "$#" -eq 0 ]; then
+  echo "usage: codara-heavy <command> [args...]" >&2
+  exit 2
+fi
+
+lock_root="${CODARA_HEAVY_LOCK_DIR:-${TMPDIR:-/tmp}/codara-heavy-locks}"
+slots="${CODARA_HEAVY_SLOTS:-1}"
+memory_max="${CODARA_HEAVY_MEMORY_MAX:-4G}"
+mkdir -p "$lock_root" 2>/dev/null
+
+held=""
+release() {
+  if [ -n "$held" ]; then
+    rm -f "$held/pid" 2>/dev/null
+    rmdir "$held" 2>/dev/null
+    held=""
+  fi
+}
+trap release EXIT
+trap 'release; exit 130' INT TERM
+
+# mkdir is atomic on every platform this runs on, unlike flock (absent on
+# macOS). A slot whose owner died is reclaimed by checking its pid.
+waited=0
+while [ -z "$held" ]; do
+  i=0
+  while [ "$i" -lt "$slots" ]; do
+    slot="$lock_root/heavy-$i"
+    if mkdir "$slot" 2>/dev/null; then
+      echo "$$" > "$slot/pid"
+      held="$slot"
+      break
+    fi
+    owner="$(cat "$slot/pid" 2>/dev/null)"
+    if [ -n "$owner" ] && ! kill -0 "$owner" 2>/dev/null; then
+      rm -f "$slot/pid" 2>/dev/null
+      rmdir "$slot" 2>/dev/null
+      continue
+    fi
+    i=$((i + 1))
+  done
+  if [ -z "$held" ]; then
+    if [ "$waited" -eq 0 ]; then
+      echo "codara-heavy: waiting for a heavy-work slot..." >&2
+      waited=1
+    fi
+    sleep 2
+  fi
+done
+
+if [ "$(uname -s)" = "Linux" ] && command -v systemd-run >/dev/null 2>&1 \
+  && systemctl --user show-environment >/dev/null 2>&1; then
+  systemd-run --user --scope -p "MemoryMax=$memory_max" -p MemorySwapMax=0 --quiet -- "$@"
+  status=$?
+else
+  "$@"
+  status=$?
+fi
+exit "$status"

@@ -604,7 +604,112 @@ export async function executeDeepSearch(
 export const DEEP_SEARCH_DESCRIPTION =
   "Free web search over DuckDuckGo's public HTML endpoints, falling through to Bing's HTML endpoint when both come back empty or bot-walled. No API key and no subscription quota, but result quality is below the provider web_search tool, so prefer web_search first and use deep_search when web_search fails, rate limits, or the task needs page-level depth. mode \"quick\" returns the top results as title, url, and snippet. mode \"deep\" also fetches the top pages concurrently and returns a readable-text digest per page; a page that cannot be fetched degrades to its search snippet. If the error says the backends are bot-challenging, free scraping is walled for now: do not rephrase and retry, switch to web_search or fetch a public feed or API endpoint directly.";
 
+export const FETCH_URL_DEFAULT_CHARS = 20_000;
+export const FETCH_URL_MAX_CHARS = 60_000;
+
+export interface FetchUrlParams {
+  url?: unknown;
+  max_chars?: unknown;
+}
+
+/** Read one given page as readable text, with deep_search's redirect and
+ *  body-size limits. */
+export async function executeFetchUrl(
+  params: FetchUrlParams,
+  options: DeepSearchOptions = {},
+): Promise<string> {
+  const raw = typeof params.url === "string" ? params.url.trim() : "";
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error("fetch_url requires an absolute http(s) URL.");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("fetch_url reads only http(s) URLs.");
+  }
+  const requested = typeof params.max_chars === "number" ? params.max_chars : Number(params.max_chars);
+  const limit = Number.isFinite(requested)
+    ? Math.max(500, Math.min(FETCH_URL_MAX_CHARS, Math.trunc(requested)))
+    : FETCH_URL_DEFAULT_CHARS;
+  const fetchImpl = options.fetchImpl ?? (fetch as unknown as FetchLike);
+  let body: string;
+  try {
+    body = await fetchPageText(url.toString(), fetchImpl, options.signal);
+  } catch (error) {
+    throw new Error(
+      `fetch_url could not read ${url.toString()}: ${errorText(error)}. If it redirected to another site, call fetch_url on that address; otherwise try web_search or the Browser.`,
+    );
+  }
+  const text = extractReadableText(body);
+  if (!text) throw new Error(`fetch_url found no readable text at ${url.toString()}.`);
+  return `${url.toString()}\n\n${buildPageDigest(text, limit)}`;
+}
+
+export const FETCH_URL_DESCRIPTION =
+  "Read one specific http(s) page as readable text (scripts, styles, and navigation stripped), for example documentation or an API reference the user linked. Use web_search or deep_search to find sources and fetch_url to read a known URL. Redirects are followed only on the same site; the body is capped at 200 KB and the digest at max_chars.";
+
+// pi-web-search registers web_search for every model but only implements it
+// for OpenAI Responses, Anthropic Messages, and Google APIs; elsewhere (for
+// example OpenRouter) every call fails first. Hide it there so research goes
+// straight to deep_search.
+export function webSearchSupported(model: { api?: unknown; provider?: unknown } | undefined): boolean {
+  if (!model) return true;
+  const api = typeof model.api === "string" ? model.api : "";
+  const provider = typeof model.provider === "string" ? model.provider : "";
+  return (
+    api === "openai-responses" ||
+    api === "openai-codex-responses" ||
+    api === "anthropic-messages" ||
+    api === "google-generative-ai" ||
+    provider === "google-generative-ai"
+  );
+}
+
 export function registerDeepSearch(pi: ExtensionAPI): void {
+  let hiddenWebSearch = false;
+  const syncWebSearch = (model: { api?: unknown; provider?: unknown } | undefined) => {
+    const active = pi.getActiveTools();
+    if (!webSearchSupported(model)) {
+      if (!active.includes("web_search")) return;
+      hiddenWebSearch = true;
+      pi.setActiveTools(active.filter((name) => name !== "web_search"));
+      return;
+    }
+    // Only restore what this gate hid, never a tool the user turned off.
+    if (!hiddenWebSearch) return;
+    hiddenWebSearch = false;
+    if (!active.includes("web_search") && pi.getAllTools().some((tool) => tool.name === "web_search")) {
+      pi.setActiveTools([...active, "web_search"]);
+    }
+  };
+  pi.on("session_start", (_event, ctx) => syncWebSearch(ctx.model));
+  pi.on("model_select", (event) => syncWebSearch(event.model));
+  pi.registerTool({
+    name: "fetch_url",
+    label: "Fetch URL",
+    description: FETCH_URL_DESCRIPTION,
+    promptSnippet: "Read one given http(s) page as readable text",
+    parameters: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "Absolute http(s) URL to read." },
+        max_chars: {
+          type: "integer",
+          minimum: 500,
+          maximum: FETCH_URL_MAX_CHARS,
+          description: `Digest length cap. Defaults to ${FETCH_URL_DEFAULT_CHARS}.`,
+        },
+      },
+      required: ["url"],
+      additionalProperties: false,
+    } as never,
+    async execute(_toolCallId, params: FetchUrlParams, signal?: AbortSignal) {
+      const text = await executeFetchUrl(params, { signal });
+      return { content: [{ type: "text" as const, text }], details: undefined };
+    },
+  });
+
   pi.registerTool({
     name: "deep_search",
     label: "Deep search",

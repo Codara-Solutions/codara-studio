@@ -34,7 +34,18 @@ const PROMPT_SURFACES = [
   "resources/pi-cora/mcp-bridge.ts",
   "resources/pi-cora/deep-search.ts",
   "resources/pi-cora/repeat-guard.ts",
+  "resources/pi-cora/tool-families.ts",
+  "resources/pi-cora/index.ts",
+  // Every tool module, so a module added later is covered without an edit.
+  ...listFiles("resources/codara-studio-mcp/tools"),
 ];
+
+function listFiles(rel) {
+  const dir = path.join(ROOT, rel);
+  return fs.readdirSync(dir, { recursive: true })
+    .filter((file) => /\.(cjs|js|ts)$/.test(file))
+    .map((file) => path.posix.join(rel, String(file).split(path.sep).join("/")));
+}
 
 const EM_DASH = "—";
 const EN_DASH = "–";

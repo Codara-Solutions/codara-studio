@@ -11,6 +11,15 @@ import {
   shortenRelative,
 } from "./git/git-ui";
 import { InlineInput } from "./file-icons/InlineInput";
+import WorktreeSetupSummary from "./worktree-setup/WorktreeSetupSummary";
+
+export interface CreateCopySetupOptions {
+  // Run the repository's setup command, the user's own and its terminals.
+  runSetupCommands: boolean;
+  // The repository command shown at the foot of the dialog. Creating with
+  // it on screen approves it for the repository.
+  approveFingerprint: string | null;
+}
 
 // Branch picker for the "Create copy" workspace action. Lists the source
 // repo's local + remote branches; a row click opens that exact branch as a new
@@ -33,14 +42,18 @@ export default function CreateCopyDialog({
   error: string | null;
   onDismissError: () => void;
   onClose: () => void;
-  onCreateNew: (name: string) => void;
-  onOpenBranch: (branch: GitBranch) => void;
+  onCreateNew: (name: string, setup: CreateCopySetupOptions) => void;
+  onOpenBranch: (branch: GitBranch, setup: CreateCopySetupOptions) => void;
 }): React.ReactElement {
   const [list, setList] = useState<GitBranchList | null>(null);
   const [refreshing, setRefreshing] = useState(true);
   const [filter, setFilter] = useState("");
   const [remotesOpen, setRemotesOpen] = useState(true);
   const [naming, setNaming] = useState(false);
+  const [runSetupCommands, setRunSetupCommands] = useState(true);
+  const [shownFingerprint, setShownFingerprint] = useState<string | null>(null);
+  const setupOptions: CreateCopySetupOptions = { runSetupCommands, approveFingerprint: shownFingerprint };
+  const openBranch = (branch: GitBranch): void => onOpenBranch(branch, setupOptions);
 
   useEffect(() => {
     let cancelled = false;
@@ -69,7 +82,8 @@ export default function CreateCopyDialog({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === "Escape" && !busy) onClose();
+      // A dialog opened on top of this one handles its own Escape first.
+      if (e.key === "Escape" && !busy && !e.defaultPrevented) onClose();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -89,10 +103,12 @@ export default function CreateCopyDialog({
       role="dialog"
       aria-modal="true"
       aria-label={`Create copy of ${workspace.name}`}
+      // The dim lives on .create-copy-scrim so glass can give it the shared
+      // dialog scrim.
+      className="create-copy-scrim"
       style={{
         position: "absolute",
         inset: 0,
-        background: "color-mix(in oklch, var(--bg) 70%, transparent)",
         display: "grid",
         placeItems: "center",
         zIndex: 1200,
@@ -102,13 +118,11 @@ export default function CreateCopyDialog({
       }}
     >
       <div
+        className="spark-glass--strong spark-overlay-surface"
         style={{
           width: "min(460px, calc(100vw - 48px))",
           maxHeight: "min(560px, calc(100vh - 96px))",
-          background: "var(--panel-2)",
-          border: "1px solid var(--rule)",
           borderRadius: 10,
-          boxShadow: "var(--shadow-2)",
           fontFamily: "var(--font-sans)",
           display: "flex",
           flexDirection: "column",
@@ -161,7 +175,7 @@ export default function CreateCopyDialog({
                 onCommit={(value) => {
                   setNaming(false);
                   const name = value.trim();
-                  if (name) onCreateNew(name);
+                  if (name) onCreateNew(name, setupOptions);
                 }}
                 onCancel={() => setNaming(false)}
               />
@@ -171,7 +185,7 @@ export default function CreateCopyDialog({
               type="button"
               disabled={busy}
               onClick={() => setNaming(true)}
-              title="Create a new branch from the repo's default branch — you pick the name"
+              title="Create a new branch from the repo's default branch. You pick the name."
               style={{
                 appearance: "none",
                 display: "flex",
@@ -298,7 +312,7 @@ export default function CreateCopyDialog({
                     key={`l:${branch.name}`}
                     branch={branch}
                     locked={busy}
-                    onOpen={onOpenBranch}
+                    onOpen={openBranch}
                   />
                 ))
               )}
@@ -352,13 +366,20 @@ export default function CreateCopyDialog({
                       key={`r:${branch.name}`}
                       branch={branch}
                       locked={busy}
-                      onOpen={onOpenBranch}
+                      onOpen={openBranch}
                     />
                   ))
                 ))}
             </>
           )}
         </div>
+        <WorktreeSetupSummary
+          sourceCwd={workspace.cwd}
+          runCommands={runSetupCommands}
+          onRunCommandsChange={setRunSetupCommands}
+          onShownCommandChange={setShownFingerprint}
+          disabled={busy}
+        />
       </div>
     </div>
   );

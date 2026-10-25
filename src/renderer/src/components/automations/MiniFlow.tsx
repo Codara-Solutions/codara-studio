@@ -189,7 +189,7 @@ export default function MiniFlow({
             key={p.id}
             type="button"
             onClick={onOpenEditor}
-            title={`${p.eyebrow}: ${p.text} — click to edit`}
+            title={`${p.eyebrow}: ${p.text} (click to edit)`}
             style={{
               position: "absolute",
               left: pos.x,

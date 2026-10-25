@@ -418,10 +418,11 @@ async function main() {
     ),
   );
   // Resume must survive for every OTHER paused/blocked shape — the e2e smoke
-  // spec clicks it on a force-paused run.
+  // spec clicks it on a force-paused run. The one exception is a parked turn
+  // whose failure card in the conversation already offers the same Retry.
   check(
     "the Resume button still renders off isPaused",
-    /\{isPaused && \(\n\s*<TextButton onClick=\{resume\}/.test(composerSource),
+    /\{isPaused && !\(isParkedTurn && failureCardOffersRetry\) && \(\n\s*<TextButton onClick=\{resume\}/.test(composerSource),
   );
 
   console.log(

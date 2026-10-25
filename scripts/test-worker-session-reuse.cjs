@@ -253,6 +253,94 @@ async function main() {
     assert.match(decision.reason, /no successful attempt/);
   }
 
+  // A worker a pause cut off is continued even though its task never
+  // finished, with no headroom cap: its session is the context for its own
+  // unfinished work.
+  {
+    const { workerTasks, workerAttempts, task, attempt } = baseRun();
+    task.status = "cancelled";
+    attempt.status = "cancelled";
+    attempt.interruptedBy = "pause";
+    attempt.contextTokens = 150_000; // far above the 20% follow-up cap
+    const decision = evaluate({ workerTasks, workerAttempts });
+    assert.equal(decision.kind, "resume");
+    assert.equal(decision.interrupted, true);
+    assert.equal(decision.sessionId, attempt.piSessionId);
+  }
+
+  // An app quit records the attempt failed with no gauge; it still resumes.
+  {
+    const { workerTasks, workerAttempts, task, attempt } = baseRun();
+    task.status = "failed";
+    attempt.status = "failed";
+    attempt.interruptedBy = "app_restart";
+    delete attempt.contextTokens;
+    const decision = evaluate({ workerTasks, workerAttempts });
+    assert.equal(decision.kind, "resume");
+    assert.equal(decision.contextTokens, 0);
+  }
+
+  // A worker that exited cleanly with a partial report is parked at `blocked`
+  // by the worker cycle. Its session continues under the normal headroom cap,
+  // as it did when partial reports were accepted.
+  {
+    const { workerTasks, workerAttempts, task, attempt } = baseRun();
+    task.status = "blocked";
+    const decision = evaluate({ workerTasks, workerAttempts });
+    assert.equal(decision.kind, "resume", "a partially finished worker continues warm");
+    assert.equal(decision.interrupted, false);
+    attempt.contextTokens = Math.ceil(SONNET_CEILING * WORKER_SESSION_REUSE_MAX_CONTEXT_FRACTION);
+    assert.equal(evaluate({ workerTasks, workerAttempts }).kind, "cold", "the headroom cap still applies");
+    attempt.contextTokens = 30_000;
+    attempt.status = "failed";
+    assert.equal(evaluate({ workerTasks, workerAttempts }).kind, "cold", "a blocked task needs a clean exit");
+  }
+
+  // The turn time limit reached while the worker was still making progress is
+  // a cut-off, not a fault: the synthetic report tells Cora to continue it
+  // with follow_up_of, so the gate must let it, with no headroom cap.
+  {
+    const { workerTasks, workerAttempts, task, attempt } = baseRun();
+    task.status = "failed";
+    attempt.status = "failed";
+    attempt.error =
+      "Pi worker exceeded its 6h turn ceiling while still making progress and did not wrap up within 15 min.";
+    attempt.contextTokens = 150_000;
+    const decision = evaluate({ workerTasks, workerAttempts });
+    assert.equal(decision.kind, "resume", "a worker cut off at the turn ceiling continues warm");
+    assert.equal(decision.interrupted, true);
+    attempt.error = "Pi worker timed out: no finished tool call or message for 92 min.";
+    assert.equal(evaluate({ workerTasks, workerAttempts }).kind, "cold", "a stalled worker does not");
+  }
+
+  // A worker that failed or was cancelled for its own reasons is never
+  // continued, and an interrupted one still needs its runtime, its session,
+  // no live writer, and a non-verifier class.
+  {
+    const { workerTasks, workerAttempts, task, attempt } = baseRun();
+    task.status = "failed";
+    attempt.status = "failed";
+    assert.equal(evaluate({ workerTasks, workerAttempts }).kind, "cold", "failed for cause");
+    task.status = "cancelled";
+    attempt.status = "cancelled";
+    assert.equal(evaluate({ workerTasks, workerAttempts }).kind, "cold", "cancelled by a Stop");
+    attempt.interruptedBy = "pause";
+    assert.equal(evaluate({ workerTasks, workerAttempts }).kind, "resume");
+    assert.equal(
+      evaluate({ workerTasks, workerAttempts }, { requestedRuntime: "codex" }).kind,
+      "cold",
+      "interrupted sessions do not cross runtimes",
+    );
+    workerTasks.push({ id: "task-cont", status: "running", resumeSessionId: attempt.piSessionId });
+    assert.match(evaluate({ workerTasks, workerAttempts }).reason, /one live writer/);
+    workerTasks.pop();
+    delete attempt.piSessionId;
+    assert.match(evaluate({ workerTasks, workerAttempts }).reason, /no resumable runtime session/);
+    attempt.piSessionId = "run-1-attempt-src";
+    task.taskClass = "verifier";
+    assert.match(evaluate({ workerTasks, workerAttempts }).reason, /verifier/);
+  }
+
   // A verifier source is never continued.
   {
     const { workerTasks, workerAttempts, task } = baseRun();

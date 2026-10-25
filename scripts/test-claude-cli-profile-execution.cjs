@@ -158,9 +158,9 @@ async function main() {
   );
 
   // A new-session default resolution is explicit and emits an exact,
-  // sanitized child environment without mutating the parent. A managed
-  // account runs in the same home as personal: its login is what differs,
-  // never its CLAUDE_CONFIG_DIR.
+  // sanitized child environment without mutating the parent. Every managed
+  // account runs in Codara's one live slot: its login is what differs, and
+  // the user's own Claude home is never its CLAUDE_CONFIG_DIR.
   const selected = await mod.resolveClaudeCliExecutionProfile(store, {
     useDefault: true,
     baseEnv,
@@ -171,9 +171,9 @@ async function main() {
   assert.equal(selected.managed, true);
   assert.equal(selected.connected, true);
   assert.equal(
-    "CLAUDE_CONFIG_DIR" in selected.env,
-    false,
-    "a managed account keeps the one home's unset selector",
+    selected.env.CLAUDE_CONFIG_DIR,
+    store.liveConfigDir,
+    "a managed account runs in the live slot",
   );
   assert.equal(selected.env.ANTHROPIC_API_KEY, undefined);
   assert.equal(baseEnv.CLAUDE_CONFIG_DIR, "/wrong/config");
@@ -364,15 +364,30 @@ async function main() {
       // Read-only sign-in probe: it derives the personal keychain service
       // name from CLAUDE_CONFIG_DIR and never launches anything.
       "src/main/agent-runtimes.ts",
+      // claude-follow: the service asks whether the Active Claude account is
+      // a managed one (to keep its flag), and the hook text names the
+      // variables that pick a Claude login of the user's own, to step aside
+      // when one is set. Neither launches anything; the hook hands Claude
+      // Code the same live slot path the runtime does.
+      "src/main/claude-follow/claude-follow-service.ts",
+      "src/main/claude-follow/hook-scripts.ts",
       // The unified account service, its Claude adapter, the startup pass
       // and the credential mirror own the two halves of an account; they
       // read the store's directories and never launch anything.
       "src/main/orchestration/account-adapters/claude-account-adapter.ts",
-      "src/main/orchestration/claude-live-slot-undo.ts",
+      // The one-time v2 migration reads the v1 store to classify its rows.
+      "src/main/orchestration/accounts-v2-migration.ts",
+      // The shell pointer and the plain-shell defaults read the Active
+      // account's live slot path; neither launches anything.
+      "src/main/orchestration/active-cli-env-pointer.ts",
       "src/main/orchestration/native-claude-profile-runtime.ts",
       "src/main/orchestration/native-cli-accounts.ts",
+      "src/main/orchestration/native-cli-shell-defaults.ts",
       "src/main/orchestration/unified-account-migration.ts",
       "src/main/pty-manager.ts",
+      // Agent session search reads the personal and Codara Claude projects
+      // roots to index transcripts; it never launches anything.
+      "src/main/session-search/service.ts",
       // Read-only transcript discovery needs the personal Claude projects
       // root; it is analytics, not an execution or launch surface.
       "src/main/usage-analytics.ts",
@@ -380,7 +395,7 @@ async function main() {
   );
 
   console.log(
-    "PASS native Claude execution profiles: one home for every account, provider overrides removed from the child env, frozen ids kept, and leases that never pin a login",
+    "PASS native Claude execution profiles: one live slot for every managed account, provider overrides removed from the child env, frozen ids kept, and leases that never pin a login",
   );
 }
 

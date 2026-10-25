@@ -10,7 +10,7 @@ export interface RemoteCoraRetryInput {
 // Conversation history is a domain boundary, not a presentation filter.
 // Automation passes have their own list/detail/history surface and must never
 // consume this page's byte budget or churn its conditional revision.
-export function selectRemoteConversationRuns<T extends Pick<RunState, "automationId">>(
+export function selectRemoteConversationRuns<T extends Pick<RunState, "automationId" | "workflow">>(
   runs: readonly T[],
   limit: number,
 ): T[] {
@@ -18,7 +18,7 @@ export function selectRemoteConversationRuns<T extends Pick<RunState, "automatio
   if (boundedLimit === 0) return [];
   const result: T[] = [];
   for (const run of runs) {
-    if (run.automationId) continue;
+    if (run.automationId || run.workflow) continue;
     result.push(run);
     if (result.length >= boundedLimit) break;
   }

@@ -291,6 +291,142 @@ async function main() {
     results.push("a failing scope blocks completion even when its siblings pass");
   }
   {
+    // codara_complete's accept_unverified must name EVERY blocking verifier,
+    // so the gate reports all of them with their task ids.
+    const twoRed = await describeVerificationFreshness(splitRound(["FAILED", "VERIFIED", "FEEDBACK"]));
+    assert.equal(twoRed.ok, false);
+    assert.deepEqual(
+      twoRed.blockingVerifiers,
+      [
+        { taskId: "v0", confidence: "FAILED", title: "Verify scope 0" },
+        { taskId: "v2", confidence: "FEEDBACK", title: "Verify scope 2" },
+      ],
+    );
+    const green = await describeVerificationFreshness(splitRound(["VERIFIED"]));
+    assert.deepEqual(green.blockingVerifiers, []);
+    results.push("every blocking verifier is listed for an explicit overrule");
+  }
+  {
+    // A chat that escalated from the direct lane keeps the direct worker's
+    // passes (stamped with a loom node). Their edits were the direct lane's
+    // own answer, so the manager's gate must not wait on a verifier for them;
+    // a loom run keeps judging its own passes.
+    const escalated = splitRound([]);
+    escalated.executionMode = "managed";
+    escalated.workerTasks[0].loomNodeId = "w0";
+    assert.equal((await describeVerificationFreshness(escalated)).ok, true);
+    const managedEdit = splitRound([]);
+    managedEdit.executionMode = "managed";
+    assert.equal((await describeVerificationFreshness(managedEdit)).ok, false, "a managed edit still needs its verifier");
+    const loomRun = splitRound([]);
+    loomRun.executionMode = "direct";
+    loomRun.workerTasks[0].loomNodeId = "w0";
+    assert.equal((await describeVerificationFreshness(loomRun)).ok, false);
+    results.push("direct-lane passes of an escalated chat do not block the manager's completion");
+  }
+
+  {
+    // The verification-round ceiling scales with implementation lineages: five
+    // areas with one corrective verdict each is a normal run, not a loop. A
+    // single lineage still trips it alone at twice the base.
+    const shim =
+      "type RunState = any; type WorkerTask = any;\n" +
+      "const VERIFICATION_ROUND_CEILING = { fast: 4, deep: 6 } as const;\n" +
+      extract(RUN_STORE, "function implementationLineageRoot(") + "\n" +
+      extract(RUN_STORE, "function verifierLineageRoot(") + "\n" +
+      extract(RUN_STORE, "function implementationLineageCount(") + "\n" +
+      extract(RUN_STORE, "function verificationLineageSaturated(") + "\n" +
+      extract(RUN_STORE, "async function maybeForceLandAtVerificationCeiling(");
+    const landed = [];
+    const build = compile(
+      shim,
+      ["runHasMcpManager", "effectiveRunExecutionPolicy", "forceLandRunUnverified"],
+      "{ maybeForceLandAtVerificationCeiling, verificationLineageSaturated, verifierLineageRoot }",
+    );
+    const api = build(() => true, () => "fast", async (runId, input) => {
+      landed.push(input);
+      return { id: runId, landed: true };
+    });
+    const tasks = [];
+    const byLineage = {};
+    for (let area = 0; area < 5; area += 1) {
+      tasks.push({ id: `impl-${area}`, taskClass: "feature", status: "accepted", stepId: `s${area}` });
+      tasks.push({ id: `ver-${area}`, taskClass: "verifier", status: "accepted", stepId: `s${area}`, autoVerifierForTaskId: `impl-${area}` });
+      byLineage[`impl-${area}`] = 1;
+    }
+    const multiArea = { id: "r", workerTasks: tasks, verificationRounds: 5, verificationRoundsByLineage: byLineage };
+    assert.equal(await api.maybeForceLandAtVerificationCeiling(multiArea, tasks[9]), null);
+    assert.equal(landed.length, 0, "five areas with one FEEDBACK each must not force-land the run");
+
+    // A retry chain is one lineage: impl-0 <- impl-0b (supersedes) <- impl-0c (follow-up).
+    const chain = [
+      { id: "impl-0", taskClass: "feature", status: "failed", stepId: "s0" },
+      { id: "impl-0b", taskClass: "feature", status: "accepted", stepId: "s1", supersedesTaskId: "impl-0" },
+      { id: "impl-0c", taskClass: "feature", status: "accepted", stepId: "s2", followUpOfTaskId: "impl-0b" },
+      { id: "ver-c", taskClass: "verifier", status: "accepted", stepId: "s2" },
+      { id: "other-1", taskClass: "feature", status: "accepted", stepId: "s3" },
+      { id: "other-2", taskClass: "feature", status: "accepted", stepId: "s4" },
+    ];
+    assert.equal(api.verifierLineageRoot({ workerTasks: chain }, chain[3]), "impl-0");
+    const saturated = { id: "r2", workerTasks: chain, verificationRounds: 4, verificationRoundsByLineage: { "impl-0": 4 } };
+    assert.equal(api.verificationLineageSaturated(saturated, chain[3]), true, "a lineage at its base stops auto-retrying");
+    assert.equal(await api.maybeForceLandAtVerificationCeiling(saturated, chain[3]), null, "one lineage at 4 of 8 does not land");
+    const single = { id: "r3", workerTasks: chain.slice(0, 4), verificationRounds: 4, verificationRoundsByLineage: { "impl-0": 4 } };
+    assert.equal((await api.maybeForceLandAtVerificationCeiling(single, chain[3]))?.landed, true, "a run with one lineage keeps the old base ceiling");
+    landed.length = 0;
+    const runaway = { ...saturated, verificationRounds: 8, verificationRoundsByLineage: { "impl-0": 8 } };
+    const result = await api.maybeForceLandAtVerificationCeiling(runaway, chain[3]);
+    assert.equal(result?.landed, true, "a single ping-ponging lineage still trips the ceiling");
+    assert.match(landed[0].note, /one implementation area drew 8 corrective rounds/);
+    results.push("the verification ceiling scales per lineage and still stops a runaway lineage");
+  }
+
+  {
+    // Green claims are keyed by lineage. A verifier the manager spawned on a
+    // step of its own names no implementation; its claims must still meet a
+    // later re-verifier's, or the regression guard never fires for that shape.
+    const shim =
+      "type RunState = any; type WorkerTask = any;\n" +
+      extract(RUN_STORE, "function implementationLineageRoot(") + "\n" +
+      extract(RUN_STORE, "function verifierLineageRoot(") + "\n" +
+      RUN_STORE.slice(
+        RUN_STORE.indexOf("const UNSCOPED_CLAIM_LINEAGE"),
+        RUN_STORE.indexOf("function greenClaimLineage("),
+      ) +
+      extract(RUN_STORE, "function greenClaimLineage(");
+    const greenClaimLineage = compile(shim, [], "greenClaimLineage")();
+    const tasks = [
+      { id: "impl-a", taskClass: "feature", stepId: "s1" },
+      { id: "ver-a", taskClass: "verifier", stepId: "s2", autoVerifierForTaskId: "impl-a" },
+      { id: "ver-own-1", taskClass: "verifier", stepId: "s3" },
+      { id: "ver-own-2", taskClass: "verifier", stepId: "s4" },
+    ];
+    const run = { workerTasks: tasks };
+    assert.equal(greenClaimLineage(run, tasks[1]), "impl-a");
+    assert.equal(greenClaimLineage(run, tasks[2]), greenClaimLineage(run, tasks[3]));
+    assert.equal(greenClaimLineage(run, tasks[2]), "unscoped");
+    results.push("unlinked verifiers share one claim scope so the regression guard still sees them");
+  }
+
+  check("a declared verifier's brief names the changed files, not [object Object]", () => {
+    const start = RUN_STORE.indexOf("async function maybeSpawnDeclaredVerifier(");
+    assert.notEqual(start, -1);
+    const body = RUN_STORE.slice(start, RUN_STORE.indexOf("\n}\n", start));
+    assert.match(body, /report\.filesChanged\.slice\(0, 20\)\.map\(\(file\) => file\.path\)/);
+    assert.doesNotMatch(body, /report\.filesChanged\.slice\(0, 20\)\.join\(/);
+  });
+
+  check("codara_complete exposes the accept_unverified overrule and the socket enforces it", () => {
+    const server = read("resources/codara-studio-mcp/server.js");
+    assert.match(server, /accept_unverified: \{[\s\S]*?overruled_verifier_task_ids/);
+    const socket = read("src/main/agent-socket.ts");
+    assert.match(socket, /function parseAcceptUnverified\(/);
+    assert.match(socket, /must list every blocking verifier/);
+    assert.match(socket, /codara_complete accept_unverified/, "the verification cap note names the exit");
+    const prompt = read("resources/pi-cora/prompt.ts");
+    assert.match(prompt, /accept_unverified/);
+  });
+  {
     // The normal ping-pong must still terminate: an old FEEDBACK answered by a
     // newer corrective edit is superseded, not permanently blocking.
     reports.clear();

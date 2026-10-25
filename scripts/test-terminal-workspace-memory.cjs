@@ -42,6 +42,15 @@ const TERMINAL_STACK = path.join(
 );
 const USE_TABS = path.join(ROOT, "src", "renderer", "src", "tabs", "useTabs.ts");
 const APP = path.join(ROOT, "src", "renderer", "src", "App.tsx");
+const SCREEN_MODES = path.join(
+  ROOT,
+  "src",
+  "renderer",
+  "src",
+  "components",
+  "Terminal",
+  "terminalScreenModes.ts",
+);
 
 let failures = 0;
 function check(name, condition, detail = "") {
@@ -272,25 +281,135 @@ async function main() {
     ),
   );
 
-  // The TUI enables bracketed paste once at startup, so a pane's fresh xterm
-  // must be told the mode across a remount or framed input (a dropped image
-  // path) silently degrades to literal text.
+  // The TUI enables bracketed paste, mouse reporting and the alternate screen
+  // once at startup, so a pane's fresh xterm must be told those modes across a
+  // remount: framed input (a dropped image path) silently degrades to literal
+  // text, and a repaint lands in the scrollback with the wheel scrolling xterm.
   check(
-    "bracketed-paste mode survives a pane remount",
-    source.includes("const bracketedPasteModes = new Map<string, boolean>()") &&
-      source.includes("bracketedPasteModes.set(sessionId, dyingTerm.modes.bracketedPasteMode === true)") &&
-      source.includes('bracketedPasteModes.get(sessionId) === true') &&
-      source.includes('term.write("\\u001b[?2004h")'),
+    "screen modes survive a pane remount",
+    source.includes("const rememberedScreenModes = new Map<string, TerminalScreenModes>()") &&
+      source.includes("rememberedScreenModes.set(sessionId, captureTerminalScreenModes(dyingTerm))") &&
+      source.includes("rememberedScreenModes.get(sessionId)") &&
+      source.includes("terminalScreenModesSequence(screenModes)"),
   );
   check(
-    "the remembered mode is dropped with the rest of a pane's memory",
-    /forgetTerminalSessionMemory\(sessionId: string\): void \{\n  bracketedPasteModes\.delete\(sessionId\);/.test(
+    "the remembered modes are dropped with the rest of a pane's memory",
+    /forgetTerminalSessionMemory\(sessionId: string\): void \{\n  rememberedScreenModes\.delete\(sessionId\);/.test(
       source,
     ),
   );
+  check(
+    "modes are restored after the normal-screen snapshot, before hidden-era bytes",
+    /term\.write\(`\$\{normalizeForTerminalReplay\(replay\)\}\\r\\n`\);\n\s*\}\n\s*restoreScreenModes\(\);\n[\s\S]{0,400}term\.write\(pendingBytes, finishReplay\)/.test(
+      source,
+    ),
+  );
+  check(
+    "a pane in the alternate screen keeps its workspace mounted",
+    source.includes('setTerminalPaneAlternateScreen(sessionId, buffer.type === "alternate")') &&
+      source.includes("setTerminalPaneAlternateScreen(sessionId, false)") &&
+      appSource.includes("isTerminalPaneInAlternateScreen(leaf.paneId)") &&
+      appSource.includes("subscribeAlternateScreenPanes"),
+  );
+
+  check(
+    "a hidden pane keeps its size until it is revealed",
+    source.includes("const holdHiddenSize = () => measuredOnce && !visibleRef.current;") &&
+      /if \(holdHiddenSize\(\)\) return;\n\s*if \(w === lastW && h === lastH\) return;/.test(source) &&
+      /if \(holdHiddenSize\(\)\) return;\n\s*if \(rafHandle !== null\)/.test(source),
+  );
+
+  check(
+    "WebGL loads after term.open and only where WebGL2 exists",
+    source.includes("term.open(container.current);\n      loadWebgl();") &&
+      source.includes("if (!canUseWebgl2()) return false;"),
+  );
+  check(
+    "a reveal gives WebGL back to a pane that lost its context",
+    source.includes("if (!webgl && webglLost && webglReloads < WEBGL_MAX_RELOADS) {"),
+  );
+
+  await checkScreenModes(outDir);
 
   fs.rmSync(outDir, { recursive: true, force: true });
   if (failures > 0) process.exitCode = 1;
+}
+
+async function checkScreenModes(outDir) {
+  const outfile = path.join(outDir, "screen-modes.cjs");
+  await esbuild.build({
+    entryPoints: [SCREEN_MODES],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile,
+    logLevel: "silent",
+  });
+  const modes = require(outfile);
+  const { Terminal } = require("@xterm/headless");
+  const write = (term, data) => new Promise((resolve) => term.write(data, resolve));
+
+  // A Claude-like TUI: alternate screen, SGR any-event mouse, focus reports,
+  // bracketed paste and application cursor keys, then a frame of text.
+  const live = new Terminal({ cols: 40, rows: 10, allowProposedApi: true });
+  await write(live, "shell history line\r\n");
+  await write(live, "\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[?1004h\x1b[?2004h\x1b[?1h\x1b[HTUI frame");
+  const captured = modes.captureTerminalScreenModes(live);
+  check(
+    "a live TUI's screen modes are captured",
+    captured.alternateScreen === true &&
+      captured.mouseTracking === "any" &&
+      captured.mouseEncoding === "SGR" &&
+      captured.sendFocus === true &&
+      captured.bracketedPaste === true &&
+      captured.applicationCursorKeys === true,
+    JSON.stringify(captured),
+  );
+
+  // The fresh instance gets the normal-screen snapshot first, then the modes.
+  const fresh = new Terminal({ cols: 40, rows: 10, allowProposedApi: true });
+  await write(fresh, "shell history line\r\n");
+  await write(fresh, modes.terminalScreenModesSequence(captured));
+  const restored = modes.captureTerminalScreenModes(fresh);
+  check(
+    "the restore sequence reproduces every captured mode",
+    JSON.stringify(restored) === JSON.stringify(captured),
+    JSON.stringify(restored),
+  );
+  check(
+    "the snapshot stays under the alternate screen",
+    fresh.buffer.active.type === "alternate" &&
+      fresh.buffer.normal.getLine(0)?.translateToString(true) === "shell history line",
+  );
+
+  const plain = new Terminal({ cols: 40, rows: 10, allowProposedApi: true });
+  await write(plain, "$ ls\r\n");
+  check(
+    "a plain shell restores nothing",
+    modes.terminalScreenModesSequence(modes.captureTerminalScreenModes(plain)) === "",
+  );
+
+  let notified = 0;
+  const unsubscribe = modes.subscribeAlternateScreenPanes(() => {
+    notified += 1;
+  });
+  const before = modes.alternateScreenPanesRevision();
+  modes.setTerminalPaneAlternateScreen("pane-1", true);
+  modes.setTerminalPaneAlternateScreen("pane-1", true);
+  check(
+    "entering the alternate screen is published once",
+    modes.isTerminalPaneInAlternateScreen("pane-1") &&
+      notified === 1 &&
+      modes.alternateScreenPanesRevision() === before + 1,
+  );
+  modes.setTerminalPaneAlternateScreen("pane-1", false);
+  unsubscribe();
+  modes.setTerminalPaneAlternateScreen("pane-1", true);
+  check(
+    "leaving is published and unsubscribed listeners stay quiet",
+    notified === 2 && modes.isTerminalPaneInAlternateScreen("pane-1"),
+  );
+  for (const term of [live, fresh, plain]) term.dispose();
 }
 
 main().catch((error) => {

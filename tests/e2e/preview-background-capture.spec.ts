@@ -64,7 +64,7 @@ test("background screenshots capture the correct guest without selecting or reve
     await colorGuest(first.tabId, "rgb(31, 151, 211)");
     await colorGuest(second.tabId, "rgb(211, 71, 41)");
     const assertCapture = async (tabId: string, expectedBgra: number[]) => {
-      const capture = await request("preview.screenshot", { tabId });
+      const capture = await request("preview.screenshot", { tabId, format: "png" });
       expect(capture.url).toBe(fixture.url);
       const encoded = Buffer.from(capture.dataUrl.split(",")[1], "base64");
       expect(capture.imageSize).toEqual({ width: encoded.readUInt32BE(16), height: encoded.readUInt32BE(20) });

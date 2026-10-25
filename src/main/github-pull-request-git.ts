@@ -10,6 +10,7 @@ import {
   runGit,
   type RunResult,
 } from "./git-exec";
+import { parseWorktreePorcelain } from "./git-worktree-porcelain";
 import { slugifyBranchName } from "./git-worktrees";
 
 const MAX_REMOTE_COUNT = 64;
@@ -612,42 +613,6 @@ export async function cleanupPullRequestWorktree(
       await dependencies.cleanupSecurityContext(security).catch(() => undefined);
     }
   }
-}
-
-function parseWorktreePorcelain(
-  output: string,
-): Array<{ path: string; head: string; branch?: string }> {
-  const entries: Array<{ path: string; head: string; branch?: string }> = [];
-  let current: { path?: string; head?: string; branch?: string } = {};
-  const flush = (): void => {
-    if (current.path && current.head) {
-      entries.push({
-        path: current.path,
-        head: current.head.toLowerCase(),
-        ...(current.branch ? { branch: current.branch } : {}),
-      });
-    }
-    current = {};
-  };
-  for (const field of output.split("\0")) {
-    if (!field) {
-      flush();
-      continue;
-    }
-    const separator = field.indexOf(" ");
-    const key = separator < 0 ? field : field.slice(0, separator);
-    const value = separator < 0 ? "" : field.slice(separator + 1);
-    if (key === "worktree") {
-      if (current.path) flush();
-      current.path = value;
-    } else if (key === "HEAD") {
-      current.head = value;
-    } else if (key === "branch") {
-      current.branch = value;
-    }
-  }
-  flush();
-  return entries;
 }
 
 async function findPinnedRepositoryRemote(

@@ -1,0 +1,39 @@
+/* The rail's Workspaces/Agents switch, on the solid rail like the rest of the
+   section. The Agents view's own styles load with it (agent-board.css). */
+
+.rail-view-switch {
+  flex: 0 0 auto;
+  padding: 6px 8px 0;
+}
+
+/* Outweighs .spark-segmented.is-wrap's sizing (and styles.css loads after
+   this sheet), so both views get the same width whatever their labels. */
+.spark-segmented.is-wrap.rail-view-switch__track .spark-segmented-item {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.rail-view-switch__track .spark-segmented-item:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.rail-view-switch__badge {
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--warn) 22%, transparent);
+  color: var(--warn);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.rail-view-switch__pending {
+  flex: 1 1 0;
+  min-height: 0;
+}

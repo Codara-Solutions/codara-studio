@@ -6,6 +6,7 @@ import type {
   WorkerArtifactPaths,
   WorkerReport,
 } from "@shared/types";
+import { gitChildEnv } from "../git-env";
 import { readWorkerReport } from "./worker-report";
 
 const execFileAsync = promisify(execFile);
@@ -197,7 +198,10 @@ async function observeWorkspaceDelta(
 }> {
   if (!cwd) return { mode: "unavailable", note: "Workspace path was not persisted.", delta: [] };
   try {
-    await execFileAsync("git", ["-C", cwd, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8" });
+    await execFileAsync("git", ["-C", cwd, "rev-parse", "--is-inside-work-tree"], {
+      encoding: "utf8",
+      env: gitChildEnv(),
+    });
   } catch {
     return {
       mode: "non_git",
@@ -211,7 +215,7 @@ async function observeWorkspaceDelta(
       const { stdout } = await execFileAsync(
         "git",
         ["-C", cwd, "diff", "--name-status", "--find-renames", baselineSha, "--"],
-        { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 },
+        { encoding: "utf8", maxBuffer: 8 * 1024 * 1024, env: gitChildEnv() },
       );
       for (const line of stdout.split(/\r?\n/)) {
         const parts = line.split("\t");
@@ -231,7 +235,7 @@ async function observeWorkspaceDelta(
   const { stdout } = await execFileAsync(
     "git",
     ["-C", cwd, "status", "--porcelain=v1", "--untracked-files=all"],
-    { encoding: "utf8", maxBuffer: 8 * 1024 * 1024 },
+    { encoding: "utf8", maxBuffer: 8 * 1024 * 1024, env: gitChildEnv() },
   );
   for (const line of stdout.split(/\r?\n/)) {
     if (!line.trim()) continue;

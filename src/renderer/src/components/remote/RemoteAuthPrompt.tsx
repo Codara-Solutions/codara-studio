@@ -58,7 +58,7 @@ export default function RemoteAuthPrompt() {
     >
       <div className="spark-scrim" style={{ position: "absolute", inset: 0, zIndex: 0 }} />
       <form
-        className="spark-glass"
+        className="spark-glass--strong spark-overlay-surface"
         onClick={(e) => e.stopPropagation()}
         onSubmit={(e) => {
           e.preventDefault();

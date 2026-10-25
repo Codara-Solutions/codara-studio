@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   InAppNotificationTone,
+  NavigationTarget,
   NotifyEvent,
   ResolvedRunQuestion,
 } from "@shared/types";
@@ -8,6 +9,7 @@ import { accentVar, kindMeta, type NotifyGlyph } from "../notifications/kinds";
 import type { NavigateTo } from "../notifications/routing";
 import {
   isNotificationTargetViewed,
+  notificationViewKey,
   type ActiveNotificationView,
 } from "../notifications/viewed";
 
@@ -25,9 +27,10 @@ import {
 // early. Click anywhere else on the card routes the event's NavigationTarget
 // through navigateTo — this lets a "needs you" alert deep-link the user
 // straight to the chat, terminal pane, or loom that needs them. Acting on the
-// card acknowledges and removes its notification-center entry. Visiting a
-// matching run, pane, or Automations hub does the same. The close button and
-// visual timeout only hide the card, so missed entries remain in the center.
+// card marks its notification-center row read; visiting the matching run or
+// pane does the same. The row itself stays in the center's history. The
+// close button and visual timeout only hide the card, so a missed alert
+// stays unread in the bell.
 
 // Fallback when the host passes no preference (matches DEFAULT_TOAST_DURATION_MS).
 const AUTO_DISMISS_MS = 6_000;
@@ -40,11 +43,26 @@ type Toast = NotifyEvent;
 
 // Renderer-local toasts (see the `spark:local-toast` listener below) are
 // tagged by their sourceKey. They never came from the notify pipeline, so
-// they have no center entry to acknowledge and no target to navigate to.
+// they have no center entry to acknowledge, and only those emitted with a
+// workspace target (an agent's new worktree) navigate anywhere.
 const LOCAL_SOURCE_PREFIX = "local:";
+const LOCAL_NAVIGABLE_PREFIX = "local:nav:";
 
 function isLocalToast(toast: Toast): boolean {
   return toast.sourceKey.startsWith(LOCAL_SOURCE_PREFIX);
+}
+
+function isNavigableLocalToast(toast: Toast): boolean {
+  return toast.sourceKey.startsWith(LOCAL_NAVIGABLE_PREFIX);
+}
+
+function localWorkspaceTarget(value: unknown): NavigationTarget | null {
+  const candidate = value as { type?: unknown; workspaceId?: unknown } | null;
+  return candidate?.type === "workspace" &&
+    typeof candidate.workspaceId === "string" &&
+    candidate.workspaceId
+    ? { type: "workspace", workspaceId: candidate.workspaceId }
+    : null;
 }
 
 let localToastSeq = 0;
@@ -65,16 +83,11 @@ export interface ToastHostProps {
   dismissMs?: number;
 }
 
-async function markReadThenRemove(id: string): Promise<void> {
+async function markRead(id: string): Promise<void> {
   try {
     await window.spark.notifications.markRead(id);
   } catch {
-    // Removal is still worth attempting if the read update raced or failed.
-  }
-  try {
-    await window.spark.notifications.remove(id);
-  } catch {
-    // Notification cleanup is best-effort.
+    // Best-effort: the row stays unread in the bell, which is recoverable.
   }
 }
 
@@ -93,7 +106,7 @@ export default function ToastHost({
   const acknowledge = useCallback((id: string) => {
     if (acknowledgingIds.current.has(id)) return;
     acknowledgingIds.current.add(id);
-    void markReadThenRemove(id).finally(() => {
+    void markRead(id).finally(() => {
       acknowledgingIds.current.delete(id);
     });
   }, []);
@@ -139,6 +152,7 @@ export default function ToastHost({
           title?: unknown;
           body?: unknown;
           tone?: unknown;
+          target?: unknown;
         }>
       ).detail;
       const title = typeof detail?.title === "string" ? detail.title : "";
@@ -148,15 +162,15 @@ export default function ToastHost({
           ? detail.tone
           : "success";
       localToastSeq += 1;
-      const id = `${LOCAL_SOURCE_PREFIX}${localToastSeq}`;
+      const target = localWorkspaceTarget(detail?.target);
+      const id = `${target ? LOCAL_NAVIGABLE_PREFIX : LOCAL_SOURCE_PREFIX}${localToastSeq}`;
       setToasts((current) => {
         const next = [
           ...current,
           {
             id,
-            // Only the glyph is read off `kind` (a neutral bell here); the
-            // title/body below are always supplied, so the kind's own label
-            // never surfaces.
+            // Nothing is read off `kind`: a local card always shows the
+            // neutral bell, and its title and body are always supplied.
             kind: "app.update-ready",
             sourceKey: id,
             title,
@@ -165,9 +179,9 @@ export default function ToastHost({
             // Unused for local toasts — nothing in this component plays audio;
             // the sound policy lives on the notify pipeline these bypass.
             soundKind: "done",
-            // Never matches a real run, so the viewed-suppression sweep below
-            // leaves local toasts alone.
-            target: { type: "run", runId: id },
+            // Without a workspace target this never matches a real run, and
+            // the viewed-suppression sweep below skips local toasts anyway.
+            target: target ?? { type: "run", runId: id },
             createdAt: new Date().toISOString(),
           } satisfies Toast,
         ];
@@ -178,27 +192,23 @@ export default function ToastHost({
     return () => window.removeEventListener("spark:local-toast", handler);
   }, []);
 
+  // Once per real change of the surface on screen (keyed, not per render):
+  // hide cards for what is now visible, and let main mark the matching center
+  // rows read in one call. Main applies the same matcher to its own list, so
+  // the renderer never fetches the history for this.
+  const activeViewKey = notificationViewKey(activeView);
   useEffect(() => {
+    const view = activeViewRef.current;
     const matchingVisible = toastsRef.current.filter(
-      (toast) => !isLocalToast(toast) && isNotificationTargetViewed(toast.target, activeView, toast.kind),
+      (toast) => !isLocalToast(toast) && isNotificationTargetViewed(toast.target, view, toast.kind),
     );
     if (matchingVisible.length > 0) {
       const matchingIds = new Set(matchingVisible.map((toast) => toast.id));
       setToasts((current) => current.filter((toast) => !matchingIds.has(toast.id)));
-      for (const toast of matchingVisible) acknowledge(toast.id);
     }
-
-    void window.spark.notifications
-      .list()
-      .then((entries) => {
-        for (const entry of entries) {
-          if (isNotificationTargetViewed(entry.target, activeView, entry.kind)) {
-            acknowledge(entry.id);
-          }
-        }
-      })
-      .catch(() => undefined);
-  }, [activeView, acknowledge]);
+    if (!view.visibleRunId && !view.terminal && !view.automation) return;
+    void window.spark.notifications.markViewed(view).catch(() => undefined);
+  }, [activeViewKey]);
 
   useEffect(() => {
     const timers = dismissTimers.current;
@@ -343,12 +353,13 @@ function ToastCard({
     status: toneVar,
     chipFill: `color-mix(in oklch, ${toneVar} 14%, var(--panel))`,
     chipBorder: `color-mix(in oklch, ${toneVar} 32%, transparent)`,
-    title: toast.title || `Cora — ${meta.label.toLowerCase()}`,
+    title: toast.title || `Cora: ${meta.label.toLowerCase()}`,
   };
 
-  // A local toast has no real navigation target (and no center entry), so it
-  // renders as a plain, non-interactive card.
-  const clickable = Boolean(navigateTo) && !isLocalToast(toast);
+  // A local toast has no center entry, and only one emitted with a target
+  // has anywhere to go; the rest render as plain, non-interactive cards.
+  const clickable =
+    Boolean(navigateTo) && (!isLocalToast(toast) || isNavigableLocalToast(toast));
 
   return (
     <div
@@ -359,11 +370,12 @@ function ToastCard({
       role={tone === "danger" ? "alert" : "status"}
       data-lifted={hover && clickable ? "true" : undefined}
       onClick={() => {
-        if (!clickable) return;
-        navigateTo?.(toast.target);
-        // Routing acts on every notification kind. Acknowledge first, then
-        // remove the center entry. The X button and visual timeout do neither.
-        onAcknowledge();
+        if (!clickable || !navigateTo) return;
+        // Opening marks the center row read, unless nothing could be opened
+        // (its workspace is gone). A local toast has no center row. The X
+        // button and visual timeout do neither.
+        const outcome = navigateTo(toast.target);
+        if (!isLocalToast(toast) && outcome !== "gone") onAcknowledge();
         onClose();
       }}
       onMouseEnter={() => setHover(true)}
@@ -421,7 +433,7 @@ function ToastCard({
           }}
         />
       )}
-      <ToastIcon glyph={meta.glyph} color={palette.status} fill={palette.chipFill} border={palette.chipBorder} />
+      <ToastIcon glyph={isLocalToast(toast) ? "bell" : meta.glyph} color={palette.status} fill={palette.chipFill} border={palette.chipBorder} />
       <div style={{ flex: 1, minWidth: 0, paddingTop: 1 }}>
         <div
           style={{
@@ -592,6 +604,26 @@ export function NotifyGlyphSvg({ glyph, size = 13 }: { glyph: NotifyGlyph; size?
               geometry as the app's reload icon (gap + arrowhead reads clockwise). */}
           <path d="M11 7 A4 4 0 1 1 9.6 3.9" />
           <path d="M11.2 1.8 L11.2 4.2 L8.8 4.2" />
+        </>
+      ) : glyph === "commit" ? (
+        <>
+          <circle cx="7" cy="7" r="2.3" />
+          <path d="M1.5 7 H4.7 M9.3 7 H12.5" />
+        </>
+      ) : glyph === "pr" ? (
+        <>
+          <circle cx="3.8" cy="3.3" r="1.4" />
+          <circle cx="3.8" cy="10.7" r="1.4" />
+          <circle cx="10.2" cy="10.7" r="1.4" />
+          <path d="M3.8 4.7 V9.3" />
+          <path d="M10.2 9.3 V5.6 a1.8 1.8 0 0 0 -1.8 -1.8 H6.4" />
+          <path d="M7.6 2.6 L6.4 3.8 L7.6 5" />
+        </>
+      ) : glyph === "download" ? (
+        <>
+          <path d="M7 2 V9" />
+          <path d="M4.2 6.4 L7 9.2 L9.8 6.4" />
+          <path d="M2.5 11.8 H11.5" />
         </>
       ) : (
         <path d="M3 7.5 L6 10.5 L11 4" />

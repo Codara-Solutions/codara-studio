@@ -8,15 +8,19 @@ import React, {
 import {
   BackIcon,
   CloseIcon,
+  CommentIcon,
   DevToolsIcon,
-  DrawIcon,
   ExternalLinkIcon,
   ForwardIcon,
   GlobeIcon,
   InspectIcon,
   LockIcon,
   ReloadIcon,
+  TabIdIcon,
 } from "../icons";
+import { IS_MAC } from "../../shortcuts/platform";
+
+const MOD_LABEL = IS_MAC ? "Cmd" : "Ctrl";
 
 // AddressBar is the chrome for a preview tab: back/forward, reload, URL
 // input, ports preset dropdown, open-in-system-browser, open-devtools.
@@ -58,8 +62,12 @@ interface Props {
   url: string;
   canGoBack: boolean;
   canGoForward: boolean;
-  inspecting: boolean;
-  drawing: boolean;
+  /** The element picker or its composer is open. */
+  pointing: boolean;
+  /** Comment mode is on. */
+  commenting: boolean;
+  /** The id agents pass as tabId, or null outside a registered tab. */
+  tabId: string | null;
   onSubmit: (url: string) => void;
   // Shift-click triggers a hard reload (ignore HTTP cache). Plain click is a
   // normal reload. The reload button forwards the click's shift state via
@@ -69,8 +77,12 @@ interface Props {
   onForward: () => void;
   onOpenDevTools: () => void;
   onOpenExternal: (url: string) => void;
-  onToggleInspect: () => void;
-  onToggleDraw: () => void;
+  onTogglePoint: () => void;
+  onToggleComment: () => void;
+  /** "id" copies the bare id; "full" adds the URL, title and who drives the tab. */
+  onCopyTabId: (detail: "id" | "full") => void;
+  /** Capture controls (responsive view, record), rendered after Comment. */
+  captureTools?: React.ReactNode;
 }
 
 const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
@@ -78,16 +90,19 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
     url,
     canGoBack,
     canGoForward,
-    inspecting,
-    drawing,
+    pointing,
+    commenting,
+    tabId,
     onSubmit,
     onReload,
     onBack,
     onForward,
     onOpenDevTools,
     onOpenExternal,
-    onToggleInspect,
-    onToggleDraw,
+    onTogglePoint,
+    onToggleComment,
+    onCopyTabId,
+    captureTools,
   },
   ref,
 ) {
@@ -436,18 +451,20 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
         <Cluster>
           <ChromeButton
             label={<InspectIcon size={13} />}
-            title={inspecting ? "Stop inspecting (Esc)" : "Inspect an element"}
+            title={pointing ? "Stop pointing (Esc)" : `Point at an element to send to an agent (${MOD_LABEL}+Shift+E)`}
             disabled={!url}
-            active={inspecting}
-            onClick={onToggleInspect}
+            active={pointing}
+            onClick={onTogglePoint}
           />
           <ChromeButton
-            label={<DrawIcon size={13} />}
-            title={drawing ? "Exit draw mode" : "Draw on the page"}
+            label={<CommentIcon size={13} />}
+            title={commenting ? "Stop commenting (Esc)" : `Comment on the page (${MOD_LABEL}+Shift+X)`}
             disabled={!url}
-            active={drawing}
-            onClick={onToggleDraw}
+            active={commenting}
+            onClick={onToggleComment}
           />
+          {captureTools}
+          {tabId ? <TabIdButton tabId={tabId} onCopy={onCopyTabId} /> : null}
           <ChromeButton
             label={<ExternalLinkIcon size={13} />}
             title="Open in system browser"
@@ -515,6 +532,64 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
     </div>
   );
 });
+
+// Copies the tab's id for an agent: a click copies the bare id,
+// the chevron menu also offers the id with the URL and who drives the tab.
+function TabIdButton({ tabId, onCopy }: { tabId: string; onCopy: (detail: "id" | "full") => void }) {
+  const [open, setOpen] = useState(false);
+  const anchorRef = useRef<HTMLSpanElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (event: MouseEvent) => {
+      if (event.target instanceof Node && (menuRef.current?.contains(event.target) || anchorRef.current?.contains(event.target))) return;
+      setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown, true);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown, true);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+  const rect = open ? anchorRef.current?.getBoundingClientRect() : null;
+  return (
+    <span ref={anchorRef} style={{ display: "inline-flex", alignItems: "center" }}>
+      <ChromeButton label={<TabIdIcon size={13} />} title={`Copy tab id ${tabId}`} onClick={() => onCopy("id")} />
+      <button
+        type="button"
+        className="spark-icon-btn"
+        aria-label="More ways to copy this tab"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title="Copy the tab id with its URL and session"
+        onClick={() => setOpen((value) => !value)}
+        style={{ ["--spark-icon-btn-size" as string]: "14px", fontSize: 9, color: "var(--muted)" }}
+      >
+        ▾
+      </button>
+      {open && rect ? (
+        <div
+          ref={menuRef}
+          role="menu"
+          className="spark-menu"
+          style={{ position: "fixed", zIndex: 130, top: rect.bottom + 6, left: Math.max(8, Math.min(rect.right - 280, window.innerWidth - 288)), width: 280 }}
+        >
+          <button type="button" role="menuitem" className="spark-menu-item" onClick={() => { setOpen(false); onCopy("id"); }}>
+            <span style={{ flex: 1, whiteSpace: "nowrap" }}>Copy tab id</span>
+            <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 11, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tabId}</span>
+          </button>
+          <button type="button" role="menuitem" className="spark-menu-item" onClick={() => { setOpen(false); onCopy("full"); }}>
+            Copy id, URL and session
+          </button>
+        </div>
+      ) : null}
+    </span>
+  );
+}
 
 // Groups a small run of ChromeButtons into one bordered, recessed affordance —
 // the Safari "toolbar cluster" idiom. The cluster carries the single hairline

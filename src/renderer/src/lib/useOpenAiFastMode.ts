@@ -54,11 +54,13 @@ export interface OpenAiFastModeControl {
 }
 
 /**
- * Reads and flips AppSettings.openAiFastMode. Read fail-closed: an unreadable
- * or unsaveable settings file reports OFF, because the wrong answer costs the
- * user 2x on every OpenAI token rather than merely running at normal speed.
- * The value takes effect on the next manager turn — pi-backend carries fast
- * mode in its session identity, so a flip relaunches the Pi session.
+ * Reads and flips AppSettings.openAiFastMode (the key predates Anthropic
+ * support; it now covers every model with a fast mode, manager and workers).
+ * Read fail-closed: an unreadable or unsaveable settings file reports OFF,
+ * because the wrong answer bills a premium rate on every token rather than
+ * merely running at normal speed. The value takes effect on the next manager
+ * turn and the next worker launch: pi-backend carries fast mode in its session
+ * identity, so a flip relaunches the Pi session.
  */
 export function useOpenAiFastMode(): OpenAiFastModeControl {
   const [enabled, setEnabled] = useState(cached?.openAiFastMode === true);

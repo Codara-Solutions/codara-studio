@@ -26,7 +26,7 @@ assert.match(focus, /BrowserWindow\.fromWebContents\(owner\)/);
 assert.match(focus, /import \{ E2E_BACKGROUND, revealWindow \} from "\.\/e2e-background";/);
 assert.match(focus, /revealWindow\(target\);/);
 assert.match(background, /if \(target\.isMinimized\(\)\) target\.restore\(\);/);
-assert.match(background, /if \(!target\.isVisible\(\)\) target\.show\(\);/);
+assert.match(background, /if \(!target\.isVisible\(\)\) \{[^}]*target\.show\(\);\s*\}/);
 assert.match(background, /target\.focus\(\);/);
 assert.match(
   focus,
@@ -41,7 +41,10 @@ assert.match(
   subscriptionAuth,
   /type: "completed",[\s\S]{0,400}?owner\.focus\?\.\(\);/,
 );
-assert.match(subscriptionAuth, /if \(!cancelled\) owner\.focus\?\.\(\);/);
+assert.match(
+  subscriptionAuth,
+  /if \(!alreadyClosed && !flow\.userCancelled && !flow\.superseded\) owner\.focus\?\.\(\);/,
+);
 assert.doesNotMatch(
   subscriptionAuth,
   /type: "cancelled"[^\n]*\n\s*focusStudioWindow/,

@@ -103,7 +103,8 @@ function applyGlassAttr(enabled: boolean): void {
 // default. Veil/blur ride CSS scale vars consumed by the --glass-* tokens;
 // refraction/chroma become the scale attributes of the three per-channel
 // feDisplacementMap primitives in #codara-glass-lens (index.html): center bend
-// 58px at 100%, ±13px channel spread for the chromatic fringe.
+// 110px at 100%, ±30px channel spread for the chromatic fringe: a strong
+// bend at the rim with a visible prism split, the crystal look.
 const GLASS_TUNING_KEYS = ["glassVeil", "glassBlur", "glassRefraction", "glassChroma"] as const;
 type GlassTuningKey = (typeof GLASS_TUNING_KEYS)[number];
 const glassTuning: Record<GlassTuningKey, number> = {
@@ -123,8 +124,8 @@ function applyGlassTuning(): void {
   const style = document.documentElement.style;
   style.setProperty("--glass-veil-scale", String(asGlassFactor(glassTuning.glassVeil)));
   style.setProperty("--glass-blur-scale", String(asGlassFactor(glassTuning.glassBlur)));
-  const center = 58 * asGlassFactor(glassTuning.glassRefraction);
-  const spread = center > 0 ? 13 * asGlassFactor(glassTuning.glassChroma) : 0;
+  const center = 110 * asGlassFactor(glassTuning.glassRefraction);
+  const spread = center > 0 ? 30 * asGlassFactor(glassTuning.glassChroma) : 0;
   const scales = [center + spread, center, Math.max(0, center - spread)];
   document
     .querySelectorAll("#codara-glass-lens feDisplacementMap")

@@ -7,6 +7,9 @@ export interface ExecutionToolCall {
   input: unknown;
   output?: string;
   isError?: boolean;
+  /** Tail of the output so far, while the call is still running. Live-only:
+   *  never journaled, so a reloaded run shows only the final output. */
+  partialOutput?: string;
   at: string;
 }
 
@@ -342,6 +345,18 @@ function reduceOrderedTurnEvent(turn: ExecutionTurn, event: SparkEvent): void {
     }
     return;
   }
+  if (event.type === "chat.tool_progress") {
+    const toolUseId = typeof payload.toolUseId === "string" ? payload.toolUseId : "";
+    const tool = turn.blocks.find(
+      (block): block is Extract<ExecutionBlock, { kind: "tool" }> =>
+        block.kind === "tool" && block.toolUseId === toolUseId,
+    );
+    // Unsequenced, so it sorts after the tool's result once one landed.
+    if (tool && tool.output === undefined && typeof payload.output === "string") {
+      tool.partialOutput = payload.output;
+    }
+    return;
+  }
   if (event.type === "chat.system_note" || event.type === "chat.backend_notice") {
     const message = typeof payload.message === "string" ? payload.message : event.message ?? "";
     if (!message || turn.blocks.some((block) => block.kind === "note" && block.message === message)) return;
@@ -395,6 +410,11 @@ function reduceLiveEvent(
     };
     if (index >= 0) next.toolCalls[index] = { ...next.toolCalls[index], ...result };
     else next.toolCalls.push({ toolUseId: id, toolName: "(unknown tool)", input: undefined, at: event.timestamp, ...result });
+  } else if (event.type === "chat.tool_progress") {
+    const index = next.toolCalls.findIndex((call) => call.toolUseId === payload.toolUseId);
+    if (index >= 0 && next.toolCalls[index].output === undefined && typeof payload.output === "string") {
+      next.toolCalls[index] = { ...next.toolCalls[index], partialOutput: payload.output };
+    }
   } else if (event.type === "chat.system_note" || event.type === "chat.backend_notice") {
     const message = typeof payload.message === "string" ? payload.message : event.message ?? "";
     if (message && !next.notes.some((note) => note.message === message)) {

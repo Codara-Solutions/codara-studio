@@ -334,6 +334,7 @@ export interface RemoteCapabilities {
   policy: {
     mcpAwareness: boolean;
     skillAwareness: boolean;
+    // Wire name kept for paired phones; it carries studioToolsInOtherApps.
     autoInstallStudioMcp: boolean;
   };
   mcp: RemoteCapabilityAsset[];
@@ -551,7 +552,7 @@ export interface RemoteCoraMessage {
    * or was never user input at all — in both cases it is delivered history.
    */
   deliveryState?: "queued" | "submitted" | "acknowledged" | "cancelled";
-  /** Ordinary turn, mid-turn steering, or a reply to Cora's question. */
+  /** Ordinary turn, a message queued while Cora worked, or a reply to Cora's question. */
   intent?: "turn" | "steer" | "answer";
 }
 
@@ -3699,7 +3700,8 @@ export class RpcSession {
           }
           const p = (params ?? {}) as { enabled?: unknown };
           // A real boolean only. Coercing a truthy string here would let a
-          // malformed phone build silently double every OpenAI token's price.
+          // malformed phone build silently buy fast mode's premium rate for
+          // Cora and every worker on an OpenAI or Claude Opus model.
           if (typeof p.enabled !== "boolean") {
             this.replyError(
               id,

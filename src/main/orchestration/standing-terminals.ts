@@ -23,10 +23,19 @@ const STANDING_TERMINAL_EFFORTS = new Set(["low", "medium", "high", "xhigh", "ma
 // provider file. Pi has no provider: it is not a Cora worker runtime, and a
 // pane runs it as the + menu does, the user's own `pi` with their own
 // settings, adding only the model and thinking level asked for.
+//
+// `compaction` carries the user's auto-compact limit to the CLIs that take it
+// per launch, never through their own config files: Codex reads
+// `-c model_auto_compact_token_limit=<tokens>`, and Claude reads
+// CLAUDE_AUTOCOMPACT_PCT_OVERRIDE from the `env` of a `--settings` file Codara
+// writes in its own home (a file path, because an inline JSON argument does
+// not survive every shell's quoting). Grok and Pi panes run the user's own
+// configuration untouched.
 export function buildStandingTerminalCommand(
   runtime: StandingTerminalRuntime,
   model?: string,
   effort?: string,
+  compaction?: { codexTokenLimit?: number | null; claudeSettingsPath?: string | null },
 ): string {
   let effectiveEffort: SpawnOpts["effort"];
   if (effort && STANDING_TERMINAL_EFFORTS.has(effort)) {
@@ -52,6 +61,14 @@ export function buildStandingTerminalCommand(
     model: effectiveModel,
     effort: effectiveEffort,
   });
+  const codexLimit = compaction?.codexTokenLimit;
+  if (runtime === "codex" && typeof codexLimit === "number" && Number.isInteger(codexLimit) && codexLimit > 0) {
+    providerArgs.push("-c", `model_auto_compact_token_limit=${codexLimit}`);
+  }
+  const claudeSettings = compaction?.claudeSettingsPath?.trim();
+  if (runtime === "claude" && claudeSettings) {
+    providerArgs.push("--settings", claudeSettings);
+  }
 
   const head = provider.binaryName;
   const tail = providerArgs.map((arg) => quoteShellArg(arg));

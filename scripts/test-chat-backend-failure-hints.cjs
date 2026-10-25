@@ -34,14 +34,17 @@ async function loadHelper() {
   assert.notEqual(start, -1, "backendFailureDetails must exist");
   assert.notEqual(end, -1, "BackendFailureMessage boundary must exist");
   const result = await esbuild.transform(
-    `${source.slice(start, end)}\nexport { backendFailureDetails };`,
+    `${source.slice(start, end)}\nexport { backendFailureDetails, failedTurnExplanation };`,
     { loader: "tsx", format: "cjs", target: "node20" },
   );
   const mod = { exports: {} };
   // eslint-disable-next-line no-new-func
   new Function("module", "exports", result.code)(mod, mod.exports);
+  helperExports = mod.exports;
   return mod.exports.backendFailureDetails;
 }
+
+let helperExports = null;
 
 async function loadDuplicateFilter() {
   const source = fs.readFileSync(SOURCE_PATH, "utf8");
@@ -269,7 +272,35 @@ async function main() {
     assert.doesNotMatch(directCapacity.hint, /account picker|usage limit/, failure);
   }
 
+  // A provider that never had an account (NoConnectedPiAccountError) asks the
+  // user to connect one, never to "reconnect" something they never did, and
+  // every account-shaped failure offers the Settings > Agents action.
+  const neverConnected = details(
+    "Cora Pi backend error: Cora is not authenticated with a ChatGPT account (openai-codex). Connect one in Settings > Agents, or pick a model from an account you have connected.",
+  );
+  assert.equal(neverConnected.kind, "auth");
+  assert.equal(neverConnected.action, "accounts");
+  assert.match(neverConnected.detail, /No ChatGPT account is connected/);
+  assert.match(neverConnected.hint, /Connect a ChatGPT account in Settings > Agents/);
+  assert.doesNotMatch(neverConnected.hint, /reconnect/i);
+  const codexAuth = details("Cora Pi backend error: Pi provider openai-codex is not authenticated with OAuth");
+  assert.equal(codexAuth.action, "accounts");
+  assert.match(codexAuth.hint, /Reconnect your ChatGPT account in Settings > Agents/);
+  assert.doesNotMatch(`${codexAuth.detail} ${codexAuth.hint}`, /Codex subscription|Cora · Pi/);
+  assert.match(details("Cora Pi backend error: anthropic OAuth session expired").hint, /Claude account/);
+  assert.equal(details("Cora Pi backend error: unexpected response shape").action, undefined);
+
+  // A failed manager turn's raw error reads through the same classifier, and
+  // an unclassified error keeps its raw text (null here).
+  const explain = helperExports.failedTurnExplanation;
+  assert.equal(explain("Pi provider anthropic is not authenticated with OAuth")?.kind, "auth");
+  assert.equal(explain("Our servers are currently overloaded.")?.kind, "capacity");
+  assert.equal(explain("Manager turn interrupted by force pause."), null);
+  assert.equal(explain(""), null);
+
   const conversationSource = fs.readFileSync(SOURCE_PATH, "utf8");
+  // A backend-failure park renders as a failure card without the Needs you tag.
+  assert.match(conversationSource, /if \(item\.backendFailure\) \{[\s\S]{0,200}<SparkTurn tag=\{<IssueChip \/>\}>/);
   const panelSource = fs.readFileSync(
     path.join(ROOT, "src", "renderer", "src", "components", "chat", "ChatPanel.tsx"),
     "utf8",

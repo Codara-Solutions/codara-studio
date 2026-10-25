@@ -36,7 +36,6 @@ test("remote access starts off, enables into a pairing QR, and turns back off", 
     // 1. The off state, as a fresh home always presents it.
     const toggle = dialog.getByRole("switch", { name: "Remote access" });
     await expect(toggle).toHaveAttribute("aria-checked", "false");
-    await expect(toggle).toHaveText("Turn on");
     await expect(dialog.getByText("Off. Paired devices cannot reach this computer.")).toBeVisible();
     await expect(dialog.getByText("No paired devices yet.")).toBeVisible();
     await expect(dialog.getByRole("button", { name: "Pair a device" })).toHaveCount(0);
@@ -52,7 +51,6 @@ test("remote access starts off, enables into a pairing QR, and turns back off", 
       timeout: 60_000,
     });
     await expect(toggle).toHaveAttribute("aria-checked", "true");
-    await expect(toggle).toHaveText("Turn off");
     await expect(dialog.getByText(/^port \d+$/)).toBeVisible();
 
     // The pairing modal round trips remoteAccess:startPairing and renders the
@@ -62,6 +60,15 @@ test("remote access starts off, enables into a pairing QR, and turns back off", 
     await expect(modal).toBeVisible();
     await expect(modal.getByText("Scan with the Codara app")).toBeVisible();
     await expect(modal.getByAltText("Pairing QR code")).toBeVisible();
+
+    // A click outside the modal never drops the QR mid-pairing: only Escape
+    // and its own buttons close it, as with Settings itself.
+    const settingsBox = await dialog.boundingBox();
+    expect(settingsBox).not.toBeNull();
+    await page.mouse.click(settingsBox!.x + 24, settingsBox!.y + settingsBox!.height - 24);
+    await page.mouse.click(6, 6);
+    await expect(modal).toBeVisible();
+    await expect(dialog).toBeVisible();
 
     // 3. The secret behind that QR must live in the image and nowhere a human
     // (or a screenshot, or a screen share) can read it as text.
@@ -89,7 +96,6 @@ test("remote access starts off, enables into a pairing QR, and turns back off", 
     // the off state.
     await toggle.click({ force: true });
     await expect(toggle).toHaveAttribute("aria-checked", "false");
-    await expect(toggle).toHaveText("Turn on");
     await expect(dialog.getByText("Off. Paired devices cannot reach this computer.")).toBeVisible();
     await expect(dialog.getByRole("button", { name: "Pair a device" })).toHaveCount(0);
   } finally {

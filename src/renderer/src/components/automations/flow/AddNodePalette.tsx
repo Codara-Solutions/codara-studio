@@ -52,7 +52,7 @@ function entries(): Entry[] {
       key: "guard",
       choice: { kind: "guard" },
       title: "Guard",
-      blurb: "Branch on a condition — pass or fail.",
+      blurb: "Branch on a condition: pass or fail.",
       group: "Flow",
       tone: "var(--ok)",
       keywords: ["if", "condition", "branch", "tests", "check", "route"],
@@ -157,7 +157,7 @@ export default function AddNodePalette({
   return (
     <div
       ref={ref}
-      className="loom-palette spark-fade-in"
+      className="loom-palette spark-glass--strong spark-overlay-surface spark-fade-in"
       role="dialog"
       aria-label="Add node"
       onKeyDown={onKey}

@@ -115,7 +115,7 @@ export const STUDIO_TOUR: ReadonlyArray<{
     title: "A place for commands and agents",
     detail:
       "A terminal runs commands on your computer inside the project folder. Use separate tabs for your app, tests, and agents. Split panes to keep them side by side.",
-    task: "Open a terminal and try git --version. Later, use the agent picker to start Claude Code or Codex. Keep a development server running here while you preview it.",
+    task: "Open a terminal and try git --version. Later, use the + menu in the tab bar to start Claude Code or Codex. Keep a development server running here while you preview it.",
   },
   {
     id: "browser",

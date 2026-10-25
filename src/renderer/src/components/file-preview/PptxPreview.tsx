@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { init } from "pptx-preview";
 import { DockablePaneBar } from "../../tabs/dockChromeSlot";
+import FindBar from "../find/FindBar";
+import { useDomFind } from "../find/useDomFind";
 
 interface Props {
   path: string;
@@ -45,6 +47,14 @@ export default function PptxPreview({ path, mtimeMs, toolbarAction, forceLocalTo
   // disposed by another deck's render.
   const [recoverNonce, setRecoverNonce] = useState(0);
   const renderedGeneration = useRef(0);
+  const findHostRef = useRef<HTMLDivElement>(null);
+  const find = useDomFind({
+    hostRef: findHostRef,
+    contentRef: hostRef,
+    scrollerRef: scrollRef,
+    enabled: error === null,
+    label: "Find in presentation",
+  });
 
   useEffect(() => {
     liveDecks += 1;
@@ -170,20 +180,26 @@ export default function PptxPreview({ path, mtimeMs, toolbarAction, forceLocalTo
         </button>
         {toolbarAction}
       </DockablePaneBar>
-      <div
-        ref={scrollRef}
-        onPointerEnter={recoverCharts}
-        style={{
-          flex: 1,
-          minHeight: 0,
-          overflow: "auto",
-          padding: "16px 24px",
-          background: "var(--bg)",
-        }}
-      >
-        <div style={{ width: BASE_WIDTH, margin: "0 auto", zoom: fitScale * zoom }}>
-          <div ref={hostRef} />
+      <div ref={findHostRef} className="codara-find-host" onKeyDown={find.onKeyDown}>
+        <div
+          ref={scrollRef}
+          className="codara-find-scroller"
+          // Focusable so a click inside makes Ctrl+F find in this deck.
+          tabIndex={-1}
+          onPointerEnter={recoverCharts}
+          style={{
+            flex: 1,
+            minHeight: 0,
+            overflow: "auto",
+            padding: "16px 24px",
+            background: "var(--bg)",
+          }}
+        >
+          <div style={{ width: BASE_WIDTH, margin: "0 auto", zoom: fitScale * zoom }}>
+            <div ref={hostRef} />
+          </div>
         </div>
+        {find.bar && <FindBar {...find.bar} />}
       </div>
     </div>
   );

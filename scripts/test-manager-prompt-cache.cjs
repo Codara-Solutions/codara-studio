@@ -297,6 +297,90 @@ async function main() {
       buildManagerTurnPrompt(turnN, [turnN.humanMessages[2]]),
   );
 
+  // The [CORA RUN STATE] digest (plan + worker tasks) changes as work
+  // progresses, so it must ride the dynamic half right after the turn input.
+  const managerPlan = await bundle(
+    "manager-plan",
+    path.join(ROOT, "src", "main", "orchestration", "manager-plan.ts"),
+  );
+  const plan = managerPlan.normalizeManagerPlanInput(
+    {
+      goal: "Migrate every service to the new logger",
+      milestones: [
+        { id: "m1", title: "auth service", status: "done", note: "tests pass", worker_task_ids: ["wt-1"] },
+        { id: "m2", title: "billing service", status: "in_progress" },
+        { id: "m3", title: "reports service", status: "pending" },
+      ],
+      decisions: ["Keep the old logger as a shim until m3"],
+      next_actions: ["Wait for wt-2"],
+    },
+    "2026-07-01T00:00:00.000Z",
+  );
+  check("a valid plan normalizes", typeof plan === "object" && plan.milestones.length === 3);
+  check(
+    "a deferred milestone needs a reason",
+    /deferred without a note/.test(
+      managerPlan.normalizeManagerPlanInput(
+        { goal: "g", milestones: [{ id: "m1", title: "t", status: "deferred" }] },
+        "t",
+      ),
+    ),
+  );
+  check(
+    "a plan needs a goal and milestones",
+    typeof managerPlan.normalizeManagerPlanInput({ milestones: [] }, "t") === "string" &&
+      typeof managerPlan.normalizeManagerPlanInput({ goal: "g", milestones: [] }, "t") === "string",
+  );
+  check(
+    "open milestones are the pending and in-progress ones",
+    managerPlan.openPlanMilestones(plan).map((milestone) => milestone.id).join(",") === "m2,m3",
+  );
+  const digest = managerPlan.renderRunStateDigest({
+    managerPlan: plan,
+    workerTasks: Array.from({ length: 15 }, (_, index) => ({
+      id: `wt-${index + 1}`,
+      title: `task ${index + 1}`,
+      status: "accepted",
+      taskClass: "feature",
+    })),
+  });
+  check(
+    "the digest carries the goal, milestone states, and the newest worker tasks",
+    /Goal: Migrate every service/.test(digest) &&
+      /- \[in_progress\] m2 billing service/.test(digest) &&
+      /newest 12 of 15/.test(digest) &&
+      !/wt-3 \|/.test(digest) &&
+      /wt-15 \| feature \| accepted/.test(digest) &&
+      digest.endsWith("[END CORA RUN STATE]"),
+    digest,
+  );
+  check(
+    "a run with neither plan nor tasks gets no digest",
+    managerPlan.renderRunStateDigest({ workerTasks: [] }) === null,
+  );
+  const tasksOnly = { workerTasks: [{ id: "wt-1", title: "task", status: "accepted", taskClass: "feature" }] };
+  check(
+    "the digest suggests codara_plan_update only where the manager has it",
+    /codara_plan_update/.test(managerPlan.renderRunStateDigest(tasksOnly)) &&
+      !/codara_plan_update/.test(managerPlan.renderRunStateDigest(tasksOnly, { planToolAvailable: false })),
+  );
+  const promptWithState = assembleManagerPrompt({
+    guidance,
+    cwd,
+    turnPrompt: buildManagerTurnPrompt(turnN, [turnN.humanMessages[2]], {
+      runState: digest,
+      coraMemory: memoryNeedle,
+    }),
+  });
+  check(
+    "the run-state digest rides the dynamic half after the turn input and before memory",
+    !promptWithState.stablePrefix.includes("CORA RUN STATE") &&
+      prefixOf(promptWithState) === prefixOf(promptOne) &&
+      promptWithState.dynamic.indexOf("[CORA RUN STATE") > promptWithState.dynamic.indexOf("Also add a test") &&
+      promptWithState.dynamic.indexOf("[CORA RUN STATE") < promptWithState.dynamic.indexOf("CORA MEMORY, THIS WORKSPACE"),
+    promptWithState.dynamic,
+  );
+
   // buildManagerStablePrefix takes primitives on purpose: a builder that cannot
   // see the RunState cannot leak a timestamp into the cached half.
   check(

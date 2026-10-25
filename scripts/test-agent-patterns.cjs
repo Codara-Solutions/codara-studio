@@ -1,3 +1,4 @@
+// test-runner: heavy (peaks near 255 MB)
 // Sanity harness for src/shared/agent-patterns.ts — simulates the byte
 // streams Claude Code / Codex paint while working, blocked, and idle, and
 // asserts the classification the main-process terminal-agent notifier and

@@ -289,7 +289,7 @@ async function listClaudeSessions(
       if (parsed.isSidechain) return null;
       // Prefer Claude Code's generated topic label; when the head missed the
       // record (giant pasted-context lines), fall back to a cached deeper
-      // scan. The first user question then becomes the row's second line.
+      // scan.
       const aiTitle =
         parsed.aiTitle ??
         (await findClaudeAiTitle(path, { mtimeMs, size }).then(
@@ -302,7 +302,6 @@ async function listClaudeSessions(
         runtime: "claude",
         sessionId: basename(path, ".jsonl"),
         title: aiTitle ?? parsed.title ?? "Untitled session",
-        preview: aiTitle === null ? null : parsed.title,
         cwd,
         cwdExists: true,
         updatedAt: new Date(mtimeMs).toISOString(),
@@ -383,7 +382,6 @@ async function listCodexSessions(
         sessionId,
         title: parsed.title ?? "Untitled session",
         // Codex has no ai-title equivalent — the title IS the first question.
-        preview: null,
         cwd,
         cwdExists: true,
         updatedAt: new Date(Math.max(stat.mtimeMs, parsed.startedAtMs ?? 0)).toISOString(),
@@ -414,7 +412,6 @@ async function listGrokSessions(
         runtime: "grok",
         sessionId: parsed.sessionId,
         title: parsed.title,
-        preview: null,
         cwd,
         cwdExists: true,
         updatedAt: new Date(updatedAtMs || Date.now()).toISOString(),
@@ -497,12 +494,11 @@ async function listAllClaudeSessions(
       if (!parsed.hasUser || !parsed.cwd || !isAbsolute(parsed.cwd)) return null;
       // Head-only ai-title here: the cross-project sweep touches every
       // transcript on the machine, so the deeper per-file scan is reserved
-      // for the per-cwd listing the picker uses.
+      // for the per-cwd listing.
       return {
         runtime: "claude",
         sessionId: basename(path, ".jsonl"),
         title: parsed.aiTitle ?? parsed.title ?? "Untitled session",
-        preview: parsed.aiTitle === null ? null : parsed.title,
         cwd: parsed.cwd,
         cwdExists: await pathIsDirectory(parsed.cwd),
         updatedAt: new Date(Math.max(mtimeMs, parsed.startedAtMs ?? 0)).toISOString(),
@@ -564,7 +560,6 @@ async function listAllCodexSessions(
         runtime: "codex",
         sessionId,
         title: parsed.title ?? "Untitled session",
-        preview: null,
         cwd: parsed.cwd,
         cwdExists: await pathIsDirectory(parsed.cwd),
         updatedAt: new Date(Math.max(stat.mtimeMs, parsed.startedAtMs ?? 0)).toISOString(),
@@ -605,7 +600,6 @@ async function listAllGrokSessions(
         runtime: "grok",
         sessionId: parsed.sessionId,
         title: parsed.title,
-        preview: null,
         cwd: parsed.cwd,
         cwdExists: await pathIsDirectory(parsed.cwd),
         updatedAt: new Date(updatedAtMs || Date.now()).toISOString(),
@@ -778,7 +772,7 @@ async function removeSessionHistoryEntries(path: string, sessionId: string): Pro
   });
   if (!changed) return;
   // history.jsonl in a managed account is a share link to the personal file
-  // (native-cli-shared-state.ts); the rewrite must rename over the REAL file,
+  // (cli-account-homes.ts); the rewrite must rename over the REAL file,
   // or the link would be replaced by a private fork of the history.
   const target = await fs.realpath(path).catch(() => path);
   const temp = `${target}.${process.pid}.${Date.now()}.tmp`;
@@ -923,7 +917,7 @@ export async function deleteWorkerSession(
   } else if (input.memoryScope === "codex-all") {
     const { memoriesRoot } = resolveCodexHomePaths(options.codexHome);
     // memories/ in a managed account is a share link to the personal store
-    // (native-cli-shared-state.ts); "delete all memories" means the ONE
+    // (cli-account-homes.ts); "delete all memories" means the ONE
     // shared store, so remove the real directory, not just the link — which
     // removeIfPresent would otherwise unlink and the next heal recreate.
     // Personal homes reject a symlinked memories/ upstream, so realpath only

@@ -18,14 +18,19 @@
  * digest — can read the latest runs without taking `runs` as a dependency.
  */
 import React, { useEffect, useRef, useState } from "react";
+import { leavesRunListUnchanged } from "@shared/live-events";
 import type { RunState } from "@shared/types";
 
 export function useGlobalRuns(booted: boolean): {
   runs: RunState[];
   runsRef: React.MutableRefObject<RunState[]>;
+  // True once the first list arrived. Until then an absent run id proves
+  // nothing, so the notification center must not call that run deleted.
+  loaded: boolean;
   refresh: () => Promise<void>;
 } {
   const [runs, setRuns] = useState<RunState[]>([]);
+  const [loaded, setLoaded] = useState(false);
 
   // Mirror the runs list through a ref so the window-focus digest can read the
   // latest runs without re-subscribing whenever the list changes.
@@ -39,6 +44,7 @@ export function useGlobalRuns(booted: boolean): {
     try {
       const next = await window.spark.orchestration.listRuns();
       setRuns(next);
+      setLoaded(true);
     } catch {
       /* Surface details elsewhere; this is opportunistic. */
     }
@@ -57,15 +63,16 @@ export function useGlobalRuns(booted: boolean): {
     // refresh once events stop arriving for this long.
     const RUN_REFRESH_DEBOUNCE_MS = 250;
     // Ceiling on how long a sustained stream may hold that trailing window
-    // open. A streaming backend emits chat.* deltas dozens of times a second,
-    // so events never fall 250 ms apart and a pure trailing debounce starved:
+    // open. A busy run (tool calls and results, worker chatter) can keep
+    // events under 250 ms apart, and a pure trailing debounce starved:
     // the cockpit's fleet list froze for the whole turn and only caught up
     // once the run went quiet. Past this age the pending refresh fires anyway.
     const RUN_REFRESH_MAX_WAIT_MS = 1000;
     let refreshTimer: number | null = null;
     let pendingSince = 0;
 
-    const off = window.spark.orchestration.onEvent(() => {
+    const off = window.spark.orchestration.onEvent((event) => {
+      if (leavesRunListUnchanged(event)) return;
       const now = Date.now();
       if (refreshTimer === null) {
         pendingSince = now;
@@ -89,5 +96,5 @@ export function useGlobalRuns(booted: boolean): {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [booted]);
 
-  return { runs, runsRef, refresh };
+  return { runs, runsRef, loaded, refresh };
 }

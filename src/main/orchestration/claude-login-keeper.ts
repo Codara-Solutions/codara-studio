@@ -294,6 +294,30 @@ export async function renewClaudeLoginForCora(
 let keeperTimer: NodeJS.Timeout | null = null;
 let keeperDeps: ClaudeLoginKeeperDeps | null = null;
 let keeperRun: Promise<ClaudeLoginKeeperOutcome> | null = null;
+let foreignLoginHandler: (() => Promise<void>) | null = null;
+let foreignLoginRun: Promise<void> | null = null;
+
+/**
+ * What a pass does with a "foreign" live login. By default nothing: the
+ * login a terminal `/login` put in the slot is left alone. While plain
+ * `claude` follows Codara, claude-follow installs a handler that adopts it
+ * as an account of its own (claude-follow/login-adoption.ts).
+ */
+export function setClaudeForeignLoginHandler(handler: (() => Promise<void>) | null): void {
+  foreignLoginHandler = handler;
+}
+
+function onForeignLogin(deps: ClaudeLoginKeeperDeps): void {
+  const handler = foreignLoginHandler;
+  if (!handler || foreignLoginRun) return;
+  foreignLoginRun = handler()
+    .catch((error: unknown) => {
+      deps.log?.(`[accounts] a terminal sign-in could not be added: ${firstLine(error)}`);
+    })
+    .finally(() => {
+      foreignLoginRun = null;
+    });
+}
 
 /** The running keeper's dependencies, or null before Studio started it. */
 export function claudeLoginKeeperDeps(): ClaudeLoginKeeperDeps | null {
@@ -305,6 +329,10 @@ export function nudgeClaudeLoginKeeper(): Promise<ClaudeLoginKeeperOutcome | nul
   const deps = keeperDeps;
   if (!deps) return Promise.resolve(null);
   keeperRun ??= refreshLiveClaudeLoginIfDue(deps)
+    .then((outcome) => {
+      if (outcome === "foreign") onForeignLogin(deps);
+      return outcome;
+    })
     .catch((error: unknown): ClaudeLoginKeeperOutcome => {
       deps.log?.(
         `[accounts] the Claude login keeper failed: ${error instanceof Error ? error.message : String(error)}`,

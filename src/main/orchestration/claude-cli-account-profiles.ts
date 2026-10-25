@@ -18,7 +18,8 @@ import {
   normalizeClaudeCliProfileId,
   type ClaudeCliProfileId,
 } from "./claude-cli-profile-ids";
-import { readClaudeProfileLogin } from "./claude-cli-live-login";
+import { claudeLiveConfigDir, readClaudeProfileLogin } from "./claude-cli-live-login";
+import { readSystemLogin } from "./system-cli-login";
 
 export {
   CLAUDE_CLI_ACCOUNTS_DIRECTORY,
@@ -765,12 +766,18 @@ export async function claudeCredentialAuthChecker(
   input: Readonly<ClaudeCliAuthCheckInput>,
   options: ClaudeCredentialAuthCheckerOptions = {},
 ): Promise<ClaudeCliAuthCheckResult> {
+  if (!input.managed) {
+    // The System login: who it is and whether it is signed in, never its token.
+    const system = await readSystemLogin("anthropic", {
+      env: input.configDirEnv ? { CLAUDE_CONFIG_DIR: input.configDirEnv } : {},
+      homeDir: dirname(resolve(input.configDir)),
+    }).catch(() => null);
+    return system?.signedIn
+      ? { connected: true, expiresAt: null, canRefresh: false }
+      : { connected: false, reason: system ? "missing" : "unavailable" };
+  }
   const read = await readClaudeProfileLogin(
-    {
-      rootDir: input.rootDir,
-      personalConfigDir: input.configDir,
-      personalConfigDirEnv: input.configDirEnv,
-    },
+    { rootDir: input.rootDir, liveConfigDir: input.configDir },
     input.profileId,
     options.fileOnly ? { fileOnly: true } : {},
   );
@@ -785,10 +792,10 @@ export async function claudeCredentialAuthChecker(
     };
   }
   if (!read.live) return { connected: false, reason: "missing" };
-  const fallback =
-    options.liveFallback === undefined
-      ? (probe: Readonly<ClaudeCliAuthCheckInput>) => defaultClaudeCliAuthChecker(probe)
-      : options.liveFallback;
+  // A managed account is signed in only through its OAuth login; there is no
+  // API-key helper to ask about inside Codara's own slot unless a caller
+  // passes one.
+  const fallback = options.liveFallback ?? null;
   if (!fallback) return { connected: false, reason: "missing" };
   const now = options.now?.() ?? Date.now();
   const cached = liveFallbackCache.get(input.configDir);
@@ -801,19 +808,22 @@ export async function claudeCredentialAuthChecker(
 }
 
 /**
- * The Claude account registry. Every profile, Account 1 included, is a
- * login rather than a directory: terminals always run in the user's own
- * Claude home, the live profile's login sits in that home's credential
- * store, and every other profile's login waits in its vault (see
- * claude-cli-live-login.ts). A managed profile keeps a directory under the
- * account root to hold that vault.
+ * The Claude account registry. A managed profile is a login rather than a
+ * directory: terminals on any managed account run in Codara's one live
+ * slot, the live profile's login sits in that slot's credential store, and
+ * every other profile's login waits in its vault (see
+ * claude-cli-live-login.ts). The synthetic `personal` profile is the System
+ * login, read for status and identity only.
  */
 export class ClaudeCliAccountProfileStore {
   readonly rootDir: string;
   readonly accountsDir: string;
   readonly filePath: string;
+  /** The System login's home, read for identity only. */
   readonly personalConfigDir: string;
   readonly personalConfigDirEnv: string | null;
+  /** Codara's live slot: CLAUDE_CONFIG_DIR of every launch on a managed account. */
+  readonly liveConfigDir: string;
   private readonly idFactory: () => string;
   private readonly now: () => Date;
   private readonly authChecker: ClaudeCliAuthChecker;
@@ -853,18 +863,13 @@ export class ClaudeCliAccountProfileStore {
         this.personalConfigDirEnv ||
         defaultPersonalClaudeConfigDir(),
     );
+    this.liveConfigDir = claudeLiveConfigDir(this.rootDir);
     this.idFactory = options.idFactory ?? randomUUID;
     this.now = options.now ?? (() => new Date());
     this.leases = options.leases;
     this.authChecker =
       options.authChecker ??
-      ((input) =>
-        claudeCredentialAuthChecker(input, {
-          liveFallback: (probe) =>
-            defaultClaudeCliAuthChecker(probe, {
-              claudeExecutable: options.claudeExecutable,
-            }),
-        }));
+      ((input) => claudeCredentialAuthChecker(input));
   }
 
   private checkInput(profileId: ClaudeCliProfileId, managed: boolean): ClaudeCliAuthCheckInput {
@@ -872,8 +877,8 @@ export class ClaudeCliAccountProfileStore {
       profileId,
       managed,
       rootDir: this.rootDir,
-      configDir: this.personalConfigDir,
-      configDirEnv: this.personalConfigDirEnv,
+      configDir: managed ? this.liveConfigDir : this.personalConfigDir,
+      configDirEnv: managed ? this.liveConfigDir : this.personalConfigDirEnv,
     };
   }
 
@@ -951,7 +956,7 @@ export class ClaudeCliAccountProfileStore {
         label: string;
         managed: boolean;
       }> = [
-        { id: CLAUDE_CLI_PERSONAL_PROFILE_ID, label: "Account 1", managed: false },
+        { id: CLAUDE_CLI_PERSONAL_PROFILE_ID, label: "Claude Code login", managed: false },
         ...snapshot.profiles.map((profile) => ({
           id: profile.id,
           label: profile.label,
@@ -1128,7 +1133,7 @@ export class ClaudeCliAccountProfileStore {
           ? snapshot.defaultProfileId
           : CLAUDE_CLI_PERSONAL_PROFILE_ID
         : normalizeClaudeCliProfileId(input.profileId);
-    let label = "Account 1";
+    let label = "Claude Code login";
     let managed = false;
     if (profileId !== CLAUDE_CLI_PERSONAL_PROFILE_ID) {
       const profile = snapshot.profiles.find((entry) => entry.id === profileId);
@@ -1146,8 +1151,8 @@ export class ClaudeCliAccountProfileStore {
       profileId,
       label,
       managed,
-      configDir: this.personalConfigDir,
-      configDirEnv: this.personalConfigDirEnv,
+      configDir: managed ? this.liveConfigDir : this.personalConfigDir,
+      configDirEnv: managed ? this.liveConfigDir : this.personalConfigDirEnv,
       connected: status.connected === true,
     };
   }

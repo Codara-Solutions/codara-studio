@@ -31,12 +31,12 @@ async function main() {
     sendInputEvent: event => events.push(event),
     debugger: { on() {}, isAttached: () => true, sendCommand: async (...args) => commands.push(args) },
   };
-  const out = await esbuild.build({ entryPoints: [path.join(__dirname, '../src/main/preview-input.ts')], bundle: true, write: false, platform: 'node', format: 'cjs', external: ['electron', './preview-bridge', './main-window-trust'] });
+  const out = await esbuild.build({ entryPoints: [path.join(__dirname, '../src/main/preview-input.ts')], bundle: true, write: false, platform: 'node', format: 'cjs', external: ['electron', './preview-bridge', '../preview-bridge', './main-window-trust', '../main-window-trust'] });
   const mod = { exports: {} };
   new Function('module', 'exports', 'require', out.outputFiles[0].text)(mod, mod.exports, name => {
     if (name === 'electron') return { ipcMain: { on() {} }, webContents: { fromId: () => wc } };
-    if (name === './main-window-trust') return { isTrustedPreviewGuest: () => true, isTrustedOnSender: () => true };
-    if (name === './preview-bridge') return { requestPreviewOp: async (op, params) => {
+    if (name === './main-window-trust' || name === '../main-window-trust') return { isTrustedPreviewGuest: () => true, isTrustedOnSender: () => true, onTrustedPreviewGuestAttached: () => () => {} };
+    if (name === './preview-bridge' || name === '../preview-bridge') return { requestPreviewOp: async (op, params) => {
       requests.push({ op, params }); return { webContentsId: 7, tabId: 'tab-a', viewport: { width: 100, height: 100 }, devicePixelRatio: 1 };
     } };
     throw new Error(`unexpected dependency ${name}`);

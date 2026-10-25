@@ -154,6 +154,10 @@ test("first-run setup guides installation, sign-in, a workspace, and the live st
     await expect(
       page.getByRole("button", { name: "Sign in with ChatGPT" }),
     ).toBeEnabled();
+    // One plain line says a plain `claude` elsewhere follows the Active account.
+    await expect(
+      page.getByText(/in your other terminals also uses the Active Claude account\. You can turn this off in Settings, Accounts\./),
+    ).toBeVisible();
     await page.screenshot({ path: join(screenshotDir, "accounts.png") });
     await page.getByRole("button", { name: "Sign in with ChatGPT" }).click();
     await expect(

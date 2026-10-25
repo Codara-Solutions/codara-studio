@@ -13,9 +13,12 @@ import type {
   ShellInfo,
 } from "@shared/types";
 import { isRemotePath, parseRemotePath } from "@shared/remote";
+import { bracketedPaste } from "../shared/terminal-text";
 import {
   restoreUserZdotdir,
+  sanitizeAppImageChildEnv,
   sanitizeElectronViteDevEnv,
+  sanitizeHostTerminalEnv,
   sanitizeNestedAgentEnv,
   sanitizeNpmRunScriptEnv,
 } from "./env-sanitize";
@@ -51,8 +54,16 @@ import {
   resolveNewNativeClaudeProfile,
 } from "./orchestration/native-claude-profile-runtime";
 import { personalCliShellHomeEnvironment, resolvePlainShellAccountSelectors } from "./orchestration/native-cli-shell-defaults";
-import { ensureCodexProjectTrust } from "./orchestration/codex-trust";
-import { installClaudeHooks } from "./hook-installer";
+import {
+  agentArgsDir,
+  claudeLaunchArgs,
+  codexLaunchArgs,
+  integrationFilesReady,
+  plainAgentLaunchArgs,
+} from "./agent-launch-integration";
+import { mintPaneSocketCapability } from "./agent-socket-capabilities";
+import { paneHelperBinDir, withPaneHelperOnPath } from "./pane-helper";
+import { continueForegroundJob } from "./terminal-foreground";
 import {
   beginPosixPtyTreeTeardown,
   capturePosixPtyTree,
@@ -179,13 +190,26 @@ interface Session {
   // SIGHUP, which surfaces as exitCode 0 + signal 1, so exit status alone can
   // never make that distinction.
   sanctioned: boolean;
+  // Set by hibernate() before an idle agent pane is stopped to save memory.
+  // Carried out as PtyExitInfo.hibernated so the renderer paints a sleeping
+  // pane that resumes on return instead of an exit line.
+  hibernated?: boolean;
   nativeCodexProfileId?: string;
   releaseNativeCodexProfileLease?: () => void;
   nativeClaudeProfileId?: string;
   releaseNativeClaudeProfileLease?: () => void;
   nativeGrokProfileId?: string;
   releaseNativeGrokProfileLease?: () => void;
+  // A `claude` or `codex` started here carries Codara's per-launch flags:
+  // Codara started it, or the pane's shell defines the wrapper functions.
+  agentFlagsReachCli: boolean;
+  // Revokes the pane's own socket token (SPARK_PANE_TOKEN) once its process
+  // is gone, so a leaked copy cannot act for a pane that no longer exists.
+  revokePaneAccess?: () => void;
 }
+
+// The shells whose bundled integration wraps a typed `claude` / `codex`.
+const AGENT_WRAPPING_FAMILIES: ReadonlySet<ShellInfo["family"]> = new Set(["bash", "zsh", "pwsh", "powershell"]);
 
 const sessions = new Map<string, Session>();
 /** Session ids between native account resolution and `sessions.set`. */
@@ -220,6 +244,12 @@ function releaseNativeProfileSessionLeases(session: Session): void {
   if (releaseGrok && session.nativeGrokProfileId) {
     notifyNativeGrokProfileLeaseReleased(session.nativeGrokProfileId);
   }
+}
+
+function revokePaneAccess(session: Session): void {
+  const revoke = session.revokePaneAccess;
+  session.revokePaneAccess = undefined;
+  revoke?.();
 }
 // Listeners for "session id became available" — orchestration uses this to
 // wait until the renderer-side TerminalView has called pty:spawn before we
@@ -374,6 +404,8 @@ const AGENT_SOCKET_ENV_KEYS = [
   "SPARK_AGENT_CAPABILITY",
 ] as const;
 
+const PANE_SOCKET_ENV_KEYS = ["SPARK_PANE_SOCKET", "SPARK_PANE_TOKEN"] as const;
+
 // Some shells run user-profile work that writes shared on-disk caches at
 // startup (Terminal-Icons calls Export-Clixml on its theme files every time
 // `Import-Module Terminal-Icons` runs, in $PROFILE). Spawning two pwsh
@@ -459,13 +491,15 @@ export interface SpawnOptions {
   /** Main-process-only lease ownership transferred to the spawned session. */
   releaseNativeClaudeProfileLease?: () => void;
   /**
-   * Main-process-only Active-account home for a PLAIN shell (no Studio
-   * startup command), so a hand-typed `grok` follows the account switch.
-   * Claude and Codex need none: each switches the login inside one home.
-   * Environment-only: unlike the native*ProfileId fields this takes no lease
-   * and is never persisted; a restored shell re-resolves whatever account is
-   * Active at restore time. Set by spawn() itself, never accepted over IPC.
+   * Main-process-only Active-account homes for a PLAIN shell (no Studio
+   * startup command), so a hand-typed `claude`, `codex` or `grok` runs as
+   * the Active account. Absent for a CLI on the System login.
+   * Environment-only: unlike the native*ProfileId fields these take no lease
+   * and are never persisted; a restored shell re-resolves whatever account
+   * is Active at restore time. Set by spawn() itself, never accepted over IPC.
    */
+  plainShellClaudeConfigDir?: string;
+  plainShellCodexHome?: string;
   plainShellGrokHome?: string;
   /**
    * A plain user shell exports SPARK_FOLLOW_ACTIVE_ACCOUNT=1 so the bundled
@@ -576,30 +610,8 @@ export async function spawn(
     if (!target) {
       throw new Error(`mirror attach: no pty session '${opts.id}'`);
     }
-    if (
-      opts.nativeCodexProfileId !== undefined &&
-      opts.nativeCodexProfileId !== target.nativeCodexProfileId
-    ) {
-      throw new Error(
-        `mirror attach: pty session '${opts.id}' is pinned to another native Codex account`,
-      );
-    }
-    if (
-      opts.nativeClaudeProfileId !== undefined &&
-      opts.nativeClaudeProfileId !== target.nativeClaudeProfileId
-    ) {
-      throw new Error(
-        `mirror attach: pty session '${opts.id}' is pinned to another native Claude account`,
-      );
-    }
-    if (
-      opts.nativeGrokProfileId !== undefined &&
-      opts.nativeGrokProfileId !== target.nativeGrokProfileId
-    ) {
-      throw new Error(
-        `mirror attach: pty session '${opts.id}' is pinned to another native Grok account`,
-      );
-    }
+    // Like any attach, a mirror reports the session's own accounts whatever
+    // its caller recorded (see spawnWithSessionLock).
     // attached: the session pre-existed, so an unhandled startupCommand here
     // means "a live shell/TUI already owns this pty", not "shell can't take
     // startup commands" — callers use the distinction to decide whether a
@@ -653,30 +665,14 @@ async function spawnWithSessionLock(
 
   const existing = sessions.get(opts.id);
   if (existing) {
-    if (
-      opts.nativeCodexProfileId !== undefined &&
-      opts.nativeCodexProfileId !== existing.nativeCodexProfileId
-    ) {
-      throw new Error(
-        `pty session '${opts.id}' is already pinned to another native Codex account`,
-      );
-    }
-    if (
-      opts.nativeClaudeProfileId !== undefined &&
-      opts.nativeClaudeProfileId !== existing.nativeClaudeProfileId
-    ) {
-      throw new Error(
-        `pty session '${opts.id}' is already pinned to another native Claude account`,
-      );
-    }
-    if (
-      opts.nativeGrokProfileId !== undefined &&
-      opts.nativeGrokProfileId !== existing.nativeGrokProfileId
-    ) {
-      throw new Error(
-        `pty session '${opts.id}' is already pinned to another native Grok account`,
-      );
-    }
+    // A live process keeps the account it started with, and an attach
+    // reports that account whatever the caller recorded. The two diverge
+    // legitimately: a Claude restore resolves to the Active account rather
+    // than the one it names, a capture records whatever is Active when it
+    // runs, and a plain shell holds no account at all. An attach runs no
+    // startup command and takes no lease, so nothing starts on the requested
+    // account; refusing it left the pane dead over a running process. A
+    // caller that needs another account kills this session first.
     // A late-attaching webContents (e.g. ChatPanel's backend-terminal tab
     // mounting after the cli-session already spawned the PTY) needs the
     // recent scrollback or it sees a blank xterm — historical bytes only
@@ -773,6 +769,9 @@ async function spawnWithSessionLock(
     return doSpawnRemote(opts);
   }
 
+  // The first panes after boot wait (bounded) for the per-launch files, so an
+  // early `claude` still reports to Codara.
+  await integrationFilesReady();
   let preparedOpts = opts;
   let resolvedStartup = opts.startupCommand;
   if (parsedStartup) {
@@ -780,7 +779,21 @@ async function spawnWithSessionLock(
     if (!binary) {
       throw new Error(`Cannot find ${parsedStartup.runtime}. Install its CLI, restart Codara, and try again.`);
     }
-    resolvedStartup = formatManualAgentStartup(parsedStartup, binary, opts.shell.family);
+    const [argv0, ...userArgs] = parsedStartup.childArgv;
+    // Codara's hooks, MCP server and Codex notify ride on this command line
+    // only. Codex also gets per-launch trust for the pane's folder: nobody can
+    // answer its trust prompt before Codara's autorun starts.
+    const injected =
+      parsedStartup.runtime === "claude"
+        ? claudeLaunchArgs({ userArgs })
+        : parsedStartup.runtime === "codex"
+          ? codexLaunchArgs({ userArgs, trustCwd: opts.cwd })
+          : plainAgentLaunchArgs("grok", { userArgs });
+    resolvedStartup = formatManualAgentStartup(
+      { ...parsedStartup, childArgv: [argv0, ...injected, ...userArgs] },
+      binary,
+      opts.shell.family,
+    );
     const pathKey = process.platform === "win32" ? "Path" : "PATH";
     const launchEnv = { ...opts.shell.env, ...opts.env };
     const inheritedPath = Object.entries(launchEnv).find(([key]) => key.toLowerCase() === "path")?.[1];
@@ -806,9 +819,6 @@ async function spawnWithSessionLock(
       execution.profileId,
       `terminal:${opts.id}`,
     );
-    await ensureCodexProjectTrust(opts.cwd, nativeCodexHome).catch(
-      () => undefined,
-    );
     preparedOpts = {
       ...preparedOpts,
       nativeCodexProfileId: execution.profileId,
@@ -828,11 +838,6 @@ async function spawnWithSessionLock(
       execution.profileId,
       `terminal:${opts.id}`,
     );
-    const claudeStateDir =
-      execution.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
-    await installClaudeHooks({
-      settingsPath: join(claudeStateDir, "settings.json"),
-    }).catch(() => undefined);
     preparedOpts = {
       ...preparedOpts,
       nativeClaudeProfileId: execution.profileId,
@@ -890,6 +895,8 @@ async function spawnWithSessionLock(
     preparedOpts = {
       ...preparedOpts,
       plainShellFollowsActiveAccount: true,
+      ...(selectors?.claudeConfigDir ? { plainShellClaudeConfigDir: selectors.claudeConfigDir } : {}),
+      ...(selectors?.codexHome ? { plainShellCodexHome: selectors.codexHome } : {}),
       ...(selectors?.grokHome ? { plainShellGrokHome: selectors.grokHome } : {}),
     };
   } else if (
@@ -1035,6 +1042,7 @@ async function doSpawnRemote(
     lastInputAt: createdAt,
     lastOutputAt: createdAt,
     lastAttachAt: createdAt,
+    agentFlagsReachCli: false,
     cwd: opts.cwd,
     pty: handle,
     webContents: opts.webContents ?? stranded?.webContents ?? null,
@@ -1088,7 +1096,7 @@ async function doSpawnRemote(
       s.exited = true;
       flushDataNow(s);
       if (s.webContents && !s.webContents.isDestroyed()) {
-        s.webContents.send(s.exitChannel, { exitCode, signal, sanctioned: s.sanctioned });
+        s.webContents.send(s.exitChannel, exitPayload(s, exitCode, signal));
       }
       if (!strandedBindings.has(opts.id)) {
         stashWebContents(opts.id, s);
@@ -1105,7 +1113,7 @@ async function doSpawnRemote(
     exitWaiters.delete(opts.id);
     for (const w of waiters) {
       try {
-        w({ exitCode, signal, sanctioned: s.sanctioned });
+        w(exitPayload(s, exitCode, signal));
       } catch {
         /* ignore */
       }
@@ -1263,12 +1271,14 @@ function doSpawn(
   // CC 2.1.201 then writes NO session JSONL, killing the chat backends'
   // transcript tailing and timing out every turn. See env-sanitize.ts.
   sanitizeNestedAgentEnv(env);
-  // A dev app (`npm run dev`) and a Studio started from another Studio's pane
-  // both carry their launcher's wiring; the shell must look like one opened
-  // from a plain terminal. See env-sanitize.ts.
+  // A dev app (`npm run dev`), a Studio started from another Studio's pane and
+  // any Studio started from a terminal carry their launcher's wiring and pane
+  // address; the shell must look like a fresh terminal of Codara's own. See
+  // env-sanitize.ts.
   sanitizeElectronViteDevEnv(env);
   sanitizeNpmRunScriptEnv(env);
   restoreUserZdotdir(env);
+  sanitizeHostTerminalEnv(env);
   // Ink/React-CLI (Claude Code, Codex) inspects these to pick interactive/colour
   // mode. Inheriting CI=true or NO_COLOR from a parent shell silently disables
   // ANSI cursor sequences and produces visually corrupt redraws.
@@ -1288,6 +1298,9 @@ function doSpawn(
   // cache is warmed in src/main/index.ts; on a cold call we just see the
   // process.env PATH fallback, which is no worse than today.
   injectEnrichedPath(env);
+  // After the PATH above: the enriched PATH keeps the process's own entries,
+  // AppRun's mount among them. See env-sanitize.ts.
+  sanitizeAppImageChildEnv(env);
 
   // Per-shell env overrides (e.g. integrated strip shells set ZDOTDIR /
   // SPARK_USER_ZDOTDIR so the bundled zshrc loads the user's existing
@@ -1360,6 +1373,11 @@ function doSpawn(
   // Lets the MCP server place the terminals an agent opens beside its own
   // pane (terminal.create callerPaneId).
   env.SPARK_AGENT_PANE_ID = opts.id;
+  // The pane's `claude` and `codex` shell functions read Codara's per-launch
+  // flags from this folder, replacing one inherited from another Studio's
+  // pane. Exported even while the boot pass is still writing the files: the
+  // shell defines its functions only when the variable is set at its start.
+  env.SPARK_AGENT_ARGS_DIR = agentArgsDir();
   if (opts.nativeCodexHome) {
     const selectedEnv = buildCodexCliSharedEnvironment(env, opts.nativeCodexHome);
     for (const key of Object.keys(env)) delete env[key];
@@ -1388,8 +1406,17 @@ function doSpawn(
       if (typeof value === "string") env[key] = value;
     }
   }
-  if (opts.plainShellGrokHome) {
-    const selectedEnv = buildGrokCliProfileEnvironment(env, opts.plainShellGrokHome);
+  const plainShellSelections: Array<(base: NodeJS.ProcessEnv) => NodeJS.ProcessEnv> = [];
+  const claudeConfigDir = opts.plainShellClaudeConfigDir;
+  if (claudeConfigDir) {
+    plainShellSelections.push((base) => buildClaudeCliProfileEnvironment(base, claudeConfigDir));
+  }
+  const codexHome = opts.plainShellCodexHome;
+  if (codexHome) plainShellSelections.push((base) => buildCodexCliSharedEnvironment(base, codexHome));
+  const grokHome = opts.plainShellGrokHome;
+  if (grokHome) plainShellSelections.push((base) => buildGrokCliProfileEnvironment(base, grokHome));
+  for (const select of plainShellSelections) {
+    const selectedEnv = select(env);
     for (const key of Object.keys(env)) delete env[key];
     for (const [key, value] of Object.entries(selectedEnv)) {
       if (typeof value === "string") env[key] = value;
@@ -1398,6 +1425,17 @@ function doSpawn(
   if (opts.plainShellFollowsActiveAccount || opts.agentShellFollowsActiveAccount) {
     env.SPARK_FOLLOW_ACTIVE_ACCOUNT = "1";
     Object.assign(env, personalCliShellHomeEnvironment());
+  }
+
+  // The pane's own socket credential, scoped to opening terminals over this
+  // pane or in a new tab beside it (`codara-pane`). Set after the account
+  // selections above, which rebuild the environment. An inherited pair names
+  // another Studio's pane and never survives.
+  for (const key of PANE_SOCKET_ENV_KEYS) delete env[key];
+  const paneAccess = mintPaneSocketCapability(opts.id);
+  if (paneAccess) {
+    Object.assign(env, paneAccess.environment);
+    withPaneHelperOnPath(env, paneHelperBinDir());
   }
 
   const cwd =
@@ -1425,19 +1463,25 @@ function doSpawn(
   // encoding:null asks node-pty for raw Buffers so we can preserve byte
   // boundaries for ANSI/UTF-8 across IPC. xterm.js's parser/decoder reassembles
   // partial sequences across writes when fed Uint8Array.
-  const pty = nodePty.spawn(opts.shell.exe, shellArgs, {
-    name: "xterm-256color",
-    cols,
-    rows,
-    cwd,
-    env,
-    encoding: null as unknown as string,
-    useConpty: process.platform === "win32" ? true : undefined,
-    // Ship node-pty's own conpty.dll instead of whatever the host Windows
-    // build carries, so ConPTY behaviour and throughput do not vary by OS
-    // build (older builds are markedly slower and buggier under floods).
-    useConptyDll: process.platform === "win32" ? true : undefined,
-  } as nodePty.IPtyForkOptions);
+  let pty: nodePty.IPty;
+  try {
+    pty = nodePty.spawn(opts.shell.exe, shellArgs, {
+      name: "xterm-256color",
+      cols,
+      rows,
+      cwd,
+      env,
+      encoding: null as unknown as string,
+      useConpty: process.platform === "win32" ? true : undefined,
+      // Ship node-pty's own conpty.dll instead of whatever the host Windows
+      // build carries, so ConPTY behaviour and throughput do not vary by OS
+      // build (older builds are markedly slower and buggier under floods).
+      useConptyDll: process.platform === "win32" ? true : undefined,
+    } as nodePty.IPtyForkOptions);
+  } catch (err) {
+    paneAccess?.revoke();
+    throw err;
+  }
 
   // If a renderer's xterm was bound to this sessionId on a just-killed PTY
   // (mode-flip respawn), re-adopt that webContents so the UI follows the new
@@ -1453,6 +1497,7 @@ function doSpawn(
     lastInputAt: createdAt,
     lastOutputAt: createdAt,
     lastAttachAt: createdAt,
+    agentFlagsReachCli: AGENT_WRAPPING_FAMILIES.has(opts.shell.family) || Boolean(opts.startupCommand),
     cwd,
     pty,
     webContents: opts.webContents ?? stranded?.webContents ?? null,
@@ -1486,6 +1531,7 @@ function doSpawn(
     releaseNativeClaudeProfileLease: opts.releaseNativeClaudeProfileLease,
     nativeGrokProfileId: opts.nativeGrokProfileId,
     releaseNativeGrokProfileLease: opts.releaseNativeGrokProfileLease,
+    revokePaneAccess: paneAccess?.revoke,
   };
 
   // Capture the local session reference so we can identity-gate this closure.
@@ -1546,6 +1592,7 @@ function doSpawn(
       }
       exitWaiters.delete(opts.id);
       releaseNativeProfileSessionLeases(s);
+      revokePaneAccess(s);
       return;
     }
     if (s) {
@@ -1553,7 +1600,7 @@ function doSpawn(
       s.exited = true;
       flushDataNow(s);
       if (s.webContents && !s.webContents.isDestroyed()) {
-        s.webContents.send(s.exitChannel, { exitCode, signal, sanctioned: s.sanctioned });
+        s.webContents.send(s.exitChannel, exitPayload(s, exitCode, signal));
       }
       // Stash for a potential same-id respawn (mode-flip flow). If the kill
       // path already stashed, that wins — overwriting with stale tail would
@@ -1566,6 +1613,7 @@ function doSpawn(
     }
     if (current === session) sessions.delete(opts.id);
     releaseNativeProfileSessionLeases(s);
+    revokePaneAccess(s);
     const t = pendingKills.get(opts.id);
     if (t) {
       clearTimeout(t);
@@ -1575,7 +1623,7 @@ function doSpawn(
     exitWaiters.delete(opts.id);
     for (const w of waiters) {
       try {
-        w({ exitCode, signal, sanctioned: s.sanctioned });
+        w(exitPayload(s, exitCode, signal));
       } catch {
         /* ignore */
       }
@@ -2087,6 +2135,15 @@ export function killIfGeneration(
   return true;
 }
 
+/**
+ * Whether a Codex started in this pane gets Codara's notify program. False
+ * for a remote pane and for a typed command in a shell Codara does not wrap
+ * (fish, cmd, sh), where only the screen can tell a turn ended.
+ */
+export function sessionAgentFlagsReachCli(id: string): boolean {
+  return sessions.get(id)?.agentFlagsReachCli === true;
+}
+
 export function nativeCodexProfileId(id: string): string | undefined {
   return sessions.get(id)?.nativeCodexProfileId;
 }
@@ -2145,15 +2202,13 @@ export function inject(
 ): void {
   if (!sessions.has(id)) return;
   if (opts?.stashDraft) write(id, "\x13");
-  // ConPTY corrupts NULs, so strip them. Also strip any bracketed-paste
-  // start/end markers (CSI 200~ / CSI 201~) the payload itself contains: this
-  // helper OWNS the paste wrap, so a marker inside `text` can only break out of
-  // it — a stray CSI 201~ would end the paste early and make the following bytes
-  // (a CR, raw CSI) execute as live keystrokes, defeating submit:false and
-  // letting injected content force-submit. Neutering them keeps the wrap intact
-  // so the single trailing CR below is the only way to submit.
-  const sanitized = text.replace(/\x00/g, "").replace(/\x1b\[20[01]~/g, "");
-  write(id, `\x1b[200~${sanitized}\x1b[201~`);
+  // This helper OWNS the paste wrap, so a marker inside `text` can only break
+  // out of it: a stray CSI 201~ would end the paste early and make the
+  // following bytes (a CR, raw CSI) execute as live keystrokes, defeating
+  // submit:false and letting injected content force-submit. bracketedPaste
+  // removes every marker (and NULs, which ConPTY corrupts), so the single
+  // trailing CR below is the only way to submit.
+  write(id, bracketedPaste(text));
   const submit = opts?.submit ?? true;
   if (submit) write(id, "\r");
 }
@@ -2164,6 +2219,9 @@ function requestTerminalRedraw(s: Session): void {
   if (s.disposed || s.exited || terminalRedraws.has(s)) return;
   // A raw byte tail may contain only incremental animation frames. Repainting
   // xterm cannot reconstruct the missing cells; the child must redraw them.
+  // SIGCONT covers a busy TUI that reads the size only after the pulse below
+  // has been undone; the pulse covers programs that ignore SIGCONT.
+  void continueForegroundJob(s.pty.pid);
   // A real size change triggers SIGWINCH even when the pane's size is stable.
   try {
     s.pty.resize(s.cols > 1 ? s.cols - 1 : 2, s.rows);
@@ -2374,6 +2432,12 @@ function markSanctioned(id: string): void {
   if (s) s.sanctioned = true;
 }
 
+function exitPayload(s: Session, exitCode: number, signal: number | undefined): PtyExitInfo {
+  return s.hibernated
+    ? { exitCode, signal, sanctioned: s.sanctioned, hibernated: true }
+    : { exitCode, signal, sanctioned: s.sanctioned };
+}
+
 // `sanctioned` marks a Codara-initiated teardown (see PtyExitInfo). Renderer
 // pane closes leave it unset: closing a worker's pane kills a worker Cora did
 // not stop, which is exactly the unsanctioned death the chip must name.
@@ -2438,6 +2502,33 @@ export function disposeUnderCwd(dir: string): number {
   return killed;
 }
 
+// The sessions disposeUnderCwd would kill, without killing them.
+export function sessionsUnderCwd(dir: string): string[] {
+  const target = normalizeCwd(dir);
+  if (!target) return [];
+  const ids: string[] = [];
+  for (const [id, s] of sessions) {
+    const c = normalizeCwd(s.cwd);
+    if (c === target || c.startsWith(`${target}/`)) ids.push(id);
+  }
+  return ids;
+}
+
+// The directory a session was spawned in. The shell may have moved since.
+export function sessionCwd(id: string): string | null {
+  return sessions.get(id)?.cwd ?? null;
+}
+
+// Pids of every live local session's shell.
+export function sessionPids(): number[] {
+  const pids: number[] = [];
+  for (const session of sessions.values()) {
+    const pid = session.pty.pid;
+    if (typeof pid === "number" && pid > 0) pids.push(pid);
+  }
+  return pids;
+}
+
 export function detachForWebContents(wc: WebContents): void {
   for (const s of sessions.values()) {
     if (s.webContents !== wc) continue;
@@ -2500,6 +2591,7 @@ export function sweepDeadSessions(): string[] {
     if (!strandedBindings.has(id)) stashWebContents(id, s);
     if (s.flushTimer) clearTimeout(s.flushTimer);
     releaseNativeProfileSessionLeases(s);
+    revokePaneAccess(s);
     sessions.delete(id);
     const waiters = exitWaiters.get(id) ?? [];
     exitWaiters.delete(id);
@@ -2615,6 +2707,7 @@ async function disposeSessionsGraceful(
     s.detachedBacklog = [];
     s.detachedBacklogBytes = 0;
     releaseNativeProfileSessionLeases(s);
+    revokePaneAccess(s);
     sessions.delete(id);
   }
   if (process.platform !== "win32") {
@@ -2725,6 +2818,92 @@ export async function disposeNativeCliRuntimeGraceful(
   return { closedSessionCount: ids.length };
 }
 
+/** What agent hibernation (src/main/agent-hibernation.ts) reads about a pane. */
+export interface HibernationSessionInfo {
+  generationId: string;
+  pid: number;
+  remote: boolean;
+  createdAt: number;
+  lastInputAt: number;
+  lastOutputAt: number;
+  // The pane's POSIX terminal (/dev/pts/N), null on Windows or when unknown.
+  ttyPath: string | null;
+}
+
+export function hibernationSessionInfo(id: string): HibernationSessionInfo | null {
+  const s = sessions.get(id);
+  if (!s || s.disposed || s.exitEmitted || pendingKills.has(id)) return null;
+  const ttyPath = (s.pty as { _pty?: unknown })._pty;
+  return {
+    generationId: s.generationId,
+    pid: s.pty.pid,
+    remote: s.pty.pid === 0 || isRemotePath(s.cwd),
+    createdAt: s.createdAt,
+    lastInputAt: s.lastInputAt,
+    lastOutputAt: s.lastOutputAt,
+    ttyPath: typeof ttyPath === "string" && /^\/dev\/(?:pts\/\d+|tty[\w.-]+)$/.test(ttyPath) ? ttyPath : null,
+  };
+}
+
+/**
+ * What a pane printed, for agent hibernation to keep while the pane sleeps:
+ * the stop drops the session with its tail and backlog. `tail` is the newest
+ * raw output (at most `maxBytes`, whole chunks), for a view that comes back
+ * with an empty xterm (a reloaded window), the same bytes a live pane's
+ * reattach replays. `unsent` is what a paused view (its xterm unmounted, see
+ * pause()) has not received yet, for a view that kept its own copy of the
+ * rest. Null when the session is gone.
+ */
+export function sleepOutput(
+  id: string,
+  maxBytes: number,
+): { tail: Buffer | null; unsent: Buffer | null } | null {
+  const s = sessions.get(id);
+  if (!s) return null;
+  const newest = (chunks: ReadonlyArray<Buffer | null>): Buffer | null => {
+    const kept: Buffer[] = [];
+    let bytes = 0;
+    for (let index = chunks.length - 1; index >= 0; index -= 1) {
+      const chunk = chunks[index];
+      if (!chunk) continue;
+      if (kept.length > 0 && bytes + chunk.length > maxBytes) break;
+      kept.unshift(chunk);
+      bytes += chunk.length;
+    }
+    return bytes > 0 ? Buffer.concat(kept, bytes) : null;
+  };
+  return {
+    tail: newest(s.tail.slice(s.tailHead)),
+    unsent: s.attached ? null : newest(s.detachedBacklog),
+  };
+}
+
+/**
+ * Stop one idle agent pane on Codara's behalf. Same graceful teardown as an
+ * account switch, so the CLI gets time to flush its transcript, but the exit
+ * carries `hibernated` and the renderer keeps the pane as a sleeping one.
+ * The generation fence refuses a pane that was respawned since it was judged.
+ */
+export async function hibernate(
+  id: string,
+  expectedGenerationId: string,
+  maxWaitMs = 3000,
+): Promise<boolean> {
+  const s = sessions.get(id);
+  if (
+    !s ||
+    s.generationId !== expectedGenerationId ||
+    s.disposed ||
+    s.exitEmitted ||
+    pendingKills.has(id)
+  ) {
+    return false;
+  }
+  s.hibernated = true;
+  await disposeSessionsGraceful([id], maxWaitMs);
+  return true;
+}
+
 export async function disposeAllGraceful(maxWaitMs = 1500): Promise<void> {
   // Preserve disposeAllGraceful's process-wide timer cleanup even if a stale
   // delayed-kill entry has outlived the session it originally belonged to.
@@ -2799,5 +2978,6 @@ function killNow(id: string): void {
   s.detachedBacklog = [];
   s.detachedBacklogBytes = 0;
   releaseNativeProfileSessionLeases(s);
+  revokePaneAccess(s);
   sessions.delete(id);
 }

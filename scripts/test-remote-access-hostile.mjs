@@ -29,6 +29,7 @@ import { createRequire } from "node:module";
 import { build } from "esbuild";
 
 const require = createRequire(import.meta.url);
+const { installFakeClock } = require("./fake-clock.cjs");
 const NoiseSecretStream = require("@hyperswarm/secret-stream");
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -193,6 +194,14 @@ function hostileSocket(port, bytes) {
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Resolve as soon as check() is true (polled every few ms), or after maxMs.
+// The caller still asserts the outcome; maxMs is only a generous upper bound
+// so the happy path does not sleep a fixed deadline.
+async function waitUntil(check, maxMs) {
+  const end = Date.now() + maxMs;
+  while (!check() && Date.now() < end) await wait(10);
+}
+
 // A legitimate client dial: Noise IK pinned to the computer's key, the same
 // handshake the phone and the test client perform.
 function noiseDial(port, keyPair, remotePublicKey) {
@@ -279,7 +288,7 @@ async function main() {
 
       // The survivors must die on the deadline rather than linger.
       const survivors = sockets.filter((s) => !s.closed);
-      await wait(HANDSHAKE_DEADLINE_MS + 2_000);
+      await waitUntil(() => survivors.every((s) => s.closed), HANDSHAKE_DEADLINE_MS + 2_000);
       const stillAliveAfterDeadline = survivors.filter((s) => !s.closed).length;
       check(
         "F1: a silent socket is destroyed on the handshake deadline",
@@ -614,6 +623,10 @@ async function main() {
     const nodeFs = require("node:fs");
     const realRename = nodeFs.promises.rename;
     const OLD_BOUNDED_WAIT_MS = 2_000;
+    // The stall is measured on a fake clock: the old code bounded the wait with
+    // a timer, and advancing the clock past it fires that timer exactly as a
+    // real sleep would. The rename is held by a promise, not by a timer.
+    const clock = installFakeClock();
 
     const home = mkdtempSync(join(tmpdir(), "codara-hostile-f4d-"));
     const deviceKey = Buffer.alloc(32, 11);
@@ -653,7 +666,7 @@ async function main() {
       // Wait well past the OLD bounded wait. The pre-fix revoke resolved at
       // the 2s timeout while the rename was still stalled; the fixed revoke
       // must still be waiting on the rename here.
-      await wait(OLD_BOUNDED_WAIT_MS + 700);
+      await clock.advance(OLD_BOUNDED_WAIT_MS + 700);
       check(
         "F4d: a revoke does not resolve while a rename is stalled past the old bounded wait",
         revokeSettled === false,
@@ -676,6 +689,7 @@ async function main() {
         new pairingModule.PairedDeviceStore(home).isAuthorized(deviceKey) === false,
       );
     } finally {
+      clock.uninstall();
       nodeFs.promises.rename = realRename;
       rmSync(home, { recursive: true, force: true });
     }
@@ -791,7 +805,8 @@ async function main() {
         service.sessionCountFor(clientKeyB64),
       );
 
-      await wait(900); // past the 700ms hello deadline
+      // Past the 700ms hello deadline: resolves as soon as the reaper has run.
+      await waitUntil(() => service.sessionCountFor(clientKeyB64) === 0, 5_000);
       check(
         "F5: unproven sessions are reaped once the hello deadline passes",
         service.sessionCountFor(clientKeyB64) === 0,
@@ -846,7 +861,7 @@ async function main() {
 
       // And they do not linger: within the IK-unauth deadline the budget
       // holders are reaped too, so nothing unauthorized is held for long.
-      await wait(HANDSHAKE_DEADLINE_MS);
+      await waitUntil(() => streams.every((s) => s.destroyed), HANDSHAKE_DEADLINE_MS);
       const stillOpenLater = streams.filter((s) => !s.destroyed).length;
       check(
         "F6: unauthorized pairing candidates do not linger past their deadline",
@@ -1180,6 +1195,10 @@ async function main() {
     process.exit(1);
   }
   console.log("all hostile-peer checks passed");
+  // Exit now: the service leaves a few un-cleared 10 s deadline timers (pairing
+  // frame, IK-unauthorized) behind the destroyed streams, and waiting for them
+  // would add ten idle seconds after the last check.
+  process.exit(0);
 }
 
 main().catch((err) => {

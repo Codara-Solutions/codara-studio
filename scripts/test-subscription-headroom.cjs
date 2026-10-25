@@ -49,7 +49,8 @@ const stubPlugin = {
     }));
     build.onLoad({ filter: /.*/, namespace: "stub" }, () => ({
       contents:
-        "export function inspectPiSubscriptionUsage() { return globalThis.__headroomUsageStub(); }",
+        "export function inspectPiSubscriptionUsage() { return globalThis.__headroomUsageStub(); }\n" +
+        "export function inspectLastKnownPiSubscriptionUsageProfiles(maxAgeMs) { return globalThis.__headroomLastKnownStub(maxAgeMs); }",
       loader: "js",
     }));
   },
@@ -125,6 +126,8 @@ async function main() {
     preferredRuntimeForHeadroom,
     rankProfilesForHeadroom,
     readSubscriptionHeadroomSummary,
+    readCachedSubscriptionHeadroomSummary,
+    CACHED_HEADROOM_MAX_AGE_MS,
     runtimeLimitReached,
     summarizeProfileHeadroom,
     summarizeProviderHeadroom,
@@ -452,6 +455,48 @@ async function main() {
   };
   check("a throwing usage read degrades to null", (await readSubscriptionHeadroomSummary()) === null);
 
+  // The manager-turn reader serves the last known usage and never waits on a
+  // vendor round trip: the live fetch below never settles.
+  let liveReads = 0;
+  let requestedMaxAge = null;
+  globalThis.__headroomUsageStub = () => {
+    liveReads += 1;
+    return new Promise(() => undefined);
+  };
+  globalThis.__headroomLastKnownStub = (maxAgeMs) => {
+    requestedMaxAge = maxAgeMs;
+    return [
+      profile("44444444-4444-4444-8444-444444444444", "anthropic", "Claude", true, "ok", [win("five_hour", "5-hour", 9)]),
+      profile("55555555-5555-4555-8555-555555555555", "openai-codex", "Codex", true, "ok", [win("primary", "5-hour", 70)]),
+    ];
+  };
+  let cachedTimer;
+  const cached = await Promise.race([
+    readCachedSubscriptionHeadroomSummary(),
+    new Promise((resolve) => {
+      cachedTimer = setTimeout(() => resolve("timed out"), 1_000);
+    }),
+  ]);
+  clearTimeout(cachedTimer);
+  check(
+    "a stale cache still yields a summary without waiting on the network",
+    cached !== "timed out" && cached?.claude?.headroomPercent === 9 && cached?.codex?.headroomPercent === 70,
+    JSON.stringify(cached),
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  check("the cached read starts a background refresh", liveReads === 1, String(liveReads));
+  check(
+    "stale usage is accepted only up to the documented age",
+    requestedMaxAge === CACHED_HEADROOM_MAX_AGE_MS && CACHED_HEADROOM_MAX_AGE_MS === 30 * 60_000,
+    String(requestedMaxAge),
+  );
+  globalThis.__headroomLastKnownStub = () => [];
+  check("nothing cached means no summary", (await readCachedSubscriptionHeadroomSummary()) === null);
+  globalThis.__headroomLastKnownStub = () => {
+    throw new Error("usage cache broken");
+  };
+  check("a throwing usage cache degrades to null", (await readCachedSubscriptionHeadroomSummary()) === null);
+
   // ── Injection into the manager turn prompt (dynamic tail) ─────────────────
 
   const backend = await bundle(
@@ -518,7 +563,7 @@ async function main() {
   );
   check(
     "run-store feeds the section into buildManagerTurnPrompt beside the memory",
-    /subscriptionHeadroom = describeHeadroomForPrompt\(await readSubscriptionHeadroomSummary\(\)\)/.test(
+    /subscriptionHeadroom = describeHeadroomForPrompt\(await readCachedSubscriptionHeadroomSummary\(\)\)/.test(
       runStoreSource,
     ) &&
       /coraMemory,\s*\n\s*priorRuns,\s*\n\s*subscriptionHeadroom,/.test(runStoreSource),

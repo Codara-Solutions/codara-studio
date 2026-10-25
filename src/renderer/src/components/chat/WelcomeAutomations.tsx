@@ -91,7 +91,9 @@ export default function WelcomeAutomations({
       </span>
       <span className="cora-welcome__automations-action">{live ? "Watch" : "Open"}</span>
       <span className="cora-welcome__automations-arrow" aria-hidden>
-        →
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+          <path d="M3.5 8h9M8.75 4.25 12.5 8l-3.75 3.75" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
       </span>
     </button>
   );

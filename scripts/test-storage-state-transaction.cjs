@@ -157,6 +157,121 @@ async function main() {
       "a throwing updater cannot mutate the durable cache by reference",
     );
 
+    // An agent worktree's creator survives a save, bounded and cleaned; a
+    // malformed creator is dropped rather than trusted.
+    const withCreators = await storage.updateState((current) => ({
+      ...current,
+      workspaces: [
+        ...current.workspaces,
+        {
+          id: "ws-agent-copy",
+          name: "Agent copy",
+          cwd: "/tmp/agent-copy",
+          color: "#2AA298",
+          workers: [],
+          copyBranch: {
+            repoCwd: "/tmp/repo",
+            branch: "agent/x",
+            city: "agent-x",
+            mode: "fork",
+            createdAt: "2026-10-12T00:00:00.000Z",
+            createdBy: { kind: "agent", client: "claude\u0007code", purpose: "p".repeat(500), extra: "dropped" },
+          },
+        },
+        {
+          id: "ws-bad-creator",
+          name: "Bad creator",
+          cwd: "/tmp/bad-creator",
+          color: "#2AA298",
+          workers: [],
+          copyBranch: {
+            repoCwd: "/tmp/repo",
+            branch: "y",
+            city: "y",
+            createdAt: "2026-10-12T00:00:00.000Z",
+            createdBy: { kind: "robot" },
+          },
+        },
+      ],
+    }));
+    const agentCopy = withCreators.workspaces.find((workspace) => workspace.id === "ws-agent-copy");
+    assert.equal(agentCopy.copyBranch.createdBy.kind, "agent");
+    assert.equal(agentCopy.copyBranch.createdBy.client, "claude code");
+    assert.equal(agentCopy.copyBranch.createdBy.purpose.length, 200);
+    assert.equal("extra" in agentCopy.copyBranch.createdBy, false);
+    const badCreator = withCreators.workspaces.find((workspace) => workspace.id === "ws-bad-creator");
+    assert.equal("createdBy" in badCreator.copyBranch, false, "an unknown creator kind is dropped");
+
+    // A renderer save that crossed a main-process workspace edit in flight
+    // carries the older list. Written as is it would undo the edit on disk
+    // until the renderer saved again; reconciled, the edit stands.
+    const clone = (value) => JSON.parse(JSON.stringify(value));
+    const readDisk = () => JSON.parse(fs.readFileSync(path.join(blockedHome, "spark-state.json"), "utf8"));
+    const mainAdded = {
+      id: "ws-main-added",
+      name: "Main added",
+      cwd: "/tmp/main-added",
+      color: "#2AA298",
+      workers: [],
+    };
+    let staleRenderer = clone(await storage.loadState());
+    await storage.updateState((current) => ({
+      ...current,
+      workspaces: [...current.workspaces, mainAdded],
+      workspaceRailOrder: [...(current.workspaceRailOrder ?? []), mainAdded.id],
+    }));
+    let saved = await storage.saveState(staleRenderer, { fromRenderer: true });
+    assert.ok(saved.workspaces.some((workspace) => workspace.id === mainAdded.id), "a stale save keeps main's new workspace");
+    assert.ok(saved.workspaceRailOrder.includes(mainAdded.id), "and its rail entry");
+    assert.ok(readDisk().workspaces.some((workspace) => workspace.id === mainAdded.id), "on disk too");
+    // The renderer's echo after state:changed agrees and clears the entry, so
+    // a later delete by the user is not undone.
+    await storage.saveState(saved, { fromRenderer: true });
+    saved = await storage.saveState(
+      {
+        ...saved,
+        workspaces: saved.workspaces.filter((workspace) => workspace.id !== mainAdded.id),
+        workspaceRailOrder: saved.workspaceRailOrder.filter((id) => id !== mainAdded.id),
+      },
+      { fromRenderer: true },
+    );
+    assert.ok(!saved.workspaces.some((workspace) => workspace.id === mainAdded.id), "a user delete after agreement stands");
+
+    // A workspace main removed stays removed, and an active one hands focus
+    // to what main chose.
+    await storage.updateState((current) => ({ ...current, activeWorkspaceId: "ws-agent-copy" }));
+    staleRenderer = clone(await storage.loadState());
+    await storage.updateState((current) => ({
+      ...current,
+      workspaces: current.workspaces.filter((workspace) => workspace.id !== "ws-agent-copy"),
+      workspaceRailOrder: (current.workspaceRailOrder ?? []).filter((id) => id !== "ws-agent-copy"),
+      activeWorkspaceId: "ws-durable",
+    }));
+    saved = await storage.saveState(staleRenderer, { fromRenderer: true });
+    assert.ok(!saved.workspaces.some((workspace) => workspace.id === "ws-agent-copy"), "a stale save cannot resurrect a removed workspace");
+    assert.equal(saved.activeWorkspaceId, "ws-durable");
+
+    // Entries expire, and saves from main itself are never rewritten.
+    staleRenderer = clone(await storage.loadState());
+    await storage.updateState((current) => ({
+      ...current,
+      workspaces: [...current.workspaces, { ...mainAdded, id: "ws-expired" }],
+    }));
+    const realNow = Date.now;
+    Date.now = () => realNow() + 31_000;
+    try {
+      saved = await storage.saveState(staleRenderer, { fromRenderer: true });
+    } finally {
+      Date.now = realNow;
+    }
+    assert.ok(!saved.workspaces.some((workspace) => workspace.id === "ws-expired"), "an edit older than 30 s is not reapplied");
+    await storage.updateState((current) => ({
+      ...current,
+      workspaces: [...current.workspaces, { ...mainAdded, id: "ws-main-only" }],
+    }));
+    saved = await storage.saveState(staleRenderer);
+    assert.ok(!saved.workspaces.some((workspace) => workspace.id === "ws-main-only"), "only renderer saves are reconciled");
+
     console.log("All storage state transaction checks passed.");
   } finally {
     console.error = originalConsoleError;

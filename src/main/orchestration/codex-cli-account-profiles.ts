@@ -13,6 +13,8 @@ export const CODEX_CLI_ACCOUNT_PROFILES_VERSION = 1 as const;
 export const CODEX_CLI_ACCOUNT_PROFILES_FILE = "account-profiles.json";
 export const CODEX_CLI_ACCOUNTS_DIRECTORY = "accounts";
 export const CODEX_CLI_AUTH_FILE = "auth.json";
+/** The CODEX_HOME inside a managed account's directory. */
+export const CODEX_CLI_HOME_DIRECTORY = "home";
 export const CODEX_CLI_PROFILE_LABEL_MAX_LENGTH = 80;
 
 const UUID_V4_PATTERN =
@@ -87,10 +89,8 @@ export interface CodexCliProfileLeaseView {
 }
 
 export interface CodexCliAccountProfileStoreOptions {
-  /** Existing Codex home represented by the synthetic `personal` profile. */
+  /** The System login's Codex home, represented by the synthetic `personal` profile. */
   personalHomeDir?: string;
-  /** Private backup of the historical login; live auth is swapped into ~/.codex. */
-  personalAuthFile?: string;
   /** Test seam. Production uses cryptographically random UUIDv4 values. */
   idFactory?: () => string;
   /** Test seam. */
@@ -236,19 +236,25 @@ export function normalizeCodexCliProfileId(
   throw new TypeError(`${label} must be "personal" or a lowercase UUIDv4`);
 }
 
+/**
+ * A managed Codex account: its directory under the account root, and inside
+ * it the CODEX_HOME its terminals run with (shared state linked into the
+ * user's own Codex home by cli-account-homes.ts, auth.json private).
+ */
 export function codexCliManagedProfilePaths(
   rootDir: string,
   rawProfileId: string,
-): { homeDir: string; authFile: string } {
+): { profileDir: string; homeDir: string; authFile: string } {
   if (!isCodexCliManagedProfileId(rawProfileId)) {
     throw new TypeError("Managed native Codex profile id must be a lowercase UUIDv4");
   }
   const accountsDir = resolve(rootDir, CODEX_CLI_ACCOUNTS_DIRECTORY);
-  const homeDir = resolve(accountsDir, rawProfileId);
-  if (dirname(homeDir) !== accountsDir || basename(homeDir) !== rawProfileId) {
+  const profileDir = resolve(accountsDir, rawProfileId);
+  if (dirname(profileDir) !== accountsDir || basename(profileDir) !== rawProfileId) {
     throw new CodexCliAccountProfileSafetyError("profile path escaped the accounts directory");
   }
-  return { homeDir, authFile: join(homeDir, CODEX_CLI_AUTH_FILE) };
+  const homeDir = join(profileDir, CODEX_CLI_HOME_DIRECTORY);
+  return { profileDir, homeDir, authFile: join(homeDir, CODEX_CLI_AUTH_FILE) };
 }
 
 function emptySnapshot(): CodexCliAccountProfilesSnapshot {
@@ -571,6 +577,7 @@ export class CodexCliAccountProfileStore {
   readonly rootDir: string;
   readonly accountsDir: string;
   readonly filePath: string;
+  /** The System login's home: read for status only, never written. */
   readonly personalHomeDir: string;
   readonly personalAuthFile: string;
   private readonly idFactory: () => string;
@@ -596,10 +603,7 @@ export class CodexCliAccountProfileStore {
     this.personalHomeDir = resolve(
       options.personalHomeDir?.trim() || defaultPersonalCodexHomeDir(),
     );
-    this.personalAuthFile = resolve(
-      options.personalAuthFile?.trim() ||
-        join(this.personalHomeDir, CODEX_CLI_AUTH_FILE),
-    );
+    this.personalAuthFile = join(this.personalHomeDir, CODEX_CLI_AUTH_FILE);
     this.idFactory = options.idFactory ?? randomUUID;
     this.now = options.now ?? (() => new Date());
     this.authChecker = options.authChecker ?? defaultCodexCliAuthChecker;
@@ -645,17 +649,17 @@ export class CodexCliAccountProfileStore {
           "a staged deletion entry is a symlink or not a directory",
         );
       }
-      const { homeDir } = codexCliManagedProfilePaths(this.rootDir, profileId);
+      const { profileDir } = codexCliManagedProfilePaths(this.rootDir, profileId);
       if (registered.has(profileId)) {
-        const original = await fs.lstat(homeDir).catch(
+        const original = await fs.lstat(profileDir).catch(
           (error: NodeJS.ErrnoException) => {
             if (error.code === "ENOENT") return null;
             throw error;
           },
         );
         if (!original) {
-          await fs.rename(staged, homeDir);
-          if (process.platform !== "win32") await fs.chmod(homeDir, 0o700);
+          await fs.rename(staged, profileDir);
+          if (process.platform !== "win32") await fs.chmod(profileDir, 0o700);
           restoredProfileIds.push(profileId);
         } else {
           if (original.isSymbolicLink() || !original.isDirectory()) {
@@ -722,18 +726,19 @@ export class CodexCliAccountProfileStore {
       }> = [
         {
           id: CODEX_CLI_PERSONAL_PROFILE_ID,
-          label: "Account 1",
+          label: "Codex login",
           managed: false,
-          homeDir: dirname(this.personalAuthFile),
+          homeDir: this.personalHomeDir,
           authFile: this.personalAuthFile,
         },
         ...snapshot.profiles.map((profile) => {
-          const paths = codexCliManagedProfilePaths(this.rootDir, profile.id);
+          const { homeDir, authFile } = codexCliManagedProfilePaths(this.rootDir, profile.id);
           return {
             id: profile.id,
             label: profile.label,
             managed: true,
-            ...paths,
+            homeDir,
+            authFile,
           };
         }),
       ];
@@ -785,15 +790,15 @@ export class CodexCliAccountProfileStore {
       snapshot = await readSnapshotFromDisk(this.filePath);
       const existingIds = new Set(snapshot.profiles.map((profile) => profile.id));
       let id: string | null = null;
-      let homeDir: string | null = null;
+      let paths: { profileDir: string; homeDir: string } | null = null;
       for (let attempt = 0; attempt < MAX_ID_GENERATION_ATTEMPTS; attempt += 1) {
         const candidate = this.idFactory();
         if (!isCodexCliManagedProfileId(candidate)) {
           throw new TypeError("Generated native Codex profile id must be a lowercase UUIDv4");
         }
         if (existingIds.has(candidate)) continue;
-        const paths = codexCliManagedProfilePaths(this.rootDir, candidate);
-        const exists = await fs.lstat(paths.homeDir).then(() => true).catch(
+        const candidatePaths = codexCliManagedProfilePaths(this.rootDir, candidate);
+        const exists = await fs.lstat(candidatePaths.profileDir).then(() => true).catch(
           (error: NodeJS.ErrnoException) => {
             if (error.code === "ENOENT") return false;
             throw error;
@@ -801,14 +806,19 @@ export class CodexCliAccountProfileStore {
         );
         if (!exists) {
           id = candidate;
-          homeDir = paths.homeDir;
+          paths = candidatePaths;
           break;
         }
       }
-      if (!id || !homeDir) throw new CodexCliAccountProfileIdCollisionError();
+      if (!id || !paths) throw new CodexCliAccountProfileIdCollisionError();
+      const homeDir = paths.profileDir;
 
-      await fs.mkdir(homeDir, { mode: 0o700 });
-      if (process.platform !== "win32") await fs.chmod(homeDir, 0o700);
+      await fs.mkdir(paths.profileDir, { mode: 0o700 });
+      await fs.mkdir(paths.homeDir, { mode: 0o700 });
+      if (process.platform !== "win32") {
+        await fs.chmod(paths.profileDir, 0o700);
+        await fs.chmod(paths.homeDir, 0o700);
+      }
       const timestamp = this.now().toISOString();
       const profile: CodexCliManagedProfile = {
         id,
@@ -908,16 +918,20 @@ export class CodexCliAccountProfileStore {
           ? snapshot.defaultProfileId
           : CODEX_CLI_PERSONAL_PROFILE_ID
         : normalizeCodexCliProfileId(input.profileId);
-    let label = "Account 1";
+    let label = "Codex login";
     let managed = false;
-    let homeDir = dirname(this.personalAuthFile);
+    let homeDir = this.personalHomeDir;
     let authFile = this.personalAuthFile;
     if (profileId !== CODEX_CLI_PERSONAL_PROFILE_ID) {
       const profile = snapshot.profiles.find((entry) => entry.id === profileId);
       if (!profile) throw new CodexCliAccountProfileNotFoundError(profileId);
       label = profile.label;
       managed = true;
-      ({ homeDir, authFile } = codexCliManagedProfilePaths(this.rootDir, profileId));
+      const paths = codexCliManagedProfilePaths(this.rootDir, profileId);
+      ({ homeDir, authFile } = paths);
+      // The account directory is checked first: lstat of the inner home
+      // would follow a symlinked account directory.
+      await assertSafeDirectory(paths.profileDir, { create: false });
       await assertSafeDirectory(homeDir, { create: false });
     }
     const status = await Promise.resolve(
@@ -941,12 +955,18 @@ export class CodexCliAccountProfileStore {
     };
   }
 
+  /**
+   * Remove a managed profile. With keepDirectory the entry goes and the
+   * directory stays for the caller to purge once the terminals still
+   * running in it have exited (reconcile never deletes an orphan).
+   */
   async deleteProfile(
     rawProfileId: string,
+    options: { keepDirectory?: boolean } = {},
   ): Promise<DeleteCodexCliProfileResult> {
     if (!isCodexCliManagedProfileId(rawProfileId)) {
       if (rawProfileId === CODEX_CLI_PERSONAL_PROFILE_ID) {
-        throw new TypeError("The existing personal Codex home cannot be deleted");
+        throw new TypeError("The Codex System login cannot be deleted");
       }
       throw new TypeError("Managed native Codex profile id must be a lowercase UUIDv4");
     }
@@ -959,49 +979,46 @@ export class CodexCliAccountProfileStore {
       if (snapshot.defaultProfileId === rawProfileId) {
         throw new CodexCliDefaultProfileDeletionError(rawProfileId);
       }
+      const next: CodexCliAccountProfilesSnapshot = {
+        ...snapshot,
+        profiles: snapshot.profiles.filter((profile) => profile.id !== rawProfileId),
+      };
+      if (options.keepDirectory) {
+        await persistSnapshotAtomically(this.rootDir, this.filePath, next);
+        return { deleted: true, snapshot: cloneSnapshot(next) };
+      }
       if (this.leases?.isLeased(rawProfileId)) {
         throw new CodexCliAccountProfileLeasedError(rawProfileId);
       }
-
-      // Serialize against the shared-state heal for this profile: a heal
-      // mid-migration keeps rollouts in a temporary stage inside the home,
-      // and deleting the home in that window would destroy state the heal
-      // was moving into the personal ~/.codex.
-      return withMutationLock(
-        `${this.filePath}::share::${rawProfileId}`,
-        async () => {
-          const { homeDir } = codexCliManagedProfilePaths(this.rootDir, rawProfileId);
-          const staged = join(
-            this.accountsDir,
-            `.${rawProfileId}.deleting-${randomBytes(8).toString("hex")}`,
-          );
-          const homeStats = await fs.lstat(homeDir).catch(
-            (error: NodeJS.ErrnoException) => {
-              if (error.code === "ENOENT") return null;
-              throw error;
-            },
-          );
-          if (homeStats && (homeStats.isSymbolicLink() || !homeStats.isDirectory())) {
-            throw new CodexCliAccountProfileSafetyError(
-              "the account home selected for deletion is unsafe",
-            );
-          }
-          if (homeStats) await fs.rename(homeDir, staged);
-          const next: CodexCliAccountProfilesSnapshot = {
-            ...snapshot,
-            profiles: snapshot.profiles.filter((profile) => profile.id !== rawProfileId),
-          };
-          try {
-            await persistSnapshotAtomically(this.rootDir, this.filePath, next);
-          } catch (error) {
-            if (homeStats) await fs.rename(staged, homeDir).catch(() => undefined);
-            throw error;
-          }
-          if (homeStats) await fs.rm(staged, { recursive: true, force: true });
-          return { deleted: true, snapshot: cloneSnapshot(next) };
+      const { profileDir } = codexCliManagedProfilePaths(this.rootDir, rawProfileId);
+      const staged = join(
+        this.accountsDir,
+        `.${rawProfileId}.deleting-${randomBytes(8).toString("hex")}`,
+      );
+      const profileStats = await fs.lstat(profileDir).catch(
+        (error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return null;
+          throw error;
         },
       );
+      if (profileStats && (profileStats.isSymbolicLink() || !profileStats.isDirectory())) {
+        throw new CodexCliAccountProfileSafetyError(
+          "the account home selected for deletion is unsafe",
+        );
+      }
+      if (profileStats) await fs.rename(profileDir, staged);
+      try {
+        await persistSnapshotAtomically(this.rootDir, this.filePath, next);
+      } catch (error) {
+        if (profileStats) await fs.rename(staged, profileDir).catch(() => undefined);
+        throw error;
+      }
+      // rm removes the shared-state links inside the home, never what they
+      // point at in the user's own Codex home.
+      if (profileStats) await fs.rm(staged, { recursive: true, force: true });
+      return { deleted: true, snapshot: cloneSnapshot(next) };
     });
+    if (options.keepDirectory) return mutate();
     if (this.leases?.runWhileUnleased) {
       return this.leases.runWhileUnleased(rawProfileId, mutate);
     }

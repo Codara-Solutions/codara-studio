@@ -24,10 +24,14 @@ fs.writeFileSync(
   JSON.stringify({ url: "http://127.0.0.1:1", token: "f".repeat(64) }),
 );
 
-const PREVIEW_TOOLS = [
+// The browser tools ship from the modules in resources/codara-studio-mcp/tools/
+// (test-mcp-tool-manifest.cjs checks their contract), so every roster below
+// takes the browser list from that registry. These are the tools that must
+// never disappear from it.
+const CORE_PREVIEW_TOOLS = [
   "codara_preview_list",
-  "codara_preview_url",
   "codara_preview_navigate",
+  "codara_preview_close",
   "codara_preview_snapshot",
   "codara_preview_click",
   "codara_preview_type",
@@ -46,22 +50,84 @@ const PREVIEW_TOOLS = [
   "codara_preview_resize",
   "codara_preview_run",
 ];
+const PREVIEW_TOOLS = require(path.join(__dirname, "..", "resources", "codara-studio-mcp", "tools", "index.cjs"))
+  .toolRegistry()
+  .tools.map((tool) => tool.name);
+for (const name of CORE_PREVIEW_TOOLS) assert.ok(PREVIEW_TOOLS.includes(name), `${name} is missing from the browser tool modules`);
 const TERMINAL_TOOLS = [
+  "codara_terminal_run",
   "codara_terminal_create",
   "codara_terminal_write",
   "codara_terminal_read",
+  "codara_terminal_list",
   "codara_terminal_close",
 ];
 const WHITEBOARD_TOOLS = ["codara_whiteboard_get", "codara_whiteboard_update", "codara_whiteboard_arrange", "codara_whiteboard_inspect", "codara_whiteboard_review"];
 const BOARD_TOOLS = ["codara_board_get", "codara_board_update"];
+const WORKTREE_TOOLS = [
+  "codara_worktree_create",
+  "codara_worktree_list",
+  "codara_worktree_remove",
+  "codara_worktree_setup",
+  "codara_worktree_cleanup",
+];
+const WORKFLOW_TOOLS = [
+  "codara_workflow_list",
+  "codara_workflow_get",
+  "codara_workflow_check",
+  "codara_workflow_run",
+  "codara_workflow_status",
+  "codara_workflow_wait",
+  "codara_workflow_stop",
+  "codara_workflow_resume",
+  "codara_workflow_save",
+];
+// A Cora chat (SPARK_RUN_ID set) also gets its whiteboard and board; a user's
+// own terminal agent gets the explicit notification, the workspace status and
+// the worktree tools instead. The share offer goes to the agents that write
+// for the user (a terminal agent, a manager chat, a direct Pi task), never to
+// workers.
 const STUDIO_TOOLS = [...PREVIEW_TOOLS, ...TERMINAL_TOOLS, ...WHITEBOARD_TOOLS, ...BOARD_TOOLS];
+// The workspace's task list and inbox: a terminal agent and Cora's manager
+// file into it; chat workers report to their manager instead.
+const TASK_TOOLS = ["codara_task_add", "codara_task_update", "codara_task_list", "codara_inbox_add"];
+const TERMINAL_STUDIO_TOOLS = [
+  ...PREVIEW_TOOLS,
+  ...TERMINAL_TOOLS,
+  "codara_notify_user",
+  "codara_workspace_status",
+  ...TASK_TOOLS,
+  ...WORKTREE_TOOLS,
+  "codara_session_search",
+  "codara_share_offer",
+];
+const RUN = { SPARK_RUN_ID: "run-roster" };
+// tools/list budgets in JSON characters. The studio list is what every Claude
+// Code, Codex and Grok session pays for on every request. Each roster carries
+// every tool module, so these move with TOOL_MODULES_BUDGET in
+// test-mcp-tool-manifest.cjs (raised by 9,000 for the browser tools of the
+// round that added the Chrome extension, audits and captures; the studio
+// one by 300 for codara_workspace_status, whose guidance rides on initialize,
+// and by 500 for codara_worktree_setup; execute by 1,000 for the automation
+// precheck and missed-run fields, about 520, and by 1,000 for
+// codara_worktree_setup; studio by 200 for codara_session_search, about
+// 450, with the rest of it and all of codara_share_offer paid for by shorter
+// terminal and worktree descriptions, which also kept execute in place;
+// studio and execute by 900 for codara_worktree_cleanup, about 850;
+// studio and execute by 2,700 for the four task list tools, about 2,650,
+// which let every agent in a workspace share one task list; studio by 100
+// for codara_browser_use, about 390, with the rest paid for by a shorter
+// codara_preview_run).
+const LIST_BUDGET = { studio: 34_200, run: 39_000, worker: 35_000, execute: 99_600, automation: 69_000 };
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",
   "codara_ask_user",
   "codara_complete",
   "codara_name_chat",
+  "codara_plan_update",
   "codara_remember",
+  "codara_recall",
   "codara_request_next_iteration",
   "codara_get_worker_status",
   "codara_wait_for_workers",
@@ -85,15 +151,19 @@ const AUTOMATION_TOOLS = [
 ];
 
 // Drive one server process: send initialize + tools/list, resolve the tool
-// names it reports plus the serverInfo.name from initialize.
-function listTools(mode, extraEnv = {}) {
+// names it reports plus the initialize result.
+function listTools(mode, extraEnv = {}, initParams = {}) {
   return new Promise((resolve, reject) => {
-    const env = { ...process.env, SPARK_HOME_DIR: HOME, ...extraEnv };
+    const env = { ...process.env, SPARK_HOME_DIR: HOME };
+    delete env.SPARK_RUN_ID;
+    delete env.CODARA_HOME_DIR;
+    Object.assign(env, extraEnv);
     if (mode) env.SPARK_MCP_MODE = mode;
     else delete env.SPARK_MCP_MODE;
     const child = spawn(process.execPath, [SERVER], { env, stdio: ["pipe", "pipe", "inherit"] });
     let out = "";
     let serverName = null;
+    let init = null;
     let tools = null;
     const timer = setTimeout(() => {
       child.kill();
@@ -113,21 +183,88 @@ function listTools(mode, extraEnv = {}) {
         } catch {
           continue;
         }
-        if (msg.id === 1 && msg.result) serverName = msg.result.serverInfo && msg.result.serverInfo.name;
+        if (msg.id === 1 && msg.result) {
+          init = msg.result;
+          serverName = msg.result.serverInfo && msg.result.serverInfo.name;
+        }
         if (msg.id === 2 && msg.result) {
           const definitions = msg.result.tools;
           tools = definitions.map((t) => t.name);
           clearTimeout(timer);
           child.stdin.end();
           child.kill();
-          resolve({ serverName, tools, definitions });
+          resolve({ serverName, init, tools, definitions, listChars: JSON.stringify(msg.result).length });
         }
       }
     });
     child.on("error", reject);
-    child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }) + "\n");
+    child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: initParams }) + "\n");
     child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\n");
   });
+}
+
+// One stdio session for protocol-level checks: send lines, collect replies.
+function stdioSession(extraEnv = {}) {
+  const env = { ...process.env, SPARK_HOME_DIR: HOME };
+  delete env.SPARK_RUN_ID;
+  delete env.SPARK_MCP_MODE;
+  delete env.CODARA_HOME_DIR;
+  Object.assign(env, extraEnv);
+  const child = spawn(process.execPath, [SERVER], { env, stdio: ["pipe", "pipe", "inherit"] });
+  const messages = [];
+  const waiters = [];
+  let out = "";
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    out += chunk;
+    let idx;
+    while ((idx = out.indexOf("\n")) >= 0) {
+      const line = out.slice(0, idx).trim();
+      out = out.slice(idx + 1);
+      if (!line) continue;
+      const msg = JSON.parse(line);
+      messages.push(msg);
+      for (const waiter of [...waiters]) {
+        if (waiter.match(msg)) {
+          waiters.splice(waiters.indexOf(waiter), 1);
+          waiter.resolve(msg);
+        }
+      }
+    }
+  });
+  return {
+    messages,
+    send(msg) {
+      child.stdin.write(JSON.stringify({ jsonrpc: "2.0", ...msg }) + "\n");
+    },
+    next(match, timeoutMs = 10_000) {
+      const found = messages.find(match);
+      if (found) return Promise.resolve(found);
+      return new Promise((resolve, reject) => {
+        // The timer is cleared once the message arrives: left running, it
+        // would hold the process open for the full timeout after the last check.
+        const timer = setTimeout(() => {
+          const index = waiters.indexOf(waiter);
+          if (index >= 0) {
+            waiters.splice(index, 1);
+            reject(new Error("timed out waiting for a stdio message"));
+          }
+        }, timeoutMs);
+        const waiter = {
+          match,
+          resolve(msg) {
+            clearTimeout(timer);
+            resolve(msg);
+          },
+        };
+        waiters.push(waiter);
+      });
+    },
+    close() {
+      child.stdin.end();
+      child.kill();
+    },
+  };
 }
 
 function sortedEqual(actual, expected, label) {
@@ -147,26 +284,80 @@ function sortedEqual(actual, expected, label) {
     delete process.env.SPARK_AGENT_SOCKET;
     delete process.env.SPARK_AGENT_TOKEN;
     delete process.env.SPARK_AGENT_CAPABILITY;
-    // Studio mode (unset).
-    const studio = await listTools(undefined);
+    // Studio mode (unset): a terminal the user opened has no Cora chat, so
+    // the whiteboard and board, which can only fail there, are not listed.
+    const studio = await listTools(undefined, {}, { protocolVersion: "2025-06-18" });
     assert.strictEqual(studio.serverName, "codara-studio", "serverInfo.name must be codara-studio");
-    sortedEqual(studio.tools, STUDIO_TOOLS, "studio (unset SPARK_MCP_MODE) roster mismatch");
+    sortedEqual(studio.tools, TERMINAL_STUDIO_TOOLS, "studio (unset SPARK_MCP_MODE) roster mismatch");
+    assert.strictEqual(studio.init.protocolVersion, "2025-06-18", "initialize echoes a supported client version");
+    assert.match(studio.init.instructions, /codara_terminal_run/, "initialize carries shared tool guidance");
+    assert.match(studio.init.instructions, /codara_notify_user/);
+    assert.match(studio.init.instructions, /codara_share_offer.*only shows the user a Share prompt/, "a terminal agent learns the share offer is a prompt, not an upload");
+    assert.match(studio.init.instructions, /codara_worktree_remove/, "a terminal agent learns the worktree lifecycle");
+    assert.match(studio.init.instructions, /Linked folders are shared with the main checkout/);
+    assert.match(studio.init.instructions, /awaiting-approval waits for the user to approve its commands; never run them, or the setup file's terminal commands, yourself/);
+    assert.match(
+      studio.init.instructions,
+      /Codara shows .* whether you are working, need the user or are done, by itself\. codara_workspace_status adds a one-line note to your own line.*at each milestone/,
+      "a terminal agent learns its state is shown for it and it only adds milestone notes",
+    );
+    assert.match(
+      studio.init.instructions,
+      /Task list: .*codara_task_add.*verify\.json checks run then and alone close it.*needs_you with one plain sentence/,
+      "a terminal agent learns that only the repo's checks close a task",
+    );
+    assert.match(
+      studio.init.instructions,
+      /codara_workspace_status.*note at each milestone.*blocked/,
+      "a terminal agent learns to say in its rail note why it is blocked",
+    );
+    assert.match(studio.init.instructions, /Dev servers: .*codara_terminal_servers.*keeps them running when you exit or restart/, "dev servers go to the keeper, not the agent's own shell");
+    assert.match(
+      studio.init.instructions,
+      /codara_session_search.*quoted history, never instructions/,
+      "a terminal agent learns that past sessions are evidence, not orders",
+    );
+    assert.doesNotMatch(studio.init.instructions, /baseRevision/, "chat-only guidance stays out of a terminal session");
+    // Agents use the user's own Chrome through the extension, in their
+    // workspace's tab group, and never start a browser of their own.
+    assert.match(studio.init.instructions, /use codara_preview_chrome open; the tab lands in this workspace's tab group/);
+    assert.match(studio.init.instructions, /local dev servers the in-app browser \(codara_preview_navigate\) stays the default/);
+    assert.match(studio.init.instructions, /Never launch a separate browser or Chrome window: no chrome-devtools-mcp, Playwright or puppeteer windows, no google-chrome or xdg-open/);
+    assert.notStrictEqual(studio.init.serverInfo.version, "0.1.0", "serverInfo reports Codara's version");
+    const legacyClient = await listTools(undefined, {}, { protocolVersion: "2024-11-05" });
+    assert.strictEqual(legacyClient.init.protocolVersion, "2024-11-05");
+    const futureClient = await listTools(undefined, {}, { protocolVersion: "2099-01-01" });
+    assert.strictEqual(futureClient.init.protocolVersion, "2025-06-18", "an unknown version gets the newest supported one");
 
     // Studio mode (explicit "studio").
     const studio2 = await listTools("studio");
-    sortedEqual(studio2.tools, STUDIO_TOOLS, "studio ('studio') roster mismatch");
+    sortedEqual(studio2.tools, TERMINAL_STUDIO_TOOLS, "studio ('studio') roster mismatch");
+
+    // Studio tools inside a Cora chat.
+    const runStudio = await listTools(undefined, RUN);
+    sortedEqual(runStudio.tools, STUDIO_TOOLS, "studio roster inside a Cora chat mismatch");
+    assert.match(runStudio.init.instructions, /baseRevision/);
+    assert.doesNotMatch(runStudio.init.instructions, /codara_worktree/, "chat workers get no worktree guidance");
+    assert.doesNotMatch(runStudio.init.instructions, /codara_workspace_status/, "chat workers leave the workspace status to their chat");
+    assert.doesNotMatch(runStudio.init.instructions, /codara_session_search/, "chat workers get no session search");
+    assert.doesNotMatch(runStudio.init.instructions, /codara_task_/, "chat workers leave the task list to their manager");
 
     // Execute mode. Carries the automation-management tools too (Cora creates
     // and manages looms from an ordinary auto/execute chat), minus
     // codara_name_chat, which the execute roster already owns and maps to
     // orchestrator.name_chat.
-    const execute = await listTools("execute");
+    const execute = await listTools("execute", RUN);
     sortedEqual(
       execute.tools,
       [
         ...STUDIO_TOOLS,
         ...EXECUTE_TOOLS,
         ...AUTOMATION_TOOLS.filter((name) => !EXECUTE_TOOLS.includes(name)),
+        ...WORKTREE_TOOLS,
+        ...WORKFLOW_TOOLS,
+        ...TASK_TOOLS,
+        "codara_session_search",
+        "codara_share_offer",
       ],
       "execute roster mismatch",
     );
@@ -280,23 +471,36 @@ function sortedEqual(actual, expected, label) {
       /action `replace`/,
       "codara_remember must tell the manager to consolidate with replace when the file is full",
     );
+    // worker-prompt.ts renderWorkerMemorySection hands chat workers a
+    // read-only copy and skips automation runs; the description must say so.
     assert.match(
       remember.description,
-      /Workers do NOT see memory/,
-      "codara_remember must tell the manager to copy relevant memory into worker descriptions",
+      /Workers in chat runs receive a read-only copy of this memory/,
+      "codara_remember must say chat workers already receive memory",
     );
+    assert.match(remember.description, /Automation workers do not see memory/);
+    assert.doesNotMatch(remember.description, /do NOT see memory/);
+    for (const name of ["codara_name_chat"]) {
+      const tool = execute.definitions.find((candidate) => candidate.name === name);
+      assert.doesNotMatch(tool.description, /Call this EARLY/, `${name} must not demand its own early round trip`);
+    }
 
-    const directMemory = await listTools("talk", { CODARA_PI_DIRECT_TASK: "1" });
-    sortedEqual(directMemory.tools, [...STUDIO_TOOLS, "codara_remember"], "direct Cora roster mismatch");
+    const directMemory = await listTools("talk", { ...RUN, CODARA_PI_DIRECT_TASK: "1" });
+    sortedEqual(directMemory.tools, [...STUDIO_TOOLS, "codara_remember", "codara_recall", ...WORKTREE_TOOLS, "codara_share_offer"], "direct Cora roster mismatch");
     const directDefinition = directMemory.definitions.find((tool) => tool.name === "codara_remember");
     assert.ok(!("runId" in directDefinition.inputSchema.properties), "direct memory cannot choose a different run");
     assert.ok(JSON.stringify(directDefinition).length < 1500, "direct memory keeps a compact tool schema");
-    const untrustedDirect = await listTools("talk", { CODARA_PI_DIRECT_TASK: "1", CODARA_PI_PROJECT_POLICY: "untrusted-pull-request" });
+    const untrustedDirect = await listTools("talk", { ...RUN, CODARA_PI_DIRECT_TASK: "1", CODARA_PI_PROJECT_POLICY: "untrusted-pull-request" });
     assert.ok(!untrustedDirect.tools.includes("codara_remember"), "untrusted PRs cannot write memory");
+    assert.ok(!untrustedDirect.tools.includes("codara_recall"), "untrusted PRs cannot read memory");
+    assert.ok(
+      !untrustedDirect.tools.some((name) => name.startsWith("codara_worktree_")),
+      "untrusted PRs cannot create or remove worktrees",
+    );
 
     // Automation mode: memory is a manager-of-a-coding-run concept, an
     // automation loop has no user conversation to learn a durable fact from.
-    const automation = await listTools("automation");
+    const automation = await listTools("automation", RUN);
     sortedEqual(automation.tools, [...STUDIO_TOOLS, ...AUTOMATION_TOOLS], "automation roster mismatch");
 
     // Looms on Pi: the worker schema is model + effort only. No engine choice
@@ -340,10 +544,14 @@ function sortedEqual(actual, expected, label) {
     // Worker mode: workers must NOT be able to write memory. The manager is the
     // only writer, which is what makes "copy the line into the description"
     // load-bearing rather than a convenience.
-    const worker = await listTools("worker");
+    const worker = await listTools("worker", RUN);
     assert.ok(
       !worker.tools.includes("codara_remember"),
       "worker roster must not expose codara_remember",
+    );
+    assert.ok(
+      !worker.tools.some((name) => name.startsWith("codara_worktree_")),
+      "workers never manage worktrees",
     );
     // The agent-loop handoff steers by model only; nextEngine is gone.
     const nextIteration = worker.definitions.find(
@@ -359,6 +567,102 @@ function sortedEqual(actual, expected, label) {
       "codara_request_next_iteration must keep nextModel steering",
     );
 
+    // Every roster stays inside its tools/list budget, every tool carries MCP
+    // annotations, and no schema lets the model pick the chat.
+    const rosters = { studio, run: runStudio, worker, execute, automation };
+    for (const [label, roster] of Object.entries(rosters)) {
+      assert.ok(
+        roster.listChars <= LIST_BUDGET[label],
+        `${label} tools/list is ${roster.listChars} chars, over its ${LIST_BUDGET[label]} budget`,
+      );
+      for (const tool of roster.definitions) {
+        assert.ok(tool.annotations && typeof tool.annotations.title === "string", `${tool.name} has an annotation title`);
+        assert.strictEqual(typeof tool.annotations.openWorldHint, "boolean", `${tool.name} declares openWorldHint`);
+        assert.ok(
+          tool.annotations.readOnlyHint === true || typeof tool.annotations.destructiveHint === "boolean",
+          `${tool.name} is either read-only or declares destructiveHint`,
+        );
+        assert.ok(!("runId" in (tool.inputSchema.properties || {})), `${tool.name} must not expose runId`);
+      }
+    }
+    const byName = (roster, name) => roster.definitions.find((tool) => tool.name === name);
+    assert.strictEqual(byName(studio, "codara_terminal_read").annotations.readOnlyHint, true);
+    assert.strictEqual(byName(studio, "codara_terminal_close").annotations.destructiveHint, true);
+    assert.strictEqual(byName(studio, "codara_preview_navigate").annotations.openWorldHint, true);
+    assert.strictEqual(byName(studio, "codara_preview_close").annotations.destructiveHint, true);
+    assert.strictEqual(byName(studio, "codara_preview_close").annotations.idempotentHint, true);
+    assert.match(studio.init.instructions, /codara_preview_close/);
+    assert.strictEqual(byName(execute, "codara_delete_automation").annotations.destructiveHint, true);
+    assert.strictEqual(byName(studio, "codara_worktree_list").annotations.readOnlyHint, true);
+    assert.strictEqual(byName(studio, "codara_worktree_setup").annotations.readOnlyHint, true);
+    // It runs the repository's setup command, so no client may auto-approve
+    // it as harmless.
+    assert.strictEqual(byName(studio, "codara_worktree_create").annotations.destructiveHint, true);
+    assert.notStrictEqual(byName(studio, "codara_worktree_create").annotations.readOnlyHint, true);
+    assert.strictEqual(byName(studio, "codara_worktree_create").annotations.openWorldHint, true);
+    assert.strictEqual(byName(studio, "codara_worktree_remove").annotations.destructiveHint, true);
+    assert.strictEqual(byName(studio, "codara_worktree_remove").annotations.idempotentHint, true);
+    // Its remove action deletes worktrees and, when ticked, remote branches.
+    assert.strictEqual(byName(studio, "codara_worktree_cleanup").annotations.destructiveHint, true);
+    assert.strictEqual(byName(studio, "codara_worktree_cleanup").annotations.openWorldHint, true);
+    assert.match(studio.init.instructions, /codara_worktree_cleanup/);
+    // A move to verifying runs the repository's check commands and fetches
+    // the base branch from origin.
+    assert.strictEqual(byName(studio, "codara_task_update").annotations.destructiveHint, true);
+    assert.strictEqual(byName(studio, "codara_task_update").annotations.openWorldHint, true);
+    assert.strictEqual(byName(studio, "codara_task_list").annotations.readOnlyHint, true);
+    for (const name of WORKTREE_TOOLS) {
+      const properties = byName(studio, name).inputSchema.properties;
+      for (const field of ["repo", "repoCwd", "cwd", "callerRole", "callerClient", "callerPaneId", "force"]) {
+        assert.ok(!(field in properties), `${name} must not let the model choose ${field}`);
+      }
+    }
+    // Worktree calls may fetch and wait for the repository lock; the client
+    // deadline sits above both.
+    const serverSource = fs.readFileSync(SERVER, "utf8");
+    const worktreeTimeout = Number(/const WORKTREE_TIMEOUT_MS = ([\d_]+);/.exec(serverSource)[1].replace(/_/g, ""));
+    assert.ok(worktreeTimeout >= 120_000, "worktree calls get a long client timeout");
+    assert.match(serverSource, /rpc\.startsWith\("worktree\."\)\) return WORKTREE_TIMEOUT_MS/);
+    // Waiting for setup gets its own deadline, still under Codex's 660 s tool limit.
+    assert.match(serverSource, /rpc === "worktree\.setup"\) return WORKTREE_SETUP_TIMEOUT_MS/);
+    // The cleanup tool waits for the user's approval, then removes.
+    const cleanupTimeout = /const WORKTREE_CLEANUP_TIMEOUT_MS = (.+);/.exec(serverSource)[1];
+    assert.equal(eval(cleanupTimeout.replace(/_/g, "")) < 660_000, true, "under Codex's tool limit");
+    assert.match(serverSource, /rpc === "worktree\.cleanup"\) return WORKTREE_CLEANUP_TIMEOUT_MS/);
+    // It marks the returned messages read, so a client must not treat it as a
+    // side-effect-free call it may repeat or run in parallel.
+    assert.notStrictEqual(byName(execute, "codara_check_messages").annotations.readOnlyHint, true);
+    // Tools that run an arbitrary command or script must never tell a client
+    // they are safe to auto-approve.
+    for (const name of [
+      "codara_terminal_run",
+      "codara_terminal_create",
+      "codara_terminal_write",
+      "codara_preview_evaluate",
+      "codara_preview_run",
+    ]) {
+      assert.strictEqual(byName(studio, name).annotations.destructiveHint, true, `${name} is destructive`);
+    }
+    assert.strictEqual(byName(execute, "codara_spawn_terminals").annotations.destructiveHint, true);
+    assert.deepStrictEqual(byName(studio, "codara_terminal_read").inputSchema.properties.mode.enum, ["text", "screen"]);
+    assert.match(byName(studio, "codara_terminal_read").inputSchema.properties.lines.description, /default 200/);
+    assert.ok(
+      byName(studio, "codara_preview_wait_for").inputSchema.properties.timeoutMs.maximum < 60_000,
+      "a browser wait must end before the 60 s client timeout",
+    );
+    // codara_update_automation refers to the create schema instead of repeating it.
+    assert.ok(JSON.stringify(byName(execute, "codara_update_automation")).length < 2_500);
+
+    // Protocol errors carry the request id and the JSON-RPC code.
+    const session = stdioSession();
+    session.send({ id: 7, method: "resources/list", params: {} });
+    const unknownMethod = await session.next((msg) => msg.id === 7);
+    assert.strictEqual(unknownMethod.error.code, -32601, "unknown method is -32601");
+    session.send({ id: "t1", method: "tools/call", params: { name: "codara_nope", arguments: {} } });
+    const unknownTool = await session.next((msg) => msg.id === "t1");
+    assert.strictEqual(unknownTool.error.code, -32602, "unknown tool is -32602");
+    session.close();
+
     // The JSON schema hides runId, but the bridge must also treat the
     // launch-time env stamp as authoritative. callToolByName is used by Pi and
     // can be invoked directly, so discard a spoofed argument before it reaches
@@ -366,15 +670,38 @@ function sortedEqual(actual, expected, label) {
     const received = [];
     const receivedAuthorization = [];
     let mockResult = { ok: true };
+    let mockError = null;
+    let mockStatus = 200;
+    const heldRequests = [];
+    let mockHangs = false;
+    let hungUpRequests = 0;
     mockAgentSocket = http.createServer((req, res) => {
       receivedAuthorization.push(req.headers.authorization);
       let body = "";
       req.setEncoding("utf8");
       req.on("data", (chunk) => { body += chunk; });
       req.on("end", () => {
-        received.push(JSON.parse(body));
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: mockResult }));
+        const parsed = JSON.parse(body);
+        received.push(parsed);
+        if (mockHangs) {
+          res.on("close", () => { hungUpRequests += 1; });
+          return;
+        }
+        // A long poll the test cancels: never answered, closed by the client.
+        if (parsed.method === "orchestrator.wait_for_workers") {
+          const held = { closed: false };
+          res.on("close", () => { held.closed = true; });
+          heldRequests.push(held);
+          return;
+        }
+        res.writeHead(mockStatus, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(
+          mockStatus !== 200
+            ? { error: "unauthorized" }
+            : mockError
+              ? { jsonrpc: "2.0", id: 1, error: mockError }
+              : { jsonrpc: "2.0", id: 1, result: mockResult },
+        ));
       });
     });
     await new Promise((resolve, reject) => {
@@ -474,6 +801,29 @@ function sortedEqual(actual, expected, label) {
       "an unmarked trusted caller must adopt a rewritten handshake on its next call",
     );
 
+    // An interrupted Cora turn aborts its waits: the call returns at once and
+    // hangs up, so the main process stops polling for a caller that is gone.
+    mockHangs = true;
+    const waitAbort = new AbortController();
+    const receivedBeforeAbort = received.length;
+    const abortedWait = directBridge.callToolByName(
+      "codara_terminal_read",
+      { paneId: "pane-owned" },
+      waitAbort.signal,
+    );
+    for (let tries = 0; received.length === receivedBeforeAbort && tries < 200; tries += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    waitAbort.abort();
+    const abortedWaitResult = await abortedWait;
+    assert.strictEqual(abortedWaitResult.isError, true, "an aborted wait reports a failed call");
+    assert.match(abortedWaitResult.content[0].text, /Cancelled/);
+    for (let tries = 0; hungUpRequests === 0 && tries < 200; tries += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.strictEqual(hungUpRequests, 1, "an aborted wait hangs up its socket request");
+    mockHangs = false;
+
     // Panes no longer carry the root token, so the handshake file is a
     // trusted caller's only source. While Codara starts, the file lands just
     // after the socket listens: a call in that moment waits for it, and an
@@ -519,23 +869,41 @@ function sortedEqual(actual, expected, label) {
     process.env.CODARA_PI_DIRECT_TASK = "1";
     delete require.cache[require.resolve(SERVER)];
     const directMemoryBridge = require(SERVER);
-    await directMemoryBridge.callToolByName("codara_preview_snapshot", { runId: "run-spoofed", workspaceId: "unrelated" });
+    // A runId the model supplies is refused before anything reaches the
+    // socket: the launch-time stamp is the only route to a chat.
+    const callsBeforeSpoof = received.length;
+    for (const [tool, args] of [
+      ["codara_preview_snapshot", { runId: "run-spoofed" }],
+      ["codara_remember", { scope: "workspace", action: "add", bullets: ["x"], runId: "run-spoofed" }],
+      ["codara_terminal_close", { paneId: "pane-owned", runId: "run-spoofed" }],
+      ["codara_terminal_write", { paneId: "pane-owned", text: "pwd", runId: "run-spoofed" }],
+      ["codara_whiteboard_get", { runId: "run-spoofed" }],
+    ]) {
+      const refused = await directMemoryBridge.callToolByName(tool, args);
+      assert.strictEqual(refused.isError, true, `${tool} refuses a foreign runId`);
+      assert.match(refused.content[0].text, /does not accept runId/);
+    }
+    const spoofedBatch = await directMemoryBridge.callToolByName("codara_preview_run", {
+      steps: [{ action: "navigate", url: "https://example.test", runId: "run-spoofed" }],
+    });
+    assert.strictEqual(spoofedBatch.isError, true);
+    assert.strictEqual(received.length, callsBeforeSpoof, "a refused runId never reaches the socket");
+    // Repeating the session's own run id is harmless.
+    await directMemoryBridge.callToolByName("codara_preview_snapshot", { runId: "run-trusted", workspaceId: "unrelated" });
     assert.equal(received.at(-1).params.runId, "run-trusted", "browser observations use the calling run");
     assert.equal(received.at(-1).params.workspaceId, undefined, "browser workspace is resolved from the run");
+    assert.equal(received.at(-1).params.callerPid, undefined, "a run's browser is scoped by the run, not a pane");
     await directMemoryBridge.callToolByName("codara_preview_run", { steps: [
-      { action: "navigate", url: "https://example.test", runId: "run-spoofed", workspaceId: "unrelated" },
+      { action: "navigate", url: "https://example.test", workspaceId: "unrelated" },
     ] });
     assert.equal(received.at(-1).params.runId, "run-trusted", "batched browser actions use the same owner");
     assert.equal(received.at(-1).params.workspaceId, undefined);
-    await directMemoryBridge.callToolByName("codara_remember", { scope: "workspace", action: "add", bullets: ["Verified build fact"], runId: "run-spoofed" });
+    await directMemoryBridge.callToolByName("codara_remember", { scope: "workspace", action: "add", bullets: ["Verified build fact"] });
     assert.strictEqual(received.at(-1).method, "orchestrator.remember");
     assert.strictEqual(received.at(-1).params.runId, "run-trusted", "direct memory stays in the calling workspace/profile");
     delete process.env.CODARA_PI_DIRECT_TASK;
 
-    await directBridge.callToolByName("codara_terminal_close", {
-      paneId: "pane-owned",
-      runId: "run-spoofed",
-    });
+    await directBridge.callToolByName("codara_terminal_close", { paneId: "pane-owned" });
     assert.strictEqual(received.at(-1).method, "terminal.close");
     assert.strictEqual(
       received.at(-1).params.runId,
@@ -545,7 +913,6 @@ function sortedEqual(actual, expected, label) {
     await directBridge.callToolByName("codara_terminal_create", {
       cwd: HOME,
       retention: "service",
-      runId: "run-spoofed",
     });
     assert.strictEqual(
       received.at(-1).params.runId,
@@ -577,12 +944,9 @@ function sortedEqual(actual, expected, label) {
       "a CLI that cleared the environment sends only its pid",
     );
     assert.strictEqual(received.at(-1).params.callerPid, process.pid);
-    if (previousPaneId !== undefined) process.env.SPARK_AGENT_PANE_ID = previousPaneId;
-    if (previousLegacyPaneId !== undefined) process.env.SPARK_PANE_ID = previousLegacyPaneId;
     await directBridge.callToolByName("codara_terminal_write", {
       paneId: "pane-owned",
       text: "npm test",
-      runId: "run-spoofed",
     });
     assert.strictEqual(received.at(-1).method, "terminal.write");
     assert.strictEqual(
@@ -590,26 +954,108 @@ function sortedEqual(actual, expected, label) {
       "run-trusted",
       "terminal.write must use the trusted launch-time run identity",
     );
+    await directBridge.callToolByName("codara_terminal_run", { command: "npm test", timeoutMs: 5_000 });
+    assert.strictEqual(received.at(-1).method, "terminal.run");
+    assert.strictEqual(received.at(-1).params.runId, "run-trusted");
+    assert.strictEqual(received.at(-1).params.callerPid, process.pid, "a new run terminal opens beside the caller");
     delete process.env.SPARK_RUN_ID;
-    await directBridge.callToolByName("codara_terminal_close", {
-      paneId: "pane-null-scoped",
-      runId: "run-spoofed",
-    });
+    await directBridge.callToolByName("codara_terminal_close", { paneId: "pane-null-scoped" });
     assert.strictEqual(
       Object.prototype.hasOwnProperty.call(received.at(-1).params, "runId"),
       false,
-      "a null-scoped terminal caller must not be able to supply another run id",
+      "a null-scoped terminal caller carries no run id",
     );
-    await directBridge.callToolByName("codara_terminal_write", {
+    const nullScopedSpoof = await directBridge.callToolByName("codara_terminal_write", {
       paneId: "pane-null-scoped",
       text: "pwd",
       runId: "run-spoofed",
     });
-    assert.strictEqual(
-      Object.prototype.hasOwnProperty.call(received.at(-1).params, "runId"),
-      false,
-      "a null-scoped terminal write must not be able to supply another run id",
+    assert.strictEqual(nullScopedSpoof.isError, true, "a null-scoped caller cannot name a run");
+    assert.match(nullScopedSpoof.content[0].text, /not part of a Cora chat/);
+    // Outside a chat the browser, the terminal list and notifications follow
+    // the pane the agent runs in, never the workspace on screen.
+    process.env.SPARK_AGENT_PANE_ID = "pane-caller";
+    for (const [tool, rpc, args] of [
+      ["codara_preview_snapshot", "preview.snapshot", {}],
+      ["codara_terminal_list", "terminal.list", {}],
+    ]) {
+      await directBridge.callToolByName(tool, args);
+      assert.strictEqual(received.at(-1).method, rpc);
+      assert.strictEqual(received.at(-1).params.callerPaneId, "pane-caller", `${tool} names the caller's pane`);
+      assert.strictEqual(received.at(-1).params.callerPid, process.pid);
+    }
+    const noChat = await directBridge.callToolByName("codara_whiteboard_get", {});
+    assert.strictEqual(noChat.isError, true);
+    assert.match(noChat.content[0].text, /only works inside a Cora chat/);
+    delete require.cache[require.resolve(SERVER)];
+    const terminalAgentBridge = require(SERVER);
+    assert.ok(
+      terminalAgentBridge.listTools().some((tool) => tool.name === "codara_notify_user"),
+      "a terminal agent can notify the user",
     );
+    await terminalAgentBridge.callToolByName("codara_notify_user", { kind: "done", message: "Tests pass." });
+    assert.strictEqual(received.at(-1).method, "agent.notify");
+    assert.strictEqual(received.at(-1).params.callerPaneId, "pane-caller");
+    assert.strictEqual(received.at(-1).params.kind, "done");
+    // The workspace status follows the caller's pane as well: a workspace or
+    // client the call names is never the one used.
+    await terminalAgentBridge.callToolByName("codara_workspace_status", {
+      status: "in_review",
+      note: "PR open",
+      workspaceId: "ws-other",
+      callerClient: "spoofed",
+      callerPaneId: "pane-spoofed",
+    });
+    assert.strictEqual(received.at(-1).method, "workspace.status");
+    assert.strictEqual(received.at(-1).params.callerPaneId, "pane-caller");
+    assert.strictEqual(received.at(-1).params.callerPid, process.pid);
+    assert.strictEqual(received.at(-1).params.callerClient, "cora");
+    assert.strictEqual(received.at(-1).params.status, "in_review");
+    assert.ok(!("workspaceId" in received.at(-1).params), "the tool never names a workspace");
+    assert.ok(!("runId" in received.at(-1).params), "a terminal agent's status call names no run");
+    // A share offer carries the caller's pane, and a relative path is the
+    // agent's, resolved against its own working directory.
+    await terminalAgentBridge.callToolByName("codara_share_offer", { path: "report.md" });
+    assert.strictEqual(received.at(-1).method, "share.offer");
+    assert.strictEqual(received.at(-1).params.path, path.resolve(process.cwd(), "report.md"));
+    assert.strictEqual(received.at(-1).params.callerPaneId, "pane-caller");
+    await terminalAgentBridge.callToolByName("codara_share_offer", { path: "/abs/page.html" });
+    assert.strictEqual(received.at(-1).params.path, "/abs/page.html");
+    // Worktree calls carry who is asking from the launch environment only:
+    // spoofed caller fields are replaced, and a refusal reaches the model as
+    // an error result that keeps its code, blockers and hint.
+    await terminalAgentBridge.callToolByName("codara_worktree_list", {
+      callerRole: "manager",
+      callerClient: "spoofed",
+      callerPaneId: "pane-spoofed",
+      callerPid: 1,
+    });
+    assert.strictEqual(received.at(-1).method, "worktree.list");
+    assert.strictEqual(received.at(-1).params.callerRole, "studio");
+    assert.strictEqual(received.at(-1).params.callerClient, "cora");
+    assert.strictEqual(received.at(-1).params.callerPaneId, "pane-caller");
+    assert.strictEqual(received.at(-1).params.callerPid, process.pid);
+    assert.ok(!("runId" in received.at(-1).params), "a terminal agent's worktree call names no run");
+    mockResult = {
+      ok: false,
+      code: "WORKTREE_NOT_MERGED",
+      error: "'agent/x' has 2 commits not in origin/main",
+      hint: "push and merge it (PR), or ask the user to delete it from the workspace rail",
+      blockers: ["WORKTREE_NOT_MERGED"],
+    };
+    const refusedRemoval = await terminalAgentBridge.callToolByName("codara_worktree_remove", { workspaceId: "ws-1" });
+    assert.strictEqual(received.at(-1).method, "worktree.remove");
+    assert.strictEqual(refusedRemoval.isError, true, "a worktree refusal is a tool error");
+    assert.deepStrictEqual(JSON.parse(refusedRemoval.content[0].text), mockResult, "the refusal keeps every field");
+    mockResult = { ok: true };
+    const worktreeRunSpoof = await terminalAgentBridge.callToolByName("codara_worktree_create", { runId: "run-spoofed" });
+    assert.strictEqual(worktreeRunSpoof.isError, true, "a worktree call cannot name a run");
+    // The retired codara_preview_url stays callable for agents that know it.
+    await terminalAgentBridge.callToolByName("codara_preview_url", {});
+    assert.strictEqual(received.at(-1).method, "preview.url");
+    delete process.env.SPARK_AGENT_PANE_ID;
+    if (previousPaneId !== undefined) process.env.SPARK_AGENT_PANE_ID = previousPaneId;
+    if (previousLegacyPaneId !== undefined) process.env.SPARK_PANE_ID = previousLegacyPaneId;
     // Implicit preview tab picking in the renderer is scoped to the calling
     // run, so EVERY preview op must carry the run stamp — not just navigate.
     process.env.SPARK_RUN_ID = "run-trusted";
@@ -632,6 +1078,29 @@ function sortedEqual(actual, expected, label) {
       );
     }
     delete process.env.SPARK_RUN_ID;
+    // An agent with no run is scoped by the pane it runs in, so its browser
+    // calls name that pane (from the environment, never tool JSON) and its pid.
+    const previousPreviewPaneId = process.env.SPARK_AGENT_PANE_ID;
+    process.env.SPARK_AGENT_PANE_ID = "pane-browser-caller";
+    for (const [tool, rpc] of [
+      ["codara_preview_navigate", "preview.navigate"],
+      ["codara_preview_snapshot", "preview.snapshot"],
+      ["codara_preview_scroll", "preview.scroll"],
+    ]) {
+      await directBridge.callToolByName(tool, {
+        url: "http://127.0.0.1:4173/",
+        callerPaneId: "pane-spoofed",
+        callerPid: 1,
+        workspaceId: "ws-spoofed",
+      });
+      assert.strictEqual(received.at(-1).method, rpc);
+      assert.strictEqual(received.at(-1).params.callerPaneId, "pane-browser-caller", `${tool} names the agent's pane`);
+      assert.strictEqual(received.at(-1).params.callerPid, process.pid);
+      assert.strictEqual(received.at(-1).params.workspaceId, undefined);
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(received.at(-1).params, "runId"), false);
+    }
+    if (previousPreviewPaneId !== undefined) process.env.SPARK_AGENT_PANE_ID = previousPreviewPaneId;
+    else delete process.env.SPARK_AGENT_PANE_ID;
 
     const batch = await directBridge.callToolByName("codara_preview_run", {
       steps: [{ action: "navigate", url: "http://127.0.0.1:4173/" }],
@@ -639,7 +1108,7 @@ function sortedEqual(actual, expected, label) {
     assert.strictEqual(batch.isError, false, "the preview batch run-id helper must remain wired");
     assert.strictEqual(received.at(-1).method, "preview.navigate");
 
-    const geometry = { url: "http://127.0.0.1:4173/", viewport: { width: 600, height: 400 }, imageSize: { width: 1200, height: 800 }, scale: { x: 2, y: 2 } };
+    const geometry = { url: "http://127.0.0.1:4173/", path: "/codara/workspace-data/ws/browser/screenshots/shot.png", viewport: { width: 600, height: 400 }, imageSize: { width: 1200, height: 800 }, scale: { x: 2, y: 2 } };
     mockResult = { ...geometry, dataUrl: "data:image/png;base64,cGl4ZWxz" };
     const screenshot = await directBridge.callToolByName("codara_preview_screenshot", {});
     assert.strictEqual(screenshot.content[0].type, "image");
@@ -647,13 +1116,30 @@ function sortedEqual(actual, expected, label) {
     const screenshotBatch = await directBridge.callToolByName("codara_preview_run", { steps: [{ action: "screenshot" }] });
     assert.strictEqual(screenshotBatch.content[0].type, "image");
     assert.deepStrictEqual(JSON.parse(screenshotBatch.content[1].text).steps[0].result, { ...geometry, captured: true });
+    // A browser tool's image result keeps every field but the image, so a
+    // tool module can add one (a diff's regions) without editing this server.
+    mockResult = { ...geometry, dataUrl: "data:image/jpeg;base64,cGl4ZWxz", region: { x: 0, y: 0, width: 600, height: 400 }, changed: [{ x: 1, y: 2 }] };
+    const extended = await directBridge.callToolByName("codara_preview_screenshot", {});
+    assert.strictEqual(extended.content[0].mimeType, "image/jpeg");
+    assert.deepStrictEqual(JSON.parse(extended.content[1].text), { ...geometry, region: mockResult.region, changed: mockResult.changed });
+    const imageStep = await directBridge.callToolByName("codara_preview_run", { steps: [{ action: "snapshot" }] });
+    assert.strictEqual(imageStep.content[0].type, "image", "any step's image goes out as image content, never as text");
+    assert.doesNotMatch(imageStep.content[1].text, /cGl4ZWxz/);
 
     mockResult = { dataUrl: "data:image/png;base64,cGl4ZWxz", revision: 4, imageSize: { width: 900, height: 600 }, nodeIds: ["entry"], issues: [{ code: "missing-source" }], detailNeeded: false };
-    const whiteboardImage = await directBridge.callToolByName("codara_whiteboard_inspect", { runId: "run-map", baseRevision: 4 });
+    process.env.SPARK_RUN_ID = "run-map";
+    const whiteboardImage = await directBridge.callToolByName("codara_whiteboard_inspect", { baseRevision: 4 });
+    delete process.env.SPARK_RUN_ID;
     assert.strictEqual(received.at(-1).method, "orchestrator.whiteboard_inspect");
+    assert.strictEqual(received.at(-1).params.runId, "run-map");
     assert.strictEqual(whiteboardImage.content[0].type, "image");
     assert.strictEqual(JSON.parse(whiteboardImage.content[1].text).revision, 4);
     assert.deepStrictEqual(JSON.parse(whiteboardImage.content[1].text).issues, [{ code: "missing-source" }]);
+    mockResult = { dataUrl: "data:image/png;base64,cGl4ZWxz", revision: 5, layout: { nodes: ["large"] } };
+    process.env.SPARK_RUN_ID = "run-map";
+    const listedOnly = await directBridge.callToolByName("codara_whiteboard_inspect", { baseRevision: 5 });
+    delete process.env.SPARK_RUN_ID;
+    assert.deepStrictEqual(JSON.parse(listedOnly.content[1].text), { url: null, revision: 5 }, "other image results keep only the listed fields");
 
     mockResult = { ok: false, error: "selector did not become visible" };
     const failedSingle = await directBridge.callToolByName("codara_preview_wait_for", { selector: "#missing" });
@@ -672,6 +1158,139 @@ function sortedEqual(actual, expected, label) {
     assert.strictEqual(continuedBatch.isError, true);
     assert.strictEqual(JSON.parse(continuedBatch.content[0].text).ran, 2);
     mockResult = { ok: true };
+
+    // Socket error codes reach the agent with a readable label.
+    mockError = { code: -32003, message: "this capability is unavailable to the calling agent process" };
+    const forbidden = await directBridge.callToolByName("codara_terminal_read", { paneId: "pane-owned" });
+    assert.strictEqual(forbidden.isError, true);
+    assert.match(forbidden.content[0].text, /Codara error -32003: not allowed for this agent/);
+    mockError = null;
+
+    // Results are compact JSON.
+    mockResult = { ok: true, nested: { a: 1 } };
+    const compact = await directBridge.callToolByName("codara_terminal_read", { paneId: "pane-owned" });
+    assert.strictEqual(compact.content[0].text, JSON.stringify(mockResult), "results are not pretty-printed");
+    mockResult = { ok: true };
+
+    // An oversized payload is refused with a reason before it is sent; the
+    // board and whiteboard writes get the larger cap the socket allows them.
+    const beforeOversize = received.length;
+    const oversized = await directBridge.callToolByName("codara_preview_evaluate", { code: "x".repeat(70 * 1024) });
+    assert.strictEqual(oversized.isError, true);
+    assert.match(oversized.content[0].text, /Request too large: \d+ KB is over the 64 KB limit/);
+    assert.strictEqual(received.length, beforeOversize, "an oversized request never reaches the socket");
+    process.env.SPARK_RUN_ID = "run-trusted";
+    const bigBoard = await directBridge.callToolByName("codara_board_update", {
+      baseRevision: 1,
+      cards: Array.from({ length: 200 }, (_, index) => ({
+        id: `card-${index}`, title: "Card", status: "idea", order: index, description: "d".repeat(400),
+      })),
+    });
+    delete process.env.SPARK_RUN_ID;
+    assert.notStrictEqual(bigBoard.isError, true, "a board write over 64 KB is still delivered");
+    assert.strictEqual(received.at(-1).method, "orchestrator.board_update");
+
+    // A stale token reads as Codara having restarted, not as a raw 401.
+    mockStatus = 401;
+    const staleToken = await directBridge.callToolByName("codara_terminal_read", { paneId: "pane-owned" });
+    mockStatus = 200;
+    assert.strictEqual(staleToken.isError, true);
+    assert.match(staleToken.content[0].text, /rejected this session's credentials/);
+
+    // A crashed app leaves its handshake behind: a dead pid or a refused
+    // connection is reported as offline, and once Codara is known to be
+    // closed, calls stop waiting for it to start.
+    const liveHandshake = fs.readFileSync(handshakePath, "utf8");
+    const deadPid = await new Promise((resolve) => {
+      const child = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+      child.on("exit", () => resolve(child.pid));
+    });
+    fs.writeFileSync(handshakePath, JSON.stringify({ ...JSON.parse(liveHandshake), pid: deadPid }));
+    // The notification bridge is a separate module instance with its own
+    // handshake wait, so its call overlaps the one below instead of adding a
+    // second three-second wait; both see the same stale handshake.
+    const offlineNotifyCall = terminalAgentBridge.callToolByName("codara_notify_user", { kind: "done" });
+    const staleStartedAt = Date.now();
+    const stalePid = await directBridge.callToolByName("codara_terminal_read", { paneId: "pane-owned" });
+    assert.strictEqual(stalePid.isError, true);
+    assert.match(stalePid.content[0].text, new RegExp(`appears to be offline.*stale handshake from pid ${deadPid}`));
+    assert.ok(Date.now() - staleStartedAt < 10_000);
+    const fastStartedAt = Date.now();
+    const fastOffline = await directBridge.callToolByName("codara_terminal_read", { paneId: "pane-owned" });
+    assert.strictEqual(fastOffline.isError, true);
+    assert.ok(Date.now() - fastStartedAt < 1_000, "a repeat call while Codara is closed fails at once");
+    // The studio roster also loads in agents started outside Codara; a
+    // notification Codara cannot show is not a failure of the agent's task.
+    const offlineNotify = await offlineNotifyCall;
+    assert.notStrictEqual(offlineNotify.isError, true, "an offline notification is not a tool error");
+    assert.deepStrictEqual(JSON.parse(offlineNotify.content[0].text), { published: false, reason: "codara_offline" });
+    const offlineStatus = await terminalAgentBridge.callToolByName("codara_workspace_status", { note: "Tests pass" });
+    assert.notStrictEqual(offlineStatus.isError, true, "a status Codara cannot show is not a tool error");
+    assert.deepStrictEqual(JSON.parse(offlineStatus.content[0].text), { updated: false, reason: "codara_offline" });
+    const offlineShare = await terminalAgentBridge.callToolByName("codara_share_offer", { path: "/abs/page.html" });
+    assert.notStrictEqual(offlineShare.isError, true, "an offer Codara cannot show is not a tool error");
+    assert.strictEqual(JSON.parse(offlineShare.content[0].text).offered, false);
+    fs.writeFileSync(handshakePath, JSON.stringify({ url: "http://127.0.0.1:1", token: "f".repeat(64) }));
+    const refused = await directBridge.callToolByName("codara_terminal_read", { paneId: "pane-owned" });
+    assert.match(refused.content[0].text, /appears to be offline: nothing is listening/);
+    fs.writeFileSync(handshakePath, liveHandshake);
+    const backOnline = await directBridge.callToolByName("codara_terminal_read", { paneId: "pane-owned" });
+    assert.notStrictEqual(backOnline.isError, true, "an app that came back is used at once");
+
+    // Over stdio: a cancelled long poll aborts its HTTP request and gets no
+    // reply, and a batch with a progressToken reports each step.
+    const executeSession = stdioSession({ SPARK_MCP_MODE: "execute", SPARK_RUN_ID: "run-stdio" });
+    executeSession.send({ id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } });
+    await executeSession.next((msg) => msg.id === 1);
+    const heldBefore = heldRequests.length;
+    executeSession.send({
+      id: 9,
+      method: "tools/call",
+      params: { name: "codara_wait_for_workers", arguments: { worker_task_ids: ["task-1"] } },
+    });
+    for (let attempt = 0; attempt < 100 && heldRequests.length === heldBefore; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.strictEqual(heldRequests.length, heldBefore + 1, "the long poll reached the socket");
+    executeSession.send({ method: "notifications/cancelled", params: { requestId: 9, reason: "user pressed Esc" } });
+    for (let attempt = 0; attempt < 100 && !heldRequests.at(-1).closed; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.strictEqual(heldRequests.at(-1).closed, true, "cancelling closes the HTTP request behind the wait");
+    executeSession.send({
+      id: 10,
+      method: "tools/call",
+      params: {
+        name: "codara_preview_run",
+        arguments: { steps: [{ action: "snapshot" }, { action: "snapshot" }] },
+        _meta: { progressToken: "batch-1" },
+      },
+    });
+    await executeSession.next((msg) => msg.id === 10);
+    const progress = executeSession.messages.filter(
+      (msg) => msg.method === "notifications/progress" && msg.params.progressToken === "batch-1",
+    );
+    assert.deepStrictEqual(progress.map((msg) => [msg.params.progress, msg.params.total]), [[1, 2], [2, 2]]);
+    assert.ok(!executeSession.messages.some((msg) => msg.id === 9), "a cancelled request is never answered");
+    executeSession.close();
+
+    // A Cora manager's worktree call carries its run and role; a stdio
+    // client is named by its initialize clientInfo.
+    const managerSession = stdioSession({ SPARK_MCP_MODE: "execute", SPARK_RUN_ID: "run-stdio" });
+    managerSession.send({
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18", clientInfo: { name: "claude-code\u0007", version: "9" } },
+    });
+    await managerSession.next((msg) => msg.id === 1);
+    managerSession.send({ id: 2, method: "tools/call", params: { name: "codara_worktree_list", arguments: {} } });
+    await managerSession.next((msg) => msg.id === 2);
+    const managerCall = received.at(-1);
+    assert.strictEqual(managerCall.method, "worktree.list");
+    assert.strictEqual(managerCall.params.runId, "run-stdio");
+    assert.strictEqual(managerCall.params.callerRole, "manager");
+    assert.strictEqual(managerCall.params.callerClient, "claude-code");
+    managerSession.close();
 
     // The batched step schema is additionalProperties:false, so every field the
     // single-shot tool accepts must also be spelled out on the step items or a

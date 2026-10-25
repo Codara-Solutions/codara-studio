@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import type { GitConflictSide, GitOpResult } from "@shared/types";
 import { isRemotePath } from "@shared/remote";
+import { gitChildEnv } from "./git-env";
 import { errorText, runGit } from "./git-exec";
 import { invalidateGitCache } from "./git-ops";
 import { runRemoteGit } from "./remote/remote-git";
@@ -32,7 +33,7 @@ function runGitWithInput(cwd: string, args: string[], input: string): Promise<Gi
     const child = spawn(
       "git",
       ["-C", cwd, "-c", "credential.interactive=false", ...args],
-      { windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } },
+      { windowsHide: true, env: gitChildEnv() },
     );
     let stderr = "";
     child.stderr.on("data", (d) => {

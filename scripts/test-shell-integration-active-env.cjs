@@ -3,10 +3,10 @@
 
 // Running plain Studio shells follow the Active account. The bundled bash,
 // zsh and PowerShell prompt hooks re-read <codaraHome>/shell/active-cli-env
-// when its revision changed and export or unset CLAUDE_CONFIG_DIR and
-// GROK_HOME under one rule: a value is only written when the variable is
-// unset or already inside the managed accounts root, and only a value inside
-// that root is ever accepted. This suite drives the real scripts in a real
+// when its revision changed and export or unset CLAUDE_CONFIG_DIR,
+// CODEX_HOME and GROK_HOME under one rule: a value is only written when the
+// variable is unset or already inside Codara's directory for that CLI, and
+// only a value inside that directory is ever accepted. This suite drives the real scripts in a real
 // interactive shell (stdin piped, prompts still fire precmd) with a temp
 // SPARK_HOME_DIR, rewriting the pointer between prompts the way main does,
 // and asserts the environment converges:
@@ -39,20 +39,35 @@ const CLAUDE_A = path.join(CODARA, "claude-cli", "accounts", "aaaaaaaa-aaaa-4aaa
 const CLAUDE_B = path.join(CODARA, "claude-cli", "accounts", "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1");
 const CLAUDE_C = path.join(CODARA, "claude-cli", "accounts", "cccccccc-cccc-4ccc-8ccc-ccccccccccc1");
 const GROK_G = path.join(CODARA, "grok-cli", "accounts", "dddddddd-dddd-4ddd-8ddd-ddddddddddd1");
+const CLAUDE_LIVE = path.join(CODARA, "claude-cli", "live", "home");
+const CODEX_X = path.join(CODARA, "codex-cli", "accounts", "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeee1", "home");
+const CODEX_Y = path.join(CODARA, "codex-cli", "accounts", "ffffffff-ffff-4fff-8fff-fffffffffff1", "home");
+const PERSONAL_CODEX = path.join(TMP, "personal", "codex home");
 const USER_OWN = path.join(TMP, "elsewhere", "mine");
 const PERSONAL_CLAUDE = path.join(TMP, "personal", "claude home");
 const PERSONAL_GROK = path.join(TMP, "personal", "grok home");
 const STEP_TIMEOUT_MS = 15000;
 
-for (const dir of [HOME, path.dirname(POINTER), CLAUDE_A, CLAUDE_B, CLAUDE_C, GROK_G]) {
+for (const dir of [HOME, path.dirname(POINTER), CLAUDE_A, CLAUDE_B, CLAUDE_C, GROK_G, CLAUDE_LIVE, CODEX_X, CODEX_Y]) {
   fs.mkdirSync(dir, { recursive: true });
 }
 // A user's own DEBUG trap (bash-preexec, iTerm2, Starship all install one)
 // must keep firing after the follow trap is chained in front of it. The body
-// carries a single quote so the `trap -p` unquoting is exercised too.
+// carries a single quote so the `trap -p` unquoting is exercised too. Like
+// bash-preexec, the user's setup then replaces the DEBUG trap again from the
+// first prompt, after the rcfile ran, so the follow must win the trap back.
+const userTrap = (counter) => `trap '${counter}=$((${counter}+1)); __USER_DEBUG_QUOTE="it'"'"'s"' DEBUG`;
 fs.writeFileSync(
   path.join(HOME, ".bashrc"),
-  "trap '__USER_DEBUG_COUNT=$((__USER_DEBUG_COUNT+1)); __USER_DEBUG_QUOTE=\"it'\"'\"'s\"' DEBUG\n",
+  [
+    userTrap("__USER_DEBUG_COUNT"),
+    "__user_late_install() {",
+    `  ${userTrap("__USER_LATE_COUNT")}`,
+    '  PROMPT_COMMAND="${PROMPT_COMMAND//trap - DEBUG; __user_late_install/:}"',
+    "}",
+    'PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }trap - DEBUG; __user_late_install"',
+    "",
+  ].join("\n"),
 );
 
 let passes = 0;
@@ -69,8 +84,9 @@ function pass(name) {
 let revision = 1000;
 function writePointer(selectors, options = {}) {
   const rev = options.revision ?? ++revision;
-  const lines = [`codara-active-cli-env 1 ${rev}`];
+  const lines = [`codara-active-cli-env 2 ${rev}`];
   if (selectors.claude) lines.push(`CLAUDE_CONFIG_DIR=${selectors.claude}`);
+  if (selectors.codex) lines.push(`CODEX_HOME=${selectors.codex}`);
   if (selectors.grok) lines.push(`GROK_HOME=${selectors.grok}`);
   writeRaw(`${lines.join("\n")}\n`);
 }
@@ -180,6 +196,12 @@ class ShellDriver {
     return { claude: match[1], grok: match[2] };
   }
 
+  async probeCodex(id) {
+    this.send(`printf '@@${id}:%s@@\\n' "\${CODEX_HOME-unset}"`);
+    const match = await this.waitFor(new RegExp(`@@${id}:([^@%]*)@@`));
+    return match[1];
+  }
+
   async close() {
     this.send("exit");
     const result = await Promise.race([
@@ -241,6 +263,11 @@ async function followScenario(shell) {
   };
   try {
     await expect(CLAUDE_A, "unset", "spawn-time selector survives the first prompt");
+    let lateAtStart = 0;
+    if (shell.exe.endsWith("bash")) {
+      driver.send("printf '@@late:%s@@\\n' \"${__USER_LATE_COUNT-0}\"");
+      lateAtStart = Number((await driver.waitFor(/@@late:(\d+)@@/))[1]);
+    }
 
     writePointer({});
     await expect("unset", "unset", "a personal default unsets the spawn-time selector");
@@ -264,7 +291,7 @@ async function followScenario(shell) {
     writePointer({ claude: "/etc", grok: `${path.join(CODARA, "grok-cli", "accounts")}/../evil` });
     await expect(USER_OWN, "unset", "values outside the managed root are refused");
 
-    writeRaw(`codara-active-cli-env 1 ${++revision}\nGROK_HOME=${GROK_G}\u0001x\n`);
+    writeRaw(`codara-active-cli-env 2 ${++revision}\nGROK_HOME=${GROK_G}\u0001x\n`);
     await expect(USER_OWN, "unset", "a value with a control character is refused");
 
     writeRaw("garbage\nGROK_HOME=" + GROK_G + "\n");
@@ -282,11 +309,15 @@ async function followScenario(shell) {
 
     if (shell.exe.endsWith("bash")) {
       driver.send(
-        "printf '@@dbg:%s|%s@@\\n' \"${__USER_DEBUG_COUNT-unset}\" \"${__USER_DEBUG_QUOTE-unset}\"",
+        "printf '@@dbg:%s|%s|%s@@\\n' \"${__USER_DEBUG_COUNT-unset}\" \"${__USER_LATE_COUNT-unset}\" \"${__USER_DEBUG_QUOTE-unset}\"",
       );
-      const dbg = await driver.waitFor(/@@dbg:([^@%]*)\|([^@%]*)@@/);
+      const dbg = await driver.waitFor(/@@dbg:([^@%|]*)\|([^@%|]*)\|([^@%]*)@@/);
       assert.ok(Number(dbg[1]) > 5, `${shell.label}: the user's own DEBUG trap must keep firing (count ${dbg[1]})`);
-      assert.equal(dbg[2], "it's", `${shell.label}: the chained trap body keeps its quotes`);
+      assert.ok(
+        Number(dbg[2]) >= lateAtStart + 10,
+        `${shell.label}: the trap the user's setup installs later must keep firing (count ${lateAtStart} -> ${dbg[2]})`,
+      );
+      assert.equal(dbg[3], "it's", `${shell.label}: the chained trap body keeps its quotes`);
     }
   } finally {
     await driver.close();
@@ -296,6 +327,33 @@ async function followScenario(shell) {
     `${shell.label}: the hook must stay silent (output mentioned the pointer):\n${driver.output}`,
   );
   pass(`${shell.label}: running shell follows managed -> personal -> managed and keeps user values`);
+}
+
+// Codex follows the same way, from the Codex accounts directory only, and
+// the Claude live slot is accepted under claude-cli/.
+async function codexScenario(shell) {
+  writePointer({ codex: CODEX_X });
+  const driver = new ShellDriver(
+    shell.exe,
+    shell.args,
+    baseEnv({ ...shell.env, SPARK_FOLLOW_ACTIVE_ACCOUNT: "1", SPARK_PERSONAL_CODEX_HOME: PERSONAL_CODEX }),
+  );
+  try {
+    assert.equal(await driver.probeCodex("x1"), CODEX_X, `${shell.label}: an unset CODEX_HOME follows a managed default`);
+    writePointer({ codex: CODEX_Y, claude: CLAUDE_LIVE });
+    assert.equal(await driver.probeCodex("x2"), CODEX_Y, `${shell.label}: a Codex switch follows`);
+    assert.deepEqual(await driver.probe("x2c"), { claude: CLAUDE_LIVE, grok: "unset" }, `${shell.label}: the live slot is followed`);
+    writePointer({});
+    assert.equal(await driver.probeCodex("x3"), PERSONAL_CODEX, `${shell.label}: the System login restores the custom home`);
+    writePointer({ codex: path.join(CODARA, "grok-cli", "accounts", "x") });
+    assert.equal(await driver.probeCodex("x4"), PERSONAL_CODEX, `${shell.label}: a value outside codex-cli/accounts is refused`);
+    await driver.sendAndSettle(`export CODEX_HOME=${JSON.stringify(USER_OWN)}`);
+    writePointer({ codex: CODEX_X });
+    assert.equal(await driver.probeCodex("x5"), USER_OWN, `${shell.label}: a user-set CODEX_HOME is never touched`);
+  } finally {
+    await driver.close();
+  }
+  pass(`${shell.label}: CODEX_HOME follows the pointer under the same rules`);
 }
 
 async function noFlagScenario(shell) {
@@ -400,7 +458,7 @@ function pwshScenario() {
   const probe = (id) =>
     `Write-Output ("@@${id}:" + $(if ($env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR } else { 'unset' }) + "|" + $(if ($env:GROK_HOME) { $env:GROK_HOME } else { 'unset' }) + "@@")`;
   const pointer = (rev, lines) =>
-    `[System.IO.File]::WriteAllText(${quote(POINTER)}, "codara-active-cli-env 1 ${rev}\`n${lines.map((l) => `${l}\`n`).join("")}")`;
+    `[System.IO.File]::WriteAllText(${quote(POINTER)}, "codara-active-cli-env 2 ${rev}\`n${lines.map((l) => `${l}\`n`).join("")}")`;
   const script = [
     `$ErrorActionPreference = 'Continue'`,
     `Remove-Item Env:SPARK_NO_SHELL_INTEGRATION,Env:SPARK_SHELL_INTEGRATION_LOADED -ErrorAction SilentlyContinue`,
@@ -498,12 +556,13 @@ function sourcePins() {
     assert.ok(text.includes("codara-active-cli-env"), `${name} requires the header word`);
     assert.ok(!/\beval\b/.test(text), `${name} must never eval the pointer`);
     assert.ok(!/Invoke-Expression|\biex\b/.test(text), `${name} must never invoke the pointer`);
-    assert.ok(!text.includes("CODEX_HOME"), `${name} never touches CODEX_HOME`);
+    assert.ok(text.includes("CODEX_HOME"), `${name} follows CODEX_HOME`);
     assert.ok(!/(?:source|\.)\s+"\$file"/.test(text), `${name} must never source the pointer`);
   }
   for (const name of ["bashrc.bash", "zshrc.zsh"]) {
     const text = scripts[name];
-    assert.ok(text.includes('"$claude_root"?*'), `${name} accepts only values under claude-cli/accounts/`);
+    assert.ok(text.includes('"$claude_root"?*'), `${name} accepts only values under claude-cli/`);
+    assert.ok(text.includes('"$codex_root"?*'), `${name} accepts only values under codex-cli/accounts/`);
     assert.ok(text.includes('"$grok_root"?*'), `${name} accepts only values under grok-cli/accounts/`);
     assert.ok(!/\$\(/.test(text.slice(text.indexOf("_spark_follow_active_account()"), text.indexOf("_spark_precmd()"))), `${name} hook forks nothing`);
     assert.ok(!/mapfile|declare -A|typeset -A/.test(text), `${name} stays bash 3.2 safe`);
@@ -522,8 +581,15 @@ function sourcePins() {
     "zshrc.zsh follows the pointer in preexec",
   );
   assert.ok(
-    /trap "_spark_follow_active_account\$\{__spark_trap_body:\+;\$__spark_trap_body\}" DEBUG/.test(scripts["bashrc.bash"]),
+    /_spark_follow_trap_hit\(\) \{\n\s*__SPARK_FOLLOW_TRAP_HIT=1\n\s*_spark_follow_active_account/.test(scripts["bashrc.bash"]) &&
+      scripts["bashrc.bash"].includes('__SPARK_FOLLOW_TRAP="_spark_follow_trap_hit \\"\\$_\\"${body:+;$body}"'),
     "bashrc.bash follows the pointer from a chained DEBUG trap",
+  );
+  assert.ok(
+    scripts["bashrc.bash"].includes(
+      '}__SPARK_FOLLOW_TRAP_HIT=; [ -n \\"\\$__SPARK_FOLLOW_TRAP_HIT\\" ] || { _spark_follow_trap_for \\"\\$(trap -p DEBUG)\\";',
+    ),
+    "bashrc.bash re-chains its DEBUG trap from the prompt when another hook replaced it",
   );
   const pty = fs.readFileSync(path.join(ROOT, "src", "main", "pty-manager.ts"), "utf8");
   assert.ok(pty.includes('env.SPARK_FOLLOW_ACTIVE_ACCOUNT = "1"'), "pty-manager exports the flag");
@@ -545,6 +611,7 @@ async function main() {
   assert.ok(SHELLS.length > 0 || pwsh.status === 0, "no supported shell found to drive");
   for (const shell of SHELLS) {
     await followScenario(shell);
+    await codexScenario(shell);
     await customPersonalScenario(shell);
     await noFlagScenario(shell);
     await followOnlyScenario(shell);

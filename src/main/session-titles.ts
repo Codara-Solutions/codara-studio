@@ -1,6 +1,6 @@
 // Shared transcript-title extraction for the two session listers
-// (agent-history.ts → pane-toolbar clock menu, worker-sessions.ts → the
-// worker session picker and Settings). Claude Code writes an LLM-generated
+// (agent-history.ts → pane-toolbar clock menu, worker-sessions.ts → Settings)
+// and the session index's prompt cleaning. Claude Code writes an LLM-generated
 // `{"type":"ai-title","aiTitle":"…"}` record into most transcripts shortly
 // after a session starts — the best available description of a session — so
 // both listers prefer it and fall back to the first real user message. This
@@ -34,15 +34,21 @@ const WRAPPER_BLOCK_RE = new RegExp(
   "gi",
 );
 
+// Strip injected wrappers, image placeholders and the AGENTS.md header,
+// keeping the rest of the text (and its line breaks) as written.
+export function stripInjectedContext(raw: string): string {
+  return raw
+    .replace(/^\s*# AGENTS\.md instructions for [^\r\n]*(?:\r?\n|$)/gim, " ")
+    .replace(WRAPPER_BLOCK_RE, " ")
+    .replace(/<image\b[^>]*>(?:[\s\S]*?<\/image>)?/gi, " ")
+    .replace(/\[Image #\d+\]/g, " ");
+}
+
 // Strip injected wrappers and collapse whitespace; null when nothing genuine
 // remains. The "Caveat: " check catches the bare first-run banner Claude Code
 // emits outside any wrapper tag.
 export function sanitizeUserText(raw: string): string | null {
-  const cleaned = raw
-    .replace(/^\s*# AGENTS\.md instructions for [^\r\n]*(?:\r?\n|$)/gim, " ")
-    .replace(WRAPPER_BLOCK_RE, " ")
-    .replace(/<image\b[^>]*>(?:[\s\S]*?<\/image>)?/gi, " ")
-    .replace(/\[Image #\d+\]/g, " ")
+  const cleaned = stripInjectedContext(raw)
     .replace(/\s+/g, " ")
     .trim();
   if (!cleaned || cleaned.startsWith("Caveat: ")) return null;

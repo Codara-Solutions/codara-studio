@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// test-runner: heavy (peaks near 240 MB)
 "use strict";
 
 const fs = require("node:fs");

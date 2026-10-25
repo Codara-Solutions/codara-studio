@@ -76,8 +76,21 @@ export function createTerminalViewportRecovery(
   };
   const observe = () => {
     if (restoring) return;
-    if (recovering || following) restore();
-    else remember();
+    if (recovering) {
+      restore();
+    } else if (following) {
+      // Runs on every parsed write. Outside a recovery window xterm keeps its
+      // own scrollbar in step while it follows the bottom, so the buffer
+      // position is the only thing to check; restore() reads layout, and
+      // doing that per write forced a synchronous layout per write.
+      const buffer = terminal.buffer.active;
+      if (buffer.viewportY < buffer.baseY) restore();
+    } else {
+      remember();
+      // Back at the bottom outside a gesture (the user scrolled down, or
+      // xterm scrolled there on a keystroke): follow again.
+      if (timer === null && !suspended && position.atBottom) following = true;
+    }
   };
   // Native scrolling suppresses xterm's public onScroll event. Register after
   // xterm's handler so wheel/scrollbar positions are captured from its buffer.
@@ -98,6 +111,14 @@ export function createTerminalViewportRecovery(
       following = false;
       suspended = false;
       remember();
+      // A click or keystroke at the bottom must not stop the follow for the
+      // rest of the turn. Once the native gesture has settled, follow again
+      // only if it left the viewport at the bottom.
+      timer = window.setTimeout(() => {
+        timer = null;
+        remember();
+        following = position.atBottom;
+      }, 250);
     },
     restoreSnapshot(viewportFromBottom: number) {
       if (disposed) return;
