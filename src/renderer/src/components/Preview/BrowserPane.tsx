@@ -741,9 +741,26 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
           /* webview not yet dom-ready */
         }
       },
-      loadURL: (next: string) => {
-        const wv = getLiveWebview();
-        if (!wv) return Promise.resolve<LoadOutcome>("loaded");
+      loadURL: async (next: string) => {
+        const deadline = Date.now() + LOAD_TIMEOUT_MS;
+        const live = async () => {
+          for (;;) {
+            const wv = getLiveWebview();
+            if (wv || Date.now() >= deadline) return wv;
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+        };
+        // A tab with no ready page takes no loadURL, and returning would drop
+        // the URL. An empty tab opens at it, as its address bar does; a page
+        // still loading (a tab woken on a slow dev server) is waited for.
+        const tabAsleep = tabIdRef.current ? isTabAsleep(tabIdRef.current) : false;
+        if (!getLiveWebview() && !webviewRef.current && !tabAsleep) {
+          urlRef.current = next;
+          onUrlChangeRef.current(next);
+          return (await live()) ? "loaded" : "timeout";
+        }
+        const wv = await live();
+        if (!wv) return "timeout";
         return new Promise<LoadOutcome>((resolve) => {
           const sameUrl = (raw: string) => {
             try {
@@ -757,14 +774,22 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
           // DOMContentLoaded, a pushState, the end of its load), which lives
           // until the new one commits. So none counts before this load
           // started, dom-ready only once it committed, and a same-page move
-          // only to this load's URL. A 204 or a download sends no
+          // only to this load's URL. The first cross-page start after the
+          // call is this load even when Chromium spells the URL its own way
+          // (file://localhost/...), or one that replaced it; either way the
+          // page it brings is the one the call reached. A 204 or a download sends no
           // did-fail-load, only did-stop-loading; a -3 for another URL is the
           // earlier load this one replaced.
           let started = false;
           let committed = false;
           let afterCommit: ReturnType<typeof setTimeout> | undefined;
-          const onStart = (e: { isMainFrame?: boolean; url?: string }) => {
-            if (e.isMainFrame !== false && e.url && ours.has(sameUrl(e.url))) started = true;
+          const onStart = (e: { isMainFrame?: boolean; isInPlace?: boolean; url?: string }) => {
+            if (e.isMainFrame === false || !e.url) return;
+            if (ours.has(sameUrl(e.url))) started = true;
+            else if (!started && e.isInPlace === false) {
+              started = true;
+              ours.add(sameUrl(e.url));
+            }
           };
           const onRedirect = (e: { isMainFrame?: boolean; url?: string }) => {
             if (e.isMainFrame !== false && e.url) ours.add(sameUrl(e.url));
@@ -782,7 +807,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
             finish("loaded");
           };
           const ends = ["dom-ready", "did-navigate-in-page", "did-fail-load", "did-stop-loading"];
-          const timer = setTimeout(() => finish(committed ? "committed" : "timeout"), LOAD_TIMEOUT_MS);
+          const timer = setTimeout(() => finish(committed ? "committed" : "timeout"), Math.max(0, deadline - Date.now()));
           const finish = (outcome: LoadOutcome) => {
             clearTimeout(timer);
             clearTimeout(afterCommit);
