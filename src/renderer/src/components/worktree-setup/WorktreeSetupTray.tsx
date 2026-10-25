@@ -79,14 +79,16 @@ export default function WorktreeSetupTray(): React.ReactElement | null {
       })
       .catch(() => undefined);
     const off = window.spark.worktreeSetup.onChanged(upsert);
+    const offDismissed = window.spark.worktreeSetup.onDismissed(forget);
     const pending = timers.current;
     return () => {
       cancelled = true;
       off();
+      offDismissed();
       for (const timer of pending.values()) window.clearTimeout(timer);
       pending.clear();
     };
-  }, [upsert]);
+  }, [upsert, forget]);
 
   const act = useCallback(async (id: string, action: () => Promise<unknown>) => {
     setBusyIds((current) => new Set(current).add(id));

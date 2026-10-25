@@ -186,6 +186,138 @@ async function main() {
     assert.equal(checkedOut.mode, "checkout");
     assert.equal((await aw.createAgentWorktree(terminalAgent, { branch: "main", checkout: true }, deps)).code, "WORKTREE_RESERVED_BRANCH");
 
+    // ── In another workspace ───────────────────────────────────────────────
+    // A coordinator in a plain folder, once the user allowed it into the
+    // repository's workspace (terminal.create's worktree option), makes the
+    // worktree there; the workspace never comes from the tool JSON.
+    const notes = path.join(scratch, "notes");
+    fs.mkdirSync(notes, { recursive: true });
+    h.state.workspaces.push({ id: "ws-notes", name: "notes", cwd: notes, color: "#654321", workers: [] });
+    h.paneWorkspace["pane-coord"] = "ws-notes";
+    const coordinator = { role: "studio", client: "claude-code", paneId: "pane-coord" };
+    assert.equal((await aw.createAgentWorktree(coordinator, { branch: "agent/from-notes" }, deps)).code, "WORKTREE_NOT_A_REPO");
+    const elsewhere = await aw.createAgentWorktree({ ...coordinator, workspaceId: "ws-repo" }, { branch: "agent/from-notes" }, deps);
+    assert.equal(elsewhere.ok, true, JSON.stringify(elsewhere));
+    assert.equal(elsewhere.sourceWorkspaceId, "ws-repo");
+    assert.equal(workspaceOf(elsewhere.workspaceId).copyBranch.repoCwd, repo);
+    assert.equal(workspaceOf(elsewhere.workspaceId).copyBranch.createdBy.paneId, "pane-coord");
+    assert.equal((await aw.createAgentWorktree({ ...coordinator, workspaceId: "ws-gone" }, {}, deps)).code, "WORKTREE_NO_WORKSPACE");
+
+    // Its maker finds it again from the plain folder: by workspaceId for
+    // setup and remove, and in list under elsewhere. Another agent there
+    // does not.
+    h.paneWorkspace["pane-other"] = "ws-notes";
+    const bystander = { role: "studio", client: "codex", paneId: "pane-other" };
+    const setupFromNotes = await aw.getAgentWorktreeSetup(coordinator, { workspaceId: elsewhere.workspaceId }, deps);
+    assert.equal(setupFromNotes.ok, true, JSON.stringify(setupFromNotes));
+    const dryRemove = await aw.removeAgentWorktree(coordinator, { workspaceId: elsewhere.workspaceId, dryRun: true }, deps);
+    assert.equal(dryRemove.ok, true, JSON.stringify(dryRemove));
+    assert.equal(dryRemove.wouldRemove, true, JSON.stringify(dryRemove));
+    assert.equal((await aw.removeAgentWorktree(bystander, { workspaceId: elsewhere.workspaceId, dryRun: true }, deps)).ok, false);
+    const listedFromNotes = await aw.listAgentWorktrees(coordinator, {}, deps);
+    assert.equal(listedFromNotes.ok, true, JSON.stringify(listedFromNotes));
+    assert.deepEqual(
+      listedFromNotes.elsewhere.map((item) => [item.workspaceId, item.branch, item.repoCwd]),
+      [[elsewhere.workspaceId, "agent/from-notes", repo]],
+    );
+    assert.equal((await aw.listAgentWorktrees(bystander, {}, deps)).code, "WORKTREE_NOT_A_REPO");
+    assert.equal(
+      (await aw.listAgentWorktrees(terminalAgent, {}, deps)).elsewhere,
+      undefined,
+      "a worktree in the caller's own repository is listed only once, under worktrees",
+    );
+
+    // terminal.create's worktree: never waits for setup (its call has 60 s,
+    // part of it spent on the approval card), never opens in a checkout
+    // another agent made, and goes again when the terminal does not open.
+    const waits = [];
+    const setupStatus = { id: "setup-1", state: "running", waitForSetup: true };
+    const withSetup = {
+      ...deps,
+      worktreeSetup: {
+        start: async () => setupStatus,
+        whenPrepared: async () => setupStatus,
+        waitFor: async (id, ms) => {
+          waits.push(ms);
+          return { ...setupStatus, state: "succeeded" };
+        },
+        get: async () => null,
+        tail: async () => "",
+        summary: (status) => ({ state: status.state }),
+      },
+    };
+    const forTerminal = await aw.createTerminalWorktree({ ...coordinator, workspaceId: "ws-repo" }, { branch: "agent/term" }, withSetup);
+    assert.equal(forTerminal.ok, true, JSON.stringify(forTerminal));
+    assert.deepEqual(waits, [], "the setup runs on while the terminal opens");
+    assert.equal(forTerminal.setup.state, "running");
+    const reused = await aw.createTerminalWorktree({ ...coordinator, workspaceId: "ws-repo" }, { branch: "agent/term" }, deps);
+    assert.equal(reused.ok, true, "its maker may open another terminal in it");
+    assert.equal(reused.created, false);
+    const taken = await aw.createTerminalWorktree({ ...bystander, workspaceId: "ws-repo" }, { branch: "agent/term" }, deps);
+    assert.equal(taken.code, "WORKTREE_NOT_YOURS", JSON.stringify(taken));
+    assert.ok(
+      fs.readFileSync(auditFile, "utf8").trim().split("\n").map((entry) => JSON.parse(entry))
+        .some((entry) => entry.outcome === "refused" && entry.code === "WORKTREE_NOT_YOURS" && entry.branch === "agent/term"),
+      "a refused shared checkout is on the audit log",
+    );
+    assert.equal((await aw.rollBackTerminalWorktree(coordinator, reused, deps)).removed, false, "one that was there before stays");
+    const rolledBack = await aw.rollBackTerminalWorktree(coordinator, forTerminal, deps);
+    assert.equal(rolledBack.removed, true, JSON.stringify(rolledBack));
+    assert.equal(fs.existsSync(forTerminal.path), false);
+    assert.equal(refExists(repo, "refs/heads/agent/term"), false);
+    assert.equal(workspaceOf(forTerminal.workspaceId), undefined);
+    // Asked again from the other workspace, the removal answers as removed.
+    const retriedElsewhere = await aw.removeAgentWorktree(coordinator, { workspaceId: forTerminal.workspaceId }, deps);
+    assert.equal(retriedElsewhere.alreadyRemoved, true, JSON.stringify(retriedElsewhere));
+    assert.notEqual(
+      (await aw.removeAgentWorktree(bystander, { workspaceId: forTerminal.workspaceId }, deps)).alreadyRemoved,
+      true,
+      "another agent learns nothing about it",
+    );
+    // Its setup usually still runs (npm install) when the terminal fails: it
+    // is stopped and its card dismissed first, or the process scan would
+    // refuse the rollback and leave the worktree behind.
+    const stops = [];
+    const dismissals = [];
+    let stopClears = true;
+    const installing = {
+      ...withSetup,
+      worktreeSetup: {
+        ...withSetup.worktreeSetup,
+        stop: async (idOrPath, timeoutMs) => {
+          stops.push([idOrPath, timeoutMs]);
+          if (stopClears) h.processes = [];
+          return true;
+        },
+        dismiss: async (idOrPath) => {
+          dismissals.push(idOrPath);
+        },
+      },
+    };
+    // A removal still refused (a shell left in it) keeps the setup's card,
+    // so the user can still see and rerun the half-run setup.
+    const shellLeft = await aw.createTerminalWorktree({ ...coordinator, workspaceId: "ws-repo" }, { branch: "agent/shell-left" }, installing);
+    assert.equal(shellLeft.ok, true, JSON.stringify(shellLeft));
+    stopClears = false;
+    h.processes = [{ pid: 4344, command: "zsh" }];
+    const refusedRollback = await aw.rollBackTerminalWorktree(coordinator, shellLeft, installing);
+    h.processes = [];
+    stopClears = true;
+    assert.equal(refusedRollback.removed, false, JSON.stringify(refusedRollback));
+    assert.deepEqual(dismissals, [], "a refused rollback keeps the setup card");
+    assert.ok(stops[0][1] > 0 && stops[0][1] <= 10_000, `the setup stop wait is capped: ${stops[0][1]}`);
+    assert.equal((await aw.removeAgentWorktree(coordinator, { workspaceId: shellLeft.workspaceId }, deps)).removed, true);
+    stops.length = 0;
+    const busy = await aw.createTerminalWorktree({ ...coordinator, workspaceId: "ws-repo" }, { branch: "agent/installing" }, installing);
+    assert.equal(busy.ok, true, JSON.stringify(busy));
+    h.processes = [{ pid: 4343, command: "npm install" }];
+    const stoppedFirst = await aw.rollBackTerminalWorktree(coordinator, busy, installing);
+    h.processes = [];
+    assert.equal(stoppedFirst.removed, true, JSON.stringify(stoppedFirst));
+    assert.deepEqual(stops.map(([idOrPath]) => idOrPath), [busy.path]);
+    assert.deepEqual(dismissals, [busy.path], "the card goes once the worktree is gone");
+    assert.equal(fs.existsSync(busy.path), false);
+
     // ── Who may call ───────────────────────────────────────────────────────
     for (const role of ["worker", "automation"]) {
       const refused = await aw.createAgentWorktree({ role, client: "cora" }, {}, deps);

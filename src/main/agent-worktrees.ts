@@ -70,6 +70,9 @@ export interface WorktreeCaller {
   runId?: string;
   // The terminal pane the calling agent runs in, already resolved.
   paneId?: string;
+  // Another workspace the call acts in, already allowed by the user through
+  // the cross-workspace terminal grant. Never read from tool JSON.
+  workspaceId?: string;
 }
 
 export type WorktreeCode =
@@ -205,6 +208,11 @@ export interface AgentWorktreeSetupRunner {
   get(idOrPath: string): Promise<WorktreeSetupStatus | null>;
   tail(id: string, lines: number): Promise<string>;
   summary(status: WorktreeSetupStatus, logTail: string): Record<string, unknown>;
+  // Stops a setup still going in the worktree and waits (at most timeoutMs)
+  // until it no longer writes there. False when it did not stop in time.
+  stop?(idOrPath: string, timeoutMs: number): Promise<boolean>;
+  // Takes its card off the tray, once the worktree is gone.
+  dismiss?(idOrPath: string): Promise<void>;
 }
 
 // codara_worktree_create waits at most this long for a setup that asks
@@ -217,6 +225,9 @@ const SETUP_LOG_LINES_MAX = 200;
 
 const AGENT_WORKTREE_LIMIT = 20;
 const FETCH_TIMEOUT_MS = 30_000;
+// A rolled-back terminal worktree waits this long for its setup to stop; the
+// MCP server's TERMINAL_WORKTREE_TIMEOUT_MS counts it in.
+const ROLLBACK_SETUP_STOP_MS = 10_000;
 const PANE_LOOKUP_TIMEOUT_MS = 2_000;
 const LIST_ITEM_BUDGET_MS = 10_000;
 const LIST_CONCURRENCY = 4;
@@ -647,14 +658,38 @@ async function deepestWorkspaceContaining(state: AppState, cwd: string): Promise
   return best?.workspace;
 }
 
+// The agent that made a worktree, by the pane or run it called from.
+function madeBy(workspace: Workspace, caller: WorktreeCaller): boolean {
+  return createdByCaller(workspace.copyBranch?.createdBy, caller);
+}
+
+function createdByCaller(creator: NonNullable<Workspace["copyBranch"]>["createdBy"], caller: WorktreeCaller): boolean {
+  if (creator?.kind !== "agent") return false;
+  return (
+    (caller.paneId !== undefined && creator.paneId === caller.paneId) ||
+    (caller.runId !== undefined && creator.runId === caller.runId)
+  );
+}
+
+/**
+ * `repoOf` names a worktree the caller made: its repository is the scope's,
+ * wherever the caller runs now. A coordinator that made a worktree in
+ * another workspace (terminal.create's worktree option) finds it again that
+ * way. A worktree someone else made leaves the scope as it was.
+ */
 export async function resolveWorktreeScope(
   caller: WorktreeCaller,
   deps: AgentWorktreeDeps,
   run?: RunState,
+  options: { repoOf?: string } = {},
 ): Promise<WorktreeScope | WorktreeRefusal> {
   const state = await deps.loadState();
   let callerWorkspace: Workspace | undefined;
-  if (run) {
+  if (caller.workspaceId) {
+    callerWorkspace = state.workspaces.find((workspace) => workspace.id === caller.workspaceId);
+    if (!callerWorkspace) return refusal("WORKTREE_NO_WORKSPACE");
+  }
+  if (!callerWorkspace && run) {
     callerWorkspace = state.workspaces.find((workspace) => workspace.id === run.workspaceId);
     const snapshotCwd = run.settingsSnapshot?.workspaceCwd;
     if (!callerWorkspace && typeof snapshotCwd === "string" && snapshotCwd) {
@@ -685,7 +720,15 @@ export async function resolveWorktreeScope(
   if (callerWorkspace.remote || isRemotePath(callerWorkspace.cwd)) {
     return refusal("WORKTREE_REMOTE_UNSUPPORTED");
   }
-  const source = callerWorkspace.copyBranch?.repoCwd ?? callerWorkspace.cwd;
+  const made = options.repoOf ? state.workspaces.find((workspace) => workspace.id === options.repoOf) : undefined;
+  const removed = options.repoOf && !made ? removedRepos.get(options.repoOf) : undefined;
+  const madeRepo =
+    made?.copyBranch && !isRemotePath(made.copyBranch.repoCwd) && madeBy(made, caller)
+      ? made.copyBranch.repoCwd
+      : removed && createdByCaller(removed.createdBy, caller)
+        ? removed.repoCwd
+        : null;
+  const source = madeRepo ?? callerWorkspace.copyBranch?.repoCwd ?? callerWorkspace.cwd;
   let repoCwd: string;
   try {
     const sourceReal = await fsp.realpath(source);
@@ -915,6 +958,71 @@ export async function createAgentWorktree(
       .catch(() => undefined);
   }
   return result;
+}
+
+/**
+ * terminal.create's worktree option. It never waits for the worktree's setup:
+ * the MCP server gives the call room for the approval card, the worktree, the
+ * terminal and a rollback (TERMINAL_WORKTREE_TIMEOUT_MS), not for a setup of
+ * up to 5 minutes, and a command started after the caller gave up would run
+ * unattended. A branch whose worktree another agent made is refused, so a
+ * terminal never opens in someone else's checkout.
+ */
+export async function createTerminalWorktree(
+  caller: WorktreeCaller,
+  input: Pick<CreateWorktreeInput, "branch" | "base" | "purpose">,
+  deps: AgentWorktreeDeps,
+): Promise<Record<string, unknown> | WorktreeRefusal> {
+  const made = await createAgentWorktree(caller, { ...input, waitForSetup: false }, deps);
+  if (isRefusal(made) || made.created !== false) return made;
+  const existing = (await deps.loadState()).workspaces.find((workspace) => workspace.id === made.workspaceId);
+  if (existing && madeBy(existing, caller)) return made;
+  const refused = refusal("WORKTREE_NOT_YOURS", `another agent's worktree is on ${String(made.branch)}; pick another branch`, {
+    workspaceId: made.workspaceId,
+    branch: made.branch,
+  });
+  await deps
+    .audit({
+      action: "create",
+      outcome: "refused",
+      code: refused.code,
+      caller,
+      repo: existing?.copyBranch?.repoCwd ?? null,
+      workspaceId: typeof made.workspaceId === "string" ? made.workspaceId : undefined,
+      branch: typeof made.branch === "string" ? made.branch : null,
+    })
+    .catch(() => undefined);
+  return refused;
+}
+
+/**
+ * Takes back the worktree createTerminalWorktree made when its terminal did
+ * not open, through the same guarded removal as codara_worktree_remove. One
+ * that existed before the call stays. Its setup is stopped first: it rarely
+ * has finished (the call does not wait for it) and its commands would fail
+ * the removal's process scan. Its card leaves the tray only with the
+ * worktree, so a worktree that stays keeps a way to rerun its setup.
+ */
+export async function rollBackTerminalWorktree(
+  caller: WorktreeCaller,
+  made: Record<string, unknown>,
+  deps: AgentWorktreeDeps,
+): Promise<{ removed: boolean; reason?: string }> {
+  if (made.created !== true || typeof made.workspaceId !== "string") {
+    return { removed: false, reason: "it was there before this call" };
+  }
+  const setupPath = typeof made.path === "string" ? made.path : null;
+  if (deps.worktreeSetup?.stop && setupPath) {
+    await deps.worktreeSetup.stop(setupPath, ROLLBACK_SETUP_STOP_MS).catch(() => false);
+  }
+  const removed = await removeAgentWorktree(caller, { workspaceId: made.workspaceId, deleteBranch: true }, deps).catch(
+    (err: unknown) => refusal("WORKTREE_GIT_FAILED", cleanText(errorText(err), 300)),
+  );
+  if (isRefusal(removed)) return { removed: false, reason: `${removed.code}: ${removed.error}` };
+  if (removed.removed === true && deps.worktreeSetup?.dismiss && setupPath) {
+    await deps.worktreeSetup.dismiss(setupPath).catch(() => undefined);
+  }
+  return { removed: removed.removed === true };
 }
 
 async function createAgentWorktreeInner(
@@ -1744,7 +1852,7 @@ export async function getAgentWorktreeSetup(
 ): Promise<Record<string, unknown> | WorktreeRefusal> {
   const gate = await gateCaller(caller, deps, { mutation: false });
   if (isRefusal(gate)) return gate;
-  const scope = await resolveWorktreeScope(caller, deps, gate.run);
+  const scope = await resolveWorktreeScope(caller, deps, gate.run, { repoOf: input.workspaceId });
   if (isRefusal(scope)) return scope;
   const managed = await managedWorkspaces(scope);
   let workspace: Workspace | undefined;
@@ -1802,7 +1910,12 @@ export async function listAgentWorktrees(
   const gate = await gateCaller(caller, deps, { mutation: false });
   if (isRefusal(gate)) return gate;
   const scope = await resolveWorktreeScope(caller, deps, gate.run);
-  if (isRefusal(scope)) return scope;
+  if (isRefusal(scope)) {
+    // A coordinator in a plain folder still sees the worktrees it made.
+    if (scope.code !== "WORKTREE_NOT_A_REPO") return scope;
+    const elsewhere = await worktreesMadeElsewhere(await deps.loadState(), caller, null);
+    return elsewhere.length ? { ok: true, repoCwd: null, worktrees: [], unmanaged: [], elsewhere } : scope;
+  }
   const checkMerge = input.checkMerge === true;
   const registrations = await listWorktreeRegistrations(scope.repoCwd).catch(() => [] as WorktreeRegistration[]);
   const ctx = newContext(scope, caller, deps, gate.preferences, registrations);
@@ -1853,13 +1966,33 @@ export async function listAgentWorktrees(
       head: entry.head,
     });
   }
+  const elsewhere = await worktreesMadeElsewhere(scope.state, caller, scope.repoCwd);
   return {
     ok: true,
     repoCwd: scope.repoCwd,
     defaultBranch: await resolveDefaultBranch(scope.repoCwd),
     worktrees: items,
     unmanaged,
+    ...(elsewhere.length ? { elsewhere } : {}),
   };
+}
+
+// Worktrees the caller made in other repositories than `repoCwd`, which
+// setup and remove reach by workspaceId.
+async function worktreesMadeElsewhere(
+  state: AppState,
+  caller: WorktreeCaller,
+  repoCwd: string | null,
+): Promise<Array<Record<string, unknown>>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const workspace of state.workspaces) {
+    const copy = workspace.copyBranch;
+    if (!copy || isRemotePath(copy.repoCwd) || !madeBy(workspace, caller)) continue;
+    const repo = await realpathOrResolve(copy.repoCwd);
+    if (repo === repoCwd) continue;
+    out.push({ workspaceId: workspace.id, name: workspace.name, path: workspace.cwd, branch: copy.branch, repoCwd: repo });
+  }
+  return out;
 }
 
 // ── Remove ─────────────────────────────────────────────────────────────────
@@ -1934,17 +2067,26 @@ function refusalFromVerdict(ctx: VerifyContext, verdict: RemovalVerdict): Worktr
 // A retried removal answers with the first result. Keyed by repository too,
 // so a caller in another repository learns nothing about this one.
 const recentRemovals = new Map<string, Record<string, unknown>>();
+// Which repository a removed worktree was in and who made it, so its maker
+// retrying from another workspace (resolveWorktreeScope's repoOf) reaches
+// the entry above instead of its own folder's repository.
+const removedRepos = new Map<string, { repoCwd: string; createdBy: NonNullable<Workspace["copyBranch"]>["createdBy"] }>();
 
 function removalKey(repoCwd: string, workspaceId: string): string {
   return `${repoCwd}\0${workspaceId}`;
 }
 
-function rememberRemoval(repoCwd: string, workspaceId: string, result: Record<string, unknown>): void {
+function rememberRemoval(repoCwd: string, workspace: Workspace, result: Record<string, unknown>): void {
   if (recentRemovals.size >= 200) {
     const first = recentRemovals.keys().next().value;
     if (first !== undefined) recentRemovals.delete(first);
   }
-  recentRemovals.set(removalKey(repoCwd, workspaceId), result);
+  if (removedRepos.size >= 200) {
+    const first = removedRepos.keys().next().value;
+    if (first !== undefined) removedRepos.delete(first);
+  }
+  recentRemovals.set(removalKey(repoCwd, workspace.id), result);
+  removedRepos.set(workspace.id, { repoCwd, createdBy: workspace.copyBranch?.createdBy });
 }
 
 export async function removeAgentWorktree(
@@ -1957,7 +2099,7 @@ export async function removeAgentWorktree(
     await auditRefusal(deps, caller, gate, input);
     return gate;
   }
-  const scope = await resolveWorktreeScope(caller, deps, gate.run);
+  const scope = await resolveWorktreeScope(caller, deps, gate.run, { repoOf: input.workspaceId });
   if (isRefusal(scope)) {
     await auditRefusal(deps, caller, scope, input);
     return scope;
@@ -2043,7 +2185,7 @@ export async function removeAgentWorktree(
     return outcome;
   }
   if (outcome.removed === true) {
-    rememberRemoval(scope.repoCwd, target.id, outcome);
+    rememberRemoval(scope.repoCwd, target, outcome);
     deps.sendAgentEvent({
       kind: "removed",
       workspaceId: target.id,
