@@ -24,6 +24,7 @@ import { normalizeKeepAwakeMode } from "@shared/keep-awake";
 import { normalizeQuickCommands, normalizeTerminalRightClick } from "@shared/quick-commands";
 import { normalizeAgentHibernationMinutes } from "@shared/agent-hibernation";
 import { normalizeSessionSearchPreferences } from "@shared/session-search";
+import { normalizeForecastIdeas } from "@shared/usage-forecast";
 import { normalizeRepository } from "@shared/pull-request-watch";
 import { writeFileAtomic } from "./fs-atomic";
 import { codaraHome } from "./codara-home";
@@ -290,6 +291,13 @@ function normalize(
       typeof src.keepAgentsInYourChrome === "boolean"
         ? src.keepAgentsInYourChrome
         : DEFAULT_PREFERENCES.keepAgentsInYourChrome,
+    usageForecast:
+      typeof src.usageForecast === "boolean"
+        ? src.usageForecast
+        : DEFAULT_PREFERENCES.usageForecast,
+    ...(src.usageForecastIdeas !== undefined
+      ? { usageForecastIdeas: normalizeForecastIdeas(src.usageForecastIdeas) }
+      : {}),
     autoOpenPreview:
       typeof src.autoOpenPreview === "boolean"
         ? src.autoOpenPreview

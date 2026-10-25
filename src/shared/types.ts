@@ -8,6 +8,7 @@ import type {
 import type { WorkflowCallMarker, WorkflowRunInfo } from "./workflow";
 import type { QuickCommand, TerminalRightClickPref } from "./quick-commands";
 import type { SessionSearchPreferences } from "./session-search";
+import type { ForecastIdeas } from "./usage-forecast";
 
 export type ShellId = string;
 
@@ -1328,6 +1329,12 @@ export interface AppPreferences {
   // use the user's own Chrome through the Codara extension
   // (src/main/separate-browser-tools.ts). Applies to new sessions.
   keepAgentsInYourChrome?: boolean;
+  // Labs: forecast when each subscription window runs out
+  // (src/main/usage-forecast.ts). Off by default; while off nothing is
+  // recorded and the usage panel looks as it always has.
+  usageForecast?: boolean;
+  // Which of the forecast's extra hints are shown, each on its own toggle.
+  usageForecastIdeas?: ForecastIdeas;
   // When true, a localhost dev URL sniffed from any terminal pane's stdout
   // auto-opens a preview tab. Default false: the detected-URL chip still shows
   // so the user can click to open, but Codara never yanks a tab open on its own
@@ -1568,6 +1575,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   keepAwakeMode: "agents",
   keepAwakeLidClosed: false,
   keepAgentsInYourChrome: true,
+  usageForecast: false,
   autoOpenPreview: false,
   linkOpenTarget: "system",
   terminalLinkMenu: true,

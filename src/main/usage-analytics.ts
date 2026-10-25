@@ -16,10 +16,20 @@ import { dirname, join } from "node:path";
 import { Worker } from "node:worker_threads";
 import { codaraHome } from "./codara-home";
 import { codexTranscriptRoots, scanUsage, type UsageScanRequest, type UsageScanRoot } from "./usage-scan";
-import type { UsageScanJob, UsageScanReply } from "./usage-scan-worker";
+import type {
+  ForecastScan,
+  UsageScanJob,
+  UsageScanReply,
+  UsageScanResult,
+  UsageScanWork,
+} from "./usage-scan-worker";
 import type { UsageSummary, UsageSummaryInput } from "@shared/usage-analytics";
 
 const WORKER_IDLE_MS = 3 * 60 * 1000;
+/** While the forecast is on it scans every 10 to 15 minutes (a 10-minute
+ * cache checked on a 5-minute poll). A worker that exited in between would
+ * reload the whole memo from disk for each scan, so it is kept past the next. */
+const FORECAST_WORKER_KEEP_MS = 20 * 60 * 1000;
 
 async function resolveProviderRoots(): Promise<UsageScanRoot[]> {
   const roots: UsageScanRoot[] = [];
@@ -82,7 +92,7 @@ function usageScanWorkerCode(): string | null {
 }
 
 interface PendingScan {
-  resolve: (summary: UsageSummary) => void;
+  resolve: (summary: UsageScanResult) => void;
   reject: (err: Error) => void;
 }
 
@@ -90,6 +100,10 @@ let worker: Worker | null = null;
 let nextJobId = 1;
 const pending = new Map<number, PendingScan>();
 let idleTimer: NodeJS.Timeout | null = null;
+let keepWorkerUntil = 0;
+/** Asked again whenever the idle delay is armed: a keep-alive outlives the
+ * reason for it only while this says so. */
+let keepWorkerWanted: () => boolean = () => false;
 
 function settleAll(err: Error): void {
   for (const scan of pending.values()) scan.reject(err);
@@ -126,11 +140,35 @@ function armIdleStop(): void {
     const thread = worker;
     worker = null;
     void thread.terminate().catch(() => undefined);
-  }, WORKER_IDLE_MS);
+  }, workerIdleDelayMs());
   idleTimer.unref();
 }
 
-function scanOnWorker(code: string, request: UsageScanRequest): Promise<UsageSummary> {
+/** Keeps the worker at least `ms` past now once it goes idle, for as long as
+ * `wanted` says so. */
+export function keepWorkerFor(ms: number, nowMs = Date.now(), wanted: () => boolean = () => true): void {
+  keepWorkerUntil = Math.max(keepWorkerUntil, nowMs + ms);
+  keepWorkerWanted = wanted;
+}
+
+/** The forecast was turned off: the worker no longer waits for its next scan
+ * and exits on the ordinary idle delay, freeing the memo it holds. */
+export function releaseForecastWorker(): void {
+  keepWorkerUntil = 0;
+  if (worker !== null && pending.size === 0) armIdleStop();
+}
+
+/** How long an idle worker is kept, for tests. */
+export function workerIdleDelayMs(nowMs = Date.now()): number {
+  return keepWorkerWanted() ? Math.max(WORKER_IDLE_MS, keepWorkerUntil - nowMs) : WORKER_IDLE_MS;
+}
+
+function scanOnWorker<T extends UsageScanResult>(
+  code: string,
+  job: UsageScanWork,
+  keep?: { ms: number; wanted: () => boolean },
+): Promise<T> {
+  if (keep) keepWorkerFor(keep.ms, Date.now(), keep.wanted);
   if (idleTimer !== null) {
     clearTimeout(idleTimer);
     idleTimer = null;
@@ -138,9 +176,9 @@ function scanOnWorker(code: string, request: UsageScanRequest): Promise<UsageSum
   if (worker === null) worker = startWorker(code);
   const id = nextJobId++;
   const thread = worker;
-  return new Promise<UsageSummary>((resolve, reject) => {
-    pending.set(id, { resolve, reject });
-    thread.postMessage({ id, request } satisfies UsageScanJob);
+  return new Promise<T>((resolve, reject) => {
+    pending.set(id, { resolve: resolve as PendingScan["resolve"], reject });
+    thread.postMessage({ id, ...job } as UsageScanJob);
   });
 }
 
@@ -155,5 +193,34 @@ export async function readUsageSummary(input: UsageSummaryInput): Promise<UsageS
   const code = usageScanWorkerCode();
   // A build without the worker bundle (unit harnesses, a stale out/) still
   // answers, on this thread.
-  return code === null ? scanUsage(request) : scanOnWorker(code, request);
+  return code === null ? scanUsage(request) : scanOnWorker<UsageSummary>(code, { request });
+}
+
+/** Priced spend per time bucket since sinceMs, and the CLIs' own limit
+ * readings, for the usage forecast. `keepWorker` says whether the forecast is
+ * still on, so the worker waits for its next scan only then. */
+export async function readForecastScan(
+  sinceMs: number,
+  bucketMs: number,
+  signalsSinceMs = sinceMs,
+  keepWorker: () => boolean = () => true,
+): Promise<ForecastScan> {
+  const roots = await resolveProviderRoots();
+  const timeline = {
+    roots,
+    cachePath: join(codaraHome(), "usage-scan-cache.json"),
+    sinceMs,
+    bucketMs,
+    nowMs: Date.now(),
+  };
+  const signals = { roots, memoPath: join(codaraHome(), "usage-forecast-signals.json"), sinceMs: signalsSinceMs };
+  const code = usageScanWorkerCode();
+  if (code === null) {
+    const { runForecastScan } = await import("./usage-scan-worker");
+    return runForecastScan(timeline, signals);
+  }
+  // Asked here, after the awaits above: the forecast may have been turned off
+  // since its caller checked, and then the worker must not wait for it.
+  const keep = keepWorker() ? { ms: FORECAST_WORKER_KEEP_MS, wanted: keepWorker } : undefined;
+  return scanOnWorker<ForecastScan>(code, { timeline, signals }, keep);
 }

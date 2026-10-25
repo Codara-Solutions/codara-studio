@@ -74,6 +74,7 @@ import type {
 import type { SshKeyImportResult, SshKeyInfo } from "@shared/ssh-keys";
 import type { MachinesSnapshot } from "@shared/machines";
 import type { UsageSummary, UsageSummaryInput } from "@shared/usage-analytics";
+import type { UsageForecastReport } from "@shared/usage-forecast";
 import type {
   SavedWorkflow,
   SavedWorkflowSummary,
@@ -456,6 +457,10 @@ const api = {
     // this resolves promptly.
     summary: (input: UsageSummaryInput): Promise<UsageSummary> =>
       ipcRenderer.invoke("usage-analytics:summary", input),
+    // Labs: when each limit window runs out. Null while the usageForecast
+    // preference is off. The first read scans transcripts and takes seconds.
+    forecast: (): Promise<UsageForecastReport | null> =>
+      ipcRenderer.invoke("usage-forecast:read"),
   },
   agents: {
     sync: (input?: { cwd?: string | null; dryRun?: boolean }): Promise<AgentSyncResult> =>

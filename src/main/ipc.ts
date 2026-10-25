@@ -69,7 +69,7 @@ import { codaraHome } from "./codara-home";
 import { logMain } from "./file-log";
 import { isTrustedOnSender, requireTrustedSender } from "./main-window-trust";
 import { detectAgentRuntimes } from "./agent-runtimes";
-import { loadPreferences, setPreference } from "./preferences-store";
+import { getPreferenceCached, loadPreferences, onPreferenceChange, setPreference } from "./preferences-store";
 import { openInSystemBrowser, openLinkFromApp } from "./open-link";
 import * as pty from "./pty-manager";
 import { readSystemCpuTimes, systemResourceSnapshot, type PaneRoot } from "./system-metrics";
@@ -1117,7 +1117,29 @@ export function registerIpc(): void {
   handle("pi-subscriptions:usage", async (_event, input?: { force?: unknown }) => {
     await unifiedAccountsReady();
     const { inspectPiSubscriptionUsage } = await import("./orchestration/pi-subscription-usage");
-    return inspectPiSubscriptionUsage(input?.force === true);
+    const overview = await inspectPiSubscriptionUsage(input?.force === true);
+    if (getPreferenceCached("usageForecast") === true) {
+      void import("./usage-forecast")
+        .then(({ recordUsageReadings }) => recordUsageReadings(overview))
+        .catch((err: unknown) => logMain("usage", `forecast reading not recorded: ${String(err).slice(0, 200)}`));
+    }
+    return overview;
+  });
+  onPreferenceChange((key, prefs) => {
+    if (key !== "usageForecast" || prefs.usageForecast === true) return;
+    void import("./usage-analytics")
+      .then(({ releaseForecastWorker }) => releaseForecastWorker())
+      .catch(() => undefined);
+  });
+  handle("usage-forecast:read", async () => {
+    if (getPreferenceCached("usageForecast") !== true) return null;
+    await unifiedAccountsReady();
+    const [{ inspectPiSubscriptionUsage }, { buildUsageForecastReport }] = await Promise.all([
+      import("./orchestration/pi-subscription-usage"),
+      import("./usage-forecast"),
+    ]);
+    const overview = await inspectPiSubscriptionUsage(false);
+    return buildUsageForecastReport(overview, getPreferenceCached("usageForecastIdeas"));
   });
   // Spends one Codex rate-limit reset of one account, after the user
   // confirmed it in the usage panel. Every window then re-reads that
