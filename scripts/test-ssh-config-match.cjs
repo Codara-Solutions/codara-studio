@@ -171,6 +171,12 @@ const MANUAL_CASES = [
   ["two values for RevokedHostKeys", "Host other\n  RevokedHostKeys /a /b\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 2 \(RevokedHostKeys has more than one value\)/],
   ["two values for HostName", "Host other\n  HostName a b\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 2 \(HostName has more than one value\)/],
   ["a keyword alone names it", "Host other\n  SendEnv\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 2 \(SendEnv has no value\)/],
+  // ssh reads a line up to its newline and strips only " \t\r\n\f" from its end.
+  ["a carriage return inside a value is part of it", "Host *\n  RevokedHostKeys /r\rx\n", "h1", "me", ["/r\rx"]],
+  ["a line separator inside a value is part of it", "Host *\n  RevokedHostKeys /r\u2028x\n", "h1", "me", ["/r\u2028x"]],
+  ["carriage returns ending a line are dropped", "Host *\n  RevokedHostKeys /r \r\r\n", "h1", "me", ["/r"]],
+  ["a carriage return ends the keyword", "Host *\n  RevokedHostKeys\r/r\n", "h1", "me", ["/r"]],
+  ["a Host line with only a comment matches nothing", "Host # todo\n  RevokedHostKeys /a\nHost *\n  RevokedHostKeys /r\n", "h1", "me", ["/r"]],
 ];
 
 async function testManualHosts(hosts) {
@@ -452,6 +458,34 @@ async function testOrdinaryConfig(hosts) {
     assert.ok(out.split("\n").includes("userknownhostsfile /k/kh /k/b c"), "as ssh -G prints");
   }
   ok("quoted UserKnownHostsFile paths name the files ssh reads");
+
+  // ssh keeps a ProxyJump value as written up to the first blank or `#`,
+  // quotes included, and ignores the rest; %j is its last hop. ssh -G does
+  // not expand UserKnownHostsFile, so ControlPath shows its %j.
+  for (const [jump, want] of [
+    ["'j1'", "'j1'"],
+    ['"j1"', '"j1"'],
+    ["a b", "a"],
+    ["a,b c", "b"],
+    ["'a#b'", "'a"],
+    ['""', '""'],
+  ]) {
+    const config = `Host h1\n  ProxyJump ${jump}\n  UserKnownHostsFile /kh-%j\n  ControlPath /cp-%j\n`;
+    writeConfigs(config);
+    const listed = (await hosts.readSshConfigHosts()).find((h) => h.id === "h1");
+    assert.ok(listed, `ProxyJump ${jump}: h1 is listed`);
+    const got = await hosts.knownHostsSettings(listed);
+    assert.ok(!("refusal" in got), `ProxyJump ${jump}: not refused (${got.refusal})`);
+    assert.equal(got.files[0], `/kh-${want}`, `ProxyJump ${jump}: %j`);
+    if (HAS_SSH) {
+      const file = path.join(TMP, "ssh-g-config");
+      fs.writeFileSync(file, config);
+      const result = spawnSync("ssh", ["-G", "-F", file, "h1"], { encoding: "utf8" });
+      assert.equal(result.status, 0, `ProxyJump ${jump}: ssh accepts it`);
+      assert.ok(result.stdout.split("\n").includes(`controlpath /cp-${want}`), `ProxyJump ${jump}: %j as ssh -G expands it`);
+    }
+  }
+  ok("ProxyJump is kept as ssh keeps it, quotes and all, for %j");
 }
 
 (async () => {

@@ -76,14 +76,16 @@ const SINGLE_KEYS = new Set([
   "hostkeyalias",
   "revokedhostkeys",
   "identityfile",
-  "proxyjump",
   "tag",
   "canonicalizehostname",
   "canonicalizemaxdots",
 ]);
 
-// The keyword, then one `=` or whitespace, as ssh's strdelim splits it.
-const KEYWORD = /^[ \t]*([^ \t=]+)[ \t]*(?:=[ \t]*)?(.*)$/;
+// The keyword, then one `=` or whitespace, as ssh's strdelim splits it. A
+// `\r` is whitespace there; anything but a newline belongs to the value.
+const KEYWORD = /^[ \t\r]*([^ \t\r=]+)[ \t\r]*(?:=[ \t\r]*)?([^\n]*)$/;
+// What ssh strips from the end of a line before reading it.
+const TRAILING_BLANKS = /[ \t\r\n\f]+$/;
 
 const words = (value: Value): string[] => (Array.isArray(value) ? value.map((v) => v.val) : [value]);
 
@@ -144,7 +146,7 @@ export function parseEntries(entries: SourceEntry[]): ParsedEntry[] {
     }
     const where = `${displayPath(entry.file)} line ${entry.line}`;
     const bad = (reason: string) => out.push({ kind: "error", where, message: `ssh cannot read ${where} (${reason})` });
-    const m = KEYWORD.exec(entry.text.replace(/[\s\f]+$/, ""));
+    const m = KEYWORD.exec(entry.text.replace(TRAILING_BLANKS, ""));
     if (!m || m[1].startsWith("#")) continue;
     const [, keyword, rest] = m;
     const param = keyword.toLowerCase();
@@ -163,7 +165,16 @@ export function parseEntries(entries: SourceEntry[]): ParsedEntry[] {
       bad(`${keyword} has a quote that is not closed`);
       continue;
     }
-    if (words.length === 0 || words.every((w) => w === "")) {
+    if (param === "proxyjump") {
+      // ssh reads ProxyJump from the raw line, quotes included, up to the
+      // first blank or `#`, and ignores what follows.
+      const jump = /^[^ \t#]*/.exec(rest)?.[0] ?? "";
+      if (jump === "") bad(`${keyword} has no value`);
+      else out.push({ kind: "option", where, param: keyword, value: jump });
+    } else if (param === "host" && words.length === 0) {
+      // `Host # note`: a block that matches no host.
+      out.push({ kind: "host", where, patterns: [] });
+    } else if (words.length === 0 || words.every((w) => w === "")) {
       bad(`${keyword} has no value`);
     } else if (words.includes("")) {
       bad(`${keyword} has an empty value`);
