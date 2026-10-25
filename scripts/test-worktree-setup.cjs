@@ -867,6 +867,19 @@ async function runSuite(m, scratch) {
       const summary = service.agentSetupSummary(prepared, "");
       assert.equal(summary.state, "awaiting-approval");
       assert.match(summary.hint, /Do not run that command or the setup file's terminal commands yourself/);
+      // Taken back by Codara, it stops asking and leaves the tray.
+      {
+        const asking = fs.realpathSync(gateWorktree());
+        const dismissed = [];
+        const quiet = gated({ onDismiss: (id) => dismissed.push(id) });
+        const pending = await quiet.start({ sourceCwd: gate, worktreePath: asking, trigger: "agent", userCommand: null });
+        assert.equal((await quiet.whenPrepared(pending.id)).state, "awaiting-approval");
+        assert.equal(await quiet.retire(asking), true);
+        assert.equal((await quiet.get(pending.id)).state, "stopped");
+        assert.deepEqual(dismissed, [pending.id]);
+        assert.equal(quiet.list().length, 0);
+        assert.equal(fs.existsSync(path.join(asking, "ran.txt")), false);
+      }
       // "Don't run" ends it without running anything.
       const declined = await svc.stop(started.id);
       assert.equal(declined.state, "stopped");
@@ -1446,6 +1459,7 @@ function runnerFor(svc, service) {
     get: (idOrPath) => svc.get(idOrPath),
     tail: (id, lines) => svc.tail(id, lines),
     summary: service.agentSetupSummary,
+    stop: (idOrPath) => svc.retire(idOrPath),
   };
 }
 
@@ -1548,6 +1562,16 @@ async function agentSuite(m, scratch) {
     assert.equal(own.code, "WORKTREE_NOT_FOUND", "the caller's own workspace is the main checkout");
     const worker = await agent.getAgentWorktreeSetup({ role: "worker", client: "cora" }, {}, deps);
     assert.equal(worker.code, "WORKTREE_FORBIDDEN");
+  });
+
+  await check("a terminal's worktree rolls back while its setup still runs", async () => {
+    const made = await agent.createTerminalWorktree(caller, { branch: "agent/setup-rollback" }, deps);
+    assert.equal(made.ok, true, JSON.stringify(made));
+    assert.ok(["queued", "running", "preparing"].includes(made.setup.state), made.setup.state);
+    const rolledBack = await agent.rollBackTerminalWorktree(caller, made, deps);
+    assert.equal(rolledBack.removed, true, JSON.stringify(rolledBack));
+    assert.equal(fs.existsSync(made.path), false);
+    assert.ok(!svc.list().some((status) => status.worktreePath === made.path), "its card left the tray");
   });
 
   await check("removal accepts untouched copies and takes the link out first", async () => {

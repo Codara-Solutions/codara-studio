@@ -1762,16 +1762,27 @@ async function createTerminal(
         ...(crossWorkspace ? { openedBy: crossWorkspace.callerName } : {}),
         ...(agentOwner ? { agentOwner } : {}),
       },
-      // Waiting for the user took part of the MCP server's 60 s budget; keep
-      // the whole call inside it, spawn wait included.
-      crossWorkspace
-        ? {
-            timeoutMs: Math.max(
-              5_000,
-              CROSS_WORKSPACE_CREATE_BUDGET_MS - (Date.now() - startedAt) - TERMINAL_SPAWN_WAIT_MS - TERMINAL_SPAWN_SETTLE_MS,
-            ),
-          }
-        : undefined,
+      {
+        // Waiting for the user took part of the MCP server's 60 s budget; keep
+        // the whole call inside it, spawn wait included.
+        ...(crossWorkspace
+          ? {
+              timeoutMs: Math.max(
+                5_000,
+                CROSS_WORKSPACE_CREATE_BUDGET_MS - (Date.now() - startedAt) - TERMINAL_SPAWN_WAIT_MS - TERMINAL_SPAWN_SETTLE_MS,
+              ),
+            }
+          : {}),
+        // A tab added after this call gave up sits in a worktree that the
+        // failed call rolls back: nobody would drive it, so close it.
+        ...(worktree?.created
+          ? {
+              onLate: (late: { tabId?: string }) => {
+                if (late?.tabId) void requestTerminalOp("destroy", { tabId: late.tabId }).catch(() => undefined);
+              },
+            }
+          : {}),
+      },
     );
     // The renderer resolves as soon as the tab is added to state, but the PTY
     // spawns a beat later when TerminalPane mounts and calls pty:spawn. Wait for

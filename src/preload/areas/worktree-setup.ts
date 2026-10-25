@@ -57,4 +57,10 @@ export const worktreeSetupApi = {
     ipcRenderer.on("worktreeSetup:changed", wrapped);
     return () => ipcRenderer.removeListener("worktreeSetup:changed", wrapped);
   },
+  /** A setup Codara took off the tray, such as the one of a worktree it rolled back. */
+  onDismissed: (listener: (id: string) => void): (() => void) => {
+    const wrapped = (_event: unknown, id: string): void => listener(id);
+    ipcRenderer.on("worktreeSetup:dismissed", wrapped);
+    return () => ipcRenderer.removeListener("worktreeSetup:dismissed", wrapped);
+  },
 };

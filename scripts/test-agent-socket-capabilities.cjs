@@ -185,6 +185,11 @@ assert.match(
   "a worktree cleanup removal, and a terminal that makes a worktree, wait out a compaction",
 );
 assert.match(socketSource, /if \(midCompactionBlocked\(method, params\)\) \{/, "dispatch applies the compaction gate");
+assert.match(
+  socketSource,
+  /\.\.\.\(worktree\?\.created\s*\?\s*\{\s*onLate: \(late: \{ tabId\?: string \}\) => \{\s*if \(late\?\.tabId\) void requestTerminalOp\("destroy", \{ tabId: late\.tabId \}\)/,
+  "a tab that lands after terminal.create gave up on its new worktree is closed",
+);
 
 const bridgeSource = fs.readFileSync(
   path.join(ROOT, "resources", "codara-studio-mcp", "server.js"),

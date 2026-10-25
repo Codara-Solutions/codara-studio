@@ -667,9 +667,11 @@ which finds it again by `workspaceId` from its own folder (see
 [Worktrees](#worktrees)). A worktree refusal comes back as the call's error
 (for example `WORKTREE_BRANCH_EXISTS: ...`) and opens no terminal. When the
 terminal does not open after the worktree was made (the shell dies, the
-caller disconnects), Codara removes the worktree again through the same
-guarded removal; if that is refused, the error names where the worktree
-stays and carries `data.worktree: { workspaceId, path, branch }`. `cwd` and `worktree` cannot be combined. The result's
+caller disconnects), Codara stops its setup (a question waiting for the
+user included, whose card leaves the tray) and removes the worktree again
+through the same guarded removal; if that is refused, the error names where
+the worktree stays and carries `data.worktree: { workspaceId, path, branch }`.
+A tab that appears after the call gave up is closed. `cwd` and `worktree` cannot be combined. The result's
 `workspaceId` and `workspace` are the worktree's own, and it adds
 `worktree: { workspaceId, path, branch, created, setup? }`; when `setup` is
 not finished, the `command` has already started, so wait with

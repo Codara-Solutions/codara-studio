@@ -255,12 +255,48 @@ async function main() {
     assert.equal(reused.created, false);
     const taken = await aw.createTerminalWorktree({ ...bystander, workspaceId: "ws-repo" }, { branch: "agent/term" }, deps);
     assert.equal(taken.code, "WORKTREE_NOT_YOURS", JSON.stringify(taken));
+    assert.ok(
+      fs.readFileSync(auditFile, "utf8").trim().split("\n").map((entry) => JSON.parse(entry))
+        .some((entry) => entry.outcome === "refused" && entry.code === "WORKTREE_NOT_YOURS" && entry.branch === "agent/term"),
+      "a refused shared checkout is on the audit log",
+    );
     assert.equal((await aw.rollBackTerminalWorktree(coordinator, reused, deps)).removed, false, "one that was there before stays");
     const rolledBack = await aw.rollBackTerminalWorktree(coordinator, forTerminal, deps);
     assert.equal(rolledBack.removed, true, JSON.stringify(rolledBack));
     assert.equal(fs.existsSync(forTerminal.path), false);
     assert.equal(refExists(repo, "refs/heads/agent/term"), false);
     assert.equal(workspaceOf(forTerminal.workspaceId), undefined);
+    // Asked again from the other workspace, the removal answers as removed.
+    const retriedElsewhere = await aw.removeAgentWorktree(coordinator, { workspaceId: forTerminal.workspaceId }, deps);
+    assert.equal(retriedElsewhere.alreadyRemoved, true, JSON.stringify(retriedElsewhere));
+    assert.notEqual(
+      (await aw.removeAgentWorktree(bystander, { workspaceId: forTerminal.workspaceId }, deps)).alreadyRemoved,
+      true,
+      "another agent learns nothing about it",
+    );
+    // Its setup usually still runs (npm install) when the terminal fails: it
+    // is stopped and its card dismissed first, or the process scan would
+    // refuse the rollback and leave the worktree behind.
+    const stops = [];
+    const installing = {
+      ...withSetup,
+      worktreeSetup: {
+        ...withSetup.worktreeSetup,
+        stop: async (idOrPath) => {
+          stops.push(idOrPath);
+          h.processes = [];
+          return true;
+        },
+      },
+    };
+    const busy = await aw.createTerminalWorktree({ ...coordinator, workspaceId: "ws-repo" }, { branch: "agent/installing" }, installing);
+    assert.equal(busy.ok, true, JSON.stringify(busy));
+    h.processes = [{ pid: 4343, command: "npm install" }];
+    const stoppedFirst = await aw.rollBackTerminalWorktree(coordinator, busy, installing);
+    h.processes = [];
+    assert.equal(stoppedFirst.removed, true, JSON.stringify(stoppedFirst));
+    assert.deepEqual(stops, [busy.path]);
+    assert.equal(fs.existsSync(busy.path), false);
 
     // ── Who may call ───────────────────────────────────────────────────────
     for (const role of ["worker", "automation"]) {

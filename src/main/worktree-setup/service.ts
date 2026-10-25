@@ -55,6 +55,8 @@ export interface WorktreeSetupServiceDeps {
   // The repository setup commands the user approved (approvals.ts).
   approvals: SetupApprovalStore;
   onChange?(status: WorktreeSetupStatus): void;
+  // A setup left the tray without the user (a rolled-back worktree's).
+  onDismiss?(id: string): void;
   now?(): Date;
   commandTimeoutMs?: number;
   maxConcurrentCommands?: number;
@@ -380,6 +382,17 @@ export class WorktreeSetupService {
     return this.settled(run, timeoutMs);
   }
 
+  /**
+   * For a worktree Codara takes back: quiesces its setup, a question for the
+   * user included, and takes it off the tray. True when nothing of it runs.
+   */
+  async retire(idOrPath: string, timeoutMs = 30_000): Promise<boolean> {
+    const quiet = await this.quiesce(idOrPath, timeoutMs);
+    const status = await this.get(idOrPath);
+    if (status) this.dismiss(status.id);
+    return quiet;
+  }
+
   /** True once the run's pipeline has returned; false after `timeoutMs`. */
   private async settled(run: Run, timeoutMs = 30_000): Promise<boolean> {
     let timer: NodeJS.Timeout | null = null;
@@ -464,6 +477,7 @@ export class WorktreeSetupService {
     const run = this.runs.get(id);
     if (!run || !isWorktreeSetupFinished(run.status.state)) return false;
     run.dismissed = true;
+    this.deps.onDismiss?.(id);
     return true;
   }
 
