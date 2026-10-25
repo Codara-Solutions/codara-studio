@@ -23,6 +23,10 @@ const SHARED_DIR = path.join(ROOT, "src", "shared");
 const FORECAST_TS = path.join(SHARED_DIR, "usage-forecast.ts");
 const SIGNALS_TS = path.join(ROOT, "src", "main", "usage-forecast-signals.ts");
 const LEARNING_TS = path.join(SHARED_DIR, "usage-forecast-learning.ts");
+const MAIN_FORECAST_TS = path.join(ROOT, "src", "main", "usage-forecast.ts");
+// The main module's own homes and the scan it would ask the worker for are
+// stubbed, so its log and scoring run against a temporary folder.
+const forecastHome = fs.mkdtempSync(path.join(os.tmpdir(), "codara-forecast-home-"));
 
 const harnessPlugin = {
   name: "usage-forecast-test-harness",
@@ -31,8 +35,18 @@ const harnessPlugin = {
       path: path.join(SHARED_DIR, `${args.path.slice("@shared/".length)}.ts`),
     }));
     build.onResolve({ filter: /^electron$/ }, () => ({ path: "electron", namespace: "stub" }));
-    build.onLoad({ filter: /.*/, namespace: "stub" }, () => ({
-      contents: "module.exports = { app: { getPath: () => '/dev/null' } };",
+    build.onResolve({ filter: /\/codara-home$/ }, () => ({ path: "codara-home", namespace: "stub" }));
+    build.onResolve({ filter: /\/usage-analytics$/ }, () => ({ path: "usage-analytics", namespace: "stub" }));
+    build.onResolve({ filter: /\/preferences-store$/ }, () => ({ path: "preferences-store", namespace: "stub" }));
+    build.onLoad({ filter: /.*/, namespace: "stub" }, (args) => ({
+      contents:
+        args.path === "codara-home"
+          ? `module.exports = { codaraHome: () => ${JSON.stringify(forecastHome)} };`
+          : args.path === "usage-analytics"
+            ? "module.exports = { readForecastScan: async () => { throw new Error('no scan in unit tests'); } };"
+            : args.path === "preferences-store"
+              ? "module.exports = { getPreferenceCached: () => undefined };"
+              : "module.exports = { app: { getPath: () => '/dev/null' } };",
       loader: "js",
     }));
   },
@@ -95,6 +109,7 @@ async function main() {
   const forecast = await bundle(FORECAST_TS, path.join(tmp, "forecast.bundle.cjs"));
   const signals = await bundle(SIGNALS_TS, path.join(tmp, "signals.bundle.cjs"));
   const learning = await bundle(LEARNING_TS, path.join(tmp, "learning.bundle.cjs"));
+  const mainForecast = await bundle(MAIN_FORECAST_TS, path.join(tmp, "main-forecast.bundle.cjs"));
   const {
     backtestForecast,
     burnNudge,
@@ -566,6 +581,52 @@ async function main() {
     eq("confidence: three windows is still learning", confidenceLine(unsure), "still learning · 3 past windows");
   }
 
+  /* ── Live forecasts are logged and scored once their window resets ──── */
+  {
+    const { logForecasts, readLoggedForecasts, scoreLoggedForecasts } = mainForecast;
+    const start = at(20, 9);
+    const reset = start + 5 * HOUR;
+    const view = (over = {}) => ({
+      profileId: "work",
+      provider: "anthropic",
+      windowId: "five_hour",
+      windowLabel: "5-hour",
+      source: "live",
+      result: {
+        inUse: true,
+        windowStartMs: start,
+        resetsAtMs: reset,
+        usedPercent: 30,
+        growthQuantiles: Array.from({ length: 21 }, (_, k) => 10 + k),
+      },
+      ...over,
+    });
+    await logForecasts([view(), view({ profileId: "other", result: { ...view().result, inUse: false } })], start + HOUR);
+    await logForecasts([view()], start + HOUR + 10 * MINUTE);
+    await logForecasts([view()], start + 2 * HOUR);
+    const logged = await readLoggedForecasts(0);
+    eq("log: only the account in use is logged, at most every 30 minutes", logged.length, 2);
+    eq("log: the uncorrected growth is kept", logged[0].growth.length, 21);
+
+    const reading = (t, used) => ({ t, profileId: "work", provider: "anthropic", windowId: "five_hour", label: "5-hour", used, resetsAt: reset });
+    eq("score: nothing is scored before the window resets", scoreLoggedForecasts(logged, [reading(start + 4.9 * HOUR, 70)], reset - MINUTE).size, 0);
+    const scored = scoreLoggedForecasts(logged, [reading(start + 3 * HOUR, 55), reading(start + 4.9 * HOUR, 70)], reset + MINUTE);
+    const samples = scored.get("anthropic|5h") ?? [];
+    eq("score: a reset window scores each logged forecast", samples.length, 2);
+    eq("score: the truth is the highest reading of that window", samples[0].actual, 70);
+    eq("score: a scored live forecast is marked live", samples[0].source, "live");
+    eq(
+      "score: an end nobody saw (last reading long before the reset) is not guessed",
+      scoreLoggedForecasts(logged, [reading(start + 2 * HOUR, 40)], reset + MINUTE).size,
+      0,
+    );
+    eq(
+      "score: a window that hit 100 is known even without a late reading",
+      (scoreLoggedForecasts(logged, [reading(start + 2 * HOUR, 100)], reset + MINUTE).get("anthropic|5h") ?? [])[0]?.actual,
+      100,
+    );
+  }
+
   /* ── The engine applies a correction to every replay ─────────────────── */
   {
     const now = at(14, 12);
@@ -592,6 +653,7 @@ async function main() {
 
   console.log(`\nAll ${pass} usage-forecast checks passed.`);
   fs.rmSync(tmp, { recursive: true, force: true });
+  fs.rmSync(forecastHome, { recursive: true, force: true });
 }
 
 main().then(
