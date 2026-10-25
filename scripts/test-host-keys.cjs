@@ -51,7 +51,8 @@
 //     both use; it stays up while one of them still waits for it
 //   - RevokedHostKeys, a KRL or a key list, refuses the keys it revokes
 //     whatever the setting, even one Codara stored; a file ssh cannot read
-//     refuses the connection, as ssh does
+//     refuses the connection, as ssh does; a certificate line in a key list
+//     revokes the key it certifies
 //
 //   node scripts/test-host-keys.cjs
 
@@ -899,6 +900,43 @@ function hasSshKeygen() {
     harness.files.set(revokedFile, `ssh-ed25519 ${b64}\n`);
     assert.equal((await connect("nas")).state, "error", "either %C candidate may revoke the key");
     ok("RevokedHostKeys refuses what it revokes, and a file ssh cannot read, whatever the setting");
+  }
+
+  {
+    // ssh 9.6 compares a key list's certificate line by the key it certifies:
+    // a host revoked by its -cert.pub is refused ("revoked by file").
+    if (hasSshKeygen()) {
+      const dir = fs.mkdtempSync(path.join(TMP, "certs-"));
+      const make = (name, type, bits) => {
+        const file = path.join(dir, name);
+        execFileSync("ssh-keygen", ["-q", "-t", type, ...(bits ? ["-b", bits] : []), "-N", "", "-f", file], { stdio: "ignore" });
+        return file;
+      };
+      const ca = make("ca", "ed25519");
+      for (const [type, bits] of [["ed25519"], ["ecdsa", "256"], ["rsa", "2048"]]) {
+        const hostFile = make(`host_${type}`, type, bits);
+        execFileSync("ssh-keygen", ["-q", "-s", ca, "-I", "nas", "-h", "-n", "nas.local", `${hostFile}.pub`], { stdio: "ignore" });
+        const [plainType, plainB64] = fs.readFileSync(`${hostFile}.pub`, "utf8").split(/\s+/);
+        const certLine = fs.readFileSync(`${hostFile}-cert.pub`, "utf8");
+        const plain = Buffer.from(plainB64, "base64");
+        assert.equal(keys.revokedByFile(Buffer.from(certLine), plain), true, `${plainType}: its certificate revokes it`);
+        assert.equal(keys.revokedByFile(Buffer.from(certLine), other), false, `${plainType}: and no other key`);
+
+        reset();
+        confirm = false;
+        harness.serverKey = plain;
+        harness.settings.nas = { files: ["/home/me/.ssh/known_hosts"], revoked: ["/home/me/.ssh/revoked"] };
+        harness.files.set("/home/me/.ssh/revoked", `# retired by its certificate\n${certLine}`);
+        harness.files.set(KNOWN, JSON.stringify({ "nas.local:22": keys.storedFingerprint(plain) }));
+        const status = await connect("nas");
+        assert.equal(status.state, "error", `${plainType}: a stored key revoked by its certificate never connects`);
+        assert.match(status.error, /revoked by \/home\/me\/\.ssh\/revoked/);
+      }
+      confirm = true;
+    } else {
+      console.log("  skip certificate revocation (no ssh-keygen)");
+    }
+    ok("a certificate line in a RevokedHostKeys key list revokes the key it certifies");
   }
 
   {

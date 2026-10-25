@@ -185,9 +185,45 @@ function keyListRevokes(text: string, key: Buffer): boolean {
     if (!KEY_TYPES.has(type) || !blob || blob.toString("base64") !== b64 || hostKeyType(blob) !== type) {
       throw new RevokedKeysFormatError("has a line ssh cannot read as a key");
     }
-    if (blob.equals(key)) return true;
+    if (blob.equals(key) || certifiedKey(blob)?.equals(key)) return true;
   }
   return false;
+}
+
+/** Public-key fields after the nonce in each certificate type (PROTOCOL.certkeys). */
+const CERT_KEY_FIELDS: Record<string, number> = {
+  "ssh-rsa": 2,
+  "ssh-dss": 4,
+  "ecdsa-sha2-nistp256": 2,
+  "ecdsa-sha2-nistp384": 2,
+  "ecdsa-sha2-nistp521": 2,
+  "ssh-ed25519": 1,
+  "sk-ecdsa-sha2-nistp256@openssh.com": 3,
+  "sk-ssh-ed25519@openssh.com": 2,
+};
+
+/**
+ * The plain key a certificate certifies, in the wire form ssh2 presents.
+ * ssh compares a key list's certificate line by this key, not the whole
+ * certificate.
+ */
+function certifiedKey(cert: Buffer): Buffer | null {
+  const certType = hostKeyType(cert);
+  if (!certType.endsWith("-cert-v01@openssh.com")) return null;
+  // `sk-ssh-ed25519-cert-v01@openssh.com` certifies `sk-ssh-ed25519@openssh.com`.
+  const base = certType.slice(0, -"-cert-v01@openssh.com".length);
+  const plainType = base.startsWith("sk-") ? `${base}@openssh.com` : base;
+  const fields = CERT_KEY_FIELDS[plainType];
+  if (!fields) return null;
+  const reader = new WireReader(cert);
+  reader.string();
+  reader.string();
+  const start = reader.position();
+  for (let i = 0; i < fields; i++) reader.string();
+  const typeName = Buffer.from(plainType, "latin1");
+  const head = Buffer.alloc(4);
+  head.writeUInt32BE(typeName.length);
+  return Buffer.concat([head, typeName, cert.subarray(start, reader.position())]);
 }
 
 const KRL_CERTIFICATES = 1;
@@ -275,6 +311,10 @@ class WireReader {
 
   done(): boolean {
     return this.offset >= this.data.length;
+  }
+
+  position(): number {
+    return this.offset;
   }
 
   skip(length: number): void {
