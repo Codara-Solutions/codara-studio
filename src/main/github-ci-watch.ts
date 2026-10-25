@@ -161,6 +161,8 @@ interface WorkspaceTrack {
   retryAt: number;
   /** The repository's switch at that read: turning it back on reads at once. */
   on: boolean;
+  /** The remote's owner/name, which the switch is keyed on. */
+  repository: string;
   /** When the last read saw something new. */
   changedAt: number;
   /** The pull request ("owner/name#N") whose failure an agent may be waiting to hear about. */
@@ -211,6 +213,11 @@ export interface GitHubCiWatch {
   nudge(delayMs?: number): void;
   /** One pass now; tests drive the watcher with it. */
   runPass(): Promise<void>;
+  /**
+   * Withdraws at once the waiting lines the current settings no longer
+   * allow, before the pass a setting change starts has read anything.
+   */
+  recheck(): void;
   /** What each workspace's row shows now. */
   entries(): PullRequestWatchEntry[];
 }
@@ -352,9 +359,9 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
   // Lines still waiting for an agent stand only while their pull request was
   // last seen watched, open and failing in a workspace that is still here.
   function retainNudges(): void {
-    const keep = watching()
-      ? [...workspaces.values()].flatMap((track) => (track.on && track.nudging ? [track.nudging] : []))
-      : [];
+    const on = (track: WorkspaceTrack) => track.on && deps.repositoryWatched?.(track.repository) !== false;
+    const keep =
+      deps.enabled() && watching() ? [...workspaces.values()].flatMap((track) => (on(track) && track.nudging ? [track.nudging] : [])) : [];
     deps.nudger?.retain(keep);
   }
 
@@ -426,6 +433,7 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
           fingerprint: track?.fingerprint ?? "",
           retryAt: now + wait.error,
           on: repositoryOn,
+          repository: refs.repository,
           changedAt: track?.changedAt ?? now,
           nudging: track?.nudging ?? null,
         });
@@ -443,7 +451,7 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
         const running = pr!.pending > 0 && now - changedAt < CI_WATCH_PENDING_GRACE_MS;
         interval = quiet && !running ? Math.min(track!.interval * 2, wait.settled) : wait.open;
       }
-      const next: WorkspaceTrack = { refs: refs.key, queriedAt: now, interval, fingerprint, retryAt: 0, on: repositoryOn, changedAt, nudging: null };
+      const next: WorkspaceTrack = { refs: refs.key, queriedAt: now, interval, fingerprint, retryAt: 0, on: repositoryOn, repository: refs.repository, changedAt, nudging: null };
       workspaces.set(cwd, next);
       if (!pr) {
         show(ids, repositoryOn ? null : switchedOff);
@@ -487,9 +495,9 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
     dueAt = deps.now() + ms;
     timer = deps.setTimeout(() => {
       timer = null;
-      void runPass().finally(() =>
-        schedule((deps.idleMs?.() ?? 0) >= CI_WATCH_IDLE_AFTER_MS ? wait.idleTick : wait.tick),
-      );
+      // soon(), not schedule(): a push or nudge during the pass already set
+      // an earlier timer, which the regular tick must not push back.
+      void runPass().finally(() => soon((deps.idleMs?.() ?? 0) >= CI_WATCH_IDLE_AFTER_MS ? wait.idleTick : wait.tick));
     }, ms);
   }
 
@@ -528,6 +536,7 @@ export function createGitHubCiWatch(deps: GitHubCiWatchDeps): GitHubCiWatch {
       soon(delayMs);
     },
     runPass,
+    recheck: retainNudges,
     entries: () => [...shown.values()],
   };
 }
@@ -736,7 +745,7 @@ export function createCiLocalRefsReader(
 export function watchUpstreamRef(read: (cwd: string, args: string[]) => Promise<string>, cwd: string, onChange: () => void): () => void {
   let closed = false;
   let watcher: FSWatcher | null = null;
-  void (async () => {
+  const arm = async (): Promise<void> => {
     const common = await read(cwd, ["rev-parse", "--git-common-dir"]);
     const upstream = await read(cwd, ["rev-parse", "--symbolic-full-name", "@{upstream}"]);
     if (closed || !common || !upstream.startsWith("refs/remotes/")) return;
@@ -747,16 +756,30 @@ export function watchUpstreamRef(read: (cwd: string, args: string[]) => Promise<
     while (dir.length > stop.length && !existsSync(dir)) dir = dirname(dir);
     if (!existsSync(dir)) return;
     const name = dir === dirname(file) ? basename(file) : null;
+    // The watched folder can go away (git pack-refs empties it): watch again
+    // from its nearest folder still there.
+    const rearm = (): void => {
+      watcher?.close();
+      watcher = null;
+      if (!closed) void arm();
+    };
     try {
-      watcher = watch(dir, { persistent: false }, (_event, changed) => {
+      const opened = watch(dir, { persistent: false }, (_event, changed) => {
+        if (!existsSync(dir)) {
+          rearm();
+          onChange();
+          return;
+        }
         if (!name || !changed || String(changed).startsWith(name)) onChange();
       });
-      watcher.on("error", () => watcher?.close());
-      if (closed) watcher.close();
+      opened.on("error", rearm);
+      watcher = opened;
+      if (closed) opened.close();
     } catch {
       watcher = null;
     }
-  })();
+  };
+  void arm();
   return () => {
     closed = true;
     watcher?.close();
@@ -894,7 +917,7 @@ async function productionDeps(): Promise<{ deps: GitHubCiWatchDeps; stop: () => 
     },
     // Claude parks a draft older than the quiet window (Ctrl+S) and brings
     // it back after the line is sent, so the two are never submitted together.
-    type: (paneId, line) => typeLine(paneId, line, { stashDraft: runtimes.get(paneId) === "claude" }),
+    type: (paneId, line, wanted) => typeLine(paneId, line, { stashDraft: runtimes.get(paneId) === "claude", wanted }),
     now: Date.now,
     setTimeout: (fn, ms) => {
       const handle = setTimeout(fn, ms);
@@ -910,7 +933,9 @@ async function productionDeps(): Promise<{ deps: GitHubCiWatchDeps; stop: () => 
   // At once: a line waiting for a busy agent is withdrawn by the pass, and
   // must not reach the agent first.
   const unsubscribe = prefs.onPreferenceChange((key) => {
-    if (key === "watchPullRequests" || key === "notifyCiFailures" || key === "pullRequestWatchOffRepos") live?.nudge(0);
+    if (key !== "watchPullRequests" && key !== "notifyCiFailures" && key !== "pullRequestWatchOffRepos") return;
+    live?.recheck();
+    live?.nudge(0);
   });
   const run = (file: string, args: string[]): Promise<string> =>
     new Promise((resolve, reject) =>

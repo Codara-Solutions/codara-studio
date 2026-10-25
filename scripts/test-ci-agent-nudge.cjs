@@ -258,6 +258,43 @@ test("review 2: the line is never typed into a bare shell, and a pane that refus
   assert.equal(h.timers.length, 1);
 });
 
+test("re-review 1: a line withdrawn while the pane answers is never typed", async ({ nudge }) => {
+  // The typer gets a check to make right before it types.
+  const writes = [];
+  let wanted = true;
+  let group;
+  const typer = nudge.createAgentPaneTyper({
+    hasSession: () => true,
+    shellPid: () => 100,
+    foregroundGroup: () => new Promise((resolve) => (group = resolve)),
+    inject: (paneId, line) => writes.push({ paneId, line }),
+    noteSubmit: () => {},
+  });
+  const typed = typer("p1", "x", { wanted: () => wanted });
+  wanted = false;
+  group(222);
+  assert.equal(await typed, false);
+  assert.deepEqual(writes, [], "withdrawn while the foreground was looked up");
+  // The nudger hands it one that says whether the line is still queued.
+  const h = harness(nudge, [pane("p1", "idle")]);
+  let check;
+  h.nudger = nudge.createCiAgentNudger({
+    panesFor: () => h.panes,
+    type: (_paneId, _line, still) => {
+      check = still;
+      return new Promise(() => {});
+    },
+    now: () => h.now,
+    setTimeout: () => ({}),
+    clearTimeout: () => {},
+    log: () => {},
+  });
+  h.nudger.failing(WS, failure());
+  assert.equal(check(), true);
+  h.nudger.retain([]);
+  assert.equal(check(), false);
+});
+
 test("review 6: a pane with text in its input box that cannot be stashed waits", ({ nudge }) => {
   const h = harness(nudge, [{ ...pane("codex", "idle"), draft: true }]);
   h.nudger.failing(WS, failure());

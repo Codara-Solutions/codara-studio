@@ -416,6 +416,18 @@ test("review 5: a push moves the upstream ref and the watch hears it, loose or p
     await settle(500);
     close();
     assert.ok(heard > 0, "the push recreated the loose ref under the watched folder");
+    // The watched folder itself goes away (git pack-refs): the watch moves up and still hears.
+    heard = 0;
+    close = mod.watchUpstreamRef(read, repo, () => (heard += 1));
+    await settle(300);
+    git(repo, ["pack-refs", "--all"]);
+    fs.rmSync(path.join(repo, ".git", "refs", "remotes", "origin", "feat"), { recursive: true, force: true });
+    await settle(500);
+    heard = 0;
+    commitAndPush(repo, "f.txt");
+    await settle(500);
+    close();
+    assert.ok(heard > 0, "re-armed after its folder disappeared");
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
@@ -821,6 +833,47 @@ test("review 1: the watcher withdraws a queued line it no longer stands behind",
   h.enabled = false;
   await h.pass();
   assert.deepEqual(h.retained.at(-1), [], "the watcher turned off altogether");
+});
+
+test("re-review 1: a setting change withdraws a waiting line at once, before any pass", async ({ mod }) => {
+  const h = harness(mod, { prs: { "/repo": pr(HEAD_A, { pending: 1 }) } });
+  await h.pass();
+  h.advance(60_000);
+  h.prs["/repo"] = pr(HEAD_A, { failed: ["build"], failedAt: h.now });
+  await h.pass();
+  assert.deepEqual(h.retained.at(-1), ["acme/widgets#42"]);
+  h.off.add("acme/widgets");
+  h.watch.recheck();
+  assert.deepEqual(h.retained.at(-1), [], "the switch counts now, not at the next read");
+  h.off.clear();
+  h.watch.recheck();
+  assert.deepEqual(h.retained.at(-1), ["acme/widgets#42"]);
+  h.watching = false;
+  h.watch.recheck();
+  assert.deepEqual(h.retained.at(-1), []);
+  h.watching = true;
+  h.enabled = false;
+  h.watch.recheck();
+  assert.deepEqual(h.retained.at(-1), []);
+});
+
+test("re-review 2: a nudge during a pass keeps its earlier timer when the pass ends", async ({ mod }) => {
+  const h = harness(mod, { prs: { "/repo": pr(HEAD_A, { pending: 1 }) } });
+  h.watch.start();
+  const first = h.timers[0];
+  h.timers = [];
+  let release;
+  h.gate = new Promise((resolve) => (release = resolve));
+  first.fn();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.reads.length, 1, "the pass is reading");
+  h.refWatches[0].onChange();
+  assert.deepEqual(h.timers.map((t) => t.ms), [1_000]);
+  h.gate = null;
+  release();
+  for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(h.timers.map((t) => t.ms), [1_000], "not replaced by the minute tick");
+  h.watch.stop();
 });
 
 test("review 5: a nudge during a running pass is not lost", async ({ mod }) => {

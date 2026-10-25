@@ -56,8 +56,12 @@ export interface CiFailure {
 export interface CiAgentNudgeDeps {
   /** The agents that may hear about this workspace's branch, most fitting first. */
   panesFor(workspace: Workspace): CiAgentPane[];
-  /** Types the line and submits it; false when the pane cannot take it. */
-  type(paneId: string, line: string): boolean | Promise<boolean>;
+  /**
+   * Types the line and submits it; false when the pane cannot take it.
+   * `wanted` says whether the line is still queued: one that has to look
+   * something up first asks it again right before typing.
+   */
+  type(paneId: string, line: string, wanted: () => boolean): boolean | Promise<boolean>;
   now(): number;
   setTimeout(fn: () => void, ms: number): unknown;
   clearTimeout(handle: unknown): void;
@@ -135,7 +139,7 @@ export function createCiAgentNudger(deps: CiAgentNudgeDeps): CiAgentNudger {
             pane.rank === best && FREE_STATES.has(pane.state) && !pane.draft && now - pane.lastInputAt >= CI_NUDGE_QUIET_INPUT_MS,
         );
         if (!free) continue;
-        const answer = deps.type(free.paneId, item.line);
+        const answer = deps.type(free.paneId, item.line, () => queue.get(key) === item);
         if (typeof answer === "boolean") {
           if (answer) record(key, item, free.paneId);
           continue;
@@ -209,12 +213,13 @@ export interface AgentPaneTyperDeps {
  */
 export function createAgentPaneTyper(
   deps: AgentPaneTyperDeps,
-): (paneId: string, line: string, opts: { stashDraft?: boolean }) => Promise<boolean> {
+): (paneId: string, line: string, opts: { stashDraft?: boolean; wanted?: () => boolean }) => Promise<boolean> {
   return async (paneId, line, opts) => {
     if (!deps.hasSession(paneId)) return false;
     const pid = deps.shellPid(paneId);
     if (pid && (await deps.foregroundGroup(pid)) === pid) return false;
-    if (!deps.hasSession(paneId)) return false;
+    // The watcher may have withdrawn the line while the lookup ran.
+    if (!deps.hasSession(paneId) || opts.wanted?.() === false) return false;
     deps.inject(paneId, line, opts.stashDraft ? { submit: true, stashDraft: true } : { submit: true });
     deps.noteSubmit(paneId);
     return true;
