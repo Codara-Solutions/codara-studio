@@ -2404,6 +2404,12 @@ a { color: inherit; }
 .composer-shell {
   font-variant-numeric: normal;
 }
+
+/* Virtuoso's inline visibility:hidden holds a long chat back for 150 ms after
+   its rows have settled; list-reveal.ts decides when to drop it sooner. */
+.cora-conversation[data-list-revealed] > [data-virtuoso-scroller] > [data-viewport-type] > [data-testid="virtuoso-item-list"] {
+  visibility: visible !important;
+}
 .composer-context-label {
   font-variant-numeric: tabular-nums;
 }
