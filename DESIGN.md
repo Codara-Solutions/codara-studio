@@ -227,3 +227,13 @@ child row lighter than its parent), GitHub's PR list for the check glyphs.
   rail as the user sees it.
 - Clean up on the fold removes one merged worktree at once; for more, it
   first shows the explorer's confirm with their names.
+- Clean up never ends silently (2026-10-25: Etienne pressed it on a worktree
+  holding only `test-results/` and saw nothing). Its answer shows next to the
+  button that asked, not only in a toast: the rows go (with a toast), the same
+  confirm asks "<name> holds .env. Remove anyway?" for ignored files a fresh
+  checkout won't bring back, or a short line under the fold or row says what
+  holds it back. That line starts with what to do ("Close the tab “x” in Repo
+  first: …"), is muted ink with a warn dot (danger for a failure), wraps to
+  at most three lines, and goes on ×, on the next Clean up, or once the
+  worktree leaves the rail. Test and build output never counts as something
+  a worktree holds.
