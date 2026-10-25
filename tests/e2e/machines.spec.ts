@@ -254,6 +254,55 @@ test("with no SSH machines, Machines on by default changes nothing you would not
   }
 });
 
+test("a key RevokedHostKeys revokes, or a config ssh would refuse, does not connect and says why", async () => {
+  test.skip(!(await dockerAvailable()), "Docker is not available");
+  test.setTimeout(120_000);
+  const fixture = await prepare({});
+  let app: ElectronApplication | null = null;
+  try {
+    const keys = (await fixture.host.exec("cat /etc/ssh/ssh_host_*_key.pub"))
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => line.split(" ").slice(0, 2).join(" "));
+    const ssh = join(fixture.home, ".ssh");
+    await mkdir(ssh, { recursive: true });
+    // Listed in known_hosts, so only RevokedHostKeys can stop it.
+    await writeFile(join(ssh, "known_hosts"), keys.map((key) => `[127.0.0.1]:${fixture.host.port} ${key}`).join("\n") + "\n");
+    await writeFile(join(ssh, "revoked"), `# retired\n${keys.join("\n")}\n`);
+    const entry = (alias: string, extra: string) =>
+      [
+        `Host ${alias}`,
+        "  HostName 127.0.0.1",
+        `  Port ${fixture.host.port}`,
+        `  User ${fixture.host.user}`,
+        `  IdentityFile ${fixture.host.keyPath}`,
+        `  ${extra}`,
+      ].join("\n");
+    await writeFile(
+      join(ssh, "config"),
+      [entry("revoked-box", "RevokedHostKeys ~/.ssh/revoked"), entry("broken-box", "UserKnownHostsFile ~/.ssh/kh_%Z"), ""].join("\n"),
+    );
+    app = await launch(fixture);
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await openMachines(page);
+    const revoked = page.locator('[data-machine-id="revoked-box"]');
+    await revoked.getByRole("button", { name: "Connect" }).click();
+    await expect(revoked).toContainText("revoked by", { timeout: 20_000 });
+    await expect(revoked).not.toContainText("Connected");
+
+    const broken = page.locator('[data-machine-id="broken-box"]');
+    await broken.getByRole("button", { name: "Connect" }).click();
+    await expect(broken).toContainText("uses %Z", { timeout: 20_000 });
+    await expect(page.getByRole("dialog", { name: /^Is this / })).toHaveCount(0);
+    await broken.screenshot({ path: join(fixture.root, "..", "codara-machines-ssh-refused-config.png") });
+    await revoked.screenshot({ path: join(fixture.root, "..", "codara-machines-ssh-revoked-key.png") });
+  } finally {
+    await app?.close().catch(() => undefined);
+    await cleanup(fixture);
+  }
+});
+
 async function openMachines(page: Page): Promise<void> {
   await page.evaluate(() =>
     window.dispatchEvent(new CustomEvent("spark:open-settings", { detail: { section: "machines" } })),

@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
-import SSHConfig from "ssh-config";
+import SSHConfig, { LineType } from "ssh-config";
 import { isValidHostId, isValidPort, type RemoteHostConfig } from "@shared/remote";
 import { writeFileAtomic } from "../fs-atomic";
 import { codaraHome } from "../codara-home";
@@ -99,7 +99,9 @@ export async function readSshConfigHosts(): Promise<RemoteHostConfig[]> {
   const system = await readSystemSshConfig();
   const aliases = new Set<string>();
   for (const entry of config) {
-    if (entry.type !== SSHConfig.DIRECTIVE) continue;
+    // Not SSHConfig.DIRECTIVE: that static is missing when the built app
+    // loads the package through require(), so every Host line was skipped.
+    if (entry.type !== LineType.DIRECTIVE) continue;
     const dir = entry as { param?: string; value?: string | string[] };
     if ((dir.param ?? "").toLowerCase() !== "host") continue;
     const values = Array.isArray(dir.value) ? dir.value : [dir.value ?? ""];
