@@ -197,6 +197,8 @@ import { isAppTearingDown, markAppTearingDown } from "./lib/app-lifecycle";
 import { requestEditorReveal } from "./components/editor-cm/reveal";
 import { workspaceRailSequence, worktreeSourceWorkspace } from "./components/jump/rail-order";
 import { useWorkspaceJump } from "./components/jump/useWorkspaceJump";
+import { useTerminalSwitcher } from "./components/jump/useTerminalSwitcher";
+import type { JumpSources } from "./components/jump/jump-model";
 import { requestShareOffer, setShareWorkspaceRoots } from "./components/share/offer-store";
 import {
   buildAwayDigest,
@@ -234,6 +236,7 @@ const SessionInspector = lazy(() => import("./components/SessionInspector"));
 const AgentCapabilitiesDialog = lazy(loadAgentCapabilitiesDialog);
 const RunSwitcher = lazy(() => import("./components/RunSwitcher"));
 const JumpPalette = lazy(() => import("./components/jump/JumpPalette"));
+const TerminalSwitcher = lazy(() => import("./components/jump/TerminalSwitcher"));
 const CreateCopyDialog = lazy(() => import("./components/CreateCopyDialog"));
 const WorktreeSetupTray = lazy(() => import("./components/worktree-setup/WorktreeSetupTray"));
 const CopyBranchDeleteDialog = lazy(() =>
@@ -4192,6 +4195,33 @@ export default function App() {
     focusTerminalTarget,
   });
 
+  // What the jump palette and the recent-terminal switcher list, read when
+  // they open.
+  const jumpSources = (): JumpSources => ({
+    workspaces: workspaceRailSequence(workspaces, workspaceGroups, workspaceRailOrder, {
+      includeCollapsed: true,
+    }),
+    // The loaded layout last: it is the live one if a stale copy of the same
+    // workspace is still among the inactive ones.
+    layouts: [
+      ...tabs.inactiveWorkspaceLayouts.map((layout) => ({
+        workspaceId: layout.workspaceId,
+        tabs: layout.tabs,
+        activeTabId: layout.activeId,
+      })),
+      ...(tabs.tabsWorkspaceId
+        ? [{ workspaceId: tabs.tabsWorkspaceId, tabs: tabs.tabs, activeTabId: tabs.activeId }]
+        : []),
+    ],
+    activeWorkspaceId: activeId,
+    branchByWorkspaceId,
+    toneByWorkspaceId,
+    attention: terminalAttention,
+    detectedAgents: terminalAgents,
+    recency: workspaceJump.recency(),
+  });
+  const terminalSwitcher = useTerminalSwitcher(jumpSources, workspaceJump.jumpTo);
+
   // Workspace N is the Nth row the rail shows, folders flattened in place.
   const handleSelectWorkspaceByIndex = useCallback(
     (event: KeyboardEvent) => {
@@ -5696,6 +5726,8 @@ export default function App() {
         const prev = cycle[(Math.max(0, idx) - 1 + cycle.length) % cycle.length];
         if (prev) tabs.setActiveTab(prev.id);
       },
+      "terminal.switchRecent": (event) => terminalSwitcher.step("workspace", event),
+      "terminal.switchRecentAll": (event) => terminalSwitcher.step("all", event),
       "tab.group": () => {
         const active = visibleWorkbenchTabs.find((tab) => tab.id === activeVisibleTabId);
         if (!active || isRunOwnedTab(active)) return;
@@ -5858,6 +5890,7 @@ export default function App() {
       tabs,
       visibleWorkbenchTabs,
       workspaceJump,
+      terminalSwitcher.step,
     ],
   );
 
@@ -5875,6 +5908,10 @@ export default function App() {
       if (onboardingOpen && document.querySelector(".onboarding-dialog")) return true;
       // The open jump palette answers Mod+1..6 itself.
       if (jumpPaletteOpen && id === "view.selectByIndex") return true;
+      // A switch behind a dialog would land out of sight.
+      if ((id === "terminal.switchRecent" || id === "terminal.switchRecentAll") && visibleModalDialog()) {
+        return true;
+      }
       if (id === "workspace.selectByIndex" || id === "workspace.back" || id === "workspace.forward") {
         // Switching workspaces behind a dialog (the jump palette, Settings,
         // Fix with agent) happens out of sight and leaves the dialog
@@ -5956,10 +5993,10 @@ export default function App() {
     [bindingTable],
   );
 
-  // Dispose PTYs when terminal panes exit. The renderer-side TerminalPane
-  // already calls pty.dispose on unmount, so this handler is intentionally
-  // a no-op for unmount cases — but we keep the seam so future "exited
-  // pane → auto-close" UX can hook in here without touching every call site.
+  // A shell the user ends with a clean `exit` closes its pane, the way a
+  // terminal window closes. Anything else keeps the pane and its exit line:
+  // a non-zero status or signal is a failure worth reading, and sanctioned,
+  // hibernated, and teardown exits are Codara's own doing.
   const onTerminalPaneExit = useCallback(
     (tabId: string, paneId: string, info?: PtyExitInfo) => {
       paneRuntimeRef.current.delete(paneId);
@@ -5975,6 +6012,21 @@ export default function App() {
       // stays the pane's running one and its chip stays as it was. The pane
       // resumes it when shown (useTerminalSession wakeFromSleep).
       if (info?.hibernated) return;
+      // A live agent pointer means the shell died under a running agent, which
+      // useTerminalSession may resume in place; Cora workers end through the
+      // run store, never through the user's `exit`.
+      const userExit =
+        !!info &&
+        !info.sanctioned &&
+        !isAppTearingDown() &&
+        info.exitCode === 0 &&
+        !info.signal &&
+        !leaf.worker &&
+        !leaf.agentSession?.active;
+      if (userExit) {
+        t.closeTerminalPane(tabId, paneId);
+        return;
+      }
       // The shell died, taking any foreground agent with it — a pointer left
       // `active` here would wrongly restore on the next boot. The poller's
       // running:false usually lands first; this covers a pty that dies without
@@ -6760,29 +6812,7 @@ export default function App() {
         {jumpPaletteOpen ? (
           <Suspense fallback={null}>
             <JumpPalette
-              sources={{
-                workspaces: workspaceRailSequence(workspaces, workspaceGroups, workspaceRailOrder, {
-                  includeCollapsed: true,
-                }),
-                // The loaded layout last: it is the live one if a stale copy
-                // of the same workspace is still among the inactive ones.
-                layouts: [
-                  ...tabs.inactiveWorkspaceLayouts.map((layout) => ({
-                    workspaceId: layout.workspaceId,
-                    tabs: layout.tabs,
-                    activeTabId: layout.activeId,
-                  })),
-                  ...(tabs.tabsWorkspaceId
-                    ? [{ workspaceId: tabs.tabsWorkspaceId, tabs: tabs.tabs, activeTabId: tabs.activeId }]
-                    : []),
-                ],
-                activeWorkspaceId: activeId,
-                branchByWorkspaceId,
-                toneByWorkspaceId,
-                attention: terminalAttention,
-                detectedAgents: terminalAgents,
-                recency: workspaceJump.recency(),
-              }}
+              sources={jumpSources()}
               worktreeSource={worktreeSourceWorkspace(workspaces, activeId, branchByWorkspaceId)}
               chordHint={hintForCommand(bindingTable, "jump.open")}
               onClose={() => setJumpPaletteOpen(false)}
@@ -6795,6 +6825,20 @@ export default function App() {
                 setJumpPaletteOpen(false);
                 openSessionSearch(query);
               }}
+            />
+          </Suspense>
+        ) : null}
+
+        {terminalSwitcher.session?.shown ? (
+          <Suspense fallback={null}>
+            <TerminalSwitcher
+              session={terminalSwitcher.session}
+              otherScopeHint={hintForCommand(
+                bindingTable,
+                terminalSwitcher.session.scope === "all" ? "terminal.switchRecent" : "terminal.switchRecentAll",
+              )}
+              onSelect={terminalSwitcher.select}
+              onCommit={terminalSwitcher.commit}
             />
           </Suspense>
         ) : null}

@@ -1027,9 +1027,22 @@ async function doSpawnRemote(
       };
     },
     onExit: (cb: (e: { exitCode: number; signal?: number }) => void) => {
-      const listener = () => cb({ exitCode: 0 });
+      // A channel that closes without an exit-status (dropped connection, a
+      // signal) reports -1, so the renderer keeps the pane instead of reading
+      // it as the user's clean `exit`.
+      let exitCode = -1;
+      const onStatus = (code: number | null) => {
+        if (typeof code === "number") exitCode = code;
+      };
+      const listener = () => cb({ exitCode });
+      channel.on("exit", onStatus);
       channel.on("close", listener);
-      return { dispose: () => channel.off("close", listener) };
+      return {
+        dispose: () => {
+          channel.off("exit", onStatus);
+          channel.off("close", listener);
+        },
+      };
     },
   };
 
