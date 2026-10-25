@@ -10,7 +10,8 @@ import { useEffect, useState, type RefObject } from "react";
 // (the rows painted first can be ones from the top), Virtuoso decides alone.
 // Rows still loading content that changes their height (an image, a Mermaid
 // diagram) keep the list hidden too, since Virtuoso would re-scroll when it
-// lands.
+// lands, and so does a web font still loading (the first JetBrains Mono load
+// reflows every code block).
 
 export interface ListSample {
   scrollTop: number;
@@ -51,6 +52,7 @@ function sampleList(root: HTMLElement): { sample: ListSample | null; hidden: boo
   const first = list.firstElementChild?.getAttribute("data-index") ?? "";
   const last = list.lastElementChild?.getAttribute("data-index") ?? "";
   const pending =
+    document.fonts.status === "loading" ||
     list.querySelector("[data-mermaid-pending]") !== null ||
     Array.from(list.querySelectorAll("img")).some((image) => !image.complete);
   return {
