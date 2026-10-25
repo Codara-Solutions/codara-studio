@@ -977,6 +977,60 @@ async function main() {
     check("scan: the memo is replaced atomically, not rewritten in place", fs.statSync(cachePath).ino !== before);
   }
   {
+    // A crash, a terminated worker or a quit between write and rename leaves
+    // the temp file; up to the memo's size each, they would pile up.
+    const cachePath = path.join(tmp, "scan-cache-sweep.json");
+    const stale = path.join(tmp, ".scan-cache-sweep.json.123.1700000000000.abcdef.tmp");
+    const fresh = path.join(tmp, ".scan-cache-sweep.json.123.1800000000000.fedcba.tmp");
+    const other = path.join(tmp, ".another-file.json.123.1700000000000.abcdef.tmp");
+    for (const file of [stale, fresh, other]) fs.writeFileSync(file, "partial");
+    const hourAgo = (Date.now() - 60 * 60 * 1000) / 1000;
+    fs.utimesSync(stale, hourAgo, hourAgo);
+    fs.utimesSync(other, hourAgo, hourAgo);
+    await scanUsage(scanRequest(cachePath));
+    check("scan: a temp file left by a write that never finished is swept", !fs.existsSync(stale));
+    check("scan: a temp file still being written is left alone", fs.existsSync(fresh));
+    check("scan: another file's temp files are left alone", fs.existsSync(other));
+  }
+  {
+    // Two scans that overlap both persist. The older snapshot must not be the
+    // one that lands last: hold the first rename while the second scan is
+    // asked for. (scanQueue already keeps them apart; this pins the result.)
+    const cachePath = path.join(tmp, "scan-cache-race.json");
+    const claudeFile = path.join(
+      claudeRoot,
+      String(fs.readdirSync(claudeRoot, { recursive: true }).find((name) => String(name).endsWith(".jsonl"))),
+    );
+    const realRename = fs.promises.rename;
+    let firstRenaming;
+    let releaseFirst;
+    const renaming = new Promise((resolve) => (firstRenaming = resolve));
+    const gate = new Promise((resolve) => (releaseFirst = resolve));
+    let cacheRenames = 0;
+    fs.promises.rename = async (from, to) => {
+      if (to === cachePath && cacheRenames++ === 0) {
+        firstRenaming();
+        await gate;
+      }
+      return realRename.call(fs.promises, from, to);
+    };
+    try {
+      const first = scanUsage(scanRequest(cachePath));
+      await renaming;
+      fs.appendFileSync(claudeFile, "\n");
+      const newSize = fs.statSync(claudeFile).size;
+      const second = scanUsage(scanRequest(cachePath));
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      releaseFirst();
+      await Promise.all([first, second]);
+      const landed = new Map();
+      decodeScanCache(fs.readFileSync(cachePath, "utf8"), landed);
+      eq("scan: overlapping persists leave the newest memo on disk", landed.get(claudeFile)?.size, newSize);
+    } finally {
+      fs.promises.rename = realRename;
+    }
+  }
+  {
     // The forecast keeps the worker between its scans; turning it off must
     // not leave the worker holding the memo for the rest of that time.
     const analytics = await bundle(ANALYTICS_TS, path.join(tmp, "analytics.bundle.cjs"));
@@ -985,6 +1039,12 @@ async function main() {
     eq("worker: a forecast scan keeps it 20 minutes", analytics.workerIdleDelayMs(now), 20 * 60_000);
     analytics.releaseForecastWorker();
     eq("worker: turning the forecast off drops that to the idle delay", analytics.workerIdleDelayMs(now), 3 * 60_000);
+    // A scan that checked the flag, then waited while it was turned off,
+    // asks for the keep-alive after the release already ran.
+    let forecastOn = true;
+    analytics.keepWorkerFor(20 * 60_000, now, () => forecastOn);
+    forecastOn = false;
+    eq("worker: a keep-alive asked for just before the forecast turned off does not hold it", analytics.workerIdleDelayMs(now), 3 * 60_000);
   }
   {
     // Codex moves finished sessions to archived_sessions beside sessions.

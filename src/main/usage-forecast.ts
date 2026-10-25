@@ -349,7 +349,12 @@ let scanInflight: Promise<ForecastScan> | null = null;
 async function forecastScan(nowMs: number): Promise<ForecastScan> {
   if (scanCache && nowMs - scanCache.at < SCAN_TTL_MS) return scanCache.scan;
   if (scanInflight) return scanInflight;
-  scanInflight = readForecastScan(nowMs - HISTORY_DAYS * DAY_MS, FORECAST_BUCKET_MS, nowMs - READINGS_DAYS * DAY_MS)
+  scanInflight = readForecastScan(
+    nowMs - HISTORY_DAYS * DAY_MS,
+    FORECAST_BUCKET_MS,
+    nowMs - READINGS_DAYS * DAY_MS,
+    () => getPreferenceCached("usageForecast") === true,
+  )
     .then((scan) => {
       scanCache = { at: Date.now(), scan };
       return scan;

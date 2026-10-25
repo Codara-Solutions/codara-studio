@@ -101,6 +101,9 @@ let nextJobId = 1;
 const pending = new Map<number, PendingScan>();
 let idleTimer: NodeJS.Timeout | null = null;
 let keepWorkerUntil = 0;
+/** Asked again whenever the idle delay is armed: a keep-alive outlives the
+ * reason for it only while this says so. */
+let keepWorkerWanted: () => boolean = () => false;
 
 function settleAll(err: Error): void {
   for (const scan of pending.values()) scan.reject(err);
@@ -141,9 +144,11 @@ function armIdleStop(): void {
   idleTimer.unref();
 }
 
-/** Keeps the worker at least `ms` past now once it goes idle. */
-export function keepWorkerFor(ms: number, nowMs = Date.now()): void {
+/** Keeps the worker at least `ms` past now once it goes idle, for as long as
+ * `wanted` says so. */
+export function keepWorkerFor(ms: number, nowMs = Date.now(), wanted: () => boolean = () => true): void {
   keepWorkerUntil = Math.max(keepWorkerUntil, nowMs + ms);
+  keepWorkerWanted = wanted;
 }
 
 /** The forecast was turned off: the worker no longer waits for its next scan
@@ -155,11 +160,15 @@ export function releaseForecastWorker(): void {
 
 /** How long an idle worker is kept, for tests. */
 export function workerIdleDelayMs(nowMs = Date.now()): number {
-  return Math.max(WORKER_IDLE_MS, keepWorkerUntil - nowMs);
+  return keepWorkerWanted() ? Math.max(WORKER_IDLE_MS, keepWorkerUntil - nowMs) : WORKER_IDLE_MS;
 }
 
-function scanOnWorker<T extends UsageScanResult>(code: string, job: UsageScanWork, keepMs = 0): Promise<T> {
-  keepWorkerFor(keepMs);
+function scanOnWorker<T extends UsageScanResult>(
+  code: string,
+  job: UsageScanWork,
+  keep?: { ms: number; wanted: () => boolean },
+): Promise<T> {
+  if (keep) keepWorkerFor(keep.ms, Date.now(), keep.wanted);
   if (idleTimer !== null) {
     clearTimeout(idleTimer);
     idleTimer = null;
@@ -188,11 +197,13 @@ export async function readUsageSummary(input: UsageSummaryInput): Promise<UsageS
 }
 
 /** Priced spend per time bucket since sinceMs, and the CLIs' own limit
- * readings, for the usage forecast. */
+ * readings, for the usage forecast. `keepWorker` says whether the forecast is
+ * still on, so the worker waits for its next scan only then. */
 export async function readForecastScan(
   sinceMs: number,
   bucketMs: number,
   signalsSinceMs = sinceMs,
+  keepWorker: () => boolean = () => true,
 ): Promise<ForecastScan> {
   const roots = await resolveProviderRoots();
   const timeline = {
@@ -208,5 +219,8 @@ export async function readForecastScan(
     const { runForecastScan } = await import("./usage-scan-worker");
     return runForecastScan(timeline, signals);
   }
-  return scanOnWorker<ForecastScan>(code, { timeline, signals }, FORECAST_WORKER_KEEP_MS);
+  // Asked here, after the awaits above: the forecast may have been turned off
+  // since its caller checked, and then the worker must not wait for it.
+  const keep = keepWorker() ? { ms: FORECAST_WORKER_KEEP_MS, wanted: keepWorker } : undefined;
+  return scanOnWorker<ForecastScan>(code, { timeline, signals }, keep);
 }
