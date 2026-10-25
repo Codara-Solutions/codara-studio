@@ -6,11 +6,12 @@ import { mkdtemp, mkdir, realpath, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// Merged and missing copy-branch workspaces in the rail: a merged worktree is
-// marked "merged" and goes in one click with its branch; a worktree with no
-// commits of its own yet is not called merged; a missing folder whose branch
-// is merged leaves on its own; a missing folder with unmerged work stays,
-// struck through, until Remove from rail drops the row and keeps the branch.
+// Merged and missing copy-branch workspaces in the rail: a merged worktree
+// folds under its project, is marked "merged" and goes in one click with its
+// branch; a worktree with no commits of its own yet is not called merged; a
+// missing folder whose branch is merged leaves on its own; a missing folder
+// with unmerged work stays, struck through, until Remove from rail drops the
+// row and keeps the branch.
 
 function git(cwd: string, args: string[], env: NodeJS.ProcessEnv): string {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", env }).trim();
@@ -130,6 +131,11 @@ test("merged and missing worktrees leave the rail cleanly", async ({}, testInfo)
     // Folder, registration and branch all gone: the row leaves on its own.
     await expect(page.locator('[data-workspace-id="ws-auto"]')).toHaveCount(0, { timeout: 30_000 });
 
+    // Merged worktrees fold under their project: one line says how many.
+    const fold = page.locator('[data-rail-children-of="ws-repo"]').getByTestId("workspace-merged-fold");
+    await expect(fold).toContainText("1 merged", { timeout: 30_000 });
+    await expect(page.locator('[data-workspace-id="ws-merged"]')).toHaveCount(0);
+    await fold.getByTestId("workspace-merged-toggle").click();
     await expect(row("ws-merged").getByTestId("workspace-merged")).toBeVisible({ timeout: 30_000 });
     await expect(row("ws-fresh").getByTestId("workspace-merged")).toHaveCount(0);
     await expect(row("ws-missing").getByTestId("workspace-missing")).toHaveText("Folder gone");

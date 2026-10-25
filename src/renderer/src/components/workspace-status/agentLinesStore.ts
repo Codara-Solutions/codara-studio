@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useSyncExternalStore } from "react";
 import { buildAgentLines, type AgentLine, type AgentNoteMap, type AgentNotePane } from "@shared/agent-status";
 import type { AgentBoardModel } from "@shared/agent-board";
 import { collectLeaves } from "../../tabs/paneTree";
@@ -112,4 +112,19 @@ export function usePublishAgentLines(board: AgentBoardModel): void {
 /** One workspace's agent lines, needs-you first. */
 export function useWorkspaceAgentLines(workspaceId: string): readonly AgentLine[] {
   return useSyncExternalStore(subscribe, () => lines[workspaceId] ?? NO_LINES);
+}
+
+/**
+ * Several workspaces' agent lines at once, for a project and its worktrees.
+ * The returned array keeps its identity while none of them changed.
+ */
+export function useAgentLinesOf(workspaceIds: readonly string[]): readonly (readonly AgentLine[])[] {
+  const last = useRef<readonly (readonly AgentLine[])[]>([]);
+  return useSyncExternalStore(subscribe, () => {
+    const prior = last.current;
+    const next = workspaceIds.map((id) => lines[id] ?? NO_LINES);
+    if (prior.length === next.length && next.every((list, index) => list === prior[index])) return prior;
+    last.current = next;
+    return next;
+  });
 }

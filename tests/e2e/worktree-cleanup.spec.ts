@@ -118,6 +118,8 @@ test("the cleanup screen removes only what it may, and what was confirmed", asyn
     await page.waitForLoadState("domcontentloaded");
     const repoRow = page.locator('[data-workspace-id="ws-repo"]');
     await expect(repoRow).toBeVisible({ timeout: 30_000 });
+    // Merged worktrees fold under their project until opened.
+    await page.locator('[data-rail-children-of="ws-repo"]').getByTestId("workspace-merged-toggle").click({ timeout: 30_000 });
     await expect(page.locator('[data-workspace-id="ws-merged"]')).toBeVisible();
 
     // A terminal open in a worktree keeps it out of reach.
