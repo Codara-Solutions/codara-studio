@@ -5,6 +5,7 @@ import { createServer } from "node:net";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { cleanEnv } from "./agent-env";
 
 // codara_preview_wait_for hmr against a real Vite dev server (feedback round
 // 5, item 4), with Codara's window hidden: a module update, a CSS update, a
@@ -14,15 +15,6 @@ import { join, resolve } from "node:path";
 
 const { rpcRaw } = require("../../cli/lib/rpc.cjs");
 const VITE = resolve(__dirname, "../../node_modules/vite/bin/vite.js");
-
-function cleanEnv(home: string): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined || /^(SPARK|CODARA)_/.test(key)) continue;
-    env[key] = value;
-  }
-  return { ...env, CODARA_HOME_DIR: home, SPARK_HOME_DIR: home, SPARK_USER_DATA_DIR: home };
-}
 
 function freePort(): Promise<number> {
   return new Promise((done, fail) => {

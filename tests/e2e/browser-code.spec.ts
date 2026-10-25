@@ -5,6 +5,7 @@ import { createServer, type Server } from "node:http";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { cleanEnv } from "./agent-env";
 
 // codara_browser_use in the built app, through the stdio MCP server as any
 // agent runs it, on four realistic flows served locally: sign in to an app,
@@ -138,15 +139,6 @@ function startFixture(): Promise<{ server: Server; url: (path: string) => string
     const { port } = server.address() as { port: number };
     done({ server, url: (path) => `http://127.0.0.1:${port}${path}` });
   }));
-}
-
-function cleanEnv(home: string): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined || /^(SPARK|CODARA)_/.test(key)) continue;
-    env[key] = value;
-  }
-  return { ...env, CODARA_HOME_DIR: home, SPARK_HOME_DIR: home, SPARK_USER_DATA_DIR: home };
 }
 
 interface Content { type: string; text?: string; data?: string; mimeType?: string }
