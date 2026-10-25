@@ -325,9 +325,15 @@ async function main() {
     rail.includes("railAutoScrollDelta") && rail.includes("startRailAutoScroll"),
   );
   check(
-    "row controls and an in-progress rename still cannot start a drag",
+    "row controls, an in-progress rename and a nested worktree row cannot start a drag",
     rail.includes("target?.closest(\"button, input, [role='menu']\")") &&
-      rail.includes("draggable={!editing}"),
+      rail.includes("draggable={!editing && !nested}"),
+  );
+  check(
+    "a project's slot spans its worktrees, so they move with it",
+    rail.includes("next.dataset.railChildrenOf === railItemId(element)") &&
+      rail.includes("end: railItemBottom(element)") &&
+      rail.includes("dragHeightRef.current = railItemBottom(event.currentTarget)"),
   );
   check(
     "the ghost is a full-size rounded slot, not a hairline insertion rule",
