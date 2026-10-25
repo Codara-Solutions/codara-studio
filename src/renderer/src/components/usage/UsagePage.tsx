@@ -1899,7 +1899,7 @@ function SourcesFooter({ summary }: { summary: UsageSummary }) {
       <span style={LABEL}>Sources</span>
       {summary.sources.map((source) => (
         <div
-          key={source.provider}
+          key={`${source.provider}:${source.dir}`}
           style={{
             display: "flex",
             flexWrap: "wrap",

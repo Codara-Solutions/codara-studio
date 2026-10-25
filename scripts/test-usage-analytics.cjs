@@ -668,6 +668,7 @@ async function main() {
 
   const scanner = await bundle(SCANNER_TS, path.join(tmp, "scanner.bundle.cjs"));
   const {
+    codexTranscriptRoots,
     decodeScanCache,
     encodeScanCache,
     listTranscriptFiles,
@@ -966,6 +967,38 @@ async function main() {
     eq("scan: each source counts its session", first.sources.map((source) => source.distinctSessions).join(","), "1,1,1");
     eq("scan: the project row carries the working directory", first.projects.find((row) => row.provider === "claude").project, "/p/app");
     check("scan: the memo is persisted where the caller asked", fs.existsSync(cachePath));
+  }
+  {
+    // Codex moves finished sessions to archived_sessions beside sessions.
+    // Skipping it hid most of a long history (about $340 shown of $6,100).
+    const codexHome = path.join(tmp, "codex-archive-tree");
+    const liveRoot = path.join(codexHome, "sessions");
+    const archivedRoot = path.join(codexHome, "archived_sessions");
+    fs.mkdirSync(path.join(liveRoot, "2026", "06", "24"), { recursive: true });
+    eq("codex roots: without an archive only sessions is read", codexTranscriptRoots(liveRoot).length, 1);
+    fs.mkdirSync(archivedRoot, { recursive: true });
+    const roots = codexTranscriptRoots(liveRoot);
+    eq("codex roots: the archive beside sessions is read too", roots.map((root) => root.dir).join(","), `${liveRoot},${archivedRoot}`);
+    const rollout = (name, model) => [name, `${sessionMeta}\n${turnContext(model)}\n${tokenCount()}\n`];
+    const [liveName, liveBody] = rollout("rollout-2026-06-24T22-03-02-019efba8-6f47-7fa2-b182-66ae4ed19230.jsonl", "gpt-5.5");
+    const [oldName, oldBody] = rollout("rollout-2026-06-20T09-00-00-019efba8-0000-7fa2-b182-66ae4ed19231.jsonl", "gpt-5.4");
+    fs.writeFileSync(path.join(liveRoot, "2026", "06", "24", liveName), liveBody);
+    fs.writeFileSync(path.join(archivedRoot, oldName), oldBody);
+    // The same rollout under both roots: archived between the two walks.
+    fs.writeFileSync(path.join(archivedRoot, liveName), liveBody);
+    const summary = await scanUsage({
+      roots,
+      cachePath: path.join(tmp, "scan-cache-archive.json"),
+      input: { sinceDay: "2026-06-01", untilDay: "2026-08-31", timeZone: "UTC" },
+    });
+    const codexCells = summary.buckets.filter((bucket) => bucket.provider === "codex");
+    eq("codex roots: archived sessions are counted", codexCells.map((bucket) => bucket.model).sort().join(","), "gpt-5.4,gpt-5.5");
+    eq(
+      "codex roots: a rollout seen under both roots counts once",
+      codexCells.reduce((total, bucket) => total + bucket.recordCount, 0),
+      2,
+    );
+    eq("codex roots: each folder has its own source row", summary.sources.map((source) => source.status).join(","), "ok,ok");
   }
   {
     const missing = await scanUsage({

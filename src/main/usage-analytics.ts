@@ -3,7 +3,8 @@
 //
 // Three roots, all personal-home only:
 //   claude — <personal claude config dir>/projects/**/*.jsonl
-//   codex  — <codex home>/sessions/YYYY/MM/DD/rollout-*.jsonl
+//   codex  — <codex home>/sessions/YYYY/MM/DD/rollout-*.jsonl, and the
+//            sessions Codex moved to <codex home>/archived_sessions
 //   cora   — <codaraHome>/pi-agent/sessions/*.jsonl
 //
 // The worker keeps the parsed-record memo between scans and is stopped once
@@ -14,7 +15,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Worker } from "node:worker_threads";
 import { codaraHome } from "./codara-home";
-import { scanUsage, type UsageScanRequest, type UsageScanRoot } from "./usage-scan";
+import { codexTranscriptRoots, scanUsage, type UsageScanRequest, type UsageScanRoot } from "./usage-scan";
 import type {
   ForecastScan,
   UsageScanJob,
@@ -47,7 +48,7 @@ async function resolveProviderRoots(): Promise<UsageScanRoot[]> {
     // managed profile left something unexpected behind. That is a real problem
     // worth surfacing on the source row, not a reason to fail the whole page.
     const { resolveCodexHomePaths } = await import("./orchestration/codex-home");
-    roots.push({ provider: "codex", dir: resolveCodexHomePaths().sessionsRoot, error: null });
+    roots.push(...codexTranscriptRoots(resolveCodexHomePaths().sessionsRoot));
   } catch (err) {
     roots.push({ provider: "codex", dir: "", error: messageOf(err) });
   }
@@ -166,15 +167,7 @@ export async function readUsageSummary(input: UsageSummaryInput): Promise<UsageS
 /** Priced spend per time bucket since sinceMs, and the CLIs' own limit
  * readings, for the usage forecast. */
 export async function readForecastScan(sinceMs: number, bucketMs: number): Promise<ForecastScan> {
-  const resolved = await resolveProviderRoots();
-  // Codex moves finished sessions to archived_sessions beside sessions; the
-  // forecast needs their limit readings, which go back months.
-  const roots = [
-    ...resolved,
-    ...resolved
-      .filter((root) => root.provider === "codex" && root.error === null && root.dir.length > 0)
-      .map((root) => ({ ...root, dir: join(dirname(root.dir), "archived_sessions") })),
-  ];
+  const roots = await resolveProviderRoots();
   const timeline = {
     roots,
     cachePath: join(codaraHome(), "usage-scan-cache.json"),
