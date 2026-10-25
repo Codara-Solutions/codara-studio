@@ -3201,6 +3201,16 @@ function SessionsSettings({
         ) : null}
       </SettingsSection>
 
+      <SettingsSection title="SSH machines">
+        {hydrated ? (
+          <ToggleRow
+            title="Keep agents running on SSH machines"
+            desc="Claude Code, Codex, Grok or Pi started in an SSH workspace runs in tmux on that machine, with the machine's own install and sign-in. It keeps working when Codara quits or loses the connection, and its pane attaches to it again when it reopens. Closing the pane stops it. Needs tmux on the machine. Preview."
+            {...bindToggle("machinesEnabled", preferences, setPreference)}
+          />
+        ) : null}
+      </SettingsSection>
+
       <SettingsSection title="Idle agents">
         {hydrated ? (
           <SettingRow

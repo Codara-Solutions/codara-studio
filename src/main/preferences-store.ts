@@ -338,6 +338,8 @@ function normalize(
       typeof src.remoteAccessEnabled === "boolean"
         ? src.remoteAccessEnabled
         : DEFAULT_PREFERENCES.remoteAccessEnabled,
+    machinesEnabled:
+      typeof src.machinesEnabled === "boolean" ? src.machinesEnabled : DEFAULT_PREFERENCES.machinesEnabled,
     // Background auto-fetch + teammate-push alerts. Absent keys resolve to the
     // defaults (on / 3 min / on) so existing preference files pick the
     // feature up on upgrade.

@@ -1248,8 +1248,9 @@ const api = {
       nativeGrokProfileId?: string;
     }> =>
       ipcRenderer.invoke("pty:spawn", args),
-    write: (id: string, data: string): Promise<void> =>
-      ipcRenderer.invoke("pty:write", { id, data }),
+    // typed: a key the user pressed in the pane (see pty-manager write).
+    write: (id: string, data: string, opts?: { typed?: boolean }): Promise<void> =>
+      ipcRenderer.invoke("pty:write", { id, data, typed: opts?.typed === true }),
     inject: (
       id: string,
       text: string,
