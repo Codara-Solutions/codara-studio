@@ -10,13 +10,17 @@
 // those: an HTML block can run past blank lines, and a fence line inside one
 // is not a fence, so the first line that may start one ends the cutting.
 // Link reference and footnote definitions apply to the whole document, so a
-// text that may contain one is never cut at all.
+// text that may contain one is never cut at all; a label can hold escaped
+// brackets and line breaks, so any "]:" after a line opening a bracket counts.
+// A lone CR is a line ending to the parser but not to this scanner, so a text
+// holding one is never cut either.
 
-const DEFINITION = /^[ \t>*+\-.)\d]*\[[^\]\n]+\]:/m;
+const DEFINITION_START = /^[ \t>*+\-.)\d]*\[/gm;
+const LONE_CR = /\r(?!\n)/;
 const BLANK = /^[ \t]*$/;
 const LIST_ITEM = /^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)/;
 const BACKTICK_FENCE = /^( {0,3})(`{3,})[^`]*$/;
-const TILDE_FENCE = /^( {0,3})(~{3,}).*$/;
+const TILDE_FENCE = /^( {0,3})(~{3,})[^]*$/;
 const FENCE_CLOSE = /^( {0,3})(`{3,}|~{3,})[ \t]*$/;
 const HTML_START = /^ {0,3}</;
 
@@ -41,8 +45,15 @@ function openingFence(line: string): OpenFence | null {
   return match ? { char: match[2][0], length: match[2].length, indent: match[1].length } : null;
 }
 
+function mayHoldDefinition(text: string): boolean {
+  for (const match of text.matchAll(DEFINITION_START)) {
+    if (text.includes("]:", match.index)) return true;
+  }
+  return false;
+}
+
 export function splitMarkdownBlocks(text: string): string[] {
-  if (DEFINITION.test(text)) return [text];
+  if (LONE_CR.test(text) || mayHoldDefinition(text)) return [text];
   const blocks: string[] = [];
   let start = 0;
   let offset = 0;

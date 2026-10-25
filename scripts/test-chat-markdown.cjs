@@ -146,6 +146,11 @@ const BLOCK_SAMPLES = [
   "A codara://tab/abc link\n\n- [ ] task\n- [x] done\n\n~~struck~~ and https://example.com",
   "    indented code\n\n    still code\n\nback out",
   "+ plus\n\n+ plus loose\n\n10. ten\n\n-\n\n- after empty item",
+  "x\r```\n\ny\n```\n\nz",
+  "~~~ a\u2028b\n\ncode\n\n~~~\n\nout",
+  "see [a\\]b]\n\n[a\\]b]: /url",
+  "[foo\nbar]: /url\n\nsee [foo bar]",
+  "see [x]\n\n[\nx\n]: /url",
 ];
 
 function* lcg(seed) {
@@ -330,6 +335,8 @@ async function main() {
     assert.deepEqual(B.splitMarkdownBlocks("One.\n\nTwo.\n\n```ts\na\n\nb\n```\n\n- x\n- y\n\nEnd"), ["One.", "Two.", "```ts\na\n\nb\n```", "- x\n- y", "End"]);
     assert.deepEqual(B.splitMarkdownBlocks("- a\n\n- b\n\nc"), ["- a\n\n- b", "c"]);
     assert.deepEqual(B.splitMarkdownBlocks("x\n\n[d]: https://e.com\n\ny"), ["x\n\n[d]: https://e.com\n\ny"]);
+    // A "]:" with no line opening a bracket before it (a type hint in code) still cuts.
+    assert.deepEqual(B.splitMarkdownBlocks("```py\ndef f() -> list[int]:\n```\n\nDone."), ["```py\ndef f() -> list[int]:\n```", "Done."]);
   });
 
   test("Markdown renders memoized pieces with the separator a whole render has", () => {
