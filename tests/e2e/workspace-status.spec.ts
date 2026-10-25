@@ -7,13 +7,14 @@ import { join, resolve } from "node:path";
 const { rpcRaw } = require("../../cli/lib/rpc.cjs");
 
 // Workspace status as agents and the user set it. An agent in a terminal of
-// one workspace sets its status and progress note through the codara-studio
-// tool server over stdio, while another workspace is on screen: the note
-// lands on the agent's own workspace, cleaned to one line, and the server's
-// instructions tell it when to post. The user then sets and clears statuses
-// from the row's right-click menu, by mouse and by keyboard, in a dark and a
-// light theme; the statuses survive a restart, and a deleted workspace takes
-// its status with it.
+// one workspace posts its progress note through the codara-studio tool server
+// over stdio, while another workspace is on screen: the note lands on the
+// agent's own line in its own workspace, cleaned to one line, and the
+// server's instructions tell it when to post. It never becomes the status the
+// user sets by hand (agent-status-lines.spec.ts covers the agents' lines).
+// The user then sets and clears statuses from the row's right-click menu, by
+// mouse and by keyboard, in a dark and a light theme; the statuses survive a
+// restart, and a deleted workspace takes its status with it.
 
 const ROOT = resolve(__dirname, "..", "..");
 
@@ -177,18 +178,16 @@ test("agents and the user set a workspace's status and progress note in the rail
     expect(refused.isError).toBe(true);
     expect(refused.content[0]?.text).toMatch(/status must be one of todo, in_progress, in_review, done, blocked/);
 
-    // The rail shows it on the agent's workspace only.
+    // The note is the agent's own line, not the workspace's hand-set status.
     const alphaStatus = row(page, "ws-alpha").getByTestId("workspace-status");
-    await expect(alphaStatus.getByTestId("workspace-status-chip")).toHaveText("In progress");
-    await expect(alphaStatus.getByTestId("workspace-status-note")).toHaveText(cut.note);
-    await expect(alphaStatus).toHaveAttribute("title", /^In progress\. Tests pass .*Set by Codex just now\.$/);
+    await expect(alphaStatus).toHaveCount(0);
     await expect(row(page, "ws-beta").getByTestId("workspace-status")).toHaveCount(0);
-    expect(Object.keys(await stored())).toEqual(["ws-alpha"]);
+    expect(await stored()).toEqual({});
 
     // By hand, with the mouse: right-click, pick Blocked, write why, save.
     let picker = await openStatusPicker(page, "ws-alpha");
-    await expect(picker.getByRole("option", { name: "In progress" })).toHaveAttribute("aria-selected", "true");
-    await expect(picker.getByTestId("workspace-status-checkpoints").locator("li")).toHaveCount(2);
+    await expect(picker.getByRole("option", { selected: true })).toHaveCount(0);
+    await expect(picker.getByTestId("workspace-status-checkpoints")).toHaveCount(0);
     await picker.getByRole("option", { name: "Blocked" }).click();
     await picker.getByRole("textbox", { name: "Progress note" }).fill("Waiting on the API key");
     await picker.getByRole("button", { name: "Save" }).click();
@@ -265,17 +264,17 @@ test("agents and the user set a workspace's status and progress note in the rail
     await page.keyboard.press("Escape");
     await expect(iconPicker).toHaveCount(0);
 
-    // An agent posting while the picker is open shows in it, and Save sends
-    // only what the user changed, so the agent's newer status stays.
+    // An agent posting while the picker is open writes its own line and
+    // leaves the user's status alone; Save keeps the status and the new note.
     picker = await openStatusPicker(page, "ws-alpha");
     await expect(picker.getByRole("option", { name: "Blocked" })).toHaveAttribute("aria-selected", "true");
     await request("workspace.status", { callerPaneId: pane.paneId, callerClient: "claude-code", status: "in_review" });
-    await expect(picker.getByRole("option", { name: "In review" })).toHaveAttribute("aria-selected", "true");
-    await expect(picker.getByTestId("workspace-status-checkpoints").locator("li").first()).toContainText("Claude Code");
+    await expect.poll(async () => (await stored())["ws-alpha"]?.status).toBe("blocked");
+    await expect(picker.getByRole("option", { name: "Blocked" })).toHaveAttribute("aria-selected", "true");
     await picker.getByRole("textbox", { name: "Progress note" }).fill("API key added");
     await picker.getByRole("button", { name: "Save" }).click();
     await expect(picker).toHaveCount(0);
-    await expect(alphaStatus.getByTestId("workspace-status-chip")).toHaveText("In review");
+    await expect(alphaStatus.getByTestId("workspace-status-chip")).toHaveText("Blocked");
     await expect(alphaStatus.getByTestId("workspace-status-note")).toHaveText("API key added");
 
     // A restart keeps them.
@@ -283,7 +282,7 @@ test("agents and the user set a workspace's status and progress note in the rail
     app = await launch();
     page = await app.firstWindow();
     await page.waitForLoadState("domcontentloaded");
-    await expect(row(page, "ws-alpha").getByTestId("workspace-status-chip")).toHaveText("In review");
+    await expect(row(page, "ws-alpha").getByTestId("workspace-status-chip")).toHaveText("Blocked");
     await expect(row(page, "ws-beta").getByTestId("workspace-status-note")).toHaveText("PR open for review");
 
     // Deleting a workspace drops its status.

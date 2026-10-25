@@ -548,11 +548,14 @@ async function taskFolder() {
     { id: "ssh", name: "Server", cwd: "ssh://host-1/srv/app", remote: { hostId: "host-1" } },
   ];
   const target = (workspaceId, worktree) => gate.resolveGateTarget(workspaces, workspaceId, worktree);
+  // The gate answers with canonical paths; on macOS the temp folder the
+  // workspaces were given is a /var symlink into /private/var.
+  const real = (folder) => fs.realpathSync(folder);
 
-  assert.deepEqual(await target("main", undefined), { cwd: repo, workspaceDir: repo, baseBranch: null }, "no worktree: the workspace's folder");
-  assert.equal((await target("main", dir("repo", "packages", "a"))).cwd, path.join(repo, "packages", "a"), "a folder inside the workspace");
-  assert.deepEqual(await target("main", agentTree), { cwd: agentTree, workspaceDir: repo, baseBranch: null }, "a worktree an agent made of the repo");
-  assert.deepEqual(await target("cora", undefined), { cwd: userTree, workspaceDir: userTree, baseBranch: "main" }, "the Cora workspace checks its own tree");
+  assert.deepEqual(await target("main", undefined), { cwd: real(repo), workspaceDir: real(repo), baseBranch: null }, "no worktree: the workspace's folder");
+  assert.equal((await target("main", dir("repo", "packages", "a"))).cwd, real(path.join(repo, "packages", "a")), "a folder inside the workspace");
+  assert.deepEqual(await target("main", agentTree), { cwd: real(agentTree), workspaceDir: real(repo), baseBranch: null }, "a worktree an agent made of the repo");
+  assert.deepEqual(await target("cora", undefined), { cwd: real(userTree), workspaceDir: real(userTree), baseBranch: "main" }, "the Cora workspace checks its own tree");
 
   const refused = async (workspaceId, worktree, pattern, why) => {
     const result = await target(workspaceId, worktree);

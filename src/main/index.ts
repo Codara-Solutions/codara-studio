@@ -72,11 +72,14 @@ import {
 import { collectLiveWork, hasLiveWork, quitPromptText, type LiveWork } from "./quit-guard";
 import {
   acquireLockAfterHandoff,
+  HANDOFF_HOLDER_EXIT_WAIT_MS,
   handoffNonceOf,
   installQuitSignals,
   isProcessAlive,
   readHandoffAnswer,
+  readHandoffHolderPid,
   shouldWatchDevParent,
+  waitForProcessExit,
   watchParentProcess,
   writeHandoffAnswer,
 } from "./app-exit";
@@ -243,6 +246,25 @@ const lockHandoff: Promise<boolean> | null = ownsSingleInstanceLock
       requestLock: () => app.requestSingleInstanceLock({ codaraHandoff: handoffNonce }),
       readAnswer: () => readHandoffAnswer(app.getPath("userData"), handoffNonce),
     });
+// A launch that lost the lock never gets `ready` on macOS (Electron emits
+// will-finish-launching, then nothing), so it acts on the hand-off without
+// waiting for it: it exits when the holder keeps the lock, and on macOS,
+// once the holder has handed the lock over and gone, it starts again as a
+// fresh launch that macOS does finish. Elsewhere the whenReady body goes on.
+void lockHandoff?.then(async (owned) => {
+  if (!owned) {
+    console.warn("[single-instance] the running instance kept the lock; quitting");
+    app.exit(0);
+    return;
+  }
+  console.warn("[single-instance] the running instance handed the lock over");
+  if (process.platform !== "darwin") return;
+  const holder = readHandoffHolderPid(app.getPath("userData"), handoffNonce);
+  if (holder) await waitForProcessExit(holder, HANDOFF_HOLDER_EXIT_WAIT_MS);
+  app.releaseSingleInstanceLock();
+  app.relaunch();
+  app.exit(0);
+});
 if (process.env.SPARK_ALLOW_MULTI !== "1") {
   app.on("second-instance", (_event, _argv, _cwd, additionalData) => {
     onSecondInstance(handoffNonceOf(additionalData));
@@ -302,6 +324,10 @@ function pauseTerminalDelivery(reason: TerminalPauseReason): void {
 // Bring the main window back from the tray (or recreate it if it was somehow
 // destroyed). On Windows we re-show the taskbar button that hide-to-tray hid.
 function showMainWindow(): void {
+  // A macOS launch waiting to relaunch after a hand-off holds the lock before
+  // `ready`, so a third launch reaches here first; its fresh launch opens the
+  // window, and createWindow() would throw before `ready`.
+  if (!app.isReady()) return;
   if (!mainWindow || mainWindow.isDestroyed()) {
     createWindow();
     return;
@@ -1107,10 +1133,8 @@ app.whenReady().then(async () => {
   // one said it is quitting and then let go, bail before doing any startup
   // work or opening a window.
   if (!ownsSingleInstanceLock) {
-    if (!(await lockHandoff)) {
-      app.quit();
-      return;
-    }
+    // The hand-off handler above exits or relaunches this process.
+    if (!(await lockHandoff) || process.platform === "darwin") return;
     ownsSingleInstanceLock = true;
     startCrashReporterEarly();
   }
@@ -1902,6 +1926,11 @@ app.on("before-quit", (event) => {
       // broad PTY sweep. This drain is single-flight and bounded (≤2s), leaving
       // room for graceful PTY teardown inside the 5s hard-exit fallback.
       if (runStoreMod) {
+        // Workflow runs first, so the agents this drain kills are not taken
+        // for their answers.
+        await import("./orchestration/workflow-driver")
+          .then((m) => m.suspendWorkflowRunsForQuit())
+          .catch(() => undefined);
         await runStoreMod.shutdownRunRuntimeResources().catch(() => undefined);
       }
       // Graceful (bounded ≤1.5s) PTY teardown so agent CLIs can flush their

@@ -577,6 +577,9 @@ async function againstChromium(lib) {
 
     // Emulation in a real page.
     const media = () => target.evaluate("({ dark: matchMedia('(prefers-color-scheme: dark)').matches, light: matchMedia('(prefers-color-scheme: light)').matches, reduce: matchMedia('(prefers-reduced-motion: reduce)').matches })");
+    // What the computer itself prefers; a reset must come back to it. The
+    // macOS CI runners have Reduce Motion switched on.
+    const system = await media();
     await lib.applyEmulation(target, { colorScheme: "dark", reducedMotion: true });
     assert.deepEqual(await media(), { dark: true, light: false, reduce: true });
     await lib.applyEmulation(target, { colorScheme: "light" });
@@ -602,7 +605,7 @@ async function againstChromium(lib) {
     const plain = await target.evaluate("({ width: innerWidth, dpr: devicePixelRatio, ua: navigator.userAgent, reduce: matchMedia('(prefers-reduced-motion: reduce)').matches })");
     assert.notEqual(plain.width, 390, "reset restores the viewport");
     assert.doesNotMatch(plain.ua, /iPhone/, "reset restores the user agent");
-    assert.equal(plain.reduce, false);
+    assert.equal(plain.reduce, system.reduce, "reset restores the computer's own reduced-motion setting");
     assert.equal(await target.evaluate(`fetch("${origin}/ua?online").then(() => "loaded", () => "failed")`, { awaitPromise: true }), "loaded");
 
     // Storage of the tab's origin.
