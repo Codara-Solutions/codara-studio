@@ -26,7 +26,9 @@ async function main() {
   new Function("module", "exports", "require", output.outputFiles[0].text)(mod, mod.exports, require);
   const { CallerPaneResolver } = mod.exports;
 
-  // pid 500 is Claude's MCP server in pane-a; pid 700 runs outside any pane.
+  // pid 500 is Claude's MCP server in pane-a, started by Claude (400) in
+  // pane-a's shell (300); pid 700 runs outside any pane.
+  const started = { 500: 9_000, 400: 8_000, 300: 1_000, 700: 5_000, 1: 0 };
   const trees = { 500: [500, 400, 300], 700: [700, 1] };
   const shells = { 300: "pane-a", 310: "pane-b" };
   const live = new Set(["pane-a", "pane-b"]);
@@ -37,7 +39,7 @@ async function main() {
     processChain: async (pid) => {
       walks += 1;
       if (!trees[pid]) throw new Error("no such process");
-      return trees[pid];
+      return trees[pid].map((entry) => ({ pid: entry, startedMs: started[entry] }));
     },
     sessionForProcessChain: (chain) => chain.map((pid) => shells[pid]).find(Boolean) ?? null,
     now: () => clock,
@@ -61,6 +63,20 @@ async function main() {
   assert.equal(await resolver.resolve({ callerPid: 500 }), null, "a pane that closed is not the caller's any more");
   live.add("pane-a");
   console.log("a pid's pane is cached and dropped when the pane ends");
+
+  assert.deepEqual(
+    await resolver.identify({ callerPaneId: "pane-b", callerPid: 500 }),
+    { paneId: "pane-a", process: "500@9000", agentStartedMs: 8000 },
+    "the caller's process is its pid and start time; its agent started when the MCP server's parent did",
+  );
+  assert.deepEqual(
+    await resolver.identify({ callerPid: 700 }),
+    { paneId: null, process: "700@5000", agentStartedMs: null },
+    "outside every pane the process still identifies the caller",
+  );
+  assert.deepEqual(await resolver.identify({ callerPid: 999 }), { paneId: null, process: null, agentStartedMs: null }, "a pid that is not running is nobody");
+  assert.equal((await resolver.identify({ callerPaneId: "pane-b" })).process, "root", "a call without a pid is the root token's");
+  console.log("the caller's process identity comes with its pane");
 
   assert.equal(await resolver.resolve({ callerPaneId: "pane-b" }), "pane-b", "no pid: the root token's own tools name a live pane");
   assert.equal(await resolver.resolve({ callerPaneId: "pane-gone" }), null);

@@ -32,12 +32,12 @@ async function main() {
     agentRunningIn: (paneId) => running.has(paneId),
     hasWorkspaceGrant: async () => grant,
   };
-  const caller = { workspaceId: "ws", runId: null, paneId: "caller-pane" };
+  const caller = { workspaceId: "ws", runId: null, paneId: "caller-pane", process: "500@1000" };
   const mine = { tabId: "t-mine", kind: "terminal", title: "dev server", paneIds: ["agent-pane"] };
   const users = { tabId: "t-user", kind: "terminal", title: "claude", paneIds: ["user-agent-pane"] };
   const self = { tabId: "t-self", kind: "terminal", title: "me", paneIds: ["caller-pane"] };
   const editor = { tabId: "e-1", kind: "editor", title: "notes.md", dirty: true };
-  const myBrowser = { tabId: "p-1", kind: "preview", title: "localhost", openedBy: { paneId: "caller-pane" } };
+  const myBrowser = { tabId: "p-1", kind: "preview", title: "localhost", openedBy: { paneId: "caller-pane", process: "500@1000" } };
   const userBrowser = { tabId: "p-2", kind: "preview", title: "docs" };
   const target = (tabs, extra = {}) => ({ workspaceId: "ws", loaded: true, kind: "tab", tabs, ...extra });
   const group = (tabs) => target(tabs, { kind: "group", group: { id: "g", name: "login-flow" } });
@@ -57,15 +57,22 @@ async function main() {
   assert.ok(decision.approval, "a browser tab the user opened needs approval");
   decision = await decideTabAction("close", target([myBrowser]), { ...caller, runId: "run-1" }, "ws", deps);
   assert.ok(decision.approval, "a run does not own a tab its pane opened outside that run");
-  const claudeBrowser = { tabId: "p-3", kind: "preview", title: "app", openedBy: { paneId: "caller-pane", sessionId: "s-claude" } };
+  const claudeBrowser = { tabId: "p-3", kind: "preview", title: "app", openedBy: { paneId: "caller-pane", sessionId: "s-claude", process: "500@1000" } };
   decision = await decideTabAction("close", target([claudeBrowser]), { ...caller, sessionId: "s-claude" }, "ws", deps);
   assert.equal(decision.approval, null, "the session that opened a browser tab closes it");
-  decision = await decideTabAction("close", target([claudeBrowser]), { ...caller, sessionId: "s-codex" }, "ws", deps);
+  decision = await decideTabAction("close", target([claudeBrowser]), { ...caller, sessionId: "s-codex", process: "700@2000" }, "ws", deps);
   assert.ok(decision.approval, "Codex started in Claude's pane does not inherit Claude's browser tabs");
-  decision = await decideTabAction("close", target([claudeBrowser]), { ...caller, paneId: "pane-2", sessionId: "s-claude" }, "ws", deps);
+  decision = await decideTabAction("close", target([claudeBrowser]), { ...caller, paneId: "pane-2", sessionId: "s-claude", process: "800@3000" }, "ws", deps);
   assert.equal(decision.approval, null, "the same session resumed in another pane keeps them");
   decision = await decideTabAction("close", target([claudeBrowser]), { ...caller, sessionId: null }, "ws", deps);
-  assert.equal(decision.approval, null, "before the caller's session is captured, its pane decides");
+  assert.equal(decision.approval, null, "the opening process itself, while its session reads as not captured");
+  decision = await decideTabAction("close", target([claudeBrowser]), { ...caller, sessionId: null, process: "700@2000" }, "ws", deps);
+  assert.ok(decision.approval, "a later agent in that pane whose session is not captured gets the card");
+  const paneOnly = { tabId: "p-4", kind: "preview", title: "app", openedBy: { paneId: "caller-pane", process: "500@1000" } };
+  decision = await decideTabAction("close", target([paneOnly]), { ...caller, sessionId: "s-later", process: "700@2000" }, "ws", deps);
+  assert.ok(decision.approval, "an opener whose session was never captured: its pane alone proves nothing");
+  decision = await decideTabAction("close", target([{ ...paneOnly, openedBy: { paneId: "caller-pane" } }]), caller, "ws", deps);
+  assert.ok(decision.approval, "an opener with neither session nor process is nobody's");
 
   decision = await decideTabAction("close", group([self, mine]), caller, "ws", deps);
   assert.deepEqual(decision.tabIds, ["t-mine"]);

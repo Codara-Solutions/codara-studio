@@ -64,11 +64,8 @@ export interface ShareableStudioTerminal {
   // The name and id of the tab group the pane's tab is in.
   group?: string;
   groupId?: string;
-  // For main's ownership checks after a relaunch: who opened the pane, and
-  // the agent CLI session running in it.
+  // For main's ownership checks after a relaunch: who opened the pane.
   agentOwner?: TerminalAgentOwner;
-  agentSessionId?: string;
-  agentSessionRuntime?: string;
 }
 
 type ListShareableStudioTerminalsFn = () => ShareableStudioTerminal[];

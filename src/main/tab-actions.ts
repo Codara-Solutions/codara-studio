@@ -19,8 +19,8 @@ export interface TabActionMember {
   dockedIn?: string;
   mergedInto?: string;
   // Who opened a browser tab, as the renderer recorded it: the run, or the
-  // pane and agent CLI session of an agent with no run.
-  openedBy?: { runId?: string | null; paneId?: string | null; sessionId?: string | null };
+  // pane, agent CLI session and process of an agent with no run.
+  openedBy?: { runId?: string | null; paneId?: string | null; sessionId?: string | null; process?: string | null };
 }
 
 export interface TabActionTarget {
@@ -35,8 +35,10 @@ export interface TabActionCaller {
   workspaceId: string;
   runId: string | null;
   paneId: string | null;
-  // The agent CLI session in the caller's pane, when Codara captured it.
+  // The agent CLI session captured in the caller's pane since its agent started.
   sessionId?: string | null;
+  // The calling process as pid and start time (agent-terminal-registry.ts).
+  process?: string | null;
 }
 
 export interface TabActionDeps {
@@ -66,12 +68,11 @@ async function ownsTab(member: TabActionMember, caller: TabActionCaller, deps: T
   if (member.kind === "preview" && member.openedBy) {
     const opener = member.openedBy;
     if (caller.runId) return opener.runId === caller.runId;
-    if (opener.runId || !caller.paneId) return false;
-    // As for terminals: a session known on both sides decides, so a new agent
-    // started in the opener's pane does not inherit its tabs; the pane decides
-    // only while a session is not captured.
-    if (opener.sessionId && caller.sessionId) return opener.sessionId === caller.sessionId;
-    return opener.paneId === caller.paneId;
+    if (opener.runId) return false;
+    // As for terminals: the same captured session or the same live process.
+    // The pane never decides alone, since a later agent in it has the same one.
+    if (opener.sessionId && caller.sessionId === opener.sessionId) return true;
+    return Boolean(opener.process) && caller.process === opener.process;
   }
   return false;
 }

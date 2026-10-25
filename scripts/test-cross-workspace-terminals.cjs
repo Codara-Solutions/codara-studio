@@ -373,9 +373,9 @@ async function main() {
 
   // ── 5. Ownership ───────────────────────────────────────────────────────
   const registry = new AgentTerminalRegistry();
-  const ceo = { paneId: "p-ceo", sessionId: null };
-  const otherPane = { paneId: "p-other", sessionId: null };
-  registry.register({ paneId: "p-cross", tabId: "t-cross", runId: null, ownerPaneId: "p-ceo" });
+  const ceo = { paneId: "p-ceo", sessionId: null, process: "41@1" };
+  const otherPane = { paneId: "p-other", sessionId: null, process: "42@1" };
+  registry.register({ paneId: "p-cross", tabId: "t-cross", runId: null, ownerPaneId: "p-ceo", ownerProcess: "41@1" });
   registry.register({ paneId: "p-plain", tabId: "t-plain", runId: null });
   registry.register({ paneId: "p-run", tabId: "t-run", runId: "run-1", ownerPaneId: "p-ceo" });
 
@@ -384,11 +384,12 @@ async function main() {
   assert.equal(registry.isActiveOwnedBy("p-cross", null, null), false, "an unplaced caller may not");
   assert.equal(registry.isActiveOwnedBy("p-cross", null), false);
   assert.equal(registry.isActiveOwnedBy("p-cross", "run-1", ceo), false, "a run may not");
-  assert.equal(registry.isActiveOwnedBy("p-plain", null), true, "a terminal opened outside any pane belongs to such callers");
-  assert.equal(registry.isActiveOwnedBy("p-plain", null, { paneId: "p-anyone" }), false, "and not to an agent in a pane");
+  assert.equal(registry.isActiveOwnedBy("p-plain", null), false, "a terminal with no recorded opener is nobody's");
+  assert.equal(registry.isActiveOwnedBy("p-plain", null, { paneId: "p-anyone", process: "43@1" }), false, "an agent in a pane included");
+  assert.equal(registry.isActiveOwnedBy("p-cross", null, { paneId: "p-ceo", sessionId: null, process: "44@9" }), false, "a later agent in the opening pane may not");
   assert.equal(registry.isActiveOwnedBy("p-run", "run-1", null), true, "a run-owned terminal follows its run");
   assert.equal(registry.isActiveOwnedBy("p-run", "run-2", ceo), false);
-  assert.deepEqual(registry.openerOf("p-cross"), { paneId: "p-ceo", sessionId: null });
+  assert.deepEqual(registry.openerOf("p-cross"), { paneId: "p-ceo", sessionId: null, process: "41@1" });
   assert.equal(registry.openerOf("p-plain"), null);
   assert.equal(registry.openerOf("p-run"), null, "a run's terminal is steered by the run, not a pane");
   assert.deepEqual(
@@ -416,9 +417,9 @@ async function main() {
   assert.equal(destroyed, 1);
   assert.deepEqual(await close(ceo), { paneId: "p-cross", alreadyClosed: true }, "a retry is idempotent");
 
-  registry.register({ paneId: "p-exit", tabId: "t-exit", runId: null, ownerPaneId: "p-ceo" });
+  registry.register({ paneId: "p-exit", tabId: "t-exit", runId: null, ownerPaneId: "p-ceo", ownerProcess: "41@1" });
   registry.markExited({ paneId: "p-exit", tabId: "t-exit" });
-  assert.deepEqual(registry.openerOf("p-exit"), { paneId: "p-ceo", sessionId: null }, "an exited terminal keeps its owner for close");
+  assert.deepEqual(registry.openerOf("p-exit"), { paneId: "p-ceo", sessionId: null, process: "41@1" }, "an exited terminal keeps its owner for close");
   await assert.rejects(
     registry.close({ paneId: "p-exit", runId: null, caller: { paneId: "p-x" }, stop() {}, destroyTab() {} }),
     AgentTerminalOwnershipError,

@@ -21,23 +21,31 @@ export interface TerminalAgentCaller {
 }
 
 const ID = /^[A-Za-z0-9_.:-]{1,200}$/;
-const UNCAPTURED = "uncaptured:";
 
-// The agent CLI session a caller's pane runs, for ownership. A pane keeps its
-// last agent's session id for resume, so when Codara sees a different agent
-// CLI running there now, the caller is that agent, whose session it has not
-// captured yet: a placeholder that matches no recorded owner and is never
-// recorded as one (captured: false).
+// What agent-session-registry.ts captured in a pane: the newest session an
+// agent CLI started or resumed there, and when.
+export interface CapturedAgentSession {
+  sessionId: string;
+  runtime: string;
+  timestamp: string;
+  active?: boolean;
+}
+
+// The agent CLI session the caller runs, for ownership: the one captured in
+// its pane after the caller's agent started, by the CLI running there now.
+// A session captured earlier, or by another CLI, or whose process ended,
+// belongs to an earlier agent in that pane, so until its own is captured the
+// caller has none and only its process identifies it. `ps` gives start
+// times in whole seconds, so a session captured in the second before the
+// agent started still counts.
 export function callerAgentSession(
-  pane: { agentSessionId?: string; agentSessionRuntime?: string } | undefined,
-  liveRuntime: string | null | undefined,
-): { sessionId: string | null; captured: boolean } {
-  const sessionId = pane?.agentSessionId ?? null;
-  if (!sessionId || sessionId.startsWith(UNCAPTURED)) return { sessionId: null, captured: false };
-  if (liveRuntime && pane?.agentSessionRuntime && liveRuntime !== pane.agentSessionRuntime) {
-    return { sessionId: `${UNCAPTURED}${liveRuntime}`, captured: false };
-  }
-  return { sessionId, captured: true };
+  start: CapturedAgentSession | null | undefined,
+  agent: { runtime: string | null | undefined; startedMs: number | null },
+): string | null {
+  if (!start?.sessionId || start.active === false || agent.startedMs === null) return null;
+  if (agent.runtime && agent.runtime !== start.runtime) return null;
+  const captured = Date.parse(start.timestamp);
+  return Number.isFinite(captured) && captured >= agent.startedMs ? start.sessionId : null;
 }
 
 // The layout is user-editable localStorage: keep only a well-formed record.
@@ -46,8 +54,7 @@ export function sanitizeTerminalAgentOwner(value: unknown): TerminalAgentOwner |
   const raw = value as Record<string, unknown>;
   const workspaceId = typeof raw.workspaceId === "string" && ID.test(raw.workspaceId) ? raw.workspaceId : null;
   const runId = typeof raw.runId === "string" && ID.test(raw.runId) ? raw.runId : null;
-  const sessionId =
-    typeof raw.sessionId === "string" && ID.test(raw.sessionId) && !raw.sessionId.startsWith(UNCAPTURED) ? raw.sessionId : null;
+  const sessionId = typeof raw.sessionId === "string" && ID.test(raw.sessionId) ? raw.sessionId : null;
   if (!workspaceId || (!runId && !sessionId)) return null;
   return {
     workspaceId,
@@ -76,6 +83,7 @@ export interface RestoredAgentTerminal {
   retention: "temporary" | "service";
   ownerPaneId?: string;
   ownerSessionId?: string;
+  ownerProcess?: string;
 }
 
 // The ledger entry to admit for a restored pane the caller asks about, or
@@ -84,7 +92,7 @@ export interface RestoredAgentTerminal {
 // pane, so no other agent inherits it.
 export function restoredAgentTerminal(
   pane: { paneId: string; tabId: string; workspaceId: string; agentOwner?: unknown },
-  caller: TerminalAgentCaller & { paneId: string | null },
+  caller: TerminalAgentCaller & { paneId: string | null; process?: string | null },
 ): RestoredAgentTerminal | null {
   const owner = sanitizeTerminalAgentOwner(pane.agentOwner);
   if (!owner || !terminalAgentOwnerMatches(owner, caller)) return null;
@@ -95,5 +103,6 @@ export function restoredAgentTerminal(
     retention: owner.retention ?? "temporary",
     ...(!owner.runId && caller.paneId ? { ownerPaneId: caller.paneId } : {}),
     ...(owner.sessionId ? { ownerSessionId: owner.sessionId } : {}),
+    ...(!owner.runId && caller.process ? { ownerProcess: caller.process } : {}),
   };
 }

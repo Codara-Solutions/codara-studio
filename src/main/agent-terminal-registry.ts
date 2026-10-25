@@ -22,19 +22,24 @@ export interface AgentTerminalRegistration {
    */
   retention?: AgentTerminalRetention;
   /**
-   * The pane and agent CLI session of the run-less agent that opened this
-   * terminal. Only that agent may write to or close it, so one agent of the
-   * user cannot steer or close a terminal another agent opened. A terminal
-   * with neither was opened by a caller outside any pane.
+   * The run-less agent that opened this terminal: the pane it ran in, its
+   * agent CLI session when Codara had captured it, and its process (see
+   * AgentTerminalCaller.process). Only that agent may write to or close it,
+   * so one agent of the user cannot steer or close a terminal another agent
+   * opened. A terminal with no session and no process belongs to nobody.
    */
   ownerPaneId?: string;
   ownerSessionId?: string;
+  ownerProcess?: string;
 }
 
-/** Who asks about a run-less terminal: the pane it runs in and its agent CLI session, when known. */
+/** Who asks about a run-less terminal. */
 export interface AgentTerminalCaller {
   paneId?: string | null;
+  // The agent CLI session captured in the caller's pane since its agent started.
   sessionId?: string | null;
+  // The calling process, as pid and start time, so a reused pid is another process.
+  process?: string | null;
 }
 
 export interface AgentTerminalSnapshot extends AgentTerminalRegistration {
@@ -71,6 +76,7 @@ interface ActiveAgentTerminal {
   retention: AgentTerminalRetention;
   ownerPaneId?: string;
   ownerSessionId?: string;
+  ownerProcess?: string;
   /**
    * A dev server was found running here (src/main/servers/), so no run's
    * cleanup closes the pane any more. It stays writable by the run that made
@@ -82,16 +88,15 @@ interface ActiveAgentTerminal {
   closePromise?: Promise<AgentTerminalCloseResult>;
 }
 
-// A known session decides on both sides, because a new agent started in the
-// opener's pane keeps the pane id but not the session. The pane decides only
-// while one side's session is not captured yet.
+// The same captured session, or the same live process, is the opener. The
+// pane never decides alone: every later agent started in it has the same
+// one. Anything else is somebody else, whose request gets the user's card.
 function openerMatches(terminal: ActiveAgentTerminal, caller: AgentTerminalCaller | null): boolean {
   if (terminal.runId !== null) return true;
-  const paneId = caller?.paneId ?? null;
   const sessionId = caller?.sessionId ?? null;
-  if (!terminal.ownerPaneId && !terminal.ownerSessionId) return !paneId && !sessionId;
-  if (terminal.ownerSessionId && sessionId) return terminal.ownerSessionId === sessionId;
-  return Boolean(terminal.ownerPaneId) && terminal.ownerPaneId === paneId;
+  const process = caller?.process ?? null;
+  if (terminal.ownerSessionId && sessionId === terminal.ownerSessionId) return true;
+  return Boolean(terminal.ownerProcess) && process === terminal.ownerProcess;
 }
 
 export class AgentTerminalOwnershipError extends Error {
@@ -137,20 +142,24 @@ export class AgentTerminalRegistry {
 
   /**
    * The run-less agent recorded as this terminal's opener, or null when a
-   * run or the workspace owns it, or a caller outside any pane opened it.
-   * Callers resolve their own pane and session only when this is set.
+   * run or the workspace owns it, or no opener was recorded (nobody's).
+   * Callers resolve their own identity only when this is set.
    */
-  openerOf(paneId: string): { paneId: string | null; sessionId: string | null } | null {
+  openerOf(paneId: string): { paneId: string | null; sessionId: string | null; process: string | null } | null {
     const terminal = this.active.get(paneId) ?? this.exited.get(paneId);
     if (!terminal || terminal.runId !== null || terminal.workspaceOwned) return null;
-    if (!terminal.ownerPaneId && !terminal.ownerSessionId) return null;
-    return { paneId: terminal.ownerPaneId ?? null, sessionId: terminal.ownerSessionId ?? null };
+    if (!terminal.ownerSessionId && !terminal.ownerProcess) return null;
+    return {
+      paneId: terminal.ownerPaneId ?? null,
+      sessionId: terminal.ownerSessionId ?? null,
+      process: terminal.ownerProcess ?? null,
+    };
   }
 
   /** Active run-less terminals this caller opened. */
   listOpenedBy(caller: AgentTerminalCaller): AgentTerminalRegistration[] {
     const owned: AgentTerminalRegistration[] = [];
-    if (!caller.paneId && !caller.sessionId) return owned;
+    if (!caller.sessionId && !caller.process) return owned;
     for (const terminal of this.active.values()) {
       if (terminal.runId !== null || terminal.workspaceOwned || !openerMatches(terminal, caller)) continue;
       owned.push({ paneId: terminal.paneId, tabId: terminal.tabId, runId: null });
@@ -173,6 +182,7 @@ export class AgentTerminalRegistry {
     terminal.workspaceOwned = true;
     delete terminal.ownerPaneId;
     delete terminal.ownerSessionId;
+    delete terminal.ownerProcess;
     return true;
   }
 

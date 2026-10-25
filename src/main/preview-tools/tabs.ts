@@ -92,8 +92,9 @@ async function tabAction(params: Record<string, unknown>, _method: string, host:
     workspaceId: located.workspaceId,
     runId,
     paneId: typeof params.callerPaneId === "string" && params.callerPaneId ? params.callerPaneId : null,
-    // Stamped by the socket from the caller's verified pane.
+    // Stamped by the socket from the caller's verified pane and process.
     sessionId: !runId && typeof params.callerSessionId === "string" && params.callerSessionId ? params.callerSessionId : null,
+    process: !runId && typeof params.callerProcess === "string" && params.callerProcess ? params.callerProcess : null,
   };
   const ref = readTarget(params.link, caller.workspaceId);
   const link = linkOf(ref);

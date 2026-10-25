@@ -5449,9 +5449,6 @@ export default function App() {
               ...(leaf.cwd ? { cwd: leaf.cwd } : {}),
               ...(tab.group ? { group: tab.group.name, groupId: tab.group.id } : {}),
               ...(leaf.agentOwner ? { agentOwner: leaf.agentOwner } : {}),
-              ...(leaf.agentSession?.sessionId
-                ? { agentSessionId: leaf.agentSession.sessionId, agentSessionRuntime: leaf.agentSession.runtime }
-                : {}),
               // The phone protocol has no Pi profile; a Pi pane is shared
               // as the shell it runs in.
               profile:
