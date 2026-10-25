@@ -211,7 +211,8 @@ export interface AgentWorktreeSetupRunner {
   // Stops a setup still going in the worktree and waits (at most timeoutMs)
   // until it no longer writes there. False when it did not stop in time.
   stop?(idOrPath: string, timeoutMs: number): Promise<boolean>;
-  // Takes its card off the tray, once the worktree is gone.
+  // Takes its card off the tray, once the worktree is gone. By the id get()
+  // gave while the folder existed: its stored path may be spelled otherwise.
   dismiss?(idOrPath: string): Promise<void>;
 }
 
@@ -1012,15 +1013,21 @@ export async function rollBackTerminalWorktree(
     return { removed: false, reason: "it was there before this call" };
   }
   const setupPath = typeof made.path === "string" ? made.path : null;
+  const setup = deps.worktreeSetup && setupPath ? await deps.worktreeSetup.get(setupPath).catch(() => null) : null;
   if (deps.worktreeSetup?.stop && setupPath) {
-    await deps.worktreeSetup.stop(setupPath, ROLLBACK_SETUP_STOP_MS).catch(() => false);
+    const stopped = await deps.worktreeSetup.stop(setupPath, ROLLBACK_SETUP_STOP_MS).catch(() => false);
+    // Every removal waits for the setup again (up to 30 s) and fails while it
+    // runs, so trying would only hold the call past its budget.
+    if (!stopped) {
+      return { removed: false, reason: `its setup did not stop within ${ROLLBACK_SETUP_STOP_MS / 1000} s` };
+    }
   }
   const removed = await removeAgentWorktree(caller, { workspaceId: made.workspaceId, deleteBranch: true }, deps).catch(
     (err: unknown) => refusal("WORKTREE_GIT_FAILED", cleanText(errorText(err), 300)),
   );
   if (isRefusal(removed)) return { removed: false, reason: `${removed.code}: ${removed.error}` };
-  if (removed.removed === true && deps.worktreeSetup?.dismiss && setupPath) {
-    await deps.worktreeSetup.dismiss(setupPath).catch(() => undefined);
+  if (removed.removed === true && deps.worktreeSetup?.dismiss && setup) {
+    await deps.worktreeSetup.dismiss(setup.id).catch(() => undefined);
   }
   return { removed: removed.removed === true };
 }

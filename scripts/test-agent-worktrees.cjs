@@ -280,14 +280,17 @@ async function main() {
     const stops = [];
     const dismissals = [];
     let stopClears = true;
+    let stopsInTime = true;
     const installing = {
       ...withSetup,
       worktreeSetup: {
         ...withSetup.worktreeSetup,
+        // The setup's id, read while the folder still exists.
+        get: async (idOrPath) => (fs.existsSync(idOrPath) ? { id: `setup:${path.basename(idOrPath)}`, state: "running" } : null),
         stop: async (idOrPath, timeoutMs) => {
           stops.push([idOrPath, timeoutMs]);
           if (stopClears) h.processes = [];
-          return true;
+          return stopsInTime;
         },
         dismiss: async (idOrPath) => {
           dismissals.push(idOrPath);
@@ -315,8 +318,22 @@ async function main() {
     h.processes = [];
     assert.equal(stoppedFirst.removed, true, JSON.stringify(stoppedFirst));
     assert.deepEqual(stops.map(([idOrPath]) => idOrPath), [busy.path]);
-    assert.deepEqual(dismissals, [busy.path], "the card goes once the worktree is gone");
+    assert.deepEqual(dismissals, [`setup:${path.basename(busy.path)}`], "the card goes, by its id, once the worktree is gone");
     assert.equal(fs.existsSync(busy.path), false);
+    // A setup that did not stop within its 10 s is not followed by a removal:
+    // the removal would wait for it again (up to 30 s) and fail all the same.
+    stops.length = 0;
+    dismissals.length = 0;
+    const stubborn = await aw.createTerminalWorktree({ ...coordinator, workspaceId: "ws-repo" }, { branch: "agent/stubborn" }, installing);
+    assert.equal(stubborn.ok, true, JSON.stringify(stubborn));
+    stopsInTime = false;
+    const notStopped = await aw.rollBackTerminalWorktree(coordinator, stubborn, installing);
+    stopsInTime = true;
+    assert.equal(notStopped.removed, false, JSON.stringify(notStopped));
+    assert.match(notStopped.reason, /setup did not stop/);
+    assert.equal(fs.existsSync(stubborn.path), true, "the worktree stays for its maker to remove");
+    assert.deepEqual(dismissals, []);
+    assert.equal((await aw.removeAgentWorktree(coordinator, { workspaceId: stubborn.workspaceId }, deps)).removed, true);
 
     // ── Who may call ───────────────────────────────────────────────────────
     for (const role of ["worker", "automation"]) {

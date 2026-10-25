@@ -153,6 +153,18 @@ async function main() {
     assert.equal(await page.evaluate(() => window.boardEscapes), 0, "the board took the confirm's Escape");
     await page.keyboard.press("Escape");
     assert.equal(await page.evaluate(() => window.boardEscapes), 1, "the board keeps its own Escape");
+    // A click on the confirm's text keeps focus in it, and with focus on
+    // nothing at all the open confirm still owns Escape.
+    await cleanUp.click();
+    await confirm.locator(".rail-confirm-text").click();
+    await page.keyboard.press("Escape");
+    await expect(confirm).toHaveCount(0);
+    await cleanUp.click();
+    await expect(confirm).toBeVisible();
+    await page.evaluate(() => (document.activeElement instanceof HTMLElement ? document.activeElement.blur() : undefined));
+    await page.keyboard.press("Escape");
+    await expect(confirm).toHaveCount(0);
+    assert.equal(await page.evaluate(() => window.boardEscapes), 1, "the board took an Escape meant for the confirm");
     await page.evaluate(() => {
       window.boardOpen = false;
     });

@@ -139,6 +139,7 @@ function CleanUpConfirm({
       <div
         role="alertdialog"
         aria-modal="true"
+        tabIndex={-1}
         aria-label={title}
         data-testid="workspace-merged-clean-up-confirm"
         className="rail-confirm spark-glass--strong spark-overlay-surface"

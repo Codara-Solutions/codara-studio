@@ -671,8 +671,9 @@ terminal does not open after the worktree was made (the shell dies, the
 caller disconnects), Codara stops its setup (a question waiting for the
 user included, for at most 10 seconds) and removes the worktree again
 through the same guarded removal; the setup's card leaves the tray with the
-worktree. If the removal is refused, the card stays, the error names where
-the worktree stays and carries `data.worktree: { workspaceId, path, branch }`.
+worktree. If the setup does not stop in that time or the removal is
+refused, the worktree and its card stay, and the error names where and
+carries `data.worktree: { workspaceId, path, branch }`.
 A tab that appears after the call gave up is closed. `cwd` and `worktree` cannot be combined. The result's
 `workspaceId` and `workspace` are the worktree's own, and it adds
 `worktree: { workspaceId, path, branch, created, setup? }`; when `setup` is
