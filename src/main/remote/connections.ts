@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { promises as fs, existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Client, ClientChannel, ConnectConfig, SFTPWrapper } from "ssh2";
+import type { Client, ClientChannel, ConnectConfig, ServerHostKeyAlgorithm, SFTPWrapper } from "ssh2";
 import type {
   HostKeyChange,
   HostKeyPromptAnswer,
@@ -21,7 +21,9 @@ import { abortableDelay, clearFreshBoxKey, nextFreshKeyDelayMs } from "./box-key
 import { deleteSecret, getSecret, setSecret } from "./secret-store";
 import {
   displayFingerprint,
+  hostKeyAlgorithms,
   hostKeyType,
+  knownHostTypes,
   knownHostsVerdict,
   sshFingerprint,
   storedFingerprint,
@@ -265,10 +267,19 @@ function promptHostKey(request: Omit<HostKeyPromptRequest, "requestId">, signal:
   });
 }
 
-async function readUserKnownHosts(): Promise<string> {
-  const files = ["known_hosts", "known_hosts2"].map((name) => join(homedir(), ".ssh", name));
+/** The known_hosts files ssh reads for this host, read only: the user's, then the system's. */
+async function readUserKnownHosts(host: RemoteHostConfig): Promise<string> {
+  const files = [
+    ...(host.userKnownHostsFiles ?? ["known_hosts", "known_hosts2"].map((name) => join(homedir(), ".ssh", name))),
+    ...(host.globalKnownHostsFiles ?? ["/etc/ssh/ssh_known_hosts", "/etc/ssh/ssh_known_hosts2"]),
+  ];
   const texts = await Promise.all(files.map((file) => fs.readFile(file, "utf8").catch(() => "")));
   return texts.join("\n");
+}
+
+/** The name known_hosts lists the host under: OpenSSH lowercases a hostname, never an alias. */
+function knownHostsName(host: RemoteHostConfig): { name: string; port: number } {
+  return host.hostKeyAlias ? { name: host.hostKeyAlias, port: 22 } : { name: host.host.toLowerCase(), port: host.port };
 }
 
 /** Where Codara's own store keeps a host's key: the alias when it has one. */
@@ -416,6 +427,8 @@ class RemoteConnection {
     const host = this.host;
     if (quiet) this.quietGeneration = generation;
     this.assertCurrent(generation, signal);
+    // A card drawn for an earlier attempt must not trust a key this one never saw.
+    forgetChangedHostKey(host.id);
     this.hostKeyChange = null;
     this.hostKeyRefusal = null;
     this.setState("connecting");
@@ -608,11 +621,16 @@ class RemoteConnection {
     const host = this.host;
     const { Client } = await loadSsh2();
     this.assertCurrent(generation, signal);
-    const mayAskHostKey = await this.mayAskForHostKey();
+    const plan = await this.hostKeyPlan();
+    const mayAskHostKey = plan.mayAsk;
     this.assertCurrent(generation, signal);
     return new Promise((resolve, reject) => {
       const client = new Client();
       let settled = false;
+      // A host-key prompt belongs to this attempt: sshd drops a handshake the
+      // user reads too long (LoginGraceTime), and a Trust after that must not
+      // store a key with no connection behind it.
+      const attempt = new AbortController();
       let proxy: ProxySocket | null = null;
       try {
         const invocation = resolveProxyInvocation(host);
@@ -647,7 +665,13 @@ class RemoteConnection {
       const fail = (err: Error) => {
         if (settled) return;
         settled = true;
+        attempt.abort();
         cleanup();
+        // The handshake may still report after giving up (a host-key answer
+        // that came too late): never as an uncaught "error".
+        if (!client.listeners("error").includes(swallowUnownedClientError)) {
+          client.on("error", swallowUnownedClientError);
+        }
         proxy?.destroy();
         reject(err);
       };
@@ -714,12 +738,13 @@ class RemoteConnection {
               ? PROXY_READY_TIMEOUT_MS
               : READY_TIMEOUT_MS,
           ...(proxy ? { sock: proxy } : {}),
+          ...(plan.serverHostKey ? { algorithms: { serverHostKey: plan.serverHostKey } } : {}),
           keepaliveInterval: KEEPALIVE_INTERVAL_MS,
           keepaliveCountMax: KEEPALIVE_COUNT_MAX,
           tryKeyboard: typeof auth.password === "string",
           hostVerifier: (key: Buffer, verified: (ok: boolean) => void) => {
             reached();
-            void this.verifyHostKey(key, generation, signal).then(verified);
+            void this.verifyHostKey(key, generation, attempt.signal).then(verified);
           },
           ...auth,
         });
@@ -730,11 +755,20 @@ class RemoteConnection {
     });
   }
 
-  private async mayAskForHostKey(): Promise<boolean> {
+  /**
+   * Whether this connect may stop to ask about a new key, and the host key
+   * algorithms to offer: with confirmation on, the types known_hosts lists for
+   * the host come first, as OpenSSH orders them.
+   */
+  private async hostKeyPlan(): Promise<{ mayAsk: boolean; serverHostKey: ServerHostKeyAlgorithm[] | null }> {
     const host = this.host;
-    if (host.codaraBoxId) return false;
+    if (host.codaraBoxId || !(await confirmNewHostKeys())) return { mayAsk: false, serverHostKey: null };
     const known = await readKnownHosts();
-    return !known[hostKeyStoreId(host)] && (await confirmNewHostKeys());
+    const { name, port } = knownHostsName(host);
+    const types = knownHostTypes(await readUserKnownHosts(host), name, port);
+    // hostKeyAlgorithms only names algorithms from ssh2's own default list.
+    const serverHostKey = types.length > 0 ? (hostKeyAlgorithms(types) as ServerHostKeyAlgorithm[]) : null;
+    return { mayAsk: !known[hostKeyStoreId(host)], serverHostKey };
   }
 
   private async verifyHostKey(
@@ -750,22 +784,24 @@ class RemoteConnection {
     const known = await readKnownHosts();
     if (!this.isCurrent(generation, signal)) return false;
     const prior = known[id];
-    if (prior === fingerprint) return true;
+    if (prior === fingerprint) {
+      forgetChangedHostKey(host.id);
+      return true;
+    }
     const confirm = !host.codaraBoxId && (await confirmNewHostKeys());
     if (!this.isCurrent(generation, signal)) return false;
     if (!prior) {
       if (confirm) {
         // OpenSSH looks a HostKeyAlias up as given, never with the port.
-        const verdict = host.hostKeyAlias
-          ? knownHostsVerdict(await readUserKnownHosts(), host.hostKeyAlias, 22, key)
-          : knownHostsVerdict(await readUserKnownHosts(), host.host, host.port, key);
+        const { name, port } = knownHostsName(host);
+        const verdict = knownHostsVerdict(await readUserKnownHosts(host), name, port, key);
         if (!this.isCurrent(generation, signal)) return false;
         if (verdict.kind === "revoked") {
           this.hostKeyRefusal = `The host key of ${id} is marked revoked in ~/.ssh/known_hosts.`;
           return false;
         }
         if (verdict.kind === "mismatch") {
-          this.refuseChangedKey(id, sshFingerprint(verdict.listedKey), key, "known_hosts");
+          this.refuseChangedKey(id, sshFingerprint(verdict.listedKey), key, hostKeyType(verdict.listedKey));
           return false;
         }
         if (verdict.kind === "none") {
@@ -783,34 +819,59 @@ class RemoteConnection {
             return false;
           }
         }
+        // Another host at the same address may have been trusted while this
+        // one waited: its key stands, and this one is a change.
+        const now = (await readKnownHosts())[id];
+        if (!this.isCurrent(generation, signal)) return false;
+        if (now === fingerprint) return true;
+        if (now) {
+          this.refuseChangedKey(id, displayFingerprint(now), key, null);
+          return false;
+        }
       }
       await rememberHostKey(id, fingerprint);
       return true;
     }
     if (confirm) {
-      this.refuseChangedKey(id, displayFingerprint(prior), key, "codara");
+      // Codara keeps one key per host; a host has one per type, and the type
+      // negotiated can change (known_hosts gained a line, the order of host
+      // key algorithms moved). One the user's known_hosts lists is the host's.
+      const { name, port } = knownHostsName(host);
+      const verdict = knownHostsVerdict(await readUserKnownHosts(host), name, port, key);
+      if (!this.isCurrent(generation, signal)) return false;
+      if (verdict.kind === "match") {
+        forgetChangedHostKey(host.id);
+        return true;
+      }
+      this.refuseChangedKey(id, displayFingerprint(prior), key, null);
       return false;
     }
     this.hostKeyRefusal = `Host key for ${id} changed (possible MITM). Remove it from spark-known-hosts.json to trust the new key.`;
     return false;
   }
 
-  /** Refuses a key that differs from the one Codara, or the user's known_hosts, has for the host. */
-  private refuseChangedKey(id: string, previousFingerprint: string, key: Buffer, listedBy: "codara" | "known_hosts"): void {
+  /**
+   * Refuses a key that differs from the one Codara has for the host
+   * (`listedType` null), or from one known_hosts lists, of that type.
+   */
+  private refuseChangedKey(id: string, previousFingerprint: string, key: Buffer, listedType: string | null): void {
     const shown = sshFingerprint(key);
+    const keyType = hostKeyType(key);
     this.hostKeyChange = {
       hostLabel: id,
       previousFingerprint,
       newFingerprint: shown,
-      keyType: hostKeyType(key),
-      ...(listedBy === "known_hosts" ? { listedBy } : {}),
+      keyType,
+      ...(listedType ? { listedBy: "known_hosts" as const, previousKeyType: listedType } : {}),
     };
     changedHostKeys.set(this.host.id, { storeId: id, fingerprint: storedFingerprint(key), shown });
-    this.hostKeyRefusal =
-      (listedBy === "known_hosts"
-        ? `The host key of ${id} changed: it is not the key your ~/.ssh/known_hosts lists. `
-        : `The host key of ${id} changed since Codara last connected. `) +
-      "Someone may be intercepting the connection, or the machine was reinstalled.";
+    const why =
+      listedType === null
+        ? `The host key of ${id} changed since Codara last connected. `
+        : listedType === keyType
+          ? `The host key of ${id} changed: it is not the key your known_hosts lists. `
+          : `The host key of ${id} changed: your known_hosts lists an ${listedType} key for it, and it offered ${keyType}. `;
+    this.hostKeyRefusal = why + "Someone may be intercepting the connection, or the machine was reinstalled.";
   }
 
   private adopt(client: Client, generation: number, signal: AbortSignal): void {

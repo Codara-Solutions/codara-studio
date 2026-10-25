@@ -33,7 +33,11 @@ export type KnownHostsVerdict =
   | { kind: "match" }
   | { kind: "revoked" }
   | { kind: "none" }
-  /** The host is listed with another key of the same type: OpenSSH refuses it as changed. */
+  /**
+   * The host is listed, but never with this key: OpenSSH refuses another key
+   * of a listed type as changed, and a key of an unlisted type is how a man
+   * in the middle would dodge that, so it is a change too.
+   */
   | { kind: "mismatch"; listedKey: Buffer };
 
 /**
@@ -41,15 +45,68 @@ export type KnownHostsVerdict =
  * apply to other ports, plain ones to 22; hashed names (`|1|salt|hash`) and
  * `*` / `?` patterns match as OpenSSH matches them. A `@revoked` key wins
  * over everything; `@cert-authority` lines are not host keys and are skipped.
- * A listed key of another type is not a change (OpenSSH asks, as for a new
- * host).
+ * `host` is hashed as given: callers lowercase a hostname, never an alias.
  */
 export function knownHostsVerdict(text: string, host: string, port: number, key: Buffer): KnownHostsVerdict {
-  const name = port === 22 ? host.toLowerCase() : `[${host.toLowerCase()}]:${port}`;
   const wanted = key.toString("base64");
   const type = hostKeyType(key);
   let matched = false;
-  let listedKey: Buffer | null = null;
+  let sameType: Buffer | null = null;
+  let otherType: Buffer | null = null;
+  for (const entry of hostEntries(text, host, port)) {
+    if (entry.blob === wanted) {
+      if (entry.revoked) return { kind: "revoked" };
+      matched = true;
+    } else if (!entry.revoked) {
+      const listed = Buffer.from(entry.blob, "base64");
+      if (hostKeyType(listed) === type) sameType ??= listed;
+      else otherType ??= listed;
+    }
+  }
+  if (matched) return { kind: "match" };
+  const listedKey = sameType ?? otherType;
+  return listedKey ? { kind: "mismatch", listedKey } : { kind: "none" };
+}
+
+/** The key types known_hosts lists for this host, in file order. */
+export function knownHostTypes(text: string, host: string, port: number): string[] {
+  const types: string[] = [];
+  for (const entry of hostEntries(text, host, port)) {
+    if (entry.revoked) continue;
+    const type = hostKeyType(Buffer.from(entry.blob, "base64"));
+    if (type !== "unknown" && !types.includes(type)) types.push(type);
+  }
+  return types;
+}
+
+// ssh2's own preference order (lib/protocol/constants.js), which an exact
+// list replaces: its `prepend` skips algorithms already in the list.
+const SERVER_HOST_KEY_ALGORITHMS = [
+  "ssh-ed25519",
+  "ecdsa-sha2-nistp256",
+  "ecdsa-sha2-nistp384",
+  "ecdsa-sha2-nistp521",
+  "rsa-sha2-512",
+  "rsa-sha2-256",
+  "ssh-rsa",
+];
+
+/**
+ * ssh2's `algorithms.serverHostKey` with the listed key types first, so a
+ * server offers a key known_hosts can vouch for. As OpenSSH does, the listed
+ * ones keep the default order among themselves: which line of the file came
+ * first never changes the key negotiated.
+ */
+export function hostKeyAlgorithms(listedTypes: readonly string[]): string[] {
+  const listed = (algorithm: string) => listedTypes.includes(algorithm.startsWith("rsa-sha2-") ? "ssh-rsa" : algorithm);
+  return [
+    ...SERVER_HOST_KEY_ALGORITHMS.filter(listed),
+    ...SERVER_HOST_KEY_ALGORITHMS.filter((algorithm) => !listed(algorithm)),
+  ];
+}
+
+function* hostEntries(text: string, host: string, port: number): Generator<{ blob: string; revoked: boolean }> {
+  const name = port === 22 ? host : `[${host}]:${port}`;
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
@@ -58,17 +115,8 @@ export function knownHostsVerdict(text: string, host: string, port: number, key:
     if (fields[0].startsWith("@")) marker = fields.shift() ?? null;
     if (marker === "@cert-authority" || fields.length < 3) continue;
     const [patterns, , blob] = fields;
-    if (!hostPatternsMatch(patterns, name)) continue;
-    if (blob === wanted) {
-      if (marker === "@revoked") return { kind: "revoked" };
-      matched = true;
-    } else if (marker === null && listedKey === null) {
-      const other = Buffer.from(blob, "base64");
-      if (hostKeyType(other) === type) listedKey = other;
-    }
+    if (hostPatternsMatch(patterns, name)) yield { blob, revoked: marker === "@revoked" };
   }
-  if (matched) return { kind: "match" };
-  return listedKey ? { kind: "mismatch", listedKey } : { kind: "none" };
 }
 
 function hostPatternsMatch(patterns: string, name: string): boolean {
@@ -79,10 +127,11 @@ function hostPatternsMatch(patterns: string, name: string): boolean {
     return digest === hash;
   }
   let matched = false;
+  const lowered = name.toLowerCase();
   for (const pattern of patterns.split(",")) {
     const negated = pattern.startsWith("!");
     const body = (negated ? pattern.slice(1) : pattern).toLowerCase();
-    if (!globMatch(body, name)) continue;
+    if (!globMatch(body, lowered)) continue;
     if (negated) return false;
     matched = true;
   }

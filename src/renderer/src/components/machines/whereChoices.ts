@@ -8,7 +8,10 @@ import { getAgentBoardSources } from "../agent-board/agentBoardSources";
 // one place shows no row at all. Reading statuses never connects a host.
 
 export interface WhereChoice {
-  /** "here" keeps the pane's own folder; "local" is this computer, from a remote pane. */
+  /**
+   * "here" keeps the pane's own folder; "local" is this computer, from a
+   * remote pane; `host:<id>` is another machine, so no host name collides.
+   */
   id: string;
   label: string;
   hostId: string | null;
@@ -28,7 +31,7 @@ export function whereChoicesFrom(
   if (current) next.push({ id: "local", label: "This computer", hostId: null });
   hosts.forEach((host, index) => {
     if (host.id !== current && statuses[index]?.state === "connected") {
-      next.push({ id: host.id, label: host.id, hostId: host.id });
+      next.push({ id: `host:${host.id}`, label: host.id, hostId: host.id });
     }
   });
   return next.length > 1 ? next : [];

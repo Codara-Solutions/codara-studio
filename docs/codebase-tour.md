@@ -495,16 +495,24 @@ takes `user@host:port` (port 1 to 65535).
 - **Host keys.** With the preference on, a key Studio has not stored is
   trusted silently only when `~/.ssh/known_hosts` lists it (read only,
   `host-keys.ts` handles hashed names, patterns and `@revoked`; a host with
-  `HostKeyAlias` is looked up by the alias, without the port, as OpenSSH
-  does); otherwise `HostKeyPrompt.tsx` asks "Is this <host>?" with the
-  fingerprint. Only once the host has answered does the handshake wait up to
-  5 minutes for the user; a machine that is down fails after the usual 20
-  seconds. Every window drops a prompt once it ends, however it ends. A key
-  that differs from Codara's stored one, or from the one known_hosts lists
-  for the host, is refused; the Machines card shows both fingerprints and
-  **Trust the new key** (`trustChangedHostKey`), which trusts only the key
-  the card showed and is forgotten when the host is disconnected, edited or
-  removed. Codara Cloud boxes keep trust on first use. With the preference
+  `HostKeyAlias` is looked up by the alias as written, without the port, as
+  OpenSSH does; `/etc/ssh/ssh_known_hosts` and a `UserKnownHostsFile` or
+  `GlobalKnownHostsFile` from `~/.ssh/config` are read too). The handshake
+  asks for the key types known_hosts lists first, in ssh's own order as
+  OpenSSH does, and a key known_hosts lists is accepted even when Codara
+  stored another of the host's keys (one per host, any type). Otherwise
+  `HostKeyPrompt.tsx` asks "Is this <host>?" with the fingerprint. Only once
+  the host has answered does the handshake wait up to 5 minutes for the
+  user; a machine that is down fails after the usual 20 seconds, and a
+  prompt ends with the attempt it belongs to (sshd drops a slow handshake
+  after its LoginGraceTime). Every window drops a prompt once it ends,
+  however it ends. A key that differs from Codara's stored one, or that
+  known_hosts does not list while listing others for the host (another key,
+  or another key type), is refused, never asked about; so is a first-use key
+  for an address another host was trusted at meanwhile. The Machines card
+  shows both fingerprints and **Trust the new key** (`trustChangedHostKey`),
+  which trusts only the key the card showed and is forgotten when the host
+  connects again, is disconnected, edited or removed. Codara Cloud boxes keep trust on first use. With the preference
   off, keys behave as before.
 
 Tests: `test-remote-agents` runs the generated lines under `/bin/sh` with

@@ -129,7 +129,7 @@ const prefsStore = () => load("src/main/preferences-store.ts");
       assert.deepEqual(where.whereChoicesFrom([{ id: "vps" }], [{ state: "disconnected" }], "/home/me/project"), []);
       assert.deepEqual(
         where.whereChoicesFrom([{ id: "vps" }], [{ state: "connected" }], "/home/me/project").map((c) => c.id),
-        ["here", "vps"],
+        ["here", "host:vps"],
       );
 
       const machinesLib = await load("src/main/remote/machines.ts", {
@@ -167,6 +167,17 @@ const prefsStore = () => load("src/main/preferences-store.ts");
         "this computer is offered from a remote pane even when no other machine is connected",
       );
       assert.equal(fromRemote[1].label, "This computer");
+      const named = where.whereChoicesFrom(
+        [{ id: "local" }, { id: "here" }, { id: "vps" }],
+        [{ state: "connected" }, { state: "connected" }, { state: "connected" }],
+        "ssh://vps/home/dev/project",
+      );
+      const ids = named.map((c) => c.id);
+      assert.equal(new Set(ids).size, ids.length, "hosts named local or here never collide with the built-in choices");
+      assert.deepEqual(
+        named.map((c) => c.hostId),
+        ["vps", null, "local", "here"],
+      );
       ok("from a pane on another machine, the Where row offers this computer");
     }
 

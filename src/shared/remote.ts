@@ -77,6 +77,12 @@ export interface RemoteHostConfig {
   hostKeyAlias?: string;
   /** Codara Cloud box id; the box is woken before the SSH handshake. */
   codaraBoxId?: string;
+  /**
+   * UserKnownHostsFile / GlobalKnownHostsFile from ~/.ssh/config, read for
+   * the host-key check; unset means ssh's defaults. Main only, like the proxy.
+   */
+  userKnownHostsFiles?: string[];
+  globalKnownHostsFiles?: string[];
 }
 
 export type RemoteConnectionState = "disconnected" | "connecting" | "connected" | "error";
@@ -202,6 +208,8 @@ export interface HostKeyChange {
   previousFingerprint: string;
   newFingerprint: string;
   keyType: string;
-  /** Set when the earlier key is the one ~/.ssh/known_hosts lists, not Codara's own. */
+  /** Set when the earlier key is the one known_hosts lists, not Codara's own. */
   listedBy?: "known_hosts";
+  /** The listed key's type, when known_hosts gave it (`ssh-ed25519`...). */
+  previousKeyType?: string;
 }

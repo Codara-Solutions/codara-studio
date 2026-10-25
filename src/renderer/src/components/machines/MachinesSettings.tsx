@@ -194,7 +194,10 @@ function MachineCard({
             Someone may be intercepting the connection, or the machine was reinstalled. Trust the new key only if you
             know why.
             <span className="machine-fingerprints">
-              <span>Before: {machine.hostKeyChange.previousFingerprint}</span>
+              <span>
+                Before: {machine.hostKeyChange.previousFingerprint}
+                {machine.hostKeyChange.previousKeyType ? ` (${machine.hostKeyChange.previousKeyType})` : ""}
+              </span>
               <span>
                 Now: {machine.hostKeyChange.newFingerprint} ({machine.hostKeyChange.keyType})
               </span>
