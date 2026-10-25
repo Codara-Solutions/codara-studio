@@ -13,7 +13,8 @@ import { shQuote } from "./connections";
 // Reconnecting on its own is quiet: it never asks for a password or
 // passphrase and never wakes a Codara box the user stopped (a paid wake).
 // When the host needs the user, or the retries run out, the pane waits for a
-// key, and that round may ask.
+// key the user types in it (reconnectByUser), and that round may ask. Text
+// Studio writes on its own never reconnects.
 
 export interface RemoteShellChannel {
   write(data: string): unknown;
@@ -42,6 +43,10 @@ export interface RemotePtyHandle {
   kill(): void;
   onData(cb: (data: string) => void): { dispose(): void };
   onExit(cb: (e: { exitCode: number; signal?: number }) => void): { dispose(): void };
+  /** The connection dropped and the pane waits for the user's key to reconnect. */
+  waitingForKey(): boolean;
+  /** The user typed a key in the pane: reconnect, asking for a password if needed. */
+  reconnectByUser(): void;
 }
 
 export interface RemotePtyInput {
@@ -202,13 +207,8 @@ export function createRemotePtyHandle(input: RemotePtyInput): RemotePtyHandle {
   return {
     pid: 0,
     write(data) {
-      if (!channel) {
-        // The key that asks for a reconnect is not typed into the agent.
-        if (waitingForKey && !ended && !killed) void reconnect(true);
-        return;
-      }
       try {
-        channel.write(data);
+        channel?.write(data);
       } catch {
         /* channel already closed */
       }
@@ -251,6 +251,12 @@ export function createRemotePtyHandle(input: RemotePtyInput): RemotePtyHandle {
       } catch {
         finish(0);
       }
+    },
+    waitingForKey() {
+      return waitingForKey && !ended && !killed;
+    },
+    reconnectByUser() {
+      if (waitingForKey && !ended && !killed) void reconnect(true);
     },
     onData(cb) {
       dataListeners.add(cb);

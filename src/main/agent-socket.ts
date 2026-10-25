@@ -1729,7 +1729,12 @@ async function handleTerminalWrite(
     if (recentSubmits.size > 64) recentSubmits.clear();
     recentSubmits.set(paneId, { at: Date.now(), cursor: paneCursors.current(paneId) });
   }
-  pty.inject(paneId, text, { submit });
+  try {
+    pty.inject(paneId, text, { submit });
+  } catch (err) {
+    if (err instanceof pty.RemotePaneDisconnectedError) return errorResponse(id, ERR_INVALID_PARAMS, err.message);
+    throw err;
+  }
   return successResponse(id, { ok: true });
 }
 

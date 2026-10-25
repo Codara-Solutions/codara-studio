@@ -18,7 +18,8 @@
 //   - reconnecting on its own never asks for a password or passphrase and
 //     never wakes a stopped Codara box (every call is quiet); when the host
 //     needs the user, or the retries run out, the loop stops and the pane
-//     waits for a key, and only that key may prompt
+//     waits for a key, and only that key may prompt; a write (text Studio
+//     sends on its own) never reconnects
 //   - a plain shell reports exit 0 unless asked for the real status (the
 //     Machines setting off keeps the old behaviour)
 //   - a channel that closed before the handle existed (during the session
@@ -307,14 +308,18 @@ function harness(lib, overrides = {}) {
     assert.equal(h.conn.execs.length, 1, "a host that needs the user is not retried in the background");
     assert.deepEqual(h.sleeps, []);
     assert.deepEqual(h.exits, [], "the pane stays open");
-    h.handle.write("x");
+    assert.equal(h.handle.waitingForKey(), true);
+    h.handle.write("text Studio sends on its own");
+    for (let i = 0; i < 20; i += 1) await tick();
+    assert.equal(h.conn.execs.length, 1, "a write is not a key: it never reconnects");
+    h.handle.reconnectByUser();
     await until("a new channel", () => h.conn.shells.length === 1);
+    assert.equal(h.handle.waitingForKey(), false);
     assert.equal(h.conn.execOpts[1].quiet, false, "the user's key may prompt");
     assert.equal(h.conn.shellOpts[0].quiet, false);
     const next = h.conn.shells[0];
     await until("the attach line", () => next.written.length === 1);
     assert.match(next.written[0], /attach-session/);
-    assert.equal(next.written.length, 1, "the key that asked for the reconnect is not typed into the agent");
     ok("a host that needs a password waits for a key, and only that key may prompt");
   }
 
@@ -327,7 +332,7 @@ function harness(lib, overrides = {}) {
     assert.equal(h.conn.execs.length, 4, "retries stop at the cap");
     assert.deepEqual(h.exits, []);
     h.conn.probe = [0];
-    h.handle.write("\r");
+    h.handle.reconnectByUser();
     await until("a new channel", () => h.conn.shells.length === 1);
     ok("retries are capped, then a key starts a new round");
   }
