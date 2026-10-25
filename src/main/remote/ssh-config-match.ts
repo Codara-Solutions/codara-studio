@@ -66,18 +66,70 @@ const CONTEXT_KEYS = new Set([
 ]);
 const REPEATABLE = new Set(["identityfile", "localforward", "remoteforward", "dynamicforward", "certificatefile"]);
 const COMMAND_KEYS = new Set(["proxycommand", "knownhostscommand"]);
-/** Keywords whose value is a command line, where `""` is an ordinary shell word. */
+/** Keywords whose value is a command line, which ssh keeps as written. */
 const RAW_KEYS = new Set(["proxycommand", "knownhostscommand", "localcommand", "remotecommand"]);
-// A `""` word on its own, outside a longer quoted string.
-const EMPTY_WORD = /(^|[\s=])""(?=\s|$)/;
+/** Keywords Codara reads that take exactly one value; ssh refuses a second. */
+const SINGLE_KEYS = new Set([
+  "hostname",
+  "user",
+  "port",
+  "hostkeyalias",
+  "revokedhostkeys",
+  "identityfile",
+  "tag",
+  "canonicalizehostname",
+  "canonicalizemaxdots",
+]);
 
-const MATCH_KEYWORD = /^(\s*)match(?=[\s=])/i;
+// The keyword, then one `=` or whitespace, as ssh's strdelim splits it. A
+// `\r` is whitespace there; anything but a newline belongs to the value.
+const KEYWORD = /^[ \t\r]*([^ \t\r=]+)[ \t\r]*(?:=[ \t\r]*)?([^\n]*)$/;
+// What ssh strips from the end of a line before reading it.
+const TRAILING_BLANKS = /[ \t\r\n\f]+$/;
 
 const words = (value: Value): string[] => (Array.isArray(value) ? value.map((v) => v.val) : [value]);
 
 export function displayPath(file: string): string {
   const home = homedir();
   return file === home || file.startsWith(`${home}${sep}`) ? `~${file.slice(home.length)}` : file;
+}
+
+/**
+ * ssh's argv_split: words split on blanks, `'` and `"` quote, a backslash
+ * escapes a quote, a backslash or (outside quotes) a blank, and `#` at the
+ * start of a word ends the line. Throws on a quote left open.
+ */
+export function splitSshWords(text: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] === " " || text[i] === "\t") {
+      i++;
+      continue;
+    }
+    if (text[i] === "#") break;
+    let word = "";
+    let quote = "";
+    for (; i < text.length; i++) {
+      const c = text[i];
+      const next = text[i + 1];
+      if (c === "\\" && (next === "'" || next === '"' || next === "\\" || (!quote && next === " "))) {
+        word += next;
+        i++;
+      } else if (!quote && (c === " " || c === "\t")) {
+        break;
+      } else if (!quote && (c === "'" || c === '"')) {
+        quote = c;
+      } else if (quote && c === quote) {
+        quote = "";
+      } else {
+        word += c;
+      }
+    }
+    if (quote) throw new Error("a quote is not closed");
+    out.push(word);
+  }
+  return out;
 }
 
 /** Reads every line once; ssh rejects a bad line wherever it is, active or not. */
@@ -93,40 +145,75 @@ export function parseEntries(entries: SourceEntry[]): ParsedEntry[] {
       continue;
     }
     const where = `${displayPath(entry.file)} line ${entry.line}`;
-    // The package rejects valid criteria such as `!final`, so a Match line is
-    // split as a plain list of words and matchCriteria judges it.
-    const match = MATCH_KEYWORD.test(entry.text);
-    let nodes: ReturnType<typeof SSHConfig.parse>;
-    try {
-      nodes = SSHConfig.parse(match ? entry.text.replace(MATCH_KEYWORD, "$1SendEnv") : entry.text);
-    } catch (err) {
-      // The package throws a TypeError for a keyword with no value at all.
-      const reason = err instanceof TypeError || !(err instanceof Error) ? "a keyword with no value" : err.message;
-      out.push({ kind: "error", where, message: `ssh cannot read ${where} (${reason})` });
+    const bad = (reason: string) => out.push({ kind: "error", where, message: `ssh cannot read ${where} (${reason})` });
+    const m = KEYWORD.exec(entry.text.replace(TRAILING_BLANKS, ""));
+    if (!m || m[1].startsWith("#")) continue;
+    const [, keyword, rest] = m;
+    const param = keyword.toLowerCase();
+    if (rest === "") {
+      bad(`${keyword} has no value`);
       continue;
     }
-    const node = nodes.find((n) => n.type === LineType.DIRECTIVE) as { param: string; value: Value } | undefined;
-    if (!node) continue;
-    const param = match ? "match" : node.param.toLowerCase();
-    if (param === "host") {
-      out.push({ kind: "host", where, patterns: words(node.value) });
-    } else if (param === "match") {
-      const criteria = matchCriteria(words(node.value));
-      if (typeof criteria === "string") {
-        out.push({ kind: "error", where, message: `ssh cannot read ${where} (${criteria})` });
-      } else {
-        out.push({ kind: "match", where, criteria });
-      }
-    } else if (words(node.value).every((w) => w === "")) {
-      out.push({ kind: "error", where, message: `ssh cannot read ${where} (${node.param} has no value)` });
-    } else if (!RAW_KEYS.has(param) && EMPTY_WORD.test(entry.text.replace(/^\s*\S+/, ""))) {
-      out.push({ kind: "error", where, message: `ssh cannot read ${where} (${node.param} has an empty value)` });
+    if (param === "match" || RAW_KEYS.has(param)) {
+      out.push(parsedByPackage(entry.text, param, keyword, where));
+      continue;
+    }
+    let words: string[];
+    try {
+      words = splitSshWords(rest);
+    } catch {
+      bad(`${keyword} has a quote that is not closed`);
+      continue;
+    }
+    if (param === "proxyjump") {
+      // ssh reads ProxyJump from the raw line, quotes included, up to the
+      // first blank or `#`, and ignores what follows.
+      const jump = /^[^ \t#]*/.exec(rest)?.[0] ?? "";
+      if (jump === "") bad(`${keyword} has no value`);
+      else out.push({ kind: "option", where, param: keyword, value: jump });
+    } else if (param === "host" && words.length === 0) {
+      // `Host # note`: a block that matches no host.
+      out.push({ kind: "host", where, patterns: [] });
+    } else if (words.length === 0 || words.every((w) => w === "")) {
+      bad(`${keyword} has no value`);
+    } else if (words.includes("")) {
+      bad(`${keyword} has an empty value`);
+    } else if (param === "host") {
+      out.push({ kind: "host", where, patterns: words });
+    } else if (SINGLE_KEYS.has(param) && words.length > 1) {
+      bad(`${keyword} has more than one value`);
     } else {
-      out.push({ kind: "option", where, param: node.param, value: node.value });
+      const value: Value = words.length === 1 ? words[0] : words.map((val) => ({ val, separator: " " }));
+      out.push({ kind: "option", where, param: keyword, value });
     }
   }
   return out;
 }
+
+// A Match line is split as ssh's match_cfg_line splits it, honouring only
+// `"` (a `'` is part of the pattern), and a command keeps its text as the
+// ssh-config package returns it, as before. The package rejects valid
+// criteria such as `!final`, so a Match line goes through as a plain list.
+function parsedByPackage(text: string, param: string, keyword: string, where: string): ParsedEntry {
+  const bad = (reason: string): ParsedEntry => ({ kind: "error", where, message: `ssh cannot read ${where} (${reason})` });
+  let nodes: ReturnType<typeof SSHConfig.parse>;
+  try {
+    nodes = SSHConfig.parse(param === "match" ? text.replace(MATCH_KEYWORD, "$1SendEnv") : text);
+  } catch (err) {
+    return bad(err instanceof Error && !(err instanceof TypeError) ? err.message : `${keyword} has no value`);
+  }
+  const node = nodes.find((n) => n.type === LineType.DIRECTIVE) as { param: string; value: Value } | undefined;
+  if (!node) return bad(`${keyword} has no value`);
+  if (param !== "match") {
+    return words(node.value).every((w) => w === "")
+      ? bad(`${keyword} has no value`)
+      : { kind: "option", where, param: node.param, value: node.value };
+  }
+  const criteria = matchCriteria(words(node.value));
+  return typeof criteria === "string" ? bad(criteria) : { kind: "match", where, criteria };
+}
+
+const MATCH_KEYWORD = /^(\s*)match(?=[\s=])/i;
 
 /** The criteria of a Match line, or why ssh calls it a bad Match condition. */
 function matchCriteria(tokens: string[]): Criterion[] | string {
@@ -149,7 +236,7 @@ function matchCriteria(tokens: string[]): Criterion[] | string {
       continue;
     }
     const arg = args[i + 1];
-    if (arg === undefined) return `Match ${args[i]} needs a value`;
+    if (arg === undefined || arg === "") return `Match ${args[i]} needs a value`;
     criteria.push({ name, negate, arg });
     i++;
   }

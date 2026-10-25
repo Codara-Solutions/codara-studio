@@ -8,6 +8,7 @@ import {
   displayPath,
   evaluateSshConfig,
   parseEntries,
+  splitSshWords,
   type Options,
   type ParsedEntry,
   type SourceEntry,
@@ -173,15 +174,6 @@ const first = (v: string | string[] | undefined): string | undefined => (Array.i
 const MAX_INCLUDE_DEPTH = 16;
 const INCLUDE_LINE = /^\s*include(?:\s+|\s*=\s*)(.+?)\s*$/i;
 
-// ssh_config tokens are whitespace separated, optionally double quoted.
-function splitConfigWords(value: string): string[] {
-  const words: string[] = [];
-  const re = /"([^"]*)"|(\S+)/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(value))) words.push(m[1] ?? m[2]);
-  return words;
-}
-
 function globToRegExp(segment: string): RegExp {
   const body = segment.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
   return new RegExp(`^${body}$`);
@@ -249,7 +241,14 @@ async function readConfigWithIncludes(
         continue;
       }
       const where = `${displayPath(file)} line ${i + 1}`;
-      for (const word of splitConfigWords(m[1])) {
+      let words: string[];
+      try {
+        words = splitSshWords(m[1]);
+      } catch {
+        out.push({ kind: "error", message: `ssh cannot read ${where} (Include has a quote that is not closed)` });
+        continue;
+      }
+      for (const word of words) {
         for (const target of await expandGlob(resolveIncludePattern(word, baseDir))) {
           let isDirectory = false;
           try {

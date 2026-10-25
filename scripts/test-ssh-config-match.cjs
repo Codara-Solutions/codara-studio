@@ -149,6 +149,34 @@ const MANUAL_CASES = [
   ["KnownHostsCommand none", "Host *\n  KnownHostsCommand none\n  RevokedHostKeys /r\n", "h1", "me", ["/r"]],
   ["KnownHostsCommand for another host", "Host other\n  KnownHostsCommand /bin/keys\n", "h1", "me", null],
   ["KnownHostsCommand under Match exec", "Match exec \"test -e /tmp/x\"\n  KnownHostsCommand /bin/keys\n", "h1", "me", /line 1 starts a "Match exec" block that sets KnownHostsCommand/],
+  // Quotes, escapes and comments as ssh's argv_split reads them (OpenSSH 9.6).
+  ["single quotes are stripped", "Host *\n  RevokedHostKeys '/r/x'\n", "h1", "me", ["/r/x"]],
+  ["quotes join inside a word", "Host *\n  RevokedHostKeys /r/'a b'c\n", "h1", "me", ["/r/a bc"]],
+  ["a backslash escapes a blank", "Host *\n  RevokedHostKeys /r/a\\ b\n", "h1", "me", ["/r/a b"]],
+  ["keyword=value with quotes", "Host *\n  RevokedHostKeys='/r/q'\n", "h1", "me", ["/r/q"]],
+  ["a quoted Host pattern", "Host 'h1'\n  RevokedHostKeys /r\n", "h1", "me", ["/r"]],
+  ["a Match line keeps single quotes", "Match host 'h1'\n  RevokedHostKeys /r\n", "h1", "me", null],
+  ["# inside a word is not a comment", "Host *\n  RevokedHostKeys /r/a#b\n", "h1", "me", ["/r/a#b"]],
+  ["\"\" in a trailing comment", "Host *\n  IdentityFile /id # note \"\"\n  RevokedHostKeys /r\n", "h1", "me", ["/r"]],
+  ["SetEnv FOO=\"\"", "Host *\n  SetEnv FOO=\"\"\n  RevokedHostKeys /r\n", "h1", "me", ["/r"]],
+  ["SetEnv FOO=''", "Host *\n  SetEnv FOO=''\n  RevokedHostKeys /r\n", "h1", "me", ["/r"]],
+  ["an empty single-quoted value", "Host other\n  UserKnownHostsFile ''\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 2 \(UserKnownHostsFile has no value\)/],
+  ["an empty single-quoted word in a list", "Host *\n  GlobalKnownHostsFile /x ''\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 2 \(GlobalKnownHostsFile has an empty value\)/],
+  ["HostKeyAlias ''", "Host *\n  HostKeyAlias ''\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 2 \(HostKeyAlias has no value\)/],
+  ["a value that is only a comment", "Host *\n  RevokedHostKeys # none yet\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 2 \(RevokedHostKeys has no value\)/],
+  ["Host with an empty pattern", "Host foo \"\"\n  RevokedHostKeys /r\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 1 \(Host has an empty value\)/],
+  ["Host with an empty single-quoted pattern", "Host foo ''\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 1 \(Host has an empty value\)/],
+  ["Match with an empty value", "Match host \"\"\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 1 \(Match host needs a value\)/],
+  ["a quote left open", "Host *\n  RevokedHostKeys '/r\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 2 \(RevokedHostKeys has a quote that is not closed\)/],
+  ["two values for RevokedHostKeys", "Host other\n  RevokedHostKeys /a /b\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 2 \(RevokedHostKeys has more than one value\)/],
+  ["two values for HostName", "Host other\n  HostName a b\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 2 \(HostName has more than one value\)/],
+  ["a keyword alone names it", "Host other\n  SendEnv\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 2 \(SendEnv has no value\)/],
+  // ssh reads a line up to its newline and strips only " \t\r\n\f" from its end.
+  ["a carriage return inside a value is part of it", "Host *\n  RevokedHostKeys /r\rx\n", "h1", "me", ["/r\rx"]],
+  ["a line separator inside a value is part of it", "Host *\n  RevokedHostKeys /r\u2028x\n", "h1", "me", ["/r\u2028x"]],
+  ["carriage returns ending a line are dropped", "Host *\n  RevokedHostKeys /r \r\r\n", "h1", "me", ["/r"]],
+  ["a carriage return ends the keyword", "Host *\n  RevokedHostKeys\r/r\n", "h1", "me", ["/r"]],
+  ["a Host line with only a comment matches nothing", "Host # todo\n  RevokedHostKeys /a\nHost *\n  RevokedHostKeys /r\n", "h1", "me", ["/r"]],
 ];
 
 async function testManualHosts(hosts) {
@@ -219,6 +247,17 @@ async function testIncludes(hosts) {
     writeConfigs(config);
     assert.deepEqual(await hosts.knownHostsSettings(manual("h1")), { files: [path.join(HOME, ".ssh", "known_hosts"), path.join(HOME, ".ssh", "known_hosts2"), "/etc/ssh/ssh_known_hosts", "/etc/ssh/ssh_known_hosts2"], revoked: ["/r"] }, name);
     check(config, ["/r"], name);
+  }
+
+  const quoted = path.join(HOME, ".ssh", "quoted inc.conf");
+  fs.writeFileSync(quoted, "Host *\n  RevokedHostKeys /r/inc\n");
+  for (const [name, config] of [
+    ["an Include in single quotes", `Include '${quoted}'\n`],
+    ["an Include with a comment", `Include ${quoted.replace(/ /g, "\\ ")} # shared\n`],
+  ]) {
+    writeConfigs(config);
+    assert.deepEqual((await hosts.knownHostsSettings(manual("h1"))).revoked, ["/r/inc"], name);
+    check(config, ["/r/inc"], name);
   }
 
   if (process.getuid && process.getuid() !== 0) {
@@ -407,6 +446,46 @@ async function testOrdinaryConfig(hosts) {
   writeConfigs("Host nas nas2\n  HostName nas.lan\n");
   assert.deepEqual((await hosts.readSshConfigHosts()).map((h) => [h.id, h.host]), [["nas", "nas.lan"], ["nas2", "nas.lan"]]);
   ok("a Host line with several aliases lists each of them");
+
+  // ssh strips the quotes from a file list: the file itself is read.
+  const files = "Host *\n  UserKnownHostsFile '/k/kh' \"/k/b c\"\n";
+  writeConfigs(files);
+  assert.deepEqual((await hosts.knownHostsSettings(manual("h1"))).files.slice(0, 2), ["/k/kh", "/k/b c"]);
+  if (HAS_SSH) {
+    const file = path.join(TMP, "ssh-g-config");
+    fs.writeFileSync(file, files);
+    const out = spawnSync("ssh", ["-G", "-F", file, "h1"], { encoding: "utf8" }).stdout;
+    assert.ok(out.split("\n").includes("userknownhostsfile /k/kh /k/b c"), "as ssh -G prints");
+  }
+  ok("quoted UserKnownHostsFile paths name the files ssh reads");
+
+  // ssh keeps a ProxyJump value as written up to the first blank or `#`,
+  // quotes included, and ignores the rest; %j is its last hop. ssh -G does
+  // not expand UserKnownHostsFile, so ControlPath shows its %j.
+  for (const [jump, want] of [
+    ["'j1'", "'j1'"],
+    ['"j1"', '"j1"'],
+    ["a b", "a"],
+    ["a,b c", "b"],
+    ["'a#b'", "'a"],
+    ['""', '""'],
+  ]) {
+    const config = `Host h1\n  ProxyJump ${jump}\n  UserKnownHostsFile /kh-%j\n  ControlPath /cp-%j\n`;
+    writeConfigs(config);
+    const listed = (await hosts.readSshConfigHosts()).find((h) => h.id === "h1");
+    assert.ok(listed, `ProxyJump ${jump}: h1 is listed`);
+    const got = await hosts.knownHostsSettings(listed);
+    assert.ok(!("refusal" in got), `ProxyJump ${jump}: not refused (${got.refusal})`);
+    assert.equal(got.files[0], `/kh-${want}`, `ProxyJump ${jump}: %j`);
+    if (HAS_SSH) {
+      const file = path.join(TMP, "ssh-g-config");
+      fs.writeFileSync(file, config);
+      const result = spawnSync("ssh", ["-G", "-F", file, "h1"], { encoding: "utf8" });
+      assert.equal(result.status, 0, `ProxyJump ${jump}: ssh accepts it`);
+      assert.ok(result.stdout.split("\n").includes(`controlpath /cp-${want}`), `ProxyJump ${jump}: %j as ssh -G expands it`);
+    }
+  }
+  ok("ProxyJump is kept as ssh keeps it, quotes and all, for %j");
 }
 
 (async () => {
