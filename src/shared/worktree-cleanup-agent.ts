@@ -72,8 +72,9 @@ export function hasUnsavedChanges(facts: Pick<WorktreeAdviceFacts, "dirty" | "lo
 
 /**
  * Local work that is only ignored files a fresh checkout would not bring
- * back (.env.local and the like), or a folder too large to check: the user
- * may still choose to remove it, after seeing the list.
+ * back (.env.local and the like): the user may still choose to remove it,
+ * after seeing the list. A folder too large to check is never this: nobody
+ * saw what it holds.
  */
 export function onlyIgnoredWork(work: WorktreeLocalWork | null): boolean {
   if (!work) return false;
@@ -81,7 +82,8 @@ export function onlyIgnoredWork(work: WorktreeLocalWork | null): boolean {
     work.tracked + work.untracked + work.hidden === 0 &&
     work.inProgress === null &&
     work.submodules.length === 0 &&
-    (work.ignored.length > 0 || work.unscanned !== null)
+    work.unscanned === null &&
+    work.ignored.length > 0
   );
 }
 
@@ -91,7 +93,6 @@ function ignoredText(work: WorktreeLocalWork): string {
     const shown = work.ignored.slice(0, 3).join(", ");
     parts.push(`ignored files a fresh checkout does not bring back (${shown}${work.ignored.length > 3 ? ", more" : ""})`);
   }
-  if (work.unscanned) parts.push(`${work.unscanned}, too large to check`);
   return parts.join(" and ");
 }
 

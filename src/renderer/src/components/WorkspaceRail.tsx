@@ -24,6 +24,7 @@ import { WorkspaceStatusLine } from "./workspace-status/WorkspaceStatusChip";
 import { WorkspaceAgentsLine } from "./workspace-status/WorkspaceAgentsLine";
 import { useAgentLinesOf } from "./workspace-status/agentLinesStore";
 import { Chevron, WorkspaceChildren, WorktreeAgentLine } from "./rail/WorkspaceChildren";
+import { CleanUpHoldsConfirm, RailCleanUpNotices, useRailCleanUp, type RailCleanUpEntry } from "./rail/RailCleanUp";
 import { setRailFold, useRailFold } from "./rail/railFolds";
 import WorkspaceStatusPicker from "./workspace-status/WorkspaceStatusPicker";
 import { setWorkspaceStatus, useUserWorkspaceStatus } from "./workspace-status/workspaceStatusStore";
@@ -50,7 +51,7 @@ import {
 import { openWorktreeCleanup } from "./worktree-cleanup/open-worktree-cleanup";
 import { PullRequestMark } from "../git/PullRequestMark";
 import { setRepositoryWatched, usePullRequestWatch } from "../git/pullRequestWatchStore";
-import type { WorktreeRailState } from "@shared/worktree-cleanup";
+import type { WorktreeRailCleanupResult, WorktreeRailState } from "@shared/worktree-cleanup";
 import { buildRailFamily, buildRailTree, railMergeState, type RailTree } from "@shared/rail-tree";
 import type { AgentLine } from "@shared/agent-status";
 
@@ -171,7 +172,9 @@ interface RailProps {
   // The first read of those states finished (useWorktreeRailStates).
   worktreeStatesLoaded?: boolean;
   // Clean up a merged worktree, or remove a workspace whose folder is gone.
-  onCleanUpWorkspace?: (id: string) => Promise<void>;
+  // confirmIgnored carries the fingerprint of a "confirm" answer the user
+  // accepted; null means there was nothing to report.
+  onCleanUpWorkspace?: (id: string, confirmIgnored?: string) => Promise<WorktreeRailCleanupResult | null>;
   // The first section's share when exactly two sections are stacked here.
   split: number;
   collapsed: Record<PanelSectionKey, boolean>;
@@ -818,7 +821,7 @@ function WorkspaceRail(props: RailProps) {
     branch: props.branchByWorkspaceId?.[w.id] ?? null,
     missing: missingWorkspaceIds.has(w.id) || props.worktreeByWorkspaceId?.[w.id]?.missing === true,
     worktree: props.worktreeByWorkspaceId?.[w.id] ?? null,
-    onCleanUp: props.onCleanUpWorkspace ? () => props.onCleanUpWorkspace!(w.id) : undefined,
+    onCleanUp: props.onCleanUpWorkspace ? (confirmIgnored) => props.onCleanUpWorkspace!(w.id, confirmIgnored) : undefined,
     folderColorManaged: groupId !== null,
     menuBoundaryRef: wsScrollRef,
     onActivate: () => props.onActivate(w.id),
@@ -2035,7 +2038,7 @@ interface RowProps {
   /** A copy-branch workspace's merge and folder state; null for other rows or before the first read. */
   worktree?: WorktreeRailState | null;
   /** Clean up (merged) or Remove from rail (missing); absent hides both. */
-  onCleanUp?: () => Promise<void>;
+  onCleanUp?: RailCleanUpEntry["cleanUp"];
   /** Folder members inherit their ordered shade from the folder family. */
   folderColorManaged?: boolean;
   /** Flip boundary for the row's "…" AnchoredMenu (the workspaces scroll container). */
@@ -2115,19 +2118,10 @@ function WorkspaceFamily({
   const expandable = family.own.length > 0 || worktrees.length > 0;
   const open = useRailFold(project.id, worktrees.length > 0) && expandable;
   const mergedOpen = useRailFold(`merged:${project.id}`, false);
-  const [cleaning, setCleaning] = useState(false);
-  const mergedCleanable = family.merged.flatMap((child) => {
+  const mergedCleanUps = family.merged.flatMap((child): RailCleanUpEntry[] => {
     const props = childProps.get(child.workspaceId);
-    return props?.onCleanUp ? [{ name: props.ws.name, cleanUp: props.onCleanUp }] : [];
+    return props?.onCleanUp ? [{ id: props.ws.id, name: props.ws.name, cleanUp: props.onCleanUp }] : [];
   });
-  const mergedCleanUps = mergedCleanable.map((entry) => entry.cleanUp);
-  const cleanUpMerged = () => {
-    if (cleaning) return;
-    setCleaning(true);
-    void (async () => {
-      for (const cleanUp of mergedCleanUps) await cleanUp();
-    })().finally(() => setCleaning(false));
-  };
   const renderChild = (workspaceId: string, agents: AgentLine[], faded: boolean) => {
     const props = childProps.get(workspaceId)!;
     return <WorkspaceRow key={workspaceId} {...props} nested nestedAgents={agents} faded={faded} />;
@@ -2150,9 +2144,7 @@ function WorkspaceFamily({
             count: family.merged.length,
             open: mergedOpen,
             onToggle: () => setRailFold(`merged:${project.id}`, !mergedOpen),
-            onCleanUp: mergedCleanUps.length > 0 ? cleanUpMerged : undefined,
-            cleanUpNames: mergedCleanable.map((entry) => entry.name),
-            cleaning,
+            cleanUps: mergedCleanUps,
             rows: family.merged.map((child) => renderChild(child.workspaceId, child.agents, true)),
           }}
         />
@@ -2222,7 +2214,8 @@ function WorkspaceRow({
   const [menuOpen, setMenuOpen] = useState(false);
   const [iconPickerOpen, setIconPickerOpen] = useState(false);
   const [statusPickerOpen, setStatusPickerOpen] = useState(false);
-  const [cleaning, setCleaning] = useState(false);
+  const rowCleanUp = useRailCleanUp([ws.id]);
+  const cleaning = rowCleanUp.cleaning;
   const statusEntry = useUserWorkspaceStatus(ws.id);
   const prWatch = usePullRequestWatch(ws.id);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
@@ -2252,9 +2245,26 @@ function WorkspaceRow({
   const canCleanUp = !missing && merged && Boolean(onCleanUp);
   const runCleanUp = () => {
     if (!onCleanUp || cleaning) return;
-    setCleaning(true);
-    void onCleanUp().finally(() => setCleaning(false));
+    rowCleanUp.start([{ id: ws.id, name: ws.name, cleanUp: onCleanUp }]);
   };
+  const rowCleanUpFeedback = (
+    <>
+      <RailCleanUpNotices
+        notices={rowCleanUp.notices}
+        named={false}
+        testId="workspace-clean-up-notice"
+        onDismiss={rowCleanUp.dismiss}
+      />
+      {rowCleanUp.holding.length > 0 && (
+        <CleanUpHoldsConfirm
+          holding={rowCleanUp.holding}
+          testId="workspace-clean-up-confirm"
+          onCancel={rowCleanUp.cancelHolding}
+          onConfirm={rowCleanUp.confirmHolding}
+        />
+      )}
+    </>
+  );
 
   useEffect(() => setName(ws.name), [ws.id, ws.name]);
   useEffect(() => {
@@ -2641,6 +2651,7 @@ function WorkspaceRow({
               />
             )}
             <WorkspaceStatusLine workspaceId={ws.id} active={active} />
+            {rowCleanUpFeedback}
           </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1, gap: 1 }}>
@@ -2718,6 +2729,7 @@ function WorkspaceRow({
             )}
             <WorkspaceStatusLine workspaceId={ws.id} active={active} />
             <WorkspaceAgentsLine workspaceId={ws.id} active={active} lines={rollupLines} />
+            {rowCleanUpFeedback}
           </div>
         )}
 

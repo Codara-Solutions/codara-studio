@@ -48,7 +48,7 @@ async function main() {
           function Harness() {
             const [names, setNames] = useState(["widgets · feat/old", "widgets · feat/older"]);
             window.setMergedNames = setNames;
-            window.cleanUps = window.cleanUps || 0;
+            window.cleaned = window.cleaned || [];
             return (
               <WorkspaceChildren
                 parentId="ws-app"
@@ -58,9 +58,20 @@ async function main() {
                   count: names.length,
                   open: false,
                   onToggle: () => {},
-                  onCleanUp: names.length > 0 ? () => { window.cleanUps += 1; } : undefined,
-                  cleanUpNames: names,
-                  cleaning: false,
+                  cleanUps: names.map((name) => ({
+                    id: name,
+                    name,
+                    cleanUp: async (confirmIgnored) => {
+                      window.cleaned.push(name);
+                      // "held" stays with a reason; "secret" asks about its
+                      // .env until the question's fingerprint comes back.
+                      if (name === "held") return { status: "refused", message: "Close the tab first.", branchDeleted: false };
+                      if (name === "secret" && confirmIgnored !== "fp-1") {
+                        return { status: "confirm", holds: [".env"], fingerprint: "fp-1", branchDeleted: false };
+                      }
+                      return { status: "removed", branchDeleted: true };
+                    },
+                  })),
                   rows: [],
                 }}
               />
@@ -131,7 +142,7 @@ async function main() {
     await page.evaluate(() => window.setMergedNames(["widgets · feat/new"]));
     await cleanUp.click();
     await expect(confirm).toHaveCount(0);
-    assert.equal(await page.evaluate(() => window.cleanUps), 1);
+    await expect.poll(() => page.evaluate(() => window.cleaned)).toEqual(["widgets · feat/new"]);
 
     // Down to one while open: it closes rather than ask about one.
     await page.evaluate(() => window.setMergedNames(["a", "b"]));
@@ -198,7 +209,22 @@ async function main() {
     await cleanUp.click();
     await confirm.getByRole("button", { name: "Clean up" }).click();
     await expect(confirm).toHaveCount(0);
-    assert.equal(await page.evaluate(() => window.cleanUps), 2);
+    // Each worktree the confirm named runs once, in order.
+    await expect.poll(() => page.evaluate(() => window.cleaned.slice(1))).toEqual(["a", "c"]);
+
+    // Confirming one worktree's .env leaves the other's reason in place.
+    await page.evaluate(() => window.setMergedNames(["held", "secret"]));
+    const notice = page.getByTestId("workspace-merged-notice");
+    await cleanUp.click();
+    await confirm.getByRole("button", { name: "Clean up" }).click();
+    await expect(confirm).toContainText("secret holds .env");
+    await expect(notice).toContainText("held: Close the tab first.");
+    await confirm.getByRole("button", { name: "Remove anyway" }).click();
+    await expect(confirm).toHaveCount(0);
+    await expect.poll(() => page.evaluate(() => window.cleaned.slice(-1))).toEqual(["secret"]);
+    await expect(notice).toContainText("held: Close the tab first.");
+    await notice.getByRole("button", { name: /^Dismiss/ }).click();
+    await expect(notice).toHaveCount(0);
     assert.deepEqual(errors, []);
     console.log("PASS the merged fold's Clean up confirm");
   } finally {

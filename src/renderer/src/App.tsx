@@ -4296,16 +4296,18 @@ export default function App() {
   // The rail row's one-click Clean up (a merged worktree) and Remove from
   // rail (a folder that is gone). A plain workspace only has its row, so it
   // goes like Delete; a copy-branch one goes through main's guarded cleanup.
+  // A removal is confirmed with a toast; anything else comes back to the
+  // rail, which shows it next to the button that asked (rail/RailCleanUp).
   const handleCleanUpWorkspace = useCallback(
-    async (id: string) => {
+    async (id: string, confirmIgnored?: string): Promise<WorktreeRailCleanupResult | null> => {
       const target = workspacesRef.current.find((w) => w.id === id);
-      if (!target) return;
+      if (!target) return null;
       if (!target.copyBranch) {
         removeWorkspaceFromState(id);
-        return;
+        return { status: "removed", workspaceName: target.name, branchDeleted: false };
       }
-      const result = await window.spark.worktreeCleanup
-        .railCleanUp({ workspaceId: id, mode: "manual" })
+      const result: WorktreeRailCleanupResult = await window.spark.worktreeCleanup
+        .railCleanUp({ workspaceId: id, mode: "manual", ...(confirmIgnored ? { confirmIgnored } : {}) })
         .catch((cause: unknown) => ({
           status: "failed" as const,
           message: cause instanceof Error ? cause.message : String(cause),
@@ -4319,13 +4321,8 @@ export default function App() {
             ? `The worktree and branch ${target.copyBranch.branch} are gone.`
             : "The worktree is gone.";
         emitLocalToast(`Cleaned up ${target.name}`, result.message ? `${body} ${result.message}` : body);
-        return;
       }
-      emitLocalToast(
-        `${target.name} was not cleaned up`,
-        result.message ?? "",
-        result.status === "failed" ? "danger" : "warning",
-      );
+      return result;
     },
     [refreshWorktreeStates, removeWorkspaceFromState],
   );

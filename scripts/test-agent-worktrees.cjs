@@ -927,11 +927,68 @@ async function main() {
     assert.equal(fs.readFileSync(rotating, "utf8").trim().split("\n").length, 1);
 
     // ── Pure helpers ───────────────────────────────────────────────────────
-    for (const entry of ["node_modules/", "packages/a/node_modules/", "dist/", "src/x.pyc", ".DS_Store", "tsconfig.tsbuildinfo"]) {
-      assert.equal(aw.isRegenerableIgnored(entry), true, `${entry} regenerates`);
+    const packages = (dir) => dir === "packages/a" || dir === "packages/web";
+    for (const entry of [
+      "node_modules/",
+      "packages/a/node_modules/",
+      "dist/",
+      "src/x.pyc",
+      ".DS_Store",
+      "tsconfig.tsbuildinfo",
+      "test-results/",
+      "playwright-report/",
+      "packages/web/test-results/",
+      ".ruff_cache/",
+    ]) {
+      assert.equal(aw.isRegenerableIgnored(entry, [], packages), true, `${entry} regenerates`);
     }
-    for (const entry of [".env.local", "secrets/", "notes.md", "config/credentials.json"]) {
-      assert.equal(aw.isRegenerableIgnored(entry), false, `${entry} is kept`);
+    for (const entry of [
+      ".env.local",
+      "secrets/",
+      "notes.md",
+      "config/credentials.json",
+      // Only at the root or a package root: git lists a wholly ignored folder as one entry.
+      "docs/test-results/",
+      "packages/b/node_modules/",
+      // A file inside a folder that is not ignored as a whole is that file, not the folder.
+      "dist/.env",
+      "test-results/.env.production",
+    ]) {
+      assert.equal(aw.isRegenerableIgnored(entry, [], packages), false, `${entry} is kept`);
+    }
+    assert.equal(aw.isRegenerableIgnored(".env", ["*.pyc"]), false, "no built-in pattern makes a .env regenerable");
+    assert.equal(aw.isRegenerableIgnored("test-results/.env.local", [".env.local"]), true, "the user's own pattern can");
+    assert.equal(aw.isRegenerableIgnored("packages/a/node_modules/"), false, "without package roots, the root only");
+    for (const name of [
+      ".env",
+      ".env.local",
+      ".env.production.local",
+      ".ENV",
+      ".env-staging",
+      ".envrc",
+      "server.pem",
+      "tls.key",
+      "id_rsa",
+      "id_ed25519",
+      ".npmrc",
+      ".netrc",
+    ]) {
+      assert.equal(aw.isSecretFile(name), true, name);
+    }
+    for (const name of [".env.example", ".env-sample", ".env.template", "env.ts", "id_rsa.pub", "keys.json", "monkey.ts"]) {
+      assert.equal(aw.isSecretFile(name), false, name);
+    }
+    for (const name of ["id_rsa", "deploy.pem", ".npmrc"]) {
+      assert.equal(aw.isRegenerableIgnored(name), false, `${name} is never regenerable by the built-in list`);
+    }
+    {
+      const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-pkg-root-"));
+      fs.mkdirSync(path.join(rootDir, "packages", "web"), { recursive: true });
+      fs.writeFileSync(path.join(rootDir, "packages", "web", "package.json"), "{}");
+      const tester = aw.packageRootTester(rootDir);
+      assert.equal(tester("packages/web"), true);
+      assert.equal(tester("packages"), false);
+      fs.rmSync(rootDir, { recursive: true, force: true });
     }
     assert.equal(aw.isRegenerableIgnored("generated/", ["generated/"]), true);
     assert.equal(aw.isRegenerableIgnored("out.log", ["*.log"]), true);
