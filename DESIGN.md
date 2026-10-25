@@ -113,3 +113,45 @@ down to the agent's timeout and stays put if the user is mid-task.
   its long label never crowds the row.
 - An expired card says nothing changed and stays a few seconds with Dismiss,
   as the cross-workspace card does.
+
+## Browser pane (2026-10)
+
+**Chosen:** variant A of four built on the real pane (labelled toolbar,
+command palette, bottom dock, minimal chrome), with C's Video or GIF choice
+before recording. The frequent tools sit in the toolbar with words (Point,
+Comment, Record); the rare ones moved into More (phone, tablet and desktop
+sizes, full screen, copy tab id for an agent, copy id, URL and session, open
+in the system browser, developer tools). A chip at the right shows how many
+browser tabs are open and the memory they use, and opens a view of every
+browser tab in every workspace where a tab can be put to sleep, woken or
+closed.
+
+**Why:** the toolbar was a row of unlabelled icons whose meaning had to be
+learned, PORTS and the tab id took space every time for something needed
+rarely, and there was no way to see which tabs were open in other workspaces
+or what they cost. Full screen did not exist.
+
+**References:** Chrome's memory saver and its tab hover cards (sleeping tabs,
+memory per tab), every browser's F11 and Esc for full screen, VS Code's
+Simple Browser (a browser that belongs to the editor), the Vercel toolbar
+(comments on a page) and Polypane (sizes side by side).
+
+**Rules:**
+
+- Menus and popovers over a page are solid (`.spark-menu.bp-menu`), never
+  glass: the page behind them is unknown and would make the text unreadable.
+- A tool used most days has a word next to its icon; a tool used rarely goes
+  in More. When the pane is narrower than 700px the words go and every icon
+  stays, with its name as the tooltip and accessible name.
+- A tab sleeps by hand or after 30 minutes unseen (on by default, one switch
+  in the tabs view). It never sleeps while on screen, while recording, within
+  ten minutes of an agent's call, or when it has its own private session
+  (sleeping would lose the session). A sleeping tab keeps its title, URL and
+  last picture, uses no memory, and loads again when shown or when an agent
+  calls it.
+- Full screen fills Codara's window; F11 again takes the whole display. Esc
+  always leaves, from the toolbar or from inside the page, and so does
+  switching tabs. Only the user's own keys count; an agent's Esc stays in
+  the page.
+- No dock: a bar along the bottom of the page would sit over the area the
+  agent's cursor works in and split the tools between two edges.

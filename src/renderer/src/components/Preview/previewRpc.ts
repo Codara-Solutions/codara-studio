@@ -16,6 +16,7 @@ import { snapshotProbe } from "./domSnapshot";
 import { clickProbe, locateProbe, typeProbe, pressKeyProbe } from "./domActions";
 import { assertDriverAllowed, moveAgentCursor, noteDriving, readDriver, type Box, type CursorMove } from "./agent-presence/store";
 import { closeIsolatedTab, openIsolatedTab } from "./isolatedTabs";
+import { isTabAsleep, wakeTab } from "./tabs-memory/browserTabs";
 import { closePageDialog, showPageDialog, type PageDialogView } from "./pageDialogs";
 import {
   closePreviewTab,
@@ -110,7 +111,7 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
       return { tabs: listPreviewTabs(readString(req.params, "workspaceId"), readString(req.params, "callerPaneId")) };
     case "activity": {
       // Answers once the cursor arrived, so main sends its input after the glide.
-      const tab = requireTab(req.params);
+      const tab = await requireTab(req.params);
       const point = typeof req.params.x === "number" && typeof req.params.y === "number" ? { x: req.params.x, y: req.params.y } : undefined;
       await moveAgentCursor(tab.id, readDriver(req.params.driver), {
         action: readString(req.params, "action") ?? "Working",
@@ -168,9 +169,9 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
 // ever lands on a tab that run opened. An agent with no run is scoped to the
 // workspace of the pane it runs in (params.callerPaneId, resolved by main). An
 // explicit tabId is still honored inside that workspace.
-function requireTab(params: Record<string, unknown>) {
+async function requireTab(params: Record<string, unknown>) {
   const runId = typeof params.runId === "string" && params.runId ? params.runId : null;
-  const tab = pickPreviewTab(
+  let tab = pickPreviewTab(
     readString(params, "tabId"),
     runId,
     readString(params, "workspaceId"),
@@ -191,11 +192,26 @@ function requireTab(params: Record<string, unknown>) {
   assertDriverAllowed(tab.id, driver);
   noteDriving(tab.id, driver);
   actedTabs.set(params, tab.id);
+  tab = await wakeForAgent(tab);
   return tab;
 }
 
+// A sleeping tab has no page; an agent's call loads it again first and then
+// acts on the woken page (the pane re-registers its handle while waking).
+async function wakeForAgent<T extends { id: string; handle: { isReady: () => boolean } }>(tab: T): Promise<T> {
+  if (!isTabAsleep(tab.id)) return tab;
+  wakeTab(tab.id);
+  const started = Date.now();
+  for (;;) {
+    const current = (pickPreviewTab(tab.id, null, (tab as { workspaceId?: string | null }).workspaceId ?? null) as T | null) ?? tab;
+    if (current.handle.isReady()) return current;
+    if (Date.now() - started > 15_000) throw new Error("timed out waking the sleeping browser tab");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
 /** Glide the agent's cursor to where an action on selector will land, before it lands. */
-async function approach(tab: ReturnType<typeof requireTab>, params: Record<string, unknown>, selector: string, move: Omit<CursorMove, "point" | "box">, withBox = false): Promise<void> {
+async function approach(tab: Awaited<ReturnType<typeof requireTab>>, params: Record<string, unknown>, selector: string, move: Omit<CursorMove, "point" | "box">, withBox = false): Promise<void> {
   const driver = readDriver(params.driver);
   if (!driver) return;
   const code = `(${locateProbe.toString()})(${JSON.stringify({ selector })}, ${createPreviewDOM.toString()})`;
@@ -302,21 +318,24 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
   // it again would abort or repeat that first load, which runs the page's
   // requests twice and records the first load's as never finished.
   noteDriving(tab.id, driver, "Navigating");
-  if (!opened) tab.handle.loadURL(url);
+  if (!opened) {
+    tab = await wakeForAgent(tab);
+    tab.handle.loadURL(url);
+  }
   await waitDomReady(tab.handle, 15_000);
   joined ??= tabGroupNameOf(tab.id);
   return { url: tab.handle.getURL(), tabId: tab.id, opened, ...(joined ? { group: joined } : {}) };
 }
 
 async function urlOf(params: Record<string, unknown>): Promise<unknown> {
-  const tab = requireTab(params);
+  const tab = await requireTab(params);
   return { url: tab.handle.getURL(), title: tab.handle.getTitle() };
 }
 
 async function snapshot(params: Record<string, unknown>): Promise<unknown> {
   const mode = readString(params, "mode") ?? "outline";
   const maxBytes = readNumber(params, "maxBytes") ?? 12_000;
-  const tab = requireTab(params);
+  const tab = await requireTab(params);
   const code = `(${snapshotProbe.toString()})(${JSON.stringify({ mode, maxBytes, selector: readString(params, "selector"), since: readString(params, "since") })}, ${createPreviewDOM.toString()}, ${createPreviewNames.toString()})`;
   const value = await runGuestScript(tab.handle, code);
   return value;
@@ -326,7 +345,7 @@ async function evaluate(params: Record<string, unknown>): Promise<unknown> {
   const code = readString(params, "code");
   if (!code) throw new Error("evaluate requires 'code'");
   const awaitPromise = readBool(params, "awaitPromise") ?? false;
-  const tab = requireTab(params);
+  const tab = await requireTab(params);
   // The documented contract is "last expression's value is returned", so run
   // the snippet as a single expression when it parses as one — `1+1`,
   // `document.title` — which covers virtually every real call. (The old
@@ -375,7 +394,7 @@ async function evaluate(params: Record<string, unknown>): Promise<unknown> {
 async function click(params: Record<string, unknown>): Promise<unknown> {
   const selector = readString(params, "selector");
   if (!selector) throw new Error("click requires 'selector'");
-  const tab = requireTab(params);
+  const tab = await requireTab(params);
   await approach(tab, params, selector, { action: "Clicking", press: true });
   const code = `(${clickProbe.toString()})(${JSON.stringify({ selector })}, ${createPreviewDOM.toString()})`;
   return runGuestScript(tab.handle, code);
@@ -387,7 +406,7 @@ async function typeText(params: Record<string, unknown>): Promise<unknown> {
   if (!selector) throw new Error("type requires 'selector'");
   if (text === null) throw new Error("type requires 'text'");
   const clearFirst = readBool(params, "clearFirst") ?? false;
-  const tab = requireTab(params);
+  const tab = await requireTab(params);
   await approach(tab, params, selector, { action: "Typing" }, true);
   const code = `(${typeProbe.toString()})(${JSON.stringify({ selector, text, clearFirst })}, ${createPreviewDOM.toString()})`;
   return runGuestScript(tab.handle, code);
@@ -397,14 +416,14 @@ async function pressKey(params: Record<string, unknown>): Promise<unknown> {
   const key = readString(params, "key");
   if (!key) throw new Error("press_key requires 'key'");
   const selector = readString(params, "selector");
-  const tab = requireTab(params);
+  const tab = await requireTab(params);
   if (selector) await approach(tab, params, selector, { action: "Typing" }, true);
   const code = `(${pressKeyProbe.toString()})(${JSON.stringify({ key, selector })}, ${createPreviewDOM.toString()})`;
   return runGuestScript(tab.handle, code);
 }
 
 async function screenshot(params: Record<string, unknown>): Promise<unknown> {
-  const tab = requireTab(params);
+  const tab = await requireTab(params);
   const [dataUrl, viewport] = await Promise.all([
     tab.handle.capturePngDataUrl(),
     runGuestScript(tab.handle, "({ width: window.innerWidth, height: window.innerHeight })")
@@ -425,13 +444,13 @@ async function screenshot(params: Record<string, unknown>): Promise<unknown> {
 const PAINT_LEASE_MAX_MS = 90_000;
 const paintLeases = new Map<string, () => void>();
 
-function paint(params: Record<string, unknown>): unknown {
+async function paint(params: Record<string, unknown>): Promise<unknown> {
   const leaseId = readString(params, "leaseId");
   if (params.hold === false) {
     if (leaseId) paintLeases.get(leaseId)?.();
     return { ok: true };
   }
-  const tab = requireTab(params);
+  const tab = await requireTab(params);
   const { background, release } = tab.handle.holdPaint();
   const id = `paint-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const timer = setTimeout(() => end(), Math.min(readNumber(params, "ms") ?? PAINT_LEASE_MAX_MS, PAINT_LEASE_MAX_MS));
@@ -448,7 +467,7 @@ async function resize(params: Record<string, unknown>): Promise<unknown> {
   const width = readNumber(params, "width");
   const height = readNumber(params, "height");
   if (!width || !height) throw new Error("resize requires numeric 'width' and 'height'");
-  const tab = requireTab(params);
+  const tab = await requireTab(params);
   const applied = tab.handle.resizeViewport(width, height);
   return { ok: true, ...applied, tabId: tab.id };
 }
@@ -459,7 +478,7 @@ const METRICS_TIMEOUT_MS = 400;
 // picked tab's guest webContents id plus viewport metrics so trusted-input
 // coordinates can be mapped against capturePage screenshots.
 async function getWebContentsId(params: Record<string, unknown>): Promise<unknown> {
-  const tab = requireTab(params);
+  const tab = await requireTab(params);
   // Keyboard dispatch needs the embedder iframe focused as well as its guest field.
   if (params.focus === true) tab.handle.focusContent();
   const webContentsId = tab.handle.getWebContentsId();

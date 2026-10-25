@@ -112,6 +112,11 @@ export function previewTabOfGuest(wcId: number): string | null {
   return tabOfGuest.get(wcId) ?? null;
 }
 
+/** The guest webContents id of every tab that has a page right now. */
+export function previewTabGuests(): Array<[tabId: string, wcId: number]> {
+  return [...guestOfTab];
+}
+
 let registered = false;
 
 export function registerPreviewCdpSessions(): void {

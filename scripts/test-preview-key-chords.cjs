@@ -8,7 +8,10 @@
 //   page handled stays in the page, an unhandled one reaches the app after
 //   the page's report or a timeout, reserved chords always reach the app, and
 //   an agent's keys never do.
-// The real window path is tests/e2e/preview-agent-input.spec.ts.
+// - F11 and F12 typed in a page always reach the app, Escape only while the
+//   tab is full screen, and an agent's keys still never do.
+// The real window path is tests/e2e/preview-agent-input.spec.ts and, for
+// full screen, tests/e2e/browser-pane-toolbar.spec.ts.
 //
 //   node scripts/test-preview-key-chords.cjs
 
@@ -35,7 +38,7 @@ function bundle(contents) {
 
 const lib = bundle(`
   export { parseKeyChord, normalizeKeyModifiers, previewKeyEvents } from "./preview-keyboard";
-  export { createChordRouter, isReservedChord } from "./browser/guest-chords";
+  export { createChordRouter, isReservedChord, isReservedPlainKey } from "./browser/guest-chords";
 `);
 
 function chords() {
@@ -156,8 +159,48 @@ function router() {
   assert.deepEqual(forwarded, [], "dispose drops pending chords");
 }
 
+function fullScreenKeys() {
+  const { createChordRouter, isReservedPlainKey } = lib;
+  const plain = (key) => ({ key, modifiers: [] });
+  assert.equal(isReservedPlainKey(plain("F11"), false), true);
+  assert.equal(isReservedPlainKey(plain("F12"), false), true);
+  assert.equal(isReservedPlainKey(plain("Escape"), false), false, "Escape stays in the page outside full screen");
+  assert.equal(isReservedPlainKey(plain("Escape"), true), true);
+  assert.equal(isReservedPlainKey({ key: "F11", modifiers: ["shift"] }, false), false);
+  assert.equal(isReservedPlainKey({ key: "Escape", modifiers: ["control"] }, true), false);
+  assert.equal(isReservedPlainKey({ key: "F12", modifiers: ["isautorepeat"] }, false), true, "a held key is still the key");
+  assert.equal(isReservedPlainKey(plain("a"), true), false);
+
+  const forwarded = [];
+  const timers = [];
+  const page = createChordRouter({
+    forward: (input) => forwarded.push(input.key),
+    setTimer: (fn) => timers.push(fn),
+    clearTimer: () => {},
+  });
+  page.reporterReady();
+  page.keyDown(plain("F11"));
+  page.keyDown(plain("F12"));
+  page.keyDown(plain("Escape"));
+  assert.deepEqual(forwarded.splice(0), ["F11", "F12"], "F11 and F12 reach the app at once, without waiting for the page");
+  page.setFullScreen(true);
+  page.keyDown(plain("Escape"));
+  page.keyDown(plain("Enter"));
+  assert.deepEqual(forwarded.splice(0), ["Escape"], "full screen: Escape reaches the app");
+  page.agentKeysStart();
+  page.keyDown(plain("Escape"));
+  page.keyDown(plain("F11"));
+  page.agentKeysEnd();
+  assert.deepEqual(forwarded.splice(0), [], "an agent's Escape never leaves full screen");
+  page.setFullScreen(false);
+  page.keyDown(plain("Escape"));
+  assert.deepEqual(forwarded.splice(0), [], "out of full screen, Escape is the page's again");
+  assert.equal(timers.length, 0, "plain keys never wait for a page report");
+}
+
 chords();
 events();
 reserved();
 router();
-console.log("preview key chords: chord notation, case and codes, reserved chords, page-first routing, agent keys kept from the app");
+fullScreenKeys();
+console.log("preview key chords: chord notation, case and codes, reserved chords, page-first routing, agent keys kept from the app, full screen keys");

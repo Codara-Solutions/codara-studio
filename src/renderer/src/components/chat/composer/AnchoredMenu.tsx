@@ -79,8 +79,15 @@ interface Props {
    * Settings dialog sits at z 100, so its menus pass something above that.
    */
   zIndex?: number;
+  /** A role="menu" whose menuitem rows take focus on open and walk with the arrows. */
+  menuItems?: boolean;
   children: React.ReactNode;
 }
+
+/** The rows the arrows walk: listbox options, plus menu items when `menuItems` is set. */
+const OPTION_ROWS = '[role="option"]';
+const MENU_ROWS = '[role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"]';
+const enabledRows = (rows: string) => rows.split(", ").map((row) => `${row}:not([disabled])`).join(", ");
 
 /** Keep the menu clear of the viewport edges. */
 const EDGE_PAD = 8;
@@ -112,8 +119,10 @@ export default function AnchoredMenu({
   align = "start",
   focusSignal = 0,
   zIndex = 60,
+  menuItems = false,
   children,
 }: Props) {
+  const rows = menuItems ? MENU_ROWS : OPTION_ROWS;
   const menuRef = useRef<HTMLDivElement>(null);
   // Identity in the single-open registry; stable for this menu's lifetime.
   const menuIdRef = useRef<symbol | null>(null);
@@ -264,10 +273,10 @@ export default function AnchoredMenu({
       const menu = menuRef.current;
       if (!menu) return;
       const selected = menu.querySelector<HTMLElement>('[role="option"][aria-selected="true"]');
-      (selected ?? menu.querySelector<HTMLElement>('[role="option"]'))?.focus();
+      (selected ?? menu.querySelector<HTMLElement>(rows))?.focus();
     });
     return () => window.cancelAnimationFrame(raf);
-  }, [open, focusSignal]);
+  }, [open, focusSignal, rows]);
 
   useEffect(() => {
     if (!open) return;
@@ -300,7 +309,7 @@ export default function AnchoredMenu({
       const menu = menuRef.current;
       if (!menu) return;
       const options = Array.from(
-        menu.querySelectorAll<HTMLElement>('[role="option"]:not([disabled])'),
+        menu.querySelectorAll<HTMLElement>(enabledRows(rows)),
       );
       if (options.length === 0) return;
       event.preventDefault();
@@ -398,7 +407,7 @@ export default function AnchoredMenu({
       window.removeEventListener("resize", measure);
       window.removeEventListener("scroll", onScroll, true);
     };
-  }, [open, onClose, measure, anchorRef, boundaryRef]);
+  }, [open, onClose, measure, anchorRef, boundaryRef, rows]);
 
   if (!open) return null;
 

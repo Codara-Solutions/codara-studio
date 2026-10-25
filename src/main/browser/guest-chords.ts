@@ -49,6 +49,16 @@ export interface ChordRouterOptions {
   clearTimer?: (timer: unknown) => void;
 }
 
+/**
+ * Plain keys the app keeps from a browser page: F11 (full screen) and F12
+ * (DevTools) always, Escape only while the tab is full screen, where it leaves.
+ */
+export function isReservedPlainKey(input: ChordInput, escapeLeavesFullScreen: boolean): boolean {
+  if (input.modifiers.some((mod) => mod === "control" || mod === "alt" || mod === "meta" || mod === "shift")) return false;
+  if (input.key === "F11" || input.key === "F12") return true;
+  return escapeLeavesFullScreen && input.key === "Escape";
+}
+
 /** The decision logic for one guest, kept free of Electron so it can be tested. */
 export function createChordRouter(options: ChordRouterOptions) {
   const setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
@@ -57,6 +67,7 @@ export function createChordRouter(options: ChordRouterOptions) {
   const waiting: Array<{ input: ChordInput; timer: unknown }> = [];
   let reporter = false;
   let agentDepth = 0;
+  let fullScreen = false;
 
   function settle(entry: { input: ChordInput; timer: unknown }, forward: boolean) {
     const index = waiting.indexOf(entry);
@@ -77,10 +88,18 @@ export function createChordRouter(options: ChordRouterOptions) {
     agentKeysEnd() {
       agentDepth = Math.max(0, agentDepth - 1);
     },
+    setFullScreen(on: boolean) {
+      fullScreen = on;
+    },
     keyDown(input: ChordInput) {
       const mods = input.modifiers;
-      if (!input.key || !(mods.includes("control") || mods.includes("alt") || mods.includes("meta"))) return;
-      if (agentDepth > 0) return;
+      if (!input.key || agentDepth > 0) return;
+      // The page still gets these keys; the app hears them as well.
+      if (isReservedPlainKey(input, fullScreen)) {
+        options.forward(input);
+        return;
+      }
+      if (!(mods.includes("control") || mods.includes("alt") || mods.includes("meta"))) return;
       if (!reporter || isReservedChord(input)) {
         options.forward(input);
         return;
@@ -122,6 +141,11 @@ export function forwardGuestChords(contents: WebContents): void {
     if (input.type !== "keyDown") return;
     router.keyDown({ key: input.key, code: input.code, modifiers: input.modifiers ?? [] });
   });
+}
+
+/** While a tab is full screen, Escape typed in its page reaches the app too. */
+export function setGuestFullScreen(wcId: number, on: boolean): void {
+  routers.get(wcId)?.setFullScreen(on);
 }
 
 /** Run an agent's key dispatch on a guest; chords it produces are never forwarded to the app. */

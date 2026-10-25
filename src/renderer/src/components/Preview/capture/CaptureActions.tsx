@@ -4,22 +4,21 @@ import type { CaptureRecordFormat, CaptureRecordingResult } from "@shared/captur
 import AnchoredMenu from "../../chat/composer/AnchoredMenu";
 import { holdPreviewCapturePaint } from "../capturePaint";
 import { CloseIcon } from "../../icons";
-import { DevicesIcon, RecordIcon } from "./icons";
+import { setTabRecording } from "../tabs-memory/browserTabs";
+import { RecordIcon } from "./icons";
 
-// The browser pane's capture controls, shown in the address bar's tools
-// cluster: the responsive view toggle and the record button. The record
-// button records a video by default; its chevron picks a GIF instead (and
-// remembers it). A recording started by an agent on this tab shows here too
-// (the same tab session). The pane also keeps its guest painting while main
-// captures it in the background (src/main/browser/capture/paint.ts).
+// The browser pane's Record tool. Record opens a small choice of Video or GIF
+// (the last one picked is preselected) and starts on Start, so a click never
+// records in a format the user did not see. While recording, the button shows
+// the time and stops. A recording started by an agent on this tab shows here
+// too (the same tab session). The pane also keeps its guest painting while
+// main captures it in the background (src/main/browser/capture/paint.ts).
 
 interface Props {
   url: string;
   visible: boolean;
   tabId?: string;
   workspaceId?: string | null;
-  responsive: boolean;
-  onToggleResponsive: () => void;
   getWebview: () => (HTMLElement & { getWebContentsId?: () => number }) | null;
 }
 
@@ -28,8 +27,8 @@ type PickedFormat = Extract<CaptureRecordFormat, "mp4" | "gif">;
 const FORMAT_KEY = "codara.preview.recordFormat";
 
 const FORMATS: ReadonlyArray<{ format: PickedFormat; label: string; hint: string }> = [
-  { format: "mp4", label: "Record video", hint: "MP4, sharp and smooth, small file" },
-  { format: "gif", label: "Record GIF", hint: "Plays inline in GitHub and chats" },
+  { format: "mp4", label: "Video", hint: "MP4: sharp and smooth, small file. Best for sharing a walkthrough." },
+  { format: "gif", label: "GIF", hint: "Plays inline in GitHub, pull requests and chats. Larger and fewer colors." },
 ];
 
 function storedFormat(): PickedFormat {
@@ -54,9 +53,10 @@ function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, "") : String(err);
 }
 
-export default function CaptureActions({ url, visible, tabId, workspaceId, responsive, onToggleResponsive, getWebview }: Props) {
+export default function CaptureActions({ url, visible, tabId, workspaceId, getWebview }: Props) {
   const keyRef = useRef<string | null>(null);
-  const chevronRef = useRef<HTMLButtonElement | null>(null);
+  const recordRef = useRef<HTMLButtonElement | null>(null);
+  const startRef = useRef<HTMLButtonElement | null>(null);
   const [since, setSince] = useState<number | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const [busy, setBusy] = useState(false);
@@ -65,7 +65,7 @@ export default function CaptureActions({ url, visible, tabId, workspaceId, respo
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
   const [format, setFormat] = useState<PickedFormat>(storedFormat);
-  const [menuOpen, setMenuOpen] = useState(false);
+  const [chooserOpen, setChooserOpen] = useState(false);
   const recording = since !== null;
   const saving = busy && !recording;
 
@@ -184,16 +184,25 @@ export default function CaptureActions({ url, visible, tabId, workspaceId, respo
     }
   };
 
-  const pick = (picked: PickedFormat) => {
-    setMenuOpen(false);
+  const choose = (picked: PickedFormat) => {
     setFormat(picked);
     try {
       window.localStorage.setItem(FORMAT_KEY, picked);
     } catch {
       /* the choice just is not remembered */
     }
-    void toggleRecording(picked);
   };
+
+  // Start takes the focus, so Enter records in the preselected format.
+  useEffect(() => {
+    if (!chooserOpen) return;
+    const raf = window.requestAnimationFrame(() => startRef.current?.focus());
+    return () => window.cancelAnimationFrame(raf);
+  }, [chooserOpen]);
+
+  useEffect(() => {
+    if (tabId) setTabRecording(tabId, recording);
+  }, [recording, tabId]);
 
   const fileAction = async (action: "save" | "copy") => {
     if (!result) return;
@@ -209,98 +218,97 @@ export default function CaptureActions({ url, visible, tabId, workspaceId, respo
 
   const fileName = result ? result.path.split(/[\\/]/).pop() : "";
   const current = FORMATS.find((entry) => entry.format === format) ?? FORMATS[0];
+  const recordLabel = recording ? "Stop recording" : "Record this tab";
   return (
-    <span style={{ position: "relative", display: "inline-flex", alignItems: "center", gap: 2 }}>
+    <span style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
       <button
+        ref={recordRef}
         type="button"
-        className={`spark-icon-btn${responsive ? " is-active" : ""}`}
-        title={responsive ? "Close the responsive view" : "Responsive view: phone, tablet and desktop side by side"}
-        aria-label={responsive ? "Close the responsive view" : "Responsive view"}
-        aria-pressed={responsive}
-        disabled={!url}
-        onClick={onToggleResponsive}
-        style={{ ["--spark-icon-btn-size" as string]: "22px" }}
+        className={`bp-tool${recording ? " is-recording" : ""}`}
+        data-testid="preview-record"
+        data-format={format}
+        title={recording ? "Stop recording and save the file" : `Record this tab as a video or a GIF (last: ${current.label})`}
+        aria-label={recordLabel}
+        aria-pressed={recording}
+        aria-haspopup={recording || saving ? undefined : "dialog"}
+        aria-expanded={recording || saving ? undefined : chooserOpen}
+        disabled={!url || saving}
+        onClick={() => {
+          if (recording) void toggleRecording(format);
+          else setChooserOpen((open) => !open);
+        }}
       >
-        <DevicesIcon size={13} />
-      </button>
-      <span style={{ display: "inline-flex", alignItems: "center" }}>
-        <button
-          type="button"
-          className="spark-icon-btn"
-          data-testid="preview-record"
-          data-format={format}
-          title={recording ? "Stop recording and save the file" : `${current.label} of this tab (${current.hint})`}
-          aria-label={recording ? "Stop recording" : current.label}
-          aria-pressed={recording}
-          disabled={!url || busy}
-          onClick={() => void toggleRecording(format)}
-          style={{
-            ["--spark-icon-btn-size" as string]: "22px",
-            width: recording || saving ? "auto" : undefined,
-            padding: recording || saving ? "0 6px 0 4px" : undefined,
-            gap: 4,
-            color: recording ? "var(--danger)" : undefined,
-          }}
-        >
-          <RecordIcon size={13} active={recording} />
-          {recording ? (
-            <span style={{ fontFamily: "var(--font-mono)", fontSize: 10, fontVariantNumeric: "tabular-nums" }}>
-              {formatElapsed(now - (since ?? now))}
-            </span>
-          ) : saving ? (
-            <span data-testid="preview-record-progress" style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: "var(--muted)", fontVariantNumeric: "tabular-nums" }}>
-              {progress === null ? "saving" : `saving ${Math.round(progress * 100)}%`}
-            </span>
-          ) : null}
-        </button>
-        {recording || saving ? null : (
-          <button
-            ref={chevronRef}
-            type="button"
-            className="spark-icon-btn"
-            data-testid="preview-record-menu"
-            aria-label="Recording format"
-            aria-haspopup="listbox"
-            aria-expanded={menuOpen}
-            title="Record a video or a GIF"
-            disabled={!url}
-            onClick={() => setMenuOpen((open) => !open)}
-            style={{ ["--spark-icon-btn-size" as string]: "14px", fontSize: 9, color: "var(--muted)" }}
-          >
-            ▾
-          </button>
+        <RecordIcon size={13} active={recording} />
+        {recording ? (
+          <>
+            <span className="bp-tool__time">{formatElapsed(now - (since ?? now))}</span>
+            <span className="bp-tool__label">Stop</span>
+          </>
+        ) : saving ? (
+          <span className="bp-tool__time" data-testid="preview-record-progress" style={{ color: "var(--muted)" }}>
+            {progress === null ? "saving" : `saving ${Math.round(progress * 100)}%`}
+          </span>
+        ) : (
+          <span className="bp-tool__label">Record</span>
         )}
-      </span>
+      </button>
       <AnchoredMenu
-        anchorRef={chevronRef}
-        open={menuOpen}
-        onClose={() => setMenuOpen(false)}
-        className="spark-menu"
-        role="listbox"
-        ariaLabel="Recording format"
+        anchorRef={recordRef}
+        open={chooserOpen}
+        onClose={() => setChooserOpen(false)}
+        className="spark-menu bp-menu"
+        role="dialog"
+        ariaLabel="Record this tab"
         placement="below"
         align="end"
       >
-        <div style={{ width: 250 }}>
-          {FORMATS.map((entry) => (
-            <button
-              key={entry.format}
-              type="button"
-              role="option"
-              aria-selected={entry.format === format}
-              className={`spark-menu-item${entry.format === format ? " is-active" : ""}`}
-              onClick={() => pick(entry.format)}
-              style={{ flexDirection: "column", alignItems: "flex-start", gap: 1 }}
-            >
-              <span>{entry.label}</span>
-              <span style={{ fontSize: 11, color: "var(--muted)" }}>{entry.hint}</span>
-            </button>
-          ))}
+        <div className="bp-record" data-testid="preview-record-menu">
+          <div
+            className="spark-segmented"
+            role="radiogroup"
+            aria-label="Recording format"
+            onKeyDown={(event) => {
+              if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+              event.preventDefault();
+              const index = FORMATS.findIndex((entry) => entry.format === format);
+              const next = FORMATS[(index + (event.key === "ArrowRight" ? 1 : FORMATS.length - 1)) % FORMATS.length];
+              choose(next.format);
+              (event.currentTarget.querySelector(`[data-format="${next.format}"]`) as HTMLElement | null)?.focus();
+            }}
+          >
+            {FORMATS.map((entry) => (
+              <button
+                key={entry.format}
+                type="button"
+                role="radio"
+                data-format={entry.format}
+                aria-checked={entry.format === format}
+                tabIndex={entry.format === format ? 0 : -1}
+                className={`spark-segmented-item${entry.format === format ? " is-selected" : ""}`}
+                onClick={() => choose(entry.format)}
+              >
+                {entry.label}
+              </button>
+            ))}
+          </div>
+          <div className="bp-record__hint">{current.hint}</div>
+          <button
+            ref={startRef}
+            type="button"
+            className="bp-record__start"
+            data-testid="preview-record-start"
+            onClick={() => {
+              setChooserOpen(false);
+              void toggleRecording(format);
+            }}
+          >
+            <RecordIcon size={12} /> Start recording
+          </button>
         </div>
       </AnchoredMenu>
       {result || error ? (
         <div
-          className="spark-menu spark-fade-in"
+          className="spark-menu bp-menu spark-fade-in"
           role="status"
           data-testid="preview-record-result"
           style={{ position: "absolute", top: 30, right: -4, zIndex: 50, width: 300, padding: 10, display: "flex", flexDirection: "column", gap: 8 }}

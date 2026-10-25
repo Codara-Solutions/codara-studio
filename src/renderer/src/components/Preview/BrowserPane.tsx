@@ -19,6 +19,18 @@ import CommentOverlay from "./point/CommentOverlay";
 import type { RunInPage } from "./point/pageScripts";
 import "./point/point.css";
 import { GlobeIcon } from "../icons";
+import { MoonIcon } from "../Terminal/AgentSleepControls";
+import { browserFullScreen, setBrowserFullScreen, stepBrowserFullScreen, useBrowserFullScreen } from "./fullScreen";
+import {
+  forgetBrowserTab,
+  isTabAsleep,
+  noteBrowserTab,
+  noteTabPage,
+  noteTabVisible,
+  setTabSnapshot,
+  useBrowserTab,
+  wakeTab,
+} from "./tabs-memory/browserTabs";
 import type { PointInspection } from "@shared/point-format";
 import { formatTabReference } from "@shared/point-format";
 import { useOptionalSelectionRouting } from "../../routing/SelectionRoutingContext";
@@ -156,6 +168,9 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   const [pointNotice, setPointNotice] = useState<string | null>(null);
   const [hostSize, setHostSize] = useState({ width: 0, height: 0 });
   const routing = useOptionalSelectionRouting();
+  const tabRecord = useBrowserTab(tabId);
+  const asleep = Boolean(tabRecord?.asleep);
+  const fullScreen = useBrowserFullScreen(tabId);
 
   // `domReady` mirrored into a ref so the navigation effect below can gate
   // on it without taking it as a dependency (which would re-run that effect
@@ -200,6 +215,8 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   useEffect(() => {
     urlRef.current = url;
   }, [url]);
+  const tabIdRef = useRef(tabId);
+  tabIdRef.current = tabId;
 
   // Cache the inspector preload's file:// URL once at mount and feed it into
   // the webview's `preload` attribute. The path lives on disk under
@@ -239,7 +256,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   // its inspector preload because the URL arrived after creation.
   const preloadReady = inspectorPreloadUrl !== null;
   useEffect(() => {
-    if (!preloadReady) return;
+    if (!preloadReady || asleep) return;
     const host = containerRef.current;
     if (!host) return;
     const initialUrl = urlRef.current;
@@ -325,6 +342,10 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       setCanGoForward(wv.canGoForward?.() ?? false);
       setError(null);
       if (e.url) onUrlChangeRef.current(e.url);
+      if (tabIdRef.current && e.url) noteTabPage(tabIdRef.current, { url: e.url });
+    };
+    const onTitle = (e: { title?: string }) => {
+      if (tabIdRef.current) noteTabPage(tabIdRef.current, { title: e.title ?? "" });
     };
     const onDidNavigateInPage = (e: { url: string; isMainFrame: boolean }) => {
       if (!e.isMainFrame) return;
@@ -377,6 +398,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
     wv.addEventListener("did-navigate-in-page", onDidNavigateInPage);
     wv.addEventListener("did-fail-load", onDidFailLoad);
     wv.addEventListener("render-process-gone", onRenderProcessGone);
+    wv.addEventListener("page-title-updated", onTitle);
 
     return () => {
       // Detach our listeners; intentionally do NOT remove the webview
@@ -387,8 +409,9 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       wv.removeEventListener("did-navigate-in-page", onDidNavigateInPage);
       wv.removeEventListener("did-fail-load", onDidFailLoad);
       wv.removeEventListener("render-process-gone", onRenderProcessGone);
+      wv.removeEventListener("page-title-updated", onTitle);
     };
-  }, [hasUrl, preloadReady, inspectorPreloadUrl]);
+  }, [hasUrl, preloadReady, inspectorPreloadUrl, asleep]);
 
   // ── Navigate when the parent's `url` prop changes. Kept separate from
   // the create-once effect so readiness (tracked via domReadyRef, not a
@@ -563,6 +586,100 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
     [currentUrl, getLiveWebview, routing, tabId],
   );
 
+  // The tabs and memory view knows every tab, whether it is on screen and,
+  // through these, when it was last seen.
+  const isolated = isFreshPartition(partition);
+  useEffect(() => {
+    if (!tabId) return;
+    noteBrowserTab(tabId, { workspaceId, url: urlRef.current, isolated });
+  }, [isolated, tabId, workspaceId]);
+  useEffect(() => {
+    if (!tabId) return;
+    return () => forgetBrowserTab(tabId);
+  }, [tabId]);
+  useEffect(() => {
+    if (tabId) noteTabVisible(tabId, visible);
+  }, [tabId, visible]);
+
+  // A sleeping tab loads again as soon as it is on screen, as a discarded
+  // tab does in a browser.
+  useEffect(() => {
+    if (tabId && visible && asleep) wakeTab(tabId);
+  }, [asleep, tabId, visible]);
+
+  // Going to sleep: keep a small picture of the page, then remove the
+  // webview, which ends its renderer process. Waking re-creates it (the
+  // create effect above) at the tab's current URL.
+  useEffect(() => {
+    if (!asleep || !tabId) return;
+    const wv = webviewRef.current;
+    if (!wv) return;
+    let cancelled = false;
+    void (async () => {
+      const picture = await Promise.race([
+        capturePage().then(shrinkSnapshot).catch(() => null),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 1500)),
+      ]);
+      if (cancelled || !isTabAsleep(tabId)) return;
+      if (picture) setTabSnapshot(tabId, picture);
+      if (webviewRef.current === wv) webviewRef.current = null;
+      domReadyRef.current = false;
+      setDomReady(false);
+      setCanGoBack(false);
+      setCanGoForward(false);
+      setPointMode(null);
+      setResponsive(false);
+      wv.remove();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [asleep, capturePage, tabId]);
+
+  // Full screen. Esc leaves (a page's own use of Esc does not stop it), F11
+  // steps to the whole display and back; a tab that leaves the screen leaves
+  // full screen too.
+  const fullScreenOn = fullScreen !== "off";
+  useEffect(() => {
+    if (!fullScreenOn || !tabId) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+      setBrowserFullScreen(tabId, "off");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [fullScreenOn, tabId]);
+  useEffect(() => {
+    if (!tabId || visible) return;
+    if (fullScreenOn) setBrowserFullScreen(tabId, "off");
+  }, [fullScreenOn, tabId, visible]);
+  useEffect(() => {
+    if (!tabId) return;
+    return () => {
+      if (browserFullScreen().tabId === tabId) setBrowserFullScreen(tabId, "off");
+    };
+  }, [tabId]);
+
+  // F11 and F12 from the shortcut table name the tab they are for.
+  useEffect(() => {
+    if (!tabId) return;
+    const onAction = (event: Event) => {
+      const detail = (event as CustomEvent<{ tabId?: string; action?: string }>).detail;
+      if (detail?.tabId !== tabId) return;
+      if (detail.action === "fullScreen") stepBrowserFullScreen(tabId, "F11");
+      if (detail.action === "devTools") {
+        try {
+          getLiveWebview()?.openDevTools?.();
+        } catch {
+          /* not dom-ready */
+        }
+      }
+    };
+    window.addEventListener("spark:browser-action", onAction);
+    return () => window.removeEventListener("spark:browser-action", onAction);
+  }, [getLiveWebview, tabId]);
+
   useImperativeHandle(
     ref,
     (): BrowserPaneHandle => ({
@@ -687,6 +804,16 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         pointing={pointMode === "pick" || pointMode === "compose"}
         commenting={pointMode === "comment"}
         tabId={tabId ?? null}
+        workspaceId={workspaceId}
+        responsive={responsive}
+        fullScreen={fullScreen !== "off"}
+        onToggleResponsive={() => {
+          if (!responsive) stopPointing();
+          setResponsive(!responsive);
+        }}
+        onToggleFullScreen={() => {
+          if (tabId) stepBrowserFullScreen(tabId, "button");
+        }}
         onSubmit={(next) => {
           if (!next) return;
           const wv = getLiveWebview();
@@ -728,17 +855,12 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         onTogglePoint={() => startPointing("pick")}
         onToggleComment={() => startPointing("comment")}
         onCopyTabId={(detail) => void copyTabReference(detail)}
-        captureTools={
+        recordTool={
           <CaptureActions
-            url={currentUrl || url}
+            url={asleep ? "" : currentUrl || url}
             visible={visible}
             tabId={tabId}
             workspaceId={workspaceId}
-            responsive={responsive}
-            onToggleResponsive={() => {
-              if (!responsive) stopPointing();
-              setResponsive(!responsive);
-            }}
             getWebview={getLiveWebview}
           />
         }
@@ -822,7 +944,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         }}
       >
         {!url ? <EmptyState onFocusAddress={() => addressRef.current?.focus()} /> : null}
-        {url && !domReady && !error ? (
+        {url && !domReady && !error && !asleep ? (
           <>
             {/* Safari-style loading hairline: a 2px accent bar pinned to the
                 top seam of the webview, shimmering left-to-right while the page
@@ -870,6 +992,14 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
             </div>
           </>
         ) : null}
+        {asleep && tabId ? (
+          <SleepingView
+            snapshot={tabRecord?.snapshot ?? null}
+            title={tabRecord?.title || currentUrl || url}
+            onWake={() => wakeTab(tabId)}
+          />
+        ) : null}
+        {fullScreen !== "off" ? <FullScreenHint mode={fullScreen} /> : null}
         <AgentPresence tabId={tabId} visible={visible} pageRef={webviewRef} />
         <PageDialogOverlay tabId={tabId} />
         {responsive && visible && url ? (
@@ -938,6 +1068,63 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   );
 });
 
+// A small JPEG of the page for its sleeping view: the full capture is a
+// device-pixel PNG, kept in memory for as long as the tab sleeps.
+async function shrinkSnapshot(dataUrl: string): Promise<string | null> {
+  const image = new Image();
+  image.src = dataUrl;
+  await image.decode();
+  const scale = Math.min(1, 960 / Math.max(1, image.naturalWidth));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const context = canvas.getContext("2d");
+  if (!context) return null;
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.72);
+}
+
+function SleepingView({ snapshot, title, onWake }: { snapshot: string | null; title: string; onWake: () => void }) {
+  return (
+    <div className="bp-asleep" data-testid="preview-asleep" onClick={onWake}>
+      {snapshot ? <img className="bp-asleep__picture" src={snapshot} alt="" /> : null}
+      <div className="bp-asleep__card">
+        <span className="bp-asleep__title">
+          <MoonIcon size={13} /> This tab is asleep
+        </span>
+        <span>
+          Its page was closed to free memory. {title ? <>Wake it to load <strong>{title}</strong> again.</> : "Wake it to load the page again."}
+        </span>
+        <button type="button" className="spark-btn" onClick={onWake}>
+          Wake
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function FullScreenHint({ mode }: { mode: "window" | "display" }) {
+  const [gone, setGone] = useState(false);
+  useEffect(() => {
+    setGone(false);
+    const timer = setTimeout(() => setGone(true), 3500);
+    return () => clearTimeout(timer);
+  }, [mode]);
+  return (
+    <div className={`bp-fs-hint${gone ? " is-gone" : ""}`} role="status" data-testid="preview-fullscreen-hint">
+      {mode === "window" ? (
+        <>
+          Full screen · <span className="spark-kbd">Esc</span> to leave · <span className="spark-kbd">F11</span> for the whole display
+        </>
+      ) : (
+        <>
+          <span className="spark-kbd">Esc</span> to leave full screen
+        </>
+      )}
+    </div>
+  );
+}
+
 function EmptyState({ onFocusAddress }: { onFocusAddress: () => void }) {
   return (
     <div
@@ -984,8 +1171,8 @@ function EmptyState({ onFocusAddress }: { onFocusAddress: () => void }) {
         </div>
       </div>
       <div className="spark-empty__body" style={{ maxWidth: 360 }}>
-        Type a URL or pick a dev-server port. Detected URLs from your terminal
-        auto-open a browser tab here.
+        Type a URL, or a port such as 3000 for a local server. Links your
+        terminals print open in a browser tab here.
       </div>
       <button
         type="button"

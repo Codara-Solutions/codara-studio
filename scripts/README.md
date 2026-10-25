@@ -344,6 +344,18 @@ Stop refuses its next calls until Undo. Run it with
 `CODARA_PRESENCE_VIDEO=1` to film the glide and take stills from the private
 X display with `ffmpeg` into `test-results/agent-presence/`.
 
+The browser pane's toolbar and tabs view (`components/Preview/toolbar/`,
+`components/Preview/tabs-memory/`): `test-browser-pane` checks when a tab may
+sleep and why not (on screen, recording, an agent in the last ten minutes,
+its own session), which tabs the 30 minute rule picks, the memory and "asleep
+for" texts, the full screen steps of the button, F11 and Esc, and the address
+bar's short forms (`5173`, `:3000/admin`). `tests/e2e/browser-pane-toolbar.spec.ts`
+drives the built app: labelled tools, the More menu by keyboard, the Video or
+GIF chooser, the tabs view with real memory, sleep and wake by hand and by an
+agent call, auto-sleep after half an hour, full screen in the window and on
+the display, Esc from the page, and the narrow toolbar. It saves screenshots
+in both themes to `test-results/browser-pane/`.
+
 What agents do on a page: `test-preview-key-chords` (chord notation, the case
 and codes of chord keys, and which of the user's chords stay in the page),
 `test-preview-waits` (codara_preview_wait_for: url, navigation, load,
