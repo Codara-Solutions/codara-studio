@@ -273,7 +273,7 @@ export default function AnchoredMenu({
       const menu = menuRef.current;
       if (!menu) return;
       const selected = menu.querySelector<HTMLElement>('[role="option"][aria-selected="true"]');
-      (selected ?? menu.querySelector<HTMLElement>(rows))?.focus();
+      (selected ?? menu.querySelector<HTMLElement>(enabledRows(rows)))?.focus();
     });
     return () => window.cancelAnimationFrame(raf);
   }, [open, focusSignal, rows]);

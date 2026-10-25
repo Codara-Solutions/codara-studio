@@ -4,6 +4,7 @@ import AnchoredMenu from "../../chat/composer/AnchoredMenu";
 import { DevToolsIcon, ExternalLinkIcon } from "../../icons";
 import { DevicesIcon } from "../capture/icons";
 import { CheckIcon, CopyIcon, FullScreenIcon, MoreIcon } from "./icons";
+import { BROWSER_MENU_Z } from "../fullScreen";
 
 // The tools used now and then, behind one More button: the sizes view and
 // full screen, the ways to hand the tab to an agent or another browser, and
@@ -91,6 +92,7 @@ export default function MoreMenu({
         <span className="bp-tool__label">More</span>
       </button>
       <AnchoredMenu
+        zIndex={BROWSER_MENU_Z}
         anchorRef={anchorRef}
         open={open}
         onClose={() => setOpen(false)}

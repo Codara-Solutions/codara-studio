@@ -16,7 +16,7 @@ import { snapshotProbe } from "./domSnapshot";
 import { clickProbe, locateProbe, typeProbe, pressKeyProbe } from "./domActions";
 import { assertDriverAllowed, moveAgentCursor, noteDriving, readDriver, type Box, type CursorMove } from "./agent-presence/store";
 import { closeIsolatedTab, openIsolatedTab } from "./isolatedTabs";
-import { isTabAsleep, wakeTab } from "./tabs-memory/browserTabs";
+import { isTabAsleep, takeWakeUrl, wakeTab } from "./tabs-memory/browserTabs";
 import { closePageDialog, showPageDialog, type PageDialogView } from "./pageDialogs";
 import {
   closePreviewTab,
@@ -111,7 +111,8 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
       return { tabs: listPreviewTabs(readString(req.params, "workspaceId"), readString(req.params, "callerPaneId")) };
     case "activity": {
       // Answers once the cursor arrived, so main sends its input after the glide.
-      const tab = await requireTab(req.params);
+      // The call that follows wakes a sleeping tab, at the URL it names.
+      const tab = await requireTab(req.params, { wake: false });
       const point = typeof req.params.x === "number" && typeof req.params.y === "number" ? { x: req.params.x, y: req.params.y } : undefined;
       await moveAgentCursor(tab.id, readDriver(req.params.driver), {
         action: readString(req.params, "action") ?? "Working",
@@ -169,7 +170,7 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
 // ever lands on a tab that run opened. An agent with no run is scoped to the
 // workspace of the pane it runs in (params.callerPaneId, resolved by main). An
 // explicit tabId is still honored inside that workspace.
-async function requireTab(params: Record<string, unknown>) {
+async function requireTab(params: Record<string, unknown>, { wake = true, wakeUrl }: { wake?: boolean; wakeUrl?: string } = {}) {
   const runId = typeof params.runId === "string" && params.runId ? params.runId : null;
   let tab = pickPreviewTab(
     readString(params, "tabId"),
@@ -192,19 +193,31 @@ async function requireTab(params: Record<string, unknown>) {
   assertDriverAllowed(tab.id, driver);
   noteDriving(tab.id, driver);
   actedTabs.set(params, tab.id);
-  tab = await wakeForAgent(tab);
+  if (wake) tab = await wakeForAgent(tab, wakeUrl);
   return tab;
 }
 
 // A sleeping tab has no page; an agent's call loads it again first and then
 // acts on the woken page (the pane re-registers its handle while waking).
-async function wakeForAgent<T extends { id: string; handle: { isReady: () => boolean } }>(tab: T): Promise<T> {
+// Tabs a navigate's tab lookup woke at the URL it names, so the navigate
+// itself does not load that URL a second time.
+const wokeAt = new Map<string, { url: string; at: number }>();
+
+async function wakeForAgent<T extends { id: string; handle: { isReady: () => boolean; loadURL: (url: string) => void } }>(tab: T, url?: string): Promise<T> {
   if (!isTabAsleep(tab.id)) return tab;
-  wakeTab(tab.id);
+  wakeTab(tab.id, url);
   const started = Date.now();
   for (;;) {
     const current = (pickPreviewTab(tab.id, null, (tab as { workspaceId?: string | null }).workspaceId ?? null) as T | null) ?? tab;
-    if (current.handle.isReady()) return current;
+    if (current.handle.isReady()) {
+      if (url) {
+        // An untaken wake URL means the tab kept its old page (woken while
+        // its picture was still being taken).
+        if (takeWakeUrl(tab.id)) current.handle.loadURL(url);
+        wokeAt.set(tab.id, { url, at: Date.now() });
+      }
+      return current;
+    }
     if (Date.now() - started > 15_000) throw new Error("timed out waking the sleeping browser tab");
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
@@ -319,8 +332,10 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
   // requests twice and records the first load's as never finished.
   noteDriving(tab.id, driver, "Navigating");
   if (!opened) {
-    tab = await wakeForAgent(tab);
-    tab.handle.loadURL(url);
+    tab = await wakeForAgent(tab, url);
+    const woke = wokeAt.get(tab.id);
+    wokeAt.delete(tab.id);
+    if (!(woke && woke.url === url && Date.now() - woke.at < 30_000)) tab.handle.loadURL(url);
   }
   await waitDomReady(tab.handle, 15_000);
   joined ??= tabGroupNameOf(tab.id);
@@ -478,7 +493,7 @@ const METRICS_TIMEOUT_MS = 400;
 // picked tab's guest webContents id plus viewport metrics so trusted-input
 // coordinates can be mapped against capturePage screenshots.
 async function getWebContentsId(params: Record<string, unknown>): Promise<unknown> {
-  const tab = await requireTab(params);
+  const tab = await requireTab(params, { wakeUrl: readString(params, "wakeUrl") ?? undefined });
   // Keyboard dispatch needs the embedder iframe focused as well as its guest field.
   if (params.focus === true) tab.handle.focusContent();
   const webContentsId = tab.handle.getWebContentsId();

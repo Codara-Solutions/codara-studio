@@ -288,6 +288,8 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
                   e.preventDefault();
                   setDraft(url);
                   inputRef.current?.blur();
+                  // Handled here, so the pane's own Esc listener skips it.
+                  if (fullScreen) onToggleFullScreen();
                 }
               }}
               placeholder="http://localhost:3000"

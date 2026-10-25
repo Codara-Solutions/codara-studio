@@ -4,6 +4,7 @@ import type { DevServerStatus } from "@shared/servers";
 import AnchoredMenu from "../../chat/composer/AnchoredMenu";
 import { serverForUrl, serverUrl } from "./address";
 import { ChevronDownIcon } from "./icons";
+import { BROWSER_MENU_Z } from "../fullScreen";
 
 // The dev servers this workspace runs, at the left end of the address pill.
 // It names the server the tab shows, and its menu opens any other one. It
@@ -70,6 +71,7 @@ export default function ServerChip({ workspaceId, url, onOpen }: Props) {
         <ChevronDownIcon />
       </button>
       <AnchoredMenu
+        zIndex={BROWSER_MENU_Z}
         anchorRef={anchorRef}
         open={open}
         onClose={() => setOpen(false)}

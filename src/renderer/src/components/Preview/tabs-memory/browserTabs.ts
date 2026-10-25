@@ -90,6 +90,7 @@ export function noteBrowserTab(id: string, input: { workspaceId: string | null; 
 }
 
 export function forgetBrowserTab(id: string): void {
+  wakeUrls.delete(id);
   if (records.delete(id)) emit();
 }
 
@@ -144,10 +145,21 @@ export function sleepTab(id: string): boolean {
   return true;
 }
 
-export function wakeTab(id: string): void {
+// The URL an agent navigates a sleeping tab to, so it wakes there instead of
+// loading its old page first.
+const wakeUrls = new Map<string, string>();
+
+export function wakeTab(id: string, url?: string): void {
   const record = records.get(id);
   if (!record?.asleep) return;
+  if (url) wakeUrls.set(id, url);
   patch(id, { asleep: false, asleepAt: null, lastSeenAt: Date.now() });
+}
+
+export function takeWakeUrl(id: string): string | null {
+  const url = wakeUrls.get(id) ?? null;
+  wakeUrls.delete(id);
+  return url;
 }
 
 export function setTabSnapshot(id: string, snapshot: string | null): void {
@@ -219,8 +231,8 @@ async function readMemory(): Promise<void> {
   if (!read) return;
   try {
     const reading = await read();
+    let changed = appMemoryBytes !== reading.appBytes;
     appMemoryBytes = reading.appBytes;
-    let changed = false;
     for (const record of records.values()) {
       const bytes = record.asleep ? null : reading.tabs[record.id] ?? null;
       if (record.memoryBytes !== bytes) {
@@ -229,10 +241,6 @@ async function readMemory(): Promise<void> {
       }
     }
     if (changed) emit();
-    else {
-      version += 1;
-      for (const listener of listeners) listener();
-    }
   } catch {
     /* the readout stays at its last value */
   }

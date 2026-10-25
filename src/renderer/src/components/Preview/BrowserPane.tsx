@@ -28,6 +28,7 @@ import {
   noteTabPage,
   noteTabVisible,
   setTabSnapshot,
+  takeWakeUrl,
   useBrowserTab,
   wakeTab,
 } from "./tabs-memory/browserTabs";
@@ -259,8 +260,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
     if (!preloadReady || asleep) return;
     const host = containerRef.current;
     if (!host) return;
-    const initialUrl = urlRef.current;
-    if (!initialUrl) return; // empty url -> empty state, do not create the element
+    if (!urlRef.current) return; // empty url -> empty state, do not create the element
 
     // Reuse the existing element if it's still attached to *this* host. If
     // React unmounted+remounted us (StrictMode dev cycle, or tab close+
@@ -277,6 +277,17 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
     }
 
     if (!webview) {
+      // Taken only when a new page is made: a tab woken before its old page
+      // was removed keeps that page, and the agent's navigate loads the URL.
+      const wakeUrl = tabIdRef.current ? takeWakeUrl(tabIdRef.current) : null;
+      // The tab's url follows at once, or a later run of this effect or the
+      // url effect below would load the old page back.
+      if (wakeUrl) {
+        urlRef.current = wakeUrl;
+        onUrlChangeRef.current(wakeUrl);
+      }
+      const initialUrl = wakeUrl ?? urlRef.current;
+      if (!initialUrl) return; // empty url -> empty state, do not create the element
       webview = document.createElement("webview") as WebviewElement;
       // Sandboxed safety: keep contextIsolation on for the embedded site.
       // backgroundThrottling=no keeps timers, animations, and websocket
@@ -616,10 +627,9 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
     if (!wv) return;
     let cancelled = false;
     void (async () => {
-      const picture = await Promise.race([
-        capturePage().then(shrinkSnapshot).catch(() => null),
-        new Promise<null>((resolve) => setTimeout(() => resolve(null), 1500)),
-      ]);
+      // Removing the webview while capturePage still runs on it fails in
+      // the guest view manager; the capture has its own time limit.
+      const picture = await capturePage().then(shrinkSnapshot).catch(() => null);
       if (cancelled || !isTabAsleep(tabId)) return;
       if (picture) setTabSnapshot(tabId, picture);
       if (webviewRef.current === wv) webviewRef.current = null;

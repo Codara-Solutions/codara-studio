@@ -6,6 +6,7 @@ import { holdPreviewCapturePaint } from "../capturePaint";
 import { CloseIcon } from "../../icons";
 import { setTabRecording } from "../tabs-memory/browserTabs";
 import { RecordIcon } from "./icons";
+import { BROWSER_MENU_Z } from "../fullScreen";
 
 // The browser pane's Record tool. Record opens a small choice of Video or GIF
 // (the last one picked is preselected) and starts on Start, so a click never
@@ -253,6 +254,7 @@ export default function CaptureActions({ url, visible, tabId, workspaceId, getWe
         )}
       </button>
       <AnchoredMenu
+        zIndex={BROWSER_MENU_Z}
         anchorRef={recordRef}
         open={chooserOpen}
         onClose={() => setChooserOpen(false)}

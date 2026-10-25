@@ -133,6 +133,9 @@ async function dispatchPreviewTool(
     throw error;
   }
   if (ref?.kind === "preview") params.tabId = ref.tabId;
+  // Every lookup of the tab in this call, the dialog guard's first, wakes a
+  // sleeping Codara tab at the URL a navigate names rather than its old page.
+  if (ref?.kind !== "chrome" && method === "preview.navigate" && typeof params.url === "string") params.wakeUrl = params.url;
   // A page dialog must never leave the call hanging (browser/dialog-guard.ts).
   if (ref?.kind !== "chrome") return guardPageDialogs(method, params, () => entry.run(params, method, host));
   if (!(await host.mayUseUserBrowser(params))) {

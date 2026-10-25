@@ -56,6 +56,10 @@ export async function readBrowserTabMemory(): Promise<BrowserTabMemory> {
   return { tabs, appBytes };
 }
 
+// Windows that "display" put in full screen. Leaving undoes only that, never
+// a full screen the user chose for the window before.
+const displayWindows = new Set<number>();
+
 export function registerPreviewTabsIpc(handle: IpcHandle): void {
   handle("preview-bridge:tab-memory", async (): Promise<BrowserTabMemory> => readBrowserTabMemory());
   handle("preview-bridge:full-screen", async (event, request: BrowserFullScreenRequest): Promise<boolean> => {
@@ -66,7 +70,16 @@ export function registerPreviewTabsIpc(handle: IpcHandle): void {
       setGuestFullScreen(wcId, mode !== "off" && id === tabId);
     }
     const win = BrowserWindow.fromWebContents(event.sender);
-    if (win && win.isFullScreen() !== (mode === "display")) win.setFullScreen(mode === "display");
+    if (win && mode === "display") {
+      if (!win.isFullScreen()) {
+        const id = win.id;
+        displayWindows.add(id);
+        win.once("leave-full-screen", () => displayWindows.delete(id));
+        win.setFullScreen(true);
+      }
+    } else if (win && displayWindows.delete(win.id) && win.isFullScreen()) {
+      win.setFullScreen(false);
+    }
     return win?.isFullScreen() ?? false;
   });
 }

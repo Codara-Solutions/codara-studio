@@ -23,6 +23,7 @@ import {
   type BrowserTabRecord,
 } from "./browserTabs";
 import { AGENT_ACTIVE_MS, formatAsleepFor, formatMemory, shortUrl, sleepBlockerText } from "./sleepPolicy";
+import { BROWSER_MENU_Z } from "../fullScreen";
 
 // The toolbar's "7 · 348 MB" chip and the view it opens: every browser tab in
 // every workspace with the memory its page uses, a way to put it to sleep or
@@ -109,6 +110,7 @@ export default function TabsChip({ tabId, workspaceId }: Props) {
         ) : null}
       </button>
       <AnchoredMenu
+        zIndex={BROWSER_MENU_Z}
         anchorRef={anchorRef}
         open={open}
         onClose={() => setOpen(false)}

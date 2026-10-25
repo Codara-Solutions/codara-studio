@@ -137,8 +137,11 @@ export function forwardGuestChords(contents: WebContents): void {
     router.dispose();
     if (routers.get(wcId) === router) routers.delete(wcId);
   });
-  contents.on("before-input-event", (_event, input) => {
+  contents.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown") return;
+    // F11 is the browser pane's full screen, forwarded below. Unhandled, it
+    // would also reach Electron's default menu and full screen the window.
+    if (input.key === "F11") event.preventDefault();
     router.keyDown({ key: input.key, code: input.code, modifiers: input.modifiers ?? [] });
   });
 }

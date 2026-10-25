@@ -312,6 +312,53 @@ test("the browser pane's toolbar, menus, tabs and memory view, sleeping tabs and
     await expect(wrapper).not.toHaveClass(/bp-fullscreen/);
     await page.locator(`[data-tab-id="${current}"][role="tab"]`).click();
 
+    // A menu opened in full screen sits above the page.
+    await fullButton.click();
+    await expect(wrapper).toHaveClass(/bp-fullscreen/);
+    await toolbar.getByRole("button", { name: "More browser tools" }).click();
+    const devTools = page.getByRole("menuitem", { name: /^Developer tools/ });
+    await expect(devTools).toBeVisible();
+    expect(await devTools.evaluate((item) => {
+      const box = item.getBoundingClientRect();
+      return item.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+    })).toBe(true);
+    await page.keyboard.press("Escape");
+    await expect(devTools).toHaveCount(0);
+    await expect(wrapper).toHaveClass(/bp-fullscreen/);
+
+    // Esc in the address bar leaves on the first press.
+    await wrapper.getByPlaceholder("http://localhost:3000").click();
+    await page.keyboard.press("Escape");
+    await expect(wrapper).not.toHaveClass(/bp-fullscreen/);
+
+    // F11 typed in the page fills the window only, not the display as well.
+    await app.evaluate(({ webContents }, title) => {
+      const guest = webContents.getAllWebContents().find((wc) => wc.getType() === "webview" && wc.getTitle() === title);
+      guest?.focus();
+      guest?.sendInputEvent({ type: "keyDown", keyCode: "F11" });
+      guest?.sendInputEvent({ type: "keyUp", keyCode: "F11" });
+    }, "Acme dashboard");
+    await expect(wrapper).toHaveClass(/bp-fullscreen/);
+    await page.waitForTimeout(500);
+    expect(await windowFull()).toBe(false);
+    await fullButton.click();
+    await expect(wrapper).not.toHaveClass(/bp-fullscreen/);
+
+    // A window the user put in full screen stays there after the display step.
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setFullScreen(true));
+    await expect.poll(windowFull).toBe(true);
+    await fullButton.click();
+    await toolbar.click({ position: { x: 600, y: 4 } });
+    await page.keyboard.press("F11");
+    await expect(page.getByTestId("preview-fullscreen-hint")).toHaveText("Esc to leave full screen");
+    await page.keyboard.press("Escape");
+    await expect(wrapper).not.toHaveClass(/bp-fullscreen/);
+    await page.waitForTimeout(500);
+    expect(await windowFull()).toBe(true);
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setFullScreen(false));
+    await expect.poll(windowFull).toBe(false);
+    await page.setViewportSize({ width: 1400, height: 900 });
+
     // A narrow pane drops the words and keeps every tool.
     // The pane fills the window here, so narrow the pane itself, as a split would.
     await toolbar.evaluate((el) => {
@@ -355,6 +402,13 @@ test("the browser pane's toolbar, menus, tabs and memory view, sleeping tabs and
     await expect(pane(page, second).locator("webview")).toHaveCount(0, { timeout: 10_000 });
     await expect(pane(page, first).locator("webview")).toHaveCount(1);
     await expect(pane(page, current).locator("webview")).toHaveCount(1);
+
+    // An agent navigating a sleeping tab wakes it at the new address directly.
+    const moved = (await request("preview.navigate", { tabId: second, url: `${fixture.url}docs` })) as { url: string };
+    expect(moved.url).toBe(`${fixture.url}docs`);
+    await expect(pane(page, second).locator("webview")).toHaveCount(1);
+    await page.waitForTimeout(1_000);
+    expect(await pageTitle(page, second)).toBe("Acme docs");
   } finally {
     await fixture.close();
   }

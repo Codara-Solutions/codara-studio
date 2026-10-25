@@ -49,3 +49,6 @@ export function useBrowserFullScreen(tabId: string | undefined): FullScreenMode 
 export function useAnyBrowserFullScreen(): State {
   return useSyncExternalStore(subscribe, read, read);
 }
+
+/** Menus opened from the toolbar stack above a full screen pane (`.bp-fullscreen`, z-index 95). */
+export const BROWSER_MENU_Z = 100;
