@@ -424,7 +424,8 @@ the same way.
 #### Agents on SSH machines
 
 With the **Keep agents running on SSH machines** setting on (the
-`machinesEnabled` preference, off by default while Machines is in preview),
+`machinesEnabled` preference, on by default; only a choice the user made,
+recorded as `machinesEnabledChosen`, turns it off),
 an agent pane in an SSH workspace (Claude Code, Codex, Grok or Pi) runs inside
 tmux on the machine instead of directly in the SSH shell. The agent then
 keeps working when Studio quits or the network drops.

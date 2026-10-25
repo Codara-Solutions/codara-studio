@@ -171,6 +171,44 @@ test("a machine your known_hosts lists connects without asking", async () => {
   }
 });
 
+test("with no SSH machines, Machines on by default changes nothing you would notice", async () => {
+  test.setTimeout(90_000);
+  const root = await mkdtemp(join(tmpdir(), "codara-machines-none-e2e-"));
+  const local = { root, userDataDir: join(root, "user-data"), home: join(root, "home"), project: join(root, "project") };
+  for (const dir of [local.userDataDir, local.home, local.project]) await mkdir(dir, { recursive: true });
+  await writeFile(
+    join(local.userDataDir, "spark-state.json"),
+    JSON.stringify({
+      workspaces: [{ id: "ws-local", name: "project", cwd: local.project, color: "#34D3C3", workers: [] }],
+      activeWorkspaceId: "ws-local",
+    }),
+  );
+  let app: ElectronApplication | null = null;
+  try {
+    // No preference file and no hosts: a fresh install, or an update.
+    app = await launch({ ...local, host: null as unknown as SshTestHost });
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await page.getByRole("tab", { name: /terminals/i }).first().click();
+    await page.getByTitle("Add pane…").first().click();
+    await expect(page.getByRole("menuitem", { name: /Claude worker/i })).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByRole("radiogroup", { name: "Where" })).toHaveCount(0);
+    await expect(page.getByRole("menuitem", { name: /Claude worker/i })).not.toContainText(/\son\s/);
+    await page.keyboard.press("Escape");
+
+    await openMachines(page);
+    await expect(page.getByRole("switch", { name: /Keep agents running on SSH machines/ })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await expect(page.locator("[data-machine-id]")).toHaveCount(1);
+    await expect(page.locator('[data-machine-id="local"]')).toBeVisible();
+  } finally {
+    await app?.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true }).catch(() => undefined);
+  }
+});
+
 async function openMachines(page: Page): Promise<void> {
   await page.evaluate(() =>
     window.dispatchEvent(new CustomEvent("spark:open-settings", { detail: { section: "machines" } })),
@@ -240,7 +278,7 @@ async function prepare({
       activeWorkspaceId: "ws-local",
     }),
   );
-  await writeFile(join(userDataDir, "spark-preferences.json"), JSON.stringify({ machinesEnabled: true }));
+  // No preference file: Machines is on by default.
   return { root, userDataDir, home, project, host };
 }
 

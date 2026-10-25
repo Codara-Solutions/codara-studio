@@ -5,7 +5,7 @@ import { shQuote } from "./connections";
 // Agent CLIs on an SSH machine (Machines, phase 1; docs/machines-plan.md).
 //
 // An agent started in a remote workspace runs the machine's own CLI with the
-// machine's own sign-in. With the `machinesEnabled` preference on, it runs
+// machine's own sign-in. With the `machinesEnabled` preference on (the default), it runs
 // inside a tmux session on a private tmux server (`tmux -L codara`), one
 // session per pane, so the agent keeps working when Studio quits, the laptop
 // sleeps or the connection drops. Opening the pane again attaches to the

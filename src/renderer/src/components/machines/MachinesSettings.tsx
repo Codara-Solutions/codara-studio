@@ -66,7 +66,7 @@ export default function MachinesSettings({ onClose }: { onClose?: () => void }) 
         {hydrated ? (
           <ToggleRow
             title="Keep agents running on SSH machines"
-            desc="Claude Code, Codex, Grok or Pi started on an SSH machine runs in tmux there, with the machine's own install and sign-in. It keeps working when Codara quits or loses the connection, and its pane attaches to it again when it reopens. Closing the pane stops it. Codara also asks you to confirm a machine's key before it connects the first time. Needs tmux on the machine. Preview."
+            desc="Claude Code, Codex, Grok or Pi started on an SSH machine runs in tmux there, with the machine's own install and sign-in. It keeps working when Codara quits or loses the connection, and its pane attaches to it again when it reopens. Closing the pane stops it. Codara also asks you to confirm a machine's key before it connects the first time. Needs tmux 2.1 or newer on the machine."
             {...bindToggle("machinesEnabled", preferences, setPreference)}
           />
         ) : null}

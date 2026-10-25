@@ -14,6 +14,25 @@ export interface WhereChoice {
   hostId: string | null;
 }
 
+/**
+ * The Where row's choices from the saved hosts and their statuses: empty
+ * (no row) unless some other machine is connected now.
+ */
+export function whereChoicesFrom(
+  hosts: readonly { id: string }[],
+  statuses: readonly ({ state: string } | undefined)[],
+  paneCwd: string | undefined,
+): WhereChoice[] {
+  const current = paneCwd ? (parseRemotePath(paneCwd)?.hostId ?? null) : null;
+  const next: WhereChoice[] = [{ id: "here", label: current ?? "This computer", hostId: current }];
+  hosts.forEach((host, index) => {
+    if (host.id !== current && statuses[index]?.state === "connected") {
+      next.push({ id: host.id, label: host.id, hostId: host.id });
+    }
+  });
+  return next.length > 1 ? next : [];
+}
+
 export function useWhereChoices(paneCwd: string | undefined): WhereChoice[] {
   const [choices, setChoices] = useState<WhereChoice[]>([]);
   useEffect(() => {
@@ -21,16 +40,10 @@ export function useWhereChoices(paneCwd: string | undefined): WhereChoice[] {
     void (async () => {
       const preferences = await window.spark.preferences.load();
       if (!preferences.machinesEnabled) return;
+      // Two local files (~/.ssh/config and Codara's own list): no network.
       const hosts = await window.spark.remote.listHosts();
       const statuses = await Promise.all(hosts.map((host) => window.spark.remote.status(host.id)));
-      const current = paneCwd ? (parseRemotePath(paneCwd)?.hostId ?? null) : null;
-      const next: WhereChoice[] = [{ id: "here", label: current ?? "This computer", hostId: current }];
-      hosts.forEach((host, index) => {
-        if (host.id !== current && statuses[index]?.state === "connected") {
-          next.push({ id: host.id, label: host.id, hostId: host.id });
-        }
-      });
-      if (alive) setChoices(next.length > 1 ? next : []);
+      if (alive) setChoices(whereChoicesFrom(hosts, statuses, paneCwd));
     })().catch(() => undefined);
     return () => {
       alive = false;
