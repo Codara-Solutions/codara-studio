@@ -164,9 +164,11 @@ assert.match(modelThinkingPicker, /Choose thinking depth/);
 
 // ── Keyboard navigation inside an opened menu ──────────────────────────────
 assert.match(anchored, /\["ArrowDown", "ArrowUp", "Home", "End"\]\.includes\(event\.key\)/);
-assert.match(anchored, /querySelectorAll<HTMLElement>\('\[role="option"\]:not\(\[disabled\]\)'\)/);
+assert.match(anchored, /const OPTION_ROWS = '\[role="option"\]';/);
+assert.match(anchored, /`\$\{row\}:not\(\[disabled\]\)`/);
+assert.match(anchored, /querySelectorAll<HTMLElement>\(enabledRows\(rows\)\)/);
 assert.match(anchored, /\[role="option"\]\[aria-selected="true"\]/);
-assert.match(anchored, /\[open, focusSignal\]/);
+assert.match(anchored, /\[open, focusSignal, rows\]/);
 
 // ── Local toasts bypass the viewed-suppression policy ──────────────────────
 assert.match(toast, /window\.addEventListener\("spark:local-toast", handler\)/);

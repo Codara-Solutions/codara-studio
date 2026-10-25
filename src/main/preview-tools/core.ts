@@ -29,7 +29,12 @@ export async function requireTarget(params: Record<string, unknown>): Promise<Br
   return (await callTarget(params)) ?? resolveBrowserTarget(params);
 }
 
-async function navigate(params: Record<string, unknown>): Promise<unknown> {
+/**
+ * Checks a Codara navigate's URL before anything looks up its tab (index.ts),
+ * so a refused navigate wakes no sleeping tab. Rewrites params.url in place:
+ * the call's tab lookups are cached per params object.
+ */
+export async function checkNavigateUrl(params: Record<string, unknown>): Promise<void> {
   const hasUrl = typeof params.url === "string" && params.url.trim() !== "";
   if (!hasUrl && (typeof params.tabId !== "string" || typeof params.group !== "string")) {
     throw new PreviewToolParamsError("navigate needs a url, or a tabId and a group to move that tab into the group.");
@@ -39,7 +44,7 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
     const remote = await resolveRemotePreviewUrl(params.workspaceId, params.url);
     if (remote && "error" in remote) throw new Error(remote.error);
     const url = remote ? remote.url : params.url;
-    if (remote) params = { ...params, url };
+    if (remote) params.url = url;
     const reachable = await waitForLoopbackPreviewServer(url);
     if (!reachable) {
       throw new Error(
@@ -49,6 +54,9 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
       );
     }
   }
+}
+
+async function navigate(params: Record<string, unknown>): Promise<unknown> {
   return requestPreviewOp("navigate", { ...params });
 }
 

@@ -409,11 +409,13 @@ test("copy tab id gives the id agents use, with its URL and session on request",
     expect(tabs.map((tab: { id: string }) => tab.id)).toContain(tabId);
     const clipboard = () => app.evaluate(({ clipboard }) => clipboard.readText());
 
-    await page.getByRole("button", { name: `Copy tab id ${tabId}`, exact: true }).click();
+    // Both live in the toolbar's More menu.
+    await page.getByRole("button", { name: "More browser tools", exact: true }).click();
+    await page.getByRole("menuitem", { name: new RegExp(`^Copy tab id for an agent ${tabId}$`) }).click();
     await expect.poll(clipboard).toBe(tabId);
     await expect(page.getByTestId("point-notice")).toContainText(`Copied ${tabId}`);
 
-    await page.getByRole("button", { name: "More ways to copy this tab", exact: true }).click();
+    await page.getByRole("button", { name: "More browser tools", exact: true }).click();
     await page.getByRole("menuitem", { name: "Copy id, URL and session" }).click();
     await expect.poll(clipboard).toContain(`tabId: ${tabId}`);
     const reference = await clipboard();

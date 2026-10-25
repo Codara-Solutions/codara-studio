@@ -2,6 +2,7 @@ import type { BrowserPaneHandle } from "./BrowserPane";
 import { clearDriver, forgetPresenceTab } from "./agent-presence/store";
 import { tabLink } from "@shared/tab-links";
 import { tabGroupNameOf } from "../../tabs/tabGroupBridge";
+import { isTabAsleep } from "./tabs-memory/browserTabs";
 
 interface RegistryEntry {
   id: string;
@@ -172,6 +173,8 @@ export function listPreviewTabs(workspaceId?: string | null, callerPaneId?: stri
       isLastViewed: lastViewed.get(workspace) === entry.id,
       isActive: entry.id === activeId && entry.workspaceId === activeWorkspaceId,
       ...(entry.partition ? { isolated: true } : {}),
+      // Asleep to save memory; any call on the tab loads it again.
+      ...(isTabAsleep(entry.id) ? { asleep: true } : {}),
       ...(group ? { group } : {}),
     };
   });

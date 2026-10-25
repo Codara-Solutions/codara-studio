@@ -8,6 +8,7 @@ import {
   unregisterPreviewTab,
   updatePreviewTabUrl,
 } from "../components/Preview/registry";
+import { setBrowserFullScreen, useAnyBrowserFullScreen } from "../components/Preview/fullScreen";
 import type { PreviewTab, Tab, TabId } from "./types";
 import type { DockRef } from "./dock";
 import {
@@ -34,6 +35,16 @@ import {
 // another tab" experience broke the user's trust in the preview surface.
 // Memory cost (~40-80MB per open preview) is bounded by tab count and is
 // acceptable on modern machines for the persistence guarantee.
+//
+// To free memory anyway, a tab can sleep (components/Preview/tabs-memory/):
+// BrowserPane removes its webview but stays mounted, keeping the title, URL
+// and a picture, and loads the page again when the tab is shown. The user
+// decides, or auto-sleep does after 30 minutes unseen; never while a tab is
+// in use (sleepPolicy.ts).
+//
+// Full screen lifts one tab's wrapper over the window with CSS
+// (.bp-fullscreen) rather than moving it, for the same reason docking never
+// moves the webview: re-parenting it reloads the page.
 
 interface Props {
   workspaceId: string | null;
@@ -55,6 +66,7 @@ function PreviewStack({ tabs, activeId, dockIndex, onUrlChange, workspaceId, wor
   // the map below). Only flips when a docked cell's shown-state changes —
   // never on a rect write, which goes straight to the element's style.
   useSyncExternalStore(subscribeDockChanges, getDockVersion, getDockVersion);
+  const fullScreen = useAnyBrowserFullScreen();
   // Memoize the filtered list so it keeps a stable identity when an
   // unrelated tab kind mutates.
   const previews = useMemo(
@@ -161,6 +173,16 @@ function PreviewStack({ tabs, activeId, dockIndex, onUrlChange, workspaceId, wor
     }
   }, [previews]);
 
+  // Full screen ends when its tab stops being the one on screen: another tab
+  // was picked, its dock cell was hidden, or its workspace was left.
+  const fullScreenTab = previews.find((t) => t.id === fullScreen.tabId) ?? null;
+  const fullScreenShown = fullScreenTab
+    ? workspaceActive && (dockIndex.has(fullScreenTab.id) ? (peekDockPlacementSnapshot(fullScreenTab.id)?.shown ?? false) : fullScreenTab.id === activeId)
+    : true;
+  useEffect(() => {
+    if (fullScreenTab && !fullScreenShown) setBrowserFullScreen(fullScreenTab.id, "off");
+  }, [fullScreenShown, fullScreenTab]);
+
   if (previews.length === 0) return null;
   return (
     // pointer-events:none on the outer so this stack's empty space doesn't
@@ -174,10 +196,12 @@ function PreviewStack({ tabs, activeId, dockIndex, onUrlChange, workspaceId, wor
         const visible = !workspaceActive ? false : docked
           ? (peekDockPlacementSnapshot(t.id)?.shown ?? false)
           : t.id === activeId;
+        const full = fullScreen.tabId === t.id && visible;
         return (
           <div
             key={t.id}
             ref={getDockRef(t.id)}
+            className={full ? "bp-fullscreen" : undefined}
             // Marks the element the grid positions, so the docked frame is
             // addressable without reaching through to the <webview> (which
             // sits below the address bar and is a smaller box).

@@ -499,6 +499,7 @@ import { isPiSubscriptionProvider } from "../shared/agent-families";
 import type { AgentDeliveryRequest, AgentDeliveryResult } from "../shared/agent-delivery";
 import { agentDelivery } from "./agent-delivery";
 import { registerCaptureIpc } from "./browser/capture/ipc";
+import { registerPreviewTabsIpc } from "./browser/preview-tabs";
 import { registerChromeLinkIpc } from "./browser/chrome";
 import { registerPointIpc } from "./browser/point";
 import { registerReviewIpc } from "./review";
@@ -4244,6 +4245,7 @@ export function registerIpc(): void {
   registerWorktreeSetupIpc(handle);
   registerChromeLinkIpc(handle);
   registerCaptureIpc(handle);
+  registerPreviewTabsIpc(handle);
   registerPointIpc(handle);
   registerWorkspaceStatusIpc(handle);
   registerPullRequestWatchIpc(handle);

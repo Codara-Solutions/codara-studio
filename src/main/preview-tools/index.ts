@@ -17,7 +17,7 @@ import { capturePreviewTools } from "./capture";
 import { cdpPreviewTools } from "./cdp";
 import { chromeLinkTools, chromeTargetTools } from "./chrome";
 import { codePreviewTools } from "./code";
-import { corePreviewTools } from "./core";
+import { checkNavigateUrl, corePreviewTools } from "./core";
 import { cosTaskTools } from "./cos-tasks";
 import { devtoolsPreviewTools } from "./devtools";
 import { inboxPreviewTools } from "./inbox";
@@ -116,6 +116,8 @@ async function dispatchPreviewTool(
   // Who drives the tab comes from the scoped caller, never from tool JSON:
   // the tab's banner names it and its Stop button refuses it by key.
   delete params.driver;
+  // Codara's own field, never the agent's.
+  delete params.lookupWake;
   if (scope === "browser") {
     // Scoping drops the pid once it found the pane; an agent outside any pane
     // keeps it as its key, so stopping one such agent leaves the others alone.
@@ -133,6 +135,16 @@ async function dispatchPreviewTool(
     throw error;
   }
   if (ref?.kind === "preview") params.tabId = ref.tabId;
+  if (ref?.kind !== "chrome" && method === "preview.navigate") {
+    // Before any lookup of the tab, so a refused navigate wakes nothing.
+    await checkNavigateUrl(params);
+    // The call's lookups pick the tab the navigate will load into (previewRpc
+    // getWebContentsId). With a url, a sleeping one wakes on a blank page: the
+    // dialog guard and the action stamp attach as on an awake tab, then the
+    // navigate loads the URL under them. Without a url (a group move) the tab
+    // keeps its page and stays asleep.
+    params.lookupWake = typeof params.url === "string" && params.url.trim() !== "" ? "blank" : "none";
+  }
   // A page dialog must never leave the call hanging (browser/dialog-guard.ts).
   if (ref?.kind !== "chrome") return guardPageDialogs(method, params, () => entry.run(params, method, host));
   if (!(await host.mayUseUserBrowser(params))) {

@@ -79,6 +79,8 @@ import {
   setLocatePaneWorkspaceFn,
   setOpenPreviewTabFn,
 } from "./components/Preview/registry";
+import { browserFullScreen } from "./components/Preview/fullScreen";
+import { setBrowserWorkspaceNames } from "./components/Preview/tabs-memory/browserTabs";
 import {
   setCloseAgentTerminalFn,
   setCreateAgentTerminalFn,
@@ -2328,6 +2330,9 @@ export default function App() {
   // — runs trigger updates).
   const workspacesRef = useRef(workspaces);
   workspacesRef.current = workspaces;
+  useEffect(() => {
+    setBrowserWorkspaceNames(workspaces.map((workspace) => [workspace.id, workspace.name] as const));
+  }, [workspaces]);
 
   // When the orchestration runner emits `launch_requested`, the worker is
   // being launched and is waiting for a renderer-side PTY at sessionId =
@@ -5696,18 +5701,31 @@ export default function App() {
   // listeners can wire up without prop drilling.
   // The browser tab on screen (or docked in the focused cell) starts pointing
   // or commenting; BrowserPane listens for its own tab id.
+  const targetBrowserTabId = useCallback((): string | null => {
+    let active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
+    if (active?.kind === "terminal") {
+      const pane = findLeafByPaneId(active.root, active.activePaneId);
+      const contentId = pane && isDockLeaf(pane) ? pane.content.tabId : null;
+      active = visibleWorkbenchTabs.find((tab) => tab.id === contentId);
+    }
+    return active?.kind === "preview" ? active.id : null;
+  }, [activeVisibleTabId, visibleWorkbenchTabs]);
   const dispatchBrowserPoint = useCallback(
     (mode: "pick" | "comment") => {
-      let active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
-      if (active?.kind === "terminal") {
-        const pane = findLeafByPaneId(active.root, active.activePaneId);
-        const contentId = pane && isDockLeaf(pane) ? pane.content.tabId : null;
-        active = visibleWorkbenchTabs.find((tab) => tab.id === contentId);
-      }
-      if (!active || active.kind !== "preview") return;
-      window.dispatchEvent(new CustomEvent("spark:browser-point", { detail: { tabId: active.id, mode } }));
+      const tabId = targetBrowserTabId();
+      if (!tabId) return;
+      window.dispatchEvent(new CustomEvent("spark:browser-point", { detail: { tabId, mode } }));
     },
-    [activeVisibleTabId, visibleWorkbenchTabs],
+    [targetBrowserTabId],
+  );
+  // F11 acts on the tab already full screen, so it steps on to the display.
+  const dispatchBrowserAction = useCallback(
+    (action: "fullScreen" | "devTools") => {
+      const tabId = (action === "fullScreen" ? browserFullScreen().tabId : null) ?? targetBrowserTabId();
+      if (!tabId) return;
+      window.dispatchEvent(new CustomEvent("spark:browser-action", { detail: { tabId, action } }));
+    },
+    [targetBrowserTabId],
   );
 
   const shortcutHandlers = useMemo<ShortcutHandlers>(
@@ -5994,6 +6012,8 @@ export default function App() {
       },
       "browser.pickElement": () => dispatchBrowserPoint("pick"),
       "browser.comment": () => dispatchBrowserPoint("comment"),
+      "browser.fullScreen": () => dispatchBrowserAction("fullScreen"),
+      "browser.devTools": () => dispatchBrowserAction("devTools"),
     }),
     [
       handleNewBalancedTerminalPane,
@@ -6008,6 +6028,7 @@ export default function App() {
       handleToggleRight,
       activeVisibleTabId,
       dispatchBrowserPoint,
+      dispatchBrowserAction,
       handleSelectWorkspaceByIndex,
       tabs,
       visibleWorkbenchTabs,
@@ -6026,6 +6047,9 @@ export default function App() {
     // instead of triggering their currently bound command.
     isDisabled: (id, event) => {
       if (isRecording()) return true;
+      // Bare F11 and F12 belong to terminals and editors unless a browser tab
+      // is the one they would act on.
+      if ((id === "browser.fullScreen" || id === "browser.devTools") && !browserFullScreen().tabId && !targetBrowserTabId()) return true;
       if (onboardingOpen && document.querySelector(".onboarding-dialog")) return true;
       // The open jump palette answers Mod+1..6 itself.
       if (jumpPaletteOpen && id === "view.selectByIndex") return true;

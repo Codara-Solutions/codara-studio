@@ -37,6 +37,7 @@ import type {
   GitSplitGroup,
   GitSplitPlanResult,
 } from "@shared/git-split";
+import type { BrowserFullScreenRequest, BrowserTabMemory } from "@shared/browser-tabs";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
 import type { ClaudeFollowStatus } from "@shared/claude-follow";
 import type { AgentDeliveryRequest, AgentDeliveryResult } from "@shared/agent-delivery";
@@ -1705,6 +1706,11 @@ const api = {
     announce: (payload: { tabId: string; webContentsId: number }): void => {
       ipcRenderer.send("preview-bridge:announce", payload);
     },
+    /** Memory of each browser tab's page and of Codara as a whole. */
+    tabMemory: (): Promise<BrowserTabMemory> => ipcRenderer.invoke("preview-bridge:tab-memory"),
+    /** Tells main a tab went full screen, so Escape in its page leaves and "display" fills the screen. */
+    fullScreen: (request: BrowserFullScreenRequest): Promise<boolean> =>
+      ipcRenderer.invoke("preview-bridge:full-screen", request),
   },
   // codara-studio MCP terminal bridge: main forwards terminal.create requests
   // here, the renderer mints an agent-tinted terminal tab via useTabs and sends
