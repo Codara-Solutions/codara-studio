@@ -296,8 +296,20 @@ test("Clean up on the merged fold always says what it did", async ({}, testInfo)
       await expect(confirm).toHaveCount(0);
       expect(existsSync(join(secrets, ".env"))).toBe(true);
 
+      // A file that appears while the question is open is not what was
+      // confirmed: the question comes back and says so.
       await fold("ws-other").getByTestId("workspace-merged-clean-up").click();
       await expect(confirm).toBeVisible({ timeout: 30_000 });
+      await writeFile(join(other, ".git", "info", "exclude"), ".env.extra\n");
+      await writeFile(join(secrets, ".env.extra"), "LOCAL_ONLY=2\n");
+      await confirm.getByRole("button", { name: "Remove anyway" }).click();
+      await expect(page.getByTestId("workspace-merged-clean-up-confirm-note")).toHaveText(
+        "It changed since you were asked. Check the list again.",
+        { timeout: 30_000 },
+      );
+      await expect(confirm).toContainText(".env.extra");
+      expect(existsSync(join(secrets, ".env"))).toBe(true);
+      await page.screenshot({ path: testInfo.outputPath("rail-clean-up-changed.png") });
       await confirm.getByRole("button", { name: "Remove anyway" }).click();
       await expect(fold("ws-other")).toHaveCount(0, { timeout: 30_000 });
       expect(existsSync(secrets)).toBe(false);

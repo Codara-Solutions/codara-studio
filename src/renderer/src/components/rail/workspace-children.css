@@ -240,6 +240,13 @@
   color: var(--ink-dim);
 }
 
+.rail-confirm-note {
+  font-size: 12px;
+  line-height: 1.5;
+  font-weight: 600;
+  color: var(--ink);
+}
+
 .rail-confirm-list {
   margin: 0;
   padding: 0 0 0 16px;

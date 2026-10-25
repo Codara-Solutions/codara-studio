@@ -530,7 +530,7 @@ async function main() {
     });
 
     // Merged worktrees that hold only ignored files.
-    commitFile(repo, ".gitignore", "test-results/\nplaywright-report/\n.ruff_cache/\n.env\n", "ignore output");
+    commitFile(repo, ".gitignore", "node_modules/\ntest-results/\nplaywright-report/\n.ruff_cache/\n.env\n", "ignore output");
     git(repo, ["push", "-q", "origin", "main"]);
     const mergedWith = (name, branch) => {
       const dir = add(name, branch);
@@ -599,6 +599,49 @@ async function main() {
       assert.equal(fs.existsSync(secrets), false);
       assert.equal(has("ws-merged-secrets"), false);
       fs.rmSync(path.join(repo, ".git", "info", "exclude"), { force: true });
+    });
+
+    await check("Clean up refuses a worktree whose ignored folders could not all be looked through", async () => {
+      const big = mergedWith("merged-big", "feature/merged-big");
+      fs.mkdirSync(path.join(big, "node_modules", "a", "b", "c", "d"), { recursive: true });
+      deps.nestedScanMaxDirs = 2;
+      try {
+        const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged-big", mode: "manual" });
+        assert.equal(result.status, "refused", "an unchecked folder is not offered as an ignored file to confirm");
+        assert.match(result.message, /could not be fully checked: node_modules\//);
+        assert.equal(result.fingerprint, undefined);
+        assert.equal(fs.existsSync(path.join(big, "node_modules", "a", "b", "c", "d")), true);
+        assert.equal(has("ws-merged-big"), true);
+      } finally {
+        delete deps.nestedScanMaxDirs;
+      }
+      const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged-big", mode: "manual" });
+      assert.equal(result.status, "removed", result.message);
+    });
+
+    await check("output folders go only at the root or a package root, and never take a .env with them", async () => {
+      const nested = mergedWith("merged-nested", "feature/merged-nested");
+      fs.mkdirSync(path.join(nested, "test-results"));
+      fs.writeFileSync(path.join(nested, "test-results", ".env"), "LOCAL_ONLY=1\n");
+      fs.mkdirSync(path.join(nested, "docs", "test-results"), { recursive: true });
+      fs.writeFileSync(path.join(nested, "docs", "test-results", "notes.md"), "kept\n");
+      fs.mkdirSync(path.join(nested, "packages", "web", "test-results"), { recursive: true });
+      fs.writeFileSync(path.join(nested, "packages", "web", "package.json"), "{}\n");
+      git(nested, ["add", "packages/web/package.json"]);
+      git(nested, ["commit", "-q", "-m", "web package"]);
+      mergeIntoMain("feature/merged-nested");
+      fs.writeFileSync(path.join(nested, "packages", "web", "test-results", "trace.zip"), "trace");
+      const asked = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged-nested", mode: "manual" });
+      assert.equal(asked.status, "confirm", asked.message);
+      // git also lists docs/ itself, as a folder that holds only ignored files.
+      assert.deepEqual([...asked.holds].sort(), ["docs/", "docs/test-results/", "test-results/.env"]);
+      assert.equal(fs.existsSync(path.join(nested, "test-results", ".env")), true);
+      const removed = await rail.cleanUpRailWorkspace(deps, {
+        workspaceId: "ws-merged-nested",
+        mode: "manual",
+        confirmIgnored: asked.fingerprint,
+      });
+      assert.equal(removed.status, "removed", removed.message);
     });
 
     await check("a worktree its agent's open tab still owns names that tab", async () => {

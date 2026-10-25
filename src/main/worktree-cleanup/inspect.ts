@@ -17,6 +17,7 @@ import {
   checkoutsInIgnored,
   cleanText,
   isRegenerableIgnored,
+  packageRootTester,
   type AgentWorktreeAuditEntry,
   type ProcessUse,
   type RendererTerminal,
@@ -728,7 +729,8 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
     // local work; removeCopyWorktree releases the links before git runs.
     const provided = await setupProvidedEntries(registration.path, all).catch(() => new Set<string>());
     ignored = all.filter((entry) => !provided.has(entry));
-    work.ignored = ignored.filter((entry) => !isRegenerableIgnored(entry, ctx.regenerable)).slice(0, MAX_LISTED);
+    const packageRoot = packageRootTester(registration.path);
+    work.ignored = ignored.filter((entry) => !isRegenerableIgnored(entry, ctx.regenerable, packageRoot)).slice(0, MAX_LISTED);
     workFound ||= work.ignored.length > 0;
   } catch (err) {
     block(check, "GIT_FAILED", `the ignored-file check failed: ${cleanText(errorText(err), 200)}`);
@@ -746,6 +748,11 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
   if (ignored) {
     const scan = await checkoutsInIgnored(real, ignored, ctx.regenerable, deps.nestedScanMaxDirs);
     nested.push(...scan.found);
+    const hidden = scan.env.filter((entry) => !work.ignored.includes(entry) && !isRegenerableIgnored(entry, ctx.regenerable));
+    if (hidden.length) {
+      work.ignored = [...work.ignored, ...hidden].slice(0, MAX_LISTED);
+      workFound = true;
+    }
     if (scan.incomplete) {
       work.unscanned = scan.incomplete;
       workFound = true;

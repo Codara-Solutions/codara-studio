@@ -927,6 +927,7 @@ async function main() {
     assert.equal(fs.readFileSync(rotating, "utf8").trim().split("\n").length, 1);
 
     // ── Pure helpers ───────────────────────────────────────────────────────
+    const packages = (dir) => dir === "packages/a" || dir === "packages/web";
     for (const entry of [
       "node_modules/",
       "packages/a/node_modules/",
@@ -939,10 +940,37 @@ async function main() {
       "packages/web/test-results/",
       ".ruff_cache/",
     ]) {
-      assert.equal(aw.isRegenerableIgnored(entry), true, `${entry} regenerates`);
+      assert.equal(aw.isRegenerableIgnored(entry, [], packages), true, `${entry} regenerates`);
     }
-    for (const entry of [".env.local", "secrets/", "notes.md", "config/credentials.json"]) {
-      assert.equal(aw.isRegenerableIgnored(entry), false, `${entry} is kept`);
+    for (const entry of [
+      ".env.local",
+      "secrets/",
+      "notes.md",
+      "config/credentials.json",
+      // Only at the root or a package root: git lists a wholly ignored folder as one entry.
+      "docs/test-results/",
+      "packages/b/node_modules/",
+      // A file inside a folder that is not ignored as a whole is that file, not the folder.
+      "dist/.env",
+      "test-results/.env.production",
+    ]) {
+      assert.equal(aw.isRegenerableIgnored(entry, [], packages), false, `${entry} is kept`);
+    }
+    assert.equal(aw.isRegenerableIgnored(".env", ["*.pyc"]), false, "no built-in pattern makes a .env regenerable");
+    assert.equal(aw.isRegenerableIgnored("test-results/.env.local", [".env.local"]), true, "the user's own pattern can");
+    assert.equal(aw.isRegenerableIgnored("packages/a/node_modules/"), false, "without package roots, the root only");
+    for (const name of [".env", ".env.local", ".env.production.local", ".ENV"]) assert.equal(aw.isEnvFile(name), true, name);
+    for (const name of [".env.example", ".env.sample", ".env.template", ".envrc", "env.ts"]) {
+      assert.equal(aw.isEnvFile(name), false, name);
+    }
+    {
+      const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-pkg-root-"));
+      fs.mkdirSync(path.join(rootDir, "packages", "web"), { recursive: true });
+      fs.writeFileSync(path.join(rootDir, "packages", "web", "package.json"), "{}");
+      const tester = aw.packageRootTester(rootDir);
+      assert.equal(tester("packages/web"), true);
+      assert.equal(tester("packages"), false);
+      fs.rmSync(rootDir, { recursive: true, force: true });
     }
     assert.equal(aw.isRegenerableIgnored("generated/", ["generated/"]), true);
     assert.equal(aw.isRegenerableIgnored("out.log", ["*.log"]), true);

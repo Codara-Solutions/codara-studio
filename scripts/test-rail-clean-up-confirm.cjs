@@ -61,8 +61,14 @@ async function main() {
                   cleanUps: names.map((name) => ({
                     id: name,
                     name,
-                    cleanUp: async () => {
+                    cleanUp: async (confirmIgnored) => {
                       window.cleaned.push(name);
+                      // "held" stays with a reason; "secret" asks about its
+                      // .env until the question's fingerprint comes back.
+                      if (name === "held") return { status: "refused", message: "Close the tab first.", branchDeleted: false };
+                      if (name === "secret" && confirmIgnored !== "fp-1") {
+                        return { status: "confirm", holds: [".env"], fingerprint: "fp-1", branchDeleted: false };
+                      }
                       return { status: "removed", branchDeleted: true };
                     },
                   })),
@@ -205,6 +211,20 @@ async function main() {
     await expect(confirm).toHaveCount(0);
     // Each worktree the confirm named runs once, in order.
     await expect.poll(() => page.evaluate(() => window.cleaned.slice(1))).toEqual(["a", "c"]);
+
+    // Confirming one worktree's .env leaves the other's reason in place.
+    await page.evaluate(() => window.setMergedNames(["held", "secret"]));
+    const notice = page.getByTestId("workspace-merged-notice");
+    await cleanUp.click();
+    await confirm.getByRole("button", { name: "Clean up" }).click();
+    await expect(confirm).toContainText("secret holds .env");
+    await expect(notice).toContainText("held: Close the tab first.");
+    await confirm.getByRole("button", { name: "Remove anyway" }).click();
+    await expect(confirm).toHaveCount(0);
+    await expect.poll(() => page.evaluate(() => window.cleaned.slice(-1))).toEqual(["secret"]);
+    await expect(notice).toContainText("held: Close the tab first.");
+    await notice.getByRole("button", { name: /^Dismiss/ }).click();
+    await expect(notice).toHaveCount(0);
     assert.deepEqual(errors, []);
     console.log("PASS the merged fold's Clean up confirm");
   } finally {

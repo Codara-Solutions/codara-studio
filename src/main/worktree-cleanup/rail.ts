@@ -232,15 +232,13 @@ function uncommittedText(work: WorktreeLocalWork): string {
   return `It has uncommitted work${list}. Commit it, or use Delete to review it.`;
 }
 
-/** What a "confirm" names: ignored files, and an ignored folder too large to check. */
-function ignoredHolds(work: WorktreeLocalWork): string[] {
-  return [...work.ignored, ...(work.unscanned && !work.ignored.includes(work.unscanned) ? [work.unscanned] : [])];
-}
 
 // The cleanup screen's rules, plus the rail's own: Clean up is for a merged
 // branch only, and never confirms uncommitted work away. Ignored files alone
 // are asked about (cleanUpRegistered), since a fresh checkout cannot bring
-// them back but nothing else is lost.
+// them back but nothing else is lost. An ignored folder the scan could not
+// see all of may hold a checkout or a .env nobody listed, so it is not
+// something to confirm: only the cleanup screen's review removes it.
 function railRefusal(
   check: WorktreeRemovalCheck,
   request: WorktreeRailCleanupRequest,
@@ -260,6 +258,9 @@ function railRefusal(
     return null;
   }
   if (check.alreadyRemoved) return null;
+  if (check.localWork?.unscanned) {
+    return `It could not be fully checked: ${check.localWork.unscanned} is too large or unreadable to look through. Use Delete to review it.`;
+  }
   if (check.localWork && !onlyIgnoredWork(check.localWork)) return uncommittedText(check.localWork);
   if (check.merge.state !== "merged") return "Its branch is not merged yet.";
   return null;
@@ -285,7 +286,7 @@ async function cleanUpRegistered(
       status: "confirm",
       workspaceName: workspace.name,
       branchDeleted: false,
-      holds: ignoredHolds(check.localWork!),
+      holds: check.localWork!.ignored,
       fingerprint: check.fingerprint,
       ...(request.confirmIgnored ? { message: "It changed since you were asked." } : {}),
     };

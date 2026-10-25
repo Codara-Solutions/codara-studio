@@ -26,6 +26,8 @@ interface Holding {
   entry: RailCleanUpEntry;
   holds: string[];
   fingerprint: string;
+  /** It was confirmed, then changed before the removal: say so, not just ask again. */
+  changed: boolean;
 }
 
 function noticeFor(entry: RailCleanUpEntry, result: WorktreeRailCleanupResult | null): RailCleanUpNotice | null {
@@ -48,7 +50,11 @@ export function useRailCleanUp(liveIds: readonly string[]) {
     if (busy.current) return;
     busy.current = true;
     setCleaning(true);
-    setNotices([]);
+    // Only the worktrees this run is about lose their line: confirming one
+    // must not hide why another stayed.
+    const ids = new Set(entries.map((entry) => entry.id));
+    const others = (current: RailCleanUpNotice[]) => current.filter((notice) => !ids.has(notice.id));
+    setNotices(others);
     const asks: Holding[] = [];
     const told: RailCleanUpNotice[] = [];
     try {
@@ -61,7 +67,12 @@ export function useRailCleanUp(liveIds: readonly string[]) {
             branchDeleted: false,
           }));
         if (result?.status === "confirm" && result.fingerprint) {
-          asks.push({ entry, holds: result.holds ?? [], fingerprint: result.fingerprint });
+          asks.push({
+            entry,
+            holds: result.holds ?? [],
+            fingerprint: result.fingerprint,
+            changed: confirmed.has(entry.id),
+          });
         }
         const notice = noticeFor(entry, result);
         if (notice) told.push(notice);
@@ -69,7 +80,7 @@ export function useRailCleanUp(liveIds: readonly string[]) {
     } finally {
       busy.current = false;
       setCleaning(false);
-      setNotices(told);
+      setNotices((current) => [...others(current), ...told]);
       setHolding(asks);
     }
   }, []);
@@ -152,11 +163,18 @@ export function CleanUpHoldsConfirm({
 }) {
   const one = holding.length === 1 ? holding[0] : null;
   const title = one ? `${one.entry.name} holds ${filesText(one.holds)}` : `${holding.length} worktrees hold files git ignores`;
+  const changed = holding.filter((item) => item.changed).map((item) => item.entry.name);
+  const note = !changed.length
+    ? undefined
+    : one
+      ? "It changed since you were asked. Check the list again."
+      : `${changed.join(", ")} changed since you were asked. Check the list again.`;
   return (
     <RailConfirm
       title={title}
+      note={note}
       text="Git ignores these, so a fresh checkout won't bring them back and the recovery copy doesn't keep them. Remove anyway?"
-      items={holding.map((item) => (one ? item.holds.join(", ") : `${item.entry.name}: ${item.holds.join(", ")}`))}
+      items={one ? one.holds : holding.map((item) => `${item.entry.name}: ${item.holds.join(", ")}`)}
       okLabel="Remove anyway"
       testId={testId}
       onCancel={onCancel}
@@ -176,6 +194,7 @@ function filesText(holds: readonly string[]): string {
 // row it was opened from, so none may leave the scrim.
 export function RailConfirm({
   title,
+  note,
   text,
   items,
   okLabel,
@@ -184,6 +203,8 @@ export function RailConfirm({
   onConfirm,
 }: {
   title: string;
+  /** Said first, above the question: what changed since it was last asked. */
+  note?: string;
   text: string;
   items: readonly string[];
   okLabel: string;
@@ -222,6 +243,11 @@ export function RailConfirm({
         onClick={(event) => event.stopPropagation()}
       >
         <span className="rail-confirm-title">{title}</span>
+        {note && (
+          <span className="rail-confirm-note" data-testid={`${testId}-note`} role="status">
+            {note}
+          </span>
+        )}
         <span className="rail-confirm-text">{text}</span>
         <ul className="rail-confirm-list">
           {items.map((item, index) => (
