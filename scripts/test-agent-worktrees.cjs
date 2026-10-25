@@ -331,7 +331,19 @@ async function main() {
     stopsInTime = true;
     assert.equal(notStopped.removed, false, JSON.stringify(notStopped));
     assert.match(notStopped.reason, /setup did not stop/);
+    assert.equal(notStopped.setupRunning, true);
     assert.equal(fs.existsSync(stubborn.path), true, "the worktree stays for its maker to remove");
+    // The agent is told plainly which worktree was left and how to remove it.
+    const leftText = aw.terminalRollbackMessage(stubborn, notStopped);
+    assert.ok(leftText.includes(stubborn.path), leftText);
+    assert.ok(leftText.includes(stubborn.workspaceId), leftText);
+    assert.ok(leftText.includes("agent/stubborn"), leftText);
+    assert.match(leftText, /was left in place because its setup was still running after 10 s/);
+    assert.match(leftText, new RegExp(`codara_worktree_remove\\(\\{ workspaceId: "${stubborn.workspaceId}" \\}\\) once its setup has ended`));
+    assert.match(aw.terminalRollbackMessage(stubborn, { removed: true }), /the worktree made for it was removed/);
+    const refusedText = aw.terminalRollbackMessage(stubborn, { removed: false, reason: "WORKTREE_RUNNING_PROCESSES: 1 processes use the worktree" });
+    assert.ok(refusedText.includes(stubborn.path) && refusedText.includes("WORKTREE_RUNNING_PROCESSES"), refusedText);
+    assert.match(refusedText, /codara_worktree_remove\(\{ workspaceId: /);
     assert.deepEqual(dismissals, []);
     assert.equal((await aw.removeAgentWorktree(coordinator, { workspaceId: stubborn.workspaceId }, deps)).removed, true);
 
