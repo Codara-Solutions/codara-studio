@@ -116,8 +116,9 @@ async function dispatchPreviewTool(
   // Who drives the tab comes from the scoped caller, never from tool JSON:
   // the tab's banner names it and its Stop button refuses it by key.
   delete params.driver;
-  // Codara's own field, never the agent's.
+  // Codara's own fields, never the agent's.
   delete params.lookupWake;
+  delete params.lookupTabId;
   if (scope === "browser") {
     // Scoping drops the pid once it found the pane; an agent outside any pane
     // keeps it as its key, so stopping one such agent leaves the others alone.

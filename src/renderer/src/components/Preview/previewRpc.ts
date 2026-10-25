@@ -17,6 +17,7 @@ import { clickProbe, locateProbe, typeProbe, pressKeyProbe } from "./domActions"
 import { assertDriverAllowed, moveAgentCursor, noteDriving, readDriver, type Box, type CursorMove } from "./agent-presence/store";
 import { closeIsolatedTab, openIsolatedTab } from "./isolatedTabs";
 import { isTabAsleep, isTabWaking, takeWakeUrl, wakeTab } from "./tabs-memory/browserTabs";
+import type { LoadOutcome } from "./BrowserPane";
 import { closePageDialog, showPageDialog, type PageDialogView } from "./pageDialogs";
 import {
   closePreviewTab,
@@ -203,7 +204,7 @@ async function requireTab(params: Record<string, unknown>, { wake = true, wakeUr
 // for the same page instead of acting on one that is still loading.
 const waking = new Map<string, Promise<unknown>>();
 
-type WakeableTab = { id: string; handle: { isReady: () => boolean; loadURL: (url: string) => Promise<void> } };
+type WakeableTab = { id: string; handle: { isReady: () => boolean; loadURL: (url: string) => Promise<unknown> } };
 
 async function wakeForAgent<T extends WakeableTab>(tab: T, url?: string): Promise<T> {
   let pending = waking.get(tab.id);
@@ -330,9 +331,15 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
     const runId = readString(params, "runId");
     const workspaceId = readString(params, "workspaceId");
     const callerPaneId = readString(params, "callerPaneId");
-    const reusable = findReusablePreviewTab(runId, workspaceId, callerPaneId);
+    // The tab this call's lookups picked (and may have woken on a blank
+    // page), even if the user switched tabs since and the pick would now
+    // differ. Main sets lookupTabId, never the agent.
+    const lookupTabId = readString(params, "lookupTabId");
+    const looked = lookupTabId ? pickPreviewTab(lookupTabId, null, workspaceId, callerPaneId) : null;
+    const reusable = looked ?? findReusablePreviewTab(runId, workspaceId, callerPaneId);
     if (reusable) assertDriverAllowed(reusable.id, driver);
-    ({ tab, opened } = await ensurePreviewTab(url, runId, workspaceId, callerPaneId, group, {
+    if (looked) ({ tab, opened } = { tab: looked, opened: false });
+    else ({ tab, opened } = await ensurePreviewTab(url, runId, workspaceId, callerPaneId, group, {
       sessionId: readString(params, "callerSessionId"),
       process: readString(params, "callerProcess"),
     }));
@@ -343,16 +350,26 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
   // it again would abort or repeat that first load, which runs the page's
   // requests twice and records the first load's as never finished.
   noteDriving(tab.id, driver, "Navigating");
+  let outcome: LoadOutcome = "loaded";
   if (!opened) {
     const asleep = isTabAsleep(tab.id);
     tab = await wakeForAgent(tab, url);
     // Answers at the new page's dom-ready, so the result names the page
-    // reached; the bound keeps a page that never gets there from holding the call.
-    if (!asleep) await Promise.race([tab.handle.loadURL(url), new Promise((resolve) => setTimeout(resolve, 15_000))]);
+    // reached; loadURL bounds a page that never gets there.
+    if (!asleep) outcome = await tab.handle.loadURL(url);
+  }
+  if (outcome === "timeout") {
+    throw new Error(`The page at ${url} did not respond within 15 s. Check that its server answers, then navigate again.`);
   }
   await waitDomReady(tab.handle, 15_000);
   joined ??= tabGroupNameOf(tab.id);
-  return { url: tab.handle.getURL(), tabId: tab.id, opened, ...(joined ? { group: joined } : {}) };
+  return {
+    url: tab.handle.getURL(),
+    tabId: tab.id,
+    opened,
+    ...(joined ? { group: joined } : {}),
+    ...(outcome === "committed" ? { loading: true, note: "The page arrived but is still loading. Call codara_preview_wait_for before reading it." } : {}),
+  };
 }
 
 async function urlOf(params: Record<string, unknown>): Promise<unknown> {
@@ -514,6 +531,11 @@ async function getWebContentsId(params: Record<string, unknown>): Promise<unknow
   const reusable = navigating && !params.tabId
     ? findReusablePreviewTab(readString(params, "runId"), readString(params, "workspaceId"), readString(params, "callerPaneId"))
     : null;
+  // With no tab of its own the navigate opens one; the user's tab must not
+  // show the agent driving it, nor carry the call's stamp or dialog guard.
+  if (navigating && !params.tabId && !reusable) {
+    throw new Error("This call has no browser tab of its own yet; its navigate opens one.");
+  }
   const wakeBlank = params.lookupWake === "blank" && (Boolean(params.tabId) || reusable !== null);
   const tab = await requireTab(reusable ? { ...params, tabId: reusable.id } : params, {
     wake: !navigating || wakeBlank,
