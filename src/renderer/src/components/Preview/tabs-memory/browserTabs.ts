@@ -92,6 +92,7 @@ export function noteBrowserTab(id: string, input: { workspaceId: string | null; 
 
 export function forgetBrowserTab(id: string): void {
   wakeUrls.delete(id);
+  wakingTabs.delete(id);
   if (records.delete(id)) emit();
 }
 
@@ -145,6 +146,7 @@ export function tabSleepBlocker(id: string): SleepBlocker | null {
 export function sleepTab(id: string): boolean {
   const record = records.get(id);
   if (!record || record.asleep || sleepBlocker(candidate(record), Date.now())) return false;
+  wakingTabs.delete(id);
   patch(id, { asleep: true, asleepAt: Date.now(), memoryBytes: null });
   return true;
 }
@@ -152,13 +154,26 @@ export function sleepTab(id: string): boolean {
 // The URL an agent navigates a sleeping tab to, so it wakes there instead of
 // loading its old page first.
 const wakeUrls = new Map<string, string>();
+// Woken tabs whose page has not reached dom-ready yet, whoever woke them (the
+// user's click, the tab coming on screen, an agent): an agent's call waits.
+const wakingTabs = new Set<string>();
 
 export function wakeTab(id: string, url?: string): void {
   const record = records.get(id);
   if (!record?.asleep) return;
   if (url) wakeUrls.set(id, url);
+  wakingTabs.add(id);
   patch(id, { asleep: false, asleepAt: null, lastSeenAt: Date.now() });
   readMemorySoon();
+}
+
+export function isTabWaking(id: string): boolean {
+  return wakingTabs.has(id);
+}
+
+/** The tab's page reached dom-ready. */
+export function noteTabReady(id: string): void {
+  wakingTabs.delete(id);
 }
 
 export function takeWakeUrl(id: string): string | null {

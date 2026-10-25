@@ -53,8 +53,14 @@ async function launch(): Promise<Fixture> {
   }));
   const server: Server = createServer((req, res) => {
     const name = (req.url ?? "/").replace(/[^a-z]/g, "") || "dashboard";
-    res.writeHead(200, { "content-type": "text/html" });
-    res.end(page(`Acme ${name}`));
+    const send = () => {
+      res.writeHead(200, { "content-type": "text/html" });
+      // "alert" asks while it loads: no DOMContentLoaded until it is answered.
+      res.end(name === "alert" ? page(`Acme ${name}`).replace("<body>", '<body><script>alert("Loaded")</script>') : page(`Acme ${name}`));
+    };
+    // "slow" keeps a wake in progress long enough for a call to land during it.
+    if (name === "slow") setTimeout(send, 2_000);
+    else send();
   });
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}/`;
@@ -467,6 +473,51 @@ test("agent calls on a sleeping tab: the URL checks come first, agent input neve
       request("preview.evaluate", { tabId: blog, code: "document.title" }),
     ]);
     expect.soft(both.map((result) => (result.status === "fulfilled" ? result.value.value : String(result.reason))), "both calls act on the woken page").toEqual(["Acme blog", "Acme blog"]);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("a navigate on a sleeping tab keeps its dialog guard, and an agent call waits for a wake the user started", async () => {
+  test.setTimeout(180_000);
+  const fixture = await launch();
+  const { page, request } = fixture;
+  try {
+    const tab = await openBrowserTab(fixture, "slow");
+    const current = await openBrowserTab(fixture, "");
+    const chip = pane(page, current).getByTestId("preview-tabs-chip");
+    const row = () => page.getByTestId("preview-tabs-view").locator(`[data-testid="preview-tab-row"][data-tab-id="${tab}"]`);
+    let skipped = 0;
+    const ensureAsleep = async () => {
+      skipped += 11 * 60_000;
+      await page.clock.setFixedTime(Date.now() + skipped);
+      await chip.click();
+      if ((await row().getAttribute("data-asleep")) !== "true") await row().getByRole("button", { name: /^Sleep / }).click();
+      await expect(row()).toHaveAttribute("data-asleep", "true");
+      await page.keyboard.press("Escape");
+      await expect(pane(page, tab).locator("webview")).toHaveCount(0);
+    };
+
+    // The user wakes the tab (its page takes two seconds); an agent's navigate
+    // during that load waits for it and then goes where it was asked.
+    await ensureAsleep();
+    await chip.click();
+    await row().getByRole("button", { name: /^Wake / }).click();
+    await page.keyboard.press("Escape");
+    const moved = (await request("preview.navigate", { tabId: tab, url: `${fixture.url}docs` }).catch((error) => ({ url: String(error) }))) as { url: string };
+    expect.soft(moved.url, "a navigate during the user's wake lands on its URL").toBe(`${fixture.url}docs`);
+    await expect.soft.poll(() => pageTitle(page, tab), { timeout: 10_000 }).toBe("Acme docs");
+
+    // A page that asks while it loads: the navigate on the sleeping tab comes
+    // back at once, as on an awake tab, and the guard has the dialog.
+    await ensureAsleep();
+    const started = Date.now();
+    const alerted = await request("preview.navigate", { tabId: tab, url: `${fixture.url}alert` }).catch((error) => ({ error: String(error) }));
+    expect.soft(Date.now() - started, "without waiting for the page that cannot load").toBeLessThan(10_000);
+    expect.soft(JSON.stringify(alerted), "the navigate succeeded").not.toMatch(/error/i);
+    const dialogs = await request("preview.dialog", { tabId: tab }).catch((error) => ({ error: String(error) }));
+    expect.soft(JSON.stringify(alerted) + JSON.stringify(dialogs), "the guard recorded the alert").toMatch(/Loaded/);
+    await request("preview.dialog", { tabId: tab, accept: true }).catch(() => {});
   } finally {
     await fixture.close();
   }

@@ -17,7 +17,7 @@ import { capturePreviewTools } from "./capture";
 import { cdpPreviewTools } from "./cdp";
 import { chromeLinkTools, chromeTargetTools } from "./chrome";
 import { codePreviewTools } from "./code";
-import { corePreviewTools } from "./core";
+import { checkNavigateUrl, corePreviewTools } from "./core";
 import { cosTaskTools } from "./cos-tasks";
 import { devtoolsPreviewTools } from "./devtools";
 import { inboxPreviewTools } from "./inbox";
@@ -116,8 +116,8 @@ async function dispatchPreviewTool(
   // Who drives the tab comes from the scoped caller, never from tool JSON:
   // the tab's banner names it and its Stop button refuses it by key.
   delete params.driver;
-  // Codara's own flag, never the agent's.
-  delete params.keepAsleep;
+  // Codara's own field, never the agent's.
+  delete params.lookupWake;
   if (scope === "browser") {
     // Scoping drops the pid once it found the pane; an agent outside any pane
     // keeps it as its key, so stopping one such agent leaves the others alone.
@@ -135,10 +135,15 @@ async function dispatchPreviewTool(
     throw error;
   }
   if (ref?.kind === "preview") params.tabId = ref.tabId;
-  // A navigate's tab lookups (the dialog guard's, the action stamp's) leave a
-  // sleeping tab asleep: the renderer's navigate wakes it at the URL, and
-  // only after core.ts has rewritten and checked that URL.
-  if (method === "preview.navigate") params.keepAsleep = true;
+  if (ref?.kind !== "chrome" && method === "preview.navigate") {
+    // Before any lookup of the tab, so a refused navigate wakes nothing.
+    await checkNavigateUrl(params);
+    // A named sleeping tab wakes on a blank page for this call's lookups: the
+    // dialog guard and the action stamp attach as on an awake tab, then the
+    // navigate loads the URL under them. Without a tabId the lookup may fall
+    // back to the user's own tab, which navigate never takes: leave it asleep.
+    params.lookupWake = ref?.kind === "preview" ? "blank" : "none";
+  }
   // A page dialog must never leave the call hanging (browser/dialog-guard.ts).
   if (ref?.kind !== "chrome") return guardPageDialogs(method, params, () => entry.run(params, method, host));
   if (!(await host.mayUseUserBrowser(params))) {

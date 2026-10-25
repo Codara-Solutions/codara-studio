@@ -26,6 +26,7 @@ import {
   isTabAsleep,
   noteBrowserTab,
   noteTabPage,
+  noteTabReady,
   noteTabVisible,
   setTabSnapshot,
   takeWakeUrl,
@@ -104,7 +105,8 @@ export interface BrowserPaneHandle {
   reload: (opts?: { ignoreCache?: boolean }) => void;
   goBack: () => void;
   goForward: () => void;
-  loadURL: (url: string) => void;
+  /** Settles when the new page commits or fails, not when it finishes loading. */
+  loadURL: (url: string) => Promise<void>;
   getURL: () => string;
   getTitle: () => string;
   openDevTools: () => void;
@@ -216,6 +218,8 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   useEffect(() => {
     urlRef.current = url;
   }, [url]);
+  // The url prop the webview was last created at or sent to (the url effect).
+  const appliedUrlRef = useRef<string | null>(null);
   const tabIdRef = useRef(tabId);
   tabIdRef.current = tabId;
 
@@ -315,6 +319,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       webview.style.border = "0";
       webview.style.background = "white";
       webview.src = initialUrl;
+      appliedUrlRef.current = initialUrl;
       host.appendChild(webview);
       webviewRef.current = webview;
     }
@@ -329,6 +334,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         return;
       }
       domReadyRef.current = true;
+      if (tabIdRef.current) noteTabReady(tabIdRef.current);
       setDomReady(true);
       setCanGoBack(wv.canGoBack?.() ?? false);
       setCanGoForward(wv.canGoForward?.() ?? false);
@@ -433,6 +439,11 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
     if (!url) return;
     const webview = getLiveWebview();
     if (!webview) return; // not created yet — src attribute carries the initial url
+    // Only a url prop that changed since it was last applied. This also runs
+    // when dom-ready flips, and an agent's loadURL made right after a page
+    // became ready (a woken tab) must not be pulled back to the prop.
+    if (appliedUrlRef.current === url) return;
+    appliedUrlRef.current = url;
     try {
       const live = webview.getURL?.() ?? "";
       if (live && live !== url) {
@@ -721,14 +732,23 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         }
       },
       loadURL: (next: string) => {
-        try {
-          const wv = getLiveWebview();
-          if (!wv) return;
-          wv.loadURL?.(next);
-        } catch {
-          const wv = getLiveWebview();
-          if (wv) wv.src = next;
-        }
+        const wv = getLiveWebview();
+        if (!wv) return Promise.resolve();
+        return new Promise<void>((resolve) => {
+          const events = ["did-navigate", "did-navigate-in-page", "did-fail-load"];
+          const settle = () => {
+            for (const name of events) wv.removeEventListener(name, settle);
+            resolve();
+          };
+          for (const name of events) wv.addEventListener(name, settle);
+          try {
+            // The load itself may never finish (a page that alerts while it
+            // loads); its failure is reported by did-fail-load above.
+            void wv.loadURL?.(next)?.catch(() => {});
+          } catch {
+            wv.src = next;
+          }
+        });
       },
       getURL: () => {
         try {
