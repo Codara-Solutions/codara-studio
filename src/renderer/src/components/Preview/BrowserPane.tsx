@@ -98,6 +98,16 @@ type WebviewElement = HTMLElement &
     ) => void;
   };
 
+/**
+ * How a loadURL ended: "loaded" at the new page's dom-ready, a same-page move
+ * or a load that ended without a page (a 204, a download, a failure);
+ * "committed" when the page arrived but is still loading after
+ * LOAD_AFTER_COMMIT_MS; "timeout" when nothing came back within LOAD_TIMEOUT_MS.
+ */
+export type LoadOutcome = "loaded" | "committed" | "timeout";
+const LOAD_TIMEOUT_MS = 15_000;
+const LOAD_AFTER_COMMIT_MS = 5_000;
+
 export interface BrowserPaneHandle {
   // `ignoreCache: true` calls Chromium's `reloadIgnoringCache` (hard reload).
   // Default is the normal cache-respecting reload — existing callers stay
@@ -106,7 +116,7 @@ export interface BrowserPaneHandle {
   goBack: () => void;
   goForward: () => void;
   /** Settles at the new page's dom-ready, a same-page move or a failure, not at its full load. */
-  loadURL: (url: string) => Promise<void>;
+  loadURL: (url: string) => Promise<LoadOutcome>;
   getURL: () => string;
   getTitle: () => string;
   openDevTools: () => void;
@@ -733,8 +743,8 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       },
       loadURL: (next: string) => {
         const wv = getLiveWebview();
-        if (!wv) return Promise.resolve();
-        return new Promise<void>((resolve) => {
+        if (!wv) return Promise.resolve<LoadOutcome>("loaded");
+        return new Promise<LoadOutcome>((resolve) => {
           const sameUrl = (raw: string) => {
             try {
               return new URL(raw).href;
@@ -743,34 +753,52 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
             }
           };
           const ours = new Set([sameUrl(next)]);
+          // Every event below may still come from the old page (its own
+          // DOMContentLoaded, a pushState, the end of its load), which lives
+          // until the new one commits. So none counts before this load
+          // started, dom-ready only once it committed, and a same-page move
+          // only to this load's URL. A 204 or a download sends no
+          // did-fail-load, only did-stop-loading; a -3 for another URL is the
+          // earlier load this one replaced.
           let started = false;
-          const follow = (e: { type?: string; isMainFrame?: boolean; url?: string }) => {
-            if (e.isMainFrame === false || !e.url) return;
-            if (e.type === "did-redirect-navigation") ours.add(sameUrl(e.url));
-            else if (ours.has(sameUrl(e.url))) started = true;
+          let committed = false;
+          let afterCommit: ReturnType<typeof setTimeout> | undefined;
+          const onStart = (e: { isMainFrame?: boolean; url?: string }) => {
+            if (e.isMainFrame !== false && e.url && ours.has(sameUrl(e.url))) started = true;
           };
-          // dom-ready, not the commit: a page that alerts while it loads holds
-          // the call here, so the dialog guard answers with the dialog. A
-          // subframe's move is not this page, and neither is a -3 (aborted)
-          // for another URL, the earlier load this one replaced. A 204 sends
-          // no did-fail-load at all, only did-stop-loading once this load has
-          // started; a download or a blocked navigate ends in a -3 for this
-          // load or one of its redirects.
-          const settle = (e?: { type?: string; isMainFrame?: boolean; errorCode?: number; validatedURL?: string }) => {
-            if (e && e.isMainFrame === false) return;
-            if (e?.errorCode === -3 && !ours.has(sameUrl(e.validatedURL ?? ""))) return;
-            if (e?.type === "did-stop-loading" && !started) return;
-            for (const name of ["dom-ready", "did-navigate-in-page", "did-fail-load", "did-stop-loading"]) wv.removeEventListener(name, settle);
-            wv.removeEventListener("did-start-navigation", follow);
-            wv.removeEventListener("did-redirect-navigation", follow);
-            resolve();
+          const onRedirect = (e: { isMainFrame?: boolean; url?: string }) => {
+            if (e.isMainFrame !== false && e.url) ours.add(sameUrl(e.url));
           };
-          wv.addEventListener("did-start-navigation", follow);
-          wv.addEventListener("did-redirect-navigation", follow);
-          for (const name of ["dom-ready", "did-navigate-in-page", "did-fail-load", "did-stop-loading"]) wv.addEventListener(name, settle);
+          const onCommit = () => {
+            if (!started) return;
+            committed = true;
+            afterCommit ??= setTimeout(() => finish("committed"), LOAD_AFTER_COMMIT_MS);
+          };
+          const onEnd = (e: { type?: string; isMainFrame?: boolean; url?: string; errorCode?: number; validatedURL?: string }) => {
+            if (!started || e.isMainFrame === false) return;
+            if (e.type === "dom-ready" && !committed) return;
+            if (e.type === "did-navigate-in-page" && !ours.has(sameUrl(e.url ?? ""))) return;
+            if (e.errorCode === -3 && !ours.has(sameUrl(e.validatedURL ?? ""))) return;
+            finish("loaded");
+          };
+          const ends = ["dom-ready", "did-navigate-in-page", "did-fail-load", "did-stop-loading"];
+          const timer = setTimeout(() => finish(committed ? "committed" : "timeout"), LOAD_TIMEOUT_MS);
+          const finish = (outcome: LoadOutcome) => {
+            clearTimeout(timer);
+            clearTimeout(afterCommit);
+            wv.removeEventListener("did-start-navigation", onStart);
+            wv.removeEventListener("did-redirect-navigation", onRedirect);
+            wv.removeEventListener("did-navigate", onCommit);
+            for (const name of ends) wv.removeEventListener(name, onEnd);
+            resolve(outcome);
+          };
+          wv.addEventListener("did-start-navigation", onStart);
+          wv.addEventListener("did-redirect-navigation", onRedirect);
+          wv.addEventListener("did-navigate", onCommit);
+          for (const name of ends) wv.addEventListener(name, onEnd);
           try {
             // The load itself may never finish (a page that alerts while it
-            // loads); its failure is reported by did-fail-load above.
+            // loads); the events above and the timers end the wait.
             void wv.loadURL?.(next)?.catch(() => {});
           } catch {
             wv.src = next;

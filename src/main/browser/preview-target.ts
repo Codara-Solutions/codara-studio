@@ -32,6 +32,9 @@ async function resolvePreviewTarget(ref: BrowserTabRef | null, params: Record<st
   const { wc, info } = await resolvePreviewGuest(scoped);
   const session = previewCdpSession(wc);
   const tabId = info.tabId;
+  // A navigate loads into the tab its lookup picked and may have woken, not
+  // a fresh pick that a tab switch in between could change.
+  if (params.lookupWake === "blank" && !scoped.tabId && tabId) params.lookupTabId = tabId;
   const target: BrowserTarget = {
     kind: "preview",
     ref: formatTabRef({ kind: "preview", tabId }),

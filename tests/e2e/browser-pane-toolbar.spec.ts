@@ -54,9 +54,16 @@ async function launch(): Promise<Fixture> {
   }));
   const server: Server = createServer((req, res) => {
     const name = (req.url ?? "/").replace(/[^a-z]/g, "") || "dashboard";
-    // A 204 keeps the current page: Chromium ends that load with -3 (aborted).
+    // A 204 or a download keeps the current page; Electron sends no
+    // did-fail-load for either, only did-stop-loading.
     if (name === "nocontent") return void res.writeHead(204).end();
     if (name === "bounce") return void res.writeHead(302, { location: "/nocontent" }).end();
+    if (name === "download") return void res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": 'attachment; filename="report.bin"' }).end("report");
+    // "hang" never answers; "stream" commits but never reaches DOMContentLoaded.
+    if (name === "hang") return;
+    if (name === "stream") return void res.writeHead(200, { "content-type": "text/html" }).write("<!doctype html><html><head><title>Acme stream</title></head><body><p>Loading");
+    // "ticker" moves itself (pushState) all the time, as a busy single-page app can.
+    if (name === "ticker") return void res.writeHead(200, { "content-type": "text/html" }).end(page("Acme ticker").replace("<body>", '<body><script>setInterval(() => history.pushState(null, "", "/ticker?" + Date.now()), 100)</script>'));
     const send = () => {
       res.writeHead(200, { "content-type": "text/html" });
       // "alert" asks while it loads: no DOMContentLoaded until it is answered.
@@ -87,6 +94,7 @@ async function launch(): Promise<Fixture> {
     app, page: window, home, cwd: workspaceDir, url, request,
     close: async () => {
       await app.close();
+      server.closeAllConnections();
       await new Promise((done) => server.close(done));
       await rm(root, { recursive: true, force: true });
     },
@@ -589,20 +597,76 @@ test("navigates on an agent's sleeping tab: url-only reuses and guards it, group
   }
 });
 
-test("a navigate the page answers with 204 returns at once, even after a redirect", async () => {
-  test.setTimeout(120_000);
+test("a navigate ends with its own page: a 204, a redirect to one or a download at once, never on the old page's moves, and a page that never answers fails", async () => {
+  test.setTimeout(150_000);
   const fixture = await launch();
   const { page, request } = fixture;
   try {
     const tab = await openBrowserTab(fixture, "docs");
-    await expect.poll(() => pageTitle(page, tab), { timeout: 10_000 }).toBe("Acme docs");
-    for (const path of ["nocontent", "bounce"]) {
+    // Downloads land in the workspace instead of asking where to save.
+    await fixture.app.evaluate(({ webContents }, dir) => {
+      for (const wc of webContents.getAllWebContents()) {
+        const session = wc.session as typeof wc.session & { savesTo?: string };
+        if (session.savesTo) continue;
+        session.savesTo = dir;
+        session.on("will-download", (_event, item) => item.setSavePath(`${dir}/${item.getFilename()}`));
+      }
+    }, fixture.cwd);
+    const go = async (path: string) => {
       const started = Date.now();
-      const result = (await request("preview.navigate", { tabId: tab, url: `${fixture.url}${path}` }).catch((error) => ({ error: String(error) }))) as { url?: string; error?: string };
-      expect.soft(Date.now() - started, `${path}: no wait for a page that never comes`).toBeLessThan(5_000);
+      const result = (await request("preview.navigate", { tabId: tab, url: `${fixture.url}${path}` }).catch((error) => ({ error: String(error) }))) as { url?: string; error?: string; loading?: boolean };
+      return { ...result, ms: Date.now() - started };
+    };
+
+    for (const path of ["nocontent", "bounce", "download"]) {
+      const result = await go(path);
+      expect.soft(result.ms, `${path}: no wait for a page that never comes`).toBeLessThan(5_000);
       expect.soft(result.error, `${path}: no error`).toBeUndefined();
+      expect.soft(result.url, `${path}: the result names the page that stayed`).toBe(`${fixture.url}docs`);
       expect.soft(await pageTitle(page, tab), `${path}: the page stays`).toBe("Acme docs");
     }
+
+    // The old page moving itself while the new one loads does not end the call.
+    expect.soft((await go("ticker")).error).toBeUndefined();
+    const slow = await go("slow");
+    expect.soft(slow.url, "the result names the new page, not the old one's last move").toBe(`${fixture.url}slow`);
+    expect.soft(await pageTitle(page, tab), "the new page is there when the call returns").toBe("Acme slow");
+
+    // A page that commits but never finishes loading answers in a few seconds, marked loading.
+    const stream = await go("stream");
+    expect.soft(stream.ms, "a committed page does not hold the call for the full bound").toBeLessThan(10_000);
+    expect.soft(stream.url, "the result names the committed page").toBe(`${fixture.url}stream`);
+    expect.soft(stream.loading, "and says it is still loading").toBe(true);
+
+    // A page that never answers fails instead of reporting the old page as reached.
+    const hang = await go("hang");
+    expect.soft(hang.ms, "bounded").toBeLessThan(25_000);
+    expect.soft(hang.error, "the call fails").toMatch(/did not respond/);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("an agent with no tab of its own leaves the user's tabs alone when it navigates", async () => {
+  test.setTimeout(120_000);
+  const fixture = await launch();
+  const { page, request } = fixture;
+  try {
+    const asleepTab = await openBrowserTab(fixture, "blog");
+    const userTab = await openBrowserTab(fixture, "docs");
+    await pane(page, userTab).getByTestId("preview-tabs-chip").click();
+    await page.getByTestId("preview-tabs-view").locator(`[data-testid="preview-tab-row"][data-tab-id="${asleepTab}"]`).getByRole("button", { name: /^Sleep / }).click();
+    await page.keyboard.press("Escape");
+    await expect(pane(page, asleepTab).locator("webview")).toHaveCount(0);
+
+    const { paneId } = await request("terminal.create", { cwd: fixture.cwd, title: "Agent pane", command: "sleep 600" });
+    const opened = (await request("preview.navigate", { callerPaneId: paneId, url: `${fixture.url}dashboard` })) as { tabId: string; opened: boolean; url: string };
+    expect.soft(opened.opened, "the agent gets a tab of its own").toBe(true);
+    expect.soft([userTab, asleepTab], "not one of the user's").not.toContain(opened.tabId);
+    expect.soft(await pane(page, userTab).locator("[data-agent-banner]").count(), "the user's tab never shows the agent driving it").toBe(0);
+    const listed = (await request("preview.list", {})).tabs as Array<{ id: string; asleep?: boolean }>;
+    expect.soft(listed.find((tab) => tab.id === asleepTab)?.asleep, "the user's sleeping tab stays asleep").toBe(true);
+    expect.soft(await pane(page, asleepTab).locator("webview").count()).toBe(0);
   } finally {
     await fixture.close();
   }

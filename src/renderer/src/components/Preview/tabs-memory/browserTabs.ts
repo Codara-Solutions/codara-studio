@@ -155,20 +155,26 @@ export function sleepTab(id: string): boolean {
 // loading its old page first.
 const wakeUrls = new Map<string, string>();
 // Woken tabs whose page has not reached dom-ready yet, whoever woke them (the
-// user's click, the tab coming on screen, an agent): an agent's call waits.
-const wakingTabs = new Set<string>();
+// user's click, the tab coming on screen, an agent), with when they woke: an
+// agent's call waits, but not on a page that never got there.
+const wakingTabs = new Map<string, number>();
+const WAKE_SETTLE_MS = 15_000;
 
 export function wakeTab(id: string, url?: string): void {
   const record = records.get(id);
   if (!record?.asleep) return;
   if (url) wakeUrls.set(id, url);
-  wakingTabs.add(id);
+  wakingTabs.set(id, Date.now());
   patch(id, { asleep: false, asleepAt: null, lastSeenAt: Date.now() });
   readMemorySoon();
 }
 
 export function isTabWaking(id: string): boolean {
-  return wakingTabs.has(id);
+  const since = wakingTabs.get(id);
+  if (since === undefined) return false;
+  if (Date.now() - since < WAKE_SETTLE_MS) return true;
+  wakingTabs.delete(id);
+  return false;
 }
 
 /** The tab's page reached dom-ready. */
