@@ -22,6 +22,7 @@
 import { createReadStream, promises as fs, statSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { basename, dirname, join } from "node:path";
+import { sweepAtomicTemps, writeFileAtomic } from "./fs-atomic";
 import { lookupUsagePrice } from "./model-prices";
 import {
   UsageAggregator,
@@ -108,6 +109,14 @@ const fileCache: ScanCache = new Map();
 let cacheLoaded: Promise<void> | null = null;
 let cacheLoadedFrom: string | null = null;
 let cacheDirty = false;
+/** Counts changes to the memo, so a persist knows whether one arrived while it wrote. */
+let cacheVersion = 0;
+let persisting: Promise<void> = Promise.resolve();
+
+function markCacheDirty(): void {
+  cacheDirty = true;
+  cacheVersion += 1;
+}
 
 /* ── Walking ─────────────────────────────────────────────────────────────── */
 
@@ -398,6 +407,7 @@ function ensureScanCacheLoaded(cachePath: string): Promise<void> {
     fileCache.clear();
     cacheLoadedFrom = cachePath;
     cacheLoaded = (async () => {
+      await sweepAtomicTemps(cachePath).catch(() => undefined);
       try {
         decodeScanCache(await fs.readFile(cachePath, "utf8"), fileCache);
       } catch {
@@ -408,13 +418,27 @@ function ensureScanCacheLoaded(cachePath: string): Promise<void> {
   return cacheLoaded;
 }
 
-async function persistScanCache(cachePath: string): Promise<void> {
+// Scans already run one at a time through scanQueue, each persisting before
+// the next starts. This keeps that true for any caller that persists outside
+// it: one write at a time, each encoding the memo as it is when its turn
+// comes, so an older snapshot can never land last.
+function persistScanCache(cachePath: string): Promise<void> {
+  const next = persisting.then(() => writeScanCache(cachePath));
+  persisting = next.catch(() => undefined);
+  return next;
+}
+
+async function writeScanCache(cachePath: string): Promise<void> {
   if (!cacheDirty) return;
+  const version = cacheVersion;
   try {
-    await fs.writeFile(cachePath, encodeScanCache(fileCache), "utf8");
+    // A torn memo is dropped whole on the next load, which then rereads
+    // every transcript.
+    await writeFileAtomic(cachePath, encodeScanCache(fileCache));
     // Cleared only after the write lands, so a failed persist retries on the
-    // next scan instead of leaving disk permanently stale.
-    cacheDirty = false;
+    // next scan instead of leaving disk permanently stale; a change made
+    // during the write keeps it dirty for the next one.
+    if (cacheVersion === version) cacheDirty = false;
   } catch (err) {
     console.warn("[usage-analytics] could not persist the scan cache:", err);
   }
@@ -490,7 +514,7 @@ export async function readFileRecords(
     provider,
     records,
   });
-  cacheDirty = true;
+  markCacheDirty();
   return records;
 }
 
@@ -631,7 +655,7 @@ async function scanUsageNow({ roots, cachePath, input }: UsageScanRequest): Prom
     windowStartMs,
     retentionCutoffMs: retentionCutoffMs(startedAtMs, windowStartMs),
   });
-  if (pruned > 0) cacheDirty = true;
+  if (pruned > 0) markCacheDirty();
   await persistScanCache(cachePath);
 
   return {

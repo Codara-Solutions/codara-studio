@@ -13,7 +13,7 @@
 import { createReadStream, promises as fs } from "node:fs";
 import { basename } from "node:path";
 import { createInterface } from "node:readline";
-import { writeFileAtomic } from "./fs-atomic";
+import { sweepAtomicTemps, writeFileAtomic } from "./fs-atomic";
 import { listTranscriptFiles, type UsageScanRoot } from "./usage-scan";
 
 export interface ClaudeLimitHit {
@@ -174,6 +174,7 @@ async function loadMemo(memoPath: string): Promise<void> {
   if (memoLoadedFrom === memoPath) return;
   memo.clear();
   memoLoadedFrom = memoPath;
+  await sweepAtomicTemps(memoPath).catch(() => undefined);
   try {
     const raw = JSON.parse(await fs.readFile(memoPath, "utf8")) as { version?: number; files?: Record<string, MemoEntry> };
     if (raw.version !== MEMO_VERSION || !raw.files) return;

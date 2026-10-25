@@ -60,7 +60,7 @@ import { codaraHome } from "./codara-home";
 import { logMain } from "./file-log";
 import { isTrustedOnSender, requireTrustedSender } from "./main-window-trust";
 import { detectAgentRuntimes } from "./agent-runtimes";
-import { getPreferenceCached, loadPreferences, setPreference } from "./preferences-store";
+import { getPreferenceCached, loadPreferences, onPreferenceChange, setPreference } from "./preferences-store";
 import { openInSystemBrowser, openLinkFromApp } from "./open-link";
 import * as pty from "./pty-manager";
 import { systemResourceSnapshot, type PaneRoot } from "./system-metrics";
@@ -1115,6 +1115,12 @@ export function registerIpc(): void {
         .catch((err: unknown) => logMain("usage", `forecast reading not recorded: ${String(err).slice(0, 200)}`));
     }
     return overview;
+  });
+  onPreferenceChange((key, prefs) => {
+    if (key !== "usageForecast" || prefs.usageForecast === true) return;
+    void import("./usage-analytics")
+      .then(({ releaseForecastWorker }) => releaseForecastWorker())
+      .catch(() => undefined);
   });
   handle("usage-forecast:read", async () => {
     if (getPreferenceCached("usageForecast") !== true) return null;
