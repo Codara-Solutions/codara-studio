@@ -11,6 +11,7 @@ import {
 } from "./markdown-links";
 import { chatUrlTransform, remarkTabLinks } from "./remark-tab-links";
 import { splitMarkdownBlocks } from "./markdown-blocks";
+import { cachedMermaidSvg, rememberMermaidSvg } from "./mermaid-cache";
 import { isTabLink } from "@shared/tab-links";
 import { openTabLink } from "../../tabs/tabLinkBridge";
 
@@ -232,14 +233,20 @@ const MarkdownBlock = React.memo(function MarkdownBlock({ text }: { text: string
 function MermaidDiagram({ source }: { source: string }) {
   const reactId = useId();
   const id = useMemo(() => `cora-mermaid-${reactId.replace(/[^a-zA-Z0-9_-]/g, "")}`, [reactId]);
-  const [svg, setSvg] = useState<string>("");
+  const [svg, setSvg] = useState<string>(() => cachedMermaidSvg(source, id));
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
+    const cached = cachedMermaidSvg(source, id);
+    if (cached) {
+      setSvg(cached);
+      return;
+    }
     let cancelled = false;
     void import("mermaid").then(async ({ default: mermaid }) => {
       mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "dark" });
       try {
         const rendered = await mermaid.render(id, source);
+        rememberMermaidSvg(source, id, rendered.svg);
         if (!cancelled) setSvg(rendered.svg);
       } catch (reason) {
         if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason));

@@ -18,6 +18,8 @@
 //     HTML of the whole text at every point of a stream, so finished pieces
 //     can skip re-parsing without anything on screen changing. Only the live
 //     turn's prose is cut; a settled message renders whole.
+//   - A Mermaid diagram remounted when pieces merge paints its cached
+//     drawing at once, under its own render id.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -153,23 +155,58 @@ const BLOCK_SAMPLES = [
   "[foo\nbar]: /url\n\nsee [foo bar]",
   "see [x]\n\n[\nx\n]: /url",
   "\uFEFFa\n\n\uFEFF# h\n\n\uFEFF    code\n\n\uFEFF```\n\nx\n```",
+  "Intro:\n\n    npm i\n\n3. Then run",
+  "1. Install\n\nThen:\n\n    npm i\n\n2. Run\n\n    x\n\n\n-\n\n\ty\n\n10. b",
+  "- ```\n  a\n\n> b\n\n> ~~~\n> c\n\nd\n\n1. ```js\n   e\n\nf",
+  "[Docs](https://x.dev) intro\n\n```py\ndef f() -> list[int]:\n```\n\n[a\\]b, [c] and [d][e]\n\n[e]: /url",
 ];
 
-function* lcg(seed) {
-  let state = seed;
-  for (;;) {
-    state = (state * 1103515245 + 12345) % 2147483648;
-    yield state / 2147483648;
-  }
+// mulberry32: integer math only, so it does not fall into a short cycle the
+// way a float LCG multiplying past 2^53 does.
+function seeded(seed) {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
 }
 
-const FUZZ_LINES = ["", "", "", "text line", "- item", "1. item", "   ```", " ```", "```", "```js", "~~~", "  code", "    deep", "> quote", "<span>", "| a | b |", "|---|---|", "---", "\tTab", "````", "* star"];
+const FUZZ_LINES = [
+  "", "", "", "", "", "", "text line", "text line", "text line", "More prose.", "- item", "1. item", "2. two", "10. ten", "-", "* star", "+ plus",
+  "   ```", " ```", "```", "```js", "~~~", "````", "  code", "    deep", "      deeper", "\tTab",
+  "> quote", ">", "| a | b |", "|---|---|", "---", "===", "# heading", "- [ ] task",
+  "[link](https://x.dev) text", "def f() -> list[int]:", "[a\\]b]",
+];
+// Lines after which nothing more is cut; kept rare so most documents still are.
+const FUZZ_STOPPERS = ["<span>", "- ```", "> ```", "1. ~~~", "[ref]: /url"];
 
 function fuzzDoc(random) {
   const lines = [];
-  const count = 4 + Math.floor(random.next().value * 30);
-  for (let i = 0; i < count; i += 1) lines.push(FUZZ_LINES[Math.floor(random.next().value * FUZZ_LINES.length)]);
-  return lines.join("\n");
+  const count = 4 + Math.floor(random() * 30);
+  for (let i = 0; i < count; i += 1) {
+    const pool = random() < 0.02 ? FUZZ_STOPPERS : FUZZ_LINES;
+    lines.push(pool[Math.floor(random() * pool.length)]);
+  }
+  return lines.join(random() < 0.1 ? "\r\n" : "\n");
+}
+
+async function loadMermaidCache() {
+  const out = await esbuild.build({
+    entryPoints: [path.join(CHAT, "mermaid-cache.ts")],
+    bundle: true,
+    format: "cjs",
+    platform: "node",
+    write: false,
+    logLevel: "silent",
+    tsconfig: path.join(ROOT, "tsconfig.node.json"),
+  });
+  const mod = { exports: {} };
+  // eslint-disable-next-line no-new-func
+  new Function("module", "exports", "require", out.outputFiles[0].text)(mod, mod.exports, require);
+  return mod.exports;
 }
 
 let passed = 0;
@@ -326,8 +363,8 @@ async function main() {
         assert.equal(B.pieces(text), B.whole(text), JSON.stringify(text));
       }
     }
-    const random = lcg(20261025);
-    for (let doc = 0; doc < 400; doc += 1) {
+    const random = seeded(20261025);
+    for (let doc = 0; doc < 1500; doc += 1) {
       const text = fuzzDoc(random);
       assert.equal(B.pieces(text), B.whole(text), JSON.stringify(text));
     }
@@ -339,6 +376,11 @@ async function main() {
     assert.deepEqual(B.splitMarkdownBlocks("x\n\n[d]: https://e.com\n\ny"), ["x\n\n[d]: https://e.com\n\ny"]);
     // A "]:" with no line opening a bracket before it (a type hint in code) still cuts.
     assert.deepEqual(B.splitMarkdownBlocks("```py\ndef f() -> list[int]:\n```\n\nDone."), ["```py\ndef f() -> list[int]:\n```", "Done."]);
+    // Nor does a link on a line that opens a bracket: only "]:" right after its label holds a definition.
+    assert.deepEqual(B.splitMarkdownBlocks("[Docs](https://x.dev)\n\n```py\ndef f() -> list[int]:\n```"), ["[Docs](https://x.dev)", "```py\ndef f() -> list[int]:\n```"]);
+    assert.equal(B.splitMarkdownBlocks("x\n\n[a\\]b\nc]: /url").length, 1);
+    // A CR that ends the text is half of a CRLF still arriving, not a lone CR.
+    assert.deepEqual(B.splitMarkdownBlocks("a\r\n\r\nb\r"), ["a\r", "b\r"]);
   });
 
   test("Markdown renders memoized pieces with the separator a whole render has", () => {
@@ -349,6 +391,22 @@ async function main() {
     assert.equal((conversation.match(/streaming=/g) ?? []).length, 1);
     assert.match(markdown, /\{index > 0 && "\\n"\}\s*<MarkdownBlock text=\{block\} \/>/);
     assert.match(markdown, /const MarkdownBlock = React\.memo\(function MarkdownBlock/);
+  });
+
+  const M = await loadMermaidCache();
+  test("a remounted Mermaid diagram reuses its drawing", () => {
+    assert.equal(M.cachedMermaidSvg("graph TD; A-->B", "cora-mermaid-r2"), "");
+    M.rememberMermaidSvg("graph TD; A-->B", "cora-mermaid-r1", '<svg id="cora-mermaid-r1"><style>#cora-mermaid-r1 .node{}</style></svg>');
+    assert.equal(M.cachedMermaidSvg("graph TD; A-->B", "cora-mermaid-r2"), '<svg id="cora-mermaid-r2"><style>#cora-mermaid-r2 .node{}</style></svg>');
+    // Least recently used goes first; a read counts as use.
+    for (let index = 0; index < M.MERMAID_CACHE_LIMIT; index += 1) {
+      if (index === 1) M.cachedMermaidSvg("graph TD; A-->B", "x");
+      M.rememberMermaidSvg(`graph ${index}`, "i", "<svg id=\"i\"/>");
+    }
+    assert.notEqual(M.cachedMermaidSvg("graph TD; A-->B", "x"), "");
+    assert.equal(M.cachedMermaidSvg("graph 0", "x"), "");
+    assert.match(markdown, /const \[svg, setSvg\] = useState<string>\(\(\) => cachedMermaidSvg\(source, id\)\);/);
+    assert.match(markdown, /rememberMermaidSvg\(source, id, rendered\.svg\);\s*if \(!cancelled\) setSvg\(rendered\.svg\);/);
   });
 
   console.log(`\n${passed} passed`);

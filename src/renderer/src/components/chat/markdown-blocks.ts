@@ -4,26 +4,33 @@
 //
 // A cut is made only at a blank line that CommonMark guarantees closes every
 // open block: the next line starts at column 0, is not a list item while a
-// list may be open (it would continue that list, and could turn it loose),
+// list may be open (it would continue that list, and could turn it loose) or
+// right after indented code (micromark then reads the item as paragraph text),
 // and no top-level code fence is open. Anything this scanner cannot be sure of stops cutting
 // from there on, which only makes the last piece longer. Raw HTML is one of
 // those: an HTML block can run past blank lines, and a fence line inside one
-// is not a fence, so the first line that may start one ends the cutting.
+// is not a fence, so the first line that may start one ends the cutting. A
+// fence opened on a list or quote marker line is another: its container, not
+// a closing fence, may end it, with or without the blank lines before.
 // Link reference and footnote definitions apply to the whole document, so a
-// text that may contain one is never cut at all; a label can hold escaped
-// brackets and line breaks, so any "]:" after a line opening a bracket counts.
+// text that may contain one is never cut at all: a line opening a bracket
+// whose first unescaped "]" is followed by ":" (a label can hold escaped
+// brackets and line breaks).
 // A lone CR is a line ending to the parser but not to this scanner, and a
 // byte-order mark is dropped only at the start of a document, so a text with
-// either past its first character is never cut either.
+// either past its first character is never cut either. A CR ending the text
+// is the first half of a CRLF still streaming in and ends the last line
+// either way.
 
 const DEFINITION_START = /^[ \t>*+\-.)\d]*\[/gm;
-const UNCUTTABLE = /\r(?!\n)|[^]\uFEFF/;
+const UNCUTTABLE = /\r(?!\n|$)|[^]\uFEFF/;
 const BLANK = /^[ \t]*$/;
 const LIST_ITEM = /^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)/;
 const BACKTICK_FENCE = /^( {0,3})(`{3,})[^`]*$/;
 const TILDE_FENCE = /^( {0,3})(~{3,})[^]*$/;
 const FENCE_CLOSE = /^( {0,3})(`{3,}|~{3,})[ \t]*$/;
 const HTML_START = /^ {0,3}</;
+const CONTAINER_FENCE = /^ {0,3}(?:[-*+]|\d{1,9}[.)]|>)[ \t>*+\-.)\d]*(?:`{3}|~{3})/;
 
 interface OpenFence {
   char: string;
@@ -48,7 +55,14 @@ function openingFence(line: string): OpenFence | null {
 
 function mayHoldDefinition(text: string): boolean {
   for (const match of text.matchAll(DEFINITION_START)) {
-    if (text.includes("]:", match.index)) return true;
+    for (let index = match.index + match[0].length; index < text.length; index += 1) {
+      const char = text[index];
+      if (char === "\\") index += 1;
+      else if (char === "]") {
+        if (text[index + 1] === ":") return true;
+        break;
+      }
+    }
   }
   return false;
 }
@@ -61,6 +75,7 @@ export function splitMarkdownBlocks(text: string): string[] {
   let fence: OpenFence | null = null;
   let blankFrom = -1;
   let listOpen = false;
+  let lastIndent = 0;
   for (const raw of text.split("\n")) {
     const lineStart = offset;
     offset += raw.length + 1;
@@ -82,14 +97,16 @@ export function splitMarkdownBlocks(text: string): string[] {
       continue;
     }
     const listItem = LIST_ITEM.test(line);
-    if (blankFrom > start && indentOf(line) === 0 && !(listItem && listOpen)) {
+    const indent = indentOf(line);
+    if (blankFrom > start && indent === 0 && !(listItem && (listOpen || lastIndent >= 4))) {
       blocks.push(text.slice(start, blankFrom - 1));
       start = lineStart;
       listOpen = false;
     }
     blankFrom = -1;
+    lastIndent = indent;
     if (listItem) listOpen = true;
-    if (HTML_START.test(line)) break;
+    if (HTML_START.test(line) || CONTAINER_FENCE.test(line)) break;
     fence = openingFence(line);
   }
   blocks.push(text.slice(start));
