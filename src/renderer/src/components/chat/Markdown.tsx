@@ -10,6 +10,7 @@ import {
   resolveChatPath,
 } from "./markdown-links";
 import { chatUrlTransform, remarkTabLinks } from "./remark-tab-links";
+import { splitMarkdownBlocks } from "./markdown-blocks";
 import { isTabLink } from "@shared/tab-links";
 import { openTabLink } from "../../tabs/tabLinkBridge";
 
@@ -194,21 +195,37 @@ const COMPONENTS: Components = {
  * enabled, so model output cannot inject DOM. GFM and highlight.js cover the
  * common tables/task-lists/code path; Mermaid runs in strict security mode. */
 function Markdown({ text }: { text: string }) {
+  const blocks = useMemo(() => splitMarkdownBlocks(text), [text]);
+  // The newline between pieces is the text node the whole document's hast
+  // puts between top-level blocks, so the DOM matches an unsplit render.
   return (
     <div className="cora-md">
-      <ReactMarkdown
-        remarkPlugins={REMARK_PLUGINS}
-        rehypePlugins={REHYPE_PLUGINS}
-        components={COMPONENTS}
-        urlTransform={chatUrlTransform}
-      >
-        {text}
-      </ReactMarkdown>
+      {blocks.map((block, index) => (
+        <React.Fragment key={index}>
+          {index > 0 && "\n"}
+          <MarkdownBlock text={block} />
+        </React.Fragment>
+      ))}
     </div>
   );
 }
 
 export default React.memo(Markdown);
+
+// Memoized per piece: while a reply streams, only the piece still growing
+// gets new text, so the finished ones above it are never parsed again.
+const MarkdownBlock = React.memo(function MarkdownBlock({ text }: { text: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={REMARK_PLUGINS}
+      rehypePlugins={REHYPE_PLUGINS}
+      components={COMPONENTS}
+      urlTransform={chatUrlTransform}
+    >
+      {text}
+    </ReactMarkdown>
+  );
+});
 
 function MermaidDiagram({ source }: { source: string }) {
   const reactId = useId();

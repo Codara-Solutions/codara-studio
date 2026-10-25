@@ -14,6 +14,9 @@
 //   - Markdown outside a run (no workspace context) keeps external-only links.
 //   - Chat code is highlighted with theme tokens scoped to .cora-md, code
 //     blocks offer Copy (skipping Mermaid), and table rows are divided by horizontal rules.
+//   - A reply rendered piece by piece (markdown-blocks.ts) gives exactly the
+//     HTML of the whole text at every point of a stream, so finished pieces
+//     can skip re-parsing without anything on screen changing.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -76,6 +79,90 @@ async function loadHighlightPipeline() {
   // eslint-disable-next-line no-new-func
   new Function("module", "exports", "require", out.outputFiles[0].text)(mod, mod.exports, require);
   return mod.exports;
+}
+
+// The chat chain through react-markdown and React's server renderer, whole
+// and split into pieces the way Markdown.tsx renders them.
+async function loadBlockRenderer() {
+  const out = await esbuild.build({
+    stdin: {
+      contents: `
+        import React from "react";
+        import { renderToStaticMarkup } from "react-dom/server";
+        import ReactMarkdown from "react-markdown";
+        import remarkGfm from "remark-gfm";
+        import remarkBreaks from "remark-breaks";
+        import { rehypeHighlightShared } from "./src/renderer/src/lib/rehype-highlight-shared";
+        import { chatUrlTransform, remarkTabLinks } from "./src/renderer/src/components/chat/remark-tab-links";
+        import { splitMarkdownBlocks } from "./src/renderer/src/components/chat/markdown-blocks";
+        const props = { remarkPlugins: [remarkGfm, remarkBreaks, remarkTabLinks], rehypePlugins: [rehypeHighlightShared], urlTransform: chatUrlTransform };
+        const md = (text) => React.createElement(ReactMarkdown, props, text);
+        export const whole = (text) => renderToStaticMarkup(md(text));
+        export const pieces = (text) =>
+          renderToStaticMarkup(React.createElement(React.Fragment, null, ...splitMarkdownBlocks(text).flatMap((piece, index) => (index ? ["\\n", md(piece)] : [md(piece)]))));
+        export { splitMarkdownBlocks };
+      `,
+      resolveDir: ROOT,
+      loader: "ts",
+    },
+    bundle: true,
+    format: "cjs",
+    platform: "node",
+    write: false,
+    logLevel: "silent",
+    tsconfig: path.join(ROOT, "tsconfig.node.json"),
+  });
+  const mod = { exports: {} };
+  // eslint-disable-next-line no-new-func
+  new Function("module", "exports", "require", out.outputFiles[0].text)(mod, mod.exports, require);
+  return mod.exports;
+}
+
+// Shapes where cutting at a blank line would change the parse: loose lists,
+// fences holding blank lines (also indented, in list items, longer fences,
+// tildes), raw HTML, definitions, tabs, CRLF, and a fence left open.
+const BLOCK_SAMPLES = [
+  "Intro paragraph.\n\n- one\n- two\n\n- three, now loose\n\nAfter the list.",
+  "1. first\n\n2. second\n\nText\n\n3. restarts at three",
+  "Steps:\n\n1. Install\n\n   ```bash\n   npm i\n\n   npm test\n   ```\n\n2. Run it\n\nDone.",
+  "- item\n  ```\n  a\n\nb\n  ```\n\nafter",
+  "- ```\n  inside\n  ```\n  ```\n  b\n\n  c\n  ```\n\nTail ```",
+  "- ```\n  code\n\n```\nmore code\n\ntext",
+  "````md\n```\nnot closed by three\n\n```\nstill code\n````\n\nOut.",
+  "~~~\ntilde\n\n```\n~~~\n\nafter tilde",
+  "  ```\n  indented fence\n\nunindented content\n  ```\n\npara",
+  "1. a\n   ```\n   x\n ```\nin code\n\nstill code\n```\n\nafter",
+  "```ts\nexport const a = 1;\n\nexport const b = 2;\n```\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n| 3 |",
+  "<div>\n```\n</div>\n\n```\na\n\nb\n```\n\nend",
+  "<!-- note\n\nhidden -->\n\nshown",
+  "<pre>\n\nraw\n</pre>\n\nafter",
+  "See [the docs][d] and a note[^1].\n\nMore.\n\n[d]: https://example.com\n\n[^1]: The note.",
+  "> quoted\n\n> second quote\n>\n> still second\n\nplain",
+  "Title\n\n===\n\nTitle\n===\n\n---\n\n* * *\n\n***",
+  "- a\n\n\tindented by tab\n\nnext",
+  "para\r\n\r\nsecond\r\n\r\n```\r\ncrlf code\r\n\r\nmore\r\n```\r\n\r\nend",
+  "\n\nleading blanks\n\n\n\nmany blanks\n\n",
+  "Open fence at the end:\n\n```python\ndef f():\n\n    return 1",
+  "A codara://tab/abc link\n\n- [ ] task\n- [x] done\n\n~~struck~~ and https://example.com",
+  "    indented code\n\n    still code\n\nback out",
+  "+ plus\n\n+ plus loose\n\n10. ten\n\n-\n\n- after empty item",
+];
+
+function* lcg(seed) {
+  let state = seed;
+  for (;;) {
+    state = (state * 1103515245 + 12345) % 2147483648;
+    yield state / 2147483648;
+  }
+}
+
+const FUZZ_LINES = ["", "", "", "text line", "- item", "1. item", "   ```", " ```", "```", "```js", "~~~", "  code", "    deep", "> quote", "<span>", "| a | b |", "|---|---|", "---", "\tTab", "````", "* star"];
+
+function fuzzDoc(random) {
+  const lines = [];
+  const count = 4 + Math.floor(random.next().value * 30);
+  for (let i = 0; i < count; i += 1) lines.push(FUZZ_LINES[Math.floor(random.next().value * FUZZ_LINES.length)]);
+  return lines.join("\n");
 }
 
 let passed = 0;
@@ -222,6 +309,33 @@ async function main() {
     const pipeline = read("src/renderer/src/components/markdown-preview/pipeline.ts");
     assert.match(pipeline, /\.\.\.afterSanitize, rehypeHighlightShared\]/);
     assert.doesNotMatch(pipeline, /from "rehype-highlight"/);
+  });
+
+  const B = await loadBlockRenderer();
+  test("a streamed reply renders the same split into pieces as whole", () => {
+    for (const sample of BLOCK_SAMPLES) {
+      for (let end = 1; end <= sample.length; end += 1) {
+        const text = sample.slice(0, end);
+        assert.equal(B.pieces(text), B.whole(text), JSON.stringify(text));
+      }
+    }
+    const random = lcg(20261025);
+    for (let doc = 0; doc < 400; doc += 1) {
+      const text = fuzzDoc(random);
+      assert.equal(B.pieces(text), B.whole(text), JSON.stringify(text));
+    }
+  });
+
+  test("ordinary replies are cut at their blank lines", () => {
+    assert.deepEqual(B.splitMarkdownBlocks("One.\n\nTwo.\n\n```ts\na\n\nb\n```\n\n- x\n- y\n\nEnd"), ["One.", "Two.", "```ts\na\n\nb\n```", "- x\n- y", "End"]);
+    assert.deepEqual(B.splitMarkdownBlocks("- a\n\n- b\n\nc"), ["- a\n\n- b", "c"]);
+    assert.deepEqual(B.splitMarkdownBlocks("x\n\n[d]: https://e.com\n\ny"), ["x\n\n[d]: https://e.com\n\ny"]);
+  });
+
+  test("Markdown renders memoized pieces with the separator a whole render has", () => {
+    assert.match(markdown, /const blocks = useMemo\(\(\) => splitMarkdownBlocks\(text\), \[text\]\);/);
+    assert.match(markdown, /\{index > 0 && "\\n"\}\s*<MarkdownBlock text=\{block\} \/>/);
+    assert.match(markdown, /const MarkdownBlock = React\.memo\(function MarkdownBlock/);
   });
 
   console.log(`\n${passed} passed`);
