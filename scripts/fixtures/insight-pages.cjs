@@ -69,12 +69,24 @@ const PAGES = {
         <button id="slow">Slow button</button>
       </main>
       <script>
+        // Chromium leaves out a shift within 500 ms of a viewport resize, as it
+        // does after input (hadRecentInput). A page in Codara's <webview> gets
+        // one as it starts, queued behind the long task below, so a banner
+        // 250 ms after the first paint landed on that edge and counted or not
+        // by a few milliseconds.
+        let resizedAt = 0;
+        addEventListener("resize", () => { resizedAt = performance.now(); });
         const begin = performance.now(); while (performance.now() - begin < 120) {}
         // Shifts count only against content already painted.
         new PerformanceObserver((list, observer) => {
           if (!list.getEntriesByName("first-contentful-paint").length) return;
           observer.disconnect();
-          setTimeout(() => { const banner = document.createElement("div"); banner.id = "banner"; banner.textContent = "Banner"; document.getElementById("slot").appendChild(banner); }, 250);
+          const insert = () => {
+            const wait = resizedAt + 600 - performance.now();
+            if (wait > 0) return void setTimeout(insert, wait);
+            const banner = document.createElement("div"); banner.id = "banner"; banner.textContent = "Banner"; document.getElementById("slot").appendChild(banner);
+          };
+          setTimeout(insert, 250);
         }).observe({ type: "paint", buffered: true });
         document.getElementById("slow").addEventListener("click", () => {
           const start = performance.now(); while (performance.now() - start < 300) {}
