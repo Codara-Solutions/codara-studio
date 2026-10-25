@@ -10,7 +10,8 @@
 // that code, and no top-level code fence is open. Anything this scanner cannot be sure of stops cutting
 // from there on, which only makes the last piece longer. Raw HTML is one of
 // those: an HTML block can run past blank lines, and a fence line inside one
-// is not a fence, so the first line that may start one ends the cutting. A
+// is not a fence, so the first line that may start one ends the cutting
+// (inside a list item at any indent, since the item's column is unknown). A
 // fence opened on a list or quote marker line is another: its container, not
 // a closing fence, may end it, with or without the blank lines before. A
 // fence indented 4 or more columns while a list is open sits in an item too,
@@ -34,6 +35,7 @@ const BACKTICK_FENCE = /^( {0,3})(`{3,})[^`]*$/;
 const TILDE_FENCE = /^( {0,3})(~{3,})[^]*$/;
 const FENCE_CLOSE = /^( {0,3})(`{3,}|~{3,})[ \t]*$/;
 const HTML_START = /^ {0,3}</;
+const ITEM_HTML_START = /^[ \t]*</;
 const INDENTED_FENCE = /^([ \t]*)(`{3,}(?=[^`]*$)|~{3,})/;
 const DEEP_CLOSE = /^([ \t]*)(`{3,}|~{3,})[ \t]*$/;
 const CONTAINER_FENCE = /^ {0,3}(?:[-*+]|\d{1,9}[.)]|>)[ \t>*+\-.)\d]*(?:`{3}|~{3})/;
@@ -122,7 +124,7 @@ export function splitMarkdownBlocks(text: string): string[] {
     blankFrom = -1;
     lastIndent = indent;
     if (listItem) listOpen = true;
-    if (HTML_START.test(line) || CONTAINER_FENCE.test(line)) break;
+    if (HTML_START.test(line) || (listOpen && ITEM_HTML_START.test(line)) || CONTAINER_FENCE.test(line)) break;
     const deep = listOpen && indent >= 4 ? INDENTED_FENCE.exec(line) : null;
     fence = deep ? { char: deep[2][0], length: deep[2].length, indent, deep: true } : openingFence(line);
   }
