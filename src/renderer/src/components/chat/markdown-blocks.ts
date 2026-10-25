@@ -11,10 +11,10 @@
 // from there on, which only makes the last piece longer. Raw HTML is one of
 // those: an HTML block can run past blank lines, and a fence line inside one
 // is not a fence, so the first line that may start one ends the cutting. A
-// fence opened on a list or quote marker line is another, and so is one
-// indented 4 or more columns while a list is open (a fence in an item): its
-// container, not a closing fence, may end it, with or without the blank lines
-// before.
+// fence opened on a list or quote marker line is another: its container, not
+// a closing fence, may end it, with or without the blank lines before. A
+// fence indented 4 or more columns while a list is open sits in an item too,
+// but cutting goes on once a closer at its own column ends it.
 // Link reference and footnote definitions apply to the whole document, so a
 // text that may contain one is never cut at all: a line opening a bracket
 // whose first unescaped "]" is followed by ":" (a label can hold escaped
@@ -33,13 +33,15 @@ const BACKTICK_FENCE = /^( {0,3})(`{3,})[^`]*$/;
 const TILDE_FENCE = /^( {0,3})(~{3,})[^]*$/;
 const FENCE_CLOSE = /^( {0,3})(`{3,}|~{3,})[ \t]*$/;
 const HTML_START = /^ {0,3}</;
-const INDENTED_FENCE = /^[ \t]*(?:`{3}|~{3})/;
+const INDENTED_FENCE = /^([ \t]*)(`{3,}(?=[^`]*$)|~{3,})/;
+const DEEP_CLOSE = /^([ \t]*)(`{3,}|~{3,})[ \t]*$/;
 const CONTAINER_FENCE = /^ {0,3}(?:[-*+]|\d{1,9}[.)]|>)[ \t>*+\-.)\d]*(?:`{3}|~{3})/;
 
 interface OpenFence {
   char: string;
   length: number;
   indent: number;
+  deep?: boolean;
 }
 
 function indentOf(line: string): number {
@@ -86,11 +88,14 @@ export function splitMarkdownBlocks(text: string): string[] {
     offset += raw.length + 1;
     const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
     if (fence) {
-      const close = FENCE_CLOSE.exec(line);
+      const close = (fence.deep ? DEEP_CLOSE : FENCE_CLOSE).exec(line);
       if (close && close[2][0] === fence.char && close[2].length >= fence.length) {
         // An indented fence may sit in a list item; a closer left of the
-        // opener could end that item instead and open a new fence.
-        if (close[1].length < fence.indent) break;
+        // opener could end that item instead and open a new fence. A fence
+        // indented 4+ columns is in an item whose content column is unknown,
+        // so a closer right of it may be 4+ columns into that item: code.
+        const column = indentOf(close[1]);
+        if (column < fence.indent || (fence.deep && column > fence.indent)) break;
         fence = null;
       } else if (fence.indent > 0 && !BLANK.test(line) && indentOf(line) < fence.indent) {
         break;
@@ -117,8 +122,8 @@ export function splitMarkdownBlocks(text: string): string[] {
     lastIndent = indent;
     if (listItem) listOpen = true;
     if (HTML_START.test(line) || CONTAINER_FENCE.test(line)) break;
-    if (listOpen && indent >= 4 && INDENTED_FENCE.test(line)) break;
-    fence = openingFence(line);
+    const deep = listOpen && indent >= 4 ? INDENTED_FENCE.exec(line) : null;
+    fence = deep ? { char: deep[2][0], length: deep[2].length, indent, deep: true } : openingFence(line);
   }
   blocks.push(text.slice(start));
   return blocks;
