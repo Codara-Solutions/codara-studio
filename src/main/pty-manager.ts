@@ -34,7 +34,7 @@ import {
   buildRemoteAgentProbe,
   remoteAgentRuntime,
 } from "./remote/remote-agents";
-import { createRemotePtyHandle, remoteAgentKillSettled } from "./remote/remote-pty";
+import { createRemotePtyHandle, remoteAgentKillSettled, type RemotePtyHandle } from "./remote/remote-pty";
 import { loadPreferences } from "./preferences-store";
 import { formatManualAgentStartup, parseManualAgentStartupCommand } from "./manual-agent-startup";
 import { assertManualAgentLaunchAllowed } from "./orchestration/project-policy";
@@ -91,7 +91,9 @@ type PtyHandle = Pick<nodePty.IPty, "pid" | "write" | "resize" | "kill" | "onDat
   // the ssh2 remote adapter, hence optional. Distinct from this module's
   // pause()/resume(), which only divert the RENDERER sink and leave the
   // child producing at full speed. See pauseFlow below.
-  Partial<Pick<nodePty.IPty, "pause" | "resume">>;
+  Partial<Pick<nodePty.IPty, "pause" | "resume">> &
+  // Remote agent panes only (remote/remote-pty.ts).
+  Partial<Pick<RemotePtyHandle, "waitingForKey" | "reconnectByUser">>;
 
 interface Session {
   id: string;
@@ -2208,9 +2210,28 @@ export function nativeGrokProfileId(id: string): string | undefined {
   return sessions.get(id)?.nativeGrokProfileId;
 }
 
-export function write(id: string, data: string): void {
+/** A write to a remote agent pane whose machine dropped and waits for the user's key. */
+export class RemotePaneDisconnectedError extends Error {}
+
+/**
+ * `typed` marks a key the user typed in the pane (the renderer's xterm). A
+ * remote agent pane whose machine dropped reconnects only for such a key:
+ * a reconnect may ask for a password or wake a stopped Codara box, which
+ * costs money, so anything else Studio writes there (nudges, Cora, MCP
+ * terminal_write) is refused with RemotePaneDisconnectedError.
+ */
+export function write(id: string, data: string, opts?: { typed?: boolean }): void {
   const s = sessions.get(id);
   if (!s) return;
+  if (s.pty.waitingForKey?.()) {
+    if (!opts?.typed) {
+      const host = parseRemotePath(s.cwd)?.hostId ?? "The machine";
+      throw new RemotePaneDisconnectedError(`${host} is disconnected: press a key in the pane to reconnect.`);
+    }
+    // The key that asks for the reconnect is not typed into the agent.
+    s.pty.reconnectByUser?.();
+    return;
+  }
   s.lastInputAt = Date.now();
   s.pty.write(data);
 }

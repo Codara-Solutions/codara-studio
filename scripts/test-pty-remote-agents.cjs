@@ -12,6 +12,10 @@
 //     transcript) and still ends with its pane
 //   - a pane reopened while its close is still ending the old session waits
 //     for that kill, so the kill never lands on the new agent
+//   - an agent pane waiting for a key after a drop reconnects only for a
+//     key the user typed in it (write with typed: true); anything else
+//     Studio writes (nudges, Cora, MCP terminal_write) is refused with an
+//     error that says to press a key in the pane, and never reconnects
 //   - preference on: an agent startup becomes the tmux launch line of
 //     remote/remote-agents.ts; a plain shell pane attaches when its agent
 //     session is alive and stays a plain shell when it is not
@@ -53,7 +57,10 @@ function fakeConnection(state) {
     async exec(command) {
       state.execs.push(command);
       if (command.includes("kill-session") && state.killGate) await state.killGate;
-      if (command.includes("has-session")) return { code: state.alive ? 0 : 1 };
+      if (command.includes("has-session")) {
+        if (state.probeError) throw state.probeError;
+        return { code: state.alive ? 0 : 1 };
+      }
       return { code: 0 };
     },
   };
@@ -191,6 +198,30 @@ async function main() {
     state.killGate = null;
     pty.disposeAll();
     ok("a pane reopened during its old session's kill waits for it");
+
+    reset();
+    await pty.spawn(options("dropped", CLAUDE));
+    state.probeError = Object.assign(new Error("needs a password"), { needsUser: true });
+    state.channels[0].emit("close");
+    await sleep(50);
+    const probes = () => state.execs.filter((c) => c.includes("has-session")).length;
+    assert.equal(probes(), 1);
+    assert.throws(() => pty.write("dropped", "nudge\r"), /homeserver is disconnected: press a key in the pane to reconnect/);
+    assert.throws(() => pty.inject("dropped", "from Cora"), /press a key in the pane to reconnect/);
+    await sleep(50);
+    assert.equal(probes(), 1, "no write from Studio reconnects");
+    assert.equal(state.channels.length, 1);
+    state.probeError = null;
+    state.alive = true;
+    pty.write("dropped", "x", { typed: true });
+    await sleep(50);
+    assert.equal(probes(), 2, "the user's key reconnects");
+    assert.equal(state.channels.length, 2);
+    assert.match(state.channels[1].writes[0], /attach-session -t '=codara-dropped'/);
+    pty.write("dropped", "hello");
+    assert.deepEqual(state.channels[1].writes.slice(1), ["hello"], "once attached, writes flow again");
+    pty.disposeAll();
+    ok("a dropped agent pane reconnects only for a typed key; Studio's own writes are refused");
   } finally {
     delete globalThis.__codaraPtySpawnHarness;
     fs.rmSync(tmp, { recursive: true, force: true });

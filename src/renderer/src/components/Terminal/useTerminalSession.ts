@@ -3323,7 +3323,7 @@ export function useTerminalSession({
           onActivityRef.current?.();
           return;
         }
-        void window.spark.pty.write(sessionId, data);
+        void window.spark.pty.write(sessionId, data, { typed: true });
         onActivityRef.current?.();
         onUserInputRef.current?.();
       });

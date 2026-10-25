@@ -3190,9 +3190,9 @@ export function registerIpc(): void {
     if (!pty.hasSession(id)) await pty.waitForSpawn(id, 10_000);
   };
 
-  handle("pty:write", async (_e, args: { id: string; data: string }) => {
+  handle("pty:write", async (_e, args: { id: string; data: string; typed?: boolean }) => {
     await awaitPendingSpawn(args.id);
-    pty.write(args.id, args.data);
+    pty.write(args.id, args.data, { typed: args.typed === true });
     // A submit starts the pane's next agent turn; other keys can answer a
     // prompt or interrupt (see noteTerminalUserInput).
     noteTerminalUserInput(args.id, args.data);
