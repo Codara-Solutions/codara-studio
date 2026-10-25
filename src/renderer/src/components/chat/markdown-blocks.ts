@@ -5,9 +5,9 @@
 // A cut is made only at a blank line that CommonMark guarantees closes every
 // open block: the next line starts at column 0, is not a list item while a
 // list may be open (it would continue that list, and could turn it loose) or
-// right after indented code (micromark then reads the item as paragraph text),
-// no blank line in between is indented enough to continue that code, and no
-// top-level code fence is open. Anything this scanner cannot be sure of stops cutting
+// right after indented code (micromark then reads the item, quoted or not, as
+// paragraph text), no blank line in between is indented enough to continue
+// that code, and no top-level code fence is open. Anything this scanner cannot be sure of stops cutting
 // from there on, which only makes the last piece longer. Raw HTML is one of
 // those: an HTML block can run past blank lines, and a fence line inside one
 // is not a fence, so the first line that may start one ends the cutting. A
@@ -29,6 +29,7 @@ const DEFINITION_START = /^[ \t>*+\-.)\d]*\[/gm;
 const UNCUTTABLE = /\r(?!\n|$)|[^]\uFEFF/;
 const BLANK = /^[ \t]*$/;
 const LIST_ITEM = /^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)/;
+const QUOTED_LIST_ITEM = /^(?: {0,3}>[ \t]?)+ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)/;
 const BACKTICK_FENCE = /^( {0,3})(`{3,})[^`]*$/;
 const TILDE_FENCE = /^( {0,3})(~{3,})[^]*$/;
 const FENCE_CLOSE = /^( {0,3})(`{3,}|~{3,})[ \t]*$/;
@@ -112,7 +113,7 @@ export function splitMarkdownBlocks(text: string): string[] {
     }
     const listItem = LIST_ITEM.test(line);
     const indent = indentOf(line);
-    const codeContinues = lastIndent >= 4 && (listItem || blankIndent >= 4);
+    const codeContinues = lastIndent >= 4 && (listItem || blankIndent >= 4 || QUOTED_LIST_ITEM.test(line));
     if (blankFrom > start && indent === 0 && !codeContinues && !(listItem && listOpen)) {
       blocks.push(text.slice(start, blankFrom - 1));
       start = lineStart;
