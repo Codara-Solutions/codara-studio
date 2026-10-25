@@ -43,6 +43,7 @@ async function main() {
         contents: `import React, { useState } from "react";
           import { createRoot } from "react-dom/client";
           import { WorkspaceChildren } from "./src/renderer/src/components/rail/WorkspaceChildren";
+          import { keyInsideModal } from "./src/renderer/src/shortcuts/modal-keys";
           function Harness() {
             const [names, setNames] = useState(["widgets · feat/old", "widgets · feat/older"]);
             window.setMergedNames = setNames;
@@ -66,6 +67,16 @@ async function main() {
           }
           window.outerEscapes = 0;
           window.addEventListener("keydown", (event) => { if (event.key === "Escape") window.outerEscapes += 1; });
+          // The board's and the workers view's own Escape: window, capture
+          // phase, stopPropagation, registered before the confirm opens.
+          window.boardEscapes = 0;
+          window.boardOpen = false;
+          window.addEventListener("keydown", (event) => {
+            if (!window.boardOpen || event.key !== "Escape" || keyInsideModal(event)) return;
+            event.preventDefault();
+            event.stopPropagation();
+            window.boardEscapes += 1;
+          }, true);
           createRoot(document.getElementById("root")).render(<Harness />);`,
         resolveDir: ROOT,
         sourcefile: "rail-confirm-harness.tsx",
@@ -130,6 +141,21 @@ async function main() {
     await page.evaluate(() => window.setMergedNames(["a", "c"]));
     await page.waitForTimeout(100);
     await expect(confirm).toHaveCount(0);
+
+    // With the board open behind it, Escape still belongs to the confirm.
+    await page.evaluate(() => {
+      window.boardOpen = true;
+    });
+    await cleanUp.click();
+    await expect(confirm).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(confirm).toHaveCount(0);
+    assert.equal(await page.evaluate(() => window.boardEscapes), 0, "the board took the confirm's Escape");
+    await page.keyboard.press("Escape");
+    assert.equal(await page.evaluate(() => window.boardEscapes), 1, "the board keeps its own Escape");
+    await page.evaluate(() => {
+      window.boardOpen = false;
+    });
 
     // Confirming runs it.
     await cleanUp.click();

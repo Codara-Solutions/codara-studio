@@ -183,6 +183,16 @@ test("a creator waits until its worktree's merge state is known", ({ mod }) => {
   assert.equal(loading.merged.length, 0);
 });
 
+test("a row's merge state is unknown only until the first read finished", ({ mod }) => {
+  // Remote worktrees are never read, and a failed read leaves no state:
+  // neither may keep the creator off its worktree for good.
+  assert.equal(mod.railMergeState(undefined, { remote: false, loaded: false }), null);
+  assert.equal(mod.railMergeState(undefined, { remote: false, loaded: true }), false);
+  assert.equal(mod.railMergeState(undefined, { remote: true, loaded: false }), false);
+  assert.equal(mod.railMergeState(true, { remote: false, loaded: true }), true);
+  assert.equal(mod.railMergeState(false, { remote: false, loaded: false }), false);
+});
+
 (async () => {
   const { mod, cleanup } = await load();
   let failed = 0;

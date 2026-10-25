@@ -138,6 +138,7 @@ function CleanUpConfirm({
     <div className="rail-confirm-scrim" onMouseDown={(event) => event.stopPropagation()} onClick={onCancel}>
       <div
         role="alertdialog"
+        aria-modal="true"
         aria-label={title}
         data-testid="workspace-merged-clean-up-confirm"
         className="rail-confirm spark-glass--strong spark-overlay-surface"

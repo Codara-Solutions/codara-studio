@@ -93,6 +93,21 @@ function byUrgency(a: AgentLine, b: AgentLine): number {
   return STATE_RANK[a.state] - STATE_RANK[b.state] || b.since - a.since;
 }
 
+/**
+ * A worktree row's `merged` for buildRailFamily. Null ("not known yet") only
+ * while the rail's first read of worktree states is pending: remote
+ * worktrees are never read and a failed read leaves no state, and neither
+ * may keep a creator off its worktree for good.
+ */
+export function railMergeState(
+  merged: boolean | undefined,
+  context: { remote: boolean; loaded: boolean },
+): boolean | null {
+  if (context.remote) return false;
+  if (merged !== undefined) return merged;
+  return context.loaded ? false : null;
+}
+
 export interface RailFamilyInput {
   /** The project's own agent lines. */
   projectLines: readonly AgentLine[];
