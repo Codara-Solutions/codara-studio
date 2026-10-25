@@ -9,8 +9,10 @@
 //   - After the jump, the scroll position, the height and the rendered rows
 //     must all hold still for three frames in a row; any change restarts the
 //     count, and a frame with no rows clears it.
+//   - Rows still loading an image or a Mermaid diagram are not still.
 //   - ChatConversation ties the reveal to the same key that remounts
-//     Virtuoso, and the CSS override reaches only its own item list.
+//     Virtuoso, and the CSS override reaches only its own item list and
+//     inherits, so a chat hidden by an ancestor stays hidden.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -57,9 +59,9 @@ function run(R, samples) {
 
 async function main() {
   const R = await loadReveal();
-  const top = { scrollTop: 0, scrollHeight: 18410, rows: "23-46" };
-  const mid = { scrollTop: 10921, scrollHeight: 19505, rows: "107-119" };
-  const end = { scrollTop: 18273, scrollHeight: 19505, rows: "117-119" };
+  const top = { scrollTop: 0, scrollHeight: 18410, rows: "23-46", pending: false };
+  const mid = { scrollTop: 10921, scrollHeight: 19505, rows: "107-119", pending: false };
+  const end = { scrollTop: 18273, scrollHeight: 19505, rows: "117-119", pending: false };
 
   test("rows that hold still at the top are never revealed early", () => {
     assert.deepEqual(run(R, [top, top, top, top, top, top]), []);
@@ -82,6 +84,21 @@ async function main() {
     assert.deepEqual(run(R, [mid, end, end, { ...end, rows: "" }, end, end, end]), [6]);
   });
 
+  test("rows still loading content are not still", () => {
+    const loading = { ...end, pending: true };
+    assert.deepEqual(run(R, [mid, end, loading, loading, loading, loading]), []);
+    assert.deepEqual(run(R, [mid, loading, loading, end, end, end]), [5]);
+    const reveal = read("src/renderer/src/components/chat/list-reveal.ts");
+    assert.match(reveal, /querySelector\("\[data-mermaid-pending\]"\)/);
+    assert.match(reveal, /some\(\(image\) => !image\.complete\)/);
+    assert.match(read("src/renderer/src/components/chat/Markdown.tsx"), /<div data-mermaid-pending style=/);
+  });
+
+  test("a reveal ends with its list", () => {
+    const reveal = read("src/renderer/src/components/chat/list-reveal.ts");
+    assert.match(reveal, /setRevealedKey\(\(current\) => \(current === key \? null : current\)\);/);
+  });
+
   test("ChatConversation reveals by Virtuoso's own key, and the override is scoped", () => {
     const conversation = read("src/renderer/src/components/chat/ChatConversation.tsx");
     assert.match(conversation, /const listKey = `\$\{run\.id\}:\$\{rowCount === 0 \? "empty" : "populated"\}`;/);
@@ -91,7 +108,7 @@ async function main() {
     const styles = read("src/renderer/src/styles.css");
     assert.match(
       styles,
-      /\.cora-conversation\[data-list-revealed\] > \[data-virtuoso-scroller\] > \[data-viewport-type\] > \[data-testid="virtuoso-item-list"\] \{\s*visibility: visible !important;/,
+      /\.cora-conversation\[data-list-revealed\] > \[data-virtuoso-scroller\] > \[data-viewport-type\] > \[data-testid="virtuoso-item-list"\] \{\s*visibility: inherit !important;/,
     );
   });
 

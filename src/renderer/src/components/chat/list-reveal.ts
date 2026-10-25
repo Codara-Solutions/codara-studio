@@ -8,11 +8,15 @@ import { useEffect, useState, type RefObject } from "react";
 // then held its scroll position, height and rendered rows for three frames:
 // the same picture Virtuoso reveals later, only sooner. Until a jump is seen
 // (the rows painted first can be ones from the top), Virtuoso decides alone.
+// Rows still loading content that changes their height (an image, a Mermaid
+// diagram) keep the list hidden too, since Virtuoso would re-scroll when it
+// lands.
 
 export interface ListSample {
   scrollTop: number;
   scrollHeight: number;
   rows: string;
+  pending: boolean;
 }
 
 export interface RevealState {
@@ -29,10 +33,11 @@ export function nextRevealState(state: RevealState, sample: ListSample | null): 
   const jumped = state.jumped || sample.scrollTop > 0;
   const same =
     state.last !== null &&
+    !state.last.pending &&
     state.last.scrollTop === sample.scrollTop &&
     state.last.scrollHeight === sample.scrollHeight &&
     state.last.rows === sample.rows;
-  return { jumped, last: sample, still: jumped && same ? state.still + 1 : 0 };
+  return { jumped, last: sample, still: jumped && same && !sample.pending ? state.still + 1 : 0 };
 }
 
 export function shouldReveal(state: RevealState): boolean {
@@ -45,8 +50,11 @@ function sampleList(root: HTMLElement): { sample: ListSample | null; hidden: boo
   if (!scroller || !list) return { sample: null, hidden: true };
   const first = list.firstElementChild?.getAttribute("data-index") ?? "";
   const last = list.lastElementChild?.getAttribute("data-index") ?? "";
+  const pending =
+    list.querySelector("[data-mermaid-pending]") !== null ||
+    Array.from(list.querySelectorAll("img")).some((image) => !image.complete);
   return {
-    sample: { scrollTop: scroller.scrollTop, scrollHeight: scroller.scrollHeight, rows: first && `${first}-${last}` },
+    sample: { scrollTop: scroller.scrollTop, scrollHeight: scroller.scrollHeight, rows: first && `${first}-${last}`, pending },
     hidden: list.style.visibility === "hidden",
   };
 }
@@ -73,7 +81,12 @@ export function useEarlyListReveal(rootRef: RefObject<HTMLElement>, key: string,
       if (frames < MAX_FRAMES) handle = requestAnimationFrame(tick);
     };
     handle = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(handle);
+    return () => {
+      cancelAnimationFrame(handle);
+      // A later list under the same key (a chat that empties and fills
+      // again) is a new Virtuoso and must not inherit this reveal.
+      setRevealedKey((current) => (current === key ? null : current));
+    };
   }, [rootRef, key, enabled]);
   return revealedKey === key;
 }
