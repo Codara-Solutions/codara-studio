@@ -10,6 +10,8 @@ import {
   resolveChatPath,
 } from "./markdown-links";
 import { chatUrlTransform, remarkTabLinks } from "./remark-tab-links";
+import { splitMarkdownBlocks } from "./markdown-blocks";
+import { cachedMermaidSvg, rememberMermaidSvg } from "./mermaid-cache";
 import { isTabLink } from "@shared/tab-links";
 import { openTabLink } from "../../tabs/tabLinkBridge";
 
@@ -193,34 +195,58 @@ const COMPONENTS: Components = {
 /** Shared safe markdown renderer for chat and result prose. Raw HTML is not
  * enabled, so model output cannot inject DOM. GFM and highlight.js cover the
  * common tables/task-lists/code path; Mermaid runs in strict security mode. */
-function Markdown({ text }: { text: string }) {
+function Markdown({ text, streaming = false }: { text: string; streaming?: boolean }) {
+  // Only text that is still growing is cut: every piece costs a parser setup,
+  // which a finished message would pay on every mount for nothing.
+  const blocks = useMemo(() => (streaming ? splitMarkdownBlocks(text) : [text]), [streaming, text]);
+  // The newline between pieces is the text node the whole document's hast
+  // puts between top-level blocks, so the DOM matches an unsplit render.
   return (
     <div className="cora-md">
-      <ReactMarkdown
-        remarkPlugins={REMARK_PLUGINS}
-        rehypePlugins={REHYPE_PLUGINS}
-        components={COMPONENTS}
-        urlTransform={chatUrlTransform}
-      >
-        {text}
-      </ReactMarkdown>
+      {blocks.map((block, index) => (
+        <React.Fragment key={index}>
+          {index > 0 && "\n"}
+          <MarkdownBlock text={block} />
+        </React.Fragment>
+      ))}
     </div>
   );
 }
 
 export default React.memo(Markdown);
 
+// Memoized per piece: while a reply streams, only the piece still growing
+// gets new text, so the finished ones above it are never parsed again.
+const MarkdownBlock = React.memo(function MarkdownBlock({ text }: { text: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={REMARK_PLUGINS}
+      rehypePlugins={REHYPE_PLUGINS}
+      components={COMPONENTS}
+      urlTransform={chatUrlTransform}
+    >
+      {text}
+    </ReactMarkdown>
+  );
+});
+
 function MermaidDiagram({ source }: { source: string }) {
   const reactId = useId();
   const id = useMemo(() => `cora-mermaid-${reactId.replace(/[^a-zA-Z0-9_-]/g, "")}`, [reactId]);
-  const [svg, setSvg] = useState<string>("");
+  const [svg, setSvg] = useState<string>(() => cachedMermaidSvg(source, id));
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
+    const cached = cachedMermaidSvg(source, id);
+    if (cached) {
+      setSvg(cached);
+      return;
+    }
     let cancelled = false;
     void import("mermaid").then(async ({ default: mermaid }) => {
       mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "dark" });
       try {
         const rendered = await mermaid.render(id, source);
+        rememberMermaidSvg(source, id, rendered.svg);
         if (!cancelled) setSvg(rendered.svg);
       } catch (reason) {
         if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason));

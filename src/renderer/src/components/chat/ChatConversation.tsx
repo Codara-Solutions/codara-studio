@@ -2768,7 +2768,7 @@ function TurnSegments({ segments, live = false }: { segments: LiveTurnSegment[];
               data-execution-kind="text"
               style={SPARK_BUBBLE_STYLE}
             >
-              <Markdown text={segment.text} />
+              <Markdown text={segment.text} streaming={live} />
             </div>
           );
         }
