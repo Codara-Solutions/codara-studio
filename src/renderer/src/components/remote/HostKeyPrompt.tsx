@@ -73,6 +73,23 @@ export default function HostKeyPrompt() {
           that this fingerprint is the machine's before you trust it. On the machine,{" "}
           <code>ssh-keygen -lf /etc/ssh/ssh_host_{keyFileName(request.keyType)}_key.pub</code> prints it.
         </div>
+        {request.certAuthority ? (
+          <div
+            role="note"
+            data-host-key-cert-authority
+            style={{
+              fontSize: 12,
+              lineHeight: 1.5,
+              color: "var(--ink)",
+              padding: "8px 10px",
+              borderRadius: 8,
+              border: "1px solid var(--warn)",
+            }}
+          >
+            Your known_hosts trusts a certificate authority for this machine, so <code>ssh</code> would connect without
+            asking. Codara cannot check SSH certificates: compare the fingerprint yourself before you trust it.
+          </div>
+        ) : null}
         <div
           style={{
             fontFamily: "var(--font-mono)",

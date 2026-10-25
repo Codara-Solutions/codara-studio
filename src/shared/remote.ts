@@ -196,6 +196,11 @@ export interface HostKeyPromptRequest {
   keyType: string;
   /** `SHA256:<base64 without padding>`, as `ssh-keygen -l` prints it. */
   fingerprint: string;
+  /**
+   * known_hosts trusts a certificate authority for this host: ssh would have
+   * checked the host's certificate, which Codara cannot.
+   */
+  certAuthority?: boolean;
 }
 
 export interface HostKeyPromptAnswer {

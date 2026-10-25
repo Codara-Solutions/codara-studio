@@ -187,6 +187,35 @@ test("a machine your known_hosts lists connects without asking", async () => {
   }
 });
 
+test("a machine only a certificate authority vouches for is asked about, with a louder note", async () => {
+  test.skip(!(await dockerAvailable()), "Docker is not available");
+  test.setTimeout(120_000);
+  const fixture = await prepare({ registerHost: true });
+  let app: ElectronApplication | null = null;
+  try {
+    // A CA key that signed nothing here: ssh would want a certificate, and
+    // ssh2 gets the plain host key.
+    const ca = (await fixture.host.exec("cat /etc/ssh/ssh_host_ed25519_key.pub")).split(" ").slice(0, 2).join(" ");
+    await mkdir(join(fixture.home, ".ssh"), { recursive: true });
+    await writeFile(join(fixture.home, ".ssh", "known_hosts"), `@cert-authority [127.0.0.1]:* ${ca}\n`);
+    app = await launch(fixture);
+    const page = await app.firstWindow();
+    await page.waitForLoadState("domcontentloaded");
+    await openMachines(page);
+    const card = page.locator(`[data-machine-id="${MACHINE}"]`);
+    await card.getByRole("button", { name: "Connect" }).click();
+    const prompt = page.getByRole("dialog", { name: `Is this ${MACHINE}?` });
+    await expect(prompt).toBeVisible({ timeout: 20_000 });
+    await expect(prompt.getByRole("note")).toContainText("certificate authority");
+    await page.screenshot({ path: join(fixture.root, "..", "codara-machines-hostkey-ca.png") });
+    await prompt.getByRole("button", { name: "Trust and connect" }).click();
+    await expect(card).toContainText("Connected", { timeout: 20_000 });
+  } finally {
+    await app?.close().catch(() => undefined);
+    await cleanup(fixture);
+  }
+});
+
 test("with no SSH machines, Machines on by default changes nothing you would notice", async () => {
   test.setTimeout(90_000);
   const root = await mkdtemp(join(tmpdir(), "codara-machines-none-e2e-"));

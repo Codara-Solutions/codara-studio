@@ -14,7 +14,7 @@ import type {
 } from "@shared/remote";
 import { writeFileAtomic } from "../fs-atomic";
 import { codaraHome } from "../codara-home";
-import { getHost } from "./ssh-hosts";
+import { getHost, systemGlobalKnownHostsFiles } from "./ssh-hosts";
 import { openProxySocket, resolveProxyInvocation, type ProxySocket } from "./proxy-command";
 import { wakeCodaraBox } from "./codara-boxes";
 import { abortableDelay, clearFreshBoxKey, nextFreshKeyDelayMs } from "./box-key-retry";
@@ -67,6 +67,24 @@ function loadSsh2(): Promise<Ssh2Module> {
       });
   }
   return ssh2Promise;
+}
+
+let hostKeyDefaultsPromise: Promise<readonly string[] | null> | null = null;
+
+/**
+ * ssh2's own server host key algorithms, the base of the reordered list: an
+ * exact list must name only algorithms this ssh2 supports, or connect throws.
+ * Null (ssh2's defaults stay) if its internals ever move.
+ */
+function loadHostKeyDefaults(): Promise<readonly string[] | null> {
+  hostKeyDefaultsPromise ??= import("ssh2/lib/protocol/constants.js")
+    .then((mod: unknown) => {
+      const constants = ((mod as { default?: unknown }).default ?? mod) as { DEFAULT_SERVER_HOST_KEY?: unknown };
+      const list = constants.DEFAULT_SERVER_HOST_KEY;
+      return Array.isArray(list) && list.every((name) => typeof name === "string") ? (list as string[]) : null;
+    })
+    .catch(() => null);
+  return hostKeyDefaultsPromise;
 }
 
 const READY_TIMEOUT_MS = 20_000;
@@ -198,12 +216,49 @@ async function readKnownHosts(): Promise<Record<string, string>> {
   }
 }
 
+// Every read-modify-write of the store runs alone: two hosts trusted at once
+// must not both pass the check, nor lose each other's entry.
+let knownHostsQueue: Promise<unknown> = Promise.resolve();
+
+function updateKnownHosts<T>(update: (all: Record<string, string>) => { result: T; write: boolean }): Promise<T> {
+  const run = knownHostsQueue.then(async () => {
+    const all = await readKnownHosts();
+    const { result, write } = update(all);
+    if (write) {
+      await writeFileAtomic(join(codaraHome(), KNOWN_HOSTS_FILE), JSON.stringify(all, null, 2)).catch(
+        () => undefined,
+      );
+    }
+    return result;
+  });
+  knownHostsQueue = run.catch(() => undefined);
+  return run;
+}
+
 async function rememberHostKey(key: string, fingerprint: string): Promise<void> {
-  const all = await readKnownHosts();
-  all[key] = fingerprint;
-  await writeFileAtomic(join(codaraHome(), KNOWN_HOSTS_FILE), JSON.stringify(all, null, 2)).catch(
-    () => undefined,
-  );
+  await updateKnownHosts((all) => {
+    all[key] = fingerprint;
+    return { result: undefined, write: true };
+  });
+}
+
+/**
+ * Stores a first-use key unless the entry appeared meanwhile (another host at
+ * the same address was trusted while this one waited) or `wanted` says the
+ * attempt is over. Returns the entry that stands in its way, if any.
+ */
+function rememberFirstHostKey(
+  key: string,
+  fingerprint: string,
+  wanted: () => boolean,
+): Promise<{ stored: boolean; existing: string | null }> {
+  return updateKnownHosts<{ stored: boolean; existing: string | null }>((all) => {
+    const existing = all[key] ?? null;
+    if (existing === fingerprint) return { result: { stored: true, existing: null }, write: false };
+    if (existing !== null || !wanted()) return { result: { stored: false, existing }, write: false };
+    all[key] = fingerprint;
+    return { result: { stored: true, existing: null }, write: true };
+  });
 }
 
 // ── Host key confirmation ────────────────────────────────────────────────────
@@ -268,11 +323,21 @@ function promptHostKey(request: Omit<HostKeyPromptRequest, "requestId">, signal:
   });
 }
 
-/** The known_hosts files ssh reads for this host, read only: the user's, then the system's. */
+/**
+ * The known_hosts files ssh reads for this host, read only: the user's, then
+ * the system's (from ~/.ssh/config, else /etc/ssh/ssh_config, else ssh's
+ * defaults).
+ */
 async function readUserKnownHosts(host: RemoteHostConfig): Promise<string> {
+  const global =
+    host.globalKnownHostsFiles ??
+    (await systemGlobalKnownHostsFiles(host.source === "ssh-config" ? host.id : host.host)) ?? [
+      "/etc/ssh/ssh_known_hosts",
+      "/etc/ssh/ssh_known_hosts2",
+    ];
   const files = [
     ...(host.userKnownHostsFiles ?? ["known_hosts", "known_hosts2"].map((name) => join(homedir(), ".ssh", name))),
-    ...(host.globalKnownHostsFiles ?? ["/etc/ssh/ssh_known_hosts", "/etc/ssh/ssh_known_hosts2"]),
+    ...global,
   ];
   const texts = await Promise.all(files.map((file) => fs.readFile(file, "utf8").catch(() => "")));
   return texts.join("\n");
@@ -767,8 +832,9 @@ class RemoteConnection {
     const known = await readKnownHosts();
     const { name, port } = knownHostsName(host);
     const types = knownHostTypes(await readUserKnownHosts(host), name, port);
-    // hostKeyAlgorithms only names algorithms from ssh2's own default list.
-    const serverHostKey = types.length > 0 ? (hostKeyAlgorithms(types) as ServerHostKeyAlgorithm[]) : null;
+    const available = types.length > 0 ? await loadHostKeyDefaults() : null;
+    // hostKeyAlgorithms only reorders ssh2's own default list.
+    const serverHostKey = available ? (hostKeyAlgorithms(types, available) as ServerHostKeyAlgorithm[]) : null;
     return { mayAsk: !known[hostKeyStoreId(host)], serverHostKey };
   }
 
@@ -788,18 +854,17 @@ class RemoteConnection {
     const confirm = !host.codaraBoxId && (await confirmNewHostKeys());
     if (!this.isCurrent(generation, signal)) return false;
     // Read before trusting even a stored key: the user may have revoked it
-    // in known_hosts since. OpenSSH looks a HostKeyAlias up as given, never
-    // with the port.
-    let verdict: KnownHostsVerdict | null = null;
-    if (confirm) {
-      const { name, port } = knownHostsName(host);
-      verdict = knownHostsVerdict(await readUserKnownHosts(host), name, port, key);
-      if (!this.isCurrent(generation, signal)) return false;
-      if (verdict.kind === "revoked") {
-        this.hostKeyRefusal = `The host key of ${id} is marked revoked in known_hosts.`;
-        return false;
-      }
+    // in known_hosts since. A revoked key loses whatever the confirmation
+    // setting; with it off, known_hosts is read for nothing else. OpenSSH
+    // looks a HostKeyAlias up as given, never with the port.
+    const { name, port } = knownHostsName(host);
+    const listed = knownHostsVerdict(await readUserKnownHosts(host), name, port, key);
+    if (!this.isCurrent(generation, signal)) return false;
+    if (listed.kind === "revoked") {
+      this.hostKeyRefusal = `The host key of ${id} is marked revoked in known_hosts.`;
+      return false;
     }
+    const verdict: KnownHostsVerdict | null = confirm ? listed : null;
     if (prior === fingerprint) {
       forgetChangedHostKey(host.id);
       return true;
@@ -815,7 +880,13 @@ class RemoteConnection {
           return false;
         }
         const trust = await promptHostKey(
-          { hostId: host.id, hostLabel: id, keyType: hostKeyType(key), fingerprint: sshFingerprint(key) },
+          {
+            hostId: host.id,
+            hostLabel: id,
+            keyType: hostKeyType(key),
+            fingerprint: sshFingerprint(key),
+            ...(verdict.certAuthority ? { certAuthority: true } : {}),
+          },
           signal,
         );
         if (!this.isCurrent(generation, signal)) return false;
@@ -827,13 +898,14 @@ class RemoteConnection {
       if (confirm) {
         // Another host at the same address may have been trusted while this
         // one waited: its key stands, and this one is a change.
-        const now = (await readKnownHosts())[id];
-        if (!this.isCurrent(generation, signal)) return false;
-        if (now === fingerprint) return true;
-        if (now) {
-          this.refuseChangedKey(id, displayFingerprint(now), key, null);
+        const { stored, existing } = await rememberFirstHostKey(id, fingerprint, () =>
+          this.isCurrent(generation, signal),
+        );
+        if (existing) {
+          this.refuseChangedKey(id, displayFingerprint(existing), key, null);
           return false;
         }
+        return stored && this.isCurrent(generation, signal);
       }
       await rememberHostKey(id, fingerprint);
       return true;
