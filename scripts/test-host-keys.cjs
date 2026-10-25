@@ -47,6 +47,8 @@
 //     files ssh-hosts names (ssh_config, else ssh's defaults) are read
 //   - a host whose ssh config ssh would refuse (a token or variable it cannot
 //     expand) is refused before any connection, whatever the setting
+//   - two hosts for one address and one key ask one question, whose answer
+//     both use; it stays up while one of them still waits for it
 //   - RevokedHostKeys, a KRL or a key list, refuses the keys it revokes
 //     whatever the setting, even one Codara stored; a file ssh cannot read
 //     refuses the connection, as ssh does
@@ -897,6 +899,46 @@ function hasSshKeygen() {
     harness.files.set(revokedFile, `ssh-ed25519 ${b64}\n`);
     assert.equal((await connect("nas")).state, "error", "either %C candidate may revoke the key");
     ok("RevokedHostKeys refuses what it revokes, and a file ssh cannot read, whatever the setting");
+  }
+
+  {
+    const settle = () => new Promise((r) => setTimeout(r, 50));
+    reset();
+    confirm = true;
+    answer = "hold";
+    const first = connect("nas");
+    const second = connect("nas2");
+    await until(() => harness.clients.length === 2);
+    await settle();
+    assert.equal(harness.prompts.length, 1, "one question for one address and one key");
+    conns.answerHostKeyPrompt({ requestId: harness.prompts[0].requestId, trust: true });
+    assert.deepEqual([(await first).state, (await second).state], ["connected", "connected"], "both use the answer");
+    assert.equal(stored()["nas.local:22"], keys.storedFingerprint(key));
+    assert.deepEqual(closed, [harness.prompts[0].requestId]);
+
+    reset();
+    const leaving = connect("nas");
+    const staying = connect("nas2");
+    await until(() => harness.clients.length === 2);
+    await settle();
+    assert.equal(harness.prompts.length, 1);
+    conns.disconnectHost("nas");
+    assert.equal((await leaving).state, "disconnected");
+    await settle();
+    assert.deepEqual(closed, [], "the question stays up while another host waits for it");
+    conns.answerHostKeyPrompt({ requestId: harness.prompts[0].requestId, trust: true });
+    assert.equal((await staying).state, "connected");
+
+    reset();
+    const a = connect("nas");
+    const b = connect("nas2");
+    await until(() => harness.clients.length === 2);
+    await settle();
+    conns.disconnectHost("nas");
+    conns.disconnectHost("nas2");
+    await Promise.all([a, b]);
+    assert.deepEqual(closed, [harness.prompts[0].requestId], "and ends once nobody waits for it");
+    ok("two hosts for one address and one key ask once, and both use the answer");
   }
 
   reset();

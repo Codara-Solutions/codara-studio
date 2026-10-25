@@ -296,33 +296,61 @@ export function answerHostKeyPrompt(answer: HostKeyPromptAnswer): void {
   pendingHostKeyPrompts.get(answer.requestId)?.(answer.trust === true);
 }
 
+/**
+ * Open questions by the entry and key they ask about: two hosts for one
+ * address (two aliases of one machine) offering one key share a question,
+ * and it lasts while any of their attempts still waits for it.
+ */
+const openHostKeyPrompts = new Map<
+  string,
+  { waiters: Set<(trust: boolean) => void>; finish: (trust: boolean) => void }
+>();
+
 function promptHostKey(request: Omit<HostKeyPromptRequest, "requestId">, signal: AbortSignal): Promise<boolean> {
   if (!hostKeyPromptSender || signal.aborted) return Promise.resolve(false);
+  const shareKey = `${request.hostLabel}\n${request.fingerprint}`;
+  const existing = openHostKeyPrompts.get(shareKey);
   const requestId = randomUUID();
-  return new Promise((resolve) => {
-    const finish = (trust: boolean) => {
+  const prompt = existing ?? {
+    waiters: new Set<(trust: boolean) => void>(),
+    finish: (trust: boolean) => {
       if (!pendingHostKeyPrompts.delete(requestId)) return;
+      openHostKeyPrompts.delete(shareKey);
       clearTimeout(timer);
-      signal.removeEventListener("abort", onAbort);
       try {
         hostKeyPromptClosedSender?.(requestId);
       } catch {
         // A window mid-teardown must not keep the handshake waiting.
       }
+      for (const waiter of prompt.waiters) waiter(trust);
+      prompt.waiters.clear();
+    },
+  };
+  const answered = new Promise<boolean>((resolve) => {
+    const waiter = (trust: boolean) => {
+      signal.removeEventListener("abort", onAbort);
       resolve(trust);
     };
-    const onAbort = () => finish(false);
-    // ssh2's handshake waits on this answer; an unanswered prompt must not
-    // hold a connection open forever.
-    const timer = setTimeout(() => finish(false), timeouts.promptMs);
-    pendingHostKeyPrompts.set(requestId, finish);
+    const onAbort = () => {
+      prompt.waiters.delete(waiter);
+      resolve(false);
+      if (prompt.waiters.size === 0) prompt.finish(false);
+    };
+    prompt.waiters.add(waiter);
     signal.addEventListener("abort", onAbort, { once: true });
-    try {
-      hostKeyPromptSender?.({ requestId, ...request });
-    } catch {
-      finish(false);
-    }
   });
+  if (existing) return answered;
+  // ssh2's handshake waits on this answer; an unanswered prompt must not
+  // hold a connection open forever.
+  const timer = setTimeout(() => prompt.finish(false), timeouts.promptMs);
+  openHostKeyPrompts.set(shareKey, prompt);
+  pendingHostKeyPrompts.set(requestId, prompt.finish);
+  try {
+    hostKeyPromptSender?.({ requestId, ...request });
+  } catch {
+    prompt.finish(false);
+  }
+  return answered;
 }
 
 type KnownHostsFiles = Exclude<KnownHostsSettings, { refusal: string }>;

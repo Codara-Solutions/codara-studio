@@ -519,8 +519,10 @@ takes `user@host:port` (port 1 to 65535).
   the host has answered does the handshake wait up to 5 minutes for the
   user; a machine that is down fails after the usual 20 seconds, and a
   prompt ends with the attempt it belongs to (sshd drops a slow handshake
-  after its LoginGraceTime). Every window drops a prompt once it ends,
-  however it ends. A key that differs from Codara's stored one, or that
+  after its LoginGraceTime). Two hosts for one address (two aliases of
+  one machine) offering one key share one prompt, which lasts while either
+  still waits for it. Every window drops a prompt once it ends, however it
+  ends. A key that differs from Codara's stored one, or that
   known_hosts does not list while listing others for the host (another key,
   or another key type), is refused, never asked about; so is a first-use key
   for an address another host was trusted at meanwhile (every change to the
