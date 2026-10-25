@@ -2,7 +2,7 @@
 // (WebAssembly) here: no fs, network, require, process or host objects, a heap
 // limit, a stack limit and an interrupt for synchronous code that never
 // yields. The only way out is a browser call, which main checks and runs like
-// any codara_preview_* call. Unlike a workflow, the context lives on between
+// any single browser tool call. Unlike a workflow, the context lives on between
 // snippets: that is the session. Main starts this file as one self-contained
 // bundle with `eval: true`, so it imports nothing but node builtins, QuickJS
 // and the prelude.

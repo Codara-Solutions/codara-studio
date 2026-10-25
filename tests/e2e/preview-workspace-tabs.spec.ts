@@ -45,10 +45,12 @@ test("Cora browsers persist as workspace tabs with scoped discovery, cursor feed
     await expect(tab).toHaveAttribute("aria-selected", "true");
     await request("preview.wait_for", { runId, tabId, selector: "#target" });
     await request("preview.mouse", { runId, tabId, x: 140, y: 100 });
-    const cursor = page.locator("[data-preview-cursor]");
-    await expect(cursor).toBeVisible();
-    await expect(cursor).toHaveCSS("left", "140px");
-    await expect(cursor).toHaveCSS("top", "100px");
+    // The run's cursor glided to the point before the click, and the banner names Cora.
+    const pane = page.locator("[data-browser-pane]").locator("visible=true");
+    const cursor = pane.locator("[data-agent-cursor][data-active]");
+    await expect(cursor).toHaveCount(1);
+    await expect(cursor).toHaveAttribute("style", /translate3d\(140px, 100px, 0px\)/);
+    await expect(pane.locator("[data-agent-banner]")).toContainText("Cora · Browser workspace A is using this tab");
     await page.screenshot({ path: testInfo.outputPath("browser-cursor.png") });
     const clicked = await request("preview.evaluate", { runId, tabId, code: 'document.querySelector("#target").textContent' });
     expect(clicked.value).toBe("Clicked");
@@ -89,7 +91,8 @@ test("Cora browsers persist as workspace tabs with scoped discovery, cursor feed
         type: "run.status_updated", workspaceId: "ws-a", runId, payload: { status: "complete" },
       });
     }, runId);
-    await expect(page.locator("[data-preview-control]")).toHaveCount(0);
+    await expect(page.locator("[data-agent-banner]")).toHaveCount(0);
+    await expect(page.locator("[data-agent-cursor][data-active]")).toHaveCount(0);
     await page.locator('[data-workspace-id="ws-a"]').click();
     await expect(tab).toBeVisible();
     await tab.click();

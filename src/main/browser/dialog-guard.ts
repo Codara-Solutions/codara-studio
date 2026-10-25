@@ -14,12 +14,13 @@ import type { CdpSession } from "./cdp-session";
 import { describeDialog, dialogState, type DialogState, type PageDialog } from "./recorders/dialogs";
 
 // Methods that never need the page, so they neither resolve a tab nor wait.
-// preview.code runs many calls, each guarded on its own.
-const UNGUARDED = new Set(["preview.list", "preview.inbox", "preview.url", "preview.code"]);
+// browser.use runs many calls, each guarded on its own, and is not a
+// preview.* method anyway.
+const UNGUARDED = new Set(["preview.list", "preview.inbox", "preview.url"]);
 // Methods that still work while a dialog holds the page. A navigation drops
 // the dialog with the page, as in a browser; a navigate without a tabId may
 // also be about to open the caller's own tab rather than the one resolved here.
-const ALLOWED_WHILE_OPEN = new Set(["preview.dialog", "preview.console", "preview.network", "preview.navigate"]);
+const ALLOWED_WHILE_OPEN = new Set(["preview.dialog", "preview.console", "preview.network", "preview.cdp_events", "preview.navigate"]);
 
 function blockedResult(open: PageDialog[]): Record<string, unknown> {
   const first = open[0];

@@ -28,6 +28,7 @@ import {
   type PaneIo,
 } from "./agent-terminal-io";
 import { terminalAgentStateSnapshot, terminalAgentTurnsSignaled, terminalPanePlacement } from "./terminal-agent-notify";
+import { paneAgentRuntime } from "./pane-agent-runtime";
 import {
   AgentTerminalOwnershipError,
   type AgentTerminalRegistration,
@@ -1833,6 +1834,7 @@ const PREVIEW_TOOL_HOST: PreviewToolHost = {
     const id = workspaceId ?? state.activeWorkspaceId;
     return state.workspaces.find((workspace) => workspace.id === id)?.name ?? null;
   },
+  paneRuntime: paneAgentRuntime,
 };
 
 async function handlePreviewToolRpc(
