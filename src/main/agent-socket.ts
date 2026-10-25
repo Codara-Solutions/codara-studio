@@ -49,6 +49,8 @@ import { assertAllowedReadPathResolved, setAllowedRoots } from "./fs-sandbox";
 import { ShareOfferGate } from "./share/offer";
 import {
   createAgentWorktree,
+  createTerminalWorktree,
+  rollBackTerminalWorktree,
   createWorktreeAuditLog,
   gateCaller,
   getAgentWorktreeSetup,
@@ -643,6 +645,15 @@ const UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS = new Set<string>([
   "worktree.cleanup",
 ]);
 
+// A terminal that makes a worktree changes worktrees like worktree.create.
+function midCompactionBlocked(method: string, params: Record<string, unknown>): boolean {
+  return (
+    MID_COMPACTION_BLOCKED_METHODS.has(method) ||
+    (method === "worktree.cleanup" && params.action === "remove") ||
+    (method === "terminal.create" && params.worktree !== undefined && params.worktree !== null)
+  );
+}
+
 function isUntrustedPullRequestBlockedMethod(method: string): boolean {
   return (
     UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS.has(method) ||
@@ -704,7 +715,7 @@ async function dispatch(
         }
       }
     }
-    if (MID_COMPACTION_BLOCKED_METHODS.has(method) || (method === "worktree.cleanup" && params.action === "remove")) {
+    if (midCompactionBlocked(method, params)) {
       const runId = stringParam(params, "runId");
       if (runId && (await getRunStore()).isRunMidAutoCompaction(runId)) {
         return errorResponse(
@@ -1516,11 +1527,46 @@ async function adoptRestoredAgentTerminal(paneId: string, params: Record<string,
   }
 }
 
+// What terminal.create's worktree option made, for handleTerminalCreate to
+// take back when the terminal then fails.
+interface TerminalWorktreeMade {
+  caller: WorktreeCaller | null;
+  worktree: Record<string, unknown> | null;
+}
+
 async function handleTerminalCreate(
   params: Record<string, unknown>,
   id: JsonRpcId,
   authKind: AgentSocketAuth["kind"],
   res: ServerResponse,
+): Promise<JsonRpcResponse> {
+  const made: TerminalWorktreeMade = { caller: null, worktree: null };
+  const response = await createTerminal(params, id, authKind, res, made);
+  if (!response.error || !made.caller || !made.worktree) return response;
+  // A worktree with no terminal would be an orphan that still counts toward
+  // the repository's limit: remove it, or say where it stays.
+  const rollback = await rollBackTerminalWorktree(made.caller, made.worktree, worktreeDeps()).catch((err: unknown) => ({
+    removed: false,
+    reason: err instanceof Error ? err.message : String(err),
+  }));
+  if (rollback.removed) {
+    return errorResponse(id, response.error.code, `${response.error.message}; the worktree made for it was removed`);
+  }
+  const kept = { workspaceId: made.worktree.workspaceId, path: made.worktree.path, branch: made.worktree.branch };
+  return errorResponse(
+    id,
+    response.error.code,
+    `${response.error.message}; the worktree stays at ${String(kept.path)} (workspaceId ${String(kept.workspaceId)}, ${rollback.reason ?? "not removed"}): remove it with codara_worktree_remove`,
+    { worktree: kept },
+  );
+}
+
+async function createTerminal(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  authKind: AgentSocketAuth["kind"],
+  res: ServerResponse,
+  made: TerminalWorktreeMade,
 ): Promise<JsonRpcResponse> {
   const startedAt = Date.now();
   let cwd = stringParam(params, "cwd");
@@ -1674,24 +1720,27 @@ async function handleTerminalCreate(
   let worktree: Record<string, unknown> | null = null;
   if (worktreeRequest) {
     try {
-      const made = await createAgentWorktree(
-        { ...(await worktreeCaller(params)), ...(crossWorkspace ? { workspaceId: crossWorkspace.target.id } : {}) },
-        worktreeRequest,
-        worktreeDeps(),
-      );
-      if (made.ok !== true) {
-        const refusal = made as WorktreeRefusal;
+      const caller = { ...(await worktreeCaller(params)), ...(crossWorkspace ? { workspaceId: crossWorkspace.target.id } : {}) };
+      const created = await createTerminalWorktree(caller, worktreeRequest, worktreeDeps());
+      if (created.ok !== true) {
+        const refusal = created as WorktreeRefusal;
         return errorResponse(id, ERR_INVALID_PARAMS, `${refusal.code}: ${refusal.error}${refusal.hint ? ` ${refusal.hint}` : ""}`);
       }
-      if (typeof made.workspaceId !== "string" || typeof made.path !== "string") {
+      made.caller = caller;
+      made.worktree = created;
+      if (typeof created.workspaceId !== "string" || typeof created.path !== "string") {
         return errorResponse(id, ERR_INTERNAL, "the worktree was made without a workspace");
       }
-      worktree = made;
-      workspaceId = made.workspaceId;
-      workspaceCwd = made.path;
-      cwd = made.path;
+      worktree = created;
+      workspaceId = created.workspaceId;
+      workspaceCwd = created.path;
+      cwd = created.path;
     } catch (error) {
       return errorResponse(id, ERR_INTERNAL, error instanceof Error ? error.message : String(error));
+    }
+    // Nobody would drive a terminal opened after the caller gave up.
+    if (res.destroyed || res.socket?.destroyed) {
+      return errorResponse(id, ERR_INTERNAL, "the caller disconnected before the terminal opened");
     }
   }
   const callerPane =

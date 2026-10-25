@@ -12,8 +12,9 @@ const { rpcRaw } = require("../../cli/lib/rpc.cjs");
 // another workspace's repository in one terminal.create call, the socket
 // method codara_terminal_create calls. The user is asked once, with the
 // cross-workspace terminal card; Allow once makes the worktree, its rail row
-// and the terminal in it, and the command runs in the worktree's folder. A
-// worktree refusal opens nothing, and after Deny no worktree is made.
+// and the terminal in it, and the command runs in the worktree's folder. The
+// coordinator lists and can remove it from its own folder. A worktree
+// refusal opens nothing, and after Deny no worktree is made.
 
 function git(cwd: string, args: string[], env: NodeJS.ProcessEnv): string {
   return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", env }).trim();
@@ -102,6 +103,14 @@ test("a coordinator starts a terminal in a new worktree of another workspace in 
       await row.click();
       await page.getByRole("tab", { name: /worker/ }).evaluate((tab) => (tab as HTMLElement).click());
       await expect(page.locator(`[data-terminal-pane-id="${opened.paneId}"]:visible`)).toBeVisible({ timeout: 15_000 });
+    });
+
+    await test.step("its maker finds it again from its own folder", async () => {
+      const caller = { callerRole: "studio", callerClient: "claude-code", callerPaneId: coordinator.paneId };
+      const listed = await request("worktree.list", caller);
+      expect(listed.elsewhere.map((item: { branch: string }) => item.branch)).toEqual(["agent/parser"]);
+      const removable = await request("worktree.remove", { ...caller, workspaceId: listed.elsewhere[0].workspaceId, dryRun: true });
+      expect(removable.ok, JSON.stringify(removable)).toBe(true);
     });
 
     await test.step("a worktree refusal opens no terminal", async () => {

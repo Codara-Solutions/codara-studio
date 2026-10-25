@@ -650,10 +650,27 @@ async function deepestWorkspaceContaining(state: AppState, cwd: string): Promise
   return best?.workspace;
 }
 
+// The agent that made a worktree, by the pane or run it called from.
+function madeBy(workspace: Workspace, caller: WorktreeCaller): boolean {
+  const creator = workspace.copyBranch?.createdBy;
+  if (creator?.kind !== "agent") return false;
+  return (
+    (caller.paneId !== undefined && creator.paneId === caller.paneId) ||
+    (caller.runId !== undefined && creator.runId === caller.runId)
+  );
+}
+
+/**
+ * `repoOf` names a worktree the caller made: its repository is the scope's,
+ * wherever the caller runs now. A coordinator that made a worktree in
+ * another workspace (terminal.create's worktree option) finds it again that
+ * way. A worktree someone else made leaves the scope as it was.
+ */
 export async function resolveWorktreeScope(
   caller: WorktreeCaller,
   deps: AgentWorktreeDeps,
   run?: RunState,
+  options: { repoOf?: string } = {},
 ): Promise<WorktreeScope | WorktreeRefusal> {
   const state = await deps.loadState();
   let callerWorkspace: Workspace | undefined;
@@ -692,7 +709,9 @@ export async function resolveWorktreeScope(
   if (callerWorkspace.remote || isRemotePath(callerWorkspace.cwd)) {
     return refusal("WORKTREE_REMOTE_UNSUPPORTED");
   }
-  const source = callerWorkspace.copyBranch?.repoCwd ?? callerWorkspace.cwd;
+  const made = options.repoOf ? state.workspaces.find((workspace) => workspace.id === options.repoOf) : undefined;
+  const madeRepo = made?.copyBranch && !isRemotePath(made.copyBranch.repoCwd) && madeBy(made, caller) ? made.copyBranch.repoCwd : null;
+  const source = madeRepo ?? callerWorkspace.copyBranch?.repoCwd ?? callerWorkspace.cwd;
   let repoCwd: string;
   try {
     const sourceReal = await fsp.realpath(source);
@@ -922,6 +941,48 @@ export async function createAgentWorktree(
       .catch(() => undefined);
   }
   return result;
+}
+
+/**
+ * terminal.create's worktree option. It never waits for the worktree's setup:
+ * the call has the MCP server's 60 seconds, part of them spent on the
+ * approval card, and a command started after the caller gave up would run
+ * unattended. A branch whose worktree another agent made is refused, so a
+ * terminal never opens in someone else's checkout.
+ */
+export async function createTerminalWorktree(
+  caller: WorktreeCaller,
+  input: Pick<CreateWorktreeInput, "branch" | "base" | "purpose">,
+  deps: AgentWorktreeDeps,
+): Promise<Record<string, unknown> | WorktreeRefusal> {
+  const made = await createAgentWorktree(caller, { ...input, waitForSetup: false }, deps);
+  if (isRefusal(made) || made.created !== false) return made;
+  const existing = (await deps.loadState()).workspaces.find((workspace) => workspace.id === made.workspaceId);
+  if (existing && madeBy(existing, caller)) return made;
+  return refusal("WORKTREE_NOT_YOURS", `another agent's worktree is on ${String(made.branch)}; pick another branch`, {
+    workspaceId: made.workspaceId,
+    branch: made.branch,
+  });
+}
+
+/**
+ * Takes back the worktree createTerminalWorktree made when its terminal did
+ * not open, through the same guarded removal as codara_worktree_remove. One
+ * that existed before the call stays.
+ */
+export async function rollBackTerminalWorktree(
+  caller: WorktreeCaller,
+  made: Record<string, unknown>,
+  deps: AgentWorktreeDeps,
+): Promise<{ removed: boolean; reason?: string }> {
+  if (made.created !== true || typeof made.workspaceId !== "string") {
+    return { removed: false, reason: "it was there before this call" };
+  }
+  const removed = await removeAgentWorktree(caller, { workspaceId: made.workspaceId, deleteBranch: true }, deps).catch(
+    (err: unknown) => refusal("WORKTREE_GIT_FAILED", cleanText(errorText(err), 300)),
+  );
+  if (isRefusal(removed)) return { removed: false, reason: `${removed.code}: ${removed.error}` };
+  return { removed: removed.removed === true };
 }
 
 async function createAgentWorktreeInner(
@@ -1751,7 +1812,7 @@ export async function getAgentWorktreeSetup(
 ): Promise<Record<string, unknown> | WorktreeRefusal> {
   const gate = await gateCaller(caller, deps, { mutation: false });
   if (isRefusal(gate)) return gate;
-  const scope = await resolveWorktreeScope(caller, deps, gate.run);
+  const scope = await resolveWorktreeScope(caller, deps, gate.run, { repoOf: input.workspaceId });
   if (isRefusal(scope)) return scope;
   const managed = await managedWorkspaces(scope);
   let workspace: Workspace | undefined;
@@ -1809,7 +1870,12 @@ export async function listAgentWorktrees(
   const gate = await gateCaller(caller, deps, { mutation: false });
   if (isRefusal(gate)) return gate;
   const scope = await resolveWorktreeScope(caller, deps, gate.run);
-  if (isRefusal(scope)) return scope;
+  if (isRefusal(scope)) {
+    // A coordinator in a plain folder still sees the worktrees it made.
+    if (scope.code !== "WORKTREE_NOT_A_REPO") return scope;
+    const elsewhere = await worktreesMadeElsewhere(await deps.loadState(), caller, null);
+    return elsewhere.length ? { ok: true, repoCwd: null, worktrees: [], unmanaged: [], elsewhere } : scope;
+  }
   const checkMerge = input.checkMerge === true;
   const registrations = await listWorktreeRegistrations(scope.repoCwd).catch(() => [] as WorktreeRegistration[]);
   const ctx = newContext(scope, caller, deps, gate.preferences, registrations);
@@ -1860,13 +1926,33 @@ export async function listAgentWorktrees(
       head: entry.head,
     });
   }
+  const elsewhere = await worktreesMadeElsewhere(scope.state, caller, scope.repoCwd);
   return {
     ok: true,
     repoCwd: scope.repoCwd,
     defaultBranch: await resolveDefaultBranch(scope.repoCwd),
     worktrees: items,
     unmanaged,
+    ...(elsewhere.length ? { elsewhere } : {}),
   };
+}
+
+// Worktrees the caller made in other repositories than `repoCwd`, which
+// setup and remove reach by workspaceId.
+async function worktreesMadeElsewhere(
+  state: AppState,
+  caller: WorktreeCaller,
+  repoCwd: string | null,
+): Promise<Array<Record<string, unknown>>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const workspace of state.workspaces) {
+    const copy = workspace.copyBranch;
+    if (!copy || isRemotePath(copy.repoCwd) || !madeBy(workspace, caller)) continue;
+    const repo = await realpathOrResolve(copy.repoCwd);
+    if (repo === repoCwd) continue;
+    out.push({ workspaceId: workspace.id, name: workspace.name, path: workspace.cwd, branch: copy.branch, repoCwd: repo });
+  }
+  return out;
 }
 
 // ── Remove ─────────────────────────────────────────────────────────────────
@@ -1964,7 +2050,7 @@ export async function removeAgentWorktree(
     await auditRefusal(deps, caller, gate, input);
     return gate;
   }
-  const scope = await resolveWorktreeScope(caller, deps, gate.run);
+  const scope = await resolveWorktreeScope(caller, deps, gate.run, { repoOf: input.workspaceId });
   if (isRefusal(scope)) {
     await auditRefusal(deps, caller, scope, input);
     return scope;

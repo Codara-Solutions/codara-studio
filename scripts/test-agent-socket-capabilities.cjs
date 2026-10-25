@@ -181,9 +181,10 @@ for (const method of ["worktree.create", "worktree.remove"]) {
 
 assert.match(
   socketSource,
-  /MID_COMPACTION_BLOCKED_METHODS\.has\(method\) \|\| \(method === "worktree\.cleanup" && params\.action === "remove"\)/,
-  "a worktree cleanup removal waits out a compaction",
+  /function midCompactionBlocked\(method: string, params: Record<string, unknown>\): boolean \{[\s\S]*?MID_COMPACTION_BLOCKED_METHODS\.has\(method\)[\s\S]*?method === "worktree\.cleanup" && params\.action === "remove"[\s\S]*?method === "terminal\.create" && params\.worktree !== undefined && params\.worktree !== null[\s\S]*?\n\}/,
+  "a worktree cleanup removal, and a terminal that makes a worktree, wait out a compaction",
 );
+assert.match(socketSource, /if \(midCompactionBlocked\(method, params\)\) \{/, "dispatch applies the compaction gate");
 
 const bridgeSource = fs.readFileSync(
   path.join(ROOT, "resources", "codara-studio-mcp", "server.js"),

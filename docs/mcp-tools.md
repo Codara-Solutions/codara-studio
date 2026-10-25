@@ -652,15 +652,24 @@ terminal in it, so an agent starts inside its own checkout in one call:
 { "workspace": "codara-studio", "worktree": { "branch": "fix/login", "base": "main" }, "command": "claude" }
 ```
 
-The worktree is made exactly as `codara_worktree_create` makes it (same
-branch rules, refusals, `.worktreeinclude` and setup), from the repository of
-the target workspace: `workspace` when given, otherwise the caller's own. A
+The worktree is made as `codara_worktree_create` makes it (same branch rules,
+refusals, `.worktreeinclude` and setup), from the repository of the target
+workspace: `workspace` when given, otherwise the caller's own. It never waits
+for its setup: the call has the MCP server's 60 seconds, part of them spent on
+the approval card. A branch that already has a worktree opens a terminal there
+only when the caller made that worktree; another agent's is refused with
+`WORKTREE_NOT_YOURS`. The call waits out a Cora chat's compaction like
+`codara_worktree_create`. A
 cross-workspace call asks the user once, with the same card and grant as any
 terminal in another workspace; the worktree is made only after the answer, and
 nothing is made on Deny. The worktree's row is credited to the calling agent,
-which may remove it later like any worktree it made. A worktree refusal comes
-back as the call's error (for example `WORKTREE_BRANCH_EXISTS: ...`) and opens
-no terminal. `cwd` and `worktree` cannot be combined. The result's
+which finds it again by `workspaceId` from its own folder (see
+[Worktrees](#worktrees)). A worktree refusal comes back as the call's error
+(for example `WORKTREE_BRANCH_EXISTS: ...`) and opens no terminal. When the
+terminal does not open after the worktree was made (the shell dies, the
+caller disconnects), Codara removes the worktree again through the same
+guarded removal; if that is refused, the error names where the worktree
+stays and carries `data.worktree: { workspaceId, path, branch }`. `cwd` and `worktree` cannot be combined. The result's
 `workspaceId` and `workspace` are the worktree's own, and it adds
 `worktree: { workspaceId, path, branch, created, setup? }`; when `setup` is
 not finished, the `command` has already started, so wait with
@@ -995,14 +1004,19 @@ In `studio` outside a Cora chat, in `execute`, and in a Cora chat that answers
 directly. An agent gets a separate checkout of its own repository on its own
 branch, which you see in the rail under the repository, and removes it once
 the branch is merged. The repository is always the one the agent runs in: its
-terminal pane or its Cora chat decides, never a tool argument. SSH workspaces
-are not supported yet.
+terminal pane or its Cora chat decides, never a tool argument. The one
+exception is a worktree the agent made in another workspace with
+[a terminal in a new worktree](#a-terminal-in-a-new-worktree): its maker
+(the same pane or Cora run) reaches it by `workspaceId` with
+`codara_worktree_setup` and `codara_worktree_remove`, and
+`codara_worktree_list` shows it under `elsewhere`, from wherever it runs. SSH
+workspaces are not supported yet.
 
 | Tool | What it does |
 |---|---|
 | `codara_worktree_create` | Creates a worktree on a new branch (default `agent/<purpose>-<id>`, from the default branch after a fetch) or, with `checkout: true`, on an existing branch. The agent's own cwd does not change; it works under the returned `path`. Codara starts the repository's [worktree setup](./worktree-setup.md) there (files from `.worktreeinclude`, links, the setup command from `.codara/worktree.json` and your own copy-branch command) and returns its state as `setup`; `setupCommand` is now always null. A setup command or terminal command not yet approved for the repository does not run: `setup.state` is `awaiting-approval` until you run or allow it from Codara, and the agent must never run either itself (see [Approving the setup command](./worktree-setup.md#approving-the-setup-command)). With `waitForSetup: true`, or when the setup file asks for it, the call waits up to 5 minutes for setup to end. Because it can run that command, it is annotated as destructive and open-world, not read-only. Asking again for the same branch returns the existing worktree. At most 20 agent worktrees per repository. |
 | `codara_worktree_setup` | The setup state of a worktree: what was copied and linked, each command with its exit code, the error and the end of the log (`logLines`, at most 200). Without `workspaceId` or `path`, the worktree the agent works in. `wait: true` waits for setup to end, also while you decide on a command awaiting approval, up to `timeoutSeconds` (default 300, at most 540). Read-only. |
-| `codara_worktree_list` | Lists the repository's Codara-managed worktrees: who created each, uncommitted and ignored files, terminals, runs and processes using it, merge status, and `removable` with the `blockers` that `codara_worktree_remove` would report. `checkMerge: true` fetches and asks GitHub, so it is slower. Worktrees Codara does not manage are listed under `unmanaged` and are never touched. |
+| `codara_worktree_list` | Lists the repository's Codara-managed worktrees: who created each, uncommitted and ignored files, terminals, runs and processes using it, merge status, and `removable` with the `blockers` that `codara_worktree_remove` would report. `checkMerge: true` fetches and asks GitHub, so it is slower. Worktrees Codara does not manage are listed under `unmanaged` and are never touched. Worktrees the agent made in other repositories are listed under `elsewhere` with their `repoCwd`, also when the agent runs in a folder that is no repository. |
 | `codara_worktree_remove` | Removes a worktree and, by default, the branch it created. `dryRun: true` only checks. |
 | `codara_worktree_cleanup` | **Clean up worktrees** for an agent, across every repository behind your workspaces. See [Cleaning up worktrees](#cleaning-up-worktrees). |
 

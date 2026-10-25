@@ -203,6 +203,65 @@ async function main() {
     assert.equal(workspaceOf(elsewhere.workspaceId).copyBranch.createdBy.paneId, "pane-coord");
     assert.equal((await aw.createAgentWorktree({ ...coordinator, workspaceId: "ws-gone" }, {}, deps)).code, "WORKTREE_NO_WORKSPACE");
 
+    // Its maker finds it again from the plain folder: by workspaceId for
+    // setup and remove, and in list under elsewhere. Another agent there
+    // does not.
+    h.paneWorkspace["pane-other"] = "ws-notes";
+    const bystander = { role: "studio", client: "codex", paneId: "pane-other" };
+    const setupFromNotes = await aw.getAgentWorktreeSetup(coordinator, { workspaceId: elsewhere.workspaceId }, deps);
+    assert.equal(setupFromNotes.ok, true, JSON.stringify(setupFromNotes));
+    const dryRemove = await aw.removeAgentWorktree(coordinator, { workspaceId: elsewhere.workspaceId, dryRun: true }, deps);
+    assert.equal(dryRemove.ok, true, JSON.stringify(dryRemove));
+    assert.equal(dryRemove.wouldRemove, true, JSON.stringify(dryRemove));
+    assert.equal((await aw.removeAgentWorktree(bystander, { workspaceId: elsewhere.workspaceId, dryRun: true }, deps)).ok, false);
+    const listedFromNotes = await aw.listAgentWorktrees(coordinator, {}, deps);
+    assert.equal(listedFromNotes.ok, true, JSON.stringify(listedFromNotes));
+    assert.deepEqual(
+      listedFromNotes.elsewhere.map((item) => [item.workspaceId, item.branch, item.repoCwd]),
+      [[elsewhere.workspaceId, "agent/from-notes", repo]],
+    );
+    assert.equal((await aw.listAgentWorktrees(bystander, {}, deps)).code, "WORKTREE_NOT_A_REPO");
+    assert.equal(
+      (await aw.listAgentWorktrees(terminalAgent, {}, deps)).elsewhere,
+      undefined,
+      "a worktree in the caller's own repository is listed only once, under worktrees",
+    );
+
+    // terminal.create's worktree: never waits for setup (its call has 60 s,
+    // part of it spent on the approval card), never opens in a checkout
+    // another agent made, and goes again when the terminal does not open.
+    const waits = [];
+    const setupStatus = { id: "setup-1", state: "running", waitForSetup: true };
+    const withSetup = {
+      ...deps,
+      worktreeSetup: {
+        start: async () => setupStatus,
+        whenPrepared: async () => setupStatus,
+        waitFor: async (id, ms) => {
+          waits.push(ms);
+          return { ...setupStatus, state: "succeeded" };
+        },
+        get: async () => null,
+        tail: async () => "",
+        summary: (status) => ({ state: status.state }),
+      },
+    };
+    const forTerminal = await aw.createTerminalWorktree({ ...coordinator, workspaceId: "ws-repo" }, { branch: "agent/term" }, withSetup);
+    assert.equal(forTerminal.ok, true, JSON.stringify(forTerminal));
+    assert.deepEqual(waits, [], "the setup runs on while the terminal opens");
+    assert.equal(forTerminal.setup.state, "running");
+    const reused = await aw.createTerminalWorktree({ ...coordinator, workspaceId: "ws-repo" }, { branch: "agent/term" }, deps);
+    assert.equal(reused.ok, true, "its maker may open another terminal in it");
+    assert.equal(reused.created, false);
+    const taken = await aw.createTerminalWorktree({ ...bystander, workspaceId: "ws-repo" }, { branch: "agent/term" }, deps);
+    assert.equal(taken.code, "WORKTREE_NOT_YOURS", JSON.stringify(taken));
+    assert.equal((await aw.rollBackTerminalWorktree(coordinator, reused, deps)).removed, false, "one that was there before stays");
+    const rolledBack = await aw.rollBackTerminalWorktree(coordinator, forTerminal, deps);
+    assert.equal(rolledBack.removed, true, JSON.stringify(rolledBack));
+    assert.equal(fs.existsSync(forTerminal.path), false);
+    assert.equal(refExists(repo, "refs/heads/agent/term"), false);
+    assert.equal(workspaceOf(forTerminal.workspaceId), undefined);
+
     // ── Who may call ───────────────────────────────────────────────────────
     for (const role of ["worker", "automation"]) {
       const refused = await aw.createAgentWorktree({ role, client: "cora" }, {}, deps);
