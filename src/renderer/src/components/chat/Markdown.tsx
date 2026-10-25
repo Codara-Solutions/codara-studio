@@ -246,8 +246,10 @@ function MermaidDiagram({ source }: { source: string }) {
       mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "dark" });
       try {
         const rendered = await mermaid.render(id, source);
-        rememberMermaidSvg(source, id, rendered.svg);
-        if (!cancelled) setSvg(rendered.svg);
+        if (!cancelled) {
+          rememberMermaidSvg(source, id, rendered.svg);
+          setSvg(rendered.svg);
+        }
       } catch (reason) {
         if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason));
       }

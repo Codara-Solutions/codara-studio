@@ -159,6 +159,9 @@ const BLOCK_SAMPLES = [
   "1. Install\n\nThen:\n\n    npm i\n\n2. Run\n\n    x\n\n\n-\n\n\ty\n\n10. b",
   "- ```\n  a\n\n> b\n\n> ~~~\n> c\n\nd\n\n1. ```js\n   e\n\nf",
   "[Docs](https://x.dev) intro\n\n```py\ndef f() -> list[int]:\n```\n\n[a\\]b, [c] and [d][e]\n\n[e]: /url",
+  "    a\n\n    \nb\n\n    c\n\n\t\nd",
+  "+\n    ```\n\n\n\ns",
+  "1. a\n\n     ```\n     b\n\n\nc",
 ];
 
 // mulberry32: integer math only, so it does not fall into a short cycle the
@@ -176,7 +179,7 @@ function seeded(seed) {
 
 const FUZZ_LINES = [
   "", "", "", "", "", "", "text line", "text line", "text line", "More prose.", "- item", "1. item", "2. two", "10. ten", "-", "* star", "+ plus",
-  "   ```", " ```", "```", "```js", "~~~", "````", "  code", "    deep", "      deeper", "\tTab",
+  "   ```", " ```", "```", "```js", "~~~", "````", "  code", "    deep", "      deeper", "\tTab", "    ", "    ```", "     ~~~",
   "> quote", ">", "| a | b |", "|---|---|", "---", "===", "# heading", "- [ ] task",
   "[link](https://x.dev) text", "def f() -> list[int]:", "[a\\]b]",
 ];
@@ -406,7 +409,9 @@ async function main() {
     assert.notEqual(M.cachedMermaidSvg("graph TD; A-->B", "x"), "");
     assert.equal(M.cachedMermaidSvg("graph 0", "x"), "");
     assert.match(markdown, /const \[svg, setSvg\] = useState<string>\(\(\) => cachedMermaidSvg\(source, id\)\);/);
-    assert.match(markdown, /rememberMermaidSvg\(source, id, rendered\.svg\);\s*if \(!cancelled\) setSvg\(rendered\.svg\);/);
+    // Only a drawing still wanted is kept: a diagram streamed over many
+    // flushes would otherwise push every other one out of the cache.
+    assert.match(markdown, /if \(!cancelled\) \{\s*rememberMermaidSvg\(source, id, rendered\.svg\);\s*setSvg\(rendered\.svg\);/);
   });
 
   console.log(`\n${passed} passed`);

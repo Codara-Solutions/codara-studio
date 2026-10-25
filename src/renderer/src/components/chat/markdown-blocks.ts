@@ -6,12 +6,15 @@
 // open block: the next line starts at column 0, is not a list item while a
 // list may be open (it would continue that list, and could turn it loose) or
 // right after indented code (micromark then reads the item as paragraph text),
-// and no top-level code fence is open. Anything this scanner cannot be sure of stops cutting
+// no blank line in between is indented enough to continue that code, and no
+// top-level code fence is open. Anything this scanner cannot be sure of stops cutting
 // from there on, which only makes the last piece longer. Raw HTML is one of
 // those: an HTML block can run past blank lines, and a fence line inside one
 // is not a fence, so the first line that may start one ends the cutting. A
-// fence opened on a list or quote marker line is another: its container, not
-// a closing fence, may end it, with or without the blank lines before.
+// fence opened on a list or quote marker line is another, and so is one
+// indented 4 or more columns while a list is open (a fence in an item): its
+// container, not a closing fence, may end it, with or without the blank lines
+// before.
 // Link reference and footnote definitions apply to the whole document, so a
 // text that may contain one is never cut at all: a line opening a bracket
 // whose first unescaped "]" is followed by ":" (a label can hold escaped
@@ -30,6 +33,7 @@ const BACKTICK_FENCE = /^( {0,3})(`{3,})[^`]*$/;
 const TILDE_FENCE = /^( {0,3})(~{3,})[^]*$/;
 const FENCE_CLOSE = /^( {0,3})(`{3,}|~{3,})[ \t]*$/;
 const HTML_START = /^ {0,3}</;
+const INDENTED_FENCE = /^[ \t]*(?:`{3}|~{3})/;
 const CONTAINER_FENCE = /^ {0,3}(?:[-*+]|\d{1,9}[.)]|>)[ \t>*+\-.)\d]*(?:`{3}|~{3})/;
 
 interface OpenFence {
@@ -76,6 +80,7 @@ export function splitMarkdownBlocks(text: string): string[] {
   let blankFrom = -1;
   let listOpen = false;
   let lastIndent = 0;
+  let blankIndent = 0;
   for (const raw of text.split("\n")) {
     const lineStart = offset;
     offset += raw.length + 1;
@@ -93,12 +98,17 @@ export function splitMarkdownBlocks(text: string): string[] {
       continue;
     }
     if (BLANK.test(line)) {
-      if (blankFrom < 0) blankFrom = lineStart;
+      if (blankFrom < 0) {
+        blankFrom = lineStart;
+        blankIndent = 0;
+      }
+      blankIndent = Math.max(blankIndent, indentOf(line));
       continue;
     }
     const listItem = LIST_ITEM.test(line);
     const indent = indentOf(line);
-    if (blankFrom > start && indent === 0 && !(listItem && (listOpen || lastIndent >= 4))) {
+    const codeContinues = lastIndent >= 4 && (listItem || blankIndent >= 4);
+    if (blankFrom > start && indent === 0 && !codeContinues && !(listItem && listOpen)) {
       blocks.push(text.slice(start, blankFrom - 1));
       start = lineStart;
       listOpen = false;
@@ -107,6 +117,7 @@ export function splitMarkdownBlocks(text: string): string[] {
     lastIndent = indent;
     if (listItem) listOpen = true;
     if (HTML_START.test(line) || CONTAINER_FENCE.test(line)) break;
+    if (listOpen && indent >= 4 && INDENTED_FENCE.test(line)) break;
     fence = openingFence(line);
   }
   blocks.push(text.slice(start));
