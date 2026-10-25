@@ -4,7 +4,9 @@
 // ~/.ssh/config reading (src/main/remote/ssh-hosts.ts): Include (absolute,
 // ~, relative to ~/.ssh, globs, cycles, depth), ProxyCommand and
 // HostKeyAlias, the refusal of unsafe %h/%r/%n values at connect time, and
-// that only main can give a host a proxy.
+// that only main can give a host a proxy. Ports outside 1 to 65535 drop the
+// host (ssh refuses them too), and UserKnownHostsFile / GlobalKnownHostsFile
+// are read for the host-key check, never from a host the renderer saved.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -184,6 +186,45 @@ async function testProxyFields(hosts, proxy) {
   });
 }
 
+async function testPortsAndKnownHostsFiles(hosts) {
+  write(
+    ".ssh/config",
+    [
+      "Host custom",
+      "  HostName c.example",
+      '  UserKnownHostsFile ~/.ssh/other_known "/srv/two known"',
+      "  GlobalKnownHostsFile /etc/ssh/custom_global",
+      "Host nofile",
+      "  HostName n.example",
+      "  UserKnownHostsFile none",
+      "Host default-files",
+      "  HostName d.example",
+      "Host too-big",
+      "  HostName b.example",
+      "  Port 99999",
+      "Host negative",
+      "  HostName m.example",
+      "  Port -22",
+      "Host zero",
+      "  HostName z.example",
+      "  Port 0",
+      "Host good",
+      "  HostName g.example",
+      "  Port 2222",
+      "",
+    ].join("\n"),
+  );
+  const list = await hosts.readSshConfigHosts();
+  const ids = list.map((h) => h.id);
+  for (const bad of ["too-big", "negative", "zero"]) assert.ok(!ids.includes(bad), `${bad}: a port ssh refuses drops the host`);
+  assert.equal(byId(list, "good").port, 2222);
+  const custom = byId(list, "custom");
+  assert.deepEqual(custom.userKnownHostsFiles, [path.join(HOME, ".ssh", "other_known"), "/srv/two known"]);
+  assert.deepEqual(custom.globalKnownHostsFiles, ["/etc/ssh/custom_global"]);
+  assert.deepEqual(byId(list, "nofile").userKnownHostsFiles, [], "none reads no file");
+  assert.equal(byId(list, "default-files").userKnownHostsFiles, undefined, "unset keeps ssh's defaults");
+}
+
 async function testOnlyMainSetsProxy(hosts) {
   write(".ssh/config", "");
   const forged = {
@@ -196,10 +237,19 @@ async function testOnlyMainSetsProxy(hosts) {
     proxyCommandTemplate: "touch /tmp/pwned",
     codaraBoxId: "6f1c0000-0000-4000-8000-000000000000",
     hostKeyAlias: "x",
+    userKnownHostsFiles: ["/tmp/attacker_known_hosts"],
+    globalKnownHostsFiles: ["/tmp/attacker_known_hosts"],
   };
   const saved = await hosts.saveManualHost(forged);
   const entry = byId(saved, "forged");
-  for (const field of ["proxyCommand", "proxyCommandTemplate", "codaraBoxId", "hostKeyAlias"]) {
+  for (const field of [
+    "proxyCommand",
+    "proxyCommandTemplate",
+    "codaraBoxId",
+    "hostKeyAlias",
+    "userKnownHostsFiles",
+    "globalKnownHostsFiles",
+  ]) {
     assert.equal(entry[field], undefined, `${field} must not survive saveManualHost`);
   }
   await assert.rejects(hosts.saveCodaraHost({ ...forged, source: "manual" }), /Malformed/);
@@ -235,6 +285,7 @@ async function testOnlyMainSetsProxy(hosts) {
   await testInclude(hosts);
   await testDepthLimit(hosts);
   await testProxyFields(hosts, proxy);
+  await testPortsAndKnownHostsFiles(hosts);
   await testOnlyMainSetsProxy(hosts);
   console.log("ssh config include: ok");
 })()

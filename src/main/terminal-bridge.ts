@@ -81,6 +81,10 @@ interface PendingEntry {
 }
 
 const pending = new Map<string, PendingEntry>();
+// Requests that timed out with an onLate: the renderer may still carry them
+// out (a tab added after the caller gave up), and the caller cleans up then.
+const LATE_WINDOW_MS = 5 * 60_000;
+const late = new Map<string, { onLate: (result: unknown) => void; timer: NodeJS.Timeout }>();
 // Tab/pane state lives in the renderer, so main cannot see a Studio terminal
 // open, close, or retitle on its own. The renderer sends a bare content-free
 // ping whenever its shareable inventory changes; interested main-side services
@@ -102,7 +106,20 @@ export function registerTerminalBridge(): void {
     if (!isTrustedOnSender(event, RESPONSE_CHANNEL)) return;
     if (!payload || typeof payload.reqId !== "string") return;
     const entry = pending.get(payload.reqId);
-    if (!entry) return;
+    if (!entry) {
+      const gaveUp = late.get(payload.reqId);
+      if (!gaveUp) return;
+      late.delete(payload.reqId);
+      clearTimeout(gaveUp.timer);
+      if (payload.ok) {
+        try {
+          gaveUp.onLate(payload.result);
+        } catch (err) {
+          console.error("[terminal-bridge] late answer handler failed:", err);
+        }
+      }
+      return;
+    }
     pending.delete(payload.reqId);
     clearTimeout(entry.timer);
     if (payload.ok) {
@@ -133,7 +150,7 @@ export function onStudioTerminalInventoryChanged(
 export async function requestTerminalOp<T = unknown>(
   op: TerminalOpName,
   params: TerminalOpParams = {},
-  opts?: { timeoutMs?: number },
+  opts?: { timeoutMs?: number; onLate?: (result: T) => void },
 ): Promise<T> {
   const win = pickTargetWindow();
   if (!win) {
@@ -153,6 +170,12 @@ export async function requestTerminalOp<T = unknown>(
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(reqId);
+      const onLate = opts?.onLate;
+      if (onLate) {
+        const lateTimer = setTimeout(() => late.delete(reqId), LATE_WINDOW_MS);
+        lateTimer.unref?.();
+        late.set(reqId, { onLate: (result) => onLate(result as T), timer: lateTimer });
+      }
       reject(new Error(`terminal op '${op}' timed out after ${timeoutMs}ms`));
     }, timeoutMs);
     pending.set(reqId, {

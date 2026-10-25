@@ -5,7 +5,7 @@ import { shQuote } from "./connections";
 // Agent CLIs on an SSH machine (Machines, phase 1; docs/machines-plan.md).
 //
 // An agent started in a remote workspace runs the machine's own CLI with the
-// machine's own sign-in. With the `machinesEnabled` preference on, it runs
+// machine's own sign-in. With the `machinesEnabled` preference on (the default), it runs
 // inside a tmux session on a private tmux server (`tmux -L codara`), one
 // session per pane, so the agent keeps working when Studio quits, the laptop
 // sleeps or the connection drops. Opening the pane again attaches to the
@@ -166,4 +166,22 @@ export function buildRemoteAgentAttach(paneId: string): string {
 /** Ends a pane's agent session: the user closed the pane on purpose. */
 export function buildRemoteAgentKill(paneId: string): string {
   return `${execScript(`${TMUX} kill-session -t ${sessionTarget(paneId)}`)} >/dev/null 2>&1; true`;
+}
+
+/** Printed by `buildRemoteAgentSessionKill` when it ended the session. */
+export const SESSION_STOPPED = "codara-stopped";
+
+/**
+ * Ends an agent session by its name, for one no pane shows any more (the
+ * Machines page lists them). Only Studio's own `codara-` sessions qualify.
+ */
+
+export function buildRemoteAgentSessionKill(sessionName: string): string | null {
+  if (!/^codara-[A-Za-z0-9_-]{1,64}$/.test(sessionName)) return null;
+  const target = shQuote(`=${sessionName}`);
+  // Checked on the machine, at the moment of the kill: a client that attached
+  // since the last reading is another computer's Codara showing the agent.
+  return `${execScript(
+    `[ -z "$(${TMUX} list-clients -t ${target} 2>/dev/null)" ] && ${TMUX} kill-session -t ${target} >/dev/null 2>&1 && echo ${SESSION_STOPPED}`,
+  )} 2>/dev/null; true`;
 }

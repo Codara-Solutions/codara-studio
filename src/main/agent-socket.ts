@@ -49,6 +49,9 @@ import { assertAllowedReadPathResolved, setAllowedRoots } from "./fs-sandbox";
 import { ShareOfferGate } from "./share/offer";
 import {
   createAgentWorktree,
+  createTerminalWorktree,
+  rollBackTerminalWorktree,
+  terminalRollbackMessage,
   createWorktreeAuditLog,
   gateCaller,
   getAgentWorktreeSetup,
@@ -59,6 +62,7 @@ import {
   type AgentWorktreeEvent,
   type WorktreeCaller,
   type WorktreeCallerRole,
+  type WorktreeRefusal,
 } from "./agent-worktrees";
 import { managedWorktreesRoot } from "./git-worktrees";
 import { agentWorktreeSetupRunner } from "./worktree-setup";
@@ -276,7 +280,9 @@ const TERMINAL_SPAWN_WAIT_MS = 10_000;
 // enough for a bad-cwd shell to have exited (chdir failure is near-instant),
 // short enough not to add noticeable latency to a healthy create.
 const TERMINAL_SPAWN_SETTLE_MS = 750;
-// Under the MCP server's 60 s timeout for terminal.create.
+// Under the MCP server's 60 s timeout for terminal.create. With a worktree
+// the server waits longer (TERMINAL_WORKTREE_TIMEOUT_MS) and the worktree's
+// own time is not counted against this.
 const CROSS_WORKSPACE_CREATE_BUDGET_MS = 55_000;
 // A burst of creates from one agent shares one process listing.
 const CALLER_PROCESS_LIST_MAX_AGE_MS = 2_000;
@@ -642,6 +648,15 @@ const UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS = new Set<string>([
   "worktree.cleanup",
 ]);
 
+// A terminal that makes a worktree changes worktrees like worktree.create.
+function midCompactionBlocked(method: string, params: Record<string, unknown>): boolean {
+  return (
+    MID_COMPACTION_BLOCKED_METHODS.has(method) ||
+    (method === "worktree.cleanup" && params.action === "remove") ||
+    (method === "terminal.create" && params.worktree !== undefined && params.worktree !== null)
+  );
+}
+
 function isUntrustedPullRequestBlockedMethod(method: string): boolean {
   return (
     UNTRUSTED_PULL_REQUEST_BLOCKED_METHODS.has(method) ||
@@ -703,7 +718,7 @@ async function dispatch(
         }
       }
     }
-    if (MID_COMPACTION_BLOCKED_METHODS.has(method) || (method === "worktree.cleanup" && params.action === "remove")) {
+    if (midCompactionBlocked(method, params)) {
       const runId = stringParam(params, "runId");
       if (runId && (await getRunStore()).isRunMidAutoCompaction(runId)) {
         return errorResponse(
@@ -1515,11 +1530,40 @@ async function adoptRestoredAgentTerminal(paneId: string, params: Record<string,
   }
 }
 
+// What terminal.create's worktree option made, for handleTerminalCreate to
+// take back when the terminal then fails.
+interface TerminalWorktreeMade {
+  caller: WorktreeCaller | null;
+  worktree: Record<string, unknown> | null;
+}
+
 async function handleTerminalCreate(
   params: Record<string, unknown>,
   id: JsonRpcId,
   authKind: AgentSocketAuth["kind"],
   res: ServerResponse,
+): Promise<JsonRpcResponse> {
+  const made: TerminalWorktreeMade = { caller: null, worktree: null };
+  const response = await createTerminal(params, id, authKind, res, made);
+  if (!response.error || !made.caller || !made.worktree) return response;
+  // A worktree with no terminal would be an orphan that still counts toward
+  // the repository's limit: remove it, or say where it stays.
+  const rollback = await rollBackTerminalWorktree(made.caller, made.worktree, worktreeDeps()).catch((err: unknown) => ({
+    removed: false,
+    reason: err instanceof Error ? err.message : String(err),
+  }));
+  const message = `${response.error.message}; ${terminalRollbackMessage(made.worktree, rollback)}`;
+  if (rollback.removed) return errorResponse(id, response.error.code, message);
+  const kept = { workspaceId: made.worktree.workspaceId, path: made.worktree.path, branch: made.worktree.branch };
+  return errorResponse(id, response.error.code, message, { worktree: kept });
+}
+
+async function createTerminal(
+  params: Record<string, unknown>,
+  id: JsonRpcId,
+  authKind: AgentSocketAuth["kind"],
+  res: ServerResponse,
+  made: TerminalWorktreeMade,
 ): Promise<JsonRpcResponse> {
   const startedAt = Date.now();
   let cwd = stringParam(params, "cwd");
@@ -1527,6 +1571,9 @@ async function handleTerminalCreate(
     return errorResponse(id, ERR_INVALID_PARAMS, "workspace must be a workspace id or an absolute folder path");
   }
   const requestedWorkspace = stringParam(params, "workspace");
+  const worktreeRequest = terminalWorktreeParam(params.worktree);
+  if (typeof worktreeRequest === "string") return errorResponse(id, ERR_INVALID_PARAMS, worktreeRequest);
+  if (worktreeRequest && cwd) return errorResponse(id, ERR_INVALID_PARAMS, "pass cwd or worktree, not both");
   const command = stringParam(params, "command");
   const title = stringParam(params, "title");
   const group = tabGroupParam(params);
@@ -1665,6 +1712,37 @@ async function handleTerminalCreate(
     }
     if (!cwd && resolved.folder) cwd = resolved.folder;
   }
+  // The worktree is made in the target workspace's repository, under the
+  // same approval as the terminal, and the terminal opens in it.
+  let worktree: Record<string, unknown> | null = null;
+  let worktreeMs = 0;
+  if (worktreeRequest) {
+    const worktreeStartedAt = Date.now();
+    try {
+      const caller = { ...(await worktreeCaller(params)), ...(crossWorkspace ? { workspaceId: crossWorkspace.target.id } : {}) };
+      const created = await createTerminalWorktree(caller, worktreeRequest, worktreeDeps());
+      if (created.ok !== true) {
+        const refusal = created as WorktreeRefusal;
+        return errorResponse(id, ERR_INVALID_PARAMS, `${refusal.code}: ${refusal.error}${refusal.hint ? ` ${refusal.hint}` : ""}`);
+      }
+      made.caller = caller;
+      made.worktree = created;
+      if (typeof created.workspaceId !== "string" || typeof created.path !== "string") {
+        return errorResponse(id, ERR_INTERNAL, "the worktree was made without a workspace");
+      }
+      worktree = created;
+      worktreeMs = Date.now() - worktreeStartedAt;
+      workspaceId = created.workspaceId;
+      workspaceCwd = created.path;
+      cwd = created.path;
+    } catch (error) {
+      return errorResponse(id, ERR_INTERNAL, error instanceof Error ? error.message : String(error));
+    }
+    // Nobody would drive a terminal opened after the caller gave up.
+    if (res.destroyed || res.socket?.destroyed) {
+      return errorResponse(id, ERR_INTERNAL, "the caller disconnected before the terminal opened");
+    }
+  }
   const callerPane =
     !run && callerPaneId
       ? (await listStudioTerminals().catch(() => [])).find((entry) => entry.paneId === callerPaneId)
@@ -1684,16 +1762,27 @@ async function handleTerminalCreate(
         ...(crossWorkspace ? { openedBy: crossWorkspace.callerName } : {}),
         ...(agentOwner ? { agentOwner } : {}),
       },
-      // Waiting for the user took part of the MCP server's 60 s budget; keep
-      // the whole call inside it, spawn wait included.
-      crossWorkspace
-        ? {
-            timeoutMs: Math.max(
-              5_000,
-              CROSS_WORKSPACE_CREATE_BUDGET_MS - (Date.now() - startedAt) - TERMINAL_SPAWN_WAIT_MS - TERMINAL_SPAWN_SETTLE_MS,
-            ),
-          }
-        : undefined,
+      {
+        // Waiting for the user took part of the MCP server's 60 s budget; keep
+        // the whole call inside it, spawn wait included.
+        ...(crossWorkspace
+          ? {
+              timeoutMs: Math.max(
+                5_000,
+                CROSS_WORKSPACE_CREATE_BUDGET_MS - (Date.now() - startedAt - worktreeMs) - TERMINAL_SPAWN_WAIT_MS - TERMINAL_SPAWN_SETTLE_MS,
+              ),
+            }
+          : {}),
+        // A tab added after this call gave up sits in a worktree that the
+        // failed call rolls back: nobody would drive it, so close it.
+        ...(worktree?.created
+          ? {
+              onLate: (late: { tabId?: string }) => {
+                if (late?.tabId) void requestTerminalOp("destroy", { tabId: late.tabId }).catch(() => undefined);
+              },
+            }
+          : {}),
+      },
     );
     // The renderer resolves as soon as the tab is added to state, but the PTY
     // spawns a beat later when TerminalPane mounts and calls pty:spawn. Wait for
@@ -1779,6 +1868,20 @@ async function handleTerminalCreate(
     return successResponse(id, {
       ...result,
       ...(crossWorkspace ? { workspaceId: crossWorkspace.target.id, workspace: crossWorkspace.target.name } : {}),
+      // The terminal sits in the worktree's own workspace, not its project's.
+      ...(worktree
+        ? {
+            workspaceId: worktree.workspaceId,
+            workspace: worktree.name,
+            worktree: {
+              workspaceId: worktree.workspaceId,
+              path: worktree.path,
+              branch: worktree.branch,
+              created: worktree.created,
+              ...(worktree.setup ? { setup: worktree.setup } : {}),
+            },
+          }
+        : {}),
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -2253,6 +2356,20 @@ function worktreeDeps(): AgentWorktreeDeps {
     randomId: () => randomBytes(8).toString("hex"),
     worktreeSetup: agentWorktreeSetupRunner(),
   };
+}
+
+/** terminal.create's worktree option: null when absent, a message when malformed. */
+function terminalWorktreeParam(value: unknown): { branch?: string; base?: string; purpose?: string } | null | string {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) return "worktree must be an object: { branch?, base?, purpose? }";
+  const out: { branch?: string; base?: string; purpose?: string } = {};
+  for (const [key, field] of Object.entries(value as Record<string, unknown>)) {
+    if (key !== "branch" && key !== "base" && key !== "purpose") return `worktree.${key} is not an option; use branch, base or purpose`;
+    if (field === undefined || field === null) continue;
+    if (typeof field !== "string") return `worktree.${key} must be a string`;
+    if (field.trim()) out[key] = field.trim();
+  }
+  return out;
 }
 
 async function worktreeCaller(params: Record<string, unknown>): Promise<WorktreeCaller> {

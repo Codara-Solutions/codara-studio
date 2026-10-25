@@ -181,3 +181,49 @@ words, and the title-bar mark (C) hid it until a run-out was likely.
   user switches to it.
 - How sure the forecast is reads as a word plus the history it learned from
   ("fairly sure · 40 past windows"), never as a raw percentage.
+
+## Worktrees in the rail (2026-10)
+
+**Chosen:** variant A, a tree, with variant B's folded merged group. A
+project's worktrees hang under its row on a thin tree line. Each worktree row
+has no tile: line 1 is its branch with the pull request mark right-aligned
+(#42 with ✕, ✓ or a dot for its checks), line 2 is its most urgent agent's
+state dot and word, its age and " · note", or "No agent · from main". The
+project row keeps its tile and name and rolls everything up in one line ("1
+needs you · 5 working"). Merged worktrees fold into one "▸ N merged · Clean up"
+line at the bottom. Picked from four variants built on the real rail (tree,
+dense branch list, agent threads, lifecycle pockets); Etienne chose A with B's
+fold.
+
+**Why:** worktree rows used to sit flat in the rail, indented 14px, each as
+tall as a project, so a busy repository pushed everything else off screen and
+nothing said which agent worked where. The summary under a row toggled a list
+instead of opening the row, so a click on the most visible text did the
+unexpected thing.
+
+**References:** VS Code's explorer and Linear's sidebar (a thin tree line, the
+child row lighter than its parent), GitHub's PR list for the check glyphs.
+
+**Rules:**
+
+- Clicking anywhere on a row opens that row. Nothing inside a row toggles.
+  Folding has its own 14px chevron at the row's left edge; rows with nothing
+  under them keep the gutter empty so every tile lines up.
+- An agent shows on one row, the one it works in: its pane's workspace, or
+  the worktree it created when its chat stays in the project, no other agent
+  runs inside it and it is not merged (otherwise the creator was a
+  coordinator and stays on the project). A creator of several such
+  worktrees shows on the newest. The project's own agents (a coordinator)
+  list at the top of the tree; clicking one opens its tab.
+- Order under a project: needs you, working, done, idle, no agent; rail order
+  among equals. Merged worktrees always go last, in their fold, folded by
+  default and faded (52%) when opened.
+- Colour only for state: the dot always, the state word only for needs you
+  (danger, semibold) and working (info). Everything else is muted ink. No new
+  tokens: `--rule` for the tree line, the existing agent state tones.
+- A worktree whose project is not in the rail stays a top-level row, indented
+  as before.
+- Two projects on one folder: the worktree hangs under the one higher in the
+  rail as the user sees it.
+- Clean up on the fold removes one merged worktree at once; for more, it
+  first shows the explorer's confirm with their names.

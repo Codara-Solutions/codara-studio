@@ -8,8 +8,9 @@ import { join } from "node:path";
 // throwaway Codara home and a fake user home. Three Claude Code stand-ins
 // share one workspace: two work (one posts a note through the real agent
 // socket, as codara_workspace_status does), one waits on a permission. The
-// row sums them in one line, expanding it lists each agent with its own
-// state and note, and clicking the waiting one opens its pane.
+// row sums them in one line, its chevron lists each agent under it with its
+// own state and note, clicking the waiting one opens its pane, and clicking
+// the summary opens the row like any other click on it.
 // AGENT_STATUS_SHOTS=<dir> also saves the row collapsed and expanded there.
 
 interface Fixture {
@@ -153,6 +154,7 @@ async function launch(fixture: Fixture): Promise<{ app: ElectronApplication; pag
 }
 
 const row = (page: Page, workspaceId: string) => page.locator(`[data-workspace-id="${workspaceId}"]`);
+const children = (page: Page, workspaceId: string) => page.locator(`[data-rail-children-of="${workspaceId}"]`);
 
 async function startAgent(page: Page, paneId: string, script: string): Promise<string> {
   const pane = page.locator(`[data-terminal-pane-id="${paneId}"]:visible`);
@@ -227,20 +229,21 @@ test("a workspace sums its agents in one line and lists each agent's own state a
       await expect(row(page, "ws-b")).toHaveAttribute("data-active", "true");
       await expect(summary).toContainText("2 working · 1 needs you", { timeout: 20_000 });
       await expect(summary).toHaveAttribute("data-needs-you", "true");
-      await expect(row(page, "ws-a").getByTestId("workspace-agent-lines")).toHaveCount(0);
+      await expect(children(page, "ws-a")).toHaveCount(0);
       await shot(page, "rail-collapsed");
     });
 
-    await test.step("expanding lists each agent on its own line", async () => {
-      await summary.click();
-      await expect(summary).toHaveAttribute("aria-expanded", "true");
+    await test.step("the chevron lists each agent on its own line, without opening the row", async () => {
+      const toggle = row(page, "ws-a").getByTestId("workspace-children-toggle");
+      await toggle.click();
+      await expect(toggle).toHaveAttribute("aria-expanded", "true");
       await expect(row(page, "ws-b")).toHaveAttribute("data-active", "true");
-      const lines = row(page, "ws-a").getByTestId("workspace-agent-line");
+      const lines = children(page, "ws-a").getByTestId("workspace-agent-line");
       await expect(lines).toHaveCount(3);
       await expect(lines.nth(0)).toHaveAttribute("data-state", "needs-you");
       await expect(lines.nth(0)).toContainText("Allow npm test?");
-      await expect(row(page, "ws-a").locator('[data-state="working"]')).toHaveCount(2);
-      await expect(row(page, "ws-a").locator('[data-state="working"]').filter({ hasText: "Wiring the rail summary line" })).toHaveCount(
+      await expect(children(page, "ws-a").locator('[data-state="working"]')).toHaveCount(2);
+      await expect(children(page, "ws-a").locator('[data-state="working"]').filter({ hasText: "Wiring the rail summary line" })).toHaveCount(
         1,
         { timeout: 10_000 },
       );
@@ -248,9 +251,17 @@ test("a workspace sums its agents in one line and lists each agent's own state a
     });
 
     await test.step("clicking the waiting agent opens its pane", async () => {
-      await row(page, "ws-a").locator('[data-testid="workspace-agent-line"][data-state="needs-you"]').click();
+      await children(page, "ws-a").locator('[data-testid="workspace-agent-line"][data-state="needs-you"]').click();
       await expect(row(page, "ws-a")).toHaveAttribute("data-active", "true");
       await expect(page.locator(`[data-terminal-pane-id="${panes[2]}"]:visible`)).toBeVisible();
+    });
+
+    await test.step("clicking the summary opens the row", async () => {
+      await row(page, "ws-b").evaluate((element) => (element as HTMLElement).click());
+      await expect(row(page, "ws-b")).toHaveAttribute("data-active", "true");
+      await summary.click();
+      await expect(row(page, "ws-a")).toHaveAttribute("data-active", "true");
+      await expect(children(page, "ws-a").getByTestId("workspace-agent-line")).toHaveCount(3);
     });
   } finally {
     await app.close().catch(() => undefined);

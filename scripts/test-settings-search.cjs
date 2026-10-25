@@ -191,6 +191,9 @@ async function main() {
     for (const row of renderedRows(remote.replace(pairing, ""))) {
       if (!findable("remote-access", row.name)) missing.push(`remote-access › ${row.name}`);
     }
+    for (const row of renderedRows(read(path.join(COMPONENTS, "machines", "MachinesSettings.tsx")))) {
+      if (!findable("machines", row.name)) missing.push(`machines › ${row.name}`);
+    }
     for (const row of renderedRows(read(path.join(COMPONENTS, "share", "SharedPagesSettings.tsx")))) {
       if (!findable("shared-pages", row.name)) missing.push(`shared-pages › ${row.name}`);
     }
@@ -251,6 +254,9 @@ async function main() {
     rendered["remote-access"] = new Set(
       renderedRows(read(path.join(COMPONENTS, "RemoteAccessSettings.tsx"))).map((row) => row.name),
     );
+    rendered.machines = new Set(
+      renderedRows(read(path.join(COMPONENTS, "machines", "MachinesSettings.tsx"))).map((row) => row.name),
+    );
     rendered["shared-pages"] = new Set(
       renderedRows(read(path.join(COMPONENTS, "share", "SharedPagesSettings.tsx"))).map((row) => row.name),
     );
@@ -274,6 +280,20 @@ async function main() {
       if (!provider) stale.push(`${entry.tab} › ${entry.title}`);
     }
     assert.deepEqual(stale, [], `entries nothing renders:\n  ${stale.join("\n  ")}`);
+  });
+
+  check("each preference toggle is indexed on one page only", () => {
+    // A toggle moved to another page must leave its old entry behind, or a
+    // search lists the setting twice and one result opens the wrong page.
+    const seen = new Map();
+    const twice = [];
+    for (const entry of SETTINGS_SEARCH_INDEX) {
+      if (!entry.toggle) continue;
+      const first = seen.get(entry.toggle);
+      if (first) twice.push(`${entry.toggle}: ${first} and ${entry.tab}`);
+      else seen.set(entry.toggle, entry.tab);
+    }
+    assert.deepEqual(twice, []);
   });
 
   check("every row a search opens a fold for sits in that fold", () => {
@@ -323,7 +343,10 @@ async function main() {
   });
 
   check("a switch in the results flips what its page row flips", () => {
-    const dialog = read(path.join(COMPONENTS, "SettingsDialog.tsx"));
+    // The Machines page binds its switch in its own file.
+    const dialog =
+      read(path.join(COMPONENTS, "SettingsDialog.tsx")) +
+      read(path.join(COMPONENTS, "machines", "MachinesSettings.tsx"));
     for (const entry of entries.filter((item) => item.toggle)) {
       if (entry.toggle === "fastMode") {
         assert.match(dialog, /function FastModeRow\(\)[\s\S]*?useOpenAiFastMode\(\)[\s\S]*?title="Fast mode"/);

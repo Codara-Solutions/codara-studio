@@ -64,6 +64,18 @@ function broadcast(status: WorktreeSetupStatus): void {
   }
 }
 
+function broadcastDismissed(id: string): void {
+  for (const window of BrowserWindow?.getAllWindows?.() ?? []) {
+    const contents = window.webContents;
+    if (contents.isDestroyed()) continue;
+    try {
+      contents.send("worktreeSetup:dismissed", id);
+    } catch {
+      /* a window may close between enumeration and send */
+    }
+  }
+}
+
 // A command waiting for the user's approval raises a needs-you notification
 // (native, toast and the notification center) on top of the tray's banner:
 // an agent or Cora made the worktree, so the user may be looking elsewhere.
@@ -174,6 +186,7 @@ export function worktreeSetupService(): WorktreeSetupService {
       broadcast(status);
       noticeApproval(status);
     },
+    onDismiss: broadcastDismissed,
   });
   const current = service;
   // Optional: unit suites load this module against an Electron stub.
@@ -241,6 +254,10 @@ export function agentWorktreeSetupRunner() {
     get: (idOrPath: string) => worktreeSetupService().get(idOrPath),
     tail: (id: string, lines: number) => worktreeSetupService().tail(id, lines),
     summary: agentSetupSummary,
+    stop: (idOrPath: string, timeoutMs: number) => worktreeSetupService().quiesce(idOrPath, timeoutMs),
+    dismiss: async (idOrPath: string) => {
+      worktreeSetupService().forget(idOrPath);
+    },
   };
 }
 

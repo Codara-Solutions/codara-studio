@@ -2595,6 +2595,11 @@ export function sessionCwd(id: string): string | null {
   return sessions.get(id)?.cwd ?? null;
 }
 
+// Every live session and the directory it was spawned in (the Machines page).
+export function sessionCwds(): Array<{ id: string; cwd: string | null }> {
+  return [...sessions].map(([id, s]) => ({ id, cwd: s.cwd ?? null }));
+}
+
 // Pids of every live local session's shell.
 export function sessionPids(): number[] {
   const pids: number[] = [];

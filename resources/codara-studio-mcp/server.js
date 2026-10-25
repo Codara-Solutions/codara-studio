@@ -113,6 +113,11 @@ const WORKTREE_SETUP_TIMEOUT_MS = 9 * 60_000 + 30_000;
 // codara_worktree_cleanup remove waits up to 5 minutes for the user's answer,
 // then removes; the deadline stays under Codex's 11-minute tool limit.
 const WORKTREE_CLEANUP_TIMEOUT_MS = 10 * 60_000 + 30_000;
+// codara_terminal_create with a worktree: the approval card (40 s), the
+// worktree, the terminal, and when the terminal fails the rollback (its
+// setup stop, 10 s, then a guarded removal), so the error with
+// data.worktree still reaches the agent.
+const TERMINAL_WORKTREE_TIMEOUT_MS = 40_000 + PREVIEW_TERMINAL_TIMEOUT_MS + 10_000 + 2 * WORKTREE_TIMEOUT_MS;
 
 // ===========================================================================
 // Browser tool set (drive the built-in browser tabs). The definitions live in
@@ -153,19 +158,22 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_create",
     description:
-      "Open a new agent-owned terminal tab next to your own pane, or in workspace (an id or folder; the user approves once). Temporary terminals are closed automatically when their Cora run finishes; use retention='service' only for a dev server or watcher the user needs afterwards. Returns { tabId, paneId, cwd }.",
+      "Open an agent-owned terminal beside your pane, or in workspace (id or folder; the user approves once), or in a new worktree of it. retention: temporary (default) closes with its Cora run; service for a server or watcher the user keeps. Returns { tabId, paneId, cwd }.",
     inputSchema: {
       type: "object",
       properties: {
         cwd: { type: "string", description: "Absolute; default the workspace root." },
         workspace: { type: "string" },
+        worktree: {
+          type: "object",
+          properties: { branch: { type: "string" }, base: { type: "string" }, purpose: { type: "string" } },
+        },
         command: { type: "string", description: "Run right after it opens." },
         title: { type: "string" },
         group: { type: "string", description: "Tab group, named after your task." },
         retention: {
           type: "string",
           enum: ["temporary", "service"],
-          description: "temporary (default) or service.",
         },
       },
       additionalProperties: false,
@@ -2093,8 +2101,9 @@ const PROGRESS_RPCS = new Set([
 ]);
 const PROGRESS_INTERVAL_MS = 10_000;
 
-function rpcTimeoutMs(rpc) {
+function rpcTimeoutMs(rpc, args) {
   if (isOrchestrationRpc(rpc)) return ORCHESTRATION_TIMEOUT_MS;
+  if (rpc === "terminal.create" && args && args.worktree) return TERMINAL_WORKTREE_TIMEOUT_MS;
   if (rpc === "terminal.run") return TERMINAL_RUN_TIMEOUT_MS;
   if (rpc === "browser.use") return BROWSER_USE_TIMEOUT_MS;
   if (rpc === "worktree.create") return WORKTREE_CREATE_TIMEOUT_MS;
@@ -2178,7 +2187,7 @@ function worktreeCallerRole() {
 let CLIENT_NAME = "";
 
 function stampWorktreeCaller(rpc, args, ctx) {
-  if (!rpc.startsWith("worktree.")) return;
+  if (!rpc.startsWith("worktree.") && !(rpc === "terminal.create" && args.worktree)) return;
   for (const key of ["runId", "callerPaneId", "callerPid", "callerRole", "callerClient"]) delete args[key];
   const envRunId = (process.env.SPARK_RUN_ID || "").trim();
   if (envRunId) args.runId = envRunId;
@@ -2666,9 +2675,9 @@ async function callTool(params, ctx = {}) {
   clampPreviewWait(rpc, args);
   resolveShareOfferPath(rpc, args);
 
-  const timeoutMs = rpcTimeoutMs(rpc);
+  const timeoutMs = rpcTimeoutMs(rpc, args);
   let heartbeat = null;
-  if (ctx.progress && PROGRESS_RPCS.has(rpc)) {
+  if (ctx.progress && (PROGRESS_RPCS.has(rpc) || timeoutMs === TERMINAL_WORKTREE_TIMEOUT_MS)) {
     let beats = 0;
     heartbeat = setInterval(() => {
       beats += 1;

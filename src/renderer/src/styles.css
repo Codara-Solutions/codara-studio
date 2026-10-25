@@ -2404,6 +2404,14 @@ a { color: inherit; }
 .composer-shell {
   font-variant-numeric: normal;
 }
+
+/* Virtuoso's inline visibility:hidden holds a long chat back for 150 ms after
+   its rows have settled; list-reveal.ts decides when to drop it sooner.
+   Inherit, never visible: a retained chat is hidden by an ancestor (ChatStack,
+   the whiteboard view), and an explicit value would paint it through. */
+.cora-conversation[data-list-revealed] > [data-virtuoso-scroller] > [data-viewport-type] > [data-testid="virtuoso-item-list"] {
+  visibility: inherit !important;
+}
 .composer-context-label {
   font-variant-numeric: tabular-nums;
 }

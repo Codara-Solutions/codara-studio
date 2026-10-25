@@ -346,8 +346,12 @@ function normalize(
       typeof src.remoteAccessEnabled === "boolean"
         ? src.remoteAccessEnabled
         : DEFAULT_PREFERENCES.remoteAccessEnabled,
+    // A value counts only if the user chose it: see machinesEnabledChosen.
     machinesEnabled:
-      typeof src.machinesEnabled === "boolean" ? src.machinesEnabled : DEFAULT_PREFERENCES.machinesEnabled,
+      src.machinesEnabledChosen === true && typeof src.machinesEnabled === "boolean"
+        ? src.machinesEnabled
+        : DEFAULT_PREFERENCES.machinesEnabled,
+    ...(src.machinesEnabledChosen === true ? { machinesEnabledChosen: true } : {}),
     // Background auto-fetch + teammate-push alerts. Absent keys resolve to the
     // defaults (on / 3 min / on) so existing preference files pick the
     // feature up on upgrade.
@@ -451,7 +455,11 @@ export async function setPreference<K extends PrefKey>(
   value: AppPreferences[K],
 ): Promise<AppPreferences> {
   const current = await loadPreferences();
-  const next = normalize({ ...current, [key]: value });
+  const next = normalize({
+    ...current,
+    [key]: value,
+    ...(key === "machinesEnabled" ? { machinesEnabledChosen: true } : {}),
+  });
   cache = next;
   for (const listener of preferenceListeners) {
     try {

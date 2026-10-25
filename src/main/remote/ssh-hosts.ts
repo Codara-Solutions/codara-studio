@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import SSHConfig from "ssh-config";
-import { isValidHostId, type RemoteHostConfig } from "@shared/remote";
+import { isValidHostId, isValidPort, type RemoteHostConfig } from "@shared/remote";
 import { writeFileAtomic } from "../fs-atomic";
 import { codaraHome } from "../codara-home";
 
@@ -43,7 +43,7 @@ function isWellFormed(h: unknown): h is RemoteHostConfig {
     typeof x.username === "string" &&
     x.username.length > 0 &&
     typeof x.port === "number" &&
-    Number.isFinite(x.port)
+    isValidPort(x.port)
   );
 }
 
@@ -59,7 +59,15 @@ function isCodaraEntry(h: RemoteHostConfig): boolean {
 // Anything that makes Studio spawn a process is set by main only. A host
 // arriving from the renderer or an edited manual entry never keeps it.
 function stripProxyFields(h: RemoteHostConfig): RemoteHostConfig {
-  const { proxyCommand: _p, proxyCommandTemplate: _t, hostKeyAlias: _a, codaraBoxId: _b, ...rest } = h;
+  const {
+    proxyCommand: _p,
+    proxyCommandTemplate: _t,
+    hostKeyAlias: _a,
+    codaraBoxId: _b,
+    userKnownHostsFiles: _u,
+    globalKnownHostsFiles: _g,
+    ...rest
+  } = h;
   return rest;
 }
 
@@ -106,16 +114,23 @@ export async function readSshConfigHosts(): Promise<RemoteHostConfig[]> {
       const identity = first(computed.IdentityFile);
       const proxy = first(computed.ProxyCommand)?.trim();
       const keyAlias = first(computed.HostKeyAlias)?.trim();
+      // ssh refuses such a port, so connecting to 22 instead would be wrong.
+      const port = Number(first(computed.Port) ?? 22);
+      if (!isValidPort(port)) continue;
+      const userKnownHostsFiles = knownHostsFiles(computed.UserKnownHostsFile);
+      const globalKnownHostsFiles = knownHostsFiles(computed.GlobalKnownHostsFile);
       out.push({
         id: alias,
         host: first(computed.HostName) ?? alias,
-        port: Number(first(computed.Port) ?? 22) || 22,
+        port,
         // ssh defaults to the local username when User is absent.
         username: first(computed.User) ?? process.env.USERNAME ?? process.env.USER ?? "root",
         identityFile: identity ? expandTilde(identity) : undefined,
         source: "ssh-config",
         ...(proxy && proxy.toLowerCase() !== "none" ? { proxyCommandTemplate: proxy } : {}),
         ...(keyAlias ? { hostKeyAlias: keyAlias } : {}),
+        ...(userKnownHostsFiles ? { userKnownHostsFiles } : {}),
+        ...(globalKnownHostsFiles ? { globalKnownHostsFiles } : {}),
       });
     } catch {
       // A malformed block for one alias shouldn't hide the rest.
@@ -214,6 +229,14 @@ async function readConfigWithIncludes(
   } finally {
     active.delete(key);
   }
+}
+
+/** UserKnownHostsFile / GlobalKnownHostsFile: unset keeps ssh's defaults, `none` reads nothing. */
+function knownHostsFiles(value: string | string[] | undefined): string[] | undefined {
+  if (value === undefined) return undefined;
+  const files = (Array.isArray(value) ? value : [value]).map((file) => file.trim()).filter(Boolean);
+  if (files.length === 1 && files[0].toLowerCase() === "none") return [];
+  return files.map(expandTilde);
 }
 
 function expandTilde(p: string): string {
