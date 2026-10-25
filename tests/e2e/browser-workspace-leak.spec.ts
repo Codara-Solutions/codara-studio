@@ -143,7 +143,7 @@ test("a browser that belongs to one workspace never opens or drives tabs in anot
       { id: userTab, title: "User page B", path: "/b-user", workspaceId: "ws-b" },
     ]);
     await expect(p.locator(`[data-tab-id="${userTab}"]`)).toHaveAttribute("aria-selected", "true");
-    await expect(p.locator("[data-preview-cursor]")).toHaveCount(0);
+    await expect(p.locator("[data-browser-pane]").locator("visible=true").locator("[data-agent-cursor][data-active]")).toHaveCount(0);
     await p.screenshot({ path: testInfo.outputPath("b-after-agent-in-a.png") });
 
     // A Cora run of A clicks a target=_blank link in its browser while the

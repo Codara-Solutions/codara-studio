@@ -32,6 +32,7 @@ export function isWorkerSafeBridgeTool(
   if (env.CODARA_PI_PROJECT_POLICY === "untrusted-pull-request") return false;
   if (
     name.startsWith("codara_preview_") ||
+    name === CODE_TOOL ||
     name.startsWith("codara_terminal_") ||
     name === "codara_whiteboard_get" ||
     name === "codara_whiteboard_inspect" ||
@@ -90,9 +91,10 @@ const FENCE_READONLY_EXTRA = ["edit"];
 // Bridge tools that ARE a shell or arbitrary code execution: any fenced preset
 // blocks them ("no shell/web" must include the terminal tab that takes a
 // command and the preview's JS evaluator; codara_preview_run is included
-// because its step batch can embed evaluate steps, and codara_preview_code
-// because its snippet can call every browser tool, evaluate among them).
-const CODE_TOOL = "codara_preview_code";
+// because its step batch can embed evaluate steps, and codara_browser_use
+// because its snippet can call every browser tool, evaluate and the
+// DevTools protocol among them).
+const CODE_TOOL = "codara_browser_use";
 const FENCE_BRIDGE_SHELL = [
   "codara_terminal_run",
   "codara_terminal_create",
@@ -104,7 +106,7 @@ const FENCE_BRIDGE_SHELL = [
   "codara_terminal_servers",
   "codara_preview_evaluate",
   "codara_preview_run",
-  "codara_preview_code",
+  CODE_TOOL,
 ];
 // Bridge tools that mutate page state; blocked for readonly only (navigation,
 // screenshots, snapshots, console, and network inspection stay available).
@@ -166,8 +168,11 @@ export function fencedToolNames(env: WorkerEnv = process.env): Set<string> {
   }
   // A snippet reaches every browser tool through browser.call and
   // browser.chrome, and its inner calls never pass through this fence, so
-  // blocking any one of them must block code mode too.
-  if ([...blocked].some((name) => name.startsWith("codara_preview_") && name !== CODE_TOOL)) blocked.add(CODE_TOOL);
+  // blocking any one of them must block code mode too. That covers its
+  // DevTools protocol commands (tab.cdp), which match evaluate, network,
+  // navigate, emulate and the rest: the hidden tools behind them are not in
+  // the roster, so a worker reaches them only through a snippet.
+  if ([...blocked].some((name) => name.startsWith("codara_preview_"))) blocked.add(CODE_TOOL);
   return blocked;
 }
 
@@ -256,7 +261,7 @@ export function fenceDecision(
     return {
       block: true,
       reason:
-        "codara_preview_code is disabled for this automation worker because its config blocks browser tools a snippet could call. " +
+        "codara_browser_use is disabled for this automation worker because its config blocks browser tools a snippet could call. " +
         "Use the single codara_preview_* tools that remain, or note the limitation in your final report.",
     };
   }

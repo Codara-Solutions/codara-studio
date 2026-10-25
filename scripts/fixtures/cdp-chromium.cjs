@@ -16,30 +16,40 @@ const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
 
+const HEADLESS_SHELLS = [
+  "chrome-headless-shell-linux64/chrome-headless-shell",
+  "chrome-linux/headless_shell",
+  "chrome-headless-shell-mac-arm64/chrome-headless-shell",
+  "chrome-headless-shell-mac-x64/chrome-headless-shell",
+];
+const FULL_BROWSERS = ["chrome-linux64/chrome", "chrome-linux/chrome", "chrome-mac/Chromium.app/Contents/MacOS/Chromium"];
+
+function inPlaywrightCache(binaries) {
+  const cache = process.env.PLAYWRIGHT_BROWSERS_PATH || path.join(os.homedir(), process.platform === "darwin" ? "Library/Caches/ms-playwright" : ".cache/ms-playwright");
+  const candidates = [];
+  for (const directory of fs.existsSync(cache) ? fs.readdirSync(cache) : []) {
+    for (const binary of binaries) {
+      const candidate = path.join(cache, directory, binary);
+      if (fs.existsSync(candidate)) candidates.push(candidate);
+    }
+  }
+  return candidates.sort().pop() ?? null;
+}
+
+// The headless shell first, as Playwright itself runs headless: it draws
+// without any window. Full Chromium in --headless=new opens real windows,
+// and macOS stops painting the ones it counts as hidden, so a page there
+// can stay unpainted (no FCP, LCP or layout shifts).
 function findChromium() {
+  const shell = inPlaywrightCache(HEADLESS_SHELLS);
+  if (shell) return shell;
   try {
     const expected = require("playwright").chromium.executablePath();
     if (fs.existsSync(expected)) return expected;
   } catch {
     /* fall through to the cache scan */
   }
-  const cache = path.join(os.homedir(), process.platform === "darwin" ? "Library/Caches/ms-playwright" : ".cache/ms-playwright");
-  const candidates = [];
-  for (const directory of fs.existsSync(cache) ? fs.readdirSync(cache) : []) {
-    for (const binary of [
-      "chrome-linux64/chrome",
-      "chrome-linux/chrome",
-      "chrome-headless-shell-linux64/chrome-headless-shell",
-      "chrome-linux/headless_shell",
-      "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
-      "chrome-headless-shell-mac-arm64/chrome-headless-shell",
-      "chrome-headless-shell-mac-x64/chrome-headless-shell",
-    ]) {
-      const candidate = path.join(cache, directory, binary);
-      if (fs.existsSync(candidate)) candidates.push(candidate);
-    }
-  }
-  return candidates.sort().pop() ?? null;
+  return inPlaywrightCache(FULL_BROWSERS);
 }
 
 async function startCdpChromium() {
@@ -54,7 +64,11 @@ async function startCdpChromium() {
     "--no-default-browser-check",
     "--disable-gpu",
     "about:blank",
-  ], { stdio: ["ignore", "ignore", "pipe"] });
+  ], {
+    stdio: ["ignore", "ignore", "pipe"],
+    // Its own process group, so close() also ends the helper processes.
+    detached: process.platform !== "win32",
+  });
   const wsUrl = await new Promise((resolve, reject) => {
     let buffered = "";
     const timer = setTimeout(() => reject(new Error("Chromium did not print its DevTools endpoint")), 15_000);
@@ -154,8 +168,18 @@ async function startCdpChromium() {
       } catch {
         /* already closed */
       }
-      child.kill("SIGKILL");
-      await new Promise((resolve) => (child.exitCode !== null ? resolve() : child.once("exit", resolve)));
+      // Killing the browser alone leaves its helpers running on macOS, and
+      // they hold the stderr pipe (and keep-alive sockets to test servers)
+      // open, so the suite finishes but its process never exits.
+      const exited = new Promise((resolve) => (child.exitCode !== null || child.signalCode !== null ? resolve() : child.once("exit", resolve)));
+      try {
+        if (process.platform === "win32") child.kill("SIGKILL");
+        else process.kill(-child.pid, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+      await exited;
+      child.stderr.destroy();
       // Chromium's helper processes outlive the browser by a moment and can
       // still be writing the profile; a busy machine made rmSync race them.
       try {

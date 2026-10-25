@@ -1,5 +1,5 @@
 import type { BrowserPaneHandle } from "./BrowserPane";
-import type { PreviewControl } from "./PreviewCursor";
+import { clearDriver, forgetPresenceTab } from "./agent-presence/store";
 import { tabGroupNameOf } from "../../tabs/tabGroupBridge";
 
 interface RegistryEntry {
@@ -8,7 +8,6 @@ interface RegistryEntry {
   url: string;
   runId: string | null;
   workspaceId: string | null;
-  controlRunId?: string | null;
   // A logged-out tab's own temporary partition. Such a tab is only ever
   // driven by its id: an implicit pick never lands an agent in it.
   partition?: string | null;
@@ -74,6 +73,7 @@ export function updatePreviewTabUrl(id: string, url: string, runId?: string | nu
 
 export function unregisterPreviewTab(id: string): void {
   entries.delete(id);
+  forgetPresenceTab(id);
   agentPaneOwners.delete(id);
   if (activeId === id) activeId = null;
   for (const [workspace, tabId] of lastViewed) if (tabId === id) lastViewed.delete(workspace);
@@ -159,17 +159,9 @@ export function listPreviewTabs(workspaceId?: string | null, callerPaneId?: stri
   });
 }
 
-export function showPreviewControl(tab: RegistryEntry, control: PreviewControl): void {
-  tab.controlRunId = control.runId;
-  tab.handle.showAgentCursor(control);
-}
-
+/** A run ended: its tabs stop showing it as driving. */
 export function clearPreviewControl(runId: string): void {
-  for (const entry of entries.values()) {
-    if (entry.controlRunId !== runId) continue;
-    entry.handle.showAgentCursor(null);
-    entry.controlRunId = null;
-  }
+  clearDriver(`run:${runId}`);
 }
 
 type OpenPreviewTabFn = (

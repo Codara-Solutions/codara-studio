@@ -14,6 +14,8 @@ export interface PreviewToolHost {
   mayUseUserBrowser(params: Record<string, unknown>): Promise<boolean>;
   /** A workspace's name, or the one on screen for null; null when there is none. */
   workspaceName?(workspaceId: string | null): Promise<string | null>;
+  /** The agent CLI running in a terminal pane (claude, codex, ...), for the tab's driving banner. */
+  paneRuntime?(paneId: string): string | null;
 }
 
 export type PreviewToolHandler = (params: Record<string, unknown>, method: string, host: PreviewToolHost) => Promise<unknown>;

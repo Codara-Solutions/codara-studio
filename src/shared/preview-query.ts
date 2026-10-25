@@ -1,4 +1,4 @@
-// Playwright-style locators for codara_preview_code, resolved in the page.
+// Playwright-style locators for codara_browser_use, resolved in the page.
 // Stringified into the browser guest with the shared locator: keep every
 // dependency inside the factory.
 

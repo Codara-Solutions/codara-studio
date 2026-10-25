@@ -98,6 +98,19 @@ function mainLog(home) {
   }
 }
 
+// Where a process that should have quit or started is stuck: its main
+// thread's stack, from macOS's own sampler.
+function stackOf(child) {
+  if (process.platform !== "darwin" || child.exitCode !== null || child.signalCode !== null) return "";
+  try {
+    const out = require("node:child_process").execFileSync("sample", [String(child.pid), "1", "-mayDie"], { encoding: "utf8", timeout: 15_000, stdio: ["ignore", "pipe", "pipe"] });
+    const start = out.indexOf("Call graph:");
+    return `\nstack of ${child.pid}:\n${out.slice(start, start + 6000)}`;
+  } catch (error) {
+    return `\nsample failed: ${error.message}`;
+  }
+}
+
 const electron = require("electron");
 const launched = new Set();
 function launchApp(env) {
@@ -218,13 +231,29 @@ async function newLaunchReplacesBrokenInstance() {
   const firstGone = await Promise.race([first.exited.then(() => true), sleep(15_000).then(() => false)]);
   check("the broken instance quits for the new launch", firstGone);
   check("and says why", /a new launch found this instance unable to load its window: quitting/.test(mainLog(home)), mainLog(home).slice(-600));
-  const secondStarted = await until(() => mainLog(home).includes(`app start pid=${second.child.pid} `), 20_000);
-  check("the new launch takes the lock and starts", secondStarted && second.child.exitCode === null, mainLog(home).slice(-600));
-  second.child.kill("SIGTERM");
-  const secondGone = await Promise.race([second.exited.then(() => true), sleep(10_000).then(() => false)]);
-  check("and quits on SIGTERM", secondGone);
+  // macOS never finishes launching a process whose first lock request lost,
+  // so there the new launch hands over to a fresh copy of itself.
+  const startedPid = () => {
+    const pids = [...mainLog(home).matchAll(/app start pid=(\d+) /g)].map((match) => Number(match[1]));
+    return pids.find((pid) => pid !== first.child.pid) ?? null;
+  };
+  const relaunches = process.platform === "darwin";
+  const secondStarted = await until(() => startedPid() !== null, 20_000);
+  const appPid = startedPid();
+  if (appPid) launched.add(appPid);
+  const detail = `${mainLog(home).slice(-600)}\nnew launch: exit=${second.child.exitCode} signal=${second.child.signalCode} stderr=${second.stderr().slice(-1500)}${stackOf(second.child)}`;
+  if (relaunches) {
+    check("the new launch takes the lock and starts again fresh", secondStarted && appPid !== second.child.pid && alive(appPid) && /relaunched=false/.test(mainLog(home).split(`app start pid=${appPid} `)[1] ?? ""), detail);
+    check("and the launch that handed over is gone", await Promise.race([second.exited.then(() => true), sleep(10_000).then(() => false)]), detail);
+  } else {
+    check("the new launch takes the lock and starts", secondStarted && appPid === second.child.pid && second.child.exitCode === null, detail);
+  }
+  if (appPid && alive(appPid)) process.kill(appPid, "SIGTERM");
+  const appGone = await until(() => !appPid || !alive(appPid), 10_000);
+  check("and quits on SIGTERM", appGone);
   if (!firstGone) first.child.kill("SIGKILL");
-  if (!secondGone) second.child.kill("SIGKILL");
+  if (appPid && !appGone) process.kill(appPid, "SIGKILL");
+  if (second.child.exitCode === null && second.child.signalCode === null) second.child.kill("SIGKILL");
 }
 
 async function newLaunchFocusesHealthyInstance() {
@@ -236,7 +265,7 @@ async function newLaunchFocusesHealthyInstance() {
   const startedAt = Date.now();
   const second = launchApp(env);
   const secondGone = await Promise.race([second.exited.then(() => true), sleep(10_000).then(() => false)]);
-  check("the new launch quits at once", secondGone && Date.now() - startedAt < 10_000, `${Date.now() - startedAt} ms`);
+  check("the new launch quits at once", secondGone && Date.now() - startedAt < 10_000, `${Date.now() - startedAt} ms; main.log ${mainLog(home).slice(-600)}\nnew launch stderr=${second.stderr().slice(-1500)}${stackOf(second.child)}`);
   check("the healthy instance keeps running", first.child.exitCode === null && first.child.signalCode === null);
   check("and started no second app", !mainLog(home).includes(`app start pid=${second.child.pid} `));
   first.child.kill("SIGTERM");
