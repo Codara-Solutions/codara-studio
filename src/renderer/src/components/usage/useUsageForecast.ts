@@ -10,8 +10,18 @@ const POLL_MS = 5 * 60_000;
 let cached: { at: number; report: UsageForecastReport | null } | null = null;
 let inflight: Promise<UsageForecastReport | null> | null = null;
 let forcedAfter: Promise<UsageForecastReport | null> | null = null;
-const listeners = new Set<(report: UsageForecastReport | null) => void>();
+/** Bumped when the report is forgotten: a read that started before must not
+ * bring back a report from before the feature was turned off. */
+let generation = 0;
+
+/** A new report, or why the last read failed (the report then stays). */
+export type UsageForecastUpdate = { report: UsageForecastReport | null } | { error: string };
+const listeners = new Set<(update: UsageForecastUpdate) => void>();
 let pollTimer: number | null = null;
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 export function loadUsageForecast(force = false): Promise<UsageForecastReport | null> {
   if (!force && cached && Date.now() - cached.at < FRESH_MS) return Promise.resolve(cached.report);
@@ -20,25 +30,40 @@ export function loadUsageForecast(force = false): Promise<UsageForecastReport | 
     // A forced read waits for the one in flight and then reads again, since
     // the one in flight may predate the change that forced it. Every forced
     // read that arrives meanwhile shares that one second read.
-    forcedAfter ??= inflight
-      .catch(() => null)
-      .then(() => {
-        forcedAfter = null;
-        return loadUsageForecast(true);
-      });
+    if (!forcedAfter) {
+      const waited = generation;
+      const after: Promise<UsageForecastReport | null> = inflight
+        .catch(() => null)
+        .then(() => {
+          if (forcedAfter === after) forcedAfter = null;
+          return waited === generation ? loadUsageForecast(true) : null;
+        });
+      forcedAfter = after;
+    }
     return forcedAfter;
   }
-  inflight = window.spark.usageAnalytics
+  const started = generation;
+  const read: Promise<UsageForecastReport | null> = window.spark.usageAnalytics
     .forecast()
-    .then((report) => {
-      cached = { at: Date.now(), report };
-      for (const listener of listeners) listener(report);
-      return report;
-    })
+    .then(
+      (report) => {
+        if (started !== generation) return null;
+        cached = { at: Date.now(), report };
+        for (const listener of listeners) listener({ report });
+        return report;
+      },
+      (err: unknown) => {
+        if (started === generation) {
+          for (const listener of listeners) listener({ error: messageOf(err) });
+        }
+        throw err;
+      },
+    )
     .finally(() => {
-      inflight = null;
+      if (inflight === read) inflight = null;
     });
-  return inflight;
+  inflight = read;
+  return read;
 }
 
 /**
@@ -46,7 +71,7 @@ export function loadUsageForecast(force = false): Promise<UsageForecastReport | 
  * watch it, one timer reads it every POLL_MS: each read builds a report in
  * the main process, so one per view would multiply that work.
  */
-export function watchUsageForecast(listener: (report: UsageForecastReport | null) => void): () => void {
+export function watchUsageForecast(listener: (update: UsageForecastUpdate) => void): () => void {
   listeners.add(listener);
   pollTimer ??= window.setInterval(() => {
     void loadUsageForecast().catch(() => undefined);
@@ -63,7 +88,10 @@ export function watchUsageForecast(listener: (report: UsageForecastReport | null
 /** Forgets the last report, so turning the feature back on never shows one
  * from before it was off. */
 export function forgetUsageForecast(): void {
+  generation += 1;
   cached = null;
+  inflight = null;
+  forcedAfter = null;
 }
 
 export interface UsageForecastState {
@@ -84,9 +112,13 @@ export function useUsageForecast(enabled: boolean): UsageForecastState {
       return;
     }
     let alive = true;
-    const unwatch = watchUsageForecast((next) => {
+    const unwatch = watchUsageForecast((update) => {
       if (!alive) return;
-      setReport(next);
+      if ("error" in update) {
+        setError(update.error);
+        return;
+      }
+      setReport(update.report);
       setError(null);
     });
     setLoading(true);
@@ -97,7 +129,7 @@ export function useUsageForecast(enabled: boolean): UsageForecastState {
         setError(null);
       })
       .catch((err: unknown) => {
-        if (alive) setError(err instanceof Error ? err.message : String(err));
+        if (alive) setError(messageOf(err));
       })
       .finally(() => {
         if (alive) setLoading(false);

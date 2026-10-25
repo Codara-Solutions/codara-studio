@@ -876,6 +876,33 @@ async function main() {
     eq("renderer: after turning it off, the old report is not reused", reads, 4);
     await answer();
     await again;
+
+    // A read still in flight when the feature is turned off must not bring
+    // its report back once it lands.
+    const seen = [];
+    const stopSeeing = hook.watchUsageForecast((update) => seen.push(update));
+    const stale = hook.loadUsageForecast(true);
+    hook.forgetUsageForecast();
+    answers.shift()({ windows: [{ stale: true }] });
+    await settle();
+    await stale;
+    eq("renderer: a read from before turning it off is not shown", seen.length, 0);
+    const fresh = hook.loadUsageForecast();
+    eq("renderer: nor reused, so the next read asks again", reads, 6);
+    await answer();
+    await fresh;
+    eq("renderer: the next read is shown", seen.length, 1);
+
+    // A failed poll reaches the views instead of vanishing.
+    window.spark.usageAnalytics.forecast = () => {
+      reads += 1;
+      return Promise.reject(new Error("scan worker exited"));
+    };
+    for (const poll of timers.values()) poll();
+    await hook.loadUsageForecast(true).catch(() => undefined);
+    await settle();
+    eq("renderer: a failed read reaches the views", seen.filter((update) => "error" in update).map((update) => update.error)[0], "scan worker exited");
+    stopSeeing();
     delete global.window;
   }
 

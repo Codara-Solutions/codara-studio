@@ -137,12 +137,29 @@ function armIdleStop(): void {
     const thread = worker;
     worker = null;
     void thread.terminate().catch(() => undefined);
-  }, Math.max(WORKER_IDLE_MS, keepWorkerUntil - Date.now()));
+  }, workerIdleDelayMs());
   idleTimer.unref();
 }
 
+/** Keeps the worker at least `ms` past now once it goes idle. */
+export function keepWorkerFor(ms: number, nowMs = Date.now()): void {
+  keepWorkerUntil = Math.max(keepWorkerUntil, nowMs + ms);
+}
+
+/** The forecast was turned off: the worker no longer waits for its next scan
+ * and exits on the ordinary idle delay, freeing the memo it holds. */
+export function releaseForecastWorker(): void {
+  keepWorkerUntil = 0;
+  if (worker !== null && pending.size === 0) armIdleStop();
+}
+
+/** How long an idle worker is kept, for tests. */
+export function workerIdleDelayMs(nowMs = Date.now()): number {
+  return Math.max(WORKER_IDLE_MS, keepWorkerUntil - nowMs);
+}
+
 function scanOnWorker<T extends UsageScanResult>(code: string, job: UsageScanWork, keepMs = 0): Promise<T> {
-  keepWorkerUntil = Math.max(keepWorkerUntil, Date.now() + keepMs);
+  keepWorkerFor(keepMs);
   if (idleTimer !== null) {
     clearTimeout(idleTimer);
     idleTimer = null;

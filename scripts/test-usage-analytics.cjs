@@ -26,6 +26,7 @@ const PRICES_TS = path.join(ROOT, "src", "main", "model-prices.ts");
 
 const SCANNER_TS = path.join(ROOT, "src", "main", "usage-scan.ts");
 const WORKER_TS = path.join(ROOT, "src", "main", "usage-scan-worker.ts");
+const ANALYTICS_TS = path.join(ROOT, "src", "main", "usage-analytics.ts");
 
 const harnessPlugin = {
   name: "usage-analytics-test-harness",
@@ -967,6 +968,23 @@ async function main() {
     eq("scan: each source counts its session", first.sources.map((source) => source.distinctSessions).join(","), "1,1,1");
     eq("scan: the project row carries the working directory", first.projects.find((row) => row.provider === "claude").project, "/p/app");
     check("scan: the memo is persisted where the caller asked", fs.existsSync(cachePath));
+    // Replaced whole, never rewritten in place: a crash mid-write must leave
+    // the previous memo rather than a torn one that forces a full rescan.
+    const before = fs.statSync(cachePath).ino;
+    const claudeFile = fs.readdirSync(claudeRoot, { recursive: true }).find((name) => String(name).endsWith(".jsonl"));
+    fs.appendFileSync(path.join(claudeRoot, String(claudeFile)), "\n");
+    await scanUsage(scanRequest(cachePath));
+    check("scan: the memo is replaced atomically, not rewritten in place", fs.statSync(cachePath).ino !== before);
+  }
+  {
+    // The forecast keeps the worker between its scans; turning it off must
+    // not leave the worker holding the memo for the rest of that time.
+    const analytics = await bundle(ANALYTICS_TS, path.join(tmp, "analytics.bundle.cjs"));
+    const now = Date.now();
+    analytics.keepWorkerFor(20 * 60_000, now);
+    eq("worker: a forecast scan keeps it 20 minutes", analytics.workerIdleDelayMs(now), 20 * 60_000);
+    analytics.releaseForecastWorker();
+    eq("worker: turning the forecast off drops that to the idle delay", analytics.workerIdleDelayMs(now), 3 * 60_000);
   }
   {
     // Codex moves finished sessions to archived_sessions beside sessions.

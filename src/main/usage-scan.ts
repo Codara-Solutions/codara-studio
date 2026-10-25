@@ -22,6 +22,7 @@
 import { createReadStream, promises as fs, statSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { basename, dirname, join } from "node:path";
+import { writeFileAtomic } from "./fs-atomic";
 import { lookupUsagePrice } from "./model-prices";
 import {
   UsageAggregator,
@@ -411,7 +412,9 @@ function ensureScanCacheLoaded(cachePath: string): Promise<void> {
 async function persistScanCache(cachePath: string): Promise<void> {
   if (!cacheDirty) return;
   try {
-    await fs.writeFile(cachePath, encodeScanCache(fileCache), "utf8");
+    // A torn memo is dropped whole on the next load, which then rereads
+    // every transcript.
+    await writeFileAtomic(cachePath, encodeScanCache(fileCache));
     // Cleared only after the write lands, so a failed persist retries on the
     // next scan instead of leaving disk permanently stale.
     cacheDirty = false;
