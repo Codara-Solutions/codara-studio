@@ -204,6 +204,20 @@ export interface ProviderCardData {
   share: number;
 }
 
+/** One provider can read several folders (Codex: live and archived
+ * sessions); its card sums them and is ok when any folder was read. */
+function mergeSources(sources: UsageSource[]): UsageSource | null {
+  if (sources.length <= 1) return sources[0] ?? null;
+  const readable = sources.filter((source) => source.status === "ok");
+  const lead = readable[0] ?? sources[0];
+  return {
+    ...lead,
+    scannedFiles: sources.reduce((total, source) => total + source.scannedFiles, 0),
+    skippedFiles: sources.reduce((total, source) => total + source.skippedFiles, 0),
+    distinctSessions: sources.reduce((total, source) => total + source.distinctSessions, 0),
+  };
+}
+
 export function buildProviderCards(
   buckets: UsageDayBucket[],
   sources: UsageSource[],
@@ -230,7 +244,7 @@ export function buildProviderCards(
         topModel = model;
       }
     }
-    const source = sources.find((entry) => entry.provider === provider) ?? null;
+    const source = mergeSources(sources.filter((entry) => entry.provider === provider));
     return {
       provider,
       source,

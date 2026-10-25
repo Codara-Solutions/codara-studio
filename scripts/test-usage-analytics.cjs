@@ -668,6 +668,7 @@ async function main() {
 
   const scanner = await bundle(SCANNER_TS, path.join(tmp, "scanner.bundle.cjs"));
   const {
+    codexTranscriptRoots,
     decodeScanCache,
     encodeScanCache,
     listTranscriptFiles,
@@ -879,7 +880,7 @@ async function main() {
     const missing = path.join(realDir, "vanished.jsonl");
     eq("scan: an unreadable file reads as null, not empty", await readTranscriptRecords(missing, "claude"), null);
     const records = await readFileRecords(cache, { path: missing, size: 10, mtimeMs: 10 }, "claude");
-    eq("scan: a read failure yields no records", records.length, 0);
+    eq("scan: a read failure reads as null, apart from an empty file", records, null);
     eq("scan: a read failure is NOT memoised", cache.size, 0);
   }
   {
@@ -966,6 +967,76 @@ async function main() {
     eq("scan: each source counts its session", first.sources.map((source) => source.distinctSessions).join(","), "1,1,1");
     eq("scan: the project row carries the working directory", first.projects.find((row) => row.provider === "claude").project, "/p/app");
     check("scan: the memo is persisted where the caller asked", fs.existsSync(cachePath));
+  }
+  {
+    // Codex moves finished sessions to archived_sessions beside sessions.
+    // Skipping it hid most of a long history (about $340 shown of $6,100).
+    const codexHome = path.join(tmp, "codex-archive-tree");
+    const liveRoot = path.join(codexHome, "sessions");
+    const archivedRoot = path.join(codexHome, "archived_sessions");
+    fs.mkdirSync(path.join(liveRoot, "2026", "06", "24"), { recursive: true });
+    eq("codex roots: without an archive only sessions is read", codexTranscriptRoots(liveRoot).length, 1);
+    fs.mkdirSync(archivedRoot, { recursive: true });
+    const roots = codexTranscriptRoots(liveRoot);
+    eq("codex roots: the archive beside sessions is read too", roots.map((root) => root.dir).join(","), `${liveRoot},${archivedRoot}`);
+    const rollout = (name, model) => [name, `${sessionMeta}\n${turnContext(model)}\n${tokenCount()}\n`];
+    const [liveName, liveBody] = rollout("rollout-2026-06-24T22-03-02-019efba8-6f47-7fa2-b182-66ae4ed19230.jsonl", "gpt-5.5");
+    const [oldName, oldBody] = rollout("rollout-2026-06-20T09-00-00-019efba8-0000-7fa2-b182-66ae4ed19231.jsonl", "gpt-5.4");
+    fs.writeFileSync(path.join(liveRoot, "2026", "06", "24", liveName), liveBody);
+    fs.writeFileSync(path.join(archivedRoot, oldName), oldBody);
+    // The same rollout under both roots: archived between the two walks.
+    fs.writeFileSync(path.join(archivedRoot, liveName), liveBody);
+    const summary = await scanUsage({
+      roots,
+      cachePath: path.join(tmp, "scan-cache-archive.json"),
+      input: { sinceDay: "2026-06-01", untilDay: "2026-08-31", timeZone: "UTC" },
+    });
+    const codexCells = summary.buckets.filter((bucket) => bucket.provider === "codex");
+    eq("codex roots: archived sessions are counted", codexCells.map((bucket) => bucket.model).sort().join(","), "gpt-5.4,gpt-5.5");
+    eq(
+      "codex roots: a rollout seen under both roots counts once",
+      codexCells.reduce((total, bucket) => total + bucket.recordCount, 0),
+      2,
+    );
+    eq("codex roots: each folder has its own source row", summary.sources.map((source) => source.status).join(","), "ok,ok");
+  }
+  {
+    // Codex moves a just-finished rollout to archived_sessions between the
+    // listing and the read: the sessions/ copy fails to open, and the
+    // archived copy must still count rather than be skipped as a duplicate.
+    // An unreadable file stands in for the moved one.
+    const codexHome = path.join(tmp, "codex-moved-tree");
+    const liveRoot = path.join(codexHome, "sessions");
+    const archivedRoot = path.join(codexHome, "archived_sessions");
+    fs.mkdirSync(path.join(liveRoot, "2026", "06", "24"), { recursive: true });
+    fs.mkdirSync(archivedRoot, { recursive: true });
+    const name = "rollout-2026-06-24T22-03-02-019efba8-6f47-7fa2-b182-66ae4ed19239.jsonl";
+    const body = `${sessionMeta}\n${turnContext("gpt-5.5")}\n${tokenCount()}\n`;
+    const moving = path.join(liveRoot, "2026", "06", "24", name);
+    fs.writeFileSync(moving, body);
+    fs.chmodSync(moving, 0o000);
+    fs.writeFileSync(path.join(archivedRoot, name), body);
+    let readable = true;
+    try {
+      fs.readFileSync(moving);
+    } catch {
+      readable = false;
+    }
+    if (readable) {
+      console.log("SKIP codex roots: a failed read (running as root, chmod does not block reads)");
+    } else {
+      const summary = await scanUsage({
+        roots: codexTranscriptRoots(liveRoot),
+        cachePath: path.join(tmp, "scan-cache-moved.json"),
+        input: { sinceDay: "2026-06-01", untilDay: "2026-08-31", timeZone: "UTC" },
+      });
+      eq(
+        "codex roots: a rollout moved between listing and read still counts from the archive",
+        summary.buckets.filter((bucket) => bucket.provider === "codex").reduce((total, bucket) => total + bucket.recordCount, 0),
+        1,
+      );
+    }
+    fs.chmodSync(moving, 0o644);
   }
   {
     const missing = await scanUsage({
