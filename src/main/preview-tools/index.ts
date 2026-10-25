@@ -26,6 +26,7 @@ import { insightPreviewTools } from "./insight";
 import { pointPreviewTools } from "./point";
 import { serverTools } from "./servers";
 import { sessionSearchTools } from "./session-search";
+import { tabTools } from "./tabs";
 import { workspaceStatusTools } from "./workspace-status";
 import { PreviewToolParamsError, type PreviewToolEntry, type PreviewToolHost, type PreviewToolTable } from "./types";
 
@@ -44,6 +45,7 @@ const TABLES: readonly PreviewToolTable[] = [
   workspaceStatusTools,
   cosTaskTools,
   sessionSearchTools,
+  tabTools,
   chromeLinkTools,
   // A snippet's browser calls go through runPreviewTool like any socket call.
   codePreviewTools((method, params, host) => runPreviewTool(method, params, host)),

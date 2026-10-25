@@ -17,7 +17,7 @@ const what = {
 
 module.exports = {
   order: 20,
-  budget: 2200,
+  budget: 2125,
   tools: [
     {
       name: "codara_preview_screenshot",
@@ -25,7 +25,7 @@ module.exports = {
       annotations: { readOnly: true },
       step: { order: 80, properties: { fullPage: what.fullPage, format: img.format } },
       description:
-        "Capture the tab (or fullPage, one element, a clip region) as an image, also saved to path. Default JPEG q70, 1280 px wide; scale is image px per CSS px.",
+        "The tab (or fullPage, one element, a clip region) as an image, also saved to path. Default JPEG q70, 1280 px wide; scale: image px per CSS px.",
       inputSchema: {
         type: "object",
         properties: { tabId: tab, ...img, scale: { type: "number" }, ...what },
@@ -37,7 +37,7 @@ module.exports = {
       rpc: "preview.compare",
       annotations: { readOnly: true },
       description:
-        "Compare the page before and after a change, or across screen sizes. baseline saves it per viewport; diff (default) returns percent changed, regions and a marked image; sizes: one image of all sizes; list: baselines.",
+        "Before/after a change, or across screen sizes. baseline saves one per viewport; diff (default): percent changed, regions, marked image; sizes: all sizes in one image; list: baselines.",
       inputSchema: {
         type: "object",
         properties: {
@@ -59,7 +59,7 @@ module.exports = {
       annotations: { readOnly: true },
       step: { order: 85, properties: { stop: { type: "boolean" } } },
       description:
-        "Record the tab to a GIF (default), MP4 or WebM, for a pull request. Call to start, act, then call with stop:true to get the path.",
+        "Record the tab to GIF (default), MP4 or WebM. Call to start, act, then call with stop:true for the path.",
       inputSchema: {
         type: "object",
         properties: {

@@ -6,7 +6,7 @@
 
 module.exports = {
   order: 30,
-  budget: 3320,
+  budget: 3262,
   tools: [
     {
       name: "codara_preview_mouse",
@@ -66,7 +66,7 @@ module.exports = {
       name: "codara_preview_drag",
       rpc: "preview.drag",
       description:
-        "Trusted drag from one point to another. Each endpoint is { selector } or { x, y } in CSS pixels.",
+        "Trusted drag between two points, each { selector } or { x, y } in CSS pixels.",
       inputSchema: {
         type: "object",
         required: ["from", "to"],
@@ -82,7 +82,7 @@ module.exports = {
             properties: { selector: { type: "string" }, x: { type: "number" }, y: { type: "number" } },
             additionalProperties: false,
           },
-          steps: { type: "number", description: "Intermediate moves (default 12, max 100)." },
+          steps: { type: "number", description: "Default 12, max 100." },
         },
         additionalProperties: false,
       },

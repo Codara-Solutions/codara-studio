@@ -192,8 +192,8 @@ async function loadPreviewTools(stubs) {
   // pull-request gate refuses it without an edit there.
   assert.deepEqual(
     tools.previewToolMethods().filter((method) => tools.previewToolRefusesUntrustedRuns(method)),
-    ["terminal.servers", "workspace.status", "task.add", "task.update", "task.list", "inbox.add", "session.search", "browser.use"],
-    "only the dev-server tool and the verify gate start commands, only the workspace status and task list write the rail, only session search reads past sessions, only browser code runs an agent's program",
+    ["terminal.servers", "workspace.status", "task.add", "task.update", "task.list", "inbox.add", "session.search", "tab.action", "browser.use"],
+    "only the dev-server tool and the verify gate start commands, only the workspace status and task list write the rail, only session search reads past sessions, only codara_tab closes the user's tabs, only browser code runs an agent's program",
   );
   const flagged = await loadPreviewTools({
     servers: `module.exports = { serverTools: { "servers.start": { run: async () => ({}), scope: "none", trustedRunsOnly: true } } };`,

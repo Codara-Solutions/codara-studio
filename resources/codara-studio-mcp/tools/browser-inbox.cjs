@@ -7,13 +7,13 @@
 
 module.exports = {
   order: 50,
-  budget: 400,
+  budget: 380,
   tools: [
     {
       name: "codara_preview_inbox",
       rpc: "preview.inbox",
       description:
-        "Read what the user queued for you from Codara (picked elements, page comments, screenshots), oldest first: text, source tab and URL, attached file paths. Read items are removed unless peek=true.",
+        "What the user queued for you in Codara (picked elements, page comments, screenshots), oldest first: text, source tab, URL, file paths. Read items are removed unless peek=true.",
       inputSchema: {
         type: "object",
         properties: {

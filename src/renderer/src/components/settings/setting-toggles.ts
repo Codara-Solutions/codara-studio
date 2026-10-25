@@ -52,6 +52,7 @@ export const PREFERENCE_TOGGLES = {
   notifyTeammatePushes: defaultOn("notifyTeammatePushes"),
   notifyPullRequests: defaultOn("notifyPullRequests"),
   notifyCiFailures: defaultOn("notifyCiFailures"),
+  watchPullRequests: defaultOn("watchPullRequests"),
   vimMode: defaultOff("vimMode"),
   autosaveEnabled: defaultOff("autosaveEnabled"),
   inlineAutocompleteEnabled: defaultOff("inlineAutocompleteEnabled"),

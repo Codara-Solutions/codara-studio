@@ -89,6 +89,8 @@ async function main() {
       "javascript:alert(1)",
       "vscode://file/etc/passwd",
       "smb://host/share",
+      "codara://settings/accounts",
+      "codara://tab/ws-a",
       "//example.com/no-scheme",
       "not a url",
       "",
@@ -109,7 +111,12 @@ async function main() {
     ["system", "https://example.com/"],
     ["studio", "https://example.com/"],
   ]);
-  console.log("ok 2 file: stays in Codara, mailto goes out, other schemes are dropped");
+  assert.equal(routeLink("codara://tab/ws-a/term-1", "system"), "tab");
+  assert.equal(routeLink("codara://group/ws-a/group-1", "studio"), "tab");
+  const tabsOpened = [];
+  assert.equal(await openLink("codara://tab/ws-a/term-1", { ...deps("system"), openTab: (url) => tabsOpened.push(url) }), "tab");
+  assert.deepEqual(tabsOpened, ["codara://tab/ws-a/term-1"]);
+  console.log("ok 2 file: stays in Codara, mailto goes out, tab links go to the app, other schemes are dropped");
 
   const { openLinkFromApp, openInSystemBrowser } = await load("src/main/open-link.ts", "open-link");
   const prefs = await load("src/main/preferences-store.ts", "preferences-store");
@@ -124,6 +131,8 @@ async function main() {
   assert.deepEqual(opened, ["https://example.com/a"], "unsafe schemes never reach shell.openExternal");
   assert.equal(await openLinkFromApp("file:///tmp/notes.md", host), "studio");
   assert.deepEqual(host.sent, [["app:open-browser-url", "file:///tmp/notes.md"]]);
+  assert.equal(await openLinkFromApp("codara://group/ws-a/group-1", host), "tab");
+  assert.deepEqual(host.sent[1], ["app:open-tab-link", "codara://group/ws-a/group-1"]);
   console.log("ok 3 openLinkFromApp opens the default browser and keeps file: in Codara");
 
   // An existing user's file predates the preference: they get the machine's

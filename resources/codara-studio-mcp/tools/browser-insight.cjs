@@ -6,7 +6,7 @@
 
 module.exports = {
   order: 60,
-  budget: 1100,
+  budget: 1085,
   tools: [
     {
       name: "codara_preview_audit",

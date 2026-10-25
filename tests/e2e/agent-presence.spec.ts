@@ -5,6 +5,7 @@ import { createServer, type Server } from "node:http";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { FAKE_AGENT, paneMcp, type PaneMcp } from "./in-pane-mcp";
 
 // The agent's cursor and driving banner on a Codara browser tab, driven by a
 // Claude Code session in a terminal pane through the stdio MCP server, as an
@@ -16,7 +17,6 @@ import { join, resolve } from "node:path";
 
 const { rpcRaw } = require("../../cli/lib/rpc.cjs");
 
-const SERVER = resolve(__dirname, "../../resources/codara-studio-mcp/server.js");
 const OUT = resolve(__dirname, "../../test-results/agent-presence");
 const WORKSPACE = "AI Continous Improvment";
 
@@ -58,29 +58,18 @@ function cleanEnv(home: string): Record<string, string> {
 
 interface Content { type: string; text?: string; data?: string; mimeType?: string }
 
-function startMcp(home: string, paneId: string) {
-  const child = spawn(process.execPath, [SERVER], { env: { ...cleanEnv(home), SPARK_PANE_ID: paneId }, stdio: ["pipe", "pipe", "inherit"] });
-  let buffer = "";
+function startMcp(link: PaneMcp) {
   let nextId = 1;
   const pending = new Map<number, (message: { result?: any; error?: any }) => void>();
-  child.stdout.setEncoding("utf8");
-  child.stdout.on("data", (chunk: string) => {
-    buffer += chunk;
-    let index;
-    while ((index = buffer.indexOf("\n")) >= 0) {
-      const line = buffer.slice(0, index).trim();
-      buffer = buffer.slice(index + 1);
-      if (!line) continue;
-      const message = JSON.parse(line);
-      pending.get(message.id)?.(message);
-      pending.delete(message.id);
-    }
+  link.onMessage((message) => {
+    pending.get(message.id)?.(message);
+    pending.delete(message.id);
   });
   const request = (method: string, params: Record<string, unknown> = {}) =>
     new Promise<any>((done, fail) => {
       const id = nextId++;
       pending.set(id, (message) => (message.error ? fail(new Error(message.error.message)) : done(message.result)));
-      child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+      link.send({ id, method, params });
     });
   return {
     request,
@@ -93,7 +82,7 @@ function startMcp(home: string, paneId: string) {
         isError: result.isError === true,
       };
     },
-    close: () => child.kill(),
+    close: () => link.close(),
   };
 }
 
@@ -190,11 +179,13 @@ test("an agent's cursor glides before it clicks, the banner names it, and Stop t
     // recognizes as claude, as the real CLI is.
     const bin = join(root, "bin");
     await mkdir(bin);
-    await writeFile(join(bin, "claude"), "#!/usr/bin/env node\nsetInterval(() => {}, 1 << 30);\n", { mode: 0o755 });
-    const { paneId } = await socket("terminal.create", { cwd, title: "Claude Code", command: join(bin, "claude") });
+    // It runs the MCP server as its child, as the real CLI does.
+    await writeFile(join(bin, "claude"), FAKE_AGENT, { mode: 0o755 });
+    const link = paneMcp(join(bin, "claude"), home, root, "claude");
+    const { paneId } = await socket("terminal.create", { cwd, title: "Claude Code", command: link.command });
     agent.callerPaneId = paneId;
 
-    mcp = startMcp(home, paneId);
+    mcp = startMcp(link);
     await mcp.request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "claude-code", version: "1" } });
     const opened = await mcp.call("codara_preview_navigate", { url: fixture.url });
     expect(opened.isError, opened.text).toBe(false);

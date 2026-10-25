@@ -464,7 +464,10 @@ every git Codara spawns; `test-git-fix-prompts`, `test-git-fix-context` and
 `test-git-fix-targets` cover Fix with agent: redaction, log and conflict
 slicing, prompt budgets, hooks and conflicts in throwaway repositories, a
 scripted `gh`, and the dialog's targets; `test-github-ci-watch` covers the
-CI failure alerts),
+pull request watcher: REST parsing, the backoff, rows, alerts and the green
+note; `test-ci-agent-nudge` covers telling the agent, once per failing
+commit and never mid-turn, and the ETag reads; `tests/e2e/pr-watch-agent.spec.ts`
+runs it end to end with a scripted `gh`),
 `test-worktrees`, `test-worktree-delete-dialog`, `test-untrusted-pr-policy`
 (the checkout of an imported pull request stays untrusted, whatever path
 tricks it tries), `test-agent-worktrees` (worktrees agents create and remove

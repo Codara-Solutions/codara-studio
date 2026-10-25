@@ -506,6 +506,7 @@ import { registerFeatureTipsIpc } from "./feature-tips";
 import { registerSessionSearchIpc } from "./session-search/service";
 import { registerServersIpc } from "./servers";
 import { registerWorkspaceStatusIpc } from "./workspace-status";
+import { registerPullRequestWatchIpc } from "./pull-request-watch-ipc";
 import { registerCosTasksIpc } from "./cos";
 import { afterSkillAssetDeleted, afterSkillAssetInstalled, registerSkillUpdatesIpc, skillOriginsDir } from "./skill-updates-ipc";
 import {
@@ -517,6 +518,7 @@ import {
 import { agentPaneAsleep, registerAgentHibernationIpc } from "./agent-hibernation";
 import { registerWorktreeCleanupIpc } from "./worktree-cleanup";
 import { registerCrossWorkspaceIpc } from "./cross-workspace-ipc";
+import { registerTabActionIpc } from "./tab-action-ipc";
 import { registerWorktreeSetupIpc } from "./worktree-setup";
 import { registerPortForwardIpc } from "./remote/port-forward-runtime";
 import { registerShareIpc } from "./share/ipc";
@@ -4212,12 +4214,14 @@ export function registerIpc(): void {
   registerCaptureIpc(handle);
   registerPointIpc(handle);
   registerWorkspaceStatusIpc(handle);
+  registerPullRequestWatchIpc(handle);
   registerCosTasksIpc(handle);
   registerReviewIpc(handle);
   registerTerminalScrollbackIpc(handle);
   registerAgentHibernationIpc(handle);
   registerWorktreeCleanupIpc(handle);
   registerCrossWorkspaceIpc(handle);
+  registerTabActionIpc(handle);
   registerFeatureTipsIpc(handle);
   registerPortForwardIpc(handle);
   registerShareIpc(handle);
