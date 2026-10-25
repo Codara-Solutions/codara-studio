@@ -170,6 +170,11 @@ const BLOCK_SAMPLES = [
   "    a\n\n> - b\n\n    c\n\n> 2. d\n\n    e\n\n> > -",
   "- >q\n    <b>\n\nc\n\n- >r\n\t<i>\n\nd\n\n- >s\n \t<u>\n\ne",
   "- a\n    <pre>\n\n\nc\n\n1. x\n\n    <!-- c\n\n    d\n\ne",
+  "- <?php\n\n> - q",
+  "* s\n-  <?php\n\n```\nx\n```",
+  "- <script>\n\n> - q\n\n- <![CDATA[\n\nz",
+  "> 1. a\n  > <b>\n\n<!-- c",
+  "- - \t\t-->\n    \n\t\t\n\n>    <div>",
 ];
 
 // mulberry32: integer math only, so it does not fall into a short cycle the
@@ -188,7 +193,7 @@ function seeded(seed) {
 const FUZZ_LINES = [
   "", "", "", "", "", "", "text line", "text line", "text line", "More prose.", "- item", "1. item", "2. two", "10. ten", "-", "* star", "+ plus",
   "   ```", " ```", "```", "```js", "~~~", "````", "  code", "    deep", "      deeper", "\tTab", "    ", "    ```", "     ~~~", "        ```", "      ~~~~",
-  "> quote", ">", "> -", "> 2. two", ">q", "    <b>", "\t<pre>", "      <!--", "| a | b |", "|---|---|", "---", "===", "# heading", "- [ ] task",
+  "> quote", ">", "> -", "> 2. two", ">q", "    <b>", "\t<pre>", "      <!--", "- <?php", "> 1. a", "  > <b>", "- <script>", "| a | b |", "|---|---|", "---", "===", "# heading", "- [ ] task",
   "[link](https://x.dev) text", "def f() -> list[int]:", "[a\\]b]",
 ];
 // Lines after which nothing more is cut; kept rare so most documents still are.

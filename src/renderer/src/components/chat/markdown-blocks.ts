@@ -7,11 +7,14 @@
 // list may be open (it would continue that list, and could turn it loose) or
 // right after indented code (micromark then reads the item, quoted or not, as
 // paragraph text), no blank line in between is indented enough to continue
-// that code, and no top-level code fence is open. Anything this scanner cannot be sure of stops cutting
-// from there on, which only makes the last piece longer. Raw HTML is one of
+// code (at the top or in a list item), and no top-level code fence is open.
+// Anything this scanner cannot be sure of stops cutting from there on, which
+// only makes the last piece longer. Raw HTML is one of
 // those: an HTML block can run past blank lines, and a fence line inside one
-// is not a fence, so the first line that may start one ends the cutting
-// (inside a list item at any indent, since the item's column is unknown). A
+// is not a fence, so the first line that may start one ends the cutting: a
+// "<" after any quote and list markers, at any indent inside a list (the
+// item's column is unknown), and up to 3 columns outside one (deeper is
+// indented code). A
 // fence opened on a list or quote marker line is another: its container, not
 // a closing fence, may end it, with or without the blank lines before. A
 // fence indented 4 or more columns while a list is open sits in an item too,
@@ -34,8 +37,7 @@ const QUOTED_LIST_ITEM = /^(?: {0,3}>[ \t]?)+ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]
 const BACKTICK_FENCE = /^( {0,3})(`{3,})[^`]*$/;
 const TILDE_FENCE = /^( {0,3})(~{3,})[^]*$/;
 const FENCE_CLOSE = /^( {0,3})(`{3,}|~{3,})[ \t]*$/;
-const HTML_START = /^ {0,3}</;
-const ITEM_HTML_START = /^[ \t]*</;
+const CONTAINER_PREFIX = /^(?:[ \t]*(?:>|[-*+](?=[ \t]|$)|\d{1,9}[.)](?=[ \t]|$)))*[ \t]*/;
 const INDENTED_FENCE = /^([ \t]*)(`{3,}(?=[^`]*$)|~{3,})/;
 const DEEP_CLOSE = /^([ \t]*)(`{3,}|~{3,})[ \t]*$/;
 const CONTAINER_FENCE = /^ {0,3}(?:[-*+]|\d{1,9}[.)]|>)[ \t>*+\-.)\d]*(?:`{3}|~{3})/;
@@ -115,7 +117,8 @@ export function splitMarkdownBlocks(text: string): string[] {
     }
     const listItem = LIST_ITEM.test(line);
     const indent = indentOf(line);
-    const codeContinues = lastIndent >= 4 && (listItem || blankIndent >= 4 || QUOTED_LIST_ITEM.test(line));
+    const codeContinues =
+      (lastIndent >= 4 && (listItem || QUOTED_LIST_ITEM.test(line))) || (blankIndent >= 4 && (lastIndent >= 4 || listOpen));
     if (blankFrom > start && indent === 0 && !codeContinues && !(listItem && listOpen)) {
       blocks.push(text.slice(start, blankFrom - 1));
       start = lineStart;
@@ -124,7 +127,9 @@ export function splitMarkdownBlocks(text: string): string[] {
     blankFrom = -1;
     lastIndent = indent;
     if (listItem) listOpen = true;
-    if (HTML_START.test(line) || (listOpen && ITEM_HTML_START.test(line)) || CONTAINER_FENCE.test(line)) break;
+    const prefix = CONTAINER_PREFIX.exec(line)![0];
+    if (line[prefix.length] === "<" && (indent < 4 || listOpen || /[^ \t]/.test(prefix))) break;
+    if (CONTAINER_FENCE.test(line)) break;
     const deep = listOpen && indent >= 4 ? INDENTED_FENCE.exec(line) : null;
     fence = deep ? { char: deep[2][0], length: deep[2].length, indent, deep: true } : openingFence(line);
   }
