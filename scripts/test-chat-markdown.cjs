@@ -151,6 +151,7 @@ const BLOCK_SAMPLES = [
   "see [a\\]b]\n\n[a\\]b]: /url",
   "[foo\nbar]: /url\n\nsee [foo bar]",
   "see [x]\n\n[\nx\n]: /url",
+  "\uFEFFa\n\n\uFEFF# h\n\n\uFEFF    code\n\n\uFEFF```\n\nx\n```",
 ];
 
 function* lcg(seed) {

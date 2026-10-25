@@ -12,11 +12,12 @@
 // Link reference and footnote definitions apply to the whole document, so a
 // text that may contain one is never cut at all; a label can hold escaped
 // brackets and line breaks, so any "]:" after a line opening a bracket counts.
-// A lone CR is a line ending to the parser but not to this scanner, so a text
-// holding one is never cut either.
+// A lone CR is a line ending to the parser but not to this scanner, and a
+// byte-order mark is dropped only at the start of a document, so a text with
+// either past its first character is never cut either.
 
 const DEFINITION_START = /^[ \t>*+\-.)\d]*\[/gm;
-const LONE_CR = /\r(?!\n)/;
+const UNCUTTABLE = /\r(?!\n)|[^]\uFEFF/;
 const BLANK = /^[ \t]*$/;
 const LIST_ITEM = /^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:[ \t]|$)/;
 const BACKTICK_FENCE = /^( {0,3})(`{3,})[^`]*$/;
@@ -53,7 +54,7 @@ function mayHoldDefinition(text: string): boolean {
 }
 
 export function splitMarkdownBlocks(text: string): string[] {
-  if (LONE_CR.test(text) || mayHoldDefinition(text)) return [text];
+  if (UNCUTTABLE.test(text) || mayHoldDefinition(text)) return [text];
   const blocks: string[] = [];
   let start = 0;
   let offset = 0;
