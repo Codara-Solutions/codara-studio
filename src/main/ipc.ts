@@ -499,6 +499,7 @@ import { registerFeatureTipsIpc } from "./feature-tips";
 import { registerSessionSearchIpc } from "./session-search/service";
 import { registerServersIpc } from "./servers";
 import { registerWorkspaceStatusIpc } from "./workspace-status";
+import { registerPullRequestWatchIpc } from "./pull-request-watch-ipc";
 import { registerCosTasksIpc } from "./cos";
 import { afterSkillAssetDeleted, afterSkillAssetInstalled, registerSkillUpdatesIpc, skillOriginsDir } from "./skill-updates-ipc";
 import {
@@ -4165,6 +4166,7 @@ export function registerIpc(): void {
   registerCaptureIpc(handle);
   registerPointIpc(handle);
   registerWorkspaceStatusIpc(handle);
+  registerPullRequestWatchIpc(handle);
   registerCosTasksIpc(handle);
   registerReviewIpc(handle);
   registerTerminalScrollbackIpc(handle);

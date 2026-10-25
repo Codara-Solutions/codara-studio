@@ -45,6 +45,8 @@ import {
   type VerticalReorderSlot,
 } from "./workspaceReorder";
 import { openWorktreeCleanup } from "./worktree-cleanup/open-worktree-cleanup";
+import { PullRequestMark } from "../git/PullRequestMark";
+import { setRepositoryWatched, usePullRequestWatch } from "../git/pullRequestWatchStore";
 import type { WorktreeRailState } from "@shared/worktree-cleanup";
 
 const PANEL_SECTION_MIME = "application/x-codara-panel-section";
@@ -2078,6 +2080,7 @@ function WorkspaceRow({
   const [statusPickerOpen, setStatusPickerOpen] = useState(false);
   const [cleaning, setCleaning] = useState(false);
   const statusEntry = useUserWorkspaceStatus(ws.id);
+  const prWatch = usePullRequestWatch(ws.id);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
   // In-flight color while the OS color dialog is open. The native
   // <input type="color"> streams `input` events 30-60×/sec (sometimes faster)
@@ -2495,6 +2498,7 @@ function WorkspaceRow({
                   </span>
                 )}
                 {branch}
+                <PullRequestMark entry={prWatch} hideMerged={merged} />
                 {merged && <MergedTag />}
               </span>
             )}
@@ -2659,6 +2663,15 @@ function WorkspaceRow({
                   onClick={() => {
                     setMenuOpen(false);
                     onCreateCopyBranch();
+                  }}
+                />
+              )}
+              {prWatch && (
+                <RowMenuItem
+                  label={prWatch.watching ? "Stop watching pull requests in this repo" : "Watch pull requests in this repo"}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    void setRepositoryWatched(prWatch.repository, !prWatch.watching).catch(() => undefined);
                   }}
                 />
               )}

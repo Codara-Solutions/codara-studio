@@ -107,6 +107,7 @@ import {
   ToggleRow,
   ValueRow,
 } from "./settings/SettingsPrimitives";
+import { PullRequestWatchOffRepos } from "./settings/PullRequestWatchOffRepos";
 import {
   entryLocation,
   matchRanges,
@@ -1427,6 +1428,20 @@ function GitSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
           title="Notify me when CI fails on my pull request"
           desc="One alert per failing commit on the pull request of each workspace's branch. Fix with agent in Source Control hands it to an agent."
           {...bindToggle("notifyCiFailures", preferences, setPreference)}
+        />
+        <ToggleRow
+          title="Watch pull requests and tell agents when CI fails"
+          desc="Rows show each branch's pull request and checks. When checks fail, the agent working on that branch gets one line asking it to fix them, once it is free. Turn it off for one repository from a row's menu."
+          {...bindToggle("watchPullRequests", preferences, setPreference)}
+        />
+        <PullRequestWatchOffRepos
+          repositories={preferences.pullRequestWatchOffRepos ?? []}
+          onWatch={(repository) =>
+            void setPreference(
+              "pullRequestWatchOffRepos",
+              (preferences.pullRequestWatchOffRepos ?? []).filter((item) => item !== repository),
+            )
+          }
         />
       </SettingsSection>
 
