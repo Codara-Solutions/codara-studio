@@ -927,7 +927,18 @@ async function main() {
     assert.equal(fs.readFileSync(rotating, "utf8").trim().split("\n").length, 1);
 
     // ── Pure helpers ───────────────────────────────────────────────────────
-    for (const entry of ["node_modules/", "packages/a/node_modules/", "dist/", "src/x.pyc", ".DS_Store", "tsconfig.tsbuildinfo"]) {
+    for (const entry of [
+      "node_modules/",
+      "packages/a/node_modules/",
+      "dist/",
+      "src/x.pyc",
+      ".DS_Store",
+      "tsconfig.tsbuildinfo",
+      "test-results/",
+      "playwright-report/",
+      "packages/web/test-results/",
+      ".ruff_cache/",
+    ]) {
       assert.equal(aw.isRegenerableIgnored(entry), true, `${entry} regenerates`);
     }
     for (const entry of [".env.local", "secrets/", "notes.md", "config/credentials.json"]) {

@@ -1,5 +1,4 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { createPortal } from "react-dom";
 import {
   AGENT_LINE_STATE_LABELS,
   AGENT_LINE_STATE_TONES,
@@ -7,6 +6,7 @@ import {
   type AgentLine,
 } from "@shared/agent-status";
 import { AgentLineItem, useMinuteClock } from "../workspace-status/WorkspaceAgentsLine";
+import { CleanUpHoldsConfirm, RailCleanUpNotices, RailConfirm, useRailCleanUp, type RailCleanUpEntry } from "./RailCleanUp";
 import "./workspace-children.css";
 
 // What hangs under a project in the workspace rail (DESIGN.md, "Worktrees in
@@ -34,18 +34,16 @@ export function WorkspaceChildren({
     count: number;
     open: boolean;
     onToggle: () => void;
-    /** Absent hides Clean up. */
-    onCleanUp?: () => void;
-    /** The worktrees Clean up removes; more than one asks first. */
-    cleanUpNames: readonly string[];
-    cleaning: boolean;
+    /** The worktrees Clean up removes; more than one asks first, and none hides it. */
+    cleanUps: readonly RailCleanUpEntry[];
     rows: ReactNode[];
   };
 }) {
   const now = useMinuteClock(ownAgents.length > 0);
   const [confirming, setConfirming] = useState(false);
-  const cleanUp = merged.onCleanUp;
-  const asks = Boolean(cleanUp) && merged.cleanUpNames.length > 1;
+  const cleanUps = merged.cleanUps;
+  const cleanUp = useRailCleanUp(cleanUps.map((entry) => entry.id));
+  const asks = cleanUps.length > 1;
   // Once there is nothing left to ask about, the question is over: a later
   // merge must not bring it back by itself.
   useEffect(() => {
@@ -82,87 +80,52 @@ export function WorkspaceChildren({
             <Chevron open={merged.open} />
           </button>
           <span style={{ flex: 1, minWidth: 0 }}>{merged.count} merged</span>
-          {merged.onCleanUp && (
+          {cleanUps.length > 0 && (
             <button
               type="button"
               className="rail-merged-clean-up"
               data-testid="workspace-merged-clean-up"
               title="Remove the merged worktrees, their branches and their rows"
-              disabled={merged.cleaning}
-              onClick={() => (merged.cleanUpNames.length > 1 ? setConfirming(true) : merged.onCleanUp?.())}
+              disabled={cleanUp.cleaning}
+              onClick={() => (asks ? setConfirming(true) : cleanUp.start(cleanUps))}
             >
-              {merged.cleaning ? "Cleaning…" : "Clean up"}
+              {cleanUp.cleaning ? "Cleaning…" : "Clean up"}
             </button>
           )}
         </div>
       )}
-      {confirming && asks && cleanUp && (
-        <CleanUpConfirm
-          names={merged.cleanUpNames}
+      {merged.count > 0 && (
+        <RailCleanUpNotices
+          notices={cleanUp.notices}
+          named
+          testId="workspace-merged-notice"
+          onDismiss={cleanUp.dismiss}
+        />
+      )}
+      {confirming && asks && (
+        <RailConfirm
+          title={`Clean up ${cleanUps.length} merged worktrees?`}
+          text="Their folders, branches and rows are removed:"
+          items={cleanUps.map((entry) => entry.name)}
+          okLabel="Clean up"
+          testId="workspace-merged-clean-up-confirm"
           onCancel={() => setConfirming(false)}
           onConfirm={() => {
             setConfirming(false);
-            cleanUp();
+            cleanUp.start(cleanUps);
           }}
+        />
+      )}
+      {!confirming && cleanUp.holding.length > 0 && (
+        <CleanUpHoldsConfirm
+          holding={cleanUp.holding}
+          testId="workspace-merged-clean-up-confirm"
+          onCancel={cleanUp.cancelHolding}
+          onConfirm={cleanUp.confirmHolding}
         />
       )}
       {merged.open && merged.rows}
     </div>
-  );
-}
-
-// The rail slides its rows with transforms, so the dialog renders into the
-// body to stay fixed to the window.
-function CleanUpConfirm({
-  names,
-  onCancel,
-  onConfirm,
-}: {
-  names: readonly string[];
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  // Capture, so Escape closes only this and no handler behind it.
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      event.stopPropagation();
-      onCancel();
-    };
-    document.addEventListener("keydown", onKey, true);
-    return () => document.removeEventListener("keydown", onKey, true);
-  }, [onCancel]);
-  const title = `Clean up ${names.length} merged worktrees?`;
-  return createPortal(
-    <div className="rail-confirm-scrim" onMouseDown={(event) => event.stopPropagation()} onClick={onCancel}>
-      <div
-        role="alertdialog"
-        aria-modal="true"
-        tabIndex={-1}
-        aria-label={title}
-        data-testid="workspace-merged-clean-up-confirm"
-        className="rail-confirm spark-glass--strong spark-overlay-surface"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <span className="rail-confirm-title">{title}</span>
-        <span className="rail-confirm-text">Their folders, branches and rows are removed:</span>
-        <ul className="rail-confirm-list">
-          {names.map((name, index) => (
-            <li key={`${index}:${name}`}>{name}</li>
-          ))}
-        </ul>
-        <div className="rail-confirm-buttons">
-          <button type="button" autoFocus className="rail-confirm-cancel" onClick={onCancel}>
-            Cancel
-          </button>
-          <button type="button" className="rail-confirm-ok" onClick={onConfirm}>
-            Clean up
-          </button>
-        </div>
-      </div>
-    </div>,
-    document.body,
   );
 }
 

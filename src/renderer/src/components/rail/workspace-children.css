@@ -106,6 +106,71 @@
   opacity: 0.6;
 }
 
+/* What held a Clean up back (rail/RailCleanUp.tsx): muted words, the state
+   dot carries the colour, as on an agent line. */
+.rail-clean-up-notices {
+  margin: 0 0 2px;
+  padding: 0;
+  list-style: none;
+}
+
+.rail-clean-up-notice {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  padding: 1px 2px 2px 4px;
+  font-size: 10.5px;
+  line-height: 13px;
+  color: var(--ink-dim);
+}
+
+.rail-clean-up-notice-dot {
+  margin-top: 4px;
+  background: var(--warn);
+}
+
+.rail-clean-up-notice[data-tone="danger"] .rail-clean-up-notice-dot {
+  background: var(--danger);
+}
+
+.rail-clean-up-notice-text {
+  flex: 1;
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.rail-clean-up-notice-close {
+  appearance: none;
+  flex: 0 0 14px;
+  width: 14px;
+  height: 13px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-2);
+  font: inherit;
+  font-size: 12px;
+  line-height: 12px;
+  cursor: pointer;
+}
+
+.rail-clean-up-notice-close:hover {
+  background: var(--hover);
+  color: var(--ink-dim);
+}
+
+.rail-clean-up-notice-close:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
 .rail-chevron {
   appearance: none;
   flex: 0 0 14px;

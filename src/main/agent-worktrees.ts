@@ -130,6 +130,8 @@ export interface RendererTerminal {
   paneId: string;
   workspaceId: string;
   cwd?: string;
+  /** The tab's title, to name it when it holds a worktree. */
+  title?: string;
 }
 
 export interface ProcessUse {
@@ -255,12 +257,17 @@ export const REGENERABLE_IGNORED_PATTERNS: readonly string[] = [
   ".turbo/",
   ".cache/",
   "coverage/",
+  "test-results/",
+  "playwright-report/",
+  "blob-report/",
   "target/",
   ".venv/",
   "venv/",
   "__pycache__/",
   "*.pyc",
   ".pytest_cache/",
+  ".ruff_cache/",
+  ".mypy_cache/",
   ".gradle/",
   ".DS_Store",
   "*.tsbuildinfo",

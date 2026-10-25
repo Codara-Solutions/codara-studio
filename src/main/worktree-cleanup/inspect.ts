@@ -373,6 +373,20 @@ export async function usageContext(deps: WorktreeCleanupDeps, dirs: readonly str
   return { deps, runs, terminals, processes };
 }
 
+// Names the tab to close. A tab counts while it is open, even when its agent
+// has exited, so its title is what the user needs to find it.
+async function agentTabUse(deps: WorktreeCleanupDeps, tab: RendererTerminal | undefined): Promise<WorktreeInUse> {
+  const title = cleanText(tab?.title ?? "", 60);
+  if (!title) return { kind: "agent", label: "the agent that made it is still open" };
+  const state = await deps.loadState().catch(() => null);
+  const workspace = cleanText(state?.workspaces.find((entry) => entry.id === tab?.workspaceId)?.name ?? "", 60);
+  return {
+    kind: "agent",
+    label: `the tab “${title}”${workspace ? ` in ${workspace}` : ""} of the agent that made it is still open`,
+    tab: { title, ...(workspace ? { workspace } : {}) },
+  };
+}
+
 function count(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }
@@ -429,9 +443,9 @@ export async function usageOf(
   for (const workspace of workspaces) {
     const owner = workspace.copyBranch?.createdBy;
     if (owner?.kind !== "agent" || !owner.paneId || panes.has(owner.paneId)) continue;
-    const open = deps.sessionCwd(owner.paneId) !== null || (ctx.terminals ?? []).some((t) => t.paneId === owner.paneId);
-    if (open) {
-      uses.push({ kind: "agent", label: "the agent that made it is still open" });
+    const tab = (ctx.terminals ?? []).find((t) => t.paneId === owner.paneId);
+    if (deps.sessionCwd(owner.paneId) !== null || tab) {
+      uses.push(await agentTabUse(deps, tab));
       break;
     }
   }
@@ -643,7 +657,10 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
   const uses = (await usageOf(ctx.usage, registration.path, real, workspaces)).filter(
     (use) => !ctx.allowInUse?.has(use.kind),
   );
-  if (uses.length) block(check, "IN_USE", `In use: ${uses.map((use) => use.label).join(", ")}.`);
+  if (uses.length) {
+    check.inUse = uses;
+    block(check, "IN_USE", `In use: ${uses.map((use) => use.label).join(", ")}.`);
+  }
 
   const target = await targetFor(repo, workspaces.find((workspace) => workspace.copyBranch) ?? null);
   const merge = await mergeFacts(repo, head, branch, target);
