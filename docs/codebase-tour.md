@@ -518,7 +518,8 @@ takes `user@host:port` (port 1 to 65535).
   lines revoke the key they certify, read by `revokedByFile` in
   `host-keys.ts`) refuses the keys it revokes whatever
   the preference, and a file ssh could not read refuses the connection, as
-  ssh does. The handshake asks for the key types
+  ssh does, including a key list line it cannot read in full (a point off
+  its curve, trailing bytes, a certificate whose signature fails). The handshake asks for the key types
   known_hosts lists first, reordering ssh2's own list as OpenSSH does, and a key known_hosts lists is accepted even when Codara
   stored another of the host's keys (one per host, any type). Otherwise
   `HostKeyPrompt.tsx` asks "Is this <host>?" with the fingerprint, with a

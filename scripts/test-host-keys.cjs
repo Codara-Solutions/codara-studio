@@ -52,7 +52,8 @@
 //   - RevokedHostKeys, a KRL or a key list, refuses the keys it revokes
 //     whatever the setting, even one Codara stored; a file ssh cannot read
 //     refuses the connection, as ssh does; a certificate line in a key list
-//     revokes the key it certifies
+//     revokes the key it certifies; a line ssh cannot read in full (bad curve,
+//     point off its curve, trailing bytes, wrong signature) refuses every host
 //
 //   node scripts/test-host-keys.cjs
 
@@ -937,6 +938,102 @@ function hasSshKeygen() {
       console.log("  skip certificate revocation (no ssh-keygen)");
     }
     ok("a certificate line in a RevokedHostKeys key list revokes the key it certifies");
+  }
+
+  {
+    // ssh 9.6 reads every key list line in full and refuses the whole file
+    // ("Error checking host key ... in revoked keys file") when one does not
+    // parse, so a host the file does not name is refused too. Each malformed
+    // case below was checked against a real sshd.
+    if (hasSshKeygen()) {
+      const dir = fs.mkdtempSync(path.join(TMP, "bad-lines-"));
+      const make = (name, type, bits) => {
+        const file = path.join(dir, name);
+        execFileSync("ssh-keygen", ["-q", "-t", type, ...(bits ? ["-b", bits] : []), "-N", "", "-f", file], { stdio: "ignore" });
+        return file;
+      };
+      const sign = (ca, pub, alg) => {
+        execFileSync("ssh-keygen", ["-q", "-s", ca, ...(alg ? ["-t", alg] : []), "-I", "x", "-h", "-n", "h", pub], { stdio: "ignore" });
+        return fs.readFileSync(pub.replace(/\.pub$/, "-cert.pub"), "utf8").trim().split(/\s+/);
+      };
+      const blobOf = (file) => fs.readFileSync(file, "utf8").trim().split(/\s+/);
+      const line = (type, blob) => `${type} ${blob.toString("base64")}\n`;
+      // Offsets of each length-prefixed string, from `from`.
+      const strings = (blob, from, count) => {
+        const out = [];
+        let at = from;
+        for (let i = 0; i < count; i++) {
+          out.push(at);
+          at += 4 + blob.readUInt32BE(at);
+        }
+        return { out, at };
+      };
+      const ca = make("ca", "ed25519");
+      const ec = make("ec384", "ecdsa", "384");
+      const ec256 = make("ec256", "ecdsa", "256");
+      const [certType, certB64] = sign(ca, `${ec}.pub`);
+      const cert = Buffer.from(certB64, "base64");
+      // ecdsa cert: type, nonce, curve, Q, serial, type, key id, principals,
+      // after, before, critical, extensions, reserved, CA key, signature.
+      const head = strings(cert, 0, 4);
+      const [, , curveAt, pointAt] = head.out;
+      const tail = strings(cert, head.at + 12, 2);
+      const sigAt = strings(cert, tail.at + 16, 5).out[4];
+      const [plainType, plainB64] = blobOf(`${ec256}.pub`);
+      const plain = Buffer.from(plainB64, "base64");
+      const edit = (blob, at, fn) => {
+        const copy = Buffer.from(blob);
+        fn(copy, at);
+        return copy;
+      };
+      const malformed = [
+        ["a certificate with trailing bytes", line(certType, Buffer.concat([cert, Buffer.alloc(4)]))],
+        ["a certificate cut before its signature", line(certType, cert.subarray(0, sigAt))],
+        ["a certificate whose signature is wrong", line(certType, edit(cert, cert.length - 1, (b, i) => (b[i] ^= 1)))],
+        ["a certificate whose curve does not match its type", line(certType, edit(cert, curveAt + 4, (b, i) => b.write("nistp256", i, "latin1")))],
+        ["a certificate whose point is off its curve", line(certType, edit(cert, pointAt + 14, (b, i) => (b[i] ^= 0xff)))],
+        ["a key with trailing bytes", line(plainType, Buffer.concat([plain, Buffer.from([0, 0, 0, 1, 7])]))],
+        ["a key whose curve does not match its type", line(plainType, edit(plain, 4 + 19 + 4, (b, i) => b.write("nistp384", i, "latin1")))],
+        ["a key whose point is off its curve", line(plainType, edit(plain, plain.length - 5, (b, i) => (b[i] ^= 0xff)))],
+        ["an Ed25519 key of 31 bytes", line("ssh-ed25519", wireKey("ssh-ed25519", Buffer.alloc(31, 1)))],
+      ];
+      for (const [name, text] of malformed) {
+        assert.throws(() => keys.revokedByFile(Buffer.from(text), key), keys.RevokedKeysFormatError, name);
+        // ssh stops at the first match: a bad line after it is never read.
+        assert.equal(keys.revokedByFile(Buffer.from(`ssh-ed25519 ${b64}\n${text}`), key), true, `${name}, after a match`);
+      }
+
+      reset();
+      confirm = false;
+      harness.settings.nas = { files: ["/home/me/.ssh/known_hosts"], revoked: ["/home/me/.ssh/revoked"] };
+      harness.files.set("/home/me/.ssh/revoked", `ssh-ed25519 ${other.toString("base64")}\n${malformed[2][1]}`);
+      harness.files.set(KNOWN, JSON.stringify({ "nas.local:22": keys.storedFingerprint(key) }));
+      const refused = await connect("nas");
+      assert.equal(refused.state, "error", "a host the file does not name is refused too");
+      assert.match(refused.error, /RevokedHostKeys \/home\/me\/\.ssh\/revoked .*line 2: a certificate whose signature is wrong.*ssh would not connect/);
+      confirm = true;
+
+      // Certificates signed by each kind of CA still read, and revoke.
+      const host = make("host", "ed25519");
+      const hostKey = Buffer.from(blobOf(`${host}.pub`)[1], "base64");
+      const cas = [["ed25519 CA", ca], ["ECDSA CA", make("ca_ec", "ecdsa", "521")]];
+      const rsaCa = make("ca_rsa", "rsa", "2048");
+      for (const alg of ["ssh-rsa", "rsa-sha2-256", "rsa-sha2-512"]) cas.push([`RSA CA, ${alg}`, rsaCa, alg]);
+      try {
+        cas.push(["DSA CA", make("ca_dsa", "dsa")]);
+      } catch {
+        // ssh-keygen without DSA support.
+      }
+      for (const [name, caFile, alg] of cas) {
+        const [type, b] = sign(caFile, `${host}.pub`, alg);
+        const text = Buffer.from(`${type} ${b}\n`);
+        assert.equal(keys.revokedByFile(text, hostKey), true, `${name}: revokes the key it certifies`);
+        assert.equal(keys.revokedByFile(text, key), false, `${name}: and no other`);
+      }
+    } else {
+      console.log("  skip malformed key list lines (no ssh-keygen)");
+    }
+    ok("a key list line ssh cannot read refuses every host; certificates from any CA type still read");
   }
 
   {
