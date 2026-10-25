@@ -9,6 +9,11 @@ import { shQuote } from "./connections";
 // screen without a second start. The pane ends only when its shell exits,
 // the agent's session is gone, the user disconnects the host, or Studio
 // kills it.
+//
+// Reconnecting on its own is quiet: it never asks for a password or
+// passphrase and never wakes a Codara box the user stopped (a paid wake).
+// When the host needs the user, or the retries run out, the pane waits for a
+// key, and that round may ask.
 
 export interface RemoteShellChannel {
   write(data: string): unknown;
@@ -23,8 +28,9 @@ export interface RemoteShellChannel {
 }
 
 export interface RemoteShellConnection {
-  shell(opts: { cols: number; rows: number }): Promise<RemoteShellChannel>;
-  exec(command: string, opts?: { timeoutMs?: number }): Promise<{ code: number | null }>;
+  /** `quiet` connects only with what needs no prompt and no box wake. */
+  shell(opts: { cols: number; rows: number; quiet?: boolean }): Promise<RemoteShellChannel>;
+  exec(command: string, opts?: { timeoutMs?: number; quiet?: boolean }): Promise<{ code: number | null }>;
   /** True once the user disconnected the host or Studio is quitting. */
   readonly isDisposed: boolean;
 }
@@ -52,12 +58,36 @@ export interface RemotePtyInput {
   /** Read once, at kill: whether the user closed the pane, so its agent ends too. */
   endAgentOnKill: () => boolean;
   log?: (message: string) => void;
+  /**
+   * The shell's own exit status for a plain shell pane. Off, the pane
+   * reports 0, as remote panes did before Machines.
+   */
+  reportExitStatus?: boolean;
   /** Waits between reconnect attempts; the last one repeats. */
   retryDelaysMs?: readonly number[];
+  /** Attempts per round before the pane waits for a key. */
+  maxAttempts?: number;
+  /** The channel closed before the handle existed, with this exit status. */
+  closedBeforeBind?: { exitCode: number | null } | null;
   sleep?: (ms: number) => Promise<void>;
 }
 
 const RETRY_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 15_000, 30_000];
+// About two minutes with the delays above.
+const MAX_ATTEMPTS = 8;
+
+// Kill-session commands still running, by pane: a pane opened again with the
+// same id waits for them (remoteAgentKillSettled) so the kill cannot land on
+// its new agent.
+const pendingAgentKills = new Map<string, Promise<void>>();
+
+export function remoteAgentKillSettled(paneId: string): Promise<void> {
+  return pendingAgentKills.get(paneId) ?? Promise.resolve();
+}
+
+function needsUser(err: unknown): boolean {
+  return (err as { needsUser?: unknown } | null)?.needsUser === true;
+}
 
 function dim(text: string): string {
   return `\r\n\x1b[2m[${text}]\x1b[0m\r\n`;
@@ -66,6 +96,7 @@ function dim(text: string): string {
 export function createRemotePtyHandle(input: RemotePtyInput): RemotePtyHandle {
   const { conn, paneId, hostLabel } = input;
   const delays = input.retryDelaysMs?.length ? input.retryDelaysMs : RETRY_DELAYS_MS;
+  const maxAttempts = Math.max(1, input.maxAttempts ?? MAX_ATTEMPTS);
   const sleep = input.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const dataListeners = new Set<(data: string) => void>();
   const exitListeners = new Set<(e: { exitCode: number; signal?: number }) => void>();
@@ -74,6 +105,7 @@ export function createRemotePtyHandle(input: RemotePtyInput): RemotePtyHandle {
   let rows = input.rows;
   let killed = false;
   let ended = false;
+  let waitingForKey = false;
 
   const emit = (data: string | Buffer) => {
     for (const listener of dataListeners) listener(data as unknown as string);
@@ -86,8 +118,8 @@ export function createRemotePtyHandle(input: RemotePtyInput): RemotePtyHandle {
     for (const listener of exitListeners) listener({ exitCode });
   };
 
-  const bind = (ch: RemoteShellChannel) => {
-    let exitCode: number | null = null;
+  const bind = (ch: RemoteShellChannel, early?: { exitCode: number | null } | null) => {
+    let exitCode: number | null = early?.exitCode ?? null;
     ch.on("data", emit);
     ch.stderr.on("data", emit);
     // ssh2 reports the remote shell's exit status before the close; a
@@ -95,34 +127,51 @@ export function createRemotePtyHandle(input: RemotePtyInput): RemotePtyHandle {
     ch.on("exit", (code: unknown) => {
       exitCode = typeof code === "number" ? code : 0;
     });
-    ch.on("close", () => {
+    const onClose = () => {
       if (ch !== channel || ended) return;
       if (killed || exitCode !== null || !input.agentPane || conn.isDisposed) {
-        finish(exitCode ?? 0);
+        finish(input.agentPane || input.reportExitStatus !== false ? (exitCode ?? 0) : 0);
         return;
       }
       channel = null;
-      void reconnect();
-    });
+      void reconnect(false);
+    };
+    ch.on("close", onClose);
+    // After the caller has subscribed to the handle.
+    if (early) queueMicrotask(onClose);
   };
 
-  const reconnect = async () => {
-    emit(dim(`lost the connection to ${hostLabel}; the agent keeps running there. Reconnecting…`));
+  const waitForKey = (why: string) => {
+    waitingForKey = true;
+    emit(dim(`${why}; the agent keeps running there. Press any key to reconnect`));
+  };
+
+  const reconnect = async (byUser: boolean) => {
+    waitingForKey = false;
+    emit(
+      dim(
+        byUser
+          ? `reconnecting to ${hostLabel}…`
+          : `lost the connection to ${hostLabel}; the agent keeps running there. Reconnecting…`,
+      ),
+    );
     for (let attempt = 0; !ended && !killed; attempt += 1) {
       if (conn.isDisposed) {
         emit(dim(`disconnected from ${hostLabel}; the agent keeps running there`));
         finish(0);
         return;
       }
+      // Only the first attempt of a round the user started may ask.
+      const quiet = !(byUser && attempt === 0);
       try {
-        const probe = await conn.exec(buildRemoteAgentProbe(paneId), { timeoutMs: 15_000 });
+        const probe = await conn.exec(buildRemoteAgentProbe(paneId), { timeoutMs: 15_000, quiet });
         if (ended || killed) return;
         if (probe.code !== 0) {
           emit(dim(`the agent on ${hostLabel} has ended`));
           finish(0);
           return;
         }
-        const next = await conn.shell({ cols, rows });
+        const next = await conn.shell({ cols, rows, quiet });
         if (ended || killed) {
           next.close();
           return;
@@ -133,19 +182,33 @@ export function createRemotePtyHandle(input: RemotePtyInput): RemotePtyHandle {
         input.log?.(`reattached pane ${paneId} on ${hostLabel} after ${attempt + 1} attempt(s)`);
         return;
       } catch (err) {
+        if (ended || killed) return;
         input.log?.(`reconnect of pane ${paneId} to ${hostLabel} failed: ${String(err)}`);
+        if (needsUser(err)) {
+          waitForKey(`${hostLabel} cannot reconnect without you`);
+          return;
+        }
+      }
+      if (attempt + 1 >= maxAttempts) {
+        waitForKey(`could not reconnect to ${hostLabel}`);
+        return;
       }
       await sleep(delays[Math.min(attempt, delays.length - 1)]);
     }
   };
 
-  bind(input.channel);
+  bind(input.channel, input.closedBeforeBind);
 
   return {
     pid: 0,
     write(data) {
+      if (!channel) {
+        // The key that asks for a reconnect is not typed into the agent.
+        if (waitingForKey && !ended && !killed) void reconnect(true);
+        return;
+      }
       try {
-        channel?.write(data);
+        channel.write(data);
       } catch {
         /* channel already closed */
       }
@@ -163,9 +226,19 @@ export function createRemotePtyHandle(input: RemotePtyInput): RemotePtyHandle {
     kill() {
       killed = true;
       if (input.endAgentOnKill() && input.agentPane && !conn.isDisposed) {
-        void conn.exec(buildRemoteAgentKill(paneId), { timeoutMs: 10_000 }).catch((err: unknown) => {
-          input.log?.(`could not end the agent session of ${paneId} on ${hostLabel}: ${String(err)}`);
-        });
+        // Quiet: a close never asks for a password or wakes a box to end the agent.
+        const kill = conn
+          .exec(buildRemoteAgentKill(paneId), { timeoutMs: 10_000, quiet: true })
+          .then(
+            () => undefined,
+            (err: unknown) => {
+              input.log?.(`could not end the agent session of ${paneId} on ${hostLabel}: ${String(err)}`);
+            },
+          )
+          .finally(() => {
+            if (pendingAgentKills.get(paneId) === kill) pendingAgentKills.delete(paneId);
+          });
+        pendingAgentKills.set(paneId, kill);
       }
       const current = channel;
       if (!current) {

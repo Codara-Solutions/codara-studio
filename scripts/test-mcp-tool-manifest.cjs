@@ -87,7 +87,8 @@ assert.ok(budgeted <= TOOL_MODULES_BUDGET, `tool module budgets add up to ${budg
 
 // A module dropped into a copy of the folder is picked up with no other edit,
 // and the registry rejects the mistakes that would break a roster.
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "codara-tool-modules-"));
+// require.cache is keyed by real paths, and os.tmpdir() is a symlink on macOS.
+const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "codara-tool-modules-")));
 const freshRegistry = () => {
   for (const key of Object.keys(require.cache)) if (key.startsWith(scratch)) delete require.cache[key];
   return require(path.join(scratch, "index.cjs")).buildRegistry(scratch);

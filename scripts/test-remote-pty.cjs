@@ -15,6 +15,14 @@
 //   - closing the pane ends its agent's session only when the user closed
 //     it on purpose, never on a disconnected host, and a close during a
 //     reconnect stops the loop and ends the pane exactly once
+//   - reconnecting on its own never asks for a password or passphrase and
+//     never wakes a stopped Codara box (every call is quiet); when the host
+//     needs the user, or the retries run out, the loop stops and the pane
+//     waits for a key, and only that key may prompt
+//   - a plain shell reports exit 0 unless asked for the real status (the
+//     Machines setting off keeps the old behaviour)
+//   - a channel that closed before the handle existed (during the session
+//     probe) still ends the pane, or reconnects an agent pane
 //
 // The real sshd and tmux are covered by tests/e2e/remote-agent.spec.ts.
 //
@@ -102,9 +110,12 @@ class FakeConn {
     this.execs = [];
     this.shells = [];
     this.probe = [];
+    this.execOpts = [];
+    this.shellOpts = [];
   }
-  async exec(command) {
+  async exec(command, opts = {}) {
     this.execs.push(command);
+    this.execOpts.push(opts);
     if (command.includes("has-session")) {
       const next = this.probe.length ? this.probe.shift() : 0;
       if (next instanceof Error) throw next;
@@ -112,7 +123,8 @@ class FakeConn {
     }
     return { code: 0 };
   }
-  async shell() {
+  async shell(opts = {}) {
+    this.shellOpts.push(opts);
     const ch = new FakeChannel(`shell-${this.shells.length + 2}`);
     this.shells.push(ch);
     return ch;
@@ -144,6 +156,9 @@ function harness(lib, overrides = {}) {
     agentPane: overrides.agentPane ?? true,
     endAgentOnKill: () => endAgent,
     retryDelaysMs: [10, 20, 30],
+    ...(overrides.maxAttempts ? { maxAttempts: overrides.maxAttempts } : {}),
+    ...(overrides.closedBeforeBind ? { closedBeforeBind: overrides.closedBeforeBind } : {}),
+    ...(overrides.reportExitStatus !== undefined ? { reportExitStatus: overrides.reportExitStatus } : {}),
     sleep: async (ms) => {
       sleeps.push(ms);
       if (overrides.sleep) await overrides.sleep(ms);
@@ -271,6 +286,70 @@ function harness(lib, overrides = {}) {
     assert.equal(h.conn.shells.length, 0, "the loop stops: no channel opens after the close");
     assert.equal(h.exits.length, 1, "the pane ends exactly once");
     ok("a close during a reconnect stops the loop and ends the pane once");
+  }
+
+  {
+    const h = harness(lib);
+    h.first.drop();
+    await until("a new channel", () => h.conn.shells.length === 1);
+    assert.ok(h.conn.execOpts.every((o) => o.quiet === true), "the probe never prompts or wakes");
+    assert.ok(h.conn.shellOpts.every((o) => o.quiet === true), "nor does the new channel");
+    ok("reconnecting on its own is quiet: no password prompt, no box wake");
+  }
+
+  {
+    const needsUser = Object.assign(new Error("needs a password"), { needsUser: true });
+    const h = harness(lib);
+    h.conn.probe = [needsUser, 0];
+    h.first.drop();
+    await until("the wait for a key", () => /press any key to reconnect/i.test(h.data.join("")));
+    for (let i = 0; i < 20; i += 1) await tick();
+    assert.equal(h.conn.execs.length, 1, "a host that needs the user is not retried in the background");
+    assert.deepEqual(h.sleeps, []);
+    assert.deepEqual(h.exits, [], "the pane stays open");
+    h.handle.write("x");
+    await until("a new channel", () => h.conn.shells.length === 1);
+    assert.equal(h.conn.execOpts[1].quiet, false, "the user's key may prompt");
+    assert.equal(h.conn.shellOpts[0].quiet, false);
+    const next = h.conn.shells[0];
+    await until("the attach line", () => next.written.length === 1);
+    assert.match(next.written[0], /attach-session/);
+    assert.equal(next.written.length, 1, "the key that asked for the reconnect is not typed into the agent");
+    ok("a host that needs a password waits for a key, and only that key may prompt");
+  }
+
+  {
+    const h = harness(lib, { maxAttempts: 4 });
+    h.conn.probe = Array.from({ length: 20 }, () => new Error("ETIMEDOUT"));
+    h.first.drop();
+    await until("the wait for a key", () => /press any key to reconnect/i.test(h.data.join("")));
+    for (let i = 0; i < 20; i += 1) await tick();
+    assert.equal(h.conn.execs.length, 4, "retries stop at the cap");
+    assert.deepEqual(h.exits, []);
+    h.conn.probe = [0];
+    h.handle.write("\r");
+    await until("a new channel", () => h.conn.shells.length === 1);
+    ok("retries are capped, then a key starts a new round");
+  }
+
+  {
+    const h = harness(lib, { agentPane: false, reportExitStatus: false });
+    h.first.exitShell(130);
+    assert.deepEqual(h.exits, [{ exitCode: 0 }]);
+    const h2 = harness(lib, { agentPane: false });
+    h2.first.exitShell(130);
+    assert.deepEqual(h2.exits, [{ exitCode: 130 }]);
+    ok("a plain shell reports exit 0 unless asked for its real status");
+  }
+
+  {
+    const h = harness(lib, { agentPane: false, closedBeforeBind: { exitCode: 2 } });
+    await until("the exit", () => h.exits.length === 1);
+    assert.deepEqual(h.exits, [{ exitCode: 2 }]);
+    const h2 = harness(lib, { closedBeforeBind: { exitCode: null } });
+    await until("a new channel", () => h2.conn.shells.length === 1);
+    assert.deepEqual(h2.exits, []);
+    ok("a close before the handle existed is not lost");
   }
 
   console.log(`\n${passed} passed`);

@@ -20,6 +20,14 @@
 //   - without tmux the agent still starts, with a note that it stops on
 //     disconnect
 //   - the probe, attach and kill commands address the same session
+//   - tmux's prefix key is off, so Ctrl+B reaches the agent and no C-b
+//     binding detaches or opens a second window (checked against the real
+//     tmux too when this computer has one, on a throwaway socket folder)
+//   - tmux older than 2.1, which lacks options the launch sets, is treated
+//     as no tmux: the agent starts directly, with a note
+//   - the folder never appears inside the quoted script, so a folder with a
+//     quote survives fish, whose single quotes treat \' as an escape; a
+//     machine name with % is printed as it is
 //
 // The real tmux and sshd are covered by tests/e2e/remote-agent.spec.ts.
 //
@@ -75,7 +83,7 @@ async function load() {
 // nothing else on PATH, so a real tmux
 // or claude on this computer can never answer. Each fake appends its argv
 // (one JSON line) to calls.jsonl.
-function machine(name, { tmux = true, claude = true, sessionAlive = false } = {}) {
+function machine(name, { tmux = true, claude = true, sessionAlive = false, tmuxVersion = "tmux 3.4" } = {}) {
   const dir = path.join(TMP, name);
   const bin = path.join(dir, "bin");
   fs.mkdirSync(bin, { recursive: true });
@@ -91,7 +99,13 @@ function machine(name, { tmux = true, claude = true, sessionAlive = false } = {}
     fs.chmodSync(file, 0o755);
   };
   if (tmux) {
-    fake("tmux", `case " $* " in *" has-session "*) exit ${sessionAlive ? 0 : 1};; esac\nexit 0`);
+    // Like tmux before 2.1, an old version refuses the mouse option, and one
+    // failed command cancels the rest of a \; chain.
+    const old = /^tmux (?:[01]\.|2\.0)/.test(tmuxVersion);
+    fake(
+      "tmux",
+      `case " $* " in *" -V "*) echo '${tmuxVersion}'; exit 0;; *" has-session "*) exit ${sessionAlive ? 0 : 1};; ${old ? '*" mouse "*) echo "invalid option: mouse" >&2; exit 1;;' : ""} esac\nexit 0`,
+    );
   }
   if (claude) fake("claude", "exit 0");
   return {
@@ -108,6 +122,15 @@ function machine(name, { tmux = true, claude = true, sessionAlive = false } = {}
       return { out, calls: recorded };
     },
   };
+}
+
+function realTmux() {
+  try {
+    execFileSync("tmux", ["-V"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 (async () => {
@@ -137,15 +160,16 @@ function machine(name, { tmux = true, claude = true, sessionAlive = false } = {}
 
   const project = path.join(TMP, "my project's dir");
   fs.mkdirSync(project, { recursive: true });
-  const launchInput = { cwd: project, paneId: "pane-7", hostLabel: "homeserver", cols: 120, rows: 40, startup: CLAUDE, runtime: "claude" };
+  const launchInput = { paneId: "pane-7", hostLabel: "homeserver", cols: 120, rows: 40, startup: CLAUDE, runtime: "claude" };
   const line = lib.buildRemoteAgentLaunch(launchInput);
   assert.match(line, /^sh -c '/);
   assert.equal(line.includes("\n"), false, "one line, so no shell shows continuation prompts");
+  assert.equal(line.includes("my project"), false, "the folder comes from the pane's cd, never from inside the quoted script");
 
   {
     const m = machine("fresh");
-    const { calls } = m.run(line);
-    const tmux = calls.filter((c) => c.program === "tmux");
+    const { calls } = m.run(line, project);
+    const tmux = calls.filter((c) => c.program === "tmux" && c.args[0] !== "-V");
     assert.equal(tmux.length, 2, JSON.stringify(calls));
     assert.ok(tmux[0].args.includes("has-session"), "it looks for a live session first");
     const args = tmux[1].args;
@@ -156,14 +180,43 @@ function machine(name, { tmux = true, claude = true, sessionAlive = false } = {}
     assert.ok(args.includes("status") && args.includes("escape-time"), "the private server's options come first");
     assert.ok(args.indexOf("history-limit") < at, "history-limit is set before the session's window exists");
     assert.ok(args.includes("*:RGB:smcup@:rmcup@"));
+    const option = (name) => {
+      const i = args.indexOf(name);
+      return i > 0 && args[i - 2] === "set-option" ? args[i + 1] : undefined;
+    };
+    assert.equal(option("prefix"), "None", "C-b must reach the agent, not tmux");
+    assert.equal(option("prefix2"), "None");
     assert.equal(calls.some((c) => c.program === "claude"), false, "tmux starts the agent, not the shell");
     ok("a fresh agent starts in its own session of the private tmux server, in a folder with spaces and quotes");
+
+    if (realTmux()) {
+      // The same arguments against the real tmux, detached, on a socket in a
+      // throwaway folder so no tmux server of this computer is touched.
+      const sockets = path.join(TMP, "tmux-sockets");
+      fs.mkdirSync(sockets, { recursive: true, mode: 0o700 });
+      const env = { ...process.env, TMUX_TMPDIR: sockets, TMUX: "" };
+      const real = args.slice(0, at).concat(["new-session", "-d", "-s", "codara-pane-7", "-x", "120", "-y", "40", "-c", project, "sleep 30"]);
+      try {
+        execFileSync("tmux", real, { env, stdio: "pipe" });
+        const show = (o) => execFileSync("tmux", ["-L", "codara", "show-options", "-g", o], { env, encoding: "utf8" }).trim();
+        assert.equal(show("prefix"), "prefix None");
+        assert.equal(show("prefix2"), "prefix2 None");
+        assert.equal(show("status"), "status off");
+      } finally {
+        try {
+          execFileSync("tmux", ["-L", "codara", "kill-server"], { env, stdio: "ignore" });
+        } catch {
+          /* already gone */
+        }
+      }
+      ok("the real tmux accepts the options: no prefix key, no status bar");
+    }
   }
 
   {
     const m = machine("alive", { sessionAlive: true });
     const { calls } = m.run(line);
-    const tmux = calls.filter((c) => c.program === "tmux");
+    const tmux = calls.filter((c) => c.program === "tmux" && c.args[0] !== "-V");
     assert.equal(tmux.length, 2, JSON.stringify(calls));
     assert.ok(tmux[0].args.includes("has-session"));
     assert.deepEqual(tmux[0].args.slice(-2), ["-t", "=codara-pane-7"]);
@@ -194,6 +247,30 @@ function machine(name, { tmux = true, claude = true, sessionAlive = false } = {}
   }
 
   {
+    const m = machine("old-tmux", { tmuxVersion: "tmux 1.8" });
+    const { out, calls } = m.run(line, project);
+    assert.match(out, /tmux on homeserver is too old \(1\.8\), so this agent stops when Studio disconnects/);
+    assert.equal(calls.some((c) => c.args.includes("new-session")), false);
+    const claude = calls.filter((c) => c.program === "claude");
+    assert.equal(claude.length, 1, "the agent still starts");
+    assert.equal(claude[0].pwd, project);
+    const m2 = machine("tmux-2-0", { tmuxVersion: "tmux 2.0" });
+    assert.equal(m2.run(line, project).calls.filter((c) => c.program === "claude").length, 1);
+    for (const version of ["tmux 2.1", "tmux 3.3a", "tmux next-3.6", "tmux master", "tmux openbsd-7.5"]) {
+      const m3 = machine(`tmux-${version.replace(/\W/g, "-")}`, { tmuxVersion: version });
+      assert.ok(m3.run(line, project).calls.some((c) => c.args.includes("new-session")), version);
+    }
+    ok("tmux older than 2.1 counts as no tmux: the agent starts directly, with a note");
+  }
+
+  {
+    const m = machine("percent", { claude: false });
+    const { out } = m.run(lib.buildRemoteAgentLaunch({ ...launchInput, hostLabel: "box%s-100%" }));
+    assert.match(out, /Claude Code is not installed on box%s-100%,/);
+    ok("a machine name with % is printed as it is");
+  }
+
+  {
     const m = machine("pi");
     const { calls } = m.run(lib.buildRemoteAgentLaunch({ ...launchInput, startup: "pi", runtime: "pi" }));
     // The fake machine has no `pi`.
@@ -221,6 +298,14 @@ function machine(name, { tmux = true, claude = true, sessionAlive = false } = {}
     const kill = machine("kill");
     const { calls: k } = kill.run(lib.buildRemoteAgentKill("pane-7"));
     assert.deepEqual(k[0].args, ["-L", "codara", "-f", "/dev/null", "kill-session", "-t", "=codara-pane-7"]);
+    // A plain sh, not a login shell: a profile that runs `exec fish` or
+    // `exec tmux` would swallow the command. The usual install folders are
+    // searched instead of the profile's PATH.
+    assert.equal(/sh -lc/.test(lib.buildRemoteAgentProbe("p") + lib.buildRemoteAgentKill("p")), false);
+    const local = machine("probe-local-bin", { sessionAlive: true });
+    fs.mkdirSync(path.join(local.dir, ".local", "bin"), { recursive: true });
+    fs.renameSync(path.join(local.dir, "bin", "tmux"), path.join(local.dir, ".local", "bin", "tmux"));
+    assert.equal(local.run(`${lib.buildRemoteAgentProbe("p")} && echo yes || echo no`).out.trim(), "yes", "tmux in ~/.local/bin");
     const noTmux = machine("kill-no-tmux", { tmux: false });
     assert.doesNotThrow(() => noTmux.run(lib.buildRemoteAgentKill("pane-7")), "killing is best effort");
     ok("probe, attach and kill address the same exact session");

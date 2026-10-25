@@ -23,15 +23,31 @@ const TMUX = `tmux -L ${REMOTE_TMUX_SOCKET} -f /dev/null`;
 // smcup@/rmcup@ keep tmux in the normal screen, so what scrolls off the top
 // lands in the pane's own scrollback and the wheel scrolls it, as it does
 // for an agent running without tmux. escape-time 0 keeps Esc instant in the
-// agents' TUIs. Server and global options, so they are set on every launch
-// and apply to sessions created after them.
+// agents' TUIs. With no prefix key, C-b reaches the agent (Claude Code's
+// background-task key) and no tmux binding can detach the pane or open a
+// second window, so the session still ends when the agent exits. Server and
+// global options, so they are set on every launch and apply to sessions
+// created after them.
 const TMUX_OPTIONS = [
+  "set-option -g prefix None",
+  "set-option -g prefix2 None",
   "set-option -s escape-time 0",
   "set-option -s terminal-overrides '*:RGB:smcup@:rmcup@'",
   "set-option -g status off",
   "set-option -g history-limit 50000",
   "set-option -g mouse off",
 ].join(" \\; ");
+
+// tmux before 2.1 lacks the mouse option, and one failed set-option cancels
+// the whole \; chain, new-session included: such a tmux counts as none. Sets
+// t when tmux is usable; `tmux -V` names releases "tmux 3.4", "tmux 3.3a",
+// "tmux next-3.6", "tmux master" or "tmux openbsd-7.5".
+const OLD_TMUX_CASE = `case "$v" in "tmux "[01].*|"tmux 2.0"*) ;; *) t=1 ;; esac;`;
+
+/** A machine name printed with printf, where % starts a conversion. */
+function printfSafe(text: string): string {
+  return text.replace(/%/g, "%%");
+}
 
 const RUNTIME_LABEL: Record<RemoteAgentRuntime, string> = {
   claude: "Claude Code",
@@ -66,8 +82,6 @@ function sessionTarget(paneId: string): string {
 }
 
 export interface RemoteAgentLaunchInput {
-  /** Absolute POSIX folder on the machine. */
-  cwd: string;
   paneId: string;
   /** The machine's name as the user knows it, for messages. */
   hostLabel: string;
@@ -79,8 +93,9 @@ export interface RemoteAgentLaunchInput {
 }
 
 /**
- * The line typed into the machine's login shell to start an agent. It runs
- * under `sh -c` whatever the login shell is (bash, zsh, fish), and:
+ * The line typed into the machine's login shell, after a `cd` into the
+ * workspace folder, to start an agent there. It runs under `sh -c` whatever
+ * the login shell is (bash, zsh, fish), and:
  *
  * - attaches to the pane's session when one is alive, ignoring the startup
  *   command, so a restored pane never starts a second agent;
@@ -88,7 +103,7 @@ export interface RemoteAgentLaunchInput {
  *   which is where a user's `~/.local/bin` install is found), and says so
  *   in the pane when it is not;
  * - starts the agent in a new session, or without tmux, with a note, when
- *   tmux is missing.
+ *   tmux is missing or older than 2.1.
  *
  * When the agent exits its session ends, the attach returns, and the pane is
  * back at the shell prompt, as a local agent pane is.
@@ -99,32 +114,48 @@ export function buildRemoteAgentLaunch(input: RemoteAgentLaunchInput): string {
   const label = RUNTIME_LABEL[input.runtime];
   const cols = Math.max(20, input.cols | 0);
   const rows = Math.max(5, input.rows | 0);
+  const host = printfSafe(input.hostLabel);
   const missing =
-    `\\n${label} is not installed on ${input.hostLabel}, or it is not on the PATH of its login shell.\\n` +
+    `\\n${label} is not installed on ${host}, or it is not on the PATH of its login shell.\\n` +
     `Install it on that machine and sign in there, then open a new ${label} tab.\\n\\n`;
   const noTmux =
-    `tmux is not installed on ${input.hostLabel}, so this agent stops when Studio disconnects.\\n` +
+    `tmux is not installed on ${host}, so this agent stops when Studio disconnects.\\n` +
     `Install tmux there to keep agents running.\\n\\n`;
+  // %s takes the version, read on the machine.
+  const oldTmux =
+    `tmux on ${host} is too old (%s), so this agent stops when Studio disconnects.\\n` +
+    `Install tmux 2.1 or newer there to keep agents running.\\n\\n`;
+  const session = sessionTarget(input.paneId);
   const script = [
-    `if command -v tmux >/dev/null 2>&1 && ${TMUX} has-session -t ${sessionTarget(input.paneId)} 2>/dev/null; then ` +
-      `exec ${TMUX} ${TMUX_OPTIONS} \\; attach-session -t ${sessionTarget(input.paneId)}; fi`,
+    `t=; v=; if command -v tmux >/dev/null 2>&1; then v=$(tmux -V 2>/dev/null); ${OLD_TMUX_CASE} fi`,
+    `if [ -n "$t" ] && ${TMUX} has-session -t ${session} 2>/dev/null; then ` +
+      `exec ${TMUX} ${TMUX_OPTIONS} \\; attach-session -t ${session}; fi`,
     `if ! command -v ${shQuote(binary)} >/dev/null 2>&1; then printf ${shQuote(missing)}; exit 0; fi`,
-    // -A attaches instead of failing if the session appeared in between.
-    `if command -v tmux >/dev/null 2>&1; then exec ${TMUX} ${TMUX_OPTIONS} \\; new-session -A ` +
-      `-s ${shQuote(remoteAgentSessionName(input.paneId))} -x ${cols} -y ${rows} -c ${shQuote(input.cwd)} ${shQuote(startup)}; fi`,
-    `printf ${shQuote(noTmux)}`,
+    // -A attaches instead of failing if the session appeared in between. The
+    // folder is the one the pane's setup line cd'd into: inside this quoted
+    // script a quote in it would break under fish.
+    `if [ -n "$t" ]; then exec ${TMUX} ${TMUX_OPTIONS} \\; new-session -A ` +
+      `-s ${shQuote(remoteAgentSessionName(input.paneId))} -x ${cols} -y ${rows} -c "$PWD" ${shQuote(startup)}; fi`,
+    `if [ -n "$v" ]; then printf ${shQuote(oldTmux)} "\${v#tmux }"; else printf ${shQuote(noTmux)}; fi`,
     `exec ${startup}`,
   ].join("; ");
   return `sh -c ${shQuote(script)}`;
 }
 
-/**
- * Run over an exec channel: exits 0 when the pane has a live agent session.
- * A login shell, because tmux may live in a PATH entry only the profile adds
- * (Homebrew on a Mac).
- */
+// Exec channels run a plain sh, never a login shell: a profile that runs
+// `exec fish` or `exec tmux` would swallow the command. tmux may live where
+// only the profile's PATH looks (Homebrew, Linuxbrew, Nix, ~/.local/bin),
+// so those folders are searched too.
+const EXTRA_PATH =
+  "/usr/local/bin:/opt/homebrew/bin:/home/linuxbrew/.linuxbrew/bin:/snap/bin:/run/current-system/sw/bin:$HOME/.nix-profile/bin:$HOME/.local/bin:$HOME/bin";
+
+function execScript(command: string): string {
+  return `sh -c ${shQuote(`PATH="$PATH:${EXTRA_PATH}"; export PATH; ${command}`)}`;
+}
+
+/** Run over an exec channel: exits 0 when the pane has a live agent session. */
 export function buildRemoteAgentProbe(paneId: string): string {
-  return `sh -lc ${shQuote(`${TMUX} has-session -t ${sessionTarget(paneId)}`)} >/dev/null 2>&1`;
+  return `${execScript(`${TMUX} has-session -t ${sessionTarget(paneId)}`)} >/dev/null 2>&1`;
 }
 
 /** Typed into a plain shell pane whose agent session is alive (a restored pane). */
@@ -134,7 +165,7 @@ export function buildRemoteAgentAttach(paneId: string): string {
 
 /** Ends a pane's agent session: the user closed the pane on purpose. */
 export function buildRemoteAgentKill(paneId: string): string {
-  return `sh -lc ${shQuote(`${TMUX} kill-session -t ${sessionTarget(paneId)}`)} >/dev/null 2>&1; true`;
+  return `${execScript(`${TMUX} kill-session -t ${sessionTarget(paneId)}`)} >/dev/null 2>&1; true`;
 }
 
 /**
@@ -143,5 +174,5 @@ export function buildRemoteAgentKill(paneId: string): string {
  */
 export function buildRemoteAgentSessionKill(sessionName: string): string | null {
   if (!/^codara-[A-Za-z0-9_-]{1,64}$/.test(sessionName)) return null;
-  return `sh -lc ${shQuote(`${TMUX} kill-session -t ${shQuote(`=${sessionName}`)}`)} >/dev/null 2>&1; true`;
+  return `${execScript(`${TMUX} kill-session -t ${shQuote(`=${sessionName}`)}`)} >/dev/null 2>&1; true`;
 }

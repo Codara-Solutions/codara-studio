@@ -33,6 +33,8 @@ export async function resolvePreviewGuest(
     runId,
     workspaceId: params.workspaceId,
     callerPaneId: params.callerPaneId,
+    // The renderer shows who drives the tab and refuses a driver the user stopped.
+    driver: params.driver,
     focus,
   })) as PreviewGuestInfo;
   const wcId = info?.webContentsId;

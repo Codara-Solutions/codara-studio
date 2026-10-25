@@ -435,22 +435,38 @@ keeps working when Studio quits or the network drops.
   shell's PATH, and otherwise starts the agent with `tmux new-session -A` in
   the workspace folder. tmux runs as a private server (`tmux -L codara -f
   /dev/null`) so the user's own tmux config and sessions are never touched,
-  with no status bar and the alternate screen off so the pane's scrollback
-  and agent detection work as on a plain shell. Without tmux the agent starts
-  directly, with a note that it stops when Studio disconnects.
-- **Restore.** A restored pane that has no startup command (the agent was
-  already running) probes the machine for its session and attaches when it
-  is alive, so the agent is not started a second time.
+  with no status bar, no prefix key (Ctrl+B reaches the agent and nothing
+  can detach the pane) and the alternate screen off so the pane's scrollback
+  and agent detection work as on a plain shell. Without tmux, or with tmux
+  older than 2.1, the agent starts directly, with a note that it stops when
+  Studio disconnects.
+- **Restore.** Every other remote pane, whatever the setting, probes the
+  machine for its session and attaches when it is alive, so an agent is
+  never started a second time beside the one in tmux (a restored
+  `claude --resume` with the setting turned off since included), and its
+  close still ends it. The setting only decides whether new agents start in
+  tmux. Probes and kills run under a plain `sh -c` with the usual install
+  folders added to PATH, never a login shell, so a profile that runs
+  `exec fish` cannot swallow them.
 - **Dropped connection.** `remote-pty.ts` keeps an agent pane open when its
   channel closes without an exit status, prints a dim note, reconnects with
-  backoff (1 s up to 30 s, repeating), checks the session is still alive and
-  attaches on a new channel. It stops when the session is gone or the user
+  backoff (1 s up to 30 s, about two minutes in all), checks the session is
+  still alive and attaches on a new channel. These attempts are quiet
+  (`ensure({ quiet: true })` in `connections.ts`): they never ask for a
+  password or passphrase and never dial a Codara box, whose wake costs money.
+  When the host needs the user or the attempts run out, the pane waits for a
+  key, and that round may ask. It stops when the session is gone or the user
   disconnects the host.
 - **Ending.** Closing the pane, Cora stopping it, or deleting its folder ends
   the tmux session (`markRemoteAgentEnd` in `pty-manager.ts`). Quitting
   Studio, closing a window, or a pane that comes back within the close's
   grace period leave it running. A pane closed while its host is
-  disconnected leaves the agent running on the machine.
+  disconnected, or that needs a password to reach, leaves the agent running
+  on the machine. A pane opened again with the same id waits for its old
+  session's kill first.
+- **Not covered.** Only agents Studio starts itself (a new agent pane or
+  tab) run in tmux. An agent typed by hand into a remote shell pane
+  runs directly in that shell and stops when the connection drops.
 
 #### Machines
 

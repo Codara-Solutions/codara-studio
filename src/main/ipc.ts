@@ -3944,10 +3944,11 @@ export function registerIpc(): void {
     listHosts,
     connectionStatus: getConnectionStatus,
     exec: async (hostId, command, timeoutMs) => {
-      // Never opens a connection: only hosts the snapshot saw connected get here.
+      // Never opens a connection: only hosts the snapshot saw connected get
+      // here, and one that drops in between is not reconnected (quiet).
       const conn = await getConnection(hostId);
       if (conn.state !== "connected") throw new Error(`${hostId} is not connected.`);
-      return conn.exec(command, { timeoutMs });
+      return conn.exec(command, { timeoutMs, quiet: true });
     },
     agentActivity: terminalAgentActivitySnapshot,
     sessions: pty.sessionCwds,

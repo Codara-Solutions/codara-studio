@@ -8,7 +8,7 @@ import {
 } from "react";
 import { isFreshPartition } from "@shared/browser-partition";
 import { holdPreviewCapturePaint, withPreviewCapturePaint } from "./capturePaint";
-import PreviewCursor, { type PreviewControl } from "./PreviewCursor";
+import AgentPresence from "./agent-presence/AgentPresence";
 import PageDialogOverlay from "./PageDialogOverlay";
 import AddressBar, { type AddressBarHandle } from "./AddressBar";
 import CaptureActions from "./capture/CaptureActions";
@@ -85,7 +85,6 @@ type WebviewElement = HTMLElement &
   };
 
 export interface BrowserPaneHandle {
-  showAgentCursor: (control: PreviewControl | null) => void;
   // `ignoreCache: true` calls Chromium's `reloadIgnoringCache` (hard reload).
   // Default is the normal cache-respecting reload — existing callers stay
   // unchanged.
@@ -157,14 +156,6 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   const [pointNotice, setPointNotice] = useState<string | null>(null);
   const [hostSize, setHostSize] = useState({ width: 0, height: 0 });
   const routing = useOptionalSelectionRouting();
-  const [control, setControl] = useState<PreviewControl | null>(null);
-  const cursorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const showAgentCursor = useCallback((next: PreviewControl | null) => {
-    if (cursorTimer.current) clearTimeout(cursorTimer.current);
-    setControl((previous) => next ? { ...previous, ...next } : null);
-    if (next) cursorTimer.current = setTimeout(() => setControl(null), next.runId ? 30_000 : 4000);
-  }, []);
-  useEffect(() => () => { if (cursorTimer.current) clearTimeout(cursorTimer.current); }, []);
 
   // `domReady` mirrored into a ref so the navigation effect below can gate
   // on it without taking it as a dependency (which would re-run that effect
@@ -575,7 +566,6 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   useImperativeHandle(
     ref,
     (): BrowserPaneHandle => ({
-      showAgentCursor,
       reload: (opts) => {
         try {
           const wv = getLiveWebview();
@@ -880,7 +870,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
             </div>
           </>
         ) : null}
-        <PreviewCursor control={control} />
+        <AgentPresence tabId={tabId} visible={visible} pageRef={webviewRef} />
         <PageDialogOverlay tabId={tabId} />
         {responsive && visible && url ? (
           <ResponsiveView

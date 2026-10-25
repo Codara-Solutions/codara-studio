@@ -1,4 +1,4 @@
-# Browser code mode (`codara_preview_code`)
+# Browser code mode (`codara_browser_use`)
 
 Agents drive Studio's browser by writing a few lines of JavaScript against a
 browser API in a persistent session, instead of one MCP call per click. Every
@@ -27,8 +27,8 @@ stays short, and bindings that survive between calls.
 
 ## The tool
 
-`codara_preview_code { code, timeoutMs?, reset? }`, socket method
-`preview.code`.
+`codara_browser_use { code, timeoutMs?, reset? }`, socket method
+`browser.use`.
 
 - `code` runs with top-level `await`. Top-level `const`, `let`, `var`,
   `function` and `class` declarations become session globals, so a later
@@ -42,8 +42,12 @@ stays short, and bindings that survive between calls.
 - `reset: true` drops the session first. `timeoutMs` defaults to 30 s, at
   most 110 s (the MCP client gives up after 120 s).
 
-The name keeps the `codara_preview_` prefix on purpose: Cora's browser
-family, the worker fences and the Capability Center all key on it.
+The tool was first called `codara_preview_code`; it was renamed before any
+release, with no alias. It is the one browser tool outside the
+`codara_preview_` prefix, so the places that key on that prefix name it as
+well: Cora's browser family (`tool-families.ts`), the worker roster and
+fences (`worker-policy.ts`), and the MCP server's caller scoping
+(`isBrowserRpc` in `server.js`).
 
 ## API, briefly
 
@@ -54,7 +58,8 @@ family, the worker fences and the Capability Center all key on it.
 `Tab`: `goto`, `reload`, `back`, `forward`, `url`, `title`, `snapshot`,
 `screenshot`, `evaluate(fn | string, arg)`, `find(description)`, `waitFor`,
 `waitForURL`, `waitForLoadState`, `waitForTimeout`, `keyboard.press/type`,
-`mouse.click/move/wheel`, `console`, `network`, `dialog`, `close`, and the
+`mouse.click/move/wheel`, `console`, `network` (list, get, waitForResponse,
+har, clear), `cdp` (send, on, waitForEvent), `dialog`, `close`, and the
 locator builders `locator(css)`, `getByRole`, `getByText`, `getByLabel`,
 `getByPlaceholder`, `getByTestId`, `getByAltText`, `getByTitle`, `ref(@ref)`.
 Shorthands `tab.click(sel)`, `tab.fill(sel, text)` and `tab.press(key)` take
@@ -76,7 +81,7 @@ enabled and not covered.
 ## How it runs
 
 ```
-agent ── MCP stdio ──▶ server.js ── agent socket ──▶ main: preview.code
+agent ── MCP stdio ──▶ server.js ── agent socket ──▶ main: browser.use
                                                         │
                                    session manager ─────┤ one kernel per agent session
                                                         ▼
@@ -105,8 +110,8 @@ agent ── MCP stdio ──▶ server.js ── agent socket ──▶ main: p
    The host functions the API needs (`__cbCall`, `__cbSleep`, `__cbLog`,
    `__cbDone`) are captured by the prelude and deleted from the global
    object before any snippet runs, and they exchange strings only.
-3. **Calls (main).** A guest call can only name a `preview.*` method, not
-   `preview.code` itself. Main adds the identity the outer call carried
+3. **Calls (main).** A guest call can only name a `preview.*` method, so
+   never `browser.use` itself. Main adds the identity the outer call carried
    (`runId`, `workspaceId`, `callerPaneId`, `callerPid`), overriding anything
    the snippet passed, and calls `runPreviewTool`, the function the socket
    uses for every browser tool. Workspace scoping, a run's own tabs,
@@ -117,7 +122,7 @@ agent ── MCP stdio ──▶ server.js ── agent socket ──▶ main: p
    browser call and sleep it left waiting without settling them, so an
    unawaited loop or timer stays suspended for good and never acts while a
    later snippet runs. Inside the kernel, an error is cut at 4,000
-   characters and a console line over 1 MB is dropped. `preview.code` itself is refused for an
+   characters and a console line over 1 MB is dropped. `browser.use` itself is refused for an
    imported pull-request run. Cora's worker fences treat it like
    `codara_preview_evaluate`, and also block it whenever a worker's
    `blockedTools` names any other browser tool, since a snippet reaches
@@ -139,6 +144,94 @@ agent ── MCP stdio ──▶ server.js ── agent socket ──▶ main: p
    not-covered checks.
 6. **Screenshots** stay in main: the guest gets `{ image: n }` and the
    pixels ride on the tool result as image blocks, at most six per call.
+
+## DevTools access
+
+`tab.network` and `tab.cdp` close the gap with a raw DevTools protocol
+client for network debugging, without handing an agent the whole browser.
+
+- `tab.network` wraps `codara_preview_network`: `list(filter)`, `get(id)`
+  (headers, timings, initiator, request and response bodies),
+  `waitForResponse(match)` (the next finished request after the call),
+  `har()` and `clear()`. `tab.network(options)` still answers like the tool.
+- `tab.cdp.send(method, params)` is one hidden `preview.cdp` call, and
+  `tab.cdp.on(events)` a subscription (`preview.cdp_events`) read with
+  `next({ filter, timeout })` or `take({ wait, max })` from a buffer of the
+  latest 500 events (an event over 64 KB is replaced by a note). Subscribe
+  before the action that fires the event. `waitForEvent(name)` is on, next
+  and close in one call.
+
+Both are ordinary `preview.*` calls on the tab's shared session
+(`cdp-session.ts`), so workspace scoping, a run's own tabs, Chrome access,
+the extension's own checks and the dialog guard apply to each, as for any
+browser tool. `src/main/preview-tools/cdp.ts` adds:
+
+- **An allowlist** (`src/main/browser/cdp-policy.ts`), by method, not by
+  domain, so a protocol version that adds commands adds nothing callable:
+  Network (bodies, search, cache and service-worker bypass, throttling, extra
+  headers, blocked URLs, user agent, replay), Page (navigate, reload,
+  history, frame and resource trees, resource content, layout metrics,
+  lifecycle events, screenshot, isolated worlds), Runtime, DOM and CSS (read
+  and edit), Accessibility, Overlay highlights, Performance metrics,
+  Emulation, Log, and Debugger read-only (script sources and search).
+  Everything allowed acts on the one tab and is no stronger than a browser
+  tool that already exists.
+- **Refusals with a reason**: Browser, Target, SystemInfo, IO, Tethering,
+  Extensions, PWA and ServiceWorker reach past the tab or onto the machine;
+  Storage reaches site data beyond the tab (`codara_preview_storage` covers
+  the tab's own); profile-wide cookie and cache commands,
+  `Network.loadNetworkResource` (any URL with the profile's cookies, past
+  CORS), `Page.setDownloadBehavior`, `DOM.setFileInputFiles` and
+  `DOM.getFileInfo` (files and paths on the machine), Security (ignoring
+  certificate errors), Input (synthetic input would skip the visible cursor
+  and the dialog guard), `Page.addScriptToEvaluateOnNewDocument` (it would
+  keep running for whoever uses the tab next) and `Page.handleJavaScriptDialog`
+  (the dialog guard answers dialogs). `Page.navigate` opens http, https and
+  about:blank only: a file: page would hand Runtime the machine's files.
+- **Parameters too.** No command may take `scriptToEvaluateOnLoad` (script
+  in every frame, past the Runtime refusal in the user's Chrome) or
+  `grantUniveralAccess` (a world that ignores the same-origin rules). The
+  allowed commands that take a script, a URL or an access flag
+  (`Page.navigate`, `Page.reload`, `Page.createIsolatedWorld`) accept only
+  the parameters the policy names.
+- **Fetch is refused on purpose.** `Fetch.enable` pauses every matching
+  request until the client continues it, and a snippet's calls die with the
+  snippet, so one that ends or times out would leave the tab hanging. In the
+  user's Chrome it would also rewrite responses inside signed-in sessions.
+  `Network.setBlockedURLs`, `Network.setExtraHTTPHeaders` and
+  `Network.emulateNetworkConditions` cover blocking, adding headers and
+  throttling, and the recorder already reads bodies.
+- **Counted domains.** The session is shared with Codara's recorders, so a
+  snippet's `Domain.enable` takes a counted hold and `Domain.disable` gives
+  that hold back; `Network.disable` never stops the network recorder.
+  Subscribing holds the event's domain. Holds and subscriptions belong to
+  the code session that made them, so two agents in one pane never share
+  them (code.ts passes the session key on a symbol that neither a snippet
+  nor tool JSON can set; another session's subscription id reads as
+  unknown). They end after 10 idle minutes, on close, or with the tab.
+  The read-only Debugger is enabled with pauses skipped, so a `debugger;`
+  statement never freezes the page.
+- **Bounded results.** A command result over 1 MB is saved as a browser
+  artifact and its path returned; a `Page.captureScreenshot` comes back as an
+  image like `tab.screenshot()`.
+- **The user's Chrome.** The extension relays commands through
+  `chrome.debugger` with its own rules (blocked sites, the per-tab cookie and
+  storage permission, child sessions refused), and main also redacts cookie
+  and authorization headers from results and events, as
+  `codara_preview_network` does there. The extension checks the tab's site,
+  never the sites of frames inside it, and protocol script and DOM edits can
+  pick any frame's context past the same-origin rules, so on a `chrome:` tab
+  Runtime, Debugger, `Page.createIsolatedWorld`, `DOM.resolveNode` and DOM or
+  CSS edits are refused: `tab.evaluate` runs in the page's top frame there.
+  Reading the DOM, styles, accessibility tree and network stays open.
+- **Workers.** The hidden `preview.cdp` tools are not in any roster, so an
+  agent reaches them only through a snippet, and a Cora worker whose config
+  blocks any browser tool (evaluate, network or any other) loses
+  `codara_browser_use` and with it every DevTools command.
+
+`scripts/test-browser-cdp-access.cjs` covers the policy and drives all of
+this on a real Chromium page; `tests/e2e/browser-code.spec.ts` runs it in
+the built app.
 
 ## Page model
 

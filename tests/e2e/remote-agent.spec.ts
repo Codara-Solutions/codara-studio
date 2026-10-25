@@ -57,6 +57,8 @@ test("a Claude agent on an SSH machine outlives Studio and ends with its pane", 
     await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 30_000 });
     await expect.poll(() => sessions(fixture.host), { timeout: 15_000 }).toEqual([`codara-${paneId}`]);
     expect(await launches(fixture.host)).toHaveLength(1);
+    // No prefix key: C-b belongs to the agent.
+    expect((await fixture.host.exec(`${TMUX} show-options -g prefix`)).trim()).toBe("prefix None");
 
     // A turn through tmux is still seen as one.
     await typeInPane(page, paneId, "hello there");
@@ -135,6 +137,39 @@ test("with the machines preference off, a remote Claude pane runs as before, wit
     await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 30_000 });
     expect(await launches(fixture.host)).toHaveLength(1);
     expect(await sessions(fixture.host)).toEqual([]);
+  } finally {
+    await app?.close().catch(() => undefined);
+    await cleanup(fixture);
+  }
+});
+
+test("turning the preference off later still attaches to a running agent and ends it with its pane", async () => {
+  test.skip(!(await dockerAvailable()), "Docker is not available");
+  test.setTimeout(150_000);
+  const fixture = await prepare({ machinesEnabled: true });
+  let app: ElectronApplication | null = null;
+  try {
+    app = await launch(fixture);
+    let page = await app.firstWindow();
+    const paneId = await openClaudePane(page);
+    await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 30_000 });
+    await expect.poll(() => sessions(fixture.host), { timeout: 15_000 }).toEqual([`codara-${paneId}`]);
+    const [pid] = await launches(fixture.host);
+    await app.close();
+    app = null;
+
+    await writeFile(join(fixture.userDataDir, "spark-preferences.json"), JSON.stringify({ machinesEnabled: false }));
+    app = await launch(fixture);
+    page = await app.firstWindow();
+    await page.getByRole("tab", { name: /terminals/i }).first().click();
+    await expect.poll(() => clients(fixture.host, paneId), { timeout: 30_000 }).toBe(1);
+    expect(await launches(fixture.host)).toEqual([pid]);
+    expect(await alive(fixture.host, pid)).toBe(true);
+
+    await page.locator(`[data-terminal-pane-id="${paneId}"]`).first().hover();
+    await page.locator(`[data-terminal-pane-id="${paneId}"]`).first().getByTitle(/Close pane/i).click();
+    await expect.poll(() => sessions(fixture.host), { timeout: 20_000 }).toEqual([]);
+    expect(await alive(fixture.host, pid)).toBe(false);
   } finally {
     await app?.close().catch(() => undefined);
     await cleanup(fixture);

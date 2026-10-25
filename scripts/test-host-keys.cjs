@@ -279,6 +279,14 @@ function hasSshKeygen() {
     assert.equal(harness.connects.length, 1, "no password round after a refused key");
     assert.deepEqual(stored(), {});
 
+    // A pane reconnecting on its own (quiet) never asks about a key.
+    reset();
+    answer = true;
+    const quietError = await (await conns.getConnection("vps")).ensure({ quiet: true }).then(() => null, (e) => e);
+    assert.ok(quietError, "a quiet connect to a machine with an unknown key fails");
+    assert.equal(harness.prompts.length, 0, "and never asks about the key");
+    assert.deepEqual(stored(), {});
+
     reset();
     harness.files.set("/home/me/.ssh/known_hosts", `@revoked nas.local ssh-ed25519 ${b64}\n`);
     const revoked = await connect("nas");

@@ -116,7 +116,7 @@ const RUN = { SPARK_RUN_ID: "run-roster" };
 // studio and execute by 900 for codara_worktree_cleanup, about 850;
 // studio and execute by 2,700 for the four task list tools, about 2,650,
 // which let every agent in a workspace share one task list; studio by 100
-// for codara_preview_code, about 390, with the rest paid for by a shorter
+// for codara_browser_use, about 390, with the rest paid for by a shorter
 // codara_preview_run).
 const LIST_BUDGET = { studio: 34_200, run: 39_000, worker: 35_000, execute: 99_600, automation: 69_000 };
 const EXECUTE_TOOLS = [
@@ -305,6 +305,11 @@ function sortedEqual(actual, expected, label) {
       studio.init.instructions,
       /Task list: .*codara_task_add.*verify\.json checks run then and alone close it.*needs_you with one plain sentence/,
       "a terminal agent learns that only the repo's checks close a task",
+    );
+    assert.match(
+      studio.init.instructions,
+      /codara_workspace_status.*note at each milestone.*blocked/,
+      "a terminal agent learns to say in its rail note why it is blocked",
     );
     assert.match(studio.init.instructions, /Dev servers: .*codara_terminal_servers.*keeps them running when you exit or restart/, "dev servers go to the keeper, not the agent's own shell");
     assert.match(

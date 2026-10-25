@@ -23,7 +23,7 @@ const ELECTRON_STUB =
   "export class Notification {\n" +
   "  static isSupported() { return true; }\n" +
   "  constructor(options) {\n" +
-  "    this.title = options.title; this.body = options.body; this.listeners = {}; this.shown = 0;\n" +
+  "    this.title = options.title; this.subtitle = options.subtitle; this.body = options.body; this.listeners = {}; this.shown = 0;\n" +
   "    globalThis.__createdNotifications.push(this);\n" +
   "  }\n" +
   "  on(event, listener) { (this.listeners[event] ??= []).push(listener); return this; }\n" +
@@ -188,7 +188,12 @@ async function main() {
   const shown = globalThis.__createdNotifications.at(-1);
   check("an unfocused window gets a native notification", globalThis.__createdNotifications.length === 1);
   check("the real app shows it", shown?.shown === 1);
-  check("the title carries the workspace", shown?.title === "Claude Code finished · api-server");
+  // macOS banners have a subtitle line for it; elsewhere it rides on the title.
+  if (process.platform === "darwin") {
+    check("the subtitle carries the workspace", shown?.title === "Claude Code finished" && shown?.subtitle === "api-server");
+  } else {
+    check("the title carries the workspace", shown?.title === "Claude Code finished · api-server" && shown?.subtitle === undefined);
+  }
   check("no toast while away", awayWin.sent.every((m) => m.channel !== "notification:in-app"));
   shown.emit("click");
   const focus = awayWin.sent.filter((m) => m.channel === "notify:focus");
