@@ -301,7 +301,11 @@ function WorkspaceRail(props: RailProps) {
   const missingWorkspaceIds = useMissingWorkspaces(workspaces);
   // Worktrees whose project is in the rail hang under it rather than in the
   // top-level list or a folder (see WorkspaceFamily).
-  const railTree = useMemo(() => buildRailTree(workspaces), [workspaces]);
+  const railTree = useMemo(
+    () => buildRailTree(workspaces, props.workspaceRailOrder),
+    [workspaces, props.workspaceRailOrder],
+  );
+  const workspaceById = useMemo(() => new Map(workspaces.map((workspace) => [workspace.id, workspace])), [workspaces]);
   // Workspace rows can be reordered within a folder or dropped onto another
   // folder. The transfer payload makes the gesture work even when Workspaces
   // is rendered in the opposite rail; local state is only visual feedback.
@@ -841,7 +845,7 @@ function WorkspaceRail(props: RailProps) {
       <WorkspaceFamily
         key={w.id}
         project={w}
-        worktrees={worktreesOf(railTree, w.id, workspaces)}
+        worktrees={worktreesOf(railTree, w.id, workspaceById)}
         rowProps={(child) => workspaceRowProps(child, child === w ? groupId : null)}
       />
     ));
@@ -2060,10 +2064,9 @@ function rowMerged(worktree: WorktreeRailState | null | undefined, missing: bool
   return worktree?.merge === "merged" || (missing && worktree?.merge === "gone");
 }
 
-function worktreesOf(tree: RailTree, projectId: string, workspaces: Workspace[]): Workspace[] {
+function worktreesOf(tree: RailTree, projectId: string, byId: ReadonlyMap<string, Workspace>): Workspace[] {
   const ids = tree.childrenOf.get(projectId);
   if (!ids) return [];
-  const byId = new Map(workspaces.map((workspace) => [workspace.id, workspace]));
   return ids.flatMap((id) => byId.get(id) ?? []);
 }
 
@@ -2096,6 +2099,7 @@ function WorkspaceFamily({
         workspaceId: worktree.id,
         lines: lineLists[index + 1] ?? [],
         creatorPaneId: creator?.kind === "agent" ? creator.paneId : undefined,
+        createdAt: worktree.copyBranch?.createdAt,
         merged: rowMerged(props.worktree, props.missing ?? false),
       };
     }),
@@ -2104,7 +2108,11 @@ function WorkspaceFamily({
   const open = useRailFold(project.id, worktrees.length > 0) && expandable;
   const mergedOpen = useRailFold(`merged:${project.id}`, false);
   const [cleaning, setCleaning] = useState(false);
-  const mergedCleanUps = family.merged.flatMap((child) => childProps.get(child.workspaceId)?.onCleanUp ?? []);
+  const mergedCleanable = family.merged.flatMap((child) => {
+    const props = childProps.get(child.workspaceId);
+    return props?.onCleanUp ? [{ name: props.ws.name, cleanUp: props.onCleanUp }] : [];
+  });
+  const mergedCleanUps = mergedCleanable.map((entry) => entry.cleanUp);
   const cleanUpMerged = () => {
     if (cleaning) return;
     setCleaning(true);
@@ -2135,6 +2143,7 @@ function WorkspaceFamily({
             open: mergedOpen,
             onToggle: () => setRailFold(`merged:${project.id}`, !mergedOpen),
             onCleanUp: mergedCleanUps.length > 0 ? cleanUpMerged : undefined,
+            cleanUpNames: mergedCleanable.map((entry) => entry.name),
             cleaning,
             rows: family.merged.map((child) => renderChild(child.workspaceId, child.agents, true)),
           }}

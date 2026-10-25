@@ -11,18 +11,42 @@ const KEY = "codara.rail.folds";
 const LEGACY_OPEN_KEY = "codara.rail.agentLinesOpen";
 
 type Folds = Record<string, boolean>;
+type FoldStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
-function readFolds(): Folds {
-  const out: Folds = {};
+function parse(storage: FoldStorage, key: string): unknown {
   try {
-    const legacy = JSON.parse(localStorage.getItem(LEGACY_OPEN_KEY) ?? "[]");
-    if (Array.isArray(legacy)) for (const id of legacy) if (typeof id === "string") out[id] = true;
-    const parsed = JSON.parse(localStorage.getItem(KEY) ?? "{}");
-    if (parsed && typeof parsed === "object") {
-      for (const [id, open] of Object.entries(parsed)) if (typeof open === "boolean") out[id] = open;
+    return JSON.parse(storage.getItem(key) ?? "null");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The stored choices. Each entry is read on its own, so an unreadable one
+ * leaves the other's choices standing; the old toggle is folded into the new
+ * entry once and then removed.
+ */
+export function readFolds(given?: FoldStorage): Folds {
+  const out: Folds = {};
+  let storage: FoldStorage;
+  try {
+    storage = given ?? localStorage;
+  } catch {
+    return out;
+  }
+  const legacy = parse(storage, LEGACY_OPEN_KEY);
+  if (Array.isArray(legacy)) for (const id of legacy) if (typeof id === "string") out[id] = true;
+  const parsed = parse(storage, KEY);
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    for (const [id, open] of Object.entries(parsed)) if (typeof open === "boolean") out[id] = open;
+  }
+  try {
+    if (storage.getItem(LEGACY_OPEN_KEY) !== null) {
+      storage.setItem(KEY, JSON.stringify(out));
+      storage.removeItem(LEGACY_OPEN_KEY);
     }
   } catch {
-    // Unreadable storage leaves every family at its default.
+    // Unwritable storage carries the old toggle over again next time.
   }
   return out;
 }

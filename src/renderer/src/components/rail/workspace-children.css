@@ -140,3 +140,77 @@
 .rail-child-faded {
   opacity: 0.52;
 }
+
+/* Same look as the explorer's move confirm (FileTree.tsx). */
+.rail-confirm-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  background: var(--modal-scrim);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.rail-confirm {
+  width: 320px;
+  max-height: 70vh;
+  border-radius: 10px;
+  padding: 16px 16px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-family: var(--font-sans);
+}
+
+.rail-confirm-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.rail-confirm-text {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-dim);
+}
+
+.rail-confirm-list {
+  margin: 0;
+  padding: 0 0 0 16px;
+  overflow-y: auto;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ink);
+}
+
+.rail-confirm-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.rail-confirm-cancel,
+.rail-confirm-ok {
+  appearance: none;
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: default;
+}
+
+.rail-confirm-cancel {
+  border: 1px solid var(--rule-strong);
+  background: transparent;
+  color: var(--ink-dim);
+}
+
+.rail-confirm-ok {
+  border: none;
+  padding: 5px 14px;
+  background: var(--accent);
+  color: var(--on-accent, #fff);
+}

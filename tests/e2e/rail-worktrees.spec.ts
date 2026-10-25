@@ -12,14 +12,15 @@ import { delimiter, join } from "node:path";
 // list; each shows its branch with its PR mark, then its agent; the one an
 // agent works in comes first and the project's roll-up counts that agent.
 // Clicking the summary opens the project, the chevron only folds it, and the
-// merged worktree waits in its own fold until Clean up removes it.
+// merged worktrees wait in their own fold until Clean up, after a confirm
+// that names them, removes them.
 // RAIL_WORKTREES_SHOTS=<dir> also saves the rail in dracula and daylight.
 
 interface Fixture {
   root: string;
   env: Record<string, string>;
   repo: string;
-  merged: string;
+  merged: string[];
   claude: string;
 }
 
@@ -78,6 +79,8 @@ async function prepare(): Promise<Fixture> {
   const idleTree = await addTree("idle", "feat/idle");
   const merged = await addTree("merged", "feat/old");
   git(repo, ["merge", "-q", "--no-ff", "-m", "merge feat/old", "feat/old"], gitEnv);
+  const mergedToo = await addTree("merged-too", "feat/older");
+  git(repo, ["merge", "-q", "--no-ff", "-m", "merge feat/older", "feat/older"], gitEnv);
   git(repo, ["update-ref", "refs/remotes/origin/main", "main"], gitEnv);
   git(repo, ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], gitEnv);
 
@@ -205,6 +208,7 @@ setTimeout(() => process.exit(0), 170000);
         { id: "ws-app", name: "widgets", cwd: repo, color: "#E8B45A", workers: [] },
         copy("wt-pr", prTree, "feat/widgets"),
         copy("wt-merged", merged, "feat/old"),
+        copy("wt-merged-too", mergedToo, "feat/older"),
         copy("wt-idle", idleTree, "feat/idle"),
         copy("wt-agent", agentTree, "feat/agent"),
         { id: "ws-other", name: "notes", cwd: other, color: "#78A8FF", workers: [] },
@@ -216,7 +220,7 @@ setTimeout(() => process.exit(0), 170000);
   return {
     root,
     repo,
-    merged,
+    merged: [merged, mergedToo],
     claude,
     env: {
       ...gitEnv,
@@ -278,7 +282,7 @@ test("worktrees hang under their project with their PR and their agent", async (
       await expect(row(page, "wt-pr").getByTestId("workspace-icon-tile")).toHaveCount(0);
       await expect(row(page, "wt-pr").getByTestId("workspace-branch")).toHaveText("feat/widgets");
       await expect(row(page, "wt-idle").getByTestId("worktree-agent-line")).toHaveText("No agent · from main");
-      await expect(children(page, "ws-app").getByTestId("workspace-merged-fold")).toContainText("1 merged", { timeout: 30_000 });
+      await expect(children(page, "ws-app").getByTestId("workspace-merged-fold")).toContainText("2 merged", { timeout: 30_000 });
       await expect(row(page, "wt-merged")).toHaveCount(0);
     });
 
@@ -335,7 +339,7 @@ test("worktrees hang under their project with their PR and their agent", async (
       await expect(row(page, "wt-idle")).toHaveAttribute("data-active", "true");
     });
 
-    await test.step("the merged fold opens faded, and Clean up removes what it holds", async () => {
+    await test.step("the merged fold opens faded, and Clean up removes what it holds after naming it", async () => {
       const fold = children(page, "ws-app").getByTestId("workspace-merged-fold");
       await fold.getByTestId("workspace-merged-toggle").click();
       await expect(row(page, "wt-merged")).toBeVisible();
@@ -343,10 +347,23 @@ test("worktrees hang under their project with their PR and their agent", async (
       await expect(row(page, "wt-merged").getByTestId("workspace-merged")).toBeVisible();
       await row(page, "ws-other").click();
       await shots(page, "rail-worktrees-merged-open");
+      const confirm = page.getByTestId("workspace-merged-clean-up-confirm");
       await fold.getByTestId("workspace-merged-clean-up").click();
+      await expect(confirm).toBeVisible();
+      await expect(confirm).toContainText("Clean up 2 merged worktrees?");
+      await expect(confirm.locator("li")).toHaveText(["widgets · feat/old", "widgets · feat/older"]);
+      if (process.env.RAIL_WORKTREES_SHOTS) {
+        await page.screenshot({ path: join(process.env.RAIL_WORKTREES_SHOTS, "rail-worktrees-clean-up-confirm-dracula.png") });
+      }
+      await confirm.getByRole("button", { name: "Cancel" }).click();
+      await expect(confirm).toHaveCount(0);
+      for (const dir of fixture.merged) expect(existsSync(dir)).toBe(true);
+      await fold.getByTestId("workspace-merged-clean-up").click();
+      await confirm.getByRole("button", { name: "Clean up" }).click();
       await expect(row(page, "wt-merged")).toHaveCount(0, { timeout: 30_000 });
+      await expect(row(page, "wt-merged-too")).toHaveCount(0, { timeout: 30_000 });
       await expect(fold).toHaveCount(0);
-      expect(existsSync(fixture.merged)).toBe(false);
+      for (const dir of fixture.merged) expect(existsSync(dir)).toBe(false);
       await expect(row(page, "wt-pr")).toBeVisible();
     });
   } finally {

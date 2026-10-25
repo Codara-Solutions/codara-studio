@@ -134,6 +134,44 @@ test("a creator whose worktree has an agent inside stays on the project", ({ mod
   assert.equal(family.all.length, 2);
 });
 
+test("the first project in rail order wins, whatever the array order", ({ mod }) => {
+  // Dropping a row reorders the workspaces array; the rail order is what the user sees.
+  const workspaces = [project("ws-second", "/repo/app"), project("ws-first", "/repo/app"), worktree("wt", "/repo/app")];
+  const tree = mod.buildRailTree(workspaces, ["ws-first", "ws-second", "wt"]);
+  assert.equal(tree.parentOf.get("wt"), "ws-first");
+  // A project filed in a folder ranks where its folder sits.
+  const filed = [project("ws-second", "/repo/app"), { ...project("ws-first", "/repo/app"), groupId: "g1" }, worktree("wt", "/repo/app")];
+  assert.equal(mod.buildRailTree(filed, ["g1", "ws-second", "wt"]).parentOf.get("wt"), "ws-first");
+  assert.equal(mod.buildRailTree(filed, ["ws-second", "g1", "wt"]).parentOf.get("wt"), "ws-second");
+});
+
+test("a creator never moves into a merged worktree, and into one worktree at most", ({ mod }) => {
+  // A coordinator made worktree A, A merged, it keeps working in the project.
+  const merged = mod.buildRailFamily({
+    projectLines: [line("p1", "working", 2)],
+    children: [{ workspaceId: "wtA", lines: [], creatorPaneId: "p1", merged: true }],
+  });
+  assert.deepEqual(merged.own.map((l) => l.key), ["pane:p1"]);
+  assert.deepEqual(merged.merged.map((row) => [row.workspaceId, row.agents.length]), [["wtA", 0]]);
+  // One pane made two empty worktrees: it shows on the newest only.
+  const twice = mod.buildRailFamily({
+    projectLines: [line("p1", "working", 2)],
+    children: [
+      { workspaceId: "older", lines: [], creatorPaneId: "p1", createdAt: "2026-10-25T10:00:00Z", merged: false },
+      { workspaceId: "newer", lines: [], creatorPaneId: "p1", createdAt: "2026-10-25T11:00:00Z", merged: false },
+    ],
+  });
+  assert.deepEqual(
+    twice.active.map((row) => [row.workspaceId, row.agents.map((l) => l.key)]),
+    [
+      ["newer", ["pane:p1"]],
+      ["older", []],
+    ],
+  );
+  assert.equal(twice.own.length, 0);
+  assert.equal(twice.all.length, 1);
+});
+
 (async () => {
   const { mod, cleanup } = await load();
   let failed = 0;

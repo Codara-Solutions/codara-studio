@@ -141,12 +141,12 @@ child row lighter than its parent), GitHub's PR list for the check glyphs.
 - Clicking anywhere on a row opens that row. Nothing inside a row toggles.
   Folding has its own 14px chevron at the row's left edge; rows with nothing
   under them keep the gutter empty so every tile lines up.
-- An agent shows on the row it works in: its pane's workspace, or the
-  worktree it created when its chat stays in the project and no other agent
-  runs inside it (then the creator was a coordinator and stays on the
-  project). The project's own
-  agents (a coordinator) list at the top of the tree; clicking one opens its
-  tab.
+- An agent shows on one row, the one it works in: its pane's workspace, or
+  the worktree it created when its chat stays in the project, no other agent
+  runs inside it and it is not merged (otherwise the creator was a
+  coordinator and stays on the project). A creator of several such
+  worktrees shows on the newest. The project's own agents (a coordinator)
+  list at the top of the tree; clicking one opens its tab.
 - Order under a project: needs you, working, done, idle, no agent; rail order
   among equals. Merged worktrees always go last, in their fold, folded by
   default and faded (52%) when opened.
@@ -155,3 +155,7 @@ child row lighter than its parent), GitHub's PR list for the check glyphs.
   tokens: `--rule` for the tree line, the existing agent state tones.
 - A worktree whose project is not in the rail stays a top-level row, indented
   as before.
+- Two projects on one folder: the worktree hangs under the one higher in the
+  rail as the user sees it.
+- Clean up on the fold removes one merged worktree at once; for more, it
+  first shows the explorer's confirm with their names.

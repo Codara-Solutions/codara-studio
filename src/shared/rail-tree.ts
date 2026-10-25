@@ -10,6 +10,7 @@ import { paneNoteKey } from "./agent-status";
 export interface RailTreeWorkspace {
   id: string;
   cwd: string;
+  groupId?: string;
   copyBranch?: {
     repoCwd: string;
     createdBy?: { kind: "user" | "agent"; paneId?: string };
@@ -29,13 +30,23 @@ function samePath(path: string): string {
 
 /**
  * Which worktree nests under which project: the first workspace in rail
- * order whose folder is the worktree's source repository. A project is never
- * itself a worktree, so the tree is one level deep; a worktree whose project
- * is not in the rail stays a row of its own.
+ * order whose folder is the worktree's source repository. `railOrder` is the
+ * top-level order the rail shows (workspace and folder ids); a filed project
+ * ranks where its folder sits, and the workspaces array orders the rest,
+ * since dropping a row reorders that array without the rail moving. A
+ * project is never itself a worktree, so the tree is one level deep; a
+ * worktree whose project is not in the rail stays a row of its own.
  */
-export function buildRailTree(workspaces: readonly RailTreeWorkspace[]): RailTree {
+export function buildRailTree(workspaces: readonly RailTreeWorkspace[], railOrder: readonly string[] = []): RailTree {
+  const slot = new Map(railOrder.map((id, index) => [id, index]));
+  const place = (workspace: RailTreeWorkspace) =>
+    (workspace.groupId === undefined ? undefined : slot.get(workspace.groupId)) ?? slot.get(workspace.id) ?? railOrder.length;
+  const projects = workspaces
+    .map((workspace, index) => ({ workspace, index, place: place(workspace) }))
+    .sort((a, b) => a.place - b.place || a.index - b.index)
+    .map((entry) => entry.workspace);
   const projectByCwd = new Map<string, string>();
-  for (const workspace of workspaces) {
+  for (const workspace of projects) {
     if (workspace.copyBranch) continue;
     const key = samePath(workspace.cwd);
     if (!projectByCwd.has(key)) projectByCwd.set(key, workspace.id);
@@ -91,6 +102,8 @@ export interface RailFamilyInput {
     lines: readonly AgentLine[];
     /** The pane that created the worktree, when an agent did. */
     creatorPaneId?: string;
+    /** When the worktree was made (ISO), to pick a creator's newest one. */
+    createdAt?: string;
     merged: boolean;
   }>;
 }
@@ -98,19 +111,31 @@ export interface RailFamilyInput {
 /**
  * Puts each agent on the row it works in. An agent whose pane is in a
  * worktree's workspace works there. An agent in the project that created a
- * worktree works in it while no agent runs inside it (its chat stays in the
- * project, its branch is the worktree's); once one does, the creator was a
- * coordinator and stays on the project. The rest are the project's own. Worktrees sort by
- * their most urgent agent (needs you, working, done, idle, none), keeping
- * rail order among equals.
+ * worktree works in it while no agent runs inside it and it is not merged
+ * (its chat stays in the project, its branch is the worktree's); once one
+ * does, the creator was a coordinator and stays on the project. A creator of
+ * several such worktrees works in the newest, so each agent shows on one row.
+ * The rest are the project's own. Worktrees sort by their most urgent agent
+ * (needs you, working, done, idle, none), keeping rail order among equals.
  */
 export function buildRailFamily(input: RailFamilyInput): RailFamily {
   const projectByKey = new Map(input.projectLines.map((line) => [line.key, line]));
+  // Creator line key to the child it works in. Later entries in rail order
+  // win ties, since a new worktree's row is added at the end.
+  const workingIn = new Map<string, { index: number; createdAt: number }>();
+  input.children.forEach((child, index) => {
+    if (!child.creatorPaneId || child.merged || child.lines.length > 0) return;
+    const key = paneNoteKey(child.creatorPaneId);
+    if (!projectByKey.has(key)) return;
+    const createdAt = child.createdAt ? Date.parse(child.createdAt) || 0 : 0;
+    const current = workingIn.get(key);
+    if (!current || createdAt >= current.createdAt) workingIn.set(key, { index, createdAt });
+  });
   const claimed = new Set<string>();
   const rows = input.children.map((child, index) => {
     const agents = [...child.lines];
-    const creator =
-      child.creatorPaneId && agents.length === 0 ? projectByKey.get(paneNoteKey(child.creatorPaneId)) : undefined;
+    const key = child.creatorPaneId ? paneNoteKey(child.creatorPaneId) : null;
+    const creator = key && workingIn.get(key)?.index === index ? projectByKey.get(key) : undefined;
     if (creator) {
       agents.push(creator);
       claimed.add(creator.key);
