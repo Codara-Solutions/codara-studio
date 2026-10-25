@@ -397,6 +397,8 @@ async function main() {
     assert.equal(B.splitMarkdownBlocks("x\n\n[a\\]b\nc]: /url").length, 1);
     // A list item's code fence indented 4 columns lets cutting go on once it closes.
     assert.deepEqual(B.splitMarkdownBlocks("1. Install:\n\n    ```bash\n    npm i\n\n    npm test\n    ```\n\n2. Run\n\nDone."), ["1. Install:\n\n    ```bash\n    npm i\n\n    npm test\n    ```\n\n2. Run", "Done."]);
+    // Outside a list, a line indented 4+ columns is indented code, markers and "<" included.
+    assert.deepEqual(B.splitMarkdownBlocks("    > <div>\n\nx"), ["    > <div>", "x"]);
     // A CR that ends the text is half of a CRLF still arriving, not a lone CR.
     assert.deepEqual(B.splitMarkdownBlocks("a\r\n\r\nb\r"), ["a\r", "b\r"]);
   });

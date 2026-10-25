@@ -128,7 +128,7 @@ export function splitMarkdownBlocks(text: string): string[] {
     lastIndent = indent;
     if (listItem) listOpen = true;
     const prefix = CONTAINER_PREFIX.exec(line)![0];
-    if (line[prefix.length] === "<" && (indent < 4 || listOpen || /[^ \t]/.test(prefix))) break;
+    if (line[prefix.length] === "<" && (indent < 4 || listOpen)) break;
     if (CONTAINER_FENCE.test(line)) break;
     const deep = listOpen && indent >= 4 ? INDENTED_FENCE.exec(line) : null;
     fence = deep ? { char: deep[2][0], length: deep[2].length, indent, deep: true } : openingFence(line);
