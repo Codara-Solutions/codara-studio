@@ -1384,6 +1384,11 @@ export interface AppPreferences {
   // computer over LAN or the blind relay; pairing and revocation live in Settings,
   // "Remote access".
   remoteAccessEnabled?: boolean;
+  // Machines (docs/machines-plan.md), off while it is built: an agent started
+  // in an SSH workspace runs in a tmux session on that machine, so it keeps
+  // working when Studio quits or disconnects, and its pane attaches to it
+  // again when reopened (src/main/remote/remote-agents.ts).
+  machinesEnabled?: boolean;
   // Background auto-fetch (src/main/git-auto-fetch.ts): one `git fetch` per
   // unique repository across every local workspace, on a timer. Default on.
   gitAutoFetchEnabled?: boolean;
@@ -1564,6 +1569,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   // DEFAULT_AGENT_HIBERNATION_MINUTES in shared/agent-hibernation.ts.
   agentHibernationMinutes: 30,
   remoteAccessEnabled: false,
+  machinesEnabled: false,
   gitAutoFetchEnabled: true,
   gitAutoFetchIntervalMinutes: DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES,
   notifyTeammatePushes: true,

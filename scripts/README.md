@@ -452,6 +452,7 @@ it proves Crashpad starts early), Settings, About and the export.
 | `test-phone-notify`, `test-terminal-phone-notify` | Notifications sent to the phone. |
 | `test-remote-connection-lifecycle`, `test-box-key-retry`, `test-ssh-keys` | SSH workspaces (`src/main/remote/`), not the phone. |
 | `test-remote-proxycommand`, `test-ssh-config-include`, `test-codara-boxes-cli` | SSH over a ProxyCommand (`proxy-command.ts`), `~/.ssh/config` Include and ProxyCommand reading with the refusal of unsafe `%h`/`%r`/`%n`, and the Codara Cloud boxes picker that reads the `codaracloud` CLI (`codara-boxes.ts`). |
+| `test-remote-agents`, `test-remote-pty`, `test-pty-remote-agents` | Agents on SSH machines kept in tmux (`remote-agents.ts`, `remote-pty.ts`, and their wiring in `pty-manager.ts`): the launch, attach, probe and kill lines run under `/bin/sh` against fake `tmux` and `claude`, reconnects after a dropped connection, and which closes end the agent. The real sshd and tmux are `tests/e2e/remote-agent.spec.ts`, which starts a throwaway container with `scripts/ssh-test-host.cjs` (`tests/e2e/fixtures/ssh-host`) and is skipped without Docker. |
 
 ### Git and GitHub
 

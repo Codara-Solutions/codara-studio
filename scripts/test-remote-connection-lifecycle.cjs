@@ -387,6 +387,57 @@ async function testFreshKeyRetry(api, harness) {
   assert.equal(net.clients, 1, "a network error stops at the first attempt");
 }
 
+// A pane reconnecting on its own (remote-pty.ts) connects quietly: never a
+// password or passphrase prompt, never a box wake (a box is not even
+// dialled: its proxy may wake it). It fails with needsUser instead, and the
+// user's own connect is never handed that quiet failure.
+async function testQuietConnect(api, harness) {
+  const prompts = [];
+  api.setAuthPromptSender((request) => {
+    prompts.push(request);
+    setImmediate(() => api.answerAuthPrompt({ requestId: request.requestId, value: null, remember: false }));
+  });
+  harness.onConnect = (client) => setImmediate(() => client.emit("error", new Error("All configured authentication methods failed")));
+  try {
+    const hostId = "quiet-password";
+    const quiet = await observe((await api.getConnection(hostId)).ensure({ quiet: true }));
+    assert.equal(quiet.ok, false);
+    assert.equal(quiet.error.needsUser, true, "a host that wants a password needs the user");
+    assert.equal(prompts.length, 0, "a quiet connect never prompts");
+    assert.equal(api.getConnectionStatus(hostId).state, "disconnected", "needing the user is not an error");
+
+    const loud = await observe((await api.getConnection(hostId)).ensure());
+    assert.equal(loud.ok, false);
+    assert.ok(prompts.length >= 1, "the user's own connect asks");
+
+    // The user's connect arrives while a quiet one is under way.
+    prompts.length = 0;
+    const conn = await api.getConnection("quiet-overlap");
+    const first = observe(conn.ensure({ quiet: true }));
+    const second = observe(conn.ensure());
+    assert.equal((await first).error.needsUser, true);
+    const user = await second;
+    assert.notEqual(user.error?.needsUser, true, "the user's connect is never handed the quiet failure");
+    assert.ok(prompts.length >= 1);
+
+    const boxId = "6f1c2d3e-0000-4000-8000-00000000beef";
+    harness.hostOverrides["quiet-box"] = {
+      source: "codara-cloud",
+      proxyCommand: [process.execPath, "-e", "setInterval(() => {}, 1000)"],
+      hostKeyAlias: "codara-box.quiet",
+      codaraBoxId: boxId,
+    };
+    const clientsBefore = harness.clients.length;
+    const box = await observe((await api.getConnection("quiet-box")).ensure({ quiet: true }));
+    assert.equal(box.error?.needsUser, true);
+    assert.equal(harness.wakes.includes(boxId), false, "a stopped box is never woken in the background");
+    assert.equal(harness.clients.length, clientsBefore, "nor dialled");
+  } finally {
+    harness.onConnect = null;
+    api.setAuthPromptSender(null);
+  }
+}
+
 async function main() {
   const harness = createHarness();
   const api = await loadConnections(harness);
@@ -399,6 +450,7 @@ async function main() {
     await testNoUnhandledRejectionOrListenerLeak(api, harness);
     await testProxyHost(api, harness);
     await testFreshKeyRetry(api, harness);
+    await testQuietConnect(api, harness);
   } finally {
     api.disposeAllConnections();
     delete globalThis.__codaraSshLifecycleHarness;
