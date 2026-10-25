@@ -1,10 +1,17 @@
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
-import SSHConfig, { LineType } from "ssh-config";
 import { isValidHostId, isValidPort, type RemoteHostConfig } from "@shared/remote";
 import { writeFileAtomic } from "../fs-atomic";
 import { codaraHome } from "../codara-home";
+import {
+  displayPath,
+  evaluateSshConfig,
+  parseEntries,
+  type Options,
+  type ParsedEntry,
+  type SourceEntry,
+} from "./ssh-config-match";
 import { expandHostName, expandSshPath, expandTilde, localUser, SshExpansionError, type SshTokenContext } from "./ssh-tokens";
 
 // Remote host registry: hosts parsed from ~/.ssh/config (read-only in the
@@ -80,33 +87,20 @@ async function writeManualHosts(hosts: RemoteHostConfig[]): Promise<void> {
 
 // Parse ~/.ssh/config into RemoteHostConfig entries. Wildcard/negated Host
 // patterns are skipped (they're matching rules, not concrete hosts); each
-// concrete alias is resolved through ssh-config's compute() so HostName /
-// User / Port / IdentityFile inherit from wildcard blocks the way real ssh
-// would resolve them.
+// concrete alias is resolved the way ssh resolves it (ssh-config-match.ts),
+// so HostName / User / Port / IdentityFile inherit from wildcard blocks.
+// Connection fields come from ~/.ssh/config alone, as before; the known-hosts
+// files and any refusal from it and the system's together, as ssh reads them.
 export async function readSshConfigHosts(): Promise<RemoteHostConfig[]> {
-  let raw: string;
-  try {
-    raw = await readConfigWithIncludes(join(homedir(), ".ssh", "config"), join(homedir(), ".ssh"), 0, new Set());
-  } catch {
-    return [];
-  }
-  let config: ReturnType<typeof SSHConfig.parse>;
-  try {
-    config = SSHConfig.parse(raw);
-  } catch {
-    return [];
-  }
-  const system = await readSystemSshConfig();
+  const user = await readUserSshConfig();
+  if (!user) return [];
+  const system = (await readSystemSshConfig()) ?? [];
+  const both = [...user, ...system];
   const aliases = new Set<string>();
-  for (const entry of config) {
-    // Not SSHConfig.DIRECTIVE: that static is missing when the built app
-    // loads the package through require(), so every Host line was skipped.
-    if (entry.type !== LineType.DIRECTIVE) continue;
-    const dir = entry as { param?: string; value?: string | string[] };
-    if ((dir.param ?? "").toLowerCase() !== "host") continue;
-    const values = Array.isArray(dir.value) ? dir.value : [dir.value ?? ""];
-    for (const v of values) {
-      const alias = String(v).trim();
+  for (const entry of user) {
+    if (entry.kind !== "host") continue;
+    for (const v of entry.patterns) {
+      const alias = v.trim();
       if (!alias || alias.includes("*") || alias.includes("?") || alias.startsWith("!")) continue;
       if (isValidHostId(alias)) aliases.add(alias);
     }
@@ -114,7 +108,8 @@ export async function readSshConfigHosts(): Promise<RemoteHostConfig[]> {
   const out: RemoteHostConfig[] = [];
   for (const alias of aliases) {
     try {
-      const computed = options(config.compute(alias) as Record<string, string | string[]>);
+      const computed = evaluateSshConfig(user, alias).options;
+      const combined = evaluateSshConfig(both, alias);
       const identity = first(computed.identityfile);
       const proxy = first(computed.proxycommand)?.trim();
       const keyAlias = first(computed.hostkeyalias)?.trim();
@@ -142,9 +137,10 @@ export async function readSshConfigHosts(): Promise<RemoteHostConfig[]> {
         username,
         proxyJump: first(computed.proxyjump)?.trim() ?? "",
       };
+      refusal = combined.refusal ?? refusal;
       let known: KnownHostsOptions = {};
       try {
-        if (!refusal) known = knownHostsOptions({ ...system?.(alias), ...computed }, context);
+        if (!refusal) known = knownHostsOptions(combined.options, context);
       } catch (err) {
         if (!(err instanceof SshExpansionError)) throw err;
         refusal = err.message;
@@ -170,22 +166,7 @@ export async function readSshConfigHosts(): Promise<RemoteHostConfig[]> {
   return out.sort((a, b) => a.id.localeCompare(b.id));
 }
 
-type Options = Record<string, string | string[]>;
-
 const first = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
-
-/**
- * ssh_config keywords ignore case and the first value obtained wins;
- * ssh-config keeps each spelling apart, in the order it met them.
- */
-function options(computed: Options): Options {
-  const out: Options = {};
-  for (const [key, value] of Object.entries(computed)) {
-    const name = key.toLowerCase();
-    if (!(name in out)) out[name] = value;
-  }
-  return out;
-}
 
 // ── Include ──────────────────────────────────────────────────────────────────
 
@@ -244,41 +225,72 @@ function resolveIncludePattern(pattern: string, baseDir: string): string {
   return isAbsolute(pattern) ? pattern : resolvePath(baseDir, pattern);
 }
 
-// Read a config file with its Include directives inlined where they stand.
-// Depth is capped and a file already being read is skipped, so a cycle or a
-// runaway chain ends quietly instead of looping.
+// Read a config file's lines with each file an Include reads in its place,
+// between enter/leave marks: ssh gives every included file its own scope, so
+// its Host lines end at its last line. ssh ignores an Include that matches
+// nothing (and a directory) but stops for any other file it cannot open, a
+// loop, or files nested deeper than 16 levels, wherever the Include stands;
+// those become error entries, which refuse every host.
 async function readConfigWithIncludes(
   file: string,
   baseDir: string,
   depth: number,
   active: Set<string>,
-): Promise<string> {
-  const key = resolvePath(file);
-  if (depth > MAX_INCLUDE_DEPTH || active.has(key)) return "";
+): Promise<SourceEntry[]> {
   const raw = await fs.readFile(file, "utf8");
-  active.add(key);
+  active.add(resolvePath(file));
   try {
-    const out: string[] = [];
-    for (const line of raw.split(/\r?\n/)) {
-      const m = INCLUDE_LINE.exec(line);
+    const out: SourceEntry[] = [];
+    const lines = raw.split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      const m = INCLUDE_LINE.exec(lines[i]);
       if (!m) {
-        out.push(line);
+        out.push({ kind: "line", file, line: i + 1, text: lines[i] });
         continue;
       }
+      const where = `${displayPath(file)} line ${i + 1}`;
       for (const word of splitConfigWords(m[1])) {
         for (const target of await expandGlob(resolveIncludePattern(word, baseDir))) {
+          let isDirectory = false;
           try {
-            out.push(await readConfigWithIncludes(target, baseDir, depth + 1, active));
-          } catch {
-            // A missing or unreadable include is ignored, as ssh does.
+            isDirectory = (await fs.stat(target)).isDirectory();
+          } catch (err) {
+            if (!missing(err)) out.push(includeError(where, target, err));
+            continue;
+          }
+          if (active.has(resolvePath(target))) {
+            out.push({ kind: "error", message: `${where} includes ${displayPath(target)} inside itself, a loop ssh stops at` });
+            continue;
+          }
+          if (depth + 1 > MAX_INCLUDE_DEPTH) {
+            out.push({ kind: "error", message: `${where} nests Includes more than ${MAX_INCLUDE_DEPTH} levels deep, which ssh stops at` });
+            continue;
+          }
+          if (isDirectory) continue;
+          try {
+            const included = await readConfigWithIncludes(target, baseDir, depth + 1, active);
+            out.push({ kind: "enter" }, ...included, { kind: "leave" });
+          } catch (err) {
+            if (!missing(err)) out.push(includeError(where, target, err));
           }
         }
       }
     }
-    return out.join("\n");
+    return out;
   } finally {
-    active.delete(key);
+    active.delete(resolvePath(file));
   }
+}
+
+const missing = (err: unknown) => {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return code === "ENOENT" || code === "ENOTDIR" || code === "EISDIR";
+};
+
+function includeError(where: string, target: string, err: unknown): SourceEntry {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  const reason = code === "EACCES" || code === "EPERM" ? "permission denied" : (code ?? "unreadable");
+  return { kind: "error", message: `ssh cannot open ${displayPath(target)}, included from ${where} (${reason})` };
 }
 
 /**
@@ -341,8 +353,11 @@ export async function knownHostsSettings(host: RemoteHostConfig): Promise<KnownH
   };
   if (host.source !== "ssh-config") {
     const [user, system] = await Promise.all([readUserSshConfig(), readSystemSshConfig()]);
+    // Codara logs in as host.username, like `ssh -l`: Match user tests it.
+    const evaluated = evaluateSshConfig([...(user ?? []), ...(system ?? [])], host.host, host.username);
+    if (evaluated.refusal) return { refusal: evaluated.refusal };
     try {
-      known = knownHostsOptions({ ...system?.(host.host), ...user?.(host.host) }, {
+      known = knownHostsOptions(evaluated.options, {
         alias: host.host,
         hostName: host.host,
         ...(host.hostKeyAlias ? { hostKeyAlias: host.hostKeyAlias } : {}),
@@ -371,25 +386,28 @@ export function setSystemSshConfigPathForTests(file: string | null): void {
 }
 
 /**
- * /etc/ssh/ssh_config with its Includes, as options for a name; null when
- * there is none. Read on each use: it is a small file.
+ * /etc/ssh/ssh_config with its Includes, parsed; null when there is none.
+ * Read on each use: it is a small file.
  */
-async function readSystemSshConfig(): Promise<((name: string) => Options) | null> {
+async function readSystemSshConfig(): Promise<ParsedEntry[] | null> {
   const file = systemSshConfigPath ?? "/etc/ssh/ssh_config";
   return readSshConfigFile(file, dirname(file));
 }
 
-function readUserSshConfig(): Promise<((name: string) => Options) | null> {
+function readUserSshConfig(): Promise<ParsedEntry[] | null> {
   return readSshConfigFile(join(homedir(), ".ssh", "config"), join(homedir(), ".ssh"));
 }
 
-async function readSshConfigFile(file: string, baseDir: string): Promise<((name: string) => Options) | null> {
+// A file that cannot be opened is absent, as ssh treats it; a line ssh
+// cannot read stays in the result and refuses every host.
+async function readSshConfigFile(file: string, baseDir: string): Promise<ParsedEntry[] | null> {
+  let entries: SourceEntry[];
   try {
-    const config = SSHConfig.parse(await readConfigWithIncludes(file, baseDir, 0, new Set()));
-    return (name) => options(config.compute(name) as Options);
+    entries = await readConfigWithIncludes(file, baseDir, 0, new Set());
   } catch {
     return null;
   }
+  return parseEntries([{ kind: "file" }, ...entries]);
 }
 
 export async function listHosts(): Promise<RemoteHostConfig[]> {

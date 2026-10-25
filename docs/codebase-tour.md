@@ -502,7 +502,12 @@ takes `user@host:port` (port 1 to 65535).
   `GlobalKnownHostsFile` from `~/.ssh/config`, else `/etc/ssh/ssh_config`,
   are read too, for a manual host or a Codara box as for a config host
   (matched by the name Codara connects to), as `knownHostsSettings` in
-  `ssh-hosts.ts` lists them).
+  `ssh-hosts.ts` lists them). Which Host and Match blocks apply is decided
+  by `ssh-config-match.ts` as OpenSSH 9.6 decides it (Match user is the
+  login, Includes keep their own scope, `Match final` rereads the files).
+  A Match criterion it cannot evaluate (exec, localnetwork) refuses the
+  host when its block could set a known-hosts setting, and a line ssh
+  cannot read refuses every host, both naming the file and line.
   `ssh-tokens.ts` expands `${VAR}` and ssh's tokens in one pass with the
   values `ssh -G` prints (OpenSSH 9.6): `%h` and a `HostKeyAlias`
   lowercased, `%j` the last ProxyJump hop's host, and a `%C` path behind a
@@ -513,7 +518,8 @@ takes `user@host:port` (port 1 to 65535).
   lines revoke the key they certify, read by `revokedByFile` in
   `host-keys.ts`) refuses the keys it revokes whatever
   the preference, and a file ssh could not read refuses the connection, as
-  ssh does. The handshake asks for the key types
+  ssh does, including a key list line it cannot read in full (a point off
+  its curve, trailing bytes, a certificate whose signature fails). The handshake asks for the key types
   known_hosts lists first, reordering ssh2's own list as OpenSSH does, and a key known_hosts lists is accepted even when Codara
   stored another of the host's keys (one per host, any type). Otherwise
   `HostKeyPrompt.tsx` asks "Is this <host>?" with the fingerprint, with a
