@@ -11,8 +11,11 @@
 // (%% %C %d %h %i %j %k %L %l %n %p %r %u) in one pass, with the values
 // `ssh -G` prints (OpenSSH 9.6): %h and a HostKeyAlias lowercased, %j the
 // last ProxyJump hop's host, %r the account name, and HostName's own %h.
-// Keywords ignore case. The GlobalKnownHostsFile of /etc/ssh/ssh_config
-// (with its Includes) counts.
+// Keywords ignore case. A value ssh cannot expand (unknown token, unset
+// variable) makes the host refuse to connect, as ssh does, instead of
+// dropping the file. RevokedHostKeys expands like UserKnownHostsFile, and
+// /etc/ssh/ssh_config (with its Includes) gives what ~/.ssh/config does not
+// set, for config hosts and any other.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -239,7 +242,7 @@ async function testKnownHostsTokens(hosts) {
     [
       "Host tok",
       "  HostName t.example",
-      '  UserKnownHostsFile %d/.ssh/kh_%h ${CODARA_TEST_KH}/x /tmp/%u_%k /tmp/100%% ${CODARA_TEST_UNSET}/y /tmp/%Z',
+      '  UserKnownHostsFile %d/.ssh/kh_%h ${CODARA_TEST_KH}/x /tmp/%u_%k /tmp/100%%',
       "Host aliased-tok",
       "  HostName a.example",
       "  HostKeyAlias keyname",
@@ -252,7 +255,7 @@ async function testKnownHostsTokens(hosts) {
   assert.deepEqual(
     byId(list, "tok").userKnownHostsFiles,
     [path.join(HOME, ".ssh", "kh_t.example"), "/srv/kh/x", `/tmp/${user}_tok`, "/tmp/100%"],
-    "tokens and variables expand; a file naming an unset variable or an unknown token is left out",
+    "tokens and variables expand",
   );
   assert.deepEqual(byId(list, "aliased-tok").userKnownHostsFiles, ["/tmp/keyname"], "%k is the HostKeyAlias when set");
 
@@ -356,33 +359,135 @@ async function testTokensAsSshExpandsThem(hosts) {
     assert.deepEqual(byId(list, "lower").userKnownHostsFiles, ["/x/l.example"]);
     assert.deepEqual(byId(list, "MixedCase").userKnownHostsFiles, ["/x/k_MixedCase"], "without HostKeyAlias, %k is the alias as written");
     assert.equal(byId(list, "literal").host, "100%.literal");
-    assert.equal(byId(list, "badname"), undefined, "ssh refuses a HostName token it does not know");
+    assert.match(byId(list, "badname").sshConfigRefusal, /^HostName "a%Zb" uses %Z, which ssh does not accept there$/);
   } finally {
     if (realUser === undefined) delete process.env.USER;
     else process.env.USER = realUser;
   }
 }
 
-async function testSystemGlobalKnownHostsFile(hosts) {
+// ssh refuses to connect when a value cannot be expanded (`ssh -G` prints
+// "unknown key %Z", "env var ${X} has no value", ...); Codara refuses too.
+async function testRefusalsAndRevokedHostKeys(hosts) {
+  delete process.env.CODARA_TEST_UNSET;
+  write(
+    ".ssh/config",
+    [
+      "Host bad-token",
+      "  UserKnownHostsFile /tmp/ok /tmp/%Z",
+      "Host unset-var",
+      "  UserKnownHostsFile ${CODARA_TEST_UNSET}/y",
+      "Host lone",
+      "  UserKnownHostsFile /tmp/a%",
+      "Host empty-var",
+      "  UserKnownHostsFile /tmp/${}",
+      "Host open-var",
+      "  UserKnownHostsFile /tmp/${HOME",
+      "Host revoked",
+      "  HostName R.example",
+      "  RevokedHostKeys ~/.ssh/revoked_%h",
+      "Host revoked-none",
+      "  RevokedHostKeys none",
+      "Host revoked-bad",
+      "  RevokedHostKeys /tmp/%Z",
+      "",
+    ].join("\n"),
+  );
+  const list = await hosts.readSshConfigHosts();
+  const refusals = {
+    "bad-token": 'UserKnownHostsFile "/tmp/%Z" uses %Z, which ssh does not accept there',
+    "unset-var": 'UserKnownHostsFile "${CODARA_TEST_UNSET}/y" uses ${CODARA_TEST_UNSET}, which is not set',
+    lone: 'UserKnownHostsFile "/tmp/a%" ends with a lone %',
+    "empty-var": 'UserKnownHostsFile "/tmp/${}" has an empty ${}',
+    "open-var": 'UserKnownHostsFile "/tmp/${HOME" has a ${ with no closing }',
+    "revoked-bad": 'RevokedHostKeys "/tmp/%Z" uses %Z, which ssh does not accept there',
+  };
+  for (const [id, refusal] of Object.entries(refusals)) {
+    const host = byId(list, id);
+    assert.equal(host.sshConfigRefusal, refusal, id);
+    assert.equal(host.userKnownHostsFiles, undefined, `${id}: no file is read in its place`);
+    assert.deepEqual(await hosts.knownHostsSettings(host), { refusal }, id);
+  }
+  assert.deepEqual(byId(list, "revoked").revokedHostKeys, [path.join(HOME, ".ssh", "revoked_r.example")]);
+  assert.equal(byId(list, "revoked-none").revokedHostKeys, undefined, "none: no file");
+  assert.deepEqual(await hosts.knownHostsSettings(byId(list, "revoked")), {
+    files: [
+      path.join(HOME, ".ssh", "known_hosts"),
+      path.join(HOME, ".ssh", "known_hosts2"),
+      "/etc/ssh/ssh_known_hosts",
+      "/etc/ssh/ssh_known_hosts2",
+    ],
+    revoked: [path.join(HOME, ".ssh", "revoked_r.example")],
+  }, "ssh's default known_hosts files");
+}
+
+async function testSystemSshConfig(hosts) {
   const etc = path.join(TMP, "etc-ssh");
   fs.mkdirSync(path.join(etc, "ssh_config.d"), { recursive: true });
   const system = path.join(etc, "ssh_config");
-  fs.writeFileSync(system, ["Include ssh_config.d/*.conf", "Host *", "  GlobalKnownHostsFile /etc/ssh/all_known", ""].join("\n"));
+  fs.writeFileSync(
+    system,
+    [
+      "Include ssh_config.d/*.conf",
+      "Host *",
+      "  GlobalKnownHostsFile /etc/ssh/all_known",
+      "  UserKnownHostsFile /etc/ssh/users/%r_%h",
+      "  RevokedHostKeys /etc/ssh/revoked",
+      "",
+    ].join("\n"),
+  );
   fs.writeFileSync(
     path.join(etc, "ssh_config.d", "corp.conf"),
     ["Host *.corp", "  GlobalKnownHostsFile /etc/ssh/corp_known /etc/ssh/corp_known2", ""].join("\n"),
   );
+  write(
+    ".ssh/config",
+    [
+      "Host cfg",
+      "  HostName NAS.corp",
+      "  User dev",
+      "Host own-file",
+      "  HostName own.corp",
+      "  UserKnownHostsFile ~/.ssh/own_known",
+      "",
+    ].join("\n"),
+  );
+  const manual = { id: "nas", host: "nas.corp", port: 22, username: "ops", source: "manual" };
   hosts.setSystemSshConfigPathForTests(system);
   try {
-    assert.deepEqual(await hosts.systemGlobalKnownHostsFiles("nas.corp"), ["/etc/ssh/corp_known", "/etc/ssh/corp_known2"], "an Include relative to /etc/ssh, first match wins");
-    assert.deepEqual(await hosts.systemGlobalKnownHostsFiles("other"), ["/etc/ssh/all_known"]);
+    assert.deepEqual(await hosts.knownHostsSettings(manual), {
+      files: ["/etc/ssh/users/ops_nas.corp", "/etc/ssh/corp_known", "/etc/ssh/corp_known2"],
+      revoked: ["/etc/ssh/revoked"],
+    }, "any host: an Include relative to /etc/ssh, first match wins, tokens expand");
+    const list = await hosts.readSshConfigHosts();
+    assert.deepEqual(await hosts.knownHostsSettings(byId(list, "cfg")), {
+      files: ["/etc/ssh/users/dev_nas.corp", "/etc/ssh/all_known"],
+      revoked: ["/etc/ssh/revoked"],
+    }, "a config host is matched by its alias, as ssh matches Host lines");
+    assert.deepEqual(
+      (await hosts.knownHostsSettings(byId(list, "own-file"))).files,
+      [path.join(HOME, ".ssh", "own_known"), "/etc/ssh/all_known"],
+      "~/.ssh/config wins over the system's",
+    );
+
+    fs.writeFileSync(system, "Host *.corp\n  GlobalKnownHostsFile none\n  UserKnownHostsFile /etc/%Z\n");
+    assert.deepEqual(await hosts.knownHostsSettings(manual), {
+      refusal: 'UserKnownHostsFile "/etc/%Z" uses %Z, which ssh does not accept there',
+    }, "ssh refuses the system's value too");
     fs.writeFileSync(system, "Host *.corp\n  GlobalKnownHostsFile none\n");
-    assert.deepEqual(await hosts.systemGlobalKnownHostsFiles("nas.corp"), []);
-    assert.equal(await hosts.systemGlobalKnownHostsFiles("other"), undefined, "unset keeps ssh's defaults");
+    assert.deepEqual((await hosts.knownHostsSettings(manual)).files, [
+      path.join(HOME, ".ssh", "known_hosts"),
+      path.join(HOME, ".ssh", "known_hosts2"),
+    ], "none reads no system file; unset keeps the user's defaults");
     fs.rmSync(system);
-    assert.equal(await hosts.systemGlobalKnownHostsFiles("other"), undefined, "no system config: defaults");
+    assert.deepEqual((await hosts.knownHostsSettings(manual)).files, [
+      path.join(HOME, ".ssh", "known_hosts"),
+      path.join(HOME, ".ssh", "known_hosts2"),
+      "/etc/ssh/ssh_known_hosts",
+      "/etc/ssh/ssh_known_hosts2",
+    ], "no system config: ssh's defaults");
   } finally {
-    hosts.setSystemSshConfigPathForTests(null);
+    hosts.setSystemSshConfigPathForTests(path.join(TMP, "no-system-ssh-config"));
   }
 }
 
@@ -400,6 +505,8 @@ async function testOnlyMainSetsProxy(hosts) {
     hostKeyAlias: "x",
     userKnownHostsFiles: ["/tmp/attacker_known_hosts"],
     globalKnownHostsFiles: ["/tmp/attacker_known_hosts"],
+    revokedHostKeys: ["/tmp/attacker_revoked"],
+    sshConfigRefusal: "forged",
   };
   const saved = await hosts.saveManualHost(forged);
   const entry = byId(saved, "forged");
@@ -410,6 +517,8 @@ async function testOnlyMainSetsProxy(hosts) {
     "hostKeyAlias",
     "userKnownHostsFiles",
     "globalKnownHostsFiles",
+    "revokedHostKeys",
+    "sshConfigRefusal",
   ]) {
     assert.equal(entry[field], undefined, `${field} must not survive saveManualHost`);
   }
@@ -442,6 +551,8 @@ async function testOnlyMainSetsProxy(hosts) {
 
 (async () => {
   const hosts = await load("ssh-hosts", "src/main/remote/ssh-hosts.ts");
+  // The machine's own /etc/ssh/ssh_config must not change what these expect.
+  hosts.setSystemSshConfigPathForTests(path.join(TMP, "no-system-ssh-config"));
   const proxy = await load("proxy-command", "src/main/remote/proxy-command.ts");
   await testInclude(hosts);
   await testDepthLimit(hosts);
@@ -449,7 +560,8 @@ async function testOnlyMainSetsProxy(hosts) {
   await testPortsAndKnownHostsFiles(hosts);
   await testKnownHostsTokens(hosts);
   await testTokensAsSshExpandsThem(hosts);
-  await testSystemGlobalKnownHostsFile(hosts);
+  await testRefusalsAndRevokedHostKeys(hosts);
+  await testSystemSshConfig(hosts);
   await testOnlyMainSetsProxy(hosts);
   console.log("ssh config include: ok");
 })()

@@ -14,7 +14,7 @@ import type {
 } from "@shared/remote";
 import { writeFileAtomic } from "../fs-atomic";
 import { codaraHome } from "../codara-home";
-import { getHost, systemGlobalKnownHostsFiles } from "./ssh-hosts";
+import { getHost, knownHostsSettings, type KnownHostsSettings } from "./ssh-hosts";
 import { openProxySocket, resolveProxyInvocation, type ProxySocket } from "./proxy-command";
 import { wakeCodaraBox } from "./codara-boxes";
 import { abortableDelay, clearFreshBoxKey, nextFreshKeyDelayMs } from "./box-key-retry";
@@ -25,6 +25,8 @@ import {
   hostKeyType,
   knownHostTypes,
   knownHostsVerdict,
+  revokedByFile,
+  RevokedKeysFormatError,
   sshFingerprint,
   type KnownHostsVerdict,
   storedFingerprint,
@@ -323,24 +325,37 @@ function promptHostKey(request: Omit<HostKeyPromptRequest, "requestId">, signal:
   });
 }
 
-/**
- * The known_hosts files ssh reads for this host, read only: the user's, then
- * the system's (from ~/.ssh/config, else /etc/ssh/ssh_config, else ssh's
- * defaults).
- */
-async function readUserKnownHosts(host: RemoteHostConfig): Promise<string> {
-  const global =
-    host.globalKnownHostsFiles ??
-    (await systemGlobalKnownHostsFiles(host.source === "ssh-config" ? host.id : host.host)) ?? [
-      "/etc/ssh/ssh_known_hosts",
-      "/etc/ssh/ssh_known_hosts2",
-    ];
-  const files = [
-    ...(host.userKnownHostsFiles ?? ["known_hosts", "known_hosts2"].map((name) => join(homedir(), ".ssh", name))),
-    ...global,
-  ];
-  const texts = await Promise.all(files.map((file) => fs.readFile(file, "utf8").catch(() => "")));
+type KnownHostsFiles = Exclude<KnownHostsSettings, { refusal: string }>;
+
+/** The known_hosts files ssh reads for this host, read only. */
+async function readUserKnownHosts(known: KnownHostsFiles): Promise<string> {
+  const texts = await Promise.all(known.files.map((file) => fs.readFile(file, "utf8").catch(() => "")));
   return texts.join("\n");
+}
+
+/**
+ * Why RevokedHostKeys refuses `key`, or null. ssh refuses a key the file
+ * revokes, and refuses to connect when it cannot read the file at all.
+ */
+async function revokedHostKeysRefusal(known: KnownHostsFiles, key: Buffer, id: string): Promise<string | null> {
+  if (!known.revoked) return null;
+  let read = false;
+  for (const file of known.revoked) {
+    let data: Buffer;
+    try {
+      data = await fs.readFile(file);
+    } catch {
+      continue;
+    }
+    read = true;
+    try {
+      if (revokedByFile(data, key)) return `The host key of ${id} is revoked by ${file} (RevokedHostKeys).`;
+    } catch (err) {
+      if (!(err instanceof RevokedKeysFormatError)) throw err;
+      return `RevokedHostKeys ${file} ${err.message}, so ssh would not connect to ${id} either.`;
+    }
+  }
+  return read ? null : `RevokedHostKeys ${known.revoked[0]} cannot be read, so ssh would not connect to ${id} either.`;
 }
 
 /**
@@ -503,6 +518,14 @@ class RemoteConnection {
     this.hostKeyChange = null;
     this.hostKeyRefusal = null;
     this.setState("connecting");
+    const known = await knownHostsSettings(host);
+    this.assertCurrent(generation, signal);
+    // ssh stops before connecting, whatever the confirmation setting.
+    if ("refusal" in known) {
+      const message = `Your ssh config stops ssh from connecting to ${host.id}: ${known.refusal}.`;
+      this.setState("error", message);
+      throw new Error(`SSH connection to ${host.id} failed: ${message}`);
+    }
     const { utils: sshUtils } = await loadSsh2();
     this.assertCurrent(generation, signal);
 
@@ -611,7 +634,7 @@ class RemoteConnection {
       lastErr = null;
       for (const attempt of attempts) {
         try {
-          const client = await this.tryConnect(attempt.cfg, generation, signal);
+          const client = await this.tryConnect(attempt.cfg, known, generation, signal);
           if (host.codaraBoxId) clearFreshBoxKey(host.id);
           this.adopt(client, generation, signal);
           return client;
@@ -662,6 +685,7 @@ class RemoteConnection {
               password: answer.value,
               tryKeyboard: true,
             },
+            known,
             generation,
             signal,
           );
@@ -686,13 +710,14 @@ class RemoteConnection {
 
   private async tryConnect(
     auth: Partial<ConnectConfig>,
+    known: KnownHostsFiles,
     generation: number,
     signal: AbortSignal,
   ): Promise<Client> {
     const host = this.host;
     const { Client } = await loadSsh2();
     this.assertCurrent(generation, signal);
-    const plan = await this.hostKeyPlan();
+    const plan = await this.hostKeyPlan(known);
     const mayAskHostKey = plan.mayAsk;
     this.assertCurrent(generation, signal);
     return new Promise((resolve, reject) => {
@@ -815,7 +840,7 @@ class RemoteConnection {
           tryKeyboard: typeof auth.password === "string",
           hostVerifier: (key: Buffer, verified: (ok: boolean) => void) => {
             reached();
-            void this.verifyHostKey(key, generation, attempt.signal).then(verified);
+            void this.verifyHostKey(key, known, generation, attempt.signal).then(verified);
           },
           ...auth,
         });
@@ -831,12 +856,14 @@ class RemoteConnection {
    * algorithms to offer: with confirmation on, the types known_hosts lists for
    * the host come first, as OpenSSH orders them.
    */
-  private async hostKeyPlan(): Promise<{ mayAsk: boolean; serverHostKey: ServerHostKeyAlgorithm[] | null }> {
+  private async hostKeyPlan(
+    settings: KnownHostsFiles,
+  ): Promise<{ mayAsk: boolean; serverHostKey: ServerHostKeyAlgorithm[] | null }> {
     const host = this.host;
     if (host.codaraBoxId || !(await confirmNewHostKeys())) return { mayAsk: false, serverHostKey: null };
     const known = await readKnownHosts();
     const { name, port } = knownHostsName(host);
-    const types = knownHostTypes(await readUserKnownHosts(host), name, port);
+    const types = knownHostTypes(await readUserKnownHosts(settings), name, port);
     const available = types.length > 0 ? await loadHostKeyDefaults() : null;
     // hostKeyAlgorithms only reorders ssh2's own default list.
     const serverHostKey = available ? (hostKeyAlgorithms(types, available) as ServerHostKeyAlgorithm[]) : null;
@@ -845,6 +872,7 @@ class RemoteConnection {
 
   private async verifyHostKey(
     key: Buffer,
+    settings: KnownHostsFiles,
     generation: number,
     signal: AbortSignal,
   ): Promise<boolean> {
@@ -858,12 +886,19 @@ class RemoteConnection {
     const prior = known[id];
     const confirm = !host.codaraBoxId && (await confirmNewHostKeys());
     if (!this.isCurrent(generation, signal)) return false;
+    // ssh checks RevokedHostKeys first, even with StrictHostKeyChecking=no.
+    const revokedBy = await revokedHostKeysRefusal(settings, key, id);
+    if (!this.isCurrent(generation, signal)) return false;
+    if (revokedBy) {
+      this.hostKeyRefusal = revokedBy;
+      return false;
+    }
     // Read before trusting even a stored key: the user may have revoked it
     // in known_hosts since. A revoked key loses whatever the confirmation
     // setting; with it off, known_hosts is read for nothing else. OpenSSH
     // looks a HostKeyAlias up without the port.
     const { name, port } = knownHostsName(host);
-    const listed = knownHostsVerdict(await readUserKnownHosts(host), name, port, key);
+    const listed = knownHostsVerdict(await readUserKnownHosts(settings), name, port, key);
     if (!this.isCurrent(generation, signal)) return false;
     if (listed.kind === "revoked") {
       this.hostKeyRefusal = `The host key of ${id} is marked revoked in known_hosts.`;

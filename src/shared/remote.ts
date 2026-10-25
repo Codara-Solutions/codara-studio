@@ -78,11 +78,15 @@ export interface RemoteHostConfig {
   /** Codara Cloud box id; the box is woken before the SSH handshake. */
   codaraBoxId?: string;
   /**
-   * UserKnownHostsFile / GlobalKnownHostsFile from ~/.ssh/config, read for
-   * the host-key check; unset means ssh's defaults. Main only, like the proxy.
+   * UserKnownHostsFile / GlobalKnownHostsFile / RevokedHostKeys from
+   * ~/.ssh/config, else /etc/ssh/ssh_config, expanded, read for the host-key
+   * check; unset means ssh's defaults. Main only, like the proxy.
    */
   userKnownHostsFiles?: string[];
   globalKnownHostsFiles?: string[];
+  revokedHostKeys?: string[];
+  /** Why ssh would refuse to connect with this host's config; Codara refuses too. Main only. */
+  sshConfigRefusal?: string;
 }
 
 export type RemoteConnectionState = "disconnected" | "connecting" | "connected" | "error";

@@ -43,8 +43,13 @@
 //   - a line with a marker OpenSSH does not know is skipped; a host only a
 //     @cert-authority line covers gets a louder question (no certificates
 //     here); the host key algorithms offered are ssh2's own, reordered
-//   - two first-use answers for one address never both win; the
-//     GlobalKnownHostsFile of /etc/ssh/ssh_config is read
+//   - two first-use answers for one address never both win; the known_hosts
+//     files ssh-hosts names (ssh_config, else ssh's defaults) are read
+//   - a host whose ssh config ssh would refuse (a token or variable it cannot
+//     expand) is refused before any connection, whatever the setting
+//   - RevokedHostKeys, a KRL or a key list, refuses the keys it revokes
+//     whatever the setting, even one Codara stored; a file ssh cannot read
+//     refuses the connection, as ssh does
 //
 //   node scripts/test-host-keys.cjs
 
@@ -115,8 +120,15 @@ function connectionStubs() {
       export async function getHost(hostId) {
         return globalThis.__codaraHostKeyHarness.hosts[hostId] ?? null;
       }
-      export async function systemGlobalKnownHostsFiles(name) {
-        return globalThis.__codaraHostKeyHarness.systemGlobal[name];
+      export async function knownHostsSettings(host) {
+        const h = globalThis.__codaraHostKeyHarness;
+        return h.settings[host.id] ?? {
+          files: [
+            ...(host.userKnownHostsFiles ?? ["/home/me/.ssh/known_hosts", "/home/me/.ssh/known_hosts2"]),
+            ...(host.globalKnownHostsFiles ?? ["/etc/ssh/ssh_known_hosts", "/etc/ssh/ssh_known_hosts2"]),
+          ],
+          revoked: host.revokedHostKeys ?? null,
+        };
       }
     `,
     "ssh2/lib/protocol/constants.js": `
@@ -142,14 +154,15 @@ function connectionStubs() {
     "node:fs": `
       export const existsSync = () => false;
       export const promises = {
-        async readFile(file) {
+        async readFile(file, encoding) {
           const text = globalThis.__codaraHostKeyHarness.files.get(String(file));
           if (text === undefined) {
             const error = new Error("ENOENT");
             error.code = "ENOENT";
             throw error;
           }
-          return text;
+          if (encoding) return String(text);
+          return Buffer.isBuffer(text) ? text : Buffer.from(text);
         },
       };
     `,
@@ -266,7 +279,7 @@ function hasSshKeygen() {
   }
 
   const harness = {
-    systemGlobal: {},
+    settings: {},
     defaultAlgorithms: [
       "ssh-ed25519",
       "ecdsa-sha2-nistp256",
@@ -332,7 +345,7 @@ function hasSshKeygen() {
     harness.clients.length = 0;
     harness.serverKey = key;
     harness.unreachable = false;
-    harness.systemGlobal = {};
+    harness.settings = {};
     closed.length = 0;
   };
 
@@ -775,19 +788,14 @@ function hasSshKeygen() {
     reset();
     confirm = true;
     answer = true;
-    harness.systemGlobal["nas.local"] = ["/etc/ssh/corp_known"];
+    harness.settings.nas = { files: ["/etc/ssh/corp_known"], revoked: null };
     harness.files.set("/etc/ssh/corp_known", `nas.local ssh-ed25519 ${other.toString("base64")}\n`);
+    harness.files.set("/home/me/.ssh/known_hosts", `nas.local ssh-ed25519 ${b64}\n`);
     const corp = await connect("nas");
-    assert.equal(corp.state, "error", "the system ssh_config's GlobalKnownHostsFile is read");
+    assert.equal(corp.state, "error", "the files ssh-hosts names are the ones read");
     assert.equal(corp.hostKeyChange?.previousFingerprint, keys.sshFingerprint(other));
     assert.equal(harness.prompts.length, 0);
-
-    reset();
-    harness.systemGlobal.aliased = ["/etc/ssh/corp_known"];
-    harness.files.set("/etc/ssh/corp_known", `builder ssh-ed25519 ${b64}\n`);
-    assert.equal((await connect("aliased")).state, "connected");
-    assert.equal(harness.prompts.length, 0, "a config host is matched by its alias, as ssh matches Host lines");
-    ok("the GlobalKnownHostsFile from /etc/ssh/ssh_config is read");
+    ok("the known_hosts files ssh-hosts names are read, and only those");
   }
 
   {
@@ -811,6 +819,84 @@ function hasSshKeygen() {
     assert.equal((await connect("nas")).state, "connected", "off otherwise keeps trust on first use, as before");
     confirm = true;
     ok("a key known_hosts revokes is refused whatever the confirmation setting");
+  }
+
+  {
+    for (const setting of [true, false]) {
+      reset();
+      confirm = setting;
+      answer = true;
+      harness.settings.nas = { refusal: 'UserKnownHostsFile "/x/%Z" uses %Z, which ssh does not accept there' };
+      const refused = await connect("nas");
+      assert.equal(refused.state, "error");
+      assert.match(refused.error, /ssh config stops ssh from connecting to nas: UserKnownHostsFile "\/x\/%Z" uses %Z/);
+      assert.equal(harness.connects.length, 0, "refused before any connection");
+      assert.equal(harness.prompts.length, 0);
+      assert.deepEqual(stored(), {});
+    }
+    ok("a host whose ssh config ssh would refuse is refused before connecting, whatever the setting");
+  }
+
+  {
+    const u32 = (n) => {
+      const b = Buffer.alloc(4);
+      b.writeUInt32BE(n);
+      return b;
+    };
+    const str = (b) => Buffer.concat([u32(b.length), Buffer.from(b)]);
+    const krl = (...sections) =>
+      Buffer.concat([Buffer.from("SSHKRL\n\0", "latin1"), u32(1), Buffer.alloc(24), str(""), str(""), ...sections]);
+    const section = (type, body) => Buffer.concat([Buffer.from([type]), str(body)]);
+    const revokedFile = "/home/me/.ssh/revoked";
+    const withRevoked = (revoked) => {
+      harness.settings.nas = { files: ["/home/me/.ssh/known_hosts"], revoked };
+    };
+    const cases = [
+      ["a key list naming the key", `# revoked\n\nssh-ed25519 ${b64} old\n`, "revoked"],
+      ["a key list naming another key", `ssh-ed25519 ${other.toString("base64")}\n`, "connected"],
+      ["a key list with a line ssh cannot read", "not a key\n", "unreadable"],
+      ["a KRL by key", krl(section(2, str(key))), "revoked"],
+      ["a KRL by SHA-256", krl(section(5, str(createHash("sha256").update(key).digest()))), "revoked"],
+      ["a KRL by SHA-1", krl(section(3, str(createHash("sha1").update(key).digest()))), "revoked"],
+      ["a KRL of another key", krl(section(2, str(other))), "connected"],
+      ["an empty KRL", krl(), "connected"],
+      ["a truncated KRL", krl(section(2, str(key))).subarray(0, -3), "unreadable"],
+      ["a KRL with a critical extension", krl(section(255, Buffer.concat([str("x@example.com"), Buffer.from([1]), str("")]))), "unreadable"],
+    ];
+    for (const setting of [true, false]) {
+      for (const [name, data, expected] of cases) {
+        reset();
+        confirm = setting;
+        answer = true;
+        withRevoked([revokedFile]);
+        harness.files.set(revokedFile, data);
+        // Listed and stored, so only RevokedHostKeys can refuse it.
+        harness.files.set("/home/me/.ssh/known_hosts", `nas.local ssh-ed25519 ${b64}\n`);
+        harness.files.set(KNOWN, JSON.stringify({ "nas.local:22": keys.storedFingerprint(key) }));
+        const status = await connect("nas");
+        const label = `${name}, confirmation ${setting ? "on" : "off"}`;
+        if (expected === "connected") {
+          assert.equal(status.state, "connected", label);
+          continue;
+        }
+        assert.equal(status.state, "error", label);
+        assert.match(status.error, expected === "revoked" ? /revoked by \/home\/me\/\.ssh\/revoked/ : /RevokedHostKeys \/home\/me\/\.ssh\/revoked .*ssh would not connect/, label);
+        assert.equal(harness.prompts.length, 0, label);
+      }
+    }
+
+    reset();
+    confirm = true;
+    withRevoked([revokedFile]);
+    const missing = await connect("nas");
+    assert.equal(missing.state, "error");
+    assert.match(missing.error, /RevokedHostKeys \/home\/me\/\.ssh\/revoked cannot be read/, "ssh refuses a file it cannot read");
+
+    reset();
+    withRevoked(["/home/me/.ssh/revoked_new", revokedFile]);
+    harness.files.set(revokedFile, `ssh-ed25519 ${b64}\n`);
+    assert.equal((await connect("nas")).state, "error", "either %C candidate may revoke the key");
+    ok("RevokedHostKeys refuses what it revokes, and a file ssh cannot read, whatever the setting");
   }
 
   reset();
