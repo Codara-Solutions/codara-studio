@@ -17,6 +17,7 @@ import {
 } from "./preview-tools";
 import { getTrustedMainWindow } from "./main-window-trust";
 import { processChain } from "./owned-process-tree";
+import { CallerPaneResolver } from "./caller-pane";
 import { processCwds } from "./pi-session-tracker";
 import { requestTerminalOp } from "./terminal-bridge";
 import {
@@ -110,7 +111,7 @@ import { normalizePiAccountProfileId } from "./orchestration/pi-account-executio
 import { effectiveChatMode } from "@shared/chat-policy";
 import { normalizeTabGroupName } from "@shared/tab-group-name";
 import { groupLink, tabLink } from "@shared/tab-links";
-import { restoredAgentTerminal, type TerminalAgentOwner } from "@shared/agent-terminal-owner";
+import { callerAgentSession, restoredAgentTerminal, type TerminalAgentOwner } from "@shared/agent-terminal-owner";
 import { DEFAULT_PREFERENCES } from "@shared/types";
 import { whiteboardIssues } from "@shared/whiteboard-quality";
 import {
@@ -1161,6 +1162,13 @@ interface StudioTerminalListing {
   groupId?: string;
   agentOwner?: TerminalAgentOwner;
   agentSessionId?: string;
+  agentSessionRuntime?: string;
+}
+
+// The agent CLI session the caller's pane runs now (shared/agent-terminal-owner.ts).
+function paneAgentSession(entry: StudioTerminalListing | undefined): { sessionId: string | null; captured: boolean } {
+  const live = entry ? terminalAgentStateSnapshot().find((state) => state.paneId === entry.paneId)?.runtime : null;
+  return callerAgentSession(entry, live);
 }
 
 const CALLER_PLACEMENT_CACHE_MS = 5_000;
@@ -1187,7 +1195,7 @@ async function resolveTerminalCaller(
   const paneId = await resolveCallerPaneId(params);
   if (!paneId || !withSession) return { paneId, sessionId: null };
   const listed = (await listStudioTerminals().catch(() => [])).find((entry) => entry.paneId === paneId);
-  return { paneId, sessionId: listed?.agentSessionId ?? null };
+  return { paneId, sessionId: paneAgentSession(listed).sessionId };
 }
 
 // The caller, looked up only for a terminal a run-less agent opened, so writes
@@ -1259,7 +1267,7 @@ async function handleTerminalList(
     ? null
     : {
         paneId: caller?.paneId ?? null,
-        sessionId: (caller && inventory.find((entry) => entry.paneId === caller.paneId)?.agentSessionId) || null,
+        sessionId: caller ? paneAgentSession(inventory.find((entry) => entry.paneId === caller.paneId)).sessionId : null,
       };
   const panes = inventory
     .filter((entry) => !workspaceId || entry.workspaceId === workspaceId)
@@ -1405,22 +1413,21 @@ async function handleShareOffer(
   });
 }
 
-// The pane the calling agent runs in, so its new terminal opens beside it
-// instead of in whichever workspace is on screen. Only placement follows from
-// it, never ownership. The MCP server sends the pane id when the CLI passed
-// its environment through and always its own pid, which reaches the pane
-// through the process tree when it did not.
-async function resolveCallerPaneId(params: Record<string, unknown>): Promise<string | null> {
-  const hinted = stringParam(params, "callerPaneId");
-  if (hinted && pty.hasSession(hinted)) return hinted;
-  const callerPid = params.callerPid;
-  if (typeof callerPid !== "number" || !Number.isSafeInteger(callerPid)) return null;
+// The pane the calling agent runs in: its new terminal opens beside it, and
+// what it opened from there is its own (caller-pane.ts). The MCP server sends
+// the pane id when the CLI passed its environment through and always its own
+// pid; with a pid, only the pane the pid runs in counts.
+const callerPanes = new CallerPaneResolver({
+  hasSession: (paneId) => pty.hasSession(paneId),
   // A reused listing can predate a freshly started MCP server; read a new one
   // before giving up.
-  const chain =
-    (await processChain(callerPid, CALLER_PROCESS_LIST_MAX_AGE_MS).catch(() => null)) ??
-    (await processChain(callerPid).catch(() => null));
-  return chain ? pty.sessionForProcessChain(chain) : null;
+  processChain: async (pid) =>
+    (await processChain(pid, CALLER_PROCESS_LIST_MAX_AGE_MS).catch(() => null)) ?? (await processChain(pid)),
+  sessionForProcessChain: (chain) => pty.sessionForProcessChain(chain),
+});
+
+function resolveCallerPaneId(params: Record<string, unknown>): Promise<string | null> {
+  return callerPanes.resolve(params);
 }
 
 // Where the caller's processes are right now, from its MCP server up to its
@@ -1460,8 +1467,9 @@ function openingAgentOwner(
     const workspaceId = run.workspaceId ?? targetWorkspaceId;
     return workspaceId ? { workspaceId, runId: run.id, ...retention } : null;
   }
-  return callerPane?.agentSessionId
-    ? { workspaceId: callerPane.workspaceId, sessionId: callerPane.agentSessionId, ...retention }
+  const session = paneAgentSession(callerPane);
+  return callerPane && session.captured && session.sessionId
+    ? { workspaceId: callerPane.workspaceId, sessionId: session.sessionId, ...retention }
     : null;
 }
 
@@ -1481,7 +1489,7 @@ async function adoptRestoredAgentTerminal(paneId: string, params: Record<string,
   const registration = restoredAgentTerminal(entry, {
     runId,
     paneId: callerPaneId,
-    sessionId: caller?.agentSessionId ?? null,
+    sessionId: paneAgentSession(caller).sessionId,
     workspaceId: caller?.workspaceId ?? null,
   });
   if (!registration || agentTerminals.knows(paneId)) return;
@@ -1650,6 +1658,7 @@ async function handleTerminalCreate(
       ? (await listStudioTerminals().catch(() => [])).find((entry) => entry.paneId === callerPaneId)
       : undefined;
   const agentOwner = openingAgentOwner(run, workspaceId, callerPane, rawRetention === "service");
+  const openerSession = paneAgentSession(callerPane);
   try {
     const result = await requestTerminalOp<{ tabId: string; paneId: string; cwd: string; group?: string }>(
       "create",
@@ -1722,7 +1731,7 @@ async function handleTerminalCreate(
       runId,
       retention: rawRetention === "service" ? "service" : "temporary",
       ...(!runId && callerPaneId ? { ownerPaneId: callerPaneId } : {}),
-      ...(!runId && callerPane?.agentSessionId ? { ownerSessionId: callerPane.agentSessionId } : {}),
+      ...(!runId && openerSession.captured && openerSession.sessionId ? { ownerSessionId: openerSession.sessionId } : {}),
     };
     if (!registerAgentTerminal(registration)) {
       // The run settled/deleted while its renderer tab was spawning. The
@@ -1899,8 +1908,16 @@ async function scopePreviewToCaller(params: Record<string, unknown>): Promise<vo
     callerPaneId = placement?.paneId ?? (await resolveCallerPaneId(params));
   }
   delete params.callerPid;
-  if (callerPaneId) params.callerPaneId = callerPaneId;
-  else delete params.callerPaneId;
+  delete params.callerSessionId;
+  if (callerPaneId) {
+    params.callerPaneId = callerPaneId;
+    // What the caller opens is its session's as well as its pane's.
+    const listed = (await listStudioTerminals().catch(() => [])).find((entry) => entry.paneId === callerPaneId);
+    const session = paneAgentSession(listed).sessionId;
+    if (session) params.callerSessionId = session;
+  } else {
+    delete params.callerPaneId;
+  }
 }
 
 const PREVIEW_TOOL_HOST: PreviewToolHost = {

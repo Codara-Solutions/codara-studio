@@ -653,8 +653,20 @@ without the user's approval; `codara_terminal_read` works as for any pane.
 Another agent in another pane, or a new agent started in the opener's pane,
 is refused. When both sessions are known the session decides, so the same
 session resumed in another pane keeps its terminals; before the session is
-captured the pane decides. A terminal opened by a caller outside any pane
-(the `cora` CLI) belongs to such callers only. A Cora run's terminal stays
+captured the pane decides. A pane keeps its last agent's session id for
+resume, so while Codara sees a different agent CLI running there than the
+one that session belongs to, the caller counts as that new agent, whose
+session is not captured yet, and owns none of the old one's terminals.
+Browser tabs an agent opens follow the same rule for `codara_tab`.
+
+The caller's pane comes from its process tree: the MCP server sends its pid
+and the pane id its environment names, and Codara accepts only the pane
+whose shell that pid descends from. A process outside that pane that names
+it (pane ids are listed by `codara_terminal_list`) counts as outside every
+pane. An agent started under a terminal multiplexer such as tmux runs under
+the multiplexer's server, not the pane's shell, so it counts as outside
+every pane too. A terminal opened by a caller outside any pane (the `cora`
+CLI) belongs to such callers only. A Cora run's terminal stays
 owned by the run and closes with it. A dev server Codara keeps
 (`codara_terminal_servers`) belongs to its workspace.
 

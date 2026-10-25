@@ -68,6 +68,7 @@ export interface ShareableStudioTerminal {
   // the agent CLI session running in it.
   agentOwner?: TerminalAgentOwner;
   agentSessionId?: string;
+  agentSessionRuntime?: string;
 }
 
 type ListShareableStudioTerminalsFn = () => ShareableStudioTerminal[];

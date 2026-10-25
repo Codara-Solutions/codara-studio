@@ -21,6 +21,24 @@ export interface TerminalAgentCaller {
 }
 
 const ID = /^[A-Za-z0-9_.:-]{1,200}$/;
+const UNCAPTURED = "uncaptured:";
+
+// The agent CLI session a caller's pane runs, for ownership. A pane keeps its
+// last agent's session id for resume, so when Codara sees a different agent
+// CLI running there now, the caller is that agent, whose session it has not
+// captured yet: a placeholder that matches no recorded owner and is never
+// recorded as one (captured: false).
+export function callerAgentSession(
+  pane: { agentSessionId?: string; agentSessionRuntime?: string } | undefined,
+  liveRuntime: string | null | undefined,
+): { sessionId: string | null; captured: boolean } {
+  const sessionId = pane?.agentSessionId ?? null;
+  if (!sessionId || sessionId.startsWith(UNCAPTURED)) return { sessionId: null, captured: false };
+  if (liveRuntime && pane?.agentSessionRuntime && liveRuntime !== pane.agentSessionRuntime) {
+    return { sessionId: `${UNCAPTURED}${liveRuntime}`, captured: false };
+  }
+  return { sessionId, captured: true };
+}
 
 // The layout is user-editable localStorage: keep only a well-formed record.
 export function sanitizeTerminalAgentOwner(value: unknown): TerminalAgentOwner | null {
@@ -28,7 +46,8 @@ export function sanitizeTerminalAgentOwner(value: unknown): TerminalAgentOwner |
   const raw = value as Record<string, unknown>;
   const workspaceId = typeof raw.workspaceId === "string" && ID.test(raw.workspaceId) ? raw.workspaceId : null;
   const runId = typeof raw.runId === "string" && ID.test(raw.runId) ? raw.runId : null;
-  const sessionId = typeof raw.sessionId === "string" && ID.test(raw.sessionId) ? raw.sessionId : null;
+  const sessionId =
+    typeof raw.sessionId === "string" && ID.test(raw.sessionId) && !raw.sessionId.startsWith(UNCAPTURED) ? raw.sessionId : null;
   if (!workspaceId || (!runId && !sessionId)) return null;
   return {
     workspaceId,

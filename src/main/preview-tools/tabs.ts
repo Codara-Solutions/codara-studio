@@ -87,10 +87,13 @@ async function tabAction(params: Record<string, unknown>, _method: string, host:
   if (direction !== "right" && direction !== "down") throw new PreviewToolParamsError("direction must be right or down.");
   const located = await callerWorkspace(params, host, "codara_tab");
   if ("refusal" in located) return { ok: false, ...located.refusal };
+  const runId = typeof params.runId === "string" && params.runId ? params.runId : null;
   const caller: TabActionCaller = {
     workspaceId: located.workspaceId,
-    runId: typeof params.runId === "string" && params.runId ? params.runId : null,
+    runId,
     paneId: typeof params.callerPaneId === "string" && params.callerPaneId ? params.callerPaneId : null,
+    // Stamped by the socket from the caller's verified pane.
+    sessionId: !runId && typeof params.callerSessionId === "string" && params.callerSessionId ? params.callerSessionId : null,
   };
   const ref = readTarget(params.link, caller.workspaceId);
   const link = linkOf(ref);

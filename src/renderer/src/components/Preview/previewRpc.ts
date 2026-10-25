@@ -291,7 +291,7 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
     const callerPaneId = readString(params, "callerPaneId");
     const reusable = findReusablePreviewTab(runId, workspaceId, callerPaneId);
     if (reusable) assertDriverAllowed(reusable.id, driver);
-    ({ tab, opened } = await ensurePreviewTab(url, runId, workspaceId, callerPaneId, group));
+    ({ tab, opened } = await ensurePreviewTab(url, runId, workspaceId, callerPaneId, group, readString(params, "callerSessionId")));
   } else {
     throw new Error("navigate requires 'url'");
   }

@@ -57,6 +57,15 @@ async function main() {
   assert.ok(decision.approval, "a browser tab the user opened needs approval");
   decision = await decideTabAction("close", target([myBrowser]), { ...caller, runId: "run-1" }, "ws", deps);
   assert.ok(decision.approval, "a run does not own a tab its pane opened outside that run");
+  const claudeBrowser = { tabId: "p-3", kind: "preview", title: "app", openedBy: { paneId: "caller-pane", sessionId: "s-claude" } };
+  decision = await decideTabAction("close", target([claudeBrowser]), { ...caller, sessionId: "s-claude" }, "ws", deps);
+  assert.equal(decision.approval, null, "the session that opened a browser tab closes it");
+  decision = await decideTabAction("close", target([claudeBrowser]), { ...caller, sessionId: "s-codex" }, "ws", deps);
+  assert.ok(decision.approval, "Codex started in Claude's pane does not inherit Claude's browser tabs");
+  decision = await decideTabAction("close", target([claudeBrowser]), { ...caller, paneId: "pane-2", sessionId: "s-claude" }, "ws", deps);
+  assert.equal(decision.approval, null, "the same session resumed in another pane keeps them");
+  decision = await decideTabAction("close", target([claudeBrowser]), { ...caller, sessionId: null }, "ws", deps);
+  assert.equal(decision.approval, null, "before the caller's session is captured, its pane decides");
 
   decision = await decideTabAction("close", group([self, mine]), caller, "ws", deps);
   assert.deepEqual(decision.tabIds, ["t-mine"]);

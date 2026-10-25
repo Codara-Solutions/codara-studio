@@ -1,7 +1,7 @@
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import { _electron as electron, type ElectronApplication } from "playwright";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -14,6 +14,9 @@ const { rpcRaw } = require("../../cli/lib/rpc.cjs");
 // tab beside the one on screen. An agent closes its own tab at once, but a
 // tab the user opened waits for the approval card: Deny keeps it, Allow once
 // closes it, and "Always allow" stores a grant that skips the next card.
+// Agents call from inside their terminal, as a real one does: another agent's
+// terminal needs the card, a pane id set from outside that pane counts for
+// nothing, and a card whose agent stopped waiting is withdrawn.
 //
 // TAB_LINKS_SHOTS=<dir> also saves screenshots of the menu and the card.
 
@@ -22,6 +25,9 @@ const SERVER = join(ROOT, "resources", "codara-studio-mcp", "server.js");
 
 type Fixture = {
   root: string;
+  // The in-pane MCP caller (IN_PANE_CALLER) and a counter for its files.
+  caller: string;
+  calls: number;
   home: string;
   cwd: string;
   origin: string;
@@ -35,6 +41,8 @@ async function setup(): Promise<Fixture> {
   const home = join(root, "home");
   const cwd = join(root, "a");
   await Promise.all([mkdir(home), mkdir(cwd)]);
+  const caller = join(root, "mcp-call.cjs");
+  await writeFile(caller, IN_PANE_CALLER);
   await writeFile(
     join(home, "spark-state.json"),
     JSON.stringify({
@@ -69,7 +77,7 @@ async function setup(): Promise<Fixture> {
     if (response.error) throw new Error(response.error.message);
     return response.result;
   };
-  return { root, home, cwd, origin, server, launch, request };
+  return { root, caller, calls: 0, home, cwd, origin, server, launch, request };
 }
 
 async function teardown(fixture: Fixture, app: ElectronApplication | null): Promise<void> {
@@ -119,6 +127,68 @@ async function mcpCall(home: string, paneId: string, name: string, args: Record<
   } finally {
     child.kill();
   }
+}
+
+// One tools/call made by a codara-studio MCP server started inside a pane, so
+// its process descends from that pane's shell as an agent CLI's does.
+// Arguments: server, codara home, request file, result file.
+const IN_PANE_CALLER = `
+const { spawn } = require("node:child_process");
+const fs = require("node:fs");
+const [server, home, requestFile, resultFile] = process.argv.slice(2);
+const { name, args } = JSON.parse(fs.readFileSync(requestFile, "utf8"));
+const env = { ...process.env, CODARA_HOME_DIR: home, SPARK_HOME_DIR: home };
+const child = spawn(process.execPath, [server], { env, stdio: ["pipe", "pipe", "inherit"] });
+let buffer = "";
+child.stdout.on("data", (chunk) => {
+  buffer += chunk;
+  let newline;
+  while ((newline = buffer.indexOf("\\n")) >= 0) {
+    const line = buffer.slice(0, newline).trim();
+    buffer = buffer.slice(newline + 1);
+    if (!line) continue;
+    const message = JSON.parse(line);
+    if (message.id === 2) {
+      fs.writeFileSync(resultFile + ".tmp", JSON.stringify(message.result));
+      fs.renameSync(resultFile + ".tmp", resultFile);
+      child.kill();
+      process.exit(0);
+    }
+  }
+});
+const send = (message) => child.stdin.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\\n");
+send({ id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "any-agent", version: "1" } } });
+send({ method: "notifications/initialized" });
+send({ id: 2, method: "tools/call", params: { name, arguments: args } });
+`;
+
+const shellQuote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
+
+// A plain shell standing in for an agent CLI's terminal.
+async function agentPane(fixture: Fixture, title: string): Promise<string> {
+  const pane = await fixture.request("terminal.create", { cwd: fixture.cwd, title });
+  return pane.paneId as string;
+}
+
+// codara_* tool call from inside `paneId`; resolves with the parsed result.
+// A refusal (ok: false) comes back as isError.
+async function mcpCallInPane(fixture: Fixture, paneId: string, name: string, args: Record<string, unknown>): Promise<any> {
+  fixture.calls += 1;
+  const requestFile = join(fixture.root, `call-${fixture.calls}.json`);
+  const resultFile = join(fixture.root, `result-${fixture.calls}.json`);
+  await writeFile(requestFile, JSON.stringify({ name, args }));
+  const command = [process.execPath, fixture.caller, SERVER, fixture.home, requestFile, resultFile].map(shellQuote).join(" ");
+  await fixture.request("terminal.write", { paneId, text: command });
+  let raw = "";
+  await expect
+    .poll(async () => (raw = await readFile(resultFile, "utf8").catch(() => "")), { timeout: 75_000 })
+    .not.toBe("");
+  const reply = JSON.parse(raw);
+  const text = reply.content[0].text as string;
+  if (!text.startsWith("{")) throw new Error(`${name}: ${text}`);
+  const result = JSON.parse(text);
+  expect(Boolean(reply.isError), raw).toBe(result.ok === false);
+  return result;
 }
 
 // A call left waiting on the card. If a step fails first, its rejection must
@@ -221,15 +291,15 @@ test("copy a tab's link, click it in a terminal, split right; an agent closes ta
     await expect(page.locator("[data-dock-cell-id]")).toHaveCount(1, { timeout: 20_000 });
 
     // The agent's list tools hand out the same links.
-    const agent = await fixture.request("terminal.create", { cwd: fixture.cwd, title: "Agent", command: "sleep 600" });
+    const agent = { paneId: await agentPane(fixture, "Agent") };
     const listed = (await fixture.request("preview.list", { callerPaneId: agent.paneId })).tabs as Array<{ id: string; link?: string }>;
     expect(listed.find((item) => item.id === target)?.link).toBe(link);
     const panes = (await fixture.request("terminal.list", { callerPaneId: agent.paneId })).panes as Array<{ paneId: string; link?: string }>;
     expect(panes.find((item) => item.paneId === term.paneId)?.link).toBe(`codara://tab/ws-a/${term.tabId}`);
 
     // A tab the agent opened closes without asking.
-    const own = await mcpCall(fixture.home, agent.paneId, "codara_preview_navigate", { url: `${fixture.origin}/own` });
-    const closedOwn = await mcpCall(fixture.home, agent.paneId, "codara_tab", { action: "close", link: `codara://tab/ws-a/${own.tabId}` });
+    const own = await mcpCallInPane(fixture, agent.paneId, "codara_preview_navigate", { url: `${fixture.origin}/own` });
+    const closedOwn = await mcpCallInPane(fixture, agent.paneId, "codara_tab", { action: "close", link: `codara://tab/ws-a/${own.tabId}` });
     expect(closedOwn).toMatchObject({ ok: true, closed: [own.tabId] });
     expect(closedOwn.approvedBy).toBeUndefined();
     await expect(page.locator(tab(own.tabId))).toHaveCount(0);
@@ -237,7 +307,7 @@ test("copy a tab's link, click it in a terminal, split right; an agent closes ta
     // A tab the user opened waits for the card. Deny keeps it.
     const userTab = await openUserTab(fixture, page, "/mine");
     const card = page.locator("[data-tab-action-approval]");
-    let pending = waiting(mcpCall(fixture.home, agent.paneId, "codara_tab", { action: "close", link: `codara://tab/ws-a/${userTab}` }));
+    let pending = waiting(mcpCallInPane(fixture, agent.paneId, "codara_tab", { action: "close", link: `codara://tab/ws-a/${userTab}` }));
     await expect(card).toBeVisible({ timeout: 20_000 });
     await expect(card).toContainText("wants to close");
     await expect(card.locator(".tab-action-prompt__row")).toHaveCount(1);
@@ -249,7 +319,7 @@ test("copy a tab's link, click it in a terminal, split right; an agent closes ta
     await expect(page.locator(tab(userTab))).toHaveCount(1);
 
     // Allow once closes it.
-    pending = waiting(mcpCall(fixture.home, agent.paneId, "codara_tab", { action: "close", link: `codara://tab/ws-a/${userTab}` }));
+    pending = waiting(mcpCallInPane(fixture, agent.paneId, "codara_tab", { action: "close", link: `codara://tab/ws-a/${userTab}` }));
     await expect(card).toBeVisible({ timeout: 20_000 });
     await card.getByRole("button", { name: "Allow once", exact: true }).click();
     expect(await pending).toMatchObject({ ok: true, closed: [userTab], approvedBy: "card" });
@@ -258,7 +328,7 @@ test("copy a tab's link, click it in a terminal, split right; an agent closes ta
     // Always allow closes this one, is listed for Settings, and the next tab
     // closes without a card.
     const second = await openUserTab(fixture, page, "/second");
-    pending = waiting(mcpCall(fixture.home, agent.paneId, "codara_tab", { action: "close", link: `codara://tab/ws-a/${second}` }));
+    pending = waiting(mcpCallInPane(fixture, agent.paneId, "codara_tab", { action: "close", link: `codara://tab/ws-a/${second}` }));
     await expect(card).toBeVisible({ timeout: 20_000 });
     await card.getByRole("button", { name: /^Always allow/ }).click();
     expect(await pending).toMatchObject({ ok: true, closed: [second] });
@@ -266,14 +336,14 @@ test("copy a tab's link, click it in a terminal, split right; an agent closes ta
       .poll(() => page.evaluate(() => window.spark.tabActions.grants()))
       .toEqual([expect.objectContaining({ action: "close", callerWorkspaceId: "ws-a", targetWorkspaceId: "ws-a" })]);
     const third = await openUserTab(fixture, page, "/third");
-    const granted = await mcpCall(fixture.home, agent.paneId, "codara_tab", { action: "close", link: `codara://tab/ws-a/${third}` });
+    const granted = await mcpCallInPane(fixture, agent.paneId, "codara_tab", { action: "close", link: `codara://tab/ws-a/${third}` });
     expect(granted).toMatchObject({ ok: true, closed: [third], approvedBy: "grant" });
     await expect(card).toHaveCount(0);
 
     // Revoked, the card comes back.
     await page.evaluate(() => window.spark.tabActions.revoke("close", "ws-a", "ws-a"));
     const fourth = await openUserTab(fixture, page, "/fourth");
-    pending = waiting(mcpCall(fixture.home, agent.paneId, "codara_tab", { action: "close", link: `codara://tab/ws-a/${fourth}` }));
+    pending = waiting(mcpCallInPane(fixture, agent.paneId, "codara_tab", { action: "close", link: `codara://tab/ws-a/${fourth}` }));
     await expect(card).toBeVisible({ timeout: 20_000 });
     await card.getByRole("button", { name: "Deny", exact: true }).click();
     expect(await pending).toMatchObject({ ok: false, reason: "denied" });
@@ -281,6 +351,57 @@ test("copy a tab's link, click it in a terminal, split right; an agent closes ta
     // A link to a closed tab says so instead of doing nothing.
     await page.evaluate((url) => window.dispatchEvent(new CustomEvent("spark:open-tab-link", { detail: { url } })), `codara://tab/ws-a/${second}`);
     await expect(page.getByText("That tab is closed")).toBeVisible();
+  } finally {
+    await teardown(fixture, app);
+  }
+});
+
+test("an agent closes only the terminals it opened; a borrowed pane id or a gone agent changes nothing", async () => {
+  test.setTimeout(240_000);
+  const fixture = await setup();
+  let app: ElectronApplication | null = null;
+  try {
+    let page: Page;
+    ({ app, page } = await fixture.launch());
+    const card = page.locator("[data-tab-action-approval]");
+    const claude = await agentPane(fixture, "Claude");
+    const codex = await agentPane(fixture, "Codex");
+
+    // Claude opens a dev server terminal.
+    const dev = await mcpCallInPane(fixture, claude, "codara_terminal_create", { title: "dev", command: "sleep 600" });
+    const devLink = `codara://tab/ws-a/${dev.tabId}`;
+
+    // Codex, in another pane, may not close it alone: the card asks.
+    let pending = waiting(mcpCallInPane(fixture, codex, "codara_tab", { action: "close", link: devLink }));
+    await expect(card).toBeVisible({ timeout: 30_000 });
+    await expect(card.locator(".tab-action-prompt__row")).toHaveCount(1);
+    await card.getByRole("button", { name: "Deny", exact: true }).click();
+    expect(await pending).toMatchObject({ ok: false, reason: "denied" });
+    await expect(mcpCallInPane(fixture, codex, "codara_terminal_close", { paneId: dev.paneId })).rejects.toThrow(/another agent opened/);
+    await expect(page.locator(tab(dev.tabId))).toHaveCount(1);
+
+    // A process outside Claude's pane that names Claude's pane is no one's
+    // pane, so it has no workspace to act in and closes nothing.
+    const spoofed = await mcpCall(fixture.home, claude, "codara_tab", { action: "close", link: devLink });
+    expect(spoofed).toMatchObject({ ok: false, reason: "not_in_codara_workspace" });
+    await expect(page.locator(tab(dev.tabId))).toHaveCount(1);
+
+    // The agent leaves while the card is open: the card is withdrawn and a
+    // late Allow cannot close anything.
+    const userTab = await openUserTab(fixture, page, "/left");
+    void waiting(mcpCallInPane(fixture, codex, "codara_tab", { action: "close", link: `codara://tab/ws-a/${userTab}` }));
+    await expect(card).toBeVisible({ timeout: 30_000 });
+    await expect(card).not.toHaveAttribute("data-expired", "true");
+    await fixture.request("terminal.write", { paneId: codex, text: "\u0003", submit: false });
+    await expect(card).toHaveAttribute("data-expired", "true", { timeout: 20_000 });
+    await expect(card).toContainText("stopped waiting");
+    await expect(page.locator(tab(userTab))).toHaveCount(1);
+
+    // Claude closes its own terminal without a card.
+    const closed = await mcpCallInPane(fixture, claude, "codara_tab", { action: "close", link: devLink });
+    expect(closed).toMatchObject({ ok: true, closed: [dev.tabId] });
+    expect(closed.approvedBy).toBeUndefined();
+    await expect(page.locator(tab(dev.tabId))).toHaveCount(0);
   } finally {
     await teardown(fixture, app);
   }

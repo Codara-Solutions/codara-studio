@@ -72,6 +72,17 @@ async function main() {
   assert.equal(terminalAgentOwnerMatches(cora, { runId: "run-7", sessionId: null, workspaceId: null }), true);
   assert.equal(terminalAgentOwnerMatches(cora, { runId: "run-8", sessionId: null, workspaceId: null }), false);
   assert.equal(terminalAgentOwnerMatches(cora, { runId: null, sessionId: claude.sessionId, workspaceId: "ws-a" }), false);
+  const { callerAgentSession } = owner;
+  const claudePane = { agentSessionId: claude.sessionId, agentSessionRuntime: "claude" };
+  assert.deepEqual(callerAgentSession(claudePane, "claude"), { sessionId: claude.sessionId, captured: true });
+  assert.deepEqual(callerAgentSession(claudePane, null), { sessionId: claude.sessionId, captured: true }, "no live agent known: the pane's session");
+  assert.deepEqual(
+    callerAgentSession(claudePane, "codex"),
+    { sessionId: "uncaptured:codex", captured: false },
+    "Codex started where Claude ran is not Claude's session before Codara captures its own",
+  );
+  assert.deepEqual(callerAgentSession({}, "codex"), { sessionId: null, captured: false });
+  assert.equal(sanitizeTerminalAgentOwner({ workspaceId: "ws-a", sessionId: "uncaptured:codex" }), null, "a placeholder is never saved as an owner");
   console.log("owner records validate and match only their own run or session");
 
   const tabs = await load("src/renderer/src/tabs/useTabs.ts");

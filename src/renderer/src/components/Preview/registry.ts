@@ -22,6 +22,16 @@ const lastViewed = new Map<string | null, string>();
 // pane that agent runs in. Kept apart from entries so ownership recorded at
 // open time survives the tab registering a beat later.
 const agentPaneOwners = new Map<string, string>();
+// The agent CLI session in that pane when the tab opened, as main stamped it,
+// so a new agent started in the same pane does not inherit the tab.
+const agentSessionOwners = new Map<string, string>();
+
+function recordAgentOpener(id: string, paneId: string | null, sessionId: string | null | undefined): void {
+  if (!paneId) return;
+  agentPaneOwners.set(id, paneId);
+  if (sessionId) agentSessionOwners.set(id, sessionId);
+  else agentSessionOwners.delete(id);
+}
 
 type LocatePaneWorkspaceFn = (paneId: string) => string | null;
 let locatePaneWorkspaceFn: LocatePaneWorkspaceFn | null = null;
@@ -76,6 +86,7 @@ export function unregisterPreviewTab(id: string): void {
   entries.delete(id);
   forgetPresenceTab(id);
   agentPaneOwners.delete(id);
+  agentSessionOwners.delete(id);
   if (activeId === id) activeId = null;
   for (const [workspace, tabId] of lastViewed) if (tabId === id) lastViewed.delete(workspace);
 }
@@ -190,9 +201,13 @@ export function previewTabsInPartition(partition: string): string[] {
   return [...entries.values()].filter((entry) => entry.partition === partition).map((entry) => entry.id);
 }
 
-/** Who opened a browser tab: the run, or the terminal pane of an agent with no run. */
-export function previewTabOpener(id: string): { runId: string | null; paneId: string | null } {
-  return { runId: entries.get(id)?.runId ?? null, paneId: agentPaneOwners.get(id) ?? null };
+/** Who opened a browser tab: the run, or the terminal pane and agent session of an agent with no run. */
+export function previewTabOpener(id: string): { runId: string | null; paneId: string | null; sessionId: string | null } {
+  return {
+    runId: entries.get(id)?.runId ?? null,
+    paneId: agentPaneOwners.get(id) ?? null,
+    sessionId: agentSessionOwners.get(id) ?? null,
+  };
 }
 
 /** Whether any workspace has this browser tab open. */
@@ -223,13 +238,14 @@ export async function openIsolatedPreviewTab(
   workspaceId?: string | null,
   callerPaneId?: string | null,
   group?: string | null,
+  callerSessionId?: string | null,
 ): Promise<RegistryEntry> {
   const { workspace, paneId } = previewScope(runId, workspaceId, callerPaneId);
   if (!openPreviewTabFn) throw new Error("Codara is not ready to open browser tabs yet. Retry in a moment.");
   const id = await Promise.resolve(
     openPreviewTabFn(url, runId, workspace, { partition, ...(group ? { group } : {}) }),
   );
-  if (paneId) agentPaneOwners.set(id, paneId);
+  recordAgentOpener(id, paneId, callerSessionId);
   return waitForRegisteredTab(id, workspace);
 }
 
@@ -241,6 +257,7 @@ export async function ensurePreviewTab(
   workspaceId?: string | null,
   callerPaneId?: string | null,
   group?: string | null,
+  callerSessionId?: string | null,
 ): Promise<{ tab: RegistryEntry; opened: boolean }> {
   const { workspace, paneId } = previewScope(runId, workspaceId, callerPaneId);
   const existing = findReusablePreviewTab(runId, workspace, paneId);
@@ -249,7 +266,7 @@ export async function ensurePreviewTab(
   const id = await Promise.resolve(
     openPreviewTabFn(url, runId, workspace, group ? { group } : undefined),
   );
-  if (paneId) agentPaneOwners.set(id, paneId);
+  recordAgentOpener(id, paneId, callerSessionId);
   return { tab: await waitForRegisteredTab(id, workspace), opened: true };
 }
 
@@ -277,7 +294,7 @@ export function previewTabOwner(tabId: string): { runId: string | null; paneId: 
 // A tab a page opened belongs to whoever owned the page's tab.
 export function inheritPreviewTabOwner(tabId: string, sourceTabId: string): void {
   const paneId = agentPaneOwners.get(sourceTabId);
-  if (paneId) agentPaneOwners.set(tabId, paneId);
+  if (paneId) recordAgentOpener(tabId, paneId, agentSessionOwners.get(sourceTabId));
 }
 
 /** The workspace's browser tabs with who drives them: a run, a terminal agent's pane, or nobody. */
