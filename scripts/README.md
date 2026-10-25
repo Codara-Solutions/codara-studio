@@ -573,6 +573,9 @@ node scripts/bench-snappy/run.mjs --apps t3code --build-profile
 node scripts/bench-snappy/run.mjs --apps studio,t3code --rounds 5 --out /tmp/ab
 ```
 
+To measure another branch with this harness, build it in its own checkout
+and point `STUDIO_BENCH_DIR` at that checkout.
+
 The latest results and what they mean are in `docs/benchmarks/snappy-*.md`.
 
 ## Tooling

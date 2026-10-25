@@ -30,7 +30,9 @@ import {
 } from "./lib.mjs";
 import { chatMarkdown, fakeAgentSource, streamChunks } from "./fixtures.mjs";
 
-const repo = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
+// STUDIO_BENCH_DIR points at another checkout's build, so a fix branch can be
+// measured with the same harness without carrying it.
+const repo = process.env.STUDIO_BENCH_DIR ? resolve(process.env.STUDIO_BENCH_DIR) : resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 export const WORKSPACES = 40;
 
 export function makeFixture() {
