@@ -19,9 +19,9 @@
 // (size, mtime) and the memo is persisted — a warm scan only re-reads the files
 // that actually changed.
 
-import { createReadStream, promises as fs } from "node:fs";
+import { createReadStream, promises as fs, statSync } from "node:fs";
 import { createInterface } from "node:readline";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { lookupUsagePrice } from "./model-prices";
 import {
   UsageAggregator,
@@ -75,6 +75,25 @@ export interface UsageScanRoot {
   dir: string;
   /** Set when the root could not be resolved at all. */
   error: string | null;
+}
+
+/**
+ * Codex moves a finished session out of sessions/YYYY/MM/DD into a flat
+ * archived_sessions folder beside it, so most of a long history lives there.
+ * The archive is only listed when it exists, so a machine without one shows
+ * no extra "missing" source.
+ */
+export function codexTranscriptRoots(sessionsRoot: string): UsageScanRoot[] {
+  const roots: UsageScanRoot[] = [{ provider: "codex", dir: sessionsRoot, error: null }];
+  const archived = join(dirname(sessionsRoot), "archived_sessions");
+  let isDirectory = false;
+  try {
+    isDirectory = statSync(archived).isDirectory();
+  } catch {
+    isDirectory = false;
+  }
+  if (isDirectory) roots.push({ provider: "codex", dir: archived, error: null });
+  return roots;
 }
 
 export interface UsageScanRequest {
@@ -519,6 +538,10 @@ async function scanUsageNow({ roots, cachePath, input }: UsageScanRequest): Prom
   const sources: UsageSource[] = [];
   const livePaths = new Set<string>();
   const walkedRoots: string[] = [];
+  // Codex records carry no dedupe key (one file is one session), and a
+  // session archived between the two walks is seen under both roots. The
+  // rollout name survives the move, so it identifies the file.
+  const codexFileNames = new Set<string>();
   let filesSinceYield = 0;
 
   for (const root of roots) {
@@ -564,6 +587,11 @@ async function scanUsageNow({ roots, cachePath, input }: UsageScanRequest): Prom
 
     for (const file of files) {
       livePaths.add(file.path);
+      if (root.provider === "codex") {
+        const name = basename(file.path);
+        if (codexFileNames.has(name)) continue;
+        codexFileNames.add(name);
+      }
       const records = await readFileRecords(fileCache, file, root.provider);
       if (records.length === 0) {
         skippedFiles += 1;

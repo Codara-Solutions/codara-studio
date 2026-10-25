@@ -262,4 +262,19 @@ check("provider cards follow the legend and carry their share", () => {
   assert.equal(cards[2].source, null);
 });
 
+check("a provider read from two folders sums them on its card", () => {
+  const cards = buildProviderCards(
+    [],
+    [
+      { provider: "codex", dir: "/x/sessions", status: "ok", scannedFiles: 2, skippedFiles: 1, distinctSessions: 2, message: null },
+      { provider: "codex", dir: "/x/archived_sessions", status: "ok", scannedFiles: 30, skippedFiles: 0, distinctSessions: 29, message: null },
+    ],
+    0,
+  );
+  const codex = cards.find((card) => card.provider === "codex");
+  assert.equal(codex.sessions, 31);
+  assert.equal(codex.source.scannedFiles, 32);
+  assert.equal(codex.source.status, "ok");
+});
+
 console.log(`\n${checks} usage page checks passed`);
