@@ -832,7 +832,7 @@ function hasSshKeygen() {
       harness.settings.nas = { refusal: 'UserKnownHostsFile "/x/%Z" uses %Z, which ssh does not accept there' };
       const refused = await connect("nas");
       assert.equal(refused.state, "error");
-      assert.match(refused.error, /ssh config stops ssh from connecting to nas: UserKnownHostsFile "\/x\/%Z" uses %Z/);
+      assert.match(refused.error, /Codara will not connect to nas because of your ssh config: UserKnownHostsFile "\/x\/%Z" uses %Z/);
       assert.equal(harness.connects.length, 0, "refused before any connection");
       assert.equal(harness.prompts.length, 0);
       assert.deepEqual(stored(), {});

@@ -502,7 +502,12 @@ takes `user@host:port` (port 1 to 65535).
   `GlobalKnownHostsFile` from `~/.ssh/config`, else `/etc/ssh/ssh_config`,
   are read too, for a manual host or a Codara box as for a config host
   (matched by the name Codara connects to), as `knownHostsSettings` in
-  `ssh-hosts.ts` lists them).
+  `ssh-hosts.ts` lists them). Which Host and Match blocks apply is decided
+  by `ssh-config-match.ts` as OpenSSH 9.6 decides it (Match user is the
+  login, Includes keep their own scope, `Match final` rereads the files).
+  A Match criterion it cannot evaluate (exec, localnetwork) refuses the
+  host when its block could set a known-hosts setting, and a line ssh
+  cannot read refuses every host, both naming the file and line.
   `ssh-tokens.ts` expands `${VAR}` and ssh's tokens in one pass with the
   values `ssh -G` prints (OpenSSH 9.6): `%h` and a `HostKeyAlias`
   lowercased, `%j` the last ProxyJump hop's host, and a `%C` path behind a
