@@ -520,6 +520,7 @@ function codexCliWindow(scan: ForecastScan, nowMs: number): { window: PiUsageWin
   };
 }
 
+const MIN_LIVE_FOR_SURE = 10;
 let backtestCache: { at: number; key: string; result: Backtests } | null = null;
 
 interface Backtests {
@@ -568,7 +569,7 @@ function recentLines(windows: readonly PastWindow[], history: BurnSeries, factor
 
 /** Scores a track's past forecasts before and after learning, and fits the
  * correction the live forecast uses from all of them plus the live ones. */
-function learnTrack(
+export function learnTrack(
   base: Omit<BacktestTrack, "learned" | "byHistory" | "learning">,
   cases: Parameters<typeof learnedBacktest>[0],
   kind: "5h" | "7d",
@@ -577,11 +578,18 @@ function learnTrack(
 ): BacktestTrack {
   const learned = learnedBacktest(cases, kind, live);
   const model = fitErrorModel([...samplesFromBacktest(cases), ...live], nowMs, kind);
+  let learning = describeLearning(model, [...learned.cases].sort((a, b) => a.atMs - b.atMs));
+  // A spend back-test scores spend scaled by today's factor, so it vouches
+  // for the timing, not for the scale. Only live forecasts scored on real
+  // readings check the scale; until there are enough, it is at most fairly sure.
+  if (base.truth === "spend" && learning.confidence === "good" && live.length < MIN_LIVE_FOR_SURE) {
+    learning = { ...learning, confidence: "fair" };
+  }
   return {
     ...base,
     learned: learned.summary,
     byHistory: learned.byHistory,
-    learning: describeLearning(model, [...learned.cases].sort((a, b) => a.atMs - b.atMs)),
+    learning,
   };
 }
 

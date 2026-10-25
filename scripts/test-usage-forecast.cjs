@@ -579,6 +579,29 @@ async function main() {
     eq("confidence: much history and small misses is sure", sure.confidence, "good");
     const unsure = describeLearning(fitErrorModel(history(3, 1), now, "5h"), []);
     eq("confidence: three windows is still learning", confidenceLine(unsure), "still learning · 3 past windows");
+
+    // A spend back-test checks the timing, not the scale, so it alone is at
+    // most fairly sure; live forecasts scored on real readings lift the cap.
+    const perfectCases = history(200, 1).map((sample) => ({
+      startMs: sample.windowStartMs,
+      closedMs: sample.closedMs,
+      checkpoint: 0.5,
+      atMs: sample.atMs,
+      usedPercent: sample.usedPercent,
+      predicted: { p10: 26, p50: 30, p90: 34 },
+      naive: 30,
+      actual: 30,
+      hitProbability: 0,
+      hit: false,
+      growth: sample.growth,
+      warnedMinutesAhead: null,
+    }));
+    const trackBase = (truth) => ({ provider: "anthropic", windowLabel: "5-hour", truth, summary: {}, recent: [] });
+    const livePerfect = history(10, 1, after(200)).map((sample) => ({ ...sample, actual: 30, source: "live" }));
+    const { learnTrack } = mainForecast;
+    eq("confidence: replayed readings can be sure", learnTrack(trackBase("readings"), perfectCases, "5h", [], after(210)).learning.confidence, "good");
+    eq("confidence: replayed spend alone is at most fairly sure", learnTrack(trackBase("spend"), perfectCases, "5h", [], after(210)).learning.confidence, "fair");
+    eq("confidence: ten scored live forecasts make spend sure", learnTrack(trackBase("spend"), perfectCases, "5h", livePerfect, after(210)).learning.confidence, "good");
   }
 
   /* ── Live forecasts are logged and scored once their window resets ──── */
