@@ -12,7 +12,12 @@
 // to fix and push someone else's branch. With no agent there (a pane
 // hibernated or relaunching) the line waits up to ten minutes, then is
 // dropped; the watcher reports the failure again on later passes, so an
-// agent that opens afterwards still hears about it.
+// agent that opens afterwards still hears about it. The watcher confirms
+// after every pass which pull requests it still stands behind (watched,
+// open, failing); any other waiting line is withdrawn.
+//
+// It never types into a bare shell (a stale agent state, the agent exited)
+// and never into an input box holding text it cannot stash first.
 //
 // createCiAgentNudger takes its effects as dependencies; github-ci-watch.ts
 // wires the live pty and agent notifier.
@@ -35,6 +40,8 @@ export interface CiAgentPane {
   lastInputAt: number;
   /** 0 the worktree's creator, 1 the workspace's panes, 2 terminals inside its folder. Lower wins. */
   rank: number;
+  /** Text may sit in its input box and the agent cannot stash it (not Claude Code). */
+  draft?: boolean;
 }
 
 export interface CiFailure {
@@ -50,7 +57,7 @@ export interface CiAgentNudgeDeps {
   /** The agents that may hear about this workspace's branch, most fitting first. */
   panesFor(workspace: Workspace): CiAgentPane[];
   /** Types the line and submits it; false when the pane cannot take it. */
-  type(paneId: string, line: string): boolean;
+  type(paneId: string, line: string): boolean | Promise<boolean>;
   now(): number;
   setTimeout(fn: () => void, ms: number): unknown;
   clearTimeout(handle: unknown): void;
@@ -62,6 +69,8 @@ export interface CiAgentNudger {
   failing(workspace: Workspace, failure: CiFailure): void;
   /** Its checks are running or green again: a queued line for an older commit is stale. */
   settled(repository: string, number: number): void;
+  /** The pull requests the watcher still stands behind; every other waiting line is withdrawn. */
+  retain(pullRequests: ReadonlyArray<{ repository: string; number: number }>): void;
   /** Lines waiting for a free agent. */
   queued(): number;
   stop(): void;
@@ -83,6 +92,8 @@ export function createCiAgentNudger(deps: CiAgentNudgeDeps): CiAgentNudger {
   const told: string[] = [];
   const queue = new Map<string, Queued>();
   let timer: unknown = null;
+  // A pane's answer can take a moment (its foreground process is looked up).
+  let typing = false;
 
   function schedule(): void {
     if (timer !== null || queue.size === 0) return;
@@ -92,28 +103,56 @@ export function createCiAgentNudger(deps: CiAgentNudgeDeps): CiAgentNudger {
     }, CI_NUDGE_RETRY_MS);
   }
 
+  // A pane that answers at once is typed into in the same call; one that
+  // has to look something up first holds the rest of the queue until it
+  // answers.
   function attempt(): void {
+    if (typing) return;
     const now = deps.now();
-    for (const [key, item] of [...queue]) {
-      const panes = deps.panesFor(item.workspace);
-      if (panes.length === 0) {
-        if (!item.aloneSince) item.aloneSince = now;
-        if (now - item.aloneSince >= CI_NUDGE_NO_AGENT_TTL_MS) queue.delete(key);
-        continue;
-      }
-      item.aloneSince = 0;
-      const best = Math.min(...panes.map((pane) => pane.rank));
-      const free = panes.find(
-        (pane) => pane.rank === best && FREE_STATES.has(pane.state) && now - pane.lastInputAt >= CI_NUDGE_QUIET_INPUT_MS,
-      );
-      if (!free) continue;
-      if (!deps.type(free.paneId, item.line)) continue;
+    const items = [...queue];
+    const record = (key: string, item: Queued, paneId: string): void => {
+      // Withdrawn or replaced while the pane answered.
+      if (queue.get(key) !== item) return;
       queue.delete(key);
       told.push(item.told);
       if (told.length > TOLD_CAP) told.shift();
-      deps.log(`told pane ${free.paneId} that ${key} failed`);
-    }
-    schedule();
+      deps.log(`told pane ${paneId} that ${key} failed`);
+    };
+    const from = (start: number): void => {
+      for (let index = start; index < items.length; index += 1) {
+        const [key, item] = items[index];
+        if (queue.get(key) !== item) continue;
+        const panes = deps.panesFor(item.workspace);
+        if (panes.length === 0) {
+          if (!item.aloneSince) item.aloneSince = now;
+          if (now - item.aloneSince >= CI_NUDGE_NO_AGENT_TTL_MS) queue.delete(key);
+          continue;
+        }
+        item.aloneSince = 0;
+        const best = Math.min(...panes.map((pane) => pane.rank));
+        const free = panes.find(
+          (pane) =>
+            pane.rank === best && FREE_STATES.has(pane.state) && !pane.draft && now - pane.lastInputAt >= CI_NUDGE_QUIET_INPUT_MS,
+        );
+        if (!free) continue;
+        const answer = deps.type(free.paneId, item.line);
+        if (typeof answer === "boolean") {
+          if (answer) record(key, item, free.paneId);
+          continue;
+        }
+        typing = true;
+        void answer
+          .catch(() => false)
+          .then((ok) => {
+            typing = false;
+            if (ok) record(key, item, free.paneId);
+            from(index + 1);
+          });
+        return;
+      }
+      schedule();
+    };
+    from(0);
   }
 
   return {
@@ -133,11 +172,51 @@ export function createCiAgentNudger(deps: CiAgentNudgeDeps): CiAgentNudger {
     settled(repository, number) {
       queue.delete(pullRequestKey(repository, number));
     },
+    retain(pullRequests) {
+      const keep = new Set(pullRequests.map((pr) => pullRequestKey(pr.repository, pr.number)));
+      for (const key of [...queue.keys()]) if (!keep.has(key)) queue.delete(key);
+      if (queue.size === 0 && timer !== null) {
+        deps.clearTimeout(timer);
+        timer = null;
+      }
+    },
     queued: () => queue.size,
     stop() {
       queue.clear();
       if (timer !== null) deps.clearTimeout(timer);
       timer = null;
     },
+  };
+}
+
+export interface AgentPaneTyperDeps {
+  hasSession(paneId: string): boolean;
+  /** The pane's shell process, 0 or null when unknown. */
+  shellPid(paneId: string): number | null;
+  /** The foreground process group of that shell's terminal; null when unknown. */
+  foregroundGroup(shellPid: number): Promise<number | null>;
+  inject(paneId: string, line: string, opts: { submit: true; stashDraft?: boolean }): void;
+  /** The submitted line starts the agent's turn, as the user's Enter would. */
+  noteSubmit(paneId: string): void;
+}
+
+/**
+ * CiAgentNudgeDeps.type on a live pty. The shell leads its own process
+ * group, so a foreground group equal to its pid means no agent is running
+ * there whatever the agent state says, and nothing is sent: not the line,
+ * and not the Ctrl+S that would freeze a shell's output. An unknown group
+ * (Windows, a failed probe) is not proof of a shell.
+ */
+export function createAgentPaneTyper(
+  deps: AgentPaneTyperDeps,
+): (paneId: string, line: string, opts: { stashDraft?: boolean }) => Promise<boolean> {
+  return async (paneId, line, opts) => {
+    if (!deps.hasSession(paneId)) return false;
+    const pid = deps.shellPid(paneId);
+    if (pid && (await deps.foregroundGroup(pid)) === pid) return false;
+    if (!deps.hasSession(paneId)) return false;
+    deps.inject(paneId, line, opts.stashDraft ? { submit: true, stashDraft: true } : { submit: true });
+    deps.noteSubmit(paneId);
+    return true;
   };
 }

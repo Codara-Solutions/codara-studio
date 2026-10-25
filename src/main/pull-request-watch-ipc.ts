@@ -4,7 +4,7 @@
 // window.spark.pullRequestWatch (src/preload/areas/pull-request-watch.ts).
 
 import { normalizeRepository, type PullRequestWatchEntry } from "@shared/pull-request-watch";
-import { nudgeGitHubCiWatch, pullRequestWatchEntries } from "./github-ci-watch";
+import { pullRequestWatchEntries } from "./github-ci-watch";
 import type { IpcHandle } from "./ipc";
 import { getPreferenceCached, setPreference } from "./preferences-store";
 
@@ -16,8 +16,8 @@ export function registerPullRequestWatchIpc(handle: IpcHandle): void {
     const off = new Set(getPreferenceCached("pullRequestWatchOffRepos") ?? []);
     if (watched) off.delete(repository);
     else off.add(repository);
+    // The watcher hears the preference change and runs a pass at once.
     await setPreference("pullRequestWatchOffRepos", [...off]);
-    nudgeGitHubCiWatch();
     return watched;
   });
 }

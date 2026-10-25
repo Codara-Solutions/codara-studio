@@ -418,7 +418,10 @@ waits for that agent rather than telling another one. It goes once per
 failing commit, and only while the agent is free: never mid-turn, while
 it asks for a permission, or within 20 seconds of you typing in its pane.
 In Claude Code a half-written prompt is stashed first (Ctrl+S) so it is
-not sent along. Checks that go green again leave a silent note in the
+not sent along; other agents with text typed since their last prompt are
+not sent the line until that is sent or cleared. Nothing is ever typed
+into a pane whose agent has exited back to the shell. Switching the
+watcher or the repository off withdraws a line that was still waiting. Checks that go green again leave a silent note in the
 notification center. "Stop watching pull requests in this repo" in a row's
 menu turns rows and agents off for one repository (the CI failure alert
 above still follows its own setting); Settings lists those with "Watch
@@ -429,8 +432,10 @@ signed in to with `gh` work too.
 Both read GitHub with your signed-in `gh`, using conditional requests: an
 unchanged pull request costs a 304, which GitHub does not count against
 your rate limit. An open pull request is asked every minute while checks
-run, then after 1, 2, 4 and 8 minutes and every 15 while nothing changes;
-a commit or a push asks at once. A branch with no pull request, or a merged
+run (for up to ten minutes without a change), then after 1, 2, 4 and 8
+minutes and every 15 while nothing changes. A commit asks at the next
+minute; a push or fetch of the branch asks within a second. A branch with
+no pull request, or a merged
 or closed one, is asked every 15 minutes, and every 5 minutes become the
 floor while you are away from the computer.
 

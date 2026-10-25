@@ -100,6 +100,10 @@ function harness(mod, { workspaces = [ws("ws-1", "/repo")], refs = { "/repo": "h
     entries: [],
     failing: [],
     settled: [],
+    retained: [],
+    refWatches: [],
+    refWatchesClosed: [],
+    gate: null,
     logs: [],
     timers: [],
     state: { workspaces, workspaceGroups: [], activeWorkspaceId: workspaces[0]?.id ?? null },
@@ -115,6 +119,7 @@ function harness(mod, { workspaces = [ws("ws-1", "/repo")], refs = { "/repo": "h
     readPullRequest: async (cwd, refs) => {
       assert.equal(refs.branch, "feat/widgets");
       h.reads.push(cwd);
+      if (h.gate) await h.gate;
       if (h.errors[cwd]) throw new Error(h.errors[cwd]);
       return h.prs[cwd] ?? null;
     },
@@ -124,6 +129,11 @@ function harness(mod, { workspaces = [ws("ws-1", "/repo")], refs = { "/repo": "h
     nudger: {
       failing: (workspace, failure) => h.failing.push({ workspaceId: workspace.id, ...failure }),
       settled: (repository, number) => h.settled.push(`${repository}#${number}`),
+      retain: (list) => h.retained.push(list.map((item) => `${item.repository.toLowerCase()}#${item.number}`)),
+    },
+    watchRefs: (cwd, _refs, onChange) => {
+      h.refWatches.push({ cwd, onChange });
+      return () => h.refWatchesClosed.push(cwd);
     },
     now: () => h.now,
     setTimeout: (fn, ms) => {
@@ -343,6 +353,69 @@ test("local refs: one git call a minute, the remote looked up once per interval"
     });
     assert.deepEqual(await resolved(repo), expected);
     assert.deepEqual(aliases, ["github.com-work"]);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+});
+
+test("review 5: a push moves the upstream ref and the watch hears it, loose or packed", async ({ mod }) => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "codara-gh-ci-push-"));
+  const home = path.join(temp, "home");
+  fs.mkdirSync(home);
+  fs.writeFileSync(path.join(home, ".gitconfig"), "[user]\n\tname = CI\n\temail = ci@example.invalid\n[init]\n\tdefaultBranch = main\n");
+  const env = { PATH: process.env.PATH, HOME: home, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: path.join(home, ".gitconfig"), GIT_TERMINAL_PROMPT: "0", LANG: "C", LC_ALL: "C" };
+  const git = (cwd, args) => execFileSync("git", args, { cwd, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const read = async (cwd, args) => {
+    try {
+      return git(cwd, args).trim();
+    } catch {
+      return "";
+    }
+  };
+  const settle = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const commitAndPush = (repo, name) => {
+    fs.writeFileSync(path.join(repo, name), name);
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-q", "-m", name]);
+    git(repo, ["push", "-q"]);
+  };
+  try {
+    try {
+      git(temp, ["--version"]);
+    } catch {
+      return;
+    }
+    const remote = path.join(temp, "remote.git");
+    const repo = path.join(temp, "repo");
+    git(temp, ["init", "-q", "--bare", "-b", "main", remote]);
+    git(temp, ["clone", "-q", remote, repo]);
+    fs.writeFileSync(path.join(repo, "a.txt"), "a\n");
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-q", "-m", "a"]);
+    git(repo, ["push", "-q", "-u", "origin", "main"]);
+    git(repo, ["checkout", "-q", "-b", "feat/x"]);
+    git(repo, ["push", "-q", "-u", "origin", "feat/x"]);
+    let heard = 0;
+    let close = mod.watchUpstreamRef(read, repo, () => (heard += 1));
+    await settle(300);
+    commitAndPush(repo, "c.txt");
+    await settle(500);
+    assert.ok(heard > 0, "the push rewrote refs/remotes/origin/feat/x");
+    close();
+    const after = heard;
+    commitAndPush(repo, "d.txt");
+    await settle(300);
+    assert.equal(heard, after, "closed: nothing more");
+    // Only in packed-refs: the nearest existing folder is watched.
+    git(repo, ["pack-refs", "--all"]);
+    fs.rmSync(path.join(repo, ".git", "refs", "remotes", "origin", "feat"), { recursive: true, force: true });
+    heard = 0;
+    close = mod.watchUpstreamRef(read, repo, () => (heard += 1));
+    await settle(300);
+    commitAndPush(repo, "e.txt");
+    await settle(500);
+    close();
+    assert.ok(heard > 0, "the push recreated the loose ref under the watched folder");
   } finally {
     fs.rmSync(temp, { recursive: true, force: true });
   }
@@ -620,6 +693,26 @@ test("an open pull request is asked every minute, twice as long while nothing ch
   assert.equal(h.reads.length, after + 2);
 });
 
+test("review 4: checks that stay pending are asked every minute for ten minutes, then less and less", async ({ mod }) => {
+  const h = harness(mod, { prs: { "/repo": pr(HEAD_A, { pending: 1 }) } });
+  const readsAt = [];
+  for (let minute = 0; minute <= 40; minute += 1) {
+    const before = h.reads.length;
+    await h.pass();
+    if (h.reads.length > before) readsAt.push(minute);
+    h.advance(60_000);
+  }
+  assert.deepEqual(readsAt, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 16, 24, 39], "a check queued forever stops costing a read a minute");
+  // A check that finishes is a change: back to every minute.
+  h.prs["/repo"] = pr(HEAD_A, { pending: 1, passed: 1 });
+  h.advance(15 * 60_000);
+  await h.pass();
+  const after = h.reads.length;
+  h.advance(60_000);
+  await h.pass();
+  assert.equal(h.reads.length, after + 1);
+});
+
 test("branches with no pull request, merged and closed ones are asked every 15 minutes", async ({ mod }) => {
   const h = harness(mod, {
     workspaces: [ws("ws-1", "/repo"), ws("ws-6", "/closed")],
@@ -686,6 +779,82 @@ test("turned off: no reads, rows cleared, and turning it back on starts fresh", 
   await h.pass();
   assert.equal(h.reads.length, 2, "forgotten state means a fresh read");
   assert.equal(h.published.length, 0, "and a failure from while it was off is quiet");
+});
+
+test("review 1: the watcher withdraws a queued line it no longer stands behind", async ({ mod }) => {
+  const h = harness(mod, { prs: { "/repo": pr(HEAD_A, { pending: 1 }) } });
+  await h.pass();
+  h.advance(60_000);
+  h.prs["/repo"] = pr(HEAD_A, { failed: ["build"], failedAt: h.now });
+  await h.pass();
+  assert.equal(h.failing.length, 1);
+  assert.deepEqual(h.retained.at(-1), ["acme/widgets#42"]);
+  await h.pass();
+  assert.deepEqual(h.retained.at(-1), ["acme/widgets#42"], "a pass that did not need to read it still stands behind it");
+  h.off.add("acme/widgets");
+  await h.pass();
+  assert.deepEqual(h.retained.at(-1), [], "switched off from the row menu");
+  h.off.clear();
+  await h.pass();
+  assert.deepEqual(h.retained.at(-1), ["acme/widgets#42"]);
+  h.watching = false;
+  await h.pass();
+  assert.deepEqual(h.retained.at(-1), [], "Watch pull requests turned off");
+  h.watching = true;
+  await h.pass();
+  h.advance(60_000);
+  await h.pass();
+  assert.deepEqual(h.retained.at(-1), ["acme/widgets#42"]);
+  h.prs["/repo"] = pr(HEAD_A, { failed: ["build"], state: "MERGED" });
+  h.refs["/repo"] = "h2 u2";
+  await h.pass();
+  assert.deepEqual(h.retained.at(-1), [], "merged while it waited");
+  h.prs["/repo"] = pr(HEAD_B, { failed: ["build"], failedAt: h.now });
+  h.refs["/repo"] = "h3 u3";
+  await h.pass();
+  assert.deepEqual(h.retained.at(-1), ["acme/widgets#42"]);
+  h.state.workspaces = [];
+  await h.pass();
+  assert.deepEqual(h.retained.at(-1), [], "the worktree was removed");
+  h.state.workspaces = [ws("ws-1", "/repo")];
+  await h.pass();
+  h.enabled = false;
+  await h.pass();
+  assert.deepEqual(h.retained.at(-1), [], "the watcher turned off altogether");
+});
+
+test("review 5: a nudge during a running pass is not lost", async ({ mod }) => {
+  const h = harness(mod, { prs: { "/repo": pr(HEAD_A, { pending: 1 }) } });
+  let release;
+  h.gate = new Promise((resolve) => (release = resolve));
+  const first = h.watch.runPass();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.reads.length, 1, "the first pass is reading");
+  // Pushed while that pass waits on GitHub.
+  h.refs["/repo"] = "h2 u2";
+  const second = h.watch.runPass();
+  h.gate = null;
+  release();
+  await first;
+  await second;
+  assert.equal(h.reads.length, 2, "a second pass ran after the first and saw the push");
+});
+
+test("review 5: a push or fetch of the branch's upstream asks again within a second", async ({ mod }) => {
+  const h = harness(mod, { workspaces: [ws("ws-1", "/repo"), ws("ws-2", "/other")], refs: { "/repo": "h1 u1", "/other": "h1 u1" } });
+  h.watch.start();
+  await h.pass();
+  assert.deepEqual(h.refWatches.map((w) => w.cwd), ["/repo", "/other"], "one watch per workspace folder");
+  await h.pass();
+  assert.equal(h.refWatches.length, 2, "kept, not reopened, while the refs stay");
+  h.timers = [];
+  h.refWatches[0].onChange();
+  assert.deepEqual(h.timers.map((t) => t.ms), [1_000]);
+  h.state.workspaces = [ws("ws-1", "/repo")];
+  await h.pass();
+  assert.deepEqual(h.refWatchesClosed, ["/other"], "a workspace that left stops being watched");
+  h.watch.stop();
+  assert.deepEqual(h.refWatchesClosed, ["/other", "/repo"], "stopping closes every watch");
 });
 
 test("timers: first pass after 45 seconds, then every minute; nudge and stop", async ({ mod }) => {

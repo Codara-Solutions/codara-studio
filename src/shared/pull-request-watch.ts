@@ -54,8 +54,14 @@ export function cleanCheckName(name: string): string {
     .slice(0, 60);
 }
 
-// Branch and folder come from the user's own checkout; only control
-// characters (escapes, line breaks) are taken out.
+// A branch can be named by a fork's author, so it keeps only what branch
+// names use, every other run of characters becomes one dash.
+export function cleanBranchName(branch: string): string {
+  return branch.replace(/[^\w./-]+/g, "-").replace(/-{2,}/g, "-").slice(0, 120);
+}
+
+// The folder is the user's own checkout; only control characters (escapes,
+// line breaks) are taken out.
 function cleanLocalText(value: string, max: number): string {
   return value
     .replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
@@ -79,7 +85,7 @@ export function agentCiFailureLine(number: number, failed: readonly string[], pl
   const shown = names.slice(0, 4).join(", ");
   const more = names.length > 4 ? ` and ${names.length - 4} more` : "";
   const what = shown ? `${shown}${more}` : "a check";
-  const branch = place.branch ? cleanLocalText(place.branch, 120) : "";
+  const branch = place.branch ? cleanBranchName(place.branch) : "";
   const folder = place.folder ? cleanLocalText(place.folder, 200) : "";
   const where = [branch && `branch ${branch}`, folder && `in ${folder}`].filter(Boolean).join(" ");
   return `CI failed on PR #${number}${where ? ` (${where})` : ""}: ${what}. Fix it with the fix-ci skill, push, and watch the checks.`;
