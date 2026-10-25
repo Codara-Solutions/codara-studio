@@ -153,19 +153,22 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_create",
     description:
-      "Open a new agent-owned terminal tab next to your own pane, or in workspace (an id or folder; the user approves once). Temporary terminals are closed automatically when their Cora run finishes; use retention='service' only for a dev server or watcher the user needs afterwards. Returns { tabId, paneId, cwd }.",
+      "Open an agent-owned terminal beside your pane, or in workspace (id or folder; the user approves once), or in a new worktree of it. retention: temporary (default) closes with its Cora run; service for a server or watcher the user keeps. Returns { tabId, paneId, cwd }.",
     inputSchema: {
       type: "object",
       properties: {
         cwd: { type: "string", description: "Absolute; default the workspace root." },
         workspace: { type: "string" },
+        worktree: {
+          type: "object",
+          properties: { branch: { type: "string" }, base: { type: "string" }, purpose: { type: "string" } },
+        },
         command: { type: "string", description: "Run right after it opens." },
         title: { type: "string" },
         group: { type: "string", description: "Tab group, named after your task." },
         retention: {
           type: "string",
           enum: ["temporary", "service"],
-          description: "temporary (default) or service.",
         },
       },
       additionalProperties: false,
@@ -2178,7 +2181,7 @@ function worktreeCallerRole() {
 let CLIENT_NAME = "";
 
 function stampWorktreeCaller(rpc, args, ctx) {
-  if (!rpc.startsWith("worktree.")) return;
+  if (!rpc.startsWith("worktree.") && !(rpc === "terminal.create" && args.worktree)) return;
   for (const key of ["runId", "callerPaneId", "callerPid", "callerRole", "callerClient"]) delete args[key];
   const envRunId = (process.env.SPARK_RUN_ID || "").trim();
   if (envRunId) args.runId = envRunId;

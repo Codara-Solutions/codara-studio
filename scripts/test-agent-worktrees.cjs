@@ -186,6 +186,23 @@ async function main() {
     assert.equal(checkedOut.mode, "checkout");
     assert.equal((await aw.createAgentWorktree(terminalAgent, { branch: "main", checkout: true }, deps)).code, "WORKTREE_RESERVED_BRANCH");
 
+    // ── In another workspace ───────────────────────────────────────────────
+    // A coordinator in a plain folder, once the user allowed it into the
+    // repository's workspace (terminal.create's worktree option), makes the
+    // worktree there; the workspace never comes from the tool JSON.
+    const notes = path.join(scratch, "notes");
+    fs.mkdirSync(notes, { recursive: true });
+    h.state.workspaces.push({ id: "ws-notes", name: "notes", cwd: notes, color: "#654321", workers: [] });
+    h.paneWorkspace["pane-coord"] = "ws-notes";
+    const coordinator = { role: "studio", client: "claude-code", paneId: "pane-coord" };
+    assert.equal((await aw.createAgentWorktree(coordinator, { branch: "agent/from-notes" }, deps)).code, "WORKTREE_NOT_A_REPO");
+    const elsewhere = await aw.createAgentWorktree({ ...coordinator, workspaceId: "ws-repo" }, { branch: "agent/from-notes" }, deps);
+    assert.equal(elsewhere.ok, true, JSON.stringify(elsewhere));
+    assert.equal(elsewhere.sourceWorkspaceId, "ws-repo");
+    assert.equal(workspaceOf(elsewhere.workspaceId).copyBranch.repoCwd, repo);
+    assert.equal(workspaceOf(elsewhere.workspaceId).copyBranch.createdBy.paneId, "pane-coord");
+    assert.equal((await aw.createAgentWorktree({ ...coordinator, workspaceId: "ws-gone" }, {}, deps)).code, "WORKTREE_NO_WORKSPACE");
+
     // ── Who may call ───────────────────────────────────────────────────────
     for (const role of ["worker", "automation"]) {
       const refused = await aw.createAgentWorktree({ role, client: "cora" }, {}, deps);

@@ -70,6 +70,9 @@ export interface WorktreeCaller {
   runId?: string;
   // The terminal pane the calling agent runs in, already resolved.
   paneId?: string;
+  // Another workspace the call acts in, already allowed by the user through
+  // the cross-workspace terminal grant. Never read from tool JSON.
+  workspaceId?: string;
 }
 
 export type WorktreeCode =
@@ -654,7 +657,11 @@ export async function resolveWorktreeScope(
 ): Promise<WorktreeScope | WorktreeRefusal> {
   const state = await deps.loadState();
   let callerWorkspace: Workspace | undefined;
-  if (run) {
+  if (caller.workspaceId) {
+    callerWorkspace = state.workspaces.find((workspace) => workspace.id === caller.workspaceId);
+    if (!callerWorkspace) return refusal("WORKTREE_NO_WORKSPACE");
+  }
+  if (!callerWorkspace && run) {
     callerWorkspace = state.workspaces.find((workspace) => workspace.id === run.workspaceId);
     const snapshotCwd = run.settingsSnapshot?.workspaceCwd;
     if (!callerWorkspace && typeof snapshotCwd === "string" && snapshotCwd) {

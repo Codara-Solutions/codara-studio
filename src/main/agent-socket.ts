@@ -59,6 +59,7 @@ import {
   type AgentWorktreeEvent,
   type WorktreeCaller,
   type WorktreeCallerRole,
+  type WorktreeRefusal,
 } from "./agent-worktrees";
 import { managedWorktreesRoot } from "./git-worktrees";
 import { agentWorktreeSetupRunner } from "./worktree-setup";
@@ -1527,6 +1528,9 @@ async function handleTerminalCreate(
     return errorResponse(id, ERR_INVALID_PARAMS, "workspace must be a workspace id or an absolute folder path");
   }
   const requestedWorkspace = stringParam(params, "workspace");
+  const worktreeRequest = terminalWorktreeParam(params.worktree);
+  if (typeof worktreeRequest === "string") return errorResponse(id, ERR_INVALID_PARAMS, worktreeRequest);
+  if (worktreeRequest && cwd) return errorResponse(id, ERR_INVALID_PARAMS, "pass cwd or worktree, not both");
   const command = stringParam(params, "command");
   const title = stringParam(params, "title");
   const group = tabGroupParam(params);
@@ -1665,6 +1669,31 @@ async function handleTerminalCreate(
     }
     if (!cwd && resolved.folder) cwd = resolved.folder;
   }
+  // The worktree is made in the target workspace's repository, under the
+  // same approval as the terminal, and the terminal opens in it.
+  let worktree: Record<string, unknown> | null = null;
+  if (worktreeRequest) {
+    try {
+      const made = await createAgentWorktree(
+        { ...(await worktreeCaller(params)), ...(crossWorkspace ? { workspaceId: crossWorkspace.target.id } : {}) },
+        worktreeRequest,
+        worktreeDeps(),
+      );
+      if (made.ok !== true) {
+        const refusal = made as WorktreeRefusal;
+        return errorResponse(id, ERR_INVALID_PARAMS, `${refusal.code}: ${refusal.error}${refusal.hint ? ` ${refusal.hint}` : ""}`);
+      }
+      if (typeof made.workspaceId !== "string" || typeof made.path !== "string") {
+        return errorResponse(id, ERR_INTERNAL, "the worktree was made without a workspace");
+      }
+      worktree = made;
+      workspaceId = made.workspaceId;
+      workspaceCwd = made.path;
+      cwd = made.path;
+    } catch (error) {
+      return errorResponse(id, ERR_INTERNAL, error instanceof Error ? error.message : String(error));
+    }
+  }
   const callerPane =
     !run && callerPaneId
       ? (await listStudioTerminals().catch(() => [])).find((entry) => entry.paneId === callerPaneId)
@@ -1779,6 +1808,20 @@ async function handleTerminalCreate(
     return successResponse(id, {
       ...result,
       ...(crossWorkspace ? { workspaceId: crossWorkspace.target.id, workspace: crossWorkspace.target.name } : {}),
+      // The terminal sits in the worktree's own workspace, not its project's.
+      ...(worktree
+        ? {
+            workspaceId: worktree.workspaceId,
+            workspace: worktree.name,
+            worktree: {
+              workspaceId: worktree.workspaceId,
+              path: worktree.path,
+              branch: worktree.branch,
+              created: worktree.created,
+              ...(worktree.setup ? { setup: worktree.setup } : {}),
+            },
+          }
+        : {}),
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -2253,6 +2296,20 @@ function worktreeDeps(): AgentWorktreeDeps {
     randomId: () => randomBytes(8).toString("hex"),
     worktreeSetup: agentWorktreeSetupRunner(),
   };
+}
+
+/** terminal.create's worktree option: null when absent, a message when malformed. */
+function terminalWorktreeParam(value: unknown): { branch?: string; base?: string; purpose?: string } | null | string {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) return "worktree must be an object: { branch?, base?, purpose? }";
+  const out: { branch?: string; base?: string; purpose?: string } = {};
+  for (const [key, field] of Object.entries(value as Record<string, unknown>)) {
+    if (key !== "branch" && key !== "base" && key !== "purpose") return `worktree.${key} is not an option; use branch, base or purpose`;
+    if (field === undefined || field === null) continue;
+    if (typeof field !== "string") return `worktree.${key} must be a string`;
+    if (field.trim()) out[key] = field.trim();
+  }
+  return out;
 }
 
 async function worktreeCaller(params: Record<string, unknown>): Promise<WorktreeCaller> {

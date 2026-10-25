@@ -588,7 +588,7 @@ In every set, except `codara_spawn_terminals`, which is only in `execute`.
 
 | Tool | What it does |
 |---|---|
-| `codara_terminal_create` | Opens a new terminal tab owned by the agent, tinted so you can see an agent drives it, in the tab group `group` names. Temporary terminals close when the run finishes; `retention: "service"` keeps one (a dev server, say) until the run is deleted. `workspace` opens it in another workspace instead; see [Terminals in another workspace](#terminals-in-another-workspace). |
+| `codara_terminal_create` | Opens a new terminal tab owned by the agent, tinted so you can see an agent drives it, in the tab group `group` names. Temporary terminals close when the run finishes; `retention: "service"` keeps one (a dev server, say) until the run is deleted. `workspace` opens it in another workspace instead; see [Terminals in another workspace](#terminals-in-another-workspace). `worktree` opens it in a new worktree; see [A terminal in a new worktree](#a-terminal-in-a-new-worktree). |
 | `codara_terminal_run` | Runs one command in a terminal the agent created, or in a new one, and waits for it: returns the exit code, the output and a `cursor`. With Codara's shell integration the shell reports when the command ended; otherwise the call returns once output has been quiet. A command still running at `timeoutMs` (default 30 seconds, at most 10 minutes) keeps running. Refuses a pane that is busy, including one another `codara_terminal_run` call is still using. `group` puts a new terminal in a tab group, or moves the tab of `paneId` into it. |
 | `codara_terminal_list` | Lists the terminal panes in the agent's workspace: the tab's `link` (and `groupLink` in a group), title, tab group, cwd, which agent CLI runs there and its state, whether the shell is running a command, which pane is the caller's and which ones it may write to. Terminals the agent opened in other workspaces are listed too, with their `workspaceId`. |
 | `codara_terminal_write` | Types into a terminal the agent created, or into the session of a dev server Codara keeps (to answer its prompts), submitting with Enter by default. |
@@ -642,6 +642,29 @@ in other workspaces lists each pair with Revoke, and updates while open.
 The new tab carries a small "from <caller>" label. It is owned like any
 terminal an agent opens (below). The result adds `workspaceId` and the
 workspace's name.
+
+### A terminal in a new worktree
+
+`worktree: { branch?, base?, purpose? }` makes a worktree first and opens the
+terminal in it, so an agent starts inside its own checkout in one call:
+
+```json
+{ "workspace": "codara-studio", "worktree": { "branch": "fix/login", "base": "main" }, "command": "claude" }
+```
+
+The worktree is made exactly as `codara_worktree_create` makes it (same
+branch rules, refusals, `.worktreeinclude` and setup), from the repository of
+the target workspace: `workspace` when given, otherwise the caller's own. A
+cross-workspace call asks the user once, with the same card and grant as any
+terminal in another workspace; the worktree is made only after the answer, and
+nothing is made on Deny. The worktree's row is credited to the calling agent,
+which may remove it later like any worktree it made. A worktree refusal comes
+back as the call's error (for example `WORKTREE_BRANCH_EXISTS: ...`) and opens
+no terminal. `cwd` and `worktree` cannot be combined. The result's
+`workspaceId` and `workspace` are the worktree's own, and it adds
+`worktree: { workspaceId, path, branch, created, setup? }`; when `setup` is
+not finished, the `command` has already started, so wait with
+`codara_worktree_setup` before building.
 
 ### Who owns an agent's terminal
 
