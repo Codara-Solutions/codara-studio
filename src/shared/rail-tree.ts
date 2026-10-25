@@ -97,9 +97,10 @@ export interface RailFamilyInput {
 
 /**
  * Puts each agent on the row it works in. An agent whose pane is in a
- * worktree's workspace works there; an agent in the project that created a
- * worktree works in that worktree (its chat stays in the project, its branch
- * is the worktree's). The rest are the project's own. Worktrees sort by
+ * worktree's workspace works there. An agent in the project that created a
+ * worktree works in it while no agent runs inside it (its chat stays in the
+ * project, its branch is the worktree's); once one does, the creator was a
+ * coordinator and stays on the project. The rest are the project's own. Worktrees sort by
  * their most urgent agent (needs you, working, done, idle, none), keeping
  * rail order among equals.
  */
@@ -108,9 +109,12 @@ export function buildRailFamily(input: RailFamilyInput): RailFamily {
   const claimed = new Set<string>();
   const rows = input.children.map((child, index) => {
     const agents = [...child.lines];
-    const creator = child.creatorPaneId ? projectByKey.get(paneNoteKey(child.creatorPaneId)) : undefined;
-    if (creator && !agents.some((line) => line.key === creator.key)) agents.push(creator);
-    if (creator) claimed.add(creator.key);
+    const creator =
+      child.creatorPaneId && agents.length === 0 ? projectByKey.get(paneNoteKey(child.creatorPaneId)) : undefined;
+    if (creator) {
+      agents.push(creator);
+      claimed.add(creator.key);
+    }
     agents.sort(byUrgency);
     return { index, merged: child.merged, row: { workspaceId: child.workspaceId, agents } };
   });

@@ -1,0 +1,142 @@
+/* The tree under a project in the workspace rail (WorkspaceChildren.tsx). */
+.rail-children {
+  position: relative;
+  margin: -2px 0 6px 18px;
+  padding-left: 12px;
+  transition: transform var(--ws-reorder-motion, 0s) var(--ease-out-fast);
+}
+
+/* The tree line stops at the last child's tick, not at the block's bottom. */
+.rail-children::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 14px;
+  width: 1px;
+  background: var(--rule);
+}
+
+.rail-children > .rail-child::before,
+.rail-children-agents > li::before {
+  content: "";
+  position: absolute;
+  left: -12px;
+  top: 50%;
+  width: 9px;
+  height: 1px;
+  background: var(--rule);
+}
+
+.rail-children-agents {
+  margin: 0 0 1px;
+  padding: 0;
+}
+
+.rail-children-agents > li {
+  position: relative;
+}
+
+.rail-child {
+  position: relative;
+}
+
+.rail-child-line1 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 10.5px;
+  line-height: 14px;
+}
+
+.rail-child-line2 {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-size: 10.5px;
+  line-height: 13px;
+  white-space: nowrap;
+}
+
+.rail-child-dot {
+  flex: 0 0 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+}
+
+.rail-child-age {
+  font-size: 10px;
+  color: var(--muted-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.rail-child-note {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rail-merged-fold {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  padding: 0 6px 0 2px;
+  font-size: 10.5px;
+  color: var(--muted-2);
+}
+
+.rail-merged-clean-up {
+  font: inherit;
+  font-size: 10.5px;
+  padding: 1px 7px;
+  border: 0;
+  border-radius: var(--radius-control, 7px);
+  background: var(--hover-strong, var(--hover));
+  color: var(--ink-dim);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.rail-merged-clean-up:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.rail-chevron {
+  appearance: none;
+  flex: 0 0 14px;
+  width: 14px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-2);
+  cursor: pointer;
+}
+
+.rail-chevron:hover {
+  background: var(--hover);
+  color: var(--ink-dim);
+}
+
+.rail-chevron:focus-visible,
+.rail-merged-clean-up:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.rail-chevron-spacer {
+  flex: 0 0 14px;
+  width: 14px;
+}
+
+.rail-child-faded {
+  opacity: 0.52;
+}

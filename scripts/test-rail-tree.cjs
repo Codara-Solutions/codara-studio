@@ -123,15 +123,15 @@ test("worktrees sort by their most urgent agent, rail order among equals; merged
   assert.deepEqual(family.merged.map((row) => row.workspaceId), ["merged-working", "merged"]);
 });
 
-test("an agent in the worktree's panes is not listed twice when it also created it", ({ mod }) => {
-  const same = line("p1", "working", 1, "ws-app");
+test("a creator whose worktree has an agent inside stays on the project", ({ mod }) => {
+  // A coordinator that opened a worker's terminal in a new worktree.
   const family = mod.buildRailFamily({
-    projectLines: [same],
-    children: [{ workspaceId: "wt", lines: [{ ...same, workspaceId: "wt" }], creatorPaneId: "p1", merged: false }],
+    projectLines: [line("coordinator", "working", 2)],
+    children: [{ workspaceId: "wt", lines: [line("worker", "needs-you", 1, "wt")], creatorPaneId: "coordinator", merged: false }],
   });
-  assert.equal(family.active[0].agents.length, 1);
-  assert.equal(family.own.length, 0);
-  assert.equal(family.all.length, 1);
+  assert.deepEqual(family.active[0].agents.map((l) => l.key), ["pane:worker"]);
+  assert.deepEqual(family.own.map((l) => l.key), ["pane:coordinator"]);
+  assert.equal(family.all.length, 2);
 });
 
 (async () => {
