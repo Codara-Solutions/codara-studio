@@ -150,6 +150,12 @@ test("the browser pane's toolbar, menus, tabs and memory view, sleeping tabs and
     }
     await expect(toolbar.getByRole("button", { name: /Point at an element to send to an agent/ })).toBeEnabled();
     await expect(toolbar.getByRole("button", { name: /^Comment on the page/ })).toBeEnabled();
+    // The chip counts memory as soon as the pages have loaded, not a poll later.
+    await expect(toolbar.getByTestId("preview-tabs-chip")).toContainText("MB", { timeout: 5_000 });
+    // Focused, the address bar is one field: the pill's ring and no second box inside it.
+    const addressInput = toolbar.getByPlaceholder("http://localhost:3000");
+    await addressInput.focus();
+    expect(await addressInput.evaluate((el) => getComputedStyle(el).boxShadow)).toBe("none");
     await shot(page, "toolbar", await paneClip(page, current, 300));
 
     // More: the sizes view, the tab id for an agent, the system browser and DevTools.

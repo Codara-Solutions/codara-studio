@@ -312,6 +312,9 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
                 fontFamily: "var(--font-mono)",
                 fontSize: 11,
                 outline: "none",
+                // The pill carries the focus ring; the app-wide input ring
+                // would draw a second box inside it.
+                boxShadow: "none",
                 // Hidden while resting so the styled overlay above shows
                 // through; focus reveals it for editing. Caret/selection only
                 // matter when focused, so opacity is the right lever here.

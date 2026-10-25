@@ -87,6 +87,7 @@ export function noteBrowserTab(id: string, input: { workspaceId: string | null; 
   });
   ensureTimer();
   emit();
+  readMemorySoon();
 }
 
 export function forgetBrowserTab(id: string): void {
@@ -95,6 +96,9 @@ export function forgetBrowserTab(id: string): void {
 }
 
 export function noteTabPage(id: string, page: { title?: string; url?: string }): void {
+  // A page that just loaded has a process to measure; the chip should not
+  // wait for the next poll to count it.
+  if (records.get(id)?.memoryBytes === null) readMemorySoon();
   const change: Partial<BrowserTabRecord> = {};
   if (page.title !== undefined) change.title = page.title;
   if (page.url) change.url = page.url;
@@ -154,6 +158,7 @@ export function wakeTab(id: string, url?: string): void {
   if (!record?.asleep) return;
   if (url) wakeUrls.set(id, url);
   patch(id, { asleep: false, asleepAt: null, lastSeenAt: Date.now() });
+  readMemorySoon();
 }
 
 export function takeWakeUrl(id: string): string | null {
@@ -251,6 +256,15 @@ async function readMemory(): Promise<void> {
   } catch {
     /* the readout stays at its last value */
   }
+}
+
+let soonTimer: ReturnType<typeof setTimeout> | null = null;
+function readMemorySoon(): void {
+  if (soonTimer || polling === 0) return;
+  soonTimer = setTimeout(() => {
+    soonTimer = null;
+    void readMemory();
+  }, 1_000);
 }
 
 function schedulePoll(): void {
