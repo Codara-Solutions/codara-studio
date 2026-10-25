@@ -475,8 +475,11 @@ keeps working when Studio quits or the network drops.
 this computer and every SSH host: status, CPU, memory, free disk and load,
 which agent CLIs and tmux are on the machine's login PATH, the agents
 running there (with Show, which jumps to the pane), and agent sessions no
-pane shows any more (with Stop). **Add a machine** reuses the SSH manager's
-host form, which also takes `user@host:port`.
+pane on this computer shows (with Stop). A session another computer's Codara,
+or someone's own ssh, has open (a tmux client is attached) reads "Open
+elsewhere" and cannot be stopped; the kill command checks again on the
+machine. **Add a machine** reuses the SSH manager's host form, which also
+takes `user@host:port` (port 1 to 65535).
 
 - **Numbers.** `machines.ts` builds the rows; it probes a host only while it
   is connected, never connecting one itself, and reuses a reading younger
@@ -485,17 +488,24 @@ host form, which also takes `user@host:port`.
   cgroup v2's `cpu.max` and `memory.max` win when set, and CPU share comes
   from `cpu.stat` usage over wall time. This computer reads Node's `os`.
 - **Where.** With the preference on, the Add pane menu shows a Where row: the
-  pane's own machine and every other connected one
-  (`components/machines/whereChoices.ts`). A pane on another machine opens
-  in the folder of a workspace already on it, else the SSH user's home.
+  pane's own machine, this computer when the pane is on another one, and
+  every other connected machine (`components/machines/whereChoices.ts`). A
+  new pane opens in the folder of a workspace already on the chosen machine,
+  else that user's home.
 - **Host keys.** With the preference on, a key Studio has not stored is
   trusted silently only when `~/.ssh/known_hosts` lists it (read only,
-  `host-keys.ts` handles hashed names, patterns and `@revoked`); otherwise
-  `HostKeyPrompt.tsx` asks "Is this <host>?" with the fingerprint, and the
-  handshake timeout stretches to 5 minutes while it waits. A changed key is
-  refused; the Machines card shows both fingerprints and **Trust the new
-  key** (`trustChangedHostKey`). Codara Cloud boxes keep trust on first use.
-  With the preference off, keys behave as before.
+  `host-keys.ts` handles hashed names, patterns and `@revoked`; a host with
+  `HostKeyAlias` is looked up by the alias, without the port, as OpenSSH
+  does); otherwise `HostKeyPrompt.tsx` asks "Is this <host>?" with the
+  fingerprint. Only once the host has answered does the handshake wait up to
+  5 minutes for the user; a machine that is down fails after the usual 20
+  seconds. Every window drops a prompt once it ends, however it ends. A key
+  that differs from Codara's stored one, or from the one known_hosts lists
+  for the host, is refused; the Machines card shows both fingerprints and
+  **Trust the new key** (`trustChangedHostKey`), which trusts only the key
+  the card showed and is forgotten when the host is disconnected, edited or
+  removed. Codara Cloud boxes keep trust on first use. With the preference
+  off, keys behave as before.
 
 Tests: `test-remote-agents` runs the generated lines under `/bin/sh` with
 fake `tmux` and `claude`, `test-remote-pty` covers reconnects with fake

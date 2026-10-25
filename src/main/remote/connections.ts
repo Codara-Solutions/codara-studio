@@ -71,6 +71,13 @@ const READY_TIMEOUT_MS = 20_000;
 const PROXY_READY_TIMEOUT_MS = 120_000;
 // The handshake waits while the user reads a new host key's fingerprint.
 const HOST_KEY_PROMPT_READY_TIMEOUT_MS = 5 * 60_000;
+// That long wait starts only once the host answered: until then a machine
+// that is down fails as fast as any other connect.
+const timeouts = { reachMs: READY_TIMEOUT_MS, promptMs: HOST_KEY_PROMPT_READY_TIMEOUT_MS };
+
+export function setHostKeyTimeoutsForTests(next: Partial<typeof timeouts>): void {
+  Object.assign(timeouts, next);
+}
 const KEEPALIVE_INTERVAL_MS = 15_000;
 const KEEPALIVE_COUNT_MAX = 3;
 // A ProxyCommand that ignores the end of its input would outlive a closed
@@ -207,11 +214,17 @@ async function rememberHostKey(key: string, fingerprint: string): Promise<void> 
 
 type HostKeyPromptSender = (request: HostKeyPromptRequest) => void;
 let hostKeyPromptSender: HostKeyPromptSender | null = null;
+let hostKeyPromptClosedSender: ((requestId: string) => void) | null = null;
 const pendingHostKeyPrompts = new Map<string, (trust: boolean) => void>();
 let confirmNewHostKeys: () => Promise<boolean> = async () => false;
 
 export function setHostKeyPromptSender(sender: HostKeyPromptSender | null): void {
   hostKeyPromptSender = sender;
+}
+
+/** Told when a prompt ends however it ends, so every window that shows it drops it. */
+export function setHostKeyPromptClosedSender(sender: ((requestId: string) => void) | null): void {
+  hostKeyPromptClosedSender = sender;
 }
 
 /** Whether a new host key needs the user's confirmation; read on each connect. */
@@ -231,12 +244,17 @@ function promptHostKey(request: Omit<HostKeyPromptRequest, "requestId">, signal:
       if (!pendingHostKeyPrompts.delete(requestId)) return;
       clearTimeout(timer);
       signal.removeEventListener("abort", onAbort);
+      try {
+        hostKeyPromptClosedSender?.(requestId);
+      } catch {
+        // A window mid-teardown must not keep the handshake waiting.
+      }
       resolve(trust);
     };
     const onAbort = () => finish(false);
     // ssh2's handshake waits on this answer; an unanswered prompt must not
     // hold a connection open forever.
-    const timer = setTimeout(() => finish(false), 5 * 60_000);
+    const timer = setTimeout(() => finish(false), timeouts.promptMs);
     pendingHostKeyPrompts.set(requestId, finish);
     signal.addEventListener("abort", onAbort, { once: true });
     try {
@@ -253,18 +271,35 @@ async function readUserKnownHosts(): Promise<string> {
   return texts.join("\n");
 }
 
-/** Changed keys the user may trust, by host id: the entry to replace and the new key. */
-const changedHostKeys = new Map<string, { storeId: string; fingerprint: string }>();
+/** Where Codara's own store keeps a host's key: the alias when it has one. */
+function hostKeyStoreId(host: RemoteHostConfig): string {
+  return host.hostKeyAlias ?? `${host.host}:${host.port}`;
+}
 
-/** Trusts the key a host presented when it was refused as changed. */
-export async function trustChangedHostKey(hostId: string): Promise<boolean> {
+/**
+ * Changed keys the user may trust, by host id: the entry to replace, the new
+ * key as stored, and as the card showed it.
+ */
+const changedHostKeys = new Map<string, { storeId: string; fingerprint: string; shown: string }>();
+
+/**
+ * Trusts the key a host presented when it was refused as changed, only if it
+ * is still the one the user saw (`fingerprint`, as `sshFingerprint` prints
+ * it): a key that arrived after the card was drawn is not what they checked.
+ */
+export async function trustChangedHostKey(hostId: string, fingerprint: string): Promise<boolean> {
   const pending = changedHostKeys.get(hostId);
-  if (!pending) return false;
+  if (!pending || pending.shown !== fingerprint) return false;
   changedHostKeys.delete(hostId);
   await rememberHostKey(pending.storeId, pending.fingerprint);
   const conn = connections.get(hostId);
   if (conn) conn.hostKeyChange = null;
   return true;
+}
+
+/** Drops the offer to trust a changed key: the host was disconnected, edited or removed. */
+export function forgetChangedHostKey(hostId: string): void {
+  changedHostKeys.delete(hostId);
 }
 
 // ── Status broadcast ─────────────────────────────────────────────────────────
@@ -595,7 +630,13 @@ class RemoteConnection {
         reject(err instanceof Error ? err : new Error(String(err)));
         return;
       }
+      let reachTimer: ReturnType<typeof setTimeout> | null = null;
+      const reached = () => {
+        if (reachTimer) clearTimeout(reachTimer);
+        reachTimer = null;
+      };
       const cleanup = () => {
+        reached();
         signal.removeEventListener("abort", onAbort);
         client.removeListener("ready", onReady);
         client.removeListener("error", onError);
@@ -655,6 +696,13 @@ class RemoteConnection {
       client.on("end", onEnd);
       client.on("keyboard-interactive", onKeyboardInteractive);
       signal.addEventListener("abort", onAbort, { once: true });
+      if (mayAskHostKey) {
+        const reachMs = proxy ? PROXY_READY_TIMEOUT_MS : timeouts.reachMs;
+        reachTimer = setTimeout(() => {
+          fail(new Error(`${host.id} did not answer within ${Math.round(reachMs / 1000)}s.`));
+          disposeClient(client);
+        }, reachMs);
+      }
       try {
         client.connect({
           host: host.host,
@@ -670,6 +718,7 @@ class RemoteConnection {
           keepaliveCountMax: KEEPALIVE_COUNT_MAX,
           tryKeyboard: typeof auth.password === "string",
           hostVerifier: (key: Buffer, verified: (ok: boolean) => void) => {
+            reached();
             void this.verifyHostKey(key, generation, signal).then(verified);
           },
           ...auth,
@@ -683,9 +732,9 @@ class RemoteConnection {
 
   private async mayAskForHostKey(): Promise<boolean> {
     const host = this.host;
-    if (host.hostKeyAlias || host.codaraBoxId) return false;
+    if (host.codaraBoxId) return false;
     const known = await readKnownHosts();
-    return !known[`${host.host}:${host.port}`] && (await confirmNewHostKeys());
+    return !known[hostKeyStoreId(host)] && (await confirmNewHostKeys());
   }
 
   private async verifyHostKey(
@@ -693,26 +742,33 @@ class RemoteConnection {
     generation: number,
     signal: AbortSignal,
   ): Promise<boolean> {
-    // Fingerprints are kept per host:port (or the box's alias); a key that
+    // Fingerprints are kept per host:port (or the host's alias); a key that
     // changed is refused until the user trusts it (trustChangedHostKey).
     const host = this.host;
-    const id = host.hostKeyAlias ?? `${host.host}:${host.port}`;
+    const id = hostKeyStoreId(host);
     const fingerprint = storedFingerprint(key);
     const known = await readKnownHosts();
     if (!this.isCurrent(generation, signal)) return false;
     const prior = known[id];
     if (prior === fingerprint) return true;
-    const confirm = !host.hostKeyAlias && !host.codaraBoxId && (await confirmNewHostKeys());
+    const confirm = !host.codaraBoxId && (await confirmNewHostKeys());
     if (!this.isCurrent(generation, signal)) return false;
     if (!prior) {
       if (confirm) {
-        const verdict = knownHostsVerdict(await readUserKnownHosts(), host.host, host.port, key);
+        // OpenSSH looks a HostKeyAlias up as given, never with the port.
+        const verdict = host.hostKeyAlias
+          ? knownHostsVerdict(await readUserKnownHosts(), host.hostKeyAlias, 22, key)
+          : knownHostsVerdict(await readUserKnownHosts(), host.host, host.port, key);
         if (!this.isCurrent(generation, signal)) return false;
-        if (verdict === "revoked") {
+        if (verdict.kind === "revoked") {
           this.hostKeyRefusal = `The host key of ${id} is marked revoked in ~/.ssh/known_hosts.`;
           return false;
         }
-        if (verdict === "none") {
+        if (verdict.kind === "mismatch") {
+          this.refuseChangedKey(id, sshFingerprint(verdict.listedKey), key, "known_hosts");
+          return false;
+        }
+        if (verdict.kind === "none") {
           if (this.quietGeneration === generation) {
             this.hostKeyRefusal = `The host key of ${id} needs your confirmation: connect to ${host.id} again.`;
             return false;
@@ -732,20 +788,29 @@ class RemoteConnection {
       return true;
     }
     if (confirm) {
-      this.hostKeyChange = {
-        hostLabel: id,
-        previousFingerprint: displayFingerprint(prior),
-        newFingerprint: sshFingerprint(key),
-        keyType: hostKeyType(key),
-      };
-      changedHostKeys.set(host.id, { storeId: id, fingerprint });
-      this.hostKeyRefusal =
-        `The host key of ${id} changed since Codara last connected. ` +
-        "Someone may be intercepting the connection, or the machine was reinstalled.";
+      this.refuseChangedKey(id, displayFingerprint(prior), key, "codara");
       return false;
     }
     this.hostKeyRefusal = `Host key for ${id} changed (possible MITM). Remove it from spark-known-hosts.json to trust the new key.`;
     return false;
+  }
+
+  /** Refuses a key that differs from the one Codara, or the user's known_hosts, has for the host. */
+  private refuseChangedKey(id: string, previousFingerprint: string, key: Buffer, listedBy: "codara" | "known_hosts"): void {
+    const shown = sshFingerprint(key);
+    this.hostKeyChange = {
+      hostLabel: id,
+      previousFingerprint,
+      newFingerprint: shown,
+      keyType: hostKeyType(key),
+      ...(listedBy === "known_hosts" ? { listedBy } : {}),
+    };
+    changedHostKeys.set(this.host.id, { storeId: id, fingerprint: storedFingerprint(key), shown });
+    this.hostKeyRefusal =
+      (listedBy === "known_hosts"
+        ? `The host key of ${id} changed: it is not the key your ~/.ssh/known_hosts lists. `
+        : `The host key of ${id} changed since Codara last connected. `) +
+      "Someone may be intercepting the connection, or the machine was reinstalled.";
   }
 
   private adopt(client: Client, generation: number, signal: AbortSignal): void {
@@ -982,6 +1047,7 @@ export function getConnectionStatus(hostId: string): RemoteConnectionStatus {
 }
 
 export function disconnectHost(hostId: string): void {
+  forgetChangedHostKey(hostId);
   connectionGenerations.set(hostId, (connectionGenerations.get(hostId) ?? 0) + 1);
   connections.get(hostId)?.dispose();
   connections.delete(hostId);

@@ -25,7 +25,7 @@ const SCRIPT = [
   `if [ "$(uname -s)" = Darwin ]; then echo "${MARK}memsize $(sysctl -n hw.memsize 2>/dev/null)"; echo "${MARK}vmstat"; vm_stat 2>/dev/null; echo "${MARK}pscpu $(ps -A -o %cpu= 2>/dev/null | awk '{s+=$1} END {print s+0}')"; fi`,
   `echo "${MARK}df"; df -Pk "$HOME" 2>/dev/null | tail -n 1`,
   `echo "${MARK}clis$(for c in ${MACHINE_CLIS.join(" ")}; do command -v "$c" >/dev/null 2>&1 && printf " %s" "$c"; done)"`,
-  `echo "${MARK}tmux"; tmux -L ${REMOTE_TMUX_SOCKET} list-sessions -F "#{session_name} #{session_created} #{pane_current_command}" 2>/dev/null`,
+  `echo "${MARK}tmux"; tmux -L ${REMOTE_TMUX_SOCKET} list-sessions -F "#{session_name} #{session_created} #{session_attached} #{pane_current_command}" 2>/dev/null`,
   `echo "${MARK}end"`,
 ].join("; ");
 
@@ -137,13 +137,14 @@ export function parseMachineProbe(output: string): MachineProbeReading {
 
   const sessions: Omit<MachineAgentSession, "attached" | "paneId">[] = [];
   for (const line of sections.get("tmux")?.body ?? []) {
-    const [name, created, ...command] = line.trim().split(/\s+/);
+    const [name, created, clients, ...command] = line.trim().split(/\s+/);
     if (!name?.startsWith("codara-")) continue;
     const createdSec = num(created);
     sessions.push({
       name,
       createdAt: createdSec === null ? null : createdSec * 1000,
       command: command.join(" ") || null,
+      openElsewhere: (num(clients) ?? 0) > 0,
     });
   }
 

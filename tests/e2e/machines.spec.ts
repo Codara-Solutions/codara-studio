@@ -80,11 +80,27 @@ test("add a machine, confirm its key, see its limits, and start an agent on it f
     await expect(card).toContainText("Codex not installed");
     await page.screenshot({ path: join(fixture.root, "..", "codara-machines-page.png") });
 
-    // An agent session no pane shows (closed while offline) is listed with Stop.
+    // An agent session no pane on this computer shows (closed while offline) is listed with Stop.
     await fixture.host.exec(`${TMUX} new-session -d -s codara-pane-ghost 'sleep 600'`);
-    await expect(card).toContainText("No pane", { timeout: 25_000 });
+    await expect(card).toContainText("Not open here", { timeout: 25_000 });
     await card.getByRole("button", { name: "Stop" }).click();
     await expect.poll(() => sessions(fixture.host), { timeout: 15_000 }).toEqual([]);
+
+    // One that Codara on another computer has open (a tmux client is attached)
+    // is never stopped, even when the client attached after the last reading.
+    await fixture.host.exec(`${TMUX} new-session -d -s codara-pane-away 'sleep 600'`);
+    await expect(card).toContainText("Not open here", { timeout: 25_000 });
+    await fixture.host.exec(
+      `(sleep 600 | TERM=xterm script -qfc "${TMUX} attach -t =codara-pane-away" /dev/null) >/dev/null 2>&1 &`,
+    );
+    await expect.poll(() => fixture.host.exec(`${TMUX} list-clients -t =codara-pane-away`), { timeout: 10_000 }).not.toBe("");
+    const stopped = await page.evaluate((id) => window.spark.machines.stopSession(id, "codara-pane-away"), MACHINE);
+    expect(stopped).toBe(false);
+    expect(await sessions(fixture.host)).toEqual(["codara-pane-away"]);
+    const away = card.locator(".machine-agent", { hasText: "Open elsewhere" });
+    await expect(away).toBeVisible({ timeout: 25_000 });
+    await expect(away.getByRole("button", { name: "Stop" })).toBeDisabled();
+    await fixture.host.exec(`${TMUX} kill-session -t =codara-pane-away`);
 
     // The Where row of the Add pane menu starts Claude on the machine.
     await page.keyboard.press("Escape");

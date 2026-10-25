@@ -41,6 +41,11 @@ export interface MachineAgentSession {
   command: string | null;
   /** True when a pane in Studio shows it. */
   attached: boolean;
+  /**
+   * A tmux client is attached although no pane here shows it: Codara on
+   * another computer, or someone's own ssh, has it open.
+   */
+  openElsewhere: boolean;
 }
 
 export type MachineKind = "local" | "ssh" | "codara-cloud";

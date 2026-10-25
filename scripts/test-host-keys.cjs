@@ -16,7 +16,17 @@
 //     the question; refusing stores nothing and asks for no password; a
 //     revoked key never connects; Codara Cloud boxes keep trust on first use
 //   - a changed key is refused, the row carries both fingerprints, and
-//     trusting the new key replaces that host's entry and connects
+//     trusting the new key replaces that host's entry and connects; a key
+//     that disagrees with the user's known_hosts is a changed key too, never
+//     a first-use question
+//   - a ~/.ssh/config host with HostKeyAlias is confirmed like any other,
+//     looked up in known_hosts by the alias with no port, as OpenSSH does
+//   - "Trust the new key" trusts only the key the card showed, and only
+//     until the host is disconnected, edited or removed
+//   - every host-key prompt that ends (answered, cancelled, timed out) is
+//     reported closed so every window drops it
+//   - a new machine that does not answer fails after the normal connect
+//     timeout; only a machine that answered waits for the user
 //
 //   node scripts/test-host-keys.cjs
 
@@ -69,6 +79,7 @@ function connectionStubs() {
         connect(config) {
           const h = globalThis.__codaraHostKeyHarness;
           h.connects.push(config);
+          if (h.unreachable) return;
           config.hostVerifier(h.serverKey, (trusted) => {
             setImmediate(() => {
               if (trusted) this.emit("ready");
@@ -165,13 +176,22 @@ function hasSshKeygen() {
   }
 
   {
-    const v = (text, host, port, k = key) => keys.knownHostsVerdict(text, host, port, k);
+    const v = (text, host, port, k = key) => keys.knownHostsVerdict(text, host, port, k).kind;
     assert.equal(v(`nas.local ssh-ed25519 ${b64}`, "nas.local", 22), "match");
     assert.equal(v(`NAS.local ssh-ed25519 ${b64}`, "nas.local", 22), "match", "host names ignore case");
     assert.equal(v(`nas.local ssh-ed25519 ${b64}`, "nas.local", 2222), "none", "a plain name is port 22 only");
     assert.equal(v(`[nas.local]:2222 ssh-ed25519 ${b64}`, "nas.local", 2222), "match");
     assert.equal(v(`alias,10.0.0.5 ssh-ed25519 ${b64}`, "10.0.0.5", 22), "match");
-    assert.equal(v(`nas.local ssh-ed25519 ${b64}`, "nas.local", 22, other), "none", "another key for the host is not this one");
+    assert.equal(v(`nas.local ssh-ed25519 ${b64}`, "nas.local", 22, other), "mismatch", "another key of the same type: changed");
+    const listed = keys.knownHostsVerdict(`nas.local ssh-ed25519 ${b64}`, "nas.local", 22, other);
+    assert.ok(listed.kind === "mismatch" && listed.listedKey.equals(key), "the mismatch carries the listed key");
+    assert.equal(
+      v(`nas.local ssh-ed25519 ${other.toString("base64")}\nnas.local ssh-ed25519 ${b64}`, "nas.local", 22),
+      "match",
+      "any line listing the key wins over another that does not",
+    );
+    assert.equal(v(`nas.local ssh-rsa ${wireKey("ssh-rsa", randomBytes(64)).toString("base64")}`, "nas.local", 22), "none", "another key type is not a change");
+    assert.equal(v(`other.local ssh-ed25519 ${other.toString("base64")}`, "nas.local", 22), "none");
     assert.equal(v(`*.tail1234.ts.net ssh-ed25519 ${b64}`, "nas.tail1234.ts.net", 22), "match");
     assert.equal(v(`10.0.0.? ssh-ed25519 ${b64}`, "10.0.0.7", 22), "match");
     assert.equal(v(`10.0.0.*,!10.0.0.7 ssh-ed25519 ${b64}`, "10.0.0.7", 22), "none", "negation wins");
@@ -207,6 +227,7 @@ function hasSshKeygen() {
       nas: { id: "nas", host: "nas.local", port: 22, username: "dev", source: "manual" },
       vps: { id: "vps", host: "203.0.113.7", port: 2222, username: "dev", source: "manual" },
       box: { id: "box", host: "box", port: 22, username: "dev", source: "codara-cloud", hostKeyAlias: "codara-box:b1", codaraBoxId: "b1" },
+      aliased: { id: "aliased", host: "10.0.0.9", port: 2200, username: "dev", source: "ssh-config", hostKeyAlias: "builder" },
     },
   };
   globalThis.__codaraHostKeyHarness = harness;
@@ -218,10 +239,13 @@ function hasSshKeygen() {
   let answer = null;
   conns.setHostKeyConfirmation(async () => confirm);
   conns.setStatusSender((s) => harness.statuses.push(s));
+  const closed = [];
   conns.setHostKeyPromptSender((request) => {
     harness.prompts.push(request);
+    if (answer === "hold") return;
     setImmediate(() => conns.answerHostKeyPrompt({ requestId: request.requestId, trust: answer }));
   });
+  conns.setHostKeyPromptClosedSender((requestId) => closed.push(requestId));
   const connect = async (hostId) => {
     const conn = await conns.getConnection(hostId);
     try {
@@ -237,6 +261,8 @@ function hasSshKeygen() {
     harness.prompts.length = 0;
     harness.connects.length = 0;
     harness.serverKey = key;
+    harness.unreachable = false;
+    closed.length = 0;
   };
 
   {
@@ -317,8 +343,9 @@ function hasSshKeygen() {
     });
     assert.ok(harness.statuses.some((s) => s.state === "error" && s.hostKeyChange), "the broadcast carries it too");
     assert.equal(harness.prompts.length, 0, "a changed key is never a first-use question");
-    assert.equal(await conns.trustChangedHostKey("vps"), false, "nothing to trust on another host");
-    assert.equal(await conns.trustChangedHostKey("nas"), true);
+    const shown = changed.hostKeyChange.newFingerprint;
+    assert.equal(await conns.trustChangedHostKey("vps", shown), false, "nothing to trust on another host");
+    assert.equal(await conns.trustChangedHostKey("nas", shown), true);
     assert.equal(stored()["nas.local:22"], keys.storedFingerprint(key));
     const after = await connect("nas");
     assert.equal(after.state, "connected");
@@ -332,6 +359,123 @@ function hasSshKeygen() {
     assert.match(legacy.error, /possible MITM/);
     assert.equal(legacy.hostKeyChange, undefined);
     ok("a changed key is refused with both fingerprints, and trusting it replaces only that entry");
+  }
+
+  {
+    reset();
+    confirm = true;
+    answer = true;
+    harness.files.set("/home/me/.ssh/known_hosts", `nas.local ssh-ed25519 ${other.toString("base64")}\n`);
+    const mismatch = await connect("nas");
+    assert.equal(mismatch.state, "error");
+    assert.equal(harness.prompts.length, 0, "a key known_hosts contradicts is never a first-use question");
+    assert.match(mismatch.error, /changed/);
+    assert.deepEqual(mismatch.hostKeyChange, {
+      hostLabel: "nas.local:22",
+      previousFingerprint: keys.sshFingerprint(other),
+      newFingerprint: keys.sshFingerprint(key),
+      keyType: "ssh-ed25519",
+      listedBy: "known_hosts",
+    });
+    assert.deepEqual(stored(), {});
+    assert.equal(await conns.trustChangedHostKey("nas", mismatch.hostKeyChange.newFingerprint), true);
+    assert.equal(stored()["nas.local:22"], keys.storedFingerprint(key));
+    assert.equal((await connect("nas")).state, "connected");
+    ok("a key that disagrees with ~/.ssh/known_hosts is refused as changed, with the listed key's fingerprint");
+  }
+
+  {
+    reset();
+    confirm = true;
+    answer = true;
+    const asked = await connect("aliased");
+    assert.equal(asked.state, "connected");
+    assert.equal(harness.prompts.length, 1, "a HostKeyAlias host is asked about like any other");
+    assert.equal(harness.prompts[0].hostLabel, "builder");
+    assert.equal(harness.connects[0].readyTimeout, 5 * 60_000);
+    assert.equal(stored().builder, keys.storedFingerprint(key));
+
+    reset();
+    harness.files.set("/home/me/.ssh/known_hosts", `builder ssh-ed25519 ${b64}\n`);
+    assert.equal((await connect("aliased")).state, "connected");
+    assert.equal(harness.prompts.length, 0, "known_hosts is read by the alias");
+
+    reset();
+    answer = false;
+    harness.files.set("/home/me/.ssh/known_hosts", `[builder]:2200 ssh-ed25519 ${b64}\n[10.0.0.9]:2200 ssh-ed25519 ${b64}\n`);
+    assert.equal((await connect("aliased")).state, "error");
+    assert.equal(harness.prompts.length, 1, "the alias is looked up with no port, never the real address");
+
+    reset();
+    harness.files.set("/home/me/.ssh/known_hosts", `builder ssh-ed25519 ${other.toString("base64")}\n`);
+    const changed = await connect("aliased");
+    assert.equal(changed.state, "error");
+    assert.equal(changed.hostKeyChange?.previousFingerprint, keys.sshFingerprint(other));
+    ok("HostKeyAlias hosts from ~/.ssh/config are confirmed, matched by the alias as OpenSSH does");
+  }
+
+  {
+    reset();
+    confirm = true;
+    harness.files.set(KNOWN, JSON.stringify({ "nas.local:22": keys.storedFingerprint(other) }));
+    const first = await connect("nas");
+    // Another key arrives after the card was drawn: trusting must not take it.
+    const third = wireKey("ssh-ed25519", randomBytes(32));
+    harness.serverKey = third;
+    await connect("nas");
+    assert.equal(await conns.trustChangedHostKey("nas", first.hostKeyChange.newFingerprint), false);
+    assert.equal(stored()["nas.local:22"], keys.storedFingerprint(other), "nothing trusted");
+
+    harness.serverKey = key;
+    const shown = (await connect("nas")).hostKeyChange.newFingerprint;
+    conns.disconnectHost("nas");
+    assert.equal(await conns.trustChangedHostKey("nas", shown), false, "a disconnect forgets the offer");
+
+    await connect("nas");
+    conns.forgetChangedHostKey("nas");
+    assert.equal(await conns.trustChangedHostKey("nas", shown), false, "editing or removing the host forgets it");
+    assert.equal(stored()["nas.local:22"], keys.storedFingerprint(other));
+    ok("Trust the new key trusts only the key the card showed, until the host is disconnected or edited");
+  }
+
+  {
+    reset();
+    confirm = true;
+    answer = true;
+    await connect("vps");
+    assert.deepEqual(closed, [harness.prompts[0].requestId], "an answered prompt is closed in every window");
+
+    reset();
+    answer = "hold";
+    const pending = connect("vps");
+    while (harness.prompts.length === 0) await new Promise((r) => setImmediate(r));
+    conns.disconnectHost("vps");
+    await pending;
+    assert.deepEqual(closed, [harness.prompts[0].requestId], "a cancelled prompt is closed");
+
+    reset();
+    conns.setHostKeyTimeoutsForTests({ promptMs: 20 });
+    const expired = await connect("vps");
+    assert.equal(expired.state, "error");
+    assert.deepEqual(closed, [harness.prompts[0].requestId], "a prompt nobody answered is closed");
+    ok("a host-key prompt that ends in any way is reported closed");
+  }
+
+  {
+    reset();
+    confirm = true;
+    harness.unreachable = true;
+    conns.setHostKeyTimeoutsForTests({ reachMs: 30 });
+    const started = Date.now();
+    const down = await Promise.race([
+      connect("vps"),
+      new Promise((resolve) => setTimeout(() => resolve({ state: "still waiting" }), 2_000)),
+    ]);
+    assert.equal(down.state, "error", "a machine that never answers fails on the connect timeout");
+    assert.match(down.error, /did not answer|timed out/i);
+    assert.ok(Date.now() - started < 1_500);
+    conns.setHostKeyTimeoutsForTests({ reachMs: 20_000, promptMs: 5 * 60_000 });
+    ok("a new machine that is down fails after the connect timeout, not the prompt's five minutes");
   }
 
   reset();

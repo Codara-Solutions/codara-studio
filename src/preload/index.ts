@@ -1611,8 +1611,15 @@ const api = {
       ipcRenderer.on("remote:hostKeyPrompt", listener);
       return () => ipcRenderer.off("remote:hostKeyPrompt", listener);
     },
-    trustChangedHostKey: (hostId: string): Promise<RemoteConnectionStatus> =>
-      ipcRenderer.invoke("remote:trustChangedHostKey", hostId),
+    /** A prompt ended (answered here or in another window, cancelled, or timed out). */
+    onHostKeyPromptClosed: (handler: (requestId: string) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, requestId: string) => handler(requestId);
+      ipcRenderer.on("remote:hostKeyPromptClosed", listener);
+      return () => ipcRenderer.off("remote:hostKeyPromptClosed", listener);
+    },
+    /** Trusts the changed key only if it is still `fingerprint`, the one the user was shown. */
+    trustChangedHostKey: (hostId: string, fingerprint: string): Promise<RemoteConnectionStatus> =>
+      ipcRenderer.invoke("remote:trustChangedHostKey", hostId, fingerprint),
   },
   // The Machines page: this computer and SSH hosts, their load and agents.
   machines: {

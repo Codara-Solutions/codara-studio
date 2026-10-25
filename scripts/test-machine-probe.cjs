@@ -105,7 +105,7 @@ const GiB = 1024 ** 3;
     assert.equal(a.cpuSample.kind, "cgroup");
     assert.equal(a.cpuSample.usageUsec, 103568);
     assert.deepEqual(a.clis, ["claude", "tmux", "git"]);
-    assert.deepEqual(a.sessions, [{ name: "codara-pane-orphan1", createdAt: 1792883114000, command: "sleep" }]);
+    assert.deepEqual(a.sessions, [{ name: "codara-pane-orphan1", createdAt: 1792883114000, command: "sleep", openElsewhere: false }]);
     const first = probe.machineStatsFrom(a, null, 10_000);
     assert.equal(first.cpus, 1);
     assert.equal(first.cpuLimited, true);
@@ -171,7 +171,7 @@ const GiB = 1024 ** 3;
       connectionStatus: (hostId) => ({ hostId, state: status[hostId] }),
       exec: async (hostId, command) => {
         execs.push({ hostId, command });
-        return { stdout: command.includes("kill-session") ? "" : output, code: 0 };
+        return { stdout: command.includes("kill-session") ? "codara-stopped\n" : output, code: 0 };
       },
       agentActivity: () => [
         { paneId: "pane-local", workspaceId: "w1", tabId: "t1", tabTitle: "Claude", runtime: "claude", state: "working" },
@@ -186,8 +186,8 @@ const GiB = 1024 ** 3;
     };
     const service = machinesLib.createMachinesService(deps);
     output = output.replace(
-      "codara-pane-orphan1 1792883114 sleep",
-      "codara-pane-orphan1 1792883114 sleep\ncodara-pane-remote 1792883000 codex",
+      "codara-pane-orphan1 1792883114 0 sleep",
+      "codara-pane-orphan1 1792883114 0 sleep\ncodara-pane-remote 1792883000 1 codex\ncodara-pane-away 1792883050 1 claude",
     );
     const snap = await service.snapshot();
     const [local, a, b] = snap.machines;
@@ -196,7 +196,14 @@ const GiB = 1024 ** 3;
     assert.equal(a.stats.cpus, 1);
     assert.equal(a.address, "dev@10.0.0.2:22");
     assert.deepEqual(a.agents.map((x) => x.paneId), ["pane-remote"]);
-    assert.deepEqual(a.orphanSessions.map((s) => s.name), ["codara-pane-orphan1"], "the session pane-remote shows is not an orphan");
+    assert.deepEqual(
+      a.orphanSessions.map((s) => [s.name, s.openElsewhere]),
+      [
+        ["codara-pane-orphan1", false],
+        ["codara-pane-away", true],
+      ],
+      "the session pane-remote shows is not listed; one another computer has open says so",
+    );
     assert.equal(b.stats, null);
     assert.deepEqual(execs.map((e) => e.hostId), ["box-a"], "a disconnected host is never probed");
 
@@ -213,10 +220,14 @@ const GiB = 1024 ** 3;
     assert.equal(await service.stopSession("box-a", "not-ours"), false);
     assert.equal(await service.stopSession("box-a", "codara-x; rm -rf ~"), false);
     assert.equal(await service.stopSession("box-b", "codara-pane-orphan1"), false, "not connected");
+    const before = execs.length;
+    assert.equal(await service.stopSession("box-a", "codara-pane-away"), false, "open on another computer");
+    assert.equal(execs.length, before, "nothing runs for it");
     assert.equal(await service.stopSession("box-a", "codara-pane-orphan1"), true);
     const kill = execs.at(-1).command;
     assert.match(kill, /kill-session -t/);
     assert.ok(kill.includes("=codara-pane-orphan1"));
+    assert.ok(kill.indexOf("list-clients") >= 0 && kill.indexOf("list-clients") < kill.indexOf("kill-session"), "and the machine checks again");
     status = { "box-a": "error", "box-b": "disconnected" };
     const offline = await service.snapshot();
     assert.equal(offline.machines[1].stats, null, "numbers go when the host does");

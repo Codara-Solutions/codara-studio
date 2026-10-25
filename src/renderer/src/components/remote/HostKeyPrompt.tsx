@@ -11,6 +11,13 @@ export default function HostKeyPrompt() {
   const request = queue[0] ?? null;
 
   useEffect(() => window.spark.remote.onHostKeyPrompt((req) => setQueue((current) => [...current, req])), []);
+  useEffect(
+    () =>
+      window.spark.remote.onHostKeyPromptClosed((requestId) =>
+        setQueue((current) => current.filter((queued) => queued.requestId !== requestId)),
+      ),
+    [],
+  );
 
   useEffect(() => {
     // Focus starts on the safe answer: Enter must not trust a key by accident.
@@ -21,7 +28,7 @@ export default function HostKeyPrompt() {
 
   const answer = (trust: boolean) => {
     window.spark.remote.answerHostKeyPrompt({ requestId: request.requestId, trust });
-    setQueue((current) => current.slice(1));
+    setQueue((current) => current.filter((queued) => queued.requestId !== request.requestId));
   };
 
   return (

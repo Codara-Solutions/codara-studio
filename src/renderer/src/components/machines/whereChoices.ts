@@ -2,13 +2,13 @@ import { useEffect, useState } from "react";
 import { makeRemotePath, parseRemotePath } from "@shared/remote";
 import { getAgentBoardSources } from "../agent-board/agentBoardSources";
 
-// The Where row of the Add pane menu: the machine a pane is on, then every
-// other SSH machine that is connected now. Only with the Machines preference
-// on; a menu that would offer one place shows no row at all. Reading statuses
-// never connects a host.
+// The Where row of the Add pane menu: the machine a pane is on, this computer
+// when that is another machine, then every other SSH machine that is
+// connected now. Only with the Machines preference on; a menu that would offer
+// one place shows no row at all. Reading statuses never connects a host.
 
 export interface WhereChoice {
-  /** "here" keeps the pane's own folder. */
+  /** "here" keeps the pane's own folder; "local" is this computer, from a remote pane. */
   id: string;
   label: string;
   hostId: string | null;
@@ -25,6 +25,7 @@ export function whereChoicesFrom(
 ): WhereChoice[] {
   const current = paneCwd ? (parseRemotePath(paneCwd)?.hostId ?? null) : null;
   const next: WhereChoice[] = [{ id: "here", label: current ?? "This computer", hostId: current }];
+  if (current) next.push({ id: "local", label: "This computer", hostId: null });
   hosts.forEach((host, index) => {
     if (host.id !== current && statuses[index]?.state === "connected") {
       next.push({ id: host.id, label: host.id, hostId: host.id });
@@ -54,11 +55,15 @@ export function useWhereChoices(paneCwd: string | undefined): WhereChoice[] {
 
 /**
  * The folder a new pane opens in on the chosen machine: the folder of a
- * workspace already on it, else the SSH user's home. Undefined keeps the
+ * workspace already on it, else the (SSH) user's home. Undefined keeps the
  * pane's own folder.
  */
 export async function whereCwd(choice: WhereChoice): Promise<string | undefined> {
-  if (choice.id === "here" || !choice.hostId) return undefined;
+  if (choice.id === "here") return undefined;
+  if (!choice.hostId) {
+    const local = getAgentBoardSources().workspaces.find((w) => w.cwd && !parseRemotePath(w.cwd));
+    return local?.cwd ?? (await window.spark.app.home());
+  }
   const hostId = choice.hostId;
   const workspace = getAgentBoardSources().workspaces.find((w) => parseRemotePath(w.cwd)?.hostId === hostId);
   if (workspace) return workspace.cwd;

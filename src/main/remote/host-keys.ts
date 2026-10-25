@@ -29,18 +29,27 @@ export function hostKeyType(key: Buffer): string {
   return key.subarray(4, 4 + length).toString("latin1");
 }
 
-export type KnownHostsVerdict = "match" | "revoked" | "none";
+export type KnownHostsVerdict =
+  | { kind: "match" }
+  | { kind: "revoked" }
+  | { kind: "none" }
+  /** The host is listed with another key of the same type: OpenSSH refuses it as changed. */
+  | { kind: "mismatch"; listedKey: Buffer };
 
 /**
  * Whether known_hosts text lists `key` for this host. `[host]:port` entries
  * apply to other ports, plain ones to 22; hashed names (`|1|salt|hash`) and
  * `*` / `?` patterns match as OpenSSH matches them. A `@revoked` key wins
  * over everything; `@cert-authority` lines are not host keys and are skipped.
+ * A listed key of another type is not a change (OpenSSH asks, as for a new
+ * host).
  */
 export function knownHostsVerdict(text: string, host: string, port: number, key: Buffer): KnownHostsVerdict {
   const name = port === 22 ? host.toLowerCase() : `[${host.toLowerCase()}]:${port}`;
   const wanted = key.toString("base64");
-  let verdict: KnownHostsVerdict = "none";
+  const type = hostKeyType(key);
+  let matched = false;
+  let listedKey: Buffer | null = null;
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
@@ -49,11 +58,17 @@ export function knownHostsVerdict(text: string, host: string, port: number, key:
     if (fields[0].startsWith("@")) marker = fields.shift() ?? null;
     if (marker === "@cert-authority" || fields.length < 3) continue;
     const [patterns, , blob] = fields;
-    if (blob !== wanted || !hostPatternsMatch(patterns, name)) continue;
-    if (marker === "@revoked") return "revoked";
-    verdict = "match";
+    if (!hostPatternsMatch(patterns, name)) continue;
+    if (blob === wanted) {
+      if (marker === "@revoked") return { kind: "revoked" };
+      matched = true;
+    } else if (marker === null && listedKey === null) {
+      const other = Buffer.from(blob, "base64");
+      if (hostKeyType(other) === type) listedKey = other;
+    }
   }
-  return verdict;
+  if (matched) return { kind: "match" };
+  return listedKey ? { kind: "mismatch", listedKey } : { kind: "none" };
 }
 
 function hostPatternsMatch(patterns: string, name: string): boolean {

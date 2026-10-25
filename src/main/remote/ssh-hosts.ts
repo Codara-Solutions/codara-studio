@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve as resolvePath } from "node:path";
 import SSHConfig from "ssh-config";
-import { isValidHostId, type RemoteHostConfig } from "@shared/remote";
+import { isValidHostId, isValidPort, type RemoteHostConfig } from "@shared/remote";
 import { writeFileAtomic } from "../fs-atomic";
 import { codaraHome } from "../codara-home";
 
@@ -43,7 +43,7 @@ function isWellFormed(h: unknown): h is RemoteHostConfig {
     typeof x.username === "string" &&
     x.username.length > 0 &&
     typeof x.port === "number" &&
-    Number.isFinite(x.port)
+    isValidPort(x.port)
   );
 }
 

@@ -168,11 +168,20 @@ export function buildRemoteAgentKill(paneId: string): string {
   return `${execScript(`${TMUX} kill-session -t ${sessionTarget(paneId)}`)} >/dev/null 2>&1; true`;
 }
 
+/** Printed by `buildRemoteAgentSessionKill` when it ended the session. */
+export const SESSION_STOPPED = "codara-stopped";
+
 /**
  * Ends an agent session by its name, for one no pane shows any more (the
  * Machines page lists them). Only Studio's own `codara-` sessions qualify.
  */
+
 export function buildRemoteAgentSessionKill(sessionName: string): string | null {
   if (!/^codara-[A-Za-z0-9_-]{1,64}$/.test(sessionName)) return null;
-  return `${execScript(`${TMUX} kill-session -t ${shQuote(`=${sessionName}`)}`)} >/dev/null 2>&1; true`;
+  const target = shQuote(`=${sessionName}`);
+  // Checked on the machine, at the moment of the kill: a client that attached
+  // since the last reading is another computer's Codara showing the agent.
+  return `${execScript(
+    `[ -z "$(${TMUX} list-clients -t ${target} 2>/dev/null)" ] && ${TMUX} kill-session -t ${target} >/dev/null 2>&1 && echo ${SESSION_STOPPED}`,
+  )} 2>/dev/null; true`;
 }

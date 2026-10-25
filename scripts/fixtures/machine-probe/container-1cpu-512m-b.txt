@@ -157,5 +157,5 @@ burst_usec 0
 overlay          514937084 264184708 224521596      55% /
 @@codara-probe:clis claude tmux git
 @@codara-probe:tmux
-codara-pane-orphan1 1792883114 sleep
+codara-pane-orphan1 1792883114 0 sleep
 @@codara-probe:end

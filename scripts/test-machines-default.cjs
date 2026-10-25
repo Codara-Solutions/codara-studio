@@ -12,6 +12,9 @@
 //     connection or probe anything, the Machines service lists only this
 //     computer and runs nothing remote, and the Add pane menu shows no
 //     Where row (reading hosts is two local files, no network)
+//   - from a pane on another machine, the Where row always offers this
+//     computer, so a pane can come back without disconnecting
+//   - a host's port is 1 to 65535, typed in the port field or as host:port
 //   - an update while SSH agent panes are open: a restored agent pane is
 //     started once, in tmux (the agent that ran directly in the old SSH
 //     shell ended with that shell), and a pane whose agent already runs in
@@ -149,6 +152,46 @@ const prefsStore = () => load("src/main/preferences-store.ts");
       assert.deepEqual(snap.machines.map((m) => m.id), ["local"]);
       assert.deepEqual(execs, [], "nothing runs anywhere else");
       ok("no SSH machines: no Where row, and the Machines service runs nothing remote");
+
+      const fromRemote = where.whereChoicesFrom(
+        [{ id: "vps" }, { id: "nas" }],
+        [{ state: "connected" }, { state: "disconnected" }],
+        "ssh://vps/home/dev/project",
+      );
+      assert.deepEqual(
+        fromRemote.map((c) => [c.id, c.hostId]),
+        [
+          ["here", "vps"],
+          ["local", null],
+        ],
+        "this computer is offered from a remote pane even when no other machine is connected",
+      );
+      assert.equal(fromRemote[1].label, "This computer");
+      ok("from a pane on another machine, the Where row offers this computer");
+    }
+
+    {
+      const remote = await load("src/shared/remote.ts");
+      const parse = remote.parseHostAddress;
+      assert.deepEqual(parse("nas.local", "22"), { host: "nas.local", user: null, port: 22 });
+      assert.deepEqual(parse("dev@nas.local:2222", ""), { host: "nas.local", user: "dev", port: 2222 });
+      assert.deepEqual(parse("nas.local", ""), { host: "nas.local", user: null, port: 22 }, "an empty port is 22");
+      assert.deepEqual(parse("nas.local", "65535").port, 65535);
+      for (const [host, port] of [
+        ["nas.local:99999", "22"],
+        ["nas.local:0", "22"],
+        ["nas.local", "65536"],
+        ["nas.local", "0"],
+        ["nas.local", "-1"],
+        ["nas.local", "22.5"],
+        ["nas.local", "abc"],
+      ]) {
+        assert.ok("error" in parse(host, port), `${host} / ${port} is refused`);
+      }
+      assert.equal(remote.isValidPort(65535), true);
+      assert.equal(remote.isValidPort(65536), false);
+      assert.equal(remote.isValidPort(0), false);
+      ok("a host's port is 1 to 65535");
     }
 
     fs.mkdirSync(CACHE_ROOT, { recursive: true });

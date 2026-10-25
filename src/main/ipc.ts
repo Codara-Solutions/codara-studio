@@ -23,10 +23,12 @@ import {
   answerAuthPrompt,
   answerHostKeyPrompt,
   disconnectHost,
+  forgetChangedHostKey,
   getConnection,
   getConnectionStatus,
   setAuthPromptSender,
   setHostKeyConfirmation,
+  setHostKeyPromptClosedSender,
   setHostKeyPromptSender,
   setStatusSender,
   trustChangedHostKey,
@@ -3940,6 +3942,7 @@ export function registerIpc(): void {
   };
   setAuthPromptSender((request) => broadcast("remote:authPrompt", request));
   setHostKeyPromptSender((request) => broadcast("remote:hostKeyPrompt", request));
+  setHostKeyPromptClosedSender((requestId) => broadcast("remote:hostKeyPromptClosed", requestId));
   setHostKeyConfirmation(async () => (await loadPreferences()).machinesEnabled === true);
   setStatusSender((status) => broadcast("remote:status", status));
   const machines = createMachinesService({
@@ -3965,8 +3968,8 @@ export function registerIpc(): void {
   );
   handle(
     "remote:trustChangedHostKey",
-    async (_e, hostId: string): Promise<RemoteConnectionStatus> => {
-      if (await trustChangedHostKey(String(hostId))) {
+    async (_e, hostId: string, fingerprint: string): Promise<RemoteConnectionStatus> => {
+      if (await trustChangedHostKey(String(hostId), String(fingerprint))) {
         try {
           await (await getConnection(hostId)).ensure();
         } catch {
@@ -3985,11 +3988,18 @@ export function registerIpc(): void {
   handle("remote:listHosts", async (): Promise<RemoteHostConfig[]> => listHosts());
   handle(
     "remote:saveHost",
-    async (_e, host: RemoteHostConfig): Promise<RemoteHostConfig[]> => saveManualHost(host),
+    async (_e, host: RemoteHostConfig): Promise<RemoteHostConfig[]> => {
+      // An edited host may point somewhere else: a key offered before is not its key.
+      forgetChangedHostKey(String(host?.id ?? ""));
+      return saveManualHost(host);
+    },
   );
   handle(
     "remote:deleteHost",
-    async (_e, hostId: string): Promise<RemoteHostConfig[]> => deleteManualHost(hostId),
+    async (_e, hostId: string): Promise<RemoteHostConfig[]> => {
+      forgetChangedHostKey(String(hostId));
+      return deleteManualHost(hostId);
+    },
   );
   // Codara Cloud boxes, read through the codaracloud CLI. connect-info saves
   // the host (main-only, with its proxy argv) so remote:connect can use it.

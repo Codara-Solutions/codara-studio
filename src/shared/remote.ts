@@ -159,6 +159,26 @@ export function isValidHostId(id: string): boolean {
   return /^[A-Za-z0-9._-]+$/.test(id);
 }
 
+export function isValidPort(port: number): boolean {
+  return Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
+/**
+ * The Add host form's host and port fields. "user@host:port" in the host
+ * field fills the other two; an empty port is 22.
+ */
+export function parseHostAddress(
+  hostField: string,
+  portField: string,
+): { host: string; user: string | null; port: number } | { error: string } {
+  const trimmed = hostField.trim();
+  const address = /^(?:([^@\s]+)@)?([^@\s:]+)(?::(\d+))?$/.exec(trimmed);
+  const portText = address?.[3] ?? (portField.trim() || "22");
+  const port = /^\d+$/.test(portText) ? Number(portText) : NaN;
+  if (!isValidPort(port)) return { error: "Port must be a number from 1 to 65535." };
+  return { host: address?.[2] ?? trimmed, user: address?.[1] ?? null, port };
+}
+
 // ── Host keys ────────────────────────────────────────────────────────────────
 
 /** Asked before the first connection to a host whose key Studio has not seen. */
@@ -182,4 +202,6 @@ export interface HostKeyChange {
   previousFingerprint: string;
   newFingerprint: string;
   keyType: string;
+  /** Set when the earlier key is the one ~/.ssh/known_hosts lists, not Codara's own. */
+  listedBy?: "known_hosts";
 }

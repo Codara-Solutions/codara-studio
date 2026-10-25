@@ -102,7 +102,9 @@ export default function MachinesSettings({ onClose }: { onClose?: () => void }) 
               busy={busy}
               onConnect={() => act(`connect:${machine.id}`, () => window.spark.remote.connect(machine.id))}
               onDisconnect={() => act(`disconnect:${machine.id}`, () => window.spark.remote.disconnect(machine.id))}
-              onTrustKey={() => act(`trust:${machine.id}`, () => window.spark.remote.trustChangedHostKey(machine.id))}
+              onTrustKey={(fingerprint) =>
+                act(`trust:${machine.id}`, () => window.spark.remote.trustChangedHostKey(machine.id, fingerprint))
+              }
               onStopSession={(session) =>
                 act(`stop:${machine.id}:${session.name}`, () =>
                   window.spark.machines.stopSession(machine.id, session.name),
@@ -133,7 +135,7 @@ function MachineCard({
   busy: string | null;
   onConnect: () => void;
   onDisconnect: () => void;
-  onTrustKey: () => void;
+  onTrustKey: (fingerprint: string) => void;
   onStopSession: (session: MachineAgentSession) => void;
   onShowAgent: (paneId: string, workspaceId: string, tabId: string) => void;
 }) {
@@ -176,13 +178,21 @@ function MachineCard({
             tone="danger"
             role="alert"
             action={
-              <button type="button" className="spark-btn" disabled={busy !== null} onClick={onTrustKey}>
+              <button
+                type="button"
+                className="spark-btn"
+                disabled={busy !== null}
+                onClick={() => onTrustKey(machine.hostKeyChange?.newFingerprint ?? "")}
+              >
                 Trust the new key
               </button>
             }
           >
-            This machine's key changed since Codara last connected to {machine.hostKeyChange.hostLabel}. Someone may
-            be intercepting the connection, or the machine was reinstalled. Trust the new key only if you know why.
+            {machine.hostKeyChange.listedBy === "known_hosts"
+              ? `This machine's key is not the one your ~/.ssh/known_hosts lists for ${machine.hostKeyChange.hostLabel}.`
+              : `This machine's key changed since Codara last connected to ${machine.hostKeyChange.hostLabel}.`}{" "}
+            Someone may be intercepting the connection, or the machine was reinstalled. Trust the new key only if you
+            know why.
             <span className="machine-fingerprints">
               <span>Before: {machine.hostKeyChange.previousFingerprint}</span>
               <span>
@@ -244,7 +254,16 @@ function MachineCard({
           ))}
           {machine.orphanSessions.map((session) => (
             <li key={session.name} className="machine-agent">
-              <span className="machine-agent__state is-orphan">No pane</span>
+              <span
+                className="machine-agent__state is-orphan"
+                title={
+                  session.openElsewhere
+                    ? "Codara on another computer, or an ssh session, has this agent open."
+                    : "No pane on this computer shows this agent."
+                }
+              >
+                {session.openElsewhere ? "Open elsewhere" : "Not open here"}
+              </span>
               <span className="machine-agent__name">{session.command ?? "agent"}</span>
               <span className="machine-agent__where">
                 {session.createdAt ? `started ${new Date(session.createdAt).toLocaleString()}` : session.name}
@@ -252,7 +271,7 @@ function MachineCard({
               <button
                 type="button"
                 className="spark-btn"
-                disabled={busy !== null}
+                disabled={busy !== null || session.openElsewhere}
                 onClick={() => onStopSession(session)}
               >
                 Stop

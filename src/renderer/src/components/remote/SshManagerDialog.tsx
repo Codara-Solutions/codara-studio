@@ -6,7 +6,7 @@ import type {
   RemoteConnectionStatus,
   RemoteHostConfig,
 } from "@shared/remote";
-import { isValidHostId } from "@shared/remote";
+import { isValidHostId, parseHostAddress } from "@shared/remote";
 import type { SshKeyInfo } from "@shared/ssh-keys";
 import BrowsePane from "./BrowsePane";
 import SshKeysTab from "./SshKeysTab";
@@ -424,11 +424,14 @@ export function HostForm({
   const [keyPickerOpen, setKeyPickerOpen] = useState(false);
 
   const save = async () => {
-    // "user@host:port" in the host field fills the other fields.
-    const address = /^(?:([^@\s]+)@)?([^@\s:]+)(?::(\d{1,5}))?$/.exec(host.trim());
-    const hostName = address?.[2] ?? host.trim();
-    const user = username.trim() || address?.[1] || "";
-    const portNumber = address?.[3] ? Number(address[3]) : Number(port) || 22;
+    const address = parseHostAddress(host, port);
+    if ("error" in address) {
+      setError(address.error);
+      return;
+    }
+    const hostName = address.host;
+    const user = username.trim() || address.user || "";
+    const portNumber = address.port;
     const trimmedId = id.trim() || (initial ? "" : hostName);
     if (!isValidHostId(trimmedId)) {
       setError("Name may only contain letters, numbers, dot, dash, underscore.");

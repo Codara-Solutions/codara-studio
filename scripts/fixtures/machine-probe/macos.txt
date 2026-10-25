@@ -32,5 +32,5 @@ Swapouts:                                     0.
 /dev/disk3s5   482797652 301234567 160123456    66%    /System/Volumes/Data
 @@codara-probe:clis claude codex tmux git node
 @@codara-probe:tmux
-codara-pane-k3j2h1 1792880000 claude
+codara-pane-k3j2h1 1792880000 0 claude
 @@codara-probe:end

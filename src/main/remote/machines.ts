@@ -13,7 +13,7 @@ import {
 import { isRemotePath, parseRemotePath, type RemoteConnectionStatus, type RemoteHostConfig } from "@shared/remote";
 import type { CpuTimes } from "../system-metrics-linux";
 import { buildMachineProbe, machineStatsFrom, parseMachineProbe, type CpuSample } from "./machine-probe";
-import { buildRemoteAgentSessionKill, remoteAgentSessionName } from "./remote-agents";
+import { SESSION_STOPPED, buildRemoteAgentSessionKill, remoteAgentSessionName } from "./remote-agents";
 
 // The Machines page: this computer and every SSH host, with size, load, the
 // CLIs agents need, and the agents running there. A host is probed only while
@@ -142,7 +142,10 @@ export function createMachinesService(deps: MachinesDeps) {
     return { machines: rows, readAt: deps.now() };
   }
 
-  /** Ends an agent session no pane shows (one the user closed while offline). */
+  /**
+   * Ends an agent session no pane on this computer shows (one the user closed
+   * while offline), never one another computer has open.
+   */
   async function stopSession(hostId: string, sessionName: string): Promise<boolean> {
     const command = buildRemoteAgentSessionKill(sessionName);
     if (!command || deps.connectionStatus(hostId).state !== "connected") return false;
@@ -152,9 +155,10 @@ export function createMachinesService(deps: MachinesDeps) {
     });
     // A session a pane still shows is ended by closing that pane.
     if (attached) return false;
-    await deps.exec(hostId, command, PROBE_TIMEOUT_MS);
+    if (readings.get(hostId)?.sessions.some((s) => s.name === sessionName && s.openElsewhere)) return false;
+    const result = await deps.exec(hostId, command, PROBE_TIMEOUT_MS);
     readings.delete(hostId);
-    return true;
+    return result.stdout.includes(SESSION_STOPPED);
   }
 
   return { snapshot, stopSession };
