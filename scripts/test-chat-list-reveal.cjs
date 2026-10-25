@@ -9,7 +9,8 @@
 //   - After the jump, the scroll position, the height and the rendered rows
 //     must all hold still for three frames in a row; any change restarts the
 //     count, and a frame with no rows clears it.
-//   - Rows still loading an image or a Mermaid diagram are not still.
+//   - Rows still loading an image or a Mermaid diagram are not still, and
+//     nothing is revealed before the execution record has hydrated.
 //   - ChatConversation ties the reveal to the same key that remounts
 //     Virtuoso, and the CSS override reaches only its own item list and
 //     inherits, so a chat hidden by an ancestor stays hidden.
@@ -102,7 +103,7 @@ async function main() {
   test("ChatConversation reveals by Virtuoso's own key, and the override is scoped", () => {
     const conversation = read("src/renderer/src/components/chat/ChatConversation.tsx");
     assert.match(conversation, /const listKey = `\$\{run\.id\}:\$\{rowCount === 0 \? "empty" : "populated"\}`;/);
-    assert.match(conversation, /useEarlyListReveal\(conversationRef, listKey, rowCount > 0\)/);
+    assert.match(conversation, /useEarlyListReveal\(conversationRef, listKey, rowCount > 0 && execution\.hydrated\)/);
     assert.match(conversation, /key=\{listKey\}/);
     assert.match(conversation, /data-list-revealed=\{listRevealed \? "true" : undefined\}/);
     const styles = read("src/renderer/src/styles.css");

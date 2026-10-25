@@ -313,7 +313,9 @@ export default function ChatConversation({
   // "Result evidence" section and the RunsView header's checks count).
   const rowCount = items.length;
   const listKey = `${run.id}:${rowCount === 0 ? "empty" : "populated"}`;
-  const listRevealed = useEarlyListReveal(conversationRef, listKey, rowCount > 0);
+  // Hydrating the execution record can add rows and change their heights, so
+  // until it lands Virtuoso alone decides when the list shows.
+  const listRevealed = useEarlyListReveal(conversationRef, listKey, rowCount > 0 && execution.hydrated);
   const minimapEntries = useMemo(() => buildConversationMinimap(items), [items]);
   // "New activity" only when something arrived after the reader left the
   // bottom; an old chat whose last answer is taller than the viewport opens
