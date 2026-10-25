@@ -6,7 +6,9 @@
 // HostKeyAlias, the refusal of unsafe %h/%r/%n values at connect time, and
 // that only main can give a host a proxy. Ports outside 1 to 65535 drop the
 // host (ssh refuses them too), and UserKnownHostsFile / GlobalKnownHostsFile
-// are read for the host-key check, never from a host the renderer saved.
+// are read for the host-key check, never from a host the renderer saved;
+// UserKnownHostsFile expands %d %u %h %k %% and ${VAR} as ssh does, and the
+// GlobalKnownHostsFile of /etc/ssh/ssh_config (with its Includes) counts.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -225,6 +227,55 @@ async function testPortsAndKnownHostsFiles(hosts) {
   assert.equal(byId(list, "default-files").userKnownHostsFiles, undefined, "unset keeps ssh's defaults");
 }
 
+async function testKnownHostsTokens(hosts) {
+  process.env.CODARA_TEST_KH = "/srv/kh";
+  delete process.env.CODARA_TEST_UNSET;
+  write(
+    ".ssh/config",
+    [
+      "Host tok",
+      "  HostName t.example",
+      '  UserKnownHostsFile %d/.ssh/kh_%h ${CODARA_TEST_KH}/x /tmp/%u_%k /tmp/100%% ${CODARA_TEST_UNSET}/y /tmp/%Z',
+      "Host aliased-tok",
+      "  HostName a.example",
+      "  HostKeyAlias keyname",
+      "  UserKnownHostsFile /tmp/%k",
+      "",
+    ].join("\n"),
+  );
+  const list = await hosts.readSshConfigHosts();
+  const user = os.userInfo().username;
+  assert.deepEqual(
+    byId(list, "tok").userKnownHostsFiles,
+    [path.join(HOME, ".ssh", "kh_t.example"), "/srv/kh/x", `/tmp/${user}_tok`, "/tmp/100%"],
+    "tokens and variables expand; a file naming an unset variable or an unknown token is left out",
+  );
+  assert.deepEqual(byId(list, "aliased-tok").userKnownHostsFiles, ["/tmp/keyname"], "%k is the HostKeyAlias when set");
+}
+
+async function testSystemGlobalKnownHostsFile(hosts) {
+  const etc = path.join(TMP, "etc-ssh");
+  fs.mkdirSync(path.join(etc, "ssh_config.d"), { recursive: true });
+  const system = path.join(etc, "ssh_config");
+  fs.writeFileSync(system, ["Include ssh_config.d/*.conf", "Host *", "  GlobalKnownHostsFile /etc/ssh/all_known", ""].join("\n"));
+  fs.writeFileSync(
+    path.join(etc, "ssh_config.d", "corp.conf"),
+    ["Host *.corp", "  GlobalKnownHostsFile /etc/ssh/corp_known /etc/ssh/corp_known2", ""].join("\n"),
+  );
+  hosts.setSystemSshConfigPathForTests(system);
+  try {
+    assert.deepEqual(await hosts.systemGlobalKnownHostsFiles("nas.corp"), ["/etc/ssh/corp_known", "/etc/ssh/corp_known2"], "an Include relative to /etc/ssh, first match wins");
+    assert.deepEqual(await hosts.systemGlobalKnownHostsFiles("other"), ["/etc/ssh/all_known"]);
+    fs.writeFileSync(system, "Host *.corp\n  GlobalKnownHostsFile none\n");
+    assert.deepEqual(await hosts.systemGlobalKnownHostsFiles("nas.corp"), []);
+    assert.equal(await hosts.systemGlobalKnownHostsFiles("other"), undefined, "unset keeps ssh's defaults");
+    fs.rmSync(system);
+    assert.equal(await hosts.systemGlobalKnownHostsFiles("other"), undefined, "no system config: defaults");
+  } finally {
+    hosts.setSystemSshConfigPathForTests(null);
+  }
+}
+
 async function testOnlyMainSetsProxy(hosts) {
   write(".ssh/config", "");
   const forged = {
@@ -286,6 +337,8 @@ async function testOnlyMainSetsProxy(hosts) {
   await testDepthLimit(hosts);
   await testProxyFields(hosts, proxy);
   await testPortsAndKnownHostsFiles(hosts);
+  await testKnownHostsTokens(hosts);
+  await testSystemGlobalKnownHostsFile(hosts);
   await testOnlyMainSetsProxy(hosts);
   console.log("ssh config include: ok");
 })()
