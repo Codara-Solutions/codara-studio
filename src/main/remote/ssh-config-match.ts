@@ -1,5 +1,6 @@
 import { isIP } from "node:net";
 import { homedir } from "node:os";
+import { sep } from "node:path";
 import SSHConfig, { LineType } from "ssh-config";
 import { expandHostName, localUser, SshExpansionError } from "./ssh-tokens";
 
@@ -64,7 +65,7 @@ const words = (value: Value): string[] => (Array.isArray(value) ? value.map((v) 
 
 function displayPath(file: string): string {
   const home = homedir();
-  return file === home || file.startsWith(`${home}/`) ? `~${file.slice(home.length)}` : file;
+  return file === home || file.startsWith(`${home}${sep}`) ? `~${file.slice(home.length)}` : file;
 }
 
 /** Reads every line once; ssh rejects a bad line wherever it is, active or not. */
@@ -231,7 +232,8 @@ class Evaluator {
   private checkCanonicalization(always: boolean): void {
     const domains = this.options.canonicaldomains;
     if (!domains || !this.setsKnownHosts || isIP(this.original)) return;
-    if (!always && (this.first("proxycommand") || this.first("proxyjump"))) return;
+    const proxied = (key: string) => (this.first(key) ?? "none").toLowerCase() !== "none";
+    if (!always && (proxied("proxycommand") || proxied("proxyjump"))) return;
     const maxDots = Number(this.first("canonicalizemaxdots") ?? 1);
     if ((this.hostName ?? "").split(".").length - 1 > maxDots) return;
     this.refuse(
