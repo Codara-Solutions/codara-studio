@@ -2847,6 +2847,19 @@ function FastModeRow() {
   );
 }
 
+function UsageForecastLabsSection() {
+  const { preferences, setPreference } = usePreferences();
+  return (
+    <SettingsSection title="Labs" description="Experiments that may change or go away.">
+      <ToggleRow
+        title="Usage forecast"
+        desc="Learns how you use each subscription from the transcripts on this computer and says, in the usage panel and the Usage tab, whether a limit runs out before it resets. Nothing leaves this computer. While off, nothing is recorded."
+        {...bindToggle("usageForecast", preferences, setPreference)}
+      />
+    </SettingsSection>
+  );
+}
+
 function AgentsSettings({ onClose }: { onClose: () => void }) {
   // Settings closes first so two modals never stack and fight over focus and
   // Escape. Nothing on this tab is a draft, so closing loses nothing.
@@ -2879,6 +2892,8 @@ function AgentsSettings({ onClose }: { onClose: () => void }) {
           </div>
         </SettingRow>
       </SettingsSection>
+
+      <UsageForecastLabsSection />
 
       <SettingsSection title="Tools">
         <SettingRow
