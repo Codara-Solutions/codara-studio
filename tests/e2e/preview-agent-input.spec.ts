@@ -6,7 +6,7 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { cleanEnv } from "./agent-env";
+import { cleanEnv, runnerFlags } from "./agent-env";
 
 // The browser tools as any agent reaches them (feedback round 5, items 1, 4,
 // 5, 11, 18, 19): the agent socket, the stdio MCP server and `cora tool`,
@@ -167,6 +167,9 @@ test("agents and users drive pages through keys, waits, dialogs, find and the ou
   let mcp: ReturnType<typeof startMcp> | null = null;
   try {
     const page = await app.firstWindow();
+    // The app keeps the runner's flags: no system keyring, no desktop, no Chrome link.
+    const flags = await runnerFlags(app);
+    expect(flags.app).toEqual(flags.runner);
     // Playwright answers the dialogs of every page it sees, the tab's guest
     // included; a listener stops it, so Codara alone decides as it would
     // outside a test.

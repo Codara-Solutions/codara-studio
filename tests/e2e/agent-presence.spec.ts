@@ -6,7 +6,7 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { FAKE_AGENT, paneMcp, type PaneMcp } from "./in-pane-mcp";
-import { cleanEnv } from "./agent-env";
+import { cleanEnv, runnerFlags } from "./agent-env";
 
 // The agent's cursor and driving banner on a Codara browser tab, driven by a
 // Claude Code session in a terminal pane through the stdio MCP server, as an
@@ -162,6 +162,9 @@ test("an agent's cursor glides before it clicks, the banner names it, and Stop t
   let mcp: ReturnType<typeof startMcp> | null = null;
   try {
     const page = await app.firstWindow();
+    // The app keeps the runner's flags: no system keyring, no desktop, no Chrome link.
+    const flags = await runnerFlags(app);
+    expect(flags.app).toEqual(flags.runner);
     await page.waitForLoadState("domcontentloaded");
     await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.setSize(1280, 800));
     await expect(page.getByText(WORKSPACE, { exact: true }).first()).toBeVisible();

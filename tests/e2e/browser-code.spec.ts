@@ -5,7 +5,7 @@ import { createServer, type Server } from "node:http";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { cleanEnv } from "./agent-env";
+import { cleanEnv, runnerFlags } from "./agent-env";
 
 // codara_browser_use in the built app, through the stdio MCP server as any
 // agent runs it, on four realistic flows served locally: sign in to an app,
@@ -227,6 +227,9 @@ test("codara_browser_use drives four real flows in fewer calls than the single t
   };
   try {
     const page = await app.firstWindow();
+    // The app keeps the runner's flags: no system keyring, no desktop, no Chrome link.
+    const flags = await runnerFlags(app);
+    expect(flags.app).toEqual(flags.runner);
     await page.waitForLoadState("domcontentloaded");
     await expect(page.getByText("Code mode test", { exact: true }).first()).toBeVisible();
     await expect.poll(async () => socket("app.info").then(() => true).catch(() => false)).toBe(true);

@@ -5,7 +5,7 @@ import { createServer } from "node:net";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { cleanEnv } from "./agent-env";
+import { cleanEnv, runnerFlags } from "./agent-env";
 
 // codara_preview_wait_for hmr against a real Vite dev server (feedback round
 // 5, item 4), with Codara's window hidden: a module update, a CSS update, a
@@ -71,6 +71,9 @@ test("hot reload waits follow a real Vite dev server through updates, an error a
       return response.result;
     };
     const page = await app.firstWindow();
+    // The app keeps the runner's flags: no system keyring, no desktop, no Chrome link.
+    const flags = await runnerFlags(app);
+    expect(flags.app).toEqual(flags.runner);
     const leaveDialogsAlone = (seen: Page) => seen.on("dialog", () => {});
     app.context().pages().forEach(leaveDialogsAlone);
     app.context().on("page", leaveDialogsAlone);
