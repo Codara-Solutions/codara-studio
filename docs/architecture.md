@@ -455,7 +455,9 @@ agents a Stop cut off and results a resumed run could not reuse (journaled as
 `abandoned`), so it survives Stop and Resume. Cancel and Delete remove the
 isolated checkouts an app restart left behind, committing their edits to
 their branches first. `codara-heavy` serializes builds and test runs across agents under a memory
-cap. On boot `recoverWorkflowRuns` salvages finished reports and parks every
+cap. A quit suspends live workflow runs (`suspendWorkflowRunsForQuit`) before
+the run store kills their agents, so a killed agent is never journaled as an
+answer. On boot `recoverWorkflowRuns` salvages finished reports and parks every
 live workflow run as paused; nothing restarts until the user resumes. Saved
 workflows come from the app's built-ins, the user's Codara home and
 `<repo>/.codara/workflows` (`workflow-registry.ts`). Cora proposes and runs
