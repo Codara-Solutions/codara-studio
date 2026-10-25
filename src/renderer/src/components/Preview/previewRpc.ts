@@ -346,8 +346,8 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
   if (!opened) {
     const asleep = isTabAsleep(tab.id);
     tab = await wakeForAgent(tab, url);
-    // Answers once the page commits, so the result names the page reached;
-    // the bound keeps a navigation that never commits from holding the call.
+    // Answers at the new page's dom-ready, so the result names the page
+    // reached; the bound keeps a page that never gets there from holding the call.
     if (!asleep) await Promise.race([tab.handle.loadURL(url), new Promise((resolve) => setTimeout(resolve, 15_000))]);
   }
   await waitDomReady(tab.handle, 15_000);
@@ -506,11 +506,18 @@ const METRICS_TIMEOUT_MS = 400;
 // picked tab's guest webContents id plus viewport metrics so trusted-input
 // coordinates can be mapped against capturePage screenshots.
 async function getWebContentsId(params: Record<string, unknown>): Promise<unknown> {
-  // A navigate's lookup wakes a sleeping tab on a blank page, which the
-  // navigate then leaves under the dialog guard (preview-tools/index.ts).
-  const tab = await requireTab(params, {
-    wake: params.lookupWake !== "none",
-    wakeUrl: params.lookupWake === "blank" ? "about:blank" : undefined,
+  // A navigate's lookups (preview-tools/index.ts) resolve the tab the
+  // navigate itself will use, and only that tab may wake, on a blank page the
+  // navigate then leaves under the dialog guard. A fallback tab the navigate
+  // will not take (the user's own) stays asleep.
+  const navigating = params.lookupWake === "blank" || params.lookupWake === "none";
+  const reusable = navigating && !params.tabId
+    ? findReusablePreviewTab(readString(params, "runId"), readString(params, "workspaceId"), readString(params, "callerPaneId"))
+    : null;
+  const wakeBlank = params.lookupWake === "blank" && (Boolean(params.tabId) || reusable !== null);
+  const tab = await requireTab(reusable ? { ...params, tabId: reusable.id } : params, {
+    wake: !navigating || wakeBlank,
+    wakeUrl: wakeBlank ? "about:blank" : undefined,
   });
   // Keyboard dispatch needs the embedder iframe focused as well as its guest field.
   if (params.focus === true) tab.handle.focusContent();

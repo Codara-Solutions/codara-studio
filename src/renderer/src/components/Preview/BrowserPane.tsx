@@ -105,7 +105,7 @@ export interface BrowserPaneHandle {
   reload: (opts?: { ignoreCache?: boolean }) => void;
   goBack: () => void;
   goForward: () => void;
-  /** Settles when the new page commits or fails, not when it finishes loading. */
+  /** Settles at the new page's dom-ready, a same-page move or a failure, not at its full load. */
   loadURL: (url: string) => Promise<void>;
   getURL: () => string;
   getTitle: () => string;
@@ -735,12 +735,20 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         const wv = getLiveWebview();
         if (!wv) return Promise.resolve();
         return new Promise<void>((resolve) => {
-          const events = ["did-navigate", "did-navigate-in-page", "did-fail-load"];
-          const settle = () => {
-            for (const name of events) wv.removeEventListener(name, settle);
+          // dom-ready, not the commit: a page that alerts while it loads holds
+          // the call here, so the dialog guard answers with the dialog. A
+          // subframe's move or an aborted (-3) earlier load is not this page.
+          const settle = (e?: { isMainFrame?: boolean; errorCode?: number }) => {
+            if (e && e.isMainFrame === false) return;
+            if (e?.errorCode === -3) return;
+            wv.removeEventListener("dom-ready", settle);
+            wv.removeEventListener("did-navigate-in-page", settle);
+            wv.removeEventListener("did-fail-load", settle);
             resolve();
           };
-          for (const name of events) wv.addEventListener(name, settle);
+          wv.addEventListener("dom-ready", settle);
+          wv.addEventListener("did-navigate-in-page", settle);
+          wv.addEventListener("did-fail-load", settle);
           try {
             // The load itself may never finish (a page that alerts while it
             // loads); its failure is reported by did-fail-load above.

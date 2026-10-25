@@ -138,11 +138,12 @@ async function dispatchPreviewTool(
   if (ref?.kind !== "chrome" && method === "preview.navigate") {
     // Before any lookup of the tab, so a refused navigate wakes nothing.
     await checkNavigateUrl(params);
-    // A named sleeping tab wakes on a blank page for this call's lookups: the
+    // The call's lookups pick the tab the navigate will load into (previewRpc
+    // getWebContentsId). With a url, a sleeping one wakes on a blank page: the
     // dialog guard and the action stamp attach as on an awake tab, then the
-    // navigate loads the URL under them. Without a tabId the lookup may fall
-    // back to the user's own tab, which navigate never takes: leave it asleep.
-    params.lookupWake = ref?.kind === "preview" ? "blank" : "none";
+    // navigate loads the URL under them. Without a url (a group move) the tab
+    // keeps its page and stays asleep.
+    params.lookupWake = typeof params.url === "string" && params.url.trim() !== "" ? "blank" : "none";
   }
   // A page dialog must never leave the call hanging (browser/dialog-guard.ts).
   if (ref?.kind !== "chrome") return guardPageDialogs(method, params, () => entry.run(params, method, host));

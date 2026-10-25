@@ -33,6 +33,7 @@ interface Fixture {
   app: ElectronApplication;
   page: Page;
   home: string;
+  cwd: string;
   url: string;
   request: (method: string, params?: Record<string, unknown>) => Promise<any>;
   close: () => Promise<void>;
@@ -80,7 +81,7 @@ async function launch(): Promise<Fixture> {
   };
   await expect.poll(async () => request("app.info").then(() => true).catch(() => false), { timeout: 30_000 }).toBe(true);
   return {
-    app, page: window, home, url, request,
+    app, page: window, home, cwd: workspaceDir, url, request,
     close: async () => {
       await app.close();
       await new Promise((done) => server.close(done));
@@ -508,16 +509,78 @@ test("a navigate on a sleeping tab keeps its dialog guard, and an agent call wai
     expect.soft(moved.url, "a navigate during the user's wake lands on its URL").toBe(`${fixture.url}docs`);
     await expect.soft.poll(() => pageTitle(page, tab), { timeout: 10_000 }).toBe("Acme docs");
 
-    // A page that asks while it loads: the navigate on the sleeping tab comes
-    // back at once, as on an awake tab, and the guard has the dialog.
+    // The navigate on a sleeping tab is stamped before the page loads, as on
+    // an awake tab: a wait for "a navigation since your last action" holds.
+    await ensureAsleep();
+    const docs = (await request("preview.navigate", { tabId: tab, url: `${fixture.url}docs` }).catch((error) => ({ error: String(error) }))) as { url?: string };
+    expect.soft(docs.url, "the navigate's result names the page it reached").toBe(`${fixture.url}docs`);
+    const stamped = await request("preview.wait_for", { tabId: tab, navigation: true, timeoutMs: 3_000 }).catch((error) => ({ error: String(error) }));
+    expect.soft(JSON.stringify(stamped), "the navigation counts as after the agent's action").not.toMatch(/error|no navigation/i);
+
+    // A page that asks while it loads: the navigate's own result reports the
+    // dialog at once, as on an awake tab, instead of waiting for the page.
     await ensureAsleep();
     const started = Date.now();
     const alerted = await request("preview.navigate", { tabId: tab, url: `${fixture.url}alert` }).catch((error) => ({ error: String(error) }));
     expect.soft(Date.now() - started, "without waiting for the page that cannot load").toBeLessThan(10_000);
-    expect.soft(JSON.stringify(alerted), "the navigate succeeded").not.toMatch(/error/i);
-    const dialogs = await request("preview.dialog", { tabId: tab }).catch((error) => ({ error: String(error) }));
-    expect.soft(JSON.stringify(alerted) + JSON.stringify(dialogs), "the guard recorded the alert").toMatch(/Loaded/);
+    expect.soft(JSON.stringify(alerted), "the navigate's own result names the dialog").toMatch(/codara_preview_dialog/);
     await request("preview.dialog", { tabId: tab, accept: true }).catch(() => {});
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("navigates on an agent's sleeping tab: url-only reuses and guards it, group-only leaves it asleep", async () => {
+  test.setTimeout(180_000);
+  const fixture = await launch();
+  const { page, request } = fixture;
+  try {
+    const current = await openBrowserTab(fixture, "");
+    const runId = await page.evaluate(async (cwd) => {
+      const run = await window.spark.orchestration.createRun({ workspaceId: "ws-pane", workspaceName: "Acme web", cwd, title: "Browser sleeper" });
+      return run.id;
+    }, fixture.cwd);
+    const { tabId } = (await request("preview.navigate", { runId, url: `${fixture.url}blog` })) as { tabId: string };
+    await page.locator(`[data-tab-id="${current}"][role="tab"]`).click();
+    const chip = pane(page, current).getByTestId("preview-tabs-chip");
+    const row = () => page.getByTestId("preview-tabs-view").locator(`[data-testid="preview-tab-row"][data-tab-id="${tabId}"]`);
+    let skipped = 0;
+    const ensureAsleep = async () => {
+      skipped += 11 * 60_000;
+      await page.clock.setFixedTime(Date.now() + skipped);
+      await chip.click();
+      if ((await row().getAttribute("data-asleep")) !== "true") await row().getByRole("button", { name: /^Sleep / }).click();
+      await expect(row()).toHaveAttribute("data-asleep", "true");
+      await page.keyboard.press("Escape");
+      await expect(pane(page, tabId).locator("webview")).toHaveCount(0);
+    };
+    const asleep = async () => ((await request("preview.list", {})).tabs as Array<{ id: string; asleep?: boolean }>).find((tab) => tab.id === tabId)?.asleep === true;
+
+    // url-only: the run's own tab is reused, woken under the guard and stamped.
+    await ensureAsleep();
+    const docs = (await request("preview.navigate", { runId, url: `${fixture.url}docs` }).catch((error) => ({ error: String(error) }))) as { url?: string; tabId?: string; opened?: boolean };
+    expect.soft(docs.tabId, "the run's tab is reused").toBe(tabId);
+    expect.soft(docs.url, "the navigate's result names the page it reached").toBe(`${fixture.url}docs`);
+    const stamped = await request("preview.wait_for", { runId, tabId, navigation: true, timeoutMs: 3_000 }).catch((error) => ({ error: String(error) }));
+    expect.soft(JSON.stringify(stamped), "the navigation counts as after the agent's action").not.toMatch(/error|no navigation/i);
+
+    // url-only to a page that alerts while it loads: the dialog at once.
+    await ensureAsleep();
+    const started = Date.now();
+    const alerted = await request("preview.navigate", { runId, url: `${fixture.url}alert` }).catch((error) => ({ error: String(error) }));
+    expect.soft(Date.now() - started, "without waiting for the page that cannot load").toBeLessThan(10_000);
+    expect.soft(JSON.stringify(alerted), "the navigate's own result names the dialog").toMatch(/codara_preview_dialog/);
+    await request("preview.dialog", { runId, tabId, accept: true }).catch(() => {});
+    await expect.poll(() => pageTitle(page, tabId), { timeout: 10_000 }).toBe("Acme alert");
+
+    // group-only: the tab joins the group and stays asleep at its own page.
+    await ensureAsleep();
+    const grouped = (await request("preview.navigate", { runId, tabId, group: "Research" }).catch((error) => ({ error: String(error) }))) as { url?: string; group?: string };
+    expect.soft(grouped.group, "the tab joins the group").toBe("Research");
+    expect.soft(grouped.url, "the result keeps the tab's own page").toBe(`${fixture.url}alert`);
+    await page.waitForTimeout(1_000);
+    expect.soft(await pane(page, tabId).locator("webview").count(), "a group-only navigate does not wake the tab").toBe(0);
+    expect.soft(await asleep(), "the tab stays asleep").toBe(true);
   } finally {
     await fixture.close();
   }
