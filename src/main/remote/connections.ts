@@ -854,18 +854,17 @@ class RemoteConnection {
     const confirm = !host.codaraBoxId && (await confirmNewHostKeys());
     if (!this.isCurrent(generation, signal)) return false;
     // Read before trusting even a stored key: the user may have revoked it
-    // in known_hosts since. OpenSSH looks a HostKeyAlias up as given, never
-    // with the port.
-    let verdict: KnownHostsVerdict | null = null;
-    if (confirm) {
-      const { name, port } = knownHostsName(host);
-      verdict = knownHostsVerdict(await readUserKnownHosts(host), name, port, key);
-      if (!this.isCurrent(generation, signal)) return false;
-      if (verdict.kind === "revoked") {
-        this.hostKeyRefusal = `The host key of ${id} is marked revoked in known_hosts.`;
-        return false;
-      }
+    // in known_hosts since. A revoked key loses whatever the confirmation
+    // setting; with it off, known_hosts is read for nothing else. OpenSSH
+    // looks a HostKeyAlias up as given, never with the port.
+    const { name, port } = knownHostsName(host);
+    const listed = knownHostsVerdict(await readUserKnownHosts(host), name, port, key);
+    if (!this.isCurrent(generation, signal)) return false;
+    if (listed.kind === "revoked") {
+      this.hostKeyRefusal = `The host key of ${id} is marked revoked in known_hosts.`;
+      return false;
     }
+    const verdict: KnownHostsVerdict | null = confirm ? listed : null;
     if (prior === fingerprint) {
       forgetChangedHostKey(host.id);
       return true;

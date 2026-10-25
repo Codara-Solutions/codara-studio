@@ -781,6 +781,29 @@ function hasSshKeygen() {
     ok("the GlobalKnownHostsFile from /etc/ssh/ssh_config is read");
   }
 
+  {
+    reset();
+    confirm = false;
+    harness.files.set("/home/me/.ssh/known_hosts", `@revoked nas.local ssh-ed25519 ${b64}\n`);
+    const fresh = await connect("nas");
+    assert.equal(fresh.state, "error", "confirmation off: a revoked key still never connects");
+    assert.match(fresh.error, /revoked/);
+    assert.deepEqual(stored(), {}, "and is not trusted on first use");
+
+    reset();
+    harness.files.set(KNOWN, JSON.stringify({ "nas.local:22": keys.storedFingerprint(key) }));
+    harness.files.set("/home/me/.ssh/known_hosts", `@revoked nas.local ssh-ed25519 ${b64}\n`);
+    const stored_ = await connect("nas");
+    assert.equal(stored_.state, "error", "nor when Codara stored it before it was revoked");
+    assert.match(stored_.error, /revoked/);
+
+    reset();
+    harness.files.set("/home/me/.ssh/known_hosts", `nas.local ssh-ed25519 ${other.toString("base64")}\n`);
+    assert.equal((await connect("nas")).state, "connected", "off otherwise keeps trust on first use, as before");
+    confirm = true;
+    ok("a key known_hosts revokes is refused whatever the confirmation setting");
+  }
+
   reset();
   fs.rmSync(TMP, { recursive: true, force: true });
   console.log(`\n${passed} passed`);

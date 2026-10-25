@@ -1,5 +1,6 @@
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { homedir, userInfo } from "node:os";
+import { homedir, hostname as localHostname, userInfo } from "node:os";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import SSHConfig from "ssh-config";
 import { isValidHostId, isValidPort, type RemoteHostConfig } from "@shared/remote";
@@ -118,16 +119,25 @@ export async function readSshConfigHosts(): Promise<RemoteHostConfig[]> {
       const port = Number(first(computed.Port) ?? 22);
       if (!isValidPort(port)) continue;
       const hostName = first(computed.HostName) ?? alias;
+      // ssh defaults to the local username when User is absent.
+      const username = first(computed.User) ?? process.env.USERNAME ?? process.env.USER ?? "root";
+      const proxyJump = first(computed.ProxyJump)?.trim();
       const userKnownHostsFiles = knownHostsFiles(computed.UserKnownHostsFile, (file) =>
-        expandUserKnownHostsFile(file, { hostName, hostKeyAlias: keyAlias || alias }),
+        expandUserKnownHostsFile(file, {
+          alias,
+          hostName,
+          hostKeyAlias: keyAlias || alias,
+          port,
+          username,
+          proxyJump: proxyJump && proxyJump.toLowerCase() !== "none" ? proxyJump : "",
+        }),
       );
       const globalKnownHostsFiles = knownHostsFiles(computed.GlobalKnownHostsFile);
       out.push({
         id: alias,
         host: hostName,
         port,
-        // ssh defaults to the local username when User is absent.
-        username: first(computed.User) ?? process.env.USERNAME ?? process.env.USER ?? "root",
+        username,
         identityFile: identity ? expandTilde(identity) : undefined,
         source: "ssh-config",
         ...(proxy && proxy.toLowerCase() !== "none" ? { proxyCommandTemplate: proxy } : {}),
@@ -250,25 +260,48 @@ function knownHostsFiles(
   return files.map(expand).filter((file): file is string => file !== null);
 }
 
+interface KnownHostsFileContext {
+  /** The name given to ssh: the ~/.ssh/config alias. */
+  alias: string;
+  hostName: string;
+  hostKeyAlias: string;
+  port: number;
+  username: string;
+  /** ProxyJump as configured, empty when unset. */
+  proxyJump: string;
+}
+
 /**
- * UserKnownHostsFile as ssh expands it: `~`, then `${VAR}`, then %d (local
- * home), %u (local user), %h (HostName), %k (HostKeyAlias, else the alias)
- * and %%. ssh refuses an unset variable or another token; such a file is
- * left out here.
+ * UserKnownHostsFile as ssh expands it: `~`, then `${VAR}`, then the tokens
+ * ssh_config(5) allows there: %% %C %d %h %i %j %k %L %l %n %p %r %u. ssh
+ * refuses an unset variable or any other token; such a file is left out.
  */
-function expandUserKnownHostsFile(file: string, host: { hostName: string; hostKeyAlias: string }): string | null {
+function expandUserKnownHostsFile(file: string, host: KnownHostsFileContext): string | null {
   let unresolved = false;
   const withVars = expandTilde(file).replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_m, name: string) => {
     const value = process.env[name];
     if (value === undefined) unresolved = true;
     return value ?? "";
   });
+  // ssh's own split: %l is gethostname() as is, %L up to its first dot.
+  const fullLocalName = localHostname();
   const tokens: Record<string, () => string> = {
     "%": () => "%",
+    C: () =>
+      createHash("sha1")
+        .update(`${fullLocalName}${host.hostName}${host.port}${host.username}${host.proxyJump}`)
+        .digest("hex"),
     d: homedir,
-    u: localUser,
     h: () => host.hostName,
+    i: localUid,
+    j: () => host.proxyJump,
     k: () => host.hostKeyAlias,
+    L: () => fullLocalName.split(".")[0],
+    l: () => fullLocalName,
+    n: () => host.alias,
+    p: () => String(host.port),
+    r: () => host.username,
+    u: localUser,
   };
   const expanded = withVars.replace(/%(.)/g, (_m, token: string) => {
     const value = tokens[token];
@@ -276,6 +309,14 @@ function expandUserKnownHostsFile(file: string, host: { hostName: string; hostKe
     return value ? value() : "";
   });
   return unresolved ? null : expanded;
+}
+
+function localUid(): string {
+  try {
+    return String(userInfo().uid);
+  } catch {
+    return String(process.getuid?.() ?? -1);
+  }
 }
 
 function localUser(): string {

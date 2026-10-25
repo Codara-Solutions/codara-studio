@@ -7,7 +7,8 @@
 // that only main can give a host a proxy. Ports outside 1 to 65535 drop the
 // host (ssh refuses them too), and UserKnownHostsFile / GlobalKnownHostsFile
 // are read for the host-key check, never from a host the renderer saved;
-// UserKnownHostsFile expands %d %u %h %k %% and ${VAR} as ssh does, and the
+// UserKnownHostsFile expands ${VAR} and every token ssh_config(5) allows it
+// (%% %C %d %h %i %j %k %L %l %n %p %r %u) as ssh does, and the
 // GlobalKnownHostsFile of /etc/ssh/ssh_config (with its Includes) counts.
 
 const assert = require("node:assert/strict");
@@ -251,6 +252,40 @@ async function testKnownHostsTokens(hosts) {
     "tokens and variables expand; a file naming an unset variable or an unknown token is left out",
   );
   assert.deepEqual(byId(list, "aliased-tok").userKnownHostsFiles, ["/tmp/keyname"], "%k is the HostKeyAlias when set");
+
+  write(
+    ".ssh/config",
+    [
+      "Host all-tokens",
+      "  HostName r.example",
+      "  Port 2222",
+      "  User bob",
+      "  UserKnownHostsFile ~/.ssh/kh/%n_%p /tmp/%r@%l /tmp/%L /tmp/%i /tmp/%C /tmp/j%j",
+      "Host jumpy",
+      "  HostName q.example",
+      "  User carol",
+      "  ProxyJump bastion.example",
+      "  UserKnownHostsFile /tmp/j%j /tmp/%C",
+      "",
+    ].join("\n"),
+  );
+  const tokens = await hosts.readSshConfigHosts();
+  const full = os.hostname();
+  const short = full.split(".")[0];
+  const uid = String(os.userInfo().uid);
+  const hash = (text) => require("node:crypto").createHash("sha1").update(text).digest("hex");
+  assert.deepEqual(byId(tokens, "all-tokens").userKnownHostsFiles, [
+    path.join(HOME, ".ssh", "kh", "all-tokens_2222"),
+    `/tmp/bob@${full}`,
+    `/tmp/${short}`,
+    `/tmp/${uid}`,
+    `/tmp/${hash(`${full}r.example2222bob`)}`,
+    "/tmp/j",
+  ], "%n %p %r %l %L %i %C expand, and %j is empty without ProxyJump");
+  assert.deepEqual(byId(tokens, "jumpy").userKnownHostsFiles, [
+    "/tmp/jbastion.example",
+    `/tmp/${hash(`${full}q.example22carolbastion.example`)}`,
+  ], "%j is the ProxyJump, and %C hashes %l%h%p%r%j");
 }
 
 async function testSystemGlobalKnownHostsFile(hosts) {

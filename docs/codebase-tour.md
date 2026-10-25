@@ -500,8 +500,8 @@ takes `user@host:port` (port 1 to 65535).
   `HostKeyAlias` is looked up by the alias as written, without the port, as
   OpenSSH does; `/etc/ssh/ssh_known_hosts` and a `UserKnownHostsFile` or
   `GlobalKnownHostsFile` from `~/.ssh/config` are read too, the first with
-  `%d %u %h %k %%` and `${VAR}` expanded, as is a `GlobalKnownHostsFile`
-  from `/etc/ssh/ssh_config`). The handshake asks for the key types
+  `${VAR}` and every token ssh allows there expanded, as is a
+  `GlobalKnownHostsFile` from `/etc/ssh/ssh_config`). The handshake asks for the key types
   known_hosts lists first, reordering ssh2's own list as OpenSSH does, and a key known_hosts lists is accepted even when Codara
   stored another of the host's keys (one per host, any type). Otherwise
   `HostKeyPrompt.tsx` asks "Is this <host>?" with the fingerprint, with a
@@ -518,8 +518,9 @@ takes `user@host:port` (port 1 to 65535).
   store runs alone). The Machines card
   shows both fingerprints and **Trust the new key** (`trustChangedHostKey`),
   which trusts only the key the card showed and is forgotten when the host
-  connects again, is disconnected, edited or removed. Codara Cloud boxes keep trust on first use. With the preference
-  off, keys behave as before.
+  connects again, is disconnected, edited or removed. Codara Cloud boxes
+  keep trust on first use. With the preference off, keys behave as before,
+  except that a key known_hosts marks `@revoked` is still refused.
 
 Tests: `test-remote-agents` runs the generated lines under `/bin/sh` with
 fake `tmux` and `claude`, `test-remote-pty` covers reconnects with fake
