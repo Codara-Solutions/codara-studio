@@ -35,6 +35,8 @@ interface Fixture {
   home: string;
   cwd: string;
   url: string;
+  /** How long /compile takes to answer, as a dev server's first compile does. */
+  compile: { delayMs: number };
   request: (method: string, params?: Record<string, unknown>) => Promise<any>;
   close: () => Promise<void>;
 }
@@ -52,11 +54,19 @@ async function launch(): Promise<Fixture> {
       { id: "ws-other", name: "Studio app", cwd: workspaceDir, color: "#E0A040", workers: [] },
     ],
   }));
+  const compile = { delayMs: 0 };
   const server: Server = createServer((req, res) => {
     const name = (req.url ?? "/").replace(/[^a-z]/g, "") || "dashboard";
-    // A 204 keeps the current page: Chromium ends that load with -3 (aborted).
+    // A 204 or a download keeps the current page; Electron sends no
+    // did-fail-load for either, only did-stop-loading.
     if (name === "nocontent") return void res.writeHead(204).end();
     if (name === "bounce") return void res.writeHead(302, { location: "/nocontent" }).end();
+    if (name === "download") return void res.writeHead(200, { "content-type": "application/octet-stream", "content-disposition": 'attachment; filename="report.bin"' }).end("report");
+    // "hang" never answers; "stream" commits but never reaches DOMContentLoaded.
+    if (name === "hang") return;
+    if (name === "stream") return void res.writeHead(200, { "content-type": "text/html" }).write("<!doctype html><html><head><title>Acme stream</title></head><body><p>Loading");
+    // "ticker" moves itself (pushState) all the time, as a busy single-page app can.
+    if (name === "ticker") return void res.writeHead(200, { "content-type": "text/html" }).end(page("Acme ticker").replace("<body>", '<body><script>setInterval(() => history.pushState(null, "", "/ticker?" + Date.now()), 100)</script>'));
     const send = () => {
       res.writeHead(200, { "content-type": "text/html" });
       // "alert" asks while it loads: no DOMContentLoaded until it is answered.
@@ -64,6 +74,7 @@ async function launch(): Promise<Fixture> {
     };
     // "slow" keeps a wake in progress long enough for a call to land during it.
     if (name === "slow") setTimeout(send, 2_000);
+    else if (name === "compile") setTimeout(send, compile.delayMs);
     else send();
   });
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
@@ -84,9 +95,10 @@ async function launch(): Promise<Fixture> {
   };
   await expect.poll(async () => request("app.info").then(() => true).catch(() => false), { timeout: 30_000 }).toBe(true);
   return {
-    app, page: window, home, cwd: workspaceDir, url, request,
+    app, page: window, home, cwd: workspaceDir, url, compile, request,
     close: async () => {
       await app.close();
+      server.closeAllConnections();
       await new Promise((done) => server.close(done));
       await rm(root, { recursive: true, force: true });
     },
@@ -118,6 +130,18 @@ function pageTitle(page: Page, tabId: string): Promise<string | null> {
 
 function pane(page: Page, tabId: string) {
   return page.locator(`[data-tab-content="${tabId}"]`);
+}
+
+/** Sleeps a tab from the tabs view of the tab on screen; a click that lands while the view opens is retried. */
+async function sleepFromTabsView(page: Page, shown: string, tabId: string) {
+  const row = page.getByTestId("preview-tabs-view").locator(`[data-testid="preview-tab-row"][data-tab-id="${tabId}"]`);
+  await expect(async () => {
+    if (!(await row.isVisible())) await pane(page, shown).getByTestId("preview-tabs-chip").click();
+    if ((await row.getAttribute("data-asleep")) !== "true") await row.getByRole("button", { name: /^Sleep / }).click({ timeout: 2_000 });
+    await expect(row).toHaveAttribute("data-asleep", "true", { timeout: 2_000 });
+  }).toPass({ timeout: 20_000 });
+  await page.keyboard.press("Escape");
+  await expect(pane(page, tabId).locator("webview")).toHaveCount(0);
 }
 
 async function setTheme(page: Page, mode: "dark" | "light") {
@@ -589,20 +613,108 @@ test("navigates on an agent's sleeping tab: url-only reuses and guards it, group
   }
 });
 
-test("a navigate the page answers with 204 returns at once, even after a redirect", async () => {
-  test.setTimeout(120_000);
+test("a navigate ends with its own page: a 204, a redirect to one or a download at once, never on the old page's moves, and a page that never answers fails", async () => {
+  test.setTimeout(150_000);
   const fixture = await launch();
   const { page, request } = fixture;
   try {
     const tab = await openBrowserTab(fixture, "docs");
-    await expect.poll(() => pageTitle(page, tab), { timeout: 10_000 }).toBe("Acme docs");
-    for (const path of ["nocontent", "bounce"]) {
+    // Downloads land in the workspace instead of asking where to save.
+    await fixture.app.evaluate(({ webContents }, dir) => {
+      for (const wc of webContents.getAllWebContents()) {
+        const session = wc.session as typeof wc.session & { savesTo?: string };
+        if (session.savesTo) continue;
+        session.savesTo = dir;
+        session.on("will-download", (_event, item) => item.setSavePath(`${dir}/${item.getFilename()}`));
+      }
+    }, fixture.cwd);
+    const go = async (path: string) => {
       const started = Date.now();
-      const result = (await request("preview.navigate", { tabId: tab, url: `${fixture.url}${path}` }).catch((error) => ({ error: String(error) }))) as { url?: string; error?: string };
-      expect.soft(Date.now() - started, `${path}: no wait for a page that never comes`).toBeLessThan(5_000);
+      const result = (await request("preview.navigate", { tabId: tab, url: `${fixture.url}${path}` }).catch((error) => ({ error: String(error) }))) as { url?: string; error?: string; loading?: boolean };
+      return { ...result, ms: Date.now() - started };
+    };
+
+    for (const path of ["nocontent", "bounce", "download"]) {
+      const result = await go(path);
+      expect.soft(result.ms, `${path}: no wait for a page that never comes`).toBeLessThan(5_000);
       expect.soft(result.error, `${path}: no error`).toBeUndefined();
+      expect.soft(result.url, `${path}: the result names the page that stayed`).toBe(`${fixture.url}docs`);
       expect.soft(await pageTitle(page, tab), `${path}: the page stays`).toBe("Acme docs");
     }
+
+    // The old page moving itself while the new one loads does not end the call.
+    expect.soft((await go("ticker")).error).toBeUndefined();
+    const slow = await go("slow");
+    expect.soft(slow.url, "the result names the new page, not the old one's last move").toBe(`${fixture.url}slow`);
+    expect.soft(await pageTitle(page, tab), "the new page is there when the call returns").toBe("Acme slow");
+
+    // A page that commits but never finishes loading answers in a few seconds, marked loading.
+    const stream = await go("stream");
+    expect.soft(stream.ms, "a committed page does not hold the call for the full bound").toBeLessThan(10_000);
+    expect.soft(stream.url, "the result names the committed page").toBe(`${fixture.url}stream`);
+    expect.soft(stream.loading, "and says it is still loading").toBe(true);
+
+    // A page that never answers fails instead of reporting the old page as reached.
+    const hang = await go("hang");
+    expect.soft(hang.ms, "bounded").toBeLessThan(25_000);
+    expect.soft(hang.error, "the call fails").toMatch(/did not respond/);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("an agent with no tab of its own leaves the user's tabs alone when it navigates", async () => {
+  test.setTimeout(120_000);
+  const fixture = await launch();
+  const { page, request } = fixture;
+  try {
+    const asleepTab = await openBrowserTab(fixture, "blog");
+    const userTab = await openBrowserTab(fixture, "docs");
+    await sleepFromTabsView(page, userTab, asleepTab);
+
+    const { paneId } = await request("terminal.create", { cwd: fixture.cwd, title: "Agent pane", command: "sleep 600" });
+    const opened = (await request("preview.navigate", { callerPaneId: paneId, url: `${fixture.url}dashboard` })) as { tabId: string; opened: boolean; url: string };
+    expect.soft(opened.opened, "the agent gets a tab of its own").toBe(true);
+    expect.soft([userTab, asleepTab], "not one of the user's").not.toContain(opened.tabId);
+    expect.soft(await pane(page, userTab).locator("[data-agent-banner]").count(), "the user's tab never shows the agent driving it").toBe(0);
+    const listed = (await request("preview.list", {})).tabs as Array<{ id: string; asleep?: boolean }>;
+    expect.soft(listed.find((tab) => tab.id === asleepTab)?.asleep, "the user's sleeping tab stays asleep").toBe(true);
+    expect.soft(await pane(page, asleepTab).locator("webview").count()).toBe(0);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("a navigate on a tab the user woke whose page is still compiling waits for it, then loads the URL", async () => {
+  test.setTimeout(150_000);
+  const fixture = await launch();
+  const { page, request } = fixture;
+  try {
+    // A new tab with no page yet opens at the URL, as its address bar does.
+    await page.getByRole("button", { name: "New tab", exact: true }).dispatchEvent("click");
+    await page.getByText("Browser", { exact: true }).dispatchEvent("click");
+    const empty = (await page.locator('[data-tab-id][role="tab"][aria-selected="true"]').getAttribute("data-tab-id"))!;
+    await expect(pane(page, empty).getByPlaceholder("http://localhost:3000")).toBeVisible();
+    const fresh = (await request("preview.navigate", { tabId: empty, url: `${fixture.url}blog` }).catch((error) => ({ error: String(error) }))) as { url?: string; error?: string };
+    expect.soft(fresh.error, "no error on an empty tab").toBeUndefined();
+    expect.soft(fresh.url, "the empty tab reached the page").toBe(`${fixture.url}blog`);
+    await expect.poll(() => pageTitle(page, empty), { timeout: 10_000 }).toBe("Acme blog");
+
+    const tab = await openBrowserTab(fixture, "compile");
+    const other = await openBrowserTab(fixture, "docs");
+    await sleepFromTabsView(page, other, tab);
+
+    // The user brings the tab back while its server compiles for 25 s; the
+    // agent's call lands after the 15 s a wake may hold calls.
+    fixture.compile.delayMs = 25_000;
+    await page.locator(`[data-tab-id="${tab}"][role="tab"]`).click();
+    await expect(pane(page, tab).locator("webview")).toHaveCount(1);
+    await page.waitForTimeout(16_000);
+    fixture.compile.delayMs = 0;
+    const result = (await request("preview.navigate", { tabId: tab, url: `${fixture.url}settings` }).catch((error) => ({ error: String(error) }))) as { url?: string; error?: string };
+    expect.soft(result.error, "no error").toBeUndefined();
+    expect.soft(result.url, "the result names the page asked for").toBe(`${fixture.url}settings`);
+    await expect.poll(() => pageTitle(page, tab), { timeout: 10_000 }).toBe("Acme settings");
   } finally {
     await fixture.close();
   }

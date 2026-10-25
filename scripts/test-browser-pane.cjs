@@ -134,9 +134,40 @@ function address() {
   assert.equal(serverForUrl(servers, "garbage"), null);
 }
 
+// A woken tab counts as waking (agent calls wait for it) until its page is
+// ready, and at most 15 s: a page that never gets there fails calls at once.
+function waking() {
+  globalThis.window ??= { localStorage: { getItem: () => null, setItem() {} } };
+  const tabs = bundle(`export * from "./tabs-memory/browserTabs";`);
+  const realNow = Date.now;
+  const realSetInterval = globalThis.setInterval;
+  let now = NOW;
+  Date.now = () => now;
+  // The auto-sleep timer runs for the app's life; here it must not hold the process.
+  globalThis.setInterval = (...args) => realSetInterval(...args).unref();
+  try {
+    tabs.noteBrowserTab("w", { workspaceId: "ws", url: "http://localhost:3000/", isolated: false });
+    assert.ok(tabs.sleepTab("w"));
+    tabs.wakeTab("w");
+    assert.equal(tabs.isTabWaking("w"), true);
+    now += 14_000;
+    assert.equal(tabs.isTabWaking("w"), true, "still waking within 15 s");
+    now += 1_000;
+    assert.equal(tabs.isTabWaking("w"), false, "a page that never got ready stops holding calls");
+    assert.ok(tabs.sleepTab("w"));
+    tabs.wakeTab("w");
+    tabs.noteTabReady("w");
+    assert.equal(tabs.isTabWaking("w"), false, "ready ends waking");
+  } finally {
+    Date.now = realNow;
+    globalThis.setInterval = realSetInterval;
+  }
+}
+
 blockers();
 autoSleep();
 words();
 fullScreen();
 address();
-console.log("browser pane: sleep blockers, auto-sleep after 30 min, tabs view words, full screen steps, ports and dev servers in the address pill");
+waking();
+console.log("browser pane: sleep blockers, auto-sleep after 30 min, tabs view words, full screen steps, ports and dev servers in the address pill, waking ends within 15 s");
