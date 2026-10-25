@@ -32,7 +32,11 @@ export function hostKeyType(key: Buffer): string {
 export type KnownHostsVerdict =
   | { kind: "match" }
   | { kind: "revoked" }
-  | { kind: "none" }
+  /**
+   * Nothing lists the host. `certAuthority`: a `@cert-authority` line covers
+   * it, so ssh would have trusted a certificate this connection cannot check.
+   */
+  | { kind: "none"; certAuthority?: true }
   /**
    * The host is listed, but never with this key: OpenSSH refuses another key
    * of a listed type as changed, and a key of an unlisted type is how a man
@@ -44,20 +48,24 @@ export type KnownHostsVerdict =
  * Whether known_hosts text lists `key` for this host. `[host]:port` entries
  * apply to other ports, plain ones to 22; hashed names (`|1|salt|hash`) and
  * `*` / `?` patterns match as OpenSSH matches them. A `@revoked` key wins
- * over everything; `@cert-authority` lines are not host keys and are skipped.
+ * over everything; `@cert-authority` lines are not host keys, and a marker
+ * OpenSSH does not know makes it skip the line, as here.
  * `host` is hashed as given: callers lowercase a hostname, never an alias.
  */
 export function knownHostsVerdict(text: string, host: string, port: number, key: Buffer): KnownHostsVerdict {
   const wanted = key.toString("base64");
   const type = hostKeyType(key);
   let matched = false;
+  let certAuthority = false;
   let sameType: Buffer | null = null;
   let otherType: Buffer | null = null;
   for (const entry of hostEntries(text, host, port)) {
-    if (entry.blob === wanted) {
-      if (entry.revoked) return { kind: "revoked" };
+    if (entry.marker === "@cert-authority") {
+      certAuthority = true;
+    } else if (entry.blob === wanted) {
+      if (entry.marker === "@revoked") return { kind: "revoked" };
       matched = true;
-    } else if (!entry.revoked) {
+    } else if (entry.marker === null) {
       const listed = Buffer.from(entry.blob, "base64");
       if (hostKeyType(listed) === type) sameType ??= listed;
       else otherType ??= listed;
@@ -65,57 +73,51 @@ export function knownHostsVerdict(text: string, host: string, port: number, key:
   }
   if (matched) return { kind: "match" };
   const listedKey = sameType ?? otherType;
-  return listedKey ? { kind: "mismatch", listedKey } : { kind: "none" };
+  if (listedKey) return { kind: "mismatch", listedKey };
+  return certAuthority ? { kind: "none", certAuthority: true } : { kind: "none" };
 }
 
 /** The key types known_hosts lists for this host, in file order. */
 export function knownHostTypes(text: string, host: string, port: number): string[] {
   const types: string[] = [];
   for (const entry of hostEntries(text, host, port)) {
-    if (entry.revoked) continue;
+    if (entry.marker !== null) continue;
     const type = hostKeyType(Buffer.from(entry.blob, "base64"));
     if (type !== "unknown" && !types.includes(type)) types.push(type);
   }
   return types;
 }
 
-// ssh2's own preference order (lib/protocol/constants.js), which an exact
-// list replaces: its `prepend` skips algorithms already in the list.
-const SERVER_HOST_KEY_ALGORITHMS = [
-  "ssh-ed25519",
-  "ecdsa-sha2-nistp256",
-  "ecdsa-sha2-nistp384",
-  "ecdsa-sha2-nistp521",
-  "rsa-sha2-512",
-  "rsa-sha2-256",
-  "ssh-rsa",
-];
-
 /**
- * ssh2's `algorithms.serverHostKey` with the listed key types first, so a
- * server offers a key known_hosts can vouch for. As OpenSSH does, the listed
- * ones keep the default order among themselves: which line of the file came
- * first never changes the key negotiated.
+ * ssh2's `algorithms.serverHostKey`: `available` (ssh2's own default list,
+ * which an exact list replaces, since its `prepend` skips algorithms already
+ * in the list) with the listed key types first, so a server offers a key
+ * known_hosts can vouch for. As OpenSSH does, the listed ones keep the
+ * default order among themselves: which line of the file came first never
+ * changes the key negotiated.
  */
-export function hostKeyAlgorithms(listedTypes: readonly string[]): string[] {
+export function hostKeyAlgorithms(listedTypes: readonly string[], available: readonly string[]): string[] {
   const listed = (algorithm: string) => listedTypes.includes(algorithm.startsWith("rsa-sha2-") ? "ssh-rsa" : algorithm);
-  return [
-    ...SERVER_HOST_KEY_ALGORITHMS.filter(listed),
-    ...SERVER_HOST_KEY_ALGORITHMS.filter((algorithm) => !listed(algorithm)),
-  ];
+  return [...available.filter(listed), ...available.filter((algorithm) => !listed(algorithm))];
 }
 
-function* hostEntries(text: string, host: string, port: number): Generator<{ blob: string; revoked: boolean }> {
+type HostEntry = { blob: string; marker: "@revoked" | "@cert-authority" | null };
+
+function* hostEntries(text: string, host: string, port: number): Generator<HostEntry> {
   const name = port === 22 ? host : `[${host}]:${port}`;
   for (const raw of text.split("\n")) {
     const line = raw.trim();
     if (!line || line.startsWith("#")) continue;
     const fields = line.split(/\s+/);
-    let marker: string | null = null;
-    if (fields[0].startsWith("@")) marker = fields.shift() ?? null;
-    if (marker === "@cert-authority" || fields.length < 3) continue;
+    let marker: HostEntry["marker"] = null;
+    if (fields[0].startsWith("@")) {
+      const word = fields.shift();
+      if (word !== "@revoked" && word !== "@cert-authority") continue;
+      marker = word;
+    }
+    if (fields.length < 3) continue;
     const [patterns, , blob] = fields;
-    if (hostPatternsMatch(patterns, name)) yield { blob, revoked: marker === "@revoked" };
+    if (hostPatternsMatch(patterns, name)) yield { blob, marker };
   }
 }
 

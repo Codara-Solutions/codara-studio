@@ -49,6 +49,10 @@ function createHarness() {
 
 function stubPlugin() {
   const sources = {
+    // connections.ts reads ssh2's host key algorithm list next to ssh2 itself.
+    "ssh2/lib/protocol/constants.js": `
+      export const DEFAULT_SERVER_HOST_KEY = ["ssh-ed25519", "ecdsa-sha2-nistp256", "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"];
+    `,
     ssh2: `
       import { EventEmitter } from "node:events";
       export class Client extends EventEmitter {
@@ -86,6 +90,9 @@ function stubPlugin() {
     "./ssh-hosts": `
       export function getHost(hostId) {
         return globalThis.__codaraSshLifecycleHarness.getHost(hostId);
+      }
+      export async function systemGlobalKnownHostsFiles() {
+        return undefined;
       }
     `,
     "./codara-boxes": `

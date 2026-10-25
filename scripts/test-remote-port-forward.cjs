@@ -119,7 +119,8 @@ const STUBS = {
     exports.loadState = async () => h.state;
     exports.onStateSaved = (listener) => { h.stateListeners.push(listener); return () => {}; };`,
   "./ssh-hosts": `
-    exports.getHost = async (id) => globalThis.__portForwardHarness.hosts.get(id) ?? null;`,
+    exports.getHost = async (id) => globalThis.__portForwardHarness.hosts.get(id) ?? null;
+    exports.systemGlobalKnownHostsFiles = async () => undefined;`,
   "./secret-store": `
     exports.getSecret = async (key) => (key.startsWith("password:") ? "test-password" : null);
     exports.setSecret = async () => {};
