@@ -2027,7 +2027,7 @@ function buildInstructions() {
   }
   if (listed.has("codara_workspace_status")) {
     parts.push(
-      "Your line in the rail: Codara shows under the workspace's name whether you are working, need the user or are done, by itself. codara_workspace_status adds a one-line note to your own line (other agents keep theirs): post one at each milestone saying what you are on or what is left. It stays until your tab closes. A read also lists the other agents' notes in this workspace.",
+      "Your line in the rail: Codara shows under the workspace's name whether you are working, need the user or are done, by itself. codara_workspace_status adds a one-line note to your own line (other agents keep theirs): post a note at each milestone saying what you are on, what is left or why you are blocked. It stays until your tab closes. A read also lists the other agents' notes in this workspace.",
     );
   }
   if (listed.has("codara_task_list")) {

@@ -306,6 +306,11 @@ function sortedEqual(actual, expected, label) {
       /Task list: .*codara_task_add.*verify\.json checks run then and alone close it.*needs_you with one plain sentence/,
       "a terminal agent learns that only the repo's checks close a task",
     );
+    assert.match(
+      studio.init.instructions,
+      /codara_workspace_status.*note at each milestone.*blocked/,
+      "a terminal agent learns to say in its rail note why it is blocked",
+    );
     assert.match(studio.init.instructions, /Dev servers: .*codara_terminal_servers.*keeps them running when you exit or restart/, "dev servers go to the keeper, not the agent's own shell");
     assert.match(
       studio.init.instructions,

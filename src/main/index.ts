@@ -1926,6 +1926,11 @@ app.on("before-quit", (event) => {
       // broad PTY sweep. This drain is single-flight and bounded (≤2s), leaving
       // room for graceful PTY teardown inside the 5s hard-exit fallback.
       if (runStoreMod) {
+        // Workflow runs first, so the agents this drain kills are not taken
+        // for their answers.
+        await import("./orchestration/workflow-driver")
+          .then((m) => m.suspendWorkflowRunsForQuit())
+          .catch(() => undefined);
         await runStoreMod.shutdownRunRuntimeResources().catch(() => undefined);
       }
       // Graceful (bounded ≤1.5s) PTY teardown so agent CLIs can flush their
