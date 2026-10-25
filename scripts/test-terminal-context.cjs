@@ -164,6 +164,19 @@ async function main() {
     assert.equal(click({ button: 2, ctrlKey: true }), "ignore");
     assert.equal(click({ button: undefined }), "menu");
   }
+  {
+    // An OSC 8 link shows any text over a hidden target: only web pages and
+    // Codara's own tab links are followed from one.
+    const follows = (uri) => links.followsHiddenTargetLink(uri);
+    assert.equal(follows("https://example.com/"), true);
+    assert.equal(follows("http://localhost:5173/"), true);
+    assert.equal(follows("codara://tab/ws-1/term-abc"), true);
+    assert.equal(follows("file:///home/me/.ssh/config"), false, "a file behind innocent text");
+    assert.equal(follows("mailto:x@example.com?body=secret"), false);
+    assert.equal(follows("vscode://open?file=/etc/passwd"), false);
+    assert.equal(follows("javascript:alert(1)"), false);
+    assert.equal(follows("not a url"), false);
+  }
   console.log("ok 4 a plain click asks, a modifier click opens, a drag does nothing");
 
   // 5. Menu rows.
@@ -189,7 +202,11 @@ async function main() {
   // The pane and its toolbar are wired to these rules.
   const session = fs.readFileSync(path.join(TERMINAL, "useTerminalSession.ts"), "utf8");
   assert.match(session, /new WebLinksAddon\(\(event, uri\) => activateTerminalLink\(event, uri\)\)/, "plain URLs");
-  assert.match(session, /activate: \(event, uri\) => activateTerminalLink\(event, uri\)/, "OSC 8 hyperlinks");
+  assert.match(
+    session,
+    /activate: \(event, uri\) => \{\s*if \(followsHiddenTargetLink\(uri\)\) activateTerminalLink\(event, uri\);/,
+    "OSC 8 hyperlinks, web and tab targets only",
+  );
   assert.match(session, /registerTerminalContextSource\(sessionId,/);
   assert.match(session, /if \(!readOnlyRef\.current\) \{\s*cleanups\.push\(\s*registerTerminalContextSource/, "mirrors do not register");
   const stack = fs.readFileSync(path.join(ROOT, "src/renderer/src/tabs/TerminalStack.tsx"), "utf8");

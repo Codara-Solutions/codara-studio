@@ -36,7 +36,9 @@ import { getTrustedMainWindow, isTrustedOnSender } from "./main-window-trust";
 // "overlay" covers an existing pane with a temporary terminal (pane.open) and
 // "closeOverlay" drops one whose PTY never started. "panes" lists every
 // terminal pane with its workspace, the agents in them or not. "group" moves
-// the tab of an existing pane into a named tab group.
+// the tab of an existing pane into a named tab group. "tabs" resolves a tab
+// or group link and "tabAct" focuses, closes, splits or unsplits what one
+// names (codara_tab).
 export type TerminalOpName =
   | "create"
   | "destroy"
@@ -46,7 +48,9 @@ export type TerminalOpName =
   | "overlay"
   | "closeOverlay"
   | "panes"
-  | "group";
+  | "group"
+  | "tabs"
+  | "tabAct";
 
 export interface TerminalOpParams {
   [key: string]: unknown;

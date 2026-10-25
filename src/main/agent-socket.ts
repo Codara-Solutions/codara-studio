@@ -16,7 +16,9 @@ import {
   type PreviewToolHost,
 } from "./preview-tools";
 import { getTrustedMainWindow } from "./main-window-trust";
-import { processChain } from "./owned-process-tree";
+import { listProcessesWithCommands, processChain, processChainIn, processStartMs } from "./owned-process-tree";
+import { latestSessionStart } from "./agent-session-registry";
+import { CallerPaneResolver } from "./caller-pane";
 import { processCwds } from "./pi-session-tracker";
 import { requestTerminalOp } from "./terminal-bridge";
 import {
@@ -31,6 +33,7 @@ import { terminalAgentStateSnapshot, terminalAgentTurnsSignaled, terminalPanePla
 import { paneAgentRuntime } from "./pane-agent-runtime";
 import {
   AgentTerminalOwnershipError,
+  type AgentTerminalCaller,
   type AgentTerminalRegistration,
 } from "./agent-terminal-registry";
 import {
@@ -108,6 +111,8 @@ import {
 import { normalizePiAccountProfileId } from "./orchestration/pi-account-execution";
 import { effectiveChatMode } from "@shared/chat-policy";
 import { normalizeTabGroupName } from "@shared/tab-group-name";
+import { groupLink, tabLink } from "@shared/tab-links";
+import { callerAgentSession, restoredAgentTerminal, type TerminalAgentOwner } from "@shared/agent-terminal-owner";
 import { DEFAULT_PREFERENCES } from "@shared/types";
 import { whiteboardIssues } from "@shared/whiteboard-quality";
 import {
@@ -132,7 +137,6 @@ import {
   callerPullRequestTrust,
   crossWorkspaceCwdRefusal,
   crossWorkspaceRefusal,
-  paneIsGone,
   resolveTargetWorkspace,
   type CrossWorkspaceDecision,
 } from "./cross-workspace-terminals";
@@ -710,7 +714,7 @@ async function dispatch(
       }
     }
     // The browser and other studio tools, one module per area (preview-tools/).
-    if (hasPreviewTool(method)) return await handlePreviewToolRpc(method, params, id);
+    if (hasPreviewTool(method)) return await handlePreviewToolRpc(method, params, id, res);
     switch (method) {
       case "terminal.read":
         return await handleTerminalRead(params, id);
@@ -1026,8 +1030,9 @@ async function handleTerminalRun(
   const runId = stringParam(params, "runId");
   const requestedPaneId = stringParam(params, "paneId");
   if (requestedPaneId) {
-    const callerPaneId = await callerPaneForOwnedTerminal(requestedPaneId, params);
-    if (!agentTerminals.isActiveOwnedBy(requestedPaneId, runId, callerPaneId)) {
+    await adoptRestoredAgentTerminal(requestedPaneId, params);
+    const caller = await callerForOwnedTerminal(requestedPaneId, params);
+    if (!agentTerminals.isActiveOwnedBy(requestedPaneId, runId, caller)) {
       return errorResponse(
         id,
         ERR_INVALID_PARAMS,
@@ -1155,6 +1160,16 @@ interface StudioTerminalListing {
   cwd?: string;
   profile?: string;
   group?: string;
+  groupId?: string;
+  agentOwner?: TerminalAgentOwner;
+}
+
+// The agent CLI session the caller runs (shared/agent-terminal-owner.ts):
+// captured in its pane after its agent started.
+function paneAgentSession(paneId: string | null, agentStartedMs: number | null): string | null {
+  if (!paneId) return null;
+  const live = terminalAgentStateSnapshot().find((state) => state.paneId === paneId)?.runtime ?? null;
+  return callerAgentSession(latestSessionStart(paneId), { runtime: live, startedMs: agentStartedMs });
 }
 
 const CALLER_PLACEMENT_CACHE_MS = 5_000;
@@ -1172,27 +1187,35 @@ async function paneWorkspaceId(paneId: string): Promise<string | null> {
   return listed?.workspaceId ?? null;
 }
 
-// The caller's pane, looked up only for a terminal that records one as its
-// owner (opened in another workspace), so other writes skip the process walk.
-async function callerPaneForOwnedTerminal(
+type AgentCaller = AgentTerminalCaller & { paneId: string | null };
+
+// Callers scopePreviewToCaller already resolved, keyed by the request's own
+// params: scoping drops the pid, and nothing in tool JSON may stand in for it.
+const scopedCallers = new WeakMap<Record<string, unknown>, AgentCaller>();
+
+// Who a run-less caller is: its verified pane, its process, and its agent
+// CLI session (agent-terminal-registry.ts decides ownership from these).
+async function resolveAgentCaller(params: Record<string, unknown>): Promise<AgentCaller> {
+  const scoped = scopedCallers.get(params);
+  if (scoped) return scoped;
+  const identity = await callerPanes.identify(params);
+  return {
+    paneId: identity.paneId,
+    process: identity.process,
+    sessionId: paneAgentSession(identity.paneId, identity.agentStartedMs),
+  };
+}
+
+// The caller, looked up only for a terminal a run-less agent opened, so writes
+// to a run's or the workspace's terminals skip the process walk. A terminal
+// with no recorded opener is nobody's, whoever asks.
+async function callerForOwnedTerminal(
   paneId: string,
   params: Record<string, unknown>,
-): Promise<string | null> {
-  const owner = agentTerminals.ownerPaneOf(paneId);
-  if (!owner) return null;
-  const gone = await paneIsGone(owner, {
-    hasSession: (id) => pty.hasSession(id),
-    listPaneIds: async () => {
-      const panes = await requestTerminalOp<Array<{ paneId: string }>>("panes", {}, { timeoutMs: 5_000 });
-      if (!Array.isArray(panes)) throw new Error("no pane inventory");
-      return panes.map((pane) => pane.paneId);
-    },
-  });
-  if (gone) {
-    agentTerminals.releasePaneOwner(paneId);
-    return null;
-  }
-  return resolveCallerPaneId(params);
+): Promise<AgentTerminalCaller | null> {
+  if (stringParam(params, "runId")) return null;
+  if (!agentTerminals.openerOf(paneId)) return null;
+  return resolveAgentCaller(params);
 }
 
 // Where the calling agent's own pane sits, so browser, list and notify calls
@@ -1220,6 +1243,15 @@ async function resolveCallerPlacement(params: Record<string, unknown>): Promise<
   return placement;
 }
 
+// codara://tab and codara://group links (shared/tab-links.ts) an agent can
+// hand the user or pass to codara_tab.
+function tabLinks(entry: StudioTerminalListing): { link: string; groupLink?: string } {
+  return {
+    link: tabLink(entry.workspaceId, entry.tabId),
+    ...(entry.groupId ? { groupLink: groupLink(entry.workspaceId, entry.groupId) } : {}),
+  };
+}
+
 async function handleTerminalList(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -1239,6 +1271,7 @@ async function handleTerminalList(
     return errorResponse(id, ERR_INTERNAL, err instanceof Error ? err.message : String(err));
   }
   const states = new Map(terminalAgentStateSnapshot().map((entry) => [entry.paneId, entry]));
+  const terminalCaller: AgentTerminalCaller | null = runId ? null : await resolveAgentCaller(params);
   const panes = inventory
     .filter((entry) => !workspaceId || entry.workspaceId === workspaceId)
     .map((entry) => {
@@ -1246,6 +1279,7 @@ async function handleTerminalList(
       return {
         paneId: entry.paneId,
         tabId: entry.tabId,
+        ...tabLinks(entry),
         ...(workspaceId ? {} : { workspaceId: entry.workspaceId }),
         ...(entry.title ? { title: entry.title } : {}),
         ...(entry.group ? { group: entry.group } : {}),
@@ -1254,13 +1288,13 @@ async function handleTerminalList(
         ...(agent ? { agentState: agent.state } : {}),
         shell: shellActivity(pty.readTail(entry.paneId, TERMINAL_SHELL_STATE_BYTES)),
         ...(caller?.paneId === entry.paneId ? { isCaller: true } : {}),
-        ...(agentTerminals.isActiveOwnedBy(entry.paneId, runId, caller?.paneId ?? null) ? { writable: true } : {}),
+        ...(agentTerminals.isActiveOwnedBy(entry.paneId, runId, terminalCaller) ? { writable: true } : {}),
       };
     });
   // Terminals this agent opened in other workspaces, so it can keep steering
   // them without knowing where they went.
   const listed = new Set(panes.map((pane) => pane.paneId));
-  const elsewhere = !runId && caller ? agentTerminals.listOwnedByPane(caller.paneId) : [];
+  const elsewhere = terminalCaller ? agentTerminals.listOpenedBy(terminalCaller) : [];
   for (const owned of elsewhere) {
     if (listed.has(owned.paneId)) continue;
     const entry = inventory.find((item) => item.paneId === owned.paneId);
@@ -1269,6 +1303,7 @@ async function handleTerminalList(
     panes.push({
       paneId: entry.paneId,
       tabId: entry.tabId,
+      ...tabLinks(entry),
       workspaceId: entry.workspaceId,
       ...(entry.title ? { title: entry.title } : {}),
       ...(entry.group ? { group: entry.group } : {}),
@@ -1381,22 +1416,30 @@ async function handleShareOffer(
   });
 }
 
-// The pane the calling agent runs in, so its new terminal opens beside it
-// instead of in whichever workspace is on screen. Only placement follows from
-// it, never ownership. The MCP server sends the pane id when the CLI passed
-// its environment through and always its own pid, which reaches the pane
-// through the process tree when it did not.
-async function resolveCallerPaneId(params: Record<string, unknown>): Promise<string | null> {
-  const hinted = stringParam(params, "callerPaneId");
-  if (hinted && pty.hasSession(hinted)) return hinted;
-  const callerPid = params.callerPid;
-  if (typeof callerPid !== "number" || !Number.isSafeInteger(callerPid)) return null;
+// The pane the calling agent runs in: its new terminal opens beside it, and
+// what it opened from there is its own (caller-pane.ts). The MCP server sends
+// the pane id when the CLI passed its environment through and always its own
+// pid; with a pid, only the pane the pid runs in counts.
+const callerPanes = new CallerPaneResolver({
+  hasSession: (paneId) => pty.hasSession(paneId),
   // A reused listing can predate a freshly started MCP server; read a new one
   // before giving up.
-  const chain =
-    (await processChain(callerPid, CALLER_PROCESS_LIST_MAX_AGE_MS).catch(() => null)) ??
-    (await processChain(callerPid).catch(() => null));
-  return chain ? pty.sessionForProcessChain(chain) : null;
+  processChain: async (pid) => {
+    for (const maxAgeMs of [CALLER_PROCESS_LIST_MAX_AGE_MS, 0]) {
+      const listed = await listProcessesWithCommands(maxAgeMs).catch(() => null);
+      const chain = listed ? processChainIn(listed, pid) : null;
+      if (!listed || !chain) continue;
+      const startedAt = new Map(listed.map((entry) => [entry.pid, entry.startedAt]));
+      return chain.map((entry) => ({ pid: entry, startedMs: processStartMs(startedAt.get(entry) ?? "") }));
+    }
+    return null;
+  },
+  sessionForProcessChain: (chain) => pty.sessionForProcessChain(chain),
+  canListProcesses: () => process.platform !== "win32",
+});
+
+function resolveCallerPaneId(params: Record<string, unknown>): Promise<string | null> {
+  return callerPanes.resolve(params);
 }
 
 // Where the caller's processes are right now, from its MCP server up to its
@@ -1421,6 +1464,57 @@ async function callerProcessCwds(params: Record<string, unknown>): Promise<strin
 // the renderer, so we round-trip through the terminal-bridge; the renderer
 // mints an agent-tinted, UNFOCUSED tab and returns the tabId + paneId (the PTY
 // session id the agent then drives via terminal.write / terminal.read).
+// What the layout saves about the agent opening a terminal, so the same run,
+// or the same agent CLI session after a resume, still owns it once Codara
+// restarts (shared/agent-terminal-owner.ts). An agent whose session Codara
+// has not captured gets no record and keeps the in-memory ownership only.
+function openingAgentOwner(
+  run: RunState | null,
+  targetWorkspaceId: string | null,
+  callerPane: StudioTerminalListing | undefined,
+  sessionId: string | null,
+  service: boolean,
+): TerminalAgentOwner | null {
+  const retention = service ? { retention: "service" as const } : {};
+  if (run) {
+    const workspaceId = run.workspaceId ?? targetWorkspaceId;
+    return workspaceId ? { workspaceId, runId: run.id, ...retention } : null;
+  }
+  return callerPane && sessionId ? { workspaceId: callerPane.workspaceId, sessionId, ...retention } : null;
+}
+
+// After a relaunch the ownership ledger is empty while the layout brought
+// back the agent terminals with their owner record. When the run or agent
+// session that opened one asks about it, admit it again so a resumed agent
+// keeps writing to and closing its own tabs. A pane this process already
+// registered, or closed, is never re-adopted.
+async function adoptRestoredAgentTerminal(paneId: string, params: Record<string, unknown>): Promise<void> {
+  if (agentTerminals.knows(paneId)) return;
+  const listing = await listStudioTerminals().catch(() => []);
+  const entry = listing.find((item) => item.paneId === paneId);
+  if (!entry?.agentOwner) return;
+  const runId = stringParam(params, "runId");
+  const agentCaller = runId ? null : await resolveAgentCaller(params);
+  const caller = agentCaller?.paneId ? listing.find((item) => item.paneId === agentCaller.paneId) : undefined;
+  const registration = restoredAgentTerminal(entry, {
+    runId,
+    paneId: agentCaller?.paneId ?? null,
+    sessionId: agentCaller?.sessionId ?? null,
+    process: agentCaller?.process ?? null,
+    workspaceId: caller?.workspaceId ?? null,
+  });
+  if (!registration || agentTerminals.knows(paneId)) return;
+  if (!registerAgentTerminal(registration)) return;
+  const offExit = pty.onExit(paneId, () => {
+    offExit();
+    agentTerminals.markExited(registration);
+  });
+  if (!pty.exists(paneId)) {
+    offExit();
+    agentTerminals.markExited(registration);
+  }
+}
+
 async function handleTerminalCreate(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -1498,7 +1592,8 @@ async function handleTerminalCreate(
       }
     }
   }
-  const callerPaneId = await resolveCallerPaneId(params);
+  const agentCaller = await resolveAgentCaller(params);
+  const callerPaneId = agentCaller.paneId;
   let crossWorkspace: { callerName: string; target: { id: string; name: string } } | null = null;
   if (requestedWorkspace) {
     let state: AppState;
@@ -1570,6 +1665,11 @@ async function handleTerminalCreate(
     }
     if (!cwd && resolved.folder) cwd = resolved.folder;
   }
+  const callerPane =
+    !run && callerPaneId
+      ? (await listStudioTerminals().catch(() => [])).find((entry) => entry.paneId === callerPaneId)
+      : undefined;
+  const agentOwner = openingAgentOwner(run, workspaceId, callerPane, agentCaller.sessionId ?? null, rawRetention === "service");
   try {
     const result = await requestTerminalOp<{ tabId: string; paneId: string; cwd: string; group?: string }>(
       "create",
@@ -1582,6 +1682,7 @@ async function handleTerminalCreate(
         ...(callerPaneId ? { callerPaneId } : {}),
         ...(group ? { group } : {}),
         ...(crossWorkspace ? { openedBy: crossWorkspace.callerName } : {}),
+        ...(agentOwner ? { agentOwner } : {}),
       },
       // Waiting for the user took part of the MCP server's 60 s budget; keep
       // the whole call inside it, spawn wait included.
@@ -1633,13 +1734,16 @@ async function handleTerminalCreate(
     // Record both process-level agent ownership (terminal.write) and run
     // ownership (terminal.close). The MCP server injects runId from the
     // caller's SPARK_RUN_ID; a user-facing studio agent has no run and owns a
-    // null-scoped terminal.
+    // null-scoped terminal through its pane and session, so another agent of
+    // the user cannot steer or close it.
     const registration: AgentTerminalRegistration = {
       paneId: result.paneId,
       tabId: result.tabId,
       runId,
       retention: rawRetention === "service" ? "service" : "temporary",
-      ...(crossWorkspace && !runId && callerPaneId ? { ownerPaneId: callerPaneId } : {}),
+      ...(!runId && callerPaneId ? { ownerPaneId: callerPaneId } : {}),
+      ...(!runId && agentCaller.sessionId ? { ownerSessionId: agentCaller.sessionId } : {}),
+      ...(!runId && agentCaller.process ? { ownerProcess: agentCaller.process } : {}),
     };
     if (!registerAgentTerminal(registration)) {
       // The run settled/deleted while its renderer tab was spawning. The
@@ -1715,8 +1819,9 @@ async function handleTerminalWrite(
   // panes, so their paneIds are discoverable. The bridge stamps SPARK_RUN_ID
   // onto writes; require the same run that created this terminal so one Cora
   // run cannot type into another run's agent-owned shell.
-  const callerPaneId = await callerPaneForOwnedTerminal(paneId, params);
-  if (!agentTerminals.isActiveOwnedBy(paneId, runId, callerPaneId) && !isKeptServerSession(paneId)) {
+  await adoptRestoredAgentTerminal(paneId, params);
+  const caller = await callerForOwnedTerminal(paneId, params);
+  if (!agentTerminals.isActiveOwnedBy(paneId, runId, caller) && !isKeptServerSession(paneId)) {
     return errorResponse(
       id,
       ERR_INVALID_PARAMS,
@@ -1784,10 +1889,11 @@ async function handleTerminalClose(
   const runId = stringParam(params, "runId");
 
   try {
+    await adoptRestoredAgentTerminal(paneId, params);
     const result = await agentTerminals.close({
       paneId,
       runId,
-      callerPaneId: await callerPaneForOwnedTerminal(paneId, params),
+      caller: await callerForOwnedTerminal(paneId, params),
       stop: () => pty.killImmediate(paneId),
       destroyTab: (registration) =>
         requestTerminalOp("destroy", {
@@ -1812,15 +1918,24 @@ async function handleTerminalClose(
 // over any workspace the call names; a caller outside any pane keeps the
 // on-screen workspace. A run keeps resolving through scopePreviewWorkspace.
 async function scopePreviewToCaller(params: Record<string, unknown>): Promise<void> {
-  let callerPaneId: string | null = null;
+  let caller: AgentCaller | null = null;
   if (!stringParam(params, "runId")) {
     const placement = await resolveCallerPlacement(params);
     if (placement) params.workspaceId = placement.workspaceId;
-    callerPaneId = placement?.paneId ?? (await resolveCallerPaneId(params));
+    caller = await resolveAgentCaller(params);
+    scopedCallers.set(params, caller);
   }
   delete params.callerPid;
-  if (callerPaneId) params.callerPaneId = callerPaneId;
-  else delete params.callerPaneId;
+  delete params.callerSessionId;
+  delete params.callerProcess;
+  if (caller?.paneId) {
+    params.callerPaneId = caller.paneId;
+    // What the caller opens is its session's and its process's, not its pane's.
+    if (caller.sessionId) params.callerSessionId = caller.sessionId;
+    if (caller.process) params.callerProcess = caller.process;
+  } else {
+    delete params.callerPaneId;
+  }
 }
 
 const PREVIEW_TOOL_HOST: PreviewToolHost = {
@@ -1839,6 +1954,13 @@ const PREVIEW_TOOL_HOST: PreviewToolHost = {
     const id = workspaceId ?? state.activeWorkspaceId;
     return state.workspaces.find((workspace) => workspace.id === id)?.name ?? null;
   },
+  ownsTerminalPane: async (paneId, params) => {
+    await adoptRestoredAgentTerminal(paneId, params);
+    return agentTerminals.isActiveOwnedBy(paneId, stringParam(params, "runId"), await callerForOwnedTerminal(paneId, params));
+  },
+  // Only an exited agent loses nothing when its pane closes.
+  agentRunningIn: (paneId) =>
+    terminalAgentStateSnapshot().some((entry) => entry.paneId === paneId && entry.state !== "done" && entry.state !== "error"),
   paneRuntime: paneAgentRuntime,
 };
 
@@ -1846,12 +1968,22 @@ async function handlePreviewToolRpc(
   method: string,
   params: Record<string, unknown>,
   id: JsonRpcId,
+  res: ServerResponse,
 ): Promise<JsonRpcResponse> {
+  // A handler that waits on the user (codara_tab's card) stops when the
+  // caller does: its request timed out or its connection dropped.
+  const callerGone = new AbortController();
+  const onClose = () => {
+    if (!res.writableFinished) callerGone.abort();
+  };
+  res.once("close", onClose);
   try {
-    return successResponse(id, await runPreviewTool(method, params, PREVIEW_TOOL_HOST));
+    return successResponse(id, await runPreviewTool(method, params, { ...PREVIEW_TOOL_HOST, signal: callerGone.signal }));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return errorResponse(id, err instanceof PreviewToolParamsError ? ERR_INVALID_PARAMS : ERR_INTERNAL, message);
+  } finally {
+    res.off("close", onClose);
   }
 }
 

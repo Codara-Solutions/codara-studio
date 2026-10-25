@@ -121,7 +121,7 @@ import KeepAwakeSettings from "./keep-awake/KeepAwakeSettings";
 import QuickCommandsSettings from "../quick-commands/QuickCommandsSettings";
 import { useDiagnostics } from "./settings/DiagnosticsControls";
 import WorktreeSetupSettingsControl from "./worktree-setup/WorktreeSetupSettingsControl";
-import CrossWorkspaceGrantsList from "./cross-workspace/CrossWorkspaceGrantsList";
+import CrossWorkspaceGrantsList, { tabActionGrantSource } from "./cross-workspace/CrossWorkspaceGrantsList";
 
 export type { SettingsTab } from "./settings/settings-index";
 
@@ -138,6 +138,9 @@ export type { SettingsTab } from "./settings/settings-index";
 // "claude-fable-5" -> "Claude Fable 5", "gpt-5.6-sol" -> "GPT-5.6 Sol",
 // "grok-4.6" -> "Grok 4.6". Generic title-casing over the id's segments, with
 // the gpt prefix uppercased, so there is no per-model table to drift.
+const TAB_CLOSE_GRANTS = tabActionGrantSource("close");
+const TAB_MOVE_GRANTS = tabActionGrantSource("move");
+
 function friendlyModelLabel(id: string): string {
   return id
     .split("-")
@@ -2849,6 +2852,16 @@ function AgentsSettings({ onClose }: { onClose: () => void }) {
           stacked
         >
           <CrossWorkspaceGrantsList />
+        </SettingRow>
+        <SettingRow
+          title="Tabs agents did not open"
+          desc="An agent that wants to close, split or unsplit tabs it did not open asks you first. Pairs you always allow are listed here, for closing and for moving (split and unsplit) separately: agents in the first workspace may do that to tabs in the second without asking, except closing a tab with a running agent or unsaved edits, which Codara always asks about. Revoke one to be asked again."
+          stacked
+        >
+          <div style={{ display: "grid", gap: 10 }}>
+            <CrossWorkspaceGrantsList source={TAB_CLOSE_GRANTS} verb="may close tabs in" empty="No workspace may close tabs without asking." />
+            <CrossWorkspaceGrantsList source={TAB_MOVE_GRANTS} verb="may move tabs in" empty="No workspace may move tabs without asking." />
+          </div>
         </SettingRow>
       </SettingsSection>
 

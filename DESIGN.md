@@ -81,3 +81,35 @@ cursors in Figma for the name tag beside the arrow.
   it acts, and the popup's Stop ends it there.
 - The component lives in `components/Preview/agent-presence/` with its own
   CSS and store; BrowserPane only mounts it, so the toolbar can move freely.
+
+## Tab links and agent tab approvals (2026-10)
+
+**Chosen:** a link brings its tab on screen and marks it with a short accent
+ring (an inset 2px ring over a soft accent wash, fading over 1.6 s). An agent
+that wants to close, split or unsplit tabs it did not open shows the same
+floating card as the cross-workspace terminal prompt, top right, listing every
+tab that would change.
+
+**Why:** after a switch of workspace or an unfolded group the eye needs one cue
+for where the tab went, and the strip already uses an inset ring for focus, so
+the flash reads as "this one" without moving anything. The card copies an
+existing pattern rather than adding a modal: it never blocks typing, counts
+down to the agent's timeout and stays put if the user is mid-task.
+
+**Rules:**
+
+- The flash is an inset box shadow, so the tab never changes size. With reduced
+  motion it is a static ring for the same time, no fade.
+- The card names the agent and the count in its title ("Claude Code wants to
+  close 3 tabs in group “login-flow”"), then lists each tab by kind and title
+  on an opaque panel, never on glass. The list scrolls past about six rows.
+- A running agent or unsaved edits show as a warning dot with plain ink text
+  ("agent running", "unsaved changes") on the row, plus one sentence under
+  the list. Color alone never carries the warning.
+- Buttons: Deny, then Allow once as the primary, on one row with the countdown;
+  "Always allow “<workspace>” to close tabs here" (or "to move tabs here" on
+  a split or unsplit card, a separate grant) is a full-width secondary
+  button under them, so the riskier, lasting choice is never the default and
+  its long label never crowds the row.
+- An expired card says nothing changed and stays a few seconds with Dismiss,
+  as the cross-workspace card does.

@@ -56,6 +56,7 @@ import { terminalScrollbackApi } from "./areas/terminal-scrollback";
 import { agentHibernationApi } from "./areas/agent-hibernation";
 import { worktreeCleanupApi } from "./areas/worktree-cleanup";
 import { crossWorkspaceApi } from "./areas/cross-workspace";
+import { tabActionsApi } from "./areas/tab-actions";
 import { worktreeSetupApi } from "./areas/worktree-setup";
 import { portsApi } from "./areas/ports";
 import { shareApi } from "./areas/share";
@@ -1827,6 +1828,7 @@ const api = {
   terminalScrollback: terminalScrollbackApi,
   worktreeCleanup: worktreeCleanupApi,
   crossWorkspace: crossWorkspaceApi,
+  tabActions: tabActionsApi,
   featureTips: featureTipsApi,
   ports: portsApi,
   sessionSearch: sessionSearchApi,
@@ -1874,6 +1876,16 @@ ipcRenderer.on(
     }
   },
 );
+
+// A codara://tab or codara://group link clicked anywhere that reaches main's
+// link router; App focuses the tab (tabs/tabLinkBridge.ts).
+ipcRenderer.on("app:open-tab-link", (_event, url: unknown) => {
+  if (typeof url !== "string" || !/^codara:\/\/(tab|group)\//i.test(url)) return;
+  const rendererWindow = globalThis as unknown as {
+    dispatchEvent: (event: CustomEvent) => boolean;
+  };
+  rendererWindow.dispatchEvent(new CustomEvent("spark:open-tab-link", { detail: { url } }));
+});
 
 // Replay chord keystrokes from a focused <webview> guest as a synthetic
 // KeyboardEvent on the host window. The main process is the one that
