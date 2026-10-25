@@ -91,8 +91,8 @@ function stubPlugin() {
       export function getHost(hostId) {
         return globalThis.__codaraSshLifecycleHarness.getHost(hostId);
       }
-      export async function systemGlobalKnownHostsFiles() {
-        return undefined;
+      export async function knownHostsSettings() {
+        return { files: [], revoked: null };
       }
     `,
     "./codara-boxes": `

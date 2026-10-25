@@ -1,11 +1,11 @@
-import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { homedir, hostname as localHostname, userInfo } from "node:os";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
-import SSHConfig from "ssh-config";
+import SSHConfig, { LineType } from "ssh-config";
 import { isValidHostId, isValidPort, type RemoteHostConfig } from "@shared/remote";
 import { writeFileAtomic } from "../fs-atomic";
 import { codaraHome } from "../codara-home";
+import { expandHostName, expandSshPath, expandTilde, localUser, SshExpansionError, type SshTokenContext } from "./ssh-tokens";
 
 // Remote host registry: hosts parsed from ~/.ssh/config (read-only in the
 // UI, refreshed on every list call) merged with manually-added hosts
@@ -67,6 +67,8 @@ function stripProxyFields(h: RemoteHostConfig): RemoteHostConfig {
     codaraBoxId: _b,
     userKnownHostsFiles: _u,
     globalKnownHostsFiles: _g,
+    revokedHostKeys: _r,
+    sshConfigRefusal: _s,
     ...rest
   } = h;
   return rest;
@@ -94,9 +96,12 @@ export async function readSshConfigHosts(): Promise<RemoteHostConfig[]> {
   } catch {
     return [];
   }
+  const system = await readSystemSshConfig();
   const aliases = new Set<string>();
   for (const entry of config) {
-    if (entry.type !== SSHConfig.DIRECTIVE) continue;
+    // Not SSHConfig.DIRECTIVE: that static is missing when the built app
+    // loads the package through require(), so every Host line was skipped.
+    if (entry.type !== LineType.DIRECTIVE) continue;
     const dir = entry as { param?: string; value?: string | string[] };
     if ((dir.param ?? "").toLowerCase() !== "host") continue;
     const values = Array.isArray(dir.value) ? dir.value : [dir.value ?? ""];
@@ -109,30 +114,41 @@ export async function readSshConfigHosts(): Promise<RemoteHostConfig[]> {
   const out: RemoteHostConfig[] = [];
   for (const alias of aliases) {
     try {
-      const computed = config.compute(alias) as Record<string, string | string[]>;
-      const first = (v: string | string[] | undefined): string | undefined =>
-        Array.isArray(v) ? v[0] : v;
-      const identity = first(computed.IdentityFile);
-      const proxy = first(computed.ProxyCommand)?.trim();
-      const keyAlias = first(computed.HostKeyAlias)?.trim();
+      const computed = options(config.compute(alias) as Record<string, string | string[]>);
+      const identity = first(computed.identityfile);
+      const proxy = first(computed.proxycommand)?.trim();
+      const keyAlias = first(computed.hostkeyalias)?.trim();
       // ssh refuses such a port, so connecting to 22 instead would be wrong.
-      const port = Number(first(computed.Port) ?? 22);
+      const port = Number(first(computed.port) ?? 22);
       if (!isValidPort(port)) continue;
-      const hostName = first(computed.HostName) ?? alias;
-      // ssh defaults to the local username when User is absent.
-      const username = first(computed.User) ?? process.env.USERNAME ?? process.env.USER ?? "root";
-      const proxyJump = first(computed.ProxyJump)?.trim();
-      const userKnownHostsFiles = knownHostsFiles(computed.UserKnownHostsFile, (file) =>
-        expandUserKnownHostsFile(file, {
-          alias,
-          hostName,
-          hostKeyAlias: keyAlias || alias,
-          port,
-          username,
-          proxyJump: proxyJump && proxyJump.toLowerCase() !== "none" ? proxyJump : "",
-        }),
-      );
-      const globalKnownHostsFiles = knownHostsFiles(computed.GlobalKnownHostsFile);
+      const rawHostName = first(computed.hostname);
+      let hostName = alias;
+      // Kept in the list, so the user sees why it cannot connect.
+      let refusal: string | undefined;
+      try {
+        if (rawHostName !== undefined) hostName = expandHostName(rawHostName, alias);
+      } catch (err) {
+        if (!(err instanceof SshExpansionError)) throw err;
+        hostName = rawHostName ?? alias;
+        refusal = `HostName "${rawHostName}" ${err.message}`;
+      }
+      // ssh defaults to the local account name when User is absent.
+      const username = first(computed.user) ?? localUser();
+      const context: SshTokenContext = {
+        alias,
+        hostName,
+        ...(keyAlias ? { hostKeyAlias: keyAlias } : {}),
+        port,
+        username,
+        proxyJump: first(computed.proxyjump)?.trim() ?? "",
+      };
+      let known: KnownHostsOptions = {};
+      try {
+        if (!refusal) known = knownHostsOptions({ ...system?.(alias), ...computed }, context);
+      } catch (err) {
+        if (!(err instanceof SshExpansionError)) throw err;
+        refusal = err.message;
+      }
       out.push({
         id: alias,
         host: hostName,
@@ -142,14 +158,33 @@ export async function readSshConfigHosts(): Promise<RemoteHostConfig[]> {
         source: "ssh-config",
         ...(proxy && proxy.toLowerCase() !== "none" ? { proxyCommandTemplate: proxy } : {}),
         ...(keyAlias ? { hostKeyAlias: keyAlias } : {}),
-        ...(userKnownHostsFiles ? { userKnownHostsFiles } : {}),
-        ...(globalKnownHostsFiles ? { globalKnownHostsFiles } : {}),
+        ...(known.user ? { userKnownHostsFiles: known.user } : {}),
+        ...(known.global ? { globalKnownHostsFiles: known.global } : {}),
+        ...(known.revoked ? { revokedHostKeys: known.revoked } : {}),
+        ...(refusal ? { sshConfigRefusal: refusal } : {}),
       });
     } catch {
       // A malformed block for one alias shouldn't hide the rest.
     }
   }
   return out.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+type Options = Record<string, string | string[]>;
+
+const first = (v: string | string[] | undefined): string | undefined => (Array.isArray(v) ? v[0] : v);
+
+/**
+ * ssh_config keywords ignore case and the first value obtained wins;
+ * ssh-config keeps each spelling apart, in the order it met them.
+ */
+function options(computed: Options): Options {
+  const out: Options = {};
+  for (const [key, value] of Object.entries(computed)) {
+    const name = key.toLowerCase();
+    if (!(name in out)) out[name] = value;
+  }
+  return out;
 }
 
 // ── Include ──────────────────────────────────────────────────────────────────
@@ -248,83 +283,85 @@ async function readConfigWithIncludes(
 
 /**
  * UserKnownHostsFile / GlobalKnownHostsFile: unset keeps ssh's defaults,
- * `none` reads nothing. `expand` drops a file it cannot resolve (null).
+ * `none` reads nothing. `expand` gives the paths a value stands for.
  */
 function knownHostsFiles(
   value: string | string[] | undefined,
-  expand: (file: string) => string | null = expandTilde,
+  expand: (file: string) => string[] = (file) => [expandTilde(file)],
 ): string[] | undefined {
   if (value === undefined) return undefined;
   const files = (Array.isArray(value) ? value : [value]).map((file) => file.trim()).filter(Boolean);
   if (files.length === 1 && files[0].toLowerCase() === "none") return [];
-  return files.map(expand).filter((file): file is string => file !== null);
+  return files.flatMap(expand);
 }
 
-interface KnownHostsFileContext {
-  /** The name given to ssh: the ~/.ssh/config alias. */
-  alias: string;
-  hostName: string;
-  hostKeyAlias: string;
-  port: number;
-  username: string;
-  /** ProxyJump as configured, empty when unset. */
-  proxyJump: string;
+interface KnownHostsOptions {
+  user?: string[];
+  global?: string[];
+  revoked?: string[];
 }
 
 /**
- * UserKnownHostsFile as ssh expands it: `~`, then `${VAR}`, then the tokens
- * ssh_config(5) allows there: %% %C %d %h %i %j %k %L %l %n %p %r %u. ssh
- * refuses an unset variable or any other token; such a file is left out.
+ * The files ssh reads before trusting a key. Throws SshExpansionError, naming
+ * the option, for a value ssh would refuse to connect with.
  */
-function expandUserKnownHostsFile(file: string, host: KnownHostsFileContext): string | null {
-  let unresolved = false;
-  const withVars = expandTilde(file).replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_m, name: string) => {
-    const value = process.env[name];
-    if (value === undefined) unresolved = true;
-    return value ?? "";
-  });
-  // ssh's own split: %l is gethostname() as is, %L up to its first dot.
-  const fullLocalName = localHostname();
-  const tokens: Record<string, () => string> = {
-    "%": () => "%",
-    C: () =>
-      createHash("sha1")
-        .update(`${fullLocalName}${host.hostName}${host.port}${host.username}${host.proxyJump}`)
-        .digest("hex"),
-    d: homedir,
-    h: () => host.hostName,
-    i: localUid,
-    j: () => host.proxyJump,
-    k: () => host.hostKeyAlias,
-    L: () => fullLocalName.split(".")[0],
-    l: () => fullLocalName,
-    n: () => host.alias,
-    p: () => String(host.port),
-    r: () => host.username,
-    u: localUser,
+function knownHostsOptions(values: Options, context: SshTokenContext): KnownHostsOptions {
+  const expand = (option: string) => (file: string) => {
+    try {
+      return expandSshPath(file, context);
+    } catch (err) {
+      if (err instanceof SshExpansionError) throw new SshExpansionError(`${option} "${file}" ${err.message}`);
+      throw err;
+    }
   };
-  const expanded = withVars.replace(/%(.)/g, (_m, token: string) => {
-    const value = tokens[token];
-    if (!value) unresolved = true;
-    return value ? value() : "";
-  });
-  return unresolved ? null : expanded;
+  const user = knownHostsFiles(values.userknownhostsfile, expand("UserKnownHostsFile"));
+  const global = knownHostsFiles(values.globalknownhostsfile);
+  const revokedValue = first(values.revokedhostkeys)?.trim();
+  const revoked =
+    revokedValue && revokedValue.toLowerCase() !== "none" ? expand("RevokedHostKeys")(revokedValue) : undefined;
+  return { ...(user ? { user } : {}), ...(global ? { global } : {}), ...(revoked ? { revoked } : {}) };
 }
 
-function localUid(): string {
-  try {
-    return String(userInfo().uid);
-  } catch {
-    return String(process.getuid?.() ?? -1);
-  }
-}
+/** What ssh reads before trusting a host key, or why it would not connect. */
+export type KnownHostsSettings = { refusal: string } | { files: string[]; revoked: string[] | null };
 
-function localUser(): string {
-  try {
-    return userInfo().username;
-  } catch {
-    return process.env.USER ?? process.env.USERNAME ?? "";
+/**
+ * The known_hosts files to read for `host`, the user's then the system's,
+ * and its RevokedHostKeys (candidates, see expandSshPath). A ~/.ssh/config
+ * host had both configs read with its own entry; ssh reads them for any
+ * other host too (a manual one, a Codara box), matched by the name it
+ * connects to, ~/.ssh/config first.
+ */
+export async function knownHostsSettings(host: RemoteHostConfig): Promise<KnownHostsSettings> {
+  if (host.sshConfigRefusal) return { refusal: host.sshConfigRefusal };
+  let known: KnownHostsOptions = {
+    user: host.userKnownHostsFiles,
+    global: host.globalKnownHostsFiles,
+    revoked: host.revokedHostKeys,
+  };
+  if (host.source !== "ssh-config") {
+    const [user, system] = await Promise.all([readUserSshConfig(), readSystemSshConfig()]);
+    try {
+      known = knownHostsOptions({ ...system?.(host.host), ...user?.(host.host) }, {
+        alias: host.host,
+        hostName: host.host,
+        ...(host.hostKeyAlias ? { hostKeyAlias: host.hostKeyAlias } : {}),
+        port: host.port,
+        username: host.username,
+        proxyJump: "",
+      });
+    } catch (err) {
+      if (err instanceof SshExpansionError) return { refusal: err.message };
+      throw err;
+    }
   }
+  return {
+    files: [
+      ...(known.user ?? ["known_hosts", "known_hosts2"].map((name) => join(homedir(), ".ssh", name))),
+      ...(known.global ?? ["/etc/ssh/ssh_known_hosts", "/etc/ssh/ssh_known_hosts2"]),
+    ],
+    revoked: known.revoked ?? null,
+  };
 }
 
 let systemSshConfigPath: string | null = null;
@@ -334,25 +371,25 @@ export function setSystemSshConfigPathForTests(file: string | null): void {
 }
 
 /**
- * The GlobalKnownHostsFile /etc/ssh/ssh_config gives `name` (the alias of a
- * ~/.ssh/config host, else the host name, as ssh matches Host lines);
- * undefined keeps ssh's defaults. Read on each connect: it is a small file.
+ * /etc/ssh/ssh_config with its Includes, as options for a name; null when
+ * there is none. Read on each use: it is a small file.
  */
-export async function systemGlobalKnownHostsFiles(name: string): Promise<string[] | undefined> {
+async function readSystemSshConfig(): Promise<((name: string) => Options) | null> {
   const file = systemSshConfigPath ?? "/etc/ssh/ssh_config";
-  try {
-    const raw = await readConfigWithIncludes(file, dirname(file), 0, new Set());
-    const computed = SSHConfig.parse(raw).compute(name) as Record<string, string | string[]>;
-    return knownHostsFiles(computed.GlobalKnownHostsFile);
-  } catch {
-    return undefined;
-  }
+  return readSshConfigFile(file, dirname(file));
 }
 
-function expandTilde(p: string): string {
-  if (p === "~") return homedir();
-  if (p.startsWith("~/") || p.startsWith("~\\")) return join(homedir(), p.slice(2));
-  return p;
+function readUserSshConfig(): Promise<((name: string) => Options) | null> {
+  return readSshConfigFile(join(homedir(), ".ssh", "config"), join(homedir(), ".ssh"));
+}
+
+async function readSshConfigFile(file: string, baseDir: string): Promise<((name: string) => Options) | null> {
+  try {
+    const config = SSHConfig.parse(await readConfigWithIncludes(file, baseDir, 0, new Set()));
+    return (name) => options(config.compute(name) as Options);
+  } catch {
+    return null;
+  }
 }
 
 export async function listHosts(): Promise<RemoteHostConfig[]> {

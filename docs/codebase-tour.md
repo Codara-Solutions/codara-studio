@@ -497,11 +497,23 @@ takes `user@host:port` (port 1 to 65535).
   `host-keys.ts` handles hashed names, patterns and `@revoked`, which wins
   even over a key Codara stored, and skips a marker OpenSSH does not know;
   a host with
-  `HostKeyAlias` is looked up by the alias as written, without the port, as
-  OpenSSH does; `/etc/ssh/ssh_known_hosts` and a `UserKnownHostsFile` or
-  `GlobalKnownHostsFile` from `~/.ssh/config` are read too, the first with
-  `${VAR}` and every token ssh allows there expanded, as is a
-  `GlobalKnownHostsFile` from `/etc/ssh/ssh_config`). The handshake asks for the key types
+  `HostKeyAlias` is looked up by the alias in lowercase, without the port,
+  as OpenSSH does; `/etc/ssh/ssh_known_hosts` and a `UserKnownHostsFile` or
+  `GlobalKnownHostsFile` from `~/.ssh/config`, else `/etc/ssh/ssh_config`,
+  are read too, for a manual host or a Codara box as for a config host
+  (matched by the name Codara connects to), as `knownHostsSettings` in
+  `ssh-hosts.ts` lists them).
+  `ssh-tokens.ts` expands `${VAR}` and ssh's tokens in one pass with the
+  values `ssh -G` prints (OpenSSH 9.6): `%h` and a `HostKeyAlias`
+  lowercased, `%j` the last ProxyJump hop's host, and a `%C` path behind a
+  ProxyJump also as ssh before 9.6 hashed it, without `%j`. A value ssh
+  cannot expand (an unknown token, an unset variable) makes ssh refuse to
+  connect, so Codara refuses that host too, saying why, whatever the
+  preference. `RevokedHostKeys` (a KRL or a key list, whose certificate
+  lines revoke the key they certify, read by `revokedByFile` in
+  `host-keys.ts`) refuses the keys it revokes whatever
+  the preference, and a file ssh could not read refuses the connection, as
+  ssh does. The handshake asks for the key types
   known_hosts lists first, reordering ssh2's own list as OpenSSH does, and a key known_hosts lists is accepted even when Codara
   stored another of the host's keys (one per host, any type). Otherwise
   `HostKeyPrompt.tsx` asks "Is this <host>?" with the fingerprint, with a
@@ -510,8 +522,10 @@ takes `user@host:port` (port 1 to 65535).
   the host has answered does the handshake wait up to 5 minutes for the
   user; a machine that is down fails after the usual 20 seconds, and a
   prompt ends with the attempt it belongs to (sshd drops a slow handshake
-  after its LoginGraceTime). Every window drops a prompt once it ends,
-  however it ends. A key that differs from Codara's stored one, or that
+  after its LoginGraceTime). Two hosts for one address (two aliases of
+  one machine) offering one key share one prompt, which lasts while either
+  still waits for it. Every window drops a prompt once it ends, however it
+  ends. A key that differs from Codara's stored one, or that
   known_hosts does not list while listing others for the host (another key,
   or another key type), is refused, never asked about; so is a first-use key
   for an address another host was trusted at meanwhile (every change to the
