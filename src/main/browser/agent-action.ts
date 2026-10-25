@@ -3,7 +3,7 @@
 // it: the time (page-activity.ts) and the elements that existed just before,
 // which waits with fresh:true compare against (wait.ts).
 
-import { noteAgentAction, startPageActivity } from "./page-activity";
+import { noteAgentAction, noteAgentActionDone, startPageActivity } from "./page-activity";
 import { dialogState, startDialogRecorder } from "./recorders/dialogs";
 import { resolveBrowserTarget, type BrowserTarget } from "./targets";
 import { MARK_BASELINE_EXPRESSION } from "./wait";
@@ -48,4 +48,10 @@ export async function markAgentAction(params: Record<string, unknown>): Promise<
     };
     target.evaluate(MARK_BASELINE_EXPRESSION).then(done, done);
   });
+}
+
+/** The agent's action on the call's tab finished. Never fails the action. */
+export async function markAgentActionDone(params: Record<string, unknown>): Promise<void> {
+  const target = await callTarget(params);
+  if (target) noteAgentActionDone(target.session);
 }
