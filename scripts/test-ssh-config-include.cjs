@@ -15,7 +15,8 @@
 // variable) makes the host refuse to connect, as ssh does, instead of
 // dropping the file. RevokedHostKeys expands like UserKnownHostsFile, and
 // /etc/ssh/ssh_config (with its Includes) gives what ~/.ssh/config does not
-// set, for config hosts and any other.
+// set. Both apply to config hosts and to any other (manual, Codara box),
+// matched by the name Codara connects to.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -469,6 +470,39 @@ async function testSystemSshConfig(hosts) {
       [path.join(HOME, ".ssh", "own_known"), "/etc/ssh/all_known"],
       "~/.ssh/config wins over the system's",
     );
+
+    // ssh reads ~/.ssh/config before the system's for any host, matched by
+    // the name it connects to: a manual host and a Codara box too.
+    write(
+      ".ssh/config",
+      [
+        "Host nas.corp",
+        "  UserKnownHostsFile ~/.ssh/corp_%h",
+        "Host *",
+        "  RevokedHostKeys ~/.ssh/revoked_global",
+        "",
+      ].join("\n"),
+    );
+    assert.deepEqual(await hosts.knownHostsSettings(manual), {
+      files: [path.join(HOME, ".ssh", "corp_nas.corp"), "/etc/ssh/corp_known", "/etc/ssh/corp_known2"],
+      revoked: [path.join(HOME, ".ssh", "revoked_global")],
+    }, "~/.ssh/config wins for a manual host, the system's fills the rest");
+    const box = {
+      id: "codara-dev",
+      host: "codara-dev",
+      port: 22,
+      username: "codara",
+      source: "codara-cloud",
+      hostKeyAlias: "codara-box.b1",
+      codaraBoxId: "b1",
+      proxyCommand: ["/opt/codaracloud", "ssh-proxy", "b1"],
+    };
+    assert.deepEqual((await hosts.knownHostsSettings(box)).revoked, [path.join(HOME, ".ssh", "revoked_global")], "a Codara box too");
+    write(".ssh/config", "Host *\n  UserKnownHostsFile ~/.ssh/kh_%Z\n");
+    assert.deepEqual(await hosts.knownHostsSettings(manual), {
+      refusal: 'UserKnownHostsFile "~/.ssh/kh_%Z" uses %Z, which ssh does not accept there',
+    }, "and ssh refuses a manual host whose ~/.ssh/config value it cannot expand");
+    write(".ssh/config", "");
 
     fs.writeFileSync(system, "Host *.corp\n  GlobalKnownHostsFile none\n  UserKnownHostsFile /etc/%Z\n");
     assert.deepEqual(await hosts.knownHostsSettings(manual), {

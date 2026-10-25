@@ -500,15 +500,18 @@ takes `user@host:port` (port 1 to 65535).
   `HostKeyAlias` is looked up by the alias in lowercase, without the port,
   as OpenSSH does; `/etc/ssh/ssh_known_hosts` and a `UserKnownHostsFile` or
   `GlobalKnownHostsFile` from `~/.ssh/config`, else `/etc/ssh/ssh_config`,
-  are read too, as `knownHostsSettings` in `ssh-hosts.ts` lists them).
+  are read too, for a manual host or a Codara box as for a config host
+  (matched by the name Codara connects to), as `knownHostsSettings` in
+  `ssh-hosts.ts` lists them).
   `ssh-tokens.ts` expands `${VAR}` and ssh's tokens in one pass with the
   values `ssh -G` prints (OpenSSH 9.6): `%h` and a `HostKeyAlias`
   lowercased, `%j` the last ProxyJump hop's host, and a `%C` path behind a
   ProxyJump also as ssh before 9.6 hashed it, without `%j`. A value ssh
   cannot expand (an unknown token, an unset variable) makes ssh refuse to
   connect, so Codara refuses that host too, saying why, whatever the
-  preference. `RevokedHostKeys` (a KRL or a key list, read by
-  `revokedByFile` in `host-keys.ts`) refuses the keys it revokes whatever
+  preference. `RevokedHostKeys` (a KRL or a key list, whose certificate
+  lines revoke the key they certify, read by `revokedByFile` in
+  `host-keys.ts`) refuses the keys it revokes whatever
   the preference, and a file ssh could not read refuses the connection, as
   ssh does. The handshake asks for the key types
   known_hosts lists first, reordering ssh2's own list as OpenSSH does, and a key known_hosts lists is accepted even when Codara

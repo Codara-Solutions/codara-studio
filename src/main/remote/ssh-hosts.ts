@@ -328,8 +328,9 @@ export type KnownHostsSettings = { refusal: string } | { files: string[]; revoke
 /**
  * The known_hosts files to read for `host`, the user's then the system's,
  * and its RevokedHostKeys (candidates, see expandSshPath). A ~/.ssh/config
- * host had /etc/ssh/ssh_config read with its own config; ssh reads it for
- * any other host too, matched by the name it connects to.
+ * host had both configs read with its own entry; ssh reads them for any
+ * other host too (a manual one, a Codara box), matched by the name it
+ * connects to, ~/.ssh/config first.
  */
 export async function knownHostsSettings(host: RemoteHostConfig): Promise<KnownHostsSettings> {
   if (host.sshConfigRefusal) return { refusal: host.sshConfigRefusal };
@@ -339,9 +340,9 @@ export async function knownHostsSettings(host: RemoteHostConfig): Promise<KnownH
     revoked: host.revokedHostKeys,
   };
   if (host.source !== "ssh-config") {
-    const system = await readSystemSshConfig();
+    const [user, system] = await Promise.all([readUserSshConfig(), readSystemSshConfig()]);
     try {
-      known = knownHostsOptions(system?.(host.host) ?? {}, {
+      known = knownHostsOptions({ ...system?.(host.host), ...user?.(host.host) }, {
         alias: host.host,
         hostName: host.host,
         ...(host.hostKeyAlias ? { hostKeyAlias: host.hostKeyAlias } : {}),
@@ -375,8 +376,16 @@ export function setSystemSshConfigPathForTests(file: string | null): void {
  */
 async function readSystemSshConfig(): Promise<((name: string) => Options) | null> {
   const file = systemSshConfigPath ?? "/etc/ssh/ssh_config";
+  return readSshConfigFile(file, dirname(file));
+}
+
+function readUserSshConfig(): Promise<((name: string) => Options) | null> {
+  return readSshConfigFile(join(homedir(), ".ssh", "config"), join(homedir(), ".ssh"));
+}
+
+async function readSshConfigFile(file: string, baseDir: string): Promise<((name: string) => Options) | null> {
   try {
-    const config = SSHConfig.parse(await readConfigWithIncludes(file, dirname(file), 0, new Set()));
+    const config = SSHConfig.parse(await readConfigWithIncludes(file, baseDir, 0, new Set()));
     return (name) => options(config.compute(name) as Options);
   } catch {
     return null;
