@@ -17,6 +17,9 @@ import type {
 } from "@shared/types";
 import { msUntilUsageReset } from "./usage-reset-timer";
 import UsageRoster, { ProviderGlyph } from "./usage/UsageRoster";
+import { forecastPillNote } from "./usage/UsageForecast";
+import { useForecastStyle, useUsageForecast } from "./usage/useUsageForecast";
+import { usePreferences } from "../preferences/usePreferences";
 import {
   USAGE_DENSITY_KEY,
   normalizeUsageDensity,
@@ -117,11 +120,14 @@ function UsagePill({
   density,
   open,
   onToggle,
+  note = null,
 }: {
   usage: UsageEntry;
   density: UsageDensity;
   open: boolean;
   onToggle: (rect: DOMRect | null) => void;
+  /** Labs: "out 14:20" when the forecast says a window runs out early. */
+  note?: string | null;
 }) {
   const [hover, setHover] = useState(false);
   const ref = useRef<HTMLButtonElement>(null);
@@ -228,6 +234,14 @@ function UsagePill({
           </span>
         </span>
       ))}
+      {note ? (
+        <span data-usage-forecast-note style={{ display: "flex", alignItems: "center", gap: 3 }}>
+          <span aria-hidden style={{ color: "var(--rule)", margin: "0 1px" }}>
+            ·
+          </span>
+          <span style={{ color: "var(--danger)", fontWeight: 650 }}>{note}</span>
+        </span>
+      ) : null}
     </button>
   );
 }
@@ -290,6 +304,9 @@ export default function UsageMeters({ onOpenUsage }: { onOpenUsage?: () => void 
   const [density, setDensityState] = useState<UsageDensity>(readDensity);
   const rootRef = useRef<HTMLDivElement>(null);
   const roster = useRosterAccounts();
+  const { preferences } = usePreferences();
+  const forecast = useUsageForecast(preferences.usageForecast === true);
+  const forecastStyle = useForecastStyle();
 
   const setDensity = useCallback((next: UsageDensity) => {
     setDensityState(next);
@@ -401,6 +418,7 @@ export default function UsageMeters({ onOpenUsage }: { onOpenUsage?: () => void 
           usage={entry}
           density={density}
           open={openEntry === entry.provider}
+          note={forecastStyle === "pill" ? (forecastPillNote(forecast.report, entry.profileId)?.text ?? null) : null}
           onToggle={(rect) => {
             roster.want();
             setAnchor(rect);
@@ -429,6 +447,7 @@ export default function UsageMeters({ onOpenUsage }: { onOpenUsage?: () => void 
           onClose={closeRoster}
           ownerRef={rootRef}
           onOpenUsage={onOpenUsage}
+          forecast={forecast.report}
         />
       ) : null}
     </div>

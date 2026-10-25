@@ -5,19 +5,48 @@
 
 import { parentPort } from "node:worker_threads";
 
-import { scanUsage, type UsageScanRequest } from "./usage-scan";
+import {
+  scanUsage,
+  scanUsageTimeline,
+  type UsageScanRequest,
+  type UsageTimeline,
+  type UsageTimelineRequest,
+} from "./usage-scan";
+import {
+  scanForecastSignals,
+  type ForecastSignals,
+  type ForecastSignalsRequest,
+} from "./usage-forecast-signals";
 
-export interface UsageScanJob {
-  id: number;
-  request: UsageScanRequest;
+/** What the usage forecast reads: spend over time and the CLIs' own limit readings. */
+export interface ForecastScan {
+  timeline: UsageTimeline;
+  signals: ForecastSignals;
 }
 
+export type UsageScanWork =
+  | { request: UsageScanRequest }
+  | { timeline: UsageTimelineRequest; signals: ForecastSignalsRequest };
+
+export type UsageScanJob = { id: number } & UsageScanWork;
+
+export type UsageScanResult = Awaited<ReturnType<typeof scanUsage>> | ForecastScan;
+
 export type UsageScanReply =
-  | { id: number; ok: true; summary: Awaited<ReturnType<typeof scanUsage>> }
+  | { id: number; ok: true; summary: UsageScanResult }
   | { id: number; ok: false; error: string };
 
+export async function runForecastScan(
+  timeline: UsageTimelineRequest,
+  signals: ForecastSignalsRequest,
+): Promise<ForecastScan> {
+  return { timeline: await scanUsageTimeline(timeline), signals: await scanForecastSignals(signals) };
+}
+
 parentPort?.on("message", (job: UsageScanJob) => {
-  scanUsage(job.request).then(
+  const work: Promise<UsageScanResult> =
+    "timeline" in job ? runForecastScan(job.timeline, job.signals) : scanUsage(job.request);
+  work.then(
     (summary) => parentPort?.postMessage({ id: job.id, ok: true, summary } satisfies UsageScanReply),
     (err: unknown) =>
       parentPort?.postMessage({

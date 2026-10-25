@@ -22,10 +22,12 @@
 import { createReadStream, promises as fs, statSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { basename, dirname, join } from "node:path";
+import { sweepAtomicTemps, writeFileAtomic } from "./fs-atomic";
 import { lookupUsagePrice } from "./model-prices";
 import {
   UsageAggregator,
   initialCodexScanState,
+  priceUsageRecord,
   initialPiScanState,
   mightCarryUsage,
   parseClaudeLine,
@@ -107,6 +109,14 @@ const fileCache: ScanCache = new Map();
 let cacheLoaded: Promise<void> | null = null;
 let cacheLoadedFrom: string | null = null;
 let cacheDirty = false;
+/** Counts changes to the memo, so a persist knows whether one arrived while it wrote. */
+let cacheVersion = 0;
+let persisting: Promise<void> = Promise.resolve();
+
+function markCacheDirty(): void {
+  cacheDirty = true;
+  cacheVersion += 1;
+}
 
 /* ── Walking ─────────────────────────────────────────────────────────────── */
 
@@ -397,6 +407,7 @@ function ensureScanCacheLoaded(cachePath: string): Promise<void> {
     fileCache.clear();
     cacheLoadedFrom = cachePath;
     cacheLoaded = (async () => {
+      await sweepAtomicTemps(cachePath).catch(() => undefined);
       try {
         decodeScanCache(await fs.readFile(cachePath, "utf8"), fileCache);
       } catch {
@@ -407,13 +418,27 @@ function ensureScanCacheLoaded(cachePath: string): Promise<void> {
   return cacheLoaded;
 }
 
-async function persistScanCache(cachePath: string): Promise<void> {
+// Scans already run one at a time through scanQueue, each persisting before
+// the next starts. This keeps that true for any caller that persists outside
+// it: one write at a time, each encoding the memo as it is when its turn
+// comes, so an older snapshot can never land last.
+function persistScanCache(cachePath: string): Promise<void> {
+  const next = persisting.then(() => writeScanCache(cachePath));
+  persisting = next.catch(() => undefined);
+  return next;
+}
+
+async function writeScanCache(cachePath: string): Promise<void> {
   if (!cacheDirty) return;
+  const version = cacheVersion;
   try {
-    await fs.writeFile(cachePath, encodeScanCache(fileCache), "utf8");
+    // A torn memo is dropped whole on the next load, which then rereads
+    // every transcript.
+    await writeFileAtomic(cachePath, encodeScanCache(fileCache));
     // Cleared only after the write lands, so a failed persist retries on the
-    // next scan instead of leaving disk permanently stale.
-    cacheDirty = false;
+    // next scan instead of leaving disk permanently stale; a change made
+    // during the write keeps it dirty for the next one.
+    if (cacheVersion === version) cacheDirty = false;
   } catch (err) {
     console.warn("[usage-analytics] could not persist the scan cache:", err);
   }
@@ -489,7 +514,7 @@ export async function readFileRecords(
     provider,
     records,
   });
-  cacheDirty = true;
+  markCacheDirty();
   return records;
 }
 
@@ -630,7 +655,7 @@ async function scanUsageNow({ roots, cachePath, input }: UsageScanRequest): Prom
     windowStartMs,
     retentionCutoffMs: retentionCutoffMs(startedAtMs, windowStartMs),
   });
-  if (pruned > 0) cacheDirty = true;
+  if (pruned > 0) markCacheDirty();
   await persistScanCache(cachePath);
 
   return {
@@ -649,6 +674,125 @@ async function scanUsageNow({ roots, cachePath, input }: UsageScanRequest): Prom
     sources,
     scanDurationMs: Math.max(0, Date.now() - startedAtMs),
     pricedBy: "model-prices",
+  };
+}
+
+/* ── Timeline (usage forecast) ───────────────────────────────────────────── */
+
+/** The subscription a record spent: Claude Code and Claude-on-Pi share the
+ * Claude plan, Codex and GPT-on-Pi share ChatGPT's. Grok never reports usage. */
+export type UsageTimelinePool = "anthropic" | "openai-codex";
+
+export interface UsageTimelineRequest {
+  roots: UsageScanRoot[];
+  cachePath: string;
+  sinceMs: number;
+  bucketMs: number;
+  nowMs: number;
+}
+
+export interface UsageTimeline {
+  startMs: number;
+  bucketMs: number;
+  /** Priced spend per bucket, oldest first, ending with the bucket holding nowMs. */
+  costUsd: Record<UsageTimelinePool, number[]>;
+  /** Sessions that wrote a priced turn in the last ten minutes. */
+  activeSessions: Record<UsageTimelinePool, number>;
+}
+
+const ACTIVE_SESSION_MS = 10 * 60 * 1000;
+
+export function timelinePool(record: UsageRecord): UsageTimelinePool | null {
+  if (record.provider === "claude") return "anthropic";
+  if (record.provider === "codex") return "openai-codex";
+  const model = record.model.toLowerCase();
+  if (model.includes("claude") || model.startsWith("anthropic/")) return "anthropic";
+  if (/(^|\/)(gpt|o\d|codex)/.test(model) || model.startsWith("openai")) return "openai-codex";
+  return null;
+}
+
+/**
+ * Spend per time bucket for the usage forecast, from the same memo the Usage
+ * tab fills. Read-only on the transcripts; it persists the memo like a scan.
+ */
+export function scanUsageTimeline(request: UsageTimelineRequest): Promise<UsageTimeline> {
+  const run = scanQueue.then(() => scanUsageTimelineNow(request));
+  scanQueue = run.catch(() => undefined);
+  return run;
+}
+
+async function scanUsageTimelineNow({
+  roots,
+  cachePath,
+  sinceMs,
+  bucketMs,
+  nowMs,
+}: UsageTimelineRequest): Promise<UsageTimeline> {
+  await ensureScanCacheLoaded(cachePath);
+  const startMs = Math.floor(sinceMs / bucketMs) * bucketMs;
+  const count = Math.max(1, Math.floor((nowMs - startMs) / bucketMs) + 1);
+  const costUsd: Record<UsageTimelinePool, number[]> = {
+    anthropic: new Array<number>(count).fill(0),
+    "openai-codex": new Array<number>(count).fill(0),
+  };
+  const recent: Record<UsageTimelinePool, Set<string>> = {
+    anthropic: new Set(),
+    "openai-codex": new Set(),
+  };
+  // Claude repeats a message across files when a session is resumed or
+  // forked; the per-file dedupe cannot see that, so it is done again here.
+  const seen = new Set<string>();
+  // As in scanUsageNow: a Codex rollout seen under sessions/ and
+  // archived_sessions/ counts once, claimed only once it was read.
+  const codexFileNames = new Set<string>();
+  let filesSinceYield = 0;
+
+  for (const root of roots) {
+    if (root.error !== null || root.dir.length === 0) continue;
+    const files = await listTranscriptFiles(root.dir, startMs - MTIME_SLACK_MS);
+    for (const file of files) {
+      const codexName = root.provider === "codex" ? basename(file.path) : null;
+      if (codexName !== null && codexFileNames.has(codexName)) continue;
+      const read = await readFileRecords(fileCache, file, root.provider);
+      if (codexName !== null && read !== null) codexFileNames.add(codexName);
+      for (const record of read ?? []) {
+        if (record.timestampMs < startMs || record.timestampMs > nowMs) continue;
+        if (record.dedupeKey !== null) {
+          if (seen.has(record.dedupeKey)) continue;
+          seen.add(record.dedupeKey);
+        }
+        const pool = timelinePool(record);
+        if (pool === null) continue;
+        const { costUsd: cost } = priceUsageRecord(
+          lookupUsagePrice,
+          record.provider,
+          record.model,
+          record.totals,
+          record.reportedCostUsd,
+        );
+        if (!(cost > 0)) continue;
+        costUsd[pool][Math.floor((record.timestampMs - startMs) / bucketMs)] += cost;
+        if (nowMs - record.timestampMs <= ACTIVE_SESSION_MS && record.sessionId.length > 0) {
+          recent[pool].add(record.sessionId);
+        }
+      }
+      filesSinceYield += 1;
+      if (filesSinceYield >= FILES_PER_YIELD) {
+        filesSinceYield = 0;
+        await yieldToLoop();
+      }
+    }
+  }
+  await persistScanCache(cachePath);
+
+  return {
+    startMs,
+    bucketMs,
+    costUsd,
+    activeSessions: {
+      anthropic: recent.anthropic.size,
+      "openai-codex": recent["openai-codex"].size,
+    },
   };
 }
 

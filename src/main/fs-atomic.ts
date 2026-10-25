@@ -71,6 +71,32 @@ export async function writeFileAtomic(
   }
 }
 
+/**
+ * Removes temp files writeFileAtomic left beside `path` when the process died
+ * between writing and renaming (a crash, a terminated worker, a quit). Only
+ * ones older than `olderThanMs` go, so a write still in progress is kept.
+ */
+export async function sweepAtomicTemps(path: string, olderThanMs = 10 * 60 * 1000, nowMs = Date.now()): Promise<void> {
+  assertCodaraOwnedWrite(path);
+  const dir = dirname(path);
+  const prefix = `.${baseName(path)}.`;
+  let names: string[];
+  try {
+    names = await fs.readdir(dir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (!name.startsWith(prefix) || !name.endsWith(".tmp")) continue;
+    const temp = join(dir, name);
+    try {
+      if (nowMs - (await fs.stat(temp)).mtimeMs >= olderThanMs) await fs.unlink(temp);
+    } catch {
+      // Gone already, or renamed by its writer.
+    }
+  }
+}
+
 function baseName(path: string): string {
   const sep = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
   return sep === -1 ? path : path.slice(sep + 1);
