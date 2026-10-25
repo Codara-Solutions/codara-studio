@@ -218,7 +218,10 @@ async function wakeForAgent<T extends { id: string; handle: { isReady: () => boo
       }
       return current;
     }
-    if (Date.now() - started > 15_000) throw new Error("timed out waking the sleeping browser tab");
+    if (Date.now() - started > 15_000) {
+      takeWakeUrl(tab.id);
+      throw new Error("timed out waking the sleeping browser tab");
+    }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 }

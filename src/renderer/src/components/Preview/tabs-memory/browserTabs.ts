@@ -226,15 +226,22 @@ let polling = 0;
 let pollTimer: ReturnType<typeof setTimeout> | null = null;
 let fastPolls = 0;
 
+// Whole megabytes: the readings move by a few kilobytes every time, and only
+// a change the user can see is worth re-rendering every pane for.
+function toMegabytes(bytes: number | null | undefined): number | null {
+  return typeof bytes === "number" ? Math.round(bytes / 1_048_576) * 1_048_576 : null;
+}
+
 async function readMemory(): Promise<void> {
   const read = window.spark?.previewBridge?.tabMemory;
   if (!read) return;
   try {
     const reading = await read();
-    let changed = appMemoryBytes !== reading.appBytes;
-    appMemoryBytes = reading.appBytes;
+    const appBytes = toMegabytes(reading.appBytes);
+    let changed = appMemoryBytes !== appBytes;
+    appMemoryBytes = appBytes;
     for (const record of records.values()) {
-      const bytes = record.asleep ? null : reading.tabs[record.id] ?? null;
+      const bytes = record.asleep ? null : toMegabytes(reading.tabs[record.id]);
       if (record.memoryBytes !== bytes) {
         records.set(record.id, { ...record, memoryBytes: bytes });
         changed = true;
