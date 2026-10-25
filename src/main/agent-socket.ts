@@ -51,6 +51,7 @@ import {
   createAgentWorktree,
   createTerminalWorktree,
   rollBackTerminalWorktree,
+  terminalRollbackMessage,
   createWorktreeAuditLog,
   gateCaller,
   getAgentWorktreeSetup,
@@ -1551,16 +1552,10 @@ async function handleTerminalCreate(
     removed: false,
     reason: err instanceof Error ? err.message : String(err),
   }));
-  if (rollback.removed) {
-    return errorResponse(id, response.error.code, `${response.error.message}; the worktree made for it was removed`);
-  }
+  const message = `${response.error.message}; ${terminalRollbackMessage(made.worktree, rollback)}`;
+  if (rollback.removed) return errorResponse(id, response.error.code, message);
   const kept = { workspaceId: made.worktree.workspaceId, path: made.worktree.path, branch: made.worktree.branch };
-  return errorResponse(
-    id,
-    response.error.code,
-    `${response.error.message}; the worktree stays at ${String(kept.path)} (workspaceId ${String(kept.workspaceId)}, ${rollback.reason ?? "not removed"}): remove it with codara_worktree_remove`,
-    { worktree: kept },
-  );
+  return errorResponse(id, response.error.code, message, { worktree: kept });
 }
 
 async function createTerminal(

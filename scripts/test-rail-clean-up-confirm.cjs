@@ -44,6 +44,7 @@ async function main() {
           import { createRoot } from "react-dom/client";
           import { WorkspaceChildren } from "./src/renderer/src/components/rail/WorkspaceChildren";
           import { keyInsideModal } from "./src/renderer/src/shortcuts/modal-keys";
+          window.keyInsideModal = keyInsideModal;
           function Harness() {
             const [names, setNames] = useState(["widgets · feat/old", "widgets · feat/older"]);
             window.setMergedNames = setNames;
@@ -153,9 +154,45 @@ async function main() {
     assert.equal(await page.evaluate(() => window.boardEscapes), 0, "the board took the confirm's Escape");
     await page.keyboard.press("Escape");
     assert.equal(await page.evaluate(() => window.boardEscapes), 1, "the board keeps its own Escape");
+    // A click on the confirm's text keeps focus in it, and with focus on
+    // nothing at all the open confirm still owns Escape.
+    await cleanUp.click();
+    await confirm.locator(".rail-confirm-text").click();
+    await page.keyboard.press("Escape");
+    await expect(confirm).toHaveCount(0);
+    await cleanUp.click();
+    await expect(confirm).toBeVisible();
+    await page.evaluate(() => (document.activeElement instanceof HTMLElement ? document.activeElement.blur() : undefined));
+    await page.keyboard.press("Escape");
+    await expect(confirm).toHaveCount(0);
+    assert.equal(await page.evaluate(() => window.boardEscapes), 1, "the board took an Escape meant for the confirm");
     await page.evaluate(() => {
       window.boardOpen = false;
     });
+
+    // A modal that is itself position: fixed (offsetParent is null for it)
+    // still owns a key with focus on nothing; a hidden one does not.
+    const ownsBodyEscape = (style) =>
+      page.evaluate((css) => {
+        const modal = document.createElement("div");
+        modal.setAttribute("role", "dialog");
+        modal.setAttribute("aria-modal", "true");
+        modal.style.cssText = css;
+        modal.textContent = "fixed dialog";
+        document.body.appendChild(modal);
+        if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+        let owned = null;
+        const probe = (event) => {
+          owned = window.keyInsideModal(event);
+        };
+        window.addEventListener("keydown", probe, true);
+        document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+        window.removeEventListener("keydown", probe, true);
+        modal.remove();
+        return owned;
+      }, style);
+    assert.equal(await ownsBodyEscape("position: fixed; inset: 20px; z-index: 5"), true, "a fixed modal owns the key");
+    assert.equal(await ownsBodyEscape("position: fixed; inset: 20px; display: none"), false, "a hidden modal does not");
 
     // Confirming runs it.
     await cleanUp.click();
