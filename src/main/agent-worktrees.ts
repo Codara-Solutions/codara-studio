@@ -519,13 +519,27 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp(`^${escaped}$`);
 }
 
-// A .env or .env.local is configuration a checkout never brings back,
-// wherever it sits: only a pattern the user marked regenerable for the
+// Secrets and local configuration a checkout never brings back (.env and
+// its variants, keys and certificates, package and network credentials),
+// wherever they sit: only a pattern the user marked regenerable for the
 // repository can let one go. The committed templates are not.
-const ENV_FILE = /^\.env(\.(?!example$|sample$|template$|dist$|defaults$)[\w.-]+)?$/i;
+const SECRET_FILES = [
+  /^\.env(?:[.-](?!(?:example|sample|template|dist|defaults)$)[\w.-]+)?$/i,
+  /^\.(?:envrc|npmrc|netrc)$/i,
+  /\.(?:pem|key)$/i,
+  /^id_(?:rsa|dsa|ecdsa|ed25519)$/i,
+];
 
-export function isEnvFile(name: string): boolean {
-  return ENV_FILE.test(name);
+export function isSecretFile(name: string): boolean {
+  return SECRET_FILES.some((pattern) => pattern.test(name));
+}
+
+// Installed packages: a key or .env in one is the package's own file and
+// comes back with the install, so the walk does not list them as secrets.
+const DEPENDENCY_STORES = new Set(["node_modules", ".venv", "venv", "__pypackages__"]);
+
+function inDependencyStore(relative: string): boolean {
+  return relative.split("/").some((segment) => DEPENDENCY_STORES.has(segment));
 }
 
 // Where a package manager or build tool keeps its output next to its
@@ -576,7 +590,7 @@ export function isRegenerableIgnored(
   const last = segments[segments.length - 1];
   const parent = segments.slice(0, -1).join("/");
   const atPackageRoot = parent === "" || isPackageRoot?.(parent) === true;
-  const patterns = !isDir && isEnvFile(last) ? extra : [...REGENERABLE_IGNORED_PATTERNS, ...extra];
+  const patterns = !isDir && isSecretFile(last) ? extra : [...REGENERABLE_IGNORED_PATTERNS, ...extra];
   for (const pattern of patterns) {
     const trimmed = pattern.trim().replace(/^\.\//, "");
     if (!trimmed) continue;
@@ -591,12 +605,16 @@ export function isRegenerableIgnored(
 }
 
 const NESTED_SCAN_MAX_DIRS = 50_000;
+// Files the walk describes (name, size, mtime) for a confirmation's
+// fingerprint, and secret files it lists: past either, it proves nothing.
+const DESCRIBE_MAX_FILES = 20_000;
+const SECRET_LIST_MAX = 1_000;
 const NESTED_SCAN_CONCURRENCY = 16;
 
 interface NestedScan {
   found: string[];
-  /** .env files inside ignored directories, relative to the root: a regenerable folder must not hide one. */
-  env: string[];
+  /** Secret files inside ignored directories, relative to the root: a regenerable folder must not hide one. */
+  secrets: string[];
   // The ignored folder the walk could not finish, or null when it saw every
   // directory under them all.
   incomplete: string | null;
@@ -608,31 +626,51 @@ interface NestedScan {
 // first so a large node_modules/ cannot use up the budget before a hand-made
 // ignored folder is checked. A walk cut short by the budget or an unreadable
 // directory proves nothing, so the caller must treat it as a block.
+//
+// On the way it lists the secret files it meets, and with `describe` it
+// reports every file under a folder that is not regenerable (path, size,
+// mtime, in a stable order): a confirmation of those folders is tied to
+// what they held, not only to their names.
 export async function checkoutsInIgnored(
   root: string,
   entries: readonly string[],
   extra: readonly string[],
   maxDirs = NESTED_SCAN_MAX_DIRS,
-  isPackageRoot: (dir: string) => boolean = packageRootTester(root),
+  options: { isPackageRoot?: (dir: string) => boolean; describe?: (line: string) => void } = {},
 ): Promise<NestedScan> {
+  const isPackageRoot = options.isPackageRoot ?? packageRootTester(root);
   const found: string[] = [];
-  const env: string[] = [];
+  const secrets: string[] = [];
   let incomplete: string | null = null;
   let budget = maxDirs;
-  const visit = async (relative: string): Promise<string[] | null> => {
+  let describedFiles = 0;
+  const visit = async (relative: string, described: boolean): Promise<{ dirs: string[]; lines: string[] } | null> => {
     const absolute = join(root, relative);
     if (existsSync(join(absolute, ".git"))) {
       found.push(resolve(absolute));
-      return [];
+      return { dirs: [], lines: [] };
     }
     const children = await fsp
       .readdir(absolute, { withFileTypes: true })
       .catch((err: NodeJS.ErrnoException) => (err?.code === "ENOENT" || err?.code === "ENOTDIR" ? [] : null));
     if (!children) return null;
+    children.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    const dirs: string[] = [];
+    const lines: string[] = [];
     for (const child of children) {
-      if (!child.isDirectory() && isEnvFile(child.name) && env.length < MAX_LISTED_PATHS) env.push(`${relative}${child.name}`);
+      const path = `${relative}${child.name}`;
+      if (child.isDirectory()) {
+        dirs.push(`${path}/`);
+        if (described) lines.push(`${path}/`);
+        continue;
+      }
+      if (isSecretFile(child.name) && !inDependencyStore(relative)) secrets.push(path);
+      if (described) {
+        const stat = await fsp.lstat(join(root, path)).catch(() => null);
+        lines.push(`${path}\0${stat?.size ?? -1}\0${stat?.mtimeMs ?? -1}`);
+      }
     }
-    return children.filter((child) => child.isDirectory()).map((child) => `${relative}${child.name}/`);
+    return { dirs, lines };
   };
   const directories = entries.filter((entry) => entry.endsWith("/"));
   const ordered = [
@@ -640,6 +678,7 @@ export async function checkoutsInIgnored(
     ...directories.filter((entry) => isRegenerableIgnored(entry, extra, isPackageRoot)),
   ];
   for (const entry of ordered) {
+    const described = Boolean(options.describe) && !isRegenerableIgnored(entry, extra, isPackageRoot);
     let level = [entry];
     while (level.length > 0 && !incomplete && found.length < MAX_LISTED_PATHS) {
       const next: string[] = [];
@@ -650,16 +689,22 @@ export async function checkoutsInIgnored(
           break;
         }
         budget -= batch.length;
-        for (const children of await Promise.all(batch.map(visit))) {
-          if (children === null) incomplete = entry;
-          else next.push(...children);
+        for (const result of await Promise.all(batch.map((dir) => visit(dir, described)))) {
+          if (result === null) {
+            incomplete = entry;
+            continue;
+          }
+          next.push(...result.dirs);
+          for (const line of result.lines) options.describe?.(line);
+          describedFiles += result.lines.length;
         }
+        if (describedFiles > DESCRIBE_MAX_FILES || secrets.length > SECRET_LIST_MAX) incomplete = entry;
       }
       level = next;
     }
     if (incomplete || found.length >= MAX_LISTED_PATHS) break;
   }
-  return { found, env, incomplete };
+  return { found, secrets, incomplete };
 }
 
 function dateStamp(date: Date): string {
@@ -1691,7 +1736,7 @@ export async function verifyRemovable(
       block("WORKTREE_NESTED_SCAN_INCOMPLETE");
       verdict.details.unscannedFolder = scan.incomplete;
     }
-    const hidden = scan.env.filter(
+    const hidden = scan.secrets.filter(
       (entry) => !verdict.dirty.ignoredBlocking.includes(entry) && !isRegenerableIgnored(entry, extra),
     );
     if (hidden.length) {

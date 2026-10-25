@@ -111,6 +111,15 @@ async function pureChecks(shared) {
     assert.equal(shared.hasUnsavedChanges({ missing: false, dirty: { tracked: 0, untracked: 0, inProgress: null }, localWork: ignoredWork([".env"]) }), false);
     assert.equal(shared.onlyIgnoredWork(ignoredWork([".env"])), true);
     assert.equal(shared.onlyIgnoredWork({ ...ignoredWork([".env"]), hidden: 1 }), false);
+    // Nobody saw what a folder too large to check holds: never confirmable.
+    assert.equal(shared.onlyIgnoredWork({ ...ignoredWork([]), unscanned: "node_modules/" }), false);
+    assert.equal(shared.onlyIgnoredWork({ ...ignoredWork([".env"]), unscanned: "data/" }), false);
+    const unchecked = baseFacts({
+      hardBlockers: [{ code: "UNCHECKED", message: "It could not be fully checked: data/ is too large or unreadable to look through, so it is not removed. Delete that folder yourself, then try again." }],
+      localWork: { ...ignoredWork([".env"]), unscanned: "data/" },
+    });
+    assert.equal(shared.adviseWorktree(unchecked, now).advice, "keep");
+    assert.match(shared.adviseWorktree(unchecked, now).reason, /could not be fully checked/);
   });
   await check("sorting puts safe first, then review, then keep, largest first", async () => {
     const sorted = shared.sortByAdvice([

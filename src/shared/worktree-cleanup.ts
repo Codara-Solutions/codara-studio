@@ -249,6 +249,7 @@ export type WorktreeCleanupCode =
   | "IN_USE"
   | "LOCKED"
   | "NESTED_CHECKOUT"
+  | "UNCHECKED"
   | "CHANGED"
   | "REPO_BUSY"
   | "GIT_FAILED"

@@ -959,9 +959,27 @@ async function main() {
     assert.equal(aw.isRegenerableIgnored(".env", ["*.pyc"]), false, "no built-in pattern makes a .env regenerable");
     assert.equal(aw.isRegenerableIgnored("test-results/.env.local", [".env.local"]), true, "the user's own pattern can");
     assert.equal(aw.isRegenerableIgnored("packages/a/node_modules/"), false, "without package roots, the root only");
-    for (const name of [".env", ".env.local", ".env.production.local", ".ENV"]) assert.equal(aw.isEnvFile(name), true, name);
-    for (const name of [".env.example", ".env.sample", ".env.template", ".envrc", "env.ts"]) {
-      assert.equal(aw.isEnvFile(name), false, name);
+    for (const name of [
+      ".env",
+      ".env.local",
+      ".env.production.local",
+      ".ENV",
+      ".env-staging",
+      ".envrc",
+      "server.pem",
+      "tls.key",
+      "id_rsa",
+      "id_ed25519",
+      ".npmrc",
+      ".netrc",
+    ]) {
+      assert.equal(aw.isSecretFile(name), true, name);
+    }
+    for (const name of [".env.example", ".env-sample", ".env.template", "env.ts", "id_rsa.pub", "keys.json", "monkey.ts"]) {
+      assert.equal(aw.isSecretFile(name), false, name);
+    }
+    for (const name of ["id_rsa", "deploy.pem", ".npmrc"]) {
+      assert.equal(aw.isRegenerableIgnored(name), false, `${name} is never regenerable by the built-in list`);
     }
     {
       const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-pkg-root-"));

@@ -17,6 +17,7 @@ import {
   checkoutsInIgnored,
   cleanText,
   isRegenerableIgnored,
+  isSecretFile,
   packageRootTester,
   type AgentWorktreeAuditEntry,
   type ProcessUse,
@@ -722,6 +723,8 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
   work.inProgress = await inProgressOperation(registration.path);
   workFound ||= work.inProgress !== null;
   let ignored: string[] | null = null;
+  // Everything kept that a removal deletes, not only the listed first few.
+  let kept: string[] = [];
   try {
     const all = await ignoredEntries(registration.path);
     // What worktree setup linked in or copied unchanged from the main
@@ -729,9 +732,9 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
     // local work; removeCopyWorktree releases the links before git runs.
     const provided = await setupProvidedEntries(registration.path, all).catch(() => new Set<string>());
     ignored = all.filter((entry) => !provided.has(entry));
-    const packageRoot = packageRootTester(registration.path);
-    work.ignored = ignored.filter((entry) => !isRegenerableIgnored(entry, ctx.regenerable, packageRoot)).slice(0, MAX_LISTED);
-    workFound ||= work.ignored.length > 0;
+    const packageRoot = packageRootTester(real);
+    kept = ignored.filter((entry) => !isRegenerableIgnored(entry, ctx.regenerable, packageRoot));
+    workFound ||= kept.length > 0;
   } catch (err) {
     block(check, "GIT_FAILED", `the ignored-file check failed: ${cleanText(errorText(err), 200)}`);
   }
@@ -746,17 +749,41 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
     if (pathKey(other) !== pathKey(real) && isAtOrUnder(other, real)) nested.push(other);
   }
   if (ignored) {
-    const scan = await checkoutsInIgnored(real, ignored, ctx.regenerable, deps.nestedScanMaxDirs);
+    // A confirmation of these files is tied to all of them: every kept
+    // entry, what the kept folders hold (path, size, mtime) and every secret
+    // file, so one that appears after the question, even past the listed
+    // twenty or inside a folder already named, asks again.
+    const contents = createHash("sha256");
+    const scan = await checkoutsInIgnored(real, ignored, ctx.regenerable, deps.nestedScanMaxDirs, {
+      isPackageRoot: packageRootTester(real),
+      describe: (line) => contents.update(`${line}\n`),
+    });
     nested.push(...scan.found);
-    const hidden = scan.env.filter((entry) => !work.ignored.includes(entry) && !isRegenerableIgnored(entry, ctx.regenerable));
-    if (hidden.length) {
-      work.ignored = [...work.ignored, ...hidden].slice(0, MAX_LISTED);
-      workFound = true;
+    const hidden = scan.secrets.filter((entry) => !kept.includes(entry) && !isRegenerableIgnored(entry, ctx.regenerable));
+    kept = [...kept, ...hidden];
+    for (const entry of kept) {
+      if (entry.endsWith("/")) continue;
+      const stat = await fsp.lstat(join(real, entry)).catch(() => null);
+      contents.update(`${entry}\0${stat?.size ?? -1}\0${stat?.mtimeMs ?? -1}\n`);
     }
+    fingerprint.update(JSON.stringify([kept, scan.secrets, contents.digest("hex")]));
+    // Secrets first, so the few named are the ones that matter.
+    const secret = (entry: string) => isSecretFile(basename(entry.replace(/\/+$/, "")));
+    work.ignored = [...kept.filter(secret), ...kept.filter((entry) => !secret(entry))].slice(0, MAX_LISTED);
+    workFound ||= kept.length > 0;
     if (scan.incomplete) {
       work.unscanned = scan.incomplete;
       workFound = true;
+      // What the walk did not see may hold a checkout, a key or work: no
+      // confirmation covers it, on any path.
+      block(
+        check,
+        "UNCHECKED",
+        `It could not be fully checked: ${scan.incomplete} is too large or unreadable to look through, so it is not removed. Delete that folder yourself, then try again.`,
+      );
     }
+  } else {
+    work.ignored = kept.slice(0, MAX_LISTED);
   }
   if (nested.length) {
     block(

@@ -237,8 +237,7 @@ function uncommittedText(work: WorktreeLocalWork): string {
 // branch only, and never confirms uncommitted work away. Ignored files alone
 // are asked about (cleanUpRegistered), since a fresh checkout cannot bring
 // them back but nothing else is lost. An ignored folder the scan could not
-// see all of may hold a checkout or a .env nobody listed, so it is not
-// something to confirm: only the cleanup screen's review removes it.
+// see all of is a blocker of the check itself (UNCHECKED), on every path.
 function railRefusal(
   check: WorktreeRemovalCheck,
   request: WorktreeRailCleanupRequest,
@@ -258,9 +257,6 @@ function railRefusal(
     return null;
   }
   if (check.alreadyRemoved) return null;
-  if (check.localWork?.unscanned) {
-    return `It could not be fully checked: ${check.localWork.unscanned} is too large or unreadable to look through. Use Delete to review it.`;
-  }
   if (check.localWork && !onlyIgnoredWork(check.localWork)) return uncommittedText(check.localWork);
   if (check.merge.state !== "merged") return "Its branch is not merged yet.";
   return null;
