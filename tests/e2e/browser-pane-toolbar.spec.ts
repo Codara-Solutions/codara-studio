@@ -419,3 +419,55 @@ test("the browser pane's toolbar, menus, tabs and memory view, sleeping tabs and
     await fixture.close();
   }
 });
+
+test("agent calls on a sleeping tab: the URL checks come first, agent input never picks the wake URL, concurrent calls share one wake", async () => {
+  test.setTimeout(180_000);
+  const fixture = await launch();
+  const { page, request } = fixture;
+  try {
+    const blog = await openBrowserTab(fixture, "blog");
+    const current = await openBrowserTab(fixture, "");
+    const chip = pane(page, current).getByTestId("preview-tabs-chip");
+    // An agent's call keeps a tab awake for ten minutes; the page clock skips them.
+    let skipped = 0;
+    const ensureAsleep = async () => {
+      skipped += 11 * 60_000;
+      await page.clock.setFixedTime(Date.now() + skipped);
+      await chip.click();
+      const row = page.getByTestId("preview-tabs-view").locator(`[data-testid="preview-tab-row"][data-tab-id="${blog}"]`);
+      if ((await row.getAttribute("data-asleep")) !== "true") await row.getByRole("button", { name: /^Sleep / }).click();
+      await expect(row).toHaveAttribute("data-asleep", "true");
+      await page.keyboard.press("Escape");
+      await expect(pane(page, blog).locator("webview")).toHaveCount(0);
+    };
+    const asleep = async () => ((await request("preview.list", {})).tabs as Array<{ id: string; asleep?: boolean }>).find((tab) => tab.id === blog)?.asleep === true;
+
+    // A navigate refused by its checks (no server on that port) leaves the tab asleep at its own page.
+    await ensureAsleep();
+    const closed = await new Promise<number>((done) => {
+      const probe = createServer().listen(0, "127.0.0.1", () => {
+        const { port } = probe.address() as { port: number };
+        probe.close(() => done(port));
+      });
+    });
+    await expect(request("preview.navigate", { tabId: blog, url: `http://127.0.0.1:${closed}/` })).rejects.toThrow(/not accepting connections/);
+    await page.waitForTimeout(1_000);
+    expect.soft(await pane(page, blog).locator("webview").count(), "a refused navigate does not wake the tab").toBe(0);
+    expect.soft(await asleep(), "a refused navigate leaves the tab asleep").toBe(true);
+
+    // A wake URL is Codara's, never the agent's: an evaluate wakes the tab at its own page.
+    await ensureAsleep();
+    const woken = await request("preview.evaluate", { tabId: blog, code: "location.pathname", wakeUrl: `${fixture.url}docs` });
+    expect.soft(woken.value, "agent input cannot choose where a tab wakes").toBe("/blog");
+
+    // Two calls at once on a sleeping tab both wait for the one wake.
+    await ensureAsleep();
+    const both = await Promise.allSettled([
+      request("preview.evaluate", { tabId: blog, code: "document.title" }),
+      request("preview.evaluate", { tabId: blog, code: "document.title" }),
+    ]);
+    expect.soft(both.map((result) => (result.status === "fulfilled" ? result.value.value : String(result.reason))), "both calls act on the woken page").toEqual(["Acme blog", "Acme blog"]);
+  } finally {
+    await fixture.close();
+  }
+});

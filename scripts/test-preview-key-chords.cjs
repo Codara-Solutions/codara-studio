@@ -38,7 +38,7 @@ function bundle(contents) {
 
 const lib = bundle(`
   export { parseKeyChord, normalizeKeyModifiers, previewKeyEvents } from "./preview-keyboard";
-  export { createChordRouter, isReservedChord, isReservedPlainKey } from "./browser/guest-chords";
+  export { createChordRouter, forwardGuestChords, isReservedChord, isReservedPlainKey } from "./browser/guest-chords";
 `);
 
 function chords() {
@@ -159,6 +159,30 @@ function router() {
   assert.deepEqual(forwarded, [], "dispose drops pending chords");
 }
 
+// The guest keeps F11 from Electron's default menu only when it is the pane's
+// own key: Shift+F11 is Step Out in a code editor running in the page.
+function guestF11() {
+  const { forwardGuestChords } = lib;
+  const handlers = {};
+  const contents = {
+    id: 9001,
+    on: (name, fn) => { handlers[name] = fn; },
+    once: () => {},
+    isDestroyed: () => false,
+    hostWebContents: { isDestroyed: () => false, send: () => {} },
+  };
+  forwardGuestChords(contents);
+  const prevented = (key, modifiers) => {
+    let taken = false;
+    handlers["before-input-event"]({ preventDefault: () => { taken = true; } }, { type: "keyDown", key, code: key, modifiers });
+    return taken;
+  };
+  assert.equal(prevented("F11", []), true, "plain F11 is the pane's full screen");
+  assert.equal(prevented("F11", ["shift"]), false, "Shift+F11 stays with the page");
+  assert.equal(prevented("F11", ["control"]), false, "Ctrl+F11 stays with the page");
+  assert.equal(prevented("F10", []), false);
+}
+
 function fullScreenKeys() {
   const { createChordRouter, isReservedPlainKey } = lib;
   const plain = (key) => ({ key, modifiers: [] });
@@ -203,4 +227,5 @@ events();
 reserved();
 router();
 fullScreenKeys();
+guestF11();
 console.log("preview key chords: chord notation, case and codes, reserved chords, page-first routing, agent keys kept from the app, full screen keys");

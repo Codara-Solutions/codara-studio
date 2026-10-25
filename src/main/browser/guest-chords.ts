@@ -141,8 +141,9 @@ export function forwardGuestChords(contents: WebContents): void {
     if (input.type !== "keyDown") return;
     // F11 is the browser pane's full screen, forwarded below. Unhandled, it
     // would also reach Electron's default menu and full screen the window.
-    if (input.key === "F11") event.preventDefault();
-    router.keyDown({ key: input.key, code: input.code, modifiers: input.modifiers ?? [] });
+    const modifiers = input.modifiers ?? [];
+    if (input.key === "F11" && isReservedPlainKey({ key: input.key, modifiers }, false)) event.preventDefault();
+    router.keyDown({ key: input.key, code: input.code, modifiers });
   });
 }
 

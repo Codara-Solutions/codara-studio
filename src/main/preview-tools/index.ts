@@ -116,6 +116,8 @@ async function dispatchPreviewTool(
   // Who drives the tab comes from the scoped caller, never from tool JSON:
   // the tab's banner names it and its Stop button refuses it by key.
   delete params.driver;
+  // Codara's own flag, never the agent's.
+  delete params.keepAsleep;
   if (scope === "browser") {
     // Scoping drops the pid once it found the pane; an agent outside any pane
     // keeps it as its key, so stopping one such agent leaves the others alone.
@@ -133,11 +135,10 @@ async function dispatchPreviewTool(
     throw error;
   }
   if (ref?.kind === "preview") params.tabId = ref.tabId;
-  // Every lookup of the named tab in this call, the dialog guard's first,
-  // wakes it at the URL a navigate names rather than its old page. Only a
-  // named tab: without one the lookup may fall back to the user's own tab,
-  // which navigate itself never takes.
-  if (ref?.kind === "preview" && method === "preview.navigate" && typeof params.url === "string") params.wakeUrl = params.url;
+  // A navigate's tab lookups (the dialog guard's, the action stamp's) leave a
+  // sleeping tab asleep: the renderer's navigate wakes it at the URL, and
+  // only after core.ts has rewritten and checked that URL.
+  if (method === "preview.navigate") params.keepAsleep = true;
   // A page dialog must never leave the call hanging (browser/dialog-guard.ts).
   if (ref?.kind !== "chrome") return guardPageDialogs(method, params, () => entry.run(params, method, host));
   if (!(await host.mayUseUserBrowser(params))) {

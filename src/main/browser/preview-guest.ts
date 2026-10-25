@@ -36,8 +36,7 @@ export async function resolvePreviewGuest(
     // The renderer shows who drives the tab and refuses a driver the user stopped.
     driver: params.driver,
     focus,
-    // A navigate wakes a sleeping tab at its new URL rather than the old page.
-    ...(typeof params.wakeUrl === "string" ? { wakeUrl: params.wakeUrl } : {}),
+    keepAsleep: params.keepAsleep === true,
   })) as PreviewGuestInfo;
   const wcId = info?.webContentsId;
   if (typeof wcId !== "number") {
