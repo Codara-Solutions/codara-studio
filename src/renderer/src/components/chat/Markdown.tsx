@@ -255,7 +255,7 @@ function MermaidDiagram({ source }: { source: string }) {
     return () => { cancelled = true; };
   }, [id, source]);
   if (error) return <pre style={CODE_BLOCK_STYLE}><code>{source}</code></pre>;
-  if (!svg) return <div style={{ color: "var(--muted)", fontSize: 12 }}>Rendering diagram…</div>;
+  if (!svg) return <div data-mermaid-pending style={{ color: "var(--muted)", fontSize: 12 }}>Rendering diagram…</div>;
   return <div style={{ maxWidth: "100%", overflowX: "auto" }} dangerouslySetInnerHTML={{ __html: svg }} />;
 }
 

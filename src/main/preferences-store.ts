@@ -24,6 +24,7 @@ import { normalizeKeepAwakeMode } from "@shared/keep-awake";
 import { normalizeQuickCommands, normalizeTerminalRightClick } from "@shared/quick-commands";
 import { normalizeAgentHibernationMinutes } from "@shared/agent-hibernation";
 import { normalizeSessionSearchPreferences } from "@shared/session-search";
+import { normalizeForecastIdeas } from "@shared/usage-forecast";
 import { normalizeRepository } from "@shared/pull-request-watch";
 import { writeFileAtomic } from "./fs-atomic";
 import { codaraHome } from "./codara-home";
@@ -290,6 +291,13 @@ function normalize(
       typeof src.keepAgentsInYourChrome === "boolean"
         ? src.keepAgentsInYourChrome
         : DEFAULT_PREFERENCES.keepAgentsInYourChrome,
+    usageForecast:
+      typeof src.usageForecast === "boolean"
+        ? src.usageForecast
+        : DEFAULT_PREFERENCES.usageForecast,
+    ...(src.usageForecastIdeas !== undefined
+      ? { usageForecastIdeas: normalizeForecastIdeas(src.usageForecastIdeas) }
+      : {}),
     autoOpenPreview:
       typeof src.autoOpenPreview === "boolean"
         ? src.autoOpenPreview
@@ -338,8 +346,12 @@ function normalize(
       typeof src.remoteAccessEnabled === "boolean"
         ? src.remoteAccessEnabled
         : DEFAULT_PREFERENCES.remoteAccessEnabled,
+    // A value counts only if the user chose it: see machinesEnabledChosen.
     machinesEnabled:
-      typeof src.machinesEnabled === "boolean" ? src.machinesEnabled : DEFAULT_PREFERENCES.machinesEnabled,
+      src.machinesEnabledChosen === true && typeof src.machinesEnabled === "boolean"
+        ? src.machinesEnabled
+        : DEFAULT_PREFERENCES.machinesEnabled,
+    ...(src.machinesEnabledChosen === true ? { machinesEnabledChosen: true } : {}),
     // Background auto-fetch + teammate-push alerts. Absent keys resolve to the
     // defaults (on / 3 min / on) so existing preference files pick the
     // feature up on upgrade.
@@ -443,7 +455,11 @@ export async function setPreference<K extends PrefKey>(
   value: AppPreferences[K],
 ): Promise<AppPreferences> {
   const current = await loadPreferences();
-  const next = normalize({ ...current, [key]: value });
+  const next = normalize({
+    ...current,
+    [key]: value,
+    ...(key === "machinesEnabled" ? { machinesEnabledChosen: true } : {}),
+  });
   cache = next;
   for (const listener of preferenceListeners) {
     try {

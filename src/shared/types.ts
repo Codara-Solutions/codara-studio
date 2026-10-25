@@ -8,6 +8,7 @@ import type {
 import type { WorkflowCallMarker, WorkflowRunInfo } from "./workflow";
 import type { QuickCommand, TerminalRightClickPref } from "./quick-commands";
 import type { SessionSearchPreferences } from "./session-search";
+import type { ForecastIdeas } from "./usage-forecast";
 
 export type ShellId = string;
 
@@ -1328,6 +1329,12 @@ export interface AppPreferences {
   // use the user's own Chrome through the Codara extension
   // (src/main/separate-browser-tools.ts). Applies to new sessions.
   keepAgentsInYourChrome?: boolean;
+  // Labs: forecast when each subscription window runs out
+  // (src/main/usage-forecast.ts). Off by default; while off nothing is
+  // recorded and the usage panel looks as it always has.
+  usageForecast?: boolean;
+  // Which of the forecast's extra hints are shown, each on its own toggle.
+  usageForecastIdeas?: ForecastIdeas;
   // When true, a localhost dev URL sniffed from any terminal pane's stdout
   // auto-opens a preview tab. Default false: the detected-URL chip still shows
   // so the user can click to open, but Codara never yanks a tab open on its own
@@ -1384,11 +1391,16 @@ export interface AppPreferences {
   // computer over LAN or the blind relay; pairing and revocation live in Settings,
   // "Remote access".
   remoteAccessEnabled?: boolean;
-  // Machines (docs/machines-plan.md), off while it is built: an agent started
-  // in an SSH workspace runs in a tmux session on that machine, so it keeps
+  // Machines (docs/machines-plan.md), on by default: an agent started in an
+  // SSH workspace runs in a tmux session on that machine, so it keeps
   // working when Studio quits or disconnects, and its pane attaches to it
-  // again when reopened (src/main/remote/remote-agents.ts).
+  // again when reopened (src/main/remote/remote-agents.ts). Only a choice
+  // the user made (machinesEnabledChosen) overrides the default.
   machinesEnabled?: boolean;
+  // Set once the user switches Machines on or off. Preferences are saved
+  // whole, so builds where the default was off wrote `machinesEnabled: false`
+  // for everyone; without this flag that value is not a choice.
+  machinesEnabledChosen?: boolean;
   // Background auto-fetch (src/main/git-auto-fetch.ts): one `git fetch` per
   // unique repository across every local workspace, on a timer. Default on.
   gitAutoFetchEnabled?: boolean;
@@ -1563,6 +1575,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   keepAwakeMode: "agents",
   keepAwakeLidClosed: false,
   keepAgentsInYourChrome: true,
+  usageForecast: false,
   autoOpenPreview: false,
   linkOpenTarget: "system",
   terminalLinkMenu: true,
@@ -1577,7 +1590,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   // DEFAULT_AGENT_HIBERNATION_MINUTES in shared/agent-hibernation.ts.
   agentHibernationMinutes: 30,
   remoteAccessEnabled: false,
-  machinesEnabled: false,
+  machinesEnabled: true,
   gitAutoFetchEnabled: true,
   gitAutoFetchIntervalMinutes: DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES,
   notifyTeammatePushes: true,

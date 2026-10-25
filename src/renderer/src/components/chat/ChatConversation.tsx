@@ -45,6 +45,7 @@ import {
   type ExecutionTurn,
 } from "../../lib/useRunExecutionRecord";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
+import { useEarlyListReveal } from "./list-reveal";
 
 // The conversation stream for one chat. Renders human messages, Cora's own
 // model/context activity, and worker steps as one ordered chat timeline.
@@ -236,6 +237,7 @@ export default function ChatConversation({
     );
   }, [run.checkpoints, run.humanMessages]);
   const virtuosoRef = useRef<VirtuosoHandle>(null);
+  const conversationRef = useRef<HTMLDivElement>(null);
   const [readerAtBottom, setReaderAtBottom] = useState(true);
   // Shows the conversation map while the reader scrolls; at rest it stays out
   // of sight until hovered.
@@ -310,6 +312,10 @@ export default function ChatConversation({
   // the full evidence stays on the technical surfaces (the Runs inspector's
   // "Result evidence" section and the RunsView header's checks count).
   const rowCount = items.length;
+  const listKey = `${run.id}:${rowCount === 0 ? "empty" : "populated"}`;
+  // Hydrating the execution record can add rows and change their heights, so
+  // until it lands Virtuoso alone decides when the list shows.
+  const listRevealed = useEarlyListReveal(conversationRef, listKey, rowCount > 0 && execution.hydrated);
   const minimapEntries = useMemo(() => buildConversationMinimap(items), [items]);
   // "New activity" only when something arrived after the reader left the
   // bottom; an old chat whose last answer is taller than the viewport opens
@@ -339,10 +345,12 @@ export default function ChatConversation({
       <StepWorkerRowsContext.Provider value={stepWorkerRows}>
       <MarkdownWorkspaceContext.Provider value={cwd || null}>
       <div
+        ref={conversationRef}
         className="cora-conversation"
         style={SCROLL_STYLE}
         data-testid="cora-conversation"
         data-scrolling={scrolling ? "true" : undefined}
+        data-list-revealed={listRevealed ? "true" : undefined}
       >
         {rowCount === 0 ? (
           <div style={{ ...CONVERSATION_COLUMN_STYLE, padding: "24px 18px" }}><ConversationEmpty /></div>
@@ -354,7 +362,7 @@ export default function ChatConversation({
             // compositor frame, leaving the populated conversation blank. Remount
             // only across that empty -> populated boundary and seed enough rows
             // to paint without waiting for a probe.
-            key={`${run.id}:${rowCount === 0 ? "empty" : "populated"}`}
+            key={listKey}
             ref={virtuosoRef}
             context={renderContext}
             style={{ height: "100%", width: "100%" }}

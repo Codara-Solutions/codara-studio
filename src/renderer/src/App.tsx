@@ -106,6 +106,7 @@ import ChromePairingPrompt from "./components/chrome/ChromePairingPrompt";
 import CrossWorkspacePrompt from "./components/cross-workspace/CrossWorkspacePrompt";
 import TabActionPrompt from "./components/tab-actions/TabActionPrompt";
 import SshManagerDialog from "./components/remote/SshManagerDialog";
+import HostKeyPrompt from "./components/remote/HostKeyPrompt";
 import { makeRemotePath, type RemoteHostConfig } from "@shared/remote";
 import {
   useTabs,
@@ -838,7 +839,11 @@ export default function App() {
   // Merged and missing copy-branch workspaces for the rail; a missing one
   // whose branch is merged or gone is cleaned up without asking (main
   // refuses anything in use, unpushed or possibly only unmounted).
-  const { states: worktreeByWorkspaceId, refresh: refreshWorktreeStates } = useWorktreeRailStates(
+  const {
+    states: worktreeByWorkspaceId,
+    loaded: worktreeStatesLoaded,
+    refresh: refreshWorktreeStates,
+  } = useWorktreeRailStates(
     workspaces,
     useCallback((result: WorktreeRailCleanupResult) => {
       emitLocalToast(
@@ -6622,6 +6627,7 @@ export default function App() {
             agentsByWorkspaceId={agentsByWorkspaceId}
             branchByWorkspaceId={branchByWorkspaceId}
             worktreeByWorkspaceId={worktreeByWorkspaceId}
+            worktreeStatesLoaded={worktreeStatesLoaded}
             onCleanUpWorkspace={handleCleanUpWorkspace}
             sections={panels.sections.left}
             draggingSection={draggingPanelSection}
@@ -6768,6 +6774,7 @@ export default function App() {
             agentsByWorkspaceId={agentsByWorkspaceId}
             branchByWorkspaceId={branchByWorkspaceId}
             worktreeByWorkspaceId={worktreeByWorkspaceId}
+            worktreeStatesLoaded={worktreeStatesLoaded}
             onCleanUpWorkspace={handleCleanUpWorkspace}
             sections={panels.sections.right}
             draggingSection={draggingPanelSection}
@@ -6831,6 +6838,7 @@ export default function App() {
           />
         )}
         <RemoteAuthPrompt />
+        <HostKeyPrompt />
         <ChromePairingPrompt />
         <CrossWorkspacePrompt />
         <TabActionPrompt />
@@ -7951,8 +7959,9 @@ const Workspace = React.memo(function Workspace({
       direction: Parameters<typeof splitTerminalPane>[2],
       autorun?: string,
       agentSession?: TerminalAgentSession | null,
+      cwd?: string,
     ) => {
-      return splitTerminalPane(tabId, paneId, direction, autorun, agentSession);
+      return splitTerminalPane(tabId, paneId, direction, autorun, agentSession, cwd);
     },
     [splitTerminalPane],
   );

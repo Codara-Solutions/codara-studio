@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { CSSProperties } from "react";
 import type {
@@ -21,7 +21,10 @@ import GitPanel from "./git/GitPanel";
 import AnchoredMenu from "./chat/composer/AnchoredMenu";
 import WorkspaceIconPicker from "./WorkspaceIconPicker";
 import { WorkspaceStatusLine } from "./workspace-status/WorkspaceStatusChip";
-import { WorkspaceAgentList, WorkspaceAgentsLine } from "./workspace-status/WorkspaceAgentsLine";
+import { WorkspaceAgentsLine } from "./workspace-status/WorkspaceAgentsLine";
+import { useAgentLinesOf } from "./workspace-status/agentLinesStore";
+import { Chevron, WorkspaceChildren, WorktreeAgentLine } from "./rail/WorkspaceChildren";
+import { setRailFold, useRailFold } from "./rail/railFolds";
 import WorkspaceStatusPicker from "./workspace-status/WorkspaceStatusPicker";
 import { setWorkspaceStatus, useUserWorkspaceStatus } from "./workspace-status/workspaceStatusStore";
 import { WorkspaceIconGlyph } from "./workspace-icons";
@@ -48,6 +51,8 @@ import { openWorktreeCleanup } from "./worktree-cleanup/open-worktree-cleanup";
 import { PullRequestMark } from "../git/PullRequestMark";
 import { setRepositoryWatched, usePullRequestWatch } from "../git/pullRequestWatchStore";
 import type { WorktreeRailState } from "@shared/worktree-cleanup";
+import { buildRailFamily, buildRailTree, railMergeState, type RailTree } from "@shared/rail-tree";
+import type { AgentLine } from "@shared/agent-status";
 
 const PANEL_SECTION_MIME = "application/x-codara-panel-section";
 const WORKSPACE_ROW_MIME = "application/x-codara-workspace-row";
@@ -163,6 +168,8 @@ interface RailProps {
   // Merge and folder state of each copy-branch workspace (useWorktreeRailStates):
   // the "merged" mark and the row's Clean up.
   worktreeByWorkspaceId?: Record<string, WorktreeRailState>;
+  // The first read of those states finished (useWorktreeRailStates).
+  worktreeStatesLoaded?: boolean;
   // Clean up a merged worktree, or remove a workspace whose folder is gone.
   onCleanUpWorkspace?: (id: string) => Promise<void>;
   // The first section's share when exactly two sections are stacked here.
@@ -294,6 +301,13 @@ function WorkspaceRail(props: RailProps) {
   } = props;
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const missingWorkspaceIds = useMissingWorkspaces(workspaces);
+  // Worktrees whose project is in the rail hang under it rather than in the
+  // top-level list or a folder (see WorkspaceFamily).
+  const railTree = useMemo(
+    () => buildRailTree(workspaces, props.workspaceRailOrder),
+    [workspaces, props.workspaceRailOrder],
+  );
+  const workspaceById = useMemo(() => new Map(workspaces.map((workspace) => [workspace.id, workspace])), [workspaces]);
   // Workspace rows can be reordered within a folder or dropped onto another
   // folder. The transfer payload makes the gesture work even when Workspaces
   // is rendered in the opposite rail; local state is only visual feedback.
@@ -369,7 +383,7 @@ function WorkspaceRail(props: RailProps) {
   const accent = props.activeWorkspace?.color || "var(--accent)";
   const workspaceGroupIds = new Set(props.workspaceGroups.map((group) => group.id));
   const unfiledWorkspaces = workspaces.filter((workspace) =>
-    !workspace.groupId || !workspaceGroupIds.has(workspace.groupId));
+    (!workspace.groupId || !workspaceGroupIds.has(workspace.groupId)) && !railTree.parentOf.has(workspace.id));
   const unfiledWorkspaceById = new Map(unfiledWorkspaces.map((workspace) => [workspace.id, workspace]));
   const workspaceGroupById = new Map(props.workspaceGroups.map((group) => [group.id, group]));
   const eligibleRailIds = new Set([...unfiledWorkspaceById.keys(), ...workspaceGroupById.keys()]);
@@ -554,6 +568,14 @@ function WorkspaceRail(props: RailProps) {
   const railItemId = (element: HTMLElement): string =>
     element.dataset.workspaceId || element.dataset.workspaceGroupId || "";
 
+  // A project's worktrees render as a sibling block right after its row, and
+  // move with it: the item spans both.
+  const railItemBottom = (element: HTMLElement): number => {
+    const next = element.nextElementSibling;
+    const children = next instanceof HTMLElement && next.dataset.railChildrenOf === railItemId(element) ? next : null;
+    return (children ?? element).getBoundingClientRect().bottom;
+  };
+
   const measureRailSlots = (scope: string): VerticalReorderSlot[] => {
     const node = listNodeForScope(scope);
     if (!node) return [];
@@ -571,7 +593,7 @@ function WorkspaceRail(props: RailProps) {
       return {
         id,
         start: rect.top - listTop + scrollTop - shift,
-        end: rect.bottom - listTop + scrollTop - shift,
+        end: railItemBottom(element) - listTop + scrollTop - shift,
       };
     });
   };
@@ -775,52 +797,59 @@ function WorkspaceRail(props: RailProps) {
   // the browser's drag-image snapshot.
   const beginRailDrag = (event: React.DragEvent<HTMLElement>, dim: () => void) => {
     event.dataTransfer.effectAllowed = "move";
-    dragHeightRef.current = event.currentTarget.getBoundingClientRect().height;
+    dragHeightRef.current = railItemBottom(event.currentTarget) - event.currentTarget.getBoundingClientRect().top;
     dragDimFrameRef.current = requestAnimationFrame(() => {
       dragDimFrameRef.current = null;
       dim();
     });
   };
 
+  const workspaceRowProps = (w: Workspace, groupId: string | null): RowProps => ({
+    ws: w,
+    active: w.id === props.activeId,
+    editing: w.id === props.editingId,
+    dragging: wsDragId === w.id,
+    dragOffset: reorderPreview?.offsets[w.id] ?? 0,
+    tone: props.toneByWorkspaceId?.[w.id] ?? null,
+    working: props.workingByWorkspaceId?.[w.id] ?? false,
+    agentTotal: props.agentsByWorkspaceId?.[w.id]?.total ?? 0,
+    agentWorking: props.agentsByWorkspaceId?.[w.id]?.working ?? 0,
+    agentSleeping: props.agentsByWorkspaceId?.[w.id]?.sleeping ?? 0,
+    branch: props.branchByWorkspaceId?.[w.id] ?? null,
+    missing: missingWorkspaceIds.has(w.id) || props.worktreeByWorkspaceId?.[w.id]?.missing === true,
+    worktree: props.worktreeByWorkspaceId?.[w.id] ?? null,
+    onCleanUp: props.onCleanUpWorkspace ? () => props.onCleanUpWorkspace!(w.id) : undefined,
+    folderColorManaged: groupId !== null,
+    menuBoundaryRef: wsScrollRef,
+    onActivate: () => props.onActivate(w.id),
+    onEdit: () => props.onEdit(w.id),
+    onChange: (patch) => props.onChange(w.id, patch),
+    onPreviewColor: (color) => props.onPreviewColor(w.id, color),
+    onCloseEditor: props.onCloseEditor,
+    onCreateCopyBranch: () => props.onCreateCopyBranch(w.id),
+    onDelete: () => props.onDelete(w.id),
+    onRowDragStart: (event) => {
+      event.dataTransfer.setData(WORKSPACE_ROW_MIME, w.id);
+      // text/plain is a compatibility transport for WebDriver/native drag
+      // implementations that discard custom MIME payloads.
+      event.dataTransfer.setData("text/plain", w.id);
+      wsDragIdRef.current = w.id;
+      beginRailDrag(event, () => setWsDragId(w.id));
+    },
+    onRowDragEnd: clearWorkspaceDrag,
+  });
+
   // Rows carry no drop logic of their own: the list they sit in owns the whole
   // gesture (see handleRailDragOver). They only announce the drag and paint
   // the preview's slide offset.
   const renderWorkspaceRows = (items: Workspace[], groupId: string | null): React.ReactNode =>
     items.map((w) => (
-      <WorkspaceRow
+      <WorkspaceFamily
         key={w.id}
-        ws={w}
-        active={w.id === props.activeId}
-        editing={w.id === props.editingId}
-        dragging={wsDragId === w.id}
-        dragOffset={reorderPreview?.offsets[w.id] ?? 0}
-        tone={props.toneByWorkspaceId?.[w.id] ?? null}
-        working={props.workingByWorkspaceId?.[w.id] ?? false}
-        agentTotal={props.agentsByWorkspaceId?.[w.id]?.total ?? 0}
-        agentWorking={props.agentsByWorkspaceId?.[w.id]?.working ?? 0}
-        agentSleeping={props.agentsByWorkspaceId?.[w.id]?.sleeping ?? 0}
-        branch={props.branchByWorkspaceId?.[w.id] ?? null}
-        missing={missingWorkspaceIds.has(w.id) || props.worktreeByWorkspaceId?.[w.id]?.missing === true}
-        worktree={props.worktreeByWorkspaceId?.[w.id] ?? null}
-        onCleanUp={props.onCleanUpWorkspace ? () => props.onCleanUpWorkspace!(w.id) : undefined}
-        folderColorManaged={groupId !== null}
-        menuBoundaryRef={wsScrollRef}
-        onActivate={() => props.onActivate(w.id)}
-        onEdit={() => props.onEdit(w.id)}
-        onChange={(patch) => props.onChange(w.id, patch)}
-        onPreviewColor={(color) => props.onPreviewColor(w.id, color)}
-        onCloseEditor={props.onCloseEditor}
-        onCreateCopyBranch={() => props.onCreateCopyBranch(w.id)}
-        onDelete={() => props.onDelete(w.id)}
-        onRowDragStart={(event) => {
-          event.dataTransfer.setData(WORKSPACE_ROW_MIME, w.id);
-          // text/plain is a compatibility transport for WebDriver/native drag
-          // implementations that discard custom MIME payloads.
-          event.dataTransfer.setData("text/plain", w.id);
-          wsDragIdRef.current = w.id;
-          beginRailDrag(event, () => setWsDragId(w.id));
-        }}
-        onRowDragEnd={clearWorkspaceDrag}
+        project={w}
+        worktrees={worktreesOf(railTree, w.id, workspaceById)}
+        statesLoaded={props.worktreeStatesLoaded ?? false}
+        rowProps={(child) => workspaceRowProps(child, child === w ? groupId : null)}
       />
     ));
 
@@ -936,7 +965,7 @@ function WorkspaceRail(props: RailProps) {
                   const group = workspaceGroupById.get(itemId);
                   if (!workspace && !group) return null;
                   const members = group
-                    ? workspaces.filter((candidate) => candidate.groupId === group.id)
+                    ? workspaces.filter((candidate) => candidate.groupId === group.id && !railTree.parentOf.has(candidate.id))
                     : [];
                   return (
                     <React.Fragment key={itemId}>
@@ -2020,6 +2049,116 @@ interface RowProps {
   onDelete: () => void;
   onRowDragStart: (event: React.DragEvent<HTMLDivElement>) => void;
   onRowDragEnd: () => void;
+  /** A worktree under its project (rail/WorkspaceChildren): no tile, its branch first, its agent second. */
+  nested?: boolean;
+  /** A nested row's agents, most urgent first. */
+  nestedAgents?: readonly AgentLine[];
+  /** A merged worktree shown from its fold. */
+  faded?: boolean;
+  /** A top-level row's chevron; a row with nothing under it keeps the gutter so the tiles line up. */
+  fold?: { expandable: boolean; open: boolean; onToggle: () => void };
+  /** Every agent of a project's family, for its roll-up line. */
+  rollupLines?: readonly AgentLine[];
+}
+
+// Merged: the branch's work is in its base. A gone branch with a gone folder
+// has nothing left but the row, which reads the same way.
+function rowMerged(worktree: WorktreeRailState | null | undefined, missing: boolean): boolean {
+  return worktree?.merge === "merged" || (missing && worktree?.merge === "gone");
+}
+
+function worktreesOf(tree: RailTree, projectId: string, byId: ReadonlyMap<string, Workspace>): Workspace[] {
+  const ids = tree.childrenOf.get(projectId);
+  if (!ids) return [];
+  return ids.flatMap((id) => byId.get(id) ?? []);
+}
+
+/**
+ * A project's row and, under it, its agents and worktrees (DESIGN.md,
+ * "Worktrees in the rail"). Each agent shows on the row it works in; the
+ * project's roll-up counts them all, so a folded family still says what
+ * waits inside it.
+ */
+function WorkspaceFamily({
+  project,
+  worktrees,
+  statesLoaded,
+  rowProps,
+}: {
+  project: Workspace;
+  worktrees: Workspace[];
+  statesLoaded: boolean;
+  rowProps: (workspace: Workspace) => RowProps;
+}) {
+  const idsKey = [project.id, ...worktrees.map((worktree) => worktree.id)].join("\n");
+  const ids = useMemo(() => idsKey.split("\n"), [idsKey]);
+  const lineLists = useAgentLinesOf(ids);
+  const projectProps = rowProps(project);
+  const childProps = new Map(worktrees.map((worktree) => [worktree.id, rowProps(worktree)]));
+  const family = buildRailFamily({
+    projectLines: lineLists[0] ?? [],
+    children: worktrees.map((worktree, index) => {
+      const props = childProps.get(worktree.id)!;
+      const creator = worktree.copyBranch?.createdBy;
+      return {
+        workspaceId: worktree.id,
+        lines: lineLists[index + 1] ?? [],
+        creatorPaneId: creator?.kind === "agent" ? creator.paneId : undefined,
+        createdAt: worktree.copyBranch?.createdAt,
+        merged: railMergeState(props.worktree ? rowMerged(props.worktree, props.missing ?? false) : undefined, {
+          remote: Boolean(worktree.remote),
+          loaded: statesLoaded,
+        }),
+      };
+    }),
+  });
+  const expandable = family.own.length > 0 || worktrees.length > 0;
+  const open = useRailFold(project.id, worktrees.length > 0) && expandable;
+  const mergedOpen = useRailFold(`merged:${project.id}`, false);
+  const [cleaning, setCleaning] = useState(false);
+  const mergedCleanable = family.merged.flatMap((child) => {
+    const props = childProps.get(child.workspaceId);
+    return props?.onCleanUp ? [{ name: props.ws.name, cleanUp: props.onCleanUp }] : [];
+  });
+  const mergedCleanUps = mergedCleanable.map((entry) => entry.cleanUp);
+  const cleanUpMerged = () => {
+    if (cleaning) return;
+    setCleaning(true);
+    void (async () => {
+      for (const cleanUp of mergedCleanUps) await cleanUp();
+    })().finally(() => setCleaning(false));
+  };
+  const renderChild = (workspaceId: string, agents: AgentLine[], faded: boolean) => {
+    const props = childProps.get(workspaceId)!;
+    return <WorkspaceRow key={workspaceId} {...props} nested nestedAgents={agents} faded={faded} />;
+  };
+  return (
+    <>
+      <WorkspaceRow
+        {...projectProps}
+        fold={{ expandable, open, onToggle: () => setRailFold(project.id, !open) }}
+        rollupLines={family.all}
+      />
+      {open && (
+        <WorkspaceChildren
+          parentId={project.id}
+          dragOffset={projectProps.dragOffset}
+          dragging={projectProps.dragging}
+          ownAgents={family.own}
+          active={family.active.map((child) => renderChild(child.workspaceId, child.agents, false))}
+          merged={{
+            count: family.merged.length,
+            open: mergedOpen,
+            onToggle: () => setRailFold(`merged:${project.id}`, !mergedOpen),
+            onCleanUp: mergedCleanUps.length > 0 ? cleanUpMerged : undefined,
+            cleanUpNames: mergedCleanable.map((entry) => entry.name),
+            cleaning,
+            rows: family.merged.map((child) => renderChild(child.workspaceId, child.agents, true)),
+          }}
+        />
+      )}
+    </>
+  );
 }
 
 function agentWorktreeTitle(
@@ -2065,6 +2204,11 @@ function WorkspaceRow({
   onDelete,
   onRowDragStart,
   onRowDragEnd,
+  nested = false,
+  nestedAgents = [],
+  faded = false,
+  fold,
+  rollupLines,
 }: RowProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const colorRef = useRef<HTMLInputElement | null>(null);
@@ -2103,9 +2247,7 @@ function WorkspaceRow({
   // The live draft (if a pick is in progress) wins over the committed color.
   const accent = draftColor || ws.color || "var(--accent)";
   const agentCreator = ws.copyBranch?.createdBy?.kind === "agent" ? ws.copyBranch.createdBy : null;
-  // Merged: the branch's work is in its base. A gone branch with a gone
-  // folder has nothing left but the row, which reads the same way.
-  const merged = worktree?.merge === "merged" || (missing && worktree?.merge === "gone");
+  const merged = rowMerged(worktree, missing);
   const canRemoveFromRail = missing && Boolean(onCleanUp);
   const canCleanUp = !missing && merged && Boolean(onCleanUp);
   const runCleanUp = () => {
@@ -2212,7 +2354,9 @@ function WorkspaceRow({
       ref={rowRef}
       data-workspace-id={ws.id}
       data-active={active ? "true" : undefined}
-      draggable={!editing}
+      data-nested={nested ? "true" : undefined}
+      className={nested ? (faded ? "rail-child rail-child-faded" : "rail-child") : undefined}
+      draggable={!editing && !nested}
       onDragStart={(event) => {
         // dragstart fires on the row, not on what was pressed: a press that
         // began on the agents line or list must not start a reorder.
@@ -2253,13 +2397,14 @@ function WorkspaceRow({
         // The row's own line, then the agent list when its status line is open.
         flexDirection: "column",
         justifyContent: "center",
-        minHeight: 32,
-        // Copy-branch rows indent so they read as a child of their parent repo.
-        marginLeft: ws.copyBranch ? 14 : 0,
+        minHeight: nested ? 0 : 32,
+        // A copy-branch row whose project is not in the rail indents so it
+        // still reads as a branch; one that is hangs under it instead.
+        marginLeft: ws.copyBranch && !nested ? 14 : 0,
         // Padding is identical between resting and editing so an inline rename
         // never reflows the row (Apple inline-rename swaps only the affordance,
         // not the geometry).
-        padding: "5px 6px 5px 9px",
+        padding: nested ? "4px 6px 4px 7px" : "5px 6px 5px 9px",
         background,
         cursor: "default",
         opacity: dragging ? 0.4 : 1,
@@ -2276,12 +2421,12 @@ function WorkspaceRow({
           ? `1px solid color-mix(in oklab, ${accent} 24%, var(--rule-soft))`
           : "1px solid transparent",
         // Generous, calm rounding — de-boxed. Surfaces sit at the surface rung.
-        borderRadius: "var(--radius-surface, 10px)",
+        borderRadius: nested ? 8 : "var(--radius-surface, 10px)",
         // ONE soft cue, per the one-hairline elevation law: the tinted fill
         // does the work; a single faint top highlight lifts active / editing /
         // hover. No left-edge bar, no border+ring+shadow+inset halo.
-        boxShadow: active || editing || rowHover ? "var(--lift-hi)" : "none",
-        marginBottom: 4,
+        boxShadow: !nested && (active || editing || rowHover) ? "var(--lift-hi)" : "none",
+        marginBottom: nested ? 1 : 4,
         // --ws-reorder-motion is 0s at rest and the reorder curve for the
         // length of a drag; the list owns it (see styles.css), because an
         // inline transition is not something a class or a media query could
@@ -2290,7 +2435,26 @@ function WorkspaceRow({
           "background var(--motion-fast) var(--ease-out), border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out), transform var(--ws-reorder-motion, 0s) var(--ease-out-fast)",
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 8, width: "100%", minWidth: 0 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: nested ? 7 : 8, width: "100%", minWidth: 0 }}>
+        {fold && (fold.expandable ? (
+          <button
+            type="button"
+            className="rail-chevron"
+            data-testid="workspace-children-toggle"
+            aria-expanded={fold.open}
+            title={fold.open ? "Fold" : "Unfold"}
+            style={{ marginLeft: -6, marginRight: -4 }}
+            onClick={(event) => {
+              event.stopPropagation();
+              fold.onToggle();
+            }}
+          >
+            <Chevron open={fold.open} />
+          </button>
+        ) : (
+          <span aria-hidden="true" className="rail-chevron-spacer" style={{ marginLeft: -6, marginRight: -4 }} />
+        ))}
+        {!nested && (
         <button
           type="button"
           data-testid="workspace-icon-tile"
@@ -2346,7 +2510,8 @@ function WorkspaceRow({
             size={12}
           />
         </button>
-        <StatusDot tone={tone} workingRingShown={working} />
+        )}
+        {!nested && <StatusDot tone={tone} workingRingShown={working} />}
         {editing && !folderColorManaged && (
           <input
             ref={colorRef}
@@ -2428,6 +2593,55 @@ function WorkspaceRow({
               outline: "none",
             }}
           />
+        ) : nested ? (
+          <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1, gap: 1 }}>
+            <span className="rail-child-line1">
+              {agentCreator && (
+                <span
+                  data-testid="workspace-agent-worktree"
+                  title={agentWorktreeTitle(agentCreator, ws.copyBranch!)}
+                  aria-label={agentWorktreeTitle(agentCreator, ws.copyBranch!)}
+                  style={{ display: "inline-flex", color: active ? "var(--ink-dim)" : "var(--muted)" }}
+                >
+                  <SparkIcon size={9} />
+                </span>
+              )}
+              <span
+                data-testid="workspace-branch"
+                title={`${ws.name}${missing ? `: folder not found at ${ws.cwd}` : `, on branch ${branch ?? ws.copyBranch?.branch ?? ""}`}`}
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  fontSize: 11.5,
+                  fontWeight: 600,
+                  color: missing ? "var(--muted)" : active ? "var(--ink)" : "var(--ink-dim)",
+                  whiteSpace: "nowrap",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  ...(missing ? { textDecoration: "line-through", textDecorationThickness: "1px" } : {}),
+                }}
+              >
+                {branch ?? ws.copyBranch?.branch ?? ws.name}
+              </span>
+              <span style={{ color: active ? "var(--ink-dim)" : "var(--muted)" }}>
+                <PullRequestMark entry={prWatch} />
+              </span>
+            </span>
+            {missing ? (
+              <span data-testid="workspace-missing" className="rail-child-line2" style={{ color: "var(--muted)" }}>
+                Folder gone
+              </span>
+            ) : (
+              <WorktreeAgentLine
+                agents={nestedAgents}
+                merged={merged}
+                pullRequest={prWatch?.watching ? prWatch.pullRequest.number : null}
+                baseBranch={ws.copyBranch?.baseBranch}
+                active={active}
+              />
+            )}
+            <WorkspaceStatusLine workspaceId={ws.id} active={active} />
+          </div>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", minWidth: 0, flex: 1, gap: 1 }}>
             <span
@@ -2503,11 +2717,11 @@ function WorkspaceRow({
               </span>
             )}
             <WorkspaceStatusLine workspaceId={ws.id} active={active} />
-            <WorkspaceAgentsLine workspaceId={ws.id} active={active} />
+            <WorkspaceAgentsLine workspaceId={ws.id} active={active} lines={rollupLines} />
           </div>
         )}
 
-        {agentTotal > 0 && !editing && (
+        {agentTotal > 0 && !editing && !nested && (
           <AgentCount total={agentTotal} working={agentWorking} sleeping={agentSleeping} accent={accent} />
         )}
 
@@ -2741,7 +2955,6 @@ function WorkspaceRow({
           </AnchoredMenu>
         </div>
       </div>
-      {!editing && <WorkspaceAgentList workspaceId={ws.id} active={active} />}
     </div>
   );
 }

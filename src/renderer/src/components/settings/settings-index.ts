@@ -23,6 +23,7 @@ export type SettingsTab =
   | "api"
   | "agents"
   | "sessions"
+  | "machines"
   | "remote-access"
   | "keybindings"
   | "runs"
@@ -112,6 +113,12 @@ export const SETTINGS_TABS: ReadonlyArray<SettingsTabMeta> = [
     description: "Search, resume and clean up your past agent sessions, and choose what comes back after a restart.",
   },
   {
+    id: "machines",
+    label: "Machines",
+    title: "Machines",
+    description: "This computer and the ones you reach over SSH: their load, and the agents running there.",
+  },
+  {
     id: "remote-access",
     label: "Remote access",
     title: "Remote access",
@@ -144,7 +151,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<{
   { label: "App", tabs: ["general", "appearance", "notifications", "keybindings"] },
   { label: "Workspace", tabs: ["editor", "terminal", "quick-commands", "git", "browser", "shared-pages"] },
   { label: "Agents and models", tabs: ["agents", "api", "sessions", "runs"] },
-  { label: "System", tabs: ["remote-access", "about"] },
+  { label: "System", tabs: ["machines", "remote-access", "about"] },
 ];
 
 export function tabMeta(tab: SettingsTab): SettingsTabMeta {
@@ -254,6 +261,7 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "api", title: "Models for Cora", desc: "OpenRouter models offered in the Cora picker.", section: "OpenRouter", keywords: "model picker openrouter favorite" },
   { tab: "api", title: "Commit message model", desc: "The model that drafts commit messages.", section: "Git commit messages", keywords: "commit draft model git" },
   { tab: "agents", title: "Add account", desc: "Sign in to another Claude, ChatGPT or xAI account.", keywords: "new sign in login another account connect claude codex grok" },
+  { tab: "agents", title: "Usage forecast", desc: "Labs: say whether a limit runs out before it resets.", section: "Labs", keywords: "usage limit forecast predict run out reset quota labs experiment", toggle: "usageForecast" },
   { tab: "agents", title: "How switching works", desc: "What a switch moves, and which sessions follow.", keywords: "switch account active use change sessions" },
   { tab: "agents", title: "Anthropic", label: "Anthropic accounts", desc: "Claude accounts for Cora and Claude Code.", keywords: "claude code claude login account email limits switch system own login" },
   { tab: "agents", title: "OpenAI", label: "OpenAI accounts", desc: "ChatGPT accounts for Cora and Codex.", keywords: "codex chatgpt codex login account email limits switch system own login" },
@@ -285,7 +293,6 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "capabilities", title: "Worker models", desc: "The models Cora may hand work to.", capabilityTab: "workers", keywords: "models worker roster switch on" },
   { tab: "sessions", title: "Resume running agent sessions when Codara reopens", desc: "Bring back agent sessions after a restart.", section: "Restore", keywords: "restore relaunch restart resume reopen", toggle: "restoreAgentSessions" },
   { tab: "sessions", title: "Keep terminal output across restarts", desc: "Show each pane's earlier output after Codara reopens.", section: "Restore", keywords: "scrollback history output restore restart relaunch update crash terminal", toggle: "restoreTerminalOutput" },
-  { tab: "sessions", title: "Keep agents running on SSH machines", desc: "Agents in SSH workspaces run in tmux on the machine and survive a quit or a lost connection.", section: "SSH machines", keywords: "ssh remote machine server tmux persist keep running disconnect home server laptop compute", toggle: "machinesEnabled" },
   { tab: "sessions", title: "Let idle agents sleep", desc: "Stop finished agents in background workspaces to save memory. They resume when you open them.", section: "Idle agents", keywords: "hibernate hibernation sleep sleeping memory ram idle background suspend keep running pin keep awake wake" },
   { tab: "sessions", title: "Search agent sessions", desc: "Keep a local index of past agent sessions to search what was said.", section: "Agent session search", keywords: "session search history find past conversations transcripts index full text claude codex grok pi cora" },
   { tab: "sessions", title: "Agents to include", desc: "Which agents' sessions are indexed.", section: "Agent session search", keywords: "claude codex grok pi cora agents filter index" },
@@ -293,6 +300,8 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "sessions", title: "Session index", desc: "Its size on disk, and Rebuild index.", section: "Agent session search", keywords: "index rebuild size disk storage sqlite reindex" },
   { tab: "sessions", title: "Delete session index", desc: "Delete the index and turn agent session search off.", section: "Agent session search", keywords: "index delete remove clear wipe disk storage sqlite turn off privacy" },
   { tab: "sessions", title: "Agent sessions", desc: "Find, resume and delete Claude and Codex sessions.", keywords: "history transcripts delete claude codex conversations" },
+  { tab: "machines", title: "Keep agents running on SSH machines", desc: "Agents on SSH machines run in tmux there and survive a quit or a lost connection.", section: "Agents on machines", keywords: "ssh remote machine server tmux persist keep running disconnect home server laptop compute host key fingerprint", toggle: "machinesEnabled" },
+  { tab: "machines", title: "Machines", desc: "This computer and your SSH hosts: CPU, memory, disk, load, installed CLIs and running agents.", keywords: "ssh remote server host computer compute cpu ram memory disk load tailscale codara cloud box agents running" },
   { tab: "remote-access", title: "Allow remote access", desc: "Pair the Codara phone app with this computer.", section: "Connection", keywords: "phone mobile app pair qr" },
   { tab: "remote-access", title: "Pair a new device", desc: "Show a code to pair another phone.", section: "Connection", keywords: "phone mobile qr code pairing" },
   { tab: "remote-access", title: "Paired devices", desc: "Phones that can reach this computer.", keywords: "revoke phone device mobile" },

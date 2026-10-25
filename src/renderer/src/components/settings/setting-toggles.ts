@@ -58,8 +58,9 @@ export const PREFERENCE_TOGGLES = {
   inlineAutocompleteEnabled: defaultOff("inlineAutocompleteEnabled"),
   restoreAgentSessions: defaultOff("restoreAgentSessions"),
   restoreTerminalOutput: defaultOn("restoreTerminalOutput"),
-  machinesEnabled: defaultOff("machinesEnabled"),
+  machinesEnabled: defaultOn("machinesEnabled"),
   keepAgentsInYourChrome: defaultOn("keepAgentsInYourChrome"),
+  usageForecast: defaultOff("usageForecast"),
 } satisfies Record<string, PreferenceToggle>;
 
 export type PreferenceToggleId = keyof typeof PREFERENCE_TOGGLES;

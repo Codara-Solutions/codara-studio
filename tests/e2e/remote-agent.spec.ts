@@ -41,13 +41,15 @@ interface Fixture {
 const HOST_ID = "testhost";
 const WS_ID = "ws-remote";
 const TMUX = "tmux -L codara -f /dev/null";
+// Machines is on by default; only the user's own choice turns it off.
+const SWITCHED_OFF = { machinesEnabled: false, machinesEnabledChosen: true };
 
 test.skip(process.platform !== "linux", "The SSH test host is a Linux container");
 
 test("a Claude agent on an SSH machine outlives Studio and ends with its pane", async () => {
   test.skip(!(await dockerAvailable()), "Docker is not available");
   test.setTimeout(180_000);
-  const fixture = await prepare({ machinesEnabled: true });
+  const fixture = await prepare({ prefs: {} });
   let app: ElectronApplication | null = null;
   try {
     app = await launch(fixture);
@@ -98,7 +100,7 @@ test("a Claude agent on an SSH machine outlives Studio and ends with its pane", 
 test("a dropped connection brings the same agent back into its pane", async () => {
   test.skip(!(await dockerAvailable()), "Docker is not available");
   test.setTimeout(120_000);
-  const fixture = await prepare({ machinesEnabled: true });
+  const fixture = await prepare({ prefs: {} });
   let app: ElectronApplication | null = null;
   try {
     app = await launch(fixture);
@@ -128,7 +130,7 @@ test("a dropped connection brings the same agent back into its pane", async () =
 test("with the machines preference off, a remote Claude pane runs as before, without tmux", async () => {
   test.skip(!(await dockerAvailable()), "Docker is not available");
   test.setTimeout(90_000);
-  const fixture = await prepare({ machinesEnabled: false });
+  const fixture = await prepare({ prefs: SWITCHED_OFF });
   let app: ElectronApplication | null = null;
   try {
     app = await launch(fixture);
@@ -146,7 +148,7 @@ test("with the machines preference off, a remote Claude pane runs as before, wit
 test("turning the preference off later still attaches to a running agent and ends it with its pane", async () => {
   test.skip(!(await dockerAvailable()), "Docker is not available");
   test.setTimeout(150_000);
-  const fixture = await prepare({ machinesEnabled: true });
+  const fixture = await prepare({ prefs: {} });
   let app: ElectronApplication | null = null;
   try {
     app = await launch(fixture);
@@ -158,7 +160,7 @@ test("turning the preference off later still attaches to a running agent and end
     await app.close();
     app = null;
 
-    await writeFile(join(fixture.userDataDir, "spark-preferences.json"), JSON.stringify({ machinesEnabled: false }));
+    await writeFile(join(fixture.userDataDir, "spark-preferences.json"), JSON.stringify(SWITCHED_OFF));
     app = await launch(fixture);
     page = await app.firstWindow();
     await page.getByRole("tab", { name: /terminals/i }).first().click();
@@ -170,6 +172,53 @@ test("turning the preference off later still attaches to a running agent and end
     await page.locator(`[data-terminal-pane-id="${paneId}"]`).first().getByTitle(/Close pane/i).click();
     await expect.poll(() => sessions(fixture.host), { timeout: 20_000 }).toEqual([]);
     expect(await alive(fixture.host, pid)).toBe(false);
+  } finally {
+    await app?.close().catch(() => undefined);
+    await cleanup(fixture);
+  }
+});
+
+test("updating Codara with an SSH agent open neither doubles nor strands it, and new agents start in tmux", async () => {
+  test.skip(!(await dockerAvailable()), "Docker is not available");
+  test.setTimeout(150_000);
+  // Before the update: Machines off (as in releases without it), so the
+  // agent runs directly in the SSH shell.
+  const fixture = await prepare({ prefs: { ...SWITCHED_OFF, restoreAgentSessions: true } });
+  let app: ElectronApplication | null = null;
+  try {
+    app = await launch(fixture);
+    let page = await app.firstWindow();
+    const paneId = await openClaudePane(page);
+    await expect(page.getByRole("status", { name: "CLAUDE ready" })).toBeVisible({ timeout: 30_000 });
+    expect(await sessions(fixture.host)).toEqual([]);
+    const [oldPid] = await launches(fixture.host);
+    await app.close();
+    app = null;
+    // The update quits Codara: the agent ends with its SSH shell.
+    await expect.poll(() => alive(fixture.host, oldPid), { timeout: 15_000 }).toBe(false);
+
+    // After the update: the file still says what the old default wrote.
+    await writeFile(
+      join(fixture.userDataDir, "spark-preferences.json"),
+      JSON.stringify({ machinesEnabled: false, restoreAgentSessions: true }),
+    );
+    app = await launch(fixture);
+    page = await app.firstWindow();
+    await page.getByRole("tab", { name: /terminals/i }).first().click();
+    await expect(page.locator(`[data-terminal-pane-id="${paneId}"]`).first()).toBeVisible({ timeout: 30_000 });
+    // Whatever the restore does, at most one Claude runs for the pane, and a
+    // tmux session exists only for a pane that shows it.
+    await page.waitForTimeout(8_000);
+    const running = [];
+    for (const pid of await launches(fixture.host)) if (await alive(fixture.host, pid)) running.push(pid);
+    expect(running.length).toBeLessThanOrEqual(1);
+    const shown = await paneIds(page);
+    for (const name of await sessions(fixture.host)) expect(shown.map((id) => `codara-${id}`)).toContain(name);
+
+    // A new agent now starts in tmux: Machines is on.
+    const before = await sessions(fixture.host);
+    const fresh = await openClaudePane(page);
+    await expect.poll(async () => (await sessions(fixture.host)).sort(), { timeout: 20_000 }).toEqual([...before, `codara-${fresh}`].sort());
   } finally {
     await app?.close().catch(() => undefined);
     await cleanup(fixture);
@@ -233,13 +282,25 @@ async function alive(host: SshTestHost, pid: number): Promise<boolean> {
   return (await host.exec(`kill -0 ${pid} 2>/dev/null && echo yes || echo no`)).trim() === "yes";
 }
 
-async function prepare({ machinesEnabled }: { machinesEnabled: boolean }): Promise<Fixture> {
+async function prepare({ prefs }: { prefs: Record<string, unknown> }): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), "codara-remote-agent-e2e-"));
   const userDataDir = join(root, "user-data");
   const home = join(root, "home");
   await mkdir(userDataDir, { recursive: true });
   await mkdir(home, { recursive: true });
   const host = await startSshTestHost({ dir: join(root, "ssh") });
+  // The user's ssh already knows the machine, so connecting asks nothing
+  // (machines.spec.ts covers the question).
+  const hostKeys = await host.exec("cat /etc/ssh/ssh_host_*_key.pub");
+  await mkdir(join(home, ".ssh"), { recursive: true });
+  await writeFile(
+    join(home, ".ssh", "known_hosts"),
+    hostKeys
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => `[127.0.0.1]:${host.port} ${line.split(" ").slice(0, 2).join(" ")}`)
+      .join("\n") + "\n",
+  );
   await writeFile(
     join(userDataDir, "spark-remote-hosts.json"),
     JSON.stringify([
@@ -262,7 +323,7 @@ async function prepare({ machinesEnabled }: { machinesEnabled: boolean }): Promi
       activeWorkspaceId: WS_ID,
     }),
   );
-  await writeFile(join(userDataDir, "spark-preferences.json"), JSON.stringify({ machinesEnabled }));
+  await writeFile(join(userDataDir, "spark-preferences.json"), JSON.stringify(prefs));
   return { root, userDataDir, home, host };
 }
 

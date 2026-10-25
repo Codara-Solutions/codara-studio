@@ -26,6 +26,7 @@ const PRICES_TS = path.join(ROOT, "src", "main", "model-prices.ts");
 
 const SCANNER_TS = path.join(ROOT, "src", "main", "usage-scan.ts");
 const WORKER_TS = path.join(ROOT, "src", "main", "usage-scan-worker.ts");
+const ANALYTICS_TS = path.join(ROOT, "src", "main", "usage-analytics.ts");
 
 const harnessPlugin = {
   name: "usage-analytics-test-harness",
@@ -668,6 +669,7 @@ async function main() {
 
   const scanner = await bundle(SCANNER_TS, path.join(tmp, "scanner.bundle.cjs"));
   const {
+    codexTranscriptRoots,
     decodeScanCache,
     encodeScanCache,
     listTranscriptFiles,
@@ -879,7 +881,7 @@ async function main() {
     const missing = path.join(realDir, "vanished.jsonl");
     eq("scan: an unreadable file reads as null, not empty", await readTranscriptRecords(missing, "claude"), null);
     const records = await readFileRecords(cache, { path: missing, size: 10, mtimeMs: 10 }, "claude");
-    eq("scan: a read failure yields no records", records.length, 0);
+    eq("scan: a read failure reads as null, apart from an empty file", records, null);
     eq("scan: a read failure is NOT memoised", cache.size, 0);
   }
   {
@@ -966,6 +968,153 @@ async function main() {
     eq("scan: each source counts its session", first.sources.map((source) => source.distinctSessions).join(","), "1,1,1");
     eq("scan: the project row carries the working directory", first.projects.find((row) => row.provider === "claude").project, "/p/app");
     check("scan: the memo is persisted where the caller asked", fs.existsSync(cachePath));
+    // Replaced whole, never rewritten in place: a crash mid-write must leave
+    // the previous memo rather than a torn one that forces a full rescan.
+    const before = fs.statSync(cachePath).ino;
+    const claudeFile = fs.readdirSync(claudeRoot, { recursive: true }).find((name) => String(name).endsWith(".jsonl"));
+    fs.appendFileSync(path.join(claudeRoot, String(claudeFile)), "\n");
+    await scanUsage(scanRequest(cachePath));
+    check("scan: the memo is replaced atomically, not rewritten in place", fs.statSync(cachePath).ino !== before);
+  }
+  {
+    // A crash, a terminated worker or a quit between write and rename leaves
+    // the temp file; up to the memo's size each, they would pile up.
+    const cachePath = path.join(tmp, "scan-cache-sweep.json");
+    const stale = path.join(tmp, ".scan-cache-sweep.json.123.1700000000000.abcdef.tmp");
+    const fresh = path.join(tmp, ".scan-cache-sweep.json.123.1800000000000.fedcba.tmp");
+    const other = path.join(tmp, ".another-file.json.123.1700000000000.abcdef.tmp");
+    for (const file of [stale, fresh, other]) fs.writeFileSync(file, "partial");
+    const hourAgo = (Date.now() - 60 * 60 * 1000) / 1000;
+    fs.utimesSync(stale, hourAgo, hourAgo);
+    fs.utimesSync(other, hourAgo, hourAgo);
+    await scanUsage(scanRequest(cachePath));
+    check("scan: a temp file left by a write that never finished is swept", !fs.existsSync(stale));
+    check("scan: a temp file still being written is left alone", fs.existsSync(fresh));
+    check("scan: another file's temp files are left alone", fs.existsSync(other));
+  }
+  {
+    // Two scans that overlap both persist. The older snapshot must not be the
+    // one that lands last: hold the first rename while the second scan is
+    // asked for. (scanQueue already keeps them apart; this pins the result.)
+    const cachePath = path.join(tmp, "scan-cache-race.json");
+    const claudeFile = path.join(
+      claudeRoot,
+      String(fs.readdirSync(claudeRoot, { recursive: true }).find((name) => String(name).endsWith(".jsonl"))),
+    );
+    const realRename = fs.promises.rename;
+    let firstRenaming;
+    let releaseFirst;
+    const renaming = new Promise((resolve) => (firstRenaming = resolve));
+    const gate = new Promise((resolve) => (releaseFirst = resolve));
+    let cacheRenames = 0;
+    fs.promises.rename = async (from, to) => {
+      if (to === cachePath && cacheRenames++ === 0) {
+        firstRenaming();
+        await gate;
+      }
+      return realRename.call(fs.promises, from, to);
+    };
+    try {
+      const first = scanUsage(scanRequest(cachePath));
+      await renaming;
+      fs.appendFileSync(claudeFile, "\n");
+      const newSize = fs.statSync(claudeFile).size;
+      const second = scanUsage(scanRequest(cachePath));
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      releaseFirst();
+      await Promise.all([first, second]);
+      const landed = new Map();
+      decodeScanCache(fs.readFileSync(cachePath, "utf8"), landed);
+      eq("scan: overlapping persists leave the newest memo on disk", landed.get(claudeFile)?.size, newSize);
+    } finally {
+      fs.promises.rename = realRename;
+    }
+  }
+  {
+    // The forecast keeps the worker between its scans; turning it off must
+    // not leave the worker holding the memo for the rest of that time.
+    const analytics = await bundle(ANALYTICS_TS, path.join(tmp, "analytics.bundle.cjs"));
+    const now = Date.now();
+    analytics.keepWorkerFor(20 * 60_000, now);
+    eq("worker: a forecast scan keeps it 20 minutes", analytics.workerIdleDelayMs(now), 20 * 60_000);
+    analytics.releaseForecastWorker();
+    eq("worker: turning the forecast off drops that to the idle delay", analytics.workerIdleDelayMs(now), 3 * 60_000);
+    // A scan that checked the flag, then waited while it was turned off,
+    // asks for the keep-alive after the release already ran.
+    let forecastOn = true;
+    analytics.keepWorkerFor(20 * 60_000, now, () => forecastOn);
+    forecastOn = false;
+    eq("worker: a keep-alive asked for just before the forecast turned off does not hold it", analytics.workerIdleDelayMs(now), 3 * 60_000);
+  }
+  {
+    // Codex moves finished sessions to archived_sessions beside sessions.
+    // Skipping it hid most of a long history (about $340 shown of $6,100).
+    const codexHome = path.join(tmp, "codex-archive-tree");
+    const liveRoot = path.join(codexHome, "sessions");
+    const archivedRoot = path.join(codexHome, "archived_sessions");
+    fs.mkdirSync(path.join(liveRoot, "2026", "06", "24"), { recursive: true });
+    eq("codex roots: without an archive only sessions is read", codexTranscriptRoots(liveRoot).length, 1);
+    fs.mkdirSync(archivedRoot, { recursive: true });
+    const roots = codexTranscriptRoots(liveRoot);
+    eq("codex roots: the archive beside sessions is read too", roots.map((root) => root.dir).join(","), `${liveRoot},${archivedRoot}`);
+    const rollout = (name, model) => [name, `${sessionMeta}\n${turnContext(model)}\n${tokenCount()}\n`];
+    const [liveName, liveBody] = rollout("rollout-2026-06-24T22-03-02-019efba8-6f47-7fa2-b182-66ae4ed19230.jsonl", "gpt-5.5");
+    const [oldName, oldBody] = rollout("rollout-2026-06-20T09-00-00-019efba8-0000-7fa2-b182-66ae4ed19231.jsonl", "gpt-5.4");
+    fs.writeFileSync(path.join(liveRoot, "2026", "06", "24", liveName), liveBody);
+    fs.writeFileSync(path.join(archivedRoot, oldName), oldBody);
+    // The same rollout under both roots: archived between the two walks.
+    fs.writeFileSync(path.join(archivedRoot, liveName), liveBody);
+    const summary = await scanUsage({
+      roots,
+      cachePath: path.join(tmp, "scan-cache-archive.json"),
+      input: { sinceDay: "2026-06-01", untilDay: "2026-08-31", timeZone: "UTC" },
+    });
+    const codexCells = summary.buckets.filter((bucket) => bucket.provider === "codex");
+    eq("codex roots: archived sessions are counted", codexCells.map((bucket) => bucket.model).sort().join(","), "gpt-5.4,gpt-5.5");
+    eq(
+      "codex roots: a rollout seen under both roots counts once",
+      codexCells.reduce((total, bucket) => total + bucket.recordCount, 0),
+      2,
+    );
+    eq("codex roots: each folder has its own source row", summary.sources.map((source) => source.status).join(","), "ok,ok");
+  }
+  {
+    // Codex moves a just-finished rollout to archived_sessions between the
+    // listing and the read: the sessions/ copy fails to open, and the
+    // archived copy must still count rather than be skipped as a duplicate.
+    // An unreadable file stands in for the moved one.
+    const codexHome = path.join(tmp, "codex-moved-tree");
+    const liveRoot = path.join(codexHome, "sessions");
+    const archivedRoot = path.join(codexHome, "archived_sessions");
+    fs.mkdirSync(path.join(liveRoot, "2026", "06", "24"), { recursive: true });
+    fs.mkdirSync(archivedRoot, { recursive: true });
+    const name = "rollout-2026-06-24T22-03-02-019efba8-6f47-7fa2-b182-66ae4ed19239.jsonl";
+    const body = `${sessionMeta}\n${turnContext("gpt-5.5")}\n${tokenCount()}\n`;
+    const moving = path.join(liveRoot, "2026", "06", "24", name);
+    fs.writeFileSync(moving, body);
+    fs.chmodSync(moving, 0o000);
+    fs.writeFileSync(path.join(archivedRoot, name), body);
+    let readable = true;
+    try {
+      fs.readFileSync(moving);
+    } catch {
+      readable = false;
+    }
+    if (readable) {
+      console.log("SKIP codex roots: a failed read (running as root, chmod does not block reads)");
+    } else {
+      const summary = await scanUsage({
+        roots: codexTranscriptRoots(liveRoot),
+        cachePath: path.join(tmp, "scan-cache-moved.json"),
+        input: { sinceDay: "2026-06-01", untilDay: "2026-08-31", timeZone: "UTC" },
+      });
+      eq(
+        "codex roots: a rollout moved between listing and read still counts from the archive",
+        summary.buckets.filter((bucket) => bucket.provider === "codex").reduce((total, bucket) => total + bucket.recordCount, 0),
+        1,
+      );
+    }
+    fs.chmodSync(moving, 0o644);
   }
   {
     const missing = await scanUsage({

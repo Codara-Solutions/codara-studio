@@ -2404,6 +2404,14 @@ a { color: inherit; }
 .composer-shell {
   font-variant-numeric: normal;
 }
+
+/* Virtuoso's inline visibility:hidden holds a long chat back for 150 ms after
+   its rows have settled; list-reveal.ts decides when to drop it sooner.
+   Inherit, never visible: a retained chat is hidden by an ancestor (ChatStack,
+   the whiteboard view), and an explicit value would paint it through. */
+.cora-conversation[data-list-revealed] > [data-virtuoso-scroller] > [data-viewport-type] > [data-testid="virtuoso-item-list"] {
+  visibility: inherit !important;
+}
 .composer-context-label {
   font-variant-numeric: tabular-nums;
 }
@@ -11161,4 +11169,68 @@ button.st-list__row:hover,
   .usage-roster__spin { animation: none; }
   .usage-chip__bar > span,
   .usage-window__bar > span { transition: none; }
+}
+
+/* Labs: usage forecast (components/usage/UsageForecast.tsx) */
+.usage-forecast {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 1px;
+}
+.usage-forecast__line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--ink-dim);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+.usage-forecast[data-forecast-tone="danger"] .usage-forecast__line {
+  color: var(--danger);
+  font-weight: 600;
+}
+.usage-forecast__dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 99px;
+  transform: translateY(-1px);
+}
+.usage-forecast__extra {
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.35;
+}
+.usage-forecast__extra.is-nudge {
+  color: var(--warn);
+}
+.usage-forecast__confidence {
+  padding-left: 12px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+.usage-window__meter {
+  position: relative;
+}
+.usage-forecast-ghost {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.usage-forecast-ghost__span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 99px;
+  opacity: 0.32;
+}
+.usage-forecast-ghost__tick {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  border-radius: 1px;
+  opacity: 0.85;
 }
