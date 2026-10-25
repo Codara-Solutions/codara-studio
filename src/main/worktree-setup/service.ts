@@ -367,30 +367,40 @@ export class WorktreeSetupService {
   }
 
   /**
-   * For removal: stops a setup still going in the worktree and waits (at
-   * most `timeoutMs`) until it has stopped writing there. True when nothing
-   * of it runs any more.
+   * For removal: stops a setup still going in the worktree, a question for
+   * the user included, and waits (at most `timeoutMs` in all; the stop goes
+   * on after that) until it has stopped writing there. True when nothing of
+   * it runs any more.
    */
   async quiesce(idOrPath: string, timeoutMs = 30_000): Promise<boolean> {
-    let run = this.runs.get(idOrPath);
-    if (!run && /[\\/]/.test(idOrPath)) {
-      const real = await fsp.realpath(idOrPath).catch(() => null);
-      run = real ? this.runs.get(setupIdFor(real)) : undefined;
-    }
+    const run = await this.runFor(idOrPath);
     if (!run) return true;
-    if (!isWorktreeSetupFinished(run.status.state)) await this.stop(run.status.id);
-    return this.settled(run, timeoutMs);
+    const deadline = Date.now() + timeoutMs;
+    if (!isWorktreeSetupFinished(run.status.state)) {
+      let timer: NodeJS.Timeout | null = null;
+      const gaveUp = new Promise<void>((resolvePromise) => {
+        timer = setTimeout(resolvePromise, Math.max(0, timeoutMs));
+      });
+      try {
+        await Promise.race([this.stop(run.status.id).then(() => undefined), gaveUp]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+    return this.settled(run, deadline - Date.now());
   }
 
-  /**
-   * For a worktree Codara takes back: quiesces its setup, a question for the
-   * user included, and takes it off the tray. True when nothing of it runs.
-   */
-  async retire(idOrPath: string, timeoutMs = 30_000): Promise<boolean> {
-    const quiet = await this.quiesce(idOrPath, timeoutMs);
-    const status = await this.get(idOrPath);
-    if (status) this.dismiss(status.id);
-    return quiet;
+  /** Takes a finished setup off the tray, by id or worktree path, as Dismiss does. */
+  forget(idOrPath: string): boolean {
+    const run = this.runs.get(idOrPath) ?? [...this.runs.values()].find((entry) => entry.status.worktreePath === idOrPath);
+    return run ? this.dismiss(run.status.id) : false;
+  }
+
+  private async runFor(idOrPath: string): Promise<Run | undefined> {
+    const run = this.runs.get(idOrPath);
+    if (run || !/[\\/]/.test(idOrPath)) return run;
+    const real = await fsp.realpath(idOrPath).catch(() => null);
+    return real ? this.runs.get(setupIdFor(real)) : undefined;
   }
 
   /** True once the run's pipeline has returned; false after `timeoutMs`. */

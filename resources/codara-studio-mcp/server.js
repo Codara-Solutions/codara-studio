@@ -113,6 +113,11 @@ const WORKTREE_SETUP_TIMEOUT_MS = 9 * 60_000 + 30_000;
 // codara_worktree_cleanup remove waits up to 5 minutes for the user's answer,
 // then removes; the deadline stays under Codex's 11-minute tool limit.
 const WORKTREE_CLEANUP_TIMEOUT_MS = 10 * 60_000 + 30_000;
+// codara_terminal_create with a worktree: the approval card (40 s), the
+// worktree, the terminal, and when the terminal fails the rollback (its
+// setup stop, 10 s, then a guarded removal), so the error with
+// data.worktree still reaches the agent.
+const TERMINAL_WORKTREE_TIMEOUT_MS = 40_000 + PREVIEW_TERMINAL_TIMEOUT_MS + 10_000 + 2 * WORKTREE_TIMEOUT_MS;
 
 // ===========================================================================
 // Browser tool set (drive the built-in browser tabs). The definitions live in
@@ -2096,8 +2101,9 @@ const PROGRESS_RPCS = new Set([
 ]);
 const PROGRESS_INTERVAL_MS = 10_000;
 
-function rpcTimeoutMs(rpc) {
+function rpcTimeoutMs(rpc, args) {
   if (isOrchestrationRpc(rpc)) return ORCHESTRATION_TIMEOUT_MS;
+  if (rpc === "terminal.create" && args && args.worktree) return TERMINAL_WORKTREE_TIMEOUT_MS;
   if (rpc === "terminal.run") return TERMINAL_RUN_TIMEOUT_MS;
   if (rpc === "browser.use") return BROWSER_USE_TIMEOUT_MS;
   if (rpc === "worktree.create") return WORKTREE_CREATE_TIMEOUT_MS;
@@ -2669,9 +2675,9 @@ async function callTool(params, ctx = {}) {
   clampPreviewWait(rpc, args);
   resolveShareOfferPath(rpc, args);
 
-  const timeoutMs = rpcTimeoutMs(rpc);
+  const timeoutMs = rpcTimeoutMs(rpc, args);
   let heartbeat = null;
-  if (ctx.progress && PROGRESS_RPCS.has(rpc)) {
+  if (ctx.progress && (PROGRESS_RPCS.has(rpc) || timeoutMs === TERMINAL_WORKTREE_TIMEOUT_MS)) {
     let beats = 0;
     heartbeat = setInterval(() => {
       beats += 1;

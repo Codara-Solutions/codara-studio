@@ -254,7 +254,10 @@ export function agentWorktreeSetupRunner() {
     get: (idOrPath: string) => worktreeSetupService().get(idOrPath),
     tail: (id: string, lines: number) => worktreeSetupService().tail(id, lines),
     summary: agentSetupSummary,
-    stop: (idOrPath: string) => worktreeSetupService().retire(idOrPath),
+    stop: (idOrPath: string, timeoutMs: number) => worktreeSetupService().quiesce(idOrPath, timeoutMs),
+    dismiss: async (idOrPath: string) => {
+      worktreeSetupService().forget(idOrPath);
+    },
   };
 }
 

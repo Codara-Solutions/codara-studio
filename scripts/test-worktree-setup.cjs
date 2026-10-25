@@ -720,6 +720,22 @@ async function runSuite(m, scratch) {
     assert.equal(alive, false, "the child that ignored SIGTERM is gone once stop returned");
   });
 
+  await check("quiesce gives up within its time even when a child ignores SIGTERM", async () => {
+    const wt = addWorktree("wt-quiesce-capped");
+    write(
+      path.join(repo, ".codara", "worktree.json"),
+      JSON.stringify({ setup: [`sh -c 'trap "" TERM; echo $$ > stubborn.pid; while :; do sleep 0.1; done' &`, "wait"] }),
+    );
+    const svc = makeService();
+    const started = await svc.start({ sourceCwd: repo, worktreePath: wt, trigger: "ui", userCommand: null });
+    const pidFile = path.join(wt, "stubborn.pid");
+    for (let i = 0; i < 100 && !fs.existsSync(pidFile); i += 1) await new Promise((r) => setTimeout(r, 50));
+    const t0 = Date.now();
+    await svc.quiesce(started.id, 1_000);
+    assert.ok(Date.now() - t0 < 2_000, `took ${Date.now() - t0} ms`);
+    assert.equal((await svc.waitFor(started.id, 10_000)).state, "stopped", "the stop goes on and ends it");
+  });
+
   await check("a command that leaves a process in the background still ends", async () => {
     // The background sleep keeps the output pipes open: waiting for them
     // would hold the step (and the agents waiting on it) until it exits.
@@ -874,8 +890,10 @@ async function runSuite(m, scratch) {
         const quiet = gated({ onDismiss: (id) => dismissed.push(id) });
         const pending = await quiet.start({ sourceCwd: gate, worktreePath: asking, trigger: "agent", userCommand: null });
         assert.equal((await quiet.whenPrepared(pending.id)).state, "awaiting-approval");
-        assert.equal(await quiet.retire(asking), true);
+        assert.equal(await quiet.quiesce(asking), true);
         assert.equal((await quiet.get(pending.id)).state, "stopped");
+        assert.deepEqual(dismissed, [], "stopping alone keeps the card");
+        assert.equal(quiet.forget(asking), true);
         assert.deepEqual(dismissed, [pending.id]);
         assert.equal(quiet.list().length, 0);
         assert.equal(fs.existsSync(path.join(asking, "ran.txt")), false);
@@ -1459,7 +1477,10 @@ function runnerFor(svc, service) {
     get: (idOrPath) => svc.get(idOrPath),
     tail: (id, lines) => svc.tail(id, lines),
     summary: service.agentSetupSummary,
-    stop: (idOrPath) => svc.retire(idOrPath),
+    stop: (idOrPath, timeoutMs) => svc.quiesce(idOrPath, timeoutMs),
+    dismiss: async (idOrPath) => {
+      svc.forget(idOrPath);
+    },
   };
 }
 

@@ -279,7 +279,9 @@ const TERMINAL_SPAWN_WAIT_MS = 10_000;
 // enough for a bad-cwd shell to have exited (chdir failure is near-instant),
 // short enough not to add noticeable latency to a healthy create.
 const TERMINAL_SPAWN_SETTLE_MS = 750;
-// Under the MCP server's 60 s timeout for terminal.create.
+// Under the MCP server's 60 s timeout for terminal.create. With a worktree
+// the server waits longer (TERMINAL_WORKTREE_TIMEOUT_MS) and the worktree's
+// own time is not counted against this.
 const CROSS_WORKSPACE_CREATE_BUDGET_MS = 55_000;
 // A burst of creates from one agent shares one process listing.
 const CALLER_PROCESS_LIST_MAX_AGE_MS = 2_000;
@@ -1718,7 +1720,9 @@ async function createTerminal(
   // The worktree is made in the target workspace's repository, under the
   // same approval as the terminal, and the terminal opens in it.
   let worktree: Record<string, unknown> | null = null;
+  let worktreeMs = 0;
   if (worktreeRequest) {
+    const worktreeStartedAt = Date.now();
     try {
       const caller = { ...(await worktreeCaller(params)), ...(crossWorkspace ? { workspaceId: crossWorkspace.target.id } : {}) };
       const created = await createTerminalWorktree(caller, worktreeRequest, worktreeDeps());
@@ -1732,6 +1736,7 @@ async function createTerminal(
         return errorResponse(id, ERR_INTERNAL, "the worktree was made without a workspace");
       }
       worktree = created;
+      worktreeMs = Date.now() - worktreeStartedAt;
       workspaceId = created.workspaceId;
       workspaceCwd = created.path;
       cwd = created.path;
@@ -1769,7 +1774,7 @@ async function createTerminal(
           ? {
               timeoutMs: Math.max(
                 5_000,
-                CROSS_WORKSPACE_CREATE_BUDGET_MS - (Date.now() - startedAt) - TERMINAL_SPAWN_WAIT_MS - TERMINAL_SPAWN_SETTLE_MS,
+                CROSS_WORKSPACE_CREATE_BUDGET_MS - (Date.now() - startedAt - worktreeMs) - TERMINAL_SPAWN_WAIT_MS - TERMINAL_SPAWN_SETTLE_MS,
               ),
             }
           : {}),

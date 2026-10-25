@@ -278,24 +278,44 @@ async function main() {
     // is stopped and its card dismissed first, or the process scan would
     // refuse the rollback and leave the worktree behind.
     const stops = [];
+    const dismissals = [];
+    let stopClears = true;
     const installing = {
       ...withSetup,
       worktreeSetup: {
         ...withSetup.worktreeSetup,
-        stop: async (idOrPath) => {
-          stops.push(idOrPath);
-          h.processes = [];
+        stop: async (idOrPath, timeoutMs) => {
+          stops.push([idOrPath, timeoutMs]);
+          if (stopClears) h.processes = [];
           return true;
+        },
+        dismiss: async (idOrPath) => {
+          dismissals.push(idOrPath);
         },
       },
     };
+    // A removal still refused (a shell left in it) keeps the setup's card,
+    // so the user can still see and rerun the half-run setup.
+    const shellLeft = await aw.createTerminalWorktree({ ...coordinator, workspaceId: "ws-repo" }, { branch: "agent/shell-left" }, installing);
+    assert.equal(shellLeft.ok, true, JSON.stringify(shellLeft));
+    stopClears = false;
+    h.processes = [{ pid: 4344, command: "zsh" }];
+    const refusedRollback = await aw.rollBackTerminalWorktree(coordinator, shellLeft, installing);
+    h.processes = [];
+    stopClears = true;
+    assert.equal(refusedRollback.removed, false, JSON.stringify(refusedRollback));
+    assert.deepEqual(dismissals, [], "a refused rollback keeps the setup card");
+    assert.ok(stops[0][1] > 0 && stops[0][1] <= 10_000, `the setup stop wait is capped: ${stops[0][1]}`);
+    assert.equal((await aw.removeAgentWorktree(coordinator, { workspaceId: shellLeft.workspaceId }, deps)).removed, true);
+    stops.length = 0;
     const busy = await aw.createTerminalWorktree({ ...coordinator, workspaceId: "ws-repo" }, { branch: "agent/installing" }, installing);
     assert.equal(busy.ok, true, JSON.stringify(busy));
     h.processes = [{ pid: 4343, command: "npm install" }];
     const stoppedFirst = await aw.rollBackTerminalWorktree(coordinator, busy, installing);
     h.processes = [];
     assert.equal(stoppedFirst.removed, true, JSON.stringify(stoppedFirst));
-    assert.deepEqual(stops, [busy.path]);
+    assert.deepEqual(stops.map(([idOrPath]) => idOrPath), [busy.path]);
+    assert.deepEqual(dismissals, [busy.path], "the card goes once the worktree is gone");
     assert.equal(fs.existsSync(busy.path), false);
 
     // ── Who may call ───────────────────────────────────────────────────────

@@ -208,9 +208,11 @@ export interface AgentWorktreeSetupRunner {
   get(idOrPath: string): Promise<WorktreeSetupStatus | null>;
   tail(id: string, lines: number): Promise<string>;
   summary(status: WorktreeSetupStatus, logTail: string): Record<string, unknown>;
-  // Stops a setup still going in the worktree, waits until it no longer
-  // writes there and dismisses its card. False when it did not stop in time.
-  stop?(idOrPath: string): Promise<boolean>;
+  // Stops a setup still going in the worktree and waits (at most timeoutMs)
+  // until it no longer writes there. False when it did not stop in time.
+  stop?(idOrPath: string, timeoutMs: number): Promise<boolean>;
+  // Takes its card off the tray, once the worktree is gone.
+  dismiss?(idOrPath: string): Promise<void>;
 }
 
 // codara_worktree_create waits at most this long for a setup that asks
@@ -223,6 +225,9 @@ const SETUP_LOG_LINES_MAX = 200;
 
 const AGENT_WORKTREE_LIMIT = 20;
 const FETCH_TIMEOUT_MS = 30_000;
+// A rolled-back terminal worktree waits this long for its setup to stop; the
+// MCP server's TERMINAL_WORKTREE_TIMEOUT_MS counts it in.
+const ROLLBACK_SETUP_STOP_MS = 10_000;
 const PANE_LOOKUP_TIMEOUT_MS = 2_000;
 const LIST_ITEM_BUDGET_MS = 10_000;
 const LIST_CONCURRENCY = 4;
@@ -957,8 +962,9 @@ export async function createAgentWorktree(
 
 /**
  * terminal.create's worktree option. It never waits for the worktree's setup:
- * the call has the MCP server's 60 seconds, part of them spent on the
- * approval card, and a command started after the caller gave up would run
+ * the MCP server gives the call room for the approval card, the worktree, the
+ * terminal and a rollback (TERMINAL_WORKTREE_TIMEOUT_MS), not for a setup of
+ * up to 5 minutes, and a command started after the caller gave up would run
  * unattended. A branch whose worktree another agent made is refused, so a
  * terminal never opens in someone else's checkout.
  */
@@ -993,8 +999,9 @@ export async function createTerminalWorktree(
  * Takes back the worktree createTerminalWorktree made when its terminal did
  * not open, through the same guarded removal as codara_worktree_remove. One
  * that existed before the call stays. Its setup is stopped first: it rarely
- * has finished (the call does not wait for it), its commands would fail the
- * removal's process scan, and an approval card would outlive the worktree.
+ * has finished (the call does not wait for it) and its commands would fail
+ * the removal's process scan. Its card leaves the tray only with the
+ * worktree, so a worktree that stays keeps a way to rerun its setup.
  */
 export async function rollBackTerminalWorktree(
   caller: WorktreeCaller,
@@ -1004,13 +1011,17 @@ export async function rollBackTerminalWorktree(
   if (made.created !== true || typeof made.workspaceId !== "string") {
     return { removed: false, reason: "it was there before this call" };
   }
-  if (deps.worktreeSetup?.stop && typeof made.path === "string") {
-    await deps.worktreeSetup.stop(made.path).catch(() => false);
+  const setupPath = typeof made.path === "string" ? made.path : null;
+  if (deps.worktreeSetup?.stop && setupPath) {
+    await deps.worktreeSetup.stop(setupPath, ROLLBACK_SETUP_STOP_MS).catch(() => false);
   }
   const removed = await removeAgentWorktree(caller, { workspaceId: made.workspaceId, deleteBranch: true }, deps).catch(
     (err: unknown) => refusal("WORKTREE_GIT_FAILED", cleanText(errorText(err), 300)),
   );
   if (isRefusal(removed)) return { removed: false, reason: `${removed.code}: ${removed.error}` };
+  if (removed.removed === true && deps.worktreeSetup?.dismiss && setupPath) {
+    await deps.worktreeSetup.dismiss(setupPath).catch(() => undefined);
+  }
   return { removed: removed.removed === true };
 }
 

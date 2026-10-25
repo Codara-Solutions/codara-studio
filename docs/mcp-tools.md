@@ -655,8 +655,9 @@ terminal in it, so an agent starts inside its own checkout in one call:
 The worktree is made as `codara_worktree_create` makes it (same branch rules,
 refusals, `.worktreeinclude` and setup), from the repository of the target
 workspace: `workspace` when given, otherwise the caller's own. It never waits
-for its setup: the call has the MCP server's 60 seconds, part of them spent on
-the approval card. A branch that already has a worktree opens a terminal there
+for its setup. The MCP server gives this call longer than a plain terminal
+(about 7 minutes): enough for the approval card, the worktree, the terminal
+and, when the terminal fails, the rollback. A branch that already has a worktree opens a terminal there
 only when the caller made that worktree; another agent's is refused with
 `WORKTREE_NOT_YOURS`. The call waits out a Cora chat's compaction like
 `codara_worktree_create`. A
@@ -668,8 +669,9 @@ which finds it again by `workspaceId` from its own folder (see
 (for example `WORKTREE_BRANCH_EXISTS: ...`) and opens no terminal. When the
 terminal does not open after the worktree was made (the shell dies, the
 caller disconnects), Codara stops its setup (a question waiting for the
-user included, whose card leaves the tray) and removes the worktree again
-through the same guarded removal; if that is refused, the error names where
+user included, for at most 10 seconds) and removes the worktree again
+through the same guarded removal; the setup's card leaves the tray with the
+worktree. If the removal is refused, the card stays, the error names where
 the worktree stays and carries `data.worktree: { workspaceId, path, branch }`.
 A tab that appears after the call gave up is closed. `cwd` and `worktree` cannot be combined. The result's
 `workspaceId` and `workspace` are the worktree's own, and it adds
