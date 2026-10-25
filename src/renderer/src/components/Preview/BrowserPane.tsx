@@ -735,20 +735,39 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         const wv = getLiveWebview();
         if (!wv) return Promise.resolve();
         return new Promise<void>((resolve) => {
+          const sameUrl = (raw: string) => {
+            try {
+              return new URL(raw).href;
+            } catch {
+              return raw;
+            }
+          };
+          const ours = new Set([sameUrl(next)]);
+          let started = false;
+          const follow = (e: { type?: string; isMainFrame?: boolean; url?: string }) => {
+            if (e.isMainFrame === false || !e.url) return;
+            if (e.type === "did-redirect-navigation") ours.add(sameUrl(e.url));
+            else if (ours.has(sameUrl(e.url))) started = true;
+          };
           // dom-ready, not the commit: a page that alerts while it loads holds
           // the call here, so the dialog guard answers with the dialog. A
-          // subframe's move or an aborted (-3) earlier load is not this page.
-          const settle = (e?: { isMainFrame?: boolean; errorCode?: number }) => {
+          // subframe's move is not this page, and neither is a -3 (aborted)
+          // for another URL, the earlier load this one replaced. A 204 sends
+          // no did-fail-load at all, only did-stop-loading once this load has
+          // started; a download or a blocked navigate ends in a -3 for this
+          // load or one of its redirects.
+          const settle = (e?: { type?: string; isMainFrame?: boolean; errorCode?: number; validatedURL?: string }) => {
             if (e && e.isMainFrame === false) return;
-            if (e?.errorCode === -3) return;
-            wv.removeEventListener("dom-ready", settle);
-            wv.removeEventListener("did-navigate-in-page", settle);
-            wv.removeEventListener("did-fail-load", settle);
+            if (e?.errorCode === -3 && !ours.has(sameUrl(e.validatedURL ?? ""))) return;
+            if (e?.type === "did-stop-loading" && !started) return;
+            for (const name of ["dom-ready", "did-navigate-in-page", "did-fail-load", "did-stop-loading"]) wv.removeEventListener(name, settle);
+            wv.removeEventListener("did-start-navigation", follow);
+            wv.removeEventListener("did-redirect-navigation", follow);
             resolve();
           };
-          wv.addEventListener("dom-ready", settle);
-          wv.addEventListener("did-navigate-in-page", settle);
-          wv.addEventListener("did-fail-load", settle);
+          wv.addEventListener("did-start-navigation", follow);
+          wv.addEventListener("did-redirect-navigation", follow);
+          for (const name of ["dom-ready", "did-navigate-in-page", "did-fail-load", "did-stop-loading"]) wv.addEventListener(name, settle);
           try {
             // The load itself may never finish (a page that alerts while it
             // loads); its failure is reported by did-fail-load above.

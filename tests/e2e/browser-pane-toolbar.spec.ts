@@ -54,6 +54,9 @@ async function launch(): Promise<Fixture> {
   }));
   const server: Server = createServer((req, res) => {
     const name = (req.url ?? "/").replace(/[^a-z]/g, "") || "dashboard";
+    // A 204 keeps the current page: Chromium ends that load with -3 (aborted).
+    if (name === "nocontent") return void res.writeHead(204).end();
+    if (name === "bounce") return void res.writeHead(302, { location: "/nocontent" }).end();
     const send = () => {
       res.writeHead(200, { "content-type": "text/html" });
       // "alert" asks while it loads: no DOMContentLoaded until it is answered.
@@ -581,6 +584,25 @@ test("navigates on an agent's sleeping tab: url-only reuses and guards it, group
     await page.waitForTimeout(1_000);
     expect.soft(await pane(page, tabId).locator("webview").count(), "a group-only navigate does not wake the tab").toBe(0);
     expect.soft(await asleep(), "the tab stays asleep").toBe(true);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("a navigate the page answers with 204 returns at once, even after a redirect", async () => {
+  test.setTimeout(120_000);
+  const fixture = await launch();
+  const { page, request } = fixture;
+  try {
+    const tab = await openBrowserTab(fixture, "docs");
+    await expect.poll(() => pageTitle(page, tab), { timeout: 10_000 }).toBe("Acme docs");
+    for (const path of ["nocontent", "bounce"]) {
+      const started = Date.now();
+      const result = (await request("preview.navigate", { tabId: tab, url: `${fixture.url}${path}` }).catch((error) => ({ error: String(error) }))) as { url?: string; error?: string };
+      expect.soft(Date.now() - started, `${path}: no wait for a page that never comes`).toBeLessThan(5_000);
+      expect.soft(result.error, `${path}: no error`).toBeUndefined();
+      expect.soft(await pageTitle(page, tab), `${path}: the page stays`).toBe("Acme docs");
+    }
   } finally {
     await fixture.close();
   }
