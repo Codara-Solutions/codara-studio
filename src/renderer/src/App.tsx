@@ -197,6 +197,8 @@ import { isAppTearingDown, markAppTearingDown } from "./lib/app-lifecycle";
 import { requestEditorReveal } from "./components/editor-cm/reveal";
 import { workspaceRailSequence, worktreeSourceWorkspace } from "./components/jump/rail-order";
 import { useWorkspaceJump } from "./components/jump/useWorkspaceJump";
+import { nextTerminalStop, type TerminalSwitchScope } from "./components/jump/terminal-switch";
+import type { JumpSources } from "./components/jump/jump-model";
 import { requestShareOffer, setShareWorkspaceRoots } from "./components/share/offer-store";
 import {
   buildAwayDigest,
@@ -4192,6 +4194,41 @@ export default function App() {
     focusTerminalTarget,
   });
 
+  // What the jump palette and the recent-terminal switcher list, read when
+  // they open.
+  const jumpSources = (): JumpSources => ({
+    workspaces: workspaceRailSequence(workspaces, workspaceGroups, workspaceRailOrder, {
+      includeCollapsed: true,
+    }),
+    // The loaded layout last: it is the live one if a stale copy of the same
+    // workspace is still among the inactive ones.
+    layouts: [
+      ...tabs.inactiveWorkspaceLayouts.map((layout) => ({
+        workspaceId: layout.workspaceId,
+        tabs: layout.tabs,
+        activeTabId: layout.activeId,
+      })),
+      ...(tabs.tabsWorkspaceId
+        ? [{ workspaceId: tabs.tabsWorkspaceId, tabs: tabs.tabs, activeTabId: tabs.activeId }]
+        : []),
+    ],
+    activeWorkspaceId: activeId,
+    branchByWorkspaceId,
+    toneByWorkspaceId,
+    attention: terminalAttention,
+    detectedAgents: terminalAgents,
+    recency: workspaceJump.recency(),
+  });
+  const jumpSourcesRef = useRef(jumpSources);
+  jumpSourcesRef.current = jumpSources;
+  const focusNextTerminal = useCallback(
+    (scope: TerminalSwitchScope) => {
+      const next = nextTerminalStop(jumpSourcesRef.current(), scope);
+      if (next) workspaceJump.jumpTo(next);
+    },
+    [workspaceJump],
+  );
+
   // Workspace N is the Nth row the rail shows, folders flattened in place.
   const handleSelectWorkspaceByIndex = useCallback(
     (event: KeyboardEvent) => {
@@ -5696,6 +5733,8 @@ export default function App() {
         const prev = cycle[(Math.max(0, idx) - 1 + cycle.length) % cycle.length];
         if (prev) tabs.setActiveTab(prev.id);
       },
+      "terminal.focusNext": () => focusNextTerminal("workspace"),
+      "terminal.focusNextAll": () => focusNextTerminal("all"),
       "tab.group": () => {
         const active = visibleWorkbenchTabs.find((tab) => tab.id === activeVisibleTabId);
         if (!active || isRunOwnedTab(active)) return;
@@ -5858,6 +5897,7 @@ export default function App() {
       tabs,
       visibleWorkbenchTabs,
       workspaceJump,
+      focusNextTerminal,
     ],
   );
 
@@ -5875,6 +5915,10 @@ export default function App() {
       if (onboardingOpen && document.querySelector(".onboarding-dialog")) return true;
       // The open jump palette answers Mod+1..6 itself.
       if (jumpPaletteOpen && id === "view.selectByIndex") return true;
+      // A switch behind a dialog would land out of sight.
+      if ((id === "terminal.focusNext" || id === "terminal.focusNextAll") && visibleModalDialog()) {
+        return true;
+      }
       if (id === "workspace.selectByIndex" || id === "workspace.back" || id === "workspace.forward") {
         // Switching workspaces behind a dialog (the jump palette, Settings,
         // Fix with agent) happens out of sight and leaves the dialog
@@ -6760,29 +6804,7 @@ export default function App() {
         {jumpPaletteOpen ? (
           <Suspense fallback={null}>
             <JumpPalette
-              sources={{
-                workspaces: workspaceRailSequence(workspaces, workspaceGroups, workspaceRailOrder, {
-                  includeCollapsed: true,
-                }),
-                // The loaded layout last: it is the live one if a stale copy
-                // of the same workspace is still among the inactive ones.
-                layouts: [
-                  ...tabs.inactiveWorkspaceLayouts.map((layout) => ({
-                    workspaceId: layout.workspaceId,
-                    tabs: layout.tabs,
-                    activeTabId: layout.activeId,
-                  })),
-                  ...(tabs.tabsWorkspaceId
-                    ? [{ workspaceId: tabs.tabsWorkspaceId, tabs: tabs.tabs, activeTabId: tabs.activeId }]
-                    : []),
-                ],
-                activeWorkspaceId: activeId,
-                branchByWorkspaceId,
-                toneByWorkspaceId,
-                attention: terminalAttention,
-                detectedAgents: terminalAgents,
-                recency: workspaceJump.recency(),
-              }}
+              sources={jumpSources()}
               worktreeSource={worktreeSourceWorkspace(workspaces, activeId, branchByWorkspaceId)}
               chordHint={hintForCommand(bindingTable, "jump.open")}
               onClose={() => setJumpPaletteOpen(false)}
