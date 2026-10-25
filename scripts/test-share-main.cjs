@@ -383,7 +383,9 @@ async function main() {
       fs.writeFileSync(path.join(dir, "notes.txt"), "x");
       fs.writeFileSync(path.join(dir, "big.html"), Buffer.alloc(5 * 1024 * 1024 + 1, 32));
       let now = 1_000_000;
-      const allowedRoot = dir;
+      // The real gate admits a workspace root by its real path too; the
+      // offer asks with the link target's real path, under /private on macOS.
+      const allowedRoot = fs.realpathSync(dir);
       const gate = new offerMod.ShareOfferGate({
         assertReadable: async (p) => {
           if (!p.startsWith(allowedRoot + path.sep)) throw new Error("Path not allowed");

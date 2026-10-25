@@ -2488,14 +2488,26 @@ function startStdioServer() {
       const line = buffer.slice(0, idx).trim();
       buffer = buffer.slice(idx + 1);
       if (!line) continue;
-      handleLine(line).catch(() => undefined);
+      const handled = handleLine(line).catch(() => undefined);
+      pendingLines.add(handled);
+      handled.finally(() => pendingLines.delete(handled));
     }
   });
 
+  // The client is gone: every request still in flight is cancelled and gets
+  // no answer, and the process exits once the replies already written have
+  // drained. stdout to a pipe is asynchronous on macOS, so exiting before that
+  // cuts a long reply (tools/list is over 64 KB) off mid-line.
   process.stdin.on("end", () => {
-    process.exit(0);
+    for (const controller of inFlight.values()) controller.abort();
+    const exit = () => process.stdout.write("", () => process.exit(0));
+    setTimeout(exit, STDIN_END_GRACE_MS).unref();
+    Promise.allSettled([...pendingLines]).then(exit);
   });
 }
+
+const STDIN_END_GRACE_MS = 2_000;
+const pendingLines = new Set();
 
 function writeLine(payload) {
   process.stdout.write(JSON.stringify(payload) + "\n");

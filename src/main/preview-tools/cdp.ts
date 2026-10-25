@@ -111,10 +111,22 @@ function ownerHolds(session: CdpSession, owner: string): OwnerHolds {
 /** Hold a domain enabled for this caller; a second enable is a no-op. */
 async function holdDomain(session: CdpSession, domain: string, params?: Record<string, unknown>): Promise<() => Promise<void>> {
   const release = await session.enable(domain, params && Object.keys(params).length ? params : undefined);
+  if (domain !== "Debugger") return release;
   // A paused page runs nothing, and no snippet could resume it (stepping is
   // refused), so the read-only debugger never stops on a breakpoint.
-  if (domain === "Debugger") await session.send("Debugger.setSkipAllPauses", { skip: true }).catch(() => {});
-  return release;
+  const skipPauses = () => session.send("Debugger.setSkipAllPauses", { skip: true }).catch(() => {});
+  await skipPauses();
+  // Chromium on macOS drops the skip when the tab navigates, and the page then
+  // stopped on its next `debugger` statement. V8 reports a pause only to the
+  // sessions that accept it, so one reported here is a pause the skip should
+  // have prevented: skip again and resume.
+  const stopWatching = session.on("Debugger.paused", () => {
+    void skipPauses().then(() => session.send("Debugger.resume").catch(() => {}));
+  });
+  return async () => {
+    stopWatching();
+    await release();
+  };
 }
 
 async function enableFor(session: CdpSession, owner: string, domain: string, params: Record<string, unknown>): Promise<void> {
