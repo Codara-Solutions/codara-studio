@@ -504,7 +504,9 @@ takes `user@host:port` (port 1 to 65535).
   (matched by the name Codara connects to), as `knownHostsSettings` in
   `ssh-hosts.ts` lists them). Which Host and Match blocks apply is decided
   by `ssh-config-match.ts` as OpenSSH 9.6 decides it (Match user is the
-  login, Includes keep their own scope, `Match final` rereads the files).
+  login, Includes keep their own scope, `Match final` rereads the files;
+  values are split into words with quotes, escapes and comments as ssh's
+  `argv_split` does).
   A Match criterion it cannot evaluate (exec, localnetwork) refuses the
   host when its block could set a known-hosts setting, and a line ssh
   cannot read refuses every host, both naming the file and line.
