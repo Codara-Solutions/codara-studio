@@ -9,7 +9,8 @@
 //   - After the jump, the scroll position, the height and the rendered rows
 //     must all hold still for three frames in a row; any change restarts the
 //     count, and a frame with no rows clears it.
-//   - Rows still loading an image or a Mermaid diagram are not still, and
+//   - Rows still loading an image or a Mermaid diagram are not still, nor is
+//     any row while a web font is loading (it can reflow the text), and
 //     nothing is revealed before the execution record has hydrated.
 //   - ChatConversation ties the reveal to the same key that remounts
 //     Virtuoso, and the CSS override reaches only its own item list and
@@ -85,13 +86,14 @@ async function main() {
     assert.deepEqual(run(R, [mid, end, end, { ...end, rows: "" }, end, end, end]), [6]);
   });
 
-  test("rows still loading content are not still", () => {
+  test("rows still loading content or fonts are not still", () => {
     const loading = { ...end, pending: true };
     assert.deepEqual(run(R, [mid, end, loading, loading, loading, loading]), []);
     assert.deepEqual(run(R, [mid, loading, loading, end, end, end]), [5]);
     const reveal = read("src/renderer/src/components/chat/list-reveal.ts");
     assert.match(reveal, /querySelector\("\[data-mermaid-pending\]"\)/);
     assert.match(reveal, /some\(\(image\) => !image\.complete\)/);
+    assert.match(reveal, /document\.fonts\.status === "loading" \|\|/);
     assert.match(read("src/renderer/src/components/chat/Markdown.tsx"), /<div data-mermaid-pending style=/);
   });
 
