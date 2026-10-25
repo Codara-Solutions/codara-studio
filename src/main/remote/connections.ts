@@ -548,9 +548,10 @@ class RemoteConnection {
     this.setState("connecting");
     const known = await knownHostsSettings(host);
     this.assertCurrent(generation, signal);
-    // ssh stops before connecting, whatever the confirmation setting.
+    // ssh stops before connecting, or may apply a revocation list Codara
+    // cannot see: refused whatever the confirmation setting.
     if ("refusal" in known) {
-      const message = `Your ssh config stops ssh from connecting to ${host.id}: ${known.refusal}.`;
+      const message = `Codara will not connect to ${host.id} because of your ssh config: ${known.refusal}.`;
       this.setState("error", message);
       throw new Error(`SSH connection to ${host.id} failed: ${message}`);
     }
