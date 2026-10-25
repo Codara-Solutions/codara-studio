@@ -76,8 +76,12 @@ const HISTORY_DAYS = 56;
 /** Limit readings are small and memoised, and every past window is one more
  * lesson for the forecast, so they reach further back than the spend. */
 const READINGS_DAYS = 120;
-const SCAN_TTL_MS = 3 * 60 * 1000;
-const BACKTEST_TTL_MS = 60 * 60 * 1000;
+/** Longer than the renderer's 5-minute poll, so most reports reuse the last
+ * scan; the live reading still moves the forecast on every one. */
+const SCAN_TTL_MS = 10 * 60 * 1000;
+/** The back-test's cache key already changes when a window closes or a live
+ * forecast is scored, which is all that moves it; this only bounds drift. */
+const BACKTEST_TTL_MS = 6 * 60 * 60 * 1000;
 const HISTORY_FILE = "usage-history.jsonl";
 const HISTORY_MAX_BYTES = 4 * 1024 * 1024;
 const FORECAST_LOG_FILE = "usage-forecast-log.jsonl";
@@ -763,6 +767,8 @@ async function buildReport(
       const lengthMs = windowLengthMs(window.label);
       const resetsAtMs = window.resetsAt ? Date.parse(window.resetsAt) : Number.NaN;
       if (lengthMs === 0 || Number.isNaN(resetsAtMs) || resetsAtMs <= nowMs) continue;
+      // A reset further out than a whole window is a bad reading.
+      if (resetsAtMs > nowMs + lengthMs + HOUR_MS) continue;
       let track: Track | null = null;
       const readings = provider === "openai-codex" ? codexReadings(scan, lengthMs / 60_000) : [];
       if (!profile.isDefault) {

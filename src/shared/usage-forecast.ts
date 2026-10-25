@@ -242,6 +242,9 @@ function analogDaysFor(
 }
 
 const REGIME_MS = 3 * DAY_MS;
+/** No window is longer than a week; a reset further out is a bad reading and
+ * must not turn into an unbounded number of steps. */
+const MAX_HORIZON_MS = 8 * DAY_MS;
 
 function pickWeighted(days: readonly AnalogDay[], random: () => number): AnalogDay | null {
   if (days.length === 0) return null;
@@ -286,7 +289,8 @@ export function forecastWindow(input: ForecastInput): ForecastResult {
   const used = clamp(input.usedPercent, 0, 100);
   const factors = input.percentPerUnit.filter((value) => Number.isFinite(value) && value >= 0);
   const factorMid = factors.length > 0 ? median(factors) : 0;
-  const pathCount = input.paths ?? 400;
+  // An account not in use does not grow, so every replay would be the same.
+  const pathCount = input.inUse ? (input.paths ?? 400) : 1;
   const random = seededRandom(input.seed ?? Math.floor(windowStartMs / 60_000));
   const { recentMs, fadeMs } = paceSpan(kind);
 
@@ -301,7 +305,8 @@ export function forecastWindow(input: ForecastInput): ForecastResult {
   const usualPerHour = usual.rate * factorMid;
 
   const steps: number[] = [];
-  for (let t = nowMs + bucketMs; t < resetsAtMs; t += bucketMs) steps.push(t);
+  const lastStepMs = Math.min(resetsAtMs, nowMs + MAX_HORIZON_MS);
+  for (let t = nowMs + bucketMs; t < lastStepMs; t += bucketMs) steps.push(t);
   steps.push(resetsAtMs);
 
   const todayStart = localDayStart(nowMs);
@@ -406,7 +411,11 @@ export function forecastWindow(input: ForecastInput): ForecastResult {
   }
 
   const cone: ConePoint[] = [{ ms: nowMs, p10: used, p50: used, p90: used }];
+  // Sorting every replay at every step is most of a week's cost; hourly is
+  // still finer than the chart draws it.
+  const coneEvery = kind === "5h" ? 1 : 4;
   steps.forEach((ms, s) => {
+    if (s % coneEvery !== coneEvery - 1 && s !== steps.length - 1) return;
     const sorted = (columns[s] as number[]).slice().sort((a, b) => a - b);
     cone.push({
       ms,

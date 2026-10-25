@@ -24,6 +24,7 @@ const FORECAST_TS = path.join(SHARED_DIR, "usage-forecast.ts");
 const SIGNALS_TS = path.join(ROOT, "src", "main", "usage-forecast-signals.ts");
 const LEARNING_TS = path.join(SHARED_DIR, "usage-forecast-learning.ts");
 const MAIN_FORECAST_TS = path.join(ROOT, "src", "main", "usage-forecast.ts");
+const HOOK_TS = path.join(ROOT, "src", "renderer", "src", "components", "usage", "useUsageForecast.ts");
 // The main module's own homes and the scan it would ask the worker for are
 // stubbed, so its log and scoring run against a temporary folder.
 const forecastHome = fs.mkdtempSync(path.join(os.tmpdir(), "codara-forecast-home-"));
@@ -35,6 +36,7 @@ const harnessPlugin = {
       path: path.join(SHARED_DIR, `${args.path.slice("@shared/".length)}.ts`),
     }));
     build.onResolve({ filter: /^electron$/ }, () => ({ path: "electron", namespace: "stub" }));
+    build.onResolve({ filter: /^react$/ }, () => ({ path: "react", namespace: "stub" }));
     build.onResolve({ filter: /\/codara-home$/ }, () => ({ path: "codara-home", namespace: "stub" }));
     build.onResolve({ filter: /\/usage-analytics$/ }, () => ({ path: "usage-analytics", namespace: "stub" }));
     build.onResolve({ filter: /\/preferences-store$/ }, () => ({ path: "preferences-store", namespace: "stub" }));
@@ -46,7 +48,9 @@ const harnessPlugin = {
             ? "module.exports = { readForecastScan: async () => { throw new Error('no scan in unit tests'); } };"
             : args.path === "preferences-store"
               ? "module.exports = { getPreferenceCached: () => undefined };"
-              : "module.exports = { app: { getPath: () => '/dev/null' } };",
+              : args.path === "react"
+                ? "module.exports = { useEffect: () => undefined, useState: (v) => [typeof v === 'function' ? v() : v, () => undefined] };"
+                : "module.exports = { app: { getPath: () => '/dev/null' } };",
       loader: "js",
     }));
   },
@@ -757,6 +761,122 @@ async function main() {
     );
     const hot = forecastWindow({ ...base, usedPercent: 60, correction: { growthBias: 3, spread: 1 } });
     check("engine: a corrected forecast can run out, with a time", hot.hitProbability > 0.5 && hot.hitAt.p50 !== null && hot.hitAt.p50 < base.resetsAtMs);
+  }
+
+  /* ── Bad readings and wasted work ────────────────────────────────────── */
+  {
+    const { parseCodexLimitLine, scanForecastSignals } = signals;
+    const codexLine = (timestamp, resetsAt, used = 10) =>
+      JSON.stringify({
+        timestamp,
+        type: "event_msg",
+        payload: { type: "token_count", rate_limits: { limit_id: "codex", primary: { used_percent: used, window_minutes: 10080, resets_at: resetsAt } } },
+      });
+    const readAt = "2026-10-24T21:43:34.976Z";
+    const inAWeek = Math.floor(Date.parse(readAt) / 1000) + 3 * 86400;
+    eq("codex: a reset already in milliseconds is kept as is", parseCodexLimitLine(codexLine(readAt, inAWeek * 1000))[0]?.resetsAtMs, inAWeek * 1000);
+    eq("codex: a reset further out than its window is not a reading", parseCodexLimitLine(codexLine(readAt, inAWeek + 30 * 86400)).length, 0);
+
+    const nowMs = at(20, 10);
+    const history = workdayHistory(nowMs, 21, 30, 9, 14);
+    const week = { nowMs, windowStartMs: nowMs - 2 * DAY, resetsAtMs: nowMs + 5 * DAY, usedPercent: 30, kind: "7d", history, percentPerUnit: [1], inUse: true, seed: 3 };
+    const far = forecastWindow({ ...week, resetsAtMs: nowMs + 1000 * DAY });
+    check(`engine: a reset 1000 days out stays a bounded forecast (${far.cone.length} points)`, far.cone.length <= 8 * 24 + 2);
+    const inUseStarted = Date.now();
+    const busy = forecastWindow(week);
+    const inUseMs = Date.now() - inUseStarted;
+    check(`engine: a week's cone is hourly (${busy.cone.length} points)`, busy.cone.length <= 5 * 24 + 2);
+    const idleStarted = Date.now();
+    for (let i = 0; i < 20; i += 1) forecastWindow({ ...week, inUse: false });
+    const idleMs = (Date.now() - idleStarted) / 20;
+    // 400 identical flat replays took about 6 ms a week; one takes well under 1.
+    check(`engine: an account not in use runs no replays (${idleMs.toFixed(1)} ms vs ${inUseMs} ms in use)`, idleMs < 1.5);
+    const idle = forecastWindow({ ...week, inUse: false });
+    eq("engine: an account not in use still ends where it is", `${idle.endPercent.p10},${idle.endPercent.p90},${idle.hitProbability}`, "30,30,0");
+
+    // The memo is replaced whole, never rewritten in place, so a crash
+    // mid-write leaves the previous one.
+    const scanHome = fs.mkdtempSync(path.join(os.tmpdir(), "codara-forecast-signals-"));
+    const sessions = path.join(scanHome, "sessions", "2026", "10", "24");
+    const archived = path.join(scanHome, "archived_sessions");
+    fs.mkdirSync(sessions, { recursive: true });
+    fs.mkdirSync(archived, { recursive: true });
+    const rollout = "rollout-2026-10-24T21-00-00-test.jsonl";
+    fs.writeFileSync(path.join(sessions, rollout), codexLine(readAt, inAWeek) + "\n");
+    fs.writeFileSync(path.join(archived, rollout), codexLine(readAt, inAWeek) + "\n");
+    const request = {
+      roots: [
+        { provider: "codex", dir: path.join(scanHome, "sessions"), error: null },
+        { provider: "codex", dir: archived, error: null },
+      ],
+      memoPath: path.join(scanHome, "signals-memo.json"),
+      sinceMs: 0,
+    };
+    const once = await scanForecastSignals(request);
+    eq("signals: a rollout under both sessions/ and archived_sessions/ counts once", once.codexSamples.length, 1);
+    const before = fs.statSync(request.memoPath).ino;
+    fs.appendFileSync(path.join(sessions, rollout), codexLine("2026-10-24T22:00:00.000Z", inAWeek, 20) + "\n");
+    await scanForecastSignals(request);
+    check("signals: the memo is replaced atomically, not rewritten in place", fs.statSync(request.memoPath).ino !== before);
+    eq("signals: the rewritten memo is whole", JSON.parse(fs.readFileSync(request.memoPath, "utf8")).version > 0, true);
+    fs.rmSync(scanHome, { recursive: true, force: true });
+  }
+
+  /* ── The renderer reads once per poll, however many views watch ─────── */
+  {
+    const timers = new Map();
+    let nextTimer = 1;
+    let reads = 0;
+    const answers = [];
+    global.window = {
+      setInterval: (fn) => {
+        timers.set(nextTimer, fn);
+        return nextTimer++;
+      },
+      clearInterval: (id) => timers.delete(id),
+      spark: {
+        usageAnalytics: {
+          forecast: () => {
+            reads += 1;
+            return new Promise((resolve) => answers.push(resolve));
+          },
+        },
+      },
+    };
+    const settle = async () => {
+      for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    };
+    const answer = async () => {
+      answers.shift()({ windows: [] });
+      await settle();
+    };
+    const hook = await bundle(HOOK_TS, path.join(tmp, "hook.bundle.cjs"));
+    const stops = [0, 1, 2].map(() => hook.watchUsageForecast(() => undefined));
+    eq("renderer: three views share one poll timer", timers.size, 1);
+    for (const poll of timers.values()) poll();
+    await settle();
+    eq("renderer: one poll is one read", reads, 1);
+    await answer();
+    await hook.loadUsageForecast();
+    eq("renderer: a fresh report is reused", reads, 1);
+
+    const first = hook.loadUsageForecast(true);
+    const later = [hook.loadUsageForecast(true), hook.loadUsageForecast(true), hook.loadUsageForecast(true)];
+    eq("renderer: a forced read starts at once", reads, 2);
+    await answer();
+    eq("renderer: forced reads that waited share one more read", reads, 3);
+    await answer();
+    await Promise.all([first, ...later]);
+    eq("renderer: nothing else was read", reads, 3);
+
+    for (const stop of stops) stop();
+    eq("renderer: the poll stops with the last view", timers.size, 0);
+    hook.forgetUsageForecast();
+    const again = hook.loadUsageForecast();
+    eq("renderer: after turning it off, the old report is not reused", reads, 4);
+    await answer();
+    await again;
+    delete global.window;
   }
 
   console.log(`\nAll ${pass} usage-forecast checks passed.`);

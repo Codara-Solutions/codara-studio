@@ -9,13 +9,25 @@ const POLL_MS = 5 * 60_000;
 
 let cached: { at: number; report: UsageForecastReport | null } | null = null;
 let inflight: Promise<UsageForecastReport | null> | null = null;
+let forcedAfter: Promise<UsageForecastReport | null> | null = null;
 const listeners = new Set<(report: UsageForecastReport | null) => void>();
+let pollTimer: number | null = null;
 
 export function loadUsageForecast(force = false): Promise<UsageForecastReport | null> {
   if (!force && cached && Date.now() - cached.at < FRESH_MS) return Promise.resolve(cached.report);
-  // A forced read waits for the one in flight and then reads again, since the
-  // one in flight may predate the change that forced it.
-  if (inflight) return force ? inflight.catch(() => null).then(() => loadUsageForecast(true)) : inflight;
+  if (inflight) {
+    if (!force) return inflight;
+    // A forced read waits for the one in flight and then reads again, since
+    // the one in flight may predate the change that forced it. Every forced
+    // read that arrives meanwhile shares that one second read.
+    forcedAfter ??= inflight
+      .catch(() => null)
+      .then(() => {
+        forcedAfter = null;
+        return loadUsageForecast(true);
+      });
+    return forcedAfter;
+  }
   inflight = window.spark.usageAnalytics
     .forecast()
     .then((report) => {
@@ -27,6 +39,31 @@ export function loadUsageForecast(force = false): Promise<UsageForecastReport | 
       inflight = null;
     });
   return inflight;
+}
+
+/**
+ * Follows the forecast while the feature is on. However many meters and tabs
+ * watch it, one timer reads it every POLL_MS: each read builds a report in
+ * the main process, so one per view would multiply that work.
+ */
+export function watchUsageForecast(listener: (report: UsageForecastReport | null) => void): () => void {
+  listeners.add(listener);
+  pollTimer ??= window.setInterval(() => {
+    void loadUsageForecast().catch(() => undefined);
+  }, POLL_MS);
+  return () => {
+    listeners.delete(listener);
+    if (listeners.size === 0 && pollTimer !== null) {
+      window.clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  };
+}
+
+/** Forgets the last report, so turning the feature back on never shows one
+ * from before it was off. */
+export function forgetUsageForecast(): void {
+  cached = null;
 }
 
 export interface UsageForecastState {
@@ -42,35 +79,32 @@ export function useUsageForecast(enabled: boolean): UsageForecastState {
 
   useEffect(() => {
     if (!enabled) {
+      forgetUsageForecast();
       setReport(null);
       return;
     }
     let alive = true;
-    const listener = (next: UsageForecastReport | null) => {
-      if (alive) setReport(next);
-    };
-    listeners.add(listener);
-    const read = (force: boolean) => {
-      setLoading(true);
-      loadUsageForecast(force)
-        .then((next) => {
-          if (!alive) return;
-          setReport(next);
-          setError(null);
-        })
-        .catch((err: unknown) => {
-          if (alive) setError(err instanceof Error ? err.message : String(err));
-        })
-        .finally(() => {
-          if (alive) setLoading(false);
-        });
-    };
-    read(false);
-    const timer = window.setInterval(() => read(true), POLL_MS);
+    const unwatch = watchUsageForecast((next) => {
+      if (!alive) return;
+      setReport(next);
+      setError(null);
+    });
+    setLoading(true);
+    loadUsageForecast()
+      .then((next) => {
+        if (!alive) return;
+        setReport(next);
+        setError(null);
+      })
+      .catch((err: unknown) => {
+        if (alive) setError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
     return () => {
       alive = false;
-      listeners.delete(listener);
-      window.clearInterval(timer);
+      unwatch();
     };
   }, [enabled]);
 

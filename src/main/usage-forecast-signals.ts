@@ -11,7 +11,9 @@
 // memo is persisted next to the usage scan cache.
 
 import { createReadStream, promises as fs } from "node:fs";
+import { basename } from "node:path";
 import { createInterface } from "node:readline";
+import { writeFileAtomic } from "./fs-atomic";
 import { listTranscriptFiles, type UsageScanRoot } from "./usage-scan";
 
 export interface ClaudeLimitHit {
@@ -47,7 +49,7 @@ interface MemoEntry {
   samples?: CodexLimitSample[];
 }
 
-const MEMO_VERSION = 1;
+const MEMO_VERSION = 2;
 const memo = new Map<string, MemoEntry>();
 let memoLoadedFrom: string | null = null;
 
@@ -132,8 +134,12 @@ export function parseCodexLimitLine(line: string): CodexLimitSample[] {
     const usedPercent = Number(window.used_percent);
     const windowMinutes = Number(window.window_minutes);
     const resetsAt = Number(window.resets_at);
-    if (![usedPercent, windowMinutes, resetsAt].every(Number.isFinite)) continue;
-    samples.push({ atMs, limitId, windowMinutes, usedPercent, resetsAtMs: resetsAt * 1000 });
+    if (![usedPercent, windowMinutes, resetsAt].every(Number.isFinite) || windowMinutes <= 0) continue;
+    // Seconds today; a value already in milliseconds is past year 5000 in seconds.
+    const resetsAtMs = resetsAt > 1e11 ? resetsAt : resetsAt * 1000;
+    // A reset further out than its own window, from when it was read, is not a reading.
+    if (resetsAtMs > atMs + windowMinutes * 60_000 + 60 * 60_000) continue;
+    samples.push({ atMs, limitId, windowMinutes, usedPercent, resetsAtMs });
   }
   return samples;
 }
@@ -182,6 +188,10 @@ export async function scanForecastSignals(request: ForecastSignalsRequest): Prom
   const claudeHits: ClaudeLimitHit[] = [];
   const codexSamples: CodexLimitSample[] = [];
   const live = new Set<string>();
+  // A Codex session archived between the walks of sessions/ and
+  // archived_sessions/ is listed under both; its rollout name identifies it,
+  // as in the Usage tab's scan.
+  const codexFileNames = new Set<string>();
   let dirty = false;
   for (const root of request.roots) {
     if (root.error !== null || root.dir.length === 0) continue;
@@ -189,14 +199,19 @@ export async function scanForecastSignals(request: ForecastSignalsRequest): Prom
     const files = await listTranscriptFiles(root.dir, request.sinceMs);
     for (const file of files) {
       live.add(file.path);
+      const codexName = root.provider === "codex" ? basename(file.path) : null;
+      if (codexName !== null && codexFileNames.has(codexName)) continue;
       let entry = memo.get(file.path);
       if (!entry || entry.size !== file.size || entry.mtimeMs !== file.mtimeMs) {
         const read = await readSignals(file.path, root.provider);
+        // Only a file that was read claims its name, so a copy that moved
+        // away mid-scan leaves the archived one free to count.
         if (read === null) continue;
         entry = { ...read, size: file.size, mtimeMs: file.mtimeMs };
         memo.set(file.path, entry);
         dirty = true;
       }
+      if (codexName !== null) codexFileNames.add(codexName);
       if (entry.hits) claudeHits.push(...entry.hits.filter((hit) => hit.atMs >= request.sinceMs));
       if (entry.samples) codexSamples.push(...entry.samples.filter((sample) => sample.atMs >= request.sinceMs));
     }
@@ -209,11 +224,9 @@ export async function scanForecastSignals(request: ForecastSignalsRequest): Prom
   }
   if (dirty) {
     try {
-      await fs.writeFile(
-        request.memoPath,
-        JSON.stringify({ version: MEMO_VERSION, files: Object.fromEntries(memo) }),
-        "utf8",
-      );
+      // A torn memo is dropped whole on the next load, which then rereads
+      // months of transcripts.
+      await writeFileAtomic(request.memoPath, JSON.stringify({ version: MEMO_VERSION, files: Object.fromEntries(memo) }));
     } catch {
       // The memo only saves time; the next scan reads again.
     }

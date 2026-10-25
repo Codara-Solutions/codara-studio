@@ -26,6 +26,10 @@ import type {
 import type { UsageSummary, UsageSummaryInput } from "@shared/usage-analytics";
 
 const WORKER_IDLE_MS = 3 * 60 * 1000;
+/** While the forecast is on it scans every 10 to 15 minutes (a 10-minute
+ * cache checked on a 5-minute poll). A worker that exited in between would
+ * reload the whole memo from disk for each scan, so it is kept past the next. */
+const FORECAST_WORKER_KEEP_MS = 20 * 60 * 1000;
 
 async function resolveProviderRoots(): Promise<UsageScanRoot[]> {
   const roots: UsageScanRoot[] = [];
@@ -96,6 +100,7 @@ let worker: Worker | null = null;
 let nextJobId = 1;
 const pending = new Map<number, PendingScan>();
 let idleTimer: NodeJS.Timeout | null = null;
+let keepWorkerUntil = 0;
 
 function settleAll(err: Error): void {
   for (const scan of pending.values()) scan.reject(err);
@@ -132,11 +137,12 @@ function armIdleStop(): void {
     const thread = worker;
     worker = null;
     void thread.terminate().catch(() => undefined);
-  }, WORKER_IDLE_MS);
+  }, Math.max(WORKER_IDLE_MS, keepWorkerUntil - Date.now()));
   idleTimer.unref();
 }
 
-function scanOnWorker<T extends UsageScanResult>(code: string, job: UsageScanWork): Promise<T> {
+function scanOnWorker<T extends UsageScanResult>(code: string, job: UsageScanWork, keepMs = 0): Promise<T> {
+  keepWorkerUntil = Math.max(keepWorkerUntil, Date.now() + keepMs);
   if (idleTimer !== null) {
     clearTimeout(idleTimer);
     idleTimer = null;
@@ -185,5 +191,5 @@ export async function readForecastScan(
     const { runForecastScan } = await import("./usage-scan-worker");
     return runForecastScan(timeline, signals);
   }
-  return scanOnWorker<ForecastScan>(code, { timeline, signals });
+  return scanOnWorker<ForecastScan>(code, { timeline, signals }, FORECAST_WORKER_KEEP_MS);
 }
