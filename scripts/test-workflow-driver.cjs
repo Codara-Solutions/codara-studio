@@ -34,10 +34,15 @@ async function until(predicate, timeoutMs = 15_000) {
 // "fail" ends failed, "crash" leaves no report, "hang-then-ok" hangs until it
 // is stopped the first time and completes the second, "report-then-hang"
 // writes a complete report and never returns (the app died under it).
+// "quit-then-ok" dies in the quit's teardown the first time and completes the
+// second, "succeed-during-quit" completes as the teardown lands, and
+// "deaf-then-ok" ignores a Stop and completes only in the teardown.
 function makeStore(root) {
   const runs = new Map();
   const calls = { launches: [], stops: [], interrupts: [], saves: [] };
   const pending = new Map();
+  // Attempts only the quit's teardown ends; a Stop does not reach them.
+  const deaf = new Map();
   const seen = new Map();
   let nextId = 0;
   const store = {
@@ -110,6 +115,14 @@ function makeStore(root) {
         await new Promise((resolve) => pending.set(attemptId, resolve));
         return { ...done("failed", null), error: "worker was stopped" };
       }
+      if (prompt === "succeed-during-quit") {
+        await new Promise((resolve) => pending.set(attemptId, resolve));
+        return done("succeeded", { status: "complete", summary: "done", result: { v: 5 } });
+      }
+      if (prompt === "deaf-then-ok") {
+        await new Promise((resolve) => deaf.set(attemptId, resolve));
+        return done("succeeded", { status: "complete", summary: "done", result: { v: 7 } });
+      }
       if (prompt === "report-then-hang") {
         fs.writeFileSync(reportPath, JSON.stringify({ status: "complete", summary: "done", result: { v: 9 } }));
         return new Promise(() => undefined);
@@ -124,8 +137,9 @@ function makeStore(root) {
     // The app quit's process teardown (shutdownRunRuntimeResources): every
     // live worker dies without the run asking it to stop.
     killLive() {
-      for (const resolve of pending.values()) resolve();
+      for (const resolve of [...pending.values(), ...deaf.values()]) resolve();
       pending.clear();
+      deaf.clear();
     },
     async interruptWorkflowAttempts(runId, reason) {
       calls.interrupts.push({ runId, reason });
@@ -412,6 +426,66 @@ return { a, b };
       "the run's spend includes the agent the quit killed",
       Math.abs(finishedAfterQuit.workflow.spent.usd - 0.03) < 1e-9,
       finishedAfterQuit.workflow.spent,
+    );
+  }
+
+  // ── An agent that succeeds while the app quits ─────────────────────────
+  {
+    const before = store.calls.launches.length;
+    const quit = await next.startWorkflowRun({
+      workspaceId: "ws",
+      cwd: base,
+      source: `export const meta = { name: "quit-success", description: "agent finishes during the quit" };
+const S = ${JSON.stringify(SCHEMA)};
+const a = await agent('ok:{"v":1}', { label: "first", schema: S });
+const b = await agent("succeed-during-quit", { label: "second", schema: S });
+return { a, b };
+`,
+    });
+    check("the agent finishing during the quit starts", await until(() => store.calls.launches.length === before + 2));
+    next.suspendWorkflowRunsForQuit();
+    store.killLive();
+    await sleep(300);
+
+    const relaunched = await loadDriver(stubFile);
+    relaunched.configureWorkflowDriver(makeEnv());
+    await relaunched.installWorkflowDriver();
+    await relaunched.recoverWorkflowRuns();
+    const journal = fs.readFileSync(path.join(base, "runs", quit.id, "workflow", "journal-0.jsonl"), "utf8");
+    check("recovery salvages an attempt that succeeded during the quit", /"seq":1,"status":"ok"/.test(journal), journal);
+    await store.controls.resume(quit.id);
+    const finishedAfterQuit = await relaunched.waitForWorkflowRun(quit.id, { timeoutMs: 20_000, pollMs: 25 });
+    check(
+      "Resume delivers the result the agent finished during the quit",
+      JSON.stringify(finishedAfterQuit.result) === JSON.stringify({ a: { v: 1 }, b: { v: 5 } }),
+      finishedAfterQuit.result,
+    );
+    check("an agent that finished during the quit does not run again", store.calls.launches.length === before + 2, store.calls.launches.length - before);
+  }
+
+  // ── A quit while a finished run settles ────────────────────────────────
+  {
+    const before = store.calls.launches.length;
+    const settling = await next.startWorkflowRun({
+      workspaceId: "ws",
+      cwd: base,
+      // The unawaited agent keeps the finished script from settling until
+      // the quit's teardown ends it.
+      source: `export const meta = { name: "settling", description: "quit while settling" };
+agent("deaf-then-ok", { label: "straggler" });
+return "finished";
+`,
+    });
+    check("the straggler starts", await until(() => store.calls.launches.length === before + 1));
+    await sleep(200);
+    next.suspendWorkflowRunsForQuit();
+    store.killLive();
+    const settled = await until(() => store.runs.get(settling.id).workflow.state !== "running", 5_000);
+    const state = store.runs.get(settling.id).workflow.state;
+    check("a run that finished before the quit is saved complete", settled && state === "complete", state);
+    check(
+      "its return value is on disk",
+      fs.existsSync(path.join(base, "runs", settling.id, "workflow", "return.json")),
     );
   }
 

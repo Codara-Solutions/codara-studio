@@ -559,9 +559,12 @@ async function settle(active: ActiveRun, outcome: WorkflowRuntimeOutcome, runtim
     counts: runtime.counts,
     spent: runtime.spent,
   };
-  // A quit leaves the run "running" on disk for recoverWorkflowRuns to park
-  // on the next launch, salvaging any report an agent finished meanwhile.
-  if (active.endReason === "discard" || active.endReason === "quit") return;
+  if (active.endReason === "discard") return;
+  // A quit that stopped the script leaves the run "running" on disk for
+  // recoverWorkflowRuns to park on the next launch, salvaging any report an
+  // agent finished meanwhile. A script that had already ended still saves
+  // its outcome.
+  if (active.endReason === "quit" && outcome.status === "stopped") return;
   if (outcome.status === "complete") {
     writeFileSync(join(workflowDir(runId), "return.json"), JSON.stringify(outcome.value ?? null, null, 2), "utf8");
     await store.saveWorkflowRunInfo(
@@ -694,7 +697,7 @@ async function runAgent(
       onStarted: (info) => {
         attemptId = info.attemptId;
         control.started({ workerTaskId: info.workerTaskId, attemptId: info.attemptId });
-        if (control.signal.aborted || timedOut) stopAttempt();
+        if ((control.signal.aborted && control.signal.reason !== "quit") || timedOut) stopAttempt();
       },
       onUsage: (live) => control.usage(live),
     });
@@ -1042,7 +1045,10 @@ export async function recoverWorkflowRuns(): Promise<string[]> {
   return parked;
 }
 
-const TERMINAL_ATTEMPT = new Set(["succeeded", "failed", "timed_out", "cancelled"]);
+// A succeeded attempt is salvaged too: one that finished while a quit was
+// suspending the run was never journaled. A call answered in the journal is
+// skipped either way, so nothing is delivered twice.
+const UNSALVAGEABLE_ATTEMPT = new Set(["failed", "timed_out", "cancelled"]);
 
 async function salvageFinishedAttempts(run: RunState): Promise<void> {
   const dir = workflowDir(run.id);
@@ -1055,7 +1061,7 @@ async function salvageFinishedAttempts(run: RunState): Promise<void> {
   for (const entry of entries) if (entry.t === "issue") issued.set(entry.seq, entry.key);
   const salvage: JournalEntry[] = [];
   for (const attempt of run.workerAttempts) {
-    if (TERMINAL_ATTEMPT.has(attempt.status) || !attempt.finalReportPath) continue;
+    if (UNSALVAGEABLE_ATTEMPT.has(attempt.status) || !attempt.finalReportPath) continue;
     const task = run.workerTasks.find((item) => item.id === attempt.workerTaskId);
     const call = task?.workflowCall;
     // An isolated agent's edits sit uncommitted in a checkout this session
