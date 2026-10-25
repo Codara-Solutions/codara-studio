@@ -343,9 +343,14 @@ async function readUserKnownHosts(host: RemoteHostConfig): Promise<string> {
   return texts.join("\n");
 }
 
-/** The name known_hosts lists the host under: OpenSSH lowercases a hostname, never an alias. */
+/**
+ * The name known_hosts lists the host under. OpenSSH lowercases a HostKeyAlias
+ * as it lowercases a host name, and then hashes it as is.
+ */
 function knownHostsName(host: RemoteHostConfig): { name: string; port: number } {
-  return host.hostKeyAlias ? { name: host.hostKeyAlias, port: 22 } : { name: host.host.toLowerCase(), port: host.port };
+  return host.hostKeyAlias
+    ? { name: host.hostKeyAlias.toLowerCase(), port: 22 }
+    : { name: host.host.toLowerCase(), port: host.port };
 }
 
 /** Where Codara's own store keeps a host's key: the alias when it has one. */
@@ -856,7 +861,7 @@ class RemoteConnection {
     // Read before trusting even a stored key: the user may have revoked it
     // in known_hosts since. A revoked key loses whatever the confirmation
     // setting; with it off, known_hosts is read for nothing else. OpenSSH
-    // looks a HostKeyAlias up as given, never with the port.
+    // looks a HostKeyAlias up without the port.
     const { name, port } = knownHostsName(host);
     const listed = knownHostsVerdict(await readUserKnownHosts(host), name, port, key);
     if (!this.isCurrent(generation, signal)) return false;

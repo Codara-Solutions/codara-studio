@@ -497,11 +497,14 @@ takes `user@host:port` (port 1 to 65535).
   `host-keys.ts` handles hashed names, patterns and `@revoked`, which wins
   even over a key Codara stored, and skips a marker OpenSSH does not know;
   a host with
-  `HostKeyAlias` is looked up by the alias as written, without the port, as
-  OpenSSH does; `/etc/ssh/ssh_known_hosts` and a `UserKnownHostsFile` or
-  `GlobalKnownHostsFile` from `~/.ssh/config` are read too, the first with
-  `${VAR}` and every token ssh allows there expanded, as is a
-  `GlobalKnownHostsFile` from `/etc/ssh/ssh_config`). The handshake asks for the key types
+  `HostKeyAlias` is looked up by the alias in lowercase, without the port,
+  as OpenSSH does; `/etc/ssh/ssh_known_hosts` and a `UserKnownHostsFile` or
+  `GlobalKnownHostsFile` from `~/.ssh/config` are read too, as is a
+  `GlobalKnownHostsFile` from `/etc/ssh/ssh_config`). `ssh-tokens.ts`
+  expands `${VAR}` and ssh's tokens in one pass with the values `ssh -G`
+  prints (OpenSSH 9.6): `%h` and a `HostKeyAlias` lowercased, `%j` the last
+  ProxyJump hop's host, and a `%C` path behind a ProxyJump also as ssh
+  before 9.6 hashed it, without `%j`. The handshake asks for the key types
   known_hosts lists first, reordering ssh2's own list as OpenSSH does, and a key known_hosts lists is accepted even when Codara
   stored another of the host's keys (one per host, any type). Otherwise
   `HostKeyPrompt.tsx` asks "Is this <host>?" with the fingerprint, with a

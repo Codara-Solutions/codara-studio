@@ -36,7 +36,7 @@
 //     key Codara has
 //   - two hosts at one address asked at once: the second answer cannot
 //     overwrite the first key, it is refused as changed
-//   - a hashed HostKeyAlias entry is hashed as written; the system-wide
+//   - a HostKeyAlias is looked up (and hashed) in lowercase; the system-wide
 //     known_hosts and a custom UserKnownHostsFile are read too
 //   - a key Codara stored loses once known_hosts marks it @revoked, and a
 //     refusal caused by a known_hosts line shows that line's key as before
@@ -655,11 +655,20 @@ function hasSshKeygen() {
     reset();
     confirm = true;
     answer = false;
-    const salt = randomBytes(20);
-    const hash = createHmac("sha1", salt).update("Builder").digest("base64");
-    harness.files.set("/home/me/.ssh/known_hosts", `|1|${salt.toString("base64")}|${hash} ssh-ed25519 ${b64}\n`);
+    const hashed = (name) => {
+      const salt = randomBytes(20);
+      return `|1|${salt.toString("base64")}|${createHmac("sha1", salt).update(name).digest("base64")}`;
+    };
+    // `HostKeyAlias Builder`: real ssh 9.6 accepts the HMAC of "builder" and
+    // rejects the HMAC of "Builder".
+    harness.files.set("/home/me/.ssh/known_hosts", `${hashed("Builder")} ssh-ed25519 ${b64}\n`);
+    assert.equal((await connect("cased")).state, "error");
+    assert.equal(harness.prompts.length, 1, "a hash of the alias as written is not ssh's entry");
+
+    reset();
+    harness.files.set("/home/me/.ssh/known_hosts", `${hashed("builder")} ssh-ed25519 ${b64}\n`);
     assert.equal((await connect("cased")).state, "connected");
-    assert.equal(harness.prompts.length, 0, "the hashed alias matched as written");
+    assert.equal(harness.prompts.length, 0, "the hashed alias matched in lowercase, as ssh hashes it");
 
     reset();
     harness.files.set("/home/me/.ssh/other_known", `c.example ssh-ed25519 ${b64}\n`);
@@ -672,7 +681,7 @@ function hasSshKeygen() {
     assert.equal(global.state, "error");
     assert.equal(global.hostKeyChange?.previousFingerprint, keys.sshFingerprint(other), "the system-wide file is read");
     assert.equal(harness.prompts.length, 0);
-    ok("hashed aliases as written, and the system-wide and custom known_hosts files");
+    ok("hashed aliases in lowercase, and the system-wide and custom known_hosts files");
   }
 
   {

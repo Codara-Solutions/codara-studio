@@ -1,11 +1,11 @@
-import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { homedir, hostname as localHostname, userInfo } from "node:os";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import SSHConfig from "ssh-config";
 import { isValidHostId, isValidPort, type RemoteHostConfig } from "@shared/remote";
 import { writeFileAtomic } from "../fs-atomic";
 import { codaraHome } from "../codara-home";
+import { expandHostName, expandSshPath, expandTilde, localUser, SshExpansionError, type SshTokenContext } from "./ssh-tokens";
 
 // Remote host registry: hosts parsed from ~/.ssh/config (read-only in the
 // UI, refreshed on every list call) merged with manually-added hosts
@@ -109,30 +109,43 @@ export async function readSshConfigHosts(): Promise<RemoteHostConfig[]> {
   const out: RemoteHostConfig[] = [];
   for (const alias of aliases) {
     try {
-      const computed = config.compute(alias) as Record<string, string | string[]>;
+      const computed = options(config.compute(alias) as Record<string, string | string[]>);
       const first = (v: string | string[] | undefined): string | undefined =>
         Array.isArray(v) ? v[0] : v;
-      const identity = first(computed.IdentityFile);
-      const proxy = first(computed.ProxyCommand)?.trim();
-      const keyAlias = first(computed.HostKeyAlias)?.trim();
+      const identity = first(computed.identityfile);
+      const proxy = first(computed.proxycommand)?.trim();
+      const keyAlias = first(computed.hostkeyalias)?.trim();
       // ssh refuses such a port, so connecting to 22 instead would be wrong.
-      const port = Number(first(computed.Port) ?? 22);
+      const port = Number(first(computed.port) ?? 22);
       if (!isValidPort(port)) continue;
-      const hostName = first(computed.HostName) ?? alias;
-      // ssh defaults to the local username when User is absent.
-      const username = first(computed.User) ?? process.env.USERNAME ?? process.env.USER ?? "root";
-      const proxyJump = first(computed.ProxyJump)?.trim();
-      const userKnownHostsFiles = knownHostsFiles(computed.UserKnownHostsFile, (file) =>
-        expandUserKnownHostsFile(file, {
-          alias,
-          hostName,
-          hostKeyAlias: keyAlias || alias,
-          port,
-          username,
-          proxyJump: proxyJump && proxyJump.toLowerCase() !== "none" ? proxyJump : "",
-        }),
-      );
-      const globalKnownHostsFiles = knownHostsFiles(computed.GlobalKnownHostsFile);
+      const rawHostName = first(computed.hostname);
+      let hostName = alias;
+      try {
+        if (rawHostName !== undefined) hostName = expandHostName(rawHostName, alias);
+      } catch (err) {
+        if (!(err instanceof SshExpansionError)) throw err;
+        // ssh refuses to connect to it either.
+        continue;
+      }
+      // ssh defaults to the local account name when User is absent.
+      const username = first(computed.user) ?? localUser();
+      const context: SshTokenContext = {
+        alias,
+        hostName,
+        ...(keyAlias ? { hostKeyAlias: keyAlias } : {}),
+        port,
+        username,
+        proxyJump: first(computed.proxyjump)?.trim() ?? "",
+      };
+      const userKnownHostsFiles = knownHostsFiles(computed.userknownhostsfile, (file) => {
+        try {
+          return expandSshPath(file, context);
+        } catch (err) {
+          if (err instanceof SshExpansionError) return [];
+          throw err;
+        }
+      });
+      const globalKnownHostsFiles = knownHostsFiles(computed.globalknownhostsfile);
       out.push({
         id: alias,
         host: hostName,
@@ -150,6 +163,19 @@ export async function readSshConfigHosts(): Promise<RemoteHostConfig[]> {
     }
   }
   return out.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/**
+ * ssh_config keywords ignore case and the first value obtained wins;
+ * ssh-config keeps each spelling apart, in the order it met them.
+ */
+function options(computed: Record<string, string | string[]>): Record<string, string | string[]> {
+  const out: Record<string, string | string[]> = {};
+  for (const [key, value] of Object.entries(computed)) {
+    const name = key.toLowerCase();
+    if (!(name in out)) out[name] = value;
+  }
+  return out;
 }
 
 // ── Include ──────────────────────────────────────────────────────────────────
@@ -248,83 +274,16 @@ async function readConfigWithIncludes(
 
 /**
  * UserKnownHostsFile / GlobalKnownHostsFile: unset keeps ssh's defaults,
- * `none` reads nothing. `expand` drops a file it cannot resolve (null).
+ * `none` reads nothing. `expand` gives the paths a value stands for.
  */
 function knownHostsFiles(
   value: string | string[] | undefined,
-  expand: (file: string) => string | null = expandTilde,
+  expand: (file: string) => string[] = (file) => [expandTilde(file)],
 ): string[] | undefined {
   if (value === undefined) return undefined;
   const files = (Array.isArray(value) ? value : [value]).map((file) => file.trim()).filter(Boolean);
   if (files.length === 1 && files[0].toLowerCase() === "none") return [];
-  return files.map(expand).filter((file): file is string => file !== null);
-}
-
-interface KnownHostsFileContext {
-  /** The name given to ssh: the ~/.ssh/config alias. */
-  alias: string;
-  hostName: string;
-  hostKeyAlias: string;
-  port: number;
-  username: string;
-  /** ProxyJump as configured, empty when unset. */
-  proxyJump: string;
-}
-
-/**
- * UserKnownHostsFile as ssh expands it: `~`, then `${VAR}`, then the tokens
- * ssh_config(5) allows there: %% %C %d %h %i %j %k %L %l %n %p %r %u. ssh
- * refuses an unset variable or any other token; such a file is left out.
- */
-function expandUserKnownHostsFile(file: string, host: KnownHostsFileContext): string | null {
-  let unresolved = false;
-  const withVars = expandTilde(file).replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_m, name: string) => {
-    const value = process.env[name];
-    if (value === undefined) unresolved = true;
-    return value ?? "";
-  });
-  // ssh's own split: %l is gethostname() as is, %L up to its first dot.
-  const fullLocalName = localHostname();
-  const tokens: Record<string, () => string> = {
-    "%": () => "%",
-    C: () =>
-      createHash("sha1")
-        .update(`${fullLocalName}${host.hostName}${host.port}${host.username}${host.proxyJump}`)
-        .digest("hex"),
-    d: homedir,
-    h: () => host.hostName,
-    i: localUid,
-    j: () => host.proxyJump,
-    k: () => host.hostKeyAlias,
-    L: () => fullLocalName.split(".")[0],
-    l: () => fullLocalName,
-    n: () => host.alias,
-    p: () => String(host.port),
-    r: () => host.username,
-    u: localUser,
-  };
-  const expanded = withVars.replace(/%(.)/g, (_m, token: string) => {
-    const value = tokens[token];
-    if (!value) unresolved = true;
-    return value ? value() : "";
-  });
-  return unresolved ? null : expanded;
-}
-
-function localUid(): string {
-  try {
-    return String(userInfo().uid);
-  } catch {
-    return String(process.getuid?.() ?? -1);
-  }
-}
-
-function localUser(): string {
-  try {
-    return userInfo().username;
-  } catch {
-    return process.env.USER ?? process.env.USERNAME ?? "";
-  }
+  return files.flatMap(expand);
 }
 
 let systemSshConfigPath: string | null = null;
@@ -342,17 +301,11 @@ export async function systemGlobalKnownHostsFiles(name: string): Promise<string[
   const file = systemSshConfigPath ?? "/etc/ssh/ssh_config";
   try {
     const raw = await readConfigWithIncludes(file, dirname(file), 0, new Set());
-    const computed = SSHConfig.parse(raw).compute(name) as Record<string, string | string[]>;
-    return knownHostsFiles(computed.GlobalKnownHostsFile);
+    const computed = options(SSHConfig.parse(raw).compute(name) as Record<string, string | string[]>);
+    return knownHostsFiles(computed.globalknownhostsfile);
   } catch {
     return undefined;
   }
-}
-
-function expandTilde(p: string): string {
-  if (p === "~") return homedir();
-  if (p.startsWith("~/") || p.startsWith("~\\")) return join(homedir(), p.slice(2));
-  return p;
 }
 
 export async function listHosts(): Promise<RemoteHostConfig[]> {

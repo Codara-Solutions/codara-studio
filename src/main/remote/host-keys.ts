@@ -50,7 +50,8 @@ export type KnownHostsVerdict =
  * `*` / `?` patterns match as OpenSSH matches them. A `@revoked` key wins
  * over everything; `@cert-authority` lines are not host keys, and a marker
  * OpenSSH does not know makes it skip the line, as here.
- * `host` is hashed as given: callers lowercase a hostname, never an alias.
+ * `host` is hashed as given: callers lowercase it first, as OpenSSH does
+ * for a host name and a HostKeyAlias alike.
  */
 export function knownHostsVerdict(text: string, host: string, port: number, key: Buffer): KnownHostsVerdict {
   const wanted = key.toString("base64");

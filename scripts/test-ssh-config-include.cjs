@@ -8,8 +8,11 @@
 // host (ssh refuses them too), and UserKnownHostsFile / GlobalKnownHostsFile
 // are read for the host-key check, never from a host the renderer saved;
 // UserKnownHostsFile expands ${VAR} and every token ssh_config(5) allows it
-// (%% %C %d %h %i %j %k %L %l %n %p %r %u) as ssh does, and the
-// GlobalKnownHostsFile of /etc/ssh/ssh_config (with its Includes) counts.
+// (%% %C %d %h %i %j %k %L %l %n %p %r %u) in one pass, with the values
+// `ssh -G` prints (OpenSSH 9.6): %h and a HostKeyAlias lowercased, %j the
+// last ProxyJump hop's host, %r the account name, and HostName's own %h.
+// Keywords ignore case. The GlobalKnownHostsFile of /etc/ssh/ssh_config
+// (with its Includes) counts.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -285,7 +288,79 @@ async function testKnownHostsTokens(hosts) {
   assert.deepEqual(byId(tokens, "jumpy").userKnownHostsFiles, [
     "/tmp/jbastion.example",
     `/tmp/${hash(`${full}q.example22carolbastion.example`)}`,
-  ], "%j is the ProxyJump, and %C hashes %l%h%p%r%j");
+    `/tmp/${hash(`${full}q.example22carol`)}`,
+  ], "%j is the ProxyJump, and %C hashes %l%h%p%r%j (and %l%h%p%r, as ssh before 9.6)");
+}
+
+// Each expected value is what `ssh -G` printed for the same config.
+async function testTokensAsSshExpandsThem(hosts) {
+  process.env.CODARA_TEST_PCT = "a%b";
+  const realUser = process.env.USER;
+  process.env.USER = "not-the-account-name";
+  try {
+    write(
+      ".ssh/config",
+      [
+        "Host KeyAlHost",
+        "  HostName %h.Example.COM",
+        "  HostKeyAlias KeyAl",
+        "  ProxyJump alice@Bastion.example:2200",
+        "  UserKnownHostsFile /x/k_%k/h_%h/j_%j/n_%n/r_%r/C_%C",
+        "Host multi",
+        "  HostName Multi.Example",
+        "  ProxyJump a.example,bob@B.Example:2222",
+        "  UserKnownHostsFile /x/j_%j/C_%C",
+        "Host v6",
+        "  ProxyJump carol@[fe80::1]:2022",
+        "  UserKnownHostsFile /x/j_%j",
+        "Host older",
+        "  HostName o.example",
+        "  User u",
+        "  ProxyJump b.example",
+        "  UserKnownHostsFile /x/C_%C",
+        "Host onepass",
+        "  UserKnownHostsFile /x/${CODARA_TEST_PCT}/%%h",
+        "Host lower",
+        "  hostname L.example",
+        "  userknownhostsfile /x/%h",
+        "Host MixedCase",
+        "  HostName Mixed.Example",
+        "  UserKnownHostsFile /x/k_%k",
+        "Host literal",
+        "  HostName 100%%.%h",
+        "Host badname",
+        "  HostName a%Zb",
+        "",
+      ].join("\n"),
+    );
+    const list = await hosts.readSshConfigHosts();
+    const user = os.userInfo().username;
+    const full = os.hostname();
+    const hash = (text) => require("node:crypto").createHash("sha1").update(text).digest("hex");
+    const keyAl = byId(list, "KeyAlHost");
+    assert.equal(keyAl.host, "KeyAlHost.Example.COM", "HostName's %h is the alias");
+    assert.equal(keyAl.username, user, "with no User, the account name, not $USER");
+    assert.deepEqual(keyAl.userKnownHostsFiles, [
+      `/x/k_keyal/h_keyalhost.example.com/j_Bastion.example/n_KeyAlHost/r_${user}/C_${hash(`${full}keyalhost.example.com22${user}Bastion.example`)}`,
+    ], "%k and %h lowercased, %j the jump host alone, %n as written");
+    assert.deepEqual(byId(list, "multi").userKnownHostsFiles, [
+      `/x/j_B.Example/C_${hash(`${full}multi.example22${user}B.Example`)}`,
+    ], "%j is the last hop");
+    assert.deepEqual(byId(list, "v6").userKnownHostsFiles, ["/x/j_fe80::1"]);
+    assert.deepEqual(byId(list, "older").userKnownHostsFiles, [
+      `/x/C_${hash(`${full}o.example22ub.example`)}`,
+      `/x/C_${hash(`${full}o.example22u`)}`,
+    ]);
+    assert.deepEqual(byId(list, "onepass").userKnownHostsFiles, ["/x/a%b/%h"], "a variable's value is not expanded again");
+    assert.equal(byId(list, "lower").host, "L.example", "keywords ignore case");
+    assert.deepEqual(byId(list, "lower").userKnownHostsFiles, ["/x/l.example"]);
+    assert.deepEqual(byId(list, "MixedCase").userKnownHostsFiles, ["/x/k_MixedCase"], "without HostKeyAlias, %k is the alias as written");
+    assert.equal(byId(list, "literal").host, "100%.literal");
+    assert.equal(byId(list, "badname"), undefined, "ssh refuses a HostName token it does not know");
+  } finally {
+    if (realUser === undefined) delete process.env.USER;
+    else process.env.USER = realUser;
+  }
 }
 
 async function testSystemGlobalKnownHostsFile(hosts) {
@@ -373,6 +448,7 @@ async function testOnlyMainSetsProxy(hosts) {
   await testProxyFields(hosts, proxy);
   await testPortsAndKnownHostsFiles(hosts);
   await testKnownHostsTokens(hosts);
+  await testTokensAsSshExpandsThem(hosts);
   await testSystemGlobalKnownHostsFile(hosts);
   await testOnlyMainSetsProxy(hosts);
   console.log("ssh config include: ok");
