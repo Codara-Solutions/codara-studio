@@ -581,7 +581,11 @@ async function testLifecycle() {
   remote.ports.set(webRemote, web.port);
   write(`  \x1b[1mLocal\x1b[22m:   http://localhost:${webRemote.toString().slice(0, 2)}`);
   write(`${webRemote.toString().slice(2)}/dashboard\r\n`);
-  const printed = await waitFor("the printed port to be forwarded", () => forwardOf(webRemote));
+  // A forward is listed while its local port is still being opened, with no URL yet.
+  const printed = await waitFor("the printed port to be forwarded", async () => {
+    const forward = await forwardOf(webRemote);
+    return forward?.state === "active" ? forward : undefined;
+  });
   assert.equal(printed.source, "terminal");
   assert.equal(printed.localUrl, `http://localhost:${webRemote}/dashboard`);
   assert.equal(await get(webRemote, "/dashboard"), "web");
