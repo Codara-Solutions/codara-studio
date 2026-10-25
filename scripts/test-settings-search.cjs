@@ -281,6 +281,20 @@ async function main() {
     assert.deepEqual(stale, [], `entries nothing renders:\n  ${stale.join("\n  ")}`);
   });
 
+  check("each preference toggle is indexed on one page only", () => {
+    // A toggle moved to another page must leave its old entry behind, or a
+    // search lists the setting twice and one result opens the wrong page.
+    const seen = new Map();
+    const twice = [];
+    for (const entry of SETTINGS_SEARCH_INDEX) {
+      if (!entry.toggle) continue;
+      const first = seen.get(entry.toggle);
+      if (first) twice.push(`${entry.toggle}: ${first} and ${entry.tab}`);
+      else seen.set(entry.toggle, entry.tab);
+    }
+    assert.deepEqual(twice, []);
+  });
+
   check("every row a search opens a fold for sits in that fold", () => {
     const dialog = read(path.join(COMPONENTS, "SettingsDialog.tsx"));
     const functions = topLevelFunctions(dialog);
