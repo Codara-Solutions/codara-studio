@@ -104,7 +104,8 @@ export interface RailFamilyInput {
     creatorPaneId?: string;
     /** When the worktree was made (ISO), to pick a creator's newest one. */
     createdAt?: string;
-    merged: boolean;
+    /** Null until the rail knows: the row stays in play, its creator on the project. */
+    merged: boolean | null;
   }>;
 }
 
@@ -124,7 +125,7 @@ export function buildRailFamily(input: RailFamilyInput): RailFamily {
   // win ties, since a new worktree's row is added at the end.
   const workingIn = new Map<string, { index: number; createdAt: number }>();
   input.children.forEach((child, index) => {
-    if (!child.creatorPaneId || child.merged || child.lines.length > 0) return;
+    if (!child.creatorPaneId || child.merged !== false || child.lines.length > 0) return;
     const key = paneNoteKey(child.creatorPaneId);
     if (!projectByKey.has(key)) return;
     const createdAt = child.createdAt ? Date.parse(child.createdAt) || 0 : 0;
@@ -141,7 +142,7 @@ export function buildRailFamily(input: RailFamilyInput): RailFamily {
       claimed.add(creator.key);
     }
     agents.sort(byUrgency);
-    return { index, merged: child.merged, row: { workspaceId: child.workspaceId, agents } };
+    return { index, merged: child.merged === true, row: { workspaceId: child.workspaceId, agents } };
   });
   const own = input.projectLines.filter((line) => !claimed.has(line.key)).sort(byUrgency);
   const ordered = (list: typeof rows) =>

@@ -172,6 +172,17 @@ test("a creator never moves into a merged worktree, and into one worktree at mos
   assert.equal(twice.all.length, 1);
 });
 
+test("a creator waits until its worktree's merge state is known", ({ mod }) => {
+  // The rail loads merge states after the rows: null is not known yet.
+  const loading = mod.buildRailFamily({
+    projectLines: [line("p1", "working", 2)],
+    children: [{ workspaceId: "wtA", lines: [], creatorPaneId: "p1", merged: null }],
+  });
+  assert.deepEqual(loading.own.map((l) => l.key), ["pane:p1"]);
+  assert.deepEqual(loading.active.map((row) => [row.workspaceId, row.agents.length]), [["wtA", 0]]);
+  assert.equal(loading.merged.length, 0);
+});
+
 (async () => {
   const { mod, cleanup } = await load();
   let failed = 0;

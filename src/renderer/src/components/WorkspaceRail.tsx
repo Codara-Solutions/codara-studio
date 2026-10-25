@@ -2100,7 +2100,7 @@ function WorkspaceFamily({
         lines: lineLists[index + 1] ?? [],
         creatorPaneId: creator?.kind === "agent" ? creator.paneId : undefined,
         createdAt: worktree.copyBranch?.createdAt,
-        merged: rowMerged(props.worktree, props.missing ?? false),
+        merged: props.worktree ? rowMerged(props.worktree, props.missing ?? false) : null,
       };
     }),
   });

@@ -45,6 +45,12 @@ export function WorkspaceChildren({
   const now = useMinuteClock(ownAgents.length > 0);
   const [confirming, setConfirming] = useState(false);
   const cleanUp = merged.onCleanUp;
+  const asks = Boolean(cleanUp) && merged.cleanUpNames.length > 1;
+  // Once there is nothing left to ask about, the question is over: a later
+  // merge must not bring it back by itself.
+  useEffect(() => {
+    if (!asks) setConfirming(false);
+  }, [asks]);
   return (
     <div
       data-rail-children-of={parentId}
@@ -90,7 +96,7 @@ export function WorkspaceChildren({
           )}
         </div>
       )}
-      {confirming && cleanUp && (
+      {confirming && asks && cleanUp && (
         <CleanUpConfirm
           names={merged.cleanUpNames}
           onCancel={() => setConfirming(false)}
@@ -116,12 +122,16 @@ function CleanUpConfirm({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  // Capture, so Escape closes only this and no handler behind it.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onCancel();
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      onCancel();
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
   }, [onCancel]);
   const title = `Clean up ${names.length} merged worktrees?`;
   return createPortal(
@@ -141,10 +151,10 @@ function CleanUpConfirm({
           ))}
         </ul>
         <div className="rail-confirm-buttons">
-          <button type="button" className="rail-confirm-cancel" onClick={onCancel}>
+          <button type="button" autoFocus className="rail-confirm-cancel" onClick={onCancel}>
             Cancel
           </button>
-          <button type="button" autoFocus className="rail-confirm-ok" onClick={onConfirm}>
+          <button type="button" className="rail-confirm-ok" onClick={onConfirm}>
             Clean up
           </button>
         </div>
