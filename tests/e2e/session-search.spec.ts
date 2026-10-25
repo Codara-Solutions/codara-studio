@@ -285,6 +285,21 @@ test("the first-run dialog shows the build once and continues it in the backgrou
     await expect(intro.getByRole("heading", { name: "Indexing your agent sessions" })).toBeVisible();
     await expect(intro).toContainText("Change or turn it off anytime in Settings → Sessions.");
     await expect(intro.getByRole("status")).toHaveText(/4 sessions · 10 messages searchable/, { timeout: 20_000 });
+
+    // The run switcher opened over the intro is drawn on top, and Escape in
+    // it closes the switcher alone.
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+k" : "Control+k");
+    const switcher = page.getByRole("dialog", { name: "Switch Cora run" });
+    const search = switcher.getByRole("textbox", { name: "Search Cora runs" });
+    await expect(search).toBeFocused();
+    const box = (await search.boundingBox())!;
+    expect(await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.getAttribute("aria-label"), {
+      x: box.x + box.width / 2,
+      y: box.y + box.height / 2,
+    })).toBe("Search Cora runs");
+    await page.keyboard.press("Escape");
+    await expect(switcher).toHaveCount(0);
+    await expect(intro).toBeVisible();
     await intro.getByRole("button", { name: /Continue in background|Done/ }).click();
     await expect(intro).toHaveCount(0);
 

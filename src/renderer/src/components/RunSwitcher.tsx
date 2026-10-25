@@ -94,9 +94,12 @@ export default function RunSwitcher({
     [filter, runs, workspaces],
   );
 
+  // Focus moves in as the switcher mounts, not a frame later: until then the
+  // keys typed after Mod+K (Escape, the first letters of a search) still go
+  // to the page or terminal that had focus, and a hidden or busy window can
+  // hold that frame back a long time.
   useEffect(() => {
-    const id = window.requestAnimationFrame(() => inputRef.current?.focus());
-    return () => window.cancelAnimationFrame(id);
+    inputRef.current?.focus();
   }, []);
 
   useEffect(() => {

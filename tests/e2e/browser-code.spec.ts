@@ -5,6 +5,7 @@ import { createServer, type Server } from "node:http";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { cleanEnv, runnerFlags } from "./agent-env";
 
 // codara_browser_use in the built app, through the stdio MCP server as any
 // agent runs it, on four realistic flows served locally: sign in to an app,
@@ -140,15 +141,6 @@ function startFixture(): Promise<{ server: Server; url: (path: string) => string
   }));
 }
 
-function cleanEnv(home: string): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value === undefined || /^(SPARK|CODARA)_/.test(key)) continue;
-    env[key] = value;
-  }
-  return { ...env, CODARA_HOME_DIR: home, SPARK_HOME_DIR: home, SPARK_USER_DATA_DIR: home };
-}
-
 interface Content { type: string; text?: string; data?: string; mimeType?: string }
 interface Tally { calls: number; argChars: number; resultChars: number; images: number; ms: number }
 
@@ -235,6 +227,9 @@ test("codara_browser_use drives four real flows in fewer calls than the single t
   };
   try {
     const page = await app.firstWindow();
+    // The app keeps the runner's flags: no system keyring, no desktop, no Chrome link.
+    const flags = await runnerFlags(app);
+    expect(flags.app).toEqual(flags.runner);
     await page.waitForLoadState("domcontentloaded");
     await expect(page.getByText("Code mode test", { exact: true }).first()).toBeVisible();
     await expect.poll(async () => socket("app.info").then(() => true).catch(() => false)).toBe(true);

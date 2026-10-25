@@ -2,7 +2,7 @@
 // (components/Preview/previewRpc.ts) through the preview bridge. Waits and
 // "find by description" run in main against any browser target.
 
-import { callTarget, markAgentAction } from "../browser/agent-action";
+import { callTarget, markAgentAction, markAgentActionDone } from "../browser/agent-action";
 import { findElements } from "../browser/find";
 import { browserBackend, resolveBrowserTarget, type BrowserTarget } from "../browser/targets";
 import { normalizeWaitRequest, waitForPage, WaitRequestError } from "../browser/wait";
@@ -16,11 +16,19 @@ export function rendererOp(op: PreviewOpName): PreviewToolHandler {
   return (params) => requestPreviewOp(op, { ...params });
 }
 
-/** An agent action: stamped on the tab first, so waits know what "after your last action" means. */
+/**
+ * An agent action: stamped on the tab first, so waits know what "after your
+ * last action" means, and again once its input landed, which the agent
+ * cursor's glide can hold back past a wait's settle window.
+ */
 export function acting(handler: PreviewToolHandler): PreviewToolHandler {
   return async (params, method, host) => {
     await markAgentAction(params);
-    return handler(params, method, host);
+    try {
+      return await handler(params, method, host);
+    } finally {
+      await markAgentActionDone(params);
+    }
   };
 }
 
