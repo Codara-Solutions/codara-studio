@@ -138,6 +138,17 @@ const MANUAL_CASES = [
   ["'all' with another criterion", "Match all host h1\n  RevokedHostKeys /r\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 1 \('all' cannot be combined with other Match criteria\)/],
   ["an unclosed quote", "Host *\n  RevokedHostKeys /r\nMatch host \"h1\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 3/],
   ["a bad line in a block that does not apply", "Host other\n  RevokedHostKeys /r\nMatch user\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 3/],
+  ["a keyword with no value", "Host other\n  RevokedHostKeys\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 2 \(RevokedHostKeys has no value\)\. ssh will not connect anywhere until that line is fixed$/],
+  ["a keyword with = and no value", "Host *\n  HostKeyAlias=\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 2 \(HostKeyAlias has no value\)/],
+  ["a keyword with an empty quoted value", "Host *\n  RevokedHostKeys \"\"\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 2 \(RevokedHostKeys has no value\)/],
+  ["an empty quoted word in a list", "Host other\n  UserKnownHostsFile /a \"\"\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 2 \(UserKnownHostsFile has an empty value\)/],
+  ["an empty User", "Host other\n  User \"\"\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 2 \(User has no value\)/],
+  ["an empty word inside a ProxyCommand is a shell word", "Host other\n  ProxyCommand echo \"\"\nHost *\n  RevokedHostKeys /r\n", "h1", "me", ["/r"]],
+  // ssh runs KnownHostsCommand and refuses what it prints as @revoked.
+  ["KnownHostsCommand", "Host *\n  KnownHostsCommand /usr/local/bin/keys %H\n", "h1", "me", /^~\/\.ssh\/config line 2 sets KnownHostsCommand, which Codara does not run, so it cannot tell which keys that command trusts or revokes\. Remove KnownHostsCommand for this host, or set it to none, to connect from Codara$/],
+  ["KnownHostsCommand none", "Host *\n  KnownHostsCommand none\n  RevokedHostKeys /r\n", "h1", "me", ["/r"]],
+  ["KnownHostsCommand for another host", "Host other\n  KnownHostsCommand /bin/keys\n", "h1", "me", null],
+  ["KnownHostsCommand under Match exec", "Match exec \"test -e /tmp/x\"\n  KnownHostsCommand /bin/keys\n", "h1", "me", /line 1 starts a "Match exec" block that sets KnownHostsCommand/],
 ];
 
 async function testManualHosts(hosts) {
@@ -151,7 +162,8 @@ async function testManualHosts(hosts) {
       assert.ok(!("refusal" in got), `${name}: not refused (${got.refusal})`);
       assert.deepEqual(got.revoked, expected, name);
     }
-    if (HAS_SSH && !/exec|localnetwork|CanonicalDomains/.test(config)) {
+    // ssh -G neither runs exec nor KnownHostsCommand, nor resolves names.
+    if (HAS_SSH && !/exec|localnetwork|CanonicalDomains|KnownHostsCommand/.test(config)) {
       const ssh = sshG(config, host, login);
       if (expected instanceof RegExp) assert.equal(ssh, "refused", `${name}: ssh refuses too`);
       else assert.deepEqual(ssh, expected, `${name}: as ssh -G prints`);
@@ -188,6 +200,75 @@ async function testIncludes(hosts) {
     "a bad line in an included file names that file",
   );
   ok("Include: its own scope, nothing where it does not apply, and file and line in refusals");
+
+  // ssh ignores an Include that matches nothing, or a directory, and stops
+  // for a file it cannot open, a loop, or more than 16 levels, even where
+  // the Include does not apply.
+  const check = (config, expected, name) => {
+    if (!HAS_SSH) return;
+    const ssh = sshG(config, "h1");
+    if (expected === "refused") assert.equal(ssh, "refused", `${name}: ssh refuses too`);
+    else assert.deepEqual(ssh, expected, `${name}: as ssh -G prints`);
+  };
+  const dir = path.join(HOME, ".ssh", "inc.d");
+  fs.mkdirSync(dir, { recursive: true });
+  for (const [name, config] of [
+    ["a missing Include", `Include ${HOME}/.ssh/nope.conf ${HOME}/.ssh/none-*.conf\nHost *\n  RevokedHostKeys /r\n`],
+    ["an Include of a directory", `Include ${dir}\nHost *\n  RevokedHostKeys /r\n`],
+  ]) {
+    writeConfigs(config);
+    assert.deepEqual(await hosts.knownHostsSettings(manual("h1")), { files: [path.join(HOME, ".ssh", "known_hosts"), path.join(HOME, ".ssh", "known_hosts2"), "/etc/ssh/ssh_known_hosts", "/etc/ssh/ssh_known_hosts2"], revoked: ["/r"] }, name);
+    check(config, ["/r"], name);
+  }
+
+  if (process.getuid && process.getuid() !== 0) {
+    const locked = path.join(HOME, ".ssh", "locked.conf");
+    fs.writeFileSync(locked, "Host *\n  RevokedHostKeys /locked\n");
+    fs.chmodSync(locked, 0o000);
+    try {
+      for (const [name, config] of [
+        ["an Include ssh cannot open", `Include ${locked}\n`],
+        ["one under a block that does not apply", `Host other\n  Include ${locked}\n`],
+        ["one a glob matches", `Include ${HOME}/.ssh/lock*.conf\n`],
+      ]) {
+        writeConfigs(config);
+        assert.match(
+          (await hosts.knownHostsSettings(manual("h1"))).refusal,
+          /^ssh cannot open ~\/\.ssh\/locked\.conf, included from ~\/\.ssh\/config line \d \(permission denied\)\. ssh will not connect anywhere until that line is fixed$/,
+          name,
+        );
+        check(config, "refused", name);
+      }
+    } finally {
+      fs.chmodSync(locked, 0o600);
+    }
+  } else {
+    console.log("  skip unreadable Include (running as root)");
+  }
+
+  const chain = (levels) => {
+    for (let i = 1; i <= levels; i++) {
+      const body = i < levels ? `Include ${HOME}/.ssh/deep-${levels}-${i + 1}.conf\n` : "RevokedHostKeys /deep\n";
+      fs.writeFileSync(path.join(HOME, ".ssh", `deep-${levels}-${i}.conf`), body);
+    }
+    return `Include ${HOME}/.ssh/deep-${levels}-1.conf\n`;
+  };
+  const sixteen = chain(16);
+  writeConfigs(sixteen);
+  assert.deepEqual((await hosts.knownHostsSettings(manual("h1"))).revoked, ["/deep"], "16 levels are read");
+  check(sixteen, ["/deep"], "16 levels");
+  const seventeen = chain(17);
+  writeConfigs(seventeen);
+  assert.match((await hosts.knownHostsSettings(manual("h1"))).refusal, /^~\/\.ssh\/deep-17-16\.conf line 1 nests Includes more than 16 levels deep/);
+  check(seventeen, "refused", "17 levels");
+
+  const loop = path.join(HOME, ".ssh", "loop.conf");
+  fs.writeFileSync(loop, `Include ${loop}\n`);
+  const looped = `Host other\n  Include ${loop}\nHost *\n  RevokedHostKeys /r\n`;
+  writeConfigs(looped);
+  assert.match((await hosts.knownHostsSettings(manual("h1"))).refusal, /^~\/\.ssh\/loop\.conf line 1 includes ~\/\.ssh\/loop\.conf inside itself/);
+  check(looped, "refused", "an Include loop");
+  ok("Include: missing files and directories are ignored; unreadable, looping or too deep refuses");
 }
 
 async function testSystemConfig(hosts) {

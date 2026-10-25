@@ -4,7 +4,14 @@ import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { isValidHostId, isValidPort, type RemoteHostConfig } from "@shared/remote";
 import { writeFileAtomic } from "../fs-atomic";
 import { codaraHome } from "../codara-home";
-import { evaluateSshConfig, parseEntries, type Options, type ParsedEntry, type SourceEntry } from "./ssh-config-match";
+import {
+  displayPath,
+  evaluateSshConfig,
+  parseEntries,
+  type Options,
+  type ParsedEntry,
+  type SourceEntry,
+} from "./ssh-config-match";
 import { expandHostName, expandSshPath, expandTilde, localUser, SshExpansionError, type SshTokenContext } from "./ssh-tokens";
 
 // Remote host registry: hosts parsed from ~/.ssh/config (read-only in the
@@ -220,18 +227,18 @@ function resolveIncludePattern(pattern: string, baseDir: string): string {
 
 // Read a config file's lines with each file an Include reads in its place,
 // between enter/leave marks: ssh gives every included file its own scope, so
-// its Host lines end at its last line. Depth is capped and a file already
-// being read is skipped, so a cycle or a runaway chain ends quietly.
+// its Host lines end at its last line. ssh ignores an Include that matches
+// nothing (and a directory) but stops for any other file it cannot open, a
+// loop, or files nested deeper than 16 levels, wherever the Include stands;
+// those become error entries, which refuse every host.
 async function readConfigWithIncludes(
   file: string,
   baseDir: string,
   depth: number,
   active: Set<string>,
 ): Promise<SourceEntry[]> {
-  const key = resolvePath(file);
-  if (depth > MAX_INCLUDE_DEPTH || active.has(key)) return [];
   const raw = await fs.readFile(file, "utf8");
-  active.add(key);
+  active.add(resolvePath(file));
   try {
     const out: SourceEntry[] = [];
     const lines = raw.split(/\r?\n/);
@@ -241,21 +248,49 @@ async function readConfigWithIncludes(
         out.push({ kind: "line", file, line: i + 1, text: lines[i] });
         continue;
       }
+      const where = `${displayPath(file)} line ${i + 1}`;
       for (const word of splitConfigWords(m[1])) {
         for (const target of await expandGlob(resolveIncludePattern(word, baseDir))) {
+          let isDirectory = false;
+          try {
+            isDirectory = (await fs.stat(target)).isDirectory();
+          } catch (err) {
+            if (!missing(err)) out.push(includeError(where, target, err));
+            continue;
+          }
+          if (active.has(resolvePath(target))) {
+            out.push({ kind: "error", message: `${where} includes ${displayPath(target)} inside itself, a loop ssh stops at` });
+            continue;
+          }
+          if (depth + 1 > MAX_INCLUDE_DEPTH) {
+            out.push({ kind: "error", message: `${where} nests Includes more than ${MAX_INCLUDE_DEPTH} levels deep, which ssh stops at` });
+            continue;
+          }
+          if (isDirectory) continue;
           try {
             const included = await readConfigWithIncludes(target, baseDir, depth + 1, active);
             out.push({ kind: "enter" }, ...included, { kind: "leave" });
-          } catch {
-            // A missing or unreadable include is ignored, as ssh does.
+          } catch (err) {
+            if (!missing(err)) out.push(includeError(where, target, err));
           }
         }
       }
     }
     return out;
   } finally {
-    active.delete(key);
+    active.delete(resolvePath(file));
   }
+}
+
+const missing = (err: unknown) => {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  return code === "ENOENT" || code === "ENOTDIR" || code === "EISDIR";
+};
+
+function includeError(where: string, target: string, err: unknown): SourceEntry {
+  const code = (err as NodeJS.ErrnoException | null)?.code;
+  const reason = code === "EACCES" || code === "EPERM" ? "permission denied" : (code ?? "unreadable");
+  return { kind: "error", message: `ssh cannot open ${displayPath(target)}, included from ${where} (${reason})` };
 }
 
 /**

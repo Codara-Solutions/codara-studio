@@ -19,6 +19,8 @@ import { expandHostName, localUser, SshExpansionError } from "./ssh-tokens";
 /** A line of a config file, or the edges of a file an Include reads. */
 export type SourceEntry =
   | { kind: "line"; file: string; line: number; text: string }
+  /** An Include ssh fails on: a file it cannot open, a loop, too deep. */
+  | { kind: "error"; message: string }
   | { kind: "file" }
   | { kind: "enter" }
   | { kind: "leave" };
@@ -44,7 +46,13 @@ export type ParsedEntry =
 type Criterion = { name: string; negate: boolean; arg: string };
 
 /** Settings that decide which known_hosts and revocation files ssh reads. */
-const KNOWN_HOSTS_KEYS = new Set(["revokedhostkeys", "userknownhostsfile", "globalknownhostsfile", "hostkeyalias"]);
+const KNOWN_HOSTS_KEYS = new Set([
+  "revokedhostkeys",
+  "userknownhostsfile",
+  "globalknownhostsfile",
+  "hostkeyalias",
+  "knownhostscommand",
+]);
 /** Settings that change which later blocks apply, or what their %tokens expand to. */
 const CONTEXT_KEYS = new Set([
   "hostname",
@@ -58,12 +66,16 @@ const CONTEXT_KEYS = new Set([
 ]);
 const REPEATABLE = new Set(["identityfile", "localforward", "remoteforward", "dynamicforward", "certificatefile"]);
 const COMMAND_KEYS = new Set(["proxycommand", "knownhostscommand"]);
+/** Keywords whose value is a command line, where `""` is an ordinary shell word. */
+const RAW_KEYS = new Set(["proxycommand", "knownhostscommand", "localcommand", "remotecommand"]);
+// A `""` word on its own, outside a longer quoted string.
+const EMPTY_WORD = /(^|[\s=])""(?=\s|$)/;
 
 const MATCH_KEYWORD = /^(\s*)match(?=[\s=])/i;
 
 const words = (value: Value): string[] => (Array.isArray(value) ? value.map((v) => v.val) : [value]);
 
-function displayPath(file: string): string {
+export function displayPath(file: string): string {
   const home = homedir();
   return file === home || file.startsWith(`${home}${sep}`) ? `~${file.slice(home.length)}` : file;
 }
@@ -72,6 +84,10 @@ function displayPath(file: string): string {
 export function parseEntries(entries: SourceEntry[]): ParsedEntry[] {
   const out: ParsedEntry[] = [];
   for (const entry of entries) {
+    if (entry.kind === "error") {
+      out.push({ kind: "error", where: "", message: entry.message });
+      continue;
+    }
     if (entry.kind !== "line") {
       out.push({ kind: entry.kind });
       continue;
@@ -101,6 +117,10 @@ export function parseEntries(entries: SourceEntry[]): ParsedEntry[] {
       } else {
         out.push({ kind: "match", where, criteria });
       }
+    } else if (words(node.value).every((w) => w === "")) {
+      out.push({ kind: "error", where, message: `ssh cannot read ${where} (${node.param} has no value)` });
+    } else if (!RAW_KEYS.has(param) && EMPTY_WORD.test(entry.text.replace(/^\s*\S+/, ""))) {
+      out.push({ kind: "error", where, message: `ssh cannot read ${where} (${node.param} has an empty value)` });
     } else {
       out.push({ kind: "option", where, param: node.param, value: node.value });
     }
@@ -177,6 +197,8 @@ const and = (a: Tri, b: Tri): Tri => (a === NO || b === NO ? NO : a === MAYBE ||
 
 class Evaluator {
   readonly options: Options = {};
+  /** Where each option got its value. */
+  readonly origins: Record<string, string> = {};
   refusal: string | undefined;
   wantFinal = false;
   private final = false;
@@ -202,6 +224,17 @@ class Evaluator {
     if (canonicalizing) this.checkCanonicalization(canonicalize === "always");
     this.final = true;
     this.pass();
+  }
+
+  // ssh runs KnownHostsCommand and trusts or refuses the keys it prints,
+  // @revoked included. Codara never runs it, so it cannot connect as ssh would.
+  checkKnownHostsCommand(): void {
+    const command = this.first("knownhostscommand");
+    if (command === undefined || command.trim().toLowerCase() === "none") return;
+    this.refuse(
+      `${this.origins.knownhostscommand} sets KnownHostsCommand, which Codara does not run, so it cannot tell which keys that command trusts or revokes. ` +
+        "Remove KnownHostsCommand for this host, or set it to none, to connect from Codara",
+    );
   }
 
   private first(key: string): string | undefined {
@@ -285,8 +318,9 @@ class Evaluator {
     return unknown ?? YES;
   }
 
-  private set(param: string, value: Value): void {
+  private set(param: string, value: Value, where: string): void {
     const key = param.toLowerCase();
+    this.origins[key] ??= where;
     let val: string | string[];
     if (Array.isArray(value)) {
       val = COMMAND_KEYS.has(key)
@@ -359,7 +393,7 @@ class Evaluator {
         }
         case "option":
           if (active === YES) {
-            this.set(p.param, p.value);
+            this.set(p.param, p.value, p.where);
           } else if (active === MAYBE && maybeAt && this.couldMatter(p.param)) {
             const { where, criterion } = maybeAt;
             const name = `Match ${criterion.negate ? "!" : ""}${criterion.name}`;
@@ -389,6 +423,7 @@ export function evaluateSshConfig(parsed: ParsedEntry[], host: string, user?: st
   const evaluator = new Evaluator(parsed, host, user, setsKnownHosts(parsed));
   if (user !== undefined) evaluator.options.user = user;
   evaluator.run();
+  evaluator.checkKnownHostsCommand();
   return { options: evaluator.options, ...(evaluator.refusal ? { refusal: evaluator.refusal } : {}) };
 }
 

@@ -2,7 +2,7 @@
 "use strict";
 
 // ~/.ssh/config reading (src/main/remote/ssh-hosts.ts): Include (absolute,
-// ~, relative to ~/.ssh, globs, cycles, depth), ProxyCommand and
+// ~, relative to ~/.ssh, globs; a loop or more than 16 levels refuses), ProxyCommand and
 // HostKeyAlias, the refusal of unsafe %h/%r/%n values at connect time, and
 // that only main can give a host a proxy. Ports outside 1 to 65535 drop the
 // host (ssh refuses them too), and UserKnownHostsFile / GlobalKnownHostsFile
@@ -94,7 +94,6 @@ async function testInclude(hosts) {
       "Include ~/extra/tilde.conf",
       `Include ${path.join(HOME, "abs", "absolute.conf")} "${path.join(HOME, "abs", "quoted.conf")}"`,
       "Include missing/*.conf",
-      "Include cycle-a.conf",
       "Host direct",
       "  HostName direct.example",
       "",
@@ -106,15 +105,9 @@ async function testInclude(hosts) {
   write("extra/tilde.conf", "Host from-tilde\n  HostName t.example\n");
   write("abs/absolute.conf", "Host from-absolute\n  HostName abs.example\n");
   write("abs/quoted.conf", "Host from-quoted\n  HostName q.example\n");
-  // cycle-a includes cycle-b which includes cycle-a again
-  write(".ssh/cycle-a.conf", "Include cycle-b.conf\nHost cycle-a\n  HostName ca.example\n");
-  write(".ssh/cycle-b.conf", "Include cycle-a.conf\nHost cycle-b\n  HostName cb.example\n");
-
   const list = await hosts.readSshConfigHosts();
   const ids = list.map((h) => h.id).sort();
   assert.deepEqual(ids, [
-    "cycle-a",
-    "cycle-b",
     "direct",
     "from-absolute",
     "from-glob-a",
@@ -124,10 +117,23 @@ async function testInclude(hosts) {
   ]);
   assert.equal(byId(list, "from-glob-a").username, "ana");
   assert.equal(byId(list, "from-glob-b").port, 2200);
+  for (const host of list) assert.equal(host.sshConfigRefusal, undefined, `${host.id}: a missing include is not an error`);
+
+  // cycle-a includes cycle-b which includes cycle-a again: ssh stops, so
+  // every host is listed with the reason.
+  write(".ssh/config", "Include cycle-a.conf\nHost direct\n  HostName direct.example\n");
+  write(".ssh/cycle-a.conf", "Include cycle-b.conf\nHost cycle-a\n  HostName ca.example\n");
+  write(".ssh/cycle-b.conf", "Include cycle-a.conf\nHost cycle-b\n  HostName cb.example\n");
+  const cycle = await hosts.readSshConfigHosts();
+  assert.deepEqual(cycle.map((h) => h.id), ["cycle-a", "cycle-b", "direct"]);
+  for (const host of cycle) {
+    assert.match(host.sshConfigRefusal, /^~\/\.ssh\/cycle-b\.conf line 1 includes ~\/\.ssh\/cycle-a\.conf inside itself/, host.id);
+  }
 }
 
 async function testDepthLimit(hosts) {
-  // A chain of 20 files: the head is read, the tail beyond depth 16 is not.
+  // A chain of 20 files: the head is read, the tail beyond depth 16 is not,
+  // and ssh stops there, so the hosts carry the reason.
   for (let i = 0; i < 20; i += 1) {
     write(
       `.ssh/chain-${i}.conf`,
@@ -140,6 +146,7 @@ async function testDepthLimit(hosts) {
   assert(byId(list, "chain-15"), "depth 16 is still read");
   assert(!byId(list, "chain-16"), "depth 17 is not read");
   assert(!byId(list, "chain-19"), "includes beyond depth 16 must be ignored");
+  assert.match(byId(list, "chain-0").sshConfigRefusal, /^~\/\.ssh\/chain-15\.conf line 3 nests Includes more than 16 levels deep/);
 }
 
 async function testProxyFields(hosts, proxy) {
