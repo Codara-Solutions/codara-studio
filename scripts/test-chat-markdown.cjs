@@ -16,7 +16,8 @@
 //     blocks offer Copy (skipping Mermaid), and table rows are divided by horizontal rules.
 //   - A reply rendered piece by piece (markdown-blocks.ts) gives exactly the
 //     HTML of the whole text at every point of a stream, so finished pieces
-//     can skip re-parsing without anything on screen changing.
+//     can skip re-parsing without anything on screen changing. Only the live
+//     turn's prose is cut; a settled message renders whole.
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -341,7 +342,11 @@ async function main() {
   });
 
   test("Markdown renders memoized pieces with the separator a whole render has", () => {
-    assert.match(markdown, /const blocks = useMemo\(\(\) => splitMarkdownBlocks\(text\), \[text\]\);/);
+    assert.match(markdown, /const blocks = useMemo\(\(\) => \(streaming \? splitMarkdownBlocks\(text\) : \[text\]\), \[streaming, text\]\);/);
+    // Only the live turn's prose streams; settled messages render whole.
+    const conversation = read("src/renderer/src/components/chat/ChatConversation.tsx");
+    assert.match(conversation, /<Markdown text=\{segment\.text\} streaming=\{live\} \/>/);
+    assert.equal((conversation.match(/streaming=/g) ?? []).length, 1);
     assert.match(markdown, /\{index > 0 && "\\n"\}\s*<MarkdownBlock text=\{block\} \/>/);
     assert.match(markdown, /const MarkdownBlock = React\.memo\(function MarkdownBlock/);
   });

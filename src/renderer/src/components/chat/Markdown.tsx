@@ -194,8 +194,10 @@ const COMPONENTS: Components = {
 /** Shared safe markdown renderer for chat and result prose. Raw HTML is not
  * enabled, so model output cannot inject DOM. GFM and highlight.js cover the
  * common tables/task-lists/code path; Mermaid runs in strict security mode. */
-function Markdown({ text }: { text: string }) {
-  const blocks = useMemo(() => splitMarkdownBlocks(text), [text]);
+function Markdown({ text, streaming = false }: { text: string; streaming?: boolean }) {
+  // Only text that is still growing is cut: every piece costs a parser setup,
+  // which a finished message would pay on every mount for nothing.
+  const blocks = useMemo(() => (streaming ? splitMarkdownBlocks(text) : [text]), [streaming, text]);
   // The newline between pieces is the text node the whole document's hast
   // puts between top-level blocks, so the DOM matches an unsplit render.
   return (
