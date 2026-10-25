@@ -465,7 +465,7 @@ export async function readFileRecords(
   cache: ScanCache,
   file: TranscriptFile,
   provider: UsageProviderKind,
-): Promise<UsageRecord[]> {
+): Promise<UsageRecord[] | null> {
   const cached = cache.get(file.path);
   // Provider is part of the identity: were two providers ever pointed at one
   // directory, a hit parsed by the other parser must not be reused.
@@ -479,8 +479,9 @@ export async function readFileRecords(
   }
 
   const parsed = await readTranscriptRecords(file.path, provider);
-  // A read failure is not an empty transcript — do not memoise it.
-  if (parsed === null) return [];
+  // A read failure is not an empty transcript: do not memoise it, and tell
+  // the caller apart from an empty file (null).
+  if (parsed === null) return null;
   const records = dedupeWithinFile(parsed);
 
   cache.set(file.path, {
@@ -588,12 +589,14 @@ async function scanUsageNow({ roots, cachePath, input }: UsageScanRequest): Prom
 
     for (const file of files) {
       livePaths.add(file.path);
-      if (root.provider === "codex") {
-        const name = basename(file.path);
-        if (codexFileNames.has(name)) continue;
-        codexFileNames.add(name);
-      }
-      const records = await readFileRecords(fileCache, file, root.provider);
+      const codexName = root.provider === "codex" ? basename(file.path) : null;
+      if (codexName !== null && codexFileNames.has(codexName)) continue;
+      const read = await readFileRecords(fileCache, file, root.provider);
+      // Only a file that was read claims its name: one that vanished between
+      // the listing and the read (moved to archived_sessions) must leave the
+      // archived copy free to count.
+      if (codexName !== null && read !== null) codexFileNames.add(codexName);
+      const records = read ?? [];
       if (records.length === 0) {
         skippedFiles += 1;
       } else {
