@@ -38,6 +38,8 @@
 //     overwrite the first key, it is refused as changed
 //   - a hashed HostKeyAlias entry is hashed as written; the system-wide
 //     known_hosts and a custom UserKnownHostsFile are read too
+//   - a key Codara stored loses once known_hosts marks it @revoked, and a
+//     refusal caused by a known_hosts line shows that line's key as before
 //
 //   node scripts/test-host-keys.cjs
 
@@ -638,6 +640,36 @@ function hasSshKeygen() {
     assert.equal(global.hostKeyChange?.previousFingerprint, keys.sshFingerprint(other), "the system-wide file is read");
     assert.equal(harness.prompts.length, 0);
     ok("hashed aliases as written, and the system-wide and custom known_hosts files");
+  }
+
+  {
+    reset();
+    confirm = true;
+    answer = true;
+    harness.files.set(KNOWN, JSON.stringify({ "nas.local:22": keys.storedFingerprint(key) }));
+    harness.files.set("/home/me/.ssh/known_hosts", `@revoked nas.local ssh-ed25519 ${b64}\n`);
+    const revoked = await connect("nas");
+    assert.equal(revoked.state, "error", "a stored key that known_hosts revokes never connects");
+    assert.match(revoked.error, /revoked/);
+
+    reset();
+    const listedRsa = wireKey("ssh-rsa", randomBytes(64));
+    const offeredRsa = wireKey("ssh-rsa", randomBytes(64));
+    harness.files.set(KNOWN, JSON.stringify({ "nas.local:22": keys.storedFingerprint(key) }));
+    harness.files.set("/home/me/.ssh/known_hosts", `nas.local ssh-rsa ${listedRsa.toString("base64")}\n`);
+    harness.serverKey = offeredRsa;
+    const stale = await connect("nas");
+    assert.equal(stale.state, "error");
+    assert.deepEqual(stale.hostKeyChange, {
+      hostLabel: "nas.local:22",
+      previousFingerprint: keys.sshFingerprint(listedRsa),
+      newFingerprint: keys.sshFingerprint(offeredRsa),
+      keyType: "ssh-rsa",
+      listedBy: "known_hosts",
+      previousKeyType: "ssh-rsa",
+    });
+    assert.match(stale.error, /known_hosts/);
+    ok("a stored key known_hosts revokes is refused, and a known_hosts line is the before of its refusal");
   }
 
   reset();

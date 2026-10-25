@@ -494,7 +494,8 @@ takes `user@host:port` (port 1 to 65535).
   else that user's home.
 - **Host keys.** With the preference on, a key Studio has not stored is
   trusted silently only when `~/.ssh/known_hosts` lists it (read only,
-  `host-keys.ts` handles hashed names, patterns and `@revoked`; a host with
+  `host-keys.ts` handles hashed names, patterns and `@revoked`, which wins
+  even over a key Codara stored; a host with
   `HostKeyAlias` is looked up by the alias as written, without the port, as
   OpenSSH does; `/etc/ssh/ssh_known_hosts` and a `UserKnownHostsFile` or
   `GlobalKnownHostsFile` from `~/.ssh/config` are read too). The handshake

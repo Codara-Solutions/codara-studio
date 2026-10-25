@@ -26,6 +26,7 @@ import {
   knownHostTypes,
   knownHostsVerdict,
   sshFingerprint,
+  type KnownHostsVerdict,
   storedFingerprint,
 } from "./host-keys";
 
@@ -784,41 +785,46 @@ class RemoteConnection {
     const known = await readKnownHosts();
     if (!this.isCurrent(generation, signal)) return false;
     const prior = known[id];
+    const confirm = !host.codaraBoxId && (await confirmNewHostKeys());
+    if (!this.isCurrent(generation, signal)) return false;
+    // Read before trusting even a stored key: the user may have revoked it
+    // in known_hosts since. OpenSSH looks a HostKeyAlias up as given, never
+    // with the port.
+    let verdict: KnownHostsVerdict | null = null;
+    if (confirm) {
+      const { name, port } = knownHostsName(host);
+      verdict = knownHostsVerdict(await readUserKnownHosts(host), name, port, key);
+      if (!this.isCurrent(generation, signal)) return false;
+      if (verdict.kind === "revoked") {
+        this.hostKeyRefusal = `The host key of ${id} is marked revoked in known_hosts.`;
+        return false;
+      }
+    }
     if (prior === fingerprint) {
       forgetChangedHostKey(host.id);
       return true;
     }
-    const confirm = !host.codaraBoxId && (await confirmNewHostKeys());
-    if (!this.isCurrent(generation, signal)) return false;
+    if (verdict?.kind === "mismatch") {
+      this.refuseChangedKey(id, sshFingerprint(verdict.listedKey), key, hostKeyType(verdict.listedKey));
+      return false;
+    }
     if (!prior) {
-      if (confirm) {
-        // OpenSSH looks a HostKeyAlias up as given, never with the port.
-        const { name, port } = knownHostsName(host);
-        const verdict = knownHostsVerdict(await readUserKnownHosts(host), name, port, key);
+      if (verdict?.kind === "none") {
+        if (this.quietGeneration === generation) {
+          this.hostKeyRefusal = `The host key of ${id} needs your confirmation: connect to ${host.id} again.`;
+          return false;
+        }
+        const trust = await promptHostKey(
+          { hostId: host.id, hostLabel: id, keyType: hostKeyType(key), fingerprint: sshFingerprint(key) },
+          signal,
+        );
         if (!this.isCurrent(generation, signal)) return false;
-        if (verdict.kind === "revoked") {
-          this.hostKeyRefusal = `The host key of ${id} is marked revoked in ~/.ssh/known_hosts.`;
+        if (!trust) {
+          this.hostKeyRefusal = `The host key of ${id} was not trusted.`;
           return false;
         }
-        if (verdict.kind === "mismatch") {
-          this.refuseChangedKey(id, sshFingerprint(verdict.listedKey), key, hostKeyType(verdict.listedKey));
-          return false;
-        }
-        if (verdict.kind === "none") {
-          if (this.quietGeneration === generation) {
-            this.hostKeyRefusal = `The host key of ${id} needs your confirmation: connect to ${host.id} again.`;
-            return false;
-          }
-          const trust = await promptHostKey(
-            { hostId: host.id, hostLabel: id, keyType: hostKeyType(key), fingerprint: sshFingerprint(key) },
-            signal,
-          );
-          if (!this.isCurrent(generation, signal)) return false;
-          if (!trust) {
-            this.hostKeyRefusal = `The host key of ${id} was not trusted.`;
-            return false;
-          }
-        }
+      }
+      if (confirm) {
         // Another host at the same address may have been trusted while this
         // one waited: its key stands, and this one is a change.
         const now = (await readKnownHosts())[id];
@@ -836,10 +842,7 @@ class RemoteConnection {
       // Codara keeps one key per host; a host has one per type, and the type
       // negotiated can change (known_hosts gained a line, the order of host
       // key algorithms moved). One the user's known_hosts lists is the host's.
-      const { name, port } = knownHostsName(host);
-      const verdict = knownHostsVerdict(await readUserKnownHosts(host), name, port, key);
-      if (!this.isCurrent(generation, signal)) return false;
-      if (verdict.kind === "match") {
+      if (verdict?.kind === "match") {
         forgetChangedHostKey(host.id);
         return true;
       }
