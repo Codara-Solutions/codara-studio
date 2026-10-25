@@ -162,6 +162,12 @@ const BLOCK_SAMPLES = [
   "    a\n\n    \nb\n\n    c\n\n\t\nd",
   "+\n    ```\n\n\n\ns",
   "1. a\n\n     ```\n     b\n\n\nc",
+  "1. Install:\n\n    ```bash\n    npm i\n\n    npm test\n    ```\n\n2. Run\n\nDone.\n\n- a\n\n    ~~~\n    x\n    ~~~\n\nEnd",
+  "1. a\n\n    ```\n        ```\n\n\nb\n\nc",
+  "- a\n\n    ~~~\n    x\n     ~~~~\n\n\nq",
+  "1. a\n\n    ```\n     ```\n\n\nb",
+  "- a\n\n\t```\n\n\nb\n\n> - a\n>\n>     ```\n\n\nc\n\n1. a\n\n\t ```\n\n\nd",
+  "    a\n\n> - b\n\n    c\n\n> 2. d\n\n    e\n\n> > -",
 ];
 
 // mulberry32: integer math only, so it does not fall into a short cycle the
@@ -179,8 +185,8 @@ function seeded(seed) {
 
 const FUZZ_LINES = [
   "", "", "", "", "", "", "text line", "text line", "text line", "More prose.", "- item", "1. item", "2. two", "10. ten", "-", "* star", "+ plus",
-  "   ```", " ```", "```", "```js", "~~~", "````", "  code", "    deep", "      deeper", "\tTab", "    ", "    ```", "     ~~~",
-  "> quote", ">", "| a | b |", "|---|---|", "---", "===", "# heading", "- [ ] task",
+  "   ```", " ```", "```", "```js", "~~~", "````", "  code", "    deep", "      deeper", "\tTab", "    ", "    ```", "     ~~~", "        ```", "      ~~~~",
+  "> quote", ">", "> -", "> 2. two", "| a | b |", "|---|---|", "---", "===", "# heading", "- [ ] task",
   "[link](https://x.dev) text", "def f() -> list[int]:", "[a\\]b]",
 ];
 // Lines after which nothing more is cut; kept rare so most documents still are.
@@ -382,6 +388,8 @@ async function main() {
     // Nor does a link on a line that opens a bracket: only "]:" right after its label holds a definition.
     assert.deepEqual(B.splitMarkdownBlocks("[Docs](https://x.dev)\n\n```py\ndef f() -> list[int]:\n```"), ["[Docs](https://x.dev)", "```py\ndef f() -> list[int]:\n```"]);
     assert.equal(B.splitMarkdownBlocks("x\n\n[a\\]b\nc]: /url").length, 1);
+    // A list item's code fence indented 4 columns lets cutting go on once it closes.
+    assert.deepEqual(B.splitMarkdownBlocks("1. Install:\n\n    ```bash\n    npm i\n\n    npm test\n    ```\n\n2. Run\n\nDone."), ["1. Install:\n\n    ```bash\n    npm i\n\n    npm test\n    ```\n\n2. Run", "Done."]);
     // A CR that ends the text is half of a CRLF still arriving, not a lone CR.
     assert.deepEqual(B.splitMarkdownBlocks("a\r\n\r\nb\r"), ["a\r", "b\r"]);
   });
