@@ -6,8 +6,12 @@
 // a fake SSH connection (the harness quotes pty-manager's own `cd` with
 // JSON.stringify). Guards:
 //
-//   - preference off: a remote pane types exactly what it typed before, and
-//     never probes the machine
+//   - preference off: a remote pane types exactly what it typed before; but
+//     an agent still running in tmux from when it was on is attached (a
+//     restored `claude --resume` must not start a second Claude on the same
+//     transcript) and still ends with its pane
+//   - a pane reopened while its close is still ending the old session waits
+//     for that kill, so the kill never lands on the new agent
 //   - preference on: an agent startup becomes the tmux launch line of
 //     remote/remote-agents.ts; a plain shell pane attaches when its agent
 //     session is alive and stays a plain shell when it is not
@@ -48,6 +52,7 @@ function fakeConnection(state) {
     },
     async exec(command) {
       state.execs.push(command);
+      if (command.includes("kill-session") && state.killGate) await state.killGate;
       if (command.includes("has-session")) return { code: state.alive ? 0 : 1 };
       return { code: 0 };
     },
@@ -101,12 +106,28 @@ async function main() {
       `cd "/home/dev/project" && export SPARK_TERMINAL=1 SPARK_REMOTE=1 && clear && ${CLAUDE}\n`,
     );
     assert.equal(state.channels[1].writes[0], 'cd "/home/dev/project" && export SPARK_TERMINAL=1 SPARK_REMOTE=1 && clear\n');
-    assert.deepEqual(state.execs, [], "the machine is never probed");
+    assert.ok(state.execs.every((c) => c.includes("has-session")), "the machine is only probed for a session");
     pty.dispose("off-agent");
     await sleep(400);
     assert.deepEqual(kills(), []);
     pty.disposeAll();
     ok("preference off: remote panes behave as before");
+
+    reset();
+    state.alive = true;
+    const RESUME = "claude --dangerously-skip-permissions --resume 3f2c9a1e-0000-4000-8000-000000000001";
+    await pty.spawn(options("off-restored", RESUME));
+    await pty.spawn(options("off-restored-shell"));
+    for (const [i, id] of [[0, "off-restored"], [1, "off-restored-shell"]]) {
+      const typed = state.channels[i].writes[0];
+      assert.match(typed, new RegExp(`attach-session -t '=codara-${id}'\\n$`), typed);
+      assert.equal(typed.includes("--resume"), false, "never a second Claude beside the one in tmux");
+    }
+    pty.dispose("off-restored");
+    await sleep(400);
+    assert.deepEqual(kills().map((c) => /codara-([a-z-]+)/.exec(c)[1]), ["off-restored"], "its pane still ends it");
+    pty.disposeAll();
+    ok("preference off: an agent still running in tmux is attached, not started again, and ends with its pane");
 
     reset();
     controller.preferences = { machinesEnabled: true };
@@ -152,6 +173,24 @@ async function main() {
     await sleep(100);
     assert.equal(kills().some((c) => /codara-(quit-me|window-me|back-again)/.test(c)), false, "quitting leaves agents running");
     ok("closing, stopping or deleting ends the agent; quitting, a closed window or a quick reopen does not");
+
+    reset();
+    let release;
+    state.killGate = new Promise((resolve) => (release = resolve));
+    await pty.spawn(options("race-me", CLAUDE));
+    pty.dispose("race-me");
+    await sleep(400);
+    assert.equal(kills().length, 1, "the close is ending the session");
+    const reopened = pty.spawn(options("race-me", CLAUDE));
+    await sleep(50);
+    assert.equal(state.channels.length, 1, "the new pane waits for the kill");
+    release();
+    await reopened;
+    assert.equal(state.channels.length, 2);
+    assert.match(state.channels[1].writes[0], /new-session -A -s/);
+    state.killGate = null;
+    pty.disposeAll();
+    ok("a pane reopened during its old session's kill waits for it");
   } finally {
     delete globalThis.__codaraPtySpawnHarness;
     fs.rmSync(tmp, { recursive: true, force: true });

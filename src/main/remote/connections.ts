@@ -80,6 +80,16 @@ export interface ExecOptions {
   stdin?: string | Buffer;
   timeoutMs?: number;
   maxBuffer?: number;
+  /** Connect, if needed, without prompts or a box wake (see `ensure`). */
+  quiet?: boolean;
+}
+
+/**
+ * A quiet connect (a pane reconnecting on its own) stopped where it would
+ * have asked the user for a password or passphrase, or woken a Codara box.
+ */
+export class NeedsUserError extends Error {
+  readonly needsUser = true;
 }
 
 export interface ExecResult {
@@ -211,6 +221,7 @@ class RemoteConnection {
   private client: Client | null = null;
   private connecting: Promise<Client> | null = null;
   private connectingAbort: AbortController | null = null;
+  private connectingQuiet = false;
   private generation = 0;
   private disposed = false;
   private sftpCached: Promise<SFTPWrapper> | null = null;
@@ -235,13 +246,29 @@ class RemoteConnection {
     });
   }
 
-  async ensure(): Promise<Client> {
+  /**
+   * The open client, connecting first if needed. `quiet` is for work nobody
+   * asked for just now (a pane reconnecting on its own): it uses only what
+   * needs no prompt (keys without a passphrase or with a saved one, the
+   * agent, a saved password) and never dials a Codara box, whose wake costs
+   * money; where it would ask it fails with NeedsUserError instead.
+   */
+  async ensure(opts: { quiet?: boolean } = {}): Promise<Client> {
+    const quiet = opts.quiet === true;
     if (this.client) return this.client;
     if (this.disposed) throw new ConnectionAttemptCancelledError();
-    if (this.connecting) return this.connecting;
+    if (this.connecting) {
+      // The user's connect is never handed a quiet attempt's failure: it
+      // starts its own, which may ask, once the quiet one gives up.
+      if (this.connectingQuiet && !quiet) return this.connecting.catch(() => this.ensure());
+      return this.connecting;
+    }
+    if (quiet && this.host.codaraBoxId) {
+      throw new NeedsUserError(`Reconnecting to ${this.host.id} could wake the box.`);
+    }
     const generation = ++this.generation;
     const controller = new AbortController();
-    const connecting = this.connect(generation, controller.signal).finally(() => {
+    const connecting = this.connect(generation, controller.signal, quiet).finally(() => {
       if (this.connecting === connecting) {
         this.connecting = null;
         this.connectingAbort = null;
@@ -249,6 +276,7 @@ class RemoteConnection {
     });
     this.connecting = connecting;
     this.connectingAbort = controller;
+    this.connectingQuiet = quiet;
     return connecting;
   }
 
@@ -260,7 +288,7 @@ class RemoteConnection {
     if (!this.isCurrent(generation, signal)) throw new ConnectionAttemptCancelledError();
   }
 
-  private async connect(generation: number, signal: AbortSignal): Promise<Client> {
+  private async connect(generation: number, signal: AbortSignal, quiet = false): Promise<Client> {
     const host = this.host;
     this.assertCurrent(generation, signal);
     this.setState("connecting");
@@ -303,7 +331,7 @@ class RemoteConnection {
             let passphrase = await getSecret(secretKey);
             this.assertCurrent(generation, signal);
             let fromPrompt = false;
-            if (passphrase === null) {
+            if (passphrase === null && !quiet) {
               const answer = await promptAuth(
                 host.id,
                 "passphrase",
@@ -384,7 +412,7 @@ class RemoteConnection {
       }
       // A key the CLI added moments ago may not have reached the box yet:
       // only then is an authentication failure worth another round.
-      if (!host.codaraBoxId || lastErr === null || !isAuthFailure(lastErr)) break;
+      if (quiet || !host.codaraBoxId || lastErr === null || !isAuthFailure(lastErr)) break;
       const delay = nextFreshKeyDelayMs(host.id, retry);
       if (delay === null) break;
       this.setState(
@@ -394,6 +422,12 @@ class RemoteConnection {
       );
       await abortableDelay(delay, signal);
       this.assertCurrent(generation, signal);
+    }
+
+    if (quiet && (lastErr === null || isAuthFailure(lastErr))) {
+      this.assertCurrent(generation, signal);
+      this.setState("disconnected");
+      throw new NeedsUserError(`Reconnecting to ${host.id} needs a password or passphrase.`);
     }
 
     // Interactive password prompts (up to 3 tries), unless a non-auth error
@@ -627,7 +661,7 @@ class RemoteConnection {
   // enforced — mirrors runGit's execFile semantics closely enough that git
   // parsers behave identically.
   async exec(command: string, opts: ExecOptions = {}): Promise<ExecResult> {
-    const client = await this.ensure();
+    const client = await this.ensure({ quiet: opts.quiet });
     const timeoutMs = opts.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
     const maxBuffer = opts.maxBuffer ?? DEFAULT_EXEC_MAX_BUFFER;
     return new Promise((resolve, reject) => {
@@ -716,8 +750,8 @@ class RemoteConnection {
   }
 
   /** Interactive PTY shell channel (remote terminals). */
-  async shell(opts: { cols: number; rows: number; term?: string }): Promise<ClientChannel> {
-    const client = await this.ensure();
+  async shell(opts: { cols: number; rows: number; term?: string; quiet?: boolean }): Promise<ClientChannel> {
+    const client = await this.ensure({ quiet: opts.quiet });
     return new Promise((resolve, reject) => {
       client.shell(
         { term: opts.term ?? "xterm-256color", cols: opts.cols, rows: opts.rows },

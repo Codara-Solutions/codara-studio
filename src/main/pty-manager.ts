@@ -34,7 +34,7 @@ import {
   buildRemoteAgentProbe,
   remoteAgentRuntime,
 } from "./remote/remote-agents";
-import { createRemotePtyHandle } from "./remote/remote-pty";
+import { createRemotePtyHandle, remoteAgentKillSettled } from "./remote/remote-pty";
 import { loadPreferences } from "./preferences-store";
 import { formatManualAgentStartup, parseManualAgentStartupCommand } from "./manual-agent-startup";
 import { assertManualAgentLaunchAllowed } from "./orchestration/project-policy";
@@ -1017,19 +1017,45 @@ async function remoteAgentSessionAlive(
 async function doSpawnRemote(
   opts: SpawnOptions,
 ): Promise<{ id: string; pid: number; startupCommandHandled?: boolean }> {
+  let unbindEarly = () => {};
   const parts = parseRemotePath(opts.cwd);
   if (!parts) throw new Error(`Malformed remote path: ${opts.cwd}`);
   const cols = Math.max(1, opts.cols | 0);
   const rows = Math.max(1, opts.rows | 0);
   const conn = await getConnection(parts.hostId);
+  // A close that is still ending this pane's old agent session must land
+  // before the new pane looks for one, or it kills the new agent.
+  await remoteAgentKillSettled(opts.id);
   const startup = opts.startupCommand?.trim();
+  // The setting only decides whether a new agent starts in tmux. Any other
+  // remote pane may be a restored pane whose agent still runs in tmux (the
+  // setting may have been turned off since): it attaches to that agent, never
+  // starts a second one beside it (`claude --resume` on the same transcript),
+  // and its close still ends it.
   const machines = (await loadPreferences()).machinesEnabled === true;
   const agentRuntime = machines ? remoteAgentRuntime(startup) : null;
+  let closedEarly: { exitCode: number | null } | null = null;
   const [channel, reattach] = await Promise.all([
-    conn.shell({ cols, rows }),
-    // A plain shell pane may be a restored pane whose agent is still running.
-    machines && !agentRuntime ? remoteAgentSessionAlive(conn, opts.id) : Promise.resolve(false),
+    conn.shell({ cols, rows }).then((ch) => {
+      // The handle binds after the probe: a close in between must not be lost.
+      let exitCode: number | null = null;
+      const onExit = (code: unknown) => {
+        exitCode = typeof code === "number" ? code : 0;
+      };
+      const onClose = () => {
+        closedEarly = { exitCode };
+      };
+      ch.on("exit", onExit);
+      ch.on("close", onClose);
+      unbindEarly = () => {
+        ch.off("exit", onExit);
+        ch.off("close", onClose);
+      };
+      return ch;
+    }),
+    agentRuntime ? Promise.resolve(false) : remoteAgentSessionAlive(conn, opts.id),
   ]);
+  unbindEarly();
   const agentPane = agentRuntime !== null || reattach;
   endRemoteAgentOnKill.delete(opts.id);
 
@@ -1043,6 +1069,8 @@ async function doSpawnRemote(
     rows,
     agentPane,
     endAgentOnKill: () => endRemoteAgentOnKill.delete(opts.id),
+    reportExitStatus: machines,
+    closedBeforeBind: closedEarly,
     log: (message) => logMain("pty", message),
   });
 
@@ -1149,7 +1177,6 @@ async function doSpawnRemote(
   // any) as the shell's first real action.
   const first = agentRuntime && startup
     ? buildRemoteAgentLaunch({
-        cwd: parts.path,
         paneId: opts.id,
         hostLabel: parts.hostId,
         cols,
