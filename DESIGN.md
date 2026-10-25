@@ -155,3 +155,29 @@ Simple Browser (a browser that belongs to the editor), the Vercel toolbar
   the page.
 - No dock: a bar along the bottom of the page would sit over the area the
   agent's cursor works in and split the tools between two edges.
+
+## Usage forecast in the usage panel (2026-10, Labs)
+
+**Chosen:** B, the projection. Each limit meter in the usage panel draws, past
+the used part, a soft segment to where the window is most likely to end, plus
+a thin tick at the pessimistic end (p90), with one short line under the
+meter: "Ends ≈ 48% at reset" or "Runs out ≈ 14:20, 40 min early". Etienne
+picked it from three variants shown on his real numbers (A a full sentence
+under each meter, B this projection, C a mark on the title-bar pill only).
+A and C stay selectable in the Usage tab's Labs card.
+
+**Why:** the meter is where the eye already goes, and a segment on it answers
+"will it last" without reading. The sentence (A) said the same thing in more
+words, and the title-bar mark (C) hid it until a run-out was likely.
+
+**Rules:**
+
+- The projection uses the meter's own tone color at low opacity, never a new
+  color. It turns to the danger tone only when running out is more likely
+  than not, and then the segment fills to the end of the meter.
+- The short line is always text as well as the segment, so color and length
+  never carry the forecast alone.
+- An account that is not in use shows no projection: it only grows if the
+  user switches to it.
+- How sure the forecast is reads as a word plus the history it learned from
+  ("fairly sure · 40 past windows"), never as a raw percentage.
