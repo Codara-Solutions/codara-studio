@@ -8,9 +8,14 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  clickAndPaint,
   cpuOver,
+  measureStream,
+  pickFrames,
+  visibleText,
   hotFunctions,
   installProbes,
+  localPage,
   memorySnapshot,
   pixelLatency,
   profile,
@@ -21,6 +26,7 @@ import {
   stopRecording,
   summarize,
   untilPainted,
+  waitForFile,
 } from "./lib.mjs";
 import { chatMarkdown, fakeAgentSource, streamChunks } from "./fixtures.mjs";
 
@@ -157,42 +163,6 @@ async function rpc(fixture, method, params) {
   if (body.error) throw new Error(`${method}: ${body.error.message}`);
   return body.result;
 }
-
-async function clickAndPaint(page, selector, predicate, arg) {
-  return page.evaluate(
-    async ({ selector, source, arg }) => {
-      const check = new Function("arg", `return (${source})(arg);`);
-      const target = document.querySelector(selector);
-      if (!target) throw new Error(`missing ${selector}`);
-      const started = performance.now();
-      target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
-      target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
-      target.click();
-      await new Promise((resolve, reject) => {
-        const poll = () => {
-          if (check(arg)) return resolve();
-          if (performance.now() - started > 15_000) return reject(new Error(`timed out after ${selector}`));
-          requestAnimationFrame(poll);
-        };
-        poll();
-      });
-      await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
-      return performance.now() - started;
-    },
-    { selector, source: predicate.toString(), arg },
-  );
-}
-
-const visibleText = (text) => {
-  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-    if (node.textContent.includes(text)) {
-      const rect = node.parentElement.getBoundingClientRect();
-      if (rect.width > 0 && rect.height > 0) return true;
-    }
-  }
-  return false;
-};
 
 export const flows = {
   // Rail clicks between two workspaces, timed until the destination's own
@@ -401,18 +371,22 @@ export const flows = {
     }
   },
 
-  // A command that prints 200,000 lines into the terminal: how long until the
-  // prompt is back, what it costs, and how scrolling the scrollback feels.
+  // A command that prints 200,000 lines into the terminal: how long until it
+  // has finished, what it costs, and how scrolling the scrollback feels.
   async terminalBusy(session, fixture) {
     const { page, pid } = session;
     await openTerminalTab(page);
     const screen = page.locator(".xterm-screen:visible").first();
     await screen.click({ force: true });
+    // The shell touches the marker once seq has exited, which is when the app
+    // has drained the pty. The t3code adapter uses the same marker.
+    const marker = join(fixture.home, "bench-busy-done");
+    rmSync(marker, { force: true });
     await startRecording(page);
     const cpu = cpuOver(pid, 6_000);
     const started = Date.now();
-    await page.keyboard.type("seq 1 200000; echo DONE-$((40+2))\n");
-    const done = await waitForTerminalText(fixture, "DONE-42", 60_000);
+    await page.keyboard.type("seq 1 200000; touch ~/bench-busy-done\n");
+    const done = (await waitForFile(marker, 60_000)) !== null;
     const elapsed = Date.now() - started;
     const output = await stopRecording(page);
     const box = await screen.boundingBox();
@@ -480,81 +454,6 @@ export const flows = {
   },
 };
 
-// Shared by both apps' stream flows: CPU in 10 s windows (to show whether the
-// cost grows with the reply), a CPU profile at 12-17 s and a trace breakdown
-// at 25-30 s, frame and long-task stats for the whole stream, and the delay
-// from the last delta leaving its sender to the closing words on screen.
-export async function measureStream(session, { chunks, head, tail, deltasPerSecond, send }) {
-  const { page, cdp, pid } = session;
-  const durationMs = Math.ceil((chunks.length / deltasPerSecond) * 1000);
-  await startRecording(page);
-  const windows = (async () => {
-    const out = [];
-    for (let at = 0; at + 10_000 <= durationMs; at += 10_000) out.push(await cpuOver(pid, 10_000));
-    return out;
-  })();
-  const streaming = send();
-  await sleep(3_000);
-  const startedRendering = await page.evaluate((needle) => document.body.innerText.includes(needle), head.trim());
-  if (!startedRendering) throw new Error("the streamed reply is not on screen");
-  await sleep(9_000);
-  const cpuProfile = await profile(cdp, () => sleep(5_000));
-  await sleep(8_000);
-  const trace = await traceBreakdown(cdp, () => sleep(5_000));
-  const sentAt = await streaming;
-  const paintedAt = await untilPainted(page, (needle) => document.body.innerText.includes(needle), tail, 30_000).catch(() => null);
-  const lagMs = paintedAt === null ? null : round(paintedAt + (await page.evaluate(() => performance.timeOrigin)) - sentAt);
-  const frames = await stopRecording(page);
-  return {
-    chars: chunks.join("").length,
-    deltas: chunks.length,
-    startedRendering,
-    finalPaintLagMs: lagMs,
-    cpuWindows: await windows,
-    ...pickFrames(frames),
-    trace,
-    hot: hotFunctions(cpuProfile, 30),
-    profile: cpuProfile,
-  };
-}
-
-// xterm draws on a WebGL canvas, so a pane's text is read from main through
-// the agent socket. That says when main has the bytes; the frame stats taken
-// around it say what drawing them cost the renderer.
-async function waitForTerminalText(fixture, text, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  const { panes } = await rpc(fixture, "terminal.list", { workspace: fixture.workspaces[0].id });
-  while (Date.now() < deadline) {
-    for (const pane of panes ?? []) {
-      const read = await rpc(fixture, "terminal.read", { paneId: pane.paneId, lines: 5 }).catch(() => null);
-      if (read?.text?.includes(text)) return true;
-    }
-    await sleep(50);
-  }
-  return false;
-}
-
-async function localPage() {
-  const { createServer } = await import("node:http");
-  const body = `<!doctype html><title>bench</title><h1>Local page</h1>${"<p>Some text for the page to lay out.</p>".repeat(200)}`;
-  const server = createServer((_req, res) => {
-    res.writeHead(200, { "content-type": "text/html" });
-    res.end(body);
-  });
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return { url: `http://127.0.0.1:${server.address().port}/`, close: () => server.close() };
-}
-
-function pickFrames(frames) {
-  return {
-    frames: frames.frames,
-    frameMs: frames.frameMs,
-    droppedFramePct: frames.droppedFramePct,
-    longTasks: frames.longTasks,
-    longTaskMs: frames.longTaskMs,
-    worstLongTaskMs: frames.worstLongTaskMs,
-  };
-}
 
 // Sends the deltas from the main process on event-log's 50 ms cadence, so the
 // harness's own round trips never pace the stream. Resolves with the epoch
@@ -676,4 +575,4 @@ export async function close(session) {
   await session.app.close().catch(() => {});
 }
 
-export { cpuOver, memorySnapshot, profile, hotFunctions, rpc, chatMarkdown, streamChunks };
+export { cpuOver, memorySnapshot, profile, hotFunctions, rpc, chatMarkdown, streamChunks, seedChat, openCora };
