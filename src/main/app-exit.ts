@@ -128,6 +128,7 @@ export const HANDOFF_FILE = "single-instance-handoff.json";
 export const HANDOFF_ANSWER_WAIT_MS = 1_000;
 export const HANDOFF_LOCK_WAIT_MS = 15_000;
 export const HANDOFF_RETRY_MS = 250;
+export const HANDOFF_HOLDER_EXIT_WAIT_MS = 10_000;
 
 export type HandoffAnswer = "quitting" | "focused";
 
@@ -155,6 +156,26 @@ export function readHandoffAnswer(userDataDir: string, nonce: string): HandoffAn
   } catch {
     return null;
   }
+}
+
+/** The pid of the instance that answered this launch, or null. */
+export function readHandoffHolderPid(userDataDir: string, nonce: string): number | null {
+  try {
+    const parsed = JSON.parse(readFileSync(join(userDataDir, HANDOFF_FILE), "utf8")) as { nonce?: unknown; pid?: unknown };
+    return parsed.nonce === nonce && Number.isInteger(parsed.pid) && (parsed.pid as number) > 0 ? (parsed.pid as number) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Resolves once `pid` is gone, or after maxMs. */
+export async function waitForProcessExit(pid: number, maxMs: number, stepMs = 100): Promise<boolean> {
+  const deadline = Date.now() + maxMs;
+  while (isProcessAlive(pid)) {
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, stepMs));
+  }
+  return true;
 }
 
 export interface HandoffOptions {

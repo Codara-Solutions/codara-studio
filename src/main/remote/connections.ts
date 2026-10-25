@@ -12,6 +12,9 @@ import type {
 import { writeFileAtomic } from "../fs-atomic";
 import { codaraHome } from "../codara-home";
 import { getHost } from "./ssh-hosts";
+import { openProxySocket, resolveProxyInvocation, type ProxySocket } from "./proxy-command";
+import { wakeCodaraBox } from "./codara-boxes";
+import { abortableDelay, clearFreshBoxKey, nextFreshKeyDelayMs } from "./box-key-retry";
 import { deleteSecret, getSecret, setSecret } from "./secret-store";
 
 // One multiplexed SSH connection per host, shared by every consumer (SFTP
@@ -54,8 +57,13 @@ function loadSsh2(): Promise<Ssh2Module> {
 }
 
 const READY_TIMEOUT_MS = 20_000;
+// Through a ProxyCommand the handshake also waits for the proxy to dial.
+const PROXY_READY_TIMEOUT_MS = 120_000;
 const KEEPALIVE_INTERVAL_MS = 15_000;
 const KEEPALIVE_COUNT_MAX = 3;
+// A ProxyCommand that ignores the end of its input would outlive a closed
+// connection, so dispose force-closes a client still open after this long.
+const DISPOSE_GRACE_MS = 2_000;
 const DEFAULT_EXEC_TIMEOUT_MS = 20_000;
 const DEFAULT_EXEC_MAX_BUFFER = 16 * 1024 * 1024;
 
@@ -72,6 +80,16 @@ export interface ExecOptions {
   stdin?: string | Buffer;
   timeoutMs?: number;
   maxBuffer?: number;
+  /** Connect, if needed, without prompts or a box wake (see `ensure`). */
+  quiet?: boolean;
+}
+
+/**
+ * A quiet connect (a pane reconnecting on its own) stopped where it would
+ * have asked the user for a password or passphrase, or woken a Codara box.
+ */
+export class NeedsUserError extends Error {
+  readonly needsUser = true;
 }
 
 export interface ExecResult {
@@ -203,6 +221,7 @@ class RemoteConnection {
   private client: Client | null = null;
   private connecting: Promise<Client> | null = null;
   private connectingAbort: AbortController | null = null;
+  private connectingQuiet = false;
   private generation = 0;
   private disposed = false;
   private sftpCached: Promise<SFTPWrapper> | null = null;
@@ -211,19 +230,45 @@ class RemoteConnection {
 
   constructor(public readonly host: RemoteHostConfig) {}
 
-  private setState(state: RemoteConnectionStatus["state"], error?: string): void {
-    this.state = state;
-    this.lastError = error ?? null;
-    statusSender?.({ hostId: this.host.id, state, ...(error ? { error } : {}) });
+  /** The user disconnected the host, or Studio is quitting: never reconnect. */
+  get isDisposed(): boolean {
+    return this.disposed;
   }
 
-  async ensure(): Promise<Client> {
+  private setState(state: RemoteConnectionStatus["state"], error?: string, progress?: string): void {
+    this.state = state;
+    this.lastError = error ?? null;
+    statusSender?.({
+      hostId: this.host.id,
+      state,
+      ...(error ? { error } : {}),
+      ...(progress ? { progress } : {}),
+    });
+  }
+
+  /**
+   * The open client, connecting first if needed. `quiet` is for work nobody
+   * asked for just now (a pane reconnecting on its own): it uses only what
+   * needs no prompt (keys without a passphrase or with a saved one, the
+   * agent, a saved password) and never dials a Codara box, whose wake costs
+   * money; where it would ask it fails with NeedsUserError instead.
+   */
+  async ensure(opts: { quiet?: boolean } = {}): Promise<Client> {
+    const quiet = opts.quiet === true;
     if (this.client) return this.client;
     if (this.disposed) throw new ConnectionAttemptCancelledError();
-    if (this.connecting) return this.connecting;
+    if (this.connecting) {
+      // The user's connect is never handed a quiet attempt's failure: it
+      // starts its own, which may ask, once the quiet one gives up.
+      if (this.connectingQuiet && !quiet) return this.connecting.catch(() => this.ensure());
+      return this.connecting;
+    }
+    if (quiet && this.host.codaraBoxId) {
+      throw new NeedsUserError(`Reconnecting to ${this.host.id} could wake the box.`);
+    }
     const generation = ++this.generation;
     const controller = new AbortController();
-    const connecting = this.connect(generation, controller.signal).finally(() => {
+    const connecting = this.connect(generation, controller.signal, quiet).finally(() => {
       if (this.connecting === connecting) {
         this.connecting = null;
         this.connectingAbort = null;
@@ -231,6 +276,7 @@ class RemoteConnection {
     });
     this.connecting = connecting;
     this.connectingAbort = controller;
+    this.connectingQuiet = quiet;
     return connecting;
   }
 
@@ -242,12 +288,31 @@ class RemoteConnection {
     if (!this.isCurrent(generation, signal)) throw new ConnectionAttemptCancelledError();
   }
 
-  private async connect(generation: number, signal: AbortSignal): Promise<Client> {
+  private async connect(generation: number, signal: AbortSignal, quiet = false): Promise<Client> {
     const host = this.host;
     this.assertCurrent(generation, signal);
     this.setState("connecting");
     const { utils: sshUtils } = await loadSsh2();
     this.assertCurrent(generation, signal);
+
+    // A Codara box may be asleep: the CLI wakes it first and reports phases,
+    // so the handshake below starts against a box that is already running.
+    if (host.codaraBoxId) {
+      try {
+        await wakeCodaraBox(host.codaraBoxId, {
+          signal,
+          onPhase: (line) => {
+            if (this.isCurrent(generation, signal)) this.setState("connecting", undefined, line);
+          },
+        });
+      } catch (err) {
+        this.assertCurrent(generation, signal);
+        const message = err instanceof Error ? err.message : "The box could not be woken.";
+        this.setState("error", message);
+        throw new Error(`SSH connection to ${host.id} failed: ${message}`);
+      }
+      this.assertCurrent(generation, signal);
+    }
 
     // Gather private keys up front (passphrase prompts must complete before
     // the TCP handshake starts consuming auth attempts).
@@ -266,7 +331,7 @@ class RemoteConnection {
             let passphrase = await getSecret(secretKey);
             this.assertCurrent(generation, signal);
             let fromPrompt = false;
-            if (passphrase === null) {
+            if (passphrase === null && !quiet) {
               const answer = await promptAuth(
                 host.id,
                 "passphrase",
@@ -331,16 +396,38 @@ class RemoteConnection {
     }
 
     let lastErr: Error | null = null;
-    for (const attempt of attempts) {
-      try {
-        const client = await this.tryConnect(attempt.cfg, generation, signal);
-        this.adopt(client, generation, signal);
-        return client;
-      } catch (err) {
-        if (err instanceof ConnectionAttemptCancelledError) throw err;
-        lastErr = err as Error;
-        if (!isAuthFailure(lastErr)) break; // network/hostkey errors: stop the ladder
+    for (let retry = 0; ; retry++) {
+      lastErr = null;
+      for (const attempt of attempts) {
+        try {
+          const client = await this.tryConnect(attempt.cfg, generation, signal);
+          if (host.codaraBoxId) clearFreshBoxKey(host.id);
+          this.adopt(client, generation, signal);
+          return client;
+        } catch (err) {
+          if (err instanceof ConnectionAttemptCancelledError) throw err;
+          lastErr = err as Error;
+          if (!isAuthFailure(lastErr)) break; // network/hostkey errors: stop the ladder
+        }
       }
+      // A key the CLI added moments ago may not have reached the box yet:
+      // only then is an authentication failure worth another round.
+      if (quiet || !host.codaraBoxId || lastErr === null || !isAuthFailure(lastErr)) break;
+      const delay = nextFreshKeyDelayMs(host.id, retry);
+      if (delay === null) break;
+      this.setState(
+        "connecting",
+        undefined,
+        `Waiting for your new SSH key to reach the box (about 1 to 2 minutes), retrying in ${Math.ceil(delay / 1000)}s`,
+      );
+      await abortableDelay(delay, signal);
+      this.assertCurrent(generation, signal);
+    }
+
+    if (quiet && (lastErr === null || isAuthFailure(lastErr))) {
+      this.assertCurrent(generation, signal);
+      this.setState("disconnected");
+      throw new NeedsUserError(`Reconnecting to ${host.id} needs a password or passphrase.`);
     }
 
     // Interactive password prompts (up to 3 tries), unless a non-auth error
@@ -397,6 +484,23 @@ class RemoteConnection {
     return new Promise((resolve, reject) => {
       const client = new Client();
       let settled = false;
+      let proxy: ProxySocket | null = null;
+      try {
+        const invocation = resolveProxyInvocation(host);
+        if (invocation) {
+          proxy = openProxySocket(invocation, {
+            onStderrLine: (line) => {
+              if (this.isCurrent(generation, signal)) this.setState("connecting", undefined, line);
+            },
+          });
+          // A proxy that dies destroys its socket; ssh2 then reports the close.
+          proxy.on("error", (err) => fail(err));
+          client.once("close", () => proxy?.destroy());
+        }
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error(String(err)));
+        return;
+      }
       const cleanup = () => {
         signal.removeEventListener("abort", onAbort);
         client.removeListener("ready", onReady);
@@ -409,6 +513,7 @@ class RemoteConnection {
         if (settled) return;
         settled = true;
         cleanup();
+        proxy?.destroy();
         reject(err);
       };
       const onReady = () => {
@@ -461,7 +566,8 @@ class RemoteConnection {
           host: host.host,
           port: host.port,
           username: host.username,
-          readyTimeout: READY_TIMEOUT_MS,
+          readyTimeout: proxy ? PROXY_READY_TIMEOUT_MS : READY_TIMEOUT_MS,
+          ...(proxy ? { sock: proxy } : {}),
           keepaliveInterval: KEEPALIVE_INTERVAL_MS,
           keepaliveCountMax: KEEPALIVE_COUNT_MAX,
           tryKeyboard: typeof auth.password === "string",
@@ -484,7 +590,7 @@ class RemoteConnection {
   ): Promise<boolean> {
     // Trust-on-first-use: remember the key's fingerprint per host:port and
     // refuse silently-changed keys (the workspace row shows the error).
-    const id = `${this.host.host}:${this.host.port}`;
+    const id = this.host.hostKeyAlias ?? `${this.host.host}:${this.host.port}`;
     const fingerprint = createHash("sha256").update(key).digest("base64");
     const known = await readKnownHosts();
     if (!this.isCurrent(generation, signal)) return false;
@@ -555,7 +661,7 @@ class RemoteConnection {
   // enforced — mirrors runGit's execFile semantics closely enough that git
   // parsers behave identically.
   async exec(command: string, opts: ExecOptions = {}): Promise<ExecResult> {
-    const client = await this.ensure();
+    const client = await this.ensure({ quiet: opts.quiet });
     const timeoutMs = opts.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS;
     const maxBuffer = opts.maxBuffer ?? DEFAULT_EXEC_MAX_BUFFER;
     return new Promise((resolve, reject) => {
@@ -644,8 +750,8 @@ class RemoteConnection {
   }
 
   /** Interactive PTY shell channel (remote terminals). */
-  async shell(opts: { cols: number; rows: number; term?: string }): Promise<ClientChannel> {
-    const client = await this.ensure();
+  async shell(opts: { cols: number; rows: number; term?: string; quiet?: boolean }): Promise<ClientChannel> {
+    const client = await this.ensure({ quiet: opts.quiet });
     return new Promise((resolve, reject) => {
       client.shell(
         { term: opts.term ?? "xterm-256color", cols: opts.cols, rows: opts.rows },
@@ -686,7 +792,12 @@ class RemoteConnection {
     const client = this.client;
     this.client = null;
     this.sftpCached = null;
-    client?.end();
+    if (client) {
+      client.end();
+      const forceClose = setTimeout(() => disposeClient(client), DISPOSE_GRACE_MS);
+      forceClose.unref?.();
+      client.once("close", () => clearTimeout(forceClose));
+    }
     this.setState("disconnected");
   }
 }

@@ -1391,6 +1391,11 @@ export interface AppPreferences {
   // computer over LAN or the blind relay; pairing and revocation live in Settings,
   // "Remote access".
   remoteAccessEnabled?: boolean;
+  // Machines (docs/machines-plan.md), off while it is built: an agent started
+  // in an SSH workspace runs in a tmux session on that machine, so it keeps
+  // working when Studio quits or disconnects, and its pane attaches to it
+  // again when reopened (src/main/remote/remote-agents.ts).
+  machinesEnabled?: boolean;
   // Background auto-fetch (src/main/git-auto-fetch.ts): one `git fetch` per
   // unique repository across every local workspace, on a timer. Default on.
   gitAutoFetchEnabled?: boolean;
@@ -1409,6 +1414,14 @@ export interface AppPreferences {
   // branch raises one notification per failing head commit
   // (src/main/github-ci-watch.ts). Default on; requires a signed-in gh.
   notifyCiFailures?: boolean;
+  // When on, the rail row of a workspace on a branch with a pull request
+  // shows its phase and checks, the agent working there is told when the
+  // checks fail, and green checks leave a quiet note
+  // (src/main/github-ci-watch.ts). Default on; requires a signed-in gh.
+  watchPullRequests?: boolean;
+  // Repositories ("owner/name", lowercase) the pull request watcher leaves
+  // alone, switched off from a workspace's row menu.
+  pullRequestWatchOffRepos?: string[];
   // How long an in-app toast stays on screen before auto-dismissing, in ms.
   // 0 = stay until clicked or closed. Missed toasts always remain in the
   // notification center regardless.
@@ -1572,11 +1585,14 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   // DEFAULT_AGENT_HIBERNATION_MINUTES in shared/agent-hibernation.ts.
   agentHibernationMinutes: 30,
   remoteAccessEnabled: false,
+  machinesEnabled: false,
   gitAutoFetchEnabled: true,
   gitAutoFetchIntervalMinutes: DEFAULT_GIT_AUTO_FETCH_INTERVAL_MINUTES,
   notifyTeammatePushes: true,
   notifyPullRequests: true,
   notifyCiFailures: true,
+  watchPullRequests: true,
+  pullRequestWatchOffRepos: [],
   toastDurationMs: DEFAULT_TOAST_DURATION_MS,
   workspaceSwitchHudMs: DEFAULT_WORKSPACE_SWITCH_HUD_MS,
 };
@@ -1854,6 +1870,9 @@ export type NotifyKind =
   // A check failed on the pull request of a workspace's branch
   // (src/main/github-ci-watch.ts). One alert per failing head commit.
   | "git.ci-failed"
+  // The checks of that pull request passed after the watcher saw them run
+  // or fail. Silent, a quiet note.
+  | "git.ci-passed"
   // A worktree's repository setup command is new or changed, so it waits for
   // the user to run it (src/main/worktree-setup). One alert per setup.
   | "worktree.setup-approval";

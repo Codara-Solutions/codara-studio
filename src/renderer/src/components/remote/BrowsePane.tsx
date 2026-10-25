@@ -52,7 +52,7 @@ export default function BrowsePane({
           overflow: "auto",
         }}
       >
-        {connecting && <PaneMsg text="Connecting…" />}
+        {connecting && <PaneMsg text={status?.progress ?? "Connecting…"} />}
         {!connecting && error && <PaneMsg text={error} danger />}
         {!connecting && !error && browse && browse.entries.length === 0 && <PaneMsg text="Empty folder." />}
         {!connecting &&

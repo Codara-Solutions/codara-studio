@@ -40,6 +40,8 @@ import {
   type StripDropSlot,
 } from "./tabGroups";
 import { TAB_GROUP_NAME_MAX } from "@shared/tab-group-name";
+import { groupLink, tabLink } from "@shared/tab-links";
+import { planTabSplit, type SplitDirection } from "./tabLinks";
 import { tabStripOverflow, type TabStripOverflow } from "./tabStripOverflow";
 
 // Delay before a terminal-pane drag hovering over an inactive tab in the strip
@@ -94,6 +96,9 @@ interface Props {
   // downstream (useTabs.openTabInSplit): the strip knows which tab was picked,
   // not which grid should take it.
   onOpenInSplit: (tabId: TabId) => void;
+  // "Split right" / "Split down": the tab beside the one on screen
+  // (useTabs.splitTabBeside).
+  onSplitTab: (tabId: TabId, direction: SplitDirection) => void;
   // Resolved keybinding hints for the "+" picker rows, derived in App from the
   // effective binding table so they reflect the user's actual (possibly
   // rebound) chords and the right platform glyphs. A field is undefined when
@@ -177,6 +182,7 @@ function TabBar({
   onPinEditorTab,
   onPinDiffTab,
   onOpenInSplit,
+  onSplitTab,
   pickerHints,
   closeOnMiddleClick,
   workspaceId,
@@ -969,15 +975,20 @@ function TabBar({
             (id) => id !== menuTab.id && tabs.find((t) => t.id === id)?.kind === "chat",
           );
         const canDock = canDockTab(menuTab) && !chatDockTaken;
+        // Split right and down pair the tab with the one on screen; the tab
+        // on screen itself keeps "Open in split", which finds it a partner.
+        const canSplit = planTabSplit(tabs, activeId, menuTab.id).kind !== "refused";
         const browserTabId = menuTab.kind === "preview" ? menuTab.id : null;
         const ownGroupId = menuTab.group?.id ?? null;
         return (
           <TabContextMenu
             path={path}
             browserTabId={browserTabId}
+            link={workspaceId ? tabLink(workspaceId, menuTab.id) : null}
             x={tabMenu.x}
             y={tabMenu.y}
-            onOpenInSplit={canDock ? () => onOpenInSplit(menuTab.id) : undefined}
+            onSplit={canSplit ? (direction) => onSplitTab(menuTab.id, direction) : undefined}
+            onOpenInSplit={canDock && !canSplit ? () => onOpenInSplit(menuTab.id) : undefined}
             otherGroups={tabGroupsIn(tabs).filter((group) => group.id !== ownGroupId)}
             grouped={ownGroupId !== null}
             onNewGroup={() => openGroupMenuAtChip(groupActions.create(menuTab.id))}
@@ -995,6 +1006,7 @@ function TabBar({
           <TabGroupMenu
             key={group.id}
             group={group}
+            link={workspaceId ? groupLink(workspaceId, group.id) : null}
             terminalCount={members.reduce((count, tab) => count + runningTerminalCount(tab), 0)}
             x={groupMenu.x}
             y={groupMenu.y}
@@ -1729,6 +1741,7 @@ const TabGroupChip = React.memo(function TabGroupChip({
 // as they are made. Enter or Escape closes it and returns focus to the chip.
 function TabGroupMenu({
   group,
+  link,
   terminalCount,
   x,
   y,
@@ -1739,6 +1752,7 @@ function TabGroupMenu({
   onDismiss,
 }: {
   group: TabGroup;
+  link: string | null;
   terminalCount: number;
   x: number;
   y: number;
@@ -1839,6 +1853,16 @@ function TabGroupMenu({
         ))}
       </div>
       <div className="spark-tab-group-menu__rule" role="separator" />
+      {link && (
+        <PickerItem
+          label="Copy link"
+          hint="for an agent"
+          onClick={() => {
+            void window.spark.clipboard.writeText(link).catch(() => {});
+            onDismiss(false);
+          }}
+        />
+      )}
       <PickerItem
         label="Ungroup"
         hint="tabs stay"
@@ -2256,8 +2280,10 @@ function RuntimeGlyph({ runtime }: { runtime: BrandRuntime }) {
 function TabContextMenu({
   path,
   browserTabId,
+  link,
   x,
   y,
+  onSplit,
   onOpenInSplit,
   otherGroups,
   grouped,
@@ -2269,8 +2295,11 @@ function TabContextMenu({
   path: string | null;
   // A browser tab's id, the one agents pass as tabId.
   browserTabId: string | null;
+  // codara://tab/..., which opens this tab when clicked in a terminal or chat.
+  link: string | null;
   x: number;
   y: number;
+  onSplit?: (direction: SplitDirection) => void;
   onOpenInSplit?: () => void;
   // The strip's groups other than this tab's own.
   otherGroups: TabGroup[];
@@ -2295,6 +2324,24 @@ function TabContextMenu({
         width,
       }}
     >
+      {onSplit && (
+        <>
+          <PickerItem
+            label="Split right"
+            onClick={() => {
+              onDismiss();
+              onSplit("right");
+            }}
+          />
+          <PickerItem
+            label="Split down"
+            onClick={() => {
+              onDismiss();
+              onSplit("down");
+            }}
+          />
+        </>
+      )}
       {onOpenInSplit && (
         <PickerItem
           label="Open in split"
@@ -2311,6 +2358,16 @@ function TabContextMenu({
           onClick={() => {
             onDismiss();
             void window.spark.fs.revealInOS(path).catch(() => {});
+          }}
+        />
+      )}
+      {link && (
+        <PickerItem
+          label="Copy link"
+          hint="for an agent"
+          onClick={() => {
+            onDismiss();
+            void window.spark.clipboard.writeText(link).catch(() => {});
           }}
         />
       )}

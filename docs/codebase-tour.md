@@ -421,6 +421,60 @@ choice), `port-forward-runtime.ts` (wiring and IPC), `forwardOut` and
 ordinary `RemoteConnection` whose transport is a ProxyCommand, so it forwards
 the same way.
 
+#### Agents on SSH machines
+
+With the **Keep agents running on SSH machines** setting on (the
+`machinesEnabled` preference, off by default while Machines is in preview),
+an agent pane in an SSH workspace (Claude Code, Codex, Grok or Pi) runs inside
+tmux on the machine instead of directly in the SSH shell. The agent then
+keeps working when Studio quits or the network drops.
+
+- **Start.** `buildRemoteAgentLaunch` in `remote-agents.ts` types one line
+  into the remote shell. It attaches when the pane's session
+  (`codara-<paneId>`) is already alive, reports a CLI missing from the login
+  shell's PATH, and otherwise starts the agent with `tmux new-session -A` in
+  the workspace folder. tmux runs as a private server (`tmux -L codara -f
+  /dev/null`) so the user's own tmux config and sessions are never touched,
+  with no status bar, no prefix key (Ctrl+B reaches the agent and nothing
+  can detach the pane) and the alternate screen off so the pane's scrollback
+  and agent detection work as on a plain shell. Without tmux, or with tmux
+  older than 2.1, the agent starts directly, with a note that it stops when
+  Studio disconnects.
+- **Restore.** Every other remote pane, whatever the setting, probes the
+  machine for its session and attaches when it is alive, so an agent is
+  never started a second time beside the one in tmux (a restored
+  `claude --resume` with the setting turned off since included), and its
+  close still ends it. The setting only decides whether new agents start in
+  tmux. Probes and kills run under a plain `sh -c` with the usual install
+  folders added to PATH, never a login shell, so a profile that runs
+  `exec fish` cannot swallow them.
+- **Dropped connection.** `remote-pty.ts` keeps an agent pane open when its
+  channel closes without an exit status, prints a dim note, reconnects with
+  backoff (1 s up to 30 s, about two minutes in all), checks the session is
+  still alive and attaches on a new channel. These attempts are quiet
+  (`ensure({ quiet: true })` in `connections.ts`): they never ask for a
+  password or passphrase and never dial a Codara box, whose wake costs money.
+  When the host needs the user or the attempts run out, the pane waits for a
+  key, and that round may ask. It stops when the session is gone or the user
+  disconnects the host.
+- **Ending.** Closing the pane, Cora stopping it, or deleting its folder ends
+  the tmux session (`markRemoteAgentEnd` in `pty-manager.ts`). Quitting
+  Studio, closing a window, or a pane that comes back within the close's
+  grace period leave it running. A pane closed while its host is
+  disconnected, or that needs a password to reach, leaves the agent running
+  on the machine. A pane opened again with the same id waits for its old
+  session's kill first.
+- **Not covered.** Only agents Studio starts itself (a new agent pane or
+  tab) run in tmux. An agent typed by hand into a remote shell pane
+  runs directly in that shell and stops when the connection drops.
+
+Tests: `test-remote-agents` runs the generated lines under `/bin/sh` with
+fake `tmux` and `claude`, `test-remote-pty` covers reconnects with fake
+channels, `test-pty-remote-agents` covers the wiring in `pty-manager.ts`, and
+`tests/e2e/remote-agent.spec.ts` runs the built app against a real sshd and
+tmux in a container (`tests/e2e/fixtures/ssh-host`, started by
+`scripts/ssh-test-host.cjs`; skipped without Docker).
+
 ### 3.6 Claude Code hooks
 
 `hook-installer.ts` builds the `hooks` block that `agent-launch-integration.ts`
@@ -544,6 +598,7 @@ Debugging:
 | Workflows | `workflow-driver.ts` (runs), `workflow-runtime.ts` (script API, journal) | `components/workflows/`; `test-workflow-*`, `tests/e2e/workflow-run.spec.ts` |
 | Git or GitHub features | `src/main/git-*.ts`, `src/main/github-*.ts` | `components/git/` |
 | Worktrees agents create and remove | `src/main/agent-worktrees.ts` (the policy, no Electron) | The `worktree.*` handlers in `agent-socket.ts`; `workspace-state-edits.ts`; `test-agent-worktrees`, `tests/e2e/agent-worktree.spec.ts` |
+| Pull requests on the rail, and the agent told when CI fails | `src/main/github-ci-watch.ts` (the watcher: reads, backoff, rows, alerts) | `github-conditional.ts` (ETag reads through `gh api`), `ci-agent-nudge.ts` (which agent, when it is free), `pull-request-watch-ipc.ts`; `src/shared/pull-request-watch.ts`; `git/pullRequestWatchStore.ts`, `git/PullRequestMark.tsx`; `test-github-ci-watch`, `test-ci-agent-nudge`, `tests/e2e/pr-watch-agent.spec.ts` |
 | Clean up worktrees | `src/main/worktree-cleanup/` (`inspect.ts` the facts and the full check, `scan.ts` the list, `remove.ts` the guarded removal, `rail.ts` the rail's merged mark, Clean up and automatic cleanup of missing folders, `space.ts` sizes; only `index.ts` touches Electron) | `src/shared/worktree-cleanup.ts` (filters, the removal outlook); `components/worktree-cleanup/`, `git/useWorktreeRailStates.ts` (the rail); `test-worktree-cleanup`, `test-worktree-rail-cleanup`, `tests/e2e/worktree-cleanup.spec.ts`, `tests/e2e/worktree-rail-cleanup.spec.ts` |
 | What a new worktree gets (copied files, links, setup commands) | `src/main/worktree-setup/` (`service.ts` runs it, `plan.ts` and `materialize.ts` decide and copy), `src/shared/worktree-setup.ts` (the file format) | `components/worktree-setup/` (the tray, the log, the setup file dialog); `test-worktree-setup`, `tests/e2e/worktree-setup.spec.ts`; [worktree-setup.md](./worktree-setup.md) |
 | The phone protocol | `remote-access/rpc.ts` | `production.ts`; the interop suites in [scripts/README.md](../scripts/README.md#remote-access-phone-and-ssh-workspaces) |

@@ -5,6 +5,7 @@ import {
   trimTerminalScrollbackLines,
   type FsEntry,
 } from "@shared/types";
+import { sanitizeTerminalAgentOwner, type TerminalAgentOwner } from "@shared/agent-terminal-owner";
 import { makeId } from "@shared/ids";
 import { basename } from "../path-utils";
 import {
@@ -67,6 +68,15 @@ import {
 } from "./tabGroups";
 import { insertTabAfter } from "./agentTerminalPlacement";
 import { applySplitDrop, type SplitDropSource, type SplitDropPlacement } from "./splitDrop";
+import {
+  extractMergedTab,
+  mergeTerminalTabInto,
+  planTabSplit,
+  planTabUnsplit,
+  splitPlacement,
+  type MergedTab,
+  type SplitDirection,
+} from "./tabLinks";
 import { resolveBootActiveTabId } from "./bootSelection";
 import { mergeSessionStart, type SessionStartRecord } from "../components/Terminal/resume-policy";
 import { runtimeFromAgentSessionLaunchCommand } from "../workers/launch-commands";
@@ -132,6 +142,36 @@ interface PersistedShape {
 function storageKey(workspaceId: string | null): string | null {
   if (!workspaceId) return null;
   return `${STORAGE_KEY_PREFIX}${workspaceId}`;
+}
+
+export type TabLayoutChange = { ok: true; hostTabId?: TabId } | { ok: false; reason: string };
+
+// Terminal tabs whose panes "Split right" moved into another tab's grid,
+// keyed by the retired tab id (see tabLinks.ts). For this app session only:
+// the panes are in the host's saved layout either way.
+const mergedTabs = new Map<TabId, MergedTab>();
+
+export function mergedTabsSnapshot(): ReadonlyMap<TabId, MergedTab> {
+  return mergedTabs;
+}
+
+// The tabs in a workspace's saved layout, read without hydrating it, for a
+// link to a workspace this renderer has not opened yet. Chat tabs are left
+// out: they are rebuilt from the runs, not restored from here.
+export function persistedLayoutTabs(workspaceId: string): Tab[] {
+  const key = storageKey(workspaceId);
+  if (!key) return [];
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as { tabs?: unknown };
+    if (!Array.isArray(parsed.tabs)) return [];
+    return (parsed.tabs as Tab[]).filter(
+      (tab) => tab && typeof tab.id === "string" && typeof tab.kind === "string" && tab.kind !== "chat",
+    );
+  } catch {
+    return [];
+  }
 }
 
 // The terminal pane ids in a workspace's saved layout, read without hydrating
@@ -619,6 +659,11 @@ export function cleanupTransientTerminalState(node: PaneNode): void {
     // without `active`, idle panes, malformed or pending captures) hydrates
     // without one and never auto-resumes. When the restore preference is off,
     // persist() already stripped the pointer, so nothing mints here.
+    if ("agentOwner" in node) {
+      const owner = sanitizeTerminalAgentOwner(node.agentOwner);
+      if (owner) node.agentOwner = owner;
+      else delete node.agentOwner;
+    }
     const session = validatedTerminalAgentSession(node.agentSession);
     if (session) {
       node.agentSession = session;
@@ -1093,6 +1138,7 @@ export interface AgentTerminalTabOptions {
   origin?: TerminalLeafOrigin;
   // The caller's workspace when an agent opened this tab from another one.
   openedBy?: string;
+  agentOwner?: TerminalAgentOwner;
   nativeClaudeProfileId?: string;
   nativeGrokProfileId?: string;
   // Opened at the request of a program in one of the user's own panes
@@ -1130,6 +1176,7 @@ export function appendAgentTerminalToWorkspaceLayout(
     root: {
       ...leaf(paneId, options?.cwd, options?.autorun, options?.origin),
       ...(options?.openedBy ? { openedBy: options.openedBy } : {}),
+      ...(options?.agentOwner ? { agentOwner: options.agentOwner } : {}),
       ...(options?.nativeClaudeProfileId
         ? { nativeClaudeProfileId: options.nativeClaudeProfileId }
         : {}),
@@ -1349,6 +1396,9 @@ export interface UseTabsApi {
   ) => boolean;
   // Send a docked tab back to the strip, keeping its content alive.
   undockTab: (tabId: TabId, options?: { focus?: boolean }) => boolean;
+  // A tab of the workspace on screen beside the active tab, and back.
+  splitTabBeside: (tabId: TabId, direction: SplitDirection) => TabLayoutChange;
+  unsplitTab: (tabId: TabId) => TabLayoutChange;
   moveTerminalPane: (
     sourceTabId: TabId,
     paneId: string,
@@ -2248,6 +2298,7 @@ export function useTabs(
       const root = {
         ...leaf(paneId, options?.cwd, options?.autorun, options?.origin),
         ...(options?.openedBy ? { openedBy: options.openedBy } : {}),
+        ...(options?.agentOwner ? { agentOwner: options.agentOwner } : {}),
         ...(options?.nativeClaudeProfileId
           ? { nativeClaudeProfileId: options.nativeClaudeProfileId }
           : {}),
@@ -2918,6 +2969,55 @@ export function useTabs(
     if (options?.focus) setActiveId(tabId);
     return true;
   }, []);
+
+  // "Split right" / "Split down": `tabId` beside the tab on screen (see
+  // planTabSplit). A merged terminal tab is remembered so its link and
+  // Unsplit still work.
+  const splitTabBeside = useCallback(
+    (tabId: TabId, direction: SplitDirection): TabLayoutChange => {
+      const plan = planTabSplit(tabsRef.current, activeIdRef.current, tabId);
+      if (plan.kind === "refused") return { ok: false, reason: plan.reason };
+      const placement = splitPlacement(direction);
+      if (plan.kind === "dock") {
+        const docked = dockTabInTerminal(tabId, plan.hostTabId, {
+          paneId: plan.paneId,
+          direction: placement.direction,
+          position: placement.position,
+          mode: "split",
+        });
+        return docked ? { ok: true, hostTabId: plan.hostTabId } : { ok: false, reason: "Codara could not split that tab." };
+      }
+      if (plan.kind === "pair") {
+        splitDrop({ tabId }, plan.targetId, placement);
+        return { ok: true, hostTabId: tabId };
+      }
+      const workspace = tabsWorkspaceIdRef.current;
+      const result = workspace
+        ? mergeTerminalTabInto(tabsRef.current, tabId, plan.hostTabId, plan.paneId, direction, workspace)
+        : null;
+      if (!result) return { ok: false, reason: "Codara could not split that tab." };
+      mergedTabs.set(tabId, result.merged);
+      setTabs(() => normalizeTerminalTitles(result.tabs));
+      setActiveId(plan.hostTabId);
+      return { ok: true, hostTabId: plan.hostTabId };
+    },
+    [dockTabInTerminal, splitDrop],
+  );
+
+  const unsplitTab = useCallback(
+    (tabId: TabId): TabLayoutChange => {
+      const plan = planTabUnsplit(tabsRef.current, tabId, mergedTabs);
+      if (plan.kind === "refused") return { ok: false, reason: plan.reason };
+      for (const id of plan.undock) undockTab(id, { focus: false });
+      for (const id of plan.extract) {
+        const alias = mergedTabs.get(id);
+        mergedTabs.delete(id);
+        if (alias) setTabs((curr) => normalizeTerminalTitles(extractMergedTab(curr, alias) ?? curr));
+      }
+      return { ok: true };
+    },
+    [undockTab],
+  );
 
   const closeTerminalPane = useCallback(
     (tabId: TabId, paneId: string) => {
@@ -4414,6 +4514,8 @@ export function useTabs(
       ensureWorkerTerminalTab,
       detachTerminalPaneToNewTab,
       openTabInSplit,
+      splitTabBeside,
+      unsplitTab,
       splitDrop,
       dockTabInTerminal,
       undockTab,

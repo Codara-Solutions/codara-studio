@@ -9,13 +9,16 @@ import {
   isAbsoluteChatPath,
   resolveChatPath,
 } from "./markdown-links";
+import { chatUrlTransform, remarkTabLinks } from "./remark-tab-links";
+import { isTabLink } from "@shared/tab-links";
+import { openTabLink } from "../../tabs/tabLinkBridge";
 
 // Hoisted so streaming re-renders reuse the same plugin arrays and component
 // map — a fresh object here re-runs the whole remark/rehype pipeline per render.
 // remark-breaks keeps single newlines as line breaks: chat prose is written
 // line-by-line, and collapsing soft breaks is what produced wall-of-text
 // question cards.
-const REMARK_PLUGINS = [remarkGfm, remarkBreaks];
+const REMARK_PLUGINS = [remarkGfm, remarkBreaks, remarkTabLinks];
 // react-markdown still rebuilds its processor per render; the shared plugin
 // keeps the highlighter it attaches from being rebuilt with it.
 const REHYPE_PLUGINS = [rehypeHighlightShared];
@@ -40,7 +43,8 @@ function MarkdownLink({ href, children }: { href?: string; children?: React.Reac
       title={href}
       onClick={(event) => {
         event.preventDefault();
-        if (target.kind === "external") void window.spark.openExternal(target.url);
+        if (href && isTabLink(href)) openTabLink(href);
+        else if (target.kind === "external") void window.spark.openExternal(target.url);
         else if (target.kind === "path" && cwd) openWorkspaceFile(cwd, target.path, target.line);
       }}
       rel="noreferrer"
@@ -196,6 +200,7 @@ function Markdown({ text }: { text: string }) {
         remarkPlugins={REMARK_PLUGINS}
         rehypePlugins={REHYPE_PLUGINS}
         components={COMPONENTS}
+        urlTransform={chatUrlTransform}
       >
         {text}
       </ReactMarkdown>

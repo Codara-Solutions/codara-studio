@@ -32,7 +32,7 @@ export const CORA_BROWSER_WORKFLOW = `For browser tasks, navigate and read a sna
   as selectors instead of guessing CSS. Re-read after navigation or a stale
   reference error. Use snapshot selector to focus a section and since with
   the previous snapshotId to read changes. Run a multi-step flow as one
-  codara_preview_code snippet (Playwright-style locators; read
+  codara_browser_use snippet (Playwright-style locators; read
   browser.documentation() once), or batch known actions with
   codara_preview_run; wait_for the expected next control or loading state
   before observing asynchronous results. Stop a batch when the next action

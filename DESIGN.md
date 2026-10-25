@@ -38,3 +38,78 @@ groups were the starting point and are what this moved away from.
 - A tab an agent opened from another workspace shows a small ↗ after its
   title. The workspace's name is in the tooltip and the accessible name, not
   in the tab, where it nearly doubled the tab's width.
+
+## The agent's hand on a browser tab (2026-10)
+
+**Chosen:** an agent that acts on a Codara browser tab shows a cursor in its
+own color that glides to each point before the click, keystroke, hover,
+scroll or drag lands there, and a small banner at the top of the page names
+who drives the tab ("Claude Code · AI Continous Improvment is using this
+tab") with a Stop button. Typing outlines the field being typed into. Both
+fade four seconds after the agent's last call.
+
+**Why:** the old cursor jumped to the point after the action and a corner
+label read "Cora" for every agent. The user could not tell which agent was
+working or follow what it did, and had no way to take the tab back short of
+closing it.
+
+**References:** OpenAI's Browser Use in the ChatGPT desktop app (a cursor
+that moves like a hand, a notice that the agent is driving). Multiplayer
+cursors in Figma for the name tag beside the arrow.
+
+**Rules:**
+
+- The layer is Codara's own UI above the `<webview>`, never injected into the
+  page: page scripts and CSP cannot see or break it, and the agent's
+  screenshots, recordings and visual diffs of the page never contain it. It
+  lets every click through; only the banner takes input.
+- A glide is a slightly curved, eased path of 250 to 450 ms, longer for a
+  farther point, and the action waits for it, never more than 600 ms. It
+  jumps instead when the tab is hidden, Codara's window is minimized or
+  the system asks for reduced motion.
+- The cursor and the banner dot use the agent's color (`--agent-claude`,
+  `--agent-codex`, `--agent-grok`, `--agent-pi` for Cora), the same one its
+  terminal tab carries; an unknown agent uses the accent.
+- Stop refuses that agent's next call on that tab with a message telling it
+  the user took the tab back. Other agents and other tabs are unaffected. The
+  banner offers Undo for six seconds; closing the tab forgets the stop.
+- The banner sits on the overlay surface (`.spark-glass--strong
+  .spark-overlay-surface`), the same read tier as the pointing panels.
+- On a tab of the user's own Chrome there is no layer in the page, which
+  would need new extension permissions. Chrome shows its own "Codara started
+  debugging this browser" bar, the extension's button names the agent while
+  it acts, and the popup's Stop ends it there.
+- The component lives in `components/Preview/agent-presence/` with its own
+  CSS and store; BrowserPane only mounts it, so the toolbar can move freely.
+
+## Tab links and agent tab approvals (2026-10)
+
+**Chosen:** a link brings its tab on screen and marks it with a short accent
+ring (an inset 2px ring over a soft accent wash, fading over 1.6 s). An agent
+that wants to close, split or unsplit tabs it did not open shows the same
+floating card as the cross-workspace terminal prompt, top right, listing every
+tab that would change.
+
+**Why:** after a switch of workspace or an unfolded group the eye needs one cue
+for where the tab went, and the strip already uses an inset ring for focus, so
+the flash reads as "this one" without moving anything. The card copies an
+existing pattern rather than adding a modal: it never blocks typing, counts
+down to the agent's timeout and stays put if the user is mid-task.
+
+**Rules:**
+
+- The flash is an inset box shadow, so the tab never changes size. With reduced
+  motion it is a static ring for the same time, no fade.
+- The card names the agent and the count in its title ("Claude Code wants to
+  close 3 tabs in group “login-flow”"), then lists each tab by kind and title
+  on an opaque panel, never on glass. The list scrolls past about six rows.
+- A running agent or unsaved edits show as a warning dot with plain ink text
+  ("agent running", "unsaved changes") on the row, plus one sentence under
+  the list. Color alone never carries the warning.
+- Buttons: Deny, then Allow once as the primary, on one row with the countdown;
+  "Always allow “<workspace>” to close tabs here" (or "to move tabs here" on
+  a split or unsplit card, a separate grant) is a full-width secondary
+  button under them, so the riskier, lasting choice is never the default and
+  its long label never crowds the row.
+- An expired card says nothing changed and stays a few seconds with Dismiss,
+  as the cross-workspace card does.

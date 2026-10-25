@@ -180,7 +180,7 @@ for (const browserTool of [
   "codara_preview_network",
   "codara_preview_resize",
   "codara_preview_run",
-  "codara_preview_code",
+  "codara_browser_use",
 ]) {
   assert.equal(executeToolNames.has(browserTool), true, `execute mode exposes ${browserTool}`);
 }
@@ -418,7 +418,7 @@ const noInput = {};
   assert.equal(blocked("codara_terminal_close")?.block, true, "readonly blocks terminal close");
   assert.equal(blocked("codara_preview_evaluate")?.block, true, "readonly blocks preview evaluate");
   assert.equal(blocked("codara_preview_run")?.block, true, "readonly blocks preview run (can embed evaluate steps)");
-  assert.equal(blocked("codara_preview_code")?.block, true, "readonly blocks browser code (can call evaluate)");
+  assert.equal(blocked("codara_browser_use")?.block, true, "readonly blocks browser code (can call evaluate)");
   assert.equal(blocked("codara_preview_click")?.block, true, "readonly blocks preview click");
   assert.equal(blocked("codara_preview_type")?.block, true, "readonly blocks preview type");
   assert.equal(blocked("codara_preview_screenshot"), undefined, "readonly keeps preview screenshot");
@@ -502,14 +502,27 @@ const noInput = {};
   // fence, so blocking any browser tool blocks code mode as well.
   for (const tool of ["codara_preview_upload", "codara_preview_chrome", "codara_preview_run", "codaraPreviewStorage"]) {
     const env = { CODARA_PI_WORKER_BLOCKED_TOOLS: `WebSearch,${tool}` };
-    const result = policy.fenceDecision("codara_preview_code", { code: "await browser.call('upload', {})" }, policy.fencedToolNames(env), env);
-    assert.equal(result?.block, true, `blocking ${tool} blocks codara_preview_code`);
+    const result = policy.fenceDecision("codara_browser_use", { code: "await browser.call('upload', {})" }, policy.fencedToolNames(env), env);
+    assert.equal(result?.block, true, `blocking ${tool} blocks codara_browser_use`);
     assert.match(result.reason, /blocks browser tools a snippet could call/);
   }
+  // Its DevTools protocol commands (tab.cdp) go with it: blocking evaluate,
+  // network or emulate blocks the snippet tool, and the hidden tools behind
+  // tab.cdp are not in the worker roster to be called directly.
+  for (const tool of ["codara_preview_evaluate", "codara_preview_network", "codara_preview_emulate"]) {
+    const env = { CODARA_PI_WORKER_BLOCKED_TOOLS: tool };
+    const result = policy.fenceDecision("codara_browser_use", { code: "await tab.cdp.send('Runtime.evaluate', { expression: '1' })" }, policy.fencedToolNames(env), env);
+    assert.equal(result?.block, true, `blocking ${tool} blocks the DevTools commands of codara_browser_use`);
+  }
+  const workerRoster = new Set(workerBridge.listTools().map((tool) => tool.name));
+  for (const hidden of ["codara_preview_cdp", "codara_preview_cdp_events", "codara_preview_locate"]) {
+    assert.equal(workerRoster.has(hidden), false, `${hidden} is reachable only through a snippet`);
+  }
+  assert.equal(workerRoster.has("codara_browser_use"), true, "workers get the browser code tool");
   const unrelated = { CODARA_PI_WORKER_BLOCKED_TOOLS: "WebSearch,Bash" };
-  assert.equal(policy.fenceDecision("codara_preview_code", { code: "1" }, policy.fencedToolNames(unrelated), unrelated), undefined);
-  const direct = { CODARA_PI_WORKER_BLOCKED_TOOLS: "codara_preview_code" };
-  assert.match(policy.fenceDecision("codara_preview_code", {}, policy.fencedToolNames(direct), direct).reason, /blocked by its worker config/);
+  assert.equal(policy.fenceDecision("codara_browser_use", { code: "1" }, policy.fencedToolNames(unrelated), unrelated), undefined);
+  const direct = { CODARA_PI_WORKER_BLOCKED_TOOLS: "codara_browser_use" };
+  assert.match(policy.fenceDecision("codara_browser_use", {}, policy.fencedToolNames(direct), direct).reason, /blocked by its worker config/);
 }
 {
   // No fence env at all: empty set, nothing vetoed.
@@ -1448,6 +1461,7 @@ const noInput = {};
   assert.equal(families.studioToolFamily("codara_list_automations"), "automations");
   assert.equal(families.studioToolFamily("codara_set_automation_enabled"), "automations");
   assert.equal(families.studioToolFamily("codara_worktree_remove"), "worktrees");
+  assert.equal(families.studioToolFamily("codara_browser_use"), "browser", "the browser code tool loads with the browser family");
   assert.equal(
     families.toolPromptSnippet("Spawn workers now. They run in parallel and report back."),
     "Spawn workers now.",

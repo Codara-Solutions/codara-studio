@@ -25,6 +25,21 @@ export function resolveTerminalLinkClick(input: TerminalLinkClickInput): Termina
   return input.menuEnabled ? "menu" : "open";
 }
 
+/**
+ * Whether an OSC 8 hyperlink may be followed. Its visible text can be
+ * anything while the target stays hidden, so only web pages and Codara's
+ * own tab links are followed; a file or mail target behind innocent text is
+ * not.
+ */
+export function followsHiddenTargetLink(uri: string): boolean {
+  try {
+    const protocol = new URL(uri).protocol;
+    return protocol === "http:" || protocol === "https:" || protocol === "codara:";
+  } catch {
+    return false;
+  }
+}
+
 export type TerminalLinkActionId = "codara" | "system" | "copy";
 
 export interface TerminalLinkAction {

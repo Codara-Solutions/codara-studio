@@ -21048,7 +21048,7 @@ function piWorkerToolDetail(event: PiRpcEvent): string {
           ? ["path"]
           : name === "fetch" || name === "web_fetch" || name === "webfetch"
             ? ["url"]
-            : name.startsWith("codara_preview")
+            : name.startsWith("codara_preview") || name === "codara_browser_use"
               ? ["url", "selector", "key", "text", "code"]
               : name.startsWith("codara_terminal")
                 ? ["command", "text"]

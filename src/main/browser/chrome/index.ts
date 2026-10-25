@@ -13,10 +13,10 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import type { ChromeLinkState, SeparateBrowserTool } from "../../../shared/chrome-link";
-import { latestSessionStart } from "../../agent-session-registry";
 import { codaraHome } from "../../codara-home";
 import type { IpcHandle } from "../../ipc";
-import { terminalAgentStateSnapshot } from "../../terminal-agent-notify";
+import { paneAgentRuntime } from "../../pane-agent-runtime";
+import { runtimeDisplayName } from "../agent-driver";
 import { registerBrowserBackend } from "../targets";
 import {
   onChromeActivity,
@@ -44,26 +44,13 @@ const reloadAsks = new Map<string, { version: string; at: number }>();
 // How long a reload may take before Settings tells the user to do it.
 const RELOAD_GRACE_MS = 15_000;
 
-const RUNTIME_NAMES: Record<string, string> = {
-  claude: "Claude Code",
-  codex: "Codex",
-  grok: "Grok",
-  gemini: "Gemini CLI",
-  pi: "Cora",
-  opencode: "opencode",
-  aider: "aider",
-  amp: "Amp",
-  droid: "Droid",
-};
-
 /** "Codex in pane 3f2a" for the activity log and the extension's popup. */
 function agentLabel(params: Record<string, unknown>): string {
   const runId = typeof params.runId === "string" ? params.runId : "";
   if (runId) return `Cora run ${runId.slice(0, 8)}`;
   const paneId = typeof params.callerPaneId === "string" ? params.callerPaneId : "";
   if (!paneId) return "An agent outside Codara's terminals";
-  const runtime = terminalAgentStateSnapshot().find((pane) => pane.paneId === paneId)?.runtime ?? latestSessionStart(paneId)?.runtime ?? null;
-  const name = runtime ? RUNTIME_NAMES[runtime] ?? runtime : "Agent";
+  const name = runtimeDisplayName(paneAgentRuntime(paneId)) ?? "Agent";
   return `${name} in pane ${paneId.slice(-6)}`;
 }
 

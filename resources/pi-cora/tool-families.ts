@@ -38,7 +38,7 @@ export const STUDIO_TOOL_FAMILIES: readonly StudioToolFamily[] = [
 export const STUDIO_TOOL_LOADER_NAME = "codara_tools";
 
 export function studioToolFamily(name: string): StudioToolFamily | null {
-  if (name.startsWith("codara_preview_")) return "browser";
+  if (name.startsWith("codara_preview_") || name === "codara_browser_use") return "browser";
   if (name.startsWith("codara_terminal_")) return "terminal";
   if (name.startsWith("codara_whiteboard_")) return "whiteboard";
   if (name.startsWith("codara_board_")) return "board";

@@ -29,7 +29,7 @@
 import { app } from "electron";
 import { promises as fs } from "node:fs";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { createRequire } from "node:module";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 
@@ -51,6 +51,7 @@ import { defaultPersonalGrokHomeDir } from "./orchestration/grok-cli-account-pro
 import { codaraHome } from "./codara-home";
 import { runsFromAppImage, type AppImageLaunchProbe } from "./appimage-launch";
 import { isTransientPath } from "./hook-installer";
+import { isInsideTemporaryRoot } from "./temporary-roots";
 import { outsideWriteCapability } from "./outside-write-guard";
 
 /** Explicit exception to the outside-write guard: the opt-in "Codara tools in other apps". */
@@ -101,8 +102,7 @@ function isSandboxedHome(): boolean {
   // Only temp-dir homes count as sandboxes. A persistent custom home (a user
   // who deliberately relocated ~/.codarastudio) still gets managed MCP entries — the
   // baked SPARK_HOME_DIR in the entry env keeps external CLIs pointed right.
-  const tmp = tmpdir();
-  return override.startsWith(tmp) || override.startsWith("/tmp/") || override.startsWith("/private/tmp/");
+  return isInsideTemporaryRoot(override.trim());
 }
 
 // The Capability Center's "N tools" badge: every tool the server can expose,

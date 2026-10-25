@@ -12,7 +12,7 @@
 //     (drive the live <preview> tab) + the terminal tool set (open and drive
 //     agent-owned terminal tabs). This is what any claude/codex sub-agent,
 //     worker, or verifier sees.
-//   - "worker": the studio roster minus whiteboard writes, plus the two
+//   - "worker": the studio roster minus whiteboard writes and codara_tab, plus the two
 //     run-lifecycle tools a headless automation pass needs (codara_ask_user,
 //     codara_request_next_iteration). Automation workers run on the bundled Pi
 //     runtime, which loads this module in-process as the bridge with this
@@ -96,10 +96,10 @@ const ORCHESTRATION_TIMEOUT_MS =
 // terminal; the client deadline sits above both.
 const TERMINAL_RUN_MAX_WAIT_MS = 10 * 60_000;
 const TERMINAL_RUN_TIMEOUT_MS = TERMINAL_RUN_MAX_WAIT_MS + 60_000;
-// codara_preview_code runs a snippet for up to 110 s on the Codara side
+// codara_browser_use runs a snippet for up to 110 s on the Codara side
 // (CODE_MAX_TIMEOUT_MS in preview-tools/code.ts).
-const PREVIEW_CODE_TIMEOUT_MS = 120_000;
-// One id per server process: Codara keys a codara_preview_code session by it,
+const BROWSER_USE_TIMEOUT_MS = 120_000;
+// One id per server process: Codara keys a codara_browser_use session by it,
 // so a new agent session starts with fresh bindings and this process's exit
 // (the pid in front) ends the session.
 const CODE_SESSION = `${process.pid}:${crypto.randomBytes(12).toString("base64url")}`;
@@ -135,7 +135,7 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_run",
     description:
-      "Run one shell command in a terminal tab and wait for it to finish. Returns status (exited, timeout, quiet), exitCode, and only the output the command printed, plus a cursor for codara_terminal_read. Without paneId it opens a temporary terminal and returns its paneId; with paneId it reuses an idle terminal you created. On timeout the command keeps running.",
+      "Run one shell command in a terminal tab and wait for it to finish. Returns status (exited, timeout, quiet), exitCode, the command's own output and a cursor for codara_terminal_read. Without paneId it opens a temporary terminal and returns its paneId; with paneId it reuses an idle one you created. On timeout the command keeps running.",
     inputSchema: {
       type: "object",
       required: ["command"],
@@ -174,7 +174,7 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_write",
     description:
-      "Type text into a terminal you created with codara_terminal_create or codara_terminal_run, pressing Enter unless submit=false (use submit=false for raw keys such as \"\\u0003\" for Ctrl+C). Writing to any other pane is rejected.",
+      "Type into a terminal you created, pressing Enter unless submit=false (for raw keys such as \"\\u0003\" for Ctrl+C). Writing to any other pane is rejected.",
     inputSchema: {
       type: "object",
       required: ["paneId", "text"],
@@ -189,7 +189,7 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_read",
     description:
-      "Read a terminal pane's recent output as plain text. Every result carries a cursor: pass it back as since to get only the output printed after that read. mode \"screen\" renders the screen instead, for full-screen programs such as agent CLIs, vim or top.",
+      "Read a terminal pane's recent output as plain text, with a cursor: pass it back as since for only newer output. mode \"screen\" renders the screen, for full-screen programs (agent CLIs, vim, top).",
     inputSchema: {
       type: "object",
       required: ["paneId"],
@@ -205,13 +205,13 @@ const TERMINAL_TOOLS = [
   {
     name: "codara_terminal_list",
     description:
-      "List the terminal panes in your workspace: paneId, title, group, cwd, which agent runs there and its state, whether the shell is running a command or idle, isCaller for your own pane, and writable for panes you may write to.",
+      "The terminal panes in your workspace: paneId, link, title, group, cwd, its agent and state, whether the shell is busy, isCaller (your pane), writable (you may write to it).",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "codara_terminal_close",
     description:
-      "Stop and close a terminal returned by codara_terminal_create or codara_terminal_run. It cannot close the user's terminal or another run's terminal. It is idempotent: a retry after a lost response returns alreadyClosed=true. Close temporary servers and watchers when done; leave one open only when the user needs the live service.",
+      "Stop and close a terminal you opened with codara_terminal_create or codara_terminal_run, not the user's or another run's terminal; idempotent: a retry returns alreadyClosed=true. Close temporary servers and watchers when done; leave one open only when the user needs it.",
     inputSchema: {
       type: "object",
       required: ["paneId"],
@@ -1772,13 +1772,14 @@ const DIRECT_MEMORY_TOOL = {
 
 // Worker mode: the studio surface a headless automation worker may drive
 // (whiteboard and board stay read-only; the board is the calling chat's own
-// kanban and its edits are the manager's call) plus
+// kanban and its edits are the manager's call; codara_tab acts on the user's
+// tabs, which no unattended pass may do) plus
 // the two run-lifecycle tools its loop prompt references: codara_ask_user
 // (blocked on a genuinely human decision) and codara_request_next_iteration
 // (agent-loop continuation). Deliberately NO manager orchestration tools, a
 // worker never spawns, steers, messages, or completes.
 
-const WORKER_READ_ONLY_STUDIO_TOOL_NAMES = ["codara_whiteboard_update", "codara_whiteboard_arrange", "codara_whiteboard_review", "codara_board_update"];
+const WORKER_READ_ONLY_STUDIO_TOOL_NAMES = ["codara_whiteboard_update", "codara_whiteboard_arrange", "codara_whiteboard_review", "codara_board_update", "codara_tab"];
 const WORKER_LIFECYCLE_TOOL_NAMES = ["codara_ask_user", "codara_request_next_iteration"];
 const WORKER_TOOLS = [
   ...STUDIO_TOOLS.filter((tool) => !WORKER_READ_ONLY_STUDIO_TOOL_NAMES.includes(tool.name)),
@@ -1985,7 +1986,7 @@ function buildInstructions() {
   ];
   if (listed.has("codara_preview_navigate")) {
     parts.push(
-      "Browser: for any multi-step flow prefer codara_preview_code, one call of JavaScript against a Playwright-style API (read browser.documentation() once). Single steps: open or reuse this session's tab with codara_preview_navigate, read it with codara_preview_snapshot, and act on its @references. Use the trusted input tools (mouse, key, scroll, hover, drag) when a page ignores synthetic events. Close the tabs you opened with codara_preview_close when you are done, unless the user needs them.",
+      "Browser: for any multi-step flow prefer codara_browser_use, one call of JavaScript against a Playwright-style API (read browser.documentation() once). Single steps: open or reuse this session's tab with codara_preview_navigate, read it with codara_preview_snapshot, and act on its @references. Use the trusted input tools (mouse, key, scroll, hover, drag) when a page ignores synthetic events. Close the tabs you opened with codara_preview_close when you are done, unless the user needs them.",
     );
     parts.push(...TOOL_REGISTRY.instructions);
     parts.push(
@@ -2027,7 +2028,7 @@ function buildInstructions() {
   }
   if (listed.has("codara_workspace_status")) {
     parts.push(
-      "Your line in the rail: Codara shows under the workspace's name whether you are working, need the user or are done, by itself. codara_workspace_status adds a one-line note to your own line (other agents keep theirs): post one at each milestone saying what you are on or what is left. It stays until your tab closes. A read also lists the other agents' notes in this workspace.",
+      "Your line in the rail: Codara shows under the workspace's name whether you are working, need the user or are done, by itself. codara_workspace_status adds a one-line note to your own line (other agents keep theirs): post a note at each milestone saying what you are on, what is left or why you are blocked. It stays until your tab closes. A read also lists the other agents' notes in this workspace.",
     );
   }
   if (listed.has("codara_task_list")) {
@@ -2081,7 +2082,7 @@ function isLongPollRpc(rpc) {
 const PROGRESS_RPCS = new Set([
   ...LONG_POLL_RPCS,
   "terminal.run",
-  "preview.code",
+  "browser.use",
   "automation.update",
   "automation.delete",
   "automation.set_enabled",
@@ -2095,7 +2096,7 @@ const PROGRESS_INTERVAL_MS = 10_000;
 function rpcTimeoutMs(rpc) {
   if (isOrchestrationRpc(rpc)) return ORCHESTRATION_TIMEOUT_MS;
   if (rpc === "terminal.run") return TERMINAL_RUN_TIMEOUT_MS;
-  if (rpc === "preview.code") return PREVIEW_CODE_TIMEOUT_MS;
+  if (rpc === "browser.use") return BROWSER_USE_TIMEOUT_MS;
   if (rpc === "worktree.create") return WORKTREE_CREATE_TIMEOUT_MS;
   if (rpc === "worktree.setup") return WORKTREE_SETUP_TIMEOUT_MS;
   if (rpc === "worktree.cleanup") return WORKTREE_CLEANUP_TIMEOUT_MS;
@@ -2126,10 +2127,16 @@ const CALLER_LOCATED_RPCS = new Set([
   "task.update",
   "task.list",
   "inbox.add",
+  "tab.action",
 ]);
+// The browser code tool is scoped like the single browser tools it drives.
+function isBrowserRpc(rpc) {
+  return rpc.startsWith("preview.") || rpc === "browser.use";
+}
+
 function injectRunIdForStudioOwnership(rpc, args) {
   if (
-    !rpc.startsWith("preview.") &&
+    !isBrowserRpc(rpc) &&
     !rpc.startsWith("terminal.") &&
     !CALLER_LOCATED_RPCS.has(rpc)
   ) return;
@@ -2138,7 +2145,7 @@ function injectRunIdForStudioOwnership(rpc, args) {
   else delete args.runId;
   // The workspace is the caller's (its run, or the pane it runs in), never
   // one the tool JSON names.
-  if (rpc.startsWith("preview.") || CALLER_LOCATED_RPCS.has(rpc)) delete args.workspaceId;
+  if (isBrowserRpc(rpc) || CALLER_LOCATED_RPCS.has(rpc)) delete args.workspaceId;
   delete args.callerPaneId;
   delete args.callerPid;
   // Codara places a new terminal beside, and scopes the browser, the terminal
@@ -2146,12 +2153,12 @@ function injectRunIdForStudioOwnership(rpc, args) {
   // arrives when the CLI passed its environment through (Codex starts MCP
   // servers with a cleared one), so the pid lets Codara find the pane by
   // walking up the process tree instead. A run is scoped by its run id.
-  if (CALLER_LOCATED_RPCS.has(rpc) || (rpc.startsWith("preview.") && !envRunId)) {
+  if (CALLER_LOCATED_RPCS.has(rpc) || (isBrowserRpc(rpc) && !envRunId)) {
     const envPaneId = (process.env.SPARK_AGENT_PANE_ID || process.env.SPARK_PANE_ID || "").trim();
     if (envPaneId) args.callerPaneId = envPaneId;
     args.callerPid = process.pid;
   }
-  if (rpc === "preview.code") args.codeSession = CODE_SESSION;
+  if (rpc === "browser.use") args.codeSession = CODE_SESSION;
   else delete args.codeSession;
 }
 
@@ -2483,14 +2490,26 @@ function startStdioServer() {
       const line = buffer.slice(0, idx).trim();
       buffer = buffer.slice(idx + 1);
       if (!line) continue;
-      handleLine(line).catch(() => undefined);
+      const handled = handleLine(line).catch(() => undefined);
+      pendingLines.add(handled);
+      handled.finally(() => pendingLines.delete(handled));
     }
   });
 
+  // The client is gone: every request still in flight is cancelled and gets
+  // no answer, and the process exits once the replies already written have
+  // drained. stdout to a pipe is asynchronous on macOS, so exiting before that
+  // cuts a long reply (tools/list is over 64 KB) off mid-line.
   process.stdin.on("end", () => {
-    process.exit(0);
+    for (const controller of inFlight.values()) controller.abort();
+    const exit = () => process.stdout.write("", () => process.exit(0));
+    setTimeout(exit, STDIN_END_GRACE_MS).unref();
+    Promise.allSettled([...pendingLines]).then(exit);
   });
 }
+
+const STDIN_END_GRACE_MS = 2_000;
+const pendingLines = new Set();
 
 function writeLine(payload) {
   process.stdout.write(JSON.stringify(payload) + "\n");
@@ -2828,7 +2847,7 @@ function codeToolResult(value) {
 }
 
 function toToolResult(value, rpc = "") {
-  if (rpc === "preview.code" && value && typeof value === "object") return codeToolResult(value);
+  if (rpc === "browser.use" && value && typeof value === "object") return codeToolResult(value);
   // MCP tool result format: { content: [{type:'text', text}] } + optional isError.
   // A screenshot result includes a data URL we surface as an image content block.
   if (value && typeof value === "object" && typeof value.dataUrl === "string" && value.dataUrl.startsWith("data:image/")) {

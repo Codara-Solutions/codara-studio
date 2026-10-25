@@ -13,7 +13,8 @@ import type { CoraWhiteboard } from "@shared/types";
 import { createPreviewDOM } from "@shared/preview-dom";
 import { createPreviewNames } from "@shared/preview-names";
 import { snapshotProbe } from "./domSnapshot";
-import { clickProbe, typeProbe, pressKeyProbe } from "./domActions";
+import { clickProbe, locateProbe, typeProbe, pressKeyProbe } from "./domActions";
+import { assertDriverAllowed, moveAgentCursor, noteDriving, readDriver, type Box, type CursorMove } from "./agent-presence/store";
 import { closeIsolatedTab, openIsolatedTab } from "./isolatedTabs";
 import { closePageDialog, showPageDialog, type PageDialogView } from "./pageDialogs";
 import {
@@ -24,7 +25,6 @@ import {
   hasPreviewTab,
   listPreviewTabs,
   pickPreviewTab,
-  showPreviewControl,
 } from "./registry";
 import { assignTabToGroup, tabGroupNameOf } from "../../tabs/tabGroupBridge";
 
@@ -109,8 +109,15 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
     case "list":
       return { tabs: listPreviewTabs(readString(req.params, "workspaceId"), readString(req.params, "callerPaneId")) };
     case "activity": {
+      // Answers once the cursor arrived, so main sends its input after the glide.
       const tab = requireTab(req.params);
-      showPreviewControl(tab, { action: readString(req.params, "action") ?? "Working", runId: readString(req.params, "runId"), ...(typeof req.params.x === "number" && typeof req.params.y === "number" ? { x: req.params.x, y: req.params.y } : {}) });
+      const point = typeof req.params.x === "number" && typeof req.params.y === "number" ? { x: req.params.x, y: req.params.y } : undefined;
+      await moveAgentCursor(tab.id, readDriver(req.params.driver), {
+        action: readString(req.params, "action") ?? "Working",
+        point,
+        press: req.params.press === true,
+        follow: req.params.follow === true,
+      });
       return { ok: true };
     }
     case "navigate":
@@ -179,9 +186,22 @@ function requireTab(params: Record<string, unknown>) {
       "No browser tab is open. Open a Browser tab in Codara (right-click a file → Open in Browser, or open a localhost URL) before calling preview tools.",
     );
   }
-  showPreviewControl(tab, { action: "Working", runId });
+  // A driver the user stopped on this tab is refused before anything runs.
+  const driver = readDriver(params.driver);
+  assertDriverAllowed(tab.id, driver);
+  noteDriving(tab.id, driver);
   actedTabs.set(params, tab.id);
   return tab;
+}
+
+/** Glide the agent's cursor to where an action on selector will land, before it lands. */
+async function approach(tab: ReturnType<typeof requireTab>, params: Record<string, unknown>, selector: string, move: Omit<CursorMove, "point" | "box">, withBox = false): Promise<void> {
+  const driver = readDriver(params.driver);
+  if (!driver) return;
+  const code = `(${locateProbe.toString()})(${JSON.stringify({ selector })}, ${createPreviewDOM.toString()})`;
+  const spot = await runGuestScript(tab.handle, code).catch(() => null) as { x: number; y: number; box: Box } | null;
+  if (!spot) return;
+  await moveAgentCursor(tab.id, driver, { ...move, point: { x: spot.x, y: spot.y }, ...(withBox ? { box: spot.box } : {}) });
 }
 
 // codara_preview_close. A named tab must be in the caller's workspace; with
@@ -199,6 +219,7 @@ function closeTab(params: Record<string, unknown>) {
       if (!hasPreviewTab(tabId)) return { ok: true, tabId, alreadyClosed: true };
       throw new Error(`Browser tab ${tabId} is not in your workspace, so you cannot close it.`);
     }
+    assertDriverAllowed(tab.id, readDriver(params.driver));
     closePreviewTab(tab.id);
     return { ok: true, tabId: tab.id, closed: true };
   }
@@ -206,6 +227,7 @@ function closeTab(params: Record<string, unknown>) {
   if (!own) {
     throw new Error("This session has no browser tab of its own open. Pass the tabId from codara_preview_list to close another tab of your workspace.");
   }
+  assertDriverAllowed(own.id, readDriver(params.driver));
   closePreviewTab(own.id);
   return { ok: true, tabId: own.id, closed: true };
 }
@@ -244,6 +266,7 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
   // The store's own answer: the bridge reads committed state, which lags a
   // move made in this same call.
   let joined: string | null = null;
+  const driver = readDriver(params.driver);
   if (params.tabId) {
     tab = pickPreviewTab(
       typeof params.tabId === "string" ? params.tabId : null,
@@ -252,6 +275,7 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
       readString(params, "callerPaneId"),
     );
     if (!tab) throw new Error(`preview tab not found: ${String(params.tabId)}`);
+    assertDriverAllowed(tab.id, driver);
     // A tab the call names joins the group; with no url that is all it does.
     if (group) joined = assignTabToGroup(tab.id, tab.workspaceId, group);
     if (!url) {
@@ -265,14 +289,19 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
     const runId = readString(params, "runId");
     const workspaceId = readString(params, "workspaceId");
     const callerPaneId = readString(params, "callerPaneId");
-    ({ tab, opened } = await ensurePreviewTab(url, runId, workspaceId, callerPaneId, group));
+    const reusable = findReusablePreviewTab(runId, workspaceId, callerPaneId);
+    if (reusable) assertDriverAllowed(reusable.id, driver);
+    ({ tab, opened } = await ensurePreviewTab(url, runId, workspaceId, callerPaneId, group, {
+      sessionId: readString(params, "callerSessionId"),
+      process: readString(params, "callerProcess"),
+    }));
   } else {
     throw new Error("navigate requires 'url'");
   }
   // A tab ensurePreviewTab just opened is already loading the URL. Loading
   // it again would abort or repeat that first load, which runs the page's
   // requests twice and records the first load's as never finished.
-  showPreviewControl(tab, { action: "Navigating", runId: readString(params, "runId") });
+  noteDriving(tab.id, driver, "Navigating");
   if (!opened) tab.handle.loadURL(url);
   await waitDomReady(tab.handle, 15_000);
   joined ??= tabGroupNameOf(tab.id);
@@ -347,10 +376,9 @@ async function click(params: Record<string, unknown>): Promise<unknown> {
   const selector = readString(params, "selector");
   if (!selector) throw new Error("click requires 'selector'");
   const tab = requireTab(params);
+  await approach(tab, params, selector, { action: "Clicking", press: true });
   const code = `(${clickProbe.toString()})(${JSON.stringify({ selector })}, ${createPreviewDOM.toString()})`;
-  const result = await runGuestScript(tab.handle, code) as { x?: number; y?: number };
-  showPreviewControl(tab, { action: "Clicking", runId: readString(params, "runId"), x: result.x, y: result.y });
-  return result;
+  return runGuestScript(tab.handle, code);
 }
 
 async function typeText(params: Record<string, unknown>): Promise<unknown> {
@@ -360,10 +388,9 @@ async function typeText(params: Record<string, unknown>): Promise<unknown> {
   if (text === null) throw new Error("type requires 'text'");
   const clearFirst = readBool(params, "clearFirst") ?? false;
   const tab = requireTab(params);
+  await approach(tab, params, selector, { action: "Typing" }, true);
   const code = `(${typeProbe.toString()})(${JSON.stringify({ selector, text, clearFirst })}, ${createPreviewDOM.toString()})`;
-  const result = await runGuestScript(tab.handle, code) as { x?: number; y?: number };
-  showPreviewControl(tab, { action: "Typing", runId: readString(params, "runId"), x: result.x, y: result.y });
-  return result;
+  return runGuestScript(tab.handle, code);
 }
 
 async function pressKey(params: Record<string, unknown>): Promise<unknown> {
@@ -371,6 +398,7 @@ async function pressKey(params: Record<string, unknown>): Promise<unknown> {
   if (!key) throw new Error("press_key requires 'key'");
   const selector = readString(params, "selector");
   const tab = requireTab(params);
+  if (selector) await approach(tab, params, selector, { action: "Typing" }, true);
   const code = `(${pressKeyProbe.toString()})(${JSON.stringify({ key, selector })}, ${createPreviewDOM.toString()})`;
   return runGuestScript(tab.handle, code);
 }

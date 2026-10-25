@@ -372,7 +372,7 @@ test("a chat docks into the grid and keeps its surface on screen", async () => {
       clientX: Math.round(pillBox.x + pillBox.width / 2),
       clientY: Math.round(pillBox.y + pillBox.height / 2),
     });
-    await page.getByText("Open in split", { exact: true }).dispatchEvent("click");
+    await page.getByText("Split right", { exact: true }).dispatchEvent("click");
 
     // The chat now lives in the grid beside the terminal, with no pill of its
     // own, and the terminal it shares the tab with is untouched.
@@ -439,7 +439,7 @@ test("a chat docks into the grid and keeps its surface on screen", async () => {
   }
 });
 
-test("Open in split pairs the two surfaces on screen, with no shell between them", async () => {
+test("Split right pairs the two surfaces on screen, with no shell between them", async () => {
   test.setTimeout(120_000);
   const { app, page, workspaceDir } = await launch();
   try {
@@ -454,7 +454,9 @@ test("Open in split pairs the two surfaces on screen, with no shell between them
     const editorPill = page.getByRole("tab", { name: /notes\.txt/i }).first();
     await expect(editorPill).toBeVisible({ timeout: 15_000 });
 
-    // Look at the chat, then split the editor in beside it.
+    // Look at the chat, then split the editor in beside it. The menu offers
+    // Split right instead of Open in split when a tab can go beside the one
+    // on screen.
     const chatPill = page.getByRole("tab", { name: /chat|cora/i }).first();
     await chatPill.dispatchEvent("click");
     const pillBox = (await editorPill.boundingBox())!;
@@ -462,7 +464,7 @@ test("Open in split pairs the two surfaces on screen, with no shell between them
       clientX: Math.round(pillBox.x + pillBox.width / 2),
       clientY: Math.round(pillBox.y + pillBox.height / 2),
     });
-    await page.getByText("Open in split", { exact: true }).dispatchEvent("click");
+    await page.getByText("Split right", { exact: true }).dispatchEvent("click");
 
     // Both surfaces are now cells in one grid — and that grid holds no shell
     // the user never asked for.

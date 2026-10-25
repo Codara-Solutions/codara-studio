@@ -4,7 +4,9 @@ import {
   DEFAULT_BLOCKED_SITES,
   agentGroupFor,
   agentGroupTitle,
+  badgeTitle,
   RELOAD_CARRY_MS,
+  USAGE_ACTIVE_MS,
   RELOAD_RETRY_MS,
   blockingRule,
   carriedSession,
@@ -155,5 +157,10 @@ export function run() {
   assert.equal(carriedSession({ at: now - RELOAD_CARRY_MS, session }, now), null, "a stale carry is dropped: tab ids are reused after a restart");
   assert.equal(carriedSession({ at: now + 5000, session }, now), null);
   assert.equal(carriedSession(null, now), null);
-  return "policy: blocked sites, browser pages, protocol permissions, cookie redaction, sharing, agent tab groups, closing tabs and self-updates";
+  const usage = { agent: "Claude Code in pane 3f2a", at: now - 1000 };
+  assert.equal(badgeTitle({ shared: true, attached: true, usage, now }), "Codara: Claude Code in pane 3f2a is using this tab. Open to stop it.", "the button names the agent while it acts");
+  assert.equal(badgeTitle({ shared: true, attached: true, usage: { ...usage, at: now - USAGE_ACTIVE_MS }, now }), "Codara: an agent is using this tab", "and stops naming it once it is idle");
+  assert.equal(badgeTitle({ shared: true, attached: false, usage, now }), "Codara: agents may use this tab");
+  assert.equal(badgeTitle({ shared: false, attached: true, usage, now }), "Codara");
+  return "policy: toolbar button names the driving agent, blocked sites, browser pages, protocol permissions, cookie redaction, sharing, agent tab groups, closing tabs and self-updates";
 }

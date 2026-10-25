@@ -80,7 +80,9 @@ export interface WorkflowAgentOutcome {
   worktree?: JournalWorktree;
 }
 
-export type WorkflowAbortReason = "skip" | "stop" | "ceiling";
+// "quit" settles like "stop", but the executor leaves the attempt to the
+// app's process teardown and the next launch's recovery.
+export type WorkflowAbortReason = "skip" | "stop" | "ceiling" | "quit";
 
 export interface WorkflowAgentControl {
   signal: AbortSignal;
@@ -247,6 +249,19 @@ export class WorkflowRuntime {
     await this.sandbox?.terminate();
     this.abortAll("stop");
     await this.settleLive();
+    this.finish({ status: "stopped" });
+  }
+
+  /**
+   * Ends the script for an app quit without waiting on live agents. The
+   * quit's teardown kills them right after, and once this has run their
+   * deaths are never journaled as answers, so a resume runs them again.
+   */
+  suspend(): void {
+    if (this.finished) return;
+    this.stopping = true;
+    void this.sandbox?.terminate();
+    this.abortAll("quit");
     this.finish({ status: "stopped" });
   }
 

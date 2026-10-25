@@ -9,7 +9,8 @@ import { buildIntegratedShellLaunch } from "./shell-init";
 import { createFile, createFolder, deleteFile, deleteToStash, importEntries, listDir, listFiles, moveEntries, purgeDeleteStash, readFileBytes, readFileEx, readTextFile, readTextFileTail, renameFile, statFile, undoDeleteFromStash, writeTextFile } from "./fs-tree";
 import { assertAllowedReadPathResolved, setAllowedRoots } from "./fs-sandbox";
 import { readClipboardFilePaths, writeClipboardFilePaths } from "./clipboard-files";
-import { deleteManualHost, listHosts, saveManualHost } from "./remote/ssh-hosts";
+import { deleteManualHost, listHosts, saveCodaraHost, saveManualHost } from "./remote/ssh-hosts";
+import { codaraBoxConnectInfo, isBoxId, listCodaraBoxes } from "./remote/codara-boxes";
 import {
   listKeys as listSshKeys,
   generateKey as generateSshKey,
@@ -30,6 +31,8 @@ import { isRemotePath } from "@shared/remote";
 import { MUTE_KEY_PATTERN } from "@shared/notify-center";
 import type { UsageSummaryInput } from "@shared/usage-analytics";
 import type {
+  CodaraBoxConnectInfoResult,
+  CodaraBoxesListResult,
   RemoteAuthPromptAnswer,
   RemoteBrowseResult,
   RemoteConnectionStatus,
@@ -496,6 +499,7 @@ import { registerFeatureTipsIpc } from "./feature-tips";
 import { registerSessionSearchIpc } from "./session-search/service";
 import { registerServersIpc } from "./servers";
 import { registerWorkspaceStatusIpc } from "./workspace-status";
+import { registerPullRequestWatchIpc } from "./pull-request-watch-ipc";
 import { registerCosTasksIpc } from "./cos";
 import { afterSkillAssetDeleted, afterSkillAssetInstalled, registerSkillUpdatesIpc, skillOriginsDir } from "./skill-updates-ipc";
 import {
@@ -507,6 +511,7 @@ import {
 import { agentPaneAsleep, registerAgentHibernationIpc } from "./agent-hibernation";
 import { registerWorktreeCleanupIpc } from "./worktree-cleanup";
 import { registerCrossWorkspaceIpc } from "./cross-workspace-ipc";
+import { registerTabActionIpc } from "./tab-action-ipc";
 import { registerWorktreeSetupIpc } from "./worktree-setup";
 import { registerPortForwardIpc } from "./remote/port-forward-runtime";
 import { registerShareIpc } from "./share/ipc";
@@ -3196,9 +3201,9 @@ export function registerIpc(): void {
     if (!pty.hasSession(id)) await pty.waitForSpawn(id, 10_000);
   };
 
-  handle("pty:write", async (_e, args: { id: string; data: string }) => {
+  handle("pty:write", async (_e, args: { id: string; data: string; typed?: boolean }) => {
     await awaitPendingSpawn(args.id);
-    pty.write(args.id, args.data);
+    pty.write(args.id, args.data, { typed: args.typed === true });
     // A submit starts the pane's next agent turn; other keys can answer a
     // prompt or interrupt (see noteTerminalUserInput).
     noteTerminalUserInput(args.id, args.data);
@@ -3954,6 +3959,25 @@ export function registerIpc(): void {
     "remote:deleteHost",
     async (_e, hostId: string): Promise<RemoteHostConfig[]> => deleteManualHost(hostId),
   );
+  // Codara Cloud boxes, read through the codaracloud CLI. connect-info saves
+  // the host (main-only, with its proxy argv) so remote:connect can use it.
+  handle(
+    "remote:codara-boxes:list",
+    async (): Promise<CodaraBoxesListResult> => listCodaraBoxes(),
+  );
+  handle(
+    "remote:codara-boxes:connect-info",
+    async (_e, boxId: string): Promise<CodaraBoxConnectInfoResult> => {
+      if (!isBoxId(boxId)) return { ok: false, code: "failed", message: "That is not a box id." };
+      const info = await codaraBoxConnectInfo(boxId);
+      if (!info.ok) return info;
+      try {
+        return { ok: true, host: await saveCodaraHost(info.host) };
+      } catch {
+        return { ok: false, code: "failed", message: "The box host could not be saved." };
+      }
+    },
+  );
   handle(
     "remote:connect",
     async (_e, hostId: string): Promise<RemoteConnectionStatus> => {
@@ -4158,12 +4182,14 @@ export function registerIpc(): void {
   registerCaptureIpc(handle);
   registerPointIpc(handle);
   registerWorkspaceStatusIpc(handle);
+  registerPullRequestWatchIpc(handle);
   registerCosTasksIpc(handle);
   registerReviewIpc(handle);
   registerTerminalScrollbackIpc(handle);
   registerAgentHibernationIpc(handle);
   registerWorktreeCleanupIpc(handle);
   registerCrossWorkspaceIpc(handle);
+  registerTabActionIpc(handle);
   registerFeatureTipsIpc(handle);
   registerPortForwardIpc(handle);
   registerShareIpc(handle);
