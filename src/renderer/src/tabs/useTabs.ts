@@ -1416,6 +1416,7 @@ export interface UseTabsApi {
     direction: TerminalSplit["direction"],
     autorun?: string,
     agentSession?: TerminalAgentSession | null,
+    cwd?: string,
   ) => string | null;
   closeTerminalPane: (tabId: TabId, paneId: string) => void;
   // closeTerminalPane for a pane living in either the active workspace or an
@@ -2728,6 +2729,8 @@ export function useTabs(
       direction: TerminalSplit["direction"],
       autorun?: string,
       agentSession?: TerminalAgentSession | null,
+      // The Where picker opens the new pane on another machine.
+      cwd?: string,
     ): string | null => {
       let newPaneId: string | null = null;
       setTabs((curr) =>
@@ -2739,9 +2742,11 @@ export function useTabs(
           newPaneId = fresh;
           // Splitting off a dock cell has no shell directory to inherit — fall
           // back to a sibling terminal's cwd rather than dropping to root.
-          const inheritedCwd = isDockLeaf(target)
-            ? collectTerminalLeaves(t.root).find((l) => l.cwd)?.cwd
-            : target.cwd;
+          const inheritedCwd =
+            cwd ??
+            (isDockLeaf(target)
+              ? collectTerminalLeaves(t.root).find((l) => l.cwd)?.cwd
+              : target.cwd);
           const newLeaf = leaf(fresh, inheritedCwd, autorun);
           if (agentSession) newLeaf.agentSession = agentSession;
           const launchRuntime =
