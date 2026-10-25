@@ -26,8 +26,11 @@ function sameStates(a: Record<string, WorktreeRailState>, b: Record<string, Work
 export function useWorktreeRailStates(
   workspaces: Workspace[],
   onAutoRemoved: (result: WorktreeRailCleanupResult) => void,
-): { states: Record<string, WorktreeRailState>; refresh: () => void } {
+): { states: Record<string, WorktreeRailState>; loaded: boolean; refresh: () => void } {
   const [states, setStates] = useState<Record<string, WorktreeRailState>>({});
+  // The first read finished, whatever it found: a row with no state after
+  // that is one main never reads, not one still loading.
+  const [loaded, setLoaded] = useState(false);
   const lastReadAt = useRef(0);
   const autoTried = useRef(new Map<string, { at: number; waitMs: number }>());
   const onAutoRemovedRef = useRef(onAutoRemoved);
@@ -52,12 +55,17 @@ export function useWorktreeRailStates(
       if (inFlight) return;
       if (!force && Date.now() - lastReadAt.current < FOCUS_GAP_MS) return;
       const api = window.spark.worktreeCleanup;
-      if (!api?.railStates) return;
+      if (!api?.railStates) {
+        setLoaded(true);
+        return;
+      }
       inFlight = true;
       lastReadAt.current = Date.now();
       try {
         const list = await api.railStates().catch(() => null);
-        if (cancelled || !list) return;
+        if (cancelled) return;
+        setLoaded(true);
+        if (!list) return;
         const next: Record<string, WorktreeRailState> = {};
         for (const state of list) next[state.workspaceId] = state;
         setStates((prev) => (sameStates(prev, next) ? prev : next));
@@ -92,5 +100,5 @@ export function useWorktreeRailStates(
     };
   }, [copyKey, refreshTick]);
 
-  return { states, refresh };
+  return { states, loaded, refresh };
 }

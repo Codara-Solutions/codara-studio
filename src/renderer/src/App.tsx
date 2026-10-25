@@ -838,7 +838,11 @@ export default function App() {
   // Merged and missing copy-branch workspaces for the rail; a missing one
   // whose branch is merged or gone is cleaned up without asking (main
   // refuses anything in use, unpushed or possibly only unmounted).
-  const { states: worktreeByWorkspaceId, refresh: refreshWorktreeStates } = useWorktreeRailStates(
+  const {
+    states: worktreeByWorkspaceId,
+    loaded: worktreeStatesLoaded,
+    refresh: refreshWorktreeStates,
+  } = useWorktreeRailStates(
     workspaces,
     useCallback((result: WorktreeRailCleanupResult) => {
       emitLocalToast(
@@ -6622,6 +6626,7 @@ export default function App() {
             agentsByWorkspaceId={agentsByWorkspaceId}
             branchByWorkspaceId={branchByWorkspaceId}
             worktreeByWorkspaceId={worktreeByWorkspaceId}
+            worktreeStatesLoaded={worktreeStatesLoaded}
             onCleanUpWorkspace={handleCleanUpWorkspace}
             sections={panels.sections.left}
             draggingSection={draggingPanelSection}
@@ -6768,6 +6773,7 @@ export default function App() {
             agentsByWorkspaceId={agentsByWorkspaceId}
             branchByWorkspaceId={branchByWorkspaceId}
             worktreeByWorkspaceId={worktreeByWorkspaceId}
+            worktreeStatesLoaded={worktreeStatesLoaded}
             onCleanUpWorkspace={handleCleanUpWorkspace}
             sections={panels.sections.right}
             draggingSection={draggingPanelSection}

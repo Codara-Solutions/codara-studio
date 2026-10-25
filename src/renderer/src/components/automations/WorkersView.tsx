@@ -7,6 +7,7 @@ import type {
 import { automationDotColor, fmtClock, fmtElapsed } from "./presentation";
 import { workerModelLabel } from "./worker-models";
 import { describeWorkerLogFailure } from "./worker-log-tail";
+import { keyInsideModal } from "../../shortcuts/modal-keys";
 
 // The Workers sub-tab: every live automation worker as an ordered activity
 // stream from Claude Agent SDK or Codex App Server. Ordinary Cora workers keep
@@ -80,7 +81,7 @@ export default function WorkersView({
   useEffect(() => {
     if (!visible || focusedAttemptId === null) return;
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === "Escape") {
+      if (e.key === "Escape" && !keyInsideModal(e)) {
         e.preventDefault();
         e.stopPropagation();
         setFocusedAttemptId(null);

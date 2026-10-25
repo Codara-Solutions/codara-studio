@@ -51,7 +51,7 @@ import { openWorktreeCleanup } from "./worktree-cleanup/open-worktree-cleanup";
 import { PullRequestMark } from "../git/PullRequestMark";
 import { setRepositoryWatched, usePullRequestWatch } from "../git/pullRequestWatchStore";
 import type { WorktreeRailState } from "@shared/worktree-cleanup";
-import { buildRailFamily, buildRailTree, type RailTree } from "@shared/rail-tree";
+import { buildRailFamily, buildRailTree, railMergeState, type RailTree } from "@shared/rail-tree";
 import type { AgentLine } from "@shared/agent-status";
 
 const PANEL_SECTION_MIME = "application/x-codara-panel-section";
@@ -168,6 +168,8 @@ interface RailProps {
   // Merge and folder state of each copy-branch workspace (useWorktreeRailStates):
   // the "merged" mark and the row's Clean up.
   worktreeByWorkspaceId?: Record<string, WorktreeRailState>;
+  // The first read of those states finished (useWorktreeRailStates).
+  worktreeStatesLoaded?: boolean;
   // Clean up a merged worktree, or remove a workspace whose folder is gone.
   onCleanUpWorkspace?: (id: string) => Promise<void>;
   // The first section's share when exactly two sections are stacked here.
@@ -846,6 +848,7 @@ function WorkspaceRail(props: RailProps) {
         key={w.id}
         project={w}
         worktrees={worktreesOf(railTree, w.id, workspaceById)}
+        statesLoaded={props.worktreeStatesLoaded ?? false}
         rowProps={(child) => workspaceRowProps(child, child === w ? groupId : null)}
       />
     ));
@@ -2079,10 +2082,12 @@ function worktreesOf(tree: RailTree, projectId: string, byId: ReadonlyMap<string
 function WorkspaceFamily({
   project,
   worktrees,
+  statesLoaded,
   rowProps,
 }: {
   project: Workspace;
   worktrees: Workspace[];
+  statesLoaded: boolean;
   rowProps: (workspace: Workspace) => RowProps;
 }) {
   const idsKey = [project.id, ...worktrees.map((worktree) => worktree.id)].join("\n");
@@ -2100,7 +2105,10 @@ function WorkspaceFamily({
         lines: lineLists[index + 1] ?? [],
         creatorPaneId: creator?.kind === "agent" ? creator.paneId : undefined,
         createdAt: worktree.copyBranch?.createdAt,
-        merged: props.worktree ? rowMerged(props.worktree, props.missing ?? false) : null,
+        merged: railMergeState(props.worktree ? rowMerged(props.worktree, props.missing ?? false) : undefined, {
+          remote: Boolean(worktree.remote),
+          loaded: statesLoaded,
+        }),
       };
     }),
   });
