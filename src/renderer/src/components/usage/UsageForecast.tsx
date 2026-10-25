@@ -460,8 +460,8 @@ const IDEA_ROWS: Array<{ key: keyof ForecastIdeas; title: string; desc: string }
 ];
 
 const STYLE_OPTIONS: Array<{ value: ForecastPanelStyle; label: string }> = [
-  { value: "line", label: "A · Sentence" },
   { value: "ghost", label: "B · Projection" },
+  { value: "line", label: "A · Sentence" },
   { value: "pill", label: "C · Title bar" },
 ];
 

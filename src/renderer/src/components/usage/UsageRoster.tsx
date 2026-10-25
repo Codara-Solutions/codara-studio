@@ -202,7 +202,7 @@ function WindowSection({
   window: usageWindow,
   nowMs,
   forecast = null,
-  forecastStyle = "line",
+  forecastStyle = "ghost",
 }: {
   window: PiUsageWindow;
   nowMs: number;

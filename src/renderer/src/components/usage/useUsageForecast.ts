@@ -86,8 +86,9 @@ export function forecastFor(
   return report.windows.find((view) => view.profileId === profileId && view.windowId === windowId) ?? null;
 }
 
-/** How the panel shows the forecast. A per-viewer demo choice, so it lives in
- * localStorage rather than in preferences. */
+/** How the panel shows the forecast. B (ghost, the projection on the meter)
+ * is the chosen default; A and C stay as a per-viewer choice in the Labs card,
+ * so it lives in localStorage rather than in preferences. */
 export type ForecastPanelStyle = "line" | "ghost" | "pill";
 
 const STYLE_KEY = "spark.usage.forecastStyle";
@@ -96,9 +97,9 @@ const STYLE_EVENT = "spark:usage-forecast-style";
 export function readForecastStyle(): ForecastPanelStyle {
   try {
     const value = window.localStorage.getItem(STYLE_KEY);
-    return value === "ghost" || value === "pill" ? value : "line";
+    return value === "line" || value === "pill" ? value : "ghost";
   } catch {
-    return "line";
+    return "ghost";
   }
 }
 
