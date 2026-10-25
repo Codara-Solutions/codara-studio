@@ -82,8 +82,15 @@ const HISTORY_FILE = "usage-history.jsonl";
 const HISTORY_MAX_BYTES = 4 * 1024 * 1024;
 const FORECAST_LOG_FILE = "usage-forecast-log.jsonl";
 const FORECAST_LOG_MAX_BYTES = 2 * 1024 * 1024;
-/** A live forecast of one window is logged at most this often. */
+/** A live forecast of one window is logged at most this often, and about
+ * ten times per window whatever its length. */
 const FORECAST_LOG_EVERY_MS = 30 * 60 * 1000;
+/** Two reads whose resets lie this close are the same window: a reset computed
+ * from "resets in N seconds" moves a little with every read. */
+const SAME_RESET_MS = 5 * 60_000;
+/** A window's last reading must come this close to its reset for its end to
+ * count as known. */
+const MAX_END_GAP_MS = 6 * HOUR_MS;
 /** A reading that did not change is written again at most this often. */
 const RECORD_REPEAT_MS = 10 * 60 * 1000;
 /** Codex's general limit; others (codex_bengalfox) are per model. */
@@ -137,7 +144,7 @@ async function appendReadings(overview: PiUsageOverview, nowMs: number): Promise
       if (
         previous &&
         previous.used === window.usedPercent &&
-        Math.abs(previous.resetsAt - resetsAt) < 5 * 60_000 &&
+        Math.abs(previous.resetsAt - resetsAt) < SAME_RESET_MS &&
         t - previous.t < RECORD_REPEAT_MS
       ) {
         continue;
@@ -216,7 +223,7 @@ export interface LoggedForecast {
   growth: number[];
 }
 
-const lastLogged = new Map<string, number>();
+const lastLogged = new Map<string, { t: number; resetsAt: number }>();
 
 function forecastLogPath(): string {
   return join(codaraHome(), FORECAST_LOG_FILE);
@@ -228,10 +235,17 @@ export function logForecasts(views: readonly WindowForecastView[], nowMs = Date.
   const lines: string[] = [];
   for (const view of views) {
     if (!view.result.inUse || view.source !== "live") continue;
-    const key = `${view.profileId}|${view.windowId}|${view.result.resetsAtMs}`;
+    const key = `${view.profileId}|${view.windowId}`;
+    const every = Math.max(FORECAST_LOG_EVERY_MS, (view.result.resetsAtMs - view.result.windowStartMs) / 10);
     const previous = lastLogged.get(key);
-    if (previous !== undefined && nowMs - previous < FORECAST_LOG_EVERY_MS) continue;
-    lastLogged.set(key, nowMs);
+    if (
+      previous &&
+      Math.abs(previous.resetsAt - view.result.resetsAtMs) < SAME_RESET_MS &&
+      nowMs - previous.t < every
+    ) {
+      continue;
+    }
+    lastLogged.set(key, { t: nowMs, resetsAt: view.result.resetsAtMs });
     const entry: LoggedForecast = {
       t: nowMs,
       profileId: view.profileId,
@@ -270,19 +284,29 @@ export function scoreLoggedForecasts(
   nowMs: number,
 ): Map<string, LearningSample[]> {
   const byTrack = new Map<string, LearningSample[]>();
+  // Both logs grow to thousands of lines, and this runs on every report.
+  const byWindow = new Map<string, RecordedReading[]>();
+  for (const reading of recorded) {
+    const key = `${reading.profileId}|${reading.windowId}`;
+    const list = byWindow.get(key) ?? [];
+    list.push(reading);
+    byWindow.set(key, list);
+  }
+  for (const list of byWindow.values()) list.sort((a, b) => a.resetsAt - b.resetsAt);
   for (const entry of logged) {
     if (entry.resetsAt > nowMs) continue;
     const lengthMs = entry.resetsAt - entry.windowStartMs;
-    const readings = recorded.filter(
-      (reading) =>
-        reading.profileId === entry.profileId &&
-        reading.windowId === entry.windowId &&
-        Math.abs(reading.resetsAt - entry.resetsAt) < 5 * 60_000,
-    );
-    if (readings.length === 0) continue;
-    const actual = Math.max(...readings.map((reading) => reading.used));
-    const lastAt = Math.max(...readings.map((reading) => reading.t));
-    if (actual < 100 && lastAt < entry.resetsAt - 0.15 * lengthMs) continue;
+    const sameWindow = byWindow.get(`${entry.profileId}|${entry.windowId}`) ?? [];
+    let actual = Number.NEGATIVE_INFINITY;
+    let lastAt = Number.NEGATIVE_INFINITY;
+    for (let i = firstResetAfter(sameWindow, entry.resetsAt - SAME_RESET_MS); i < sameWindow.length; i += 1) {
+      const reading = sameWindow[i] as RecordedReading;
+      if (reading.resetsAt - entry.resetsAt >= SAME_RESET_MS) break;
+      actual = Math.max(actual, reading.used);
+      lastAt = Math.max(lastAt, reading.t);
+    }
+    if (actual === Number.NEGATIVE_INFINITY) continue;
+    if (actual < 100 && lastAt < entry.resetsAt - Math.min(0.15 * lengthMs, MAX_END_GAP_MS)) continue;
     const kind = windowKindFor(entry.label, lengthMs);
     if (kind !== "5h" && kind !== "7d") continue;
     const key = `${entry.provider}|${kind}`;
@@ -299,6 +323,18 @@ export function scoreLoggedForecasts(
     byTrack.set(key, list);
   }
   return byTrack;
+}
+
+/** Index of the first reading whose reset is after `ms`, in a list sorted by reset. */
+function firstResetAfter(sorted: readonly RecordedReading[], ms: number): number {
+  let lo = 0;
+  let hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if ((sorted[mid] as RecordedReading).resetsAt <= ms) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }
 
 /* ── Inputs ──────────────────────────────────────────────────────────────── */
@@ -474,7 +510,9 @@ function windowView(options: {
     percentPerUnit: track.factors,
     inUse: profile.isDefault,
     ...(learning ? { correction: learning.correction } : {}),
-    seed: hashSeed(`${profile.profileId}|${window.id}|${resetsAtMs}`),
+    // Keyed on the reset to 10 minutes, so a reset that drifts between reads
+    // does not reshuffle the replays.
+    seed: hashSeed(`${profile.profileId}|${window.id}|${Math.round(resetsAtMs / (10 * 60_000))}`),
   });
   return {
     key: `${profile.profileId}|${window.id}`,
@@ -520,7 +558,7 @@ function codexCliWindow(scan: ForecastScan, nowMs: number): { window: PiUsageWin
   };
 }
 
-const MIN_LIVE_FOR_SURE = 10;
+const MIN_LIVE_WINDOWS_FOR_SURE = 10;
 let backtestCache: { at: number; key: string; result: Backtests } | null = null;
 
 interface Backtests {
@@ -582,7 +620,7 @@ export function learnTrack(
   // A spend back-test scores spend scaled by today's factor, so it vouches
   // for the timing, not for the scale. Only live forecasts scored on real
   // readings check the scale; until there are enough, it is at most fairly sure.
-  if (base.truth === "spend" && learning.confidence === "good" && live.length < MIN_LIVE_FOR_SURE) {
+  if (base.truth === "spend" && learning.confidence === "good" && model.liveWindows < MIN_LIVE_WINDOWS_FOR_SURE) {
     learning = { ...learning, confidence: "fair" };
   }
   return {
@@ -599,26 +637,46 @@ function backtests(
   live: ReadonlyMap<string, LearningSample[]>,
   nowMs: number,
 ): Backtests {
+  const claude = spendSeries(scan, "anthropic");
+  const hits = claudeSessionHits(scan).map((hit) => hit.atMs);
+  const claudeTracks = (
+    [["5h", 5 * HOUR_MS, "5-hour"], ["7d", 7 * DAY_MS, "7-day"]] as const
+  ).flatMap(([kind, lengthMs, label]) => {
+    const factor = claudeFactors[kind];
+    if (factor === undefined) return [];
+    return [{ kind, label, factor, windows: pastWindowsFromSpend(claude, lengthMs, factor, nowMs, kind === "5h" ? hits : []) }];
+  });
+  const readings = codexReadings(scan, 10080);
+  const codex =
+    readings.length > 0
+      ? {
+          series: trimLeadingIdle(percentSeriesFromReadings(readings, readingsStart(readings, nowMs), nowMs)),
+          windows: pastWindowsFromReadings(readings, 7 * DAY_MS, nowMs),
+        }
+      : null;
   // The live reading moves the factors a little on every poll; only a real
-  // change of scale (10% steps) or a newly scored live forecast is worth a
-  // new back-test before the TTL.
+  // change of scale (10% steps), another closed window or a newly scored live
+  // forecast is worth a new back-test before the TTL.
+  const shape = (windows: readonly PastWindow[]) => [
+    windows.length,
+    windows[windows.length - 1]?.resetsAtMs ?? 0,
+    Math.round(windows.reduce((sum, window) => sum + window.endPercent, 0)),
+  ];
   const key = JSON.stringify({
-    factors: Object.fromEntries(
-      Object.entries(claudeFactors).map(([kind, factor]) => [kind, Math.round(Math.log(factor ?? 1) * 10)]),
-    ),
-    live: [...live.entries()].map(([track, samples]) => [track, samples.length]),
+    factors: claudeTracks.map((track) => [track.kind, Math.round(Math.log(track.factor) * 10)]),
+    windows: [...claudeTracks.map((track) => shape(track.windows)), codex ? shape(codex.windows) : null],
+    live: [...live.entries()].map(([track, samples]) => [
+      track,
+      samples.length,
+      samples.reduce((latest, sample) => Math.max(latest, sample.closedMs), 0),
+    ]),
   });
   if (backtestCache && backtestCache.key === key && nowMs - backtestCache.at < BACKTEST_TTL_MS) {
     return backtestCache.result;
   }
   const tracks: BacktestTrack[] = [];
   const learning = new Map<string, ForecastLearning>();
-  const claude = spendSeries(scan, "anthropic");
-  const hits = claudeSessionHits(scan).map((hit) => hit.atMs);
-  for (const [kind, lengthMs, label] of [["5h", 5 * HOUR_MS, "5-hour"], ["7d", 7 * DAY_MS, "7-day"]] as const) {
-    const factor = claudeFactors[kind];
-    if (factor === undefined) continue;
-    const windows = pastWindowsFromSpend(claude, lengthMs, factor, nowMs, kind === "5h" ? hits : []);
+  for (const { kind, label, factor, windows } of claudeTracks) {
     const { cases, summary, scored } = backtestForecast({ windows, history: claude, percentPerUnit: [factor], kind, paths: 150 });
     if (summary.cases === 0) continue;
     const track = learnTrack(
@@ -631,10 +689,8 @@ function backtests(
     tracks.push(track);
     learning.set(`anthropic|${kind}`, track.learning);
   }
-  const readings = codexReadings(scan, 10080);
-  if (readings.length > 0) {
-    const series = trimLeadingIdle(percentSeriesFromReadings(readings, readingsStart(readings, nowMs), nowMs));
-    const windows = pastWindowsFromReadings(readings, 7 * DAY_MS, nowMs);
+  if (codex) {
+    const { series, windows } = codex;
     const { cases, summary, scored } = backtestForecast({ windows, history: series, percentPerUnit: [1], kind: "7d", paths: 150 });
     if (summary.cases > 0) {
       const track = learnTrack(

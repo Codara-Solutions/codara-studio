@@ -50,6 +50,8 @@ export interface ErrorModel extends ForecastCorrection {
   samples: number;
   /** How many of them were live forecasts rather than replays. */
   liveSamples: number;
+  /** Past windows with at least one scored live forecast. */
+  liveWindows: number;
 }
 
 export interface ForecastLearning {
@@ -80,6 +82,10 @@ const MIN_LESSON_WINDOWS = 5;
 const LIVE_WEIGHT = 3;
 const BIAS_LIMITS: [number, number] = [0.4, 2.5];
 const SPREAD_LIMITS: [number, number] = [0.6, 4];
+/** Forecasts of one window can disagree on its start by a few minutes (a
+ * reset computed from "resets in N seconds" moves with every read), while two
+ * real windows start hours apart. */
+const SAME_WINDOW_MS = 30 * 60_000;
 
 function clamp(value: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, value));
@@ -141,6 +147,24 @@ export function correctedEnd(
   return { p10: end(0.1), p50: end(0.5), p90: end(0.9), hitProbability };
 }
 
+/** One id per real window: forecasts whose starts lie within SAME_WINDOW_MS
+ * of the window's first start share it, whichever source made them. */
+function windowIds(samples: readonly LearningSample[]): number[] {
+  const order = samples.map((_, i) => i).sort((a, b) => (samples[a] as LearningSample).windowStartMs - (samples[b] as LearningSample).windowStartMs);
+  const ids = new Array<number>(samples.length);
+  let id = -1;
+  let first = Number.NEGATIVE_INFINITY;
+  for (const i of order) {
+    const start = (samples[i] as LearningSample).windowStartMs;
+    if (start - first > SAME_WINDOW_MS) {
+      id += 1;
+      first = start;
+    }
+    ids[i] = id;
+  }
+  return ids;
+}
+
 /**
  * Fits the correction from forecasts whose outcome was known by nowMs. The
  * bias is the scale that would have made the middle guesses miss least; the
@@ -153,27 +177,37 @@ export function fitErrorModel(
   kind: "5h" | "7d",
 ): ErrorModel {
   const known = samples.filter((sample) => sample.closedMs <= nowMs && sample.growth.length > 0);
+  const ids = windowIds(known);
   const counts = {
-    windows: new Set(known.map((sample) => `${sample.source}|${sample.windowStartMs}`)).size,
+    windows: new Set(ids).size,
     samples: known.length,
     liveSamples: known.filter((sample) => sample.source === "live").length,
+    liveWindows: new Set(ids.filter((_, i) => (known[i] as LearningSample).source === "live")).size,
   };
   // A window where nothing happened and nothing was forecast says nothing
   // about scale or spread, and early on those are most of what there is.
-  const lessons = known.filter(
-    (sample) =>
-      Math.max(growthAt(sample.growth, 0.9), sample.actual - sample.usedPercent) >= MIN_LESSON_POINTS,
-  );
+  const lessonIds = new Map<LearningSample, number>();
+  known.forEach((sample, i) => {
+    if (Math.max(growthAt(sample.growth, 0.9), sample.actual - sample.usedPercent) >= MIN_LESSON_POINTS) {
+      lessonIds.set(sample, ids[i] as number);
+    }
+  });
+  const lessons = [...lessonIds.keys()];
   const life = halfLifeMs(kind);
-  const weightOf = (sample: LearningSample) =>
+  const windowWeightOf = (sample: LearningSample) =>
     Math.pow(0.5, Math.max(0, nowMs - sample.closedMs) / life) * (sample.source === "live" ? LIVE_WEIGHT : 1);
 
   // Evidence is counted in windows: three checkpoints of one window are not
-  // three independent lessons.
-  const windowWeight = new Map<string, number>();
+  // three independent lessons, and a window logged live every half hour is
+  // still one window. Each source's checkpoints share that window's weight.
+  const checkpoints = new Map<string, number>();
+  const checkpointKey = (sample: LearningSample) => `${lessonIds.get(sample)}|${sample.source}`;
+  for (const sample of lessons) checkpoints.set(checkpointKey(sample), (checkpoints.get(checkpointKey(sample)) ?? 0) + 1);
+  const weightOf = (sample: LearningSample) => windowWeightOf(sample) / (checkpoints.get(checkpointKey(sample)) ?? 1);
+  const windowWeight = new Map<number, number>();
   for (const sample of lessons) {
-    const key = `${sample.source}|${sample.windowStartMs}`;
-    windowWeight.set(key, Math.max(windowWeight.get(key) ?? 0, weightOf(sample)));
+    const id = lessonIds.get(sample) as number;
+    windowWeight.set(id, Math.max(windowWeight.get(id) ?? 0, windowWeightOf(sample)));
   }
   if (windowWeight.size < MIN_LESSON_WINDOWS) return { ...NO_CORRECTION, ...counts };
   const evidence = [...windowWeight.values()].reduce((sum, w) => sum + w, 0);
@@ -242,6 +276,17 @@ export interface LearnedBacktest {
   }>;
 }
 
+function countAtOrBefore(sorted: readonly number[], value: number): number {
+  let lo = 0;
+  let hi = sorted.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if ((sorted[mid] as number) <= value) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
 const HISTORY_BANDS: Array<[number, number, string]> = [
   [0, 10, "fewer than 10 past windows"],
   [10, 30, "10 to 29 past windows"],
@@ -260,17 +305,28 @@ export function learnedBacktest(
   extra: readonly LearningSample[] = [],
 ): LearnedBacktest {
   const pool = [...samplesFromBacktest(cases), ...extra];
-  const after: BacktestCase[] = [];
-  const priorWindows: number[] = [];
-  for (const c of cases) {
-    const model = fitErrorModel(pool, c.atMs, kind);
-    const corrected = correctedEnd(c.growth, c.usedPercent, model);
-    priorWindows.push(model.windows);
-    after.push({
+  const closings = pool.map((sample) => sample.closedMs).sort((a, b) => a - b);
+  const after = new Array<BacktestCase>(cases.length);
+  const priorWindows = new Array<number>(cases.length);
+  // Refitting for every forecast costs a fit over the whole pool each time.
+  // One more closed window, or a few more days of fade, barely moves a fit
+  // made from many, so it is refit once the known history grew by a twentieth
+  // or a week passed. It still only ever uses windows that had reset.
+  let fitted: { known: number; atMs: number; model: ErrorModel } | null = null;
+  const order = cases.map((_, i) => i).sort((a, b) => (cases[a] as BacktestCase).atMs - (cases[b] as BacktestCase).atMs);
+  for (const i of order) {
+    const c = cases[i] as BacktestCase;
+    const known = countAtOrBefore(closings, c.atMs);
+    if (!fitted || known - fitted.known >= Math.max(1, fitted.known / 20) || c.atMs - fitted.atMs >= 7 * DAY_MS) {
+      fitted = { known, atMs: c.atMs, model: fitErrorModel(pool, c.atMs, kind) };
+    }
+    const corrected = correctedEnd(c.growth, c.usedPercent, fitted.model);
+    priorWindows[i] = fitted.model.windows;
+    after[i] = {
       ...c,
       predicted: { p10: corrected.p10, p50: corrected.p50, p90: corrected.p90 },
       hitProbability: corrected.hitProbability,
-    });
+    };
   }
   const windows = new Set(cases.map((c) => c.startMs)).size;
   const byHistory = HISTORY_BANDS.map(([lo, hi, label]) => {

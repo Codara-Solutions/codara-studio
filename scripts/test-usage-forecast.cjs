@@ -602,6 +602,46 @@ async function main() {
     eq("confidence: replayed readings can be sure", learnTrack(trackBase("readings"), perfectCases, "5h", [], after(210)).learning.confidence, "good");
     eq("confidence: replayed spend alone is at most fairly sure", learnTrack(trackBase("spend"), perfectCases, "5h", [], after(210)).learning.confidence, "fair");
     eq("confidence: ten scored live forecasts make spend sure", learnTrack(trackBase("spend"), perfectCases, "5h", livePerfect, after(210)).learning.confidence, "good");
+
+    // A window is one window however many forecasts of it were kept, and
+    // whichever source kept them.
+    const oneLiveWindow = Array.from({ length: 10 }, (_, k) => ({ ...livePerfect[0], atMs: livePerfect[0].atMs + k * MINUTE }));
+    eq("confidence: ten live forecasts of one window are one live window", learnTrack(trackBase("spend"), perfectCases, "5h", oneLiveWindow, after(210)).learning.confidence, "fair");
+    const jittered = history(20, 1).map((sample, i) => ({ ...sample, windowStartMs: sample.windowStartMs + (i % 3) * MINUTE }));
+    const twice = [...history(20, 1), ...jittered.map((sample) => ({ ...sample, source: "live" }))];
+    eq("learning: a window kept as replay and live, starts a few minutes apart, counts once", fitErrorModel(twice, after(20), "5h").windows, 20);
+    eq("learning: live windows are counted", fitErrorModel(twice, after(20), "5h").liveWindows, 20);
+    const chattyWeek = Array.from({ length: 300 }, (_, k) => ({ ...history(1, 3, after(100))[0], atMs: after(100) + k * MINUTE, source: "live" }));
+    const outvoted = fitErrorModel([...history(100, 1), ...chattyWeek], after(102), "5h");
+    check(
+      `learning: one live window logged 300 times does not outvote 100 windows (${outvoted.growthBias.toFixed(2)})`,
+      outvoted.growthBias < 1.2,
+    );
+
+    // One fit per closed window, not per forecast, keeps a long history quick.
+    const manyCases = history(800, 1).flatMap((sample) =>
+      [0.25, 0.5, 0.75].map((checkpoint) => ({
+        startMs: sample.windowStartMs,
+        closedMs: sample.closedMs,
+        checkpoint,
+        atMs: sample.windowStartMs + checkpoint * 5 * HOUR,
+        usedPercent: sample.usedPercent,
+        predicted: { p10: 26, p50: 30, p90: 34 },
+        naive: 30,
+        actual: sample.actual,
+        hitProbability: 0,
+        hit: false,
+        growth: sample.growth,
+        warnedMinutesAhead: null,
+      })),
+    );
+    const manyLive = history(800, 1).flatMap((sample) =>
+      Array.from({ length: 10 }, (_, k) => ({ ...sample, atMs: sample.windowStartMs + k * 30 * MINUTE, source: "live" })),
+    );
+    const walkStarted = Date.now();
+    learnedBacktest(manyCases, "5h", manyLive);
+    const walkMs = Date.now() - walkStarted;
+    check(`walk-forward: 2400 forecasts and 8000 live ones replay in under 2 s (${walkMs} ms)`, walkMs < 2000);
   }
 
   /* ── Live forecasts are logged and scored once their window resets ──── */
@@ -648,6 +688,51 @@ async function main() {
       (scoreLoggedForecasts(logged, [reading(start + 2 * HOUR, 100)], reset + MINUTE).get("anthropic|5h") ?? [])[0]?.actual,
       100,
     );
+
+    // A reset computed from "resets in N seconds" moves a little on every
+    // read; it is still the same window, logged on the same schedule.
+    const drifting = (minutes, t) =>
+      logForecasts([view({ profileId: "drift", result: { ...view().result, resetsAtMs: reset + minutes * MINUTE } })], t);
+    await drifting(0, start + HOUR);
+    await drifting(1, start + HOUR + 5 * MINUTE);
+    await drifting(-1, start + HOUR + 10 * MINUTE);
+    await drifting(0, start + 2 * HOUR);
+    eq(
+      "log: a reset that drifts by a minute between reads is the same window",
+      (await readLoggedForecasts(0)).filter((entry) => entry.profileId === "drift").length,
+      2,
+    );
+    const weekStart = at(20, 0);
+    const week = (t) =>
+      logForecasts(
+        [view({ profileId: "weekly", windowId: "seven_day", windowLabel: "7-day", result: { ...view().result, windowStartMs: weekStart, resetsAtMs: weekStart + 7 * DAY } })],
+        t,
+      );
+    for (let hour = 1; hour <= 48; hour += 1) await week(weekStart + hour * HOUR);
+    const weekly = (await readLoggedForecasts(0)).filter((entry) => entry.profileId === "weekly").length;
+    check(`log: a 7-day window is logged about ten times a week, not every half hour (${weekly} in 2 days)`, weekly <= 3);
+
+    const weekEnd = weekStart + 7 * DAY;
+    const weekLogged = [{ t: weekStart + DAY, profileId: "weekly", provider: "openai-codex", windowId: "seven_day", label: "7-day", windowStartMs: weekStart, resetsAt: weekEnd, used: 10, growth: Array.from({ length: 21 }, (_, k) => k) }];
+    const weekReading = (t, used) => ({ t, profileId: "weekly", provider: "openai-codex", windowId: "seven_day", label: "7-day", used, resetsAt: weekEnd });
+    eq(
+      "score: a week whose last reading came 20 hours before the reset is not scored",
+      scoreLoggedForecasts(weekLogged, [weekReading(weekEnd - 20 * HOUR, 50)], weekEnd + MINUTE).size,
+      0,
+    );
+    eq(
+      "score: a week read 2 hours before the reset is scored",
+      scoreLoggedForecasts(weekLogged, [weekReading(weekEnd - 2 * HOUR, 50)], weekEnd + MINUTE).size,
+      1,
+    );
+
+    const busyLogged = Array.from({ length: 7000 }, (_, i) => ({ ...logged[0], t: logged[0].t + i, resetsAt: reset + (i % 700) * 5 * HOUR, windowStartMs: start + (i % 700) * 5 * HOUR }));
+    const busyReadings = Array.from({ length: 24000 }, (_, i) => ({ ...reading(start + (i % 700) * 5 * HOUR + 4.9 * HOUR, 50), resetsAt: reset + (i % 700) * 5 * HOUR }));
+    const scoreStarted = Date.now();
+    const busy = scoreLoggedForecasts(busyLogged, busyReadings, reset + 800 * 5 * HOUR);
+    const scoreMs = Date.now() - scoreStarted;
+    eq("score: every logged forecast of a full log is scored", (busy.get("anthropic|5h") ?? []).length, 7000);
+    check(`score: a full log scores in under 300 ms (${scoreMs} ms)`, scoreMs < 300);
   }
 
   /* ── The engine applies a correction to every replay ─────────────────── */
