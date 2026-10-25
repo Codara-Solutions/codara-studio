@@ -166,7 +166,11 @@ export async function readUsageSummary(input: UsageSummaryInput): Promise<UsageS
 
 /** Priced spend per time bucket since sinceMs, and the CLIs' own limit
  * readings, for the usage forecast. */
-export async function readForecastScan(sinceMs: number, bucketMs: number): Promise<ForecastScan> {
+export async function readForecastScan(
+  sinceMs: number,
+  bucketMs: number,
+  signalsSinceMs = sinceMs,
+): Promise<ForecastScan> {
   const roots = await resolveProviderRoots();
   const timeline = {
     roots,
@@ -175,7 +179,7 @@ export async function readForecastScan(sinceMs: number, bucketMs: number): Promi
     bucketMs,
     nowMs: Date.now(),
   };
-  const signals = { roots, memoPath: join(codaraHome(), "usage-forecast-signals.json"), sinceMs };
+  const signals = { roots, memoPath: join(codaraHome(), "usage-forecast-signals.json"), sinceMs: signalsSinceMs };
   const code = usageScanWorkerCode();
   if (code === null) {
     const { runForecastScan } = await import("./usage-scan-worker");

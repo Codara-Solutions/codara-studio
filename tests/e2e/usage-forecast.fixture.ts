@@ -25,6 +25,12 @@ import {
   type UsageForecastReport,
   type WindowForecastView,
 } from "../../src/shared/usage-forecast";
+import {
+  describeLearning,
+  fitErrorModel,
+  learnedBacktest,
+  samplesFromBacktest,
+} from "../../src/shared/usage-forecast-learning";
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -114,6 +120,10 @@ function syntheticData(now: number): { overview: unknown; report: UsageForecastR
   };
 
   const history = syntheticHistory(now);
+  const past = pastWindowsFromSpend(history, 5 * HOUR, 1, now);
+  const { cases, summary } = backtestForecast({ windows: past.slice(-12), history, percentPerUnit: [1], kind: "5h", paths: 60 });
+  const walked = learnedBacktest(cases, "5h");
+  const learning = describeLearning(fitErrorModel(samplesFromBacktest(cases), now, "5h"), walked.cases);
   const spec = [
     { profileId: "claude-work", provider: "anthropic", account: "Work", active: true, id: "five_hour", label: "5-hour", used: 64, start: work5Reset - 5 * HOUR, reset: work5Reset, factor: 1 },
     { profileId: "claude-work", provider: "anthropic", account: "Work", active: true, id: "seven_day", label: "7-day", used: 48, start: work7Reset - 7 * DAY, reset: work7Reset, factor: 0.05 },
@@ -130,6 +140,7 @@ function syntheticData(now: number): { overview: unknown; report: UsageForecastR
       history,
       percentPerUnit: [entry.factor * 0.9, entry.factor, entry.factor * 1.1],
       inUse: entry.active,
+      ...(entry.active ? { correction: learning.correction } : {}),
       paths: 200,
       seed: index + 1,
     });
@@ -148,6 +159,7 @@ function syntheticData(now: number): { overview: unknown; report: UsageForecastR
         spread: [0.9, 1.1],
         note: "Spend from the transcripts, turned into percent with this window's live reading.",
       },
+      learning: entry.active ? learning : null,
       result,
       verdict: describeForecast(result, entry.label),
       nudge: burnNudge(result, 5, entry.label),
@@ -167,15 +179,24 @@ function syntheticData(now: number): { overview: unknown; report: UsageForecastR
     ],
     now,
   );
-  const past = pastWindowsFromSpend(history, 5 * HOUR, 1, now);
-  const { summary } = backtestForecast({ windows: past.slice(-12), history, percentPerUnit: [1], kind: "5h", paths: 60 });
   const report: UsageForecastReport = {
     generatedAt: now,
     windows,
     nextAccount: next ? { anthropic: next } : {},
     activeSessions: { anthropic: 5, "openai-codex": 0 },
     patterns: [{ provider: "anthropic", windowLabel: "5-hour", ...weeklyPattern(history, 1, now) }],
-    backtest: [{ provider: "anthropic", windowLabel: "5-hour", truth: "spend", summary, recent: [] }],
+    backtest: [
+      {
+        provider: "anthropic",
+        windowLabel: "5-hour",
+        truth: "spend",
+        summary,
+        learned: walked.summary,
+        byHistory: walked.byHistory,
+        learning,
+        recent: [],
+      },
+    ],
     sources: ["Synthetic history for the test."],
     notes: [],
   };

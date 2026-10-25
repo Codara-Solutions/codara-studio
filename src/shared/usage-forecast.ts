@@ -11,6 +11,8 @@
 // process, the renderer and the test harness share one implementation. Time
 // of day is read in the process's local time zone, which is the user's.
 
+import type { ForecastLearning, LearnedBacktest } from "./usage-forecast-learning";
+
 export const FORECAST_BUCKET_MS = 15 * 60 * 1000;
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -43,9 +45,27 @@ export interface ForecastInput {
   /** False for an account that is not the one in use: its window only grows
    * when someone switches to it, so it is forecast flat. */
   inUse: boolean;
+  /** What the forecast learned from its own past errors on this kind of
+   * window (usage-forecast-learning.ts). Absent: the replays as they come. */
+  correction?: ForecastCorrection;
   paths?: number;
   seed?: number;
 }
+
+/**
+ * A correction learned from past forecasts and what really happened. Each
+ * replay's growth from now to the reset becomes
+ * growthBias * (median + spread * (growth - median)): the bias moves the
+ * whole forecast up or down, the spread widens or narrows the band.
+ */
+export interface ForecastCorrection {
+  growthBias: number;
+  spread: number;
+}
+
+/** Quantile levels kept of the uncorrected growth, so a correction can be
+ * applied to a forecast after the fact (the back-test does). */
+export const GROWTH_LEVELS = 20;
 
 export interface ConePoint {
   ms: number;
@@ -66,6 +86,9 @@ export interface ForecastResult {
   endPercent: { p10: number; p50: number; p90: number };
   /** Share of replays that reach 100% before the reset. */
   hitProbability: number;
+  /** Uncorrected growth from now to the reset, uncapped, at quantile levels
+   * 0, 1/GROWTH_LEVELS, ..., 1. */
+  growthQuantiles: number[];
   /** When the limit is reached, as quantiles over every replay; null where a
    * quantile falls among the replays that never reach it. */
   hitAt: { p10: number | null; p50: number | null; p90: number | null };
@@ -293,9 +316,9 @@ export function forecastWindow(input: ForecastInput): ForecastResult {
     return found;
   };
 
-  const columns: number[][] = steps.map(() => new Array<number>(pathCount));
-  const hits: number[] = new Array<number>(pathCount);
-  const ends: number[] = new Array<number>(pathCount);
+  // Growth since now, uncapped, per step and replay: the cap at 100 and the
+  // learned correction are applied after, so neither distorts the other.
+  const growth: number[][] = steps.map(() => new Array<number>(pathCount));
 
   for (let p = 0; p < pathCount; p += 1) {
     const factor =
@@ -304,8 +327,7 @@ export function forecastWindow(input: ForecastInput): ForecastResult {
     // each replay keeps its own multiple of it (log-normal, median 1).
     const persistence = Math.exp(0.6 * gaussian(random));
     const chosenDay = new Map<number, AnalogDay | null>();
-    let cumulative = used;
-    let hitAt = Number.POSITIVE_INFINITY;
+    let grown = 0;
     let previous = nowMs;
     for (let s = 0; s < steps.length; s += 1) {
       const t = steps[s] as number;
@@ -329,19 +351,58 @@ export function forecastWindow(input: ForecastInput): ForecastResult {
         const pattern = kind === "5h" ? replay : 0.5 * replay * level + 0.5 * own;
         units = weight * paced + (1 - weight) * pattern;
       }
-      const before = cumulative;
-      cumulative = Math.min(100, cumulative + units * factor);
-      if (cumulative >= 100 && before < 100 && hitAt === Number.POSITIVE_INFINITY) {
-        const added = cumulative - before;
-        const share = added > 0 ? (100 - before) / added : 1;
-        hitAt = previous + span * clamp(share, 0, 1);
-      }
-      (columns[s] as number[])[p] = cumulative;
+      grown += units * factor;
+      (growth[s] as number[])[p] = grown;
       previous = t;
     }
-    if (used >= 100) hitAt = nowMs;
+  }
+
+  const rawEnds = pathCount > 0 && steps.length > 0 ? (growth[steps.length - 1] as number[]).slice() : [];
+  const sortedRaw = rawEnds.slice().sort((a, b) => a - b);
+  const growthQuantiles = Array.from({ length: GROWTH_LEVELS + 1 }, (_, k) =>
+    sortedRaw.length > 0 ? quantile(sortedRaw, k / GROWTH_LEVELS) : 0,
+  );
+
+  const correction = input.correction;
+  const middle = sortedRaw.length > 0 ? quantile(sortedRaw, 0.5) : 0;
+  const scale: number[] = new Array<number>(pathCount).fill(1);
+  const linear: number[] = new Array<number>(pathCount).fill(0);
+  if (correction) {
+    for (let p = 0; p < pathCount; p += 1) {
+      const raw = rawEnds[p] as number;
+      const corrected = Math.max(0, correction.growthBias * (middle + correction.spread * (raw - middle)));
+      // A replay that grew nothing has no shape to scale; a corrected one
+      // that should grow does so evenly up to the reset.
+      if (raw > 1e-9) scale[p] = corrected / raw;
+      else {
+        scale[p] = 0;
+        linear[p] = corrected;
+      }
+    }
+  }
+  const untilReset = Math.max(1, resetsAtMs - nowMs);
+  const columns: number[][] = steps.map(() => new Array<number>(pathCount));
+  const hits: number[] = new Array<number>(pathCount);
+  const ends: number[] = new Array<number>(pathCount);
+  for (let p = 0; p < pathCount; p += 1) {
+    let before = used;
+    let previous = nowMs;
+    let hitAt = used >= 100 ? nowMs : Number.POSITIVE_INFINITY;
+    for (let s = 0; s < steps.length; s += 1) {
+      const t = steps[s] as number;
+      const raw = (growth[s] as number[])[p] as number;
+      const value = Math.min(100, used + raw * (scale[p] as number) + (linear[p] as number) * ((t - nowMs) / untilReset));
+      if (value >= 100 && before < 100 && hitAt === Number.POSITIVE_INFINITY) {
+        const added = value - before;
+        const share = added > 0 ? (100 - before) / added : 1;
+        hitAt = previous + (t - previous) * clamp(share, 0, 1);
+      }
+      (columns[s] as number[])[p] = value;
+      before = value;
+      previous = t;
+    }
     hits[p] = hitAt;
-    ends[p] = cumulative;
+    ends[p] = before;
   }
 
   const cone: ConePoint[] = [{ ms: nowMs, p10: used, p50: used, p90: used }];
@@ -377,6 +438,7 @@ export function forecastWindow(input: ForecastInput): ForecastResult {
       p90: quantile(sortedEnds, 0.9),
     },
     hitProbability: pathCount > 0 ? hitCount / pathCount : 0,
+    growthQuantiles,
     // The early quantile of the hit time is the pessimistic one.
     hitAt: { p10: hitQuantile(0.1), p50: hitQuantile(0.5), p90: hitQuantile(0.9) },
     pace: {
@@ -676,6 +738,8 @@ export interface PastWindow {
 
 export interface BacktestCase {
   startMs: number;
+  /** When the window reset, so when its outcome was known. */
+  closedMs: number;
   checkpoint: number;
   atMs: number;
   usedPercent: number;
@@ -684,6 +748,8 @@ export interface BacktestCase {
   actual: number;
   hitProbability: number;
   hit: boolean;
+  /** The uncorrected growth quantiles the forecast saw (ForecastResult). */
+  growth: number[];
   /** Minutes the forecast warned ahead of an actual hit (p50 hit at a likely hit), or null. */
   warnedMinutesAhead: number | null;
 }
@@ -753,6 +819,7 @@ export function backtestForecast(options: {
       const called = result.hitProbability >= 0.5;
       cases.push({
         startMs: window.startMs,
+        closedMs: window.resetsAtMs,
         checkpoint,
         atMs,
         usedPercent,
@@ -761,6 +828,7 @@ export function backtestForecast(options: {
         actual: Math.min(100, window.endPercent),
         hitProbability: result.hitProbability,
         hit,
+        growth: result.growthQuantiles,
         warnedMinutesAhead:
           hit && called && window.hitAtMs !== null ? Math.round((window.hitAtMs - atMs) / 60_000) : null,
       });
@@ -934,6 +1002,9 @@ export interface WindowForecastView {
    * used when the live read has no windows. */
   source: "live" | "cli";
   calibration: ForecastCalibration;
+  /** What it learned from its past errors on this provider and window
+   * length, already applied to `result`; null when nothing to learn from. */
+  learning: ForecastLearning | null;
   result: ForecastResult;
   verdict: ForecastVerdict;
   nudge: string | null;
@@ -967,7 +1038,13 @@ export interface BacktestTrack {
   /** "readings" scores against the provider's percent; "spend" against spend
    * scaled by today's factor, which tests timing, not the scale. */
   truth: "readings" | "spend";
+  /** The plain model, as the forecast was before it learned. */
   summary: BacktestSummary;
+  /** The same past forecasts corrected with only what was known at the
+   * time (walk-forward), and that split by how much history it had. */
+  learned: BacktestSummary;
+  byHistory: LearnedBacktest["byHistory"];
+  learning: ForecastLearning;
   recent: BacktestWindowLine[];
 }
 

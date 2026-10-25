@@ -8,7 +8,12 @@
 //   - the limit readings the CLIs wrote themselves (Claude's "session limit"
 //     messages, Codex's rate_limits on every turn),
 //   - the provider's live usage read, and the readings this module records
-//     from it while the preference is on (usage-history.jsonl).
+//     from it while the preference is on (usage-history.jsonl),
+//   - its own past forecasts: the back-test replays, and the live forecasts
+//     it logs while the preference is on (usage-forecast-log.jsonl), scored
+//     against the readings once their window resets. From their errors it
+//     learns a correction per provider and window length
+//     (@shared/usage-forecast-learning).
 //
 // Nothing here sends anything anywhere. With the preference off nothing in it
 // runs: the IPC handler, the recorder and Cora's hint all check the preference
@@ -56,14 +61,29 @@ import {
   type UsageForecastReport,
   type WindowForecastView,
 } from "@shared/usage-forecast";
+import {
+  describeLearning,
+  fitErrorModel,
+  learnedBacktest,
+  samplesFromBacktest,
+  type ForecastLearning,
+  type LearningSample,
+} from "@shared/usage-forecast-learning";
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const HISTORY_DAYS = 56;
+/** Limit readings are small and memoised, and every past window is one more
+ * lesson for the forecast, so they reach further back than the spend. */
+const READINGS_DAYS = 120;
 const SCAN_TTL_MS = 3 * 60 * 1000;
 const BACKTEST_TTL_MS = 60 * 60 * 1000;
 const HISTORY_FILE = "usage-history.jsonl";
 const HISTORY_MAX_BYTES = 4 * 1024 * 1024;
+const FORECAST_LOG_FILE = "usage-forecast-log.jsonl";
+const FORECAST_LOG_MAX_BYTES = 2 * 1024 * 1024;
+/** A live forecast of one window is logged at most this often. */
+const FORECAST_LOG_EVERY_MS = 30 * 60 * 1000;
 /** A reading that did not change is written again at most this often. */
 const RECORD_REPEAT_MS = 10 * 60 * 1000;
 /** Codex's general limit; others (codex_bengalfox) are per model. */
@@ -136,37 +156,149 @@ async function appendReadings(overview: PiUsageOverview, nowMs: number): Promise
       lines.push(JSON.stringify(reading));
     }
   }
+  await appendTrimmed(historyPath(), lines, HISTORY_MAX_BYTES);
+}
+
+/** Appends lines and, past maxBytes, keeps the newer half. Callers queue on
+ * `recording`, so a trim never races another append. */
+async function appendTrimmed(path: string, lines: readonly string[], maxBytes: number): Promise<void> {
   if (lines.length === 0) return;
-  const path = historyPath();
   await fs.appendFile(path, `${lines.join("\n")}\n`, "utf8");
   const stats = await fs.stat(path).catch(() => null);
-  if (stats && stats.size > HISTORY_MAX_BYTES) {
+  if (stats && stats.size > maxBytes) {
     const raw = await fs.readFile(path, "utf8");
     const kept = raw.split("\n").filter(Boolean);
     await writeFileAtomic(path, `${kept.slice(Math.floor(kept.length / 2)).join("\n")}\n`);
   }
 }
 
-export async function readRecordedReadings(sinceMs: number): Promise<RecordedReading[]> {
+async function readJsonLines<T>(path: string, keep: (value: T) => boolean): Promise<T[]> {
   let raw: string;
   try {
-    raw = await fs.readFile(historyPath(), "utf8");
+    raw = await fs.readFile(path, "utf8");
   } catch {
     return [];
   }
-  const readings: RecordedReading[] = [];
+  const values: T[] = [];
   for (const line of raw.split("\n")) {
     if (!line) continue;
     try {
-      const reading = JSON.parse(line) as RecordedReading;
-      if (typeof reading.t === "number" && reading.t >= sinceMs && typeof reading.used === "number") {
-        readings.push(reading);
-      }
+      const value = JSON.parse(line) as T;
+      if (keep(value)) values.push(value);
     } catch {
       // A torn last line from a crash; the next append starts a fresh one.
     }
   }
-  return readings;
+  return values;
+}
+
+export function readRecordedReadings(sinceMs: number): Promise<RecordedReading[]> {
+  return readJsonLines<RecordedReading>(
+    historyPath(),
+    (reading) => typeof reading.t === "number" && reading.t >= sinceMs && typeof reading.used === "number",
+  );
+}
+
+/* ── Logged forecasts ────────────────────────────────────────────────────── */
+
+/** A live forecast as it was made, kept until its window resets and the
+ * recorded readings say how it really ended. */
+export interface LoggedForecast {
+  t: number;
+  profileId: string;
+  provider: ForecastProvider;
+  windowId: string;
+  label: string;
+  windowStartMs: number;
+  resetsAt: number;
+  used: number;
+  /** Uncorrected growth quantiles, so a later correction can be scored on it. */
+  growth: number[];
+}
+
+const lastLogged = new Map<string, number>();
+
+function forecastLogPath(): string {
+  return join(codaraHome(), FORECAST_LOG_FILE);
+}
+
+/** Logs the live forecasts of accounts in use. Called only while the
+ * usageForecast preference is on, from building a report. */
+export function logForecasts(views: readonly WindowForecastView[], nowMs = Date.now()): Promise<void> {
+  const lines: string[] = [];
+  for (const view of views) {
+    if (!view.result.inUse || view.source !== "live") continue;
+    const key = `${view.profileId}|${view.windowId}|${view.result.resetsAtMs}`;
+    const previous = lastLogged.get(key);
+    if (previous !== undefined && nowMs - previous < FORECAST_LOG_EVERY_MS) continue;
+    lastLogged.set(key, nowMs);
+    const entry: LoggedForecast = {
+      t: nowMs,
+      profileId: view.profileId,
+      provider: view.provider,
+      windowId: view.windowId,
+      label: view.windowLabel,
+      windowStartMs: view.result.windowStartMs,
+      resetsAt: view.result.resetsAtMs,
+      used: view.result.usedPercent,
+      growth: view.result.growthQuantiles.map((value) => Math.round(value * 100) / 100),
+    };
+    lines.push(JSON.stringify(entry));
+  }
+  if (lines.length === 0) return Promise.resolve();
+  const next = recording.then(() => appendTrimmed(forecastLogPath(), lines, FORECAST_LOG_MAX_BYTES));
+  recording = next.catch(() => undefined);
+  return next;
+}
+
+export function readLoggedForecasts(sinceMs: number): Promise<LoggedForecast[]> {
+  return readJsonLines<LoggedForecast>(
+    forecastLogPath(),
+    (entry) => typeof entry.t === "number" && entry.t >= sinceMs && Array.isArray(entry.growth),
+  );
+}
+
+/**
+ * Logged forecasts whose window has reset, with the truth from the recorded
+ * readings: the highest reading of that window. A window whose last reading
+ * came long before the reset (Studio closed) has no known end unless it hit
+ * 100, so it is left out rather than scored against a guess.
+ */
+export function scoreLoggedForecasts(
+  logged: readonly LoggedForecast[],
+  recorded: readonly RecordedReading[],
+  nowMs: number,
+): Map<string, LearningSample[]> {
+  const byTrack = new Map<string, LearningSample[]>();
+  for (const entry of logged) {
+    if (entry.resetsAt > nowMs) continue;
+    const lengthMs = entry.resetsAt - entry.windowStartMs;
+    const readings = recorded.filter(
+      (reading) =>
+        reading.profileId === entry.profileId &&
+        reading.windowId === entry.windowId &&
+        Math.abs(reading.resetsAt - entry.resetsAt) < 5 * 60_000,
+    );
+    if (readings.length === 0) continue;
+    const actual = Math.max(...readings.map((reading) => reading.used));
+    const lastAt = Math.max(...readings.map((reading) => reading.t));
+    if (actual < 100 && lastAt < entry.resetsAt - 0.15 * lengthMs) continue;
+    const kind = windowKindFor(entry.label, lengthMs);
+    if (kind !== "5h" && kind !== "7d") continue;
+    const key = `${entry.provider}|${kind}`;
+    const list = byTrack.get(key) ?? [];
+    list.push({
+      atMs: entry.t,
+      closedMs: entry.resetsAt,
+      windowStartMs: entry.windowStartMs,
+      usedPercent: entry.used,
+      growth: entry.growth,
+      actual: Math.min(100, actual),
+      source: "live",
+    });
+    byTrack.set(key, list);
+  }
+  return byTrack;
 }
 
 /* ── Inputs ──────────────────────────────────────────────────────────────── */
@@ -177,7 +309,7 @@ let scanInflight: Promise<ForecastScan> | null = null;
 async function forecastScan(nowMs: number): Promise<ForecastScan> {
   if (scanCache && nowMs - scanCache.at < SCAN_TTL_MS) return scanCache.scan;
   if (scanInflight) return scanInflight;
-  scanInflight = readForecastScan(nowMs - HISTORY_DAYS * DAY_MS, FORECAST_BUCKET_MS)
+  scanInflight = readForecastScan(nowMs - HISTORY_DAYS * DAY_MS, FORECAST_BUCKET_MS, nowMs - READINGS_DAYS * DAY_MS)
     .then((scan) => {
       scanCache = { at: Date.now(), scan };
       return scan;
@@ -200,6 +332,10 @@ function codexReadings(scan: ForecastScan, windowMinutes: number): LimitReading[
   return scan.signals.codexSamples
     .filter((sample) => CODEX_GENERAL_LIMITS.has(sample.limitId) && sample.windowMinutes === windowMinutes)
     .map((sample) => ({ atMs: sample.atMs, usedPercent: sample.usedPercent, resetsAtMs: sample.resetsAtMs }));
+}
+
+function readingsStart(readings: readonly LimitReading[], nowMs: number): number {
+  return readings.reduce((earliest, reading) => Math.min(earliest, reading.atMs), nowMs);
 }
 
 /** One limit-hit per window: several panes report the same moment. */
@@ -323,9 +459,11 @@ function windowView(options: {
   source: "live" | "cli";
   ideas: ForecastIdeas;
   activeSessions: number;
+  learning: ForecastLearning | null;
 }): WindowForecastView {
   const { profile, window, provider, track, lengthMs, resetsAtMs, nowMs } = options;
   const kind = windowKindFor(window.label, lengthMs);
+  const learning = profile.isDefault ? options.learning : null;
   const result = forecastWindow({
     nowMs,
     windowStartMs: resetsAtMs - lengthMs,
@@ -335,6 +473,7 @@ function windowView(options: {
     history: track.history,
     percentPerUnit: track.factors,
     inUse: profile.isDefault,
+    ...(learning ? { correction: learning.correction } : {}),
     seed: hashSeed(`${profile.profileId}|${window.id}|${resetsAtMs}`),
   });
   return {
@@ -347,6 +486,7 @@ function windowView(options: {
     windowLabel: window.label,
     source: options.source,
     calibration: track.calibration,
+    learning,
     result,
     verdict: describeForecast(result, window.label),
     nudge: options.ideas.burnNudge ? burnNudge(result, options.activeSessions, window.label) : null,
@@ -380,7 +520,13 @@ function codexCliWindow(scan: ForecastScan, nowMs: number): { window: PiUsageWin
   };
 }
 
-let backtestCache: { at: number; key: string; tracks: BacktestTrack[] } | null = null;
+let backtestCache: { at: number; key: string; result: Backtests } | null = null;
+
+interface Backtests {
+  tracks: BacktestTrack[];
+  /** By `${provider}|${kind}`. */
+  learning: Map<string, ForecastLearning>;
+}
 
 function recentLines(windows: readonly PastWindow[], history: BurnSeries, factors: number[], kind: "5h" | "7d", label: string) {
   return windows
@@ -420,53 +566,90 @@ function recentLines(windows: readonly PastWindow[], history: BurnSeries, factor
     });
 }
 
+/** Scores a track's past forecasts before and after learning, and fits the
+ * correction the live forecast uses from all of them plus the live ones. */
+function learnTrack(
+  base: Omit<BacktestTrack, "learned" | "byHistory" | "learning">,
+  cases: Parameters<typeof learnedBacktest>[0],
+  kind: "5h" | "7d",
+  live: readonly LearningSample[],
+  nowMs: number,
+): BacktestTrack {
+  const learned = learnedBacktest(cases, kind, live);
+  const model = fitErrorModel([...samplesFromBacktest(cases), ...live], nowMs, kind);
+  return {
+    ...base,
+    learned: learned.summary,
+    byHistory: learned.byHistory,
+    learning: describeLearning(model, [...learned.cases].sort((a, b) => a.atMs - b.atMs)),
+  };
+}
+
 function backtests(
   scan: ForecastScan,
   claudeFactors: Partial<Record<"5h" | "7d", number>>,
+  live: ReadonlyMap<string, LearningSample[]>,
   nowMs: number,
-): BacktestTrack[] {
+): Backtests {
   // The live reading moves the factors a little on every poll; only a real
-  // change of scale (10% steps) is worth a new back-test before the TTL.
-  const key = JSON.stringify(
-    Object.fromEntries(Object.entries(claudeFactors).map(([kind, factor]) => [kind, Math.round(Math.log(factor ?? 1) * 10)])),
-  );
+  // change of scale (10% steps) or a newly scored live forecast is worth a
+  // new back-test before the TTL.
+  const key = JSON.stringify({
+    factors: Object.fromEntries(
+      Object.entries(claudeFactors).map(([kind, factor]) => [kind, Math.round(Math.log(factor ?? 1) * 10)]),
+    ),
+    live: [...live.entries()].map(([track, samples]) => [track, samples.length]),
+  });
   if (backtestCache && backtestCache.key === key && nowMs - backtestCache.at < BACKTEST_TTL_MS) {
-    return backtestCache.tracks;
+    return backtestCache.result;
   }
   const tracks: BacktestTrack[] = [];
+  const learning = new Map<string, ForecastLearning>();
   const claude = spendSeries(scan, "anthropic");
   const hits = claudeSessionHits(scan).map((hit) => hit.atMs);
   for (const [kind, lengthMs, label] of [["5h", 5 * HOUR_MS, "5-hour"], ["7d", 7 * DAY_MS, "7-day"]] as const) {
     const factor = claudeFactors[kind];
     if (factor === undefined) continue;
     const windows = pastWindowsFromSpend(claude, lengthMs, factor, nowMs, kind === "5h" ? hits : []);
-    const { summary, scored } = backtestForecast({ windows, history: claude, percentPerUnit: [factor], kind, paths: 150 });
+    const { cases, summary, scored } = backtestForecast({ windows, history: claude, percentPerUnit: [factor], kind, paths: 150 });
     if (summary.cases === 0) continue;
-    tracks.push({
-      provider: "anthropic",
-      windowLabel: label,
-      truth: "spend",
-      summary,
-      recent: recentLines(scored, claude, [factor], kind, label),
-    });
+    const track = learnTrack(
+      { provider: "anthropic", windowLabel: label, truth: "spend", summary, recent: recentLines(scored, claude, [factor], kind, label) },
+      cases,
+      kind,
+      live.get(`anthropic|${kind}`) ?? [],
+      nowMs,
+    );
+    tracks.push(track);
+    learning.set(`anthropic|${kind}`, track.learning);
   }
   const readings = codexReadings(scan, 10080);
   if (readings.length > 0) {
-    const series = trimLeadingIdle(percentSeriesFromReadings(readings, scan.timeline.startMs, nowMs));
+    const series = trimLeadingIdle(percentSeriesFromReadings(readings, readingsStart(readings, nowMs), nowMs));
     const windows = pastWindowsFromReadings(readings, 7 * DAY_MS, nowMs);
-    const { summary, scored } = backtestForecast({ windows, history: series, percentPerUnit: [1], kind: "7d", paths: 150 });
+    const { cases, summary, scored } = backtestForecast({ windows, history: series, percentPerUnit: [1], kind: "7d", paths: 150 });
     if (summary.cases > 0) {
-      tracks.push({
-        provider: "openai-codex",
-        windowLabel: "7-day",
-        truth: "readings",
-        summary,
-        recent: recentLines(scored, series, [1], "7d", "7-day"),
-      });
+      const track = learnTrack(
+        { provider: "openai-codex", windowLabel: "7-day", truth: "readings", summary, recent: recentLines(scored, series, [1], "7d", "7-day") },
+        cases,
+        "7d",
+        live.get("openai-codex|7d") ?? [],
+        nowMs,
+      );
+      tracks.push(track);
+      learning.set("openai-codex|7d", track.learning);
     }
   }
-  backtestCache = { at: nowMs, key, tracks };
-  return tracks;
+  // A track with live forecasts but no replays (a window length the history
+  // cannot rebuild) still learns from what it logged.
+  for (const [trackKey, samples] of live) {
+    if (learning.has(trackKey) || samples.length === 0) continue;
+    const kind = trackKey.endsWith("|5h") ? "5h" : "7d";
+    learning.set(trackKey, describeLearning(fitErrorModel(samples, nowMs, kind), []));
+  }
+  const result = { tracks, learning };
+  backtestCache = { at: nowMs, key, result };
+  return result;
 }
 
 let lastReport: UsageForecastReport | null = null;
@@ -486,11 +669,15 @@ async function buildReport(
   nowMs: number,
 ): Promise<UsageForecastReport> {
   const ideas = normalizeForecastIdeas(ideasInput);
-  const [scan, recorded] = await Promise.all([forecastScan(nowMs), readRecordedReadings(nowMs - HISTORY_DAYS * DAY_MS)]);
+  const [scan, recorded, logged] = await Promise.all([
+    forecastScan(nowMs),
+    readRecordedReadings(nowMs - HISTORY_DAYS * DAY_MS),
+    readLoggedForecasts(nowMs - HISTORY_DAYS * DAY_MS),
+  ]);
   const claudeSpend = spendSeries(scan, "anthropic");
   const codexSpend = spendSeries(scan, "openai-codex");
   const hits = claudeSessionHits(scan);
-  const views: WindowForecastView[] = [];
+  const plans: Array<Omit<Parameters<typeof windowView>[0], "learning"> & { kind: string }> = [];
   const notes: string[] = [];
   const claudeFactorByKind: Partial<Record<"5h" | "7d", number[]>> = {};
 
@@ -529,7 +716,7 @@ async function buildReport(
         };
       } else if (readings.length >= 5) {
         track = {
-          history: trimLeadingIdle(percentSeriesFromReadings(readings, scan.timeline.startMs, nowMs)),
+          history: trimLeadingIdle(percentSeriesFromReadings(readings, readingsStart(readings, nowMs), nowMs)),
           factors: [1],
           calibration: {
             method: "readings",
@@ -562,22 +749,38 @@ async function buildReport(
       if (provider === "anthropic" && profile.isDefault && (kind === "5h" || kind === "7d")) {
         claudeFactorByKind[kind] = track.factors;
       }
-      views.push(
-        windowView({
-          profile: liveProfile,
-          window,
-          provider,
-          track,
-          lengthMs,
-          resetsAtMs,
-          nowMs,
-          source,
-          ideas,
-          activeSessions: scan.timeline.activeSessions[provider],
-        }),
-      );
+      plans.push({
+        profile: liveProfile,
+        window,
+        provider,
+        track,
+        lengthMs,
+        resetsAtMs,
+        nowMs,
+        source,
+        ideas,
+        activeSessions: scan.timeline.activeSessions[provider],
+        kind,
+      });
     }
   }
+
+  const factor5 = claudeFactorByKind["5h"];
+  const factor7 = claudeFactorByKind["7d"];
+  const live = scoreLoggedForecasts(logged, recorded, nowMs);
+  const learned = backtests(
+    scan,
+    {
+      ...(factor5 ? { "5h": median(factor5) } : {}),
+      ...(factor7 ? { "7d": median(factor7) } : {}),
+    },
+    live,
+    nowMs,
+  );
+  const views = plans.map(({ kind, ...plan }) =>
+    windowView({ ...plan, learning: learned.learning.get(`${plan.provider}|${kind}`) ?? null }),
+  );
+  await logForecasts(views, nowMs).catch(() => undefined);
 
   const nextAccount: Partial<Record<ForecastProvider, string>> = {};
   if (ideas.nextAccount) {
@@ -602,15 +805,13 @@ async function buildReport(
     }
   }
 
-  const factor5 = claudeFactorByKind["5h"];
-  const factor7 = claudeFactorByKind["7d"];
   const patterns: ForecastPattern[] = [];
   if (factor5) {
     patterns.push({ provider: "anthropic", windowLabel: "5-hour", ...weeklyPattern(claudeSpend, median(factor5), nowMs) });
   }
   const codexWeekly = codexReadings(scan, 10080);
   if (codexWeekly.length > 0) {
-    const series = trimLeadingIdle(percentSeriesFromReadings(codexWeekly, scan.timeline.startMs, nowMs));
+    const series = trimLeadingIdle(percentSeriesFromReadings(codexWeekly, readingsStart(codexWeekly, nowMs), nowMs));
     patterns.push({ provider: "openai-codex", windowLabel: "7-day", ...weeklyPattern(series, 1, nowMs) });
   }
 
@@ -622,6 +823,7 @@ async function buildReport(
     recorded.length > 0
       ? `${recorded.length} live readings recorded by Studio since the forecast was turned on.`
       : "No recorded readings yet: Studio starts recording when the forecast is on.",
+    `${logged.length} of its own live forecasts logged, ${[...live.values()].reduce((sum, list) => sum + list.length, 0)} of them already scored against how the window really ended.`,
   ];
 
   return {
@@ -630,14 +832,7 @@ async function buildReport(
     nextAccount,
     activeSessions: scan.timeline.activeSessions,
     patterns,
-    backtest: backtests(
-      scan,
-      {
-        ...(factor5 ? { "5h": median(factor5) } : {}),
-        ...(factor7 ? { "7d": median(factor7) } : {}),
-      },
-      nowMs,
-    ),
+    backtest: learned.tracks,
     sources,
     notes,
   };

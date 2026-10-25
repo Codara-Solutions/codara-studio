@@ -55,17 +55,20 @@ test("on: the panel says when a window runs out, in each style", async () => {
   try {
     let flyout = await openClaudeFlyout(page);
     const fiveHour = flyout.locator(".usage-window").first();
+    // B, the projection on the meter, is the default.
     await expect(fiveHour.locator(".usage-forecast")).toHaveAttribute("data-forecast-tone", "danger");
-    await expect(fiveHour.locator(".usage-forecast__line")).toContainText(/hit the 5-hour limit at \d\d:\d\d, .* before it resets/);
-    await expect(fiveHour.locator(".usage-forecast__extra")).toContainText(/5 agents are burning/);
+    await expect(fiveHour.locator(".usage-forecast-ghost")).toBeVisible();
+    await expect(fiveHour.locator(".usage-forecast__line")).toContainText(/Runs out ≈ \d\d:\d\d/);
+    await expect(fiveHour.locator(".usage-forecast__confidence")).toContainText(/past windows?/);
     await expect(flyout).toContainText("Use Personal next");
 
     await page.evaluate(() => {
-      window.localStorage.setItem("spark.usage.forecastStyle", "ghost");
-      window.dispatchEvent(new CustomEvent("spark:usage-forecast-style", { detail: "ghost" }));
+      window.localStorage.setItem("spark.usage.forecastStyle", "line");
+      window.dispatchEvent(new CustomEvent("spark:usage-forecast-style", { detail: "line" }));
     });
-    await expect(fiveHour.locator(".usage-forecast-ghost")).toBeVisible();
-    await expect(fiveHour.locator(".usage-forecast__line")).toContainText(/Runs out ≈ \d\d:\d\d/);
+    await expect(fiveHour.locator(".usage-forecast-ghost")).toHaveCount(0);
+    await expect(fiveHour.locator(".usage-forecast__line")).toContainText(/hit the 5-hour limit at \d\d:\d\d, .* before it resets/);
+    await expect(fiveHour.locator(".usage-forecast__extra")).toContainText(/5 agents are burning/);
 
     await page.evaluate(() => {
       window.localStorage.setItem("spark.usage.forecastStyle", "pill");
@@ -84,6 +87,7 @@ test("on: the panel says when a window runs out, in each style", async () => {
     await expect(section).toContainText(/hit the 5-hour limit at/);
     await expect(section).toContainText("Your week, Claude");
     await expect(section).toContainText("How accurate is it?");
+    await expect(section).toContainText("After learning from its misses");
     flyout = page.getByRole("dialog", { name: "Claude usage" });
     await expect(flyout).toHaveCount(0);
   } finally {

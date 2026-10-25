@@ -11197,6 +11197,12 @@ button.st-list__row:hover,
 .usage-forecast__extra.is-nudge {
   color: var(--warn);
 }
+.usage-forecast__confidence {
+  padding-left: 12px;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
 .usage-window__meter {
   position: relative;
 }

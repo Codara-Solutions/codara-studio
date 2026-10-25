@@ -718,14 +718,20 @@ async function scanUsageTimelineNow({
   // Claude repeats a message across files when a session is resumed or
   // forked; the per-file dedupe cannot see that, so it is done again here.
   const seen = new Set<string>();
+  // As in scanUsageNow: a Codex rollout seen under sessions/ and
+  // archived_sessions/ counts once, claimed only once it was read.
+  const codexFileNames = new Set<string>();
   let filesSinceYield = 0;
 
   for (const root of roots) {
     if (root.error !== null || root.dir.length === 0) continue;
     const files = await listTranscriptFiles(root.dir, startMs - MTIME_SLACK_MS);
     for (const file of files) {
-      const records = await readFileRecords(fileCache, file, root.provider);
-      for (const record of records) {
+      const codexName = root.provider === "codex" ? basename(file.path) : null;
+      if (codexName !== null && codexFileNames.has(codexName)) continue;
+      const read = await readFileRecords(fileCache, file, root.provider);
+      if (codexName !== null && read !== null) codexFileNames.add(codexName);
+      for (const record of read ?? []) {
         if (record.timestampMs < startMs || record.timestampMs > nowMs) continue;
         if (record.dedupeKey !== null) {
           if (seen.has(record.dedupeKey)) continue;

@@ -22,6 +22,7 @@ const ROOT = path.resolve(__dirname, "..");
 const SHARED_DIR = path.join(ROOT, "src", "shared");
 const FORECAST_TS = path.join(SHARED_DIR, "usage-forecast.ts");
 const SIGNALS_TS = path.join(ROOT, "src", "main", "usage-forecast-signals.ts");
+const LEARNING_TS = path.join(SHARED_DIR, "usage-forecast-learning.ts");
 
 const harnessPlugin = {
   name: "usage-forecast-test-harness",
@@ -93,6 +94,7 @@ async function main() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "codara-usage-forecast-"));
   const forecast = await bundle(FORECAST_TS, path.join(tmp, "forecast.bundle.cjs"));
   const signals = await bundle(SIGNALS_TS, path.join(tmp, "signals.bundle.cjs"));
+  const learning = await bundle(LEARNING_TS, path.join(tmp, "learning.bundle.cjs"));
   const {
     backtestForecast,
     burnNudge,
@@ -441,6 +443,151 @@ async function main() {
     eq("codex: the window length is kept", samples[0].windowMinutes, 10080);
     eq("codex: the reset is in milliseconds", samples[0].resetsAtMs, 1793383421000);
     eq("codex: a line without limits gives nothing", parseCodexLimitLine('{"type":"event_msg"}').length, 0);
+  }
+
+  /* ── Learning from past errors ───────────────────────────────────────── */
+  {
+    const { confidenceLine, correctedEnd, describeLearning, fitErrorModel, learnedBacktest } = learning;
+    // Growth quantiles of a forecast that says "about 10 more points, 6 to
+    // 14", at the 21 levels the engine keeps.
+    const band = (middle, half) =>
+      Array.from({ length: 21 }, (_, k) => Math.max(0, middle + half * ((k - 10) / 8)));
+    // Past windows that each really grew `ratio` times what was forecast,
+    // with a little noise, one forecast per window halfway through.
+    const history = (count, ratio, startMs = at(1, 0)) =>
+      Array.from({ length: count }, (_, i) => {
+        const windowStartMs = startMs + i * 5 * HOUR;
+        const noise = ((i * 7) % 5) - 2;
+        return {
+          atMs: windowStartMs + 2.5 * HOUR,
+          closedMs: windowStartMs + 5 * HOUR,
+          windowStartMs,
+          usedPercent: 20,
+          growth: band(10, 4),
+          actual: 20 + 10 * ratio + noise,
+          source: "replay",
+        };
+      });
+    // Just after the last of `count` windows, so none of them has faded.
+    const after = (count) => at(1, 0) + count * 5 * HOUR + HOUR;
+    const now = after(200);
+
+    const none = fitErrorModel([], now, "5h");
+    eq("learning: with no past forecasts there is no correction", `${none.growthBias},${none.spread}`, "1,1");
+    const few = fitErrorModel(history(3, 2), now, "5h");
+    eq("learning: fewer than 5 telling windows correct nothing", `${few.growthBias},${few.spread}`, "1,1");
+    eq("learning: they still count as history", few.windows, 3);
+
+    const some = fitErrorModel(history(10, 2), after(10), "5h");
+    const many = fitErrorModel(history(200, 2), now, "5h");
+    check(`learning: an underestimate is corrected upward (${some.growthBias.toFixed(2)})`, some.growthBias > 1.1);
+    check(
+      `learning: more history pulls the correction closer to the truth (${some.growthBias.toFixed(2)} < ${many.growthBias.toFixed(2)} <= 2.1)`,
+      some.growthBias < many.growthBias && many.growthBias <= 2.1 && many.growthBias > 1.6,
+    );
+    const over = fitErrorModel(history(200, 0.5), now, "5h");
+    check(`learning: an overestimate is corrected downward (${over.growthBias.toFixed(2)})`, over.growthBias < 0.7);
+
+    // Idle windows (nothing forecast, nothing happened) teach nothing.
+    const idle = history(50, 1).map((sample) => ({ ...sample, growth: band(0.2, 0.1), actual: sample.usedPercent }));
+    const idleModel = fitErrorModel(idle, now, "5h");
+    eq("learning: idle windows leave the forecast alone", `${idleModel.growthBias},${idleModel.spread}`, "1,1");
+
+    // Outcomes far outside the band: it widens until 8 in 10 land inside.
+    const offsets = [-12, -6, 0, 6, 12, -3, 3, 9, -9, 1];
+    const wild = history(200, 1).map((sample, i) => ({ ...sample, actual: 30 + offsets[i % offsets.length] }));
+    const wide = fitErrorModel(wild, now, "5h");
+    check(`learning: misses outside the band widen it (${wide.spread.toFixed(2)})`, wide.spread > 1.5);
+    const held = wild.filter((sample) => {
+      const end = correctedEnd(sample.growth, sample.usedPercent, wide);
+      return sample.actual >= end.p10 - 0.5 && sample.actual <= end.p90 + 0.5;
+    }).length / wild.length;
+    check(`learning: the widened band holds most outcomes (${held.toFixed(2)})`, held >= 0.7);
+
+    // Outcomes always on the middle guess: the band narrows, but only with
+    // a lot of evidence, since narrowing promises more than it knows.
+    const exact = history(200, 1).map((sample) => ({ ...sample, actual: 30 }));
+    const tightFew = fitErrorModel(exact.slice(0, 8), after(8), "5h");
+    const tightMany = fitErrorModel(exact, now, "5h");
+    check(
+      `learning: the band narrows slowly (${tightFew.spread.toFixed(2)} with 8 windows, ${tightMany.spread.toFixed(2)} with 200)`,
+      tightFew.spread > 0.8 && tightMany.spread < tightFew.spread,
+    );
+
+    // Old lessons fade: an old underestimate, then a long run of good guesses.
+    const old = history(60, 2, at(1, 0));
+    const recent = history(60, 1, at(1, 0) + 60 * 5 * HOUR + 120 * DAY);
+    const faded = fitErrorModel([...old, ...recent], at(1, 0) + 60 * 5 * HOUR + 120 * DAY + 60 * 5 * HOUR, "5h");
+    check(`learning: recent windows outweigh old ones (${faded.growthBias.toFixed(2)})`, faded.growthBias < 1.2);
+
+    // Live forecasts count more than replays.
+    const mixed = [...history(30, 1), ...history(30, 2, at(1, 0) + 30 * 5 * HOUR).map((s) => ({ ...s, source: "live" }))];
+    const mixedModel = fitErrorModel(mixed, after(60), "5h");
+    check(`learning: live forecasts weigh more than replays (${mixedModel.growthBias.toFixed(2)})`, mixedModel.growthBias > 1.4);
+    eq("learning: live forecasts are counted apart", mixedModel.liveSamples, 30);
+
+    // The correction moves the end band the way forecastWindow moves each replay.
+    const corrected = correctedEnd(band(10, 4), 20, { growthBias: 2, spread: 1 });
+    eq("learning: a doubled growth doubles the middle guess", Math.round(corrected.p50), 40);
+    const runOut = correctedEnd(band(70, 20), 30, { growthBias: 1, spread: 1 });
+    check(`learning: the share past the limit is the chance to run out (${runOut.hitProbability.toFixed(2)})`, runOut.hitProbability > 0.4 && runOut.hitProbability < 0.6);
+
+    // Walk-forward: a forecast is only ever corrected with windows that had
+    // reset before it was made.
+    const cases = history(40, 2).map((sample) => ({
+      startMs: sample.windowStartMs,
+      closedMs: sample.closedMs,
+      checkpoint: 0.5,
+      atMs: sample.atMs,
+      usedPercent: sample.usedPercent,
+      predicted: { p10: 20 + 6, p50: 30, p90: 20 + 14 },
+      naive: 30,
+      actual: sample.actual,
+      hitProbability: 0,
+      hit: false,
+      growth: sample.growth,
+      warnedMinutesAhead: null,
+    }));
+    const walked = learnedBacktest(cases, "5h");
+    eq("walk-forward: the first forecast had nothing to learn from", Math.round(walked.cases[0].predicted.p50), 30);
+    check(
+      `walk-forward: later forecasts miss less once it has learned (${walked.summary.maeModel.toFixed(1)} < 9)`,
+      walked.summary.maeModel < 9,
+    );
+    const lateBand = walked.byHistory[walked.byHistory.length - 1];
+    check(
+      `walk-forward: with more history the miss shrinks (${lateBand.maeBefore.toFixed(1)} -> ${lateBand.maeAfter.toFixed(1)})`,
+      lateBand.maeAfter < lateBand.maeBefore,
+    );
+
+    const sure = describeLearning(fitErrorModel(history(200, 1), now, "5h"), walked.cases.slice(-30).map((c) => ({ ...c, actual: c.predicted.p50 })));
+    eq("confidence: much history and small misses is sure", sure.confidence, "good");
+    const unsure = describeLearning(fitErrorModel(history(3, 1), now, "5h"), []);
+    eq("confidence: three windows is still learning", confidenceLine(unsure), "still learning · 3 past windows");
+  }
+
+  /* ── The engine applies a correction to every replay ─────────────────── */
+  {
+    const now = at(14, 12);
+    const history = workdayHistory(now, 14, 8, 9, 18);
+    const base = { nowMs: now, windowStartMs: now - 2 * HOUR, resetsAtMs: now + 3 * HOUR, usedPercent: 20, kind: "5h", history, percentPerUnit: [1], inUse: true, paths: 200, seed: 3 };
+    const plain = forecastWindow(base);
+    const doubled = forecastWindow({ ...base, correction: { growthBias: 2, spread: 1 } });
+    eq("engine: growth quantiles are kept, one per level", plain.growthQuantiles.length, 21);
+    check(
+      `engine: a doubled growth doubles the forecast growth (${(plain.endPercent.p50 - 20).toFixed(1)} -> ${(doubled.endPercent.p50 - 20).toFixed(1)})`,
+      Math.abs((doubled.endPercent.p50 - 20) - 2 * (plain.endPercent.p50 - 20)) < 1.5,
+    );
+    const identity = forecastWindow({ ...base, correction: { growthBias: 1, spread: 1 } });
+    eq("engine: a neutral correction changes nothing", JSON.stringify(identity.endPercent), JSON.stringify(plain.endPercent));
+    const wider = forecastWindow({ ...base, correction: { growthBias: 1, spread: 2 } });
+    check(
+      "engine: a wider spread widens the band around the same middle",
+      wider.endPercent.p90 - wider.endPercent.p10 > plain.endPercent.p90 - plain.endPercent.p10 &&
+        Math.abs(wider.endPercent.p50 - plain.endPercent.p50) < 1,
+    );
+    const hot = forecastWindow({ ...base, usedPercent: 60, correction: { growthBias: 3, spread: 1 } });
+    check("engine: a corrected forecast can run out, with a time", hot.hitProbability > 0.5 && hot.hitAt.p50 !== null && hot.hitAt.p50 < base.resetsAtMs);
   }
 
   console.log(`\nAll ${pass} usage-forecast checks passed.`);

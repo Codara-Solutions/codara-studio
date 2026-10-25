@@ -17,6 +17,7 @@ import {
   type UsageForecastReport,
   type WindowForecastView,
 } from "@shared/usage-forecast";
+import { confidenceLine, correctionWords, type ForecastLearning } from "@shared/usage-forecast-learning";
 import { usePreferences } from "../../preferences/usePreferences";
 import Segmented from "./Segmented";
 import {
@@ -37,7 +38,8 @@ const PROVIDER_NAME = { anthropic: "Claude", "openai-codex": "Codex" } as const;
 
 /* ── Usage panel ─────────────────────────────────────────────────────────── */
 
-/** One sentence under a window's meter, with the nudge or go-ahead under it. */
+/** One sentence under a window's meter, with how sure it is and the nudge
+ * or go-ahead under it. */
 export function ForecastLine({ view, compact = false }: { view: WindowForecastView; compact?: boolean }) {
   const tone = view.verdict.tone;
   const extra = view.nudge ?? view.goAhead;
@@ -47,11 +49,23 @@ export function ForecastLine({ view, compact = false }: { view: WindowForecastVi
         <span className="usage-forecast__dot" style={{ background: TONE_COLOR[tone] }} aria-hidden />
         <span>{compact ? shortHeadline(view) : view.verdict.headline}</span>
       </span>
+      {view.learning && view.result.inUse ? (
+        <span className="usage-forecast__confidence" data-confidence={view.learning.confidence} title={learningTitle(view.learning)}>
+          {confidenceLine(view.learning)}
+        </span>
+      ) : null}
       {extra && !compact ? (
         <span className={`usage-forecast__extra${view.nudge ? " is-nudge" : ""}`}>{extra}</span>
       ) : null}
     </div>
   );
+}
+
+function learningTitle(learning: ForecastLearning): string {
+  const parts = [`Learned from ${learning.windows} past windows of this kind.`];
+  if (learning.typicalMiss !== null) parts.push(`Lately off by ${learning.typicalMiss.toFixed(1)} points on average.`);
+  if (learning.bandHeld !== null) parts.push(`The band held ${Math.round(learning.bandHeld * 100)}% of recent outcomes.`);
+  return parts.join(" ");
 }
 
 /** The headline cut to what fits beside a projected meter. */
@@ -307,6 +321,12 @@ export function UsageForecastSection({
                 </span>
               </div>
               {view.verdict.detail ? <span style={{ fontSize: 12, color: "var(--ink-dim)", paddingLeft: 16 }}>{view.verdict.detail}</span> : null}
+              {view.learning && view.result.inUse ? (
+                <span className="usage-forecast__confidence" data-confidence={view.learning.confidence} style={{ paddingLeft: 16, fontSize: 11.5 }}>
+                  How sure: {confidenceLine(view.learning)}
+                  {view.learning.windows > 0 ? `. From its past misses: ${correctionWords(view.learning.correction)}.` : "."}
+                </span>
+              ) : null}
               {view.nudge ? <span className="usage-forecast__extra is-nudge" style={{ paddingLeft: 16 }}>{view.nudge}</span> : null}
               {view.goAhead ? <span className="usage-forecast__extra" style={{ paddingLeft: 16 }}>{view.goAhead}</span> : null}
               {report?.nextAccount[view.provider] ? (
@@ -423,7 +443,10 @@ function BacktestCard({ tracks }: { tracks: BacktestTrack[] }) {
     <div style={{ ...CARD, display: "flex", flexDirection: "column", gap: 10 }}>
       <div>
         <div style={CARD_TITLE}>How accurate is it?</div>
-        <div style={CARD_HINT}>Replayed on your own past windows, using only what was known at the time.</div>
+        <div style={CARD_HINT}>
+          Replayed on your own past windows, using only what was known at the time. Then again with what it learned
+          from the windows before each one.
+        </div>
       </div>
       {tracks.length === 0 ? <p style={NOTE}>Not enough past windows yet.</p> : null}
       {tracks.map((track) => {
@@ -445,6 +468,20 @@ function BacktestCard({ tracks }: { tracks: BacktestTrack[] }) {
                 : ""}
               {track.truth === "spend" ? " · scored on spend, so this tests timing, not the % scale" : ""}
             </span>
+            <span style={{ fontSize: 11.5, color: "var(--ink-dim)" }}>
+              After learning from its misses: off by {track.learned.maeModel.toFixed(1)}, band held{" "}
+              {percentWords(track.learned.coverage)} · {confidenceLine(track.learning)}
+            </span>
+            {track.byHistory.length > 1 ? (
+              <span style={{ fontSize: 11, color: "var(--muted)" }}>
+                {track.byHistory
+                  .map(
+                    (band) =>
+                      `With ${band.label}: band held ${percentWords(band.coverageBefore)} → ${percentWords(band.coverageAfter)}`,
+                  )
+                  .join(" · ")}
+              </span>
+            ) : null}
           </div>
         );
       })}
