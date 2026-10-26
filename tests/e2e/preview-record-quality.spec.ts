@@ -236,9 +236,10 @@ test("recordings: a sharp MP4 from the button, a clean GIF from its menu, an age
       }).observe(document.body, { subtree: true, childList: true, characterData: true });
     });
 
-    // The button: a video by default.
+    // The button asks Video or GIF first: a video by default.
     await expect(record).toHaveAttribute("data-format", "mp4");
     await record.click();
+    await page.getByTestId("preview-record-start").click();
     await expect(record).toHaveAttribute("aria-pressed", "true");
     await page.waitForTimeout(4_000);
     let stoppedAt = Date.now();
@@ -266,13 +267,19 @@ test("recordings: a sharp MP4 from the button, a clean GIF from its menu, an age
     if (process.platform === "linux") expect(await app.evaluate(({ clipboard }) => clipboard.readText())).toBe(mp4Path);
     await saved.getByRole("button", { name: "Dismiss" }).click();
 
-    // The menu: a GIF, remembered for the next click.
-    // The keyboard picks it: arrows move through the menu, Enter records.
-    await page.getByTestId("preview-record-menu").click();
-    await expect(page.getByRole("listbox", { name: "Recording format" })).toBeVisible();
-    await expect(page.getByRole("option", { name: /Record video/ })).toBeFocused();
-    await page.keyboard.press("ArrowDown");
-    await expect(page.getByRole("option", { name: /Record GIF/ })).toBeFocused();
+    // The choice: a GIF, remembered for the next recording.
+    // The keyboard picks it: Start has the focus, the arrows switch the
+    // format, and Enter on Start records.
+    await record.click();
+    const chooser = page.getByRole("dialog", { name: "Record this tab" });
+    await expect(chooser.getByRole("radiogroup", { name: "Recording format" })).toBeVisible();
+    const start = page.getByTestId("preview-record-start");
+    await expect(start).toBeFocused();
+    await chooser.getByRole("radio", { name: "Video" }).focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(chooser.getByRole("radio", { name: "GIF" })).toBeFocused();
+    await expect(chooser.getByRole("radio", { name: "GIF" })).toHaveAttribute("aria-checked", "true");
+    await start.focus();
     await page.keyboard.press("Enter");
     await expect(record).toHaveAttribute("aria-pressed", "true");
     await expect(record).toHaveAttribute("data-format", "gif");

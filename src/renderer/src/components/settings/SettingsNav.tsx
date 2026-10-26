@@ -109,6 +109,15 @@ function NavIcon({ tab }: { tab: SettingsTab }) {
           <line x1="8" y1="12" x2="13" y2="12" />
         </svg>
       );
+    case "machines":
+      return (
+        <svg {...common}>
+          <rect x="3.5" y="5" width="11" height="8" rx="1.5" />
+          <line x1="6.5" y1="16.5" x2="11.5" y2="16.5" />
+          <rect x="16" y="7" width="4.5" height="12" rx="1.2" />
+          <line x1="18.25" y1="16" x2="18.25" y2="16.01" />
+        </svg>
+      );
     case "remote-access":
       return (
         <svg {...common}>

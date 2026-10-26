@@ -32,6 +32,7 @@ import { STEP_META, STEP_TONE, stepActionLine, stepTitle } from "./flow/step-met
 import { LoomIcon, Medallion, TopRule, WORKER_TONE } from "./flow/FlowNodes";
 import { workerModelLabel } from "./worker-models";
 import { describeWorkerLogFailure } from "./worker-log-tail";
+import { keyInsideModal } from "../../shortcuts/modal-keys";
 
 // LiveBoard — the "whiteboard" view of ONE running loom: the loom graph on a
 // full read-only ReactFlow canvas with LIVE execution state. Live edges carry
@@ -372,6 +373,7 @@ export default function LiveBoard({
       if (e.key !== "Escape") return;
       const t = e.target;
       if (t instanceof HTMLElement && (t.tagName === "INPUT" || t.isContentEditable)) return;
+      if (keyInsideModal(e)) return;
       e.preventDefault();
       e.stopPropagation();
       if (sheetOpen) setSheetOpen(false);

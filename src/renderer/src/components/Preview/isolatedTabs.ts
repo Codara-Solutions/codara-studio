@@ -22,6 +22,7 @@ export async function openIsolatedTab(params: Record<string, unknown>): Promise<
     text(params, "workspaceId"),
     text(params, "callerPaneId"),
     text(params, "group"),
+    { sessionId: text(params, "callerSessionId"), process: text(params, "callerProcess") },
   );
   const started = Date.now();
   while (!tab.handle.isReady()) {

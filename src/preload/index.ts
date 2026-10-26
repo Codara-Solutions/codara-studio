@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer, webFrame, webUtils } from "electron";
 import type {
   CodaraBoxConnectInfoResult,
   CodaraBoxesListResult,
+  HostKeyPromptAnswer,
+  HostKeyPromptRequest,
   RemoteAuthPromptAnswer,
   RemoteAuthPromptRequest,
   RemoteBrowseResult,
@@ -35,6 +37,7 @@ import type {
   GitSplitGroup,
   GitSplitPlanResult,
 } from "@shared/git-split";
+import type { BrowserFullScreenRequest, BrowserTabMemory } from "@shared/browser-tabs";
 import type { NativeCliShellProfileLeftover } from "@shared/native-cli-shell-leftover";
 import type { ClaudeFollowStatus } from "@shared/claude-follow";
 import type { AgentDeliveryRequest, AgentDeliveryResult } from "@shared/agent-delivery";
@@ -50,12 +53,14 @@ import { featureTipsApi } from "./areas/feature-tips";
 import { sessionSearchApi } from "./areas/session-search";
 import { serversApi } from "./areas/servers";
 import { workspaceStatusApi } from "./areas/workspace-status";
+import { pullRequestWatchApi } from "./areas/pull-request-watch";
 import { cosTasksApi } from "./areas/cos-tasks";
 import { skillOriginsApi } from "./areas/skill-origins";
 import { terminalScrollbackApi } from "./areas/terminal-scrollback";
 import { agentHibernationApi } from "./areas/agent-hibernation";
 import { worktreeCleanupApi } from "./areas/worktree-cleanup";
 import { crossWorkspaceApi } from "./areas/cross-workspace";
+import { tabActionsApi } from "./areas/tab-actions";
 import { worktreeSetupApi } from "./areas/worktree-setup";
 import { portsApi } from "./areas/ports";
 import { shareApi } from "./areas/share";
@@ -68,7 +73,9 @@ import type {
   MemoryLearningSettings,
 } from "@shared/memory-items";
 import type { SshKeyImportResult, SshKeyInfo } from "@shared/ssh-keys";
+import type { MachinesSnapshot } from "@shared/machines";
 import type { UsageSummary, UsageSummaryInput } from "@shared/usage-analytics";
+import type { UsageForecastReport } from "@shared/usage-forecast";
 import type {
   SavedWorkflow,
   SavedWorkflowSummary,
@@ -451,6 +458,10 @@ const api = {
     // this resolves promptly.
     summary: (input: UsageSummaryInput): Promise<UsageSummary> =>
       ipcRenderer.invoke("usage-analytics:summary", input),
+    // Labs: when each limit window runs out. Null while the usageForecast
+    // preference is off. The first read scans transcripts and takes seconds.
+    forecast: (): Promise<UsageForecastReport | null> =>
+      ipcRenderer.invoke("usage-forecast:read"),
   },
   agents: {
     sync: (input?: { cwd?: string | null; dryRun?: boolean }): Promise<AgentSyncResult> =>
@@ -1247,8 +1258,9 @@ const api = {
       nativeGrokProfileId?: string;
     }> =>
       ipcRenderer.invoke("pty:spawn", args),
-    write: (id: string, data: string): Promise<void> =>
-      ipcRenderer.invoke("pty:write", { id, data }),
+    // typed: a key the user pressed in the pane (see pty-manager write).
+    write: (id: string, data: string, opts?: { typed?: boolean }): Promise<void> =>
+      ipcRenderer.invoke("pty:write", { id, data, typed: opts?.typed === true }),
     inject: (
       id: string,
       text: string,
@@ -1597,6 +1609,29 @@ const api = {
     },
     // Which agent CLIs (claude/codex) are installed on the host — used to
     // hint before launching a remote agent terminal.
+    answerHostKeyPrompt: (answer: HostKeyPromptAnswer): void => {
+      ipcRenderer.send("remote:hostKeyPromptAnswer", answer);
+    },
+    onHostKeyPrompt: (handler: (request: HostKeyPromptRequest) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, request: HostKeyPromptRequest) => handler(request);
+      ipcRenderer.on("remote:hostKeyPrompt", listener);
+      return () => ipcRenderer.off("remote:hostKeyPrompt", listener);
+    },
+    /** A prompt ended (answered here or in another window, cancelled, or timed out). */
+    onHostKeyPromptClosed: (handler: (requestId: string) => void): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, requestId: string) => handler(requestId);
+      ipcRenderer.on("remote:hostKeyPromptClosed", listener);
+      return () => ipcRenderer.off("remote:hostKeyPromptClosed", listener);
+    },
+    /** Trusts the changed key only if it is still `fingerprint`, the one the user was shown. */
+    trustChangedHostKey: (hostId: string, fingerprint: string): Promise<RemoteConnectionStatus> =>
+      ipcRenderer.invoke("remote:trustChangedHostKey", hostId, fingerprint),
+  },
+  // The Machines page: this computer and SSH hosts, their load and agents.
+  machines: {
+    snapshot: (): Promise<MachinesSnapshot> => ipcRenderer.invoke("machines:snapshot"),
+    stopSession: (hostId: string, sessionName: string): Promise<boolean> =>
+      ipcRenderer.invoke("machines:stopSession", { hostId, sessionName }),
   },
   // SSH key management (SSH manager → Keys tab). Paths never leave ~/.ssh
   // except the import source, which comes from the native file picker.
@@ -1671,6 +1706,11 @@ const api = {
     announce: (payload: { tabId: string; webContentsId: number }): void => {
       ipcRenderer.send("preview-bridge:announce", payload);
     },
+    /** Memory of each browser tab's page and of Codara as a whole. */
+    tabMemory: (): Promise<BrowserTabMemory> => ipcRenderer.invoke("preview-bridge:tab-memory"),
+    /** Tells main a tab went full screen, so Escape in its page leaves and "display" fills the screen. */
+    fullScreen: (request: BrowserFullScreenRequest): Promise<boolean> =>
+      ipcRenderer.invoke("preview-bridge:full-screen", request),
   },
   // codara-studio MCP terminal bridge: main forwards terminal.create requests
   // here, the renderer mints an agent-tinted terminal tab via useTabs and sends
@@ -1821,11 +1861,13 @@ const api = {
   capture: captureApi,
   point: pointApi,
   workspaceStatus: workspaceStatusApi,
+  pullRequestWatch: pullRequestWatchApi,
   cosTasks: cosTasksApi,
   review: reviewApi,
   terminalScrollback: terminalScrollbackApi,
   worktreeCleanup: worktreeCleanupApi,
   crossWorkspace: crossWorkspaceApi,
+  tabActions: tabActionsApi,
   featureTips: featureTipsApi,
   ports: portsApi,
   sessionSearch: sessionSearchApi,
@@ -1873,6 +1915,16 @@ ipcRenderer.on(
     }
   },
 );
+
+// A codara://tab or codara://group link clicked anywhere that reaches main's
+// link router; App focuses the tab (tabs/tabLinkBridge.ts).
+ipcRenderer.on("app:open-tab-link", (_event, url: unknown) => {
+  if (typeof url !== "string" || !/^codara:\/\/(tab|group)\//i.test(url)) return;
+  const rendererWindow = globalThis as unknown as {
+    dispatchEvent: (event: CustomEvent) => boolean;
+  };
+  rendererWindow.dispatchEvent(new CustomEvent("spark:open-tab-link", { detail: { url } }));
+});
 
 // Replay chord keystrokes from a focused <webview> guest as a synthetic
 // KeyboardEvent on the host window. The main process is the one that

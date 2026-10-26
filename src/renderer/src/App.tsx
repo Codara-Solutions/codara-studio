@@ -79,6 +79,8 @@ import {
   setLocatePaneWorkspaceFn,
   setOpenPreviewTabFn,
 } from "./components/Preview/registry";
+import { browserFullScreen } from "./components/Preview/fullScreen";
+import { setBrowserWorkspaceNames } from "./components/Preview/tabs-memory/browserTabs";
 import {
   setCloseAgentTerminalFn,
   setCreateAgentTerminalFn,
@@ -104,9 +106,19 @@ import { useWorktreeRailStates } from "./git/useWorktreeRailStates";
 import RemoteAuthPrompt from "./components/remote/RemoteAuthPrompt";
 import ChromePairingPrompt from "./components/chrome/ChromePairingPrompt";
 import CrossWorkspacePrompt from "./components/cross-workspace/CrossWorkspacePrompt";
+import TabActionPrompt from "./components/tab-actions/TabActionPrompt";
 import SshManagerDialog from "./components/remote/SshManagerDialog";
+import HostKeyPrompt from "./components/remote/HostKeyPrompt";
 import { makeRemotePath, type RemoteHostConfig } from "@shared/remote";
-import { useTabs, isDraftChatTabId, persistedTerminalPaneIds, restoredChatRunIds, sameWorkerMeta } from "./tabs/useTabs";
+import {
+  useTabs,
+  isDraftChatTabId,
+  mergedTabsSnapshot,
+  persistedLayoutTabs,
+  persistedTerminalPaneIds,
+  restoredChatRunIds,
+  sameWorkerMeta,
+} from "./tabs/useTabs";
 import { selectTerminalWorkspaceLayers } from "./tabs/terminalWorkspaceLayers";
 import { useAgentHibernation } from "./lib/useAgentHibernation";
 import { sleepingPaneIds } from "./lib/agentHibernation";
@@ -133,6 +145,10 @@ import {
   type WorkspaceTabs,
 } from "./tabs/agentTerminalPlacement";
 import { setTabGroupBridge } from "./tabs/tabGroupBridge";
+import { flashTabStripItems, OPEN_TAB_LINK_EVENT, setTabLinkBridge } from "./tabs/tabLinkBridge";
+import { resolveTabLink, type SplitDirection, type TabLinkMember, type WorkspaceTabsSnapshot } from "./tabs/tabLinks";
+import { collectLeaves } from "./tabs/paneTree";
+import { parseTabLink, type TabLinkRef } from "@shared/tab-links";
 import type { ActiveNotificationView } from "./notifications/viewed";
 import { useViewedAutomation } from "./notifications/viewed-automation";
 import type { TerminalPaneDragPayload } from "./tabs/terminalDrag";
@@ -825,7 +841,11 @@ export default function App() {
   // Merged and missing copy-branch workspaces for the rail; a missing one
   // whose branch is merged or gone is cleaned up without asking (main
   // refuses anything in use, unpushed or possibly only unmounted).
-  const { states: worktreeByWorkspaceId, refresh: refreshWorktreeStates } = useWorktreeRailStates(
+  const {
+    states: worktreeByWorkspaceId,
+    loaded: worktreeStatesLoaded,
+    refresh: refreshWorktreeStates,
+  } = useWorktreeRailStates(
     workspaces,
     useCallback((result: WorktreeRailCleanupResult) => {
       emitLocalToast(
@@ -2310,6 +2330,9 @@ export default function App() {
   // — runs trigger updates).
   const workspacesRef = useRef(workspaces);
   workspacesRef.current = workspaces;
+  useEffect(() => {
+    setBrowserWorkspaceNames(workspaces.map((workspace) => [workspace.id, workspace.name] as const));
+  }, [workspaces]);
 
   // When the orchestration runner emits `launch_requested`, the worker is
   // being launched and is waiting for a renderer-side PTY at sessionId =
@@ -4273,16 +4296,18 @@ export default function App() {
   // The rail row's one-click Clean up (a merged worktree) and Remove from
   // rail (a folder that is gone). A plain workspace only has its row, so it
   // goes like Delete; a copy-branch one goes through main's guarded cleanup.
+  // A removal is confirmed with a toast; anything else comes back to the
+  // rail, which shows it next to the button that asked (rail/RailCleanUp).
   const handleCleanUpWorkspace = useCallback(
-    async (id: string) => {
+    async (id: string, confirmIgnored?: string): Promise<WorktreeRailCleanupResult | null> => {
       const target = workspacesRef.current.find((w) => w.id === id);
-      if (!target) return;
+      if (!target) return null;
       if (!target.copyBranch) {
         removeWorkspaceFromState(id);
-        return;
+        return { status: "removed", workspaceName: target.name, branchDeleted: false };
       }
-      const result = await window.spark.worktreeCleanup
-        .railCleanUp({ workspaceId: id, mode: "manual" })
+      const result: WorktreeRailCleanupResult = await window.spark.worktreeCleanup
+        .railCleanUp({ workspaceId: id, mode: "manual", ...(confirmIgnored ? { confirmIgnored } : {}) })
         .catch((cause: unknown) => ({
           status: "failed" as const,
           message: cause instanceof Error ? cause.message : String(cause),
@@ -4296,13 +4321,8 @@ export default function App() {
             ? `The worktree and branch ${target.copyBranch.branch} are gone.`
             : "The worktree is gone.";
         emitLocalToast(`Cleaned up ${target.name}`, result.message ? `${body} ${result.message}` : body);
-        return;
       }
-      emitLocalToast(
-        `${target.name} was not cleaned up`,
-        result.message ?? "",
-        result.status === "failed" ? "danger" : "warning",
-      );
+      return result;
     },
     [refreshWorktreeStates, removeWorkspaceFromState],
   );
@@ -5158,6 +5178,140 @@ export default function App() {
     return () => window.removeEventListener("spark:focus-tab", handler);
   }, [setActiveTabStable, tabs.tabs]);
 
+  // Tab and group links (shared/tab-links.ts). Every loaded layout, plus the
+  // saved layout of a workspace not opened this session, so a link to it
+  // still resolves.
+  const tabLinkLayouts = useCallback((): WorkspaceTabsSnapshot[] => {
+    const current = tabsRef.current;
+    const layouts: WorkspaceTabsSnapshot[] = [];
+    if (current.tabsWorkspaceId) {
+      layouts.push({ workspaceId: current.tabsWorkspaceId, tabs: current.tabs, loaded: true });
+    }
+    for (const layout of current.inactiveWorkspaceLayouts) {
+      layouts.push({ workspaceId: layout.workspaceId, tabs: layout.tabs, loaded: true });
+    }
+    for (const workspace of workspacesRef.current) {
+      if (layouts.some((layout) => layout.workspaceId === workspace.id)) continue;
+      layouts.push({ workspaceId: workspace.id, tabs: persistedLayoutTabs(workspace.id), loaded: false });
+    }
+    return layouts;
+  }, []);
+
+  // The unfold and highlight wait until the link's workspace is the one on
+  // screen, which is a render or two after a switch.
+  const pendingTabLinkRef = useRef<{ workspaceId: string; groupId: string | null; flash: string[] } | null>(null);
+  const finishTabLinkFocus = useCallback(() => {
+    const pending = pendingTabLinkRef.current;
+    const current = tabsRef.current;
+    if (!pending || current.tabsWorkspaceId !== pending.workspaceId || activeIdRef.current !== pending.workspaceId) return;
+    pendingTabLinkRef.current = null;
+    const group = pending.groupId ? current.tabs.find((tab) => tab.group?.id === pending.groupId)?.group : undefined;
+    if (group?.collapsed) current.toggleTabGroupCollapsed(group.id);
+    flashTabStripItems(pending.flash);
+  }, []);
+  useEffect(() => {
+    finishTabLinkFocus();
+  }, [finishTabLinkFocus, tabs.tabsWorkspaceId, activeId, tabs.activeId]);
+
+  const focusTabLink = useCallback((ref: TabLinkRef): boolean => {
+    const target = resolveTabLink(tabLinkLayouts(), ref, mergedTabsSnapshot());
+    if (!target) return false;
+    const current = tabsRef.current;
+    const onScreen = current.tabsWorkspaceId === target.workspaceId ? current.activeId : null;
+    const shown = (entry: TabLinkMember) => entry.mergedInto ?? entry.dockedIn ?? entry.tabId;
+    const pick =
+      target.tabs.find((entry) => shown(entry) === onScreen) ??
+      target.tabs.find((entry) => !entry.dockedIn && !entry.mergedInto) ??
+      target.tabs[0];
+    const selectId = shown(pick);
+    const groupId =
+      target.group?.id ??
+      (target.loaded ? current.tabs.find((tab) => tab.id === pick.tabId)?.group?.id ?? null : null);
+    const flash =
+      ref.kind === "group"
+        ? [`[data-tab-group-chip="${CSS.escape(ref.id)}"]`, ...target.tabs.map((entry) => `[data-tab-id="${CSS.escape(shown(entry))}"]`)]
+        : [`[data-tab-id="${CSS.escape(selectId)}"]`];
+    pendingTabLinkRef.current = { workspaceId: target.workspaceId, groupId, flash };
+    workspaceJump.jumpTo({ workspaceId: target.workspaceId, tabId: selectId });
+    finishTabLinkFocus();
+    return true;
+  }, [finishTabLinkFocus, tabLinkLayouts, workspaceJump]);
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const url = (event as CustomEvent<{ url?: unknown }>).detail?.url;
+      const ref = parseTabLink(url);
+      if (!ref) return;
+      if (focusTabLink(ref)) return;
+      const workspaceKnown = workspacesRef.current.some((workspace) => workspace.id === ref.workspaceId);
+      emitLocalToast(
+        !workspaceKnown
+          ? "That tab's workspace is not open in Codara"
+          : ref.kind === "group"
+            ? "That tab group has no tabs left"
+            : "That tab is closed",
+        "The link points to something that is no longer there.",
+        "warning",
+      );
+    };
+    window.addEventListener(OPEN_TAB_LINK_EVENT, handler);
+    return () => window.removeEventListener(OPEN_TAB_LINK_EVENT, handler);
+  }, [focusTabLink]);
+
+  useEffect(() => {
+    setTabLinkBridge({
+      resolve: (ref) => resolveTabLink(tabLinkLayouts(), ref, mergedTabsSnapshot()),
+      activeWorkspaceId: () => {
+        const current = tabsRef.current;
+        return current.tabsWorkspaceId === activeIdRef.current ? current.tabsWorkspaceId : null;
+      },
+      focus: focusTabLink,
+      close: (workspaceId, tabIds) => {
+        const current = tabsRef.current;
+        const closed: string[] = [];
+        const onScreen = current.tabsWorkspaceId === workspaceId;
+        const layoutTabs = onScreen
+          ? current.tabs
+          : current.inactiveWorkspaceLayouts.find((layout) => layout.workspaceId === workspaceId)?.tabs ?? [];
+        for (const tabId of tabIds) {
+          const tab = layoutTabs.find((item) => item.id === tabId);
+          if (!tab) {
+            const merged = mergedTabsSnapshot().get(tabId);
+            const host = merged && merged.workspaceId === workspaceId
+              ? layoutTabs.find((item): item is TerminalTab => item.id === merged.hostTabId && item.kind === "terminal")
+              : undefined;
+            if (!merged || !host) continue;
+            for (const leaf of collectLeaves(merged.root)) {
+              if (findLeafByPaneId(host.root, leaf.paneId)) current.closeTerminalPaneInWorkspace(workspaceId, host.id, leaf.paneId);
+            }
+            closed.push(tabId);
+          } else if (tab.kind === "preview") {
+            current.closePreviewTab(tab.id);
+            closed.push(tabId);
+          } else if (!onScreen) {
+            // A background layout only knows how to drop terminal panes; main
+            // offers nothing else there.
+            if (tab.kind !== "terminal") continue;
+            for (const leaf of collectLeaves(tab.root)) {
+              current.closeTerminalPaneInWorkspace(workspaceId, tab.id, leaf.paneId);
+            }
+            closed.push(tabId);
+          } else if (tab.kind === "chat") {
+            current.closeChatTabForRun(tab.id);
+            closed.push(tabId);
+          } else {
+            current.closeTab(tab.id);
+            closed.push(tabId);
+          }
+        }
+        return closed;
+      },
+      split: (tabId, direction) => tabsRef.current.splitTabBeside(tabId, direction),
+      unsplit: (tabId) => tabsRef.current.unsplitTab(tabId),
+    });
+    return () => setTabLinkBridge(null);
+  }, [focusTabLink, tabLinkLayouts]);
+
   // Expose a tab-creation entry point to the preview registry so the
   // spark-preview MCP bridge can auto-open a preview tab when a sub-agent
   // calls navigate without one already being open. The registered fn returns
@@ -5300,7 +5454,8 @@ export default function App() {
               workspaceId: layout.workspaceId,
               title: tab.title,
               ...(leaf.cwd ? { cwd: leaf.cwd } : {}),
-              ...(tab.group ? { group: tab.group.name } : {}),
+              ...(tab.group ? { group: tab.group.name, groupId: tab.group.id } : {}),
+              ...(leaf.agentOwner ? { agentOwner: leaf.agentOwner } : {}),
               // The phone protocol has no Pi profile; a Pi pane is shared
               // as the shell it runs in.
               profile:
@@ -5380,6 +5535,7 @@ export default function App() {
         requestedFromPane: input.requestedFromPane,
         group: input.group,
         openedBy: input.openedBy,
+        agentOwner: input.agentOwner,
       };
       // A background run's terminal must not land in the ACTIVE workspace's
       // strip (same invariant as the spawn_terminals queue path). The hidden
@@ -5542,18 +5698,31 @@ export default function App() {
   // listeners can wire up without prop drilling.
   // The browser tab on screen (or docked in the focused cell) starts pointing
   // or commenting; BrowserPane listens for its own tab id.
+  const targetBrowserTabId = useCallback((): string | null => {
+    let active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
+    if (active?.kind === "terminal") {
+      const pane = findLeafByPaneId(active.root, active.activePaneId);
+      const contentId = pane && isDockLeaf(pane) ? pane.content.tabId : null;
+      active = visibleWorkbenchTabs.find((tab) => tab.id === contentId);
+    }
+    return active?.kind === "preview" ? active.id : null;
+  }, [activeVisibleTabId, visibleWorkbenchTabs]);
   const dispatchBrowserPoint = useCallback(
     (mode: "pick" | "comment") => {
-      let active = visibleWorkbenchTabs.find((t) => t.id === activeVisibleTabId);
-      if (active?.kind === "terminal") {
-        const pane = findLeafByPaneId(active.root, active.activePaneId);
-        const contentId = pane && isDockLeaf(pane) ? pane.content.tabId : null;
-        active = visibleWorkbenchTabs.find((tab) => tab.id === contentId);
-      }
-      if (!active || active.kind !== "preview") return;
-      window.dispatchEvent(new CustomEvent("spark:browser-point", { detail: { tabId: active.id, mode } }));
+      const tabId = targetBrowserTabId();
+      if (!tabId) return;
+      window.dispatchEvent(new CustomEvent("spark:browser-point", { detail: { tabId, mode } }));
     },
-    [activeVisibleTabId, visibleWorkbenchTabs],
+    [targetBrowserTabId],
+  );
+  // F11 acts on the tab already full screen, so it steps on to the display.
+  const dispatchBrowserAction = useCallback(
+    (action: "fullScreen" | "devTools") => {
+      const tabId = (action === "fullScreen" ? browserFullScreen().tabId : null) ?? targetBrowserTabId();
+      if (!tabId) return;
+      window.dispatchEvent(new CustomEvent("spark:browser-action", { detail: { tabId, action } }));
+    },
+    [targetBrowserTabId],
   );
 
   const shortcutHandlers = useMemo<ShortcutHandlers>(
@@ -5840,6 +6009,8 @@ export default function App() {
       },
       "browser.pickElement": () => dispatchBrowserPoint("pick"),
       "browser.comment": () => dispatchBrowserPoint("comment"),
+      "browser.fullScreen": () => dispatchBrowserAction("fullScreen"),
+      "browser.devTools": () => dispatchBrowserAction("devTools"),
     }),
     [
       handleNewBalancedTerminalPane,
@@ -5854,6 +6025,7 @@ export default function App() {
       handleToggleRight,
       activeVisibleTabId,
       dispatchBrowserPoint,
+      dispatchBrowserAction,
       handleSelectWorkspaceByIndex,
       tabs,
       visibleWorkbenchTabs,
@@ -5872,6 +6044,9 @@ export default function App() {
     // instead of triggering their currently bound command.
     isDisabled: (id, event) => {
       if (isRecording()) return true;
+      // Bare F11 and F12 belong to terminals and editors unless a browser tab
+      // is the one they would act on.
+      if ((id === "browser.fullScreen" || id === "browser.devTools") && !browserFullScreen().tabId && !targetBrowserTabId()) return true;
       if (onboardingOpen && document.querySelector(".onboarding-dialog")) return true;
       // The open jump palette answers Mod+1..6 itself.
       if (jumpPaletteOpen && id === "view.selectByIndex") return true;
@@ -6473,6 +6648,7 @@ export default function App() {
             agentsByWorkspaceId={agentsByWorkspaceId}
             branchByWorkspaceId={branchByWorkspaceId}
             worktreeByWorkspaceId={worktreeByWorkspaceId}
+            worktreeStatesLoaded={worktreeStatesLoaded}
             onCleanUpWorkspace={handleCleanUpWorkspace}
             sections={panels.sections.left}
             draggingSection={draggingPanelSection}
@@ -6619,6 +6795,7 @@ export default function App() {
             agentsByWorkspaceId={agentsByWorkspaceId}
             branchByWorkspaceId={branchByWorkspaceId}
             worktreeByWorkspaceId={worktreeByWorkspaceId}
+            worktreeStatesLoaded={worktreeStatesLoaded}
             onCleanUpWorkspace={handleCleanUpWorkspace}
             sections={panels.sections.right}
             draggingSection={draggingPanelSection}
@@ -6682,8 +6859,10 @@ export default function App() {
           />
         )}
         <RemoteAuthPrompt />
+        <HostKeyPrompt />
         <ChromePairingPrompt />
         <CrossWorkspacePrompt />
+        <TabActionPrompt />
 
         {booted && (
           <Suspense fallback={null}>
@@ -7801,8 +7980,9 @@ const Workspace = React.memo(function Workspace({
       direction: Parameters<typeof splitTerminalPane>[2],
       autorun?: string,
       agentSession?: TerminalAgentSession | null,
+      cwd?: string,
     ) => {
-      return splitTerminalPane(tabId, paneId, direction, autorun, agentSession);
+      return splitTerminalPane(tabId, paneId, direction, autorun, agentSession, cwd);
     },
     [splitTerminalPane],
   );
@@ -7865,6 +8045,14 @@ const Workspace = React.memo(function Workspace({
       openTabInSplit(dockedTabId);
     },
     [openTabInSplit],
+  );
+  const splitTabBeside = tabs.splitTabBeside;
+  const handleSplitTab = useCallback(
+    (tabId: string, direction: SplitDirection) => {
+      const change = splitTabBeside(tabId, direction);
+      if (!change.ok) emitLocalToast("Could not split that tab", change.reason, "warning");
+    },
+    [splitTabBeside],
   );
   const handleUndockTab = useCallback(
     (dockedTabId: string) => undockTab(dockedTabId, { focus: true }),
@@ -7965,6 +8153,7 @@ const Workspace = React.memo(function Workspace({
         onPinEditorTab={onPinEditorTab}
         onPinDiffTab={onPinDiffTab}
         onOpenInSplit={handleOpenInSplit}
+        onSplitTab={handleSplitTab}
         pickerHints={pickerHints}
         closeOnMiddleClick={closeTabsOnMiddleClick}
         workspaceId={workspace?.id ?? null}

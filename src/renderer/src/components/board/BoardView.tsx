@@ -10,6 +10,7 @@ import {
   parseBoardCardDrag,
   peekBoardCardDrag,
 } from "./boardDrag";
+import { keyInsideModal } from "../../shortcuts/modal-keys";
 
 // The Cora Board: THIS chat's kanban. All persisted state lives on the run
 // (RunState.board) behind the main-process board IPC — this view loads it
@@ -2156,6 +2157,7 @@ function Lightbox({
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape" && event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      if (keyInsideModal(event)) return;
       event.preventDefault();
       event.stopImmediatePropagation();
       if (event.key === "Escape") handlers.current.onClose();

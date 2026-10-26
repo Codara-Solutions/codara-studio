@@ -266,8 +266,15 @@ async function prepare() {
   const script = join(bin, "codex.js");
   await writeFile(script, `
     const fs = require("node:fs");
-    const args = process.argv.slice(2);
-    if (args.includes("--version")) { console.log("codex-cli 0.153.4"); process.exit(0); }
+    const argv = process.argv.slice(2);
+    if (argv.includes("--version")) { console.log("codex-cli 0.153.4"); process.exit(0); }
+    // Codara puts its config overrides first (codex -c mcp_servers...=... resume <id>),
+    // which Codex accepts before a subcommand. Read the subcommand the same way.
+    const args = [];
+    for (let i = 0; i < argv.length; i++) {
+      if (args.length === 0 && (argv[i] === "-c" || argv[i] === "--config")) i++;
+      else if (args.length > 0 || !/^--config=/.test(argv[i])) args.push(argv[i]);
+    }
     fs.appendFileSync(${JSON.stringify(launchLog)}, JSON.stringify([...args, "cwd:" + process.cwd()]) + "\\n");
     const paths = ${JSON.stringify({ [FIRST]: firstPath, [SECOND]: secondPath })};
     let current;

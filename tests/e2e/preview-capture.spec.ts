@@ -112,6 +112,12 @@ async function selectTab(page: Page, title: string) {
   await page.locator("[data-tab-id]").filter({ hasText: title }).first().click();
 }
 
+/** The phone, tablet and desktop view, from the toolbar's More menu. */
+async function openSizes(page: Page) {
+  await page.getByRole("button", { name: "More browser tools", exact: true }).click();
+  await page.getByRole("menuitemcheckbox", { name: "Phone, tablet and desktop" }).click();
+}
+
 test("capture tools: screenshot options, before/after diff, sizes and recording, in the background and from the pane", async () => {
   test.setTimeout(180_000);
   const root = await mkdtemp(join(tmpdir(), "codara-preview-capture-tools-"));
@@ -149,7 +155,7 @@ test("capture tools: screenshot options, before/after diff, sizes and recording,
     await selectTab(page, new URL(fixture.url).host);
     const record = page.getByTestId("preview-record");
     await expect(record).toBeVisible();
-    await page.getByRole("button", { name: "Responsive view" }).click();
+    await openSizes(page);
     const responsive = page.getByTestId("responsive-view");
     await expect(responsive).toBeVisible();
     await expect(responsive.getByTestId("responsive-frame")).toHaveCount(3);
@@ -232,7 +238,7 @@ test("capture tools: screenshot options, before/after diff, sizes and recording,
     await expect(responsive).toHaveCount(0);
 
     // Pointing works on the page itself, so it closes the side-by-side view.
-    await page.getByRole("button", { name: "Responsive view" }).click();
+    await openSizes(page);
     await expect(responsive).toBeVisible();
     await page.getByRole("button", { name: /Point at an element/ }).click();
     await expect(responsive).toHaveCount(0);
@@ -241,7 +247,9 @@ test("capture tools: screenshot options, before/after diff, sizes and recording,
     await page.keyboard.press("Escape");
     await expect(picker).toHaveCount(0);
 
+    // Record asks Video or GIF first; Video is preselected.
     await record.click();
+    await page.getByTestId("preview-record-start").click();
     await expect(record).toHaveAttribute("aria-pressed", "true");
     for (const left of [120, 220, 320]) {
       await request("preview.evaluate", { tabId: shown.tabId, code: `document.getElementById("box").style.left = "${left}px"` });

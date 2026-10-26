@@ -36,6 +36,7 @@ export async function resolvePreviewGuest(
     // The renderer shows who drives the tab and refuses a driver the user stopped.
     driver: params.driver,
     focus,
+    ...(params.lookupWake === "blank" || params.lookupWake === "none" ? { lookupWake: params.lookupWake } : {}),
   })) as PreviewGuestInfo;
   const wcId = info?.webContentsId;
   if (typeof wcId !== "number") {

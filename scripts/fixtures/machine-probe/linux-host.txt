@@ -1,0 +1,154 @@
+@@codara-probe:os Linux x86_64
+@@codara-probe:nproc 24
+@@codara-probe:stat
+cpu  756314 2264208 1088802 95832289 2827499 0 72518 0 248631 124583
+@@codara-probe:meminfo
+MemTotal:       32210644 kB
+MemFree:         5334544 kB
+MemAvailable:   10101388 kB
+Buffers:          830640 kB
+Cached:          5993020 kB
+SwapCached:         5140 kB
+Active:          7925500 kB
+Inactive:       14529852 kB
+Active(anon):    7256380 kB
+Inactive(anon):  8870744 kB
+Active(file):     669120 kB
+Inactive(file):  5659108 kB
+Unevictable:      133360 kB
+Mlocked:           44700 kB
+SwapTotal:      33554424 kB
+SwapFree:       30216812 kB
+Zswap:                 0 kB
+Zswapped:              0 kB
+Dirty:             12180 kB
+Writeback:             0 kB
+AnonPages:      15750556 kB
+Mapped:          2430964 kB
+Shmem:            489652 kB
+KReclaimable:     852196 kB
+Slab:            1424832 kB
+SReclaimable:     810676 kB
+SUnreclaim:       614156 kB
+KernelStack:       95344 kB
+PageTables:       287600 kB
+SecPageTables:     10040 kB
+NFS_Unstable:          0 kB
+Bounce:                0 kB
+WritebackTmp:          0 kB
+CommitLimit:    49659744 kB
+Committed_AS:   81644832 kB
+VmallocTotal:   34359738367 kB
+VmallocUsed:      298404 kB
+VmallocChunk:          0 kB
+Percpu:            34368 kB
+HardwareCorrupted:     0 kB
+AnonHugePages:    118784 kB
+ShmemHugePages:    16384 kB
+ShmemPmdMapped:        0 kB
+FileHugePages:    112640 kB
+FilePmdMapped:     24576 kB
+CmaTotal:              0 kB
+CmaFree:          912536 kB
+Unaccepted:            0 kB
+Balloon:               0 kB
+GPUActive:             0 kB
+GPUReclaim:            0 kB
+HugePages_Total:       0
+HugePages_Free:        0
+HugePages_Rsvd:        0
+HugePages_Surp:        0
+Hugepagesize:       2048 kB
+Hugetlb:               0 kB
+DirectMap4k:     5207136 kB
+DirectMap2M:    24551424 kB
+DirectMap1G:     5242880 kB
+@@codara-probe:loadavg 5.35 5.37 4.82 4/5923 2728645
+@@codara-probe:cgroup memory.stat
+anon 16128561152
+file 6987988992
+kernel 944799744
+kernel_stack 90161152
+pagetables 293437440
+sec_pagetables 802816
+percpu 7498504
+sock 69632
+vmalloc 1806336
+shmem 501473280
+zswap 0
+zswapped 0
+zswap_incomp 0
+file_mapped 1995988992
+file_dirty 12525568
+file_writeback 0
+swapcached 5263360
+anon_thp 121634816
+file_thp 115343360
+shmem_thp 16777216
+inactive_anon 9083641856
+active_anon 7430803456
+inactive_file 5795422208
+active_file 685178880
+unevictable 136560640
+slab_reclaimable 406733032
+slab_unreclaimable 132264872
+slab 538997904
+workingset_refault_anon 417901
+workingset_refault_file 1439422
+workingset_activate_anon 129542
+workingset_activate_file 24966
+workingset_restore_anon 131083
+workingset_restore_file 53278
+workingset_nodereclaim 671664
+pgdemote_kswapd 0
+pgdemote_direct 0
+pgdemote_khugepaged 0
+pgdemote_proactive 0
+pgsteal_kswapd 29208066
+pgsteal_direct 1165868
+pgsteal_khugepaged 28437
+pgsteal_proactive 0
+pgscan_kswapd 30486927
+pgscan_direct 1369044
+pgscan_khugepaged 35591
+pgscan_proactive 0
+pgrefill 25102960
+pgpromote_success 0
+pgscan 31891562
+pgsteal 30402371
+pswpin 400025
+pswpout 1475303
+pgfault 1618484488
+pgmajfault 662524
+pgactivate 1821769
+pgdeactivate 1
+pglazyfree 3951
+pglazyfreed 0
+swpin_zero 17876
+swpout_zero 119031
+zswpin 0
+zswpout 0
+zswpwb 0
+thp_fault_alloc 14548
+thp_collapse_alloc 13834
+thp_swpout 155
+thp_swpout_fallback 0
+numa_pages_migrated 0
+numa_pte_updates 0
+numa_hint_faults 0
+@@codara-probe:cgroup cpu.stat
+usage_usec 41818449000
+user_usec 30205240000
+system_usec 11613209000
+nice_usec 22642091000
+core_sched.force_idle_usec 0
+nr_periods 0
+nr_throttled 0
+throttled_usec 0
+nr_bursts 0
+burst_usec 0
+@@codara-probe:df
+/dev/nvme0n1p5   514937084 264181552 224524752      55% /
+@@codara-probe:clis claude codex grok tmux git node docker
+@@codara-probe:tmux
+@@codara-probe:end

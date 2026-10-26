@@ -162,6 +162,78 @@ test("loaded Cora conversations stay mounted across workspace navigation", async
   }
 });
 
+// A long chat is shown before react-virtuoso's own reveal (list-reveal.ts).
+// The override must only lift Virtuoso's hold, never an ancestor's: a
+// retained chat behind another workspace or an editor must stay hidden.
+test("a long chat shown early stays hidden behind other views", async () => {
+  const fixture = await prepareWorkspace();
+  let app: ElectronApplication | null = null;
+  try {
+    app = await electron.launch({
+      args: ["."],
+      env: {
+        ...process.env,
+        SPARK_USER_DATA_DIR: fixture.userDataDir,
+        CODARA_HOME_DIR: fixture.userDataDir,
+        SPARK_HOME_DIR: fixture.userDataDir,
+        SPARK_SKIP_LEGACY_MIGRATION: "1",
+        SPARK_NO_SHELL_INTEGRATION: "1",
+      },
+    });
+    const page = await app.firstWindow();
+    await page.setViewportSize({ width: 1200, height: 800 });
+    await page.waitForLoadState("domcontentloaded");
+
+    await page.evaluate(
+      async ({ cwd }) => {
+        const spark = (window as unknown as { spark: any }).spark;
+        const run = await spark.orchestration.createRun({
+          workspaceId: "ws-draft-a",
+          workspaceName: "workspace-a",
+          cwd,
+          title: "Long retained chat",
+        });
+        const answer = Array.from({ length: 12 }, (_, line) => `Line ${line} of a long answer about the rail.`).join("\n\n");
+        for (let index = 0; index < 30; index += 1) {
+          await spark.orchestration.addRunMessage({ runId: run.id, author: "user", kind: "note", message: `Question ${index}` });
+          await spark.orchestration.addRunMessage({ runId: run.id, author: "spark", kind: "note", message: `${answer}\n\nAnswer ${index} ends here` });
+        }
+      },
+      { cwd: fixture.workspaceADir },
+    );
+    // Open it fresh from history, so Virtuoso mounts with the whole chat and
+    // jumps to its last message.
+    await page.getByRole("button", { name: "New Cora chat" }).first().dispatchEvent("click");
+    const history = page.getByRole("button", { name: "Open chat history" });
+    await expect(history.last()).toBeVisible({ timeout: 10_000 });
+    await history.last().dispatchEvent("click");
+    const option = page.getByRole("option", { name: /Long retained chat/ });
+    await expect(option).toBeVisible({ timeout: 10_000 });
+    await option.dispatchEvent("click");
+
+    const list = page.locator(
+      '[data-testid="cora-conversation"][data-list-revealed] > [data-virtuoso-scroller] > [data-viewport-type] > [data-testid="virtuoso-item-list"]',
+    );
+    await expect(list).toHaveCount(1, { timeout: 15_000 });
+    const visibility = () => list.evaluate((element) => getComputedStyle(element).visibility);
+    await expect.poll(visibility).toBe("visible");
+    await expect(page.getByText("Answer 29 ends here", { exact: true })).toBeVisible();
+
+    await page.locator('[data-workspace-id="ws-draft-b"]').dispatchEvent("click");
+    await expect.poll(visibility).toBe("hidden");
+
+    await page.locator('[data-workspace-id="ws-draft-a"]').dispatchEvent("click");
+    await expect.poll(visibility).toBe("visible");
+    await page.evaluate((path) => {
+      window.dispatchEvent(new CustomEvent("spark:open-file", { detail: { path } }));
+    }, fixture.workspaceAFile);
+    await expect(page.getByRole("tab", { name: /README\.md/ })).toBeVisible();
+    await expect.poll(visibility).toBe("hidden");
+  } finally {
+    await app?.close();
+  }
+});
+
 async function openDraftChat(page: Page): Promise<void> {
   const tab = page.getByRole("tab", { name: /New chat|Cora/ }).first();
   await expect(tab).toBeVisible();

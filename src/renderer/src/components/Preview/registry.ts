@@ -1,6 +1,8 @@
 import type { BrowserPaneHandle } from "./BrowserPane";
 import { clearDriver, forgetPresenceTab } from "./agent-presence/store";
+import { tabLink } from "@shared/tab-links";
 import { tabGroupNameOf } from "../../tabs/tabGroupBridge";
+import { isTabAsleep } from "./tabs-memory/browserTabs";
 
 interface RegistryEntry {
   id: string;
@@ -21,6 +23,21 @@ const lastViewed = new Map<string | null, string>();
 // pane that agent runs in. Kept apart from entries so ownership recorded at
 // open time survives the tab registering a beat later.
 const agentPaneOwners = new Map<string, string>();
+// The agent CLI session and process of that agent when the tab opened, as
+// main stamped them, so a new agent started in the same pane does not
+// inherit the tab.
+export interface AgentOpenerIdentity {
+  sessionId: string | null;
+  process: string | null;
+}
+const agentIdentityOwners = new Map<string, AgentOpenerIdentity>();
+
+function recordAgentOpener(id: string, paneId: string | null, identity: AgentOpenerIdentity | null | undefined): void {
+  if (!paneId) return;
+  agentPaneOwners.set(id, paneId);
+  if (identity?.sessionId || identity?.process) agentIdentityOwners.set(id, identity);
+  else agentIdentityOwners.delete(id);
+}
 
 type LocatePaneWorkspaceFn = (paneId: string) => string | null;
 let locatePaneWorkspaceFn: LocatePaneWorkspaceFn | null = null;
@@ -75,6 +92,7 @@ export function unregisterPreviewTab(id: string): void {
   entries.delete(id);
   forgetPresenceTab(id);
   agentPaneOwners.delete(id);
+  agentIdentityOwners.delete(id);
   if (activeId === id) activeId = null;
   for (const [workspace, tabId] of lastViewed) if (tabId === id) lastViewed.delete(workspace);
 }
@@ -148,12 +166,15 @@ export function listPreviewTabs(workspaceId?: string | null, callerPaneId?: stri
     const group = tabGroupNameOf(entry.id);
     return {
       id: entry.id,
+      ...(entry.workspaceId ? { link: tabLink(entry.workspaceId, entry.id) } : {}),
       title: entry.handle.getTitle() || entry.url,
       url: entry.handle.getURL() || entry.url,
       workspaceId: entry.workspaceId,
       isLastViewed: lastViewed.get(workspace) === entry.id,
       isActive: entry.id === activeId && entry.workspaceId === activeWorkspaceId,
       ...(entry.partition ? { isolated: true } : {}),
+      // Asleep to save memory; any call on the tab loads it again.
+      ...(isTabAsleep(entry.id) ? { asleep: true } : {}),
       ...(group ? { group } : {}),
     };
   });
@@ -188,6 +209,16 @@ export function previewTabsInPartition(partition: string): string[] {
   return [...entries.values()].filter((entry) => entry.partition === partition).map((entry) => entry.id);
 }
 
+/** Who opened a browser tab: the run, or the terminal pane, agent session and process of an agent with no run. */
+export function previewTabOpener(id: string): AgentOpenerIdentity & { runId: string | null; paneId: string | null } {
+  return {
+    runId: entries.get(id)?.runId ?? null,
+    paneId: agentPaneOwners.get(id) ?? null,
+    sessionId: agentIdentityOwners.get(id)?.sessionId ?? null,
+    process: agentIdentityOwners.get(id)?.process ?? null,
+  };
+}
+
 /** Whether any workspace has this browser tab open. */
 export function hasPreviewTab(id: string): boolean {
   return entries.has(id);
@@ -216,13 +247,14 @@ export async function openIsolatedPreviewTab(
   workspaceId?: string | null,
   callerPaneId?: string | null,
   group?: string | null,
+  callerIdentity?: AgentOpenerIdentity | null,
 ): Promise<RegistryEntry> {
   const { workspace, paneId } = previewScope(runId, workspaceId, callerPaneId);
   if (!openPreviewTabFn) throw new Error("Codara is not ready to open browser tabs yet. Retry in a moment.");
   const id = await Promise.resolve(
     openPreviewTabFn(url, runId, workspace, { partition, ...(group ? { group } : {}) }),
   );
-  if (paneId) agentPaneOwners.set(id, paneId);
+  recordAgentOpener(id, paneId, callerIdentity);
   return waitForRegisteredTab(id, workspace);
 }
 
@@ -234,6 +266,7 @@ export async function ensurePreviewTab(
   workspaceId?: string | null,
   callerPaneId?: string | null,
   group?: string | null,
+  callerIdentity?: AgentOpenerIdentity | null,
 ): Promise<{ tab: RegistryEntry; opened: boolean }> {
   const { workspace, paneId } = previewScope(runId, workspaceId, callerPaneId);
   const existing = findReusablePreviewTab(runId, workspace, paneId);
@@ -242,7 +275,7 @@ export async function ensurePreviewTab(
   const id = await Promise.resolve(
     openPreviewTabFn(url, runId, workspace, group ? { group } : undefined),
   );
-  if (paneId) agentPaneOwners.set(id, paneId);
+  recordAgentOpener(id, paneId, callerIdentity);
   return { tab: await waitForRegisteredTab(id, workspace), opened: true };
 }
 
@@ -270,7 +303,7 @@ export function previewTabOwner(tabId: string): { runId: string | null; paneId: 
 // A tab a page opened belongs to whoever owned the page's tab.
 export function inheritPreviewTabOwner(tabId: string, sourceTabId: string): void {
   const paneId = agentPaneOwners.get(sourceTabId);
-  if (paneId) agentPaneOwners.set(tabId, paneId);
+  if (paneId) recordAgentOpener(tabId, paneId, agentIdentityOwners.get(sourceTabId));
 }
 
 /** The workspace's browser tabs with who drives them: a run, a terminal agent's pane, or nobody. */

@@ -320,10 +320,14 @@
 
 /* ── Dialogs ─────────────────────────────────────────────────────────── */
 
+/* Under the palettes a shortcut opens over these dialogs (the run switcher,
+   the jump palette, quick commands: 120). They share their layer otherwise,
+   and these portaled dialogs come later in the document, so they would cover
+   the palette the person just opened. */
 .ss-dialog-layer {
   position: fixed;
   inset: 0;
-  z-index: 120;
+  z-index: 119;
   display: flex;
   align-items: center;
   justify-content: center;

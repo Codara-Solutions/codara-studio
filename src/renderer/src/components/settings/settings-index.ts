@@ -23,6 +23,7 @@ export type SettingsTab =
   | "api"
   | "agents"
   | "sessions"
+  | "machines"
   | "remote-access"
   | "keybindings"
   | "runs"
@@ -112,6 +113,12 @@ export const SETTINGS_TABS: ReadonlyArray<SettingsTabMeta> = [
     description: "Search, resume and clean up your past agent sessions, and choose what comes back after a restart.",
   },
   {
+    id: "machines",
+    label: "Machines",
+    title: "Machines",
+    description: "This computer and the ones you reach over SSH: their load, and the agents running there.",
+  },
+  {
     id: "remote-access",
     label: "Remote access",
     title: "Remote access",
@@ -144,7 +151,7 @@ export const SETTINGS_NAV_GROUPS: ReadonlyArray<{
   { label: "App", tabs: ["general", "appearance", "notifications", "keybindings"] },
   { label: "Workspace", tabs: ["editor", "terminal", "quick-commands", "git", "browser", "shared-pages"] },
   { label: "Agents and models", tabs: ["agents", "api", "sessions", "runs"] },
-  { label: "System", tabs: ["remote-access", "about"] },
+  { label: "System", tabs: ["machines", "remote-access", "about"] },
 ];
 
 export function tabMeta(tab: SettingsTab): SettingsTabMeta {
@@ -223,6 +230,7 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "git", title: "Notify me when teammates push", desc: "One quiet alert per repository when others push.", section: "Alerts", keywords: "github push alert gh notification", toggle: "notifyTeammatePushes" },
   { tab: "git", title: "Notify me when a pull request is opened", desc: "A notification for new pull requests.", section: "Alerts", keywords: "github pr review notification", toggle: "notifyPullRequests" },
   { tab: "git", title: "Notify me when CI fails on my pull request", desc: "An alert when a check fails on your branch's pull request.", section: "Alerts", keywords: "github ci checks actions failed failing build notification fix with agent", toggle: "notifyCiFailures" },
+  { tab: "git", title: "Watch pull requests and tell agents when CI fails", desc: "Pull request and checks on each row; the agent on a failing branch is told to fix it.", section: "Alerts", keywords: "github pr ci checks agent fix-ci worktree watch rail", toggle: "watchPullRequests" },
   { tab: "git", title: "Instant git triggers", desc: "Pushes reach automations in seconds through the GitHub App.", section: "Remotes", keywords: "github app webhook install push automations" },
   { tab: "git", title: "Custom webhook receiver", desc: "Your own receiver for GitHub push webhooks.", section: "Remotes", keywords: "github webhook url receiver push hook", reveal: "Remotes advanced" },
   { tab: "git", title: "Worktree setup file", desc: "What every new worktree gets: copied files, linked folders, a setup command.", section: "Worktrees", keywords: "worktree worktreeinclude .env copy link node_modules install setup codara worktree.json terminals" },
@@ -253,6 +261,7 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "api", title: "Models for Cora", desc: "OpenRouter models offered in the Cora picker.", section: "OpenRouter", keywords: "model picker openrouter favorite" },
   { tab: "api", title: "Commit message model", desc: "The model that drafts commit messages.", section: "Git commit messages", keywords: "commit draft model git" },
   { tab: "agents", title: "Add account", desc: "Sign in to another Claude, ChatGPT or xAI account.", keywords: "new sign in login another account connect claude codex grok" },
+  { tab: "agents", title: "Usage forecast", desc: "Labs: say whether a limit runs out before it resets.", section: "Labs", keywords: "usage limit forecast predict run out reset quota labs experiment", toggle: "usageForecast" },
   { tab: "agents", title: "How switching works", desc: "What a switch moves, and which sessions follow.", keywords: "switch account active use change sessions" },
   { tab: "agents", title: "Anthropic", label: "Anthropic accounts", desc: "Claude accounts for Cora and Claude Code.", keywords: "claude code claude login account email limits switch system own login" },
   { tab: "agents", title: "OpenAI", label: "OpenAI accounts", desc: "ChatGPT accounts for Cora and Codex.", keywords: "codex chatgpt codex login account email limits switch system own login" },
@@ -270,6 +279,7 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "agents", title: "Grok flags", desc: "Extra flags each time Grok starts in a terminal.", section: "Startup flags", keywords: "grok launch arguments args options xai" },
   { tab: "agents", title: "Pi flags", desc: "Extra flags each time Pi starts in a terminal.", section: "Startup flags", keywords: "pi launch arguments args options thinking model" },
   { tab: "agents", title: "Terminals in other workspaces", desc: "Workspaces whose agents may open terminals in another one without asking.", section: "Workspaces", keywords: "cross workspace terminal agent allow always revoke permission grant coordinator worker pane" },
+  { tab: "agents", title: "Tabs agents did not open", desc: "Workspaces whose agents may close, or move (split and unsplit), your tabs without asking.", section: "Workspaces", keywords: "tab close split unsplit agent allow always revoke permission grant codara_tab link" },
   { tab: "agents", title: "Capability Center", desc: "MCP servers, skills, profiles, memory and worker models.", section: "Tools", keywords: "mcp servers skills memory profiles worker models tools" },
   { tab: "capabilities", title: "Always verify edits with a worker", desc: "Every change goes through a worker and a verifier.", section: "Behavior", capabilityTab: "policy", keywords: "cora verify verifier review edits" },
   { tab: "capabilities", title: "Auto-compact context at", desc: "How full the context window gets before Cora and her workers compact.", section: "Behavior", capabilityTab: "policy", keywords: "compaction compact context window limit tokens percent summarize" },
@@ -290,6 +300,8 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "sessions", title: "Session index", desc: "Its size on disk, and Rebuild index.", section: "Agent session search", keywords: "index rebuild size disk storage sqlite reindex" },
   { tab: "sessions", title: "Delete session index", desc: "Delete the index and turn agent session search off.", section: "Agent session search", keywords: "index delete remove clear wipe disk storage sqlite turn off privacy" },
   { tab: "sessions", title: "Agent sessions", desc: "Find, resume and delete Claude and Codex sessions.", keywords: "history transcripts delete claude codex conversations" },
+  { tab: "machines", title: "Keep agents running on SSH machines", desc: "Agents on SSH machines run in tmux there and survive a quit or a lost connection.", section: "Agents on machines", keywords: "ssh remote machine server tmux persist keep running disconnect home server laptop compute host key fingerprint", toggle: "machinesEnabled" },
+  { tab: "machines", title: "Machines", desc: "This computer and your SSH hosts: CPU, memory, disk, load, installed CLIs and running agents.", keywords: "ssh remote server host computer compute cpu ram memory disk load tailscale codara cloud box agents running" },
   { tab: "remote-access", title: "Allow remote access", desc: "Pair the Codara phone app with this computer.", section: "Connection", keywords: "phone mobile app pair qr" },
   { tab: "remote-access", title: "Pair a new device", desc: "Show a code to pair another phone.", section: "Connection", keywords: "phone mobile qr code pairing" },
   { tab: "remote-access", title: "Paired devices", desc: "Phones that can reach this computer.", keywords: "revoke phone device mobile" },

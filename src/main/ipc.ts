@@ -21,18 +21,27 @@ import type { SshKeyImportResult, SshKeyInfo } from "@shared/ssh-keys";
 import { browseRemoteDir } from "./remote/browse";
 import {
   answerAuthPrompt,
+  answerHostKeyPrompt,
   disconnectHost,
+  forgetChangedHostKey,
   getConnection,
   getConnectionStatus,
   setAuthPromptSender,
+  setHostKeyConfirmation,
+  setHostKeyPromptClosedSender,
+  setHostKeyPromptSender,
   setStatusSender,
+  trustChangedHostKey,
 } from "./remote/connections";
+import { createMachinesService, readLocalStats } from "./remote/machines";
+import type { MachinesSnapshot } from "@shared/machines";
 import { isRemotePath } from "@shared/remote";
 import { MUTE_KEY_PATTERN } from "@shared/notify-center";
 import type { UsageSummaryInput } from "@shared/usage-analytics";
 import type {
   CodaraBoxConnectInfoResult,
   CodaraBoxesListResult,
+  HostKeyPromptAnswer,
   RemoteAuthPromptAnswer,
   RemoteBrowseResult,
   RemoteConnectionStatus,
@@ -60,10 +69,10 @@ import { codaraHome } from "./codara-home";
 import { logMain } from "./file-log";
 import { isTrustedOnSender, requireTrustedSender } from "./main-window-trust";
 import { detectAgentRuntimes } from "./agent-runtimes";
-import { loadPreferences, setPreference } from "./preferences-store";
+import { getPreferenceCached, loadPreferences, onPreferenceChange, setPreference } from "./preferences-store";
 import { openInSystemBrowser, openLinkFromApp } from "./open-link";
 import * as pty from "./pty-manager";
-import { systemResourceSnapshot, type PaneRoot } from "./system-metrics";
+import { readSystemCpuTimes, systemResourceSnapshot, type PaneRoot } from "./system-metrics";
 import { serversService } from "./servers/service";
 import { registerKeepAwakeIpc } from "./keep-awake";
 import {
@@ -490,6 +499,7 @@ import { isPiSubscriptionProvider } from "../shared/agent-families";
 import type { AgentDeliveryRequest, AgentDeliveryResult } from "../shared/agent-delivery";
 import { agentDelivery } from "./agent-delivery";
 import { registerCaptureIpc } from "./browser/capture/ipc";
+import { registerPreviewTabsIpc } from "./browser/preview-tabs";
 import { registerChromeLinkIpc } from "./browser/chrome";
 import { registerPointIpc } from "./browser/point";
 import { registerReviewIpc } from "./review";
@@ -499,6 +509,7 @@ import { registerFeatureTipsIpc } from "./feature-tips";
 import { registerSessionSearchIpc } from "./session-search/service";
 import { registerServersIpc } from "./servers";
 import { registerWorkspaceStatusIpc } from "./workspace-status";
+import { registerPullRequestWatchIpc } from "./pull-request-watch-ipc";
 import { registerCosTasksIpc } from "./cos";
 import { afterSkillAssetDeleted, afterSkillAssetInstalled, registerSkillUpdatesIpc, skillOriginsDir } from "./skill-updates-ipc";
 import {
@@ -510,6 +521,7 @@ import {
 import { agentPaneAsleep, registerAgentHibernationIpc } from "./agent-hibernation";
 import { registerWorktreeCleanupIpc } from "./worktree-cleanup";
 import { registerCrossWorkspaceIpc } from "./cross-workspace-ipc";
+import { registerTabActionIpc } from "./tab-action-ipc";
 import { registerWorktreeSetupIpc } from "./worktree-setup";
 import { registerPortForwardIpc } from "./remote/port-forward-runtime";
 import { registerShareIpc } from "./share/ipc";
@@ -1106,7 +1118,29 @@ export function registerIpc(): void {
   handle("pi-subscriptions:usage", async (_event, input?: { force?: unknown }) => {
     await unifiedAccountsReady();
     const { inspectPiSubscriptionUsage } = await import("./orchestration/pi-subscription-usage");
-    return inspectPiSubscriptionUsage(input?.force === true);
+    const overview = await inspectPiSubscriptionUsage(input?.force === true);
+    if (getPreferenceCached("usageForecast") === true) {
+      void import("./usage-forecast")
+        .then(({ recordUsageReadings }) => recordUsageReadings(overview))
+        .catch((err: unknown) => logMain("usage", `forecast reading not recorded: ${String(err).slice(0, 200)}`));
+    }
+    return overview;
+  });
+  onPreferenceChange((key, prefs) => {
+    if (key !== "usageForecast" || prefs.usageForecast === true) return;
+    void import("./usage-analytics")
+      .then(({ releaseForecastWorker }) => releaseForecastWorker())
+      .catch(() => undefined);
+  });
+  handle("usage-forecast:read", async () => {
+    if (getPreferenceCached("usageForecast") !== true) return null;
+    await unifiedAccountsReady();
+    const [{ inspectPiSubscriptionUsage }, { buildUsageForecastReport }] = await Promise.all([
+      import("./orchestration/pi-subscription-usage"),
+      import("./usage-forecast"),
+    ]);
+    const overview = await inspectPiSubscriptionUsage(false);
+    return buildUsageForecastReport(overview, getPreferenceCached("usageForecastIdeas"));
   });
   // Spends one Codex rate-limit reset of one account, after the user
   // confirmed it in the usage panel. Every window then re-reads that
@@ -3183,9 +3217,9 @@ export function registerIpc(): void {
     if (!pty.hasSession(id)) await pty.waitForSpawn(id, 10_000);
   };
 
-  handle("pty:write", async (_e, args: { id: string; data: string }) => {
+  handle("pty:write", async (_e, args: { id: string; data: string; typed?: boolean }) => {
     await awaitPendingSpawn(args.id);
-    pty.write(args.id, args.data);
+    pty.write(args.id, args.data, { typed: args.typed === true });
     // A submit starts the pane's next agent turn; other keys can answer a
     // prompt or interrupt (see noteTerminalUserInput).
     noteTerminalUserInput(args.id, args.data);
@@ -3930,16 +3964,65 @@ export function registerIpc(): void {
     }
   };
   setAuthPromptSender((request) => broadcast("remote:authPrompt", request));
+  setHostKeyPromptSender((request) => broadcast("remote:hostKeyPrompt", request));
+  setHostKeyPromptClosedSender((requestId) => broadcast("remote:hostKeyPromptClosed", requestId));
+  setHostKeyConfirmation(async () => (await loadPreferences()).machinesEnabled === true);
   setStatusSender((status) => broadcast("remote:status", status));
+  const machines = createMachinesService({
+    listHosts,
+    connectionStatus: getConnectionStatus,
+    exec: async (hostId, command, timeoutMs) => {
+      // Never opens a connection: only hosts the snapshot saw connected get
+      // here, and one that drops in between is not reconnected (quiet).
+      const conn = await getConnection(hostId);
+      if (conn.state !== "connected") throw new Error(`${hostId} is not connected.`);
+      return conn.exec(command, { timeoutMs, quiet: true });
+    },
+    agentActivity: terminalAgentActivitySnapshot,
+    sessions: pty.sessionCwds,
+    localStats: (previous) => readLocalStats(previous, () => readSystemCpuTimes().total),
+    now: Date.now,
+  });
+  handle("machines:snapshot", async (): Promise<MachinesSnapshot> => machines.snapshot());
+  handle(
+    "machines:stopSession",
+    async (_e, args: { hostId: string; sessionName: string }): Promise<boolean> =>
+      machines.stopSession(String(args?.hostId ?? ""), String(args?.sessionName ?? "")),
+  );
+  handle(
+    "remote:trustChangedHostKey",
+    async (_e, hostId: string, fingerprint: string): Promise<RemoteConnectionStatus> => {
+      if (await trustChangedHostKey(String(hostId), String(fingerprint))) {
+        try {
+          await (await getConnection(hostId)).ensure();
+        } catch {
+          // getConnectionStatus below carries the error detail.
+        }
+      }
+      return getConnectionStatus(hostId);
+    },
+  );
+  ipcMain.on("remote:hostKeyPromptAnswer", (e, answer: HostKeyPromptAnswer) => {
+    // Trusting a host key is the user's decision: never a webview guest's.
+    if (!isTrustedOnSender(e, "remote:hostKeyPromptAnswer")) return;
+    answerHostKeyPrompt(answer);
+  });
 
   handle("remote:listHosts", async (): Promise<RemoteHostConfig[]> => listHosts());
   handle(
     "remote:saveHost",
-    async (_e, host: RemoteHostConfig): Promise<RemoteHostConfig[]> => saveManualHost(host),
+    async (_e, host: RemoteHostConfig): Promise<RemoteHostConfig[]> => {
+      // An edited host may point somewhere else: a key offered before is not its key.
+      forgetChangedHostKey(String(host?.id ?? ""));
+      return saveManualHost(host);
+    },
   );
   handle(
     "remote:deleteHost",
-    async (_e, hostId: string): Promise<RemoteHostConfig[]> => deleteManualHost(hostId),
+    async (_e, hostId: string): Promise<RemoteHostConfig[]> => {
+      forgetChangedHostKey(String(hostId));
+      return deleteManualHost(hostId);
+    },
   );
   // Codara Cloud boxes, read through the codaracloud CLI. connect-info saves
   // the host (main-only, with its proxy argv) so remote:connect can use it.
@@ -4162,14 +4245,17 @@ export function registerIpc(): void {
   registerWorktreeSetupIpc(handle);
   registerChromeLinkIpc(handle);
   registerCaptureIpc(handle);
+  registerPreviewTabsIpc(handle);
   registerPointIpc(handle);
   registerWorkspaceStatusIpc(handle);
+  registerPullRequestWatchIpc(handle);
   registerCosTasksIpc(handle);
   registerReviewIpc(handle);
   registerTerminalScrollbackIpc(handle);
   registerAgentHibernationIpc(handle);
   registerWorktreeCleanupIpc(handle);
   registerCrossWorkspaceIpc(handle);
+  registerTabActionIpc(handle);
   registerFeatureTipsIpc(handle);
   registerPortForwardIpc(handle);
   registerShareIpc(handle);

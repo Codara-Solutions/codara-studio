@@ -19,6 +19,20 @@ import CommentOverlay from "./point/CommentOverlay";
 import type { RunInPage } from "./point/pageScripts";
 import "./point/point.css";
 import { GlobeIcon } from "../icons";
+import { MoonIcon } from "../Terminal/AgentSleepControls";
+import { browserFullScreen, setBrowserFullScreen, stepBrowserFullScreen, useBrowserFullScreen } from "./fullScreen";
+import {
+  forgetBrowserTab,
+  isTabAsleep,
+  noteBrowserTab,
+  noteTabPage,
+  noteTabReady,
+  noteTabVisible,
+  setTabSnapshot,
+  takeWakeUrl,
+  useBrowserTab,
+  wakeTab,
+} from "./tabs-memory/browserTabs";
 import type { PointInspection } from "@shared/point-format";
 import { formatTabReference } from "@shared/point-format";
 import { useOptionalSelectionRouting } from "../../routing/SelectionRoutingContext";
@@ -84,6 +98,16 @@ type WebviewElement = HTMLElement &
     ) => void;
   };
 
+/**
+ * How a loadURL ended: "loaded" at the new page's dom-ready, a same-page move
+ * or a load that ended without a page (a 204, a download, a failure);
+ * "committed" when the page arrived but is still loading after
+ * LOAD_AFTER_COMMIT_MS; "timeout" when nothing came back within LOAD_TIMEOUT_MS.
+ */
+export type LoadOutcome = "loaded" | "committed" | "timeout";
+const LOAD_TIMEOUT_MS = 15_000;
+const LOAD_AFTER_COMMIT_MS = 5_000;
+
 export interface BrowserPaneHandle {
   // `ignoreCache: true` calls Chromium's `reloadIgnoringCache` (hard reload).
   // Default is the normal cache-respecting reload — existing callers stay
@@ -91,7 +115,8 @@ export interface BrowserPaneHandle {
   reload: (opts?: { ignoreCache?: boolean }) => void;
   goBack: () => void;
   goForward: () => void;
-  loadURL: (url: string) => void;
+  /** Settles at the new page's dom-ready, a same-page move or a failure, not at its full load. */
+  loadURL: (url: string) => Promise<LoadOutcome>;
   getURL: () => string;
   getTitle: () => string;
   openDevTools: () => void;
@@ -156,6 +181,9 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   const [pointNotice, setPointNotice] = useState<string | null>(null);
   const [hostSize, setHostSize] = useState({ width: 0, height: 0 });
   const routing = useOptionalSelectionRouting();
+  const tabRecord = useBrowserTab(tabId);
+  const asleep = Boolean(tabRecord?.asleep);
+  const fullScreen = useBrowserFullScreen(tabId);
 
   // `domReady` mirrored into a ref so the navigation effect below can gate
   // on it without taking it as a dependency (which would re-run that effect
@@ -200,6 +228,10 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   useEffect(() => {
     urlRef.current = url;
   }, [url]);
+  // The url prop the webview was last created at or sent to (the url effect).
+  const appliedUrlRef = useRef<string | null>(null);
+  const tabIdRef = useRef(tabId);
+  tabIdRef.current = tabId;
 
   // Cache the inspector preload's file:// URL once at mount and feed it into
   // the webview's `preload` attribute. The path lives on disk under
@@ -239,11 +271,10 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   // its inspector preload because the URL arrived after creation.
   const preloadReady = inspectorPreloadUrl !== null;
   useEffect(() => {
-    if (!preloadReady) return;
+    if (!preloadReady || asleep) return;
     const host = containerRef.current;
     if (!host) return;
-    const initialUrl = urlRef.current;
-    if (!initialUrl) return; // empty url -> empty state, do not create the element
+    if (!urlRef.current) return; // empty url -> empty state, do not create the element
 
     // Reuse the existing element if it's still attached to *this* host. If
     // React unmounted+remounted us (StrictMode dev cycle, or tab close+
@@ -260,6 +291,17 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
     }
 
     if (!webview) {
+      // Taken only when a new page is made: a tab woken before its old page
+      // was removed keeps that page, and the agent's navigate loads the URL.
+      const wakeUrl = tabIdRef.current ? takeWakeUrl(tabIdRef.current) : null;
+      // The tab's url follows at once, or a later run of this effect or the
+      // url effect below would load the old page back.
+      if (wakeUrl) {
+        urlRef.current = wakeUrl;
+        onUrlChangeRef.current(wakeUrl);
+      }
+      const initialUrl = wakeUrl ?? urlRef.current;
+      if (!initialUrl) return; // empty url -> empty state, do not create the element
       webview = document.createElement("webview") as WebviewElement;
       // Sandboxed safety: keep contextIsolation on for the embedded site.
       // backgroundThrottling=no keeps timers, animations, and websocket
@@ -287,6 +329,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       webview.style.border = "0";
       webview.style.background = "white";
       webview.src = initialUrl;
+      appliedUrlRef.current = initialUrl;
       host.appendChild(webview);
       webviewRef.current = webview;
     }
@@ -301,6 +344,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         return;
       }
       domReadyRef.current = true;
+      if (tabIdRef.current) noteTabReady(tabIdRef.current);
       setDomReady(true);
       setCanGoBack(wv.canGoBack?.() ?? false);
       setCanGoForward(wv.canGoForward?.() ?? false);
@@ -325,6 +369,10 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       setCanGoForward(wv.canGoForward?.() ?? false);
       setError(null);
       if (e.url) onUrlChangeRef.current(e.url);
+      if (tabIdRef.current && e.url) noteTabPage(tabIdRef.current, { url: e.url });
+    };
+    const onTitle = (e: { title?: string }) => {
+      if (tabIdRef.current) noteTabPage(tabIdRef.current, { title: e.title ?? "" });
     };
     const onDidNavigateInPage = (e: { url: string; isMainFrame: boolean }) => {
       if (!e.isMainFrame) return;
@@ -377,6 +425,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
     wv.addEventListener("did-navigate-in-page", onDidNavigateInPage);
     wv.addEventListener("did-fail-load", onDidFailLoad);
     wv.addEventListener("render-process-gone", onRenderProcessGone);
+    wv.addEventListener("page-title-updated", onTitle);
 
     return () => {
       // Detach our listeners; intentionally do NOT remove the webview
@@ -387,8 +436,9 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
       wv.removeEventListener("did-navigate-in-page", onDidNavigateInPage);
       wv.removeEventListener("did-fail-load", onDidFailLoad);
       wv.removeEventListener("render-process-gone", onRenderProcessGone);
+      wv.removeEventListener("page-title-updated", onTitle);
     };
-  }, [hasUrl, preloadReady, inspectorPreloadUrl]);
+  }, [hasUrl, preloadReady, inspectorPreloadUrl, asleep]);
 
   // ── Navigate when the parent's `url` prop changes. Kept separate from
   // the create-once effect so readiness (tracked via domReadyRef, not a
@@ -399,6 +449,11 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
     if (!url) return;
     const webview = getLiveWebview();
     if (!webview) return; // not created yet — src attribute carries the initial url
+    // Only a url prop that changed since it was last applied. This also runs
+    // when dom-ready flips, and an agent's loadURL made right after a page
+    // became ready (a woken tab) must not be pulled back to the prop.
+    if (appliedUrlRef.current === url) return;
+    appliedUrlRef.current = url;
     try {
       const live = webview.getURL?.() ?? "";
       if (live && live !== url) {
@@ -563,6 +618,99 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
     [currentUrl, getLiveWebview, routing, tabId],
   );
 
+  // The tabs and memory view knows every tab, whether it is on screen and,
+  // through these, when it was last seen.
+  const isolated = isFreshPartition(partition);
+  useEffect(() => {
+    if (!tabId) return;
+    noteBrowserTab(tabId, { workspaceId, url: urlRef.current, isolated });
+  }, [isolated, tabId, workspaceId]);
+  useEffect(() => {
+    if (!tabId) return;
+    return () => forgetBrowserTab(tabId);
+  }, [tabId]);
+  useEffect(() => {
+    if (tabId) noteTabVisible(tabId, visible);
+  }, [tabId, visible]);
+
+  // A sleeping tab loads again as soon as it is on screen, as a discarded
+  // tab does in a browser.
+  useEffect(() => {
+    if (tabId && visible && asleep) wakeTab(tabId);
+  }, [asleep, tabId, visible]);
+
+  // Going to sleep: keep a small picture of the page, then remove the
+  // webview, which ends its renderer process. Waking re-creates it (the
+  // create effect above) at the tab's current URL.
+  useEffect(() => {
+    if (!asleep || !tabId) return;
+    const wv = webviewRef.current;
+    if (!wv) return;
+    let cancelled = false;
+    void (async () => {
+      // Removing the webview while capturePage still runs on it fails in
+      // the guest view manager; the capture has its own time limit.
+      const picture = await capturePage().then(shrinkSnapshot).catch(() => null);
+      if (cancelled || !isTabAsleep(tabId)) return;
+      if (picture) setTabSnapshot(tabId, picture);
+      if (webviewRef.current === wv) webviewRef.current = null;
+      domReadyRef.current = false;
+      setDomReady(false);
+      setCanGoBack(false);
+      setCanGoForward(false);
+      setPointMode(null);
+      setResponsive(false);
+      wv.remove();
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [asleep, capturePage, tabId]);
+
+  // Full screen. Esc leaves (a page's own use of Esc does not stop it), F11
+  // steps to the whole display and back; a tab that leaves the screen leaves
+  // full screen too.
+  const fullScreenOn = fullScreen !== "off";
+  useEffect(() => {
+    if (!fullScreenOn || !tabId) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+      setBrowserFullScreen(tabId, "off");
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [fullScreenOn, tabId]);
+  useEffect(() => {
+    if (!tabId || visible) return;
+    if (fullScreenOn) setBrowserFullScreen(tabId, "off");
+  }, [fullScreenOn, tabId, visible]);
+  useEffect(() => {
+    if (!tabId) return;
+    return () => {
+      if (browserFullScreen().tabId === tabId) setBrowserFullScreen(tabId, "off");
+    };
+  }, [tabId]);
+
+  // F11 and F12 from the shortcut table name the tab they are for.
+  useEffect(() => {
+    if (!tabId) return;
+    const onAction = (event: Event) => {
+      const detail = (event as CustomEvent<{ tabId?: string; action?: string }>).detail;
+      if (detail?.tabId !== tabId) return;
+      if (detail.action === "fullScreen") stepBrowserFullScreen(tabId, "F11");
+      if (detail.action === "devTools") {
+        try {
+          getLiveWebview()?.openDevTools?.();
+        } catch {
+          /* not dom-ready */
+        }
+      }
+    };
+    window.addEventListener("spark:browser-action", onAction);
+    return () => window.removeEventListener("spark:browser-action", onAction);
+  }, [getLiveWebview, tabId]);
+
   useImperativeHandle(
     ref,
     (): BrowserPaneHandle => ({
@@ -593,15 +741,94 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
           /* webview not yet dom-ready */
         }
       },
-      loadURL: (next: string) => {
-        try {
-          const wv = getLiveWebview();
-          if (!wv) return;
-          wv.loadURL?.(next);
-        } catch {
-          const wv = getLiveWebview();
-          if (wv) wv.src = next;
+      loadURL: async (next: string) => {
+        const deadline = Date.now() + LOAD_TIMEOUT_MS;
+        const live = async () => {
+          for (;;) {
+            const wv = getLiveWebview();
+            if (wv || Date.now() >= deadline) return wv;
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+        };
+        // A tab with no ready page takes no loadURL, and returning would drop
+        // the URL. An empty tab opens at it, as its address bar does; a page
+        // still loading (a tab woken on a slow dev server) is waited for.
+        const tabAsleep = tabIdRef.current ? isTabAsleep(tabIdRef.current) : false;
+        if (!getLiveWebview() && !webviewRef.current && !tabAsleep) {
+          urlRef.current = next;
+          onUrlChangeRef.current(next);
+          return (await live()) ? "loaded" : "timeout";
         }
+        const wv = await live();
+        if (!wv) return "timeout";
+        return new Promise<LoadOutcome>((resolve) => {
+          const sameUrl = (raw: string) => {
+            try {
+              return new URL(raw).href;
+            } catch {
+              return raw;
+            }
+          };
+          const ours = new Set([sameUrl(next)]);
+          // Every event below may still come from the old page (its own
+          // DOMContentLoaded, a pushState, the end of its load), which lives
+          // until the new one commits. So none counts before this load
+          // started, dom-ready only once it committed, and a same-page move
+          // only to this load's URL. The first cross-page start after the
+          // call is this load even when Chromium spells the URL its own way
+          // (file://localhost/...), or one that replaced it; either way the
+          // page it brings is the one the call reached. A 204 or a download sends no
+          // did-fail-load, only did-stop-loading; a -3 for another URL is the
+          // earlier load this one replaced.
+          let started = false;
+          let committed = false;
+          let afterCommit: ReturnType<typeof setTimeout> | undefined;
+          const onStart = (e: { isMainFrame?: boolean; isInPlace?: boolean; url?: string }) => {
+            if (e.isMainFrame === false || !e.url) return;
+            if (ours.has(sameUrl(e.url))) started = true;
+            else if (!started && e.isInPlace === false) {
+              started = true;
+              ours.add(sameUrl(e.url));
+            }
+          };
+          const onRedirect = (e: { isMainFrame?: boolean; url?: string }) => {
+            if (e.isMainFrame !== false && e.url) ours.add(sameUrl(e.url));
+          };
+          const onCommit = () => {
+            if (!started) return;
+            committed = true;
+            afterCommit ??= setTimeout(() => finish("committed"), LOAD_AFTER_COMMIT_MS);
+          };
+          const onEnd = (e: { type?: string; isMainFrame?: boolean; url?: string; errorCode?: number; validatedURL?: string }) => {
+            if (!started || e.isMainFrame === false) return;
+            if (e.type === "dom-ready" && !committed) return;
+            if (e.type === "did-navigate-in-page" && !ours.has(sameUrl(e.url ?? ""))) return;
+            if (e.errorCode === -3 && !ours.has(sameUrl(e.validatedURL ?? ""))) return;
+            finish("loaded");
+          };
+          const ends = ["dom-ready", "did-navigate-in-page", "did-fail-load", "did-stop-loading"];
+          const timer = setTimeout(() => finish(committed ? "committed" : "timeout"), Math.max(0, deadline - Date.now()));
+          const finish = (outcome: LoadOutcome) => {
+            clearTimeout(timer);
+            clearTimeout(afterCommit);
+            wv.removeEventListener("did-start-navigation", onStart);
+            wv.removeEventListener("did-redirect-navigation", onRedirect);
+            wv.removeEventListener("did-navigate", onCommit);
+            for (const name of ends) wv.removeEventListener(name, onEnd);
+            resolve(outcome);
+          };
+          wv.addEventListener("did-start-navigation", onStart);
+          wv.addEventListener("did-redirect-navigation", onRedirect);
+          wv.addEventListener("did-navigate", onCommit);
+          for (const name of ends) wv.addEventListener(name, onEnd);
+          try {
+            // The load itself may never finish (a page that alerts while it
+            // loads); the events above and the timers end the wait.
+            void wv.loadURL?.(next)?.catch(() => {});
+          } catch {
+            wv.src = next;
+          }
+        });
       },
       getURL: () => {
         try {
@@ -687,6 +914,16 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         pointing={pointMode === "pick" || pointMode === "compose"}
         commenting={pointMode === "comment"}
         tabId={tabId ?? null}
+        workspaceId={workspaceId}
+        responsive={responsive}
+        fullScreen={fullScreen !== "off"}
+        onToggleResponsive={() => {
+          if (!responsive) stopPointing();
+          setResponsive(!responsive);
+        }}
+        onToggleFullScreen={() => {
+          if (tabId) stepBrowserFullScreen(tabId, "button");
+        }}
         onSubmit={(next) => {
           if (!next) return;
           const wv = getLiveWebview();
@@ -728,17 +965,12 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         onTogglePoint={() => startPointing("pick")}
         onToggleComment={() => startPointing("comment")}
         onCopyTabId={(detail) => void copyTabReference(detail)}
-        captureTools={
+        recordTool={
           <CaptureActions
-            url={currentUrl || url}
+            url={asleep ? "" : currentUrl || url}
             visible={visible}
             tabId={tabId}
             workspaceId={workspaceId}
-            responsive={responsive}
-            onToggleResponsive={() => {
-              if (!responsive) stopPointing();
-              setResponsive(!responsive);
-            }}
             getWebview={getLiveWebview}
           />
         }
@@ -822,7 +1054,7 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
         }}
       >
         {!url ? <EmptyState onFocusAddress={() => addressRef.current?.focus()} /> : null}
-        {url && !domReady && !error ? (
+        {url && !domReady && !error && !asleep ? (
           <>
             {/* Safari-style loading hairline: a 2px accent bar pinned to the
                 top seam of the webview, shimmering left-to-right while the page
@@ -870,6 +1102,14 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
             </div>
           </>
         ) : null}
+        {asleep && tabId ? (
+          <SleepingView
+            snapshot={tabRecord?.snapshot ?? null}
+            title={tabRecord?.title || currentUrl || url}
+            onWake={() => wakeTab(tabId)}
+          />
+        ) : null}
+        {fullScreen !== "off" ? <FullScreenHint mode={fullScreen} /> : null}
         <AgentPresence tabId={tabId} visible={visible} pageRef={webviewRef} />
         <PageDialogOverlay tabId={tabId} />
         {responsive && visible && url ? (
@@ -938,6 +1178,63 @@ const BrowserPane = forwardRef<BrowserPaneHandle, Props>(function BrowserPane(
   );
 });
 
+// A small JPEG of the page for its sleeping view: the full capture is a
+// device-pixel PNG, kept in memory for as long as the tab sleeps.
+async function shrinkSnapshot(dataUrl: string): Promise<string | null> {
+  const image = new Image();
+  image.src = dataUrl;
+  await image.decode();
+  const scale = Math.min(1, 960 / Math.max(1, image.naturalWidth));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+  canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const context = canvas.getContext("2d");
+  if (!context) return null;
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.72);
+}
+
+function SleepingView({ snapshot, title, onWake }: { snapshot: string | null; title: string; onWake: () => void }) {
+  return (
+    <div className="bp-asleep" data-testid="preview-asleep" onClick={onWake}>
+      {snapshot ? <img className="bp-asleep__picture" src={snapshot} alt="" /> : null}
+      <div className="bp-asleep__card">
+        <span className="bp-asleep__title">
+          <MoonIcon size={13} /> This tab is asleep
+        </span>
+        <span>
+          Its page was closed to free memory. {title ? <>Wake it to load <strong>{title}</strong> again.</> : "Wake it to load the page again."}
+        </span>
+        <button type="button" className="spark-btn" onClick={onWake}>
+          Wake
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function FullScreenHint({ mode }: { mode: "window" | "display" }) {
+  const [gone, setGone] = useState(false);
+  useEffect(() => {
+    setGone(false);
+    const timer = setTimeout(() => setGone(true), 3500);
+    return () => clearTimeout(timer);
+  }, [mode]);
+  return (
+    <div className={`bp-fs-hint${gone ? " is-gone" : ""}`} role="status" data-testid="preview-fullscreen-hint">
+      {mode === "window" ? (
+        <>
+          Full screen · <span className="spark-kbd">Esc</span> to leave · <span className="spark-kbd">F11</span> for the whole display
+        </>
+      ) : (
+        <>
+          <span className="spark-kbd">Esc</span> to leave full screen
+        </>
+      )}
+    </div>
+  );
+}
+
 function EmptyState({ onFocusAddress }: { onFocusAddress: () => void }) {
   return (
     <div
@@ -984,8 +1281,8 @@ function EmptyState({ onFocusAddress }: { onFocusAddress: () => void }) {
         </div>
       </div>
       <div className="spark-empty__body" style={{ maxWidth: 360 }}>
-        Type a URL or pick a dev-server port. Detected URLs from your terminal
-        auto-open a browser tab here.
+        Type a URL, or a port such as 3000 for a local server. Links your
+        terminals print open in a browser tab here.
       </div>
       <button
         type="button"

@@ -93,8 +93,8 @@ environment variable that Codara sets for the agent:
 
 | Set | Who sees it | What it adds |
 |---|---|---|
-| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, `codara_notify_user`, `codara_workspace_status`, the task list tools, `codara_session_search`, `codara_share_offer` and the worktree tools; whiteboard and board only inside a Cora chat |
-| `worker` | Workers in automation passes | `studio` with the whiteboard and board read-only, plus `codara_ask_user` and `codara_request_next_iteration` |
+| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, `codara_tab`, `codara_notify_user`, `codara_workspace_status`, the task list tools, `codara_session_search`, `codara_share_offer` and the worktree tools; whiteboard and board only inside a Cora chat |
+| `worker` | Workers in automation passes | `studio` with the whiteboard and board read-only and without `codara_tab`, plus `codara_ask_user` and `codara_request_next_iteration` |
 | `execute` | A Cora chat that orchestrates work | `studio`, plus orchestration, automation management, the task list tools, `codara_session_search`, the worktree tools and `codara_share_offer` |
 | `automation` | The chat that designs automations | `studio`, plus automation management, `codara_ask_user` and `codara_name_chat` |
 
@@ -134,7 +134,7 @@ workspace on screen.
 
 | Tool | What it does |
 |---|---|
-| `codara_preview_list` | Lists the browser tabs in the workspace, with id, title, URL, tab group and which one is active. |
+| `codara_preview_list` | Lists the browser tabs in the workspace, with id, `link`, title, URL, tab group and which one is active. |
 | `codara_preview_navigate` | Loads a URL (http, https or file) in a tab, creating one for the run if needed. `group` puts a tab it opens in a tab group; with `tabId` it moves that tab into the group, and `url` may then be left out. |
 | `codara_preview_close` | Closes a browser tab: this session's own by default, or the `tabId` given. A `chrome:` tabId closes a Chrome tab an agent opened or the user shared. |
 | `codara_preview_snapshot` | Reads the page as a compact outline with `@references` that other tools accept as selectors, link targets (`-> /path`) and names for icon-only links and buttons. Can return only what changed since a previous snapshot. |
@@ -588,12 +588,12 @@ In every set, except `codara_spawn_terminals`, which is only in `execute`.
 
 | Tool | What it does |
 |---|---|
-| `codara_terminal_create` | Opens a new terminal tab owned by the agent, tinted so you can see an agent drives it, in the tab group `group` names. Temporary terminals close when the run finishes; `retention: "service"` keeps one (a dev server, say) until the run is deleted. `workspace` opens it in another workspace instead; see [Terminals in another workspace](#terminals-in-another-workspace). |
+| `codara_terminal_create` | Opens a new terminal tab owned by the agent, tinted so you can see an agent drives it, in the tab group `group` names. Temporary terminals close when the run finishes; `retention: "service"` keeps one (a dev server, say) until the run is deleted. `workspace` opens it in another workspace instead; see [Terminals in another workspace](#terminals-in-another-workspace). `worktree` opens it in a new worktree; see [A terminal in a new worktree](#a-terminal-in-a-new-worktree). |
 | `codara_terminal_run` | Runs one command in a terminal the agent created, or in a new one, and waits for it: returns the exit code, the output and a `cursor`. With Codara's shell integration the shell reports when the command ended; otherwise the call returns once output has been quiet. A command still running at `timeoutMs` (default 30 seconds, at most 10 minutes) keeps running. Refuses a pane that is busy, including one another `codara_terminal_run` call is still using. `group` puts a new terminal in a tab group, or moves the tab of `paneId` into it. |
-| `codara_terminal_list` | Lists the terminal panes in the agent's workspace: title, tab group, cwd, which agent CLI runs there and its state, whether the shell is running a command, which pane is the caller's and which ones it may write to. Terminals the agent opened in other workspaces are listed too, with their `workspaceId`. |
+| `codara_terminal_list` | Lists the terminal panes in the agent's workspace: the tab's `link` (and `groupLink` in a group), title, tab group, cwd, which agent CLI runs there and its state, whether the shell is running a command, which pane is the caller's and which ones it may write to. Terminals the agent opened in other workspaces are listed too, with their `workspaceId`. |
 | `codara_terminal_write` | Types into a terminal the agent created, or into the session of a dev server Codara keeps (to answer its prompts), submitting with Enter by default. |
 | `codara_terminal_read` | Reads a terminal pane without escape codes. Returns a `cursor`; pass it back as `since` to get only output written after it. `mode: "screen"` renders what a full-screen program (an agent CLI, vim, top) shows instead of the raw stream. |
-| `codara_terminal_close` | Closes a terminal the agent created. It cannot close yours or another run's. |
+| `codara_terminal_close` | Closes a terminal the agent created, after a Codara restart too (see [Tab links](#tab-links)). It cannot close yours or another run's. |
 | `codara_spawn_terminals` | Opens one tab split into Claude Code, Codex, Grok or Pi panes for you to drive, launched the way the **+** menu launches them. An optional model and effort apply to each group; for Pi they become `--model` and `--thinking`. |
 
 ### Terminals in another workspace
@@ -639,14 +639,77 @@ not the caller's. Always is kept per caller and target workspace pair in
 `<codara home>/cross-workspace-grants.json`, and Settings, Agents, Terminals
 in other workspaces lists each pair with Revoke, and updates while open.
 
-The new tab carries a small "from <caller>" label. The pane that opened it
-owns it: only that pane may `codara_terminal_write` to it, run in it with
-`codara_terminal_run` or close it, while `codara_terminal_read` works as for
-any pane. Once the opening pane is closed, the terminal follows the rule for
-every terminal opened outside a run. A pane that is asleep (hibernated) or
-restarting its agent is not closed: it keeps its terminals. A Cora run's terminal stays owned by the
-run and closes with it. The
-result adds `workspaceId` and the workspace's name.
+The new tab carries a small "from <caller>" label. It is owned like any
+terminal an agent opens (below). The result adds `workspaceId` and the
+workspace's name.
+
+### A terminal in a new worktree
+
+`worktree: { branch?, base?, purpose? }` makes a worktree first and opens the
+terminal in it, so an agent starts inside its own checkout in one call:
+
+```json
+{ "workspace": "codara-studio", "worktree": { "branch": "fix/login", "base": "main" }, "command": "claude" }
+```
+
+The worktree is made as `codara_worktree_create` makes it (same branch rules,
+refusals, `.worktreeinclude` and setup), from the repository of the target
+workspace: `workspace` when given, otherwise the caller's own. It never waits
+for its setup. The MCP server gives this call longer than a plain terminal
+(about 7 minutes): enough for the approval card, the worktree, the terminal
+and, when the terminal fails, the rollback. A branch that already has a worktree opens a terminal there
+only when the caller made that worktree; another agent's is refused with
+`WORKTREE_NOT_YOURS`. The call waits out a Cora chat's compaction like
+`codara_worktree_create`. A
+cross-workspace call asks the user once, with the same card and grant as any
+terminal in another workspace; the worktree is made only after the answer, and
+nothing is made on Deny. The worktree's row is credited to the calling agent,
+which finds it again by `workspaceId` from its own folder (see
+[Worktrees](#worktrees)). A worktree refusal comes back as the call's error
+(for example `WORKTREE_BRANCH_EXISTS: ...`) and opens no terminal. When the
+terminal does not open after the worktree was made (the shell dies, the
+caller disconnects), Codara stops its setup (a question waiting for the
+user included, for at most 10 seconds) and removes the worktree again
+through the same guarded removal; the setup's card leaves the tray with the
+worktree. If the setup does not stop in that time or the removal is
+refused, the worktree and its card stay, and the error names where and
+carries `data.worktree: { workspaceId, path, branch }`.
+A tab that appears after the call gave up is closed. `cwd` and `worktree` cannot be combined. The result's
+`workspaceId` and `workspace` are the worktree's own, and it adds
+`worktree: { workspaceId, path, branch, created, setup? }`; when `setup` is
+not finished, the `command` has already started, so wait with
+`codara_worktree_setup` before building.
+
+### Who owns an agent's terminal
+
+A terminal an agent without a run opens belongs to that agent: Codara records
+the agent's process, the pane it runs in, and the agent CLI session it
+captured there. Only that agent may `codara_terminal_write` to it, run in it
+with `codara_terminal_run`, close it with `codara_terminal_close`, or close
+and move it with `codara_tab` without the user's approval;
+`codara_terminal_read` works as for any pane. The opener is the same
+process (pid and start time, so a reused pid is someone else) or the same
+captured session, so the same session resumed in another pane, or after a
+restart, keeps its terminals. The pane alone never decides: every later
+agent started in it has the same pane. A session counts only when Codara
+captured it in the caller's pane after the caller's agent started, by the
+CLI running there now, so a new Claude or Codex started where another ran
+owns none of the old one's terminals until its own session is captured, and
+then only its own. A terminal with no recorded opener belongs to nobody.
+Anyone else is refused, and `codara_tab` shows the user its card. Browser
+tabs an agent opens follow the same rule for `codara_tab`.
+
+The caller's pane comes from its process tree: the MCP server sends its pid
+and the pane id its environment names, and Codara accepts only the pane
+whose shell that pid descends from. A process outside that pane that names
+it (pane ids are listed by `codara_terminal_list`) counts as outside every
+pane. An agent started under a terminal multiplexer such as tmux runs under
+the multiplexer's server, not the pane's shell, so it counts as outside
+every pane too, and owns what it opened by its process only. A call without
+a pid (the `cora` CLI) can come only from the root socket token, and
+terminals such calls open belong to such calls. A Cora run's terminal stays
+owned by the run and closes with it. A dev server Codara keeps
+(`codara_terminal_servers`) belongs to its workspace.
 
 ### Tab groups
 
@@ -668,6 +731,63 @@ Groups are the user's too: they can rename, recolor, ungroup or close them, and
 group the extension made with that title in the same window, or starts one;
 it never groups a tab the user shared or joins a group the user made. Without
 `group` it uses the workspace's name, cleaned the same way.
+
+### Tab links
+
+Every tab and tab group has a link: `codara://tab/<workspace>/<tab>` and
+`codara://group/<workspace>/<group>`, made from the ids the layout already
+saves, so a link keeps working across restarts for as long as its tab is
+open. The user copies one with **Copy link** in a tab's or a group's menu and
+pastes it to an agent; `codara_preview_list` and `codara_terminal_list` return
+them too. Clicking a link in a Codara terminal or in Cora's chat brings the tab
+on screen (see [Tab menu](shortcuts-and-settings.md#tab-menu)). Codara does not
+register `codara://` with the operating system, so a link clicked outside
+Codara does nothing.
+
+`codara_tab` (socket method `tab.action`) takes `link`, a link or a bare
+`tabId` from the list tools (a tab in the caller's workspace), and `action`:
+
+| Action | What it does |
+|---|---|
+| `info` | The tab, or the group's tabs: id, link, kind, title, pane ids, whether it sits in a split and whether an editor has unsaved changes. |
+| `focus` | Shows it to the user, as clicking the link would: switches workspace, unfolds the group, highlights the tab. Always allowed. |
+| `close` | Closes the tab, or every tab of the group. Never the terminal the agent runs in; in a workspace that is not on screen only terminal and browser tabs close. |
+| `split` | Puts the tab beside the tab on screen, `direction` `right` (default) or `down`. Works in the workspace on screen only. |
+| `unsplit` | Takes the tab out of a split, or releases everything split into it. |
+
+Close, split and unsplit act at once on tabs the agent opened: terminals it
+created and browser tabs it opened. Any other tab waits for the user's answer
+on a card listing every tab that would change, marking a running agent or
+unsaved edits. **Deny** returns `reason: "denied"`, no answer within 40 seconds
+returns `reason: "no_answer"`; neither changes anything. If the agent stops
+waiting first (its call timed out or it went away), the card is withdrawn and
+says so, and nothing changes. Cards and the change itself fit inside the MCP
+call's 60 seconds. **Allow once** acts
+this time. After an Allow, Codara reads the tabs again: a tab that closed
+meanwhile is left alone, the terminal the agent runs in is never closed even
+if it moved into one of the tabs, and a tab or pane that joined, or now has an
+agent running or unsaved edits, gets a new card instead of being closed
+unseen. **Always allow** stores a grant for the agent's workspace and that
+kind of action: closing (`tab-action-close-grants.json` in Codara's home) or
+moving, which covers split and unsplit (`tab-action-move-grants.json`), in the
+cross-workspace grant format. Allowing moves never allows closing, or the
+reverse. Settings > Agents lists both under Workspaces ("Tabs agents did not
+open") with Revoke. Later requests of that kind from agents of that workspace
+act without the card (`approvedBy: "grant"`), except a close that would stop a
+running agent or drop unsaved edits, which always shows the card. An Always
+also answers the same agent's other cards still open for the same kind of
+action and workspace, never a card for another action or another agent. Only the
+card or a stored grant approves: a pasted link or an agent saying the user
+agreed does not. A tab in another workspace is refused unless the user
+already allowed this workspace's agents there for terminals (see [Terminals in
+another workspace](#terminals-in-another-workspace)). Imported pull request
+runs and automation workers never get the tool.
+
+Ownership of a terminal an agent created survives a restart: the pane saves
+which run, or which agent CLI session in which workspace, opened it. After a
+relaunch, when that run or the resumed session (Claude Code and Codex keep
+their session id) writes to, closes or acts on the pane, Codara recognizes it
+as the owner again. Another agent still cannot.
 
 ### Dev servers
 
@@ -889,14 +1009,19 @@ In `studio` outside a Cora chat, in `execute`, and in a Cora chat that answers
 directly. An agent gets a separate checkout of its own repository on its own
 branch, which you see in the rail under the repository, and removes it once
 the branch is merged. The repository is always the one the agent runs in: its
-terminal pane or its Cora chat decides, never a tool argument. SSH workspaces
-are not supported yet.
+terminal pane or its Cora chat decides, never a tool argument. The one
+exception is a worktree the agent made in another workspace with
+[a terminal in a new worktree](#a-terminal-in-a-new-worktree): its maker
+(the same pane or Cora run) reaches it by `workspaceId` with
+`codara_worktree_setup` and `codara_worktree_remove`, and
+`codara_worktree_list` shows it under `elsewhere`, from wherever it runs. SSH
+workspaces are not supported yet.
 
 | Tool | What it does |
 |---|---|
 | `codara_worktree_create` | Creates a worktree on a new branch (default `agent/<purpose>-<id>`, from the default branch after a fetch) or, with `checkout: true`, on an existing branch. The agent's own cwd does not change; it works under the returned `path`. Codara starts the repository's [worktree setup](./worktree-setup.md) there (files from `.worktreeinclude`, links, the setup command from `.codara/worktree.json` and your own copy-branch command) and returns its state as `setup`; `setupCommand` is now always null. A setup command or terminal command not yet approved for the repository does not run: `setup.state` is `awaiting-approval` until you run or allow it from Codara, and the agent must never run either itself (see [Approving the setup command](./worktree-setup.md#approving-the-setup-command)). With `waitForSetup: true`, or when the setup file asks for it, the call waits up to 5 minutes for setup to end. Because it can run that command, it is annotated as destructive and open-world, not read-only. Asking again for the same branch returns the existing worktree. At most 20 agent worktrees per repository. |
 | `codara_worktree_setup` | The setup state of a worktree: what was copied and linked, each command with its exit code, the error and the end of the log (`logLines`, at most 200). Without `workspaceId` or `path`, the worktree the agent works in. `wait: true` waits for setup to end, also while you decide on a command awaiting approval, up to `timeoutSeconds` (default 300, at most 540). Read-only. |
-| `codara_worktree_list` | Lists the repository's Codara-managed worktrees: who created each, uncommitted and ignored files, terminals, runs and processes using it, merge status, and `removable` with the `blockers` that `codara_worktree_remove` would report. `checkMerge: true` fetches and asks GitHub, so it is slower. Worktrees Codara does not manage are listed under `unmanaged` and are never touched. |
+| `codara_worktree_list` | Lists the repository's Codara-managed worktrees: who created each, uncommitted and ignored files, terminals, runs and processes using it, merge status, and `removable` with the `blockers` that `codara_worktree_remove` would report. `checkMerge: true` fetches and asks GitHub, so it is slower. Worktrees Codara does not manage are listed under `unmanaged` and are never touched. Worktrees the agent made in other repositories are listed under `elsewhere` with their `repoCwd`, also when the agent runs in a folder that is no repository. |
 | `codara_worktree_remove` | Removes a worktree and, by default, the branch it created. `dryRun: true` only checks. |
 | `codara_worktree_cleanup` | **Clean up worktrees** for an agent, across every repository behind your workspaces. See [Cleaning up worktrees](#cleaning-up-worktrees). |
 

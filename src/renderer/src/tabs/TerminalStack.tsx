@@ -47,6 +47,7 @@ import { workerModelLabel } from "../components/runs/run-format";
 import { RuntimeMark, type BrandRuntime } from "../components/BrandMarks";
 import { agentBrandColor, agentBrandRuntime, agentBrandTone } from "../lib/agent-brand";
 import { visibleWorkerChip } from "./terminalAgentState";
+import { useWhereChoices, whereCwd } from "../components/machines/whereChoices";
 import {
   TERMINAL_PANE_DRAG_MIME,
   beginTerminalPaneDrag,
@@ -135,6 +136,7 @@ interface Props {
     direction: TerminalSplit["direction"],
     autorun?: string,
     agentSession?: TerminalAgentSession | null,
+    cwd?: string,
   ) => void;
   onMovePane: (
     payload: TerminalPaneDragPayload,
@@ -212,7 +214,7 @@ type Bundle = {
   onActivate: () => void;
   onSplitRight: () => void;
   onSplitDown: () => void;
-  onSmartAdd: (autorun?: string, agentSession?: TerminalAgentSession | null) => void;
+  onSmartAdd: (autorun?: string, agentSession?: TerminalAgentSession | null, cwd?: string) => void;
   onClose: () => void;
   onToggleZoom: () => void;
   onCwd: (cwd: string) => void;
@@ -393,10 +395,11 @@ function TerminalStack({
     tabId: TabId,
     autorun?: string,
     agentSession?: TerminalAgentSession | null,
+    cwd?: string,
   ): void => {
     const target = smartAddTargetInTab(tabId);
     if (!target) return;
-    splitRef.current(tabId, target.paneId, target.direction, autorun, agentSession);
+    splitRef.current(tabId, target.paneId, target.direction, autorun, agentSession, cwd);
   }, [smartAddTargetInTab]);
 
   const handlesRef = useRef<Map<string, TerminalPaneHandle | null>>(new Map());
@@ -425,7 +428,7 @@ function TerminalStack({
           onActivate: () => activateRef.current(tabId, paneId),
           onSplitRight: () => splitRef.current(tabId, paneId, "horizontal"),
           onSplitDown: () => splitRef.current(tabId, paneId, "vertical"),
-          onSmartAdd: (autorun, agentSession) => smartAddInTab(tabId, autorun, agentSession),
+          onSmartAdd: (autorun, agentSession, cwd) => smartAddInTab(tabId, autorun, agentSession, cwd),
           onClose: () => closeRef.current(tabId, paneId),
           onToggleZoom: () => zoomToggleRef.current(tabId, paneId),
           onCwd: (cwd: string) => cwdRef.current(tabId, paneId, cwd),
@@ -1344,6 +1347,7 @@ const TerminalTabPane = React.memo(function TerminalTabPane({
               <PaneToolbar
                 dragPayload={{ tabId: tab.id, paneId: leaf.paneId }}
                 onSmartAdd={bundle.onSmartAdd}
+                paneCwd={leaf.cwd}
                 onSplitRight={bundle.onSplitRight}
                 onSplitDown={bundle.onSplitDown}
                 onCopyContext={() => void copyTerminalContext(leaf.paneId)}
@@ -2361,7 +2365,9 @@ function ResizeIntersectionGrip({
 
 interface PaneToolbarProps {
   dragPayload: TerminalPaneDragPayload;
-  onSmartAdd: (autorun?: string, agentSession?: TerminalAgentSession | null) => void;
+  onSmartAdd: (autorun?: string, agentSession?: TerminalAgentSession | null, cwd?: string) => void;
+  /** The pane's folder, so the Where picker knows which machine it is on. */
+  paneCwd?: string;
   onSplitRight: () => void;
   onSplitDown: () => void;
   onCopyContext: () => void;
@@ -2376,6 +2382,7 @@ interface PaneToolbarProps {
 function PaneToolbar({
   dragPayload,
   onSmartAdd,
+  paneCwd,
   onSplitRight,
   onSplitDown,
   onCopyContext,
@@ -2532,9 +2539,10 @@ function PaneToolbar({
         <AddPaneMenu
           ref={menuRef}
           position={menuPosition}
-          onPick={(command) => {
+          paneCwd={paneCwd}
+          onPick={(command, cwd) => {
             setMenuOpen(false);
-            onSmartAdd(command);
+            onSmartAdd(command, undefined, cwd);
           }}
         />,
         document.body,
@@ -2614,8 +2622,22 @@ type AddPaneKind = "shell" | "claude" | "codex" | "grok" | "pi";
 // shell starts a new session of that agent once its prompt is ready.
 const AddPaneMenu = React.forwardRef<
   HTMLDivElement,
-  { onPick: (command: string | undefined) => void; position: { top: number; left: number } }
->(function AddPaneMenu({ onPick, position }, ref) {
+  {
+    onPick: (command: string | undefined, cwd?: string) => void;
+    position: { top: number; left: number };
+    paneCwd?: string;
+  }
+>(function AddPaneMenu({ onPick, position, paneCwd }, ref) {
+  const whereChoices = useWhereChoices(paneCwd);
+  const [whereId, setWhereId] = useState("here");
+  const where = whereChoices.find((choice) => choice.id === whereId) ?? null;
+  const pick = (command: string | undefined) => {
+    if (!where || where.id === "here") {
+      onPick(command);
+      return;
+    }
+    void whereCwd(where).then((cwd) => onPick(command, cwd));
+  };
   const items: Array<{
     kind: AddPaneKind;
     title: string;
@@ -2682,6 +2704,28 @@ const AddPaneMenu = React.forwardRef<
         minWidth: 238,
       }}
     >
+      {whereChoices.length > 0 ? (
+        <div
+          role="radiogroup"
+          aria-label="Where"
+          style={{ display: "flex", flexWrap: "wrap", gap: 4, padding: "4px 6px 6px", alignItems: "center" }}
+        >
+          <span style={{ fontSize: 10.5, color: "var(--muted)", marginRight: 2 }}>Where</span>
+          {whereChoices.map((choice) => (
+            <button
+              key={choice.id}
+              type="button"
+              role="radio"
+              aria-checked={whereId === choice.id}
+              className={`spark-btn${whereId === choice.id ? " is-primary" : ""}`}
+              style={{ fontSize: 11, padding: "1px 8px" }}
+              onClick={() => setWhereId(choice.id)}
+            >
+              {choice.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
       <div style={{ display: "grid", gap: 1 }}>
         {items.map((item) => (
           <AddPaneMenuItem
@@ -2689,9 +2733,10 @@ const AddPaneMenu = React.forwardRef<
             title={item.title}
             hint={item.hint}
             command={item.command}
+            detail={where && where.id !== "here" ? `on ${where.label}` : undefined}
             accent={item.accent}
             glyph={item.glyph}
-            onClick={() => onPick(item.command)}
+            onClick={() => pick(item.command)}
           />
         ))}
       </div>
@@ -2703,6 +2748,7 @@ function AddPaneMenuItem({
   title,
   hint,
   command,
+  detail: detailOverride,
   glyph,
   accent,
   onClick,
@@ -2710,6 +2756,7 @@ function AddPaneMenuItem({
   title: string;
   hint: string;
   command?: string;
+  detail?: string;
   glyph: React.ReactNode;
   accent: "shell" | "claude" | "codex" | "grok" | "pi";
   onClick: () => void;
@@ -2718,7 +2765,7 @@ function AddPaneMenuItem({
   const [focus, setFocus] = useState(false);
   const active = hover || focus;
   const tone = menuItemTone(accent);
-  const detail = command ?? "current workspace";
+  const detail = detailOverride ?? command ?? "current workspace";
   return (
     // .spark-menu-item supplies the shared 5px radius, --hover (ink-5%) hover
     // fill, press beat, and the global :focus-visible accent ring; the inline

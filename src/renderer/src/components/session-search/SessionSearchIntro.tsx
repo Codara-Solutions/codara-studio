@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { sessionSearchProgressLine } from "@shared/session-search";
+import { keyBelongsToOtherModal } from "../../shortcuts/modal-keys";
 import { publishSessionSearchStatus, useSessionSearchStatus } from "./useSessionSearchStatus";
 import "./session-search.css";
 
@@ -10,6 +11,7 @@ import "./session-search.css";
 
 export default function SessionSearchIntro({ onClosed }: { onClosed: () => void }) {
   const { status } = useSessionSearchStatus();
+  const dialogRef = useRef<HTMLElement | null>(null);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const closing = useRef(false);
 
@@ -30,7 +32,7 @@ export default function SessionSearchIntro({ onClosed }: { onClosed: () => void 
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || keyBelongsToOtherModal(event, dialogRef.current)) return;
       event.preventDefault();
       event.stopPropagation();
       close();
@@ -46,6 +48,7 @@ export default function SessionSearchIntro({ onClosed }: { onClosed: () => void 
     <div className="ss-dialog-layer" role="presentation">
       <div className="spark-scrim spark-scrim--clear" style={{ zIndex: 0 }} />
       <section
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="ss-intro-title"

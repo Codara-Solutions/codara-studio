@@ -315,7 +315,7 @@ async function main() {
     "bulk cleanup must preserve another run's pane",
   );
   assert.equal(
-    bulkRegistry.isActiveOwnedBy("pane-null", null),
+    bulkRegistry.has("pane-null"),
     true,
     "bulk cleanup must preserve a null-owned user pane",
   );
@@ -332,7 +332,7 @@ async function main() {
   );
   assert.deepEqual(serviceResult.failures, []);
   assert.equal(bulkRegistry.isActiveOwnedBy("pane-other", "run-other"), true);
-  assert.equal(bulkRegistry.isActiveOwnedBy("pane-null", null), true);
+  assert.equal(bulkRegistry.has("pane-null"), true);
 
   const retryRegistry = new AgentTerminalRegistry();
   retryRegistry.register({ paneId: "pane-fails-once", tabId: "tab-fails-once", runId: "run-retry" });

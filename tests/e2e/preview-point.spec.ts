@@ -7,6 +7,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
+import { runInPane } from "./in-pane-mcp";
 
 // Pointing at the page, end to end: the inspect tool through the agent
 // socket, the stdio MCP server and `cora inspect`; a pick from the UI queued
@@ -273,12 +274,12 @@ test("a pick from the browser tab is queued in the inbox and pasted into a termi
 
     // An agent without MCP sees the same item from a shell in a pane, and a
     // peek leaves it.
+    // Codara takes the pane from the process tree, so the CLI runs in one.
     const { panes } = await request("terminal.list", {});
     const pane = panes.find((entry: { title?: string }) => /terminals/i.test(entry.title ?? "")) ?? panes[0];
-    const peeked = await promisify(execFile)(process.execPath, [CORA, "inbox", "--peek", "--json", "--home", fixture.home], {
-      env: { ...childEnv(fixture.home), SPARK_PANE_ID: pane.paneId },
-    });
-    expect(peeked.stdout).toContain("Make the button blue");
+    const { paneId: shell } = await request("terminal.create", { title: "shell" });
+    const peeked = await runInPane(fixture.home, shell, [process.execPath, CORA, "inbox", "--peek", "--json", "--home", fixture.home]);
+    expect(peeked).toContain("Make the button blue");
 
     const { items } = await request("preview.inbox", { workspaceId: "ws-point" });
     expect(items).toHaveLength(1);
@@ -408,11 +409,13 @@ test("copy tab id gives the id agents use, with its URL and session on request",
     expect(tabs.map((tab: { id: string }) => tab.id)).toContain(tabId);
     const clipboard = () => app.evaluate(({ clipboard }) => clipboard.readText());
 
-    await page.getByRole("button", { name: `Copy tab id ${tabId}`, exact: true }).click();
+    // Both live in the toolbar's More menu.
+    await page.getByRole("button", { name: "More browser tools", exact: true }).click();
+    await page.getByRole("menuitem", { name: new RegExp(`^Copy tab id for an agent ${tabId}$`) }).click();
     await expect.poll(clipboard).toBe(tabId);
     await expect(page.getByTestId("point-notice")).toContainText(`Copied ${tabId}`);
 
-    await page.getByRole("button", { name: "More ways to copy this tab", exact: true }).click();
+    await page.getByRole("button", { name: "More browser tools", exact: true }).click();
     await page.getByRole("menuitem", { name: "Copy id, URL and session" }).click();
     await expect.poll(clipboard).toContain(`tabId: ${tabId}`);
     const reference = await clipboard();
