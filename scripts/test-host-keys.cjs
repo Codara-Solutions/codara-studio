@@ -896,11 +896,44 @@ function hasSshKeygen() {
     assert.equal(missing.state, "error");
     assert.match(missing.error, /RevokedHostKeys \/home\/me\/\.ssh\/revoked cannot be read/, "ssh refuses a file it cannot read");
 
+    const second = "/home/me/.ssh/revoked_more";
+    const listedAndStored = () => {
+      harness.files.set("/home/me/.ssh/known_hosts", `nas.local ssh-ed25519 ${b64}\n`);
+      harness.files.set(KNOWN, JSON.stringify({ "nas.local:22": keys.storedFingerprint(key) }));
+    };
     reset();
-    withRevoked(["/home/me/.ssh/revoked_new", revokedFile]);
-    harness.files.set(revokedFile, `ssh-ed25519 ${b64}\n`);
-    assert.equal((await connect("nas")).state, "error", "either %C candidate may revoke the key");
-    ok("RevokedHostKeys refuses what it revokes, and a file ssh cannot read, whatever the setting");
+    listedAndStored();
+    withRevoked(["/home/me/.ssh/revoked_missing", revokedFile]);
+    harness.files.set(revokedFile, `ssh-ed25519 ${other.toString("base64")}\n`);
+    const firstMissing = await connect("nas");
+    assert.equal(firstMissing.state, "error", "a file ssh cannot read refuses, even when the next one reads");
+    assert.match(firstMissing.error, /RevokedHostKeys \/home\/me\/\.ssh\/revoked_missing cannot be read/);
+
+    // OpenSSH 10.3+ reads several RevokedHostKeys files, one after another.
+    reset();
+    listedAndStored();
+    withRevoked([revokedFile, second]);
+    harness.files.set(revokedFile, `ssh-ed25519 ${other.toString("base64")}\n`);
+    harness.files.set(second, `ssh-ed25519 ${b64}\n`);
+    const bySecond = await connect("nas");
+    assert.equal(bySecond.state, "error", "the second file revokes the key");
+    assert.match(bySecond.error, /revoked by \/home\/me\/\.ssh\/revoked_more/);
+
+    reset();
+    listedAndStored();
+    withRevoked([revokedFile, second]);
+    harness.files.set(revokedFile, `ssh-ed25519 ${other.toString("base64")}\n`);
+    const secondMissing = await connect("nas");
+    assert.equal(secondMissing.state, "error", "one file ssh cannot read refuses, even after one it read");
+    assert.match(secondMissing.error, /RevokedHostKeys \/home\/me\/\.ssh\/revoked_more cannot be read/);
+
+    reset();
+    listedAndStored();
+    withRevoked([revokedFile, second]);
+    harness.files.set(revokedFile, `ssh-ed25519 ${other.toString("base64")}\n`);
+    harness.files.set(second, krl());
+    assert.equal((await connect("nas")).state, "connected", "neither file revokes the key");
+    ok("RevokedHostKeys refuses what any of its files revokes, and a file ssh cannot read, whatever the setting");
   }
 
   {

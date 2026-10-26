@@ -34,10 +34,13 @@ fs.mkdirSync(STATE, { recursive: true });
 process.env.HOME = HOME;
 process.env.USERPROFILE = HOME;
 
+// ssh reads ~/.ssh/config and its Includes only when nobody but their owner
+// can write them (test-ssh-config-match covers the other modes).
 function write(rel, text) {
   const file = path.join(HOME, rel);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, text);
+  fs.chmodSync(file, 0o600);
   return file;
 }
 
@@ -48,6 +51,7 @@ function stubs() {
       export async function writeFileAtomic(file, text) { await fs.writeFile(file, text); }
     `,
     "../codara-home": `export function codaraHome() { return ${JSON.stringify(STATE)}; }`,
+    "../path-reconstruction": `export async function getEnrichedEnv() { return process.env; }`,
   };
   return {
     name: "ssh-include-stubs",
@@ -299,8 +303,7 @@ async function testKnownHostsTokens(hosts) {
   assert.deepEqual(byId(tokens, "jumpy").userKnownHostsFiles, [
     "/tmp/jbastion.example",
     `/tmp/${hash(`${full}q.example22carolbastion.example`)}`,
-    `/tmp/${hash(`${full}q.example22carol`)}`,
-  ], "%j is the ProxyJump, and %C hashes %l%h%p%r%j (and %l%h%p%r, as ssh before 9.6)");
+  ], "%j is the ProxyJump, and %C hashes %l%h%p%r%j, as ssh 9.6 and later do");
 }
 
 // Each expected value is what `ssh -G` printed for the same config.
@@ -358,10 +361,7 @@ async function testTokensAsSshExpandsThem(hosts) {
       `/x/j_B.Example/C_${hash(`${full}multi.example22${user}B.Example`)}`,
     ], "%j is the last hop");
     assert.deepEqual(byId(list, "v6").userKnownHostsFiles, ["/x/j_fe80::1"]);
-    assert.deepEqual(byId(list, "older").userKnownHostsFiles, [
-      `/x/C_${hash(`${full}o.example22ub.example`)}`,
-      `/x/C_${hash(`${full}o.example22u`)}`,
-    ]);
+    assert.deepEqual(byId(list, "older").userKnownHostsFiles, [`/x/C_${hash(`${full}o.example22ub.example`)}`], "one file, with the jump host hashed in");
     assert.deepEqual(byId(list, "onepass").userKnownHostsFiles, ["/x/a%b/%h"], "a variable's value is not expanded again");
     assert.equal(byId(list, "lower").host, "L.example", "keywords ignore case");
     assert.deepEqual(byId(list, "lower").userKnownHostsFiles, ["/x/l.example"]);
@@ -448,6 +448,7 @@ async function testSystemSshConfig(hosts) {
     path.join(etc, "ssh_config.d", "corp.conf"),
     ["Host *.corp", "  GlobalKnownHostsFile /etc/ssh/corp_known /etc/ssh/corp_known2", ""].join("\n"),
   );
+  fs.chmodSync(path.join(etc, "ssh_config.d", "corp.conf"), 0o644);
   write(
     ".ssh/config",
     [
