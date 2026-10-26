@@ -303,8 +303,7 @@ async function testKnownHostsTokens(hosts) {
   assert.deepEqual(byId(tokens, "jumpy").userKnownHostsFiles, [
     "/tmp/jbastion.example",
     `/tmp/${hash(`${full}q.example22carolbastion.example`)}`,
-    `/tmp/${hash(`${full}q.example22carol`)}`,
-  ], "%j is the ProxyJump, and %C hashes %l%h%p%r%j (and %l%h%p%r, as ssh before 9.6)");
+  ], "%j is the ProxyJump, and %C hashes %l%h%p%r%j, as ssh 9.6 and later do");
 }
 
 // Each expected value is what `ssh -G` printed for the same config.
@@ -362,10 +361,7 @@ async function testTokensAsSshExpandsThem(hosts) {
       `/x/j_B.Example/C_${hash(`${full}multi.example22${user}B.Example`)}`,
     ], "%j is the last hop");
     assert.deepEqual(byId(list, "v6").userKnownHostsFiles, ["/x/j_fe80::1"]);
-    assert.deepEqual(byId(list, "older").userKnownHostsFiles, [
-      `/x/C_${hash(`${full}o.example22ub.example`)}`,
-      `/x/C_${hash(`${full}o.example22u`)}`,
-    ]);
+    assert.deepEqual(byId(list, "older").userKnownHostsFiles, [`/x/C_${hash(`${full}o.example22ub.example`)}`], "one file, with the jump host hashed in");
     assert.deepEqual(byId(list, "onepass").userKnownHostsFiles, ["/x/a%b/%h"], "a variable's value is not expanded again");
     assert.equal(byId(list, "lower").host, "L.example", "keywords ignore case");
     assert.deepEqual(byId(list, "lower").userKnownHostsFiles, ["/x/l.example"]);
@@ -420,7 +416,7 @@ async function testRefusalsAndRevokedHostKeys(hosts) {
     assert.equal(host.userKnownHostsFiles, undefined, `${id}: no file is read in its place`);
     assert.deepEqual(await hosts.knownHostsSettings(host), { refusal }, id);
   }
-  assert.deepEqual(byId(list, "revoked").revokedHostKeys, [[path.join(HOME, ".ssh", "revoked_r.example")]]);
+  assert.deepEqual(byId(list, "revoked").revokedHostKeys, [path.join(HOME, ".ssh", "revoked_r.example")]);
   assert.equal(byId(list, "revoked-none").revokedHostKeys, undefined, "none: no file");
   assert.deepEqual(await hosts.knownHostsSettings(byId(list, "revoked")), {
     files: [
@@ -429,7 +425,7 @@ async function testRefusalsAndRevokedHostKeys(hosts) {
       "/etc/ssh/ssh_known_hosts",
       "/etc/ssh/ssh_known_hosts2",
     ],
-    revoked: [[path.join(HOME, ".ssh", "revoked_r.example")]],
+    revoked: [path.join(HOME, ".ssh", "revoked_r.example")],
   }, "ssh's default known_hosts files");
 }
 
@@ -470,12 +466,12 @@ async function testSystemSshConfig(hosts) {
   try {
     assert.deepEqual(await hosts.knownHostsSettings(manual), {
       files: ["/etc/ssh/users/ops_nas.corp", "/etc/ssh/corp_known", "/etc/ssh/corp_known2"],
-      revoked: [["/etc/ssh/revoked"]],
+      revoked: ["/etc/ssh/revoked"],
     }, "any host: an Include relative to /etc/ssh, first match wins, tokens expand");
     const list = await hosts.readSshConfigHosts();
     assert.deepEqual(await hosts.knownHostsSettings(byId(list, "cfg")), {
       files: ["/etc/ssh/users/dev_nas.corp", "/etc/ssh/all_known"],
-      revoked: [["/etc/ssh/revoked"]],
+      revoked: ["/etc/ssh/revoked"],
     }, "a config host is matched by its alias, as ssh matches Host lines");
     assert.deepEqual(
       (await hosts.knownHostsSettings(byId(list, "own-file"))).files,
@@ -497,7 +493,7 @@ async function testSystemSshConfig(hosts) {
     );
     assert.deepEqual(await hosts.knownHostsSettings(manual), {
       files: [path.join(HOME, ".ssh", "corp_nas.corp"), "/etc/ssh/corp_known", "/etc/ssh/corp_known2"],
-      revoked: [[path.join(HOME, ".ssh", "revoked_global")]],
+      revoked: [path.join(HOME, ".ssh", "revoked_global")],
     }, "~/.ssh/config wins for a manual host, the system's fills the rest");
     const box = {
       id: "codara-dev",
@@ -509,7 +505,7 @@ async function testSystemSshConfig(hosts) {
       codaraBoxId: "b1",
       proxyCommand: ["/opt/codaracloud", "ssh-proxy", "b1"],
     };
-    assert.deepEqual((await hosts.knownHostsSettings(box)).revoked, [[path.join(HOME, ".ssh", "revoked_global")]], "a Codara box too");
+    assert.deepEqual((await hosts.knownHostsSettings(box)).revoked, [path.join(HOME, ".ssh", "revoked_global")], "a Codara box too");
     write(".ssh/config", "Host *\n  UserKnownHostsFile ~/.ssh/kh_%Z\n");
     assert.deepEqual(await hosts.knownHostsSettings(manual), {
       refusal: 'UserKnownHostsFile "~/.ssh/kh_%Z" uses %Z, which ssh does not accept there',
@@ -551,7 +547,7 @@ async function testOnlyMainSetsProxy(hosts) {
     hostKeyAlias: "x",
     userKnownHostsFiles: ["/tmp/attacker_known_hosts"],
     globalKnownHostsFiles: ["/tmp/attacker_known_hosts"],
-    revokedHostKeys: [["/tmp/attacker_revoked"]],
+    revokedHostKeys: ["/tmp/attacker_revoked"],
     sshConfigRefusal: "forged",
   };
   const saved = await hosts.saveManualHost(forged);

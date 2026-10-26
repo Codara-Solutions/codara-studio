@@ -872,7 +872,7 @@ function hasSshKeygen() {
         reset();
         confirm = setting;
         answer = true;
-        withRevoked([[revokedFile]]);
+        withRevoked([revokedFile]);
         harness.files.set(revokedFile, data);
         // Listed and stored, so only RevokedHostKeys can refuse it.
         harness.files.set("/home/me/.ssh/known_hosts", `nas.local ssh-ed25519 ${b64}\n`);
@@ -891,17 +891,11 @@ function hasSshKeygen() {
 
     reset();
     confirm = true;
-    withRevoked([[revokedFile]]);
+    withRevoked([revokedFile]);
     const missing = await connect("nas");
     assert.equal(missing.state, "error");
     assert.match(missing.error, /RevokedHostKeys \/home\/me\/\.ssh\/revoked cannot be read/, "ssh refuses a file it cannot read");
 
-    reset();
-    withRevoked([["/home/me/.ssh/revoked_new", revokedFile]]);
-    harness.files.set(revokedFile, `ssh-ed25519 ${b64}\n`);
-    assert.equal((await connect("nas")).state, "error", "either %C candidate may revoke the key");
-
-    // OpenSSH 10.3+ reads several RevokedHostKeys files, one after another.
     const second = "/home/me/.ssh/revoked_more";
     const listedAndStored = () => {
       harness.files.set("/home/me/.ssh/known_hosts", `nas.local ssh-ed25519 ${b64}\n`);
@@ -909,7 +903,16 @@ function hasSshKeygen() {
     };
     reset();
     listedAndStored();
-    withRevoked([[revokedFile], [second]]);
+    withRevoked(["/home/me/.ssh/revoked_missing", revokedFile]);
+    harness.files.set(revokedFile, `ssh-ed25519 ${other.toString("base64")}\n`);
+    const firstMissing = await connect("nas");
+    assert.equal(firstMissing.state, "error", "a file ssh cannot read refuses, even when the next one reads");
+    assert.match(firstMissing.error, /RevokedHostKeys \/home\/me\/\.ssh\/revoked_missing cannot be read/);
+
+    // OpenSSH 10.3+ reads several RevokedHostKeys files, one after another.
+    reset();
+    listedAndStored();
+    withRevoked([revokedFile, second]);
     harness.files.set(revokedFile, `ssh-ed25519 ${other.toString("base64")}\n`);
     harness.files.set(second, `ssh-ed25519 ${b64}\n`);
     const bySecond = await connect("nas");
@@ -918,7 +921,7 @@ function hasSshKeygen() {
 
     reset();
     listedAndStored();
-    withRevoked([[revokedFile], [second]]);
+    withRevoked([revokedFile, second]);
     harness.files.set(revokedFile, `ssh-ed25519 ${other.toString("base64")}\n`);
     const secondMissing = await connect("nas");
     assert.equal(secondMissing.state, "error", "one file ssh cannot read refuses, even after one it read");
@@ -926,7 +929,7 @@ function hasSshKeygen() {
 
     reset();
     listedAndStored();
-    withRevoked([[revokedFile], [second]]);
+    withRevoked([revokedFile, second]);
     harness.files.set(revokedFile, `ssh-ed25519 ${other.toString("base64")}\n`);
     harness.files.set(second, krl());
     assert.equal((await connect("nas")).state, "connected", "neither file revokes the key");
@@ -956,7 +959,7 @@ function hasSshKeygen() {
         reset();
         confirm = false;
         harness.serverKey = plain;
-        harness.settings.nas = { files: ["/home/me/.ssh/known_hosts"], revoked: [["/home/me/.ssh/revoked"]] };
+        harness.settings.nas = { files: ["/home/me/.ssh/known_hosts"], revoked: ["/home/me/.ssh/revoked"] };
         harness.files.set("/home/me/.ssh/revoked", `# retired by its certificate\n${certLine}`);
         harness.files.set(KNOWN, JSON.stringify({ "nas.local:22": keys.storedFingerprint(plain) }));
         const status = await connect("nas");
@@ -1035,7 +1038,7 @@ function hasSshKeygen() {
 
       reset();
       confirm = false;
-      harness.settings.nas = { files: ["/home/me/.ssh/known_hosts"], revoked: [["/home/me/.ssh/revoked"]] };
+      harness.settings.nas = { files: ["/home/me/.ssh/known_hosts"], revoked: ["/home/me/.ssh/revoked"] };
       harness.files.set("/home/me/.ssh/revoked", `ssh-ed25519 ${other.toString("base64")}\n${malformed[2][1]}`);
       harness.files.set(KNOWN, JSON.stringify({ "nas.local:22": keys.storedFingerprint(key) }));
       const refused = await connect("nas");

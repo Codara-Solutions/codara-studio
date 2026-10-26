@@ -84,8 +84,7 @@ export interface RemoteHostConfig {
    */
   userKnownHostsFiles?: string[];
   globalKnownHostsFiles?: string[];
-  /** Each RevokedHostKeys file, as the paths it may expand to. */
-  revokedHostKeys?: string[][];
+  revokedHostKeys?: string[];
   /** Why ssh would refuse to connect with this host's config; Codara refuses too. Main only. */
   sshConfigRefusal?: string;
 }

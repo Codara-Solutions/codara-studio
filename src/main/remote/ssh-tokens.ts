@@ -33,26 +33,11 @@ export function expandHostName(value: string, alias: string): string {
  * `~` first, then `${VAR}` and %% %C %d %h %i %j %k %L %l %n %p %r %u in one
  * pass, so a variable's value is never expanded again.
  *
- * Usually one path. ssh before 9.6 hashes %C without %j (and refuses %j), so
- * for a host behind a ProxyJump a %C path also yields the file an older ssh
- * wrote.
+ * The path for OpenSSH 9.6 and later, which hash %C with the ProxyJump host;
+ * Codara reads an older or unknown release with 9.6+ rules (ssh-version.ts).
  */
-export function expandSshPath(value: string, context: SshTokenContext): string[] {
-  const tokens = fileTokens(context);
-  const used = new Set<string>();
-  const tracked: Record<string, () => string> = {};
-  for (const [key, get] of Object.entries(tokens)) {
-    tracked[key] = () => {
-      used.add(key);
-      return get();
-    };
-  }
-  const text = expandTilde(value);
-  const current = expand(text, tracked, true);
-  const jump = lastJumpHost(context.proxyJump);
-  if (!used.has("C") || used.has("j") || !jump) return [current];
-  const older = expand(text, { ...tokens, C: () => connectionHash(context, "") }, true);
-  return older === current ? [current] : [current, older];
+export function expandSshPath(value: string, context: SshTokenContext): string {
+  return expand(expandTilde(value), fileTokens(context), true);
 }
 
 /**
