@@ -421,6 +421,141 @@ choice), `port-forward-runtime.ts` (wiring and IPC), `forwardOut` and
 ordinary `RemoteConnection` whose transport is a ProxyCommand, so it forwards
 the same way.
 
+#### Agents on SSH machines
+
+With the **Keep agents running on SSH machines** setting on (the
+`machinesEnabled` preference, on by default; only a choice the user made,
+recorded as `machinesEnabledChosen`, turns it off),
+an agent pane in an SSH workspace (Claude Code, Codex, Grok or Pi) runs inside
+tmux on the machine instead of directly in the SSH shell. The agent then
+keeps working when Studio quits or the network drops.
+
+- **Start.** `buildRemoteAgentLaunch` in `remote-agents.ts` types one line
+  into the remote shell. It attaches when the pane's session
+  (`codara-<paneId>`) is already alive, reports a CLI missing from the login
+  shell's PATH, and otherwise starts the agent with `tmux new-session -A` in
+  the workspace folder. tmux runs as a private server (`tmux -L codara -f
+  /dev/null`) so the user's own tmux config and sessions are never touched,
+  with no status bar, no prefix key (Ctrl+B reaches the agent and nothing
+  can detach the pane) and the alternate screen off so the pane's scrollback
+  and agent detection work as on a plain shell. Without tmux, or with tmux
+  older than 2.1, the agent starts directly, with a note that it stops when
+  Studio disconnects.
+- **Restore.** Every other remote pane, whatever the setting, probes the
+  machine for its session and attaches when it is alive, so an agent is
+  never started a second time beside the one in tmux (a restored
+  `claude --resume` with the setting turned off since included), and its
+  close still ends it. The setting only decides whether new agents start in
+  tmux. Probes and kills run under a plain `sh -c` with the usual install
+  folders added to PATH, never a login shell, so a profile that runs
+  `exec fish` cannot swallow them.
+- **Dropped connection.** `remote-pty.ts` keeps an agent pane open when its
+  channel closes without an exit status, prints a dim note, reconnects with
+  backoff (1 s up to 30 s, about two minutes in all), checks the session is
+  still alive and attaches on a new channel. These attempts are quiet
+  (`ensure({ quiet: true })` in `connections.ts`): they never ask for a
+  password or passphrase and never dial a Codara box, whose wake costs money.
+  When the host needs the user or the attempts run out, the pane waits for a
+  key, and that round may ask. It stops when the session is gone or the user
+  disconnects the host.
+- **Ending.** Closing the pane, Cora stopping it, or deleting its folder ends
+  the tmux session (`markRemoteAgentEnd` in `pty-manager.ts`). Quitting
+  Studio, closing a window, or a pane that comes back within the close's
+  grace period leave it running. A pane closed while its host is
+  disconnected, or that needs a password to reach, leaves the agent running
+  on the machine. A pane opened again with the same id waits for its old
+  session's kill first.
+- **Not covered.** Only agents Studio starts itself (a new agent pane or
+  tab) run in tmux. An agent typed by hand into a remote shell pane
+  runs directly in that shell and stops when the connection drops.
+
+#### Machines
+
+**Settings, Machines** (`components/machines/MachinesSettings.tsx`) lists
+this computer and every SSH host: status, CPU, memory, free disk and load,
+which agent CLIs and tmux are on the machine's login PATH, the agents
+running there (with Show, which jumps to the pane), and agent sessions no
+pane on this computer shows (with Stop). A session another computer's Codara,
+or someone's own ssh, has open (a tmux client is attached) reads "Open
+elsewhere" and cannot be stopped; the kill command checks again on the
+machine. **Add a machine** reuses the SSH manager's host form, which also
+takes `user@host:port` (port 1 to 65535).
+
+- **Numbers.** `machines.ts` builds the rows; it probes a host only while it
+  is connected, never connecting one itself, and reuses a reading younger
+  than 4 seconds. The probe (`machine-probe.ts`) is one `sh -lc` exec with
+  marked sections. Inside a container `/proc` describes the host, so
+  cgroup v2's `cpu.max` and `memory.max` win when set, and CPU share comes
+  from `cpu.stat` usage over wall time. This computer reads Node's `os`.
+- **Where.** With the preference on, the Add pane menu shows a Where row: the
+  pane's own machine, this computer when the pane is on another one, and
+  every other connected machine (`components/machines/whereChoices.ts`). A
+  new pane opens in the folder of a workspace already on the chosen machine,
+  else that user's home.
+- **Host keys.** With the preference on, a key Studio has not stored is
+  trusted silently only when `~/.ssh/known_hosts` lists it (read only,
+  `host-keys.ts` handles hashed names, patterns and `@revoked`, which wins
+  even over a key Codara stored, and skips a marker OpenSSH does not know;
+  a host with
+  `HostKeyAlias` is looked up by the alias in lowercase, without the port,
+  as OpenSSH does; `/etc/ssh/ssh_known_hosts` and a `UserKnownHostsFile` or
+  `GlobalKnownHostsFile` from `~/.ssh/config`, else `/etc/ssh/ssh_config`,
+  are read too, for a manual host or a Codara box as for a config host
+  (matched by the name Codara connects to), as `knownHostsSettings` in
+  `ssh-hosts.ts` lists them). Which Host and Match blocks apply is decided
+  by `ssh-config-match.ts` as OpenSSH 9.6 decides it (Match user is the
+  login, Includes keep their own scope, `Match final` rereads the files;
+  values are split into words with quotes, escapes and comments as ssh's
+  `argv_split` does).
+  A Match criterion it cannot evaluate (exec, localnetwork) refuses the
+  host when its block could set a known-hosts setting, and a line ssh
+  cannot read refuses every host, both naming the file and line.
+  `ssh-tokens.ts` expands `${VAR}` and ssh's tokens in one pass with the
+  values `ssh -G` prints (OpenSSH 9.6): `%h` and a `HostKeyAlias`
+  lowercased, `%j` the last ProxyJump hop's host, and a `%C` path behind a
+  ProxyJump also as ssh before 9.6 hashed it, without `%j`. A value ssh
+  cannot expand (an unknown token, an unset variable) makes ssh refuse to
+  connect, so Codara refuses that host too, saying why, whatever the
+  preference. `RevokedHostKeys` (a KRL or a key list, whose certificate
+  lines revoke the key they certify, read by `revokedByFile` in
+  `host-keys.ts`) refuses the keys it revokes whatever
+  the preference, and a file ssh could not read refuses the connection, as
+  ssh does, including a key list line it cannot read in full (a point off
+  its curve, trailing bytes, a certificate whose signature fails). The handshake asks for the key types
+  known_hosts lists first, reordering ssh2's own list as OpenSSH does, and a key known_hosts lists is accepted even when Codara
+  stored another of the host's keys (one per host, any type). Otherwise
+  `HostKeyPrompt.tsx` asks "Is this <host>?" with the fingerprint, with a
+  louder note when only a `@cert-authority` line covers the host (ssh would
+  have checked a certificate; Codara cannot). Only once
+  the host has answered does the handshake wait up to 5 minutes for the
+  user; a machine that is down fails after the usual 20 seconds, and a
+  prompt ends with the attempt it belongs to (sshd drops a slow handshake
+  after its LoginGraceTime). Two hosts for one address (two aliases of
+  one machine) offering one key share one prompt, which lasts while either
+  still waits for it. Every window drops a prompt once it ends, however it
+  ends. A key that differs from Codara's stored one, or that
+  known_hosts does not list while listing others for the host (another key,
+  or another key type), is refused, never asked about; so is a first-use key
+  for an address another host was trusted at meanwhile (every change to the
+  store runs alone). The Machines card
+  shows both fingerprints and **Trust the new key** (`trustChangedHostKey`),
+  which trusts only the key the card showed and is forgotten when the host
+  connects again, is disconnected, edited or removed. Codara Cloud boxes
+  keep trust on first use. With the preference off, keys behave as before,
+  except that a key known_hosts marks `@revoked` is still refused.
+
+Tests: `test-remote-agents` runs the generated lines under `/bin/sh` with
+fake `tmux` and `claude`, `test-remote-pty` covers reconnects with fake
+channels, `test-pty-remote-agents` covers the wiring in `pty-manager.ts`, and
+`tests/e2e/remote-agent.spec.ts` runs the built app against a real sshd and
+tmux in a container (`tests/e2e/fixtures/ssh-host`, started by
+`scripts/ssh-test-host.cjs`; skipped without Docker). `test-machine-probe`
+parses recorded probe output (a host, a 1 CPU and 512 MiB container, macOS)
+and drives the service with fake connections, `test-host-keys` covers
+fingerprints, known_hosts and the confirm flow, and
+`tests/e2e/machines.spec.ts` adds a machine, confirms its key, reads its
+limits and starts an agent on it from the Where row.
+
 ### 3.6 Claude Code hooks
 
 `hook-installer.ts` builds the `hooks` block that `agent-launch-integration.ts`
@@ -538,13 +673,15 @@ Debugging:
 | Agent session search (the rail's Sessions view) | `src/main/session-search/session-index.ts` (the index, no Electron) | `transcript-parsers.ts`, `session-index-worker.ts` (its thread), `service.ts` (pacing, IPC, the agent tool); `components/session-search/`; `test-session-search`, `tests/e2e/session-search.spec.ts`; [agent-session-search.md](./agent-session-search.md) |
 | The rail's Agents view | `src/shared/agent-board.ts` (which group a card lands in) | `components/agent-board/`; `src/main/agent-board.ts` and `terminalAgentActivitySnapshot` in `terminal-agent-notify.ts`; `test-agent-board`, `tests/e2e/agent-board.spec.ts` |
 | A workspace's status line and its agent lines in the rail | `src/shared/agent-status.ts` (each agent's state, the summary line) | `components/workspace-status/WorkspaceAgentsLine.tsx`, `agentLinesStore.ts`; `src/main/workspace-status/agent-notes.ts` and `preview-tools/workspace-status.ts` (the note an agent writes); `test-agent-status`, `test-workspace-status` |
+| Worktrees nested under their project in the rail, each agent on its row, the merged fold | `src/shared/rail-tree.ts` (which worktree nests where, which row each agent shows on, the order) | `WorkspaceFamily` and the nested `WorkspaceRow` in `components/WorkspaceRail.tsx`, `components/rail/WorkspaceChildren.tsx`, `rail/railFolds.ts`; DESIGN.md "Worktrees in the rail"; `test-rail-tree`, e2e `rail-worktrees` |
 | The preview browser | `components/Preview/previewRpc.ts` (DOM actions) or `src/main/preview-input.ts` (trusted input) | The socket handlers in `src/main/preview-tools/` (one table per area, merged in `index.ts`); `test-preview-tools-routing` |
 | The chat UI | `components/chat/` | `lib/useRunExecutionRecord.ts`, `chat/timeline.ts` |
 | Automations and looms | `scheduler.ts`, `automation-loop.ts`, `loom-*.ts` | `components/automations/` |
 | Workflows | `workflow-driver.ts` (runs), `workflow-runtime.ts` (script API, journal) | `components/workflows/`; `test-workflow-*`, `tests/e2e/workflow-run.spec.ts` |
 | Git or GitHub features | `src/main/git-*.ts`, `src/main/github-*.ts` | `components/git/` |
 | Worktrees agents create and remove | `src/main/agent-worktrees.ts` (the policy, no Electron) | The `worktree.*` handlers in `agent-socket.ts`; `workspace-state-edits.ts`; `test-agent-worktrees`, `tests/e2e/agent-worktree.spec.ts` |
-| Clean up worktrees | `src/main/worktree-cleanup/` (`inspect.ts` the facts and the full check, `scan.ts` the list, `remove.ts` the guarded removal, `rail.ts` the rail's merged mark, Clean up and automatic cleanup of missing folders, `space.ts` sizes; only `index.ts` touches Electron) | `src/shared/worktree-cleanup.ts` (filters, the removal outlook); `components/worktree-cleanup/`, `git/useWorktreeRailStates.ts` (the rail); `test-worktree-cleanup`, `test-worktree-rail-cleanup`, `tests/e2e/worktree-cleanup.spec.ts`, `tests/e2e/worktree-rail-cleanup.spec.ts` |
+| Pull requests on the rail, and the agent told when CI fails | `src/main/github-ci-watch.ts` (the watcher: reads, backoff, rows, alerts) | `github-conditional.ts` (ETag reads through `gh api`), `ci-agent-nudge.ts` (which agent, when it is free), `pull-request-watch-ipc.ts`; `src/shared/pull-request-watch.ts`; `git/pullRequestWatchStore.ts`, `git/PullRequestMark.tsx`; `test-github-ci-watch`, `test-ci-agent-nudge`, `tests/e2e/pr-watch-agent.spec.ts` |
+| Clean up worktrees | `src/main/worktree-cleanup/` (`inspect.ts` the facts and the full check, `scan.ts` the list, `remove.ts` the guarded removal, `rail.ts` the rail's merged mark, Clean up and automatic cleanup of missing folders, `space.ts` sizes; only `index.ts` touches Electron) | `src/shared/worktree-cleanup.ts` (filters, the removal outlook); `components/worktree-cleanup/`, `git/useWorktreeRailStates.ts` and `components/rail/RailCleanUp.tsx` (the rail: its confirm and what held a Clean up back); `test-worktree-cleanup`, `test-worktree-rail-cleanup`, `tests/e2e/worktree-cleanup.spec.ts`, `tests/e2e/worktree-rail-cleanup.spec.ts` |
 | What a new worktree gets (copied files, links, setup commands) | `src/main/worktree-setup/` (`service.ts` runs it, `plan.ts` and `materialize.ts` decide and copy), `src/shared/worktree-setup.ts` (the file format) | `components/worktree-setup/` (the tray, the log, the setup file dialog); `test-worktree-setup`, `tests/e2e/worktree-setup.spec.ts`; [worktree-setup.md](./worktree-setup.md) |
 | The phone protocol | `remote-access/rpc.ts` | `production.ts`; the interop suites in [scripts/README.md](../scripts/README.md#remote-access-phone-and-ssh-workspaces) |
 | The Claude Code hook | `src/main/hook-installer.ts` | `resources/claude-hooks/codara-hook.py`, `hook-watcher.ts` |

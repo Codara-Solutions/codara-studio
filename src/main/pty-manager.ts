@@ -28,6 +28,14 @@ import { getHookRpcEnvSafe } from "./hook-rpc";
 import { codaraHome } from "./codara-home";
 import { logMain } from "./file-log";
 import { getConnection, shQuote } from "./remote/connections";
+import {
+  buildRemoteAgentAttach,
+  buildRemoteAgentLaunch,
+  buildRemoteAgentProbe,
+  remoteAgentRuntime,
+} from "./remote/remote-agents";
+import { createRemotePtyHandle, remoteAgentKillSettled, type RemotePtyHandle } from "./remote/remote-pty";
+import { loadPreferences } from "./preferences-store";
 import { formatManualAgentStartup, parseManualAgentStartupCommand } from "./manual-agent-startup";
 import { assertManualAgentLaunchAllowed } from "./orchestration/project-policy";
 import { buildCodexCliSharedEnvironment } from "./orchestration/codex-cli-profile-execution";
@@ -83,7 +91,9 @@ type PtyHandle = Pick<nodePty.IPty, "pid" | "write" | "resize" | "kill" | "onDat
   // the ssh2 remote adapter, hence optional. Distinct from this module's
   // pause()/resume(), which only divert the RENDERER sink and leave the
   // child producing at full speed. See pauseFlow below.
-  Partial<Pick<nodePty.IPty, "pause" | "resume">>;
+  Partial<Pick<nodePty.IPty, "pause" | "resume">> &
+  // Remote agent panes only (remote/remote-pty.ts).
+  Partial<Pick<RemotePtyHandle, "waitingForKey" | "reconnectByUser">>;
 
 interface Session {
   id: string;
@@ -661,6 +671,8 @@ async function spawnWithSessionLock(
   if (pending) {
     clearTimeout(pending);
     pendingKills.delete(opts.id);
+    // The pane came back before its close took effect: its agent stays.
+    endRemoteAgentOnKill.delete(opts.id);
   }
 
   const existing = sessions.get(opts.id);
@@ -981,70 +993,88 @@ function serializeSessionSpawn<T>(id: string, operation: () => Promise<T>): Prom
 // path and optionally fire the startup command as the shell's first input,
 // so callers get `startupCommandHandled: true` (no renderer type-after-mount
 // race, same as the pwsh args-takeover path locally).
+// Remote panes whose agent session (remote/remote-agents.ts) must end with
+// the pane: closed by the user, stopped by Cora, or under a deleted folder.
+// Anything else that drops the channel (quitting Studio, a closed window, a
+// lost connection) leaves the agent working on the machine for the pane to
+// attach to again.
+const endRemoteAgentOnKill = new Set<string>();
+
+function markRemoteAgentEnd(id: string): void {
+  const session = sessions.get(id);
+  if (session && isRemotePath(session.cwd)) endRemoteAgentOnKill.add(id);
+}
+
+async function remoteAgentSessionAlive(
+  conn: Awaited<ReturnType<typeof getConnection>>,
+  paneId: string,
+): Promise<boolean> {
+  try {
+    return (await conn.exec(buildRemoteAgentProbe(paneId), { timeoutMs: 8_000 })).code === 0;
+  } catch {
+    return false;
+  }
+}
+
 async function doSpawnRemote(
   opts: SpawnOptions,
 ): Promise<{ id: string; pid: number; startupCommandHandled?: boolean }> {
+  let unbindEarly = () => {};
   const parts = parseRemotePath(opts.cwd);
   if (!parts) throw new Error(`Malformed remote path: ${opts.cwd}`);
   const cols = Math.max(1, opts.cols | 0);
   const rows = Math.max(1, opts.rows | 0);
   const conn = await getConnection(parts.hostId);
-  const channel = await conn.shell({ cols, rows });
+  // A close that is still ending this pane's old agent session must land
+  // before the new pane looks for one, or it kills the new agent.
+  await remoteAgentKillSettled(opts.id);
+  const startup = opts.startupCommand?.trim();
+  // The setting only decides whether a new agent starts in tmux. Any other
+  // remote pane may be a restored pane whose agent still runs in tmux (the
+  // setting may have been turned off since): it attaches to that agent, never
+  // starts a second one beside it (`claude --resume` on the same transcript),
+  // and its close still ends it.
+  const machines = (await loadPreferences()).machinesEnabled === true;
+  const agentRuntime = machines ? remoteAgentRuntime(startup) : null;
+  let closedEarly: { exitCode: number | null } | null = null;
+  const [channel, reattach] = await Promise.all([
+    conn.shell({ cols, rows }).then((ch) => {
+      // The handle binds after the probe: a close in between must not be lost.
+      let exitCode: number | null = null;
+      const onExit = (code: unknown) => {
+        exitCode = typeof code === "number" ? code : 0;
+      };
+      const onClose = () => {
+        closedEarly = { exitCode };
+      };
+      ch.on("exit", onExit);
+      ch.on("close", onClose);
+      unbindEarly = () => {
+        ch.off("exit", onExit);
+        ch.off("close", onClose);
+      };
+      return ch;
+    }),
+    agentRuntime ? Promise.resolve(false) : remoteAgentSessionAlive(conn, opts.id),
+  ]);
+  unbindEarly();
+  const agentPane = agentRuntime !== null || reattach;
+  endRemoteAgentOnKill.delete(opts.id);
 
-  const handle: PtyHandle = {
-    pid: 0,
-    write: (data: string) => {
-      try {
-        channel.write(data);
-      } catch {
-        /* channel already closed */
-      }
-    },
-    resize: (c: number, r: number) => {
-      try {
-        // ssh2 order is (rows, cols, heightPx, widthPx).
-        channel.setWindow(r, c, 0, 0);
-      } catch {
-        /* ignore */
-      }
-    },
-    kill: () => {
-      try {
-        channel.close();
-      } catch {
-        /* ignore */
-      }
-    },
-    onData: (cb: (data: string) => void) => {
-      const listener = (d: Buffer) => cb(d as unknown as string);
-      channel.on("data", listener);
-      channel.stderr.on("data", listener);
-      return {
-        dispose: () => {
-          channel.off("data", listener);
-          channel.stderr.off("data", listener);
-        },
-      };
-    },
-    onExit: (cb: (e: { exitCode: number; signal?: number }) => void) => {
-      // A channel that closes without an exit-status (dropped connection, a
-      // signal) reports -1, so the renderer keeps the pane instead of reading
-      // it as the user's clean `exit`.
-      let exitCode = -1;
-      const onStatus = (code: number | null) => {
-        if (typeof code === "number") exitCode = code;
-      };
-      const listener = () => cb({ exitCode });
-      channel.on("exit", onStatus);
-      channel.on("close", listener);
-      return {
-        dispose: () => {
-          channel.off("exit", onStatus);
-          channel.off("close", listener);
-        },
-      };
-    },
-  };
+  const handle: PtyHandle = createRemotePtyHandle({
+    conn,
+    channel,
+    paneId: opts.id,
+    hostLabel: parts.hostId,
+    cwd: parts.path,
+    cols,
+    rows,
+    agentPane,
+    endAgentOnKill: () => endRemoteAgentOnKill.delete(opts.id),
+    reportExitStatus: machines,
+    closedBeforeBind: closedEarly,
+    log: (message) => logMain("pty", message),
+  });
 
   const stranded = opts.webContents ? null : consumeStrandedBinding(opts.id);
   const createdAt = Date.now();
@@ -1147,10 +1177,21 @@ async function doSpawnRemote(
   // First input: land in the workspace directory, mark the pane, wipe the
   // banner + echoed setup line, then run the caller's startup command (if
   // any) as the shell's first real action.
-  const startup = opts.startupCommand?.trim();
+  const first = agentRuntime && startup
+    ? buildRemoteAgentLaunch({
+        paneId: opts.id,
+        hostLabel: parts.hostId,
+        cols,
+        rows,
+        startup,
+        runtime: agentRuntime,
+      })
+    : reattach
+      ? buildRemoteAgentAttach(opts.id)
+      : startup;
   const setup =
     `cd ${shQuote(parts.path)} && export SPARK_TERMINAL=1 SPARK_REMOTE=1 && clear` +
-    (startup ? ` && ${startup}` : "") +
+    (first ? ` && ${first}` : "") +
     "\n";
   channel.write(setup);
 
@@ -2169,9 +2210,28 @@ export function nativeGrokProfileId(id: string): string | undefined {
   return sessions.get(id)?.nativeGrokProfileId;
 }
 
-export function write(id: string, data: string): void {
+/** A write to a remote agent pane whose machine dropped and waits for the user's key. */
+export class RemotePaneDisconnectedError extends Error {}
+
+/**
+ * `typed` marks a key the user typed in the pane (the renderer's xterm). A
+ * remote agent pane whose machine dropped reconnects only for such a key:
+ * a reconnect may ask for a password or wake a stopped Codara box, which
+ * costs money, so anything else Studio writes there (nudges, Cora, MCP
+ * terminal_write) is refused with RemotePaneDisconnectedError.
+ */
+export function write(id: string, data: string, opts?: { typed?: boolean }): void {
   const s = sessions.get(id);
   if (!s) return;
+  if (s.pty.waitingForKey?.()) {
+    if (!opts?.typed) {
+      const host = parseRemotePath(s.cwd)?.hostId ?? "The machine";
+      throw new RemotePaneDisconnectedError(`${host} is disconnected: press a key in the pane to reconnect.`);
+    }
+    // The key that asks for the reconnect is not typed into the agent.
+    s.pty.reconnectByUser?.();
+    return;
+  }
   s.lastInputAt = Date.now();
   s.pty.write(data);
 }
@@ -2457,6 +2517,7 @@ function exitPayload(s: Session, exitCode: number, signal: number | undefined): 
 export function dispose(id: string, opts?: { sanctioned?: boolean }): void {
   if (!sessions.has(id) || pendingKills.has(id)) return;
   if (opts?.sanctioned) markSanctioned(id);
+  markRemoteAgentEnd(id);
   const timer = setTimeout(() => {
     pendingKills.delete(id);
     killNow(id);
@@ -2472,6 +2533,7 @@ export function dispose(id: string, opts?: { sanctioned?: boolean }): void {
 // must never repaint that worker as crashed.
 export function killImmediate(id: string): void {
   markSanctioned(id);
+  markRemoteAgentEnd(id);
   killNow(id);
 }
 
@@ -2508,6 +2570,7 @@ export function disposeUnderCwd(dir: string): number {
       // Reaping the shells that hold a deleted worktree open is Codara's own
       // teardown, not a process dying on its own.
       markSanctioned(id);
+      markRemoteAgentEnd(id);
       killNow(id);
       killed += 1;
     }
@@ -2530,6 +2593,11 @@ export function sessionsUnderCwd(dir: string): string[] {
 // The directory a session was spawned in. The shell may have moved since.
 export function sessionCwd(id: string): string | null {
   return sessions.get(id)?.cwd ?? null;
+}
+
+// Every live session and the directory it was spawned in (the Machines page).
+export function sessionCwds(): Array<{ id: string; cwd: string | null }> {
+  return [...sessions].map(([id, s]) => ({ id, cwd: s.cwd ?? null }));
 }
 
 // Pids of every live local session's shell.

@@ -70,6 +70,9 @@ export interface WorktreeCaller {
   runId?: string;
   // The terminal pane the calling agent runs in, already resolved.
   paneId?: string;
+  // Another workspace the call acts in, already allowed by the user through
+  // the cross-workspace terminal grant. Never read from tool JSON.
+  workspaceId?: string;
 }
 
 export type WorktreeCode =
@@ -127,6 +130,8 @@ export interface RendererTerminal {
   paneId: string;
   workspaceId: string;
   cwd?: string;
+  /** The tab's title, to name it when it holds a worktree. */
+  title?: string;
 }
 
 export interface ProcessUse {
@@ -205,6 +210,12 @@ export interface AgentWorktreeSetupRunner {
   get(idOrPath: string): Promise<WorktreeSetupStatus | null>;
   tail(id: string, lines: number): Promise<string>;
   summary(status: WorktreeSetupStatus, logTail: string): Record<string, unknown>;
+  // Stops a setup still going in the worktree and waits (at most timeoutMs)
+  // until it no longer writes there. False when it did not stop in time.
+  stop?(idOrPath: string, timeoutMs: number): Promise<boolean>;
+  // Takes its card off the tray, once the worktree is gone. By the id get()
+  // gave while the folder existed: its stored path may be spelled otherwise.
+  dismiss?(idOrPath: string): Promise<void>;
 }
 
 // codara_worktree_create waits at most this long for a setup that asks
@@ -217,6 +228,9 @@ const SETUP_LOG_LINES_MAX = 200;
 
 const AGENT_WORKTREE_LIMIT = 20;
 const FETCH_TIMEOUT_MS = 30_000;
+// A rolled-back terminal worktree waits this long for its setup to stop; the
+// MCP server's TERMINAL_WORKTREE_TIMEOUT_MS counts it in.
+const ROLLBACK_SETUP_STOP_MS = 10_000;
 const PANE_LOOKUP_TIMEOUT_MS = 2_000;
 const LIST_ITEM_BUDGET_MS = 10_000;
 const LIST_CONCURRENCY = 4;
@@ -243,12 +257,17 @@ export const REGENERABLE_IGNORED_PATTERNS: readonly string[] = [
   ".turbo/",
   ".cache/",
   "coverage/",
+  "test-results/",
+  "playwright-report/",
+  "blob-report/",
   "target/",
   ".venv/",
   "venv/",
   "__pycache__/",
   "*.pyc",
   ".pytest_cache/",
+  ".ruff_cache/",
+  ".mypy_cache/",
   ".gradle/",
   ".DS_Store",
   "*.tsbuildinfo",
@@ -500,23 +519,84 @@ function globToRegExp(glob: string): RegExp {
   return new RegExp(`^${escaped}$`);
 }
 
-// Directory patterns ("dist/") match the first path segment of an entry or
-// the basename of a collapsed ignored directory ("packages/a/node_modules/");
-// other patterns match the basename as a glob.
-export function isRegenerableIgnored(entry: string, extra: readonly string[] = []): boolean {
+// Secrets and local configuration a checkout never brings back (.env and
+// its variants, keys and certificates, package and network credentials),
+// wherever they sit: only a pattern the user marked regenerable for the
+// repository can let one go. The committed templates are not.
+const SECRET_FILES = [
+  /^\.env(?:[.-](?!(?:example|sample|template|dist|defaults)$)[\w.-]+)?$/i,
+  /^\.(?:envrc|npmrc|netrc)$/i,
+  /\.(?:pem|key)$/i,
+  /^id_(?:rsa|dsa|ecdsa|ed25519)$/i,
+];
+
+export function isSecretFile(name: string): boolean {
+  return SECRET_FILES.some((pattern) => pattern.test(name));
+}
+
+// Installed packages: a key or .env in one is the package's own file and
+// comes back with the install, so the walk does not list them as secrets.
+const DEPENDENCY_STORES = new Set(["node_modules", ".venv", "venv", "__pypackages__"]);
+
+function inDependencyStore(relative: string): boolean {
+  return relative.split("/").some((segment) => DEPENDENCY_STORES.has(segment));
+}
+
+// Where a package manager or build tool keeps its output next to its
+// manifest: a node_modules/ or test-results/ deeper down is regenerable only
+// beside one of these.
+const PACKAGE_MANIFESTS = [
+  "package.json",
+  "pyproject.toml",
+  "setup.py",
+  "Cargo.toml",
+  "go.mod",
+  "pom.xml",
+  "build.gradle",
+  "build.gradle.kts",
+  "composer.json",
+  "Gemfile",
+  "deno.json",
+];
+
+/** Tells whether a folder of the worktree at `root` holds a package manifest. */
+export function packageRootTester(root: string): (dir: string) => boolean {
+  const known = new Map<string, boolean>();
+  return (dir) => {
+    let found = known.get(dir);
+    if (found === undefined) {
+      found = PACKAGE_MANIFESTS.some((name) => existsSync(join(root, dir, name)));
+      known.set(dir, found);
+    }
+    return found;
+  };
+}
+
+// Directory patterns ("dist/") match a collapsed ignored directory by its
+// name, at the worktree's root or at a package root (isPackageRoot; without
+// it, the root only): git lists a wholly ignored folder as one entry, so a
+// match anywhere would let docs/test-results/ or a hand-made folder go
+// unasked. Other patterns match a file's basename as a glob. A .env matches
+// only the user's own patterns (extra).
+export function isRegenerableIgnored(
+  entry: string,
+  extra: readonly string[] = [],
+  isPackageRoot?: (dir: string) => boolean,
+): boolean {
   const normalized = entry.replace(/\\/g, "/");
   const isDir = normalized.endsWith("/");
   const segments = normalized.replace(/\/+$/, "").split("/").filter(Boolean);
   if (segments.length === 0) return true;
-  const first = segments[0];
   const last = segments[segments.length - 1];
-  for (const pattern of [...REGENERABLE_IGNORED_PATTERNS, ...extra]) {
+  const parent = segments.slice(0, -1).join("/");
+  const atPackageRoot = parent === "" || isPackageRoot?.(parent) === true;
+  const patterns = !isDir && isSecretFile(last) ? extra : [...REGENERABLE_IGNORED_PATTERNS, ...extra];
+  for (const pattern of patterns) {
     const trimmed = pattern.trim().replace(/^\.\//, "");
     if (!trimmed) continue;
     if (trimmed.endsWith("/")) {
       const name = trimmed.replace(/\/+$/, "");
-      const matcher = globToRegExp(name);
-      if (matcher.test(first) || (isDir && matcher.test(last))) return true;
+      if (isDir && atPackageRoot && globToRegExp(name).test(last)) return true;
     } else if (globToRegExp(trimmed).test(last)) {
       return true;
     }
@@ -525,10 +605,16 @@ export function isRegenerableIgnored(entry: string, extra: readonly string[] = [
 }
 
 const NESTED_SCAN_MAX_DIRS = 50_000;
+// Files the walk describes (name, size, mtime) for a confirmation's
+// fingerprint, and secret files it lists: past either, it proves nothing.
+const DESCRIBE_MAX_FILES = 20_000;
+const SECRET_LIST_MAX = 1_000;
 const NESTED_SCAN_CONCURRENCY = 16;
 
 interface NestedScan {
   found: string[];
+  /** Secret files inside ignored directories, relative to the root: a regenerable folder must not hide one. */
+  secrets: string[];
   // The ignored folder the walk could not finish, or null when it saw every
   // directory under them all.
   incomplete: string | null;
@@ -540,33 +626,59 @@ interface NestedScan {
 // first so a large node_modules/ cannot use up the budget before a hand-made
 // ignored folder is checked. A walk cut short by the budget or an unreadable
 // directory proves nothing, so the caller must treat it as a block.
+//
+// On the way it lists the secret files it meets, and with `describe` it
+// reports every file under a folder that is not regenerable (path, size,
+// mtime, in a stable order): a confirmation of those folders is tied to
+// what they held, not only to their names.
 export async function checkoutsInIgnored(
   root: string,
   entries: readonly string[],
   extra: readonly string[],
   maxDirs = NESTED_SCAN_MAX_DIRS,
+  options: { isPackageRoot?: (dir: string) => boolean; describe?: (line: string) => void } = {},
 ): Promise<NestedScan> {
+  const isPackageRoot = options.isPackageRoot ?? packageRootTester(root);
   const found: string[] = [];
+  const secrets: string[] = [];
   let incomplete: string | null = null;
   let budget = maxDirs;
-  const visit = async (relative: string): Promise<string[] | null> => {
+  let describedFiles = 0;
+  const visit = async (relative: string, described: boolean): Promise<{ dirs: string[]; lines: string[] } | null> => {
     const absolute = join(root, relative);
     if (existsSync(join(absolute, ".git"))) {
       found.push(resolve(absolute));
-      return [];
+      return { dirs: [], lines: [] };
     }
     const children = await fsp
       .readdir(absolute, { withFileTypes: true })
       .catch((err: NodeJS.ErrnoException) => (err?.code === "ENOENT" || err?.code === "ENOTDIR" ? [] : null));
     if (!children) return null;
-    return children.filter((child) => child.isDirectory()).map((child) => `${relative}${child.name}/`);
+    children.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    const dirs: string[] = [];
+    const lines: string[] = [];
+    for (const child of children) {
+      const path = `${relative}${child.name}`;
+      if (child.isDirectory()) {
+        dirs.push(`${path}/`);
+        if (described) lines.push(`${path}/`);
+        continue;
+      }
+      if (isSecretFile(child.name) && !inDependencyStore(relative)) secrets.push(path);
+      if (described) {
+        const stat = await fsp.lstat(join(root, path)).catch(() => null);
+        lines.push(`${path}\0${stat?.size ?? -1}\0${stat?.mtimeMs ?? -1}`);
+      }
+    }
+    return { dirs, lines };
   };
   const directories = entries.filter((entry) => entry.endsWith("/"));
   const ordered = [
-    ...directories.filter((entry) => !isRegenerableIgnored(entry, extra)),
-    ...directories.filter((entry) => isRegenerableIgnored(entry, extra)),
+    ...directories.filter((entry) => !isRegenerableIgnored(entry, extra, isPackageRoot)),
+    ...directories.filter((entry) => isRegenerableIgnored(entry, extra, isPackageRoot)),
   ];
   for (const entry of ordered) {
+    const described = Boolean(options.describe) && !isRegenerableIgnored(entry, extra, isPackageRoot);
     let level = [entry];
     while (level.length > 0 && !incomplete && found.length < MAX_LISTED_PATHS) {
       const next: string[] = [];
@@ -577,16 +689,22 @@ export async function checkoutsInIgnored(
           break;
         }
         budget -= batch.length;
-        for (const children of await Promise.all(batch.map(visit))) {
-          if (children === null) incomplete = entry;
-          else next.push(...children);
+        for (const result of await Promise.all(batch.map((dir) => visit(dir, described)))) {
+          if (result === null) {
+            incomplete = entry;
+            continue;
+          }
+          next.push(...result.dirs);
+          for (const line of result.lines) options.describe?.(line);
+          describedFiles += result.lines.length;
         }
+        if (describedFiles > DESCRIBE_MAX_FILES || secrets.length > SECRET_LIST_MAX) incomplete = entry;
       }
       level = next;
     }
     if (incomplete || found.length >= MAX_LISTED_PATHS) break;
   }
-  return { found, incomplete };
+  return { found, secrets, incomplete };
 }
 
 function dateStamp(date: Date): string {
@@ -647,14 +765,38 @@ async function deepestWorkspaceContaining(state: AppState, cwd: string): Promise
   return best?.workspace;
 }
 
+// The agent that made a worktree, by the pane or run it called from.
+function madeBy(workspace: Workspace, caller: WorktreeCaller): boolean {
+  return createdByCaller(workspace.copyBranch?.createdBy, caller);
+}
+
+function createdByCaller(creator: NonNullable<Workspace["copyBranch"]>["createdBy"], caller: WorktreeCaller): boolean {
+  if (creator?.kind !== "agent") return false;
+  return (
+    (caller.paneId !== undefined && creator.paneId === caller.paneId) ||
+    (caller.runId !== undefined && creator.runId === caller.runId)
+  );
+}
+
+/**
+ * `repoOf` names a worktree the caller made: its repository is the scope's,
+ * wherever the caller runs now. A coordinator that made a worktree in
+ * another workspace (terminal.create's worktree option) finds it again that
+ * way. A worktree someone else made leaves the scope as it was.
+ */
 export async function resolveWorktreeScope(
   caller: WorktreeCaller,
   deps: AgentWorktreeDeps,
   run?: RunState,
+  options: { repoOf?: string } = {},
 ): Promise<WorktreeScope | WorktreeRefusal> {
   const state = await deps.loadState();
   let callerWorkspace: Workspace | undefined;
-  if (run) {
+  if (caller.workspaceId) {
+    callerWorkspace = state.workspaces.find((workspace) => workspace.id === caller.workspaceId);
+    if (!callerWorkspace) return refusal("WORKTREE_NO_WORKSPACE");
+  }
+  if (!callerWorkspace && run) {
     callerWorkspace = state.workspaces.find((workspace) => workspace.id === run.workspaceId);
     const snapshotCwd = run.settingsSnapshot?.workspaceCwd;
     if (!callerWorkspace && typeof snapshotCwd === "string" && snapshotCwd) {
@@ -685,7 +827,15 @@ export async function resolveWorktreeScope(
   if (callerWorkspace.remote || isRemotePath(callerWorkspace.cwd)) {
     return refusal("WORKTREE_REMOTE_UNSUPPORTED");
   }
-  const source = callerWorkspace.copyBranch?.repoCwd ?? callerWorkspace.cwd;
+  const made = options.repoOf ? state.workspaces.find((workspace) => workspace.id === options.repoOf) : undefined;
+  const removed = options.repoOf && !made ? removedRepos.get(options.repoOf) : undefined;
+  const madeRepo =
+    made?.copyBranch && !isRemotePath(made.copyBranch.repoCwd) && madeBy(made, caller)
+      ? made.copyBranch.repoCwd
+      : removed && createdByCaller(removed.createdBy, caller)
+        ? removed.repoCwd
+        : null;
+  const source = madeRepo ?? callerWorkspace.copyBranch?.repoCwd ?? callerWorkspace.cwd;
   let repoCwd: string;
   try {
     const sourceReal = await fsp.realpath(source);
@@ -915,6 +1065,100 @@ export async function createAgentWorktree(
       .catch(() => undefined);
   }
   return result;
+}
+
+/**
+ * terminal.create's worktree option. It never waits for the worktree's setup:
+ * the MCP server gives the call room for the approval card, the worktree, the
+ * terminal and a rollback (TERMINAL_WORKTREE_TIMEOUT_MS), not for a setup of
+ * up to 5 minutes, and a command started after the caller gave up would run
+ * unattended. A branch whose worktree another agent made is refused, so a
+ * terminal never opens in someone else's checkout.
+ */
+export async function createTerminalWorktree(
+  caller: WorktreeCaller,
+  input: Pick<CreateWorktreeInput, "branch" | "base" | "purpose">,
+  deps: AgentWorktreeDeps,
+): Promise<Record<string, unknown> | WorktreeRefusal> {
+  const made = await createAgentWorktree(caller, { ...input, waitForSetup: false }, deps);
+  if (isRefusal(made) || made.created !== false) return made;
+  const existing = (await deps.loadState()).workspaces.find((workspace) => workspace.id === made.workspaceId);
+  if (existing && madeBy(existing, caller)) return made;
+  const refused = refusal("WORKTREE_NOT_YOURS", `another agent's worktree is on ${String(made.branch)}; pick another branch`, {
+    workspaceId: made.workspaceId,
+    branch: made.branch,
+  });
+  await deps
+    .audit({
+      action: "create",
+      outcome: "refused",
+      code: refused.code,
+      caller,
+      repo: existing?.copyBranch?.repoCwd ?? null,
+      workspaceId: typeof made.workspaceId === "string" ? made.workspaceId : undefined,
+      branch: typeof made.branch === "string" ? made.branch : null,
+    })
+    .catch(() => undefined);
+  return refused;
+}
+
+/**
+ * Takes back the worktree createTerminalWorktree made when its terminal did
+ * not open, through the same guarded removal as codara_worktree_remove. One
+ * that existed before the call stays. Its setup is stopped first: it rarely
+ * has finished (the call does not wait for it) and its commands would fail
+ * the removal's process scan. Its card leaves the tray only with the
+ * worktree, so a worktree that stays keeps a way to rerun its setup.
+ */
+export async function rollBackTerminalWorktree(
+  caller: WorktreeCaller,
+  made: Record<string, unknown>,
+  deps: AgentWorktreeDeps,
+): Promise<TerminalRollback> {
+  if (made.created !== true || typeof made.workspaceId !== "string") {
+    return { removed: false, reason: "it was there before this call" };
+  }
+  const setupPath = typeof made.path === "string" ? made.path : null;
+  const setup = deps.worktreeSetup && setupPath ? await deps.worktreeSetup.get(setupPath).catch(() => null) : null;
+  if (deps.worktreeSetup?.stop && setupPath) {
+    const stopped = await deps.worktreeSetup.stop(setupPath, ROLLBACK_SETUP_STOP_MS).catch(() => false);
+    // Every removal waits for the setup again (up to 30 s) and fails while it
+    // runs, so trying would only hold the call past its budget.
+    if (!stopped) {
+      return { removed: false, setupRunning: true, reason: `its setup did not stop within ${ROLLBACK_SETUP_STOP_MS / 1000} s` };
+    }
+  }
+  const removed = await removeAgentWorktree(caller, { workspaceId: made.workspaceId, deleteBranch: true }, deps).catch(
+    (err: unknown) => refusal("WORKTREE_GIT_FAILED", cleanText(errorText(err), 300)),
+  );
+  if (isRefusal(removed)) return { removed: false, reason: `${removed.code}: ${removed.error}` };
+  if (removed.removed === true && deps.worktreeSetup?.dismiss && setup) {
+    await deps.worktreeSetup.dismiss(setup.id).catch(() => undefined);
+  }
+  return { removed: removed.removed === true };
+}
+
+export interface TerminalRollback {
+  removed: boolean;
+  reason?: string;
+  /** Left in place because its setup was still running after the stop wait. */
+  setupRunning?: boolean;
+}
+
+/** What terminal.create's error says about the worktree it made. */
+export function terminalRollbackMessage(made: Record<string, unknown>, rollback: TerminalRollback): string {
+  if (rollback.removed) return "the worktree made for it was removed";
+  const workspaceId = String(made.workspaceId);
+  const which = `${String(made.branch)} at ${String(made.path)} (workspaceId ${workspaceId})`;
+  const remove = `codara_worktree_remove({ workspaceId: "${workspaceId}" })`;
+  if (rollback.setupRunning) {
+    return (
+      `the worktree made for it, ${which}, was left in place because its setup was still running after ` +
+      `${ROLLBACK_SETUP_STOP_MS / 1000} s: remove it with ${remove} once its setup has ended ` +
+      `(codara_worktree_setup({ workspaceId: "${workspaceId}" }) shows its state)`
+    );
+  }
+  return `the worktree made for it, ${which}, stays (${rollback.reason ?? "not removed"}): remove it with ${remove}`;
 }
 
 async function createAgentWorktreeInner(
@@ -1453,7 +1697,7 @@ export async function verifyRemovable(
     const all = await ignoredEntries(path);
     const provided = await setupProvidedEntries(realPath, all).catch(() => new Set<string>());
     ignored = all.filter((entry) => !provided.has(entry));
-    const blocking = ignored.filter((entry) => !isRegenerableIgnored(entry, extra));
+    const blocking = ignored.filter((entry) => !isRegenerableIgnored(entry, extra, packageRootTester(realPath)));
     if (blocking.length) {
       verdict.dirty.ignoredBlocking = blocking.slice(0, MAX_LISTED_PATHS);
       if (options.discardIgnoredFiles) {
@@ -1491,6 +1735,14 @@ export async function verifyRemovable(
     if (scan.incomplete) {
       block("WORKTREE_NESTED_SCAN_INCOMPLETE");
       verdict.details.unscannedFolder = scan.incomplete;
+    }
+    const hidden = scan.secrets.filter(
+      (entry) => !verdict.dirty.ignoredBlocking.includes(entry) && !isRegenerableIgnored(entry, extra),
+    );
+    if (hidden.length) {
+      verdict.dirty.ignoredBlocking = [...verdict.dirty.ignoredBlocking, ...hidden].slice(0, MAX_LISTED_PATHS);
+      if (options.discardIgnoredFiles) verdict.warnings.push(`ignored files will be deleted: ${hidden.join(", ")}`);
+      else block("WORKTREE_IGNORED_FILES");
     }
   }
   if (nested.length) {
@@ -1744,7 +1996,7 @@ export async function getAgentWorktreeSetup(
 ): Promise<Record<string, unknown> | WorktreeRefusal> {
   const gate = await gateCaller(caller, deps, { mutation: false });
   if (isRefusal(gate)) return gate;
-  const scope = await resolveWorktreeScope(caller, deps, gate.run);
+  const scope = await resolveWorktreeScope(caller, deps, gate.run, { repoOf: input.workspaceId });
   if (isRefusal(scope)) return scope;
   const managed = await managedWorkspaces(scope);
   let workspace: Workspace | undefined;
@@ -1802,7 +2054,12 @@ export async function listAgentWorktrees(
   const gate = await gateCaller(caller, deps, { mutation: false });
   if (isRefusal(gate)) return gate;
   const scope = await resolveWorktreeScope(caller, deps, gate.run);
-  if (isRefusal(scope)) return scope;
+  if (isRefusal(scope)) {
+    // A coordinator in a plain folder still sees the worktrees it made.
+    if (scope.code !== "WORKTREE_NOT_A_REPO") return scope;
+    const elsewhere = await worktreesMadeElsewhere(await deps.loadState(), caller, null);
+    return elsewhere.length ? { ok: true, repoCwd: null, worktrees: [], unmanaged: [], elsewhere } : scope;
+  }
   const checkMerge = input.checkMerge === true;
   const registrations = await listWorktreeRegistrations(scope.repoCwd).catch(() => [] as WorktreeRegistration[]);
   const ctx = newContext(scope, caller, deps, gate.preferences, registrations);
@@ -1853,13 +2110,33 @@ export async function listAgentWorktrees(
       head: entry.head,
     });
   }
+  const elsewhere = await worktreesMadeElsewhere(scope.state, caller, scope.repoCwd);
   return {
     ok: true,
     repoCwd: scope.repoCwd,
     defaultBranch: await resolveDefaultBranch(scope.repoCwd),
     worktrees: items,
     unmanaged,
+    ...(elsewhere.length ? { elsewhere } : {}),
   };
+}
+
+// Worktrees the caller made in other repositories than `repoCwd`, which
+// setup and remove reach by workspaceId.
+async function worktreesMadeElsewhere(
+  state: AppState,
+  caller: WorktreeCaller,
+  repoCwd: string | null,
+): Promise<Array<Record<string, unknown>>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const workspace of state.workspaces) {
+    const copy = workspace.copyBranch;
+    if (!copy || isRemotePath(copy.repoCwd) || !madeBy(workspace, caller)) continue;
+    const repo = await realpathOrResolve(copy.repoCwd);
+    if (repo === repoCwd) continue;
+    out.push({ workspaceId: workspace.id, name: workspace.name, path: workspace.cwd, branch: copy.branch, repoCwd: repo });
+  }
+  return out;
 }
 
 // ── Remove ─────────────────────────────────────────────────────────────────
@@ -1934,17 +2211,26 @@ function refusalFromVerdict(ctx: VerifyContext, verdict: RemovalVerdict): Worktr
 // A retried removal answers with the first result. Keyed by repository too,
 // so a caller in another repository learns nothing about this one.
 const recentRemovals = new Map<string, Record<string, unknown>>();
+// Which repository a removed worktree was in and who made it, so its maker
+// retrying from another workspace (resolveWorktreeScope's repoOf) reaches
+// the entry above instead of its own folder's repository.
+const removedRepos = new Map<string, { repoCwd: string; createdBy: NonNullable<Workspace["copyBranch"]>["createdBy"] }>();
 
 function removalKey(repoCwd: string, workspaceId: string): string {
   return `${repoCwd}\0${workspaceId}`;
 }
 
-function rememberRemoval(repoCwd: string, workspaceId: string, result: Record<string, unknown>): void {
+function rememberRemoval(repoCwd: string, workspace: Workspace, result: Record<string, unknown>): void {
   if (recentRemovals.size >= 200) {
     const first = recentRemovals.keys().next().value;
     if (first !== undefined) recentRemovals.delete(first);
   }
-  recentRemovals.set(removalKey(repoCwd, workspaceId), result);
+  if (removedRepos.size >= 200) {
+    const first = removedRepos.keys().next().value;
+    if (first !== undefined) removedRepos.delete(first);
+  }
+  recentRemovals.set(removalKey(repoCwd, workspace.id), result);
+  removedRepos.set(workspace.id, { repoCwd, createdBy: workspace.copyBranch?.createdBy });
 }
 
 export async function removeAgentWorktree(
@@ -1957,7 +2243,7 @@ export async function removeAgentWorktree(
     await auditRefusal(deps, caller, gate, input);
     return gate;
   }
-  const scope = await resolveWorktreeScope(caller, deps, gate.run);
+  const scope = await resolveWorktreeScope(caller, deps, gate.run, { repoOf: input.workspaceId });
   if (isRefusal(scope)) {
     await auditRefusal(deps, caller, scope, input);
     return scope;
@@ -2043,7 +2329,7 @@ export async function removeAgentWorktree(
     return outcome;
   }
   if (outcome.removed === true) {
-    rememberRemoval(scope.repoCwd, target.id, outcome);
+    rememberRemoval(scope.repoCwd, target, outcome);
     deps.sendAgentEvent({
       kind: "removed",
       workspaceId: target.id,

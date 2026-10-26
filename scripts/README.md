@@ -344,6 +344,18 @@ Stop refuses its next calls until Undo. Run it with
 `CODARA_PRESENCE_VIDEO=1` to film the glide and take stills from the private
 X display with `ffmpeg` into `test-results/agent-presence/`.
 
+The browser pane's toolbar and tabs view (`components/Preview/toolbar/`,
+`components/Preview/tabs-memory/`): `test-browser-pane` checks when a tab may
+sleep and why not (on screen, recording, an agent in the last ten minutes,
+its own session), which tabs the 30 minute rule picks, the memory and "asleep
+for" texts, the full screen steps of the button, F11 and Esc, and the address
+bar's short forms (`5173`, `:3000/admin`). `tests/e2e/browser-pane-toolbar.spec.ts`
+drives the built app: labelled tools, the More menu by keyboard, the Video or
+GIF chooser, the tabs view with real memory, sleep and wake by hand and by an
+agent call, auto-sleep after half an hour, full screen in the window and on
+the display, Esc from the page, and the narrow toolbar. It saves screenshots
+in both themes to `test-results/browser-pane/`.
+
 What agents do on a page: `test-preview-key-chords` (chord notation, the case
 and codes of chord keys, and which of the user's chords stay in the page),
 `test-preview-waits` (codara_preview_wait_for: url, navigation, load,
@@ -451,7 +463,11 @@ it proves Crashpad starts early), Settings, About and the export.
 | `test-remote-access-workspace-roots`, `test-remote-access-cora-send-rate` | What a phone may not do: add the home folder or a credentials folder as a workspace, or send Cora messages faster than its budget. |
 | `test-phone-notify`, `test-terminal-phone-notify` | Notifications sent to the phone. |
 | `test-remote-connection-lifecycle`, `test-box-key-retry`, `test-ssh-keys` | SSH workspaces (`src/main/remote/`), not the phone. |
+| `test-ssh-config-match` | Which `~/.ssh/config` and `/etc/ssh/ssh_config` blocks apply to a host (`ssh-config-match.ts`), checked against `ssh -G` when ssh is installed, and the refusals for a Match Codara cannot evaluate or a line ssh cannot read. |
 | `test-remote-proxycommand`, `test-ssh-config-include`, `test-codara-boxes-cli` | SSH over a ProxyCommand (`proxy-command.ts`), `~/.ssh/config` Include and ProxyCommand reading with the refusal of unsafe `%h`/`%r`/`%n`, and the Codara Cloud boxes picker that reads the `codaracloud` CLI (`codara-boxes.ts`). |
+| `test-machine-probe`, `test-host-keys` | The Machines page: the probe's parser on recorded output from a host, a container limited by cgroup v2 and macOS (`scripts/fixtures/machine-probe/`), the service against fake connections (never probes a disconnected host, stops only orphaned sessions), fingerprints against `ssh-keygen`, `known_hosts` matching, and the confirm, refuse and changed-key flows of `connections.ts`. The UI and a real sshd are `tests/e2e/machines.spec.ts`. |
+| `test-machines-default` | Machines on by default: no file and an old saved default both read on, only the user's own choice turns it off; with no SSH machines nothing connects or probes and the Add pane menu has no Where row; after an update a restored SSH agent starts once, in tmux. |
+| `test-remote-agents`, `test-remote-pty`, `test-pty-remote-agents` | Agents on SSH machines kept in tmux (`remote-agents.ts`, `remote-pty.ts`, and their wiring in `pty-manager.ts`): the launch, attach, probe and kill lines run under `/bin/sh` against fake `tmux` and `claude`, reconnects after a dropped connection, and which closes end the agent. The real sshd and tmux are `tests/e2e/remote-agent.spec.ts`, which starts a throwaway container with `scripts/ssh-test-host.cjs` (`tests/e2e/fixtures/ssh-host`) and is skipped without Docker. |
 
 ### Git and GitHub
 
@@ -462,7 +478,10 @@ every git Codara spawns; `test-git-fix-prompts`, `test-git-fix-context` and
 `test-git-fix-targets` cover Fix with agent: redaction, log and conflict
 slicing, prompt budgets, hooks and conflicts in throwaway repositories, a
 scripted `gh`, and the dialog's targets; `test-github-ci-watch` covers the
-CI failure alerts),
+pull request watcher: REST parsing, the backoff, rows, alerts and the green
+note; `test-ci-agent-nudge` covers telling the agent, once per failing
+commit and never mid-turn, and the ETag reads; `tests/e2e/pr-watch-agent.spec.ts`
+runs it end to end with a scripted `gh`),
 `test-worktrees`, `test-worktree-delete-dialog`, `test-untrusted-pr-policy`
 (the checkout of an imported pull request stays untrusted, whatever path
 tricks it tries), `test-agent-worktrees` (worktrees agents create and remove

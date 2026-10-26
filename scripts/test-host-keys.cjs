@@ -1,0 +1,1119 @@
+#!/usr/bin/env node
+"use strict";
+
+// Host keys (src/main/remote/host-keys.ts and verifyHostKey in
+// connections.ts, Machines phase 2). Guards:
+//
+//   - fingerprints read exactly as `ssh-keygen -lf` prints them, and the key
+//     type comes from the key itself
+//   - ~/.ssh/known_hosts matching: plain names for port 22, `[host]:port`
+//     otherwise, hashed names, `*` / `?` patterns and `!` negation; a
+//     `@revoked` key always loses, `@cert-authority` lines are not host keys
+//   - with confirmation off (the default) a new key is trusted on first use,
+//     as before
+//   - with it on: a key the user's known_hosts lists connects without asking;
+//     an unknown one asks first, with a long enough handshake timeout to read
+//     the question; refusing stores nothing and asks for no password; a
+//     revoked key never connects; Codara Cloud boxes keep trust on first use
+//   - a changed key is refused, the row carries both fingerprints, and
+//     trusting the new key replaces that host's entry and connects; a key
+//     that disagrees with the user's known_hosts is a changed key too, never
+//     a first-use question
+//   - a ~/.ssh/config host with HostKeyAlias is confirmed like any other,
+//     looked up in known_hosts by the alias with no port, as OpenSSH does
+//   - "Trust the new key" trusts only the key the card showed, and only
+//     until the host is disconnected, edited or removed
+//   - every host-key prompt that ends (answered, cancelled, timed out) is
+//     reported closed so every window drops it
+//   - a new machine that does not answer fails after the normal connect
+//     timeout; only a machine that answered waits for the user
+//   - a key of another type than the ones known_hosts lists for the host is
+//     a changed key, never a first-use question, and the handshake asks for
+//     the listed types first, as OpenSSH does
+//   - a prompt ends with the attempt it belongs to (sshd's LoginGraceTime),
+//     and trusting it afterwards stores nothing
+//   - an offer to trust a changed key ends once the host connects with the
+//     key Codara has
+//   - two hosts at one address asked at once: the second answer cannot
+//     overwrite the first key, it is refused as changed
+//   - a HostKeyAlias is looked up (and hashed) in lowercase; the system-wide
+//     known_hosts and a custom UserKnownHostsFile are read too
+//   - a key Codara stored loses once known_hosts marks it @revoked, and a
+//     refusal caused by a known_hosts line shows that line's key as before
+//   - a line with a marker OpenSSH does not know is skipped; a host only a
+//     @cert-authority line covers gets a louder question (no certificates
+//     here); the host key algorithms offered are ssh2's own, reordered
+//   - two first-use answers for one address never both win; the known_hosts
+//     files ssh-hosts names (ssh_config, else ssh's defaults) are read
+//   - a host whose ssh config ssh would refuse (a token or variable it cannot
+//     expand) is refused before any connection, whatever the setting
+//   - two hosts for one address and one key ask one question, whose answer
+//     both use; it stays up while one of them still waits for it
+//   - RevokedHostKeys, a KRL or a key list, refuses the keys it revokes
+//     whatever the setting, even one Codara stored; a file ssh cannot read
+//     refuses the connection, as ssh does; a certificate line in a key list
+//     revokes the key it certifies; a line ssh cannot read in full (bad curve,
+//     point off its curve, trailing bytes, wrong signature) refuses every host
+//
+//   node scripts/test-host-keys.cjs
+
+const assert = require("node:assert/strict");
+const { execFileSync } = require("node:child_process");
+const { createHash, createHmac, randomBytes } = require("node:crypto");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const esbuild = require("esbuild");
+
+const ROOT = path.resolve(__dirname, "..");
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "codara-host-keys-"));
+
+let passed = 0;
+function ok(name) {
+  passed += 1;
+  console.log(`  ok  ${name}`);
+}
+
+function wireKey(type, body) {
+  const t = Buffer.from(type);
+  const head = Buffer.alloc(4);
+  head.writeUInt32BE(t.length);
+  const len = Buffer.alloc(4);
+  len.writeUInt32BE(body.length);
+  return Buffer.concat([head, t, len, body]);
+}
+
+async function bundle(entry, plugins, outName) {
+  const outfile = path.join(TMP, outName);
+  await esbuild.build({
+    entryPoints: [path.join(ROOT, entry)],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile,
+    plugins,
+    logLevel: "silent",
+    alias: { "@shared": path.join(ROOT, "src", "shared") },
+  });
+  return require(outfile);
+}
+
+function connectionStubs() {
+  const sources = {
+    ssh2: `
+      import { EventEmitter } from "node:events";
+      export class Client extends EventEmitter {
+        connect(config) {
+          const h = globalThis.__codaraHostKeyHarness;
+          h.connects.push(config);
+          h.clients.push(this);
+          if (h.unreachable) return;
+          config.hostVerifier(h.serverKey, (trusted) => {
+            setImmediate(() => {
+              if (trusted) this.emit("ready");
+              else this.emit("error", new Error("Host denied (verification failed)"));
+            });
+          });
+        }
+        end() { setImmediate(() => this.emit("close")); return this; }
+        destroy() { return this; }
+      }
+      export const utils = { parseKey() { return {}; } };
+    `,
+    "./ssh-hosts": `
+      export async function getHost(hostId) {
+        return globalThis.__codaraHostKeyHarness.hosts[hostId] ?? null;
+      }
+      export async function knownHostsSettings(host) {
+        const h = globalThis.__codaraHostKeyHarness;
+        return h.settings[host.id] ?? {
+          files: [
+            ...(host.userKnownHostsFiles ?? ["/home/me/.ssh/known_hosts", "/home/me/.ssh/known_hosts2"]),
+            ...(host.globalKnownHostsFiles ?? ["/etc/ssh/ssh_known_hosts", "/etc/ssh/ssh_known_hosts2"]),
+          ],
+          revoked: host.revokedHostKeys ?? null,
+        };
+      }
+    `,
+    "ssh2/lib/protocol/constants.js": `
+      export const DEFAULT_SERVER_HOST_KEY = globalThis.__codaraHostKeyHarness.defaultAlgorithms;
+    `,
+    "./codara-boxes": "export async function wakeCodaraBox() {}",
+    "./box-key-retry": `
+      export function nextFreshKeyDelayMs() { return null; }
+      export function clearFreshBoxKey() {}
+      export function abortableDelay() { return Promise.resolve(); }
+    `,
+    "./secret-store": `
+      export async function getSecret(key) { return key.startsWith("password:") ? "pw" : null; }
+      export async function setSecret() {}
+      export async function deleteSecret() {}
+    `,
+    "../fs-atomic": `
+      export async function writeFileAtomic(file, text) {
+        globalThis.__codaraHostKeyHarness.files.set(file, text);
+      }
+    `,
+    "../codara-home": "export function codaraHome() { return '/codara-home'; }",
+    "node:fs": `
+      export const existsSync = () => false;
+      export const promises = {
+        async readFile(file, encoding) {
+          const text = globalThis.__codaraHostKeyHarness.files.get(String(file));
+          if (text === undefined) {
+            const error = new Error("ENOENT");
+            error.code = "ENOENT";
+            throw error;
+          }
+          if (encoding) return String(text);
+          return Buffer.isBuffer(text) ? text : Buffer.from(text);
+        },
+      };
+    `,
+    "node:os": "export function homedir() { return '/home/me'; }",
+  };
+  return {
+    name: "host-key-stubs",
+    setup(build) {
+      for (const specifier of Object.keys(sources)) {
+        const escaped = specifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        build.onResolve({ filter: new RegExp(`^${escaped}$`) }, () => ({ path: specifier, namespace: "hk" }));
+      }
+      build.onLoad({ filter: /.*/, namespace: "hk" }, (args) => ({ contents: sources[args.path], loader: "js" }));
+    },
+  };
+}
+
+function hasSshKeygen() {
+  try {
+    execFileSync("ssh-keygen", ["-?"], { stdio: "ignore" });
+    return true;
+  } catch (err) {
+    return err.status !== undefined && err.status !== 127 && err.code !== "ENOENT";
+  }
+}
+
+(async () => {
+  const keys = await bundle("src/main/remote/host-keys.ts", [], "host-keys.cjs");
+  const key = wireKey("ssh-ed25519", randomBytes(32));
+  const other = wireKey("ssh-ed25519", randomBytes(32));
+  const b64 = key.toString("base64");
+
+  {
+    assert.equal(keys.hostKeyType(key), "ssh-ed25519");
+    assert.equal(keys.hostKeyType(Buffer.from("junk")), "unknown");
+    assert.equal(keys.storedFingerprint(key), createHash("sha256").update(key).digest("base64"));
+    assert.equal(keys.displayFingerprint(keys.storedFingerprint(key)), keys.sshFingerprint(key));
+    if (hasSshKeygen()) {
+      const file = path.join(TMP, "id_test");
+      execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", file], { stdio: "ignore" });
+      const pub = fs.readFileSync(`${file}.pub`, "utf8").trim().split(/\s+/);
+      const listed = execFileSync("ssh-keygen", ["-lf", `${file}.pub`], { encoding: "utf8" }).split(/\s+/)[1];
+      assert.equal(keys.sshFingerprint(Buffer.from(pub[1], "base64")), listed);
+      assert.equal(keys.hostKeyType(Buffer.from(pub[1], "base64")), pub[0]);
+    } else {
+      console.log("  skip ssh-keygen comparison (no ssh-keygen)");
+    }
+    ok("fingerprints and key types read as ssh-keygen prints them");
+  }
+
+  {
+    const v = (text, host, port, k = key) => keys.knownHostsVerdict(text, host, port, k).kind;
+    assert.equal(v(`nas.local ssh-ed25519 ${b64}`, "nas.local", 22), "match");
+    assert.equal(v(`NAS.local ssh-ed25519 ${b64}`, "nas.local", 22), "match", "host names ignore case");
+    assert.equal(v(`nas.local ssh-ed25519 ${b64}`, "nas.local", 2222), "none", "a plain name is port 22 only");
+    assert.equal(v(`[nas.local]:2222 ssh-ed25519 ${b64}`, "nas.local", 2222), "match");
+    assert.equal(v(`alias,10.0.0.5 ssh-ed25519 ${b64}`, "10.0.0.5", 22), "match");
+    assert.equal(v(`nas.local ssh-ed25519 ${b64}`, "nas.local", 22, other), "mismatch", "another key of the same type: changed");
+    const listed = keys.knownHostsVerdict(`nas.local ssh-ed25519 ${b64}`, "nas.local", 22, other);
+    assert.ok(listed.kind === "mismatch" && listed.listedKey.equals(key), "the mismatch carries the listed key");
+    assert.equal(
+      v(`nas.local ssh-ed25519 ${other.toString("base64")}\nnas.local ssh-ed25519 ${b64}`, "nas.local", 22),
+      "match",
+      "any line listing the key wins over another that does not",
+    );
+    const rsa = wireKey("ssh-rsa", randomBytes(64));
+    assert.equal(v(`nas.local ssh-rsa ${rsa.toString("base64")}`, "nas.local", 22), "mismatch", "only another key type listed: changed");
+    const other_type = keys.knownHostsVerdict(`nas.local ssh-rsa ${rsa.toString("base64")}`, "nas.local", 22, key);
+    assert.ok(other_type.kind === "mismatch" && other_type.listedKey.equals(rsa));
+    assert.deepEqual(
+      keys.knownHostTypes(`nas.local ssh-rsa ${rsa.toString("base64")}\nnas.local ssh-ed25519 ${b64}\nother ecdsa-sha2-nistp256 ${b64}`, "nas.local", 22),
+      ["ssh-rsa", "ssh-ed25519"],
+    );
+    const aliasSalt = randomBytes(20);
+    const aliasHash = createHmac("sha1", aliasSalt).update("Builder").digest("base64");
+    const hashedAlias = `|1|${aliasSalt.toString("base64")}|${aliasHash} ssh-ed25519 ${b64}`;
+    assert.equal(v(hashedAlias, "Builder", 22), "match", "a hashed alias is hashed as written");
+    assert.equal(v(`builder ssh-ed25519 ${b64}`, "Builder", 22), "match", "plain names still ignore case");
+    assert.equal(v(`other.local ssh-ed25519 ${other.toString("base64")}`, "nas.local", 22), "none");
+    assert.equal(v(`*.tail1234.ts.net ssh-ed25519 ${b64}`, "nas.tail1234.ts.net", 22), "match");
+    assert.equal(v(`10.0.0.? ssh-ed25519 ${b64}`, "10.0.0.7", 22), "match");
+    assert.equal(v(`10.0.0.*,!10.0.0.7 ssh-ed25519 ${b64}`, "10.0.0.7", 22), "none", "negation wins");
+    const salt = randomBytes(20);
+    const hash = createHmac("sha1", salt).update("[nas.local]:2222").digest("base64");
+    assert.equal(v(`|1|${salt.toString("base64")}|${hash} ssh-ed25519 ${b64}`, "nas.local", 2222), "match");
+    assert.equal(v(`|1|${salt.toString("base64")}|${hash} ssh-ed25519 ${b64}`, "nas.local", 22), "none");
+    assert.equal(
+      v(`nas.local ssh-ed25519 ${b64}\n@revoked * ssh-ed25519 ${b64}`, "nas.local", 22),
+      "revoked",
+      "a revoked key loses even when listed",
+    );
+    assert.equal(v(`@cert-authority *.local ssh-ed25519 ${b64}`, "nas.local", 22), "none");
+    assert.equal(v(`@future nas.local ssh-ed25519 ${b64}`, "nas.local", 22), "none", "an unknown marker is skipped, as OpenSSH does");
+    assert.equal(
+      v(`@future nas.local ssh-ed25519 ${other.toString("base64")}`, "nas.local", 22),
+      "none",
+      "and lists nothing for the host",
+    );
+    assert.deepEqual(keys.knownHostsVerdict(`@cert-authority *.local ssh-ed25519 ${b64}`, "nas.local", 22, other), {
+      kind: "none",
+      certAuthority: true,
+    });
+    assert.deepEqual(keys.knownHostsVerdict("", "nas.local", 22, other), { kind: "none" });
+    assert.equal(v(`# nas.local ssh-ed25519 ${b64}\n\n`, "nas.local", 22), "none");
+    if (hasSshKeygen()) {
+      const file = path.join(TMP, "known_hosts");
+      fs.writeFileSync(file, `[nas.local]:2222 ssh-ed25519 ${b64}\n`);
+      execFileSync("ssh-keygen", ["-H", "-f", file], { stdio: "ignore" });
+      const hashed = fs.readFileSync(file, "utf8");
+      assert.match(hashed, /^\|1\|/);
+      assert.equal(v(hashed, "nas.local", 2222), "match", "ssh-keygen -H output matches");
+    }
+    ok("known_hosts matching: ports, hashed names, patterns, negation, revoked and CA lines");
+  }
+
+  const harness = {
+    settings: {},
+    defaultAlgorithms: [
+      "ssh-ed25519",
+      "ecdsa-sha2-nistp256",
+      "ecdsa-sha2-nistp384",
+      "ecdsa-sha2-nistp521",
+      "rsa-sha2-512",
+      "rsa-sha2-256",
+      "ssh-rsa",
+    ],
+    clients: [],
+    connects: [],
+    prompts: [],
+    statuses: [],
+    files: new Map(),
+    serverKey: key,
+    hosts: {
+      nas: { id: "nas", host: "nas.local", port: 22, username: "dev", source: "manual" },
+      vps: { id: "vps", host: "203.0.113.7", port: 2222, username: "dev", source: "manual" },
+      box: { id: "box", host: "box", port: 22, username: "dev", source: "codara-cloud", hostKeyAlias: "codara-box:b1", codaraBoxId: "b1" },
+      aliased: { id: "aliased", host: "10.0.0.9", port: 2200, username: "dev", source: "ssh-config", hostKeyAlias: "builder" },
+      nas2: { id: "nas2", host: "nas.local", port: 22, username: "ops", source: "manual" },
+      cased: { id: "cased", host: "10.0.0.10", port: 22, username: "dev", source: "ssh-config", hostKeyAlias: "Builder" },
+      custom: {
+        id: "custom",
+        host: "c.example",
+        port: 22,
+        username: "dev",
+        source: "ssh-config",
+        userKnownHostsFiles: ["/home/me/.ssh/other_known"],
+      },
+    },
+  };
+  globalThis.__codaraHostKeyHarness = harness;
+  delete process.env.SSH_AUTH_SOCK;
+  const conns = await bundle("src/main/remote/connections.ts", [connectionStubs()], "connections.cjs");
+  const KNOWN = "/codara-home/spark-known-hosts.json";
+  const stored = () => JSON.parse(harness.files.get(KNOWN) ?? "{}");
+  let confirm = false;
+  let answer = null;
+  conns.setHostKeyConfirmation(async () => confirm);
+  conns.setStatusSender((s) => harness.statuses.push(s));
+  const closed = [];
+  conns.setHostKeyPromptSender((request) => {
+    harness.prompts.push(request);
+    if (answer === "hold") return;
+    setImmediate(() => conns.answerHostKeyPrompt({ requestId: request.requestId, trust: answer }));
+  });
+  conns.setHostKeyPromptClosedSender((requestId) => closed.push(requestId));
+  const connect = async (hostId) => {
+    const conn = await conns.getConnection(hostId);
+    try {
+      await conn.ensure();
+    } catch {
+      /* the status says why */
+    }
+    return conns.getConnectionStatus(hostId);
+  };
+  const reset = () => {
+    for (const id of Object.keys(harness.hosts)) conns.disconnectHost(id);
+    harness.files.clear();
+    harness.prompts.length = 0;
+    harness.connects.length = 0;
+    harness.clients.length = 0;
+    harness.serverKey = key;
+    harness.unreachable = false;
+    harness.settings = {};
+    closed.length = 0;
+  };
+
+  {
+    const status = await connect("nas");
+    assert.equal(status.state, "connected");
+    assert.equal(harness.prompts.length, 0);
+    assert.equal(stored()["nas.local:22"], keys.storedFingerprint(key));
+    assert.equal(harness.connects[0].readyTimeout, 20_000);
+    ok("confirmation off: a new key is trusted on first use, as before");
+  }
+
+  {
+    reset();
+    confirm = true;
+    harness.files.set("/home/me/.ssh/known_hosts", `nas.local ssh-ed25519 ${b64}\n`);
+    const status = await connect("nas");
+    assert.equal(status.state, "connected");
+    assert.equal(harness.prompts.length, 0, "a key the user's ssh already trusts is not asked about");
+    assert.equal(stored()["nas.local:22"], keys.storedFingerprint(key));
+
+    reset();
+    answer = true;
+    const asked = await connect("vps");
+    assert.equal(asked.state, "connected");
+    assert.equal(harness.prompts.length, 1);
+    assert.deepEqual(
+      { ...harness.prompts[0], requestId: undefined },
+      { requestId: undefined, hostId: "vps", hostLabel: "203.0.113.7:2222", keyType: "ssh-ed25519", fingerprint: keys.sshFingerprint(key) },
+    );
+    assert.equal(harness.connects[0].readyTimeout, 5 * 60_000, "the handshake waits while the user reads");
+    assert.equal(stored()["203.0.113.7:2222"], keys.storedFingerprint(key));
+    await connect("vps");
+    assert.equal(harness.prompts.length, 1, "asked once, not on every connect");
+
+    reset();
+    answer = false;
+    const refused = await connect("vps");
+    assert.equal(refused.state, "error");
+    assert.match(refused.error, /was not trusted/);
+    assert.equal(harness.connects.length, 1, "no password round after a refused key");
+    assert.deepEqual(stored(), {});
+
+    // A pane reconnecting on its own (quiet) never asks about a key.
+    reset();
+    answer = true;
+    const quietError = await (await conns.getConnection("vps")).ensure({ quiet: true }).then(() => null, (e) => e);
+    assert.ok(quietError, "a quiet connect to a machine with an unknown key fails");
+    assert.equal(harness.prompts.length, 0, "and never asks about the key");
+    assert.deepEqual(stored(), {});
+
+    reset();
+    harness.files.set("/home/me/.ssh/known_hosts", `@revoked nas.local ssh-ed25519 ${b64}\n`);
+    const revoked = await connect("nas");
+    assert.equal(revoked.state, "error");
+    assert.match(revoked.error, /revoked/);
+    assert.equal(harness.prompts.length, 0);
+
+    reset();
+    const box = await connect("box");
+    assert.equal(box.state, "connected");
+    assert.equal(harness.prompts.length, 0, "Codara Cloud boxes keep trust on first use");
+    ok("confirmation on: known_hosts first, then the user; refusing or a revoked key never connects");
+  }
+
+  {
+    reset();
+    confirm = true;
+    harness.files.set(KNOWN, JSON.stringify({ "nas.local:22": keys.storedFingerprint(other) }));
+    harness.statuses.length = 0;
+    const changed = await connect("nas");
+    assert.equal(changed.state, "error");
+    assert.match(changed.error, /changed since Codara last connected/);
+    assert.deepEqual(changed.hostKeyChange, {
+      hostLabel: "nas.local:22",
+      previousFingerprint: keys.sshFingerprint(other),
+      newFingerprint: keys.sshFingerprint(key),
+      keyType: "ssh-ed25519",
+    });
+    assert.ok(harness.statuses.some((s) => s.state === "error" && s.hostKeyChange), "the broadcast carries it too");
+    assert.equal(harness.prompts.length, 0, "a changed key is never a first-use question");
+    const shown = changed.hostKeyChange.newFingerprint;
+    assert.equal(await conns.trustChangedHostKey("vps", shown), false, "nothing to trust on another host");
+    assert.equal(await conns.trustChangedHostKey("nas", shown), true);
+    assert.equal(stored()["nas.local:22"], keys.storedFingerprint(key));
+    const after = await connect("nas");
+    assert.equal(after.state, "connected");
+    assert.equal(after.hostKeyChange, undefined);
+
+    reset();
+    confirm = false;
+    harness.files.set(KNOWN, JSON.stringify({ "nas.local:22": keys.storedFingerprint(other) }));
+    const legacy = await connect("nas");
+    assert.equal(legacy.state, "error");
+    assert.match(legacy.error, /possible MITM/);
+    assert.equal(legacy.hostKeyChange, undefined);
+    ok("a changed key is refused with both fingerprints, and trusting it replaces only that entry");
+  }
+
+  {
+    reset();
+    confirm = true;
+    answer = true;
+    harness.files.set("/home/me/.ssh/known_hosts", `nas.local ssh-ed25519 ${other.toString("base64")}\n`);
+    const mismatch = await connect("nas");
+    assert.equal(mismatch.state, "error");
+    assert.equal(harness.prompts.length, 0, "a key known_hosts contradicts is never a first-use question");
+    assert.match(mismatch.error, /changed/);
+    assert.deepEqual(mismatch.hostKeyChange, {
+      hostLabel: "nas.local:22",
+      previousFingerprint: keys.sshFingerprint(other),
+      newFingerprint: keys.sshFingerprint(key),
+      keyType: "ssh-ed25519",
+      listedBy: "known_hosts",
+      previousKeyType: "ssh-ed25519",
+    });
+    assert.deepEqual(stored(), {});
+    assert.equal(await conns.trustChangedHostKey("nas", mismatch.hostKeyChange.newFingerprint), true);
+    assert.equal(stored()["nas.local:22"], keys.storedFingerprint(key));
+    assert.equal((await connect("nas")).state, "connected");
+    ok("a key that disagrees with ~/.ssh/known_hosts is refused as changed, with the listed key's fingerprint");
+  }
+
+  {
+    reset();
+    confirm = true;
+    answer = true;
+    const asked = await connect("aliased");
+    assert.equal(asked.state, "connected");
+    assert.equal(harness.prompts.length, 1, "a HostKeyAlias host is asked about like any other");
+    assert.equal(harness.prompts[0].hostLabel, "builder");
+    assert.equal(harness.connects[0].readyTimeout, 5 * 60_000);
+    assert.equal(stored().builder, keys.storedFingerprint(key));
+
+    reset();
+    harness.files.set("/home/me/.ssh/known_hosts", `builder ssh-ed25519 ${b64}\n`);
+    assert.equal((await connect("aliased")).state, "connected");
+    assert.equal(harness.prompts.length, 0, "known_hosts is read by the alias");
+
+    reset();
+    answer = false;
+    harness.files.set("/home/me/.ssh/known_hosts", `[builder]:2200 ssh-ed25519 ${b64}\n[10.0.0.9]:2200 ssh-ed25519 ${b64}\n`);
+    assert.equal((await connect("aliased")).state, "error");
+    assert.equal(harness.prompts.length, 1, "the alias is looked up with no port, never the real address");
+
+    reset();
+    harness.files.set("/home/me/.ssh/known_hosts", `builder ssh-ed25519 ${other.toString("base64")}\n`);
+    const changed = await connect("aliased");
+    assert.equal(changed.state, "error");
+    assert.equal(changed.hostKeyChange?.previousFingerprint, keys.sshFingerprint(other));
+    ok("HostKeyAlias hosts from ~/.ssh/config are confirmed, matched by the alias as OpenSSH does");
+  }
+
+  {
+    reset();
+    confirm = true;
+    harness.files.set(KNOWN, JSON.stringify({ "nas.local:22": keys.storedFingerprint(other) }));
+    const first = await connect("nas");
+    // Another key arrives after the card was drawn: trusting must not take it.
+    const third = wireKey("ssh-ed25519", randomBytes(32));
+    harness.serverKey = third;
+    await connect("nas");
+    assert.equal(await conns.trustChangedHostKey("nas", first.hostKeyChange.newFingerprint), false);
+    assert.equal(stored()["nas.local:22"], keys.storedFingerprint(other), "nothing trusted");
+
+    harness.serverKey = key;
+    const shown = (await connect("nas")).hostKeyChange.newFingerprint;
+    conns.disconnectHost("nas");
+    assert.equal(await conns.trustChangedHostKey("nas", shown), false, "a disconnect forgets the offer");
+
+    await connect("nas");
+    conns.forgetChangedHostKey("nas");
+    assert.equal(await conns.trustChangedHostKey("nas", shown), false, "editing or removing the host forgets it");
+    assert.equal(stored()["nas.local:22"], keys.storedFingerprint(other));
+    ok("Trust the new key trusts only the key the card showed, until the host is disconnected or edited");
+  }
+
+  {
+    reset();
+    confirm = true;
+    answer = true;
+    await connect("vps");
+    assert.deepEqual(closed, [harness.prompts[0].requestId], "an answered prompt is closed in every window");
+
+    reset();
+    answer = "hold";
+    const pending = connect("vps");
+    while (harness.prompts.length === 0) await new Promise((r) => setImmediate(r));
+    conns.disconnectHost("vps");
+    await pending;
+    assert.deepEqual(closed, [harness.prompts[0].requestId], "a cancelled prompt is closed");
+
+    reset();
+    conns.setHostKeyTimeoutsForTests({ promptMs: 20 });
+    const expired = await connect("vps");
+    assert.equal(expired.state, "error");
+    assert.deepEqual(closed, [harness.prompts[0].requestId], "a prompt nobody answered is closed");
+    ok("a host-key prompt that ends in any way is reported closed");
+  }
+
+  {
+    reset();
+    confirm = true;
+    harness.unreachable = true;
+    conns.setHostKeyTimeoutsForTests({ reachMs: 30 });
+    const started = Date.now();
+    const down = await Promise.race([
+      connect("vps"),
+      new Promise((resolve) => setTimeout(() => resolve({ state: "still waiting" }), 2_000)),
+    ]);
+    assert.equal(down.state, "error", "a machine that never answers fails on the connect timeout");
+    assert.match(down.error, /did not answer|timed out/i);
+    assert.ok(Date.now() - started < 1_500);
+    conns.setHostKeyTimeoutsForTests({ reachMs: 20_000, promptMs: 5 * 60_000 });
+    ok("a new machine that is down fails after the connect timeout, not the prompt's five minutes");
+  }
+
+  const until = async (check) => {
+    while (!check()) await new Promise((r) => setImmediate(r));
+  };
+
+  {
+    reset();
+    confirm = true;
+    answer = true;
+    const ecdsa = wireKey("ecdsa-sha2-nistp256", randomBytes(65));
+    harness.files.set("/home/me/.ssh/known_hosts", `nas.local ssh-ed25519 ${b64}\n`);
+    harness.serverKey = ecdsa;
+    const downgraded = await connect("nas");
+    assert.equal(downgraded.state, "error");
+    assert.equal(harness.prompts.length, 0, "a key of an unlisted type is never a first-use question");
+    assert.equal(downgraded.hostKeyChange?.previousFingerprint, keys.sshFingerprint(key));
+    assert.equal(downgraded.hostKeyChange?.previousKeyType, "ssh-ed25519");
+    assert.equal(downgraded.hostKeyChange?.keyType, "ecdsa-sha2-nistp256");
+    assert.match(downgraded.error, /ssh-ed25519/, "the refusal names the type known_hosts lists");
+    assert.deepEqual(stored(), {});
+
+    reset();
+    harness.files.set("/home/me/.ssh/known_hosts", `nas.local ecdsa-sha2-nistp256 ${ecdsa.toString("base64")}\n`);
+    harness.serverKey = ecdsa;
+    assert.equal((await connect("nas")).state, "connected");
+    assert.equal(harness.connects[0].algorithms?.serverHostKey?.[0], "ecdsa-sha2-nistp256", "the listed type is asked for first");
+    assert.ok(harness.connects[0].algorithms.serverHostKey.includes("ssh-ed25519"), "the others stay, after it");
+
+    reset();
+    const rsaKey = wireKey("ssh-rsa", randomBytes(64));
+    harness.files.set("/home/me/.ssh/known_hosts", `[203.0.113.7]:2222 ssh-rsa ${rsaKey.toString("base64")}\n`);
+    harness.serverKey = rsaKey;
+    await connect("vps");
+    assert.deepEqual(harness.connects[0].algorithms.serverHostKey.slice(0, 3), ["rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"]);
+
+    // Listed types keep ssh's own order among themselves, whatever the file
+    // order: the key negotiated does not depend on which line came first.
+    assert.deepEqual(
+      keys.hostKeyAlgorithms(["ssh-rsa", "ecdsa-sha2-nistp256", "ssh-ed25519"], harness.defaultAlgorithms).slice(0, 5),
+      ["ssh-ed25519", "ecdsa-sha2-nistp256", "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"],
+    );
+
+    // Codara stored another of the host's keys (another type was negotiated
+    // then); one known_hosts lists is the host's own, as ssh would agree.
+    reset();
+    harness.files.set(KNOWN, JSON.stringify({ "nas.local:22": keys.storedFingerprint(key) }));
+    harness.files.set("/home/me/.ssh/known_hosts", `nas.local ecdsa-sha2-nistp256 ${ecdsa.toString("base64")}\n`);
+    harness.serverKey = ecdsa;
+    assert.equal((await connect("nas")).state, "connected", "a key known_hosts lists is not a change");
+    assert.equal(harness.prompts.length, 0);
+    ok("a key of another type than known_hosts lists is refused as changed, and listed types are asked for first");
+  }
+
+  {
+    reset();
+    confirm = true;
+    answer = "hold";
+    const pending = connect("vps");
+    await until(() => harness.prompts.length === 1);
+    // sshd gives up on an unauthenticated connection (LoginGraceTime).
+    harness.clients[0].emit("close");
+    const failed = await pending;
+    assert.equal(failed.state, "error");
+    assert.deepEqual(closed, [harness.prompts[0].requestId], "the prompt ends with its attempt");
+    conns.answerHostKeyPrompt({ requestId: harness.prompts[0].requestId, trust: true });
+    await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(stored(), {}, "a late Trust stores nothing");
+    ok("a host-key prompt ends with the connection attempt it belongs to");
+  }
+
+  {
+    reset();
+    confirm = true;
+    harness.files.set(KNOWN, JSON.stringify({ "nas.local:22": keys.storedFingerprint(other) }));
+    const shown = (await connect("nas")).hostKeyChange.newFingerprint;
+    // The real machine is back: the connect succeeds with the stored key.
+    harness.serverKey = other;
+    assert.equal((await connect("nas")).state, "connected");
+    assert.equal(await conns.trustChangedHostKey("nas", shown), false, "a stale card cannot trust the other key");
+    assert.equal(stored()["nas.local:22"], keys.storedFingerprint(other));
+    ok("an offer to trust a changed key ends when the host connects with the known key");
+  }
+
+  {
+    reset();
+    confirm = true;
+    answer = "hold";
+    const first = connect("nas");
+    await until(() => harness.prompts.length === 1);
+    harness.serverKey = other;
+    const second = connect("nas2");
+    await until(() => harness.prompts.length === 2);
+    conns.answerHostKeyPrompt({ requestId: harness.prompts[0].requestId, trust: true });
+    assert.equal((await first).state, "connected");
+    conns.answerHostKeyPrompt({ requestId: harness.prompts[1].requestId, trust: true });
+    const late = await second;
+    assert.equal(late.state, "error", "the second key for one address is a change, not a first use");
+    assert.equal(late.hostKeyChange?.previousFingerprint, keys.sshFingerprint(key));
+    assert.equal(stored()["nas.local:22"], keys.storedFingerprint(key), "the first answer stands");
+    ok("two hosts at one address asked at once: the second key is refused as changed");
+  }
+
+  {
+    reset();
+    confirm = true;
+    answer = false;
+    const hashed = (name) => {
+      const salt = randomBytes(20);
+      return `|1|${salt.toString("base64")}|${createHmac("sha1", salt).update(name).digest("base64")}`;
+    };
+    // `HostKeyAlias Builder`: real ssh 9.6 accepts the HMAC of "builder" and
+    // rejects the HMAC of "Builder".
+    harness.files.set("/home/me/.ssh/known_hosts", `${hashed("Builder")} ssh-ed25519 ${b64}\n`);
+    assert.equal((await connect("cased")).state, "error");
+    assert.equal(harness.prompts.length, 1, "a hash of the alias as written is not ssh's entry");
+
+    reset();
+    harness.files.set("/home/me/.ssh/known_hosts", `${hashed("builder")} ssh-ed25519 ${b64}\n`);
+    assert.equal((await connect("cased")).state, "connected");
+    assert.equal(harness.prompts.length, 0, "the hashed alias matched in lowercase, as ssh hashes it");
+
+    reset();
+    harness.files.set("/home/me/.ssh/other_known", `c.example ssh-ed25519 ${b64}\n`);
+    assert.equal((await connect("custom")).state, "connected");
+    assert.equal(harness.prompts.length, 0, "a custom UserKnownHostsFile is read");
+
+    reset();
+    harness.files.set("/etc/ssh/ssh_known_hosts", `nas.local ssh-ed25519 ${other.toString("base64")}\n`);
+    const global = await connect("nas");
+    assert.equal(global.state, "error");
+    assert.equal(global.hostKeyChange?.previousFingerprint, keys.sshFingerprint(other), "the system-wide file is read");
+    assert.equal(harness.prompts.length, 0);
+    ok("hashed aliases in lowercase, and the system-wide and custom known_hosts files");
+  }
+
+  {
+    reset();
+    confirm = true;
+    answer = true;
+    harness.files.set(KNOWN, JSON.stringify({ "nas.local:22": keys.storedFingerprint(key) }));
+    harness.files.set("/home/me/.ssh/known_hosts", `@revoked nas.local ssh-ed25519 ${b64}\n`);
+    const revoked = await connect("nas");
+    assert.equal(revoked.state, "error", "a stored key that known_hosts revokes never connects");
+    assert.match(revoked.error, /revoked/);
+
+    reset();
+    const listedRsa = wireKey("ssh-rsa", randomBytes(64));
+    const offeredRsa = wireKey("ssh-rsa", randomBytes(64));
+    harness.files.set(KNOWN, JSON.stringify({ "nas.local:22": keys.storedFingerprint(key) }));
+    harness.files.set("/home/me/.ssh/known_hosts", `nas.local ssh-rsa ${listedRsa.toString("base64")}\n`);
+    harness.serverKey = offeredRsa;
+    const stale = await connect("nas");
+    assert.equal(stale.state, "error");
+    assert.deepEqual(stale.hostKeyChange, {
+      hostLabel: "nas.local:22",
+      previousFingerprint: keys.sshFingerprint(listedRsa),
+      newFingerprint: keys.sshFingerprint(offeredRsa),
+      keyType: "ssh-rsa",
+      listedBy: "known_hosts",
+      previousKeyType: "ssh-rsa",
+    });
+    assert.match(stale.error, /known_hosts/);
+    ok("a stored key known_hosts revokes is refused, and a known_hosts line is the before of its refusal");
+  }
+
+  {
+    reset();
+    confirm = true;
+    answer = true;
+    const ca = wireKey("ssh-ed25519", randomBytes(32));
+    harness.files.set("/home/me/.ssh/known_hosts", `@cert-authority *.local ssh-ed25519 ${ca.toString("base64")}\n`);
+    assert.equal((await connect("nas")).state, "connected");
+    assert.equal(harness.prompts.length, 1);
+    assert.equal(harness.prompts[0].certAuthority, true, "the question says ssh would have used a certificate");
+
+    reset();
+    harness.files.set("/home/me/.ssh/known_hosts", `@future nas.local ssh-ed25519 ${other.toString("base64")}\n`);
+    assert.equal((await connect("nas")).state, "connected");
+    assert.equal(harness.prompts.length, 1, "an unknown marker neither vouches nor objects");
+    assert.equal(harness.prompts[0].certAuthority, undefined);
+    ok("unknown markers are skipped, and a host only a certificate authority covers gets a louder question");
+  }
+
+  {
+    reset();
+    confirm = true;
+    // ssh2 on a Node without Ed25519 signing leaves it out of its list.
+    const saved = harness.defaultAlgorithms.splice(0, harness.defaultAlgorithms.length, ...harness.defaultAlgorithms.filter((a) => a !== "ssh-ed25519"));
+    try {
+      const ecdsa = wireKey("ecdsa-sha2-nistp256", randomBytes(65));
+      harness.files.set("/home/me/.ssh/known_hosts", `nas.local ssh-ed25519 ${b64}\nnas.local ecdsa-sha2-nistp256 ${ecdsa.toString("base64")}\n`);
+      harness.serverKey = ecdsa;
+      assert.equal((await connect("nas")).state, "connected");
+      const offered = harness.connects[0].algorithms?.serverHostKey ?? [];
+      assert.equal(offered.includes("ssh-ed25519"), false, "never an algorithm ssh2 does not have");
+      assert.equal(offered[0], "ecdsa-sha2-nistp256");
+      assert.deepEqual([...offered].sort(), [...harness.defaultAlgorithms].sort(), "exactly ssh2's own, reordered");
+    } finally {
+      harness.defaultAlgorithms.splice(0, harness.defaultAlgorithms.length, ...saved);
+    }
+    ok("the host key algorithms offered are ssh2's own, the listed types first");
+  }
+
+  {
+    reset();
+    confirm = true;
+    answer = "hold";
+    const first = connect("nas");
+    await until(() => harness.prompts.length === 1);
+    harness.serverKey = other;
+    const second = connect("nas2");
+    await until(() => harness.prompts.length === 2);
+    // Both answered in the same moment: each re-check runs before either write.
+    conns.answerHostKeyPrompt({ requestId: harness.prompts[0].requestId, trust: true });
+    conns.answerHostKeyPrompt({ requestId: harness.prompts[1].requestId, trust: true });
+    const states = [(await first).state, (await second).state];
+    assert.deepEqual(states.filter((s) => s === "connected").length, 1, "only one key wins an address");
+    const winner = states[0] === "connected" ? key : other;
+    assert.equal(stored()["nas.local:22"], keys.storedFingerprint(winner), "and it is the one stored");
+    ok("two first-use answers for one address at once: one is stored, the other refused as changed");
+  }
+
+  {
+    reset();
+    confirm = true;
+    answer = true;
+    harness.settings.nas = { files: ["/etc/ssh/corp_known"], revoked: null };
+    harness.files.set("/etc/ssh/corp_known", `nas.local ssh-ed25519 ${other.toString("base64")}\n`);
+    harness.files.set("/home/me/.ssh/known_hosts", `nas.local ssh-ed25519 ${b64}\n`);
+    const corp = await connect("nas");
+    assert.equal(corp.state, "error", "the files ssh-hosts names are the ones read");
+    assert.equal(corp.hostKeyChange?.previousFingerprint, keys.sshFingerprint(other));
+    assert.equal(harness.prompts.length, 0);
+    ok("the known_hosts files ssh-hosts names are read, and only those");
+  }
+
+  {
+    reset();
+    confirm = false;
+    harness.files.set("/home/me/.ssh/known_hosts", `@revoked nas.local ssh-ed25519 ${b64}\n`);
+    const fresh = await connect("nas");
+    assert.equal(fresh.state, "error", "confirmation off: a revoked key still never connects");
+    assert.match(fresh.error, /revoked/);
+    assert.deepEqual(stored(), {}, "and is not trusted on first use");
+
+    reset();
+    harness.files.set(KNOWN, JSON.stringify({ "nas.local:22": keys.storedFingerprint(key) }));
+    harness.files.set("/home/me/.ssh/known_hosts", `@revoked nas.local ssh-ed25519 ${b64}\n`);
+    const stored_ = await connect("nas");
+    assert.equal(stored_.state, "error", "nor when Codara stored it before it was revoked");
+    assert.match(stored_.error, /revoked/);
+
+    reset();
+    harness.files.set("/home/me/.ssh/known_hosts", `nas.local ssh-ed25519 ${other.toString("base64")}\n`);
+    assert.equal((await connect("nas")).state, "connected", "off otherwise keeps trust on first use, as before");
+    confirm = true;
+    ok("a key known_hosts revokes is refused whatever the confirmation setting");
+  }
+
+  {
+    for (const setting of [true, false]) {
+      reset();
+      confirm = setting;
+      answer = true;
+      harness.settings.nas = { refusal: 'UserKnownHostsFile "/x/%Z" uses %Z, which ssh does not accept there' };
+      const refused = await connect("nas");
+      assert.equal(refused.state, "error");
+      assert.match(refused.error, /Codara will not connect to nas because of your ssh config: UserKnownHostsFile "\/x\/%Z" uses %Z/);
+      assert.equal(harness.connects.length, 0, "refused before any connection");
+      assert.equal(harness.prompts.length, 0);
+      assert.deepEqual(stored(), {});
+    }
+    ok("a host whose ssh config ssh would refuse is refused before connecting, whatever the setting");
+  }
+
+  {
+    const u32 = (n) => {
+      const b = Buffer.alloc(4);
+      b.writeUInt32BE(n);
+      return b;
+    };
+    const str = (b) => Buffer.concat([u32(b.length), Buffer.from(b)]);
+    const krl = (...sections) =>
+      Buffer.concat([Buffer.from("SSHKRL\n\0", "latin1"), u32(1), Buffer.alloc(24), str(""), str(""), ...sections]);
+    const section = (type, body) => Buffer.concat([Buffer.from([type]), str(body)]);
+    const revokedFile = "/home/me/.ssh/revoked";
+    const withRevoked = (revoked) => {
+      harness.settings.nas = { files: ["/home/me/.ssh/known_hosts"], revoked };
+    };
+    const cases = [
+      ["a key list naming the key", `# revoked\n\nssh-ed25519 ${b64} old\n`, "revoked"],
+      ["a key list naming another key", `ssh-ed25519 ${other.toString("base64")}\n`, "connected"],
+      ["a key list with a line ssh cannot read", "not a key\n", "unreadable"],
+      ["a KRL by key", krl(section(2, str(key))), "revoked"],
+      ["a KRL by SHA-256", krl(section(5, str(createHash("sha256").update(key).digest()))), "revoked"],
+      ["a KRL by SHA-1", krl(section(3, str(createHash("sha1").update(key).digest()))), "revoked"],
+      ["a KRL of another key", krl(section(2, str(other))), "connected"],
+      ["an empty KRL", krl(), "connected"],
+      ["a truncated KRL", krl(section(2, str(key))).subarray(0, -3), "unreadable"],
+      ["a KRL with a critical extension", krl(section(255, Buffer.concat([str("x@example.com"), Buffer.from([1]), str("")]))), "unreadable"],
+    ];
+    for (const setting of [true, false]) {
+      for (const [name, data, expected] of cases) {
+        reset();
+        confirm = setting;
+        answer = true;
+        withRevoked([revokedFile]);
+        harness.files.set(revokedFile, data);
+        // Listed and stored, so only RevokedHostKeys can refuse it.
+        harness.files.set("/home/me/.ssh/known_hosts", `nas.local ssh-ed25519 ${b64}\n`);
+        harness.files.set(KNOWN, JSON.stringify({ "nas.local:22": keys.storedFingerprint(key) }));
+        const status = await connect("nas");
+        const label = `${name}, confirmation ${setting ? "on" : "off"}`;
+        if (expected === "connected") {
+          assert.equal(status.state, "connected", label);
+          continue;
+        }
+        assert.equal(status.state, "error", label);
+        assert.match(status.error, expected === "revoked" ? /revoked by \/home\/me\/\.ssh\/revoked/ : /RevokedHostKeys \/home\/me\/\.ssh\/revoked .*ssh would not connect/, label);
+        assert.equal(harness.prompts.length, 0, label);
+      }
+    }
+
+    reset();
+    confirm = true;
+    withRevoked([revokedFile]);
+    const missing = await connect("nas");
+    assert.equal(missing.state, "error");
+    assert.match(missing.error, /RevokedHostKeys \/home\/me\/\.ssh\/revoked cannot be read/, "ssh refuses a file it cannot read");
+
+    const second = "/home/me/.ssh/revoked_more";
+    const listedAndStored = () => {
+      harness.files.set("/home/me/.ssh/known_hosts", `nas.local ssh-ed25519 ${b64}\n`);
+      harness.files.set(KNOWN, JSON.stringify({ "nas.local:22": keys.storedFingerprint(key) }));
+    };
+    reset();
+    listedAndStored();
+    withRevoked(["/home/me/.ssh/revoked_missing", revokedFile]);
+    harness.files.set(revokedFile, `ssh-ed25519 ${other.toString("base64")}\n`);
+    const firstMissing = await connect("nas");
+    assert.equal(firstMissing.state, "error", "a file ssh cannot read refuses, even when the next one reads");
+    assert.match(firstMissing.error, /RevokedHostKeys \/home\/me\/\.ssh\/revoked_missing cannot be read/);
+
+    // OpenSSH 10.3+ reads several RevokedHostKeys files, one after another.
+    reset();
+    listedAndStored();
+    withRevoked([revokedFile, second]);
+    harness.files.set(revokedFile, `ssh-ed25519 ${other.toString("base64")}\n`);
+    harness.files.set(second, `ssh-ed25519 ${b64}\n`);
+    const bySecond = await connect("nas");
+    assert.equal(bySecond.state, "error", "the second file revokes the key");
+    assert.match(bySecond.error, /revoked by \/home\/me\/\.ssh\/revoked_more/);
+
+    reset();
+    listedAndStored();
+    withRevoked([revokedFile, second]);
+    harness.files.set(revokedFile, `ssh-ed25519 ${other.toString("base64")}\n`);
+    const secondMissing = await connect("nas");
+    assert.equal(secondMissing.state, "error", "one file ssh cannot read refuses, even after one it read");
+    assert.match(secondMissing.error, /RevokedHostKeys \/home\/me\/\.ssh\/revoked_more cannot be read/);
+
+    reset();
+    listedAndStored();
+    withRevoked([revokedFile, second]);
+    harness.files.set(revokedFile, `ssh-ed25519 ${other.toString("base64")}\n`);
+    harness.files.set(second, krl());
+    assert.equal((await connect("nas")).state, "connected", "neither file revokes the key");
+    ok("RevokedHostKeys refuses what any of its files revokes, and a file ssh cannot read, whatever the setting");
+  }
+
+  {
+    // ssh 9.6 compares a key list's certificate line by the key it certifies:
+    // a host revoked by its -cert.pub is refused ("revoked by file").
+    if (hasSshKeygen()) {
+      const dir = fs.mkdtempSync(path.join(TMP, "certs-"));
+      const make = (name, type, bits) => {
+        const file = path.join(dir, name);
+        execFileSync("ssh-keygen", ["-q", "-t", type, ...(bits ? ["-b", bits] : []), "-N", "", "-f", file], { stdio: "ignore" });
+        return file;
+      };
+      const ca = make("ca", "ed25519");
+      for (const [type, bits] of [["ed25519"], ["ecdsa", "256"], ["rsa", "2048"]]) {
+        const hostFile = make(`host_${type}`, type, bits);
+        execFileSync("ssh-keygen", ["-q", "-s", ca, "-I", "nas", "-h", "-n", "nas.local", `${hostFile}.pub`], { stdio: "ignore" });
+        const [plainType, plainB64] = fs.readFileSync(`${hostFile}.pub`, "utf8").split(/\s+/);
+        const certLine = fs.readFileSync(`${hostFile}-cert.pub`, "utf8");
+        const plain = Buffer.from(plainB64, "base64");
+        assert.equal(keys.revokedByFile(Buffer.from(certLine), plain), true, `${plainType}: its certificate revokes it`);
+        assert.equal(keys.revokedByFile(Buffer.from(certLine), other), false, `${plainType}: and no other key`);
+
+        reset();
+        confirm = false;
+        harness.serverKey = plain;
+        harness.settings.nas = { files: ["/home/me/.ssh/known_hosts"], revoked: ["/home/me/.ssh/revoked"] };
+        harness.files.set("/home/me/.ssh/revoked", `# retired by its certificate\n${certLine}`);
+        harness.files.set(KNOWN, JSON.stringify({ "nas.local:22": keys.storedFingerprint(plain) }));
+        const status = await connect("nas");
+        assert.equal(status.state, "error", `${plainType}: a stored key revoked by its certificate never connects`);
+        assert.match(status.error, /revoked by \/home\/me\/\.ssh\/revoked/);
+      }
+      confirm = true;
+    } else {
+      console.log("  skip certificate revocation (no ssh-keygen)");
+    }
+    ok("a certificate line in a RevokedHostKeys key list revokes the key it certifies");
+  }
+
+  {
+    // ssh 9.6 reads every key list line in full and refuses the whole file
+    // ("Error checking host key ... in revoked keys file") when one does not
+    // parse, so a host the file does not name is refused too. Each malformed
+    // case below was checked against a real sshd.
+    if (hasSshKeygen()) {
+      const dir = fs.mkdtempSync(path.join(TMP, "bad-lines-"));
+      const make = (name, type, bits) => {
+        const file = path.join(dir, name);
+        execFileSync("ssh-keygen", ["-q", "-t", type, ...(bits ? ["-b", bits] : []), "-N", "", "-f", file], { stdio: "ignore" });
+        return file;
+      };
+      const sign = (ca, pub, alg) => {
+        execFileSync("ssh-keygen", ["-q", "-s", ca, ...(alg ? ["-t", alg] : []), "-I", "x", "-h", "-n", "h", pub], { stdio: "ignore" });
+        return fs.readFileSync(pub.replace(/\.pub$/, "-cert.pub"), "utf8").trim().split(/\s+/);
+      };
+      const blobOf = (file) => fs.readFileSync(file, "utf8").trim().split(/\s+/);
+      const line = (type, blob) => `${type} ${blob.toString("base64")}\n`;
+      // Offsets of each length-prefixed string, from `from`.
+      const strings = (blob, from, count) => {
+        const out = [];
+        let at = from;
+        for (let i = 0; i < count; i++) {
+          out.push(at);
+          at += 4 + blob.readUInt32BE(at);
+        }
+        return { out, at };
+      };
+      const ca = make("ca", "ed25519");
+      const ec = make("ec384", "ecdsa", "384");
+      const ec256 = make("ec256", "ecdsa", "256");
+      const [certType, certB64] = sign(ca, `${ec}.pub`);
+      const cert = Buffer.from(certB64, "base64");
+      // ecdsa cert: type, nonce, curve, Q, serial, type, key id, principals,
+      // after, before, critical, extensions, reserved, CA key, signature.
+      const head = strings(cert, 0, 4);
+      const [, , curveAt, pointAt] = head.out;
+      const tail = strings(cert, head.at + 12, 2);
+      const sigAt = strings(cert, tail.at + 16, 5).out[4];
+      const [plainType, plainB64] = blobOf(`${ec256}.pub`);
+      const plain = Buffer.from(plainB64, "base64");
+      const edit = (blob, at, fn) => {
+        const copy = Buffer.from(blob);
+        fn(copy, at);
+        return copy;
+      };
+      const malformed = [
+        ["a certificate with trailing bytes", line(certType, Buffer.concat([cert, Buffer.alloc(4)]))],
+        ["a certificate cut before its signature", line(certType, cert.subarray(0, sigAt))],
+        ["a certificate whose signature is wrong", line(certType, edit(cert, cert.length - 1, (b, i) => (b[i] ^= 1)))],
+        ["a certificate whose curve does not match its type", line(certType, edit(cert, curveAt + 4, (b, i) => b.write("nistp256", i, "latin1")))],
+        ["a certificate whose point is off its curve", line(certType, edit(cert, pointAt + 14, (b, i) => (b[i] ^= 0xff)))],
+        ["a key with trailing bytes", line(plainType, Buffer.concat([plain, Buffer.from([0, 0, 0, 1, 7])]))],
+        ["a key whose curve does not match its type", line(plainType, edit(plain, 4 + 19 + 4, (b, i) => b.write("nistp384", i, "latin1")))],
+        ["a key whose point is off its curve", line(plainType, edit(plain, plain.length - 5, (b, i) => (b[i] ^= 0xff)))],
+        ["an Ed25519 key of 31 bytes", line("ssh-ed25519", wireKey("ssh-ed25519", Buffer.alloc(31, 1)))],
+      ];
+      for (const [name, text] of malformed) {
+        assert.throws(() => keys.revokedByFile(Buffer.from(text), key), keys.RevokedKeysFormatError, name);
+        // ssh stops at the first match: a bad line after it is never read.
+        assert.equal(keys.revokedByFile(Buffer.from(`ssh-ed25519 ${b64}\n${text}`), key), true, `${name}, after a match`);
+      }
+
+      reset();
+      confirm = false;
+      harness.settings.nas = { files: ["/home/me/.ssh/known_hosts"], revoked: ["/home/me/.ssh/revoked"] };
+      harness.files.set("/home/me/.ssh/revoked", `ssh-ed25519 ${other.toString("base64")}\n${malformed[2][1]}`);
+      harness.files.set(KNOWN, JSON.stringify({ "nas.local:22": keys.storedFingerprint(key) }));
+      const refused = await connect("nas");
+      assert.equal(refused.state, "error", "a host the file does not name is refused too");
+      assert.match(refused.error, /RevokedHostKeys \/home\/me\/\.ssh\/revoked .*line 2: a certificate whose signature is wrong.*ssh would not connect/);
+      confirm = true;
+
+      // Certificates signed by each kind of CA still read, and revoke.
+      const host = make("host", "ed25519");
+      const hostKey = Buffer.from(blobOf(`${host}.pub`)[1], "base64");
+      const cas = [["ed25519 CA", ca], ["ECDSA CA", make("ca_ec", "ecdsa", "521")]];
+      const rsaCa = make("ca_rsa", "rsa", "2048");
+      for (const alg of ["ssh-rsa", "rsa-sha2-256", "rsa-sha2-512"]) cas.push([`RSA CA, ${alg}`, rsaCa, alg]);
+      try {
+        cas.push(["DSA CA", make("ca_dsa", "dsa")]);
+      } catch {
+        // ssh-keygen without DSA support.
+      }
+      for (const [name, caFile, alg] of cas) {
+        const [type, b] = sign(caFile, `${host}.pub`, alg);
+        const text = Buffer.from(`${type} ${b}\n`);
+        assert.equal(keys.revokedByFile(text, hostKey), true, `${name}: revokes the key it certifies`);
+        assert.equal(keys.revokedByFile(text, key), false, `${name}: and no other`);
+      }
+    } else {
+      console.log("  skip malformed key list lines (no ssh-keygen)");
+    }
+    ok("a key list line ssh cannot read refuses every host; certificates from any CA type still read");
+  }
+
+  {
+    const settle = () => new Promise((r) => setTimeout(r, 50));
+    reset();
+    confirm = true;
+    answer = "hold";
+    const first = connect("nas");
+    const second = connect("nas2");
+    await until(() => harness.clients.length === 2);
+    await settle();
+    assert.equal(harness.prompts.length, 1, "one question for one address and one key");
+    conns.answerHostKeyPrompt({ requestId: harness.prompts[0].requestId, trust: true });
+    assert.deepEqual([(await first).state, (await second).state], ["connected", "connected"], "both use the answer");
+    assert.equal(stored()["nas.local:22"], keys.storedFingerprint(key));
+    assert.deepEqual(closed, [harness.prompts[0].requestId]);
+
+    reset();
+    const leaving = connect("nas");
+    const staying = connect("nas2");
+    await until(() => harness.clients.length === 2);
+    await settle();
+    assert.equal(harness.prompts.length, 1);
+    conns.disconnectHost("nas");
+    assert.equal((await leaving).state, "disconnected");
+    await settle();
+    assert.deepEqual(closed, [], "the question stays up while another host waits for it");
+    conns.answerHostKeyPrompt({ requestId: harness.prompts[0].requestId, trust: true });
+    assert.equal((await staying).state, "connected");
+
+    reset();
+    const a = connect("nas");
+    const b = connect("nas2");
+    await until(() => harness.clients.length === 2);
+    await settle();
+    conns.disconnectHost("nas");
+    conns.disconnectHost("nas2");
+    await Promise.all([a, b]);
+    assert.deepEqual(closed, [harness.prompts[0].requestId], "and ends once nobody waits for it");
+    ok("two hosts for one address and one key ask once, and both use the answer");
+  }
+
+  reset();
+  fs.rmSync(TMP, { recursive: true, force: true });
+  console.log(`\n${passed} passed`);
+})().catch((err) => {
+  console.error(err);
+  fs.rmSync(TMP, { recursive: true, force: true });
+  process.exit(1);
+});

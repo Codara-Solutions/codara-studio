@@ -75,6 +75,7 @@ import {
 } from "../lib/account-provider-descriptors";
 import { stableAccountCardKeys } from "../lib/account-card-keys";
 import RemoteAccessSettings from "./RemoteAccessSettings";
+import MachinesSettings from "./machines/MachinesSettings";
 import SharedPagesSettings from "./share/SharedPagesSettings";
 import { CardOverflowMenu } from "./AccountCardPrimitives";
 import { CodaraMark, RuntimeMark } from "./BrandMarks";
@@ -107,6 +108,7 @@ import {
   ToggleRow,
   ValueRow,
 } from "./settings/SettingsPrimitives";
+import { PullRequestWatchOffRepos } from "./settings/PullRequestWatchOffRepos";
 import {
   entryLocation,
   matchRanges,
@@ -121,7 +123,7 @@ import KeepAwakeSettings from "./keep-awake/KeepAwakeSettings";
 import QuickCommandsSettings from "../quick-commands/QuickCommandsSettings";
 import { useDiagnostics } from "./settings/DiagnosticsControls";
 import WorktreeSetupSettingsControl from "./worktree-setup/WorktreeSetupSettingsControl";
-import CrossWorkspaceGrantsList from "./cross-workspace/CrossWorkspaceGrantsList";
+import CrossWorkspaceGrantsList, { tabActionGrantSource } from "./cross-workspace/CrossWorkspaceGrantsList";
 
 export type { SettingsTab } from "./settings/settings-index";
 
@@ -138,6 +140,9 @@ export type { SettingsTab } from "./settings/settings-index";
 // "claude-fable-5" -> "Claude Fable 5", "gpt-5.6-sol" -> "GPT-5.6 Sol",
 // "grok-4.6" -> "Grok 4.6". Generic title-casing over the id's segments, with
 // the gpt prefix uppercased, so there is no per-model table to drift.
+const TAB_CLOSE_GRANTS = tabActionGrantSource("close");
+const TAB_MOVE_GRANTS = tabActionGrantSource("move");
+
 function friendlyModelLabel(id: string): string {
   return id
     .split("-")
@@ -482,6 +487,7 @@ export default function SettingsDialog({
               {renderedTab === "sessions" && (
                 <SessionsSettings onOpenWorkerSession={onOpenWorkerSession} />
               )}
+              {renderedTab === "machines" && <MachinesSettings onClose={onClose} />}
               {renderedTab === "remote-access" && <RemoteAccessSettings />}
               {renderedTab === "shared-pages" && <SharedPagesSettings />}
               {renderedTab === "keybindings" && <KeybindingsTab />}
@@ -1424,6 +1430,20 @@ function GitSettings({ workspaceCwd }: { workspaceCwd?: string | null }) {
           title="Notify me when CI fails on my pull request"
           desc="One alert per failing commit on the pull request of each workspace's branch. Fix with agent in Source Control hands it to an agent."
           {...bindToggle("notifyCiFailures", preferences, setPreference)}
+        />
+        <ToggleRow
+          title="Watch pull requests and tell agents when CI fails"
+          desc="Rows show each branch's pull request and checks. When checks fail, the agent working on that branch gets one line asking it to fix them, once it is free. Turn it off for one repository from a row's menu."
+          {...bindToggle("watchPullRequests", preferences, setPreference)}
+        />
+        <PullRequestWatchOffRepos
+          repositories={preferences.pullRequestWatchOffRepos ?? []}
+          onWatch={(repository) =>
+            void setPreference(
+              "pullRequestWatchOffRepos",
+              (preferences.pullRequestWatchOffRepos ?? []).filter((item) => item !== repository),
+            )
+          }
         />
       </SettingsSection>
 
@@ -2829,6 +2849,19 @@ function FastModeRow() {
   );
 }
 
+function UsageForecastLabsSection() {
+  const { preferences, setPreference } = usePreferences();
+  return (
+    <SettingsSection title="Labs" description="Experiments that may change or go away.">
+      <ToggleRow
+        title="Usage forecast"
+        desc="Learns how you use each subscription from the transcripts on this computer and says, in the usage panel and the Usage tab, whether a limit runs out before it resets. Nothing leaves this computer. While off, nothing is recorded."
+        {...bindToggle("usageForecast", preferences, setPreference)}
+      />
+    </SettingsSection>
+  );
+}
+
 function AgentsSettings({ onClose }: { onClose: () => void }) {
   // Settings closes first so two modals never stack and fight over focus and
   // Escape. Nothing on this tab is a draft, so closing loses nothing.
@@ -2850,7 +2883,19 @@ function AgentsSettings({ onClose }: { onClose: () => void }) {
         >
           <CrossWorkspaceGrantsList />
         </SettingRow>
+        <SettingRow
+          title="Tabs agents did not open"
+          desc="An agent that wants to close, split or unsplit tabs it did not open asks you first. Pairs you always allow are listed here, for closing and for moving (split and unsplit) separately: agents in the first workspace may do that to tabs in the second without asking, except closing a tab with a running agent or unsaved edits, which Codara always asks about. Revoke one to be asked again."
+          stacked
+        >
+          <div style={{ display: "grid", gap: 10 }}>
+            <CrossWorkspaceGrantsList source={TAB_CLOSE_GRANTS} verb="may close tabs in" empty="No workspace may close tabs without asking." />
+            <CrossWorkspaceGrantsList source={TAB_MOVE_GRANTS} verb="may move tabs in" empty="No workspace may move tabs without asking." />
+          </div>
+        </SettingRow>
       </SettingsSection>
+
+      <UsageForecastLabsSection />
 
       <SettingsSection title="Tools">
         <SettingRow

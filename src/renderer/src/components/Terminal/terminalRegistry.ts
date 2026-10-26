@@ -6,6 +6,7 @@
 // here at mount and terminalRpc calls it. Mirrors Preview/registry.ts'
 // setOpenPreviewTabFn. Lives for the renderer process lifetime.
 
+import type { TerminalAgentOwner } from "@shared/agent-terminal-owner";
 import type { TerminalLeafOrigin } from "../../tabs/types";
 
 export interface CreateAgentTerminalInput {
@@ -40,6 +41,8 @@ export interface CreateAgentTerminalInput {
   // Main-resolved name of the caller's workspace when an agent opens this tab
   // in another workspace; shown on the tab.
   openedBy?: string;
+  // Main-resolved agent that asked for the tab, saved with the pane.
+  agentOwner?: TerminalAgentOwner;
 }
 
 export interface CreateAgentTerminalResult {
@@ -58,8 +61,11 @@ export interface ShareableStudioTerminal {
   title?: string;
   cwd?: string;
   profile: "shell" | "claude" | "codex" | "grok";
-  // The name of the tab group the pane's tab is in.
+  // The name and id of the tab group the pane's tab is in.
   group?: string;
+  groupId?: string;
+  // For main's ownership checks after a relaunch: who opened the pane.
+  agentOwner?: TerminalAgentOwner;
 }
 
 type ListShareableStudioTerminalsFn = () => ShareableStudioTerminal[];

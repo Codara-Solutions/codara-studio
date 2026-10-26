@@ -16,6 +16,7 @@ const SETTINGS_SECTIONS: Record<SettingsTab, true> = {
   api: true,
   agents: true,
   sessions: true,
+  machines: true,
   "remote-access": true,
   "shared-pages": true,
   keybindings: true,

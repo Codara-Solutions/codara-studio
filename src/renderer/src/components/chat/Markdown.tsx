@@ -9,13 +9,18 @@ import {
   isAbsoluteChatPath,
   resolveChatPath,
 } from "./markdown-links";
+import { chatUrlTransform, remarkTabLinks } from "./remark-tab-links";
+import { splitMarkdownBlocks } from "./markdown-blocks";
+import { cachedMermaidSvg, rememberMermaidSvg } from "./mermaid-cache";
+import { isTabLink } from "@shared/tab-links";
+import { openTabLink } from "../../tabs/tabLinkBridge";
 
 // Hoisted so streaming re-renders reuse the same plugin arrays and component
 // map — a fresh object here re-runs the whole remark/rehype pipeline per render.
 // remark-breaks keeps single newlines as line breaks: chat prose is written
 // line-by-line, and collapsing soft breaks is what produced wall-of-text
 // question cards.
-const REMARK_PLUGINS = [remarkGfm, remarkBreaks];
+const REMARK_PLUGINS = [remarkGfm, remarkBreaks, remarkTabLinks];
 // react-markdown still rebuilds its processor per render; the shared plugin
 // keeps the highlighter it attaches from being rebuilt with it.
 const REHYPE_PLUGINS = [rehypeHighlightShared];
@@ -40,7 +45,8 @@ function MarkdownLink({ href, children }: { href?: string; children?: React.Reac
       title={href}
       onClick={(event) => {
         event.preventDefault();
-        if (target.kind === "external") void window.spark.openExternal(target.url);
+        if (href && isTabLink(href)) openTabLink(href);
+        else if (target.kind === "external") void window.spark.openExternal(target.url);
         else if (target.kind === "path" && cwd) openWorkspaceFile(cwd, target.path, target.line);
       }}
       rel="noreferrer"
@@ -189,34 +195,61 @@ const COMPONENTS: Components = {
 /** Shared safe markdown renderer for chat and result prose. Raw HTML is not
  * enabled, so model output cannot inject DOM. GFM and highlight.js cover the
  * common tables/task-lists/code path; Mermaid runs in strict security mode. */
-function Markdown({ text }: { text: string }) {
+function Markdown({ text, streaming = false }: { text: string; streaming?: boolean }) {
+  // Only text that is still growing is cut: every piece costs a parser setup,
+  // which a finished message would pay on every mount for nothing.
+  const blocks = useMemo(() => (streaming ? splitMarkdownBlocks(text) : [text]), [streaming, text]);
+  // The newline between pieces is the text node the whole document's hast
+  // puts between top-level blocks, so the DOM matches an unsplit render.
   return (
     <div className="cora-md">
-      <ReactMarkdown
-        remarkPlugins={REMARK_PLUGINS}
-        rehypePlugins={REHYPE_PLUGINS}
-        components={COMPONENTS}
-      >
-        {text}
-      </ReactMarkdown>
+      {blocks.map((block, index) => (
+        <React.Fragment key={index}>
+          {index > 0 && "\n"}
+          <MarkdownBlock text={block} />
+        </React.Fragment>
+      ))}
     </div>
   );
 }
 
 export default React.memo(Markdown);
 
+// Memoized per piece: while a reply streams, only the piece still growing
+// gets new text, so the finished ones above it are never parsed again.
+const MarkdownBlock = React.memo(function MarkdownBlock({ text }: { text: string }) {
+  return (
+    <ReactMarkdown
+      remarkPlugins={REMARK_PLUGINS}
+      rehypePlugins={REHYPE_PLUGINS}
+      components={COMPONENTS}
+      urlTransform={chatUrlTransform}
+    >
+      {text}
+    </ReactMarkdown>
+  );
+});
+
 function MermaidDiagram({ source }: { source: string }) {
   const reactId = useId();
   const id = useMemo(() => `cora-mermaid-${reactId.replace(/[^a-zA-Z0-9_-]/g, "")}`, [reactId]);
-  const [svg, setSvg] = useState<string>("");
+  const [svg, setSvg] = useState<string>(() => cachedMermaidSvg(source, id));
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
+    const cached = cachedMermaidSvg(source, id);
+    if (cached) {
+      setSvg(cached);
+      return;
+    }
     let cancelled = false;
     void import("mermaid").then(async ({ default: mermaid }) => {
       mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "dark" });
       try {
         const rendered = await mermaid.render(id, source);
-        if (!cancelled) setSvg(rendered.svg);
+        if (!cancelled) {
+          rememberMermaidSvg(source, id, rendered.svg);
+          setSvg(rendered.svg);
+        }
       } catch (reason) {
         if (!cancelled) setError(reason instanceof Error ? reason.message : String(reason));
       }
@@ -224,7 +257,7 @@ function MermaidDiagram({ source }: { source: string }) {
     return () => { cancelled = true; };
   }, [id, source]);
   if (error) return <pre style={CODE_BLOCK_STYLE}><code>{source}</code></pre>;
-  if (!svg) return <div style={{ color: "var(--muted)", fontSize: 12 }}>Rendering diagram…</div>;
+  if (!svg) return <div data-mermaid-pending style={{ color: "var(--muted)", fontSize: 12 }}>Rendering diagram…</div>;
   return <div style={{ maxWidth: "100%", overflowX: "auto" }} dangerouslySetInnerHTML={{ __html: svg }} />;
 }
 

@@ -94,8 +94,9 @@ async function main() {
     bundle("src/main/git-worktrees.ts", "git"),
     bundle("src/main/worktree-cleanup/rail.ts", "rail"),
     bundle("src/main/agent-worktrees.ts", "agent"),
+    bundle("src/main/worktree-cleanup/remove.ts", "remove"),
   ]);
-  const [wt, rail, agent] = bundles.map((entry) => entry.mod);
+  const [wt, rail, agent, remove] = bundles.map((entry) => entry.mod);
 
   const scratch = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "codara-wt-rail-")));
   const home = path.join(scratch, "home");
@@ -397,7 +398,7 @@ async function main() {
     await check("Clean up refuses a merged worktree with uncommitted changes", async () => {
       const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged-dirty", mode: "manual" });
       assert.equal(result.status, "refused");
-      assert.match(result.message, /uncommitted work/);
+      assert.match(result.message, /uncommitted work \(notes.txt\)/);
       assert.equal(fs.existsSync(path.join(mergedDirty, "notes.txt")), true);
       assert.equal(branchExists(repo, "feature/merged-dirty"), true);
       assert.equal(has("ws-merged-dirty"), true);
@@ -527,6 +528,191 @@ async function main() {
       assert.equal(branchExists(repo, "feature/merged"), false);
       assert.equal(has("ws-merged"), false);
       assert.equal(h.state.activeWorkspaceId, "ws-repo");
+    });
+
+    // Merged worktrees that hold only ignored files.
+    commitFile(repo, ".gitignore", "node_modules/\ntest-results/\nplaywright-report/\n.ruff_cache/\n.env\n", "ignore output");
+    git(repo, ["push", "-q", "origin", "main"]);
+    const mergedWith = (name, branch) => {
+      const dir = add(name, branch);
+      commitFile(dir, `${name}.txt`, `${name}\n`, `${name} work`);
+      mergeIntoMain(branch);
+      h.state.workspaces.push(copyWorkspace(`ws-${name}`, dir, repo, branch));
+      return dir;
+    };
+    const output = mergedWith("merged-output", "feature/merged-output");
+    fs.mkdirSync(path.join(output, "test-results", "run-1"), { recursive: true });
+    fs.writeFileSync(path.join(output, "test-results", "run-1", "trace.zip"), "trace");
+    fs.mkdirSync(path.join(output, "playwright-report"));
+    fs.writeFileSync(path.join(output, "playwright-report", "index.html"), "<html></html>");
+    fs.mkdirSync(path.join(output, ".ruff_cache"));
+    fs.writeFileSync(path.join(output, ".ruff_cache", "CACHEDIR.TAG"), "tag");
+    const secrets = mergedWith("merged-secrets", "feature/merged-secrets");
+    fs.writeFileSync(path.join(secrets, ".env"), "LOCAL_ONLY=1\n");
+
+    await check("Clean up removes a merged worktree that holds only test and lint output", async () => {
+      const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged-output", mode: "manual" });
+      assert.equal(result.status, "removed", result.message);
+      assert.equal(fs.existsSync(output), false);
+      assert.equal(branchExists(repo, "feature/merged-output"), false);
+      assert.equal(has("ws-merged-output"), false);
+    });
+
+    await check("Clean up asks before deleting an ignored .env, and only the answer it asked for removes it", async () => {
+      const asked = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged-secrets", mode: "manual" });
+      assert.equal(asked.status, "confirm", asked.message);
+      assert.deepEqual(asked.holds, [".env"]);
+      assert.ok(asked.fingerprint);
+      assert.equal(fs.existsSync(path.join(secrets, ".env")), true);
+
+      const wrong = await rail.cleanUpRailWorkspace(deps, {
+        workspaceId: "ws-merged-secrets",
+        mode: "manual",
+        confirmIgnored: "not-the-fingerprint",
+      });
+      assert.equal(wrong.status, "confirm");
+      assert.match(wrong.message, /changed/);
+      const auto = await rail.cleanUpRailWorkspace(deps, {
+        workspaceId: "ws-merged-secrets",
+        mode: "auto",
+        confirmIgnored: asked.fingerprint,
+      });
+      assert.equal(auto.status, "refused", "the automatic cleanup never takes a confirmation");
+
+      // A file that appeared after the question is not what was confirmed.
+      fs.writeFileSync(path.join(secrets, ".env.extra"), "x\n");
+      fs.writeFileSync(path.join(repo, ".git", "info", "exclude"), ".env.extra\n");
+      const changed = await rail.cleanUpRailWorkspace(deps, {
+        workspaceId: "ws-merged-secrets",
+        mode: "manual",
+        confirmIgnored: asked.fingerprint,
+      });
+      assert.equal(changed.status, "confirm");
+      assert.deepEqual(changed.holds, [".env", ".env.extra"]);
+      assert.equal(fs.existsSync(path.join(secrets, ".env")), true);
+
+      const removed = await rail.cleanUpRailWorkspace(deps, {
+        workspaceId: "ws-merged-secrets",
+        mode: "manual",
+        confirmIgnored: changed.fingerprint,
+      });
+      assert.equal(removed.status, "removed", removed.message);
+      assert.equal(fs.existsSync(secrets), false);
+      assert.equal(has("ws-merged-secrets"), false);
+      fs.rmSync(path.join(repo, ".git", "info", "exclude"), { force: true });
+    });
+
+    await check("Clean up refuses a worktree whose ignored folders could not all be looked through", async () => {
+      const big = mergedWith("merged-big", "feature/merged-big");
+      fs.mkdirSync(path.join(big, "node_modules", "a", "b", "c", "d"), { recursive: true });
+      deps.nestedScanMaxDirs = 2;
+      try {
+        const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged-big", mode: "manual" });
+        assert.equal(result.status, "refused", "an unchecked folder is not offered as an ignored file to confirm");
+        assert.match(result.message, /could not be fully checked: node_modules\//);
+        assert.doesNotMatch(result.message, /Use Delete/, "the cleanup screen refuses it too, so the rail does not send the user there");
+        assert.equal(result.fingerprint, undefined);
+        // The cleanup screen and the agent tool remove through the same
+        // check: ticking the item does not get past it.
+        const [screen] = await remove.checkCleanupTargets(deps, [{ repoRoot: repo, path: big }]);
+        assert.ok(screen.blockers.some((entry) => entry.code === "UNCHECKED"), JSON.stringify(screen.blockers));
+        const { outcomes } = await remove.removeCleanupWorktrees(deps, {
+          items: [{ repoRoot: repo, path: big, fingerprint: screen.fingerprint, confirmDirty: true, confirmUnmerged: true }],
+          deleteMergedBranches: true,
+        });
+        assert.equal(outcomes[0].status, "refused");
+        assert.equal(outcomes[0].code, "UNCHECKED");
+        assert.equal(fs.existsSync(path.join(big, "node_modules", "a", "b", "c", "d")), true);
+        assert.equal(has("ws-merged-big"), true);
+      } finally {
+        delete deps.nestedScanMaxDirs;
+      }
+      const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged-big", mode: "manual" });
+      assert.equal(result.status, "removed", result.message);
+    });
+
+    await check("output folders go only at the root or a package root, and never take a .env with them", async () => {
+      const nested = mergedWith("merged-nested", "feature/merged-nested");
+      fs.mkdirSync(path.join(nested, "test-results"));
+      fs.writeFileSync(path.join(nested, "test-results", ".env"), "LOCAL_ONLY=1\n");
+      fs.mkdirSync(path.join(nested, "docs", "test-results"), { recursive: true });
+      fs.writeFileSync(path.join(nested, "docs", "test-results", "notes.md"), "kept\n");
+      fs.mkdirSync(path.join(nested, "packages", "web", "test-results"), { recursive: true });
+      fs.writeFileSync(path.join(nested, "packages", "web", "package.json"), "{}\n");
+      git(nested, ["add", "packages/web/package.json"]);
+      git(nested, ["commit", "-q", "-m", "web package"]);
+      mergeIntoMain("feature/merged-nested");
+      fs.writeFileSync(path.join(nested, "packages", "web", "test-results", "trace.zip"), "trace");
+      const asked = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged-nested", mode: "manual" });
+      assert.equal(asked.status, "confirm", asked.message);
+      // git also lists docs/ itself, as a folder that holds only ignored files.
+      assert.deepEqual([...asked.holds].sort(), ["docs/", "docs/test-results/", "test-results/.env"]);
+      assert.equal(fs.existsSync(path.join(nested, "test-results", ".env")), true);
+      const removed = await rail.cleanUpRailWorkspace(deps, {
+        workspaceId: "ws-merged-nested",
+        mode: "manual",
+        confirmIgnored: asked.fingerprint,
+      });
+      assert.equal(removed.status, "removed", removed.message);
+    });
+
+    await check("a confirmation covers every ignored file, not only the twenty it names", async () => {
+      fs.writeFileSync(path.join(repo, ".git", "info", "exclude"), "*.local-data\nscratch/\n");
+      const many = mergedWith("merged-many", "feature/merged-many");
+      for (let i = 1; i <= 25; i += 1) fs.writeFileSync(path.join(many, `a${String(i).padStart(2, "0")}.local-data`), `${i}\n`);
+      fs.mkdirSync(path.join(many, "scratch"));
+      fs.writeFileSync(path.join(many, "scratch", "notes.txt"), "notes\n");
+      const ask = (confirmIgnored) =>
+        rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged-many", mode: "manual", ...(confirmIgnored ? { confirmIgnored } : {}) });
+      let answer = await ask();
+      assert.equal(answer.status, "confirm", answer.message);
+      assert.equal(answer.holds.length, 20, "twenty are named");
+      const stale = async (change, why) => {
+        const before = answer.fingerprint;
+        change();
+        answer = await ask(before);
+        assert.equal(answer.status, "confirm", `${why}: removed on the old yes`);
+        assert.match(answer.message, /changed/, why);
+        assert.notEqual(answer.fingerprint, before, why);
+        assert.equal(fs.existsSync(many), true, why);
+      };
+      await stale(() => fs.writeFileSync(path.join(many, "a26.local-data"), "26\n"), "an entry past the twentieth");
+      await stale(() => fs.writeFileSync(path.join(many, "scratch", "new-key"), "k\n"), "a file inside a named folder");
+      await stale(() => fs.writeFileSync(path.join(many, "scratch", "notes.txt"), "notes, longer now\n"), "a file that changed inside a named folder");
+      await stale(() => {
+        fs.mkdirSync(path.join(many, "test-results"));
+        fs.writeFileSync(path.join(many, "test-results", "id_ed25519"), "k\n");
+      }, "a key inside an output folder");
+      assert.equal(answer.holds[0], "test-results/id_ed25519", "secrets are named first");
+      const removed = await ask(answer.fingerprint);
+      assert.equal(removed.status, "removed", removed.message);
+      fs.rmSync(path.join(repo, ".git", "info", "exclude"), { force: true });
+    });
+
+    await check("keys and .env files inside installed packages are the packages' own", async () => {
+      const deps2 = mergedWith("merged-deps", "feature/merged-deps");
+      fs.mkdirSync(path.join(deps2, "node_modules", "tls-lib", "test"), { recursive: true });
+      fs.writeFileSync(path.join(deps2, "node_modules", "tls-lib", "test", "server.key"), "k\n");
+      fs.writeFileSync(path.join(deps2, "node_modules", "tls-lib", ".env"), "x\n");
+      const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged-deps", mode: "manual" });
+      assert.equal(result.status, "removed", JSON.stringify(result));
+    });
+
+    await check("a worktree its agent's open tab still owns names that tab", async () => {
+      const held = mergedWith("merged-held", "feature/merged-held");
+      const workspace = h.state.workspaces.find((entry) => entry.id === "ws-merged-held");
+      workspace.copyBranch.createdBy = { kind: "agent", client: "claude-code", paneId: "pane-agent" };
+      h.terminals.push({ paneId: "pane-agent", workspaceId: "ws-repo", title: "usage agent", cwd: repo });
+      try {
+        const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged-held", mode: "manual" });
+        assert.equal(result.status, "refused");
+        assert.equal(result.message, "Close the tab “usage agent” in repo first: its agent still owns this worktree.");
+        assert.equal(fs.existsSync(held), true);
+      } finally {
+        h.terminals.pop();
+      }
+      const result = await rail.cleanUpRailWorkspace(deps, { workspaceId: "ws-merged-held", mode: "manual" });
+      assert.equal(result.status, "removed", result.message);
     });
 
     await check("no rail action touched another worktree or the main checkout", async () => {

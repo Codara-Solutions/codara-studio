@@ -77,6 +77,16 @@ export interface RemoteHostConfig {
   hostKeyAlias?: string;
   /** Codara Cloud box id; the box is woken before the SSH handshake. */
   codaraBoxId?: string;
+  /**
+   * UserKnownHostsFile / GlobalKnownHostsFile / RevokedHostKeys from
+   * ~/.ssh/config, else /etc/ssh/ssh_config, expanded, read for the host-key
+   * check; unset means ssh's defaults. Main only, like the proxy.
+   */
+  userKnownHostsFiles?: string[];
+  globalKnownHostsFiles?: string[];
+  revokedHostKeys?: string[];
+  /** Why ssh would refuse to connect with this host's config; Codara refuses too. Main only. */
+  sshConfigRefusal?: string;
 }
 
 export type RemoteConnectionState = "disconnected" | "connecting" | "connected" | "error";
@@ -88,6 +98,8 @@ export interface RemoteConnectionStatus {
   error?: string;
   /** Present while connecting, e.g. the phase of a Codara box that is waking. */
   progress?: string;
+  /** Set when the host's key changed: Studio refuses until the user trusts the new one. */
+  hostKeyChange?: HostKeyChange;
 }
 
 // ── Codara Cloud boxes ───────────────────────────────────────────────────────
@@ -155,4 +167,58 @@ export interface RemoteAuthPromptAnswer {
 
 export function isValidHostId(id: string): boolean {
   return /^[A-Za-z0-9._-]+$/.test(id);
+}
+
+export function isValidPort(port: number): boolean {
+  return Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
+/**
+ * The Add host form's host and port fields. "user@host:port" in the host
+ * field fills the other two; an empty port is 22.
+ */
+export function parseHostAddress(
+  hostField: string,
+  portField: string,
+): { host: string; user: string | null; port: number } | { error: string } {
+  const trimmed = hostField.trim();
+  const address = /^(?:([^@\s]+)@)?([^@\s:]+)(?::(\d+))?$/.exec(trimmed);
+  const portText = address?.[3] ?? (portField.trim() || "22");
+  const port = /^\d+$/.test(portText) ? Number(portText) : NaN;
+  if (!isValidPort(port)) return { error: "Port must be a number from 1 to 65535." };
+  return { host: address?.[2] ?? trimmed, user: address?.[1] ?? null, port };
+}
+
+// ── Host keys ────────────────────────────────────────────────────────────────
+
+/** Asked before the first connection to a host whose key Studio has not seen. */
+export interface HostKeyPromptRequest {
+  requestId: string;
+  hostId: string;
+  /** `host:port`, or the host key alias. */
+  hostLabel: string;
+  keyType: string;
+  /** `SHA256:<base64 without padding>`, as `ssh-keygen -l` prints it. */
+  fingerprint: string;
+  /**
+   * known_hosts trusts a certificate authority for this host: ssh would have
+   * checked the host's certificate, which Codara cannot.
+   */
+  certAuthority?: boolean;
+}
+
+export interface HostKeyPromptAnswer {
+  requestId: string;
+  trust: boolean;
+}
+
+export interface HostKeyChange {
+  hostLabel: string;
+  previousFingerprint: string;
+  newFingerprint: string;
+  keyType: string;
+  /** Set when the earlier key is the one known_hosts lists, not Codara's own. */
+  listedBy?: "known_hosts";
+  /** The listed key's type, when known_hosts gave it (`ssh-ed25519`...). */
+  previousKeyType?: string;
 }

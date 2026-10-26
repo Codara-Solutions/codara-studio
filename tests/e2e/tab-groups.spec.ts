@@ -1,12 +1,12 @@
 import { test, expect, type Page } from "@playwright/test";
 import { _electron as electron, type ElectronApplication } from "playwright";
-import { execFile, spawn } from "node:child_process";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { dispatchDrag } from "./drag";
+import { mcpToolInPane, runInPane } from "./in-pane-mcp";
 
 const { rpcRaw } = require("../../cli/lib/rpc.cjs");
 
@@ -18,7 +18,6 @@ const { rpcRaw } = require("../../cli/lib/rpc.cjs");
 // holds a terminal.
 
 const ROOT = resolve(__dirname, "..", "..");
-const SERVER = join(ROOT, "resources", "codara-studio-mcp", "server.js");
 const CLI = join(ROOT, "cli", "cora.cjs");
 
 type Fixture = {
@@ -84,64 +83,21 @@ async function teardown(fixture: Fixture, app: ElectronApplication | null): Prom
   await rm(fixture.root, { recursive: true, force: true });
 }
 
-// The environment an agent in that pane gets, minus anything the test runner
-// inherited that would name another run or pane.
-function agentEnv(home: string, paneId: string): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, CODARA_HOME_DIR: home, SPARK_HOME_DIR: home, SPARK_PANE_ID: paneId };
-  for (const key of ["SPARK_RUN_ID", "SPARK_AGENT_PANE_ID", "SPARK_MCP_MODE"]) delete env[key];
-  return env;
-}
-
 // One tools/call over the codara-studio MCP server's stdio, as Claude Code or
-// Codex would make it from the agent's pane.
+// Codex would make it from the agent's pane (a plain shell in these tests).
 async function mcpCall(home: string, paneId: string, name: string, args: Record<string, unknown>): Promise<any> {
-  const child = spawn(process.execPath, [SERVER], { env: agentEnv(home, paneId), stdio: ["pipe", "pipe", "inherit"] });
-  try {
-    let buffer = "";
-    const waiting = new Map<number, (message: any) => void>();
-    child.stdout.on("data", (chunk) => {
-      buffer += chunk;
-      let newline;
-      while ((newline = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, newline).trim();
-        buffer = buffer.slice(newline + 1);
-        if (!line) continue;
-        const message = JSON.parse(line);
-        waiting.get(message.id)?.(message);
-      }
-    });
-    const send = (message: Record<string, unknown>) => child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
-    const call = (id: number, method: string, params: Record<string, unknown>) =>
-      new Promise<any>((done) => {
-        waiting.set(id, done);
-        send({ id, method, params });
-      });
-    await call(1, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "any-agent", version: "1" } });
-    send({ method: "notifications/initialized" });
-    const reply = await call(2, "tools/call", { name, arguments: args });
-    expect(reply.result?.isError ?? false, JSON.stringify(reply.result)).toBe(false);
-    return JSON.parse(reply.result.content[0].text);
-  } finally {
-    child.kill();
-  }
+  const result = await mcpToolInPane(home, paneId, name, args);
+  expect(result?.isError ?? false, JSON.stringify(result)).toBe(false);
+  return JSON.parse(result.content[0].text);
 }
 
 // The same tool through `cora tool`, which sends every value as JSON: the
 // group name 2024 arrives as a number.
-function cliCall(home: string, paneId: string, args: string[]): Promise<any> {
-  return new Promise((done, fail) => {
-    execFile(
-      process.execPath,
-      [CLI, "tool", ...args, "--home", home, "--json"],
-      { env: agentEnv(home, paneId), timeout: 60_000 },
-      (error, stdout, stderr) => {
-        if (error) return fail(new Error(`${error.message}\n${stderr}`));
-        const result = JSON.parse(stdout);
-        if (result.isError) return fail(new Error(stdout));
-        done(JSON.parse(result.content[0].text));
-      },
-    );
-  });
+async function cliCall(home: string, paneId: string, args: string[]): Promise<any> {
+  const stdout = await runInPane(home, paneId, [process.execPath, CLI, "tool", ...args, "--home", home, "--json"]);
+  const result = JSON.parse(stdout);
+  if (result.isError) throw new Error(stdout);
+  return JSON.parse(result.content[0].text);
 }
 
 const stripIds = (page: Page) =>
@@ -222,7 +178,6 @@ test("an agent's tabs join its named group in its own workspace, across a reload
     const { paneId: agentPane, tabId: agentTab } = await fixture.request("terminal.create", {
       cwd: fixture.cwdA,
       title: "Agent A",
-      command: "sleep 600",
     });
     const agent = { callerPaneId: agentPane };
 
@@ -451,7 +406,7 @@ test("an agent closes its own browser tab or one of its workspace, never another
   try {
     let page: Page;
     ({ app, page } = await fixture.launch());
-    const { paneId: agentPane } = await fixture.request("terminal.create", { cwd: fixture.cwdA, title: "Agent A", command: "sleep 600" });
+    const { paneId: agentPane } = await fixture.request("terminal.create", { cwd: fixture.cwdA, title: "Agent A" });
     const agent = { callerPaneId: agentPane };
 
     await page.locator('[data-workspace-id="ws-b"]').click();
