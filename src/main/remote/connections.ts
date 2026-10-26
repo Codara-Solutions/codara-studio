@@ -362,28 +362,31 @@ async function readUserKnownHosts(known: KnownHostsFiles): Promise<string> {
 }
 
 /**
- * Why RevokedHostKeys refuses `key`, or null. ssh refuses a key the file
- * revokes, and refuses to connect when it cannot read the file at all.
+ * Why RevokedHostKeys refuses `key`, or null. ssh checks each file in turn:
+ * it refuses a key one revokes, and refuses to connect when it cannot read
+ * one at all.
  */
 async function revokedHostKeysRefusal(known: KnownHostsFiles, key: Buffer, id: string): Promise<string | null> {
-  if (!known.revoked) return null;
-  let read = false;
-  for (const file of known.revoked) {
-    let data: Buffer;
-    try {
-      data = await fs.readFile(file);
-    } catch {
-      continue;
+  for (const candidates of known.revoked ?? []) {
+    let read = false;
+    for (const file of candidates) {
+      let data: Buffer;
+      try {
+        data = await fs.readFile(file);
+      } catch {
+        continue;
+      }
+      read = true;
+      try {
+        if (revokedByFile(data, key)) return `The host key of ${id} is revoked by ${file} (RevokedHostKeys).`;
+      } catch (err) {
+        if (!(err instanceof RevokedKeysFormatError)) throw err;
+        return `RevokedHostKeys ${file} ${err.message}, so ssh would not connect to ${id} either.`;
+      }
     }
-    read = true;
-    try {
-      if (revokedByFile(data, key)) return `The host key of ${id} is revoked by ${file} (RevokedHostKeys).`;
-    } catch (err) {
-      if (!(err instanceof RevokedKeysFormatError)) throw err;
-      return `RevokedHostKeys ${file} ${err.message}, so ssh would not connect to ${id} either.`;
-    }
+    if (!read) return `RevokedHostKeys ${candidates[0]} cannot be read, so ssh would not connect to ${id} either.`;
   }
-  return read ? null : `RevokedHostKeys ${known.revoked[0]} cannot be read, so ssh would not connect to ${id} either.`;
+  return null;
 }
 
 /**

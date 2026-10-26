@@ -34,10 +34,13 @@ fs.mkdirSync(STATE, { recursive: true });
 process.env.HOME = HOME;
 process.env.USERPROFILE = HOME;
 
+// ssh reads ~/.ssh/config and its Includes only when nobody but their owner
+// can write them (test-ssh-config-match covers the other modes).
 function write(rel, text) {
   const file = path.join(HOME, rel);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, text);
+  fs.chmodSync(file, 0o600);
   return file;
 }
 
@@ -48,6 +51,7 @@ function stubs() {
       export async function writeFileAtomic(file, text) { await fs.writeFile(file, text); }
     `,
     "../codara-home": `export function codaraHome() { return ${JSON.stringify(STATE)}; }`,
+    "../path-reconstruction": `export async function getEnrichedEnv() { return process.env; }`,
   };
   return {
     name: "ssh-include-stubs",
@@ -416,7 +420,7 @@ async function testRefusalsAndRevokedHostKeys(hosts) {
     assert.equal(host.userKnownHostsFiles, undefined, `${id}: no file is read in its place`);
     assert.deepEqual(await hosts.knownHostsSettings(host), { refusal }, id);
   }
-  assert.deepEqual(byId(list, "revoked").revokedHostKeys, [path.join(HOME, ".ssh", "revoked_r.example")]);
+  assert.deepEqual(byId(list, "revoked").revokedHostKeys, [[path.join(HOME, ".ssh", "revoked_r.example")]]);
   assert.equal(byId(list, "revoked-none").revokedHostKeys, undefined, "none: no file");
   assert.deepEqual(await hosts.knownHostsSettings(byId(list, "revoked")), {
     files: [
@@ -425,7 +429,7 @@ async function testRefusalsAndRevokedHostKeys(hosts) {
       "/etc/ssh/ssh_known_hosts",
       "/etc/ssh/ssh_known_hosts2",
     ],
-    revoked: [path.join(HOME, ".ssh", "revoked_r.example")],
+    revoked: [[path.join(HOME, ".ssh", "revoked_r.example")]],
   }, "ssh's default known_hosts files");
 }
 
@@ -448,6 +452,7 @@ async function testSystemSshConfig(hosts) {
     path.join(etc, "ssh_config.d", "corp.conf"),
     ["Host *.corp", "  GlobalKnownHostsFile /etc/ssh/corp_known /etc/ssh/corp_known2", ""].join("\n"),
   );
+  fs.chmodSync(path.join(etc, "ssh_config.d", "corp.conf"), 0o644);
   write(
     ".ssh/config",
     [
@@ -465,12 +470,12 @@ async function testSystemSshConfig(hosts) {
   try {
     assert.deepEqual(await hosts.knownHostsSettings(manual), {
       files: ["/etc/ssh/users/ops_nas.corp", "/etc/ssh/corp_known", "/etc/ssh/corp_known2"],
-      revoked: ["/etc/ssh/revoked"],
+      revoked: [["/etc/ssh/revoked"]],
     }, "any host: an Include relative to /etc/ssh, first match wins, tokens expand");
     const list = await hosts.readSshConfigHosts();
     assert.deepEqual(await hosts.knownHostsSettings(byId(list, "cfg")), {
       files: ["/etc/ssh/users/dev_nas.corp", "/etc/ssh/all_known"],
-      revoked: ["/etc/ssh/revoked"],
+      revoked: [["/etc/ssh/revoked"]],
     }, "a config host is matched by its alias, as ssh matches Host lines");
     assert.deepEqual(
       (await hosts.knownHostsSettings(byId(list, "own-file"))).files,
@@ -492,7 +497,7 @@ async function testSystemSshConfig(hosts) {
     );
     assert.deepEqual(await hosts.knownHostsSettings(manual), {
       files: [path.join(HOME, ".ssh", "corp_nas.corp"), "/etc/ssh/corp_known", "/etc/ssh/corp_known2"],
-      revoked: [path.join(HOME, ".ssh", "revoked_global")],
+      revoked: [[path.join(HOME, ".ssh", "revoked_global")]],
     }, "~/.ssh/config wins for a manual host, the system's fills the rest");
     const box = {
       id: "codara-dev",
@@ -504,7 +509,7 @@ async function testSystemSshConfig(hosts) {
       codaraBoxId: "b1",
       proxyCommand: ["/opt/codaracloud", "ssh-proxy", "b1"],
     };
-    assert.deepEqual((await hosts.knownHostsSettings(box)).revoked, [path.join(HOME, ".ssh", "revoked_global")], "a Codara box too");
+    assert.deepEqual((await hosts.knownHostsSettings(box)).revoked, [[path.join(HOME, ".ssh", "revoked_global")]], "a Codara box too");
     write(".ssh/config", "Host *\n  UserKnownHostsFile ~/.ssh/kh_%Z\n");
     assert.deepEqual(await hosts.knownHostsSettings(manual), {
       refusal: 'UserKnownHostsFile "~/.ssh/kh_%Z" uses %Z, which ssh does not accept there',
@@ -546,7 +551,7 @@ async function testOnlyMainSetsProxy(hosts) {
     hostKeyAlias: "x",
     userKnownHostsFiles: ["/tmp/attacker_known_hosts"],
     globalKnownHostsFiles: ["/tmp/attacker_known_hosts"],
-    revokedHostKeys: ["/tmp/attacker_revoked"],
+    revokedHostKeys: [["/tmp/attacker_revoked"]],
     sshConfigRefusal: "forged",
   };
   const saved = await hosts.saveManualHost(forged);

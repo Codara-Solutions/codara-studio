@@ -278,9 +278,11 @@ test("a key RevokedHostKeys revokes, or a config ssh would refuse, does not conn
         `  IdentityFile ${fixture.host.keyPath}`,
         `  ${extra}`,
       ].join("\n");
+    // ssh, and Codara with it, refuses a config others can write, whatever the umask.
     await writeFile(
       join(ssh, "config"),
       [entry("revoked-box", "RevokedHostKeys ~/.ssh/revoked"), entry("broken-box", "UserKnownHostsFile ~/.ssh/kh_%Z"), ""].join("\n"),
+      { mode: 0o600 },
     );
     app = await launch(fixture);
     const page = await app.firstWindow();

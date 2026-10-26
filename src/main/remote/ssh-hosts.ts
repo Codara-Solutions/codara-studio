@@ -1,4 +1,4 @@
-import { promises as fs } from "node:fs";
+import { promises as fs, type Stats } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { isValidHostId, isValidPort, type RemoteHostConfig } from "@shared/remote";
@@ -14,6 +14,7 @@ import {
   type SourceEntry,
 } from "./ssh-config-match";
 import { expandHostName, expandSshPath, expandTilde, localUser, SshExpansionError, type SshTokenContext } from "./ssh-tokens";
+import { localSshVersion, sshRules, type SshRules } from "./ssh-version";
 
 // Remote host registry: hosts parsed from ~/.ssh/config (read-only in the
 // UI, refreshed on every list call) merged with manually-added hosts
@@ -221,18 +222,31 @@ function resolveIncludePattern(pattern: string, baseDir: string): string {
 // between enter/leave marks: ssh gives every included file its own scope, so
 // its Host lines end at its last line. ssh ignores an Include that matches
 // nothing (and a directory) but stops for any other file it cannot open, a
-// loop, or files nested deeper than 16 levels, wherever the Include stands;
-// those become error entries, which refuse every host.
+// loop, files nested deeper than 16 levels, or (`check`) a file others can
+// write, wherever the Include stands; those become error entries, which
+// refuse every host.
 async function readConfigWithIncludes(
   file: string,
   baseDir: string,
   depth: number,
   active: Set<string>,
+  rules: SshRules,
+  check: { includedFrom?: string } | null,
 ): Promise<SourceEntry[]> {
-  const raw = await fs.readFile(file, "utf8");
+  const handle = await fs.open(file, "r");
+  let raw: string;
+  let stat: Stats;
+  try {
+    stat = await handle.stat();
+    raw = await handle.readFile("utf8");
+  } finally {
+    await handle.close();
+  }
   active.add(resolvePath(file));
   try {
     const out: SourceEntry[] = [];
+    const refused = check && (await permissionsRefusal(stat, file, check.includedFrom, rules));
+    if (refused) out.push(refused);
     const lines = raw.split(/\r?\n/);
     for (let i = 0; i < lines.length; i++) {
       const m = INCLUDE_LINE.exec(lines[i]);
@@ -250,9 +264,9 @@ async function readConfigWithIncludes(
       }
       for (const word of words) {
         for (const target of await expandGlob(resolveIncludePattern(word, baseDir))) {
-          let isDirectory = false;
+          let stat: Stats;
           try {
-            isDirectory = (await fs.stat(target)).isDirectory();
+            stat = await fs.stat(target);
           } catch (err) {
             if (!missing(err)) out.push(includeError(where, target, err));
             continue;
@@ -265,9 +279,14 @@ async function readConfigWithIncludes(
             out.push({ kind: "error", message: `${where} nests Includes more than ${MAX_INCLUDE_DEPTH} levels deep, which ssh stops at` });
             continue;
           }
-          if (isDirectory) continue;
+          if (stat.isDirectory()) {
+            // ssh opens it, checks its mode, and only then finds nothing to read.
+            const refused = await permissionsRefusal(stat, target, where, rules);
+            if (refused) out.push(refused);
+            continue;
+          }
           try {
-            const included = await readConfigWithIncludes(target, baseDir, depth + 1, active);
+            const included = await readConfigWithIncludes(target, baseDir, depth + 1, active, rules, { includedFrom: where });
             out.push({ kind: "enter" }, ...included, { kind: "leave" });
           } catch (err) {
             if (!missing(err)) out.push(includeError(where, target, err));
@@ -292,6 +311,58 @@ function includeError(where: string, target: string, err: unknown): SourceEntry 
   return { kind: "error", message: `ssh cannot open ${displayPath(target)}, included from ${where} (${reason})` };
 }
 
+// ssh reads ~/.ssh/config and every file an Include reads only when root or
+// the user owns it and nobody else can write it ("Bad owner or permissions").
+// Debian and Ubuntu also accept a file its owner's private group can write.
+// Windows' ssh checks ACLs instead, which Codara does not read.
+async function permissionsRefusal(stat: Stats, file: string, includedFrom: string | undefined, rules: SshRules): Promise<SourceEntry | null> {
+  if (typeof process.getuid !== "function") return null;
+  const uid = process.getuid();
+  const name = displayPath(file);
+  let reason: string;
+  let until: string;
+  if (stat.uid !== 0 && stat.uid !== uid) {
+    reason = "it belongs to another user";
+    until = `you own ${name}`;
+  } else if (stat.mode & 0o002 || (stat.mode & 0o020 && !(rules.groupWritableOwnGroup && (await groupIsOwnerAlone(stat.gid, stat.uid, uid))))) {
+    reason = stat.mode & 0o002 ? "anyone can write to it" : "its group can write to it";
+    until = `chmod go-w ${name} is run`;
+  } else {
+    return null;
+  }
+  const from = includedFrom ? `, included from ${includedFrom},` : "";
+  return { kind: "error", message: `ssh refuses to read ${name}${from} because ${reason} (bad owner or permissions)`, until };
+}
+
+// Debian's secure_permissions: every account whose primary group this is is
+// the user, and its member list is at most the file's owner.
+async function groupIsOwnerAlone(gid: number, owner: number, uid: number): Promise<boolean> {
+  let passwd: string[][];
+  let group: string[] | undefined;
+  try {
+    const read = async (f: string) => (await fs.readFile(f, "utf8")).split("\n").map((l) => l.split(":"));
+    passwd = await read("/etc/passwd");
+    group = (await read("/etc/group")).find((g) => g.length >= 4 && Number(g[2]) === gid);
+  } catch {
+    return false;
+  }
+  if (!group) return false;
+  let members = 0;
+  for (const p of passwd) {
+    if (p.length < 4 || Number(p[3]) !== gid) continue;
+    members++;
+    if (Number(p[2]) !== uid) return false;
+  }
+  const ownerName = passwd.find((p) => p.length >= 4 && Number(p[2]) === owner)?.[0];
+  if (ownerName === undefined) return false;
+  const listed = group[3].trim().split(",").filter(Boolean);
+  if (listed.length > 0) {
+    members++;
+    if (listed[0] !== ownerName || listed.length > 1) return false;
+  }
+  return members > 0;
+}
+
 /**
  * UserKnownHostsFile / GlobalKnownHostsFile: unset keeps ssh's defaults,
  * `none` reads nothing. `expand` gives the paths a value stands for.
@@ -309,7 +380,8 @@ function knownHostsFiles(
 interface KnownHostsOptions {
   user?: string[];
   global?: string[];
-  revoked?: string[];
+  /** Each RevokedHostKeys file, as its candidate paths (see expandSshPath). */
+  revoked?: string[][];
 }
 
 /**
@@ -327,18 +399,18 @@ function knownHostsOptions(values: Options, context: SshTokenContext): KnownHost
   };
   const user = knownHostsFiles(values.userknownhostsfile, expand("UserKnownHostsFile"));
   const global = knownHostsFiles(values.globalknownhostsfile);
-  const revokedValue = first(values.revokedhostkeys)?.trim();
-  const revoked =
-    revokedValue && revokedValue.toLowerCase() !== "none" ? expand("RevokedHostKeys")(revokedValue) : undefined;
+  // 10.3+ reads a list; an earlier ssh refuses a second value (ssh-config-match.ts).
+  const revokedValues = knownHostsFiles(values.revokedhostkeys, (file) => [file]);
+  const revoked = revokedValues?.length ? revokedValues.map(expand("RevokedHostKeys")) : undefined;
   return { ...(user ? { user } : {}), ...(global ? { global } : {}), ...(revoked ? { revoked } : {}) };
 }
 
 /** What ssh reads before trusting a host key, or why it would not connect. */
-export type KnownHostsSettings = { refusal: string } | { files: string[]; revoked: string[] | null };
+export type KnownHostsSettings = { refusal: string } | { files: string[]; revoked: string[][] | null };
 
 /**
  * The known_hosts files to read for `host`, the user's then the system's,
- * and its RevokedHostKeys (candidates, see expandSshPath). A ~/.ssh/config
+ * and its RevokedHostKeys files (each as candidates, see expandSshPath). A ~/.ssh/config
  * host had both configs read with its own entry; ssh reads them for any
  * other host too (a manual one, a Codara box), matched by the name it
  * connects to, ~/.ssh/config first.
@@ -390,23 +462,24 @@ export function setSystemSshConfigPathForTests(file: string | null): void {
  */
 async function readSystemSshConfig(): Promise<ParsedEntry[] | null> {
   const file = systemSshConfigPath ?? "/etc/ssh/ssh_config";
-  return readSshConfigFile(file, dirname(file));
+  return readSshConfigFile(file, dirname(file), false);
 }
 
 function readUserSshConfig(): Promise<ParsedEntry[] | null> {
-  return readSshConfigFile(join(homedir(), ".ssh", "config"), join(homedir(), ".ssh"));
+  return readSshConfigFile(join(homedir(), ".ssh", "config"), join(homedir(), ".ssh"), true);
 }
 
 // A file that cannot be opened is absent, as ssh treats it; a line ssh
 // cannot read stays in the result and refuses every host.
-async function readSshConfigFile(file: string, baseDir: string): Promise<ParsedEntry[] | null> {
+async function readSshConfigFile(file: string, baseDir: string, checkPermissions: boolean): Promise<ParsedEntry[] | null> {
+  const rules = sshRules(await localSshVersion());
   let entries: SourceEntry[];
   try {
-    entries = await readConfigWithIncludes(file, baseDir, 0, new Set());
+    entries = await readConfigWithIncludes(file, baseDir, 0, new Set(), rules, checkPermissions ? {} : null);
   } catch {
     return null;
   }
-  return parseEntries([{ kind: "file" }, ...entries]);
+  return parseEntries([{ kind: "file" }, ...entries], rules);
 }
 
 export async function listHosts(): Promise<RemoteHostConfig[]> {

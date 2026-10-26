@@ -3,9 +3,11 @@
 
 // Which ssh_config blocks apply to a host (src/main/remote/ssh-config-match.ts),
 // for the known-hosts and RevokedHostKeys settings Codara reads before
-// trusting a key. Each expectation is what `ssh -G` (OpenSSH 9.6) printed for
-// the same config; when ssh is installed the user-config cases are checked
-// against it again here. Match user tests the account Codara logs in as;
+// trusting a key. Each expectation is what `ssh -G` printed for the same
+// config; where releases differ (src/main/remote/ssh-version.ts), the case
+// says which result each range gives, and Codara follows the ssh on PATH.
+// When ssh is installed the user-config cases are checked against it again
+// here, so on any release Codara equals that machine's `ssh -G`. Match user tests the account Codara logs in as;
 // Match host the HostName with %h expanded, ignoring case; `?` is exactly one
 // character; an Include's Host lines end with its file; `Match final`,
 // `canonical` and CanonicalizeHostname reread the config with the HostName.
@@ -32,7 +34,19 @@ process.env.HOME = HOME;
 process.env.USERPROFILE = HOME;
 const SYSTEM = path.join(TMP, "ssh_config");
 const ME = os.userInfo().username;
-const HAS_SSH = spawnSync("ssh", ["-V"], { encoding: "utf8" }).status === 0;
+const SSH_V = spawnSync("ssh", ["-V"], { encoding: "utf8" });
+const HAS_SSH = SSH_V.status === 0;
+const VERSION = /OpenSSH_(?:for_Windows_)?(\d+)\.(\d+)/.exec(`${SSH_V.stderr ?? ""}${SSH_V.stdout ?? ""}`);
+const DEBIAN = /\b(?:Debian|Ubuntu|Raspbian)\b/.test(SSH_V.stderr ?? "");
+/** `then` on ssh `version` or newer, or with no ssh to ask (Codara reads the newest rules then); `before` otherwise. */
+function since(version, then, before) {
+  if (!VERSION) return then;
+  const [major, minor] = version.split(".").map(Number);
+  const [have, haveMinor] = [Number(VERSION[1]), Number(VERSION[2])];
+  return have > major || (have === major && haveMinor >= minor) ? then : before;
+}
+/** Each file Codara reads for RevokedHostKeys, one candidate path apiece. */
+const revoked = (files) => files && files.map((file) => [file]);
 
 async function load() {
   const sources = {
@@ -41,6 +55,8 @@ async function load() {
       export async function writeFileAtomic(file, text) { await fs.writeFile(file, text); }
     `,
     "../codara-home": `export function codaraHome() { return ${JSON.stringify(STATE)}; }`,
+    // The ssh on this test's PATH, which sshG runs too.
+    "../path-reconstruction": `export async function getEnrichedEnv() { return process.env; }`,
   };
   const outfile = path.join(TMP, "ssh-hosts.cjs");
   await esbuild.build({
@@ -71,23 +87,72 @@ async function load() {
   return require(outfile);
 }
 
+async function testVersionRules() {
+  const outfile = path.join(TMP, "ssh-version.cjs");
+  await esbuild.build({
+    entryPoints: [path.join(ROOT, "src/main/remote/ssh-version.ts")],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile,
+    logLevel: "silent",
+    plugins: [
+      {
+        name: "ssh-version-stubs",
+        setup(build) {
+          build.onResolve({ filter: /^\.\.\/path-reconstruction$/ }, () => ({ path: "path-reconstruction", namespace: "stub" }));
+          build.onLoad({ filter: /.*/, namespace: "stub" }, () => ({
+            contents: "export async function getEnrichedEnv() { return process.env; }",
+            loader: "js",
+          }));
+        },
+      },
+    ],
+  });
+  const { parseSshVersion, sshRules } = require(outfile);
+  assert.deepEqual(parseSshVersion("OpenSSH_9.6p1 Ubuntu-3ubuntu13.20, OpenSSL 3.0.13 30 Jan 2024"), { major: 9, minor: 6, debian: true });
+  assert.deepEqual(parseSshVersion("OpenSSH_10.2p1, LibreSSL 3.3.6"), { major: 10, minor: 2, debian: false });
+  assert.deepEqual(parseSshVersion("OpenSSH_for_Windows_9.5p1, LibreSSL 3.8.2"), { major: 9, minor: 5, debian: false });
+  assert.equal(parseSshVersion("ssh: command not found"), null);
+  // Unknown: the rules that never skip a revocation list, and no Debian leniency.
+  const unknown = sshRules(null);
+  assert.equal(unknown.matchSplitsLikeOptions, true, "quoted Match patterns apply");
+  assert.equal(unknown.revokedHostKeysList, true, "every RevokedHostKeys file is read");
+  assert.equal(unknown.groupWritableOwnGroup, false);
+  assert.equal(unknown.matchCriteria, null, "a Match criterion it does not know is a maybe, not a refusal");
+  assert.equal(sshRules({ major: 10, minor: 7, debian: false }).matchCriteria, null, "nor past the releases checked");
+  assert.equal(sshRules({ major: 9, minor: 8, debian: false }).matchSplitsLikeOptions, false);
+  assert.equal(sshRules({ major: 10, minor: 2, debian: false }).revokedHostKeysList, false);
+  ok("ssh -V names the release; an unknown one reads with the newest rules");
+}
+
+// ssh reads ~/.ssh/config and every included file only when nobody but
+// its owner can write it, so they are written as ssh wants them, whatever
+// the umask; testPermissions covers the other modes.
+function writePrivate(file, text) {
+  fs.writeFileSync(file, text);
+  fs.chmodSync(file, 0o600);
+}
+
 function writeConfigs(user, system = "") {
-  fs.writeFileSync(path.join(HOME, ".ssh", "config"), user);
+  writePrivate(path.join(HOME, ".ssh", "config"), user);
   fs.writeFileSync(SYSTEM, system);
 }
 
-/** `ssh -G` for this config alone: its revokedhostkeys, or "refused" when ssh would not run. */
+/** `ssh -G` for this config alone: its revokedhostkeys as printed, null for none, or "refused" when ssh would not run. */
 function sshG(config, host, user) {
   const file = path.join(TMP, "ssh-g-config");
   fs.writeFileSync(file, config);
   const result = spawnSync("ssh", ["-G", "-F", file, ...(user ? ["-l", user] : []), host], { encoding: "utf8" });
   if (result.status !== 0) return "refused";
   const line = result.stdout.split("\n").find((l) => l.startsWith("revokedhostkeys "));
-  // OpenSSH 10 (macOS 26) prints an unset RevokedHostKeys as "none"; 9.x omits
-  // the line. Both mean no revocation list, as Codara reads "none".
+  // 10.3+ prints an empty list as "none"; 10.2 and earlier omit the line.
   const value = line?.slice("revokedhostkeys ".length);
-  return value && value.toLowerCase() !== "none" ? [value] : null;
+  return value && value.toLowerCase() !== "none" ? value : null;
 }
+
+/** How ssh -G prints these RevokedHostKeys files: on one line, a blank apart. */
+const printed = (files) => files && files.join(" ");
 
 const manual = (host, username = "me") => ({ id: "m", host, port: 22, username, source: "manual" });
 
@@ -115,7 +180,9 @@ const MANUAL_CASES = [
   ["Match !host", "Match !host other\n  RevokedHostKeys /r\n", "h1", "me", ["/r"]],
   ["Match !host on this host", "Match !host h1\n  RevokedHostKeys /r\n", "h1", "me", null],
   ["every criterion must match, even the same one twice", "Match host h2 host h1\n  RevokedHostKeys /r\n", "h1", "me", null],
-  ["Match host=value", "Match host=h1\n  RevokedHostKeys /r\n", "h1", "me", ["/r"]],
+  // ssh 9.9 alone reads `host=h1` as one criterion it does not know.
+  ["Match host=value", "Match host=h1\n  RevokedHostKeys /r\n", "h1", "me", since("10.0", ["/r"], since("9.9", /^ssh cannot read ~\/\.ssh\/config line 1 \(Match host=h1 needs a value\)/, ["/r"]))],
+  ["Match !host=value", "Match !host=other\n  RevokedHostKeys /r\n", "h1", "me", since("10.0", ["/r"], since("9.9", /line 1 \(Match !host=other needs a value\)/, ["/r"]))],
   ["Match final rereads the config", "Match final host h1\n  RevokedHostKeys /r/fin\n", "h1", "me", ["/r/fin"]],
   ["Match canonical alone never matches", "Match canonical\n  RevokedHostKeys /r\n", "h1", "me", null],
   ["Match canonical matches on the final pass", "Match final host nomatch\n  User z\nMatch canonical\n  RevokedHostKeys /r\n", "h1", "me", ["/r"]],
@@ -123,6 +190,10 @@ const MANUAL_CASES = [
   ["the final pass matches Host lines against the lowercased HostName", "Host h1\n  HostName Real.Example\nHost real.example\n  RevokedHostKeys /r\nMatch final\n", "h1", "me", ["/r"]],
   ["CanonicalizeHostname yes rereads the config too", "CanonicalizeHostname yes\nHost h1\n  HostName real\nHost real\n  RevokedHostKeys /r\n", "h1", "me", ["/r"]],
   ["Match tagged", "Tag t\nMatch tagged t\n  RevokedHostKeys /r\n", "h1", "me", ["/r"]],
+  // 10.0+: with no Tag set, Match tagged matches only an empty pattern.
+  ["Match tagged * with no Tag", "Match tagged *\n  RevokedHostKeys /r\n", "h1", "me", since("10.0", null, ["/r"])],
+  ["Match tagged with an empty pattern", "Match tagged \"\"\n  RevokedHostKeys /r\n", "h1", "me", since("10.0", ["/r"], /^ssh cannot read ~\/\.ssh\/config line 1 \(Match tagged needs a value\)/)],
+  ["Match tagged= with an empty pattern", "Match tagged=\n  RevokedHostKeys /r\n", "h1", "me", since("10.0", ["/r"], /^ssh cannot read ~\/\.ssh\/config line 1 \(Match tagged=? needs a value\)/)],
   ["Match all", "Match all\n  RevokedHostKeys /r\n", "h1", "me", ["/r"]],
   ["Match final all", "Match final all\n  RevokedHostKeys /r\n", "h1", "me", ["/r"]],
   ["the first value obtained wins", "Host h1\n  RevokedHostKeys /a\nHost *\n  RevokedHostKeys /b\n", "h1", "me", ["/a"]],
@@ -139,6 +210,8 @@ const MANUAL_CASES = [
   // ssh refuses the whole file.
   ["a Match with no value", "Host *\n  RevokedHostKeys /r/all\nMatch user\n  User x\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 3 \(.+\)\. ssh will not connect anywhere until that line is fixed$/],
   ["'all' with another criterion", "Match all host h1\n  RevokedHostKeys /r\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 1 \('all' cannot be combined with other Match criteria\)/],
+  // sessiontype, version and command came in 10.0; an ssh that does not know one refuses the file.
+  ["a Match criterion this ssh may not know", "Match sessiontype shell\n  IdentityFile /id\nHost *\n  RevokedHostKeys /r\n", "h1", "me", since("10.0", ["/r"], /^ssh cannot read ~\/\.ssh\/config line 1 \(Match sessiontype is not a criterion this ssh knows\)/)],
   ["an unclosed quote", "Host *\n  RevokedHostKeys /r\nMatch host \"h1\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 3/],
   ["a bad line in a block that does not apply", "Host other\n  RevokedHostKeys /r\nMatch user\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 3/],
   ["a keyword with no value", "Host other\n  RevokedHostKeys\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 2 \(RevokedHostKeys has no value\)\. ssh will not connect anywhere until that line is fixed$/],
@@ -158,7 +231,11 @@ const MANUAL_CASES = [
   ["a backslash escapes a blank", "Host *\n  RevokedHostKeys /r/a\\ b\n", "h1", "me", ["/r/a b"]],
   ["keyword=value with quotes", "Host *\n  RevokedHostKeys='/r/q'\n", "h1", "me", ["/r/q"]],
   ["a quoted Host pattern", "Host 'h1'\n  RevokedHostKeys /r\n", "h1", "me", ["/r"]],
-  ["a Match line keeps single quotes", "Match host 'h1'\n  RevokedHostKeys /r\n", "h1", "me", null],
+  // 9.9+ splits a Match line as any other; before, a `'` was part of the pattern.
+  ["a Match line's single quotes", "Match host 'h1'\n  RevokedHostKeys /r\n", "h1", "me", since("9.9", ["/r"], null)],
+  ["a quoted Match pattern list", "Match host 'other,h1'\n  RevokedHostKeys /r\n", "h1", "me", since("9.9", ["/r"], null)],
+  ["a Match line's double quotes", "Match host \"h1\"\n  RevokedHostKeys /r\n", "h1", "me", ["/r"]],
+  ["a Match line's trailing comment", "Match host h1 #note\n  RevokedHostKeys /r\n", "h1", "me", ["/r"]],
   ["# inside a word is not a comment", "Host *\n  RevokedHostKeys /r/a#b\n", "h1", "me", ["/r/a#b"]],
   ["\"\" in a trailing comment", "Host *\n  IdentityFile /id # note \"\"\n  RevokedHostKeys /r\n", "h1", "me", ["/r"]],
   ["SetEnv FOO=\"\"", "Host *\n  SetEnv FOO=\"\"\n  RevokedHostKeys /r\n", "h1", "me", ["/r"]],
@@ -171,7 +248,13 @@ const MANUAL_CASES = [
   ["Host with an empty single-quoted pattern", "Host foo ''\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 1 \(Host has an empty value\)/],
   ["Match with an empty value", "Match host \"\"\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 1 \(Match host needs a value\)/],
   ["a quote left open", "Host *\n  RevokedHostKeys '/r\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 2 \(RevokedHostKeys has a quote that is not closed\)/],
-  ["two values for RevokedHostKeys", "Host other\n  RevokedHostKeys /a /b\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 2 \(RevokedHostKeys has more than one value\)/],
+  // 10.3+ reads a list of RevokedHostKeys files, each of which can revoke the key.
+  ["two values for RevokedHostKeys", "Host other\n  RevokedHostKeys /a /b\n", "h1", "me", since("10.3", null, /^ssh cannot read ~\/\.ssh\/config line 2 \(RevokedHostKeys has more than one value\)/)],
+  ["two RevokedHostKeys files", "Host *\n  RevokedHostKeys /a '/b c'\n", "h1", "me", since("10.3", ["/a", "/b c"], /^ssh cannot read ~\/\.ssh\/config line 2 \(RevokedHostKeys has more than one value\)/)],
+  ["the first RevokedHostKeys line wins, list and all", "Host h1\n  RevokedHostKeys /a\nHost *\n  RevokedHostKeys /b /c\n", "h1", "me", since("10.3", ["/a"], /line 4 \(RevokedHostKeys has more than one value\)/)],
+  ["RevokedHostKeys none with a file", "Host *\n  RevokedHostKeys none /a\n", "h1", "me", since("10.3", /^ssh cannot read ~\/\.ssh\/config line 2 \(RevokedHostKeys none must appear alone\)/, /line 2 \(RevokedHostKeys has more than one value\)/)],
+  ["RevokedHostKeys a file, then none", "Host *\n  RevokedHostKeys /a NONE\n", "h1", "me", since("10.3", /line 2 \(RevokedHostKeys none must appear alone\)/, /line 2 \(RevokedHostKeys has more than one value\)/)],
+  ["RevokedHostKeys NONE", "Host *\n  RevokedHostKeys NONE\nHost *\n  RevokedHostKeys /r\n", "h1", "me", null],
   ["two values for HostName", "Host other\n  HostName a b\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 2 \(HostName has more than one value\)/],
   ["a keyword alone names it", "Host other\n  SendEnv\n", "h1", "me", /^ssh cannot read ~\/\.ssh\/config line 2 \(SendEnv has no value\)/],
   // ssh reads a line up to its newline and strips only " \t\r\n\f" from its end.
@@ -191,13 +274,13 @@ async function testManualHosts(hosts) {
       assert.match(got.refusal, expected, name);
     } else {
       assert.ok(!("refusal" in got), `${name}: not refused (${got.refusal})`);
-      assert.deepEqual(got.revoked, expected, name);
+      assert.deepEqual(got.revoked, revoked(expected), name);
     }
     // ssh -G neither runs exec nor KnownHostsCommand, nor resolves names.
     if (HAS_SSH && !/exec|localnetwork|CanonicalDomains|KnownHostsCommand/.test(config)) {
       const ssh = sshG(config, host, login);
       if (expected instanceof RegExp) assert.equal(ssh, "refused", `${name}: ssh refuses too`);
-      else assert.deepEqual(ssh, expected, `${name}: as ssh -G prints`);
+      else assert.equal(ssh, printed(expected), `${name}: as ssh -G prints`);
     }
   }
   ok(`a manual host: ${MANUAL_CASES.length} configs resolve as ssh -G does, or refuse`);
@@ -205,17 +288,17 @@ async function testManualHosts(hosts) {
 
 async function testIncludes(hosts) {
   const inc = path.join(HOME, ".ssh", "inc.conf");
-  fs.writeFileSync(inc, "Host x\n  User y\n");
+  writePrivate(inc, "Host x\n  User y\n");
   writeConfigs(`Host *\n  Include ${inc}\n  RevokedHostKeys /r\n`);
-  assert.deepEqual((await hosts.knownHostsSettings(manual("h1"))).revoked, ["/r"], "an included Host block ends with its file");
-  if (HAS_SSH) assert.deepEqual(sshG(`Host *\n  Include ${inc}\n  RevokedHostKeys /r\n`, "h1"), ["/r"]);
+  assert.deepEqual((await hosts.knownHostsSettings(manual("h1"))).revoked, [["/r"]], "an included Host block ends with its file");
+  if (HAS_SSH) assert.equal(sshG(`Host *\n  Include ${inc}\n  RevokedHostKeys /r\n`, "h1"), "/r");
 
-  fs.writeFileSync(inc, "RevokedHostKeys /inc\nHost *\n  RevokedHostKeys /inc-all\n");
+  writePrivate(inc, "RevokedHostKeys /inc\nHost *\n  RevokedHostKeys /inc-all\n");
   writeConfigs(`Match host zz\n  Include ${inc}\nHost h1\n  RevokedHostKeys /r\n`);
-  assert.deepEqual((await hosts.knownHostsSettings(manual("h1"))).revoked, ["/r"], "a file included where nothing applies applies nowhere");
-  if (HAS_SSH) assert.deepEqual(sshG(`Match host zz\n  Include ${inc}\nHost h1\n  RevokedHostKeys /r\n`, "h1"), ["/r"]);
+  assert.deepEqual((await hosts.knownHostsSettings(manual("h1"))).revoked, [["/r"]], "a file included where nothing applies applies nowhere");
+  if (HAS_SSH) assert.equal(sshG(`Match host zz\n  Include ${inc}\nHost h1\n  RevokedHostKeys /r\n`, "h1"), "/r");
 
-  fs.writeFileSync(inc, "Host *\n  RevokedHostKeys /inc\n");
+  writePrivate(inc, "Host *\n  RevokedHostKeys /inc\n");
   writeConfigs(`Match exec true\n  Include ${inc}\n`);
   assert.match(
     (await hosts.knownHostsSettings(manual("h1"))).refusal,
@@ -223,7 +306,7 @@ async function testIncludes(hosts) {
     "a file included under Match exec counts as that block",
   );
 
-  fs.writeFileSync(inc, "Host *\n  IdentityFile /id\nMatch user\n");
+  writePrivate(inc, "Host *\n  IdentityFile /id\nMatch user\n");
   writeConfigs(`Include ${inc}\n`);
   assert.match(
     (await hosts.knownHostsSettings(manual("h1"))).refusal,
@@ -239,33 +322,34 @@ async function testIncludes(hosts) {
     if (!HAS_SSH) return;
     const ssh = sshG(config, "h1");
     if (expected === "refused") assert.equal(ssh, "refused", `${name}: ssh refuses too`);
-    else assert.deepEqual(ssh, expected, `${name}: as ssh -G prints`);
+    else assert.equal(ssh, printed(expected), `${name}: as ssh -G prints`);
   };
   const dir = path.join(HOME, ".ssh", "inc.d");
   fs.mkdirSync(dir, { recursive: true });
+  fs.chmodSync(dir, 0o755);
   for (const [name, config] of [
     ["a missing Include", `Include ${HOME}/.ssh/nope.conf ${HOME}/.ssh/none-*.conf\nHost *\n  RevokedHostKeys /r\n`],
     ["an Include of a directory", `Include ${dir}\nHost *\n  RevokedHostKeys /r\n`],
   ]) {
     writeConfigs(config);
-    assert.deepEqual(await hosts.knownHostsSettings(manual("h1")), { files: [path.join(HOME, ".ssh", "known_hosts"), path.join(HOME, ".ssh", "known_hosts2"), "/etc/ssh/ssh_known_hosts", "/etc/ssh/ssh_known_hosts2"], revoked: ["/r"] }, name);
+    assert.deepEqual(await hosts.knownHostsSettings(manual("h1")), { files: [path.join(HOME, ".ssh", "known_hosts"), path.join(HOME, ".ssh", "known_hosts2"), "/etc/ssh/ssh_known_hosts", "/etc/ssh/ssh_known_hosts2"], revoked: [["/r"]] }, name);
     check(config, ["/r"], name);
   }
 
   const quoted = path.join(HOME, ".ssh", "quoted inc.conf");
-  fs.writeFileSync(quoted, "Host *\n  RevokedHostKeys /r/inc\n");
+  writePrivate(quoted, "Host *\n  RevokedHostKeys /r/inc\n");
   for (const [name, config] of [
     ["an Include in single quotes", `Include '${quoted}'\n`],
     ["an Include with a comment", `Include ${quoted.replace(/ /g, "\\ ")} # shared\n`],
   ]) {
     writeConfigs(config);
-    assert.deepEqual((await hosts.knownHostsSettings(manual("h1"))).revoked, ["/r/inc"], name);
+    assert.deepEqual((await hosts.knownHostsSettings(manual("h1"))).revoked, [["/r/inc"]], name);
     check(config, ["/r/inc"], name);
   }
 
   if (process.getuid && process.getuid() !== 0) {
     const locked = path.join(HOME, ".ssh", "locked.conf");
-    fs.writeFileSync(locked, "Host *\n  RevokedHostKeys /locked\n");
+    writePrivate(locked, "Host *\n  RevokedHostKeys /locked\n");
     fs.chmodSync(locked, 0o000);
     try {
       for (const [name, config] of [
@@ -291,13 +375,13 @@ async function testIncludes(hosts) {
   const chain = (levels) => {
     for (let i = 1; i <= levels; i++) {
       const body = i < levels ? `Include ${HOME}/.ssh/deep-${levels}-${i + 1}.conf\n` : "RevokedHostKeys /deep\n";
-      fs.writeFileSync(path.join(HOME, ".ssh", `deep-${levels}-${i}.conf`), body);
+      writePrivate(path.join(HOME, ".ssh", `deep-${levels}-${i}.conf`), body);
     }
     return `Include ${HOME}/.ssh/deep-${levels}-1.conf\n`;
   };
   const sixteen = chain(16);
   writeConfigs(sixteen);
-  assert.deepEqual((await hosts.knownHostsSettings(manual("h1"))).revoked, ["/deep"], "16 levels are read");
+  assert.deepEqual((await hosts.knownHostsSettings(manual("h1"))).revoked, [["/deep"]], "16 levels are read");
   check(sixteen, ["/deep"], "16 levels");
   const seventeen = chain(17);
   writeConfigs(seventeen);
@@ -305,12 +389,77 @@ async function testIncludes(hosts) {
   check(seventeen, "refused", "17 levels");
 
   const loop = path.join(HOME, ".ssh", "loop.conf");
-  fs.writeFileSync(loop, `Include ${loop}\n`);
+  writePrivate(loop, `Include ${loop}\n`);
   const looped = `Host other\n  Include ${loop}\nHost *\n  RevokedHostKeys /r\n`;
   writeConfigs(looped);
   assert.match((await hosts.knownHostsSettings(manual("h1"))).refusal, /^~\/\.ssh\/loop\.conf line 1 includes ~\/\.ssh\/loop\.conf inside itself/);
   check(looped, "refused", "an Include loop");
   ok("Include: missing files and directories are ignored; unreadable, looping or too deep refuses");
+}
+
+// ssh refuses ~/.ssh/config, and every file an Include reads (where it
+// applies or not), unless only its owner can write it; Debian and Ubuntu's
+// ssh also accepts a file the owner's private group can write. `ssh -G -F`
+// skips the check for the -F file itself, so ~/.ssh/config must give what
+// an included file of the same mode gives.
+async function testPermissions(hosts) {
+  if (process.platform === "win32") {
+    console.log("  skip config file permissions (Windows' ssh checks ACLs)");
+    return;
+  }
+  const esc = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // ssh opens an included directory too, and checks its mode before it finds nothing to read.
+  for (const [mode, directory] of [[0o600], [0o644], [0o640], [0o620], [0o660], [0o602], [0o666], [0o755, true], [0o775, true], [0o757, true]]) {
+    const octal = mode.toString(8);
+    const inc = path.join(HOME, ".ssh", `inc-${octal}${directory ? ".d" : ".conf"}`);
+    if (directory) fs.mkdirSync(inc);
+    else fs.writeFileSync(inc, "Host *\n  RevokedHostKeys /r/inc\n");
+    fs.chmodSync(inc, mode);
+    const writable = mode & 0o002 ? "anyone" : "its group";
+    // Debian's ssh accepts a group-writable file when its group holds the
+    // owner alone; whether this one does is what that ssh -G says.
+    let accepted = (mode & 0o022) === 0;
+    if (DEBIAN && (mode & 0o022) === 0o020) accepted = sshG(`Include ${inc}\n`, "h1") !== "refused";
+    for (const [where, config, want] of [
+      ["where it applies", `Include ${inc}\n`, directory ? null : ["/r/inc"]],
+      ["where it does not", `Host other\n  Include ${inc}\nHost *\n  RevokedHostKeys /r\n`, ["/r"]],
+    ]) {
+      const name = `an Include of ${directory ? "a directory" : "a file"} of mode ${octal} ${where}`;
+      writeConfigs(config);
+      const got = await hosts.knownHostsSettings(manual("h1"));
+      if (accepted) {
+        assert.deepEqual(got, { files: got.files, revoked: revoked(want) }, name);
+      } else {
+        const shown = `~/.ssh/${path.basename(inc)}`;
+        assert.match(
+          got.refusal ?? "",
+          new RegExp(`^ssh refuses to read ${esc(shown)}, included from ~/\\.ssh/config line \\d, because ${writable} can write to it \\(bad owner or permissions\\)\\. ssh will not connect anywhere until chmod go-w ${esc(shown)} is run$`),
+          name,
+        );
+      }
+      if (HAS_SSH) {
+        const ssh = sshG(config, "h1");
+        if (accepted) assert.equal(ssh, printed(want), `${name}: as ssh -G prints`);
+        else assert.equal(ssh, "refused", `${name}: ssh refuses too`);
+      }
+    }
+    if (directory) continue;
+    const config = path.join(HOME, ".ssh", "config");
+    fs.writeFileSync(config, "Host *\n  RevokedHostKeys /r\n");
+    fs.chmodSync(config, mode);
+    const got = await hosts.knownHostsSettings(manual("h1"));
+    if (accepted) {
+      assert.deepEqual(got.revoked, [["/r"]], `~/.ssh/config of mode ${octal}`);
+    } else {
+      assert.equal(
+        got.refusal,
+        `ssh refuses to read ~/.ssh/config because ${writable} can write to it (bad owner or permissions). ssh will not connect anywhere until chmod go-w ~/.ssh/config is run`,
+        `~/.ssh/config of mode ${octal}`,
+      );
+    }
+  }
+  writeConfigs("");
+  ok("~/.ssh/config and every file or directory an Include names refuse when others can write them, as ssh does");
 }
 
 async function testSystemConfig(hosts) {
@@ -319,8 +468,8 @@ async function testSystemConfig(hosts) {
   assert.deepEqual(list, [], "no concrete alias");
   writeConfigs("Host box\n  User root\n", "Match user root\n  RevokedHostKeys /r/sys\n");
   const box = (await hosts.readSshConfigHosts()).find((h) => h.id === "box");
-  assert.deepEqual(box.revokedHostKeys, ["/r/sys"], "the system's Match user sees the User ~/.ssh/config set");
-  assert.deepEqual((await hosts.knownHostsSettings(manual("h1", "root"))).revoked, ["/r/sys"], "and a manual host's login");
+  assert.deepEqual(box.revokedHostKeys, [["/r/sys"]], "the system's Match user sees the User ~/.ssh/config set");
+  assert.deepEqual((await hosts.knownHostsSettings(manual("h1", "root"))).revoked, [["/r/sys"]], "and a manual host's login");
   assert.equal((await hosts.knownHostsSettings(manual("h1", "me"))).revoked, null);
 
   writeConfigs("Host h1\n  RevokedHostKeys none\n", "Host *\n  RevokedHostKeys /r/sys\n");
@@ -360,8 +509,8 @@ async function testConfigHosts(hosts) {
   writeConfigs("Host *\n  User root\nHost box\n  HostName b.example\nMatch user root\n  RevokedHostKeys /r/root\n");
   const [rootBox] = await hosts.readSshConfigHosts();
   assert.equal(rootBox.username, "root");
-  assert.deepEqual(rootBox.revokedHostKeys, ["/r/root"], "a config host's Match user sees its User");
-  if (HAS_SSH) assert.deepEqual(sshG("Host *\n  User root\nHost box\n  HostName b.example\nMatch user root\n  RevokedHostKeys /r/root\n", "box"), ["/r/root"]);
+  assert.deepEqual(rootBox.revokedHostKeys, [["/r/root"]], "a config host's Match user sees its User");
+  if (HAS_SSH) assert.equal(sshG("Host *\n  User root\nHost box\n  HostName b.example\nMatch user root\n  RevokedHostKeys /r/root\n", "box"), "/r/root");
   ok("a config host carries the refusal, for a bad line anywhere or a Match Codara cannot check");
 }
 
@@ -412,7 +561,7 @@ async function testOrdinaryConfig(hosts) {
       source: "ssh-config",
       proxyCommandTemplate: "ssh -W %h:%p bastion",
       hostKeyAlias: "web-key",
-      revokedHostKeys: ["/etc/ssh/revoked_example"],
+      revokedHostKeys: [["/etc/ssh/revoked_example"]],
     },
   ]);
   for (const host of list) {
@@ -424,7 +573,7 @@ async function testOrdinaryConfig(hosts) {
     files: [home(".ssh/known_lan"), "/etc/ssh/lan_known"],
     revoked: null,
   });
-  assert.deepEqual((await hosts.knownHostsSettings(manual("api.example.com"))).revoked, ["/etc/ssh/revoked_example"]);
+  assert.deepEqual((await hosts.knownHostsSettings(manual("api.example.com"))).revoked, [["/etc/ssh/revoked_example"]]);
   if (HAS_SSH) {
     const plain = config.replace(/~\//g, `${HOME}/`);
     for (const [alias, field, want] of [
@@ -462,14 +611,16 @@ async function testOrdinaryConfig(hosts) {
   }
   ok("quoted UserKnownHostsFile paths name the files ssh reads");
 
-  // ssh keeps a ProxyJump value as written up to the first blank or `#`,
-  // quotes included, and ignores the rest; %j is its last hop. ssh -G does
-  // not expand UserKnownHostsFile, so ControlPath shows its %j.
+  // ssh keeps a ProxyJump value as written up to the first `#`, quotes
+  // included, and ignores the rest; before 10.1 it also stops at the first
+  // blank. %j is its last hop. ssh -G does not expand UserKnownHostsFile, so
+  // ControlPath shows its %j.
   for (const [jump, want] of [
     ["'j1'", "'j1'"],
     ['"j1"', '"j1"'],
-    ["a b", "a"],
-    ["a,b c", "b"],
+    ["a b", since("10.1", "a b", "a")],
+    ["a,b c", since("10.1", "b c", "b")],
+    ["a  b # note", since("10.1", "a  b", "a")],
     ["'a#b'", "'a"],
     ['""', '""'],
   ]) {
@@ -492,11 +643,14 @@ async function testOrdinaryConfig(hosts) {
 }
 
 (async () => {
+  await testVersionRules();
   const hosts = await load();
   hosts.setSystemSshConfigPathForTests(SYSTEM);
   if (!HAS_SSH) console.log("  (no ssh: expectations only, no live ssh -G check)");
+  else console.log(`  checked against ${SSH_V.stderr.trim().split(",")[0]}, umask ${process.umask().toString(8).padStart(3, "0")}`);
   await testManualHosts(hosts);
   await testIncludes(hosts);
+  await testPermissions(hosts);
   await testSystemConfig(hosts);
   await testConfigHosts(hosts);
   await testOrdinaryConfig(hosts);

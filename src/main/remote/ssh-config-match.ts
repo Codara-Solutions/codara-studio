@@ -3,13 +3,15 @@ import { homedir } from "node:os";
 import { sep } from "node:path";
 import SSHConfig, { LineType } from "ssh-config";
 import { expandHostName, localUser, SshExpansionError } from "./ssh-tokens";
+import type { SshRules } from "./ssh-version";
 
-// Which ssh_config options apply to a host, as OpenSSH 9.6 decides it
-// (readconf.c), so Codara reads the known-hosts and revocation settings ssh
-// would. The ssh-config package only splits a line into words: its own
-// compute() matches `Match user` against the local account, treats `?` as
-// zero or one character, runs `Match exec` through /bin/sh and silently drops
-// criteria it does not know, and inlined Includes leak into the next block.
+// Which ssh_config options apply to a host, as the user's OpenSSH decides it
+// (readconf.c; ssh-version.ts lists where releases differ), so Codara reads
+// the known-hosts and revocation settings ssh would. The ssh-config package
+// only splits a line into words: its own compute() matches `Match user`
+// against the local account, treats `?` as zero or one character, runs
+// `Match exec` through /bin/sh and silently drops criteria it does not know,
+// and inlined Includes leak into the next block.
 //
 // Criteria Codara cannot evaluate as ssh does (exec, localnetwork, anything
 // newer) are never emulated. Their block counts as "maybe": if it could set
@@ -19,8 +21,11 @@ import { expandHostName, localUser, SshExpansionError } from "./ssh-tokens";
 /** A line of a config file, or the edges of a file an Include reads. */
 export type SourceEntry =
   | { kind: "line"; file: string; line: number; text: string }
-  /** An Include ssh fails on: a file it cannot open, a loop, too deep. */
-  | { kind: "error"; message: string }
+  /**
+   * An Include ssh fails on: a file it cannot open, a loop, too deep, or a
+   * file others can write. `until` ends the refusal, "that line is fixed" by default.
+   */
+  | { kind: "error"; message: string; until?: string }
   | { kind: "file" }
   | { kind: "enter" }
   | { kind: "leave" };
@@ -41,9 +46,10 @@ export type ParsedEntry =
   | { kind: "host"; where: string; patterns: string[] }
   | { kind: "match"; where: string; criteria: Criterion[] }
   | { kind: "option"; where: string; param: string; value: Value }
-  | { kind: "error"; where: string; message: string };
+  | { kind: "error"; where: string; message: string; until?: string };
 
-type Criterion = { name: string; negate: boolean; arg: string };
+/** `emptyIsExact`: an unset Tag matches only an empty pattern (10.0+). */
+type Criterion = { name: string; negate: boolean; arg: string; emptyIsExact?: boolean };
 
 /** Settings that decide which known_hosts and revocation files ssh reads. */
 const KNOWN_HOSTS_KEYS = new Set([
@@ -133,11 +139,11 @@ export function splitSshWords(text: string): string[] {
 }
 
 /** Reads every line once; ssh rejects a bad line wherever it is, active or not. */
-export function parseEntries(entries: SourceEntry[]): ParsedEntry[] {
+export function parseEntries(entries: SourceEntry[], rules: SshRules): ParsedEntry[] {
   const out: ParsedEntry[] = [];
   for (const entry of entries) {
     if (entry.kind === "error") {
-      out.push({ kind: "error", where: "", message: entry.message });
+      out.push({ kind: "error", where: "", message: entry.message, ...(entry.until ? { until: entry.until } : {}) });
       continue;
     }
     if (entry.kind !== "line") {
@@ -154,8 +160,8 @@ export function parseEntries(entries: SourceEntry[]): ParsedEntry[] {
       bad(`${keyword} has no value`);
       continue;
     }
-    if (param === "match" || RAW_KEYS.has(param)) {
-      out.push(parsedByPackage(entry.text, param, keyword, where));
+    if ((param === "match" && !rules.matchSplitsLikeOptions) || RAW_KEYS.has(param)) {
+      out.push(parsedByPackage(entry.text, param, keyword, where, rules));
       continue;
     }
     let words: string[];
@@ -165,10 +171,17 @@ export function parseEntries(entries: SourceEntry[]): ParsedEntry[] {
       bad(`${keyword} has a quote that is not closed`);
       continue;
     }
-    if (param === "proxyjump") {
-      // ssh reads ProxyJump from the raw line, quotes included, up to the
-      // first blank or `#`, and ignores what follows.
-      const jump = /^[^ \t#]*/.exec(rest)?.[0] ?? "";
+    const revokedList = param === "revokedhostkeys" && rules.revokedHostKeysList;
+    if (param === "match") {
+      const criteria = matchCriteria(words, rules);
+      if (typeof criteria === "string") bad(criteria);
+      else out.push({ kind: "match", where, criteria });
+    } else if (param === "proxyjump") {
+      // ssh reads ProxyJump from the raw line, quotes included, and ignores
+      // what follows a `#`; before 10.1 also what follows the first blank.
+      const jump = rules.proxyJumpToEndOfLine
+        ? rest.replace(/#.*$/s, "").replace(/[ \t\n\v\f\r]+$/, "")
+        : (/^[^ \t#]*/.exec(rest)?.[0] ?? "");
       if (jump === "") bad(`${keyword} has no value`);
       else out.push({ kind: "option", where, param: keyword, value: jump });
     } else if (param === "host" && words.length === 0) {
@@ -180,7 +193,9 @@ export function parseEntries(entries: SourceEntry[]): ParsedEntry[] {
       bad(`${keyword} has an empty value`);
     } else if (param === "host") {
       out.push({ kind: "host", where, patterns: words });
-    } else if (SINGLE_KEYS.has(param) && words.length > 1) {
+    } else if (revokedList && words.length > 1 && words.some((w) => w.toLowerCase() === "none")) {
+      bad(`${keyword} none must appear alone`);
+    } else if (SINGLE_KEYS.has(param) && !revokedList && words.length > 1) {
       bad(`${keyword} has more than one value`);
     } else {
       const value: Value = words.length === 1 ? words[0] : words.map((val) => ({ val, separator: " " }));
@@ -190,11 +205,11 @@ export function parseEntries(entries: SourceEntry[]): ParsedEntry[] {
   return out;
 }
 
-// A Match line is split as ssh's match_cfg_line splits it, honouring only
-// `"` (a `'` is part of the pattern), and a command keeps its text as the
-// ssh-config package returns it, as before. The package rejects valid
-// criteria such as `!final`, so a Match line goes through as a plain list.
-function parsedByPackage(text: string, param: string, keyword: string, where: string): ParsedEntry {
+// Before 9.9 a Match line is split as ssh's match_cfg_line split it,
+// honouring only `"` (a `'` is part of the pattern), and a command keeps its
+// text as the ssh-config package returns it, as before. The package rejects
+// valid criteria such as `!final`, so a Match line goes through as a plain list.
+function parsedByPackage(text: string, param: string, keyword: string, where: string, rules: SshRules): ParsedEntry {
   const bad = (reason: string): ParsedEntry => ({ kind: "error", where, message: `ssh cannot read ${where} (${reason})` });
   let nodes: ReturnType<typeof SSHConfig.parse>;
   try {
@@ -209,14 +224,17 @@ function parsedByPackage(text: string, param: string, keyword: string, where: st
       ? bad(`${keyword} has no value`)
       : { kind: "option", where, param: node.param, value: node.value };
   }
-  const criteria = matchCriteria(words(node.value));
+  const criteria = matchCriteria(words(node.value), rules);
   return typeof criteria === "string" ? bad(criteria) : { kind: "match", where, criteria };
 }
 
 const MATCH_KEYWORD = /^(\s*)match(?=[\s=])/i;
 
+/** Criteria 10.0+ also reads as `name=value`. */
+const ATTRIBUTE_EQUALS = /^(host|originalhost|user|localuser|localnetwork|version|tagged|command|exec)=/;
+
 /** The criteria of a Match line, or why ssh calls it a bad Match condition. */
-function matchCriteria(tokens: string[]): Criterion[] | string {
+function matchCriteria(tokens: string[], rules: SshRules): Criterion[] | string {
   const end = tokens.findIndex((t) => t.startsWith("#"));
   const args = end === -1 ? tokens : tokens.slice(0, end);
   if (args.length === 0) return "Match needs at least one criterion";
@@ -235,10 +253,13 @@ function matchCriteria(tokens: string[]): Criterion[] | string {
       criteria.push({ name, negate, arg: "" });
       continue;
     }
-    const arg = args[i + 1];
-    if (arg === undefined || arg === "") return `Match ${args[i]} needs a value`;
-    criteria.push({ name, negate, arg });
-    i++;
+    const joined = rules.matchAttributeEquals ? ATTRIBUTE_EQUALS.exec(name) : null;
+    const attribute = joined ? joined[1] : name;
+    const arg = joined ? args[i].slice(args[i].indexOf("=") + 1) : args[++i];
+    const emptyIsExact = rules.matchEmptyTag && (attribute === "tagged" || attribute === "command");
+    if (arg === undefined || (arg === "" && !emptyIsExact)) return `Match ${joined ? attribute : args[i - 1]} needs a value`;
+    if (rules.matchCriteria && !rules.matchCriteria.has(attribute)) return `Match ${attribute} is not a criterion this ssh knows`;
+    criteria.push({ name: attribute, negate, arg, ...(emptyIsExact ? { emptyIsExact } : {}) });
   }
   return criteria;
 }
@@ -392,9 +413,11 @@ class Evaluator {
         case "localuser":
           r = patternListMatches(c.arg, localUser(), false);
           break;
-        case "tagged":
-          r = patternListMatches(c.arg, this.first("tag") ?? "", false);
+        case "tagged": {
+          const tag = this.first("tag") ?? "";
+          r = tag === "" && c.emptyIsExact ? c.arg === "" : patternListMatches(c.arg, tag, false);
           break;
+        }
         default:
           unknown ??= c;
           continue;
@@ -461,7 +484,7 @@ class Evaluator {
           break;
         }
         case "error":
-          this.refuse(`${p.message}. ssh will not connect anywhere until that line is fixed`);
+          this.refuse(`${p.message}. ssh will not connect anywhere until ${p.until ?? "that line is fixed"}`);
           break;
         case "host":
           active = and(base, hostLineMatches(p.patterns, hostName()) ? YES : NO);
