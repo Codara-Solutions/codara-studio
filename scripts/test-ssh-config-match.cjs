@@ -83,7 +83,10 @@ function sshG(config, host, user) {
   const result = spawnSync("ssh", ["-G", "-F", file, ...(user ? ["-l", user] : []), host], { encoding: "utf8" });
   if (result.status !== 0) return "refused";
   const line = result.stdout.split("\n").find((l) => l.startsWith("revokedhostkeys "));
-  return line ? [line.slice("revokedhostkeys ".length)] : null;
+  // OpenSSH 10 (macOS 26) prints an unset RevokedHostKeys as "none"; 9.x omits
+  // the line. Both mean no revocation list, as Codara reads "none".
+  const value = line?.slice("revokedhostkeys ".length);
+  return value && value.toLowerCase() !== "none" ? [value] : null;
 }
 
 const manual = (host, username = "me") => ({ id: "m", host, port: 22, username, source: "manual" });
