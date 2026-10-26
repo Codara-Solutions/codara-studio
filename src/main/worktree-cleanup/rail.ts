@@ -4,12 +4,15 @@ import { isRemotePath } from "@shared/remote";
 import type { AppState, Workspace } from "@shared/types";
 import type {
   WorktreeCleanupOutcome,
+  WorktreeInUse,
   WorktreeInUseKind,
+  WorktreeLocalWork,
   WorktreeRailCleanupRequest,
   WorktreeRailCleanupResult,
   WorktreeRailState,
   WorktreeRemovalCheck,
 } from "@shared/worktree-cleanup";
+import { onlyIgnoredWork } from "@shared/worktree-cleanup-agent";
 import {
   RECOVERY_REF_PREFIX,
   RepoLockTimeoutError,
@@ -204,15 +207,47 @@ async function dropRow(
   }
 }
 
+// What to close or stop, first: the rail shows this in a line or three.
+function inUseText(uses: readonly WorktreeInUse[]): string {
+  const parts: string[] = [];
+  for (const use of uses) {
+    if (use.kind === "agent" && use.tab) {
+      const where = use.tab.workspace ? ` in ${use.tab.workspace}` : "";
+      parts.push(`Close the tab “${use.tab.title}”${where} first: its agent still owns this worktree.`);
+    } else if (use.kind === "agent") {
+      parts.push("Close the tab of the agent that made it first.");
+    } else if (use.kind === "app") {
+      parts.push("Codara itself runs from it.");
+    } else {
+      parts.push(`Stop ${use.label} in it first.`);
+    }
+  }
+  return parts.join(" ");
+}
+
+function uncommittedText(work: WorktreeLocalWork): string {
+  const shown = work.paths.slice(0, 3);
+  const more = work.tracked + work.untracked - shown.length;
+  const list = shown.length ? ` (${shown.join(", ")}${more > 0 ? ` and ${more} more` : ""})` : "";
+  return `It has uncommitted work${list}. Commit it, or use Delete to review it.`;
+}
+
+
 // The cleanup screen's rules, plus the rail's own: Clean up is for a merged
-// branch only, and never confirms local work away.
+// branch only, and never confirms uncommitted work away. Ignored files alone
+// are asked about (cleanUpRegistered), since a fresh checkout cannot bring
+// them back but nothing else is lost. An ignored folder the scan could not
+// see all of is a blocker of the check itself (UNCHECKED), on every path.
 function railRefusal(
   check: WorktreeRemovalCheck,
   request: WorktreeRailCleanupRequest,
   repo: RepoContext,
   parentPresent: boolean,
 ): string | null {
-  if (check.blockers.length) return check.blockers[0].message;
+  if (check.blockers.length) {
+    const blocker = check.blockers[0];
+    return blocker.code === "IN_USE" && check.inUse?.length ? inUseText(check.inUse) : blocker.message;
+  }
   if (request.mode === "auto") {
     if (!check.alreadyRemoved) return "The folder is still there.";
     if (!parentPresent) return "The folder above it is gone or empty, so its drive may only be unmounted.";
@@ -222,7 +257,7 @@ function railRefusal(
     return null;
   }
   if (check.alreadyRemoved) return null;
-  if (check.localWork) return "It has uncommitted work. Use Delete to review it.";
+  if (check.localWork && !onlyIgnoredWork(check.localWork)) return uncommittedText(check.localWork);
   if (check.merge.state !== "merged") return "Its branch is not merged yet.";
   return null;
 }
@@ -241,12 +276,25 @@ async function cleanUpRegistered(
   const parentPresent = await parentHoldsFolders(path);
   const why = railRefusal(check, request, repo, parentPresent);
   if (why) return refused(why, workspace.name);
+  const holdsIgnored = !check.alreadyRemoved && check.localWork !== null;
+  if (holdsIgnored && request.confirmIgnored !== check.fingerprint) {
+    return {
+      status: "confirm",
+      workspaceName: workspace.name,
+      branchDeleted: false,
+      holds: check.localWork!.ignored,
+      fingerprint: check.fingerprint,
+      ...(request.confirmIgnored ? { message: "It changed since you were asked." } : {}),
+    };
+  }
   // The removal checks again under the repository lock and refuses unless the
-  // fingerprint of what was just judged still matches.
+  // fingerprint of what was just judged, and confirmed, still matches.
   const { outcomes } = await removeCleanupWorktrees(
     deps,
     {
-      items: [{ repoRoot: repo.root, path, fingerprint: check.fingerprint, confirmDirty: false, confirmUnmerged: false }],
+      items: [
+        { repoRoot: repo.root, path, fingerprint: check.fingerprint, confirmDirty: holdsIgnored, confirmUnmerged: false },
+      ],
       deleteMergedBranches: true,
     },
     { ...options, caller: callerFor(request.mode), ...(allowInUse ? { allowInUse } : {}) },
@@ -314,7 +362,7 @@ async function cleanUpUnregistered(
   const uses = (await usageOf(ctx, workspace.cwd, await canonicalPath(workspace.cwd), [workspace])).filter(
     (use) => !allowed?.has(use.kind),
   );
-  if (uses.length) return refuse("IN_USE", `In use: ${uses.map((use) => use.label).join(", ")}.`);
+  if (uses.length) return refuse("IN_USE", inUseText(uses));
   const merged = facts?.state === "merged";
   if (request.mode === "auto") {
     if (!(await parentHoldsFolders(workspace.cwd))) {
@@ -362,7 +410,15 @@ export async function cleanUpRailWorkspace(
   options: RemoveOptions = {},
 ): Promise<WorktreeRailCleanupResult> {
   const mode = request?.mode === "auto" ? "auto" : "manual";
-  const normalized: WorktreeRailCleanupRequest = { workspaceId: String(request?.workspaceId ?? ""), mode };
+  const normalized: WorktreeRailCleanupRequest = {
+    workspaceId: String(request?.workspaceId ?? ""),
+    mode,
+    // The automatic cleanup never removes a folder that is there, so it has
+    // nothing to confirm.
+    ...(mode === "manual" && typeof request?.confirmIgnored === "string" && request.confirmIgnored
+      ? { confirmIgnored: request.confirmIgnored }
+      : {}),
+  };
   const state = await deps.loadState();
   const workspace = state.workspaces.find((candidate) => candidate.id === normalized.workspaceId);
   if (!workspace || !isLocalCopy(workspace)) return refused("This workspace is not a local worktree.");

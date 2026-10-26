@@ -186,6 +186,167 @@ async function main() {
     assert.equal(checkedOut.mode, "checkout");
     assert.equal((await aw.createAgentWorktree(terminalAgent, { branch: "main", checkout: true }, deps)).code, "WORKTREE_RESERVED_BRANCH");
 
+    // ── In another workspace ───────────────────────────────────────────────
+    // A coordinator in a plain folder, once the user allowed it into the
+    // repository's workspace (terminal.create's worktree option), makes the
+    // worktree there; the workspace never comes from the tool JSON.
+    const notes = path.join(scratch, "notes");
+    fs.mkdirSync(notes, { recursive: true });
+    h.state.workspaces.push({ id: "ws-notes", name: "notes", cwd: notes, color: "#654321", workers: [] });
+    h.paneWorkspace["pane-coord"] = "ws-notes";
+    const coordinator = { role: "studio", client: "claude-code", paneId: "pane-coord" };
+    assert.equal((await aw.createAgentWorktree(coordinator, { branch: "agent/from-notes" }, deps)).code, "WORKTREE_NOT_A_REPO");
+    const elsewhere = await aw.createAgentWorktree({ ...coordinator, workspaceId: "ws-repo" }, { branch: "agent/from-notes" }, deps);
+    assert.equal(elsewhere.ok, true, JSON.stringify(elsewhere));
+    assert.equal(elsewhere.sourceWorkspaceId, "ws-repo");
+    assert.equal(workspaceOf(elsewhere.workspaceId).copyBranch.repoCwd, repo);
+    assert.equal(workspaceOf(elsewhere.workspaceId).copyBranch.createdBy.paneId, "pane-coord");
+    assert.equal((await aw.createAgentWorktree({ ...coordinator, workspaceId: "ws-gone" }, {}, deps)).code, "WORKTREE_NO_WORKSPACE");
+
+    // Its maker finds it again from the plain folder: by workspaceId for
+    // setup and remove, and in list under elsewhere. Another agent there
+    // does not.
+    h.paneWorkspace["pane-other"] = "ws-notes";
+    const bystander = { role: "studio", client: "codex", paneId: "pane-other" };
+    const setupFromNotes = await aw.getAgentWorktreeSetup(coordinator, { workspaceId: elsewhere.workspaceId }, deps);
+    assert.equal(setupFromNotes.ok, true, JSON.stringify(setupFromNotes));
+    const dryRemove = await aw.removeAgentWorktree(coordinator, { workspaceId: elsewhere.workspaceId, dryRun: true }, deps);
+    assert.equal(dryRemove.ok, true, JSON.stringify(dryRemove));
+    assert.equal(dryRemove.wouldRemove, true, JSON.stringify(dryRemove));
+    assert.equal((await aw.removeAgentWorktree(bystander, { workspaceId: elsewhere.workspaceId, dryRun: true }, deps)).ok, false);
+    const listedFromNotes = await aw.listAgentWorktrees(coordinator, {}, deps);
+    assert.equal(listedFromNotes.ok, true, JSON.stringify(listedFromNotes));
+    assert.deepEqual(
+      listedFromNotes.elsewhere.map((item) => [item.workspaceId, item.branch, item.repoCwd]),
+      [[elsewhere.workspaceId, "agent/from-notes", repo]],
+    );
+    assert.equal((await aw.listAgentWorktrees(bystander, {}, deps)).code, "WORKTREE_NOT_A_REPO");
+    assert.equal(
+      (await aw.listAgentWorktrees(terminalAgent, {}, deps)).elsewhere,
+      undefined,
+      "a worktree in the caller's own repository is listed only once, under worktrees",
+    );
+
+    // terminal.create's worktree: never waits for setup (its call has 60 s,
+    // part of it spent on the approval card), never opens in a checkout
+    // another agent made, and goes again when the terminal does not open.
+    const waits = [];
+    const setupStatus = { id: "setup-1", state: "running", waitForSetup: true };
+    const withSetup = {
+      ...deps,
+      worktreeSetup: {
+        start: async () => setupStatus,
+        whenPrepared: async () => setupStatus,
+        waitFor: async (id, ms) => {
+          waits.push(ms);
+          return { ...setupStatus, state: "succeeded" };
+        },
+        get: async () => null,
+        tail: async () => "",
+        summary: (status) => ({ state: status.state }),
+      },
+    };
+    const forTerminal = await aw.createTerminalWorktree({ ...coordinator, workspaceId: "ws-repo" }, { branch: "agent/term" }, withSetup);
+    assert.equal(forTerminal.ok, true, JSON.stringify(forTerminal));
+    assert.deepEqual(waits, [], "the setup runs on while the terminal opens");
+    assert.equal(forTerminal.setup.state, "running");
+    const reused = await aw.createTerminalWorktree({ ...coordinator, workspaceId: "ws-repo" }, { branch: "agent/term" }, deps);
+    assert.equal(reused.ok, true, "its maker may open another terminal in it");
+    assert.equal(reused.created, false);
+    const taken = await aw.createTerminalWorktree({ ...bystander, workspaceId: "ws-repo" }, { branch: "agent/term" }, deps);
+    assert.equal(taken.code, "WORKTREE_NOT_YOURS", JSON.stringify(taken));
+    assert.ok(
+      fs.readFileSync(auditFile, "utf8").trim().split("\n").map((entry) => JSON.parse(entry))
+        .some((entry) => entry.outcome === "refused" && entry.code === "WORKTREE_NOT_YOURS" && entry.branch === "agent/term"),
+      "a refused shared checkout is on the audit log",
+    );
+    assert.equal((await aw.rollBackTerminalWorktree(coordinator, reused, deps)).removed, false, "one that was there before stays");
+    const rolledBack = await aw.rollBackTerminalWorktree(coordinator, forTerminal, deps);
+    assert.equal(rolledBack.removed, true, JSON.stringify(rolledBack));
+    assert.equal(fs.existsSync(forTerminal.path), false);
+    assert.equal(refExists(repo, "refs/heads/agent/term"), false);
+    assert.equal(workspaceOf(forTerminal.workspaceId), undefined);
+    // Asked again from the other workspace, the removal answers as removed.
+    const retriedElsewhere = await aw.removeAgentWorktree(coordinator, { workspaceId: forTerminal.workspaceId }, deps);
+    assert.equal(retriedElsewhere.alreadyRemoved, true, JSON.stringify(retriedElsewhere));
+    assert.notEqual(
+      (await aw.removeAgentWorktree(bystander, { workspaceId: forTerminal.workspaceId }, deps)).alreadyRemoved,
+      true,
+      "another agent learns nothing about it",
+    );
+    // Its setup usually still runs (npm install) when the terminal fails: it
+    // is stopped and its card dismissed first, or the process scan would
+    // refuse the rollback and leave the worktree behind.
+    const stops = [];
+    const dismissals = [];
+    let stopClears = true;
+    let stopsInTime = true;
+    const installing = {
+      ...withSetup,
+      worktreeSetup: {
+        ...withSetup.worktreeSetup,
+        // The setup's id, read while the folder still exists.
+        get: async (idOrPath) => (fs.existsSync(idOrPath) ? { id: `setup:${path.basename(idOrPath)}`, state: "running" } : null),
+        stop: async (idOrPath, timeoutMs) => {
+          stops.push([idOrPath, timeoutMs]);
+          if (stopClears) h.processes = [];
+          return stopsInTime;
+        },
+        dismiss: async (idOrPath) => {
+          dismissals.push(idOrPath);
+        },
+      },
+    };
+    // A removal still refused (a shell left in it) keeps the setup's card,
+    // so the user can still see and rerun the half-run setup.
+    const shellLeft = await aw.createTerminalWorktree({ ...coordinator, workspaceId: "ws-repo" }, { branch: "agent/shell-left" }, installing);
+    assert.equal(shellLeft.ok, true, JSON.stringify(shellLeft));
+    stopClears = false;
+    h.processes = [{ pid: 4344, command: "zsh" }];
+    const refusedRollback = await aw.rollBackTerminalWorktree(coordinator, shellLeft, installing);
+    h.processes = [];
+    stopClears = true;
+    assert.equal(refusedRollback.removed, false, JSON.stringify(refusedRollback));
+    assert.deepEqual(dismissals, [], "a refused rollback keeps the setup card");
+    assert.ok(stops[0][1] > 0 && stops[0][1] <= 10_000, `the setup stop wait is capped: ${stops[0][1]}`);
+    assert.equal((await aw.removeAgentWorktree(coordinator, { workspaceId: shellLeft.workspaceId }, deps)).removed, true);
+    stops.length = 0;
+    const busy = await aw.createTerminalWorktree({ ...coordinator, workspaceId: "ws-repo" }, { branch: "agent/installing" }, installing);
+    assert.equal(busy.ok, true, JSON.stringify(busy));
+    h.processes = [{ pid: 4343, command: "npm install" }];
+    const stoppedFirst = await aw.rollBackTerminalWorktree(coordinator, busy, installing);
+    h.processes = [];
+    assert.equal(stoppedFirst.removed, true, JSON.stringify(stoppedFirst));
+    assert.deepEqual(stops.map(([idOrPath]) => idOrPath), [busy.path]);
+    assert.deepEqual(dismissals, [`setup:${path.basename(busy.path)}`], "the card goes, by its id, once the worktree is gone");
+    assert.equal(fs.existsSync(busy.path), false);
+    // A setup that did not stop within its 10 s is not followed by a removal:
+    // the removal would wait for it again (up to 30 s) and fail all the same.
+    stops.length = 0;
+    dismissals.length = 0;
+    const stubborn = await aw.createTerminalWorktree({ ...coordinator, workspaceId: "ws-repo" }, { branch: "agent/stubborn" }, installing);
+    assert.equal(stubborn.ok, true, JSON.stringify(stubborn));
+    stopsInTime = false;
+    const notStopped = await aw.rollBackTerminalWorktree(coordinator, stubborn, installing);
+    stopsInTime = true;
+    assert.equal(notStopped.removed, false, JSON.stringify(notStopped));
+    assert.match(notStopped.reason, /setup did not stop/);
+    assert.equal(notStopped.setupRunning, true);
+    assert.equal(fs.existsSync(stubborn.path), true, "the worktree stays for its maker to remove");
+    // The agent is told plainly which worktree was left and how to remove it.
+    const leftText = aw.terminalRollbackMessage(stubborn, notStopped);
+    assert.ok(leftText.includes(stubborn.path), leftText);
+    assert.ok(leftText.includes(stubborn.workspaceId), leftText);
+    assert.ok(leftText.includes("agent/stubborn"), leftText);
+    assert.match(leftText, /was left in place because its setup was still running after 10 s/);
+    assert.match(leftText, new RegExp(`codara_worktree_remove\\(\\{ workspaceId: "${stubborn.workspaceId}" \\}\\) once its setup has ended`));
+    assert.match(aw.terminalRollbackMessage(stubborn, { removed: true }), /the worktree made for it was removed/);
+    const refusedText = aw.terminalRollbackMessage(stubborn, { removed: false, reason: "WORKTREE_RUNNING_PROCESSES: 1 processes use the worktree" });
+    assert.ok(refusedText.includes(stubborn.path) && refusedText.includes("WORKTREE_RUNNING_PROCESSES"), refusedText);
+    assert.match(refusedText, /codara_worktree_remove\(\{ workspaceId: /);
+    assert.deepEqual(dismissals, []);
+    assert.equal((await aw.removeAgentWorktree(coordinator, { workspaceId: stubborn.workspaceId }, deps)).removed, true);
+
     // ── Who may call ───────────────────────────────────────────────────────
     for (const role of ["worker", "automation"]) {
       const refused = await aw.createAgentWorktree({ role, client: "cora" }, {}, deps);
@@ -766,11 +927,68 @@ async function main() {
     assert.equal(fs.readFileSync(rotating, "utf8").trim().split("\n").length, 1);
 
     // ── Pure helpers ───────────────────────────────────────────────────────
-    for (const entry of ["node_modules/", "packages/a/node_modules/", "dist/", "src/x.pyc", ".DS_Store", "tsconfig.tsbuildinfo"]) {
-      assert.equal(aw.isRegenerableIgnored(entry), true, `${entry} regenerates`);
+    const packages = (dir) => dir === "packages/a" || dir === "packages/web";
+    for (const entry of [
+      "node_modules/",
+      "packages/a/node_modules/",
+      "dist/",
+      "src/x.pyc",
+      ".DS_Store",
+      "tsconfig.tsbuildinfo",
+      "test-results/",
+      "playwright-report/",
+      "packages/web/test-results/",
+      ".ruff_cache/",
+    ]) {
+      assert.equal(aw.isRegenerableIgnored(entry, [], packages), true, `${entry} regenerates`);
     }
-    for (const entry of [".env.local", "secrets/", "notes.md", "config/credentials.json"]) {
-      assert.equal(aw.isRegenerableIgnored(entry), false, `${entry} is kept`);
+    for (const entry of [
+      ".env.local",
+      "secrets/",
+      "notes.md",
+      "config/credentials.json",
+      // Only at the root or a package root: git lists a wholly ignored folder as one entry.
+      "docs/test-results/",
+      "packages/b/node_modules/",
+      // A file inside a folder that is not ignored as a whole is that file, not the folder.
+      "dist/.env",
+      "test-results/.env.production",
+    ]) {
+      assert.equal(aw.isRegenerableIgnored(entry, [], packages), false, `${entry} is kept`);
+    }
+    assert.equal(aw.isRegenerableIgnored(".env", ["*.pyc"]), false, "no built-in pattern makes a .env regenerable");
+    assert.equal(aw.isRegenerableIgnored("test-results/.env.local", [".env.local"]), true, "the user's own pattern can");
+    assert.equal(aw.isRegenerableIgnored("packages/a/node_modules/"), false, "without package roots, the root only");
+    for (const name of [
+      ".env",
+      ".env.local",
+      ".env.production.local",
+      ".ENV",
+      ".env-staging",
+      ".envrc",
+      "server.pem",
+      "tls.key",
+      "id_rsa",
+      "id_ed25519",
+      ".npmrc",
+      ".netrc",
+    ]) {
+      assert.equal(aw.isSecretFile(name), true, name);
+    }
+    for (const name of [".env.example", ".env-sample", ".env.template", "env.ts", "id_rsa.pub", "keys.json", "monkey.ts"]) {
+      assert.equal(aw.isSecretFile(name), false, name);
+    }
+    for (const name of ["id_rsa", "deploy.pem", ".npmrc"]) {
+      assert.equal(aw.isRegenerableIgnored(name), false, `${name} is never regenerable by the built-in list`);
+    }
+    {
+      const rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "codara-pkg-root-"));
+      fs.mkdirSync(path.join(rootDir, "packages", "web"), { recursive: true });
+      fs.writeFileSync(path.join(rootDir, "packages", "web", "package.json"), "{}");
+      const tester = aw.packageRootTester(rootDir);
+      assert.equal(tester("packages/web"), true);
+      assert.equal(tester("packages"), false);
+      fs.rmSync(rootDir, { recursive: true, force: true });
     }
     assert.equal(aw.isRegenerableIgnored("generated/", ["generated/"]), true);
     assert.equal(aw.isRegenerableIgnored("out.log", ["*.log"]), true);

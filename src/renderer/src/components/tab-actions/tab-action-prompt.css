@@ -1,0 +1,71 @@
+/* The tabs an agent asks to close or move, listed on the approval card. The
+   list sits on an opaque panel, never on see-through glass, and scrolls once
+   a group is long. */
+
+.tab-action-prompt__list {
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  max-height: 168px;
+  overflow-y: auto;
+  border-radius: 8px;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+}
+
+.tab-action-prompt__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.tab-action-prompt__kind {
+  flex: 0 0 64px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.tab-action-prompt__name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--ink);
+}
+
+/* Text in the ink color, so it reads in every theme; the dot carries the
+   warning color. */
+.tab-action-prompt__warning {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--ink-dim);
+}
+
+.tab-action-prompt__warning::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn);
+}
+
+.tab-action-prompt__note {
+  color: var(--ink);
+}
+
+/* The grant is a full-width line under Deny and Allow once: its label names
+   the workspace, so it would crowd the row. */
+.tab-action-prompt__always {
+  justify-self: stretch;
+  justify-content: center;
+  white-space: normal;
+  text-align: center;
+}

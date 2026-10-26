@@ -21,7 +21,7 @@
 // call per tick, which also survives the page being replaced mid-wait.
 
 import { createPreviewDOM } from "../../shared/preview-dom";
-import { isHmrRequest, pageActivity, type PageActivity } from "./page-activity";
+import { isHmrRequest, lastAgentActivityAt, pageActivity, type PageActivity } from "./page-activity";
 import type { BrowserTarget } from "./targets";
 
 export const WAIT_DEFAULT_MS = 5_000;
@@ -306,7 +306,8 @@ export function checkWait(
     const requested = activity.navigationRequestedAt > 0 &&
       (activity.loadingStartedAt >= activity.navigationRequestedAt || now - activity.navigationRequestedAt < REQUESTED_NAVIGATION_MS);
     const pendingNavigation = requested || activity.loadingStartedAt > activity.loadingStoppedAt;
-    const settling = activity.lastActionAt > 0 && now - activity.lastActionAt < ACTION_SETTLE_MS;
+    const actedAt = lastAgentActivityAt(activity);
+    const settling = actedAt > 0 && now - actedAt < ACTION_SETTLE_MS;
     const ready = probe?.readyState ?? "unknown";
     if (pendingNavigation) waiting.push("a navigation is still loading");
     else if (settling) waiting.push("the last action just happened");

@@ -96,6 +96,12 @@ const askInWindow: CrossWorkspaceAsk = async ({ caller, target, agent }) => {
   });
 };
 
+// Whether the user answered Always for agents of `caller` acting in
+// `target`. codara_tab acts in another workspace only then.
+export function hasCrossWorkspaceGrant(callerWorkspaceId: string, targetWorkspaceId: string): Promise<boolean> {
+  return grantStore().has(callerWorkspaceId, targetWorkspaceId);
+}
+
 export function crossWorkspaceApprover(): CrossWorkspaceApprover {
   approver ??= createCrossWorkspaceApprover({ store: grantStore(), ask: askInWindow });
   return approver;

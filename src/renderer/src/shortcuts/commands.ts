@@ -72,7 +72,9 @@ export type CommandId =
   | "chat.stop"
   | "markdown.togglePreview"
   | "browser.pickElement"
-  | "browser.comment";
+  | "browser.comment"
+  | "browser.fullScreen"
+  | "browser.devTools";
 
 export type CommandGroup =
   | "General"
@@ -555,5 +557,20 @@ export const COMMANDS: Command[] = [
     label: "Comment on the browser page",
     group: "View",
     defaultChords: [mod("x", { shift: true })],
+  },
+  {
+    // F11 and F12 as in a browser. Bare keys, so they only act while a
+    // browser tab is on screen (App's isDisabled); a page in the tab passes
+    // them up too (main/browser/guest-chords.ts).
+    id: "browser.fullScreen",
+    label: "Browser full screen (again for the whole display)",
+    group: "View",
+    defaultChords: [{ ctrl: false, meta: false, alt: false, shift: false, key: "F11" }],
+  },
+  {
+    id: "browser.devTools",
+    label: "Browser developer tools",
+    group: "View",
+    defaultChords: [{ ctrl: false, meta: false, alt: false, shift: false, key: "F12" }],
   },
 ];

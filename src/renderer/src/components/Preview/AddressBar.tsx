@@ -9,50 +9,28 @@ import {
   BackIcon,
   CloseIcon,
   CommentIcon,
-  DevToolsIcon,
-  ExternalLinkIcon,
   ForwardIcon,
   GlobeIcon,
   InspectIcon,
   LockIcon,
   ReloadIcon,
-  TabIdIcon,
 } from "../icons";
 import { IS_MAC } from "../../shortcuts/platform";
+import MoreMenu from "./toolbar/MoreMenu";
+import ServerChip from "./toolbar/ServerChip";
+import { ExitFullScreenIcon, FullScreenIcon } from "./toolbar/icons";
+import TabsChip from "./tabs-memory/TabsChip";
+import { normalizeUrl } from "./toolbar/address";
+import "./browser-pane.css";
 
 const MOD_LABEL = IS_MAC ? "Cmd" : "Ctrl";
 
-// AddressBar is the chrome for a preview tab: back/forward, reload, URL
-// input, ports preset dropdown, open-in-system-browser, open-devtools.
-//
-// The ports list is curated for common dev servers; clicking probes the
-// port via fetch (no-cors) before navigating. This avoids the awkward
-// "click a port and stare at a connection-refused error page" UX when
-// nothing is running there yet.
-
-type PortPreset = {
-  port: number;
-  label: string;
-};
-
-const PORT_PRESETS: readonly PortPreset[] = [
-  { port: 5173, label: "Vite" },
-  { port: 5174, label: "Vite (alt)" },
-  { port: 3000, label: "Next.js / Express" },
-  { port: 3001, label: "Next.js (alt)" },
-  { port: 4173, label: "Vite preview" },
-  { port: 4200, label: "Angular" },
-  { port: 4321, label: "Astro" },
-  { port: 5500, label: "Live Server" },
-  { port: 6006, label: "Storybook" },
-  { port: 8080, label: "Webpack / Vue CLI" },
-  { port: 8081, label: "Metro" },
-  { port: 8000, label: "Django / FastAPI" },
-  { port: 8888, label: "Jupyter" },
-  { port: 5000, label: "Flask" },
-  { port: 9000, label: "Misc" },
-  { port: 9229, label: "Node debug" },
-];
+// AddressBar is the browser pane's toolbar (DESIGN.md, "Browser pane"):
+// back, forward and reload; the address pill with the workspace's dev
+// servers at its left end; the tools used every few minutes with a word next
+// to each (Point, Comment, Record); a More menu for the rest; the tabs and
+// memory chip; and full screen. In a narrow pane the words drop and the
+// icons, tooltips and accessible names stay.
 
 export interface AddressBarHandle {
   focus: () => void;
@@ -68,6 +46,11 @@ interface Props {
   commenting: boolean;
   /** The id agents pass as tabId, or null outside a registered tab. */
   tabId: string | null;
+  workspaceId: string | null;
+  /** The phone, tablet and desktop view is open. */
+  responsive: boolean;
+  /** The pane fills the window (or the whole display). */
+  fullScreen: boolean;
   onSubmit: (url: string) => void;
   // Shift-click triggers a hard reload (ignore HTTP cache). Plain click is a
   // normal reload. The reload button forwards the click's shift state via
@@ -79,10 +62,12 @@ interface Props {
   onOpenExternal: (url: string) => void;
   onTogglePoint: () => void;
   onToggleComment: () => void;
+  onToggleResponsive: () => void;
+  onToggleFullScreen: () => void;
   /** "id" copies the bare id; "full" adds the URL, title and who drives the tab. */
   onCopyTabId: (detail: "id" | "full") => void;
-  /** Capture controls (responsive view, record), rendered after Comment. */
-  captureTools?: React.ReactNode;
+  /** The Record tool, rendered after Comment. */
+  recordTool?: React.ReactNode;
 }
 
 const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
@@ -93,6 +78,9 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
     pointing,
     commenting,
     tabId,
+    workspaceId,
+    responsive,
+    fullScreen,
     onSubmit,
     onReload,
     onBack,
@@ -101,21 +89,20 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
     onOpenExternal,
     onTogglePoint,
     onToggleComment,
+    onToggleResponsive,
+    onToggleFullScreen,
     onCopyTabId,
-    captureTools,
+    recordTool,
   },
   ref,
 ) {
   const [draft, setDraft] = useState(url);
   const [notice, setNotice] = useState<string | null>(null);
-  const [checkingPort, setCheckingPort] = useState<number | null>(null);
-  const [portsOpen, setPortsOpen] = useState(false);
   // Drives the Safari-style address display: when unfocused we render a
   // styled URL (dimmed scheme + emphasized host); on focus the raw editable
   // draft is shown so the user can edit the full string.
   const [focused, setFocused] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const portsAnchor = useRef<HTMLDivElement | null>(null);
 
   // Parse the resting URL into scheme / host / rest so the unfocused pill can
   // dim the scheme and emphasize the host (the Safari "emphasized domain"
@@ -149,71 +136,20 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
     [],
   );
 
-  useEffect(() => {
-    if (!portsOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (
-        portsAnchor.current &&
-        e.target instanceof Node &&
-        !portsAnchor.current.contains(e.target)
-      ) {
-        setPortsOpen(false);
-      }
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setPortsOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [portsOpen]);
-
   const submit = () => {
     const next = normalizeUrl(draft);
     if (!next) {
-      setNotice("Enter a URL or pick a port preset.");
+      setNotice("Enter a URL, or a port such as 3000 for a local server.");
       return;
     }
     setNotice(null);
+    setDraft(next);
     onSubmit(next);
   };
 
-  const tryPort = async (port: number) => {
-    setNotice(null);
-    setCheckingPort(port);
-    const target = `http://localhost:${port}`;
-    const ok = await probeUrl(target);
-    setCheckingPort(null);
-    setPortsOpen(false);
-    if (!ok) {
-      setNotice(`No server listening on :${port}.`);
-      return;
-    }
-    setDraft(target);
-    onSubmit(target);
-  };
-
   return (
-    <div
-      style={{
-        flex: "0 0 auto",
-        borderBottom: "1px solid var(--rule-soft)",
-        background: "var(--panel)",
-        boxShadow: "var(--lift-hi)",
-      }}
-    >
-      <div
-        style={{
-          height: 38,
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          padding: "0 8px",
-        }}
-      >
+    <div className="bp-toolbar" data-testid="preview-toolbar">
+      <div className="bp-toolbar__row">
         {/* Navigation cluster: back / forward / reload grouped inside one
             subtly-bordered, recessed affordance so the three nav controls
             read as a unit (Safari toolbar idiom) rather than three loose
@@ -237,77 +173,6 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
             onClick={(e) => onReload({ ignoreCache: e.shiftKey })}
           />
         </Cluster>
-
-        <div ref={portsAnchor} style={{ position: "relative", flex: "0 0 auto" }}>
-          <button
-            type="button"
-            className="spark-btn"
-            onClick={() => setPortsOpen((o) => !o)}
-            title="Common dev-server ports"
-            aria-pressed={portsOpen}
-            style={{
-              height: 28,
-              padding: "0 10px",
-              fontFamily: "var(--font-mono)",
-              fontSize: 10,
-              letterSpacing: "0.06em",
-              textTransform: "uppercase",
-              // Reflect the open state with accent ink on a soft fill, matching
-              // the .spark-icon-btn.is-active idiom — no extra border/glow.
-              color: portsOpen ? "var(--accent-text)" : "var(--ink-dim)",
-              background: portsOpen ? "var(--accent-soft)" : undefined,
-              borderColor: portsOpen ? "var(--accent-edge)" : undefined,
-            }}
-          >
-            Ports
-          </button>
-          {portsOpen && (
-            <div
-              className="spark-menu spark-fade-in"
-              style={{
-                position: "absolute",
-                top: 34,
-                left: 0,
-                zIndex: 50,
-                minWidth: 240,
-                maxHeight: 320,
-                overflow: "auto",
-              }}
-            >
-              <div className="spark-eyebrow" style={{ padding: "6px 8px 7px" }}>
-                Dev-server ports
-              </div>
-              {PORT_PRESETS.map((p) => {
-                const checking = checkingPort === p.port;
-                return (
-                  <button
-                    key={p.port}
-                    type="button"
-                    className="spark-menu-item"
-                    onClick={() => void tryPort(p.port)}
-                    style={{ gap: 10 }}
-                  >
-                    <span style={{ flex: 1 }}>{p.label}</span>
-                    {checking ? (
-                      <span
-                        style={{
-                          color: "var(--accent-text)",
-                          fontFamily: "var(--font-mono)",
-                          fontVariantNumeric: "tabular-nums",
-                          fontSize: 10,
-                        }}
-                      >
-                        checking…
-                      </span>
-                    ) : (
-                      <span className="spark-kbd">:{p.port}</span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
 
         {/* Address pill — the single highest-leverage "reads as a browser"
             element. Leading security glyph (lock for https, globe for http),
@@ -347,6 +212,15 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
               "border-color var(--motion-fast) var(--ease-out), box-shadow var(--motion-fast) var(--ease-out)",
           }}
         >
+          <ServerChip
+            workspaceId={workspaceId}
+            url={url}
+            onOpen={(target) => {
+              setNotice(null);
+              setDraft(target);
+              onSubmit(target);
+            }}
+          />
           {/* Security glyph — lock (https) vs globe (http). Muted at rest so
               it sits quietly until the host carries the eye. */}
           <span
@@ -414,6 +288,8 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
                   e.preventDefault();
                   setDraft(url);
                   inputRef.current?.blur();
+                  // Handled here, so the pane's own Esc listener skips it.
+                  if (fullScreen) onToggleFullScreen();
                 }
               }}
               placeholder="http://localhost:3000"
@@ -436,6 +312,9 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
                 fontFamily: "var(--font-mono)",
                 fontSize: 11,
                 outline: "none",
+                // The pill carries the focus ring; the app-wide input ring
+                // would draw a second box inside it.
+                boxShadow: "none",
                 // Hidden while resting so the styled overlay above shows
                 // through; focus reveals it for editing. Caret/selection only
                 // matter when focused, so opacity is the right lever here.
@@ -445,38 +324,47 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
           </div>
         </div>
 
-        {/* Tools cluster: inspect / draw toggles + open-external + devtools,
-            grouped like the nav cluster so the toolbar reads as two clean
-            affordances rather than a row of loose boxes. */}
-        <Cluster>
-          <ChromeButton
-            label={<InspectIcon size={13} />}
-            title={pointing ? "Stop pointing (Esc)" : `Point at an element to send to an agent (${MOD_LABEL}+Shift+E)`}
-            disabled={!url}
-            active={pointing}
-            onClick={onTogglePoint}
-          />
-          <ChromeButton
-            label={<CommentIcon size={13} />}
-            title={commenting ? "Stop commenting (Esc)" : `Comment on the page (${MOD_LABEL}+Shift+X)`}
-            disabled={!url}
-            active={commenting}
-            onClick={onToggleComment}
-          />
-          {captureTools}
-          {tabId ? <TabIdButton tabId={tabId} onCopy={onCopyTabId} /> : null}
-          <ChromeButton
-            label={<ExternalLinkIcon size={13} />}
-            title="Open in system browser"
-            disabled={!url}
-            onClick={() => onOpenExternal(url)}
-          />
-          <ChromeButton
-            label={<DevToolsIcon size={13} />}
-            title="Open Chromium DevTools"
-            onClick={onOpenDevTools}
-          />
-        </Cluster>
+        <ToolButton
+          icon={<InspectIcon size={13} />}
+          label="Point"
+          title={pointing ? "Stop pointing (Esc)" : `Point at an element to send to an agent (${MOD_LABEL}+Shift+E)`}
+          disabled={!url}
+          active={pointing}
+          onClick={onTogglePoint}
+        />
+        <ToolButton
+          icon={<CommentIcon size={13} />}
+          label="Comment"
+          title={commenting ? "Stop commenting (Esc)" : `Comment on the page (${MOD_LABEL}+Shift+X)`}
+          disabled={!url}
+          active={commenting}
+          onClick={onToggleComment}
+        />
+        {recordTool}
+        <MoreMenu
+          url={url}
+          tabId={tabId}
+          responsive={responsive}
+          fullScreen={fullScreen}
+          onToggleResponsive={onToggleResponsive}
+          onToggleFullScreen={onToggleFullScreen}
+          onCopyTabId={onCopyTabId}
+          onOpenExternal={() => onOpenExternal(url)}
+          onOpenDevTools={onOpenDevTools}
+        />
+        <span className="bp-sep" aria-hidden />
+        <TabsChip tabId={tabId} workspaceId={workspaceId} />
+        <button
+          type="button"
+          className={`bp-tool bp-tool--icon${fullScreen ? " is-active" : ""}`}
+          data-testid="preview-fullscreen"
+          aria-pressed={fullScreen}
+          aria-label={fullScreen ? "Leave full screen" : "Full screen"}
+          title={fullScreen ? "Leave full screen (Esc)" : "Full screen: fill the Codara window (F11)"}
+          onClick={onToggleFullScreen}
+        >
+          {fullScreen ? <ExitFullScreenIcon size={13} /> : <FullScreenIcon size={13} />}
+        </button>
       </div>
       {notice ? (
         <div
@@ -533,61 +421,36 @@ const AddressBar = forwardRef<AddressBarHandle, Props>(function AddressBar(
   );
 });
 
-// Copies the tab's id for an agent: a click copies the bare id,
-// the chevron menu also offers the id with the URL and who drives the tab.
-function TabIdButton({ tabId, onCopy }: { tabId: string; onCopy: (detail: "id" | "full") => void }) {
-  const [open, setOpen] = useState(false);
-  const anchorRef = useRef<HTMLSpanElement | null>(null);
-  const menuRef = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (event: MouseEvent) => {
-      if (event.target instanceof Node && (menuRef.current?.contains(event.target) || anchorRef.current?.contains(event.target))) return;
-      setOpen(false);
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown, true);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown, true);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-  const rect = open ? anchorRef.current?.getBoundingClientRect() : null;
+// A toolbar tool with its word next to the icon. The aria-label carries the
+// full description, so the name stays when a narrow pane drops the word.
+function ToolButton({
+  icon,
+  label,
+  title,
+  disabled,
+  active,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  title: string;
+  disabled?: boolean;
+  active?: boolean;
+  onClick: () => void;
+}) {
   return (
-    <span ref={anchorRef} style={{ display: "inline-flex", alignItems: "center" }}>
-      <ChromeButton label={<TabIdIcon size={13} />} title={`Copy tab id ${tabId}`} onClick={() => onCopy("id")} />
-      <button
-        type="button"
-        className="spark-icon-btn"
-        aria-label="More ways to copy this tab"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        title="Copy the tab id with its URL and session"
-        onClick={() => setOpen((value) => !value)}
-        style={{ ["--spark-icon-btn-size" as string]: "14px", fontSize: 9, color: "var(--muted)" }}
-      >
-        ▾
-      </button>
-      {open && rect ? (
-        <div
-          ref={menuRef}
-          role="menu"
-          className="spark-menu"
-          style={{ position: "fixed", zIndex: 130, top: rect.bottom + 6, left: Math.max(8, Math.min(rect.right - 280, window.innerWidth - 288)), width: 280 }}
-        >
-          <button type="button" role="menuitem" className="spark-menu-item" onClick={() => { setOpen(false); onCopy("id"); }}>
-            <span style={{ flex: 1, whiteSpace: "nowrap" }}>Copy tab id</span>
-            <span style={{ color: "var(--muted)", fontFamily: "var(--font-mono)", fontSize: 11, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tabId}</span>
-          </button>
-          <button type="button" role="menuitem" className="spark-menu-item" onClick={() => { setOpen(false); onCopy("full"); }}>
-            Copy id, URL and session
-          </button>
-        </div>
-      ) : null}
-    </span>
+    <button
+      type="button"
+      className={`bp-tool${active ? " is-active" : ""}`}
+      title={title}
+      aria-label={title}
+      aria-pressed={active ? true : undefined}
+      disabled={disabled}
+      onClick={onClick}
+    >
+      {icon}
+      <span className="bp-tool__label">{label}</span>
+    </button>
   );
 }
 
@@ -652,20 +515,6 @@ function ChromeButton({
   );
 }
 
-async function probeUrl(url: string): Promise<boolean> {
-  try {
-    await fetch(url, {
-      method: "GET",
-      mode: "no-cors",
-      cache: "no-store",
-      signal: AbortSignal.timeout(900),
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 // Split a resting URL into scheme / host / rest for the Safari-style address
 // display (dimmed scheme, emphasized host, dimmed path+query). Returns null
 // for anything that isn't a parseable http(s) URL so the caller can fall back
@@ -680,16 +529,6 @@ function parseAddress(
   const [, scheme, host, rest] = m;
   if (!host) return null;
   return { scheme: scheme.toLowerCase(), host, rest };
-}
-
-function normalizeUrl(raw: string): string | null {
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-  if (/^https?:\/\//i.test(trimmed)) return trimmed;
-  if (/^localhost(:|\/|$)/i.test(trimmed)) return `http://${trimmed}`;
-  if (/^\d{1,3}(\.\d{1,3}){3}(:|\/|$)/.test(trimmed)) return `http://${trimmed}`;
-  if (/^[\w.-]+\.[a-z]{2,}/i.test(trimmed)) return `https://${trimmed}`;
-  return trimmed;
 }
 
 export default AddressBar;

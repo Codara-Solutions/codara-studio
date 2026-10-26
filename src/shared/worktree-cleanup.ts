@@ -31,6 +31,8 @@ export interface WorktreeInUse {
   kind: WorktreeInUseKind;
   /** Plain words for the screen, such as "2 terminals". */
   label: string;
+  /** With "agent": the open tab of the agent that made the worktree, to close. */
+  tab?: { title: string; workspace?: string };
 }
 
 export interface WorktreeSize {
@@ -247,6 +249,7 @@ export type WorktreeCleanupCode =
   | "IN_USE"
   | "LOCKED"
   | "NESTED_CHECKOUT"
+  | "UNCHECKED"
   | "CHANGED"
   | "REPO_BUSY"
   | "GIT_FAILED"
@@ -283,6 +286,8 @@ export interface WorktreeRemovalCheck extends WorktreeCleanupTarget {
   workspace: WorktreeLinkedWorkspace | null;
   alreadyRemoved: boolean;
   blockers: Array<{ code: WorktreeCleanupCode; message: string }>;
+  /** What the IN_USE blocker is about. */
+  inUse?: WorktreeInUse[];
   localWork: WorktreeLocalWork | null;
   unmerged: WorktreeUnmergedWork | null;
   merge: { state: WorktreeMergeState; proof?: WorktreeMergeProof; target?: string };
@@ -362,16 +367,26 @@ export interface WorktreeRailState {
 export interface WorktreeRailCleanupRequest {
   workspaceId: string;
   mode: "manual" | "auto";
+  /**
+   * The fingerprint of a "confirm" answer the user accepted: its ignored
+   * files go with the folder. Anything changed since refuses again.
+   */
+  confirmIgnored?: string;
 }
 
 export interface WorktreeRailCleanupResult {
-  status: "removed" | "refused" | "failed";
+  /** "confirm": only ignored files hold it back; ask, then send the fingerprint back. */
+  status: "removed" | "refused" | "failed" | "confirm";
   /** Why it was refused or failed, or what was left behind. */
   message?: string;
   workspaceName?: string;
   branchDeleted: boolean;
   /** Plain words for why the branch stayed, such as "it has unmerged commits". */
   branchKept?: string;
+  /** With "confirm": the ignored files a fresh checkout would not bring back. */
+  holds?: string[];
+  /** With "confirm": what the answer is tied to. */
+  fingerprint?: string;
 }
 
 // ── Formatting ─────────────────────────────────────────────────────────────

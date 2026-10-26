@@ -373,107 +373,70 @@ async function main() {
 
   // ── 5. Ownership ───────────────────────────────────────────────────────
   const registry = new AgentTerminalRegistry();
-  registry.register({ paneId: "p-cross", tabId: "t-cross", runId: null, ownerPaneId: "p-ceo" });
+  const ceo = { paneId: "p-ceo", sessionId: null, process: "41@1" };
+  const otherPane = { paneId: "p-other", sessionId: null, process: "42@1" };
+  registry.register({ paneId: "p-cross", tabId: "t-cross", runId: null, ownerPaneId: "p-ceo", ownerProcess: "41@1" });
   registry.register({ paneId: "p-plain", tabId: "t-plain", runId: null });
   registry.register({ paneId: "p-run", tabId: "t-run", runId: "run-1", ownerPaneId: "p-ceo" });
 
-  assert.equal(registry.isActiveOwnedBy("p-cross", null, "p-ceo"), true, "the opening pane may write");
-  assert.equal(registry.isActiveOwnedBy("p-cross", null, "p-other"), false, "another agent's pane may not");
+  assert.equal(registry.isActiveOwnedBy("p-cross", null, ceo), true, "the opening pane may write");
+  assert.equal(registry.isActiveOwnedBy("p-cross", null, otherPane), false, "another agent's pane may not");
   assert.equal(registry.isActiveOwnedBy("p-cross", null, null), false, "an unplaced caller may not");
   assert.equal(registry.isActiveOwnedBy("p-cross", null), false);
-  assert.equal(registry.isActiveOwnedBy("p-cross", "run-1", "p-ceo"), false, "a run may not");
-  assert.equal(registry.isActiveOwnedBy("p-plain", null), true, "ordinary terminals keep their old rule");
-  assert.equal(registry.isActiveOwnedBy("p-plain", null, "p-anyone"), true);
+  assert.equal(registry.isActiveOwnedBy("p-cross", "run-1", ceo), false, "a run may not");
+  assert.equal(registry.isActiveOwnedBy("p-plain", null), false, "a terminal with no recorded opener is nobody's");
+  assert.equal(registry.isActiveOwnedBy("p-plain", null, { paneId: "p-anyone", process: "43@1" }), false, "an agent in a pane included");
+  assert.equal(registry.isActiveOwnedBy("p-cross", null, { paneId: "p-ceo", sessionId: null, process: "44@9" }), false, "a later agent in the opening pane may not");
   assert.equal(registry.isActiveOwnedBy("p-run", "run-1", null), true, "a run-owned terminal follows its run");
-  assert.equal(registry.isActiveOwnedBy("p-run", "run-2", "p-ceo"), false);
-  assert.equal(registry.ownerPaneOf("p-cross"), "p-ceo");
-  assert.equal(registry.ownerPaneOf("p-plain"), null);
-  assert.equal(registry.ownerPaneOf("p-run"), null, "a run's terminal is steered by the run, not a pane");
+  assert.equal(registry.isActiveOwnedBy("p-run", "run-2", ceo), false);
+  assert.deepEqual(registry.openerOf("p-cross"), { paneId: "p-ceo", sessionId: null, process: "41@1" });
+  assert.equal(registry.openerOf("p-plain"), null);
+  assert.equal(registry.openerOf("p-run"), null, "a run's terminal is steered by the run, not a pane");
   assert.deepEqual(
-    registry.listOwnedByPane("p-ceo").map((t) => t.paneId),
+    registry.listOpenedBy(ceo).map((t) => t.paneId),
     ["p-cross"],
-    "the caller lists the terminals it opened elsewhere",
+    "the caller lists the terminals it opened",
   );
-  assert.deepEqual(registry.listOwnedByPane("p-other"), []);
+  assert.deepEqual(registry.listOpenedBy(otherPane), []);
 
   let destroyed = 0;
-  const close = (callerPaneId) =>
+  const close = (caller) =>
     registry.close({
       paneId: "p-cross",
       runId: null,
-      callerPaneId,
+      caller,
       stop: () => undefined,
       destroyTab: () => {
         destroyed += 1;
       },
     });
-  await assert.rejects(close("p-other"), AgentTerminalOwnershipError);
+  await assert.rejects(close(otherPane), AgentTerminalOwnershipError);
   await assert.rejects(close(null), AgentTerminalOwnershipError);
   assert.equal(destroyed, 0);
-  assert.deepEqual(await close("p-ceo"), { paneId: "p-cross", alreadyClosed: false });
+  assert.deepEqual(await close(ceo), { paneId: "p-cross", alreadyClosed: false });
   assert.equal(destroyed, 1);
-  assert.deepEqual(await close("p-ceo"), { paneId: "p-cross", alreadyClosed: true }, "a retry is idempotent");
+  assert.deepEqual(await close(ceo), { paneId: "p-cross", alreadyClosed: true }, "a retry is idempotent");
 
-  registry.register({ paneId: "p-exit", tabId: "t-exit", runId: null, ownerPaneId: "p-ceo" });
+  registry.register({ paneId: "p-exit", tabId: "t-exit", runId: null, ownerPaneId: "p-ceo", ownerProcess: "41@1" });
   registry.markExited({ paneId: "p-exit", tabId: "t-exit" });
-  assert.equal(registry.ownerPaneOf("p-exit"), "p-ceo", "an exited terminal keeps its owner for close");
+  assert.deepEqual(registry.openerOf("p-exit"), { paneId: "p-ceo", sessionId: null, process: "41@1" }, "an exited terminal keeps its owner for close");
   await assert.rejects(
-    registry.close({ paneId: "p-exit", runId: null, callerPaneId: "p-x", stop() {}, destroyTab() {} }),
+    registry.close({ paneId: "p-exit", runId: null, caller: { paneId: "p-x" }, stop() {}, destroyTab() {} }),
     AgentTerminalOwnershipError,
   );
 
   registry.register({ paneId: "p-dev", tabId: "t-dev", runId: null, ownerPaneId: "p-ceo" });
   assert.equal(registry.transferToWorkspace("p-dev"), true);
-  assert.equal(registry.ownerPaneOf("p-dev"), null);
-  assert.equal(registry.isActiveOwnedBy("p-dev", null, "p-anyone"), true, "a kept dev server belongs to its workspace");
+  assert.equal(registry.openerOf("p-dev"), null);
+  assert.equal(registry.isActiveOwnedBy("p-dev", null, { paneId: "p-anyone" }), true, "a kept dev server belongs to its workspace");
 
+  // Pane ids are never reused, so an opener whose pane closed leaves its
+  // terminal to its session, or to the user, never to whichever agent asks.
   registry.register({ paneId: "p-orphan", tabId: "t-orphan", runId: null, ownerPaneId: "p-gone" });
-  assert.equal(registry.isActiveOwnedBy("p-orphan", null, "p-other"), false);
-  registry.releasePaneOwner("p-orphan");
-  assert.equal(registry.ownerPaneOf("p-orphan"), null);
-  assert.equal(
-    registry.isActiveOwnedBy("p-orphan", null, "p-other"),
-    true,
-    "once its opener's pane is gone it follows the rule for every run-less terminal",
-  );
-
-  // Whether the opener's pane is really gone (agent-socket releases the owner
-  // only then).
-  let layoutReads = 0;
-  const panes = (sessions, layout) => ({
-    hasSession: (id) => sessions.includes(id),
-    listPaneIds: async () => {
-      layoutReads += 1;
-      if (layout instanceof Error) throw layout;
-      return layout;
-    },
-  });
-  assert.equal(await cross.paneIsGone("p-ceo", panes(["p-ceo"], ["p-ceo"])), false, "a live pane is there");
-  assert.equal(layoutReads, 0, "a live pane needs no layout read");
-  assert.equal(
-    await cross.paneIsGone("p-ceo", panes([], ["p-ceo", "p-x"])),
-    false,
-    "a hibernated or respawning pane has no process but is still in the layout",
-  );
-  assert.equal(
-    await cross.paneIsGone("p-ceo", panes([], new Error("no window"))),
-    false,
-    "an unreadable layout keeps the owner",
-  );
-  assert.equal(await cross.paneIsGone("p-ceo", panes([], ["p-x"])), true, "a closed pane is gone");
-
-  registry.register({ paneId: "p-sleep", tabId: "t-sleep", runId: null, ownerPaneId: "p-ceo" });
-  const steer = async (callerPaneId, sessions, layout) => {
-    const owner = registry.ownerPaneOf("p-sleep");
-    if (owner && (await cross.paneIsGone(owner, panes(sessions, layout)))) registry.releasePaneOwner("p-sleep");
-    return registry.isActiveOwnedBy("p-sleep", null, callerPaneId);
-  };
-  assert.equal(await steer("p-other", [], ["p-ceo"]), false, "another agent cannot take over while the owner sleeps");
-  assert.equal(registry.ownerPaneOf("p-sleep"), "p-ceo", "sleeping keeps the owner");
-  assert.equal(await steer("p-ceo", ["p-ceo"], ["p-ceo"]), true, "the owner steers again once it wakes");
-  assert.equal(await steer("p-other", [], ["p-other"]), true, "once the owner's pane is closed, the old rule applies");
-  assert.equal(registry.ownerPaneOf("p-sleep"), null);
-  console.log("ok 5 a cross-workspace terminal is steered only from the pane that opened it, also while it sleeps");
+  assert.equal(registry.isActiveOwnedBy("p-orphan", null, otherPane), false);
+  registry.register({ paneId: "p-resumed", tabId: "t-resumed", runId: null, ownerPaneId: "p-gone", ownerSessionId: "s-1" });
+  assert.equal(registry.isActiveOwnedBy("p-resumed", null, { paneId: "p-new", sessionId: "s-1" }), true, "the opener's session resumed elsewhere");
+  console.log("ok 5 a terminal is steered only by the agent that opened it");
 }
 
 main().catch((error) => {

@@ -178,7 +178,8 @@ for (const [runtime, command] of [
 }
 assert.match(
   terminalStack,
-  /onPick=\{\(command\) => \{[\s\S]*?onSmartAdd\(command\)/,
+  // The Where row may pass another machine's folder; the pane still lands in this tab.
+  /onPick=\{\(command(?:, cwd)?\) => \{[\s\S]*?onSmartAdd\(command(?:, undefined, cwd)?\)/,
   "the terminal-toolbar worker launcher must add a pane inside its own tab",
 );
 

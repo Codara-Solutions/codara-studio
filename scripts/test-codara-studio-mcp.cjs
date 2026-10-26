@@ -629,6 +629,22 @@ function sortedEqual(actual, expected, label) {
     const cleanupTimeout = /const WORKTREE_CLEANUP_TIMEOUT_MS = (.+);/.exec(serverSource)[1];
     assert.equal(eval(cleanupTimeout.replace(/_/g, "")) < 660_000, true, "under Codex's tool limit");
     assert.match(serverSource, /rpc === "worktree\.cleanup"\) return WORKTREE_CLEANUP_TIMEOUT_MS/);
+    // terminal.create with a worktree: the approval card (40 s), the worktree
+    // (WORKTREE_TIMEOUT_MS), the terminal (55 s), and on failure the setup
+    // stop (10 s) and the rollback's removal (WORKTREE_TIMEOUT_MS), so the
+    // agent still gets data.worktree; under Codex's tool limit.
+    const terminalWorktree = /const TERMINAL_WORKTREE_TIMEOUT_MS = (.+);/.exec(serverSource);
+    assert.ok(terminalWorktree, "terminal.create with a worktree has its own client timeout");
+    const terminalWorktreeMs = eval(
+      terminalWorktree[1]
+        .replace(/PREVIEW_TERMINAL_TIMEOUT_MS/g, "60000")
+        .replace(/WORKTREE_TIMEOUT_MS/g, String(worktreeTimeout))
+        .replace(/_/g, ""),
+    );
+    assert.ok(terminalWorktreeMs >= 40_000 + worktreeTimeout + 55_000 + 10_000 + worktreeTimeout, `${terminalWorktreeMs} ms covers a rollback`);
+    assert.ok(terminalWorktreeMs < 660_000, "under Codex's tool limit");
+    assert.match(serverSource, /rpc === "terminal\.create" && args && args\.worktree\) return TERMINAL_WORKTREE_TIMEOUT_MS/);
+    assert.match(serverSource, /const timeoutMs = rpcTimeoutMs\(rpc, args\);/);
     // It marks the returned messages read, so a client must not treat it as a
     // side-effect-free call it may repeat or run in parallel.
     assert.notStrictEqual(byName(execute, "codara_check_messages").annotations.readOnlyHint, true);

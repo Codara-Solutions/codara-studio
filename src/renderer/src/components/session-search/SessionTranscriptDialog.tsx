@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Virtuoso } from "react-virtuoso";
 import {
@@ -6,6 +6,7 @@ import {
   sessionQueryTerms,
   type SessionTranscript,
 } from "@shared/session-search";
+import { keyBelongsToOtherModal } from "../../shortcuts/modal-keys";
 import { CloseIcon } from "../icons";
 import SessionAgentMark from "./SessionAgentMark";
 import { TermsText } from "./SessionHighlight";
@@ -35,6 +36,7 @@ export default function SessionTranscriptDialog({
   const [transcript, setTranscript] = useState<SessionTranscript | null | undefined>(undefined);
   const [expanded, setExpanded] = useState<ReadonlySet<number>>(() => new Set());
   const [note, setNote] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLElement | null>(null);
   const terms = sessionQueryTerms(query);
 
   useEffect(() => {
@@ -54,7 +56,7 @@ export default function SessionTranscriptDialog({
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
+      if (event.key !== "Escape" || keyBelongsToOtherModal(event, dialogRef.current)) return;
       event.preventDefault();
       event.stopPropagation();
       onClose();
@@ -69,6 +71,7 @@ export default function SessionTranscriptDialog({
     <div className="ss-dialog-layer" role="presentation" onMouseDown={onClose}>
       <div className="spark-scrim spark-scrim--clear" style={{ zIndex: 0 }} />
       <section
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="Session transcript"

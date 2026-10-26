@@ -38,6 +38,11 @@ export interface InFlightRequest {
 export interface PageActivity {
   /** When an agent last acted on the tab (click, type, key, navigate, ...); 0 before any. */
   lastActionAt: number;
+  /**
+   * When that action finished: its input landed, which can be most of a
+   * second after it began while the agent cursor glides to its target.
+   */
+  lastActionDoneAt: number;
   navigations: NavigationRecord[];
   /** Main frame loading started / stopped (Page.frameStartedLoading / frameStoppedLoading). */
   loadingStartedAt: number;
@@ -97,6 +102,7 @@ export function pageActivity(session: CdpSession): PageActivity {
   if (!activity) {
     activity = {
       lastActionAt: 0,
+      lastActionDoneAt: 0,
       navigations: [],
       loadingStartedAt: 0,
       loadingStoppedAt: 0,
@@ -114,6 +120,16 @@ export function pageActivity(session: CdpSession): PageActivity {
 /** An agent is about to act on the tab. */
 export function noteAgentAction(session: CdpSession): void {
   pageActivity(session).lastActionAt = Date.now();
+}
+
+/** The agent's action on the tab finished. */
+export function noteAgentActionDone(session: CdpSession): void {
+  pageActivity(session).lastActionDoneAt = Date.now();
+}
+
+/** The latest moment an agent's action touched the page, for windows that follow it. */
+export function lastAgentActivityAt(activity: PageActivity): number {
+  return Math.max(activity.lastActionAt, activity.lastActionDoneAt);
 }
 
 function pushCapped<T>(list: T[], item: T): void {

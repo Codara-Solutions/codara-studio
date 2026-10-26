@@ -17,6 +17,8 @@ import {
   checkoutsInIgnored,
   cleanText,
   isRegenerableIgnored,
+  isSecretFile,
+  packageRootTester,
   type AgentWorktreeAuditEntry,
   type ProcessUse,
   type RendererTerminal,
@@ -373,6 +375,20 @@ export async function usageContext(deps: WorktreeCleanupDeps, dirs: readonly str
   return { deps, runs, terminals, processes };
 }
 
+// Names the tab to close. A tab counts while it is open, even when its agent
+// has exited, so its title is what the user needs to find it.
+async function agentTabUse(deps: WorktreeCleanupDeps, tab: RendererTerminal | undefined): Promise<WorktreeInUse> {
+  const title = cleanText(tab?.title ?? "", 60);
+  if (!title) return { kind: "agent", label: "the agent that made it is still open" };
+  const state = await deps.loadState().catch(() => null);
+  const workspace = cleanText(state?.workspaces.find((entry) => entry.id === tab?.workspaceId)?.name ?? "", 60);
+  return {
+    kind: "agent",
+    label: `the tab “${title}”${workspace ? ` in ${workspace}` : ""} of the agent that made it is still open`,
+    tab: { title, ...(workspace ? { workspace } : {}) },
+  };
+}
+
 function count(n: number, one: string, many = `${one}s`): string {
   return `${n} ${n === 1 ? one : many}`;
 }
@@ -429,9 +445,9 @@ export async function usageOf(
   for (const workspace of workspaces) {
     const owner = workspace.copyBranch?.createdBy;
     if (owner?.kind !== "agent" || !owner.paneId || panes.has(owner.paneId)) continue;
-    const open = deps.sessionCwd(owner.paneId) !== null || (ctx.terminals ?? []).some((t) => t.paneId === owner.paneId);
-    if (open) {
-      uses.push({ kind: "agent", label: "the agent that made it is still open" });
+    const tab = (ctx.terminals ?? []).find((t) => t.paneId === owner.paneId);
+    if (deps.sessionCwd(owner.paneId) !== null || tab) {
+      uses.push(await agentTabUse(deps, tab));
       break;
     }
   }
@@ -643,7 +659,10 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
   const uses = (await usageOf(ctx.usage, registration.path, real, workspaces)).filter(
     (use) => !ctx.allowInUse?.has(use.kind),
   );
-  if (uses.length) block(check, "IN_USE", `In use: ${uses.map((use) => use.label).join(", ")}.`);
+  if (uses.length) {
+    check.inUse = uses;
+    block(check, "IN_USE", `In use: ${uses.map((use) => use.label).join(", ")}.`);
+  }
 
   const target = await targetFor(repo, workspaces.find((workspace) => workspace.copyBranch) ?? null);
   const merge = await mergeFacts(repo, head, branch, target);
@@ -704,6 +723,8 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
   work.inProgress = await inProgressOperation(registration.path);
   workFound ||= work.inProgress !== null;
   let ignored: string[] | null = null;
+  // Everything kept that a removal deletes, not only the listed first few.
+  let kept: string[] = [];
   try {
     const all = await ignoredEntries(registration.path);
     // What worktree setup linked in or copied unchanged from the main
@@ -711,8 +732,9 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
     // local work; removeCopyWorktree releases the links before git runs.
     const provided = await setupProvidedEntries(registration.path, all).catch(() => new Set<string>());
     ignored = all.filter((entry) => !provided.has(entry));
-    work.ignored = ignored.filter((entry) => !isRegenerableIgnored(entry, ctx.regenerable)).slice(0, MAX_LISTED);
-    workFound ||= work.ignored.length > 0;
+    const packageRoot = packageRootTester(real);
+    kept = ignored.filter((entry) => !isRegenerableIgnored(entry, ctx.regenerable, packageRoot));
+    workFound ||= kept.length > 0;
   } catch (err) {
     block(check, "GIT_FAILED", `the ignored-file check failed: ${cleanText(errorText(err), 200)}`);
   }
@@ -727,12 +749,41 @@ export async function checkRemoval(ctx: CheckContext, targetPath: string): Promi
     if (pathKey(other) !== pathKey(real) && isAtOrUnder(other, real)) nested.push(other);
   }
   if (ignored) {
-    const scan = await checkoutsInIgnored(real, ignored, ctx.regenerable, deps.nestedScanMaxDirs);
+    // A confirmation of these files is tied to all of them: every kept
+    // entry, what the kept folders hold (path, size, mtime) and every secret
+    // file, so one that appears after the question, even past the listed
+    // twenty or inside a folder already named, asks again.
+    const contents = createHash("sha256");
+    const scan = await checkoutsInIgnored(real, ignored, ctx.regenerable, deps.nestedScanMaxDirs, {
+      isPackageRoot: packageRootTester(real),
+      describe: (line) => contents.update(`${line}\n`),
+    });
     nested.push(...scan.found);
+    const hidden = scan.secrets.filter((entry) => !kept.includes(entry) && !isRegenerableIgnored(entry, ctx.regenerable));
+    kept = [...kept, ...hidden];
+    for (const entry of kept) {
+      if (entry.endsWith("/")) continue;
+      const stat = await fsp.lstat(join(real, entry)).catch(() => null);
+      contents.update(`${entry}\0${stat?.size ?? -1}\0${stat?.mtimeMs ?? -1}\n`);
+    }
+    fingerprint.update(JSON.stringify([kept, scan.secrets, contents.digest("hex")]));
+    // Secrets first, so the few named are the ones that matter.
+    const secret = (entry: string) => isSecretFile(basename(entry.replace(/\/+$/, "")));
+    work.ignored = [...kept.filter(secret), ...kept.filter((entry) => !secret(entry))].slice(0, MAX_LISTED);
+    workFound ||= kept.length > 0;
     if (scan.incomplete) {
       work.unscanned = scan.incomplete;
       workFound = true;
+      // What the walk did not see may hold a checkout, a key or work: no
+      // confirmation covers it, on any path.
+      block(
+        check,
+        "UNCHECKED",
+        `It could not be fully checked: ${scan.incomplete} is too large or unreadable to look through, so it is not removed. Delete that folder yourself, then try again.`,
+      );
     }
+  } else {
+    work.ignored = kept.slice(0, MAX_LISTED);
   }
   if (nested.length) {
     block(

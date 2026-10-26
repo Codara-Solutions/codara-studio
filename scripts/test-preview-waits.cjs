@@ -24,7 +24,7 @@ const { bundleBrowser, startPageServer, openPage, navigate, sleep } = require(".
 const lib = bundleBrowser(`
   export * from "./wait";
   export { classifyHmrConsole, isHmrRequest, noteAgentAction } from "./page-activity";
-  export { markAgentAction } from "./agent-action";
+  export { markAgentAction, markAgentActionDone } from "./agent-action";
 `);
 
 function requests() {
@@ -94,7 +94,7 @@ function hmrSignals() {
 function verdicts() {
   const { checkWait, normalizeWaitRequest } = lib;
   const activity = (over = {}) => ({
-    lastActionAt: 0, navigations: [], loadingStartedAt: 0, loadingStoppedAt: 0, navigationRequestedAt: 0,
+    lastActionAt: 0, lastActionDoneAt: 0, navigations: [], loadingStartedAt: 0, loadingStoppedAt: 0, navigationRequestedAt: 0,
     inFlight: new Map(), lastNetworkAt: 0, hmr: [], lastHmrAt: 0, ...over,
   });
   const probe = (over = {}) => ({ href: "http://x/a", readyState: "complete", title: "", quietMs: 5000, ...over });
@@ -110,6 +110,11 @@ function verdicts() {
   assert.equal(checkWait(load, activity({ navigationRequestedAt: 90_000 }), probe(), now, now).ok, true, "a request no load followed was abandoned");
   assert.deepEqual(checkWait(load, activity({ navigationRequestedAt: 90_000, loadingStartedAt: 91_000 }), probe(), now, now).waiting, ["a navigation is still loading"]);
   assert.deepEqual(checkWait(load, activity({ lastActionAt: now - 100 }), probe(), now, now).waiting, ["the last action just happened"]);
+  // The settle window runs from when the action's input landed, not from
+  // when the agent cursor started gliding toward its target.
+  assert.deepEqual(checkWait(load, activity({ lastActionAt: now - 600, lastActionDoneAt: now - 100 }), probe(), now, now).waiting, ["the last action just happened"]);
+  assert.equal(checkWait(nav, activity({ lastActionAt: 90_000, lastActionDoneAt: 96_000, navigations: [{ at: 95_000, url: "http://x/b" }] }), probe(), now, 99_000).ok, true,
+    "a navigation the action caused before it returned counts");
   assert.deepEqual(checkWait(load, activity(), probe({ readyState: "interactive" }), now, now).waiting, ["document.readyState is interactive"]);
   assert.equal(checkWait(normalizeWaitRequest({ load: "domcontentloaded" }), activity(), probe({ readyState: "interactive" }), now, now).ok, true);
   const idle = normalizeWaitRequest({ load: "networkidle" });
@@ -253,6 +258,16 @@ async function inChromium() {
     const idle = await wait({ load: "networkidle" });
     assert.equal(idle.ok, true, JSON.stringify(idle));
     assert.ok(idle.waitedMs >= 500, `networkidle waited for the fetch (${idle.waitedMs} ms)`);
+    // The same click held back by the agent cursor's glide: the page's fetch
+    // starts 50 ms after the click lands, long after the action began.
+    await navigate(target, server.url("/"));
+    await lib.markAgentAction({});
+    await sleep(700);
+    await target.evaluate("document.getElementById('fetch').click()");
+    await lib.markAgentActionDone({});
+    const glided = await wait({ load: "networkidle" });
+    assert.equal(glided.ok, true, JSON.stringify(glided));
+    assert.ok(glided.waitedMs >= 500, `networkidle waited for the fetch after a glide (${glided.waitedMs} ms)`);
     await act("void fetch('/delay?ms=3000')");
     await sleep(100);
     const stillBusy = await wait({ load: "networkidle", timeoutMs: 300 });

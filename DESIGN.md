@@ -81,3 +81,159 @@ cursors in Figma for the name tag beside the arrow.
   it acts, and the popup's Stop ends it there.
 - The component lives in `components/Preview/agent-presence/` with its own
   CSS and store; BrowserPane only mounts it, so the toolbar can move freely.
+
+## Tab links and agent tab approvals (2026-10)
+
+**Chosen:** a link brings its tab on screen and marks it with a short accent
+ring (an inset 2px ring over a soft accent wash, fading over 1.6 s). An agent
+that wants to close, split or unsplit tabs it did not open shows the same
+floating card as the cross-workspace terminal prompt, top right, listing every
+tab that would change.
+
+**Why:** after a switch of workspace or an unfolded group the eye needs one cue
+for where the tab went, and the strip already uses an inset ring for focus, so
+the flash reads as "this one" without moving anything. The card copies an
+existing pattern rather than adding a modal: it never blocks typing, counts
+down to the agent's timeout and stays put if the user is mid-task.
+
+**Rules:**
+
+- The flash is an inset box shadow, so the tab never changes size. With reduced
+  motion it is a static ring for the same time, no fade.
+- The card names the agent and the count in its title ("Claude Code wants to
+  close 3 tabs in group “login-flow”"), then lists each tab by kind and title
+  on an opaque panel, never on glass. The list scrolls past about six rows.
+- A running agent or unsaved edits show as a warning dot with plain ink text
+  ("agent running", "unsaved changes") on the row, plus one sentence under
+  the list. Color alone never carries the warning.
+- Buttons: Deny, then Allow once as the primary, on one row with the countdown;
+  "Always allow “<workspace>” to close tabs here" (or "to move tabs here" on
+  a split or unsplit card, a separate grant) is a full-width secondary
+  button under them, so the riskier, lasting choice is never the default and
+  its long label never crowds the row.
+- An expired card says nothing changed and stays a few seconds with Dismiss,
+  as the cross-workspace card does.
+
+## Browser pane (2026-10)
+
+**Chosen:** variant A of four built on the real pane (labelled toolbar,
+command palette, bottom dock, minimal chrome), with C's Video or GIF choice
+before recording. The frequent tools sit in the toolbar with words (Point,
+Comment, Record); the rare ones moved into More (phone, tablet and desktop
+sizes, full screen, copy tab id for an agent, copy id, URL and session, open
+in the system browser, developer tools). A chip at the right shows how many
+browser tabs are open and the memory they use, and opens a view of every
+browser tab in every workspace where a tab can be put to sleep, woken or
+closed.
+
+**Why:** the toolbar was a row of unlabelled icons whose meaning had to be
+learned, PORTS and the tab id took space every time for something needed
+rarely, and there was no way to see which tabs were open in other workspaces
+or what they cost. Full screen did not exist.
+
+**References:** Chrome's memory saver and its tab hover cards (sleeping tabs,
+memory per tab), every browser's F11 and Esc for full screen, VS Code's
+Simple Browser (a browser that belongs to the editor), the Vercel toolbar
+(comments on a page) and Polypane (sizes side by side).
+
+**Rules:**
+
+- Menus and popovers over a page are solid (`.spark-menu.bp-menu`), never
+  glass: the page behind them is unknown and would make the text unreadable.
+- A tool used most days has a word next to its icon; a tool used rarely goes
+  in More. When the pane is narrower than 700px the words go and every icon
+  stays, with its name as the tooltip and accessible name.
+- A tab sleeps by hand or after 30 minutes unseen (on by default, one switch
+  in the tabs view). It never sleeps while on screen, while recording, within
+  ten minutes of an agent's call, or when it has its own private session
+  (sleeping would lose the session). A sleeping tab keeps its title, URL and
+  last picture, uses no memory, and loads again when shown or when an agent
+  calls it.
+- Full screen fills Codara's window; F11 again takes the whole display. Esc
+  always leaves, from the toolbar or from inside the page, and so does
+  switching tabs. Only the user's own keys count; an agent's Esc stays in
+  the page.
+- No dock: a bar along the bottom of the page would sit over the area the
+  agent's cursor works in and split the tools between two edges.
+
+## Usage forecast in the usage panel (2026-10, Labs)
+
+**Chosen:** B, the projection. Each limit meter in the usage panel draws, past
+the used part, a soft segment to where the window is most likely to end, plus
+a thin tick at the pessimistic end (p90), with one short line under the
+meter: "Ends ≈ 48% at reset" or "Runs out ≈ 14:20, 40 min early". Etienne
+picked it from three variants shown on his real numbers (A a full sentence
+under each meter, B this projection, C a mark on the title-bar pill only).
+A and C stay selectable in the Usage tab's Labs card.
+
+**Why:** the meter is where the eye already goes, and a segment on it answers
+"will it last" without reading. The sentence (A) said the same thing in more
+words, and the title-bar mark (C) hid it until a run-out was likely.
+
+**Rules:**
+
+- The projection uses the meter's own tone color at low opacity, never a new
+  color. It turns to the danger tone only when running out is more likely
+  than not, and then the segment fills to the end of the meter.
+- The short line is always text as well as the segment, so color and length
+  never carry the forecast alone.
+- An account that is not in use shows no projection: it only grows if the
+  user switches to it.
+- How sure the forecast is reads as a word plus the history it learned from
+  ("fairly sure · 40 past windows"), never as a raw percentage.
+
+## Worktrees in the rail (2026-10)
+
+**Chosen:** variant A, a tree, with variant B's folded merged group. A
+project's worktrees hang under its row on a thin tree line. Each worktree row
+has no tile: line 1 is its branch with the pull request mark right-aligned
+(#42 with ✕, ✓ or a dot for its checks), line 2 is its most urgent agent's
+state dot and word, its age and " · note", or "No agent · from main". The
+project row keeps its tile and name and rolls everything up in one line ("1
+needs you · 5 working"). Merged worktrees fold into one "▸ N merged · Clean up"
+line at the bottom. Picked from four variants built on the real rail (tree,
+dense branch list, agent threads, lifecycle pockets); Etienne chose A with B's
+fold.
+
+**Why:** worktree rows used to sit flat in the rail, indented 14px, each as
+tall as a project, so a busy repository pushed everything else off screen and
+nothing said which agent worked where. The summary under a row toggled a list
+instead of opening the row, so a click on the most visible text did the
+unexpected thing.
+
+**References:** VS Code's explorer and Linear's sidebar (a thin tree line, the
+child row lighter than its parent), GitHub's PR list for the check glyphs.
+
+**Rules:**
+
+- Clicking anywhere on a row opens that row. Nothing inside a row toggles.
+  Folding has its own 14px chevron at the row's left edge; rows with nothing
+  under them keep the gutter empty so every tile lines up.
+- An agent shows on one row, the one it works in: its pane's workspace, or
+  the worktree it created when its chat stays in the project, no other agent
+  runs inside it and it is not merged (otherwise the creator was a
+  coordinator and stays on the project). A creator of several such
+  worktrees shows on the newest. The project's own agents (a coordinator)
+  list at the top of the tree; clicking one opens its tab.
+- Order under a project: needs you, working, done, idle, no agent; rail order
+  among equals. Merged worktrees always go last, in their fold, folded by
+  default and faded (52%) when opened.
+- Colour only for state: the dot always, the state word only for needs you
+  (danger, semibold) and working (info). Everything else is muted ink. No new
+  tokens: `--rule` for the tree line, the existing agent state tones.
+- A worktree whose project is not in the rail stays a top-level row, indented
+  as before.
+- Two projects on one folder: the worktree hangs under the one higher in the
+  rail as the user sees it.
+- Clean up on the fold removes one merged worktree at once; for more, it
+  first shows the explorer's confirm with their names.
+- Clean up never ends silently (2026-10-25: Etienne pressed it on a worktree
+  holding only `test-results/` and saw nothing). Its answer shows next to the
+  button that asked, not only in a toast: the rows go (with a toast), the same
+  confirm asks "<name> holds .env. Remove anyway?" for ignored files a fresh
+  checkout won't bring back, or a short line under the fold or row says what
+  holds it back. That line starts with what to do ("Close the tab “x” in Repo
+  first: …"), is muted ink with a warn dot (danger for a failure), wraps to
+  at most three lines, and goes on ×, on the next Clean up, or once the
+  worktree leaves the rail. Test and build output never counts as something
+  a worktree holds.

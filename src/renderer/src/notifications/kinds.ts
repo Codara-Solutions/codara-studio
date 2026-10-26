@@ -36,6 +36,7 @@ export const NOTIFY_KIND_META: Record<NotifyKind, NotifyKindMeta> = {
   "git.teammate-push": { label: "Teammate pushed", tone: "success", glyph: "commit" },
   "git.pull-request": { label: "Pull request", tone: "success", glyph: "pr" },
   "git.ci-failed": { label: "CI failed", tone: "danger", glyph: "cross" },
+  "git.ci-passed": { label: "Checks passed", tone: "success", glyph: "check" },
   "worktree.setup-approval": { label: "Setup needs you", tone: "warning", glyph: "alert" },
 };
 

@@ -2,7 +2,7 @@
 // (components/Preview/previewRpc.ts) through the preview bridge. Waits and
 // "find by description" run in main against any browser target.
 
-import { callTarget, markAgentAction } from "../browser/agent-action";
+import { callTarget, markAgentAction, markAgentActionDone } from "../browser/agent-action";
 import { findElements } from "../browser/find";
 import { browserBackend, resolveBrowserTarget, type BrowserTarget } from "../browser/targets";
 import { normalizeWaitRequest, waitForPage, WaitRequestError } from "../browser/wait";
@@ -16,11 +16,19 @@ export function rendererOp(op: PreviewOpName): PreviewToolHandler {
   return (params) => requestPreviewOp(op, { ...params });
 }
 
-/** An agent action: stamped on the tab first, so waits know what "after your last action" means. */
+/**
+ * An agent action: stamped on the tab first, so waits know what "after your
+ * last action" means, and again once its input landed, which the agent
+ * cursor's glide can hold back past a wait's settle window.
+ */
 export function acting(handler: PreviewToolHandler): PreviewToolHandler {
   return async (params, method, host) => {
     await markAgentAction(params);
-    return handler(params, method, host);
+    try {
+      return await handler(params, method, host);
+    } finally {
+      await markAgentActionDone(params);
+    }
   };
 }
 
@@ -29,7 +37,12 @@ export async function requireTarget(params: Record<string, unknown>): Promise<Br
   return (await callTarget(params)) ?? resolveBrowserTarget(params);
 }
 
-async function navigate(params: Record<string, unknown>): Promise<unknown> {
+/**
+ * Checks a Codara navigate's URL before anything looks up its tab (index.ts),
+ * so a refused navigate wakes no sleeping tab. Rewrites params.url in place:
+ * the call's tab lookups are cached per params object.
+ */
+export async function checkNavigateUrl(params: Record<string, unknown>): Promise<void> {
   const hasUrl = typeof params.url === "string" && params.url.trim() !== "";
   if (!hasUrl && (typeof params.tabId !== "string" || typeof params.group !== "string")) {
     throw new PreviewToolParamsError("navigate needs a url, or a tabId and a group to move that tab into the group.");
@@ -39,7 +52,7 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
     const remote = await resolveRemotePreviewUrl(params.workspaceId, params.url);
     if (remote && "error" in remote) throw new Error(remote.error);
     const url = remote ? remote.url : params.url;
-    if (remote) params = { ...params, url };
+    if (remote) params.url = url;
     const reachable = await waitForLoopbackPreviewServer(url);
     if (!reachable) {
       throw new Error(
@@ -49,6 +62,9 @@ async function navigate(params: Record<string, unknown>): Promise<unknown> {
       );
     }
   }
+}
+
+async function navigate(params: Record<string, unknown>): Promise<unknown> {
   return requestPreviewOp("navigate", { ...params });
 }
 

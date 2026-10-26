@@ -138,6 +138,27 @@ group they name (`group` on the codara-studio tools, see
 [mcp-tools.md](mcp-tools.md#tab-groups)); those groups are the same and can be
 edited the same way.
 
+#### Tab menu
+
+Right-click a tab (or a group's chip) for these, next to the group items:
+
+- **Split right** and **Split down** put the tab beside the tab on screen: a
+  browser, editor or chat tab takes a cell in the terminal's grid, a terminal
+  tab's panes join it, and two tabs with no grid get one. **Undock to tab** in
+  a docked cell's header puts it back; moved terminal panes drag back out like
+  any pane. Shown when the tab can go beside the one on screen; otherwise the
+  menu keeps **Open in split**.
+- **Copy link** copies `codara://tab/<workspace>/<tab>` (on a chip,
+  `codara://group/...`). Paste it to an agent so it knows exactly which tab you
+  mean; agents also get these links from their list tools. Clicking a link in a
+  Codara terminal (plain click, no modifier) or in Cora's chat switches to its
+  workspace, unfolds its group and highlights the tab for a moment. A link to a
+  closed tab or an empty group says so. Links only open inside Codara; the
+  operating system does not know `codara://`.
+
+What an agent may do with a link, and the approval card for tabs it did not
+open, is in [mcp-tools.md](mcp-tools.md#tab-links).
+
 ### Terminal
 
 | Action | Default | Command id |
@@ -253,12 +274,13 @@ The pages:
 | Editor | Code editor (Vim mode, autosave) and inline AI autocomplete. |
 | Terminal | The shell for new panes, output history and scrollback lines, whether programs may copy to the clipboard, clearing the terminal output Codara saved (**Clear saved terminal output**), a resource overview, and the run terminal lifecycle for worker panes. |
 | Quick commands | Saved shell commands and agent prompts: add, edit, reorder, delete, and where each is offered. Also what a right-click in a terminal does. See [Quick commands](#quick-commands). |
-| Git | Remotes (background fetch, Instant git triggers, and a custom webhook receiver under Advanced), Alerts (notify on teammate pushes, new pull requests, and CI failing on your pull request), Worktrees (whether agents may create and remove worktrees, and remove ones you created, the repository's worktree setup file, and under Advanced your own setup command for new worktrees and extra ignored files an agent may delete with a merged worktree). |
+| Git | Remotes (background fetch, Instant git triggers, and a custom webhook receiver under Advanced), Alerts (notify on teammate pushes, new pull requests, and CI failing on your pull request; watch pull requests on the rail and tell agents when CI fails), Worktrees (whether agents may create and remove worktrees, and remove ones you created, the repository's worktree setup file, and under Advanced your own setup command for new worktrees and extra ignored files an agent may delete with a merged worktree). |
 | Browser | Links (auto-open the browser for local dev servers, open links in the default browser or the Codara browser, ask where terminal links open), and the Chrome extension (**Keep agents in your Chrome**, link status, pairing, paired browsers, agent activity). |
 | Shared pages | The links you shared from the editor: copy one, change when it expires, or delete it (see [share-links.md](./share-links.md)). |
 | API and model | An OpenRouter key, and how Git commit messages are generated. |
 | Agents | Your accounts (see [accounts.md](./accounts.md)), **Install Pi** when Pi is not installed yet, and **Open Capability Center** and **Worker models** buttons, which close Settings and open the Capability Center on MCP servers or on worker models. |
 | Sessions | Turn agent session search on or off and choose what it indexes (see [agent-session-search.md](./agent-session-search.md)), browse and resume Claude and Codex sessions from any local project, choose whether running agent sessions (Claude Code, Codex, Grok and Pi panes) resume when Codara reopens, whether terminal panes keep their output across restarts (**Keep terminal output across restarts**, on by default), and how long an idle agent in a background workspace may wait before it sleeps (**Let idle agents sleep**, see below). |
+| Machines | Whether agents on SSH machines run in tmux there so they keep working when Codara quits or the connection drops, and whether a new machine's key is confirmed first (**Keep agents running on SSH machines**, on by default, needs tmux 2.1 or newer on the machine; an agent typed by hand into a remote shell is not covered). Then this computer and every SSH host with status, CPU, memory, free disk, load, installed CLIs and running agents: Connect, Disconnect, **Add a machine**, Show an agent's pane, Stop an agent no pane shows, and **Trust the new key** when a machine's key changed. With the setting on, the Add pane menu's **Where** row starts a pane on another connected machine. |
 | Remote access | Turn phone access on, pair a device, and revoke paired devices (see [remote-access.md](./remote-access.md)). |
 | Keybindings | Rebind or unbind every command above. |
 | Runs | Every Cora run: browse, keep, delete. |
@@ -295,7 +317,10 @@ Failed closes retry automatically.
 hyperlink) opens a small menu: **Open in Codara browser**, **Open in default
 browser** and **Copy link**. A `file:` link offers **Open in Codara** and
 **Copy link**, a `mailto:` link **Open in mail app** and **Copy link**, and
-any other scheme only **Copy link**. Ctrl+click (Cmd+click on macOS; either
+any other scheme only **Copy link**. An OSC 8 hyperlink shows text of the
+program's choosing over a hidden target, so only `http:`, `https:` and
+`codara://` tab links react to a click there; a `file:` or `mailto:` target
+behind one does nothing. Ctrl+click (Cmd+click on macOS; either
 works everywhere) skips the menu and opens the link where **Open links in**
 says. Dragging across a link selects text and opens nothing. The menu works
 from the keyboard (arrows, Home, End, Enter, Escape) and gives focus back to
@@ -416,9 +441,41 @@ one alert when a check fails on the pull request of a workspace's branch,
 once per failing commit, including a pull request opened after the push
 whose checks failed before Codara first read it. Checks that failed while
 Codara was closed, or while the setting was off, stay quiet until a later
-run fails. Clicking the alert opens Source Control. It asks GitHub only
-when the branch or its upstream moved, every 90 seconds while checks run,
-and every 15 minutes otherwise.
+run fails. Clicking the alert opens Source Control.
+
+**Watch pull requests and tell agents when CI fails** (Settings, Git,
+Alerts, on by default) puts each branch's pull request on its row in the
+rail: `#42`, draft, merged or closed, and ✓, ✕ or a dot while checks run.
+When the checks fail, the agent working on that branch gets one line:
+'CI failed on PR #42 (branch feat/widgets in /path/to/worktree): "build".
+Fix it with the fix-ci skill, push, and watch the checks.' The line goes
+to the agent that created the worktree; when there is none, to an agent
+in the workspace's panes; when there is none of those either, to one whose
+terminal opened in its folder (not in a worktree nested inside it). It
+waits for that agent rather than telling another one. It goes once per
+failing commit, and only while the agent is free: never mid-turn, while
+it asks for a permission, or within 20 seconds of you typing in its pane.
+In Claude Code a half-written prompt is stashed first (Ctrl+S) so it is
+not sent along; other agents with text typed since their last prompt are
+not sent the line until that is sent or cleared. Nothing is ever typed
+into a pane whose agent has exited back to the shell. Switching the
+watcher or the repository off withdraws a line that was still waiting. Checks that go green again leave a silent note in the
+notification center. "Stop watching pull requests in this repo" in a row's
+menu turns rows and agents off for one repository (the CI failure alert
+above still follows its own setting); Settings lists those with "Watch
+again". Branches pushed to a fork find their pull request on the parent
+repository, and ssh host aliases and GitHub Enterprise hosts you are
+signed in to with `gh` work too.
+
+Both read GitHub with your signed-in `gh`, using conditional requests: an
+unchanged pull request costs a 304, which GitHub does not count against
+your rate limit. An open pull request is asked every minute while checks
+run (for up to ten minutes without a change), then after 1, 2, 4 and 8
+minutes and every 15 while nothing changes. A commit asks at the next
+minute; a push or fetch of the branch asks within a second. A branch with
+no pull request, or a merged
+or closed one, is asked every 15 minutes, and every 5 minutes become the
+floor while you are away from the computer.
 
 ### Quick commands
 

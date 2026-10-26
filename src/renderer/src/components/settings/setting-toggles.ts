@@ -52,12 +52,15 @@ export const PREFERENCE_TOGGLES = {
   notifyTeammatePushes: defaultOn("notifyTeammatePushes"),
   notifyPullRequests: defaultOn("notifyPullRequests"),
   notifyCiFailures: defaultOn("notifyCiFailures"),
+  watchPullRequests: defaultOn("watchPullRequests"),
   vimMode: defaultOff("vimMode"),
   autosaveEnabled: defaultOff("autosaveEnabled"),
   inlineAutocompleteEnabled: defaultOff("inlineAutocompleteEnabled"),
   restoreAgentSessions: defaultOff("restoreAgentSessions"),
   restoreTerminalOutput: defaultOn("restoreTerminalOutput"),
+  machinesEnabled: defaultOn("machinesEnabled"),
   keepAgentsInYourChrome: defaultOn("keepAgentsInYourChrome"),
+  usageForecast: defaultOff("usageForecast"),
 } satisfies Record<string, PreferenceToggle>;
 
 export type PreferenceToggleId = keyof typeof PREFERENCE_TOGGLES;

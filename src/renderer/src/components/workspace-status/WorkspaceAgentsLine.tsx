@@ -1,4 +1,4 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useState } from "react";
 import type { KeyboardEvent, MouseEvent } from "react";
 import {
   AGENT_LINE_STATE_LABELS,
@@ -14,55 +14,14 @@ import "./workspace-agents.css";
 
 // The workspace's one status line under its name in the rail, computed from
 // its agents and its task list ("2 working · 1 needs you · 3 done today").
-// Clicking it lists the agents under the row (WorkspaceAgentList), one entry
-// each; clicking an agent opens its tab. Which rows are open is a per-window
-// convenience kept in localStorage. A workspace from before Codara recorded
-// origins also gets the button that confirms the origin URL its gate found:
-// the user's click, which no agent tool can make.
-
-const OPEN_KEY = "codara.rail.agentLinesOpen";
-
-function readOpen(): Set<string> {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(OPEN_KEY) ?? "[]");
-    return new Set(Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === "string") : []);
-  } catch {
-    return new Set();
-  }
-}
-
-let openRows: Set<string> | null = null;
-const openListeners = new Set<() => void>();
-
-function isOpen(workspaceId: string): boolean {
-  openRows ??= readOpen();
-  return openRows.has(workspaceId);
-}
-
-function setOpen(workspaceId: string, open: boolean): void {
-  const next = new Set(openRows ?? readOpen());
-  if (open) next.add(workspaceId);
-  else next.delete(workspaceId);
-  openRows = next;
-  for (const listener of openListeners) listener();
-  try {
-    localStorage.setItem(OPEN_KEY, JSON.stringify([...next]));
-  } catch {
-    // Storage may be unavailable; the row just forgets on reload.
-  }
-}
-
-function subscribeOpen(listener: () => void): () => void {
-  openListeners.add(listener);
-  return () => openListeners.delete(listener);
-}
-
-function useRowOpen(workspaceId: string): boolean {
-  return useSyncExternalStore(subscribeOpen, () => isOpen(workspaceId));
-}
+// It is plain text: a click on it opens the row like any other click there.
+// The agents themselves are listed under the row by rail/WorkspaceChildren,
+// which AgentLineItem serves; clicking one opens its tab. A workspace from
+// before Codara recorded origins also gets the button that confirms the
+// origin URL its gate found: the user's click, which no agent tool can make.
 
 // One minute is the finest age shown.
-function useMinuteClock(enabled: boolean): number {
+export function useMinuteClock(enabled: boolean): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!enabled) return undefined;
@@ -86,7 +45,7 @@ function keepToSelf(event: MouseEvent | KeyboardEvent): void {
   event.stopPropagation();
 }
 
-function StateMark({ state }: { state: AgentLine["state"] }) {
+export function StateMark({ state }: { state: AgentLine["state"] }) {
   const tone = AGENT_LINE_STATE_TONES[state];
   if (state === "done") {
     return (
@@ -109,7 +68,7 @@ function StateMark({ state }: { state: AgentLine["state"] }) {
   );
 }
 
-function AgentLineItem({ line, now, active }: { line: AgentLine; now: number; active: boolean }) {
+export function AgentLineItem({ line, now, active }: { line: AgentLine; now: number; active: boolean }) {
   const age = agentLineAge(line, now);
   const state = AGENT_LINE_STATE_LABELS[line.state];
   const description = [`${line.name}: ${state}.`, line.text ?? "", age ? `${age}.` : ""].filter(Boolean).join(" ");
@@ -196,26 +155,6 @@ function AgentLineItem({ line, now, active }: { line: AgentLine; now: number; ac
   );
 }
 
-/** The workspace's agents, listed under its row while its status line is open. */
-export function WorkspaceAgentList({ workspaceId, active = false }: { workspaceId: string; active?: boolean }) {
-  const lines = useWorkspaceAgentLines(workspaceId);
-  const open = useRowOpen(workspaceId);
-  const now = useMinuteClock(open && lines.length > 0);
-  if (!open || lines.length === 0) return null;
-  return (
-    <ul
-      data-testid="workspace-agent-lines"
-      data-workspace-agents-area=""
-      aria-label="Agents in this workspace"
-      style={{ margin: "3px 0 0", padding: "0 0 0 24px", minWidth: 0, width: "100%", boxSizing: "border-box" }}
-    >
-      {lines.map((line) => (
-        <AgentLineItem key={line.key} line={line} now={now} active={active} />
-      ))}
-    </ul>
-  );
-}
-
 function ConfirmOriginButton({ workspaceId, origin }: { workspaceId: string; origin: string }) {
   const [confirming, setConfirming] = useState(false);
   return (
@@ -253,40 +192,32 @@ function ConfirmOriginButton({ workspaceId, origin }: { workspaceId: string; ori
   );
 }
 
-export function WorkspaceAgentsLine({ workspaceId, active = false }: { workspaceId: string; active?: boolean }) {
-  const lines = useWorkspaceAgentLines(workspaceId);
+/**
+ * The roll-up under a row's name. A project passes `lines` for every agent of
+ * its family (its own and its worktrees'), so a folded project still says
+ * what waits inside it.
+ */
+export function WorkspaceAgentsLine({
+  workspaceId,
+  active = false,
+  lines: familyLines,
+}: {
+  workspaceId: string;
+  active?: boolean;
+  lines?: readonly AgentLine[];
+}) {
+  const ownLines = useWorkspaceAgentLines(workspaceId);
   const tasks = useTaskSummary(workspaceId);
-  const open = useRowOpen(workspaceId);
-  const summary = summarizeWorkspace(lines, tasks);
+  const summary = summarizeWorkspace(familyLines ?? ownLines, tasks);
   if (!summary) return null;
-  const expandable = lines.length > 0;
-  const expanded = open && expandable;
-  const toggle = () => {
-    if (expandable) setOpen(workspaceId, !open);
-  };
-  const muted = active ? "var(--ink-dim)" : "var(--muted)";
   return (
     <span data-testid="workspace-agents" style={{ display: "flex", flexDirection: "column", minWidth: 0, marginTop: 2 }}>
       <span
-        role={expandable ? "button" : "note"}
-        tabIndex={expandable ? 0 : undefined}
-        aria-expanded={expandable ? expanded : undefined}
+        role="note"
         aria-label={`${summary.line}. ${summary.description}`}
         title={summary.description}
         data-testid="workspace-agents-summary"
-        data-workspace-agents-area=""
         data-needs-you={summary.needsYou > 0 ? "true" : "false"}
-        onClick={(event) => {
-          if (!expandable) return;
-          keepToSelf(event);
-          toggle();
-        }}
-        onKeyDown={(event) => {
-          if (!expandable || (event.key !== "Enter" && event.key !== " ")) return;
-          keepToSelf(event);
-          event.preventDefault();
-          toggle();
-        }}
         style={{
           ...lineText,
           display: "-webkit-box",
@@ -294,15 +225,9 @@ export function WorkspaceAgentsLine({ workspaceId, active = false }: { workspace
           WebkitLineClamp: 2,
           overflow: "hidden",
           overflowWrap: "anywhere",
-          color: muted,
-          cursor: expandable ? "pointer" : undefined,
+          color: active ? "var(--ink-dim)" : "var(--muted)",
         }}
       >
-        {expandable && (
-          <span aria-hidden="true" style={{ display: "inline-block", width: 9, color: "var(--muted-2)" }}>
-            {expanded ? "▾" : "▸"}
-          </span>
-        )}
         {summary.parts.length > 0
           ? summary.parts.map((part, index) => (
               <span key={part.kind}>

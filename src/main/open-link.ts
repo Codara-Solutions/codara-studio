@@ -22,5 +22,8 @@ export function openLinkFromApp(
       if (host && !host.isDestroyed()) host.send("app:open-browser-url", target);
     },
     openInSystem: openInSystemBrowser,
+    openTab: (target) => {
+      if (host && !host.isDestroyed()) host.send("app:open-tab-link", target);
+    },
   });
 }

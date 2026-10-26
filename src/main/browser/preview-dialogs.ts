@@ -9,7 +9,7 @@ import { ipcMain, type IpcMainEvent, type WebContents } from "electron";
 import { isTrustedPreviewGuest, onTrustedPreviewGuestAttached } from "../main-window-trust";
 import { requestPreviewOp } from "../preview-bridge";
 import type { CdpSession } from "./cdp-session";
-import { pageActivity } from "./page-activity";
+import { lastAgentActivityAt, pageActivity } from "./page-activity";
 import { previewCdpSession, previewTabOfGuest } from "./preview-cdp";
 import { dialogState, setDialogPresenter, type PageDialogType } from "./recorders/dialogs";
 
@@ -77,7 +77,7 @@ function onBeforeUnload(guest: WebContents, event: Electron.Event): void {
   // running, or one just asked to navigate: the tab's navigate returns
   // before the page starts unloading), and kept otherwise, as Electron
   // always did.
-  const agentCaused = state.agentCallInFlight || Date.now() - pageActivity(session).lastActionAt < AGENT_UNLOAD_WINDOW_MS;
+  const agentCaused = state.agentCallInFlight || Date.now() - lastAgentActivityAt(pageActivity(session)) < AGENT_UNLOAD_WINDOW_MS;
   const leave = action === "accept" || (action === "ask" && agentCaused);
   if (leave) event.preventDefault();
   state.note({ type: "beforeunload", message: "", accepted: leave, by: "policy" });

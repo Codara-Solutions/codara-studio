@@ -1,0 +1,36 @@
+Last login: Sat Oct 25 09:12:01 on ttys002
+@@codara-probe:os Darwin arm64
+@@codara-probe:nproc 10
+@@codara-probe:loadavg  2.31 2.05 1.98 
+@@codara-probe:memsize 17179869184
+@@codara-probe:vmstat
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                               12345.
+Pages active:                            301234.
+Pages inactive:                          298765.
+Pages speculative:                         4321.
+Pages throttled:                              0.
+Pages wired down:                        123456.
+Pages purgeable:                           2345.
+"Translation faults":                 987654321.
+Pages copy-on-write:                   12345678.
+Pages zero filled:                    456789012.
+Pages reactivated:                      1234567.
+Pages purged:                            234567.
+File-backed pages:                       250000.
+Anonymous pages:                         354000.
+Pages stored in compressor:              200000.
+Pages occupied by compressor:             60000.
+Decompressions:                          345678.
+Compressions:                            567890.
+Pageins:                                2345678.
+Pageouts:                                 12345.
+Swapins:                                      0.
+Swapouts:                                     0.
+@@codara-probe:pscpu 152.4
+@@codara-probe:df
+/dev/disk3s5   482797652 301234567 160123456    66%    /System/Volumes/Data
+@@codara-probe:clis claude codex tmux git node
+@@codara-probe:tmux
+codara-pane-k3j2h1 1792880000 0 claude
+@@codara-probe:end
