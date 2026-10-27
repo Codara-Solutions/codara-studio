@@ -2588,6 +2588,9 @@ export function registerIpc(): void {
         // The new branch is a shared ref — refresh the source repo's panel.
         const { invalidateGitCache } = await getGitOps();
         invalidateGitCache(input.repoCwd);
+        void import("./claude-pretrust")
+          .then(({ pretrustClaudeWorktree }) => pretrustClaudeWorktree(result.path, input.repoCwd))
+          .catch(() => undefined);
       }
       return result;
     },

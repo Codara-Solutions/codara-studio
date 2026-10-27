@@ -192,6 +192,9 @@ export interface AgentWorktreeDeps {
   // .codara/worktree.json, src/main/worktree-setup). Without it a created
   // worktree only reports the user's setup command for the agent to run.
   worktreeSetup?: AgentWorktreeSetupRunner;
+  // Trusts a new worktree for Claude Code (claude-pretrust.ts) so the first
+  // Claude pane there does not stop at its folder trust prompt.
+  pretrustClaude?(path: string, workspaces: readonly Workspace[]): Promise<unknown>;
 }
 
 export interface AgentWorktreeSetupRunner {
@@ -1324,6 +1327,7 @@ async function createAgentWorktreeInner(
       }
       deps.publishState(next);
       deps.invalidateGitCache(repoCwd);
+      void deps.pretrustClaude?.(workspace.cwd, next.workspaces).catch(() => undefined);
       createdWorkspace = workspace;
       return createdResult(workspace, current, {
         created: true,
