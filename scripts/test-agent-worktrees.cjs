@@ -231,6 +231,34 @@ async function main() {
     assert.equal(workspaceOf(fromPr.workspaceId).copyBranch.pullRequestCode, true);
     assert.deepEqual(h.pretrusted.map((entry) => entry.cwd), [fromMain.path]);
     assert.equal(await aw.startsFromPullRequestCode({ repoCwd: repo, workspaces: [], names: [], commit: "f".repeat(40) }), true, "an unknown commit counts as pull-request code");
+    // A plainly named branch or tag on a pull request's commit does not make
+    // it trusted, as a base or checked out.
+    git(repo, ["branch", "innocent", "codara/pr/abcd/7/fix"]);
+    git(repo, ["tag", "innocent-tag", "refs/codara/pr-import/abcd/tx1"]);
+    const laundered = await aw.createAgentWorktree(terminalAgent, { branch: "agent/laundered", base: prCommit }, deps);
+    assert.equal(laundered.ok, true, JSON.stringify(laundered));
+    assert.equal(workspaceOf(laundered.workspaceId).copyBranch.pullRequestCode, true, "a raw sha on a renamed branch");
+    const fromTag = await aw.createAgentWorktree(terminalAgent, { branch: "agent/from-tag", base: "innocent-tag" }, deps);
+    assert.equal(workspaceOf(fromTag.workspaceId).copyBranch.pullRequestCode, true, "a tag on the commit");
+    const checkedOutPr = await aw.createAgentWorktree(terminalAgent, { branch: "innocent", checkout: true }, deps);
+    assert.equal(checkedOutPr.ok, true, JSON.stringify(checkedOutPr));
+    assert.equal(workspaceOf(checkedOutPr.workspaceId).copyBranch.pullRequestCode, true, "a checked-out branch is checked by its commit");
+    assert.deepEqual(h.pretrusted.map((entry) => entry.cwd), [fromMain.path]);
+    // Once main has the commit, it is the repository's own.
+    git(repo, ["update-ref", "refs/heads/main", prCommit, main]);
+    assert.equal(await aw.startsFromPullRequestCode({ repoCwd: repo, workspaces: [], names: [], commit: prCommit }), false);
+    git(repo, ["update-ref", "refs/heads/main", main, prCommit]);
+    git(repo, ["reset", "-q", "--hard", main]);
+    for (const made of [laundered, fromTag]) {
+      git(repo, ["worktree", "remove", "--force", made.path]);
+      git(repo, ["branch", "-D", made.branch]);
+    }
+    git(repo, ["worktree", "remove", "--force", checkedOutPr.path]);
+    git(repo, ["branch", "-D", "innocent"]);
+    git(repo, ["tag", "-d", "innocent-tag"]);
+    const launderedIds = new Set([laundered, fromTag, checkedOutPr].map((made) => made.workspaceId));
+    h.state.workspaces = h.state.workspaces.filter((workspace) => !launderedIds.has(workspace.id));
+    h.state.workspaceRailOrder = h.state.workspaceRailOrder.filter((id) => !launderedIds.has(id));
     for (const made of [...prMade, fromMain, fromPr]) {
       git(repo, ["worktree", "remove", "--force", made.path]);
       git(repo, ["branch", "-D", made.branch]);

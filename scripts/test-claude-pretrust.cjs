@@ -363,6 +363,65 @@ async function main() {
     assert.equal(readJson(liveFile).projects["/workspace"].hasTrustDialogAccepted, true);
   });
 
+  await check("without a readable list, no folder trust reaches the user's .claude.json", async () => {
+    for (const [name, content] of [
+      ["missing", null],
+      ["broken", "{ not json"],
+      ["newer", { version: 2, folders: [] }],
+      ["shapeless", { version: 1, folders: "/workspace" }],
+    ]) {
+      const live = liveHome(`no-list-${name}`);
+      const record = path.join(path.dirname(live.configDir), "pretrusted-folders.json");
+      if (typeof content === "string") fs.writeFileSync(record, content, { mode: 0o600 });
+      else if (content) writeJson(record, content);
+      const userDir = path.join(TMP, `no-list-user-${name}`);
+      fs.mkdirSync(userDir, { recursive: true });
+      const user = { configDir: path.join(userDir, ".claude"), configDirEnv: null, homeDir: userDir };
+      const userFile = path.join(userDir, ".claude.json");
+      writeJson(userFile, { projects: {} });
+      const liveFile = path.join(live.configDir, ".claude.json");
+      writeJson(liveFile, {
+        mcpServers: { docs: { type: "stdio", command: "docs-server" } },
+        projects: { "/somewhere": { hasTrustDialogAccepted: true } },
+      });
+      if (content !== null) {
+        assert.equal(await trust.addClaudeFolderTrust(live, "/new"), "no-record", `${name}: an unreadable list is not rewritten`);
+        assert.equal(fs.readFileSync(record, "utf8").includes("/new"), false);
+        assert.equal(readJson(liveFile).projects["/new"], undefined);
+      }
+      const baseFile = path.join(TMP, `no-list-base-${name}.json`);
+      const report = await trust.sync.syncClaudeFollowConfig({ userHome: user, liveHome: live, baseFile });
+      const mine = readJson(userFile);
+      assert.equal(mine.projects["/somewhere"], undefined, `${name}: no trust goes to the user's file`);
+      assert.equal(mine.mcpServers.docs.command, "docs-server", `${name}: other settings still sync`);
+      assert.equal(report.deferred, 1, `${name}: the trust stays unsettled`);
+      // Once the list is readable again, the held trust is synced as usual.
+      writeJson(record, { version: 1, folders: [] });
+      await trust.sync.syncClaudeFollowConfig({ userHome: user, liveHome: live, baseFile });
+      assert.equal(readJson(userFile).projects["/somewhere"].hasTrustDialogAccepted, true, `${name}: synced once listed`);
+    }
+    // With no list and no trust waiting for the user's side, an empty list is
+    // started, so later answers sync.
+    const live = liveHome("no-list-fresh");
+    const record = path.join(path.dirname(live.configDir), "pretrusted-folders.json");
+    const userDir = path.join(TMP, "no-list-user-fresh");
+    fs.mkdirSync(userDir, { recursive: true });
+    const user = { configDir: path.join(userDir, ".claude"), configDirEnv: null, homeDir: userDir };
+    const userFile = path.join(userDir, ".claude.json");
+    writeJson(userFile, { projects: { "/both": { hasTrustDialogAccepted: true } } });
+    const liveFile = path.join(live.configDir, ".claude.json");
+    writeJson(liveFile, { projects: { "/both": { hasTrustDialogAccepted: true } } });
+    const baseFile = path.join(TMP, "no-list-base-fresh.json");
+    await trust.sync.syncClaudeFollowConfig({ userHome: user, liveHome: live, baseFile });
+    assert.deepEqual(readJson(record), { version: 1, folders: [] });
+    assert.equal(fs.statSync(record).mode & 0o777, 0o600);
+    const config = readJson(liveFile);
+    config.projects["/answered-later"] = { hasTrustDialogAccepted: true };
+    writeJson(liveFile, config);
+    await trust.sync.syncClaudeFollowConfig({ userHome: user, liveHome: live, baseFile });
+    assert.equal(readJson(userFile).projects["/answered-later"].hasTrustDialogAccepted, true);
+  });
+
   const deps = (home, workspaces, logs = [], extra = {}) => ({
     workspaces: async () => workspaces,
     home: () => home,

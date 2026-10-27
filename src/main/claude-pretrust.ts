@@ -170,7 +170,7 @@ export async function claudeTrustKeyForCwd(
   return claudeProjectKey(key, platform);
 }
 
-export type ClaudeTrustWrite = "added" | "present" | "no-config";
+export type ClaudeTrustWrite = "added" | "present" | "no-config" | "no-record";
 
 async function readJsonObject(file: string): Promise<Record<string, unknown> | null> {
   const stats = await fs.lstat(file).catch(() => null);
@@ -203,7 +203,11 @@ export async function addClaudeFolderTrust(home: ClaudeLiveHome, key: string): P
   try {
     const current = await readJsonObject(file);
     if (!current) return "no-config";
-    const listed = await readClaudePretrustedFolders(home);
+    // An unreadable list is never rewritten: the folders it held would leave
+    // it and claude-follow would copy their trust to the user's file.
+    const list = await readClaudePretrustedFolders(home);
+    if (list.kind === "unreadable") return "no-record";
+    const listed = list.kind === "listed" ? list.folders : new Set<string>();
     const projects = isRecord(current.projects) ? current.projects : {};
     const entry = projects[key];
     if (isRecord(entry) && entry.hasTrustDialogAccepted === true) return "present";
@@ -288,6 +292,7 @@ export async function pretrustClaudeFolder(
       if (!key) return "skipped";
       const result = await addClaudeFolderTrust(deps.home(), key);
       if (result === "added") deps.log(`trusted ${key} for Claude Code`);
+      if (result === "no-record") deps.log(`did not trust ${key}: ${claudePretrustedFoldersFile(deps.home())} is unreadable`);
       return result;
     } catch (error) {
       logTo(deps)(`could not trust ${cwd} for Claude Code: ${error instanceof Error ? error.message : String(error)}`);

@@ -1166,15 +1166,41 @@ export function terminalRollbackMessage(made: Record<string, unknown>, rollback:
 }
 
 /**
+ * The branches whose commits count as the repository's own: its default
+ * branch and the branch checked out in its main checkout (which Codara
+ * already trusts), unless that is a pull-request branch.
+ */
+async function ownBranchNames(repoCwd: string): Promise<Set<string>> {
+  const names = new Set<string>();
+  const remoteHead = await readGitText(repoCwd, ["symbolic-ref", "-q", "refs/remotes/origin/HEAD"]);
+  const defaultName = remoteHead.trim().replace(/^refs\/remotes\/origin\//, "");
+  if (defaultName && defaultName !== remoteHead.trim()) names.add(defaultName);
+  else {
+    for (const candidate of ["main", "master"]) {
+      if (await refExists(repoCwd, `refs/heads/${candidate}`)) {
+        names.add(candidate);
+        break;
+      }
+    }
+  }
+  const head = (await readGitText(repoCwd, ["symbolic-ref", "-q", "HEAD"])).trim();
+  if (head.startsWith("refs/heads/") && !isPullRequestRef(head)) names.add(head.slice("refs/heads/".length));
+  return names;
+}
+
+/**
  * True when a new worktree starts from pull-request code, which Codara never
  * trusts for Claude Code: it is made from a pull-request workspace, its base
  * or branch is a pull-request ref (`codara/pr/...`, `refs/codara/pr-import/...`),
- * or its starting commit is on no branch, remote branch or tag other than
- * pull-request ones. The branches of worktrees already holding pull-request
- * code (`known`) count as pull-request ones, so a second worktree cannot
- * launder the first one's commits; `ignoreRefs` leaves out the branch just
- * made for this one. A commit that cannot be checked counts as pull-request
- * code.
+ * or its starting commit is not on the repository's own branches (the
+ * default branch, the main checkout's branch, and their remote-tracking
+ * copies) while a pull-request ref, or a worktree branch already holding
+ * pull-request code (`known`), has it. A commit on no ref at all, or one that
+ * cannot be checked, counts as pull-request code too. A new branch name or
+ * tag therefore does not make a pull request's commits trusted. This catches
+ * mistakes and laundering through refs; it cannot stop an agent with a shell
+ * from writing a pull request's files into a trusted folder. `ignoreRefs`
+ * leaves out the branch just made for this worktree.
  */
 export async function startsFromPullRequestCode(input: {
   repoCwd: string;
@@ -1189,8 +1215,11 @@ export async function startsFromPullRequestCode(input: {
   if (input.commit === undefined) return false;
   if (!input.commit) return true;
   const ignored = new Set(input.ignoreRefs ?? []);
+  const pullRequestBranches = new Set<string>();
   for (const workspace of input.known ?? []) {
-    if (workspace.copyBranch && holdsPullRequestCode(workspace)) ignored.add(`refs/heads/${workspace.copyBranch.branch}`);
+    if (workspace.copyBranch && holdsPullRequestCode(workspace)) {
+      pullRequestBranches.add(`refs/heads/${workspace.copyBranch.branch}`);
+    }
   }
   const refs = (
     await readGitText(input.repoCwd, [
@@ -1201,12 +1230,21 @@ export async function startsFromPullRequestCode(input: {
       "refs/heads",
       "refs/remotes",
       "refs/tags",
+      "refs/codara/pr-import",
     ])
   )
     .split(/\r?\n/)
     .map((ref) => ref.trim())
     .filter((ref) => ref && !ignored.has(ref) && !ref.endsWith("/HEAD"));
-  return !refs.some((ref) => !isPullRequestRef(ref));
+  const own = await ownBranchNames(input.repoCwd);
+  const onOwnBranch = refs.some((ref) => {
+    if (isPullRequestRef(ref) || pullRequestBranches.has(ref)) return false;
+    const name = ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : /^refs\/remotes\/[^/]+\/(.+)$/.exec(ref)?.[1];
+    return name !== undefined && own.has(name);
+  });
+  if (onOwnBranch) return false;
+  if (refs.some((ref) => isPullRequestRef(ref) || pullRequestBranches.has(ref))) return true;
+  return refs.length === 0;
 }
 
 async function createAgentWorktreeInner(
@@ -1339,7 +1377,9 @@ async function createAgentWorktreeInner(
         workspaces: [scope.callerWorkspace, scope.parentWorkspace],
         known: current.state.workspaces,
         names: [baseName, checkout ? branch : null],
-        ...(checkout ? {} : { commit: baseCommit, ignoreRefs: [`refs/heads/${created.branch}`] }),
+        ...(checkout
+          ? { commit: await revParse(created.path, "HEAD^{commit}") }
+          : { commit: baseCommit, ignoreRefs: [`refs/heads/${created.branch}`] }),
       });
       const workspace: Workspace = {
         id: `ws-agent-${deps.randomId()}`,
