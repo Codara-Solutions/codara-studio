@@ -14,6 +14,7 @@ function compile(entry, outfile) {
     bundle: true,
     platform: "node",
     format: "cjs",
+    alias: { "@shared": path.join(root, "src", "shared") },
     logLevel: "silent",
   });
   return require(path.join(outDir, outfile));
@@ -111,6 +112,19 @@ assert.deepEqual(state.terminalAgentCensus(terminalTabs, { idle: true, busy: tru
 assert.deepEqual(state.terminalAgentCensus([{ ...terminalTabs[0], root: {
   ...idleLeaf, worker: { ...seededWorker, runtimeState: "background" },
 } }]), { total: 1, working: 1 }, "an agent working in the background counts as working");
+// The number agrees with the agent lines (terminalAgentPlacement): a quiet
+// agent mid-turn ("No output") and one starting count as working; one
+// waiting on the user, ready or stopped does not.
+for (const runtimeState of ["stalled", "launching"]) {
+  assert.deepEqual(state.terminalAgentCensus([{ ...terminalTabs[0], root: {
+    ...idleLeaf, worker: { ...seededWorker, runtimeState },
+  } }], { idle: true }, {}), { total: 1, working: 1 }, `a ${runtimeState} agent counts as working`);
+}
+for (const runtimeState of ["blocked", "idle", "error"]) {
+  assert.deepEqual(state.terminalAgentCensus([{ ...terminalTabs[0], root: {
+    ...idleLeaf, worker: { ...seededWorker, runtimeState },
+  } }], { idle: true }, { idle: true }), { total: 1, working: 0 }, `a ${runtimeState} agent is not working`);
+}
 assert.equal(
   state.visibleWorkerChip({ ...seededWorker, state: "done", runtimeState: "background" })?.runtimeState,
   "background",

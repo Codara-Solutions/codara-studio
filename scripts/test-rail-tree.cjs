@@ -193,6 +193,53 @@ test("a row's merge state is unknown only until the first read finished", ({ mod
   assert.equal(mod.railMergeState(false, { remote: false, loaded: false }), false);
 });
 
+test("a project's number counts its worktrees' agents too", ({ mod }) => {
+  // The roll-up line no longer counts agents, so a folded project shows
+  // through its number that agents work inside it.
+  const rows = [
+    { workspaceId: "wt-a", agents: [line("a1", "working", 1, "wt-a"), line("a2", "idle", 1, "wt-a")] },
+    { workspaceId: "wt-b", agents: [] },
+    { workspaceId: "wt-c", agents: [line("c1", "idle", 1, "wt-c")] },
+  ];
+  assert.deepEqual(
+    mod.railFamilyAgentCount(
+      { total: 1, working: 0, sleeping: 0 },
+      [{ total: 2, working: 1, sleeping: 0 }, undefined, { total: 1, working: 0, sleeping: 1 }],
+      rows,
+    ),
+    { total: 4, working: 1, sleeping: 1, inWorktrees: 3 },
+  );
+  assert.deepEqual(
+    mod.railFamilyAgentCount(undefined, [{ total: 1, working: 1 }], [{ agents: [line("w1", "working", 1, "wt-a")] }]),
+    { total: 1, working: 1, sleeping: 0, inWorktrees: 1 },
+    "a project with no agent of its own still counts its worktree's",
+  );
+  assert.deepEqual(
+    mod.railFamilyAgentCount({ total: 2, working: 2, sleeping: 0 }, []),
+    { total: 2, working: 2, sleeping: 0, inWorktrees: 0 },
+    "a project without worktrees counts its own",
+  );
+});
+
+test("an agent of the project's pane working in the worktree it made counts as in the worktree", ({ mod }) => {
+  // The creator's pane is in the project's workspace, so the census counts it
+  // there; buildRailFamily shows it on the worktree, and so does the label.
+  const family = mod.buildRailFamily({
+    projectLines: [line("creator", "working"), line("coord", "idle")],
+    children: [{ workspaceId: "wt-a", lines: [], creatorPaneId: "creator", merged: false }],
+  });
+  const count = mod.railFamilyAgentCount({ total: 2, working: 1, sleeping: 0 }, [{ total: 0, working: 0 }], [
+    ...family.active,
+    ...family.merged,
+  ]);
+  assert.deepEqual(count, { total: 2, working: 1, sleeping: 0, inWorktrees: 1 });
+  // A line the census does not count yet never makes the label exceed the number.
+  assert.equal(
+    mod.railFamilyAgentCount({ total: 1 }, [], [{ agents: [line("x", "idle"), line("y", "idle")] }]).inWorktrees,
+    1,
+  );
+});
+
 (async () => {
   const { mod, cleanup } = await load();
   let failed = 0;
