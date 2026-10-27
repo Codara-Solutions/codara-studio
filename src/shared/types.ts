@@ -519,6 +519,11 @@ export interface Workspace {
     // only worktrees an agent created unless the user opts in
     // (agentsMayRemoveUserWorktrees), so this must survive every save.
     createdBy?: CopyBranchCreator;
+    // An agent's worktree whose starting commit is reachable only from an
+    // imported pull request (or that was made from a pull-request
+    // workspace): its code is the PR's, so Codara never trusts it for
+    // Claude Code (claude-pretrust.ts). Must survive every save.
+    pullRequestCode?: true;
   };
   // Present only on SSH remote workspaces (cwd is then ssh://<hostId>/...).
   // Host connection details live in the remote-hosts registry, keyed by id,

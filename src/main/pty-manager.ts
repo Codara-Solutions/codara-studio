@@ -36,7 +36,11 @@ import {
 } from "./remote/remote-agents";
 import { createRemotePtyHandle, remoteAgentKillSettled, type RemotePtyHandle } from "./remote/remote-pty";
 import { loadPreferences } from "./preferences-store";
-import { formatManualAgentStartup, parseManualAgentStartupCommand } from "./manual-agent-startup";
+import {
+  formatManualAgentStartup,
+  parseManualAgentStartupCommand,
+  startupCommandRunsClaude,
+} from "./manual-agent-startup";
 import { assertManualAgentLaunchAllowed } from "./orchestration/project-policy";
 import { buildCodexCliSharedEnvironment } from "./orchestration/codex-cli-profile-execution";
 import { inspectNativeCliProcesses, nativeCliPtyRoots } from "./orchestration/native-cli-process-shutdown";
@@ -70,6 +74,7 @@ import {
   plainAgentLaunchArgs,
 } from "./agent-launch-integration";
 import { mintPaneSocketCapability } from "./agent-socket-capabilities";
+import { pretrustClaudeFolder } from "./claude-pretrust";
 import { paneHelperBinDir, withPaneHelperOnPath } from "./pane-helper";
 import { continueForegroundJob } from "./terminal-foreground";
 import {
@@ -856,6 +861,16 @@ async function spawnWithSessionLock(
       nativeClaudeConfigDirEnv: execution.env.CLAUDE_CONFIG_DIR ?? null,
       releaseNativeClaudeProfileLease,
     };
+  }
+  // Nobody can answer Claude Code's folder trust prompt in a pane Codara or
+  // an agent opens, so a workspace folder is trusted before the launch, as
+  // Codex is above. After the account resolution: it prepares the live slot.
+  if (
+    parsedStartup
+      ? parsedStartup.runtime === "claude"
+      : startupCommandRunsClaude(opts.startupCommand)
+  ) {
+    await pretrustClaudeFolder(opts.cwd, { env: { ...process.env, ...opts.env } });
   }
   if (
     opts.nativeGrokProfileId !== undefined ||

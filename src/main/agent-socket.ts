@@ -65,6 +65,7 @@ import {
   type WorktreeRefusal,
 } from "./agent-worktrees";
 import { managedWorktreesRoot } from "./git-worktrees";
+import { pretrustClaudeFolder } from "./claude-pretrust";
 import { agentWorktreeSetupRunner } from "./worktree-setup";
 import { invalidateGitCache } from "./git-ops";
 import { createGitHubCliAdapter } from "./github-cli";
@@ -2355,6 +2356,7 @@ function worktreeDeps(): AgentWorktreeDeps {
     now: () => new Date(),
     randomId: () => randomBytes(8).toString("hex"),
     worktreeSetup: agentWorktreeSetupRunner(),
+    pretrustClaude: (path, workspaces) => pretrustClaudeFolder(path, { workspaces }),
   };
 }
 

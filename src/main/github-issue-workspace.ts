@@ -85,6 +85,8 @@ export interface GitHubIssueWorkspaceDependencies {
     workspaceName: string;
     branch: string;
   }): Promise<boolean>;
+  // Trusts the new worktree for Claude Code (claude-pretrust.ts).
+  pretrustClaude?(path: string, workspaces: readonly Workspace[]): Promise<unknown>;
 }
 
 const issueMutations = new Map<string, Promise<StartGitHubIssueResult>>();
@@ -111,6 +113,8 @@ function productionDependencies(): GitHubIssueWorkspaceDependencies {
       const started = await startWorktreeSetup({ ...input, trigger: "issue" });
       return Boolean(started && !isWorktreeSetupStartError(started));
     },
+    pretrustClaude: async (path, workspaces) =>
+      (await import("./claude-pretrust")).pretrustClaudeFolder(path, { workspaces }),
   };
 }
 
@@ -331,6 +335,7 @@ async function createOrResumeIssueWorkspace(
     );
   }
   dependencies.publishState(persistedState);
+  void dependencies.pretrustClaude?.(created.path, persistedState.workspaces).catch(() => undefined);
 
   const setupStarted = dependencies.startWorktreeSetup
     ? await dependencies

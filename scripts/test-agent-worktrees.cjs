@@ -132,7 +132,11 @@ async function main() {
       afterVerify: async () => {
         if (h.afterVerify) await h.afterVerify();
       },
+      pretrustClaude: async (cwd, workspaces) => {
+        h.pretrusted.push({ cwd, workspaceIds: workspaces.map((workspace) => workspace.id) });
+      },
     };
+    h.pretrusted = [];
     const terminalAgent = { role: "studio", client: "claude-code", paneId: "pane-1" };
     const workspaceOf = (id) => h.state.workspaces.find((workspace) => workspace.id === id);
 
@@ -185,6 +189,86 @@ async function main() {
     assert.equal(checkedOut.ok, true, JSON.stringify(checkedOut));
     assert.equal(checkedOut.mode, "checkout");
     assert.equal((await aw.createAgentWorktree(terminalAgent, { branch: "main", checkout: true }, deps)).code, "WORKTREE_RESERVED_BRANCH");
+
+    // ── Claude folder trust ────────────────────────────────────────────────
+    // A new worktree is trusted for Claude Code once it is saved, with the
+    // state that lists it; one that starts from pull-request code never is,
+    // and is marked so no later launch trusts it either.
+    assert.deepEqual(h.pretrusted.map((entry) => entry.cwd), [created.path, checkedOut.path]);
+    assert.ok(h.pretrusted[0].workspaceIds.includes(created.workspaceId), "the list already holds the new worktree");
+    assert.equal(createdWorkspace.copyBranch.pullRequestCode, undefined);
+    h.pretrusted.length = 0;
+    const main = git(repo, ["rev-parse", "main"]);
+    git(repo, ["checkout", "-q", "--detach"]);
+    const prCommit = commitFile(repo, "pr.txt", "from a fork\n", "pull request change");
+    git(repo, ["checkout", "-q", "main"]);
+    git(repo, ["update-ref", "refs/codara/pr-import/abcd/tx1", prCommit]);
+    git(repo, ["branch", "codara/pr/abcd/7/fix", prCommit]);
+    const prMade = [];
+    for (const [branch, base] of [
+      ["agent/pr-ref", "refs/codara/pr-import/abcd/tx1"],
+      ["agent/pr-branch", "codara/pr/abcd/7/fix"],
+      ["agent/pr-sha", prCommit],
+    ]) {
+      const made = await aw.createAgentWorktree(terminalAgent, { branch, base }, deps);
+      assert.equal(made.ok, true, `${base}: ${JSON.stringify(made)}`);
+      assert.equal(workspaceOf(made.workspaceId).copyBranch.pullRequestCode, true, `${base} is pull-request code`);
+      prMade.push(made);
+    }
+    assert.deepEqual(h.pretrusted, [], "pull-request code is never trusted");
+    const fromMain = await aw.createAgentWorktree(terminalAgent, { branch: "agent/from-main-sha", base: main }, deps);
+    assert.equal(workspaceOf(fromMain.workspaceId).copyBranch.pullRequestCode, undefined, "a commit on main is not");
+    assert.deepEqual(h.pretrusted.map((entry) => entry.cwd), [fromMain.path]);
+    // Made from a pull-request workspace, even from a commit main has.
+    h.state.workspaces.push({
+      id: "ws-pr", name: "pr", cwd: prMade[1].path, color: "#000000", workers: [],
+      copyBranch: { repoCwd: repo, branch: "agent/pr-branch", city: "pr", mode: "fork", createdAt: h.now.toISOString(),
+        origin: { kind: "github-pull-request" } },
+    });
+    h.paneWorkspace["pane-pr"] = "ws-pr";
+    const fromPr = await aw.createAgentWorktree({ role: "studio", client: "claude-code", paneId: "pane-pr" }, { branch: "agent/from-pr", base: main }, deps);
+    assert.equal(fromPr.ok, true, JSON.stringify(fromPr));
+    assert.equal(workspaceOf(fromPr.workspaceId).copyBranch.pullRequestCode, true);
+    assert.deepEqual(h.pretrusted.map((entry) => entry.cwd), [fromMain.path]);
+    assert.equal(await aw.startsFromPullRequestCode({ repoCwd: repo, workspaces: [], names: [], commit: "f".repeat(40) }), true, "an unknown commit counts as pull-request code");
+    // A plainly named branch or tag on a pull request's commit does not make
+    // it trusted, as a base or checked out.
+    git(repo, ["branch", "innocent", "codara/pr/abcd/7/fix"]);
+    git(repo, ["tag", "innocent-tag", "refs/codara/pr-import/abcd/tx1"]);
+    const laundered = await aw.createAgentWorktree(terminalAgent, { branch: "agent/laundered", base: prCommit }, deps);
+    assert.equal(laundered.ok, true, JSON.stringify(laundered));
+    assert.equal(workspaceOf(laundered.workspaceId).copyBranch.pullRequestCode, true, "a raw sha on a renamed branch");
+    const fromTag = await aw.createAgentWorktree(terminalAgent, { branch: "agent/from-tag", base: "innocent-tag" }, deps);
+    assert.equal(workspaceOf(fromTag.workspaceId).copyBranch.pullRequestCode, true, "a tag on the commit");
+    const checkedOutPr = await aw.createAgentWorktree(terminalAgent, { branch: "innocent", checkout: true }, deps);
+    assert.equal(checkedOutPr.ok, true, JSON.stringify(checkedOutPr));
+    assert.equal(workspaceOf(checkedOutPr.workspaceId).copyBranch.pullRequestCode, true, "a checked-out branch is checked by its commit");
+    assert.deepEqual(h.pretrusted.map((entry) => entry.cwd), [fromMain.path]);
+    // Once main has the commit, it is the repository's own.
+    git(repo, ["update-ref", "refs/heads/main", prCommit, main]);
+    assert.equal(await aw.startsFromPullRequestCode({ repoCwd: repo, workspaces: [], names: [], commit: prCommit }), false);
+    git(repo, ["update-ref", "refs/heads/main", main, prCommit]);
+    git(repo, ["reset", "-q", "--hard", main]);
+    for (const made of [laundered, fromTag]) {
+      git(repo, ["worktree", "remove", "--force", made.path]);
+      git(repo, ["branch", "-D", made.branch]);
+    }
+    git(repo, ["worktree", "remove", "--force", checkedOutPr.path]);
+    git(repo, ["branch", "-D", "innocent"]);
+    git(repo, ["tag", "-d", "innocent-tag"]);
+    const launderedIds = new Set([laundered, fromTag, checkedOutPr].map((made) => made.workspaceId));
+    h.state.workspaces = h.state.workspaces.filter((workspace) => !launderedIds.has(workspace.id));
+    h.state.workspaceRailOrder = h.state.workspaceRailOrder.filter((id) => !launderedIds.has(id));
+    for (const made of [...prMade, fromMain, fromPr]) {
+      git(repo, ["worktree", "remove", "--force", made.path]);
+      git(repo, ["branch", "-D", made.branch]);
+    }
+    const cleaned = new Set([...prMade, fromMain, fromPr].map((made) => made.workspaceId).concat("ws-pr"));
+    h.state.workspaces = h.state.workspaces.filter((workspace) => !cleaned.has(workspace.id));
+    h.state.workspaceRailOrder = h.state.workspaceRailOrder.filter((id) => !cleaned.has(id));
+    git(repo, ["update-ref", "-d", "refs/codara/pr-import/abcd/tx1"]);
+    git(repo, ["branch", "-D", "codara/pr/abcd/7/fix"]);
+    h.pretrusted.length = 0;
 
     // ── In another workspace ───────────────────────────────────────────────
     // A coordinator in a plain folder, once the user allowed it into the

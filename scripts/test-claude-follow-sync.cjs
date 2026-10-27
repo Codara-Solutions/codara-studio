@@ -91,6 +91,8 @@ async function main() {
   const sync = (extra = {}) => h.syncClaudeFollowConfig({ userHome, liveHome, baseFile, ...extra });
 
   // --- config-sync ------------------------------------------------------------
+  // Codara's list of the folders it trusted (claude-pretrust.ts), here empty.
+  writePrivate(path.join(path.dirname(live), "pretrusted-folders.json"), { version: 1, folders: [] });
   writePrivate(userFile, {
     numStartups: 12,
     oauthAccount: { accountUuid: "me", emailAddress: "me@example.com" },
