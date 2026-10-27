@@ -62,6 +62,7 @@ import {
   decideResume,
   mergeSessionStart,
   pruneAttempts,
+  relocateResumePointer,
   type ResumeProbe,
   type SessionStartRecord,
 } from "./resume-policy";
@@ -224,6 +225,9 @@ function logRestore(line: string): void {
   }
 }
 interface ResumePlan {
+  // The pointer the plan resumes: the input, or a copy moved to the start cwd
+  // its transcript was found under. Callers adopt it when it is not the input.
+  session: TerminalAgentSession;
   // The command to hand pty.spawn's startupCommand: a `--resume`/`resume` for a
   // healthy session, a fresh forced-id `claude` launch for a Claude self-heal,
   // or null for Codex-with-a-dead-rollout (nothing deterministic to relaunch).
@@ -277,26 +281,32 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
     .catch(() => ({ exists: false as const }));
   const decision = decideResume(probe as ResumeProbe, restore.runtime);
   const p = probe as ResumeProbe;
+  const relocated = relocateResumePointer(restore, p);
   logRestore(
     `plan ${restore.runtime} id=${restore.sessionId} cwd=${restore.cwd} ` +
-      `probe(exists=${p.exists} resumable=${p.resumable ?? "-"} repairable=${p.repairable ?? "-"}) -> ${decision.kind}`,
+      `probe(exists=${p.exists} resumable=${p.resumable ?? "-"} repairable=${p.repairable ?? "-"}) -> ${decision.kind}` +
+      (relocated ? ` from start cwd=${relocated.cwd}` : ""),
   );
   if (decision.kind === "resume" || decision.kind === "repair-resume") {
-    if (restore.runtime === "claude" && decision.kind === "repair-resume") {
+    // `claude --resume` only finds a session from the directory it was
+    // started in, so a pointer that recorded a later cwd resumes from there.
+    const target = relocated ?? restore;
+    if (target.runtime === "claude" && decision.kind === "repair-resume") {
       // The transcript's last line is a truncated partial write (sleep/crash).
       // Repair it in place (keeps a .bak) so `claude --resume` accepts it and
       // the conversation is preserved.
       await window.spark.agentSession
         .repairTranscript({
           runtime: "claude",
-          cwd: restore.cwd,
-          sessionId: restore.sessionId,
-          nativeClaudeProfileId: restore.nativeClaudeProfileId,
+          cwd: target.cwd,
+          sessionId: target.sessionId,
+          nativeClaudeProfileId: target.nativeClaudeProfileId,
         })
         .catch(() => undefined);
     }
     return {
-      resumeCommand: buildAgentResumeCommand(restore),
+      session: target,
+      resumeCommand: buildAgentResumeCommand(target),
       resumeIsFreshFallback: false,
       fallbackNotice: null,
       fallbackSession: null,
@@ -308,6 +318,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
       // brings the pane back; main binds its new session after the first
       // reply, so there is no replacement pointer to hand over yet.
       return {
+        session: restore,
         resumeCommand: PI_LAUNCH_COMMAND,
         resumeIsFreshFallback: true,
         fallbackNotice: "previous Pi session couldn't be resumed, starting a fresh one",
@@ -317,6 +328,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
     if (restore.runtime === "grok") {
       const fresh = buildGrokLaunch();
       return {
+        session: restore,
         resumeCommand: fresh.command,
         resumeIsFreshFallback: true,
         fallbackNotice: "previous Grok session couldn't be resumed, starting a fresh one",
@@ -335,6 +347,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
     // hand the owner the replacement pointer to persist.
     const fresh = buildClaudeLaunch();
     return {
+      session: restore,
       resumeCommand: fresh.command,
       resumeIsFreshFallback: true,
       fallbackNotice: "previous Claude session couldn't be resumed, starting a fresh one",
@@ -351,6 +364,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
   // Codex can't force session ids, so there's nothing to relaunch
   // deterministically — surface the notice, clear the pointer, plain shell.
   return {
+    session: restore,
     resumeCommand: null,
     resumeIsFreshFallback: false,
     fallbackNotice: "previous Codex session couldn't be resumed",
@@ -3091,6 +3105,21 @@ export function useTerminalSession({
         });
       };
 
+      // Persist the pointer a plan moved to its start cwd, so the pane spawns
+      // there and later restores stop probing the wrong project folder.
+      const adoptPlanSession = (
+        from: TerminalAgentSession,
+        plan: ResumePlan,
+      ): TerminalAgentSession => {
+        if (plan.session === from) return from;
+        logRestore(
+          `pane=${sessionId} ${from.runtime} id=${from.sessionId} cwd moved to its start cwd (${from.cwd} -> ${plan.session.cwd})`,
+        );
+        agentSessionRef.current = plan.session;
+        onResumeFallbackRef.current?.(plan.session);
+        return plan.session;
+      };
+
       // In-place auto-resume after an UNEXPECTED pty death (see the onExit
       // re-arm below). Reuses the SAME session id + xterm: main deleted the old
       // session on exit, so a same-id spawn is a fresh PTY that DOES deliver the
@@ -3121,6 +3150,7 @@ export function useTerminalSession({
         logRestore(`pane=${sessionId} in-place re-arm after pty death (${session.runtime} id=${session.sessionId})`);
         const plan = await computeResumePlan(session);
         if (disposed) return;
+        session = adoptPlanSession(session, plan);
         if (!plan.resumeCommand) {
           // Codex with an unresumable rollout → nothing deterministic to relaunch.
           if (plan.fallbackNotice) term.write(`\x1b[2m[${plan.fallbackNotice}]\x1b[0m\r\n`);
@@ -3207,6 +3237,7 @@ export function useTerminalSession({
           }
           const plan = session ? await computeResumePlan(session) : null;
           if (disposed) return;
+          if (session && plan) session = adoptPlanSession(session, plan);
           const command = plan?.resumeCommand ?? null;
           logRestore(`pane=${sessionId} waking from sleep (${session?.runtime ?? "no session"}) cmd=${command ?? "none"}`);
           if (session && command && !plan?.resumeIsFreshFallback) {
@@ -3457,6 +3488,7 @@ export function useTerminalSession({
           // it is shared verbatim with the in-place death re-arm below.
           if (restore.active !== false) {
             const plan = await computeResumePlan(restore);
+            restore = adoptPlanSession(restore, plan);
             resumeCommand = plan.resumeCommand;
             resumeIsFreshFallback = plan.resumeIsFreshFallback;
             fallbackNotice = plan.fallbackNotice;
@@ -3992,7 +4024,7 @@ export function useTerminalSession({
         startupCommandHandled &&
         agentSession?.runtime === "claude"
       ) {
-        armClaudeRefusalWatch(agentSession.cwd);
+        armClaudeRefusalWatch(agentSessionRef.current?.cwd ?? agentSession.cwd);
       }
 
       if (sleepingRef.current && visibleRef.current) scheduleWake();

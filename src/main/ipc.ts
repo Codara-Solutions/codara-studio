@@ -96,6 +96,7 @@ import {
   claudeSessionTranscriptPath,
   discoverClaudeSessionForCwd,
   inspectClaudeTranscriptTail,
+  locateClaudeTranscript,
   repairClaudeTranscriptTail,
   resolveSafeClaudeTranscriptPath,
 } from "./orchestration/claude-paths";
@@ -3568,7 +3569,13 @@ export function registerIpc(): void {
         nativeClaudeProfileId?: string;
         nativeGrokProfileId?: string;
       },
-    ): Promise<{ exists: boolean; resumable?: boolean; repairable?: boolean; transcriptPath?: string }> => {
+    ): Promise<{
+      exists: boolean;
+      resumable?: boolean;
+      repairable?: boolean;
+      transcriptPath?: string;
+      cwd?: string;
+    }> => {
       if (!args.sessionId) return { exists: false };
       if (args.runtime === "pi") {
         // `pi --session <id>` looks the id up in the pane's cwd. Pi writes a
@@ -3608,14 +3615,33 @@ export function registerIpc(): void {
           args.sessionId,
           execution.env.CLAUDE_CONFIG_DIR ?? null,
         );
-        const path = await resolveSafeClaudeTranscriptPath(
+        let path = await resolveSafeClaudeTranscriptPath(
           args.cwd,
           args.sessionId,
           execution.env.CLAUDE_CONFIG_DIR ?? null,
         ).catch(() => null);
+        let exists = path ? await fs.access(path).then(() => true, () => false) : false;
+        // A pointer saved by an older build can carry a directory the agent
+        // cd'ed into instead of the one the session started in, which names
+        // another project folder. Find the transcript by id and report the cwd
+        // that maps to its folder; the renderer resumes from there.
+        let relocatedCwd: string | undefined;
+        if (!exists) {
+          const located = await locateClaudeTranscript({
+            sessionId: args.sessionId,
+            cwd: args.cwd,
+            transcriptPath: args.transcriptPath,
+            stateDir: execution.env.CLAUDE_CONFIG_DIR ?? null,
+          }).catch(() => null);
+          if (located) {
+            path = located.path;
+            exists = true;
+            if (located.cwd !== args.cwd) relocatedCwd = located.cwd;
+          }
+        }
         if (!path) return { exists: false, transcriptPath: expectedPath };
-        const exists = await fs.access(path).then(() => true, () => false);
         if (!exists) return { exists: false, transcriptPath: path };
+        const where = relocatedCwd ? { cwd: relocatedCwd } : {};
         // Resumability: the transcript must contain at least one real user
         // message line. Scan only the head — a genuine conversation has its
         // first user message within the first few KB.
@@ -3631,14 +3657,14 @@ export function registerIpc(): void {
             }
           })
           .catch(() => true); // unreadable head → don't block the resume attempt
-        if (!resumable) return { exists: true, resumable: false, transcriptPath: path };
+        if (!resumable) return { exists: true, resumable: false, transcriptPath: path, ...where };
         // The head scan passes even when a sleep/crash cut the writer mid-line,
         // leaving a truncated LAST record that `claude --resume` may refuse.
         // Check the TAIL and flag it repairable so the renderer truncates the
         // partial line (preserving the conversation) instead of self-healing
         // into a fresh session and losing it.
         const { repairable } = await inspectClaudeTranscriptTail(path);
-        return { exists: true, resumable: true, repairable, transcriptPath: path };
+        return { exists: true, resumable: true, repairable, transcriptPath: path, ...where };
       }
       // Codex: sessions are date-bucketed, not addressable by cwd, so rely on the
       // transcript path captured at launch. Size floor stands in for the message
