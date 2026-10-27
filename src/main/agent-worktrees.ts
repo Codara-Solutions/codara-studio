@@ -37,6 +37,7 @@ import {
 import { deleteBranch, deleteBranchIfAt } from "./git-branches";
 import { listProcessesWithCommands, processChainIn } from "./owned-process-tree";
 import { setupProvidedEntries } from "./worktree-setup/links";
+import { holdsPullRequestCode, isPullRequestRef } from "./pull-request-code";
 import type { WorktreeSetupStatus } from "@shared/worktree-setup";
 import {
   insertCopyWorkspace,
@@ -1164,6 +1165,50 @@ export function terminalRollbackMessage(made: Record<string, unknown>, rollback:
   return `the worktree made for it, ${which}, stays (${rollback.reason ?? "not removed"}): remove it with ${remove}`;
 }
 
+/**
+ * True when a new worktree starts from pull-request code, which Codara never
+ * trusts for Claude Code: it is made from a pull-request workspace, its base
+ * or branch is a pull-request ref (`codara/pr/...`, `refs/codara/pr-import/...`),
+ * or its starting commit is on no branch, remote branch or tag other than
+ * pull-request ones. The branches of worktrees already holding pull-request
+ * code (`known`) count as pull-request ones, so a second worktree cannot
+ * launder the first one's commits; `ignoreRefs` leaves out the branch just
+ * made for this one. A commit that cannot be checked counts as pull-request
+ * code.
+ */
+export async function startsFromPullRequestCode(input: {
+  repoCwd: string;
+  workspaces: readonly Workspace[];
+  names: readonly (string | null | undefined)[];
+  commit?: string | null;
+  ignoreRefs?: readonly string[];
+  known?: readonly Workspace[];
+}): Promise<boolean> {
+  if (input.workspaces.some(holdsPullRequestCode)) return true;
+  if (input.names.some(isPullRequestRef)) return true;
+  if (input.commit === undefined) return false;
+  if (!input.commit) return true;
+  const ignored = new Set(input.ignoreRefs ?? []);
+  for (const workspace of input.known ?? []) {
+    if (workspace.copyBranch && holdsPullRequestCode(workspace)) ignored.add(`refs/heads/${workspace.copyBranch.branch}`);
+  }
+  const refs = (
+    await readGitText(input.repoCwd, [
+      "for-each-ref",
+      "--contains",
+      input.commit,
+      "--format=%(refname)",
+      "refs/heads",
+      "refs/remotes",
+      "refs/tags",
+    ])
+  )
+    .split(/\r?\n/)
+    .map((ref) => ref.trim())
+    .filter((ref) => ref && !ignored.has(ref) && !ref.endsWith("/HEAD"));
+  return !refs.some((ref) => !isPullRequestRef(ref));
+}
+
 async function createAgentWorktreeInner(
   caller: WorktreeCaller,
   input: CreateWorktreeInput,
@@ -1289,6 +1334,13 @@ async function createAgentWorktreeInner(
       }
 
       const repoKey = await preferredRepoKey(current);
+      const pullRequestCode = await startsFromPullRequestCode({
+        repoCwd,
+        workspaces: [scope.callerWorkspace, scope.parentWorkspace],
+        known: current.state.workspaces,
+        names: [baseName, checkout ? branch : null],
+        ...(checkout ? {} : { commit: baseCommit, ignoreRefs: [`refs/heads/${created.branch}`] }),
+      });
       const workspace: Workspace = {
         id: `ws-agent-${deps.randomId()}`,
         name: title || created.branch,
@@ -1305,6 +1357,7 @@ async function createAgentWorktreeInner(
           createdAt: deps.now().toISOString(),
           fileCount: created.fileCount,
           createdBy: creatorFor(caller, purpose || undefined),
+          ...(pullRequestCode ? { pullRequestCode: true as const } : {}),
         },
       };
       let next: AppState;
@@ -1327,7 +1380,7 @@ async function createAgentWorktreeInner(
       }
       deps.publishState(next);
       deps.invalidateGitCache(repoCwd);
-      void deps.pretrustClaude?.(workspace.cwd, next.workspaces).catch(() => undefined);
+      if (!pullRequestCode) void deps.pretrustClaude?.(workspace.cwd, next.workspaces).catch(() => undefined);
       createdWorkspace = workspace;
       return createdResult(workspace, current, {
         created: true,

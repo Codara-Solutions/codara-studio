@@ -99,6 +99,9 @@ test("a Claude pane in a workspace starts with its folder already trusted, and o
     expect(live.numStartups).toBe(3);
     expect(live.projects["/elsewhere"]).toEqual({ hasTrustDialogAccepted: true });
     expect(live.projects[workspace].hasClaudeMdExternalIncludesApproved).toBe(false);
+    // Listed as Codara's, so claude-follow never copies it into the user's file.
+    const listed = JSON.parse(await readFile(join(codaraHome, "claude-cli", "live", "pretrusted-folders.json"), "utf8"));
+    expect(listed.folders).toEqual([workspace]);
 
     // An agent's command Studio does not rewrite, outside every workspace:
     // Claude still starts, and nothing is trusted for it.

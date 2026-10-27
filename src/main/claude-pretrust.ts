@@ -1,8 +1,15 @@
 import { promises as fs } from "node:fs";
-import { dirname, isAbsolute, join, relative, sep } from "node:path";
+import { homedir } from "node:os";
+import { dirname, isAbsolute, join, posix, relative, sep, win32 } from "node:path";
+import { lock } from "proper-lockfile";
 import { isRemotePath } from "@shared/remote";
 import type { Workspace } from "@shared/types";
-import { CLAUDE_DEFAULT_PROJECT_CONFIG } from "./claude-follow/config-sync";
+import {
+  CLAUDE_DEFAULT_PROJECT_CONFIG,
+  claudePretrustedFoldersFile,
+  formatClaudePretrustedFolders,
+  readClaudePretrustedFolders,
+} from "./claude-follow/config-sync";
 import { logMain } from "./file-log";
 import {
   claudeGlobalConfigFile,
@@ -10,7 +17,9 @@ import {
   updateClaudeGlobalConfig,
   type ClaudeLiveHome,
 } from "./orchestration/claude-cli-live-login";
+import { atomicWritePrivateFile } from "./orchestration/native-cli-atomic-file";
 import { workspaceProjectPolicyModeForTerminalCwd } from "./orchestration/project-policy";
+import { holdsPullRequestCode, isPullRequestRef } from "./pull-request-code";
 
 /**
  * Folder trust for the Claude Code sessions Codara starts. Claude Code asks
@@ -21,12 +30,19 @@ import { workspaceProjectPolicyModeForTerminalCwd } from "./orchestration/projec
  * record is written into the live slot's `.claude.json` before the launch.
  *
  * Only a folder the user added as a workspace, or a worktree Codara made from
- * one, is trusted, never an imported pull request, and only by adding: an
+ * one, is trusted: never pull-request code (an import, or a worktree made
+ * from one), never a repository nested inside the workspace, never the home
+ * folder, a folder above it or a filesystem root. Trust is only added: an
  * existing record and every other key stay as they are. The live slot's file
  * is written only when it already exists, because a managed home is seeded
  * from the user's own `.claude.json` on first use (cli-account-homes.ts) and
- * a file created here would stop that. The user's own `.claude.json` is never
- * written: a session on the System login still shows the prompt.
+ * a file created here would stop that.
+ *
+ * The user's own `.claude.json` is never written, directly or through
+ * claude-follow's sync: every folder trusted here is listed in Codara's
+ * record next to the live slot, and the sync leaves those out. A session on
+ * the System login still shows the prompt, on purpose: that user is at a
+ * terminal of their own and can answer it.
  *
  * Claude Code 2.1.311 looks the record up under the physical path of its
  * working directory (symlinks resolved), and walks up from there to the
@@ -103,14 +119,34 @@ export async function claudeTrustRoot(cwd: string): Promise<string | null> {
 type TrustWorkspace = Pick<Workspace, "cwd" | "copyBranch">;
 
 /**
- * The key to trust for a Claude session in `cwd`, or null when `cwd` is not
- * inside a local workspace (a worktree Codara made is one), is inside an
- * imported pull request, or does not exist.
+ * Claude Code never records trust for the home folder itself, and outside a
+ * repository its lookup walks every parent up to the filesystem root: a
+ * record on the home folder, on a folder above it, or on a root (a Windows
+ * drive included) would trust every folder below it that is not a repository.
+ */
+export async function isTooBroadToTrust(
+  key: string,
+  home: string,
+  platform: NodeJS.Platform = process.platform,
+): Promise<boolean> {
+  const paths = platform === "win32" ? win32 : posix;
+  if (paths.dirname(key) === key || paths.parse(key).root === key) return true;
+  const realHome = (await realpathOrNull(home)) ?? home;
+  return isInside(key, realHome);
+}
+
+/**
+ * The key to trust for a Claude session in `cwd`, or null when it must not
+ * be trusted: `cwd` is outside every local workspace (a worktree Codara made
+ * is one), inside pull-request code, in a repository nested in the workspace
+ * (a clone, a vendored copy, a submodule), gone, or the key would be the home
+ * folder, a folder above it or a filesystem root.
  */
 export async function claudeTrustKeyForCwd(
   cwd: string,
   workspaces: readonly TrustWorkspace[],
   platform: NodeJS.Platform = process.platform,
+  home: string = homedir(),
 ): Promise<string | null> {
   if (!cwd.trim() || isRemotePath(cwd)) return null;
   if ((await workspaceProjectPolicyModeForTerminalCwd(cwd, workspaces)) !== "trusted") return null;
@@ -119,43 +155,85 @@ export async function claudeTrustKeyForCwd(
   let scope: string | null = null;
   for (const workspace of workspaces) {
     if (!workspace.cwd.trim() || isRemotePath(workspace.cwd)) continue;
-    if (workspace.copyBranch?.origin?.kind === "github-pull-request") continue;
     const root = await realpathOrNull(workspace.cwd);
     if (!root || !isInside(root, real)) continue;
+    if (holdsPullRequestCode(workspace)) return null;
     // The innermost workspace decides: a worktree kept inside its repository
     // is its own scope, not the enclosing one's.
     if (scope === null || root.length > scope.length) scope = root;
   }
   if (scope === null) return null;
   const gitRoot = await claudeGitRoot(real);
+  if (gitRoot !== (await claudeGitRoot(scope))) return null;
   const key = gitRoot === null ? real : isInside(scope, gitRoot) ? gitRoot : scope;
+  if (await isTooBroadToTrust(key, home, platform)) return null;
   return claudeProjectKey(key, platform);
 }
 
 export type ClaudeTrustWrite = "added" | "present" | "no-config";
 
+async function readJsonObject(file: string): Promise<Record<string, unknown> | null> {
+  const stats = await fs.lstat(file).catch(() => null);
+  if (!stats?.isFile()) return null;
+  const parsed = JSON.parse(await fs.readFile(file, "utf8")) as unknown;
+  if (!isRecord(parsed)) throw new Error("Claude Code's config file is not an object");
+  return parsed;
+}
+
 /**
- * Add `projects[key].hasTrustDialogAccepted = true` to a home's `.claude.json`
- * under Claude Code's own lock. A folder Claude Code has no entry for gets
- * the entry its prompt would write; an existing entry keeps every other key.
- * A missing file is not created.
+ * Add `projects[key].hasTrustDialogAccepted = true` to a live slot's
+ * `.claude.json` under Claude Code's own lock. A folder Claude Code has no
+ * entry for gets the entry its prompt would write; an existing entry keeps
+ * every other key. A missing file is not created, checked again inside the
+ * lock. The folder is listed in Codara's record first (under that record's
+ * own lock), so claude-follow never sees the trust without the listing and
+ * never copies it into the user's `.claude.json`; a folder that was already
+ * trusted by someone else is not listed.
  */
 export async function addClaudeFolderTrust(home: ClaudeLiveHome, key: string): Promise<ClaudeTrustWrite> {
   const file = await claudeGlobalConfigFile(home);
-  const stats = await fs.lstat(file).catch(() => null);
-  if (!stats?.isFile()) return "no-config";
-  let added = false;
-  await updateClaudeGlobalConfig(home, (config) => {
-    if (config.projects !== undefined && !isRecord(config.projects)) return null;
-    const projects = (config.projects ?? {}) as Record<string, unknown>;
-    const entry = projects[key];
-    if (entry !== undefined && !isRecord(entry)) return null;
-    if (isRecord(entry) && entry.hasTrustDialogAccepted === true) return null;
-    added = true;
-    const base = isRecord(entry) ? entry : structuredClone(CLAUDE_DEFAULT_PROJECT_CONFIG);
-    return { ...config, projects: { ...projects, [key]: { ...base, hasTrustDialogAccepted: true } } };
+  if (!(await fs.lstat(file).catch(() => null))?.isFile()) return "no-config";
+  const record = claudePretrustedFoldersFile(home);
+  const release = await lock(record, {
+    realpath: false,
+    lockfilePath: `${record}.lock`,
+    retries: { retries: 20, minTimeout: 50, maxTimeout: 500 },
+    stale: 10_000,
   });
-  return added ? "added" : "present";
+  try {
+    const current = await readJsonObject(file);
+    if (!current) return "no-config";
+    const listed = await readClaudePretrustedFolders(home);
+    const projects = isRecord(current.projects) ? current.projects : {};
+    const entry = projects[key];
+    if (isRecord(entry) && entry.hasTrustDialogAccepted === true) return "present";
+    if (!listed.has(key)) {
+      listed.add(key);
+      await atomicWritePrivateFile(record, formatClaudePretrustedFolders(listed));
+    }
+    let seen = false;
+    let added = false;
+    await updateClaudeGlobalConfig(
+      home,
+      (config) => {
+        seen = true;
+        if (config.projects !== undefined && !isRecord(config.projects)) return null;
+        const inner = (config.projects ?? {}) as Record<string, unknown>;
+        const existing = inner[key];
+        if (existing !== undefined && !isRecord(existing)) return null;
+        if (isRecord(existing) && existing.hasTrustDialogAccepted === true) return null;
+        added = true;
+        const base = isRecord(existing) ? existing : structuredClone(CLAUDE_DEFAULT_PROJECT_CONFIG);
+        return { ...config, projects: { ...inner, [key]: { ...base, hasTrustDialogAccepted: true } } };
+      },
+      undefined,
+      { onlyIfExists: true },
+    );
+    if (!seen) return "no-config";
+    return added ? "added" : "present";
+  } finally {
+    await release().catch(() => undefined);
+  }
 }
 
 export interface ClaudePretrustDeps {
@@ -232,13 +310,15 @@ export async function pretrustClaudeFolder(
 /**
  * Trust a worktree Codara just made from `sourceCwd`, before it is saved as a
  * workspace of its own, so the first Claude pane there never asks. Only when
- * `sourceCwd` itself is in scope.
+ * `sourceCwd` itself is in scope and the checked-out `branch` is not a
+ * pull request's.
  */
 export async function pretrustClaudeWorktree(
   worktreePath: string,
   sourceCwd: string,
-  options: { deps?: ClaudePretrustDeps } = {},
+  options: { branch?: string | null; deps?: ClaudePretrustDeps } = {},
 ): Promise<ClaudeTrustWrite | "skipped" | "failed" | "timed-out"> {
+  if (isPullRequestRef(options.branch)) return "skipped";
   let deps: ClaudePretrustDeps | null = options.deps ?? null;
   try {
     deps ??= await productionDeps();

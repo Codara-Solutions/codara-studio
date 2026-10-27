@@ -86,7 +86,18 @@ async function load() {
     logLevel: "silent",
     tsconfig: path.join(ROOT, "tsconfig.node.json"),
   });
-  return { ...require(outfile), ...require(startup) };
+  const sync = path.join(TMP, "config-sync.cjs");
+  await build({
+    entryPoints: [path.join(ROOT, "src", "main", "claude-follow", "config-sync.ts")],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    target: "node20",
+    outfile: sync,
+    logLevel: "silent",
+    tsconfig: path.join(ROOT, "tsconfig.node.json"),
+  });
+  return { ...require(outfile), ...require(startup), sync: require(sync) };
 }
 
 function git(cwd, ...args) {
@@ -113,6 +124,13 @@ function layout() {
   git(at("repo"), "commit", "-q", "--allow-empty", "-m", "init");
   git(at("repo"), "worktree", "add", "-q", at("repo-wt"), "-b", "wt");
   fs.symlinkSync(base, at("link"));
+  // A repository cloned or vendored inside the workspace's, and a submodule.
+  fs.mkdirSync(at("repo", "vendor", "evil"), { recursive: true });
+  git(at("repo", "vendor", "evil"), "init", "-q");
+  fs.mkdirSync(at("lib"), { recursive: true });
+  git(at("lib"), "init", "-q");
+  git(at("lib"), "commit", "-q", "--allow-empty", "-m", "lib");
+  git(at("repo"), "-c", "protocol.file.allow=always", "submodule", "add", "-q", at("lib"), "libs/lib");
   return at;
 }
 
@@ -148,8 +166,14 @@ async function main() {
     const key = (cwd, workspaces) => trust.claudeTrustKeyForCwd(cwd, workspaces);
     // A workspace that is a repository: any folder in it trusts the root.
     assert.equal(await key(at("repo", "sub"), [ws(at("repo"))]), at("repo"));
-    // A parent folder added as a workspace: the repository inside it is trusted at its root.
-    assert.equal(await key(at("repo", "sub"), [ws(at())]), at("repo"));
+    // A parent folder added as a workspace: a repository inside it is not what the user added.
+    assert.equal(await key(at("repo", "sub"), [ws(at())]), null);
+    assert.equal(await key(at("plain", "deep"), [ws(at())]), at("plain", "deep"), "a plain folder under it is");
+    // A repository nested in the workspace's: a vendored clone, a submodule.
+    assert.equal(fs.statSync(at("repo", "libs", "lib", ".git")).isFile(), true, "the submodule is a real one");
+    assert.equal(await key(at("repo", "vendor", "evil"), [ws(at("repo"))]), null);
+    assert.equal(await key(at("repo", "libs", "lib"), [ws(at("repo"))]), null);
+    assert.equal(await key(at("repo", "vendor"), [ws(at("repo"))]), at("repo"), "the workspace's own folders still are");
     // A workspace inside a repository: the workspace folder, never the repository above it.
     assert.equal(await key(at("repo", "sub"), [ws(at("repo", "sub"))]), at("repo", "sub"));
     // Outside a repository, the folder Claude Code runs in.
@@ -159,6 +183,13 @@ async function main() {
       await key(at("repo-wt"), [ws(at("repo")), ws(at("repo-wt"), { copyBranch: { repoCwd: at("repo"), branch: "wt" } })]),
       at("repo-wt"),
     );
+    // Pull-request code: an import, or a worktree made from one or from a PR ref.
+    const madeFromPr = ws(at("repo-wt"), { copyBranch: { repoCwd: at("repo"), branch: "wt", pullRequestCode: true } });
+    assert.equal(await key(at("repo-wt"), [ws(at("repo")), madeFromPr]), null);
+    const prBase = ws(at("repo-wt"), { copyBranch: { repoCwd: at("repo"), branch: "wt", baseBranch: "codara/pr/ab/7/fix" } });
+    assert.equal(await key(at("repo-wt"), [ws(at("repo")), prBase]), null);
+    const prCheckout = ws(at("repo-wt"), { copyBranch: { repoCwd: at("repo"), branch: "codara/pr/ab/7/fix" } });
+    assert.equal(await key(at("repo-wt"), [ws(at("repo")), prCheckout]), null);
     // Reached through a symlink: still the physical key, from either side.
     assert.equal(await key(at("link", "repo", "sub"), [ws(at("repo"))]), at("repo"));
     assert.equal(await key(at("repo", "sub"), [ws(at("link", "repo"))]), at("repo"));
@@ -170,6 +201,24 @@ async function main() {
     const pr = ws(at("repo-wt"), { copyBranch: { repoCwd: at("repo"), branch: "wt", origin: { kind: "github-pull-request" } } });
     assert.equal(await key(at("repo-wt"), [ws(at()), pr]), null, "an imported pull request, even inside a trusted workspace");
     assert.equal(await key(at("repo-wt"), [pr]), null);
+  });
+
+  await check("never the home folder, a folder above it, or a filesystem root", async () => {
+    const home = process.env.HOME;
+    fs.mkdirSync(path.join(home, "notes", "deep"), { recursive: true });
+    const key = (cwd, workspaces) => trust.claudeTrustKeyForCwd(cwd, workspaces);
+    assert.equal(await key(home, [ws(home)]), null, "a home workspace opened at its root");
+    assert.equal(await key(path.join(home, "notes"), [ws(home)]), path.join(home, "notes"), "a folder under it is fine");
+    assert.equal(await key(TMP, [ws(TMP)]), null, "a folder above home");
+    assert.equal(await key("/", [ws("/")]), null, "the root");
+    // Home reached through a symlink is still home.
+    fs.symlinkSync(home, path.join(TMP, "home-link"));
+    assert.equal(await trust.isTooBroadToTrust(home, path.join(TMP, "home-link")), true);
+    for (const root of ["C:\\", "D:\\", "\\\\server\\share\\"]) {
+      assert.equal(await trust.isTooBroadToTrust(root, "C:\\Users\\me", "win32"), true, root);
+    }
+    assert.equal(await trust.isTooBroadToTrust("C:\\work\\repo", "C:\\Users\\me", "win32"), false);
+    assert.equal(await trust.isTooBroadToTrust(at("repo"), home), false);
   });
 
   await check("keys are written as Claude Code writes them", async () => {
@@ -252,6 +301,66 @@ async function main() {
     assert.equal(after.numStartups, 9);
     assert.deepEqual(after.projects["/claude"], { hasTrustDialogAccepted: true });
     assert.equal(after.projects["/locked"].hasTrustDialogAccepted, true);
+  });
+
+  const listed = (home) => {
+    try {
+      return readJson(path.join(path.dirname(home.configDir), "pretrusted-folders.json")).folders;
+    } catch {
+      return [];
+    }
+  };
+
+  await check("Codara lists the folders it trusted, and only those", async () => {
+    const home = liveHome("listed");
+    const file = path.join(home.configDir, ".claude.json");
+    writeJson(file, { projects: { "/by-the-user": { hasTrustDialogAccepted: true } } });
+    assert.equal(await trust.addClaudeFolderTrust(home, "/by-codara"), "added");
+    assert.equal(await trust.addClaudeFolderTrust(home, "/by-the-user"), "present");
+    assert.deepEqual(listed(home), ["/by-codara"]);
+    const record = path.join(path.dirname(home.configDir), "pretrusted-folders.json");
+    assert.equal(fs.statSync(record).mode & 0o777, 0o600);
+  });
+
+  await check("a config removed while the lock is awaited is not created", async () => {
+    const { lock } = require("proper-lockfile");
+    const home = liveHome("vanishing");
+    const file = path.join(home.configDir, ".claude.json");
+    writeJson(file, {});
+    const release = await lock(file, { realpath: false, lockfilePath: `${file}.lock` });
+    const write = trust.addClaudeFolderTrust(home, "/gone");
+    // The folder is listed before the write waits for Claude Code's lock.
+    for (let attempt = 0; attempt < 200 && listed(home).length === 0; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    fs.rmSync(file);
+    await release();
+    assert.equal(await write, "no-config");
+    assert.equal(fs.existsSync(file), false);
+  });
+
+  await check("claude-follow never copies Codara's trust into the user's .claude.json", async () => {
+    const live = liveHome("follow");
+    const userDir = path.join(TMP, "follow-user");
+    fs.mkdirSync(userDir, { recursive: true });
+    const user = { configDir: path.join(userDir, ".claude"), configDirEnv: null, homeDir: userDir };
+    const userFile = path.join(userDir, ".claude.json");
+    writeJson(userFile, { projects: {} });
+    const liveFile = path.join(live.configDir, ".claude.json");
+    writeJson(liveFile, { projects: { "/answered-in-a-following-terminal": { hasTrustDialogAccepted: true } } });
+    assert.equal(await trust.addClaudeFolderTrust(live, "/workspace"), "added");
+    const baseFile = path.join(TMP, "follow-base.json");
+    await trust.sync.syncClaudeFollowConfig({ userHome: user, liveHome: live, baseFile });
+    const mine = readJson(userFile).projects;
+    assert.equal(mine["/answered-in-a-following-terminal"].hasTrustDialogAccepted, true, "the user's own answer still reaches their file");
+    assert.equal(mine["/workspace"], undefined, "Codara's never does");
+    assert.equal(readJson(liveFile).projects["/workspace"].hasTrustDialogAccepted, true, "and stays in the live slot");
+    // A second pass, and a user who trusts the folder themselves, change nothing for it.
+    mine["/workspace"] = { hasTrustDialogAccepted: false };
+    writeJson(userFile, { projects: mine });
+    await trust.sync.syncClaudeFollowConfig({ userHome: user, liveHome: live, baseFile });
+    assert.equal(readJson(userFile).projects["/workspace"].hasTrustDialogAccepted, false);
+    assert.equal(readJson(liveFile).projects["/workspace"].hasTrustDialogAccepted, true);
   });
 
   const deps = (home, workspaces, logs = [], extra = {}) => ({

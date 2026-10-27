@@ -1,5 +1,5 @@
 import { promises as fs } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { outsideWriteCapability } from "../outside-write-guard";
 import {
   claudeGlobalConfigFile,
@@ -33,6 +33,11 @@ import { atomicWritePrivateFile, readPrivateJsonFile } from "../orchestration/na
  * merge saw, so a concurrent Claude Code save is never undone; an entry that
  * moved meanwhile waits for the next pass. Every other key, and every entry
  * older Codara builds marked as theirs, is left as it is.
+ *
+ * Folder trust Codara added itself, before launching Claude Code in a
+ * workspace (claude-pretrust.ts), is the live slot's own and never moves:
+ * the folders are listed in a record next to the live slot, and their trust
+ * leaves are left out of the merge on both sides.
  */
 
 /** The one write into the user's own `.claude.json`. */
@@ -67,6 +72,25 @@ function meaningful(key: string, value: unknown): boolean {
 }
 
 const leafKey = (...path: string[]): string => JSON.stringify(path);
+
+const PRETRUSTED_VERSION = 1;
+
+/** Codara's list of the folders it trusted in a live slot: next to the slot, never inside the user's homes. */
+export function claudePretrustedFoldersFile(liveHome: ClaudeLiveHome): string {
+  return join(dirname(liveHome.configDir), "pretrusted-folders.json");
+}
+
+/** The folders Codara trusted in this live slot; empty when the record is missing or unreadable. */
+export async function readClaudePretrustedFolders(liveHome: ClaudeLiveHome): Promise<Set<string>> {
+  const read = await readPrivateJsonFile(claudePretrustedFoldersFile(liveHome));
+  if (read.kind !== "value" || !isRecord(read.value) || read.value.version !== PRETRUSTED_VERSION) return new Set();
+  const folders = Array.isArray(read.value.folders) ? read.value.folders : [];
+  return new Set(folders.filter((folder): folder is string => typeof folder === "string"));
+}
+
+export function formatClaudePretrustedFolders(folders: Iterable<string>): string {
+  return `${JSON.stringify({ version: PRETRUSTED_VERSION, folders: [...folders].sort() }, null, 2)}\n`;
+}
 
 /** The synced entries of one config, keyed by their path. */
 export function syncedLeaves(config: Record<string, unknown> | null): Leaves {
@@ -279,9 +303,14 @@ export async function syncClaudeFollowConfig(input: ConfigSyncInput): Promise<Co
     return { toUser: 0, toLive: 0, deferred: 0, userWritable };
   }
   if (!live) return { toUser: 0, toLive: 0, deferred: 0, userWritable };
-  const base = await readBase(input.baseFile);
-  const userLeaves = userWritable ? syncedLeaves(user) : base;
-  const liveLeaves = syncedLeaves(live);
+  const pretrusted = await readClaudePretrustedFolders(input.liveHome);
+  const withoutPretrusted = (leaves: Leaves): Leaves => {
+    for (const folder of pretrusted) leaves.delete(leafKey("projects", folder, "hasTrustDialogAccepted"));
+    return leaves;
+  };
+  const base = withoutPretrusted(await readBase(input.baseFile));
+  const userLeaves = userWritable ? withoutPretrusted(syncedLeaves(user)) : base;
+  const liveLeaves = withoutPretrusted(syncedLeaves(live));
   const plan = planConfigMerge(userLeaves, liveLeaves, base);
   if (!userWritable) plan.toUser.clear();
   await input.beforeWrite?.();
