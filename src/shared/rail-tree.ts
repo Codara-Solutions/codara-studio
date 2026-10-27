@@ -178,3 +178,41 @@ export function buildRailFamily(input: RailFamilyInput): RailFamily {
     all: all.sort(byUrgency),
   };
 }
+
+/** A workspace's agent census as App counts it (agentsByWorkspaceId). */
+export interface RailAgentCount {
+  total: number;
+  working: number;
+  sleeping: number;
+}
+
+export interface RailFamilyAgentCount extends RailAgentCount {
+  /** Of `total`, the agents whose workspace is one of the project's worktrees. */
+  inWorktrees: number;
+}
+
+/**
+ * The number on a project's row: its own agents plus every worktree's, merged
+ * ones included, so a folded project still shows that agents work inside it.
+ * It is the one place the rail counts agents (DESIGN.md, "One home for agent
+ * counts"); the family's roll-up line no longer does.
+ */
+export function railFamilyAgentCount(
+  project: Partial<RailAgentCount> | undefined,
+  worktrees: ReadonlyArray<Partial<RailAgentCount> | undefined>,
+): RailFamilyAgentCount {
+  const sum: RailFamilyAgentCount = {
+    total: project?.total ?? 0,
+    working: project?.working ?? 0,
+    sleeping: project?.sleeping ?? 0,
+    inWorktrees: 0,
+  };
+  for (const count of worktrees) {
+    const total = count?.total ?? 0;
+    sum.total += total;
+    sum.working += count?.working ?? 0;
+    sum.sleeping += count?.sleeping ?? 0;
+    sum.inWorktrees += total;
+  }
+  return sum;
+}

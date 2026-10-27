@@ -173,7 +173,7 @@ export function buildAgentLines(input: AgentLinesInput): Record<string, AgentLin
   return out;
 }
 
-export type WorkspaceSummaryPartKind = "working" | "needs-you" | "ready" | "inbox" | "done" | "idle";
+export type WorkspaceSummaryPartKind = "working" | "needs-you" | "ready" | "inbox" | "done" | "idle" | "running";
 
 export interface WorkspaceSummaryPart {
   kind: WorkspaceSummaryPartKind;
@@ -200,15 +200,32 @@ function plural(count: number, word: string): string {
   return `${count} ${word}${count === 1 ? "" : "s"}`;
 }
 
+export interface SummarizeWorkspaceOptions {
+  /**
+   * "rail": the line under a workspace's name in the rail, whose number at
+   * the row's right edge is the one home for agent counts (DESIGN.md, "One
+   * home for agent counts"). It speaks only when something needs the user or
+   * finished: needs you, ready, in inbox, done. It never counts agents
+   * working or idle, tasks running read as tasks ("1 task running"), and it
+   * is null when there is nothing to say. The description keeps the full
+   * account. "full" (the default) is the line as it reads elsewhere.
+   */
+  variant?: "full" | "rail";
+}
+
 /**
  * The workspace's one line, computed from its agents and its task list (PR
  * #45's counts), never written by a model. Agents working and tasks running
  * read as "working", agents and tasks waiting on the user as "needs you", and
  * finished turns the user has not opened plus tasks closed today as "done".
  * A workspace whose agents are all idle says so; one with neither agents nor
- * a task list has no line (null).
+ * a task list has no line (null). The rail variant differs; see its option.
  */
-export function summarizeWorkspace(lines: readonly AgentLine[], tasks: TaskSummary | null): WorkspaceSummary | null {
+export function summarizeWorkspace(
+  lines: readonly AgentLine[],
+  tasks: TaskSummary | null,
+  options: SummarizeWorkspaceOptions = {},
+): WorkspaceSummary | null {
   if (lines.length === 0 && !tasks) return null;
   const agents = countStates(lines);
   const t = tasks?.counts ?? { inbox: 0, ready: 0, running: 0, needsYou: 0, doneToday: 0 };
@@ -219,12 +236,15 @@ export function summarizeWorkspace(lines: readonly AgentLine[], tasks: TaskSumma
   const working = agents.working + t.running;
   const needsYou = agents["needs-you"] + t.needsYou;
   const done = agents.done + t.doneToday;
-  add("working", working, `${working} working`);
+  const rail = options.variant === "rail";
+  if (!rail) add("working", working, `${working} working`);
   add("needs-you", needsYou, `${needsYou} needs you`);
   add("ready", t.ready, `${t.ready} ready`);
   add("inbox", t.inbox, `${t.inbox} in inbox`);
   add("done", done, t.doneToday > 0 ? `${done} done today` : `${done} done`);
-  if (parts.length === 0 && agents.idle > 0) add("idle", agents.idle, `${plural(agents.idle, "agent")} idle`);
+  if (rail) add("running", t.running, `${plural(t.running, "task")} running`);
+  else if (parts.length === 0 && agents.idle > 0) add("idle", agents.idle, `${plural(agents.idle, "agent")} idle`);
+  if (rail && parts.length === 0) return null;
   const line = parts.length > 0 ? parts.map((part) => part.text).join(" · ") : "Nothing on the list";
 
   const sentences: string[] = [];

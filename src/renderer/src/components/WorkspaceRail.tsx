@@ -52,7 +52,7 @@ import { openWorktreeCleanup } from "./worktree-cleanup/open-worktree-cleanup";
 import { PullRequestMark } from "../git/PullRequestMark";
 import { setRepositoryWatched, usePullRequestWatch } from "../git/pullRequestWatchStore";
 import type { WorktreeRailCleanupResult, WorktreeRailState } from "@shared/worktree-cleanup";
-import { buildRailFamily, buildRailTree, railMergeState, type RailTree } from "@shared/rail-tree";
+import { buildRailFamily, buildRailTree, railFamilyAgentCount, railMergeState, type RailTree } from "@shared/rail-tree";
 import type { AgentLine } from "@shared/agent-status";
 
 const PANEL_SECTION_MIME = "application/x-codara-panel-section";
@@ -2031,6 +2031,8 @@ interface RowProps {
   agentWorking?: number;
   /** How many of those Codara stopped to save memory (agent hibernation). */
   agentSleeping?: number;
+  /** A project's row: how many of its counted agents work in its worktrees. */
+  agentInWorktrees?: number;
   /** Current git branch (or short hash when detached); null hides the subtitle. */
   branch?: string | null;
   /** The workspace's folder is not on disk right now (moved/renamed/unmounted). */
@@ -2079,8 +2081,8 @@ function worktreesOf(tree: RailTree, projectId: string, byId: ReadonlyMap<string
 /**
  * A project's row and, under it, its agents and worktrees (DESIGN.md,
  * "Worktrees in the rail"). Each agent shows on the row it works in; the
- * project's roll-up counts them all, so a folded family still says what
- * waits inside it.
+ * project's number and roll-up line cover them all, so a folded family still
+ * says what works and waits inside it.
  */
 function WorkspaceFamily({
   project,
@@ -2115,6 +2117,13 @@ function WorkspaceFamily({
       };
     }),
   });
+  const familyCount = railFamilyAgentCount(
+    { total: projectProps.agentTotal, working: projectProps.agentWorking, sleeping: projectProps.agentSleeping },
+    worktrees.map((worktree) => {
+      const props = childProps.get(worktree.id)!;
+      return { total: props.agentTotal, working: props.agentWorking, sleeping: props.agentSleeping };
+    }),
+  );
   const expandable = family.own.length > 0 || worktrees.length > 0;
   const open = useRailFold(project.id, worktrees.length > 0) && expandable;
   const mergedOpen = useRailFold(`merged:${project.id}`, false);
@@ -2130,6 +2139,10 @@ function WorkspaceFamily({
     <>
       <WorkspaceRow
         {...projectProps}
+        agentTotal={familyCount.total}
+        agentWorking={familyCount.working}
+        agentSleeping={familyCount.sleeping}
+        agentInWorktrees={familyCount.inWorktrees}
         fold={{ expandable, open, onToggle: () => setRailFold(project.id, !open) }}
         rollupLines={family.all}
       />
@@ -2181,6 +2194,7 @@ function WorkspaceRow({
   agentTotal = 0,
   agentWorking = 0,
   agentSleeping = 0,
+  agentInWorktrees = 0,
   branch = null,
   missing = false,
   worktree = null,
@@ -2734,7 +2748,13 @@ function WorkspaceRow({
         )}
 
         {agentTotal > 0 && !editing && !nested && (
-          <AgentCount total={agentTotal} working={agentWorking} sleeping={agentSleeping} accent={accent} />
+          <AgentCount
+            total={agentTotal}
+            working={agentWorking}
+            sleeping={agentSleeping}
+            inWorktrees={agentInWorktrees}
+            accent={accent}
+          />
         )}
 
         {!editing && (canCleanUp || canRemoveFromRail) && (rowHover || cleaning || moreFocus) && (
@@ -3203,13 +3223,22 @@ function RowMenuItem({
 // accent the moment one of them is mid-turn. Same 10px tabular type as the
 // folder header's member count; the slash and the row placement keep the two
 // apart, and no glyph or chip is drawn so the rail stays quiet.
-function AgentCount(props: { total: number; working: number; sleeping?: number; accent: string }) {
-  const { total, working, sleeping = 0, accent } = props;
+// It is the row's one agent count: the line under the name no longer repeats
+// it (DESIGN.md, "One home for agent counts"). A project's number covers its
+// worktrees too, and its label says how many of those agents work there.
+function AgentCount(props: { total: number; working: number; sleeping?: number; inWorktrees?: number; accent: string }) {
+  const { total, working, sleeping = 0, inWorktrees = 0, accent } = props;
   const base =
     working > 0
       ? `${working} of ${total} agent${total === 1 ? "" : "s"} working`
       : `${total} agent${total === 1 ? "" : "s"} idle`;
-  const label = sleeping > 0 ? `${base}, ${sleeping} sleeping` : base;
+  const label = [
+    base,
+    sleeping > 0 ? `${sleeping} sleeping` : null,
+    inWorktrees > 0 ? `${inWorktrees} in worktree${inWorktrees === 1 ? "" : "s"}` : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
   return (
     <span
       role="status"

@@ -237,3 +237,35 @@ child row lighter than its parent), GitHub's PR list for the check glyphs.
   at most three lines, and goes on ×, on the next Clean up, or once the
   worktree leaves the rail. Test and build output never counts as something
   a worktree holds.
+
+## One home for agent counts (2026-10)
+
+**Chosen:** B, number only. The number at a workspace row's right edge is the
+one place the rail counts agents: a muted "3" while they are idle, "1/3" in
+the workspace's accent while one works, unchanged. The line under the name
+speaks only when something needs the user or finished: "needs you" (danger,
+semibold), "ready", "in inbox", "done" or "done today". It never says "N
+working" or "N agents idle", so an idle workspace is a one-line row. Picked
+from the 2026-10-27 rail mock-up (A to D); Etienne chose B.
+
+**Why:** a row said its agent count twice, once in the line ("1 agent idle",
+"2 working · 1 idle") and once in the number beside it. One home for agent
+counts; the line under a workspace speaks only when something needs you or
+finished.
+
+**Rules:**
+
+- A project's number counts its whole family: its own agents plus every
+  worktree's (merged ones too), working and sleeping alike, so a folded
+  project still shows that agents work inside it. Its tooltip and accessible
+  name say how many of them are in worktrees ("1 of 3 agents working, 2 in
+  worktrees").
+- Tasks of the workspace's list that are still running are not agents. When
+  they show on the line they read as tasks ("1 task running"), muted and
+  last, never as "working".
+- The line's tooltip and accessible name keep the full account (every
+  agent's state, the task list, who needs you and why).
+- The rail variant lives in `summarizeWorkspace(..., { variant: "rail" })`;
+  other callers keep the full line.
+- Worktree rows under a project keep their own agent line (state dot and
+  word): it names one agent, it is not a count.

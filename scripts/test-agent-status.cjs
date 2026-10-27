@@ -213,6 +213,54 @@ function summaryMergesAgentsAndTasks(mod) {
   assert.equal(mod.agentLineAge({ since: 0 }, NOW), null);
 }
 
+function railSummarySpeaksOnlyWhenNeeded(mod) {
+  const { summarizeWorkspace: summarize } = mod;
+  const rail = { variant: "rail" };
+  const a = lines(mod, {
+    activity: [
+      activity("w1", "working"),
+      activity("w2", "working"),
+      activity("n1", "blocked", { question: "Allow npm test?" }),
+      activity("i1", "idle"),
+    ],
+  })["ws-a"];
+  // The row's number counts the agents; the line names only what needs the user.
+  const agentsOnly = summarize(a, null, rail);
+  assert.equal(agentsOnly.line, "1 needs you", "no agent count on the line");
+  assert.deepEqual(agentsOnly.parts.map((part) => part.kind), ["needs-you"]);
+  assert.equal(agentsOnly.needsYou, 1);
+  assert.match(agentsOnly.description, /4 agents: 1 needs you, 2 working, 1 idle\./, "the tooltip keeps the full account");
+
+  const tasks = {
+    counts: { inbox: 1, ready: 2, running: 1, needsYou: 1, doneToday: 3 },
+    line: "1 running · 1 needs you · 2 ready · 1 in inbox · 3 done today",
+    needsYou: { taskId: "T4", title: "Ship it", reason: "Approve the deploy" },
+    updatedAt: NOW,
+  };
+  const merged = summarize(a, tasks, rail);
+  assert.equal(merged.line, "2 needs you · 2 ready · 1 in inbox · 3 done today · 1 task running");
+  assert.deepEqual(merged.parts.map((part) => part.kind), ["needs-you", "ready", "inbox", "done", "running"]);
+  assert.match(merged.description, /Tasks: 1 running/);
+
+  // Working and idle agents alone leave the row on one line.
+  const working = lines(mod, { activity: [activity("w1", "working"), activity("i1", "idle")] })["ws-a"];
+  assert.equal(summarize(working, null, rail), null, "agents working say nothing under the name");
+  const idle = lines(mod, { activity: [activity("i1", "idle"), activity("i2", "idle")] })["ws-a"];
+  assert.equal(summarize(idle, null, rail), null, "idle agents say nothing under the name");
+  const empty = { ...tasks, counts: { inbox: 0, ready: 0, running: 0, needsYou: 0, doneToday: 0 }, needsYou: undefined };
+  assert.equal(summarize([], empty, rail), null, "an empty task list says nothing either");
+
+  // Tasks running are tasks, never read as agents.
+  const running = summarize(working, { ...empty, counts: { ...empty.counts, running: 2 } }, rail);
+  assert.equal(running.line, "2 tasks running");
+  const done = summarize(lines(mod, { activity: [activity("d1", "idle")], unseen: { d1: "complete" } })["ws-a"], null, rail);
+  assert.equal(done.line, "1 done", "a finished turn still shows");
+
+  // Without the option the line reads as it always did.
+  assert.equal(summarize(a, null).line, "2 working · 1 needs you");
+  assert.equal(summarize(idle, null).line, "2 agents idle");
+}
+
 function focusClearsDone(mod) {
   const { clearSeenAttention: clear } = mod;
   const attention = {
@@ -336,6 +384,8 @@ async function closedPaneDropsItsNote(status) {
     console.log("notes on their own line: ok");
     summaryMergesAgentsAndTasks(mod);
     console.log("workspace summary line: ok");
+    railSummarySpeaksOnlyWhenNeeded(mod);
+    console.log("rail summary line speaks only when needed: ok");
     focusClearsDone(mod);
     console.log("focus clears done: ok");
     const status = await bundle(

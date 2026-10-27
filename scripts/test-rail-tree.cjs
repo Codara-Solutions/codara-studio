@@ -193,6 +193,29 @@ test("a row's merge state is unknown only until the first read finished", ({ mod
   assert.equal(mod.railMergeState(false, { remote: false, loaded: false }), false);
 });
 
+test("a project's number counts its worktrees' agents too", ({ mod }) => {
+  // The roll-up line no longer counts agents, so a folded project shows
+  // through its number that agents work inside it.
+  assert.deepEqual(
+    mod.railFamilyAgentCount({ total: 1, working: 0, sleeping: 0 }, [
+      { total: 2, working: 1, sleeping: 0 },
+      undefined,
+      { total: 1, working: 0, sleeping: 1 },
+    ]),
+    { total: 4, working: 1, sleeping: 1, inWorktrees: 3 },
+  );
+  assert.deepEqual(
+    mod.railFamilyAgentCount(undefined, [{ total: 1, working: 1 }]),
+    { total: 1, working: 1, sleeping: 0, inWorktrees: 1 },
+    "a project with no agent of its own still counts its worktree's",
+  );
+  assert.deepEqual(
+    mod.railFamilyAgentCount({ total: 2, working: 2, sleeping: 0 }, []),
+    { total: 2, working: 2, sleeping: 0, inWorktrees: 0 },
+    "a project without worktrees counts its own",
+  );
+});
+
 (async () => {
   const { mod, cleanup } = await load();
   let failed = 0;
