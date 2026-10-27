@@ -259,12 +259,17 @@ finished.
   worktree's (merged ones too), working and sleeping alike, so a folded
   project still shows that agents work inside it. Its tooltip and accessible
   name say how many of them are in worktrees ("1 of 3 agents working, 2 in
-  worktrees").
+  worktrees"), counting the agents shown on worktree rows. The row is busy
+  (`aria-busy`) while any agent of the family works.
 - Tasks of the workspace's list that are still running are not agents. When
   they show on the line they read as tasks ("1 task running"), muted and
   last, never as "working".
-- The line's tooltip and accessible name keep the full account (every
-  agent's state, the task list, who needs you and why).
+- The line's tooltip and accessible name say who needs you and why and give
+  the task list. They never tally agents: the number does, from its own
+  census, and two counts could disagree.
+- "Working" in the number means what the agent lines call working: mid-turn,
+  in the background, quiet ("No output") or starting. A quiet agent mid-turn
+  never reads as idle.
 - The rail variant lives in `summarizeWorkspace(..., { variant: "rail" })`;
   other callers keep the full line.
 - Worktree rows under a project keep their own agent line (state dot and

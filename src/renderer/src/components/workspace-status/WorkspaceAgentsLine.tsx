@@ -218,8 +218,8 @@ export function WorkspaceAgentsLine({
       {summary && (
         <span
           role="note"
-          aria-label={`${summary.line}. ${summary.description}`}
-          title={summary.description}
+          aria-label={summary.description ? `${summary.line}. ${summary.description}` : summary.line}
+          title={summary.description || undefined}
           data-testid="workspace-agents-summary"
           data-needs-you={summary.needsYou > 0 ? "true" : "false"}
           style={{

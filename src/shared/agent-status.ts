@@ -207,8 +207,10 @@ export interface SummarizeWorkspaceOptions {
    * home for agent counts"). It speaks only when something needs the user or
    * finished: needs you, ready, in inbox, done. It never counts agents
    * working or idle, tasks running read as tasks ("1 task running"), and it
-   * is null when there is nothing to say. The description keeps the full
-   * account. "full" (the default) is the line as it reads elsewhere.
+   * is null when there is nothing to say. Its description names who needs
+   * the user and why and gives the task list, but leaves the agent tally to
+   * the number, which counts from another source and could disagree. "full"
+   * (the default) is the line as it reads elsewhere.
    */
   variant?: "full" | "rail";
 }
@@ -248,7 +250,7 @@ export function summarizeWorkspace(
   const line = parts.length > 0 ? parts.map((part) => part.text).join(" · ") : "Nothing on the list";
 
   const sentences: string[] = [];
-  if (lines.length > 0) {
+  if (lines.length > 0 && !rail) {
     const said = (["needs-you", "working", "done", "idle"] as const)
       .filter((state) => agents[state] > 0)
       .map((state) => `${agents[state]} ${AGENT_LINE_STATE_LABELS[state].toLowerCase()}`);

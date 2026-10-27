@@ -235,8 +235,9 @@ test("a workspace counts its agents in its number, says what needs you in one li
       await expect(summary).toHaveText("1 needs you", { timeout: 20_000 });
       await expect(summary.locator('[data-part="needs-you"]')).toHaveText("1 needs you");
       await expect(summary).toHaveAttribute("data-needs-you", "true");
-      // The full account stays on hover.
-      await expect(summary).toHaveAttribute("title", /3 agents: 1 needs you, 2 working\./);
+      // Hover says who needs you and why; counting agents is the number's job.
+      await expect(summary).toHaveAttribute("title", /needs you: Allow npm test\?/);
+      await expect(summary).not.toHaveAttribute("title", /working|idle/);
       await expect(children(page, "ws-a")).toHaveCount(0);
       await shot(page, "rail-collapsed");
     });

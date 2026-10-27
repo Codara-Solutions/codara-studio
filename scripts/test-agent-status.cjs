@@ -229,7 +229,8 @@ function railSummarySpeaksOnlyWhenNeeded(mod) {
   assert.equal(agentsOnly.line, "1 needs you", "no agent count on the line");
   assert.deepEqual(agentsOnly.parts.map((part) => part.kind), ["needs-you"]);
   assert.equal(agentsOnly.needsYou, 1);
-  assert.match(agentsOnly.description, /4 agents: 1 needs you, 2 working, 1 idle\./, "the tooltip keeps the full account");
+  assert.match(agentsOnly.description, /^Claude Code · n1 needs you: Allow npm test\?$/, "the tooltip says who needs you and why");
+  assert.doesNotMatch(agentsOnly.description, /agents?:|working|idle/, "and leaves the agent tally to the number");
 
   const tasks = {
     counts: { inbox: 1, ready: 2, running: 1, needsYou: 1, doneToday: 3 },
@@ -241,6 +242,7 @@ function railSummarySpeaksOnlyWhenNeeded(mod) {
   assert.equal(merged.line, "2 needs you · 2 ready · 1 in inbox · 3 done today · 1 task running");
   assert.deepEqual(merged.parts.map((part) => part.kind), ["needs-you", "ready", "inbox", "done", "running"]);
   assert.match(merged.description, /Tasks: 1 running/);
+  assert.match(merged.description, /T4 Ship it needs you: Approve the deploy/);
 
   // Working and idle agents alone leave the row on one line.
   const working = lines(mod, { activity: [activity("w1", "working"), activity("i1", "idle")] })["ws-a"];
@@ -256,8 +258,9 @@ function railSummarySpeaksOnlyWhenNeeded(mod) {
   const done = summarize(lines(mod, { activity: [activity("d1", "idle")], unseen: { d1: "complete" } })["ws-a"], null, rail);
   assert.equal(done.line, "1 done", "a finished turn still shows");
 
-  // Without the option the line reads as it always did.
+  // Without the option the line and its account read as they always did.
   assert.equal(summarize(a, null).line, "2 working · 1 needs you");
+  assert.match(summarize(a, null).description, /4 agents: 1 needs you, 2 working, 1 idle\./);
   assert.equal(summarize(idle, null).line, "2 agents idle");
 }
 

@@ -2123,6 +2123,7 @@ function WorkspaceFamily({
       const props = childProps.get(worktree.id)!;
       return { total: props.agentTotal, working: props.agentWorking, sleeping: props.agentSleeping };
     }),
+    [...family.active, ...family.merged],
   );
   const expandable = family.own.length > 0 || worktrees.length > 0;
   const open = useRailFold(project.id, worktrees.length > 0) && expandable;
@@ -2413,7 +2414,9 @@ function WorkspaceRow({
         if (!editing && !pressInAgents.current) setRowPressed(true);
       }}
       onMouseUp={() => setRowPressed(false)}
-      aria-busy={working}
+      // A project's number counts its whole family; busy follows it, so an
+      // agent working in a folded worktree still marks the project busy.
+      aria-busy={working || agentWorking > 0}
       data-agent-working={working ? "true" : undefined}
       data-copy-branch={ws.copyBranch ? "true" : undefined}
       style={{

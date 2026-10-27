@@ -11,7 +11,7 @@ import { delimiter, join } from "node:path";
 // pull request. The worktrees hang under their project, not in the top-level
 // list; each shows its branch with its PR mark, then its agent; the one an
 // agent works in comes first and the project's number counts that agent.
-// Clicking the row opens the project, the chevron only folds it, and the
+// A click anywhere on the row opens the project, the chevron only folds it, and the
 // merged worktrees wait in their own fold until Clean up, after a confirm
 // that names them, removes them.
 // RAIL_WORKTREES_SHOTS=<dir> also saves the rail in dracula and daylight.
@@ -328,8 +328,8 @@ test("worktrees hang under their project with their PR and their agent", async (
       await shots(page, "rail-worktrees");
     });
 
-    await test.step("the number opens the project; the chevron only folds it", async () => {
-      await row(page, "ws-app").getByTestId("workspace-agent-count").click();
+    await test.step("a click anywhere on the row opens the project; the chevron only folds it", async () => {
+      await row(page, "ws-app").getByTitle("widgets", { exact: true }).click();
       await expect(row(page, "ws-app")).toHaveAttribute("data-active", "true");
       await row(page, "ws-other").click();
       const toggle = row(page, "ws-app").getByTestId("workspace-children-toggle");
@@ -341,6 +341,7 @@ test("worktrees hang under their project with their PR and their agent", async (
       // Folded, the project still says what works inside it.
       await expect(row(page, "ws-app").getByTestId("workspace-agent-count")).toHaveText("1/1");
       await expect(row(page, "ws-app").getByTestId("workspace-agent-count")).toHaveAttribute("data-working", "true");
+      await expect(row(page, "ws-app")).toHaveAttribute("aria-busy", "true");
       await toggle.click();
       await row(page, "wt-idle").getByTestId("worktree-agent-line").click();
       await expect(row(page, "wt-idle")).toHaveAttribute("data-active", "true");
