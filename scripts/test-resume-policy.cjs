@@ -27,7 +27,14 @@ async function main() {
     outfile,
     logLevel: "silent",
   });
-  const { decideResume, canAutoResume, pruneAttempts, mergeSessionStart, adoptLiveSessionAccount } = require(outfile);
+  const {
+    decideResume,
+    canAutoResume,
+    pruneAttempts,
+    mergeSessionStart,
+    adoptLiveSessionAccount,
+    relocateResumePointer,
+  } = require(outfile);
 
   let failures = 0;
   const check = (name, cond) => {
@@ -263,6 +270,49 @@ async function main() {
   );
   check("adopt: a Pi pointer has no account", adoptLiveSessionAccount({ ...claudePtr, runtime: "pi" }, { nativeClaudeProfileId: B }) === null);
   check("adopt: no pointer, nothing to adopt", adoptLiveSessionAccount(null, { nativeClaudeProfileId: B }) === null);
+
+  // ── relocateResumePointer: a pointer that saved a cwd the agent cd'ed into
+  // resumes from the start cwd the probe found its transcript under ──
+  const movedPtr = {
+    runtime: "claude",
+    sessionId: "0d34e9f6-eaa0-4b77-b80e-11d4c469602b",
+    cwd: "/home/u/Codara SL/Studio/codara-studio",
+    nativeClaudeProfileId: "profile-a",
+    capturedAt: "2026-10-27T13:34:09.304Z",
+    active: true,
+  };
+  const foundAt = "/cfg/projects/-home-u-Codara-SL/0d34e9f6-eaa0-4b77-b80e-11d4c469602b.jsonl";
+  const moved = relocateResumePointer(movedPtr, {
+    exists: true,
+    resumable: true,
+    transcriptPath: foundAt,
+    cwd: "/home/u/Codara SL",
+  });
+  check("relocate: resumes from the start cwd", moved?.cwd === "/home/u/Codara SL");
+  check("relocate: records where the transcript was found", moved?.transcriptPath === foundAt);
+  check(
+    "relocate: keeps id, account and liveness",
+    moved?.sessionId === movedPtr.sessionId &&
+      moved?.nativeClaudeProfileId === "profile-a" &&
+      moved?.active === true &&
+      moved?.capturedAt === movedPtr.capturedAt,
+  );
+  check(
+    "relocate: the decision is still a plain resume",
+    decideResume({ exists: true, resumable: true, cwd: "/home/u/Codara SL" }, "claude").kind === "resume",
+  );
+  check(
+    "relocate: a probe found under the pointer's own cwd moves nothing",
+    relocateResumePointer(movedPtr, { exists: true, resumable: true, transcriptPath: foundAt }) === null,
+  );
+  check(
+    "relocate: the same cwd moves nothing",
+    relocateResumePointer(movedPtr, { exists: true, cwd: movedPtr.cwd }) === null,
+  );
+  check(
+    "relocate: a missing transcript moves nothing (fresh fallback stays in place)",
+    relocateResumePointer(movedPtr, { exists: false, cwd: "/home/u/Codara SL" }) === null,
+  );
 
   if (failures > 0) {
     console.error(`${failures} failure(s)`);

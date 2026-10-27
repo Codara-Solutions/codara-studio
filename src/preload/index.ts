@@ -1375,7 +1375,7 @@ const api = {
       nativeCodexProfileId?: string;
       nativeClaudeProfileId?: string;
       nativeGrokProfileId?: string;
-    }): Promise<{ exists: boolean; resumable?: boolean; repairable?: boolean; transcriptPath?: string }> =>
+    }): Promise<{ exists: boolean; resumable?: boolean; repairable?: boolean; transcriptPath?: string; cwd?: string }> =>
       ipcRenderer.invoke("agentSession:probe", args),
     // Repair a Claude transcript whose tail a sleep/crash truncated, so
     // `claude --resume` accepts it (keeps a .bak). No-op for Codex.
