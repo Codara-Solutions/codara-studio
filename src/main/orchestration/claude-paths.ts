@@ -192,6 +192,159 @@ export async function resolveSafeClaudeTranscriptPath(
 }
 
 /**
+ * The directory whose Claude project folder is `folder`: the first candidate,
+ * or its nearest ancestor, that encodes to that folder name. Claude buckets a
+ * session by the cwd it was STARTED in and keeps writing there after the
+ * agent's Bash tool `cd`s elsewhere, while hook payloads and transcript lines
+ * report the live cwd. Mapping a live cwd back to its folder recovers the one
+ * directory `claude --resume` can find the session from. Returns null when no
+ * candidate fits (the encoding is lossy, so a folder name alone can't be decoded).
+ */
+export function claudeProjectCwdForFolder(
+  folder: string,
+  candidates: Iterable<string | null | undefined>,
+): string | null {
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    let cursor = candidate;
+    for (;;) {
+      if (encodeCwdForClaudeProjects(cursor) === folder) return cursor;
+      const parent = dirname(cursor);
+      if (parent === cursor) break;
+      cursor = parent;
+    }
+  }
+  return null;
+}
+
+/** claudeProjectCwdForFolder for the folder a transcript path sits in. */
+export function claudeProjectCwdForTranscript(
+  transcriptPath: string,
+  candidates: Iterable<string | null | undefined>,
+): string | null {
+  return claudeProjectCwdForFolder(basename(dirname(transcriptPath)), candidates);
+}
+
+/**
+ * The cwd to record for a Claude hook event: the session's start cwd, never a
+ * directory the agent later moved into. Hook payloads carry the live cwd, so
+ * it is mapped back through the transcript's project folder. When that fails
+ * (the agent moved outside the start directory) a cwd already recorded for the
+ * same session is kept, since a session's start cwd never changes.
+ */
+export function claudeHookSessionCwd(input: {
+  sessionId: string;
+  liveCwd?: string;
+  transcriptPath?: string;
+  previous?: { runtime?: string; sessionId?: string; cwd?: string } | null;
+}): string | undefined {
+  const { sessionId, liveCwd, transcriptPath, previous } = input;
+  if (transcriptPath) {
+    const start = claudeProjectCwdForTranscript(transcriptPath, [liveCwd]);
+    if (start) return start;
+  }
+  if (previous?.runtime === "claude" && previous.sessionId === sessionId && previous.cwd) {
+    return previous.cwd;
+  }
+  return liveCwd;
+}
+
+const CLAUDE_SESSION_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/;
+const TRANSCRIPT_CWD_SCAN_BYTES = 262_144;
+
+/**
+ * Every distinct `cwd` recorded in the head of a Claude transcript, in order of
+ * appearance. The first one is the start cwd; later ones are wherever the
+ * agent moved. Reads the raw bytes with a regex rather than parsing lines so a
+ * record cut by the scan window still contributes.
+ */
+export async function readClaudeTranscriptCwds(
+  path: string,
+  maxBytes: number = TRANSCRIPT_CWD_SCAN_BYTES,
+): Promise<string[]> {
+  let text: string;
+  try {
+    const handle = await fs.open(path, "r");
+    try {
+      const buf = Buffer.alloc(maxBytes);
+      const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
+      text = buf.subarray(0, bytesRead).toString("utf8");
+    } finally {
+      await handle.close().catch(() => undefined);
+    }
+  } catch {
+    return [];
+  }
+  const seen = new Set<string>();
+  for (const match of text.matchAll(/"cwd"\s*:\s*("(?:[^"\\]|\\.)*")/g)) {
+    try {
+      const value = JSON.parse(match[1]) as unknown;
+      if (typeof value === "string" && value) seen.add(value);
+    } catch {
+      /* malformed escape inside a cut record */
+    }
+  }
+  return [...seen];
+}
+
+/**
+ * Find a Claude session's transcript by id when it is not in the project folder
+ * of the cwd a restore pointer recorded, and the cwd to resume it from. Looks
+ * first in the folder of the pointer's own transcript path, then in every
+ * folder under `<config>/projects/`. The cwd is the recorded one or an ancestor
+ * of it, else one of the cwds the transcript recorded (or an ancestor), that
+ * encodes to the folder it was found in. Returns null when the transcript is
+ * nowhere, or no known directory maps to its folder.
+ */
+export async function locateClaudeTranscript(input: {
+  sessionId: string;
+  cwd?: string;
+  transcriptPath?: string;
+  stateDir?: string | null;
+}): Promise<{ path: string; cwd: string } | null> {
+  const { sessionId, cwd, transcriptPath, stateDir } = input;
+  if (!CLAUDE_SESSION_ID_RE.test(sessionId)) return null;
+  const root = claudeConfigDir(stateDir);
+  const projects = join(root, "projects");
+  const fileName = `${sessionId}.jsonl`;
+  const folders: string[] = [];
+  // Only the hint's folder NAME is trusted; the path is rebuilt under this
+  // profile so a pointer can never steer the probe outside its projects dir.
+  if (transcriptPath && basename(transcriptPath) === fileName) {
+    folders.push(basename(dirname(transcriptPath)));
+  }
+  const listed = await fs.readdir(projects).catch(() => [] as string[]);
+  for (const name of listed) if (!folders.includes(name)) folders.push(name);
+
+  const found: { path: string; folder: string; mtimeMs: number }[] = [];
+  for (const folder of folders) {
+    const path = join(projects, folder, fileName);
+    try {
+      await assertSafeClaudeStoragePath(root, path, {
+        includeLeaf: true,
+        requireLeaf: true,
+        leafType: "file",
+      });
+      const stat = await fs.stat(path);
+      found.push({ path, folder, mtimeMs: stat.mtimeMs });
+    } catch {
+      /* not in this folder, or not a safe regular file */
+    }
+  }
+  // One id normally lives in one folder; if a copy exists elsewhere, the most
+  // recently written one is the conversation that continued.
+  found.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  for (const hit of found) {
+    const known = claudeProjectCwdForFolder(hit.folder, [cwd]);
+    if (known) return { path: hit.path, cwd: known };
+    const recorded = await readClaudeTranscriptCwds(hit.path);
+    const start = claudeProjectCwdForFolder(hit.folder, recorded);
+    if (start) return { path: hit.path, cwd: start };
+  }
+  return null;
+}
+
+/**
  * Find the newest Claude session transcript for `cwd` whose mtime is at or
  * after `since`, returning its session id (the filename minus `.jsonl`) and
  * path. Used to capture the id of a `claude` session a manual terminal pane

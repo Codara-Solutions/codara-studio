@@ -23,7 +23,10 @@ function lifecycleStubs() {
     ],
     [
       "./agent-session-registry",
-      "export function recordSessionStart() { globalThis.__hookSessionStarts++; }",
+      [
+        "export function recordSessionStart(rec) { globalThis.__hookSessionStarts++; globalThis.__hookSessionRecords.push(rec); }",
+        "export function latestSessionStart(paneId) { const all = globalThis.__hookSessionRecords.filter((r) => r.paneId === paneId); return all[all.length - 1] ?? null; }",
+      ].join("\n"),
     ],
     [
       "./pty-manager",
@@ -102,6 +105,7 @@ async function assertExactlyOneRearm(watcher, trigger, label) {
 
 async function main() {
   globalThis.__hookSessionStarts = 0;
+  globalThis.__hookSessionRecords = [];
   globalThis.__hookDispatches = 0;
   await esbuild.build({
     entryPoints: [path.join(ROOT, "src", "main", "hook-watcher.ts")],
@@ -177,6 +181,38 @@ async function main() {
     );
     fs.rmSync(oldHooksDir, { recursive: true, force: true });
 
+    // A turn-end hook reports the live cwd the agent's Bash tool moved into.
+    // The record must keep the start cwd, the one Claude filed the transcript
+    // under, or restore probes the wrong project folder.
+    const startCwd = path.join(TMP, "Codara SL");
+    const movedCwd = path.join(startCwd, "Studio", "codara-studio");
+    const sessionId = "0d34e9f6-eaa0-4b77-b80e-11d4c469602b";
+    const transcriptPath = path.join(
+      TMP,
+      "claude",
+      "projects",
+      startCwd.replace(/[^a-zA-Z0-9]/g, "-"),
+      `${sessionId}.jsonl`,
+    );
+    const stopFile = "stop-after-cd.json";
+    fs.writeFileSync(
+      path.join(hooksDir, stopFile),
+      JSON.stringify({
+        hookName: "Stop",
+        timestamp: new Date().toISOString(),
+        paneId: "pane-moved",
+        payload: { session_id: sessionId, cwd: movedCwd, transcript_path: transcriptPath },
+      }),
+      "utf8",
+    );
+    await waitFor("stop hook record", () =>
+      globalThis.__hookSessionRecords.find((r) => r.paneId === "pane-moved"),
+    );
+    const stopRecord = globalThis.__hookSessionRecords.find((r) => r.paneId === "pane-moved");
+    assert.equal(stopRecord.sessionId, sessionId);
+    assert.equal(stopRecord.cwd, startCwd, "hook record keeps the session's start cwd");
+    assert.equal(stopRecord.transcriptPath, transcriptPath);
+
     // Retention runs after startup as well as at boot, keeps fresh entries,
     // and advances through its bounded directory-cursor sweep.
     const oldFile = path.join(processedDir, "old.json");
@@ -219,6 +255,7 @@ async function main() {
   console.log("PASS concurrent starts, error bursts, and close events retain one watcher");
   console.log("PASS directory replacement rebinds the native watcher");
   console.log("PASS processed retention prunes after startup in bounded chunks");
+  console.log("PASS a hook after the agent cd'ed records the session's start cwd");
   console.log("PASS stop cancels timers and wins pending re-arm races");
 }
 
@@ -229,6 +266,7 @@ main()
   })
   .finally(() => {
     delete globalThis.__hookSessionStarts;
+    delete globalThis.__hookSessionRecords;
     delete globalThis.__hookDispatches;
     delete process.env.CODARA_HOME_DIR;
     delete process.env.SPARK_SKIP_LEGACY_MIGRATION;

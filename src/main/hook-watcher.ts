@@ -29,7 +29,8 @@ import { promises as fs, type Dir, type FSWatcher } from "node:fs";
 import { watch as fsWatch } from "node:fs";
 import { join } from "node:path";
 
-import { recordSessionStart } from "./agent-session-registry";
+import { latestSessionStart, recordSessionStart } from "./agent-session-registry";
+import { claudeHookSessionCwd } from "./orchestration/claude-paths";
 import { nativeClaudeProfileId } from "./pty-manager";
 import { noteTerminalHookEvent } from "./terminal-agent-notify";
 import { codaraHome } from "./codara-home";
@@ -833,13 +834,22 @@ async function dispatchEnvelope(state: WatcherState, envelope: HookFileEnvelope)
   ) {
     const boundSessionId = stringField(payloadObj, ["session_id", "sessionId", "id"]);
     if (boundSessionId) {
+      const transcriptPath = stringField(payloadObj, ["transcript_path", "transcriptPath"]);
       recordSessionStart({
         paneId: envelope.paneId,
         runtime: "claude",
         nativeClaudeProfileId: nativeClaudeProfileId(envelope.paneId),
         sessionId: boundSessionId,
-        transcriptPath: stringField(payloadObj, ["transcript_path", "transcriptPath"]),
-        cwd: stringField(payloadObj, ["cwd"]),
+        transcriptPath,
+        // The payload's cwd is where the agent is NOW (its Bash tool may have
+        // cd'ed); restore must use the directory the session started in, which
+        // is the one Claude filed the transcript under.
+        cwd: claudeHookSessionCwd({
+          sessionId: boundSessionId,
+          liveCwd: stringField(payloadObj, ["cwd"]),
+          transcriptPath,
+          previous: latestSessionStart(envelope.paneId),
+        }),
         source:
           envelope.hookName === "SessionStart"
             ? stringField(payloadObj, ["source"])
