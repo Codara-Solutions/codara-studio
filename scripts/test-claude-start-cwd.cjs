@@ -53,6 +53,9 @@ async function main() {
     const elsewhere = path.join(dir, "other", "repo");
     const sessionId = "0d34e9f6-eaa0-4b77-b80e-11d4c469602b";
     const startFolder = encodeCwdForClaudeProjects(startCwd);
+    // The lookup only resumes from a directory that exists.
+    fs.mkdirSync(movedCwd, { recursive: true });
+    fs.mkdirSync(elsewhere, { recursive: true });
 
     // --- folder → cwd mapping -------------------------------------------
     check(
@@ -104,12 +107,46 @@ async function main() {
       }) === startCwd,
     );
     check(
-      "a previous record of ANOTHER session is not reused",
+      "another session's recorded cwd is not reused when it does not map to this transcript's folder",
       claudeHookSessionCwd({
         sessionId,
         liveCwd: elsewhere,
-        transcriptPath,
+        transcriptPath: path.join(path.dirname(path.dirname(transcriptPath)), "-unmapped-folder", `${sessionId}.jsonl`),
         previous: { runtime: "claude", sessionId: "other-session", cwd: startCwd },
+        spawnCwd: startCwd,
+      }) === elsewhere,
+    );
+    const clearedPath = path.join(path.dirname(transcriptPath), "cleared-session.jsonl");
+    check(
+      "/clear outside the start dir: the previous record of the old session maps to the folder",
+      claudeHookSessionCwd({
+        sessionId: "cleared-session",
+        liveCwd: elsewhere,
+        transcriptPath: clearedPath,
+        previous: { runtime: "claude", sessionId, cwd: startCwd },
+      }) === startCwd,
+    );
+    check(
+      "/clear outside the start dir: the pane's spawn cwd maps to the folder",
+      claudeHookSessionCwd({
+        sessionId: "cleared-session",
+        liveCwd: elsewhere,
+        transcriptPath: clearedPath,
+        spawnCwd: startCwd,
+      }) === startCwd,
+    );
+    check(
+      "a nested claude started elsewhere keeps its own folder, not the pane's",
+      claudeHookSessionCwd({
+        sessionId: "nested-session",
+        liveCwd: elsewhere,
+        transcriptPath: path.join(
+          path.dirname(path.dirname(transcriptPath)),
+          encodeCwdForClaudeProjects(elsewhere),
+          "nested-session.jsonl",
+        ),
+        previous: { runtime: "claude", sessionId, cwd: startCwd },
+        spawnCwd: startCwd,
       }) === elsewhere,
     );
     check(
@@ -131,6 +168,29 @@ async function main() {
     check(
       "transcript cwds are distinct and in order of appearance",
       JSON.stringify(scanned) === JSON.stringify([startCwd, movedCwd]),
+    );
+    const injected = path.join(dir, "injected.jsonl");
+    fs.writeFileSync(
+      injected,
+      [
+        JSON.stringify({
+          type: "assistant",
+          cwd: movedCwd,
+          message: { content: [{ type: "tool_use", input: { cwd: "/attacker/chosen" } }] },
+        }),
+        JSON.stringify({
+          type: "user",
+          cwd: startCwd,
+          toolUseResult: { stdout: '{"cwd":"/from/tool/output"}' },
+        }),
+        '{"type":"user","cwd":"/cut/by/window',
+      ].join("\n"),
+      "utf8",
+    );
+    const injectedCwds = await readClaudeTranscriptCwds(injected);
+    check(
+      "only a record's own cwd counts, user records first; nested keys and cut lines are ignored",
+      JSON.stringify(injectedCwds) === JSON.stringify([startCwd, movedCwd]),
     );
     check(
       "an unreadable transcript yields no cwds",
@@ -168,6 +228,57 @@ async function main() {
     check(
       "a transcript-path hint only contributes its folder name",
       hinted && hinted.path === transcriptPath && hinted.cwd === startCwd,
+    );
+
+    // A session started in a worktree that was removed after merge: the
+    // transcript survives, its start dir does not. Relocating there would
+    // spawn the pane in a missing directory, so the lookup reports nothing
+    // and the fresh fallback runs in the pointer's own folder.
+    const removedWorktree = path.join(dir, "work", "Worktrees", "repo--feature");
+    const removedId = "bbbbbbbb-1111-2222-3333-444444444444";
+    const removedFolder = path.join(projects, encodeCwdForClaudeProjects(removedWorktree));
+    fs.mkdirSync(removedFolder, { recursive: true });
+    fs.writeFileSync(
+      path.join(removedFolder, `${removedId}.jsonl`),
+      lines([removedWorktree, elsewhere]),
+      "utf8",
+    );
+    check(
+      "a start dir that no longer exists is not relocated to",
+      (await locateClaudeTranscript({ sessionId: removedId, cwd: elsewhere })) === null,
+    );
+    fs.mkdirSync(removedWorktree, { recursive: true });
+    const restored = await locateClaudeTranscript({ sessionId: removedId, cwd: elsewhere });
+    check(
+      "the same start dir is used once it exists",
+      restored && restored.cwd === removedWorktree,
+    );
+
+    // A copy of one id in two folders: the folder the pointer recorded wins
+    // over a more recently written copy elsewhere.
+    const dupId = "cccccccc-1111-2222-3333-444444444444";
+    const hintedCopy = path.join(projects, startFolder, `${dupId}.jsonl`);
+    const newerCopy = path.join(projects, encodeCwdForClaudeProjects(elsewhere), `${dupId}.jsonl`);
+    fs.writeFileSync(hintedCopy, lines([startCwd]), "utf8");
+    fs.writeFileSync(newerCopy, lines([elsewhere]), "utf8");
+    const old = new Date(Date.now() - 60_000);
+    fs.utimesSync(hintedCopy, old, old);
+    const dup = await locateClaudeTranscript({
+      sessionId: dupId,
+      cwd: path.join(dir, "unrelated"),
+      transcriptPath: hintedCopy,
+    });
+    check(
+      "the pointer's own transcript folder wins over a newer copy",
+      dup && dup.path === hintedCopy && dup.cwd === startCwd,
+    );
+    const dupNoHint = await locateClaudeTranscript({
+      sessionId: dupId,
+      cwd: path.join(dir, "unrelated"),
+    });
+    check(
+      "without a hint the most recently written copy wins",
+      dupNoHint && dupNoHint.path === newerCopy && dupNoHint.cwd === elsewhere,
     );
 
     check(

@@ -31,7 +31,7 @@ import { join } from "node:path";
 
 import { latestSessionStart, recordSessionStart } from "./agent-session-registry";
 import { claudeHookSessionCwd } from "./orchestration/claude-paths";
-import { nativeClaudeProfileId } from "./pty-manager";
+import { nativeClaudeProfileId, sessionCwd } from "./pty-manager";
 import { noteTerminalHookEvent } from "./terminal-agent-notify";
 import { codaraHome } from "./codara-home";
 
@@ -849,6 +849,7 @@ async function dispatchEnvelope(state: WatcherState, envelope: HookFileEnvelope)
           liveCwd: stringField(payloadObj, ["cwd"]),
           transcriptPath,
           previous: latestSessionStart(envelope.paneId),
+          spawnCwd: sessionCwd(envelope.paneId),
         }),
         source:
           envelope.hookName === "SessionStart"

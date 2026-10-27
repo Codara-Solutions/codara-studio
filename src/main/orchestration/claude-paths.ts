@@ -204,17 +204,32 @@ export function claudeProjectCwdForFolder(
   folder: string,
   candidates: Iterable<string | null | undefined>,
 ): string | null {
+  for (const match of claudeProjectCwdMatches(folder, candidates)) return match;
+  return null;
+}
+
+// Every candidate (or ancestor) that encodes to `folder`, in candidate order.
+function* claudeProjectCwdMatches(
+  folder: string,
+  candidates: Iterable<string | null | undefined>,
+): Generator<string> {
   for (const candidate of candidates) {
     if (!candidate) continue;
     let cursor = candidate;
     for (;;) {
-      if (encodeCwdForClaudeProjects(cursor) === folder) return cursor;
+      if (encodeCwdForClaudeProjects(cursor) === folder) {
+        yield cursor;
+        break;
+      }
       const parent = dirname(cursor);
       if (parent === cursor) break;
       cursor = parent;
     }
   }
-  return null;
+}
+
+async function isDirectory(path: string): Promise<boolean> {
+  return fs.stat(path).then((stat) => stat.isDirectory(), () => false);
 }
 
 /** claudeProjectCwdForFolder for the folder a transcript path sits in. */
@@ -228,19 +243,27 @@ export function claudeProjectCwdForTranscript(
 /**
  * The cwd to record for a Claude hook event: the session's start cwd, never a
  * directory the agent later moved into. Hook payloads carry the live cwd, so
- * it is mapped back through the transcript's project folder. When that fails
- * (the agent moved outside the start directory) a cwd already recorded for the
- * same session is kept, since a session's start cwd never changes.
+ * it is mapped back through the transcript's project folder, trying the live
+ * cwd, the pane's previous record and the pane's spawn cwd (and their
+ * ancestors). The folder match is what keeps a nested `claude` started
+ * elsewhere from being filed under the pane's directory. When nothing maps (the
+ * agent moved outside the start directory) a cwd already recorded for the same
+ * session is kept, since a session's start cwd never changes.
  */
 export function claudeHookSessionCwd(input: {
   sessionId: string;
   liveCwd?: string;
   transcriptPath?: string;
   previous?: { runtime?: string; sessionId?: string; cwd?: string } | null;
+  spawnCwd?: string | null;
 }): string | undefined {
-  const { sessionId, liveCwd, transcriptPath, previous } = input;
+  const { sessionId, liveCwd, transcriptPath, previous, spawnCwd } = input;
   if (transcriptPath) {
-    const start = claudeProjectCwdForTranscript(transcriptPath, [liveCwd]);
+    const start = claudeProjectCwdForTranscript(transcriptPath, [
+      liveCwd,
+      previous?.cwd,
+      spawnCwd,
+    ]);
     if (start) return start;
   }
   if (previous?.runtime === "claude" && previous.sessionId === sessionId && previous.cwd) {
@@ -253,10 +276,12 @@ const CLAUDE_SESSION_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/;
 const TRANSCRIPT_CWD_SCAN_BYTES = 262_144;
 
 /**
- * Every distinct `cwd` recorded in the head of a Claude transcript, in order of
- * appearance. The first one is the start cwd; later ones are wherever the
- * agent moved. Reads the raw bytes with a regex rather than parsing lines so a
- * record cut by the scan window still contributes.
+ * Every distinct top-level `cwd` recorded in the head of a Claude transcript:
+ * user records first, then the rest, each in order of appearance. The first
+ * user record's cwd is the start cwd; later ones are wherever the agent moved.
+ * Only whole lines are parsed and only a record's own `cwd` counts, so a `cwd`
+ * key inside a tool call's input or output (text a model or a fetched page can
+ * steer) is never taken as a directory to resume from.
  */
 export async function readClaudeTranscriptCwds(
   path: string,
@@ -275,16 +300,22 @@ export async function readClaudeTranscriptCwds(
   } catch {
     return [];
   }
-  const seen = new Set<string>();
-  for (const match of text.matchAll(/"cwd"\s*:\s*("(?:[^"\\]|\\.)*")/g)) {
+  const user: string[] = [];
+  const other: string[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.includes('"cwd"')) continue;
+    let rec: unknown;
     try {
-      const value = JSON.parse(match[1]) as unknown;
-      if (typeof value === "string" && value) seen.add(value);
+      rec = JSON.parse(line);
     } catch {
-      /* malformed escape inside a cut record */
+      continue; // the line the scan window cut
     }
+    if (!rec || typeof rec !== "object" || Array.isArray(rec)) continue;
+    const { cwd, type } = rec as { cwd?: unknown; type?: unknown };
+    if (typeof cwd !== "string" || !cwd) continue;
+    (type === "user" ? user : other).push(cwd);
   }
-  return [...seen];
+  return [...new Set([...user, ...other])];
 }
 
 /**
@@ -293,8 +324,10 @@ export async function readClaudeTranscriptCwds(
  * first in the folder of the pointer's own transcript path, then in every
  * folder under `<config>/projects/`. The cwd is the recorded one or an ancestor
  * of it, else one of the cwds the transcript recorded (or an ancestor), that
- * encodes to the folder it was found in. Returns null when the transcript is
- * nowhere, or no known directory maps to its folder.
+ * encodes to the folder it was found in and still exists as a directory (a
+ * removed worktree must not become the pane's spawn cwd). Returns null when the
+ * transcript is nowhere, or no existing directory maps to its folder, so the
+ * caller's fresh fallback runs in the pointer's own folder.
  */
 export async function locateClaudeTranscript(input: {
   sessionId: string;
@@ -310,9 +343,11 @@ export async function locateClaudeTranscript(input: {
   const folders: string[] = [];
   // Only the hint's folder NAME is trusted; the path is rebuilt under this
   // profile so a pointer can never steer the probe outside its projects dir.
-  if (transcriptPath && basename(transcriptPath) === fileName) {
-    folders.push(basename(dirname(transcriptPath)));
-  }
+  const hinted =
+    transcriptPath && basename(transcriptPath) === fileName
+      ? basename(dirname(transcriptPath))
+      : null;
+  if (hinted) folders.push(hinted);
   const listed = await fs.readdir(projects).catch(() => [] as string[]);
   for (const name of listed) if (!folders.includes(name)) folders.push(name);
 
@@ -331,15 +366,20 @@ export async function locateClaudeTranscript(input: {
       /* not in this folder, or not a safe regular file */
     }
   }
-  // One id normally lives in one folder; if a copy exists elsewhere, the most
-  // recently written one is the conversation that continued.
-  found.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  // One id normally lives in one folder. If a copy exists elsewhere, the
+  // folder the pointer itself recorded wins, then the most recently written.
+  found.sort(
+    (a, b) =>
+      Number(b.folder === hinted) - Number(a.folder === hinted) || b.mtimeMs - a.mtimeMs,
+  );
   for (const hit of found) {
-    const known = claudeProjectCwdForFolder(hit.folder, [cwd]);
-    if (known) return { path: hit.path, cwd: known };
+    for (const known of claudeProjectCwdMatches(hit.folder, [cwd])) {
+      if (await isDirectory(known)) return { path: hit.path, cwd: known };
+    }
     const recorded = await readClaudeTranscriptCwds(hit.path);
-    const start = claudeProjectCwdForFolder(hit.folder, recorded);
-    if (start) return { path: hit.path, cwd: start };
+    for (const start of claudeProjectCwdMatches(hit.folder, recorded)) {
+      if (await isDirectory(start)) return { path: hit.path, cwd: start };
+    }
   }
   return null;
 }

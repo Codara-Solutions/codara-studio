@@ -30,7 +30,10 @@ function lifecycleStubs() {
     ],
     [
       "./pty-manager",
-      "export function nativeClaudeProfileId() { return undefined; }",
+      [
+        "export function nativeClaudeProfileId() { return undefined; }",
+        "export function sessionCwd(id) { return globalThis.__hookSpawnCwds?.[id] ?? null; }",
+      ].join("\n"),
     ],
     [
       "./terminal-agent-notify",
@@ -213,6 +216,34 @@ async function main() {
     assert.equal(stopRecord.cwd, startCwd, "hook record keeps the session's start cwd");
     assert.equal(stopRecord.transcriptPath, transcriptPath);
 
+    // `/clear` after the agent left the start directory: a new session id, a
+    // live cwd unrelated to the transcript folder. The pane's spawn cwd maps
+    // to that folder, so the record still names the start cwd.
+    const outsideCwd = path.join(TMP, "elsewhere", "repo");
+    const clearedId = "7ff46c48-3293-4866-ae65-00f572fbf618";
+    globalThis.__hookSpawnCwds = { "pane-cleared": startCwd };
+    fs.writeFileSync(
+      path.join(hooksDir, "clear-after-cd.json"),
+      JSON.stringify({
+        hookName: "SessionStart",
+        timestamp: new Date().toISOString(),
+        paneId: "pane-cleared",
+        payload: {
+          session_id: clearedId,
+          source: "clear",
+          cwd: outsideCwd,
+          transcript_path: path.join(path.dirname(transcriptPath), `${clearedId}.jsonl`),
+        },
+      }),
+      "utf8",
+    );
+    await waitFor("clear hook record", () =>
+      globalThis.__hookSessionRecords.find((r) => r.paneId === "pane-cleared"),
+    );
+    const clearRecord = globalThis.__hookSessionRecords.find((r) => r.paneId === "pane-cleared");
+    assert.equal(clearRecord.sessionId, clearedId);
+    assert.equal(clearRecord.cwd, startCwd, "a /clear outside the start dir keeps the start cwd");
+
     // Retention runs after startup as well as at boot, keeps fresh entries,
     // and advances through its bounded directory-cursor sweep.
     const oldFile = path.join(processedDir, "old.json");
@@ -256,6 +287,7 @@ async function main() {
   console.log("PASS directory replacement rebinds the native watcher");
   console.log("PASS processed retention prunes after startup in bounded chunks");
   console.log("PASS a hook after the agent cd'ed records the session's start cwd");
+  console.log("PASS a /clear outside the start dir records the start cwd via the spawn cwd");
   console.log("PASS stop cancels timers and wins pending re-arm races");
 }
 
@@ -267,6 +299,7 @@ main()
   .finally(() => {
     delete globalThis.__hookSessionStarts;
     delete globalThis.__hookSessionRecords;
+    delete globalThis.__hookSpawnCwds;
     delete globalThis.__hookDispatches;
     delete process.env.CODARA_HOME_DIR;
     delete process.env.SPARK_SKIP_LEGACY_MIGRATION;
