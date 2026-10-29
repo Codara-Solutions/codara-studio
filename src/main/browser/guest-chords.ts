@@ -32,13 +32,19 @@ export interface ChordReport {
   handled: boolean;
 }
 
-/** Chords the app keeps whatever the page does, like a browser's reserved tab keys. */
+/**
+ * Chords the app keeps whatever the page does, like a browser's reserved tab
+ * keys: Mod+W, Mod+T and Ctrl+Tab. A page cannot take new tab or close tab
+ * from Chrome either, and a terminal tab that never opens because the page in
+ * view swallowed Mod+T looks like a dead shortcut.
+ */
 export function isReservedChord(input: ChordInput): boolean {
   const mods = input.modifiers;
   const primary = mods.includes("control") || mods.includes("meta");
   if (!primary || mods.includes("alt")) return false;
   if (input.key === "Tab") return mods.includes("control");
-  return !mods.includes("shift") && input.key.toLowerCase() === "w";
+  const key = input.key.toLowerCase();
+  return !mods.includes("shift") && (key === "w" || key === "t");
 }
 
 export interface ChordRouterOptions {

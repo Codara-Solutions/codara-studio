@@ -82,6 +82,10 @@ function reserved() {
   assert.equal(isReservedChord({ key: "W", modifiers: ["meta"] }), true);
   assert.equal(isReservedChord({ key: "Tab", modifiers: ["control"] }), true);
   assert.equal(isReservedChord({ key: "Tab", modifiers: ["control", "shift"] }), true);
+  assert.equal(isReservedChord({ key: "t", modifiers: ["control"] }), true);
+  assert.equal(isReservedChord({ key: "T", modifiers: ["meta"] }), true);
+  assert.equal(isReservedChord({ key: "t", modifiers: ["control", "shift"] }), false);
+  assert.equal(isReservedChord({ key: "t", modifiers: ["control", "alt"] }), false);
   assert.equal(isReservedChord({ key: "k", modifiers: ["control"] }), false);
   assert.equal(isReservedChord({ key: "w", modifiers: ["control", "shift"] }), false);
   assert.equal(isReservedChord({ key: "w", modifiers: ["control", "alt"] }), false);
