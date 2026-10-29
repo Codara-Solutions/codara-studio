@@ -65,7 +65,7 @@ function grantStore(): CrossWorkspaceGrantStore {
   return store;
 }
 
-const askInWindow: CrossWorkspaceAsk = async ({ caller, target, agent }) => {
+const askInWindow: CrossWorkspaceAsk = async ({ caller, target, agent, action }) => {
   const win = getTrustedMainWindow();
   if (!win || win.webContents.isDestroyed()) return null;
   const id = randomBytes(12).toString("hex");
@@ -74,6 +74,7 @@ const askInWindow: CrossWorkspaceAsk = async ({ caller, target, agent }) => {
     callerName: caller.name,
     targetName: target.name,
     agent,
+    ...(action === "worktree" ? { action } : {}),
     expiresAt: Date.now() + CROSS_WORKSPACE_APPROVAL_TIMEOUT_MS,
   };
   return new Promise<CrossWorkspaceAnswer | null>((resolve) => {

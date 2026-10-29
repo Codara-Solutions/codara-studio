@@ -8,6 +8,9 @@ import {
   type TerminalAgentActivity,
 } from "@shared/agent-board";
 import type { SparkEvent } from "@shared/types";
+import { withBackgroundAgents, type BackgroundWorktree } from "@shared/background-agents";
+import { buildRailTree } from "@shared/rail-tree";
+import { useAgentNotes } from "../workspace-status/agentNotesStore";
 import { collectLeaves } from "../../tabs/paneTree";
 import { isDockLeaf } from "../../tabs/dock";
 import { liveTerminalRuntime } from "../../tabs/terminalAgentState";
@@ -366,6 +369,45 @@ export function stabilizeAgentBoard(model: AgentBoardModel, previous: Map<string
   return next;
 }
 
+/**
+ * The copy-branch workspaces a background agent may work in: every local
+ * one, with who made it, its project and what the rail last read of it.
+ * background-agents.ts decides which get a card.
+ */
+export function backgroundWorktreesOf(
+  workspaces: AgentBoardSources["workspaces"],
+  states: AgentBoardSources["worktreeStates"],
+): BackgroundWorktree[] {
+  const copies = workspaces.filter((workspace) => workspace.copyBranch && !workspace.remote);
+  if (copies.length === 0) return [];
+  const tree = buildRailTree(workspaces);
+  return copies.map((workspace) => {
+    const copy = workspace.copyBranch!;
+    const creator = copy.createdBy?.kind === "agent" ? copy.createdBy : undefined;
+    const state = states[workspace.id];
+    const createdAt = Date.parse(copy.createdAt);
+    return {
+      workspaceId: workspace.id,
+      ...(tree.parentOf.get(workspace.id) ? { projectId: tree.parentOf.get(workspace.id) } : {}),
+      createdAt: Number.isFinite(createdAt) ? createdAt : 0,
+      ...(creator
+        ? {
+            creator: {
+              ...(creator.paneId ? { paneId: creator.paneId } : {}),
+              ...(creator.runId ? { runId: creator.runId } : {}),
+              ...(creator.client ? { client: creator.client } : {}),
+              ...(creator.purpose ? { purpose: creator.purpose } : {}),
+              ...(creator.fromWorkspaceId ? { fromWorkspaceId: creator.fromWorkspaceId } : {}),
+              ...(creator.fromWorkspaceName ? { fromWorkspaceName: creator.fromWorkspaceName } : {}),
+            },
+          }
+        : {}),
+      merged: state?.merge === "merged" || (state?.missing === true && state.merge === "gone"),
+      ...(state?.headAt ? { headAt: state.headAt } : {}),
+    };
+  });
+}
+
 export interface AgentBoardState {
   model: AgentBoardModel;
   /** The card of the pane the user is looking at, if it is on the board. */
@@ -420,8 +462,23 @@ export function useAgentBoard(live: boolean): AgentBoardState {
       }),
     [live, now, workspaces, layoutPanes, activity, sources.runs, runLive, unseen, accountLabels],
   );
+  const notes = useAgentNotes();
+  const backgroundWorktrees = useMemo(
+    () => backgroundWorktreesOf(sources.workspaces, sources.worktreeStates),
+    [sources.workspaces, sources.worktreeStates],
+  );
+  const withBackground = useMemo(
+    () =>
+      withBackgroundAgents(model, {
+        now: live ? now : Date.now(),
+        worktrees: backgroundWorktrees,
+        notes,
+        workspaces,
+      }),
+    [model, live, now, backgroundWorktrees, notes, workspaces],
+  );
   const cardCache = useRef(new Map<string, AgentBoardCard>());
-  const stable = useMemo(() => stabilizeAgentBoard(model, cardCache.current), [model]);
+  const stable = useMemo(() => stabilizeAgentBoard(withBackground, cardCache.current), [withBackground]);
   const activeKey = sources.activePaneId ? `pane:${sources.activePaneId}` : null;
   return { model: stable, activeKey, activeWorkspaceId: sources.activeWorkspaceId, navigate: sources.navigate, now };
 }

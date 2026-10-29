@@ -6,6 +6,7 @@
 // renderer side is window.spark.workspaceStatus
 // (src/preload/areas/workspace-status.ts).
 
+import { promises as fsp } from "node:fs";
 import { join } from "node:path";
 import { webContents } from "electron";
 
@@ -24,9 +25,11 @@ import { codaraHome } from "../codara-home";
 import type { IpcHandle } from "../ipc";
 import { loadState, onStateSaved } from "../storage";
 import { onTerminalPaneRemoved, terminalAgentStateSnapshot, terminalPanePlacement } from "../terminal-agent-notify";
+import { listWorktrees } from "../worktree-cleanup/inspect";
 import { createAgentNoteBook, type AgentNoteBook } from "./agent-notes";
 import { provideWorkspaceStatusService } from "./service";
 import { createWorkspaceStatusStore, type WorkspaceStatusStore } from "./store";
+import { resolveWorktreeNoteTarget } from "./worktree-notes";
 
 export const WORKSPACE_STATUS_CHANGED_CHANNEL = "workspaceStatus:changed";
 export const AGENT_NOTES_CHANGED_CHANNEL = "workspaceStatus:agentNoteChanged";
@@ -79,8 +82,10 @@ async function workspaceName(workspaceId: string): Promise<string | null> {
 
 // A pane's note goes with its pane (onTerminalPaneRemoved). A chat has no
 // pane, so its note lasts while the chat is on the Agents view, as its line
-// does, and the next tool call in its workspace drops it after that.
+// does, and the next tool call in its workspace drops it after that. A
+// worktree's note lasts while its workspace does (pruneWorkspaces).
 async function agentIsLive(key: string): Promise<boolean> {
+  if (key.startsWith("worktree:")) return true;
   if (key.startsWith("pane:")) return terminalPanePlacement(key.slice("pane:".length)) !== null;
   if (!key.startsWith("run:")) return false;
   const { getRun } = await import("../orchestration/run-store");
@@ -96,6 +101,18 @@ provideWorkspaceStatusService({
   agentLabelForPane(paneId) {
     const runtime = terminalAgentStateSnapshot().find((entry) => entry.paneId === paneId)?.runtime;
     return runtime ? workspaceStatusAgentLabel(runtime) : null;
+  },
+  async worktreeNoteTarget(path, caller) {
+    const state = await loadState();
+    return resolveWorktreeNoteTarget(path, caller, {
+      workspaces: state.workspaces,
+      realpath: (value) => fsp.realpath(value),
+      worktreesOf: async (cwd) => {
+        const listing = await listWorktrees(cwd);
+        const main = listing.mainBare ? null : listing.mainPath;
+        return { main, linked: listing.registrations.map((entry) => entry.path).filter((entry) => entry !== main) };
+      },
+    });
   },
 });
 

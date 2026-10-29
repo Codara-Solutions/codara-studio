@@ -23,7 +23,7 @@ import WorkspaceIconPicker from "./WorkspaceIconPicker";
 import { WorkspaceStatusLine } from "./workspace-status/WorkspaceStatusChip";
 import { WorkspaceAgentsLine } from "./workspace-status/WorkspaceAgentsLine";
 import { useAgentLinesOf } from "./workspace-status/agentLinesStore";
-import { Chevron, WorkspaceChildren, WorktreeAgentLine } from "./rail/WorkspaceChildren";
+import { Chevron, ExternalWorktreeRow, WorkspaceChildren, WorktreeAgentLine } from "./rail/WorkspaceChildren";
 import { CleanUpHoldsConfirm, RailCleanUpNotices, useRailCleanUp, type RailCleanUpEntry } from "./rail/RailCleanUp";
 import { setRailFold, useRailFold } from "./rail/railFolds";
 import WorkspaceStatusPicker from "./workspace-status/WorkspaceStatusPicker";
@@ -51,7 +51,7 @@ import {
 import { openWorktreeCleanup } from "./worktree-cleanup/open-worktree-cleanup";
 import { PullRequestMark } from "../git/PullRequestMark";
 import { setRepositoryWatched, usePullRequestWatch } from "../git/pullRequestWatchStore";
-import type { WorktreeRailCleanupResult, WorktreeRailState } from "@shared/worktree-cleanup";
+import type { WorktreeRailCleanupResult, WorktreeRailExternal, WorktreeRailState } from "@shared/worktree-cleanup";
 import { buildRailFamily, buildRailTree, railFamilyAgentCount, railMergeState, type RailTree } from "@shared/rail-tree";
 import type { AgentLine } from "@shared/agent-status";
 
@@ -171,6 +171,10 @@ interface RailProps {
   worktreeByWorkspaceId?: Record<string, WorktreeRailState>;
   // The first read of those states finished (useWorktreeRailStates).
   worktreeStatesLoaded?: boolean;
+  // Worktrees of the rail's repositories made outside Codara, listed under
+  // their project (useWorktreeRailStates), and opening one in the rail.
+  externalWorktrees?: readonly WorktreeRailExternal[];
+  onOpenExternalWorktree?: (entry: WorktreeRailExternal) => void;
   // Clean up a merged worktree, or remove a workspace whose folder is gone.
   // confirmIgnored carries the fingerprint of a "confirm" answer the user
   // accepted; null means there was nothing to report.
@@ -311,6 +315,15 @@ function WorkspaceRail(props: RailProps) {
     [workspaces, props.workspaceRailOrder],
   );
   const workspaceById = useMemo(() => new Map(workspaces.map((workspace) => [workspace.id, workspace])), [workspaces]);
+  const externalByProject = useMemo(() => {
+    const out = new Map<string, WorktreeRailExternal[]>();
+    for (const entry of props.externalWorktrees ?? []) {
+      const list = out.get(entry.projectId);
+      if (list) list.push(entry);
+      else out.set(entry.projectId, [entry]);
+    }
+    return out;
+  }, [props.externalWorktrees]);
   // Workspace rows can be reordered within a folder or dropped onto another
   // folder. The transfer payload makes the gesture work even when Workspaces
   // is rendered in the opposite rail; local state is only visual feedback.
@@ -851,6 +864,8 @@ function WorkspaceRail(props: RailProps) {
         key={w.id}
         project={w}
         worktrees={worktreesOf(railTree, w.id, workspaceById)}
+        external={externalByProject.get(w.id) ?? NO_EXTERNAL}
+        onOpenExternal={props.onOpenExternalWorktree}
         statesLoaded={props.worktreeStatesLoaded ?? false}
         rowProps={(child) => workspaceRowProps(child, child === w ? groupId : null)}
       />
@@ -2072,6 +2087,8 @@ function rowMerged(worktree: WorktreeRailState | null | undefined, missing: bool
   return worktree?.merge === "merged" || (missing && worktree?.merge === "gone");
 }
 
+const NO_EXTERNAL: readonly WorktreeRailExternal[] = [];
+
 function worktreesOf(tree: RailTree, projectId: string, byId: ReadonlyMap<string, Workspace>): Workspace[] {
   const ids = tree.childrenOf.get(projectId);
   if (!ids) return [];
@@ -2087,11 +2104,16 @@ function worktreesOf(tree: RailTree, projectId: string, byId: ReadonlyMap<string
 function WorkspaceFamily({
   project,
   worktrees,
+  external,
+  onOpenExternal,
   statesLoaded,
   rowProps,
 }: {
   project: Workspace;
   worktrees: Workspace[];
+  /** Worktrees of its repository made outside Codara, after its own. */
+  external: readonly WorktreeRailExternal[];
+  onOpenExternal?: (entry: WorktreeRailExternal) => void;
   statesLoaded: boolean;
   rowProps: (workspace: Workspace) => RowProps;
 }) {
@@ -2125,8 +2147,8 @@ function WorkspaceFamily({
     }),
     [...family.active, ...family.merged],
   );
-  const expandable = family.own.length > 0 || worktrees.length > 0;
-  const open = useRailFold(project.id, worktrees.length > 0) && expandable;
+  const expandable = family.own.length > 0 || worktrees.length > 0 || external.length > 0;
+  const open = useRailFold(project.id, worktrees.length > 0 || external.length > 0) && expandable;
   const mergedOpen = useRailFold(`merged:${project.id}`, false);
   const mergedCleanUps = family.merged.flatMap((child): RailCleanUpEntry[] => {
     const props = childProps.get(child.workspaceId);
@@ -2153,7 +2175,14 @@ function WorkspaceFamily({
           dragOffset={projectProps.dragOffset}
           dragging={projectProps.dragging}
           ownAgents={family.own}
-          active={family.active.map((child) => renderChild(child.workspaceId, child.agents, false))}
+          active={[
+            ...family.active.map((child) => renderChild(child.workspaceId, child.agents, false)),
+            ...external.map((entry) => <ExternalWorktreeRow
+                key={`external:${entry.path}`}
+                entry={entry}
+                onOpen={entry.branch ? onOpenExternal : undefined}
+              />),
+          ]}
           merged={{
             count: family.merged.length,
             open: mergedOpen,

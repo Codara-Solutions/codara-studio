@@ -1,10 +1,14 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   AGENT_LINE_STATE_LABELS,
   AGENT_LINE_STATE_TONES,
   agentLineAge,
+  isWorktreeNoteKey,
   type AgentLine,
 } from "@shared/agent-status";
+import { formatAgentSpan } from "@shared/agent-board";
+import type { WorktreeRailExternal } from "@shared/worktree-cleanup";
+import { useAgentNotes } from "../workspace-status/agentNotesStore";
 import { AgentLineItem, useMinuteClock } from "../workspace-status/WorkspaceAgentsLine";
 import { CleanUpHoldsConfirm, RailCleanUpNotices, RailConfirm, useRailCleanUp, type RailCleanUpEntry } from "./RailCleanUp";
 import "./workspace-children.css";
@@ -172,6 +176,9 @@ export function WorktreeAgentLine({
   const tone = AGENT_LINE_STATE_TONES[first.state];
   const loud = first.state === "needs-you" || first.state === "working";
   const others = agents.length - 1;
+  // An agent with no pane here (background-agents.ts) is named, since
+  // opening the row shows no tab of it: "Background agent · from X".
+  const background = isWorktreeNoteKey(first.key);
   const description = agents
     .map((line) => [`${line.name}: ${AGENT_LINE_STATE_LABELS[line.state]}.`, line.text ?? ""].filter(Boolean).join(" "))
     .join(" ");
@@ -184,10 +191,97 @@ export function WorktreeAgentLine({
       style={{ color: muted }}
     >
       <span aria-hidden="true" className="rail-child-dot" style={{ background: tone }} />
+      {background && (
+        <span className="rail-child-who" data-testid="worktree-background-agent">
+          {first.name} ·
+        </span>
+      )}
       <span style={{ color: loud ? tone : muted, fontWeight: first.state === "needs-you" ? 600 : undefined }}>{word}</span>
       {age && <span className="rail-child-age">{age}</span>}
       {others > 0 && <span className="rail-child-age">+{others}</span>}
       {first.text && <span className="rail-child-note">· {first.text}</span>}
     </span>
+  );
+}
+
+function samePath(a: string, b: string): boolean {
+  return a.replace(/[\\/]+$/, "") === b.replace(/[\\/]+$/, "");
+}
+
+function folderName(path: string): string {
+  return path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
+}
+
+/**
+ * A worktree of the project's repository that Codara did not make (plain
+ * `git worktree add`): listed so nothing works out of sight. Its second line
+ * is the note an agent left on it (codara_workspace_status with worktree),
+ * else when its commit was made. Clicking it opens it in the rail as a
+ * worktree of the project.
+ */
+export function ExternalWorktreeRow({
+  entry,
+  onOpen,
+}: {
+  entry: WorktreeRailExternal;
+  onOpen?: (entry: WorktreeRailExternal) => void;
+}) {
+  const notes = useAgentNotes();
+  const note = useMemo(
+    () => Object.values(notes).find((candidate) => candidate.worktreePath && samePath(candidate.worktreePath, entry.path)) ?? null,
+    [notes, entry.path],
+  );
+  const now = useMinuteClock(true);
+  const [hover, setHover] = useState(false);
+  const label = entry.branch ?? folderName(entry.path);
+  const text = note?.entry.note ?? null;
+  const by = note ? [note.entry.by.label, note.from ? `from ${note.from.workspaceName}` : null].filter(Boolean).join(" · ") : null;
+  const age = note
+    ? formatAgentSpan(Math.max(0, now - note.entry.updatedAt))
+    : entry.headAt
+      ? formatAgentSpan(Math.max(0, now - entry.headAt))
+      : null;
+  const title = [
+    `Made outside Codara: ${entry.path}`,
+    entry.branch ? `on branch ${entry.branch}` : `detached at ${entry.head.slice(0, 8)}`,
+    by && text ? `${by}: ${text}` : null,
+    onOpen ? "Click to open it here." : null,
+  ]
+    .filter(Boolean)
+    .join(". ");
+  return (
+    <div
+      className="rail-child rail-child-external"
+      data-testid="workspace-external-worktree"
+      data-path={entry.path}
+      role={onOpen ? "button" : undefined}
+      tabIndex={onOpen ? 0 : undefined}
+      title={title}
+      aria-label={title}
+      onClick={onOpen ? () => onOpen(entry) : undefined}
+      onKeyDown={
+        onOpen
+          ? (event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onOpen(entry);
+              }
+            }
+          : undefined
+      }
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+      style={{ background: hover ? "var(--hover, color-mix(in oklab, var(--ink) 5%, transparent))" : "transparent" }}
+    >
+      <span className="rail-child-line1">
+        <span className="rail-child-branch">{label}</span>
+      </span>
+      <span data-testid="external-worktree-line" className="rail-child-line2" style={{ color: "var(--muted)" }}>
+        {note && <span aria-hidden="true" className="rail-child-dot" style={{ background: "var(--muted-2)" }} />}
+        <span>External worktree</span>
+        {age && <span className="rail-child-age">{age}</span>}
+        {text && <span className="rail-child-note">· {text}</span>}
+      </span>
+    </div>
   );
 }

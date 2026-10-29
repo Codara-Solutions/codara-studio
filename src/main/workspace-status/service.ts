@@ -5,6 +5,7 @@
 
 import type { AgentNoteBook } from "./agent-notes";
 import type { WorkspaceStatusStore } from "./store";
+import type { WorktreeNoteCaller, WorktreeNoteTarget } from "./worktree-notes";
 
 export interface WorkspaceStatusService {
   store(): WorkspaceStatusStore;
@@ -20,6 +21,8 @@ export interface WorkspaceStatusService {
   agentIsLive(key: string): Promise<boolean>;
   /** "Claude Code", "Codex", ... for the agent Codara sees in that pane, if any. */
   agentLabelForPane(paneId: string): string | null;
+  /** Where a note about the worktree at `path` goes, or why this caller may not write one (worktree-notes.ts). */
+  worktreeNoteTarget(path: string, caller: WorktreeNoteCaller): Promise<WorktreeNoteTarget>;
 }
 
 let service: WorkspaceStatusService | null = null;

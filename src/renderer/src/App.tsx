@@ -30,7 +30,7 @@ import {
   TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
   runtimeStateIsBusy,
 } from "@shared/types";
-import type { WorktreeRailCleanupResult } from "@shared/worktree-cleanup";
+import type { WorktreeRailCleanupResult, WorktreeRailExternal } from "@shared/worktree-cleanup";
 import type {
   GitHubIssueSummary,
   GitHubWorkQueueItem,
@@ -843,6 +843,7 @@ export default function App() {
   // refuses anything in use, unpushed or possibly only unmounted).
   const {
     states: worktreeByWorkspaceId,
+    external: externalWorktrees,
     loaded: worktreeStatesLoaded,
     refresh: refreshWorktreeStates,
   } = useWorktreeRailStates(
@@ -3266,6 +3267,7 @@ export default function App() {
       navigate: navigateToNotifyTarget,
       branches: branchByWorkspaceId,
       closePane: closeAgentBoardPane,
+      worktreeStates: worktreeByWorkspaceId,
     });
   }, [
     workspaces,
@@ -3278,6 +3280,7 @@ export default function App() {
     navigateToNotifyTarget,
     branchByWorkspaceId,
     closeAgentBoardPane,
+    worktreeByWorkspaceId,
   ]);
   useEffect(() => () => publishAgentBoardSources(null), []);
 
@@ -3696,6 +3699,51 @@ export default function App() {
     setActiveId(ws.id);
     setEditingId(ws.id);
   }, [workspaces, activeWorkspace, home]);
+
+  // A worktree made outside Codara (plain `git worktree add`), clicked in the
+  // rail: it becomes a worktree row of its project, as the user's own (no
+  // creator), checked out rather than forked, so removing the row later
+  // keeps its branch.
+  const openExternalWorktree = useCallback(
+    async (entry: WorktreeRailExternal) => {
+      const same = (a: string, b: string) => a.replace(/[\\/]+$/, "") === b.replace(/[\\/]+$/, "");
+      const existing = workspaces.find((workspace) => same(workspace.cwd, entry.path));
+      if (existing) {
+        setActiveId(existing.id);
+        return;
+      }
+      const project = workspaces.find((workspace) => workspace.id === entry.projectId);
+      if (!project || !entry.branch) return;
+      const ws: Workspace = {
+        id: makeId("ws"),
+        name: entry.branch,
+        cwd: entry.path,
+        color: project.color,
+        workers: [],
+        ...(project.groupId ? { groupId: project.groupId } : {}),
+        copyBranch: {
+          repoCwd: project.cwd,
+          branch: entry.branch,
+          city: basename(entry.path) || entry.branch,
+          mode: "checkout",
+          createdAt: new Date().toISOString(),
+        },
+      };
+      const roots = workspaces
+        .map((workspace) => workspace.cwd)
+        .filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0);
+      await window.spark.ui?.setAllowedRoots([...roots, ws.cwd]).catch(() => {
+        /* sandbox push is best-effort; the parent effect re-sends on state change */
+      });
+      setWorkspaces((list) =>
+        list.some((workspace) => same(workspace.cwd, ws.cwd)) ? list : [...list, ws],
+      );
+      activeRunIdsByWorkspaceRef.current[ws.id] = null;
+      setActiveId(ws.id);
+      refreshWorktreeStates();
+    },
+    [workspaces, refreshWorktreeStates],
+  );
 
   // Attach a local folder outside the workspace cwd as an extra Explorer root
   // (e.g. a OneDrive clients folder). The picker is always the local OS
@@ -6659,6 +6707,8 @@ export default function App() {
             branchByWorkspaceId={branchByWorkspaceId}
             worktreeByWorkspaceId={worktreeByWorkspaceId}
             worktreeStatesLoaded={worktreeStatesLoaded}
+            externalWorktrees={externalWorktrees}
+            onOpenExternalWorktree={openExternalWorktree}
             onCleanUpWorkspace={handleCleanUpWorkspace}
             sections={panels.sections.left}
             draggingSection={draggingPanelSection}
@@ -6806,6 +6856,8 @@ export default function App() {
             branchByWorkspaceId={branchByWorkspaceId}
             worktreeByWorkspaceId={worktreeByWorkspaceId}
             worktreeStatesLoaded={worktreeStatesLoaded}
+            externalWorktrees={externalWorktrees}
+            onOpenExternalWorktree={openExternalWorktree}
             onCleanUpWorkspace={handleCleanUpWorkspace}
             sections={panels.sections.right}
             draggingSection={draggingPanelSection}

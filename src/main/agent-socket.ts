@@ -786,7 +786,7 @@ async function dispatch(
       case "worktree.list":
       case "worktree.remove":
       case "worktree.setup":
-        return await handleWorktree(method, params, id);
+        return await handleWorktree(method, params, id, auth.kind, res);
       case "worktree.cleanup":
         return await handleWorktreeCleanup(params, id);
       case "accounts.list":
@@ -1538,6 +1538,105 @@ interface TerminalWorktreeMade {
   worktree: Record<string, unknown> | null;
 }
 
+// What authorizeWorkspaceTarget found: the workspace a call names and, when
+// it is not the caller's own, who asked (the user allowed it).
+interface CrossWorkspaceTarget {
+  target: Workspace;
+  folder?: string;
+  cross: { callerId: string; callerName: string; target: { id: string; name: string } } | null;
+}
+
+/**
+ * The workspace a terminal.create or worktree.create call names in
+ * `workspace`, and the user's consent when it is not the caller's own. A
+ * run speaks for its own workspace and an interactive agent for the
+ * workspace of the pane it runs in; neither comes from tool JSON. `precheck`
+ * refuses before the user is asked (a cwd outside the target).
+ */
+async function authorizeWorkspaceTarget(input: {
+  params: Record<string, unknown>;
+  id: JsonRpcId;
+  authKind: AgentSocketAuth["kind"];
+  res: ServerResponse;
+  requested: string;
+  run: RunState | null;
+  callerPaneId: string | null;
+  action: "terminal" | "worktree";
+  precheck?: (target: Workspace) => Promise<string | null>;
+}): Promise<({ ok: true } & CrossWorkspaceTarget) | { ok: false; response: JsonRpcResponse }> {
+  const { id, run, callerPaneId, res } = input;
+  const fail = (code: number, message: string) => ({ ok: false as const, response: errorResponse(id, code, message) });
+  let state: AppState;
+  try {
+    state = await loadState();
+  } catch (error) {
+    return fail(ERR_INTERNAL, error instanceof Error ? error.message : String(error));
+  }
+  const resolved = await resolveTargetWorkspace(state.workspaces, input.requested);
+  if (!resolved.ok) return fail(ERR_INVALID_PARAMS, resolved.message);
+  const target = resolved.workspace;
+  const callerWorkspaceId = run
+    ? (run.workspaceId ?? null)
+    : callerPaneId
+      ? await paneWorkspaceId(callerPaneId)
+      : null;
+  const caller = state.workspaces.find((workspace) => workspace.id === callerWorkspaceId) ?? null;
+  if (caller?.id === target.id) {
+    return { ok: true, target, ...(resolved.folder ? { folder: resolved.folder } : {}), cross: null };
+  }
+  const refusal = crossWorkspaceRefusal({
+    authKind: input.authKind,
+    untrustedRun: run !== null && runProjectPolicyMode(run) === "untrusted-pull-request",
+    callerTrust: caller
+      ? await callerPullRequestTrust({
+          caller,
+          processCwds: await callerProcessCwds(input.params),
+          workspaces: state.workspaces,
+        })
+      : undefined,
+    caller,
+    target,
+  });
+  if (refusal || !caller) return fail(ERR_FORBIDDEN, refusal ?? "caller workspace unknown");
+  const runtime = callerPaneId
+    ? terminalAgentStateSnapshot().find((entry) => entry.paneId === callerPaneId)?.runtime
+    : undefined;
+  const early = input.precheck ? await input.precheck(target) : null;
+  if (early) return fail(ERR_INVALID_PARAMS, early);
+  let callerGone = false;
+  const onCallerGone = () => {
+    callerGone = true;
+  };
+  res.once("close", onCallerGone);
+  let decision: CrossWorkspaceDecision;
+  try {
+    decision = await crossWorkspaceApprover().authorize({
+      caller,
+      target,
+      agent: run ? "Cora" : (runtime && AGENT_NOTIFY_LABELS[runtime]) || null,
+      requester: run ? `run:${run.id}` : `pane:${callerPaneId}`,
+      ...(input.action === "worktree" ? { action: "worktree" as const } : {}),
+    });
+  } finally {
+    res.off("close", onCallerGone);
+  }
+  if (!decision.ok) return fail(ERR_FORBIDDEN, decision.message);
+  // The user may answer after the agent stopped waiting (interrupted, or
+  // its call timed out): nobody would drive what opened now.
+  if (callerGone || res.destroyed || res.socket?.destroyed) {
+    return fail(
+      ERR_INTERNAL,
+      `the caller disconnected before the ${input.action === "worktree" ? "worktree was made" : "terminal opened"}`,
+    );
+  }
+  return {
+    ok: true,
+    target,
+    ...(resolved.folder ? { folder: resolved.folder } : {}),
+    cross: { callerId: caller.id, callerName: caller.name, target: { id: target.id, name: target.name } },
+  };
+}
+
 async function handleTerminalCreate(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -1642,76 +1741,27 @@ async function createTerminal(
   }
   const agentCaller = await resolveAgentCaller(params);
   const callerPaneId = agentCaller.paneId;
-  let crossWorkspace: { callerName: string; target: { id: string; name: string } } | null = null;
+  let crossWorkspace: CrossWorkspaceTarget["cross"] = null;
   if (requestedWorkspace) {
-    let state: AppState;
-    try {
-      state = await loadState();
-    } catch (error) {
-      return errorResponse(id, ERR_INTERNAL, error instanceof Error ? error.message : String(error));
-    }
-    const resolved = await resolveTargetWorkspace(state.workspaces, requestedWorkspace);
-    if (!resolved.ok) return errorResponse(id, ERR_INVALID_PARAMS, resolved.message);
-    const target = resolved.workspace;
-    // A run speaks for its own workspace; an interactive agent for the
-    // workspace of the pane it runs in. Neither comes from tool JSON.
-    const callerWorkspaceId = run
-      ? (run.workspaceId ?? null)
-      : callerPaneId
-        ? await paneWorkspaceId(callerPaneId)
-        : null;
-    const caller = state.workspaces.find((workspace) => workspace.id === callerWorkspaceId) ?? null;
-    if (caller?.id !== target.id) {
-      const refusal = crossWorkspaceRefusal({
-        authKind,
-        untrustedRun: run !== null && runProjectPolicyMode(run) === "untrusted-pull-request",
-        callerTrust: caller
-          ? await callerPullRequestTrust({
-              caller,
-              processCwds: await callerProcessCwds(params),
-              workspaces: state.workspaces,
-            })
-          : undefined,
-        caller,
-        target,
-      });
-      if (refusal || !caller) return errorResponse(id, ERR_FORBIDDEN, refusal ?? "caller workspace unknown");
-      const runtime = callerPaneId
-        ? terminalAgentStateSnapshot().find((entry) => entry.paneId === callerPaneId)?.runtime
-        : undefined;
-      if (cwd) {
-        const cwdRefusal = await crossWorkspaceCwdRefusal(cwd, target);
-        if (cwdRefusal) return errorResponse(id, ERR_INVALID_PARAMS, cwdRefusal);
-      }
-      let callerGone = false;
-      const onCallerGone = () => {
-        callerGone = true;
-      };
-      res.once("close", onCallerGone);
-      let decision: CrossWorkspaceDecision;
-      try {
-        decision = await crossWorkspaceApprover().authorize({
-          caller,
-          target,
-          agent: run ? "Cora" : (runtime && AGENT_NOTIFY_LABELS[runtime]) || null,
-          requester: run ? `run:${run.id}` : `pane:${callerPaneId}`,
-        });
-      } finally {
-        res.off("close", onCallerGone);
-      }
-      if (!decision.ok) return errorResponse(id, ERR_FORBIDDEN, decision.message);
-      // The user may answer after the agent stopped waiting (interrupted, or
-      // its call timed out): nobody would drive a terminal opened now.
-      if (callerGone || res.destroyed || res.socket?.destroyed) {
-        return errorResponse(id, ERR_INTERNAL, "the caller disconnected before the terminal opened");
-      }
-      crossWorkspace = { callerName: caller.name, target: { id: target.id, name: target.name } };
-    }
+    const placed = await authorizeWorkspaceTarget({
+      params,
+      id,
+      authKind,
+      res,
+      requested: requestedWorkspace,
+      run,
+      callerPaneId,
+      action: "terminal",
+      precheck: cwd ? (target) => crossWorkspaceCwdRefusal(cwd!, target) : undefined,
+    });
+    if (!placed.ok) return placed.response;
+    const target = placed.target;
+    crossWorkspace = placed.cross;
     if (crossWorkspace || !workspaceId) {
       workspaceId = target.id;
       workspaceCwd = target.cwd;
     }
-    if (!cwd && resolved.folder) cwd = resolved.folder;
+    if (!cwd && placed.folder) cwd = placed.folder;
   }
   // The worktree is made in the target workspace's repository, under the
   // same approval as the terminal, and the terminal opens in it.
@@ -1720,7 +1770,15 @@ async function createTerminal(
   if (worktreeRequest) {
     const worktreeStartedAt = Date.now();
     try {
-      const caller = { ...(await worktreeCaller(params)), ...(crossWorkspace ? { workspaceId: crossWorkspace.target.id } : {}) };
+      const caller = {
+        ...(await worktreeCaller(params)),
+        ...(crossWorkspace
+          ? {
+              workspaceId: crossWorkspace.target.id,
+              origin: { workspaceId: crossWorkspace.callerId, workspaceName: crossWorkspace.callerName },
+            }
+          : {}),
+      };
       const created = await createTerminalWorktree(caller, worktreeRequest, worktreeDeps());
       if (created.ok !== true) {
         const refusal = created as WorktreeRefusal;
@@ -2406,10 +2464,21 @@ async function handleWorktree(
   method: "worktree.create" | "worktree.list" | "worktree.remove" | "worktree.setup",
   params: Record<string, unknown>,
   id: JsonRpcId,
+  authKind: AgentSocketAuth["kind"],
+  res: ServerResponse,
 ): Promise<JsonRpcResponse> {
   const checks: Array<[string, "string" | "boolean"]> =
     method === "worktree.create"
-      ? [["branch", "string"], ["base", "string"], ["checkout", "boolean"], ["purpose", "string"], ["title", "string"], ["fetch", "boolean"], ["waitForSetup", "boolean"]]
+      ? [
+          ["branch", "string"],
+          ["base", "string"],
+          ["checkout", "boolean"],
+          ["purpose", "string"],
+          ["title", "string"],
+          ["fetch", "boolean"],
+          ["waitForSetup", "boolean"],
+          ["workspace", "string"],
+        ]
       : method === "worktree.list"
         ? [["checkMerge", "boolean"]]
         : method === "worktree.setup"
@@ -2464,10 +2533,37 @@ async function handleWorktree(
       );
     }
     if (method === "worktree.create") {
+      // Another workspace's repository, under the same consent as a terminal
+      // there; the worktree records who asked, so its row shows them.
+      let creator: WorktreeCaller = caller;
+      const requested = str("workspace");
+      if (requested) {
+        const gate = await gateCaller(caller, deps, { mutation: true });
+        if ("ok" in gate && gate.ok === false) return successResponse(id, gate);
+        const run = caller.runId ? await (await getRunStore()).getRun(caller.runId) : null;
+        const placed = await authorizeWorkspaceTarget({
+          params,
+          id,
+          authKind,
+          res,
+          requested,
+          run,
+          callerPaneId: caller.paneId ?? null,
+          action: "worktree",
+        });
+        if (!placed.ok) return placed.response;
+        if (placed.cross) {
+          creator = {
+            ...caller,
+            workspaceId: placed.target.id,
+            origin: { workspaceId: placed.cross.callerId, workspaceName: placed.cross.callerName },
+          };
+        }
+      }
       return successResponse(
         id,
         await createAgentWorktree(
-          caller,
+          creator,
           {
             branch: str("branch"),
             base: str("base"),
