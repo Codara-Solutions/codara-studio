@@ -158,8 +158,12 @@ export default function AgentInboxMenu({
           onSelect={run(() => actions.unread(row, !unread))}
         />
         {pr ? <Item icon={<CopyIcon />} label="Copy link" onSelect={run(() => actions.copyLink(row))} /> : null}
-        <Separator />
-        <Item icon={<TrashIcon />} label="Delete" danger onSelect={() => onView("delete")} />
+        {row.card.target.type === "terminal" || row.card.target.type === "run" ? (
+          <>
+            <Separator />
+            <Item icon={<TrashIcon />} label="Delete" danger onSelect={() => onView("delete")} />
+          </>
+        ) : null}
       </>
     );
   }

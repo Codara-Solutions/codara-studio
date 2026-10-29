@@ -19,14 +19,14 @@ const MIN = 60_000;
 const SHOTS = process.env.AGENT_INBOX_SHOTS;
 
 const WORKSPACES = [
-  { id: "ws-cos", name: "Company OS", branch: "main", icon: "layers" },
-  { id: "ws-sub", name: "Subcloud", branch: "fix/coherence-index-model", icon: "cloud" },
+  { id: "ws-cos", name: "Finance", branch: "main", icon: "layers" },
+  { id: "ws-sub", name: "Gateway", branch: "fix/model-fallback", icon: "cloud" },
   { id: "ws-studio", name: "Codara Studio", branch: "usage-panel-hairlines", icon: "code" },
-  { id: "ws-trading", name: "Trading", branch: "funding-rate-backtest", icon: "package" },
+  { id: "ws-trading", name: "Research", branch: "funding-rate-backtest", icon: "package" },
   { id: "ws-cora", name: "Codara Studio", branch: "Cora", icon: "code" },
-  { id: "ws-aici", name: "AI Continous Improvment", branch: "main", icon: "brain" },
+  { id: "ws-aici", name: "Kitchen", branch: "main", icon: "brain" },
   { id: "ws-ctrlt", name: "Codara Studio", branch: "fix-ctrl-t", icon: "code" },
-  { id: "ws-planner", name: "Company OS", branch: "planner-sync", icon: "layers" },
+  { id: "ws-planner", name: "Finance", branch: "planner-sync", icon: "layers" },
 ];
 
 interface Fixture {
@@ -117,16 +117,16 @@ function activity(now: number) {
     ...extra,
   });
   return [
-    pane("p-invoice", "ws-cos", "blocked", "Book the Hetzner invoice", now - 2 * MIN, {
-      question: "Book the Hetzner October invoice to Codara Cloud, or split it 70/30 with Studio?",
+    pane("p-invoice", "ws-cos", "blocked", "Book the October invoice", now - 2 * MIN, {
+      question: "Book the October hosting invoice to Cloud, or split it 70/30 with Studio?",
     }),
-    pane("p-pr30", "ws-sub", "error", "PR #30 coherence-index", now - 12 * MIN, {
-      message: "FCB coherence-index sends no model, so the request is refused.",
+    pane("p-pr30", "ws-sub", "error", "PR #30 model fallback", now - 12 * MIN, {
+      message: "The upstream sends no model, so the request is refused.",
     }),
     pane("p-usage", "ws-studio", "done", "Usage panel (hairlines)", now - 6 * MIN, {
       message: "PR #61 open, checks passed. Ready for you to merge.",
     }),
-    pane("p-forge", "ws-trading", "done", "Forge funding-rate backtest", now - 3 * 60 * MIN - 5 * MIN, {
+    pane("p-forge", "ws-trading", "done", "Funding-rate backtest", now - 3 * 60 * MIN - 5 * MIN, {
       runtime: "codex",
       message: "Sharpe 1.4 on 2024 to 2026.",
     }),
@@ -275,7 +275,7 @@ test("the Agents tab is an inbox with shelves, settle, snooze, undo and merge", 
     await ready(page);
     await standIns(app, fixture);
     await sendWatch(app, watch("ws-studio", 61, "open", "passing", "Usage panel (hairlines)"));
-    await sendWatch(app, watch("ws-sub", 30, "open", "failing", "coherence-index sends a model"));
+    await sendWatch(app, watch("ws-sub", 30, "open", "failing", "Send a default model"));
     await sendWatch(app, watch("ws-cora", 64, "open", "passing", "Release Cora"));
     await sendWatch(app, watch("ws-ctrlt", 59, "merged", "passing", "Ctrl+T opens a new tab"));
     await boardChanged(app);
@@ -309,7 +309,7 @@ test("the Agents tab is an inbox with shelves, settle, snooze, undo and merge", 
       await expect(row(page, "p-usage").locator("[data-agent-runtime]")).toHaveCount(0);
       await expect(row(page, "p-forge").locator('[data-agent-runtime="codex"]')).toHaveAttribute("title", "Codex");
       // The question stays one hover away.
-      await expect(row(page, "p-invoice").locator("[data-agent-card-open]")).toHaveAttribute("title", /Hetzner October invoice/);
+      await expect(row(page, "p-invoice").locator("[data-agent-card-open]")).toHaveAttribute("title", /October hosting invoice/);
     });
 
     await test.step("working agents sit on the Working shelf with a live timer", async () => {
@@ -356,7 +356,7 @@ test("the Agents tab is an inbox with shelves, settle, snooze, undo and merge", 
 
     await test.step("the menu offers Merge only for a ready pull request", async () => {
       await row(page, "p-pr30").locator("[data-agent-card-open]").click({ button: "right" });
-      let menu = page.getByRole("menu", { name: "Actions for PR #30 coherence-index" });
+      let menu = page.getByRole("menu", { name: "Actions for PR #30 model fallback" });
       await expect(menu).toBeVisible();
       await expect(menu.getByRole("menuitem", { name: /^Merge PR/ })).toHaveCount(0);
       await page.keyboard.press("Escape");
@@ -414,7 +414,7 @@ test("the Agents tab is an inbox with shelves, settle, snooze, undo and merge", 
 
     await test.step("settle from the hover, then Ctrl+Z brings it back", async () => {
       await row(page, "p-forge").hover();
-      await row(page, "p-forge").getByRole("button", { name: "Settle Forge funding-rate backtest" }).click();
+      await row(page, "p-forge").getByRole("button", { name: "Settle Funding-rate backtest" }).click();
       await expect(row(page, "p-forge")).toHaveCount(0);
       await expect(shelf(page, "Settled")).toHaveAccessibleName("Settled, 3");
       await expect(page.locator(".agent-inbox__notice")).toHaveText(/^Settled, (Ctrl\+Z|⌘Z) to undo$/);
@@ -452,16 +452,16 @@ test("the Agents tab is an inbox with shelves, settle, snooze, undo and merge", 
 
     await test.step("rename and pin from the menu", async () => {
       await row(page, "p-forge").locator("[data-agent-card-open]").click({ button: "right" });
-      await page.getByRole("menu", { name: "Actions for Forge funding-rate backtest" }).getByRole("menuitem", { name: /^Un-settle/ }).click();
+      await page.getByRole("menu", { name: "Actions for Funding-rate backtest" }).getByRole("menuitem", { name: /^Un-settle/ }).click();
       await row(page, "p-forge").locator("[data-agent-card-open]").click({ button: "right" });
-      await page.getByRole("menu", { name: "Actions for Forge funding-rate backtest" }).getByRole("menuitem", { name: "Rename" }).click();
-      const field = page.getByRole("textbox", { name: "Name for Forge funding-rate backtest" });
+      await page.getByRole("menu", { name: "Actions for Funding-rate backtest" }).getByRole("menuitem", { name: "Rename" }).click();
+      const field = page.getByRole("textbox", { name: "Name for Funding-rate backtest" });
       await expect(field).toBeFocused();
-      await field.fill("Forge backtest");
+      await field.fill("Backtest 2026");
       await field.press("Enter");
-      await expect(row(page, "p-forge").locator(".agent-inbox-row__title")).toHaveText("Forge backtest");
+      await expect(row(page, "p-forge").locator(".agent-inbox-row__title")).toHaveText("Backtest 2026");
       await row(page, "p-forge").locator("[data-agent-card-open]").click({ button: "right" });
-      await page.getByRole("menu", { name: "Actions for Forge backtest" }).getByRole("menuitem", { name: "Pin" }).click();
+      await page.getByRole("menu", { name: "Actions for Backtest 2026" }).getByRole("menuitem", { name: "Pin" }).click();
       await expect(page.locator('[data-agent-shelf="inbox"]').first()).toHaveAttribute("data-agent-card", "pane:p-forge");
     });
 
@@ -471,7 +471,7 @@ test("the Agents tab is an inbox with shelves, settle, snooze, undo and merge", 
       await ready(page);
       await standIns(app, fixture);
       await boardChanged(app);
-      await expect(row(page, "p-forge").locator(".agent-inbox-row__title")).toHaveText("Forge backtest", { timeout: 15_000 });
+      await expect(row(page, "p-forge").locator(".agent-inbox-row__title")).toHaveText("Backtest 2026", { timeout: 15_000 });
       await expect(shelf(page, "Snoozed")).toHaveAccessibleName("Snoozed, 1");
       await expect(row(page, "p-usage")).toHaveAttribute("data-agent-shelf", "settled");
     });
