@@ -1,14 +1,16 @@
 import { Suspense, lazy, useRef } from "react";
 import type { KeyboardEvent } from "react";
 import { useAgentBoard } from "./useAgentBoard";
+import { useAgentInbox } from "./useAgentInbox";
 import { usePublishAgentLines } from "../workspace-status/agentLinesStore";
 import { RAIL_VIEW_PANEL_ID, type RailView } from "./railView";
 import "./rail-view-switch.css";
 
 // The top of the rail's Workspaces section: a switch between the workspace
-// list in the user's own order, the Agents view, which sorts every agent
-// terminal and Cora chat of every workspace into Needs you, Working and Done,
-// and the Sessions view, which searches every past agent session.
+// list in the user's own order, the Agents view, an inbox of every agent
+// terminal and Cora chat of every workspace (what needs you or finished on
+// top, then the Working, Snoozed and Settled shelves), and the Sessions view,
+// which searches every past agent session.
 // The rail renders its own list under this when the switch says Workspaces.
 
 const VIEWS: { id: RailView; label: string }[] = [
@@ -17,13 +19,13 @@ const VIEWS: { id: RailView; label: string }[] = [
   { id: "sessions", label: "Sessions" },
 ];
 
-const loadAgentBoardList = () => import("./AgentBoardList");
-const AgentBoardList = lazy(loadAgentBoardList);
+const loadAgentInboxList = () => import("./AgentInboxList");
+const AgentInboxList = lazy(loadAgentInboxList);
 const loadSessionSearchList = () => import("../session-search/SessionSearchList");
 const SessionSearchList = lazy(loadSessionSearchList);
 
 const PRELOAD: Partial<Record<RailView, () => Promise<unknown>>> = {
-  agents: loadAgentBoardList,
+  agents: loadAgentInboxList,
   sessions: loadSessionSearchList,
 };
 
@@ -38,7 +40,9 @@ export default function AgentsRailSwitch({
   const board = useAgentBoard(live);
   // The workspace rows' agent lines come from the same board.
   usePublishAgentLines(board.model);
-  const needsYou = board.model.needsYou.length;
+  const inbox = useAgentInbox(board.model, board.now);
+  // Snoozed and settled agents wait quietly: the badge counts the inbox only.
+  const needsYou = inbox.needsYou;
   const tabRefs = useRef(new Map<RailView, HTMLButtonElement>());
 
   const onTabKey = (event: KeyboardEvent<HTMLButtonElement>) => {
@@ -97,7 +101,7 @@ export default function AgentsRailSwitch({
       </div>
       {live && (
         <Suspense fallback={<div className="rail-view-switch__pending" />}>
-          <AgentBoardList {...board} />
+          <AgentInboxList {...board} view={inbox} />
         </Suspense>
       )}
       {view === "sessions" && (

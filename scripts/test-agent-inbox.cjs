@@ -326,7 +326,7 @@ function testPlainWords() {
   const files = [path.join(ROOT, "src", "shared", "agent-inbox.ts")];
   for (const file of files) {
     const text = fs.readFileSync(file, "utf8");
-    check(`${path.relative(ROOT, file)} has no em or en dash`, !/[–—]/.test(text));
+    check(`${path.relative(ROOT, file)} has no em or en dash`, !/[\u2013\u2014]/.test(text));
   }
 }
 

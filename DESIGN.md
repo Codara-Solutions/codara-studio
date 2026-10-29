@@ -274,3 +274,63 @@ finished.
   other callers keep the full line.
 - Worktree rows under a project keep their own agent line (state dot and
   word): it names one agent, it is not a count.
+
+## Agents tab (2026-10)
+
+**Chosen:** D′, "straight T3 Code, a bit nicer and more minimal". The Agents
+tab is an inbox after T3 Code's thread sidebar: what needs you or finished on
+top, then Working, Snoozed and Settled shelves at the bottom with plain
+counts. Each row has no box and three lines: the project, then the title,
+then the branch and pull request. A status word sits top right (Input,
+Failed, Done, Working with a live timer) and gives way to the age once the
+row is seen. Etienne picked D from four variants on the real rows (D straight
+T3 Code, E T3 in Studio's colours, F grouped by workspace, G one line per
+agent), asking for it a bit nicer and more minimal; D′ is that refinement,
+recorded next to D in the mock-up before it was built.
+
+**Credit:** the design, its words and its behaviour come from T3 Code
+(github.com/pingdotgg/t3code, MIT, by Theo / Ping Labs). The code is Codara's
+own; the header of `AgentInboxList.tsx` names the source too.
+
+**Why:** the old view drew every agent as a card with a coloured edge, a
+harness mark, a workspace tile in its colour, a status phrase and often a
+reply box, so five agents filled the rail and finished work never left.
+T3 Code's rule is that every agent is either working or out of the way:
+settle what is done, snooze what can wait, and a merged pull request settles
+itself.
+
+**References:** T3 Code's sidebar (`SidebarThreadRow`, its collapsible
+section headers, the snooze presets and the undo notice in the footer).
+
+**Rules:**
+
+- Fewer marks per row than T3 Code: the agent's mark only when it is not
+  Claude Code, project tiles in muted ink (no workspace colour), +/- line
+  counts only on a finished agent's pull request, the check as Studio's ✓ ✕
+  or a dot.
+- Colour is for state only: the status word and its icon (`--warn` Input,
+  `--danger` Failed, `--ok` Done, `--info` Working), the check glyph, +/-.
+  A seen row's title is dimmed (`--ink-dim`); only the open row gets a
+  surface (`--hover-strong`).
+- Hover, or keyboard focus, turns the status slot into Snooze and ✓ Settle.
+  E settles the focused row. Snooze offers 1 hour, 3 hours, this evening
+  (18:00, gone once passed), tomorrow 09:00 and next Monday 09:00; two that
+  land on the same minute keep the named one.
+- A settled agent comes back when it does something new (starts working,
+  asks, or finishes a turn the user has not seen); a snooze ends early only
+  for a question or a fresh failure, never for a finished turn.
+- A merged pull request settles its workspace's finished agents once. Undo,
+  or new work after the merge, keeps the agent in view for that merge.
+  Pinned, working and waiting agents are never auto-settled.
+- Undo is one quiet line in the footer ("Settled, Ctrl+Z to undo") for eight
+  seconds; Ctrl+Z (⌘Z) works while focus is in the list.
+- The right-click menu is T3 Code's, trimmed: Open, Merge PR (our one
+  addition, only while the pull request is open with passing checks),
+  Settle, Snooze ›, Pin, Rename, Mark unread, Copy link, Delete. Snooze's
+  times and Delete's confirmation replace the list in place.
+- Merge PR re-reads GitHub first. Into main, master or the repository's
+  default branch it opens the Git panel's merge confirmation; into any other
+  base it squash-merges on the click, pinned to the head commit, and settles
+  the row.
+- Rows do not answer questions in place: opening the row goes to the agent.
+  The question is the row's tooltip.
