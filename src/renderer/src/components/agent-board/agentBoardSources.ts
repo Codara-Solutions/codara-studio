@@ -26,6 +26,10 @@ export interface AgentBoardSources {
   activeWorkspaceId: string | null;
   activePaneId: string | null;
   navigate: ((target: NavigationTarget) => unknown) | null;
+  /** Each workspace's current branch, by workspace id, as the rail reads it. */
+  branches: Readonly<Record<string, string | null>>;
+  /** Closes one terminal pane wherever its workspace is, ending its agent. */
+  closePane: ((workspaceId: string, tabId: string, paneId: string) => void) | null;
 }
 
 const EMPTY: AgentBoardSources = {
@@ -36,6 +40,8 @@ const EMPTY: AgentBoardSources = {
   activeWorkspaceId: null,
   activePaneId: null,
   navigate: null,
+  branches: {},
+  closePane: null,
 };
 
 let sources: AgentBoardSources = EMPTY;

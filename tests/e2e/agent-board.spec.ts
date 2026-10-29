@@ -7,12 +7,13 @@ import { join } from "node:path";
 // The rail's Agents view against a throwaway Codara home and a fake user
 // home (no real ~/.claude, shell startup file or account is read or
 // written). A fake Claude Code drives its pane through OSC 7501 program
-// status: it lands under Needs you in another workspace with a question,
-// which the card never pastes into (a real one is a menu) but opens the pane
-// for; then it stops with an error and is answered from its card's reply
-// box, moves to Done with its last message, and opening the card brings its
-// pane back. A seeded blocked Cora chat is answered with one of its options;
-// the switch works from the keyboard and is remembered on reload.
+// status: it lands in the inbox as Input in another workspace with its
+// question in the row's tooltip, the row opens its pane where it is
+// answered; then it stops with an error (Failed), finishes with its last
+// message, and opening the row brings its pane back. A seeded blocked Cora
+// chat waits as Input with Cora's mark; the switch works from the keyboard
+// and is remembered on reload. agent-inbox.spec.ts covers the shelves,
+// settle, snooze, undo and merge.
 
 const MINUTE = 60_000;
 const RUN_ID = "run-agents-view";
@@ -291,28 +292,30 @@ test("a terminal agent in another workspace is answered from the Agents view", a
     });
 
     const agent = card(page, `pane:${paneId}`);
-    await test.step("the Agents view puts it under Needs you with its question", async () => {
+    const open = agent.locator("[data-agent-card-open]");
+    await test.step("the Agents view puts it in the inbox as Input with its question", async () => {
       await viewTab(page, "Agents").click();
       await expect(viewTab(page, "Agents")).toHaveAttribute("aria-selected", "true");
       await expect(page.locator('[data-workspace-id="ws-a"]')).toHaveCount(0);
       await expect(agent).toHaveAttribute("data-agent-bucket", "needs-you");
+      await expect(agent).toHaveAttribute("data-agent-shelf", "inbox");
       await expect(agent).toHaveAttribute("data-agent-workspace", "ws-a");
-      await expect(agent).toContainText("Deploy to production?");
+      await expect(agent.locator(".agent-inbox-row__status")).toHaveText("Input");
+      await expect(open).toHaveAttribute("title", "Deploy to production?");
       await expect(agent).toContainText("alpha");
-      // The harness is its mark, named in the tooltip, not repeated as text.
-      await expect(agent.locator('[data-agent-runtime="claude"]')).toHaveAttribute("title", "Claude Code");
+      // Claude Code is the default agent: no mark, and its name is not
+      // repeated as text; a screen reader still hears it.
+      await expect(agent.locator("[data-agent-runtime]")).toHaveCount(0);
       await expect(agent).not.toContainText("Claude Code");
-      await expect(page.getByRole("button", { name: "Needs you, 1", exact: true })).toHaveAttribute("aria-expanded", "true");
+      await expect(open).toHaveAccessibleName(/Claude Code in alpha/);
     });
 
     await test.step("a question in a terminal is answered in its pane, never pasted into", async () => {
-      // No text box: pasted text and Enter would pick a real menu's
-      // highlighted answer without the user choosing it.
+      // No text box on the row: pasted text and Enter would pick a real
+      // menu's highlighted answer without the user choosing it.
       await expect(agent.getByRole("textbox")).toHaveCount(0);
-      const answer = agent.getByRole("button", { name: "Answer Claude Code in its terminal in alpha" });
-      await expect(answer).toHaveText("Answer in terminal");
-      await answer.click();
-      await expect(agent.locator("[data-agent-card-open]")).toHaveAttribute("aria-current", "true");
+      await open.click();
+      await expect(open).toHaveAttribute("aria-current", "true");
       const input = page.locator(`[data-terminal-pane-id="${paneId}"]:visible .xterm-helper-textarea`).first();
       await input.focus();
       await input.pressSequentially("yes", { delay: 2 });
@@ -320,23 +323,22 @@ test("a terminal agent in another workspace is answered from the Agents view", a
       await expect(agent).not.toHaveAttribute("data-agent-bucket", "needs-you", { timeout: 15_000 });
     });
 
-    await test.step("an agent stopped by an error takes a reply from its card", async () => {
+    await test.step("an agent stopped by an error reads Failed and is answered in its pane", async () => {
       await expect(agent).toHaveAttribute("data-agent-bucket", "needs-you", { timeout: 15_000 });
-      await expect(agent).toContainText("Stopped");
-      await expect(agent).toContainText("Rate limited, try again.");
-      const reply = agent.getByRole("textbox", { name: "Reply to Claude Code in alpha" });
-      await reply.fill("try again");
-      await reply.press("Enter");
-      // The agent picks it up and leaves Needs you.
+      await expect(agent.locator(".agent-inbox-row__status")).toHaveText("Failed");
+      await expect(open).toHaveAttribute("title", "Rate limited, try again.");
+      const input = page.locator(`[data-terminal-pane-id="${paneId}"]:visible .xterm-helper-textarea`).first();
+      await input.focus();
+      await input.pressSequentially("try again", { delay: 2 });
+      await input.press("Enter");
       await expect(agent).not.toHaveAttribute("data-agent-bucket", "needs-you", { timeout: 15_000 });
-      // The box went with it; the keyboard stays on the card.
-      await expect(agent.locator("[data-agent-card-open]")).toBeFocused();
     });
 
-    await test.step("the finished agent moves to Done with its last message", async () => {
+    await test.step("the finished agent stays in the inbox with its last message", async () => {
       await expect(agent).toHaveAttribute("data-agent-bucket", "done", { timeout: 15_000 });
-      await expect(agent).toContainText("Shipped after you said try again.");
-      await expect(agent).toContainText("Done just now");
+      await expect(agent).toHaveAttribute("data-agent-shelf", "inbox");
+      await expect(open).toHaveAttribute("title", "Shipped after you said try again.");
+      await expect(agent.locator(".agent-inbox-row__line.is-meta")).toContainText("Shipped after you said try again.");
       await expect(viewTab(page, "Agents")).toHaveAccessibleName("Agents");
     });
 
@@ -345,9 +347,9 @@ test("a terminal agent in another workspace is answered from the Agents view", a
       await page.locator('[data-workspace-id="ws-b"]').evaluate((row) => (row as HTMLElement).click());
       await expect(page.locator('[data-workspace-id="ws-b"]')).toHaveAttribute("data-active", "true");
       await viewTab(page, "Agents").click();
-      await expect(agent.locator("[data-agent-card-open]")).not.toHaveAttribute("aria-current", "true");
-      await agent.locator("[data-agent-card-open]").click();
-      await expect(agent.locator("[data-agent-card-open]")).toHaveAttribute("aria-current", "true");
+      await expect(open).not.toHaveAttribute("aria-current", "true");
+      await open.click();
+      await expect(open).toHaveAttribute("aria-current", "true");
       // The switch says where you landed, as a switch from the rail does.
       await expect(page.getByTestId("workspace-switch-hud")).toContainText("alpha");
       const pane = page.locator(`[data-terminal-pane-id="${paneId}"]:visible`);
@@ -361,25 +363,11 @@ test("a terminal agent in another workspace is answered from the Agents view", a
   }
 });
 
-test("a Cora question is answered from its card, by keyboard, and the view is remembered", async () => {
+test("a waiting Cora chat opens from its row, by keyboard, and the view is remembered", async () => {
   test.setTimeout(90_000);
   const fixture = await prepare({ blockedRun: true });
   const { app, page } = await launch(fixture);
   try {
-    // Right after boot the main-process evaluate can fail ("Resulting promise
-    // was garbage collected"), so it repeats until it lands. Installing the
-    // stand-in twice is harmless: nothing has answered yet.
-    await expect(async () => {
-      await app.evaluate(({ ipcMain }) => {
-        const calls: unknown[] = [];
-        (globalThis as { __answerCalls?: unknown[] }).__answerCalls = calls;
-        ipcMain.removeHandler("orchestration:answerRunQuestion");
-        ipcMain.handle("orchestration:answerRunQuestion", async (_e, input: unknown) => {
-          calls.push(input);
-          return {};
-        });
-      });
-    }).toPass({ timeout: 20_000 });
     const chat = card(page, `run:${RUN_ID}`);
 
     await test.step("the switch works from the keyboard", async () => {
@@ -389,31 +377,18 @@ test("a Cora question is answered from its card, by keyboard, and the view is re
       await expect(viewTab(page, "Agents")).toBeFocused();
     });
 
-    await test.step("the blocked chat waits under Needs you with its answers", async () => {
+    await test.step("the blocked chat waits in the inbox as Input, with Cora's mark", async () => {
       await expect(chat).toHaveAttribute("data-agent-bucket", "needs-you", { timeout: 15_000 });
-      await expect(chat).toContainText("Postgres or SQLite for the session store?");
+      await expect(chat.locator(".agent-inbox-row__status")).toHaveText("Input");
+      await expect(chat.locator("[data-agent-card-open]")).toHaveAttribute("title", "Postgres or SQLite for the session store?");
       await expect(chat).toContainText("Pick a database");
+      // Cora is not the default agent, so its row carries its mark.
       await expect(chat.locator('[data-agent-runtime="cora"]')).toHaveAttribute("aria-label", "Cora");
       await expect(chat).toContainText("beta");
-      await expect(chat.getByRole("button", { name: "Postgres", exact: true })).toBeVisible();
-      await expect(chat.getByRole("textbox", { name: "Reply to Cora in beta" })).toBeVisible();
     });
 
-    await test.step("an option answers the question it was asked for", async () => {
-      await chat.getByRole("button", { name: "Postgres", exact: true }).click();
-      await expect(chat.getByRole("status")).toHaveText("Sent");
-      const calls = (await app.evaluate(
-        () => (globalThis as { __answerCalls?: unknown[] }).__answerCalls ?? [],
-      )) as Array<Record<string, unknown>>;
-      expect(calls).toHaveLength(1);
-      expect(calls[0]).toMatchObject({ runId: RUN_ID, questionMessageId: QUESTION_ID, message: "Use Postgres." });
-      expect(typeof calls[0].clientMessageId).toBe("string");
-    });
-
-    await test.step("Tab reaches the card and Enter opens its chat in its workspace", async () => {
+    await test.step("Tab reaches the row and Enter opens its chat in its workspace", async () => {
       await viewTab(page, "Agents").focus();
-      await page.keyboard.press("Tab");
-      await expect(page.getByRole("button", { name: "Needs you, 1", exact: true })).toBeFocused();
       await page.keyboard.press("Tab");
       await expect(chat.locator("[data-agent-card-open]")).toBeFocused();
       await page.keyboard.press("Enter");
@@ -470,29 +445,7 @@ test("a Cora question is answered from its card, by keyboard, and the view is re
   }
 });
 
-// What each card is painted with: its workspace edge, the status word, the
-// harness mark and, unless it is the workspace you are in, its tile.
-async function cardColours(page: Page): Promise<Record<string, Record<string, string>>> {
-  return page.locator("[data-agent-card]").evaluateAll((cards) =>
-    Object.fromEntries(
-      cards.map((card) => {
-        const pick = (selector: string, prop: "color" | "backgroundColor") => {
-          const node = card.querySelector(selector);
-          return node ? getComputedStyle(node)[prop] : "";
-        };
-        const colours: Record<string, string> = {
-          edge: getComputedStyle(card, "::before").backgroundColor,
-          status: pick(".agent-card__status", "color"),
-          mark: pick(".agent-card__mark", "color"),
-        };
-        if (!card.classList.contains("is-here")) colours.tile = pick(".agent-card__ws-tile", "backgroundColor");
-        return [card.getAttribute("data-agent-card") ?? "", colours];
-      }),
-    ),
-  );
-}
-
-test("a switch from a card keeps every card's colours and says where you are", async () => {
+test("opening a row from another workspace goes there and says where you are", async () => {
   test.setTimeout(90_000);
   const fixture = await prepare({ blockedRun: true });
   const { app, page } = await launch(fixture);
@@ -514,61 +467,29 @@ test("a switch from a card keeps every card's colours and says where you are", a
       await input.pressSequentially("keep going", { delay: 2 });
       await input.press("Enter");
       await viewTab(page, "Agents").click();
-      await expect(page.locator('[data-agent-bucket="working"][data-agent-workspace="ws-a"]')).toHaveCount(1, {
+      await expect(page.locator('[data-agent-shelf="working"][data-agent-workspace="ws-a"]')).toHaveCount(1, {
         timeout: 15_000,
       });
-      await expect(card(page, `run:${RUN_ID}`)).toHaveAttribute("data-agent-bucket", "needs-you", { timeout: 15_000 });
-      await expect(page.locator('[data-agent-workspace="ws-a"]')).toHaveClass(/is-here/);
-      await expect(card(page, `run:${RUN_ID}`)).not.toHaveClass(/is-here/);
+      await expect(card(page, `run:${RUN_ID}`)).toHaveAttribute("data-agent-shelf", "inbox", { timeout: 15_000 });
     });
 
-    await test.step("the status says how long an agent has worked or waited", async () => {
-      // The seeded question was asked ten minutes ago.
-      await expect(card(page, `run:${RUN_ID}`).locator(".agent-card__status")).toHaveText(/^Needs you \u00b7 1\dm$/);
-      await expect(card(page, `run:${RUN_ID}`).locator(".agent-card__status")).toHaveAttribute("title", /^Waiting since \d\d:\d\d$/);
-      const working = page.locator('[data-agent-bucket="working"] .agent-card__status');
-      await expect(working).toHaveText(/^Working for (<1m|\d+m)$/);
-      await expect(working).toHaveAttribute("title", /^Started \d\d:\d\d$/);
-      const dark = await page.evaluate(() => document.documentElement.dataset.themeMode !== "light");
-      if (dark && process.env.AGENT_TIMES_SHOT) {
-        await page.locator(".agent-board").first().screenshot({ path: process.env.AGENT_TIMES_SHOT });
-      }
-      if (dark && process.env.AGENT_TIMES_SHOT_LIGHT) {
-        // Flip the root to the light theme for one frame, as the provider does.
-        await page.evaluate(() => {
-          const root = document.documentElement;
-          root.classList.remove("dark", "theme-codara-classic");
-          root.classList.add("light", "theme-codara-daylight");
-          root.dataset.theme = "codara-daylight";
-          root.dataset.themeMode = "light";
-          root.style.setProperty("color-scheme", "light");
-        });
-        await page.waitForTimeout(400);
-        await page.locator(".agent-board").first().screenshot({ path: process.env.AGENT_TIMES_SHOT_LIGHT });
-      }
+    await test.step("Working shows a live timer and a waiting chat reads Input", async () => {
+      const working = page.locator('[data-agent-shelf="working"] .agent-inbox-row__status');
+      await expect(working).toHaveText(/^Working(now|\d+m)$/);
+      await expect(card(page, `run:${RUN_ID}`).locator(".agent-inbox-row__status")).toHaveText("Input");
     });
 
-    const before = await cardColours(page);
-    await test.step("opening the beta card switches workspace and names it", async () => {
+    await test.step("project tiles are monochrome: no workspace colour on any row", async () => {
+      const tiles = await page
+        .locator(".agent-inbox-row__tile")
+        .evaluateAll((nodes) => nodes.map((node) => `${getComputedStyle(node).color} ${getComputedStyle(node).backgroundColor}`));
+      expect(tiles.length).toBeGreaterThanOrEqual(2);
+      expect(new Set(tiles).size).toBe(1);
+    });
+
+    await test.step("opening the beta row switches workspace and names it", async () => {
       await card(page, `run:${RUN_ID}`).locator("[data-agent-card-open]").click();
       await expect(page.getByTestId("workspace-switch-hud")).toContainText("beta");
-      await expect(card(page, `run:${RUN_ID}`)).toHaveClass(/is-here/);
-      await expect(page.locator('[data-agent-workspace="ws-a"]')).not.toHaveClass(/is-here/);
-    });
-
-    await test.step("no card changed colour, only the you-are-here tile moved", async () => {
-      // Let any colour transition settle before reading.
-      await page.waitForTimeout(400);
-      const after = await cardColours(page);
-      const working = Object.keys(after).find((key) => key.startsWith("pane:")) ?? "";
-      expect(working).toBeTruthy();
-      expect(after[working].edge).not.toBe(after[`run:${RUN_ID}`].edge);
-      for (const [key, colours] of Object.entries(after)) {
-        for (const [part, value] of Object.entries(colours)) {
-          if (part === "tile" && before[key]?.tile === undefined) continue;
-          expect(`${key} ${part} ${value}`).toBe(`${key} ${part} ${before[key]?.[part]}`);
-        }
-      }
     });
   } finally {
     await app.close();
@@ -604,9 +525,9 @@ test("an agent whose turn ended with background work still running is not ready"
       await viewTab(page, "Agents").click();
       const agent = card(page, `pane:${paneId}`);
       await expect(agent).toHaveAttribute("data-agent-bucket", "working", { timeout: 15_000 });
-      await expect(agent).toContainText("In background");
-      await expect(agent.locator(".agent-card__status")).toHaveText(/^In background for (<1m|\d+m)$/);
-      await expect(agent).toContainText("1 agent running");
+      await expect(agent).toHaveAttribute("data-agent-shelf", "working");
+      await expect(agent.locator(".agent-inbox-row__status")).toHaveText(/^Working(now|\d+m)$/);
+      await expect(agent.locator(".agent-inbox-row__line.is-meta")).toContainText("1 agent running");
       await viewTab(page, "Workspaces").click();
     });
 
@@ -618,8 +539,8 @@ test("an agent whose turn ended with background work still running is not ready"
       await expect(count).toHaveAttribute("data-working", "false");
       await viewTab(page, "Agents").click();
       await expect(card(page, `pane:${paneId}`)).toHaveAttribute("data-agent-bucket", "done", { timeout: 15_000 });
+      await expect(card(page, `pane:${paneId}`)).toHaveAttribute("data-agent-shelf", "inbox");
       await expect(card(page, `pane:${paneId}`)).toContainText("The review found nothing.");
-      await expect(card(page, `pane:${paneId}`).locator(".agent-card__status")).toHaveText("Done just now");
     });
   } finally {
     await app.close();

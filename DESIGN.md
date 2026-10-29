@@ -156,31 +156,78 @@ Simple Browser (a browser that belongs to the editor), the Vercel toolbar
 - No dock: a bar along the bottom of the page would sit over the area the
   agent's cursor works in and split the tools between two edges.
 
-## Usage forecast in the usage panel (2026-10, Labs)
+## Usage in the title bar (2026-10)
 
-**Chosen:** B, the projection. Each limit meter in the usage panel draws, past
-the used part, a soft segment to where the window is most likely to end, plus
-a thin tick at the pessimistic end (p90), with one short line under the
-meter: "Ends ≈ 48% at reset" or "Runs out ≈ 14:20, 40 min early". Etienne
-picked it from three variants shown on his real numbers (A a full sentence
-under each meter, B this projection, C a mark on the title-bar pill only).
-A and C stay selectable in the Usage tab's Labs card.
+**Chosen:** title bar option 3, hairlines, with popover option C, now → at
+reset. Each provider in the title bar is its glyph and one thin 26px line:
+the solid part is what the active account has used of the limit that matters
+most, the faint part is where the forecast says it ends at the reset. Clicking
+one opens a single panel where every limit reads "NOW 82% → AT RESET out
+17:40 · 2h 50m early" (or "35% at reset") over a dot-and-circle track: the
+dot is now, the circle is the forecast end. Etienne picked it from round 2 of
+the usage mock-up (title bars: rings, one glyph, hairlines; popovers: big
+number with bar, rings, now → at reset), after rejecting round 1 (the Orca
+style roster with its flyout, lanes, a table and a sheet). It replaces the
+text chips ("Main 5h 82% · wk 34%"), the "Usage · all agents" roster and its
+per-provider flyout, and the Labs forecast styles (projection, sentence,
+title-bar mark) that were never on by default.
 
-**Why:** the meter is where the eye already goes, and a segment on it answers
-"will it last" without reading. The sentence (A) said the same thing in more
-words, and the title-bar mark (C) hid it until a run-out was likely.
+**Why:** his words: the top part "super minimalistic", and when pressed
+"informative but simple to understand and nice looking", showing "where it
+thinks our usage will be based on predictions: are we going to finish it
+before it resets?". The chips said how much was used but not whether it would
+last, and the forecast that answers that was a Labs switch nobody had on. For
+ChatGPT he wanted the banked resets usable from there: how many, and when
+each expires.
+
+**References:** the mock-up (round 2, `usage-variants/index.html`, with
+`round1.html` for what was rejected), built on Studio's own dark tokens.
+Orca's usage roster (github.com/stablyai/orca) still shapes the account model
+behind the Switch menu. t3code (github.com/pingdotgg/t3code) for how a reset
+is spent: the credit id is sent, and the request id is derived from the
+account and the credit.
 
 **Rules:**
 
-- The projection uses the meter's own tone color at low opacity, never a new
-  color. It turns to the danger tone only when running out is more likely
-  than not, and then the segment fills to the end of the meter.
-- The short line is always text as well as the segment, so color and length
-  never carry the forecast alone.
-- An account that is not in use shows no projection: it only grows if the
-  user switches to it.
-- How sure the forecast is reads as a word plus the history it learned from
-  ("fairly sure · 40 past windows"), never as a raw percentage.
+- Colour only for risk. The hairline and its glyph are ink-dim while fine and
+  turn danger only when the forecast says a limit runs out before it resets
+  (or it is used up). In the panel the "now" number is ink, warn past 70%
+  used, danger when it runs out. No green anywhere: fine is the quiet state.
+- The forecast is never shown alone: the faint part and the circle always
+  come with the "at reset" number or the run-out time and how early, and the
+  hairline's tooltip and accessible name say it in one plain sentence.
+- A hairline draws the limit that runs out first, else the one forecast to
+  end highest; plan-wide windows before a model's cap.
+- Running out is said only when it is more likely than not (the forecast's
+  odds at or above one in two).
+- Never a made-up number: a window the forecast has no history for (no view,
+  or no past day like today) says "not enough history yet" and draws no
+  circle. With the forecast turned off, the panel shows only "now" and the
+  reset time.
+- The forecast is on by default. Settings, Agents, Usage has the switch; only
+  the user's own choice turns it off (usageForecastChosen), since the Labs
+  builds saved `usageForecast: false` for everyone.
+- One panel, no flyout. Per provider: glyph, name, the active account (or the
+  plan when there is no one else to switch to) and, on the right, "Switch"
+  when there is another account to move new sessions to, else the email.
+  The Switch menu lists every account, the active one checked; switching is
+  the same request Accounts makes.
+- "<Account> has 98% left · Switch" appears only while one of the active
+  account's limits runs out and another switchable account has at least 25%
+  room and more than the active one. Nothing nudges while things are fine.
+- ChatGPT's banked resets list each reset with its expiry, absolute and
+  relative, soonest first; one expiring within a day gets a warn dot. "Use a
+  reset" spends the one that expires first, by its credit id, after a confirm
+  that names it ("The reset expiring today 19:48 goes first. This can't be
+  undone."). When ChatGPT says none applies (applicable 0), or nothing is used
+  yet, the button is off and a sentence says why.
+- A provider with nothing to draw is one line ("Grok: limits appear once Cora
+  is signed in · Connect"). Plain words for the private own login: "Claude
+  Code keeps these private".
+- Providers keep the Accounts order (Claude, ChatGPT, Grok) whatever the
+  numbers say, so nothing jumps place between two looks.
+- The footer has two links, "Usage details" and "Accounts". The separate Usage
+  opener in the title bar shows only when there is no hairline to click.
 
 ## Worktrees in the rail (2026-10)
 
@@ -274,3 +321,63 @@ finished.
   other callers keep the full line.
 - Worktree rows under a project keep their own agent line (state dot and
   word): it names one agent, it is not a count.
+
+## Agents tab (2026-10)
+
+**Chosen:** D′, "straight T3 Code, a bit nicer and more minimal". The Agents
+tab is an inbox after T3 Code's thread sidebar: what needs you or finished on
+top, then Working, Snoozed and Settled shelves at the bottom with plain
+counts. Each row has no box and three lines: the project, then the title,
+then the branch and pull request. A status word sits top right (Input,
+Failed, Done, Working with a live timer) and gives way to the age once the
+row is seen. Etienne picked D from four variants on the real rows (D straight
+T3 Code, E T3 in Studio's colours, F grouped by workspace, G one line per
+agent), asking for it a bit nicer and more minimal; D′ is that refinement,
+recorded next to D in the mock-up before it was built.
+
+**Credit:** the design, its words and its behaviour come from T3 Code
+(github.com/pingdotgg/t3code, MIT, by Theo / Ping Labs). The code is Codara's
+own; the header of `AgentInboxList.tsx` names the source too.
+
+**Why:** the old view drew every agent as a card with a coloured edge, a
+harness mark, a workspace tile in its colour, a status phrase and often a
+reply box, so five agents filled the rail and finished work never left.
+T3 Code's rule is that every agent is either working or out of the way:
+settle what is done, snooze what can wait, and a merged pull request settles
+itself.
+
+**References:** T3 Code's sidebar (`SidebarThreadRow`, its collapsible
+section headers, the snooze presets and the undo notice in the footer).
+
+**Rules:**
+
+- Fewer marks per row than T3 Code: the agent's mark only when it is not
+  Claude Code, project tiles in muted ink (no workspace colour), +/- line
+  counts only on a finished agent's pull request, the check as Studio's ✓ ✕
+  or a dot.
+- Colour is for state only: the status word and its icon (`--warn` Input,
+  `--danger` Failed, `--ok` Done, `--info` Working), the check glyph, +/-.
+  A seen row's title is dimmed (`--ink-dim`); only the open row gets a
+  surface (`--hover-strong`).
+- Hover, or keyboard focus, turns the status slot into Snooze and ✓ Settle.
+  E settles the focused row. Snooze offers 1 hour, 3 hours, this evening
+  (18:00, gone once passed), tomorrow 09:00 and next Monday 09:00; two that
+  land on the same minute keep the named one.
+- A settled agent comes back when it does something new (starts working,
+  asks, or finishes a turn the user has not seen); a snooze ends early only
+  for a question or a fresh failure, never for a finished turn.
+- A merged pull request settles its workspace's finished agents once. Undo,
+  or new work after the merge, keeps the agent in view for that merge.
+  Pinned, working and waiting agents are never auto-settled.
+- Undo is one quiet line in the footer ("Settled, Ctrl+Z to undo") for eight
+  seconds; Ctrl+Z (⌘Z) works while focus is in the list.
+- The right-click menu is T3 Code's, trimmed: Open, Merge PR (our one
+  addition, only while the pull request is open with passing checks),
+  Settle, Snooze ›, Pin, Rename, Mark unread, Copy link, Delete. Snooze's
+  times and Delete's confirmation replace the list in place.
+- Merge PR re-reads GitHub first. Into main, master or the repository's
+  default branch it opens the Git panel's merge confirmation; into any other
+  base it squash-merges on the click, pinned to the head commit, and settles
+  the row.
+- Rows do not answer questions in place: opening the row goes to the agent.
+  The question is the row's tooltip.

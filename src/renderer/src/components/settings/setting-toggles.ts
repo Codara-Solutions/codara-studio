@@ -60,7 +60,7 @@ export const PREFERENCE_TOGGLES = {
   restoreTerminalOutput: defaultOn("restoreTerminalOutput"),
   machinesEnabled: defaultOn("machinesEnabled"),
   keepAgentsInYourChrome: defaultOn("keepAgentsInYourChrome"),
-  usageForecast: defaultOff("usageForecast"),
+  usageForecast: defaultOn("usageForecast"),
 } satisfies Record<string, PreferenceToggle>;
 
 export type PreferenceToggleId = keyof typeof PREFERENCE_TOGGLES;

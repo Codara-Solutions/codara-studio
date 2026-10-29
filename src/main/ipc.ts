@@ -499,6 +499,7 @@ import type {
   WorkerSessionSummary,
 } from "@shared/types";
 import { isPiSubscriptionProvider } from "../shared/agent-families";
+import { isPiResetCreditId } from "@shared/types";
 import type { AgentDeliveryRequest, AgentDeliveryResult } from "../shared/agent-delivery";
 import { agentDelivery } from "./agent-delivery";
 import { registerCaptureIpc } from "./browser/capture/ipc";
@@ -589,6 +590,14 @@ function piAccountProfileIdFromIpc(value: unknown): string {
   if (typeof value !== "string" || !PI_ACCOUNT_PROFILE_ID_PATTERN.test(value)) {
     throw new TypeError("Pi account profile id must be a lowercase UUIDv4");
   }
+  return value;
+}
+
+/** ChatGPT's id of one banked reset, as the usage read reported it. Absent
+ * lets ChatGPT pick, as before credit ids were read. */
+/** A reset is only spent by naming it: no id, no spend. */
+function codexResetCreditIdFromIpc(value: unknown): string {
+  if (!isPiResetCreditId(value)) throw new TypeError("Reset credit id must be a short id string");
   return value;
 }
 
@@ -1151,12 +1160,13 @@ export function registerIpc(): void {
   // account, whose cached reading the call dropped.
   handle(
     "pi-subscriptions:codex-reset",
-    async (_event, input?: { profileId?: unknown }): Promise<PiCodexResetResult> => {
+    async (_event, input?: { profileId?: unknown; creditId?: unknown }): Promise<PiCodexResetResult> => {
       await unifiedAccountsReady();
       const profileId = piAccountProfileIdFromIpc(input?.profileId);
+      const creditId = codexResetCreditIdFromIpc(input?.creditId);
       const { redeemCodexRateLimitReset } = await import("./orchestration/pi-subscription-usage");
       try {
-        return { outcome: await redeemCodexRateLimitReset(profileId) };
+        return { outcome: await redeemCodexRateLimitReset(profileId, creditId) };
       } finally {
         for (const contents of webContents.getAllWebContents()) {
           if (!contents.isDestroyed()) contents.send("pi-subscriptions:event", { type: "usage" });

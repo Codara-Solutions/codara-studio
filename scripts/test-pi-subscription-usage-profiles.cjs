@@ -429,8 +429,8 @@ async function main() {
         JSON.stringify({
           available_count: 2,
           credits: [
-            { status: "available", expires_at: new Date(syntheticNow + 3 * 86_400_000).toISOString() },
-            { status: "available", expires_at: new Date(syntheticNow + 9 * 86_400_000).toISOString() },
+            { id: "credit-late", status: "available", expires_at: new Date(syntheticNow + 9 * 86_400_000).toISOString() },
+            { id: "credit-soon", status: "available", expires_at: new Date(syntheticNow + 3 * 86_400_000).toISOString() },
           ],
         }),
         { status: resetListStatus },
@@ -465,6 +465,7 @@ async function main() {
       resetDefault.resetCredits?.available === 2 &&
       resetDefault.resetCredits.nextExpiresAt ===
         new Date(syntheticNow + 3 * 86_400_000).toISOString() &&
+      resetDefault.resetCredits.credits?.map((credit) => credit.id).join(",") === "credit-soon,credit-late" &&
       resetSecond.resetCredits?.available === 0 &&
       resetSecond.resetCredits.nextExpiresAt === undefined,
     JSON.stringify({ resetDefault, resetSecond }),
@@ -492,10 +493,29 @@ async function main() {
     JSON.stringify(listFailed),
   );
 
-  // Spending a reset: one POST with a fresh request id, the account's own
-  // token and account id, and the cached reading dropped afterwards.
+  // A spend must name its reset: without a valid credit id nothing is sent,
+  // so ChatGPT never picks one and a retry can never spend a second.
   codexRequests.length = 0;
-  const outcome = await usage.redeemCodexRateLimitReset(profiles[0].id);
+  const unnamed = [];
+  for (const creditId of [undefined, null, "", "has space", 42, "x".repeat(201)]) {
+    try {
+      await usage.redeemCodexRateLimitReset(profiles[0].id, creditId);
+      unnamed.push(`spent with ${JSON.stringify(creditId)}`);
+    } catch (error) {
+      unnamed.push(error.message);
+    }
+  }
+  check(
+    "a reset without a valid credit id is refused before anything is sent",
+    codexRequests.length === 0 &&
+      unnamed.every((message) => message === "Codara could not tell which reset to use. Check the limits and try again."),
+    JSON.stringify({ unnamed, requests: codexRequests.map((request) => request.href) }),
+  );
+
+  // Spending a reset: one POST with the credit id, the account's own token
+  // and account id, and the cached reading dropped afterwards.
+  codexRequests.length = 0;
+  const outcome = await usage.redeemCodexRateLimitReset(profiles[0].id, "credit-soon");
   const consume = codexRequests.find((request) => request.href.endsWith("/consume"));
   let redeemBody = null;
   try {
@@ -510,8 +530,26 @@ async function main() {
       consume?.method === "POST" &&
       consume.headers.authorization === "Bearer access-secret-default" &&
       consume.headers["chatgpt-account-id"] === "vendor-account-default" &&
+      redeemBody?.credit_id === "credit-soon" &&
       /^[0-9a-f-]{36}$/.test(redeemBody?.redeem_request_id ?? ""),
     JSON.stringify(codexRequests),
+  );
+  // Naming the reset: its id goes with the request, and the request id is
+  // derived from the account and the credit, so a retry spends nothing more.
+  codexRequests.length = 0;
+  await usage.redeemCodexRateLimitReset(profiles[0].id, "credit-soon");
+  await usage.redeemCodexRateLimitReset(profiles[0].id, "credit-soon");
+  const named = codexRequests
+    .filter((request) => request.href.endsWith("/consume"))
+    .map((request) => JSON.parse(request.body));
+  check(
+    "a named reset sends its credit_id with a request id stable per account and credit",
+    named.length === 2 &&
+      named.every((body) => body.credit_id === "credit-soon") &&
+      named[0].redeem_request_id === named[1].redeem_request_id &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(named[0].redeem_request_id) &&
+      named[0].redeem_request_id !== usage.codexRedeemRequestId("vendor-account-default", "credit-late"),
+    JSON.stringify(named),
   );
   codexRequests.length = 0;
   await usage.inspectPiSubscriptionUsage(false);
@@ -527,11 +565,11 @@ async function main() {
   consumeCode = "no_credit";
   check(
     "the provider's answer is passed on as an outcome",
-    (await usage.redeemCodexRateLimitReset(profiles[0].id)) === "no_credit",
+    (await usage.redeemCodexRateLimitReset(profiles[0].id, "credit-soon")) === "no_credit",
   );
   const redeemError = async (profileId) => {
     try {
-      await usage.redeemCodexRateLimitReset(profileId);
+      await usage.redeemCodexRateLimitReset(profileId, "credit-soon");
       return null;
     } catch (error) {
       return error.message;
