@@ -67,11 +67,11 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
   const pickGenerationRef = useRef(0);
 
   useEffect(() => {
-    // A pick main is still checking must not open a tab once the panel has
-    // closed (Escape) or opened again.
+    // A deferred Enter, or a pick main is still checking, must not open a
+    // tab once the panel has closed (Escape) or opened again.
     pickGenerationRef.current += 1;
-    if (!open) return;
     pendingOpenQueryRef.current = null;
+    if (!open) return;
     setPickError(null);
     setQuery("");
     setScoredQuery("");
@@ -213,6 +213,7 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
   }, [scoredQuery, cwd]);
 
   useEffect(() => {
+    pendingOpenQueryRef.current = null;
     pickGenerationRef.current += 1;
     setPickError(null);
   }, [cwd]);
@@ -411,6 +412,7 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
               <button
                 type="button"
                 onClick={() => {
+                  pendingOpenQueryRef.current = null;
                   pickGenerationRef.current += 1;
                   setPickError(null);
                   setQuery("");
