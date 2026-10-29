@@ -83,6 +83,19 @@ export function setAllowedRoots(roots: string[]): void {
   workspaceRoots = resolveAll(roots);
 }
 
+// Single files outside every root that an agent opened in the editor for the
+// user (codara_open_file). Main adds them after checking the file; the
+// renderer cannot. Exact paths only, never their folders, and only for this
+// run of the app.
+const grantedFiles = new Set<string>();
+const MAX_GRANTED_FILES = 512;
+
+export function grantReadFile(file: string): void {
+  if (typeof file !== "string" || file.length === 0 || isRemotePath(file)) return;
+  if (grantedFiles.size >= MAX_GRANTED_FILES) grantedFiles.delete(grantedFiles.values().next().value as string);
+  for (const spelling of withRealSpelling(path.resolve(file))) grantedFiles.add(spelling);
+}
+
 function home(seg: string): string {
   return path.join(os.homedir(), seg);
 }
@@ -136,6 +149,7 @@ export function isAllowedReadPath(target: string): boolean {
   // handler was routed there for an active remote workspace.
   if (isRemotePath(target)) return true;
   const abs = path.resolve(target);
+  if (grantedFiles.has(abs)) return true;
   const roots = [...seededRoots, ...workspaceRoots, ...staticAllowed()];
   return roots.some((root) => isInside(root, abs));
 }

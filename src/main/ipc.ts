@@ -1,9 +1,9 @@
 import { ipcMain, dialog, BrowserWindow, app, shell, webContents, clipboard, nativeImage, type WebContents } from "electron";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
 import { createFile, createFolder, deleteFile, deleteToStash, importEntries, listDir, listFiles, moveEntries, purgeDeleteStash, readFileBytes, readFileEx, readTextFile, readTextFileTail, renameFile, statFile, undoDeleteFromStash, writeTextFile } from "./fs-tree";
@@ -1905,7 +1905,13 @@ export function registerIpc(): void {
       if (isRemotePath(target) || (base && isRemotePath(base))) {
         return { exists: false, isFile: false, resolved: target };
       }
-      const resolved = base ? join(base, target) : target;
+      // `~/` is the user's home, as in a shell; an absolute target ignores
+      // the pane's cwd.
+      const expanded = /^~(?=[\\/])/.test(target) ? join(homedir(), target.slice(2)) : target;
+      // A relative name with no known folder names nothing; resolving it
+      // against Codara's own working directory would be a guess.
+      if (!base && !isAbsolute(expanded)) return { exists: false, isFile: false, resolved: expanded };
+      const resolved = base && !isAbsolute(expanded) ? join(base, expanded) : expanded;
       try {
         await assertAllowedReadPathResolved(resolved);
       } catch {

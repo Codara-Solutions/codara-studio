@@ -204,8 +204,13 @@ async function main() {
   assert.match(session, /new WebLinksAddon\(\(event, uri\) => activateTerminalLink\(event, uri\)\)/, "plain URLs");
   assert.match(
     session,
-    /activate: \(event, uri\) => \{\s*if \(followsHiddenTargetLink\(uri\)\) activateTerminalLink\(event, uri\);/,
-    "OSC 8 hyperlinks, web and tab targets only",
+    /activate: \(event, uri\) => \{\s*const fileTarget = fileLinkTarget\(uri\);\s*if \(fileTarget\) activateFileLink\(event, fileTarget\);\s*else if \(followsHiddenTargetLink\(uri\)\) activateTerminalLink\(event, uri\);/,
+    "OSC 8 hyperlinks: a local file opens in the editor, otherwise web and tab targets only",
+  );
+  assert.match(
+    session,
+    /const activateFileLink = [^\n]*\n\s*if \(!event \|\| event\.button !== 0 \|\| \(!event\.ctrlKey && !event\.metaKey\)\) return;/,
+    "an OSC 8 file link opens on Ctrl or Cmd+click only",
   );
   assert.match(session, /registerTerminalContextSource\(sessionId,/);
   assert.match(session, /if \(!readOnlyRef\.current\) \{\s*cleanups\.push\(\s*registerTerminalContextSource/, "mirrors do not register");

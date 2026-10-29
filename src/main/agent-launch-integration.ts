@@ -278,7 +278,7 @@ export async function writeIntegrationFiles(
   const claudeSettingsPath = join(dir, "claude", "settings.json");
   const claudeHooks = hookScript ? { ...claudeHookSettings(python, hookScript) } : null;
   const separateBrowserTools = options.separateBrowserTools ?? null;
-  const claudeSettingsWritten = await writeClaudeSettings(claudeSettingsPath, claudeHooks, separateBrowserTools);
+  await writeClaudeSettings(claudeSettingsPath, claudeHooks, separateBrowserTools);
   const claudeMcpConfigPaths: Partial<Record<AgentMcpMode, string>> = {};
   for (const mode of MCP_MODES) {
     const path = join(dir, "claude", `mcp-${mode}.json`);
@@ -297,7 +297,7 @@ export async function writeIntegrationFiles(
     claudeHooks,
     separateBrowserTools,
     claudeSettingsFile: claudeSettingsPath,
-    claudeSettingsPath: claudeSettingsWritten ? claudeSettingsPath : null,
+    claudeSettingsPath,
     claudeMcpConfigPaths,
     codexNotifyArgv,
     codexTuiNotificationsUnset: tuiNotificationsUnset(codexText),
@@ -311,18 +311,22 @@ export async function writeIntegrationFiles(
  * Chrome" turns off. Removed when it would be empty, so no launch points at
  * a stale one.
  */
+// Claude Code prints its markdown links to files as OSC 8 file:// hyperlinks
+// only in terminals it recognizes, and xterm.js inside Codara is not one of
+// them. FORCE_HYPERLINK turns them on; Codara's terminal opens a clicked file
+// link in its editor (useTerminalSession.ts). Claude applies a settings file's
+// env to its own process, so this reaches the Claude sessions Codara starts
+// (and the commands they run), not every program in the pane. A user's own
+// --settings replaces this file, and with it the links.
+const CLAUDE_SESSION_ENV = { FORCE_HYPERLINK: "1" } as const;
+
 async function writeClaudeSettings(
   path: string,
   hooks: Record<string, unknown> | null,
   guard: SeparateBrowserToolsGuard | null,
-): Promise<boolean> {
-  const content = { ...(hooks ?? {}), ...(guard?.claudeSettings ?? {}) };
-  if (Object.keys(content).length === 0) {
-    await fs.rm(path, { force: true });
-    return false;
-  }
+): Promise<void> {
+  const content = { ...(hooks ?? {}), ...(guard?.claudeSettings ?? {}), env: { ...CLAUDE_SESSION_ENV } };
   await writeIfChanged(path, `${JSON.stringify(content, null, 2)}\n`);
-  return true;
 }
 
 /**
@@ -333,8 +337,8 @@ async function writeClaudeSettings(
 export async function setSeparateBrowserToolsGuard(guard: SeparateBrowserToolsGuard | null): Promise<void> {
   if (!state) return;
   state.separateBrowserTools = guard;
-  const written = await writeClaudeSettings(state.claudeSettingsFile, state.claudeHooks, guard);
-  state.claudeSettingsPath = written ? state.claudeSettingsFile : null;
+  await writeClaudeSettings(state.claudeSettingsFile, state.claudeHooks, guard);
+  state.claudeSettingsPath = state.claudeSettingsFile;
   await writeShellArgsFiles();
 }
 

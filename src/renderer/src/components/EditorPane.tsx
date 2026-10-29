@@ -52,6 +52,7 @@ import {
   PreviewFullscreenButton,
   usePreviewFullscreen,
 } from "./file-preview/PreviewFullscreenButton";
+import { isSecretFilePath } from "@shared/secret-files";
 import { shareableKind } from "@shared/share";
 import ShareButton from "./share/ShareButton";
 
@@ -247,7 +248,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       languageCompartment.of([]),
       inlineCompletion({
         getPrefs: () => ({
-          enabled: prefsRef.current.inlineAutocompleteEnabled,
+          // A .env or key file's text never goes to the completion model.
+          enabled: prefsRef.current.inlineAutocompleteEnabled && !isSecretFilePath(pathRef.current ?? ""),
           modelId: prefsRef.current.inlineAutocompleteModelId,
           delayMs: prefsRef.current.inlineAutocompleteDelayMs,
         }),
