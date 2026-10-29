@@ -545,6 +545,11 @@ export interface CopyBranchCreator {
   runId?: string;
   paneId?: string;
   purpose?: string;
+  // The workspace the agent called from, as it was named then. Set when an
+  // agent made the worktree, so a worktree made for another workspace's
+  // repository says who works in it ("Background agent · from <name>").
+  fromWorkspaceId?: string;
+  fromWorkspaceName?: string;
 }
 
 // Sent to the renderer ("workspace:agentEvent") when an agent creates or
@@ -564,6 +569,8 @@ export const COPY_BRANCH_CREATOR_LIMITS = {
   runId: 120,
   paneId: 120,
   purpose: 200,
+  fromWorkspaceId: 120,
+  fromWorkspaceName: 120,
 } as const;
 
 // Field-level validation for a persisted creator: an unknown kind drops the
@@ -573,7 +580,7 @@ export function normalizeCopyBranchCreator(value: unknown): CopyBranchCreator | 
   const raw = value as Record<string, unknown>;
   if (raw.kind !== "user" && raw.kind !== "agent") return undefined;
   const creator: CopyBranchCreator = { kind: raw.kind };
-  for (const key of ["client", "runId", "paneId", "purpose"] as const) {
+  for (const key of ["client", "runId", "paneId", "purpose", "fromWorkspaceId", "fromWorkspaceName"] as const) {
     const field = raw[key];
     if (typeof field !== "string") continue;
     const text = field.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").trim().slice(0, COPY_BRANCH_CREATOR_LIMITS[key]);

@@ -74,7 +74,7 @@ async function main() {
     for (const [name, script, expected] of [
       ["a read still pending is not loaded", () => { window.spark = { worktreeCleanup: { railStates: () => new Promise(() => {}) } }; }, "false"],
       ["a failed read counts as loaded", () => { window.spark = { worktreeCleanup: { railStates: () => Promise.reject(new Error("main is busy")) } }; }, "true"],
-      ["a read that lists nothing counts as loaded", () => { window.spark = { worktreeCleanup: { railStates: async () => [] } }; }, "true"],
+      ["a read that lists nothing counts as loaded", () => { window.spark = { worktreeCleanup: { railStates: async () => ({ states: [], external: [] }) } }; }, "true"],
     ]) {
       const page = await browser.newPage();
       await page.addInitScript(script);

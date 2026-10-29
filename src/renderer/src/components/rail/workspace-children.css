@@ -79,6 +79,46 @@
   text-overflow: ellipsis;
 }
 
+/* "Background agent · from X": its own muted line above the state line,
+   since the rail is too narrow for both on one. */
+.rail-child-who {
+  min-width: 0;
+  font-size: 10.5px;
+  line-height: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* A worktree made outside Codara: the nested row's geometry, no tile. */
+.rail-child-external {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 6px 4px 7px;
+  margin-bottom: 1px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: default;
+  transition: background var(--motion-fast) var(--ease-out);
+}
+
+.rail-child-external:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.rail-child-branch {
+  flex: 1;
+  min-width: 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .rail-merged-fold {
   display: flex;
   align-items: center;

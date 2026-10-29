@@ -156,6 +156,8 @@ async function main() {
       client: "claude-code",
       paneId: "pane-1",
       purpose: "Fix the login bug",
+      fromWorkspaceId: "ws-repo",
+      fromWorkspaceName: h.state.workspaces.find((workspace) => workspace.id === "ws-repo").name,
     });
     assert.deepEqual(h.state.workspaceRailOrder, ["ws-repo", created.workspaceId], "nested after its source");
     assert.equal(h.events.at(-1).kind, "created");
@@ -280,11 +282,18 @@ async function main() {
     h.paneWorkspace["pane-coord"] = "ws-notes";
     const coordinator = { role: "studio", client: "claude-code", paneId: "pane-coord" };
     assert.equal((await aw.createAgentWorktree(coordinator, { branch: "agent/from-notes" }, deps)).code, "WORKTREE_NOT_A_REPO");
-    const elsewhere = await aw.createAgentWorktree({ ...coordinator, workspaceId: "ws-repo" }, { branch: "agent/from-notes" }, deps);
+    const elsewhere = await aw.createAgentWorktree(
+      { ...coordinator, workspaceId: "ws-repo", origin: { workspaceId: "ws-notes", workspaceName: "notes" } },
+      { branch: "agent/from-notes" },
+      deps,
+    );
     assert.equal(elsewhere.ok, true, JSON.stringify(elsewhere));
     assert.equal(elsewhere.sourceWorkspaceId, "ws-repo");
     assert.equal(workspaceOf(elsewhere.workspaceId).copyBranch.repoCwd, repo);
     assert.equal(workspaceOf(elsewhere.workspaceId).copyBranch.createdBy.paneId, "pane-coord");
+    // The worktree says who works in it: the workspace the agent called from.
+    assert.equal(workspaceOf(elsewhere.workspaceId).copyBranch.createdBy.fromWorkspaceId, "ws-notes");
+    assert.equal(workspaceOf(elsewhere.workspaceId).copyBranch.createdBy.fromWorkspaceName, "notes");
     assert.equal((await aw.createAgentWorktree({ ...coordinator, workspaceId: "ws-gone" }, {}, deps)).code, "WORKTREE_NO_WORKSPACE");
 
     // Its maker finds it again from the plain folder: by workspaceId for
