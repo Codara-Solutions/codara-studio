@@ -239,14 +239,27 @@ assert.equal(busy.canUse, true);
 assert.equal(busy.why, null);
 assert.equal(busy.next.id, "soon");
 // Without an applicable count, a reset is worth spending once a window has use.
-assert.equal(glance.planCodexReset(codex(30, { available: 1 }), NOW).canUse, true);
-assert.equal(glance.planCodexReset(codex(0, { available: 1 }), NOW).canUse, false);
+assert.equal(glance.planCodexReset(codex(30, { available: 1, credits }), NOW).canUse, true);
+assert.equal(glance.planCodexReset(codex(0, { available: 1, credits }), NOW).canUse, false);
 assert.equal(glance.planCodexReset(codex(30, { available: 0 }), NOW), null);
-// Only the count and the soonest expiry were read: one entry, no id.
-assert.deepEqual(
-  glance.planCodexReset(codex(30, { available: 2, nextExpiresAt: at(3 * DAY) }), NOW).credits.map((credit) => credit.id),
-  [null],
-);
+// Only the count and the soonest expiry were read (the list fetch failed):
+// one entry, no id, and nothing can be spent, because a spend must name the
+// reset that expires first.
+const unlisted = glance.planCodexReset(codex(91, { available: 2, applicable: 2, nextExpiresAt: at(3 * DAY) }), NOW);
+assert.deepEqual(unlisted.credits.map((credit) => credit.id), [null]);
+assert.equal(unlisted.canUse, false);
+assert.equal(unlisted.why, "Codara could not read which reset expires first. Try again in a moment.");
+assert.equal(glance.planCodexReset(codex(91, { available: 2, applicable: 2 }), NOW).canUse, false);
+// The earliest reset has no usable id: no falling back to a later one.
+for (const id of [undefined, "", "has space"]) {
+  const plan = glance.planCodexReset(
+    codex(91, { available: 2, applicable: 2, credits: [{ id, expiresAt: at(HOUR) }, { id: "later", expiresAt: at(DAY * 3) }] }),
+    NOW,
+  );
+  assert.equal(plan.next.id, null);
+  assert.equal(plan.canUse, false);
+}
+console.log("ok - Use a reset is off unless the reset that expires first has an id");
 assert.deepEqual(glance.resetConfirmWords(busy, codex(91), "ChatGPT", NOW), {
   question: "Use 1 of 2 resets now?",
   detail: "ChatGPT's weekly limit goes from 91% back to 0%. The reset expiring today 19:48 goes first. This can't be undone.",
@@ -254,3 +267,23 @@ assert.deepEqual(glance.resetConfirmWords(busy, codex(91), "ChatGPT", NOW), {
 assert.equal(glance.expiryWords(NOW + 8 * DAY + 7 * HOUR + 20 * MINUTE, NOW), "Sat 7 Nov, 00:20");
 assert.equal(glance.expiryWords(NOW + 16 * HOUR, NOW), "tomorrow 09:00");
 console.log("ok - the reset that expires first is spent, and Use a reset is off with a reason when none applies");
+
+// ── What the confirm spends ───────────────────────────────────────────────
+const busyUsage = codex(91, { available: 2, applicable: 2, credits });
+const captured = glance.resetTarget("codex", busyUsage, NOW);
+assert.deepEqual(captured, { profileId: "codex", creditId: "soon" });
+assert.equal(glance.sameResetTarget(captured, glance.resetTarget("codex", busyUsage, NOW + MINUTE)), true);
+// The account switched while the confirm was open.
+assert.equal(glance.sameResetTarget(captured, glance.resetTarget("codex-2", busyUsage, NOW)), false);
+assert.equal(glance.sameResetTarget(captured, glance.resetTarget(null, busyUsage, NOW)), false);
+// The captured reset expired: the next one is a different target.
+const afterExpiry = glance.resetTarget("codex", busyUsage, NOW + 3 * HOUR);
+assert.deepEqual(afterExpiry, { profileId: "codex", creditId: "later" });
+assert.equal(glance.sameResetTarget(captured, afterExpiry), false);
+// A refresh replaced the list, lost it, or made none applicable.
+const refreshed = codex(91, { available: 2, applicable: 2, credits: [{ id: "new", expiresAt: at(HOUR) }, ...credits] });
+assert.equal(glance.sameResetTarget(captured, glance.resetTarget("codex", refreshed, NOW)), false);
+assert.equal(glance.resetTarget("codex", codex(91, { available: 2, applicable: 2, nextExpiresAt: at(DAY) }), NOW), null);
+assert.equal(glance.resetTarget("codex", codex(91, { available: 2, applicable: 0, credits }), NOW), null);
+assert.equal(glance.sameResetTarget(null, null), false);
+console.log("ok - the confirm keeps the account and reset it opened for, and any change is a different target");

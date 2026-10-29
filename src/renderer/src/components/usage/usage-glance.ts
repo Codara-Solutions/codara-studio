@@ -5,7 +5,7 @@
 // rules without a renderer. The words follow the mock-up Etienne picked
 // (DESIGN.md, "Usage in the title bar").
 
-import type { PiUsageProfile, PiUsageResetCredit, PiUsageWindow } from "@shared/types";
+import { isPiResetCreditId, type PiUsageProfile, type PiUsageResetCredit, type PiUsageWindow } from "@shared/types";
 import { formatClock, type UsageForecastReport, type WindowForecastView } from "@shared/usage-forecast";
 import { formatResetDuration, orderWindows, type RosterAccount, type RosterProvider } from "./usage-roster";
 
@@ -204,7 +204,8 @@ export interface ResetPlan {
   /** Every listed reset, soonest expiry first. May be empty when only the
    * count was read. */
   credits: BankedReset[];
-  /** The reset "Use a reset" spends: the unexpired one that expires first. */
+  /** The reset "Use a reset" spends: the unexpired one that expires first.
+   * Spending needs its id; without one "Use a reset" stays off. */
   next: BankedReset | null;
   canUse: boolean;
   /** Why "Use a reset" is off, in plain words; null while it is on. */
@@ -262,7 +263,7 @@ export function planCodexReset(usage: PiUsageProfile | null | undefined, nowMs: 
     .filter(({ at }) => at === null || at > nowMs)
     .sort((a, b) => (a.at ?? Infinity) - (b.at ?? Infinity))
     .map(({ credit, at }) => ({
-      id: credit.id ?? null,
+      id: isPiResetCreditId(credit.id) ? credit.id : null,
       expiresAtMs: at,
       grantedAtMs: parseMs(credit.grantedAt),
       soon: at !== null && at - nowMs <= DAY_MS,
@@ -278,9 +279,16 @@ export function planCodexReset(usage: PiUsageProfile | null | undefined, nowMs: 
   const general = (usage?.windows ?? []).filter((window) => (window.scope?.kind ?? "general") === "general");
   const nothingUsed = general.every((window) => window.usedPercent < 1);
   const applicable = banked.applicable;
-  const canUse = applicable !== undefined ? applicable > 0 : !nothingUsed;
+  const worth = applicable !== undefined ? applicable > 0 : !nothingUsed;
+  // A reset is only spent by naming the one that expires first. When the
+  // list could not be read (or that reset has no id), nothing is offered:
+  // letting ChatGPT pick would lose both the order and the retry guard.
+  const named = next?.id != null;
+  const canUse = worth && named;
   let why: string | null = null;
-  if (!canUse) {
+  if (worth && !named) {
+    why = "Codara could not read which reset expires first. Try again in a moment.";
+  } else if (!canUse) {
     const tightest = [...general].sort((a, b) => b.usedPercent - a.usedPercent)[0];
     const name = tightest ? limitTitle(tightest).toLowerCase() : null;
     why = nothingUsed
@@ -291,6 +299,33 @@ export function planCodexReset(usage: PiUsageProfile | null | undefined, nowMs: 
     }
   }
   return { count, credits, next, canUse, why };
+}
+
+/** What a confirmed reset spends: this account's reset that expires first. */
+export interface ResetTarget {
+  profileId: string;
+  creditId: string;
+}
+
+/**
+ * The reset "Use a reset" would spend right now, or null when none can be
+ * spent. The confirm step captures it when it opens and closes again when
+ * this no longer gives the same answer, so the final click never spends
+ * another account's reset or a different one.
+ */
+export function resetTarget(
+  profileId: string | null | undefined,
+  usage: PiUsageProfile | null | undefined,
+  nowMs: number,
+): ResetTarget | null {
+  if (!profileId) return null;
+  const plan = planCodexReset(usage, nowMs);
+  const creditId = plan?.canUse ? plan.next?.id : null;
+  return creditId ? { profileId, creditId } : null;
+}
+
+export function sameResetTarget(a: ResetTarget | null, b: ResetTarget | null): boolean {
+  return Boolean(a && b && a.profileId === b.profileId && a.creditId === b.creditId);
 }
 
 /** The confirm step's question and detail, naming the reset that is spent. */

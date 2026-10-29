@@ -46,7 +46,7 @@
 // extra_usage amounts are minor units of its currency, as Claude Code's own
 // schema for this endpoint documents; the newer `spend` object follows Orca.
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { logMain } from "../file-log";
 import { familyForSubscription, PI_SUBSCRIPTION_PROVIDERS } from "../../shared/agent-families";
@@ -60,6 +60,7 @@ import type {
   PiUsageResetCredits,
   PiUsageWindow,
 } from "@shared/types";
+import { isPiResetCreditId } from "@shared/types";
 
 import {
   inspectPiAccountProfileAuthStore,
@@ -1140,17 +1141,20 @@ export function codexRedeemRequestId(accountId: string, creditId: string): strin
 /**
  * Spend one of a Codex account's rate-limit resets. The usage panel asks the
  * user to confirm first: a reset is something the account earned, and using
- * it cannot be undone. With a credit id (the panel sends the reset that
- * expires first) that reset is the one spent, and its request id is derived
- * from it, so a retried request spends at most one reset. Without one,
- * ChatGPT picks and every call gets a fresh request id. The account's cached
- * reading is dropped whatever happens, so the next read shows what ChatGPT
- * reports now.
+ * it cannot be undone. The credit id is required: the panel names the reset
+ * that expires first, that reset is the one spent, and the request id is
+ * derived from account and credit, so a retried request spends at most one
+ * reset. A spend without a valid credit id is refused before anything is
+ * sent. The account's cached reading is dropped whatever happens, so the
+ * next read shows what ChatGPT reports now.
  */
 export async function redeemCodexRateLimitReset(
   profileId: string,
-  creditId?: string,
+  creditId: string,
 ): Promise<PiCodexResetOutcome> {
+  if (!isPiResetCreditId(creditId)) {
+    throw new CodexResetError("Codara could not tell which reset to use. Check the limits and try again.");
+  }
   const inspection = await inspectPiAccountProfileAuthStore();
   const profile = inspection.snapshot.profiles.find((entry) => entry.id === profileId);
   if (!profile || profile.provider !== "openai-codex") {
@@ -1168,11 +1172,7 @@ export async function redeemCodexRateLimitReset(
     const response = await fetch(`${CODEX_RESET_CREDITS_URL}/consume`, {
       method: "POST",
       headers: codexHeaders(resolved.access, accountId),
-      body: JSON.stringify(
-        creditId
-          ? { redeem_request_id: codexRedeemRequestId(accountId, creditId), credit_id: creditId }
-          : { redeem_request_id: randomUUID() },
-      ),
+      body: JSON.stringify({ redeem_request_id: codexRedeemRequestId(accountId, creditId), credit_id: creditId }),
       signal: AbortSignal.timeout(RESET_REQUEST_TIMEOUT_MS),
     });
     if (!response.ok) {

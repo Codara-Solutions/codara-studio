@@ -1033,6 +1033,14 @@ export type PiUsageCredits =
     };
 
 /** One banked Codex rate-limit reset, from `wham/rate-limit-reset-credits`. */
+/** What a ChatGPT reset credit id may look like when it crosses IPC. A reset
+ * is only ever spent by naming one, so an id outside this shape is no id. */
+export const PI_RESET_CREDIT_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,200}$/;
+
+export function isPiResetCreditId(value: unknown): value is string {
+  return typeof value === "string" && PI_RESET_CREDIT_ID_PATTERN.test(value);
+}
+
 export interface PiUsageResetCredit {
   /** ChatGPT's credit id: spending sends it, so the chosen reset is the one spent. */
   id?: string;

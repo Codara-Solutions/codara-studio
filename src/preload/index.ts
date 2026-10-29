@@ -435,8 +435,8 @@ const api = {
       ipcRenderer.invoke("pi-subscriptions:usage", { force }),
     // Spends one of the account's Codex rate-limit resets, the one named by
     // creditId when given; the caller has already asked the user to confirm.
-    redeemCodexReset: (profileId: string, creditId?: string): Promise<PiCodexResetResult> =>
-      ipcRenderer.invoke("pi-subscriptions:codex-reset", { profileId, ...(creditId ? { creditId } : {}) }),
+    redeemCodexReset: (profileId: string, creditId: string): Promise<PiCodexResetResult> =>
+      ipcRenderer.invoke("pi-subscriptions:codex-reset", { profileId, creditId }),
     // Returns [] rather than throwing when Pi is absent, so the picker falls
     // back to its curated rows instead of failing to render.
     catalog: (force = false): Promise<PiCatalogModel[]> =>

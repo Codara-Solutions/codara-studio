@@ -497,6 +497,7 @@ import type {
   WorkerSessionSummary,
 } from "@shared/types";
 import { isPiSubscriptionProvider } from "../shared/agent-families";
+import { isPiResetCreditId } from "@shared/types";
 import type { AgentDeliveryRequest, AgentDeliveryResult } from "../shared/agent-delivery";
 import { agentDelivery } from "./agent-delivery";
 import { registerCaptureIpc } from "./browser/capture/ipc";
@@ -592,11 +593,9 @@ function piAccountProfileIdFromIpc(value: unknown): string {
 
 /** ChatGPT's id of one banked reset, as the usage read reported it. Absent
  * lets ChatGPT pick, as before credit ids were read. */
-function codexResetCreditIdFromIpc(value: unknown): string | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value !== "string" || !/^[A-Za-z0-9_.:-]{1,200}$/.test(value)) {
-    throw new TypeError("Reset credit id must be a short id string");
-  }
+/** A reset is only spent by naming it: no id, no spend. */
+function codexResetCreditIdFromIpc(value: unknown): string {
+  if (!isPiResetCreditId(value)) throw new TypeError("Reset credit id must be a short id string");
   return value;
 }
 

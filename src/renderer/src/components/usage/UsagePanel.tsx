@@ -27,6 +27,9 @@ import {
   percentText,
   planCodexReset,
   resetConfirmWords,
+  resetTarget,
+  sameResetTarget,
+  type ResetTarget,
   switchSuggestion,
   type GlanceLimit,
 } from "./usage-glance";
@@ -275,11 +278,12 @@ function ResetBlock({
 }: {
   entry: RosterProvider;
   nowMs: number;
-  confirming: boolean;
+  /** The reset the open confirm will spend; null while it is closed. */
+  confirming: ResetTarget | null;
   onConfirm: (open: boolean) => void;
   busy: boolean;
   message: { text: string; danger: boolean } | null;
-  onReset: (creditId: string | null) => void;
+  onReset: (target: ResetTarget) => void;
 }) {
   const plan = planCodexReset(entry.usage, nowMs);
   if (!plan) return null;
@@ -305,7 +309,7 @@ function ResetBlock({
           ) : null}
         </div>
       ))}
-      {confirming && plan.canUse ? (
+      {confirming && plan.canUse && plan.next?.id === confirming.creditId ? (
         <div className="usage-resets__confirm" role="group" aria-label="Confirm reset">
           <span className="usage-resets__q">{words.question}</span>
           <span className="usage-resets__d">{words.detail}</span>
@@ -318,7 +322,7 @@ function ResetBlock({
               className="spark-btn is-primary"
               data-reset-confirm
               disabled={busy}
-              onClick={() => onReset(plan.next?.id ?? null)}
+              onClick={() => onReset(confirming)}
             >
               {busy ? "Using…" : "Use reset"}
             </button>
@@ -414,7 +418,8 @@ export default function UsagePanel({
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [menu, setMenu] = useState<PiSubscriptionProvider | null>(null);
   const [switching, setSwitching] = useState<SwitchState | null>(null);
-  const [confirming, setConfirming] = useState(false);
+  // The confirm holds the exact reset it was opened for: account and credit.
+  const [confirming, setConfirming] = useState<ResetTarget | null>(null);
   const [resetBusy, setResetBusy] = useState(false);
   const [resetMessage, setResetMessage] = useState<{ text: string; danger: boolean } | null>(null);
 
@@ -466,7 +471,7 @@ export default function UsagePanel({
         return;
       }
       if (confirmingRef.current) {
-        setConfirming(false);
+        setConfirming(null);
         window.requestAnimationFrame(() => {
           panelRef.current?.querySelector<HTMLElement>("[data-reset-open]")?.focus();
         });
@@ -517,13 +522,27 @@ export default function UsagePanel({
       });
   };
 
-  const redeemReset = (entry: RosterProvider, creditId: string | null) => {
-    const profileId = entry.active?.profileId;
-    if (!profileId || resetBusy) return;
+  // The ChatGPT account the reset block belongs to, and the reset it would
+  // spend now. While the confirm is open this must keep naming the captured
+  // reset; a switch, a refresh or an expiry that changes it closes the confirm.
+  const codexEntry = roster.find((entry) => entry.provider === "openai-codex") ?? null;
+  const liveTarget = resetTarget(codexEntry?.active?.profileId, codexEntry?.usage, nowMs);
+  useEffect(() => {
+    if (confirming && !resetBusy && !sameResetTarget(confirming, liveTarget)) setConfirming(null);
+  }, [confirming, liveTarget, resetBusy]);
+
+  const redeemReset = (entry: RosterProvider, target: ResetTarget) => {
+    if (resetBusy) return;
+    // Check again at the click itself: the clock may have moved past the
+    // reset's expiry since the last render.
+    if (!sameResetTarget(target, resetTarget(entry.active?.profileId, entry.usage, Date.now()))) {
+      setConfirming(null);
+      return;
+    }
     setResetBusy(true);
     setResetMessage(null);
     window.spark.piSubscriptions
-      .redeemCodexReset(profileId, creditId ?? undefined)
+      .redeemCodexReset(target.profileId, target.creditId)
       .then((result) => {
         setResetMessage({
           text: RESET_OUTCOME_TEXT[result.outcome] ?? "The reset was sent.",
@@ -533,7 +552,7 @@ export default function UsagePanel({
       .catch((error) => setResetMessage({ text: ipcErrorMessage(error), danger: true }))
       .finally(() => {
         setResetBusy(false);
-        setConfirming(false);
+        setConfirming(null);
         window.requestAnimationFrame(() => {
           (panelRef.current?.querySelector<HTMLElement>("[data-reset-open]") ?? panelRef.current)?.focus();
         });
@@ -656,7 +675,7 @@ export default function UsagePanel({
                 confirming={confirming}
                 onConfirm={(open) => {
                   setResetMessage(null);
-                  setConfirming(open);
+                  setConfirming(open ? resetTarget(entry.active?.profileId, entry.usage, nowMs) : null);
                   if (!open) {
                     window.requestAnimationFrame(() => {
                       panelRef.current?.querySelector<HTMLElement>("[data-reset-open]")?.focus();
@@ -665,7 +684,7 @@ export default function UsagePanel({
                 }}
                 busy={resetBusy}
                 message={resetMessage}
-                onReset={(creditId) => redeemReset(entry, creditId)}
+                onReset={(target) => redeemReset(entry, target)}
               />
             ) : null}
           </section>
