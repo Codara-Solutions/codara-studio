@@ -289,6 +289,14 @@ function testUndo(I) {
   const afterUndo = I.reconcileAgentInbox(model(cards), undoMerge, { ...merged, now: NOW + 2 * MIN });
   check("undoing it is not followed by the watcher settling it again", !afterUndo.prefs.settled["pane:done"]);
 
+  // The watcher sees the merge before the inbox's merge call returns.
+  const watcherFirst = I.reconcileAgentInbox(model(cards), before, merged).prefs;
+  check("the watcher settles the row first", !!watcherFirst.settled["pane:done"]);
+  check("the inbox's merge then changes nothing", I.settleMergedAgent(watcherFirst, "pane:done", "codara-solutions/codara-studio#61", NOW + MIN) === watcherFirst);
+  const undoneWatcher = I.restoreAgentInbox(watcherFirst, I.snapshotAgentInbox(before, ["pane:done"]));
+  const lateMerge = I.settleMergedAgent(undoneWatcher, "pane:done", "codara-solutions/codara-studio#61", NOW + MIN);
+  check("undoing the watcher while the merge runs is not taken back by it", !lateMerge.settled["pane:done"]);
+
   let prefs = I.snoozeAgent(I.emptyAgentInboxPrefs(), "pane:a", NOW + HOUR, NOW);
   const snapshot = I.snapshotAgentInbox(prefs, ["pane:a"]);
   prefs = I.settleAgent(prefs, "pane:a", NOW);

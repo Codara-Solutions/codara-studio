@@ -428,9 +428,12 @@ export function settleAgent(prefs: AgentInboxPrefs, key: string, now: number): A
 /**
  * Settles a row whose pull request the user just merged from the inbox. It
  * counts as that merge's auto-settle, so undoing it is never followed by the
- * watcher settling it again for the same merge.
+ * watcher settling it again for the same merge. When the watcher saw the
+ * merge first it already settled the row (or the user already undid that),
+ * so this changes nothing and leaves no second undo step behind.
  */
 export function settleMergedAgent(prefs: AgentInboxPrefs, key: string, ref: string, now: number): AgentInboxPrefs {
+  if (prefs.autoSettled[key] === ref) return prefs;
   const next = clone(prefs);
   next.settled[key] = { at: now, auto: ref };
   next.autoSettled[key] = ref;
