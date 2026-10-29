@@ -1389,6 +1389,9 @@ export interface AppPreferences {
   // default browser, copy); Ctrl or Cmd+click opens it per linkOpenTarget.
   // Off: a plain click opens it straight away. Default on.
   terminalLinkMenu?: boolean;
+  // Quick Open (Mod+P) also lists matching files anywhere in the home folder,
+  // below the workspace's own. Default on.
+  quickOpenAnywhere?: boolean;
   // "Create copy branch" setup command, keyed by absolute repo cwd. Run live
   // in a terminal in the new worktree after creation. Repos with no entry use
   // DEFAULT_COPY_BRANCH_SETUP_COMMAND.
@@ -1619,6 +1622,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   autoOpenPreview: false,
   linkOpenTarget: "system",
   terminalLinkMenu: true,
+  quickOpenAnywhere: true,
   copyBranchSetupCommandByRepo: {},
   quickCommands: [],
   terminalRightClick: "paste",
@@ -2471,6 +2475,27 @@ export interface FsEntry {
   isDir: boolean;
   ext?: string;
 }
+
+// Quick Open's "Elsewhere on this computer" (src/main/quick-open-anywhere.ts).
+export interface HomeFileHit {
+  /** Absolute path. */
+  path: string;
+  /** Path below the home folder, POSIX separators. */
+  rel: string;
+  name: string;
+}
+
+export interface HomeFileSearchResult {
+  hits: HomeFileHit[];
+  /** The walk stopped early (time, candidate cap); refining the query helps. */
+  truncated: boolean;
+  /** A newer query from the same window replaced this one. */
+  cancelled?: boolean;
+  /** The section is off in Settings. */
+  disabled?: boolean;
+}
+
+export type HomePickResult = { ok: true; path: string } | { ok: false; message: string };
 
 export interface FsFileContent {
   path: string;
