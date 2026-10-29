@@ -147,17 +147,26 @@ test("a path with spaces in agent output and codara_open_file open the editor", 
     // spaces, and a Claude markdown link to the .env file as OSC 8.
     const toolLine = `⏺ Read(${fixture.notes})`;
     const osc8 = `  See \x1b]8;id=env;file://${encodeURI(fixture.envFile)}\x1b\\.env settings\x1b]8;;\x1b\\ for the API key.`;
-    const grid = await printLines(pane, fixture, [toolLine, "", osc8]);
+    // Two rows down, clear of the pane's hover toolbar.
+    const grid = await printLines(pane, fixture, ["", "", toolLine, "", osc8]);
     // Inside the path, past "Codara SL" (whose space ends the first token).
     const pathCell = toolLine.indexOf("My Project") + 3;
     const notesTab = page.getByRole("tab", { name: "meeting notes.md" });
 
     // A plain click selects or does nothing; it never opens the file.
-    await clickAt(page, await cellCenter(pane, grid, 0, pathCell));
+    await clickAt(page, await cellCenter(pane, grid, 2, pathCell));
     await page.waitForTimeout(500);
     await expect(notesTab).toHaveCount(0);
 
-    await clickAt(page, await cellCenter(pane, grid, 0, pathCell), MOD);
+    // Hovered, the whole path is one link, across both spaces.
+    const pathPoint = await cellCenter(pane, grid, 2, pathCell);
+    await page.mouse.move(pathPoint.x, pathPoint.y + 40);
+    await page.mouse.move(pathPoint.x - 3, pathPoint.y);
+    await page.waitForTimeout(500);
+    await page.mouse.move(pathPoint.x, pathPoint.y);
+    await page.waitForTimeout(500);
+    await proof(page, "0-claude-line-path-hovered");
+    await clickAt(page, pathPoint, MOD);
     await expect(notesTab).toBeVisible({ timeout: 10_000 });
     await expect(page.locator(".cm-content:visible")).toContainText("Ship the file links", { timeout: 10_000 });
     await proof(page, "1-ctrl-click-path-with-spaces");
@@ -165,7 +174,7 @@ test("a path with spaces in agent output and codara_open_file open the editor", 
     // Back to the terminal: the OSC 8 link opens the .env file.
     await page.getByRole("tab", { name: /terminals/i }).first().evaluate((tab) => (tab as HTMLElement).click());
     await expect(pane.locator(".xterm-host")).toBeVisible();
-    await clickAt(page, await cellCenter(pane, grid, 2, "  See ".length + 2), MOD);
+    await clickAt(page, await cellCenter(pane, grid, 4, "  See ".length + 2), MOD);
     await expect(page.getByRole("tab", { name: ".env" })).toBeVisible({ timeout: 10_000 });
     await expect(page.locator(".cm-content:visible")).toContainText("API_URL=http://localhost:4000", { timeout: 10_000 });
     await proof(page, "2-ctrl-click-claude-osc8-file-link");
