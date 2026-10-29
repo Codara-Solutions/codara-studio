@@ -56,6 +56,7 @@ export const PREFERENCE_TOGGLES = {
   vimMode: defaultOff("vimMode"),
   autosaveEnabled: defaultOff("autosaveEnabled"),
   inlineAutocompleteEnabled: defaultOff("inlineAutocompleteEnabled"),
+  quickOpenAnywhere: defaultOn("quickOpenAnywhere"),
   restoreAgentSessions: defaultOff("restoreAgentSessions"),
   restoreTerminalOutput: defaultOn("restoreTerminalOutput"),
   machinesEnabled: defaultOn("machinesEnabled"),

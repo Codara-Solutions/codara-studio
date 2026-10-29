@@ -1920,6 +1920,20 @@ function EditorSettings() {
           />
         </Advanced>
       </SettingsSection>
+
+      <SettingsSection title="Quick Open">
+        <ToggleRow
+          title="Search your whole computer"
+          desc={
+            <>
+              Quick Open (<Kbd>Ctrl+P</Kbd> or <Kbd>Cmd+P</Kbd>) also lists matching files from your home folder,
+              below the workspace's own. Caches, browser profiles, SSH and GPG keys, and hidden folders stay out (type a leading
+              dot to include hidden files). A file opens only when you pick it.
+            </>
+          }
+          {...bindToggle("quickOpenAnywhere", preferences, setPreference)}
+        />
+      </SettingsSection>
     </>
   );
 }

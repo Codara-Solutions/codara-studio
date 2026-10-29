@@ -311,6 +311,10 @@ function normalize(
       typeof src.terminalLinkMenu === "boolean"
         ? src.terminalLinkMenu
         : DEFAULT_PREFERENCES.terminalLinkMenu,
+    quickOpenAnywhere:
+      typeof src.quickOpenAnywhere === "boolean"
+        ? src.quickOpenAnywhere
+        : DEFAULT_PREFERENCES.quickOpenAnywhere,
     copyBranchSetupCommandByRepo: normalizeStringMap(
       src.copyBranchSetupCommandByRepo,
     ),

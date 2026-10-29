@@ -137,6 +137,8 @@ import type {
   DeleteWorkerSessionInput,
   DeleteWorkerSessionResult,
   FileListResult,
+  HomeFileSearchResult,
+  HomePickResult,
   FsChangeEvent,
   FsEntry,
   FsFileContent,
@@ -805,6 +807,13 @@ const api = {
     // True when the file is a secret by its name, a link on the way to it or
     // its real name: the editor then opens it as plain text only.
     isSecretFile: (path: string): Promise<boolean> => ipcRenderer.invoke("fs:isSecretFile", path),
+    // Quick Open's "Elsewhere on this computer": file names under the home
+    // folder (a newer call cancels the previous one), and opening a result,
+    // which lets the editor read that one file.
+    searchHome: (query: string, excludeRoot: string | null): Promise<HomeFileSearchResult> =>
+      ipcRenderer.invoke("fs:searchHome", query, excludeRoot),
+    cancelHomeSearch: (): Promise<void> => ipcRenderer.invoke("fs:cancelHomeSearch"),
+    openHomeSearchPick: (path: string): Promise<HomePickResult> => ipcRenderer.invoke("fs:openHomeSearchPick", path),
     // Size + mtime only — used by the file previewers, which load content
     // via file:// URLs and never round-trip bytes through IPC.
     statFile: (path: string): Promise<{ size: number; mtimeMs: number }> =>

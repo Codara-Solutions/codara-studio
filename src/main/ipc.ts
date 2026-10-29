@@ -1,7 +1,7 @@
 import { ipcMain, dialog, BrowserWindow, app, shell, webContents, clipboard, nativeImage, type WebContents } from "electron";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { isAbsolute, join, sep } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { homedir, tmpdir } from "node:os";
 import { isSecretFileOnDisk } from "./secret-file-check";
@@ -9,7 +9,8 @@ import { kernelPath } from "./open-file";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
 import { createFile, createFolder, deleteFile, deleteToStash, importEntries, listDir, listFiles, moveEntries, purgeDeleteStash, readFileBytes, readFileEx, readTextFile, readTextFileTail, renameFile, statFile, undoDeleteFromStash, writeTextFile } from "./fs-tree";
-import { assertAllowedReadPathResolved, setAllowedRoots } from "./fs-sandbox";
+import { assertAllowedReadPathResolved, grantReadFile, setAllowedRoots } from "./fs-sandbox";
+import { createHomeSearchService } from "./quick-open-anywhere";
 import { readClipboardFilePaths, writeClipboardFilePaths } from "./clipboard-files";
 import { deleteManualHost, listHosts, saveCodaraHost, saveManualHost } from "./remote/ssh-hosts";
 import { codaraBoxConnectInfo, isBoxId, listCodaraBoxes } from "./remote/codara-boxes";
@@ -409,6 +410,8 @@ import type {
   CreateRunInput,
   CreateWorkerTaskInput,
   FileListResult,
+  HomeFileSearchResult,
+  HomePickResult,
   FsEntry,
   FsFileContent,
   FsReadResult,
@@ -1948,6 +1951,38 @@ export function registerIpc(): void {
   // notes.html that points at a .env): such a file opens as plain text, with
   // no preview, share or inline completion. Answers yes or no, never content.
   handle("fs:isSecretFile", async (_e, file: unknown): Promise<boolean> => isSecretFileOnDisk(file));
+
+  // Quick Open's "Elsewhere on this computer": file names under the home
+  // folder. One search per window at a time; the pick grants the read sandbox
+  // that one file, and only when the window's last search returned it.
+  const homeSearch = createHomeSearchService({
+    home: homedir,
+    enabled: () => getPreferenceCached("quickOpenAnywhere") !== false,
+    grantReadFile,
+    // A Codara home set outside ~/.codarastudio (CODARA_HOME) holds the same
+    // keys and runs, so it stays out too.
+    extraSkipped: () => {
+      const rel = relative(homedir(), codaraHome()).split(sep).join("/");
+      return rel && !rel.startsWith("..") && !isAbsolute(rel) ? [rel] : [];
+    },
+  });
+  const homeSearchSenders = new Set<number>();
+  const trackHomeSearchSender = (sender: WebContents): number => {
+    const id = sender.id;
+    if (!homeSearchSenders.has(id)) {
+      homeSearchSenders.add(id);
+      sender.once("destroyed", () => {
+        homeSearchSenders.delete(id);
+        homeSearch.forget(id);
+      });
+    }
+    return id;
+  };
+  handle("fs:searchHome", async (e, query: unknown, excludeRoot: unknown): Promise<HomeFileSearchResult> =>
+    homeSearch.search(trackHomeSearchSender(e.sender), query, excludeRoot),
+  );
+  handle("fs:cancelHomeSearch", async (e): Promise<void> => homeSearch.cancel(e.sender.id));
+  handle("fs:openHomeSearchPick", async (e, file: unknown): Promise<HomePickResult> => homeSearch.pick(e.sender.id, file));
 
 
   handle(
