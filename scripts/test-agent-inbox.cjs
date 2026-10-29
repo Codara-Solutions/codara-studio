@@ -297,6 +297,12 @@ function testUndo(I) {
   const lateMerge = I.settleMergedAgent(undoneWatcher, "pane:done", "codara-solutions/codara-studio#61", NOW + MIN);
   check("undoing the watcher while the merge runs is not taken back by it", !lateMerge.settled["pane:done"]);
 
+  // What a merge from the inbox may settle once GitHub answers.
+  check("a finished agent settles on its merge", I.settlesOnMerge(card("pane:ok", { bucket: "done" })));
+  check("one that failed while the merge ran does not", !I.settlesOnMerge(card("pane:bad", { bucket: "done", tone: "danger", status: "Failed" })));
+  check("one asking for input does not", !I.settlesOnMerge(card("pane:ask", { bucket: "needs-you" })));
+  check("one back at work does not", !I.settlesOnMerge(card("pane:busy", { bucket: "working" })));
+
   let prefs = I.snoozeAgent(I.emptyAgentInboxPrefs(), "pane:a", NOW + HOUR, NOW);
   const snapshot = I.snapshotAgentInbox(prefs, ["pane:a"]);
   prefs = I.settleAgent(prefs, "pane:a", NOW);

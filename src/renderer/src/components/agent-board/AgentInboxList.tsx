@@ -108,6 +108,10 @@ export default function AgentInboxList({ view, activeKey, navigate, now }: Props
     for (const section of sections) for (const row of section.rows) map.set(row.key, { row, shelf: section.shelf });
     return map;
   }, [sections]);
+  // Merges finish after an await: they read the row as it is by then.
+  const byKeyRef = useRef(byKey);
+  byKeyRef.current = byKey;
+  const latestRow = useCallback((key: string) => byKeyRef.current.get(key)?.row ?? null, []);
   const visible = useMemo(() => {
     const out: Row[] = [];
     for (const section of sections) if (section.shelf === "inbox" || shelves[section.shelf]) out.push(...section.rows);
@@ -174,10 +178,14 @@ export default function AgentInboxList({ view, activeKey, navigate, now }: Props
 
   const startMerge = useCallback((row: Row) => {
     setMerging((current) => new Set(current).add(row.key));
-    void mergeFromInbox(row, (request) => {
-      setConfirmResult(null);
-      setConfirm(request);
-    }).finally(() =>
+    void mergeFromInbox(
+      row,
+      (request) => {
+        setConfirmResult(null);
+        setConfirm(request);
+      },
+      latestRow,
+    ).finally(() =>
       setMerging((current) => {
         const next = new Set(current);
         next.delete(row.key);
@@ -391,7 +399,7 @@ export default function AgentInboxList({ view, activeKey, navigate, now }: Props
               setConfirmResult(null);
             }}
             onMerged={() => {
-              settleMerged(confirm.key, confirm.repository, confirm.pullRequest.number);
+              settleMerged(confirm.key, confirm.repository, confirm.pullRequest.number, latestRow);
               setConfirm(null);
               setConfirmResult(null);
             }}

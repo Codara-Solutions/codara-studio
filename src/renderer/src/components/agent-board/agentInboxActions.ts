@@ -1,5 +1,11 @@
 import { useEffect, useState } from "react";
-import { mergeNeedsConfirmation, pullRequestRef, settleMergedAgent, type AgentInboxRow } from "@shared/agent-inbox";
+import {
+  mergeNeedsConfirmation,
+  pullRequestRef,
+  settleMergedAgent,
+  settlesOnMerge,
+  type AgentInboxRow,
+} from "@shared/agent-inbox";
 import type { GitHubPullRequestSummary } from "@shared/github";
 import type { PullRequestWatchState } from "@shared/pull-request-watch";
 import { isRemotePath } from "@shared/remote";
@@ -23,8 +29,17 @@ function workspaceCwd(workspaceId: string): string | null {
   return getAgentBoardSources().workspaces.find((workspace) => workspace.id === workspaceId)?.cwd ?? null;
 }
 
-/** Settles a row after its pull request merged, with the footer's undo. */
-export function settleMerged(key: string, repository: string, number: number): void {
+/** Reads a row as it is now, after an await: null once it left the list. */
+export type LatestInboxRow = (key: string) => AgentInboxRow | null;
+
+/**
+ * Settles a row after its pull request merged, with the footer's undo. The
+ * row is read again first: an agent that failed, went back to work or asked
+ * for input while the merge ran stays in the inbox.
+ */
+export function settleMerged(key: string, repository: string, number: number, latest: LatestInboxRow): void {
+  const row = latest(key);
+  if (!row || !settlesOnMerge(row.card)) return;
   const ref = pullRequestRef({ repository: repository.toLowerCase(), number });
   updateAgentInbox((current) => settleMergedAgent(current, key, ref, Date.now()), {
     keys: [key],
@@ -41,6 +56,7 @@ export function settleMerged(key: string, repository: string, number: number): v
 export async function mergeFromInbox(
   row: AgentInboxRow,
   confirm: (request: MergeConfirmRequest) => void,
+  latest: LatestInboxRow,
 ): Promise<void> {
   const watched = row.pullRequest;
   const cwd = workspaceCwd(row.card.workspaceId);
@@ -89,7 +105,7 @@ export async function mergeFromInbox(
       return;
     }
     emitLocalToast(`Merged #${pullRequest.number}`, `Squashed into ${pullRequest.baseBranch}.`);
-    settleMerged(row.key, repository, pullRequest.number);
+    settleMerged(row.key, repository, pullRequest.number, latest);
   } catch (cause) {
     emitLocalToast(`Could not merge #${watched.number}`, unwrapIpcError(cause), "danger");
   }

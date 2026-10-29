@@ -219,8 +219,7 @@ export function reconcileAgentInbox(
       // New work after the merge is news: the same merge never hides it again.
       if (pr?.phase === "merged") target.autoSettled[card.key] = pullRequestRef(pr);
     }
-    // A failure stays in view whatever happened to the pull request.
-    if (!pr || pr.phase !== "merged" || card.bucket !== "done" || card.tone === "danger") continue;
+    if (!pr || pr.phase !== "merged" || !settlesOnMerge(card)) continue;
     const ref = pullRequestRef(pr);
     const current = next ?? prefs;
     if (current.settled[card.key] || prefs.pinned[card.key] || current.autoSettled[card.key] === ref) continue;
@@ -423,6 +422,15 @@ export function settleAgent(prefs: AgentInboxPrefs, key: string, now: number): A
   delete next.snoozed[key];
   delete next.unread[key];
   return next;
+}
+
+/**
+ * Whether a merged pull request may settle this card: only a finished agent.
+ * A failure stays in view whatever happened to the pull request, and so does
+ * an agent that is working or asking for input again.
+ */
+export function settlesOnMerge(card: AgentBoardCard): boolean {
+  return card.bucket === "done" && card.tone !== "danger";
 }
 
 /**
