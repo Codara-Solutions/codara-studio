@@ -225,7 +225,40 @@ async function main() {
       },
       NOW,
     ),
-    { available: 2, nextExpiresAt: "2026-10-18T12:00:00.000Z" },
+    {
+      available: 2,
+      nextExpiresAt: "2026-10-18T12:00:00.000Z",
+      credits: [{ expiresAt: "2026-10-18T12:00:00.000Z" }, { expiresAt: "2026-10-20T12:00:00.000Z" }],
+    },
+  );
+  same(
+    "reset summary with the applicable count",
+    codexResetCreditsValue({ available_count: 2, applicable_available_count: 0 }),
+    { available: 2, applicable: 0 },
+  );
+  same(
+    "reset details keep each credit id, soonest first, and the applicable count",
+    codexResetCreditDetails(
+      {
+        available_count: 2,
+        applicable_available_count: 0,
+        credits: [
+          { id: "later", status: "available", reset_type: "codex_rate_limits", granted_at: "2026-10-08T10:00:00.000Z", expires_at: "2026-11-07T00:20:00.000Z" },
+          { id: "other-kind", status: "available", reset_type: "something_else", expires_at: "2026-10-15T13:00:00.000Z" },
+          { id: "soon", status: "available", reset_type: "codex_rate_limits", granted_at: "2026-09-29T10:00:00.000Z", expires_at: "2026-10-15T19:48:00.000Z" },
+        ],
+      },
+      NOW,
+    ),
+    {
+      available: 2,
+      applicable: 0,
+      nextExpiresAt: "2026-10-15T19:48:00.000Z",
+      credits: [
+        { id: "soon", expiresAt: "2026-10-15T19:48:00.000Z", grantedAt: "2026-09-29T10:00:00.000Z" },
+        { id: "later", expiresAt: "2026-11-07T00:20:00.000Z", grantedAt: "2026-10-08T10:00:00.000Z" },
+      ],
+    },
   );
   same(
     "reset details count from statuses",
@@ -233,7 +266,7 @@ async function main() {
       { credits: [{ status: "available" }, { status: "expired" }] },
       NOW,
     ),
-    { available: 1 },
+    { available: 1, credits: [{}] },
   );
   same("reset details without a count", codexResetCreditDetails({ credits: [{}] }, NOW), undefined);
 

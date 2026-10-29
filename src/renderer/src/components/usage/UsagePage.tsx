@@ -183,7 +183,7 @@ const NOTE: React.CSSProperties = {
 
 export default function UsagePage() {
   const { preferences } = usePreferences();
-  const forecastOn = preferences.usageForecast === true;
+  const forecastOn = preferences.usageForecast !== false;
   const forecast = useUsageForecast(forecastOn);
   const [windowDays, setWindowDays] = useState<number>(30);
   const [metric, setMetric] = useState<UsageMetric>("cost");

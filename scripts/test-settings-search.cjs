@@ -71,7 +71,7 @@ const DIALOG_FUNCTION_TABS = {
   ClaudeFollowSetting: "agents",
   PiRuntimeInstallRow: "agents",
   PiLoginPanel: "agents",
-  UsageForecastLabsSection: "agents",
+  UsageForecastSettings: "agents",
   SessionsSettings: "sessions",
   KeybindingsTab: "keybindings",
   RunsSettings: "runs",
