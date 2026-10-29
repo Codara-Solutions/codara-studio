@@ -33,8 +33,11 @@
 //                   rate_limit_reset_credits: { available_count } }
 //                 each window { used_percent, limit_window_seconds, reset_after_seconds }
 //              GET .../wham/rate-limit-reset-credits
-//              -> { available_count, credits: [{ status, granted_at, expires_at }] }
-//                 read only when the summary reports a reset to spend, for its expiry.
+//              -> { available_count, applicable_available_count,
+//                   credits: [{ id, status, reset_type, granted_at, expires_at }] }
+//                 read only when the summary reports a reset to spend, for the
+//                 list. Spending POSTs .../consume with { redeem_request_id, credit_id }
+//                 (the shape t3code sends, github.com/pingdotgg/t3code).
 // Both are read defensively: every field is optional and a missing window is
 // simply omitted rather than rendered as a confident zero.
 //
@@ -43,7 +46,7 @@
 // extra_usage amounts are minor units of its currency, as Claude Code's own
 // schema for this endpoint documents; the newer `spend` object follows Orca.
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { logMain } from "../file-log";
 import { familyForSubscription, PI_SUBSCRIPTION_PROVIDERS } from "../../shared/agent-families";
@@ -446,14 +449,22 @@ export function codexCreditsValue(value: unknown): PiUsageCredits | undefined {
 
 /** The reset count `wham/usage` carries, without expiries. */
 export function codexResetCreditsValue(value: unknown): PiUsageResetCredits | undefined {
-  const count = finiteNumber(recordValue(value)?.available_count);
-  return count === null ? undefined : { available: Math.max(0, Math.floor(count)) };
+  const record = recordValue(value);
+  const count = finiteNumber(record?.available_count);
+  if (count === null) return undefined;
+  const applicable = finiteNumber(record?.applicable_available_count);
+  return {
+    available: Math.max(0, Math.floor(count)),
+    ...(applicable === null ? {} : { applicable: Math.max(0, Math.floor(applicable)) }),
+  };
 }
 
 /**
- * The reset list from `wham/rate-limit-reset-credits`: the count and when the
- * soonest unspent reset expires. Spent and expired entries never set the
- * expiry; when entries carry no status at all, only future expiries count.
+ * The reset list from `wham/rate-limit-reset-credits`: the count, how many
+ * can be spent now, and every unspent reset with its id and expiry, soonest
+ * first. Spent and expired entries are left out; when entries carry no
+ * status at all, only future expiries count. Entries of another reset type
+ * (the field is `codex_rate_limits` for these) are left out too.
  */
 export function codexResetCreditDetails(
   value: unknown,
@@ -463,24 +474,42 @@ export function codexResetCreditDetails(
   if (!record) return undefined;
   const entries = (Array.isArray(record.credits) ? record.credits : [])
     .map(recordValue)
-    .filter((entry): entry is Record<string, unknown> => entry !== null);
+    .filter((entry): entry is Record<string, unknown> => entry !== null)
+    .filter((entry) => {
+      const type = stringValue(entry.reset_type);
+      return type === null || type === "codex_rate_limits";
+    });
   const reportsStatus = entries.some((entry) => typeof entry.status === "string");
-  const unspent = reportsStatus
-    ? entries.filter((entry) => String(entry.status).toLowerCase() === "available")
-    : entries;
+  const unspent = (
+    reportsStatus
+      ? entries.filter((entry) => String(entry.status).toLowerCase() === "available")
+      : entries
+  )
+    .map((entry) => ({ entry, expires: epochMs(entry.expires_at) }))
+    .filter(({ expires }) => expires === null || expires > nowMs)
+    .sort((left, right) => (left.expires ?? Infinity) - (right.expires ?? Infinity));
   const count =
     finiteNumber(record.available_count) ?? (reportsStatus ? unspent.length : null);
   if (count === null) return undefined;
   const available = Math.max(0, Math.floor(count));
-  const soonest = unspent
-    .map((entry) => epochMs(entry.expires_at))
-    .filter((ms): ms is number => ms !== null && ms > nowMs)
-    .sort((left, right) => left - right)[0];
+  const applicable = finiteNumber(record.applicable_available_count);
+  const soonest = unspent.find(({ expires }) => expires !== null)?.expires;
+  const credits = unspent.map(({ entry, expires }) => {
+    const id = stringValue(entry.id) ?? stringValue(entry.credit_id);
+    const granted = epochMs(entry.granted_at);
+    return {
+      ...(id ? { id } : {}),
+      ...(expires !== null ? { expiresAt: new Date(expires).toISOString() } : {}),
+      ...(granted !== null ? { grantedAt: new Date(granted).toISOString() } : {}),
+    };
+  });
   return {
     available,
-    ...(available > 0 && soonest !== undefined
+    ...(applicable === null ? {} : { applicable: Math.max(0, Math.floor(applicable)) }),
+    ...(available > 0 && soonest !== undefined && soonest !== null
       ? { nextExpiresAt: new Date(soonest).toISOString() }
       : {}),
+    ...(available > 0 && credits.length > 0 ? { credits } : {}),
   };
 }
 
@@ -749,7 +778,11 @@ async function codexResetCreditsWithExpiry(
     const result = await fetchJsonRecord(CODEX_RESET_CREDITS_URL, headers);
     if (!result.ok) return summary;
     const details = codexResetCreditDetails(result.data);
-    return details ?? summary;
+    if (!details) return summary;
+    // The summary's applicable count stands when the list does not repeat it.
+    return details.applicable === undefined && summary.applicable !== undefined
+      ? { ...details, applicable: summary.applicable }
+      : details;
   } catch {
     return summary;
   }
@@ -927,7 +960,7 @@ function refreshUsageProfileCountdowns(
         : {}),
     })),
     ...(profile.credits ? { credits: { ...profile.credits } } : {}),
-    ...(profile.resetCredits ? { resetCredits: { ...profile.resetCredits } } : {}),
+    ...(profile.resetCredits ? { resetCredits: cloneResetCredits(profile.resetCredits) } : {}),
   };
 }
 
@@ -1084,14 +1117,40 @@ const CODEX_RESET_OUTCOMES: Readonly<Record<string, PiCodexResetOutcome>> = {
 /** A failure whose message is fixed copy, safe to show and to cross IPC. */
 class CodexResetError extends Error {}
 
+/** The namespace t3code (github.com/pingdotgg/t3code, MIT) derives its
+ * request ids in, so a retry from either app spends one reset at most. */
+const CODEX_REDEEM_NAMESPACE = Buffer.from([
+  0x6f, 0x1c, 0x2a, 0x9e, 0x2d, 0x4b, 0x4c, 0x1e, 0x9a, 0x7f, 0x3b, 0x8d, 0x5e, 0x0c, 0x1a, 0x42,
+]);
+
+/** A UUIDv5 of the account and the credit: the same reset always gets the
+ * same request id, so ChatGPT answers a repeat with already_redeemed. */
+export function codexRedeemRequestId(accountId: string, creditId: string): string {
+  const bytes = createHash("sha1")
+    .update(CODEX_REDEEM_NAMESPACE)
+    .update(`${accountId}:${creditId}`)
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 /**
  * Spend one of a Codex account's rate-limit resets. The usage panel asks the
  * user to confirm first: a reset is something the account earned, and using
- * it cannot be undone. One request id per call, so a request the transport
- * retries still spends at most one reset. The account's cached reading is
- * dropped whatever happens, so the next read shows what ChatGPT reports now.
+ * it cannot be undone. With a credit id (the panel sends the reset that
+ * expires first) that reset is the one spent, and its request id is derived
+ * from it, so a retried request spends at most one reset. Without one,
+ * ChatGPT picks and every call gets a fresh request id. The account's cached
+ * reading is dropped whatever happens, so the next read shows what ChatGPT
+ * reports now.
  */
-export async function redeemCodexRateLimitReset(profileId: string): Promise<PiCodexResetOutcome> {
+export async function redeemCodexRateLimitReset(
+  profileId: string,
+  creditId?: string,
+): Promise<PiCodexResetOutcome> {
   const inspection = await inspectPiAccountProfileAuthStore();
   const profile = inspection.snapshot.profiles.find((entry) => entry.id === profileId);
   if (!profile || profile.provider !== "openai-codex") {
@@ -1109,7 +1168,11 @@ export async function redeemCodexRateLimitReset(profileId: string): Promise<PiCo
     const response = await fetch(`${CODEX_RESET_CREDITS_URL}/consume`, {
       method: "POST",
       headers: codexHeaders(resolved.access, accountId),
-      body: JSON.stringify({ redeem_request_id: randomUUID() }),
+      body: JSON.stringify(
+        creditId
+          ? { redeem_request_id: codexRedeemRequestId(accountId, creditId), credit_id: creditId }
+          : { redeem_request_id: randomUUID() },
+      ),
       signal: AbortSignal.timeout(RESET_REQUEST_TIMEOUT_MS),
     });
     if (!response.ok) {
@@ -1145,6 +1208,10 @@ export async function redeemCodexRateLimitReset(profileId: string): Promise<PiCo
     profileCache.delete(profile.id);
     profileInflight.delete(profile.id);
   }
+}
+
+function cloneResetCredits(value: PiUsageResetCredits): PiUsageResetCredits {
+  return { ...value, ...(value.credits ? { credits: value.credits.map((credit) => ({ ...credit })) } : {}) };
 }
 
 /** Drop the cache so the next read is live; used after a connect/disconnect. */

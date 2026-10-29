@@ -1032,11 +1032,26 @@ export type PiUsageCredits =
       usedPercent: number | null;
     };
 
+/** One banked Codex rate-limit reset, from `wham/rate-limit-reset-credits`. */
+export interface PiUsageResetCredit {
+  /** ChatGPT's credit id: spending sends it, so the chosen reset is the one spent. */
+  id?: string;
+  expiresAt?: string;
+  grantedAt?: string;
+}
+
 /** Codex rate-limit resets the account has earned and not spent yet. */
 export interface PiUsageResetCredits {
   available: number;
+  /** How many ChatGPT lets the account spend right now
+   * (`applicable_available_count`); 0 when nothing is used enough to reset.
+   * Absent when ChatGPT did not say. */
+  applicable?: number;
   /** When the soonest unspent reset expires, if the provider said. */
   nextExpiresAt?: string;
+  /** Every unspent, unexpired reset, soonest expiry first, when the list
+   * could be read. */
+  credits?: PiUsageResetCredit[];
 }
 
 export interface PiUsageProvider {
@@ -1334,10 +1349,15 @@ export interface AppPreferences {
   // use the user's own Chrome through the Codara extension
   // (src/main/separate-browser-tools.ts). Applies to new sessions.
   keepAgentsInYourChrome?: boolean;
-  // Labs: forecast when each subscription window runs out
-  // (src/main/usage-forecast.ts). Off by default; while off nothing is
-  // recorded and the usage panel looks as it always has.
+  // Forecast when each subscription window runs out
+  // (src/main/usage-forecast.ts). On by default; while off nothing is
+  // recorded and the usage panel shows only what is used now. Only a choice
+  // the user made (usageForecastChosen) overrides the default.
   usageForecast?: boolean;
+  // Set once the user switches the forecast on or off. Builds where it was a
+  // Labs switch saved `usageForecast: false` for everyone; without this flag
+  // that value is not a choice.
+  usageForecastChosen?: boolean;
   // Which of the forecast's extra hints are shown, each on its own toggle.
   usageForecastIdeas?: ForecastIdeas;
   // When true, a localhost dev URL sniffed from any terminal pane's stdout
@@ -1580,7 +1600,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   keepAwakeMode: "agents",
   keepAwakeLidClosed: false,
   keepAgentsInYourChrome: true,
-  usageForecast: false,
+  usageForecast: true,
   autoOpenPreview: false,
   linkOpenTarget: "system",
   terminalLinkMenu: true,

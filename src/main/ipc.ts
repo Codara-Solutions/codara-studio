@@ -590,6 +590,16 @@ function piAccountProfileIdFromIpc(value: unknown): string {
   return value;
 }
 
+/** ChatGPT's id of one banked reset, as the usage read reported it. Absent
+ * lets ChatGPT pick, as before credit ids were read. */
+function codexResetCreditIdFromIpc(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string" || !/^[A-Za-z0-9_.:-]{1,200}$/.test(value)) {
+    throw new TypeError("Reset credit id must be a short id string");
+  }
+  return value;
+}
+
 function piAccountLabelFromIpc(value: unknown, required: boolean): string | undefined {
   if (value === undefined && !required) return undefined;
   if (typeof value !== "string") throw new TypeError("Account label must be a string");
@@ -1148,12 +1158,13 @@ export function registerIpc(): void {
   // account, whose cached reading the call dropped.
   handle(
     "pi-subscriptions:codex-reset",
-    async (_event, input?: { profileId?: unknown }): Promise<PiCodexResetResult> => {
+    async (_event, input?: { profileId?: unknown; creditId?: unknown }): Promise<PiCodexResetResult> => {
       await unifiedAccountsReady();
       const profileId = piAccountProfileIdFromIpc(input?.profileId);
+      const creditId = codexResetCreditIdFromIpc(input?.creditId);
       const { redeemCodexRateLimitReset } = await import("./orchestration/pi-subscription-usage");
       try {
-        return { outcome: await redeemCodexRateLimitReset(profileId) };
+        return { outcome: await redeemCodexRateLimitReset(profileId, creditId) };
       } finally {
         for (const contents of webContents.getAllWebContents()) {
           if (!contents.isDestroyed()) contents.send("pi-subscriptions:event", { type: "usage" });

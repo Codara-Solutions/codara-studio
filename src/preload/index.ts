@@ -433,10 +433,10 @@ const api = {
       ipcRenderer.invoke("pi-runtime:install"),
     usage: (force = false): Promise<PiUsageOverview> =>
       ipcRenderer.invoke("pi-subscriptions:usage", { force }),
-    // Spends one of the account's Codex rate-limit resets; the caller has
-    // already asked the user to confirm.
-    redeemCodexReset: (profileId: string): Promise<PiCodexResetResult> =>
-      ipcRenderer.invoke("pi-subscriptions:codex-reset", { profileId }),
+    // Spends one of the account's Codex rate-limit resets, the one named by
+    // creditId when given; the caller has already asked the user to confirm.
+    redeemCodexReset: (profileId: string, creditId?: string): Promise<PiCodexResetResult> =>
+      ipcRenderer.invoke("pi-subscriptions:codex-reset", { profileId, ...(creditId ? { creditId } : {}) }),
     // Returns [] rather than throwing when Pi is absent, so the picker falls
     // back to its curated rows instead of failing to render.
     catalog: (force = false): Promise<PiCatalogModel[]> =>
@@ -458,7 +458,7 @@ const api = {
     // this resolves promptly.
     summary: (input: UsageSummaryInput): Promise<UsageSummary> =>
       ipcRenderer.invoke("usage-analytics:summary", input),
-    // Labs: when each limit window runs out. Null while the usageForecast
+    // When each limit window runs out. Null while the usageForecast
     // preference is off. The first read scans transcripts and takes seconds.
     forecast: (): Promise<UsageForecastReport | null> =>
       ipcRenderer.invoke("usage-forecast:read"),
