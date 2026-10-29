@@ -215,7 +215,7 @@ function SwitchMenu({
       {open ? (
         <div
           ref={menuRef}
-          className="spark-menu usage-switch__menu"
+          className="usage-switch__menu"
           role="menu"
           aria-label={`${providerName(entry.provider)} accounts`}
           onKeyDown={onKeyDown}

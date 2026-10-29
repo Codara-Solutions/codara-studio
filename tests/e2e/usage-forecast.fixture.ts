@@ -1,5 +1,5 @@
-// A Codara with the Labs usage forecast, stubbed at the IPC boundary like
-// usage-roster.fixture.ts: accounts, usage and the forecast report answer
+// A Codara with the usage forecast, stubbed at the IPC boundary like
+// usage-hairlines.fixture.ts: accounts, usage and the forecast report answer
 // from data built here, and every home points into a temporary folder. The
 // report is computed by the real model on a synthetic history, so the panel
 // and the chart draw what the model really says.
@@ -38,9 +38,10 @@ const DAY = 24 * HOUR;
 const BUCKET = 15 * MINUTE;
 
 export interface ForecastAppOptions {
+  /** False writes the user's own choice to turn it off; true leaves the
+   * default, which is on. */
   forecast: boolean;
   theme?: string;
-  panelStyle?: "line" | "ghost" | "pill";
   /** Whether to answer usage-forecast:read from the fixture. Off, the real
    * main handler answers, which is how the flag-off test proves it says null. */
   stubForecast?: boolean;
@@ -229,7 +230,10 @@ export async function launchForecastApp(options: ForecastAppOptions): Promise<Fo
   );
   await writeFile(
     join(root, "spark-preferences.json"),
-    JSON.stringify({ theme: options.theme ?? "codara-classic", usageForecast: options.forecast }),
+    JSON.stringify({
+      theme: options.theme ?? "codara-classic",
+      ...(options.forecast ? {} : { usageForecast: false, usageForecastChosen: true }),
+    }),
   );
 
   const demoDir = process.env.CODARA_FORECAST_DEMO_DIR;
@@ -256,9 +260,6 @@ export async function launchForecastApp(options: ForecastAppOptions): Promise<Fo
   });
   const page = await app.firstWindow();
   await page.waitForLoadState("domcontentloaded");
-  if (options.panelStyle) {
-    await page.evaluate((style) => window.localStorage.setItem("spark.usage.forecastStyle", style), options.panelStyle);
-  }
   await app.evaluate(
     ({ ipcMain, webContents }, fixture) => {
       const status = () => ({
@@ -296,7 +297,9 @@ export async function launchForecastApp(options: ForecastAppOptions): Promise<Fo
       stubForecast: options.stubForecast ?? true,
     },
   );
-  if (options.panelStyle) await page.reload();
+  // The renderer read before the stubs existed; a reload reads them fresh.
+  await page.reload();
+  await page.waitForLoadState("domcontentloaded");
   return {
     app,
     page,

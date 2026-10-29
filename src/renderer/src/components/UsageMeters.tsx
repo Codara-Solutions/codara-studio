@@ -232,8 +232,8 @@ export default function UsageMeters({ onOpenUsage }: { onOpenUsage?: () => void 
   // nothing to report. An EXPIRED one was connected and its workers will
   // fail, so it keeps its place and says "reconnect". One line per provider,
   // for the account new sessions use (isDefault); the panel lists the rest.
-  const connected: UsageEntry[] = (overview?.profiles ?? [])
-    .filter((profile) => profile.isDefault)
+  const defaults: UsageEntry[] = overview?.profiles?.filter((profile) => profile.isDefault) ?? [];
+  const connected = defaults
     .filter((entry) => (entry.status === "ok" && entry.windows.length > 0) || entry.status === "expired")
     .sort(
       (left, right) =>

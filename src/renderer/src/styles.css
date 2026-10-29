@@ -11076,15 +11076,22 @@ button.st-list__row:hover,
   outline: none;
   box-shadow: var(--focus-ring);
 }
-/* Hangs from the provider's section (.usage-prov), under its header. */
+/* Hangs from the provider's section (.usage-prov), under its header. Solid,
+   never a second glass layer over the panel's: the rows behind would show
+   through it. */
 .usage-switch__menu {
   position: absolute;
   z-index: 2;
   top: 32px;
   right: 6px;
-  width: 280px;
+  width: 290px;
   display: flex;
   flex-direction: column;
+  padding: 4px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-popover, 12px);
+  background: var(--panel-2);
+  box-shadow: var(--shadow-2);
 }
 .usage-switch__item {
   appearance: none;
@@ -11120,11 +11127,10 @@ button.st-list__row:hover,
   font-size: 12px;
 }
 .usage-switch__sub {
-  overflow: hidden;
   color: var(--muted);
   font-size: 10.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 .usage-switch__tag {
   color: var(--accent-text, var(--accent));

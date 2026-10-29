@@ -194,8 +194,8 @@ function data(state: HairlineState, now: number) {
 }
 
 const ACCOUNT_ROWS = [
-  { id: "claude-main", provider: "anthropic", label: "Main", email: "info@codarasolutions.com", cliProfileId: "managed-main", coraHalf: "linked" },
-  { id: "claude-main-2", provider: "anthropic", label: "Main 2", email: "edescombes@codarasolutions.com", cliProfileId: "managed-main-2", coraHalf: "linked" },
+  { id: "claude-main", provider: "anthropic", label: "Main", email: "main@example.com", cliProfileId: "managed-main", coraHalf: "linked" },
+  { id: "claude-main-2", provider: "anthropic", label: "Main 2", email: "main2@example.com", cliProfileId: "managed-main-2", coraHalf: "linked" },
   { id: "codex-pro", provider: "openai-codex", label: "Account 1", email: "pro@example.com", cliProfileId: "managed-codex", coraHalf: "linked" },
   { id: "grok-1", provider: "xai", label: "Account 1", email: "grok@example.com", cliProfileId: null, coraHalf: "none", builtIn: true },
 ];
@@ -300,7 +300,7 @@ export async function launchUsageHairlinesApp(
                 connected: true,
                 inUse: false,
                 status: "connected",
-                email: "info@codarasolutions.com",
+                email: "main@example.com",
               },
             ],
           },
