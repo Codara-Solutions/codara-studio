@@ -15,7 +15,7 @@ import { FS_READ_TEXT_LIMIT_BYTES } from "@shared/types";
 const BINARY_SNIFF_BYTES = 8 * 1024;
 
 export type OpenFileCheck =
-  | { ok: true; path: string; line?: number }
+  | { ok: true; path: string; real: string; line?: number }
   | {
       ok: false;
       reason: "invalid" | "missing" | "directory" | "binary" | "too_large";
@@ -36,6 +36,7 @@ function readLine(raw: unknown): number | undefined {
 }
 
 export async function checkOpenFile(rawPath: unknown, rawLine: unknown, deps: OpenFileDeps = {}): Promise<OpenFileCheck> {
+  // Never trimmed: "notes.txt " is another file than "notes.txt".
   if (typeof rawPath !== "string" || rawPath.trim().length === 0 || rawPath.length > 4096 || rawPath.includes("\0")) {
     return { ok: false, reason: "invalid", message: "path must be a file path" };
   }
@@ -45,7 +46,7 @@ export async function checkOpenFile(rawPath: unknown, rawLine: unknown, deps: Op
   } catch (error) {
     return { ok: false, reason: "invalid", message: (error as Error).message };
   }
-  let target = rawPath.trim();
+  let target = rawPath;
   if (/^~(?=[\\/]|$)/.test(target)) target = path.join((deps.homeDir ?? os.homedir)(), target.slice(1));
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(target) || !path.isAbsolute(target)) {
     return { ok: false, reason: "invalid", message: "path must be an absolute path on this computer" };
@@ -73,7 +74,10 @@ export async function checkOpenFile(rawPath: unknown, rawLine: unknown, deps: Op
   if (await startsBinary(real, size)) {
     return { ok: false, reason: "binary", message: "the file is binary, not text; the editor cannot show it" };
   }
-  return { ok: true, path: real, ...(line !== undefined ? { line } : {}) };
+  // The tab keeps the name the agent asked for: a .env that links to a
+  // config.txt is still a .env to the editor, which keeps its text away from
+  // inline completion.
+  return { ok: true, path: path.normalize(target), real, ...(line !== undefined ? { line } : {}) };
 }
 
 async function startsBinary(file: string, size: number): Promise<boolean> {

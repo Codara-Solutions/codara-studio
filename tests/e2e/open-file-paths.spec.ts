@@ -1,6 +1,6 @@
 import { expect, test, type ElectronApplication, type Locator, type Page } from "@playwright/test";
 import { _electron as electron } from "playwright";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mcpToolInPane } from "./in-pane-mcp";
@@ -211,6 +211,18 @@ test("a path with spaces in agent output and codara_open_file open the editor", 
     expect(outside.opened).toBe(true);
     await expect(page.getByRole("tab", { name: "secrets.env" })).toBeVisible({ timeout: 10_000 });
     await expect(page.locator(".cm-content:visible")).toContainText("TOKEN=fixture-value", { timeout: 10_000 });
+
+    // Inline completion never carries a secret file's text, also through a
+    // link with an innocent name (main checks the file it points at).
+    await symlink(fixture.envFile, join(fixture.cwd, "linked-notes.txt"));
+    const completionError = (filename: string) =>
+      page.evaluate(
+        (name) => window.spark.inlineAi.complete({ prefix: "A", suffix: "", filename: name, language: null, modelId: "m", requestId: `r-${name}` }),
+        filename,
+      ).then((response) => response.error);
+    expect(await completionError(fixture.envFile)).toBe("Inline completion is off for files with secrets.");
+    expect(await completionError(join(fixture.cwd, "linked-notes.txt"))).toBe("Inline completion is off for files with secrets.");
+    expect(await completionError(fixture.notes)).not.toBe("Inline completion is off for files with secrets.");
 
     // Refusals say why and open nothing.
     expect(await callTool({ path: join(fixture.cwd, "docs with space") })).toMatchObject({ opened: false, reason: "directory" });

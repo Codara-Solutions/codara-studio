@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { homedir, tmpdir } from "node:os";
+import { isSecretFilePath } from "@shared/secret-files";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
 import { createFile, createFolder, deleteFile, deleteToStash, importEntries, listDir, listFiles, moveEntries, purgeDeleteStash, readFileBytes, readFileEx, readTextFile, readTextFileTail, renameFile, statFile, undoDeleteFromStash, writeTextFile } from "./fs-tree";
@@ -671,6 +672,19 @@ const PASTED_IMAGE_EXTENSIONS = new Map([
 // destroyTray; the handler calls them on keepRunningInBackground changes.
 type TrayHook = { ensure: () => void; destroy: () => void };
 let _trayHook: TrayHook | null = null;
+
+// A file whose text no completion request may carry, by its own name or by
+// the name of the file a link points at.
+async function isSecretEditorFile(file: unknown): Promise<boolean> {
+  if (typeof file !== "string" || file.length === 0 || isRemotePath(file)) return false;
+  if (isSecretFilePath(file)) return true;
+  try {
+    return isSecretFilePath(await fs.realpath(file));
+  } catch {
+    return false;
+  }
+}
+
 export function setTrayHook(hook: TrayHook): void {
   _trayHook = hook;
 }
@@ -1667,6 +1681,9 @@ export function registerIpc(): void {
   handle(
     "inline-ai:complete",
     async (_e, req: InlineAiCompletionRequest): Promise<InlineAiCompletionResponse> => {
+      // The editor turns completion off for a .env or key file by its name;
+      // a link named notes.txt that points at a .env is caught here.
+      if (await isSecretEditorFile(req?.filename)) return { text: "", error: "Inline completion is off for files with secrets." };
       const { runInlineAiCompletion } = await getInlineAi();
       return runInlineAiCompletion(req);
     },

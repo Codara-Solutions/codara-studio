@@ -20,6 +20,7 @@ async function openFile(params: Record<string, unknown>, _method: string, host: 
   // The editor reads through the fs sandbox, which only knows the folders
   // open in Codara; the user asked for this one file.
   grantReadFile(checked.path);
+  grantReadFile(checked.real);
   const result = await requestTerminalOp<{ ok?: boolean; shown?: boolean; reason?: string }>("openFile", {
     workspaceId: located.workspaceId,
     path: checked.path,

@@ -79,6 +79,7 @@ async function main() {
     `${CWD}/README.md`,
     `${CWD}/src/a.ts`,
     `${CWD}/docs/my notes.txt`,
+    `${CWD}/meeting notes.md`,
     "/tmp/report",
     "/tmp/report 2.md",
     "/tmp/x/dir with space/notes.md",
@@ -147,6 +148,9 @@ async function main() {
       { text: ".env", file: `${CWD}/.env`, from: 18, to: 21 },
       { text: "README.md:4:2", file: `${CWD}/README.md`, line: 4, column: 2, from: 44, to: 56 },
     ]);
+    assert.deepEqual(await linksOf("⏺ Read(meeting notes.md)"), [
+      { text: "meeting notes.md", file: `${CWD}/meeting notes.md`, from: 8, to: 23 },
+    ]);
     assert.deepEqual(await linksOf("Wrote docs/my notes.txt"), [{ text: "docs/my notes.txt", file: `${CWD}/docs/my notes.txt`, from: 7, to: 23 }]);
     assert.deepEqual(await linksOf("src/a.ts(3,7): error TS2322"), [
       { text: "src/a.ts(3,7)", file: `${CWD}/src/a.ts`, line: 3, column: 7, from: 1, to: 13 },
@@ -174,8 +178,8 @@ async function main() {
     assert.deepEqual(anchored.wider.map((c) => c.file), ["~/a b/c.md now", "~/a b/c.md"]);
     const [suffixed] = links.scanRowForPaths("/a/b.ts:3 more");
     assert.deepEqual(suffixed.wider, [], "a line suffix ends the path");
-    const [bare] = links.scanRowForPaths("the README.md file");
-    assert.deepEqual(bare.wider, [], "a bare name never spans words");
+    const [bare] = links.scanRowForPaths("see the README.md file");
+    assert.deepEqual(bare.wider.map((c) => c.file), ["see the README.md", "the README.md"], "a bare name only grows backward");
     assert.deepEqual(
       links.dropOverlapping([
         { startCol: 1, endCol: 10 },
@@ -218,11 +222,14 @@ async function main() {
   fs.writeFileSync(path.join(dir, "empty.md"), "");
   fs.writeFileSync(path.join(dir, "logo.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x0d]));
   fs.writeFileSync(path.join(dir, "big.log"), Buffer.alloc(5 * 1024 * 1024 + 1, 0x61));
+  const reasonOf = async (p, line) => (await checkOpenFile(p, line)).reason;
   await check("codara_open_file's check: text files open, everything else is refused with a reason", async () => {
-    assert.deepEqual(await checkOpenFile(path.join(dir, ".env"), 2), { ok: true, path: path.join(dir, ".env"), line: 2 });
-    assert.deepEqual(await checkOpenFile(path.join(dir, "notes.txt")), { ok: true, path: path.join(dir, "notes.txt") });
-    assert.deepEqual(await checkOpenFile(path.join(dir, "empty.md")), { ok: true, path: path.join(dir, "empty.md") });
-    assert.deepEqual(await checkOpenFile("~/notes.txt", undefined, { homeDir: () => dir }), { ok: true, path: path.join(dir, "notes.txt") });
+    assert.deepEqual(await checkOpenFile(path.join(dir, ".env"), 2), { ok: true, path: path.join(dir, ".env"), real: path.join(dir, ".env"), line: 2 });
+    const ok = (p) => ({ ok: true, path: p, real: p });
+    assert.deepEqual(await checkOpenFile(path.join(dir, "notes.txt")), ok(path.join(dir, "notes.txt")));
+    assert.deepEqual(await checkOpenFile(path.join(dir, "empty.md")), ok(path.join(dir, "empty.md")));
+    assert.deepEqual(await checkOpenFile("~/notes.txt", undefined, { homeDir: () => dir }), ok(path.join(dir, "notes.txt")));
+    assert.equal(await reasonOf(`${path.join(dir, "notes.txt")} `), "missing", "a trailing space names another file");
     const reason = async (p, line) => (await checkOpenFile(p, line)).reason;
     assert.equal(await reason(path.join(dir, "missing.md")), "missing");
     assert.equal(await reason(path.join(dir, "folder")), "directory");
@@ -237,8 +244,12 @@ async function main() {
     const refused = await checkOpenFile(path.join(dir, "logo.png"));
     assert.ok(!JSON.stringify(refused).includes("PNG"), "a refusal carries no file content");
     if (process.platform !== "win32") {
-      fs.symlinkSync(path.join(dir, ".env"), path.join(dir, "link-to-env"));
-      assert.deepEqual(await checkOpenFile(path.join(dir, "link-to-env")), { ok: true, path: path.join(dir, ".env") }, "a link opens its target");
+      fs.symlinkSync(path.join(dir, "notes.txt"), path.join(dir, ".env.local"));
+      assert.deepEqual(
+        await checkOpenFile(path.join(dir, ".env.local")),
+        { ok: true, path: path.join(dir, ".env.local"), real: path.join(dir, "notes.txt") },
+        "a link keeps the name asked for, so a .env stays a .env to the editor",
+      );
     }
   });
 
@@ -274,7 +285,7 @@ async function main() {
     assert.equal(entry.trustedRunsOnly, true, "an imported pull request cannot open files on the user's screen");
     const result = await run({ path: path.join(dir, ".env"), line: 1, workspaceId: "ws-other" });
     assert.deepEqual(harness.ops, [{ op: "openFile", params: { workspaceId: "ws-caller", path: path.join(dir, ".env"), line: 1 } }]);
-    assert.deepEqual(harness.grants, [path.join(dir, ".env")]);
+    assert.deepEqual(harness.grants, [path.join(dir, ".env"), path.join(dir, ".env")]);
     assert.equal(result.opened, true);
     assert.equal(result.onScreen, true);
     assert.ok(!JSON.stringify(result).includes("do-not-print"), "the file's text is never returned");
