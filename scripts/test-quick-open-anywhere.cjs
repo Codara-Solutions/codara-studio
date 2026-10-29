@@ -99,6 +99,13 @@ async function main() {
       ".codarastudio/remote/identity.json",
       ".codarastudio/worktrees/repo/feat/README.md",
       ".ssh/id_ed25519",
+      ".aws/credentials",
+      ".docker/config.json",
+      ".kube/config",
+      ".config/gh/hosts.yml",
+      ".config/gcloud/credentials.db",
+      ".netrc",
+      ".git-credentials",
       ".gnupg/private-keys-v1.d/k.key",
       "snap/firefox/common/x",
     ]) {
@@ -303,6 +310,27 @@ async function main() {
     assert.equal(sandbox.isAllowedReadPath(target), true);
     assert.equal(sandbox.isAllowedReadPath(path.join(HOME, "Projects", "app", ".env")), false);
     assert.equal(sandbox.isAllowedReadPath(path.join(HOME, "Projects", "app")), false);
+  });
+
+  await check("the real read sandbox: a link swapped in after the pick is refused on read", async () => {
+    const target = path.join(HOME, "Projects", "app", "notes-app.md");
+    await sandbox.assertAllowedReadPathResolved(target);
+    const moved = `${target}.moved`;
+    fs.renameSync(target, moved);
+    fs.symlinkSync(path.join(OUTSIDE, "secret-notes.md"), target);
+    await assert.rejects(sandbox.assertAllowedReadPathResolved(target), /Path not allowed/, "the file swapped for a link");
+    fs.rmSync(target);
+    fs.renameSync(moved, target);
+    await sandbox.assertAllowedReadPathResolved(target);
+    const folder = path.join(HOME, "Projects", "app");
+    fs.renameSync(folder, `${folder}.moved`);
+    fs.mkdirSync(path.join(OUTSIDE, "app"), { recursive: true });
+    fs.writeFileSync(path.join(OUTSIDE, "app", "notes-app.md"), "other\n");
+    fs.symlinkSync(path.join(OUTSIDE, "app"), folder);
+    await assert.rejects(sandbox.assertAllowedReadPathResolved(target), /Path not allowed/, "a folder above it swapped for a link");
+    fs.rmSync(folder);
+    fs.renameSync(`${folder}.moved`, folder);
+    await sandbox.assertAllowedReadPathResolved(target);
   });
 
   console.log(`\n${passed} checks passed`);

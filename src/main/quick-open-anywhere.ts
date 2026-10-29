@@ -50,6 +50,15 @@ const SKIPPED_HOME_PREFIXES = [
   ".ssh",
   ".gnupg",
   ".password-store",
+  ".aws",
+  ".azure",
+  ".docker",
+  ".kube",
+  ".config/gcloud",
+  ".config/gh",
+  ".netrc",
+  ".git-credentials",
+  ".pgpass",
   "Library",
   "AppData",
 ];
@@ -271,7 +280,12 @@ async function searchByWalking(c: Collector, signal: AbortSignal): Promise<{ tru
       const absDir = relDir ? path.join(home, relDir) : home;
       let entries: import("node:fs").Dirent[];
       try {
-        if (relDir && (await fsp.lstat(absDir)).dev !== homeDev) continue;
+        // A folder swapped for a link since its parent was read is not
+        // followed (readdir would), nor one on another disk (a network mount).
+        if (relDir) {
+          const stat = await fsp.lstat(absDir);
+          if (!stat.isDirectory() || stat.dev !== homeDev) continue;
+        }
         entries = await fsp.readdir(absDir, { withFileTypes: true });
       } catch {
         continue;
@@ -291,7 +305,7 @@ async function searchByWalking(c: Collector, signal: AbortSignal): Promise<{ tru
     }
     level = next;
   }
-  return { truncated: false };
+  return { truncated: level.length > 0 };
 }
 
 export async function searchHomeFiles(query: unknown, opts: HomeSearchOptions): Promise<HomeFileSearchResult> {
