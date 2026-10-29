@@ -19,6 +19,7 @@ import {
 import { closePaneOverlay, openPaneOverlay } from "./paneOverlays";
 import { assignPaneToGroup } from "../../tabs/tabGroupBridge";
 import { tabLinkBridge } from "../../tabs/tabLinkBridge";
+import { editorOpenBridge } from "../../tabs/editorOpenBridge";
 import { previewTabOpener } from "../Preview/registry";
 import { sanitizeTerminalAgentOwner } from "@shared/agent-terminal-owner";
 import { parseTabLink } from "@shared/tab-links";
@@ -87,6 +88,8 @@ async function dispatch(req: BridgeRequest): Promise<unknown> {
       return tabs(req.params);
     case "tabAct":
       return tabAct(req.params);
+    case "openFile":
+      return openFile(req.params);
     default:
       throw new Error(`unknown terminal op: ${req.op || "?"}`);
   }
@@ -171,6 +174,16 @@ async function tabAct(params: Record<string, unknown>): Promise<unknown> {
   if (action === "split") return bridge.split(tabId, params.direction === "down" ? "down" : "right");
   if (action === "unsplit") return bridge.unsplit(tabId);
   throw new Error(`unknown tab action: ${action ?? "?"}`);
+}
+
+// codara_open_file: main checked the file and the caller's workspace.
+async function openFile(params: Record<string, unknown>): Promise<unknown> {
+  const workspaceId = readString(params, "workspaceId");
+  // Not trimmed: a file name may end in a space.
+  const path = typeof params.path === "string" ? params.path : null;
+  if (!workspaceId || !path) throw new Error("openFile requires workspaceId and path");
+  const line = typeof params.line === "number" && Number.isInteger(params.line) && params.line > 0 ? params.line : undefined;
+  return editorOpenBridge().open({ workspaceId, path, ...(line !== undefined ? { line } : {}) });
 }
 
 async function overlay(params: Record<string, unknown>): Promise<unknown> {

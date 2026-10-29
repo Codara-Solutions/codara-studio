@@ -1,9 +1,11 @@
 import { ipcMain, dialog, BrowserWindow, app, shell, webContents, clipboard, nativeImage, type WebContents } from "electron";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
+import { isSecretFileOnDisk } from "./secret-file-check";
+import { kernelPath } from "./open-file";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
 import { createFile, createFolder, deleteFile, deleteToStash, importEntries, listDir, listFiles, moveEntries, purgeDeleteStash, readFileBytes, readFileEx, readTextFile, readTextFileTail, renameFile, statFile, undoDeleteFromStash, writeTextFile } from "./fs-tree";
@@ -680,6 +682,7 @@ const PASTED_IMAGE_EXTENSIONS = new Map([
 // destroyTray; the handler calls them on keepRunningInBackground changes.
 type TrayHook = { ensure: () => void; destroy: () => void };
 let _trayHook: TrayHook | null = null;
+
 export function setTrayHook(hook: TrayHook): void {
   _trayHook = hook;
 }
@@ -1677,6 +1680,9 @@ export function registerIpc(): void {
   handle(
     "inline-ai:complete",
     async (_e, req: InlineAiCompletionRequest): Promise<InlineAiCompletionResponse> => {
+      // The editor turns completion off for a .env or key file by its name;
+      // a link named notes.txt that points at a .env is caught here.
+      if (await isSecretFileOnDisk(req?.filename)) return { text: "", error: "Inline completion is off for files with secrets." };
       const { runInlineAiCompletion } = await getInlineAi();
       return runInlineAiCompletion(req);
     },
@@ -1915,7 +1921,15 @@ export function registerIpc(): void {
       if (isRemotePath(target) || (base && isRemotePath(base))) {
         return { exists: false, isFile: false, resolved: target };
       }
-      const resolved = base ? join(base, target) : target;
+      // `~/` is the user's home, as in a shell; an absolute target ignores
+      // the pane's cwd.
+      const expanded = /^~(?=[\\/])/.test(target) ? `${homedir()}${sep}${target.slice(2)}` : target;
+      // A relative name with no known folder names nothing; resolving it
+      // against Codara's own working directory would be a guess.
+      if (!base && !isAbsolute(expanded)) return { exists: false, isFile: false, resolved: expanded };
+      // Joined as text: kernelPath resolves any ".." through links the way
+      // the file will be read.
+      const resolved = await kernelPath(base && !isAbsolute(expanded) ? `${base}${sep}${expanded}` : expanded);
       try {
         await assertAllowedReadPathResolved(resolved);
       } catch {
@@ -1929,6 +1943,11 @@ export function registerIpc(): void {
       }
     },
   );
+
+  // The editor asks whether an open file is a secret on disk (a link named
+  // notes.html that points at a .env): such a file opens as plain text, with
+  // no preview, share or inline completion. Answers yes or no, never content.
+  handle("fs:isSecretFile", async (_e, file: unknown): Promise<boolean> => isSecretFileOnDisk(file));
 
 
   handle(
