@@ -5,6 +5,7 @@ import type {
   RunState,
   Workspace,
 } from "@shared/types";
+import type { WorktreeRailState } from "@shared/worktree-cleanup";
 import type { Tab } from "../../tabs/types";
 
 // What App knows that the Agents view needs: the workspaces, every run, the
@@ -30,6 +31,8 @@ export interface AgentBoardSources {
   branches: Readonly<Record<string, string | null>>;
   /** Closes one terminal pane wherever its workspace is, ending its agent. */
   closePane: ((workspaceId: string, tabId: string, paneId: string) => void) | null;
+  /** Each copy-branch workspace's merge state and last commit, as the rail reads them. */
+  worktreeStates: Readonly<Record<string, WorktreeRailState>>;
 }
 
 const EMPTY: AgentBoardSources = {
@@ -42,6 +45,7 @@ const EMPTY: AgentBoardSources = {
   navigate: null,
   branches: {},
   closePane: null,
+  worktreeStates: {},
 };
 
 let sources: AgentBoardSources = EMPTY;

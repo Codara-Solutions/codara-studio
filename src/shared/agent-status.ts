@@ -12,7 +12,12 @@ import type { TaskSummary } from "./cos-tasks";
 import type { NavigationTarget } from "./types";
 import type { WorkspaceStatusEntry } from "./workspace-status";
 
-/** "pane:<paneId>" for an agent in a terminal pane, "run:<runId>" for a Cora chat. */
+/**
+ * "pane:<paneId>" for an agent in a terminal pane, "run:<runId>" for a Cora
+ * chat, "worktree:<workspaceId>" for the work done in a worktree the rail
+ * shows, and "worktree:path:<hash>" for a worktree it does not (made outside
+ * Codara), whoever does it (codara_workspace_status with `worktree`).
+ */
 export type AgentNoteKey = string;
 
 export function paneNoteKey(paneId: string): AgentNoteKey {
@@ -23,11 +28,23 @@ export function runNoteKey(runId: string): AgentNoteKey {
   return `run:${runId}`;
 }
 
+export function worktreeNoteKey(workspaceId: string): AgentNoteKey {
+  return `worktree:${workspaceId}`;
+}
+
+export function isWorktreeNoteKey(key: string): boolean {
+  return key.startsWith("worktree:");
+}
+
 /** What an agent said about its own work, and the workspace it said it in. */
 export interface AgentNote {
   key: AgentNoteKey;
   workspaceId: string;
   entry: WorkspaceStatusEntry;
+  /** A worktree note: the worktree's folder. */
+  worktreePath?: string;
+  /** A worktree note: the workspace of the agent that wrote it last. */
+  from?: { workspaceId: string; workspaceName: string };
 }
 
 export type AgentNoteMap = Record<AgentNoteKey, AgentNote>;

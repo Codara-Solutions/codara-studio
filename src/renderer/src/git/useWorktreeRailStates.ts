@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Workspace } from "@shared/types";
-import type { WorktreeRailCleanupResult, WorktreeRailState } from "@shared/worktree-cleanup";
+import type { WorktreeRailCleanupResult, WorktreeRailExternal, WorktreeRailState } from "@shared/worktree-cleanup";
 
 // Merge and folder state of every copy-branch workspace, for the rail's
-// "merged" mark and its one-click cleanup. Read on a slow poll, early when
+// "merged" mark and its one-click cleanup, and the worktrees of the rail's
+// repositories made outside Codara, so none works out of sight. Read on a
+// slow poll, early when
 // the window regains focus (a merge usually lands while the user is in the
 // browser), and whenever the set of copy-branch workspaces changes.
 //
@@ -23,11 +25,19 @@ function sameStates(a: Record<string, WorktreeRailState>, b: Record<string, Work
   return keys.every((key) => JSON.stringify(a[key]) === JSON.stringify(b[key]));
 }
 
+const NO_EXTERNAL: readonly WorktreeRailExternal[] = [];
+
 export function useWorktreeRailStates(
   workspaces: Workspace[],
   onAutoRemoved: (result: WorktreeRailCleanupResult) => void,
-): { states: Record<string, WorktreeRailState>; loaded: boolean; refresh: () => void } {
+): {
+  states: Record<string, WorktreeRailState>;
+  external: readonly WorktreeRailExternal[];
+  loaded: boolean;
+  refresh: () => void;
+} {
   const [states, setStates] = useState<Record<string, WorktreeRailState>>({});
+  const [external, setExternal] = useState<readonly WorktreeRailExternal[]>(NO_EXTERNAL);
   // The first read finished, whatever it found: a row with no state after
   // that is one main never reads, not one still loading.
   const [loaded, setLoaded] = useState(false);
@@ -37,14 +47,17 @@ export function useWorktreeRailStates(
   onAutoRemovedRef.current = onAutoRemoved;
   const [refreshTick, setRefreshTick] = useState(0);
   const refresh = useCallback(() => setRefreshTick((tick) => tick + 1), []);
+  // Every local workspace: a project with no copy-branch row can still have
+  // worktrees made outside Codara.
   const copyKey = workspaces
-    .filter((ws) => ws.copyBranch && !ws.remote)
-    .map((ws) => `${ws.id}:${ws.cwd}`)
+    .filter((ws) => !ws.remote)
+    .map((ws) => `${ws.id}:${ws.cwd}:${ws.copyBranch ? 1 : 0}`)
     .join("|");
 
   useEffect(() => {
     if (!copyKey) {
       setStates((prev) => (Object.keys(prev).length ? {} : prev));
+      setExternal(NO_EXTERNAL);
       return;
     }
     let cancelled = false;
@@ -62,10 +75,13 @@ export function useWorktreeRailStates(
       inFlight = true;
       lastReadAt.current = Date.now();
       try {
-        const list = await api.railStates().catch(() => null);
+        const overview = await api.railStates().catch(() => null);
         if (cancelled) return;
         setLoaded(true);
-        if (!list) return;
+        if (!overview) return;
+        const list = overview.states;
+        const outside = overview.external ?? NO_EXTERNAL;
+        setExternal((prev) => (JSON.stringify(prev) === JSON.stringify(outside) ? prev : outside));
         const next: Record<string, WorktreeRailState> = {};
         for (const state of list) next[state.workspaceId] = state;
         setStates((prev) => (sameStates(prev, next) ? prev : next));
@@ -100,5 +116,5 @@ export function useWorktreeRailStates(
     };
   }, [copyKey, refreshTick]);
 
-  return { states, loaded, refresh };
+  return { states, external, loaded, refresh };
 }

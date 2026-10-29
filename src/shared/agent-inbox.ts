@@ -56,7 +56,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function validKey(key: string): boolean {
-  return /^(?:pane|run):[\w.:-]{1,200}$/.test(key);
+  return /^(?:pane|run|worktree):[\w.:-]{1,200}$/.test(key);
 }
 
 function finite(value: unknown): number | null {

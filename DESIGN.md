@@ -262,6 +262,17 @@ child row lighter than its parent), GitHub's PR list for the check glyphs.
   coordinator and stays on the project). A creator of several such
   worktrees shows on the newest. The project's own agents (a coordinator)
   list at the top of the tree; clicking one opens its tab.
+- A background agent (a coordinator's subagent in another workspace's
+  repository, which has no pane there) shows on the worktree it made with
+  codara_worktree_create and `workspace`, or wrote a note on with
+  codara_workspace_status and `worktree`. The row gains one muted line above
+  the state line, "Background agent · from <workspace>", since the rail is
+  too narrow for both on one line; the state line is unchanged. It stays
+  until the branch merges or the worktree goes. It is not counted at the
+  right edge: its coordinator's pane already is, in its own workspace.
+- A worktree git lists that Codara did not make (plain `git worktree add`)
+  is listed under its project as "External worktree", no tile, with the note
+  an agent left on it. Clicking it opens it as one of the project's worktrees.
 - Order under a project: needs you, working, done, idle, no agent; rail order
   among equals. Merged worktrees always go last, in their fold, folded by
   default and faded (52%) when opened.

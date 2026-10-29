@@ -74,6 +74,9 @@ export interface WorktreeCaller {
   // Another workspace the call acts in, already allowed by the user through
   // the cross-workspace terminal grant. Never read from tool JSON.
   workspaceId?: string;
+  // The workspace the agent itself runs in, when workspaceId names another
+  // one: recorded on the worktree as who works in it.
+  origin?: { workspaceId: string; workspaceName: string };
 }
 
 export type WorktreeCode =
@@ -933,14 +936,23 @@ function defaultBranchName(input: CreateWorktreeInput, deps: AgentWorktreeDeps):
   return slug ? `agent/${slug}-${hexFrom(id, 4)}` : `agent/wt-${hexFrom(id, 6)}`;
 }
 
-function creatorFor(caller: WorktreeCaller, purpose?: string): CopyBranchCreator {
+function creatorFor(caller: WorktreeCaller, scope: WorktreeScope, purpose?: string): CopyBranchCreator {
   const client = cleanText(caller.client, COPY_BRANCH_CREATOR_LIMITS.client);
+  // A caller acting in another workspace says where it came from; any other
+  // caller was placed in the workspace it runs in.
+  const from =
+    caller.origin ??
+    (caller.workspaceId ? null : { workspaceId: scope.callerWorkspace.id, workspaceName: scope.callerWorkspace.name });
+  const fromId = from ? cleanText(from.workspaceId, COPY_BRANCH_CREATOR_LIMITS.fromWorkspaceId) : "";
+  const fromName = from ? cleanText(from.workspaceName, COPY_BRANCH_CREATOR_LIMITS.fromWorkspaceName) : "";
   return {
     kind: "agent",
     ...(client ? { client } : {}),
     ...(caller.runId ? { runId: cleanText(caller.runId, COPY_BRANCH_CREATOR_LIMITS.runId) } : {}),
     ...(caller.paneId ? { paneId: cleanText(caller.paneId, COPY_BRANCH_CREATOR_LIMITS.paneId) } : {}),
     ...(purpose ? { purpose } : {}),
+    ...(fromId ? { fromWorkspaceId: fromId } : {}),
+    ...(fromName ? { fromWorkspaceName: fromName } : {}),
   };
 }
 
@@ -1396,7 +1408,7 @@ async function createAgentWorktreeInner(
           mode: created.mode,
           createdAt: deps.now().toISOString(),
           fileCount: created.fileCount,
-          createdBy: creatorFor(caller, purpose || undefined),
+          createdBy: creatorFor(caller, scope, purpose || undefined),
           ...(pullRequestCode ? { pullRequestCode: true as const } : {}),
         },
       };
