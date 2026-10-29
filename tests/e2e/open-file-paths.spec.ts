@@ -239,7 +239,19 @@ test("a path with spaces in agent output and codara_open_file open the editor", 
     expect((await callTool({ path: "page.html" })).opened).toBe(true);
     await expect(page.getByRole("tab", { name: "page.html" })).toBeVisible({ timeout: 10_000 });
     await expect(page.locator(".cm-content:visible")).toContainText("API_KEY=test-only-not-a-secret", { timeout: 10_000 });
-    await expect(page.locator("iframe:visible")).toHaveCount(0);
+    await expect(page.locator("webview:visible")).toHaveCount(0);
+
+    // An ordinary page shows rendered; swapped for a link to the .env while
+    // open, the preview goes and the editor shows plain text.
+    const swapPage = join(fixture.cwd, "swap.html");
+    await writeFile(swapPage, "<h1>Ordinary page</h1>\n");
+    expect((await callTool({ path: "swap.html" })).opened).toBe(true);
+    await expect(page.getByRole("tab", { name: "swap.html" })).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator("webview:visible")).toHaveCount(1, { timeout: 10_000 });
+    await rm(swapPage);
+    await symlink(fixture.envFile, swapPage);
+    await expect(page.locator("webview:visible")).toHaveCount(0, { timeout: 10_000 });
+    await expect(page.locator(".cm-content:visible")).toBeVisible();
 
     // Refusals say why and open nothing.
     expect(await callTool({ path: join(fixture.cwd, "docs with space") })).toMatchObject({ opened: false, reason: "directory" });

@@ -2773,8 +2773,10 @@ function resolveShareOfferPath(rpc, args) {
 // The same for codara_open_file, and `~/` is the agent's home as in its shell.
 function resolveOpenFilePath(rpc, args) {
   if (rpc !== "file.open" || typeof args.path !== "string" || args.path.length === 0) return;
-  if (/^~(?=[\\/]|$)/.test(args.path)) args.path = path.join(os.homedir(), args.path.slice(1));
-  else if (!path.isAbsolute(args.path)) args.path = path.resolve(process.cwd(), args.path);
+  // Joined as text, not normalized: Studio resolves any ".." through links
+  // the way the kernel reads the file.
+  if (/^~(?=[\\/]|$)/.test(args.path)) args.path = `${os.homedir()}${args.path.slice(1)}`;
+  else if (!path.isAbsolute(args.path)) args.path = `${process.cwd()}${path.sep}${args.path}`;
 }
 
 // wait_for must answer before the client gives up on the call, or the agent

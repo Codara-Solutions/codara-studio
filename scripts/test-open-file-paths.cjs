@@ -272,6 +272,16 @@ async function main() {
     assert.equal(await isSecretFileOnDisk(chain("deep", MAX_LINK_HOPS + 1, MAX_LINK_HOPS)), true, ".env at the last hop looked at");
     assert.equal(await isSecretFileOnDisk(chain("long", MAX_LINK_HOPS + 3, 0)), true, "past the hop limit fails closed");
 
+    // codara_open_file and the terminal's check name the file the kernel
+    // reads: "d/.." is actual/, not w/.
+    const { kernelPath, checkOpenFile: check2 } = await bundle("src/main/open-file.ts", "open-file-kernel");
+    assert.equal(await kernelPath(`${w}/d/../config.txt`), path.join(w, "actual", "config.txt"));
+    assert.equal(await kernelPath(`${w}//plain.txt`), path.join(w, "plain.txt"), "no .. keeps the spelling, tidied");
+    assert.equal(await kernelPath(path.join(w, "d", "x.txt")), path.join(w, "d", "x.txt"), "a folder link keeps its name");
+    const viaDotDot = await check2(`${w}/d/../config.txt`);
+    assert.equal(viaDotDot.path, path.join(w, "actual", "config.txt"));
+    assert.equal(viaDotDot.real, path.join(w, "actual", "config.txt"));
+
     fs.symlinkSync("loop-b.txt", path.join(w, "loop-a.txt"));
     fs.symlinkSync("loop-a.txt", path.join(w, "loop-b.txt"));
     assert.equal(await isSecretFileOnDisk(path.join(w, "loop-a.txt")), true, "a link loop fails closed");

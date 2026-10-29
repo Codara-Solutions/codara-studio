@@ -22,6 +22,23 @@ export type OpenFileCheck =
       message: string;
     };
 
+const PARENT_SEGMENT_RE = /(^|[\\/])\.\.([\\/]|$)/;
+
+/**
+ * The path with its ".." resolved the way the kernel reads it: the folders
+ * first, links included, then "..". path.normalize would cancel "link/.."
+ * without looking at the link and name another file. Paths without ".." keep
+ * their spelling (a folder link the user opened stays as they named it).
+ */
+export async function kernelPath(p: string): Promise<string> {
+  if (!PARENT_SEGMENT_RE.test(p)) return path.normalize(p);
+  try {
+    return path.join(await fsp.realpath(path.dirname(p)), path.basename(p));
+  } catch {
+    return path.normalize(p);
+  }
+}
+
 export interface OpenFileDeps {
   homeDir?: () => string;
 }
@@ -77,7 +94,7 @@ export async function checkOpenFile(rawPath: unknown, rawLine: unknown, deps: Op
   // The tab keeps the name the agent asked for: a .env that links to a
   // config.txt is still a .env to the editor, which keeps its text away from
   // inline completion.
-  return { ok: true, path: path.normalize(target), real, ...(line !== undefined ? { line } : {}) };
+  return { ok: true, path: await kernelPath(target), real, ...(line !== undefined ? { line } : {}) };
 }
 
 async function startsBinary(file: string, size: number): Promise<boolean> {

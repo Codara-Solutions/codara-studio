@@ -109,21 +109,35 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   // A .env or key file opens as plain text: no preview, no share, no inline
   // completion. Its name says so at once; a link on the way to it (notes.html
   // pointing at a .env) only main can see, so nothing is previewed or offered
-  // for sharing until main has answered for this path.
+  // for sharing until main has answered for this path. When something in the
+  // file's folder is created, deleted or renamed (the file swapped for a
+  // link), main is asked again and the preview is covered until it answers.
   const nameSecret = isSecretFilePath(path);
-  const [diskSecret, setDiskSecret] = useState<{ path: string; secret: boolean } | null>(null);
+  const [diskSecret, setDiskSecret] = useState<{ path: string; round: number; secret: boolean } | null>(null);
+  const [secretRound, setSecretRound] = useState(0);
+  useEffect(() => {
+    if (nameSecret) return;
+    const folder = path.replace(/\\/g, "/").replace(/\/[^/]*$/, "");
+    return window.spark.fs.onChanged((event) => {
+      const dirs = event.dirs.map((dir) => dir.replace(/\\/g, "/").replace(/\/+$/, ""));
+      if (dirs.length === 0 || dirs.some((dir) => folder === dir || folder.startsWith(`${dir}/`))) {
+        setSecretRound((round) => round + 1);
+      }
+    });
+  }, [path, nameSecret]);
   useEffect(() => {
     if (nameSecret) return;
     let live = true;
     window.spark.fs.isSecretFile(path).then(
-      (secret) => live && setDiskSecret({ path, secret }),
-      () => live && setDiskSecret({ path, secret: true }),
+      (secret) => live && setDiskSecret({ path, round: secretRound, secret }),
+      () => live && setDiskSecret({ path, round: secretRound, secret: true }),
     );
     return () => {
       live = false;
     };
-  }, [path, nameSecret]);
+  }, [path, nameSecret, secretRound]);
   const secretKnown = nameSecret || diskSecret?.path === path;
+  const secretRechecking = !nameSecret && secretKnown && diskSecret?.round !== secretRound;
   const secret = nameSecret || (diskSecret?.path === path && diskSecret.secret);
   const isMarkdown = useMemo(() => !secret && isMarkdownPath(path), [path, secret]);
   const isCsv = !secret && isCsvPath(path);
@@ -220,7 +234,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const pathRef = useRef(path);
   pathRef.current = path;
   const maySecretRef = useRef(true);
-  maySecretRef.current = secret || !secretKnown;
+  maySecretRef.current = secret || !secretKnown || secretRechecking;
 
   const languageLabelRef = useRef<string | null>(languageLabel(path));
   useEffect(() => {
@@ -418,7 +432,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     docRef.current = doc;
     docPathRef.current = path;
   }
-  const shareReady = shareable && secretKnown && doc.status === "ready" && docPathRef.current === path;
+  const shareReady = shareable && secretKnown && !secretRechecking && doc.status === "ready" && docPathRef.current === path;
   const getShareText = useCallback(
     () => (docRef.current.status === "ready" ? docRef.current.content : ""),
     [],
@@ -617,6 +631,11 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
               />
             </Suspense>
           </div>
+        )}
+        {secretRechecking && previewVisible && (
+          // The file may have been swapped for a link to a .env: nothing of
+          // the preview shows until main says it is still not a secret.
+          <div aria-hidden style={{ position: "absolute", inset: 0, zIndex: 5, background: "var(--bg)" }} />
         )}
         {codeVisible && (
           <div ref={editorHostRef} className="codara-find-host">
