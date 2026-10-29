@@ -79,14 +79,15 @@
   text-overflow: ellipsis;
 }
 
-/* "Background agent · from X" before the state word: muted ink, the dot
-   carries the colour. */
+/* "Background agent · from X": its own muted line above the state line,
+   since the rail is too narrow for both on one. */
 .rail-child-who {
-  flex: 0 1 auto;
   min-width: 0;
+  font-size: 10.5px;
+  line-height: 13px;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  color: var(--muted);
 }
 
 /* A worktree made outside Codara: the nested row's geometry, no tile. */

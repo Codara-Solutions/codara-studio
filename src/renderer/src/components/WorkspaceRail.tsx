@@ -317,13 +317,17 @@ function WorkspaceRail(props: RailProps) {
   const workspaceById = useMemo(() => new Map(workspaces.map((workspace) => [workspace.id, workspace])), [workspaces]);
   const externalByProject = useMemo(() => {
     const out = new Map<string, WorktreeRailExternal[]>();
+    // One opened in the rail since main last listed it is a row already.
+    const trim = (path: string) => path.replace(/[\\/]+$/, "");
+    const rows = new Set(workspaces.map((workspace) => trim(workspace.cwd)));
     for (const entry of props.externalWorktrees ?? []) {
+      if (rows.has(trim(entry.path))) continue;
       const list = out.get(entry.projectId);
       if (list) list.push(entry);
       else out.set(entry.projectId, [entry]);
     }
     return out;
-  }, [props.externalWorktrees]);
+  }, [props.externalWorktrees, workspaces]);
   // Workspace rows can be reordered within a folder or dropped onto another
   // folder. The transfer payload makes the gesture work even when Workspaces
   // is rendered in the opposite rail; local state is only visual feedback.

@@ -182,7 +182,7 @@ export function WorktreeAgentLine({
   const description = agents
     .map((line) => [`${line.name}: ${AGENT_LINE_STATE_LABELS[line.state]}.`, line.text ?? ""].filter(Boolean).join(" "))
     .join(" ");
-  return (
+  const line = (
     <span
       data-testid="worktree-agent-line"
       data-state={first.state}
@@ -191,16 +191,21 @@ export function WorktreeAgentLine({
       style={{ color: muted }}
     >
       <span aria-hidden="true" className="rail-child-dot" style={{ background: tone }} />
-      {background && (
-        <span className="rail-child-who" data-testid="worktree-background-agent">
-          {first.name} ·
-        </span>
-      )}
       <span style={{ color: loud ? tone : muted, fontWeight: first.state === "needs-you" ? 600 : undefined }}>{word}</span>
       {age && <span className="rail-child-age">{age}</span>}
       {others > 0 && <span className="rail-child-age">+{others}</span>}
       {first.text && <span className="rail-child-note">· {first.text}</span>}
     </span>
+  );
+  if (!background) return line;
+  // Its own line above the state: the rail is too narrow to share one.
+  return (
+    <>
+      <span className="rail-child-who" data-testid="worktree-background-agent" title={first.name} style={{ color: muted }}>
+        {first.name}
+      </span>
+      {line}
+    </>
   );
 }
 
