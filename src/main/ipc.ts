@@ -1,7 +1,7 @@
 import { ipcMain, dialog, BrowserWindow, app, shell, webContents, clipboard, nativeImage, type WebContents } from "electron";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, resolve as pathResolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { homedir, tmpdir } from "node:os";
 import { isSecretFilePath } from "@shared/secret-files";
@@ -673,15 +673,25 @@ const PASTED_IMAGE_EXTENSIONS = new Map([
 type TrayHook = { ensure: () => void; destroy: () => void };
 let _trayHook: TrayHook | null = null;
 
-// A file whose text no completion request may carry, by its own name or by
-// the name of the file a link points at.
+// A file whose text no completion request may carry: by its own name, the
+// name of any link on the way to the file (notes.txt -> .env -> config.txt),
+// or the file's real name.
+const MAX_LINK_HOPS = 32;
 async function isSecretEditorFile(file: unknown): Promise<boolean> {
   if (typeof file !== "string" || file.length === 0 || isRemotePath(file)) return false;
   if (isSecretFilePath(file)) return true;
   try {
+    let current = file;
+    for (let hop = 0; hop < MAX_LINK_HOPS; hop += 1) {
+      if (!(await fs.lstat(current)).isSymbolicLink()) break;
+      current = pathResolve(dirname(current), await fs.readlink(current));
+      if (isSecretFilePath(current)) return true;
+    }
     return isSecretFilePath(await fs.realpath(file));
-  } catch {
-    return false;
+  } catch (error) {
+    // Nothing on disk yet (a new file) has no text to protect beyond its
+    // name; a link loop or an unreadable link gets no completion.
+    return (error as NodeJS.ErrnoException).code !== "ENOENT";
   }
 }
 

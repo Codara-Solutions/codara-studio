@@ -222,6 +222,11 @@ test("a path with spaces in agent output and codara_open_file open the editor", 
       ).then((response) => response.error);
     expect(await completionError(fixture.envFile)).toBe("Inline completion is off for files with secrets.");
     expect(await completionError(join(fixture.cwd, "linked-notes.txt"))).toBe("Inline completion is off for files with secrets.");
+    // A chain whose middle link is the .env: notes -> .env.shared -> plain.txt.
+    await writeFile(join(fixture.cwd, "plain.txt"), "SECRET=chain\n");
+    await symlink(join(fixture.cwd, "plain.txt"), join(fixture.cwd, ".env.shared"));
+    await symlink(join(fixture.cwd, ".env.shared"), join(fixture.cwd, "chain-notes.txt"));
+    expect(await completionError(join(fixture.cwd, "chain-notes.txt"))).toBe("Inline completion is off for files with secrets.");
     expect(await completionError(fixture.notes)).not.toBe("Inline completion is off for files with secrets.");
 
     // Refusals say why and open nothing.

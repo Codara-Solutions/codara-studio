@@ -206,14 +206,14 @@ function wordStartsBefore(row: string, start: number, max: number): number[] {
 }
 
 // Readings of the token across the spaces around it. A token with a line
-// suffix ends there. Anchored paths only grow forward, since their first
-// character is the anchor; a bare file name only grows backward
-// (`meeting notes.md`), since the word after a file name in a sentence is
-// never part of it.
+// suffix ends there, but may still start earlier (`meeting notes.md:12`).
+// Anchored paths only grow forward, since their first character is the
+// anchor; a bare file name only grows backward (`meeting notes.md`), since
+// the word after a file name in a sentence is never part of it.
 function widerCandidates(row: string, start: number, end: number, base: PathCandidate): PathCandidate[] {
-  if (base.line !== undefined || base.text !== row.slice(start, end)) return [];
+  if (base.text !== row.slice(start, end)) return [];
   const bare = !isAnchored(base.file) && !/[\\/]/.test(base.file);
-  const ends = [end, ...(bare ? [] : wordEndsAfter(row, end, MAX_WORDS_AFTER))];
+  const ends = [end, ...(bare || base.line !== undefined ? [] : wordEndsAfter(row, end, MAX_WORDS_AFTER))];
   // A bare name takes plain words only: `/tmp/report 2.md` printed after a
   // file that exists is two paths, and the one that exists as printed wins.
   const before = isAnchored(base.file) ? [] : wordStartsBefore(row, start, MAX_WORDS_BEFORE);

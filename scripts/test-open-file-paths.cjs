@@ -151,6 +151,9 @@ async function main() {
     assert.deepEqual(await linksOf("⏺ Read(meeting notes.md)"), [
       { text: "meeting notes.md", file: `${CWD}/meeting notes.md`, from: 8, to: 23 },
     ]);
+    assert.deepEqual(await linksOf("⏺ Read(meeting notes.md:12)"), [
+      { text: "meeting notes.md:12", file: `${CWD}/meeting notes.md`, line: 12, from: 8, to: 26 },
+    ]);
     assert.deepEqual(await linksOf("Wrote docs/my notes.txt"), [{ text: "docs/my notes.txt", file: `${CWD}/docs/my notes.txt`, from: 7, to: 23 }]);
     assert.deepEqual(await linksOf("src/a.ts(3,7): error TS2322"), [
       { text: "src/a.ts(3,7)", file: `${CWD}/src/a.ts`, line: 3, column: 7, from: 1, to: 13 },
@@ -178,6 +181,8 @@ async function main() {
     assert.deepEqual(anchored.wider.map((c) => c.file), ["~/a b/c.md now", "~/a b/c.md"]);
     const [suffixed] = links.scanRowForPaths("/a/b.ts:3 more");
     assert.deepEqual(suffixed.wider, [], "a line suffix ends the path");
+    const [spacedSuffix] = links.scanRowForPaths("Read(meeting notes.md:12)");
+    assert.deepEqual(spacedSuffix.wider.map((c) => [c.file, c.line]), [["meeting notes.md", 12]], "but it may start earlier");
     const [bare] = links.scanRowForPaths("see the README.md file");
     assert.deepEqual(bare.wider.map((c) => c.file), ["see the README.md", "the README.md"], "a bare name only grows backward");
     assert.deepEqual(
