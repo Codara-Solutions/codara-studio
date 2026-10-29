@@ -6050,6 +6050,9 @@ export default function App() {
       if (onboardingOpen && document.querySelector(".onboarding-dialog")) return true;
       // The open jump palette answers Mod+1..6 itself.
       if (jumpPaletteOpen && id === "view.selectByIndex") return true;
+      // A terminal tab opened behind Settings or another modal dialog appears
+      // out of sight, so the chord stays with the dialog.
+      if (id === "tab.newTerminal" && visibleModalDialog()) return true;
       if (id === "workspace.selectByIndex" || id === "workspace.back" || id === "workspace.forward") {
         // Switching workspaces behind a dialog (the jump palette, Settings,
         // Fix with agent) happens out of sight and leaves the dialog

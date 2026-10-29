@@ -17,8 +17,8 @@ a chord you already use.
 
 Inside a browser tab the page gets a chord first, as in a browser. Codara
 runs its own command only when the page did not handle the chord, so a site
-whose Mod+K opens its own search keeps it. Mod+W and Ctrl+Tab always stay
-Codara's. Keys an agent sends to a page never trigger Codara's shortcuts.
+whose Mod+K opens its own search keeps it. Mod+W, Mod+T and Ctrl+Tab always
+stay Codara's. Keys an agent sends to a page never trigger Codara's shortcuts.
 
 ### General
 
@@ -115,7 +115,7 @@ On a layout without [ and ] keys, rebind back and forward in Keybindings.
 |---|---|---|
 | Switch to tab 1 to 9 | Mod+1 ... Mod+9 (fixed; on macOS Cmd only, since Ctrl+1 ... Ctrl+9 switch workspaces) | `view.selectByIndex` |
 | New chat | Mod+Alt+N | `chat.new` |
-| New terminal tab | Mod+T | `tab.newTerminal` |
+| New terminal tab | Mod+T (works from a focused terminal too; does nothing while a modal dialog such as Settings is open) | `tab.newTerminal` |
 | Quick Open file | Mod+P | `tab.newEditor` |
 | New browser tab | Mod+E | `tab.newPreview` |
 | New whiteboard | Mod+Shift+W | `tab.newWhiteboard` |
