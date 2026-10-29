@@ -8181,7 +8181,6 @@ const Workspace = React.memo(function Workspace({
           <EmptyWorkbench
             onNewChat={onNewChat}
             onNewTerminal={onNewTerminalTab}
-            onNewAgent={onNewClaudeWorker}
             hints={pickerHints}
           />
         )}
@@ -8487,12 +8486,10 @@ const NoWorkspace = React.memo(function NoWorkspace({ onCreate }: { onCreate: ()
 const EmptyWorkbench = React.memo(function EmptyWorkbench({
   onNewChat,
   onNewTerminal,
-  onNewAgent,
   hints,
 }: {
   onNewChat: () => void;
   onNewTerminal: () => void;
-  onNewAgent: () => void;
   hints: PickerHints;
 }) {
   const hintStyle: React.CSSProperties = {
@@ -8574,8 +8571,8 @@ const EmptyWorkbench = React.memo(function EmptyWorkbench({
           marginBottom: 8,
         }}
       >
-        Start a chat with Cora, open a terminal or launch an agent. Past chats
-        are still in the history popover.
+        Start a chat with Cora or open a terminal. Past chats are still in the
+        history popover.
       </div>
       <div style={{ display: "inline-flex", gap: 10 }}>
         <button
@@ -8601,15 +8598,6 @@ const EmptyWorkbench = React.memo(function EmptyWorkbench({
         >
           + New terminal
           {hints.terminal && <span style={hintStyle}>{hints.terminal}</span>}
-        </button>
-        <button
-          type="button"
-          onClick={onNewAgent}
-          style={buttonStyle}
-          onMouseEnter={onEnter}
-          onMouseLeave={onLeave}
-        >
-          + New agent
         </button>
       </div>
     </div>
