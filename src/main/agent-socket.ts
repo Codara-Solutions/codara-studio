@@ -115,6 +115,7 @@ import {
 } from "./orchestration/worker-session-reuse";
 import { normalizePiAccountProfileId } from "./orchestration/pi-account-execution";
 import { effectiveChatMode } from "@shared/chat-policy";
+import { isRemotePath } from "@shared/remote";
 import { normalizeTabGroupName } from "@shared/tab-group-name";
 import { groupLink, tabLink } from "@shared/tab-links";
 import { callerAgentSession, restoredAgentTerminal, type TerminalAgentOwner } from "@shared/agent-terminal-owner";
@@ -1553,6 +1554,20 @@ interface CrossWorkspaceTarget {
  * workspace of the pane it runs in; neither comes from tool JSON. `precheck`
  * refuses before the user is asked (a cwd outside the target).
  */
+/**
+ * What the user is asked about when an agent works in another workspace: its
+ * folder, the repository a worktree of it belongs to, and where the folder
+ * really is. Approval is for that, not for an id whose folder may move while
+ * the card waits.
+ */
+async function workspaceIdentity(workspace: Workspace): Promise<string> {
+  let real = workspace.cwd;
+  if (!workspace.remote && !isRemotePath(workspace.cwd)) {
+    real = await fsp.realpath(workspace.cwd).catch(() => workspace.cwd);
+  }
+  return JSON.stringify([workspace.cwd, real, workspace.copyBranch?.repoCwd ?? null, workspace.remote ?? null]);
+}
+
 async function authorizeWorkspaceTarget(input: {
   params: Record<string, unknown>;
   id: JsonRpcId;
@@ -1603,6 +1618,7 @@ async function authorizeWorkspaceTarget(input: {
     : undefined;
   const early = input.precheck ? await input.precheck(target) : null;
   if (early) return fail(ERR_INVALID_PARAMS, early);
+  const identity = await workspaceIdentity(target);
   let callerGone = false;
   const onCallerGone = () => {
     callerGone = true;
@@ -1628,6 +1644,17 @@ async function authorizeWorkspaceTarget(input: {
       ERR_INTERNAL,
       `the caller disconnected before the ${input.action === "worktree" ? "worktree was made" : "terminal opened"}`,
     );
+  }
+  // The user allowed this folder: if the workspace moved while the card
+  // waited, what would open now is not what they allowed.
+  let fresh: Workspace | undefined;
+  try {
+    fresh = (await loadState()).workspaces.find((workspace) => workspace.id === target.id);
+  } catch {
+    fresh = undefined;
+  }
+  if (!fresh || (await workspaceIdentity(fresh)) !== identity) {
+    return fail(ERR_FORBIDDEN, `${target.name} changed folder while you were waiting for the user; ask again`);
   }
   return {
     ok: true,

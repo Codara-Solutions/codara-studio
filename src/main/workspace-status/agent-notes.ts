@@ -35,6 +35,12 @@ export interface AgentNoteBook {
     about?: Pick<AgentNote, "worktreePath" | "from">,
   ): AgentNoteUpdate;
   drop(key: AgentNoteKey): boolean;
+  /**
+   * Moves a note to another key and workspace, keeping its entry and history:
+   * an external worktree's note (`worktree:path:...`) onto the row the user
+   * opened it as. A note already at `to` wins; the moved one is dropped then.
+   */
+  move(from: AgentNoteKey, to: AgentNoteKey, workspaceId: string): boolean;
   /** Drops the notes of workspaces not in the set; an empty set drops nothing (see the store's prune). */
   pruneWorkspaces(liveWorkspaceIds: ReadonlySet<string>): AgentNoteKey[];
   onChange(listener: (key: AgentNoteKey, note: AgentNote | null) => void): () => void;
@@ -123,6 +129,16 @@ export function createAgentNoteBook(options: { now?: () => number } = {}): Agent
       return { note: clone(next), changed: true, noteTruncated: applied.noteTruncated };
     },
     drop: remove,
+    move(from, to, workspaceId) {
+      const current = notes.get(from);
+      if (!current || from === to || !isAgentNoteKey(to) || !isWorkspaceIdLike(workspaceId)) return false;
+      remove(from);
+      if (notes.has(to)) return false;
+      const next: AgentNote = { ...clone(current), key: to, workspaceId };
+      notes.set(to, next);
+      notify(to, next);
+      return true;
+    },
     pruneWorkspaces(liveWorkspaceIds) {
       if (liveWorkspaceIds.size === 0) return [];
       const gone = [...notes.values()].filter((note) => !liveWorkspaceIds.has(note.workspaceId)).map((note) => note.key);

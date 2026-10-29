@@ -11,7 +11,9 @@ import { join } from "node:path";
 import { webContents } from "electron";
 
 import { coraRunPlacement } from "@shared/agent-board";
-import { paneNoteKey, type AgentNoteChange, type AgentNoteMap } from "@shared/agent-status";
+import { paneNoteKey, worktreeNoteKey, type AgentNoteChange, type AgentNoteMap } from "@shared/agent-status";
+import { isRemotePath } from "@shared/remote";
+import type { Workspace } from "@shared/types";
 import {
   isWorkspaceIdLike,
   parseWorkspaceStatusId,
@@ -29,7 +31,7 @@ import { listWorktrees } from "../worktree-cleanup/inspect";
 import { createAgentNoteBook, type AgentNoteBook } from "./agent-notes";
 import { provideWorkspaceStatusService } from "./service";
 import { createWorkspaceStatusStore, type WorkspaceStatusStore } from "./store";
-import { resolveWorktreeNoteTarget } from "./worktree-notes";
+import { externalWorktreeNoteKey, resolveWorktreeNoteTarget } from "./worktree-notes";
 
 export const WORKSPACE_STATUS_CHANGED_CHANNEL = "workspaceStatus:changed";
 export const AGENT_NOTES_CHANGED_CHANNEL = "workspaceStatus:agentNoteChanged";
@@ -69,10 +71,32 @@ function workspaceStatusStore(): WorkspaceStatusStore {
     void store?.prune(live).catch(() => undefined);
     agentNotes().pruneWorkspaces(live);
   };
-  onStateSaved((state) => prune(state.workspaces));
+  onStateSaved((state) => {
+    prune(state.workspaces);
+    void adoptExternalWorktreeNotes(state.workspaces).catch(() => undefined);
+  });
   // And those removed while the store was not loaded yet.
   void loadState().then((state) => prune(state.workspaces), () => undefined);
   return store;
+}
+
+/**
+ * A worktree made outside Codara keeps its note by folder
+ * (`worktree:path:...`). Once the user opens it in the rail it has a row of
+ * its own, so its note moves there, status and history included.
+ */
+async function adoptExternalWorktreeNotes(workspaces: readonly Workspace[]): Promise<void> {
+  const book = agentNotes();
+  const external = Object.values(book.list()).filter((note) => note.key.startsWith("worktree:path:") && note.worktreePath);
+  if (external.length === 0) return;
+  for (const workspace of workspaces) {
+    if (!workspace.copyBranch || workspace.remote || isRemotePath(workspace.cwd)) continue;
+    const real = await fsp.realpath(workspace.cwd).catch(() => null);
+    if (!real) continue;
+    const key = externalWorktreeNoteKey(real);
+    const note = external.find((candidate) => candidate.key === key);
+    if (note) book.move(note.key, worktreeNoteKey(workspace.id), workspace.id);
+  }
 }
 
 async function workspaceName(workspaceId: string): Promise<string | null> {

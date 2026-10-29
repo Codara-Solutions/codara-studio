@@ -16,7 +16,7 @@ const { rpcRaw } = require("../../cli/lib/rpc.cjs");
 // (codara_workspace_status). Repo's rail then shows the worktree's row with
 // "Background agent · from Notes", its state and the note, the Agents tab
 // lists it under Repo, and a worktree made with plain `git worktree add`
-// is listed too, as an external one.
+// is listed too, as an external one, and keeps its note once opened.
 //
 // CODARA_PROOF_DIR=<dir> saves the screenshots there.
 
@@ -164,12 +164,29 @@ test("a background agent working in another workspace's repository shows on that
       await page.getByRole("tablist", { name: "Rail view" }).getByRole("tab", { name: /^Workspaces/ }).click();
     });
 
-    await test.step("clicking the external worktree opens it in the rail as a worktree of Repo", async () => {
+    await test.step("clicking the external worktree opens it in the rail as a worktree of Repo, its note kept", async () => {
+      // An agent in Repo itself may note any worktree of its repository. A
+      // pane opens in the workspace in front, so bring Repo there first.
+      await page.locator('[data-workspace-id="ws-repo"]').first().click();
+      const repoPane = await request("terminal.create", { cwd: repo, title: "repo agent" });
+      const noted = await request("workspace.status", {
+        callerRole: "studio",
+        callerClient: "claude-code",
+        callerPaneId: repoPane.paneId,
+        worktree: outside,
+        status: "blocked",
+        note: "Need the staging key",
+      });
+      expect(noted.updated, JSON.stringify(noted)).toBe(true);
       const external = page.locator(`[data-rail-children-of="ws-repo"] [data-testid="workspace-external-worktree"]`);
+      await expect(external).toContainText("Need the staging key", { timeout: 15_000 });
       await external.click();
       await expect(external).toHaveCount(0, { timeout: 30_000 });
       const adopted = page.locator(`[data-rail-children-of="ws-repo"] [data-copy-branch="true"]`, { hasText: "feat/by-hand" });
       await expect(adopted).toBeVisible({ timeout: 15_000 });
+      const line = adopted.getByTestId("worktree-agent-line");
+      await expect(line).toHaveAttribute("data-state", "needs-you", { timeout: 15_000 });
+      await expect(line).toContainText("Need the staging key");
     });
   } finally {
     await app.close();

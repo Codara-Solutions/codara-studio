@@ -47,9 +47,11 @@ function refused(reason: string, note: string): WorktreeNoteTarget {
   return { refusal: { updated: false, reason, note, hint: HINT } };
 }
 
+// Compared after realpath, which spells a folder the way the disk does, so
+// no case folding: on a case-sensitive volume "fix" and "FIX" are two
+// worktrees, possibly of two repositories.
 function pathKey(path: string): string {
-  const trimmed = path.length > 1 ? path.replace(/[\\/]+$/, "") : path;
-  return process.platform === "win32" || process.platform === "darwin" ? trimmed.toLowerCase() : trimmed;
+  return path.length > 1 ? path.replace(/[\\/]+$/, "") : path;
 }
 
 /** The note key of a worktree the rail does not show, by its folder. */
@@ -106,9 +108,16 @@ export async function resolveWorktreeNoteTarget(
     return { key: worktreeNoteKey(rail.id), workspaceId: rail.id, path: rail.cwd, worktreeWorkspaceId: rail.id };
   }
   // Otherwise it must be one of the caller's own repository's worktrees.
-  const listed = await deps.worktreesOf(callerWorkspace.cwd).catch(() => null);
+  let why = "";
+  const listed = await deps.worktreesOf(callerWorkspace.cwd).catch((error: unknown) => {
+    why = (error instanceof Error ? error.message : String(error)).split("\n")[0].slice(0, 200);
+    return null;
+  });
   if (!listed) {
-    return refused("worktree_not_yours", `${path} is not a worktree you made, and Codara could not list your repository's worktrees.`);
+    return refused(
+      "worktree_not_yours",
+      `${path} is not a worktree you made, and Codara could not list your repository's worktrees${why ? ` (${why})` : ""}.`,
+    );
   }
   const mainKey = listed.main ? await realOr(listed.main) : null;
   if (mainKey === wanted) {

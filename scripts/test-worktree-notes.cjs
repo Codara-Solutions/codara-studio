@@ -169,6 +169,38 @@ async function main() {
       assert.equal(book.get("worktree:wt-made"), null, "a removed worktree takes its note along");
       assert.equal(book.get("worktree:path:abc").entry.note, "External");
     });
+    await check("an external worktree's note moves to the row it is opened as, status and history kept", async () => {
+      const book = createAgentNoteBook({ now: () => 2_000 });
+      const by = { kind: "agent", label: "Claude Code" };
+      const key = externalWorktreeNoteKey(plain);
+      book.update(key, "ws-cloud", { status: "blocked", note: "Need the key" }, by, { worktreePath: plain });
+      assert.equal(book.move(key, "worktree:wt-plain", "wt-plain"), true);
+      assert.equal(book.get(key), null);
+      const moved = book.get("worktree:wt-plain");
+      assert.equal(moved.workspaceId, "wt-plain");
+      assert.equal(moved.entry.status, "blocked");
+      assert.equal(moved.entry.note, "Need the key");
+      assert.equal(moved.worktreePath, plain);
+      // A note already on the row wins; the folder's one goes.
+      book.update(key, "ws-cloud", { note: "Older" }, by, { worktreePath: plain });
+      assert.equal(book.move(key, "worktree:wt-plain", "wt-plain"), false);
+      assert.equal(book.get("worktree:wt-plain").entry.note, "Need the key");
+      assert.equal(book.get(key), null);
+    });
+
+    await check("folders that differ only in case are different worktrees", async () => {
+      assert.notEqual(externalWorktreeNoteKey("/trees/fix"), externalWorktreeNoteKey("/trees/FIX"));
+      // On a case-sensitive disk a rail worktree spelled like the caller's in
+      // another case is not matched to it.
+      const upper = copy("wt-upper", made.toUpperCase(), cloud, { kind: "agent", paneId: "p-someone" });
+      const own = copy("wt-own", made, cloud, { kind: "agent", paneId: "p-coord", fromWorkspaceId: "ws-ai" });
+      const target = await resolveWorktreeNoteTarget(made, coordinator, {
+        ...deps,
+        workspaces: [workspaces[0], workspaces[1], upper, own],
+        realpath: async (value) => value,
+      });
+      assert.equal(target.key, "worktree:wt-own");
+    });
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
   }
