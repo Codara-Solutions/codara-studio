@@ -50,7 +50,8 @@ export type TerminalOpName =
   | "panes"
   | "group"
   | "tabs"
-  | "tabAct";
+  | "tabAct"
+  | "openFile";
 
 export interface TerminalOpParams {
   [key: string]: unknown;

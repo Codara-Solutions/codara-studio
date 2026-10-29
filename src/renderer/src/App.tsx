@@ -146,6 +146,7 @@ import {
 } from "./tabs/agentTerminalPlacement";
 import { setTabGroupBridge } from "./tabs/tabGroupBridge";
 import { flashTabStripItems, OPEN_TAB_LINK_EVENT, setTabLinkBridge } from "./tabs/tabLinkBridge";
+import { setEditorOpenBridge, type EditorOpenRequest } from "./tabs/editorOpenBridge";
 import { resolveTabLink, type SplitDirection, type TabLinkMember, type WorkspaceTabsSnapshot } from "./tabs/tabLinks";
 import { collectLeaves } from "./tabs/paneTree";
 import { parseTabLink, type TabLinkRef } from "@shared/tab-links";
@@ -5367,6 +5368,42 @@ export default function App() {
     return () => setTabLinkBridge(null);
   }, [focusTabLink, tabLinkLayouts]);
 
+  // codara_open_file: an agent's file opens as a kept (not preview) editor tab
+  // of the agent's workspace. When that workspace is not on screen the user
+  // is not pulled away from what they are doing: the tab opens when they go
+  // there next.
+  const pendingFileOpensRef = useRef(new Map<string, EditorOpenRequest[]>());
+  const openEditorRequest = useCallback((request: EditorOpenRequest) => {
+    tabsRef.current.openEditorTab(entryFromPath(request.path), { preview: false });
+    if (request.line !== undefined) requestEditorReveal(request.path, { line: request.line });
+  }, []);
+  useEffect(() => {
+    const workspaceId = tabs.tabsWorkspaceId;
+    if (!workspaceId || workspaceId !== activeId) return;
+    const queued = pendingFileOpensRef.current.get(workspaceId);
+    if (!queued) return;
+    pendingFileOpensRef.current.delete(workspaceId);
+    for (const request of queued) openEditorRequest(request);
+  }, [activeId, openEditorRequest, tabs.tabsWorkspaceId]);
+  useEffect(() => {
+    setEditorOpenBridge({
+      open: (request) => {
+        if (!workspacesRef.current.some((workspace) => workspace.id === request.workspaceId)) {
+          return { ok: false, reason: "workspace_closed" };
+        }
+        const current = tabsRef.current;
+        if (current.tabsWorkspaceId === request.workspaceId && activeIdRef.current === request.workspaceId) {
+          openEditorRequest(request);
+          return { ok: true, shown: true };
+        }
+        const queued = (pendingFileOpensRef.current.get(request.workspaceId) ?? []).filter((item) => item.path !== request.path);
+        pendingFileOpensRef.current.set(request.workspaceId, [...queued, request].slice(-10));
+        return { ok: true, shown: false };
+      },
+    });
+    return () => setEditorOpenBridge(null);
+  }, [openEditorRequest]);
+
   // Expose a tab-creation entry point to the preview registry so the
   // spark-preview MCP bridge can auto-open a preview tab when a sub-agent
   // calls navigate without one already being open. The registered fn returns
@@ -8018,7 +8055,14 @@ const Workspace = React.memo(function Workspace({
     [setDirty],
   );
   const handleSparkOpen = useCallback(
-    (input: { file: string }) => onSparkOpenFile(input.file),
+    (input: { file: string; line?: number; column?: number }) => {
+      onSparkOpenFile(input.file);
+      // A link with a line suffix (src/a.ts:42) shows that line once the
+      // editor has read the file.
+      if (input.line !== undefined && input.line > 0) {
+        requestEditorReveal(input.file, { line: input.line, ...(input.column ? { column: input.column } : {}) });
+      }
+    },
     [onSparkOpenFile],
   );
   const handlePaneExit = useCallback(

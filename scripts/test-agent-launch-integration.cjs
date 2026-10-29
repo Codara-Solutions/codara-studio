@@ -120,7 +120,8 @@ async function main() {
     assert.equal(launch.agentArgsDir(), dir);
     assert.deepEqual(tree(HOME), userHomeBefore, "boot wrote into the user's home");
     const settings = JSON.parse(fs.readFileSync(path.join(dir, "claude", "settings.json"), "utf8"));
-    assert.deepEqual(Object.keys(settings), ["hooks"]);
+    assert.deepEqual(Object.keys(settings), ["hooks", "env"]);
+    assert.deepEqual(settings.env, { FORCE_HYPERLINK: "1" }, "Claude prints its file links as OSC 8 hyperlinks in Codara's terminal");
     assert.match(settings.hooks.Stop[0].hooks[0].command, /claude-hooks\/codara-hook\.py" Stop$/);
     assert.ok(fs.existsSync(path.join(CODARA, "claude-hooks", "codara-hook.py")));
     assert.ok(fs.existsSync(path.join(CODARA, "codex-hooks", "codara-codex-notify.py")));
@@ -264,8 +265,8 @@ async function main() {
       codexConfigText: '[tui]\nnotifications = ["agent-turn-complete"]\n',
     });
     assert.deepEqual([result.claudeHooks, result.codexNotify], [false, false]);
-    assert.equal(fs.existsSync(settingsPath), false, "a stale hooks file was left for --settings");
-    assert.deepEqual(launch.claudeLaunchArgs({ userArgs: [] }), [`--mcp-config=${studioMcp}`]);
+    assert.deepEqual(JSON.parse(fs.readFileSync(settingsPath, "utf8")), { env: { FORCE_HYPERLINK: "1" } }, "a stale hooks entry was left for --settings");
+    assert.deepEqual(launch.claudeLaunchArgs({ userArgs: [] }), ["--settings", settingsPath, `--mcp-config=${studioMcp}`]);
     const args = launch.codexLaunchArgs({ userArgs: [] });
     assert.equal(args.length, 2, args.join(" "));
     assert.equal(launch.codexNotifyInjected(), false);
@@ -300,7 +301,7 @@ async function main() {
     launch.resetAgentLaunchIntegrationForTests();
     await launch.writeIntegrationFiles({ ...options, separateBrowserTools: guard });
     const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
-    assert.deepEqual(Object.keys(settings), ["hooks", "enabledPlugins", "deniedMcpServers"]);
+    assert.deepEqual(Object.keys(settings), ["hooks", "enabledPlugins", "deniedMcpServers", "env"]);
     assert.deepEqual(settings.enabledPlugins, guard.claudeSettings.enabledPlugins);
     assert.deepEqual(settings.deniedMcpServers, [{ serverName: "my-chrome" }]);
     assert.match(settings.hooks.Stop[0].hooks[0].command, /codara-hook\.py" Stop$/);
@@ -325,22 +326,22 @@ async function main() {
 
   await check("switching it off takes the browser entries out of new launches; the hooks stay", async () => {
     await launch.setSeparateBrowserToolsGuard(null);
-    assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(settingsPath, "utf8"))), ["hooks"]);
+    assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(settingsPath, "utf8"))), ["hooks", "env"]);
     assert.deepEqual(codexDisabled(), []);
     assert.ok(!fs.readFileSync(path.join(dir, "codex", "args.txt"), "utf8").includes("enabled=false"));
     await launch.setSeparateBrowserToolsGuard(guard);
     assert.ok(fs.readFileSync(path.join(dir, "codex", "args.txt"), "utf8").includes("enabled=false"), "switching back on");
   });
 
-  await check("without Python the switch alone still gets a settings file, and off removes it", async () => {
+  await check("without Python the switch still reaches the settings file, and off takes its entries out", async () => {
     launch.resetAgentLaunchIntegrationForTests();
     await launch.writeIntegrationFiles({ ...options, pythonAvailable: false, separateBrowserTools: guard });
-    assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(settingsPath, "utf8"))), ["enabledPlugins", "deniedMcpServers"]);
+    assert.deepEqual(Object.keys(JSON.parse(fs.readFileSync(settingsPath, "utf8"))), ["enabledPlugins", "deniedMcpServers", "env"]);
     assert.deepEqual(launch.claudeLaunchArgs({ userArgs: [] }), ["--settings", settingsPath, `--mcp-config=${studioMcp}`]);
     await launch.setSeparateBrowserToolsGuard(null);
-    assert.equal(fs.existsSync(settingsPath), false, "an empty settings file was left for --settings");
-    assert.deepEqual(launch.claudeLaunchArgs({ userArgs: [] }), [`--mcp-config=${studioMcp}`]);
-    assert.deepEqual(fs.readFileSync(path.join(dir, "claude", "args.txt"), "utf8").split("\n"), [`--mcp-config=${studioMcp}`, ""]);
+    assert.deepEqual(JSON.parse(fs.readFileSync(settingsPath, "utf8")), { env: { FORCE_HYPERLINK: "1" } }, "the browser entries were left for --settings");
+    assert.deepEqual(launch.claudeLaunchArgs({ userArgs: [] }), ["--settings", settingsPath, `--mcp-config=${studioMcp}`]);
+    assert.deepEqual(fs.readFileSync(path.join(dir, "claude", "args.txt"), "utf8").split("\n"), ["--settings", settingsPath, `--mcp-config=${studioMcp}`, ""]);
   });
 
   await check("a pane never waits on boot for more than the bound", async () => {

@@ -93,13 +93,13 @@ environment variable that Codara sets for the agent:
 
 | Set | Who sees it | What it adds |
 |---|---|---|
-| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, `codara_tab`, `codara_notify_user`, `codara_workspace_status`, the task list tools, `codara_session_search`, `codara_share_offer` and the worktree tools; whiteboard and board only inside a Cora chat |
+| `studio` (default) | Agents you run yourself in any terminal | Browser, terminals, `codara_tab`, `codara_notify_user`, `codara_workspace_status`, the task list tools, `codara_session_search`, `codara_share_offer`, `codara_open_file` and the worktree tools; whiteboard and board only inside a Cora chat |
 | `worker` | Workers in automation passes | `studio` with the whiteboard and board read-only and without `codara_tab`, plus `codara_ask_user` and `codara_request_next_iteration` |
-| `execute` | A Cora chat that orchestrates work | `studio`, plus orchestration, automation management, the task list tools, `codara_session_search`, the worktree tools and `codara_share_offer` |
+| `execute` | A Cora chat that orchestrates work | `studio`, plus orchestration, automation management, the task list tools, `codara_session_search`, the worktree tools, `codara_share_offer` and `codara_open_file` |
 | `automation` | The chat that designs automations | `studio`, plus automation management, `codara_ask_user` and `codara_name_chat` |
 
 A Cora chat that answers directly, without workers, gets `studio` plus
-`codara_remember`, `codara_share_offer` and the worktree tools, with the whiteboard and board
+`codara_remember`, `codara_share_offer`, `codara_open_file` and the worktree tools, with the whiteboard and board
 read-only. Cora's chat workers and Talk chats do not get the worktree tools. Requests to draw
 on the whiteboard, change the board or schedule work therefore go to the
 orchestrating chat, and a direct chat hands over to it when a follow-up needs
@@ -984,6 +984,15 @@ directly. Never for workers or an imported pull request.
 | Tool | What it does |
 |---|---|
 | `codara_share_offer` | Takes `path`, an HTML or Markdown file (absolute, or relative to the agent's working directory) in a folder open in Codara, at most 5 MB. Codara opens the file and shows its Share prompt; nothing is uploaded unless you click Share there, and the agent never gets the link. Returns `offered: true`, or `offered: false` with a `reason` (`invalid`, `not_shareable`, `missing`, `too_large`, `not_allowed`, `rate_limited`, `no_window`, `codara_offline`). One prompt per agent every 10 seconds. See [share-links.md](./share-links.md). |
+
+## Opening a file for the user
+
+In `studio` outside a Cora chat, in `execute`, and in a Cora chat that answers
+directly. Never for workers or an imported pull request.
+
+| Tool | What it does |
+|---|---|
+| `codara_open_file` | Takes `path` (absolute, `~/`, or relative to the agent's working directory) and an optional 1-based `line`. Codara opens the text file as a kept editor tab in the agent's own workspace and shows that line; a `.env` opens as plain editable text. A file outside the workspace folders opens too: Codara lets the editor read that one file. The file's text is never returned. Returns `opened: true` with `onScreen` (false when the user is in another workspace: the tab opens when they go back to it), or `opened: false` with a `reason` (`invalid`, `missing`, `directory`, `binary`, `too_large`, `workspace_closed`, `not_in_codara_workspace`, `codara_offline`). |
 
 ## Past sessions
 

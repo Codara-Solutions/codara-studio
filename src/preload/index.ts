@@ -801,7 +801,11 @@ const api = {
       exists: boolean;
       isFile: boolean;
       resolved: string;
-    }> => ipcRenderer.invoke("fs:pathExists", input),    // Size + mtime only — used by the file previewers, which load content
+    }> => ipcRenderer.invoke("fs:pathExists", input),
+    // True when the file is a secret by its name, a link on the way to it or
+    // its real name: the editor then opens it as plain text only.
+    isSecretFile: (path: string): Promise<boolean> => ipcRenderer.invoke("fs:isSecretFile", path),
+    // Size + mtime only — used by the file previewers, which load content
     // via file:// URLs and never round-trip bytes through IPC.
     statFile: (path: string): Promise<{ size: number; mtimeMs: number }> =>
       ipcRenderer.invoke("fs:statFile", path),

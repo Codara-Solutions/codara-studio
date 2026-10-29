@@ -52,6 +52,10 @@ export function registerPromptTracker(term: Terminal): PromptTracker {
 
 export interface SparkOpenInput {
   file: string;
+  /** 1-based line to show, when the link named one. */
+  line?: number;
+  /** 1-based column on that line. */
+  column?: number;
 }
 
 export function registerSparkOpenHandler(

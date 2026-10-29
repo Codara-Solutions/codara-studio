@@ -74,7 +74,7 @@ import { asciiBytes, indexOfBytes } from "./terminalByteScan";
 import { isParsingReplay, writeAsReplay } from "./osc52";
 import { registerOsc52Clipboard } from "./terminalClipboard";
 import { readRecentOutput, registerTerminalContextSource } from "./terminalContext";
-import { followsHiddenTargetLink, resolveTerminalLinkClick } from "./terminalLinks";
+import { fileLinkTarget, followsHiddenTargetLink, resolveTerminalLinkClick } from "./terminalLinks";
 import { isTabLink, TAB_LINK_TEXT_PATTERN } from "@shared/tab-links";
 import { openTabLink } from "../../tabs/tabLinkBridge";
 import type { TerminalLinkMenuRequest } from "./TerminalLinkMenu";
@@ -983,6 +983,32 @@ export function useTerminalSession({
           showMenu({ url: uri, x: event.clientX, y: event.clientY });
         }
       };
+      // A path in the output or a file:// hyperlink: Ctrl+click (Cmd+click on
+      // a Mac) opens it in the editor, as in VS Code; a plain click is left to
+      // xterm's selection. Only a file the read sandbox lets the editor open
+      // counts, the same check the plain-text links light up by.
+      const resolveExistingFile = async (target: string, baseDir: string | null): Promise<string | null> => {
+        const result = await window.spark.fs.pathExists?.({
+          target,
+          baseDir: baseDir ?? undefined,
+        });
+        return result?.exists && result.isFile ? result.resolved : null;
+      };
+      const openFileLink = (input: { file: string; line?: number; column?: number }) => {
+        onSparkOpenRef.current?.({
+          file: input.file,
+          ...(input.line !== undefined ? { line: input.line } : {}),
+          ...(input.column !== undefined ? { column: input.column } : {}),
+        });
+      };
+      const activateFileLink = (event: MouseEvent | undefined, target: { path: string; line?: number; column?: number }) => {
+        if (!event || event.button !== 0 || (!event.ctrlKey && !event.metaKey)) return;
+        // The pane's cwd only tells main whether the pane is remote, where a
+        // file:// path names a file on the other machine.
+        void resolveExistingFile(target.path, latestCwd).then((file) => {
+          if (file) openFileLink({ ...target, file });
+        });
+      };
       preloadTerminalPrefs();
 
       const term = new Terminal({
@@ -1011,11 +1037,15 @@ export function useTerminalSession({
         // links open like plain-text URLs do.
         linkHandler: {
           activate: (event, uri) => {
-            if (followsHiddenTargetLink(uri)) activateTerminalLink(event, uri);
+            const fileTarget = fileLinkTarget(uri);
+            if (fileTarget) activateFileLink(event, fileTarget);
+            else if (followsHiddenTargetLink(uri)) activateTerminalLink(event, uri);
           },
           // An agent's markdown link to a tab arrives as an OSC 8 codara://
-          // link, which xterm only passes on with this set. Its text hides
-          // its target, so activate follows web and tab links only.
+          // link, and one to a file (Claude Code's) as a file:// link, which
+          // xterm only passes on with this set. Its text hides its target, so
+          // activate follows web and tab links, and opens a file only in
+          // Codara's editor, never with the system's handler for it.
           allowNonHttpProtocols: true,
         },
       });
@@ -1073,20 +1103,14 @@ export function useTerminalSession({
       let latestCwd: string | null = initialCwd?.trim() || null;
       const fileLinkProvider = createFileLinkProvider(term, {
         getCwd: () => latestCwd,
-        resolveExisting: async (target, baseDir) => {
-          const result = await window.spark.fs.pathExists?.({
-            target,
-            baseDir: baseDir ?? undefined,
-          });
-          return result?.exists && result.isFile ? result.resolved : null;
-        },
-        onActivate: ({ file, event }) => {
+        resolveExisting: resolveExistingFile,
+        onActivate: ({ file, line, column, event }) => {
           // Modifier gate: Ctrl on Win/Linux, Cmd on macOS — accept either
           // so a Mac user on an external Windows keyboard still gets the
           // right behavior. Plain click is a no-op so xterm's selection
           // drag continues to work over the underlined region.
           if (!event.ctrlKey && !event.metaKey) return;
-          onSparkOpenRef.current?.({ file });
+          openFileLink({ file, line, column });
         },
       });
       const linkProviderDispose = term.registerLinkProvider(fileLinkProvider);

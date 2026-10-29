@@ -2,6 +2,8 @@
 // preload bridge and the renderer (Share popover, Settings "Shared pages").
 // The share key itself never appears here: it stays in main.
 
+import { isSecretFilePath } from "./secret-files";
+
 export const SHARE_EXPIRY_CHOICES = [7, 30, 90] as const;
 export type ShareExpiryDays = (typeof SHARE_EXPIRY_CHOICES)[number];
 export const SHARE_DEFAULT_EXPIRY_DAYS: ShareExpiryDays = 30;
@@ -48,6 +50,9 @@ export function isShareExpiryDays(value: unknown): value is ShareExpiryDays {
 }
 
 export function shareableKind(path: string): ShareableKind | null {
+  // A .env or key file never becomes a page, whatever its last extension
+  // (.env.backup.html).
+  if (isSecretFilePath(path)) return null;
   if (/\.(html?|xhtml)$/i.test(path)) return "html";
   if (/\.(md|markdown|mdown|mkd|mkdn)$/i.test(path)) return "markdown";
   return null;
