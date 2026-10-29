@@ -188,6 +188,13 @@ export async function railWorktreeOverview(
   return { states, external };
 }
 
+// Canonical paths compared as spelled, no case folding: on a case-sensitive
+// volume "fix" and "FIX" are two worktrees, and hiding one as "already
+// shown" would hide work.
+function exactKey(canonicalPath: string): string {
+  return canonicalPath.length > 1 ? canonicalPath.replace(/[\\/]+$/, "") : canonicalPath;
+}
+
 /**
  * Worktrees git registers for a project's repository that no workspace in the
  * rail is: made with plain `git worktree add`. A pruned one (folder gone) and
@@ -197,15 +204,15 @@ export async function railWorktreeOverview(
 async function externalWorktrees(state: AppState, repos: readonly RepoContext[]): Promise<WorktreeRailExternal[]> {
   const local = state.workspaces.filter((workspace) => !workspace.remote && workspace.cwd && !isRemotePath(workspace.cwd));
   const shown = new Set<string>();
-  for (const workspace of local) shown.add(pathKey(await canonicalMaybeMissing(workspace.cwd)));
+  for (const workspace of local) shown.add(exactKey(await canonicalMaybeMissing(workspace.cwd)));
   const items: Array<{ repo: RepoContext; projectId: string; entry: WorktreeRegistration; path: string }> = [];
   for (const repo of repos) {
     if (!repo.mainPath) continue;
-    const mainKey = pathKey(await canonicalMaybeMissing(repo.mainPath));
+    const mainKey = exactKey(await canonicalMaybeMissing(repo.mainPath));
     let projectId: string | null = null;
     for (const workspace of local) {
       if (workspace.copyBranch) continue;
-      if (pathKey(await canonicalMaybeMissing(workspace.cwd)) === mainKey) {
+      if (exactKey(await canonicalMaybeMissing(workspace.cwd)) === mainKey) {
         projectId = workspace.id;
         break;
       }
@@ -214,7 +221,7 @@ async function externalWorktrees(state: AppState, repos: readonly RepoContext[])
     for (const entry of repo.registrations) {
       if (entry.prunable) continue;
       const path = await canonicalMaybeMissing(entry.path);
-      const key = pathKey(path);
+      const key = exactKey(path);
       if (key === mainKey || shown.has(key)) continue;
       items.push({ repo, projectId, entry, path });
     }

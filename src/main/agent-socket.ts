@@ -1561,11 +1561,19 @@ interface CrossWorkspaceTarget {
  * the card waits.
  */
 async function workspaceIdentity(workspace: Workspace): Promise<string> {
-  let real = workspace.cwd;
-  if (!workspace.remote && !isRemotePath(workspace.cwd)) {
-    real = await fsp.realpath(workspace.cwd).catch(() => workspace.cwd);
-  }
-  return JSON.stringify([workspace.cwd, real, workspace.copyBranch?.repoCwd ?? null, workspace.remote ?? null]);
+  const canonical = async (path: string | undefined): Promise<string | null> => {
+    if (!path) return null;
+    if (workspace.remote || isRemotePath(path)) return path;
+    return fsp.realpath(path).catch(() => path);
+  };
+  const repoCwd = workspace.copyBranch?.repoCwd;
+  return JSON.stringify([
+    workspace.cwd,
+    await canonical(workspace.cwd),
+    repoCwd ?? null,
+    await canonical(repoCwd),
+    workspace.remote ?? null,
+  ]);
 }
 
 async function authorizeWorkspaceTarget(input: {
