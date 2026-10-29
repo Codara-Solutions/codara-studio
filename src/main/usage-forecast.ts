@@ -1,4 +1,4 @@
-// Usage forecast (Labs, behind the usageForecast preference): for each
+// Usage forecast (behind the usageForecast preference, on by default): for each
 // subscription window, when it runs out and whether that comes before the
 // reset. The model is in @shared/usage-forecast; this module gathers what it
 // learns from, all of it local:

@@ -542,8 +542,13 @@ saved groups), `test-workspace-reorder`, `test-workbench-routing`, `test-editor-
 `test-file-preview-capabilities`, `test-csv-preview`, `test-csv-preview-ui`,
 `test-run-graph-layout`, `test-overlay-performance`,
 `test-renderer-boot-ready`, `test-onboarding`, `test-usage-analytics`,
-`test-usage-roster` (the title bar's Usage panel: row order, chips, every
-account with its email, what a switch does, reset and credit copy),
+`test-usage-roster` (who is behind each provider in the title bar's usage
+panel: provider order, every account with its email, what a switch does),
+`test-usage-glance` (what the hairlines and the panel say: the forecast as
+"at reset" or a run-out time, "not enough history yet", which limit a
+hairline draws, when another account is suggested, which banked ChatGPT
+reset is spent and when spending is off), `test-usage-forecast-default` (the
+forecast is on by default and only the user's own choice turns it off),
 `test-settings-dialog` (Settings closes only through Escape, X, Done or
 Cancel; every search result is rendered; the face is opaque; a menu closes on
 a scroll only when its anchor moved), `test-settings-search` (every rendered
