@@ -360,6 +360,33 @@ async function main() {
     via: "always",
   });
 
+  // A worktree (codara_worktree_create with workspace) asks with its own card
+  // and wording; one Always grant covers terminals and worktrees alike.
+  {
+    const seen = [];
+    const worktreeStore = memoryStore();
+    const worktreeAnswers = [null, "deny", "always"];
+    let worktreeClock = 5_000_000;
+    const worktreeApprover = cross.createCrossWorkspaceApprover({
+      store: worktreeStore,
+      now: () => worktreeClock,
+      ask: async (input) => {
+        seen.push(input.action ?? "terminal");
+        return worktreeAnswers.shift();
+      },
+    });
+    const ask = (action) =>
+      worktreeApprover.authorize({ caller, target: cora, agent: "Claude Code", requester: "pane:p9", ...(action ? { action } : {}) });
+    let answer = await ask("worktree");
+    assert.match(answer.message, /may make worktrees in Cora; ask them/);
+    answer = await ask("worktree");
+    assert.match(answer.message, /declined: CEO may not make worktrees in Cora/);
+    worktreeClock += cross.CROSS_WORKSPACE_DENY_COOLDOWN_MS + 1;
+    assert.deepEqual(await ask("worktree"), { ok: true, via: "always" });
+    assert.deepEqual(seen, ["worktree", "worktree", "worktree"], "the card says it is for a worktree");
+    assert.deepEqual(await ask(), { ok: true, via: "grant" }, "the grant covers terminals too");
+  }
+
   const targetWs = { id: "ws-repo", name: "Repo", cwd: repo };
   assert.equal(await cross.crossWorkspaceCwdRefusal(repo, targetWs), null);
   assert.equal(await cross.crossWorkspaceCwdRefusal(sub, targetWs), null);
@@ -369,7 +396,7 @@ async function main() {
   assert.match(await cross.crossWorkspaceCwdRefusal(`${repo}/../elsewhere`, targetWs), /inside Repo/);
   assert.match(await cross.crossWorkspaceCwdRefusal("ssh://box/home/me", targetWs), /local folder/);
   assert.match(await cross.crossWorkspaceCwdRefusal("relative", targetWs), /absolute/);
-  console.log("ok 4 the approver asks once per pair and requester, remembers always and a recent deny; cwd stays in the target");
+  console.log("ok 4 the approver asks once per pair and requester, remembers always and a recent deny; cwd stays in the target; worktrees share the grant");
 
   // ── 5. Ownership ───────────────────────────────────────────────────────
   const registry = new AgentTerminalRegistry();

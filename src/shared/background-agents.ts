@@ -9,10 +9,10 @@
 // or the worktree is removed.
 //
 // Its state is worked out from what Codara sees cheaply: the note's status,
-// whether the creating session is still open and working (a Claude Code
-// session with background tasks reads "In background", which is working),
-// and how recent the last sign of work is (the note, the checked-out commit,
-// the worktree's creation). Pure, so scripts/test-background-agents.cjs runs
+// whether the creating session is working (a Claude Code session with
+// background tasks reads "In background", which is working), and how recent
+// the last sign of work is (the note, the checked-out commit, the worktree's
+// creation). Pure, so scripts/test-background-agents.cjs runs
 // it without the app.
 
 import {
@@ -24,7 +24,7 @@ import {
 } from "./agent-board";
 import { worktreeNoteKey, type AgentNoteMap } from "./agent-status";
 
-/** While the creator is open, this long after the last sign of work still reads as working. */
+/** This long after the last sign of work (a note, a commit, its creation) still reads as working. */
 export const BACKGROUND_RECENT_MS = 10 * 60_000;
 /** While the creator itself works (or runs background tasks), this long. */
 export const BACKGROUND_CREATOR_WORKING_MS = 2 * 60 * 60_000;
@@ -120,7 +120,7 @@ export function backgroundAgentCards(input: BackgroundAgentInput): AgentBoardCar
     if (status === "blocked") state = "needs-you";
     else if (status === "in_review" || status === "done") state = "done";
     else if (creatorCard?.bucket === "working" && quiet < BACKGROUND_CREATOR_WORKING_MS) state = "working";
-    else if (creatorCard && quiet < BACKGROUND_RECENT_MS) state = "working";
+    else if (quiet < BACKGROUND_RECENT_MS) state = "working";
     else state = "idle";
     const project = worktree.projectId ? input.workspaces.get(worktree.projectId) : undefined;
     const text = note?.entry.note ?? null;

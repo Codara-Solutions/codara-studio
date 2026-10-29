@@ -117,8 +117,11 @@ const RUN = { SPARK_RUN_ID: "run-roster" };
 // studio and execute by 2,700 for the four task list tools, about 2,650,
 // which let every agent in a workspace share one task list; studio by 100
 // for codara_browser_use, about 390, with the rest paid for by a shorter
-// codara_preview_run).
-const LIST_BUDGET = { studio: 34_200, run: 39_000, worker: 35_000, execute: 99_600, automation: 69_000 };
+// codara_preview_run; studio by 250 for codara_worktree_create's workspace
+// and codara_workspace_status's worktree, about 210, and execute by 100 for
+// the first, about 70, so a background agent can work in another repository
+// and still show on its rail).
+const LIST_BUDGET = { studio: 34_450, run: 39_000, worker: 35_000, execute: 99_700, automation: 69_000 };
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",
@@ -295,6 +298,18 @@ function sortedEqual(actual, expected, label) {
     assert.match(studio.init.instructions, /codara_share_offer.*only shows the user a Share prompt/, "a terminal agent learns the share offer is a prompt, not an upload");
     assert.match(studio.init.instructions, /codara_worktree_remove/, "a terminal agent learns the worktree lifecycle");
     assert.match(studio.init.instructions, /Linked folders are shared with the main checkout/);
+    // Work on another repository shows on that repository's rail, whoever
+    // does it (the coordinator or its background subagent).
+    assert.match(
+      studio.init.instructions,
+      /To work on another repository, or to hand one to a background subagent, call it with workspace .*instead of running git worktree add/,
+      "an agent learns to make another repository's worktree through Codara",
+    );
+    assert.match(
+      studio.init.instructions,
+      /reports with worktree set to its path: the note shows on that worktree's row/,
+      "an agent learns where a subagent's milestone notes go",
+    );
     assert.match(studio.init.instructions, /awaiting-approval waits for the user to approve its commands; never run them, or the setup file's terminal commands, yourself/);
     assert.match(
       studio.init.instructions,
@@ -600,6 +615,9 @@ function sortedEqual(actual, expected, label) {
     assert.strictEqual(byName(studio, "codara_worktree_create").annotations.destructiveHint, true);
     assert.notStrictEqual(byName(studio, "codara_worktree_create").annotations.readOnlyHint, true);
     assert.strictEqual(byName(studio, "codara_worktree_create").annotations.openWorldHint, true);
+    // Another workspace's repository, and a note on a worktree's row.
+    assert.equal(byName(studio, "codara_worktree_create").inputSchema.properties.workspace.type, "string");
+    assert.equal(byName(studio, "codara_workspace_status").inputSchema.properties.worktree.type, "string");
     assert.strictEqual(byName(studio, "codara_worktree_remove").annotations.destructiveHint, true);
     assert.strictEqual(byName(studio, "codara_worktree_remove").annotations.idempotentHint, true);
     // Its remove action deletes worktrees and, when ticked, remote branches.

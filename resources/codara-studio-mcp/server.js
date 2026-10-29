@@ -269,14 +269,11 @@ const NOTIFY_TOOL = {
 const WORKSPACE_STATUS_TOOL = {
   name: "codara_workspace_status",
   description:
-    "Read (no arguments) or set your one-line note in Codara's rail. Codara shows your state (working, needs you, done); status is for older callers. With worktree, the note goes on that worktree's row instead.",
+    "Read (no arguments) or set your one-line note in Codara's rail. Codara shows your state (working, needs you, done); status is for older callers.",
   inputSchema: {
     type: "object",
     properties: {
-      worktree: {
-        type: "string",
-        description: "Absolute path of a worktree you made with codara_worktree_create, or one of your own repository.",
-      },
+      worktree: { type: "string", description: "Its path: the note goes on that worktree's row." },
       status: { type: "string", enum: ["todo", "in_progress", "in_review", "done", "blocked"] },
       note: { type: "string", description: "One line, at most 140 characters; empty clears it." },
       clear: { type: "boolean" },
@@ -423,14 +420,11 @@ const WORKTREE_TOOLS = [
   {
     name: "codara_worktree_create",
     description:
-      "Create an isolated git worktree of your repository, or of another workspace's with workspace, on a new branch (or checkout:true for an existing one), shown in that workspace's rail. Work under the returned path. Repeating a branch returns its worktree.",
+      "Create an isolated git worktree of your repository (or workspace's) on a new branch (or checkout:true for an existing one), shown in its rail. Work under the returned path. Repeating a branch returns its worktree.",
     inputSchema: {
       type: "object",
       properties: {
-        workspace: {
-          type: "string",
-          description: "Another rail workspace, by id or folder, whose repository to use; the user approves once. Default yours.",
-        },
+        workspace: { type: "string", description: "Another workspace (id or folder); the user approves once." },
         branch: { type: "string", description: "Default agent/<purpose>-<id>." },
         base: { type: "string", description: "Default the default branch, fetched; HEAD is your commit." },
         checkout: { type: "boolean", description: "Use an existing branch." },
