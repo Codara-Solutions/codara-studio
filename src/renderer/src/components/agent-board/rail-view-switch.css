@@ -1,5 +1,5 @@
 /* The rail's Workspaces/Agents switch, on the solid rail like the rest of the
-   section. The Agents view's own styles load with it (agent-board.css). */
+   section. The Agents view's own styles load with it (agent-inbox.css). */
 
 .rail-view-switch {
   flex: 0 0 auto;

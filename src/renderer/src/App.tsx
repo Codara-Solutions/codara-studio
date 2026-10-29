@@ -3248,6 +3248,9 @@ export default function App() {
     [workspaces],
   );
   useNotifyFocusRouting(navigateToNotifyTarget, booted);
+  const closeAgentBoardPane = useCallback((workspaceId: string, tabId: string, paneId: string) => {
+    tabsRef.current.closeTerminalPaneInWorkspace(workspaceId, tabId, paneId);
+  }, []);
   // The rail's Agents view reads these from its own store, so an agent
   // changing state re-renders that view and not the memoized rail.
   useEffect(() => {
@@ -3261,6 +3264,8 @@ export default function App() {
       activeWorkspaceId: tabs.tabsWorkspaceId,
       activePaneId: activeViewPaneId,
       navigate: navigateToNotifyTarget,
+      branches: branchByWorkspaceId,
+      closePane: closeAgentBoardPane,
     });
   }, [
     workspaces,
@@ -3271,6 +3276,8 @@ export default function App() {
     terminalAttention,
     activeViewPaneId,
     navigateToNotifyTarget,
+    branchByWorkspaceId,
+    closeAgentBoardPane,
   ]);
   useEffect(() => () => publishAgentBoardSources(null), []);
 
