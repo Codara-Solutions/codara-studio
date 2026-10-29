@@ -253,6 +253,9 @@ function testAutoSettle(I) {
   const view = I.buildAgentInbox(model(cards), r.prefs, merged);
   check("the settled agents leave the inbox", !keys(view.inbox).includes("pane:done") && keys(view.settled).includes("pane:done"));
 
+  const failed = I.reconcileAgentInbox(model([card("run:failed", { tone: "danger", status: "Failed" })]), I.emptyAgentInboxPrefs(), merged);
+  check("a failure is never auto-settled", !failed.changed);
+
   const twice = I.reconcileAgentInbox(model(cards), r.prefs, { ...merged, now: NOW + MIN });
   check("a second look settles nothing new", !twice.changed);
 
@@ -277,6 +280,14 @@ function testUndo(I) {
   check("undo brings an auto-settled agent back", !undone.settled["pane:done"]);
   const after = I.reconcileAgentInbox(model(cards), undone, { ...merged, now: NOW + MIN });
   check("an undone auto-settle is not settled again by the same merge", !after.changed && !after.prefs.settled["pane:done"]);
+
+  // Merged from the inbox, then the watcher says merged, then the user undoes.
+  const mergedHere = I.settleMergedAgent(before, "pane:done", "codara-solutions/codara-studio#61", NOW);
+  check("a merge from the inbox settles the row for that merge", mergedHere.settled["pane:done"].auto === "codara-solutions/codara-studio#61" && mergedHere.autoSettled["pane:done"] === "codara-solutions/codara-studio#61");
+  const watcher = I.reconcileAgentInbox(model(cards), mergedHere, { ...merged, now: NOW + MIN });
+  const undoMerge = I.restoreAgentInbox(watcher.prefs, I.snapshotAgentInbox(before, ["pane:done"]));
+  const afterUndo = I.reconcileAgentInbox(model(cards), undoMerge, { ...merged, now: NOW + 2 * MIN });
+  check("undoing it is not followed by the watcher settling it again", !afterUndo.prefs.settled["pane:done"]);
 
   let prefs = I.snoozeAgent(I.emptyAgentInboxPrefs(), "pane:a", NOW + HOUR, NOW);
   const snapshot = I.snapshotAgentInbox(prefs, ["pane:a"]);

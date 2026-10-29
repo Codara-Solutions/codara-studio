@@ -219,7 +219,8 @@ export function reconcileAgentInbox(
       // New work after the merge is news: the same merge never hides it again.
       if (pr?.phase === "merged") target.autoSettled[card.key] = pullRequestRef(pr);
     }
-    if (!pr || pr.phase !== "merged" || card.bucket !== "done") continue;
+    // A failure stays in view whatever happened to the pull request.
+    if (!pr || pr.phase !== "merged" || card.bucket !== "done" || card.tone === "danger") continue;
     const ref = pullRequestRef(pr);
     const current = next ?? prefs;
     if (current.settled[card.key] || prefs.pinned[card.key] || current.autoSettled[card.key] === ref) continue;
@@ -419,6 +420,20 @@ function clone(prefs: AgentInboxPrefs): AgentInboxPrefs {
 export function settleAgent(prefs: AgentInboxPrefs, key: string, now: number): AgentInboxPrefs {
   const next = clone(prefs);
   next.settled[key] = { at: now };
+  delete next.snoozed[key];
+  delete next.unread[key];
+  return next;
+}
+
+/**
+ * Settles a row whose pull request the user just merged from the inbox. It
+ * counts as that merge's auto-settle, so undoing it is never followed by the
+ * watcher settling it again for the same merge.
+ */
+export function settleMergedAgent(prefs: AgentInboxPrefs, key: string, ref: string, now: number): AgentInboxPrefs {
+  const next = clone(prefs);
+  next.settled[key] = { at: now, auto: ref };
+  next.autoSettled[key] = ref;
   delete next.snoozed[key];
   delete next.unread[key];
   return next;

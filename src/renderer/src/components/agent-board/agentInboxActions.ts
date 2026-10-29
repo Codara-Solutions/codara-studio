@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { mergeNeedsConfirmation, pullRequestRef, settleAgent, type AgentInboxRow } from "@shared/agent-inbox";
+import { mergeNeedsConfirmation, pullRequestRef, settleMergedAgent, type AgentInboxRow } from "@shared/agent-inbox";
 import type { GitHubPullRequestSummary } from "@shared/github";
 import type { PullRequestWatchState } from "@shared/pull-request-watch";
 import { isRemotePath } from "@shared/remote";
@@ -24,8 +24,12 @@ function workspaceCwd(workspaceId: string): string | null {
 }
 
 /** Settles a row after its pull request merged, with the footer's undo. */
-export function settleMerged(key: string, number: number): void {
-  updateAgentInbox((current) => settleAgent(current, key, Date.now()), { keys: [key], text: `Settled, #${number} merged` });
+export function settleMerged(key: string, repository: string, number: number): void {
+  const ref = pullRequestRef({ repository: repository.toLowerCase(), number });
+  updateAgentInbox((current) => settleMergedAgent(current, key, ref, Date.now()), {
+    keys: [key],
+    text: `Settled, #${number} merged`,
+  });
 }
 
 /**
@@ -52,7 +56,10 @@ export async function mergeFromInbox(
       return;
     }
     const pullRequest = status.pullRequest;
-    if (!pullRequest || pullRequest.number !== watched.number || pullRequest.state !== "OPEN") {
+    // The row's pull request is one repository's number: a workspace whose
+    // remote now points elsewhere can have the same number for another one.
+    const sameRepository = status.repository.nameWithOwner.toLowerCase() === watched.repository.toLowerCase();
+    if (!sameRepository || !pullRequest || pullRequest.number !== watched.number || pullRequest.state !== "OPEN") {
       emitLocalToast(
         `#${watched.number} changed`,
         "Its branch no longer points at this open pull request. Nothing was merged.",
@@ -82,7 +89,7 @@ export async function mergeFromInbox(
       return;
     }
     emitLocalToast(`Merged #${pullRequest.number}`, `Squashed into ${pullRequest.baseBranch}.`);
-    settleMerged(row.key, pullRequest.number);
+    settleMerged(row.key, repository, pullRequest.number);
   } catch (cause) {
     emitLocalToast(`Could not merge #${watched.number}`, unwrapIpcError(cause), "danger");
   }

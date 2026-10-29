@@ -391,7 +391,7 @@ export default function AgentInboxList({ view, activeKey, navigate, now }: Props
               setConfirmResult(null);
             }}
             onMerged={() => {
-              settleMerged(confirm.key, confirm.pullRequest.number);
+              settleMerged(confirm.key, confirm.repository, confirm.pullRequest.number);
               setConfirm(null);
               setConfirmResult(null);
             }}
