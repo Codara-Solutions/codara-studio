@@ -96,10 +96,11 @@ function looksLikeRealPath(token: string): boolean {
   if (token.includes("://")) return false;
   // Absolute, home and explicit-relative are always candidates.
   if (isAnchored(token)) return true;
-  // A bare name needs a recognized extension (or to be a .env file) to
-  // avoid lighting up every prose "word/word" and "Node.js".
-  if (!/[\\/]/.test(token)) return ENV_FILE_RE.test(token) || hasKnownExtension(token);
-  return hasKnownExtension(token);
+  // A bare name or path needs a recognized extension (or to name a .env
+  // file, as in config/.env) to avoid lighting up every prose "word/word"
+  // and "Node.js".
+  const name = token.split(/[\\/]/).pop() ?? token;
+  return ENV_FILE_RE.test(name) || hasKnownExtension(token);
 }
 
 export interface FileLinkActivation {

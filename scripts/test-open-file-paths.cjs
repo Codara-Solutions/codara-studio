@@ -14,6 +14,8 @@
 //   5. The read sandbox grants the one file an agent opened, not its folder.
 //   6. The file.open handler opens in the caller's workspace and refuses
 //      without touching the tabs or the sandbox.
+//   7. A file reached through a .env link is a secret too (secret-file-check),
+//      and no secret file becomes a share link.
 //
 //   node scripts/test-open-file-paths.cjs
 
@@ -76,6 +78,8 @@ async function main() {
     "/home/etienne/Documents/Codara SL/Worktrees/x/notes.md",
     "/home/etienne/Documents/Projects/AI Continous Improvment/global/AGENTS.md",
     `${CWD}/.env`,
+    `${CWD}/config/.env`,
+    `${CWD}/config/.env.local`,
     `${CWD}/README.md`,
     `${CWD}/src/a.ts`,
     `${CWD}/docs/my notes.txt`,
@@ -154,6 +158,10 @@ async function main() {
     assert.deepEqual(await linksOf("⏺ Read(meeting notes.md:12)"), [
       { text: "meeting notes.md:12", file: `${CWD}/meeting notes.md`, line: 12, from: 8, to: 26 },
     ]);
+    assert.deepEqual((await linksOf("Set it in config/.env and config/.env.local")).map((link) => link.file), [
+      `${CWD}/config/.env`,
+      `${CWD}/config/.env.local`,
+    ]);
     assert.deepEqual(await linksOf("Wrote docs/my notes.txt"), [{ text: "docs/my notes.txt", file: `${CWD}/docs/my notes.txt`, from: 7, to: 23 }]);
     assert.deepEqual(await linksOf("src/a.ts(3,7): error TS2322"), [
       { text: "src/a.ts(3,7)", file: `${CWD}/src/a.ts`, line: 3, column: 7, from: 1, to: 13 },
@@ -217,6 +225,64 @@ async function main() {
     for (const p of ["/a/README.md", "/a/notes.txt", "/a/environment.ts", "/a/env", "/a/id_ed25519.pub", ""]) {
       assert.equal(isSecretFilePath(p), false, p);
     }
+  });
+
+  const { isSecretFileOnDisk, MAX_LINK_HOPS } = await bundle("src/main/secret-file-check.ts", "secret-file-check");
+  const { shareableKind } = await bundle("src/shared/share.ts", "share");
+  await check("a file reached through a secret is a secret: every link, the kernel's way", async () => {
+    const w = path.join(TMP, "links");
+    fs.mkdirSync(path.join(w, "actual", "inner"), { recursive: true });
+    fs.writeFileSync(path.join(w, "config.txt"), "KEY=x\n");
+    fs.writeFileSync(path.join(w, "plain.txt"), "hello\n");
+    fs.symlinkSync("config.txt", path.join(w, ".env"));
+    fs.symlinkSync(".env", path.join(w, "notes.txt"));
+    fs.symlinkSync("plain.txt", path.join(w, "readme.txt"));
+    assert.equal(await isSecretFileOnDisk(path.join(w, "plain.txt")), false);
+    assert.equal(await isSecretFileOnDisk(path.join(w, "readme.txt")), false, "an ordinary link");
+    assert.equal(await isSecretFileOnDisk(path.join(w, "notes.txt")), true, "notes.txt -> .env -> config.txt");
+    assert.equal(await isSecretFileOnDisk(path.join(w, "new.txt")), false, "a new file has only its name");
+    assert.equal(await isSecretFileOnDisk(path.join(w, "new.env")), true);
+    assert.equal(await isSecretFileOnDisk(path.join(w, "page.html")), false, "missing, ordinary name");
+
+    // "d/../middle.txt" where d is a link into actual/inner: the kernel reads
+    // actual/middle.txt (a link to a .env), not w/middle.txt.
+    fs.writeFileSync(path.join(w, "actual", "config.txt"), "KEY=y\n");
+    fs.symlinkSync("config.txt", path.join(w, "actual", ".env"));
+    fs.symlinkSync(".env", path.join(w, "actual", "middle.txt"));
+    fs.symlinkSync(path.join("actual", "inner"), path.join(w, "d"));
+    fs.symlinkSync("d/../middle.txt", path.join(w, "dotdot.txt"));
+    assert.equal(fs.readFileSync(path.join(w, "dotdot.txt"), "utf8"), "KEY=y\n", "the kernel follows d first");
+    assert.equal(await isSecretFileOnDisk(path.join(w, "dotdot.txt")), true, "d/.. resolved after d");
+
+    // A long chain with the .env deep inside, and one longer than the limit.
+    const chain = (name, length, secretAt) => {
+      const dirName = path.join(w, name);
+      fs.mkdirSync(dirName);
+      fs.writeFileSync(path.join(dirName, "end.txt"), "x\n");
+      let next = "end.txt";
+      for (let i = length; i >= 1; i -= 1) {
+        const link = i === secretAt ? `.env.${i}` : `hop${i}.txt`;
+        fs.symlinkSync(next, path.join(dirName, link));
+        next = link;
+      }
+      return path.join(dirName, next);
+    };
+    assert.equal(await isSecretFileOnDisk(chain("short", 5, 4)), true, ".env four links in");
+    assert.equal(await isSecretFileOnDisk(chain("plainchain", 5, 0)), false, "a chain of ordinary links");
+    assert.equal(await isSecretFileOnDisk(chain("deep", MAX_LINK_HOPS + 1, MAX_LINK_HOPS)), true, ".env at the last hop looked at");
+    assert.equal(await isSecretFileOnDisk(chain("long", MAX_LINK_HOPS + 3, 0)), true, "past the hop limit fails closed");
+
+    fs.symlinkSync("loop-b.txt", path.join(w, "loop-a.txt"));
+    fs.symlinkSync("loop-a.txt", path.join(w, "loop-b.txt"));
+    assert.equal(await isSecretFileOnDisk(path.join(w, "loop-a.txt")), true, "a link loop fails closed");
+    assert.equal(await isSecretFileOnDisk("ssh://host/home/e/.env"), false, "remote files are not read here");
+  });
+
+  await check("a .env never becomes a share link, whatever its last extension", () => {
+    assert.equal(shareableKind("/a/.env.backup.html"), null);
+    assert.equal(shareableKind("/a/secrets.env"), null);
+    assert.equal(shareableKind("/a/page.html"), "html");
+    assert.equal(shareableKind("/a/notes.md"), "markdown");
   });
 
   const { checkOpenFile } = await bundle("src/main/open-file.ts", "open-file");

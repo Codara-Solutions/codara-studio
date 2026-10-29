@@ -106,9 +106,28 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   ref,
 ) {
   const path = file.path;
-  const isMarkdown = useMemo(() => isMarkdownPath(path), [path]);
-  const isCsv = isCsvPath(path);
-  const previewKind = useMemo(() => previewKindForPath(path), [path]);
+  // A .env or key file opens as plain text: no preview, no share, no inline
+  // completion. Its name says so at once; a link on the way to it (notes.html
+  // pointing at a .env) only main can see, so nothing is previewed or offered
+  // for sharing until main has answered for this path.
+  const nameSecret = isSecretFilePath(path);
+  const [diskSecret, setDiskSecret] = useState<{ path: string; secret: boolean } | null>(null);
+  useEffect(() => {
+    if (nameSecret) return;
+    let live = true;
+    window.spark.fs.isSecretFile(path).then(
+      (secret) => live && setDiskSecret({ path, secret }),
+      () => live && setDiskSecret({ path, secret: true }),
+    );
+    return () => {
+      live = false;
+    };
+  }, [path, nameSecret]);
+  const secretKnown = nameSecret || diskSecret?.path === path;
+  const secret = nameSecret || (diskSecret?.path === path && diskSecret.secret);
+  const isMarkdown = useMemo(() => !secret && isMarkdownPath(path), [path, secret]);
+  const isCsv = !secret && isCsvPath(path);
+  const previewKind = useMemo(() => (secret ? null : previewKindForPath(path)), [path, secret]);
   // Image/pdf/media panes never mount CodeMirror or read text over IPC —
   // FilePreview loads them via file:// URLs. SVG and HTML are real markup,
   // so they keep the document flow and get the same Preview/Edit toggle as
@@ -124,11 +143,11 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     setViewMode(toggleKind || isCsv ? "preview" : "edit");
   }, [path, toggleKind, isCsv]);
   const [copiedAt, setCopiedAt] = useState<number | null>(null);
-  const shareable = useMemo(() => shareableKind(path) !== null, [path]);
+  const shareable = useMemo(() => !secret && shareableKind(path) !== null, [path, secret]);
 
   const cmRef = useRef<ReactCodeMirrorRef>(null);
   const { preferences } = usePreferences();
-  const previewVisible = previewOnly || (hasViewToggle && viewMode === "preview");
+  const previewVisible = secretKnown && (previewOnly || (hasViewToggle && viewMode === "preview"));
   const { fullscreen, toggleFullscreen } = usePreviewFullscreen(active && previewVisible);
   const fullscreenAction = previewVisible ? (
     <PreviewFullscreenButton fullscreen={fullscreen} onToggle={toggleFullscreen} />
@@ -200,6 +219,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   onCloseRef.current = onClose;
   const pathRef = useRef(path);
   pathRef.current = path;
+  const maySecretRef = useRef(true);
+  maySecretRef.current = secret || !secretKnown;
 
   const languageLabelRef = useRef<string | null>(languageLabel(path));
   useEffect(() => {
@@ -249,7 +270,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       inlineCompletion({
         getPrefs: () => ({
           // A .env or key file's text never goes to the completion model.
-          enabled: prefsRef.current.inlineAutocompleteEnabled && !isSecretFilePath(pathRef.current ?? ""),
+          enabled: prefsRef.current.inlineAutocompleteEnabled && !maySecretRef.current,
           modelId: prefsRef.current.inlineAutocompleteModelId,
           delayMs: prefsRef.current.inlineAutocompleteDelayMs,
         }),
@@ -397,7 +418,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
     docRef.current = doc;
     docPathRef.current = path;
   }
-  const shareReady = shareable && doc.status === "ready" && docPathRef.current === path;
+  const shareReady = shareable && secretKnown && doc.status === "ready" && docPathRef.current === path;
   const getShareText = useCallback(
     () => (docRef.current.status === "ready" ? docRef.current.content : ""),
     [],
@@ -509,7 +530,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             table={isCsv}
           />
         )}
-        {previewOnly && (
+        {previewOnly && secretKnown && (
           <FilePreview
             path={path}
             kind={previewKind!}
@@ -519,7 +540,7 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             onWhiteboardSaved={handleWhiteboardSaved}
           />
         )}
-        {toggleKind && viewMode === "preview" && (
+        {toggleKind && secretKnown && viewMode === "preview" && (
           <FilePreview path={path} kind={previewKind!} />
         )}
         {doc.status === "ready" && conflict && (
@@ -575,12 +596,12 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
             detail={`${formatBytes(doc.size)} exceeds the ${formatBytes(doc.limit)} editor limit.`}
           />
         )}
-        {doc.status === "ready" && isMarkdown && viewMode === "preview" && (
+        {doc.status === "ready" && isMarkdown && secretKnown && viewMode === "preview" && (
           <Suspense fallback={null}>
             <MarkdownPreview text={doc.content} basePath={path} />
           </Suspense>
         )}
-        {doc.status === "ready" && isCsv && (
+        {doc.status === "ready" && isCsv && secretKnown && (
           <div style={{ display: viewMode === "preview" ? "flex" : "none", flex: 1, minHeight: 0, minWidth: 0 }}>
             <Suspense fallback={<EditorMessage text="Preparing table..." />}>
               <CsvPreview

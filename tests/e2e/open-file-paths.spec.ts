@@ -229,6 +229,18 @@ test("a path with spaces in agent output and codara_open_file open the editor", 
     expect(await completionError(join(fixture.cwd, "chain-notes.txt"))).toBe("Inline completion is off for files with secrets.");
     expect(await completionError(fixture.notes)).not.toBe("Inline completion is off for files with secrets.");
 
+    // A secret never opens in a preview: a .env named like a page, and a
+    // page-named link to a .env, both open as plain text in the editor.
+    await writeFile(join(fixture.cwd, ".env.backup.html"), "BACKUP_KEY=fixture-html\n");
+    expect((await callTool({ path: ".env.backup.html" })).opened).toBe(true);
+    await expect(page.getByRole("tab", { name: ".env.backup.html" })).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator(".cm-content:visible")).toContainText("BACKUP_KEY=fixture-html", { timeout: 10_000 });
+    await symlink(fixture.envFile, join(fixture.cwd, "page.html"));
+    expect((await callTool({ path: "page.html" })).opened).toBe(true);
+    await expect(page.getByRole("tab", { name: "page.html" })).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator(".cm-content:visible")).toContainText("API_KEY=test-only-not-a-secret", { timeout: 10_000 });
+    await expect(page.locator("iframe:visible")).toHaveCount(0);
+
     // Refusals say why and open nothing.
     expect(await callTool({ path: join(fixture.cwd, "docs with space") })).toMatchObject({ opened: false, reason: "directory" });
     expect(await callTool({ path: "missing.md" })).toMatchObject({ opened: false, reason: "missing" });

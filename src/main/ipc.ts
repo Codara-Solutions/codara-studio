@@ -1,10 +1,10 @@
 import { ipcMain, dialog, BrowserWindow, app, shell, webContents, clipboard, nativeImage, type WebContents } from "electron";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { dirname, isAbsolute, join, resolve as pathResolve } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { homedir, tmpdir } from "node:os";
-import { isSecretFilePath } from "@shared/secret-files";
+import { isSecretFileOnDisk } from "./secret-file-check";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
 import { createFile, createFolder, deleteFile, deleteToStash, importEntries, listDir, listFiles, moveEntries, purgeDeleteStash, readFileBytes, readFileEx, readTextFile, readTextFileTail, renameFile, statFile, undoDeleteFromStash, writeTextFile } from "./fs-tree";
@@ -672,28 +672,6 @@ const PASTED_IMAGE_EXTENSIONS = new Map([
 // destroyTray; the handler calls them on keepRunningInBackground changes.
 type TrayHook = { ensure: () => void; destroy: () => void };
 let _trayHook: TrayHook | null = null;
-
-// A file whose text no completion request may carry: by its own name, the
-// name of any link on the way to the file (notes.txt -> .env -> config.txt),
-// or the file's real name.
-const MAX_LINK_HOPS = 32;
-async function isSecretEditorFile(file: unknown): Promise<boolean> {
-  if (typeof file !== "string" || file.length === 0 || isRemotePath(file)) return false;
-  if (isSecretFilePath(file)) return true;
-  try {
-    let current = file;
-    for (let hop = 0; hop < MAX_LINK_HOPS; hop += 1) {
-      if (!(await fs.lstat(current)).isSymbolicLink()) break;
-      current = pathResolve(dirname(current), await fs.readlink(current));
-      if (isSecretFilePath(current)) return true;
-    }
-    return isSecretFilePath(await fs.realpath(file));
-  } catch (error) {
-    // Nothing on disk yet (a new file) has no text to protect beyond its
-    // name; a link loop or an unreadable link gets no completion.
-    return (error as NodeJS.ErrnoException).code !== "ENOENT";
-  }
-}
 
 export function setTrayHook(hook: TrayHook): void {
   _trayHook = hook;
@@ -1693,7 +1671,7 @@ export function registerIpc(): void {
     async (_e, req: InlineAiCompletionRequest): Promise<InlineAiCompletionResponse> => {
       // The editor turns completion off for a .env or key file by its name;
       // a link named notes.txt that points at a .env is caught here.
-      if (await isSecretEditorFile(req?.filename)) return { text: "", error: "Inline completion is off for files with secrets." };
+      if (await isSecretFileOnDisk(req?.filename)) return { text: "", error: "Inline completion is off for files with secrets." };
       const { runInlineAiCompletion } = await getInlineAi();
       return runInlineAiCompletion(req);
     },
@@ -1952,6 +1930,11 @@ export function registerIpc(): void {
       }
     },
   );
+
+  // The editor asks whether an open file is a secret on disk (a link named
+  // notes.html that points at a .env): such a file opens as plain text, with
+  // no preview, share or inline completion. Answers yes or no, never content.
+  handle("fs:isSecretFile", async (_e, file: unknown): Promise<boolean> => isSecretFileOnDisk(file));
 
 
   handle(
