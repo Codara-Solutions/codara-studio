@@ -1928,7 +1928,8 @@ function EditorSettings() {
             <>
               Quick Open (<Kbd>Ctrl+P</Kbd> or <Kbd>Cmd+P</Kbd>) also lists matching files from your home folder,
               below the workspace's own. Caches, browser profiles, SSH and GPG keys, and hidden folders stay out (type a leading
-              dot to include hidden files). A file opens only when you pick it.
+              dot to include hidden files). Type a path (<Kbd>~/</Kbd> or <Kbd>/</Kbd>) to list that folder, hidden entries
+              included, with its private files opening as plain text. A file opens only when you pick it.
             </>
           }
           {...bindToggle("quickOpenAnywhere", preferences, setPreference)}

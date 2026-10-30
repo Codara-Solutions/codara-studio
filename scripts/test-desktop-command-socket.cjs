@@ -36,7 +36,7 @@ function loadTypeScriptModule(sourcePath) {
   return loaded.exports;
 }
 
-const { startDesktopCommandSocket } = loadTypeScriptModule(
+const { parseOpenPathRequest, startDesktopCommandSocket } = loadTypeScriptModule(
   path.join(ROOT, "src", "main", "desktop-command-socket.ts"),
 );
 
@@ -74,11 +74,17 @@ async function main() {
   try {
     let calls = 0;
     let outcome = async () => "opened";
+    const opened = [];
+    let openOutcome = async () => "opened";
     const socket = await startDesktopCommandSocket({
       socketPath,
       newTerminal: () => {
         calls += 1;
         return outcome();
+      },
+      openPath: (target) => {
+        opened.push(target);
+        return openOutcome();
       },
     });
 
@@ -119,6 +125,84 @@ async function main() {
       assert.equal(await send(socketPath, [bad]), "unknown-command\n", `refuses ${JSON.stringify(bad)}`);
     }
     assert.equal(calls, 5);
+
+    // open-path: the path arrives whole, spaces and accents included, in one
+    // write or several, and each answer reaches the caller.
+    const spaced = "/home/e/Documents/Codara SL/Año nuevo/plan final.md";
+    assert.equal(await send(socketPath, [`open-path ${spaced}\n`]), "opened\n");
+    assert.equal(await send(socketPath, ["open-pa", "th /home/", "e/x\n"]), "opened\n");
+    assert.deepEqual(opened, [spaced, "/home/e/x"]);
+    opened.length = 0;
+    assert.equal(await send(socketPath, ["open-path /home/e/folder/\n"]), "opened\n");
+    assert.deepEqual(opened, ["/home/e/folder"], "trailing slash dropped");
+    opened.length = 0;
+    for (const reply of ["ignored", "not-found", "not-text", "too-large", "not-allowed", "no-workspace", "timeout", "unavailable"]) {
+      openOutcome = async () => reply;
+      assert.equal(await send(socketPath, ["open-path /x\n"]), `${reply}\n`);
+    }
+    openOutcome = async () => {
+      throw new Error("renderer gone");
+    };
+    assert.equal(await send(socketPath, ["open-path /x\n"]), "unavailable\n");
+    openOutcome = async () => "opened";
+    opened.length = 0;
+
+    // The longest path allowed passes; one byte more is refused at once.
+    const longest = `/${"x".repeat(4095)}`;
+    assert.equal(await send(socketPath, [`open-path ${longest}\n`]), "opened\n");
+    assert.deepEqual(opened, [longest]);
+    opened.length = 0;
+    assert.equal(await send(socketPath, [`open-path /${"x".repeat(4096)}\n`]), "invalid-path\n");
+    assert.equal(await send(socketPath, [`open-path /${"x".repeat(9000)}`]), "invalid-path\n", "no newline, too long");
+
+    // Bad input is refused before anything looks at the disk.
+    for (const bad of [
+      "open-path \n",
+      "open-path relative/file\n",
+      "open-path ./file\n",
+      "open-path ~/file\n",
+      "open-path ~\n",
+      "open-path /a/../etc/passwd\n",
+      "open-path /a/./b\n",
+      "open-path /a/..\n",
+      "open-path /a\tb\n",
+      "open-path /a\rb\n",
+      "open-path /a\r\n",
+      "open-path /a\u0000b\n",
+      "open-path /a\u007fb\n",
+      "open-path /a\nnew-terminal\n",
+      "open-path /a\n\n",
+      "open-path /a\nopen-path /b\n",
+      Buffer.concat([Buffer.from("open-path /a"), Buffer.from([0xff, 0xfe]), Buffer.from("\n")]),
+      Buffer.concat([Buffer.from("open-path /a"), Buffer.from([0xc0, 0xaf]), Buffer.from("\n")]),
+    ]) {
+      assert.equal(await send(socketPath, [bad]), "invalid-path\n", `refuses ${JSON.stringify(String(bad))}`);
+    }
+    assert.deepEqual(opened, []);
+
+    // Near misses of the command are not the command.
+    for (const bad of ["open-path\n", "OPEN-PATH /a\n", "open-path\t/a\n", " open-path /a\n", "open-paths /a\n"]) {
+      assert.equal(await send(socketPath, [bad]), "unknown-command\n", `refuses ${JSON.stringify(bad)}`);
+    }
+    assert.deepEqual(opened, []);
+    assert.equal(calls, 5, "open-path never opens a terminal");
+
+    // A caller that stops halfway through a path is dropped, and nothing runs.
+    assert.equal(await send(socketPath, ["open-path /half"], { closeAfter: true }), "");
+    assert.deepEqual(opened, []);
+
+    // The answer may take longer than a stalled caller is given.
+    openOutcome = () => new Promise((resolve) => setTimeout(() => resolve("opened"), 1_300));
+    assert.equal(await send(socketPath, ["open-path /slow\n"]), "opened\n");
+    openOutcome = async () => "opened";
+    opened.length = 0;
+
+    const parsed = (text) => parseOpenPathRequest(Buffer.from(text));
+    assert.equal(parsed("open-path /\n"), "/");
+    assert.equal(parsed("open-path //\n"), "/");
+    assert.equal(parsed("open-path /a b/ñ\n"), "/a b/ñ");
+    assert.equal(parsed("open-path /a..b/...\n"), "/a..b/...", "dots inside a name are a name");
+    assert.equal(parsed("open-path /a"), null);
 
     // A caller that sends and hangs up without reading still gets its tab, once.
     await new Promise((resolve, reject) => {

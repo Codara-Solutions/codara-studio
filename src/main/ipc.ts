@@ -9,8 +9,9 @@ import { kernelPath } from "./open-file";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
 import { createFile, createFolder, deleteFile, deleteToStash, importEntries, listDir, listFiles, moveEntries, purgeDeleteStash, readFileBytes, readFileEx, readTextFile, readTextFileTail, renameFile, statFile, undoDeleteFromStash, writeTextFile } from "./fs-tree";
-import { assertAllowedReadPathResolved, grantReadFile, setAllowedRoots } from "./fs-sandbox";
+import { assertAllowedReadPathResolved, grantReadFile, grantResolvedFile, setAllowedRoots } from "./fs-sandbox";
 import { createHomeSearchService } from "./quick-open-anywhere";
+import { createPathQueryService } from "./quick-open-path";
 import { readClipboardFilePaths, writeClipboardFilePaths } from "./clipboard-files";
 import { deleteManualHost, listHosts, saveCodaraHost, saveManualHost } from "./remote/ssh-hosts";
 import { codaraBoxConnectInfo, isBoxId, listCodaraBoxes } from "./remote/codara-boxes";
@@ -411,6 +412,8 @@ import type {
   CreateWorkerTaskInput,
   FileListResult,
   HomeFileSearchResult,
+  PathPickResult,
+  PathQueryResult,
   HomePickResult,
   FsEntry,
   FsFileContent,
@@ -1966,6 +1969,13 @@ export function registerIpc(): void {
       return rel && !rel.startsWith("..") && !isAbsolute(rel) ? [rel] : [];
     },
   });
+  // Quick Open's path mode: the names in the one folder a typed path names.
+  const pathQuery = createPathQueryService({
+    home: homedir,
+    codaraHome,
+    enabled: () => getPreferenceCached("quickOpenAnywhere") !== false,
+    grantResolvedFile,
+  });
   const homeSearchSenders = new Set<number>();
   const trackHomeSearchSender = (sender: WebContents): number => {
     const id = sender.id;
@@ -1974,6 +1984,7 @@ export function registerIpc(): void {
       sender.once("destroyed", () => {
         homeSearchSenders.delete(id);
         homeSearch.forget(id);
+        pathQuery.forget(id);
       });
     }
     return id;
@@ -1983,6 +1994,11 @@ export function registerIpc(): void {
   );
   handle("fs:cancelHomeSearch", async (e): Promise<void> => homeSearch.cancel(e.sender.id));
   handle("fs:openHomeSearchPick", async (e, file: unknown): Promise<HomePickResult> => homeSearch.pick(e.sender.id, file));
+  handle("fs:searchPath", async (e, query: unknown, cwd: unknown): Promise<PathQueryResult> =>
+    pathQuery.search(trackHomeSearchSender(e.sender), query, cwd),
+  );
+  handle("fs:cancelPathSearch", async (e): Promise<void> => pathQuery.cancel(e.sender.id));
+  handle("fs:openPathPick", async (e, target: unknown): Promise<PathPickResult> => pathQuery.pick(e.sender.id, target));
 
 
   handle(

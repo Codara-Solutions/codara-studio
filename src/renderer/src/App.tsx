@@ -3661,9 +3661,8 @@ export default function App() {
   // `groupId` (from a folder's "Add workspace here…") files the new workspace
   // straight into that folder; its shade is then assigned by the folder
   // family like any other member.
-  const createWs = useCallback(async (groupId?: string) => {
-    const path = await window.spark.dialog.openDirectory(activeWorkspace?.cwd || home);
-    if (!path) return;
+  const addWorkspaceAt = useCallback(async (path: string, options?: { groupId?: string; rename?: boolean }) => {
+    const groupId = options?.groupId;
     const targetGroupId =
       typeof groupId === "string" && workspaceGroupsRef.current.some((g) => g.id === groupId)
         ? groupId
@@ -3698,8 +3697,25 @@ export default function App() {
     );
     activeRunIdsByWorkspaceRef.current[ws.id] = null;
     setActiveId(ws.id);
-    setEditingId(ws.id);
-  }, [workspaces, activeWorkspace, home]);
+    if (options?.rename !== false) setEditingId(ws.id);
+  }, [workspaces]);
+
+  const createWs = useCallback(async (groupId?: string) => {
+    const path = await window.spark.dialog.openDirectory(activeWorkspace?.cwd || home);
+    if (path) await addWorkspaceAt(path, { groupId });
+  }, [activeWorkspace, home, addWorkspaceAt]);
+
+  // A folder picked by its path, in Quick Open or from the file manager: the
+  // workspace already on it, or a new one, ready to use without a rename.
+  const openFolderAsWorkspace = useCallback(
+    async (path: string) => {
+      const same = (a: string, b: string) => a.replace(/[\\/]+$/, "") === b.replace(/[\\/]+$/, "");
+      const existing = workspaces.find((workspace) => same(workspace.cwd, path));
+      if (existing) setActiveId(existing.id);
+      else await addWorkspaceAt(path, { rename: false });
+    },
+    [workspaces, addWorkspaceAt],
+  );
 
   // A worktree made outside Codara (plain `git worktree add`), clicked in the
   // rail: it becomes a worktree row of its project, as the user's own (no
@@ -5385,6 +5401,30 @@ export default function App() {
     pendingFileOpensRef.current.delete(workspaceId);
     for (const request of queued) openEditorRequest(request);
   }, [activeId, openEditorRequest, tabs.tabsWorkspaceId]);
+  // A path from the file manager (src/main/desktop-command-socket.ts). Main
+  // checked it and let the editor read the file. Optional for the same reason
+  // as onDesktopNewTerminal.
+  useEffect(
+    () =>
+      window.spark.windowControls.onDesktopOpenPath?.(async (request) => {
+        if (visibleModalDialog()) return "ignored";
+        if (request.kind === "folder") {
+          await openFolderAsWorkspace(request.path);
+          return "opened";
+        }
+        const workspaceId = activeIdRef.current;
+        if (!workspaceId) return "no-workspace";
+        if (tabsRef.current.tabsWorkspaceId === workspaceId) {
+          openEditorRequest({ workspaceId, path: request.path });
+        } else {
+          const queued = pendingFileOpensRef.current.get(workspaceId) ?? [];
+          pendingFileOpensRef.current.set(workspaceId, [...queued, { workspaceId, path: request.path }].slice(-10));
+        }
+        return "opened";
+      }),
+    [openEditorRequest, openFolderAsWorkspace],
+  );
+
   useEffect(() => {
     setEditorOpenBridge({
       open: (request) => {
@@ -7112,6 +7152,7 @@ export default function App() {
           cwd={activeWorkspace?.cwd ?? null}
           onClose={closeFileSearch}
           onOpenFile={handleSearchOpenFile}
+          onOpenFolder={openFolderAsWorkspace}
         />
 
         <WorkspaceSwitchHud

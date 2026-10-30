@@ -8,6 +8,7 @@ import { spawn } from "node:child_process";
 import { promises as fsp, accessSync, constants as fsConstants } from "node:fs";
 import path from "node:path";
 import { checkOpenFile } from "./open-file";
+import { CREDENTIAL_HOME_PATHS } from "@shared/secret-files";
 import type { HomeFileHit, HomeFileSearchResult, HomePickResult } from "@shared/types";
 
 export const HOME_SEARCH_LIMIT = 50;
@@ -47,18 +48,7 @@ const SKIPPED_HOME_PREFIXES = [
   ".Codara",
   ".Cora",
   ".SparkAgent",
-  ".ssh",
-  ".gnupg",
-  ".password-store",
-  ".aws",
-  ".azure",
-  ".docker",
-  ".kube",
-  ".config/gcloud",
-  ".config/gh",
-  ".netrc",
-  ".git-credentials",
-  ".pgpass",
+  ...CREDENTIAL_HOME_PATHS,
   "Library",
   "AppData",
 ];

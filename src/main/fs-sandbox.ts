@@ -101,7 +101,16 @@ export function grantReadFile(file: string): void {
   } catch {
     return;
   }
-  for (const spelling of new Set([abs, real])) {
+  grantResolvedFile(abs, real);
+}
+
+/**
+ * The same grant for a caller that already resolved the real path off the main
+ * thread: a file on a drive that stopped answering must not freeze the app in
+ * a synchronous lookup here.
+ */
+export function grantResolvedFile(file: string, real: string): void {
+  for (const spelling of new Set([path.resolve(file), real])) {
     grantedFiles.delete(spelling);
     if (grantedFiles.size >= MAX_GRANTED_FILES) grantedFiles.delete(grantedFiles.keys().next().value as string);
     grantedFiles.set(spelling, real);
