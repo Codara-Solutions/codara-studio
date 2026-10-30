@@ -11,7 +11,8 @@ import { isPathQuery } from "@shared/path-query";
 import type { PathPickResult, PathQueryHit, PathQueryResult } from "@shared/types";
 
 export const PATH_RESULT_LIMIT = 200;
-// A huge folder is cut off rather than read whole on every keystroke.
+// A huge folder is cut off rather than filtered whole on every keystroke; a
+// name typed in full is still found.
 const MAX_ENTRIES_SCANNED = 5_000;
 const LIST_TIMEOUT_MS = 2_500;
 const OPEN_TIMEOUT_MS = 1_500;
@@ -181,8 +182,10 @@ export async function resolveOpenTarget(target: string, deps: PathDeps, timeoutM
   }
 }
 
+const PARENT_SEGMENT_RE = /(?:^|\/)\.\.(?:\/|$)/;
+
 export interface ResolvedPathQuery {
-  /** Absolute folder to list. */
+  /** Absolute folder to list. Any ".." is still in it: see listedFolder. */
   folder: string;
   /** The folder as typed, ending in a slash. */
   typedFolder: string;
@@ -197,11 +200,10 @@ export function resolvePathQuery(raw: unknown, opts: { home: string; cwd: string
   const cut = query.lastIndexOf("/") + 1;
   const typedFolder = query.slice(0, cut);
   const prefix = query.slice(cut);
-  let folder: string;
-  if (typedFolder.startsWith("~")) folder = path.resolve(opts.home, `.${typedFolder.slice(1)}`);
-  else if (typedFolder.startsWith(".")) folder = path.resolve(opts.cwd ?? opts.home, typedFolder);
-  else folder = path.resolve(typedFolder);
-  return { folder, typedFolder, prefix };
+  let spelled = typedFolder;
+  if (typedFolder.startsWith("~")) spelled = `${opts.home}${typedFolder.slice(1)}`;
+  else if (typedFolder.startsWith(".")) spelled = `${opts.cwd ?? opts.home}/${typedFolder}`;
+  return { folder: PARENT_SEGMENT_RE.test(spelled) ? spelled : path.resolve(spelled), typedFolder, prefix };
 }
 
 function folderLabel(typedFolder: string): string {
@@ -210,14 +212,13 @@ function folderLabel(typedFolder: string): string {
 
 interface Candidate {
   name: string;
-  isDir: boolean;
-  isLink: boolean;
   rank: number;
 }
 
 export interface PathListFs {
   stat: typeof fsp.stat;
-  opendir: typeof fsp.opendir;
+  realpath: typeof fsp.realpath;
+  readdir: (target: string) => Promise<string[]>;
 }
 
 export interface PathSearchOptions {
@@ -242,25 +243,39 @@ function rankOf(name: string, lowerPrefix: string): number {
   return lower.includes(lowerPrefix) ? 2 : -1;
 }
 
+// Names only, on purpose: opendir and readdir with file types fall back to a
+// synchronous lstat per entry on a filesystem that reports no types (FUSE can),
+// and that call would run on the main thread. Each kept row gets its own
+// asynchronous stat instead, one at a time.
 async function listFolder(
   parsed: ResolvedPathQuery,
   opts: PathSearchOptions,
   fs: PathListFs,
   signal: AbortSignal,
 ): Promise<PathQueryResult> {
-  const { folder, typedFolder, prefix } = parsed;
+  const { typedFolder, prefix } = parsed;
   const limit = opts.limit ?? PATH_RESULT_LIMIT;
   const maxEntries = opts.maxEntries ?? MAX_ENTRIES_SCANNED;
   const lowerPrefix = prefix.toLowerCase();
   const label = folderLabel(typedFolder);
   const hits: PathQueryHit[] = [];
 
+  let real: string;
   try {
-    if (!(await fs.stat(folder)).isDirectory()) return { hits: [], truncated: false, missing: true };
+    real = await fs.realpath(parsed.folder);
+    if (!(await fs.stat(real)).isDirectory()) return { hits: [], truncated: false, missing: true };
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT" || code === "ENOTDIR") return { hits: [], truncated: false, missing: true };
     return { hits: [], truncated: false, message: "That folder cannot be read." };
+  }
+  // ".." means what the kernel says it means, after the links before it. With
+  // none, the folder keeps the spelling typed, as a link the user named should.
+  const folder = PARENT_SEGMENT_RE.test(parsed.folder) ? real : parsed.folder;
+  const realCodaraHome = await fs.realpath(opts.codaraHome).catch(() => opts.codaraHome);
+  // Below a link too: the folder listed is the real one.
+  if (isCodaraPrivatePath(folder, opts.codaraHome) || isCodaraPrivatePath(real, realCodaraHome)) {
+    return { hits: [], truncated: false, message: PRIVATE_MESSAGE };
   }
   if (!prefix) {
     hits.push({
@@ -273,27 +288,23 @@ async function listFolder(
     });
   }
 
-  const found: Candidate[] = [];
-  let truncated = false;
-  let scanned = 0;
+  let names: string[];
   try {
-    const dir = await fs.opendir(folder, { bufferSize: 256 });
-    // Leaving this loop early closes the folder.
-    for await (const entry of dir) {
-      if (signal.aborted) return { hits: [], truncated: false, cancelled: true };
-      scanned += 1;
-      if (scanned > maxEntries) {
-        truncated = true;
-        break;
-      }
-      const rank = rankOf(entry.name, lowerPrefix);
-      if (rank < 0 || isCodaraPrivatePath(path.join(folder, entry.name), opts.codaraHome)) continue;
-      found.push({ name: entry.name, isDir: entry.isDirectory(), isLink: entry.isSymbolicLink(), rank });
-    }
+    names = await fs.readdir(real);
   } catch {
     return { hits, truncated: false, message: "That folder cannot be read." };
   }
+  if (signal.aborted) return { hits: [], truncated: false, cancelled: true };
+  let truncated = names.length > maxEntries;
+  const scanned = truncated ? names.slice(0, maxEntries) : names;
+  if (truncated && prefix && !scanned.includes(prefix) && names.includes(prefix)) scanned.push(prefix);
 
+  const found: Candidate[] = [];
+  for (const name of scanned) {
+    const rank = rankOf(name, lowerPrefix);
+    if (rank < 0 || isCodaraPrivatePath(path.join(real, name), realCodaraHome)) continue;
+    found.push({ name, rank });
+  }
   found.sort((a, b) => {
     if (a.rank !== b.rank) return a.rank - b.rank;
     const an = a.name.toLowerCase();
@@ -302,18 +313,17 @@ async function listFolder(
   });
   const kept = found.slice(0, limit - hits.length);
   if (kept.length < found.length) truncated = true;
-  // Only links need a look of their own, and only those that will be shown.
-  for (const candidate of kept) {
+
+  for (const { name } of kept) {
     if (signal.aborted) return { hits: [], truncated: false, cancelled: true };
-    if (!candidate.isLink) continue;
-    candidate.isDir = await fs.stat(path.join(folder, candidate.name)).then(
+    const entry = path.join(folder, name);
+    // A broken link is still an entry; picking it says so.
+    const isDir = await fs.stat(entry).then(
       (stat) => stat.isDirectory(),
       () => false,
     );
-  }
-  for (const { name, isDir } of kept) {
     hits.push({
-      path: path.join(folder, name),
+      path: entry,
       name,
       isDir,
       kind: name === prefix ? "exact" : "child",
@@ -327,9 +337,6 @@ async function listFolder(
 export async function searchPathQuery(query: unknown, opts: PathSearchOptions): Promise<PathQueryResult> {
   const parsed = resolvePathQuery(query, { home: opts.home, cwd: opts.cwd });
   if (!parsed) return { hits: [], truncated: false };
-  if (isCodaraPrivatePath(parsed.folder, opts.codaraHome)) {
-    return { hits: [], truncated: false, message: PRIVATE_MESSAGE };
-  }
   const local = new AbortController();
   const onAbort = (): void => local.abort();
   opts.signal?.addEventListener("abort", onAbort, { once: true });
@@ -350,7 +357,8 @@ export async function searchPathQuery(query: unknown, opts: PathSearchOptions): 
 export interface PathQueryServiceDeps extends PathDeps {
   /** False when Settings turned Quick Open's reach outside the workspace off. */
   enabled: () => boolean;
-  grantReadFile: (file: string) => void;
+  /** The read sandbox's one-file grant, with the real path already looked up. */
+  grantResolvedFile: (file: string, real: string) => void;
   search?: typeof searchPathQuery;
 }
 
@@ -400,10 +408,7 @@ export function createPathQueryService(deps: PathQueryServiceDeps) {
     }
     const resolved = await resolveOpenTarget(target, deps);
     if (!resolved.ok) return { ok: false, message: resolved.message };
-    if (resolved.kind === "file") {
-      deps.grantReadFile(resolved.path);
-      if (resolved.real !== resolved.path) deps.grantReadFile(resolved.real);
-    }
+    if (resolved.kind === "file") deps.grantResolvedFile(resolved.path, resolved.real);
     return { ok: true, kind: resolved.kind, path: resolved.path };
   }
 

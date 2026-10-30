@@ -3,7 +3,7 @@ import { ipcMain } from "electron";
 import type { DesktopOpenPathOutcome, DesktopOpenPathRequest } from "@shared/types";
 import type { DesktopNewTerminalOutcome, DesktopOpenPathReply } from "./desktop-command-socket";
 import { revealWindow } from "./e2e-background";
-import { grantReadFile } from "./fs-sandbox";
+import { grantResolvedFile } from "./fs-sandbox";
 import { getTrustedMainWindow, isTrustedOnSender } from "./main-window-trust";
 import { resolveOpenTarget, type OpenTarget, type PathDeps } from "./quick-open-path";
 
@@ -70,10 +70,7 @@ export async function requestDesktopOpenPath(target: string, deps: PathDeps): Pr
   if (!window || !contents || contents.isDestroyed() || contents.isCrashed()) return "unavailable";
   // The editor reads through the fs sandbox, which only knows the folders open
   // in Studio; the person asked for this one file.
-  if (resolved.kind === "file") {
-    grantReadFile(resolved.path);
-    grantReadFile(resolved.real);
-  }
+  if (resolved.kind === "file") grantResolvedFile(resolved.path, resolved.real);
   const request: DesktopOpenPathRequest = { path: resolved.path, kind: resolved.kind };
   const reply = await new Promise<DesktopOpenPathReply>((resolve) => {
     const reqId = randomUUID();

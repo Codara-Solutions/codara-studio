@@ -7,8 +7,8 @@
 //   2. Listing: the one folder named, hidden entries included, filtered as you
 //      type, links followed for their kind, private data left out, a big
 //      folder cut off, files never opened.
-//   3. A folder that never answers costs a bounded number of fs threads, and
-//      main keeps answering.
+//   3. A folder that never answers costs a bounded number of fs threads, main
+//      keeps answering, and a listing makes no synchronous fs call at all.
 //   4. The pick: only what the last listing returned, links allowed, a file
 //      gets a one-file read grant, a folder gets none.
 //   5. What may not open: Codara's private data, a folder on or above a
@@ -117,8 +117,8 @@ async function main() {
     assert.deepEqual(at("~/.claude/"), { folder: claude, typedFolder: "~/.claude/", prefix: "" });
     assert.deepEqual(at("~/.claude/se"), { folder: claude, typedFolder: "~/.claude/", prefix: "se" });
     assert.deepEqual(at("./src/in"), { folder: path.join(cwd, "src"), typedFolder: "./src/", prefix: "in" });
-    assert.deepEqual(at("../"), { folder: path.dirname(cwd), typedFolder: "../", prefix: "" });
-    assert.deepEqual(at("~/.claude/.."), { folder: home, typedFolder: "~/.claude/../", prefix: "" });
+    assert.deepEqual(at("../"), { folder: `${cwd}/../`, typedFolder: "../", prefix: "" });
+    assert.deepEqual(at("~/.claude/.."), { folder: `${home}/.claude/../`, typedFolder: "~/.claude/../", prefix: "" });
     assert.equal(at("plain"), null);
     assert.equal(at(42), null);
   });
@@ -171,6 +171,17 @@ async function main() {
     assert.deepEqual(names(await search("./s")), ["src"]);
   });
 
+  await check("\"..\" is what the kernel says, after the links before it", async () => {
+    fs.mkdirSync(path.join(home, "deep", "er"), { recursive: true });
+    write(path.join(home, "deep", "marker.txt"));
+    fs.symlinkSync(path.join(home, "deep", "er"), path.join(home, "hop"));
+    const result = await search("~/hop/../");
+    assert.equal(result.hits[0].path, path.join(home, "deep"), "the link's parent, not the home folder");
+    assert.ok(names(result).includes("marker.txt"));
+    assert.equal(result.hits[1].path, path.join(home, "deep", "er"));
+    assert.deepEqual(names(await search("~/.claude/..")).slice(0, 1), [path.basename(home)]);
+  });
+
   await check("no match, no folder, and a file used as a folder", async () => {
     assert.deepEqual(await search("~/.claude/zzz"), { hits: [], truncated: false });
     assert.deepEqual(await search("~/nowhere/x"), { hits: [], truncated: false, missing: true });
@@ -185,6 +196,15 @@ async function main() {
     assert.match(inside.message, /private/);
     assert.equal((await search("~/.codarastudio/pi-agent/")).hits.length, 0);
     assert.deepEqual(names(await search("~/.codarastudio/worktrees/")).slice(1), ["repo"]);
+    // A link into it, and a home reached through a link, list nothing either.
+    fs.symlinkSync(path.join(codaraHome, "remote"), path.join(home, "alias"));
+    const viaLink = await search("~/alias/");
+    assert.equal(viaLink.hits.length, 0);
+    assert.match(viaLink.message, /private/);
+    const linkedHome = path.join(TMP, "linked-codara");
+    fs.symlinkSync(codaraHome, linkedHome);
+    const spelledViaLink = await search("~/.codarastudio/", { codaraHome: linkedHome });
+    assert.deepEqual(names(spelledViaLink).slice(1), ["worktrees"], "the child filter sees the real home");
     assert.equal(isCodaraPrivatePath(path.join(codaraHome, "remote-x"), codaraHome), true);
     assert.equal(isCodaraPrivatePath(`${codaraHome}-other/file`, codaraHome), false);
     assert.equal(isCodaraPrivatePath(codaraHome, codaraHome), false);
@@ -200,35 +220,61 @@ async function main() {
     const scanned = await search("~/big/", { maxEntries: 10 });
     assert.equal(scanned.truncated, true);
     assert.equal(scanned.hits.length, 11);
+    // A name typed in full is found wherever it falls in the folder.
+    const all = fs.readdirSync(path.join(home, "big"));
+    const last = all[all.length - 1];
+    const typed = await search(`~/big/${last}`, { maxEntries: 3 });
+    assert.equal(typed.hits[0].path, path.join(home, "big", last));
+    assert.equal(typed.hits[0].kind, "exact");
   });
 
   await check("a listing touches names only, in the one folder", async () => {
     const calls = [];
     const spy = {
+      realpath: (target) => fs.promises.realpath(target),
       stat: (target) => {
         calls.push(["stat", target]);
         return fs.promises.stat(target);
       },
-      opendir: (target, options) => {
-        calls.push(["opendir", target]);
-        return fs.promises.opendir(target, options);
+      readdir: (target) => {
+        calls.push(["readdir", target]);
+        return fs.promises.readdir(target);
       },
     };
     await search("~/.claude/", { fs: spy });
-    const opened = calls.filter(([kind]) => kind === "opendir");
-    assert.deepEqual(opened, [["opendir", claude]], "no walk: session-env stays closed");
-    const looked = calls.filter(([kind]) => kind === "stat").map(([, target]) => path.basename(target));
-    assert.deepEqual(looked.sort(), [".claude", "broken", "linked-folder", "linked.json"]);
+    assert.deepEqual(calls.filter(([kind]) => kind === "readdir"), [["readdir", claude]], "no walk: session-env stays closed");
+  });
+
+  await check("a listing and a pick make no synchronous fs call", async () => {
+    const sync = ["statSync", "lstatSync", "realpathSync", "readdirSync", "openSync", "readSync", "existsSync"];
+    const saved = sync.map((name) => fs[name]);
+    const used = [];
+    sync.forEach((name, at) => {
+      fs[name] = (...args) => {
+        used.push(name);
+        return saved[at](...args);
+      };
+    });
+    try {
+      await search("~/.claude/");
+      await resolveOpenTarget(path.join(claude, "linked.json"), { home: () => home, codaraHome: () => codaraHome, networkMounts: async () => [] });
+    } finally {
+      sync.forEach((name, at) => {
+        fs[name] = saved[at];
+      });
+    }
+    assert.deepEqual(used, []);
   });
 
   await check("a folder that never answers costs two threads and main stays free", async () => {
     let started = 0;
     const dead = {
-      stat: () => {
+      realpath: () => {
         started += 1;
         return new Promise(() => undefined);
       },
-      opendir: () => new Promise(() => undefined),
+      stat: () => new Promise(() => undefined),
+      readdir: () => new Promise(() => undefined),
     };
     const stuck = await Promise.all([1, 2, 3, 4].map(() => search("~/.claude/", { fs: dead, timeoutMs: 30 })));
     for (const result of stuck) assert.deepEqual(result, { hits: [], truncated: false, message: "That folder is not answering." });
@@ -271,7 +317,7 @@ async function main() {
     const service = fresh.createPathQueryService({
       ...deps,
       enabled: () => true,
-      grantReadFile: (file) => grants.push(file),
+      grantResolvedFile: (file, real) => grants.push([file, real]),
       search: (query, opts) => fresh.searchPathQuery(query, opts),
     });
     assert.deepEqual(await service.pick(1, path.join(claude, "settings.json")), {
@@ -281,12 +327,12 @@ async function main() {
     await service.search(1, "~/.claude/", cwd);
     const file = path.join(claude, "settings.json");
     assert.deepEqual(await service.pick(1, file), { ok: true, kind: "file", path: file });
-    assert.deepEqual(grants, [file]);
+    assert.deepEqual(grants, [[file, file]]);
 
     grants.length = 0;
     const link = path.join(claude, "linked.json");
     assert.deepEqual(await service.pick(1, link), { ok: true, kind: "file", path: link });
-    assert.deepEqual(grants, [link, file], "a link grants both spellings");
+    assert.deepEqual(grants, [[link, file]], "a link grants its spelling and its real path");
 
     grants.length = 0;
     assert.deepEqual(await service.pick(1, claude), { ok: true, kind: "folder", path: claude });
@@ -302,7 +348,7 @@ async function main() {
   });
 
   await check("the setting turns the whole mode off", async () => {
-    const service = fresh.createPathQueryService({ ...deps, enabled: () => false, grantReadFile: () => assert.fail("no grant") });
+    const service = fresh.createPathQueryService({ ...deps, enabled: () => false, grantResolvedFile: () => assert.fail("no grant") });
     assert.deepEqual(await service.search(1, "~/.claude/", cwd), { hits: [], truncated: false, disabled: true });
     assert.equal((await service.pick(1, claude)).ok, false);
   });
@@ -312,7 +358,7 @@ async function main() {
     const service = fresh.createPathQueryService({
       ...deps,
       enabled: () => true,
-      grantReadFile: () => undefined,
+      grantResolvedFile: () => undefined,
       search: (query, opts) =>
         new Promise((resolve) => {
           seen.push(opts.signal);

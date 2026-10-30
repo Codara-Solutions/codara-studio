@@ -9,7 +9,7 @@ import { kernelPath } from "./open-file";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
 import { createFile, createFolder, deleteFile, deleteToStash, importEntries, listDir, listFiles, moveEntries, purgeDeleteStash, readFileBytes, readFileEx, readTextFile, readTextFileTail, renameFile, statFile, undoDeleteFromStash, writeTextFile } from "./fs-tree";
-import { assertAllowedReadPathResolved, grantReadFile, setAllowedRoots } from "./fs-sandbox";
+import { assertAllowedReadPathResolved, grantReadFile, grantResolvedFile, setAllowedRoots } from "./fs-sandbox";
 import { createHomeSearchService } from "./quick-open-anywhere";
 import { createPathQueryService } from "./quick-open-path";
 import { readClipboardFilePaths, writeClipboardFilePaths } from "./clipboard-files";
@@ -1974,7 +1974,7 @@ export function registerIpc(): void {
     home: homedir,
     codaraHome,
     enabled: () => getPreferenceCached("quickOpenAnywhere") !== false,
-    grantReadFile,
+    grantResolvedFile,
   });
   const homeSearchSenders = new Set<number>();
   const trackHomeSearchSender = (sender: WebContents): number => {

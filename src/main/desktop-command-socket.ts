@@ -88,7 +88,6 @@ export function parseOpenPathRequest(request: Buffer): string | null {
   } catch {
     return null;
   }
-  // eslint-disable-next-line no-control-regex
   if (!text.startsWith("/") || /[\u0000-\u001f\u007f]/.test(text)) return null;
   if (text.split("/").some((segment) => segment === "." || segment === "..")) return null;
   return text.replace(/\/+$/, "") || "/";
