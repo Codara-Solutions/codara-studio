@@ -2497,6 +2497,48 @@ export interface HomeFileSearchResult {
 
 export type HomePickResult = { ok: true; path: string } | { ok: false; message: string };
 
+// Quick Open with a query that looks like a path (src/main/quick-open-path.ts).
+export interface PathQueryHit {
+  /** Absolute path. */
+  path: string;
+  name: string;
+  isDir: boolean;
+  /**
+   * "folder" is the folder the query ends in ("~/.claude/"): picking it opens
+   * it as a workspace. "exact" is the path the query spells without a trailing
+   * slash, "child" another entry of the folder listed.
+   */
+  kind: "folder" | "exact" | "child";
+  /** The query that completes to this entry; folders end in a slash. */
+  completion: string;
+  /** Where it is, as the user spelled it: "~/.claude". */
+  label: string;
+}
+
+export interface PathQueryResult {
+  hits: PathQueryHit[];
+  /** The folder held more entries than were looked at. */
+  truncated: boolean;
+  /** The folder the query names does not exist. */
+  missing?: boolean;
+  /** Why nothing could be listed, for the user. */
+  message?: string;
+  cancelled?: boolean;
+  disabled?: boolean;
+}
+
+export type PathPickResult =
+  | { ok: true; kind: "file" | "folder"; path: string }
+  | { ok: false; message: string };
+
+// The desktop command socket's open-path command, as the renderer gets it.
+export interface DesktopOpenPathRequest {
+  path: string;
+  kind: "file" | "folder";
+}
+
+export type DesktopOpenPathOutcome = "opened" | "ignored" | "no-workspace";
+
 export interface FsFileContent {
   path: string;
   content: string;

@@ -138,6 +138,10 @@ import type {
   DeleteWorkerSessionResult,
   FileListResult,
   HomeFileSearchResult,
+  PathPickResult,
+  PathQueryResult,
+  DesktopOpenPathOutcome,
+  DesktopOpenPathRequest,
   HomePickResult,
   FsChangeEvent,
   FsEntry,
@@ -812,6 +816,10 @@ const api = {
     // which lets the editor read that one file.
     searchHome: (query: string, excludeRoot: string | null): Promise<HomeFileSearchResult> =>
       ipcRenderer.invoke("fs:searchHome", query, excludeRoot),
+    searchPath: (query: string, cwd: string | null): Promise<PathQueryResult> =>
+      ipcRenderer.invoke("fs:searchPath", query, cwd),
+    cancelPathSearch: (): Promise<void> => ipcRenderer.invoke("fs:cancelPathSearch"),
+    openPathPick: (target: string): Promise<PathPickResult> => ipcRenderer.invoke("fs:openPathPick", target),
     cancelHomeSearch: (): Promise<void> => ipcRenderer.invoke("fs:cancelHomeSearch"),
     openHomeSearchPick: (path: string): Promise<HomePickResult> => ipcRenderer.invoke("fs:openHomeSearchPick", path),
     // Size + mtime only — used by the file previewers, which load content
@@ -1510,6 +1518,18 @@ const api = {
       };
       ipcRenderer.on("desktop-command:new-terminal", listener);
       return () => ipcRenderer.off("desktop-command:new-terminal", listener);
+    },
+    onDesktopOpenPath: (
+      handler: (request: DesktopOpenPathRequest) => Promise<DesktopOpenPathOutcome>,
+    ): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, reqId: string, request: DesktopOpenPathRequest) => {
+        void handler(request).then(
+          (outcome) => ipcRenderer.send("desktop-command:result", { reqId, outcome }),
+          () => ipcRenderer.send("desktop-command:result", { reqId }),
+        );
+      };
+      ipcRenderer.on("desktop-command:open-path", listener);
+      return () => ipcRenderer.off("desktop-command:open-path", listener);
     },
   },
   app: {

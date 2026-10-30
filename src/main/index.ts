@@ -23,6 +23,7 @@ import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { disposeAllConnections } from "./remote/connections";
 import { closeAllPaneOverlays, startAgentSocket, stopAgentSocket } from "./agent-socket";
+import { homedir } from "node:os";
 import { ensureCodaraHomeSync, codaraHome } from "./codara-home";
 import { startCrashReporterEarly, startDiagnostics } from "./diagnostics";
 import { flush, loadSettings, loadState } from "./storage";
@@ -47,7 +48,11 @@ import { routeGuestPopups } from "./guest-popups";
 import { isFreshPartition } from "../shared/browser-partition";
 import { openLinkFromApp } from "./open-link";
 import { registerTerminalBridge } from "./terminal-bridge";
-import { registerDesktopCommandBridge, requestDesktopNewTerminal } from "./desktop-command-bridge";
+import {
+  registerDesktopCommandBridge,
+  requestDesktopNewTerminal,
+  requestDesktopOpenPath,
+} from "./desktop-command-bridge";
 import {
   DESKTOP_COMMAND_SOCKET_NAME,
   startDesktopCommandSocket,
@@ -1355,6 +1360,7 @@ app.whenReady().then(async () => {
     void startDesktopCommandSocket({
       socketPath: join(codaraHome(), DESKTOP_COMMAND_SOCKET_NAME),
       newTerminal: requestDesktopNewTerminal,
+      openPath: (target) => requestDesktopOpenPath(target, { home: homedir, codaraHome }),
     })
       .then((socket) => {
         desktopCommandSocket = socket;

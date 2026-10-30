@@ -286,6 +286,16 @@ async function main() {
     fs.symlinkSync("loop-a.txt", path.join(w, "loop-b.txt"));
     assert.equal(await isSecretFileOnDisk(path.join(w, "loop-a.txt")), true, "a link loop fails closed");
     assert.equal(await isSecretFileOnDisk("ssh://host/home/e/.env"), false, "remote files are not read here");
+
+    // A credential store holds secrets under ordinary names, and a link out
+    // of one is the same file.
+    const os_ = os.homedir();
+    assert.equal(await isSecretFileOnDisk(path.join(os_, ".aws", "config")), true, "by where it is");
+    assert.equal(await isSecretFileOnDisk(path.join(os_, ".kube", "no-such-file")), true, "even before it exists");
+    assert.equal(await isSecretFileOnDisk(path.join(os_, ".config", "gh", "hosts.yml")), true);
+    assert.equal(await isSecretFileOnDisk(path.join(os_, ".claude", ".credentials.json")), true, "by its name");
+    assert.equal(await isSecretFileOnDisk(path.join(os_, "no-such-folder", "notes.md")), false);
+    assert.equal(await isSecretFileOnDisk(path.join(w, ".ssh", "config")), false, "only the home folder's own store");
   });
 
   await check("a .env never becomes a share link, whatever its last extension", () => {
