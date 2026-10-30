@@ -12,7 +12,8 @@
 // - the AppImage Crashpad handler: only this launch's handler is matched,
 //   and only a real mount point counts
 // - the event-loop probe: window maths, which windows reach main.log, and a
-//   real stall of the loop showing up in the next window
+//   real stall of the loop showing up in the next window, and the time away
+//   from an unfocused app not showing up as one
 //
 //   node scripts/test-diagnostics-records.cjs
 
@@ -307,6 +308,22 @@ async function main() {
     assert.ok(probe.recentEventLoopWindows().length > paused, "sampling again records windows again");
     probe.setEventLoopProbeSampling(false);
     assert.equal(probe.eventLoopProbeRunning(), false, "a pause after stop is a no-op");
+  });
+
+  await check("time away from the app is not reported as a stall", async () => {
+    const lines = [];
+    // Blur and focus both inside one window: the timer's own reset does not
+    // run in between, so the gap is the histogram's to get wrong.
+    assert.equal(probe.startEventLoopProbe((line) => lines.push(line), { CODARA_EVENT_LOOP_WINDOW_MS: "2500" }), true);
+    await sleep(100);
+    probe.setEventLoopProbeSampling(false);
+    await sleep(1_500);
+    probe.setEventLoopProbeSampling(true);
+    await sleep(1_100);
+    probe.stopEventLoopProbe();
+    const window = probe.recentEventLoopWindows().at(-1);
+    assert.ok(window.maxMs < 250, `the window after focus returned: ${JSON.stringify(window)}`);
+    assert.deepEqual(lines, []);
   });
 
   if (failures > 0) {

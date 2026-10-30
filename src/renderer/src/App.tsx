@@ -6212,9 +6212,12 @@ export default function App() {
   });
 
   // A desktop-wide Ctrl+T reaches Studio through the desktop command socket
-  // instead of the keyboard (src/main/desktop-command-socket.ts).
+  // instead of the keyboard (src/main/desktop-command-socket.ts). Optional
+  // because `npm run dev` never rebuilds the preload, so after a fast-forward
+  // this can run against one that predates it, and a throw here takes the
+  // whole window down.
   useEffect(
-    () => window.spark.windowControls.onDesktopNewTerminal(() => runShortcutCommand("tab.newTerminal")),
+    () => window.spark.windowControls.onDesktopNewTerminal?.(() => runShortcutCommand("tab.newTerminal")),
     [runShortcutCommand],
   );
 
