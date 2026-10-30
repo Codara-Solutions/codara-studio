@@ -7,7 +7,7 @@ import { promises as fsp } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { isRemotePath } from "@shared/remote";
-import { isCredentialHomePath, isSecretFilePath } from "@shared/secret-files";
+import { CREDENTIAL_HOME_PATHS, isCredentialHomePath, isSecretFilePath } from "@shared/secret-files";
 
 // More links than this in one chain and the file counts as a secret: every
 // hop must be looked at, and the kernel gives up near here too (ELOOP).
@@ -31,7 +31,15 @@ async function isSecretName(file: string): Promise<boolean> {
   // A linked home: the real path of a file does not start with the spelling
   // os.homedir() gives.
   const realHome = await fsp.realpath(home).catch(() => home);
-  return realHome !== home && inCredentialStore(file, realHome);
+  if (realHome !== home && inCredentialStore(file, realHome)) return true;
+  // A store that is itself a link (~/.aws into a dotfiles repo): its files have
+  // real paths that say nothing about the home folder.
+  for (const store of CREDENTIAL_HOME_PATHS) {
+    const spelled = path.join(home, store);
+    const real = await fsp.realpath(spelled).catch(() => spelled);
+    if (real !== spelled && (file === real || file.startsWith(`${real}${path.sep}`))) return true;
+  }
+  return false;
 }
 
 export async function isSecretFileOnDisk(file: unknown): Promise<boolean> {

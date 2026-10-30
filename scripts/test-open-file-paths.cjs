@@ -296,6 +296,26 @@ async function main() {
     assert.equal(await isSecretFileOnDisk(path.join(os_, ".claude", ".credentials.json")), true, "by its name");
     assert.equal(await isSecretFileOnDisk(path.join(os_, "no-such-folder", "notes.md")), false);
     assert.equal(await isSecretFileOnDisk(path.join(w, ".ssh", "config")), false, "only the home folder's own store");
+
+    // A store that is itself a link: a link into it is still a secret.
+    const realHomeVar = process.env.HOME;
+    const linkedHome = path.join(w, "linked-store-home");
+    const dotfiles = path.join(w, "dotfiles", "aws");
+    fs.mkdirSync(linkedHome, { recursive: true });
+    fs.mkdirSync(dotfiles, { recursive: true });
+    fs.writeFileSync(path.join(dotfiles, "config.html"), "secret\n");
+    fs.writeFileSync(path.join(w, "dotfiles", "readme.html"), "fine\n");
+    fs.symlinkSync(dotfiles, path.join(linkedHome, ".aws"));
+    fs.symlinkSync(path.join(linkedHome, ".aws", "config.html"), path.join(linkedHome, "notes.html"));
+    fs.symlinkSync(path.join(w, "dotfiles", "readme.html"), path.join(linkedHome, "readme.html"));
+    process.env.HOME = linkedHome;
+    try {
+      assert.equal(await isSecretFileOnDisk(path.join(linkedHome, "notes.html")), true, "through a link to the store");
+      assert.equal(await isSecretFileOnDisk(path.join(dotfiles, "config.html")), true, "by the store's real place");
+      assert.equal(await isSecretFileOnDisk(path.join(linkedHome, "readme.html")), false, "beside the store is not in it");
+    } finally {
+      process.env.HOME = realHomeVar;
+    }
   });
 
   await check("a .env never becomes a share link, whatever its last extension", () => {
