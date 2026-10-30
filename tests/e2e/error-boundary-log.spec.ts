@@ -43,7 +43,7 @@ async function launchWithStalePreload(missing: string[]): Promise<{
   }
   await writeFile(preloadPath, preload);
 
-  await writeFile(join(workspaceDir, "notes.txt"), "a file tab\n", "utf8");
+  await writeFile(join(workspaceDir, "notes.md"), "# A file tab\n", "utf8");
   await writeFile(
     join(codaraHome, "spark-state.json"),
     JSON.stringify({
@@ -81,13 +81,15 @@ test("the app boots on a preload older than its renderer", async () => {
     await expect(page.locator('[data-workspace-id="ws-stale"]')).toBeVisible({ timeout: 30_000 });
     await expect(page.getByText("Nothing open here")).toBeVisible();
 
-    const fileRow = page.locator(`[data-fs-path="${join(workspaceDir, "notes.txt")}"]`);
+    const fileRow = page.locator(`[data-fs-path="${join(workspaceDir, "notes.md")}"]`);
     await expect(fileRow).toBeVisible({ timeout: 15_000 });
     await fileRow.dblclick();
-    await expect(page.getByRole("tab", { name: /notes\.txt/i }).first()).toBeVisible({ timeout: 15_000 });
-    // With no way to ask, a file counts as secret, as it does when the check fails.
-    await expect(page.getByText("a file tab")).toHaveCount(0);
-    await page.waitForTimeout(1_000);
+    await expect(page.getByRole("tab", { name: /notes\.md/i }).first()).toBeVisible({ timeout: 15_000 });
+    // With no way to ask, a file counts as secret, as it does when the check
+    // fails: it still opens as text, without the Markdown preview a file known
+    // to be safe gets.
+    await expect(page.locator(".cm-content")).toContainText("A file tab", { timeout: 15_000 });
+    await expect(page.getByRole("button", { name: "Preview", exact: true })).toHaveCount(0);
     await expect(page.getByRole("heading", { name: CRASH_TITLE })).toHaveCount(0);
   } finally {
     await app.close();
