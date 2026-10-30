@@ -12,10 +12,14 @@
 // whose path has a space like the real Codara folder, must resolve a cache of
 // its own, through electron-vite's real config loading.
 //
+// The cache then sits in the repository root, out of reach of the
+// node_modules skip, so Ctrl+P's file list must leave it out by name.
+//
 //   node scripts/test-vite-cache-per-checkout.cjs
 
 const assert = require("node:assert/strict");
 const { execFileSync } = require("node:child_process");
+const esbuild = require("esbuild");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -50,6 +54,24 @@ async function main() {
   assert.equal(await rendererCacheDir(ROOT), path.join(ROOT, ".vite-cache"));
 
   execFileSync("git", ["check-ignore", "-q", ".vite-cache/deps/_metadata.json"], { cwd: ROOT, stdio: "ignore" });
+
+  const fsTreeBundle = path.join(TMP, "fs-tree.cjs");
+  esbuild.buildSync({
+    entryPoints: [path.join(ROOT, "src/main/fs-tree.ts")],
+    outfile: fsTreeBundle,
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    target: "node22",
+    logLevel: "silent",
+    external: ["electron"],
+    alias: { "@shared": path.join(ROOT, "src", "shared") },
+  });
+  fs.mkdirSync(path.join(second, ".vite-cache", "deps"), { recursive: true });
+  fs.writeFileSync(path.join(second, ".vite-cache", "deps", "react.js"), "");
+  const { files } = await require(fsTreeBundle).listFiles(second);
+  assert.ok(files.some((file) => file.name === "package.json"), "the checkout is listed");
+  assert.deepEqual(files.filter((file) => file.path.includes(".vite-cache")), []);
 
   console.log("all vite cache checks passed");
 }

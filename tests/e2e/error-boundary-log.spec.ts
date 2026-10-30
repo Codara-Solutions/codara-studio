@@ -108,7 +108,9 @@ test("a crash the error boundary catches lands in main.log, with a stale preload
     await expect.poll(log, { timeout: 10_000 }).toContain(
       "[error-boundary] caught render error: TypeError: window.spark.remote.onHostKeyPrompt is not a function",
     );
-    const entry = (await log()).split("[error-boundary] caught render error:")[1];
+    const entries = (await log()).split("[error-boundary] caught render error:");
+    expect(entries, "one crash, one entry").toHaveLength(2);
+    const entry = entries[1];
     expect(entry, "the stack").toMatch(/\n\s+at .+:\d+:\d+/);
     expect(entry, "the component stack").toMatch(/Component stack:\s*\n\s+at /);
 
