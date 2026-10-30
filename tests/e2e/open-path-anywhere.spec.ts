@@ -213,8 +213,8 @@ test("Quick Open resolves a typed path: hidden folders, files, drilling in, no m
     await fifth.input.fill("~/no-such-folder/x");
     await expect(fifth.dialog.getByText("No such folder.")).toBeVisible({ timeout: 10_000 });
 
-    // A slash that names nothing here is a text search, as it always was.
-    await fifth.input.fill("/src/index");
+    // A slash that names nothing on disk is a text search, as it always was.
+    await fifth.input.fill("/index.ts");
     await expect(fifth.dialog.getByRole("button", { name: /^index\.ts/ })).toBeVisible({ timeout: 10_000 });
 
     // The workspace's folder is reachable with ./ too.

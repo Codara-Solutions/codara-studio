@@ -189,9 +189,9 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile, onOpen
   const homeHits = homeVisible ? home.hits : [];
   const pathSettled = !pathMode || (pathResult.query === scoredQuery && pathResult.status !== "searching");
   const homeSettled = pathMode ? pathSettled : !homeVisible || (home.query === scoredQuery && home.status !== "searching");
-  // "/src/app" may be a path or a piece of one in the workspace: when no such
-  // folder exists it is searched as text, as it always was.
-  const pathFellThrough = pathMode && pathSettled && pathResult.missing && scoredQuery.trimStart().startsWith("/");
+  // "/index.ts" may be a path or a piece of one in the workspace: when nothing
+  // on disk answers to it, it is searched as text, as it always was.
+  const pathFellThrough = pathMode && pathSettled && pathResult.hits.length === 0 && scoredQuery.trimStart().startsWith("/");
   const shownRows = pathMode && !pathFellThrough ? EMPTY_ROWS : rows;
   const pathHits = pathMode ? pathResult.hits : EMPTY_PATH_HITS;
 
