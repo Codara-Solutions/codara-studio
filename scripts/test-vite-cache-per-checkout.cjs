@@ -55,6 +55,8 @@ async function main() {
 
   execFileSync("git", ["check-ignore", "-q", ".vite-cache/deps/_metadata.json"], { cwd: ROOT, stdio: "ignore" });
 
+  const electronStub = path.join(TMP, "electron-stub.cjs");
+  fs.writeFileSync(electronStub, "module.exports = { app: { getPath: () => '', isPackaged: false }, shell: {} };\n");
   const fsTreeBundle = path.join(TMP, "fs-tree.cjs");
   esbuild.buildSync({
     entryPoints: [path.join(ROOT, "src/main/fs-tree.ts")],
@@ -64,8 +66,8 @@ async function main() {
     format: "cjs",
     target: "node22",
     logLevel: "silent",
-    external: ["electron"],
-    alias: { "@shared": path.join(ROOT, "src", "shared") },
+    loader: { ".node": "empty" },
+    alias: { "@shared": path.join(ROOT, "src", "shared"), electron: electronStub },
   });
   fs.mkdirSync(path.join(second, ".vite-cache", "deps"), { recursive: true });
   fs.writeFileSync(path.join(second, ".vite-cache", "deps", "react.js"), "");
