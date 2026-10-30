@@ -13,6 +13,7 @@ import {
   type WebContents,
 } from "electron";
 import { logMain } from "./file-log";
+import { errorBoundaryLogEntry } from "@shared/error-boundary";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -1112,6 +1113,10 @@ function createWindow(): void {
   );
   mainWindow.webContents.on("preload-error", (_e, preloadPath, error) => {
     console.error("[main] preload error", preloadPath, error);
+  });
+  mainWindow.webContents.on("console-message", (details) => {
+    const entry = errorBoundaryLogEntry(details.level, details.message);
+    if (entry) logMain("error-boundary", entry);
   });
 
   // The renderer entry is loaded through loadURL(pathToFileURL(...)) rather than

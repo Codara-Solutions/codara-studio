@@ -62,7 +62,9 @@ export function useHomeFileSearch(
   useEffect(() => {
     if (open) return;
     seqRef.current += 1;
-    void window.spark.fs.cancelHomeSearch().catch(() => undefined);
+    // Runs on mount, and the panel is always mounted: a preload that predates
+    // this call under `npm run dev` must not take the window down.
+    void window.spark.fs.cancelHomeSearch?.().catch(() => undefined);
   }, [open]);
 
   return state;

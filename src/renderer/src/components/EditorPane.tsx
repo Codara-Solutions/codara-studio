@@ -128,7 +128,10 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   useEffect(() => {
     if (nameSecret) return;
     let live = true;
-    window.spark.fs.isSecretFile(path).then(
+    // Every file tab runs this as it mounts, so a preload that predates it
+    // under `npm run dev` must not throw; no answer means secret, as a failed
+    // check does.
+    (window.spark.fs.isSecretFile?.(path) ?? Promise.resolve(true)).then(
       (secret) => live && setDiskSecret({ path, round: secretRound, secret }),
       () => live && setDiskSecret({ path, round: secretRound, secret: true }),
     );
