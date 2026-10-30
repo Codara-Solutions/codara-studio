@@ -14,6 +14,10 @@ export const PATH_RESULT_LIMIT = 200;
 // A huge folder is cut off rather than filtered whole on every keystroke; a
 // name typed in full is still found.
 const MAX_ENTRIES_SCANNED = 5_000;
+// Reading names is cheap until there are millions of them, when building the
+// list alone would stall main. A folder's own size gives that away (about 40
+// bytes an entry on ext4, more elsewhere): past this it is not listed at all.
+const MAX_FOLDER_BYTES = 32 * 1024 * 1024;
 const LIST_TIMEOUT_MS = 2_500;
 const OPEN_TIMEOUT_MS = 1_500;
 
@@ -228,6 +232,7 @@ export interface PathSearchOptions {
   signal?: AbortSignal;
   limit?: number;
   maxEntries?: number;
+  maxFolderBytes?: number;
   timeoutMs?: number;
   /** Stands in for the disk in the unit suite. */
   fs?: PathListFs;
@@ -261,9 +266,12 @@ async function listFolder(
   const hits: PathQueryHit[] = [];
 
   let real: string;
+  let folderBytes: number;
   try {
     real = await fs.realpath(parsed.folder);
-    if (!(await fs.stat(real)).isDirectory()) return { hits: [], truncated: false, missing: true };
+    const stat = await fs.stat(real);
+    if (!stat.isDirectory()) return { hits: [], truncated: false, missing: true };
+    folderBytes = stat.size;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "ENOENT" || code === "ENOTDIR") return { hits: [], truncated: false, missing: true };
@@ -289,15 +297,23 @@ async function listFolder(
   }
 
   let names: string[];
-  try {
-    names = await fs.readdir(real);
-  } catch {
-    return { hits, truncated: false, message: "That folder cannot be read." };
+  let truncated = false;
+  if (folderBytes > (opts.maxFolderBytes ?? MAX_FOLDER_BYTES)) {
+    // Only a name typed in full can be answered without the list.
+    truncated = true;
+    const typed = prefix && (await fs.stat(path.join(real, prefix)).then(() => true, () => false));
+    names = typed ? [prefix] : [];
+  } else {
+    try {
+      names = await fs.readdir(real);
+    } catch {
+      return { hits, truncated: false, message: "That folder cannot be read." };
+    }
   }
   if (signal.aborted) return { hits: [], truncated: false, cancelled: true };
-  let truncated = names.length > maxEntries;
-  const scanned = truncated ? names.slice(0, maxEntries) : names;
-  if (truncated && prefix && !scanned.includes(prefix) && names.includes(prefix)) scanned.push(prefix);
+  truncated ||= names.length > maxEntries;
+  const scanned = names.length > maxEntries ? names.slice(0, maxEntries) : names;
+  if (scanned !== names && prefix && !scanned.includes(prefix) && names.includes(prefix)) scanned.push(prefix);
 
   const found: Candidate[] = [];
   for (const name of scanned) {

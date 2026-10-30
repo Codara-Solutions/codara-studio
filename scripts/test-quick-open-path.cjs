@@ -226,6 +226,16 @@ async function main() {
     const typed = await search(`~/big/${last}`, { maxEntries: 3 });
     assert.equal(typed.hits[0].path, path.join(home, "big", last));
     assert.equal(typed.hits[0].kind, "exact");
+
+    // A giant folder is never enumerated, and a name typed in full still works.
+    const noReaddir = { ...fs.promises, readdir: () => assert.fail("a giant folder is not read") };
+    const giant = await search("~/big/", { fs: noReaddir, maxFolderBytes: 1 });
+    assert.deepEqual(names(giant), ["big"]);
+    assert.equal(giant.truncated, true);
+    const named = await search(`~/big/${last}`, { fs: noReaddir, maxFolderBytes: 1 });
+    assert.equal(named.hits[0].path, path.join(home, "big", last));
+    assert.equal(named.hits[0].kind, "exact");
+    assert.deepEqual(await search("~/big/nope", { fs: noReaddir, maxFolderBytes: 1 }), { hits: [], truncated: true });
   });
 
   await check("a listing touches names only, in the one folder", async () => {
