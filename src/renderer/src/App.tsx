@@ -6130,7 +6130,7 @@ export default function App() {
     () => buildBindingTable(shortcutPreferences.keybindings),
     [shortcutPreferences.keybindings],
   );
-  useGlobalShortcuts(bindingTable, shortcutHandlers, {
+  const runShortcutCommand = useGlobalShortcuts(bindingTable, shortcutHandlers, {
     // While the Keybindings settings recorder is active, suppress all
     // shortcuts so chords like Ctrl+Tab can be captured for rebinding
     // instead of triggering their currently bound command.
@@ -6210,6 +6210,13 @@ export default function App() {
       );
     },
   });
+
+  // A desktop-wide Ctrl+T reaches Studio through the desktop command socket
+  // instead of the keyboard (src/main/desktop-command-socket.ts).
+  useEffect(
+    () => window.spark.windowControls.onDesktopNewTerminal(() => runShortcutCommand("tab.newTerminal")),
+    [runShortcutCommand],
+  );
 
   // Resolved keybind hints for the tab-strip "+" picker. Derived from the
   // effective binding table so the menu always shows the user's actual chord

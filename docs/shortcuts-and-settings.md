@@ -242,6 +242,37 @@ rebindable command; editors and terminals keep their own Mod+F.
 On macOS, Electron's default menu also binds Cmd+M to Minimize; rebind
 `agent.cycleModel` if the window minimizes instead.
 
+### From a desktop shortcut (Linux)
+
+A desktop-wide shortcut on the same chord as a Studio command takes the key
+before Studio sees it, and a key typed back by a tool such as `wtype` may not
+reach a native Wayland window. So on Linux a script can ask Studio directly
+for what Mod+T does:
+
+```python
+import os, socket
+
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+    client.settimeout(0.5)
+    client.connect(os.path.expanduser("~/.codarastudio/desktop-command.sock"))
+    client.sendall(b"new-terminal\n")
+    reply = client.recv(64)
+```
+
+`new-terminal` is the only command. It runs `tab.newTerminal` under the same
+rules as the chord, whatever the chord is bound to. The reply is one line:
+
+| Reply | Meaning |
+|---|---|
+| `opened` | The tab opened. |
+| `ignored` | Studio refused, as it refuses the chord: a modal dialog such as Settings is open. |
+| `unavailable` | Studio is running but its window did not answer. |
+| `unknown-command` | Anything but `new-terminal` was sent. Nothing ran. |
+
+A connection error means Studio is not running or is an older build, which is
+the script's cue to fall back. The socket file is in the Codara home with mode
+600, so only your user can reach it, and it opens no network port.
+
 ## Settings
 
 Open Settings with `Mod+,`. The sidebar groups the pages under App,

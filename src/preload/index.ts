@@ -1502,6 +1502,15 @@ const api = {
       ipcRenderer.on("window:open-automations", listener);
       return () => ipcRenderer.off("window:open-automations", listener);
     },
+    // Fired for the desktop command socket. The handler says whether the
+    // command ran, which main relays to the caller outside Studio.
+    onDesktopNewTerminal: (handler: () => boolean): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, reqId: string) => {
+        ipcRenderer.send("desktop-command:result", { reqId, ran: handler() });
+      };
+      ipcRenderer.on("desktop-command:new-terminal", listener);
+      return () => ipcRenderer.off("desktop-command:new-terminal", listener);
+    },
   },
   app: {
     /**
