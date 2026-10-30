@@ -266,11 +266,12 @@ rules as the chord, whatever the chord is bound to. The reply is one line:
 |---|---|
 | `opened` | The tab opened. |
 | `ignored` | Studio refused, as it refuses the chord: a modal dialog such as Settings is open. |
-| `unavailable` | Studio is running but its window did not answer. |
+| `unavailable` | Studio is running but its window did not answer in time. The tab may still open. |
 | `unknown-command` | Anything but `new-terminal` was sent. Nothing ran. |
 
-A connection error means Studio is not running or is an older build, which is
-the script's cue to fall back. The socket file is in the Codara home with mode
+A failed connect means Studio is not running or is an older build, which is
+the script's cue to fall back. Once the command is sent, do not fall back,
+whatever the reply: a slow Studio still acts on it. The socket file is in the Codara home with mode
 600, so only your user can reach it, and it opens no network port.
 
 ## Settings

@@ -120,9 +120,22 @@ async function main() {
     }
     assert.equal(calls, 5);
 
+    // A caller that sends and hangs up without reading still gets its tab, once.
+    await new Promise((resolve, reject) => {
+      const client = net.createConnection(socketPath, () => {
+        client.end("new-terminal\n", () => client.destroy());
+      });
+      client.on("close", resolve);
+      client.on("error", reject);
+    });
+    while (calls === 5) await new Promise((done) => setTimeout(done, 5));
+    assert.equal(calls, 6);
+    assert.equal(await send(socketPath, ["new-terminal\n"]), "opened\n");
+    assert.equal(calls, 7);
+
     // A caller that hangs up early runs nothing, and the socket keeps serving.
     assert.equal(await send(socketPath, ["new-term"], { closeAfter: true }), "");
-    assert.equal(calls, 5);
+    assert.equal(calls, 7);
 
     // A caller that stalls is dropped instead of holding a slot.
     assert.equal(

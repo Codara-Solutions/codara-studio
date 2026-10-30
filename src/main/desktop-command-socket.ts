@@ -9,8 +9,9 @@ import { createConnection, createServer, type Server, type Socket } from "node:n
 // Protocol: connect, write exactly "new-terminal\n", read one line, done.
 //   opened           the renderer ran the command
 //   ignored          the renderer refused it, as it refuses the chord (a modal
-//                    dialog is open), so the caller must not retry another way
-//   unavailable      no renderer answered
+//                    dialog is open)
+//   unavailable      no renderer answered in time; a slow one may still act,
+//                    so only a failed connect is a reason to try another way
 //   unknown-command  anything else was sent; nothing ran
 //
 // The socket lives in the Codara home (mode 0700) and is itself 0600, so only
