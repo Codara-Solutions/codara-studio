@@ -3353,7 +3353,10 @@ export function useTerminalSession({
         // still looks like one. See formatPaneExitLine.
         term.write(formatPaneExitLine(info));
         term.options.disableStdin = true;
-        onExitRef.current?.(info);
+        onExitRef.current?.({
+          ...info,
+          agentRecoverable: agentRunningRef.current && !!agentSessionRef.current?.sessionId,
+        });
         // In-place auto-resume: if an agent TUI was live in this pane when its
         // PTY died unexpectedly — NOT an app quit/reload (appTearingDown), and
         // NOT a clean TUI exit (a clean quit emits the alt-screen-leave the

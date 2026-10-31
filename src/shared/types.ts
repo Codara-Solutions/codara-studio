@@ -1712,6 +1712,9 @@ export interface PtyExitInfo {
   // Codara stopped an idle agent pane to save memory (agent hibernation).
   // The pane resumes the agent's session when the user opens it again.
   hibernated?: boolean;
+  // Renderer only: the pane's agent was live with a session to resume, so
+  // useTerminalSession may relaunch it in place. Never sent by main.
+  agentRecoverable?: boolean;
 }
 
 /** Main-owned, observation-only resource data for one live PTY session. */

@@ -413,8 +413,8 @@ function findLeafByPaneId(node: PaneNode, paneId: string): TerminalLeaf | null {
 // Anything else keeps the pane and its exit line: a non-zero status or signal
 // is a failure worth reading; sanctioned, hibernated and teardown exits are
 // Codara's own doing; Cora workers end through the run store; and a live agent
-// pointer means the shell died under a running agent, which useTerminalSession
-// may resume in place. Status 0 cannot prove the user typed `exit`: `exec true`
+// pointer or agentRecoverable means the shell died under a running agent, which
+// useTerminalSession may resume in place. Status 0 cannot prove the user typed `exit`: `exec true`
 // closes the pane too.
 function isCleanShellExit(leaf: TerminalLeaf, info?: PtyExitInfo): boolean {
   return (
@@ -424,6 +424,7 @@ function isCleanShellExit(leaf: TerminalLeaf, info?: PtyExitInfo): boolean {
     !isAppTearingDown() &&
     info.exitCode === 0 &&
     !info.signal &&
+    !info.agentRecoverable &&
     leaf.worker?.source !== "spark" &&
     !leaf.agentSession?.active
   );
@@ -6312,10 +6313,11 @@ export default function App() {
       // resumes it when shown (useTerminalSession wakeFromSleep).
       if (info?.hibernated) return;
       if (isCleanShellExit(leaf, info)) {
-        // closeTerminalPane reseeds a shell when it empties the workspace,
-        // which would hand back the terminal the user just left.
+        // No reseed: a fresh shell would hand back the terminal that just
+        // ended. The option covers split panes too, because two that exit
+        // before a render each still see a split here.
         if (tab.root.kind === "leaf") t.closeTab(tabId);
-        else t.closeTerminalPane(tabId, paneId);
+        else t.closeTerminalPane(tabId, paneId, { allowEmptyWorkspace: true });
         return;
       }
       // The shell died, taking any foreground agent with it — a pointer left
