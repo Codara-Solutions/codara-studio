@@ -17,6 +17,14 @@
 // `count` model requests, once `after` requests have passed. Modes: http429
 // http500 http401 cut hang empty. stub.requests holds every request seen.
 //
+// A summary request gets a narrative. stub.summaries([...]) queues how the next
+// ones behave: ok, bad (no sections), invented, huge, http500 or hang. Each ok
+// also ends stub.reportContext(n), which sets the input tokens every reply
+// claims, so a test can reach a threshold without sending that much text.
+//
+// A prompt with FAIL_COMMAND runs a failing command first, and one with
+// LARGE_OUTPUT prints five megabytes first.
+//
 // Model lists: stub.offer({ anthropic, codex }) sets what GET /v1/models and GET
 // /codex/models answer, in each provider's own shape. Without an offer both 404.
 // stub.listRequests holds every list request seen.
@@ -28,6 +36,22 @@ import { zstdDecompressSync } from "node:zlib";
 const control = { mode: "ok", count: null, after: 0 };
 const requests = [];
 const listRequests = [];
+const summaryQueue = [];
+let reportedContext = 120;
+const NARRATIVE = `## Goal
+Copy input.txt in upper case.
+
+## Progress
+### Done
+- [x] Read \`input.txt\`.
+
+## Proven and Claimed
+Proven: input.txt was read.
+Claimed: nothing.
+
+## Next Steps
+1. Finish the copy.
+`;
 const offers = { anthropic: null, codex: null };
 const id = (prefix) => `${prefix}_${randomUUID().replaceAll("-", "").slice(0, 20)}`;
 
@@ -74,15 +98,35 @@ function responsesView(body) {
 
 const findTool = (tools, name) => tools.find((tool) => tool.toLowerCase() === name) ?? null;
 
+function planSummary() {
+  const mode = summaryQueue.shift() ?? "ok";
+  if (mode === "bad") return { mode, text: "I could not do that." };
+  if (mode === "invented") return { mode, text: NARRATIVE.replace("`input.txt`", "`src/never-touched.ts`") };
+  if (mode === "huge") return { mode, text: `${NARRATIVE}${"padding ".repeat(50_000)}` };
+  if (mode === "ok") reportedContext = 120;
+  return { mode, text: NARRATIVE };
+}
+
 function plan(view) {
+  if (view.system.includes("context summarization assistant")) return planSummary();
   const lastUser = view.events.findLastIndex((event) => event.kind === "user");
   const prompt = lastUser >= 0 ? view.events[lastUser].text : "";
-  const results = view.events.slice(lastUser + 1).filter((event) => event.kind === "result");
-  const [read, write, finish] = ["read", "write", "submit_result"].map((name) => findTool(view.tools, name));
+  const allResults = view.events.slice(lastUser + 1).filter((event) => event.kind === "result");
+  const [read, write, finish, bash] = ["read", "write", "submit_result", "bash"].map((name) => findTool(view.tools, name));
+  const setup = prompt.includes("FAIL_COMMAND")
+    ? "echo SEEDED-ERROR-771 >&2; exit 7"
+    : prompt.includes("LARGE_OUTPUT")
+      ? "head -c 5000000 /dev/zero | tr '\\0' x"
+      : null;
+  const compacted = prompt.includes("# Session facts");
+  if (setup && !compacted && allResults.length === 0) return { tool: bash, input: { command: setup } };
+  // The setup command's result is not part of the copy.
+  const results = setup && !compacted ? allResults.slice(1) : allResults;
+  const copied = compacted && /## Files changed with write or edit\n\n- output\.txt/.test(prompt);
   if (prompt.includes("EMPTY_TEXT")) return { text: "" };
   if (prompt.includes("PLAIN_TEXT") || !read || !write) return { text: "STUB-FINAL: plain reply." };
-  if (results.length === 0) return { tool: read, input: { path: "input.txt" } };
-  if (results.length === 1) {
+  if (results.length === 0 && !copied) return { tool: read, input: { path: "input.txt" } };
+  if (results.length === 1 && !copied) {
     return { tool: write, input: { path: "output.txt", content: `${results[0].text.trim().toUpperCase()}\n` } };
   }
   if (finish && !prompt.includes("NO_SUBMIT")) {
@@ -103,7 +147,7 @@ function startSse(res) {
 }
 
 function anthropicStart(res, model) {
-  const usage = { input_tokens: 120, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  const usage = { input_tokens: reportedContext, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
   sse(res, "message_start", {
     type: "message_start",
     message: { id: id("msg"), type: "message", role: "assistant", model, content: [], stop_reason: null, stop_sequence: null, usage },
@@ -167,9 +211,9 @@ function streamResponses(res, step, model) {
       status: "completed",
       output: [item],
       usage: {
-        input_tokens: 120,
+        input_tokens: reportedContext,
         output_tokens: 30,
-        total_tokens: 150,
+        total_tokens: reportedContext + 30,
         input_tokens_details: { cached_tokens: 0 },
         output_tokens_details: { reasoning_tokens: 0 },
       },
@@ -212,9 +256,15 @@ async function handleModel(req, res, flavour) {
     apiKey: req.headers["x-api-key"] ?? null,
     thinking: body.thinking ?? body.reasoning ?? null,
     outputConfig: body.output_config ?? null,
-    events: view.events.map(({ kind, name, text }) => ({ kind, name, chars: text?.length ?? 0, text: text?.slice(0, 200) })),
+    events: view.events.map(({ kind, name, text }) => ({ kind, name, chars: text?.length ?? 0, text })),
     reply: step,
+    summary: view.system.includes("context summarization assistant"),
   });
+  if (step.mode === "http500") return jsonError(res, 500, "api_error", "stub server error");
+  if (step.mode === "hang") {
+    startSse(res);
+    return undefined;
+  }
   if (fault === "http429") return jsonError(res, 429, "rate_limit_error", "stub rate limit", { "retry-after": "0" });
   if (fault === "http500") return jsonError(res, 500, "api_error", "stub server error");
   if (fault === "http401") return jsonError(res, 401, "authentication_error", "stub invalid token");
@@ -258,11 +308,17 @@ export function startStubModel() {
         requests,
         listRequests,
         offer: (update) => Object.assign(offers, update),
+        summaries: (modes) => summaryQueue.push(...modes),
+        reportContext: (tokens) => {
+          reportedContext = tokens;
+        },
         control: (update) => Object.assign(control, { count: null, after: 0 }, update),
         reset: () => {
           requests.length = 0;
           listRequests.length = 0;
           Object.assign(offers, { anthropic: null, codex: null });
+          summaryQueue.length = 0;
+          reportedContext = 120;
           Object.assign(control, { mode: "ok", count: null, after: 0 });
         },
         close: () => {

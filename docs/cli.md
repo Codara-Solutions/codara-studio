@@ -75,6 +75,36 @@ or `--mcp-config FILE`, in `.mcp.json` format. A project's own `.mcp.json` does 
 start by itself, because it can run any command. For a custom endpoint, set
 `baseUrl` and `apiKey` in `models.json`, or set `CORA_BASE_URL`.
 
+### Compaction
+
+A long session is summarized between turns once its context passes 400,000 tokens,
+or sooner on a model whose window leaves less room: the limit is the window minus
+15%, with at least 32,768 tokens held back (`gpt-6-luna`, at 272,000, compacts at
+231,200). The run then continues by itself. `/compact [focus]` does it by hand in the
+terminal interface.
+
+The summary is checked before it replaces anything. Code rebuilds the facts from the
+session file every time: your messages word for word, files read and changed through
+the read, write and edit tools, failed commands with their errors, the session id and the
+folder. The model writes only the story around them. A summary with a required part missing, an invented file, or too
+large is retried once, and after that the session continues uncompacted with a warning.
+A kill during compaction changes nothing, so `cora resume` works. The full history stays
+in the session file.
+
+Plain runs print `cora: compacted 412k -> 31k` on stderr. `--json` emits
+`{"type":"compaction","status":"ok","reason":"threshold","tokensBefore":412000,"tokensAfter":31000}`,
+or `"status":"failed"` with `error`, and `cora_result` carries a `compactions` count.
+
+`~/.cora/settings.json` only, never a project's settings:
+
+```json
+{ "compaction": { "atTokens": 400000, "keepRecentTokens": 40000, "timeoutMs": 180000 } }
+```
+
+`keepRecentTokens` is how much of the latest conversation stays word for word.
+`compaction.enabled: false` turns automatic compaction off. Project instructions and
+skills are sent whole with every request, so they are never summarized.
+
 ## Driving Studio: `cora studio`
 
 The remote commands below are all under `cora studio`. The CLI needs Node 22 or

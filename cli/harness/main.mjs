@@ -95,16 +95,19 @@ function parseArgs(argv) {
 }
 
 /** The one model a new session starts on. */
+function readSettings(home) {
+  try {
+    return JSON.parse(readFileSync(join(home, "settings.json"), "utf8"));
+  } catch {
+    return {};
+  }
+}
+
 function defaultModel(cli, routes, home, catalog) {
   if (cli.model) return resolveModel(cli.model, catalog);
   if (process.env.CORA_MODEL) return resolveModel(process.env.CORA_MODEL, catalog);
   if (cli.resume || cli.continue) return null;
-  let settings = {};
-  try {
-    settings = JSON.parse(readFileSync(join(home, "settings.json"), "utf8"));
-  } catch {
-    // No settings yet.
-  }
+  const settings = readSettings(home);
   if (settings.defaultProvider && settings.defaultModel) {
     return { provider: settings.defaultProvider, id: settings.defaultModel };
   }
@@ -340,6 +343,8 @@ async function runAgent(cli, pi, home) {
     last: null,
     sessionId: null,
     retries: 0,
+    compactions: 0,
+    json: Boolean(cli.json),
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     progress: exec && !cli.json && process.stderr.isTTY,
     streamTimeoutMs: pi.SettingsManager.create(process.cwd(), home).getHttpIdleTimeoutMs(),
@@ -347,6 +352,13 @@ async function runAgent(cli, pi, home) {
   if (exec) failIfUnfinished(run, cli.json);
   const effort = cli.effort ?? (resuming ? undefined : DEFAULT_EFFORT);
   const { coraExtension, coraSystemPrompt } = await import("./extension.mjs");
+  const { useCompactionSettings } = await import("./compaction.mjs");
+  const compaction = {
+    state: { window: 0 },
+    config: readSettings(home).compaction,
+    engine: { compact: pi.compact, estimateTokens: pi.estimateTokens },
+  };
+  useCompactionSettings(pi.SettingsManager, compaction.state, compaction.config);
   const args = [
     "--system-prompt", coraSystemPrompt({ exec }),
     ...piArguments(cli, model, effort, { exec, prompt }),
@@ -354,7 +366,7 @@ async function runAgent(cli, pi, home) {
   // Pi's own exit code misses most failures (--mode json always reports 0), so
   // the code set below decides.
   await pi.main(args, {
-    extensionFactories: [coraExtension(run, { exec, mcpConfig })],
+    extensionFactories: [coraExtension(run, { exec, mcpConfig, compaction })],
   });
   if (!exec) return;
 
@@ -379,6 +391,7 @@ async function runAgent(cli, pi, home) {
         summary: run.report?.summary ?? null,
         report: run.report,
         retries: run.retries,
+        compactions: run.compactions,
         usage: run.usage,
       })}\n`,
     );

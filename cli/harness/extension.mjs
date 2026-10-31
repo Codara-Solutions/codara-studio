@@ -1,9 +1,9 @@
 // The Pi extension behind `cora`: what Cora adds on top of Pi's agent loop.
 // The loop, tools, sessions, retries and terminal UI are all Pi's.
 
-import { registerContextCompaction } from "../../resources/pi-cora/compaction.ts";
 import { CORA_ENGINEERING_RULES, CORA_REPLY_LANGUAGE } from "../../resources/pi-cora/prompt.ts";
 import { loginName } from "./accounts.mjs";
+import { registerCompaction } from "./compaction.mjs";
 
 const REPORTED_STATUSES = ["complete", "partial", "blocked", "failed"];
 
@@ -106,10 +106,11 @@ function registerSubmitResult(pi, run) {
  * @param run  shared state the exec wrapper reads once Pi returns
  * @param options.exec  a one-shot run, which gets submit_result
  * @param options.mcpConfig  normalized MCP roster, or null
+ * @param options.compaction  { state, config, engine } for registerCompaction
  */
-export function coraExtension(run, { exec, mcpConfig }) {
+export function coraExtension(run, { exec, mcpConfig, compaction }) {
   return async (pi) => {
-    registerContextCompaction(pi);
+    registerCompaction(pi, run, { exec, ...compaction });
     if (exec) registerSubmitResult(pi, run);
 
     let lastStreamEvent = Date.now();

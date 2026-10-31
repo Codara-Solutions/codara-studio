@@ -552,6 +552,216 @@ test("a rejected login names the login command for this provider and is not retr
   assert.equal(stub.requests.length, 1);
 });
 
+// ── compaction ──────────────────────────────────────────────────────────────
+
+const compactionWorld = (compaction = {}, settings = {}) =>
+  makeWorld({ settings: { retry: { maxRetries: 0 }, compaction: { keepRecentTokens: 10, ...compaction }, ...settings } });
+const summaryRequests = () => stub.requests.filter((request) => request.summary);
+const workRequests = () => stub.requests.filter((request) => !request.summary);
+const sessionFile = (world) => {
+  const folder = join(world.home, "sessions");
+  return join(folder, readdirSync(folder)[0]);
+};
+const sessionEntries = (world) =>
+  readFileSync(sessionFile(world), "utf8")
+    .trim()
+    .split("\n")
+    .flatMap((line) => {
+      try {
+        return [JSON.parse(line)];
+      } catch {
+        return [];
+      }
+    });
+const compactions = (world) => sessionEntries(world).filter((entry) => entry.type === "compaction");
+
+test("compaction starts past 400k and not before, and the setting moves it", async () => {
+  for (const [tokens, count] of [[399_000, 0], [401_000, 1]]) {
+    stub.reset();
+    stub.reportContext(tokens);
+    const result = await cora(compactionWorld(), ["exec", "--model", "sonnet", "copy it"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(summaryRequests().length, count, `at ${tokens}`);
+  }
+  stub.reset();
+  stub.reportContext(51_000);
+  await cora(compactionWorld({ atTokens: 50_000 }), ["exec", "--model", "sonnet", "copy it"]);
+  assert.equal(summaryRequests().length, 1);
+  stub.reset();
+  stub.reportContext(410_000);
+  await cora(compactionWorld({ enabled: false }), ["exec", "--model", "sonnet", "copy it"]);
+  assert.equal(summaryRequests().length, 0);
+});
+
+test("a smaller window compacts at its own limit, leaving room for the summary", async () => {
+  // gpt-6-luna is 272k: 400k could never be reached.
+  for (const [tokens, count] of [[230_000, 0], [232_000, 1]]) {
+    stub.reset();
+    stub.reportContext(tokens);
+    await cora(compactionWorld(), ["exec", "--model", "luna", "copy it"]);
+    assert.equal(summaryRequests().length, count, `luna at ${tokens}`);
+  }
+  for (const [tokens, count] of [[66_000, 0], [68_000, 1]]) {
+    stub.reset();
+    stub.offer({ anthropic: offerClaude(["claude-sonnet-5-5", 100_000, 64_000]) });
+    stub.reportContext(tokens);
+    await cora(compactionWorld(), ["exec", "--model", "sonnet", "copy it"]);
+    assert.equal(summaryRequests().length, count, `100k window at ${tokens}`);
+  }
+});
+
+test("mid-run compaction continues the task with no new prompt and no re-reading", async () => {
+  const world = compactionWorld();
+  writeFileSync(join(world.project, "AGENTS.md"), "PROJECT-RULE-MARKER\n");
+  stub.reportContext(410_000);
+  const result = await cora(world, ["exec", "--model", "sonnet", "--json", "copy it"]);
+  assert.equal(result.status, 0, result.stderr);
+  const final = resultOf(result.stdout);
+  assert.equal(final.status, "complete");
+  assert.equal(final.compactions, 1);
+  assert.equal(readFileSync(join(world.project, "output.txt"), "utf8"), "HELLO\n");
+  assert.deepEqual(workRequests().map((request) => request.reply.tool?.toLowerCase()), ["read", "write", "submit_result"]);
+  const after = stub.requests.findIndex((request) => request.summary) + 1;
+  assert.match(stub.requests[after].system, /PROJECT-RULE-MARKER/);
+  const handoff = userTexts(stub.requests[after])[0].text;
+  assert.match(handoff, /Do not greet, restate the task/);
+  assert.equal(userTexts(stub.requests[after]).length, 1);
+  assert.deepEqual(stub.requests[after].events.at(-1).kind, "result");
+  const event = events(result.stdout).find((line) => line.type === "compaction");
+  assert.equal(event.status, "ok");
+  assert.equal(event.reason, "threshold");
+  assert.ok(event.tokensBefore > 400_000);
+  assert.ok(event.tokensAfter < event.tokensBefore);
+
+  stub.reset();
+  stub.reportContext(410_000);
+  const plain = await cora(compactionWorld(), ["exec", "--model", "sonnet", "copy it"]);
+  assert.equal(plain.stderr.match(/compacted/g)?.length, 1);
+  assert.match(plain.stderr, /cora: compacted 410k -> \d+k\n/);
+});
+
+test("code-built facts survive two compactions in a row", async () => {
+  const world = compactionWorld();
+  stub.reportContext(410_000);
+  const first = await cora(world, ["exec", "--model", "sonnet", "--json", "copy it SEED-USER-FACT FAIL_COMMAND"]);
+  assert.equal(first.status, 0, first.stderr);
+  const { sessionId } = resultOf(first.stdout);
+  assert.equal(compactions(world).length, 1);
+  stub.reportContext(410_000);
+  const second = await cora(world, ["exec", "--resume", sessionId, "--json", "copy it again SECOND-MESSAGE"]);
+  assert.equal(second.status, 0, second.stderr);
+  const stored = compactions(world);
+  assert.equal(stored.length, 2);
+  for (const fact of ["copy it SEED-USER-FACT FAIL_COMMAND", "SEEDED-ERROR-771", "exit 7", sessionId, world.project, "input.txt", "output.txt"]) {
+    assert.ok(stored[1].summary.includes(fact), `lost after two compactions: ${fact}`);
+  }
+  assert.match(summaryRequests()[0].events[0].text, /shortened for this summary only/);
+  // One long turn reaches the summary whole, from its first tool result on.
+  assert.match(summaryRequests()[0].events[0].text, /\[Tool result\]: SEEDED-ERROR-771/);
+  // The kept turn is the latest work, and the story has to reach it.
+  const keptTool = sessionEntries(world).find((entry) => entry.id === stored[0].firstKeptEntryId).message.content.find(({ type }) => type === "toolCall");
+  assert.ok(summaryRequests()[0].events[0].text.includes(`[Assistant tool calls]: ${keptTool.name}(`), keptTool.name);
+  // The model is given its last narrative, never the fact sheet to rewrite.
+  const request = summaryRequests().at(-1).events[0].text;
+  assert.match(request, /<previous-summary>\n## Goal/);
+  assert.doesNotMatch(request.split("<previous-summary>")[1], /# Session facts/);
+});
+
+test("a rejected summary is retried once, and the retry is told why", async () => {
+  for (const [mode, reason] of [["bad", /no "## Goal" section/], ["invented", /src\/never-touched\.ts/], ["huge", /over the \d+k target/]]) {
+    stub.reset();
+    stub.summaries([mode, "ok"]);
+    stub.reportContext(410_000);
+    const world = compactionWorld();
+    const result = await cora(world, ["exec", "--model", "sonnet", "copy it"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(summaryRequests().length, 2, mode);
+    assert.match(summaryRequests()[1].events[0].text, reason);
+    assert.equal(compactions(world).length, 1, mode);
+  }
+});
+
+test("a summary that keeps failing leaves the run going, with one clear warning", async () => {
+  for (const mode of ["bad", "http500"]) {
+    stub.reset();
+    stub.summaries([mode, mode]);
+    stub.reportContext(410_000);
+    const world = compactionWorld();
+    const result = await cora(world, ["exec", "--model", "sonnet", "--json", "copy it FAIL_COMMAND"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(resultOf(result.stdout).status, "complete");
+    assert.equal(summaryRequests().length, 2, `${mode} tried again on a later turn`);
+    assert.equal(compactions(world).length, 0);
+    assert.equal(result.stderr.match(/compaction failed/g)?.length, 1);
+    assert.match(result.stderr, /continuing with the full context/);
+    assert.equal(events(result.stdout).find((line) => line.type === "compaction").status, "failed");
+    assert.equal(readFileSync(join(world.project, "output.txt"), "utf8"), "HELLO\n");
+  }
+  stub.reset();
+  stub.summaries(["hang", "hang"]);
+  stub.reportContext(410_000);
+  const hung = await cora(compactionWorld({ timeoutMs: 500 }), ["exec", "--model", "sonnet", "copy it"]);
+  assert.equal(hung.status, 0, hung.stderr);
+  assert.match(hung.stderr, /compaction failed/);
+});
+
+test("a kill during compaction leaves a session that resumes with nothing lost", async () => {
+  const world = compactionWorld();
+  stub.summaries(["hang"]);
+  stub.reportContext(410_000);
+  const child = spawn(process.execPath, [CLI, "exec", "--model", "sonnet", "--json", "copy it SEED-USER-FACT"], {
+    cwd: world.project,
+    env: world.env,
+    stdio: "ignore",
+  });
+  const exited = new Promise((resolve) => child.on("exit", resolve));
+  const started = Date.now();
+  while (summaryRequests().length === 0) {
+    assert.ok(Date.now() - started < 20_000, "compaction never started");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  child.kill("SIGKILL");
+  await exited;
+  const before = sessionEntries(world);
+  assert.equal(before.filter((entry) => entry.type === "compaction").length, 0);
+  const toolResults = before.filter((entry) => entry.message?.role === "toolResult").length;
+  assert.ok(toolResults > 0);
+  // A kill can also tear the line being written.
+  writeFileSync(sessionFile(world), `${readFileSync(sessionFile(world), "utf8")}{"type":"compaction","summ`);
+  const sessionId = before[0].id;
+  stub.reset();
+  const result = await cora(world, ["exec", "--resume", sessionId, "--json", "PLAIN_TEXT carry on"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(resultOf(result.stdout).sessionId, sessionId);
+  // The session is still over the limit, so it compacts first, this time whole.
+  const after = sessionEntries(world);
+  assert.equal(after.filter((entry) => entry.message?.role === "toolResult").length, toolResults);
+  const [compaction, extra] = compactions(world);
+  assert.equal(extra, undefined);
+  assert.match(compaction.summary, /copy it SEED-USER-FACT/);
+  assert.match(userTexts(workRequests()[0])[0].text, /copy it SEED-USER-FACT/);
+});
+
+test("a very large last tool output leaves the context under its target", async () => {
+  const world = compactionWorld({}, {});
+  stub.reportContext(410_000);
+  const result = await cora(world, ["exec", "--model", "sonnet", "--json", "copy it LARGE_OUTPUT"]);
+  assert.equal(result.status, 0, result.stderr);
+  const event = events(result.stdout).find((line) => line.type === "compaction");
+  assert.equal(event.status, "ok");
+  assert.ok(event.tokensAfter < 60_000, `after: ${event.tokensAfter}`);
+  assert.ok(stub.requests.some((request) => request.events.some(({ kind, text }) => kind === "result" && text?.length > 40_000)));
+  assert.equal(resultOf(result.stdout).status, "complete");
+});
+
+test("a run that has finished spends nothing on a summary", async () => {
+  stub.reportContext(410_000);
+  const result = await cora(compactionWorld(), ["exec", "--model", "sonnet", "PLAIN_TEXT hi"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(summaryRequests().length, 0);
+  assert.doesNotMatch(result.stderr, /compact/);
+});
+
 // ── prompts ─────────────────────────────────────────────────────────────────
 
 test("word choice does not change behaviour", async () => {
@@ -861,9 +1071,9 @@ test("a project's .mcp.json is not started on its own", async () => {
 
 // ── interactive ─────────────────────────────────────────────────────────────
 
-test("cora opens Pi's terminal interface in a real terminal", async () => {
+test("cora opens Pi's terminal interface in a real terminal, and /compact takes a focus", async () => {
   if (spawnSync("script", ["--version"]).status !== 0) return "SKIP: util-linux script is not installed";
-  const world = makeWorld();
+  const world = makeWorld({ settings: { compaction: { keepRecentTokens: 10 } } });
   const child = spawn(
     "script",
     ["-qfec", `stty cols 100 rows 30; exec ${process.execPath} ${CLI} --model sonnet`, "/dev/null"],
@@ -896,8 +1106,19 @@ test("cora opens Pi's terminal interface in a real terminal", async () => {
   try {
     await until(() => output.includes("claude-sonnet-5-5"), "the footer");
     await settle();
-    await type("PLAIN_TEXT hello");
+    await type("PLAIN_TEXT hello input.txt");
     await until(() => output.includes("STUB-FINAL"), "the reply");
+    await settle();
+    await type("PLAIN_TEXT again");
+    await until(() => workRequests().length === 2, "the second request");
+    await until(() => output.split("STUB-FINAL").length > 2, "the second reply");
+    await settle();
+    stub.summaries(["bad", "bad"]);
+    await type("/compact FOCUS-MARKER");
+    await until(() => output.includes("compaction failed"), "the failure");
+    await settle();
+    await type("/compact FOCUS-MARKER");
+    await until(() => output.includes("Compacted from"), "the compaction line");
     await settle();
     await type("/quit");
     assert.equal(await exited, 0);
@@ -911,6 +1132,7 @@ test("cora opens Pi's terminal interface in a real terminal", async () => {
   }
   assert.match(stub.requests[0].system, /You are Cora/);
   assert.equal(stub.requests[0].tools.some((tool) => /submit_result/i.test(tool)), false);
+  assert.match(summaryRequests().at(-1).events[0].text, /Focus on this: FOCUS-MARKER/);
   return undefined;
 });
 
