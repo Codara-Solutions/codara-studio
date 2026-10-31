@@ -98,6 +98,12 @@ class FakeChannel extends EventEmitter {
     this.closed = true;
     this.emit("close");
   }
+  /** sshd reports a signal death, as ssh2 passes it on: no code, then the name. */
+  dieBySignal(signal = "SIGTERM") {
+    this.emit("exit", null, signal, false, "");
+    this.closed = true;
+    this.emit("close");
+  }
   /** The connection under it dropped: close without an exit status. */
   drop() {
     this.closed = true;
@@ -338,13 +344,47 @@ function harness(lib, overrides = {}) {
   }
 
   {
-    const h = harness(lib, { agentPane: false, reportExitStatus: false });
-    h.first.exitShell(130);
-    assert.deepEqual(h.exits, [{ exitCode: 0 }]);
-    const h2 = harness(lib, { agentPane: false });
-    h2.first.exitShell(130);
-    assert.deepEqual(h2.exits, [{ exitCode: 130 }]);
-    ok("a plain shell reports exit 0 unless asked for its real status");
+    const off = harness(lib, { agentPane: false, reportExitStatus: false });
+    off.first.exitShell(3);
+    assert.deepEqual(off.exits, [{ exitCode: 3 }], "Machines off keeps a failure: 0 would close the pane");
+    const clean = harness(lib, { agentPane: false, reportExitStatus: false });
+    clean.first.exitShell(0);
+    assert.deepEqual(clean.exits, [{ exitCode: 0 }]);
+    const dropped = harness(lib, { agentPane: false, reportExitStatus: false });
+    dropped.first.drop();
+    assert.deepEqual(dropped.exits, [{ exitCode: -1 }]);
+    const on = harness(lib, { agentPane: false });
+    on.first.exitShell(130);
+    assert.deepEqual(on.exits, [{ exitCode: 130 }]);
+    ok("a plain shell reports its own status with Machines on or off");
+  }
+
+  {
+    const off = harness(lib, { agentPane: false, reportExitStatus: false });
+    off.handle.kill();
+    off.first.exitShell(129);
+    assert.deepEqual(off.exits, [{ exitCode: 0 }], "the hangup of a kill is no crash");
+    const on = harness(lib, { agentPane: false });
+    on.handle.kill();
+    on.first.exitShell(129);
+    assert.deepEqual(on.exits, [{ exitCode: 129 }]);
+    ok("a pane Studio killed reports 0 with Machines off");
+  }
+
+  {
+    for (const overrides of [{ agentPane: false }, { agentPane: false, reportExitStatus: false }, { agentPane: true }]) {
+      const h = harness(lib, overrides);
+      h.first.dieBySignal("SIGKILL");
+      assert.deepEqual(h.exits, [{ exitCode: -1 }], "a signal death is no clean exit");
+      assert.equal(h.conn.execs.length, 0, "a shell that died on the machine is not reconnected");
+    }
+    assert.equal(lib.remoteExitStatus(0), 0);
+    assert.equal(lib.remoteExitStatus(3), 3);
+    assert.equal(lib.remoteExitStatus(null), -1, "the early listener in pty-manager reads the same way");
+    const early = harness(lib, { agentPane: false, closedBeforeBind: { exitCode: lib.remoteExitStatus(null) } });
+    await until("the exit", () => early.exits.length === 1);
+    assert.deepEqual(early.exits, [{ exitCode: -1 }]);
+    ok("an ssh signal death reports -1, never 0");
   }
 
   {

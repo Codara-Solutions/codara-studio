@@ -1430,7 +1430,7 @@ export interface UseTabsApi {
   // workspace/tab so cross-workspace cleanup can target the right layout.
   findTerminalPaneInInactiveWorkspaces: (
     paneId: string,
-  ) => { workspaceId: string; tabId: TabId } | null;
+  ) => { workspaceId: string; tabId: TabId; leaf: TerminalLeaf } | null;
   // Flip `zoomedPaneId` for a tab: sets it to `paneId` if currently null or a
   // different pane, clears it if `paneId` is already the zoomed one. Stored
   // on the tab so it persists across tab switches.
@@ -3181,12 +3181,13 @@ export function useTabs(
 
   // See UseTabsApi: resolve which hidden workspace/tab owns a pane id.
   const findTerminalPaneInInactiveWorkspaces = useCallback(
-    (paneId: string): { workspaceId: string; tabId: TabId } | null => {
+    (paneId: string): { workspaceId: string; tabId: TabId; leaf: TerminalLeaf } | null => {
       for (const [workspaceId, layout] of liveWorkspaceTabsRef.current) {
         if (workspaceId === tabsWorkspaceIdRef.current) continue;
         for (const t of layout.tabs) {
           if (t.kind !== "terminal") continue;
-          if (findLeaf(t.root, paneId)) return { workspaceId, tabId: t.id };
+          const leaf = findLeaf(t.root, paneId);
+          if (leaf) return { workspaceId, tabId: t.id, leaf };
         }
       }
       return null;

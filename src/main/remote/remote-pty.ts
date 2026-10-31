@@ -64,8 +64,10 @@ export interface RemotePtyInput {
   endAgentOnKill: () => boolean;
   log?: (message: string) => void;
   /**
-   * The shell's own exit status for a plain shell pane. Off, the pane
-   * reports 0, as remote panes did before Machines.
+   * Whether a plain shell pane Studio killed reports the status its dying
+   * shell left. Off, it reports 0, as remote panes did before Machines, so the
+   * hangup never reads as a crash. A shell that ends by itself always reports
+   * its own status: 0 closes the pane, so a failure must not turn into it.
    */
   reportExitStatus?: boolean;
   /** Waits between reconnect attempts; the last one repeats. */
@@ -88,6 +90,15 @@ const pendingAgentKills = new Map<string, Promise<void>>();
 
 export function remoteAgentKillSettled(paneId: string): Promise<void> {
   return pendingAgentKills.get(paneId) ?? Promise.resolve();
+}
+
+/**
+ * The status of ssh2's channel "exit" event: (code) for an exit status,
+ * (null, "SIGTERM", ...) for a signal. -1 for a signal, because 0 would close
+ * the pane like a clean exit.
+ */
+export function remoteExitStatus(code: unknown): number {
+  return typeof code === "number" ? code : -1;
 }
 
 function needsUser(err: unknown): boolean {
@@ -130,15 +141,18 @@ export function createRemotePtyHandle(input: RemotePtyInput): RemotePtyHandle {
     // ssh2 reports the remote shell's exit status before the close; a
     // dropped connection closes the channel without one.
     ch.on("exit", (code: unknown) => {
-      exitCode = typeof code === "number" ? code : 0;
+      exitCode = remoteExitStatus(code);
     });
     const onClose = () => {
       if (ch !== channel || ended) return;
-      if (killed || exitCode !== null || !input.agentPane || conn.isDisposed) {
+      if (killed) {
+        finish(input.agentPane || input.reportExitStatus !== false ? (exitCode ?? 0) : 0);
+        return;
+      }
+      if (exitCode !== null || !input.agentPane || conn.isDisposed) {
         // No exit status means the connection went away, not the user's
         // `exit`: -1 keeps the pane, where 0 would close it like a clean exit.
-        if (exitCode === null && !killed) finish(-1);
-        else finish(input.agentPane || input.reportExitStatus !== false ? (exitCode ?? 0) : 0);
+        finish(exitCode ?? -1);
         return;
       }
       channel = null;

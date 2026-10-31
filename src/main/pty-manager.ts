@@ -34,7 +34,7 @@ import {
   buildRemoteAgentProbe,
   remoteAgentRuntime,
 } from "./remote/remote-agents";
-import { createRemotePtyHandle, remoteAgentKillSettled, type RemotePtyHandle } from "./remote/remote-pty";
+import { createRemotePtyHandle, remoteAgentKillSettled, remoteExitStatus, type RemotePtyHandle } from "./remote/remote-pty";
 import { loadPreferences } from "./preferences-store";
 import {
   formatManualAgentStartup,
@@ -1057,7 +1057,7 @@ async function doSpawnRemote(
       // The handle binds after the probe: a close in between must not be lost.
       let exitCode: number | null = null;
       const onExit = (code: unknown) => {
-        exitCode = typeof code === "number" ? code : 0;
+        exitCode = remoteExitStatus(code);
       };
       const onClose = () => {
         closedEarly = { exitCode };
