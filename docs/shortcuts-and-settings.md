@@ -17,8 +17,9 @@ a chord you already use.
 
 Inside a browser tab the page gets a chord first, as in a browser. Codara
 runs its own command only when the page did not handle the chord, so a site
-whose Mod+K opens its own search keeps it. Mod+W, Mod+T and Ctrl+Tab always
-stay Codara's. Keys an agent sends to a page never trigger Codara's shortcuts.
+whose Mod+K opens its own search keeps it. Mod+W, Mod+T, Ctrl+Tab and
+Ctrl+PageDown / Ctrl+PageUp always stay Codara's. Keys an agent sends to a page
+never trigger Codara's shortcuts.
 
 ### General
 
@@ -187,7 +188,8 @@ agent CLI alike: through the panes of a split tab from left to right (top to
 bottom in a vertical split), then on to the next terminal tab, back to the
 first after the last. Chats, editors and browsers are skipped, and so are
 Cora worker tabs and tabs in a collapsed group. From a chat or editor it goes
-to the first terminal to its right. Ctrl+Shift+Tab walks the same order but
+to the first terminal to its right. In a tab with a zoomed pane the zoom moves
+to the pane it lands on. Ctrl+Shift+Tab walks the same order but
 carries on into the next workspace in the rail instead of wrapping, covering
 every workspace opened since Codara started. Claude Code's mode switch is
 Shift+Tab without Ctrl and still reaches the CLI. Tab cycling is on

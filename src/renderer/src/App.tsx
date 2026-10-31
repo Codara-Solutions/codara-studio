@@ -3036,6 +3036,11 @@ export default function App() {
       return;
     }
     t.setActiveTab(tab.id);
+    // Behind the tab's zoom the pane is display:none and would take the
+    // keyboard out of sight, so the zoom moves to it.
+    if (tab.zoomedPaneId && tab.zoomedPaneId !== target.paneId) {
+      t.toggleTerminalPaneZoom(tab.id, target.paneId);
+    }
     t.setActiveTerminalPane(tab.id, target.paneId);
   }, []);
 
@@ -4289,8 +4294,7 @@ export default function App() {
     focusTerminalTarget,
   });
 
-  // What the jump palette and the recent-terminal switcher list, read when
-  // they open.
+  // What the jump palette lists and Ctrl+Tab steps through, read when used.
   const jumpSources = (): JumpSources => ({
     workspaces: workspaceRailSequence(workspaces, workspaceGroups, workspaceRailOrder, {
       includeCollapsed: true,

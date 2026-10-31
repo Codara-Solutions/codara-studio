@@ -41,7 +41,7 @@ export function terminalStops(sources: JumpSources, scope: TerminalSwitchScope):
 /**
  * The stop after the pane on screen. From a chat, editor or browser tab it is
  * the first terminal to its right in the same workspace, else the first one
- * after it in the list. Null when there is nowhere else to go.
+ * in a later workspace in rail order. Null when there is nowhere else to go.
  */
 export function nextTerminalStop(sources: JumpSources, scope: TerminalSwitchScope): TerminalStop | null {
   const stops = terminalStops(sources, scope);
@@ -58,10 +58,9 @@ export function nextTerminalStop(sources: JumpSources, scope: TerminalSwitchScop
   if (at >= 0) return stops.length > 1 ? stops[(at + 1) % stops.length] : null;
   const right = stops.findIndex((stop) => stop.workspaceId === workspaceId && stop.tabIndex > activeIndex);
   if (right >= 0) return stops[right];
-  // Past the workspace's last terminal: the stop that follows it, wrapping.
-  let last = -1;
-  stops.forEach((stop, index) => {
-    if (stop.workspaceId === workspaceId) last = index;
-  });
-  return stops[(last + 1) % stops.length];
+  // Past the workspace's last terminal, or in a workspace with none: on along
+  // the rail from this workspace's place, wrapping only past the rail's end.
+  const here = sources.workspaces.findIndex((workspace) => workspace.id === workspaceId);
+  const later = new Set(sources.workspaces.slice(here + 1).map((workspace) => workspace.id));
+  return stops.find((stop) => later.has(stop.workspaceId)) ?? stops[0];
 }

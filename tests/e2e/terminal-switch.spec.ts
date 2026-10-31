@@ -8,7 +8,8 @@ import { join } from "node:path";
 // from the chat Ctrl+Tab lands in the workspace's terminal, then moves left to
 // right across a split and wraps, Shift+Tab alone stays with the terminal (it
 // is Claude Code's mode switch), Ctrl+Shift+Tab carries on into the next
-// workspace and back, and tab cycling answers Ctrl+PageDown / Ctrl+PageUp.
+// workspace and back, tab cycling answers Ctrl+PageDown / Ctrl+PageUp, and a
+// pane hidden by its tab's zoom comes on screen before it takes the keyboard.
 
 const IS_MAC = process.platform === "darwin";
 const MOD = IS_MAC ? "Meta" : "Control";
@@ -71,6 +72,15 @@ async function awaitAnyFocusedPane(page: Page): Promise<string> {
 
 async function expectActive(page: Page, id: string) {
   await expect(page.locator(`[data-workspace-id="${id}"]`)).toHaveAttribute("data-active", "true");
+}
+
+// A workspace switch settles on its pane a few frames after the keyboard
+// arrives, so a press sent the moment it lands would step from the pane that
+// was active there before.
+async function expectLanded(page: Page, workspaceId: string, paneId: string) {
+  await expectActive(page, workspaceId);
+  await expectFocusedPane(page, paneId);
+  await page.waitForTimeout(300);
 }
 
 test("Ctrl+Tab steps through terminal panes left to right, Ctrl+Shift+Tab across workspaces", async () => {
@@ -150,8 +160,10 @@ test("Ctrl+Tab steps through terminal panes left to right, Ctrl+Shift+Tab across
     await page.keyboard.press(WORKSPACE(2));
     await expectActive(page, "ws-b");
     await page.keyboard.press("Control+Tab");
-    const beta = await awaitAnyFocusedPane(page);
-    expect([left, right]).not.toContain(beta);
+    await expect
+      .poll(async () => [left, right, null].includes(await focusedPane(page)), { timeout: 15_000 })
+      .toBe(false);
+    const beta = (await focusedPane(page)) as string;
     // Alone in its workspace, Ctrl+Tab has nowhere to go.
     await page.keyboard.press("Control+Tab");
     await page.waitForTimeout(300);
@@ -160,19 +172,45 @@ test("Ctrl+Tab steps through terminal panes left to right, Ctrl+Shift+Tab across
     // Ctrl+Shift+Tab walks on: past beta's last pane back to alpha's first,
     // then right, then into beta again.
     await page.keyboard.press("Control+Shift+Tab");
-    await expectActive(page, "ws-a");
-    await expectFocusedPane(page, left);
+    await expectLanded(page, "ws-a", left);
     await page.keyboard.press("Control+Shift+Tab");
     await expectFocusedPane(page, right);
     await page.keyboard.press("Control+Shift+Tab");
-    await expectActive(page, "ws-b");
-    await expectFocusedPane(page, beta);
+    await expectLanded(page, "ws-b", beta);
 
     // Tab cycling: Ctrl+PageUp back to the chat, Ctrl+PageDown to the terminal.
     await page.keyboard.press("Control+PageUp");
     await expectPaneShown(page, beta, false);
     await page.keyboard.press("Control+PageDown");
     await expectPaneShown(page, beta, true);
+
+    // A zoom hides the tab's other panes, and the keyboard must never land in
+    // one of those: stepping within the tab moves the zoom along.
+    await page.locator(`.codara-terminal-session[data-pane-id="${beta}"]`).click();
+    await expectFocusedPane(page, beta);
+    await page.keyboard.press("Control+Shift+Tab");
+    await expectLanded(page, "ws-a", left);
+    await page.locator('button[title^="Zoom pane"]:visible').first().click();
+    await expectPaneShown(page, right, false);
+    await page.keyboard.press("Control+Tab");
+    await expectFocusedPane(page, right);
+    await expectPaneShown(page, right, true);
+    await expectPaneShown(page, left, false);
+    await page.keyboard.press("Control+Tab");
+    await expectFocusedPane(page, left);
+    await expectPaneShown(page, left, true);
+    await expectPaneShown(page, right, false);
+
+    // Likewise stepping into the tab from elsewhere: the walk leaves alpha
+    // zoomed on its right pane and comes back in at its hidden left one.
+    await page.keyboard.press("Control+Shift+Tab");
+    await expectFocusedPane(page, right);
+    await page.keyboard.press("Control+Shift+Tab");
+    await expectLanded(page, "ws-b", beta);
+    await page.keyboard.press("Control+Shift+Tab");
+    await expectLanded(page, "ws-a", left);
+    await expectPaneShown(page, left, true);
+    await expectPaneShown(page, right, false);
   } finally {
     await app?.close().catch(() => undefined);
     await rm(root, { recursive: true, force: true }).catch(() => undefined);

@@ -19,7 +19,12 @@ const GRABBY_PAGE = `<!doctype html><html><head><title>Grabby page</title></head
 <input id="field" autofocus>
 <script>
   window.ctrlT = 0;
+  window.ctrlPage = 0;
   document.addEventListener("keydown", (event) => {
+    if (event.ctrlKey && (event.key === "PageDown" || event.key === "PageUp")) {
+      window.ctrlPage += 1;
+      event.preventDefault();
+    }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "t") {
       window.ctrlT += 1;
       event.preventDefault();
@@ -120,26 +125,47 @@ test("Ctrl+T opens a new terminal tab from every part of the workbench", async (
     // only through the guest's before-input-event forwarding, the path a real
     // key press takes. One page ignores Ctrl+T, the other handles it itself.
     await expect.poll(async () => request("app.info").then(() => true).catch(() => false)).toBe(true);
-    const guestPress = (title: string) => async () => {
-      const sent = await app!.evaluate(({ webContents }, title) => {
+    const guestPress = (title: string, keyCode = "t", control = false) => async () => {
+      const sent = await app!.evaluate(({ webContents }, { title, keyCode, control }) => {
         const guest = webContents.getAllWebContents().find((wc) => wc.getType() === "webview" && wc.getTitle() === title);
         if (!guest) return false;
         guest.focus();
-        const modifiers = [process.platform === "darwin" ? "meta" : "control"] as Array<"meta" | "control">;
-        guest.sendInputEvent({ type: "keyDown", keyCode: "t", modifiers });
-        guest.sendInputEvent({ type: "keyUp", keyCode: "t", modifiers });
+        const modifiers = [!control && process.platform === "darwin" ? "meta" : "control"] as Array<"meta" | "control">;
+        guest.sendInputEvent({ type: "keyDown", keyCode, modifiers });
+        guest.sendInputEvent({ type: "keyUp", keyCode, modifiers });
         return true;
-      }, title);
+      }, { title, keyCode, control });
       expect(sent).toBe(true);
     };
+    const tabIds = () => tabs.evaluateAll((els) => els.map((el) => el.getAttribute("data-tab-id")));
+    const tabsBeforeBrowser = await tabIds();
     await request("preview.navigate", { url: `${pageUrl}plain` });
     await request("preview.wait_for", { selector: "#field" });
+    const browserTabId = (await tabIds()).find((id) => !tabsBeforeBrowser.includes(id));
     await pressAndCheck("browser tab (plain page)", guestPress("Plain page"));
     await request("preview.navigate", { url: pageUrl });
     await request("preview.wait_for", { selector: "#field" });
     await pressAndCheck("browser tab (page handles Ctrl+T)", guestPress("Grabby page"));
     RESULTS["browser tab: page still saw the key"] = String(
       (await request("preview.evaluate", { code: "window.ctrlT" })).value >= 1,
+    );
+
+    // Tab cycling is on the same footing: the page sees Ctrl+PageUp / PageDown
+    // and handles them, and Codara still moves off the tab.
+    const selectedTab = page.locator('[role="tab"][data-tab-id][aria-selected="true"]');
+    for (const keyCode of ["PageUp", "PageDown"]) {
+      await page.locator(`[role="tab"][data-tab-id="${browserTabId}"]`).click();
+      await expect(selectedTab).toHaveAttribute("data-tab-id", browserTabId ?? "");
+      await guestPress("Grabby page", keyCode, true)();
+      try {
+        await expect(selectedTab).not.toHaveAttribute("data-tab-id", browserTabId ?? "", { timeout: 10_000 });
+        RESULTS[`browser tab (page handles Ctrl+${keyCode})`] = "moves";
+      } catch (error) {
+        RESULTS[`browser tab (page handles Ctrl+${keyCode})`] = `nothing: ${String(error).split("\n")[0]}`;
+      }
+    }
+    RESULTS["browser tab: page still saw Ctrl+PageUp and PageDown"] = String(
+      (await request("preview.evaluate", { code: "window.ctrlPage" })).value >= 2,
     );
 
     // The Settings dialog is modal: the terminal would open out of sight
@@ -161,6 +187,9 @@ test("Ctrl+T opens a new terminal tab from every part of the workbench", async (
       "browser tab (plain page)": "opens",
       "browser tab (page handles Ctrl+T)": "opens",
       "browser tab: page still saw the key": "true",
+      "browser tab (page handles Ctrl+PageUp)": "moves",
+      "browser tab (page handles Ctrl+PageDown)": "moves",
+      "browser tab: page still saw Ctrl+PageUp and PageDown": "true",
       "Settings dialog": "nothing",
     });
   } finally {

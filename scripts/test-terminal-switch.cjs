@@ -17,7 +17,7 @@ const path = require("node:path");
 const esbuild = require("esbuild");
 
 const ROOT = path.resolve(__dirname, "..");
-const PLATFORMS = { mac: "MacIntel", windows: "Win32" };
+const PLATFORMS = { mac: "MacIntel", windows: "Win32", linux: "Linux x86_64" };
 
 async function load(platform) {
   const out = await esbuild.build({
@@ -154,6 +154,25 @@ function checkOrder(lib) {
   empty.layouts[1].activeTabId = "chat";
   assert.equal(lib.nextTerminalStop(empty, "workspace"), null);
   assert.equal(lib.nextTerminalStop(empty, "all").paneId, "b-pane");
+
+  // Ctrl+Shift+Tab from a workspace with no terminals goes on along the rail
+  // from there, wrapping only past its end.
+  const rail = (activeWorkspaceId, withTerminals) => ({
+    workspaces: [ws("a", "Alpha"), ws("b", "Beta"), ws("c", "Gamma")],
+    layouts: ["a", "b", "c"].map((id) => ({
+      workspaceId: id,
+      activeTabId: withTerminals.includes(id) ? `${id}-tab` : "chat",
+      tabs: withTerminals.includes(id)
+        ? [terminalTab(`${id}-tab`, leaf(`${id}-pane`), `${id}-pane`)]
+        : [{ kind: "chat", id: "chat" }],
+    })),
+    activeWorkspaceId,
+  });
+  assert.equal(lib.nextTerminalStop(rail("b", ["a", "c"]), "all").paneId, "c-pane");
+  assert.equal(lib.nextTerminalStop(rail("c", ["a", "b"]), "all").paneId, "a-pane");
+  assert.equal(lib.nextTerminalStop(rail("a", ["c"]), "all").paneId, "c-pane");
+  assert.equal(lib.nextTerminalStop(rail("b", ["a"]), "all").paneId, "a-pane");
+  assert.equal(lib.nextTerminalStop(rail("b", ["a", "c"]), "workspace"), null);
 }
 
 function checkChords(lib, platform) {

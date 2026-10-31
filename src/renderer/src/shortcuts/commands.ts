@@ -436,7 +436,7 @@ export const COMMANDS: Command[] = [
     label: "Cycle to next tab",
     group: "Tabs",
     // Ctrl+PageDown / Ctrl+PageUp, the tab chords of Chrome, Firefox and
-    // VS Code. Ctrl+Tab belongs to the recent-terminal switcher.
+    // VS Code. Ctrl+Tab steps through terminal panes instead.
     defaultChords: [ctrl("PageDown")],
   },
   {
