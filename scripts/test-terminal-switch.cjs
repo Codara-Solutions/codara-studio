@@ -147,6 +147,19 @@ function checkOrder(lib) {
   assert.equal(lib.nextTerminalStop(sources({ activeTabId: "chat" }), "workspace").paneId, "left");
   assert.equal(lib.nextTerminalStop(sources({ activeTabId: "e1" }), "workspace").paneId, "top");
 
+  // From a docked cell between two shells: the shell after it in that tab,
+  // not the next tab. Past the tab's last shell it moves on as usual.
+  const dockedCell = leaf("cell", { content: { type: "tab", tabId: "e1" } });
+  const docked = (root) => ({
+    workspaces: [ws("a", "Alpha")],
+    layouts: [{ workspaceId: "a", activeTabId: "host", tabs: [terminalTab("host", root, "cell"), terminalTab("other", leaf("o"), "o")] }],
+    activeWorkspaceId: "a",
+  });
+  const between = docked(split(leaf("x"), split(dockedCell, leaf("y"))));
+  assert.equal(lib.nextTerminalStop(between, "workspace").paneId, "y");
+  assert.equal(lib.nextTerminalStop(between, "all").paneId, "y");
+  assert.equal(lib.nextTerminalStop(docked(split(leaf("x"), dockedCell)), "workspace").paneId, "o");
+
   // A workspace with a single pane has nowhere to go; one with none, nothing.
   assert.equal(lib.nextTerminalStop(sources({ activeWorkspaceId: "b" }), "workspace"), null);
   const empty = sources();

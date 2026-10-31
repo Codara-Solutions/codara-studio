@@ -56,6 +56,13 @@ export function nextTerminalStop(sources: JumpSources, scope: TerminalSwitchScop
 
   const at = stops.findIndex((stop) => stop.workspaceId === workspaceId && stop.paneId === activePaneId);
   if (at >= 0) return stops.length > 1 ? stops[(at + 1) % stops.length] : null;
+  // From a docked editor or browser cell: the next shell along its own tab.
+  if (activeTab?.kind === "terminal") {
+    const leaves = collectLeaves(activeTab.root);
+    const after = new Set(leaves.slice(leaves.findIndex((leaf) => leaf.paneId === activePaneId) + 1).map((leaf) => leaf.paneId));
+    const inTab = stops.find((stop) => stop.tabId === activeTab.id && after.has(stop.paneId));
+    if (inTab) return inTab;
+  }
   const right = stops.findIndex((stop) => stop.workspaceId === workspaceId && stop.tabIndex > activeIndex);
   if (right >= 0) return stops[right];
   // Past the workspace's last terminal, or in a workspace with none: on along
