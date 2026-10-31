@@ -1,6 +1,6 @@
 "use strict";
 
-// `cora bench` — the harness benchmark, run against the LIVE app.
+// `cora studio bench` — the harness benchmark, run against the LIVE app.
 //
 // Per task: seed a throwaway git workspace, `chat.create` a real Cora run,
 // poll the visible test every few seconds to catch the moment it first goes
@@ -9,10 +9,10 @@
 // bench/score.cjs into a 0-100 HARNESS score (correctness, efficiency against
 // par, post-green discipline, orchestration, penalties).
 //
-//   cora bench                       train split, one trial each
-//   cora bench --split holdout|all   the held-out tasks (confirm, don't tune)
-//   cora bench --task NAME[,NAME]    one task or a focused comma-separated suite
-//   cora bench --repeat 3            reliability: pass^k + score spread
+//   cora studio bench                       train split, one trial each
+//   cora studio bench --split holdout|all   the held-out tasks (confirm, don't tune)
+//   cora studio bench --task NAME[,NAME]    one task or a focused comma-separated suite
+//   cora studio bench --repeat 3            reliability: pass^k + score spread
 //
 // Every completed suite appends one provenance-stamped line to
 // cli/bench/history.jsonl; only identical task/scorer/runner versions compare.
@@ -481,8 +481,8 @@ async function bench(args, flags) {
     ? TASKS.filter((task) => requestedTasks.includes(task.name))
     : TASKS.filter((task) => split === "all" || task.split === split);
   const missingTasks = requestedTasks.filter((name) => !selected.some((task) => task.name === name));
-  if (missingTasks.length) fail(`unknown task${missingTasks.length === 1 ? "" : "s"}: ${missingTasks.join(", ")} (see \`cora bench list\`)`);
-  if (selected.length === 0) fail(`no tasks selected (see \`cora bench list\`)`);
+  if (missingTasks.length) fail(`unknown task${missingTasks.length === 1 ? "" : "s"}: ${missingTasks.join(", ")} (see \`cora studio bench list\`)`);
+  if (selected.length === 0) fail(`no tasks selected (see \`cora studio bench list\`)`);
   const repeat = Number(flags.repeat ?? 1);
   if (!Number.isSafeInteger(repeat) || repeat < 1) fail("--repeat must be a positive integer");
   const agent = flags.agent ?? "cora";
@@ -510,7 +510,7 @@ async function bench(args, flags) {
   };
 
   console.log(
-    `${c.violet("◆ cora bench")}  ${selected.length} task${selected.length === 1 ? "" : "s"} · ` +
+    `${c.violet("◆ cora studio bench")}  ${selected.length} task${selected.length === 1 ? "" : "s"} · ` +
       `${requestedTasks.length ? `${selected.length === 1 ? "task" : "tasks"} ${requestedTasks.join(",")}` : `${split} split`} · ${repeat} trial${repeat === 1 ? "" : "s"} · ` +
       `${agent === "cora" ? `prompt ${benchPromptHash}` : `agent ${rivalLabel(agent, control.model, control.effort)}`} · ` +
       `${control.model}/${control.effort}\n`,

@@ -1,0 +1,18 @@
+{
+  "name": "cora-cli",
+  "version": "0.1.0",
+  "description": "Cora: a standalone terminal coding harness",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "node": ">=22.18"
+  },
+  "bin": {
+    "cora": "cora.cjs"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@earendil-works/pi-tui": "0.85.1",
+    "@modelcontextprotocol/sdk": "1.30.0"
+  }
+}

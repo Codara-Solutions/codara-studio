@@ -31,7 +31,7 @@ function workerRows(run) {
 
 function agents(args, flags) {
   const target = args[0] ? findRun(flags, args[0]) : latestRun(flags);
-  if (!target) fail("no runs found — start one with `cora start`");
+  if (!target) fail("no runs found — start one with `cora studio start`");
   if (flags.json) return console.log(JSON.stringify({ run: target.id, workers: target.workerTasks, attempts: target.workerAttempts }, null, 2));
   console.log(`${c.cyan(target.id)}  ${statusColor(target.status)}  ${target.title ?? ""}`);
   const rows = workerRows(target);
@@ -46,7 +46,7 @@ function renderDashboard(flags, run) {
   const lines = [];
   const push = (line = "") => lines.push(line);
 
-  push(`${c.violet("◆ cora watch")}  ${c.cyan(run.id)}  ${statusColor(run.status)}  ${c.dim(timeAgo(run.updatedAt))}`);
+  push(`${c.violet("◆ cora studio watch")}  ${c.cyan(run.id)}  ${statusColor(run.status)}  ${c.dim(timeAgo(run.updatedAt))}`);
   push(`${c.bold(run.title ?? "(untitled)")}`);
   push();
 
@@ -68,7 +68,7 @@ function renderDashboard(flags, run) {
   if (question) {
     push(`${c.yellow("Cora asks:")} ${question.message}`);
     (question.questionOptions ?? []).forEach((option, i) => push(`  ${i + 1}. ${option.label}`));
-    push(c.dim(`reply: cora send ${run.id.slice(0, 12)} <text or number>`));
+    push(c.dim(`reply: cora studio send ${run.id.slice(0, 12)} <text or number>`));
     push();
   }
 
@@ -88,7 +88,7 @@ async function watch(args, flags) {
   let target = args[0]
     ? findRun(flags, args[0])
     : listRuns(flags).find((run) => ["working", "running", "blocked", "paused"].includes(run.status)) ?? latestRun(flags);
-  if (!target) fail("no runs found — start one with `cora start`");
+  if (!target) fail("no runs found — start one with `cora studio start`");
   const settled = new Set(["complete", "failed", "cancelled"]);
   const interval = 1000;
   const startedSettled = settled.has(target.status);
@@ -113,7 +113,7 @@ async function agent(args, flags) {
   const [sub, ...rest] = args;
   if (sub === "spawn") {
     if (!rest[0] || rest.length < 2) {
-      fail("usage: cora agent spawn <run> <brief> [--title T --runtime claude|codex|grok --model M --effort E --class feature|leaf|verifier]");
+      fail("usage: cora studio agent spawn <run> <brief> [--title T --runtime claude|codex|grok --model M --effort E --class feature|leaf|verifier]");
     }
     const run = findRun(flags, rest[0]);
     const worker = {
@@ -131,7 +131,7 @@ async function agent(args, flags) {
     return;
   }
   if (sub === "message") {
-    if (!rest[0] || !rest[1] || rest.length < 3) fail("usage: cora agent message <run> <all|task-id> <message>");
+    if (!rest[0] || !rest[1] || rest.length < 3) fail("usage: cora studio agent message <run> <all|task-id> <message>");
     const run = findRun(flags, rest[0]);
     const to = rest[1] === "all" ? "all" : [rest[1]];
     const result = await rpc(flags, "orchestrator.message_workers", {
@@ -143,7 +143,7 @@ async function agent(args, flags) {
     console.log(`message sent to ${rest[1]} on ${run.id}`);
     return;
   }
-  fail("usage: cora agent <spawn|message> ...");
+  fail("usage: cora studio agent <spawn|message> ...");
 }
 
 module.exports = { agents, watch, agent, renderDashboard, workerRows };

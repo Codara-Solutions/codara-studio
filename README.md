@@ -88,7 +88,7 @@ matching terminal tool use. One account per CLI is the **Active** one.
   the Active login before Claude Code would, and Cora asks Codara instead of
   refreshing its own copy.
 
-Manage accounts in Settings, Agents, or with `cora auth`. The full story is in
+Manage accounts in Settings, Agents, or with `cora studio auth`. The full story is in
 [docs/accounts.md](./docs/accounts.md).
 
 ## Documentation

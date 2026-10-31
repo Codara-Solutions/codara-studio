@@ -15,6 +15,7 @@ const path = require("node:path");
 
 const ROOT = path.resolve(__dirname, "..");
 const CLI = path.join(ROOT, "cli", "cora.cjs");
+const STUDIO = [CLI, "studio"];
 const asynchronousAssertions = [];
 
 // ── synthetic home ──────────────────────────────────────────────────────────
@@ -69,7 +70,7 @@ writeRun({
 });
 
 function cli(...args) {
-  return execFileSync("node", [CLI, ...args], {
+  return execFileSync("node", [...STUDIO, ...args], {
     env: { ...process.env, CODARA_HOME_DIR: home, NO_COLOR: "1" },
     encoding: "utf8",
     timeout: 30_000,
@@ -78,7 +79,7 @@ function cli(...args) {
 
 function cliFails(...args) {
   try {
-    execFileSync("node", [CLI, ...args], {
+    execFileSync("node", [...STUDIO, ...args], {
       env: { ...process.env, CODARA_HOME_DIR: home, NO_COLOR: "1" },
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
@@ -470,7 +471,7 @@ const { renderDashboard } = require(path.join(ROOT, "cli", "commands", "agents.c
 const { findRun } = require(path.join(ROOT, "cli", "lib", "store.cjs"));
 const flags = { home };
 const frame = renderDashboard(flags, findRun(flags, "run-alpha"));
-assert.match(frame, /cora watch/);
+assert.match(frame, /cora studio watch/);
 assert.match(frame, /subagents \(2\)/);
 assert.match(frame, /Widget core/);
 assert.match(frame, /Worker attempt running/);

@@ -35,11 +35,11 @@ const PROVIDER_CLI_NAMES = new Map([
 // One sign-in serves Cora and the CLI, so these moved to the account
 // commands; the app refuses the old CLI-only forms.
 const UNIFIED_CLI_ACTIONS = new Map([
-  ["add", "cora auth add <provider> [label]"],
-  ["login", "cora auth login <provider> <#|label|id>"],
-  ["reconnect", "cora auth login <provider> <#|label|id>"],
-  ["use", "cora auth use <provider> <#|label|id>"],
-  ["logout", "cora auth remove <provider> <#|label|id>"],
+  ["add", "cora studio auth add <provider> [label]"],
+  ["login", "cora studio auth login <provider> <#|label|id>"],
+  ["reconnect", "cora studio auth login <provider> <#|label|id>"],
+  ["use", "cora studio auth use <provider> <#|label|id>"],
+  ["logout", "cora studio auth remove <provider> <#|label|id>"],
 ]);
 
 const PROVIDER_ORDER = ["anthropic", "openai-codex", "xai"];
@@ -292,7 +292,7 @@ async function subscriptionAuth(args, flags) {
     const provider = normalizeProvider(args[1]);
     const account = resolveAccount(await subscriptionAccounts(flags, provider), args[2]);
     const label = flags.label || args.slice(3).join(" ").trim();
-    if (!label) fail("usage: cora auth rename <provider> <#|label|id> <new-label>");
+    if (!label) fail("usage: cora studio auth rename <provider> <#|label|id> <new-label>");
     const result = await rpc(flags, "accounts.rename", { profileId: account.id, label });
     if (flags.json) return console.log(JSON.stringify(result, null, 2));
     console.log(`${c.green("✓")} renamed ${c.bold(account.label)} to ${c.bold(label)}`);
@@ -307,7 +307,7 @@ async function subscriptionAuth(args, flags) {
     console.log(`${c.green("✓")} removed ${c.bold(account.label)}`);
     return;
   }
-  fail("usage: cora auth list | add | login | use | rename | remove | cli …");
+  fail("usage: cora studio auth list | add | login | use | rename | remove | cli …");
 }
 
 async function nativeAuth(args, flags) {
@@ -329,7 +329,7 @@ async function nativeAuth(args, flags) {
   const account = resolveAccount(profiles, args[2], `${runtime} account`);
   if (action === "rename") {
     const label = flags.label || args.slice(3).join(" ").trim();
-    if (!label) fail("usage: cora auth cli rename <runtime> <#|label|id> <new-label>");
+    if (!label) fail("usage: cora studio auth cli rename <runtime> <#|label|id> <new-label>");
     const result = await rpc(flags, "nativeAccounts.rename", { runtime, profileId: account.id, label });
     if (flags.json) return console.log(JSON.stringify(result, null, 2));
     console.log(`${c.green("✓")} renamed ${c.bold(account.label)} to ${c.bold(label)}`);
@@ -342,7 +342,7 @@ async function nativeAuth(args, flags) {
     console.log(`${c.green("✓")} removed ${c.bold(account.label)}`);
     return;
   }
-  fail("usage: cora auth cli list | rename | remove");
+  fail("usage: cora studio auth cli list | rename | remove");
 }
 
 async function auth(args, flags) {

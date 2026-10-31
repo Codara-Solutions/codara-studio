@@ -410,9 +410,9 @@ async function deleteRunRpc(flags, runId, request = rpcRaw) {
 
 async function chat(args, flags) {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    fail("`cora chat` needs an interactive terminal");
+    fail("`cora studio chat` needs an interactive terminal");
   }
-  if (args.length > 1) fail("usage: cora chat [run] [--cwd DIR --model M --effort E --direct]");
+  if (args.length > 1) fail("usage: cora studio chat [run] [--cwd DIR --model M --effort E --direct]");
   if (flags.direct && flags.managed) fail("choose only one of --direct or --managed");
 
   const ui = await import("@earendil-works/pi-tui");

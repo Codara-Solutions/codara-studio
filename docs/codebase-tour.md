@@ -351,7 +351,7 @@ Debugging:
   `app.info` is always available.
 - **A run that went wrong.** `npm run inspect-run -- <run-id>` writes a
   markdown dump of the run: `run.json`, events, manager calls, worker
-  prompts, logs and reports. `cora runs`, `cora run` and `cora log` also
+  prompts, logs and reports. `cora studio runs`, `cora studio run` and `cora studio log` also
   read runs offline ([cli.md](./cli.md)).
 - **Terminal agent detection.** The notifier writes a diagnostic trail of
   state changes to `<tmpdir>/spark-terminal-notify.log`. Set

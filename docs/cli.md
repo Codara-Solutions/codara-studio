@@ -33,19 +33,19 @@ unique prefix of one works.
 
 ```sh
 cora                                   # fullscreen Cora chat (in a TTY)
-cora start "Fix the failing tests" --cwd . --wait
-cora runs                              # recent runs, newest first
-cora watch                             # live dashboard of the active run
-cora send <run> 2                      # answer Cora's question with option 2
-cora board <run>                       # the run's kanban board
+cora studio start "Fix the failing tests" --cwd . --wait
+cora studio runs                              # recent runs, newest first
+cora studio watch                             # live dashboard of the active run
+cora studio send <run> 2                      # answer Cora's question with option 2
+cora studio board <run>                       # the run's kanban board
 ```
 
 Claude Code and Codex sessions can use `cora` to bring in Cora or a second
 opinion:
 
 ```sh
-cora agent spawn <run> "Audit the fix" --title "Independent audit" --runtime codex
-cora agent message <run> all "Re-check the acceptance criteria"
+cora studio agent spawn <run> "Audit the fix" --title "Independent audit" --runtime codex
+cora studio agent message <run> all "Re-check the acceptance criteria"
 ```
 
 ## Command reference
@@ -138,7 +138,7 @@ the run you pass with `--run`.
 | `ws prune` | Removes workspaces whose folder no longer exists. |
 | `rpc <method> [params-json]` | Calls any socket method directly. |
 
-The `app.*` methods reachable through `cora rpc` (screenshots, in-page
+The `app.*` methods reachable through `cora studio rpc` (screenshots, in-page
 evaluation) are for development: they are available in unpackaged builds,
 and in packaged builds only when the app was started with
 `CODARA_DEV_TOOLS=1`.

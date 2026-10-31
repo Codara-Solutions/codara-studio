@@ -7,12 +7,12 @@ automations, and benchmark the whole harness.
 ```
 npm run cora -- help          # inside the repo
 node cli/cora.cjs status      # directly
-cora chat                     # fullscreen chat (also the TTY default)
+cora studio chat                     # fullscreen chat (also the TTY default)
 ```
 
 ## Full-screen chat
 
-Run `cora` in a terminal to open the chat UI, or use `cora chat <run-prefix>`
+Run `cora` in a terminal to open the chat UI, or use `cora studio chat <run-prefix>`
 to resume a run. The transcript follows Cora in real time and the status bar
 shows active agents and step progress; closing the UI leaves long-running work
 alive in Codara Studio. Type `/` to browse commands. `/resume` lists chats from
@@ -53,32 +53,32 @@ without spending CPU repainting idle screens.
   adapter for same-model comparisons; `bench/history.jsonl` is the committed
   score history.
 
-Housekeeping: `cora ws prune` removes workspaces whose directory no longer
+Housekeeping: `cora studio ws prune` removes workspaces whose directory no longer
 exists (bench runs register throwaway tmpdirs as real workspaces; the bench
 also prunes its own after grading).
 
 ## Accounts
 
 An account is one sign-in (Claude, ChatGPT or Grok) that serves both Cora
-and the matching CLI. `cora auth list` shows every account with its Cora side
-and its CLI side; `cora auth use` makes one the Active account for both (see
+and the matching CLI. `cora studio auth list` shows every account with its Cora side
+and its CLI side; `cora studio auth use` makes one the Active account for both (see
 [docs/accounts.md](../docs/accounts.md)).
 
 ```sh
-cora auth list
-cora auth add anthropic "Work Claude"
-cora auth login anthropic "Work Claude"       # reconnect
-cora auth use anthropic "Work Claude"         # Active for Cora and Claude Code
-cora auth rename anthropic "Work Claude" "Team Claude"
-cora auth remove anthropic "Team Claude"
+cora studio auth list
+cora studio auth add anthropic "Work Claude"
+cora studio auth login anthropic "Work Claude"       # reconnect
+cora studio auth use anthropic "Work Claude"         # Active for Cora and Claude Code
+cora studio auth rename anthropic "Work Claude" "Team Claude"
+cora studio auth remove anthropic "Team Claude"
 
-cora auth cli list claude                     # the CLI side only
-cora auth cli rename claude "Work Claude" "Team Claude"
-cora auth cli remove claude "Old CLI"         # only a CLI side no account uses
+cora studio auth cli list claude                     # the CLI side only
+cora studio auth cli rename claude "Work Claude" "Team Claude"
+cora studio auth cli remove claude "Old CLI"         # only a CLI side no account uses
 ```
 
 Every printed `#1`, `#2`, and so on is selectable, so the short form
-`cora auth use anthropic 2` works too.
+`cora studio auth use anthropic 2` works too.
 
 Sign-in opens the provider page and finishes in the invoking terminal. Add
 `--default` to make a reconnected account Active once it succeeds;
@@ -91,14 +91,14 @@ account card, which offers to) and run it again.
 
 ## The live dashboard
 
-`cora watch` repaints a dashboard of the active run every second: status,
+`cora studio watch` repaints a dashboard of the active run every second: status,
 every subagent with its model and runtime, steps, the blocking question if
 any, and the latest activity. It reads run state from disk, so it costs the
 app nothing.
 
 ## The benchmark
 
-`cora bench` needs the app running with a Pi subscription. It rates the
+`cora studio bench` needs the app running with a Pi subscription. It rates the
 HARNESS, not just correctness: per task it seeds a throwaway git workspace,
 starts a real Cora run, polls the visible test to catch the moment it first
 goes green, waits for the run to settle (auto-answering questions), then
@@ -128,7 +128,7 @@ and split
 prompts don't overfit the tasks. Every task ships a reference solution the
 offline self-test grades to prove the hidden checks are satisfiable.
 
-`cora bench list` shows the suite; `--split train|holdout|all` picks the
+`cora studio bench list` shows the suite; `--split train|holdout|all` picks the
 split (default train); `--task NAME[,NAME]` runs a focused suite; `--repeat N` measures
 reliability (green k/k + score spread); `--keep` keeps workspaces;
 `--agent hermes|codex|claude` sends the same seeded workspace through a native

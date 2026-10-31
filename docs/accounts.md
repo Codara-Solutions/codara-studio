@@ -24,7 +24,7 @@ Open Settings (Cmd+, on macOS, Ctrl+, elsewhere), go to **Agents**, and click
 [getting-started.md](./getting-started.md)). From a terminal:
 
 ```sh
-cora auth add anthropic "Work Claude"
+cora studio auth add anthropic "Work Claude"
 ```
 
 The sign-in page opens in your browser and the command finishes in your
@@ -41,14 +41,14 @@ installing Codara, that login is Account 1.
 Click **Use this account** on an account card, or run:
 
 ```sh
-cora auth list                          # every account, with a number
-cora auth use anthropic "Work Claude"   # or: cora auth use anthropic 2
+cora studio auth list                          # every account, with a number
+cora studio auth use anthropic "Work Claude"   # or: cora studio auth use anthropic 2
 ```
 
 This switches Cora and the terminal tool to that account together. A Cora
 chat that is already running keeps the account it started with. A Codex
 switch that would close running Codex sessions needs your confirmation, which
-the account card asks for; `cora auth use` stops and tells you how many
+the account card asks for; `cora studio auth use` stops and tells you how many
 sessions are open.
 
 ### What a switch does in Claude Code and Codex
@@ -114,9 +114,9 @@ OAuth logins expire and have to be refreshed. Two rules keep that safe:
 The account card has these actions, and so does the CLI:
 
 ```sh
-cora auth login anthropic "Work Claude"               # reconnect an expired sign-in
-cora auth rename anthropic "Work Claude" "Team Claude"
-cora auth remove anthropic "Team Claude"              # asks first; --yes skips the prompt
+cora studio auth login anthropic "Work Claude"               # reconnect an expired sign-in
+cora studio auth rename anthropic "Work Claude" "Team Claude"
+cora studio auth remove anthropic "Team Claude"              # asks first; --yes skips the prompt
 ```
 
 Every file an account leaves on disk is listed in

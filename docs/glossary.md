@@ -97,6 +97,6 @@ See [accounts.md](./accounts.md) for how these fit together.
 - **Remote access.** Pairing with the Codara phone app over the local
   network or the Codara relay (`src/main/remote-access/`). See
   [remote-access.md](./remote-access.md).
-- **Harness benchmark.** `cora bench`, which scores the whole orchestration
+- **Harness benchmark.** `cora studio bench`, which scores the whole orchestration
   harness on seeded tasks (correctness, efficiency, discipline,
   orchestration). See [cli/README.md](../cli/README.md).
