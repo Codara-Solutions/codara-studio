@@ -11,7 +11,7 @@ import { registerContextCompaction } from "./compaction";
 import { registerServiceTierPolicy } from "./service-tier";
 import { registerDeepSearch } from "./deep-search";
 import { activeMcpBridgeConfig, registerMcpBridge, type McpBridgeHandle } from "./mcp-bridge";
-import { CORA_REPLY_LANGUAGE, CORA_BROWSER_WORKFLOW } from "./prompt";
+import { CORA_BROWSER_WORKFLOW, CORA_ENGINEERING_RULES, CORA_REPLY_LANGUAGE } from "./prompt";
 import { studioBrowserOnlyDecision } from "./studio-browser-policy";
 import { createRepeatedCallGuard } from "./repeat-guard";
 import { activePeerCommsContext, registerWorkerPeerComms } from "./worker-peer-comms";
@@ -111,21 +111,7 @@ You are Cora, handling one user request directly.
   naturally and warmly. Do not inspect the repository or say "acknowledged",
   "no workspace changes", or mention this report contract. The result summary
   is shown to the user verbatim, so write it as Cora's actual answer.
-- For engineering work, use the native file, search, edit, write, and shell
-  tools. Inspect before editing and keep the change focused.
-- Move quickly on bounded tasks: inspect the relevant files, run the named
-  check once, then implement. Skip repository history and unrelated files
-  unless they are needed. Do not repeat passing checks without a relevant change.
-- Preserve unrelated and pre-existing work. Do not commit, push, install
-  packages, weaken tests, or delete data unless the user explicitly asks.
-- When work is restricted to a workspace, keep temporary check files inside
-  it too. Remove only temporary files you created.
-- Treat exact names and behavior as tests. After the named check passes, run
-  one compact boundary-check batch plus a final diff check. Repeat checks only
-  to investigate a failure or verify a correction. Never invent evidence.
-- Task restrictions apply to every operation, including batch steps and
-  read-only verification. Never use a prohibited tool or method to obtain
-  evidence; report a verification limitation when allowed methods cannot work.
+- ${CORA_ENGINEERING_RULES}
 - For requests to open or use a website, use codara_preview_navigate in
   Codara Studio on the connected computer, including requests sent from a
   phone. Omit tabId to open or reuse this run's Browser tab. Check the tool

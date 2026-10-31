@@ -1,19 +1,22 @@
-# cora — the Codara Studio CLI
+# cora
 
-Drive Cora (Codara Studio's orchestrator) from a terminal: start runs, watch
-subagents live, answer questions, work the kanban board and whiteboard, manage
-automations, and benchmark the whole harness.
+A coding agent in your terminal, built on Pi, with no Studio app and no Electron
+(`cora`, `cora exec`, `cora resume`, `cora login`). `cora studio` drives a running
+Codara Studio: start runs, watch subagents live, answer questions, work the kanban
+board and whiteboard, manage automations, and benchmark the whole harness.
+[docs/cli.md](../docs/cli.md) has the commands, exit codes and account rules.
 
 ```
-npm run cora -- help          # inside the repo
-node cli/cora.cjs status      # directly
-cora studio chat                     # fullscreen chat (also the TTY default)
+cora exec "fix the failing test"     # one-shot run
+npm run cora -- studio help          # inside the repo
+node cli/cora.cjs studio status      # directly
+cora studio chat                     # fullscreen chat
 ```
 
 ## Full-screen chat
 
-Run `cora` in a terminal to open the chat UI, or use `cora studio chat <run-prefix>`
-to resume a run. The transcript follows Cora in real time and the status bar
+Run `cora studio chat` in a terminal to open the chat UI, or use
+`cora studio chat <run-prefix>` to resume a run. The transcript follows Cora in real time and the status bar
 shows active agents and step progress; closing the UI leaves long-running work
 alive in Codara Studio. Type `/` to browse commands. `/resume` lists chats from
 the current directory; press `c` to copy a highlighted run id or `d` twice to
@@ -33,7 +36,12 @@ without spending CPU repainting idle screens.
 
 ## Layout
 
-- `cora.cjs` — entry point: arg parsing, help, dispatch.
+- `cora.cjs` — entry point: help, version, and the split between the agent and
+  `studio`. It has no dependencies, so `--version` and `studio` never load Pi.
+- `harness/main.mjs` — the agent: arguments, model choice, prompt handling, exit
+  codes. `harness/accounts.mjs` decides which login a provider uses and who may
+  refresh it. `harness/extension.mjs` is what Cora adds to Pi.
+- `studio.cjs` — the remote: arg parsing and dispatch for `cora studio`.
 - `lib/rpc.cjs` — talks to the running app (reads `~/.codarastudio/agent-socket.json`
   for the loopback URL + bearer token, POSTs JSON-RPC to `/rpc`).
 - `lib/store.cjs` — offline reads of `~/.codarastudio/runs`; run inspection works

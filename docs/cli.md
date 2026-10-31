@@ -1,21 +1,75 @@
 # The `cora` CLI
 
-`cora` is a terminal remote for Codara Studio. With it you can start and
-answer Cora chats, follow a run and its workers live, read and edit a run's
-board, manage accounts and automations, and let one agent hand work to Cora
-from its own terminal. This page shows how to set it up and lists every
-command. [cli/README.md](../cli/README.md) goes deeper on the fullscreen chat
-UI, the live dashboard and the harness benchmark.
+`cora` is two things. On its own it is a coding agent in your terminal, built on
+Pi, with no Codara Studio app and no Electron. `cora studio` is a remote for a
+running Studio: start and answer Cora chats, follow a run and its workers live,
+read and edit a run's board, manage accounts and automations, and let one agent
+hand work to Cora from its own terminal. This page covers both.
+[cli/README.md](../cli/README.md) goes deeper on the fullscreen chat UI, the live
+dashboard and the harness benchmark.
 
-## Setup
+## The standalone agent
 
-The CLI lives in `cli/` in this repository and needs Node 22 or newer. From a
-checkout:
+It needs Node 22.18 or newer and works on a clone of this repository:
 
 ```sh
-npm link                  # once: puts `cora` on your PATH
-cora help                 # the command list
-npm run cora -- status    # or run it without linking
+git clone --depth 1 https://github.com/Codara-Solutions/codara-studio
+npm install -g ./codara-studio/cli
+cora login
+```
+
+| Command | What it does |
+|---|---|
+| `cora` | Interactive session in this folder, in Pi's terminal interface. |
+| `cora exec "prompt"` | One-shot run. The prompt can also come from stdin, at any size. |
+| `cora exec --json "prompt"` | One JSON event per line, ending with a `cora_result` line. |
+| `cora resume [id]`, `--resume [id]` | Continue a session with its full tool history, from any folder. Any unique start of the id works. |
+| `cora login [claude\|chatgpt]` | Sign in, or list what is signed in. |
+| `cora models [search]` | List the models you can use. |
+
+`--model` takes `sonnet`, `opus`, `luna`, `sol` or any `provider/id`. `--effort`
+takes `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | The model reported `complete`, or `unreported` for a plain answer with no report. |
+| 1 | The run failed: a provider error, a timeout, an empty or cut-off reply, or an internal error. |
+| 2 | The command was wrong, or there is no login for that provider. |
+| 3 | The model reported `partial`, `blocked` or `failed`. A `complete` with a failed check counts as `partial`. |
+
+A failed request is retried by itself, from the same context, so finished tool
+calls never run twice. The error names the provider and the real cause.
+
+### Accounts
+
+`cora` uses a `cora login` sign-in if there is one, and otherwise Studio's Active
+account, in place, without copying it. A Studio account can be shared with Claude
+Code or the Codex CLI, and those rotate refresh tokens, so a second refresher
+would sign them out. So `cora` asks a running Studio to renew a Claude login, the
+same request Studio's own sessions make. With Studio closed it refuses an expired
+shared login rather than spending it. `cora login` creates a separate sign-in
+that only `cora` refreshes. An API key in the shell never replaces a login.
+
+### Files and settings
+
+Everything lives in `~/.cora` (`CORA_HOME`): `auth.json`, `sessions/`, `skills/`,
+`settings.json` and `models.json` in Pi's format. `httpIdleTimeoutMs` in
+`settings.json` sets the hung-stream timeout. MCP servers come from `~/.cora/mcp.json`
+or `--mcp-config FILE`, in `.mcp.json` format. A project's own `.mcp.json` does not
+start by itself, because it can run any command. For a custom endpoint, set
+`baseUrl` and `apiKey` in `models.json`, or set `CORA_BASE_URL`.
+
+## Driving Studio: `cora studio`
+
+The remote commands below are all under `cora studio`. The CLI needs Node 22 or
+newer. From a checkout:
+
+```sh
+npm link                         # once: puts `cora` on your PATH
+cora studio help                 # the command list
+npm run cora -- studio status    # or run it without linking
 ```
 
 `cora` finds the running app through `~/.codarastudio/agent-socket.json` (the

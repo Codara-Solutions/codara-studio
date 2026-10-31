@@ -158,6 +158,7 @@ calls.
 | Suites | Covers |
 |---|---|
 | `test-pi-runtime`, `test-pi-backend-session-lifecycle`, `test-pi-rpc-client`, `test-pi-turn`, `test-pi-turn-cost`, `test-pi-mcp-config`, `test-pi-commit-message` | Starting Pi (`pi-runtime.ts`, `pi-runtime-electron.ts`), the RPC client, turns and their cost, the MCP bridge config. |
+| `test-cora-harness` | The standalone `cora` CLI end to end: a real child process against the stub model in `cora-stub-model.mjs`, in a throwaway HOME, with non-loopback network blocked. Exit codes, retries, resume, token refresh rules, MCP, and the terminal interface. |
 | `test-pi-cora-extension`, `test-repeat-guard`, `test-deep-search`, `test-whiteboard-review-extension`, `test-whiteboard-quality` | The Pi extension in `resources/pi-cora/`. |
 | `test-pi-manager-compaction`, `test-pi-worker-compaction`, `test-pi-manager-compaction-integration.mjs`, `test-pi-worker-compaction-integration.mjs` | Context compaction for the manager and for workers. |
 | `test-pi-worker-harness-gate`, `test-pi-worker-providers` | Which providers workers may run on. |
