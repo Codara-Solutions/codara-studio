@@ -9,6 +9,8 @@ import type {
   WorktreeLocalWork,
   WorktreeRailCleanupRequest,
   WorktreeRailCleanupResult,
+  WorktreeRailExternal,
+  WorktreeRailOverview,
   WorktreeRailState,
   WorktreeRemovalCheck,
 } from "@shared/worktree-cleanup";
@@ -155,12 +157,89 @@ async function hasOwnCommits(repo: RepoContext, head: string, workspace: Workspa
   return Number.isFinite(seconds) && seconds > 0 && seconds * 1000 >= createdAt - 1_000;
 }
 
+// When a commit was made, in ms; null when git cannot say.
+async function commitTime(root: string, commit: string): Promise<number | null> {
+  const seconds = Number(await readGitText(root, ["log", "-1", "--format=%ct", commit]).catch(() => ""));
+  return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : null;
+}
+
 /** The rail's state of every local copy-branch workspace. Reads only. */
 export async function railWorktreeStates(deps: WorktreeCleanupDeps): Promise<WorktreeRailState[]> {
+  return (await railWorktreeOverview(deps, { external: false })).states;
+}
+
+/**
+ * The rail's state of every local copy-branch workspace and, unless asked
+ * not to, the worktrees of its projects' repositories that no row shows, from
+ * one `git worktree list` per repository. Reads only.
+ */
+export async function railWorktreeOverview(
+  deps: WorktreeCleanupDeps,
+  options: { external?: boolean } = {},
+): Promise<WorktreeRailOverview> {
   const state = await deps.loadState();
   const { repos } = await discoverRepos(state, {
     withPullRequests: (root) => deps.pullRequests(root).catch(() => null),
   });
+  const [states, external] = await Promise.all([
+    statesOf(repos),
+    options.external === false ? Promise.resolve([]) : externalWorktrees(state, repos),
+  ]);
+  return { states, external };
+}
+
+// Canonical paths compared as spelled, no case folding: on a case-sensitive
+// volume "fix" and "FIX" are two worktrees, and hiding one as "already
+// shown" would hide work.
+function exactKey(canonicalPath: string): string {
+  return canonicalPath.length > 1 ? canonicalPath.replace(/[\\/]+$/, "") : canonicalPath;
+}
+
+/**
+ * Worktrees git registers for a project's repository that no workspace in the
+ * rail is: made with plain `git worktree add`. A pruned one (folder gone) and
+ * the main checkout are left out, and so is a repository whose main checkout
+ * is not a project row, since there is nothing to hang them under.
+ */
+async function externalWorktrees(state: AppState, repos: readonly RepoContext[]): Promise<WorktreeRailExternal[]> {
+  const local = state.workspaces.filter((workspace) => !workspace.remote && workspace.cwd && !isRemotePath(workspace.cwd));
+  const shown = new Set<string>();
+  for (const workspace of local) shown.add(exactKey(await canonicalMaybeMissing(workspace.cwd)));
+  const items: Array<{ repo: RepoContext; projectId: string; entry: WorktreeRegistration; path: string }> = [];
+  for (const repo of repos) {
+    if (!repo.mainPath) continue;
+    const mainKey = exactKey(await canonicalMaybeMissing(repo.mainPath));
+    let projectId: string | null = null;
+    for (const workspace of local) {
+      if (workspace.copyBranch) continue;
+      if (exactKey(await canonicalMaybeMissing(workspace.cwd)) === mainKey) {
+        projectId = workspace.id;
+        break;
+      }
+    }
+    if (!projectId) continue;
+    for (const entry of repo.registrations) {
+      if (entry.prunable) continue;
+      const path = await canonicalMaybeMissing(entry.path);
+      const key = exactKey(path);
+      if (key === mainKey || shown.has(key)) continue;
+      items.push({ repo, projectId, entry, path });
+    }
+  }
+  return mapLimited(items, ROW_CONCURRENCY, async ({ repo, projectId, entry, path }) => {
+    const headAt = await commitTime(repo.root, entry.head);
+    return {
+      projectId,
+      path,
+      branch: shortName(entry.branch),
+      head: entry.head,
+      ...(headAt ? { headAt } : {}),
+      locked: entry.locked,
+    };
+  });
+}
+
+async function statesOf(repos: readonly RepoContext[]): Promise<WorktreeRailState[]> {
   const items: Array<{ repo: RepoContext; workspace: Workspace & { copyBranch: NonNullable<Workspace["copyBranch"]> } }> = [];
   for (const repo of repos) {
     for (const workspace of repo.workspaces) if (isLocalCopy(workspace)) items.push({ repo, workspace });
@@ -174,6 +253,7 @@ export async function railWorktreeStates(deps: WorktreeCleanupDeps): Promise<Wor
     const head = registered ?? tip;
     const base = { workspaceId: workspace.id, missing, branch, branchGone: tip === null };
     if (!head) return { ...base, merge: "gone", autoCandidate: missing };
+    const headAt = await commitTime(repo.root, head);
     const facts = await mergeFacts(repo, head, branch, await targetFor(repo, workspace)).catch(() => ({ state: "unknown" as const }));
     const empty = facts.state === "merged" && "proof" in facts && facts.proof === "ancestor" && !(await hasOwnCommits(repo, head, workspace));
     return {
@@ -183,6 +263,7 @@ export async function railWorktreeStates(deps: WorktreeCleanupDeps): Promise<Wor
       ...("target" in facts && facts.target ? { target: facts.target } : {}),
       // An empty branch loses nothing either, so a missing one goes too.
       autoCandidate: missing && facts.state === "merged",
+      ...(headAt ? { headAt } : {}),
     };
   });
 }

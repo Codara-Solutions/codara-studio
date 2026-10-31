@@ -30,7 +30,7 @@ import {
   TERMINAL_SCROLLBACK_LINE_LIMIT_DEFAULT,
   runtimeStateIsBusy,
 } from "@shared/types";
-import type { WorktreeRailCleanupResult } from "@shared/worktree-cleanup";
+import type { WorktreeRailCleanupResult, WorktreeRailExternal } from "@shared/worktree-cleanup";
 import type {
   GitHubIssueSummary,
   GitHubWorkQueueItem,
@@ -146,6 +146,7 @@ import {
 } from "./tabs/agentTerminalPlacement";
 import { setTabGroupBridge } from "./tabs/tabGroupBridge";
 import { flashTabStripItems, OPEN_TAB_LINK_EVENT, setTabLinkBridge } from "./tabs/tabLinkBridge";
+import { setEditorOpenBridge, type EditorOpenRequest } from "./tabs/editorOpenBridge";
 import { resolveTabLink, type SplitDirection, type TabLinkMember, type WorkspaceTabsSnapshot } from "./tabs/tabLinks";
 import { collectLeaves } from "./tabs/paneTree";
 import { parseTabLink, type TabLinkRef } from "@shared/tab-links";
@@ -843,6 +844,7 @@ export default function App() {
   // refuses anything in use, unpushed or possibly only unmounted).
   const {
     states: worktreeByWorkspaceId,
+    external: externalWorktrees,
     loaded: worktreeStatesLoaded,
     refresh: refreshWorktreeStates,
   } = useWorktreeRailStates(
@@ -3248,6 +3250,9 @@ export default function App() {
     [workspaces],
   );
   useNotifyFocusRouting(navigateToNotifyTarget, booted);
+  const closeAgentBoardPane = useCallback((workspaceId: string, tabId: string, paneId: string) => {
+    tabsRef.current.closeTerminalPaneInWorkspace(workspaceId, tabId, paneId);
+  }, []);
   // The rail's Agents view reads these from its own store, so an agent
   // changing state re-renders that view and not the memoized rail.
   useEffect(() => {
@@ -3261,6 +3266,9 @@ export default function App() {
       activeWorkspaceId: tabs.tabsWorkspaceId,
       activePaneId: activeViewPaneId,
       navigate: navigateToNotifyTarget,
+      branches: branchByWorkspaceId,
+      closePane: closeAgentBoardPane,
+      worktreeStates: worktreeByWorkspaceId,
     });
   }, [
     workspaces,
@@ -3271,6 +3279,9 @@ export default function App() {
     terminalAttention,
     activeViewPaneId,
     navigateToNotifyTarget,
+    branchByWorkspaceId,
+    closeAgentBoardPane,
+    worktreeByWorkspaceId,
   ]);
   useEffect(() => () => publishAgentBoardSources(null), []);
 
@@ -3650,9 +3661,8 @@ export default function App() {
   // `groupId` (from a folder's "Add workspace here…") files the new workspace
   // straight into that folder; its shade is then assigned by the folder
   // family like any other member.
-  const createWs = useCallback(async (groupId?: string) => {
-    const path = await window.spark.dialog.openDirectory(activeWorkspace?.cwd || home);
-    if (!path) return;
+  const addWorkspaceAt = useCallback(async (path: string, options?: { groupId?: string; rename?: boolean }) => {
+    const groupId = options?.groupId;
     const targetGroupId =
       typeof groupId === "string" && workspaceGroupsRef.current.some((g) => g.id === groupId)
         ? groupId
@@ -3687,8 +3697,70 @@ export default function App() {
     );
     activeRunIdsByWorkspaceRef.current[ws.id] = null;
     setActiveId(ws.id);
-    setEditingId(ws.id);
-  }, [workspaces, activeWorkspace, home]);
+    if (options?.rename !== false) setEditingId(ws.id);
+  }, [workspaces]);
+
+  const createWs = useCallback(async (groupId?: string) => {
+    const path = await window.spark.dialog.openDirectory(activeWorkspace?.cwd || home);
+    if (path) await addWorkspaceAt(path, { groupId });
+  }, [activeWorkspace, home, addWorkspaceAt]);
+
+  // A folder picked by its path, in Quick Open or from the file manager: the
+  // workspace already on it, or a new one, ready to use without a rename.
+  const openFolderAsWorkspace = useCallback(
+    async (path: string) => {
+      const same = (a: string, b: string) => a.replace(/[\\/]+$/, "") === b.replace(/[\\/]+$/, "");
+      const existing = workspaces.find((workspace) => same(workspace.cwd, path));
+      if (existing) setActiveId(existing.id);
+      else await addWorkspaceAt(path, { rename: false });
+    },
+    [workspaces, addWorkspaceAt],
+  );
+
+  // A worktree made outside Codara (plain `git worktree add`), clicked in the
+  // rail: it becomes a worktree row of its project, as the user's own (no
+  // creator), checked out rather than forked, so removing the row later
+  // keeps its branch.
+  const openExternalWorktree = useCallback(
+    async (entry: WorktreeRailExternal) => {
+      const same = (a: string, b: string) => a.replace(/[\\/]+$/, "") === b.replace(/[\\/]+$/, "");
+      const existing = workspaces.find((workspace) => same(workspace.cwd, entry.path));
+      if (existing) {
+        setActiveId(existing.id);
+        return;
+      }
+      const project = workspaces.find((workspace) => workspace.id === entry.projectId);
+      if (!project || !entry.branch) return;
+      const ws: Workspace = {
+        id: makeId("ws"),
+        name: entry.branch,
+        cwd: entry.path,
+        color: project.color,
+        workers: [],
+        ...(project.groupId ? { groupId: project.groupId } : {}),
+        copyBranch: {
+          repoCwd: project.cwd,
+          branch: entry.branch,
+          city: basename(entry.path) || entry.branch,
+          mode: "checkout",
+          createdAt: new Date().toISOString(),
+        },
+      };
+      const roots = workspaces
+        .map((workspace) => workspace.cwd)
+        .filter((cwd): cwd is string => typeof cwd === "string" && cwd.length > 0);
+      await window.spark.ui?.setAllowedRoots([...roots, ws.cwd]).catch(() => {
+        /* sandbox push is best-effort; the parent effect re-sends on state change */
+      });
+      setWorkspaces((list) =>
+        list.some((workspace) => same(workspace.cwd, ws.cwd)) ? list : [...list, ws],
+      );
+      activeRunIdsByWorkspaceRef.current[ws.id] = null;
+      setActiveId(ws.id);
+      refreshWorktreeStates();
+    },
+    [workspaces, refreshWorktreeStates],
+  );
 
   // Attach a local folder outside the workspace cwd as an extra Explorer root
   // (e.g. a OneDrive clients folder). The picker is always the local OS
@@ -5312,6 +5384,66 @@ export default function App() {
     return () => setTabLinkBridge(null);
   }, [focusTabLink, tabLinkLayouts]);
 
+  // codara_open_file: an agent's file opens as a kept (not preview) editor tab
+  // of the agent's workspace. When that workspace is not on screen the user
+  // is not pulled away from what they are doing: the tab opens when they go
+  // there next.
+  const pendingFileOpensRef = useRef(new Map<string, EditorOpenRequest[]>());
+  const openEditorRequest = useCallback((request: EditorOpenRequest) => {
+    tabsRef.current.openEditorTab(entryFromPath(request.path), { preview: false });
+    if (request.line !== undefined) requestEditorReveal(request.path, { line: request.line });
+  }, []);
+  useEffect(() => {
+    const workspaceId = tabs.tabsWorkspaceId;
+    if (!workspaceId || workspaceId !== activeId) return;
+    const queued = pendingFileOpensRef.current.get(workspaceId);
+    if (!queued) return;
+    pendingFileOpensRef.current.delete(workspaceId);
+    for (const request of queued) openEditorRequest(request);
+  }, [activeId, openEditorRequest, tabs.tabsWorkspaceId]);
+  // A path from the file manager (src/main/desktop-command-socket.ts). Main
+  // checked it and let the editor read the file. Optional for the same reason
+  // as onDesktopNewTerminal.
+  useEffect(
+    () =>
+      window.spark.windowControls.onDesktopOpenPath?.(async (request) => {
+        if (visibleModalDialog()) return "ignored";
+        if (request.kind === "folder") {
+          await openFolderAsWorkspace(request.path);
+          return "opened";
+        }
+        const workspaceId = activeIdRef.current;
+        if (!workspaceId) return "no-workspace";
+        if (tabsRef.current.tabsWorkspaceId === workspaceId) {
+          openEditorRequest({ workspaceId, path: request.path });
+        } else {
+          const queued = pendingFileOpensRef.current.get(workspaceId) ?? [];
+          pendingFileOpensRef.current.set(workspaceId, [...queued, { workspaceId, path: request.path }].slice(-10));
+        }
+        return "opened";
+      }),
+    [openEditorRequest, openFolderAsWorkspace],
+  );
+
+  useEffect(() => {
+    setEditorOpenBridge({
+      open: (request) => {
+        if (!workspacesRef.current.some((workspace) => workspace.id === request.workspaceId)) {
+          return { ok: false, reason: "workspace_closed" };
+        }
+        const current = tabsRef.current;
+        if (current.tabsWorkspaceId === request.workspaceId && activeIdRef.current === request.workspaceId) {
+          openEditorRequest(request);
+          return { ok: true, shown: true };
+        }
+        const queued = (pendingFileOpensRef.current.get(request.workspaceId) ?? []).filter((item) => item.path !== request.path);
+        pendingFileOpensRef.current.set(request.workspaceId, [...queued, request].slice(-10));
+        return { ok: true, shown: false };
+      },
+    });
+    return () => setEditorOpenBridge(null);
+  }, [openEditorRequest]);
+
   // Expose a tab-creation entry point to the preview registry so the
   // spark-preview MCP bridge can auto-open a preview tab when a sub-agent
   // calls navigate without one already being open. The registered fn returns
@@ -6038,7 +6170,7 @@ export default function App() {
     () => buildBindingTable(shortcutPreferences.keybindings),
     [shortcutPreferences.keybindings],
   );
-  useGlobalShortcuts(bindingTable, shortcutHandlers, {
+  const runShortcutCommand = useGlobalShortcuts(bindingTable, shortcutHandlers, {
     // While the Keybindings settings recorder is active, suppress all
     // shortcuts so chords like Ctrl+Tab can be captured for rebinding
     // instead of triggering their currently bound command.
@@ -6050,6 +6182,9 @@ export default function App() {
       if (onboardingOpen && document.querySelector(".onboarding-dialog")) return true;
       // The open jump palette answers Mod+1..6 itself.
       if (jumpPaletteOpen && id === "view.selectByIndex") return true;
+      // A terminal tab opened behind Settings or another modal dialog appears
+      // out of sight, so the chord stays with the dialog.
+      if (id === "tab.newTerminal" && visibleModalDialog()) return true;
       if (id === "workspace.selectByIndex" || id === "workspace.back" || id === "workspace.forward") {
         // Switching workspaces behind a dialog (the jump palette, Settings,
         // Fix with agent) happens out of sight and leaves the dialog
@@ -6115,6 +6250,16 @@ export default function App() {
       );
     },
   });
+
+  // A desktop-wide Ctrl+T reaches Studio through the desktop command socket
+  // instead of the keyboard (src/main/desktop-command-socket.ts). Optional
+  // because `npm run dev` never rebuilds the preload, so after a fast-forward
+  // this can run against one that predates it, and a throw here takes the
+  // whole window down.
+  useEffect(
+    () => window.spark.windowControls.onDesktopNewTerminal?.(() => runShortcutCommand("tab.newTerminal")),
+    [runShortcutCommand],
+  );
 
   // Resolved keybind hints for the tab-strip "+" picker. Derived from the
   // effective binding table so the menu always shows the user's actual chord
@@ -6664,6 +6809,8 @@ export default function App() {
             branchByWorkspaceId={branchByWorkspaceId}
             worktreeByWorkspaceId={worktreeByWorkspaceId}
             worktreeStatesLoaded={worktreeStatesLoaded}
+            externalWorktrees={externalWorktrees}
+            onOpenExternalWorktree={openExternalWorktree}
             onCleanUpWorkspace={handleCleanUpWorkspace}
             sections={panels.sections.left}
             draggingSection={draggingPanelSection}
@@ -6811,6 +6958,8 @@ export default function App() {
             branchByWorkspaceId={branchByWorkspaceId}
             worktreeByWorkspaceId={worktreeByWorkspaceId}
             worktreeStatesLoaded={worktreeStatesLoaded}
+            externalWorktrees={externalWorktrees}
+            onOpenExternalWorktree={openExternalWorktree}
             onCleanUpWorkspace={handleCleanUpWorkspace}
             sections={panels.sections.right}
             draggingSection={draggingPanelSection}
@@ -7018,6 +7167,7 @@ export default function App() {
           cwd={activeWorkspace?.cwd ?? null}
           onClose={closeFileSearch}
           onOpenFile={handleSearchOpenFile}
+          onOpenFolder={openFolderAsWorkspace}
         />
 
         <WorkspaceSwitchHud
@@ -7971,7 +8121,14 @@ const Workspace = React.memo(function Workspace({
     [setDirty],
   );
   const handleSparkOpen = useCallback(
-    (input: { file: string }) => onSparkOpenFile(input.file),
+    (input: { file: string; line?: number; column?: number }) => {
+      onSparkOpenFile(input.file);
+      // A link with a line suffix (src/a.ts:42) shows that line once the
+      // editor has read the file.
+      if (input.line !== undefined && input.line > 0) {
+        requestEditorReveal(input.file, { line: input.line, ...(input.column ? { column: input.column } : {}) });
+      }
+    },
     [onSparkOpenFile],
   );
   const handlePaneExit = useCallback(
@@ -8196,7 +8353,6 @@ const Workspace = React.memo(function Workspace({
           <EmptyWorkbench
             onNewChat={onNewChat}
             onNewTerminal={onNewTerminalTab}
-            onNewAgent={onNewClaudeWorker}
             hints={pickerHints}
           />
         )}
@@ -8502,12 +8658,10 @@ const NoWorkspace = React.memo(function NoWorkspace({ onCreate }: { onCreate: ()
 const EmptyWorkbench = React.memo(function EmptyWorkbench({
   onNewChat,
   onNewTerminal,
-  onNewAgent,
   hints,
 }: {
   onNewChat: () => void;
   onNewTerminal: () => void;
-  onNewAgent: () => void;
   hints: PickerHints;
 }) {
   const hintStyle: React.CSSProperties = {
@@ -8589,8 +8743,8 @@ const EmptyWorkbench = React.memo(function EmptyWorkbench({
           marginBottom: 8,
         }}
       >
-        Start a chat with Cora, open a terminal or launch an agent. Past chats
-        are still in the history popover.
+        Start a chat with Cora or open a terminal. Past chats are still in the
+        history popover.
       </div>
       <div style={{ display: "inline-flex", gap: 10 }}>
         <button
@@ -8616,15 +8770,6 @@ const EmptyWorkbench = React.memo(function EmptyWorkbench({
         >
           + New terminal
           {hints.terminal && <span style={hintStyle}>{hints.terminal}</span>}
-        </button>
-        <button
-          type="button"
-          onClick={onNewAgent}
-          style={buttonStyle}
-          onMouseEnter={onEnter}
-          onMouseLeave={onLeave}
-        >
-          + New agent
         </button>
       </div>
     </div>

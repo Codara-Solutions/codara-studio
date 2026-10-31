@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { findBinding, type BindingTable } from "./bindings";
 import type { CommandId } from "./commands";
 import { noteCommandRan } from "../components/feature-tips/feature-usage";
@@ -18,22 +18,29 @@ export type UseGlobalShortcutsOptions = {
   isDisabled?: (id: CommandId, e: KeyboardEvent) => boolean;
 };
 
+// Returns a function that runs a command as its chord would, under the same
+// isDisabled rules, for a press that reached Studio without a key event. It
+// says whether the command ran.
 export function useGlobalShortcuts(
   table: BindingTable,
   handlers: ShortcutHandlers,
   options?: UseGlobalShortcutsOptions,
-) {
+): (id: CommandId) => boolean {
   const latest = useRef({ table, handlers, options });
   latest.current = { table, handlers, options };
 
+  const enabledHandler = useCallback((id: CommandId, e: KeyboardEvent) => {
+    const { handlers, options } = latest.current;
+    if (options?.isDisabled?.(id, e)) return null;
+    return handlers[id] ?? null;
+  }, []);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const { table, handlers, options } = latest.current;
-      const binding = findBinding(table, e);
+      const binding = findBinding(latest.current.table, e);
       if (!binding) return;
       const id = binding.command.id;
-      if (options?.isDisabled?.(id, e)) return;
-      const h = handlers[id];
+      const h = enabledHandler(id, e);
       if (!h) return;
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -43,5 +50,17 @@ export function useGlobalShortcuts(
     window.addEventListener("keydown", onKey, { capture: true });
     return () =>
       window.removeEventListener("keydown", onKey, { capture: true });
-  }, []);
+  }, [enabledHandler]);
+
+  return useCallback(
+    (id: CommandId) => {
+      const event = new KeyboardEvent("keydown");
+      const h = enabledHandler(id, event);
+      if (!h) return false;
+      h(event);
+      noteCommandRan(id);
+      return true;
+    },
+    [enabledHandler],
+  );
 }

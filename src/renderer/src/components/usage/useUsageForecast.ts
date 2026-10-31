@@ -1,8 +1,8 @@
-// Labs: the usage forecast, shared by the title bar, the usage panel and the
+// The usage forecast, shared by the title bar, the usage panel and the
 // Usage tab. One read serves all three; the main process caches the scan.
 
 import { useEffect, useState } from "react";
-import type { UsageForecastReport, WindowForecastView } from "@shared/usage-forecast";
+import type { UsageForecastReport } from "@shared/usage-forecast";
 
 const FRESH_MS = 60_000;
 const POLL_MS = 5 * 60_000;
@@ -141,49 +141,4 @@ export function useUsageForecast(enabled: boolean): UsageForecastState {
   }, [enabled]);
 
   return { report, loading, error };
-}
-
-export function forecastFor(
-  report: UsageForecastReport | null,
-  profileId: string | undefined,
-  windowId: string,
-): WindowForecastView | null {
-  if (!report || !profileId) return null;
-  return report.windows.find((view) => view.profileId === profileId && view.windowId === windowId) ?? null;
-}
-
-/** How the panel shows the forecast. B (ghost, the projection on the meter)
- * is the chosen default; A and C stay as a per-viewer choice in the Labs card,
- * so it lives in localStorage rather than in preferences. */
-export type ForecastPanelStyle = "line" | "ghost" | "pill";
-
-const STYLE_KEY = "spark.usage.forecastStyle";
-const STYLE_EVENT = "spark:usage-forecast-style";
-
-export function readForecastStyle(): ForecastPanelStyle {
-  try {
-    const value = window.localStorage.getItem(STYLE_KEY);
-    return value === "line" || value === "pill" ? value : "ghost";
-  } catch {
-    return "ghost";
-  }
-}
-
-export function writeForecastStyle(style: ForecastPanelStyle): void {
-  try {
-    window.localStorage.setItem(STYLE_KEY, style);
-  } catch {
-    // A locked storage keeps the choice for this window only.
-  }
-  window.dispatchEvent(new CustomEvent(STYLE_EVENT, { detail: style }));
-}
-
-export function useForecastStyle(): ForecastPanelStyle {
-  const [style, setStyle] = useState<ForecastPanelStyle>(readForecastStyle);
-  useEffect(() => {
-    const onChange = (event: Event) => setStyle((event as CustomEvent<ForecastPanelStyle>).detail);
-    window.addEventListener(STYLE_EVENT, onChange);
-    return () => window.removeEventListener(STYLE_EVENT, onChange);
-  }, []);
-  return style;
 }

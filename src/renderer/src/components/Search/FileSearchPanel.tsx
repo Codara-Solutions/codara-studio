@@ -1,15 +1,21 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
-import type { FsEntry } from "@shared/types";
+import type { FsEntry, HomeFileHit, PathQueryHit } from "@shared/types";
+import { isPathQuery } from "@shared/path-query";
 import { CloseIcon } from "../icons";
 import FileNodeIcon from "../file-icons/LazyFileNodeIcon";
 import { basename, dirname } from "../../path-utils";
+import { usePreferences } from "../../preferences/usePreferences";
+import { homeQueryQualifies, useHomeFileSearch } from "./useHomeFileSearch";
+import { usePathQuery } from "./usePathQuery";
 
 interface Props {
   open: boolean;
   cwd: string | null;
   onClose: () => void;
   onOpenFile: (entry: FsEntry) => void;
+  /** A folder picked by its path; it becomes a workspace. */
+  onOpenFolder?: (path: string) => void;
 }
 
 interface FileRow {
@@ -20,11 +26,23 @@ interface FileRow {
   score: number;
 }
 
+// One line of the result list. Workspace files come first; files found in
+// the home folder follow under their own heading. `pick` is the row's place
+// among the rows that open something (what the arrow keys move through).
+type ListItem =
+  | { kind: "file"; row: FileRow; pick: number }
+  | { kind: "heading" }
+  | { kind: "home"; hit: HomeFileHit; pick: number }
+  | { kind: "path"; hit: PathQueryHit; pick: number }
+  | { kind: "status"; text: string; danger?: boolean };
+
+type Pick = { kind: "file"; row: FileRow } | { kind: "home"; hit: HomeFileHit } | { kind: "path"; hit: PathQueryHit };
+
 const DISPLAY_LIMIT = 250;
 const DEBOUNCE_MS = 250;
 const FILE_LIST_CACHE_MS = 30_000;
 
-export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Props) {
+export default function FileSearchPanel({ open, cwd, onClose, onOpenFile, onOpenFolder }: Props) {
   const [query, setQuery] = useState("");
   // The scoring pass below walks every file in the workspace (up to the
   // listFiles cap of 10k) with a fuzzy character walk, so it must not run per
@@ -42,15 +60,29 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
   const loadedWorkspaceRef = useRef<{ cwd: string; at: number } | null>(null);
   const keyboardMoveRef = useRef(false);
   // Deferred Enter: the keydown handler flushed the scoring debounce and
-  // parked the query it wants opened; the effect below `openRow` completes
+  // parked the query it wants opened; the effect below `openPick` completes
   // the open on the first render where the rows reflect exactly that query.
   // Any later keystroke re-parks or (via onChange) cancels, so a stale
   // pending open can never fire.
   const pendingOpenQueryRef = useRef<string | null>(null);
+  const { preferences } = usePreferences();
+  const anywhereEnabled = preferences.quickOpenAnywhere !== false;
+  // A preload from before path mode (`npm run dev` keeps it across a fast
+  // forward) has no such call: the query stays plain text.
+  const pathReady = typeof window.spark.fs.searchPath === "function";
+  const pathMode = anywhereEnabled && pathReady && isPathQuery(scoredQuery, cwd);
+  const pathResult = usePathQuery(open, pathMode, scoredQuery, cwd);
+  const home = useHomeFileSearch(open, anywhereEnabled && Boolean(cwd) && !pathMode, scoredQuery, cwd);
+  const [pickError, setPickError] = useState<string | null>(null);
+  const pickGenerationRef = useRef(0);
 
   useEffect(() => {
-    if (!open) return;
+    // A deferred Enter, or a pick main is still checking, must not open a
+    // tab once the panel has closed (Escape) or opened again.
+    pickGenerationRef.current += 1;
     pendingOpenQueryRef.current = null;
+    if (!open) return;
+    setPickError(null);
     setQuery("");
     setScoredQuery("");
     setSelectedIndex(0);
@@ -151,45 +183,192 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
     return matched.slice(0, DISPLAY_LIMIT);
   }, [cwd, files, scoredQuery]);
 
+  const homeVisible = anywhereEnabled && Boolean(cwd) && !pathMode && homeQueryQualifies(scoredQuery);
+  // Home hits answer `home.query`; while a newer query is searching they stay
+  // on screen, but they never open from a deferred Enter for the new query.
+  const homeHits = homeVisible ? home.hits : [];
+  const pathSettled = !pathMode || (pathResult.query === scoredQuery && pathResult.status !== "searching");
+  const homeSettled = pathMode ? pathSettled : !homeVisible || (home.query === scoredQuery && home.status !== "searching");
+  // "/index.ts" may be a path or a piece of one in the workspace: when nothing
+  // on disk answers to it, it is searched as text, as it always was.
+  const pathFellThrough = pathMode && pathSettled && pathResult.hits.length === 0 && scoredQuery.trimStart().startsWith("/");
+  const shownRows = pathMode && !pathFellThrough ? EMPTY_ROWS : rows;
+  const pathHits = pathMode ? pathResult.hits : EMPTY_PATH_HITS;
+
+  const { items, picks, pickToItem } = useMemo(() => {
+    const items: ListItem[] = [];
+    const picks: Pick[] = [];
+    const pickToItem: number[] = [];
+    for (const row of shownRows) {
+      pickToItem.push(items.length);
+      items.push({ kind: "file", row, pick: picks.length });
+      picks.push({ kind: "file", row });
+    }
+    if (pathMode) {
+      if (pickError) items.push({ kind: "status", text: pickError, danger: true });
+      for (const hit of pathHits) {
+        pickToItem.push(items.length);
+        items.push({ kind: "path", hit, pick: picks.length });
+        picks.push({ kind: "path", hit });
+      }
+      if (pathHits.length === 0 && shownRows.length === 0) {
+        if (pathResult.status === "error") items.push({ kind: "status", text: pathResult.error ?? "The path could not be read.", danger: true });
+        else if (pathResult.message) items.push({ kind: "status", text: pathResult.message, danger: true });
+        else if (pathSettled) items.push({ kind: "status", text: pathResult.missing ? "No such folder." : "Nothing here matches." });
+        else items.push({ kind: "status", text: "Looking…" });
+      } else if (pathResult.message) {
+        items.push({ kind: "status", text: pathResult.message, danger: true });
+      }
+    }
+    if (homeVisible) {
+      if (rows.length === 0) {
+        items.push({ kind: "status", text: files.length === 0 ? "This workspace has no files to open." : "Nothing in this workspace matches." });
+      }
+      items.push({ kind: "heading" });
+      if (pickError) items.push({ kind: "status", text: pickError, danger: true });
+      for (const hit of homeHits) {
+        pickToItem.push(items.length);
+        items.push({ kind: "home", hit, pick: picks.length });
+        picks.push({ kind: "home", hit });
+      }
+      if (homeHits.length === 0) {
+        if (home.status === "error") items.push({ kind: "status", text: home.error ?? "The search failed.", danger: true });
+        else if (home.status === "done" && home.query === scoredQuery) items.push({ kind: "status", text: "No other files match." });
+        else items.push({ kind: "status", text: "Searching your home folder…" });
+      }
+    }
+    return { items, picks, pickToItem };
+  }, [
+    shownRows,
+    rows.length,
+    files.length,
+    homeVisible,
+    homeHits,
+    home.status,
+    home.error,
+    home.query,
+    scoredQuery,
+    pickError,
+    pathMode,
+    pathHits,
+    pathResult.status,
+    pathResult.error,
+    pathResult.message,
+    pathResult.missing,
+    pathSettled,
+  ]);
+
   useEffect(() => {
     setSelectedIndex(0);
   }, [scoredQuery, cwd]);
 
   useEffect(() => {
-    if (selectedIndex < 0) {
-      setSelectedIndex(0);
-    } else if (selectedIndex >= rows.length) {
-      setSelectedIndex(Math.max(0, rows.length - 1));
-    }
-  }, [rows.length, selectedIndex]);
+    pendingOpenQueryRef.current = null;
+    pickGenerationRef.current += 1;
+    setPickError(null);
+  }, [cwd]);
 
   useEffect(() => {
-    if (!open || rows.length === 0 || !keyboardMoveRef.current) return;
+    if (selectedIndex < 0) {
+      setSelectedIndex(0);
+    } else if (selectedIndex >= picks.length) {
+      setSelectedIndex(Math.max(0, picks.length - 1));
+    }
+  }, [picks.length, selectedIndex]);
+
+  useEffect(() => {
+    if (!open || picks.length === 0 || !keyboardMoveRef.current) return;
     keyboardMoveRef.current = false;
     virtuosoRef.current?.scrollToIndex({
-      index: selectedIndex,
+      index: pickToItem[selectedIndex] ?? 0,
       align: "center",
       behavior: "auto",
     });
-  }, [open, selectedIndex, rows.length]);
+  }, [open, selectedIndex, picks.length, pickToItem]);
 
-  const openRow = useCallback(
-    (row: FileRow | undefined) => {
-      if (!row) return;
-      onOpenFile(row.entry);
-      onClose();
+  const completeTo = useCallback((completion: string) => {
+    pendingOpenQueryRef.current = null;
+    pickGenerationRef.current += 1;
+    setPickError(null);
+    setQuery(completion);
+    // No debounce: the list follows the step at once, as a shell's does.
+    setScoredQuery(completion);
+  }, []);
+
+  const openPath = useCallback(
+    (hit: PathQueryHit) => {
+      const generation = pickGenerationRef.current + 1;
+      pickGenerationRef.current = generation;
+      setPickError(null);
+      void window.spark.fs.openPathPick(hit.path).then(
+        (result) => {
+          if (pickGenerationRef.current !== generation) return;
+          if (!result.ok) {
+            setPickError(result.message);
+            return;
+          }
+          if (result.kind === "folder") onOpenFolder?.(result.path);
+          else onOpenFile(entryFromName(hit.name, result.path));
+          onClose();
+        },
+        (error) => {
+          if (pickGenerationRef.current !== generation) return;
+          setPickError((error as Error)?.message || String(error));
+        },
+      );
     },
-    [onClose, onOpenFile],
+    [onClose, onOpenFile, onOpenFolder],
+  );
+
+  const openPick = useCallback(
+    (pick: Pick | undefined) => {
+      if (!pick) return;
+      if (pick.kind === "file") {
+        onOpenFile(pick.row.entry);
+        onClose();
+        return;
+      }
+      if (pick.kind === "path") {
+        // A folder is stepped into; the row for the folder itself opens it.
+        if (pick.hit.isDir && pick.hit.kind !== "folder") completeTo(pick.hit.completion);
+        else openPath(pick.hit);
+        return;
+      }
+      // Main checks the file and lets the editor read it (it is outside every
+      // workspace); only then does the tab open.
+      const generation = pickGenerationRef.current + 1;
+      pickGenerationRef.current = generation;
+      setPickError(null);
+      void window.spark.fs.openHomeSearchPick(pick.hit.path).then(
+        (result) => {
+          if (pickGenerationRef.current !== generation) return;
+          if (!result.ok) {
+            setPickError(result.message);
+            return;
+          }
+          onOpenFile(entryFromHit(pick.hit, result.path));
+          onClose();
+        },
+        (error) => {
+          if (pickGenerationRef.current !== generation) return;
+          setPickError((error as Error)?.message || String(error));
+        },
+      );
+    },
+    [completeTo, onClose, onOpenFile, openPath],
   );
 
   useEffect(() => {
     if (pendingOpenQueryRef.current === null) return;
     if (scoredQuery !== pendingOpenQueryRef.current) return;
+    // With no workspace match the best pick is the first home hit, which
+    // arrives after the workspace rows; wait for it.
+    if (shownRows.length === 0 && !homeSettled) return;
     pendingOpenQueryRef.current = null;
     // Selection was reset to 0 by the scoredQuery-change effect, so this
     // opens the best match for the query the user pressed Enter on.
-    openRow(rows[0]);
-  }, [scoredQuery, rows, openRow]);
+    openPick(picks[0]);
+  }, [scoredQuery, shownRows.length, homeSettled, picks, openPick]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement | HTMLElement>) => {
@@ -200,9 +379,9 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
       }
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        if (rows.length === 0) return;
+        if (picks.length === 0) return;
         keyboardMoveRef.current = true;
-        setSelectedIndex((index) => Math.min(rows.length - 1, index + 1));
+        setSelectedIndex((index) => Math.min(picks.length - 1, index + 1));
         return;
       }
       if (e.key === "ArrowUp") {
@@ -211,21 +390,49 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
         setSelectedIndex((index) => Math.max(0, index - 1));
         return;
       }
+      if (e.key === "Tab" && anywhereEnabled && pathReady && isPathQuery(query, cwd)) {
+        e.preventDefault();
+        if (query !== scoredQuery) {
+          setScoredQuery(query);
+          return;
+        }
+        const pick = picks[selectedIndex];
+        if (pick?.kind === "path" && pathSettled) completeTo(pick.hit.completion);
+        return;
+      }
       if (e.key === "Enter") {
         e.preventDefault();
+        // The list after a step into a folder is still coming: a second press
+        // must not land on the row for the folder and open it as a workspace.
+        if (pathMode && query === scoredQuery && !pathSettled) return;
         // A fast Enter can land inside the scoring debounce window, when
         // `rows` still reflects the PREVIOUS query — opening an arbitrary
         // file. Flush the debounce and defer the open: the effect below fires
         // it once the scoring memo has re-run against the real query.
-        if (query !== scoredQuery) {
+        if (query !== scoredQuery || (shownRows.length === 0 && !homeSettled)) {
           pendingOpenQueryRef.current = query;
           setScoredQuery(query);
           return;
         }
-        openRow(rows[selectedIndex]);
+        openPick(picks[selectedIndex]);
       }
     },
-    [onClose, openRow, rows, selectedIndex, query, scoredQuery],
+    [
+      onClose,
+      openPick,
+      completeTo,
+      picks,
+      shownRows.length,
+      homeSettled,
+      anywhereEnabled,
+      pathReady,
+      cwd,
+      pathMode,
+      pathSettled,
+      selectedIndex,
+      query,
+      scoredQuery,
+    ],
   );
 
   if (!open) return null;
@@ -291,8 +498,11 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
               type="text"
               value={query}
               onChange={(e) => {
-                // Typing after a deferred Enter supersedes it.
+                // Typing after a deferred Enter supersedes it, and a pick
+                // still being checked.
                 pendingOpenQueryRef.current = null;
+                pickGenerationRef.current += 1;
+                setPickError(null);
                 setQuery(e.currentTarget.value);
               }}
               onKeyDown={handleKeyDown}
@@ -320,6 +530,9 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
               <button
                 type="button"
                 onClick={() => {
+                  pendingOpenQueryRef.current = null;
+                  pickGenerationRef.current += 1;
+                  setPickError(null);
                   setQuery("");
                   inputRef.current?.focus();
                 }}
@@ -396,8 +609,8 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
             // Sized to the results, like Spotlight: a short list stays a short
             // card instead of a tall panel with one row at the top.
             height:
-              rows.length > 0 && cwd && !loading && !error
-                ? `min(${rows.length * RESULT_ROW_HEIGHT + 8}px, 520px, calc(100vh - 170px))`
+              items.length > 0 && cwd && !loading && !error
+                ? `min(${items.length * RESULT_ROW_HEIGHT + 8}px, 520px, calc(100vh - 170px))`
                 : 150,
           }}
         >
@@ -407,7 +620,7 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
             <Empty eyebrow="No workspace" text="Open a workspace to search its files." />
           ) : loading ? (
             <Empty eyebrow="Loading" text="Indexing the workspace…" loading />
-          ) : rows.length === 0 ? (
+          ) : items.length === 0 ? (
             files.length === 0 ? (
               <Empty eyebrow="No files" text="This workspace has no files to open." />
             ) : (
@@ -418,17 +631,45 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
               ref={virtuosoRef}
               style={{ height: "100%", width: "100%" }}
               fixedItemHeight={RESULT_ROW_HEIGHT}
-              totalCount={rows.length}
+              totalCount={items.length}
               overscan={400}
               itemContent={(index) => {
-                const row = rows[index];
-                if (!row) return null;
-                return (
+                const item = items[index];
+                if (!item) return null;
+                if (item.kind === "heading") return <SectionHeading />;
+                if (item.kind === "status") return <SectionStatus text={item.text} danger={item.danger} />;
+                const pick = item.pick;
+                if (item.kind === "path") {
+                  const openHere = item.hit.kind === "folder";
+                  return (
+                    <FileResultRow
+                      name={item.hit.name}
+                      isDir={item.hit.isDir}
+                      directory={openHere ? "Open as workspace" : item.hit.label}
+                      title={item.hit.path}
+                      active={pick === selectedIndex}
+                      onMouseEnter={() => setSelectedIndex(pick)}
+                      onClick={() => openPick(picks[pick])}
+                    />
+                  );
+                }
+                return item.kind === "file" ? (
                   <FileResultRow
-                    row={row}
-                    active={index === selectedIndex}
-                    onMouseEnter={() => setSelectedIndex(index)}
-                    onClick={() => openRow(row)}
+                    name={item.row.entry.name}
+                    directory={item.row.directory}
+                    title={item.row.entry.path}
+                    active={pick === selectedIndex}
+                    onMouseEnter={() => setSelectedIndex(pick)}
+                    onClick={() => openPick(picks[pick])}
+                  />
+                ) : (
+                  <FileResultRow
+                    name={item.hit.name}
+                    directory={homeDirectoryLabel(item.hit.rel)}
+                    title={item.hit.path}
+                    active={pick === selectedIndex}
+                    onMouseEnter={() => setSelectedIndex(pick)}
+                    onClick={() => openPick(picks[pick])}
                   />
                 );
               }}
@@ -451,13 +692,30 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
           }}
         >
           <span>
-            <span style={{ color: "var(--ink-dim)" }}>{rows.length}</span> shown of{" "}
-            <span style={{ color: "var(--ink-dim)" }}>{files.length}</span> files
+            {pathMode ? (
+              <>
+                <span style={{ color: "var(--ink-dim)" }}>{pathHits.length}</span> {pathHits.length === 1 ? "path" : "paths"}
+              </>
+            ) : (
+              <>
+                <span style={{ color: "var(--ink-dim)" }}>{rows.length}</span> shown of{" "}
+                <span style={{ color: "var(--ink-dim)" }}>{files.length}</span> files
+              </>
+            )}
+            {homeVisible && homeHits.length > 0 ? (
+              <>
+                {" "}· <span style={{ color: "var(--ink-dim)" }}>{homeHits.length}</span> elsewhere
+              </>
+            ) : null}
           </span>
           <span style={{ flex: 1 }} />
-          {truncated ? (
+          {pathMode && pathResult.truncated ? (
+            <span style={{ color: "var(--warn)" }}>Long folder. Keep typing to filter</span>
+          ) : pathMode ? (
+            <span>Enter opens · Tab completes</span>
+          ) : truncated || (homeVisible && home.truncated) ? (
             <span style={{ color: "var(--warn)" }}>
-              File list capped. Refine the query
+              {truncated ? "File list capped" : "Home search stopped early"}. Refine the query
             </span>
           ) : null}
         </footer>
@@ -467,14 +725,79 @@ export default function FileSearchPanel({ open, cwd, onClose, onOpenFile }: Prop
 }
 
 const RESULT_ROW_HEIGHT = 28;
+const EMPTY_ROWS: FileRow[] = [];
+const EMPTY_PATH_HITS: PathQueryHit[] = [];
+
+function entryFromName(name: string, path: string): FsEntry {
+  const dot = name.lastIndexOf(".");
+  return { name, path, isDir: false, ext: dot > 0 ? name.slice(dot + 1).toLowerCase() : undefined };
+}
+
+function entryFromHit(hit: HomeFileHit, path: string): FsEntry {
+  return entryFromName(hit.name, path);
+}
+
+/** "~/Documents/notes" for a file at ~/Documents/notes/x.md; "~" at the top. */
+function homeDirectoryLabel(rel: string): string {
+  const slash = rel.lastIndexOf("/");
+  return slash < 0 ? "~" : `~/${rel.slice(0, slash)}`;
+}
+
+function SectionHeading() {
+  return (
+    <div
+      role="presentation"
+      className="spark-eyebrow"
+      style={{
+        display: "flex",
+        alignItems: "flex-end",
+        height: RESULT_ROW_HEIGHT,
+        boxSizing: "border-box",
+        margin: "0 6px",
+        padding: "0 10px 5px",
+      }}
+    >
+      Elsewhere on this computer
+    </div>
+  );
+}
+
+function SectionStatus({ text, danger = false }: { text: string; danger?: boolean }) {
+  return (
+    <div
+      role="status"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        height: RESULT_ROW_HEIGHT,
+        boxSizing: "border-box",
+        margin: "0 6px",
+        padding: "0 10px",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+        color: danger ? "var(--danger)" : "var(--muted-2)",
+        fontSize: 12,
+      }}
+    >
+      {text}
+    </div>
+  );
+}
 
 function FileResultRow({
-  row,
+  name,
+  isDir = false,
+  directory,
+  title,
   active,
   onMouseEnter,
   onClick,
 }: {
-  row: FileRow;
+  name: string;
+  isDir?: boolean;
+  directory: string;
+  title: string;
   active: boolean;
   onMouseEnter: () => void;
   onClick: () => void;
@@ -486,7 +809,7 @@ function FileResultRow({
       aria-selected={active}
       onMouseEnter={onMouseEnter}
       onClick={onClick}
-      title={row.entry.path}
+      title={title}
       // The selected row is the inset capsule every palette and glass menu
       // uses (the run switcher's row), not a full-width bar.
       style={{
@@ -504,7 +827,7 @@ function FileResultRow({
         cursor: "default",
       }}
     >
-      <FileNodeIcon name={row.entry.name} isDir={false} size={15} />
+      <FileNodeIcon name={name} isDir={isDir} size={15} />
       <span
         style={{
           flex: "0 1 auto",
@@ -517,9 +840,9 @@ function FileResultRow({
           fontSize: 13,
         }}
       >
-        {row.entry.name}
+        {name}
       </span>
-      {row.directory ? (
+      {directory ? (
         <span
           style={{
             flex: "1 1 auto",
@@ -532,7 +855,7 @@ function FileResultRow({
             fontSize: 11,
           }}
         >
-          {row.directory}
+          {directory}
         </span>
       ) : null}
     </div>

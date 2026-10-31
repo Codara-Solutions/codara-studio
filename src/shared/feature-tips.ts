@@ -315,9 +315,9 @@ export const FEATURE_CATALOG: readonly FeatureCatalogEntry[] = [
   {
     id: "usage-panel",
     name: "Usage and limits",
-    used: "The Usage page was opened.",
+    used: "The usage panel or the Usage page was opened.",
     signals: {
-      clicks: ['button[aria-label="Usage analytics"]'],
+      clicks: ['button[aria-label="Usage analytics"]', "[data-usage-hairline]"],
       commands: ["usage.open"],
       visible: ["[data-usage-page]"],
     },
@@ -326,9 +326,9 @@ export const FEATURE_CATALOG: readonly FeatureCatalogEntry[] = [
       body: "Usage shows each agent's limits and when they reset, so a long run does not stop by surprise.",
       tour: [
         {
-          target: 'button[aria-label="Usage analytics"]',
+          target: ".usage-hairlines",
           title: "Usage",
-          body: "Open it here or with {shortcut:usage.open} to see every account's limits and spend.",
+          body: "Each line is a plan: solid is used now, faint is where it ends at the reset. Click it, or open the Usage page with {shortcut:usage.open}.",
           placement: "bottom",
         },
       ],

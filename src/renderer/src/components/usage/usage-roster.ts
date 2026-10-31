@@ -1,16 +1,15 @@
-// What the title bar's Usage roster shows: one row per provider with the
-// windows of the account new sessions use, and per provider the details its
-// flyout lists (every window, credits, resets, every account with its email
-// and limits). The layout follows Orca's usage roster (github.com/stablyai/orca,
-// MIT); the rules are Codara's own. Pure, so scripts/test-usage-roster.cjs
-// pins them without a renderer.
+// Who is behind each provider in the title bar's usage panel: the account new
+// sessions use with its reading, every other account with its email and
+// limits, and what switching to it does. The account model follows Orca's
+// usage roster (github.com/stablyai/orca, MIT); the rules are Codara's own.
+// What the panel says about each limit is in usage-glance.ts. Pure, so
+// scripts/test-usage-roster.cjs pins them without a renderer.
 
 import type {
   NativeCliAccountsInspection,
   PiSubscriptionOverview,
   PiSubscriptionProfileConnection,
   PiSubscriptionProvider,
-  PiUsageCredits,
   PiUsageOverview,
   PiUsageProfile,
   PiUsageWindow,
@@ -21,15 +20,6 @@ import {
   systemLoginBadge,
   type AccountProviderDescriptor,
 } from "../../lib/account-provider-descriptors";
-
-/** Detailed draws every window as a bar; Compact one number per provider. */
-export type UsageDensity = "detailed" | "compact";
-
-export const USAGE_DENSITY_KEY = "spark.usage.density";
-
-export function normalizeUsageDensity(value: unknown): UsageDensity {
-  return value === "compact" ? "compact" : "detailed";
-}
 
 /** One short window in a row: "5h", "wk" or a model's name. */
 export interface RosterChip {
@@ -135,17 +125,6 @@ export function windowChipLabel(window: PiUsageWindow): string | null {
   return length.amount % 7 === 0 ? `${length.amount / 7}w` : `${length.amount}d`;
 }
 
-/** The window's name in the flyout: "Session", "Weekly", "Fable weekly". */
-export function windowTitle(window: PiUsageWindow): string {
-  const label = window.label.trim();
-  if (scopeKind(window) === "general") {
-    if (label === "5-hour") return "Session";
-    if (label === "7-day") return "Weekly";
-    return label;
-  }
-  return label.replace(/ 7-day$/, " weekly");
-}
-
 function windowRank(window: PiUsageWindow): number {
   const kind = scopeKind(window);
   if (kind === "general") return 0;
@@ -194,28 +173,6 @@ export function tightestChip(chips: readonly RosterChip[]): RosterChip | null {
   );
 }
 
-/** What a title-bar pill shows: every plan-wide window, or in Compact the tightest. */
-export function pillChips(chips: readonly RosterChip[], density: UsageDensity): RosterChip[] {
-  if (density === "compact") {
-    const worst = tightestChip(chips);
-    return worst ? [worst] : [];
-  }
-  const general = chips.filter((chip) => chip.general);
-  return general.length > 0 ? general : chips.slice(0, 1);
-}
-
-/**
- * Headroom as a colour: green with plenty left, through amber, to red as the
- * window fills. The title bar's scale, so a row and its pill always agree.
- * Two segments, because a straight green-to-red mix passes through olive.
- */
-export function usageTone(usedPercent: number): string {
-  const used = clampPercent(usedPercent);
-  const amber = "var(--warn, #d99a2b)";
-  if (used <= 60) return `color-mix(in oklch, ${amber} ${(used / 60) * 100}%, var(--ok))`;
-  return `color-mix(in oklch, var(--danger) ${((used - 60) / 40) * 100}%, ${amber})`;
-}
-
 function clampPercent(value: number): number {
   return Number.isFinite(value) ? Math.min(100, Math.max(0, value)) : 0;
 }
@@ -238,35 +195,6 @@ export function formatResetDuration(ms: number): string {
   return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
 }
 
-/** "Resets in 2h 14m", or "Resets now" for a moment already past. */
-export function formatResetsIn(resetsAt: string | undefined, nowMs: number): string | null {
-  const at = resetsAt ? Date.parse(resetsAt) : Number.NaN;
-  if (!Number.isFinite(at)) return null;
-  const duration = formatResetDuration(at - nowMs);
-  return duration === "now" ? "Resets now" : `Resets in ${duration}`;
-}
-
-/** The soonest reset among the chips a row draws. */
-export function soonestReset(chips: readonly RosterChip[], nowMs: number): string | null {
-  const times = chips
-    .map((chip) => (chip.resetsAt ? Date.parse(chip.resetsAt) : Number.NaN))
-    .filter((at) => Number.isFinite(at));
-  if (times.length === 0) return null;
-  return formatResetsIn(new Date(Math.min(...times)).toISOString(), nowMs);
-}
-
-/** "Updated just now", "Updated 2m ago", "Updated 3h ago". */
-export function formatUpdatedAgo(checkedAt: string | undefined, nowMs: number): string | null {
-  const at = checkedAt ? Date.parse(checkedAt) : Number.NaN;
-  if (!Number.isFinite(at)) return null;
-  const minutes = Math.floor(Math.max(0, nowMs - at) / 60_000);
-  if (minutes < 1) return "Updated just now";
-  if (minutes < 60) return `Updated ${minutes}m ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `Updated ${hours}h ago`;
-  return `Updated ${Math.floor(hours / 24)}d ago`;
-}
-
 /** "plus" to "Plus", "chatgpt_business" to "ChatGPT Business". */
 export function formatPlan(plan: string | undefined | null): string | null {
   const trimmed = plan?.trim();
@@ -279,86 +207,6 @@ export function formatPlan(plan: string | undefined | null): string | null {
       return lower === "chatgpt" ? "ChatGPT" : lower.charAt(0).toUpperCase() + lower.slice(1);
     })
     .join(" ");
-}
-
-const CREDIT_COUNT = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
-
-function formatMoney(amount: number, currency: string): string {
-  try {
-    return new Intl.NumberFormat("en-US", { style: "currency", currency }).format(amount);
-  } catch {
-    return `${amount.toFixed(2)} ${currency}`;
-  }
-}
-
-/** The credits section of a flyout: its title, one line, and a bar when capped. */
-export function describeCredits(
-  credits: PiUsageCredits | undefined,
-): { title: string; line: string; usedPercent: number | null } | null {
-  if (!credits) return null;
-  if (credits.kind === "balance") {
-    return {
-      title: "Credits",
-      line: credits.unlimited
-        ? "Unlimited credits"
-        : `${CREDIT_COUNT.format(credits.balance)} credits available`,
-      usedPercent: null,
-    };
-  }
-  const spent = credits.spent === null ? null : formatMoney(credits.spent, credits.currency);
-  const limit = credits.limit === null ? null : formatMoney(credits.limit, credits.currency);
-  const line =
-    spent !== null && limit !== null
-      ? `${spent} of ${limit} spent`
-      : spent !== null
-        ? `${spent} spent, no cap`
-        : limit !== null
-          ? `Limit ${limit}`
-          : null;
-  if (!line) return null;
-  return {
-    title: "Extra Usage",
-    line,
-    usedPercent: credits.usedPercent === null ? null : clampPercent(credits.usedPercent),
-  };
-}
-
-/** "3 rate-limit resets available" and when the soonest expires. */
-export function describeResetCredits(
-  usage: PiUsageProfile | null,
-  nowMs: number,
-): { count: number; line: string; expiry: string | null } | null {
-  const available = usage?.resetCredits?.available ?? 0;
-  if (available <= 0) return null;
-  const at = usage?.resetCredits?.nextExpiresAt
-    ? Date.parse(usage.resetCredits.nextExpiresAt)
-    : Number.NaN;
-  const duration = Number.isFinite(at) ? formatResetDuration(at - nowMs) : null;
-  const expiry =
-    duration === null
-      ? null
-      : duration === "now"
-        ? available > 1
-          ? "Next expires now"
-          : "Expires now"
-        : available > 1
-          ? `Next expires in ${duration}`
-          : `Expires in ${duration}`;
-  return {
-    count: available,
-    line:
-      available === 1
-        ? "1 rate-limit reset available"
-        : `${available} rate-limit resets available`,
-    expiry,
-  };
-}
-
-/** A reset is worth spending only once a general window has some use on it. */
-export function resetWorthSpending(usage: PiUsageProfile | null): boolean {
-  return (usage?.windows ?? []).some(
-    (window) => scopeKind(window) === "general" && window.usedPercent >= 1,
-  );
 }
 
 function firstSentence(text: string): string {
@@ -423,6 +271,9 @@ function emailLine(email: string | undefined | null, label: string): string | nu
   return trimmed && trimmed !== label ? trimmed : null;
 }
 
+/** What a System login without Cora's half says in place of limits. */
+const CORA_NOT_SIGNED_IN = "Limits appear once Cora is signed in";
+
 function rowAccount(
   profile: PiSubscriptionProfileConnection,
   usage: PiUsageProfile | undefined,
@@ -433,7 +284,7 @@ function rowAccount(
   const chips = usageChips(usage);
   let note: string | null = null;
   if (system && profile.coraHalf === "none") {
-    note = "Limits show once Cora is connected";
+    note = CORA_NOT_SIGNED_IN;
   } else if (chips.length === 0) {
     note = readingNote(usage, descriptor, loading)?.short ?? null;
   }
@@ -526,7 +377,7 @@ function buildProvider(provider: PiSubscriptionProvider, inputs: RosterInputs): 
       system: true,
       usage: null,
       chips: [],
-      note: signedOut ? "Signed out on this computer" : "Limits not shown for your own login",
+      note: signedOut ? "Signed out on this computer" : `${descriptor.cliLabel} keeps these private`,
       action: anyActive && !signedOut ? "use-system" : null,
       blocked: null,
     });
@@ -542,9 +393,9 @@ function buildProvider(provider: PiSubscriptionProvider, inputs: RosterInputs): 
     status = "No account active";
     detail = "Choose an account below, or add one in Accounts.";
   } else if (active.system && active.profileId === null) {
-    status = `Using your ${descriptor.cliLabel} login`;
+    status = `${descriptor.cliLabel} keeps these private`;
     detail = `Codara never reads your own ${descriptor.cliLabel} login, so its limits are not shown. Add the account in Accounts to see them here.`;
-  } else if (active.system && active.note === "Limits show once Cora is connected") {
+  } else if (active.system && active.note === CORA_NOT_SIGNED_IN) {
     status = active.note;
     detail = `Limits are read with Cora's own sign-in. Connect Cora to this account in Accounts to see them.`;
   } else if (chips.length === 0) {
@@ -568,17 +419,12 @@ function buildProvider(provider: PiSubscriptionProvider, inputs: RosterInputs): 
 }
 
 /**
- * One entry per provider that has any account or a System login, the one
- * nearest a limit first (as in Orca), and providers with nothing to draw last
- * in the Accounts order.
+ * One entry per provider that has any account or a System login, in the
+ * Accounts order. The panel keeps that order whatever the numbers say, so a
+ * provider never jumps place between two looks.
  */
 export function buildUsageRoster(inputs: RosterInputs): RosterProvider[] {
-  const providers = PROVIDER_ORDER.map((provider) => buildProvider(provider, inputs)).filter(
+  return PROVIDER_ORDER.map((provider) => buildProvider(provider, inputs)).filter(
     (entry): entry is RosterProvider => entry !== null,
   );
-  const worst = (entry: RosterProvider) => tightestChip(entry.chips)?.usedPercent ?? -1;
-  return providers
-    .map((entry, index) => ({ entry, index }))
-    .sort((left, right) => worst(right.entry) - worst(left.entry) || left.index - right.index)
-    .map(({ entry }) => entry);
 }

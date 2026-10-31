@@ -83,6 +83,40 @@ export function setAllowedRoots(roots: string[]): void {
   workspaceRoots = resolveAll(roots);
 }
 
+// Single files outside every root that an agent opened in the editor for the
+// user (codara_open_file), or the user picked in Quick Open. Main adds them
+// after checking the file; the renderer cannot. Exact paths only, never their
+// folders, and only for this run of the app. Each spelling keeps the real
+// path it had when granted: a read refuses it once a link swapped in later
+// (the file or a folder above it) points somewhere else.
+const grantedFiles = new Map<string, string>();
+const MAX_GRANTED_FILES = 512;
+
+export function grantReadFile(file: string): void {
+  if (typeof file !== "string" || file.length === 0 || isRemotePath(file)) return;
+  const abs = path.resolve(file);
+  let real: string;
+  try {
+    real = realpathSync(abs);
+  } catch {
+    return;
+  }
+  grantResolvedFile(abs, real);
+}
+
+/**
+ * The same grant for a caller that already resolved the real path off the main
+ * thread: a file on a drive that stopped answering must not freeze the app in
+ * a synchronous lookup here.
+ */
+export function grantResolvedFile(file: string, real: string): void {
+  for (const spelling of new Set([path.resolve(file), real])) {
+    grantedFiles.delete(spelling);
+    if (grantedFiles.size >= MAX_GRANTED_FILES) grantedFiles.delete(grantedFiles.keys().next().value as string);
+    grantedFiles.set(spelling, real);
+  }
+}
+
 function home(seg: string): string {
   return path.join(os.homedir(), seg);
 }
@@ -136,6 +170,10 @@ export function isAllowedReadPath(target: string): boolean {
   // handler was routed there for an active remote workspace.
   if (isRemotePath(target)) return true;
   const abs = path.resolve(target);
+  return grantedFiles.has(abs) || insideAllowedRoot(abs);
+}
+
+function insideAllowedRoot(abs: string): boolean {
   const roots = [...seededRoots, ...workspaceRoots, ...staticAllowed()];
   return roots.some((root) => isInside(root, abs));
 }
@@ -187,6 +225,17 @@ export async function assertAllowedReadPathResolved(target: string): Promise<voi
   assertAllowedReadPath(target);
   if (isRemotePath(target)) return;
   const abs = path.resolve(target);
+  const grantedReal = grantedFiles.get(abs);
+  if (grantedReal !== undefined && !insideAllowedRoot(abs)) {
+    let real: string | null = null;
+    try {
+      real = await fsp.realpath(abs);
+    } catch {
+      real = null;
+    }
+    if (real !== grantedReal) throw new Error(`Path not allowed: ${target}`);
+    return;
+  }
   // The allowlist admits the runs root by its real spelling too (a linked home
   // or ~/.codarastudio, a home under macOS /var/folders), so a target under
   // either spelling gets the real-path check.

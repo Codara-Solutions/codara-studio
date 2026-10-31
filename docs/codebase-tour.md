@@ -97,7 +97,9 @@ tabs and panes belong to the renderer.
    command, `manual-agent-startup.ts` checks the command against an allowlist
    and `binary-resolver.ts` finds the binary. `spawn` also resolves the
    CLI's account (for Grok, the Active account's `GROK_HOME`), makes sure
-   Codex trusts the folder, and installs the Claude hooks. `doSpawn` builds
+   Codex trusts the folder, adds a workspace folder's trust record for
+   Claude Code to the live slot (`claude-pretrust.ts`), and installs the
+   Claude hooks. `doSpawn` builds
    the environment and starts node-pty. The startup command is passed to
    the shell (`withStartupCommand`), so it runs once the shell is ready.
 5. **Shell integration.** `shell-init.ts` copies the scripts in

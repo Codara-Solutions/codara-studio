@@ -273,6 +273,14 @@ function stubPlugin() {
       }
       export function notifyNativeGrokProfileLeaseReleased() {}
     `,
+    // Never the real live slot: the launch only reports what it would trust.
+    "./claude-pretrust": `
+      export async function pretrustClaudeFolder(cwd, options) {
+        const controller = globalThis.__codaraPtySpawnHarness;
+        (controller.pretrusted ??= []).push({ cwd, env: options?.env ?? null });
+        return "skipped";
+      }
+    `,
     "./agent-launch-integration": `
       export function integrationFilesReady() { return Promise.resolve(); }
       export function agentArgsDir() { return "/codara/integrations"; }
@@ -427,6 +435,19 @@ async function main() {
       pty.dispose(runtime);
     }
     assert.equal(controller.activeProfileLeases.size, 0);
+    // Claude's folder trust is settled before its launch, as Codex's is on
+    // its command line; Codex and Grok panes write nothing.
+    assert.deepEqual(controller.pretrusted.map((entry) => entry.cwd), ["/tmp"]);
+    assert.equal(controller.pretrusted[0].env.SPARK_NO_SHELL_INTEGRATION, "1", "the pane's own env decides");
+    // A `claude` Studio does not rewrite (an agent's or a standing
+    // terminal's command) is still a Claude launch; a plain shell is not.
+    for (const [id, startupCommand] of [["typed-claude", "claude --settings /x/settings.json"], ["plain", undefined]]) {
+      await pty.spawn({ ...localOptions(id), startupCommand });
+      controller.exitLocal(controller.localSpawnCalls.at(-1).pid);
+      pty.dispose(id);
+    }
+    assert.deepEqual(controller.pretrusted.map((entry) => entry.cwd), ["/tmp", "/tmp"]);
+    controller.pretrusted.length = 0;
     controller.localSpawnCalls.length = 0;
     controller.binaryCalls.length = 0;
 

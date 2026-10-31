@@ -364,6 +364,32 @@ async function main() {
     };
     const has = (id) => h.state.workspaces.some((workspace) => workspace.id === id);
 
+    // Worktrees made with plain `git worktree add`, which no rail row shows.
+    const outside = add("outside", "feat/outside");
+    const pruned = add("pruned", "feat/pruned");
+    fs.rmSync(pruned, { recursive: true, force: true });
+    const overview = await rail.railWorktreeOverview(deps);
+    git(repo, ["worktree", "remove", "--force", outside]);
+    // Only this one: other rows' missing folders must stay registered.
+    fs.rmSync(path.join(repo, ".git", "worktrees", "pruned"), { recursive: true, force: true });
+    git(repo, ["branch", "-D", "feat/outside", "feat/pruned"]);
+    await check("the rail lists the worktrees made outside Codara under their project, and only those", async () => {
+      const listed = overview.external.find((entry) => entry.path === outside);
+      assert.deepEqual([listed?.projectId, listed?.branch], ["ws-repo", "feat/outside"]);
+      assert.ok(listed.headAt > 0, "with when its commit was made");
+      const shown = new Set(h.state.workspaces.map((workspace) => workspace.cwd));
+      for (const entry of overview.external) {
+        assert.notEqual(entry.path, repo, "not the main checkout");
+        assert.notEqual(entry.path, pruned, "not a pruned one");
+        assert.ok(!shown.has(entry.path), `not a row the rail has: ${entry.path}`);
+      }
+      assert.ok(overview.states.length > 0);
+      assert.ok(
+        overview.states.filter((entry) => entry.merge !== "gone").every((entry) => entry.headAt > 0),
+        "every row with a commit says when it was made",
+      );
+    });
+
     const states = Object.fromEntries((await rail.railWorktreeStates(deps)).map((entry) => [entry.workspaceId, entry]));
     await check("the rail reads merge and folder state for every copy-branch workspace", async () => {
       assert.equal(states["ws-repo"], undefined, "the main checkout is not a copy-branch row");

@@ -59,6 +59,11 @@ export function usePullRequestWatch(workspaceId: string | null | undefined): Pul
   return useSyncExternalStore(subscribe, () => (workspaceId ? entries[workspaceId] ?? null : null));
 }
 
+/** Every workspace's pull request watch, by workspace id. */
+export function usePullRequestWatches(): Readonly<Record<string, PullRequestWatchEntry>> {
+  return useSyncExternalStore(subscribe, () => entries);
+}
+
 /** Switches the watcher on or off for a repository ("owner/name"). */
 export function setRepositoryWatched(repository: string, watched: boolean): Promise<boolean> {
   return window.spark.pullRequestWatch.setRepositoryWatched(repository, watched);

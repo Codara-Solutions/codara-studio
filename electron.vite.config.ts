@@ -123,6 +123,10 @@ export default defineConfig(({ command }) => ({
   },
   renderer: {
     root: resolve(__dirname, "src/renderer"),
+    // Vite's default is inside node_modules, which a worktree can share with
+    // the main checkout. Its config hash includes the root, so a run in one
+    // would delete the deps the other's live window is still importing.
+    cacheDir: resolve(__dirname, ".vite-cache"),
     define: {
       "process.env.NODE_ENV": JSON.stringify("production"),
       "import.meta.env.VITE_APP_VERSION": JSON.stringify(

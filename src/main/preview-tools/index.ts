@@ -22,6 +22,7 @@ import { cosTaskTools } from "./cos-tasks";
 import { devtoolsPreviewTools } from "./devtools";
 import { inboxPreviewTools } from "./inbox";
 import { inputPreviewTools } from "./input";
+import { openFileTools } from "./open-file";
 import { insightPreviewTools } from "./insight";
 import { pointPreviewTools } from "./point";
 import { serverTools } from "./servers";
@@ -46,6 +47,7 @@ const TABLES: readonly PreviewToolTable[] = [
   cosTaskTools,
   sessionSearchTools,
   tabTools,
+  openFileTools,
   chromeLinkTools,
   // A snippet's browser calls go through runPreviewTool like any socket call.
   codePreviewTools((method, params, host) => runPreviewTool(method, params, host)),

@@ -62,6 +62,7 @@ import {
   decideResume,
   mergeSessionStart,
   pruneAttempts,
+  relocateResumePointer,
   type ResumeProbe,
   type SessionStartRecord,
 } from "./resume-policy";
@@ -73,7 +74,7 @@ import { asciiBytes, indexOfBytes } from "./terminalByteScan";
 import { isParsingReplay, writeAsReplay } from "./osc52";
 import { registerOsc52Clipboard } from "./terminalClipboard";
 import { readRecentOutput, registerTerminalContextSource } from "./terminalContext";
-import { followsHiddenTargetLink, resolveTerminalLinkClick } from "./terminalLinks";
+import { fileLinkTarget, followsHiddenTargetLink, resolveTerminalLinkClick } from "./terminalLinks";
 import { isTabLink, TAB_LINK_TEXT_PATTERN } from "@shared/tab-links";
 import { openTabLink } from "../../tabs/tabLinkBridge";
 import type { TerminalLinkMenuRequest } from "./TerminalLinkMenu";
@@ -224,6 +225,9 @@ function logRestore(line: string): void {
   }
 }
 interface ResumePlan {
+  // The pointer the plan resumes: the input, or a copy moved to the start cwd
+  // its transcript was found under. Callers adopt it when it is not the input.
+  session: TerminalAgentSession;
   // The command to hand pty.spawn's startupCommand: a `--resume`/`resume` for a
   // healthy session, a fresh forced-id `claude` launch for a Claude self-heal,
   // or null for Codex-with-a-dead-rollout (nothing deterministic to relaunch).
@@ -277,26 +281,32 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
     .catch(() => ({ exists: false as const }));
   const decision = decideResume(probe as ResumeProbe, restore.runtime);
   const p = probe as ResumeProbe;
+  const relocated = relocateResumePointer(restore, p);
   logRestore(
     `plan ${restore.runtime} id=${restore.sessionId} cwd=${restore.cwd} ` +
-      `probe(exists=${p.exists} resumable=${p.resumable ?? "-"} repairable=${p.repairable ?? "-"}) -> ${decision.kind}`,
+      `probe(exists=${p.exists} resumable=${p.resumable ?? "-"} repairable=${p.repairable ?? "-"}) -> ${decision.kind}` +
+      (relocated ? ` from start cwd=${relocated.cwd}` : ""),
   );
   if (decision.kind === "resume" || decision.kind === "repair-resume") {
-    if (restore.runtime === "claude" && decision.kind === "repair-resume") {
+    // `claude --resume` only finds a session from the directory it was
+    // started in, so a pointer that recorded a later cwd resumes from there.
+    const target = relocated ?? restore;
+    if (target.runtime === "claude" && decision.kind === "repair-resume") {
       // The transcript's last line is a truncated partial write (sleep/crash).
       // Repair it in place (keeps a .bak) so `claude --resume` accepts it and
       // the conversation is preserved.
       await window.spark.agentSession
         .repairTranscript({
           runtime: "claude",
-          cwd: restore.cwd,
-          sessionId: restore.sessionId,
-          nativeClaudeProfileId: restore.nativeClaudeProfileId,
+          cwd: target.cwd,
+          sessionId: target.sessionId,
+          nativeClaudeProfileId: target.nativeClaudeProfileId,
         })
         .catch(() => undefined);
     }
     return {
-      resumeCommand: buildAgentResumeCommand(restore),
+      session: target,
+      resumeCommand: buildAgentResumeCommand(target),
       resumeIsFreshFallback: false,
       fallbackNotice: null,
       fallbackSession: null,
@@ -308,6 +318,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
       // brings the pane back; main binds its new session after the first
       // reply, so there is no replacement pointer to hand over yet.
       return {
+        session: restore,
         resumeCommand: PI_LAUNCH_COMMAND,
         resumeIsFreshFallback: true,
         fallbackNotice: "previous Pi session couldn't be resumed, starting a fresh one",
@@ -317,6 +328,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
     if (restore.runtime === "grok") {
       const fresh = buildGrokLaunch();
       return {
+        session: restore,
         resumeCommand: fresh.command,
         resumeIsFreshFallback: true,
         fallbackNotice: "previous Grok session couldn't be resumed, starting a fresh one",
@@ -335,6 +347,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
     // hand the owner the replacement pointer to persist.
     const fresh = buildClaudeLaunch();
     return {
+      session: restore,
       resumeCommand: fresh.command,
       resumeIsFreshFallback: true,
       fallbackNotice: "previous Claude session couldn't be resumed, starting a fresh one",
@@ -351,6 +364,7 @@ async function computeResumePlan(restore: TerminalAgentSession): Promise<ResumeP
   // Codex can't force session ids, so there's nothing to relaunch
   // deterministically — surface the notice, clear the pointer, plain shell.
   return {
+    session: restore,
     resumeCommand: null,
     resumeIsFreshFallback: false,
     fallbackNotice: "previous Codex session couldn't be resumed",
@@ -969,6 +983,32 @@ export function useTerminalSession({
           showMenu({ url: uri, x: event.clientX, y: event.clientY });
         }
       };
+      // A path in the output or a file:// hyperlink: Ctrl+click (Cmd+click on
+      // a Mac) opens it in the editor, as in VS Code; a plain click is left to
+      // xterm's selection. Only a file the read sandbox lets the editor open
+      // counts, the same check the plain-text links light up by.
+      const resolveExistingFile = async (target: string, baseDir: string | null): Promise<string | null> => {
+        const result = await window.spark.fs.pathExists?.({
+          target,
+          baseDir: baseDir ?? undefined,
+        });
+        return result?.exists && result.isFile ? result.resolved : null;
+      };
+      const openFileLink = (input: { file: string; line?: number; column?: number }) => {
+        onSparkOpenRef.current?.({
+          file: input.file,
+          ...(input.line !== undefined ? { line: input.line } : {}),
+          ...(input.column !== undefined ? { column: input.column } : {}),
+        });
+      };
+      const activateFileLink = (event: MouseEvent | undefined, target: { path: string; line?: number; column?: number }) => {
+        if (!event || event.button !== 0 || (!event.ctrlKey && !event.metaKey)) return;
+        // The pane's cwd only tells main whether the pane is remote, where a
+        // file:// path names a file on the other machine.
+        void resolveExistingFile(target.path, latestCwd).then((file) => {
+          if (file) openFileLink({ ...target, file });
+        });
+      };
       preloadTerminalPrefs();
 
       const term = new Terminal({
@@ -997,11 +1037,15 @@ export function useTerminalSession({
         // links open like plain-text URLs do.
         linkHandler: {
           activate: (event, uri) => {
-            if (followsHiddenTargetLink(uri)) activateTerminalLink(event, uri);
+            const fileTarget = fileLinkTarget(uri);
+            if (fileTarget) activateFileLink(event, fileTarget);
+            else if (followsHiddenTargetLink(uri)) activateTerminalLink(event, uri);
           },
           // An agent's markdown link to a tab arrives as an OSC 8 codara://
-          // link, which xterm only passes on with this set. Its text hides
-          // its target, so activate follows web and tab links only.
+          // link, and one to a file (Claude Code's) as a file:// link, which
+          // xterm only passes on with this set. Its text hides its target, so
+          // activate follows web and tab links, and opens a file only in
+          // Codara's editor, never with the system's handler for it.
           allowNonHttpProtocols: true,
         },
       });
@@ -1059,20 +1103,14 @@ export function useTerminalSession({
       let latestCwd: string | null = initialCwd?.trim() || null;
       const fileLinkProvider = createFileLinkProvider(term, {
         getCwd: () => latestCwd,
-        resolveExisting: async (target, baseDir) => {
-          const result = await window.spark.fs.pathExists?.({
-            target,
-            baseDir: baseDir ?? undefined,
-          });
-          return result?.exists && result.isFile ? result.resolved : null;
-        },
-        onActivate: ({ file, event }) => {
+        resolveExisting: resolveExistingFile,
+        onActivate: ({ file, line, column, event }) => {
           // Modifier gate: Ctrl on Win/Linux, Cmd on macOS — accept either
           // so a Mac user on an external Windows keyboard still gets the
           // right behavior. Plain click is a no-op so xterm's selection
           // drag continues to work over the underlined region.
           if (!event.ctrlKey && !event.metaKey) return;
-          onSparkOpenRef.current?.({ file });
+          openFileLink({ file, line, column });
         },
       });
       const linkProviderDispose = term.registerLinkProvider(fileLinkProvider);
@@ -3091,6 +3129,21 @@ export function useTerminalSession({
         });
       };
 
+      // Persist the pointer a plan moved to its start cwd, so the pane spawns
+      // there and later restores stop probing the wrong project folder.
+      const adoptPlanSession = (
+        from: TerminalAgentSession,
+        plan: ResumePlan,
+      ): TerminalAgentSession => {
+        if (plan.session === from) return from;
+        logRestore(
+          `pane=${sessionId} ${from.runtime} id=${from.sessionId} cwd moved to its start cwd (${from.cwd} -> ${plan.session.cwd})`,
+        );
+        agentSessionRef.current = plan.session;
+        onResumeFallbackRef.current?.(plan.session);
+        return plan.session;
+      };
+
       // In-place auto-resume after an UNEXPECTED pty death (see the onExit
       // re-arm below). Reuses the SAME session id + xterm: main deleted the old
       // session on exit, so a same-id spawn is a fresh PTY that DOES deliver the
@@ -3121,6 +3174,7 @@ export function useTerminalSession({
         logRestore(`pane=${sessionId} in-place re-arm after pty death (${session.runtime} id=${session.sessionId})`);
         const plan = await computeResumePlan(session);
         if (disposed) return;
+        session = adoptPlanSession(session, plan);
         if (!plan.resumeCommand) {
           // Codex with an unresumable rollout → nothing deterministic to relaunch.
           if (plan.fallbackNotice) term.write(`\x1b[2m[${plan.fallbackNotice}]\x1b[0m\r\n`);
@@ -3207,6 +3261,7 @@ export function useTerminalSession({
           }
           const plan = session ? await computeResumePlan(session) : null;
           if (disposed) return;
+          if (session && plan) session = adoptPlanSession(session, plan);
           const command = plan?.resumeCommand ?? null;
           logRestore(`pane=${sessionId} waking from sleep (${session?.runtime ?? "no session"}) cmd=${command ?? "none"}`);
           if (session && command && !plan?.resumeIsFreshFallback) {
@@ -3457,6 +3512,7 @@ export function useTerminalSession({
           // it is shared verbatim with the in-place death re-arm below.
           if (restore.active !== false) {
             const plan = await computeResumePlan(restore);
+            restore = adoptPlanSession(restore, plan);
             resumeCommand = plan.resumeCommand;
             resumeIsFreshFallback = plan.resumeIsFreshFallback;
             fallbackNotice = plan.fallbackNotice;
@@ -3992,7 +4048,7 @@ export function useTerminalSession({
         startupCommandHandled &&
         agentSession?.runtime === "claude"
       ) {
-        armClaudeRefusalWatch(agentSession.cwd);
+        armClaudeRefusalWatch(agentSessionRef.current?.cwd ?? agentSession.cwd);
       }
 
       if (sleepingRef.current && visibleRef.current) scheduleWake();

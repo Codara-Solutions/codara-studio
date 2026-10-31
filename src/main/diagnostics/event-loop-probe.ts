@@ -135,6 +135,9 @@ export function startEventLoopProbe(
     sampling = active;
     if (active) {
       sampledInWindow = true;
+      // Without this the first sample after enable() measures from the last
+      // one before disable(), which reports the time away as a stall.
+      histogram.reset();
       histogram.enable();
     } else {
       histogram.disable();

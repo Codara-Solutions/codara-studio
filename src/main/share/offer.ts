@@ -8,6 +8,7 @@
 import { promises as fsp } from "node:fs";
 import path from "node:path";
 import { SHARE_MAX_PAGE_BYTES, shareableKind } from "../../shared/share";
+import { isSecretFileOnDisk } from "../secret-file-check";
 
 // One prompt per caller every few seconds: an agent in a loop must not be
 // able to bury the user in Share prompts.
@@ -54,6 +55,10 @@ export class ShareOfferGate {
     // file is not a page.
     if (!shareableKind(real)) {
       return { ok: false, reason: "not_shareable", message: "only .html and .md files can be shared as a link" };
+    }
+    // Nor a page reached through a .env link (notes.md -> .env -> page.md).
+    if (await isSecretFileOnDisk(rawPath)) {
+      return { ok: false, reason: "not_shareable", message: "a file with secrets cannot be shared as a link" };
     }
     try {
       await this.deps.assertReadable(real);

@@ -12,7 +12,7 @@ import type {
   WorktreeCleanupTarget,
   WorktreeRailCleanupRequest,
   WorktreeRailCleanupResult,
-  WorktreeRailState,
+  WorktreeRailOverview,
   WorktreeRemovalCheck,
   WorktreeSizeEvent,
 } from "@shared/worktree-cleanup";
@@ -32,8 +32,8 @@ export const worktreeCleanupApi = {
     ipcRenderer.invoke("worktreeCleanup:check", targets),
   remove: (request: WorktreeCleanupRemoveRequest): Promise<WorktreeCleanupRemoveResult> =>
     ipcRenderer.invoke("worktreeCleanup:remove", request),
-  /** Merge and folder state of each copy-branch workspace, for the rail. */
-  railStates: (): Promise<WorktreeRailState[]> => ipcRenderer.invoke("worktreeCleanup:railStates"),
+  /** Merge and folder state of each copy-branch workspace, and the worktrees made outside Codara, for the rail. */
+  railStates: (): Promise<WorktreeRailOverview> => ipcRenderer.invoke("worktreeCleanup:railStates"),
   /** Clean up one copy-branch workspace from its rail row. */
   railCleanUp: (request: WorktreeRailCleanupRequest): Promise<WorktreeRailCleanupResult> =>
     ipcRenderer.invoke("worktreeCleanup:railCleanUp", request),

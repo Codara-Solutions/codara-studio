@@ -136,9 +136,10 @@ export type AgentBoardReply =
   | { kind: "message"; runId: string };
 
 export interface AgentBoardCard {
-  /** "pane:<id>" or "run:<id>"; stable across updates. */
+  /** "pane:<id>", "run:<id>" or "worktree:<workspaceId>"; stable across updates. */
   key: string;
-  source: "terminal" | "cora";
+  /** "background": an agent working in a worktree without a pane there (background-agents.ts). */
+  source: "terminal" | "cora" | "background";
   bucket: AgentBoardBucket;
   status: string;
   tone: AgentBoardTone;
