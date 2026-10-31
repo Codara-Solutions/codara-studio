@@ -10,11 +10,15 @@ dashboard and the harness benchmark.
 
 ## The standalone agent
 
-It needs Node 22.18 or newer and works on a clone of this repository:
+It needs Node 22.18 or newer. It runs from a clone of this repository, so keep the
+folder: `npm install -g .` links to it. Run `npm ci` first, because linking a folder
+does not install its dependencies.
 
 ```sh
 git clone --depth 1 https://github.com/Codara-Solutions/codara-studio
-npm install -g ./codara-studio/cli
+cd codara-studio/cli
+npm ci
+npm install -g .
 cora login
 ```
 
