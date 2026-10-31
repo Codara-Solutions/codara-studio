@@ -13,8 +13,11 @@ import { useTaskSummary } from "./cosTasksStore";
 import "./workspace-agents.css";
 
 // The workspace's one status line under its name in the rail, computed from
-// its agents and its task list ("2 working · 1 needs you · 3 done today").
-// It is plain text: a click on it opens the row like any other click there.
+// its agents and its task list ("1 needs you · 3 done today"). The number at
+// the row's right edge counts the agents, so the line speaks only when
+// something needs the user or finished, and an idle workspace has none
+// (DESIGN.md, "One home for agent counts"). It is plain text: a click on it
+// opens the row like any other click there.
 // The agents themselves are listed under the row by rail/WorkspaceChildren,
 // which AgentLineItem serves; clicking one opens its tab. A workspace from
 // before Codara recorded origins also gets the button that confirms the
@@ -208,40 +211,40 @@ export function WorkspaceAgentsLine({
 }) {
   const ownLines = useWorkspaceAgentLines(workspaceId);
   const tasks = useTaskSummary(workspaceId);
-  const summary = summarizeWorkspace(familyLines ?? ownLines, tasks);
-  if (!summary) return null;
+  const summary = summarizeWorkspace(familyLines ?? ownLines, tasks, { variant: "rail" });
+  if (!summary && !tasks?.originToConfirm) return null;
   return (
     <span data-testid="workspace-agents" style={{ display: "flex", flexDirection: "column", minWidth: 0, marginTop: 2 }}>
-      <span
-        role="note"
-        aria-label={`${summary.line}. ${summary.description}`}
-        title={summary.description}
-        data-testid="workspace-agents-summary"
-        data-needs-you={summary.needsYou > 0 ? "true" : "false"}
-        style={{
-          ...lineText,
-          display: "-webkit-box",
-          WebkitBoxOrient: "vertical",
-          WebkitLineClamp: 2,
-          overflow: "hidden",
-          overflowWrap: "anywhere",
-          color: active ? "var(--ink-dim)" : "var(--muted)",
-        }}
-      >
-        {summary.parts.length > 0
-          ? summary.parts.map((part, index) => (
-              <span key={part.kind}>
-                {index > 0 && " · "}
-                <span
-                  data-part={part.kind}
-                  style={part.kind === "needs-you" ? { color: "var(--danger)", fontWeight: 600 } : undefined}
-                >
-                  {part.text}
-                </span>
+      {summary && (
+        <span
+          role="note"
+          aria-label={summary.description ? `${summary.line}. ${summary.description}` : summary.line}
+          title={summary.description || undefined}
+          data-testid="workspace-agents-summary"
+          data-needs-you={summary.needsYou > 0 ? "true" : "false"}
+          style={{
+            ...lineText,
+            display: "-webkit-box",
+            WebkitBoxOrient: "vertical",
+            WebkitLineClamp: 2,
+            overflow: "hidden",
+            overflowWrap: "anywhere",
+            color: active ? "var(--ink-dim)" : "var(--muted)",
+          }}
+        >
+          {summary.parts.map((part, index) => (
+            <span key={part.kind}>
+              {index > 0 && " · "}
+              <span
+                data-part={part.kind}
+                style={part.kind === "needs-you" ? { color: "var(--danger)", fontWeight: 600 } : undefined}
+              >
+                {part.text}
               </span>
-            ))
-          : summary.line}
-      </span>
+            </span>
+          ))}
+        </span>
+      )}
       {tasks?.originToConfirm && <ConfirmOriginButton workspaceId={workspaceId} origin={tasks.originToConfirm} />}
     </span>
   );

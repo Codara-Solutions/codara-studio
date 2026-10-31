@@ -13,6 +13,7 @@ import {
   type WebContents,
 } from "electron";
 import { logMain } from "./file-log";
+import { errorBoundaryLogEntry } from "@shared/error-boundary";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -22,6 +23,7 @@ import * as pty from "./pty-manager";
 import * as fsWatcher from "./fs-watcher";
 import { disposeAllConnections } from "./remote/connections";
 import { closeAllPaneOverlays, startAgentSocket, stopAgentSocket } from "./agent-socket";
+import { homedir } from "node:os";
 import { ensureCodaraHomeSync, codaraHome } from "./codara-home";
 import { startCrashReporterEarly, startDiagnostics } from "./diagnostics";
 import { flush, loadSettings, loadState } from "./storage";
@@ -46,6 +48,16 @@ import { routeGuestPopups } from "./guest-popups";
 import { isFreshPartition } from "../shared/browser-partition";
 import { openLinkFromApp } from "./open-link";
 import { registerTerminalBridge } from "./terminal-bridge";
+import {
+  registerDesktopCommandBridge,
+  requestDesktopNewTerminal,
+  requestDesktopOpenPath,
+} from "./desktop-command-bridge";
+import {
+  DESKTOP_COMMAND_SOCKET_NAME,
+  startDesktopCommandSocket,
+  type DesktopCommandSocket,
+} from "./desktop-command-socket";
 import { retryPendingAgentTerminalCleanups } from "./agent-terminal-lifecycle";
 import { registerPreviewInput } from "./preview-input";
 import { registerPreviewCdpSessions } from "./browser/preview-cdp";
@@ -291,6 +303,7 @@ const trayIconPath = app.isPackaged
   : join(__dirname, "../../build/tray.png");
 
 let mainWindow: BrowserWindow | null = null;
+let desktopCommandSocket: DesktopCommandSocket | null = null;
 // Tray + background-running state (Feature: "close to tray"). `isQuitting`
 // flips true only on an explicit Quit (tray menu / before-quit) so the window
 // `close` handler knows to actually close instead of hiding to the tray.
@@ -1106,6 +1119,10 @@ function createWindow(): void {
   mainWindow.webContents.on("preload-error", (_e, preloadPath, error) => {
     console.error("[main] preload error", preloadPath, error);
   });
+  mainWindow.webContents.on("console-message", (details) => {
+    const entry = errorBoundaryLogEntry(details.level, details.message);
+    if (entry) logMain("error-boundary", entry);
+  });
 
   // The renderer entry is loaded through loadURL(pathToFileURL(...)) rather than
   // loadFile() deliberately. loadFile builds its URL with the legacy
@@ -1336,6 +1353,20 @@ app.whenReady().then(async () => {
   }
   registerPreviewBridge();
   registerTerminalBridge();
+  // Non-fatal: Studio's own chords work without it, and a desktop script that
+  // cannot connect falls back to typing the key.
+  if (process.platform === "linux") {
+    registerDesktopCommandBridge();
+    void startDesktopCommandSocket({
+      socketPath: join(codaraHome(), DESKTOP_COMMAND_SOCKET_NAME),
+      newTerminal: requestDesktopNewTerminal,
+      openPath: (target) => requestDesktopOpenPath(target, { home: homedir, codaraHome }),
+    })
+      .then((socket) => {
+        desktopCommandSocket = socket;
+      })
+      .catch((err) => console.warn("[main] desktop command socket unavailable:", err));
+  }
   // Every preview guest gets its DevTools protocol session (and console and
   // network recording) as Chromium attaches it; the computer-use executor
   // binds announced guests to their tabs.
@@ -1955,6 +1986,7 @@ app.on("before-quit", (event) => {
         .then((m) => m.stopScheduler())
         .catch(() => undefined);
       await stopAgentSocket().catch(() => undefined);
+      await desktopCommandSocket?.close().catch(() => undefined);
       // Release the global accelerator and tear down the tray icon (best-effort)
       // so no handles linger past quit.
       globalShortcut.unregisterAll();

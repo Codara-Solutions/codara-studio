@@ -1,0 +1,525 @@
+/* The Agents tab as an inbox, after T3 Code's thread sidebar (see
+   AgentInboxList.tsx and DESIGN.md, "Agents tab"). It sits on the solid rail:
+   theme tokens only, no glass and no colour of its own. Colour is for state:
+   the status word and its icon, the check glyph, the +/- counts. */
+
+.agent-inbox {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-inbox__scroll {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 6px 4px;
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-inbox__empty,
+.agent-inbox__clear {
+  margin: 10px 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.agent-inbox__clear {
+  margin: 6px 10px;
+}
+
+/* Pushes the shelves to the bottom while the inbox is short. */
+.agent-inbox__spacer {
+  flex: 1 1 auto;
+  min-height: 8px;
+}
+
+.agent-inbox__rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+/* ── Row ─────────────────────────────────────────────────────────────────── */
+
+.agent-inbox-row {
+  position: relative;
+}
+
+.agent-inbox-row__open {
+  appearance: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px 9px;
+  border: 0;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  text-align: left;
+  cursor: default;
+  transition: background var(--motion-fast) var(--ease-out);
+}
+
+.agent-inbox-row__open:hover {
+  background: var(--hover);
+}
+
+.agent-inbox-row__open:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* Only the open row gets a surface. */
+.agent-inbox-row.is-active .agent-inbox-row__open {
+  background: var(--hover-strong);
+}
+
+.agent-inbox-row__line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.agent-inbox-row__line.is-where {
+  height: 18px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.agent-inbox-row__line.is-what {
+  margin-top: 1px;
+}
+
+.agent-inbox-row__line.is-meta {
+  height: 17px;
+  font-size: 11.5px;
+  color: var(--muted);
+  gap: 8px;
+}
+
+.agent-inbox-row__tile {
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  background: var(--hover-strong);
+  color: var(--ink-dim);
+}
+
+.agent-inbox-row__ws,
+.agent-inbox-row__branch,
+.agent-inbox-row__title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-inbox-row__title {
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 18px;
+  color: var(--ink);
+}
+
+/* Seen and nothing new. */
+.agent-inbox-row.is-read .agent-inbox-row__title {
+  font-weight: 400;
+  color: var(--ink-dim);
+}
+
+.agent-inbox-row__pin {
+  flex: 0 0 auto;
+  display: inline-flex;
+  color: var(--muted);
+}
+
+.agent-inbox-row__status,
+.agent-inbox-row__age {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  white-space: nowrap;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-inbox-row__status {
+  font-weight: 500;
+}
+
+.agent-inbox-row__age,
+.agent-inbox-row__status.is-snoozed,
+.agent-inbox-row__status.is-busy {
+  color: var(--muted);
+}
+
+.agent-inbox-row__status.is-input {
+  color: var(--warn);
+}
+
+.agent-inbox-row__status.is-failed {
+  color: var(--danger);
+}
+
+.agent-inbox-row__status.is-done {
+  color: var(--ok);
+}
+
+.agent-inbox-row__status.is-working {
+  color: var(--info);
+}
+
+.agent-inbox-row__timer {
+  margin-left: 2px;
+}
+
+.agent-inbox-row__pr {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-inbox-row__check {
+  font-weight: 700;
+}
+
+.agent-inbox-row__check.is-ok {
+  color: var(--ok);
+}
+
+.agent-inbox-row__check.is-bad {
+  color: var(--danger);
+}
+
+.agent-inbox-row__check.is-pending {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--warn);
+}
+
+.agent-inbox-row__diff {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.agent-inbox-row__diff .is-add {
+  color: var(--ok);
+}
+
+.agent-inbox-row__diff .is-del {
+  color: var(--danger);
+}
+
+.agent-inbox-row__agent {
+  flex: 0 0 auto;
+  display: inline-flex;
+  opacity: 0.8;
+}
+
+/* ── Hover actions: they take the status slot's place ─────────────────────── */
+
+.agent-inbox-row__actions {
+  position: absolute;
+  top: 7px;
+  right: 6px;
+  display: none;
+  align-items: center;
+  gap: 1px;
+  padding-left: 6px;
+}
+
+/* Keyboard focus shows them too; a click's focus does not, or the last row
+   clicked would keep its actions after the pointer left. */
+.agent-inbox-row:hover .agent-inbox-row__actions,
+.agent-inbox-row:has(:focus-visible) .agent-inbox-row__actions {
+  display: inline-flex;
+}
+
+.agent-inbox-row:hover .agent-inbox-row__line.is-where .agent-inbox-row__status,
+.agent-inbox-row:hover .agent-inbox-row__line.is-where .agent-inbox-row__age,
+.agent-inbox-row:has(:focus-visible) .agent-inbox-row__line.is-where .agent-inbox-row__status,
+.agent-inbox-row:has(:focus-visible) .agent-inbox-row__line.is-where .agent-inbox-row__age,
+.agent-inbox-row.is-settled:hover .agent-inbox-row__age,
+.agent-inbox-row.is-settled:has(:focus-visible) .agent-inbox-row__age {
+  visibility: hidden;
+}
+
+.agent-inbox-row__act {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 5px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  cursor: default;
+}
+
+.agent-inbox-row__act.is-word {
+  color: var(--ink);
+}
+
+.agent-inbox-row__act:hover {
+  background: var(--hover-strong);
+  color: var(--ink);
+}
+
+.agent-inbox-row__act:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* ── Rename ──────────────────────────────────────────────────────────────── */
+
+.agent-inbox-row__title.is-renaming {
+  height: 18px;
+}
+
+.agent-inbox-row__rename-wrap {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  top: 26px;
+}
+
+.agent-inbox-row__rename {
+  width: 100%;
+  box-sizing: border-box;
+  height: 22px;
+  padding: 0 4px;
+  border: 1px solid var(--accent-edge);
+  border-radius: 5px;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  outline: none;
+}
+
+/* ── Settled: one greyed line ─────────────────────────────────────────────── */
+
+.agent-inbox-row.is-settled .agent-inbox-row__open {
+  padding: 6px 10px;
+}
+
+.agent-inbox-row__line.is-one {
+  height: 18px;
+  gap: 8px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.agent-inbox-row.is-settled .agent-inbox-row__title {
+  font-size: 12.5px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.agent-inbox-row.is-settled .agent-inbox-row__tile {
+  opacity: 0.55;
+}
+
+.agent-inbox-row.is-settled .agent-inbox-row__actions {
+  top: 5px;
+}
+
+/* A snoozed row keeps its three lines, quieter. */
+.agent-inbox-row.is-snoozed .agent-inbox-row__title {
+  font-weight: 400;
+  color: var(--ink-dim);
+}
+
+/* ── Shelves ─────────────────────────────────────────────────────────────── */
+
+.agent-inbox__shelf {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--rule-soft);
+}
+
+.agent-inbox__shelf-heading {
+  margin: 0;
+  font: inherit;
+}
+
+.agent-inbox__shelf-btn {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--ink-dim);
+  font-family: var(--font-sans);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: default;
+}
+
+.agent-inbox__shelf-btn:hover {
+  color: var(--ink);
+  background: var(--hover);
+}
+
+.agent-inbox__shelf-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.agent-inbox__shelf-count {
+  margin-left: auto;
+  color: var(--muted);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-inbox__shelf-chevron {
+  display: inline-flex;
+  color: var(--muted);
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+
+.agent-inbox__shelf-btn[aria-expanded="true"] .agent-inbox__shelf-chevron {
+  transform: rotate(90deg);
+}
+
+.agent-inbox__shelf .agent-inbox__rows {
+  padding-bottom: 4px;
+}
+
+/* ── Footer: one quiet line, only while there is something to undo ───────── */
+
+.agent-inbox__foot {
+  flex: 0 0 auto;
+  height: 0;
+  overflow: hidden;
+  padding: 0 16px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 26px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  transition: height var(--motion) var(--ease-out);
+}
+
+.agent-inbox__foot.is-shown {
+  height: 26px;
+}
+
+.agent-inbox__undo {
+  appearance: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-dim);
+  font: inherit;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in oklab, var(--ink-dim) 35%, transparent);
+  text-underline-offset: 2px;
+  cursor: default;
+}
+
+.agent-inbox__undo:hover {
+  color: var(--ink);
+}
+
+.agent-inbox__undo:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: 3px;
+}
+
+/* The right-click point the menu hangs from. */
+.agent-inbox__point {
+  position: fixed;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+/* ── Menu ────────────────────────────────────────────────────────────────── */
+
+.agent-inbox-menu {
+  min-width: 176px;
+}
+
+.agent-inbox-menu__icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  width: 13px;
+  color: var(--muted);
+}
+
+.agent-inbox-menu__item.is-danger .agent-inbox-menu__icon {
+  color: var(--danger);
+}
+
+.agent-inbox-menu__label {
+  flex: 1 1 auto;
+}
+
+.agent-inbox-menu__hint {
+  display: inline-flex;
+  margin-left: 12px;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-inbox-menu__sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--rule-soft);
+}
+
+.agent-inbox-menu__confirm {
+  max-width: 220px;
+}
+
+.agent-inbox-menu__question {
+  margin: 4px 8px 6px;
+  color: var(--ink-dim);
+  font-size: 11.5px;
+  line-height: 1.4;
+  white-space: normal;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-inbox__foot,
+  .agent-inbox__shelf-chevron,
+  .agent-inbox-row__open {
+    transition: none;
+  }
+}

@@ -1,4 +1,5 @@
 import React from "react";
+import { cannotRecoverByReload, errorBoundaryConsoleLine } from "@shared/error-boundary";
 
 // Class component because hooks can't catch render errors. The whole point
 // is to wrap the entire App tree so a crash in any descendant lands here
@@ -64,10 +65,11 @@ export default class ErrorBoundary extends React.Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo): void {
-    // Log to renderer console so DevTools captures it. Main process
-    // listeners (uncaughtException etc.) won't see this — it's a renderer
-    // exception, not a Node one.
-    console.error("[error-boundary] caught render error", error, info);
+    // Log to renderer console so DevTools captures it. Main's uncaughtException
+    // listeners won't see this, it's a renderer exception, so main copies this
+    // line from the console into main.log. That route needs no preload, which
+    // may be what failed.
+    console.error(errorBoundaryConsoleLine(error, info.componentStack));
     // The component stack is the single most useful thing for whoever fixes
     // this — it names the subtree that blew up, which a JS stack full of
     // minified framework frames often does not.
@@ -220,6 +222,18 @@ export default class ErrorBoundary extends React.Component<Props, State> {
             usually brings it back. If it keeps happening, copy the report and hand it
             to an agent.
           </p>
+          {import.meta.env.DEV && cannotRecoverByReload(error) ? (
+            <p
+              style={{
+                margin: "8px 0 0",
+                fontSize: 13,
+                lineHeight: 1.55,
+                color: "var(--ink, #e5e5e5)",
+              }}
+            >
+              Restart <code>npm run dev</code> to fix this. Reload can't: this window is out of step with the code on disk.
+            </p>
+          ) : null}
 
           {/* The one line worth reading, in the app's mono voice. The rest of
               the trace is one disclosure away, closed by default. */}

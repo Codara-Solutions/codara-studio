@@ -1,6 +1,6 @@
-// Labs: the usage forecast's surfaces. ForecastLine and ForecastGhost sit in
-// the usage panel under each window; UsageForecastSection is the Usage tab's
-// card with the chart, the weekly pattern, the back-test and the toggles.
+// The usage forecast's card in the Usage tab: the chart, the weekly pattern,
+// the back-test and the idea toggles. The title bar and its panel draw the
+// forecast themselves (usage-glance.ts, UsagePanel.tsx).
 // The numbers come from the main process (src/main/usage-forecast.ts); this
 // file only draws them.
 
@@ -8,7 +8,6 @@ import React, { useMemo, useState } from "react";
 import {
   DEFAULT_FORECAST_IDEAS,
   formatClock,
-  formatSpan,
   normalizeForecastIdeas,
   type BacktestTrack,
   type ForecastIdeas,
@@ -17,15 +16,9 @@ import {
   type UsageForecastReport,
   type WindowForecastView,
 } from "@shared/usage-forecast";
-import { confidenceLine, correctionWords, type ForecastLearning } from "@shared/usage-forecast-learning";
+import { confidenceLine, correctionWords } from "@shared/usage-forecast-learning";
 import { usePreferences } from "../../preferences/usePreferences";
-import Segmented from "./Segmented";
-import {
-  loadUsageForecast,
-  useForecastStyle,
-  writeForecastStyle,
-  type ForecastPanelStyle,
-} from "./useUsageForecast";
+import { loadUsageForecast } from "./useUsageForecast";
 
 export const TONE_COLOR: Record<ForecastTone, string> = {
   danger: "var(--danger)",
@@ -35,80 +28,6 @@ export const TONE_COLOR: Record<ForecastTone, string> = {
 };
 
 const PROVIDER_NAME = { anthropic: "Claude", "openai-codex": "Codex" } as const;
-
-/* ── Usage panel ─────────────────────────────────────────────────────────── */
-
-/** One sentence under a window's meter, with how sure it is and the nudge
- * or go-ahead under it. */
-export function ForecastLine({ view, compact = false }: { view: WindowForecastView; compact?: boolean }) {
-  const tone = view.verdict.tone;
-  const extra = view.nudge ?? view.goAhead;
-  return (
-    <div className="usage-forecast" data-forecast-tone={tone} title={view.verdict.detail || undefined}>
-      <span className="usage-forecast__line">
-        <span className="usage-forecast__dot" style={{ background: TONE_COLOR[tone] }} aria-hidden />
-        <span>{compact ? shortHeadline(view) : view.verdict.headline}</span>
-      </span>
-      {view.learning && view.result.inUse ? (
-        <span className="usage-forecast__confidence" data-confidence={view.learning.confidence} title={learningTitle(view.learning)}>
-          {confidenceLine(view.learning)}
-        </span>
-      ) : null}
-      {extra && !compact ? (
-        <span className={`usage-forecast__extra${view.nudge ? " is-nudge" : ""}`}>{extra}</span>
-      ) : null}
-    </div>
-  );
-}
-
-function learningTitle(learning: ForecastLearning): string {
-  const parts = [`Learned from ${learning.windows} past windows of this kind.`];
-  if (learning.typicalMiss !== null) parts.push(`Lately off by ${learning.typicalMiss.toFixed(1)} points on average.`);
-  if (learning.bandHeld !== null) parts.push(`The band held ${Math.round(learning.bandHeld * 100)}% of recent outcomes.`);
-  return parts.join(" ");
-}
-
-/** The headline cut to what fits beside a projected meter. */
-function shortHeadline(view: WindowForecastView): string {
-  const { result } = view;
-  if (!result.inUse) return "Not in use";
-  if (result.usedPercent >= 100) return `Used up · resets ${formatClock(result.resetsAtMs, result.nowMs)}`;
-  if (result.hitProbability >= 0.5 && result.hitAt.p50 !== null) {
-    return `Runs out ≈ ${formatClock(result.hitAt.p50, result.nowMs)}, ${formatSpan(result.resetsAtMs - result.hitAt.p50)} early`;
-  }
-  return `Ends ≈ ${Math.round(result.endPercent.p50)}% at reset`;
-}
-
-/**
- * The meter's projection: a soft segment from used to the median end and a
- * hairline at the pessimistic end, drawn over the existing bar.
- */
-export function ForecastGhost({ view }: { view: WindowForecastView }) {
-  const used = view.result.usedPercent;
-  const end = Math.max(used, view.result.endPercent.p50);
-  const high = Math.max(end, view.result.endPercent.p90);
-  const color = TONE_COLOR[view.verdict.tone];
-  return (
-    <span className="usage-forecast-ghost" aria-hidden>
-      <span
-        className="usage-forecast-ghost__span"
-        style={{ left: `${used}%`, width: `${Math.max(0, end - used)}%`, background: color }}
-      />
-      <span className="usage-forecast-ghost__tick" style={{ left: `calc(${Math.min(100, high)}% - 1px)`, background: color }} />
-    </span>
-  );
-}
-
-/** The title bar's mark: a small "runs out 14:20" beside a pill whose active
- * window is forecast to run out. Null when nothing is at risk. */
-export function forecastPillNote(report: UsageForecastReport | null, profileId: string): { text: string; tone: ForecastTone } | null {
-  if (!report) return null;
-  const risky = report.windows
-    .filter((view) => view.profileId === profileId && view.result.inUse && view.result.hitProbability >= 0.5 && view.result.hitAt.p50 !== null)
-    .sort((a, b) => (a.result.hitAt.p50 as number) - (b.result.hitAt.p50 as number))[0];
-  if (!risky || risky.result.hitAt.p50 === null) return null;
-  return { text: `out ${formatClock(risky.result.hitAt.p50, risky.result.nowMs)}`, tone: "danger" };
-}
 
 /* ── Chart ───────────────────────────────────────────────────────────────── */
 
@@ -239,16 +158,6 @@ const CARD: React.CSSProperties = {
 const CARD_TITLE: React.CSSProperties = { fontSize: 12, fontWeight: 600, color: "var(--ink)" };
 const CARD_HINT: React.CSSProperties = { fontSize: 11, color: "var(--muted)", marginTop: 2 };
 const NOTE: React.CSSProperties = { margin: 0, fontSize: 11, color: "var(--muted)", lineHeight: 1.45 };
-const LABS_TAG: React.CSSProperties = {
-  fontSize: 9.5,
-  letterSpacing: "0.08em",
-  textTransform: "uppercase",
-  color: "var(--accent-text, var(--accent))",
-  border: "1px solid color-mix(in oklab, var(--accent) 45%, transparent)",
-  borderRadius: 99,
-  padding: "1px 7px",
-};
-
 function viewTitle(view: WindowForecastView): string {
   return `${PROVIDER_NAME[view.provider]} · ${view.accountLabel} · ${view.windowLabel}`;
 }
@@ -281,7 +190,6 @@ export function UsageForecastSection({
           <div>
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <span style={CARD_TITLE}>Will it last until the reset?</span>
-              <span style={LABS_TAG}>Labs</span>
             </div>
             <div style={CARD_HINT}>
               Your past days at this time, blended with your pace right now. The band is where 8 in 10 replays end.
@@ -363,7 +271,7 @@ export function UsageForecastSection({
         </div>
       ) : null}
 
-      <LabsControls report={report} />
+      <IdeaControls report={report} />
     </section>
   );
 }
@@ -496,16 +404,9 @@ const IDEA_ROWS: Array<{ key: keyof ForecastIdeas; title: string; desc: string }
   { key: "coraHint", title: "Cora hint", desc: "Cora reads the forecast before it dispatches several workers." },
 ];
 
-const STYLE_OPTIONS: Array<{ value: ForecastPanelStyle; label: string }> = [
-  { value: "ghost", label: "B · Projection" },
-  { value: "line", label: "A · Sentence" },
-  { value: "pill", label: "C · Title bar" },
-];
-
-function LabsControls({ report }: { report: UsageForecastReport | null }) {
+function IdeaControls({ report }: { report: UsageForecastReport | null }) {
   const { preferences, setPreference } = usePreferences();
   const ideas = normalizeForecastIdeas(preferences.usageForecastIdeas ?? DEFAULT_FORECAST_IDEAS);
-  const style = useForecastStyle();
   const toggle = (key: keyof ForecastIdeas) => {
     void setPreference("usageForecastIdeas", { ...ideas, [key]: !ideas[key] })
       .then(() => loadUsageForecast(true))
@@ -513,17 +414,9 @@ function LabsControls({ report }: { report: UsageForecastReport | null }) {
   };
   return (
     <div style={{ ...CARD, display: "flex", flexDirection: "column", gap: 10 }}>
-      <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-        <div>
-          <div style={CARD_TITLE}>Try it</div>
-          <div style={CARD_HINT}>Each idea on its own switch, and three ways to show it in the usage panel.</div>
-        </div>
-        <Segmented
-          label="Usage panel style"
-          options={STYLE_OPTIONS}
-          value={style}
-          onChange={(value) => writeForecastStyle(value as ForecastPanelStyle)}
-        />
+      <div>
+        <div style={CARD_TITLE}>Extra hints</div>
+        <div style={CARD_HINT}>Each idea on its own switch.</div>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 8 }}>
         {IDEA_ROWS.map((row) => (
@@ -538,7 +431,7 @@ function LabsControls({ report }: { report: UsageForecastReport | null }) {
       </div>
       {report ? (
         <p style={NOTE}>
-          {report.sources.join(" ")} {report.notes.join(" ")} Turn it off in Settings, Agents, Labs.
+          {report.sources.join(" ")} {report.notes.join(" ")} Turn it off in Settings, Agents, Usage.
         </p>
       ) : null}
     </div>

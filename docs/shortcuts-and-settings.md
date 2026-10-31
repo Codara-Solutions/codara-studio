@@ -17,8 +17,8 @@ a chord you already use.
 
 Inside a browser tab the page gets a chord first, as in a browser. Codara
 runs its own command only when the page did not handle the chord, so a site
-whose Mod+K opens its own search keeps it. Mod+W and Ctrl+Tab always stay
-Codara's. Keys an agent sends to a page never trigger Codara's shortcuts.
+whose Mod+K opens its own search keeps it. Mod+W, Mod+T and Ctrl+Tab always
+stay Codara's. Keys an agent sends to a page never trigger Codara's shortcuts.
 
 ### General
 
@@ -115,7 +115,7 @@ On a layout without [ and ] keys, rebind back and forward in Keybindings.
 |---|---|---|
 | Switch to tab 1 to 9 | Mod+1 ... Mod+9 (fixed; on macOS Cmd only, since Ctrl+1 ... Ctrl+9 switch workspaces) | `view.selectByIndex` |
 | New chat | Mod+Alt+N | `chat.new` |
-| New terminal tab | Mod+T | `tab.newTerminal` |
+| New terminal tab | Mod+T (works from a focused terminal too; does nothing while a modal dialog such as Settings is open) | `tab.newTerminal` |
 | Quick Open file | Mod+P | `tab.newEditor` |
 | New browser tab | Mod+E | `tab.newPreview` |
 | New whiteboard | Mod+Shift+W | `tab.newWhiteboard` |
@@ -254,6 +254,38 @@ rebindable command; editors and terminals keep their own Mod+F.
 
 On macOS, Electron's default menu also binds Cmd+M to Minimize; rebind
 `agent.cycleModel` if the window minimizes instead.
+
+### From a desktop shortcut (Linux)
+
+A desktop-wide shortcut on the same chord as a Studio command takes the key
+before Studio sees it, and a key typed back by a tool such as `wtype` may not
+reach a native Wayland window. So on Linux a script can ask Studio directly
+for what Mod+T does:
+
+```python
+import os, socket
+
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+    client.settimeout(0.5)
+    client.connect(os.path.expanduser("~/.codarastudio/desktop-command.sock"))
+    client.sendall(b"new-terminal\n")
+    reply = client.recv(64)
+```
+
+`new-terminal` is the only command. It runs `tab.newTerminal` under the same
+rules as the chord, whatever the chord is bound to. The reply is one line:
+
+| Reply | Meaning |
+|---|---|
+| `opened` | The tab opened. |
+| `ignored` | Studio refused, as it refuses the chord: a modal dialog such as Settings is open. |
+| `unavailable` | Studio is running but its window did not answer in time. The tab may still open. |
+| `unknown-command` | Anything but `new-terminal` was sent. Nothing ran. |
+
+A failed connect means Studio is not running or is an older build, which is
+the script's cue to fall back. Once the command is sent, do not fall back,
+whatever the reply: a slow Studio still acts on it. The socket file is in the Codara home with mode
+600, so only your user can reach it, and it opens no network port.
 
 ## Settings
 
@@ -764,44 +796,56 @@ Workspaces list shows, the **Agents** side of the switch counts the agents
 waiting on you. Creating or renaming a workspace or a folder switches back
 to **Workspaces**, where you type its name.
 
-The Agents view has three groups, each with its count. Click a group's name
-to fold it; the folding is remembered.
+The Agents view is an inbox, after T3 Code's thread list. On top are the
+agents that need you or finished: a terminal agent waiting at a permission
+prompt or a question, one that stopped with an error, Cora chats that asked
+you something or are paused, terminal agents back at their prompt, and Cora
+chats that finished, failed or were cancelled in the last 12 hours. Under
+them are three shelves with their counts; click one to fold or open it (the
+folding is remembered):
 
-- **Needs you**: a terminal agent waiting at a permission prompt or a
-  question, one that stopped with an error, and Cora chats that asked you
-  something or are paused. The one waiting longest comes first.
 - **Working**: terminal agents in a turn and Cora chats that are planning,
   working or reviewing, including automation runs and board cards while they
-  work. The latest start comes first.
-- **Done**: terminal agents back at their prompt, and Cora chats that
-  finished, failed or were cancelled in the last 12 hours (a finished chat
-  you have not opened stays until you do). Unseen ones come first, marked
-  with a dot. A terminal agent Codara stopped to save memory (see
-  [Idle agents sleep](#idle-agents-sleep)) shows here as **Sleeping**;
-  opening its card resumes it.
+  work. Open until you fold it.
+- **Snoozed**: agents you snoozed, until their time. A question or a new
+  failure wakes one early; a finished turn does not.
+- **Settled**: agents you put away, one line each. One comes back by itself
+  when it does something new: starts working, asks something, or finishes a
+  turn you have not seen.
 
-Each card shows the agent (Claude Code, Codex, Grok, Pi or Cora), its
-workspace with the workspace's status when one is set (from the workspace
-row's menu or by an agent), the account it runs on when Codara knows it, what it is doing or
-asked, the tool it is running when the agent reports one, and how long it
-has been in that state. A terminal agent's card is titled by your last prompt
-when the agent's hooks report it, otherwise by its tab.
+Each row has three lines: the workspace, the title (your last prompt when
+the agent's hooks report it, otherwise its tab, or a name you gave it), and
+the branch with its pull request (#61 with ✓, ✕ or a dot for its checks).
+When a finished agent has an open pull request the row adds its +/- line
+counts. The agent's mark shows only when it is not Claude Code. The top
+right says **Input**, **Failed**, **Done** or **Working** with how long it
+has worked; a row you have seen shows its age instead and a dimmed title.
+The question or the last message is the row's tooltip. A terminal agent
+Codara stopped to save memory (see [Idle agents sleep](#idle-agents-sleep))
+stays with the finished ones; opening it resumes it.
 
-A **Needs you** card has a reply box. For a Cora question the answer options
-show as buttons above the box. For a terminal agent that stopped with an
-error, the text is pasted into its pane and submitted, as if you had typed it
-at its prompt. A terminal agent waiting at a permission prompt, a question or
-a plan to approve shows **Answer in terminal** instead, which opens its pane:
-those prompts are menus that take keys, and pasted text followed by Enter
-could pick the highlighted answer, often Yes, without you choosing it.
-Clicking a card, or Enter on it, switches to its workspace and opens its pane
-or chat.
+Point at a row, or reach it with the keyboard, and the top right turns into
+**Snooze** (1 hour, 3 hours, this evening, tomorrow 09:00 or next Monday
+09:00) and **Settle**. When a workspace's pull request is merged, its
+finished agents settle themselves. After a settle or a snooze the bottom of
+the list says so with **Ctrl+Z to undo** (⌘Z on a Mac) for a few seconds.
+
+Right-click a row for **Open**, **Merge PR** (only while the pull request is
+open and its checks pass), **Settle**, **Snooze**, **Pin** (pinned rows stay
+on top), **Rename**, **Mark unread**, **Copy link** (the pull request's)
+and **Delete** (closes a terminal agent's pane or deletes a Cora chat, after
+you confirm). Merge PR reads GitHub again first. Into main, master or the
+repository's default branch it shows the same confirmation as the Git panel;
+into any other branch it squash-merges right away and settles the row.
+
+Clicking a row, or Enter on it, switches to its workspace and opens its pane
+or chat, where you answer it: a terminal agent's prompts are menus that take
+keys, so Codara never pastes into them.
 
 Keys: Left and Right move between **Workspaces**, **Agents** and
-**Sessions**; in the
-list, Up and Down (or Home and End) move between cards, Tab reaches a card's
-reply box or its **Answer in terminal** button, and Escape goes back to the
-card.
+**Sessions**; in the list, Up and Down (or Home and End) move between rows,
+E settles the row in focus, the menu key or Shift+F10 opens its menu, and
+Ctrl+Z (⌘Z) takes back the last settle or snooze.
 
 ### Check first and missed runs
 

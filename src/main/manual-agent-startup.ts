@@ -1,3 +1,4 @@
+import { posix } from "node:path";
 import type { ShellInfo } from "@shared/types";
 
 const MAX_STARTUP_COMMAND_LENGTH = 8_192;
@@ -269,4 +270,17 @@ function tokenizeKnownStartup(source: string): string[] | null {
   if (quote) return null;
   push();
   return tokens;
+}
+
+/**
+ * True when a pane's startup command starts Claude Code: Studio's own
+ * `claude ...` forms, and the commands agents and Cora's standing terminals
+ * pass (`claude --settings ...`, a bare `claude`). Only the program word is
+ * read; the rest of the line is the shell's.
+ */
+export function startupCommandRunsClaude(command: string | null | undefined): boolean {
+  const first = command?.trim().split(/\s+/, 1)[0]?.replace(/^["']|["']$/g, "");
+  if (!first) return false;
+  const name = posix.basename(first.replaceAll("\\", "/")).toLowerCase();
+  return name === "claude" || name === "claude.exe" || name === "claude.cmd";
 }

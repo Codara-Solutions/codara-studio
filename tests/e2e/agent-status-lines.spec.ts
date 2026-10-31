@@ -8,9 +8,11 @@ import { join } from "node:path";
 // throwaway Codara home and a fake user home. Three Claude Code stand-ins
 // share one workspace: two work (one posts a note through the real agent
 // socket, as codara_workspace_status does), one waits on a permission. The
-// row sums them in one line, its chevron lists each agent under it with its
+// row counts them in its number and names the waiting one in its line, its chevron lists each agent under it with its
 // own state and note, clicking the waiting one opens its pane, and clicking
-// the summary opens the row like any other click on it.
+// the summary opens the row like any other click on it. The number at the
+// row's right edge is the one count of agents ("2/3"); the line under the
+// name says only what needs the user (DESIGN.md, "One home for agent counts").
 // AGENT_STATUS_SHOTS=<dir> also saves the row collapsed and expanded there.
 
 interface Fixture {
@@ -187,7 +189,7 @@ async function shot(page: Page, name: string): Promise<void> {
   await test.info().attach(name, { path, contentType: "image/png" });
 }
 
-test("a workspace sums its agents in one line and lists each agent's own state and note", async () => {
+test("a workspace counts its agents in its number, says what needs you in one line and lists each agent's own state and note", async () => {
   test.skip(process.platform === "win32", "the fake agents are started from a POSIX shell");
   test.setTimeout(150_000);
   const fixture = await prepare();
@@ -227,8 +229,15 @@ test("a workspace sums its agents in one line and lists each agent's own state a
       // Look elsewhere, as you would while they work.
       await row(page, "ws-b").evaluate((element) => (element as HTMLElement).click());
       await expect(row(page, "ws-b")).toHaveAttribute("data-active", "true");
-      await expect(summary).toContainText("2 working · 1 needs you", { timeout: 20_000 });
+      const count = row(page, "ws-a").getByTestId("workspace-agent-count");
+      await expect(count).toHaveText("2/3", { timeout: 20_000 });
+      await expect(count).toHaveAttribute("aria-label", "2 of 3 agents working");
+      await expect(summary).toHaveText("1 needs you", { timeout: 20_000 });
+      await expect(summary.locator('[data-part="needs-you"]')).toHaveText("1 needs you");
       await expect(summary).toHaveAttribute("data-needs-you", "true");
+      // Hover says who needs you and why; counting agents is the number's job.
+      await expect(summary).toHaveAttribute("title", /needs you: Allow npm test\?/);
+      await expect(summary).not.toHaveAttribute("title", /working|idle/);
       await expect(children(page, "ws-a")).toHaveCount(0);
       await shot(page, "rail-collapsed");
     });

@@ -100,6 +100,7 @@ const TERMINAL_STUDIO_TOOLS = [
   ...WORKTREE_TOOLS,
   "codara_session_search",
   "codara_share_offer",
+  "codara_open_file",
 ];
 const RUN = { SPARK_RUN_ID: "run-roster" };
 // tools/list budgets in JSON characters. The studio list is what every Claude
@@ -117,8 +118,12 @@ const RUN = { SPARK_RUN_ID: "run-roster" };
 // studio and execute by 2,700 for the four task list tools, about 2,650,
 // which let every agent in a workspace share one task list; studio by 100
 // for codara_browser_use, about 390, with the rest paid for by a shorter
-// codara_preview_run).
-const LIST_BUDGET = { studio: 34_200, run: 39_000, worker: 35_000, execute: 99_600, automation: 69_000 };
+// codara_preview_run; studio and execute by 400 for codara_open_file, about
+// 400; studio by 250 for codara_worktree_create's workspace and
+// codara_workspace_status's worktree, about 210, and execute by 100 for the
+// first, about 70, so a background agent can work in another repository and
+// still show on its rail).
+const LIST_BUDGET = { studio: 34_850, run: 39_000, worker: 35_000, execute: 100_100, automation: 69_000 };
 const EXECUTE_TOOLS = [
   "codara_spawn_terminals",
   "codara_spawn_workers",
@@ -293,8 +298,21 @@ function sortedEqual(actual, expected, label) {
     assert.match(studio.init.instructions, /codara_terminal_run/, "initialize carries shared tool guidance");
     assert.match(studio.init.instructions, /codara_notify_user/);
     assert.match(studio.init.instructions, /codara_share_offer.*only shows the user a Share prompt/, "a terminal agent learns the share offer is a prompt, not an upload");
+    assert.match(studio.init.instructions, /"open X".*codara_open_file/, "a terminal agent learns to open a file the user names in Codara's editor");
     assert.match(studio.init.instructions, /codara_worktree_remove/, "a terminal agent learns the worktree lifecycle");
     assert.match(studio.init.instructions, /Linked folders are shared with the main checkout/);
+    // Work on another repository shows on that repository's rail, whoever
+    // does it (the coordinator or its background subagent).
+    assert.match(
+      studio.init.instructions,
+      /To work on another repository, or to hand one to a background subagent, call it with workspace .*instead of running git worktree add/,
+      "an agent learns to make another repository's worktree through Codara",
+    );
+    assert.match(
+      studio.init.instructions,
+      /reports with worktree set to its path: the note shows on that worktree's row/,
+      "an agent learns where a subagent's milestone notes go",
+    );
     assert.match(studio.init.instructions, /awaiting-approval waits for the user to approve its commands; never run them, or the setup file's terminal commands, yourself/);
     assert.match(
       studio.init.instructions,
@@ -358,6 +376,7 @@ function sortedEqual(actual, expected, label) {
         ...TASK_TOOLS,
         "codara_session_search",
         "codara_share_offer",
+        "codara_open_file",
       ],
       "execute roster mismatch",
     );
@@ -486,7 +505,7 @@ function sortedEqual(actual, expected, label) {
     }
 
     const directMemory = await listTools("talk", { ...RUN, CODARA_PI_DIRECT_TASK: "1" });
-    sortedEqual(directMemory.tools, [...STUDIO_TOOLS, "codara_remember", "codara_recall", ...WORKTREE_TOOLS, "codara_share_offer"], "direct Cora roster mismatch");
+    sortedEqual(directMemory.tools, [...STUDIO_TOOLS, "codara_remember", "codara_recall", ...WORKTREE_TOOLS, "codara_share_offer", "codara_open_file"], "direct Cora roster mismatch");
     const directDefinition = directMemory.definitions.find((tool) => tool.name === "codara_remember");
     assert.ok(!("runId" in directDefinition.inputSchema.properties), "direct memory cannot choose a different run");
     assert.ok(JSON.stringify(directDefinition).length < 1500, "direct memory keeps a compact tool schema");
@@ -600,6 +619,9 @@ function sortedEqual(actual, expected, label) {
     assert.strictEqual(byName(studio, "codara_worktree_create").annotations.destructiveHint, true);
     assert.notStrictEqual(byName(studio, "codara_worktree_create").annotations.readOnlyHint, true);
     assert.strictEqual(byName(studio, "codara_worktree_create").annotations.openWorldHint, true);
+    // Another workspace's repository, and a note on a worktree's row.
+    assert.equal(byName(studio, "codara_worktree_create").inputSchema.properties.workspace.type, "string");
+    assert.equal(byName(studio, "codara_workspace_status").inputSchema.properties.worktree.type, "string");
     assert.strictEqual(byName(studio, "codara_worktree_remove").annotations.destructiveHint, true);
     assert.strictEqual(byName(studio, "codara_worktree_remove").annotations.idempotentHint, true);
     // Its remove action deletes worktrees and, when ticked, remote branches.
@@ -1037,6 +1059,16 @@ function sortedEqual(actual, expected, label) {
     assert.strictEqual(received.at(-1).params.callerPaneId, "pane-caller");
     await terminalAgentBridge.callToolByName("codara_share_offer", { path: "/abs/page.html" });
     assert.strictEqual(received.at(-1).params.path, "/abs/page.html");
+    // codara_open_file is located the same way; its path is the agent's too,
+    // and ~/ is the agent's home.
+    await terminalAgentBridge.callToolByName("codara_open_file", { path: "notes/todo.md", line: 3 });
+    assert.strictEqual(received.at(-1).method, "file.open");
+    assert.strictEqual(received.at(-1).params.path, path.resolve(process.cwd(), "notes/todo.md"));
+    assert.strictEqual(received.at(-1).params.line, 3);
+    assert.strictEqual(received.at(-1).params.callerPaneId, "pane-caller");
+    assert.ok(!("workspaceId" in received.at(-1).params), "the tool never names a workspace");
+    await terminalAgentBridge.callToolByName("codara_open_file", { path: "~/Codara SL/.env" });
+    assert.strictEqual(received.at(-1).params.path, path.join(os.homedir(), "Codara SL/.env"));
     // Worktree calls carry who is asking from the launch environment only:
     // spoofed caller fields are replaced, and a refusal reaches the model as
     // an error result that keeps its code, blockers and hint.
@@ -1246,6 +1278,9 @@ function sortedEqual(actual, expected, label) {
     const offlineShare = await terminalAgentBridge.callToolByName("codara_share_offer", { path: "/abs/page.html" });
     assert.notStrictEqual(offlineShare.isError, true, "an offer Codara cannot show is not a tool error");
     assert.strictEqual(JSON.parse(offlineShare.content[0].text).offered, false);
+    const offlineOpen = await terminalAgentBridge.callToolByName("codara_open_file", { path: "/abs/.env" });
+    assert.notStrictEqual(offlineOpen.isError, true, "a file Codara cannot show is not a tool error");
+    assert.deepStrictEqual(JSON.parse(offlineOpen.content[0].text).reason, "codara_offline");
     fs.writeFileSync(handshakePath, JSON.stringify({ url: "http://127.0.0.1:1", token: "f".repeat(64) }));
     const refused = await directBridge.callToolByName("codara_terminal_read", { paneId: "pane-owned" });
     assert.match(refused.content[0].text, /appears to be offline: nothing is listening/);

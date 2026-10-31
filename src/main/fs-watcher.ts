@@ -11,6 +11,7 @@ import type { FsChangeEvent } from "@shared/types";
 const IGNORED_NAMES = new Set([
   ".git",
   "node_modules",
+  ".vite-cache",
   "out",
   "dist",
   "build",

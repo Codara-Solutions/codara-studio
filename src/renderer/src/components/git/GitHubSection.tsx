@@ -1046,7 +1046,7 @@ function PublishField({
   );
 }
 
-function MergePullRequestDialog({
+export function MergePullRequestDialog({
   cwd,
   repository,
   pullRequest,

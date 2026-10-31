@@ -1,3 +1,4 @@
+import { terminalAgentPlacement } from "@shared/agent-board";
 import type { RuntimeState, TerminalAgentRuntime } from "@shared/types";
 import type { Tab, TerminalAgentSession, TerminalLeafWorker } from "./types";
 import { collectLeaves } from "./paneTree";
@@ -109,9 +110,14 @@ export function terminalAgentCensus(
       // cannot prove the CLI launched, but a live chip must count immediately.
       if (!liveTerminalRuntime(worker)) return;
       agents.add(leaf.paneId);
-      // An agent whose background work still runs is busy too.
-      if (worker.runtimeState === "working" || worker.runtimeState === "background") working.add(leaf.paneId);
-      else if (worker.runtimeState) working.delete(leaf.paneId);
+      // Working means what the Agents view and the agent lines call working
+      // (terminalAgentPlacement): mid-turn, in the background, quiet ("No
+      // output") or starting. The rail's number is the one place it counts
+      // agents, so a quiet agent mid-turn must not read as idle there.
+      if (worker.runtimeState) {
+        if (terminalAgentPlacement(worker.runtimeState).bucket === "working") working.add(leaf.paneId);
+        else working.delete(leaf.paneId);
+      }
     });
   }
   for (const paneId of working) agents.add(paneId);

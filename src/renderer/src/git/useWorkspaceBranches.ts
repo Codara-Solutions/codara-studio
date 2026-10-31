@@ -19,11 +19,20 @@ export function useWorkspaceBranches(
   const targetsRef = useRef<{ id: string; cwd: string }[]>([]);
   targetsRef.current = workspaces.map((ws) => ({ id: ws.id, cwd: ws.cwd }));
   const inFlight = useRef(false);
+  // A read asked for while one is in flight runs once it lands, with the
+  // latest targets: the first read at boot starts before the workspaces load,
+  // and dropping the one their arrival asks for left every row without its
+  // branch until the next poll.
+  const again = useRef(false);
+  const latestRefresh = useRef<(() => Promise<void>) | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     const refresh = async () => {
-      if (inFlight.current) return;
+      if (inFlight.current) {
+        again.current = true;
+        return;
+      }
       inFlight.current = true;
       try {
         const targets = targetsRef.current;
@@ -49,15 +58,21 @@ export function useWorkspaceBranches(
         });
       } finally {
         inFlight.current = false;
+        if (again.current) {
+          again.current = false;
+          void latestRefresh.current?.();
+        }
       }
     };
 
+    latestRefresh.current = refresh;
     void refresh();
     const timer = window.setInterval(() => void refresh(), POLL_MS);
     const onFocus = () => void refresh();
     window.addEventListener("focus", onFocus);
     return () => {
       cancelled = true;
+      if (latestRefresh.current === refresh) latestRefresh.current = null;
       window.clearInterval(timer);
       window.removeEventListener("focus", onFocus);
     };

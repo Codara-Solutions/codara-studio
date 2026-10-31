@@ -23,7 +23,7 @@ import WorkspaceIconPicker from "./WorkspaceIconPicker";
 import { WorkspaceStatusLine } from "./workspace-status/WorkspaceStatusChip";
 import { WorkspaceAgentsLine } from "./workspace-status/WorkspaceAgentsLine";
 import { useAgentLinesOf } from "./workspace-status/agentLinesStore";
-import { Chevron, WorkspaceChildren, WorktreeAgentLine } from "./rail/WorkspaceChildren";
+import { Chevron, ExternalWorktreeRow, WorkspaceChildren, WorktreeAgentLine } from "./rail/WorkspaceChildren";
 import { CleanUpHoldsConfirm, RailCleanUpNotices, useRailCleanUp, type RailCleanUpEntry } from "./rail/RailCleanUp";
 import { setRailFold, useRailFold } from "./rail/railFolds";
 import WorkspaceStatusPicker from "./workspace-status/WorkspaceStatusPicker";
@@ -51,8 +51,8 @@ import {
 import { openWorktreeCleanup } from "./worktree-cleanup/open-worktree-cleanup";
 import { PullRequestMark } from "../git/PullRequestMark";
 import { setRepositoryWatched, usePullRequestWatch } from "../git/pullRequestWatchStore";
-import type { WorktreeRailCleanupResult, WorktreeRailState } from "@shared/worktree-cleanup";
-import { buildRailFamily, buildRailTree, railMergeState, type RailTree } from "@shared/rail-tree";
+import type { WorktreeRailCleanupResult, WorktreeRailExternal, WorktreeRailState } from "@shared/worktree-cleanup";
+import { buildRailFamily, buildRailTree, railFamilyAgentCount, railMergeState, type RailTree } from "@shared/rail-tree";
 import type { AgentLine } from "@shared/agent-status";
 
 const PANEL_SECTION_MIME = "application/x-codara-panel-section";
@@ -171,6 +171,10 @@ interface RailProps {
   worktreeByWorkspaceId?: Record<string, WorktreeRailState>;
   // The first read of those states finished (useWorktreeRailStates).
   worktreeStatesLoaded?: boolean;
+  // Worktrees of the rail's repositories made outside Codara, listed under
+  // their project (useWorktreeRailStates), and opening one in the rail.
+  externalWorktrees?: readonly WorktreeRailExternal[];
+  onOpenExternalWorktree?: (entry: WorktreeRailExternal) => void;
   // Clean up a merged worktree, or remove a workspace whose folder is gone.
   // confirmIgnored carries the fingerprint of a "confirm" answer the user
   // accepted; null means there was nothing to report.
@@ -311,6 +315,19 @@ function WorkspaceRail(props: RailProps) {
     [workspaces, props.workspaceRailOrder],
   );
   const workspaceById = useMemo(() => new Map(workspaces.map((workspace) => [workspace.id, workspace])), [workspaces]);
+  const externalByProject = useMemo(() => {
+    const out = new Map<string, WorktreeRailExternal[]>();
+    // One opened in the rail since main last listed it is a row already.
+    const trim = (path: string) => path.replace(/[\\/]+$/, "");
+    const rows = new Set(workspaces.map((workspace) => trim(workspace.cwd)));
+    for (const entry of props.externalWorktrees ?? []) {
+      if (rows.has(trim(entry.path))) continue;
+      const list = out.get(entry.projectId);
+      if (list) list.push(entry);
+      else out.set(entry.projectId, [entry]);
+    }
+    return out;
+  }, [props.externalWorktrees, workspaces]);
   // Workspace rows can be reordered within a folder or dropped onto another
   // folder. The transfer payload makes the gesture work even when Workspaces
   // is rendered in the opposite rail; local state is only visual feedback.
@@ -851,6 +868,8 @@ function WorkspaceRail(props: RailProps) {
         key={w.id}
         project={w}
         worktrees={worktreesOf(railTree, w.id, workspaceById)}
+        external={externalByProject.get(w.id) ?? NO_EXTERNAL}
+        onOpenExternal={props.onOpenExternalWorktree}
         statesLoaded={props.worktreeStatesLoaded ?? false}
         rowProps={(child) => workspaceRowProps(child, child === w ? groupId : null)}
       />
@@ -2031,6 +2050,8 @@ interface RowProps {
   agentWorking?: number;
   /** How many of those Codara stopped to save memory (agent hibernation). */
   agentSleeping?: number;
+  /** A project's row: how many of its counted agents work in its worktrees. */
+  agentInWorktrees?: number;
   /** Current git branch (or short hash when detached); null hides the subtitle. */
   branch?: string | null;
   /** The workspace's folder is not on disk right now (moved/renamed/unmounted). */
@@ -2070,6 +2091,8 @@ function rowMerged(worktree: WorktreeRailState | null | undefined, missing: bool
   return worktree?.merge === "merged" || (missing && worktree?.merge === "gone");
 }
 
+const NO_EXTERNAL: readonly WorktreeRailExternal[] = [];
+
 function worktreesOf(tree: RailTree, projectId: string, byId: ReadonlyMap<string, Workspace>): Workspace[] {
   const ids = tree.childrenOf.get(projectId);
   if (!ids) return [];
@@ -2079,17 +2102,22 @@ function worktreesOf(tree: RailTree, projectId: string, byId: ReadonlyMap<string
 /**
  * A project's row and, under it, its agents and worktrees (DESIGN.md,
  * "Worktrees in the rail"). Each agent shows on the row it works in; the
- * project's roll-up counts them all, so a folded family still says what
- * waits inside it.
+ * project's number and roll-up line cover them all, so a folded family still
+ * says what works and waits inside it.
  */
 function WorkspaceFamily({
   project,
   worktrees,
+  external,
+  onOpenExternal,
   statesLoaded,
   rowProps,
 }: {
   project: Workspace;
   worktrees: Workspace[];
+  /** Worktrees of its repository made outside Codara, after its own. */
+  external: readonly WorktreeRailExternal[];
+  onOpenExternal?: (entry: WorktreeRailExternal) => void;
   statesLoaded: boolean;
   rowProps: (workspace: Workspace) => RowProps;
 }) {
@@ -2115,8 +2143,16 @@ function WorkspaceFamily({
       };
     }),
   });
-  const expandable = family.own.length > 0 || worktrees.length > 0;
-  const open = useRailFold(project.id, worktrees.length > 0) && expandable;
+  const familyCount = railFamilyAgentCount(
+    { total: projectProps.agentTotal, working: projectProps.agentWorking, sleeping: projectProps.agentSleeping },
+    worktrees.map((worktree) => {
+      const props = childProps.get(worktree.id)!;
+      return { total: props.agentTotal, working: props.agentWorking, sleeping: props.agentSleeping };
+    }),
+    [...family.active, ...family.merged],
+  );
+  const expandable = family.own.length > 0 || worktrees.length > 0 || external.length > 0;
+  const open = useRailFold(project.id, worktrees.length > 0 || external.length > 0) && expandable;
   const mergedOpen = useRailFold(`merged:${project.id}`, false);
   const mergedCleanUps = family.merged.flatMap((child): RailCleanUpEntry[] => {
     const props = childProps.get(child.workspaceId);
@@ -2130,6 +2166,10 @@ function WorkspaceFamily({
     <>
       <WorkspaceRow
         {...projectProps}
+        agentTotal={familyCount.total}
+        agentWorking={familyCount.working}
+        agentSleeping={familyCount.sleeping}
+        agentInWorktrees={familyCount.inWorktrees}
         fold={{ expandable, open, onToggle: () => setRailFold(project.id, !open) }}
         rollupLines={family.all}
       />
@@ -2139,7 +2179,14 @@ function WorkspaceFamily({
           dragOffset={projectProps.dragOffset}
           dragging={projectProps.dragging}
           ownAgents={family.own}
-          active={family.active.map((child) => renderChild(child.workspaceId, child.agents, false))}
+          active={[
+            ...family.active.map((child) => renderChild(child.workspaceId, child.agents, false)),
+            ...external.map((entry) => <ExternalWorktreeRow
+                key={`external:${entry.path}`}
+                entry={entry}
+                onOpen={entry.branch ? onOpenExternal : undefined}
+              />),
+          ]}
           merged={{
             count: family.merged.length,
             open: mergedOpen,
@@ -2181,6 +2228,7 @@ function WorkspaceRow({
   agentTotal = 0,
   agentWorking = 0,
   agentSleeping = 0,
+  agentInWorktrees = 0,
   branch = null,
   missing = false,
   worktree = null,
@@ -2399,7 +2447,9 @@ function WorkspaceRow({
         if (!editing && !pressInAgents.current) setRowPressed(true);
       }}
       onMouseUp={() => setRowPressed(false)}
-      aria-busy={working}
+      // A project's number counts its whole family; busy follows it, so an
+      // agent working in a folded worktree still marks the project busy.
+      aria-busy={working || agentWorking > 0}
       data-agent-working={working ? "true" : undefined}
       data-copy-branch={ws.copyBranch ? "true" : undefined}
       style={{
@@ -2734,7 +2784,13 @@ function WorkspaceRow({
         )}
 
         {agentTotal > 0 && !editing && !nested && (
-          <AgentCount total={agentTotal} working={agentWorking} sleeping={agentSleeping} accent={accent} />
+          <AgentCount
+            total={agentTotal}
+            working={agentWorking}
+            sleeping={agentSleeping}
+            inWorktrees={agentInWorktrees}
+            accent={accent}
+          />
         )}
 
         {!editing && (canCleanUp || canRemoveFromRail) && (rowHover || cleaning || moreFocus) && (
@@ -3203,13 +3259,22 @@ function RowMenuItem({
 // accent the moment one of them is mid-turn. Same 10px tabular type as the
 // folder header's member count; the slash and the row placement keep the two
 // apart, and no glyph or chip is drawn so the rail stays quiet.
-function AgentCount(props: { total: number; working: number; sleeping?: number; accent: string }) {
-  const { total, working, sleeping = 0, accent } = props;
+// It is the row's one agent count: the line under the name no longer repeats
+// it (DESIGN.md, "One home for agent counts"). A project's number covers its
+// worktrees too, and its label says how many of those agents work there.
+function AgentCount(props: { total: number; working: number; sleeping?: number; inWorktrees?: number; accent: string }) {
+  const { total, working, sleeping = 0, inWorktrees = 0, accent } = props;
   const base =
     working > 0
       ? `${working} of ${total} agent${total === 1 ? "" : "s"} working`
       : `${total} agent${total === 1 ? "" : "s"} idle`;
-  const label = sleeping > 0 ? `${base}, ${sleeping} sleeping` : base;
+  const label = [
+    base,
+    sleeping > 0 ? `${sleeping} sleeping` : null,
+    inWorktrees > 0 ? `${inWorktrees} in worktree${inWorktrees === 1 ? "" : "s"}` : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
   return (
     <span
       role="status"

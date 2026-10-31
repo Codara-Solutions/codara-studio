@@ -519,6 +519,11 @@ export interface Workspace {
     // only worktrees an agent created unless the user opts in
     // (agentsMayRemoveUserWorktrees), so this must survive every save.
     createdBy?: CopyBranchCreator;
+    // An agent's worktree whose starting commit is reachable only from an
+    // imported pull request (or that was made from a pull-request
+    // workspace): its code is the PR's, so Codara never trusts it for
+    // Claude Code (claude-pretrust.ts). Must survive every save.
+    pullRequestCode?: true;
   };
   // Present only on SSH remote workspaces (cwd is then ssh://<hostId>/...).
   // Host connection details live in the remote-hosts registry, keyed by id,
@@ -540,6 +545,11 @@ export interface CopyBranchCreator {
   runId?: string;
   paneId?: string;
   purpose?: string;
+  // The workspace the agent called from, as it was named then. Set when an
+  // agent made the worktree, so a worktree made for another workspace's
+  // repository says who works in it ("Background agent · from <name>").
+  fromWorkspaceId?: string;
+  fromWorkspaceName?: string;
 }
 
 // Sent to the renderer ("workspace:agentEvent") when an agent creates or
@@ -559,6 +569,8 @@ export const COPY_BRANCH_CREATOR_LIMITS = {
   runId: 120,
   paneId: 120,
   purpose: 200,
+  fromWorkspaceId: 120,
+  fromWorkspaceName: 120,
 } as const;
 
 // Field-level validation for a persisted creator: an unknown kind drops the
@@ -568,7 +580,7 @@ export function normalizeCopyBranchCreator(value: unknown): CopyBranchCreator | 
   const raw = value as Record<string, unknown>;
   if (raw.kind !== "user" && raw.kind !== "agent") return undefined;
   const creator: CopyBranchCreator = { kind: raw.kind };
-  for (const key of ["client", "runId", "paneId", "purpose"] as const) {
+  for (const key of ["client", "runId", "paneId", "purpose", "fromWorkspaceId", "fromWorkspaceName"] as const) {
     const field = raw[key];
     if (typeof field !== "string") continue;
     const text = field.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ").trim().slice(0, COPY_BRANCH_CREATOR_LIMITS[key]);
@@ -1027,11 +1039,34 @@ export type PiUsageCredits =
       usedPercent: number | null;
     };
 
+/** One banked Codex rate-limit reset, from `wham/rate-limit-reset-credits`. */
+/** What a ChatGPT reset credit id may look like when it crosses IPC. A reset
+ * is only ever spent by naming one, so an id outside this shape is no id. */
+export const PI_RESET_CREDIT_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,200}$/;
+
+export function isPiResetCreditId(value: unknown): value is string {
+  return typeof value === "string" && PI_RESET_CREDIT_ID_PATTERN.test(value);
+}
+
+export interface PiUsageResetCredit {
+  /** ChatGPT's credit id: spending sends it, so the chosen reset is the one spent. */
+  id?: string;
+  expiresAt?: string;
+  grantedAt?: string;
+}
+
 /** Codex rate-limit resets the account has earned and not spent yet. */
 export interface PiUsageResetCredits {
   available: number;
+  /** How many ChatGPT lets the account spend right now
+   * (`applicable_available_count`); 0 when nothing is used enough to reset.
+   * Absent when ChatGPT did not say. */
+  applicable?: number;
   /** When the soonest unspent reset expires, if the provider said. */
   nextExpiresAt?: string;
+  /** Every unspent, unexpired reset, soonest expiry first, when the list
+   * could be read. */
+  credits?: PiUsageResetCredit[];
 }
 
 export interface PiUsageProvider {
@@ -1329,10 +1364,15 @@ export interface AppPreferences {
   // use the user's own Chrome through the Codara extension
   // (src/main/separate-browser-tools.ts). Applies to new sessions.
   keepAgentsInYourChrome?: boolean;
-  // Labs: forecast when each subscription window runs out
-  // (src/main/usage-forecast.ts). Off by default; while off nothing is
-  // recorded and the usage panel looks as it always has.
+  // Forecast when each subscription window runs out
+  // (src/main/usage-forecast.ts). On by default; while off nothing is
+  // recorded and the usage panel shows only what is used now. Only a choice
+  // the user made (usageForecastChosen) overrides the default.
   usageForecast?: boolean;
+  // Set once the user switches the forecast on or off. Builds where it was a
+  // Labs switch saved `usageForecast: false` for everyone; without this flag
+  // that value is not a choice.
+  usageForecastChosen?: boolean;
   // Which of the forecast's extra hints are shown, each on its own toggle.
   usageForecastIdeas?: ForecastIdeas;
   // When true, a localhost dev URL sniffed from any terminal pane's stdout
@@ -1349,6 +1389,9 @@ export interface AppPreferences {
   // default browser, copy); Ctrl or Cmd+click opens it per linkOpenTarget.
   // Off: a plain click opens it straight away. Default on.
   terminalLinkMenu?: boolean;
+  // Quick Open (Mod+P) also lists matching files anywhere in the home folder,
+  // below the workspace's own. Default on.
+  quickOpenAnywhere?: boolean;
   // "Create copy branch" setup command, keyed by absolute repo cwd. Run live
   // in a terminal in the new worktree after creation. Repos with no entry use
   // DEFAULT_COPY_BRANCH_SETUP_COMMAND.
@@ -1575,10 +1618,11 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   keepAwakeMode: "agents",
   keepAwakeLidClosed: false,
   keepAgentsInYourChrome: true,
-  usageForecast: false,
+  usageForecast: true,
   autoOpenPreview: false,
   linkOpenTarget: "system",
   terminalLinkMenu: true,
+  quickOpenAnywhere: true,
   copyBranchSetupCommandByRepo: {},
   quickCommands: [],
   terminalRightClick: "paste",
@@ -2431,6 +2475,69 @@ export interface FsEntry {
   isDir: boolean;
   ext?: string;
 }
+
+// Quick Open's "Elsewhere on this computer" (src/main/quick-open-anywhere.ts).
+export interface HomeFileHit {
+  /** Absolute path. */
+  path: string;
+  /** Path below the home folder, POSIX separators. */
+  rel: string;
+  name: string;
+}
+
+export interface HomeFileSearchResult {
+  hits: HomeFileHit[];
+  /** The walk stopped early (time, candidate cap); refining the query helps. */
+  truncated: boolean;
+  /** A newer query from the same window replaced this one. */
+  cancelled?: boolean;
+  /** The section is off in Settings. */
+  disabled?: boolean;
+}
+
+export type HomePickResult = { ok: true; path: string } | { ok: false; message: string };
+
+// Quick Open with a query that looks like a path (src/main/quick-open-path.ts).
+export interface PathQueryHit {
+  /** Absolute path. */
+  path: string;
+  name: string;
+  isDir: boolean;
+  /**
+   * "folder" is the folder the query ends in ("~/.claude/"): picking it opens
+   * it as a workspace. "exact" is the path the query spells without a trailing
+   * slash, "child" another entry of the folder listed.
+   */
+  kind: "folder" | "exact" | "child";
+  /** The query that completes to this entry; folders end in a slash. */
+  completion: string;
+  /** Where it is, as the user spelled it: "~/.claude". */
+  label: string;
+}
+
+export interface PathQueryResult {
+  hits: PathQueryHit[];
+  /** The folder held more entries than were looked at. */
+  truncated: boolean;
+  /** The folder the query names does not exist. */
+  missing?: boolean;
+  /** Why nothing could be listed, for the user. */
+  message?: string;
+  cancelled?: boolean;
+  disabled?: boolean;
+}
+
+export type PathPickResult =
+  | { ok: true; kind: "file" | "folder"; path: string }
+  | { ok: false; message: string };
+
+// The desktop command socket's open-path command, as the renderer gets it.
+export interface DesktopOpenPathRequest {
+  path: string;
+  kind: "file" | "folder";
+}
+
+export type DesktopOpenPathOutcome = "opened" | "ignored" | "no-workspace";
 
 export interface FsFileContent {
   path: string;
