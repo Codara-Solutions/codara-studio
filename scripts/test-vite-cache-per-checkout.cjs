@@ -26,7 +26,8 @@ const path = require("node:path");
 
 const ROOT = path.resolve(__dirname, "..");
 process.env.VITE_CJS_IGNORE_WARNING = "1";
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "codara vite cache "));
+// realpath: macOS keeps its temp folder behind a /var symlink, and Vite resolves it.
+const TMP = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "codara vite cache ")));
 process.on("exit", () => fs.rmSync(TMP, { recursive: true, force: true }));
 
 function copy(from, to) {
