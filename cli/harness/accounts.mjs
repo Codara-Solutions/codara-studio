@@ -35,6 +35,7 @@ export const PROVIDER_ALIASES = {
 const LOGIN_NAMES = { anthropic: "claude", "openai-codex": "chatgpt", xai: "grok" };
 const PROVIDER_NAMES = { anthropic: "Claude", "openai-codex": "ChatGPT", xai: "Grok" };
 const STUDIO_PROBE_TIMEOUT_MS = 500;
+const LOGIN_MARGIN_MS = 60_000;
 
 export function loginName(provider) {
   return LOGIN_NAMES[provider] ?? provider;
@@ -102,6 +103,14 @@ export function credentialRoutes(env = process.env) {
 
 export function hasLogin(provider, routes, env = process.env) {
   return routes.has(provider) || Boolean(readJson(join(coraHome(env), "auth.json"))?.[provider]);
+}
+
+/** The stored login for a provider, if it can be used without refreshing it. */
+export function unexpiredLogin(provider, routes, env = process.env) {
+  const file = routes.get(provider)?.authFile ?? join(coraHome(env), "auth.json");
+  const record = readJson(file)?.[provider];
+  const usable = record?.type === "oauth" && record.access && record.expires > Date.now() + LOGIN_MARGIN_MS;
+  return usable ? record : null;
 }
 
 /** A models.json `apiKey` for this provider, the path custom endpoints take. */

@@ -17,7 +17,9 @@ import {
   applyRefreshRules,
   routedCredentialStore,
   studioHome,
+  unexpiredLogin,
 } from "./accounts.mjs";
+import { defaultModels, isAlias, loadCatalog, registerCatalog, resolveAlias } from "./catalog.mjs";
 
 const STDIN_NOTICE_MS = 2000;
 const STDIN_WAIT_NOTICE = "cora: waiting for stdin to close; add it to the prompt or pass </dev/null\n";
@@ -26,16 +28,7 @@ const require = createRequire(import.meta.url);
 
 const EFFORTS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const DEFAULT_EFFORT = "high";
-const MODEL_ALIASES = {
-  sonnet: "anthropic/claude-sonnet-5",
-  opus: "anthropic/claude-opus-5",
-  fable: "anthropic/claude-fable-5-1",
-  luna: "openai-codex/gpt-5.6-luna",
-  terra: "openai-codex/gpt-5.6-terra",
-  sol: "openai-codex/gpt-5.6-sol",
-  astra: "openai-codex/gpt-6-astra",
-};
-const DEFAULT_MODELS = { "openai-codex": "gpt-5.6-sol", anthropic: "claude-opus-5" };
+const LOGIN_PROVIDERS = ["anthropic", "openai-codex", "xai"];
 /** Commands that moved under `cora studio`. Matched only as a lone first word. */
 const STUDIO_COMMANDS = new Set([
   "chat", "start", "send", "wait", "tail", "cancel", "runs", "run", "log", "agents", "watch",
@@ -54,8 +47,9 @@ const PI_SWITCHES = new Set([
 
 class UsageError extends Error {}
 
-function resolveModel(name) {
-  const value = MODEL_ALIASES[name] ?? name;
+function resolveModel(name, catalog) {
+  if (isAlias(name)) return resolveAlias(name, catalog);
+  const value = name;
   const slash = value.indexOf("/");
   if (slash > 0) return { provider: value.slice(0, slash), id: value.slice(slash + 1) };
   if (value.startsWith("claude-")) return { provider: "anthropic", id: value };
@@ -101,9 +95,9 @@ function parseArgs(argv) {
 }
 
 /** The one model a new session starts on. */
-function defaultModel(cli, routes, home) {
-  if (cli.model) return resolveModel(cli.model);
-  if (process.env.CORA_MODEL) return resolveModel(process.env.CORA_MODEL);
+function defaultModel(cli, routes, home, catalog) {
+  if (cli.model) return resolveModel(cli.model, catalog);
+  if (process.env.CORA_MODEL) return resolveModel(process.env.CORA_MODEL, catalog);
   if (cli.resume || cli.continue) return null;
   let settings = {};
   try {
@@ -114,7 +108,7 @@ function defaultModel(cli, routes, home) {
   if (settings.defaultProvider && settings.defaultModel) {
     return { provider: settings.defaultProvider, id: settings.defaultModel };
   }
-  for (const [provider, id] of Object.entries(DEFAULT_MODELS)) {
+  for (const [provider, id] of defaultModels(catalog)) {
     if (hasLogin(provider, routes)) return { provider, id };
   }
   return null;
@@ -271,10 +265,45 @@ function failIfUnfinished(run, json) {
   });
 }
 
+function catalogFor(routes, home, options = {}) {
+  return loadCatalog({
+    home,
+    readLogin: (provider) => unexpiredLogin(provider, routes),
+    discover: !process.env.CORA_BASE_URL?.trim(),
+    ...options,
+  });
+}
+
+/** Sets Cora's credentials, models and refresh rules on every Pi runtime, before
+ * Pi can resolve a model or read a credential. */
+function useCoraRuntime(pi, home, routes, catalog, endpoints = {}) {
+  const { create } = pi.ModelRuntime;
+  const credentials = routedCredentialStore(pi.AuthStorage, join(home, "auth.json"), routes);
+  pi.ModelRuntime.create = async (options = {}) => {
+    const runtime = await create.call(pi.ModelRuntime, { ...options, credentials });
+    registerCatalog(runtime, catalog, endpoints);
+    await applyRefreshRules(runtime, routes, studioHome());
+    return runtime;
+  };
+}
+
+async function listModels(cli, pi, home) {
+  const routes = credentialRoutes();
+  const signedIn = LOGIN_PROVIDERS.some((provider) => hasLogin(provider, routes) || hasConfiguredKey(provider));
+  if (!signedIn) throw new UsageError("not signed in. Run: cora login claude   (or: cora login chatgpt)");
+  const catalog = await catalogFor(routes, home, { force: true });
+  if (catalog.failed.length > 0) {
+    process.stderr.write(`cora: could not ask ${catalog.failed.join(", ")} for its models; showing the last known list\n`);
+  }
+  useCoraRuntime(pi, home, routes, catalog);
+  await pi.main(["--no-extensions", "--list-models", ...cli.positional]);
+}
+
 async function runAgent(cli, pi, home) {
   if (typeof cli.resume === "string") enterSessionFolder(cli.resume, home);
   const routes = credentialRoutes();
-  const model = defaultModel(cli, routes, home);
+  const catalog = await catalogFor(routes, home);
+  const model = defaultModel(cli, routes, home, catalog);
   const resuming = Boolean(cli.resume || cli.continue);
   if (!resuming || model) assertSignedIn(model, routes);
   const interactive = cli.command === "run" && process.stdin.isTTY && process.stdout.isTTY;
@@ -288,19 +317,8 @@ async function runAgent(cli, pi, home) {
   // never send; the prompt has been read above.
   if (exec) Object.defineProperty(process.stdin, "isTTY", { value: true });
   const mcpConfig = await loadMcpConfig(home, cli);
-  const providerOverrides = new Map();
   const baseUrl = process.env.CORA_BASE_URL?.trim();
-  if (baseUrl && model?.provider) {
-    providerOverrides.set(model.provider, { baseUrl });
-  }
-
-  const { create: createRuntime } = pi.ModelRuntime;
-  const credentials = routedCredentialStore(pi.AuthStorage, join(home, "auth.json"), routes);
-  pi.ModelRuntime.create = async (options = {}) => {
-    const runtime = await createRuntime.call(pi.ModelRuntime, { ...options, credentials });
-    await applyRefreshRules(runtime, routes, studioHome());
-    return runtime;
-  };
+  useCoraRuntime(pi, home, routes, catalog, baseUrl && model?.provider ? { [model.provider]: baseUrl } : {});
 
   const run = {
     report: null,
@@ -321,7 +339,7 @@ async function runAgent(cli, pi, home) {
   // Pi's own exit code misses most failures (--mode json always reports 0), so
   // the code set below decides.
   await pi.main(args, {
-    extensionFactories: [coraExtension(run, { exec, providerOverrides, mcpConfig })],
+    extensionFactories: [coraExtension(run, { exec, mcpConfig })],
   });
   if (!exec) return;
 
@@ -384,9 +402,7 @@ export async function run(argv) {
     const pi = await loadPi();
     if (cli.command === "login") return await login(pi.ModelRuntime, cli.positional[0]);
     if (cli.command === "logout") return await logout(pi.ModelRuntime, cli.positional[0]);
-    if (cli.command === "models") {
-      return await pi.main(["--no-extensions", "--list-models", ...cli.positional]);
-    }
+    if (cli.command === "models") return await listModels(cli, pi, home);
     return await runAgent(cli, pi, home);
   } catch (error) {
     const usage = error instanceof UsageError || error.usage;

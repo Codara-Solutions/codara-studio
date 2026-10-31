@@ -40,7 +40,9 @@ without spending CPU repainting idle screens.
   `studio`. It has no dependencies, so `--version` and `studio` never load Pi.
 - `harness/main.mjs` — the agent: arguments, model choice, prompt handling, exit
   codes. `harness/accounts.mjs` decides which login a provider uses and who may
-  refresh it. `harness/extension.mjs` is what Cora adds to Pi.
+  refresh it. `harness/catalog.mjs` decides which models exist, from the account's
+  own list with `harness/models.json` as the fallback. `harness/extension.mjs` is
+  what Cora adds to Pi.
 - `studio.cjs` — the remote: arg parsing and dispatch for `cora studio`.
 - `lib/rpc.cjs` — talks to the running app (reads `~/.codarastudio/agent-socket.json`
   for the loopback URL + bearer token, POSTs JSON-RPC to `/rpc`).

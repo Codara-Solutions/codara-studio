@@ -15,6 +15,10 @@
 // Faults: stub.control({ mode, count, after }) applies a fault to the next
 // `count` model requests, once `after` requests have passed. Modes: http429
 // http500 http401 cut hang empty. stub.requests holds every request seen.
+//
+// Model lists: stub.offer({ anthropic, codex }) sets what GET /v1/models and GET
+// /codex/models answer, in each provider's own shape. Without an offer both 404.
+// stub.listRequests holds every list request seen.
 
 import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
@@ -22,6 +26,8 @@ import { zstdDecompressSync } from "node:zlib";
 
 const control = { mode: "ok", count: null, after: 0 };
 const requests = [];
+const listRequests = [];
+const offers = { anthropic: null, codex: null };
 const id = (prefix) => `${prefix}_${randomUUID().replaceAll("-", "").slice(0, 20)}`;
 
 function readBody(req) {
@@ -226,6 +232,12 @@ export function startStubModel() {
       res.writeHead(200);
       return res.end("{}");
     }
+    if (req.method === "GET" && (url === "/v1/models" || url === "/codex/models")) {
+      const offer = url === "/v1/models" ? offers.anthropic : offers.codex;
+      listRequests.push({ path: url, authorization: req.headers.authorization ?? null });
+      res.writeHead(offer ? 200 : 404, { "content-type": "application/json" });
+      return res.end(JSON.stringify(offer ?? { error: "no list" }));
+    }
     if (req.method === "POST" && url === "/v1/messages") return handleModel(req, res, "anthropic");
     if (req.method === "POST" && url === "/codex/responses") return handleModel(req, res, "responses");
     res.writeHead(404);
@@ -236,9 +248,13 @@ export function startStubModel() {
       resolve({
         url: `http://127.0.0.1:${server.address().port}`,
         requests,
+        listRequests,
+        offer: (update) => Object.assign(offers, update),
         control: (update) => Object.assign(control, { count: null, after: 0 }, update),
         reset: () => {
           requests.length = 0;
+          listRequests.length = 0;
+          Object.assign(offers, { anthropic: null, codex: null });
           Object.assign(control, { mode: "ok", count: null, after: 0 });
         },
         close: () => {

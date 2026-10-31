@@ -31,8 +31,18 @@ cora login
 | `cora login [claude\|chatgpt]` | Sign in, or list what is signed in. |
 | `cora models [search]` | List the models you can use. |
 
-`--model` takes `sonnet`, `opus`, `luna`, `sol` or any `provider/id`. `--effort`
-takes `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`.
+`--model` takes `sonnet`, `opus`, `fable`, `luna`, `terra`, `sol`, `astra` or any
+`provider/id`. `--effort` takes `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or
+`max`.
+
+### Models
+
+A name like `sonnet` means the newest model of that family your account offers, so
+a new model needs no upgrade. `cora` asks each provider what the account offers and
+keeps the answer for six hours in `~/.cora/catalog.json`. `cora models` always asks
+again. If a provider cannot be reached, or its login has expired, `cora` keeps the
+last answer, and then falls back to `cli/harness/models.json`. Asking never refreshes
+a login.
 
 ### Exit codes
 
@@ -59,7 +69,7 @@ that only `cora` refreshes. An API key in the shell never replaces a login.
 ### Files and settings
 
 Everything lives in `~/.cora` (`CORA_HOME`): `auth.json`, `sessions/`, `skills/`,
-`settings.json` and `models.json` in Pi's format. `httpIdleTimeoutMs` in
+`catalog.json`, `settings.json` and `models.json` in Pi's format. `httpIdleTimeoutMs` in
 `settings.json` sets the hung-stream timeout. MCP servers come from `~/.cora/mcp.json`
 or `--mcp-config FILE`, in `.mcp.json` format. A project's own `.mcp.json` does not
 start by itself, because it can run any command. For a custom endpoint, set

@@ -183,7 +183,7 @@ test("--json streams events and ends with the result", async () => {
   assert.equal(final.type, "cora_result");
   assert.equal(final.status, "complete");
   assert.equal(final.exitCode, 0);
-  assert.equal(final.model, "claude-sonnet-5");
+  assert.equal(final.model, "claude-sonnet-5-5");
   assert.equal(final.provider, "anthropic");
   assert.equal(final.sessionId, lines[0].id);
   assert.ok(final.usage.input > 0);
@@ -249,10 +249,10 @@ test("an unexpected internal error exits 1 and says what happened", async () => 
 
 test("sonnet, opus, luna and sol reach the right endpoint with the chosen effort", async () => {
   const cases = [
-    ["sonnet", "claude-sonnet-5", "/v1/messages"],
-    ["opus", "claude-opus-5", "/v1/messages"],
-    ["luna", "gpt-5.6-luna", "/codex/responses"],
-    ["sol", "gpt-5.6-sol", "/codex/responses"],
+    ["sonnet", "claude-sonnet-5-5", "/v1/messages"],
+    ["opus", "claude-opus-5-5", "/v1/messages"],
+    ["luna", "gpt-6-luna", "/codex/responses"],
+    ["sol", "gpt-6.1-sol", "/codex/responses"],
   ];
   for (const [alias, id, path] of cases) {
     for (const effort of ["low", "high"]) {
@@ -269,6 +269,122 @@ test("sonnet, opus, luna and sol reach the right endpoint with the chosen effort
       else assert.notEqual(sent, "[null,null]", `${alias} sent no thinking settings`);
     }
   }
+});
+
+const offerClaude = (...models) => ({
+  data: models.map(([id, maxInput, maxOutput]) => ({
+    id,
+    display_name: id,
+    max_input_tokens: maxInput,
+    max_tokens: maxOutput,
+    capabilities: { image_input: { supported: true } },
+  })),
+});
+const offerCodex = (...slugs) => ({
+  models: slugs.map(([slug, context, visibility = "list"]) => ({
+    slug,
+    display_name: slug,
+    context_window: context,
+    visibility,
+    input_modalities: ["text", "image"],
+  })),
+});
+
+test("aliases follow what the account offers, with no Pi upgrade", async () => {
+  stub.offer({
+    anthropic: offerClaude(["claude-sonnet-5-5", 1_000_000, 128_000], ["claude-sonnet-6", 2_000_000, 256_000], ["claude-sonnet-4-5-20250929", 200_000, 64_000]),
+    codex: offerCodex(["gpt-6-luna", 272_000], ["gpt-7-luna", 900_000], ["gpt-9-luna", 1, "hide"]),
+  });
+  for (const [alias, id] of [["sonnet", "claude-sonnet-6"], ["luna", "gpt-7-luna"]]) {
+    const world = makeWorld();
+    const result = await cora(world, ["exec", "--model", alias, "--effort", "high", "--json", "copy it"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.doesNotMatch(result.stderr, /not found|custom model/i);
+    assert.equal(resultOf(result.stdout).model, id);
+    assert.equal(stub.requests.at(-1).model, id);
+  }
+  const table = await cora(makeWorld(), ["models"]);
+  assert.match(table.stdout, /claude-sonnet-6\s+2M\s+256K/);
+  assert.match(table.stdout, /gpt-7-luna\s+900K/);
+  assert.doesNotMatch(table.stdout, /gpt-9-luna|claude-opus/);
+});
+
+test("a discovered model keeps its family's request settings", async () => {
+  stub.offer({ codex: offerCodex(["gpt-7-luna", 900_000]), anthropic: offerClaude(["claude-sonnet-6", 2_000_000, 256_000]) });
+  for (const [alias, known] of [["luna", "gpt-6-luna"], ["sonnet", "claude-sonnet-5-5"]]) {
+    const result = await cora(makeWorld(), ["exec", "--model", alias, "--effort", "xhigh", "copy it"]);
+    assert.equal(result.status, 0, result.stderr);
+    const discovered = stub.requests.at(-1);
+    stub.offer({ codex: null, anthropic: null });
+    await cora(makeWorld(), ["exec", "--model", known, "--effort", "xhigh", "copy it"]);
+    const builtIn = stub.requests.at(-1);
+    stub.offer({ codex: offerCodex(["gpt-7-luna", 900_000]), anthropic: offerClaude(["claude-sonnet-6", 2_000_000, 256_000]) });
+    assert.deepEqual([discovered.thinking, discovered.outputConfig], [builtIn.thinking, builtIn.outputConfig]);
+  }
+});
+
+test("with no list the data file gives the current models, their limits and no warning", async () => {
+  for (const [alias, id] of [["sonnet", "claude-sonnet-5-5"], ["opus", "claude-opus-5-5"], ["luna", "gpt-6-luna"], ["sol", "gpt-6.1-sol"]]) {
+    for (const name of [alias, id]) {
+      stub.reset();
+      const result = await cora(makeWorld(), ["exec", "--model", name, "--json", "copy it"]);
+      assert.equal(result.status, 0, `${name}: ${result.stderr}`);
+      assert.equal(resultOf(result.stdout).model, id);
+      assert.doesNotMatch(result.stderr, /not found|custom model/i);
+    }
+  }
+  const table = await cora(makeWorld(), ["models"]);
+  assert.match(table.stdout, /claude-sonnet-5-5\s+1M\s+128K/);
+  assert.match(table.stdout, /gpt-6-luna\s+272K\s+128K/);
+  assert.match(table.stderr, /could not ask .*HTTP 404/);
+});
+
+test("cora models sees every kind of login and filters by search", async () => {
+  const studio = studioWorld({ credential: claudeCredential() });
+  const fromStudio = await cora(studio, ["models", "sonnet"]);
+  assert.equal(fromStudio.status, 0, fromStudio.stderr);
+  assert.match(fromStudio.stdout, /claude-sonnet-5-5/);
+  assert.doesNotMatch(fromStudio.stdout, /No models available|gpt-6/);
+  const own = await cora(makeWorld(), ["models"]);
+  assert.match(own.stdout, /claude-opus-5-5/);
+  assert.match(own.stdout, /gpt-6\.1-sol/);
+  const none = await cora(makeWorld({ auth: null }), ["models"]);
+  assert.equal(none.status, 2);
+  assert.match(none.stderr, /not signed in/);
+  assert.doesNotMatch(none.stdout + none.stderr, /\/login/);
+});
+
+test("the account's list is cached, and an expired login is never used to ask", async () => {
+  stub.offer({ anthropic: offerClaude(["claude-sonnet-5-5", 1_000_000, 128_000]) });
+  const world = makeWorld();
+  await cora(world, ["exec", "--model", "sonnet", "copy it"]);
+  assert.equal(stub.listRequests.filter((request) => request.path === "/v1/models").length, 1);
+  assert.equal(stub.listRequests[0].authorization, `Bearer ${CLAUDE_TOKEN}`);
+  await cora(world, ["exec", "--model", "sonnet", "copy it"]);
+  assert.equal(stub.listRequests.filter((request) => request.path === "/v1/models").length, 1);
+
+  stub.reset();
+  const expired = studioWorld({ credential: claudeCredential({ expires: 1 }) });
+  const before = readFileSync(expired.authFile, "utf8");
+  await cora(expired, ["exec", "--model", "sonnet", "copy it"]);
+  assert.equal(stub.listRequests.length, 0);
+  assert.equal(readFileSync(expired.authFile, "utf8"), before);
+});
+
+test("models.json custom models and base URLs survive the catalog", async () => {
+  stub.offer({ anthropic: offerClaude(["claude-sonnet-5-5", 1_000_000, 128_000]) });
+  const world = makeWorld();
+  writeJson(join(world.home, "models.json"), {
+    providers: {
+      "openai-codex": { baseUrl: stub.url },
+      anthropic: { baseUrl: stub.url, models: [{ id: "my-private-model", name: "Mine", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 1000, maxTokens: 100 }] },
+    },
+  });
+  const table = await cora(world, ["models"]);
+  assert.match(table.stdout, /my-private-model/);
+  const result = await cora(world, ["exec", "--model", "anthropic/my-private-model", "copy it"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(stub.requests[0].model, "my-private-model");
 });
 
 test("an unknown model is refused by name", async () => {
@@ -293,7 +409,7 @@ test("resume continues with the full tool history, from any folder", async () =>
   assert.match(result.stderr, /resuming in /);
   const final = resultOf(result.stdout);
   assert.equal(final.sessionId, first.sessionId);
-  assert.equal(final.model, "gpt-5.6-luna");
+  assert.equal(final.model, "gpt-6-luna");
   const [request] = stub.requests;
   const sequence = request.events.map((event) => event.name?.toLowerCase() ?? event.kind);
   assert.deepEqual(sequence, ["user", "read", "result", "write", "result", "submit_result", "result", "user"]);
@@ -378,7 +494,7 @@ test("a provider that keeps failing stops with the real cause", async () => {
   assert.equal(result.status, 1);
   const final = resultOf(result.stdout);
   assert.equal(final.status, "error");
-  assert.match(final.error, /anthropic \(claude-sonnet-5\).*500.*stub server error/);
+  assert.match(final.error, /anthropic \(claude-sonnet-5-5\).*500.*stub server error/);
   assert.equal(stub.requests.length, 3);
   assert.equal(existsSync(join(world.project, "output.txt")), false);
 });
@@ -388,7 +504,7 @@ test("a dropped stream names the provider, not 'terminated.'", async () => {
   stub.control({ mode: "cut" });
   const result = await cora(world, ["exec", "--model", "luna", "copy it"]);
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /openai-codex \(gpt-5\.6-luna\) dropped the connection/);
+  assert.match(result.stderr, /openai-codex \(gpt-6-luna\) dropped the connection/);
   assert.doesNotMatch(result.stderr, /^terminated\.?$/m);
 });
 
@@ -399,7 +515,7 @@ test("a hung stream times out with a clear message", async () => {
   const result = await cora(world, ["exec", "--model", "sonnet", "copy it"]);
   assert.equal(result.status, 1);
   assert.ok(Date.now() - started < 20_000);
-  assert.match(result.stderr, /anthropic \(claude-sonnet-5\) sent no data for \d+s, so the request timed out/);
+  assert.match(result.stderr, /anthropic \(claude-sonnet-5-5\) sent no data for \d+s, so the request timed out/);
 });
 
 test("a rejected login names the login command for this provider and is not retried", async () => {
@@ -407,7 +523,7 @@ test("a rejected login names the login command for this provider and is not retr
   stub.control({ mode: "http401" });
   const result = await cora(world, ["exec", "--model", "sonnet", "copy it"]);
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /anthropic \(claude-sonnet-5\) rejected the login/);
+  assert.match(result.stderr, /anthropic \(claude-sonnet-5-5\) rejected the login/);
   assert.match(result.stderr, /cora login claude/);
   assert.doesNotMatch(result.stderr, /\bpi\b/);
   assert.equal(stub.requests.length, 1);
@@ -520,7 +636,7 @@ test("a custom endpoint works from models.json with a dummy key, and from CORA_B
   writeJson(join(signedIn.home, "models.json"), {});
   const result = await cora(signedIn, ["exec", "--model", "sol", "copy it"], { env: { CORA_BASE_URL: stub.url } });
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(stub.requests[0].model, "gpt-5.6-sol");
+  assert.equal(stub.requests[0].model, "gpt-6.1-sol");
 });
 
 function studioWorld({ provider = "anthropic", credential, shared = true } = {}) {
@@ -755,7 +871,7 @@ test("cora opens Pi's terminal interface in a real terminal", async () => {
   };
   const exited = new Promise((resolve) => child.on("exit", resolve));
   try {
-    await until(() => output.includes("claude-sonnet-5"), "the footer");
+    await until(() => output.includes("claude-sonnet-5-5"), "the footer");
     await settle();
     await type("PLAIN_TEXT hello");
     await until(() => output.includes("STUB-FINAL"), "the reply");

@@ -96,12 +96,10 @@ function registerSubmitResult(pi, run) {
 /**
  * @param run  shared state the exec wrapper reads once Pi returns
  * @param options.exec  a one-shot run, which gets submit_result
- * @param options.providerOverrides  provider name to Pi provider config
  * @param options.mcpConfig  normalized MCP roster, or null
  */
-export function coraExtension(run, { exec, providerOverrides, mcpConfig }) {
+export function coraExtension(run, { exec, mcpConfig }) {
   return async (pi) => {
-    for (const [provider, config] of providerOverrides) pi.registerProvider(provider, config);
     registerContextCompaction(pi);
     if (exec) registerSubmitResult(pi, run);
 
