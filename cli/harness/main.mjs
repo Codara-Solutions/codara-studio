@@ -220,6 +220,21 @@ function outcome(run) {
   return { status: "unreported", exitCode: 0 };
 }
 
+/**
+ * What the reader is told last. A run that ends in submit_result has no closing
+ * message, and any text the model wrote beside the call would otherwise be lost.
+ * That text goes last, so a closing line the user asked for still ends the output.
+ */
+function closingText({ last, report }) {
+  const said = (last?.content ?? [])
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join("\n")
+    .trim();
+  if (!report?.summary) return said;
+  return said && !report.summary.includes(said) ? `${report.summary}\n\n${said}` : report.summary;
+}
+
 function piArguments(cli, model, effort, { exec, prompt }) {
   const args = ["--no-extensions", ...cli.passthrough];
   if (model?.provider) args.push("--provider", model.provider);
@@ -346,7 +361,8 @@ async function runAgent(cli, pi, home) {
   const result = outcome(run);
   run.finished = true;
   if (!cli.json) {
-    if (run.report?.summary) process.stdout.write(`${run.report.summary}\n`);
+    // Pi prints a closing message itself, but not when a tool call ended the run.
+    if (run.report) process.stdout.write(`${closingText(run)}\n`);
     if (result.exitCode === 3) process.stderr.write(`cora: the model reported ${result.status}\n`);
     // Pi already printed a provider error.
     if (result.error && run.last?.stopReason !== "error") process.stderr.write(`cora: ${result.error}\n`);
@@ -359,6 +375,7 @@ async function runAgent(cli, pi, home) {
         sessionId: run.sessionId,
         model: run.last?.model ?? model?.id ?? null,
         provider: run.last?.provider ?? model?.provider ?? null,
+        text: closingText(run),
         summary: run.report?.summary ?? null,
         report: run.report,
         retries: run.retries,

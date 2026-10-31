@@ -19,7 +19,10 @@ export function coraSystemPrompt({ exec }) {
 - This is a one-shot run: nobody can answer a question. Make the safest
   reversible assumption and state it.
 - When finished, call submit_result exactly once with an honest status. Use
-  partial when any requested part is unfinished or unverified.`
+  partial when any requested part is unfinished or unverified.
+- Its summary is your closing message: the reader sees it and nothing after it.
+  Write everything the user asked to be told there, and end it with any closing
+  line or format they asked for, word for word.`
       : ""
   }`;
 }
@@ -46,14 +49,20 @@ function registerSubmitResult(pi, run) {
     name: "submit_result",
     label: "Submit result",
     description:
-      "Finish this one-shot run and record its honest result. Call once, after edits and focused checks.",
-    promptSnippet: "Record the outcome, changed files and checks of this run",
+      "Finish this one-shot run and record its honest result. Call once, after edits and focused checks. " +
+      "This ends the run, so summary is your closing message to the reader.",
+    promptSnippet: "Record the outcome and give your closing message",
     parameters: {
       type: "object",
       required: ["status", "summary"],
       properties: {
         status: { type: "string", enum: REPORTED_STATUSES },
-        summary: { type: "string", description: "One concise outcome sentence." },
+        summary: {
+          type: "string",
+          description:
+            "Your closing message, shown to the reader as your final words: the outcome, anything the user " +
+            "asked to be told, and any closing line or format they requested, word for word.",
+        },
         files_changed: {
           type: "array",
           items: {

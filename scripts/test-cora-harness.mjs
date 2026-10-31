@@ -455,6 +455,29 @@ test("complete with a failed check is partial", async () => {
   assert.equal(resultOf(result.stdout).status, "partial");
 });
 
+test("the closing message reaches the reader in plain mode and in --json", async () => {
+  const plain = await cora(makeWorld(), ["exec", "--model", "sonnet", "copy it TEXT_BESIDE_SUBMIT"]);
+  assert.equal(plain.status, 0, plain.stderr);
+  assert.equal(plain.stdout.trim().split("\n").at(-1), "STATUS: DONE");
+  assert.match(plain.stdout, /STUB-FINAL: copied/);
+
+  const json = await cora(makeWorld(), ["exec", "--model", "sonnet", "--json", "copy it TEXT_BESIDE_SUBMIT"]);
+  const final = resultOf(json.stdout);
+  assert.match(final.text, /STUB-FINAL: copied[\s\S]*STATUS: DONE$/);
+
+  const reportOnly = resultOf((await cora(makeWorld(), ["exec", "--model", "luna", "--json", "copy it"])).stdout);
+  assert.equal(reportOnly.text, "STUB-FINAL: copied input.txt to output.txt.");
+  const answer = resultOf((await cora(makeWorld(), ["exec", "--model", "sonnet", "--json", "PLAIN_TEXT hi"])).stdout);
+  assert.equal(answer.text, "STUB-FINAL: plain reply.");
+  assert.equal(answer.summary, null);
+});
+
+test("the reporting tool tells the model its summary is the closing message", async () => {
+  await cora(makeWorld(), ["exec", "--model", "luna", "copy it"]);
+  const [{ system }] = stub.requests;
+  assert.match(system, /end it with any closing\s+line or format they asked for, word for word/);
+});
+
 test("a plain answer without a report says so", async () => {
   const result = await cora(makeWorld(), ["exec", "--model", "sonnet", "--json", "PLAIN_TEXT hi"]);
   assert.equal(result.status, 0);

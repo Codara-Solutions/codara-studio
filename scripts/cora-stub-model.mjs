@@ -9,8 +9,9 @@
 //   2 results  submit_result when offered (status from SUBMIT_<STATUS>), else text
 //
 // A prompt that contains PLAIN_TEXT gets a text reply straight away, one with
-// NO_SUBMIT finishes in text, one with EMPTY_TEXT gets an empty message, and one
-// with FAILED_CHECK submits a failed check alongside its status.
+// NO_SUBMIT finishes in text, one with EMPTY_TEXT gets an empty message, one with
+// FAILED_CHECK submits a failed check alongside its status, and one with
+// TEXT_BESIDE_SUBMIT writes a closing line in the same message as the call.
 //
 // Faults: stub.control({ mode, count, after }) applies a fault to the next
 // `count` model requests, once `after` requests have passed. Modes: http429
@@ -87,7 +88,8 @@ function plan(view) {
   if (finish && !prompt.includes("NO_SUBMIT")) {
     const status = /SUBMIT_(\w+)/.exec(prompt)?.[1]?.toLowerCase() ?? "complete";
     const checks = prompt.includes("FAILED_CHECK") ? [{ command: "npm test", result: "failed" }] : undefined;
-    return { tool: finish, input: { status, summary: "STUB-FINAL: copied input.txt to output.txt.", ...(checks ? { checks } : {}) } };
+    const beside = prompt.includes("TEXT_BESIDE_SUBMIT") ? { text: "STATUS: DONE" } : {};
+    return { ...beside, tool: finish, input: { status, summary: "STUB-FINAL: copied input.txt to output.txt.", ...(checks ? { checks } : {}) } };
   }
   return { text: "STUB-FINAL: copied input.txt to output.txt." };
 }
@@ -111,15 +113,21 @@ function anthropicStart(res, model) {
 function streamAnthropic(res, step, model) {
   startSse(res);
   anthropicStart(res, model);
+  const index = step.tool && step.text ? 1 : 0;
+  if (index === 1) {
+    sse(res, "content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+    sse(res, "content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: step.text } });
+    sse(res, "content_block_stop", { type: "content_block_stop", index: 0 });
+  }
   const block = step.tool
     ? { type: "tool_use", id: id("toolu"), name: step.tool, input: {} }
     : { type: "text", text: "" };
   const delta = step.tool
     ? { type: "input_json_delta", partial_json: JSON.stringify(step.input) }
     : { type: "text_delta", text: step.text };
-  sse(res, "content_block_start", { type: "content_block_start", index: 0, content_block: block });
-  sse(res, "content_block_delta", { type: "content_block_delta", index: 0, delta });
-  sse(res, "content_block_stop", { type: "content_block_stop", index: 0 });
+  sse(res, "content_block_start", { type: "content_block_start", index, content_block: block });
+  sse(res, "content_block_delta", { type: "content_block_delta", index, delta });
+  sse(res, "content_block_stop", { type: "content_block_stop", index });
   sse(res, "message_delta", {
     type: "message_delta",
     delta: { stop_reason: step.tool ? "tool_use" : "end_turn", stop_sequence: null },
