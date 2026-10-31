@@ -44,6 +44,8 @@ export type CommandId =
   | "terminal.closePane"
   | "terminal.toggleZoom"
   | "terminal.copyContext"
+  | "terminal.focusNext"
+  | "terminal.focusNextAll"
   | "quickCommands.open"
   | "view.selectByIndex"
   | "view.zoomIn"
@@ -316,6 +318,22 @@ export const COMMANDS: Command[] = [
     // terminal must keep receiving. The pane toolbar has a button for it.
     defaultChords: [],
   },
+  // The next terminal pane (shell or agent CLI) to the right, then on along
+  // the tab strip; see ../components/jump/terminal-switch.ts. Literal Ctrl on
+  // every platform, since Cmd+Tab is the macOS app switcher. Claude Code's
+  // mode cycling is Shift+Tab without Ctrl, so it still reaches the CLI.
+  {
+    id: "terminal.focusNext",
+    label: "Next terminal pane in this workspace",
+    group: "Terminal",
+    defaultChords: [ctrl("Tab")],
+  },
+  {
+    id: "terminal.focusNextAll",
+    label: "Next terminal pane, on into the next workspace",
+    group: "Terminal",
+    defaultChords: [ctrl("Tab", { shift: true })],
+  },
   {
     id: "quickCommands.open",
     label: "Run a quick command",
@@ -417,15 +435,15 @@ export const COMMANDS: Command[] = [
     id: "tab.cycleNext",
     label: "Cycle to next tab",
     group: "Tabs",
-    // Cross-app convention is literal Ctrl+Tab even on Mac — Cmd+Tab is
-    // the system app switcher.
-    defaultChords: [ctrl("Tab")],
+    // Ctrl+PageDown / Ctrl+PageUp, the tab chords of Chrome, Firefox and
+    // VS Code. Ctrl+Tab steps through terminal panes instead.
+    defaultChords: [ctrl("PageDown")],
   },
   {
     id: "tab.cyclePrev",
     label: "Cycle to previous tab",
     group: "Tabs",
-    defaultChords: [ctrl("Tab", { shift: true })],
+    defaultChords: [ctrl("PageUp")],
   },
   // Tab groups from the keyboard. No default chord: the free ones collide
   // with editor and terminal bindings. A group's chip is focusable too: Enter

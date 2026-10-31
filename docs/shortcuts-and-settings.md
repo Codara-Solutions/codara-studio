@@ -17,8 +17,9 @@ a chord you already use.
 
 Inside a browser tab the page gets a chord first, as in a browser. Codara
 runs its own command only when the page did not handle the chord, so a site
-whose Mod+K opens its own search keeps it. Mod+W, Mod+T and Ctrl+Tab always
-stay Codara's. Keys an agent sends to a page never trigger Codara's shortcuts.
+whose Mod+K opens its own search keeps it. Mod+W, Mod+T, Ctrl+Tab and
+Ctrl+PageDown / Ctrl+PageUp always stay Codara's. Keys an agent sends to a page
+never trigger Codara's shortcuts.
 
 ### General
 
@@ -121,8 +122,8 @@ On a layout without [ and ] keys, rebind back and forward in Keybindings.
 | New whiteboard | Mod+Shift+W | `tab.newWhiteboard` |
 | Close active tab | Mod+W | `tab.close` |
 | Close other tabs | Mod+Alt+T | `tab.closeOthers` |
-| Cycle to next tab | Ctrl+Tab | `tab.cycleNext` |
-| Cycle to previous tab | Ctrl+Shift+Tab | `tab.cyclePrev` |
+| Cycle to next tab | Ctrl+PageDown | `tab.cycleNext` |
+| Cycle to previous tab | Ctrl+PageUp | `tab.cyclePrev` |
 | Group active tab (or edit its group) | (unbound) | `tab.group` |
 | Remove active tab from its group | (unbound) | `tab.ungroup` |
 
@@ -169,6 +170,8 @@ open, is in [mcp-tools.md](mcp-tools.md#tab-links).
 | Close active terminal pane | (unbound) | `terminal.closePane` |
 | Toggle terminal pane zoom | Mod+Shift+Enter | `terminal.toggleZoom` |
 | Copy terminal context | (unbound) | `terminal.copyContext` |
+| Next terminal pane in this workspace | Ctrl+Tab (Ctrl on every platform) | `terminal.focusNext` |
+| Next terminal pane, on into the next workspace | Ctrl+Shift+Tab (Ctrl on every platform) | `terminal.focusNextAll` |
 | Run a quick command | Mod+Shift+P | `quickCommands.open` |
 
 Mod+W already closes just the selected pane when a terminal tab has more than
@@ -179,6 +182,18 @@ button does (see [Terminal clipboard, links and context](#terminal-clipboard-lin
 It has no default chord because the free Ctrl+Alt letters type characters
 through AltGr on many keyboard layouts, and a terminal must keep receiving
 them.
+
+Ctrl+Tab moves the keyboard to the next terminal pane on the right, shell or
+agent CLI alike: through the panes of a split tab from left to right (top to
+bottom in a vertical split), then on to the next terminal tab, back to the
+first after the last. Chats, editors and browsers are skipped, and so are
+Cora worker tabs and tabs in a collapsed group. From a chat or editor it goes
+to the first terminal to its right. In a tab with a zoomed pane the zoom moves
+to the pane it lands on. Ctrl+Shift+Tab walks the same order but
+carries on into the next workspace in the rail instead of wrapping, covering
+every workspace opened since Codara started. Claude Code's mode switch is
+Shift+Tab without Ctrl and still reaches the CLI. Tab cycling is on
+Ctrl+PageDown and Ctrl+PageUp.
 
 Run a quick command opens the palette of your saved commands (see
 [Quick commands](#quick-commands)): type to filter, Enter runs the selected
