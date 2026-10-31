@@ -587,6 +587,41 @@ None of these are in the registry.
 | `remote-access-e2e.mjs` with `remote-test-client.mjs` (`npm run test:remote-access-e2e`) | Nothing extra. It starts the real remote-access service over a temp home and drives it the way the phone does. |
 | `profile-session-index.cjs` | Nothing extra. It builds the agent session index from this computer's real transcripts into a temp folder (reading them only) and prints the time, peak memory, index size and search times. `--pace interactive` measures a pass you start; `--claude DIR` and the like point it at other folders. |
 
+## Snappiness benchmark
+
+`bench-snappy/` measures how fast the built app feels: start, workspace and
+tab switches, typing in the composer and a terminal (key to pixels on
+screen), opening and scrolling a long chat, a 40-second streamed reply, the
+Explorer and a 2 MB file, the browser pane, a busy terminal, idle CPU and
+memory of every process, and five agents running. It is not in the registry.
+Everything runs on a private Xvfb display with a throwaway home.
+
+```sh
+npm run build
+node scripts/bench-snappy/run.mjs --rounds 5 --out /tmp/bench
+node scripts/bench-snappy/summarize.mjs /tmp/bench    # medians, p95, noise
+node scripts/bench-snappy/flames.mjs /tmp/bench       # flame graphs of the profiles
+```
+
+Build with `npx electron-vite build --sourcemap` to get source names in the
+profiles. `--flows workspaceSwitch,chatStream` picks flows; `--apps
+studio,t3code` adds [t3code](https://github.com/pingdotgg/t3code) as a
+reference, run back to back with Studio and in alternating order. t3code runs
+only inside a bubblewrap sandbox (`bench-snappy/t3code/`, needs `bwrap`) that sees one
+folder and none of your sign-ins, with a fake `pi` streaming the same reply:
+
+```sh
+export T3CODE_BENCH_DIR=/path/to/empty/folder
+scripts/bench-snappy/t3code/setup.sh                  # clone, Node, install, build
+node scripts/bench-snappy/run.mjs --apps t3code --build-profile
+node scripts/bench-snappy/run.mjs --apps studio,t3code --rounds 5 --out /tmp/ab
+```
+
+To measure another branch with this harness, build it in its own checkout
+and point `STUDIO_BENCH_DIR` at that checkout.
+
+The latest results and what they mean are in `docs/benchmarks/snappy-*.md`.
+
 ## Tooling
 
 | Script | When it runs | What it does |
