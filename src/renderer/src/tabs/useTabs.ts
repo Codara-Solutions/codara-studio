@@ -1418,7 +1418,12 @@ export interface UseTabsApi {
     agentSession?: TerminalAgentSession | null,
     cwd?: string,
   ) => string | null;
-  closeTerminalPane: (tabId: TabId, paneId: string) => void;
+  // allowEmptyWorkspace skips the fresh shell a workspace's last close reseeds.
+  closeTerminalPane: (
+    tabId: TabId,
+    paneId: string,
+    opts?: { allowEmptyWorkspace?: boolean },
+  ) => void;
   // closeTerminalPane for a pane living in either the active workspace or an
   // inactive retained layout (worker_attempt.finished / failed agent creates
   // keep firing while their workspace is in the background). Dropping the tab's last
@@ -1430,7 +1435,7 @@ export interface UseTabsApi {
   // workspace/tab so cross-workspace cleanup can target the right layout.
   findTerminalPaneInInactiveWorkspaces: (
     paneId: string,
-  ) => { workspaceId: string; tabId: TabId } | null;
+  ) => { workspaceId: string; tabId: TabId; leaf: TerminalLeaf } | null;
   // Flip `zoomedPaneId` for a tab: sets it to `paneId` if currently null or a
   // different pane, clears it if `paneId` is already the zoomed one. Stored
   // on the tab so it persists across tab switches.
@@ -3025,7 +3030,7 @@ export function useTabs(
   );
 
   const closeTerminalPane = useCallback(
-    (tabId: TabId, paneId: string) => {
+    (tabId: TabId, paneId: string, opts?: { allowEmptyWorkspace?: boolean }) => {
       // A dock cell has no PTY and its content outlives the grid: Ctrl+W on one
       // returns the tab to the strip instead of destroying it. The destructive
       // variant is the × on the cell's chrome, which closes the tab itself.
@@ -3078,6 +3083,10 @@ export function useTabs(
           // while another is zoomed leaves the zoom intact.)
           const zoomedPaneId = t.zoomedPaneId === paneId ? null : t.zoomedPaneId;
           next.push({ ...t, root, activePaneId, zoomedPaneId });
+        }
+        if (next.length === 0 && opts?.allowEmptyWorkspace) {
+          setActiveId(null);
+          return next;
         }
         if (next.length === 0) {
           // Closing the last pane of the workspace's last tab: reseed a single
@@ -3181,12 +3190,13 @@ export function useTabs(
 
   // See UseTabsApi: resolve which hidden workspace/tab owns a pane id.
   const findTerminalPaneInInactiveWorkspaces = useCallback(
-    (paneId: string): { workspaceId: string; tabId: TabId } | null => {
+    (paneId: string): { workspaceId: string; tabId: TabId; leaf: TerminalLeaf } | null => {
       for (const [workspaceId, layout] of liveWorkspaceTabsRef.current) {
         if (workspaceId === tabsWorkspaceIdRef.current) continue;
         for (const t of layout.tabs) {
           if (t.kind !== "terminal") continue;
-          if (findLeaf(t.root, paneId)) return { workspaceId, tabId: t.id };
+          const leaf = findLeaf(t.root, paneId);
+          if (leaf) return { workspaceId, tabId: t.id, leaf };
         }
       }
       return null;

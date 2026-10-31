@@ -34,7 +34,7 @@ import {
   buildRemoteAgentProbe,
   remoteAgentRuntime,
 } from "./remote/remote-agents";
-import { createRemotePtyHandle, remoteAgentKillSettled, type RemotePtyHandle } from "./remote/remote-pty";
+import { createRemotePtyHandle, remoteAgentKillSettled, remoteExitStatus, type RemotePtyHandle } from "./remote/remote-pty";
 import { loadPreferences } from "./preferences-store";
 import {
   formatManualAgentStartup,
@@ -1051,16 +1051,17 @@ async function doSpawnRemote(
   // and its close still ends it.
   const machines = (await loadPreferences()).machinesEnabled === true;
   const agentRuntime = machines ? remoteAgentRuntime(startup) : null;
+  let exitedEarly: number | null = null;
   let closedEarly: { exitCode: number | null } | null = null;
   const [channel, reattach] = await Promise.all([
     conn.shell({ cols, rows }).then((ch) => {
-      // The handle binds after the probe: a close in between must not be lost.
-      let exitCode: number | null = null;
+      // The handle binds after the probe: an exit or close in between must not
+      // be lost, and the two can land on either side of the bind.
       const onExit = (code: unknown) => {
-        exitCode = typeof code === "number" ? code : 0;
+        exitedEarly = remoteExitStatus(code);
       };
       const onClose = () => {
-        closedEarly = { exitCode };
+        closedEarly = { exitCode: exitedEarly };
       };
       ch.on("exit", onExit);
       ch.on("close", onClose);
@@ -1087,6 +1088,7 @@ async function doSpawnRemote(
     agentPane,
     endAgentOnKill: () => endRemoteAgentOnKill.delete(opts.id),
     reportExitStatus: machines,
+    exitedBeforeBind: exitedEarly,
     closedBeforeBind: closedEarly,
     log: (message) => logMain("pty", message),
   });

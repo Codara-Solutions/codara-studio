@@ -411,6 +411,27 @@ function findLeafByPaneId(node: PaneNode, paneId: string): TerminalLeaf | null {
   return findLeafByPaneId(node.a, paneId) ?? findLeafByPaneId(node.b, paneId);
 }
 
+// A shell that ended cleanly closes its pane, the way a terminal window closes.
+// Anything else keeps the pane and its exit line: a non-zero status or signal
+// is a failure worth reading; sanctioned, hibernated and teardown exits are
+// Codara's own doing; Cora workers end through the run store; and a live agent
+// pointer or agentRecoverable means the shell died under a running agent, which
+// useTerminalSession may resume in place. Status 0 cannot prove the user typed `exit`: `exec true`
+// closes the pane too.
+function isCleanShellExit(leaf: TerminalLeaf, info?: PtyExitInfo): boolean {
+  return (
+    !!info &&
+    !info.hibernated &&
+    !info.sanctioned &&
+    !isAppTearingDown() &&
+    info.exitCode === 0 &&
+    !info.signal &&
+    !info.agentRecoverable &&
+    leaf.worker?.source !== "spark" &&
+    !leaf.agentSession?.active
+  );
+}
+
 function findWorkerLeafByTaskId(node: PaneNode, workerTaskId: string): TerminalLeaf | null {
   // Prefer the pane hosting the task's LATEST attempt so open-from-graph lands
   // on the live retry, not a finished predecessor. attemptOrdinal is
@@ -6324,10 +6345,6 @@ export default function App() {
     [bindingTable],
   );
 
-  // Dispose PTYs when terminal panes exit. The renderer-side TerminalPane
-  // already calls pty.dispose on unmount, so this handler is intentionally
-  // a no-op for unmount cases — but we keep the seam so future "exited
-  // pane → auto-close" UX can hook in here without touching every call site.
   const onTerminalPaneExit = useCallback(
     (tabId: string, paneId: string, info?: PtyExitInfo) => {
       paneRuntimeRef.current.delete(paneId);
@@ -6343,6 +6360,14 @@ export default function App() {
       // stays the pane's running one and its chip stays as it was. The pane
       // resumes it when shown (useTerminalSession wakeFromSleep).
       if (info?.hibernated) return;
+      if (isCleanShellExit(leaf, info)) {
+        // No reseed: a fresh shell would hand back the terminal that just
+        // ended. The option covers split panes too, because two that exit
+        // before a render each still see a split here.
+        if (tab.root.kind === "leaf") t.closeTab(tabId);
+        else t.closeTerminalPane(tabId, paneId, { allowEmptyWorkspace: true });
+        return;
+      }
       // The shell died, taking any foreground agent with it — a pointer left
       // `active` here would wrongly restore on the next boot. The poller's
       // running:false usually lands first; this covers a pty that dies without
@@ -6413,6 +6438,19 @@ export default function App() {
         agentRunning: false,
         ...(workerCrashed ? { runtimeState: "error" as const } : {}),
       });
+    },
+    [],
+  );
+
+  // A kept-alive hidden stack shows its workspace's frozen layout, so only the
+  // close follows the exit there; its other pane state stays as it was.
+  const onHiddenTerminalPaneExit = useCallback(
+    (_tabId: string, paneId: string, info?: PtyExitInfo) => {
+      const t = tabsRef.current;
+      const owner = t.findTerminalPaneInInactiveWorkspaces(paneId);
+      if (owner && isCleanShellExit(owner.leaf, info)) {
+        t.closeTerminalPaneInWorkspace(owner.workspaceId, owner.tabId, paneId);
+      }
     },
     [],
   );
@@ -6935,6 +6973,7 @@ export default function App() {
               onGitChanged={sharedGit.notifyChanged}
               onFileSaved={sharedGit.notifyChanged}
               onTerminalPaneExit={onTerminalPaneExit}
+              onHiddenTerminalPaneExit={onHiddenTerminalPaneExit}
               onPreviewUrlChange={handlePreviewUrlChange}
               onPaneCwd={handlePaneCwd}
               onPaneActivity={handlePaneActivity}
@@ -7532,6 +7571,11 @@ interface WorkspaceProps {
     paneId: string,
     info?: PtyExitInfo,
   ) => void;
+  onHiddenTerminalPaneExit: (
+    tabId: string,
+    paneId: string,
+    info?: PtyExitInfo,
+  ) => void;
   onPreviewUrlChange: (id: string, url: string) => void;
   onPaneCwd: (tabId: string, paneId: string, cwd: string) => void;
   onPaneActivity: (tabId: string, paneId: string) => void;
@@ -7592,6 +7636,7 @@ const Workspace = React.memo(function Workspace({
   onGitChanged,
   onFileSaved,
   onTerminalPaneExit,
+  onHiddenTerminalPaneExit,
   onPreviewUrlChange,
   onPaneCwd,
   onPaneActivity,
@@ -8456,7 +8501,7 @@ const Workspace = React.memo(function Workspace({
                 scrollbackLineLimit={terminalScrollbackLineLimit}
                 onDetectedUrl={isActive ? onDetectedUrl : noopTerminalCb}
                 onSparkOpen={isActive ? handleSparkOpen : noopTerminalCb}
-                onPaneExit={isActive ? handlePaneExit : noopTerminalCb}
+                onPaneExit={isActive ? handlePaneExit : onHiddenTerminalPaneExit}
                 onActivatePane={isActive ? handleActivatePane : noopTerminalCb}
                 onSplitRatioChange={isActive ? handleSplitRatioChange : noopTerminalCb}
                 onSplitPane={isActive ? handleSplitPane : noopTerminalCb}
