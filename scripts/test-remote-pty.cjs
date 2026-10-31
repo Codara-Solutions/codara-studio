@@ -165,6 +165,7 @@ function harness(lib, overrides = {}) {
     retryDelaysMs: [10, 20, 30],
     ...(overrides.maxAttempts ? { maxAttempts: overrides.maxAttempts } : {}),
     ...(overrides.closedBeforeBind ? { closedBeforeBind: overrides.closedBeforeBind } : {}),
+    ...(overrides.exitedBeforeBind !== undefined ? { exitedBeforeBind: overrides.exitedBeforeBind } : {}),
     ...(overrides.reportExitStatus !== undefined ? { reportExitStatus: overrides.reportExitStatus } : {}),
     sleep: async (ms) => {
       sleeps.push(ms);
@@ -395,6 +396,17 @@ function harness(lib, overrides = {}) {
     await until("a new channel", () => h2.conn.shells.length === 1);
     assert.deepEqual(h2.exits, []);
     ok("a close before the handle existed is not lost");
+  }
+
+  {
+    for (const status of [0, 3, -1]) {
+      const h = harness(lib, { exitedBeforeBind: status });
+      assert.deepEqual(h.exits, [], "the close has not come yet");
+      h.first.drop();
+      assert.deepEqual(h.exits, [{ exitCode: status }]);
+      assert.equal(h.conn.execs.length, 0, "a shell that exited is not reconnected");
+    }
+    ok("a status before the handle existed survives a close after it");
   }
 
   console.log(`\n${passed} passed`);

@@ -74,6 +74,8 @@ export interface RemotePtyInput {
   retryDelaysMs?: readonly number[];
   /** Attempts per round before the pane waits for a key. */
   maxAttempts?: number;
+  /** The shell reported this status before the handle existed; its close may still come. */
+  exitedBeforeBind?: number | null;
   /** The channel closed before the handle existed, with this exit status. */
   closedBeforeBind?: { exitCode: number | null } | null;
   sleep?: (ms: number) => Promise<void>;
@@ -134,8 +136,12 @@ export function createRemotePtyHandle(input: RemotePtyInput): RemotePtyHandle {
     for (const listener of exitListeners) listener({ exitCode });
   };
 
-  const bind = (ch: RemoteShellChannel, early?: { exitCode: number | null } | null) => {
-    let exitCode: number | null = early?.exitCode ?? null;
+  const bind = (
+    ch: RemoteShellChannel,
+    early?: { exitCode: number | null } | null,
+    exitedEarly: number | null = null,
+  ) => {
+    let exitCode: number | null = early?.exitCode ?? exitedEarly;
     ch.on("data", emit);
     ch.stderr.on("data", emit);
     // ssh2 reports the remote shell's exit status before the close; a
@@ -219,7 +225,7 @@ export function createRemotePtyHandle(input: RemotePtyInput): RemotePtyHandle {
     }
   };
 
-  bind(input.channel, input.closedBeforeBind);
+  bind(input.channel, input.closedBeforeBind, input.exitedBeforeBind ?? null);
 
   return {
     pid: 0,

@@ -24,6 +24,8 @@
 //     machine; quitting (disposeAll) and a closed window
 //     (disposeForWebContents) leave it running; a pane that comes back
 //     before its close takes effect keeps its agent
+//   - a status the shell reported during the probe reaches the pane even
+//     when its close lands after the handle bound
 //
 //   node scripts/test-pty-remote-agents.cjs
 
@@ -58,6 +60,7 @@ function fakeConnection(state) {
       state.execs.push(command);
       if (command.includes("kill-session") && state.killGate) await state.killGate;
       if (command.includes("has-session")) {
+        if (state.probeGate) await state.probeGate;
         if (state.probeError) throw state.probeError;
         return { code: state.alive ? 0 : 1 };
       }
@@ -222,6 +225,26 @@ async function main() {
     assert.deepEqual(state.channels[1].writes.slice(1), ["hello"], "once attached, writes flow again");
     pty.disposeAll();
     ok("a dropped agent pane reconnects only for a typed key; Studio's own writes are refused");
+
+    for (const [id, emitted, reported] of [
+      ["early-clean", [0], 0],
+      ["early-failed", [3], 3],
+      ["early-signal", [null, "SIGTERM", false, ""], -1],
+    ]) {
+      reset();
+      let openProbe;
+      state.probeGate = new Promise((resolve) => (openProbe = resolve));
+      const spawned = pty.spawn(options(id));
+      await sleep(20);
+      state.channels[0].emit("exit", ...emitted);
+      openProbe();
+      state.probeGate = null;
+      await spawned;
+      const exited = new Promise((resolve) => pty.onExit(id, resolve));
+      state.channels[0].emit("close");
+      assert.equal((await exited).exitCode, reported);
+    }
+    ok("a status reported during the probe reaches the pane when the close comes after it");
   } finally {
     delete globalThis.__codaraPtySpawnHarness;
     fs.rmSync(tmp, { recursive: true, force: true });
