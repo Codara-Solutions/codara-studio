@@ -40,6 +40,45 @@ export function followsHiddenTargetLink(uri: string): boolean {
   }
 }
 
+export interface FileLinkTarget {
+  path: string;
+  line?: number;
+  column?: number;
+}
+
+/**
+ * The local file an OSC 8 `file://` hyperlink names (Claude Code prints its
+ * markdown links to files this way), or null for anything else. The path is
+ * percent-decoded, so a folder with spaces arrives exactly. A `#L12` or
+ * `#L12C3` fragment, the form editors use, picks the line. A link to another
+ * host names no file on this computer.
+ */
+export function fileLinkTarget(uri: string): FileLinkTarget | null {
+  let url: URL;
+  try {
+    url = new URL(uri);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "file:") return null;
+  if (url.hostname !== "" && url.hostname !== "localhost") return null;
+  let path: string;
+  try {
+    path = decodeURIComponent(url.pathname);
+  } catch {
+    return null;
+  }
+  // Windows: file:///C:/Users/x arrives as /C:/Users/x.
+  if (/^\/[A-Za-z]:[\\/]/.test(path)) path = path.slice(1);
+  if (!path || path.includes("\0")) return null;
+  const fragment = /^#L(\d+)(?:C(\d+))?$/i.exec(url.hash);
+  return {
+    path,
+    ...(fragment ? { line: Number(fragment[1]) } : {}),
+    ...(fragment?.[2] ? { column: Number(fragment[2]) } : {}),
+  };
+}
+
 export type TerminalLinkActionId = "codara" | "system" | "copy";
 
 export interface TerminalLinkAction {

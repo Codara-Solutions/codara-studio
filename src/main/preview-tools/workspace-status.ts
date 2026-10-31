@@ -3,10 +3,13 @@
 // terminal pane it runs in, or its Cora chat), never to the whole workspace,
 // so agents sharing a workspace keep separate lines. The rail computes each
 // agent's state itself and shows the note beside it. The workspace is always
-// the caller's own, never one the call names. The notes live in
+// the caller's own, never one the call names. With `worktree` the note goes
+// on that worktree's row instead, for the agent (often a coordinator's
+// background subagent) working there; ../workspace-status/worktree-notes.ts
+// decides which worktrees a caller may write on. The notes live in
 // ../workspace-status/agent-notes.ts.
 
-import { paneNoteKey, runNoteKey, type AgentNote, type AgentNoteKey } from "@shared/agent-status";
+import { isWorktreeNoteKey, paneNoteKey, runNoteKey, type AgentNote, type AgentNoteKey } from "@shared/agent-status";
 import {
   WORKSPACE_STATUS_IDS,
   WORKSPACE_STATUS_LABELS,
@@ -155,6 +158,11 @@ async function runWorkspaceStatus(
   host: PreviewToolHost,
 ): Promise<unknown> {
   const patch = patchFromParams(params);
+  const rawWorktree = params.worktree;
+  if (rawWorktree !== undefined && rawWorktree !== null && typeof rawWorktree !== "string") {
+    throw new PreviewToolParamsError("worktree must be the absolute path of a worktree.");
+  }
+  const worktreePath = typeof rawWorktree === "string" && rawWorktree.trim() ? rawWorktree.trim() : null;
   const target = await callerWorkspace(params, host);
   if ("refusal" in target) return target.refusal;
   const service = workspaceStatusService();
@@ -163,11 +171,13 @@ async function runWorkspaceStatus(
     return { updated: false, reason: "workspace_gone", note: "Your workspace was removed from Codara." };
   }
   const book = service.notes();
+  if (worktreePath) return worktreeStatus(worktreePath, patch, target, name);
   // Notes of agents that are gone (a chat that left the Agents view, a pane
-  // main never saw close) are dropped here rather than read back.
+  // main never saw close) are dropped here rather than read back. A
+  // worktree's note belongs to its row, not to an agent of this workspace.
   const others: AgentNote[] = [];
   for (const note of book.inWorkspace(target.workspaceId)) {
-    if (note.key === target.agentKey) continue;
+    if (note.key === target.agentKey || isWorktreeNoteKey(note.key)) continue;
     if (await service.agentIsLive(note.key)) others.push(note);
     else book.drop(note.key);
   }
@@ -186,6 +196,38 @@ async function runWorkspaceStatus(
   if (patch.status) hints.push(STATE_HINT);
   return {
     ...view(target.workspaceId, name, result.note, others),
+    updated: result.changed,
+    ...(result.noteTruncated ? { noteTruncated: true } : {}),
+    ...(hints.length > 0 ? { hint: hints.join(" ") } : {}),
+  };
+}
+
+/** Reads or writes the note on a worktree's row. */
+async function worktreeStatus(
+  path: string,
+  patch: WorkspaceStatusPatch,
+  caller: { workspaceId: string; by: WorkspaceStatusAuthor; agentKey: AgentNoteKey | null },
+  callerName: string,
+): Promise<unknown> {
+  const service = workspaceStatusService();
+  const placed = await service.worktreeNoteTarget(path, { workspaceId: caller.workspaceId, agentKey: caller.agentKey });
+  if ("refusal" in placed) return placed.refusal;
+  const book = service.notes();
+  const rowName = (await service.workspaceName(placed.workspaceId)) ?? callerName;
+  const where = { worktree: placed.path, ...(placed.worktreeWorkspaceId ? { workspaceId: placed.worktreeWorkspaceId } : {}) };
+  if (isRead(patch)) return { ...view(placed.workspaceId, rowName, book.get(placed.key), []), ...where };
+  const result = book.update(placed.key, placed.workspaceId, patch, caller.by, {
+    worktreePath: placed.path,
+    from: { workspaceId: caller.workspaceId, workspaceName: callerName },
+  });
+  const hints: string[] = [];
+  if (result.noteTruncated) hints.push(`A note is one line of at most ${WORKSPACE_STATUS_NOTE_MAX} characters; the rest was cut.`);
+  if (patch.status) {
+    hints.push("On a worktree's row, in_review or done reads as done, blocked as needs you; anything else Codara works out from its activity.");
+  }
+  return {
+    ...view(placed.workspaceId, rowName, result.note, []),
+    ...where,
     updated: result.changed,
     ...(result.noteTruncated ? { noteTruncated: true } : {}),
     ...(hints.length > 0 ? { hint: hints.join(" ") } : {}),

@@ -72,6 +72,9 @@ export default function SharePopover({ anchorRef, path, getText, onClose }: Prop
   const share = async (page: PackagedShare) => {
     setStage({ kind: "uploading", page });
     try {
+      // Asked again at the moment of sending: the file may have been swapped
+      // for a link to a .env since the prompt opened.
+      if (await window.spark.fs.isSecretFile(path)) throw new Error("A file with secrets cannot be shared as a link.");
       const shared = await window.spark.share.create({ html: page.html, title: page.title, ttlDays });
       let copied = false;
       try {

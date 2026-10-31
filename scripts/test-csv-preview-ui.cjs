@@ -218,6 +218,8 @@ async function main() {
             },
             fs: {
               readEx: async (path) => ({ kind: "text", path, content: window.diskText, size: window.diskText.length, mtimeMs: 1 }),
+              isSecretFile: async () => false,
+              onChanged: () => () => {},
               writeText: async (path, text) => {
                 if (window.failSave) throw new Error("disk unavailable");
                 window.diskText = text;

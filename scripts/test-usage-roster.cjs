@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 "use strict";
 
-// What the title bar's Usage panel shows, from the pure model in
-// src/renderer/src/components/usage/usage-roster.ts: row order, the chips each
-// row draws, the active account and every other one with its email, what a
-// switch does, and the copy for resets, credits and countdowns.
+// Who is behind each provider in the title bar's usage panel, from the pure
+// model in src/renderer/src/components/usage/usage-roster.ts: provider order,
+// the chips each account carries, the active account and every other one
+// with its email, what a switch does, and countdown units. What the panel
+// says about each limit is pinned in test-usage-glance.cjs.
 
 const assert = require("node:assert/strict");
 const path = require("node:path");
@@ -80,13 +81,7 @@ assert.equal(
   roster.windowChipLabel(win("a", "Code review 7-day", 1, { scope: { kind: "code_review" } })),
   null,
 );
-assert.equal(roster.windowTitle(win("a", "5-hour", 1)), "Session");
-assert.equal(roster.windowTitle(win("a", "7-day", 1)), "Weekly");
-assert.equal(
-  roster.windowTitle(win("a", "Fable 7-day", 1, { scope: { kind: "model", modelLabel: "Fable" } })),
-  "Fable weekly",
-);
-console.log("ok - windows are named 5h, wk and by model, Session and Weekly in full");
+console.log("ok - windows are named 5h, wk and by model");
 
 // ── countdowns ────────────────────────────────────────────────────────────
 assert.equal(roster.formatResetDuration(47 * 60_000 + 30_000), "47m");
@@ -95,72 +90,13 @@ assert.equal(roster.formatResetDuration(3 * HOUR + 54 * 60_000), "3h 54m");
 assert.equal(roster.formatResetDuration(2 * HOUR), "2h");
 assert.equal(roster.formatResetDuration(6 * 24 * HOUR + 7 * HOUR + 59 * 60_000), "6d 7h");
 assert.equal(roster.formatResetDuration(-5), "now");
-assert.equal(roster.formatResetsIn(at(2 * HOUR + 14 * 60_000), NOW), "Resets in 2h 14m");
-assert.equal(roster.formatResetsIn(at(-1000), NOW), "Resets now");
-assert.equal(roster.formatResetsIn(undefined, NOW), null);
-assert.equal(roster.formatUpdatedAgo(at(-20_000), NOW), "Updated just now");
-assert.equal(roster.formatUpdatedAgo(at(-2 * 60_000), NOW), "Updated 2m ago");
-assert.equal(roster.formatUpdatedAgo(at(-3 * HOUR), NOW), "Updated 3h ago");
-assert.equal(roster.formatUpdatedAgo("garbage", NOW), null);
-console.log("ok - countdowns and freshness read in plain units");
+console.log("ok - countdowns read in plain units");
 
 // ── plans, credits and resets ─────────────────────────────────────────────
 assert.equal(roster.formatPlan("plus"), "Plus");
 assert.equal(roster.formatPlan("chatgpt_business"), "ChatGPT Business");
 assert.equal(roster.formatPlan(""), null);
-assert.deepEqual(roster.describeCredits({ kind: "balance", balance: 1234.5, unlimited: false }), {
-  title: "Credits",
-  line: "1,234.5 credits available",
-  usedPercent: null,
-});
-assert.equal(
-  roster.describeCredits({ kind: "balance", balance: 0, unlimited: true }).line,
-  "Unlimited credits",
-);
-assert.deepEqual(
-  roster.describeCredits({ kind: "spend", currency: "USD", spent: 12.5, limit: 50, usedPercent: 25 }),
-  { title: "Extra Usage", line: "$12.50 of $50.00 spent", usedPercent: 25 },
-);
-assert.equal(
-  roster.describeCredits({ kind: "spend", currency: "EUR", spent: 3, limit: null, usedPercent: null })
-    .line,
-  "€3.00 spent, no cap",
-);
-assert.equal(roster.describeCredits(undefined), null);
-
-const codex = (extra) =>
-  usageProfile("c1", "openai-codex", "Work", true, [win("p", "5-hour", 12)], extra);
-assert.equal(roster.describeResetCredits(codex({ resetCredits: { available: 0 } }), NOW), null);
-assert.deepEqual(
-  roster.describeResetCredits(
-    codex({ resetCredits: { available: 2, nextExpiresAt: at(3 * 24 * HOUR + 4 * HOUR) } }),
-    NOW,
-  ),
-  { count: 2, line: "2 rate-limit resets available", expiry: "Next expires in 3d 4h" },
-);
-assert.deepEqual(
-  roster.describeResetCredits(codex({ resetCredits: { available: 1 } }), NOW),
-  { count: 1, line: "1 rate-limit reset available", expiry: null },
-);
-assert.equal(
-  roster.describeResetCredits(
-    codex({ resetCredits: { available: 1, nextExpiresAt: at(50 * 60_000) } }),
-    NOW,
-  ).expiry,
-  "Expires in 50m",
-);
-// A reset is only worth spending once a plan-wide window has use on it.
-assert.equal(roster.resetWorthSpending(codex({})), true);
-assert.equal(
-  roster.resetWorthSpending(
-    usageProfile("c1", "openai-codex", "Work", true, [
-      win("p", "5-hour", 0.4),
-      win("r", "Code review 7-day", 80, { scope: { kind: "code_review" } }),
-    ]),
-  ),
-  false,
-);
-console.log("ok - credits, extra usage and resets say only what was reported");
+console.log("ok - plans read as their names");
 
 // ── the roster ────────────────────────────────────────────────────────────
 const usage = {
@@ -218,11 +154,10 @@ const cli = {
 };
 
 const built = roster.buildUsageRoster({ usage, accounts, cli });
-// Worst first: Codex's 71% outranks Claude's 26%; Grok draws nothing and
-// goes last.
+// The Accounts order, whatever the numbers: a provider never jumps place.
 assert.deepEqual(
   built.map((entry) => entry.provider),
-  ["openai-codex", "anthropic", "xai"],
+  ["anthropic", "openai-codex", "xai"],
 );
 const claude = built.find((entry) => entry.provider === "anthropic");
 assert.equal(claude.name, "Claude");
@@ -233,16 +168,7 @@ assert.deepEqual(
 );
 assert.equal(claude.active.label, "Personal");
 assert.equal(claude.active.email, "me@example.com");
-assert.equal(roster.soonestReset(claude.chips, NOW), "Resets in 2h");
 assert.equal(roster.tightestChip(claude.chips).label, "wk");
-assert.deepEqual(
-  roster.pillChips(claude.chips, "detailed").map((chip) => chip.label),
-  ["5h", "wk"],
-);
-assert.deepEqual(
-  roster.pillChips(claude.chips, "compact").map((chip) => chip.label),
-  ["wk"],
-);
 // Every account, with its email and limits. The own login comes first and
 // can be switched to, but its limits are never read.
 assert.deepEqual(
@@ -253,7 +179,7 @@ assert.deepEqual(
     ["Work", "me@work.example", false, "use"],
   ],
 );
-assert.equal(claude.accounts[0].note, "Limits not shown for your own login");
+assert.equal(claude.accounts[0].note, "Claude Code keeps these private");
 assert.deepEqual(
   claude.accounts[2].chips.map((chip) => chip.label),
   ["5h"],
@@ -261,7 +187,7 @@ assert.deepEqual(
 const grok = built.find((entry) => entry.provider === "xai");
 assert.equal(grok.status, "Not reported by xAI");
 assert.equal(grok.chips.length, 0);
-console.log("ok - rows sort worst first and list every account with its email");
+console.log("ok - providers keep the Accounts order and list every account with its email");
 
 // Before the account list arrives, the usage read names the accounts.
 const early = roster.buildUsageRoster({ usage, accounts: null, cli: null });
@@ -288,7 +214,7 @@ const systemOnly = roster.buildUsageRoster({
 assert.equal(systemOnly.length, 1);
 assert.equal(systemOnly[0].active.system, true);
 assert.equal(systemOnly[0].active.profileId, null);
-assert.equal(systemOnly[0].status, "Using your Claude Code login");
+assert.equal(systemOnly[0].status, "Claude Code keeps these private");
 assert.equal(systemOnly[0].chips.length, 0);
 assert.equal(systemOnly[0].accounts[1].action, "use");
 console.log("ok - the own login is shown as active without made-up limits");
@@ -319,7 +245,7 @@ const codexRules = rules[0];
 assert.deepEqual(
   codexRules.accounts.map((account) => [account.label, account.action, account.note]),
   [
-    ["Codex", "use", "Limits show once Cora is connected"],
+    ["Codex", "use", "Limits appear once Cora is signed in"],
     ["Team", null, null],
     ["Old", null, "ChatGPT rejected the stored session."],
     ["Cora only", null, "Not available"],
@@ -328,8 +254,3 @@ assert.deepEqual(
 assert.equal(codexRules.accounts[2].blocked, "Needs a new sign-in. Reconnect it in Accounts.");
 assert.equal(codexRules.accounts[3].blocked, "Share it with Codex in Accounts first");
 console.log("ok - switching is offered only where Accounts offers it");
-
-assert.equal(roster.normalizeUsageDensity("compact"), "compact");
-assert.equal(roster.normalizeUsageDensity("bogus"), "detailed");
-assert.equal(roster.normalizeUsageDensity(null), "detailed");
-console.log("ok - density falls back to Detailed");

@@ -291,10 +291,12 @@ function normalize(
       typeof src.keepAgentsInYourChrome === "boolean"
         ? src.keepAgentsInYourChrome
         : DEFAULT_PREFERENCES.keepAgentsInYourChrome,
+    // A value counts only if the user chose it: see usageForecastChosen.
     usageForecast:
-      typeof src.usageForecast === "boolean"
+      src.usageForecastChosen === true && typeof src.usageForecast === "boolean"
         ? src.usageForecast
         : DEFAULT_PREFERENCES.usageForecast,
+    ...(src.usageForecastChosen === true ? { usageForecastChosen: true } : {}),
     ...(src.usageForecastIdeas !== undefined
       ? { usageForecastIdeas: normalizeForecastIdeas(src.usageForecastIdeas) }
       : {}),
@@ -309,6 +311,10 @@ function normalize(
       typeof src.terminalLinkMenu === "boolean"
         ? src.terminalLinkMenu
         : DEFAULT_PREFERENCES.terminalLinkMenu,
+    quickOpenAnywhere:
+      typeof src.quickOpenAnywhere === "boolean"
+        ? src.quickOpenAnywhere
+        : DEFAULT_PREFERENCES.quickOpenAnywhere,
     copyBranchSetupCommandByRepo: normalizeStringMap(
       src.copyBranchSetupCommandByRepo,
     ),
@@ -459,6 +465,7 @@ export async function setPreference<K extends PrefKey>(
     ...current,
     [key]: value,
     ...(key === "machinesEnabled" ? { machinesEnabledChosen: true } : {}),
+    ...(key === "usageForecast" ? { usageForecastChosen: true } : {}),
   });
   cache = next;
   for (const listener of preferenceListeners) {

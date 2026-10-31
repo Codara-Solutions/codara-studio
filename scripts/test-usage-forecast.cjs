@@ -1,4 +1,4 @@
-// Unit tests for the usage forecast (Labs, behind the usageForecast
+// Unit tests for the usage forecast (behind the usageForecast
 // preference): the model in src/shared/usage-forecast.ts and the transcript
 // readers in src/main/usage-forecast-signals.ts.
 //

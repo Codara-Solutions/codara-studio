@@ -357,6 +357,31 @@ export interface WorktreeRailState {
   target?: string;
   /** Missing, and merged or gone: the rail asks main to remove it, and main checks everything again. */
   autoCandidate: boolean;
+  /** When its checked-out commit was made (ms), the activity a background agent leaves behind. */
+  headAt?: number;
+}
+
+/**
+ * A worktree git lists for a project's repository that no rail row shows: one
+ * made with plain `git worktree add`, by hand or by an agent. The rail lists
+ * it under its project so nothing works out of sight.
+ */
+export interface WorktreeRailExternal {
+  /** The project row it hangs under: the workspace whose folder is the repository's main checkout. */
+  projectId: string;
+  path: string;
+  /** Short branch name; null on a detached HEAD. */
+  branch: string | null;
+  head: string;
+  /** When the checked-out commit was made (ms). */
+  headAt?: number;
+  locked: boolean;
+}
+
+/** One read of the rail's worktrees: the rows it has, and the ones made outside Codara. */
+export interface WorktreeRailOverview {
+  states: WorktreeRailState[];
+  external: WorktreeRailExternal[];
 }
 
 /**

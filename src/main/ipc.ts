@@ -1,13 +1,17 @@
 import { ipcMain, dialog, BrowserWindow, app, shell, webContents, clipboard, nativeImage, type WebContents } from "electron";
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
+import { isSecretFileOnDisk } from "./secret-file-check";
+import { kernelPath } from "./open-file";
 import { listShells, defaultShell } from "./shells";
 import { buildIntegratedShellLaunch } from "./shell-init";
 import { createFile, createFolder, deleteFile, deleteToStash, importEntries, listDir, listFiles, moveEntries, purgeDeleteStash, readFileBytes, readFileEx, readTextFile, readTextFileTail, renameFile, statFile, undoDeleteFromStash, writeTextFile } from "./fs-tree";
-import { assertAllowedReadPathResolved, setAllowedRoots } from "./fs-sandbox";
+import { assertAllowedReadPathResolved, grantReadFile, grantResolvedFile, setAllowedRoots } from "./fs-sandbox";
+import { createHomeSearchService } from "./quick-open-anywhere";
+import { createPathQueryService } from "./quick-open-path";
 import { readClipboardFilePaths, writeClipboardFilePaths } from "./clipboard-files";
 import { deleteManualHost, listHosts, saveCodaraHost, saveManualHost } from "./remote/ssh-hosts";
 import { codaraBoxConnectInfo, isBoxId, listCodaraBoxes } from "./remote/codara-boxes";
@@ -96,6 +100,7 @@ import {
   claudeSessionTranscriptPath,
   discoverClaudeSessionForCwd,
   inspectClaudeTranscriptTail,
+  locateClaudeTranscript,
   repairClaudeTranscriptTail,
   resolveSafeClaudeTranscriptPath,
 } from "./orchestration/claude-paths";
@@ -406,6 +411,10 @@ import type {
   CreateRunInput,
   CreateWorkerTaskInput,
   FileListResult,
+  HomeFileSearchResult,
+  PathPickResult,
+  PathQueryResult,
+  HomePickResult,
   FsEntry,
   FsFileContent,
   FsReadResult,
@@ -496,6 +505,7 @@ import type {
   WorkerSessionSummary,
 } from "@shared/types";
 import { isPiSubscriptionProvider } from "../shared/agent-families";
+import { isPiResetCreditId } from "@shared/types";
 import type { AgentDeliveryRequest, AgentDeliveryResult } from "../shared/agent-delivery";
 import { agentDelivery } from "./agent-delivery";
 import { registerCaptureIpc } from "./browser/capture/ipc";
@@ -589,6 +599,14 @@ function piAccountProfileIdFromIpc(value: unknown): string {
   return value;
 }
 
+/** ChatGPT's id of one banked reset, as the usage read reported it. Absent
+ * lets ChatGPT pick, as before credit ids were read. */
+/** A reset is only spent by naming it: no id, no spend. */
+function codexResetCreditIdFromIpc(value: unknown): string {
+  if (!isPiResetCreditId(value)) throw new TypeError("Reset credit id must be a short id string");
+  return value;
+}
+
 function piAccountLabelFromIpc(value: unknown, required: boolean): string | undefined {
   if (value === undefined && !required) return undefined;
   if (typeof value !== "string") throw new TypeError("Account label must be a string");
@@ -670,6 +688,7 @@ const PASTED_IMAGE_EXTENSIONS = new Map([
 // destroyTray; the handler calls them on keepRunningInBackground changes.
 type TrayHook = { ensure: () => void; destroy: () => void };
 let _trayHook: TrayHook | null = null;
+
 export function setTrayHook(hook: TrayHook): void {
   _trayHook = hook;
 }
@@ -1147,12 +1166,13 @@ export function registerIpc(): void {
   // account, whose cached reading the call dropped.
   handle(
     "pi-subscriptions:codex-reset",
-    async (_event, input?: { profileId?: unknown }): Promise<PiCodexResetResult> => {
+    async (_event, input?: { profileId?: unknown; creditId?: unknown }): Promise<PiCodexResetResult> => {
       await unifiedAccountsReady();
       const profileId = piAccountProfileIdFromIpc(input?.profileId);
+      const creditId = codexResetCreditIdFromIpc(input?.creditId);
       const { redeemCodexRateLimitReset } = await import("./orchestration/pi-subscription-usage");
       try {
-        return { outcome: await redeemCodexRateLimitReset(profileId) };
+        return { outcome: await redeemCodexRateLimitReset(profileId, creditId) };
       } finally {
         for (const contents of webContents.getAllWebContents()) {
           if (!contents.isDestroyed()) contents.send("pi-subscriptions:event", { type: "usage" });
@@ -1666,6 +1686,9 @@ export function registerIpc(): void {
   handle(
     "inline-ai:complete",
     async (_e, req: InlineAiCompletionRequest): Promise<InlineAiCompletionResponse> => {
+      // The editor turns completion off for a .env or key file by its name;
+      // a link named notes.txt that points at a .env is caught here.
+      if (await isSecretFileOnDisk(req?.filename)) return { text: "", error: "Inline completion is off for files with secrets." };
       const { runInlineAiCompletion } = await getInlineAi();
       return runInlineAiCompletion(req);
     },
@@ -1904,7 +1927,15 @@ export function registerIpc(): void {
       if (isRemotePath(target) || (base && isRemotePath(base))) {
         return { exists: false, isFile: false, resolved: target };
       }
-      const resolved = base ? join(base, target) : target;
+      // `~/` is the user's home, as in a shell; an absolute target ignores
+      // the pane's cwd.
+      const expanded = /^~(?=[\\/])/.test(target) ? `${homedir()}${sep}${target.slice(2)}` : target;
+      // A relative name with no known folder names nothing; resolving it
+      // against Codara's own working directory would be a guess.
+      if (!base && !isAbsolute(expanded)) return { exists: false, isFile: false, resolved: expanded };
+      // Joined as text: kernelPath resolves any ".." through links the way
+      // the file will be read.
+      const resolved = await kernelPath(base && !isAbsolute(expanded) ? `${base}${sep}${expanded}` : expanded);
       try {
         await assertAllowedReadPathResolved(resolved);
       } catch {
@@ -1918,6 +1949,56 @@ export function registerIpc(): void {
       }
     },
   );
+
+  // The editor asks whether an open file is a secret on disk (a link named
+  // notes.html that points at a .env): such a file opens as plain text, with
+  // no preview, share or inline completion. Answers yes or no, never content.
+  handle("fs:isSecretFile", async (_e, file: unknown): Promise<boolean> => isSecretFileOnDisk(file));
+
+  // Quick Open's "Elsewhere on this computer": file names under the home
+  // folder. One search per window at a time; the pick grants the read sandbox
+  // that one file, and only when the window's last search returned it.
+  const homeSearch = createHomeSearchService({
+    home: homedir,
+    enabled: () => getPreferenceCached("quickOpenAnywhere") !== false,
+    grantReadFile,
+    // A Codara home set outside ~/.codarastudio (CODARA_HOME) holds the same
+    // keys and runs, so it stays out too.
+    extraSkipped: () => {
+      const rel = relative(homedir(), codaraHome()).split(sep).join("/");
+      return rel && !rel.startsWith("..") && !isAbsolute(rel) ? [rel] : [];
+    },
+  });
+  // Quick Open's path mode: the names in the one folder a typed path names.
+  const pathQuery = createPathQueryService({
+    home: homedir,
+    codaraHome,
+    enabled: () => getPreferenceCached("quickOpenAnywhere") !== false,
+    grantResolvedFile,
+  });
+  const homeSearchSenders = new Set<number>();
+  const trackHomeSearchSender = (sender: WebContents): number => {
+    const id = sender.id;
+    if (!homeSearchSenders.has(id)) {
+      homeSearchSenders.add(id);
+      sender.once("destroyed", () => {
+        homeSearchSenders.delete(id);
+        homeSearch.forget(id);
+        pathQuery.forget(id);
+      });
+    }
+    return id;
+  };
+  handle("fs:searchHome", async (e, query: unknown, excludeRoot: unknown): Promise<HomeFileSearchResult> =>
+    homeSearch.search(trackHomeSearchSender(e.sender), query, excludeRoot),
+  );
+  handle("fs:cancelHomeSearch", async (e): Promise<void> => homeSearch.cancel(e.sender.id));
+  handle("fs:openHomeSearchPick", async (e, file: unknown): Promise<HomePickResult> => homeSearch.pick(e.sender.id, file));
+  handle("fs:searchPath", async (e, query: unknown, cwd: unknown): Promise<PathQueryResult> =>
+    pathQuery.search(trackHomeSearchSender(e.sender), query, cwd),
+  );
+  handle("fs:cancelPathSearch", async (e): Promise<void> => pathQuery.cancel(e.sender.id));
+  handle("fs:openPathPick", async (e, target: unknown): Promise<PathPickResult> => pathQuery.pick(e.sender.id, target));
 
 
   handle(
@@ -2588,6 +2669,11 @@ export function registerIpc(): void {
         // The new branch is a shared ref — refresh the source repo's panel.
         const { invalidateGitCache } = await getGitOps();
         invalidateGitCache(input.repoCwd);
+        void import("./claude-pretrust")
+          .then(({ pretrustClaudeWorktree }) =>
+            pretrustClaudeWorktree(result.path, input.repoCwd, { branch: input.checkoutBranch ?? null }),
+          )
+          .catch(() => undefined);
       }
       return result;
     },
@@ -3563,7 +3649,13 @@ export function registerIpc(): void {
         nativeClaudeProfileId?: string;
         nativeGrokProfileId?: string;
       },
-    ): Promise<{ exists: boolean; resumable?: boolean; repairable?: boolean; transcriptPath?: string }> => {
+    ): Promise<{
+      exists: boolean;
+      resumable?: boolean;
+      repairable?: boolean;
+      transcriptPath?: string;
+      cwd?: string;
+    }> => {
       if (!args.sessionId) return { exists: false };
       if (args.runtime === "pi") {
         // `pi --session <id>` looks the id up in the pane's cwd. Pi writes a
@@ -3603,14 +3695,33 @@ export function registerIpc(): void {
           args.sessionId,
           execution.env.CLAUDE_CONFIG_DIR ?? null,
         );
-        const path = await resolveSafeClaudeTranscriptPath(
+        let path = await resolveSafeClaudeTranscriptPath(
           args.cwd,
           args.sessionId,
           execution.env.CLAUDE_CONFIG_DIR ?? null,
         ).catch(() => null);
+        let exists = path ? await fs.access(path).then(() => true, () => false) : false;
+        // A pointer saved by an older build can carry a directory the agent
+        // cd'ed into instead of the one the session started in, which names
+        // another project folder. Find the transcript by id and report the cwd
+        // that maps to its folder; the renderer resumes from there.
+        let relocatedCwd: string | undefined;
+        if (!exists) {
+          const located = await locateClaudeTranscript({
+            sessionId: args.sessionId,
+            cwd: args.cwd,
+            transcriptPath: args.transcriptPath,
+            stateDir: execution.env.CLAUDE_CONFIG_DIR ?? null,
+          }).catch(() => null);
+          if (located) {
+            path = located.path;
+            exists = true;
+            if (located.cwd !== args.cwd) relocatedCwd = located.cwd;
+          }
+        }
         if (!path) return { exists: false, transcriptPath: expectedPath };
-        const exists = await fs.access(path).then(() => true, () => false);
         if (!exists) return { exists: false, transcriptPath: path };
+        const where = relocatedCwd ? { cwd: relocatedCwd } : {};
         // Resumability: the transcript must contain at least one real user
         // message line. Scan only the head — a genuine conversation has its
         // first user message within the first few KB.
@@ -3626,14 +3737,14 @@ export function registerIpc(): void {
             }
           })
           .catch(() => true); // unreadable head → don't block the resume attempt
-        if (!resumable) return { exists: true, resumable: false, transcriptPath: path };
+        if (!resumable) return { exists: true, resumable: false, transcriptPath: path, ...where };
         // The head scan passes even when a sleep/crash cut the writer mid-line,
         // leaving a truncated LAST record that `claude --resume` may refuse.
         // Check the TAIL and flag it repairable so the renderer truncates the
         // partial line (preserving the conversation) instead of self-healing
         // into a fresh session and losing it.
         const { repairable } = await inspectClaudeTranscriptTail(path);
-        return { exists: true, resumable: true, repairable, transcriptPath: path };
+        return { exists: true, resumable: true, repairable, transcriptPath: path, ...where };
       }
       // Codex: sessions are date-bucketed, not addressable by cwd, so rely on the
       // transcript path captured at launch. Size floor stands in for the message

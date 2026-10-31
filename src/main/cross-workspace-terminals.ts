@@ -313,6 +313,13 @@ export interface CrossWorkspaceAskInput {
   // the same requester share one card, so one answer never covers an agent
   // the card did not name.
   requester: string;
+  // What the card asks for: a terminal (the default) or a worktree of the
+  // target's repository. One grant covers both.
+  action?: "terminal" | "worktree";
+}
+
+function wantsVerb(input: Pick<CrossWorkspaceAskInput, "action">): string {
+  return input.action === "worktree" ? "make worktrees in" : "open terminals in";
 }
 
 /** Shows the prompt and resolves with the answer, or null when nobody answered (timeout, no window). */
@@ -372,8 +379,8 @@ export function createCrossWorkspaceApprover(deps: {
       ok: false,
       message:
         answer === "deny"
-          ? `the user declined: ${input.caller.name} may not open terminals in ${input.target.name}`
-          : `the user did not answer whether ${input.caller.name} may open terminals in ${input.target.name}; ask them, then retry`,
+          ? `the user declined: ${input.caller.name} may not ${wantsVerb(input)} ${input.target.name}`
+          : `the user did not answer whether ${input.caller.name} may ${wantsVerb(input)} ${input.target.name}; ask them, then retry`,
     };
   };
   return {
@@ -384,10 +391,10 @@ export function createCrossWorkspaceApprover(deps: {
       if (denied !== undefined && now() - denied < CROSS_WORKSPACE_DENY_COOLDOWN_MS) {
         return {
           ok: false,
-          message: `the user declined: ${input.caller.name} may not open terminals in ${input.target.name}. Do not retry; open the terminal in your own workspace or ask the user`,
+          message: `the user declined: ${input.caller.name} may not ${wantsVerb(input)} ${input.target.name}. Do not retry; work in your own workspace or ask the user`,
         };
       }
-      const key = JSON.stringify([input.caller.id, input.target.id, input.requester]);
+      const key = JSON.stringify([input.caller.id, input.target.id, input.requester, input.action ?? "terminal"]);
       let card = pending.get(key);
       if (!card) {
         const entry: PendingCard = { decision: decide(input).finally(() => pending.delete(key)), onceUsed: false };
@@ -400,7 +407,7 @@ export function createCrossWorkspaceApprover(deps: {
         if (card.onceUsed) {
           return {
             ok: false,
-            message: `the user allowed ${input.caller.name} to open one terminal in ${input.target.name}, and another call took it; call again to ask for this one`,
+            message: `the user allowed ${input.caller.name} to ${input.action === "worktree" ? "make one worktree" : "open one terminal"} in ${input.target.name}, and another call took it; call again to ask for this one`,
           };
         }
         card.onceUsed = true;

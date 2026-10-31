@@ -37,6 +37,7 @@ import {
 import { deleteBranch, deleteBranchIfAt } from "./git-branches";
 import { listProcessesWithCommands, processChainIn } from "./owned-process-tree";
 import { setupProvidedEntries } from "./worktree-setup/links";
+import { holdsPullRequestCode, isPullRequestRef } from "./pull-request-code";
 import type { WorktreeSetupStatus } from "@shared/worktree-setup";
 import {
   insertCopyWorkspace,
@@ -73,6 +74,9 @@ export interface WorktreeCaller {
   // Another workspace the call acts in, already allowed by the user through
   // the cross-workspace terminal grant. Never read from tool JSON.
   workspaceId?: string;
+  // The workspace the agent itself runs in, when workspaceId names another
+  // one: recorded on the worktree as who works in it.
+  origin?: { workspaceId: string; workspaceName: string };
 }
 
 export type WorktreeCode =
@@ -192,6 +196,9 @@ export interface AgentWorktreeDeps {
   // .codara/worktree.json, src/main/worktree-setup). Without it a created
   // worktree only reports the user's setup command for the agent to run.
   worktreeSetup?: AgentWorktreeSetupRunner;
+  // Trusts a new worktree for Claude Code (claude-pretrust.ts) so the first
+  // Claude pane there does not stop at its folder trust prompt.
+  pretrustClaude?(path: string, workspaces: readonly Workspace[]): Promise<unknown>;
 }
 
 export interface AgentWorktreeSetupRunner {
@@ -929,14 +936,23 @@ function defaultBranchName(input: CreateWorktreeInput, deps: AgentWorktreeDeps):
   return slug ? `agent/${slug}-${hexFrom(id, 4)}` : `agent/wt-${hexFrom(id, 6)}`;
 }
 
-function creatorFor(caller: WorktreeCaller, purpose?: string): CopyBranchCreator {
+function creatorFor(caller: WorktreeCaller, scope: WorktreeScope, purpose?: string): CopyBranchCreator {
   const client = cleanText(caller.client, COPY_BRANCH_CREATOR_LIMITS.client);
+  // A caller acting in another workspace says where it came from; any other
+  // caller was placed in the workspace it runs in.
+  const from =
+    caller.origin ??
+    (caller.workspaceId ? null : { workspaceId: scope.callerWorkspace.id, workspaceName: scope.callerWorkspace.name });
+  const fromId = from ? cleanText(from.workspaceId, COPY_BRANCH_CREATOR_LIMITS.fromWorkspaceId) : "";
+  const fromName = from ? cleanText(from.workspaceName, COPY_BRANCH_CREATOR_LIMITS.fromWorkspaceName) : "";
   return {
     kind: "agent",
     ...(client ? { client } : {}),
     ...(caller.runId ? { runId: cleanText(caller.runId, COPY_BRANCH_CREATOR_LIMITS.runId) } : {}),
     ...(caller.paneId ? { paneId: cleanText(caller.paneId, COPY_BRANCH_CREATOR_LIMITS.paneId) } : {}),
     ...(purpose ? { purpose } : {}),
+    ...(fromId ? { fromWorkspaceId: fromId } : {}),
+    ...(fromName ? { fromWorkspaceName: fromName } : {}),
   };
 }
 
@@ -1161,6 +1177,88 @@ export function terminalRollbackMessage(made: Record<string, unknown>, rollback:
   return `the worktree made for it, ${which}, stays (${rollback.reason ?? "not removed"}): remove it with ${remove}`;
 }
 
+/**
+ * The branches whose commits count as the repository's own: its default
+ * branch and the branch checked out in its main checkout (which Codara
+ * already trusts), unless that is a pull-request branch.
+ */
+async function ownBranchNames(repoCwd: string): Promise<Set<string>> {
+  const names = new Set<string>();
+  const remoteHead = await readGitText(repoCwd, ["symbolic-ref", "-q", "refs/remotes/origin/HEAD"]);
+  const defaultName = remoteHead.trim().replace(/^refs\/remotes\/origin\//, "");
+  if (defaultName && defaultName !== remoteHead.trim()) names.add(defaultName);
+  else {
+    for (const candidate of ["main", "master"]) {
+      if (await refExists(repoCwd, `refs/heads/${candidate}`)) {
+        names.add(candidate);
+        break;
+      }
+    }
+  }
+  const head = (await readGitText(repoCwd, ["symbolic-ref", "-q", "HEAD"])).trim();
+  if (head.startsWith("refs/heads/") && !isPullRequestRef(head)) names.add(head.slice("refs/heads/".length));
+  return names;
+}
+
+/**
+ * True when a new worktree starts from pull-request code, which Codara never
+ * trusts for Claude Code: it is made from a pull-request workspace, its base
+ * or branch is a pull-request ref (`codara/pr/...`, `refs/codara/pr-import/...`),
+ * or its starting commit is not on the repository's own branches (the
+ * default branch, the main checkout's branch, and their remote-tracking
+ * copies) while a pull-request ref, or a worktree branch already holding
+ * pull-request code (`known`), has it. A commit on no ref at all, or one that
+ * cannot be checked, counts as pull-request code too. A new branch name or
+ * tag therefore does not make a pull request's commits trusted. This catches
+ * mistakes and laundering through refs; it cannot stop an agent with a shell
+ * from writing a pull request's files into a trusted folder. `ignoreRefs`
+ * leaves out the branch just made for this worktree.
+ */
+export async function startsFromPullRequestCode(input: {
+  repoCwd: string;
+  workspaces: readonly Workspace[];
+  names: readonly (string | null | undefined)[];
+  commit?: string | null;
+  ignoreRefs?: readonly string[];
+  known?: readonly Workspace[];
+}): Promise<boolean> {
+  if (input.workspaces.some(holdsPullRequestCode)) return true;
+  if (input.names.some(isPullRequestRef)) return true;
+  if (input.commit === undefined) return false;
+  if (!input.commit) return true;
+  const ignored = new Set(input.ignoreRefs ?? []);
+  const pullRequestBranches = new Set<string>();
+  for (const workspace of input.known ?? []) {
+    if (workspace.copyBranch && holdsPullRequestCode(workspace)) {
+      pullRequestBranches.add(`refs/heads/${workspace.copyBranch.branch}`);
+    }
+  }
+  const refs = (
+    await readGitText(input.repoCwd, [
+      "for-each-ref",
+      "--contains",
+      input.commit,
+      "--format=%(refname)",
+      "refs/heads",
+      "refs/remotes",
+      "refs/tags",
+      "refs/codara/pr-import",
+    ])
+  )
+    .split(/\r?\n/)
+    .map((ref) => ref.trim())
+    .filter((ref) => ref && !ignored.has(ref) && !ref.endsWith("/HEAD"));
+  const own = await ownBranchNames(input.repoCwd);
+  const onOwnBranch = refs.some((ref) => {
+    if (isPullRequestRef(ref) || pullRequestBranches.has(ref)) return false;
+    const name = ref.startsWith("refs/heads/") ? ref.slice("refs/heads/".length) : /^refs\/remotes\/[^/]+\/(.+)$/.exec(ref)?.[1];
+    return name !== undefined && own.has(name);
+  });
+  if (onOwnBranch) return false;
+  if (refs.some((ref) => isPullRequestRef(ref) || pullRequestBranches.has(ref))) return true;
+  return refs.length === 0;
+}
+
 async function createAgentWorktreeInner(
   caller: WorktreeCaller,
   input: CreateWorktreeInput,
@@ -1286,6 +1384,15 @@ async function createAgentWorktreeInner(
       }
 
       const repoKey = await preferredRepoKey(current);
+      const pullRequestCode = await startsFromPullRequestCode({
+        repoCwd,
+        workspaces: [scope.callerWorkspace, scope.parentWorkspace],
+        known: current.state.workspaces,
+        names: [baseName, checkout ? branch : null],
+        ...(checkout
+          ? { commit: await revParse(created.path, "HEAD^{commit}") }
+          : { commit: baseCommit, ignoreRefs: [`refs/heads/${created.branch}`] }),
+      });
       const workspace: Workspace = {
         id: `ws-agent-${deps.randomId()}`,
         name: title || created.branch,
@@ -1301,7 +1408,8 @@ async function createAgentWorktreeInner(
           mode: created.mode,
           createdAt: deps.now().toISOString(),
           fileCount: created.fileCount,
-          createdBy: creatorFor(caller, purpose || undefined),
+          createdBy: creatorFor(caller, scope, purpose || undefined),
+          ...(pullRequestCode ? { pullRequestCode: true as const } : {}),
         },
       };
       let next: AppState;
@@ -1324,6 +1432,7 @@ async function createAgentWorktreeInner(
       }
       deps.publishState(next);
       deps.invalidateGitCache(repoCwd);
+      if (!pullRequestCode) void deps.pretrustClaude?.(workspace.cwd, next.workspaces).catch(() => undefined);
       createdWorkspace = workspace;
       return createdResult(workspace, current, {
         created: true,

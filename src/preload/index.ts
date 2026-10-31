@@ -137,6 +137,12 @@ import type {
   DeleteWorkerSessionInput,
   DeleteWorkerSessionResult,
   FileListResult,
+  HomeFileSearchResult,
+  PathPickResult,
+  PathQueryResult,
+  DesktopOpenPathOutcome,
+  DesktopOpenPathRequest,
+  HomePickResult,
   FsChangeEvent,
   FsEntry,
   FsFileContent,
@@ -433,10 +439,10 @@ const api = {
       ipcRenderer.invoke("pi-runtime:install"),
     usage: (force = false): Promise<PiUsageOverview> =>
       ipcRenderer.invoke("pi-subscriptions:usage", { force }),
-    // Spends one of the account's Codex rate-limit resets; the caller has
-    // already asked the user to confirm.
-    redeemCodexReset: (profileId: string): Promise<PiCodexResetResult> =>
-      ipcRenderer.invoke("pi-subscriptions:codex-reset", { profileId }),
+    // Spends one of the account's Codex rate-limit resets, the one named by
+    // creditId when given; the caller has already asked the user to confirm.
+    redeemCodexReset: (profileId: string, creditId: string): Promise<PiCodexResetResult> =>
+      ipcRenderer.invoke("pi-subscriptions:codex-reset", { profileId, creditId }),
     // Returns [] rather than throwing when Pi is absent, so the picker falls
     // back to its curated rows instead of failing to render.
     catalog: (force = false): Promise<PiCatalogModel[]> =>
@@ -458,7 +464,7 @@ const api = {
     // this resolves promptly.
     summary: (input: UsageSummaryInput): Promise<UsageSummary> =>
       ipcRenderer.invoke("usage-analytics:summary", input),
-    // Labs: when each limit window runs out. Null while the usageForecast
+    // When each limit window runs out. Null while the usageForecast
     // preference is off. The first read scans transcripts and takes seconds.
     forecast: (): Promise<UsageForecastReport | null> =>
       ipcRenderer.invoke("usage-forecast:read"),
@@ -801,7 +807,22 @@ const api = {
       exists: boolean;
       isFile: boolean;
       resolved: string;
-    }> => ipcRenderer.invoke("fs:pathExists", input),    // Size + mtime only — used by the file previewers, which load content
+    }> => ipcRenderer.invoke("fs:pathExists", input),
+    // True when the file is a secret by its name, a link on the way to it or
+    // its real name: the editor then opens it as plain text only.
+    isSecretFile: (path: string): Promise<boolean> => ipcRenderer.invoke("fs:isSecretFile", path),
+    // Quick Open's "Elsewhere on this computer": file names under the home
+    // folder (a newer call cancels the previous one), and opening a result,
+    // which lets the editor read that one file.
+    searchHome: (query: string, excludeRoot: string | null): Promise<HomeFileSearchResult> =>
+      ipcRenderer.invoke("fs:searchHome", query, excludeRoot),
+    searchPath: (query: string, cwd: string | null): Promise<PathQueryResult> =>
+      ipcRenderer.invoke("fs:searchPath", query, cwd),
+    cancelPathSearch: (): Promise<void> => ipcRenderer.invoke("fs:cancelPathSearch"),
+    openPathPick: (target: string): Promise<PathPickResult> => ipcRenderer.invoke("fs:openPathPick", target),
+    cancelHomeSearch: (): Promise<void> => ipcRenderer.invoke("fs:cancelHomeSearch"),
+    openHomeSearchPick: (path: string): Promise<HomePickResult> => ipcRenderer.invoke("fs:openHomeSearchPick", path),
+    // Size + mtime only — used by the file previewers, which load content
     // via file:// URLs and never round-trip bytes through IPC.
     statFile: (path: string): Promise<{ size: number; mtimeMs: number }> =>
       ipcRenderer.invoke("fs:statFile", path),
@@ -1375,7 +1396,7 @@ const api = {
       nativeCodexProfileId?: string;
       nativeClaudeProfileId?: string;
       nativeGrokProfileId?: string;
-    }): Promise<{ exists: boolean; resumable?: boolean; repairable?: boolean; transcriptPath?: string }> =>
+    }): Promise<{ exists: boolean; resumable?: boolean; repairable?: boolean; transcriptPath?: string; cwd?: string }> =>
       ipcRenderer.invoke("agentSession:probe", args),
     // Repair a Claude transcript whose tail a sleep/crash truncated, so
     // `claude --resume` accepts it (keeps a .bak). No-op for Codex.
@@ -1488,6 +1509,27 @@ const api = {
       const listener = () => handler();
       ipcRenderer.on("window:open-automations", listener);
       return () => ipcRenderer.off("window:open-automations", listener);
+    },
+    // Fired for the desktop command socket. The handler says whether the
+    // command ran, which main relays to the caller outside Studio.
+    onDesktopNewTerminal: (handler: () => boolean): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, reqId: string) => {
+        ipcRenderer.send("desktop-command:result", { reqId, ran: handler() });
+      };
+      ipcRenderer.on("desktop-command:new-terminal", listener);
+      return () => ipcRenderer.off("desktop-command:new-terminal", listener);
+    },
+    onDesktopOpenPath: (
+      handler: (request: DesktopOpenPathRequest) => Promise<DesktopOpenPathOutcome>,
+    ): (() => void) => {
+      const listener = (_e: Electron.IpcRendererEvent, reqId: string, request: DesktopOpenPathRequest) => {
+        void handler(request).then(
+          (outcome) => ipcRenderer.send("desktop-command:result", { reqId, outcome }),
+          () => ipcRenderer.send("desktop-command:result", { reqId }),
+        );
+      };
+      ipcRenderer.on("desktop-command:open-path", listener);
+      return () => ipcRenderer.off("desktop-command:open-path", listener);
     },
   },
   app: {

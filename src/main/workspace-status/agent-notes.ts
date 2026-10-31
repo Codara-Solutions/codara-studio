@@ -27,8 +27,20 @@ export interface AgentNoteBook {
   list(): AgentNoteMap;
   get(key: AgentNoteKey): AgentNote | null;
   inWorkspace(workspaceId: string): AgentNote[];
-  update(key: AgentNoteKey, workspaceId: string, patch: WorkspaceStatusPatch, by: WorkspaceStatusAuthor): AgentNoteUpdate;
+  update(
+    key: AgentNoteKey,
+    workspaceId: string,
+    patch: WorkspaceStatusPatch,
+    by: WorkspaceStatusAuthor,
+    about?: Pick<AgentNote, "worktreePath" | "from">,
+  ): AgentNoteUpdate;
   drop(key: AgentNoteKey): boolean;
+  /**
+   * Moves a note to another key and workspace, keeping its entry and history:
+   * an external worktree's note (`worktree:path:...`) onto the row the user
+   * opened it as. A note already at `to` wins; the moved one is dropped then.
+   */
+  move(from: AgentNoteKey, to: AgentNoteKey, workspaceId: string): boolean;
   /** Drops the notes of workspaces not in the set; an empty set drops nothing (see the store's prune). */
   pruneWorkspaces(liveWorkspaceIds: ReadonlySet<string>): AgentNoteKey[];
   onChange(listener: (key: AgentNoteKey, note: AgentNote | null) => void): () => void;
@@ -44,11 +56,13 @@ function clone(note: AgentNote): AgentNote {
       by: { ...entry.by },
       checkpoints: entry.checkpoints.map((checkpoint) => ({ ...checkpoint, by: { ...checkpoint.by } })),
     },
+    ...(note.worktreePath ? { worktreePath: note.worktreePath } : {}),
+    ...(note.from ? { from: { ...note.from } } : {}),
   };
 }
 
 export function isAgentNoteKey(value: unknown): value is AgentNoteKey {
-  return typeof value === "string" && /^(pane|run):./.test(value) && isWorkspaceIdLike(value);
+  return typeof value === "string" && /^(pane|run|worktree):./.test(value) && isWorkspaceIdLike(value);
 }
 
 export function createAgentNoteBook(options: { now?: () => number } = {}): AgentNoteBook {
@@ -83,21 +97,30 @@ export function createAgentNoteBook(options: { now?: () => number } = {}): Agent
     inWorkspace(workspaceId) {
       return [...notes.values()].filter((note) => note.workspaceId === workspaceId).map(clone);
     },
-    update(key, workspaceId, patch, by) {
+    update(key, workspaceId, patch, by, about) {
       if (!isAgentNoteKey(key)) throw new Error("The agent's key is invalid.");
       if (!isWorkspaceIdLike(workspaceId)) throw new Error("workspaceId is invalid");
       const current = notes.get(key) ?? null;
       const applied = applyWorkspaceStatusPatch(current?.entry ?? null, patch, by, now());
       // A pane moved to another workspace takes its note along.
       const moved = current !== null && current.workspaceId !== workspaceId;
+      const from = about?.from ?? current?.from;
+      const worktreePath = about?.worktreePath ?? current?.worktreePath;
+      const reattributed = Boolean(about?.from && about.from.workspaceId !== current?.from?.workspaceId);
       if (!applied.entry) {
         const changed = remove(key);
         return { note: null, changed, noteTruncated: applied.noteTruncated };
       }
-      if (!applied.changed && !moved) {
+      if (!applied.changed && !moved && !reattributed) {
         return { note: current ? clone(current) : null, changed: false, noteTruncated: applied.noteTruncated };
       }
-      const next: AgentNote = { key, workspaceId, entry: applied.entry };
+      const next: AgentNote = {
+        key,
+        workspaceId,
+        entry: applied.entry,
+        ...(worktreePath ? { worktreePath } : {}),
+        ...(from ? { from: { ...from } } : {}),
+      };
       // Re-inserting keeps the map in write order, oldest first.
       notes.delete(key);
       notes.set(key, next);
@@ -106,6 +129,16 @@ export function createAgentNoteBook(options: { now?: () => number } = {}): Agent
       return { note: clone(next), changed: true, noteTruncated: applied.noteTruncated };
     },
     drop: remove,
+    move(from, to, workspaceId) {
+      const current = notes.get(from);
+      if (!current || from === to || !isAgentNoteKey(to) || !isWorkspaceIdLike(workspaceId)) return false;
+      remove(from);
+      if (notes.has(to)) return false;
+      const next: AgentNote = { ...clone(current), key: to, workspaceId };
+      notes.set(to, next);
+      notify(to, next);
+      return true;
+    },
     pruneWorkspaces(liveWorkspaceIds) {
       if (liveWorkspaceIds.size === 0) return [];
       const gone = [...notes.values()].filter((note) => !liveWorkspaceIds.has(note.workspaceId)).map((note) => note.key);

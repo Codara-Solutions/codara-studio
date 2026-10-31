@@ -11,8 +11,9 @@ interface QueuedRequest extends CrossWorkspaceApprovalRequest {
 }
 
 /**
- * An agent asked to open a terminal in another workspace for the first time
- * (codara_terminal_create with `workspace`). Same floating card as the
+ * An agent asked to open a terminal in, or make a worktree of, another
+ * workspace for the first time (codara_terminal_create or
+ * codara_worktree_create with `workspace`). Same floating card as the
  * browser pairing prompt; one request at a time, oldest first. It counts down
  * to main's timeout and says so when the request expired.
  */
@@ -58,6 +59,7 @@ export default function CrossWorkspacePrompt(): React.ReactElement | null {
   }, [request?.id, expired]);
 
   if (!request) return null;
+  const worktree = request.action === "worktree";
 
   const decide = async (answer: CrossWorkspaceAnswer) => {
     setBusy(true);
@@ -78,15 +80,16 @@ export default function CrossWorkspacePrompt(): React.ReactElement | null {
     return (
       <section
         role="status"
-        aria-label="Terminal request expired"
+        aria-label={worktree ? "Worktree request expired" : "Terminal request expired"}
         data-cross-workspace-approval={request.id}
         data-expired="true"
         className="spark-glass--strong spark-overlay-surface chrome-pairing"
       >
         <div className="chrome-pairing__title">Request expired</div>
         <p className="chrome-pairing__body">
-          {request.agent ?? "An agent"} in {request.callerName} stopped waiting to open a terminal in{" "}
-          {request.targetName}. Nothing was opened; it can ask again.
+          {request.agent ?? "An agent"} in {request.callerName} stopped waiting to{" "}
+          {worktree ? "make a worktree of" : "open a terminal in"} {request.targetName}.{" "}
+          {worktree ? "Nothing was made" : "Nothing was opened"}; it can ask again.
         </p>
         <div className="chrome-pairing__actions">
           <button type="button" className="spark-btn" onClick={() => dismiss(request.id)}>
@@ -101,20 +104,27 @@ export default function CrossWorkspacePrompt(): React.ReactElement | null {
   return (
     <section
       role="dialog"
-      aria-label="Allow terminals in another workspace"
+      aria-label={worktree ? "Allow a worktree in another workspace" : "Allow terminals in another workspace"}
       data-cross-workspace-approval={request.id}
       className="spark-glass--strong spark-overlay-surface chrome-pairing"
     >
       <div className="chrome-pairing__title">
-        Allow {request.callerName} to open terminals in {request.targetName}?
+        Allow {request.callerName} to {worktree ? "work in" : "open terminals in"} {request.targetName}?
       </div>
+      {worktree ? (
+        <p className="chrome-pairing__body">
+          {request.agent ?? "An agent"} in {request.callerName} wants to make a worktree of {request.targetName} on a
+          new branch and work there. It shows in {request.targetName}'s rail. Allow once covers this one worktree.
+        </p>
+      ) : (
+        <p className="chrome-pairing__body">
+          {request.agent ?? "An agent"} in {request.callerName} wants to open a terminal under {request.targetName}{" "}
+          and type into it. Allow once covers this one terminal.
+        </p>
+      )}
       <p className="chrome-pairing__body">
-        {request.agent ?? "An agent"} in {request.callerName} wants to open a terminal under {request.targetName}{" "}
-        and type into it. Allow once covers this one terminal.
-      </p>
-      <p className="chrome-pairing__body">
-        Always lets every agent in {request.callerName} do this without asking from now on, including other
-        sessions and Cora runs there. Revoke it in Settings, Agents.
+        Always lets every agent in {request.callerName} open terminals and make worktrees in {request.targetName}{" "}
+        without asking from now on, including other sessions and Cora runs there. Revoke it in Settings, Agents.
       </p>
       <div className="chrome-pairing__actions">
         <span className="chrome-pairing__countdown" aria-live="off">

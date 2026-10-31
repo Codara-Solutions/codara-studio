@@ -45,7 +45,7 @@ test("a new workspace opens with no chat and no terminal", async () => {
     await expect(page.locator(".spark-terminal-pane")).toHaveCount(0);
     await expect(page.getByRole("button", { name: /^\+ New chat/ })).toBeVisible();
     await expect(page.getByRole("button", { name: /^\+ New terminal/ })).toBeVisible();
-    await expect(page.getByRole("button", { name: /^\+ New agent/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^\+ New agent/ })).toHaveCount(0);
     await mkdir(SHOT_DIR, { recursive: true });
     await page.screenshot({ path: join(SHOT_DIR, "after.png") });
 

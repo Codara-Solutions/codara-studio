@@ -16,6 +16,10 @@ export interface ResumeProbe {
   // starting a fresh session and losing the conversation.
   repairable?: boolean;
   transcriptPath?: string;
+  // Claude only: the transcript was found in another project folder than the
+  // pointer's cwd names, and this is the directory that maps to it (the
+  // session's start cwd). Present only when it differs from the probed cwd.
+  cwd?: string;
 }
 
 export type ResumeDecision =
@@ -43,6 +47,25 @@ export function decideResume(
     return { kind: "resume" };
   }
   return runtime === "codex" ? { kind: "clear" } : { kind: "fresh" };
+}
+
+/**
+ * Move a restore pointer to the directory its transcript was actually found
+ * under. A pointer that saved a directory the agent later cd'ed into names the
+ * wrong project folder; the probe finds the transcript by id and reports the
+ * start cwd, and resuming (and persisting) from there keeps the conversation
+ * and puts the pane back in its own folder. Returns null when nothing moves.
+ */
+export function relocateResumePointer<P extends AgentSessionPointer>(
+  pointer: P,
+  probe: ResumeProbe,
+): P | null {
+  if (!probe.exists || !probe.cwd || probe.cwd === pointer.cwd) return null;
+  return {
+    ...pointer,
+    cwd: probe.cwd,
+    transcriptPath: probe.transcriptPath ?? pointer.transcriptPath,
+  };
 }
 
 // Structural twin of tabs/types.ts TerminalAgentSession, redeclared here so

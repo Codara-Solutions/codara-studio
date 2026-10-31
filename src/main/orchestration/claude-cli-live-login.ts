@@ -364,16 +364,19 @@ export async function readClaudeOauthAccount(
  * config writes (`<file>.lock`), re-reading inside it so a concurrent save of
  * project state is never lost. The file keeps its mode; an unparsable file is
  * left alone rather than replaced. Only claude-follow's sync passes a
- * capability, to write the user's own `.claude.json`.
+ * capability, to write the user's own `.claude.json`. With `onlyIfExists`
+ * a missing file is never created, checked again inside the lock.
  */
 export async function updateClaudeGlobalConfig(
   home: ClaudeLiveHome,
   transform: (config: Record<string, unknown>) => Record<string, unknown> | null,
   capability?: OutsideWriteCapability,
+  options: { onlyIfExists?: boolean } = {},
 ): Promise<boolean> {
   const file = await claudeGlobalConfigFile(home);
   assertCodaraOwnedWrite(file, capability);
   assertCodaraOwnedWrite(`${file}.lock`, capability);
+  if (options.onlyIfExists && !(await lstatOrNull(file))) return false;
   await fs.mkdir(dirname(file), { recursive: true });
   const release = await lock(file, {
     realpath: false,
@@ -383,6 +386,8 @@ export async function updateClaudeGlobalConfig(
   });
   try {
     const stats = await lstatOrNull(file);
+    // Removed while the lock was awaited: still not created.
+    if (options.onlyIfExists && !stats) return false;
     const current = (await readConfigObject(file)) ?? {};
     const next = transform({ ...current });
     if (next === null) return false;

@@ -253,6 +253,7 @@ its first send (`run-store.ts`).
 | `test-agent-board` | The rail's Agents view: which group every terminal agent and Cora chat lands in and in what order (`src/shared/agent-board.ts`), the layout panes it counts and the cards it keeps unchanged, the remembered switch, and the per-pane prompt, tool, question and last message main's notifier records for it, from hooks and OSC 7501. |
 | `test-terminal-redraw`, `test-terminal-scrollback`, `test-terminal-viewport`, `test-terminal-wake-recovery`, `test-terminal-workspace-memory` | Terminal rendering in the renderer: redraw, scrollback, viewport, recovery after sleep, memory limits. |
 | `test-session-registry`, `test-session-restore`, `test-resume-matrix`, `test-resume-policy`, `test-codex-session-tracker`, `test-pi-session-tracker`, `test-grok-sessions`, `test-manual-agent-startup`, `test-pane-format` | Finding agent sessions and resuming them after a restart. |
+| `test-claude-pretrust` | Claude Code's folder trust for the panes Codara opens (`claude-pretrust.ts`): the folder Claude Code records trust under (physical repository or worktree root), only workspaces and Codara worktrees in scope and never pull-request code, a nested repository or submodule, the home folder or anything above it, the record added under Claude Code's lock with every other key kept and never a missing file created, Codara's list of what it trusted that claude-follow leaves out of the user's `.claude.json` (with no readable list, no folder trust goes there at all), and a failed or slow write that never holds a launch. |
 | `test-session-search` | Agent session search (`src/main/session-search/`): the Claude, Codex, Grok, Pi and Cora transcript parsers on fixtures (prose kept, tool output and injected context left out), the SQLite index's first build, appends read from where the last pass stopped, rewrites, removed files, unreadable folders, copies counted once, agents left out, a pass cut short, scope filters, highlights, and the resume command and workspace a found session opens in. |
 | `test-terminal-scrollback-store` | Each pane's output kept across restarts (`terminal-scrollback-store.ts`, `terminal-scrollback-render.ts`, with the real `@xterm/headless`): the replayed text holds only text, colors and line breaks; folding old bytes keeps screen, cursor and history; endless footer repaints cannot push history out; 0600 files, debounced saves, per-pane and total limits, deletion on close, age and setting off; a replay until the pane's process starts, never over a live PTY. |
 | `test-quit-guard` | What a quit or an update restart would cut off (`quit-guard.ts`, `terminalAgentsMidTurn`): terminal agents mid-turn or waiting inside a turn, the quit prompt's wording, and the update restart that waits, restarts on its own after the settle window, on Restart now, or not at all after Don't restart yet. |
@@ -541,8 +542,13 @@ saved groups), `test-workspace-reorder`, `test-workbench-routing`, `test-editor-
 `test-file-preview-capabilities`, `test-csv-preview`, `test-csv-preview-ui`,
 `test-run-graph-layout`, `test-overlay-performance`,
 `test-renderer-boot-ready`, `test-onboarding`, `test-usage-analytics`,
-`test-usage-roster` (the title bar's Usage panel: row order, chips, every
-account with its email, what a switch does, reset and credit copy),
+`test-usage-roster` (who is behind each provider in the title bar's usage
+panel: provider order, every account with its email, what a switch does),
+`test-usage-glance` (what the hairlines and the panel say: the forecast as
+"at reset" or a run-out time, "not enough history yet", which limit a
+hairline draws, when another account is suggested, which banked ChatGPT
+reset is spent and when spending is off), `test-usage-forecast-default` (the
+forecast is on by default and only the user's own choice turns it off),
 `test-settings-dialog` (Settings closes only through Escape, X, Done or
 Cancel; every search result is rendered; the face is opaque; a menu closes on
 a scroll only when its anchor moved), `test-settings-search` (every rendered

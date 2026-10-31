@@ -16,6 +16,7 @@ const MAX_FILE_LIST_FILES = 10000;
 const SKIPPED_FILE_LIST_DIRS = new Set([
   ".git",
   "node_modules",
+  ".vite-cache",
   "out",
   "dist",
   "build",

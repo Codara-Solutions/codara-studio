@@ -1920,6 +1920,21 @@ function EditorSettings() {
           />
         </Advanced>
       </SettingsSection>
+
+      <SettingsSection title="Quick Open">
+        <ToggleRow
+          title="Search your whole computer"
+          desc={
+            <>
+              Quick Open (<Kbd>Ctrl+P</Kbd> or <Kbd>Cmd+P</Kbd>) also lists matching files from your home folder,
+              below the workspace's own. Caches, browser profiles, SSH and GPG keys, and hidden folders stay out (type a leading
+              dot to include hidden files). Type a path (<Kbd>~/</Kbd> or <Kbd>/</Kbd>) to list that folder, hidden entries
+              included, with its private files opening as plain text. A file opens only when you pick it.
+            </>
+          }
+          {...bindToggle("quickOpenAnywhere", preferences, setPreference)}
+        />
+      </SettingsSection>
     </>
   );
 }
@@ -2849,13 +2864,13 @@ function FastModeRow() {
   );
 }
 
-function UsageForecastLabsSection() {
+function UsageForecastSettings() {
   const { preferences, setPreference } = usePreferences();
   return (
-    <SettingsSection title="Labs" description="Experiments that may change or go away.">
+    <SettingsSection title="Usage">
       <ToggleRow
         title="Usage forecast"
-        desc="Learns how you use each subscription from the transcripts on this computer and says, in the usage panel and the Usage tab, whether a limit runs out before it resets. Nothing leaves this computer. While off, nothing is recorded."
+        desc="Learns how you use each subscription from the transcripts on this computer and shows, in the title bar, the usage panel and the Usage tab, where each limit will be when it resets and whether it runs out first. Nothing leaves this computer. While off, nothing is recorded and only today's usage is shown."
         {...bindToggle("usageForecast", preferences, setPreference)}
       />
     </SettingsSection>
@@ -2895,7 +2910,7 @@ function AgentsSettings({ onClose }: { onClose: () => void }) {
         </SettingRow>
       </SettingsSection>
 
-      <UsageForecastLabsSection />
+      <UsageForecastSettings />
 
       <SettingsSection title="Tools">
         <SettingRow

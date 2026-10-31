@@ -1,5 +1,5 @@
 import { promises as fs } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { outsideWriteCapability } from "../outside-write-guard";
 import {
   claudeGlobalConfigFile,
@@ -33,6 +33,11 @@ import { atomicWritePrivateFile, readPrivateJsonFile } from "../orchestration/na
  * merge saw, so a concurrent Claude Code save is never undone; an entry that
  * moved meanwhile waits for the next pass. Every other key, and every entry
  * older Codara builds marked as theirs, is left as it is.
+ *
+ * Folder trust Codara added itself, before launching Claude Code in a
+ * workspace (claude-pretrust.ts), is the live slot's own and never moves:
+ * the folders are listed in a record next to the live slot, and their trust
+ * leaves are left out of the merge on both sides.
  */
 
 /** The one write into the user's own `.claude.json`. */
@@ -67,6 +72,39 @@ function meaningful(key: string, value: unknown): boolean {
 }
 
 const leafKey = (...path: string[]): string => JSON.stringify(path);
+
+const isTrustLeaf = (key: string): boolean => {
+  const path = JSON.parse(key) as unknown;
+  return Array.isArray(path) && path.length === 3 && path[0] === "projects" && path[2] === "hasTrustDialogAccepted";
+};
+
+const PRETRUSTED_VERSION = 1;
+
+/** Codara's list of the folders it trusted in a live slot: next to the slot, never inside the user's homes. */
+export function claudePretrustedFoldersFile(liveHome: ClaudeLiveHome): string {
+  return join(dirname(liveHome.configDir), "pretrusted-folders.json");
+}
+
+export type ClaudePretrustedFolders =
+  | { kind: "listed"; folders: Set<string> }
+  | { kind: "none" }
+  | { kind: "unreadable" };
+
+/** The folders Codara trusted in this live slot, as its record lists them. */
+export async function readClaudePretrustedFolders(liveHome: ClaudeLiveHome): Promise<ClaudePretrustedFolders> {
+  const read = await readPrivateJsonFile(claudePretrustedFoldersFile(liveHome));
+  if (read.kind === "none") return { kind: "none" };
+  if (read.kind !== "value" || !isRecord(read.value) || read.value.version !== PRETRUSTED_VERSION) {
+    return { kind: "unreadable" };
+  }
+  const folders = read.value.folders;
+  if (!Array.isArray(folders) || !folders.every((folder) => typeof folder === "string")) return { kind: "unreadable" };
+  return { kind: "listed", folders: new Set(folders) };
+}
+
+export function formatClaudePretrustedFolders(folders: Iterable<string>): string {
+  return `${JSON.stringify({ version: PRETRUSTED_VERSION, folders: [...folders].sort() }, null, 2)}\n`;
+}
 
 /** The synced entries of one config, keyed by their path. */
 export function syncedLeaves(config: Record<string, unknown> | null): Leaves {
@@ -279,11 +317,38 @@ export async function syncClaudeFollowConfig(input: ConfigSyncInput): Promise<Co
     return { toUser: 0, toLive: 0, deferred: 0, userWritable };
   }
   if (!live) return { toUser: 0, toLive: 0, deferred: 0, userWritable };
-  const base = await readBase(input.baseFile);
-  const userLeaves = userWritable ? syncedLeaves(user) : base;
-  const liveLeaves = syncedLeaves(live);
+  const pretrusted = await readClaudePretrustedFolders(input.liveHome);
+  const pretrustedFolders = pretrusted.kind === "listed" ? pretrusted.folders : new Set<string>();
+  const withoutPretrusted = (leaves: Leaves): Leaves => {
+    for (const folder of pretrustedFolders) leaves.delete(leafKey("projects", folder, "hasTrustDialogAccepted"));
+    return leaves;
+  };
+  const base = withoutPretrusted(await readBase(input.baseFile));
+  const userLeaves = userWritable ? withoutPretrusted(syncedLeaves(user)) : base;
+  const liveLeaves = withoutPretrusted(syncedLeaves(live));
   const plan = planConfigMerge(userLeaves, liveLeaves, base);
   if (!userWritable) plan.toUser.clear();
+  // Without Codara's list there is no telling its trust from the user's, so
+  // no folder trust goes to the user's file this pass, and the record keeps
+  // those entries unsettled.
+  const heldTrust = new Set<string>();
+  if (pretrusted.kind !== "listed") {
+    for (const key of plan.toUser.keys()) {
+      if (isTrustLeaf(key)) heldTrust.add(key);
+    }
+    for (const key of heldTrust) plan.toUser.delete(key);
+    // With no list and no trust waiting for the user's side, nothing Codara
+    // trusted can be missing from it: start an empty list. Created only if
+    // still absent, so a list Codara writes meanwhile is never replaced.
+    if (pretrusted.kind === "none" && heldTrust.size === 0) {
+      await fs
+        .writeFile(claudePretrustedFoldersFile(input.liveHome), formatClaudePretrustedFolders([]), {
+          flag: "wx",
+          mode: 0o600,
+        })
+        .catch(() => undefined);
+    }
+  }
   await input.beforeWrite?.();
 
   const appliedLive = await applySide(input.liveHome, liveLeaves, plan.toLive).catch((error: unknown) => {
@@ -303,6 +368,10 @@ export async function syncClaudeFollowConfig(input: ConfigSyncInput): Promise<Co
   let deferred = 0;
   const keys = new Set([...plan.toUser.keys(), ...plan.toLive.keys(), ...plan.agreed.keys(), ...base.keys()]);
   for (const key of keys) {
+    if (heldTrust.has(key)) {
+      deferred += 1;
+      continue;
+    }
     const userDone = !plan.toUser.has(key) || appliedUser.has(key);
     const liveDone = !plan.toLive.has(key) || appliedLive.has(key);
     if (!userDone || !liveDone) {
