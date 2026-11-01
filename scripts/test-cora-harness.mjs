@@ -387,6 +387,20 @@ test("models.json custom models and base URLs survive the catalog", async () => 
   assert.equal(stub.requests[0].model, "my-private-model");
 });
 
+test("a models.json entry for a bundled model keeps what the user wrote", async () => {
+  stub.offer({ anthropic: offerClaude(["claude-sonnet-5-5", 1_000_000, 128_000]) });
+  const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  const entry = { id: "claude-sonnet-5-5", name: "Mine", reasoning: false, input: ["text"], cost, contextWindow: 123_000, maxTokens: 9_990 };
+  for (const models of [[entry], [entry, { ...entry, id: "my-other-model" }]]) {
+    const world = makeWorld();
+    writeJson(join(world.home, "models.json"), { providers: { "openai-codex": { baseUrl: stub.url }, anthropic: { baseUrl: stub.url, models } } });
+    const table = await cora(world, ["models"]);
+    assert.equal(table.status, 0, table.stderr);
+    const row = table.stdout.split("\n").find((line) => line.includes("claude-sonnet-5-5"));
+    assert.match(row, /claude-sonnet-5-5\s+123K\s+10\.0K/, row);
+  }
+});
+
 test("an unknown model is refused by name", async () => {
   const result = await cora(makeWorld(), ["exec", "--model", "no-such-model", "x"]);
   assert.notEqual(result.status, 0);
@@ -1267,6 +1281,19 @@ test("an untrusted repo cannot choose the shell, and a trusted one still can", a
   const trusted = await cora(world, ["exec", "--model", "sonnet", "--json", command]);
   assert.equal(trusted.status, 0, trusted.stderr);
   assert.equal(bashResult(stub.requests[1]).trim(), "value:REPO-PREFIX");
+});
+
+test("bash runs in the session's folder, not where the process started", async () => {
+  const { registerBashLimit } = await import(pathToFileURL(join(ROOT, "cli", "harness", "bash-limit.mjs")).href);
+  const { createBashToolDefinition, createLocalBashOperations } = await import("@earendil-works/pi-coding-agent");
+  const tools = [];
+  const settings = { getShellPath: () => undefined, getShellCommandPrefix: () => undefined };
+  const engine = { createBashToolDefinition, createLocalBashOperations, settings: () => settings, startsOff: () => false };
+  registerBashLimit({ on() {}, registerTool: (tool) => tools.push(tool) }, engine, { defaultSeconds: 5, maxSeconds: 9 });
+  const folder = realpathSync(mkdtempSync(join(sandbox, "session-folder-")));
+  assert.notEqual(folder, process.cwd());
+  const result = await tools[0].execute("call", { command: "pwd" }, undefined, () => undefined, { cwd: folder });
+  assert.equal(result.content[0].text.trim(), folder);
 });
 
 test("the limit does not bring back a bash tool the user turned off", async () => {

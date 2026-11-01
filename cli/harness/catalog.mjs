@@ -152,14 +152,17 @@ function familyTemplate(provider, id) {
   return BUILT_IN[provider].find((model) => model.id === ALIASES[alias]?.id) ?? BUILT_IN[provider][0];
 }
 
+/** What the user wrote in models.json beats the bundled list and the account's. */
 function providerModels(provider, current, catalog) {
-  const known = new Map([...current, ...BUILT_IN[provider]].map((model) => [model.id, model]));
+  const custom = catalog.custom[provider];
+  const own = new Map(current.filter((model) => custom?.has(model.id)).map((model) => [model.id, model]));
+  const known = new Map([...current, ...BUILT_IN[provider], ...own.values()].map((model) => [model.id, model]));
   const offered = catalog.offered[provider];
   if (!offered) return [...known.values()];
-  const custom = catalog.custom[provider];
   const listed = new Set(offered.map((model) => model.id));
   return [
     ...offered.map((model) => {
+      if (own.has(model.id)) return own.get(model.id);
       const base = known.get(model.id) ?? { ...familyTemplate(provider, model.id), cost: NO_COST };
       return {
         ...base,
@@ -170,7 +173,7 @@ function providerModels(provider, current, catalog) {
         input: model.images === false ? ["text"] : base.input,
       };
     }),
-    ...current.filter((model) => custom?.has(model.id) && !listed.has(model.id)),
+    ...[...own.values()].filter((model) => !listed.has(model.id)),
   ];
 }
 

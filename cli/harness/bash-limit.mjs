@@ -63,10 +63,11 @@ export function registerBashLimit(pi, engine, limits) {
   });
   const bash = createBashToolDefinition(process.cwd());
   /** Built per call from the session's settings, which have passed Pi's project
-   * trust check by then. This extension loads before that check. */
-  const trustedBash = () => {
+   * trust check by then. This extension loads before that check. A session opened
+   * from the picker runs in its own folder, and Pi leaves the process where it was. */
+  const trustedBash = (cwd) => {
     const shellPath = settings().getShellPath();
-    return createBashToolDefinition(process.cwd(), {
+    return createBashToolDefinition(cwd, {
       shellPath,
       commandPrefix: settings().getShellCommandPrefix(),
       operations: operations(createLocalBashOperations({ shellPath })),
@@ -90,7 +91,7 @@ export function registerBashLimit(pi, engine, limits) {
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const timeout = callLimit(params.timeout, limits);
       try {
-        return await trustedBash().execute(toolCallId, { ...params, timeout }, signal, onUpdate, ctx);
+        return await trustedBash(ctx.cwd).execute(toolCallId, { ...params, timeout }, signal, onUpdate, ctx);
       } catch (error) {
         const status = `Command timed out after ${timeout} seconds`;
         if (error.message?.endsWith(status)) error.message = `${error.message.slice(0, -status.length)}${timedOutLine(timeout)}`;
