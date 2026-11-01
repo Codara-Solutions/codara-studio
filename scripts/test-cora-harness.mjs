@@ -917,8 +917,9 @@ globalThis.setTimeout = (run, ms, ...rest) => (new Error().stack.includes("prope
   );
   const world = makeWorld();
   const { sessionId } = resultOf((await cora(world, ["exec", "--model", "sonnet", "--json", "PLAIN_TEXT one"])).stdout);
+  const { lockfilePath } = sessionLockOptions(world);
   stub.reset();
-  stub.control({ mode: "late", count: 1 });
+  stub.control({ mode: "late", count: 2 });
   const stale = spawn(process.execPath, [CLI, "exec", "--resume", sessionId, "--json", "PLAIN_TEXT two"], {
     cwd: world.project,
     env: { ...world.env, NODE_OPTIONS: `--require ${networkGuard} --require ${noRenewal}` },
@@ -929,8 +930,8 @@ globalThis.setTimeout = (run, ms, ...rest) => (new Error().stack.includes("prope
   stale.stderr.on("data", (chunk) => (output += chunk));
   const exited = new Promise((resolve) => stale.on("exit", resolve));
   while (stub.requests.length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
-  const other = await cora(world, ["exec", "--resume", sessionId, "--json", "PLAIN_TEXT three"]);
-  assert.equal(other.status, 0, other.stderr);
+  const replacement = cora(world, ["exec", "--resume", sessionId, "--json", "PLAIN_TEXT three"]);
+  while (stub.requests.length < 2) await new Promise((resolve) => setTimeout(resolve, 20));
   const after = readFileSync(sessionFile(world), "utf8");
   stub.release();
   const timer = setTimeout(() => stale.kill("SIGKILL"), 4000);
@@ -939,6 +940,12 @@ globalThis.setTimeout = (run, ms, ...rest) => (new Error().stack.includes("prope
   assert.equal(readFileSync(sessionFile(world), "utf8"), after, "the stale process wrote to the session");
   assert.equal(code, 1);
   assert.match(output, new RegExp(`cora resume ${sessionId}`));
+  assert.ok(existsSync(lockfilePath), "the stale process removed the replacement's lock as it exited");
+  const third = await cora(world, ["exec", "--resume", sessionId, "--json", "PLAIN_TEXT four"]);
+  assert.equal(third.status, 1, third.stderr);
+  assert.match(third.stderr, /is in use by another cora/);
+  stub.release();
+  assert.equal((await replacement).status, 0);
 });
 
 function fakeSessions(calls = []) {

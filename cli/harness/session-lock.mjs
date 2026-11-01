@@ -4,7 +4,7 @@
 // stops renewing, and the lock can be taken over once it goes stale.
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import lockfile from "proper-lockfile";
 
@@ -21,8 +21,9 @@ export const sessionInUse = (file) => `session ${idOf(file)} is in use by anothe
  * Makes Pi take the lock before it loads a session, because loading can rewrite
  * the file, and check it still has the lock before each write, because a process
  * waking from a pause can write before it notices the lock lapsed. Its entry would
- * become the session's leaf and hide what the new holder wrote. Everything held
- * stays held until `holdOnly` names the running session.
+ * become the session's leaf and hide what the new holder wrote. A pause between
+ * that check and the write itself is not covered. Everything held stays held until
+ * `holdOnly` names the running session.
  * @param pi  { SessionManager, findMostRecentSession }
  * @param onLost  ends the process with this message
  */
@@ -43,6 +44,14 @@ export function lockSessions({ SessionManager, findMostRecentSession }, home, on
     }
   };
 
+  /** proper-lockfile removes its locks at exit without asking whose they are now. */
+  const lockFs = {
+    ...fs,
+    rmdirSync: (path) => {
+      if (!held.has(path) || owns(path)) fs.rmdirSync(path);
+    },
+  };
+
   /** A lock that lapsed may have let another writer in, and this process has no
    * sight of what it wrote, so it cannot go on from the history it loaded. */
   const stop = (file) =>
@@ -50,7 +59,7 @@ export function lockSessions({ SessionManager, findMostRecentSession }, home, on
 
   const tryLock = (file) => {
     try {
-      return lockfile.lockSync(file, { ...options(file), update: RENEW_MS, onCompromised: () => stop(file) });
+      return lockfile.lockSync(file, { ...options(file), fs: lockFs, update: RENEW_MS, onCompromised: () => stop(file) });
     } catch (error) {
       if (error.code === "ELOCKED") return null;
       throw error;
@@ -96,9 +105,14 @@ export function lockSessions({ SessionManager, findMostRecentSession }, home, on
       return write.apply(this, args);
     };
   }
-  // Runs before proper-lockfile's own exit hook frees the lock.
+  // Runs before proper-lockfile's own exit hook, which then frees what this left.
   process.on("exit", () => {
-    for (const path of held.keys()) if (owns(path)) rmSync(ownerFile(path));
+    for (const path of held.keys()) {
+      if (owns(path)) {
+        held.delete(path);
+        rmSync(ownerFile(path));
+      }
+    }
   });
 
   return {
@@ -106,9 +120,8 @@ export function lockSessions({ SessionManager, findMostRecentSession }, home, on
     holdOnly(file) {
       if (file) hold(file);
       for (const [path, release] of held) {
-        if (!file || path !== lockPath(file)) {
+        if ((!file || path !== lockPath(file)) && owns(path)) {
           held.delete(path);
-          if (!owns(path)) continue;
           rmSync(ownerFile(path));
           release();
         }

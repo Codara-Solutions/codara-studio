@@ -19,8 +19,8 @@
 //
 // Faults: stub.control({ mode, count, after }) applies a fault to the next
 // `count` model requests, once `after` requests have passed. Modes: http429
-// http500 http401 cut hang empty, late, which holds the reply until
-// stub.release(), and chatgpt429, which answers with `body` as the error and
+// http500 http401 cut hang empty, late, which holds each reply until
+// a stub.release(), oldest first, and chatgpt429, which answers with `body` as the error and
 // `headers` as its headers. stub.requests holds every request seen.
 //
 // A summary request gets a narrative. stub.summaries([...]) queues how the next
@@ -348,7 +348,7 @@ export function startStubModel() {
           reportedContext = tokens;
         },
         control: (update) => Object.assign(control, { count: null, after: 0 }, update),
-        release: () => lateReplies.splice(0).forEach((reply) => reply()),
+        release: () => lateReplies.shift()?.(),
         reset: () => {
           requests.length = 0;
           listRequests.length = 0;
