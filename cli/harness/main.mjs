@@ -29,6 +29,7 @@ const require = createRequire(import.meta.url);
 
 const EFFORTS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const DEFAULT_EFFORT = "high";
+const EXIT_INTERRUPTED = 130;
 const LOGIN_PROVIDERS = ["anthropic", "openai-codex", "xai"];
 /** Commands that moved under `cora studio`. Matched only as a lone first word. */
 const STUDIO_COMMANDS = new Set([
@@ -78,6 +79,7 @@ function parseArgs(argv) {
     else if (arg === "--effort") cli.effort = value();
     else if (arg === "--mcp-config") cli.mcpConfig = resolve(value());
     else if (arg === "--json") cli.json = true;
+    else if (arg === "--no-limit-wait") cli.noLimitWait = true;
     else if (arg === "--continue" || arg === "-c") cli.continue = true;
     else if (arg === "--resume" || arg === "-r") {
       cli.resume = args[0] && !args[0].startsWith("-") ? args.shift() : true;
@@ -211,6 +213,7 @@ async function loadMcpConfig(home, cli) {
 /** Pi prints a failure it cannot hand to anyone and sets the exit code. A run that
  * looked fine until then has still failed. */
 export function outcome(run, piExitCode) {
+  if (run.waitStopped) return { status: "stopped", exitCode: EXIT_INTERRUPTED, error: "stopped while waiting for a usage limit to reset" };
   const result = modelOutcome(run);
   if (!piExitCode || result.exitCode === 1) return result;
   return { status: "error", exitCode: piExitCode, error: run.piError ?? `Pi stopped with exit code ${piExitCode}` };
@@ -357,9 +360,11 @@ async function runAgent(cli, pi, home) {
     compactions: 0,
     closing: "",
     piError: null,
-    chatgptLimit: null,
+    limit: null,
     retryNotBefore: 0,
     resetsAt: null,
+    limitWaits: 0,
+    waitStopped: false,
     json: Boolean(cli.json),
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     progress: exec && !cli.json && process.stderr.isTTY,
@@ -368,12 +373,16 @@ async function runAgent(cli, pi, home) {
   if (exec) failIfUnfinished(run, cli.json);
   rememberPiErrors(run);
   const effort = cli.effort ?? (resuming ? undefined : DEFAULT_EFFORT);
-  const { coraExtension, coraSystemPrompt, observeChatgptLimits } = await import("./extension.mjs");
-  observeChatgptLimits(run);
+  const [{ coraExtension, coraSystemPrompt }, { limitWaitSettings, observeLimits }] = await Promise.all([
+    import("./extension.mjs"),
+    import("./limits.mjs"),
+  ]);
+  observeLimits(run);
+  const settings = readSettings(home);
   const { useCompactionSettings } = await import("./compaction.mjs");
   const compaction = {
     state: { window: 0 },
-    config: readSettings(home).compaction,
+    config: settings.compaction,
     engine: { compact: pi.compact, estimateTokens: pi.estimateTokens },
   };
   useCompactionSettings(pi.SettingsManager, compaction.state, compaction.config);
@@ -390,7 +399,9 @@ async function runAgent(cli, pi, home) {
   // Pi's own exit code misses most failures (--mode json always reports 0), so
   // the code set below decides, and only ever makes it worse.
   await pi.main(args, {
-    extensionFactories: [coraExtension(run, { exec, mcpConfig, compaction, locks })],
+    extensionFactories: [
+      coraExtension(run, { exec, mcpConfig, compaction, locks, limitWait: limitWaitSettings(settings.limitWait, cli.noLimitWait) }),
+    ],
   });
   if (!exec) return;
 
@@ -401,7 +412,7 @@ async function runAgent(cli, pi, home) {
     if (run.closing && !lastMessageSpoke(run)) process.stdout.write(`${run.closing}\n`);
     if (result.exitCode === 3) process.stderr.write(`cora: the model reported ${result.status}\n`);
     // Pi already printed a provider error.
-    if (result.error && run.last?.stopReason !== "error") process.stderr.write(`cora: ${result.error}\n`);
+    if (result.error && (run.waitStopped || run.last?.stopReason !== "error")) process.stderr.write(`cora: ${result.error}\n`);
     if (run.sessionId) process.stderr.write(`cora: session ${run.sessionId}\n`);
   } else {
     process.stdout.write(
@@ -415,6 +426,7 @@ async function runAgent(cli, pi, home) {
         report: run.report,
         ...(run.resetsAt ? { resetsAt: run.resetsAt } : {}),
         retries: run.retries,
+        limitWaits: run.limitWaits,
         compactions: run.compactions,
         usage: run.usage,
       })}\n`,

@@ -1,17 +1,13 @@
 // The Pi extension behind `cora`: what Cora adds on top of Pi's agent loop.
 // The loop, tools, sessions, retries and terminal UI are all Pi's.
 
-import { setTimeout as delay } from "node:timers/promises";
-
 import { CORA_ENGINEERING_RULES, CORA_REPLY_LANGUAGE } from "../../resources/pi-cora/prompt.ts";
 import { loginName } from "./accounts.mjs";
 import { registerCompaction } from "./compaction.mjs";
+import { limitFailure, registerLimitWait } from "./limits.mjs";
 import { sessionInUse } from "./session-lock.mjs";
 
 const REPORTED_STATUSES = ["complete", "partial", "blocked", "failed"];
-/** Longer than this is not worth holding a run open for. */
-const MAX_RATE_LIMIT_WAIT_MS = 60_000;
-const CHATGPT_RESPONSES_PATH = "/codex/responses";
 
 export function coraSystemPrompt({ exec }) {
   return `You are Cora, a coding agent working in the user's terminal.
@@ -39,52 +35,6 @@ export function coraSystemPrompt({ exec }) {
   memory. End with any closing line or format the user asked for, word for word.`
       : ""
   }`;
-}
-
-/**
- * Pi turns every ChatGPT 429 with an error body into the same "usage limit"
- * sentence and drops the code and reset time, so they are read off the response.
- * WebSocket errors keep their own wording and never reach this.
- */
-export function observeChatgptLimits(run) {
-  const { fetch } = globalThis;
-  globalThis.fetch = async (input, init) => {
-    if (!String(input.url ?? input).endsWith(CHATGPT_RESPONSES_PATH)) return fetch(input, init);
-    // Waiting here and not when the error arrives means it only happens if Pi
-    // retries, and Pi's own backoff counts towards it.
-    const wait = run.retryNotBefore - Date.now();
-    run.retryNotBefore = 0;
-    run.chatgptLimit = null;
-    if (wait > 0) await delay(wait, undefined, { signal: init?.signal });
-    const response = await fetch(input, init);
-    if (response.status === 429) {
-      const error = await response.clone().json().then((body) => body?.error, () => null);
-      const retryAfter = Number(response.headers.get("retry-after"));
-      run.chatgptLimit = {
-        code: String(error?.code ?? error?.type ?? ""),
-        plan: error?.plan_type,
-        resetsAt: error?.resets_at ? error.resets_at * 1000 : retryAfter > 0 ? Date.now() + retryAfter * 1000 : null,
-      };
-    }
-    return response;
-  };
-}
-
-/** A rate limit passes in moments. A usage limit needs its reset, so retrying
- * only burns the retry budget and hides the answer. */
-function chatgptLimitFailure(limit, now) {
-  const waitMs = limit.resetsAt ? Math.max(0, limit.resetsAt - now) : 0;
-  const usage = limit.code === "usage_not_included" || (limit.code === "usage_limit_reached" && !limit.resetsAt);
-  if (!usage && waitMs <= MAX_RATE_LIMIT_WAIT_MS) {
-    return { retryNotBefore: limit.resetsAt, errorMessage: `ChatGPT rate limited the request (429), for about ${Math.ceil(waitMs / 1000)}s` };
-  }
-  const plan = limit.plan ? ` on the ${String(limit.plan).toLowerCase()} plan` : "";
-  const when = limit.resetsAt
-    ? ` It resets at ${new Date(limit.resetsAt).toLocaleString()}, in about ${Math.ceil(waitMs / 60_000)} min.`
-    : "";
-  // "quota exceeded" is one of Pi's no-retry phrases, and a number in the time must
-  // not read as an HTTP status to its retry check.
-  return { resetsAt: limit.resetsAt, errorMessage: `ChatGPT usage limit reached, quota exceeded${plan}.${when}` };
 }
 
 /** A provider failure in plain words. `raw` stays in the text because Pi decides
@@ -179,12 +129,14 @@ function registerSubmitResult(pi, run) {
  * @param options.mcpConfig  normalized MCP roster, or null
  * @param options.compaction  { state, config, engine } for registerCompaction
  * @param options.locks  this process's session locks
+ * @param options.limitWait  from limitWaitSettings
  */
-export function coraExtension(run, { exec, mcpConfig, compaction, locks }) {
+export function coraExtension(run, { exec, mcpConfig, compaction, locks, limitWait }) {
   return async (pi) => {
     registerCompaction(pi, run, { exec, ...compaction });
     if (exec) registerSubmitResult(pi, run);
     registerSessionLock(pi, locks);
+    const waits = registerLimitWait(pi, run, { settings: limitWait, locks });
 
     let lastStreamEvent = Date.now();
     let failedAttempt = null;
@@ -220,14 +172,18 @@ export function coraExtension(run, { exec, mcpConfig, compaction, locks }) {
       for (const key of ["input", "output", "cacheRead", "cacheWrite"]) {
         run.usage[key] += message.usage?.[key] ?? 0;
       }
-      if (message.stopReason !== "error") return undefined;
-      const limit = run.chatgptLimit && /hit your ChatGPT usage limit/.test(message.errorMessage ?? "");
-      const failure = limit ? chatgptLimitFailure(run.chatgptLimit, Date.now()) : null;
-      failedAttempt = failure?.errorMessage ?? explainProviderError(message, Date.now() - lastStreamEvent, run.streamTimeoutMs);
-      run.chatgptLimit = null;
-      run.last = { ...message, errorMessage: failedAttempt };
+      if (message.stopReason !== "error") {
+        waits.replied();
+        return undefined;
+      }
+      const failure = limitFailure(message, run.limit, Date.now(), waits.afterWait());
+      const explained = failure?.errorMessage ?? explainProviderError(message, Date.now() - lastStreamEvent, run.streamTimeoutMs);
+      failedAttempt = failure?.canWait ? null : explained;
+      run.limit = null;
+      run.last = { ...message, errorMessage: explained };
       if (failure?.resetsAt) run.resetsAt = new Date(failure.resetsAt).toISOString();
       if (failure?.retryNotBefore) run.retryNotBefore = failure.retryNotBefore;
+      if (failure) waits.failed(failure);
       return { message: run.last };
     });
 

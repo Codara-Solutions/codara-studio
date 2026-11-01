@@ -26,6 +26,7 @@ Options
   --resume [id]       same as cora resume; works with exec
   -c, --continue      continue the most recent session
   --json              exec: one JSON event per line, ending with cora_result
+  --no-limit-wait     stop at a usage limit instead of waiting for its reset
   --mcp-config FILE   add MCP servers from a file (.mcp.json format)
   -v, --version       print the version
 
@@ -34,6 +35,7 @@ exec exit codes
   1  a provider or runtime failure stopped the run
   2  bad usage or no sign-in
   3  the model reported partial, blocked or failed
+  130  stopped by Ctrl+C while waiting for a usage limit
 
 Files live in ~/.cora (CORA_HOME): auth.json, settings.json, models.json,
 mcp.json, skills/, sessions/.

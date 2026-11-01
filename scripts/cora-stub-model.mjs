@@ -20,8 +20,11 @@
 // Faults: stub.control({ mode, count, after }) applies a fault to the next
 // `count` model requests, once `after` requests have passed. Modes: http429
 // http500 http401 cut hang empty, late, which holds each reply until
-// a stub.release(), oldest first, and chatgpt429, which answers with `body` as the error and
-// `headers` as its headers. stub.requests holds every request seen.
+// a stub.release(), oldest first, chatgpt429, which answers with `body` as the error and
+// `headers` as its headers, and anthropic429, Anthropic's error body with `headers`. In
+// chatgptSocket mode a socket opens and each message gets `body` as an error event; in
+// every other mode a socket is refused, so a Codex request falls back to HTTP.
+// stub.requests holds every request seen, and stub.socketRequests counts those.
 //
 // A summary request gets a narrative. stub.summaries([...]) queues how the next
 // ones behave: ok, bad (no sections), invented, huge, http500 or hang. Each ok
@@ -40,11 +43,16 @@ import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { zstdDecompressSync } from "node:zlib";
 
+import { WebSocketServer } from "ws";
+
+import { CONTINUE_NOTE } from "../cli/harness/limits.mjs";
+
 const control = { mode: "ok", count: null, after: 0, body: null, headers: null };
 const requests = [];
 const listRequests = [];
 const summaryQueue = [];
 const lateReplies = [];
+let socketRequests = 0;
 let reportedContext = 120;
 export const LONG_CLOSING = `Proposed fix:
 
@@ -128,7 +136,8 @@ function planSummary() {
 
 function plan(view) {
   if (view.system.includes("context summarization assistant")) return planSummary();
-  const lastUser = view.events.findLastIndex((event) => event.kind === "user");
+  // The note a usage limit wait leaves is not a new task.
+  const lastUser = view.events.findLastIndex((event) => event.kind === "user" && !event.text.includes(CONTINUE_NOTE));
   const prompt = lastUser >= 0 ? view.events[lastUser].text : "";
   const allResults = view.events.slice(lastUser + 1).filter((event) => event.kind === "result");
   const [read, write, finish, bash] = ["read", "write", "submit_result", "bash"].map((name) => findTool(view.tools, name));
@@ -297,6 +306,9 @@ async function handleModel(req, res, flavour) {
     res.writeHead(429, { "content-type": "application/json", ...control.headers });
     return res.end(JSON.stringify({ error: control.body }));
   }
+  if (fault === "anthropic429") {
+    return jsonError(res, 429, "rate_limit_error", "This request would exceed your account's rate limit.", control.headers ?? {});
+  }
   if (fault === "http429") return jsonError(res, 429, "rate_limit_error", "stub rate limit", { "retry-after": "0" });
   if (fault === "http500") return jsonError(res, 500, "api_error", "stub server error");
   if (fault === "http401") return jsonError(res, 401, "authentication_error", "stub invalid token");
@@ -336,10 +348,24 @@ export function startStubModel() {
     res.writeHead(404);
     return res.end(`no route for ${req.method} ${url}`);
   });
+  const sockets = new WebSocketServer({ noServer: true });
+  server.on("upgrade", (req, socket, head) => {
+    if (control.mode !== "chatgptSocket") return socket.destroy();
+    return sockets.handleUpgrade(req, socket, head, (client) => {
+      client.on("message", () => {
+        socketRequests += 1;
+        takeFault();
+        client.send(JSON.stringify({ type: "error", status: 429, error: control.body }));
+      });
+    });
+  });
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => {
       resolve({
         url: `http://127.0.0.1:${server.address().port}`,
+        get socketRequests() {
+          return socketRequests;
+        },
         requests,
         listRequests,
         offer: (update) => Object.assign(offers, update),
@@ -347,15 +373,16 @@ export function startStubModel() {
         reportContext: (tokens) => {
           reportedContext = tokens;
         },
-        control: (update) => Object.assign(control, { count: null, after: 0 }, update),
+        control: (update) => Object.assign(control, { count: null, after: 0, body: null, headers: null }, update),
         release: () => lateReplies.shift()?.(),
         reset: () => {
           requests.length = 0;
           listRequests.length = 0;
+          socketRequests = 0;
           Object.assign(offers, { anthropic: null, codex: null });
           summaryQueue.length = 0;
           reportedContext = 120;
-          Object.assign(control, { mode: "ok", count: null, after: 0 });
+          Object.assign(control, { mode: "ok", count: null, after: 0, body: null, headers: null });
         },
         close: () => {
           server.closeAllConnections();

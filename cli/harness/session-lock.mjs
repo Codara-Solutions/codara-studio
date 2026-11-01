@@ -125,5 +125,9 @@ export function lockSessions({ SessionManager, findMostRecentSession }, home, on
       }
     },
     inUse: (file) => !held.has(lockPath(file)) && lockfile.checkSync(file, options(file)),
+    /** Ends the run if another process has taken `file` since this one locked it. */
+    confirm(file) {
+      if (file && held.has(lockPath(file)) && !owns(lockPath(file))) stop(file);
+    },
   };
 }

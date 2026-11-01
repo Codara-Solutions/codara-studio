@@ -52,6 +52,7 @@ a login.
 | 1 | The run failed: a provider error, a timeout, an empty or cut-off reply, or an internal error. |
 | 2 | The command was wrong, or there is no login for that provider. |
 | 3 | The model reported `partial`, `blocked` or `failed`. A `complete` with a failed check counts as `partial`. |
+| 130 | Ctrl+C stopped the run while it waited for a usage limit to reset. The `cora_result` status is `stopped`. |
 
 The model reports its status with a tool call and then answers in a normal reply, which is
 the `text` of `cora_result`. A session has one writer: a second `cora` on it stops with
@@ -60,8 +61,30 @@ tell a live writer from one that died, whose session it then takes over. A proce
 that loses its lock, for example when a laptop sleeps, stops and prints the `cora resume`
 command, since another run may have changed the session in the meantime.
 
-A ChatGPT rate limit of up to a minute is waited out and retried. A usage limit stops the
-run with exit 1, says when it resets, and sets `resetsAt` in `cora_result`.
+A rate limit of up to a minute is waited out and retried. A usage limit with a known reset
+time is waited out too, in `cora` and `cora exec`: one line says what happened, when it
+resets and that Ctrl+C stops it, then the same session goes on by itself. The rules:
+
+- A wait never goes past six hours, which covers the five-hour window. A later reset, such
+  as a weekly limit, stops the run. `"limitWait": { "maxMinutes": N }` in `settings.json`
+  changes that.
+- With no known reset the run stops with exit 1. Nothing polls.
+- The run goes on 30 seconds after the reset (`marginSeconds`), to allow for clock
+  differences, and tells the model in one note that it paused.
+- If the limit is still on then, the run stops with exit 1. It waits again only after a
+  real reply has shown the limit lifted.
+- The wall clock decides, so a laptop that sleeps through the reset goes on as it wakes.
+- The session lock stays held during the wait. If another `cora` takes the session over,
+  this one stops rather than go on from old history.
+- Ctrl+C stops the wait and leaves a session that `cora resume` continues. Esc does too in
+  the terminal interface, which stays open. A killed wait resumes the same way.
+- `--no-limit-wait`, or `"limitWait": false` in `settings.json`, stops at the limit with
+  exit 1, says when it resets, and sets `resetsAt` in `cora_result`.
+
+`--json` emits `{"type":"limit_wait","status":...,"resetsAt":...}` for each step: `waiting`,
+then `resumed` or `stopped`, or instead `too_long` or `still_limited`. `cora_result` counts
+them in `limitWaits`. A caller with its own deadline should watch for `waiting` or pass
+`--no-limit-wait`.
 
 A failed request is retried by itself, from the same context, so finished tool
 calls never run twice. The error names the provider and the real cause.
