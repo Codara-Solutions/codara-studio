@@ -392,3 +392,50 @@ section headers, the snooze presets and the undo notice in the footer).
   the row.
 - Rows do not answer questions in place: opening the row goes to the agent.
   The question is the row's tooltip.
+
+## Cora chat (2026-11)
+
+**Chosen:** B, "T3 in Studio colours". The chat takes T3 Code's shape and keeps
+Studio's warm tokens, so it follows every theme. Etienne picked B from four
+variants on one made-up conversation, each in dark and light with a replay of
+a message going out and a reply streaming back (A straight T3 in its own greys,
+B T3 in Studio colours, C compact at split-pane size, D T3 with every step left
+open on a thin trail).
+
+**References:** T3 Code's `TimelineUserMessageRow`, `TimelineAssistantRows`,
+`WorkLog`, `TimelineWorkGroupRows`, the fold rules in `MessagesTimeline.logic`,
+and its published desktop screenshot.
+
+**Credit:** the design and the fold rules come from T3 Code
+(github.com/pingdotgg/t3code, MIT, by Theo / Ping Labs). The code is Codara's
+own; the header of `turn-fold.ts` names the source too.
+
+**Rules**
+
+- The reply has no bubble and no name. The user's message is a `--panel-2`
+  bubble, 16px radius, no border, at most 80% wide.
+- Reply text is 14px at 1.625 line height.
+- A finished turn folds behind "Worked for 42s" and opens with one click. The
+  fold hides tool calls and the narration between them, never the answer and
+  never an error.
+- Only a completed turn folds. A failed or stopped turn stays open: that is
+  when the steps matter.
+- Find opens whatever it lands in, a fold or a long message. An opened fold
+  stays open when the list scrolls it away and back.
+- A user message past 600 characters or 8 lines collapses to 176px with a fade
+  behind "Show full message".
+- Tool rows are one 24px line with a plain mark per kind of tool. Running and
+  failed calls keep the status icon.
+- Colour means state. The only other colour is the workspace accent, on send,
+  stop and the working dot.
+- An error row is a soft 8% `--danger` tint with no border, so it reads as part
+  of the conversation.
+- Send and stop are one 32px round button in the same place. Starters are pills
+  showing a title, with the description in the tooltip.
+- A code block in the chat is one bordered surface with its bar always showing.
+
+**Where it differs from T3 on purpose:** the composer stays docked at the bottom
+of a new chat, because centring it would make it jump on the first send. It
+keeps Studio's own control order. Worker rows stay separate timeline items. The
+composer uses `--panel`, so in the light themes it stays warm rather than near
+white.

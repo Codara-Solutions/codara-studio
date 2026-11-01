@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type {
   Checkpoint,
   PlanValidation,
@@ -28,12 +28,15 @@ import Markdown, { MarkdownWorkspaceContext } from "./Markdown";
 import { unwrapIpcError } from "../../lib/ipc-error";
 import { chordToHint, mod } from "../../shortcuts/chord";
 import { findMatchingRows, stepMatch } from "./conversation-search";
+import { foldHoldsMatch, shouldCollapseUserMessage, splitSettledTurn } from "./turn-fold";
 import { openAccountsSettings } from "./account-readiness";
 import { retryableFailedCallId } from "./failed-turn";
 import {
   compactPreview,
   formatToolPayload,
+  toolActivityKind,
   toolCallHeadline,
+  type ToolActivityKind,
   waitForWorkersTaskIds,
 } from "./tool-labels";
 import { toolFileDiff, type ToolFileChange } from "./tool-file-diff";
@@ -65,6 +68,7 @@ type ConversationRenderContext = {
   finalAnswerByCallId: Map<string, string>;
   /** Row of the current find match, or -1. */
   findCurrentIndex: number;
+  findQuery: string;
 };
 
 interface ConversationMinimapEntry {
@@ -303,8 +307,9 @@ export default function ChatConversation({
       executionByCallId,
       finalAnswerByCallId,
       findCurrentIndex,
+      findQuery,
     }),
-    [executionByCallId, finalAnswerByCallId, findCurrentIndex],
+    [executionByCallId, finalAnswerByCallId, findCurrentIndex, findQuery],
   );
   // The result manifest is the worker's final-report envelope, written for
   // Cora to review, not for the reader. It no longer gets a row here: the
@@ -418,10 +423,12 @@ export default function ChatConversation({
                         completionVerdict={completionVerdict}
                         runBlocked={run.status === "blocked"}
                         failureCardShown={retryableCallId !== null}
+                        findCurrent={context.findCurrentIndex === index}
                       />
                     ) : item?.kind === "tool" ? (
                       <ToolActivityRow
                         item={item}
+                        findQuery={context.findCurrentIndex === index ? context.findQuery : ""}
                         retryRunId={
                           retryableCallId && item.activity === "manager" && timelineSparkCallId(item) === retryableCallId
                             ? run.id
@@ -925,6 +932,7 @@ const MessageTurn = React.memo(function MessageTurn({
   completionVerdict,
   runBlocked,
   failureCardShown,
+  findCurrent,
 }: {
   item: MessageItem;
   runId: string;
@@ -935,6 +943,8 @@ const MessageTurn = React.memo(function MessageTurn({
   runBlocked: boolean;
   /** The run is parked on a failed turn whose card offers Retry. */
   failureCardShown: boolean;
+  /** Find landed on this message, so a collapsed one must open. */
+  findCurrent: boolean;
 }) {
   if (item.author === "system") {
     return (
@@ -964,9 +974,7 @@ const MessageTurn = React.memo(function MessageTurn({
             ...(queued ? USER_QUEUED_BUBBLE_STYLE : null),
           }}
         >
-          <div className="cora-user-md">
-            <Markdown text={item.text} />
-          </div>
+          <CollapsibleUserText id={item.id} text={item.text} findCurrent={findCurrent} />
           <AttachmentStrip attachments={item.attachments} align="end" />
         </div>
         <div
@@ -1511,6 +1519,7 @@ function LiveToolRow({ call, live = false }: { call: LiveToolCall; live?: boolea
 
   return (
     <div
+      className="cora-live-tool"
       style={{
         ...LIVE_TOOL_ROW_STYLE,
         borderColor: open ? "var(--rule-soft)" : "transparent",
@@ -1519,14 +1528,18 @@ function LiveToolRow({ call, live = false }: { call: LiveToolCall; live?: boolea
     >
       <DisclosureButton
         onClick={() => setOpen((value) => !value)}
-        baseStyle={TOOL_ROW_BUTTON_STYLE}
+        baseStyle={LIVE_TOOL_BUTTON_STYLE}
         title={`${headline.title} · ${call.toolName}`}
       >
-        <ActivityIcon
-          state={running ? "running" : failed ? "failed" : finished ? "done" : "dot"}
-          title={failed ? "This action failed" : finished ? "This action completed" : undefined}
-        />
-        <span style={TOOL_TITLE_STYLE}>
+        {running || failed || !finished ? (
+          <ActivityIcon
+            state={running ? "running" : failed ? "failed" : "dot"}
+            title={failed ? "This action failed" : undefined}
+          />
+        ) : (
+          <ToolKindGlyph kind={toolActivityKind(call.toolName)} />
+        )}
+        <span style={LIVE_TOOL_TITLE_STYLE}>
           <ToolHeadlineTitle title={headline.title} />
         </span>
         <span
@@ -1751,6 +1764,48 @@ function ActivityIcon({
       ) : (
         <span className="cora-activity-icon__dot" />
       )}
+    </span>
+  );
+}
+
+// What a finished call did, in place of a green check on every row: T3 Code's
+// quiet log. Running and failed calls keep ActivityIcon, because state outranks
+// kind.
+function ToolKindGlyph({ kind }: { kind: ToolActivityKind }) {
+  return (
+    <span className="cora-activity-icon cora-tool-kind" aria-hidden>
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+        {kind === "read" ? (
+          <>
+            <path d="M1.5 7S3.6 3 7 3s5.5 4 5.5 4-2.1 4-5.5 4-5.5-4-5.5-4Z" />
+            <circle cx="7" cy="7" r="1.6" />
+          </>
+        ) : kind === "search" ? (
+          <>
+            <circle cx="6.2" cy="6.2" r="3.9" />
+            <path d="m9.2 9.2 3 3" />
+          </>
+        ) : kind === "run" ? (
+          <path d="m2.5 3.5 3.5 3.5-3.5 3.5M7.5 11h4.5" />
+        ) : kind === "edit" ? (
+          <>
+            <path d="M6.5 2.5h-3a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h7a1 1 0 0 0 1-1v-3" />
+            <path d="M10.2 2.2a1.1 1.1 0 0 1 1.6 1.6L7 8.5l-2 .5.5-2Z" />
+          </>
+        ) : kind === "web" ? (
+          <>
+            <circle cx="7" cy="7" r="5.2" />
+            <path d="M1.8 7h10.4M7 1.8c1.5 1.4 2.2 3.2 2.2 5.2S8.5 10.8 7 12.2C5.5 10.8 4.8 9 4.8 7S5.5 3.2 7 1.8Z" />
+          </>
+        ) : kind === "worker" ? (
+          <>
+            <rect x="2.5" y="4.5" width="9" height="7" rx="1.5" />
+            <path d="M7 4.5V2.5M5.2 7.5h.01M8.8 7.5h.01" />
+          </>
+        ) : (
+          <circle cx="7" cy="7" r="2" />
+        )}
+      </svg>
     </span>
   );
 }
@@ -2378,6 +2433,7 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
   executionTurn,
   finalAnswer,
   retryRunId,
+  findQuery = "",
 }: {
   item: ToolItem;
   embedded?: boolean;
@@ -2385,6 +2441,8 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
   finalAnswer?: string;
   /** Set on the failed turn the run is parked on; its card offers Retry. */
   retryRunId?: string;
+  /** Find's query while find sits on this row, else empty. */
+  findQuery?: string;
 }) {
   const live = item.tone === "live";
   // Drives the elapsed readouts (the inline stats and the expanded meta line)
@@ -2423,6 +2481,7 @@ const ToolActivityRow = React.memo(function ToolActivityRow({
           executionTurn={executionTurn}
           finalAnswer={finalAnswer}
           retryRunId={retryRunId}
+          findQuery={findQuery}
         />
       );
     }
@@ -2605,8 +2664,8 @@ function managerStageLabel(item: ToolItem): { label: string; title: string } | n
 // it happens. Backend/system notes are
 // kept in the run record but are never rendered: they are runtime bookkeeping
 // ("Cora Pi session ready · …"), not conversation. The slim "Working for Ns"
-// header hands off to the completed disclosure's "Worked for Ns" line in the
-// same position.
+// line hands off to the settled turn's "Worked for Ns" fold in the same
+// position.
 function AssistantLiveTurn({
   item,
   executionTurn,
@@ -2660,9 +2719,9 @@ function AssistantLiveTurn({
             ) : null}
           </div>
         ) : (
-          <div style={WORKING_LINE_STYLE}>
-            <ActivityIcon state="running" />
-            <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>
+          <div className="cora-turn-head cora-turn-head--live">
+            <ActivityIcon state="dot" color="var(--accent)" />
+            <span>
               Working<ElapsedSince since={item.at} />
             </span>
             {waiting && (item.detail || item.title) ? (
@@ -2679,22 +2738,23 @@ function AssistantLiveTurn({
   );
 }
 
-// A settled (completed or failed) chat turn, kept in the transcript the way
-// Claude Code keeps one: the streamed prose and tool rows stay inline under a
-// quiet "Worked for Ns" line instead of collapsing behind a disclosure. The
-// durable final answer renders as its own message right below, so the trailing
-// streamed copy is deduped away exactly as in the live view; completion causes
-// no visual jump and hides nothing.
+// A settled (completed or failed) chat turn. A completed turn folds its tool
+// work and narration behind "Worked for Ns", one click from open; a failed or
+// stopped turn stays open, because that is when the steps matter. The durable
+// final answer renders as its own message right below, so the trailing
+// streamed copy is deduped away exactly as in the live view.
 function AssistantSettledTurn({
   item,
   executionTurn,
   finalAnswer,
   retryRunId,
+  findQuery,
 }: {
   item: ToolItem;
   executionTurn?: ExecutionTurn;
   finalAnswer?: string;
   retryRunId?: string;
+  findQuery: string;
 }) {
   const sparkCallId = timelineSparkCallId(item);
   const failed = item.status === "failed";
@@ -2705,7 +2765,16 @@ function AssistantSettledTurn({
       )
     : [];
   const segments = liveTurnSegments(blocks);
-  const actionCount = blocks.filter((block) => block.kind === "tool").length;
+  const fold = item.status === "completed"
+    ? splitSettledTurn(segments, Boolean(finalAnswer?.trim()))
+    : { hidden: [], kept: segments };
+  const foldable = fold.hidden.length > 0;
+  const [opened, setOpened] = useRememberedOpen(`turn:${item.id}`);
+  const findReveals = foldHoldsMatch(fold.hidden, findQuery);
+  useEffect(() => {
+    if (findReveals) setOpened(true);
+  }, [findReveals, setOpened]);
+  const open = opened || findReveals;
   return (
     <SparkTurn>
       <div
@@ -2716,20 +2785,88 @@ function AssistantSettledTurn({
       >
         {failed ? (
           <TurnErrorCard title={item.title} error={item.detail} retryRunId={retryRunId} />
+        ) : foldable ? (
+          <button
+            type="button"
+            className="cora-turn-head cora-turn-head--fold"
+            aria-expanded={open}
+            onClick={() => setOpened(!open)}
+          >
+            {item.title}
+            <ChevronGlyph open={open} />
+          </button>
         ) : (
-          <div style={WORKING_LINE_STYLE}>
-            <ActivityIcon state="done" />
-            <span style={MANAGER_DISCLOSURE_TITLE_STYLE}>{item.title}</span>
-            {actionCount > 0 && (
-              <span style={TOOL_INLINE_DETAIL_STYLE}>
-                {actionCount === 1 ? "1 action" : `${actionCount} actions`}
-              </span>
-            )}
-          </div>
+          <div className="cora-turn-head">{item.title}</div>
         )}
-        <TurnSegments segments={segments} />
+        <TurnSegments segments={open ? segments : fold.kept} />
       </div>
     </SparkTurn>
+  );
+}
+
+// Rows are virtualized, so a row scrolled away unmounts. What the reader opened
+// must survive that, or a row would change height as it scrolls back in.
+const rememberedOpen = new Set<string>();
+
+function useRememberedOpen(key: string): [boolean, (open: boolean) => void] {
+  const [open, setOpen] = useState(() => rememberedOpen.has(key));
+  const set = useCallback((next: boolean) => {
+    if (next) rememberedOpen.add(key);
+    else rememberedOpen.delete(key);
+    setOpen(next);
+  }, [key]);
+  return [open, set];
+}
+
+// A long message folds to a fading excerpt, as T3 Code's does, so it cannot push
+// the reply off screen. Find opens the one it lands on.
+function CollapsibleUserText({
+  id,
+  text,
+  findCurrent,
+}: {
+  id: string;
+  text: string;
+  findCurrent: boolean;
+}) {
+  const collapsible = shouldCollapseUserMessage(text);
+  const [opened, setOpened] = useRememberedOpen(`message:${id}`);
+  const reveal = collapsible && findCurrent;
+  useEffect(() => {
+    if (reveal) setOpened(true);
+  }, [reveal, setOpened]);
+  const open = opened || reveal;
+  return (
+    <>
+      <div className={`cora-user-md${collapsible && !open ? " is-collapsed" : ""}`}>
+        <Markdown text={text} />
+      </div>
+      {collapsible && (
+        <button
+          type="button"
+          className="cora-user-more"
+          aria-expanded={open}
+          onClick={() => setOpened(!open)}
+        >
+          {open ? "Show less" : "Show full message"}
+        </button>
+      )}
+    </>
+  );
+}
+
+function ChevronGlyph({ open }: { open: boolean }) {
+  return (
+    <svg
+      className={`cora-turn-chevron${open ? " is-open" : ""}`}
+      width="12"
+      height="12"
+      viewBox="0 0 12 12"
+      fill="none"
+      aria-hidden
+    >
+      <path d="m4.5 2.5 3.5 3.5-3.5 3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
 
@@ -3758,6 +3895,7 @@ function DisclosureButton({
 function Caret({ open }: { open: boolean }) {
   return (
     <span
+      className="cora-caret"
       aria-hidden
       style={{
         flex: "0 0 auto",
@@ -3897,14 +4035,12 @@ const DELIVERY_CHIP_STYLE: React.CSSProperties = {
 };
 
 const USER_BUBBLE_STYLE: React.CSSProperties = {
-  maxWidth: "min(80%, 620px)",
+  maxWidth: "80%",
   boxSizing: "border-box",
-  background: "color-mix(in oklab, var(--ink) 5%, var(--panel-2))",
-  // One soft hairline; the bubble reads as a calm surface, not a box.
-  border: "1px solid var(--rule-soft)",
-  borderRadius: 18,
-  borderBottomRightRadius: 6,
-  padding: "9px 14px",
+  background: "var(--panel-2)",
+  border: "none",
+  borderRadius: 16,
+  padding: 12,
   color: "var(--ink)",
   wordBreak: "break-word",
   boxShadow: "none",
@@ -4354,6 +4490,13 @@ const TOOL_ROW_BUTTON_STYLE: React.CSSProperties = {
   textAlign: "left",
 };
 
+const LIVE_TOOL_BUTTON_STYLE: React.CSSProperties = {
+  ...TOOL_ROW_BUTTON_STYLE,
+  minHeight: 24,
+  gap: 6,
+  padding: "0 2px",
+};
+
 const TOOL_TITLE_STYLE: React.CSSProperties = {
   color: "var(--ink-dim)",
   fontSize: 12,
@@ -4363,6 +4506,12 @@ const TOOL_TITLE_STYLE: React.CSSProperties = {
   overflow: "hidden",
   textOverflow: "ellipsis",
   whiteSpace: "nowrap",
+};
+
+const LIVE_TOOL_TITLE_STYLE: React.CSSProperties = {
+  ...TOOL_TITLE_STYLE,
+  fontSize: 14,
+  fontWeight: 400,
 };
 
 const TOOL_INLINE_DETAIL_STYLE: React.CSSProperties = {
@@ -4485,9 +4634,8 @@ const STALL_HINT_STYLE: React.CSSProperties = {
   lineHeight: 1.4,
 };
 
-// The slim in-flight header: pulsing dots + "Working for Ns". Sits where the
-// completed turn's "Worked for Ns" disclosure line will land, so the
-// live → done transition swaps copy without moving anything.
+// The one-line state of a turn on hold or compacting. The working and worked
+// lines are .cora-turn-head.
 const WORKING_LINE_STYLE: React.CSSProperties = {
   display: "flex",
   alignItems: "center",

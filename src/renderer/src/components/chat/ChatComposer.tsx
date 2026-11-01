@@ -2344,20 +2344,20 @@ function StopButton({ onClick, stopping }: { onClick: () => void; stopping: bool
       onBlur={() => setFocusRing(false)}
       style={{
         appearance: "none",
-        width: 26,
-        height: 26,
-        flex: "0 0 26px",
+        width: 32,
+        height: 32,
+        flex: "0 0 32px",
         border: "none",
-        borderRadius: "var(--radius-control, 7px)",
-        background: hover ? "var(--panel-3)" : "var(--panel-2)",
+        borderRadius: "50%",
+        background: hover ? "color-mix(in oklch, var(--accent) 88%, var(--ink))" : "var(--accent)",
         // Keyboard focus restores the accent ring (the inline box-shadow would
         // otherwise clobber the global :focus-visible rule).
         boxShadow: focusRing
           ? "var(--focus-ring)"
           : pressed
             ? "var(--well)"
-            : "inset 0 0 0 1px var(--rule)",
-        color: "var(--ink)",
+            : "var(--lift-hi)",
+        color: "var(--accent-ink)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -2414,13 +2414,13 @@ function SendButton({
       onBlur={() => setFocusRing(false)}
       style={{
         appearance: "none",
-        width: 26,
-        height: 26,
-        flex: "0 0 26px",
+        width: 32,
+        height: 32,
+        flex: "0 0 32px",
         border: "none",
-        borderRadius: "var(--radius-control, 7px)",
+        borderRadius: "50%",
         background: disabled
-          ? "color-mix(in oklab, var(--ink) 7%, transparent)"
+          ? "var(--panel-3)"
           : hover
             ? "color-mix(in oklch, var(--accent) 88%, var(--ink))"
             : "var(--accent)",
@@ -2435,7 +2435,7 @@ function SendButton({
               : hover
                 ? "var(--shadow-glow)"
                 : "var(--lift-hi)",
-        color: disabled ? "var(--muted)" : "var(--accent-ink)",
+        color: disabled ? "var(--ink-dim)" : "var(--accent-ink)",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
