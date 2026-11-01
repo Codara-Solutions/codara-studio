@@ -159,8 +159,6 @@ function inventedFile(narrative, source) {
 }
 
 function problemWith({ narrative, summary, limits, tokensAfter, tokensOf, source }) {
-  const missing = REQUIRED_SECTIONS.find((section) => !narrative.includes(section));
-  if (missing) return `the narrative has no "${missing}" section`;
   const invented = inventedFile(narrative, source);
   if (invented) return `Done names ${invented}, which the session never mentions`;
   const tokens = tokensOf(summary);
@@ -224,6 +222,9 @@ async function writeNarrative({ event, ctx, engine, window, kept, previous, inst
     };
     const pieceSignal = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
     const result = await engine.compact(prepared, model, auth.apiKey, auth.headers, instructions, pieceSignal);
+    // The next piece builds on this one, so a bad one here loses its part of the story.
+    const missing = REQUIRED_SECTIONS.find((section) => !result.summary.includes(section));
+    if (missing) throw new Error(`the narrative has no "${missing}" section`);
     summary = result.summary;
     usage = addUsage(usage, result.usage);
   }

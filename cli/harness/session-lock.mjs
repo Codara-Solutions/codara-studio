@@ -1,83 +1,80 @@
 // One writer per session. Two processes appending to one session file fork its
-// history without either noticing. The lock names its holder, so one a kill left
-// behind is taken over at once instead of after a timeout.
+// history without either noticing, so a process holds the lock before Pi reads
+// the file and until it exits. A live holder renews the lock; one that was killed
+// stops renewing, and the lock can be taken over once it goes stale.
 
-import { linkSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { basename, join } from "node:path";
+import lockfile from "proper-lockfile";
 
-const TAKEOVER_ATTEMPTS = 3;
+const STALE_MS = 6_000;
+const RENEW_MS = 2_000;
+const RETRY_MS = 200;
 
-function isAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error.code === "EPERM";
-  }
-}
+export const sessionInUse = (file) => `session ${basename(file, ".jsonl").split("_").at(-1)} is in use by another cora`;
 
-function holderOf(path) {
-  try {
-    const pid = Number(readFileSync(path, "utf8"));
-    return Number.isInteger(pid) && pid > 0 ? pid : 0;
-  } catch {
-    return 0;
-  }
-}
-
-/** Moves a dead holder's lock aside. Only one process wins the rename, and the
- * winner puts it back if a new holder got there between the read and the move. */
-function clearDeadHolder(path) {
-  const aside = `${path}.${process.pid}`;
-  try {
-    renameSync(path, aside);
-  } catch {
-    return;
-  }
-  const moved = holderOf(aside);
-  if (moved && isAlive(moved)) linkSync(aside, path);
-  rmSync(aside, { force: true });
-}
-
-export function sessionLocks(home) {
+/**
+ * Makes Pi take the lock before it loads a session.
+ * @param onLost  ends the process with this message: another one has the session
+ */
+export function lockSessions(SessionManager, home, onLost) {
   const folder = join(home, "session-locks");
-  const pathFor = (sessionFile) => join(folder, `${basename(sessionFile)}.lock`);
+  const lockPath = (file) => join(folder, `${basename(file)}.lock`);
+  const options = (file) => ({ realpath: false, lockfilePath: lockPath(file), stale: STALE_MS });
+  const pause = new Int32Array(new SharedArrayBuffer(4));
   let held = null;
 
-  const release = () => {
-    if (held) rmSync(held, { force: true });
-    held = null;
-  };
-  process.on("exit", release);
-
-  /** @returns the process holding the session, or null when this one may write. */
-  const inUseBy = (sessionFile) => {
-    const path = pathFor(sessionFile);
-    if (path === held) return null;
-    const holder = holderOf(path);
-    return holder && isAlive(holder) ? holder : null;
-  };
-
-  /** @returns null once this process holds the session, else the process that does. */
-  const acquire = (sessionFile) => {
-    const path = pathFor(sessionFile);
-    if (path === held) return null;
-    mkdirSync(folder, { recursive: true });
-    for (let attempt = 0; attempt < TAKEOVER_ATTEMPTS; attempt += 1) {
-      try {
-        writeFileSync(path, String(process.pid), { flag: "wx" });
-        release();
-        held = path;
-        return null;
-      } catch (error) {
-        if (error.code !== "EEXIST") throw error;
-      }
-      const holder = inUseBy(sessionFile);
-      if (holder) return holder;
-      clearDeadHolder(path);
+  const tryLock = (file) => {
+    try {
+      return lockfile.lockSync(file, { ...options(file), update: RENEW_MS, onCompromised: renew });
+    } catch (error) {
+      if (error.code === "ELOCKED") return null;
+      throw error;
     }
-    return holderOf(path) || process.pid;
   };
 
-  return { acquire, inUseBy };
+  /** A sleeping laptop misses its renewals, and nobody may have taken over. */
+  function renew() {
+    held.release = tryLock(held.file);
+    if (!held.release) onLost(sessionInUse(held.file));
+  }
+
+  /** Waits past the stale limit only at startup: a dead holder can only be told
+   * from a live one by waiting, and blocking later would stop this lock renewing. */
+  const hold = (file) => {
+    if (held && lockPath(held.file) === lockPath(file)) return;
+    mkdirSync(folder, { recursive: true });
+    const deadline = Date.now() + (held ? 0 : STALE_MS + 1_000);
+    for (;;) {
+      const release = tryLock(file);
+      if (release) {
+        held?.release();
+        held = { file, release };
+        return;
+      }
+      if (Date.now() >= deadline) {
+        if (held) throw new Error(sessionInUse(file));
+        onLost(sessionInUse(file));
+      }
+      Atomics.wait(pause, 0, 0, RETRY_MS);
+    }
+  };
+
+  const { open, continueRecent } = SessionManager;
+  SessionManager.open = (path, ...rest) => {
+    hold(path);
+    return open.call(SessionManager, path, ...rest);
+  };
+  SessionManager.continueRecent = (cwd, sessionDir) => {
+    const recent = continueRecent.call(SessionManager, cwd, sessionDir);
+    const file = recent.getSessionFile();
+    hold(file);
+    // What it read predates the lock.
+    return existsSync(file) ? open.call(SessionManager, file, sessionDir, cwd) : recent;
+  };
+
+  return {
+    hold,
+    inUse: (file) => Boolean(held) && lockPath(held.file) !== lockPath(file) && lockfile.checkSync(file, options(file)),
+  };
 }

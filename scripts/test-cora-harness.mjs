@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -489,6 +489,9 @@ test("a report followed by silence still shows what the model last said, and not
   assert.equal(resultOf(beside.stdout).text, "STATUS: DONE");
   const plain = await cora(makeWorld(), ["exec", "--model", "sonnet", "copy it TEXT_BESIDE_SUBMIT EMPTY_CLOSING"]);
   assert.equal(plain.stdout.trim(), "STATUS: DONE");
+  const stale = await cora(makeWorld(), ["exec", "--model", "sonnet", "--json", "copy it EARLY_TEXT EMPTY_CLOSING"]);
+  assert.equal(stale.status, 1, "earlier progress passed as the closing message");
+  assert.equal(resultOf(stale.stdout).status, "error");
   const silent = await cora(makeWorld(), ["exec", "--model", "sonnet", "--json", "copy it EMPTY_CLOSING"]);
   assert.equal(silent.status, 1);
   assert.equal(resultOf(silent.stdout).status, "error");
@@ -632,6 +635,40 @@ test("a short ChatGPT rate limit is waited out and retried", async () => {
   }
 });
 
+test("a rate limit's wait replaces the backoff, and happens only before a real retry", async () => {
+  const body = { code: "rate_limit_exceeded", message: "slow down" };
+  stub.control({ mode: "chatgpt429", count: 1, body, headers: { "retry-after": "2" } });
+  const slowBackoff = makeWorld({ settings: { retry: { baseDelayMs: 3000 } } });
+  const started = Date.now();
+  const retried = await cora(slowBackoff, ["exec", "--model", "terra", "--json", "copy it"]);
+  assert.equal(retried.status, 0, retried.stderr);
+  assert.ok(Date.now() - started < 4500, "the wait and the backoff were added together");
+  stub.reset();
+  stub.control({ mode: "chatgpt429", count: 9, body, headers: { "retry-after": "9" } });
+  const noRetry = makeWorld({ settings: { retry: { enabled: false } } });
+  const stopped = Date.now();
+  const failed = await cora(noRetry, ["exec", "--model", "terra", "--json", "copy it"]);
+  assert.equal(failed.status, 1);
+  assert.ok(Date.now() - stopped < 4000, "waited with no retry left");
+});
+
+test("a limit describes only the latest ChatGPT request", async () => {
+  const { observeChatgptLimits } = await import(pathToFileURL(join(ROOT, "cli", "harness", "extension.mjs")).href);
+  const { fetch } = globalThis;
+  const responses = [new Response(JSON.stringify({ error: { code: "usage_limit_reached" } }), { status: 429 }), new Response("{}")];
+  globalThis.fetch = async () => responses.shift();
+  const run = { chatgptLimit: null };
+  try {
+    observeChatgptLimits(run);
+    await globalThis.fetch("https://x.test/backend-api/codex/responses");
+    assert.equal(run.chatgptLimit.code, "usage_limit_reached");
+    await globalThis.fetch("https://x.test/backend-api/codex/responses");
+    assert.equal(run.chatgptLimit, null);
+  } finally {
+    globalThis.fetch = fetch;
+  }
+});
+
 test("a real ChatGPT usage limit stops at once and says when it resets", async () => {
   const cases = [
     { code: "usage_limit_reached", message: "limit", plan_type: "plus", resets_at: inSeconds(3 * 3600 + 120) },
@@ -678,6 +715,12 @@ const sessionEntries = (world) =>
         return [];
       }
     });
+const sessionLockOptions = (world) => ({
+  realpath: false,
+  lockfilePath: join(world.home, "session-locks", `${sessionFile(world).split("/").at(-1)}.lock`),
+  stale: 6000,
+  update: 2000,
+});
 const compactions = (world) => sessionEntries(world).filter((entry) => entry.type === "compaction");
 
 test("compaction starts past 400k and not before, and the setting moves it", async () => {
@@ -769,7 +812,7 @@ test("a session has one writer at a time, and a dead writer does not block it", 
   ]) {
     const second = await cora(world, args);
     assert.equal(second.status, 1, second.stderr);
-    assert.match(second.stderr, new RegExp(`session ${sessionId} is in use by process ${writer.pid}`));
+    assert.match(second.stderr, new RegExp(`session ${sessionId} is in use`));
     assert.equal(resultOf(second.stdout).status, "error");
   }
   assert.equal(readFileSync(sessionFile(world), "utf8"), before);
@@ -780,6 +823,66 @@ test("a session has one writer at a time, and a dead writer does not block it", 
   const third = await cora(world, ["exec", "--resume", sessionId, "--json", "PLAIN_TEXT five"]);
   assert.equal(third.status, 0, third.stderr);
   assert.deepEqual(readdirSync(join(world.home, "session-locks")), []);
+  mkdirSync(join(world.home, "session-locks", `${sessionFile(world).split("/").at(-1)}.lock`));
+  const old = new Date(Date.now() - 60_000);
+  utimesSync(join(world.home, "session-locks", `${sessionFile(world).split("/").at(-1)}.lock`), old, old);
+  const reclaimed = Date.now();
+  assert.equal((await cora(world, ["exec", "--resume", sessionId, "PLAIN_TEXT six"])).status, 0);
+  assert.ok(Date.now() - reclaimed < 3000, "a lock nobody renews still blocked the session");
+});
+
+test("six runs on one session never fork it", async () => {
+  const world = makeWorld();
+  const { sessionId } = resultOf((await cora(world, ["exec", "--model", "sonnet", "--json", "PLAIN_TEXT one"])).stdout);
+  const runs = await Promise.all(
+    Array.from({ length: 6 }, (_, index) => cora(world, ["exec", "--resume", sessionId, "--json", `PLAIN_TEXT ${index}`])),
+  );
+  for (const run of runs) if (run.status !== 0) assert.match(run.stderr, /is in use/);
+  assert.ok(runs.some((run) => run.status === 0));
+  const parents = sessionEntries(world).slice(1).map((entry) => entry.parentId);
+  assert.equal(new Set(parents).size, parents.length, "two entries share a parent, so the session forked");
+});
+
+test("history is read only after the lock is held", async () => {
+  const world = makeWorld();
+  const { sessionId } = resultOf((await cora(world, ["exec", "--model", "sonnet", "--json", "PLAIN_TEXT one"])).stdout);
+  const file = sessionFile(world);
+  const { lock } = require("proper-lockfile");
+  mkdirSync(join(world.home, "session-locks"), { recursive: true });
+  for (const [name, resume] of [["RESUMED", ["--resume", sessionId]], ["CONTINUED", ["--continue", "--model", "sonnet"]]]) {
+    const release = await lock(file, sessionLockOptions(world));
+    const waiting = cora(world, ["exec", ...resume, "--json", "PLAIN_TEXT two"]);
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    const parentId = sessionEntries(world).at(-1).id;
+    const message = { role: "user", content: [{ type: "text", text: name }], timestamp: Date.now() };
+    const entry = { type: "message", id: name, parentId, timestamp: new Date().toISOString(), message };
+    writeFileSync(file, `${readFileSync(file, "utf8")}${JSON.stringify(entry)}\n`);
+    await release();
+    const result = await waiting;
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(userTexts(stub.requests.at(-1)).some(({ text }) => text.includes(name)), `${name} was read before the lock`);
+  }
+});
+
+test("a missed renewal keeps the session, and losing it stops the run", async () => {
+  const world = makeWorld();
+  const { sessionId } = resultOf((await cora(world, ["exec", "--model", "sonnet", "--json", "PLAIN_TEXT one"])).stdout);
+  const options = sessionLockOptions(world);
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  stub.reset();
+  stub.control({ mode: "hang" });
+  const writer = cora(world, ["exec", "--resume", sessionId, "--json", "PLAIN_TEXT two"]);
+  while (stub.requests.length === 0) await sleep(20);
+  rmdirSync(options.lockfilePath);
+  await sleep(2500);
+  assert.ok(existsSync(options.lockfilePath), "the lock was not taken back");
+  rmdirSync(options.lockfilePath);
+  const release = await require("proper-lockfile").lock(sessionFile(world), options);
+  const result = await writer;
+  await release();
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /is in use by another cora/);
+  assert.equal(resultOf(result.stdout).status, "error");
 });
 
 test("code-built facts survive two compactions in a row", async () => {
@@ -897,6 +1000,19 @@ test("an oversized history is summarized in pieces, with nothing dropped", async
   assert.equal(compactions(world).length, 1);
 });
 
+test("a rejected piece stops the compaction, so the next one never loses its story", async () => {
+  const world = compactionWorld();
+  stub.offer({ anthropic: offerClaude(["claude-sonnet-5-5", 40_000, 8_000]) });
+  stub.summaries(["bad"]);
+  stub.reportContext(30_000);
+  const result = await cora(world, ["exec", "--model", "sonnet", "--json", "copy it BIG_RESULT"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(summaryRequests()[0].reply.mode, "bad");
+  assert.match(summaryRequests()[2].events[0].text, /<previous-summary>\n## Goal/);
+  assert.doesNotMatch(summaryRequests()[1].events[0].text, /I could not do that/);
+  assert.equal(compactions(world).length, 1);
+});
+
 test("a very large last tool output leaves the context under its target", async () => {
   const world = compactionWorld({}, {});
   stub.reportContext(410_000);
@@ -965,7 +1081,9 @@ test("a prompt that looks like a flag or a file is still the prompt", async () =
 
 test("luna is no longer a name, and its full id still works", async () => {
   const short = await cora(makeWorld(), ["exec", "--model", "luna", "copy it"]);
-  assert.notEqual(short.status, 0);
+  assert.equal(short.status, 2);
+  assert.match(short.stderr, /unknown model: luna/);
+  assert.doesNotMatch(short.stderr, /openrouter/);
   assert.equal(stub.requests.length, 0);
   assert.doesNotMatch(spawnSync(process.execPath, [CLI, "--help"], { encoding: "utf8" }).stdout, /luna/);
   const full = await cora(makeWorld(), ["exec", "--model", "gpt-6-luna", "copy it"]);
@@ -1169,6 +1287,38 @@ syncBuiltinESMExports();
   assert.deepEqual(readdirSync(dirname(world.authFile)).filter((name) => name.includes(".tmp")), []);
 });
 
+test("a short write never replaces a login, and cora logout writes the same safe way", async () => {
+  const shortWrite = join(sandbox, "short-write.cjs");
+  writeFileSync(
+    shortWrite,
+    `const fs = require("node:fs");
+const { syncBuiltinESMExports } = require("node:module");
+const write = fs.writeSync;
+fs.writeSync = (fd, data, ...rest) => (typeof data === "string" && data.includes("refresh-new") ? write(fd, data.slice(0, 20)) : write(fd, data, ...rest));
+syncBuiltinESMExports();
+`,
+  );
+  const world = studioWorld({ credential: claudeCredential({ expires: 1, refresh: "refresh-held" }) });
+  const studio = await fakeStudio(world, async (method) =>
+    method === "app.info" ? { result: {} } : { result: { access: "sk-ant-oat01-renewed", refresh: "refresh-new", expires: FAR_FUTURE } },
+  );
+  try {
+    await cora(world, ["exec", "--model", "sonnet", "copy it"], { env: { NODE_OPTIONS: `--require ${networkGuard} --require ${shortWrite}` } });
+  } finally {
+    studio.close();
+  }
+  assert.doesNotThrow(() => JSON.parse(readFileSync(world.authFile, "utf8")), "a cut-off file replaced the login");
+
+  const own = makeWorld();
+  const authFile = join(own.home, "auth.json");
+  const before = readFileSync(authFile, "utf8");
+  const logout = await cora(own, ["logout", "claude"], {
+    env: { NODE_OPTIONS: `--require ${networkGuard} --require ${join(sandbox, "kill-at-sync.cjs")}` },
+  });
+  assert.equal(logout.signal, "SIGKILL", "logout wrote the file without an fsync");
+  assert.equal(readFileSync(authFile, "utf8"), before);
+});
+
 test("an expired shared Claude login is renewed by a running Studio, under Pi's file lock", async () => {
   const world = studioWorld({ credential: claudeCredential({ expires: 1, refresh: "refresh-held" }) });
   const lockfile = require("proper-lockfile");
@@ -1363,9 +1513,8 @@ test("an interactive resume of a session in use says so and leaves the terminal"
   if (spawnSync("script", ["--version"]).status !== 0) return "SKIP: util-linux script is not installed";
   const world = makeWorld();
   const { sessionId } = resultOf((await cora(world, ["exec", "--model", "sonnet", "--json", "PLAIN_TEXT one"])).stdout);
-  const name = `${sessionFile(world).split("/").at(-1)}.lock`;
   mkdirSync(join(world.home, "session-locks"), { recursive: true });
-  writeFileSync(join(world.home, "session-locks", name), String(process.pid));
+  const release = await require("proper-lockfile").lock(sessionFile(world), sessionLockOptions(world));
   const before = readFileSync(sessionFile(world), "utf8");
   const child = spawn(
     "script",
@@ -1378,8 +1527,9 @@ test("an interactive resume of a session in use says so and leaves the terminal"
   const timer = setTimeout(() => process.kill(-child.pid, "SIGKILL"), 15_000);
   const code = await exited;
   clearTimeout(timer);
+  await release();
   assert.equal(code, 1, output.slice(-400));
-  assert.match(output, new RegExp(`session ${sessionId} is in use by process ${process.pid}`));
+  assert.match(output, new RegExp(`session ${sessionId} is in use`));
   assert.equal(readFileSync(sessionFile(world), "utf8"), before);
   return undefined;
 });

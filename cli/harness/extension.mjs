@@ -1,13 +1,12 @@
 // The Pi extension behind `cora`: what Cora adds on top of Pi's agent loop.
 // The loop, tools, sessions, retries and terminal UI are all Pi's.
 
-import { writeSync } from "node:fs";
-import { basename } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { CORA_ENGINEERING_RULES, CORA_REPLY_LANGUAGE } from "../../resources/pi-cora/prompt.ts";
 import { loginName } from "./accounts.mjs";
 import { registerCompaction } from "./compaction.mjs";
+import { sessionInUse } from "./session-lock.mjs";
 
 const REPORTED_STATUSES = ["complete", "partial", "blocked", "failed"];
 /** Longer than this is not worth holding a run open for. */
@@ -43,8 +42,15 @@ export function coraSystemPrompt({ exec }) {
 export function observeChatgptLimits(run) {
   const { fetch } = globalThis;
   globalThis.fetch = async (input, init) => {
+    if (!String(input.url ?? input).endsWith(CHATGPT_RESPONSES_PATH)) return fetch(input, init);
+    // Waiting here and not when the error arrives means it only happens if Pi
+    // retries, and Pi's own backoff counts towards it.
+    const wait = run.retryNotBefore - Date.now();
+    run.retryNotBefore = 0;
+    run.chatgptLimit = null;
+    if (wait > 0) await delay(wait, undefined, { signal: init?.signal });
     const response = await fetch(input, init);
-    if (response.status === 429 && String(input.url ?? input).endsWith(CHATGPT_RESPONSES_PATH)) {
+    if (response.status === 429) {
       const error = await response.clone().json().then((body) => body?.error, () => null);
       const retryAfter = Number(response.headers.get("retry-after"));
       run.chatgptLimit = {
@@ -63,7 +69,7 @@ function chatgptLimitFailure(limit, now) {
   const waitMs = limit.resetsAt ? Math.max(0, limit.resetsAt - now) : 0;
   const usage = limit.code === "usage_not_included" || (limit.code === "usage_limit_reached" && !limit.resetsAt);
   if (!usage && waitMs <= MAX_RATE_LIMIT_WAIT_MS) {
-    return { waitMs, errorMessage: `ChatGPT rate limited the request (429), for about ${Math.ceil(waitMs / 1000)}s` };
+    return { retryNotBefore: limit.resetsAt, errorMessage: `ChatGPT rate limited the request (429), for about ${Math.ceil(waitMs / 1000)}s` };
   }
   const plan = limit.plan ? ` on the ${String(limit.plan).toLowerCase()} plan` : "";
   const when = limit.resetsAt
@@ -99,31 +105,16 @@ function textOf(message) {
     .trim();
 }
 
-function registerSessionLock(pi, run, { exec, locks }) {
-  const inUse = (file, pid) => `session ${basename(file, ".jsonl").split("_").at(-1)} is in use by process ${pid}`;
+function registerSessionLock(pi, locks) {
+  // Sessions that Pi loads are locked before that; this covers new and forked ones.
   pi.on("session_start", (_event, ctx) => {
     const file = ctx.sessionManager.getSessionFile();
-    const holder = file ? locks.acquire(file) : null;
-    if (!holder) return;
-    const error = inUse(file, holder);
-    if (ctx.hasUI) {
-      // After the terminal interface has given the screen back.
-      process.on("exit", (code) => {
-        process.stderr.write(`cora: ${error}\n`);
-        process.exitCode = code || 1;
-      });
-      ctx.shutdown();
-      return;
-    }
-    run.finished = true;
-    process.stderr.write(`cora: ${error}\n`);
-    if (run.json) writeSync(1, `${JSON.stringify({ type: "cora_result", status: "error", exitCode: 1, error })}\n`);
-    process.exit(1);
+    if (file) locks.hold(file);
   });
   pi.on("session_before_switch", (event, ctx) => {
-    const holder = event.targetSessionFile ? locks.inUseBy(event.targetSessionFile) : null;
-    if (!holder) return undefined;
-    ctx.ui.notify(`Cora: ${inUse(event.targetSessionFile, holder)}.`, "error");
+    const file = event.targetSessionFile;
+    if (!file || !locks.inUse(file)) return undefined;
+    ctx.ui.notify(`Cora: ${sessionInUse(file)}.`, "error");
     return { cancel: true };
   });
 }
@@ -190,7 +181,7 @@ export function coraExtension(run, { exec, mcpConfig, compaction, locks }) {
   return async (pi) => {
     registerCompaction(pi, run, { exec, ...compaction });
     if (exec) registerSubmitResult(pi, run);
-    registerSessionLock(pi, run, { exec, locks });
+    registerSessionLock(pi, locks);
 
     let lastStreamEvent = Date.now();
     let failedAttempt = null;
@@ -215,12 +206,14 @@ export function coraExtension(run, { exec, mcpConfig, compaction, locks }) {
     pi.on("tool_execution_start", (event) => {
       if (exec && run.progress) process.stderr.write(`cora: ${event.toolName}\n`);
     });
-    pi.on("message_end", async (event, ctx) => {
+    pi.on("message_end", (event) => {
       const { message } = event;
       if (message.role !== "assistant") return undefined;
       run.last = message;
       const said = textOf(message);
-      if (said) run.closing = said;
+      // A reply before the report is progress. One after it is the closing message,
+      // and a text beside the report still counts when nothing follows it.
+      if (said || !run.report) run.closing = said;
       for (const key of ["input", "output", "cacheRead", "cacheWrite"]) {
         run.usage[key] += message.usage?.[key] ?? 0;
       }
@@ -231,7 +224,7 @@ export function coraExtension(run, { exec, mcpConfig, compaction, locks }) {
       run.chatgptLimit = null;
       run.last = { ...message, errorMessage: failedAttempt };
       if (failure?.resetsAt) run.resetsAt = new Date(failure.resetsAt).toISOString();
-      if (failure?.waitMs) await delay(failure.waitMs, undefined, { signal: ctx.signal }).catch(() => undefined);
+      if (failure?.retryNotBefore) run.retryNotBefore = failure.retryNotBefore;
       return { message: run.last };
     });
 

@@ -13,7 +13,8 @@
 // NO_SUBMIT finishes in text, one with EMPTY_TEXT gets an empty message, one with
 // FAILED_CHECK submits a failed check alongside its status, one with
 // TEXT_BESIDE_SUBMIT writes a line in the same message as the call, one with
-// EMPTY_CLOSING has nothing to say after the call, and one with LONG_CLOSING
+// EMPTY_CLOSING has nothing to say after the call, one with EARLY_TEXT writes
+// progress beside its first tool call, and one with LONG_CLOSING
 // closes with a long fenced diff full of characters JSON would have to escape.
 //
 // Faults: stub.control({ mode, count, after }) applies a fault to the next
@@ -143,7 +144,9 @@ function plan(view) {
   const copied = compacted && /## Files changed with write or edit\n\n- output\.txt/.test(prompt);
   if (prompt.includes("EMPTY_TEXT")) return { text: "" };
   if (prompt.includes("PLAIN_TEXT") || !read || !write) return { text: "STUB-FINAL: plain reply." };
-  if (results.length === 0 && !copied) return { tool: read, input: { path: "input.txt" } };
+  if (results.length === 0 && !copied) {
+    return { ...(prompt.includes("EARLY_TEXT") ? { text: "Working on it." } : {}), tool: read, input: { path: "input.txt" } };
+  }
   if (results.length === 1 && !copied) {
     return { tool: write, input: { path: "output.txt", content: `${results[0].text.trim().toUpperCase()}\n` } };
   }

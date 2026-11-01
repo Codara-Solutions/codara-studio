@@ -55,7 +55,8 @@ a login.
 
 The model reports its status with a tool call and then answers in a normal reply, which is
 the `text` of `cora_result`. A session has one writer: a second `cora` on it stops with
-`session <id> is in use by process <pid>`, and a process that died holds nothing.
+`session <id> is in use by another cora` after about 7 seconds, the time it takes to
+tell a live writer from one that died, whose session it then takes over.
 
 A ChatGPT rate limit of up to a minute is waited out and retried. A usage limit stops the
 run with exit 1, says when it resets, and sets `resetsAt` in `cora_result`.

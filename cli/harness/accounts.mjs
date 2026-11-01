@@ -16,7 +16,7 @@
 
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -127,7 +127,7 @@ function writeFileAtomically(path, text) {
   try {
     const file = openSync(temporary, "wx", 0o600);
     try {
-      writeSync(file, text);
+      writeFileSync(file, text);
       fsyncSync(file);
     } finally {
       closeSync(file);
@@ -343,19 +343,21 @@ function terminalInteraction() {
   };
 }
 
-export async function login(ModelRuntime, rawProvider, env = process.env) {
+/** Cora's own sign-ins, through the same atomic writes as every other credential. */
+function ownRuntime(pi, home) {
+  const credentials = routedCredentialStore(pi.AuthStorage, pi.FileAuthStorageBackend, join(home, "auth.json"), new Map());
+  return pi.ModelRuntime.create({ credentials, modelsPath: join(home, "models.json") });
+}
+
+export async function login(pi, rawProvider, env = process.env) {
   const provider = PROVIDER_ALIASES[rawProvider];
   if (!provider) throw Object.assign(new Error(`unknown provider: ${rawProvider}`), { usage: true });
-  const home = coraHome(env);
-  const runtime = await ModelRuntime.create({
-    authPath: join(home, "auth.json"),
-    modelsPath: join(home, "models.json"),
-  });
+  const runtime = await ownRuntime(pi, coraHome(env));
   await runtime.login(provider, "oauth", terminalInteraction());
   console.log(`Signed in to ${PROVIDER_NAMES[provider]}. This sign-in belongs to Cora alone.`);
 }
 
-export async function logout(ModelRuntime, rawProvider, env = process.env) {
+export async function logout(pi, rawProvider, env = process.env) {
   const provider = PROVIDER_ALIASES[rawProvider];
   if (!provider) throw Object.assign(new Error(`usage: cora logout <claude|chatgpt>`), { usage: true });
   const home = coraHome(env);
@@ -369,7 +371,7 @@ export async function logout(ModelRuntime, rawProvider, env = process.env) {
     );
     return;
   }
-  const runtime = await ModelRuntime.create({ authPath: ownFile, modelsPath: join(home, "models.json") });
+  const runtime = await ownRuntime(pi, home);
   await runtime.logout(provider);
   console.log(`Signed out of ${PROVIDER_NAMES[provider]}.`);
 }

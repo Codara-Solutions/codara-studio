@@ -1,7 +1,7 @@
 // `cora` without Studio: Pi's own terminal agent, run in this process with
 // Cora's prompt, accounts and result reporting. The only process is this Node.
 
-import { existsSync, fstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, fstatSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync, writeSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 
@@ -20,7 +20,7 @@ import {
   unexpiredLogin,
 } from "./accounts.mjs";
 import { defaultModels, isAlias, loadCatalog, registerCatalog, resolveAlias } from "./catalog.mjs";
-import { sessionLocks } from "./session-lock.mjs";
+import { lockSessions } from "./session-lock.mjs";
 
 const STDIN_NOTICE_MS = 2000;
 const STDIN_WAIT_NOTICE = "cora: waiting for stdin to close; add it to the prompt or pass </dev/null\n";
@@ -56,7 +56,8 @@ function resolveModel(name, catalog) {
   if (value.startsWith("claude-")) return { provider: "anthropic", id: value };
   if (value.startsWith("gpt-")) return { provider: "openai-codex", id: value };
   if (value.startsWith("grok-")) return { provider: "xai", id: value };
-  return { id: value };
+  if (process.env.CORA_BASE_URL?.trim() || Object.values(catalog.custom).some((ids) => ids.has(value))) return { id: value };
+  throw new UsageError(`unknown model: ${value}. Use sonnet, opus, terra, sol or a provider/id; cora models lists them.`);
 }
 
 function parseArgs(argv) {
@@ -268,14 +269,18 @@ function enterSessionFolder(id, home) {
   process.stderr.write(`cora: resuming in ${header.cwd}\n`);
 }
 
+function reportFailure(error, json) {
+  process.stderr.write(`cora: ${error}\n`);
+  // Straight to the descriptor: Pi takes process.stdout over during a run.
+  if (json) writeSync(1, `${JSON.stringify({ type: "cora_result", status: "error", exitCode: 1, error })}\n`);
+}
+
 /** Pi can end the process itself (it does on an unanswerable prompt), and a
  * one-shot run that never reached its result must not exit 0. */
 function failIfUnfinished(run, json) {
   process.on("exit", () => {
     if (run.finished || process.exitCode) return;
-    const error = "the run stopped before it finished";
-    process.stderr.write(`cora: ${error}\n`);
-    if (json) process.stdout.write(`${JSON.stringify({ type: "cora_result", status: "error", exitCode: 1, error })}\n`);
+    reportFailure("the run stopped before it finished", json);
     process.exitCode = 1;
   });
 }
@@ -353,6 +358,7 @@ async function runAgent(cli, pi, home) {
     closing: "",
     piError: null,
     chatgptLimit: null,
+    retryNotBefore: 0,
     resetsAt: null,
     json: Boolean(cli.json),
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -371,6 +377,12 @@ async function runAgent(cli, pi, home) {
     engine: { compact: pi.compact, estimateTokens: pi.estimateTokens },
   };
   useCompactionSettings(pi.SettingsManager, compaction.state, compaction.config);
+  const locks = lockSessions(pi.SessionManager, home, (error) => {
+    run.finished = true;
+    // After the terminal interface has given the screen back.
+    process.once("exit", () => reportFailure(error, cli.json));
+    process.exit(1);
+  });
   const args = [
     "--system-prompt", coraSystemPrompt({ exec }),
     ...piArguments(cli, model, effort, { exec, prompt }),
@@ -378,7 +390,7 @@ async function runAgent(cli, pi, home) {
   // Pi's own exit code misses most failures (--mode json always reports 0), so
   // the code set below decides, and only ever makes it worse.
   await pi.main(args, {
-    extensionFactories: [coraExtension(run, { exec, mcpConfig, compaction, locks: sessionLocks(home) })],
+    extensionFactories: [coraExtension(run, { exec, mcpConfig, compaction, locks })],
   });
   if (!exec) return;
 
@@ -442,19 +454,14 @@ export async function run(argv) {
     const cli = parseArgs(argv);
     if (cli.command === "login" && cli.positional.length === 0) return printLogins();
     const pi = await loadPi();
-    if (cli.command === "login") return await login(pi.ModelRuntime, cli.positional[0]);
-    if (cli.command === "logout") return await logout(pi.ModelRuntime, cli.positional[0]);
+    if (cli.command === "login") return await login(pi, cli.positional[0]);
+    if (cli.command === "logout") return await logout(pi, cli.positional[0]);
     if (cli.command === "models") return await listModels(cli, pi, home);
     return await runAgent(cli, pi, home);
   } catch (error) {
     const usage = error instanceof UsageError || error.usage;
-    process.stderr.write(`cora: ${error.message}\n`);
+    reportFailure(error.message, !usage && argv.includes("--json"));
     process.exitCode = usage ? 2 : 1;
-    if (!usage && argv.includes("--json")) {
-      process.stdout.write(
-        `${JSON.stringify({ type: "cora_result", status: "error", exitCode: 1, error: error.message })}\n`,
-      );
-    }
     return undefined;
   } finally {
     // MCP children and keep-alive sockets would hold a finished run open.
