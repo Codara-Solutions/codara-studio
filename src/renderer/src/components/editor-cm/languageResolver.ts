@@ -85,6 +85,13 @@ export async function resolveLanguage(filename: string): Promise<Extension | nul
   return result as Extension;
 }
 
+/** Whether a language pack exists for this file name (its extension or exact name). */
+export function hasLanguage(filename: string): boolean {
+  const lower = filename.toLowerCase();
+  const base = lower.split(/[/\\]/).pop() ?? lower;
+  return Boolean(filenameOverrides[base] ?? loaders[extOf(base) ?? ""]);
+}
+
 // Used by the inline-AI prompt to label the language for the model. Prefer
 // the file extension; the model will still produce useful completions
 // without it but the system prompt mentions it when present.

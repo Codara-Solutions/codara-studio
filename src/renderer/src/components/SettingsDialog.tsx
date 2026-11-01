@@ -18,6 +18,7 @@ import type { ClaudeFollowStatus } from "@shared/claude-follow";
 import type {
   AppSettings,
   EditorThemeId,
+  EditorWordWrap,
   LinkOpenTarget,
   NativeCliAccountsInspection,
   PiSubscriptionOverview,
@@ -51,7 +52,7 @@ import { usePreferences } from "../preferences/usePreferences";
 import SessionSearchSettings from "./session-search/SessionSearchSettings";
 import { useFeatureTipsSetting } from "./feature-tips/useFeatureTipsSetting";
 import KeybindingsSection, { ChordChips } from "../shortcuts/KeybindingsSection";
-import { buildBindingTable } from "../shortcuts/bindings";
+import { buildBindingTable, commandHint } from "../shortcuts/bindings";
 import { IS_MAC } from "../shortcuts/platform";
 import { isRecording } from "../shortcuts/recording";
 import { useOpenAiFastMode } from "../lib/useOpenAiFastMode";
@@ -1822,6 +1823,17 @@ function EditorSettings() {
           title="Vim mode"
           desc="Modal editing with the :w, :q, :wq and :x commands."
           {...bindToggle("vimMode", preferences, setPreference)}
+        />
+        <SelectRow
+          title="Word wrap"
+          desc={`Automatic wraps text, Markdown and log files and leaves code unwrapped. ${commandHint(preferences.keybindings, "editor.toggleWordWrap") || "its shortcut"} toggles it in the editor.`}
+          value={preferences.editorWordWrap}
+          options={[
+            { value: "auto", label: "Automatic" },
+            { value: "on", label: "Always wrap" },
+            { value: "off", label: "Never wrap" },
+          ]}
+          onChange={(v) => void setPreference("editorWordWrap", v as EditorWordWrap)}
         />
         <SelectRow
           title="Editor theme"

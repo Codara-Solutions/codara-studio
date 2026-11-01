@@ -2,6 +2,7 @@ import {
   chordEquals,
   chordFromStorage,
   chordMatches,
+  chordToHint,
   chordToStorage,
   type Chord,
 } from "./chord";
@@ -65,6 +66,22 @@ function bindingMatches(binding: EffectiveBinding, e: KeyboardEvent): boolean {
   if (cmd.customMatch) return cmd.customMatch(e);
   if (cmd.digitRange) return binding.chords.some((chord) => digitRangeMatches(chord, e) !== null);
   return binding.chords.some((chord) => chordMatches(chord, e));
+}
+
+/** The key hint ("Alt+Z") for a command as bound now, with the user's overrides; "" when unbound. */
+export function commandHint(overrides: KeybindingOverrides, id: CommandId): string {
+  const chord = buildBindingTable(overrides).find((b) => b.command.id === id)?.chords[0];
+  return chord ? chordToHint(chord) : "";
+}
+
+/**
+ * Whether a terminal keeps this chord for itself. Alt+Z is a shell's meta-z
+ * (readline, zsh) and the word wrap toggle only acts on a file editor.
+ */
+export function terminalKeepsChord(id: CommandId, target: EventTarget | null): boolean {
+  if (id !== "editor.toggleWordWrap") return false;
+  const closest = (target as Element | null)?.closest;
+  return typeof closest === "function" && !!(target as Element).closest(".codara-terminal-session");
 }
 
 // Find which command should fire for a given event: the first match in
