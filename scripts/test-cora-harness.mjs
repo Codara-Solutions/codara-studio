@@ -2097,6 +2097,24 @@ test("a command word after options never starts a model run", async () => {
   assert.equal(stub.requests.length, 0, "a command word reached a model");
 });
 
+test("help and version after options never start a model run", async () => {
+  const world = makeWorld();
+  for (const args of [["--json", "help"], ["--model", "sonnet", "help", "--"], ["--model", "sonnet", "version"], ["--continue", "help", "me"]]) {
+    const result = await cora(world, args);
+    assert.equal(result.status, 2, args.join(" "));
+    assert.match(result.stderr, /options go after the command.*quote it/, args.join(" "));
+  }
+  assert.equal(stub.requests.length, 0, "asking for help reached a model");
+  for (const args of [["--model", "sonnet", "help me PLAIN_TEXT"], ["exec", "--model", "sonnet", "help", "PLAIN_TEXT"], ["--model", "sonnet", "--", "version", "PLAIN_TEXT"], ["--", "help", "PLAIN_TEXT"]]) {
+    stub.reset();
+    const result = await cora(world, args);
+    assert.equal(result.status, 0, `${args.join(" ")}: ${result.stderr}`);
+    assert.equal(stub.requests.length, 1, args.join(" "));
+  }
+  assert.match((await cora(world, ["help"])).stdout, /a coding agent in your terminal/);
+  assert.match((await cora(world, ["version"])).stdout, /^\d+\.\d+\.\d+/);
+});
+
 test("a later -- does not free the command word before it", async () => {
   const world = makeWorld();
   for (const args of [["--model", "sonnet", "auth", "list", "--"], ["--json", "task", "list", "--", "x"], ["auth", "--", "list"]]) {

@@ -8,6 +8,8 @@ const { resolve } = require("node:path");
 
 const EFFORTS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 const COMMANDS = new Set(["exec", "resume", "login", "logout", "models"]);
+/** cora.cjs answers these when they come first, so here they can only follow options. */
+const INFO = new Set(["help", "version"]);
 /** Agents in Studio's panes call these by name, so they run from here too. */
 const STUDIO_TOOLS = new Set([
   "studio", "tool", "tools", "task", "tasks", "inbox", "inspect", "server", "servers", "workflow", "workflows",
@@ -65,7 +67,7 @@ function parseArgs(argv) {
     } else if (PI_VALUE_FLAGS.has(arg)) cli.passthrough.push(arg, value());
     else if (PI_SWITCHES.has(arg)) cli.passthrough.push(arg);
     else if (arg.startsWith("-") && arg.length > 1) throw new UsageError(`unknown option: ${arg}`);
-    else if (cli.command === "run" && cli.positional.length === 0 && (STUDIO_TOOLS.has(arg) || MOVED.has(arg) || COMMANDS.has(arg))) {
+    else if (cli.command === "run" && cli.positional.length === 0 && (STUDIO_TOOLS.has(arg) || MOVED.has(arg) || COMMANDS.has(arg) || INFO.has(arg))) {
       if (!STUDIO_TOOLS.has(arg) || arg !== argv[0]) throw refuseCommandWord(arg, args);
       return { ...cli, studioArgs: arg === "studio" ? args : argv };
     } else cli.positional.push(arg);
