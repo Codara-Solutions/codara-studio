@@ -229,6 +229,54 @@ account and the credit.
 - The footer has two links, "Usage details" and "Accounts". The separate Usage
   opener in the title bar shows only when there is no hairline to click.
 
+## System activity (2026-11)
+
+**Chosen:** variant A, one ranked list, without its per-row bars. Pressing a
+title-bar meter opens one list, heaviest first, of panes, what closed panes
+left running, Codara itself and other apps. Each row is the agent and workspace
+("Claude Code · codara-studio"), what is heavy in it ("next-server, claude"),
+and one figure on the right. Etienne picked it over a list of programs in cores
+and a sentence-first view grouped by workspace, in his words: "top part of A
+but without the line of each thing just the % like it has to the right is
+enough".
+
+**Why:** the panel could not answer "what is eating my CPU?". Panes always came
+first, so Codara at 138% sat under rows at 0%. The headline said 19% of the
+machine while rows counted 100% per core, up to 2400% here. Rows were named by
+the chat title, often the person's own last message. And 24 `sh` loops at about
+2000% were lost inside Other apps, with no way to tell who started them.
+
+**References:** the mock-up on Studio's own tokens, with the same fake process
+data as a normal moment and as the runaway, next to the old panel. Windows Task
+Manager for a list that adds up to its headline.
+
+**Rules:**
+
+- CPU rows read as a share of the whole machine, the scale of the headline, so
+  they add up to it. "100% is one core" stays inside the sampler.
+- One list, sorted by the figure alone. Nothing holds a place for being an
+  agent.
+- No bars, tracks or sparklines on a row: the figure on the right is enough.
+- A row is named by who it is. What the agent was asked moves to the row's
+  detail ("Last prompt: ..."), a Cora worker's title too ("Task: ...").
+- Idle rows fold into one line that opens: under 1% of one core on CPU, and on
+  RAM anything left running under 64 MB. Before the first CPU reading nothing
+  is called idle.
+- Colour only for risk, with an icon and words: a row with at least half the
+  machine, or a left-running row using a full core. Such a row opens by itself
+  so what it runs shows without a click. No green and no colour for "fine".
+- What a closed pane left running is named by what it is ("sh ×24 left
+  running"), then its agent and workspace if they are known. It says "no open
+  terminal", which is all Studio knows. Nothing about it is made up: an unknown
+  owner is left out, and a process that might still have a pane, such as one
+  from a second Studio, stays in Other apps.
+
+**Ownership:** `SPARK_PANE_ID` is inherited through `setsid` and reparenting, so
+Linux can still name the pane after the parent, the session and the pane are
+gone. A cgroup cannot do this: only a personal launcher puts agents in their
+own scope, and Studio does not. macOS and Windows have no such reading yet, so
+there a process that lost its parent stays in Other apps.
+
 ## Worktrees in the rail (2026-10)
 
 **Chosen:** variant A, a tree, with variant B's folded merged group. A
