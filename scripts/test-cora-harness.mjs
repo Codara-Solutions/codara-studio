@@ -1292,7 +1292,7 @@ test("bash runs in the session's folder, not where the process started", async (
   registerBashLimit({ on() {}, registerTool: (tool) => tools.push(tool) }, engine, { defaultSeconds: 5, maxSeconds: 9 });
   const folder = realpathSync(mkdtempSync(join(sandbox, "session-folder-")));
   assert.notEqual(folder, process.cwd());
-  const result = await tools[0].execute("call", { command: "pwd" }, undefined, () => undefined, { cwd: folder });
+  const result = await tools[0].execute("call", { command: "pwd" }, undefined, () => undefined, { cwd: folder, sessionManager: { getSessionId: () => "session", getSessionFile: () => undefined } });
   assert.equal(result.content[0].text.trim(), folder);
 });
 
