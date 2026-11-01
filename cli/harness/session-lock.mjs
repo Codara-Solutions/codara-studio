@@ -44,11 +44,18 @@ export function lockSessions({ SessionManager, findMostRecentSession }, home, on
     }
   };
 
-  /** proper-lockfile removes its locks at exit without asking whose they are now. */
+  /** proper-lockfile removes its locks at exit without asking whose they are now,
+   * so a held lock goes only while this process owns it. Anything else is a dead
+   * holder's. A takeover between this check and the removal is not covered. */
   const lockFs = {
     ...fs,
     rmdirSync: (path) => {
-      if (!held.has(path) || owns(path)) fs.rmdirSync(path);
+      if (!held.has(path)) {
+        fs.rmdirSync(path);
+      } else if (owns(path)) {
+        rmSync(ownerFile(path));
+        fs.rmdirSync(path);
+      }
     },
   };
 
@@ -105,15 +112,6 @@ export function lockSessions({ SessionManager, findMostRecentSession }, home, on
       return write.apply(this, args);
     };
   }
-  // Runs before proper-lockfile's own exit hook, which then frees what this left.
-  process.on("exit", () => {
-    for (const path of held.keys()) {
-      if (owns(path)) {
-        held.delete(path);
-        rmSync(ownerFile(path));
-      }
-    }
-  });
 
   return {
     /** For when `file` has started: Pi writes the outgoing session until then. */
@@ -121,9 +119,8 @@ export function lockSessions({ SessionManager, findMostRecentSession }, home, on
       if (file) hold(file);
       for (const [path, release] of held) {
         if ((!file || path !== lockPath(file)) && owns(path)) {
-          held.delete(path);
-          rmSync(ownerFile(path));
           release();
+          held.delete(path);
         }
       }
     },

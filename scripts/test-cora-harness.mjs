@@ -1021,6 +1021,30 @@ test("both of Pi's session writers refuse to run for a process that lost the ses
   assert.ok(existsSync(join(home, "session-locks", "0_abc.jsonl.lock")), "it freed a lock that belongs to another process");
 });
 
+test("a takeover between the two exit hooks keeps the new holder's lock", () => {
+  const home = mkdtempSync(join(sandbox, "locks-"));
+  const script = join(sandbox, "takeover-at-exit.mjs");
+  const owner = join(home, "session-locks", "0_abc.jsonl.lock.owner");
+  writeFileSync(
+    script,
+    `import { writeFileSync } from "node:fs";
+import { lockSessions } from ${JSON.stringify(pathToFileURL(join(ROOT, "cli", "harness", "session-lock.mjs")).href)};
+class SessionManager {
+  static open() {}
+  _persist() {}
+  _rewriteFile() {}
+}
+lockSessions({ SessionManager, findMostRecentSession: () => null }, ${JSON.stringify(home)}, () => undefined);
+SessionManager.open("0_abc.jsonl");
+process.on("exit", () => writeFileSync(${JSON.stringify(owner)}, "another process"));
+`,
+  );
+  const child = spawnSync(process.execPath, [script], { encoding: "utf8" });
+  assert.equal(child.status, 0, child.stderr);
+  assert.ok(existsSync(owner.replace(/\.owner$/, "")), "the exit hook removed the new holder's lock");
+  assert.equal(readFileSync(owner, "utf8"), "another process");
+});
+
 test("cora refuses to start if Pi renames a method the session fence relies on", async () => {
   const home = mkdtempSync(join(sandbox, "locks-"));
   const { lockSessions } = await lockSessionsModule();
