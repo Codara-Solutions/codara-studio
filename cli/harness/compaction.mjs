@@ -21,9 +21,20 @@ const MIN_SUMMARY_TARGET_TOKENS = 8_000;
 const NARRATIVE_RESERVE_TOKENS = 16_384;
 const DEFAULT_TIMEOUT_MS = 180_000;
 const CHARS_PER_TOKEN = 4;
-const USER_SHARE_OF_SUMMARY = 0.6;
+/** The fact sheet's share of a summary. The narrative gets the rest. */
+const FACTS_SHARE = 0.65;
+/** What each list may take of the fact sheet. User messages get all that is left. */
+const CHANGED_SHARE = 0.15;
+const READ_SHARE = 0.1;
+const FAILED_SHARE = 0.15;
+/** The first message is usually the task, so it keeps this share of the users' room. */
+const FIRST_USER_SHARE = 0.25;
 const MIN_USER_CHARS = 500;
+const USER_WRAPPER_CHARS = 48;
+/** Room for a line saying what was left out and where it is. */
+const NOTE_CHARS = 160;
 const MAX_FAILED_COMMANDS = 30;
+const MAX_LABEL_CHARS = 300;
 const ERROR_TAIL_CHARS = 600;
 const MAX_TASK_CHARS = 4000;
 /** After a failure, wait for this much growth before paying for another try. */
@@ -116,35 +127,77 @@ export function sessionFacts(entries, firstKeptEntryId) {
   return facts;
 }
 
-/** Newest messages are whole. Only what cannot fit the target is cut, and the
- * cut names where the full text is. */
+/** A message in at most `chars`, with a pointer to the rest when it does not fit. */
+function userMessage({ id, text }, number, chars, sessionFile) {
+  const fits = text.length <= chars;
+  const head = fits ? text : text.slice(0, Math.max(0, chars - NOTE_CHARS - sessionFile.length));
+  const note = fits ? "" : `\n[cut ${text.length - head.length} characters: full text in ${sessionFile}, entry ${id}]`;
+  return `<user-message n="${number}">\n${head}${note}\n</user-message>`;
+}
+
+/** The first message and the newest ones, whole while they fit. The middle goes
+ * first, as one line naming where it is, so the sheet stops growing with the session. */
 function renderUsers(users, budgetChars, sessionFile) {
-  let left = budgetChars;
-  const rendered = [...users].reverse().map(({ id, text }) => {
-    if (text.length <= left) {
-      left -= text.length;
-      return text;
+  if (users.length === 0) return [];
+  const [first, ...rest] = users;
+  const size = (text) => text.length + USER_WRAPPER_CHARS;
+  const pointer = NOTE_CHARS + sessionFile.length;
+  const available = Math.max(0, budgetChars - pointer);
+  const held = Math.min(size(first.text), Math.floor(available * FIRST_USER_SHARE));
+  let left = available - held;
+  const newest = [];
+  let keptFrom = users.length;
+  for (let index = users.length - 1; index >= 1; index -= 1) {
+    const message = users[index];
+    if (size(message.text) <= left) {
+      left -= size(message.text);
+      newest.unshift(userMessage(message, index + 1, message.text.length, sessionFile));
+      keptFrom = index;
+      continue;
     }
-    const head = text.slice(0, Math.max(left, MIN_USER_CHARS));
-    left = 0;
-    const note = `[cut ${text.length - head.length} characters: full text in ${sessionFile}, entry ${id}]`;
-    return `${head}\n${note}`;
-  });
-  return rendered.reverse();
+    if (left - USER_WRAPPER_CHARS >= MIN_USER_CHARS + pointer) {
+      newest.unshift(userMessage(message, index + 1, left - USER_WRAPPER_CHARS, sessionFile));
+      left = 0;
+      keptFrom = index;
+    }
+    break;
+  }
+  const leftOut = rest.slice(0, Math.max(0, keptFrom - 1));
+  const gap = leftOut.length > 0
+    ? [`[${leftOut.length} user messages left out here: entries ${leftOut[0].id} to ${leftOut.at(-1).id} in ${sessionFile}]`]
+    : [];
+  return [userMessage(first, 1, Math.max(0, held + left - USER_WRAPPER_CHARS), sessionFile), ...gap, ...newest];
+}
+
+/** The latest lines that fit, and one line for those that do not. */
+function latestLines(lines, budgetChars, leftOut) {
+  const kept = [];
+  let left = budgetChars - NOTE_CHARS;
+  for (const line of [...lines].reverse()) {
+    if (line.length + 1 > left) break;
+    left -= line.length + 1;
+    kept.unshift(line);
+  }
+  const missing = lines.length - kept.length;
+  return (missing > 0 ? [leftOut(missing), ...kept] : kept).join("\n");
 }
 
 function renderFacts(facts, { sessionId, cwd, sessionFile }, targetChars) {
-  const users = renderUsers(facts.users, Math.floor(targetChars * USER_SHARE_OF_SUMMARY), sessionFile);
-  const failed = facts.failed.slice(-MAX_FAILED_COMMANDS);
-  const list = (values) => [...values].map((value) => `- ${value}`).join("\n") || "(none)";
+  const budget = Math.floor(targetChars * FACTS_SHARE);
+  const fromHistory = (what) => (count) => `[${count} earlier ${what} left out: see ${sessionFile}]`;
+  const list = (values, share, what) =>
+    latestLines([...values].map((value) => `- ${value}`), Math.floor(budget * share), fromHistory(what)) || "(none)";
+  const failed = facts.failed.slice(-MAX_FAILED_COMMANDS).map(({ label, error }) => `- \`${label.slice(0, MAX_LABEL_CHARS)}\`\n  ${error}`);
   const sections = [
     `# Session facts, built from the session file\n\nSession: ${sessionId}\nWorking folder: ${cwd}\nFull history: ${sessionFile}`,
-    `## User messages, oldest first, verbatim\n\n${users.map((text, index) => `<user-message n="${index + 1}">\n${text}\n</user-message>`).join("\n") || "(all still in the conversation below)"}`,
-    `## Files changed with write or edit\n\n${list(facts.changed)}`,
-    `## Files read with read\n\n${list(facts.read)}`,
-    `## Failed commands (${failed.length} of ${facts.failed.length})\n\n${failed.map(({ label, error }) => `- \`${label}\`\n  ${error}`).join("\n") || "(none)"}`,
+    `## Files changed with write or edit\n\n${list(facts.changed, CHANGED_SHARE, "files")}`,
+    `## Files read with read\n\n${list(facts.read, READ_SHARE, "files")}`,
+    `## Failed commands (${failed.length} of ${facts.failed.length})\n\n${latestLines(failed, Math.floor(budget * FAILED_SHARE), fromHistory("failures")) || "(none)"}`,
   ];
   if (facts.tasks) sections.push(`## Task list, as last written\n\n${facts.tasks}`);
+  const used = sections.join("\n\n").length;
+  const users = renderUsers(facts.users, budget - used, sessionFile);
+  sections.splice(1, 0, `## User messages, oldest first, verbatim\n\n${users.join("\n") || "(all still in the conversation below)"}`);
   return sections.join("\n\n");
 }
 
@@ -292,6 +345,7 @@ export function registerCompaction(pi, run, { exec, state, config, engine }) {
       .map((entry) => entry.message);
     const keptTokens = kept.reduce((sum, message) => sum + engine.estimateTokens(message), 0);
     const source = JSON.stringify(branchEntries);
+    const room = Math.max(0, limits.summaryTarget - tokensOf(facts) - tokensOf(CONTINUE));
     const focus = event.customInstructions ? `\n\nFocus on this: ${event.customInstructions}` : "";
 
     let problem = null;
@@ -305,7 +359,7 @@ export function registerCompaction(pi, run, { exec, state, config, engine }) {
           window,
           kept,
           previous: narrativeBefore(branchEntries),
-          instructions: `${NARRATIVE_INSTRUCTIONS}${focus}${correction}`,
+          instructions: `${NARRATIVE_INSTRUCTIONS}\nKeep the narrative under ${room} tokens.${focus}${correction}`,
           signal: event.signal,
           timeoutMs: limits.timeoutMs,
         });

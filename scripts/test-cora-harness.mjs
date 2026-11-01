@@ -7,11 +7,11 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { LONG_CLOSING, startStubModel } from "./cora-stub-model.mjs";
@@ -1303,7 +1303,7 @@ const sessionEntries = (world) =>
     });
 const sessionLockOptions = (world) => ({
   realpath: false,
-  lockfilePath: join(world.home, "session-locks", `${sessionFile(world).split("/").at(-1)}.lock`),
+  lockfilePath: `${sessionFile(world)}.lock`,
   stale: 6000,
   update: 2000,
 });
@@ -1408,10 +1408,10 @@ test("a session has one writer at a time, and a dead writer does not block it", 
   stub.reset();
   const third = await cora(world, ["exec", "--resume", sessionId, "--json", "PLAIN_TEXT five"]);
   assert.equal(third.status, 0, third.stderr);
-  assert.deepEqual(readdirSync(join(world.home, "session-locks")), []);
-  mkdirSync(join(world.home, "session-locks", `${sessionFile(world).split("/").at(-1)}.lock`));
+  assert.deepEqual(readdirSync(join(world.home, "sessions")).filter((name) => !name.endsWith(".jsonl")), []);
+  mkdirSync(`${sessionFile(world)}.lock`);
   const old = new Date(Date.now() - 60_000);
-  utimesSync(join(world.home, "session-locks", `${sessionFile(world).split("/").at(-1)}.lock`), old, old);
+  utimesSync(`${sessionFile(world)}.lock`, old, old);
   const reclaimed = Date.now();
   assert.equal((await cora(world, ["exec", "--resume", sessionId, "PLAIN_TEXT six"])).status, 0);
   assert.ok(Date.now() - reclaimed < 3000, "a lock nobody renews still blocked the session");
@@ -1434,7 +1434,6 @@ test("history is read only after the lock is held", async () => {
   const { sessionId } = resultOf((await cora(world, ["exec", "--model", "sonnet", "--json", "PLAIN_TEXT one"])).stdout);
   const file = sessionFile(world);
   const { lock } = require("proper-lockfile");
-  mkdirSync(join(world.home, "session-locks"), { recursive: true });
   for (const [name, resume] of [["RESUMED", ["--resume", sessionId]], ["CONTINUED", ["--continue", "--model", "sonnet"]]]) {
     const release = await lock(file, sessionLockOptions(world));
     const waiting = cora(world, ["exec", ...resume, "--json", "PLAIN_TEXT two"]);
@@ -1454,7 +1453,6 @@ test("--continue leaves a session it has no lock on untouched", async () => {
   const world = makeWorld();
   await cora(world, ["exec", "--model", "sonnet", "PLAIN_TEXT one"]);
   const file = sessionFile(world);
-  mkdirSync(join(world.home, "session-locks"), { recursive: true });
   const release = await require("proper-lockfile").lock(file, sessionLockOptions(world));
   const text = readFileSync(file, "utf8").trimEnd();
   writeFileSync(file, text);
@@ -1562,20 +1560,20 @@ test("a switch keeps the outgoing session locked until the next one has started"
   const { default: lockfile } = await import(pathToFileURL(require.resolve("proper-lockfile")).href);
   const { lockSessions } = await lockSessionsModule();
   const SessionManager = fakeSessions();
-  const locks = lockSessions({ SessionManager, findMostRecentSession: () => null }, home, assert.fail);
-  const locked = (name) =>
-    lockfile.checkSync(name, { realpath: false, lockfilePath: join(home, "session-locks", `${name}.lock`) });
-  SessionManager.open("a.jsonl");
-  assert.throws(() => SessionManager.open("broken.jsonl"));
-  assert.ok(locked("a.jsonl"), "a failed switch left the running session unlocked");
-  SessionManager.open("b.jsonl");
-  assert.ok(locked("a.jsonl"), "the outgoing session was freed before it finished writing");
-  locks.holdOnly("b.jsonl");
-  assert.ok(!locked("a.jsonl"));
-  assert.ok(locked("b.jsonl"));
+  const locks = lockSessions({ SessionManager, findMostRecentSession: () => null }, assert.fail);
+  const [a, b] = [join(home, "a.jsonl"), join(home, "b.jsonl")];
+  const locked = (file) => lockfile.checkSync(file, { realpath: false, lockfilePath: `${file}.lock` });
+  SessionManager.open(a);
+  assert.throws(() => SessionManager.open(join(home, "broken.jsonl")));
+  assert.ok(locked(a), "a failed switch left the running session unlocked");
+  SessionManager.open(b);
+  assert.ok(locked(a), "the outgoing session was freed before it finished writing");
+  locks.holdOnly(b);
+  assert.ok(!locked(a));
+  assert.ok(locked(b));
   locks.holdOnly(undefined);
-  assert.ok(!locked("b.jsonl"));
-  assert.deepEqual(readdirSync(join(home, "session-locks")), []);
+  assert.ok(!locked(b));
+  assert.deepEqual(readdirSync(home), []);
 });
 
 test("both of Pi's session writers refuse to run for a process that lost the session", async () => {
@@ -1585,32 +1583,34 @@ test("both of Pi's session writers refuse to run for a process that lost the ses
   const SessionManager = fakeSessions(calls);
   const lost = [];
   let stopping = true;
-  const locks = lockSessions({ SessionManager, findMostRecentSession: () => null }, home, (message) => {
+  const locks = lockSessions({ SessionManager, findMostRecentSession: () => null }, (message) => {
     lost.push(message);
     if (stopping) throw new Error(message);
   });
-  const session = SessionManager.open("0_abc.jsonl");
+  const file = join(home, "0_abc.jsonl");
+  const session = SessionManager.open(file);
   session._persist();
   session._rewriteFile();
   assert.deepEqual(calls, ["_persist", "_rewriteFile"]);
-  writeFileSync(join(home, "session-locks", "0_abc.jsonl.lock.owner"), "another process");
+  writeFileSync(`${file}.lock.owner`, "another process");
   assert.throws(() => session._persist());
   assert.throws(() => session._rewriteFile());
   assert.equal(calls.length, 2, "a write went through");
   assert.match(lost[0], /cora resume abc/);
-  const fresh = Object.assign(new SessionManager(), { persist: true, sessionFile: "1_new.jsonl" });
+  const fresh = Object.assign(new SessionManager(), { persist: true, sessionFile: join(home, "1_new.jsonl") });
   fresh._persist();
   assert.equal(calls.length, 3, "a session that was never locked is new, and has nobody to race");
   stopping = false;
   locks.holdOnly(undefined);
-  assert.equal(readFileSync(join(home, "session-locks", "0_abc.jsonl.lock.owner"), "utf8"), "another process");
-  assert.ok(existsSync(join(home, "session-locks", "0_abc.jsonl.lock")), "it freed a lock that belongs to another process");
+  assert.equal(readFileSync(`${file}.lock.owner`, "utf8"), "another process");
+  assert.ok(existsSync(`${file}.lock`), "it freed a lock that belongs to another process");
 });
 
 test("a takeover between the two exit hooks keeps the new holder's lock", () => {
   const home = mkdtempSync(join(sandbox, "locks-"));
   const script = join(sandbox, "takeover-at-exit.mjs");
-  const owner = join(home, "session-locks", "0_abc.jsonl.lock.owner");
+  const file = join(home, "0_abc.jsonl");
+  const owner = `${file}.lock.owner`;
   writeFileSync(
     script,
     `import { writeFileSync } from "node:fs";
@@ -1620,8 +1620,8 @@ class SessionManager {
   _persist() {}
   _rewriteFile() {}
 }
-lockSessions({ SessionManager, findMostRecentSession: () => null }, ${JSON.stringify(home)}, () => undefined);
-SessionManager.open("0_abc.jsonl");
+lockSessions({ SessionManager, findMostRecentSession: () => null }, () => undefined);
+SessionManager.open(${JSON.stringify(file)});
 process.on("exit", () => writeFileSync(${JSON.stringify(owner)}, "another process"));
 `,
   );
@@ -1636,7 +1636,7 @@ test("cora refuses to start if Pi renames a method the session fence relies on",
   const { lockSessions } = await lockSessionsModule();
   class Renamed extends fakeSessions() {}
   Object.setPrototypeOf(Renamed.prototype, { _rewriteFile() {} });
-  assert.throws(() => lockSessions({ SessionManager: Renamed, findMostRecentSession: () => null }, home, assert.fail), /_persist/);
+  assert.throws(() => lockSessions({ SessionManager: Renamed, findMostRecentSession: () => null }, assert.fail), /_persist/);
 });
 
 test("--continue with nothing to continue starts a new session without searching again", async () => {
@@ -1644,7 +1644,7 @@ test("--continue with nothing to continue starts a new session without searching
   const { lockSessions } = await lockSessionsModule();
   const calls = [];
   const SessionManager = fakeSessions(calls);
-  lockSessions({ SessionManager, findMostRecentSession: () => null }, home, assert.fail);
+  lockSessions({ SessionManager, findMostRecentSession: () => null }, assert.fail);
   SessionManager.continueRecent("/project", "/sessions");
   assert.deepEqual(calls, ["create /project"]);
 });
@@ -1661,7 +1661,7 @@ test("the real terminal interface hands the lock over when a new session starts"
   );
   child.stdout.on("data", () => undefined);
   const exited = new Promise((resolve) => child.on("exit", resolve));
-  const locks = () => (existsSync(join(world.home, "session-locks")) ? readdirSync(join(world.home, "session-locks")).filter((name) => name.endsWith(".lock")) : []);
+  const locks = () => readdirSync(join(world.home, "sessions")).filter((name) => name.endsWith(".lock"));
   const waitFor = async (check, label) => {
     const started = Date.now();
     while (!check()) {
@@ -1691,10 +1691,38 @@ test("a new session is locked from the start", async () => {
   });
   const exited = new Promise((resolve) => writer.on("exit", resolve));
   while (stub.requests.length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
-  const held = readdirSync(join(world.home, "session-locks")).filter((name) => name.endsWith(".lock"));
+  const held = readdirSync(join(world.home, "sessions")).filter((name) => name.endsWith(".lock"));
   writer.kill("SIGKILL");
   await exited;
   assert.equal(held.length, 1);
+});
+
+test("one session has one lock, through a symlink and from a second Cora home", async () => {
+  const world = makeWorld();
+  const { sessionId } = resultOf((await cora(world, ["exec", "--model", "sonnet", "--json", "PLAIN_TEXT one"])).stdout);
+  const linkedFolder = makeWorld();
+  symlinkSync(join(world.home, "sessions"), join(linkedFolder.home, "sessions"));
+  const linkedFile = makeWorld();
+  mkdirSync(join(linkedFile.home, "sessions"));
+  symlinkSync(sessionFile(world), join(linkedFile.home, "sessions", basename(sessionFile(world))));
+  stub.reset();
+  stub.control({ mode: "hang" });
+  const writer = spawn(process.execPath, [CLI, "exec", "--resume", sessionId, "PLAIN_TEXT two"], { cwd: world.project, env: world.env, stdio: "ignore" });
+  const exited = new Promise((resolve) => writer.on("exit", resolve));
+  try {
+    while (stub.requests.length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
+    const others = await Promise.all(
+      [linkedFolder, linkedFile].map((other) => cora(other, ["exec", "--resume", sessionId, "PLAIN_TEXT three"], { cwd: other.project })),
+    );
+    for (const other of others) {
+      assert.equal(other.status, 1, other.stderr);
+      assert.match(other.stderr, /is in use by another cora/);
+    }
+    assert.equal(stub.requests.length, 1, "a second writer reached the model");
+  } finally {
+    writer.kill("SIGKILL");
+    await exited;
+  }
 });
 
 test("code-built facts survive two compactions in a row", async () => {
@@ -1722,6 +1750,56 @@ test("code-built facts survive two compactions in a row", async () => {
   const request = summaryRequests().at(-1).events[0].text;
   assert.match(request, /<previous-summary>\n## Goal/);
   assert.doesNotMatch(request.split("<previous-summary>")[1], /# Session facts/);
+});
+
+/** Appends work to a stored session, as a session that has run for days would hold it. */
+function growSession(world, turns) {
+  const file = sessionFile(world);
+  const entries = sessionEntries(world);
+  const template = entries.findLast((entry) => entry.message?.role === "assistant").message;
+  let parentId = entries.at(-1).id;
+  const lines = [];
+  const add = (id, message) => {
+    lines.push(JSON.stringify({ type: "message", id, parentId, timestamp: new Date().toISOString(), message }));
+    parentId = id;
+  };
+  for (let turn = 0; turn < turns; turn += 1) {
+    const timestamp = Date.now();
+    const calls = [
+      { type: "toolCall", id: `write-${turn}`, name: "write", arguments: { path: `${world.project}/generated/${"deep/".repeat(20)}file-${turn}.txt`, content: "x" } },
+      { type: "toolCall", id: `bash-${turn}`, name: "bash", arguments: { command: `${"long command ".repeat(150)}${turn}` } },
+    ];
+    add(`user-${turn}`, { role: "user", content: [{ type: "text", text: `USER-${turn} ${"y".repeat(600)}` }], timestamp });
+    add(`work-${turn}`, { ...template, content: calls, stopReason: "toolUse", timestamp });
+    for (const call of calls) {
+      add(`result-${call.id}`, { role: "toolResult", toolCallId: call.id, toolName: call.name, content: [{ type: "text", text: "e".repeat(900) }], isError: true, timestamp });
+    }
+    add(`done-${turn}`, { ...template, content: [{ type: "text", text: "Done." }], stopReason: "stop", timestamp });
+  }
+  writeFileSync(file, `${readFileSync(file, "utf8").trimEnd()}\n${lines.join("\n")}\n`);
+}
+
+test("a very long session still compacts, twice, and says what it left out", async () => {
+  const world = compactionWorld();
+  const first = await cora(world, ["exec", "--model", "sonnet", "--json", "PLAIN_TEXT THE-FIRST-GOAL"]);
+  assert.equal(first.status, 0, first.stderr);
+  const { sessionId } = resultOf(first.stdout);
+  growSession(world, 1000);
+  for (const [round, prompt] of ["copy it", "copy it again"].entries()) {
+    stub.reportContext(410_000);
+    const run = await cora(world, ["exec", "--resume", sessionId, "--json", prompt]);
+    assert.equal(run.status, 0, run.stderr);
+    const stored = compactions(world);
+    assert.equal(stored.length, round + 1, `compaction ${round + 1} did not happen`);
+    const { summary } = stored[round];
+    assert.ok(summary.length < 40_000 * 4, `summary is ${summary.length} characters`);
+    assert.ok(summary.includes("PLAIN_TEXT THE-FIRST-GOAL"), "the first message was lost");
+    assert.match(summary, /\[\d+ user messages left out here: entries user-\d+ to user-\d+ in .*\.jsonl\]/);
+    assert.ok(summary.includes(`<user-message n="1001">\nUSER-999 ${"y".repeat(600)}\n</user-message>`), "the newest message is not whole");
+    assert.match(summary, /\[\d+ earlier files left out: see /);
+    assert.ok(summary.includes(`file-999.txt`), "the latest file was lost");
+  }
+  assert.match(summaryRequests()[0].events[0].text, /Keep the narrative under \d+ tokens/);
 });
 
 test("a rejected summary is retried once, and the retry is told why", async () => {
@@ -1941,6 +2019,33 @@ test("no login means no request, even with an API key in the shell", async () =>
   assert.equal(result.status, 2);
   assert.match(result.stderr, /not signed in to anthropic\. Run: cora login claude/);
   assert.equal(stub.requests.length, 0);
+});
+
+test("a resumed session needs its login too, even with an API key in the shell", async () => {
+  const world = makeWorld();
+  const { sessionId } = resultOf((await cora(world, ["exec", "--model", "sonnet", "--json", "PLAIN_TEXT one"])).stdout);
+  const signedIn = readFileSync(join(world.home, "auth.json"), "utf8");
+  const before = readFileSync(sessionFile(world), "utf8");
+  writeJson(join(world.home, "auth.json"), {});
+  stub.reset();
+  const env = { ANTHROPIC_API_KEY: "sk-ant-metered" };
+  for (const resume of [["--resume", sessionId], ["--continue"]]) {
+    const result = await cora(world, ["exec", ...resume, "PLAIN_TEXT two"], { env });
+    assert.equal(result.status, 2, result.stderr);
+    assert.match(result.stderr, /not signed in to anthropic\. Run: cora login claude/);
+    assert.equal(stub.requests.length, 0, "a resumed session was paid for from the shell");
+    assert.equal(readFileSync(sessionFile(world), "utf8"), before);
+  }
+  writeFileSync(join(world.home, "auth.json"), signedIn);
+  const back = await cora(world, ["exec", "--resume", sessionId, "PLAIN_TEXT three"], { env });
+  assert.equal(back.status, 0, back.stderr);
+  assert.equal(stub.requests[0].authorization, `Bearer ${CLAUDE_TOKEN}`);
+  writeJson(join(world.home, "auth.json"), {});
+  writeJson(join(world.home, "models.json"), { providers: { anthropic: { baseUrl: stub.url, apiKey: "configured-key" } } });
+  stub.reset();
+  const keyed = await cora(world, ["exec", "--resume", sessionId, "PLAIN_TEXT four"], { env });
+  assert.equal(keyed.status, 0, keyed.stderr);
+  assert.equal(stub.requests[0].apiKey, "configured-key");
 });
 
 test("a subscription login beats an API key in the shell", async () => {
@@ -2325,7 +2430,6 @@ test("an interactive resume of a session in use says so and leaves the terminal"
   if (spawnSync("script", ["--version"]).status !== 0) return "SKIP: util-linux script is not installed";
   const world = makeWorld();
   const { sessionId } = resultOf((await cora(world, ["exec", "--model", "sonnet", "--json", "PLAIN_TEXT one"])).stdout);
-  mkdirSync(join(world.home, "session-locks"), { recursive: true });
   const release = await require("proper-lockfile").lock(sessionFile(world), sessionLockOptions(world));
   const before = readFileSync(sessionFile(world), "utf8");
   const child = spawn(

@@ -4,8 +4,8 @@
 // stops renewing, and the lock can be taken over once it goes stale.
 
 import { randomUUID } from "node:crypto";
-import fs, { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import fs, { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import lockfile from "proper-lockfile";
 
 const STALE_MS = 6_000;
@@ -13,6 +13,18 @@ const RENEW_MS = 2_000;
 const RETRY_MS = 200;
 /** Pi's private methods that change a session file. */
 const SESSION_WRITERS = ["_persist", "_rewriteFile"];
+
+/** Not there yet, a new session is known by its folder. */
+function canonical(file) {
+  for (const read of [() => realpathSync(file), () => join(realpathSync(dirname(file)), basename(file))]) {
+    try {
+      return read();
+    } catch {
+      // Next.
+    }
+  }
+  return resolve(file);
+}
 
 const idOf = (file) => basename(file, ".jsonl").split("_").at(-1);
 export const sessionInUse = (file) => `session ${idOf(file)} is in use by another cora`;
@@ -23,13 +35,19 @@ export const sessionInUse = (file) => `session ${idOf(file)} is in use by anothe
  * waking from a pause can write before it notices the lock lapsed. Its entry would
  * become the session's leaf and hide what the new holder wrote. A pause between
  * that check and the write itself is not covered. Everything held stays held until
- * `holdOnly` names the running session.
+ * `holdOnly` names the running session. The lock sits beside the real file, so a
+ * symlink or another Cora home reaches the same one.
  * @param pi  { SessionManager, findMostRecentSession }
  * @param onLost  ends the process with this message
  */
-export function lockSessions({ SessionManager, findMostRecentSession }, home, onLost) {
-  const folder = join(home, "session-locks");
-  const lockPath = (file) => join(folder, `${basename(file)}.lock`);
+export function lockSessions({ SessionManager, findMostRecentSession }, onLost) {
+  const known = new Map();
+  /** Once per path: one session keeps its lock whatever happens to the links. */
+  const realFile = (file) => {
+    if (!known.has(file)) known.set(file, canonical(file));
+    return known.get(file);
+  };
+  const lockPath = (file) => `${realFile(file)}.lock`;
   const options = (file) => ({ realpath: false, lockfilePath: lockPath(file), stale: STALE_MS });
   const pause = new Int32Array(new SharedArrayBuffer(4));
   const held = new Map();
@@ -66,7 +84,7 @@ export function lockSessions({ SessionManager, findMostRecentSession }, home, on
 
   const tryLock = (file) => {
     try {
-      return lockfile.lockSync(file, { ...options(file), fs: lockFs, update: RENEW_MS, onCompromised: () => stop(file) });
+      return lockfile.lockSync(realFile(file), { ...options(file), fs: lockFs, update: RENEW_MS, onCompromised: () => stop(file) });
     } catch (error) {
       if (error.code === "ELOCKED") return null;
       throw error;
@@ -77,7 +95,7 @@ export function lockSessions({ SessionManager, findMostRecentSession }, home, on
    * from a live one by waiting, and blocking later would stop the held locks renewing. */
   const hold = (file) => {
     if (held.has(lockPath(file))) return;
-    mkdirSync(folder, { recursive: true });
+    mkdirSync(dirname(lockPath(file)), { recursive: true });
     const deadline = Date.now() + (held.size > 0 ? 0 : STALE_MS + 1_000);
     for (;;) {
       const release = tryLock(file);
@@ -87,8 +105,8 @@ export function lockSessions({ SessionManager, findMostRecentSession }, home, on
         return;
       }
       if (Date.now() >= deadline) {
-        if (held.size > 0) throw new Error(sessionInUse(file));
-        onLost(sessionInUse(file));
+        if (held.size > 0) throw new Error(sessionInUse(realFile(file)));
+        onLost(sessionInUse(realFile(file)));
       }
       Atomics.wait(pause, 0, 0, RETRY_MS);
     }
@@ -124,7 +142,7 @@ export function lockSessions({ SessionManager, findMostRecentSession }, home, on
         }
       }
     },
-    inUse: (file) => !held.has(lockPath(file)) && lockfile.checkSync(file, options(file)),
+    inUse: (file) => !held.has(lockPath(file)) && lockfile.checkSync(realFile(file), options(file)),
     /** Ends the run if another process has taken `file` since this one locked it. */
     confirm(file) {
       if (file && held.has(lockPath(file)) && !owns(lockPath(file))) stop(file);

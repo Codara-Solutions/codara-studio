@@ -133,6 +133,20 @@ function assertSignedIn(model, routes) {
   throw new UsageError(`not signed in to ${provider}. Run: cora login ${loginName(provider)}`);
 }
 
+/**
+ * A resumed session names its model only once Pi has restored it, so the check on the
+ * way in cannot see it. Pi would then take a key from the shell, which is metered.
+ * @param status  Pi's auth status for the provider
+ */
+function refuseShellKey(routes) {
+  return (provider, status) => {
+    if (hasLogin(provider, routes) || hasConfiguredKey(provider)) return;
+    if (status.source !== "environment" && !LOGIN_PROVIDERS.includes(provider)) return;
+    process.once("exit", () => process.stderr.write(`cora: not signed in to ${provider}. Run: cora login ${loginName(provider)}\n`));
+    process.exit(2);
+  };
+}
+
 function isPipedInput() {
   try {
     const stat = fstatSync(0);
@@ -286,7 +300,8 @@ function piArguments(cli, model, effort, { exec, prompt }) {
  */
 function enterSessionFolder(id, home) {
   const folder = join(home, "sessions");
-  const matches = existsSync(folder) ? readdirSync(folder).filter((name) => name.includes(`_${id}`)) : [];
+  const isSession = (name) => name.endsWith(".jsonl") && name.includes(`_${id}`);
+  const matches = existsSync(folder) ? readdirSync(folder).filter(isSession) : [];
   if (matches.length === 0) return;
   if (matches.length > 1) throw new UsageError(`session id ${id} matches ${matches.length} sessions; use more of it`);
   const header = JSON.parse(readFileSync(join(folder, matches[0]), "utf8").split("\n", 1)[0]);
@@ -411,7 +426,7 @@ async function runAgent(cli, pi, home) {
     engine: { compact: pi.compact, estimateTokens: pi.estimateTokens },
   };
   useCompactionSettings(pi.SettingsManager, compaction.state, compaction.config);
-  const locks = lockSessions(pi, home, (error) => {
+  const locks = lockSessions(pi, (error) => {
     run.finished = true;
     // After the terminal interface has given the screen back.
     process.once("exit", () => reportFailure(error, cli.json));
@@ -427,6 +442,7 @@ async function runAgent(cli, pi, home) {
     extensionFactories: [
       coraExtension(run, {
         exec,
+        checkLogin: refuseShellKey(routes),
         mcpConfig,
         compaction,
         locks,
