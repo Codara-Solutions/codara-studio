@@ -1394,6 +1394,8 @@ function codexCompleted(
     if (w.turn?.announced && now - w.turn.announcedAt < 5_000) return;
     if (userInput !== true) return;
     startTurn(w, now, "prompt", null);
+    // A new turn starts with no answer; this message is that turn's.
+    if (typeof message === "string") w.finalMessage = message;
   }
   requestDone(w, { origin: "codex", body: summarizeAgentMessage(message), delayMs: 0 });
 }

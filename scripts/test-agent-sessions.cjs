@@ -178,6 +178,7 @@ function tempDir() {
   );
   assert.ok(codexArgs.includes("projects={'/tmp/a b'={trust_level='trusted'}}"), "Codex keeps its trust override whole");
   assert.equal(codexArgs.at(-1), brief.replace(/\n+$/, ""));
+  assert.equal(codexArgs.at(-2), "--", "a brief that opens with a dash stays the brief");
   const windows = sessions.agentSessionCommand({
     runtime: "claude",
     model: null,
@@ -246,6 +247,8 @@ function tempDir() {
   assert.equal(cut.link, "codara://tab/ws-target/tab-1");
   assert.deepEqual(again.visibleTo({ workspaceId: null, process: "9:9" }).map((entry) => entry.id), ["as-2"]);
   assert.deepEqual(again.visibleTo({ workspaceId: null, process: null }), [], "nobody identified sees nothing");
+  assert.equal(again.holdsPane("pane-1"), true, "a session keeps its pane");
+  assert.equal(again.holdsPane("pane-other"), false);
 
   const leftover = path.join(storeDir, sessions.AGENT_SESSION_BRIEFS_DIR, "as-gone.md");
   fs.writeFileSync(leftover, "x");

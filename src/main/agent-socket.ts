@@ -2051,6 +2051,8 @@ function agentSessions(): AgentSessions {
     const store = agentSessionStore;
     onTerminalAgentTurnEnded((event) => store.noteTurnEnd(event));
     onTerminalPaneRemoved((paneId) => store.notePaneClosed(paneId));
+    // A dev server started inside a session must not open it to other agents.
+    agentTerminals.keepOwnerOf((paneId) => store.holdsPane(paneId));
   }
   return agentSessionStore;
 }

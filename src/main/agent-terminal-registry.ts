@@ -112,6 +112,7 @@ export class AgentTerminalRegistry {
   private readonly active = new Map<string, ActiveAgentTerminal>();
   private readonly exited = new Map<string, ActiveAgentTerminal>();
   private readonly closed = new Map<string, string | null>();
+  private ownerKept: ((paneId: string) => boolean) | null = null;
 
   constructor(
     private readonly closedTombstoneLimit = DEFAULT_CLOSED_TOMBSTONE_LIMIT,
@@ -126,6 +127,15 @@ export class AgentTerminalRegistry {
       // explicit supported service marker may opt out of settlement cleanup.
       retention: input.retention === "service" ? "service" : "temporary",
     });
+  }
+
+  /**
+   * Panes that never pass to the workspace, whatever starts in them. A check
+   * rather than a flag on the terminal: a restored pane is registered again
+   * only when someone next touches it.
+   */
+  keepOwnerOf(check: (paneId: string) => boolean): void {
+    this.ownerKept = check;
   }
 
   /** Whether this process ever registered the pane, closed ones included. */
@@ -175,7 +185,7 @@ export class AgentTerminalRegistry {
   /** Hands a pane from its run to its workspace (see workspaceOwned). */
   transferToWorkspace(paneId: string): boolean {
     const terminal = this.active.get(paneId) ?? this.exited.get(paneId);
-    if (!terminal) return false;
+    if (!terminal || this.ownerKept?.(paneId)) return false;
     if (!terminal.workspaceOwned) terminal.adoptedFromRunId = terminal.runId;
     terminal.runId = null;
     terminal.retention = "service";

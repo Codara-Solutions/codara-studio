@@ -122,7 +122,9 @@ export function agentSessionCommand(input: {
   ];
   // Nobody can answer Codex's trust prompt for an agent started this way.
   if (input.runtime === "codex" && input.codexTrust) parts.push("-c", shellQuote(input.codexTrust, platform));
+  // After `--`, a brief that opens with a dash is still the brief.
   parts.push(
+    "--",
     platform === "win32"
       ? shellQuote(`Read the file ${input.briefPath} and do what it says.`, platform)
       : `"$(cat ${shellQuote(input.briefPath, platform)})"`,
@@ -314,6 +316,10 @@ export class AgentSessions {
 
   private forPane(paneId: string): AgentSessionRecord[] {
     return [...this.records.values()].filter((record) => record.paneId === paneId);
+  }
+
+  holdsPane(paneId: string): boolean {
+    return this.forPane(paneId).some((record) => record.closedAt === null);
   }
 
   /** A turn ended in the session's pane: the answer, or how it failed. */

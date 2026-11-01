@@ -766,6 +766,11 @@ async function main() {
     assert.equal(registry.isActiveOwnedBy("pane-a", null), false);
     assert.equal(registry.transferToWorkspace("pane-a"), true);
     assert.equal(registry.transferToWorkspace("pane-missing"), false);
+    registry.register({ paneId: "pane-session", tabId: "tab-s", runId: null, retention: "service", ownerProcess: "1@1" });
+    registry.keepOwnerOf((paneId) => paneId === "pane-session");
+    assert.equal(registry.transferToWorkspace("pane-session"), false, "a session stays its starter's");
+    assert.equal(registry.isActiveOwnedBy("pane-session", null, { process: "2@2" }), false);
+    assert.equal(registry.isActiveOwnedBy("pane-session", null, { process: "1@1" }), true);
     assert.deepEqual(registry.listForRun("run-1"), [], "run cleanup would still close it");
     assert.equal(registry.isActiveOwnedBy("pane-a", "run-1"), true);
     assert.equal(registry.isActiveOwnedBy("pane-a", null), true);
