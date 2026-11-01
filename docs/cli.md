@@ -54,9 +54,8 @@ a login.
 | 3 | The model reported `partial`, `blocked` or `failed`. A `complete` with a failed check counts as `partial`. |
 | 130 | Ctrl+C stopped the run while it waited for a usage limit to reset. The `cora_result` status is `stopped`. |
 
-The model reports its status with a tool call and answers in a normal reply, which is the
-`text` of `cora_result`. It can do both in one reply, with no other tool call, to save a
-request; a report with no text still gets a further turn for the reply. A session has one writer: a second `cora` on it stops with
+The model reports its status with a tool call and then answers in a normal reply, which is
+the `text` of `cora_result`. A session has one writer: a second `cora` on it stops with
 `session <id> is in use by another cora` after about 7 seconds, the time it takes to
 tell a live writer from one that died, whose session it then takes over. A process
 that loses its lock, for example when a laptop sleeps, stops and prints the `cora resume`

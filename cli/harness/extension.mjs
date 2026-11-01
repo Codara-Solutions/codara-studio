@@ -32,11 +32,8 @@ export function coraSystemPrompt({ exec }) {
 - This is a one-shot run: nobody can answer a question. Make the safest
   reversible assumption and state it.
 - When finished, call submit_result exactly once with an honest status, then
-  write your closing message as a normal reply. Better, once you have seen the
-  result of your last edit or check, write the closing message and call
-  submit_result in that same reply, as its only tool call, with
-  closing_included true: the run ends there without another turn. Use partial
-  when any requested part is unfinished or unverified.
+  write your closing message as a normal reply. Use partial when any requested
+  part is unfinished or unverified.
 - That reply is all the reader sees, so it holds the whole answer at full
   length. Copy code, diffs and output exactly from what you read, never from
   memory. submit_result is never shown to the reader, so that reply still ends
@@ -80,31 +77,19 @@ function registerSessionLock(pi, locks) {
   });
 }
 
-/** The report ends the run only when nothing is left to see: its reply already
- * holds the closing message, and no other call in it has a result to come. */
-export function reportEndsRun(message, closingIncluded) {
-  const calls = message?.content?.filter((part) => part.type === "toolCall") ?? [];
-  return closingIncluded === true && calls.length === 1 && Boolean(textOf(message));
-}
-
 function registerSubmitResult(pi, run) {
   pi.registerTool({
     name: "submit_result",
     label: "Submit result",
     description:
       "Record the honest result of this one-shot run. Call once, after edits and focused checks, then write " +
-      "your closing message as a normal reply, or put it in this same reply and set closing_included.",
+      "your closing message as a normal reply.",
     promptSnippet: "Record the outcome, before your closing message",
     parameters: {
       type: "object",
       required: ["status"],
       properties: {
         status: { type: "string", enum: REPORTED_STATUSES },
-        closing_included: {
-          type: "boolean",
-          description:
-            "True when the text of this same reply is your whole closing message, ending with any closing line the user asked for, and this is its only tool call. The run then ends here.",
-        },
         files_changed: {
           type: "array",
           items: {
@@ -130,15 +115,11 @@ function registerSubmitResult(pi, run) {
       },
       additionalProperties: false,
     },
-    async execute(_toolCallId, { closing_included: closingIncluded, ...params }) {
+    async execute(_toolCallId, params) {
       const reported = REPORTED_STATUSES.includes(params.status) ? params.status : "failed";
       const failedCheck = params.checks?.some((check) => check.result === "failed");
       const status = reported === "complete" && failedCheck ? "partial" : reported;
       run.report = { ...params, status };
-      if (reportEndsRun(run.last, closingIncluded)) {
-        run.endedOnReport = true;
-        return { content: [{ type: "text", text: `Result recorded (${status}).` }], details: { status }, terminate: true };
-      }
       return {
         content: [{ type: "text", text: `Result recorded (${status}). Now write your closing message as a normal reply.` }],
         details: { status },

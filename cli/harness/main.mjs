@@ -235,9 +235,8 @@ function modelOutcome(run) {
   return { status: "unreported", exitCode: 0 };
 }
 
-/** Pi prints a final assistant message, and a run that ends on its report has none. */
-function piPrintedClosing({ last, endedOnReport }) {
-  return !endedOnReport && Boolean(last?.content?.some((part) => part.type === "text" && part.text.trim()));
+function lastMessageSpoke({ last }) {
+  return Boolean(last?.content?.some((part) => part.type === "text" && part.text.trim()));
 }
 
 /**
@@ -450,7 +449,7 @@ async function runAgent(cli, pi, home) {
   run.finished = true;
   if (!cli.json) {
     // Pi prints only the last message, which can be empty after the report.
-    if (run.closing && !piPrintedClosing(run)) process.stdout.write(`${run.closing}\n`);
+    if (run.closing && !lastMessageSpoke(run)) process.stdout.write(`${run.closing}\n`);
     if (result.exitCode === 3) process.stderr.write(`cora: the model reported ${result.status}\n`);
     // Pi already printed a provider error.
     if (result.error && (run.waitStopped || run.last?.stopReason !== "error")) process.stderr.write(`cora: ${result.error}\n`);
