@@ -13,14 +13,16 @@
 //      fails rather than starting forever.
 //   2. The brief reaches the agent as one argument whatever it holds: the
 //      real shell gets it byte for byte through the command line, which names
-//      only the private file. Windows reads the file instead.
+//      only the private file. Windows reads the file instead. A shell that
+//      cannot report back is refused.
 //   3. Requests are validated: runtime, effort, a model that could read as a
 //      flag, an oversized or empty brief.
 //   4. Records survive a new store, are mode 600, are found only from the
 //      caller's workspace (or its own process with none), keep the whole final
 //      message for one session and a cut one in a list, and a broken file
 //      reads as none. Briefs are removed once the first turn ended, and left
-//      overs at load.
+//      overs at load. History is bounded, but a session with an open tab
+//      keeps its record, and the largest history reads back.
 //   5. The cap on live sessions holds for starts made together.
 //   6. A wait returns on the first settled session (any), on the last (all),
 //      on a timeout with the sessions still running, and when its client went.
@@ -190,6 +192,11 @@ function tempDir() {
   assert.match(windows, /Read the file C:\\Users\\o''b\\brief\.md/, "PowerShell doubles a quote");
   assert.ok(!windows.includes("$("), "PowerShell gets no POSIX substitution");
 
+  for (const family of ["bash", "zsh", "pwsh", "powershell"]) assert.equal(sessions.agentSessionShellRefusal(family), null);
+  for (const family of ["fish", "sh", "cmd", "wsl", "other"]) {
+    assert.match(sessions.agentSessionShellRefusal(family), /need bash, zsh or PowerShell/, `${family} cannot report back`);
+  }
+
   // 3. Validation.
   const ok = sessions.parseAgentSessionStart({ brief: "First line\nmore", runtime: "codex" });
   assert.equal(ok.title, "First line");
@@ -249,6 +256,41 @@ function tempDir() {
   assert.deepEqual(again.visibleTo({ workspaceId: null, process: null }), [], "nobody identified sees nothing");
   assert.equal(again.holdsPane("pane-1"), true, "a session keeps its pane");
   assert.equal(again.holdsPane("pane-other"), false);
+  // History is bounded, but never by dropping a session whose tab is open.
+  const pruneDir = tempDir();
+  const openPanes = new Set(["pane-open"]);
+  let pruneNow = T0;
+  const pruning = new sessions.AgentSessions({
+    dir: pruneDir,
+    live: (paneId) => (openPanes.has(paneId) ? live() : null),
+    now: () => pruneNow,
+    bootAt: T0 - 1,
+  });
+  await pruning.load();
+  await pruning.add(record({ id: "as-open", paneId: "pane-open" }));
+  await pruning.add(record({ id: "as-gone", paneId: "pane-gone" }));
+  for (let index = 0; index < 205; index += 1) {
+    await pruning.add(record({ id: `as-bulk-${index}`, paneId: `pane-bulk-${index}`, startedAt: T0 + index + 1 }));
+  }
+  assert.equal(pruning.get("as-gone"), null, "the oldest closed session goes when history is full");
+  assert.equal(pruning.holdsPane("pane-open"), true, "an open tab keeps its record past the limit");
+  pruneNow = T0 + 31 * 24 * 60 * 60_000;
+  await pruning.add(record({ id: "as-new", paneId: "pane-new", startedAt: pruneNow }));
+  assert.equal(pruning.holdsPane("pane-open"), true, "and past the age limit");
+  assert.equal(pruning.get("as-bulk-1"), null);
+  await pruning.flush();
+  // The largest history that can be written can also be read back.
+  const bigDir = tempDir();
+  const big = new sessions.AgentSessions({ dir: bigDir, live: () => null, now: () => T0, bootAt: T0 - 1 });
+  await big.load();
+  for (let index = 0; index < 200; index += 1) {
+    await big.add(record({ id: `as-${index}`, paneId: `pane-${index}`, startedAt: T0 + index, finalMessage: "界".repeat(16_000) }));
+  }
+  await big.flush();
+  const reread = new sessions.AgentSessions({ dir: bigDir, live: () => null, now: () => T0, bootAt: T0 - 1 });
+  await reread.load();
+  assert.equal(reread.get("as-199").finalMessage.length, 16_000, "a full history survives a restart");
+  assert.ok(fs.statSync(path.join(bigDir, sessions.AGENT_SESSIONS_FILE)).size > 8 * 1024 * 1024);
 
   const leftover = path.join(storeDir, sessions.AGENT_SESSION_BRIEFS_DIR, "as-gone.md");
   fs.writeFileSync(leftover, "x");

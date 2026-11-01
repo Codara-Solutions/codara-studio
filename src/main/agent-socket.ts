@@ -44,6 +44,7 @@ import {
   AgentSessions,
   agentSessionCommand,
   agentSessionMessageRefusal,
+  agentSessionShellRefusal,
   agentSessionWaitMs,
   parseAgentSessionStart,
   type AgentSessionCaller,
@@ -65,6 +66,7 @@ import {
   registerAgentTerminal,
 } from "./agent-terminal-lifecycle";
 import { serversService } from "./servers/service";
+import { defaultShell } from "./shells";
 import { loadPreferences, setPreference } from "./preferences-store";
 import { loadSettings, loadState, saveState, updateState } from "./storage";
 import { assertAllowedReadPathResolved, setAllowedRoots } from "./fs-sandbox";
@@ -2118,6 +2120,8 @@ async function handleSessionStart(
   if (!workspace) {
     return errorResponse(id, ERR_INVALID_PARAMS, "Codara could not tell which workspace you run in; pass workspace");
   }
+  const shellRefusal = agentSessionShellRefusal((await defaultShell())?.family ?? null);
+  if (shellRefusal) return errorResponse(id, ERR_INVALID_PARAMS, shellRefusal);
   const release = sessions.reserve();
   if (!release) {
     return errorResponse(

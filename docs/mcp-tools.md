@@ -893,6 +893,8 @@ Rules:
   session with `codara_terminal_write`.
 - At most 12 sessions run at once, so a caller in a loop cannot run up your
   subscription.
+- A session needs bash, zsh or PowerShell as the terminal shell: agents report
+  to Codara through what those shells load.
 - A session keeps running when its caller ends. One started from a Cora chat
   stays until you close it or delete that chat.
 - A session never wakes its caller: the caller finds out with

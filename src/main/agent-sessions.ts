@@ -41,7 +41,8 @@ export const AGENT_SESSION_BRIEFS_DIR = "agent-session-briefs";
 const FILE_VERSION = 1;
 const MAX_RECORDS = 200;
 const MAX_RECORD_AGE_MS = 30 * 24 * 60 * 60_000;
-const MAX_FILE_BYTES = 8 * 1024 * 1024;
+// Every record at its longest answer, in three-byte text, fits well inside this.
+const MAX_FILE_BYTES = 32 * 1024 * 1024;
 const WAIT_POLL_MS = 500;
 const MAX_EARLY_TURN_ENDS = 32;
 // The value lands in a shell line, quoted: a leading dash would still read as a flag.
@@ -130,6 +131,15 @@ export function agentSessionCommand(input: {
       : `"$(cat ${shellQuote(input.briefPath, platform)})"`,
   );
   return parts.join(" ");
+}
+
+// Agents report to Codara through the wrappers these shells load. Anywhere else
+// a session would run with no tools and nothing would come back.
+const SHELLS_WITH_AGENT_REPORTS: ReadonlySet<string> = new Set(["bash", "zsh", "pwsh", "powershell"]);
+
+export function agentSessionShellRefusal(family: string | null): string | null {
+  if (family === null || SHELLS_WITH_AGENT_REPORTS.has(family)) return null;
+  return `sessions need bash, zsh or PowerShell as the terminal shell; this one is ${family}`;
 }
 
 export interface AgentSessionView {
@@ -232,7 +242,6 @@ export class AgentSessions {
         this.deps.log?.("agent-sessions: unreadable record file, starting empty");
       }
     }
-    this.prune();
     // A brief is needed only until its first turn ends. A crash can leave one
     // behind, and a brief is private text with no other reader.
     const dir = join(this.deps.dir, AGENT_SESSION_BRIEFS_DIR);
@@ -245,15 +254,20 @@ export class AgentSessions {
     }
   }
 
+  // A session with an open tab keeps its record however old: the record is what
+  // keeps that pane its starter's. Panes are not known yet while loading, so
+  // nothing is dropped until the next session starts.
   private prune(): void {
+    const closed = [...this.records.values()]
+      .filter((record) => record.closedAt !== null || this.deps.live(record.paneId) === null)
+      .sort((a, b) => a.startedAt - b.startedAt);
     const cutoff = this.now() - MAX_RECORD_AGE_MS;
-    for (const record of this.records.values()) {
-      if (record.startedAt < cutoff) this.records.delete(record.id);
+    let excess = this.records.size - MAX_RECORDS;
+    for (const record of closed) {
+      if (record.startedAt >= cutoff && excess <= 0) break;
+      this.records.delete(record.id);
+      excess -= 1;
     }
-    const excess = this.records.size - MAX_RECORDS;
-    if (excess <= 0) return;
-    const oldest = [...this.records.values()].sort((a, b) => a.startedAt - b.startedAt);
-    for (const record of oldest.slice(0, excess)) this.records.delete(record.id);
   }
 
   private persist(): Promise<void> {
