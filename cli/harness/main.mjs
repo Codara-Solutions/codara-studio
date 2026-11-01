@@ -239,6 +239,24 @@ function lastMessageSpoke({ last }) {
   return Boolean(last?.content?.some((part) => part.type === "text" && part.text.trim()));
 }
 
+/**
+ * The settings manager Pi's session runs on, the one that has passed project trust,
+ * which an extension is never given. Pi reads the shell prefix from it to build its
+ * tools. Reading any other manager would let an untrusted repo pick the shell.
+ */
+function runtimeSettings(SettingsManager) {
+  const read = SettingsManager.prototype.getShellCommandPrefix;
+  let current = null;
+  SettingsManager.prototype.getShellCommandPrefix = function getShellCommandPrefix() {
+    current = this;
+    return read.call(this);
+  };
+  return () => {
+    if (!current) throw new Error("this version of Pi no longer reads its shell settings: update runtimeSettings");
+    return current;
+  };
+}
+
 /** Mirrors how Pi picks the first active tools: --tools, then the rest. */
 function bashStartsOff({ passthrough }, defaultTools) {
   if (passthrough.includes("--tools")) return false;
@@ -358,7 +376,6 @@ async function runAgent(cli, pi, home) {
   const baseUrl = process.env.CORA_BASE_URL?.trim();
   useCoraRuntime(pi, home, routes, catalog, baseUrl && model?.provider ? { [model.provider]: baseUrl } : {});
 
-  const piSettings = pi.SettingsManager.create(process.cwd(), home);
   const run = {
     report: null,
     last: null,
@@ -375,7 +392,7 @@ async function runAgent(cli, pi, home) {
     json: Boolean(cli.json),
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     progress: exec && !cli.json && process.stderr.isTTY,
-    streamTimeoutMs: piSettings.getHttpIdleTimeoutMs(),
+    streamTimeoutMs: pi.SettingsManager.create(process.cwd(), home).getHttpIdleTimeoutMs(),
   };
   if (exec) failIfUnfinished(run, cli.json);
   rememberPiErrors(run);
@@ -416,12 +433,11 @@ async function runAgent(cli, pi, home) {
         limitWait: limitWaitSettings(settings.limitWait, cli.noLimitWait),
         bash: {
           limits: bashTimeoutSettings(settings.bashTimeout),
-          startsOff: bashStartsOff(cli, piSettings.getDefaultTools()),
           engine: {
             createBashToolDefinition: pi.createBashToolDefinition,
             createLocalBashOperations: pi.createLocalBashOperations,
-            shellPath: piSettings.getShellPath(),
-            commandPrefix: piSettings.getShellCommandPrefix(),
+            settings: runtimeSettings(pi.SettingsManager),
+            startsOff: (settings) => bashStartsOff(cli, settings.getDefaultTools()),
           },
         },
       }),

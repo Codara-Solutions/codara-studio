@@ -7,18 +7,19 @@
 const DEFAULT_SECONDS = 300;
 /** Past this a job belongs in the background, where a long build still works. */
 const MAX_SECONDS = 1800;
-/** What Pi's timer takes in seconds (2^31 - 1 ms). */
-const LARGEST_SECONDS = 2_147_483;
 /** Time for Pi's own kill to end the call before this one stops waiting for it. */
 const HARD_STOP_MS = 2000;
+/** What a timer can hold (2^31 - 1 ms), the hard stop included. */
+const LARGEST_SECONDS = Math.floor((2_147_483_647 - HARD_STOP_MS) / 1000);
 
 const positive = (value, fallback) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? value : fallback);
 
 /** @param value  `bashTimeout` from settings.json: { defaultSeconds, maxSeconds } */
 export function bashTimeoutSettings(value) {
-  const defaultSeconds = Math.min(positive(value?.defaultSeconds, DEFAULT_SECONDS), LARGEST_SECONDS);
-  // A longer default than the maximum means the owner wants more, not less.
-  return { defaultSeconds, maxSeconds: Math.min(Math.max(positive(value?.maxSeconds, MAX_SECONDS), defaultSeconds), LARGEST_SECONDS) };
+  const wanted = positive(value?.defaultSeconds, DEFAULT_SECONDS);
+  // A maximum someone set is a promise. Only the built-in one gives way to a long default.
+  const maxSeconds = Math.min(positive(value?.maxSeconds, Math.max(MAX_SECONDS, wanted)), LARGEST_SECONDS);
+  return { defaultSeconds: Math.min(wanted, maxSeconds), maxSeconds };
 }
 
 export function callLimit(requested, { defaultSeconds, maxSeconds }) {
@@ -50,18 +51,27 @@ function operations({ exec }) {
  * Replaces Pi's bash tool with the same tool under a limit. The description and the
  * parameter both say so, because Pi's say there is no default. Pi turns on every
  * tool an extension adds, so one that was off has to be turned off again.
- * @param engine  { createBashToolDefinition, createLocalBashOperations, shellPath, commandPrefix }
+ * @param engine  { createBashToolDefinition, createLocalBashOperations, settings, startsOff }
+ *   `settings()` is the settings manager of the running session, and `startsOff(it)`
+ *   says that no setting or flag left bash on
  * @param limits  from bashTimeoutSettings
- * @param startsOff  no setting or flag left bash on for this session
  */
-export function registerBashLimit(pi, engine, limits, startsOff) {
-  const { shellPath, commandPrefix } = engine;
-  if (startsOff) pi.on("session_start", () => pi.setActiveTools(pi.getActiveTools().filter((name) => name !== "bash")));
-  const bash = engine.createBashToolDefinition(process.cwd(), {
-    shellPath,
-    commandPrefix,
-    operations: operations(engine.createLocalBashOperations({ shellPath })),
+export function registerBashLimit(pi, engine, limits) {
+  const { createBashToolDefinition, createLocalBashOperations, settings, startsOff } = engine;
+  pi.on("session_start", () => {
+    if (startsOff(settings())) pi.setActiveTools(pi.getActiveTools().filter((name) => name !== "bash"));
   });
+  const bash = createBashToolDefinition(process.cwd());
+  /** Built per call from the session's settings, which have passed Pi's project
+   * trust check by then. This extension loads before that check. */
+  const trustedBash = () => {
+    const shellPath = settings().getShellPath();
+    return createBashToolDefinition(process.cwd(), {
+      shellPath,
+      commandPrefix: settings().getShellCommandPrefix(),
+      operations: operations(createLocalBashOperations({ shellPath })),
+    });
+  };
   pi.registerTool({
     ...bash,
     description: bash.description.replace(
@@ -80,7 +90,7 @@ export function registerBashLimit(pi, engine, limits, startsOff) {
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const timeout = callLimit(params.timeout, limits);
       try {
-        return await bash.execute(toolCallId, { ...params, timeout }, signal, onUpdate, ctx);
+        return await trustedBash().execute(toolCallId, { ...params, timeout }, signal, onUpdate, ctx);
       } catch (error) {
         const status = `Command timed out after ${timeout} seconds`;
         if (error.message?.endsWith(status)) error.message = `${error.message.slice(0, -status.length)}${timedOutLine(timeout)}`;

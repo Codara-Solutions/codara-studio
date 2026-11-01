@@ -131,13 +131,13 @@ function registerSubmitResult(pi, run) {
  * @param options.compaction  { state, config, engine } for registerCompaction
  * @param options.locks  this process's session locks
  * @param options.limitWait  from limitWaitSettings
- * @param options.bash  { engine, limits, startsOff } for registerBashLimit
+ * @param options.bash  { engine, limits } for registerBashLimit
  */
 export function coraExtension(run, { exec, mcpConfig, compaction, locks, limitWait, bash }) {
   return async (pi) => {
     registerCompaction(pi, run, { exec, ...compaction });
     if (exec) registerSubmitResult(pi, run);
-    registerBashLimit(pi, bash.engine, bash.limits, bash.startsOff);
+    registerBashLimit(pi, bash.engine, bash.limits);
     registerSessionLock(pi, locks);
     const waits = registerLimitWait(pi, run, { settings: limitWait, locks });
 

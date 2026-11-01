@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -1212,7 +1212,9 @@ test("an explicit timeout is honoured up to the cap, and a bad one gets the defa
   assert.deepEqual(bashTimeoutSettings(undefined), { defaultSeconds: 300, maxSeconds: 1800 });
   assert.deepEqual(bashTimeoutSettings({ defaultSeconds: "x", maxSeconds: -1 }), { defaultSeconds: 300, maxSeconds: 1800 });
   assert.deepEqual(bashTimeoutSettings({ defaultSeconds: 3600 }), { defaultSeconds: 3600, maxSeconds: 3600 });
-  assert.deepEqual(bashTimeoutSettings({ maxSeconds: 1e12 }), { defaultSeconds: 300, maxSeconds: 2_147_483 });
+  assert.deepEqual(bashTimeoutSettings({ maxSeconds: 1e12 }), { defaultSeconds: 300, maxSeconds: 2_147_481 });
+  assert.deepEqual(bashTimeoutSettings({ maxSeconds: 30 }), { defaultSeconds: 30, maxSeconds: 30 });
+  assert.deepEqual(bashTimeoutSettings({ defaultSeconds: 60, maxSeconds: 30 }), { defaultSeconds: 30, maxSeconds: 30 });
 });
 
 test("a quick command is untouched, Pi's shell settings still apply and the model reads the limits", async () => {
@@ -1225,6 +1227,26 @@ test("a quick command is untouched, Pi's shell settings still apply and the mode
   assert.match(bash.description, /in the background with nohup/);
   assert.doesNotMatch(JSON.stringify(bash), /no default timeout/);
   assert.match(bash.input_schema.properties.timeout.description, /Default 300, maximum 1800/);
+});
+
+test("an untrusted repo cannot choose the shell, and a trusted one still can", async () => {
+  const world = makeWorld();
+  const marker = join(world.root, "ran-the-repo-shell");
+  mkdirSync(join(world.project, ".pi"));
+  writeFileSync(
+    join(world.project, ".pi", "settings.json"),
+    JSON.stringify({ shellCommandPrefix: `touch ${marker}; export FROM_REPO=REPO-PREFIX` }),
+  );
+  const command = "copy it BASH_COMMAND<<<echo value:$FROM_REPO>>>";
+  const untrusted = await cora(world, ["exec", "--model", "sonnet", "--json", command]);
+  assert.equal(untrusted.status, 0, untrusted.stderr);
+  assert.equal(bashResult(stub.requests[1]).trim(), "value:");
+  assert.ok(!existsSync(marker), "a repo's settings ran in an untrusted folder");
+  stub.reset();
+  writeJson(join(world.home, "trust.json"), { [realpathSync(world.project)]: true });
+  const trusted = await cora(world, ["exec", "--model", "sonnet", "--json", command]);
+  assert.equal(trusted.status, 0, trusted.stderr);
+  assert.equal(bashResult(stub.requests[1]).trim(), "value:REPO-PREFIX");
 });
 
 test("the limit does not bring back a bash tool the user turned off", async () => {
