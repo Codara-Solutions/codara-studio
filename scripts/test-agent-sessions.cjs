@@ -291,6 +291,26 @@ function tempDir() {
   await reread.load();
   assert.equal(reread.get("as-199").finalMessage.length, 16_000, "a full history survives a restart");
   assert.ok(fs.statSync(path.join(bigDir, sessions.AGENT_SESSIONS_FILE)).size > 8 * 1024 * 1024);
+  // Open tabs are not counted, so with enough of them the oldest answers go,
+  // never the records: the file stays readable and each pane stays its starter's.
+  const hugeDir = tempDir();
+  const seeded = Array.from({ length: 685 }, (_, index) =>
+    record({ id: `as-${index}`, paneId: `pane-${index}`, startedAt: T0 + index, finalMessage: "界".repeat(16_000) }),
+  );
+  fs.writeFileSync(path.join(hugeDir, sessions.AGENT_SESSIONS_FILE), JSON.stringify({ version: 1, sessions: seeded }));
+  const hugeOptions = { dir: hugeDir, live: () => live(), now: () => T0 + 1_000, bootAt: T0 - 1 };
+  const huge = new sessions.AgentSessions(hugeOptions);
+  await huge.load();
+  for (let index = 685; index < 715; index += 1) {
+    await huge.add(record({ id: `as-${index}`, paneId: `pane-${index}`, startedAt: T0 + index, finalMessage: "界".repeat(16_000) }));
+  }
+  await huge.flush();
+  assert.ok(fs.statSync(path.join(hugeDir, sessions.AGENT_SESSIONS_FILE)).size <= 32 * 1024 * 1024);
+  const hugeAgain = new sessions.AgentSessions(hugeOptions);
+  await hugeAgain.load();
+  assert.equal(hugeAgain.holdsPane("pane-0"), true, "the oldest record survives without its answer");
+  assert.equal(hugeAgain.get("as-0").finalMessage, null);
+  assert.equal(hugeAgain.get("as-714").finalMessage.length, 16_000, "the newest answer stays");
 
   const leftover = path.join(storeDir, sessions.AGENT_SESSION_BRIEFS_DIR, "as-gone.md");
   fs.writeFileSync(leftover, "x");

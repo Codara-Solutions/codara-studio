@@ -270,8 +270,24 @@ export class AgentSessions {
     }
   }
 
+  // Open tabs keep their records past MAX_RECORDS, so with enough of them the
+  // oldest answers give way and the file stays readable at the next start.
+  private serialized(): string {
+    const write = (): string => `${JSON.stringify({ version: FILE_VERSION, sessions: [...this.records.values()] })}\n`;
+    let body = write();
+    if (Buffer.byteLength(body) <= MAX_FILE_BYTES) return body;
+    const oldest = [...this.records.values()].sort((a, b) => a.startedAt - b.startedAt);
+    for (const record of oldest) {
+      if (record.finalMessage === null) continue;
+      record.finalMessage = null;
+      body = write();
+      if (Buffer.byteLength(body) <= MAX_FILE_BYTES) break;
+    }
+    return body;
+  }
+
   private persist(): Promise<void> {
-    const body = `${JSON.stringify({ version: FILE_VERSION, sessions: [...this.records.values()] })}\n`;
+    const body = this.serialized();
     const next = this.writes.then(
       () => writeFileAtomic(this.file, body, { mode: 0o600 }),
       () => writeFileAtomic(this.file, body, { mode: 0o600 }),

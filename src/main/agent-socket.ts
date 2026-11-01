@@ -2098,6 +2098,10 @@ async function agentSessionCallerRefusal(
   return trust === "trusted" ? null : "an agent in an imported pull request cannot start sessions";
 }
 
+function sessionCapMessage(): string {
+  return `${AGENT_SESSION_MAX_LIVE} sessions are already running; wait for one to finish or ask the user`;
+}
+
 async function handleSessionStart(
   params: Record<string, unknown>,
   id: JsonRpcId,
@@ -2124,11 +2128,7 @@ async function handleSessionStart(
   if (shellRefusal) return errorResponse(id, ERR_INVALID_PARAMS, shellRefusal);
   const release = sessions.reserve();
   if (!release) {
-    return errorResponse(
-      id,
-      ERR_INVALID_PARAMS,
-      `${AGENT_SESSION_MAX_LIVE} sessions are already running; wait for one to finish or ask the user`,
-    );
+    return errorResponse(id, ERR_INVALID_PARAMS, sessionCapMessage());
   }
   const sessionId = `as-${randomUUID()}`;
   try {
@@ -2281,6 +2281,10 @@ async function handleSessionMessage(params: Record<string, unknown>, id: JsonRpc
     now: Date.now(),
   });
   if (refusal) return errorResponse(id, ERR_INVALID_PARAMS, refusal);
+  // Nothing below awaits before the prompt is recorded, so a check is enough.
+  const release = sessions.reserve();
+  if (!release) return errorResponse(id, ERR_INVALID_PARAMS, sessionCapMessage());
+  release();
   try {
     pty.inject(paneId, text, { submit: true, stashDraft: record.runtime === "claude" });
   } catch (err) {
