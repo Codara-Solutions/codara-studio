@@ -28,6 +28,10 @@ const MAX_ANCESTOR_DEPTH = 128;
 // Swap moves slowly and /proc/<pid>/status is the costliest file read here,
 // so each process's figure is reused for a few seconds.
 const SWAP_REREAD_MS = 3_000;
+// A process keeps its environment for life unless it execs, and an exec into
+// a program of the same name looks the same from here, so it is reread now and
+// then rather than once. Every outside process is read, so not on each sample.
+const ORIGIN_REREAD_MS = 30_000;
 // PF_KTHREAD in /proc/<pid>/stat's flags.
 const LINUX_KERNEL_THREAD = 0x00200000;
 
@@ -449,23 +453,32 @@ export function processOwners<T extends OwnedProcess>(
   const livePanes = new Set(paneByPid.values());
   const owners = new Map<number, OwnerKey>();
   // A pane id this window does not have is not yet a closed pane: a second
-  // Studio's live panes look the same. Only when init holds the top of the
-  // processes carrying that id is nothing left above them.
+  // Studio's live panes carry unknown ids too, and a child one of them detached
+  // sits under init like any orphan. Its pane still shows, though: a process
+  // carrying that id has a parent that is alive, is not init and does not carry
+  // it, which is the pane's own Studio. Only an id with nothing held that way
+  // is closed; a parent that cannot be read counts as held, so doubt stays in
+  // Other apps.
+  let heldPanes: Set<string> | null = null;
+  const isHeld = (paneId: string): boolean => {
+    if (!heldPanes) {
+      heldPanes = new Set();
+      for (const entry of processes) {
+        const id = originOf(entry)?.paneId;
+        if (!id || livePanes.has(`pane:${id}`) || entry.ppid <= 1) continue;
+        const above = byPid.get(entry.ppid);
+        if (above?.name && INIT_NAMES.has(above.name)) continue;
+        if (!above || originOf(above)?.paneId !== id) heldPanes.add(id);
+      }
+    }
+    return heldPanes.has(paneId);
+  };
   const ownerByOrigin = (entry: T): OwnerKey | null => {
     const paneId = originOf(entry)?.paneId;
     if (!paneId) return null;
     const pane = `pane:${paneId}`;
     if (livePanes.has(pane)) return pane;
-    let top = entry;
-    for (let depth = 0; depth < MAX_ANCESTOR_DEPTH; depth += 1) {
-      if (top.ppid <= 1) return `${LEFT_RUNNING_PREFIX}${paneId}`;
-      const above = byPid.get(top.ppid);
-      if (!above) return null;
-      if (above.name && INIT_NAMES.has(above.name)) return `${LEFT_RUNNING_PREFIX}${paneId}`;
-      if (originOf(above)?.paneId !== paneId) return null;
-      top = above;
-    }
-    return null;
+    return isHeld(paneId) ? null : `${LEFT_RUNNING_PREFIX}${paneId}`;
   };
   for (const { pid } of processes) {
     if (owners.has(pid)) continue;
@@ -683,7 +696,7 @@ export class ProcessSampler {
   private readonly platform: NodeJS.Platform;
   private readonly now: () => number;
   private readonly descriptions = new Map<string, { name: string; command: string }>();
-  private readonly origins = new Map<string, ProcessOrigin | null>();
+  private readonly origins = new Map<string, { at: number; origin: ProcessOrigin | null }>();
   private readonly pendingMac = new Map<number, { key: string; name: string }>();
   private pageSize: number | null = null;
   private readonly privatePages: PrivatePagesCache = { entries: new Map() };
@@ -855,15 +868,14 @@ export class ProcessSampler {
     return described;
   }
 
-  // environ is fixed at exec, and an exec changes the key, so one read lasts
-  // the process's life however many samples ask.
   private originOf(entry: MeasuredProcess): ProcessOrigin | null {
     if (this.platform !== "linux" || entry.kernelThread) return null;
     const key = descriptionKey(entry);
+    const now = this.now();
     const known = this.origins.get(key);
-    if (known !== undefined) return known;
+    if (known && now - known.at < ORIGIN_REREAD_MS) return known.origin;
     const origin = readLinuxProcessOrigin(entry.pid, this.options.procRoot);
-    this.origins.set(key, origin);
+    this.origins.set(key, { at: now, origin });
     return origin;
   }
 

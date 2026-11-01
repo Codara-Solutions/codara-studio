@@ -266,9 +266,10 @@ Manager for a list that adds up to its headline.
   machine, or a left-running row using a full core. Such a row opens by itself
   so what it runs shows without a click. No green and no colour for "fine".
 - What a closed pane left running is named by what it is ("sh ×24 left
-  running"), then its agent and workspace if they are known. Say "no open
-  terminal", never "terminal closed": a second Studio's pane looks the same from
-  here. Nothing about it is made up: an unknown owner is left out.
+  running"), then its agent and workspace if they are known. It says "no open
+  terminal", which is all Studio knows. Nothing about it is made up: an unknown
+  owner is left out, and a process that might still have a pane, such as one
+  from a second Studio, stays in Other apps.
 
 **Ownership:** `SPARK_PANE_ID` is inherited through `setsid` and reparenting, so
 Linux can still name the pane after the parent, the session and the pane are

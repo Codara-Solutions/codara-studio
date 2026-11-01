@@ -818,6 +818,11 @@ fs.chmodSync(fakeNvidiaSmi, 0o755);
       write(900, { name: "electron", ppid: 1 });
       write(901, { name: "zsh", ppid: 900, env: { SPARK_PANE_ID: "pane-of-another-studio" } });
       write(902, { name: "node", ppid: 901, sid: 901, env: { SPARK_PANE_ID: "pane-of-another-studio" }, ticks });
+      // That pane detached a child: init holds it, yet its pane is still open.
+      write(903, { name: "python", ppid: 1, sid: 903, env: { SPARK_PANE_ID: "pane-of-another-studio" }, ticks });
+      // Its parent is unreadable, so nothing proves the pane closed.
+      write(904, { name: "node", ppid: 905, sid: 904, env: { SPARK_PANE_ID: "pane-held-by-root" }, ticks });
+      write(905, { name: "sudo", ppid: 1, sid: 905, env: {} });
       write(950, { name: "chrome", ppid: 1, ticks });
       write(960, { name: "kswapd0", ppid: 1, kernel: true });
     };
@@ -846,18 +851,21 @@ fs.chmodSync(fakeNvidiaSmi, 0o755);
     );
     const other = sampled.groups.find((group) => group.owner === "outside");
     assert.deepEqual(
-      other.apps.map((app) => app.name).sort(),
-      ["chrome", "electron", "kernel", "node", "systemd", "zsh"].sort(),
-      "another Studio's live pane stays with the other apps",
+      other.apps.filter((app) => app.cpuPercent > 0).map((app) => [app.name, app.processCount]).sort(),
+      [["chrome", 1], ["node", 2], ["python", 1]],
+      "another Studio's live pane stays with the other apps, even what it detached",
     );
+    assert.equal(sampled.groups.filter((group) => group.owner === "left-running").length, 1, "doubt stays in Other apps");
 
-    // Each process's environment is read once: nothing rereads it per sample.
-    const before = fs.readFileSync(path.join(proc, "800", "environ"), "utf8");
+    // An environment is not read on every sample, yet an exec into a program
+    // of the same name is noticed: pid, start time and name all stay the same.
     fs.writeFileSync(path.join(proc, "800", "environ"), "");
     clock += 1000;
     const again = await sampler.sample(roots);
-    assert.equal(again.groups.find((group) => group.owner === "left-running").processCount, 24);
-    fs.writeFileSync(path.join(proc, "800", "environ"), before);
+    assert.equal(again.groups.find((group) => group.owner === "left-running").processCount, 24, "reused between samples");
+    clock += 30_000;
+    const later = await sampler.sample(roots);
+    assert.equal(later.groups.find((group) => group.owner === "left-running").processCount, 23, "reread after a while");
 
     assert.deepEqual(metrics.parseProcessOrigin("A=1\0SPARK_PANE_ID=pane-1\0CLAUDECODE=1\0"), { paneId: "pane-1", runtime: "claude" });
     assert.deepEqual(metrics.parseProcessOrigin("SPARK_PANE_ID=pane-1\0CODEX_MANAGED_BY_NPM=1\0"), { paneId: "pane-1", runtime: "codex" });
