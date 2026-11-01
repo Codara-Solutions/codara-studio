@@ -35,7 +35,7 @@ and a turn that fails because an account is missing or signed out shows
 **Open accounts** next to **Retry**. From a terminal:
 
 ```sh
-cora auth add anthropic "Work Claude"
+cora studio auth add anthropic "Work Claude"
 ```
 
 The sign-in page opens in your browser and the command finishes in your
@@ -72,9 +72,9 @@ same account. Limits show once Cora is connected.
 Click **Switch to this account** on an account card, or run:
 
 ```sh
-cora auth list                          # every account, with a number
-cora auth use anthropic "Work Claude"   # or: cora auth use anthropic 2
-cora auth use anthropic system          # back to your own Claude Code login
+cora studio auth list                          # every account, with a number
+cora studio auth use anthropic "Work Claude"   # or: cora studio auth use anthropic 2
+cora studio auth use anthropic system          # back to your own Claude Code login
 ```
 
 This switches Cora and the terminal tool to that account together, in one
@@ -156,9 +156,9 @@ The account card's menu has **Rename** and **Remove**, and an expired
 account shows **Sign-in expired** with **Reconnect**. The CLI has the same:
 
 ```sh
-cora auth login anthropic "Work Claude"               # reconnect an expired sign-in
-cora auth rename anthropic "Work Claude" "Team Claude"
-cora auth remove anthropic "Team Claude"              # asks first; --yes skips the prompt
+cora studio auth login anthropic "Work Claude"               # reconnect an expired sign-in
+cora studio auth rename anthropic "Work Claude" "Team Claude"
+cora studio auth remove anthropic "Team Claude"              # asks first; --yes skips the prompt
 ```
 
 Removing an account asks once. A Codara account's sign-in is deleted from

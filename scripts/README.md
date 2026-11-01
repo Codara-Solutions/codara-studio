@@ -40,8 +40,11 @@ How `scripts/run-all-tests.cjs` works:
   - A file with a `// test-runner: heavy (why)` line never runs next to
     another heavy one. Tag a suite heavy when it launches Chromium or
     Electron, or when its process peaks above about 200 MB.
+  - A file with a `// test-runner: timeout=600` line gets that many seconds
+    instead of 180.
   - A file with a `// test-runner: serial (why)` line runs after the pool,
-    with nothing else running. Today that is `test-renderer-chunks.mjs` (a
+    with nothing else running. Today that is `test-cora-harness.mjs` (its
+    timing checks), `test-renderer-chunks.mjs` (a
     production Vite build, about 2 GB) and `test-workflow-sandbox.cjs` (its
     heap-limit case grows QuickJS's WebAssembly memory to 2 GB).
   - No suite starts while `MemAvailable` is below `CODARA_TEST_MIN_FREE_MB`
@@ -200,6 +203,7 @@ calls.
 | Suites | Covers |
 |---|---|
 | `test-pi-runtime`, `test-pi-backend-session-lifecycle`, `test-pi-rpc-client`, `test-pi-turn`, `test-pi-turn-cost`, `test-pi-mcp-config`, `test-pi-commit-message` | Starting Pi (`pi-runtime.ts`, `pi-runtime-electron.ts`), the RPC client, turns and their cost, the MCP bridge config. |
+| `test-cora-harness` | The standalone `cora` CLI end to end: a real child process against the stub model in `cora-stub-model.mjs`, in a throwaway HOME, with non-loopback network blocked. Exit codes, retries, resume, token refresh rules, MCP, and the terminal interface. |
 | `test-pi-cora-extension`, `test-pi-cora-abandonable-wait`, `test-repeat-guard`, `test-deep-search`, `test-whiteboard-review-extension`, `test-whiteboard-quality` | The Pi extension in `resources/pi-cora/`. |
 | `test-pi-manager-compaction`, `test-pi-worker-compaction`, `test-pi-manager-compaction-integration.mjs`, `test-pi-worker-compaction-integration.mjs` | Context compaction for the manager and for workers, including the mid-turn pause and the summary recovery ladder. |
 | `test-pi-fast-mode-fallback-integration.mjs` (with the fast-mode block in `test-pi-cora-extension`) | Fast mode for the manager and workers: request shaping per provider and model, and the standard-speed fallback through a real offline Pi session. |

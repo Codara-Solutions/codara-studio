@@ -136,11 +136,12 @@ export interface PiMcpDroppedServer {
  * Turn discovered runtime-agnostic entries into the exact roster the Pi bridge
  * connects to. Entries that cannot be launched (no command and no usable url),
  * explicitly disabled entries, and Codara's own built-in server are dropped
- * rather than surfaced as a broken connection at session start.
+ * rather than surfaced as a broken connection at session start. Cora alone runs
+ * without Studio's server, so `keepReservedNames` lets a user's server use those names.
  */
 export function normalizePiMcpServers(
   raw: readonly RawMcpServer[],
-  options: { cwd?: string; env?: NodeJS.ProcessEnv; maxServers?: number } = {},
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; maxServers?: number; keepReservedNames?: boolean } = {},
 ): PiMcpServerConfig[] {
   return normalizePiMcpServersDetailed(raw, options).servers.map(({ rawName: _rawName, ...server }) => server);
 }
@@ -148,7 +149,7 @@ export function normalizePiMcpServers(
 /** The same roster plus every dropped entry and why, for the Capability Center. */
 export function normalizePiMcpServersDetailed(
   raw: readonly RawMcpServer[],
-  options: { cwd?: string; env?: NodeJS.ProcessEnv; maxServers?: number } = {},
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; maxServers?: number; keepReservedNames?: boolean } = {},
 ): { servers: Array<PiMcpServerConfig & { rawName: string }>; dropped: PiMcpDroppedServer[] } {
   const env = options.env ?? process.env;
   const maxServers = options.maxServers ?? PI_MCP_DEFAULTS.maxServers;
@@ -165,7 +166,7 @@ export function normalizePiMcpServersDetailed(
       drop(rawName, "turned-off", "Its config entry sets enabled = false.");
       continue;
     }
-    if (RESERVED.has(rawName.toLowerCase())) {
+    if (!options.keepReservedNames && RESERVED.has(rawName.toLowerCase())) {
       drop(rawName, "reserved", "Codara's built-in tools already reach Cora directly.");
       continue;
     }

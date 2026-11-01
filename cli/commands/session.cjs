@@ -24,7 +24,7 @@ function printSession(result) {
     (question.questionOptions ?? []).forEach((option, i) => {
       console.log(`  ${i + 1}. ${option.label}${option.recommended ? c.dim("  (recommended)") : ""}`);
     });
-    console.log(c.dim(`\nreply with: cora send ${run.id.slice(0, 12)} <text or option number>`));
+    console.log(c.dim(`\nreply with: cora studio send ${run.id.slice(0, 12)} <text or option number>`));
   } else if (["complete", "failed", "cancelled"].includes(run.status)) {
     const last = (run.humanMessages ?? []).filter((m) => m.author !== "user").at(-1);
     if (last?.message) console.log(`\n${last.message}`);
@@ -55,7 +55,7 @@ async function follow(flags, runId, { fromStart = false, deadline } = {}) {
 }
 
 async function start(args, flags) {
-  if (args.length === 0) fail("usage: cora start <prompt> [--cwd DIR --model M --effort E --direct --wait]");
+  if (args.length === 0) fail("usage: cora studio start <prompt> [--cwd DIR --model M --effort E --direct --wait]");
   if (flags.direct && flags.managed) fail("choose only one of --direct or --managed");
   const params = {
     cwd: path.resolve(flags.cwd || process.cwd()),
@@ -70,7 +70,7 @@ async function start(args, flags) {
   console.log(`${c.cyan(started.run.id)}  started`);
   if (started.workspaceCreated) console.log(c.dim("registered a new Codara workspace"));
   if (!flags.wait) {
-    console.log(c.dim(`follow with: cora watch ${started.run.id.slice(0, 12)}`));
+    console.log(c.dim(`follow with: cora studio watch ${started.run.id.slice(0, 12)}`));
     return;
   }
   await follow(flags, started.run.id, { fromStart: true, deadline: Date.now() + timeoutMs(flags) });
@@ -79,7 +79,7 @@ async function start(args, flags) {
 }
 
 async function send(args, flags) {
-  if (!args[0] || !args[1]) fail("usage: cora send <run> <message|option#> [--wait]");
+  if (!args[0] || !args[1]) fail("usage: cora studio send <run> <message|option#> [--wait]");
   let content = args.slice(1).join(" ");
   // A bare number answers the pending question by option index.
   if (/^\d+$/.test(content.trim())) {
@@ -98,14 +98,14 @@ async function send(args, flags) {
 }
 
 async function wait(args, flags) {
-  if (!args[0]) fail("usage: cora wait <run> [--timeout SECONDS]");
+  if (!args[0]) fail("usage: cora studio wait <run> [--timeout SECONDS]");
   const waited = await rpc(flags, "chat.wait", { runId: args[0], timeoutMs: timeoutMs(flags) });
   if (flags.json) return console.log(JSON.stringify(waited, null, 2));
   printSession(waited);
 }
 
 async function tail(args, flags) {
-  if (!args[0]) fail("usage: cora tail <run> [--all] [--timeout SECONDS]");
+  if (!args[0]) fail("usage: cora studio tail <run> [--all] [--timeout SECONDS]");
   const followed = await follow(flags, args[0], {
     fromStart: Boolean(flags.all),
     deadline: flags.timeout ? Date.now() + timeoutMs(flags) : undefined,
@@ -115,7 +115,7 @@ async function tail(args, flags) {
 }
 
 async function cancel(args, flags) {
-  if (!args[0]) fail("usage: cora cancel <run> [reason]");
+  if (!args[0]) fail("usage: cora studio cancel <run> [reason]");
   const cancelled = await rpc(flags, "chat.cancel", {
     runId: args[0],
     reason: args.slice(1).join(" ") || undefined,
