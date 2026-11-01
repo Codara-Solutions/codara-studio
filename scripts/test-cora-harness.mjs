@@ -2048,11 +2048,65 @@ test("a resumed session needs its login too, even with an API key in the shell",
   assert.equal(stub.requests[0].apiKey, "configured-key");
 });
 
+test("a model picked in the terminal cannot be paid for from the shell", async () => {
+  if (spawnSync("script", ["--version"]).status !== 0) return "SKIP: util-linux script is not installed";
+  const world = makeWorld({ auth: { "openai-codex": codexCredential() } });
+  let screen = "";
+  const child = spawn(
+    "script",
+    ["-qfec", `stty cols 120 rows 30; exec ${process.execPath} ${CLI} --model sol`, "/dev/null"],
+    { cwd: world.project, env: { ...world.env, TERM: "xterm-256color", ANTHROPIC_API_KEY: "sk-ant-metered" }, stdio: ["pipe", "pipe", "pipe"], detached: true },
+  );
+  child.stdout.setEncoding("utf8").on("data", (chunk) => (screen += chunk));
+  const exited = new Promise((resolve) => child.on("exit", resolve));
+  const waitFor = async (check, label) => {
+    const started = Date.now();
+    while (!check()) {
+      assert.ok(Date.now() - started < 15_000, `${label}\n${screen.slice(-600)}`);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  };
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    child.stdin.write("/model anthropic/claude-sonnet-5-5\r");
+    await waitFor(() => /not signed in to anthropic/.test(screen), "the pick was not refused");
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    child.stdin.write("PLAIN_TEXT after the pick\r");
+    await waitFor(() => stub.requests.length > 0, "the prompt never reached a model");
+    assert.equal(stub.requests[0].apiKey, null, "a pick was paid for from the shell");
+    assert.notEqual(stub.requests[0].model, "claude-sonnet-5-5");
+  } finally {
+    process.kill(-child.pid, "SIGKILL");
+    await exited;
+  }
+  return undefined;
+});
+
 test("a subscription login beats an API key in the shell", async () => {
   const result = await cora(makeWorld(), ["exec", "--model", "sonnet", "copy it"], { env: { ANTHROPIC_API_KEY: "sk-ant-metered" } });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(stub.requests[0].authorization, `Bearer ${CLAUDE_TOKEN}`);
   assert.equal(stub.requests[0].apiKey, null);
+});
+
+test("a model keeps its own endpoint from models.json, unless the run overrides every endpoint", async () => {
+  const world = makeWorld({ auth: null });
+  writeJson(join(world.home, "models.json"), {
+    providers: { anthropic: { apiKey: "local-key", models: [{ id: "own-endpoint-model", baseUrl: stub.url }] } },
+  });
+  const own = await cora(world, ["exec", "--model", "anthropic/own-endpoint-model", "copy it"]);
+  assert.equal(own.status, 0, own.stderr);
+  assert.equal(stub.requests[0].model, "own-endpoint-model");
+  stub.reset();
+  const other = createServer((_request, response) => response.writeHead(500).end()).listen(0, "127.0.0.1");
+  await new Promise((resolve) => other.once("listening", resolve));
+  writeJson(join(world.home, "models.json"), {
+    providers: { anthropic: { apiKey: "local-key", models: [{ id: "own-endpoint-model", baseUrl: `http://127.0.0.1:${other.address().port}` }] } },
+  });
+  const overridden = await cora(world, ["exec", "--model", "anthropic/own-endpoint-model", "copy it"], { env: { CORA_BASE_URL: stub.url } });
+  other.close();
+  assert.equal(overridden.status, 0, overridden.stderr);
+  assert.equal(stub.requests[0].model, "own-endpoint-model");
 });
 
 test("a custom endpoint works from models.json with a dummy key, and from CORA_BASE_URL", async () => {

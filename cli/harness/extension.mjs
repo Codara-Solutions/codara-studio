@@ -128,24 +128,39 @@ function registerSubmitResult(pi, run) {
   });
 }
 
+function registerLoginCheck(pi, loginProblem) {
+  const problemWith = (model, { modelRegistry }) => loginProblem(model.provider, modelRegistry.getProviderAuthStatus(model.provider));
+  const stop = (problem) => {
+    process.once("exit", () => process.stderr.write(`cora: ${problem}\n`));
+    process.exit(2);
+  };
+  // New sessions and forks keep the model already in use, and a pick is checked below.
+  pi.on("session_start", ({ reason }, ctx) => {
+    if (!ctx.model || (reason !== "startup" && reason !== "resume")) return;
+    const problem = problemWith(ctx.model, ctx);
+    if (problem) stop(problem);
+  });
+  pi.on("model_select", async ({ model, previousModel }, ctx) => {
+    const problem = problemWith(model, ctx);
+    if (!problem) return;
+    if (!previousModel || !(await pi.setModel(previousModel))) stop(problem);
+    ctx.ui.notify(`${problem}. Staying on ${previousModel.id}.`, "error");
+  });
+}
+
 /**
  * @param run  shared state the exec wrapper reads once Pi returns
  * @param options.exec  a one-shot run, which gets submit_result
- * @param options.checkLogin  ends the run if this provider would be paid from the shell
+ * @param options.loginProblem  says why this provider must not be used, if it must not
  * @param options.mcpConfig  normalized MCP roster, or null
  * @param options.compaction  { state, config, engine } for registerCompaction
  * @param options.locks  this process's session locks
  * @param options.limitWait  from limitWaitSettings
  * @param options.bash  { engine, limits } for registerBashLimit
  */
-export function coraExtension(run, { exec, checkLogin, mcpConfig, compaction, locks, limitWait, bash }) {
+export function coraExtension(run, { exec, loginProblem, mcpConfig, compaction, locks, limitWait, bash }) {
   return async (pi) => {
-    // New sessions and forks keep the model already in use, which may be the user's own pick.
-    pi.on("session_start", ({ reason }, { model, modelRegistry }) => {
-      if (model && (reason === "startup" || reason === "resume")) {
-        checkLogin(model.provider, modelRegistry.getProviderAuthStatus(model.provider));
-      }
-    });
+    registerLoginCheck(pi, loginProblem);
     registerCompaction(pi, run, { exec, ...compaction });
     if (exec) registerSubmitResult(pi, run);
     registerBashLimit(pi, bash.engine, bash.limits);

@@ -176,13 +176,18 @@ function providerModels(provider, current, catalog) {
 
 /**
  * Pi's `models` replaces a provider's whole list and a model's own baseUrl beats
- * the provider's, so every entry carries the URL this run must use.
+ * the provider's, so every entry carries the URL this run must use: the run's
+ * override, else the one it has now, which a new model takes from the provider.
  */
 export function registerCatalog(runtime, catalog, endpoints = {}) {
   for (const provider of Object.keys(BUILT_IN)) {
     const current = runtime.getModels(provider);
-    const baseUrl = endpoints[provider] ?? current[0]?.baseUrl ?? BUILT_IN[provider][0].baseUrl;
-    const models = providerModels(provider, current, catalog).map((model) => ({ ...model, baseUrl }));
+    const providerUrl = current[0]?.baseUrl ?? BUILT_IN[provider][0].baseUrl;
+    const urls = new Map(current.map((model) => [model.id, model.baseUrl]));
+    const models = providerModels(provider, current, catalog).map((model) => ({
+      ...model,
+      baseUrl: endpoints[provider] ?? urls.get(model.id) ?? providerUrl,
+    }));
     runtime.registerProvider(provider, { models });
   }
 }

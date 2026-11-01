@@ -134,16 +134,16 @@ function assertSignedIn(model, routes) {
 }
 
 /**
- * A resumed session names its model only once Pi has restored it, so the check on the
- * way in cannot see it. Pi would then take a key from the shell, which is metered.
+ * Models that appear after the check on the way in, restored by a resume or picked
+ * in the terminal interface, would otherwise be paid for with a key from the shell.
  * @param status  Pi's auth status for the provider
+ * @returns what is wrong, or nothing
  */
-function refuseShellKey(routes) {
+function shellKeyProblem(routes) {
   return (provider, status) => {
-    if (hasLogin(provider, routes) || hasConfiguredKey(provider)) return;
-    if (status.source !== "environment" && !LOGIN_PROVIDERS.includes(provider)) return;
-    process.once("exit", () => process.stderr.write(`cora: not signed in to ${provider}. Run: cora login ${loginName(provider)}\n`));
-    process.exit(2);
+    if (hasLogin(provider, routes) || hasConfiguredKey(provider)) return undefined;
+    if (status.source !== "environment" && !LOGIN_PROVIDERS.includes(provider)) return undefined;
+    return `not signed in to ${provider}. Run: cora login ${loginName(provider)}`;
   };
 }
 
@@ -442,7 +442,7 @@ async function runAgent(cli, pi, home) {
     extensionFactories: [
       coraExtension(run, {
         exec,
-        checkLogin: refuseShellKey(routes),
+        loginProblem: shellKeyProblem(routes),
         mcpConfig,
         compaction,
         locks,
