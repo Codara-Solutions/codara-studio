@@ -377,7 +377,7 @@ async function runAgent(cli, pi, home) {
     engine: { compact: pi.compact, estimateTokens: pi.estimateTokens },
   };
   useCompactionSettings(pi.SettingsManager, compaction.state, compaction.config);
-  const locks = lockSessions(pi.SessionManager, home, (error) => {
+  const locks = lockSessions(pi, home, (error) => {
     run.finished = true;
     // After the terminal interface has given the screen back.
     process.once("exit", () => reportFailure(error, cli.json));
@@ -440,11 +440,12 @@ function prepareEnvironment(home) {
 
 async function loadPi() {
   const packageEntry = import.meta.resolve("@earendil-works/pi-coding-agent");
-  const [bundle, { AuthStorage, FileAuthStorageBackend }] = await Promise.all([
+  const [bundle, { AuthStorage, FileAuthStorageBackend }, { findMostRecentSession }] = await Promise.all([
     import(new URL("./bundle/index.js", packageEntry)),
     import(new URL("./core/auth-storage.js", packageEntry)),
+    import(new URL("./core/session-manager.js", packageEntry)),
   ]);
-  return { ...bundle, AuthStorage, FileAuthStorageBackend };
+  return { ...bundle, AuthStorage, FileAuthStorageBackend, findMostRecentSession };
 }
 
 export async function run(argv) {

@@ -3,7 +3,7 @@
 // the file and until it exits. A live holder renews the lock; one that was killed
 // stops renewing, and the lock can be taken over once it goes stale.
 
-import { existsSync, mkdirSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { basename, join } from "node:path";
 import lockfile from "proper-lockfile";
 
@@ -11,49 +11,50 @@ const STALE_MS = 6_000;
 const RENEW_MS = 2_000;
 const RETRY_MS = 200;
 
-export const sessionInUse = (file) => `session ${basename(file, ".jsonl").split("_").at(-1)} is in use by another cora`;
+const idOf = (file) => basename(file, ".jsonl").split("_").at(-1);
+export const sessionInUse = (file) => `session ${idOf(file)} is in use by another cora`;
 
 /**
- * Makes Pi take the lock before it loads a session.
- * @param onLost  ends the process with this message: another one has the session
+ * Makes Pi take the lock before it loads a session, because loading can rewrite
+ * the file. Everything held stays held until `holdOnly` names the running session.
+ * @param pi  { SessionManager, findMostRecentSession }
+ * @param onLost  ends the process with this message
  */
-export function lockSessions(SessionManager, home, onLost) {
+export function lockSessions({ SessionManager, findMostRecentSession }, home, onLost) {
   const folder = join(home, "session-locks");
   const lockPath = (file) => join(folder, `${basename(file)}.lock`);
   const options = (file) => ({ realpath: false, lockfilePath: lockPath(file), stale: STALE_MS });
   const pause = new Int32Array(new SharedArrayBuffer(4));
-  let held = null;
+  const held = new Map();
+
+  /** A lock that lapsed may have let another writer in, and this process has no
+   * sight of what it wrote, so it cannot go on from the history it loaded. */
+  const stop = (file) => () =>
+    onLost(`this cora lost session ${idOf(file)} and stopped. Continue with: cora resume ${idOf(file)}`);
 
   const tryLock = (file) => {
     try {
-      return lockfile.lockSync(file, { ...options(file), update: RENEW_MS, onCompromised: renew });
+      return lockfile.lockSync(file, { ...options(file), update: RENEW_MS, onCompromised: stop(file) });
     } catch (error) {
       if (error.code === "ELOCKED") return null;
       throw error;
     }
   };
 
-  /** A sleeping laptop misses its renewals, and nobody may have taken over. */
-  function renew() {
-    held.release = tryLock(held.file);
-    if (!held.release) onLost(sessionInUse(held.file));
-  }
-
   /** Waits past the stale limit only at startup: a dead holder can only be told
-   * from a live one by waiting, and blocking later would stop this lock renewing. */
+   * from a live one by waiting, and blocking later would stop the held locks renewing. */
   const hold = (file) => {
-    if (held && lockPath(held.file) === lockPath(file)) return;
+    if (held.has(lockPath(file))) return;
     mkdirSync(folder, { recursive: true });
-    const deadline = Date.now() + (held ? 0 : STALE_MS + 1_000);
+    const deadline = Date.now() + (held.size > 0 ? 0 : STALE_MS + 1_000);
     for (;;) {
       const release = tryLock(file);
       if (release) {
-        held?.release();
-        held = { file, release };
+        held.set(lockPath(file), release);
         return;
       }
       if (Date.now() >= deadline) {
-        if (held) throw new Error(sessionInUse(file));
+        if (held.size > 0) throw new Error(sessionInUse(file));
         onLost(sessionInUse(file));
       }
       Atomics.wait(pause, 0, 0, RETRY_MS);
@@ -66,15 +67,22 @@ export function lockSessions(SessionManager, home, onLost) {
     return open.call(SessionManager, path, ...rest);
   };
   SessionManager.continueRecent = (cwd, sessionDir) => {
-    const recent = continueRecent.call(SessionManager, cwd, sessionDir);
-    const file = recent.getSessionFile();
-    hold(file);
-    // What it read predates the lock.
-    return existsSync(file) ? open.call(SessionManager, file, sessionDir, cwd) : recent;
+    const recent = findMostRecentSession(sessionDir, cwd);
+    if (recent) return SessionManager.open(recent, sessionDir, cwd);
+    return continueRecent.call(SessionManager, cwd, sessionDir);
   };
 
   return {
-    hold,
-    inUse: (file) => Boolean(held) && lockPath(held.file) !== lockPath(file) && lockfile.checkSync(file, options(file)),
+    /** For when `file` has started: Pi writes the outgoing session until then. */
+    holdOnly(file) {
+      if (file) hold(file);
+      for (const [path, release] of held) {
+        if (!file || path !== lockPath(file)) {
+          held.delete(path);
+          release();
+        }
+      }
+    },
+    inUse: (file) => !held.has(lockPath(file)) && lockfile.checkSync(file, options(file)),
   };
 }

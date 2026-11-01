@@ -106,11 +106,7 @@ function textOf(message) {
 }
 
 function registerSessionLock(pi, locks) {
-  // Sessions that Pi loads are locked before that; this covers new and forked ones.
-  pi.on("session_start", (_event, ctx) => {
-    const file = ctx.sessionManager.getSessionFile();
-    if (file) locks.hold(file);
-  });
+  pi.on("session_start", (_event, ctx) => locks.holdOnly(ctx.sessionManager.getSessionFile()));
   pi.on("session_before_switch", (event, ctx) => {
     const file = event.targetSessionFile;
     if (!file || !locks.inUse(file)) return undefined;

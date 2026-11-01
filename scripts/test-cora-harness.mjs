@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -864,25 +864,122 @@ test("history is read only after the lock is held", async () => {
   }
 });
 
-test("a missed renewal keeps the session, and losing it stops the run", async () => {
+test("--continue leaves a session it has no lock on untouched", async () => {
+  const world = makeWorld();
+  await cora(world, ["exec", "--model", "sonnet", "PLAIN_TEXT one"]);
+  const file = sessionFile(world);
+  mkdirSync(join(world.home, "session-locks"), { recursive: true });
+  const release = await require("proper-lockfile").lock(file, sessionLockOptions(world));
+  const text = readFileSync(file, "utf8").trimEnd();
+  writeFileSync(file, text);
+  const waiting = cora(world, ["exec", "--continue", "--model", "sonnet", "PLAIN_TEXT two"]);
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  assert.equal(readFileSync(file, "utf8"), text, "the loader changed a session another process holds");
+  await release();
+  assert.equal((await waiting).status, 0);
+});
+
+test("a writer that slept through a takeover stops instead of forking", async () => {
   const world = makeWorld();
   const { sessionId } = resultOf((await cora(world, ["exec", "--model", "sonnet", "--json", "PLAIN_TEXT one"])).stdout);
-  const options = sessionLockOptions(world);
-  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   stub.reset();
+  stub.control({ mode: "hang", count: 1 });
+  const writer = spawn(process.execPath, [CLI, "exec", "--resume", sessionId, "--json", "PLAIN_TEXT two"], {
+    cwd: world.project,
+    env: world.env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  writer.stdout.on("data", (chunk) => (output += chunk));
+  writer.stderr.on("data", (chunk) => (output += chunk));
+  const exited = new Promise((resolve) => writer.on("exit", resolve));
+  while (stub.requests.length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
+  writer.kill("SIGSTOP");
+  const other = await cora(world, ["exec", "--resume", sessionId, "--json", "PLAIN_TEXT three"]);
+  assert.equal(other.status, 0, other.stderr);
+  const after = readFileSync(sessionFile(world), "utf8");
+  writer.kill("SIGCONT");
+  const timer = setTimeout(() => writer.kill("SIGKILL"), 4000);
+  const code = await exited;
+  clearTimeout(timer);
+  assert.equal(code, 1, "it went on from history it had not read");
+  assert.match(output, new RegExp(`cora resume ${sessionId}`));
+  assert.equal(readFileSync(sessionFile(world), "utf8"), after);
+});
+
+test("a switch keeps the outgoing session locked until the next one has started", async () => {
+  const home = mkdtempSync(join(sandbox, "locks-"));
+  const { default: lockfile } = await import(pathToFileURL(require.resolve("proper-lockfile")).href);
+  const { lockSessions } = await import(pathToFileURL(join(ROOT, "cli", "harness", "session-lock.mjs")).href);
+  const opened = (file) => ({ getSessionFile: () => file });
+  const SessionManager = {
+    open(file) {
+      if (file.endsWith("broken.jsonl")) throw new Error("not a session");
+      return opened(file);
+    },
+    continueRecent: (cwd) => opened(cwd),
+  };
+  const locks = lockSessions({ SessionManager, findMostRecentSession: () => null }, home, assert.fail);
+  const locked = (name) =>
+    lockfile.checkSync(name, { realpath: false, lockfilePath: join(home, "session-locks", `${name}.lock`) });
+  SessionManager.open("a.jsonl");
+  assert.throws(() => SessionManager.open("broken.jsonl"));
+  assert.ok(locked("a.jsonl"), "a failed switch left the running session unlocked");
+  SessionManager.open("b.jsonl");
+  assert.ok(locked("a.jsonl"), "the outgoing session was freed before it finished writing");
+  locks.holdOnly("b.jsonl");
+  assert.ok(!locked("a.jsonl"));
+  assert.ok(locked("b.jsonl"));
+  locks.holdOnly(undefined);
+  assert.ok(!locked("b.jsonl"));
+});
+
+test("the real terminal interface hands the lock over when a new session starts", async () => {
+  if (spawnSync("script", ["--version"]).status !== 0) return "SKIP: util-linux script is not installed";
+  const world = makeWorld();
+  const { sessionId } = resultOf((await cora(world, ["exec", "--model", "sonnet", "--json", "PLAIN_TEXT one"])).stdout);
+  const lockName = `${sessionFile(world).split("/").at(-1)}.lock`;
+  const child = spawn(
+    "script",
+    ["-qfec", `stty cols 100 rows 30; exec ${process.execPath} ${CLI} --resume ${sessionId} --model sonnet`, "/dev/null"],
+    { cwd: world.project, env: { ...world.env, TERM: "xterm-256color" }, stdio: ["pipe", "pipe", "pipe"], detached: true },
+  );
+  child.stdout.on("data", () => undefined);
+  const exited = new Promise((resolve) => child.on("exit", resolve));
+  const locks = () => (existsSync(join(world.home, "session-locks")) ? readdirSync(join(world.home, "session-locks")) : []);
+  const waitFor = async (check, label) => {
+    const started = Date.now();
+    while (!check()) {
+      assert.ok(Date.now() - started < 15_000, label);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  };
+  try {
+    await waitFor(() => locks().includes(lockName), "the resumed session was never locked");
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    child.stdin.write("/new\r");
+    await waitFor(() => locks().length === 1 && !locks().includes(lockName), "the lock did not move to the new session");
+  } finally {
+    process.kill(-child.pid, "SIGKILL");
+    await exited;
+  }
+  return undefined;
+});
+
+test("a new session is locked from the start", async () => {
+  const world = makeWorld();
   stub.control({ mode: "hang" });
-  const writer = cora(world, ["exec", "--resume", sessionId, "--json", "PLAIN_TEXT two"]);
-  while (stub.requests.length === 0) await sleep(20);
-  rmdirSync(options.lockfilePath);
-  await sleep(2500);
-  assert.ok(existsSync(options.lockfilePath), "the lock was not taken back");
-  rmdirSync(options.lockfilePath);
-  const release = await require("proper-lockfile").lock(sessionFile(world), options);
-  const result = await writer;
-  await release();
-  assert.equal(result.status, 1);
-  assert.match(result.stderr, /is in use by another cora/);
-  assert.equal(resultOf(result.stdout).status, "error");
+  const writer = spawn(process.execPath, [CLI, "exec", "--model", "sonnet", "PLAIN_TEXT one"], {
+    cwd: world.project,
+    env: world.env,
+    stdio: "ignore",
+  });
+  const exited = new Promise((resolve) => writer.on("exit", resolve));
+  while (stub.requests.length === 0) await new Promise((resolve) => setTimeout(resolve, 20));
+  const held = readdirSync(join(world.home, "session-locks"));
+  writer.kill("SIGKILL");
+  await exited;
+  assert.equal(held.length, 1);
 });
 
 test("code-built facts survive two compactions in a row", async () => {
