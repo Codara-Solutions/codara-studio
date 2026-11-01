@@ -470,6 +470,70 @@ test("the closing message reaches the reader in plain mode and in --json", async
   assert.equal(answer.text, "STUB-FINAL: plain reply.");
 });
 
+test("a report beside the closing message saves the extra model request", async () => {
+  for (const model of ["sonnet", "terra"]) {
+    stub.reset();
+    const baseline = await cora(makeWorld(), ["exec", "--model", model, "--json", "copy it"]);
+    assert.equal(baseline.status, 0, baseline.stderr);
+    const before = stub.requests.length;
+    assert.equal(before, 4);
+    stub.reset();
+    const world = makeWorld();
+    const json = await cora(world, ["exec", "--model", model, "--json", "copy it CLOSE_IN_REPLY"]);
+    assert.equal(json.status, 0, json.stderr);
+    assert.equal(stub.requests.length, before - 1, `${model} made another request after the report`);
+    const final = resultOf(json.stdout);
+    assert.equal(final.status, "complete");
+    assert.equal(final.text, "STUB-FINAL: closed in the same reply.");
+    assert.equal(final.report.closing_included, undefined);
+    assert.equal(readFileSync(join(world.project, "output.txt"), "utf8"), "HELLO\n");
+    const plain = await cora(makeWorld(), ["exec", "--model", model, "copy it CLOSE_IN_REPLY"]);
+    assert.equal(plain.status, 0, plain.stderr);
+    assert.equal(plain.stdout.trim(), "STUB-FINAL: closed in the same reply.");
+    stub.reset();
+    const resumed = await cora(world, ["exec", "--resume", final.sessionId, "--json", "PLAIN_TEXT carry on"]);
+    assert.equal(resumed.status, 0, resumed.stderr);
+  }
+});
+
+test("a report that ends the run stays honest, and with no text a reply is still required", async () => {
+  const failed = await cora(makeWorld(), ["exec", "--model", "sonnet", "--json", "copy it CLOSE_IN_REPLY FAILED_CHECK"]);
+  assert.equal(failed.status, 3);
+  assert.equal(resultOf(failed.stdout).status, "partial");
+  stub.reset();
+  const blocked = await cora(makeWorld(), ["exec", "--model", "sonnet", "--json", "copy it CLOSE_IN_REPLY SUBMIT_BLOCKED"]);
+  assert.equal(blocked.status, 3);
+  assert.equal(resultOf(blocked.stdout).status, "blocked");
+  stub.reset();
+  const silent = await cora(makeWorld(), ["exec", "--model", "sonnet", "--json", "copy it CLOSE_IN_REPLY NO_TEXT"]);
+  assert.equal(silent.status, 0, silent.stderr);
+  assert.equal(stub.requests.length, 4, "a report with no text ended the run");
+  assert.equal(resultOf(silent.stdout).text, "STUB-FINAL: copied input.txt to output.txt.");
+  stub.reset();
+  const nothing = await cora(makeWorld(), ["exec", "--model", "sonnet", "--json", "copy it CLOSE_IN_REPLY NO_TEXT EMPTY_CLOSING"]);
+  assert.equal(nothing.status, 1, "no closing message passed as a finished run");
+  const { reportEndsRun } = await import(pathToFileURL(join(ROOT, "cli", "harness", "extension.mjs")).href);
+  const text = { type: "text", text: "All done." };
+  const call = { type: "toolCall", name: "submit_result" };
+  const other = { type: "toolCall", name: "bash" };
+  assert.equal(reportEndsRun({ content: [text, call] }, true), true);
+  assert.equal(reportEndsRun({ content: [text, call] }, undefined), false, "a preamble beside the report is not the closing message");
+  assert.equal(reportEndsRun({ content: [call] }, true), false);
+  assert.equal(reportEndsRun({ content: [{ type: "text", text: "  " }, call] }, true), false);
+  assert.equal(reportEndsRun({ content: [text, call, other] }, true), false, "the status came before another call's result");
+});
+
+test("the prompt asks for few turns without dropping the checks", async () => {
+  await cora(makeWorld(), ["exec", "--model", "sonnet", "PLAIN_TEXT hi"]);
+  const { coraSystemPrompt } = await import(pathToFileURL(join(ROOT, "cli", "harness", "extension.mjs")).href);
+  for (const system of [stub.requests[0].system, coraSystemPrompt({ exec: false })]) {
+    assert.match(system, /Work in few turns/);
+    assert.match(system, /edits\[\]/);
+    assert.match(system, /never replaces checking your work/);
+  }
+  assert.match(stub.requests[0].system, /closing_included true/);
+});
+
 test("the closing message is the model's plain reply after the report, whole and exact", async () => {
   for (const model of ["sonnet", "terra"]) {
     stub.reset();

@@ -16,6 +16,8 @@
 // EMPTY_CLOSING has nothing to say after the call, one with EARLY_TEXT writes
 // progress beside its first tool call, and one with LONG_CLOSING
 // closes with a long fenced diff full of characters JSON would have to escape.
+// One with CLOSE_IN_REPLY writes the closing message beside a submit_result that
+// sets closing_included, and with NO_TEXT sets it with nothing written.
 //
 // Faults: stub.control({ mode, count, after }) applies a fault to the next
 // `count` model requests, once `after` requests have passed. Modes: http429
@@ -174,8 +176,13 @@ function plan(view) {
   if (finish && !prompt.includes("NO_SUBMIT")) {
     const status = /SUBMIT_(\w+)/.exec(prompt)?.[1]?.toLowerCase() ?? "complete";
     const checks = prompt.includes("FAILED_CHECK") ? [{ command: "npm test", result: "failed" }] : undefined;
-    const beside = prompt.includes("TEXT_BESIDE_SUBMIT") ? { text: "STATUS: DONE" } : {};
-    return { ...beside, tool: finish, input: { status, ...(checks ? { checks } : {}) } };
+    const closing = prompt.includes("CLOSE_IN_REPLY");
+    const beside = prompt.includes("TEXT_BESIDE_SUBMIT")
+      ? { text: "STATUS: DONE" }
+      : closing && !prompt.includes("NO_TEXT")
+        ? { text: "STUB-FINAL: closed in the same reply." }
+        : {};
+    return { ...beside, tool: finish, input: { status, ...(checks ? { checks } : {}), ...(closing ? { closing_included: true } : {}) } };
   }
   return { text: "STUB-FINAL: copied input.txt to output.txt." };
 }
@@ -227,31 +234,37 @@ function streamResponses(res, step, model) {
   const base = { id: id("resp"), object: "response", created_at: Math.floor(Date.now() / 1000), model };
   startSse(res);
   sse(res, null, { type: "response.created", response: { ...base, status: "in_progress", output: [] } });
-  let item;
+  const output = [];
+  if (step.text || !step.tool) {
+    const itemId = id("msg");
+    const index = output.length;
+    const part = { type: "output_text", text: step.text, annotations: [] };
+    const item = { type: "message", id: itemId, role: "assistant", status: "completed", content: [part] };
+    sse(res, null, { type: "response.output_item.added", output_index: index, item: { ...item, content: [], status: "in_progress" } });
+    sse(res, null, { type: "response.content_part.added", item_id: itemId, output_index: index, content_index: 0, part: { ...part, text: "" } });
+    sse(res, null, { type: "response.output_text.delta", item_id: itemId, output_index: index, content_index: 0, delta: step.text });
+    sse(res, null, { type: "response.output_text.done", item_id: itemId, output_index: index, content_index: 0, text: step.text });
+    sse(res, null, { type: "response.content_part.done", item_id: itemId, output_index: index, content_index: 0, part });
+    sse(res, null, { type: "response.output_item.done", output_index: index, item });
+    output.push(item);
+  }
   if (step.tool) {
     const callId = id("call");
+    const index = output.length;
     const args = JSON.stringify(step.input);
-    item = { type: "function_call", id: `fc_${callId}`, call_id: callId, name: step.tool, arguments: args, status: "completed" };
-    sse(res, null, { type: "response.output_item.added", output_index: 0, item: { ...item, arguments: "", status: "in_progress" } });
-    sse(res, null, { type: "response.function_call_arguments.delta", item_id: item.id, output_index: 0, delta: args });
-    sse(res, null, { type: "response.function_call_arguments.done", item_id: item.id, output_index: 0, arguments: args });
-  } else {
-    const itemId = id("msg");
-    const part = { type: "output_text", text: step.text, annotations: [] };
-    item = { type: "message", id: itemId, role: "assistant", status: "completed", content: [part] };
-    sse(res, null, { type: "response.output_item.added", output_index: 0, item: { ...item, content: [], status: "in_progress" } });
-    sse(res, null, { type: "response.content_part.added", item_id: itemId, output_index: 0, content_index: 0, part: { ...part, text: "" } });
-    sse(res, null, { type: "response.output_text.delta", item_id: itemId, output_index: 0, content_index: 0, delta: step.text });
-    sse(res, null, { type: "response.output_text.done", item_id: itemId, output_index: 0, content_index: 0, text: step.text });
-    sse(res, null, { type: "response.content_part.done", item_id: itemId, output_index: 0, content_index: 0, part });
+    const item = { type: "function_call", id: `fc_${callId}`, call_id: callId, name: step.tool, arguments: args, status: "completed" };
+    sse(res, null, { type: "response.output_item.added", output_index: index, item: { ...item, arguments: "", status: "in_progress" } });
+    sse(res, null, { type: "response.function_call_arguments.delta", item_id: item.id, output_index: index, delta: args });
+    sse(res, null, { type: "response.function_call_arguments.done", item_id: item.id, output_index: index, arguments: args });
+    sse(res, null, { type: "response.output_item.done", output_index: index, item });
+    output.push(item);
   }
-  sse(res, null, { type: "response.output_item.done", output_index: 0, item });
   sse(res, null, {
     type: "response.completed",
     response: {
       ...base,
       status: "completed",
-      output: [item],
+      output,
       usage: {
         input_tokens: reportedContext,
         output_tokens: 30,
