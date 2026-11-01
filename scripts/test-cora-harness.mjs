@@ -1130,6 +1130,122 @@ test("repo text is not the user: the prompt says so and blocks nothing by itself
   assert.ok(stub.requests[0].tools.some((tool) => tool.toLowerCase() === "bash"), "no tool was taken away");
 });
 
+// ── bash time limits ────────────────────────────────────────────────────────
+
+const shortLimit = { bashTimeout: { defaultSeconds: 1, maxSeconds: 3 } };
+const bashResult = (request) => request.events.find((event) => event.kind === "result").text;
+const isAlive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+test("a hanging command returns at the timeout with its output, and the model is told what was skipped", async () => {
+  const world = makeWorld({ settings: shortLimit });
+  const started = Date.now();
+  const command = "echo PARTIAL-OUTPUT; sleep 1000; touch restored.txt";
+  const result = await cora(world, ["exec", "--model", "sonnet", "--json", `copy it BASH_COMMAND<<<${command}>>>`], { timeout: 15_000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(Date.now() - started < 8000, "the call outlived its timeout");
+  assert.ok(!existsSync(join(world.project, "restored.txt")), "a later command ran");
+  const text = bashResult(stub.requests[1]);
+  assert.match(text, /PARTIAL-OUTPUT/);
+  assert.match(text, /Command timed out after 1 seconds and was killed with its child processes\./);
+  assert.match(text, /Any later commands in this same call did not run/);
+  assert.doesNotMatch(text, /sleep 1000/);
+  assert.equal(readFileSync(join(world.project, "output.txt"), "utf8"), "HELLO\n");
+});
+
+test("a background child holding the pipe is killed with the call", async () => {
+  const world = makeWorld({ settings: shortLimit });
+  const command = "sleep 1000 & echo $! > child.pid; echo STARTED; sleep 1000";
+  const started = Date.now();
+  const result = await cora(world, ["exec", "--model", "sonnet", "--json", `copy it BASH_COMMAND<<<${command}>>>`], { timeout: 15_000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(Date.now() - started < 8000, "the pipe kept the call alive");
+  const pid = Number(readFileSync(join(world.project, "child.pid"), "utf8"));
+  await until(() => !isAlive(pid), "the background child survived");
+  assert.match(bashResult(stub.requests[1]), /STARTED[\s\S]*timed out after 1 seconds/);
+});
+
+test("a process that left the group and keeps writing cannot hold the call open", async () => {
+  if (spawnSync("setsid", ["--version"]).status !== 0) return "SKIP: setsid is not installed";
+  const world = makeWorld({ settings: shortLimit });
+  const escaped = "setsid sh -c 'echo $$ > left.pid; while :; do echo noise; sleep 0.02; done' & sleep 1000";
+  const started = Date.now();
+  try {
+    const result = await cora(world, ["exec", "--model", "sonnet", "--json", `copy it BASH_COMMAND<<<${escaped}>>>`], { timeout: 15_000 });
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(Date.now() - started < 10_000, "the writer held the call open");
+    assert.match(bashResult(stub.requests[1]), /noise[\s\S]*timed out after 1 seconds/);
+  } finally {
+    const file = join(world.project, "left.pid");
+    if (existsSync(file)) process.kill(Number(readFileSync(file, "utf8")), "SIGKILL");
+  }
+  return undefined;
+});
+
+test("an explicit timeout is honoured up to the cap, and a bad one gets the default", async () => {
+  const world = makeWorld({ settings: shortLimit });
+  const longer = await cora(world, ["exec", "--model", "sonnet", "--json", "copy it BASH_TIMEOUT_3 BASH_COMMAND<<<sleep 2; echo FINISHED-LATE>>>"], { timeout: 15_000 });
+  assert.equal(longer.status, 0, longer.stderr);
+  assert.match(bashResult(stub.requests[1]), /FINISHED-LATE/);
+  assert.doesNotMatch(bashResult(stub.requests[1]), /timed out/);
+  stub.reset();
+  const started = Date.now();
+  const capped = await cora(makeWorld({ settings: shortLimit }), ["exec", "--model", "sonnet", "--json", "copy it BASH_TIMEOUT_100 BASH_COMMAND<<<sleep 1000>>>"], { timeout: 15_000 });
+  assert.equal(capped.status, 0, capped.stderr);
+  assert.ok(Date.now() - started < 10_000, "the cap was not applied");
+  assert.match(bashResult(stub.requests[1]), /timed out after 3 seconds/);
+  const { callLimit, bashTimeoutSettings } = await import(pathToFileURL(join(ROOT, "cli", "harness", "bash-limit.mjs")).href);
+  const limits = { defaultSeconds: 5, maxSeconds: 9 };
+  assert.equal(callLimit(undefined, limits), 5);
+  assert.equal(callLimit(0, limits), 5);
+  assert.equal(callLimit(-3, limits), 5);
+  assert.equal(callLimit(Number.NaN, limits), 5);
+  assert.equal(callLimit("7", limits), 7);
+  assert.equal(callLimit(Number.POSITIVE_INFINITY, limits), 5);
+  assert.equal(callLimit(99, limits), 9);
+  assert.deepEqual(bashTimeoutSettings(undefined), { defaultSeconds: 300, maxSeconds: 1800 });
+  assert.deepEqual(bashTimeoutSettings({ defaultSeconds: "x", maxSeconds: -1 }), { defaultSeconds: 300, maxSeconds: 1800 });
+  assert.deepEqual(bashTimeoutSettings({ defaultSeconds: 3600 }), { defaultSeconds: 3600, maxSeconds: 3600 });
+  assert.deepEqual(bashTimeoutSettings({ maxSeconds: 1e12 }), { defaultSeconds: 300, maxSeconds: 2_147_483 });
+});
+
+test("a quick command is untouched, Pi's shell settings still apply and the model reads the limits", async () => {
+  const world = makeWorld({ settings: { shellCommandPrefix: "export FROM_PREFIX=PREFIX-APPLIED" } });
+  const result = await cora(world, ["exec", "--model", "sonnet", "--json", "copy it BASH_COMMAND<<<echo $FROM_PREFIX>>>"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(bashResult(stub.requests[1]).trim(), "PREFIX-APPLIED");
+  const bash = stub.requests[0].toolSpecs.find((tool) => tool.name.toLowerCase() === "bash");
+  assert.match(bash.description, /killed after 300 seconds unless timeout sets a longer limit, up to 1800/);
+  assert.match(bash.description, /in the background with nohup/);
+  assert.doesNotMatch(JSON.stringify(bash), /no default timeout/);
+  assert.match(bash.input_schema.properties.timeout.description, /Default 300, maximum 1800/);
+});
+
+test("the limit does not bring back a bash tool the user turned off", async () => {
+  for (const [flags, expected, settings] of [
+    [["--no-tools"], false],
+    [["--no-builtin-tools"], false],
+    [["--exclude-tools", "bash"], false],
+    [["--tools", "read"], false],
+    [["--tools", "bash"], true],
+    [["--no-builtin-tools", "--tools", "bash"], true],
+    [[], false, { defaultTools: ["read"] }],
+    [[], true, { defaultTools: ["bash"] }],
+    [["--tools", "bash"], true, { defaultTools: ["read"] }],
+  ]) {
+    stub.reset();
+    const result = await cora(makeWorld({ settings }), ["exec", "--model", "sonnet", ...flags, "PLAIN_TEXT hi"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(stub.requests[0].tools.some((tool) => tool.toLowerCase() === "bash"), expected, flags.join(" "));
+  }
+});
+
 // ── compaction ──────────────────────────────────────────────────────────────
 
 const compactionWorld = (compaction = {}, settings = {}) =>

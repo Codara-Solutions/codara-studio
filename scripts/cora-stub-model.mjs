@@ -33,7 +33,8 @@
 //
 // A prompt with FAIL_COMMAND runs a failing command first, and one with
 // LARGE_OUTPUT prints five megabytes first, one with BIG_RESULT prints a fact
-// followed by 40,000 characters.
+// followed by 40,000 characters. A prompt with BASH_COMMAND<<<...>>> runs that
+// command first, with BASH_TIMEOUT_<n> as its timeout.
 //
 // Model lists: stub.offer({ anthropic, codex }) sets what GET /v1/models and GET
 // /codex/models answer, in each provider's own shape. Without an offer both 404.
@@ -110,7 +111,7 @@ function anthropicView(body) {
     }
   }
   const system = Array.isArray(body.system) ? body.system.map((block) => block.text ?? "").join("\n") : String(body.system ?? "");
-  return { model: body.model, tools: (body.tools ?? []).map((tool) => tool.name), system, events };
+  return { model: body.model, tools: (body.tools ?? []).map((tool) => tool.name), toolSpecs: body.tools ?? [], system, events };
 }
 
 function responsesView(body) {
@@ -141,7 +142,11 @@ function plan(view) {
   const prompt = lastUser >= 0 ? view.events[lastUser].text : "";
   const allResults = view.events.slice(lastUser + 1).filter((event) => event.kind === "result");
   const [read, write, finish, bash] = ["read", "write", "submit_result", "bash"].map((name) => findTool(view.tools, name));
-  const setup = prompt.includes("FAIL_COMMAND")
+  const custom = /BASH_COMMAND<<<(.*?)>>>/s.exec(prompt)?.[1];
+  const timeout = Number(/BASH_TIMEOUT_(\d+)/.exec(prompt)?.[1]);
+  const setup = custom
+    ? custom
+    : prompt.includes("FAIL_COMMAND")
     ? "echo SEEDED-ERROR-771 >&2; exit 7"
     : prompt.includes("LARGE_OUTPUT")
       ? "head -c 5000000 /dev/zero | tr '\\0' x"
@@ -149,7 +154,7 @@ function plan(view) {
         ? "echo UNIQUE-RESULT-FACT-613; head -c 40000 /dev/zero | tr '\\0' x"
         : null;
   const compacted = prompt.includes("# Session facts");
-  if (setup && !compacted && allResults.length === 0) return { tool: bash, input: { command: setup } };
+  if (setup && !compacted && allResults.length === 0) return { tool: bash, input: { command: setup, ...(timeout ? { timeout } : {}) } };
   // The setup command's result is not part of the copy.
   const results = setup && !compacted ? allResults.slice(1) : allResults;
   const copied = compacted && /## Files changed with write or edit\n\n- output\.txt/.test(prompt);
@@ -288,6 +293,7 @@ async function handleModel(req, res, flavour) {
     path: req.url,
     model: view.model,
     tools: view.tools,
+    toolSpecs: view.toolSpecs,
     system: view.system,
     authorization: req.headers.authorization ?? null,
     apiKey: req.headers["x-api-key"] ?? null,

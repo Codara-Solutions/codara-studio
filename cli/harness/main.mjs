@@ -239,6 +239,12 @@ function lastMessageSpoke({ last }) {
   return Boolean(last?.content?.some((part) => part.type === "text" && part.text.trim()));
 }
 
+/** Mirrors how Pi picks the first active tools: --tools, then the rest. */
+function bashStartsOff({ passthrough }, defaultTools) {
+  if (passthrough.includes("--tools")) return false;
+  return passthrough.includes("--no-builtin-tools") || Boolean(defaultTools && !defaultTools.includes("bash"));
+}
+
 function piArguments(cli, model, effort, { exec, prompt }) {
   const args = ["--no-extensions", ...cli.passthrough];
   if (model?.provider) args.push("--provider", model.provider);
@@ -352,6 +358,7 @@ async function runAgent(cli, pi, home) {
   const baseUrl = process.env.CORA_BASE_URL?.trim();
   useCoraRuntime(pi, home, routes, catalog, baseUrl && model?.provider ? { [model.provider]: baseUrl } : {});
 
+  const piSettings = pi.SettingsManager.create(process.cwd(), home);
   const run = {
     report: null,
     last: null,
@@ -368,14 +375,15 @@ async function runAgent(cli, pi, home) {
     json: Boolean(cli.json),
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     progress: exec && !cli.json && process.stderr.isTTY,
-    streamTimeoutMs: pi.SettingsManager.create(process.cwd(), home).getHttpIdleTimeoutMs(),
+    streamTimeoutMs: piSettings.getHttpIdleTimeoutMs(),
   };
   if (exec) failIfUnfinished(run, cli.json);
   rememberPiErrors(run);
   const effort = cli.effort ?? (resuming ? undefined : DEFAULT_EFFORT);
-  const [{ coraExtension, coraSystemPrompt }, { limitWaitSettings, observeLimits }] = await Promise.all([
+  const [{ coraExtension, coraSystemPrompt }, { limitWaitSettings, observeLimits }, { bashTimeoutSettings }] = await Promise.all([
     import("./extension.mjs"),
     import("./limits.mjs"),
+    import("./bash-limit.mjs"),
   ]);
   observeLimits(run);
   const settings = readSettings(home);
@@ -400,7 +408,23 @@ async function runAgent(cli, pi, home) {
   // the code set below decides, and only ever makes it worse.
   await pi.main(args, {
     extensionFactories: [
-      coraExtension(run, { exec, mcpConfig, compaction, locks, limitWait: limitWaitSettings(settings.limitWait, cli.noLimitWait) }),
+      coraExtension(run, {
+        exec,
+        mcpConfig,
+        compaction,
+        locks,
+        limitWait: limitWaitSettings(settings.limitWait, cli.noLimitWait),
+        bash: {
+          limits: bashTimeoutSettings(settings.bashTimeout),
+          startsOff: bashStartsOff(cli, piSettings.getDefaultTools()),
+          engine: {
+            createBashToolDefinition: pi.createBashToolDefinition,
+            createLocalBashOperations: pi.createLocalBashOperations,
+            shellPath: piSettings.getShellPath(),
+            commandPrefix: piSettings.getShellCommandPrefix(),
+          },
+        },
+      }),
     ],
   });
   if (!exec) return;

@@ -3,6 +3,7 @@
 
 import { CORA_ENGINEERING_RULES, CORA_REPLY_LANGUAGE } from "../../resources/pi-cora/prompt.ts";
 import { loginName } from "./accounts.mjs";
+import { registerBashLimit } from "./bash-limit.mjs";
 import { registerCompaction } from "./compaction.mjs";
 import { limitFailure, registerLimitWait } from "./limits.mjs";
 import { sessionInUse } from "./session-lock.mjs";
@@ -130,11 +131,13 @@ function registerSubmitResult(pi, run) {
  * @param options.compaction  { state, config, engine } for registerCompaction
  * @param options.locks  this process's session locks
  * @param options.limitWait  from limitWaitSettings
+ * @param options.bash  { engine, limits, startsOff } for registerBashLimit
  */
-export function coraExtension(run, { exec, mcpConfig, compaction, locks, limitWait }) {
+export function coraExtension(run, { exec, mcpConfig, compaction, locks, limitWait, bash }) {
   return async (pi) => {
     registerCompaction(pi, run, { exec, ...compaction });
     if (exec) registerSubmitResult(pi, run);
+    registerBashLimit(pi, bash.engine, bash.limits, bash.startsOff);
     registerSessionLock(pi, locks);
     const waits = registerLimitWait(pi, run, { settings: limitWait, locks });
 
