@@ -29,7 +29,7 @@ function contextRun(flags) {
   const run = flags.run
     ? findRun(flags, flags.run)
     : listRuns(flags).find((candidate) => !candidate.workflow && !candidate.automationId) ?? null;
-  if (!run) fail("workflows need a workspace context and no runs exist yet; start one with `cora start`, or pass --run");
+  if (!run) fail("workflows need a workspace context and no runs exist yet; start one with `cora studio start`, or pass --run");
   return run;
 }
 

@@ -10,7 +10,7 @@ const { c, statusColor, table, fail } = require("../lib/ui.cjs");
 
 function contextRun(flags) {
   const run = flags.run ? findRun(flags, flags.run) : latestRun(flags);
-  if (!run) fail("automations need a workspace context and no runs exist yet — start one with `cora start`, or pass --run");
+  if (!run) fail("automations need a workspace context and no runs exist yet — start one with `cora studio start`, or pass --run");
   return run;
 }
 
@@ -47,8 +47,8 @@ async function auto(args, flags) {
     off: ["automation.set_enabled", "disabled"],
   };
   const verb = verbs[sub];
-  if (!verb) fail("usage: cora auto <list|run|pause|resume|stop|on|off> [automation-id] [--run RUN]");
-  if (!rest[0]) fail(`usage: cora auto ${sub} <automation-id> [--run RUN]`);
+  if (!verb) fail("usage: cora studio auto <list|run|pause|resume|stop|on|off> [automation-id] [--run RUN]");
+  if (!rest[0]) fail(`usage: cora studio auto ${sub} <automation-id> [--run RUN]`);
 
   const params = { runId: run.id, automationId: rest[0] };
   if (sub === "on") params.enabled = true;

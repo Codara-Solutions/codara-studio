@@ -1,21 +1,164 @@
 # The `cora` CLI
 
-`cora` is a terminal remote for Codara Studio. With it you can start and
-answer Cora chats, follow a run and its workers live, read and edit a run's
-board, manage accounts and automations, and let one agent hand work to Cora
-from its own terminal. This page shows how to set it up and lists every
-command. [cli/README.md](../cli/README.md) goes deeper on the fullscreen chat
-UI, the live dashboard and the harness benchmark.
+`cora` is two things. On its own it is a coding agent in your terminal, built on
+Pi, with no Codara Studio app and no Electron. `cora studio` is a remote for a
+running Studio: start and answer Cora chats, follow a run and its workers live,
+read and edit a run's board, manage accounts and automations, and let one agent
+hand work to Cora from its own terminal. This page covers both. Agents in Studio's
+panes call `cora tool`, `task`, `inbox`, `inspect`, `server` and `workflow` by those
+names, so these six work with or without `studio` in front. Every other Studio
+command needs it: `cora auth list` stops and says so, with no model call. To send
+such words as a prompt, quote them: `cora "auth list"`.
+[cli/README.md](../cli/README.md) goes deeper on the fullscreen chat UI, the live
+dashboard and the harness benchmark.
 
-## Setup
+## The standalone agent
 
-The CLI lives in `cli/` in this repository and needs Node 22 or newer. From a
-checkout:
+It needs Node 22.18 or newer. It runs from a clone of this repository, so keep the
+folder: `npm install -g .` links to it. Run `npm ci` first, because linking a folder
+does not install its dependencies.
 
 ```sh
-npm link                  # once: puts `cora` on your PATH
-cora help                 # the command list
-npm run cora -- status    # or run it without linking
+git clone --depth 1 https://github.com/Codara-Solutions/codara-studio
+cd codara-studio/cli
+npm ci
+npm install -g .
+cora login
+```
+
+| Command | What it does |
+|---|---|
+| `cora` | Interactive session in this folder, in Pi's terminal interface. |
+| `cora exec "prompt"` | One-shot run. The prompt can also come from stdin, at any size. |
+| `cora exec --json "prompt"` | One JSON event per line, ending with a `cora_result` line. |
+| `cora resume [id]`, `--resume [id]` | Continue a session with its full tool history, from any folder. Any unique start of the id works. |
+| `cora login [claude\|chatgpt]` | Sign in, or list what is signed in. |
+| `cora models [search]` | List the models you can use. |
+
+`--model` takes `sonnet`, `opus`, `fable`, `terra`, `sol`, `astra` or any
+`provider/id`. `--effort` takes `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or
+`max`.
+
+### Models
+
+A name like `sonnet` means the newest model of that family your account offers, so
+a new model needs no upgrade. `cora` asks each provider what the account offers and
+keeps the answer for six hours in `~/.cora/catalog.json`. `cora models` always asks
+again. If a provider cannot be reached, or its login has expired, `cora` keeps the
+last answer, and then falls back to `cli/harness/models.json`. Asking never refreshes
+a login.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | The model reported `complete`, or `unreported` for a plain answer with no report. |
+| 1 | The run failed: a provider error, a timeout, an empty or cut-off reply, or an internal error. |
+| 2 | The command was wrong, or there is no login for that provider. |
+| 3 | The model reported `partial`, `blocked` or `failed`. A `complete` with a failed check counts as `partial`. |
+| 130 | Ctrl+C stopped the run while it waited for a usage limit to reset. The `cora_result` status is `stopped`. |
+
+The model reports its status with a tool call and then answers in a normal reply, which is
+the `text` of `cora_result`. A session has one writer: a second `cora` on it stops with
+`session <id> is in use by another cora` after about 7 seconds, the time it takes to
+tell a live writer from one that died, whose session it then takes over. A process
+that loses its lock, for example when a laptop sleeps, stops and prints the `cora resume`
+command, since another run may have changed the session in the meantime.
+
+A rate limit of up to a minute is waited out and retried. A usage limit with a known reset
+time is waited out too, in `cora` and `cora exec`: one line says what happened, when it
+resets and that Ctrl+C stops it, then the same session goes on by itself. The rules:
+
+- A wait never goes past six hours, which covers the five-hour window. A later reset, such
+  as a weekly limit, stops the run. `"limitWait": { "maxMinutes": N }` in `settings.json`
+  changes that.
+- With no known reset the run stops with exit 1. Nothing polls.
+- The run goes on 30 seconds after the reset (`marginSeconds`), to allow for clock
+  differences, and tells the model in one note that it paused.
+- If the limit is still on then, the run stops with exit 1. It waits again only after a
+  real reply has shown the limit lifted.
+- The wall clock decides, so a laptop that sleeps through the reset goes on as it wakes.
+- The session lock stays held during the wait. If another `cora` takes the session over,
+  this one stops rather than go on from old history.
+- Ctrl+C stops the wait and leaves a session that `cora resume` continues. Esc does too in
+  the terminal interface, which stays open. A killed wait resumes the same way.
+- `--no-limit-wait`, or `"limitWait": false` in `settings.json`, stops at the limit with
+  exit 1, says when it resets, and sets `resetsAt` in `cora_result`.
+
+`--json` emits `{"type":"limit_wait","status":...,"resetsAt":...}` for each step: `waiting`,
+then `resumed` or `stopped`, or instead `too_long` or `still_limited`. `cora_result` counts
+them in `limitWaits`. A caller with its own deadline should watch for `waiting` or pass
+`--no-limit-wait`.
+
+A failed request is retried by itself, from the same context, so finished tool
+calls never run twice. The error names the provider and the real cause.
+
+### Accounts
+
+`cora` uses a `cora login` sign-in if there is one, and otherwise Studio's Active
+account, in place, without copying it. A Studio account can be shared with Claude
+Code or the Codex CLI, and those rotate refresh tokens, so a second refresher
+would sign them out. So `cora` asks a running Studio to renew a Claude login, the
+same request Studio's own sessions make, and with Studio closed it refuses an expired
+shared login rather than spending it. Nothing can renew a shared ChatGPT login for
+`cora`, so it uses one only until it expires, then refuses and says what to do.
+`cora login` creates a separate sign-in that only `cora` refreshes. An API key in the
+shell never replaces a login. Login files are replaced whole under Pi's lock, so a
+kill during a refresh leaves the old file.
+
+### Files and settings
+
+Everything lives in `~/.cora` (`CORA_HOME`): `auth.json`, `sessions/`, `skills/`,
+`catalog.json`, `settings.json` and `models.json` in Pi's format. `httpIdleTimeoutMs` in
+`settings.json` sets the hung-stream timeout. `bashTimeout` sets the time limit on each
+bash call the model makes: `{ "defaultSeconds": 120, "maxSeconds": 1800 }`. A call past its
+limit is killed with its process group, and the model gets the output so far and a line
+saying that any later commands in that call did not run. The model can ask for a longer
+limit up to the maximum, and runs longer jobs in the background. MCP servers come from `~/.cora/mcp.json`
+or `--mcp-config FILE`, in `.mcp.json` format. A project's own `.mcp.json` does not
+start by itself, because it can run any command. For a custom endpoint, set
+`baseUrl` and `apiKey` in `models.json`, or set `CORA_BASE_URL`.
+
+### Compaction
+
+A long session is summarized between turns once its context passes 400,000 tokens,
+or sooner on a model whose window leaves less room: the limit is the window minus
+15%, with at least 32,768 tokens held back (`gpt-6-astra`, at 272,000, compacts at
+231,200). The run then continues by itself. `/compact [focus]` does it by hand in the
+terminal interface.
+
+The summary is checked before it replaces anything. Code rebuilds the facts from the
+session file every time: your messages word for word, files read and changed through
+the read, write and edit tools, failed commands with their errors, the session id and the
+folder. The model writes only the story around them. A history too large for one request is summarized in pieces, each
+updating the last. A summary with a required part missing, an invented file, or too
+large is retried once, and after that the session continues uncompacted with a warning.
+A kill during compaction changes nothing, so `cora resume` works. The full history stays
+in the session file.
+
+Plain runs print `cora: compacted 412k -> 31k` on stderr. `--json` emits
+`{"type":"compaction","status":"ok","reason":"threshold","tokensBefore":412000,"tokensAfter":31000}`,
+or `"status":"failed"` with `error`, and `cora_result` carries a `compactions` count.
+
+`~/.cora/settings.json` only, never a project's settings:
+
+```json
+{ "compaction": { "atTokens": 400000, "keepRecentTokens": 40000, "timeoutMs": 180000 } }
+```
+
+`keepRecentTokens` is how much of the latest conversation stays word for word.
+`compaction.enabled: false` turns automatic compaction off. Project instructions and
+skills are sent whole with every request, so they are never summarized.
+
+## Driving Studio: `cora studio`
+
+The remote commands below are all under `cora studio`. The CLI needs Node 22 or
+newer. From a checkout:
+
+```sh
+npm link                         # once: puts `cora` on your PATH
+cora studio help                 # the command list
+npm run cora -- studio status    # or run it without linking
 ```
 
 `cora` finds the running app through `~/.codarastudio/agent-socket.json` (the
@@ -33,19 +176,19 @@ unique prefix of one works.
 
 ```sh
 cora                                   # fullscreen Cora chat (in a TTY)
-cora start "Fix the failing tests" --cwd . --wait
-cora runs                              # recent runs, newest first
-cora watch                             # live dashboard of the active run
-cora send <run> 2                      # answer Cora's question with option 2
-cora board <run>                       # the run's kanban board
+cora studio start "Fix the failing tests" --cwd . --wait
+cora studio runs                              # recent runs, newest first
+cora studio watch                             # live dashboard of the active run
+cora studio send <run> 2                      # answer Cora's question with option 2
+cora studio board <run>                       # the run's kanban board
 ```
 
 Claude Code and Codex sessions can use `cora` to bring in Cora or a second
 opinion:
 
 ```sh
-cora agent spawn <run> "Audit the fix" --title "Independent audit" --runtime codex
-cora agent message <run> all "Re-check the acceptance criteria"
+cora studio agent spawn <run> "Audit the fix" --title "Independent audit" --runtime codex
+cora studio agent message <run> all "Re-check the acceptance criteria"
 ```
 
 Agents without MCP support call the same browser, terminal and worktree
@@ -210,7 +353,7 @@ cora tool preview_screenshot --tabId chrome:1234567
 | `rpc <method> [params-json]` | Calls any socket method directly. |
 | `tool list \| help <name> \| <name> [args-json] [--arg value]` | Calls a codara-studio tool from any Codara terminal, with the same tool set and results as an MCP call. |
 
-The `app.*` methods reachable through `cora rpc` (screenshots, in-page
+The `app.*` methods reachable through `cora studio rpc` (screenshots, in-page
 evaluation) are for development: they are available in unpackaged builds,
 and in packaged builds only when the app was started with
 `CODARA_DEV_TOOLS=1`.

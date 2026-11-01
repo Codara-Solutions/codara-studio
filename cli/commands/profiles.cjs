@@ -21,7 +21,7 @@ async function profile(args, flags) {
   }
   if (action === "create") {
     const name = args.slice(1).join(" ").trim();
-    if (!name) fail("usage: cora profile create <name> [--description TEXT --instructions TEXT]");
+    if (!name) fail("usage: cora studio profile create <name> [--description TEXT --instructions TEXT]");
     const result = await rpc(flags, "profiles.create", {
       name,
       ...(flags.description ? { description: flags.description } : {}),
@@ -34,13 +34,13 @@ async function profile(args, flags) {
   }
   if (action === "use") {
     const reference = args.slice(1).join(" ").trim();
-    if (!reference) fail("usage: cora profile use <name|id>");
+    if (!reference) fail("usage: cora studio profile use <name|id>");
     const result = await rpc(flags, "profiles.use", { profile: reference });
     if (flags.json) return console.log(JSON.stringify(result, null, 2));
     console.log(`${c.green("✓")} ${c.bold(result.profile.name)} is now the default Cora profile`);
     return;
   }
-  fail("usage: cora profile list | create <name> | use <name|id>");
+  fail("usage: cora studio profile list | create <name> | use <name|id>");
 }
 
 module.exports = { profile };

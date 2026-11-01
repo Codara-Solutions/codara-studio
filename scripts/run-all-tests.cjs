@@ -19,6 +19,7 @@
 // - A file that says `// test-runner: heavy` (it boots Electron or Chromium,
 //   or bundles something big) never runs next to another heavy one.
 // - A file that says `// test-runner: serial` runs after the pool, alone.
+// - A file that says `// test-runner: timeout=600` gets that many seconds.
 // - No test starts while MemAvailable is below CODARA_TEST_MIN_FREE_MB
 //   (default 2048) unless nothing else is running.
 // - Each test gets its own TMPDIR, so suites that use fixed names under
@@ -37,6 +38,7 @@ const TIMEOUT_MS = 180_000;
 const TAIL_CHARS = 6000;
 const TIMINGS = path.join(DIR, "..", "node_modules", ".cache", "codara-tests", "timings.json");
 const TAG = /^\s*\/\/\s*test-runner:\s*(heavy|serial)\b/m;
+const TIMEOUT_TAG = /^\s*\/\/\s*test-runner:\s*timeout=(\d+)\b/m;
 
 function listTests(filter) {
   return fs
@@ -117,6 +119,15 @@ function killGroup(child, signal) {
   } catch {}
 }
 
+function timeoutOf(file) {
+  try {
+    const seconds = TIMEOUT_TAG.exec(fs.readFileSync(path.join(DIR, file), "utf8"))?.[1];
+    return seconds ? Number(seconds) * 1000 : TIMEOUT_MS;
+  } catch {
+    return TIMEOUT_MS;
+  }
+}
+
 function runOne(file, { env, onSpawn }) {
   return new Promise((resolve) => {
     const t0 = Date.now();
@@ -143,7 +154,7 @@ function runOne(file, { env, onSpawn }) {
       timedOut = true;
       killGroup(child, "SIGTERM");
       setTimeout(() => killGroup(child, "SIGKILL"), 5_000).unref();
-    }, TIMEOUT_MS);
+    }, timeoutOf(file));
     let exitCode = null;
     let exitSignal = null;
     child.on("exit", (code, signal) => {

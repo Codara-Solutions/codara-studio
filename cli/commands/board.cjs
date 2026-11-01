@@ -11,12 +11,12 @@ const { c, statusColor, fail } = require("../lib/ui.cjs");
 const LANES = ["idea", "queued", "running", "blocked", "review", "done", "failed"];
 
 async function board(args, flags) {
-  if (!args[0]) fail("usage: cora board <run>  ·  cora board <run> add <title> [--desc TEXT]");
+  if (!args[0]) fail("usage: cora studio board <run>  ·  cora studio board <run> add <title> [--desc TEXT]");
   const run = findRun(flags, args[0]);
   const [action, ...rest] = args.slice(1);
 
   if (action === "add") {
-    if (rest.length === 0) fail("usage: cora board <run> add <title> [--desc TEXT]");
+    if (rest.length === 0) fail("usage: cora studio board <run> add <title> [--desc TEXT]");
     const current = await rpc(flags, "orchestrator.board_get", { runId: run.id });
     const cards = [
       ...(current.cards ?? []),
@@ -44,12 +44,12 @@ async function board(args, flags) {
 }
 
 async function whiteboard(args, flags) {
-  if (!args[0]) fail("usage: cora whiteboard <run>  ·  cora whiteboard <run> set <markdown...>");
+  if (!args[0]) fail("usage: cora studio whiteboard <run>  ·  cora studio whiteboard <run> set <markdown...>");
   const run = findRun(flags, args[0]);
   const [action, ...rest] = args.slice(1);
 
   if (action === "set") {
-    if (rest.length === 0) fail("usage: cora whiteboard <run> set <markdown...>");
+    if (rest.length === 0) fail("usage: cora studio whiteboard <run> set <markdown...>");
     await rpc(flags, "orchestrator.whiteboard_update", { runId: run.id, content: rest.join(" ") });
     console.log(`whiteboard updated on ${c.cyan(run.id)}`);
     return;
