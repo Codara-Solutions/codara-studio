@@ -71,6 +71,7 @@ export type CommandId =
   | "agent.openEffortPicker"
   | "chat.stop"
   | "markdown.togglePreview"
+  | "editor.toggleWordWrap"
   | "browser.pickElement"
   | "browser.comment"
   | "browser.fullScreen"
@@ -542,6 +543,19 @@ export const COMMANDS: Command[] = [
     label: "Toggle markdown preview",
     group: "View",
     defaultChords: [mod("v", { shift: true })],
+  },
+  {
+    // VS Code's "View: Toggle Word Wrap" is Alt+Z. On macOS Option+Z types a
+    // character, which the matcher (it reads e.key) never sees as "z", so
+    // there it is Cmd+Option+Z. Only the focused file editor reacts.
+    id: "editor.toggleWordWrap",
+    label: "Toggle word wrap in the editor",
+    group: "View",
+    defaultChords: [
+      IS_MAC
+        ? mod("z", { alt: true })
+        : { ctrl: false, meta: false, alt: true, shift: false, key: "z" },
+    ],
   },
   {
     // Mod+Shift+E sits next to Mod+E (new browser tab) and is otherwise free.

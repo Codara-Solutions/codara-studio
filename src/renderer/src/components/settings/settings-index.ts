@@ -237,6 +237,7 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   { tab: "git", title: "Copy-branch setup command", desc: "Your own command for new worktrees, after the repository's.", section: "Worktrees", keywords: "worktree pnpm npm install setup", reveal: "Worktrees advanced" },
   { tab: "git", title: "Agent worktrees: also regenerable", desc: "Ignored files an agent may delete with a merged worktree.", section: "Worktrees", keywords: "worktree ignored gitignore cache build regenerable", reveal: "Worktrees advanced" },
   { tab: "editor", title: "Vim mode", desc: "Modal editing in the file editor.", section: "Editing", keywords: "modal keys vi", toggle: "vimMode" },
+  { tab: "editor", title: "Word wrap", desc: "Wrap long lines in the file editor, or scroll sideways.", section: "Editing", keywords: "wrap lines horizontal scroll alt z" },
   { tab: "editor", title: "Editor theme", desc: "Syntax colors in the file editor.", section: "Editing", keywords: "syntax colors highlighting" },
   { tab: "editor", title: "Autosave", desc: "Save the active file after you stop typing.", section: "Saving", keywords: "save automatically auto-save", toggle: "autosaveEnabled" },
   { tab: "editor", title: "Autosave delay", desc: "How long after typing the file is saved.", section: "Saving", keywords: "save wait seconds" },
