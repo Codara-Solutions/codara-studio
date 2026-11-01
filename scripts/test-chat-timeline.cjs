@@ -665,6 +665,7 @@ async function main() {
     assert.equal(head.status, "completed");
     assert.equal(head.tone, "done");
     assert.equal(head.title, "Worked");
+    assert.equal(head.turnStatus, "failed", "the fold must see how the whole turn ended");
     assert.deepEqual(head.traceWindow, { from: undefined, to: at(30) });
     // Whole-turn gauges ride the final slice only.
     assert.equal(head.meta.some((meta) => meta.label === "Duration"), false);
@@ -694,6 +695,7 @@ async function main() {
     );
     const head = timeline.find((item) => item.id === "spark-call:spark-1");
     assert.equal(head.status, "completed", "the pre-question slice reads settled while the turn lives on");
+    assert.equal(head.turnStatus, "started", "a turn still running must not fold its first slice");
     const tail = timeline.find((item) => item.id === "spark-call:spark-1:seg1");
     assert.equal(tail.status, "started");
     assert.equal(tail.tone, "live");

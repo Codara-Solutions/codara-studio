@@ -1112,25 +1112,6 @@ function WelcomeState({ workspace }: { workspace: Workspace | null }) {
   };
   return (
     <div className="cora-welcome">
-      {/* Hero accent icon tile — accent-soft fill + accent-edge hairline +
-          the --lift-hi top highlight for tint-first depth. The other chat
-          empty states (ConversationEmpty, history "No chats yet") echo this
-          rhythm at a smaller scale. */}
-      <div
-        style={{
-          width: 44,
-          height: 44,
-          borderRadius: "var(--radius-surface, 10px)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          background: "var(--accent-soft)",
-          border: "1px solid var(--accent-edge)",
-          boxShadow: "var(--lift-hi)",
-        }}
-      >
-        <SparkMark size={20} />
-      </div>
       <div className="cora-welcome__copy">
         <div className="cora-welcome__title">Work with Cora on this project</div>
         <div className="cora-welcome__body">
@@ -1170,18 +1151,10 @@ function WelcomeState({ workspace }: { workspace: Workspace | null }) {
             key={starter.title}
             type="button"
             className="cora-starter"
+            title={starter.body}
             onClick={() => prefill(starter.prompt)}
           >
-            <span className="cora-starter__label">{starter.label}</span>
-            <span className="cora-starter__title">
-              {starter.title}
-              <span className="cora-starter__arrow" aria-hidden>
-                <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
-                  <path d="M3.5 8.5 8.5 3.5M4.5 3.5h4v4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </span>
-            </span>
-            <span className="cora-starter__body">{starter.body}</span>
+            {starter.title}
           </button>
         ))}
       </div>

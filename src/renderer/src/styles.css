@@ -1741,82 +1741,31 @@ a { color: inherit; }
   flex: 0 0 auto;
 }
 .cora-welcome__starters {
-  display: grid;
-  /* auto-fit rather than a fixed pair: the chat is as often half a split as it
-     is a whole tab, and a viewport media query cannot see that. Cards drop to
-     one column when two no longer fit the surface, at any window size. */
-  grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr));
-  gap: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
   width: min(620px, 100%);
   margin-top: 3px;
 }
 .cora-starter {
-  position: relative;
-  display: flex;
-  min-width: 0;
-  min-height: 90px;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
-  padding: 11px 14px 11px 12px;
+  height: 28px;
+  padding: 0 10px;
   border: 1px solid var(--rule-soft);
-  border-radius: var(--radius-surface, 10px);
-  background: color-mix(in oklab, var(--ink) 2.5%, var(--panel));
-  box-shadow: var(--lift-hi);
-  color: var(--ink);
-  font-family: var(--font-sans);
-  text-align: left;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-dim);
+  font: 400 12px/1 var(--font-sans);
   cursor: default;
   transition:
     background var(--motion-fast) var(--ease-out),
-    border-color var(--motion-fast) var(--ease-out),
-    transform var(--motion-fast) var(--ease-out),
-    box-shadow var(--motion-fast) var(--ease-out);
+    color var(--motion-fast) var(--ease-out);
 }
 .cora-starter:hover {
-  border-color: var(--accent-edge);
-  background: color-mix(in oklch, var(--accent) 8%, var(--panel));
-  box-shadow: var(--lift-hi), 0 0 18px color-mix(in oklch, var(--accent) 9%, transparent);
-  transform: translateY(-1px);
-}
-.cora-starter:active { transform: translateY(0); }
-.cora-starter__label {
-  color: var(--muted);
-  font-size: 9px;
-  font-weight: 750;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-.cora-starter__title {
+  background: var(--hover);
   color: var(--ink);
-  font-size: 12px;
-  font-weight: 670;
 }
-.cora-starter__body {
-  color: var(--muted);
-  font-size: 10.5px;
-  line-height: 1.4;
-}
-.cora-starter__title {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-.cora-starter__arrow {
-  display: inline-flex;
-  color: var(--accent-text);
-  opacity: 0;
-  transform: translate(-2px, 1px);
-  transition: opacity var(--motion-fast) var(--ease-out), transform var(--motion-fast) var(--ease-out);
-}
-.cora-starter:hover .cora-starter__arrow,
-.cora-starter:focus-visible .cora-starter__arrow {
-  opacity: 1;
-  transform: translate(0, 0);
-}
-/* The welcome's door to Automations: one quiet full-width row under the
-   starter cards. While an automation runs (or needs an answer) it lights up
-   as the live cue: comet arc / red dot + the automation's name. */
+.cora-starter:active { background: var(--press); }
 .cora-welcome__automations {
   appearance: none;
   display: flex;
@@ -2455,12 +2404,13 @@ a { color: inherit; }
    its top edge the brightest line on screen. */
 .composer-shell.spark-glass--strong,
 html:not([data-glass="off"]) .composer-shell.spark-glass--strong {
-  background-color: var(--panel-2);
+  background-color: var(--panel);
   background-image: none;
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
   border: 1px solid var(--rule);
-  box-shadow: 0 1px 2px oklch(0 0 0 / 0.10), 0 10px 28px oklch(0 0 0 / 0.16);
+  border-radius: 16px;
+  box-shadow: var(--lift-hi);
 }
 .composer-shell.spark-glass--strong:focus-within,
 html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
@@ -2479,6 +2429,137 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
     padding-left: max(20px, calc(52px - (100cqw - 768px) / 2));
     padding-right: max(20px, calc(52px - (100cqw - 768px) / 2));
   }
+}
+
+/* The Cora chat's look, after T3 Code (see DESIGN.md, "Cora chat"). The line
+   that opens a turn: "Working for Ns" with a dot in the workspace colour, then
+   "Worked for Ns" in the same place, over one hairline. */
+.cora-turn-head {
+  appearance: none;
+  box-sizing: border-box;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 4px 8px;
+  border: none;
+  border-bottom: 1px solid var(--rule-soft);
+  background: transparent;
+  color: var(--muted);
+  font: 400 14px/1.625 var(--font-sans);
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+}
+.cora-turn-head--live {
+  color: var(--ink-dim);
+}
+.cora-turn-head--live .cora-activity-icon {
+  width: auto;
+  flex: 0 0 auto;
+}
+.cora-turn-head--fold {
+  cursor: default;
+  transition: color var(--motion-fast) var(--ease-out);
+}
+.cora-turn-head--fold:hover {
+  color: var(--ink);
+}
+.cora-turn-head--fold:focus-visible {
+  outline: none;
+  border-radius: var(--radius-control, 7px);
+  box-shadow: var(--focus-ring);
+}
+.cora-turn-chevron {
+  flex: 0 0 auto;
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+.cora-turn-chevron.is-open {
+  transform: rotate(90deg);
+}
+
+/* A finished call's row names what it did; the chevron only shows when the row
+   is about to be used. */
+.cora-tool-kind {
+  color: var(--muted);
+}
+.cora-live-tool .cora-caret {
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--ease-out);
+}
+.cora-live-tool:hover .cora-caret,
+.cora-live-tool:focus-within .cora-caret {
+  opacity: 1;
+}
+
+/* T3 Code's limit: a long message shows 176px, fading out over the last 28. */
+.cora-user-md.is-collapsed {
+  max-height: 176px;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
+}
+.cora-user-more {
+  appearance: none;
+  display: block;
+  margin: 6px 0 0 auto;
+  padding: 1px 6px;
+  border: none;
+  border-radius: var(--radius-control, 7px);
+  background: transparent;
+  color: var(--muted);
+  font: 400 12px/1.5 var(--font-sans);
+  cursor: default;
+}
+.cora-user-more:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.cora-user-more:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.cora-conversation .cora-md {
+  font-size: 14px;
+  line-height: 1.625;
+}
+.cora-conversation .cora-md h3,
+.cora-conversation .cora-user-md .cora-md h2,
+.cora-conversation .cora-user-md .cora-md h3 {
+  font-size: 14px;
+}
+
+/* A code block in the chat is one bordered surface with its language and Copy
+   always on top, not a pre with a bar that appears on hover. Mermaid and
+   failed diagrams stay plain pres. */
+.cora-conversation .cora-md-code {
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--panel);
+  overflow: hidden;
+}
+.cora-conversation .cora-md-code__bar {
+  position: static;
+  height: 28px;
+  justify-content: space-between;
+  padding: 0 6px 0 12px;
+  opacity: 1;
+}
+.cora-conversation .cora-md-code__copy {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+.cora-conversation .cora-md-code__copy:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.cora-conversation .cora-md-code > pre {
+  margin: 0 !important;
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
 }
 
 /* Consecutive tool calls inside a turn: one tight list, not spaced rows. */
@@ -2922,11 +3003,10 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 12px 14px 12px 13px;
-  border: 1px solid var(--rule-soft);
-  border-left: 2px solid color-mix(in oklch, var(--danger) 75%, transparent);
-  border-radius: 10px;
-  background: color-mix(in oklab, var(--ink) 2.5%, var(--panel));
+  padding: 8px 10px 10px;
+  border: none;
+  border-radius: var(--radius-surface, 10px);
+  background: color-mix(in oklch, var(--danger) 8%, transparent);
 }
 .cora-turn-error__head {
   display: flex;
@@ -2940,8 +3020,8 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
 }
 .cora-turn-error__title {
   min-width: 0;
-  color: var(--ink);
-  font: 600 13px/1.35 var(--font-sans);
+  color: var(--danger);
+  font: 500 14px/1.625 var(--font-sans);
 }
 .cora-turn-error__body {
   display: flex;
@@ -2950,9 +3030,9 @@ html:not([data-glass="off"]) .composer-shell.spark-glass--strong:focus-within {
   padding-left: 22px;
 }
 .cora-turn-error__lead {
-  color: var(--ink);
-  font-size: 13px;
-  line-height: 1.5;
+  color: color-mix(in oklab, var(--ink) 80%, transparent);
+  font-size: 14px;
+  line-height: 1.625;
   overflow-wrap: anywhere;
 }
 .cora-turn-error__hint {
