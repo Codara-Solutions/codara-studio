@@ -333,6 +333,10 @@ terminals: interactive Claude Code, Codex, Grok or Pi sessions for you to drive
 (`codara_spawn_terminals`), and terminals the agent drives itself
 (`codara_terminal_create`, tracked by `agent-terminal-lifecycle.ts` and
 closed when the run ends).
+Any agent can also start a session (`codara_session_start`): a real agent CLI
+in a tab of any workspace, with its brief submitted and its final message
+reported back (`agent-sessions.ts`). It is such a terminal, kept after its
+caller ends.
 
 **Direct lane.** A chat's first message goes through `shouldUseDirectExecution`
 (`direct-execution.ts`). A bounded request (a question, a focused fix) runs as
