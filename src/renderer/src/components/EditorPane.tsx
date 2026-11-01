@@ -27,8 +27,12 @@ import {
   languageCompartment,
   themeCompartment,
   vimCompartment,
+  wrapCompartment,
 } from "./editor-cm/extensions";
 import { EDITOR_THEME_EXT } from "./editor-cm/themes";
+import { resolveWordWrap } from "./editor-cm/wordWrap";
+import { COMMANDS } from "../shortcuts/commands";
+import { chordToHint } from "../shortcuts/chord";
 import { initVimGlobals, vimHandlersExtension } from "./editor-cm/vim";
 import { languageLabel, resolveLanguage } from "./editor-cm/languageResolver";
 import { useDocument } from "./editor-cm/useDocument";
@@ -64,6 +68,10 @@ function isMarkdownPath(p: string): boolean {
 }
 
 type ViewMode = "edit" | "preview";
+
+const wrapShortcutLabel = chordToHint(
+  COMMANDS.find((c) => c.id === "editor.toggleWordWrap")!.defaultChords[0],
+);
 
 // Vim ex-commands (`:w`, `:q`, `:wq`, `:x`) and arrow→hjkl remaps are
 // installed once at module load. Subsequent EditorPane mounts reuse them.
@@ -163,7 +171,8 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
   const shareable = useMemo(() => !secret && shareableKind(path) !== null, [path, secret]);
 
   const cmRef = useRef<ReactCodeMirrorRef>(null);
-  const { preferences } = usePreferences();
+  const { preferences, setPreference } = usePreferences();
+  const wrapOn = resolveWordWrap(preferences.editorWordWrap, path);
   const previewVisible = secretKnown && (previewOnly || (hasViewToggle && viewMode === "preview"));
   const { fullscreen, toggleFullscreen } = usePreviewFullscreen(active && previewVisible);
   const fullscreenAction = previewVisible ? (
@@ -284,6 +293,11 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           : githubDark,
       ),
       languageCompartment.of([]),
+      wrapCompartment.of(
+        resolveWordWrap(prefsRef.current.editorWordWrap, pathRef.current)
+          ? EditorView.lineWrapping
+          : [],
+      ),
       inlineCompletion({
         getPrefs: () => ({
           // A .env or key file's text never goes to the completion model.
@@ -325,6 +339,29 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
       ),
     });
   }, [preferences.vimMode]);
+
+  // Word wrap follows the preference, or the file type while it is "auto".
+  useEffect(() => {
+    const view = cmRef.current?.view;
+    if (!view) return;
+    view.dispatch({
+      effects: wrapCompartment.reconfigure(wrapOn ? EditorView.lineWrapping : []),
+    });
+  }, [wrapOn, doc.status]);
+
+  // Alt+Z (editor.toggleWordWrap) saves an explicit choice, the opposite of
+  // what this file does now, so it wins over the file-type default.
+  const toggleWrap = useCallback(() => {
+    void setPreference("editorWordWrap", wrapOn ? "off" : "on");
+  }, [setPreference, wrapOn]);
+  useEffect(() => {
+    const onToggle = () => {
+      if (!focused || !codeVisible) return;
+      toggleWrap();
+    };
+    window.addEventListener("spark:editor.toggleWordWrap", onToggle);
+    return () => window.removeEventListener("spark:editor.toggleWordWrap", onToggle);
+  }, [focused, codeVisible, toggleWrap]);
 
   // Theme swap — EDITOR_THEME_EXT entries are lazy loaders, so resolve the
   // selected theme's promise and reconfigure once it lands. The eagerly
@@ -698,6 +735,28 @@ const EditorPane = forwardRef<EditorPaneHandle, Props>(function EditorPane(
           </span>
         )}
         <span style={{ flex: 1 }} />
+        {doc.status === "ready" && codeVisible && (
+          <button
+            type="button"
+            onClick={toggleWrap}
+            aria-pressed={wrapOn}
+            aria-label="Word wrap"
+            title={`Word wrap ${wrapOn ? "on" : "off"} (${wrapShortcutLabel})`}
+            style={{
+              background: "transparent",
+              border: "none",
+              padding: 0,
+              cursor: "default",
+              fontFamily: "var(--font-mono)",
+              fontSize: "inherit",
+              textTransform: "uppercase",
+              letterSpacing: "0.08em",
+              color: wrapOn ? "var(--ink)" : "var(--muted-2)",
+            }}
+          >
+            Wrap
+          </button>
+        )}
         <AIStatusFooter
           statusRef={aiStatusRef}
           enabled={preferences.inlineAutocompleteEnabled}

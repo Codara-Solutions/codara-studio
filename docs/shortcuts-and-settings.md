@@ -107,6 +107,7 @@ On a layout without [ and ] keys, rebind back and forward in Keybindings.
 | Zoom out | Mod+- or Mod+Shift+- | `view.zoomOut` |
 | Reset zoom | Mod+0 | `view.zoomReset` |
 | Toggle markdown preview | Mod+Shift+V | `markdown.togglePreview` |
+| Toggle word wrap in the editor | Alt+Z (Cmd+Option+Z on macOS) | `editor.toggleWordWrap` |
 | Point at an element to send to an agent (browser tab) | Mod+Shift+E | `browser.pickElement` |
 | Comment on the browser page | Mod+Shift+X | `browser.comment` |
 
@@ -305,7 +306,7 @@ The pages:
 | General | Getting started (reopens the first-run guide, turns feature tips on or off, and lets tips you have seen come back), Window (keep running in the background when the window is closed, middle-click to close tabs, the workspace switch badge), Sleep (keep the computer awake while agents work, always or never, and on a Linux laptop with the lid closed; see [Keep the computer awake](#keep-the-computer-awake)). |
 | Appearance | Theme, and Glass (liquid glass for menus, popovers, toasts and dialogs, with tint, blur, refraction and fringe under **Fine-tune glass**). |
 | Notifications | In the app (toast and how long it stays), On your computer (native OS notification, sound, dock badge and taskbar flash). |
-| Editor | Code editor (Vim mode, autosave) and inline AI autocomplete. |
+| Editor | Code editor (Vim mode, word wrap, autosave) and inline AI autocomplete. |
 | Terminal | The shell for new panes, output history and scrollback lines, whether programs may copy to the clipboard, clearing the terminal output Codara saved (**Clear saved terminal output**), a resource overview, and the run terminal lifecycle for worker panes. |
 | Quick commands | Saved shell commands and agent prompts: add, edit, reorder, delete, and where each is offered. Also what a right-click in a terminal does. See [Quick commands](#quick-commands). |
 | Git | Remotes (background fetch, Instant git triggers, and a custom webhook receiver under Advanced), Alerts (notify on teammate pushes, new pull requests, and CI failing on your pull request; watch pull requests on the rail and tell agents when CI fails), Worktrees (whether agents may create and remove worktrees, and remove ones you created, the repository's worktree setup file, and under Advanced your own setup command for new worktrees and extra ignored files an agent may delete with a merged worktree). |

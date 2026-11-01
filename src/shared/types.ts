@@ -1297,9 +1297,15 @@ export interface NotificationChannelsPref {
   osCues: boolean;
 }
 
+// "auto" wraps prose and plain files (.txt, .md, .log, no extension) and
+// leaves code unwrapped; "on" and "off" are the user's own choice for every file.
+export type EditorWordWrap = "auto" | "on" | "off";
+export const EDITOR_WORD_WRAP_VALUES: readonly EditorWordWrap[] = ["auto", "on", "off"];
+
 export interface AppPreferences {
   theme: ThemePref;
   vimMode: boolean;
+  editorWordWrap: EditorWordWrap;
   editorTheme: EditorThemeId;
   // When true, the editor saves a dirty buffer automatically after typing
   // pauses (debounced by autosaveDelayMs). Off by default: autosave writes
@@ -1598,6 +1604,7 @@ export const DEFAULT_COPY_BRANCH_SETUP_COMMAND = "";
 export const DEFAULT_PREFERENCES: AppPreferences = {
   theme: "codara-classic",
   vimMode: false,
+  editorWordWrap: "auto",
   editorTheme: "github-dark",
   autosaveEnabled: false,
   autosaveDelayMs: DEFAULT_AUTOSAVE_DELAY_MS,

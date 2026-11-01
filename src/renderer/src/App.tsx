@@ -6204,6 +6204,11 @@ export default function App() {
         if (!/\.(md|markdown|mdown|mkd|mkdn)$/i.test(active.path)) return;
         window.dispatchEvent(new CustomEvent("spark:markdown.togglePreview"));
       },
+      // Only a focused file editor listens; it saves the opposite of what the
+      // file does now as the user's own choice.
+      "editor.toggleWordWrap": () => {
+        window.dispatchEvent(new CustomEvent("spark:editor.toggleWordWrap"));
+      },
       "browser.pickElement": () => dispatchBrowserPoint("pick"),
       "browser.comment": () => dispatchBrowserPoint("comment"),
       "browser.fullScreen": () => dispatchBrowserAction("fullScreen"),
@@ -6282,6 +6287,15 @@ export default function App() {
       // leftover ^V as a bare "v").
       if (
         id === "markdown.togglePreview" &&
+        event.target instanceof Element &&
+        event.target.closest(".codara-terminal-session")
+      ) {
+        return true;
+      }
+      // Alt+Z is also a shell's meta-z (readline, zsh), and the toggle only
+      // acts on a file editor, so a terminal keeps the key.
+      if (
+        id === "editor.toggleWordWrap" &&
         event.target instanceof Element &&
         event.target.closest(".codara-terminal-session")
       ) {

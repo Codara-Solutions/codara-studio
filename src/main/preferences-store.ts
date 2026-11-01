@@ -11,10 +11,12 @@ import {
   DEFAULT_NOTIFICATION_CHANNELS,
   DEFAULT_PREFERENCES,
   EDITOR_THEME_IDS,
+  EDITOR_WORD_WRAP_VALUES,
   LEGACY_DEFAULT_INLINE_AUTOCOMPLETE_MODEL_IDS,
   LINK_OPEN_TARGETS,
   type AppPreferences,
   type EditorThemeId,
+  type EditorWordWrap,
   type LinkOpenTarget,
   type NotificationChannelsPref,
   type PrefKey,
@@ -233,6 +235,9 @@ function normalize(
   return {
     theme: normalizeTheme(src.theme),
     vimMode: typeof src.vimMode === "boolean" ? src.vimMode : DEFAULT_PREFERENCES.vimMode,
+    editorWordWrap: (EDITOR_WORD_WRAP_VALUES as readonly unknown[]).includes(src.editorWordWrap)
+      ? (src.editorWordWrap as EditorWordWrap)
+      : DEFAULT_PREFERENCES.editorWordWrap,
     editorTheme: isEditorThemeId(src.editorTheme)
       ? src.editorTheme
       : DEFAULT_PREFERENCES.editorTheme,

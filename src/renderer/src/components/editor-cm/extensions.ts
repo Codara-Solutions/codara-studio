@@ -8,6 +8,7 @@ import { EditorView } from "@codemirror/view";
 export const languageCompartment = new Compartment();
 export const themeCompartment = new Compartment();
 export const vimCompartment = new Compartment();
+export const wrapCompartment = new Compartment();
 
 // Only what basicSetup doesn't already cover — basicSetup gives us line
 // numbers, fold gutter, history, indentOnInput, bracketMatching,
@@ -30,6 +31,16 @@ export function buildSharedExtensions(): Extension[] {
         fontSize: "13px",
         lineHeight: "1.55",
         backgroundColor: "transparent !important",
+      },
+      // Unwrapped long lines scroll sideways. The app-wide 10px bar with a
+      // 70% rule thumb all but vanishes on the editor surface and sits at the
+      // foot of a tall pane, so the horizontal bar gets a thumb that shows.
+      ".cm-scroller::-webkit-scrollbar": { height: "12px", width: "12px" },
+      ".cm-scroller::-webkit-scrollbar-thumb": {
+        backgroundColor: "color-mix(in oklab, var(--muted-2) 55%, transparent)",
+      },
+      ".cm-scroller::-webkit-scrollbar-thumb:hover": {
+        backgroundColor: "var(--muted-2)",
       },
       ".cm-content": {
         caretColor: "var(--ink)",

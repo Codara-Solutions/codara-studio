@@ -18,6 +18,7 @@ import type { ClaudeFollowStatus } from "@shared/claude-follow";
 import type {
   AppSettings,
   EditorThemeId,
+  EditorWordWrap,
   LinkOpenTarget,
   NativeCliAccountsInspection,
   PiSubscriptionOverview,
@@ -1822,6 +1823,17 @@ function EditorSettings() {
           title="Vim mode"
           desc="Modal editing with the :w, :q, :wq and :x commands."
           {...bindToggle("vimMode", preferences, setPreference)}
+        />
+        <SelectRow
+          title="Word wrap"
+          desc="Automatic wraps text, Markdown and log files and leaves code unwrapped. Alt+Z toggles it in the editor."
+          value={preferences.editorWordWrap}
+          options={[
+            { value: "auto", label: "Automatic" },
+            { value: "on", label: "Always wrap" },
+            { value: "off", label: "Never wrap" },
+          ]}
+          onChange={(v) => void setPreference("editorWordWrap", v as EditorWordWrap)}
         />
         <SelectRow
           title="Editor theme"
