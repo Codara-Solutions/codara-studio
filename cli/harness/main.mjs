@@ -20,6 +20,7 @@ import {
   unexpiredLogin,
 } from "./accounts.mjs";
 import { defaultModels, isAlias, loadCatalog, registerCatalog, resolveAlias } from "./catalog.mjs";
+import { sessionLocks } from "./session-lock.mjs";
 
 const STDIN_NOTICE_MS = 2000;
 const STDIN_WAIT_NOTICE = "cora: waiting for stdin to close; add it to the prompt or pass </dev/null\n";
@@ -206,7 +207,15 @@ async function loadMcpConfig(home, cli) {
   return buildMcpConfig(home, cli, sdkDir, normalizePiMcpServers, buildPiMcpBridgeConfig, activeMcpBridgeConfig);
 }
 
-function outcome(run) {
+/** Pi prints a failure it cannot hand to anyone and sets the exit code. A run that
+ * looked fine until then has still failed. */
+export function outcome(run, piExitCode) {
+  const result = modelOutcome(run);
+  if (!piExitCode || result.exitCode === 1) return result;
+  return { status: "error", exitCode: piExitCode, error: run.piError ?? `Pi stopped with exit code ${piExitCode}` };
+}
+
+function modelOutcome(run) {
   const { last, report } = run;
   if (!last) return { status: "error", exitCode: 1, error: "the run ended before the model replied" };
   if (last.stopReason === "error") return { status: "error", exitCode: 1, error: last.errorMessage };
@@ -214,28 +223,16 @@ function outcome(run) {
   if (last.stopReason === "length") {
     return { status: "truncated", exitCode: 1, error: `${last.provider} cut the reply off at its output limit` };
   }
-  if (report) return { status: report.status, exitCode: report.status === "complete" ? 0 : 3 };
-  const text = last.content?.some((part) => part.type === "text" && part.text.trim());
   const called = last.content?.some((part) => part.type === "toolCall");
-  if (!text && !called) {
+  if (!run.closing && !called) {
     return { status: "error", exitCode: 1, error: `${last.provider} returned an empty reply` };
   }
+  if (report) return { status: report.status, exitCode: report.status === "complete" ? 0 : 3 };
   return { status: "unreported", exitCode: 0 };
 }
 
-/**
- * What the reader is told last. A run that ends in submit_result has no closing
- * message, and any text the model wrote beside the call would otherwise be lost.
- * That text goes last, so a closing line the user asked for still ends the output.
- */
-function closingText({ last, report }) {
-  const said = (last?.content ?? [])
-    .filter((part) => part.type === "text")
-    .map((part) => part.text)
-    .join("\n")
-    .trim();
-  if (!report?.summary) return said;
-  return said && !report.summary.includes(said) ? `${report.summary}\n\n${said}` : report.summary;
+function lastMessageSpoke({ last }) {
+  return Boolean(last?.content?.some((part) => part.type === "text" && part.text.trim()));
 }
 
 function piArguments(cli, model, effort, { exec, prompt }) {
@@ -296,7 +293,7 @@ function catalogFor(routes, home, options = {}) {
  * Pi can resolve a model or read a credential. */
 function useCoraRuntime(pi, home, routes, catalog, endpoints = {}) {
   const { create } = pi.ModelRuntime;
-  const credentials = routedCredentialStore(pi.AuthStorage, join(home, "auth.json"), routes);
+  const credentials = routedCredentialStore(pi.AuthStorage, pi.FileAuthStorageBackend, join(home, "auth.json"), routes);
   pi.ModelRuntime.create = async (options = {}) => {
     const runtime = await create.call(pi.ModelRuntime, { ...options, credentials });
     registerCatalog(runtime, catalog, endpoints);
@@ -315,6 +312,15 @@ async function listModels(cli, pi, home) {
   }
   useCoraRuntime(pi, home, routes, catalog);
   await pi.main(["--no-extensions", "--list-models", ...cli.positional]);
+}
+
+/** Pi reports an internal failure with console.error and nothing else. */
+function rememberPiErrors(run) {
+  const { error } = console;
+  console.error = (...parts) => {
+    run.piError = parts.join(" ");
+    error.apply(console, parts);
+  };
 }
 
 async function runAgent(cli, pi, home) {
@@ -344,14 +350,20 @@ async function runAgent(cli, pi, home) {
     sessionId: null,
     retries: 0,
     compactions: 0,
+    closing: "",
+    piError: null,
+    chatgptLimit: null,
+    resetsAt: null,
     json: Boolean(cli.json),
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     progress: exec && !cli.json && process.stderr.isTTY,
     streamTimeoutMs: pi.SettingsManager.create(process.cwd(), home).getHttpIdleTimeoutMs(),
   };
   if (exec) failIfUnfinished(run, cli.json);
+  rememberPiErrors(run);
   const effort = cli.effort ?? (resuming ? undefined : DEFAULT_EFFORT);
-  const { coraExtension, coraSystemPrompt } = await import("./extension.mjs");
+  const { coraExtension, coraSystemPrompt, observeChatgptLimits } = await import("./extension.mjs");
+  observeChatgptLimits(run);
   const { useCompactionSettings } = await import("./compaction.mjs");
   const compaction = {
     state: { window: 0 },
@@ -364,17 +376,17 @@ async function runAgent(cli, pi, home) {
     ...piArguments(cli, model, effort, { exec, prompt }),
   ];
   // Pi's own exit code misses most failures (--mode json always reports 0), so
-  // the code set below decides.
+  // the code set below decides, and only ever makes it worse.
   await pi.main(args, {
-    extensionFactories: [coraExtension(run, { exec, mcpConfig, compaction })],
+    extensionFactories: [coraExtension(run, { exec, mcpConfig, compaction, locks: sessionLocks(home) })],
   });
   if (!exec) return;
 
-  const result = outcome(run);
+  const result = outcome(run, process.exitCode ?? 0);
   run.finished = true;
   if (!cli.json) {
-    // Pi prints a closing message itself, but not when a tool call ended the run.
-    if (run.report) process.stdout.write(`${closingText(run)}\n`);
+    // Pi prints only the last message, which can be empty after the report.
+    if (run.closing && !lastMessageSpoke(run)) process.stdout.write(`${run.closing}\n`);
     if (result.exitCode === 3) process.stderr.write(`cora: the model reported ${result.status}\n`);
     // Pi already printed a provider error.
     if (result.error && run.last?.stopReason !== "error") process.stderr.write(`cora: ${result.error}\n`);
@@ -387,9 +399,9 @@ async function runAgent(cli, pi, home) {
         sessionId: run.sessionId,
         model: run.last?.model ?? model?.id ?? null,
         provider: run.last?.provider ?? model?.provider ?? null,
-        text: closingText(run),
-        summary: run.report?.summary ?? null,
+        text: run.closing,
         report: run.report,
+        ...(run.resetsAt ? { resetsAt: run.resetsAt } : {}),
         retries: run.retries,
         compactions: run.compactions,
         usage: run.usage,
@@ -416,11 +428,11 @@ function prepareEnvironment(home) {
 
 async function loadPi() {
   const packageEntry = import.meta.resolve("@earendil-works/pi-coding-agent");
-  const [bundle, { AuthStorage }] = await Promise.all([
+  const [bundle, { AuthStorage, FileAuthStorageBackend }] = await Promise.all([
     import(new URL("./bundle/index.js", packageEntry)),
     import(new URL("./core/auth-storage.js", packageEntry)),
   ]);
-  return { ...bundle, AuthStorage };
+  return { ...bundle, AuthStorage, FileAuthStorageBackend };
 }
 
 export async function run(argv) {

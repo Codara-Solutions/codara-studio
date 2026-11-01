@@ -169,19 +169,37 @@ function problemWith({ narrative, summary, limits, tokensAfter, tokensOf, source
   return null;
 }
 
-/** Oldest first out of the request if it could not fit. The facts already hold
- * everything that has to survive from those messages. */
-function fitInWindow(messages, window, estimateTokens) {
-  if (!window) return messages;
-  const kept = [...messages];
-  let total = kept.reduce((sum, message) => sum + estimateTokens(message), 0);
-  while (kept.length > 1 && total > window - 2 * NARRATIVE_RESERVE_TOKENS) {
-    total -= estimateTokens(kept.shift());
+/** Pieces that each fit one summary request, oldest first. A single message larger
+ * than that stays whole: if the provider refuses it, the attempt fails out loud. */
+function intoPieces(messages, window, estimateTokens) {
+  const limit = window ? window - 2 * NARRATIVE_RESERVE_TOKENS : Number.POSITIVE_INFINITY;
+  const pieces = [[]];
+  let size = 0;
+  for (const message of messages) {
+    const tokens = estimateTokens(message);
+    if (size + tokens > limit && pieces.at(-1).length > 0) {
+      pieces.push([]);
+      size = 0;
+    }
+    pieces.at(-1).push(message);
+    size += tokens;
   }
-  return kept;
+  return pieces;
 }
 
-async function writeNarrative({ event, ctx, engine, window, kept, previous, instructions, signal }) {
+/** Pi's Usage: token counts, and a `cost` of the same shape. */
+function addUsage(total, usage) {
+  if (!total || !usage) return total ?? usage;
+  const sum = { ...total, cost: { ...total.cost } };
+  for (const [from, to] of [[usage, sum], [usage.cost ?? {}, sum.cost]]) {
+    for (const [key, value] of Object.entries(from)) {
+      if (typeof value === "number") to[key] = (to[key] ?? 0) + value;
+    }
+  }
+  return sum;
+}
+
+async function writeNarrative({ event, ctx, engine, window, kept, previous, instructions, signal, timeoutMs }) {
   const { preparation } = event;
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
   if (!auth.ok) throw new Error(auth.error);
@@ -190,16 +208,26 @@ async function writeNarrative({ event, ctx, engine, window, kept, previous, inst
   // that ignores these instructions, so it all goes through the same request.
   // Kept messages go too: without them Next Steps would stop before the latest work.
   const messages = [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages, ...kept];
-  const prepared = {
-    ...preparation,
-    messagesToSummarize: fitInWindow(messages, window, engine.estimateTokens),
-    turnPrefixMessages: [],
-    isSplitTurn: false,
-    previousSummary: previous,
-    fileOps: { read: new Set(), written: new Set(), edited: new Set() },
-    settings: { ...preparation.settings, reserveTokens: NARRATIVE_RESERVE_TOKENS },
-  };
-  return engine.compact(prepared, model, auth.apiKey, auth.headers, instructions, signal);
+  // Each piece updates the story so far, so a long history costs more requests
+  // and loses nothing.
+  let summary = previous;
+  let usage;
+  for (const piece of intoPieces(messages, window, engine.estimateTokens)) {
+    const prepared = {
+      ...preparation,
+      messagesToSummarize: piece,
+      turnPrefixMessages: [],
+      isSplitTurn: false,
+      previousSummary: summary,
+      fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+      settings: { ...preparation.settings, reserveTokens: NARRATIVE_RESERVE_TOKENS },
+    };
+    const pieceSignal = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
+    const result = await engine.compact(prepared, model, auth.apiKey, auth.headers, instructions, pieceSignal);
+    summary = result.summary;
+    usage = addUsage(usage, result.usage);
+  }
+  return { summary, usage };
 }
 
 function narrativeBefore(entries) {
@@ -264,7 +292,6 @@ export function registerCompaction(pi, run, { exec, state, config, engine }) {
     const keptTokens = kept.reduce((sum, message) => sum + engine.estimateTokens(message), 0);
     const source = JSON.stringify(branchEntries);
     const focus = event.customInstructions ? `\n\nFocus on this: ${event.customInstructions}` : "";
-    const signal = AbortSignal.any([event.signal, AbortSignal.timeout(limits.timeoutMs)]);
 
     let problem = null;
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -278,7 +305,8 @@ export function registerCompaction(pi, run, { exec, state, config, engine }) {
           kept,
           previous: narrativeBefore(branchEntries),
           instructions: `${NARRATIVE_INSTRUCTIONS}${focus}${correction}`,
-          signal,
+          signal: event.signal,
+          timeoutMs: limits.timeoutMs,
         });
         const narrative = text.trim();
         const summary = `${facts}\n\n# Narrative\n\n${narrative}\n\n${CONTINUE}`;

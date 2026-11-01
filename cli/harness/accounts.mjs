@@ -9,16 +9,17 @@
 //
 // A Studio account with a `cliProfileId` shares its OAuth grant with Claude
 // Code or Codex. Those providers rotate refresh tokens, so a second refresher
-// logs the other holder out (see claude-login-keeper.ts). This process
-// therefore never spends a shared Claude token, and spends a shared ChatGPT
-// token only while Studio runs, because Studio's credential mirror then
-// carries the new token to the Codex CLI.
+// logs the other holder out (see claude-login-keeper.ts). This process therefore
+// never spends a shared token. Studio renews a shared Claude login on request;
+// nothing can do that for ChatGPT, because Pi's lock does not hold the Codex CLI
+// back, so a shared ChatGPT login is only used until it expires.
 
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, realpathSync, renameSync, rmSync, writeSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 
 const require = createRequire(import.meta.url);
@@ -32,6 +33,7 @@ export const PROVIDER_ALIASES = {
   grok: "xai",
   xai: "xai",
 };
+const CLI_NAMES = { anthropic: "Claude Code", "openai-codex": "the Codex CLI", xai: "the Grok CLI" };
 const LOGIN_NAMES = { anthropic: "claude", "openai-codex": "chatgpt", xai: "grok" };
 const PROVIDER_NAMES = { anthropic: "Claude", "openai-codex": "ChatGPT", xai: "Grok" };
 const STUDIO_PROBE_TIMEOUT_MS = 500;
@@ -118,19 +120,92 @@ export function hasConfiguredKey(provider, env = process.env) {
   return Boolean(readJson(join(coraHome(env), "models.json"))?.providers?.[provider]?.apiKey);
 }
 
+function writeFileAtomically(path, text) {
+  const target = realpathSync(path);
+  const folder = dirname(target);
+  const temporary = join(folder, `.${basename(target)}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`);
+  try {
+    const file = openSync(temporary, "wx", 0o600);
+    try {
+      writeSync(file, text);
+      fsyncSync(file);
+    } finally {
+      closeSync(file);
+    }
+    renameSync(temporary, target);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+  // Windows cannot open a folder for syncing, and a rename is durable there.
+  if (process.platform === "win32") return;
+  const directory = openSync(folder, "r");
+  try {
+    fsyncSync(directory);
+  } finally {
+    closeSync(directory);
+  }
+}
+
+/**
+ * Pi's file store with the same lock, but a kill during a write leaves the old
+ * file: Pi truncates in place, and the file can be Studio's only copy of a login.
+ * Pi's own write stays reachable only for creating an empty file.
+ */
+function atomicFileBackend(FileAuthStorageBackend) {
+  return class AtomicFileBackend extends FileAuthStorageBackend {
+    withLock(update) {
+      return super.withLock((current) => {
+        const { result, next } = update(current);
+        if (next !== undefined) writeFileAtomically(this.authPath, next);
+        return { result };
+      });
+    }
+
+    async withLockAsync(update, options) {
+      options?.signal?.throwIfAborted();
+      this.ensureParentDir();
+      this.ensureFileExists();
+      let lost = null;
+      const release = await this.acquireLockAsync(options?.signal, (error) => {
+        lost = error ?? new Error("Auth storage lock was compromised");
+      });
+      const stillHeld = () => {
+        if (lost) throw lost;
+        options?.signal?.throwIfAborted();
+      };
+      try {
+        stillHeld();
+        const { result, next } = await update(readFileSync(this.authPath, "utf8"));
+        stillHeld();
+        if (next !== undefined) writeFileAtomically(this.authPath, next);
+        return result;
+      } finally {
+        await Promise.resolve(release()).catch(() => undefined);
+      }
+    }
+  };
+}
+
 /**
  * Pi's CredentialStore, split by provider so one session can use a Claude and
  * a ChatGPT account that live in different files. Each file keeps its own Pi
  * lock. Removal only ever touches Cora's own file: a Studio account is
  * removed from Studio.
  */
-export function routedCredentialStore(AuthStorage, ownFile, routes) {
-  const own = AuthStorage.create(ownFile);
+export function routedCredentialStore(AuthStorage, FileAuthStorageBackend, ownFile, routes) {
+  const Backend = atomicFileBackend(FileAuthStorageBackend);
+  const create = (file) => {
+    // With its path, AuthStorage skips taking the lock when the file has not changed.
+    const backend = new Backend(file);
+    return new AuthStorage(backend, backend.authPath);
+  };
+  const own = create(ownFile);
   const stores = new Map();
   const storeFor = (provider) => {
     const account = routes.get(provider);
     if (!account) return own;
-    if (!stores.has(provider)) stores.set(provider, AuthStorage.create(account.authFile));
+    if (!stores.has(provider)) stores.set(provider, create(account.authFile));
     return stores.get(provider);
   };
   return {
@@ -169,11 +244,15 @@ export async function studioIsRunning(home) {
 
 function sharedLoginExpired(provider, account) {
   const name = PROVIDER_NAMES[provider] ?? provider;
-  const cli = provider === "anthropic" ? "Claude Code" : "the Codex CLI";
+  const cli = CLI_NAMES[provider] ?? "its CLI";
+  const renewal =
+    provider === "anthropic"
+      ? "Open Codara Studio and retry"
+      : `Use ${cli} or Codara Studio until it signs itself back in, then retry`;
   return new Error(
     `The ${name} login "${account.label}" has expired and is shared with ${cli}, so Cora will not ` +
-      `refresh it while Codara Studio is closed: that could sign ${cli} out. ` +
-      `Open Studio and retry, or run: cora login ${loginName(provider)} (a separate Cora sign-in).`,
+      `refresh it: that could sign ${cli} out. ` +
+      `${renewal}, or run: cora login ${loginName(provider)} (a separate Cora sign-in).`,
   );
 }
 
@@ -189,9 +268,8 @@ function renewThroughStudio(account, home) {
 /**
  * Who may refresh each Studio account, set on the runtime before anything can
  * read a credential. Claude goes through Studio whenever Studio can answer, the
- * same request its own Cora sessions make, and a shared login never refreshes
- * here. ChatGPT keeps Pi's refresh while Studio runs, because Studio's mirror
- * then carries the new token to the Codex CLI.
+ * same request its own Cora sessions make. No other shared login refreshes here:
+ * Studio has no such request, and refreshing beside a running CLI can log it out.
  */
 export async function applyRefreshRules(runtime, routes, home) {
   if (routes.size === 0) return;
@@ -203,7 +281,7 @@ export async function applyRefreshRules(runtime, routes, home) {
         accountProfileId: account.profileId,
         request: renewThroughStudio(account, home),
       });
-    } else if (account.shared && !running) {
+    } else if (account.shared) {
       runtime.registerProvider(provider, {
         oauth: {
           name: `${PROVIDER_NAMES[provider] ?? provider} (Codara Studio account)`,
@@ -304,7 +382,7 @@ export function printLogins(env = process.env) {
     const account = routes.get(provider);
     if (own[provider]) console.log(`${name} Cora sign-in`);
     else if (account) {
-      const note = account.shared ? ", shared with its CLI; needs Studio open to refresh" : "";
+      const note = account.shared ? ", shared with its CLI, which refreshes it" : "";
       console.log(`${name} Codara Studio account "${account.label}"${note}`);
     } else console.log(`${name} not signed in (cora login ${loginName(provider)})`);
   }

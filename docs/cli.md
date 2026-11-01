@@ -31,7 +31,7 @@ cora login
 | `cora login [claude\|chatgpt]` | Sign in, or list what is signed in. |
 | `cora models [search]` | List the models you can use. |
 
-`--model` takes `sonnet`, `opus`, `fable`, `luna`, `terra`, `sol`, `astra` or any
+`--model` takes `sonnet`, `opus`, `fable`, `terra`, `sol`, `astra` or any
 `provider/id`. `--effort` takes `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or
 `max`.
 
@@ -53,6 +53,13 @@ a login.
 | 2 | The command was wrong, or there is no login for that provider. |
 | 3 | The model reported `partial`, `blocked` or `failed`. A `complete` with a failed check counts as `partial`. |
 
+The model reports its status with a tool call and then answers in a normal reply, which is
+the `text` of `cora_result`. A session has one writer: a second `cora` on it stops with
+`session <id> is in use by process <pid>`, and a process that died holds nothing.
+
+A ChatGPT rate limit of up to a minute is waited out and retried. A usage limit stops the
+run with exit 1, says when it resets, and sets `resetsAt` in `cora_result`.
+
 A failed request is retried by itself, from the same context, so finished tool
 calls never run twice. The error names the provider and the real cause.
 
@@ -62,9 +69,12 @@ calls never run twice. The error names the provider and the real cause.
 account, in place, without copying it. A Studio account can be shared with Claude
 Code or the Codex CLI, and those rotate refresh tokens, so a second refresher
 would sign them out. So `cora` asks a running Studio to renew a Claude login, the
-same request Studio's own sessions make. With Studio closed it refuses an expired
-shared login rather than spending it. `cora login` creates a separate sign-in
-that only `cora` refreshes. An API key in the shell never replaces a login.
+same request Studio's own sessions make, and with Studio closed it refuses an expired
+shared login rather than spending it. Nothing can renew a shared ChatGPT login for
+`cora`, so it uses one only until it expires, then refuses and says what to do.
+`cora login` creates a separate sign-in that only `cora` refreshes. An API key in the
+shell never replaces a login. Login files are replaced whole under Pi's lock, so a
+kill during a refresh leaves the old file.
 
 ### Files and settings
 
@@ -79,14 +89,15 @@ start by itself, because it can run any command. For a custom endpoint, set
 
 A long session is summarized between turns once its context passes 400,000 tokens,
 or sooner on a model whose window leaves less room: the limit is the window minus
-15%, with at least 32,768 tokens held back (`gpt-6-luna`, at 272,000, compacts at
+15%, with at least 32,768 tokens held back (`gpt-6-astra`, at 272,000, compacts at
 231,200). The run then continues by itself. `/compact [focus]` does it by hand in the
 terminal interface.
 
 The summary is checked before it replaces anything. Code rebuilds the facts from the
 session file every time: your messages word for word, files read and changed through
 the read, write and edit tools, failed commands with their errors, the session id and the
-folder. The model writes only the story around them. A summary with a required part missing, an invented file, or too
+folder. The model writes only the story around them. A history too large for one request is summarized in pieces, each
+updating the last. A summary with a required part missing, an invented file, or too
 large is retried once, and after that the session continues uncompacted with a warning.
 A kill during compaction changes nothing, so `cora resume` works. The full history stays
 in the session file.

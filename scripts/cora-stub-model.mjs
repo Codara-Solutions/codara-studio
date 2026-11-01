@@ -7,15 +7,19 @@
 //   0 results  read input.txt
 //   1 result   write output.txt with the text upper-cased
 //   2 results  submit_result when offered (status from SUBMIT_<STATUS>), else text
+//   after it   the closing message, as plain text
 //
 // A prompt that contains PLAIN_TEXT gets a text reply straight away, one with
 // NO_SUBMIT finishes in text, one with EMPTY_TEXT gets an empty message, one with
-// FAILED_CHECK submits a failed check alongside its status, and one with
-// TEXT_BESIDE_SUBMIT writes a closing line in the same message as the call.
+// FAILED_CHECK submits a failed check alongside its status, one with
+// TEXT_BESIDE_SUBMIT writes a line in the same message as the call, one with
+// EMPTY_CLOSING has nothing to say after the call, and one with LONG_CLOSING
+// closes with a long fenced diff full of characters JSON would have to escape.
 //
 // Faults: stub.control({ mode, count, after }) applies a fault to the next
 // `count` model requests, once `after` requests have passed. Modes: http429
-// http500 http401 cut hang empty. stub.requests holds every request seen.
+// http500 http401 cut hang empty, and chatgpt429, which answers with `body` as
+// the error and `headers` as its headers. stub.requests holds every request seen.
 //
 // A summary request gets a narrative. stub.summaries([...]) queues how the next
 // ones behave: ok, bad (no sections), invented, huge, http500 or hang. Each ok
@@ -23,7 +27,8 @@
 // claims, so a test can reach a threshold without sending that much text.
 //
 // A prompt with FAIL_COMMAND runs a failing command first, and one with
-// LARGE_OUTPUT prints five megabytes first.
+// LARGE_OUTPUT prints five megabytes first, one with BIG_RESULT prints a fact
+// followed by 40,000 characters.
 //
 // Model lists: stub.offer({ anthropic, codex }) sets what GET /v1/models and GET
 // /codex/models answer, in each provider's own shape. Without an offer both 404.
@@ -33,11 +38,22 @@ import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { zstdDecompressSync } from "node:zlib";
 
-const control = { mode: "ok", count: null, after: 0 };
+const control = { mode: "ok", count: null, after: 0, body: null, headers: null };
 const requests = [];
 const listRequests = [];
 const summaryQueue = [];
 let reportedContext = 120;
+export const LONG_CLOSING = `Proposed fix:
+
+\`\`\`diff
+--- a/lib/match.mjs
++++ b/lib/match.mjs
+@@ -1,3 +1,3 @@
+-const re = /^(\\d{1,2})[ -]([a-z]{3})\\.?$/i;
++const re = /^(\\d{1,2})[ -]([a-z]{3,4})\\.?$/i;
+ const path = "C:\\\\temp\\\\new";
+${" context line\n".repeat(2000)}\`\`\`
+`;
 const NARRATIVE = `## Goal
 Copy input.txt in upper case.
 
@@ -117,7 +133,9 @@ function plan(view) {
     ? "echo SEEDED-ERROR-771 >&2; exit 7"
     : prompt.includes("LARGE_OUTPUT")
       ? "head -c 5000000 /dev/zero | tr '\\0' x"
-      : null;
+      : prompt.includes("BIG_RESULT")
+        ? "echo UNIQUE-RESULT-FACT-613; head -c 40000 /dev/zero | tr '\\0' x"
+        : null;
   const compacted = prompt.includes("# Session facts");
   if (setup && !compacted && allResults.length === 0) return { tool: bash, input: { command: setup } };
   // The setup command's result is not part of the copy.
@@ -129,11 +147,16 @@ function plan(view) {
   if (results.length === 1 && !copied) {
     return { tool: write, input: { path: "output.txt", content: `${results[0].text.trim().toUpperCase()}\n` } };
   }
+  const reported = view.events.slice(lastUser + 1).some((event) => event.name?.toLowerCase() === "submit_result");
+  if (reported) {
+    if (prompt.includes("EMPTY_CLOSING")) return { text: "" };
+    return { text: prompt.includes("LONG_CLOSING") ? LONG_CLOSING : "STUB-FINAL: copied input.txt to output.txt." };
+  }
   if (finish && !prompt.includes("NO_SUBMIT")) {
     const status = /SUBMIT_(\w+)/.exec(prompt)?.[1]?.toLowerCase() ?? "complete";
     const checks = prompt.includes("FAILED_CHECK") ? [{ command: "npm test", result: "failed" }] : undefined;
     const beside = prompt.includes("TEXT_BESIDE_SUBMIT") ? { text: "STATUS: DONE" } : {};
-    return { ...beside, tool: finish, input: { status, summary: "STUB-FINAL: copied input.txt to output.txt.", ...(checks ? { checks } : {}) } };
+    return { ...beside, tool: finish, input: { status, ...(checks ? { checks } : {}) } };
   }
   return { text: "STUB-FINAL: copied input.txt to output.txt." };
 }
@@ -264,6 +287,10 @@ async function handleModel(req, res, flavour) {
   if (step.mode === "hang") {
     startSse(res);
     return undefined;
+  }
+  if (fault === "chatgpt429") {
+    res.writeHead(429, { "content-type": "application/json", ...control.headers });
+    return res.end(JSON.stringify({ error: control.body }));
   }
   if (fault === "http429") return jsonError(res, 429, "rate_limit_error", "stub rate limit", { "retry-after": "0" });
   if (fault === "http500") return jsonError(res, 500, "api_error", "stub server error");

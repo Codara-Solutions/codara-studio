@@ -7,14 +7,14 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { startStubModel } from "./cora-stub-model.mjs";
+import { LONG_CLOSING, startStubModel } from "./cora-stub-model.mjs";
 
 const require = createRequire(import.meta.url);
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -114,9 +114,9 @@ function cora(world, args, { input, cwd = world.project, env = {}, timeout = 60_
       reject(new Error(`cora ${args.join(" ").slice(0, 80)} timed out:\n${stderr.slice(-800)}`));
     }, timeout);
     child.on("error", reject);
-    child.on("close", (status) => {
+    child.on("close", (status, signal) => {
       clearTimeout(timer);
-      resolve({ status, stdout, stderr: stdinError ? `stdin ${stdinError}\n${stderr}` : stderr });
+      resolve({ status, signal, stdout, stderr: stdinError ? `stdin ${stdinError}\n${stderr}` : stderr });
     });
     if (input !== undefined) {
       child.stdin.on("error", (error) => (stdinError = error.code));
@@ -169,7 +169,7 @@ test("cora exec runs the task and prints the final text", async () => {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.stdout.trim(), "STUB-FINAL: copied input.txt to output.txt.");
   assert.equal(readFileSync(join(world.project, "output.txt"), "utf8"), "HELLO\n");
-  assert.deepEqual(stub.requests.map(toolCalls), [[], ["read"], ["read", "write"]]);
+  assert.deepEqual(stub.requests.map(toolCalls), [[], ["read"], ["read", "write"], ["read", "write", "submit_result"]]);
 });
 
 test("--json streams events and ends with the result", async () => {
@@ -247,11 +247,11 @@ test("an unexpected internal error exits 1 and says what happened", async () => 
 
 // ── models and effort ───────────────────────────────────────────────────────
 
-test("sonnet, opus, luna and sol reach the right endpoint with the chosen effort", async () => {
+test("sonnet, opus, terra and sol reach the right endpoint with the chosen effort", async () => {
   const cases = [
     ["sonnet", "claude-sonnet-5-5", "/v1/messages"],
     ["opus", "claude-opus-5-5", "/v1/messages"],
-    ["luna", "gpt-6-luna", "/codex/responses"],
+    ["terra", "gpt-6.1-terra", "/codex/responses"],
     ["sol", "gpt-6.1-sol", "/codex/responses"],
   ];
   for (const [alias, id, path] of cases) {
@@ -293,9 +293,9 @@ const offerCodex = (...slugs) => ({
 test("aliases follow what the account offers, with no Pi upgrade", async () => {
   stub.offer({
     anthropic: offerClaude(["claude-sonnet-5-5", 1_000_000, 128_000], ["claude-sonnet-6", 2_000_000, 256_000], ["claude-sonnet-4-5-20250929", 200_000, 64_000]),
-    codex: offerCodex(["gpt-6-luna", 272_000], ["gpt-7-luna", 900_000], ["gpt-9-luna", 1, "hide"]),
+    codex: offerCodex(["gpt-6.1-terra", 500_000], ["gpt-7-terra", 900_000], ["gpt-9-terra", 1, "hide"]),
   });
-  for (const [alias, id] of [["sonnet", "claude-sonnet-6"], ["luna", "gpt-7-luna"]]) {
+  for (const [alias, id] of [["sonnet", "claude-sonnet-6"], ["terra", "gpt-7-terra"]]) {
     const world = makeWorld();
     const result = await cora(world, ["exec", "--model", alias, "--effort", "high", "--json", "copy it"]);
     assert.equal(result.status, 0, result.stderr);
@@ -305,26 +305,26 @@ test("aliases follow what the account offers, with no Pi upgrade", async () => {
   }
   const table = await cora(makeWorld(), ["models"]);
   assert.match(table.stdout, /claude-sonnet-6\s+2M\s+256K/);
-  assert.match(table.stdout, /gpt-7-luna\s+900K/);
-  assert.doesNotMatch(table.stdout, /gpt-9-luna|claude-opus/);
+  assert.match(table.stdout, /gpt-7-terra\s+900K/);
+  assert.doesNotMatch(table.stdout, /gpt-9-terra|claude-opus/);
 });
 
 test("a discovered model keeps its family's request settings", async () => {
-  stub.offer({ codex: offerCodex(["gpt-7-luna", 900_000]), anthropic: offerClaude(["claude-sonnet-6", 2_000_000, 256_000]) });
-  for (const [alias, known] of [["luna", "gpt-6-luna"], ["sonnet", "claude-sonnet-5-5"]]) {
+  stub.offer({ codex: offerCodex(["gpt-7-terra", 900_000]), anthropic: offerClaude(["claude-sonnet-6", 2_000_000, 256_000]) });
+  for (const [alias, known] of [["terra", "gpt-6.1-terra"], ["sonnet", "claude-sonnet-5-5"]]) {
     const result = await cora(makeWorld(), ["exec", "--model", alias, "--effort", "xhigh", "copy it"]);
     assert.equal(result.status, 0, result.stderr);
     const discovered = stub.requests.at(-1);
     stub.offer({ codex: null, anthropic: null });
     await cora(makeWorld(), ["exec", "--model", known, "--effort", "xhigh", "copy it"]);
     const builtIn = stub.requests.at(-1);
-    stub.offer({ codex: offerCodex(["gpt-7-luna", 900_000]), anthropic: offerClaude(["claude-sonnet-6", 2_000_000, 256_000]) });
+    stub.offer({ codex: offerCodex(["gpt-7-terra", 900_000]), anthropic: offerClaude(["claude-sonnet-6", 2_000_000, 256_000]) });
     assert.deepEqual([discovered.thinking, discovered.outputConfig], [builtIn.thinking, builtIn.outputConfig]);
   }
 });
 
 test("with no list the data file gives the current models, their limits and no warning", async () => {
-  for (const [alias, id] of [["sonnet", "claude-sonnet-5-5"], ["opus", "claude-opus-5-5"], ["luna", "gpt-6-luna"], ["sol", "gpt-6.1-sol"]]) {
+  for (const [alias, id] of [["sonnet", "claude-sonnet-5-5"], ["opus", "claude-opus-5-5"], ["terra", "gpt-6.1-terra"], ["sol", "gpt-6.1-sol"]]) {
     for (const name of [alias, id]) {
       stub.reset();
       const result = await cora(makeWorld(), ["exec", "--model", name, "--json", "copy it"]);
@@ -335,7 +335,7 @@ test("with no list the data file gives the current models, their limits and no w
   }
   const table = await cora(makeWorld(), ["models"]);
   assert.match(table.stdout, /claude-sonnet-5-5\s+1M\s+128K/);
-  assert.match(table.stdout, /gpt-6-luna\s+272K\s+128K/);
+  assert.match(table.stdout, /gpt-6.1-terra\s+500K\s+128K/);
   assert.match(table.stderr, /could not ask .*HTTP 404/);
 });
 
@@ -398,7 +398,7 @@ test("an unknown model is refused by name", async () => {
 
 test("resume continues with the full tool history, from any folder", async () => {
   const world = makeWorld();
-  const first = resultOf((await cora(world, ["exec", "--model", "luna", "--json", "copy it"])).stdout);
+  const first = resultOf((await cora(world, ["exec", "--model", "terra", "--json", "copy it"])).stdout);
   stub.reset();
   const elsewhere = join(world.root, "elsewhere");
   mkdirSync(elsewhere);
@@ -409,7 +409,7 @@ test("resume continues with the full tool history, from any folder", async () =>
   assert.match(result.stderr, /resuming in /);
   const final = resultOf(result.stdout);
   assert.equal(final.sessionId, first.sessionId);
-  assert.equal(final.model, "gpt-6-luna");
+  assert.equal(final.model, "gpt-6.1-terra");
   const [request] = stub.requests;
   const sequence = request.events.map((event) => event.name?.toLowerCase() ?? event.kind);
   assert.deepEqual(sequence, ["user", "read", "result", "write", "result", "submit_result", "result", "user"]);
@@ -458,24 +458,83 @@ test("complete with a failed check is partial", async () => {
 test("the closing message reaches the reader in plain mode and in --json", async () => {
   const plain = await cora(makeWorld(), ["exec", "--model", "sonnet", "copy it TEXT_BESIDE_SUBMIT"]);
   assert.equal(plain.status, 0, plain.stderr);
-  assert.equal(plain.stdout.trim().split("\n").at(-1), "STATUS: DONE");
   assert.match(plain.stdout, /STUB-FINAL: copied/);
 
   const json = await cora(makeWorld(), ["exec", "--model", "sonnet", "--json", "copy it TEXT_BESIDE_SUBMIT"]);
   const final = resultOf(json.stdout);
-  assert.match(final.text, /STUB-FINAL: copied[\s\S]*STATUS: DONE$/);
+  assert.match(final.text, /STUB-FINAL: copied/);
 
-  const reportOnly = resultOf((await cora(makeWorld(), ["exec", "--model", "luna", "--json", "copy it"])).stdout);
+  const reportOnly = resultOf((await cora(makeWorld(), ["exec", "--model", "terra", "--json", "copy it"])).stdout);
   assert.equal(reportOnly.text, "STUB-FINAL: copied input.txt to output.txt.");
   const answer = resultOf((await cora(makeWorld(), ["exec", "--model", "sonnet", "--json", "PLAIN_TEXT hi"])).stdout);
   assert.equal(answer.text, "STUB-FINAL: plain reply.");
-  assert.equal(answer.summary, null);
 });
 
-test("the reporting tool tells the model its summary is the closing message", async () => {
-  await cora(makeWorld(), ["exec", "--model", "luna", "copy it"]);
-  const [{ system }] = stub.requests;
-  assert.match(system, /end it with any closing\s+line or format they asked for, word for word/);
+test("the closing message is the model's plain reply after the report, whole and exact", async () => {
+  for (const model of ["sonnet", "terra"]) {
+    stub.reset();
+    const json = await cora(makeWorld(), ["exec", "--model", model, "--json", "copy it LONG_CLOSING"]);
+    assert.equal(json.status, 0, json.stderr);
+    assert.equal(resultOf(json.stdout).status, "complete");
+    assert.equal(resultOf(json.stdout).text, LONG_CLOSING.trim());
+    const plain = await cora(makeWorld(), ["exec", "--model", model, "copy it LONG_CLOSING"]);
+    assert.equal(plain.stdout.trim(), LONG_CLOSING.trim());
+  }
+  assert.match(stub.requests[0].system, /then\s+write your closing message as a normal reply/);
+});
+
+test("a report followed by silence still shows what the model last said, and nothing else", async () => {
+  const beside = await cora(makeWorld(), ["exec", "--model", "sonnet", "--json", "copy it TEXT_BESIDE_SUBMIT EMPTY_CLOSING"]);
+  assert.equal(beside.status, 0, beside.stderr);
+  assert.equal(resultOf(beside.stdout).text, "STATUS: DONE");
+  const plain = await cora(makeWorld(), ["exec", "--model", "sonnet", "copy it TEXT_BESIDE_SUBMIT EMPTY_CLOSING"]);
+  assert.equal(plain.stdout.trim(), "STATUS: DONE");
+  const silent = await cora(makeWorld(), ["exec", "--model", "sonnet", "--json", "copy it EMPTY_CLOSING"]);
+  assert.equal(silent.status, 1);
+  assert.equal(resultOf(silent.stdout).status, "error");
+  assert.match(resultOf(silent.stdout).error, /empty reply/);
+});
+
+test("the report has no text of its own, so nothing long is written as a JSON string", async () => {
+  await cora(makeWorld(), ["exec", "--model", "sonnet", "copy it"]);
+  assert.ok(stub.requests.every((request) => request.reply.input?.summary === undefined));
+});
+
+test("an internal failure after the last reply is never reported as success", async () => {
+  const world = makeWorld();
+  const diskFull = join(sandbox, "disk-full.cjs");
+  writeFileSync(
+    diskFull,
+    `const fs = require("node:fs");
+const { syncBuiltinESMExports } = require("node:module");
+for (const name of ["appendFileSync", "writeFileSync"]) {
+  const write = fs[name];
+  fs[name] = (file, data, ...rest) => {
+    if (String(data).includes("STUB-FINAL")) throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" });
+    return write(file, data, ...rest);
+  };
+}
+syncBuiltinESMExports();
+`,
+  );
+  const env = { NODE_OPTIONS: `--require ${networkGuard} --require ${diskFull}` };
+  const json = await cora(world, ["exec", "--model", "sonnet", "--json", "PLAIN_TEXT hi"], { env });
+  assert.equal(json.status, 1, json.stderr);
+  const final = resultOf(json.stdout);
+  assert.equal(final.status, "error");
+  assert.equal(final.exitCode, 1);
+  assert.match(final.error, /ENOSPC/);
+  const plain = await cora(world, ["exec", "--model", "sonnet", "PLAIN_TEXT hi"], { env });
+  assert.equal(plain.status, 1);
+});
+
+test("a nonzero exit from Pi overrides a run that looked finished", async () => {
+  const { outcome } = await import(pathToFileURL(join(ROOT, "cli", "harness", "main.mjs")).href);
+  const finished = { last: { stopReason: "stop", content: [{ type: "text", text: "hi" }] }, closing: "hi", report: null, piError: "ENOSPC" };
+  assert.deepEqual(outcome(finished, 0), { status: "unreported", exitCode: 0 });
+  assert.deepEqual(outcome(finished, 1), { status: "error", exitCode: 1, error: "ENOSPC" });
+  assert.deepEqual(outcome({ ...finished, report: { status: "complete" } }, 7), { status: "error", exitCode: 7, error: "ENOSPC" });
+  assert.equal(outcome({ ...finished, piError: null }, 1).error, "Pi stopped with exit code 1");
 });
 
 test("a plain answer without a report says so", async () => {
@@ -502,8 +561,8 @@ for (const mode of ["http500", "cut", "http429"]) {
     assert.equal(final.status, "complete");
     assert.equal(final.retries, 1);
     // One extra request for the retry, with the same context as the failed one.
-    assert.equal(stub.requests.length, 4);
-    assert.deepEqual(stub.requests.map(toolCalls), [[], ["read"], ["read", "write"], ["read", "write"]]);
+    assert.equal(stub.requests.length, 5);
+    assert.deepEqual(stub.requests.map(toolCalls).slice(0, 4), [[], ["read"], ["read", "write"], ["read", "write"]]);
     assert.equal(stub.requests[3].events.length, stub.requests[2].events.length);
     assert.ok(stub.requests.every((request) => userTexts(request).length === 1));
     assert.match(result.stderr, /Retrying the request/);
@@ -525,9 +584,9 @@ test("a provider that keeps failing stops with the real cause", async () => {
 test("a dropped stream names the provider, not 'terminated.'", async () => {
   const world = makeWorld({ settings: { retry: { maxRetries: 0 } } });
   stub.control({ mode: "cut" });
-  const result = await cora(world, ["exec", "--model", "luna", "copy it"]);
+  const result = await cora(world, ["exec", "--model", "terra", "copy it"]);
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /openai-codex \(gpt-6-luna\) dropped the connection/);
+  assert.match(result.stderr, /openai-codex \(gpt-6.1-terra\) dropped the connection/);
   assert.doesNotMatch(result.stderr, /^terminated\.?$/m);
 });
 
@@ -550,6 +609,52 @@ test("a rejected login names the login command for this provider and is not retr
   assert.match(result.stderr, /cora login claude/);
   assert.doesNotMatch(result.stderr, /\bpi\b/);
   assert.equal(stub.requests.length, 1);
+});
+
+const CHATGPT_HEADERS = {};
+const inSeconds = (seconds) => Math.floor(Date.now() / 1000) + seconds;
+
+test("a short ChatGPT rate limit is waited out and retried", async () => {
+  const cases = [
+    [{ code: "rate_limit_exceeded", message: "slow down", plan_type: "plus", resets_at: inSeconds(2) }, CHATGPT_HEADERS, 900],
+    [{ code: "rate_limit_exceeded", message: "slow down" }, { "retry-after": "1" }, 900],
+    [{ type: "tokens", message: "Rate limited" }, CHATGPT_HEADERS, 0],
+  ];
+  for (const [body, headers, waitedMs] of cases) {
+    stub.reset();
+    stub.control({ mode: "chatgpt429", count: 1, body, headers });
+    const started = Date.now();
+    const result = await cora(makeWorld(), ["exec", "--model", "terra", "--json", "copy it"]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(resultOf(result.stdout).retries, 1);
+    assert.match(result.stderr, /rate limited/);
+    assert.ok(Date.now() - started >= waitedMs, "the retry did not wait for the reset");
+  }
+});
+
+test("a real ChatGPT usage limit stops at once and says when it resets", async () => {
+  const cases = [
+    { code: "usage_limit_reached", message: "limit", plan_type: "plus", resets_at: inSeconds(3 * 3600 + 120) },
+    { code: "rate_limit_exceeded", message: "limit", plan_type: "plus", resets_at: inSeconds(30 * 60) },
+  ];
+  for (const body of cases) {
+    stub.reset();
+    stub.control({ mode: "chatgpt429", count: 9, body });
+    const result = await cora(makeWorld(), ["exec", "--model", "terra", "--json", "copy it"]);
+    assert.equal(result.status, 1, result.stderr);
+    const final = resultOf(result.stdout);
+    assert.equal(final.retries, 0);
+    assert.match(final.error, /usage limit/i);
+    assert.match(final.error, /plus plan/);
+    assert.match(final.error, /resets at/);
+    assert.equal(new Date(final.resetsAt).getTime(), body.resets_at * 1000);
+    assert.equal(stub.requests.filter((request) => request.fault === "chatgpt429").length, 1);
+  }
+  stub.reset();
+  stub.control({ mode: "chatgpt429", count: 9, body: { code: "usage_not_included", message: "limit" } });
+  const noPlan = await cora(makeWorld(), ["exec", "--model", "terra", "--json", "copy it"]);
+  assert.equal(noPlan.status, 1);
+  assert.equal(resultOf(noPlan.stdout).retries, 0);
 });
 
 // ── compaction ──────────────────────────────────────────────────────────────
@@ -594,12 +699,12 @@ test("compaction starts past 400k and not before, and the setting moves it", asy
 });
 
 test("a smaller window compacts at its own limit, leaving room for the summary", async () => {
-  // gpt-6-luna is 272k: 400k could never be reached.
-  for (const [tokens, count] of [[230_000, 0], [232_000, 1]]) {
+  // gpt-6-astra is 272k: 400k could never be reached. gpt-6.1-terra, at 500k, can.
+  for (const [model, tokens, count] of [["astra", 230_000, 0], ["astra", 232_000, 1], ["terra", 399_000, 0], ["terra", 401_000, 1]]) {
     stub.reset();
     stub.reportContext(tokens);
-    await cora(compactionWorld(), ["exec", "--model", "luna", "copy it"]);
-    assert.equal(summaryRequests().length, count, `luna at ${tokens}`);
+    await cora(compactionWorld(), ["exec", "--model", model, "copy it"]);
+    assert.equal(summaryRequests().length, count, `${model} at ${tokens}`);
   }
   for (const [tokens, count] of [[66_000, 0], [68_000, 1]]) {
     stub.reset();
@@ -620,7 +725,7 @@ test("mid-run compaction continues the task with no new prompt and no re-reading
   assert.equal(final.status, "complete");
   assert.equal(final.compactions, 1);
   assert.equal(readFileSync(join(world.project, "output.txt"), "utf8"), "HELLO\n");
-  assert.deepEqual(workRequests().map((request) => request.reply.tool?.toLowerCase()), ["read", "write", "submit_result"]);
+  assert.deepEqual(workRequests().map((request) => request.reply.tool?.toLowerCase()), ["read", "write", "submit_result", undefined]);
   const after = stub.requests.findIndex((request) => request.summary) + 1;
   assert.match(stub.requests[after].system, /PROJECT-RULE-MARKER/);
   const handoff = userTexts(stub.requests[after])[0].text;
@@ -638,6 +743,43 @@ test("mid-run compaction continues the task with no new prompt and no re-reading
   const plain = await cora(compactionWorld(), ["exec", "--model", "sonnet", "copy it"]);
   assert.equal(plain.stderr.match(/compacted/g)?.length, 1);
   assert.match(plain.stderr, /cora: compacted 410k -> \d+k\n/);
+});
+
+test("a session has one writer at a time, and a dead writer does not block it", async () => {
+  const world = makeWorld();
+  const first = await cora(world, ["exec", "--model", "sonnet", "--json", "PLAIN_TEXT one"]);
+  const { sessionId } = resultOf(first.stdout);
+  stub.reset();
+  stub.control({ mode: "hang" });
+  const writer = spawn(process.execPath, [CLI, "exec", "--resume", sessionId, "--json", "PLAIN_TEXT two"], {
+    cwd: world.project,
+    env: world.env,
+    stdio: "ignore",
+  });
+  const exited = new Promise((resolve) => writer.on("exit", resolve));
+  const started = Date.now();
+  while (stub.requests.length === 0) {
+    assert.ok(Date.now() - started < 20_000, "the first writer never reached the model");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  const before = readFileSync(sessionFile(world), "utf8");
+  for (const args of [
+    ["exec", "--resume", sessionId, "--json", "PLAIN_TEXT three"],
+    ["exec", "--continue", "--model", "terra", "--json", "PLAIN_TEXT four"],
+  ]) {
+    const second = await cora(world, args);
+    assert.equal(second.status, 1, second.stderr);
+    assert.match(second.stderr, new RegExp(`session ${sessionId} is in use by process ${writer.pid}`));
+    assert.equal(resultOf(second.stdout).status, "error");
+  }
+  assert.equal(readFileSync(sessionFile(world), "utf8"), before);
+  assert.equal(stub.requests.length, 1);
+  writer.kill("SIGKILL");
+  await exited;
+  stub.reset();
+  const third = await cora(world, ["exec", "--resume", sessionId, "--json", "PLAIN_TEXT five"]);
+  assert.equal(third.status, 0, third.stderr);
+  assert.deepEqual(readdirSync(join(world.home, "session-locks")), []);
 });
 
 test("code-built facts survive two compactions in a row", async () => {
@@ -742,6 +884,19 @@ test("a kill during compaction leaves a session that resumes with nothing lost",
   assert.match(userTexts(workRequests()[0])[0].text, /copy it SEED-USER-FACT/);
 });
 
+test("an oversized history is summarized in pieces, with nothing dropped", async () => {
+  const world = compactionWorld();
+  stub.offer({ anthropic: offerClaude(["claude-sonnet-5-5", 40_000, 8_000]) });
+  stub.reportContext(30_000);
+  const result = await cora(world, ["exec", "--model", "sonnet", "--json", "copy it BIG_RESULT"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(summaryRequests().length > 1, "one request cannot hold it");
+  const texts = summaryRequests().map((request) => request.events[0].text);
+  assert.ok(texts.some((text) => text.includes("UNIQUE-RESULT-FACT-613")), "the oldest tool result never reached a summary");
+  assert.ok(texts.slice(1).every((text) => text.includes("<previous-summary>")), "a later piece lost the story so far");
+  assert.equal(compactions(world).length, 1);
+});
+
 test("a very large last tool output leaves the context under its target", async () => {
   const world = compactionWorld({}, {});
   stub.reportContext(410_000);
@@ -808,6 +963,16 @@ test("a prompt that looks like a flag or a file is still the prompt", async () =
 
 // ── usage ───────────────────────────────────────────────────────────────────
 
+test("luna is no longer a name, and its full id still works", async () => {
+  const short = await cora(makeWorld(), ["exec", "--model", "luna", "copy it"]);
+  assert.notEqual(short.status, 0);
+  assert.equal(stub.requests.length, 0);
+  assert.doesNotMatch(spawnSync(process.execPath, [CLI, "--help"], { encoding: "utf8" }).stdout, /luna/);
+  const full = await cora(makeWorld(), ["exec", "--model", "gpt-6-luna", "copy it"]);
+  assert.equal(full.status, 0, full.stderr);
+  assert.equal(stub.requests[0].model, "gpt-6-luna");
+});
+
 test("usage mistakes exit 2 and old commands point to their new home", async () => {
   const world = makeWorld();
   for (const [args, pattern] of [
@@ -827,7 +992,7 @@ test("usage mistakes exit 2 and old commands point to their new home", async () 
 test("a sentence that starts with a Studio command is a prompt", async () => {
   const result = await cora(makeWorld(), ["--model", "sonnet", "status of the copy, please copy it"]);
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(stub.requests.length, 3);
+  assert.equal(stub.requests.length, 4);
 });
 
 test("cora studio still reaches the old commands", async () => {
@@ -939,11 +1104,69 @@ test("an expired shared Claude login is never spent while Studio is closed", asy
 test("an expired shared ChatGPT login is never spent while Studio is closed", async () => {
   const world = studioWorld({ provider: "openai-codex", credential: codexCredential({ expires: 1 }) });
   const before = readFileSync(world.authFile, "utf8");
-  const result = await cora(world, ["exec", "--model", "luna", "copy it"]);
+  const result = await cora(world, ["exec", "--model", "terra", "copy it"]);
   assert.equal(result.status, 1);
   assert.match(result.stderr, /shared with the Codex CLI/);
   assert.equal(readFileSync(world.authFile, "utf8"), before);
   assert.equal(stub.requests.length, 0);
+});
+
+test("an expired shared ChatGPT login is never spent, even with Studio running", async () => {
+  const world = studioWorld({ provider: "openai-codex", credential: codexCredential({ expires: 1 }) });
+  const before = readFileSync(world.authFile, "utf8");
+  const studio = await fakeStudio(world, async () => ({ result: {} }));
+  try {
+    const result = await cora(world, ["exec", "--model", "terra", "--json", "copy it"]);
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stdout + result.stderr, /shared with the Codex CLI/);
+    assert.match(result.stdout + result.stderr, /cora login chatgpt/);
+  } finally {
+    studio.close();
+  }
+  assert.equal(readFileSync(world.authFile, "utf8"), before);
+  assert.equal(stub.requests.length, 0);
+});
+
+test("a login write replaces the file whole, and a kill mid-write leaves the old one", async () => {
+  const renewed = async (method) =>
+    method === "app.info" ? { result: {} } : { result: { access: "sk-ant-oat01-renewed", refresh: "refresh-new", expires: FAR_FUTURE } };
+  const killAtSync = join(sandbox, "kill-at-sync.cjs");
+  writeFileSync(
+    killAtSync,
+    `const fs = require("node:fs");
+const { syncBuiltinESMExports } = require("node:module");
+fs.fsyncSync = () => process.kill(process.pid, "SIGKILL");
+syncBuiltinESMExports();
+`,
+  );
+  const expired = () => studioWorld({ credential: claudeCredential({ expires: 1, refresh: "refresh-held" }) });
+
+  const killedWorld = expired();
+  const before = readFileSync(killedWorld.authFile, "utf8");
+  const killedStudio = await fakeStudio(killedWorld, renewed);
+  try {
+    const killed = await cora(killedWorld, ["exec", "--model", "sonnet", "copy it"], {
+      env: { NODE_OPTIONS: `--require ${networkGuard} --require ${killAtSync}` },
+    });
+    assert.equal(killed.signal, "SIGKILL", "the login was written without an fsync");
+  } finally {
+    killedStudio.close();
+  }
+  assert.equal(readFileSync(killedWorld.authFile, "utf8"), before);
+
+  const world = expired();
+  const inode = statSync(world.authFile).ino;
+  const studio = await fakeStudio(world, renewed);
+  try {
+    const result = await cora(world, ["exec", "--model", "sonnet", "copy it"]);
+    assert.equal(result.status, 0, result.stderr);
+  } finally {
+    studio.close();
+  }
+  assert.notEqual(statSync(world.authFile).ino, inode, "the file was rewritten in place");
+  assert.equal(statSync(world.authFile).mode & 0o777, 0o600);
+  assert.equal(JSON.parse(readFileSync(world.authFile, "utf8")).anthropic.refresh, "refresh-new");
+  assert.deepEqual(readdirSync(dirname(world.authFile)).filter((name) => name.includes(".tmp")), []);
 });
 
 test("an expired shared Claude login is renewed by a running Studio, under Pi's file lock", async () => {
@@ -1133,6 +1356,31 @@ test("cora opens Pi's terminal interface in a real terminal, and /compact takes 
   assert.match(stub.requests[0].system, /You are Cora/);
   assert.equal(stub.requests[0].tools.some((tool) => /submit_result/i.test(tool)), false);
   assert.match(summaryRequests().at(-1).events[0].text, /Focus on this: FOCUS-MARKER/);
+  return undefined;
+});
+
+test("an interactive resume of a session in use says so and leaves the terminal", async () => {
+  if (spawnSync("script", ["--version"]).status !== 0) return "SKIP: util-linux script is not installed";
+  const world = makeWorld();
+  const { sessionId } = resultOf((await cora(world, ["exec", "--model", "sonnet", "--json", "PLAIN_TEXT one"])).stdout);
+  const name = `${sessionFile(world).split("/").at(-1)}.lock`;
+  mkdirSync(join(world.home, "session-locks"), { recursive: true });
+  writeFileSync(join(world.home, "session-locks", name), String(process.pid));
+  const before = readFileSync(sessionFile(world), "utf8");
+  const child = spawn(
+    "script",
+    ["-qfec", `stty cols 100 rows 30; exec ${process.execPath} ${CLI} --resume ${sessionId} --model sonnet`, "/dev/null"],
+    { cwd: world.project, env: { ...world.env, TERM: "xterm-256color" }, stdio: ["pipe", "pipe", "pipe"], detached: true },
+  );
+  let output = "";
+  child.stdout.on("data", (chunk) => (output += chunk));
+  const exited = new Promise((resolve) => child.on("exit", resolve));
+  const timer = setTimeout(() => process.kill(-child.pid, "SIGKILL"), 15_000);
+  const code = await exited;
+  clearTimeout(timer);
+  assert.equal(code, 1, output.slice(-400));
+  assert.match(output, new RegExp(`session ${sessionId} is in use by process ${process.pid}`));
+  assert.equal(readFileSync(sessionFile(world), "utf8"), before);
   return undefined;
 });
 

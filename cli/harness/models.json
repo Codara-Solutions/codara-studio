@@ -12,10 +12,6 @@
       "provider": "anthropic",
       "id": "claude-fable-5-1"
     },
-    "luna": {
-      "provider": "openai-codex",
-      "id": "gpt-6-luna"
-    },
     "terra": {
       "provider": "openai-codex",
       "id": "gpt-6.1-terra"

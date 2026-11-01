@@ -21,7 +21,7 @@ const HELP = `cora: a coding agent in your terminal
   cora studio <command>              drive a running Codara Studio (cora studio help)
 
 Options
-  --model NAME        sonnet, opus, luna, sol (newest you can use), or any provider/id
+  --model NAME        sonnet, opus, terra, sol (newest you can use), or any provider/id
   --effort LEVEL      off, minimal, low, medium, high, xhigh, max
   --resume [id]       same as cora resume; works with exec
   -c, --continue      continue the most recent session
